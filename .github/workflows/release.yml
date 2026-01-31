@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build binaries
+        run: |
+          # Linux
+          GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o gooner-linux-amd64 ./cmd/gooner
+          GOOS=linux GOARCH=arm64 go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o gooner-linux-arm64 ./cmd/gooner
+
+          # macOS
+          GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o gooner-darwin-amd64 ./cmd/gooner
+          GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o gooner-darwin-arm64 ./cmd/gooner
+
+          # Windows
+          GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o gooner-windows-amd64.exe ./cmd/gooner
+
+      - name: Create archives
+        run: |
+          tar -czvf gooner-linux-amd64.tar.gz gooner-linux-amd64
+          tar -czvf gooner-linux-arm64.tar.gz gooner-linux-arm64
+          tar -czvf gooner-darwin-amd64.tar.gz gooner-darwin-amd64
+          tar -czvf gooner-darwin-arm64.tar.gz gooner-darwin-arm64
+          zip gooner-windows-amd64.zip gooner-windows-amd64.exe
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            gooner-linux-amd64.tar.gz
+            gooner-linux-arm64.tar.gz
+            gooner-darwin-amd64.tar.gz
+            gooner-darwin-arm64.tar.gz
+            gooner-windows-amd64.zip
