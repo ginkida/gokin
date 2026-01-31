@@ -1,5 +1,5 @@
 # Binaries
-gooner
+/gooner
 *.exe
 *.exe~
 *.dll
