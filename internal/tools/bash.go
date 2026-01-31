@@ -8,10 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"gokin/internal/logging"
 	"gokin/internal/security"
 	"gokin/internal/tasks"
 
@@ -249,43 +247,6 @@ func (t *BashTool) executeBackground(ctx context.Context, command string) (ToolR
 	), nil
 }
 
-// killProcessGroup attempts graceful shutdown with SIGTERM, then SIGKILL after timeout.
-func killProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration) {
-	if cmd.Process == nil {
-		return
-	}
-
-	pid := cmd.Process.Pid
-
-	// First, try graceful shutdown with SIGTERM
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-		// Process group kill failed, try individual process
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			logging.Debug("SIGTERM failed, trying SIGKILL", "error", err)
-		}
-	}
-
-	// Wait briefly for graceful shutdown
-	done := make(chan struct{})
-	go func() {
-		// The process should exit after receiving SIGTERM
-		// This goroutine just signals when we should escalate to SIGKILL
-		time.Sleep(gracePeriod)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// Grace period expired - escalate to SIGKILL
-		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-			// Fallback to killing just the process
-			if err := cmd.Process.Kill(); err != nil {
-				logging.Warn("failed to kill process", "error", err)
-			}
-		}
-	}
-}
-
 // executeForeground runs a command and waits for completion.
 func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolResult, error) {
 	// Create context with explicit timeout to prevent indefinite hangs
@@ -310,9 +271,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 	cmd.Env = buildSafeEnv()
 
 	// Set up process group for proper cleanup of child processes
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	setBashProcAttr(cmd)
 
 	// Capture output
 	var stdout, stderr bytes.Buffer
@@ -352,7 +311,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 		// Context was cancelled or timed out
 		timedOut = true
 		// Kill the process group with graceful shutdown (5 second grace period)
-		killProcessGroup(cmd, 5*time.Second)
+		killBashProcessGroup(cmd, 5*time.Second)
 		// Wait for the Wait() goroutine to complete to avoid goroutine leak
 		wg.Wait()
 	}

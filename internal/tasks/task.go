@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -158,9 +157,7 @@ func (t *Task) Start(ctx context.Context) error {
 	t.cmd.Env = buildSafeEnv()
 
 	// Set up process group for proper cleanup of child processes
-	t.cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	setProcAttr(t.cmd)
 
 	t.Status = StatusRunning
 	t.StartTime = time.Now()
@@ -206,10 +203,7 @@ func (t *Task) Cancel() {
 
 	if t.Status == StatusRunning && t.cancelFunc != nil {
 		// Kill entire process group for proper cleanup
-		if t.cmd != nil && t.cmd.Process != nil {
-			// Kill process group (negative PID)
-			_ = syscall.Kill(-t.cmd.Process.Pid, syscall.SIGKILL)
-		}
+		killProcessGroup(t.cmd)
 		t.cancelFunc()
 		t.Status = StatusCancelled
 		t.EndTime = time.Now()
