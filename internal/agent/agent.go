@@ -270,8 +270,7 @@ func (a *Agent) SetTreePlanner(tp *TreePlanner) {
 	if tp != nil {
 		tp.SetCallbacks(
 			func(tree *PlanTree, node *PlanNode) {
-				a.currentStep++
-				a.SetProgress(a.currentStep, a.totalSteps, "Executing step: "+node.Action.Prompt)
+				a.IncrementStep("Executing step: " + node.Action.Prompt)
 				if a.onText != nil {
 					a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
 				}
@@ -924,45 +923,51 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				}
 				wg.Wait()
 
-				// Process results and handle failures
-				for _, res := range results {
+				// Process results and collect failures
+				var firstFailure *parallelResult
+				for i := range results {
+					res := &results[i]
 					if res.result.Output != "" {
 						output.WriteString(res.result.Output)
 					}
+					// Track first failure for potential replan
+					if !res.result.IsSuccess() && firstFailure == nil {
+						firstFailure = res
+					}
+				}
 
-					// Handle failure and potential replan
-					if !res.result.IsSuccess() {
-						if a.treePlanner.ShouldReplan(a.activePlan, res.result) && replanAttempts < 3 {
-							replanAttempts++
+				// Handle failure with single replan attempt
+				if firstFailure != nil {
+					if a.treePlanner.ShouldReplan(a.activePlan, firstFailure.result) && replanAttempts < 3 {
+						replanAttempts++
 
-							// Build replan context with reflection
-							var reflection *Reflection
-							if a.reflector != nil && res.action.ToolName != "" {
-								reflection = a.reflector.Analyze(res.action.ToolName, res.action.ToolArgs, res.result.Error)
-							}
-
-							// Find the node in the tree for replanning
-							node, _ := a.activePlan.GetNode(res.action.NodeID)
-
-							replanCtx := &ReplanContext{
-								FailedNode:    node,
-								Error:         res.result.Error,
-								Reflection:    reflection,
-								AttemptNumber: replanAttempts,
-							}
-
-							a.safeOnText(fmt.Sprintf("\n[Replanning after failure of step \"%s\" (attempt %d)...]\n",
-								res.action.Prompt, replanAttempts))
-
-							if err := a.treePlanner.Replan(ctx, a.activePlan, replanCtx); err != nil {
-								logging.Warn("replan failed", "error", err)
-								a.activePlan = nil // Exit planned mode on replan failure
-							}
-						} else {
-							// Max replans exceeded or should not replan
-							a.safeOnText("\n[Plan failed, switching to reactive mode]\n")
-							a.activePlan = nil
+						// Build replan context with reflection
+						var reflection *Reflection
+						if a.reflector != nil && firstFailure.action.ToolName != "" {
+							reflection = a.reflector.Analyze(firstFailure.action.ToolName, firstFailure.action.ToolArgs, firstFailure.result.Error)
 						}
+
+						// Find the node in the tree for replanning
+						node, _ := a.activePlan.GetNode(firstFailure.action.NodeID)
+
+						replanCtx := &ReplanContext{
+							FailedNode:    node,
+							Error:         firstFailure.result.Error,
+							Reflection:    reflection,
+							AttemptNumber: replanAttempts,
+						}
+
+						a.safeOnText(fmt.Sprintf("\n[Replanning after failure of step \"%s\" (attempt %d)...]\n",
+							firstFailure.action.Prompt, replanAttempts))
+
+						if err := a.treePlanner.Replan(ctx, a.activePlan, replanCtx); err != nil {
+							logging.Warn("replan failed", "error", err)
+							a.activePlan = nil // Exit planned mode on replan failure
+						}
+					} else {
+						// Max replans exceeded or should not replan
+						a.safeOnText("\n[Plan failed, switching to reactive mode]\n")
+						a.activePlan = nil
 					}
 				}
 				continue
