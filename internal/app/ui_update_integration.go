@@ -17,65 +17,39 @@ func (a *App) initializeUIUpdateSystem() {
 	// Create UI update manager
 	a.uiUpdateManager = NewUIUpdateManager(a.program, a)
 
-	// Set up parallel executor callbacks (only if parallelExecutor exists)
-	if a.parallelExecutor != nil {
-		a.setupParallelExecutorCallbacks()
+	// Set up orchestrator callbacks
+	if a.orchestrator != nil {
+		a.setupOrchestratorCallbacks()
 	}
-
-	// Start the update manager
-	a.uiUpdateManager.Start()
-
-	logging.Debug("UI update system initialized")
 }
 
-// setupParallelExecutorCallbacks sets up UI callbacks for parallel executor.
-func (a *App) setupParallelExecutorCallbacks() {
-	if a.parallelExecutor == nil {
+// setupOrchestratorCallbacks sets up UI callbacks for the unified task orchestrator.
+func (a *App) setupOrchestratorCallbacks() {
+	if a.orchestrator == nil {
 		return
 	}
 
-	// Store callbacks for later use
-	a.parallelExecutorCallbacks = map[string]any{
-		"OnTaskStart": func(taskID string) {
-			if a.uiUpdateManager == nil || a.parallelExecutor == nil {
-				return
-			}
-			a.parallelExecutor.mu.RLock()
-			defer a.parallelExecutor.mu.RUnlock()
-			if task, exists := a.parallelExecutor.activeTasks[taskID]; exists {
-				a.uiUpdateManager.BroadcastTaskStart(taskID, task.Task.Name, "parallel")
-			}
-		},
-		"OnTaskComplete": func(taskID string, err error) {
-			if a.uiUpdateManager != nil {
-				success := err == nil
-				duration := time.Duration(0)
-				a.uiUpdateManager.BroadcastTaskComplete(taskID, success, duration, err, "parallel")
-			}
-		},
-		"OnTaskProgress": func(taskID string, progress float64, message string) {
-			if a.uiUpdateManager != nil {
-				a.uiUpdateManager.BroadcastTaskProgress(taskID, progress, message)
-			}
-		},
-	}
-
-	// Wire up callbacks to parallel executor
-	if a.parallelExecutor != nil {
-		onStart := func(taskID string) {
-			if fn, ok := a.parallelExecutorCallbacks["OnTaskStart"].(func(string)); ok {
-				fn(taskID)
-			}
+	a.orchestrator.SetOnStatusChange(func(taskID string, status OrchestratorTaskStatus) {
+		if a.uiUpdateManager == nil {
+			return
 		}
-		onComplete := func(taskID string, err error) {
-			if fn, ok := a.parallelExecutorCallbacks["OnTaskComplete"].(func(string, error)); ok {
-				fn(taskID, err)
-			}
-		}
-		a.parallelExecutor.SetUICallbacks(onStart, onComplete)
-	}
 
-	logging.Debug("parallel executor UI callbacks configured")
+		// Map orchestrator status to UI broadcast
+		switch status {
+		case TaskStatusRunning:
+			// For orchestrator, we might need more details.
+			// For now, simple broadcast.
+			a.uiUpdateManager.BroadcastTaskStart(taskID, "Task "+taskID, "orchestrator")
+		case TaskStatusCompleted:
+			a.uiUpdateManager.BroadcastTaskComplete(taskID, true, 0, nil, "orchestrator")
+		case TaskStatusFailed:
+			a.uiUpdateManager.BroadcastTaskComplete(taskID, false, 0, nil, "orchestrator")
+		case TaskStatusSkipped:
+			a.uiUpdateManager.BroadcastTaskComplete(taskID, false, 0, nil, "orchestrator")
+		}
+	})
+
+	logging.Debug("orchestrator UI callbacks configured")
 }
 
 // NotifyPlanStepStarted notifies the UI that a plan step has started.

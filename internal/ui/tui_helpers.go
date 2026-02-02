@@ -160,6 +160,35 @@ func (m Model) renderTodos() string {
 	return boxStyle.Render(strings.TrimSuffix(builder.String(), "\n"))
 }
 
+// renderScratchpad renders the agent scratchpad.
+func (m Model) renderScratchpad() string {
+	if m.scratchpad == "" {
+		return ""
+	}
+
+	// Style for the scratchpad box - Distinct from tasks
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorAccent).
+		Padding(0, 1).
+		MarginBottom(1).
+		Width(m.width - 4)
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary)
+
+	contentStyle := lipgloss.NewStyle().
+		Foreground(ColorText)
+
+	var builder strings.Builder
+	builder.WriteString(titleStyle.Render(" 🧠 Scratchpad"))
+	builder.WriteString("\n")
+	builder.WriteString(contentStyle.Render(m.scratchpad))
+
+	return boxStyle.Render(builder.String())
+}
+
 // getCommandHint returns a hint for the current command input.
 func (m Model) getCommandHint(input string) string {
 	// Extract command name

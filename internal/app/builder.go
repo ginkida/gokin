@@ -46,35 +46,31 @@ type Builder struct {
 	cancel  context.CancelFunc
 
 	// Optional components (nil means not configured)
-	configDir      string
-	configDirErr   error
-	geminiClient   client.Client
-	registry       *tools.Registry
-	executor       *tools.Executor
-	session        *chat.Session
-	tuiModel       *ui.Model
-	projectInfo    *appcontext.ProjectInfo
-	projectMemory  *appcontext.ProjectMemory
-	promptBuilder  *appcontext.PromptBuilder
-	contextManager *appcontext.ContextManager
-	permManager    *permission.Manager
-	planManager    *plan.Manager
-	hooksManager   *hooks.Manager
-	taskManager    *tasks.Manager
-	undoManager    *undo.Manager
-	agentRunner    *agent.Runner
-	commandHandler *commands.Handler
-	searchCache    *cache.SearchCache
-	rateLimiter    *ratelimit.Limiter
-	auditLogger    *audit.Logger
-	fileWatcher    *watcher.Watcher
-	semanticIdx    *semantic.EnhancedIndexer
-	taskRouter     *router.Router
-	queueManager   *QueueManager // Phase 2: Priority queue
-
-	// Phase 3: Advanced features
-	dependencyManager *DependencyManager
-	parallelExecutor  *ParallelExecutor
+	configDir        string
+	configDirErr     error
+	geminiClient     client.Client
+	registry         *tools.Registry
+	executor         *tools.Executor
+	session          *chat.Session
+	tuiModel         *ui.Model
+	projectInfo      *appcontext.ProjectInfo
+	projectMemory    *appcontext.ProjectMemory
+	promptBuilder    *appcontext.PromptBuilder
+	contextManager   *appcontext.ContextManager
+	permManager      *permission.Manager
+	planManager      *plan.Manager
+	hooksManager     *hooks.Manager
+	taskManager      *tasks.Manager
+	undoManager      *undo.Manager
+	agentRunner      *agent.Runner
+	commandHandler   *commands.Handler
+	searchCache      *cache.SearchCache
+	rateLimiter      *ratelimit.Limiter
+	auditLogger      *audit.Logger
+	fileWatcher      *watcher.Watcher
+	semanticIdx      *semantic.EnhancedIndexer
+	taskRouter       *router.Router
+	taskOrchestrator *TaskOrchestrator // Unified Task Orchestrator
 
 	// Phase 4: UI Auto-Update System
 	uiUpdateManager *UIUpdateManager
@@ -98,7 +94,8 @@ type Builder struct {
 	sessionManager *chat.SessionManager
 
 	// MCP (Model Context Protocol)
-	mcpManager *mcp.Manager
+	mcpManager   *mcp.Manager
+	contextAgent *appcontext.ContextAgent
 
 	// For error collection during build
 	buildErrors []error
@@ -293,6 +290,7 @@ func (b *Builder) initSession() error {
 	b.promptBuilder.SetPlanAutoDetect(b.cfg.Plan.AutoDetect)
 
 	b.contextManager = appcontext.NewContextManager(b.session, b.geminiClient, &b.cfg.Context)
+	b.contextAgent = appcontext.NewContextAgent(b.contextManager, b.session, b.configDir)
 
 	// Start session watcher for auto-updating token counts
 	b.contextManager.StartSessionWatcher()
@@ -410,46 +408,12 @@ func (b *Builder) initManagers() error {
 		"decompose_threshold", routerCfg.DecomposeThreshold,
 		"parallel_threshold", routerCfg.ParallelThreshold)
 
-	// === IMPROVEMENT 4: Initialize priority queue ===
-	// Maximum 100 queued messages, high priority tasks can bump low priority
-	maxQueueSize := 100
-	b.queueManager = NewQueueManager(maxQueueSize)
-
-	// Set up queue callbacks for progress updates
-	b.queueManager.SetCallbacks(
-		func(task *QueueTask) {
-			// On task start - log it
-			logging.Info("processing queued task",
-				"id", task.ID,
-				"priority", task.Priority,
-				"message", task.ID)
-		},
-		func(task *QueueTask, err error) {
-			// On task complete - log result
-			if err != nil {
-				logging.Warn("queued task failed", "id", task.ID, "error", err)
-			} else {
-				logging.Debug("queued task completed", "id", task.ID)
-			}
-		},
-	)
-
-	// Start queue processor
-	go b.queueManager.ProcessQueue(b.ctx)
-
-	logging.Debug("priority queue initialized", "max_size", maxQueueSize)
-
-	// === PHASE 3: Initialize advanced features ===
-
-	// 1. Dependency Manager
-	b.dependencyManager = NewDependencyManager()
-	logging.Debug("dependency manager initialized")
-
-	// 2. Parallel Executor (max 5 concurrent tasks)
-	b.parallelExecutor = NewParallelExecutor(5, 10*time.Minute)
-	logging.Debug("parallel executor initialized",
-		"max_concurrent", 5,
-		"timeout", "10m")
+	// Initialize Task Orchestrator (Unified)
+	b.taskOrchestrator = NewTaskOrchestrator(5, 10*time.Minute)
+	b.taskOrchestrator.SetOnStatusChange(func(id string, status OrchestratorTaskStatus) {
+		// UI updates will be handled via App's program
+	})
+	logging.Debug("task orchestrator initialized", "max_concurrent", 5)
 
 	// === PHASE 5: Agent System Improvements (6→10) ===
 
@@ -1074,6 +1038,20 @@ func (b *Builder) wireDependencies() error {
 		}
 	})
 
+	b.agentRunner.SetOnScratchpadUpdate(func(content string) {
+		app.mu.Lock()
+		app.scratchpad = content
+		app.mu.Unlock()
+
+		if app.session != nil {
+			app.session.SetScratchpad(content)
+		}
+
+		if app.program != nil {
+			app.program.Send(ui.ScratchpadMsg(content))
+		}
+	})
+
 	// Set up apply code block callback
 	b.tuiModel.SetApplyCodeBlockCallback(app.handleApplyCodeBlock)
 
@@ -1150,6 +1128,7 @@ func (b *Builder) assembleApp() *App {
 		projectInfo:          b.projectInfo,
 		contextManager:       b.contextManager,
 		promptBuilder:        b.promptBuilder,
+		contextAgent:         b.contextAgent,
 		permManager:          b.permManager,
 		permResponseChan:     make(chan permission.Decision, 2),
 		questionResponseChan: make(chan string, 1),
@@ -1168,12 +1147,9 @@ func (b *Builder) assembleApp() *App {
 		fileWatcher:          b.fileWatcher,
 		semanticIndexer:      b.semanticIdx,
 		taskRouter:           b.taskRouter,
-		queueManager:         b.queueManager,
-		dependencyManager:    b.dependencyManager,
-		parallelExecutor:     b.parallelExecutor,
+		orchestrator:         b.taskOrchestrator,
 		// Phase 4: UI Auto-Update System (initialized separately)
-		uiUpdateManager:           nil, // Will be set after assembly
-		parallelExecutorCallbacks: make(map[string]any),
+		uiUpdateManager: nil, // Will be set after assembly
 		// Phase 5: Agent System Improvements
 		coordinator:       b.coordinator,
 		agentTypeRegistry: b.agentTypeRegistry,

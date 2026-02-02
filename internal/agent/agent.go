@@ -59,6 +59,9 @@ type Agent struct {
 	// Plan approval callback for context compaction
 	onPlanApproved func(planSummary string) // Called when plan is built, allows context clearing
 
+	// Scratchpad update callback
+	onScratchpadUpdate func(content string)
+
 	// Context management
 	ctxCfg       *config.ContextConfig
 	tokenCounter *ctxmgr.TokenCounter
@@ -84,6 +87,9 @@ type Agent struct {
 	// Phase 2: Tools used tracking for progress
 	toolsUsed []string
 	toolsMu   sync.Mutex
+
+	// Agent Scratchpad (Phase 7)
+	Scratchpad string
 }
 
 // NewAgent creates a new agent with the specified type and filtered tools.
@@ -138,6 +144,18 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry *tools.Registry
 
 	// Initialize self-reflection capability
 	agent.reflector = NewReflector()
+
+	// Wire up scratchpad if it exists
+	if t, ok := agent.registry.Get("update_scratchpad"); ok {
+		if ust, ok := t.(*tools.UpdateScratchpadTool); ok {
+			ust.SetUpdater(func(content string) {
+				agent.Scratchpad = content
+				if agent.onScratchpadUpdate != nil {
+					agent.onScratchpadUpdate(content)
+				}
+			})
+		}
+	}
 
 	// Initialize delegation strategy (messenger set later)
 	agent.delegation = NewDelegationStrategy(agentType, nil)
@@ -231,6 +249,11 @@ func (a *Agent) SetProjectContext(ctx string) {
 // SetOnText sets the streaming callback for real-time output.
 func (a *Agent) SetOnText(onText func(string)) {
 	a.onText = onText
+}
+
+// SetOnScratchpadUpdate sets the callback for scratchpad updates.
+func (a *Agent) SetOnScratchpadUpdate(fn func(string)) {
+	a.onScratchpadUpdate = fn
 }
 
 // SetOnInput sets the callback for requesting user input.
@@ -529,6 +552,16 @@ func (a *Agent) buildSystemPrompt() string {
 		sb.WriteString("\n")
 		sb.WriteString(a.projectContext)
 		sb.WriteString("\n")
+	}
+
+	// Inject scratchpad if not empty
+	if a.Scratchpad != "" {
+		sb.WriteString("\n═══════════════════════════════════════════════════════════════════════\n")
+		sb.WriteString("                         YOUR SCRATCHPAD\n")
+		sb.WriteString("═══════════════════════════════════════════════════════════════════════\n")
+		sb.WriteString("This is your persistent memory. Use it to store facts, thoughts, or plans.\n\n")
+		sb.WriteString(a.Scratchpad)
+		sb.WriteString("\n═══════════════════════════════════════════════════════════════════════\n")
 	}
 
 	return sb.String()

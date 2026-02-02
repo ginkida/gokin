@@ -60,6 +60,10 @@ type Runner struct {
 	// Phase 2: Progress tracking callback
 	onAgentProgress func(id string, progress *AgentProgress)
 
+	// Scratchpad state
+	onScratchpadUpdate func(content string)
+	sharedScratchpad   string
+
 	// Phase 2: Shared memory for inter-agent communication
 	sharedMemory *SharedMemory
 
@@ -219,6 +223,27 @@ func (r *Runner) SetOnAgentProgress(callback func(id string, progress *AgentProg
 	r.mu.Lock()
 	r.onAgentProgress = callback
 	r.mu.Unlock()
+}
+
+// SetOnScratchpadUpdate sets the callback for agent scratchpad updates.
+func (r *Runner) SetOnScratchpadUpdate(fn func(string)) {
+	r.mu.Lock()
+	r.onScratchpadUpdate = func(content string) {
+		r.mu.Lock()
+		r.sharedScratchpad = content
+		r.mu.Unlock()
+		if fn != nil {
+			fn(content)
+		}
+	}
+	r.mu.Unlock()
+}
+
+// SetSharedScratchpad sets the shared scratchpad content.
+func (r *Runner) SetSharedScratchpad(content string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sharedScratchpad = content
 }
 
 // SetSharedMemory sets the shared memory for inter-agent communication.
@@ -713,6 +738,16 @@ func (r *Runner) SpawnAsyncWithStreaming(
 				}
 			}
 		}()
+
+		// Set scratchpad update callback and initial content
+		r.mu.RLock()
+		agent.Scratchpad = r.sharedScratchpad
+		callback := r.onScratchpadUpdate
+		r.mu.RUnlock()
+
+		if callback != nil {
+			agent.SetOnScratchpadUpdate(callback)
+		}
 
 		// Check if context is already cancelled
 		select {

@@ -18,6 +18,7 @@ type SessionState struct {
 	TotalTokens int                 `json:"total_tokens"`
 	Version     int64               `json:"version"`
 	Summary     string              `json:"summary,omitempty"`
+	Scratchpad  string              `json:"scratchpad,omitempty"`
 }
 
 // SerializedContent represents a serializable conversation content.

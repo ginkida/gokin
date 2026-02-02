@@ -152,5 +152,8 @@ func DefaultRegistry(workDir string) *Registry {
 	// Shared memory tool (Phase 2)
 	r.MustRegister(NewSharedMemoryTool())
 
+	// Agent Scratchpad tool (Phase 7)
+	r.MustRegister(NewUpdateScratchpadTool(nil))
+
 	return r
 }

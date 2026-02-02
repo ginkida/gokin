@@ -98,6 +98,9 @@ type Model struct {
 	gitStatusRequest *GitStatusRequestMsg
 	onGitAction      func(action GitAction)
 
+	// Scratchpad
+	scratchpad string
+
 	// File browser state
 	fileBrowser       FileBrowserModel
 	fileBrowserActive bool
@@ -239,12 +242,18 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// ScratchpadMsg is sent when the agent scratchpad is updated.
+type ScratchpadMsg string
+
 // Update handles TUI events.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	// Handle critical messages FIRST - always process these regardless of welcome screen
 	switch msg := msg.(type) {
+	case ScratchpadMsg:
+		m.scratchpad = string(msg)
+		return m, nil
 	case tea.WindowSizeMsg:
 		// This is critical for initializing the viewport
 		m.width = msg.Width
@@ -1432,6 +1441,12 @@ func (m Model) View() string {
 	// Output viewport
 	builder.WriteString(m.output.View())
 	builder.WriteString("\n")
+
+	// Scratchpad panel
+	if m.scratchpad != "" {
+		builder.WriteString(m.renderScratchpad())
+		builder.WriteString("\n")
+	}
 
 	// Plan progress panel (when actively executing a plan)
 	if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {

@@ -112,6 +112,7 @@ type App struct {
 	projectInfo    *appcontext.ProjectInfo
 	contextManager *appcontext.ContextManager
 	promptBuilder  *appcontext.PromptBuilder
+	contextAgent   *appcontext.ContextAgent
 
 	// Permission management
 	permManager      *permission.Manager
@@ -163,16 +164,13 @@ type App struct {
 	// Task router for intelligent task routing
 	taskRouter *router.Router
 
-	// === IMPROVEMENT 4: Priority queue for task management ===
-	queueManager *QueueManager
+	// Agent Scratchpad (shared)
+	scratchpad string
 
-	// === PHASE 3: Advanced features ===
-	dependencyManager *DependencyManager // Task dependencies and DAG execution
-	parallelExecutor  *ParallelExecutor  // Parallel task execution
+	// Unified Task Orchestrator (replacing QueueManager, DependencyManager, ParallelExecutor)
+	orchestrator *TaskOrchestrator
 
-	// === PHASE 4: UI Auto-Update System ===
-	uiUpdateManager           *UIUpdateManager // Coordinates periodic UI updates
-	parallelExecutorCallbacks map[string]any   // UI callbacks for parallel executor
+	uiUpdateManager *UIUpdateManager // Coordinates periodic UI updates
 
 	// === PHASE 5: Agent System Improvements (6→10) ===
 	coordinator       *agent.Coordinator       // Task orchestration
@@ -250,6 +248,16 @@ func (a *App) Run() error {
 					logging.Warn("failed to restore session", "error", restoreErr)
 				} else {
 					sessionRestored = true
+					// Sync scratchpad from restored session
+					a.scratchpad = a.session.GetScratchpad()
+					if a.agentRunner != nil {
+						a.agentRunner.SetSharedScratchpad(a.scratchpad)
+					}
+					// Notify TUI about restored scratchpad
+					if a.program != nil {
+						a.program.Send(ui.ScratchpadMsg(a.scratchpad))
+					}
+
 					// Notify user about restored session
 					a.tui.AddSystemMessage(fmt.Sprintf("Restored session from %s (%d messages)",
 						info.LastActive.Format("2006-01-02 15:04"), len(state.History)))
@@ -308,6 +316,14 @@ func (a *App) Run() error {
 
 	// === PHASE 4: Initialize UI Auto-Update System ===
 	a.initializeUIUpdateSystem()
+
+	// Start background processes
+	if a.orchestrator != nil {
+		go a.orchestrator.Start(a.ctx)
+	}
+	if a.contextAgent != nil {
+		go a.contextAgent.Start(a.ctx)
+	}
 
 	// Set app reference in TUI for data providers
 	a.tui.SetApp(a)
@@ -1106,16 +1122,16 @@ func isRetryableError(err error) bool {
 // buildStepPrompt constructs the prompt for a single plan step sub-agent.
 // StepPromptContext holds context for building step prompts.
 type StepPromptContext struct {
-	Step             *plan.Step
-	PrevSummary      string
-	PlanTitle        string
-	PlanDescription  string
-	PlanRequest      string
-	ContractContext  string
-	ContextSnapshot  string
-	SharedMemoryCtx  string
-	TotalSteps       int
-	CompletedCount   int
+	Step            *plan.Step
+	PrevSummary     string
+	PlanTitle       string
+	PlanDescription string
+	PlanRequest     string
+	ContractContext string
+	ContextSnapshot string
+	SharedMemoryCtx string
+	TotalSteps      int
+	CompletedCount  int
 }
 
 func buildStepPrompt(ctx *StepPromptContext) string {

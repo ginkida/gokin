@@ -32,6 +32,7 @@ type Session struct {
 	totalTokens int   // cached total
 	version     int64 // version for optimistic concurrency control
 	onChange    ChangeHandler
+	scratchpad  string
 	mu          sync.RWMutex
 }
 
@@ -385,6 +386,7 @@ func (s *Session) GetState() *SessionState {
 		TokenCounts: make([]int, len(s.tokenCounts)),
 		TotalTokens: s.totalTokens,
 		Version:     s.version,
+		Scratchpad:  s.scratchpad,
 	}
 	copy(state.TokenCounts, s.tokenCounts)
 
@@ -416,6 +418,21 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	copy(s.tokenCounts, state.TokenCounts)
 	s.totalTokens = state.TotalTokens
 	s.version = state.Version
+	s.scratchpad = state.Scratchpad
 
 	return nil
+}
+
+// GetScratchpad returns the current scratchpad content.
+func (s *Session) GetScratchpad() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.scratchpad
+}
+
+// SetScratchpad sets the scratchpad content.
+func (s *Session) SetScratchpad(content string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scratchpad = content
 }
