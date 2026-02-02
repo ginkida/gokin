@@ -529,8 +529,44 @@ func (tp *TreePlanner) GetNextAction(tree *PlanTree) (*PlannedAction, error) {
 	return nil, fmt.Errorf("no ready actions in plan")
 }
 
+// GetReadyActions returns all currently ready independent actions.
+func (tp *TreePlanner) GetReadyActions(tree *PlanTree) ([]*PlannedAction, error) {
+	if tree == nil || tree.Root == nil {
+		return nil, fmt.Errorf("invalid plan tree")
+	}
+
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+
+	readyNodes := tree.GetReadyNodes()
+	if len(readyNodes) == 0 {
+		return nil, nil // No ready actions available
+	}
+
+	var actions []*PlannedAction
+	for _, node := range readyNodes {
+		node.Status = PlanNodeExecuting
+		node.UpdatedAt = time.Now()
+
+		// For parallel execution, the concept of a single "current" node is less applicable,
+		// but we update it to the last retrieved node for backward compatibility.
+		tree.CurrentNode = node
+
+		if tp.onNodeStart != nil {
+			tp.onNodeStart(tree, node)
+		}
+
+		actions = append(actions, node.Action)
+	}
+
+	return actions, nil
+}
+
 // RecordResult records the result of executing an action.
 func (tp *TreePlanner) RecordResult(tree *PlanTree, nodeID string, result *AgentResult) error {
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+
 	node, ok := tree.GetNode(nodeID)
 	if !ok {
 		return fmt.Errorf("node not found: %s", nodeID)

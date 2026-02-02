@@ -53,6 +53,7 @@ type Agent struct {
 	// Project context injection for sub-agents
 	projectContext string            // Injected project guidelines/instructions
 	onText         func(text string) // Streaming callback for real-time output
+	onTextMu       sync.Mutex        // Protects onText from interleaving
 	onInput        func(prompt string) (string, error)
 
 	// Plan approval callback for context compaction
@@ -269,20 +270,27 @@ func (a *Agent) SetTreePlanner(tp *TreePlanner) {
 	if tp != nil {
 		tp.SetCallbacks(
 			func(tree *PlanTree, node *PlanNode) {
+				a.currentStep++
 				a.SetProgress(a.currentStep, a.totalSteps, "Executing step: "+node.Action.Prompt)
+				if a.onText != nil {
+					a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
+				}
 			},
 			func(tree *PlanTree, node *PlanNode, success bool) {
-				// Node completion handled in execution loop
+				if a.onText != nil {
+					a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
+				}
 			},
 			func(tree *PlanTree, ctx *ReplanContext) {
 				if a.onText != nil {
-					a.onText(fmt.Sprintf("\n[Replanning: %s]\n", ctx.Error))
+					a.safeOnText(fmt.Sprintf("\n[Replanning: %s]\n", ctx.Error))
+					a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
 				}
 			},
 			func(action *PlannedAction) {
 				// Record planning progress
 				if a.onText != nil {
-					a.onText(fmt.Sprintf("  • %s: %s\n", action.AgentType, action.Prompt))
+					a.safeOnText(fmt.Sprintf("  • %s: %s\n", action.AgentType, action.Prompt))
 				}
 				a.SetProgress(0, 0, "Planning: "+action.Prompt)
 			},
@@ -825,7 +833,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		} else {
 			a.activePlan = tree
 			if a.onText != nil {
-				a.onText(fmt.Sprintf("\n[Plan tree built: %d nodes, best path: %d steps]\n",
+				a.safeOnText(fmt.Sprintf("\n[Plan tree built: %d nodes, best path: %d steps]\n",
 					tree.TotalNodes, len(tree.BestPath)))
 			}
 
@@ -835,11 +843,18 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				a.onPlanApproved(planSummary)
 			}
 
+			// Set total steps to best path length
+			a.totalSteps = len(tree.BestPath)
+			a.currentStep = 0
+
 			// === Interactive Plan Review ===
 			if a.onInput != nil && a.requireApproval {
 				if err := a.requestPlanApproval(ctx, tree); err != nil {
 					return a.history, output.String(), err
 				}
+			} else if a.onText != nil {
+				// Show plan tree even if approval not required
+				a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
 			}
 		}
 	}
@@ -860,79 +875,97 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			if err := a.checkAndSummarize(ctx); err != nil {
 				logging.Warn("auto-summarization failed", "agent_id", a.ID, "error", err)
 				if a.onText != nil {
-					a.onText("\n[Warning: context optimization failed — conversation may hit length limits]\n")
+					a.safeOnText("\n[Warning: context optimization failed — conversation may hit length limits]\n")
 				}
 			}
 		}
 
 		// Update progress at start of each turn
-		if i > 0 {
+		if i > 0 && a.activePlan == nil {
 			a.SetProgress(i+1, a.maxTurns, fmt.Sprintf("Turn %d: Executing tools", i+1))
 		}
 
 		// === Planned mode: Execute from plan tree ===
 		if a.activePlan != nil {
-			action, err := a.treePlanner.GetNextAction(a.activePlan)
+			actions, err := a.treePlanner.GetReadyActions(a.activePlan)
 			if err != nil {
 				// No more actions in plan, check if completed
-				if a.onText != nil {
-					a.onText("\n[Plan completed or no more actions available]\n")
-				}
+				a.safeOnText("\n[Plan completed or no more actions available]\n")
 				a.activePlan = nil // Exit planned mode
-			} else if action != nil {
-				if a.onText != nil {
-					a.onText(fmt.Sprintf("\n[Executing planned step: %s %s]\n",
-						action.Type, action.AgentType))
+			} else if len(actions) > 0 {
+				type parallelResult struct {
+					action *PlannedAction
+					result *AgentResult
 				}
 
-				result := a.executePlannedAction(ctx, action)
+				var wg sync.WaitGroup
+				var resMu sync.Mutex
+				results := make([]parallelResult, 0, len(actions))
 
-				// Record result in tree
-				if err := a.treePlanner.RecordResult(a.activePlan, action.NodeID, result); err != nil {
-					logging.Warn("failed to record plan result", "error", err)
+				for _, act := range actions {
+					wg.Add(1)
+					go func(action *PlannedAction) {
+						defer wg.Done()
+
+						a.safeOnText(fmt.Sprintf("\n[Executing planned step: %s %s]\n",
+							action.Type, action.AgentType))
+
+						result := a.executePlannedAction(ctx, action)
+
+						// Record result in tree (RecordResult is thread-safe)
+						if err := a.treePlanner.RecordResult(a.activePlan, action.NodeID, result); err != nil {
+							logging.Warn("failed to record plan result", "error", err)
+						}
+
+						resMu.Lock()
+						results = append(results, parallelResult{action, result})
+						resMu.Unlock()
+					}(act)
 				}
+				wg.Wait()
 
-				// Handle failure and potential replan
-				if !result.IsSuccess() {
-					if a.treePlanner.ShouldReplan(a.activePlan, result) && replanAttempts < 3 {
-						replanAttempts++
+				// Process results and handle failures
+				for _, res := range results {
+					if res.result.Output != "" {
+						output.WriteString(res.result.Output)
+					}
 
-						// Build replan context with reflection
-						var reflection *Reflection
-						if a.reflector != nil && action.ToolName != "" {
-							reflection = a.reflector.Analyze(action.ToolName, action.ToolArgs, result.Error)
-						}
+					// Handle failure and potential replan
+					if !res.result.IsSuccess() {
+						if a.treePlanner.ShouldReplan(a.activePlan, res.result) && replanAttempts < 3 {
+							replanAttempts++
 
-						replanCtx := &ReplanContext{
-							FailedNode:    a.activePlan.CurrentNode,
-							Error:         result.Error,
-							Reflection:    reflection,
-							AttemptNumber: replanAttempts,
-						}
+							// Build replan context with reflection
+							var reflection *Reflection
+							if a.reflector != nil && res.action.ToolName != "" {
+								reflection = a.reflector.Analyze(res.action.ToolName, res.action.ToolArgs, res.result.Error)
+							}
 
-						if a.onText != nil {
-							a.onText(fmt.Sprintf("\n[Replanning after failure (attempt %d)...]\n", replanAttempts))
-						}
+							// Find the node in the tree for replanning
+							node, _ := a.activePlan.GetNode(res.action.NodeID)
 
-						if err := a.treePlanner.Replan(ctx, a.activePlan, replanCtx); err != nil {
-							logging.Warn("replan failed", "error", err)
-							a.activePlan = nil // Exit planned mode on replan failure
+							replanCtx := &ReplanContext{
+								FailedNode:    node,
+								Error:         res.result.Error,
+								Reflection:    reflection,
+								AttemptNumber: replanAttempts,
+							}
+
+							a.safeOnText(fmt.Sprintf("\n[Replanning after failure of step \"%s\" (attempt %d)...]\n",
+								res.action.Prompt, replanAttempts))
+
+							if err := a.treePlanner.Replan(ctx, a.activePlan, replanCtx); err != nil {
+								logging.Warn("replan failed", "error", err)
+								a.activePlan = nil // Exit planned mode on replan failure
+							}
+						} else {
+							// Max replans exceeded or should not replan
+							a.safeOnText("\n[Plan failed, switching to reactive mode]\n")
+							a.activePlan = nil
 						}
-					} else {
-						// Max replans exceeded or should not replan
-						if a.onText != nil {
-							a.onText("\n[Plan failed, switching to reactive mode]\n")
-						}
-						a.activePlan = nil
 					}
 				}
-
-				// Add result to output
-				if result.Output != "" {
-					output.WriteString(result.Output)
-				}
-
-				continue // Next iteration
+				continue
 			}
 		}
 
@@ -954,7 +987,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			output.WriteString(resp.Text)
 			// Stream text to UI in real-time
 			if a.onText != nil {
-				a.onText(resp.Text)
+				a.safeOnText(resp.Text)
 			}
 		}
 
@@ -988,7 +1021,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 					// Notify user
 					if a.onText != nil {
-						a.onText(fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, count))
+						a.safeOnText(fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, count))
 					}
 
 					// Inject intervention message
@@ -1035,14 +1068,14 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		emptyMsg := "\n[Model returned an empty response — try rephrasing your request]\n"
 		output.WriteString(emptyMsg)
 		if a.onText != nil {
-			a.onText(emptyMsg)
+			a.safeOnText(emptyMsg)
 		}
 	}
 
 	// Notify user if we hit the max turn limit
 	if i >= a.maxTurns {
 		if a.onText != nil {
-			a.onText("\n[Reached maximum turn limit — stopping]\n")
+			a.safeOnText("\n[Reached maximum turn limit — stopping]\n")
 		}
 	}
 
@@ -1367,6 +1400,16 @@ func (a *Agent) Cancel() {
 	}
 }
 
+// safeOnText streams text to the UI in a thread-safe manner.
+func (a *Agent) safeOnText(text string) {
+	if a.onText == nil {
+		return
+	}
+	a.onTextMu.Lock()
+	defer a.onTextMu.Unlock()
+	a.onText(text)
+}
+
 // executePlannedAction executes a single planned action and returns the result.
 func (a *Agent) executePlannedAction(ctx context.Context, action *PlannedAction) *AgentResult {
 	if action == nil {
@@ -1422,7 +1465,7 @@ func (a *Agent) executeDecomposeAction(ctx context.Context, action *PlannedActio
 	}
 
 	if a.onText != nil {
-		a.onText(fmt.Sprintf("\n[Expanding milestone: %s]\n", action.Prompt))
+		a.safeOnText(fmt.Sprintf("\n[Expanding milestone: %s]\n", action.Prompt))
 	}
 
 	// Expand the milestone into sub-tasks
@@ -1624,8 +1667,9 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 
 	for {
 		// Show current plan
-		a.onText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
-		a.onText("Plan commands: [Enter] to approve, 'e <num> <prompt>' to edit, 'd <num>' to delete, 'a <prompt>' to add, 'c' to cancel\n")
+		a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
+		a.safeOnText("Commands: [Enter] approve | e <n> <prompt> | d <n> | a [type] <prompt> | c cancel\n")
+		a.safeOnText("Types: explore, plan, general, bash, decompose (default: general)\n")
 
 		response, err := a.onInput("Plan approval > ")
 		if err != nil {
@@ -1635,7 +1679,7 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 		response = strings.TrimSpace(response)
 		if response == "" {
 			// Approved
-			a.onText("[Plan approved]\n")
+			a.safeOnText("[Plan approved]\n")
 			return nil
 		}
 
@@ -1647,59 +1691,80 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 			return fmt.Errorf("plan rejected by user")
 		case "e", "edit":
 			if len(parts) < 3 {
-				a.onText("Usage: e <num> <new prompt>\n")
+				a.safeOnText("Usage: e <num> <new prompt>\n")
 				continue
 			}
 			var num int
 			if _, err := fmt.Sscanf(parts[1], "%d", &num); err != nil {
-				a.onText("Invalid step number\n")
+				a.safeOnText("Invalid step number\n")
 				continue
 			}
 			if num < 1 || num > len(tree.BestPath) {
-				a.onText("Step number out of range\n")
+				a.safeOnText("Step number out of range\n")
 				continue
 			}
 
 			newPrompt := strings.Join(parts[2:], " ")
 			tree.BestPath[num-1].Action.Prompt = newPrompt
-			a.onText(fmt.Sprintf("Step %d updated\n", num))
+			a.safeOnText(fmt.Sprintf("Step %d updated\n", num))
 
 		case "d", "delete":
 			if len(parts) < 2 {
-				a.onText("Usage: d <num>\n")
+				a.safeOnText("Usage: d <num>\n")
 				continue
 			}
 			var num int
 			if _, err := fmt.Sscanf(parts[1], "%d", &num); err != nil {
-				a.onText("Invalid step number\n")
+				a.safeOnText("Invalid step number\n")
 				continue
 			}
 			if num < 1 || num > len(tree.BestPath) {
-				a.onText("Step number out of range\n")
+				a.safeOnText("Step number out of range\n")
 				continue
 			}
 
 			// Remove node from best path
 			tree.BestPath = append(tree.BestPath[:num-1], tree.BestPath[num:]...)
-			a.onText(fmt.Sprintf("Step %d deleted\n", num))
+			a.safeOnText(fmt.Sprintf("Step %d deleted\n", num))
 
 		case "a", "add":
 			if len(parts) < 2 {
-				a.onText("Usage: a <prompt>\n")
+				a.safeOnText("Usage: a <prompt>\n")
 				continue
 			}
 			prompt := strings.Join(parts[1:], " ")
+			agentType := AgentTypeGeneral
+
+			// Check if first word of prompt is a known type
+			if len(parts) > 2 {
+				potentialType := ParseAgentType(parts[1])
+				if potentialType != "" || parts[1] == "decompose" {
+					agentType = potentialType
+					if parts[1] == "decompose" {
+						agentType = AgentTypePlan // Use plan agent for decompose milestones
+					}
+					prompt = strings.Join(parts[2:], " ")
+				}
+			}
+
 			// Add as child of root for now (end of plan)
 			tree.AddNode(tree.Root.ID, &PlannedAction{
 				Type:      ActionDelegate,
-				AgentType: AgentTypeGeneral,
+				AgentType: agentType,
 				Prompt:    prompt,
 			})
+			if agentType == "" { // Was decompose
+				node, _ := tree.GetNode(tree.Root.ID)
+				if len(node.Children) > 0 {
+					lastChild := node.Children[len(node.Children)-1]
+					lastChild.Action.Type = ActionDecompose
+				}
+			}
 			tree.BestPath = a.treePlanner.SelectBestPath(tree)
-			a.onText("Step added\n")
+			a.safeOnText("[Step added]\n")
 
 		default:
-			a.onText(fmt.Sprintf("Unknown command: %s\n", cmd))
+			a.safeOnText(fmt.Sprintf("Unknown command: %s\n", cmd))
 		}
 	}
 }

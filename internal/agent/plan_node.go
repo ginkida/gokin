@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"sync"
 	"time"
 )
 
@@ -38,9 +39,9 @@ type PlannedAction struct {
 
 // PlanNode represents a single node in the plan tree.
 type PlanNode struct {
-	ID       string       `json:"id"`
-	ParentID string       `json:"parent_id,omitempty"`
-	Children []*PlanNode  `json:"children,omitempty"`
+	ID       string      `json:"id"`
+	ParentID string      `json:"parent_id,omitempty"`
+	Children []*PlanNode `json:"children,omitempty"`
 
 	// Action to execute at this node
 	Action *PlannedAction `json:"action"`
@@ -105,6 +106,8 @@ type PlanTree struct {
 
 	// Node index for quick lookup
 	nodeIndex map[string]*PlanNode `json:"-"`
+
+	mu sync.RWMutex // Protects the tree structure and nodes
 }
 
 // PlanGoal describes the objective of the plan.
