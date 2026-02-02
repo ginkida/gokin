@@ -91,13 +91,14 @@ const (
 
 // AgentResult contains the result of an agent's execution.
 type AgentResult struct {
-	AgentID   string        `json:"agent_id"`
-	Type      AgentType     `json:"type"`
-	Status    AgentStatus   `json:"status"`
-	Output    string        `json:"output"`
-	Error     string        `json:"error,omitempty"`
-	Duration  time.Duration `json:"duration"`
-	Completed bool          `json:"completed"`
+	AgentID   string                 `json:"agent_id"`
+	Type      AgentType              `json:"type"`
+	Status    AgentStatus            `json:"status"`
+	Output    string                 `json:"output"`
+	Error     string                 `json:"error,omitempty"`
+	Duration  time.Duration          `json:"duration"`
+	Completed bool                   `json:"completed"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"` // Additional context (e.g., learned_entry_id for feedback loop)
 }
 
 // AgentTask represents a task to be executed by an agent.

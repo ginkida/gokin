@@ -181,6 +181,17 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		}
 	}
 
+	// 7b. Save active plan for later resume
+	if a.planManager != nil {
+		plan := a.planManager.GetCurrentPlan()
+		if plan != nil && !plan.IsComplete() {
+			logging.Debug("saving active plan for resume", "plan_id", plan.ID, "status", plan.Status)
+			if err := a.planManager.SaveCurrentPlan(); err != nil {
+				logging.Debug("failed to save active plan", "error", err)
+			}
+		}
+	}
+
 	// 8. Cleanup spawned editor processes
 	logging.Debug("cleaning up spawned processes")
 	commands.CleanupSpawnedProcesses()

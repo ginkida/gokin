@@ -267,14 +267,16 @@ func (t *ReadTool) Validate(args map[string]any) error {
 func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	filePath, _ := GetString(args, "file_path")
 
-	// Validate path if validator is configured
-	if t.pathValidator != nil {
-		validPath, err := t.pathValidator.ValidateFile(filePath)
-		if err != nil {
-			return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
-		}
-		filePath = validPath
+	// Validate path (mandatory for security)
+	if t.pathValidator == nil {
+		return NewErrorResult("security error: path validator not initialized"), nil
 	}
+
+	validPath, err := t.pathValidator.ValidateFile(filePath)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
+	}
+	filePath = validPath
 
 	// Check if file exists
 	info, err := os.Stat(filePath)

@@ -36,6 +36,7 @@ func (c *ThemeCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// No args - show current theme and available themes
 	if len(args) == 0 {
 		var sb strings.Builder
+		sb.WriteString("  [Set a custom theme for Gokin]\n")
 		sb.WriteString(fmt.Sprintf("Current theme: %s\n\n", currentTheme))
 
 		availableThemes := ui.GetAvailableThemes()

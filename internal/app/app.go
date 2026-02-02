@@ -283,6 +283,22 @@ func (a *App) Run() error {
 	// Show welcome message
 	a.tui.Welcome()
 
+	// Check for paused plans and notify user
+	if a.planManager != nil && a.planManager.HasPausedPlan() {
+		plans, err := a.planManager.ListResumablePlans()
+		if err == nil && len(plans) > 0 {
+			// Show notification about resumable plan
+			latestPlan := plans[0] // Most recent
+			msg := fmt.Sprintf("Paused plan found: %s (%d/%d steps complete)\nUse /resume-plan to continue.",
+				latestPlan.Title, latestPlan.Completed, latestPlan.StepCount)
+			a.tui.AddSystemMessage(msg)
+			logging.Info("paused plan available for resume",
+				"plan_id", latestPlan.ID,
+				"title", latestPlan.Title,
+				"progress", fmt.Sprintf("%d/%d", latestPlan.Completed, latestPlan.StepCount))
+		}
+	}
+
 	// Create and run the program
 	a.program = a.tui.GetProgram()
 
@@ -627,10 +643,50 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 // executePlanWithClearContext dispatches plan execution to either delegated
 // sub-agent mode or direct monolithic execution.
 func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *plan.Plan) {
+	if a.agentRunner != nil {
+		sharedMem := a.agentRunner.GetSharedMemory()
+		if sharedMem != nil {
+			completedCount := approvedPlan.CompletedCount()
+			if completedCount == 0 {
+				// Clear SharedMemory for fresh plan execution
+				sharedMem.Clear()
+				logging.Debug("shared memory cleared for new plan execution", "plan_id", approvedPlan.ID)
+			} else {
+				// Resuming plan: restore completed steps to SharedMemory
+				a.restoreSharedMemoryFromPlan(sharedMem, approvedPlan)
+			}
+		}
+	}
+
 	if a.config.Plan.DelegateSteps && a.agentRunner != nil {
 		a.executePlanDelegated(ctx, approvedPlan)
 	} else {
 		a.executePlanDirectly(ctx, approvedPlan)
+	}
+}
+
+// restoreSharedMemoryFromPlan repopulates SharedMemory with results from completed steps.
+// This is used when resuming a plan to give sub-agents access to previous step results.
+func (a *App) restoreSharedMemoryFromPlan(sharedMem *agent.SharedMemory, p *plan.Plan) {
+	steps := p.GetStepsSnapshot()
+	restored := 0
+	for _, step := range steps {
+		if step.Status == plan.StatusCompleted && step.Output != "" {
+			sharedMem.Write(
+				fmt.Sprintf("step_%d_result", step.ID),
+				map[string]string{
+					"title":  step.Title,
+					"output": step.Output,
+				},
+				agent.SharedEntryTypeFact,
+				fmt.Sprintf("plan_step_%d", step.ID),
+			)
+			restored++
+		}
+	}
+	if restored > 0 {
+		logging.Debug("shared memory restored from completed steps",
+			"plan_id", p.ID, "steps_restored", restored)
 	}
 }
 
@@ -643,7 +699,14 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		"title", approvedPlan.Title,
 		"steps", approvedPlan.StepCount())
 
-	// 1. Convert plan steps to PlanStepInfo
+	// 1. Save context snapshot before clearing (preserves planning decisions)
+	contextSnapshot := a.extractContextSnapshot()
+	if contextSnapshot != "" {
+		approvedPlan.SetContextSnapshot(contextSnapshot)
+		logging.Debug("context snapshot saved", "plan_id", approvedPlan.ID, "snapshot_len", len(contextSnapshot))
+	}
+
+	// 2. Convert plan steps to PlanStepInfo
 	steps := make([]appcontext.PlanStepInfo, 0, len(approvedPlan.Steps))
 	for _, s := range approvedPlan.Steps {
 		steps = append(steps, appcontext.PlanStepInfo{
@@ -653,11 +716,11 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		})
 	}
 
-	// 2. Build plan execution prompt
-	planPrompt := a.promptBuilder.BuildPlanExecutionPrompt(
-		approvedPlan.Title, approvedPlan.Description, steps)
+	// 3. Build plan execution prompt (includes context snapshot if available)
+	planPrompt := a.promptBuilder.BuildPlanExecutionPromptWithContext(
+		approvedPlan.Title, approvedPlan.Description, steps, contextSnapshot)
 
-	// 3. Clear session history
+	// 4. Clear session history
 	a.session.Clear()
 
 	// 4. Inject plan context as system prompt
@@ -761,6 +824,29 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 
 	totalSteps := len(approvedPlan.Steps)
 
+	// Get plan-level context for sub-agents
+	contractCtx := ""
+	if a.planManager != nil {
+		contractCtx = a.planManager.GetActiveContractContext()
+	}
+
+	// Save context snapshot if not already present (e.g., first execution, not resume)
+	contextSnapshot := approvedPlan.GetContextSnapshot()
+	if contextSnapshot == "" && approvedPlan.CompletedCount() == 0 {
+		contextSnapshot = a.extractContextSnapshot()
+		if contextSnapshot != "" {
+			approvedPlan.SetContextSnapshot(contextSnapshot)
+			logging.Debug("context snapshot saved for delegated plan",
+				"plan_id", approvedPlan.ID, "snapshot_len", len(contextSnapshot))
+		}
+	}
+
+	// Get SharedMemory for inter-step communication
+	var sharedMem *agent.SharedMemory
+	if a.agentRunner != nil {
+		sharedMem = a.agentRunner.GetSharedMemory()
+	}
+
 	// Notify UI with plan banner
 	if a.program != nil {
 		a.program.Send(ui.StreamTextMsg(
@@ -799,9 +885,27 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			a.program.Send(ui.StreamTextMsg(header))
 		}
 
-		// Build step prompt with previous step context
-		prevSummary := a.planManager.GetPreviousStepsSummary(step.ID, 500)
-		stepPrompt := buildStepPrompt(step, prevSummary)
+		// Build step prompt with full plan context
+		prevSummary := a.planManager.GetPreviousStepsSummary(step.ID, 2000)
+
+		// Get SharedMemory context for this sub-agent
+		sharedMemCtx := ""
+		if sharedMem != nil {
+			sharedMemCtx = sharedMem.GetForContext(fmt.Sprintf("plan_step_%d", step.ID), 20)
+		}
+
+		stepPrompt := buildStepPrompt(&StepPromptContext{
+			Step:            step,
+			PrevSummary:     prevSummary,
+			PlanTitle:       approvedPlan.Title,
+			PlanDescription: approvedPlan.Description,
+			PlanRequest:     approvedPlan.Request,
+			ContractContext: contractCtx,
+			ContextSnapshot: contextSnapshot,
+			SharedMemoryCtx: sharedMemCtx,
+			TotalSteps:      totalSteps,
+			CompletedCount:  approvedPlan.CompletedCount(),
+		})
 
 		// Stream sub-agent text to TUI
 		onText := func(text string) {
@@ -810,23 +914,35 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			}
 		}
 
-		// Spawn sub-agent for this step with retry on timeout
+		// Spawn sub-agent for this step with retry on retryable errors
 		var result *agent.AgentResult
 		var err error
-		const maxRetries = 2
+		const maxRetries = 3
+		backoffDurations := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+
 		for attempt := 0; attempt < maxRetries; attempt++ {
 			_, result, err = a.agentRunner.SpawnWithContext(
 				ctx, "general", stepPrompt, 30, "", projectCtx, onText, true)
 
-			// Only retry on timeout errors
-			if err != nil && strings.Contains(err.Error(), "deadline exceeded") && attempt < maxRetries-1 {
-				logging.Warn("sub-agent timeout, retrying step",
-					"step_id", step.ID, "attempt", attempt+1)
+			// Retry on retryable errors (timeout, network, rate limit, etc.)
+			if err != nil && isRetryableError(err) && attempt < maxRetries-1 {
+				backoff := backoffDurations[attempt]
+				logging.Warn("sub-agent error, retrying step",
+					"step_id", step.ID, "attempt", attempt+1, "error", err.Error(), "backoff", backoff)
 				if a.program != nil {
 					a.program.Send(ui.StreamTextMsg(
-						fmt.Sprintf("\nStep %d timed out, retrying...\n", step.ID)))
+						fmt.Sprintf("\n⚠️ Step %d failed (attempt %d/%d): %s\nRetrying in %v...\n",
+							step.ID, attempt+1, maxRetries, err.Error(), backoff)))
 				}
-				continue
+
+				// Wait with backoff, but respect context cancellation
+				select {
+				case <-time.After(backoff):
+					continue
+				case <-ctx.Done():
+					err = ctx.Err()
+					break
+				}
 			}
 			break
 		}
@@ -839,7 +955,34 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				errMsg = result.Error
 			}
 
-			// Preserve partial output even on failure
+			// Check if this is a retryable error after all retries exhausted
+			if err != nil && isRetryableError(err) {
+				// Pause the step instead of failing — user can resume later
+				a.planManager.PauseStep(step.ID, errMsg)
+
+				if a.program != nil {
+					a.program.Send(ui.StreamTextMsg(
+						fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s\n"+
+							"Use /resume-plan to continue when ready.\n",
+							step.ID, maxRetries, errMsg)))
+					a.program.Send(ui.PlanProgressMsg{
+						PlanID:        approvedPlan.ID,
+						CurrentStepID: step.ID,
+						CurrentTitle:  step.Title,
+						TotalSteps:    totalSteps,
+						Completed:     approvedPlan.CompletedCount(),
+						Progress:      approvedPlan.Progress(),
+						Status:        "paused",
+					})
+					a.program.Send(ui.ResponseDoneMsg{})
+				}
+
+				logging.Info("plan paused due to retryable error",
+					"step_id", step.ID, "error", errMsg)
+				return // Exit but don't mark as failed — can be resumed
+			}
+
+			// Non-retryable error: preserve partial output if available
 			if result != nil && result.Output != "" {
 				a.planManager.CompleteStep(step.ID, "(partial) "+result.Output)
 				logging.Debug("step failed but partial output preserved",
@@ -868,6 +1011,22 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			output = output[:2000] + "..."
 		}
 		a.planManager.CompleteStep(step.ID, output)
+
+		// Store step result in SharedMemory for inter-step communication
+		if sharedMem != nil {
+			// Store the step output as a fact for other steps to reference
+			sharedMem.Write(
+				fmt.Sprintf("step_%d_result", step.ID),
+				map[string]string{
+					"title":  step.Title,
+					"output": output,
+				},
+				agent.SharedEntryTypeFact,
+				fmt.Sprintf("plan_step_%d", step.ID),
+			)
+			logging.Debug("step result stored in shared memory",
+				"step_id", step.ID, "output_len", len(output))
+		}
 
 		if a.program != nil {
 			a.program.Send(ui.StreamTextMsg(
@@ -913,25 +1072,105 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	}
 }
 
+// isRetryableError checks if an error is retryable (network, timeout, rate limit).
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	retryable := []string{
+		"deadline exceeded",
+		"timeout",
+		"connection refused",
+		"connection reset",
+		"temporary failure",
+		"rate limit",
+		"503",
+		"502",
+		"429",
+		"network",
+		"eof",
+		"context canceled",
+		"i/o timeout",
+		"no such host",
+		"tls handshake",
+	}
+	for _, pattern := range retryable {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildStepPrompt constructs the prompt for a single plan step sub-agent.
-func buildStepPrompt(step *plan.Step, prevSummary string) string {
+// StepPromptContext holds context for building step prompts.
+type StepPromptContext struct {
+	Step             *plan.Step
+	PrevSummary      string
+	PlanTitle        string
+	PlanDescription  string
+	PlanRequest      string
+	ContractContext  string
+	ContextSnapshot  string
+	SharedMemoryCtx  string
+	TotalSteps       int
+	CompletedCount   int
+}
+
+func buildStepPrompt(ctx *StepPromptContext) string {
 	var sb strings.Builder
-	sb.WriteString("Execute this plan step:\n\n")
-	sb.WriteString(fmt.Sprintf("## Step %d: %s\n", step.ID, step.Title))
-	if step.Description != "" {
-		sb.WriteString(step.Description)
+
+	// Plan overview (helps sub-agent understand the overall goal)
+	sb.WriteString("# Plan Execution Context\n\n")
+	sb.WriteString(fmt.Sprintf("**Plan:** %s\n", ctx.PlanTitle))
+	if ctx.PlanDescription != "" {
+		sb.WriteString(fmt.Sprintf("**Goal:** %s\n", ctx.PlanDescription))
+	}
+	if ctx.PlanRequest != "" && len(ctx.PlanRequest) < 500 {
+		sb.WriteString(fmt.Sprintf("**Original Request:** %s\n", ctx.PlanRequest))
+	}
+	sb.WriteString(fmt.Sprintf("**Progress:** Step %d of %d (%d completed)\n\n",
+		ctx.Step.ID, ctx.TotalSteps, ctx.CompletedCount))
+
+	// Contract context (constraints, invariants)
+	if ctx.ContractContext != "" {
+		sb.WriteString("## Contract Constraints\n")
+		sb.WriteString(ctx.ContractContext)
 		sb.WriteString("\n")
 	}
 
-	if prevSummary != "" {
-		sb.WriteString("\n## Previous Steps (completed):\n")
-		sb.WriteString(prevSummary)
+	// Context from planning discussion (key decisions)
+	if ctx.ContextSnapshot != "" {
+		sb.WriteString("## Key Decisions from Planning\n")
+		sb.WriteString(ctx.ContextSnapshot)
+		sb.WriteString("\n")
 	}
 
-	sb.WriteString("\n## Rules:\n")
+	// Shared memory from previous steps (inter-agent knowledge)
+	if ctx.SharedMemoryCtx != "" {
+		sb.WriteString(ctx.SharedMemoryCtx)
+	}
+
+	// Current step details
+	sb.WriteString(fmt.Sprintf("## Current Step %d: %s\n", ctx.Step.ID, ctx.Step.Title))
+	if ctx.Step.Description != "" {
+		sb.WriteString(ctx.Step.Description)
+		sb.WriteString("\n")
+	}
+
+	// Previous steps summary (compact)
+	if ctx.PrevSummary != "" {
+		sb.WriteString("\n## Previous Steps Summary\n")
+		sb.WriteString(ctx.PrevSummary)
+	}
+
+	sb.WriteString("\n## Execution Rules\n")
 	sb.WriteString("- Read files before editing\n")
-	sb.WriteString("- Execute exactly what the step describes\n")
+	sb.WriteString("- Execute exactly what this step describes\n")
+	sb.WriteString("- Build upon work from previous steps\n")
 	sb.WriteString("- Provide a brief summary of what was done\n")
+	sb.WriteString("- Report any issues or deviations from the plan\n")
 
 	return sb.String()
 }
@@ -946,6 +1185,50 @@ func (a *App) GetPlanManager() *plan.Manager {
 // GetTreePlanner returns the tree planner.
 func (a *App) GetTreePlanner() *agent.TreePlanner {
 	return a.treePlanner
+}
+
+// extractContextSnapshot creates a summary of the current session context.
+// This preserves key decisions and findings from the planning conversation.
+func (a *App) extractContextSnapshot() string {
+	history := a.session.GetHistory()
+	if len(history) < 4 {
+		return "" // Not enough context to summarize
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Context from Planning Discussion\n\n")
+
+	// Extract key points from recent messages (skip system prompt)
+	messageCount := 0
+	maxMessages := 6 // Last 3 turns (6 messages)
+
+	for i := len(history) - 1; i >= 0 && messageCount < maxMessages; i-- {
+		content := history[i]
+		if content == nil || len(content.Parts) == 0 {
+			continue
+		}
+
+		role := "User"
+		if content.Role == "model" {
+			role = "Assistant"
+		}
+
+		// Extract text content from parts
+		for _, part := range content.Parts {
+			if part != nil && part.Text != "" {
+				text := part.Text
+				// Truncate long messages
+				if len(text) > 500 {
+					text = text[:500] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", role, text))
+				messageCount++
+				break
+			}
+		}
+	}
+
+	return sb.String()
 }
 
 // verifyContractAfterPlan runs contract verification after plan execution completes.
@@ -1231,6 +1514,9 @@ func (a *App) TogglePermissions() bool {
 		logging.Debug("permissions disabled")
 	}
 
+	// Update unrestricted mode based on new state
+	a.updateUnrestrictedModeLocked()
+
 	return newEnabled
 }
 
@@ -1286,6 +1572,9 @@ func (a *App) ToggleSandbox() bool {
 		logging.Debug("sandbox disabled")
 	}
 
+	// Update unrestricted mode based on new state
+	a.updateUnrestrictedModeLocked()
+
 	return newEnabled
 }
 
@@ -1294,6 +1583,36 @@ func (a *App) GetSandboxState() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.config.Tools.Bash.Sandbox
+}
+
+// updateUnrestrictedModeLocked updates the executor's unrestricted mode based on
+// current sandbox and permission states. Must be called with a.mu held.
+func (a *App) updateUnrestrictedModeLocked() {
+	if a.executor == nil {
+		return
+	}
+
+	sandboxOff := !a.config.Tools.Bash.Sandbox
+	permissionOff := a.permManager == nil || !a.permManager.IsEnabled()
+	unrestrictedMode := sandboxOff && permissionOff
+
+	// Update executor's unrestricted mode
+	a.executor.SetUnrestrictedMode(unrestrictedMode)
+
+	// Update bash tool's unrestricted mode
+	if a.registry != nil {
+		if bashTool, ok := a.registry.Get("bash"); ok {
+			if bt, ok := bashTool.(*tools.BashTool); ok {
+				bt.SetUnrestrictedMode(unrestrictedMode)
+			}
+		}
+	}
+
+	if unrestrictedMode {
+		logging.Debug("unrestricted mode enabled: sandbox=off, permission=off")
+	} else {
+		logging.Debug("unrestricted mode disabled")
+	}
 }
 
 // GetPermissionsState returns whether permissions are enabled.

@@ -44,6 +44,10 @@ type Manager struct {
 	contractStore    *contract.Store
 	contractVerifier *contract.Verifier
 
+	// Plan persistence
+	planStore *PlanStore
+	workDir   string // Current working directory for plan context
+
 	// Context-clear signaling for plan execution
 	contextClearRequested bool
 	approvedPlanSnapshot  *Plan
@@ -191,6 +195,7 @@ func (m *Manager) RequestApproval(ctx context.Context) (ApprovalDecision, error)
 func (m *Manager) StartStep(stepID int) {
 	m.mu.Lock()
 	plan := m.currentPlan
+	store := m.planStore
 	onStart := m.onStepStart
 	onProgress := m.onProgressUpdate
 	m.mu.Unlock()
@@ -200,6 +205,11 @@ func (m *Manager) StartStep(stepID int) {
 	}
 
 	plan.StartStep(stepID)
+
+	// Save progress (for crash recovery - we know which step was running)
+	if store != nil {
+		_ = store.Save(plan)
+	}
 
 	// Send progress update
 	if onProgress != nil {
@@ -230,6 +240,7 @@ func (m *Manager) StartStep(stepID int) {
 func (m *Manager) CompleteStep(stepID int, output string) {
 	m.mu.Lock()
 	plan := m.currentPlan
+	store := m.planStore
 	onComplete := m.onStepComplete
 	onProgress := m.onProgressUpdate
 	m.mu.Unlock()
@@ -239,6 +250,11 @@ func (m *Manager) CompleteStep(stepID int, output string) {
 	}
 
 	plan.CompleteStep(stepID, output)
+
+	// Save progress (for crash recovery)
+	if store != nil {
+		_ = store.Save(plan)
+	}
 
 	// Send progress update
 	if onProgress != nil {
@@ -273,6 +289,7 @@ func (m *Manager) CompleteStep(stepID int, output string) {
 func (m *Manager) FailStep(stepID int, errMsg string) {
 	m.mu.Lock()
 	plan := m.currentPlan
+	store := m.planStore
 	onProgress := m.onProgressUpdate
 	m.mu.Unlock()
 
@@ -281,6 +298,11 @@ func (m *Manager) FailStep(stepID int, errMsg string) {
 	}
 
 	plan.FailStep(stepID, errMsg)
+
+	// Auto-save failed plan for potential retry
+	if store != nil {
+		_ = store.Save(plan)
+	}
 
 	// Send progress update
 	if onProgress != nil {
@@ -504,6 +526,239 @@ func (m *Manager) GetContractVerifier() *contract.Verifier {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.contractVerifier
+}
+
+// SetPlanStore sets the plan store for persistence.
+func (m *Manager) SetPlanStore(store *PlanStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.planStore = store
+}
+
+// GetPlanStore returns the plan store.
+func (m *Manager) GetPlanStore() *PlanStore {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.planStore
+}
+
+// SetWorkDir sets the working directory for plan context.
+func (m *Manager) SetWorkDir(workDir string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.workDir = workDir
+}
+
+// SaveCurrentPlan saves the current plan to persistent storage.
+func (m *Manager) SaveCurrentPlan() error {
+	m.mu.RLock()
+	plan := m.currentPlan
+	store := m.planStore
+	m.mu.RUnlock()
+
+	if store == nil {
+		return nil // Persistence not enabled
+	}
+
+	if plan == nil {
+		return nil // No plan to save
+	}
+
+	return store.Save(plan)
+}
+
+// LoadPausedPlan loads the most recent paused plan from storage.
+func (m *Manager) LoadPausedPlan() (*Plan, error) {
+	m.mu.RLock()
+	store := m.planStore
+	m.mu.RUnlock()
+
+	if store == nil {
+		return nil, fmt.Errorf("plan store not configured")
+	}
+
+	plan, err := store.LoadLast()
+	if err != nil {
+		return nil, err
+	}
+
+	// Set as current plan
+	m.mu.Lock()
+	m.currentPlan = plan
+	m.mu.Unlock()
+
+	return plan, nil
+}
+
+// LoadPlanByID loads a specific plan by ID from storage.
+func (m *Manager) LoadPlanByID(planID string) (*Plan, error) {
+	m.mu.RLock()
+	store := m.planStore
+	m.mu.RUnlock()
+
+	if store == nil {
+		return nil, fmt.Errorf("plan store not configured")
+	}
+
+	plan, err := store.Load(planID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set as current plan
+	m.mu.Lock()
+	m.currentPlan = plan
+	m.mu.Unlock()
+
+	return plan, nil
+}
+
+// ListSavedPlans returns info about all saved plans.
+func (m *Manager) ListSavedPlans() ([]PlanInfo, error) {
+	m.mu.RLock()
+	store := m.planStore
+	m.mu.RUnlock()
+
+	if store == nil {
+		return nil, fmt.Errorf("plan store not configured")
+	}
+
+	return store.List()
+}
+
+// ListResumablePlans returns info about resumable plans.
+func (m *Manager) ListResumablePlans() ([]PlanInfo, error) {
+	m.mu.RLock()
+	store := m.planStore
+	m.mu.RUnlock()
+
+	if store == nil {
+		return nil, fmt.Errorf("plan store not configured")
+	}
+
+	return store.ListResumable()
+}
+
+// DeleteSavedPlan deletes a plan from storage.
+func (m *Manager) DeleteSavedPlan(planID string) error {
+	m.mu.RLock()
+	store := m.planStore
+	m.mu.RUnlock()
+
+	if store == nil {
+		return fmt.Errorf("plan store not configured")
+	}
+
+	return store.Delete(planID)
+}
+
+// HasPausedPlan checks if there's a paused plan (in memory or storage).
+func (m *Manager) HasPausedPlan() bool {
+	m.mu.RLock()
+	plan := m.currentPlan
+	store := m.planStore
+	m.mu.RUnlock()
+
+	// Check current plan in memory
+	if plan != nil && plan.Status == StatusPaused {
+		return true
+	}
+
+	// Check storage
+	if store != nil {
+		plans, err := store.ListResumable()
+		if err == nil && len(plans) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// PauseStep marks a step as paused with a reason.
+func (m *Manager) PauseStep(stepID int, reason string) {
+	m.mu.Lock()
+	plan := m.currentPlan
+	store := m.planStore
+	onProgress := m.onProgressUpdate
+	m.mu.Unlock()
+
+	if plan == nil {
+		return
+	}
+
+	plan.PauseStep(stepID, reason)
+
+	// Auto-save paused plan for later resume
+	if store != nil {
+		_ = store.Save(plan)
+	}
+
+	// Send progress update
+	if onProgress != nil {
+		step := plan.GetStep(stepID)
+		if step != nil {
+			onProgress(&ProgressUpdate{
+				PlanID:        plan.ID,
+				CurrentStepID: stepID,
+				CurrentTitle:  step.Title,
+				TotalSteps:    plan.StepCount(),
+				Completed:     plan.CompletedCount(),
+				Progress:      plan.Progress(),
+				Status:        "paused",
+			})
+		}
+	}
+}
+
+// ResumePlan resumes a paused plan by resetting paused/failed steps to pending.
+// Returns the plan if it can be resumed, or an error if no plan is available.
+func (m *Manager) ResumePlan() (*Plan, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.currentPlan == nil {
+		return nil, fmt.Errorf("no active plan to resume")
+	}
+
+	plan := m.currentPlan
+
+	// Check if there are any resumable steps
+	hasPending := false
+	for _, step := range plan.Steps {
+		if step.Status == StatusPending || step.Status == StatusPaused || step.Status == StatusFailed {
+			hasPending = true
+			break
+		}
+	}
+
+	if !hasPending {
+		return nil, fmt.Errorf("plan already completed, no steps to resume")
+	}
+
+	// Reset paused and failed steps to pending for retry
+	for _, step := range plan.Steps {
+		if step.Status == StatusPaused || step.Status == StatusFailed {
+			step.Status = StatusPending
+			step.Error = ""
+		}
+	}
+
+	// Reset plan status to in_progress
+	plan.Status = StatusInProgress
+
+	return plan, nil
+}
+
+// IsPlanPaused returns true if the current plan is paused.
+func (m *Manager) IsPlanPaused() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.currentPlan == nil {
+		return false
+	}
+	return m.currentPlan.Status == StatusPaused
 }
 
 // GetActiveContractContext returns formatted contract text for context injection.

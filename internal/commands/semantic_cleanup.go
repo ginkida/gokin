@@ -91,7 +91,7 @@ func (c *SemanticCleanupCommand) listProjects(sb strings.Builder, indexer *seman
 
 	cacheDir := projectMgr.GetProjectCacheDir(semantic.ProjectID(currentProjectID))
 	sb.WriteString(fmt.Sprintf("Cache Directory: %s\n\n", filepath.Dir(cacheDir)))
-	sb.WriteString(fmt.Sprintf("Current Project:\n"))
+	sb.WriteString("  [Clean up old semantic index entries]\n")
 	sb.WriteString(fmt.Sprintf("  Path:     %s\n", workDir))
 	sb.WriteString(fmt.Sprintf("  ID:       %s\n\n", currentProjectID))
 

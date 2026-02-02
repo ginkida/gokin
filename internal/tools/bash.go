@@ -65,10 +65,11 @@ const (
 
 // BashTool executes bash commands.
 type BashTool struct {
-	workDir        string
-	taskManager    *tasks.Manager
-	timeout        time.Duration // Explicit timeout for commands
-	sandboxEnabled bool          // Enable sandboxing for bash commands
+	workDir          string
+	taskManager      *tasks.Manager
+	timeout          time.Duration // Explicit timeout for commands
+	sandboxEnabled   bool          // Enable sandboxing for bash commands
+	unrestrictedMode bool          // Skip command validation when both sandbox and permissions are off
 }
 
 // NewBashTool creates a new BashTool instance.
@@ -129,6 +130,12 @@ func (t *BashTool) SetTaskManager(manager *tasks.Manager) {
 // When disabled, commands run directly without isolation.
 func (t *BashTool) SetSandboxEnabled(enabled bool) {
 	t.sandboxEnabled = enabled
+}
+
+// SetUnrestrictedMode enables or disables unrestricted mode.
+// When enabled (both sandbox and permissions are off), command validation is skipped.
+func (t *BashTool) SetUnrestrictedMode(enabled bool) {
+	t.unrestrictedMode = enabled
 }
 
 func (t *BashTool) Name() string {
@@ -203,6 +210,11 @@ func (t *BashTool) Validate(args map[string]any) error {
 	command, ok := GetString(args, "command")
 	if !ok || command == "" {
 		return NewValidationError("command", "is required")
+	}
+
+	// Skip command validation in unrestricted mode (sandbox=off + permissions=off)
+	if t.unrestrictedMode {
+		return nil
 	}
 
 	// Use unified command validator for comprehensive security checks

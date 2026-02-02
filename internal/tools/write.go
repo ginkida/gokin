@@ -96,14 +96,16 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	filePath, _ := GetString(args, "file_path")
 	content, _ := GetString(args, "content")
 
-	// Validate path using PathValidator (prevents path traversal and symlink attacks)
-	if t.pathValidator != nil {
-		validPath, err := t.pathValidator.Validate(filePath)
-		if err != nil {
-			return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
-		}
-		filePath = validPath
+	// Validate path (mandatory for security)
+	if t.pathValidator == nil {
+		return NewErrorResult("security error: path validator not initialized"), nil
 	}
+
+	validPath, err := t.pathValidator.Validate(filePath)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
+	}
+	filePath = validPath
 
 	// Create parent directories if they don't exist
 	dir := filepath.Dir(filePath)

@@ -20,6 +20,14 @@ import (
 	"google.golang.org/genai"
 )
 
+// Limits for parallel tool execution to prevent resource exhaustion.
+const (
+	// MaxFunctionCallsPerResponse limits the number of function calls processed per response.
+	MaxFunctionCallsPerResponse = 10
+	// MaxConcurrentToolExecutions limits parallel goroutines for tool execution.
+	MaxConcurrentToolExecutions = 5
+)
+
 // ResultCompactor interface for compacting tool results.
 type ResultCompactor interface {
 	CompactForType(toolName string, result ToolResult) ToolResult
@@ -145,6 +153,7 @@ type Executor struct {
 	executionContext map[string]*ExecutionInfo // Track active executions
 	notificationMgr  *NotificationManager      // User notifications
 	redactor         *security.SecretRedactor  // Redact secrets from output
+	unrestrictedMode bool                      // Full freedom when both sandbox and permissions are off
 
 	// Token usage from last response (from API usage metadata)
 	lastInputTokens  int
@@ -226,6 +235,18 @@ func (e *Executor) SetSafetyValidator(validator SafetyValidator) {
 // EnablePreFlightChecks enables or disables pre-flight safety checks.
 func (e *Executor) EnablePreFlightChecks(enabled bool) {
 	e.preFlightChecks = enabled
+}
+
+// SetUnrestrictedMode enables or disables unrestricted mode.
+// When enabled (both sandbox and permissions are off), preflight check errors
+// are converted to warnings and don't block execution.
+func (e *Executor) SetUnrestrictedMode(enabled bool) {
+	e.unrestrictedMode = enabled
+}
+
+// IsUnrestrictedMode returns whether unrestricted mode is enabled.
+func (e *Executor) IsUnrestrictedMode() bool {
+	return e.unrestrictedMode
 }
 
 // SetFallbackConfig sets the fallback configuration for tool responses.
@@ -476,6 +497,14 @@ func (e *Executor) collectStreamWithHandler(ctx context.Context, stream *client.
 
 // executeTools executes a list of function calls with enhanced safety checks.
 func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall) ([]*genai.FunctionResponse, error) {
+	// Limit number of function calls to prevent resource exhaustion
+	if len(calls) > MaxFunctionCallsPerResponse {
+		logging.Warn("truncating function calls",
+			"original_count", len(calls),
+			"max_allowed", MaxFunctionCallsPerResponse)
+		calls = calls[:MaxFunctionCallsPerResponse]
+	}
+
 	results := make([]*genai.FunctionResponse, len(calls))
 
 	// For single tool, execute directly
@@ -489,14 +518,31 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 		return results, nil
 	}
 
-	// For multiple tools, execute in parallel
+	// For multiple tools, execute in parallel with semaphore to limit concurrency
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	semaphore := make(chan struct{}, MaxConcurrentToolExecutions)
 
 	for i, call := range calls {
 		wg.Add(1)
 		go func(idx int, fc *genai.FunctionCall) {
 			defer wg.Done()
+
+			// Acquire semaphore slot
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }() // Release slot when done
+			case <-ctx.Done():
+				mu.Lock()
+				results[idx] = &genai.FunctionResponse{
+					ID:       fc.ID,
+					Name:     fc.Name,
+					Response: NewErrorResult("cancelled").ToMap(),
+				}
+				mu.Unlock()
+				return
+			}
+
 			defer func() {
 				if r := recover(); r != nil {
 					stack := make([]byte, 4096)
@@ -613,16 +659,30 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			}
 		}
 
-		// Block execution if safety check failed
+		// Block execution if safety check failed (unless unrestricted mode is on)
 		if preFlight != nil && !preFlight.IsValid {
 			reasons := strings.Join(preFlight.Errors, "; ")
-			if e.handler != nil && e.handler.OnToolDenied != nil {
-				e.handler.OnToolDenied(call.Name, reasons)
+
+			if e.unrestrictedMode {
+				// In unrestricted mode, convert errors to warnings and allow execution
+				preFlight.Warnings = append(preFlight.Warnings, preFlight.Errors...)
+				preFlight.Errors = nil
+				preFlight.IsValid = true
+				logging.Warn("unrestricted mode: safety check bypassed",
+					"tool", call.Name,
+					"original_errors", reasons)
+				if e.handler != nil && e.handler.OnWarning != nil {
+					e.handler.OnWarning(fmt.Sprintf("[%s] Bypassed in unrestricted mode: %s", call.Name, reasons))
+				}
+			} else {
+				if e.handler != nil && e.handler.OnToolDenied != nil {
+					e.handler.OnToolDenied(call.Name, reasons)
+				}
+				if e.notificationMgr != nil {
+					e.notificationMgr.NotifyDenied(call.Name, reasons)
+				}
+				return NewErrorResult(fmt.Sprintf("Safety check failed: %s", reasons))
 			}
-			if e.notificationMgr != nil {
-				e.notificationMgr.NotifyDenied(call.Name, reasons)
-			}
-			return NewErrorResult(fmt.Sprintf("Safety check failed: %s", reasons))
 		}
 	}
 

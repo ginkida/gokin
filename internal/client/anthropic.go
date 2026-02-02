@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -322,16 +323,31 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 	return false
 }
 
+// calculateBackoffWithJitter calculates exponential backoff with jitter.
+// This prevents thundering herd problem when many clients retry simultaneously.
+func calculateBackoffWithJitter(baseDelay time.Duration, attempt int, maxDelay time.Duration) time.Duration {
+	// Exponential backoff: baseDelay * 2^attempt
+	delay := baseDelay * time.Duration(1<<uint(attempt))
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	// Add jitter: random value between 0 and 25% of delay
+	jitter := time.Duration(rand.Int63n(int64(delay / 4)))
+	return delay + jitter
+}
+
 // streamRequest performs a streaming request to the Anthropic API with retry logic.
 func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[string]interface{}) (*StreamingResponse, error) {
 	var lastErr error
 	var lastStatusCode int
+	maxDelay := 30 * time.Second // Cap maximum delay at 30 seconds
 
 	// Retry loop
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
 			// Exponential backoff with jitter
-			delay := c.config.RetryDelay * time.Duration(1<<uint(attempt-1))
+			delay := calculateBackoffWithJitter(c.config.RetryDelay, attempt-1, maxDelay)
 			logging.Info("retrying request", "attempt", attempt, "delay", delay, "last_status", lastStatusCode)
 			select {
 			case <-time.After(delay):
@@ -442,6 +458,9 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
 
+	// Stream idle timeout (30 seconds between chunks)
+	const streamIdleTimeout = 30 * time.Second
+
 	// Process stream in goroutine
 	go func() {
 		defer close(chunks)
@@ -453,111 +472,154 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 			completedCalls: make([]*genai.FunctionCall, 0),
 		}
 
+		// Channel for scanner results - single goroutine reads all lines
+		type scanResult struct {
+			line string
+			ok   bool
+			err  error
+		}
+		scanCh := make(chan scanResult)
+
+		// Start a single scanner goroutine that reads all lines
+		// It will exit when resp.Body is closed (in defer above)
+		go func() {
+			defer close(scanCh)
+			for {
+				ok := scanner.Scan()
+				select {
+				case scanCh <- scanResult{line: scanner.Text(), ok: ok, err: scanner.Err()}:
+					if !ok {
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
 		eventCount := 0
+		idleTimer := time.NewTimer(streamIdleTimeout)
+		defer idleTimer.Stop()
+
 	scanLoop:
 		for {
-			// Check for context cancellation BEFORE scanning next line
+			// Reset idle timer for each iteration
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(streamIdleTimeout)
+
+			// Wait for scan result with timeout
 			select {
 			case <-ctx.Done():
 				logging.Debug("context cancelled, stopping stream processing")
 				chunks <- ResponseChunk{Error: ctx.Err(), Done: true}
 				return
-			default:
-			}
 
-			// Scan with timeout check
-			if !scanner.Scan() {
-				break scanLoop
-			}
-			line := scanner.Text()
-
-			// Log raw SSE lines for debugging
-			if line != "" {
-				logging.Debug("SSE raw line", "line", line)
-			}
-
-			// SSE format: "data: {...}" or "data:{...}" (handle both)
-			var data string
-			if strings.HasPrefix(line, "data: ") {
-				data = strings.TrimPrefix(line, "data: ")
-			} else if strings.HasPrefix(line, "data:") {
-				data = strings.TrimPrefix(line, "data:")
-			} else {
-				continue
-			}
-			eventCount++
-			// Log FULL data for error events to see the complete error message
-			if strings.Contains(data, "error") {
-				logging.Error("SSE ERROR event received", "full_data", data)
-			} else {
-				logging.Debug("SSE data event", "count", eventCount, "data_preview", truncateString(data, 200))
-			}
-
-			// Skip "[DONE]" marker
-			if data == "[DONE]" {
-				// Send any accumulated tool calls before marking done
-				if len(accumulator.completedCalls) > 0 {
-					chunks <- ResponseChunk{
-						FunctionCalls: accumulator.completedCalls,
-						Done:          true,
-					}
-				} else {
-					select {
-					case chunks <- ResponseChunk{Done: true}:
-					case <-ctx.Done():
-						return
-					}
-				}
-				return
-			}
-
-			// Parse JSON
-			var event map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				// Log invalid JSON for debugging
-				preview := data
-				if len(preview) > 100 {
-					preview = preview[:100] + "..."
-				}
-				logging.Warn("failed to parse SSE event", "error", err, "data", preview)
-				continue
-			}
-
-			// Handle Z.AI/GLM error format: {"error":{"code":"...", "message":"..."}}
-			if errObj, ok := event["error"].(map[string]interface{}); ok {
-				errCode, _ := errObj["code"].(string)
-				errMsg, _ := errObj["message"].(string)
-				logging.Error("Z.AI API error", "code", errCode, "message", errMsg)
+			case <-idleTimer.C:
+				logging.Warn("stream idle timeout exceeded", "timeout", streamIdleTimeout)
 				chunks <- ResponseChunk{
-					Error: fmt.Errorf("API error (%s): %s", errCode, errMsg),
+					Error: fmt.Errorf("stream idle timeout: no data received for %v", streamIdleTimeout),
 					Done:  true,
 				}
 				return
-			}
 
-			// Process event
-			chunk := c.processStreamEvent(event, accumulator)
-			if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 {
-				// Check context before sending chunk
-				select {
-				case chunks <- chunk:
-				case <-ctx.Done():
-					logging.Debug("context cancelled during chunk send")
+			case result, ok := <-scanCh:
+				if !ok {
+					// Channel closed, scanner finished
+					break scanLoop
+				}
+				if !result.ok {
+					if result.err != nil {
+						logging.Warn("SSE scanner error", "error", result.err)
+						chunks <- ResponseChunk{Error: result.err, Done: true}
+					}
+					break scanLoop
+				}
+				line := result.line
+
+				// Log raw SSE lines for debugging
+				if line != "" {
+					logging.Debug("SSE raw line", "line", line)
+				}
+
+				// SSE format: "data: {...}" or "data:{...}" (handle both)
+				var data string
+				if strings.HasPrefix(line, "data: ") {
+					data = strings.TrimPrefix(line, "data: ")
+				} else if strings.HasPrefix(line, "data:") {
+					data = strings.TrimPrefix(line, "data:")
+				} else {
+					continue
+				}
+				eventCount++
+				// Log FULL data for error events to see the complete error message
+				if strings.Contains(data, "error") {
+					logging.Error("SSE ERROR event received", "full_data", data)
+				} else {
+					logging.Debug("SSE data event", "count", eventCount, "data_preview", truncateString(data, 200))
+				}
+
+				// Skip "[DONE]" marker
+				if data == "[DONE]" {
+					// Send any accumulated tool calls before marking done
+					if len(accumulator.completedCalls) > 0 {
+						chunks <- ResponseChunk{
+							FunctionCalls: accumulator.completedCalls,
+							Done:          true,
+						}
+					} else {
+						select {
+						case chunks <- ResponseChunk{Done: true}:
+						case <-ctx.Done():
+							return
+						}
+					}
 					return
 				}
-			}
 
-			if chunk.Done {
-				return
-			}
-		}
+				// Parse JSON
+				var event map[string]interface{}
+				if err := json.Unmarshal([]byte(data), &event); err != nil {
+					// Log invalid JSON for debugging
+					preview := data
+					if len(preview) > 100 {
+						preview = preview[:100] + "..."
+					}
+					logging.Warn("failed to parse SSE event", "error", err, "data", preview)
+					continue
+				}
 
-		if err := scanner.Err(); err != nil {
-			logging.Warn("SSE scanner error", "error", err)
-			select {
-			case chunks <- ResponseChunk{Error: err, Done: true}:
-			case <-ctx.Done():
-				logging.Debug("context cancelled, dropping scanner error", "error", err)
+				// Handle Z.AI/GLM error format: {"error":{"code":"...", "message":"..."}}
+				if errObj, ok := event["error"].(map[string]interface{}); ok {
+					errCode, _ := errObj["code"].(string)
+					errMsg, _ := errObj["message"].(string)
+					logging.Error("Z.AI API error", "code", errCode, "message", errMsg)
+					chunks <- ResponseChunk{
+						Error: fmt.Errorf("API error (%s): %s", errCode, errMsg),
+						Done:  true,
+					}
+					return
+				}
+
+				// Process event
+				chunk := c.processStreamEvent(event, accumulator)
+				if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 {
+					// Check context before sending chunk
+					select {
+					case chunks <- chunk:
+					case <-ctx.Done():
+						logging.Debug("context cancelled during chunk send")
+						return
+					}
+				}
+
+				if chunk.Done {
+					return
+				}
 			}
 		}
 	}()
@@ -992,7 +1054,7 @@ func (c *AnthropicClient) convertToolsToAnthropic() []map[string]interface{} {
 // randomID generates a unique ID for tool_use.
 func randomID() string {
 	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := cryptorand.Read(b); err != nil {
 		return fmt.Sprintf("toolu_%d", time.Now().UnixNano())
 	}
 	return "toolu_" + hex.EncodeToString(b)

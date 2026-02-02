@@ -119,6 +119,7 @@ func NewHandler() *Handler {
 
 	// Register planning mode command
 	h.Register(&PlanCommand{})
+	h.Register(&ResumePlanCommand{})
 
 	// Register tree planner command
 	h.Register(&TreeStatsCommand{})

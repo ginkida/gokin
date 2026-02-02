@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Store manages persistent memory storage.
@@ -22,6 +23,11 @@ type Store struct {
 	entries       map[string]*Entry // ID -> Entry (Project & Session)
 	globalEntries map[string]*Entry // ID -> Global Entry
 	byKey         map[string]string // Key -> ID (All types)
+
+	// Debounced write support
+	dirty     bool         // Whether there are unsaved changes
+	saveTimer *time.Timer  // Timer for debounced save
+	saveMu    sync.Mutex   // Protects saveTimer
 
 	mu sync.RWMutex
 }
@@ -87,7 +93,10 @@ func (s *Store) Add(entry *Entry) error {
 		s.pruneOldest()
 	}
 
-	return s.save()
+	// Mark dirty and schedule debounced save
+	s.dirty = true
+	s.scheduleSave()
+	return nil
 }
 
 // Get retrieves an entry by key.
@@ -385,4 +394,54 @@ func (s *Store) pruneOldest() {
 func hashPath(path string) string {
 	hash := sha256.Sum256([]byte(path))
 	return hex.EncodeToString(hash[:8])
+}
+
+// scheduleSave schedules a debounced save operation.
+// Multiple calls within 2 seconds will be coalesced into a single save.
+func (s *Store) scheduleSave() {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	// Cancel existing timer if any
+	if s.saveTimer != nil {
+		s.saveTimer.Stop()
+	}
+
+	// Schedule new save after 2 seconds
+	s.saveTimer = time.AfterFunc(2*time.Second, func() {
+		s.mu.RLock()
+		dirty := s.dirty
+		s.mu.RUnlock()
+
+		if dirty {
+			s.mu.Lock()
+			_ = s.save()
+			s.dirty = false
+			s.mu.Unlock()
+		}
+	})
+}
+
+// Flush forces an immediate save of any pending changes.
+// Should be called during shutdown to ensure data is persisted.
+func (s *Store) Flush() error {
+	s.saveMu.Lock()
+	if s.saveTimer != nil {
+		s.saveTimer.Stop()
+		s.saveTimer = nil
+	}
+	s.saveMu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.dirty {
+		return nil
+	}
+
+	err := s.save()
+	if err == nil {
+		s.dirty = false
+	}
+	return err
 }

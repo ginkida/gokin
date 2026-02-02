@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // SharedEntryType represents the type of shared memory entry.
@@ -43,6 +46,9 @@ type SharedMemory struct {
 	byType      map[SharedEntryType][]string // Type -> list of keys
 	subscribers map[string]chan<- *SharedEntry
 	mu          sync.RWMutex
+
+	// Metrics for monitoring
+	droppedMessages atomic.Int64 // Count of messages dropped due to slow subscribers
 }
 
 // NewSharedMemory creates a new shared memory instance.
@@ -90,11 +96,16 @@ func (sm *SharedMemory) WriteWithTTL(key string, value any, entryType SharedEntr
 	}
 
 	// Notify subscribers
-	for _, ch := range sm.subscribers {
+	for subscriberID, ch := range sm.subscribers {
 		select {
 		case ch <- entry:
 		default:
 			// Non-blocking send, drop if subscriber is slow
+			dropped := sm.droppedMessages.Add(1)
+			logging.Warn("shared memory: message dropped for slow subscriber",
+				"subscriber_id", subscriberID,
+				"entry_key", key,
+				"total_dropped", dropped)
 		}
 	}
 }
@@ -274,9 +285,10 @@ func (sm *SharedMemory) Stats() SharedMemoryStats {
 	defer sm.mu.RUnlock()
 
 	stats := SharedMemoryStats{
-		TotalEntries: len(sm.entries),
-		Subscribers:  len(sm.subscribers),
-		ByType:       make(map[SharedEntryType]int),
+		TotalEntries:    len(sm.entries),
+		Subscribers:     len(sm.subscribers),
+		ByType:          make(map[SharedEntryType]int),
+		DroppedMessages: sm.droppedMessages.Load(),
 	}
 
 	for entryType, keys := range sm.byType {
@@ -288,9 +300,10 @@ func (sm *SharedMemory) Stats() SharedMemoryStats {
 
 // SharedMemoryStats contains statistics about shared memory usage.
 type SharedMemoryStats struct {
-	TotalEntries int
-	Subscribers  int
-	ByType       map[SharedEntryType]int
+	TotalEntries    int
+	Subscribers     int
+	ByType          map[SharedEntryType]int
+	DroppedMessages int64 // Total messages dropped due to slow subscribers
 }
 
 // Clear removes all entries from shared memory.

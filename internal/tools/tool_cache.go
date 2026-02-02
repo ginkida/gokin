@@ -81,6 +81,7 @@ func (c *ToolResultCache) IsCacheable(toolName string) bool {
 }
 
 // Get retrieves a cached result if available and not expired.
+// Note: Uses full Lock (not RLock) because we mutate state (HitCount++, hits++, updateLRU).
 func (c *ToolResultCache) Get(toolName string, args map[string]any) (ToolResult, bool) {
 	if !c.IsCacheable(toolName) {
 		return ToolResult{}, false
@@ -88,8 +89,8 @@ func (c *ToolResultCache) Get(toolName string, args map[string]any) (ToolResult,
 
 	key := c.makeKey(toolName, args)
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	entry, exists := c.entries[key]
 	if !exists {

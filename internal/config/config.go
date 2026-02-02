@@ -171,12 +171,14 @@ type PermissionConfig struct {
 
 // PlanConfig holds plan mode settings.
 type PlanConfig struct {
-	Enabled            bool `yaml:"enabled"`              // Enable/disable plan mode
-	RequireApproval    bool `yaml:"require_approval"`     // Require user approval before execution
-	AutoDetect         bool `yaml:"auto_detect"`          // Auto-trigger planning for complex tasks
-	ClearContext       bool `yaml:"clear_context"`        // Clear context before plan execution
-	DelegateSteps      bool `yaml:"delegate_steps"`       // Run each step in isolated sub-agent
-	AbortOnStepFailure bool `yaml:"abort_on_step_failure"` // Stop plan on step failure
+	Enabled            bool          `yaml:"enabled"`               // Enable/disable plan mode
+	RequireApproval    bool          `yaml:"require_approval"`      // Require user approval before execution
+	AutoDetect         bool          `yaml:"auto_detect"`           // Auto-trigger planning for complex tasks
+	ClearContext       bool          `yaml:"clear_context"`         // Clear context before plan execution
+	DelegateSteps      bool          `yaml:"delegate_steps"`        // Run each step in isolated sub-agent
+	AbortOnStepFailure bool          `yaml:"abort_on_step_failure"` // Stop plan on step failure
+	PlanningTimeout    time.Duration `yaml:"planning_timeout"`      // Timeout for LLM plan generation
+	UseLLMExpansion    bool          `yaml:"use_llm_expansion"`     // Use LLM for dynamic plan expansion
 }
 
 // HooksConfig holds hooks system settings.
@@ -289,18 +291,18 @@ type MCPConfig struct {
 
 // MCPServerConfig holds configuration for a single MCP server.
 type MCPServerConfig struct {
-	Name        string            `yaml:"name"`                   // Unique identifier
-	Transport   string            `yaml:"transport"`              // "stdio" or "http"
-	Command     string            `yaml:"command,omitempty"`      // For stdio: command to run
-	Args        []string          `yaml:"args,omitempty"`         // For stdio: command arguments
-	Env         map[string]string `yaml:"env,omitempty"`          // Additional env vars (supports ${VAR})
-	URL         string            `yaml:"url,omitempty"`          // For http: server URL
-	Headers     map[string]string `yaml:"headers,omitempty"`      // For http: custom headers
-	AutoConnect bool              `yaml:"auto_connect"`           // Connect on startup
-	Timeout     time.Duration     `yaml:"timeout,omitempty"`      // Request timeout
-	MaxRetries  int               `yaml:"max_retries,omitempty"`  // Retry count
-	RetryDelay  time.Duration     `yaml:"retry_delay,omitempty"`  // Between retries
-	ToolPrefix  string            `yaml:"tool_prefix,omitempty"`  // Prefix for tool names
+	Name        string            `yaml:"name"`                  // Unique identifier
+	Transport   string            `yaml:"transport"`             // "stdio" or "http"
+	Command     string            `yaml:"command,omitempty"`     // For stdio: command to run
+	Args        []string          `yaml:"args,omitempty"`        // For stdio: command arguments
+	Env         map[string]string `yaml:"env,omitempty"`         // Additional env vars (supports ${VAR})
+	URL         string            `yaml:"url,omitempty"`         // For http: server URL
+	Headers     map[string]string `yaml:"headers,omitempty"`     // For http: custom headers
+	AutoConnect bool              `yaml:"auto_connect"`          // Connect on startup
+	Timeout     time.Duration     `yaml:"timeout,omitempty"`     // Request timeout
+	MaxRetries  int               `yaml:"max_retries,omitempty"` // Retry count
+	RetryDelay  time.Duration     `yaml:"retry_delay,omitempty"` // Between retries
+	ToolPrefix  string            `yaml:"tool_prefix,omitempty"` // Prefix for tool names
 }
 
 // DefaultConfig returns the default configuration.
@@ -382,6 +384,8 @@ func DefaultConfig() *Config {
 			ClearContext:       true,  // Clear context before plan execution
 			DelegateSteps:      true,  // Run each step in isolated sub-agent
 			AbortOnStepFailure: false, // Continue by default on step failure
+			PlanningTimeout:    60 * time.Second,
+			UseLLMExpansion:    true,
 		},
 		Hooks: HooksConfig{
 			Enabled: false, // Disabled by default

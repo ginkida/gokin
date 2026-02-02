@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
+	"gokin/internal/security"
+
 	"github.com/google/uuid"
 )
 
@@ -103,31 +105,14 @@ func (e *Entry) Matches(filter QueryFilter) bool {
 }
 
 // SanitizeArgs creates a copy of args with sensitive values redacted.
+// It uses security.SecretRedactor for comprehensive masking.
 func SanitizeArgs(args map[string]any) map[string]any {
 	if args == nil {
 		return nil
 	}
 
-	sanitized := make(map[string]any, len(args))
-	sensitiveKeys := map[string]bool{
-		"password":    true,
-		"secret":      true,
-		"token":       true,
-		"api_key":     true,
-		"apikey":      true,
-		"credentials": true,
-		"auth":        true,
-	}
-
-	for k, v := range args {
-		if sensitiveKeys[k] {
-			sanitized[k] = "[REDACTED]"
-		} else {
-			sanitized[k] = v
-		}
-	}
-
-	return sanitized
+	redactor := security.NewSecretRedactor()
+	return redactor.RedactMap(args)
 }
 
 // TruncateResult truncates a result string to the specified maximum length.

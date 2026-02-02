@@ -28,6 +28,13 @@ type Coordinator struct {
 	onTaskComplete func(task *CoordinatedTask, result *AgentResult)
 	onAllComplete  func(results map[string]*AgentResult)
 
+	// Event-driven channels for efficient processing
+	taskReadyCh chan struct{} // Signals when a task becomes ready
+	agentDoneCh chan string   // Signals when an agent completes (carries agentID)
+
+	// Reflection for error learning feedback loop
+	reflector *Reflector
+
 	mu     sync.RWMutex
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -57,9 +64,19 @@ func NewCoordinator(runner *Runner, config *CoordinatorConfig) *Coordinator {
 		maxParallel:  config.MaxParallel,
 		running:      make(map[string]string),
 		completed:    make(map[string]bool),
+		taskReadyCh:  make(chan struct{}, 100), // Buffered to avoid blocking
+		agentDoneCh:  make(chan string, 100),   // Buffered for agent completions
+		reflector:    NewReflector(),           // Initialize reflector for feedback loop
 		ctx:          ctx,
 		cancel:       cancel,
 	}
+}
+
+// SetReflector sets the reflector for error learning feedback loop.
+func (c *Coordinator) SetReflector(r *Reflector) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reflector = r
 }
 
 // generateTaskID creates a unique task ID.
@@ -95,6 +112,11 @@ func (c *Coordinator) AddTask(prompt string, agentType AgentType, priority TaskP
 	if c.areDependenciesMet(task) {
 		task.Status = TaskStatusReady
 		c.queue.PushTask(task)
+		// Signal that a task is ready (non-blocking)
+		select {
+		case c.taskReadyCh <- struct{}{}:
+		default:
+		}
 	} else {
 		task.Status = TaskStatusBlocked
 	}
@@ -130,15 +152,39 @@ func (c *Coordinator) Stop() {
 }
 
 // processLoop is the main coordination loop.
+// Uses event-driven approach with fallback ticker to reduce CPU usage.
 func (c *Coordinator) processLoop() {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	// Fallback ticker for periodic checks (30s instead of 100ms)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
+
+		case <-c.taskReadyCh:
+			// A task became ready - process it
+			c.processReadyTasks()
+
+			// Check if all done
+			if c.isAllComplete() {
+				c.notifyAllComplete()
+				return
+			}
+
+		case agentID := <-c.agentDoneCh:
+			// An agent completed - handle it
+			c.handleAgentCompletion(agentID)
+
+			// Check if all done
+			if c.isAllComplete() {
+				c.notifyAllComplete()
+				return
+			}
+
 		case <-ticker.C:
+			// Fallback: periodic check for any missed events
 			c.processReadyTasks()
 			c.checkCompletedAgents()
 
@@ -211,8 +257,12 @@ func (c *Coordinator) checkCompletedAgents() {
 		// Update task status
 		if result.Status == AgentStatusCompleted {
 			task.Status = TaskStatusCompleted
+			// Record success for learned solutions (feedback loop)
+			c.recordReflectionFeedback(result, true)
 		} else {
 			task.Status = TaskStatusFailed
+			// Record failure for learned solutions (feedback loop)
+			c.recordReflectionFeedback(result, false)
 		}
 		task.Result = result
 
@@ -234,6 +284,36 @@ func (c *Coordinator) checkCompletedAgents() {
 	}
 }
 
+// recordReflectionFeedback records success/failure for learned error solutions.
+func (c *Coordinator) recordReflectionFeedback(result *AgentResult, success bool) {
+	if c.reflector == nil {
+		return
+	}
+
+	// Check if this result used a learned solution (has LearnedEntryID in metadata)
+	// The agent would have stored this in the result metadata during error recovery
+	if result.Metadata != nil {
+		if entryID, ok := result.Metadata["learned_entry_id"].(string); ok && entryID != "" {
+			var err error
+			if success {
+				err = c.reflector.RecordSolutionSuccess(entryID)
+			} else {
+				err = c.reflector.RecordSolutionFailure(entryID)
+			}
+			if err != nil {
+				logging.Warn("coordinator: failed to record reflection feedback",
+					"entry_id", entryID,
+					"success", success,
+					"error", err)
+			} else {
+				logging.Debug("coordinator: recorded reflection feedback",
+					"entry_id", entryID,
+					"success", success)
+			}
+		}
+	}
+}
+
 // unblockDependents moves blocked tasks to ready if dependencies are met.
 func (c *Coordinator) unblockDependents(completedID string) {
 	dependents := c.dependencies[completedID]
@@ -247,11 +327,62 @@ func (c *Coordinator) unblockDependents(completedID string) {
 			task.Status = TaskStatusReady
 			c.queue.PushTask(task)
 
+			// Signal that a task is ready (non-blocking)
+			select {
+			case c.taskReadyCh <- struct{}{}:
+			default:
+			}
+
 			logging.Debug("coordinator: task unblocked",
 				"task_id", depTaskID,
 				"unblocked_by", completedID)
 		}
 	}
+}
+
+// handleAgentCompletion handles a single agent completion event.
+func (c *Coordinator) handleAgentCompletion(agentID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	taskID, ok := c.running[agentID]
+	if !ok {
+		return
+	}
+
+	result, ok := c.runner.GetResult(agentID)
+	if !ok || !result.Completed {
+		return
+	}
+
+	task := c.tasks[taskID]
+	if task == nil {
+		return
+	}
+
+	// Update task status
+	if result.Status == AgentStatusCompleted {
+		task.Status = TaskStatusCompleted
+	} else {
+		task.Status = TaskStatusFailed
+	}
+	task.Result = result
+
+	// Mark completed
+	c.completed[taskID] = true
+	delete(c.running, agentID)
+
+	logging.Info("coordinator: task completed",
+		"task_id", taskID,
+		"status", task.Status,
+		"duration", result.Duration)
+
+	if c.onTaskComplete != nil {
+		c.onTaskComplete(task, result)
+	}
+
+	// Unblock dependent tasks
+	c.unblockDependents(taskID)
 }
 
 // isAllComplete checks if all tasks are done.

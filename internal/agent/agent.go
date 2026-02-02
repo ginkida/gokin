@@ -22,20 +22,20 @@ import (
 
 // Agent represents an isolated executor for subtasks.
 type Agent struct {
-	ID          string
-	Type        AgentType
-	Model       string
-	client      client.Client
-	registry    *tools.Registry
+	ID           string
+	Type         AgentType
+	Model        string
+	client       client.Client
+	registry     *tools.Registry
 	baseRegistry *tools.Registry
-	messenger   tools.Messenger
-	permissions *permission.Manager
-	timeout     time.Duration
-	history     []*genai.Content
-	status      AgentStatus
-	startTime   time.Time
-	endTime     time.Time
-	maxTurns    int
+	messenger    tools.Messenger
+	permissions  *permission.Manager
+	timeout      time.Duration
+	history      []*genai.Content
+	status       AgentStatus
+	startTime    time.Time
+	endTime      time.Time
+	maxTurns     int
 
 	// === IMPROVEMENT 4: Progress tracking ===
 	currentStep      int
@@ -45,14 +45,15 @@ type Agent struct {
 	progressCallback func(progress *AgentProgress)
 
 	// Mental loop detection tracking
-	callHistory     map[string]int // Map of tool_name:arguments -> count
-	callHistoryMu   sync.Mutex     // Protects callHistory map
-	lastThought     string         // Store the last reasoning/thought
-	loopIntervened  bool           // Flag to indicate if loop intervention occurred
+	callHistory    map[string]int // Map of tool_name:arguments -> count
+	callHistoryMu  sync.Mutex     // Protects callHistory map
+	lastThought    string         // Store the last reasoning/thought
+	loopIntervened bool           // Flag to indicate if loop intervention occurred
 
 	// Project context injection for sub-agents
 	projectContext string            // Injected project guidelines/instructions
 	onText         func(text string) // Streaming callback for real-time output
+	onInput        func(prompt string) (string, error)
 
 	// Plan approval callback for context compaction
 	onPlanApproved func(planSummary string) // Called when plan is built, allows context clearing
@@ -70,10 +71,11 @@ type Agent struct {
 	delegation *DelegationStrategy
 
 	// Tree planning (Phase 6)
-	treePlanner  *TreePlanner
-	activePlan   *PlanTree
-	planningMode bool
-	planGoal     *PlanGoal
+	treePlanner     *TreePlanner
+	activePlan      *PlanTree
+	planningMode    bool
+	requireApproval bool
+	planGoal        *PlanGoal
 
 	// Phase 2: Shared memory for inter-agent communication
 	sharedMemory *SharedMemory
@@ -104,19 +106,19 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry *tools.Registry
 	}
 
 	agent := &Agent{
-		ID:          id,
-		Type:        agentType,
-		Model:       model,
-		client:      agentClient,
-		registry:    filteredRegistry,
+		ID:           id,
+		Type:         agentType,
+		Model:        model,
+		client:       agentClient,
+		registry:     filteredRegistry,
 		baseRegistry: baseRegistry,
-		permissions: permManager,
-		timeout:     2 * time.Minute,
-		history:     make([]*genai.Content, 0),
-		status:      AgentStatusPending,
-		maxTurns:    maxTurns,
-		callHistory: make(map[string]int),
-		ctxCfg:      ctxCfg,
+		permissions:  permManager,
+		timeout:      2 * time.Minute,
+		history:      make([]*genai.Content, 0),
+		status:       AgentStatusPending,
+		maxTurns:     maxTurns,
+		callHistory:  make(map[string]int),
+		ctxCfg:       ctxCfg,
 	}
 
 	// Wire up RequestTool tool if it exists in the registry
@@ -225,9 +227,14 @@ func (a *Agent) SetProjectContext(ctx string) {
 	a.projectContext = ctx
 }
 
-// SetOnText sets a streaming callback for real-time text output.
-func (a *Agent) SetOnText(callback func(text string)) {
-	a.onText = callback
+// SetOnText sets the streaming callback for real-time output.
+func (a *Agent) SetOnText(onText func(string)) {
+	a.onText = onText
+}
+
+// SetOnInput sets the callback for requesting user input.
+func (a *Agent) SetOnInput(onInput func(string) (string, error)) {
+	a.onInput = onInput
 }
 
 // SetOnPlanApproved sets a callback for when a plan is built and ready.
@@ -258,6 +265,29 @@ func (a *Agent) SetMessenger(m tools.Messenger) {
 // SetTreePlanner sets the tree planner for planned execution mode.
 func (a *Agent) SetTreePlanner(tp *TreePlanner) {
 	a.treePlanner = tp
+
+	if tp != nil {
+		tp.SetCallbacks(
+			func(tree *PlanTree, node *PlanNode) {
+				a.SetProgress(a.currentStep, a.totalSteps, "Executing step: "+node.Action.Prompt)
+			},
+			func(tree *PlanTree, node *PlanNode, success bool) {
+				// Node completion handled in execution loop
+			},
+			func(tree *PlanTree, ctx *ReplanContext) {
+				if a.onText != nil {
+					a.onText(fmt.Sprintf("\n[Replanning: %s]\n", ctx.Error))
+				}
+			},
+			func(action *PlannedAction) {
+				// Record planning progress
+				if a.onText != nil {
+					a.onText(fmt.Sprintf("  • %s: %s\n", action.AgentType, action.Prompt))
+				}
+				a.SetProgress(0, 0, "Planning: "+action.Prompt)
+			},
+		)
+	}
 }
 
 // SetSharedMemory sets the shared memory instance for inter-agent communication.
@@ -284,6 +314,16 @@ func (a *Agent) GetToolsUsed() []string {
 	result := make([]string, len(a.toolsUsed))
 	copy(result, a.toolsUsed)
 	return result
+}
+
+// SetPlanGoal sets the goal for the plan.
+func (a *Agent) SetPlanGoal(goal *PlanGoal) {
+	a.planGoal = goal
+}
+
+// SetRequireApproval sets whether plan approval is required.
+func (a *Agent) SetRequireApproval(required bool) {
+	a.requireApproval = required
 }
 
 // EnablePlanningMode enables tree-based planning for agent execution.
@@ -793,6 +833,13 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			if a.onPlanApproved != nil {
 				planSummary := a.treePlanner.GeneratePlanSummary(tree)
 				a.onPlanApproved(planSummary)
+			}
+
+			// === Interactive Plan Review ===
+			if a.onInput != nil && a.requireApproval {
+				if err := a.requestPlanApproval(ctx, tree); err != nil {
+					return a.history, output.String(), err
+				}
 			}
 		}
 	}
@@ -1341,15 +1388,7 @@ func (a *Agent) executePlannedAction(ctx context.Context, action *PlannedAction)
 	case ActionVerify:
 		return a.executeVerifyAction(ctx, action, startTime)
 	case ActionDecompose:
-		// Decompose is handled at planning phase, not execution
-		return &AgentResult{
-			AgentID:   a.ID,
-			Type:      a.Type,
-			Status:    AgentStatusCompleted,
-			Output:    "Task decomposed into sub-steps",
-			Duration:  time.Since(startTime),
-			Completed: true,
-		}
+		return a.executeDecomposeAction(ctx, action, startTime)
 	default:
 		return &AgentResult{
 			AgentID: a.ID,
@@ -1357,6 +1396,52 @@ func (a *Agent) executePlannedAction(ctx context.Context, action *PlannedAction)
 			Status:  AgentStatusFailed,
 			Error:   fmt.Sprintf("unknown action type: %s", action.Type),
 		}
+	}
+}
+
+// executeDecomposeAction handles a decomposition milestone.
+func (a *Agent) executeDecomposeAction(ctx context.Context, action *PlannedAction, startTime time.Time) *AgentResult {
+	if a.activePlan == nil || a.treePlanner == nil {
+		return &AgentResult{
+			AgentID: a.ID,
+			Type:    a.Type,
+			Status:  AgentStatusFailed,
+			Error:   "no active plan or tree planner",
+		}
+	}
+
+	// Find the node in the active plan
+	node, ok := a.activePlan.GetNode(action.NodeID)
+	if !ok {
+		return &AgentResult{
+			AgentID: a.ID,
+			Type:    a.Type,
+			Status:  AgentStatusFailed,
+			Error:   "node not found in plan",
+		}
+	}
+
+	if a.onText != nil {
+		a.onText(fmt.Sprintf("\n[Expanding milestone: %s]\n", action.Prompt))
+	}
+
+	// Expand the milestone into sub-tasks
+	if err := a.treePlanner.ExpandMilestone(ctx, a.activePlan, node); err != nil {
+		return &AgentResult{
+			AgentID: a.ID,
+			Type:    a.Type,
+			Status:  AgentStatusFailed,
+			Error:   fmt.Sprintf("decomposition failed: %v", err),
+		}
+	}
+
+	return &AgentResult{
+		AgentID:   a.ID,
+		Type:      a.Type,
+		Status:    AgentStatusCompleted,
+		Output:    fmt.Sprintf("Milestone expanded: %s", action.Prompt),
+		Duration:  time.Since(startTime),
+		Completed: true,
 	}
 }
 
@@ -1528,5 +1613,78 @@ func (a *Agent) executeVerifyAction(ctx context.Context, action *PlannedAction, 
 		Output:    output.String(),
 		Duration:  time.Since(startTime),
 		Completed: true,
+	}
+}
+
+// requestPlanApproval handles the interactive review and editing of a plan.
+func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
+	if a.onInput == nil || a.onText == nil {
+		return nil
+	}
+
+	for {
+		// Show current plan
+		a.onText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
+		a.onText("Plan commands: [Enter] to approve, 'e <num> <new prompt>' to edit, 'd <num>' to delete, 'c' to cancel\n")
+
+		response, err := a.onInput("Plan approval > ")
+		if err != nil {
+			return err
+		}
+
+		response = strings.TrimSpace(response)
+		if response == "" {
+			// Approved
+			a.onText("[Plan approved]\n")
+			return nil
+		}
+
+		parts := strings.Fields(response)
+		cmd := strings.ToLower(parts[0])
+
+		switch cmd {
+		case "c", "cancel", "abort":
+			return fmt.Errorf("plan rejected by user")
+		case "e", "edit":
+			if len(parts) < 3 {
+				a.onText("Usage: e <num> <new prompt>\n")
+				continue
+			}
+			var num int
+			if _, err := fmt.Sscanf(parts[1], "%d", &num); err != nil {
+				a.onText("Invalid step number\n")
+				continue
+			}
+			if num < 1 || num > len(tree.BestPath) {
+				a.onText("Step number out of range\n")
+				continue
+			}
+
+			newPrompt := strings.Join(parts[2:], " ")
+			tree.BestPath[num-1].Action.Prompt = newPrompt
+			a.onText(fmt.Sprintf("Step %d updated\n", num))
+
+		case "d", "delete":
+			if len(parts) < 2 {
+				a.onText("Usage: d <num>\n")
+				continue
+			}
+			var num int
+			if _, err := fmt.Sscanf(parts[1], "%d", &num); err != nil {
+				a.onText("Invalid step number\n")
+				continue
+			}
+			if num < 1 || num > len(tree.BestPath) {
+				a.onText("Step number out of range\n")
+				continue
+			}
+
+			// Remove node from best path
+			tree.BestPath = append(tree.BestPath[:num-1], tree.BestPath[num:]...)
+			a.onText(fmt.Sprintf("Step %d deleted\n", num))
+
+		default:
+			a.onText(fmt.Sprintf("Unknown command: %s\n", cmd))
+		}
 	}
 }

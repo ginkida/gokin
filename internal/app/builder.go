@@ -326,8 +326,29 @@ func (b *Builder) initManagers() error {
 	}
 	b.executor.SetPermissions(b.permManager)
 
+	// Set unrestricted mode when both sandbox and permissions are off
+	// In this mode, preflight check errors become warnings (no blocking)
+	sandboxOff := !b.cfg.Tools.Bash.Sandbox
+	permissionOff := !b.cfg.Permission.Enabled
+	b.executor.SetUnrestrictedMode(sandboxOff && permissionOff)
+	if sandboxOff && permissionOff {
+		logging.Debug("unrestricted mode enabled: sandbox=off, permission=off")
+	}
+
 	// Plan manager
 	b.planManager = plan.NewManager(b.cfg.Plan.Enabled, b.cfg.Plan.RequireApproval)
+	b.planManager.SetWorkDir(b.workDir)
+
+	// Plan persistence store
+	if b.configDirErr == nil {
+		planStore, err := plan.NewPlanStore(b.configDir)
+		if err != nil {
+			logging.Warn("plan persistence disabled", "error", err)
+		} else {
+			b.planManager.SetPlanStore(planStore)
+			logging.Debug("plan store initialized", "dir", b.configDir)
+		}
+	}
 
 	// Hooks manager
 	b.hooksManager = hooks.NewManager(b.cfg.Hooks.Enabled, b.workDir)
@@ -377,6 +398,13 @@ func (b *Builder) initManagers() error {
 		ParallelThreshold:  7,
 	}
 	b.taskRouter = router.NewRouter(routerCfg, b.executor, b.agentRunner, b.geminiClient, b.workDir)
+
+	// Wire plan manager to router for plan-aware routing
+	// When a plan is active, router avoids nested decomposition
+	if b.planManager != nil {
+		b.taskRouter.SetPlanChecker(b.planManager)
+	}
+
 	logging.Debug("task router initialized",
 		"enabled", routerCfg.Enabled,
 		"decompose_threshold", routerCfg.DecomposeThreshold,
@@ -461,6 +489,10 @@ func (b *Builder) initManagers() error {
 	// === PHASE 6: Tree Planner ===
 	// 5. Tree Planner for planned execution mode
 	treePlannerConfig := agent.DefaultTreePlannerConfig()
+	if b.cfg.Plan.PlanningTimeout > 0 {
+		treePlannerConfig.PlanningTimeout = b.cfg.Plan.PlanningTimeout
+	}
+	treePlannerConfig.UseLLMExpansion = b.cfg.Plan.UseLLMExpansion
 	b.treePlanner = agent.NewTreePlanner(
 		treePlannerConfig,
 		b.strategyOptimizer,
@@ -468,10 +500,13 @@ func (b *Builder) initManagers() error {
 		b.geminiClient,
 	)
 	b.agentRunner.SetTreePlanner(b.treePlanner)
+	b.agentRunner.SetPlanningModeEnabled(b.cfg.Plan.Enabled)
+	b.agentRunner.SetRequireApprovalEnabled(b.cfg.Plan.RequireApproval)
 	logging.Debug("tree planner initialized",
 		"algorithm", treePlannerConfig.Algorithm,
 		"beam_width", treePlannerConfig.BeamWidth,
-		"max_depth", treePlannerConfig.MaxTreeDepth)
+		"max_depth", treePlannerConfig.MaxTreeDepth,
+		"timeout", treePlannerConfig.PlanningTimeout)
 
 	// === PHASE 2: Learning Infrastructure ===
 
@@ -531,8 +566,13 @@ func (b *Builder) initIntegrations() error {
 		if bt, ok := bashTool.(*tools.BashTool); ok {
 			bt.SetTaskManager(b.taskManager)
 			bt.SetSandboxEnabled(b.cfg.Tools.Bash.Sandbox)
+			// Set unrestricted mode for bash tool (skip command validation)
+			sandboxOff := !b.cfg.Tools.Bash.Sandbox
+			permissionOff := !b.cfg.Permission.Enabled
+			bt.SetUnrestrictedMode(sandboxOff && permissionOff)
 			logging.Debug("bash tool configured",
 				"sandbox", b.cfg.Tools.Bash.Sandbox,
+				"unrestricted", sandboxOff && permissionOff,
 				"blocked_commands", len(b.cfg.Tools.Bash.BlockedCommands))
 		}
 	}
@@ -1143,6 +1183,13 @@ func (b *Builder) assembleApp() *App {
 		treePlanner: b.treePlanner,
 		// MCP (Model Context Protocol)
 		mcpManager: b.mcpManager,
+	}
+
+	// Wire up user input callback for agents
+	if b.agentRunner != nil {
+		b.agentRunner.SetOnInput(func(prompt string) (string, error) {
+			return b.cachedApp.promptQuestion(b.ctx, prompt, nil, "")
+		})
 	}
 
 	return b.cachedApp

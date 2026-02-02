@@ -26,7 +26,7 @@ type CachedSummary struct {
 type SummaryCache struct {
 	mu       sync.RWMutex
 	cache    map[string]*CachedSummary // messageHash -> summary
-	lruList  []*string                 // Order of recent use (front = most recent)
+	lruList  []string                  // Order of recent use (front = most recent)
 	maxCache int
 	ttl      time.Duration // Time-to-live for cache entries
 }
@@ -35,16 +35,17 @@ type SummaryCache struct {
 func NewSummaryCache(maxEntries int, ttl time.Duration) *SummaryCache {
 	return &SummaryCache{
 		cache:    make(map[string]*CachedSummary),
-		lruList:  make([]*string, 0, maxEntries),
+		lruList:  make([]string, 0, maxEntries),
 		maxCache: maxEntries,
 		ttl:      ttl,
 	}
 }
 
 // Get retrieves a cached summary if available and not expired.
+// Note: Uses full Lock (not RLock) because we mutate LastUsedAt.
 func (c *SummaryCache) Get(messageHash string) (*CachedSummary, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	entry, ok := c.cache[messageHash]
 	if !ok {
@@ -89,7 +90,7 @@ func (c *SummaryCache) Put(messageHash string, summary *genai.Content, tokenCoun
 	entry.MessageRange.End = endIdx
 
 	c.cache[messageHash] = entry
-	c.lruList = append([]*string{&messageHash}, c.lruList...)
+	c.lruList = append([]string{messageHash}, c.lruList...)
 }
 
 // Invalidate removes a cache entry.
@@ -101,7 +102,7 @@ func (c *SummaryCache) Invalidate(messageHash string) {
 
 	// Remove from LRU list
 	for i, key := range c.lruList {
-		if key != nil && *key == messageHash {
+		if key == messageHash {
 			c.lruList = append(c.lruList[:i], c.lruList[i+1:]...)
 			break
 		}
@@ -114,7 +115,7 @@ func (c *SummaryCache) Clear() {
 	defer c.mu.Unlock()
 
 	c.cache = make(map[string]*CachedSummary)
-	c.lruList = make([]*string, 0, c.maxCache)
+	c.lruList = make([]string, 0, c.maxCache)
 }
 
 // evictOldest removes the least recently used entry.
@@ -125,9 +126,7 @@ func (c *SummaryCache) evictOldest() {
 
 	// Remove last (oldest) entry
 	oldest := c.lruList[len(c.lruList)-1]
-	if oldest != nil {
-		delete(c.cache, *oldest)
-	}
+	delete(c.cache, oldest)
 	c.lruList = c.lruList[:len(c.lruList)-1]
 }
 

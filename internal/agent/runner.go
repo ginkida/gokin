@@ -46,8 +46,9 @@ type Runner struct {
 	metaAgent         *MetaAgent
 
 	// Phase 6: Tree Planner
-	treePlanner         *TreePlanner
-	planningModeEnabled bool // Global planning mode flag
+	treePlanner            *TreePlanner
+	planningModeEnabled    bool // Global planning mode flag
+	requireApprovalEnabled bool // Global require approval flag
 
 	// Callback for context compaction when plan is approved
 	onPlanApproved func(planSummary string)
@@ -61,6 +62,9 @@ type Runner struct {
 
 	// Phase 2: Shared memory for inter-agent communication
 	sharedMemory *SharedMemory
+
+	// User input callback
+	onInput func(prompt string) (string, error)
 
 	// Phase 2: Example store for few-shot learning
 	exampleStore ExampleStoreInterface
@@ -160,18 +164,32 @@ func (r *Runner) GetTreePlanner() *TreePlanner {
 	return r.treePlanner
 }
 
-// SetPlanningModeEnabled enables or disables global planning mode for all agents.
+// IsPlanningModeEnabled returns the global planning mode enabled flag.
+func (r *Runner) IsPlanningModeEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.planningModeEnabled
+}
+
+// SetPlanningModeEnabled sets the global planning mode enabled flag.
 func (r *Runner) SetPlanningModeEnabled(enabled bool) {
 	r.mu.Lock()
 	r.planningModeEnabled = enabled
 	r.mu.Unlock()
 }
 
-// IsPlanningModeEnabled returns whether global planning mode is enabled.
-func (r *Runner) IsPlanningModeEnabled() bool {
+// IsRequireApprovalEnabled returns the global require approval flag.
+func (r *Runner) IsRequireApprovalEnabled() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.planningModeEnabled
+	return r.requireApprovalEnabled
+}
+
+// SetRequireApprovalEnabled sets the global require approval flag.
+func (r *Runner) SetRequireApprovalEnabled(enabled bool) {
+	r.mu.Lock()
+	r.requireApprovalEnabled = enabled
+	r.mu.Unlock()
 }
 
 // SetOnPlanApproved sets the callback for when a plan is approved.
@@ -248,6 +266,13 @@ func (r *Runner) GetExampleStore() ExampleStoreInterface {
 	return r.exampleStore
 }
 
+// SetOnInput sets the callback for requesting user input.
+func (r *Runner) SetOnInput(callback func(string) (string, error)) {
+	r.mu.Lock()
+	r.onInput = callback
+	r.mu.Unlock()
+}
+
 // SetPromptOptimizer sets the prompt optimizer.
 func (r *Runner) SetPromptOptimizer(optimizer *PromptOptimizer) {
 	r.mu.Lock()
@@ -311,7 +336,9 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	metaAgent := r.metaAgent
 	treePlanner := r.treePlanner
 	planningMode := r.planningModeEnabled
+	requireApproval := r.requireApprovalEnabled
 	planApprovedCallback := r.onPlanApproved
+	onInput := r.onInput
 	r.mu.RUnlock()
 
 	// Check for dynamic type first
@@ -329,6 +356,11 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 		agent = NewAgent(at, r.client, r.baseRegistry, r.workDir, maxTurns, model, r.permissions, ctxCfg)
 	}
 
+	// Set input callback
+	if onInput != nil {
+		agent.SetOnInput(onInput)
+	}
+
 	// Set up messenger for inter-agent communication
 	if r.messengerFactory != nil {
 		messenger := r.messengerFactory(agent.ID)
@@ -340,13 +372,13 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 		agent.reflector.SetErrorStore(errorStore)
 	}
 
-	// Wire tree planner for planned execution
+	// Wire tree planner	// Wire planning capabilities
 	if treePlanner != nil {
 		agent.SetTreePlanner(treePlanner)
-		// Enable planning mode if globally enabled
 		if planningMode {
-			agent.EnablePlanningMode(nil) // Use default goal
+			agent.EnablePlanningMode(nil)
 		}
+		agent.SetRequireApproval(requireApproval)
 		// Wire plan approval callback for context compaction
 		if planApprovedCallback != nil {
 			agent.SetOnPlanApproved(planApprovedCallback)
@@ -416,6 +448,7 @@ func (r *Runner) SpawnWithContext(
 	r.mu.RLock()
 	ctxCfg := r.ctxCfg
 	errorStore := r.errorStore
+	onInput := r.onInput
 	r.mu.RUnlock()
 
 	// Pass nil permissions for approved plan execution to avoid per-tool prompts
@@ -425,10 +458,20 @@ func (r *Runner) SpawnWithContext(
 	}
 	agent := NewAgent(at, r.client, r.baseRegistry, r.workDir, maxTurns, model, perms, ctxCfg)
 
+	// Set input callback
+	if onInput != nil {
+		agent.SetOnInput(onInput)
+	}
+
 	// Set up messenger for inter-agent communication
 	if r.messengerFactory != nil {
 		messenger := r.messengerFactory(agent.ID)
 		agent.SetMessenger(messenger)
+	}
+
+	// Set input callback
+	if onInput != nil {
+		agent.SetOnInput(onInput)
 	}
 
 	// Wire error store for learning from errors

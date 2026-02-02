@@ -9,7 +9,7 @@ import (
 
 const (
 	// MaxMessages is the maximum number of messages to keep in history.
-	MaxMessages = 50
+	MaxMessages = 100
 )
 
 // ChangeEvent represents a session history change event.
@@ -249,6 +249,30 @@ func (s *Session) trimHistoryLocked() {
 		startIdx = systemMessages
 	}
 	s.History = append(s.History[:systemMessages], s.History[startIdx:]...)
+
+	// Sync tokenCounts with History to avoid desynchronization
+	if len(s.tokenCounts) > 0 {
+		// Apply the same trimming logic to tokenCounts
+		if len(s.tokenCounts) > MaxMessages {
+			tcSystemMessages := systemMessages
+			if tcSystemMessages > len(s.tokenCounts) {
+				tcSystemMessages = 0
+			}
+			tcStartIdx := len(s.tokenCounts) - remaining
+			if tcStartIdx < tcSystemMessages {
+				tcStartIdx = tcSystemMessages
+			}
+			if tcStartIdx < len(s.tokenCounts) {
+				s.tokenCounts = append(s.tokenCounts[:tcSystemMessages], s.tokenCounts[tcStartIdx:]...)
+			}
+		}
+
+		// Recalculate totalTokens from remaining tokenCounts
+		s.totalTokens = 0
+		for _, count := range s.tokenCounts {
+			s.totalTokens += count
+		}
+	}
 }
 
 // TrimHistory manually triggers history trimming to max messages.

@@ -27,6 +27,7 @@ const (
 	StatusCompleted
 	StatusFailed
 	StatusSkipped
+	StatusPaused // Temporarily paused, can be resumed
 )
 
 func (s Status) String() string {
@@ -41,6 +42,8 @@ func (s Status) String() string {
 		return "failed"
 	case StatusSkipped:
 		return "skipped"
+	case StatusPaused:
+		return "paused"
 	default:
 		return "unknown"
 	}
@@ -59,6 +62,8 @@ func (s Status) Icon() string {
 		return "✗"
 	case StatusSkipped:
 		return "⊘"
+	case StatusPaused:
+		return "⏸"
 	default:
 		return "?"
 	}
@@ -104,7 +109,25 @@ type Plan struct {
 	Contract   *ContractSpec `json:"contract,omitempty"`
 	ContractID string        `json:"contract_id,omitempty"` // Links to persisted contract in store
 
+	// Context snapshot from planning conversation (preserved across session clear)
+	ContextSnapshot string `json:"context_snapshot,omitempty"`
+
 	mu sync.RWMutex
+}
+
+// SetContextSnapshot stores a summary of the planning conversation context.
+func (p *Plan) SetContextSnapshot(snapshot string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ContextSnapshot = snapshot
+	p.UpdatedAt = time.Now()
+}
+
+// GetContextSnapshot returns the saved context snapshot.
+func (p *Plan) GetContextSnapshot() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.ContextSnapshot
 }
 
 // HasContract returns true if the plan has a contract specification.
@@ -366,4 +389,35 @@ func (p *Plan) CompletedCount() int {
 		}
 	}
 	return count
+}
+
+// PendingCount returns the number of pending or paused steps (resumable).
+func (p *Plan) PendingCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	count := 0
+	for _, step := range p.Steps {
+		if step.Status == StatusPending || step.Status == StatusPaused || step.Status == StatusFailed {
+			count++
+		}
+	}
+	return count
+}
+
+// PauseStep marks a step as paused (can be resumed later).
+func (p *Plan) PauseStep(id int, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, step := range p.Steps {
+		if step.ID == id {
+			step.Status = StatusPaused
+			step.Error = reason
+			step.EndTime = time.Now()
+			p.Status = StatusPaused
+			p.UpdatedAt = time.Now()
+			break
+		}
+	}
 }

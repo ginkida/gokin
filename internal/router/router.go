@@ -14,6 +14,12 @@ import (
 	"google.golang.org/genai"
 )
 
+// PlanChecker interface for checking planning state
+type PlanChecker interface {
+	IsActive() bool
+	IsEnabled() bool
+}
+
 // Router determines the optimal execution strategy for incoming tasks
 // and routes them to the appropriate handler (direct, executor, or sub-agent).
 type Router struct {
@@ -22,6 +28,9 @@ type Router struct {
 	agentRunner AgentRunner
 	client      client.Client
 	workDir     string
+
+	// Plan awareness
+	planChecker PlanChecker
 
 	// Configuration
 	enabled            bool
@@ -65,9 +74,31 @@ func NewRouter(cfg *RouterConfig, executor *tools.Executor, agentRunner AgentRun
 	}
 }
 
+// SetPlanChecker sets the plan checker for plan-aware routing.
+func (r *Router) SetPlanChecker(checker PlanChecker) {
+	r.planChecker = checker
+}
+
 // Route determines the best execution strategy and returns a routing decision
 func (r *Router) Route(message string) *RoutingDecision {
 	analysis := r.analyzer.Analyze(message)
+
+	// If a plan is actively being executed, prefer simpler strategies
+	// to avoid nested planning/coordination
+	planActive := r.planChecker != nil && r.planChecker.IsActive()
+	if planActive {
+		logging.Debug("plan active, using simplified routing",
+			"original_score", analysis.Score,
+			"original_strategy", analysis.Strategy)
+		// Reduce complexity score when plan is active to prevent nested decomposition
+		if analysis.Score > r.decomposeThreshold {
+			analysis.Score = r.decomposeThreshold - 1
+		}
+		// Don't use sub-agents during plan execution (plan steps are already sub-agents)
+		if analysis.Strategy == StrategySubAgent {
+			analysis.Strategy = StrategyExecutor
+		}
+	}
 
 	logging.Debug("task routed",
 		"message", message,

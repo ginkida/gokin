@@ -141,6 +141,18 @@ func NewCommandValidator() *CommandValidator {
 
 		// Process hiding attempts
 		regexp.MustCompile(`LD_PRELOAD.*\.so`),
+
+		// Obfuscated commands (hex/octal escapes)
+		regexp.MustCompile(`\\x[0-9a-fA-F]{2}`),                // \xXX
+		regexp.MustCompile(`\\[0-7]{3}`),                       // \OOO
+		regexp.MustCompile(`(?i)printf\s+.*\\`),                // printf with escapes
+
+		// Shell injection separators and constructs
+		regexp.MustCompile(`[;&|]\s*(ba)?sh`),                 // ;sh, |sh, &sh
+		regexp.MustCompile(`\$\(.*\)`),                         // $(...) command substitution (risky in some contexts)
+		regexp.MustCompile("`.*`"),                             // `...` backticks substitution
+		regexp.MustCompile(`(?i)eval\s+`),                      // eval (broad match)
+		regexp.MustCompile(`>\s*/dev/(tcp|udp)/`),              // redundant but safer with separators
 	}
 
 	return cv

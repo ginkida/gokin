@@ -667,6 +667,25 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 		builder.WriteString("\n\n")
 	}
 
+	// Add persistent memories from memory store (critical for context retention)
+	if b.memoryStore != nil {
+		memoryContent := b.memoryStore.GetForContext(true)
+		if memoryContent != "" {
+			builder.WriteString("## Project Knowledge\n")
+			builder.WriteString(memoryContent)
+			builder.WriteString("\n\n")
+		}
+	}
+
+	// Inject active contract context from plan manager
+	if b.planManager != nil {
+		if ctx := b.planManager.GetActiveContractContext(); ctx != "" {
+			builder.WriteString("## Active Contract\n")
+			builder.WriteString(ctx)
+			builder.WriteString("\n\n")
+		}
+	}
+
 	// The approved plan
 	builder.WriteString("═══════════════════════════════════════════════════════════════════════\n")
 	builder.WriteString("                         APPROVED PLAN\n")
@@ -702,9 +721,35 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 	return builder.String()
 }
 
+// BuildPlanExecutionPromptWithContext is like BuildPlanExecutionPrompt but includes
+// a context snapshot from the planning conversation to preserve important decisions.
+func (b *PromptBuilder) BuildPlanExecutionPromptWithContext(title, description string, steps []PlanStepInfo, contextSnapshot string) string {
+	basePrompt := b.BuildPlanExecutionPrompt(title, description, steps)
+
+	if contextSnapshot == "" {
+		return basePrompt
+	}
+
+	// Insert context snapshot before the approved plan section
+	var builder strings.Builder
+	builder.WriteString("You are Gokin, executing an approved plan. Execute precisely.\n\n")
+
+	// Context from planning discussion (important decisions, findings)
+	builder.WriteString(contextSnapshot)
+	builder.WriteString("\n")
+
+	// The rest is from base prompt (skip the first line which we already wrote)
+	lines := strings.SplitN(basePrompt, "\n", 2)
+	if len(lines) > 1 {
+		builder.WriteString(lines[1])
+	}
+
+	return builder.String()
+}
+
 // BuildSubAgentPrompt builds a compact project context for injection into sub-agents.
 // Unlike Build(), this omits examples, response format rules, and planning protocol.
-// It provides only project guidelines, GOKIN.md instructions, and working directory.
+// It provides project guidelines, GOKIN.md instructions, memory, and working directory.
 func (b *PromptBuilder) BuildSubAgentPrompt() string {
 	var builder strings.Builder
 
@@ -719,6 +764,25 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 		builder.WriteString("\n## Project Instructions\n")
 		builder.WriteString(b.projectMemory.GetInstructions())
 		builder.WriteString("\n")
+	}
+
+	// Add persistent memories (project knowledge, decisions, etc.)
+	if b.memoryStore != nil {
+		memoryContent := b.memoryStore.GetForContext(true)
+		if memoryContent != "" {
+			builder.WriteString("\n## Project Knowledge\n")
+			builder.WriteString(memoryContent)
+			builder.WriteString("\n")
+		}
+	}
+
+	// Inject active contract context
+	if b.planManager != nil {
+		if ctx := b.planManager.GetActiveContractContext(); ctx != "" {
+			builder.WriteString("\n## Active Contract\n")
+			builder.WriteString(ctx)
+			builder.WriteString("\n")
+		}
 	}
 
 	// Working directory

@@ -119,14 +119,16 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	newStr, _ := GetString(args, "new_string")
 	replaceAll := GetBoolDefault(args, "replace_all", false)
 
-	// Validate path if validator is configured
-	if t.pathValidator != nil {
-		validPath, err := t.pathValidator.ValidateFile(filePath)
-		if err != nil {
-			return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
-		}
-		filePath = validPath
+	// Validate path (mandatory for security)
+	if t.pathValidator == nil {
+		return NewErrorResult("security error: path validator not initialized"), nil
 	}
+
+	validPath, err := t.pathValidator.ValidateFile(filePath)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
+	}
+	filePath = validPath
 
 	// Read existing file
 	data, err := os.ReadFile(filePath)

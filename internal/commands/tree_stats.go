@@ -47,7 +47,7 @@ func (c *TreeStatsCommand) Execute(ctx context.Context, args []string, app AppIn
 	}
 	sb.WriteString("Mode\n")
 	sb.WriteString(fmt.Sprintf("  Current Mode:    %s\n", modeStatus))
-	sb.WriteString(fmt.Sprintf("  Toggle:          /plan\n\n"))
+	sb.WriteString("  Toggle:          /plan\n\n")
 
 	// Configuration
 	sb.WriteString("📋 Configuration\n")
@@ -68,6 +68,14 @@ func (c *TreeStatsCommand) Execute(ctx context.Context, args []string, app AppIn
 		sb.WriteString(fmt.Sprintf("  Total Replans:   %v\n", replans))
 	}
 	sb.WriteString("\n")
+
+	// Visual Tree
+	activeTree := planner.GetActiveTree()
+	if activeTree != nil {
+		sb.WriteString("🌳 Current Plan Tree\n")
+		sb.WriteString(planner.GenerateVisualTree(activeTree))
+		sb.WriteString("\n")
+	}
 
 	// Tips
 	sb.WriteString("Tips\n")
