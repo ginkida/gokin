@@ -1625,7 +1625,7 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 	for {
 		// Show current plan
 		a.onText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
-		a.onText("Plan commands: [Enter] to approve, 'e <num> <new prompt>' to edit, 'd <num>' to delete, 'c' to cancel\n")
+		a.onText("Plan commands: [Enter] to approve, 'e <num> <prompt>' to edit, 'd <num>' to delete, 'a <prompt>' to add, 'c' to cancel\n")
 
 		response, err := a.onInput("Plan approval > ")
 		if err != nil {
@@ -1682,6 +1682,21 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 			// Remove node from best path
 			tree.BestPath = append(tree.BestPath[:num-1], tree.BestPath[num:]...)
 			a.onText(fmt.Sprintf("Step %d deleted\n", num))
+
+		case "a", "add":
+			if len(parts) < 2 {
+				a.onText("Usage: a <prompt>\n")
+				continue
+			}
+			prompt := strings.Join(parts[1:], " ")
+			// Add as child of root for now (end of plan)
+			tree.AddNode(tree.Root.ID, &PlannedAction{
+				Type:      ActionDelegate,
+				AgentType: AgentTypeGeneral,
+				Prompt:    prompt,
+			})
+			tree.BestPath = a.treePlanner.SelectBestPath(tree)
+			a.onText("Step added\n")
 
 		default:
 			a.onText(fmt.Sprintf("Unknown command: %s\n", cmd))

@@ -19,6 +19,7 @@ type AgentState struct {
 	MaxTurns   int                 `json:"max_turns"`
 	TurnCount  int                 `json:"turn_count"`
 	LastPrompt string              `json:"last_prompt,omitempty"`
+	ActivePlan *PlanTree           `json:"active_plan,omitempty"`
 }
 
 // SerializedContent represents a serializable conversation content.
@@ -50,15 +51,16 @@ func (a *Agent) GetState() *AgentState {
 	}
 
 	return &AgentState{
-		ID:        a.ID,
-		Type:      a.Type,
-		Model:     a.Model,
-		Status:    a.status,
-		History:   history,
-		StartTime: a.startTime,
-		EndTime:   a.endTime,
-		MaxTurns:  a.maxTurns,
-		TurnCount: len(a.history) / 2, // Approximate turn count
+		ID:         a.ID,
+		Type:       a.Type,
+		Model:      a.Model,
+		Status:     a.status,
+		History:    history,
+		StartTime:  a.startTime,
+		EndTime:    a.endTime,
+		MaxTurns:   a.maxTurns,
+		TurnCount:  len(a.history) / 2, // Approximate turn count
+		ActivePlan: a.activePlan,
 	}
 }
 
@@ -77,6 +79,7 @@ func (a *Agent) RestoreHistory(state *AgentState) error {
 	a.status = state.Status
 	a.startTime = state.StartTime
 	a.endTime = state.EndTime
+	a.activePlan = state.ActivePlan
 	return nil
 }
 

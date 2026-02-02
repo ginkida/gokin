@@ -620,6 +620,7 @@ We have successfully completed the previous step: "%s" (Agent: %s)
 Output of previous step: %s
 
 Suggest 2-3 logical next steps to continue toward the goal.
+Respond in the same language as the goal description.
 Respond in the STEP format:
 STEP: <explore|plan|general|bash|decompose> | <prompt>`, goal.Description, node.Action.Prompt, node.Action.AgentType, node.Result.Output)
 
@@ -637,6 +638,7 @@ func (tp *TreePlanner) generateAlternativeActionsWithLLM(ctx context.Context, no
 We are considering this approach: "%s" (Agent: %s)
 
 Suggest 2 alternative approaches or different next steps to achieve the same goal.
+Respond in the same language as the goal description.
 Respond in the STEP format:
 STEP: <explore|plan|general|bash|decompose> | <prompt>`, goal.Description, node.Action.Prompt, node.Action.AgentType)
 
@@ -659,6 +661,7 @@ func (tp *TreePlanner) generateRecoveryActionsWithLLM(ctx context.Context, node 
 The step: "%s" (Agent: %s) FAILED with error: %s
 
 Analyze the error and suggest 2-3 recovery steps or alternative approaches to overcome this failure.
+Respond in the same language as the goal description.
 Respond in the STEP format:
 STEP: <explore|plan|general|bash|decompose> | <prompt>`, goal.Description, node.Action.Prompt, node.Action.AgentType, errorMsg)
 
@@ -891,6 +894,8 @@ Create a plan with 3-5 steps. For each step, specify:
 
 Respond in this exact format (one step per line):
 STEP: <agent_type> | <prompt for this step>
+
+Respond in the same language as the task description.
 
 Example:
 STEP: explore | Search for authentication-related files and understand the current implementation
