@@ -100,6 +100,11 @@ func (c *Client) receiveLoop() {
 
 // handleMessage routes an incoming message to the appropriate handler.
 func (c *Client) handleMessage(msg *JSONRPCMessage) {
+	if msg == nil {
+		logging.Warn("MCP received nil message")
+		return
+	}
+
 	if msg.IsResponse() {
 		// Route to pending request
 		id, ok := msg.ID.(float64) // JSON numbers are float64

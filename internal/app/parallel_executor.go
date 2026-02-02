@@ -120,9 +120,15 @@ func (pe *ParallelExecutor) ExecuteTasks(ctx context.Context, tasks []*Task) ([]
 			pe.addActiveTask(t.ID, activeTask)
 			defer pe.removeActiveTask(t.ID)
 
+			// Get callbacks under lock to avoid race condition
+			pe.mu.RLock()
+			onStart := pe.onTaskStart
+			onComplete := pe.onTaskComplete
+			pe.mu.RUnlock()
+
 			// Trigger UI callback
-			if pe.onTaskStart != nil {
-				pe.onTaskStart(t.ID)
+			if onStart != nil {
+				onStart(t.ID)
 			}
 
 			// Execute task
@@ -152,8 +158,8 @@ func (pe *ParallelExecutor) ExecuteTasks(ctx context.Context, tasks []*Task) ([]
 			}
 
 			// Trigger UI callback
-			if pe.onTaskComplete != nil {
-				pe.onTaskComplete(t.ID, err)
+			if onComplete != nil {
+				onComplete(t.ID, err)
 			}
 
 			resultsChan <- result

@@ -113,21 +113,33 @@ func NewStdioTransport(command string, args []string, env map[string]string) (*S
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		stdin.Close()
+		if closeErr := stdin.Close(); closeErr != nil {
+			logging.Debug("error closing stdin during cleanup", "error", closeErr)
+		}
 		return nil, fmt.Errorf("failed to get stdout pipe: %w", err)
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		stdin.Close()
-		stdout.Close()
+		if closeErr := stdin.Close(); closeErr != nil {
+			logging.Debug("error closing stdin during cleanup", "error", closeErr)
+		}
+		if closeErr := stdout.Close(); closeErr != nil {
+			logging.Debug("error closing stdout during cleanup", "error", closeErr)
+		}
 		return nil, fmt.Errorf("failed to get stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		stdin.Close()
-		stdout.Close()
-		stderr.Close()
+		if closeErr := stdin.Close(); closeErr != nil {
+			logging.Debug("error closing stdin during cleanup", "error", closeErr)
+		}
+		if closeErr := stdout.Close(); closeErr != nil {
+			logging.Debug("error closing stdout during cleanup", "error", closeErr)
+		}
+		if closeErr := stderr.Close(); closeErr != nil {
+			logging.Debug("error closing stderr during cleanup", "error", closeErr)
+		}
 		return nil, fmt.Errorf("failed to start MCP server: %w", err)
 	}
 

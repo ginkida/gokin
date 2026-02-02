@@ -400,6 +400,7 @@ func (dm *DependencyManager) ExecuteDependencies(ctx context.Context, maxParalle
 		// Execute tasks in this level in parallel
 		semaphore := make(chan struct{}, maxParallel)
 		var wg sync.WaitGroup
+		var errorsMu sync.Mutex
 		errors := make([]error, 0)
 
 		for _, taskID := range level {
@@ -435,7 +436,9 @@ func (dm *DependencyManager) ExecuteDependencies(ctx context.Context, maxParalle
 						"id", id,
 						"error", err)
 					dm.deps.MarkTaskStatus(id, TaskStatusFailed, err)
+					errorsMu.Lock()
 					errors = append(errors, err)
+					errorsMu.Unlock()
 				} else {
 					logging.Debug("task completed",
 						"id", id)

@@ -743,6 +743,11 @@ func (tp *TreePlanner) Replan(ctx context.Context, tree *PlanTree, rctx *ReplanC
 		return fmt.Errorf("max replans exceeded (%d)", tp.config.MaxReplans)
 	}
 
+	// FailedNode is required for replanning
+	if rctx.FailedNode == nil {
+		return fmt.Errorf("cannot replan: FailedNode is nil")
+	}
+
 	tree.ReplanCount++
 	tree.UpdatedAt = time.Now()
 
@@ -752,12 +757,10 @@ func (tp *TreePlanner) Replan(ctx context.Context, tree *PlanTree, rctx *ReplanC
 		"failed_node", rctx.FailedNode.ID)
 
 	// 1. Prune the failed subtree
-	if rctx.FailedNode != nil {
-		tree.PruneSubtree(rctx.FailedNode.ID)
-	}
+	tree.PruneSubtree(rctx.FailedNode.ID)
 
 	// 2. Update scores based on reflection
-	if rctx.Reflection != nil && rctx.FailedNode != nil {
+	if rctx.Reflection != nil {
 		tp.updateScoresAfterFailure(tree, rctx.FailedNode, rctx.Reflection)
 	}
 

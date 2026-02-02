@@ -948,7 +948,13 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						}
 
 						// Find the node in the tree for replanning
-						node, _ := a.activePlan.GetNode(firstFailure.action.NodeID)
+						node, nodeFound := a.activePlan.GetNode(firstFailure.action.NodeID)
+						if !nodeFound || node == nil {
+							logging.Warn("failed node not found in tree, switching to reactive mode",
+								"node_id", firstFailure.action.NodeID)
+							a.activePlan = nil
+							continue
+						}
 
 						replanCtx := &ReplanContext{
 							FailedNode:    node,

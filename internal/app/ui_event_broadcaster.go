@@ -91,19 +91,20 @@ func (b *UIEventBroadcaster) sendAsync(msg tea.Msg) {
 		defer cancel()
 
 		done := make(chan struct{})
+		var closeOnce sync.Once
+		closeDone := func() {
+			closeOnce.Do(func() {
+				close(done)
+			})
+		}
+
 		go func() {
 			defer func() {
-				// Recover from panic if channel is already closed
+				// Recover from panic if channel is already closed or program.Send panics
 				recover()
 			}()
 			program.Send(msg)
-			// Use select to avoid blocking on close if context already cancelled
-			select {
-			case <-sendCtx.Done():
-				// Context cancelled, don't try to close
-			default:
-				close(done)
-			}
+			closeDone()
 		}()
 
 		select {
