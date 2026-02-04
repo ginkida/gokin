@@ -1,0 +1,20 @@
+{
+  "blank_issues_enabled": true,
+  "contact_links": [
+    {
+      "name": "Documentation",
+      "url": "https://github.com/ginkida/gokin#readme",
+      "about": "Please check the documentation first."
+    },
+    {
+      "name": "GitHub Discussions",
+      "url": "https://github.com/ginkida/gokin/discussions",
+      "about": "Use GitHub Discussions for questions and general discussions."
+    },
+    {
+      "name": "Security Issue",
+      "url": "https://github.com/ginkida/gokin/security/advisories",
+      "about": "Please report security vulnerabilities privately."
+    }
+  ]
+}

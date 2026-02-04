@@ -40,6 +40,8 @@ func NewClient(ctx context.Context, cfg *config.Config, modelID string) (Client,
 	switch provider {
 	case "glm":
 		return newGLMClient(cfg, modelID)
+	case "deepseek":
+		return newDeepSeekClient(cfg, modelID)
 	case "gemini":
 		return NewGeminiClient(ctx, cfg)
 	case "anthropic":
@@ -60,13 +62,18 @@ func NewClient(ctx context.Context, cfg *config.Config, modelID string) (Client,
 			return newAnthropicClientForModelID(cfg, modelID)
 		}
 
+		// Check DeepSeek models (API, not Ollama)
+		modelLower := strings.ToLower(modelID)
+		if strings.HasPrefix(modelLower, "deepseek") {
+			return newDeepSeekClient(cfg, modelID)
+		}
+
 		// Check common open-source model prefixes (typically run via Ollama)
 		ollamaPrefixes := []string{
-			"llama", "qwen", "deepseek", "codellama", "mistral", "phi", "gemma",
+			"llama", "qwen", "codellama", "mistral", "phi", "gemma",
 			"vicuna", "yi", "starcoder", "wizardcoder", "orca", "neural", "solar",
 			"openchat", "zephyr", "dolphin", "nous", "tinyllama", "stablelm",
 		}
-		modelLower := strings.ToLower(modelID)
 		for _, prefix := range ollamaPrefixes {
 			if strings.HasPrefix(modelLower, prefix) {
 				return newOllamaClient(cfg, modelID)
@@ -181,6 +188,47 @@ func newAnthropicClientForModelID(cfg *config.Config, modelID string) (Client, e
 	}
 
 	return newAnthropicClientForModel(cfg, modelInfo)
+}
+
+// newDeepSeekClient creates a DeepSeek client using Anthropic-compatible API.
+func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
+	// Load API key from environment or config (try DeepSeekKey first, then legacy APIKey)
+	loadedKey := security.GetDeepSeekKey(cfg.API.DeepSeekKey, cfg.API.APIKey)
+
+	if !loadedKey.IsSet() {
+		return nil, fmt.Errorf("DeepSeek API key required (set GOKIN_DEEPSEEK_KEY environment variable or use /login deepseek <key>)")
+	}
+
+	// Log key source for debugging (without exposing the key)
+	logging.Debug("loaded DeepSeek API key",
+		"source", loadedKey.Source,
+		"model", modelID)
+
+	// Validate key format
+	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
+		return nil, fmt.Errorf("invalid DeepSeek API key: %w", err)
+	}
+
+	// Use custom base URL if provided, otherwise use default DeepSeek endpoint
+	baseURL := cfg.Model.CustomBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.deepseek.com/anthropic"
+	}
+
+	anthropicConfig := AnthropicConfig{
+		APIKey:        loadedKey.Value,
+		BaseURL:       baseURL,
+		Model:         modelID,
+		MaxTokens:     cfg.Model.MaxOutputTokens,
+		Temperature:   cfg.Model.Temperature,
+		StreamEnabled: true,
+		// Retry configuration from config
+		MaxRetries:  cfg.API.Retry.MaxRetries,
+		RetryDelay:  cfg.API.Retry.RetryDelay,
+		HTTPTimeout: cfg.API.Retry.HTTPTimeout,
+	}
+
+	return NewAnthropicClient(anthropicConfig)
 }
 
 // newOllamaClient creates an Ollama client for local LLM inference.

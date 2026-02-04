@@ -39,6 +39,7 @@ type SerializedPart struct {
 
 // SerializedFunc represents a serializable function call or response.
 type SerializedFunc struct {
+	ID       string         `json:"id,omitempty"`
 	Name     string         `json:"name"`
 	Args     map[string]any `json:"args,omitempty"`
 	Response map[string]any `json:"response,omitempty"`
@@ -77,6 +78,7 @@ func serializePart(part *genai.Part) SerializedPart {
 	if part.FunctionCall != nil {
 		sp.Type = "function_call"
 		sp.FunctionCall = &SerializedFunc{
+			ID:   part.FunctionCall.ID,
 			Name: part.FunctionCall.Name,
 			Args: part.FunctionCall.Args,
 		}
@@ -86,6 +88,7 @@ func serializePart(part *genai.Part) SerializedPart {
 	if part.FunctionResponse != nil {
 		sp.Type = "function_response"
 		sp.FunctionResp = &SerializedFunc{
+			ID:       part.FunctionResponse.ID,
 			Name:     part.FunctionResponse.Name,
 			Response: part.FunctionResponse.Response,
 		}
@@ -136,6 +139,7 @@ func deserializePart(sp SerializedPart) (*genai.Part, error) {
 		} else {
 			part = &genai.Part{
 				FunctionCall: &genai.FunctionCall{
+					ID:   sp.FunctionCall.ID,
 					Name: sp.FunctionCall.Name,
 					Args: sp.FunctionCall.Args,
 				},
@@ -146,6 +150,7 @@ func deserializePart(sp SerializedPart) (*genai.Part, error) {
 			part = genai.NewPartFromText(" ")
 		} else {
 			part = genai.NewPartFromFunctionResponse(sp.FunctionResp.Name, sp.FunctionResp.Response)
+			part.FunctionResponse.ID = sp.FunctionResp.ID
 		}
 	default:
 		text := sp.Text

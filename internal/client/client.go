@@ -38,6 +38,21 @@ var AvailableModels = []ModelInfo{
 		Provider:    "glm",
 		BaseURL:     "https://api.z.ai/api/anthropic",
 	},
+	// DeepSeek models (via Anthropic-compatible API)
+	{
+		ID:          "deepseek-chat",
+		Name:        "DeepSeek Chat",
+		Description: "Powerful coding assistant from DeepSeek",
+		Provider:    "deepseek",
+		BaseURL:     "https://api.deepseek.com/anthropic",
+	},
+	{
+		ID:          "deepseek-reasoner",
+		Name:        "DeepSeek Reasoner",
+		Description: "Extended reasoning model (thinking)",
+		Provider:    "deepseek",
+		BaseURL:     "https://api.deepseek.com/anthropic",
+	},
 	// Ollama (local models - use exact name from 'ollama list')
 	{
 		ID:          "ollama",

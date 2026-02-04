@@ -163,6 +163,30 @@ func GetOllamaKey(configOllamaKey string) *LoadedKey {
 	return GetAPIKey(envVars, configOllamaKey, "")
 }
 
+// GetDeepSeekKey loads the DeepSeek API key from environment or config
+//
+// Environment variables checked (in priority order):
+//   - GOKIN_DEEPSEEK_KEY (recommended, explicit)
+//   - DEEPSEEK_API_KEY (generic)
+//
+// Config fallback:
+//   - api.deepseek_key (new field)
+//   - api.api_key (legacy field, for backward compatibility)
+func GetDeepSeekKey(configDeepSeekKey, configLegacyKey string) *LoadedKey {
+	envVars := []string{
+		"GOKIN_DEEPSEEK_KEY", // Preferred, explicit
+		"DEEPSEEK_API_KEY",   // Generic DeepSeek
+	}
+
+	// Try new config field first, then legacy
+	configValue := configDeepSeekKey
+	if configValue == "" {
+		configValue = configLegacyKey
+	}
+
+	return GetAPIKey(envVars, configValue, "")
+}
+
 // MaskKey masks an API key for safe logging/display
 // Shows first 4 and last 4 characters with asterisks in between
 //

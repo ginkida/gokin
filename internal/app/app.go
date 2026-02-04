@@ -1723,7 +1723,21 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.client.SetRateLimiter(a.rateLimiter)
 	}
 
-	// 8. Update UI state (model name, etc.)
+	// 8. Update permission manager (YOLO mode)
+	if a.permManager != nil {
+		a.permManager.SetEnabled(a.config.Permission.Enabled)
+	}
+
+	// 8a. Update bash tool sandbox mode
+	if a.registry != nil {
+		if bashTool, ok := a.registry.Get("bash"); ok {
+			if bt, ok := bashTool.(*tools.BashTool); ok {
+				bt.SetSandboxEnabled(a.config.Tools.Bash.Sandbox)
+			}
+		}
+	}
+
+	// 8c. Update UI state (model name, etc.)
 	if a.tui != nil {
 		a.tui.SetCurrentModel(a.config.Model.Name)
 		a.tui.SetShowTokens(a.config.UI.ShowTokenUsage)
@@ -1732,7 +1746,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.tui.SetPlanningModeEnabled(a.planningModeEnabled)
 	}
 
-	// 8b. Send ConfigUpdateMsg to Bubbletea program to refresh UI
+	// 8d. Send ConfigUpdateMsg to Bubbletea program to refresh UI
 	if a.program != nil {
 		a.program.Send(ui.ConfigUpdateMsg{
 			PermissionsEnabled: a.config.Permission.Enabled,

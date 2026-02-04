@@ -133,8 +133,18 @@ func (c *AnthropicClient) SendMessage(ctx context.Context, message string) (*Str
 
 // SendMessageWithHistory sends a message with conversation history.
 func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []*genai.Content, message string) (*StreamingResponse, error) {
-	// Convert Gemini format to Anthropic format
-	messages := c.convertHistoryToMessages(history, message)
+	// Debug: log incoming history
+	var historyRoles []string
+	for i, h := range history {
+		historyRoles = append(historyRoles, fmt.Sprintf("[%d]%s", i, h.Role))
+	}
+	logging.Debug("SendMessageWithHistory called",
+		"history_len", len(history),
+		"history_roles", strings.Join(historyRoles, ","),
+		"message_len", len(message))
+
+	// Convert Gemini format to Anthropic format, extracting system prompt
+	messages, systemPrompt := c.convertHistoryToMessagesWithSystem(history, message)
 
 	// Build request
 	requestBody := map[string]interface{}{
@@ -142,6 +152,11 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 		"max_tokens": c.config.MaxTokens,
 		"messages":   messages,
 		"stream":     true,
+	}
+
+	// Add system prompt as separate parameter (required by Anthropic/DeepSeek)
+	if systemPrompt != "" {
+		requestBody["system"] = systemPrompt
 	}
 
 	// Extended Thinking support
@@ -169,14 +184,19 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 
 // SendFunctionResponse sends function call results back to the model.
 func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*genai.Content, results []*genai.FunctionResponse) (*StreamingResponse, error) {
-	// Append function results to history and continue
-	messages := c.convertHistoryWithResults(history, results)
+	// Append function results to history and continue, extracting system prompt
+	messages, systemPrompt := c.convertHistoryWithResultsAndSystem(history, results)
 
 	requestBody := map[string]interface{}{
 		"model":      c.config.Model,
 		"max_tokens": c.config.MaxTokens,
 		"messages":   messages,
 		"stream":     true,
+	}
+
+	// Add system prompt as separate parameter (required by Anthropic/DeepSeek)
+	if systemPrompt != "" {
+		requestBody["system"] = systemPrompt
 	}
 
 	if len(c.tools) > 0 {
@@ -350,7 +370,7 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 		if attempt > 0 {
 			// Exponential backoff with jitter
 			delay := calculateBackoffWithJitter(c.config.RetryDelay, attempt-1, maxDelay)
-			logging.Info("retrying request", "attempt", attempt, "delay", delay, "last_status", lastStatusCode)
+			logging.Debug("retrying request", "attempt", attempt, "delay", delay, "last_status", lastStatusCode)
 
 			// Notify UI about retry
 			c.mu.RLock()
@@ -442,7 +462,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
 	}
 
-	logging.Info("anthropic API request", "url", url, "model", c.config.Model)
+	logging.Debug("anthropic API request", "url", url, "model", c.config.Model)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
@@ -731,15 +751,18 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 			acc.currentBlockType = blockType
 
 			if blockType == "tool_use" {
-				// Extract tool ID and name
-				if id, ok := contentBlock["id"].(string); ok {
+				// Extract tool name first (needed for ID generation)
+				if name, ok := contentBlock["name"].(string); ok {
+					acc.currentToolName = name
+				}
+				// Extract tool ID - generate if missing (DeepSeek doesn't provide ID)
+				if id, ok := contentBlock["id"].(string); ok && id != "" {
 					acc.currentToolID = id
 					logging.Debug("captured tool_use ID", "id", id)
 				} else {
-					logging.Warn("tool_use block missing ID")
-				}
-				if name, ok := contentBlock["name"].(string); ok {
-					acc.currentToolName = name
+					// Generate unique ID for providers that don't return one
+					acc.currentToolID = randomID()
+					logging.Debug("generated tool_use ID (provider didn't return one)", "id", acc.currentToolID, "name", acc.currentToolName)
 				}
 				acc.currentToolInput.Reset()
 			} else if blockType == "thinking" {
@@ -861,11 +884,61 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 	return chunk
 }
 
-// convertHistoryToMessages converts Gemini history to Anthropic messages format.
-func (c *AnthropicClient) convertHistoryToMessages(history []*genai.Content, newMessage string) []map[string]interface{} {
+// convertHistoryToMessagesWithSystem converts Gemini history to Anthropic messages format,
+// extracting the system prompt from the first user message if it looks like a system prompt.
+// Returns (messages, systemPrompt).
+func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Content, newMessage string) ([]map[string]interface{}, string) {
 	messages := make([]map[string]interface{}, 0)
+	var systemPrompt string
+	skipFirst := 0
 
-	for _, content := range history {
+	// Check if first message is a system prompt (user message with system prompt markers)
+	// This handles both cases:
+	// - [user_system, model_ack, ...] - skip both
+	// - [user_system] only - skip just the system prompt
+	if len(history) >= 1 && history[0].Role == genai.RoleUser {
+		for _, part := range history[0].Parts {
+			if part.Text != "" {
+				text := part.Text
+				// Check if it looks like a system prompt
+				if strings.Contains(text, "You are") ||
+					strings.Contains(text, "agent") ||
+					strings.Contains(text, "tools") ||
+					strings.Contains(text, "IMPORTANT") ||
+					strings.Contains(text, "MANDATORY") ||
+					len(text) > 500 { // Long first message is likely system prompt
+					systemPrompt = text
+					skipFirst = 1 // Skip system prompt
+					logging.Debug("extracted system prompt from history", "length", len(systemPrompt))
+
+					// Also skip model acknowledgment if present
+					if len(history) >= 2 && history[1].Role == genai.RoleModel {
+						// Check if it's just an acknowledgment (short response)
+						for _, p := range history[1].Parts {
+							if p.Text != "" && len(p.Text) < 200 &&
+								(strings.Contains(p.Text, "understand") ||
+									strings.Contains(p.Text, "help") ||
+									strings.Contains(p.Text, "I'll")) {
+								skipFirst = 2 // Skip both system prompt and ack
+								break
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+
+	logging.Debug("system prompt detection",
+		"history_len", len(history),
+		"skipFirst", skipFirst,
+		"systemPrompt_found", systemPrompt != "")
+
+	// Convert remaining history
+	for i := skipFirst; i < len(history); i++ {
+		content := history[i]
+		logging.Debug("converting history item", "index", i, "role", content.Role)
 		if content.Role == genai.RoleUser {
 			messages = append(messages, c.buildUserMessage(content.Parts))
 		} else if content.Role == genai.RoleModel {
@@ -874,25 +947,80 @@ func (c *AnthropicClient) convertHistoryToMessages(history []*genai.Content, new
 	}
 
 	// Add new user message (ensure non-empty content)
+	// Use array format for consistency with buildUserMessage
 	if newMessage == "" {
 		newMessage = "Continue."
 	}
 	messages = append(messages, map[string]interface{}{
-		"role":    "user",
-		"content": newMessage,
+		"role": "user",
+		"content": []map[string]interface{}{
+			{"type": "text", "text": newMessage},
+		},
 	})
 
+	// Log final messages structure
+	var msgRoles []string
+	for i, m := range messages {
+		role, _ := m["role"].(string)
+		msgRoles = append(msgRoles, fmt.Sprintf("[%d]%s", i, role))
+	}
+	logging.Debug("final messages", "count", len(messages), "roles", strings.Join(msgRoles, ","))
+
+	return messages, systemPrompt
+}
+
+// convertHistoryToMessages converts Gemini history to Anthropic messages format.
+// Deprecated: use convertHistoryToMessagesWithSystem instead.
+func (c *AnthropicClient) convertHistoryToMessages(history []*genai.Content, newMessage string) []map[string]interface{} {
+	messages, _ := c.convertHistoryToMessagesWithSystem(history, newMessage)
 	return messages
 }
 
-// convertHistoryWithResults converts history with function results to messages.
-func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, results []*genai.FunctionResponse) []map[string]interface{} {
+// convertHistoryWithResultsAndSystem converts history with function results to messages,
+// extracting the system prompt. Returns (messages, systemPrompt).
+func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Content, results []*genai.FunctionResponse) ([]map[string]interface{}, string) {
 	messages := make([]map[string]interface{}, 0)
+	var systemPrompt string
+	skipFirst := 0
 
-	logging.Debug("convertHistoryWithResults", "history_len", len(history), "results_len", len(results))
+	logging.Debug("convertHistoryWithResultsAndSystem", "history_len", len(history), "results_len", len(results))
 
-	// Convert history
-	for i, content := range history {
+	// Check if first message is a system prompt
+	if len(history) >= 1 && history[0].Role == genai.RoleUser {
+		for _, part := range history[0].Parts {
+			if part.Text != "" {
+				text := part.Text
+				if strings.Contains(text, "You are") ||
+					strings.Contains(text, "agent") ||
+					strings.Contains(text, "tools") ||
+					strings.Contains(text, "IMPORTANT") ||
+					strings.Contains(text, "MANDATORY") ||
+					len(text) > 500 {
+					systemPrompt = text
+					skipFirst = 1
+					logging.Debug("extracted system prompt from history (with results)", "length", len(systemPrompt))
+
+					// Also skip model acknowledgment if present
+					if len(history) >= 2 && history[1].Role == genai.RoleModel {
+						for _, p := range history[1].Parts {
+							if p.Text != "" && len(p.Text) < 200 &&
+								(strings.Contains(p.Text, "understand") ||
+									strings.Contains(p.Text, "help") ||
+									strings.Contains(p.Text, "I'll")) {
+								skipFirst = 2
+								break
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+
+	// Convert remaining history
+	for i := skipFirst; i < len(history); i++ {
+		content := history[i]
 		// Detailed logging to debug ID mismatch
 		var partDetails []string
 		for j, part := range content.Parts {
@@ -916,8 +1044,6 @@ func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, re
 	// Add function result as user message
 	resultContents := make([]map[string]interface{}, 0)
 	for _, result := range results {
-		// Use result.ID for tool_use_id (required by Anthropic API)
-		// Fall back to Name if ID is not set (for backwards compatibility)
 		toolUseID := result.ID
 		if toolUseID == "" {
 			logging.Warn("tool result missing ID, using Name as fallback", "name", result.Name)
@@ -925,20 +1051,16 @@ func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, re
 		}
 		logging.Debug("adding tool result", "tool_use_id", toolUseID, "name", result.Name)
 
-		// Extract content string from the response map
-		// Anthropic expects content as a string, not a map
 		var contentStr string
-		resp := result.Response // result.Response is map[string]any
+		resp := result.Response
 		if resp != nil {
 			if content, ok := resp["content"].(string); ok {
 				contentStr = content
 			} else if data, ok := resp["data"]; ok {
-				// If there's structured data, convert to JSON string
 				if jsonBytes, err := json.Marshal(data); err == nil {
 					contentStr = string(jsonBytes)
 				}
 			}
-			// If there was an error, include it
 			if errStr, ok := resp["error"].(string); ok && errStr != "" {
 				contentStr = "Error: " + errStr
 			}
@@ -951,7 +1073,7 @@ func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, re
 		resultContents = append(resultContents, map[string]interface{}{
 			"type":        "tool_result",
 			"tool_use_id": toolUseID,
-			"id":          toolUseID, // Z.AI compatibility: some backends expect 'id' field
+			"id":          toolUseID, // Z.AI compatibility
 			"content":     contentStr,
 		})
 	}
@@ -961,6 +1083,13 @@ func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, re
 		"content": resultContents,
 	})
 
+	return messages, systemPrompt
+}
+
+// convertHistoryWithResults converts history with function results to messages.
+// Deprecated: use convertHistoryWithResultsAndSystem instead.
+func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, results []*genai.FunctionResponse) []map[string]interface{} {
+	messages, _ := c.convertHistoryWithResultsAndSystem(history, results)
 	return messages
 }
 
@@ -1043,9 +1172,10 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 			// Use original ID from model response - this MUST match tool_use_id in tool_result
 			toolID := part.FunctionCall.ID
 			if toolID == "" {
-				// Fallback only if ID is missing (shouldn't happen normally)
-				logging.Warn("FunctionCall missing ID in buildAssistantMessage, generating new one", "name", part.FunctionCall.Name)
-				toolID = part.FunctionCall.Name + "_" + randomID()
+				// Fallback: use Name as ID for consistency with tool_result
+				// This handles old sessions that didn't save IDs
+				logging.Warn("FunctionCall missing ID in buildAssistantMessage, using name as ID", "name", part.FunctionCall.Name)
+				toolID = part.FunctionCall.Name
 			}
 			logging.Debug("buildAssistantMessage tool_use", "id", toolID, "name", part.FunctionCall.Name)
 			content = append(content, map[string]interface{}{
@@ -1055,6 +1185,15 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 				"input": part.FunctionCall.Args,
 			})
 		}
+	}
+
+	// Anthropic/DeepSeek API requires non-empty content array for assistant messages
+	if len(content) == 0 {
+		logging.Warn("buildAssistantMessage: empty content, adding placeholder", "parts_count", len(parts))
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": "I'll help you with that.",
+		})
 	}
 
 	return map[string]interface{}{

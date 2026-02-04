@@ -29,7 +29,7 @@ const (
 %s╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
 ║                    %sWelcome to Gokin!%s                        ║
-║       AI coding assistant powered by Gemini, GLM & Ollama     ║
+║   AI coding assistant: Gemini, GLM, DeepSeek & Ollama   ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝%s
 
@@ -54,11 +54,15 @@ Choose your AI provider to get started.
                        • Budget-friendly (~$3/month)
                        • Get key from your GLM provider
 
-  %s[3]%s Ollama (Local)   • Run LLMs locally, no API key needed
+  %s[3]%s DeepSeek (Cloud) • DeepSeek Chat & Reasoner models
+                       • Powerful coding assistant
+                       • Get key at: https://platform.deepseek.com/api_keys
+
+  %s[4]%s Ollama (Local)   • Run LLMs locally, no API key needed
                        • Privacy-focused, works offline
                        • Requires: ollama serve
 
-%sEnter your choice (1, 2, or 3):%s `
+%sEnter your choice (1-4):%s `
 )
 
 // Spinner animation frames
@@ -72,7 +76,7 @@ func RunSetupWizard() error {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		fmt.Printf(authChoiceMessage, colorYellow, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorCyan, colorReset)
+		fmt.Printf(authChoiceMessage, colorYellow, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorCyan, colorReset)
 
 		choice, err := reader.ReadString('\n')
 		if err != nil {
@@ -87,9 +91,11 @@ func RunSetupWizard() error {
 		case "2":
 			return setupAPIKey(reader, "glm")
 		case "3":
+			return setupAPIKey(reader, "deepseek")
+		case "4":
 			return setupOllama(reader)
 		default:
-			fmt.Printf("\n%s⚠ Invalid choice. Please enter 1, 2, or 3.%s\n", colorRed, colorReset)
+			fmt.Printf("\n%s⚠ Invalid choice. Please enter 1, 2, 3, or 4.%s\n", colorRed, colorReset)
 		}
 	}
 }
@@ -97,9 +103,13 @@ func RunSetupWizard() error {
 func setupAPIKey(reader *bufio.Reader, backend string) error {
 	keyType := "Gemini"
 	keyURL := "https://aistudio.google.com/apikey"
-	if backend == "glm" {
+	switch backend {
+	case "glm":
 		keyType = "GLM"
 		keyURL = "your GLM provider"
+	case "deepseek":
+		keyType = "DeepSeek"
+		keyURL = "https://platform.deepseek.com/api_keys"
 	}
 
 	fmt.Printf("\n%s─── %s API Key Setup ───%s\n", colorCyan, keyType, colorReset)
@@ -138,8 +148,11 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 
 	// Set default model based on backend
 	defaultModel := "gemini-3-flash-preview"
-	if backend == "glm" {
+	switch backend {
+	case "glm":
 		defaultModel = "glm-4.7"
+	case "deepseek":
+		defaultModel = "deepseek-chat"
 	}
 
 	content := fmt.Sprintf("api:\n  api_key: %s\n  backend: %s\nmodel:\n  provider: %s\n  name: %s\n", apiKey, backend, backend, defaultModel)

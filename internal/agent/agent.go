@@ -1254,6 +1254,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			funcParts := make([]*genai.Part, len(results))
 			for j, result := range results {
 				funcParts[j] = genai.NewPartFromFunctionResponse(result.Name, result.Response)
+				funcParts[j].FunctionResponse.ID = result.ID
 			}
 			funcContent := &genai.Content{
 				Role:  genai.RoleUser,
@@ -1450,6 +1451,7 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 			case <-ctx.Done():
 				mu.Lock()
 				results[indexMap[fc]] = &genai.FunctionResponse{
+					ID:       fc.ID,
 					Name:     fc.Name,
 					Response: tools.NewErrorResult("cancelled").ToMap(),
 				}
@@ -1528,6 +1530,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	}
 
 	return &genai.FunctionResponse{
+		ID:       call.ID, // Must match tool_use.id for Anthropic/DeepSeek API
 		Name:     call.Name,
 		Response: result.ToMap(),
 	}
@@ -1771,7 +1774,13 @@ func (a *Agent) executeDecomposeAction(ctx context.Context, action *PlannedActio
 
 // executeToolAction executes a tool call action.
 func (a *Agent) executeToolAction(ctx context.Context, action *PlannedAction, startTime time.Time) *AgentResult {
+	// Generate unique ID for planned action tool calls
+	idBytes := make([]byte, 12)
+	rand.Read(idBytes)
+	toolID := "toolu_" + hex.EncodeToString(idBytes)
+
 	call := &genai.FunctionCall{
+		ID:   toolID,
 		Name: action.ToolName,
 		Args: action.ToolArgs,
 	}

@@ -36,9 +36,10 @@ type APIConfig struct {
 	APIKey string `yaml:"api_key,omitempty"`
 
 	// Separate keys for each provider
-	GeminiKey string `yaml:"gemini_key,omitempty"`
-	GLMKey    string `yaml:"glm_key,omitempty"`
-	OllamaKey string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
+	GeminiKey   string `yaml:"gemini_key,omitempty"`
+	GLMKey      string `yaml:"glm_key,omitempty"`
+	DeepSeekKey string `yaml:"deepseek_key,omitempty"`
+	OllamaKey   string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
 
 	// Ollama server URL (default: http://localhost:11434)
 	OllamaBaseURL string `yaml:"ollama_base_url,omitempty"`
@@ -67,6 +68,10 @@ func (c *APIConfig) GetActiveKey() string {
 	case "glm":
 		if c.GLMKey != "" {
 			return c.GLMKey
+		}
+	case "deepseek":
+		if c.DeepSeekKey != "" {
+			return c.DeepSeekKey
 		}
 	case "gemini":
 		if c.GeminiKey != "" {
@@ -100,6 +105,8 @@ func (c *APIConfig) HasProvider(provider string) bool {
 		return c.GeminiKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "gemini")
 	case "glm":
 		return c.GLMKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "glm")
+	case "deepseek":
+		return c.DeepSeekKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "deepseek")
 	case "ollama":
 		// Ollama is always "available" since it doesn't require an API key
 		return true
@@ -114,6 +121,8 @@ func (c *APIConfig) SetProviderKey(provider, key string) {
 		c.GeminiKey = key
 	case "glm":
 		c.GLMKey = key
+	case "deepseek":
+		c.DeepSeekKey = key
 	case "ollama":
 		c.OllamaKey = key
 	}
@@ -428,7 +437,7 @@ func DefaultConfig() *Config {
 		Session: SessionConfig{
 			Enabled:      true,            // Enabled by default
 			SaveInterval: 2 * time.Minute, // Save every 2 minutes
-			AutoLoad:     true,            // Auto-load on startup
+			AutoLoad:     true,            // Auto-load last session on startup
 		},
 		Memory: MemoryConfig{
 			Enabled:    true, // Enabled by default
@@ -436,7 +445,7 @@ func DefaultConfig() *Config {
 			AutoInject: true, // Auto-inject into system prompt
 		},
 		Logging: LoggingConfig{
-			Level: "warn", // Default to warn level (less verbose)
+			Level: "warn", // Default to warn level
 		},
 		Audit: AuditConfig{
 			Enabled:       true,  // Enabled by default

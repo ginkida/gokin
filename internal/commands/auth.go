@@ -171,6 +171,8 @@ func (c *LogoutCommand) Usage() string {
 	return `/logout           - Remove active provider key
 /logout gemini    - Remove Gemini key
 /logout glm       - Remove GLM key
+/logout deepseek  - Remove DeepSeek key
+/logout ollama    - Remove Ollama key
 /logout all       - Remove all keys`
 }
 func (c *LogoutCommand) GetMetadata() CommandMetadata {
@@ -179,7 +181,7 @@ func (c *LogoutCommand) GetMetadata() CommandMetadata {
 		Icon:     "logout",
 		Priority: 10,
 		HasArgs:  true,
-		ArgHint:  "[gemini|glm|all]",
+		ArgHint:  "[gemini|glm|deepseek|ollama|all]",
 	}
 }
 
@@ -212,28 +214,46 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		if currentProvider == "glm" {
 			cfg.API.APIKey = ""
 		}
+	case "deepseek":
+		cfg.API.DeepSeekKey = ""
+		if currentProvider == "deepseek" {
+			cfg.API.APIKey = ""
+		}
+	case "ollama":
+		cfg.API.OllamaKey = ""
+		if currentProvider == "ollama" {
+			cfg.API.APIKey = ""
+		}
 	case "all":
 		cfg.API.GeminiKey = ""
 		cfg.API.GLMKey = ""
+		cfg.API.DeepSeekKey = ""
+		cfg.API.OllamaKey = ""
 		cfg.API.APIKey = ""
 	default:
-		return fmt.Sprintf("Unknown provider: %s\n\nUsage: /logout [gemini|glm|all]", target), nil
+		return fmt.Sprintf("Unknown provider: %s\n\nUsage: /logout [gemini|glm|deepseek|ollama|all]", target), nil
 	}
 
-	// If we removed the active provider's key, try to switch to another provider
-	if target == currentProvider || target == "all" {
-		// Check if another provider has a key
-		if target != "all" {
-			if currentProvider == "gemini" && cfg.API.GLMKey != "" {
-				cfg.API.ActiveProvider = "glm"
-				cfg.Model.Provider = "glm"
-				cfg.Model.Name = "glm-4.7"
-			} else if currentProvider == "glm" && cfg.API.GeminiKey != "" {
-				cfg.API.ActiveProvider = "gemini"
-				cfg.Model.Provider = "gemini"
-				cfg.Model.Name = "gemini-3-flash-preview"
-			}
-		}
+	// Collect available providers with keys
+	availableProviders := []string{}
+	providerModels := map[string]string{
+		"gemini":   "gemini-3-flash-preview",
+		"glm":      "glm-4.7",
+		"deepseek": "deepseek-chat",
+		"ollama":   "llama3.2",
+	}
+
+	if cfg.API.GeminiKey != "" {
+		availableProviders = append(availableProviders, "gemini")
+	}
+	if cfg.API.GLMKey != "" {
+		availableProviders = append(availableProviders, "glm")
+	}
+	if cfg.API.DeepSeekKey != "" {
+		availableProviders = append(availableProviders, "deepseek")
+	}
+	if cfg.API.OllamaKey != "" || cfg.API.OllamaBaseURL != "" {
+		availableProviders = append(availableProviders, "ollama")
 	}
 
 	// Save config directly without re-initializing client
@@ -242,21 +262,44 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
-	var result string
-	if target == "all" {
-		result = "All API keys removed.\n\nUse /login to add a new API key."
-	} else {
-		result = fmt.Sprintf("%s API key removed.", strings.Title(target))
-		// Check if we switched providers
-		newProvider := cfg.API.GetActiveProvider()
-		if newProvider != currentProvider && cfg.API.HasProvider(newProvider) {
-			result += fmt.Sprintf("\nSwitched to %s.", newProvider)
-		} else if !cfg.API.HasProvider(newProvider) {
-			result += "\n\nNo API keys configured. Use /login to add a new API key."
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("✓ %s API key removed.\n", strings.Title(target)))
+
+	// Build response based on available providers
+	if len(availableProviders) == 0 {
+		result.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		result.WriteString("No API keys configured.\n\n")
+		result.WriteString("Choose AI provider:\n")
+		result.WriteString("  /login gemini <key>   - Google Gemini\n")
+		result.WriteString("  /login deepseek <key> - DeepSeek\n")
+		result.WriteString("  /login glm <key>      - GLM (Zhipu AI)\n")
+		result.WriteString("  /login ollama         - Ollama (local)\n")
+	} else if target == currentProvider || target == "all" {
+		// Active provider was removed, need to switch
+		result.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		result.WriteString("Choose AI provider:\n\n")
+
+		for i, provider := range availableProviders {
+			marker := "  "
+			if i == 0 {
+				marker = "→ "
+			}
+			result.WriteString(fmt.Sprintf("%s/provider %s\n", marker, provider))
+		}
+
+		// Auto-switch to first available
+		if len(availableProviders) > 0 {
+			newProvider := availableProviders[0]
+			cfg.API.ActiveProvider = newProvider
+			cfg.Model.Provider = newProvider
+			cfg.Model.Name = providerModels[newProvider]
+			cfg.Save()
+
+			result.WriteString(fmt.Sprintf("\n✓ Auto-switched to %s\n", newProvider))
 		}
 	}
 
-	return result, nil
+	return result.String(), nil
 }
 
 // ProviderCommand switches between providers.
@@ -265,9 +308,11 @@ type ProviderCommand struct{}
 func (c *ProviderCommand) Name() string        { return "provider" }
 func (c *ProviderCommand) Description() string { return "Switch AI provider" }
 func (c *ProviderCommand) Usage() string {
-	return `/provider         - Show current provider
-/provider gemini  - Switch to Gemini
-/provider glm     - Switch to GLM`
+	return `/provider          - Show current provider
+/provider gemini   - Switch to Gemini
+/provider deepseek - Switch to DeepSeek
+/provider glm      - Switch to GLM
+/provider ollama   - Switch to Ollama (local)`
 }
 func (c *ProviderCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
@@ -275,7 +320,7 @@ func (c *ProviderCommand) GetMetadata() CommandMetadata {
 		Icon:     "provider",
 		Priority: 20,
 		HasArgs:  true,
-		ArgHint:  "[gemini|glm]",
+		ArgHint:  "[gemini|deepseek|glm|ollama]",
 	}
 }
 
@@ -287,35 +332,46 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 
 	currentProvider := cfg.API.GetActiveProvider()
 
+	// Provider configurations
+	providerInfo := []struct {
+		name        string
+		model       string
+		description string
+	}{
+		{"gemini", "gemini-3-flash-preview", "Google Gemini"},
+		{"deepseek", "deepseek-chat", "DeepSeek"},
+		{"glm", "glm-4.7", "GLM (Zhipu AI)"},
+		{"ollama", "llama3.2", "Ollama (local)"},
+	}
+
+	providerModels := make(map[string]string)
+	validProviders := make(map[string]bool)
+	for _, p := range providerInfo {
+		providerModels[p.name] = p.model
+		validProviders[p.name] = true
+	}
+
 	// No args - show current status
 	if len(args) == 0 {
 		var sb strings.Builder
-		sb.WriteString("Providers:\n\n")
+		sb.WriteString("AI Providers:\n\n")
 
-		providers := []struct {
-			name  string
-			model string
-		}{
-			{"gemini", "gemini-3-flash-preview"},
-			{"glm", "glm-4.7"},
-		}
-
-		for _, p := range providers {
+		for _, p := range providerInfo {
 			marker := "  "
 			if p.name == currentProvider {
-				marker = "> "
+				marker = "→ "
 			}
 
 			status := "not configured"
 			if cfg.API.HasProvider(p.name) {
-				status = "ready"
+				status = "✓ ready"
 			}
 
-			sb.WriteString(fmt.Sprintf("%s%-8s %s\n", marker, p.name, status))
+			sb.WriteString(fmt.Sprintf("%s%-10s %-16s %s\n", marker, p.name, p.description, status))
 		}
 
 		sb.WriteString(fmt.Sprintf("\nCurrent: %s (%s)\n", currentProvider, cfg.Model.Name))
-		sb.WriteString("\nUsage: /provider gemini  or  /provider glm")
+		sb.WriteString("\nUsage: /provider <name>")
 
 		return sb.String(), nil
 	}
@@ -323,36 +379,29 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 	// Switch provider
 	newProvider := strings.ToLower(args[0])
 
-	if newProvider != "gemini" && newProvider != "glm" {
-		return fmt.Sprintf("Unknown provider: %s\n\nAvailable: gemini, glm", newProvider), nil
+	if !validProviders[newProvider] {
+		return fmt.Sprintf("Unknown provider: %s\n\nAvailable: gemini, deepseek, glm, ollama", newProvider), nil
 	}
 
 	if newProvider == currentProvider {
 		return fmt.Sprintf("Already using %s", newProvider), nil
 	}
 
-	// Check if provider has a key
-	if !cfg.API.HasProvider(newProvider) {
+	// Check if provider has a key (ollama doesn't require key for local)
+	if newProvider != "ollama" && !cfg.API.HasProvider(newProvider) {
 		return fmt.Sprintf("%s is not configured.\n\nUse: /login %s <api_key>", newProvider, newProvider), nil
 	}
 
 	// Switch provider
 	cfg.API.ActiveProvider = newProvider
-
-	// Set default model for new provider
-	if newProvider == "glm" {
-		cfg.Model.Provider = "glm"
-		cfg.Model.Name = "glm-4.7"
-	} else {
-		cfg.Model.Provider = "gemini"
-		cfg.Model.Name = "gemini-3-flash-preview"
-	}
+	cfg.Model.Provider = newProvider
+	cfg.Model.Name = providerModels[newProvider]
 
 	if err := app.ApplyConfig(cfg); err != nil {
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
-	return fmt.Sprintf("Switched to %s (%s)", newProvider, cfg.Model.Name), nil
+	return fmt.Sprintf("✓ Switched to %s (%s)", newProvider, cfg.Model.Name), nil
 }
 
 // StatusCommand shows current configuration status.

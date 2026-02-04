@@ -117,7 +117,9 @@ func (c *GeminiClient) SendFunctionResponse(ctx context.Context, history []*gena
 	// Create function response content
 	var parts []*genai.Part
 	for _, result := range results {
-		parts = append(parts, genai.NewPartFromFunctionResponse(result.Name, result.Response))
+		part := genai.NewPartFromFunctionResponse(result.Name, result.Response)
+		part.FunctionResponse.ID = result.ID
+		parts = append(parts, part)
 	}
 
 	// Ensure we have at least one part

@@ -32,6 +32,7 @@ func (rc *ResponseCompressor) CompressFunctionResponse(part *genai.FunctionRespo
 	}
 
 	compressed := &genai.FunctionResponse{
+		ID:       part.ID,
 		Name:     part.Name,
 		Response: make(map[string]any),
 	}

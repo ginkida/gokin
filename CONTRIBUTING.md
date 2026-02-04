@@ -133,11 +133,28 @@ func (t *MyTool) Execute(ctx context.Context, params map[string]any) (string, er
 
 When reporting bugs:
 
+- Use the [issue templates](.github/ISSUE_TEMPLATE/) provided
 - Use a clear, descriptive title
 - Describe steps to reproduce
 - Include expected vs actual behavior
-- Add system info (OS, Go version)
+- Add system info (OS, Go version, Gokin version, AI provider)
+- Provide logs if possible (use `--verbose` or `--debug`)
+
+## Code of Conduct
+
+Please note that this project adheres to a [Code of Conduct](.github/CODE_OF_CONDUCT.md).
+By participating, you are expected to uphold this code. Please report unacceptable
+behavior to [ginkida@ginkida.dev](mailto:ginkida@ginkida.dev).
 
 ## Questions?
 
-Feel free to open an issue for questions or discussions.
+Feel free to open an issue for questions or discussions. We welcome:
+
+- Bug reports (use the [Bug Report template](.github/ISSUE_TEMPLATE/bug_report.md))
+- Feature requests (use the [Feature Request template](.github/ISSUE_TEMPLATE/feature_request.md))
+- Questions (use the [Question template](.github/ISSUE_TEMPLATE/question.md))
+- Documentation improvements (use the [Documentation template](.github/ISSUE_TEMPLATE/documentation.md))
+
+## License
+
+By contributing to Gokin, you agree that your contributions will be licensed under the same license as the project.
