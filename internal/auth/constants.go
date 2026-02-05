@@ -1,15 +1,12 @@
 package auth
 
-import (
-	"os"
-	"time"
-)
+import "time"
 
 // Google OAuth credentials for Gemini Code Assist
-// Set via environment variables: GEMINI_OAUTH_CLIENT_ID, GEMINI_OAUTH_CLIENT_SECRET
-var (
-	GeminiOAuthClientID     = os.Getenv("GEMINI_OAUTH_CLIENT_ID")
-	GeminiOAuthClientSecret = os.Getenv("GEMINI_OAUTH_CLIENT_SECRET")
+// These are public client credentials for desktop/CLI OAuth flow
+const (
+	GeminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+	GeminiOAuthClientSecret = "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"
 )
 
 const (
