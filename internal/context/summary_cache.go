@@ -43,6 +43,7 @@ func NewSummaryCache(maxEntries int, ttl time.Duration) *SummaryCache {
 
 // Get retrieves a cached summary if available and not expired.
 // Note: Uses full Lock (not RLock) because we mutate LastUsedAt.
+// Returns a COPY of the cached entry to prevent use-after-free if the entry is evicted.
 func (c *SummaryCache) Get(messageHash string) (*CachedSummary, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -60,7 +61,18 @@ func (c *SummaryCache) Get(messageHash string) (*CachedSummary, bool) {
 	// Update last used time
 	entry.LastUsedAt = time.Now()
 
-	return entry, true
+	// Return a COPY to prevent use-after-free when entry is evicted
+	result := &CachedSummary{
+		Summary:     entry.Summary,
+		TokenCount:  entry.TokenCount,
+		CreatedAt:   entry.CreatedAt,
+		LastUsedAt:  entry.LastUsedAt,
+		MessageHash: entry.MessageHash,
+	}
+	result.MessageRange.Start = entry.MessageRange.Start
+	result.MessageRange.End = entry.MessageRange.End
+
+	return result, true
 }
 
 // Put stores a summary in the cache.

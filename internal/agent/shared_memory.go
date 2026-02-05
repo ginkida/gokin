@@ -48,6 +48,7 @@ type SharedMemory struct {
 	entries     map[string]*SharedEntry
 	byType      map[SharedEntryType][]string // Type -> list of keys
 	subscribers map[string]chan<- *SharedEntry
+	closingCh   map[string]bool // Track channels that are being closed
 	mu          sync.RWMutex
 
 	// Metrics for monitoring
@@ -60,6 +61,7 @@ func NewSharedMemory() *SharedMemory {
 		entries:     make(map[string]*SharedEntry),
 		byType:      make(map[SharedEntryType][]string),
 		subscribers: make(map[string]chan<- *SharedEntry),
+		closingCh:   make(map[string]bool),
 	}
 }
 
@@ -112,8 +114,12 @@ func (sm *SharedMemory) WriteWithTTL(key string, value any, entryType SharedEntr
 		sm.byType[entryType] = append(sm.byType[entryType], key)
 	}
 
-	// Notify subscribers
+	// Notify subscribers (skip channels that are being closed)
 	for subscriberID, ch := range sm.subscribers {
+		// Skip channels marked for closing to prevent send-on-closed-channel panic
+		if sm.closingCh[subscriberID] {
+			continue
+		}
 		select {
 		case ch <- entry:
 		default:
@@ -215,14 +221,37 @@ func (sm *SharedMemory) Subscribe(agentID string) <-chan *SharedEntry {
 }
 
 // Unsubscribe removes a subscription.
+// The subscriber should stop reading from the channel before calling this.
 func (sm *SharedMemory) Unsubscribe(agentID string) {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if ch, ok := sm.subscribers[agentID]; ok {
-		close(ch)
-		delete(sm.subscribers, agentID)
+	ch, ok := sm.subscribers[agentID]
+	if !ok {
+		sm.mu.Unlock()
+		return
 	}
+
+	// Mark as closing BEFORE removing from subscribers map
+	// This prevents Write() from sending to this channel while we close it
+	sm.closingCh[agentID] = true
+	delete(sm.subscribers, agentID)
+	sm.mu.Unlock()
+
+	// Close the channel outside the lock
+	// Using recover to handle any potential panic from double-close
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("shared memory: recovered from channel close panic",
+					"agent_id", agentID, "panic", r)
+			}
+		}()
+		close(ch)
+	}()
+
+	// Clean up the closing marker (safe to do without lock since it's only read under lock)
+	sm.mu.Lock()
+	delete(sm.closingCh, agentID)
+	sm.mu.Unlock()
 }
 
 // GetForContext returns a formatted string of relevant entries for injection into prompts.

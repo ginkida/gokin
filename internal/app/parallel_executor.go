@@ -91,9 +91,22 @@ func (pe *ParallelExecutor) ExecuteTasks(ctx context.Context, tasks []*Task) ([]
 		wg.Add(1)
 		t := task
 
-		semaphore <- struct{}{} // Acquire
 		go func() {
 			defer wg.Done()
+
+			// Check context BEFORE trying to acquire semaphore to avoid goroutine leak
+			select {
+			case <-ctx.Done():
+				// Context cancelled, don't even try to acquire semaphore
+				resultsChan <- TaskResult{
+					TaskID:  t.ID,
+					Success: false,
+					Error:   ctx.Err(),
+				}
+				return
+			case semaphore <- struct{}{}: // Acquire
+				// Successfully acquired semaphore
+			}
 			defer func() { <-semaphore }() // Release
 
 			// Create task context with timeout

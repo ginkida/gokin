@@ -31,8 +31,8 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 		return ""
 	}
 
-	// Only show hints every 60 seconds at most (less frequent)
-	if time.Since(h.lastHintTime) < 60*time.Second {
+	// Minimum delay between hints: 30 seconds (not 60 - that's too aggressive)
+	if time.Since(h.lastHintTime) < 30*time.Second {
 		return ""
 	}
 
@@ -55,6 +55,8 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 			"Shift+Tab toggles planning mode",
 			"Ctrl+P opens command palette",
 			"/copy --last copies AI response",
+			"Ctrl+T toggles task list",
+			"Ctrl+O shows activity feed",
 		}
 
 		idx := len(h.hintsShown) % len(generalHints)
@@ -62,13 +64,13 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 		hintID = fmt.Sprintf("general_%d", idx)
 	}
 
-	h.hintsShown[hintID]++
-
-	// Only show the same hint once
-	if h.hintsShown[hintID] > 1 {
+	// Check BEFORE incrementing (fix logic order)
+	if h.hintsShown[hintID] >= 1 {
 		return ""
 	}
 
+	// Mark as shown AFTER the check
+	h.hintsShown[hintID]++
 	h.lastHint = hint
 	h.lastHintTime = time.Now()
 	return hint

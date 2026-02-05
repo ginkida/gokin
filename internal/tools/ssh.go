@@ -159,6 +159,13 @@ func (t *SSHTool) Validate(args map[string]any) error {
 		return NewValidationError("host", result.Reason)
 	}
 
+	// Validate user if present
+	if user, ok := GetString(args, "user"); ok && user != "" {
+		if result := t.validator.ValidateUser(user); !result.Valid {
+			return NewValidationError("user", result.Reason)
+		}
+	}
+
 	// Validate command if present
 	if command, ok := GetString(args, "command"); ok && command != "" {
 		if result := t.validator.ValidateCommand(command); !result.Valid {
@@ -290,8 +297,15 @@ func (t *SSHTool) executeBackground(ctx context.Context, args map[string]any, co
 
 	config := t.buildConfig(args)
 
+	// Validate user before constructing command to prevent injection
+	if result := t.validator.ValidateUser(config.User); !result.Valid {
+		return NewErrorResult(fmt.Sprintf("invalid username: %s", result.Reason)), nil
+	}
+
 	// Create wrapped command that includes SSH
-	sshCommand := fmt.Sprintf("ssh -o StrictHostKeyChecking=no -o BatchMode=yes %s@%s -p %d '%s'",
+	// Use accept-new instead of no for StrictHostKeyChecking to protect against MITM attacks
+	// while still allowing connections to new hosts
+	sshCommand := fmt.Sprintf("ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes %s@%s -p %d '%s'",
 		config.User, config.Host, config.Port, command)
 
 	taskID, err := t.taskManager.Start(ctx, sshCommand)

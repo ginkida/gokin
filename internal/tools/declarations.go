@@ -722,18 +722,6 @@ func AskAgentToolDeclaration() *genai.FunctionDeclaration {
 	}
 }
 
-// VerifyPlanToolDeclaration returns the declaration for the verify_plan tool.
-func VerifyPlanToolDeclaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
-		Name:        "verify_plan",
-		Description: "Verifies the current plan against its contract.",
-		Parameters: &genai.Schema{
-			Type:       genai.TypeObject,
-			Properties: map[string]*genai.Schema{},
-		},
-	}
-}
-
 // CopyToolDeclaration returns the declaration for the copy tool.
 func CopyToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
@@ -1203,7 +1191,6 @@ func GetAllDeclarations() map[string]*genai.FunctionDeclaration {
 		"tools_list":           ToolsListToolDeclaration(),
 		"request_tool":         RequestToolToolDeclaration(),
 		"ask_agent":            AskAgentToolDeclaration(),
-		"verify_plan":          VerifyPlanToolDeclaration(),
 		"copy":                 CopyToolDeclaration(),
 		"move":                 MoveToolDeclaration(),
 		"delete":               DeleteToolDeclaration(),

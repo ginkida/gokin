@@ -117,12 +117,24 @@ func (tq *TaskQueue) PeekTask() *CoordinatedTask {
 }
 
 // UpdatePriority updates the priority of a task.
-func (tq *TaskQueue) UpdatePriority(task *CoordinatedTask, priority TaskPriority) {
+// Returns false if the task is not in the queue.
+func (tq *TaskQueue) UpdatePriority(task *CoordinatedTask, priority TaskPriority) bool {
 	tq.mu.Lock()
 	defer tq.mu.Unlock()
 
+	// Validate index is within bounds
+	if task.index < 0 || task.index >= len(tq.items) {
+		return false
+	}
+
+	// Verify task is actually at the expected index
+	if tq.items[task.index] != task {
+		return false
+	}
+
 	task.Priority = priority
 	heap.Fix(tq, task.index)
+	return true
 }
 
 // RemoveTask removes a specific task from the queue.

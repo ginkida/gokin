@@ -326,6 +326,11 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				m.currentCommand = nil
 				return m, nil
 			}
+
+		case tea.KeyShiftTab:
+			// Ignore Shift+Tab - it's handled by the parent TUI for planning mode toggle
+			// Don't pass to textarea to avoid unexpected behavior
+			return m, nil
 		}
 
 		// Update textarea and check for suggestion updates

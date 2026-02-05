@@ -149,7 +149,7 @@ type Model struct {
 
 	// Planning mode state
 	planningModeEnabled  bool
-	onPlanningModeToggle func() bool // Called to toggle planning mode
+	onPlanningModeToggle func() // Called to toggle planning mode (async, no return)
 
 	// Sandbox state
 	sandboxEnabled  bool
@@ -343,15 +343,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.input.Focus())
 		}
 
-		// Check for slow operation warning (show toast after 3 seconds of no activity)
+		// Check for slow operation warning (after 3 seconds of no activity)
+		// Just set flag - hint shown inline in status, no toast to avoid jumping
 		if (m.state == StateProcessing || m.state == StateStreaming) &&
 			!m.slowWarningShown &&
 			!m.lastActivityTime.IsZero() &&
 			time.Since(m.lastActivityTime) > slowOperationThreshold {
 			m.slowWarningShown = true
-			if m.toastManager != nil {
-				m.toastManager.ShowWarning("Operation taking longer than expected... (ESC to cancel)")
-			}
 		}
 	}
 
@@ -573,7 +571,12 @@ func (m *Model) handleQuestionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 
-	// Option selection mode
+	// Option selection mode - guard against nil request
+	if m.questionRequest == nil {
+		m.state = StateInput
+		return m.input.Focus()
+	}
+
 	optCount := len(m.questionRequest.Options)
 	if optCount == 0 {
 		// No options - just free text input
@@ -714,9 +717,7 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.planRequest.Description,
 				m.planRequest.Steps,
 			)
-			if m.toastManager != nil {
-				m.toastManager.ShowSuccess("Plan approved - starting execution")
-			}
+			// No toast needed - user just pressed approve, they know
 		}
 		m.planRequest = nil
 		m.planSelectedOption = 0
@@ -882,11 +883,17 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Handle 'a' key for activity feed toggle (only when input is empty)
-	if msg.String() == "a" && m.state == StateInput && m.input.Value() == "" {
+	// Handle Ctrl+O for activity feed toggle
+	if msg.Type == tea.KeyCtrlO && m.state == StateInput {
 		if m.activityFeed != nil {
 			m.activityFeed.Toggle()
 		}
+		return nil
+	}
+
+	// Handle Ctrl+T for todos toggle
+	if msg.Type == tea.KeyCtrlT && m.state == StateInput {
+		m.todosVisible = !m.todosVisible
 		return nil
 	}
 
@@ -966,6 +973,10 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.currentTool = ""
 			m.currentToolInfo = ""
 			m.streamStartTime = time.Time{} // Reset timeout tracking
+			// Hide tool progress bar if visible
+			if m.toolProgressBar != nil {
+				m.toolProgressBar.Hide()
+			}
 			m.output.AppendLine("")
 			m.output.AppendLine(m.styles.Warning.Render(" Interrupted - request cancelled"))
 			m.output.AppendLine("")
@@ -1018,17 +1029,9 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case tea.KeyShiftTab:
-		// Toggle planning mode (like Claude Code)
+		// Toggle planning mode (like Claude Code) - async to avoid blocking UI
 		if m.state == StateInput && m.onPlanningModeToggle != nil {
-			enabled := m.onPlanningModeToggle()
-			m.planningModeEnabled = enabled
-			// Show feedback
-			if enabled {
-				m.output.AppendLine(m.styles.Spinner.Render("Planning mode enabled — complex tasks will be broken into steps"))
-			} else {
-				m.output.AppendLine(m.styles.Dim.Render("Planning mode disabled — direct execution"))
-			}
-			m.output.AppendLine("")
+			m.onPlanningModeToggle() // Async toggle, feedback via PlanningModeToggledMsg
 			return nil
 		}
 
@@ -1215,33 +1218,23 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			oldStepID := m.planProgressPanel.currentStepID
 			newStepID := msg.CurrentStepID
 
-			// Handle different status types
+			// Handle different status types (no toasts - updates shown in status line)
 			switch msg.Status {
 			case "in_progress":
 				// New step started
 				if newStepID != oldStepID && newStepID > 0 {
 					m.planProgressPanel.StartStep(newStepID)
-					if m.toastManager != nil {
-						stepTitle := msg.CurrentTitle
-						if len(stepTitle) > 30 {
-							stepTitle = stepTitle[:27] + "..."
-						}
-						m.toastManager.ShowInfo(fmt.Sprintf("Step %d: %s", newStepID, stepTitle))
-					}
 				}
 
 			case "completed":
-				// Step completed - use the step that was just completed
+				// Step completed
 				stepID := msg.CurrentStepID
 				if stepID > 0 {
 					m.planProgressPanel.CompleteStep(stepID, "")
-					if m.toastManager != nil {
-						m.toastManager.ShowSuccess(fmt.Sprintf("Step %d completed", stepID))
-					}
 				}
 
 			case "failed":
-				// Step failed
+				// Step failed - show toast only for failures
 				stepID := msg.CurrentStepID
 				if stepID > 0 {
 					m.planProgressPanel.FailStep(stepID, "")
@@ -1255,9 +1248,6 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				stepID := msg.CurrentStepID
 				if stepID > 0 {
 					m.planProgressPanel.SkipStep(stepID)
-					if m.toastManager != nil {
-						m.toastManager.ShowWarning(fmt.Sprintf("Step %d skipped", stepID))
-					}
 				}
 			}
 		}
@@ -1269,12 +1259,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// End plan in progress panel
 		if m.planProgressPanel != nil {
 			m.planProgressPanel.EndPlan()
-			if m.toastManager != nil {
-				if msg.Success {
-					m.toastManager.ShowSuccess(fmt.Sprintf("Plan completed in %s", formatElapsed(msg.Duration)))
-				} else {
-					m.toastManager.ShowError("Plan execution failed")
-				}
+			// Only show toast for failures - success is obvious from output
+			if m.toastManager != nil && !msg.Success {
+				m.toastManager.ShowError("Plan execution failed")
 			}
 		}
 
@@ -1394,6 +1381,20 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	case ConfigUpdateMsg:
 		m.permissionsEnabled = msg.PermissionsEnabled
 		m.sandboxEnabled = msg.SandboxEnabled
+		m.planningModeEnabled = msg.PlanningModeEnabled
+		if msg.ModelName != "" {
+			m.currentModel = msg.ModelName
+		}
+
+	// Planning mode toggle result (async)
+	case PlanningModeToggledMsg:
+		m.planningModeEnabled = msg.Enabled
+		if msg.Enabled {
+			m.output.AppendLine(m.styles.Spinner.Render("Planning mode enabled — complex tasks will be broken into steps"))
+		} else {
+			m.output.AppendLine(m.styles.Dim.Render("Planning mode disabled — direct execution"))
+		}
+		m.output.AppendLine("")
 
 	// Coordinated task events (Phase 2)
 	case TaskStartedEvent:
@@ -1427,17 +1428,19 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	// Status updates from client (retry, rate limit, stream idle)
+	// Most are handled silently - only show persistent issues
 	case StatusUpdateMsg:
 		if m.toastManager != nil {
 			switch msg.Type {
 			case StatusRetry:
-				m.toastManager.ShowWarning(msg.Message)
+				// Silent - retries are normal
 			case StatusRateLimit:
+				// Only show if it affects user
 				m.toastManager.ShowWarning(msg.Message)
 			case StatusStreamIdle:
-				m.toastManager.ShowInfo(msg.Message)
+				// Silent - normal operation
 			case StatusStreamResume:
-				// Clear any stream idle warning - toasts auto-expire
+				// Silent
 			case StatusRecoverableError:
 				m.toastManager.ShowError(msg.Message)
 			}
@@ -1585,12 +1588,12 @@ func (m *Model) handleToolResult(content string) {
 func (m Model) View() string {
 	var builder strings.Builder
 
-	// Toast notifications (top of screen)
+	// Toast notifications (top of screen) - single line, minimal
 	if m.toastManager != nil && m.toastManager.Count() > 0 {
 		toasts := m.toastManager.View(m.width)
 		if toasts != "" {
 			builder.WriteString(toasts)
-			builder.WriteString("\n\n")
+			builder.WriteString("\n")
 		}
 	}
 
@@ -1800,6 +1803,27 @@ func (m Model) View() string {
 				builder.WriteString("\n" + hintStyle.Render("  "+hint))
 			}
 		}
+
+		// Contextual hints (only when input is empty)
+		if inputText == "" && m.hintsEnabled && m.hintSystem != nil {
+			if hint := m.hintSystem.GetContextualHint(m.state, m.currentTool, time.Since(m.sessionStart)); hint != "" {
+				hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+				builder.WriteString("\n" + hintStyle.Render("  Tip: "+hint))
+			}
+		}
+
+		// Hints for hidden panels with content
+		var hiddenPanelHints []string
+		if len(m.todoItems) > 0 && !m.todosVisible {
+			hiddenPanelHints = append(hiddenPanelHints, fmt.Sprintf("Ctrl+T — tasks (%d)", len(m.todoItems)))
+		}
+		if m.activityFeed != nil && !m.activityFeed.IsVisible() && m.activityFeed.HasActiveEntries() {
+			hiddenPanelHints = append(hiddenPanelHints, "Ctrl+O — activity")
+		}
+		if len(hiddenPanelHints) > 0 {
+			hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+			builder.WriteString("\n" + hintStyle.Render("  "+strings.Join(hiddenPanelHints, " • ")))
+		}
 	}
 
 	// Enhanced status bar
@@ -1949,7 +1973,7 @@ func (m *Model) ClearCoordinatedTasks() {
 func (m *Model) handleBackgroundTask(msg BackgroundTaskMsg) {
 	switch msg.Status {
 	case "running":
-		// New task started
+		// New task started - track silently (shown in status bar)
 		m.backgroundTasks[msg.ID] = &BackgroundTaskState{
 			ID:          msg.ID,
 			Type:        msg.Type,
@@ -1957,32 +1981,17 @@ func (m *Model) handleBackgroundTask(msg BackgroundTaskMsg) {
 			Status:      "running",
 			StartTime:   time.Now(),
 		}
-		// Show toast notification
-		if m.toastManager != nil {
-			desc := msg.Description
-			if len(desc) > 40 {
-				desc = desc[:37] + "..."
-			}
-			m.toastManager.ShowInfo(fmt.Sprintf("Background task started: %s", desc))
-		}
 
 	case "completed", "failed", "cancelled":
 		// Task finished - remove from tracking
 		if task, ok := m.backgroundTasks[msg.ID]; ok {
-			// Show completion toast
-			if m.toastManager != nil {
+			// Only show toast for failures
+			if m.toastManager != nil && msg.Status == "failed" {
 				desc := task.Description
 				if len(desc) > 30 {
 					desc = desc[:27] + "..."
 				}
-				switch msg.Status {
-				case "completed":
-					m.toastManager.ShowSuccess(fmt.Sprintf("Task completed: %s", desc))
-				case "failed":
-					m.toastManager.ShowError(fmt.Sprintf("Task failed: %s", desc))
-				case "cancelled":
-					m.toastManager.ShowWarning(fmt.Sprintf("Task cancelled: %s", desc))
-				}
+				m.toastManager.ShowError(fmt.Sprintf("Task failed: %s", desc))
 			}
 			delete(m.backgroundTasks, msg.ID)
 		}

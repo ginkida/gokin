@@ -157,8 +157,10 @@ type (
 	}
 	// ConfigUpdateMsg signals that config has changed and UI should refresh.
 	ConfigUpdateMsg struct {
-		PermissionsEnabled bool
-		SandboxEnabled     bool
+		PermissionsEnabled  bool
+		SandboxEnabled      bool
+		PlanningModeEnabled bool
+		ModelName           string // Current model name (empty = no change)
 	}
 	// BackgroundTaskMsg signals a background task state change.
 	BackgroundTaskMsg struct {
@@ -248,4 +250,9 @@ type StatusUpdateMsg struct {
 	Type    StatusType
 	Message string
 	Details map[string]any
+}
+
+// PlanningModeToggledMsg is sent after async toggle completes.
+type PlanningModeToggledMsg struct {
+	Enabled bool
 }

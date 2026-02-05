@@ -143,3 +143,15 @@ func IsGitRepo(workDir string) bool {
 	err := cmd.Run()
 	return err == nil
 }
+
+// GetCurrentBranch returns the current git branch name.
+// Returns empty string if not in a git repo or on error.
+func GetCurrentBranch(workDir string) string {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = workDir
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}

@@ -242,15 +242,21 @@ func (r *Runner) SetOnScratchpadUpdate(fn func(string)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onScratchpadUpdate = func(content string) {
-		// Update shared scratchpad atomically
-		r.mu.Lock()
-		r.sharedScratchpad = content
-		r.mu.Unlock()
-		// Call user callback outside the lock to prevent deadlock
+		// Update shared scratchpad atomically using a separate method
+		// to avoid holding lock while calling user callback
+		r.updateSharedScratchpad(content)
+		// Call user callback outside any lock to prevent deadlock
 		if fn != nil {
 			fn(content)
 		}
 	}
+}
+
+// updateSharedScratchpad atomically updates the shared scratchpad.
+func (r *Runner) updateSharedScratchpad(content string) {
+	r.mu.Lock()
+	r.sharedScratchpad = content
+	r.mu.Unlock()
 }
 
 // SetSharedScratchpad sets the shared scratchpad content.
@@ -1118,6 +1124,49 @@ func (r *Runner) Cleanup(maxAge time.Duration) int {
 	return cleaned
 }
 
+// setResultLocked stores an agent result and triggers cleanup if needed.
+// Must be called with r.mu held.
+func (r *Runner) setResultLocked(agentID string, result *AgentResult) {
+	r.results[agentID] = result
+
+	// Check if we need to cleanup old results
+	if len(r.results) > MaxAgentResults {
+		r.cleanupOldResultsLocked()
+	}
+}
+
+// cleanupOldResultsLocked removes old completed/failed results to prevent memory leak.
+// Must be called with r.mu held.
+func (r *Runner) cleanupOldResultsLocked() {
+	// Find completed results older than 10 minutes
+	cutoff := time.Now().Add(-10 * time.Minute)
+	toDelete := make([]string, 0)
+
+	for id, result := range r.results {
+		if result.Completed {
+			// Check if corresponding agent exists and has old endTime
+			if agent, ok := r.agents[id]; ok {
+				if !agent.endTime.IsZero() && agent.endTime.Before(cutoff) {
+					toDelete = append(toDelete, id)
+				}
+			} else {
+				// No agent, just delete the orphaned result
+				toDelete = append(toDelete, id)
+			}
+		}
+	}
+
+	// Delete old results
+	for _, id := range toDelete {
+		delete(r.results, id)
+		delete(r.agents, id)
+	}
+
+	if len(toDelete) > 0 {
+		logging.Debug("runner: cleaned up old results", "count", len(toDelete))
+	}
+}
+
 // SetStore sets the agent store for persistence.
 func (r *Runner) SetStore(store *AgentStore) {
 	r.store = store
@@ -1277,7 +1326,11 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 
 		// Save updated state
 		if r.store != nil {
-			_ = r.store.Save(agent)
+			if saveErr := r.store.Save(agent); saveErr != nil {
+				logging.Warn("failed to save agent state",
+					"agent_id", agent.ID,
+					"error", saveErr)
+			}
 		}
 
 		r.mu.Lock()

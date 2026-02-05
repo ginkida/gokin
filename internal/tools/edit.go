@@ -23,8 +23,14 @@ type EditTool struct {
 }
 
 // NewEditTool creates a new EditTool instance.
-func NewEditTool() *EditTool {
-	return &EditTool{}
+func NewEditTool(workDir string) *EditTool {
+	t := &EditTool{
+		workDir: workDir,
+	}
+	if workDir != "" {
+		t.pathValidator = security.NewPathValidator([]string{workDir}, false)
+	}
+	return t
 }
 
 // SetUndoManager sets the undo manager for tracking changes.

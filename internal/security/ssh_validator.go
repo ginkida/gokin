@@ -279,6 +279,40 @@ func (v *SSHValidator) AddBlockedPattern(pattern string) error {
 	return nil
 }
 
+// ValidateUser checks if a username is safe for SSH connections.
+// This prevents command injection via username field.
+func (v *SSHValidator) ValidateUser(user string) SSHValidationResult {
+	if user == "" {
+		return SSHValidationResult{
+			Valid:  false,
+			Reason: "empty username",
+		}
+	}
+
+	// Username must only contain safe characters: alphanumeric, dot, underscore, hyphen
+	// This prevents injection attacks like: user="admin' -o ProxyCommand='bash -c ...'"
+	safeUserRegex := regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+	if !safeUserRegex.MatchString(user) {
+		return SSHValidationResult{
+			Valid:  false,
+			Reason: "username contains invalid characters (only alphanumeric, dot, underscore, hyphen allowed)",
+		}
+	}
+
+	// Check reasonable length
+	if len(user) > 64 {
+		return SSHValidationResult{
+			Valid:  false,
+			Reason: "username too long (max 64 characters)",
+		}
+	}
+
+	return SSHValidationResult{
+		Valid:  true,
+		Reason: "username passed validation",
+	}
+}
+
 // DefaultSSHValidator is a singleton validator with default security rules.
 var DefaultSSHValidator = NewSSHValidator()
 
@@ -290,4 +324,9 @@ func ValidateSSHCommand(command string) SSHValidationResult {
 // ValidateSSHHost is a convenience function using the default validator.
 func ValidateSSHHost(host string) SSHValidationResult {
 	return DefaultSSHValidator.ValidateHost(host)
+}
+
+// ValidateSSHUser is a convenience function using the default validator.
+func ValidateSSHUser(user string) SSHValidationResult {
+	return DefaultSSHValidator.ValidateUser(user)
 }

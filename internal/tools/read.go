@@ -176,13 +176,19 @@ type ReadTool struct {
 	pathValidator  *security.PathValidator
 }
 
-// NewReadTool creates a new ReadTool instance.
-func NewReadTool() *ReadTool {
-	return &ReadTool{
+// NewReadTool creates a new ReadTool instance with the given working directory.
+// If workDir is empty, no path validation is performed (not recommended for production).
+func NewReadTool(workDir string) *ReadTool {
+	t := &ReadTool{
+		workDir:        workDir,
 		notebookReader: readers.NewNotebookReader(),
 		imageReader:    readers.NewImageReader(),
 		pdfReader:      readers.NewPDFReader(),
 	}
+	if workDir != "" {
+		t.pathValidator = security.NewPathValidator([]string{workDir}, false)
+	}
+	return t
 }
 
 // SetWorkDir sets the working directory and initializes path validator.

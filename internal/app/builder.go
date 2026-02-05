@@ -17,7 +17,6 @@ import (
 	"gokin/internal/commands"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
-	"gokin/internal/contract"
 	"gokin/internal/git"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
@@ -452,20 +451,6 @@ func (b *Builder) initManagers() error {
 
 	// Command handler
 	b.commandHandler = commands.NewHandler()
-
-	// Wire contract store and verifier into plan manager (merged from contract.Manager)
-	if b.cfg.Contract.Enabled {
-		contractStore, err := contract.NewStore(b.workDir, b.configDir)
-		if err != nil {
-			logging.Debug("contract store not available", "error", err)
-		} else {
-			b.planManager.SetContractStore(contractStore)
-			b.planManager.SetContractVerifier(
-				contract.NewVerifier(b.workDir, b.cfg.Contract.VerifyTimeout),
-			)
-			logging.Debug("contract capabilities wired into plan manager")
-		}
-	}
 
 	// Initialize task router
 	routerCfg := &router.RouterConfig{
@@ -924,22 +909,6 @@ func (b *Builder) initIntegrations() error {
 		}
 	}
 
-	// Wire up contract store to enter_plan_mode tool
-	if b.planManager.GetContractStore() != nil {
-		if enterPlanTool, ok := b.registry.Get("enter_plan_mode"); ok {
-			if ept, ok := enterPlanTool.(*tools.EnterPlanModeTool); ok {
-				ept.SetContractStore(b.planManager.GetContractStore())
-			}
-		}
-	}
-
-	// Wire up verify_plan tool
-	if vpt, ok := b.registry.Get("verify_plan"); ok {
-		if t, ok := vpt.(*tools.VerifyPlanTool); ok {
-			t.SetPlanManager(b.planManager)
-		}
-	}
-
 	// Wire up shared_memory tool (Phase 2)
 	if smt, ok := b.registry.Get("shared_memory"); ok {
 		if t, ok := smt.(*tools.SharedMemoryTool); ok {
@@ -1037,6 +1006,11 @@ func (b *Builder) initUI() error {
 		b.tuiModel.SetProjectInfo(b.projectInfo.Type.String(), b.projectInfo.Name)
 	}
 
+	// Set git branch for status bar display
+	if branch := git.GetCurrentBranch(b.workDir); branch != "" {
+		b.tuiModel.SetGitBranch(branch)
+	}
+
 	return nil
 }
 
@@ -1128,8 +1102,8 @@ func (b *Builder) wireDependencies() error {
 	b.tuiModel.SetSandboxEnabled(b.cfg.Tools.Bash.Sandbox)
 	b.tuiModel.SetSandboxToggleCallback(app.ToggleSandbox, app.GetSandboxState)
 
-	// Set up planning mode toggle callback
-	b.tuiModel.SetPlanningModeToggleCallback(app.TogglePlanningMode)
+	// Set up planning mode toggle callback (async to avoid blocking UI)
+	b.tuiModel.SetPlanningModeToggleCallback(app.TogglePlanningModeAsync)
 
 	// Set up command palette integration
 	hasAPIKey := b.cfg.API.APIKey != "" || b.cfg.API.GeminiKey != "" || b.cfg.API.GLMKey != ""
@@ -1220,11 +1194,6 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up plan progress updates
 	b.planManager.SetProgressUpdateHandler(app.handlePlanProgressUpdate)
-
-	// Set up contract context injection via plan manager
-	if b.cfg.Contract.Enabled && (b.cfg.Contract.InjectContext || b.cfg.Contract.AutoDetect) {
-		b.promptBuilder.SetPlanManager(b.planManager)
-	}
 
 	// Set up diff preview (skip if permissions are disabled — no approval needed)
 	if b.cfg.DiffPreview.Enabled && b.cfg.Permission.Enabled {

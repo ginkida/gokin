@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,25 +17,32 @@ const (
 	viewportUpdateInterval = 16 * time.Millisecond
 )
 
+// outputState holds the mutable state protected by a mutex.
+// This is kept separate so OutputModel can be copied by Bubble Tea without copying the mutex.
+type outputState struct {
+	mu             sync.Mutex
+	content        *strings.Builder
+	codeBlocks     *CodeBlockRegistry
+	cachedWrapped  string
+	lastContentLen int
+	lastWrappedLen int
+	width          int
+	ready          bool
+}
+
 // OutputModel represents the output/viewport component.
 type OutputModel struct {
 	viewport     viewport.Model
 	styles       *Styles
-	content      *strings.Builder
 	renderer     *glamour.TermRenderer
-	ready        bool
-	width        int
 	streamParser *MarkdownStreamParser
-	codeBlocks   *CodeBlockRegistry
+
+	// state holds mutex-protected mutable state (pointer to avoid copy issues)
+	state *outputState
 
 	// Debouncing for viewport updates (using atomic int64 to avoid copy issues)
 	lastUpdateNano int64 // atomic: last update time in nanoseconds
 	contentDirty   int64 // atomic: 1 if content needs update, 0 otherwise
-
-	// Cached wrapped content to avoid re-wrapping unchanged lines
-	lastContentLen  int
-	cachedWrapped   string
-	lastWrappedLen  int
 }
 
 // NewOutputModel creates a new output model.
@@ -47,9 +55,11 @@ func NewOutputModel(styles *Styles) OutputModel {
 	return OutputModel{
 		styles:       styles,
 		renderer:     renderer,
-		content:      &strings.Builder{},
 		streamParser: NewMarkdownStreamParser(styles),
-		codeBlocks:   NewCodeBlockRegistry(styles),
+		state: &outputState{
+			content:    &strings.Builder{},
+			codeBlocks: NewCodeBlockRegistry(styles),
+		},
 	}
 }
 
@@ -64,13 +74,19 @@ func (m OutputModel) Update(msg tea.Msg) (OutputModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		if !m.ready {
+		m.state.mu.Lock()
+		ready := m.state.ready
+		m.state.mu.Unlock()
+
+		if !ready {
 			// Calculate viewport height dynamically - use all available space except for input (3 lines) and status bar (2 lines)
 			availableHeight := msg.Height - 5
 			m.viewport = viewport.New(msg.Width, availableHeight)
 			m.viewport.YPosition = 0
 			m.viewport.MouseWheelEnabled = true
-			m.ready = true
+			m.state.mu.Lock()
+			m.state.ready = true
+			m.state.mu.Unlock()
 		} else {
 			// Recalculate on resize
 			availableHeight := msg.Height - 5
@@ -89,7 +105,11 @@ func (m OutputModel) Update(msg tea.Msg) (OutputModel, tea.Cmd) {
 
 // View renders the output component.
 func (m OutputModel) View() string {
-	if !m.ready {
+	m.state.mu.Lock()
+	ready := m.state.ready
+	m.state.mu.Unlock()
+
+	if !ready {
 		return "Loading..."
 	}
 	return m.styles.Viewport.Render(m.viewport.View())
@@ -97,7 +117,9 @@ func (m OutputModel) View() string {
 
 // AppendText appends text to the output.
 func (m *OutputModel) AppendText(text string) {
-	m.content.WriteString(text)
+	m.state.mu.Lock()
+	m.state.content.WriteString(text)
+	m.state.mu.Unlock()
 	m.updateViewport()
 }
 
@@ -110,21 +132,24 @@ func (m *OutputModel) AppendTextStream(text string) {
 	}
 
 	blocks := m.streamParser.Feed(text)
+
+	m.state.mu.Lock()
 	for _, block := range blocks {
 		if block.IsCode {
 			// Register code block for later actions
-			if m.codeBlocks != nil {
-				lineNum := strings.Count(m.content.String(), "\n")
-				m.codeBlocks.AddBlock(block.Language, block.Filename, block.Content, lineNum)
+			if m.state.codeBlocks != nil {
+				lineNum := strings.Count(m.state.content.String(), "\n")
+				m.state.codeBlocks.AddBlock(block.Language, block.Filename, block.Content, lineNum)
 			}
 
 			// Render with syntax highlighting and border
-			rendered := m.streamParser.RenderCodeBlock(block, m.width)
-			m.content.WriteString(rendered)
+			rendered := m.streamParser.RenderCodeBlock(block, m.state.width)
+			m.state.content.WriteString(rendered)
 		} else {
-			m.content.WriteString(block.Content)
+			m.state.content.WriteString(block.Content)
 		}
 	}
+	m.state.mu.Unlock()
 	m.updateViewport()
 }
 
@@ -135,18 +160,21 @@ func (m *OutputModel) FlushStream() {
 	}
 
 	blocks := m.streamParser.Flush()
+
+	m.state.mu.Lock()
 	for _, block := range blocks {
 		if block.IsCode {
-			if m.codeBlocks != nil {
-				lineNum := strings.Count(m.content.String(), "\n")
-				m.codeBlocks.AddBlock(block.Language, block.Filename, block.Content, lineNum)
+			if m.state.codeBlocks != nil {
+				lineNum := strings.Count(m.state.content.String(), "\n")
+				m.state.codeBlocks.AddBlock(block.Language, block.Filename, block.Content, lineNum)
 			}
-			rendered := m.streamParser.RenderCodeBlock(block, m.width)
-			m.content.WriteString(rendered)
+			rendered := m.streamParser.RenderCodeBlock(block, m.state.width)
+			m.state.content.WriteString(rendered)
 		} else {
-			m.content.WriteString(block.Content)
+			m.state.content.WriteString(block.Content)
 		}
 	}
+	m.state.mu.Unlock()
 	// Force update on flush to ensure all content is visible
 	m.ForceUpdateViewport()
 }
@@ -160,13 +188,17 @@ func (m *OutputModel) ResetStream() {
 
 // GetCodeBlocks returns the code block registry.
 func (m *OutputModel) GetCodeBlocks() *CodeBlockRegistry {
-	return m.codeBlocks
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	return m.state.codeBlocks
 }
 
 // AppendLine appends a line to the output.
 func (m *OutputModel) AppendLine(text string) {
-	m.content.WriteString(text)
-	m.content.WriteString("\n")
+	m.state.mu.Lock()
+	m.state.content.WriteString(text)
+	m.state.content.WriteString("\n")
+	m.state.mu.Unlock()
 	m.updateViewport()
 }
 
@@ -178,18 +210,22 @@ func (m *OutputModel) AppendMarkdown(text string) {
 			text = rendered
 		}
 	}
-	m.content.WriteString(text)
-	m.content.WriteString("\n")
+	m.state.mu.Lock()
+	m.state.content.WriteString(text)
+	m.state.content.WriteString("\n")
+	m.state.mu.Unlock()
 	m.updateViewport()
 }
 
 // Clear clears the output.
 func (m *OutputModel) Clear() {
-	m.content.Reset()
+	m.state.mu.Lock()
+	m.state.content.Reset()
 	// Reset cache on clear
-	m.cachedWrapped = ""
-	m.lastContentLen = 0
-	m.lastWrappedLen = 0
+	m.state.cachedWrapped = ""
+	m.state.lastContentLen = 0
+	m.state.lastWrappedLen = 0
+	m.state.mu.Unlock()
 	m.ForceUpdateViewport()
 }
 
@@ -199,14 +235,18 @@ func (m *OutputModel) SetSize(width, height int) {
 	m.viewport.Height = height
 	// Use more conservative padding to ensure text never hits the right edge
 	newWidth := width - 4
+
+	m.state.mu.Lock()
 	// If width changed, invalidate cache for full re-wrap
-	if newWidth != m.width {
-		m.cachedWrapped = ""
-		m.lastContentLen = 0
-		m.lastWrappedLen = 0
+	if newWidth != m.state.width {
+		m.state.cachedWrapped = ""
+		m.state.lastContentLen = 0
+		m.state.lastWrappedLen = 0
 	}
-	m.width = newWidth
-	m.ready = true
+	m.state.width = newWidth
+	m.state.ready = true
+	m.state.mu.Unlock()
+
 	m.ForceUpdateViewport()
 }
 
@@ -216,7 +256,11 @@ func (m *OutputModel) ScrollToBottom() {
 }
 
 func (m *OutputModel) updateViewport() {
-	if !m.ready {
+	m.state.mu.Lock()
+	ready := m.state.ready
+	m.state.mu.Unlock()
+
+	if !ready {
 		return
 	}
 
@@ -238,7 +282,11 @@ func (m *OutputModel) updateViewport() {
 // ForceUpdateViewport forces an immediate viewport update, bypassing debounce.
 // Use sparingly - mainly for final flush operations.
 func (m *OutputModel) ForceUpdateViewport() {
-	if !m.ready {
+	m.state.mu.Lock()
+	ready := m.state.ready
+	m.state.mu.Unlock()
+
+	if !ready {
 		return
 	}
 
@@ -250,7 +298,11 @@ func (m *OutputModel) ForceUpdateViewport() {
 // FlushPendingUpdate applies any pending viewport update.
 // Called periodically (e.g., on spinner tick) to ensure content is eventually shown.
 func (m *OutputModel) FlushPendingUpdate() {
-	if atomic.LoadInt64(&m.contentDirty) == 1 && m.ready {
+	m.state.mu.Lock()
+	ready := m.state.ready
+	m.state.mu.Unlock()
+
+	if atomic.LoadInt64(&m.contentDirty) == 1 && ready {
 		m.doViewportUpdate()
 		atomic.StoreInt64(&m.lastUpdateNano, time.Now().UnixNano())
 		atomic.StoreInt64(&m.contentDirty, 0)
@@ -259,33 +311,41 @@ func (m *OutputModel) FlushPendingUpdate() {
 
 // doViewportUpdate performs the actual viewport update with incremental wrapping.
 func (m *OutputModel) doViewportUpdate() {
-	content := m.content.String()
+	m.state.mu.Lock()
+	content := m.state.content.String()
 	contentLen := len(content)
+	lastContentLen := m.state.lastContentLen
+	cachedWrapped := m.state.cachedWrapped
+	lastWrappedLen := m.state.lastWrappedLen
+	width := m.state.width
+	m.state.mu.Unlock()
 
 	// Optimization: if content unchanged, skip wrapping
-	if contentLen == m.lastContentLen && m.cachedWrapped != "" {
+	if contentLen == lastContentLen && cachedWrapped != "" {
 		return
 	}
 
 	// Incremental wrapping: only wrap new content if possible
 	var wrapped string
-	if m.width > 20 {
-		if contentLen > m.lastContentLen && m.lastWrappedLen > 0 && m.cachedWrapped != "" {
+	if width > 20 {
+		if contentLen > lastContentLen && lastWrappedLen > 0 && cachedWrapped != "" {
 			// Append only new content wrapping
-			newContent := content[m.lastContentLen:]
-			newWrapped := wrapText(newContent, m.width)
-			wrapped = m.cachedWrapped + newWrapped
+			newContent := content[lastContentLen:]
+			newWrapped := wrapText(newContent, width)
+			wrapped = cachedWrapped + newWrapped
 		} else {
 			// Full re-wrap (on resize, clear, or first time)
-			wrapped = wrapText(content, m.width)
+			wrapped = wrapText(content, width)
 		}
 	} else {
 		wrapped = content
 	}
 
-	m.cachedWrapped = wrapped
-	m.lastContentLen = contentLen
-	m.lastWrappedLen = len(wrapped)
+	m.state.mu.Lock()
+	m.state.cachedWrapped = wrapped
+	m.state.lastContentLen = contentLen
+	m.state.lastWrappedLen = len(wrapped)
+	m.state.mu.Unlock()
 
 	m.viewport.SetContent(wrapped)
 	m.viewport.GotoBottom()
@@ -341,12 +401,16 @@ func wrapText(text string, width int) string {
 
 // Ready returns whether the viewport is ready.
 func (m OutputModel) Ready() bool {
-	return m.ready
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	return m.state.ready
 }
 
 // Content returns the current content.
-func (m OutputModel) Content() string {
-	return m.content.String()
+func (m *OutputModel) Content() string {
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	return m.state.content.String()
 }
 
 // SetMouseEnabled enables or disables mouse wheel scrolling in the viewport.

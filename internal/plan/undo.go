@@ -53,8 +53,13 @@ func (e *ManagerUndoExtension) SaveCheckpoint() error {
 		Executed:    make([]int, 0),
 	}
 
-	// Copy steps
-	copy(state.Steps, plan.Steps)
+	// Deep copy steps to isolate checkpoint from future modifications
+	for i, step := range plan.Steps {
+		if step != nil {
+			stepCopy := *step
+			state.Steps[i] = &stepCopy
+		}
+	}
 
 	// Add to history
 	e.history = append(e.history, state)

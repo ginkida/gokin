@@ -5,18 +5,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"gokin/internal/contract"
 )
-
-// ContractSpec holds optional contract fields for a plan.
-type ContractSpec struct {
-	Name       string               `json:"name"`
-	Intent     string               `json:"intent"`
-	Boundaries []contract.Boundary  `json:"boundaries,omitempty"`
-	Invariants []contract.Invariant `json:"invariants,omitempty"`
-	Examples   []contract.Example   `json:"examples,omitempty"`
-}
 
 // Status represents the status of a plan or step.
 type Status int
@@ -105,10 +94,6 @@ type Plan struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 	Request     string    `json:"request"` // Original user request
 
-	// Optional contract specification
-	Contract   *ContractSpec `json:"contract,omitempty"`
-	ContractID string        `json:"contract_id,omitempty"` // Links to persisted contract in store
-
 	// Context snapshot from planning conversation (preserved across session clear)
 	ContextSnapshot string `json:"context_snapshot,omitempty"`
 
@@ -128,11 +113,6 @@ func (p *Plan) GetContextSnapshot() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.ContextSnapshot
-}
-
-// HasContract returns true if the plan has a contract specification.
-func (p *Plan) HasContract() bool {
-	return p.Contract != nil
 }
 
 // NewPlan creates a new plan.
@@ -326,24 +306,6 @@ func (p *Plan) Format() string {
 	}
 	builder.WriteString("\n")
 
-	// Include contract info if present
-	if p.Contract != nil {
-		builder.WriteString(fmt.Sprintf("Contract: %s\n", p.Contract.Name))
-		if p.Contract.Intent != "" {
-			builder.WriteString(fmt.Sprintf("Intent: %s\n", p.Contract.Intent))
-		}
-		if len(p.Contract.Boundaries) > 0 {
-			builder.WriteString(fmt.Sprintf("Boundaries: %d defined\n", len(p.Contract.Boundaries)))
-		}
-		if len(p.Contract.Invariants) > 0 {
-			builder.WriteString(fmt.Sprintf("Invariants: %d defined\n", len(p.Contract.Invariants)))
-		}
-		if len(p.Contract.Examples) > 0 {
-			builder.WriteString(fmt.Sprintf("Examples: %d defined\n", len(p.Contract.Examples)))
-		}
-		builder.WriteString("\n")
-	}
-
 	for _, step := range p.Steps {
 		icon := step.Status.Icon()
 		builder.WriteString(fmt.Sprintf("%s %d. %s\n", icon, step.ID, step.Title))
@@ -367,13 +329,18 @@ func (p *Plan) StepCount() int {
 }
 
 // GetStepsSnapshot returns a snapshot of all steps (thread-safe).
-// The returned slice is a copy that can be safely iterated without holding locks.
+// The returned slice is a deep copy that can be safely modified without affecting the original.
 func (p *Plan) GetStepsSnapshot() []*Step {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	snapshot := make([]*Step, len(p.Steps))
-	copy(snapshot, p.Steps)
+	for i, step := range p.Steps {
+		if step != nil {
+			stepCopy := *step // Deep copy the struct
+			snapshot[i] = &stepCopy
+		}
+	}
 	return snapshot
 }
 

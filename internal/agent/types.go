@@ -46,6 +46,9 @@ func (t AgentType) AllowedTools() []string {
 			"read", "glob", "grep", "tree", "list_dir", "diff",
 			"todo", "web_fetch", "web_search", "ask_user", "env",
 			"tools_list", "request_tool", "ask_agent",
+			// Planning tools
+			"enter_plan_mode", "exit_plan_mode",
+			"update_plan_progress", "get_plan_status",
 		}
 	case AgentTypeGuide:
 		// Documentation/search focused

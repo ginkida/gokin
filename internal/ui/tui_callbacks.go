@@ -57,7 +57,8 @@ func (m *Model) GetPermissionsEnabled() bool {
 }
 
 // SetPlanningModeToggleCallback sets the callback for planning mode toggle.
-func (m *Model) SetPlanningModeToggleCallback(onToggle func() bool) {
+// The callback is async and doesn't return a value - the result is sent via PlanningModeToggledMsg.
+func (m *Model) SetPlanningModeToggleCallback(onToggle func()) {
 	m.onPlanningModeToggle = onToggle
 }
 

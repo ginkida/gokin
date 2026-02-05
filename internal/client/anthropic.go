@@ -900,16 +900,31 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 		for _, part := range history[0].Parts {
 			if part.Text != "" {
 				text := part.Text
-				// Check if it looks like a system prompt
-				if strings.Contains(text, "You are") ||
-					strings.Contains(text, "agent") ||
-					strings.Contains(text, "tools") ||
-					strings.Contains(text, "IMPORTANT") ||
-					strings.Contains(text, "MANDATORY") ||
-					len(text) > 500 { // Long first message is likely system prompt
+				// Check if it looks like a system prompt using stricter heuristics
+				// Require multiple indicators or explicit system prompt markers
+				indicators := 0
+				if strings.Contains(text, "You are a") || strings.Contains(text, "You are an") {
+					indicators += 2 // Strong indicator
+				}
+				if strings.HasPrefix(text, "You are") {
+					indicators += 2 // Strong indicator at start
+				}
+				if strings.Contains(text, "IMPORTANT:") || strings.Contains(text, "MANDATORY:") {
+					indicators++
+				}
+				if strings.Contains(text, "available tools") || strings.Contains(text, "function calling") {
+					indicators++
+				}
+				if strings.Contains(text, "system prompt") || strings.Contains(text, "System:") {
+					indicators += 2 // Explicit marker
+				}
+				// Long message with at least one indicator
+				isSystemPrompt := (indicators >= 2) || (len(text) > 1000 && indicators >= 1)
+
+				if isSystemPrompt {
 					systemPrompt = text
 					skipFirst = 1 // Skip system prompt
-					logging.Debug("extracted system prompt from history", "length", len(systemPrompt))
+					logging.Debug("extracted system prompt from history", "length", len(systemPrompt), "indicators", indicators)
 
 					// Also skip model acknowledgment if present
 					if len(history) >= 2 && history[1].Role == genai.RoleModel {
@@ -985,20 +1000,34 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 
 	logging.Debug("convertHistoryWithResultsAndSystem", "history_len", len(history), "results_len", len(results))
 
-	// Check if first message is a system prompt
+	// Check if first message is a system prompt using stricter heuristics
 	if len(history) >= 1 && history[0].Role == genai.RoleUser {
 		for _, part := range history[0].Parts {
 			if part.Text != "" {
 				text := part.Text
-				if strings.Contains(text, "You are") ||
-					strings.Contains(text, "agent") ||
-					strings.Contains(text, "tools") ||
-					strings.Contains(text, "IMPORTANT") ||
-					strings.Contains(text, "MANDATORY") ||
-					len(text) > 500 {
+				// Use stricter heuristics - require multiple indicators
+				indicators := 0
+				if strings.Contains(text, "You are a") || strings.Contains(text, "You are an") {
+					indicators += 2
+				}
+				if strings.HasPrefix(text, "You are") {
+					indicators += 2
+				}
+				if strings.Contains(text, "IMPORTANT:") || strings.Contains(text, "MANDATORY:") {
+					indicators++
+				}
+				if strings.Contains(text, "available tools") || strings.Contains(text, "function calling") {
+					indicators++
+				}
+				if strings.Contains(text, "system prompt") || strings.Contains(text, "System:") {
+					indicators += 2
+				}
+				isSystemPrompt := (indicators >= 2) || (len(text) > 1000 && indicators >= 1)
+
+				if isSystemPrompt {
 					systemPrompt = text
 					skipFirst = 1
-					logging.Debug("extracted system prompt from history (with results)", "length", len(systemPrompt))
+					logging.Debug("extracted system prompt from history (with results)", "length", len(systemPrompt), "indicators", indicators)
 
 					// Also skip model acknowledgment if present
 					if len(history) >= 2 && history[1].Role == genai.RoleModel {

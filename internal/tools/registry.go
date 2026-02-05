@@ -101,9 +101,9 @@ func DefaultRegistry(workDir string) *Registry {
 	r := NewRegistry()
 
 	// Register all tools
-	r.MustRegister(NewReadTool())
+	r.MustRegister(NewReadTool(workDir))
 	r.MustRegister(NewWriteTool(workDir))
-	r.MustRegister(NewEditTool())
+	r.MustRegister(NewEditTool(workDir))
 	r.MustRegister(NewBashTool(workDir))
 	r.MustRegister(NewGlobTool(workDir))
 	r.MustRegister(NewGrepTool(workDir))
@@ -134,9 +134,6 @@ func DefaultRegistry(workDir string) *Registry {
 	r.MustRegister(NewToolsListTool(r))
 	r.MustRegister(NewRequestToolTool())
 	r.MustRegister(NewAskAgentTool())
-
-	// Plan verification tool (contract merged into plan)
-	r.MustRegister(NewVerifyPlanTool())
 
 	// File operation tools
 	r.MustRegister(NewCopyTool(workDir))
@@ -356,9 +353,9 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	declarations := GetAllDeclarations()
 
 	// Core file tools
-	r.RegisterFactory("read", func() Tool { return NewReadTool() }, declarations["read"])
+	r.RegisterFactory("read", func() Tool { return NewReadTool(workDir) }, declarations["read"])
 	r.RegisterFactory("write", func() Tool { return NewWriteTool(workDir) }, declarations["write"])
-	r.RegisterFactory("edit", func() Tool { return NewEditTool() }, declarations["edit"])
+	r.RegisterFactory("edit", func() Tool { return NewEditTool(workDir) }, declarations["edit"])
 
 	// Search tools
 	r.RegisterFactory("glob", func() Tool { return NewGlobTool(workDir) }, declarations["glob"])
@@ -406,7 +403,6 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	r.RegisterFactory("exit_plan_mode", func() Tool { return NewExitPlanModeTool() }, declarations["exit_plan_mode"])
 	r.RegisterFactory("undo_plan", func() Tool { return NewUndoPlanTool() }, declarations["undo_plan"])
 	r.RegisterFactory("redo_plan", func() Tool { return NewRedoPlanTool() }, declarations["redo_plan"])
-	r.RegisterFactory("verify_plan", func() Tool { return NewVerifyPlanTool() }, declarations["verify_plan"])
 
 	// Code analysis tools
 	r.RegisterFactory("batch", func() Tool { return NewBatchTool(workDir) }, declarations["batch"])

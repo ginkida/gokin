@@ -73,16 +73,22 @@ func (m *ProjectMemory) Load() error {
 
 // GetInstructions returns the loaded instructions.
 func (m *ProjectMemory) GetInstructions() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.instructions
 }
 
 // GetSourcePath returns the path where instructions were loaded from.
 func (m *ProjectMemory) GetSourcePath() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.sourcePath
 }
 
 // HasInstructions returns true if instructions were loaded.
 func (m *ProjectMemory) HasInstructions() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.instructions != ""
 }
 

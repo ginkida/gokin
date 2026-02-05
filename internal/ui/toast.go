@@ -47,7 +47,7 @@ type ToastManager struct {
 func NewToastManager(styles *Styles) *ToastManager {
 	return &ToastManager{
 		toasts:    make([]Toast, 0),
-		maxToasts: 3,
+		maxToasts: 2, // Reduced to minimize visual noise
 		styles:    styles,
 		nextID:    1,
 	}
@@ -80,12 +80,12 @@ func (m *ToastManager) Show(toastType ToastType, title, message string, duration
 
 // ShowSuccess displays a success toast.
 func (m *ToastManager) ShowSuccess(message string) {
-	m.Show(ToastSuccess, "Success", message, 3*time.Second)
+	m.Show(ToastSuccess, "Success", message, 2*time.Second)
 }
 
 // ShowError displays an error toast.
 func (m *ToastManager) ShowError(message string) {
-	m.Show(ToastError, "Error", message, 5*time.Second)
+	m.Show(ToastError, "Error", message, 4*time.Second)
 }
 
 // ShowErrorWithHint displays an error toast with optional actionable hint.
@@ -100,12 +100,12 @@ func (m *ToastManager) ShowErrorWithHint(message string) {
 
 // ShowInfo displays an info toast.
 func (m *ToastManager) ShowInfo(message string) {
-	m.Show(ToastInfo, "Info", message, 3*time.Second)
+	m.Show(ToastInfo, "Info", message, 2*time.Second)
 }
 
 // ShowWarning displays a warning toast.
 func (m *ToastManager) ShowWarning(message string) {
-	m.Show(ToastWarning, "Warning", message, 4*time.Second)
+	m.Show(ToastWarning, "Warning", message, 3*time.Second)
 }
 
 // Dismiss removes a toast by ID.

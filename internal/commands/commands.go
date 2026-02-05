@@ -107,9 +107,6 @@ func NewHandler() *Handler {
 	h.Register(&SemanticReindexCommand{})
 	h.Register(&SemanticCleanupCommand{})
 
-	// Register contract commands
-	h.Register(&ContractCommand{})
-
 	// Register onboarding commands
 	h.Register(&QuickstartCommand{})
 

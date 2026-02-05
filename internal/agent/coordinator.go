@@ -277,46 +277,58 @@ func (c *Coordinator) startTask(task *CoordinatedTask) {
 // checkCompletedAgents checks for completed agents and updates tasks.
 func (c *Coordinator) checkCompletedAgents() {
 	c.mu.Lock()
-	// Note: explicit unlock at end of function to allow cleanup outside lock
+
+	// Collect completed agents first to avoid modifying map during iteration
+	type completedAgent struct {
+		agentID string
+		taskID  string
+		result  *AgentResult
+	}
+	var completed []completedAgent
 
 	for agentID, taskID := range c.running {
 		result, ok := c.runner.GetResult(agentID)
 		if !ok || !result.Completed {
 			continue
 		}
+		completed = append(completed, completedAgent{agentID, taskID, result})
+	}
 
-		task := c.tasks[taskID]
+	// Now process completed agents
+	for _, ca := range completed {
+		task := c.tasks[ca.taskID]
 		if task == nil {
+			delete(c.running, ca.agentID)
 			continue
 		}
 
 		// Update task status
-		if result.Status == AgentStatusCompleted {
+		if ca.result.Status == AgentStatusCompleted {
 			task.Status = TaskStatusCompleted
 			// Record success for learned solutions (feedback loop)
-			c.recordReflectionFeedback(result, true)
+			c.recordReflectionFeedback(ca.result, true)
 		} else {
 			task.Status = TaskStatusFailed
 			// Record failure for learned solutions (feedback loop)
-			c.recordReflectionFeedback(result, false)
+			c.recordReflectionFeedback(ca.result, false)
 		}
-		task.Result = result
+		task.Result = ca.result
 
 		// Mark completed
-		c.completed[taskID] = true
-		delete(c.running, agentID)
+		c.completed[ca.taskID] = true
+		delete(c.running, ca.agentID)
 
 		logging.Info("coordinator: task completed",
-			"task_id", taskID,
+			"task_id", ca.taskID,
 			"status", task.Status,
-			"duration", result.Duration)
+			"duration", ca.result.Duration)
 
 		if c.onTaskComplete != nil {
-			c.onTaskComplete(task, result)
+			c.onTaskComplete(task, ca.result)
 		}
 
 		// Unblock dependent tasks
-		c.unblockDependents(taskID)
+		c.unblockDependents(ca.taskID)
 	}
 
 	// Check if cleanup is needed (threshold reached)
@@ -467,10 +479,17 @@ func (c *Coordinator) notifyAllComplete() {
 // Wait blocks until all tasks are complete.
 func (c *Coordinator) Wait() map[string]*AgentResult {
 	resultChan := make(chan map[string]*AgentResult, 1)
+	var once sync.Once
 
 	c.mu.Lock()
 	c.onAllComplete = func(results map[string]*AgentResult) {
-		resultChan <- results
+		// Use sync.Once to ensure we only send once and prevent goroutine leak
+		once.Do(func() {
+			select {
+			case resultChan <- results:
+			default:
+			}
+		})
 	}
 	c.mu.Unlock()
 
@@ -478,6 +497,8 @@ func (c *Coordinator) Wait() map[string]*AgentResult {
 	case results := <-resultChan:
 		return results
 	case <-c.ctx.Done():
+		// Clean up: ensure callback won't block if called later
+		once.Do(func() {})
 		return nil
 	}
 }
@@ -485,10 +506,17 @@ func (c *Coordinator) Wait() map[string]*AgentResult {
 // WaitWithTimeout waits for completion with a timeout.
 func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentResult, error) {
 	resultChan := make(chan map[string]*AgentResult, 1)
+	var once sync.Once
 
 	c.mu.Lock()
 	c.onAllComplete = func(results map[string]*AgentResult) {
-		resultChan <- results
+		// Use sync.Once to ensure we only send once and prevent goroutine leak
+		once.Do(func() {
+			select {
+			case resultChan <- results:
+			default:
+			}
+		})
 	}
 	c.mu.Unlock()
 
@@ -496,8 +524,12 @@ func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentR
 	case results := <-resultChan:
 		return results, nil
 	case <-time.After(timeout):
+		// Clean up: ensure callback won't block if called later
+		once.Do(func() {})
 		return nil, fmt.Errorf("coordination timed out after %v", timeout)
 	case <-c.ctx.Done():
+		// Clean up: ensure callback won't block if called later
+		once.Do(func() {})
 		return nil, c.ctx.Err()
 	}
 }

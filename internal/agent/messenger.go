@@ -204,7 +204,13 @@ func (m *AgentMessenger) handleDelegation(msg Message) {
 		m.mu.RUnlock()
 
 		if ok {
-			responseChan <- fmt.Sprintf("Delegation failed: maximum depth (%d) exceeded", MaxDelegationDepth)
+			select {
+			case responseChan <- fmt.Sprintf("Delegation failed: maximum depth (%d) exceeded", MaxDelegationDepth):
+				// Sent successfully
+			default:
+				// Channel full or closed - receiver already timed out
+				logging.Debug("response channel full, receiver likely timed out", "msg_id", msg.ID)
+			}
 		}
 		return
 	}

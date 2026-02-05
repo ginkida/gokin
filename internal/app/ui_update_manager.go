@@ -34,27 +34,16 @@ func NewUIUpdateManager(program *tea.Program, app *App) *UIUpdateManager {
 // Start begins periodic UI updates
 func (m *UIUpdateManager) Start() {
 	m.mu.Lock()
-	if m.running {
-		m.mu.Unlock()
-		return
-	}
-	m.mu.Unlock()
-
-	// Wait for any previous goroutines to finish without holding the lock
-	m.wg.Wait()
-
-	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Re-check running state after waiting (another goroutine may have started)
 	if m.running {
 		return
 	}
 
 	m.running = true
 	m.stopChan = make(chan struct{})
-	// Note: sync.Once is intentionally left as-is. We create a fresh one
-	// via pointer indirection to allow multiple Start/Stop cycles.
+	// Create a new stopOnce for this Start/Stop cycle
+	// Note: sync.Once cannot be "reset", so we create a fresh value
 	m.stopOnce = sync.Once{}
 }
 

@@ -14,6 +14,7 @@ type FileWatcher struct {
 	debounceMs int
 	callback   func(string)
 	cancel     context.CancelFunc
+	done       chan struct{} // Signals goroutine completion
 
 	mu      sync.Mutex
 	lastMod time.Time
@@ -30,6 +31,7 @@ func NewFileWatcher(ctx context.Context, path string, debounceMs int, callback f
 		path:       path,
 		debounceMs: debounceMs,
 		callback:   callback,
+		done:       make(chan struct{}),
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -52,6 +54,8 @@ func NewFileWatcher(ctx context.Context, path string, debounceMs int, callback f
 
 // watch periodically checks for file changes.
 func (fw *FileWatcher) watch(ctx context.Context) {
+	defer close(fw.done) // Signal completion when goroutine exits
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -92,14 +96,27 @@ func (fw *FileWatcher) checkChanges() {
 	}
 }
 
-// Close stops the file watcher.
+// Close stops the file watcher and waits for the goroutine to finish.
 func (fw *FileWatcher) Close() {
 	if fw.cancel != nil {
 		fw.cancel()
 	}
+
+	// Wait for the watch goroutine to finish with timeout
+	if fw.done != nil {
+		select {
+		case <-fw.done:
+			// Goroutine finished cleanly
+		case <-time.After(5 * time.Second):
+			// Timeout - goroutine may be stuck
+		}
+	}
+
+	fw.mu.Lock()
 	if fw.timer != nil {
 		fw.timer.Stop()
 	}
+	fw.mu.Unlock()
 }
 
 // WatchInstructionFiles watches all possible instruction file locations.

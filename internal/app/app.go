@@ -17,7 +17,6 @@ import (
 	"gokin/internal/commands"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
-	"gokin/internal/contract"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/mcp"
@@ -254,9 +253,7 @@ func (a *App) Run() error {
 						a.agentRunner.SetSharedScratchpad(a.scratchpad)
 					}
 					// Notify TUI about restored scratchpad
-					if a.program != nil {
-						a.program.Send(ui.ScratchpadMsg(a.scratchpad))
-					}
+					a.safeSendToProgram(ui.ScratchpadMsg(a.scratchpad))
 
 					// Notify user about restored session
 					a.tui.AddSystemMessage(fmt.Sprintf("Restored session from %s (%d messages)",
@@ -462,14 +459,19 @@ func (a *App) executeCommand(name string, args []string) {
 	ctx := a.ctx
 	result, err := a.commandHandler.Execute(ctx, name, args, a)
 
-	if a.program != nil {
+	// Copy program reference under lock for safe access
+	a.mu.Lock()
+	program := a.program
+	a.mu.Unlock()
+
+	if program != nil {
 		if err != nil {
-			a.program.Send(ui.ErrorMsg(err))
+			program.Send(ui.ErrorMsg(err))
 		} else {
 			// Display command result as assistant message
-			a.program.Send(ui.StreamTextMsg(result))
+			program.Send(ui.StreamTextMsg(result))
 		}
-		a.program.Send(ui.ResponseDoneMsg{})
+		program.Send(ui.ResponseDoneMsg{})
 	}
 }
 
@@ -501,9 +503,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 		if pending != "" {
 			// Notify user that we're processing pending message
-			if a.program != nil {
-				a.program.Send(ui.StreamTextMsg("\n📤 Processing queued message...\n"))
-			}
+			a.safeSendToProgram(ui.StreamTextMsg("\n📤 Processing queued message...\n"))
 			// Recursively handle the pending message
 			go a.handleSubmit(pending)
 		}
@@ -553,9 +553,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	}
 
 	if err != nil {
-		if a.program != nil {
-			a.program.Send(ui.ErrorMsg(err))
-		}
+		a.safeSendToProgram(ui.ErrorMsg(err))
 		return
 	}
 
@@ -609,20 +607,21 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// Don't send it again here to avoid duplicate output
 	_ = response // Used for token counting above
 
-	// Signal completion
-	if a.program != nil {
-		a.program.Send(ui.ResponseDoneMsg{})
+	// Signal completion - copy program reference under lock
+	a.mu.Lock()
+	program := a.program
+	duration := time.Since(a.responseStartTime)
+	toolsUsed := make([]string, len(a.responseToolsUsed))
+	copy(toolsUsed, a.responseToolsUsed)
+	inputTokens := a.totalInputTokens
+	outputTokens := a.totalOutputTokens
+	a.mu.Unlock()
+
+	if program != nil {
+		program.Send(ui.ResponseDoneMsg{})
 
 		// Send response metadata
-		a.mu.Lock()
-		duration := time.Since(a.responseStartTime)
-		toolsUsed := make([]string, len(a.responseToolsUsed))
-		copy(toolsUsed, a.responseToolsUsed)
-		inputTokens := a.totalInputTokens
-		outputTokens := a.totalOutputTokens
-		a.mu.Unlock()
-
-		a.program.Send(ui.ResponseMetadataMsg{
+		program.Send(ui.ResponseMetadataMsg{
 			Model:        a.config.Model.Name,
 			InputTokens:  inputTokens,
 			OutputTokens: outputTokens,
@@ -649,8 +648,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				}
 				display = append(display, fmt.Sprintf("%s %s", icon, item.Content))
 			}
-			if a.program != nil {
-				a.program.Send(ui.TodoUpdateMsg(display))
+			if program != nil {
+				program.Send(ui.TodoUpdateMsg(display))
 			}
 		}
 	}
@@ -659,6 +658,11 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 // executePlanWithClearContext dispatches plan execution to either delegated
 // sub-agent mode or direct monolithic execution.
 func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *plan.Plan) {
+	// Enter execution mode - this blocks creation of new plans during execution
+	if a.planManager != nil {
+		a.planManager.SetExecutionMode(true)
+	}
+
 	if a.agentRunner != nil {
 		sharedMem := a.agentRunner.GetSharedMemory()
 		if sharedMem != nil {
@@ -714,6 +718,13 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		"plan_id", approvedPlan.ID,
 		"title", approvedPlan.Title,
 		"steps", approvedPlan.StepCount())
+
+	// Ensure execution mode is reset on any exit path (including panics and early returns)
+	defer func() {
+		if a.planManager != nil {
+			a.planManager.SetExecutionMode(false)
+		}
+	}()
 
 	// 1. Save context snapshot before clearing (preserves planning decisions)
 	contextSnapshot := a.extractContextSnapshot()
@@ -807,8 +818,7 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		a.program.Send(ui.ResponseDoneMsg{})
 	}
 
-	// Auto-verify contract if enabled and plan has one
-	a.verifyContractAfterPlan(ctx, approvedPlan)
+	// Note: SetExecutionMode(false) is handled by defer at function start
 
 	// Send final metadata after verification
 	if a.program != nil {
@@ -839,6 +849,14 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 		"title", approvedPlan.Title,
 		"steps", approvedPlan.StepCount())
 
+	// Ensure execution mode is reset on any exit path (including panics and early returns)
+	defer func() {
+		if a.planManager != nil {
+			a.planManager.SetExecutionMode(false)
+			a.planManager.SetCurrentStepID(-1)
+		}
+	}()
+
 	// Skip diff approval prompts for delegated plan execution —
 	// the plan itself was already approved by the user.
 	ctx = tools.ContextWithSkipDiff(ctx)
@@ -847,12 +865,6 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	projectCtx := a.promptBuilder.BuildSubAgentPrompt()
 
 	totalSteps := len(approvedPlan.Steps)
-
-	// Get plan-level context for sub-agents
-	contractCtx := ""
-	if a.planManager != nil {
-		contractCtx = a.planManager.GetActiveContractContext()
-	}
 
 	// Save context snapshot if not already present (e.g., first execution, not resume)
 	contextSnapshot := approvedPlan.GetContextSnapshot()
@@ -889,8 +901,9 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			continue
 		}
 
-		// Mark step as started
+		// Mark step as started and track current step ID
 		a.planManager.StartStep(step.ID)
+		a.planManager.SetCurrentStepID(step.ID)
 
 		// Update plan progress in status bar
 		if a.program != nil {
@@ -924,7 +937,6 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			PlanTitle:       approvedPlan.Title,
 			PlanDescription: approvedPlan.Description,
 			PlanRequest:     approvedPlan.Request,
-			ContractContext: contractCtx,
 			ContextSnapshot: contextSnapshot,
 			SharedMemoryCtx: sharedMemCtx,
 			TotalSteps:      totalSteps,
@@ -1082,13 +1094,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 		a.program.Send(ui.ResponseDoneMsg{})
 	}
 
-	// Auto-verify contract if enabled and plan has one
-	a.verifyContractAfterPlan(ctx, approvedPlan)
-
-	// Send final done message after verification
-	if a.program != nil {
-		a.program.Send(ui.ResponseDoneMsg{})
-	}
+	// Note: SetExecutionMode(false) is handled by defer at function start
 
 	// Save session
 	if a.sessionManager != nil {
@@ -1135,7 +1141,6 @@ type StepPromptContext struct {
 	PlanTitle       string
 	PlanDescription string
 	PlanRequest     string
-	ContractContext string
 	ContextSnapshot string
 	SharedMemoryCtx string
 	TotalSteps      int
@@ -1156,13 +1161,6 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 	}
 	sb.WriteString(fmt.Sprintf("**Progress:** Step %d of %d (%d completed)\n\n",
 		ctx.Step.ID, ctx.TotalSteps, ctx.CompletedCount))
-
-	// Contract context (constraints, invariants)
-	if ctx.ContractContext != "" {
-		sb.WriteString("## Contract Constraints\n")
-		sb.WriteString(ctx.ContractContext)
-		sb.WriteString("\n")
-	}
 
 	// Context from planning discussion (key decisions)
 	if ctx.ContextSnapshot != "" {
@@ -1255,139 +1253,6 @@ func (a *App) extractContextSnapshot() string {
 	return sb.String()
 }
 
-// verifyContractAfterPlan runs contract verification after plan execution completes.
-// Only runs if the plan has a contract and auto_verify is enabled.
-func (a *App) verifyContractAfterPlan(ctx context.Context, executedPlan *plan.Plan) {
-	// Check if plan has a contract
-	if !executedPlan.HasContract() {
-		return
-	}
-
-	// Check if auto-verify is enabled
-	if !a.config.Contract.AutoVerify {
-		return
-	}
-
-	// Get contract verifier
-	verifier := a.planManager.GetContractVerifier()
-	if verifier == nil {
-		logging.Warn("contract verifier not available, skipping auto-verification")
-		return
-	}
-
-	// Get contract from store if we have a ContractID
-	var c *contract.Contract
-	store := a.planManager.GetContractStore()
-	if executedPlan.ContractID != "" && store != nil {
-		loaded, err := store.Load(executedPlan.ContractID)
-		if err != nil {
-			logging.Warn("failed to load contract for verification", "contract_id", executedPlan.ContractID, "error", err)
-			return
-		}
-		c = loaded
-	} else if executedPlan.Contract != nil {
-		// Create a temporary contract from the plan's contract spec
-		c = &contract.Contract{
-			ID:         executedPlan.ID, // Use plan ID as contract ID
-			Name:       executedPlan.Contract.Name,
-			Intent:     executedPlan.Contract.Intent,
-			Boundaries: executedPlan.Contract.Boundaries,
-			Invariants: executedPlan.Contract.Invariants,
-			Examples:   executedPlan.Contract.Examples,
-		}
-	} else {
-		return
-	}
-
-	// Send verification start message to UI
-	if a.program != nil {
-		a.program.Send(ui.StreamTextMsg(
-			fmt.Sprintf("\n━━━ Verifying contract: %s ━━━\n", c.Name)))
-	}
-
-	// Run verification
-	result, err := verifier.Verify(ctx, c)
-	if err != nil {
-		logging.Error("contract verification failed", "error", err)
-		if a.program != nil {
-			a.program.Send(ui.StreamTextMsg(
-				fmt.Sprintf("  ❌ Verification error: %s\n", err.Error())))
-		}
-		return
-	}
-
-	// Format and display results
-	a.displayContractVerificationResults(c, result)
-
-	// Save verification result to contract
-	if store != nil && c.ID != "" {
-		c.LastVerification = result
-		if err := store.Save(c); err != nil {
-			logging.Warn("failed to save verification result", "error", err)
-		}
-	}
-}
-
-// displayContractVerificationResults formats and sends verification results to the UI.
-func (a *App) displayContractVerificationResults(c *contract.Contract, result *contract.VerificationResult) {
-	if a.program == nil {
-		return
-	}
-
-	// Overall status
-	statusIcon := "✅"
-	statusText := "PASSED"
-	if !result.Passed {
-		statusIcon = "❌"
-		statusText = "FAILED"
-	}
-
-	a.program.Send(ui.StreamTextMsg(
-		fmt.Sprintf("  %s Contract verification: %s\n", statusIcon, statusText)))
-	a.program.Send(ui.StreamTextMsg(
-		fmt.Sprintf("  Duration: %s\n", result.Duration)))
-
-	// Show example results
-	if len(result.ExampleResults) > 0 {
-		a.program.Send(ui.StreamTextMsg("\n  Examples:\n"))
-		for _, er := range result.ExampleResults {
-			icon := "✓"
-			if !er.Passed {
-				icon = "✗"
-			}
-			a.program.Send(ui.StreamTextMsg(
-				fmt.Sprintf("    %s %s", icon, er.Name)))
-			if !er.Passed && er.Error != "" {
-				a.program.Send(ui.StreamTextMsg(
-					fmt.Sprintf(" — %s\n", er.Error)))
-			} else {
-				a.program.Send(ui.StreamTextMsg("\n"))
-			}
-		}
-	}
-
-	// Show invariant results
-	if len(result.InvariantResults) > 0 {
-		a.program.Send(ui.StreamTextMsg("\n  Invariants:\n"))
-		for _, ir := range result.InvariantResults {
-			icon := "✓"
-			if !ir.Passed {
-				icon = "✗"
-			}
-			a.program.Send(ui.StreamTextMsg(
-				fmt.Sprintf("    %s %s\n", icon, ir.Name)))
-		}
-	}
-
-	// Show summary if available
-	if result.Summary != "" {
-		a.program.Send(ui.StreamTextMsg(
-			fmt.Sprintf("\n  Summary: %s\n", result.Summary)))
-	}
-
-	a.program.Send(ui.StreamTextMsg("\n"))
-}
-
 // AppInterface implementation for commands package
 
 // GetSession returns the current session.
@@ -1405,17 +1270,38 @@ func (a *App) GetContextManager() *appcontext.ContextManager {
 	return a.contextManager
 }
 
+// safeSendToProgram safely sends a message to the Bubbletea program.
+// It copies the program reference under lock to prevent race conditions.
+func (a *App) safeSendToProgram(msg tea.Msg) {
+	a.mu.Lock()
+	program := a.program
+	a.mu.Unlock()
+
+	if program != nil {
+		program.Send(msg)
+	}
+}
+
 // sendTokenUsageUpdate sends a token usage update to the UI.
 // This can be called from any goroutine safely.
 func (a *App) sendTokenUsageUpdate() {
-	if a.program == nil || a.contextManager == nil || !a.config.UI.ShowTokenUsage {
+	if a.contextManager == nil || !a.config.UI.ShowTokenUsage {
 		return
 	}
+
+	a.mu.Lock()
+	program := a.program
+	a.mu.Unlock()
+
+	if program == nil {
+		return
+	}
+
 	usage := a.contextManager.GetTokenUsage()
 	if usage == nil {
 		return
 	}
-	a.program.Send(ui.TokenUsageMsg{
+	program.Send(ui.TokenUsageMsg{
 		Tokens:      usage.InputTokens,
 		MaxTokens:   usage.MaxTokens,
 		PercentUsed: usage.PercentUsed,
@@ -1517,9 +1403,9 @@ func (a *App) GetModelSetter() commands.ModelSetter {
 // TogglePermissions toggles the permission system on/off.
 func (a *App) TogglePermissions() bool {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	if a.permManager == nil {
+		a.mu.Unlock()
 		return false
 	}
 
@@ -1541,33 +1427,67 @@ func (a *App) TogglePermissions() bool {
 	// Update unrestricted mode based on new state
 	a.updateUnrestrictedModeLocked()
 
+	// Copy state for UI message before unlocking
+	program := a.program
+	sandboxEnabled := a.config.Tools.Bash.Sandbox
+	planningModeEnabled := a.planningModeEnabled
+	modelName := a.config.Model.Name
+	a.mu.Unlock()
+
+	// Send UI update message (program.Send is thread-safe)
+	if program != nil {
+		program.Send(ui.ConfigUpdateMsg{
+			PermissionsEnabled:  newEnabled,
+			SandboxEnabled:      sandboxEnabled,
+			PlanningModeEnabled: planningModeEnabled,
+			ModelName:           modelName,
+		})
+	}
+
 	return newEnabled
 }
 
 // TogglePlanningMode toggles the tree planning mode on/off.
 func (a *App) TogglePlanningMode() bool {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	a.planningModeEnabled = !a.planningModeEnabled
+	newEnabled := a.planningModeEnabled
 
 	// Update agent runner
 	if a.agentRunner != nil {
-		a.agentRunner.SetPlanningModeEnabled(a.planningModeEnabled)
+		a.agentRunner.SetPlanningModeEnabled(newEnabled)
 	}
 
-	// Update TUI display
+	// Update TUI display (direct setter for immediate effect)
 	if a.tui != nil {
-		a.tui.SetPlanningModeEnabled(a.planningModeEnabled)
+		a.tui.SetPlanningModeEnabled(newEnabled)
 	}
 
-	if a.planningModeEnabled {
+	if newEnabled {
 		logging.Debug("planning mode enabled")
 	} else {
 		logging.Debug("planning mode disabled")
 	}
 
-	return a.planningModeEnabled
+	// Copy state for UI message before unlocking
+	program := a.program
+	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
+	sandboxEnabled := a.config.Tools.Bash.Sandbox
+	modelName := a.config.Model.Name
+	a.mu.Unlock()
+
+	// Send UI update message to trigger proper refresh
+	if program != nil {
+		program.Send(ui.ConfigUpdateMsg{
+			PermissionsEnabled:  permissionsEnabled,
+			SandboxEnabled:      sandboxEnabled,
+			PlanningModeEnabled: newEnabled,
+			ModelName:           modelName,
+		})
+	}
+
+	return newEnabled
 }
 
 // IsPlanningModeEnabled returns whether planning mode is active.
@@ -1577,10 +1497,51 @@ func (a *App) IsPlanningModeEnabled() bool {
 	return a.planningModeEnabled
 }
 
+// TogglePlanningModeAsync toggles planning mode asynchronously.
+// This is safe to call from UI callbacks as it doesn't block the Bubble Tea event loop.
+func (a *App) TogglePlanningModeAsync() {
+	go func() {
+		a.mu.Lock()
+		a.planningModeEnabled = !a.planningModeEnabled
+		newEnabled := a.planningModeEnabled
+
+		if a.agentRunner != nil {
+			a.agentRunner.SetPlanningModeEnabled(newEnabled)
+		}
+
+		if a.tui != nil {
+			a.tui.SetPlanningModeEnabled(newEnabled)
+		}
+
+		if newEnabled {
+			logging.Debug("planning mode enabled")
+		} else {
+			logging.Debug("planning mode disabled")
+		}
+
+		program := a.program
+		permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
+		sandboxEnabled := a.config.Tools.Bash.Sandbox
+		modelName := a.config.Model.Name
+		a.mu.Unlock()
+
+		if program != nil {
+			// Send toggled message for UI feedback
+			program.Send(ui.PlanningModeToggledMsg{Enabled: newEnabled})
+			// Send config update for status bar
+			program.Send(ui.ConfigUpdateMsg{
+				PermissionsEnabled:  permissionsEnabled,
+				SandboxEnabled:      sandboxEnabled,
+				PlanningModeEnabled: newEnabled,
+				ModelName:           modelName,
+			})
+		}
+	}()
+}
+
 // ToggleSandbox toggles the bash sandbox mode on/off.
 func (a *App) ToggleSandbox() bool {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	a.config.Tools.Bash.Sandbox = !a.config.Tools.Bash.Sandbox
 	newEnabled := a.config.Tools.Bash.Sandbox
@@ -1588,6 +1549,11 @@ func (a *App) ToggleSandbox() bool {
 	// Save config
 	if err := a.config.Save(); err != nil {
 		logging.Warn("failed to save sandbox setting", "error", err)
+	}
+
+	// Update TUI display
+	if a.tui != nil {
+		a.tui.SetSandboxEnabled(newEnabled)
 	}
 
 	if newEnabled {
@@ -1598,6 +1564,23 @@ func (a *App) ToggleSandbox() bool {
 
 	// Update unrestricted mode based on new state
 	a.updateUnrestrictedModeLocked()
+
+	// Copy state for UI message before unlocking
+	program := a.program
+	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
+	planningModeEnabled := a.planningModeEnabled
+	modelName := a.config.Model.Name
+	a.mu.Unlock()
+
+	// Send UI update message to trigger proper refresh
+	if program != nil {
+		program.Send(ui.ConfigUpdateMsg{
+			PermissionsEnabled:  permissionsEnabled,
+			SandboxEnabled:      newEnabled,
+			PlanningModeEnabled: planningModeEnabled,
+			ModelName:           modelName,
+		})
+	}
 
 	return newEnabled
 }
@@ -1749,8 +1732,10 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// 8d. Send ConfigUpdateMsg to Bubbletea program to refresh UI
 	if a.program != nil {
 		a.program.Send(ui.ConfigUpdateMsg{
-			PermissionsEnabled: a.config.Permission.Enabled,
-			SandboxEnabled:     a.config.Tools.Bash.Sandbox,
+			PermissionsEnabled:  a.config.Permission.Enabled,
+			SandboxEnabled:      a.config.Tools.Bash.Sandbox,
+			PlanningModeEnabled: a.planningModeEnabled,
+			ModelName:           a.config.Model.Name,
 		})
 	}
 

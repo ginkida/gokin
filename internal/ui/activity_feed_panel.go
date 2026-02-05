@@ -43,7 +43,7 @@ type ActivityFeedPanel struct {
 // NewActivityFeedPanel creates a new activity feed panel.
 func NewActivityFeedPanel(styles *Styles) *ActivityFeedPanel {
 	return &ActivityFeedPanel{
-		visible:            true, // Visible by default
+		visible:            false, // Hidden by default - toggle with 'a' key
 		entries:            make([]ActivityFeedEntry, 0, maxActivityEntries),
 		recentLog:          make([]string, 0, maxRecentLog),
 		activeEntries:      make(map[string]int),

@@ -4,10 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
-	"gokin/internal/contract"
-	"gokin/internal/logging"
 	"gokin/internal/plan"
 
 	"google.golang.org/genai"
@@ -15,13 +12,7 @@ import (
 
 // EnterPlanModeTool allows the model to create execution plans and request user approval.
 type EnterPlanModeTool struct {
-	manager       *plan.Manager
-	contractStore *contract.Store
-}
-
-// SetContractStore sets the contract store for persisting contracts attached to plans.
-func (t *EnterPlanModeTool) SetContractStore(store *contract.Store) {
-	t.contractStore = store
+	manager *plan.Manager
 }
 
 // NewEnterPlanModeTool creates a new enter plan mode tool.
@@ -85,56 +76,6 @@ func (t *EnterPlanModeTool) Declaration() *genai.FunctionDeclaration {
 					Type:        genai.TypeString,
 					Description: "The original user request that prompted this plan",
 				},
-				"contract_name": {
-					Type:        genai.TypeString,
-					Description: "Short identifier for the contract (e.g. 'email_validator'). Include for tasks with clear I/O boundaries. Omit for exploratory tasks or refactoring.",
-				},
-				"intent": {
-					Type:        genai.TypeString,
-					Description: "One sentence describing the observable outcome (e.g. 'Validate email addresses per RFC 5322 and return bool')",
-				},
-				"boundaries": {
-					Type:        genai.TypeArray,
-					Description: "Input/output constraints and side effects. Each boundary defines what goes in, comes out, or changes.",
-					Items: &genai.Schema{
-						Type: genai.TypeObject,
-						Properties: map[string]*genai.Schema{
-							"name":        {Type: genai.TypeString, Description: "Boundary name"},
-							"type":        {Type: genai.TypeString, Description: "Type: input, output, or side_effect"},
-							"description": {Type: genai.TypeString, Description: "What this boundary constrains"},
-							"constraint":  {Type: genai.TypeString, Description: "Specific constraint (optional)"},
-						},
-						Required: []string{"name", "type", "description"},
-					},
-				},
-				"invariants": {
-					Type:        genai.TypeArray,
-					Description: "Conditions that must always or never hold. Define what the implementation must guarantee regardless of input.",
-					Items: &genai.Schema{
-						Type: genai.TypeObject,
-						Properties: map[string]*genai.Schema{
-							"name":        {Type: genai.TypeString, Description: "Invariant name"},
-							"description": {Type: genai.TypeString, Description: "What must hold"},
-							"type":        {Type: genai.TypeString, Description: "Type: always, never, pre, or post"},
-						},
-						Required: []string{"name", "description", "type"},
-					},
-				},
-				"examples": {
-					Type:        genai.TypeArray,
-					Description: "Concrete input/output pairs for automated verification. Include a command and expected_output so verify_plan can check automatically.",
-					Items: &genai.Schema{
-						Type: genai.TypeObject,
-						Properties: map[string]*genai.Schema{
-							"name":            {Type: genai.TypeString, Description: "Example name"},
-							"input":           {Type: genai.TypeString, Description: "Example input"},
-							"expected_output": {Type: genai.TypeString, Description: "Expected output from the command (matched according to match_type)"},
-							"match_type":      {Type: genai.TypeString, Description: "How to match: exact, contains, regex, exit_code"},
-							"command":         {Type: genai.TypeString, Description: "Shell command to run for verification (e.g. 'go test ./... -run TestEmailValid')"},
-						},
-						Required: []string{"name"},
-					},
-				},
 			},
 			Required: []string{"title", "steps"},
 		},
@@ -179,7 +120,23 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 		return NewErrorResult("plan mode is disabled in configuration"), nil
 	}
 
-	// Check if there's already an active plan
+	// Check if we're currently executing an approved plan (nested plans not allowed)
+	if t.manager.IsExecuting() {
+		currentPlan := t.manager.GetCurrentPlan()
+		stepID := t.manager.GetCurrentStepID()
+		var stepInfo string
+		if stepID >= 0 && currentPlan != nil {
+			if step := currentPlan.GetStep(stepID); step != nil {
+				stepInfo = fmt.Sprintf(" (currently executing step %d: %s)", stepID+1, step.Title)
+			}
+		}
+		return NewErrorResult(fmt.Sprintf(
+			"cannot create a new plan while executing an approved plan%s. Complete the current plan first or use update_plan_progress to report progress.",
+			stepInfo,
+		)), nil
+	}
+
+	// Check if there's already an active plan (in creation phase)
 	if t.manager.IsActive() {
 		currentPlan := t.manager.GetCurrentPlan()
 		return NewErrorResult(fmt.Sprintf(
@@ -206,89 +163,6 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 				stepDesc, _ := step["description"].(string)
 				p.AddStep(stepTitle, stepDesc)
 			}
-		}
-	}
-
-	// Parse optional contract fields
-	contractName, _ := GetString(args, "contract_name")
-	intent, _ := GetString(args, "intent")
-	if contractName != "" || intent != "" {
-		spec := &plan.ContractSpec{
-			Name:   contractName,
-			Intent: intent,
-		}
-
-		// Parse boundaries array
-		if boundariesRaw, ok := args["boundaries"]; ok {
-			if boundariesSlice, ok := boundariesRaw.([]any); ok {
-				for _, bRaw := range boundariesSlice {
-					if bMap, ok := bRaw.(map[string]any); ok {
-						b := contract.Boundary{
-							Name:        getStringField(bMap, "name"),
-							Type:        getStringField(bMap, "type"),
-							Description: getStringField(bMap, "description"),
-							Constraint:  getStringField(bMap, "constraint"),
-						}
-						spec.Boundaries = append(spec.Boundaries, b)
-					}
-				}
-			}
-		}
-
-		// Parse invariants array
-		if invariantsRaw, ok := args["invariants"]; ok {
-			if invariantsSlice, ok := invariantsRaw.([]any); ok {
-				for _, invRaw := range invariantsSlice {
-					if invMap, ok := invRaw.(map[string]any); ok {
-						inv := contract.Invariant{
-							Name:        getStringField(invMap, "name"),
-							Description: getStringField(invMap, "description"),
-							Type:        getStringField(invMap, "type"),
-						}
-						spec.Invariants = append(spec.Invariants, inv)
-					}
-				}
-			}
-		}
-
-		// Parse examples array
-		if examplesRaw, ok := args["examples"]; ok {
-			if examplesSlice, ok := examplesRaw.([]any); ok {
-				for _, exRaw := range examplesSlice {
-					if exMap, ok := exRaw.(map[string]any); ok {
-						ex := contract.Example{
-							Name:           getStringField(exMap, "name"),
-							Input:          getStringField(exMap, "input"),
-							ExpectedOutput: getStringField(exMap, "expected_output"),
-							MatchType:      getStringField(exMap, "match_type"),
-							Command:        getStringField(exMap, "command"),
-						}
-						spec.Examples = append(spec.Examples, ex)
-					}
-				}
-			}
-		}
-
-		p.Contract = spec
-
-		// Persist contract to store if available
-		if t.contractStore != nil {
-			ct := &contract.Contract{
-				ID:         fmt.Sprintf("contract_%d", time.Now().UnixNano()),
-				Name:       contractName,
-				Version:    1,
-				Status:     contract.StatusActive,
-				Intent:     intent,
-				Boundaries: spec.Boundaries,
-				Invariants: spec.Invariants,
-				Examples:   spec.Examples,
-				CreatedAt:  time.Now(),
-				UpdatedAt:  time.Now(),
-			}
-			if err := t.contractStore.Save(ct); err != nil {
-				logging.Debug("failed to save contract", "error", err, "contractID", ct.ID)
-			}
-			p.ContractID = ct.ID
 		}
 	}
 
@@ -565,27 +439,6 @@ func (t *GetPlanStatusTool) Execute(ctx context.Context, args map[string]any) (T
 		"completed":   p.CompletedCount(),
 		"total":       p.StepCount(),
 		"progress":    p.Progress() * 100,
-	}
-
-	// Include contract info if present
-	if p.HasContract() {
-		contractInfo := map[string]any{
-			"name":   p.Contract.Name,
-			"intent": p.Contract.Intent,
-		}
-		if len(p.Contract.Boundaries) > 0 {
-			contractInfo["boundaries_count"] = len(p.Contract.Boundaries)
-		}
-		if len(p.Contract.Invariants) > 0 {
-			contractInfo["invariants_count"] = len(p.Contract.Invariants)
-		}
-		if len(p.Contract.Examples) > 0 {
-			contractInfo["examples_count"] = len(p.Contract.Examples)
-		}
-		if p.ContractID != "" {
-			contractInfo["contract_id"] = p.ContractID
-		}
-		data["contract"] = contractInfo
 	}
 
 	return NewSuccessResultWithData(builder.String(), data), nil

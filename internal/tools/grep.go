@@ -189,22 +189,28 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	var re *regexp.Regexp
 	var compileErr error
-	done := make(chan struct{})
+	compileDone := make(chan struct{})
 
 	go func() {
+		defer close(compileDone)
 		re, compileErr = regexp.Compile(regexPattern)
-		close(done)
 	}()
 
 	select {
-	case <-done:
+	case <-compileDone:
 		if compileErr != nil {
 			return NewErrorResult(fmt.Sprintf("invalid regex: %s", compileErr)), nil
 		}
 	case <-time.After(5 * time.Second):
+		// Goroutine will leak but this is acceptable for rare pathological patterns
 		return NewErrorResult("regex compilation timeout: pattern too complex"), nil
 	case <-ctx.Done():
-		return NewErrorResult("cancelled"), nil
+		return NewErrorResult("cancelled"), ctx.Err()
+	}
+
+	// Safety check: ensure regex was compiled successfully before use
+	if re == nil {
+		return NewErrorResult("regex compilation failed unexpectedly"), nil
 	}
 
 	// Get files to search

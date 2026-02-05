@@ -21,6 +21,16 @@ import (
 	"google.golang.org/genai"
 )
 
+const (
+	// MaxHistorySize is the maximum number of messages in history before forced compaction.
+	// This prevents unbounded memory growth during long sessions.
+	MaxHistorySize = 200
+
+	// MaxTurnLimit is the absolute maximum number of turns an agent can take.
+	// This prevents infinite loops even if mental loop detection fails.
+	MaxTurnLimit = 100
+)
+
 // Agent represents an isolated executor for subtasks.
 type Agent struct {
 	ID           string
@@ -1008,9 +1018,11 @@ KEY RULES:
 
 // executeLoop runs the function calling loop for the agent.
 func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.Builder) ([]*genai.Content, string, error) {
-	// Add user prompt to history
+	// Add user prompt to history (protected by mutex)
 	userContent := genai.NewContentFromText(prompt, genai.RoleUser)
+	a.stateMu.Lock()
 	a.history = append(a.history, userContent)
+	a.stateMu.Unlock()
 
 	// Update progress
 	a.SetProgress(1, a.maxTurns, "Processing request")
@@ -1033,9 +1045,8 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				a.onPlanApproved(planSummary)
 			}
 
-			// Set total steps to best path length
-			a.totalSteps = len(tree.BestPath)
-			a.currentStep = 0
+			// Set total steps to best path length using SetProgress for thread safety
+			a.SetProgress(0, len(tree.BestPath), "Building plan...")
 
 			// === Interactive Plan Review ===
 			if a.onInput != nil && a.requireApproval {
@@ -1052,7 +1063,14 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	loopRecoveryTurns := 0
 	replanAttempts := 0
 	var i int
-	for i = 0; i < a.maxTurns; i++ {
+	// Use min(maxTurns, MaxTurnLimit) to prevent infinite loops
+	effectiveMaxTurns := a.maxTurns
+	if effectiveMaxTurns > MaxTurnLimit {
+		effectiveMaxTurns = MaxTurnLimit
+		logging.Warn("maxTurns exceeds MaxTurnLimit, capping", "agent_id", a.ID,
+			"requested", a.maxTurns, "capped", MaxTurnLimit)
+	}
+	for i = 0; i < effectiveMaxTurns; i++ {
 		select {
 		case <-ctx.Done():
 			return a.history, output.String(), ctx.Err()
@@ -1180,12 +1198,14 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			return a.history, output.String(), fmt.Errorf("model response error: %w", err)
 		}
 
-		// Add model response to history
+		// Add model response to history (protected by mutex)
 		modelContent := &genai.Content{
 			Role:  genai.RoleModel,
 			Parts: a.buildResponseParts(resp),
 		}
+		a.stateMu.Lock()
 		a.history = append(a.history, modelContent)
+		a.stateMu.Unlock()
 
 		// Accumulate text output
 		if resp.Text != "" {
@@ -1229,14 +1249,16 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						a.safeOnText(fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, count))
 					}
 
-					// Inject intervention message
+					// Inject intervention message (protected by mutex)
 					intervention := fmt.Sprintf("Wait. I've noticed I'm calling %s with the same arguments repeatedly. I should stop and rethink my approach. Why isn't this working? What am I missing?", fc.Name)
+					a.stateMu.Lock()
 					a.history = append(a.history, genai.NewContentFromText(intervention, genai.RoleUser))
 					// Give bounded extra turns to recover (max 3)
 					if loopRecoveryTurns < 3 {
 						loopRecoveryTurns++
 						a.maxTurns++
 					}
+					a.stateMu.Unlock()
 					continue
 				}
 			}
@@ -1260,7 +1282,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				Role:  genai.RoleUser,
 				Parts: funcParts,
 			}
+			a.stateMu.Lock()
 			a.history = append(a.history, funcContent)
+			a.stateMu.Unlock()
 
 			continue
 		}
@@ -1290,6 +1314,17 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 // checkAndSummarize monitors token usage and triggers summarization if thresholds are met.
 func (a *Agent) checkAndSummarize(ctx context.Context) error {
+	// 0. Check hard limit on history size to prevent memory exhaustion
+	a.stateMu.RLock()
+	historyLen := len(a.history)
+	a.stateMu.RUnlock()
+
+	if historyLen > MaxHistorySize {
+		logging.Warn("history size exceeded MaxHistorySize, forcing compaction",
+			"agent_id", a.ID, "history_len", historyLen, "max", MaxHistorySize)
+		return a.forceCompactHistory(ctx)
+	}
+
 	// 1. Get current token usage
 	tokenCount, err := a.tokenCounter.CountContents(ctx, a.history)
 	if err != nil {
@@ -1342,13 +1377,53 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	return nil
 }
 
-// getModelResponse gets a response from the model.
-func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) {
-	if len(a.history) == 0 {
-		return nil, fmt.Errorf("empty history")
+// forceCompactHistory aggressively compacts history when MaxHistorySize is exceeded.
+// This is a safety measure to prevent memory exhaustion.
+func (a *Agent) forceCompactHistory(ctx context.Context) error {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
+	if len(a.history) <= 10 {
+		return nil // Not enough to compact
 	}
 
-	lastContent := a.history[len(a.history)-1]
+	// Keep only the first 2 messages (system context) and last 8 (recent turns)
+	// Everything else is discarded (not summarized) to ensure we reduce memory
+	keepStart := 2
+	keepEnd := 8
+	if len(a.history) < keepStart+keepEnd {
+		return nil
+	}
+
+	newHistory := make([]*genai.Content, 0, keepStart+keepEnd+1)
+	newHistory = append(newHistory, a.history[:keepStart]...)
+
+	// Add a placeholder indicating history was truncated
+	truncateNotice := genai.NewContentFromText(
+		"[Previous conversation history was truncated to prevent memory exhaustion. "+
+			"Context may be incomplete.]",
+		genai.RoleUser)
+	newHistory = append(newHistory, truncateNotice)
+
+	newHistory = append(newHistory, a.history[len(a.history)-keepEnd:]...)
+
+	a.history = newHistory
+	logging.Info("history force-compacted", "agent_id", a.ID, "new_len", len(a.history))
+
+	return nil
+}
+
+// getModelResponse gets a response from the model.
+func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) {
+	// Read history under lock for thread safety
+	a.stateMu.RLock()
+	historyLen := len(a.history)
+	if historyLen == 0 {
+		a.stateMu.RUnlock()
+		return nil, fmt.Errorf("empty history")
+	}
+	lastContent := a.history[historyLen-1]
+	a.stateMu.RUnlock()
 
 	// Check if the last content contains function responses (tool results).
 	// If so, use SendFunctionResponse instead of SendMessageWithHistory
@@ -1367,7 +1442,12 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 
 		if len(funcResponses) > 0 {
 			// Route through SendFunctionResponse for proper API formatting
-			historyWithoutLast := a.history[:len(a.history)-1]
+			// Copy history under lock
+			a.stateMu.RLock()
+			historyWithoutLast := make([]*genai.Content, len(a.history)-1)
+			copy(historyWithoutLast, a.history[:len(a.history)-1])
+			a.stateMu.RUnlock()
+
 			stream, err := a.client.SendFunctionResponse(ctx, historyWithoutLast, funcResponses)
 			if err != nil {
 				return nil, err
@@ -1392,7 +1472,12 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 		message = "Continue."
 	}
 
-	historyWithoutLast := a.history[:len(a.history)-1]
+	// Copy history under lock
+	a.stateMu.RLock()
+	historyWithoutLast := make([]*genai.Content, len(a.history)-1)
+	copy(historyWithoutLast, a.history[:len(a.history)-1])
+	a.stateMu.RUnlock()
+
 	stream, err := a.client.SendMessageWithHistory(ctx, historyWithoutLast, message)
 	if err != nil {
 		return nil, err
@@ -1440,14 +1525,39 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 	semaphore := make(chan struct{}, 5) // Max 5 concurrent executions
 
 	for _, call := range calls {
+		// Check context before spawning goroutine to avoid unnecessary work
+		if ctx.Err() != nil {
+			mu.Lock()
+			results[indexMap[call]] = &genai.FunctionResponse{
+				ID:       call.ID,
+				Name:     call.Name,
+				Response: tools.NewErrorResult("cancelled").ToMap(),
+			}
+			mu.Unlock()
+			continue
+		}
+
 		wg.Add(1)
 		go func(fc *genai.FunctionCall) {
 			defer wg.Done()
 
-			// Acquire semaphore slot
+			// Check context again before trying to acquire semaphore
+			if ctx.Err() != nil {
+				mu.Lock()
+				results[indexMap[fc]] = &genai.FunctionResponse{
+					ID:       fc.ID,
+					Name:     fc.Name,
+					Response: tools.NewErrorResult("cancelled").ToMap(),
+				}
+				mu.Unlock()
+				return
+			}
+
+			// Acquire semaphore slot with timeout to prevent goroutine leak
+			acquired := false
 			select {
 			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
+				acquired = true
 			case <-ctx.Done():
 				mu.Lock()
 				results[indexMap[fc]] = &genai.FunctionResponse{
@@ -1459,6 +1569,10 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 				return
 			}
 
+			if acquired {
+				defer func() { <-semaphore }()
+			}
+
 			result := a.executeToolWithReflection(ctx, fc)
 
 			mu.Lock()
@@ -1467,7 +1581,25 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 		}(call)
 	}
 
-	wg.Wait()
+	// Wait with timeout to prevent infinite blocking
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All goroutines completed normally
+	case <-ctx.Done():
+		// Context cancelled, but goroutines should exit on their own
+		// Wait a bit more for cleanup
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			logging.Warn("executeToolsParallel: some goroutines did not exit in time")
+		}
+	}
 }
 
 // executeToolWithReflection executes a tool with reflection and delegation on failure.

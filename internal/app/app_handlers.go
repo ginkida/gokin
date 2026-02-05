@@ -142,43 +142,11 @@ func (a *App) promptPlanApproval(ctx context.Context, p *plan.Plan) (plan.Approv
 		}
 	}
 
-	// Build plan approval request with optional contract fields
+	// Build plan approval request
 	msg := ui.PlanApprovalRequestMsg{
 		Title:       p.Title,
 		Description: p.Description,
 		Steps:       steps,
-	}
-
-	// Include contract fields if the plan has a contract specification
-	if p.Contract != nil {
-		msg.ContractName = p.Contract.Name
-		msg.Intent = p.Contract.Intent
-
-		// Format boundaries for display
-		for _, b := range p.Contract.Boundaries {
-			s := fmt.Sprintf("[%s] %s: %s", b.Type, b.Name, b.Description)
-			if b.Constraint != "" {
-				s += fmt.Sprintf(" (%s)", b.Constraint)
-			}
-			msg.Boundaries = append(msg.Boundaries, s)
-		}
-
-		// Format invariants for display
-		for _, inv := range p.Contract.Invariants {
-			msg.Invariants = append(msg.Invariants, fmt.Sprintf("[%s] %s: %s", inv.Type, inv.Name, inv.Description))
-		}
-
-		// Format examples for display
-		for _, ex := range p.Contract.Examples {
-			s := ex.Name
-			if ex.Input != "" {
-				s += ": " + ex.Input
-			}
-			if ex.ExpectedOutput != "" {
-				s += " -> " + ex.ExpectedOutput
-			}
-			msg.Examples = append(msg.Examples, s)
-		}
 	}
 
 	// Send plan approval request to TUI

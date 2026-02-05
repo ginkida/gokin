@@ -304,6 +304,12 @@ func (t *BatchTool) executeRename(ctx context.Context, files []string, from, to 
 		Description: fmt.Sprintf("rename '%s' to '%s'", from, to),
 	}
 
+	// Security: validate rename_to doesn't contain path traversal sequences
+	if strings.Contains(to, "..") || strings.Contains(to, "/") || strings.Contains(to, string(filepath.Separator)) {
+		result.Failed["validation"] = "rename_to cannot contain path separators or '..'"
+		return result
+	}
+
 	for _, path := range files {
 		select {
 		case <-ctx.Done():
@@ -322,6 +328,13 @@ func (t *BatchTool) executeRename(ctx context.Context, files []string, from, to 
 
 		newBase := strings.ReplaceAll(base, from, to)
 		newPath := filepath.Join(dir, newBase)
+
+		// Security: verify the new path stays in the same directory
+		newPath = filepath.Clean(newPath)
+		if filepath.Dir(newPath) != filepath.Clean(dir) {
+			result.Failed[path] = "path traversal detected: new path escapes original directory"
+			continue
+		}
 
 		if dryRun {
 			result.Succeeded = append(result.Succeeded, fmt.Sprintf("%s -> %s", path, newPath))

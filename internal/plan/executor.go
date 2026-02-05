@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-
-	"gokin/internal/contract"
 )
 
 // ApprovalDecision represents the user's decision on a plan.
@@ -40,10 +38,6 @@ type Manager struct {
 	onProgressUpdate func(progress *ProgressUpdate) // Progress update handler
 	undoExtension    *ManagerUndoExtension          // Undo/redo support
 
-	// Contract capabilities (merged from contract.Manager)
-	contractStore    *contract.Store
-	contractVerifier *contract.Verifier
-
 	// Plan persistence
 	planStore *PlanStore
 	workDir   string // Current working directory for plan context
@@ -51,6 +45,10 @@ type Manager struct {
 	// Context-clear signaling for plan execution
 	contextClearRequested bool
 	approvedPlanSnapshot  *Plan
+
+	// Execution mode tracking - distinguishes between plan creation and plan execution phases
+	executionMode   bool // true = executing approved plan, false = creating/designing plan
+	currentStepID   int  // ID of the step currently being executed (-1 if none)
 
 	mu sync.RWMutex
 }
@@ -60,6 +58,7 @@ func NewManager(enabled, requireApproval bool) *Manager {
 	return &Manager{
 		enabled:         enabled,
 		requireApproval: requireApproval,
+		currentStepID:   -1,
 	}
 }
 
@@ -500,32 +499,38 @@ func (m *Manager) ConsumeContextClearRequest() *Plan {
 	return plan
 }
 
-// SetContractStore sets the contract store for persistence.
-func (m *Manager) SetContractStore(store *contract.Store) {
+// SetExecutionMode sets whether the manager is in execution mode.
+// In execution mode, new plans cannot be created (nested plans are blocked).
+func (m *Manager) SetExecutionMode(executing bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.contractStore = store
+	m.executionMode = executing
+	if !executing {
+		m.currentStepID = -1
+	}
 }
 
-// SetContractVerifier sets the contract verifier.
-func (m *Manager) SetContractVerifier(verifier *contract.Verifier) {
+// IsExecuting returns true if currently executing an approved plan.
+// This is different from IsActive() - IsActive checks if a plan exists,
+// IsExecuting checks if we're in the execution phase (after approval).
+func (m *Manager) IsExecuting() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.executionMode
+}
+
+// SetCurrentStepID sets the ID of the step currently being executed.
+func (m *Manager) SetCurrentStepID(stepID int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.contractVerifier = verifier
+	m.currentStepID = stepID
 }
 
-// GetContractStore returns the contract store.
-func (m *Manager) GetContractStore() *contract.Store {
+// GetCurrentStepID returns the ID of the step currently being executed (-1 if none).
+func (m *Manager) GetCurrentStepID() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.contractStore
-}
-
-// GetContractVerifier returns the contract verifier.
-func (m *Manager) GetContractVerifier() *contract.Verifier {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.contractVerifier
+	return m.currentStepID
 }
 
 // SetPlanStore sets the plan store for persistence.
@@ -759,56 +764,4 @@ func (m *Manager) IsPlanPaused() bool {
 		return false
 	}
 	return m.currentPlan.Status == StatusPaused
-}
-
-// GetActiveContractContext returns formatted contract text for context injection.
-// Returns empty string if no active plan has a contract.
-func (m *Manager) GetActiveContractContext() string {
-	m.mu.RLock()
-	plan := m.currentPlan
-	m.mu.RUnlock()
-
-	if plan == nil || plan.Contract == nil {
-		return ""
-	}
-
-	spec := plan.Contract
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("Contract: %s\n", spec.Name))
-	sb.WriteString(fmt.Sprintf("Intent: %s\n", spec.Intent))
-
-	if len(spec.Boundaries) > 0 {
-		sb.WriteString("\nBoundaries:\n")
-		for _, b := range spec.Boundaries {
-			sb.WriteString(fmt.Sprintf("  - [%s] %s: %s", b.Type, b.Name, b.Description))
-			if b.Constraint != "" {
-				sb.WriteString(fmt.Sprintf(" (constraint: %s)", b.Constraint))
-			}
-			sb.WriteString("\n")
-		}
-	}
-
-	if len(spec.Invariants) > 0 {
-		sb.WriteString("\nInvariants:\n")
-		for _, inv := range spec.Invariants {
-			sb.WriteString(fmt.Sprintf("  - [%s] %s: %s\n", inv.Type, inv.Name, inv.Description))
-		}
-	}
-
-	if len(spec.Examples) > 0 {
-		sb.WriteString("\nExamples:\n")
-		for _, ex := range spec.Examples {
-			sb.WriteString(fmt.Sprintf("  - %s", ex.Name))
-			if ex.Input != "" {
-				sb.WriteString(fmt.Sprintf(": %s", ex.Input))
-			}
-			if ex.ExpectedOutput != "" {
-				sb.WriteString(fmt.Sprintf(" -> %s", ex.ExpectedOutput))
-			}
-			sb.WriteString("\n")
-		}
-	}
-
-	return sb.String()
 }

@@ -31,23 +31,33 @@ func (a *Agent) SetProgressCallback(callback ProgressCallback) {
 
 // updateProgress sends a progress update if callback is set.
 func (a *Agent) updateProgress() {
+	// Read progress fields under progressMu
 	a.progressMu.Lock()
 	callback := a.progressCallback
-	a.progressMu.Unlock()
-
 	if callback == nil {
+		a.progressMu.Unlock()
 		return
 	}
+	currentStep := a.currentStep
+	totalSteps := a.totalSteps
+	stepDescription := a.stepDescription
+	a.progressMu.Unlock()
+
+	// Read status and startTime under stateMu (separate lock)
+	a.stateMu.RLock()
+	status := a.status
+	startTime := a.startTime
+	a.stateMu.RUnlock()
 
 	progress := &AgentProgress{
 		AgentID:       a.ID,
 		AgentType:     a.Type,
-		CurrentStep:   a.currentStep,
-		TotalSteps:    a.totalSteps,
-		CurrentAction: a.stepDescription,
-		StartTime:     a.startTime,
-		Elapsed:       time.Since(a.startTime),
-		Status:        a.status,
+		CurrentStep:   currentStep,
+		TotalSteps:    totalSteps,
+		CurrentAction: stepDescription,
+		StartTime:     startTime,
+		Elapsed:       time.Since(startTime),
+		Status:        status,
 	}
 
 	callback(progress)
