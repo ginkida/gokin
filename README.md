@@ -36,6 +36,7 @@ Gokin (GLM-4 / Gemini Flash 3)   →     Claude Code (Claude Opus 4.5)
 |------|------|----------|
 | Gokin + Ollama | Free (local) | Privacy-focused, offline development |
 | Gokin + GLM-4 | ~$3/month | Initial development, bulk operations |
+| Gokin + DeepSeek | ~$1/month | Coding tasks, great value |
 | Gokin + Gemini Flash 3 | Free tier available | Fast iterations, prototyping |
 | Claude Code | ~$100/month | Final polish, complex reasoning |
 
@@ -50,6 +51,7 @@ Gokin (GLM-4 / Gemini Flash 3)   →     Claude Code (Claude Opus 4.5)
 
 ### AI Providers
 - **Google Gemini** — Gemini 3 Pro/Flash, free tier available
+- **DeepSeek** — Excellent coding model, very affordable (~$1/month)
 - **GLM-4** — Cost-effective Chinese model (~$3/month)
 - **Ollama** — Local LLMs (Llama, Qwen, DeepSeek, CodeLlama), free & private
 
@@ -99,6 +101,7 @@ sudo mv gokin /usr/local/bin/
 - Go 1.23+
 - One of:
   - Google Gemini API key (free tier available)
+  - DeepSeek API key
   - GLM-4 API key
   - Ollama installed locally (no API key needed)
 
@@ -142,6 +145,7 @@ gokin
 | Provider | Models | Cost | Best For |
 |----------|--------|------|----------|
 | **Gemini** | gemini-3-flash-preview, gemini-3-pro-preview | Free tier + paid | Fast iterations, prototyping |
+| **DeepSeek** | deepseek-chat, deepseek-reasoner | ~$1/month | Coding tasks, reasoning |
 | **GLM** | glm-4.7 | ~$3/month | Budget-friendly development |
 | **Ollama** | Any model from `ollama list` | Free (local) | Privacy, offline, custom models |
 
@@ -157,7 +161,7 @@ gokin
 
 ```bash
 # Via environment
-export GOKIN_BACKEND="gemini"   # or "glm" or "ollama"
+export GOKIN_BACKEND="gemini"   # or "deepseek", "glm", or "ollama"
 
 # Via config.yaml
 model:
@@ -315,12 +319,14 @@ All commands start with `/`:
 | `/theme` | Switch UI theme |
 | `/permissions` | Manage tool permissions |
 | `/sandbox` | Toggle sandbox mode |
+| `/update` | Check for and install updates |
 
 ### Authentication
 
 | Command | Description |
 |---------|-------------|
 | `/login <api_key>` | Set Gemini API key |
+| `/login <api_key> --deepseek` | Set DeepSeek API key |
 | `/login <api_key> --glm` | Set GLM API key |
 | `/login <api_key> --ollama` | Set Ollama API key (for remote servers) |
 | `/logout` | Remove saved API key |
@@ -398,8 +404,8 @@ AI has access to 50+ tools:
 |------|-------------|
 | `enter_plan_mode` | Start planning mode |
 | `update_plan_progress` | Update plan step status |
-| `verify_plan` | Verify plan against contract |
-| `undo_plan` / `redo_plan` | Undo/redo plan steps |
+| `get_plan_status` | Get current plan status |
+| `exit_plan_mode` | Exit plan mode |
 
 ### Task Management
 
@@ -430,10 +436,11 @@ Configuration is stored in `~/.config/gokin/config.yaml`:
 ```yaml
 api:
   gemini_key: ""                 # Gemini API key (or via GEMINI_API_KEY)
+  deepseek_key: ""               # DeepSeek API key (or via DEEPSEEK_API_KEY)
   glm_key: ""                    # GLM API key (or via GLM_API_KEY)
   ollama_key: ""                 # Ollama API key (optional, for remote servers)
   ollama_base_url: ""            # Ollama server URL (default: http://localhost:11434)
-  backend: "gemini"              # gemini, glm, or ollama
+  backend: "gemini"              # gemini, deepseek, glm, or ollama
 
 model:
   name: "gemini-3-flash-preview" # Model name
@@ -521,13 +528,15 @@ logging:
 |----------|-------------|
 | `GEMINI_API_KEY` | Gemini API key |
 | `GOKIN_GEMINI_KEY` | Gemini API key (alternative) |
+| `DEEPSEEK_API_KEY` | DeepSeek API key |
+| `GOKIN_DEEPSEEK_KEY` | DeepSeek API key (alternative) |
 | `GLM_API_KEY` | GLM API key |
 | `GOKIN_GLM_KEY` | GLM API key (alternative) |
 | `OLLAMA_API_KEY` | Ollama API key (for remote servers) |
 | `GOKIN_OLLAMA_KEY` | Ollama API key (alternative) |
 | `OLLAMA_HOST` | Ollama server URL (default: http://localhost:11434) |
 | `GOKIN_MODEL` | Model name (overrides config) |
-| `GOKIN_BACKEND` | Backend: gemini, glm, or ollama |
+| `GOKIN_BACKEND` | Backend: gemini, deepseek, glm, or ollama |
 
 ### Secure API Key Storage
 
@@ -536,6 +545,9 @@ logging:
 ```bash
 # Add to ~/.bashrc or ~/.zshrc
 export GEMINI_API_KEY="your-api-key"
+
+# Or for DeepSeek
+export DEEPSEEK_API_KEY="your-api-key"
 
 # Or for GLM
 export GLM_API_KEY="your-api-key"
@@ -992,7 +1004,7 @@ gokin/
 │   │   └── shared_memory.go # Inter-agent memory
 │   ├── client/              # AI providers
 │   │   ├── gemini.go        # Google Gemini
-│   │   ├── anthropic.go     # GLM-4 (Anthropic-compatible)
+│   │   ├── anthropic.go     # DeepSeek & GLM-4 (Anthropic-compatible)
 │   │   └── ollama.go        # Ollama (local LLMs)
 │   ├── mcp/                 # MCP (Model Context Protocol)
 │   │   ├── client.go        # MCP client
