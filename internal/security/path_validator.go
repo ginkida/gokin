@@ -81,7 +81,7 @@ func (v *PathValidator) Validate(path string) (string, error) {
 
 	// Check if resolved path is within allowed directories
 	if !v.isAllowed(resolvedPath) {
-		return "", fmt.Errorf("path '%s' is outside allowed directories", path)
+		return "", fmt.Errorf("path '%s' is outside allowed directories", filepath.Base(path))
 	}
 
 	return resolvedPath, nil
@@ -158,9 +158,11 @@ func (v *PathValidator) isPathWithin(target, base string) bool {
 	joined := filepath.Join(base, rel)
 	// On Windows, paths are case-insensitive, so we need to compare accordingly
 	if runtime.GOOS == "windows" {
-		return strings.HasPrefix(strings.ToLower(joined), strings.ToLower(base))
+		lowerJoined := strings.ToLower(joined)
+		lowerBase := strings.ToLower(base)
+		return lowerJoined == lowerBase || strings.HasPrefix(lowerJoined, lowerBase+string(filepath.Separator))
 	}
-	return strings.HasPrefix(joined, base)
+	return joined == base || strings.HasPrefix(joined, base+string(filepath.Separator))
 }
 
 // checkSymlink checks if any component of the path is a symlink.
@@ -230,8 +232,8 @@ func JoinPathSafe(base, rel string) (string, error) {
 
 	joined := filepath.Join(cleanBase, cleanRel)
 
-	// Verify the result is still within base
-	if !strings.HasPrefix(joined, cleanBase) {
+	// Verify the result is still within base (use separator-aware check to prevent prefix matching bugs)
+	if joined != cleanBase && !strings.HasPrefix(joined, cleanBase+string(filepath.Separator)) {
 		return "", fmt.Errorf("path traversal attempt detected")
 	}
 

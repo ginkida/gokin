@@ -118,6 +118,17 @@ func loadFromFile(cfg *Config, path string) error {
 		return err
 	}
 
+	// Warn if config file has overly permissive permissions
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode := info.Mode().Perm()
+		if mode&0077 != 0 {
+			slog.Warn("config file has insecure permissions",
+				"path", path,
+				"mode", fmt.Sprintf("%04o", mode),
+				"recommended", "0600")
+		}
+	}
+
 	// Expand only safe environment variables in the config file
 	expanded := expandSafeEnvVars(string(data))
 

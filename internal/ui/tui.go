@@ -1794,7 +1794,8 @@ func (m Model) View() string {
 
 		if m.currentTool != "" {
 			// Tool execution: ⠋ bash  go build ./...  3.2s
-			status := spinner + " " + dimStyle.Render(m.currentTool)
+			toolNameStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+			status := spinner + " " + toolNameStyle.Render(m.currentTool)
 
 			if m.currentToolInfo != "" {
 				infoStyle := lipgloss.NewStyle().Foreground(ColorMuted)

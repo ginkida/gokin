@@ -13,6 +13,8 @@ import (
 	"gokin/internal/undo"
 )
 
+const maxCopyDepth = 50
+
 // CopyTool copies files or directories.
 type CopyTool struct {
 	workDir       string
@@ -159,8 +161,17 @@ func (t *CopyTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	return NewSuccessResult(fmt.Sprintf("Copied %s to %s", source, dest)), nil
 }
 
-// copyFile copies a single file.
+// copyFile copies a single file. Rejects symlinks to prevent symlink attacks.
 func (t *CopyTool) copyFile(src, dst string) error {
+	// Check source is not a symlink (use Lstat to detect symlinks)
+	srcLstat, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if srcLstat.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to copy symlink: %s", filepath.Base(src))
+	}
+
 	// Create destination directory if needed
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
@@ -187,9 +198,26 @@ func (t *CopyTool) copyFile(src, dst string) error {
 	return err
 }
 
-// copyDir copies a directory recursively.
+// copyDir copies a directory recursively with depth limit and symlink protection.
 func (t *CopyTool) copyDir(src, dst string) ([]string, error) {
+	return t.copyDirRecursive(src, dst, 0)
+}
+
+func (t *CopyTool) copyDirRecursive(src, dst string, depth int) ([]string, error) {
+	if depth > maxCopyDepth {
+		return nil, fmt.Errorf("maximum directory depth (%d) exceeded", maxCopyDepth)
+	}
+
 	var copiedPaths []string
+
+	// Use Lstat to detect symlinks at directory level
+	srcLstat, err := os.Lstat(src)
+	if err != nil {
+		return nil, err
+	}
+	if srcLstat.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to copy symlink directory: %s", filepath.Base(src))
+	}
 
 	srcInfo, err := os.Stat(src)
 	if err != nil {
@@ -209,8 +237,18 @@ func (t *CopyTool) copyDir(src, dst string) ([]string, error) {
 		srcPath := filepath.Join(src, entry.Name())
 		dstPath := filepath.Join(dst, entry.Name())
 
+		// Check each entry with Lstat to detect symlinks
+		entryInfo, err := os.Lstat(srcPath)
+		if err != nil {
+			return copiedPaths, err
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			// Skip symlinks silently
+			continue
+		}
+
 		if entry.IsDir() {
-			subPaths, err := t.copyDir(srcPath, dstPath)
+			subPaths, err := t.copyDirRecursive(srcPath, dstPath, depth+1)
 			if err != nil {
 				return copiedPaths, err
 			}

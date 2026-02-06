@@ -84,6 +84,16 @@ func NewOllamaClient(config OllamaConfig) (*OllamaClient, error) {
 		return nil, fmt.Errorf("invalid BaseURL: %w", err)
 	}
 
+	// Warn if using unencrypted HTTP to a non-localhost host
+	if baseURL.Scheme == "http" {
+		host := baseURL.Hostname()
+		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+			logging.Warn("Ollama connection uses unencrypted HTTP to remote host",
+				"host", host,
+				"recommendation", "use HTTPS for remote Ollama servers")
+		}
+	}
+
 	// Create HTTP client with timeout and optional auth
 	var httpClient *http.Client
 	if config.APIKey != "" {

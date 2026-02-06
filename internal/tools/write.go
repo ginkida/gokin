@@ -112,9 +112,9 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	}
 	filePath = validPath
 
-	// Create parent directories if they don't exist
+	// Create parent directories if they don't exist (0750: restrict group write, no others)
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return NewErrorResult(fmt.Sprintf("error creating directories: %s", err)), nil
 	}
 

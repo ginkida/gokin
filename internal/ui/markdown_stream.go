@@ -5,8 +5,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/lipgloss"
 	"gokin/internal/highlight"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // RenderedBlock represents a rendered piece of content.
@@ -30,9 +31,6 @@ type MarkdownStreamParser struct {
 	// Table buffering state: accumulate consecutive table lines before rendering
 	inTable   bool
 	tableRows []string
-
-	// Inline code style (computed once from styles)
-	inlineCodeStyle lipgloss.Style
 }
 
 // codeBlockStartRegex matches code block start: ```lang or ```lang:filename
@@ -56,13 +54,13 @@ var tableSeparatorRegex = regexp.MustCompile(`^\s*\|[\s\-:|]+\|\s*$`)
 
 // Markdown inline formatting regexes
 var (
-	headingRegex       = regexp.MustCompile(`^(#{1,6})\s+(.+)$`)
-	blockquoteRegex    = regexp.MustCompile(`^>\s?(.*)$`)
+	headingRegex        = regexp.MustCompile(`^(#{1,6})\s+(.+)$`)
+	blockquoteRegex     = regexp.MustCompile(`^>\s?(.*)$`)
 	horizontalRuleRegex = regexp.MustCompile(`^(---+|\*\*\*+|___+)\s*$`)
-	boldRegex          = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	italicRegex        = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
-	linkRegex          = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	strikethroughRegex = regexp.MustCompile(`~~(.+?)~~`)
+	boldRegex           = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	italicRegex         = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
+	linkRegex           = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	strikethroughRegex  = regexp.MustCompile(`~~(.+?)~~`)
 )
 
 // NewMarkdownStreamParser creates a new streaming markdown parser.
@@ -70,10 +68,6 @@ func NewMarkdownStreamParser(styles *Styles) *MarkdownStreamParser {
 	return &MarkdownStreamParser{
 		highlighter: highlight.New("monokai"),
 		styles:      styles,
-		inlineCodeStyle: lipgloss.NewStyle().
-			Background(lipgloss.Color("#2D2D2D")).
-			Foreground(lipgloss.Color("#E06C75")).
-			Padding(0, 1),
 	}
 }
 
@@ -284,11 +278,18 @@ func (p *MarkdownStreamParser) renderCodeBlockWithBorder(filename, lang, content
 		if sideLen < 3 {
 			sideLen = 3
 		}
-		leftDash := strings.Repeat("─", sideLen)
-		rightDash := strings.Repeat("─", contentWidth-sideLen-labelLen)
-		if len(rightDash) < 0 {
-			rightDash = "───"
+
+		leftDashLen := sideLen
+		rightDashLen := contentWidth - sideLen - labelLen
+
+		// Ensure non-negative lengths
+		if rightDashLen < 0 {
+			rightDashLen = 0
 		}
+
+		leftDash := strings.Repeat("─", leftDashLen)
+		rightDash := strings.Repeat("─", rightDashLen)
+
 		result.WriteString(p.styles.Dim.Render(leftDash+" ") + p.styles.CodeBlockHeader.Render(label) + p.styles.Dim.Render(" "+rightDash))
 	} else {
 		result.WriteString(p.styles.Dim.Render(strings.Repeat("─", contentWidth)))
@@ -336,7 +337,7 @@ func (p *MarkdownStreamParser) renderInlineCode(line string) string {
 		inner := matched[1 : len(matched)-1]
 
 		// Apply inline code style
-		result.WriteString(p.inlineCodeStyle.Render(inner))
+		result.WriteString(p.styles.InlineCode.Render(inner))
 
 		// Advance past the match
 		remaining = remaining[loc[1]:]
@@ -366,7 +367,7 @@ func (p *MarkdownStreamParser) renderListItem(line string) (string, bool) {
 		bullets := []string{"●", "○", "■", "□", "◆", "◇"}
 		bullet := bullets[depth%len(bullets)]
 
-		rendered := prefix + bulletStyle.Render(bullet) + " " + p.renderInlineCode(content)
+		rendered := prefix + bulletStyle.Render(bullet) + " " + p.renderInlineFormatting(content)
 		return rendered, true
 	}
 
@@ -380,7 +381,7 @@ func (p *MarkdownStreamParser) renderListItem(line string) (string, bool) {
 		// Build indentation: 2 spaces per depth level
 		prefix := strings.Repeat("  ", depth)
 
-		rendered := prefix + numberStyle.Render(num+".") + " " + p.renderInlineCode(content)
+		rendered := prefix + numberStyle.Render(num+".") + " " + p.renderInlineFormatting(content)
 		return rendered, true
 	}
 
@@ -415,15 +416,19 @@ func (p *MarkdownStreamParser) renderMarkdownLine(line string) string {
 			headingStyle = headingStyle.Foreground(ColorText)
 		}
 		prefix := strings.Repeat("#", level) + " "
-		return headingStyle.Render(prefix + p.renderInlineFormatting(text))
+		// Allow inline code in headings, strip bold/strike markers, apply heading color
+		cleanText := stripMarkdownMarkers(text)
+		styledText := p.renderInlineCode(cleanText)
+		return applyBaseStyle(prefix+styledText, headingStyle)
 	}
 
 	// Blockquotes: > text
 	if matches := blockquoteRegex.FindStringSubmatch(line); matches != nil {
 		quoteStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 		barStyle := lipgloss.NewStyle().Foreground(ColorDim)
-		content := p.renderInlineFormatting(matches[1])
-		return barStyle.Render("│ ") + quoteStyle.Render(content)
+		styledContent := p.renderInlineCode(matches[1])
+		cleanContent := stripMarkdownMarkers(styledContent)
+		return barStyle.Render("│ ") + applyBaseStyle(cleanContent, quoteStyle)
 	}
 
 	// List items
@@ -488,12 +493,22 @@ func (p *MarkdownStreamParser) renderInlineFormatting(line string) string {
 	line = linkRegex.ReplaceAllStringFunc(line, func(match string) string {
 		inner := linkRegex.FindStringSubmatch(match)
 		if len(inner) > 2 {
-			return inner[1] + " (" + linkStyle.Render(inner[2]) + ")"
+			return inner[1] + " " + linkStyle.Render("("+inner[2]+")")
 		}
 		return match
 	})
 
-	return line
+	// Ensure all plain text has explicit foreground color
+	return applyBaseStyle(line, lipgloss.NewStyle().Foreground(ColorText))
+}
+
+// stripMarkdownMarkers removes bold and strikethrough markers from text.
+// Used for headings/blockquotes where the parent style already provides formatting,
+// avoiding nested ANSI sequences that break foreground colors.
+func stripMarkdownMarkers(text string) string {
+	text = boldRegex.ReplaceAllString(text, "$1")
+	text = strikethroughRegex.ReplaceAllString(text, "$1")
+	return text
 }
 
 // listDepth calculates the nesting depth from leading whitespace.
@@ -688,4 +703,23 @@ var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 func visibleWidth(s string) int {
 	clean := ansiRegex.ReplaceAllString(s, "")
 	return len(clean)
+}
+
+// applyBaseStyle ensures that plain text between styled spans has an explicit foreground color.
+// Inner styled spans emit \x1b[0m (full reset) which strips the outer foreground.
+// This function re-applies the base style's ANSI sequence after every reset.
+func applyBaseStyle(text string, base lipgloss.Style) string {
+	if text == "" {
+		return text
+	}
+	// Render an empty string to extract the ANSI start sequence from the style
+	rendered := base.Render("")
+	idx := strings.Index(rendered, "\x1b[0m")
+	if idx <= 0 {
+		return text
+	}
+	baseSeq := rendered[:idx]
+	// After every ANSI reset, re-apply the base style
+	text = strings.ReplaceAll(text, "\x1b[0m", "\x1b[0m"+baseSeq)
+	return baseSeq + text + "\x1b[0m"
 }

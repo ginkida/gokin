@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +15,9 @@ import (
 
 	"google.golang.org/genai"
 )
+
+// validHostPattern restricts SSH hostnames to safe characters only.
+var validHostPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // SSHTool executes commands on remote servers via SSH.
 type SSHTool struct {
@@ -152,6 +157,11 @@ func (t *SSHTool) Validate(args map[string]any) error {
 	host, ok := GetString(args, "host")
 	if !ok || host == "" {
 		return NewValidationError("host", "host is required")
+	}
+
+	// Validate host format to prevent injection
+	if !validHostPattern.MatchString(host) {
+		return NewValidationError("host", "contains disallowed characters")
 	}
 
 	// Validate host
@@ -302,13 +312,21 @@ func (t *SSHTool) executeBackground(ctx context.Context, args map[string]any, co
 		return NewErrorResult(fmt.Sprintf("invalid username: %s", result.Reason)), nil
 	}
 
-	// Create wrapped command that includes SSH
-	// Use accept-new instead of no for StrictHostKeyChecking to protect against MITM attacks
-	// while still allowing connections to new hosts
-	sshCommand := fmt.Sprintf("ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes %s@%s -p %d '%s'",
-		config.User, config.Host, config.Port, command)
+	// Validate host to prevent injection via hostname
+	if !validHostPattern.MatchString(config.Host) {
+		return NewErrorResult("invalid hostname: contains disallowed characters"), nil
+	}
 
-	taskID, err := t.taskManager.Start(ctx, sshCommand)
+	// Use StartWithArgs to avoid shell interpretation and command injection
+	sshArgs := []string{
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "BatchMode=yes",
+		"-p", strconv.Itoa(config.Port),
+		fmt.Sprintf("%s@%s", config.User, config.Host),
+		command,
+	}
+
+	taskID, err := t.taskManager.StartWithArgs(ctx, "ssh", sshArgs)
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("failed to start background task: %s", err)), nil
 	}

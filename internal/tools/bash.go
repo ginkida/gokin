@@ -66,6 +66,24 @@ const (
 	StreamingFlushInterval = 100 * time.Millisecond
 )
 
+// dangerousEnvVars is a blocklist of environment variables that can be used
+// for code injection or privilege escalation.
+var dangerousEnvVars = map[string]bool{
+	"LD_PRELOAD":            true,
+	"LD_LIBRARY_PATH":       true,
+	"DYLD_INSERT_LIBRARIES": true,
+	"DYLD_LIBRARY_PATH":     true,
+	"BASH_ENV":              true,
+	"ENV":                   true,
+	"PROMPT_COMMAND":         true,
+	"IFS":                   true,
+	"CDPATH":                true,
+	"SHELLOPTS":             true,
+	"BASHOPTS":              true,
+	"BASH_FUNC_":            true,
+	"PS4":                   true,
+}
+
 // BashSession maintains persistent state across bash command invocations.
 // It tracks the working directory and environment variables so that
 // sequential commands behave as if they run in the same shell session.
@@ -98,10 +116,23 @@ func (s *BashSession) SetWorkDir(dir string) {
 }
 
 // SetEnv sets an environment variable in the session.
-func (s *BashSession) SetEnv(key, value string) {
+// Returns an error if the variable is in the dangerous blocklist.
+func (s *BashSession) SetEnv(key, value string) error {
+	// Check against blocklist (exact match and prefix match for BASH_FUNC_)
+	upperKey := strings.ToUpper(key)
+	if dangerousEnvVars[upperKey] {
+		return fmt.Errorf("environment variable %q is blocked for security reasons", key)
+	}
+	for blocked := range dangerousEnvVars {
+		if strings.HasPrefix(upperKey, blocked) {
+			return fmt.Errorf("environment variable %q is blocked for security reasons", key)
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.env[key] = value
+	return nil
 }
 
 // Env returns a copy of the session environment variables.
@@ -317,10 +348,21 @@ func (t *BashTool) executeBackground(ctx context.Context, command string) (ToolR
 func (t *BashTool) buildSessionEnv() []string {
 	env := buildSafeEnv()
 
-	// Inject session environment variables (override safe env if same key)
+	// Inject session environment variables
 	sessionEnv := t.session.Env()
 	for key, val := range sessionEnv {
-		// Remove existing entry for this key if present
+		// For PATH, append instead of replacing to prevent hijacking
+		if strings.ToUpper(key) == "PATH" {
+			for i, e := range env {
+				if strings.HasPrefix(e, "PATH=") {
+					env[i] = e + string(os.PathListSeparator) + val
+					break
+				}
+			}
+			continue
+		}
+
+		// Override existing entry or append
 		found := false
 		prefix := key + "="
 		for i, e := range env {

@@ -61,6 +61,32 @@ func (m *Manager) Start(ctx context.Context, command string) (string, error) {
 	return id, nil
 }
 
+// StartWithArgs starts a new background task using direct exec (no shell interpretation).
+// This prevents command injection attacks when constructing commands from user input.
+func (m *Manager) StartWithArgs(ctx context.Context, program string, args []string) (string, error) {
+	m.mu.Lock()
+	m.counter++
+	id := fmt.Sprintf("task_%d_%d", time.Now().Unix(), m.counter)
+
+	task := NewTaskWithArgs(id, program, args, m.workDir)
+	m.tasks[id] = task
+	onComplete := m.onComplete
+	m.mu.Unlock()
+
+	// Start the task
+	if err := task.Start(ctx); err != nil {
+		m.mu.Lock()
+		delete(m.tasks, id)
+		m.mu.Unlock()
+		return "", err
+	}
+
+	// Monitor for completion
+	go m.monitorTask(task, onComplete)
+
+	return id, nil
+}
+
 // monitorTask waits for task completion and calls the handler.
 func (m *Manager) monitorTask(task *Task, onComplete CompletionHandler) {
 	// Poll for completion

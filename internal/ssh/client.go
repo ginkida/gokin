@@ -16,6 +16,7 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // SSHConfig holds connection configuration.
@@ -164,9 +165,11 @@ func (c *SSHClient) buildSSHConfig() (*ssh.ClientConfig, error) {
 		return nil, fmt.Errorf("no authentication method available")
 	}
 
-	// Host key callback - use InsecureIgnoreHostKey for now
-	// In production, should verify against known_hosts
-	hostKeyCallback := ssh.InsecureIgnoreHostKey()
+	// Host key callback - use known_hosts file for host key verification
+	hostKeyCallback, err := c.buildHostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build host key callback: %w", err)
+	}
 
 	return &ssh.ClientConfig{
 		User:            c.config.User,
@@ -174,6 +177,24 @@ func (c *SSHClient) buildSSHConfig() (*ssh.ClientConfig, error) {
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         c.config.Timeout,
 	}, nil
+}
+
+// buildHostKeyCallback creates a host key callback using known_hosts file.
+// Falls back to InsecureIgnoreHostKey if known_hosts file is not available.
+func (c *SSHClient) buildHostKeyCallback() (ssh.HostKeyCallback, error) {
+	if c.config.KnownHostsPath != "" {
+		khPath := expandPath(c.config.KnownHostsPath)
+		if _, err := os.Stat(khPath); err == nil {
+			callback, err := knownhosts.New(khPath)
+			if err != nil {
+				logging.Warn("failed to parse known_hosts, falling back to insecure", "path", khPath, "error", err)
+				return ssh.InsecureIgnoreHostKey(), nil
+			}
+			return callback, nil
+		}
+		logging.Warn("known_hosts file not found, host key verification disabled", "path", khPath)
+	}
+	return ssh.InsecureIgnoreHostKey(), nil
 }
 
 // Execute runs a command on the remote host.

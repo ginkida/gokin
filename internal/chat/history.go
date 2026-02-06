@@ -36,8 +36,8 @@ func NewHistoryManager() (*HistoryManager, error) {
 		return nil, err
 	}
 
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	// Create directory if it doesn't exist (0700: only owner can access session data)
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, err
 	}
 
@@ -78,9 +78,9 @@ func (m *HistoryManager) Save(session *Session) error {
 		return err
 	}
 
-	// Write file
+	// Write file (0600: only owner can read/write session data)
 	filename := filepath.Join(m.dataDir, session.ID+".json")
-	return os.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0600)
 }
 
 // Load loads a session history from disk.
@@ -162,8 +162,8 @@ func (m *HistoryManager) SaveFull(session *Session) error {
 		return err
 	}
 
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
+	// Create directory if it doesn't exist (0700: only owner can access session data)
+	if err := os.MkdirAll(sessionsDir, 0700); err != nil {
 		return err
 	}
 
@@ -175,9 +175,9 @@ func (m *HistoryManager) SaveFull(session *Session) error {
 		return err
 	}
 
-	// Write file
+	// Write file (0600: only owner can read/write session data)
 	filename := filepath.Join(sessionsDir, session.ID+".json")
-	return os.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0600)
 }
 
 // LoadFull loads a complete session state.
@@ -209,8 +209,8 @@ func (m *HistoryManager) ListSessions() ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
+	// Create directory if it doesn't exist (0700: only owner can access session data)
+	if err := os.MkdirAll(sessionsDir, 0700); err != nil {
 		return nil, err
 	}
 

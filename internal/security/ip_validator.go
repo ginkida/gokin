@@ -173,7 +173,11 @@ func (v *IPValidator) ValidateURL(rawURL string) URLValidationResult {
 		}
 	}
 
-	// Check ALL resolved IPs (defense against DNS rebinding)
+	// Check ALL resolved IPs (defense against DNS rebinding).
+	// Note: This does not fully prevent DNS rebinding attacks, as DNS may return
+	// different IPs between validation and the actual HTTP request. Full mitigation
+	// requires DNS pinning via a custom net.Dialer / http.Transport that reuses
+	// the resolved IP. This should be addressed in a future PR.
 	for _, ip := range ips {
 		if v.isBlockedIP(ip) {
 			return URLValidationResult{

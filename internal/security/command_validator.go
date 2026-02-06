@@ -87,6 +87,10 @@ func NewCommandValidator() *CommandValidator {
 			"mimikatz",
 			"hashdump",
 			"secretsdump",
+			// Env variable injection for code loading
+			"LD_PRELOAD=",
+			"LD_LIBRARY_PATH=",
+			"DYLD_INSERT_LIBRARIES=",
 		},
 	}
 
@@ -152,6 +156,11 @@ func NewCommandValidator() *CommandValidator {
 		regexp.MustCompile(`[;&|]\s*(ba)?sh`),                 // ;sh, |sh, &sh
 		regexp.MustCompile(`(?i)eval\s+.*(base64|curl|wget|nc\b)`), // eval with known-dangerous commands
 		regexp.MustCompile(`>\s*/dev/(tcp|udp)/`),              // redundant but safer with separators
+
+		// Additional eval patterns
+		regexp.MustCompile(`\beval\s+["']`),                    // eval "..." / eval '...'
+		regexp.MustCompile(`\beval\s+\$`),                      // eval $var
+		regexp.MustCompile(`\bsource\s+/dev/`),                 // source /dev/tcp
 	}
 
 	// Caution patterns: suspicious but not outright blocked.

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // Updater is the main orchestrator for the update system.
@@ -172,8 +174,9 @@ func (u *Updater) Download(ctx context.Context, info *UpdateInfo, progress Progr
 		return "", err
 	}
 
-	// Verify checksum if available
-	if u.config.VerifyChecksum && info.ChecksumURL != "" {
+	// Verify checksum
+	if info.ChecksumURL != "" {
+		// Checksum URL available - always verify regardless of config
 		if progress != nil {
 			progress(&UpdateProgress{
 				Status:  StatusVerifying,
@@ -205,6 +208,12 @@ func (u *Updater) Download(ctx context.Context, info *UpdateInfo, progress Progr
 				return "", err
 			}
 		}
+	} else if u.config.VerifyChecksum {
+		// Checksum required by config but not available from release
+		os.Remove(downloadedPath)
+		return "", fmt.Errorf("checksum verification required but no checksum URL available for this release")
+	} else {
+		logging.Warn("no checksum available for update, skipping verification")
 	}
 
 	// Extract binary if needed

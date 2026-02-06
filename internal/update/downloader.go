@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Downloader handles downloading update files.
@@ -26,7 +27,7 @@ type Downloader struct {
 func NewDownloader(config *Config, tempDir string) *Downloader {
 	return &Downloader{
 		httpClient: &http.Client{
-			Timeout: 0, // No timeout for downloads (can be large)
+			Timeout: 10 * time.Minute, // Safety timeout for downloads
 		},
 		config:  config,
 		tempDir: tempDir,
@@ -228,6 +229,11 @@ func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error
 			return "", err
 		}
 
+		// Skip symlinks and hard links to prevent path traversal attacks
+		if header.Typeflag == tar.TypeSymlink || header.Typeflag == tar.TypeLink {
+			continue
+		}
+
 		// Look for the binary
 		baseName := filepath.Base(header.Name)
 		if baseName == binaryName || baseName == binaryName+".exe" {
@@ -262,6 +268,11 @@ func (d *Downloader) extractZip(archivePath, binaryName string) (string, error) 
 	defer r.Close()
 
 	for _, f := range r.File {
+		// Skip symlinks to prevent path traversal attacks
+		if f.FileInfo().Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+
 		baseName := filepath.Base(f.Name)
 		if baseName == binaryName || baseName == binaryName+".exe" {
 			if !f.FileInfo().IsDir() {

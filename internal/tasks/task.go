@@ -120,6 +120,10 @@ type Task struct {
 	EndTime   time.Time
 	WorkDir   string
 
+	// Program and Args allow exec without shell interpretation (prevents injection).
+	Program string
+	Args    []string
+
 	cmd        *exec.Cmd
 	cancelFunc context.CancelFunc
 	mu         sync.RWMutex
@@ -130,6 +134,19 @@ func NewTask(id, command, workDir string) *Task {
 	return &Task{
 		ID:      id,
 		Command: command,
+		Status:  StatusPending,
+		WorkDir: workDir,
+	}
+}
+
+// NewTaskWithArgs creates a new background task that executes a program directly
+// without shell interpretation. This prevents command injection attacks.
+func NewTaskWithArgs(id, program string, args []string, workDir string) *Task {
+	return &Task{
+		ID:      id,
+		Command: program + " " + fmt.Sprintf("%v", args),
+		Program: program,
+		Args:    args,
 		Status:  StatusPending,
 		WorkDir: workDir,
 	}
@@ -147,8 +164,13 @@ func (t *Task) Start(ctx context.Context) error {
 	execCtx, cancel := context.WithCancel(ctx)
 	t.cancelFunc = cancel
 
-	// Create command
-	t.cmd = exec.CommandContext(execCtx, "sh", "-c", t.Command)
+	// Create command - use Program/Args if set (no shell interpretation),
+	// otherwise fall back to shell execution
+	if t.Program != "" {
+		t.cmd = exec.CommandContext(execCtx, t.Program, t.Args...)
+	} else {
+		t.cmd = exec.CommandContext(execCtx, "sh", "-c", t.Command)
+	}
 	t.cmd.Dir = t.WorkDir
 	t.cmd.Stdout = &t.Output
 	t.cmd.Stderr = &t.Output

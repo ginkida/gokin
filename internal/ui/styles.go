@@ -179,6 +179,9 @@ type Styles struct {
 	ModalMuted    lipgloss.Style // Dimmed text (ColorDim + italic)
 	ModalDefault  lipgloss.Style // Default indicator (ColorContext + italic)
 
+	// Markdown styles
+	InlineCode lipgloss.Style // Style for inline code blocks (backticks)
+
 	// Code block styles
 	CodeBlockBorder   lipgloss.Style // Border for code blocks
 	CodeBlockHeader   lipgloss.Style // Header with filename/language
@@ -327,6 +330,12 @@ func DefaultStyles() *Styles {
 			Foreground(ColorContext).
 			Italic(true),
 
+		// Markdown styles
+		InlineCode: lipgloss.NewStyle().
+			Foreground(ColorPrimary).              // Soft Purple (Lavender) - more subtle than Pink
+			Background(lipgloss.Color("#1E293B")). // Slate 800 (Dark but visible)
+			Padding(0, 1),
+
 		// Code block styles
 		CodeBlockBorder: lipgloss.NewStyle().
 			Foreground(ColorBorder),
@@ -469,7 +478,7 @@ func (s *Styles) FormatToolExecuting(name string, args map[string]any) string {
 func (s *Styles) FormatToolExecutingBlock(name string, args map[string]any) string {
 	bulletStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	nameStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	argsStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	argsStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	var result strings.Builder
 	result.WriteString(bulletStyle.Render("◦ "))
