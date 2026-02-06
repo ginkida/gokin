@@ -29,7 +29,7 @@ func (c *InstructionsCommand) Usage() string {
 // GetMetadata returns command metadata for the palette.
 func (c *InstructionsCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryContext,
+		Category: CategorySession,
 		Icon:     "note",
 		Priority: 10,
 		HasArgs:  true,

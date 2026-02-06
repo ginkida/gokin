@@ -56,8 +56,8 @@ func DefaultShortcuts() []ShortcutCategory {
 			Name: "Command Center",
 			Shortcuts: []Shortcut{
 				{Keys: []string{"Ctrl", "p"}, Description: "Command Palette (All Actions)"},
-				{Keys: []string{"y"}, Description: "Copy last response"},
-				{Keys: []string{"Y"}, Description: "Copy conversation history"},
+				{Keys: []string{"Ctrl", "G"}, Description: "Toggle select mode (freeze + native selection)"},
+				{Keys: []string{"Option", "C"}, Description: "Copy last AI response"},
 			},
 		},
 		{

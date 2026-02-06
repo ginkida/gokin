@@ -16,7 +16,7 @@ func (c *ThemeCommand) Description() string { return "Change UI color theme" }
 func (c *ThemeCommand) Usage() string       { return "/theme [theme-name]" }
 func (c *ThemeCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryTools,
 		Icon:     "theme",
 		Priority: 40,
 		HasArgs:  true,

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -199,6 +200,10 @@ type Model struct {
 	lastRequestLatency time.Duration
 	retryAttempt       int
 	retryMax           int
+
+	// Copy support: track last AI response
+	lastResponseText   string           // Last AI response text (saved on ResponseDoneMsg)
+	currentResponseBuf *strings.Builder // Accumulates current streaming response (pointer to survive Bubble Tea copies)
 }
 
 // BackgroundTaskState tracks the state of a background task for UI display.
@@ -265,6 +270,7 @@ func NewModel() *Model {
 		backgroundTasks:      make(map[string]*BackgroundTaskState),
 		toolProgressBar:      NewToolProgressBarModel(styles),
 		activityFeed:         NewActivityFeedPanel(styles),
+		currentResponseBuf:   &strings.Builder{},
 	}
 }
 
@@ -961,6 +967,35 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// Ctrl+G: toggle mouse mode (scroll ↔ select) with viewport freeze
+	if msg.Type == tea.KeyCtrlG && m.state == StateInput {
+		m.mouseEnabled = !m.mouseEnabled
+		m.output.SetMouseEnabled(m.mouseEnabled)
+		m.output.SetFrozen(!m.mouseEnabled)
+		if m.mouseEnabled {
+			if m.toastManager != nil {
+				m.toastManager.ShowInfo("Scroll mode")
+			}
+			return tea.EnableMouseCellMotion
+		}
+		if m.toastManager != nil {
+			m.toastManager.ShowInfo("Select mode — drag to select, Cmd+C to copy | Ctrl+G to exit")
+		}
+		return tea.DisableMouse
+	}
+
+	// Option+C: copy last AI response to clipboard
+	if msg.String() == "alt+c" && m.state == StateInput {
+		if m.lastResponseText != "" {
+			copyViaOSC52(m.lastResponseText)
+			_ = clipboard.WriteAll(m.lastResponseText) // best-effort; OSC52 is primary
+			if m.toastManager != nil {
+				m.toastManager.ShowInfo("Copied last response")
+			}
+		}
+		return nil
+	}
+
 	// Code block navigation and actions (only when input is empty)
 	if m.state == StateInput && m.input.Value() == "" {
 		codeBlocks := m.output.GetCodeBlocks()
@@ -1106,6 +1141,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 		m.output.AppendTextStream(string(msg))
+		m.currentResponseBuf.WriteString(string(msg))
 
 	case ToolCallMsg:
 		m.streamStartTime = time.Now() // Reset timeout on tool activity
@@ -1188,6 +1224,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Time{} // Reset activity tracking
 		m.slowWarningShown = false       // Reset slow warning
 		m.responseHeaderShown = false    // Reset for next response
+		if m.currentResponseBuf.Len() > 0 {
+			m.lastResponseText = m.currentResponseBuf.String()
+			m.currentResponseBuf.Reset()
+		}
 		m.output.FlushStream()           // Flush any remaining streamed content
 		m.output.AppendLine("")
 		cmds = append(cmds, m.input.Focus())
@@ -1208,6 +1248,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.currentToolInfo = ""
 		m.streamStartTime = time.Time{} // Reset timeout tracking
 		m.responseHeaderShown = false   // Reset for next response
+		m.currentResponseBuf.Reset()    // Discard partial response on error
 		m.output.FlushStream()          // Flush any remaining streamed content
 
 		// Use enhanced error guidance system

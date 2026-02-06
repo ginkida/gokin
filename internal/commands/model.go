@@ -22,7 +22,7 @@ func (c *ModelCommand) Usage() string {
 }
 func (c *ModelCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category:    CategoryModelSession,
+		Category:    CategorySession,
 		Icon:        "model",
 		Priority:    0,
 		RequiresAPI: true,

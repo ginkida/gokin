@@ -15,7 +15,7 @@ func (c *StatsCommand) Description() string { return "Show detailed session stat
 func (c *StatsCommand) Usage() string       { return "/stats" }
 func (c *StatsCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category:    CategoryModelSession,
+		Category:    CategorySession,
 		Icon:        "stats",
 		Priority:    60,
 		RequiresAPI: true,

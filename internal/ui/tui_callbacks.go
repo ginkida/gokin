@@ -167,6 +167,95 @@ func (m *Model) SetPaletteProvider(provider PaletteProvider) {
 	}
 }
 
+// RegisterPaletteActions registers keyboard shortcut actions in the command palette.
+func (m *Model) RegisterPaletteActions() {
+	if m.commandPalette == nil {
+		return
+	}
+
+	actions := []EnhancedPaletteCommand{
+		{
+			Name:        "Toggle Mouse Mode",
+			Description: "Switch between scroll and select modes",
+			Shortcut:    "Ctrl+G",
+			Category:    PaletteCategoryInfo{Name: "Tools", Icon: "gear", Priority: 5},
+			Enabled:     true,
+			Priority:    550,
+			Type:        CommandTypeAction,
+			Action: func() {
+				m.mouseEnabled = !m.mouseEnabled
+				m.output.SetMouseEnabled(m.mouseEnabled)
+			},
+		},
+		{
+			Name:        "Toggle Task List",
+			Description: "Show or hide the task list panel",
+			Shortcut:    "Ctrl+T",
+			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
+			Enabled:     true,
+			Priority:    150,
+			Type:        CommandTypeAction,
+			Action: func() {
+				m.todosVisible = !m.todosVisible
+			},
+		},
+		{
+			Name:        "Toggle Activity Feed",
+			Description: "Show or hide the activity feed panel",
+			Shortcut:    "Ctrl+O",
+			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
+			Enabled:     true,
+			Priority:    151,
+			Type:        CommandTypeAction,
+			Action: func() {
+				if m.activityFeed != nil {
+					m.activityFeed.Toggle()
+				}
+			},
+		},
+		{
+			Name:        "Toggle Planning Mode",
+			Description: "Enable or disable planning mode",
+			Shortcut:    "Shift+Tab",
+			Category:    PaletteCategoryInfo{Name: "Planning", Icon: "tree", Priority: 4},
+			Enabled:     true,
+			Priority:    400,
+			Type:        CommandTypeAction,
+			Action: func() {
+				if m.onPlanningModeToggle != nil {
+					m.onPlanningModeToggle()
+				}
+			},
+		},
+		{
+			Name:        "Clear Screen",
+			Description: "Clear the output display",
+			Shortcut:    "Ctrl+L",
+			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
+			Enabled:     true,
+			Priority:    152,
+			Type:        CommandTypeAction,
+			Action: func() {
+				m.output.Clear()
+			},
+		},
+		{
+			Name:        "Toggle Compact Mode",
+			Description: "Switch between compact and normal display",
+			Shortcut:    "Ctrl+Shift+C",
+			Category:    PaletteCategoryInfo{Name: "Tools", Icon: "gear", Priority: 5},
+			Enabled:     true,
+			Priority:    551,
+			Type:        CommandTypeAction,
+			Action: func() {
+				m.CompactMode = !m.CompactMode
+			},
+		},
+	}
+
+	m.commandPalette.SetActionCommands(actions)
+}
+
 // RefreshPaletteCommands refreshes the command palette commands.
 func (m *Model) RefreshPaletteCommands() {
 	if m.commandPalette != nil {

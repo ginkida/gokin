@@ -36,6 +36,7 @@ type PaletteCommandData interface {
 	IsEnabled() bool
 	GetReason() string
 	GetPriority() int
+	IsAdvanced() bool
 }
 
 // PaletteProvider is an interface for fetching palette commands.
@@ -49,7 +50,7 @@ type EnhancedPaletteCommand struct {
 	Name        string
 	Description string
 	Usage       string
-	Shortcut    string // /command format
+	Shortcut    string // /command format or keyboard shortcut
 	Category    PaletteCategoryInfo
 	Icon        string
 	ArgHint     string
@@ -59,6 +60,7 @@ type EnhancedPaletteCommand struct {
 	IsRecent    bool   // In recently used
 	Type        CommandType
 	Action      func() // Direct action (for CommandTypeAction)
+	Advanced    bool   // Hidden from default view, visible when searching
 }
 
 // CommandPalette provides quick access to commands via Ctrl+P.
@@ -77,6 +79,7 @@ type CommandPalette struct {
 	showPreview     bool
 	previewCmd      *EnhancedPaletteCommand
 	paletteProvider PaletteProvider
+	actionCommands  []EnhancedPaletteCommand
 }
 
 // NewCommandPalette creates a new command palette.
@@ -99,6 +102,11 @@ func (p *CommandPalette) SetPaletteProvider(provider PaletteProvider) {
 	p.paletteProvider = provider
 }
 
+// SetActionCommands sets direct action commands (keyboard shortcuts) for the palette.
+func (p *CommandPalette) SetActionCommands(actions []EnhancedPaletteCommand) {
+	p.actionCommands = actions
+}
+
 // RefreshCommands refreshes the command list from the provider.
 func (p *CommandPalette) RefreshCommands() {
 	if p.paletteProvider == nil {
@@ -112,7 +120,7 @@ func (p *CommandPalette) RefreshCommands() {
 		recentSet[c] = true
 	}
 
-	p.commands = make([]EnhancedPaletteCommand, 0, len(paletteCmds))
+	p.commands = make([]EnhancedPaletteCommand, 0, len(paletteCmds)+len(p.actionCommands))
 	for _, item := range paletteCmds {
 		pc, ok := item.(PaletteCommandData)
 		if !ok {
@@ -135,8 +143,12 @@ func (p *CommandPalette) RefreshCommands() {
 			Priority: pc.GetPriority(),
 			IsRecent: recentSet[pc.GetName()],
 			Type:     CommandTypeSlash,
+			Advanced: pc.IsAdvanced(),
 		})
 	}
+
+	// Append action commands (keyboard shortcuts)
+	p.commands = append(p.commands, p.actionCommands...)
 
 	p.sortCommands()
 	p.filterCommands(p.query)
@@ -228,7 +240,13 @@ func (p *CommandPalette) GetQuery() string {
 // filterCommands filters commands based on the query with fuzzy matching.
 func (p *CommandPalette) filterCommands(query string) {
 	if query == "" {
-		p.filtered = p.commands
+		// Hide advanced commands in default view
+		p.filtered = make([]EnhancedPaletteCommand, 0, len(p.commands))
+		for _, cmd := range p.commands {
+			if !cmd.Advanced {
+				p.filtered = append(p.filtered, cmd)
+			}
+		}
 		return
 	}
 

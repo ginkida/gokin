@@ -4,12 +4,34 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// getTextSelectionHint returns a platform/terminal-specific hint for text selection.
+func getTextSelectionHint() string {
+	term := os.Getenv("TERM_PROGRAM")
+	switch {
+	case runtime.GOOS == "darwin" && term == "iTerm.app":
+		return "Ctrl+G for select mode, or Option+drag"
+	case runtime.GOOS == "darwin" && term == "Apple_Terminal":
+		return "Ctrl+G for select mode, or Fn+drag"
+	case runtime.GOOS == "darwin":
+		return "Ctrl+G for select mode"
+	default:
+		return "Ctrl+G for select mode, or Shift+drag"
+	}
+}
+
+// copyViaOSC52 copies text to clipboard via OSC 52 escape sequence.
+func copyViaOSC52(text string) {
+	encoded := base64.StdEncoding.EncodeToString([]byte(text))
+	fmt.Fprintf(os.Stderr, "\033]52;c;%s\a", encoded)
+}
 
 // getMacOSBattery removed as battery monitoring is disabled.
 
@@ -57,12 +79,13 @@ func (m *Model) Welcome() {
 		contextStr = fmt.Sprintf("%.0f%%", m.tokenUsage.PercentUsed*100)
 	}
 
-	// 3 lines of content
+	// 4 lines of content
 	line1 := titleStyle.Render("GOKIN")
 	line2 := infoStyle.Render(dir+" · "+modelName+" · "+contextStr)
 	line3 := dimStyle.Render("Ctrl+P commands · Shift+Tab plan mode")
+	line4 := dimStyle.Render(getTextSelectionHint())
 
-	content := line1 + "\n" + line2 + "\n" + line3
+	content := line1 + "\n" + line2 + "\n" + line3 + "\n" + line4
 
 	// Wrap in lipgloss rounded border
 	boxStyle := lipgloss.NewStyle().
@@ -73,6 +96,17 @@ func (m *Model) Welcome() {
 
 	m.output.AppendLine(boxStyle.Render(content))
 	m.output.AppendLine("")
+
+	// Suggestion prompts for new users
+	suggestionStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	promptStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
+	suggestions := suggestionStyle.Render("  Try: ") +
+		promptStyle.Render("\"describe this project\"") +
+		suggestionStyle.Render(" · ") +
+		promptStyle.Render("\"find bugs in main.go\"") +
+		suggestionStyle.Render(" · ") +
+		promptStyle.Render("/help")
+	m.output.AppendLine(suggestions)
 }
 
 // AddSystemMessage adds a system message to the output.

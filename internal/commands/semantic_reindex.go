@@ -17,9 +17,10 @@ func (c *SemanticReindexCommand) Description() string {
 func (c *SemanticReindexCommand) Usage() string { return "/semantic-reindex" }
 func (c *SemanticReindexCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySemanticSearch,
+		Category: CategoryTools,
 		Icon:     "reindex",
 		Priority: 10,
+		Advanced: true,
 	}
 }
 

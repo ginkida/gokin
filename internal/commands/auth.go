@@ -26,7 +26,7 @@ Tip: Use /oauth-login for Google account authentication (uses your Gemini subscr
 }
 func (c *LoginCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthentication,
+		Category: CategoryAuthSetup,
 		Icon:     "key",
 		Priority: 0,
 		HasArgs:  true,
@@ -189,7 +189,7 @@ func (c *LogoutCommand) Usage() string {
 }
 func (c *LogoutCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthentication,
+		Category: CategoryAuthSetup,
 		Icon:     "logout",
 		Priority: 10,
 		HasArgs:  true,
@@ -328,7 +328,7 @@ func (c *ProviderCommand) Usage() string {
 }
 func (c *ProviderCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthentication,
+		Category: CategoryAuthSetup,
 		Icon:     "provider",
 		Priority: 20,
 		HasArgs:  true,
@@ -424,7 +424,7 @@ func (c *StatusCommand) Description() string { return "Show configuration status
 func (c *StatusCommand) Usage() string       { return "/status" }
 func (c *StatusCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthentication,
+		Category: CategoryAuthSetup,
 		Icon:     "status",
 		Priority: 30,
 	}
@@ -491,9 +491,10 @@ A browser window will open for Google authentication.`
 }
 func (c *OAuthLoginCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthentication,
+		Category: CategoryAuthSetup,
 		Icon:     "google",
 		Priority: 5,
+		Advanced: true,
 	}
 }
 
@@ -595,9 +596,10 @@ You can use /login gemini <key> to use an API key instead.`
 }
 func (c *OAuthLogoutCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthentication,
+		Category: CategoryAuthSetup,
 		Icon:     "logout",
 		Priority: 15,
+		Advanced: true,
 	}
 }
 

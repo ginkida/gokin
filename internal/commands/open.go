@@ -46,7 +46,7 @@ func (c *OpenCommand) Description() string { return "Open a file in your editor"
 func (c *OpenCommand) Usage() string       { return "/open <file>" }
 func (c *OpenCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryInteractive,
+		Category: CategoryTools,
 		Icon:     "edit",
 		Priority: 20,
 		HasArgs:  true,

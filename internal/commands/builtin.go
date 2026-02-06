@@ -52,25 +52,44 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 			cmd.Usage(), colorCyan, colorReset, cmd.Description()), nil
 	}
 
-	// Show all commands organized by category
 	var sb strings.Builder
 
-	// Define categories and their commands (with colors)
+	// Essential Commands — the most useful commands at a glance
+	sb.WriteString(fmt.Sprintf("\n%s─── Essential Commands ───%s\n\n", colorYellow, colorReset))
+
+	essentials := []struct {
+		name string
+		desc string
+	}{
+		{"help", "Show help (this page) or /help <cmd> for details"},
+		{"model", "Switch AI model"},
+		{"clear", "Clear conversation history"},
+		{"save", "Save current session"},
+		{"undo", "Undo the last file change"},
+		{"commit", "Create a git commit with AI-generated message"},
+		{"plan", "Toggle planning mode"},
+		{"doctor", "Check environment and configuration"},
+	}
+
+	for _, e := range essentials {
+		sb.WriteString(fmt.Sprintf("  %s/%-10s%s %s\n", colorGreen, e.name, colorReset, e.desc))
+	}
+
+	// All Commands grouped by 6 categories
+	sb.WriteString(fmt.Sprintf("\n%s─── All Commands ───%s\n", colorYellow, colorReset))
+
 	categories := []struct {
 		name     string
-		icon     string
 		commands []string
 	}{
-		{"Getting Started", "🚀", []string{"help", "quickstart"}},
-		{"Session", "📋", []string{"clear", "compact", "save", "resume", "sessions", "model"}},
-		{"History & Undo", "⏪", []string{"undo"}},
-		{"Git", "🔀", []string{"init", "commit", "pr"}},
-		{"Auth", "🔐", []string{"login", "logout"}},
-		{"Context", "📝", []string{"instructions"}},
-		{"Semantic Search", "🔍", []string{"semantic-stats", "semantic-reindex", "semantic-cleanup"}},
-		{"Contracts", "📜", []string{"contract"}},
-		{"Interactive", "🖥️", []string{"browse", "clear-todos"}},
-		{"Utility", "🔧", []string{"doctor", "config", "stats", "theme"}},
+		{"Getting Started", []string{"help", "quickstart"}},
+		{"Session", []string{"model", "clear", "compact", "save", "resume", "sessions", "stats", "undo", "instructions"}},
+		{"Auth & Setup", []string{"login", "logout", "oauth-login", "oauth-logout", "provider", "status", "doctor", "config", "update"}},
+		{"Git", []string{"init", "commit", "pr"}},
+		{"Planning", []string{"plan", "resume-plan", "tree-stats"}},
+		{"Tools", []string{"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
+			"semantic-stats", "semantic-reindex", "semantic-cleanup",
+			"register-agent-type", "list-agent-types", "unregister-agent-type"}},
 	}
 
 	// Build a map for quick lookup
@@ -80,47 +99,27 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		cmdMap[cmd.Name()] = cmd
 	}
 
-	sb.WriteString(fmt.Sprintf(`
-%s╔═══════════════════════════════════════════════════════════════╗
-║                     📚 Gokin Commands                        ║
-╚═══════════════════════════════════════════════════════════════╝%s
-
-%sNavigation:%s
-  • %s/help <command>%s - Command details
-  • %s/quickstart%s     - Quick start with examples
-  • %s/tour%s           - Interactive tutorial
-
-`, colorCyan, colorReset, colorYellow, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset))
-
 	for _, cat := range categories {
 		var catCmds []Command
 		for _, name := range cat.commands {
 			if cmd, ok := cmdMap[name]; ok {
 				catCmds = append(catCmds, cmd)
-				delete(cmdMap, name) // Remove from map to track uncategorized
+				delete(cmdMap, name)
 			}
 		}
-
 		if len(catCmds) == 0 {
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("%s%s %s%s\n", colorBold, cat.icon, cat.name, colorReset))
-		sb.WriteString(strings.Repeat("─", 55) + "\n")
-
+		sb.WriteString(fmt.Sprintf("\n  %s%s%s\n", colorBold, cat.name, colorReset))
 		for _, cmd := range catCmds {
-			sb.WriteString(fmt.Sprintf("  %s/%s%s\n", colorGreen, cmd.Name(), colorReset))
-			sb.WriteString(fmt.Sprintf("      %s%s%s\n", colorCyan, cmd.Description(), colorReset))
+			sb.WriteString(fmt.Sprintf("    %s/%-22s%s %s%s%s\n", colorGreen, cmd.Name(), colorReset, colorCyan, cmd.Description(), colorReset))
 		}
-		sb.WriteString("\n")
 	}
 
 	// Show any uncategorized commands
 	if len(cmdMap) > 0 {
-		sb.WriteString(fmt.Sprintf("%s⚙️  Other Commands%s\n", colorBold, colorReset))
-		sb.WriteString(strings.Repeat("─", 55) + "\n")
-
-		// Sort remaining commands
+		sb.WriteString(fmt.Sprintf("\n  %sOther%s\n", colorBold, colorReset))
 		var remaining []Command
 		for _, cmd := range cmdMap {
 			remaining = append(remaining, cmd)
@@ -128,21 +127,32 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		sort.Slice(remaining, func(i, j int) bool {
 			return remaining[i].Name() < remaining[j].Name()
 		})
-
 		for _, cmd := range remaining {
-			sb.WriteString(fmt.Sprintf("  %s/%s%s\n", colorGreen, cmd.Name(), colorReset))
-			sb.WriteString(fmt.Sprintf("      %s%s%s\n", colorCyan, cmd.Description(), colorReset))
+			sb.WriteString(fmt.Sprintf("    %s/%-22s%s %s%s%s\n", colorGreen, cmd.Name(), colorReset, colorCyan, cmd.Description(), colorReset))
 		}
-		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("%s─── Keyboard Shortcuts ───%s\n", colorYellow, colorReset))
-	sb.WriteString(fmt.Sprintf("  %sCtrl+P%s        - Command palette\n", colorGreen, colorReset))
-	sb.WriteString(fmt.Sprintf("  %sCtrl+C%s        - Exit\n", colorGreen, colorReset))
-	sb.WriteString(fmt.Sprintf("  %sCtrl+L%s        - Clear screen\n", colorGreen, colorReset))
-	sb.WriteString(fmt.Sprintf("  %sEsc%s           - Cancel operation\n\n", colorGreen, colorReset))
+	// Keyboard Shortcuts
+	sb.WriteString(fmt.Sprintf("\n%s─── Keyboard Shortcuts ───%s\n\n", colorYellow, colorReset))
+	shortcuts := []struct {
+		key  string
+		desc string
+	}{
+		{"Ctrl+P", "Command palette"},
+		{"Shift+Tab", "Toggle planning mode"},
+		{"Ctrl+G", "Toggle mouse mode"},
+		{"Ctrl+T", "Toggle task list"},
+		{"Ctrl+O", "Toggle activity feed"},
+		{"Ctrl+L", "Clear screen"},
+		{"Ctrl+R", "Search input history"},
+		{"Ctrl+C", "Exit"},
+		{"Esc", "Cancel current operation"},
+	}
+	for _, s := range shortcuts {
+		sb.WriteString(fmt.Sprintf("  %s%-14s%s %s\n", colorGreen, s.key, colorReset, s.desc))
+	}
 
-	sb.WriteString(fmt.Sprintf("Tip: Use %s/quickstart%s to get started!\n", colorGreen, colorReset))
+	sb.WriteString(fmt.Sprintf("\nTip: Use %sCtrl+P%s to access all commands quickly.\n", colorGreen, colorReset))
 
 	return sb.String(), nil
 }
@@ -155,7 +165,7 @@ func (c *ClearCommand) Description() string { return "Clear conversation history
 func (c *ClearCommand) Usage() string       { return "/clear" }
 func (c *ClearCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryModelSession,
+		Category: CategorySession,
 		Icon:     "clear",
 		Priority: 10,
 	}
@@ -185,9 +195,10 @@ func (c *CompactCommand) Description() string { return "Force context compaction
 func (c *CompactCommand) Usage() string       { return "/compact" }
 func (c *CompactCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryModelSession,
+		Category: CategorySession,
 		Icon:     "compress",
 		Priority: 20,
+		Advanced: true,
 	}
 }
 
@@ -213,7 +224,7 @@ func (c *SaveCommand) Description() string { return "Save current session" }
 func (c *SaveCommand) Usage() string       { return "/save [name]" }
 func (c *SaveCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryModelSession,
+		Category: CategorySession,
 		Icon:     "save",
 		Priority: 30,
 		HasArgs:  true,
@@ -258,7 +269,7 @@ func (c *ResumeCommand) Description() string { return "Resume a saved session" }
 func (c *ResumeCommand) Usage() string       { return "/resume <session_id>" }
 func (c *ResumeCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryModelSession,
+		Category: CategorySession,
 		Icon:     "resume",
 		Priority: 40,
 		HasArgs:  true,
@@ -303,7 +314,7 @@ func (c *SessionsCommand) Description() string { return "List saved sessions" }
 func (c *SessionsCommand) Usage() string       { return "/sessions" }
 func (c *SessionsCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryModelSession,
+		Category: CategorySession,
 		Icon:     "list",
 		Priority: 50,
 	}
@@ -348,7 +359,7 @@ func (c *UndoCommand) Description() string { return "Undo the last file change" 
 func (c *UndoCommand) Usage() string       { return "/undo" }
 func (c *UndoCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryContext,
+		Category: CategorySession,
 		Icon:     "undo",
 		Priority: 0,
 	}
@@ -424,7 +435,7 @@ func (c *DoctorCommand) Description() string { return "Check environment and con
 func (c *DoctorCommand) Usage() string       { return "/doctor" }
 func (c *DoctorCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryAuthSetup,
 		Icon:     "doctor",
 		Priority: 0,
 	}
@@ -540,7 +551,7 @@ func (c *ConfigCommand) Description() string { return "Show current configuratio
 func (c *ConfigCommand) Usage() string       { return "/config" }
 func (c *ConfigCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryAuthSetup,
 		Icon:     "config",
 		Priority: 10,
 	}
@@ -615,7 +626,7 @@ func (c *PermissionsCommand) Usage() string {
 }
 func (c *PermissionsCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryTools,
 		Icon:     "shield",
 		Priority: 20,
 		HasArgs:  true,
@@ -670,11 +681,12 @@ func (c *SandboxCommand) Usage() string {
 }
 func (c *SandboxCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryTools,
 		Icon:     "sandbox",
 		Priority: 30,
 		HasArgs:  true,
 		ArgHint:  "on|off",
+		Advanced: true,
 	}
 }
 
@@ -721,7 +733,7 @@ func (c *ClearTodosCommand) Description() string { return "Clear all todo items"
 func (c *ClearTodosCommand) Usage() string       { return "/clear-todos" }
 func (c *ClearTodosCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryInteractive,
+		Category: CategoryTools,
 		Icon:     "clear",
 		Priority: 10,
 	}
@@ -744,7 +756,7 @@ func (c *BrowseCommand) Description() string { return "Open interactive file bro
 func (c *BrowseCommand) Usage() string       { return "/browse [path]" }
 func (c *BrowseCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryInteractive,
+		Category: CategoryTools,
 		Icon:     "folder",
 		Priority: 0,
 		HasArgs:  true,

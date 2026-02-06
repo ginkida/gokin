@@ -54,9 +54,10 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 		generalHints := []string{
 			"Shift+Tab toggles planning mode",
 			"Ctrl+P opens command palette",
-			"/copy --last copies AI response",
+			"Option+C copies last response",
 			"Ctrl+T toggles task list",
 			"Ctrl+O shows activity feed",
+			getTextSelectionHint(),
 		}
 
 		idx := len(h.hintsShown) % len(generalHints)

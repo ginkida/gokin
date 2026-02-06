@@ -19,6 +19,7 @@ func (c *TreeStatsCommand) GetMetadata() CommandMetadata {
 		Category: CategoryPlanning,
 		Icon:     "tree",
 		Priority: 0,
+		Advanced: true,
 	}
 }
 

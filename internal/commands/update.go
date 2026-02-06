@@ -21,7 +21,7 @@ func (c *UpdateCommand) Usage() string {
 
 func (c *UpdateCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryAuthSetup,
 		Icon:     "download",
 		Priority: 5,
 		HasArgs:  true,

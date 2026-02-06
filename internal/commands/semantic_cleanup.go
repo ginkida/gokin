@@ -17,11 +17,12 @@ func (c *SemanticCleanupCommand) Description() string { return "Clean up old sem
 func (c *SemanticCleanupCommand) Usage() string       { return "/semantic-cleanup [list|clean] [days]" }
 func (c *SemanticCleanupCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySemanticSearch,
+		Category: CategoryTools,
 		Icon:     "cleanup",
 		Priority: 20,
 		HasArgs:  true,
 		ArgHint:  "list|clean [days]",
+		Advanced: true,
 	}
 }
 

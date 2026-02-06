@@ -25,11 +25,12 @@ func (c *RegisterAgentTypeCommand) Usage() string {
 
 func (c *RegisterAgentTypeCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryTools,
 		Icon:     "robot",
 		HasArgs:  true,
 		ArgHint:  `<name> "<desc>" [--tools ...]`,
 		Priority: 30,
+		Advanced: true,
 	}
 }
 
@@ -111,9 +112,10 @@ func (c *ListAgentTypesCommand) Usage() string {
 
 func (c *ListAgentTypesCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryTools,
 		Icon:     "list",
 		Priority: 31,
+		Advanced: true,
 	}
 }
 
@@ -177,11 +179,12 @@ func (c *UnregisterAgentTypeCommand) Usage() string {
 
 func (c *UnregisterAgentTypeCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySettings,
+		Category: CategoryTools,
 		Icon:     "trash",
 		HasArgs:  true,
 		ArgHint:  "<name>",
 		Priority: 32,
+		Advanced: true,
 	}
 }
 

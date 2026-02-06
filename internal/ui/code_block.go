@@ -113,6 +113,7 @@ func (r *CodeBlockRegistry) CopySelected() error {
 	if block == nil {
 		return fmt.Errorf("no code block selected")
 	}
+	copyViaOSC52(block.Content)
 	err := clipboard.WriteAll(block.Content)
 	if err == nil {
 		r.ShowCopyFeedback()

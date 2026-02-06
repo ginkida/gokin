@@ -1192,6 +1192,7 @@ func (b *Builder) wireDependencies() error {
 	paletteCtx := commands.NewPaletteContext(b.workDir, hasAuth)
 	paletteProvider := commands.NewPaletteProvider(b.commandHandler, paletteCtx)
 	b.tuiModel.SetPaletteProvider(paletteProvider)
+	b.tuiModel.RegisterPaletteActions()
 
 	// Set up plan approval callback for context compaction
 	b.agentRunner.SetOnPlanApproved(app.CompactContextWithPlan)

@@ -230,6 +230,7 @@ func (h *Handler) GetPaletteCommands(ctx PaletteContext) []PaletteCommand {
 			ArgHint:     meta.ArgHint,
 			State:       state,
 			Priority:    catInfo.Priority*100 + meta.Priority,
+			Advanced:    meta.Advanced,
 		})
 	}
 
@@ -301,6 +302,7 @@ type PaletteCommandForUI struct {
 	enabled      bool
 	reason       string
 	priority     int
+	advanced     bool
 }
 
 // Implement ui.PaletteCommandData interface
@@ -315,6 +317,7 @@ func (c *PaletteCommandForUI) GetArgHint() string        { return c.argHint }
 func (c *PaletteCommandForUI) IsEnabled() bool           { return c.enabled }
 func (c *PaletteCommandForUI) GetReason() string         { return c.reason }
 func (c *PaletteCommandForUI) GetPriority() int          { return c.priority }
+func (c *PaletteCommandForUI) IsAdvanced() bool          { return c.advanced }
 
 // GetPaletteCommandsForUI implements ui.PaletteProvider interface.
 // Returns []any where each element implements ui.PaletteCommandData.
@@ -335,6 +338,7 @@ func (p *PaletteProviderAdapter) GetPaletteCommandsForUI() []any {
 			enabled:      pc.State.Enabled,
 			reason:       pc.State.Reason,
 			priority:     pc.Priority,
+			advanced:     pc.Advanced,
 		})
 	}
 

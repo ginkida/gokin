@@ -145,6 +145,10 @@ func (m Model) renderStatusBarMedium() string {
 		leftParts = append(leftParts, dimStyle.Render("PLAN"))
 	}
 
+	if !m.mouseEnabled {
+		leftParts = append(leftParts, dimStyle.Render("SELECT"))
+	}
+
 	// Background tasks (compact)
 	if bgCount := len(m.backgroundTasks); bgCount > 0 {
 		leftParts = append(leftParts, dimStyle.Render(fmt.Sprintf("%d bg", bgCount)))
@@ -192,6 +196,10 @@ func (m Model) renderStatusBarFull() string {
 	// Plan mode
 	if m.planningModeEnabled {
 		leftParts = append(leftParts, dimStyle.Render("PLAN"))
+	}
+
+	if !m.mouseEnabled {
+		leftParts = append(leftParts, dimStyle.Render("SELECT"))
 	}
 
 	// Background tasks

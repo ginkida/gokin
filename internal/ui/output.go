@@ -28,6 +28,7 @@ type outputState struct {
 	lastWrappedLen int
 	width          int
 	ready          bool
+	frozen         bool // When true, viewport won't auto-scroll to bottom
 }
 
 // OutputModel represents the output/viewport component.
@@ -225,6 +226,7 @@ func (m *OutputModel) Clear() {
 	m.state.cachedWrapped = ""
 	m.state.lastContentLen = 0
 	m.state.lastWrappedLen = 0
+	m.state.frozen = false // Unfreeze on clear to restore normal scroll behavior
 	m.state.mu.Unlock()
 	m.ForceUpdateViewport()
 }
@@ -348,7 +350,12 @@ func (m *OutputModel) doViewportUpdate() {
 	m.state.mu.Unlock()
 
 	m.viewport.SetContent(wrapped)
-	m.viewport.GotoBottom()
+	m.state.mu.Lock()
+	frozen := m.state.frozen
+	m.state.mu.Unlock()
+	if !frozen {
+		m.viewport.GotoBottom()
+	}
 }
 
 // wrapText wraps text to the specified width using lipgloss for ANSI-aware wrapping.
@@ -416,4 +423,12 @@ func (m *OutputModel) Content() string {
 // SetMouseEnabled enables or disables mouse wheel scrolling in the viewport.
 func (m *OutputModel) SetMouseEnabled(enabled bool) {
 	m.viewport.MouseWheelEnabled = enabled
+}
+
+// SetFrozen freezes or unfreezes the viewport auto-scroll.
+// When frozen, new content won't cause the viewport to jump to the bottom.
+func (m *OutputModel) SetFrozen(frozen bool) {
+	m.state.mu.Lock()
+	m.state.frozen = frozen
+	m.state.mu.Unlock()
 }

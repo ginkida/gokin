@@ -14,9 +14,10 @@ func (c *SemanticStatsCommand) Description() string { return "Show semantic sear
 func (c *SemanticStatsCommand) Usage() string       { return "/semantic-stats" }
 func (c *SemanticStatsCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySemanticSearch,
+		Category: CategoryTools,
 		Icon:     "stats",
 		Priority: 0,
+		Advanced: true,
 	}
 }
 

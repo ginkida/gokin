@@ -2,7 +2,9 @@ package commands
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -19,7 +21,7 @@ func (c *CopyCommand) Description() string { return "Copy text or last response 
 func (c *CopyCommand) Usage() string       { return "/copy [--last|--all|--ascii] [<text>]" }
 func (c *CopyCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryInteractive,
+		Category: CategoryTools,
 		Icon:     "copy",
 		Priority: 0,
 		HasArgs:  true,
@@ -133,7 +135,7 @@ func (c *PasteCommand) Description() string { return "Get text from clipboard" }
 func (c *PasteCommand) Usage() string       { return "/paste" }
 func (c *PasteCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryInteractive,
+		Category: CategoryTools,
 		Icon:     "paste",
 		Priority: 10,
 	}
@@ -164,7 +166,7 @@ func (c *QuickLookCommand) Description() string { return "Preview a file using m
 func (c *QuickLookCommand) Usage() string       { return "/ql <file>" }
 func (c *QuickLookCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryMacOS,
+		Category: CategoryTools,
 		Icon:     "preview",
 		Priority: 20,
 		Platform: "darwin",
@@ -285,6 +287,10 @@ func isWSL() bool {
 }
 
 func copyToClipboard(text string) error {
+	// Fire OSC52 in parallel — works over SSH, ignored by unsupported terminals
+	encoded := base64.StdEncoding.EncodeToString([]byte(text))
+	fmt.Fprintf(os.Stderr, "\033]52;c;%s\a", encoded)
+
 	// Try atotto/clipboard first
 	if err := clipboard.WriteAll(text); err == nil {
 		return nil
