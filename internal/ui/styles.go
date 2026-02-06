@@ -332,8 +332,8 @@ func DefaultStyles() *Styles {
 
 		// Markdown styles
 		InlineCode: lipgloss.NewStyle().
-			Foreground(ColorPrimary).              // Soft Purple (Lavender) - more subtle than Pink
-			Background(lipgloss.Color("#1E293B")). // Slate 800 (Dark but visible)
+			Foreground(lipgloss.Color("#94A3B8")). // Slate 400 - muted blue-gray
+			Background(lipgloss.Color("#1E293B")). // Slate 800 - subtle contrast
 			Padding(0, 1),
 
 		// Code block styles
