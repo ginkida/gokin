@@ -11,7 +11,7 @@ import (
 func ReadToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "read",
-		Description: "Reads a file from the filesystem and returns its contents with line numbers.",
+		Description: "Reads a file from the filesystem and returns its contents with line numbers. PREFER this over bash cat/head/tail. Use to understand file contents, find specific code, check configuration.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -37,7 +37,7 @@ func ReadToolDeclaration() *genai.FunctionDeclaration {
 func WriteToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "write",
-		Description: "Writes content to a file. Creates the file if it doesn't exist, overwrites if it does.",
+		Description: "Creates or overwrites a file with new content. Use ONLY for new files or full rewrites. For targeted modifications of existing files, use 'edit' instead.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -59,7 +59,7 @@ func WriteToolDeclaration() *genai.FunctionDeclaration {
 func EditToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "edit",
-		Description: "Edits a file by replacing specified text. Use for precise modifications.",
+		Description: "Performs exact string replacement in a file. PREFER this over 'write' for modifying existing files — it's safer and preserves unchanged content. Always read the file first to get exact text to match.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -89,7 +89,7 @@ func EditToolDeclaration() *genai.FunctionDeclaration {
 func BashToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "bash",
-		Description: "Executes a bash command and returns the output. Use for system operations, git commands, running tests, etc.",
+		Description: "Executes a bash command and returns the output. Use for builds, tests, git commands, and system operations. Do NOT use for file operations that have dedicated tools: use 'read' instead of cat, 'grep' instead of grep/rg, 'glob' instead of find/ls, 'edit' instead of sed.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{

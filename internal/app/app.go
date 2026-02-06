@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"google.golang.org/genai"
 
 	"gokin/internal/agent"
 	"gokin/internal/audit"
@@ -290,7 +291,10 @@ func (a *App) Run() error {
 		a.client.SetSystemInstruction(systemPrompt)
 		a.session.SystemInstruction = systemPrompt
 	} else {
-		// Restored session: use saved system instruction or rebuild
+		// Restored session: clean up legacy system prompt messages from history
+		a.stripLegacySystemMessages()
+
+		// Use saved system instruction or rebuild
 		if a.session.SystemInstruction != "" {
 			a.client.SetSystemInstruction(a.session.SystemInstruction)
 		} else {
@@ -1029,83 +1033,50 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	return nil
 }
 
+// stripLegacySystemMessages removes old-style system prompt messages from session history.
+// Before Phase 1, system prompt was injected as history[0] (user message) + history[1] (model ack).
+// Now system prompt is passed via API parameter, so these legacy messages waste tokens.
+func (a *App) stripLegacySystemMessages() {
+	history := a.session.GetHistory()
+	if len(history) < 2 {
+		return
+	}
+
+	stripCount := 0
+
+	// Check if first message is a legacy system prompt (user role, long text with system prompt markers)
+	if history[0].Role == string(genai.RoleUser) && len(history[0].Parts) > 0 {
+		text := history[0].Parts[0].Text
+		if len(text) > 500 && (strings.Contains(text, "You are") || strings.Contains(text, "MANDATORY") || strings.Contains(text, "available tools")) {
+			stripCount = 1
+			// Also check for model acknowledgment
+			if len(history) >= 2 && history[1].Role == string(genai.RoleModel) && len(history[1].Parts) > 0 {
+				ackText := history[1].Parts[0].Text
+				if len(ackText) < 200 && (strings.Contains(ackText, "understand") || strings.Contains(ackText, "I'll") || strings.Contains(ackText, "help")) {
+					stripCount = 2
+				}
+			}
+		}
+	}
+
+	if stripCount > 0 {
+		a.session.SetHistory(history[stripCount:])
+		logging.Info("stripped legacy system messages from restored session", "count", stripCount)
+	}
+}
+
 // buildModelEnhancement returns model-specific prompt enhancements.
-// Different models have different tendencies - some forget instructions more easily.
 func (a *App) buildModelEnhancement() string {
 	modelName := a.config.Model.Name
 
-	// GLM models (ZhipuAI) tend to forget instructions
 	if strings.HasPrefix(modelName, "glm") {
-		return `
-
-════════════════════════════════════════════════════════════════════
-                    GLM MODEL RESPONSE REQUIREMENTS
-════════════════════════════════════════════════════════════════════
-
-**YOU ARE USING GLM MODEL. FOLLOW THESE RULES STRICTLY:**
-
-After calling ANY function (read, grep, glob, bash, etc.), you MUST:
-
-1. **ANALYZE** - Look at the tool results carefully
-2. **SUMMARIZE** - Extract key information from results
-3. **EXPLAIN** - Tell the user what you found
-4. **RECOMMEND** - Suggest next steps
-
-**RESPONSE FORMAT:**
-` + "```" + `
-## What I Found
-[Summarize tool results]
-
-## Key Points
-- Point 1
-- Point 2
-
-## Recommendations
-[Suggest next steps]
-` + "```" + `
-
-**EXAMPLE:**
-
-User: "What files are here?"
-❌ WRONG: [run glob, stop]
-✅ CORRECT: "Here are the files I found:
-- **Source files**: main.go, handler.go, service.go
-- **Config**: config.yaml
-- **Tests**: main_test.go
-The project appears to be a Go web server. Want me to read any specific file?"
-
-**CRITICAL**: NEVER use tools and then stop without providing analysis!
-════════════════════════════════════════════════════════════════════
-`
+		return "\n\n**GLM Model Note:** After every tool call, you MUST respond with analysis of results. Never call tools and stop silently. Structure: What I Found → Key Points → Next Steps."
 	}
 
-	// Gemini Flash models - faster but may give shorter responses
 	if strings.Contains(modelName, "flash") {
-		return `
-
-**RESPONSE QUALITY REMINDER (Flash Model):**
-While being fast, ensure your responses are still:
-- Detailed enough to be useful
-- Include specific file:line references
-- Provide concrete recommendations
-Don't sacrifice quality for speed.
-`
+		return "\n\n**Flash Model Note:** Keep responses detailed with specific file:line references despite speed optimizations."
 	}
 
-	// Gemini Pro/Ultra - generally good, but reminder doesn't hurt
-	if strings.Contains(modelName, "pro") || strings.Contains(modelName, "ultra") {
-		return `
-
-**RESPONSE QUALITY STANDARD:**
-You're using a capable model. Provide responses that:
-- Thoroughly analyze tool results
-- Give specific code references (file:line)
-- Explain WHY things are the way they are
-- Suggest concrete next steps
-`
-	}
-
-	// Default for unknown models
 	return ""
 }
 

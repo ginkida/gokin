@@ -136,22 +136,10 @@ func (s *Session) SetHistory(history []*genai.Content) {
 
 	oldCount := len(s.History)
 
-	// Apply sliding window if history exceeds max
+	// Apply sliding window if history exceeds max.
+	// System instruction is now passed via API parameter, not stored in history.
 	if len(history) > MaxMessages {
-		// Keep first 2 messages (system prompt + initial response) and last N messages
-		systemMessages := 2
-		if systemMessages > len(history) {
-			systemMessages = 0
-		}
-		remaining := MaxMessages - systemMessages
-		if remaining < 0 {
-			remaining = 0
-		}
-		startIdx := len(history) - remaining
-		if startIdx < systemMessages {
-			startIdx = systemMessages
-		}
-		history = append(history[:systemMessages], history[startIdx:]...)
+		history = history[len(history)-MaxMessages:]
 	}
 
 	s.History = history
@@ -171,21 +159,10 @@ func (s *Session) SetHistoryIfVersion(history []*genai.Content, expectedVersion 
 
 	oldCount := len(s.History)
 
-	// Apply sliding window if history exceeds max
+	// Apply sliding window if history exceeds max.
+	// System instruction is now passed via API parameter, not stored in history.
 	if len(history) > MaxMessages {
-		systemMessages := 2
-		if systemMessages > len(history) {
-			systemMessages = 0
-		}
-		remaining := MaxMessages - systemMessages
-		if remaining < 0 {
-			remaining = 0
-		}
-		startIdx := len(history) - remaining
-		if startIdx < systemMessages {
-			startIdx = systemMessages
-		}
-		history = append(history[:systemMessages], history[startIdx:]...)
+		history = history[len(history)-MaxMessages:]
 	}
 
 	s.History = history
@@ -238,43 +215,19 @@ func (s *Session) MessageCount() int {
 }
 
 // trimHistoryLocked trims history to max messages.
+// System instruction is now passed via API parameter, not stored in history.
+// Simple sliding window: keep the last MaxMessages messages.
 // Caller MUST hold s.mu.Lock() before calling.
 func (s *Session) trimHistoryLocked() {
 	if len(s.History) <= MaxMessages {
 		return
 	}
 
-	// Keep first 2 messages (system prompt + initial response) and last N messages
-	systemMessages := 2
-	if systemMessages > len(s.History) {
-		systemMessages = 0
-	}
-	remaining := MaxMessages - systemMessages
-	if remaining < 0 {
-		remaining = 0
-	}
-	startIdx := len(s.History) - remaining
-	if startIdx < systemMessages {
-		startIdx = systemMessages
-	}
-	s.History = append(s.History[:systemMessages], s.History[startIdx:]...)
+	s.History = s.History[len(s.History)-MaxMessages:]
 
 	// Sync tokenCounts with History to avoid desynchronization
-	if len(s.tokenCounts) > 0 {
-		// Apply the same trimming logic to tokenCounts
-		if len(s.tokenCounts) > MaxMessages {
-			tcSystemMessages := systemMessages
-			if tcSystemMessages > len(s.tokenCounts) {
-				tcSystemMessages = 0
-			}
-			tcStartIdx := len(s.tokenCounts) - remaining
-			if tcStartIdx < tcSystemMessages {
-				tcStartIdx = tcSystemMessages
-			}
-			if tcStartIdx < len(s.tokenCounts) {
-				s.tokenCounts = append(s.tokenCounts[:tcSystemMessages], s.tokenCounts[tcStartIdx:]...)
-			}
-		}
+	if len(s.tokenCounts) > MaxMessages {
+		s.tokenCounts = s.tokenCounts[len(s.tokenCounts)-MaxMessages:]
 
 		// Recalculate totalTokens from remaining tokenCounts
 		s.totalTokens = 0
