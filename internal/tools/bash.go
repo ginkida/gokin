@@ -338,12 +338,61 @@ func (t *BashTool) buildSessionEnv() []string {
 	return env
 }
 
-// updateSessionAfterCommand checks if the command changed the working directory
-// (via cd) and updates the session accordingly.
+// pwdMarker is appended to commands to reliably detect the final working directory.
+const pwdMarker = "___GOKIN_PWD___"
+
+// wrapCommandWithPWD appends a pwd probe to the command so we can reliably
+// track working directory changes across compound commands, subshells, cd -, etc.
+func wrapCommandWithPWD(command string) string {
+	return command + "; echo '" + pwdMarker + "'$(pwd)"
+}
+
+// extractPWDFromOutput finds the pwd marker in output, extracts the real pwd,
+// and returns the cleaned output (with marker removed) and the detected directory.
+func extractPWDFromOutput(output string) (string, string) {
+	idx := strings.LastIndex(output, pwdMarker)
+	if idx < 0 {
+		return output, ""
+	}
+
+	// Extract the directory path after the marker
+	afterMarker := output[idx+len(pwdMarker):]
+	detectedDir := strings.TrimSpace(strings.SplitN(afterMarker, "\n", 2)[0])
+
+	// Remove the marker line from output
+	cleaned := output[:idx]
+	// Also remove trailing newline before marker if present
+	cleaned = strings.TrimRight(cleaned, "\n")
+	// Restore one trailing newline for clean output
+	if cleaned != "" {
+		cleaned += "\n"
+	}
+
+	return cleaned, detectedDir
+}
+
+// updateSessionAfterCommand uses the detected pwd from the command output
+// to update the session working directory. Falls back to heuristic parsing.
 func (t *BashTool) updateSessionAfterCommand(command string) {
+	// Fallback: legacy heuristic for simple cd commands (used when pwd detection unavailable)
+	t.updateSessionAfterCommandLegacy(command)
+}
+
+// updateSessionFromPWD updates the session working directory from detected pwd.
+func (t *BashTool) updateSessionFromPWD(detectedDir string) {
+	if detectedDir == "" {
+		return
+	}
+	detectedDir = filepath.Clean(detectedDir)
+	if info, err := os.Stat(detectedDir); err == nil && info.IsDir() {
+		t.session.SetWorkDir(detectedDir)
+	}
+}
+
+// updateSessionAfterCommandLegacy is the original heuristic cd-tracking.
+func (t *BashTool) updateSessionAfterCommandLegacy(command string) {
 	trimmed := strings.TrimSpace(command)
 
-	// Handle bare "cd" (go to home directory)
 	if trimmed == "cd" || trimmed == "cd~" || trimmed == "cd ~" {
 		if home, err := os.UserHomeDir(); err == nil {
 			t.session.SetWorkDir(home)
@@ -351,40 +400,28 @@ func (t *BashTool) updateSessionAfterCommand(command string) {
 		return
 	}
 
-	// Handle "cd -" — we don't track OLDPWD, so skip
 	if trimmed == "cd -" {
 		return
 	}
 
-	// Match commands starting with "cd " — extract the target path.
-	// We handle simple cases: "cd <path>", "cd <path> && ...", "cd <path>; ..."
-	// For compound commands we only update if cd is the last meaningful command,
-	// but a simple heuristic is to check if it starts with "cd ".
 	if !strings.HasPrefix(trimmed, "cd ") {
 		return
 	}
 
-	// Extract the path argument from the cd command.
-	// Stop at shell operators: &&, ||, ;, |, #
 	rest := strings.TrimPrefix(trimmed, "cd ")
 	rest = strings.TrimSpace(rest)
 
-	// If the cd is followed by another command (&&, ;, ||, |), it's part of a
-	// compound command — the final working directory depends on the full chain,
-	// which we can't easily determine. Skip updating in that case.
 	for _, sep := range []string{"&&", "||", ";", "|"} {
 		if strings.Contains(rest, sep) {
 			return
 		}
 	}
 
-	// Strip surrounding quotes if present
 	if (strings.HasPrefix(rest, "\"") && strings.HasSuffix(rest, "\"")) ||
 		(strings.HasPrefix(rest, "'") && strings.HasSuffix(rest, "'")) {
 		rest = rest[1 : len(rest)-1]
 	}
 
-	// Handle home directory expansion
 	if strings.HasPrefix(rest, "~") {
 		if home, err := os.UserHomeDir(); err == nil {
 			rest = home + rest[1:]
@@ -395,7 +432,6 @@ func (t *BashTool) updateSessionAfterCommand(command string) {
 		return
 	}
 
-	// Resolve relative paths against current session workDir
 	currentDir := t.session.WorkDir()
 	var target string
 	if filepath.IsAbs(rest) {
@@ -404,10 +440,8 @@ func (t *BashTool) updateSessionAfterCommand(command string) {
 		target = filepath.Join(currentDir, rest)
 	}
 
-	// Clean the path
 	target = filepath.Clean(target)
 
-	// Only update if the directory actually exists
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		t.session.SetWorkDir(target)
 	}
@@ -432,8 +466,11 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 	// Use session working directory
 	workDir := t.session.WorkDir()
 
+	// Wrap command with pwd probe for reliable directory tracking
+	wrappedCommand := wrapCommandWithPWD(command)
+
 	// Fall back to standard execution (legacy behavior)
-	cmd := exec.CommandContext(execCtx, "bash", "-c", command)
+	cmd := exec.CommandContext(execCtx, "bash", "-c", wrappedCommand)
 	cmd.Dir = workDir
 
 	// Use sanitized environment with session env vars injected
@@ -554,16 +591,21 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 				t.timeout)), nil
 		}
 
-		// Update session after successful command
-		if cmdErr == nil {
+		// Extract real pwd from output and update session
+		rawOutput := stdout.String()
+		cleanOutput, detectedDir := extractPWDFromOutput(rawOutput)
+		if detectedDir != "" {
+			t.updateSessionFromPWD(detectedDir)
+		} else if cmdErr == nil {
 			t.updateSessionAfterCommand(command)
 		}
 
 		if cmdErr != nil {
 			exitErr, ok := cmdErr.(*exec.ExitError)
 			if ok {
+				cleanErr, _ := extractPWDFromOutput(rawOutput)
 				return ToolResult{
-					Content: stdout.String(),
+					Content: cleanErr,
 					Error:   fmt.Sprintf("command exited with code %d", exitErr.ExitCode()),
 					Success: false,
 				}, nil
@@ -571,7 +613,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 			return NewErrorResult(fmt.Sprintf("command failed: %s", cmdErr)), nil
 		}
 
-		return t.buildResult(stdout.String(), stderr.String()), nil
+		return t.buildResult(cleanOutput, stderr.String()), nil
 	}
 
 	// Non-streaming path: capture output directly
@@ -629,18 +671,22 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 			t.timeout)), nil
 	}
 
-	// Update session after successful command
-	if finalErr == nil {
+	// Extract real pwd from output and update session
+	rawOutput := stdout.String()
+	cleanOutput, detectedDir := extractPWDFromOutput(rawOutput)
+	if detectedDir != "" {
+		t.updateSessionFromPWD(detectedDir)
+	} else if finalErr == nil {
 		t.updateSessionAfterCommand(command)
 	}
 
 	// Handle command error
 	if finalErr != nil {
-		// Include exit code in error
 		exitErr, ok := finalErr.(*exec.ExitError)
 		if ok {
+			cleanErr, _ := extractPWDFromOutput(rawOutput)
 			return ToolResult{
-				Content: stdout.String(),
+				Content: cleanErr,
 				Error:   fmt.Sprintf("command exited with code %d", exitErr.ExitCode()),
 				Success: false,
 			}, nil
@@ -648,7 +694,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 		return NewErrorResult(fmt.Sprintf("command failed: %s", finalErr)), nil
 	}
 
-	return t.buildResult(stdout.String(), stderr.String()), nil
+	return t.buildResult(cleanOutput, stderr.String()), nil
 }
 
 // buildResult constructs a ToolResult from stdout and stderr output.

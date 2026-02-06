@@ -323,6 +323,24 @@ func (m Model) renderStatusBarFull() string {
 		leftParts = append(leftParts, memStyle.Render(fmt.Sprintf("Mem: %d", m.injectedContextCount)))
 	}
 
+	// Retry indicator
+	if m.retryAttempt > 0 && m.retryMax > 0 {
+		retryStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+		rightParts = append(rightParts, retryStyle.Render(fmt.Sprintf("↻ %d/%d", m.retryAttempt, m.retryMax)))
+	}
+
+	// Request latency
+	if m.lastRequestLatency > 0 {
+		latencyStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		var latencyStr string
+		if m.lastRequestLatency < time.Second {
+			latencyStr = fmt.Sprintf("⏱ %dms", m.lastRequestLatency.Milliseconds())
+		} else {
+			latencyStr = fmt.Sprintf("⏱ %.1fs", m.lastRequestLatency.Seconds())
+		}
+		rightParts = append(rightParts, latencyStyle.Render(latencyStr))
+	}
+
 	// Token usage with percentage
 	if m.tokenUsagePercent > 0 {
 		usageColor := ColorSuccess

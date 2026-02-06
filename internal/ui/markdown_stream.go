@@ -55,6 +55,17 @@ var tableRowRegex = regexp.MustCompile(`^\s*\|.*\|\s*$`)
 // tableSeparatorRegex matches a markdown table separator row: | --- | --- |
 var tableSeparatorRegex = regexp.MustCompile(`^\s*\|[\s\-:|]+\|\s*$`)
 
+// Markdown inline formatting regexes
+var (
+	headingRegex       = regexp.MustCompile(`^(#{1,6})\s+(.+)$`)
+	blockquoteRegex    = regexp.MustCompile(`^>\s?(.*)$`)
+	horizontalRuleRegex = regexp.MustCompile(`^(---+|\*\*\*+|___+)\s*$`)
+	boldRegex          = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	italicRegex        = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
+	linkRegex          = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	strikethroughRegex = regexp.MustCompile(`~~(.+?)~~`)
+)
+
 // NewMarkdownStreamParser creates a new streaming markdown parser.
 func NewMarkdownStreamParser(styles *Styles) *MarkdownStreamParser {
 	return &MarkdownStreamParser{
@@ -148,19 +159,12 @@ func (p *MarkdownStreamParser) Feed(chunk string) []RenderedBlock {
 					blocks = append(blocks, p.flushTable()...)
 				}
 
-				// Check for list items
-				if rendered, ok := p.renderListItem(line); ok {
-					blocks = append(blocks, RenderedBlock{
-						Content: rendered + "\n",
-						IsCode:  false,
-					})
-				} else {
-					// Regular text with inline code styling
-					blocks = append(blocks, RenderedBlock{
-						Content: p.renderInlineCode(line) + "\n",
-						IsCode:  false,
-					})
-				}
+				// Render full markdown line (headings, blockquotes, hr, lists, inline)
+				rendered := p.renderMarkdownLine(line)
+				blocks = append(blocks, RenderedBlock{
+					Content: rendered + "\n",
+					IsCode:  false,
+				})
 			}
 		}
 	}
@@ -423,6 +427,115 @@ func (p *MarkdownStreamParser) renderListItem(line string) (string, bool) {
 	return "", false
 }
 
+// renderMarkdownLine renders a single line of markdown with full formatting support:
+// headings, blockquotes, horizontal rules, lists, and inline formatting (bold, italic, etc.)
+func (p *MarkdownStreamParser) renderMarkdownLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+
+	// Horizontal rules: ---, ***, ___
+	if horizontalRuleRegex.MatchString(trimmed) {
+		hrStyle := lipgloss.NewStyle().Foreground(ColorDim)
+		return hrStyle.Render(strings.Repeat("─", 40))
+	}
+
+	// Headings: # H1, ## H2, etc.
+	if matches := headingRegex.FindStringSubmatch(trimmed); matches != nil {
+		level := len(matches[1])
+		text := matches[2]
+		headingStyle := lipgloss.NewStyle().Bold(true)
+		// Color by heading level
+		switch level {
+		case 1:
+			headingStyle = headingStyle.Foreground(ColorAccent)
+		case 2:
+			headingStyle = headingStyle.Foreground(ColorSecondary)
+		case 3:
+			headingStyle = headingStyle.Foreground(ColorInfo)
+		default:
+			headingStyle = headingStyle.Foreground(ColorText)
+		}
+		prefix := strings.Repeat("#", level) + " "
+		return headingStyle.Render(prefix + p.renderInlineFormatting(text))
+	}
+
+	// Blockquotes: > text
+	if matches := blockquoteRegex.FindStringSubmatch(line); matches != nil {
+		quoteStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		barStyle := lipgloss.NewStyle().Foreground(ColorDim)
+		content := p.renderInlineFormatting(matches[1])
+		return barStyle.Render("│ ") + quoteStyle.Render(content)
+	}
+
+	// List items
+	if rendered, ok := p.renderListItem(line); ok {
+		return rendered
+	}
+
+	// Regular text with full inline formatting
+	return p.renderInlineFormatting(line)
+}
+
+// renderInlineFormatting applies bold, italic, strikethrough, links, and inline code.
+func (p *MarkdownStreamParser) renderInlineFormatting(line string) string {
+	if line == "" {
+		return line
+	}
+
+	// Apply inline code first (so code content isn't processed for other formatting)
+	line = p.renderInlineCode(line)
+
+	// Bold: **text**
+	boldStyle := lipgloss.NewStyle().Bold(true)
+	line = boldRegex.ReplaceAllStringFunc(line, func(match string) string {
+		inner := boldRegex.FindStringSubmatch(match)
+		if len(inner) > 1 {
+			return boldStyle.Render(inner[1])
+		}
+		return match
+	})
+
+	// Italic: *text* (but not **text**)
+	italicStyle := lipgloss.NewStyle().Italic(true)
+	line = italicRegex.ReplaceAllStringFunc(line, func(match string) string {
+		inner := italicRegex.FindStringSubmatch(match)
+		if len(inner) > 1 {
+			// Reconstruct with surrounding context chars from lookaround
+			prefix := ""
+			suffix := ""
+			if len(match) > 0 && match[0] != '*' {
+				prefix = string(match[0])
+			}
+			if len(match) > 0 && match[len(match)-1] != '*' {
+				suffix = string(match[len(match)-1])
+			}
+			return prefix + italicStyle.Render(inner[1]) + suffix
+		}
+		return match
+	})
+
+	// Strikethrough: ~~text~~
+	strikeStyle := lipgloss.NewStyle().Strikethrough(true)
+	line = strikethroughRegex.ReplaceAllStringFunc(line, func(match string) string {
+		inner := strikethroughRegex.FindStringSubmatch(match)
+		if len(inner) > 1 {
+			return strikeStyle.Render(inner[1])
+		}
+		return match
+	})
+
+	// Links: [text](url)
+	linkStyle := lipgloss.NewStyle().Foreground(ColorInfo).Underline(true)
+	line = linkRegex.ReplaceAllStringFunc(line, func(match string) string {
+		inner := linkRegex.FindStringSubmatch(match)
+		if len(inner) > 2 {
+			return inner[1] + " (" + linkStyle.Render(inner[2]) + ")"
+		}
+		return match
+	})
+
+	return line
+}
+
 // listDepth calculates the nesting depth from leading whitespace.
 // Each 2 spaces (or 1 tab) equals one level of depth.
 func listDepth(indent string) int {
@@ -608,10 +721,11 @@ func (p *MarkdownStreamParser) renderTable(rows []string) string {
 	return result.String()
 }
 
+// ansiRegex matches ANSI escape codes for stripping in visible width calculation.
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
 // visibleWidth calculates the visible width of a string (ignoring ANSI codes).
 func visibleWidth(s string) int {
-	// Simple approximation - strip ANSI codes
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	clean := ansiRegex.ReplaceAllString(s, "")
 	return len(clean)
 }

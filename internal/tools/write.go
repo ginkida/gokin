@@ -55,7 +55,7 @@ func (t *WriteTool) Name() string {
 }
 
 func (t *WriteTool) Description() string {
-	return "Writes content to a file. Creates the file if it doesn't exist, or overwrites if it does."
+	return "Writes content to a file. Creates the file if it doesn't exist, or overwrites if it does. Set append=true to append instead of overwrite."
 }
 
 func (t *WriteTool) Declaration() *genai.FunctionDeclaration {
@@ -72,6 +72,10 @@ func (t *WriteTool) Declaration() *genai.FunctionDeclaration {
 				"content": {
 					Type:        genai.TypeString,
 					Description: "The content to write to the file",
+				},
+				"append": {
+					Type:        genai.TypeBoolean,
+					Description: "If true, append content to the file instead of overwriting. Default: false.",
 				},
 			},
 			Required: []string{"file_path", "content"},
@@ -95,6 +99,7 @@ func (t *WriteTool) Validate(args map[string]any) error {
 func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	filePath, _ := GetString(args, "file_path")
 	content, _ := GetString(args, "content")
+	appendMode := GetBoolDefault(args, "append", false)
 
 	// Validate path (mandatory for security)
 	if t.pathValidator == nil {
@@ -126,10 +131,18 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 		}
 	}
 
+	// Determine final content
+	var finalContent string
+	if appendMode && !isNew {
+		finalContent = string(oldContent) + content
+	} else {
+		finalContent = content
+	}
+
 	// Show diff preview and wait for approval if enabled
 	// Skip diff approval when running in delegated plan execution (context flag)
 	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
-		approved, err := t.diffHandler.PromptDiff(ctx, filePath, string(oldContent), content, "write", isNew)
+		approved, err := t.diffHandler.PromptDiff(ctx, filePath, string(oldContent), finalContent, "write", isNew)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
 		}
@@ -139,7 +152,7 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	}
 
 	// Write file atomically to prevent data corruption on interruption
-	newContent := []byte(content)
+	newContent := []byte(finalContent)
 	if err := AtomicWrite(filePath, newContent, 0644); err != nil {
 		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 	}
@@ -152,7 +165,9 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 
 	// Create status message
 	var status string
-	if isNew {
+	if appendMode && !isNew {
+		status = fmt.Sprintf("Appended to %s (%d bytes added, %d bytes total)", filePath, len(content), len(finalContent))
+	} else if isNew {
 		status = fmt.Sprintf("Created new file: %s (%d bytes)", filePath, len(content))
 	} else {
 		status = fmt.Sprintf("Updated file: %s (%d bytes)", filePath, len(content))

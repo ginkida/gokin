@@ -22,6 +22,10 @@ type Manager struct {
 	// Session cache for "allow for session" and "deny for session" decisions
 	sessionCache *cache.LRUCache[string, Decision]
 
+	// Auto-approved tool types: after user approves a caution-level tool once,
+	// subsequent uses of the same tool type are auto-approved for the session
+	autoApprovedTools map[string]bool
+
 	// Prompt handler for asking the user
 	promptHandler PromptHandler
 
@@ -35,9 +39,10 @@ func NewManager(rules *Rules, enabled bool) *Manager {
 	}
 
 	return &Manager{
-		rules:        rules,
-		enabled:      enabled,
-		sessionCache: cache.NewLRUCache[string, Decision](1000, 24*time.Hour),
+		rules:             rules,
+		enabled:           enabled,
+		sessionCache:      cache.NewLRUCache[string, Decision](1000, 24*time.Hour),
+		autoApprovedTools: make(map[string]bool),
 	}
 }
 
@@ -110,6 +115,16 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		}, nil
 
 	case LevelAsk:
+		// Auto-approve caution-level tools if previously approved this session
+		risk := GetToolRiskLevel(toolName)
+		if risk == RiskMedium {
+			m.mu.RLock()
+			autoApproved := m.autoApprovedTools[toolName]
+			m.mu.RUnlock()
+			if autoApproved {
+				return &Response{Allowed: true, Decision: DecisionAllowSession}, nil
+			}
+		}
 		return m.askUser(ctx, toolName, args)
 	}
 
@@ -147,10 +162,22 @@ func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]
 	// Handle the decision
 	switch decision {
 	case DecisionAllow:
+		// For caution-level tools, auto-approve future uses of same tool type
+		if GetToolRiskLevel(toolName) == RiskMedium {
+			m.mu.Lock()
+			m.autoApprovedTools[toolName] = true
+			m.mu.Unlock()
+		}
 		return &Response{Allowed: true, Decision: decision}, nil
 
 	case DecisionAllowSession:
 		m.rememberKey(key, decision)
+		// Also mark caution-level tools for auto-approve
+		if GetToolRiskLevel(toolName) == RiskMedium {
+			m.mu.Lock()
+			m.autoApprovedTools[toolName] = true
+			m.mu.Unlock()
+		}
 		return &Response{Allowed: true, Decision: decision}, nil
 
 	case DecisionDeny:
@@ -208,6 +235,9 @@ func (m *Manager) ForgetWithArgs(toolName string, args map[string]any) {
 // ClearSession clears all session-level decisions.
 func (m *Manager) ClearSession() {
 	m.sessionCache.Clear()
+	m.mu.Lock()
+	m.autoApprovedTools = make(map[string]bool)
+	m.mu.Unlock()
 }
 
 // IsEnabled returns whether the permission system is enabled.

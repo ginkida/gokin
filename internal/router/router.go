@@ -46,6 +46,8 @@ type Router struct {
 	enabled            bool
 	decomposeThreshold int
 	parallelThreshold  int
+	costAware          bool
+	fastModel          string
 
 	// Learned routing
 	routingHistory []routingRecord
@@ -67,8 +69,10 @@ type AgentRunner interface {
 // RouterConfig holds configuration for the router
 type RouterConfig struct {
 	Enabled            bool
-	DecomposeThreshold int // Default: 4
-	ParallelThreshold  int // Default: 7
+	DecomposeThreshold int    // Default: 4
+	ParallelThreshold  int    // Default: 7
+	CostAware          bool   // Enable cost-aware model selection
+	FastModel          string // Model for simple tasks (e.g., "gemini-2.0-flash")
 }
 
 // NewRouter creates a new task router
@@ -90,6 +94,8 @@ func NewRouter(cfg *RouterConfig, executor *tools.Executor, agentRunner AgentRun
 		enabled:            cfg.Enabled,
 		decomposeThreshold: cfg.DecomposeThreshold,
 		parallelThreshold:  cfg.ParallelThreshold,
+		costAware:          cfg.CostAware,
+		fastModel:          cfg.FastModel,
 		routingHistory:     make([]routingRecord, 0, 100),
 	}
 }
@@ -189,6 +195,11 @@ func (r *Router) Route(message string) *RoutingDecision {
 	default:
 		decision.Handler = HandlerExecutor
 		decision.Reasoning = "Standard strategy"
+	}
+
+	// Cost-aware model selection
+	if r.costAware && r.fastModel != "" {
+		decision.SuggestedModel = r.selectCostAwareModel(analysis)
 	}
 
 	return decision
@@ -564,6 +575,7 @@ type RoutingDecision struct {
 	Reasoning       string
 	Decomposition   *DecompositionResult // For HandlerCoordinated
 	LearnedExamples []LearnedExample     // Similar past tasks (Phase 2)
+	SuggestedModel  string               // Cost-aware model suggestion (empty = use default)
 }
 
 // LearnedExample contains information about a learned example for few-shot learning.
@@ -588,6 +600,22 @@ const (
 // String returns the string representation
 func (h HandlerType) String() string {
 	return string(h)
+}
+
+// selectCostAwareModel returns the fast model for simple tasks, empty for complex ones.
+func (r *Router) selectCostAwareModel(analysis *TaskComplexity) string {
+	// Use fast model for direct responses and simple single-tool calls
+	switch analysis.Strategy {
+	case StrategyDirect:
+		return r.fastModel
+	case StrategySingleTool:
+		// Single tool calls with low complexity can use fast model
+		if analysis.Score <= 2 {
+			return r.fastModel
+		}
+	}
+	// Complex tasks use the default (primary) model
+	return ""
 }
 
 // TrackOperation records an operation outcome for context awareness.

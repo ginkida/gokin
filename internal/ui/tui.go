@@ -194,6 +194,11 @@ type Model struct {
 	conversationMode     string // exploring/implementing/debugging
 	mcpHealthy           int
 	mcpTotal             int
+
+	// Request latency tracking
+	lastRequestLatency time.Duration
+	retryAttempt       int
+	retryMax           int
 }
 
 // BackgroundTaskState tracks the state of a background task for UI display.
@@ -1188,6 +1193,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		cmds = append(cmds, m.input.Focus())
 
 	case ResponseMetadataMsg:
+		// Track request latency for status bar
+		if msg.Duration > 0 {
+			m.lastRequestLatency = msg.Duration
+		}
 		// Render response metadata footer
 		footer := m.renderResponseMetadata(msg)
 		m.output.AppendLine(footer)
@@ -1467,20 +1476,26 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	// Status updates from client (retry, rate limit, stream idle)
-	// Most are handled silently - only show persistent issues
 	case StatusUpdateMsg:
-		if m.toastManager != nil {
-			switch msg.Type {
-			case StatusRetry:
-				// Silent - retries are normal
-			case StatusRateLimit:
-				// Only show if it affects user
+		switch msg.Type {
+		case StatusRetry:
+			if attempt, ok := msg.Details["attempt"].(int); ok {
+				m.retryAttempt = attempt
+			}
+			if maxAttempts, ok := msg.Details["max_attempts"].(int); ok {
+				m.retryMax = maxAttempts
+			}
+		case StatusRateLimit:
+			if m.toastManager != nil {
 				m.toastManager.ShowWarning(msg.Message)
-			case StatusStreamIdle:
-				// Silent - normal operation
-			case StatusStreamResume:
-				// Silent
-			case StatusRecoverableError:
+			}
+		case StatusStreamIdle:
+			// Silent
+		case StatusStreamResume:
+			m.retryAttempt = 0
+			m.retryMax = 0
+		case StatusRecoverableError:
+			if m.toastManager != nil {
 				m.toastManager.ShowError(msg.Message)
 			}
 		}

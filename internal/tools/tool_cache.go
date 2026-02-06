@@ -64,17 +64,20 @@ func NewToolResultCache(config CacheConfig) *ToolResultCache {
 }
 
 // IsCacheable returns true if a tool should be cached.
-// Only idempotent/read-only tools are cached.
+// Read-only and git-query tools are cached.
 func (c *ToolResultCache) IsCacheable(toolName string) bool {
 	cacheableTools := map[string]bool{
-		"read":      true, // File content (assuming doesn't change frequently)
-		"glob":      true, // File listings
-		"grep":      true, // Search results
-		"tree":      true, // Directory structure
-		"env":       true, // Environment variables
-		"list_dir":  true, // Directory contents
-		"git_log":   true, // Git history (rarely changes during session)
-		"git_blame": true, // Blame info
+		"read":       true, // File content
+		"glob":       true, // File listings
+		"grep":       true, // Search results
+		"tree":       true, // Directory structure
+		"env":        true, // Environment variables
+		"list_dir":   true, // Directory contents
+		"git_log":    true, // Git history
+		"git_blame":  true, // Blame info
+		"git_status": true, // Git status (short TTL, invalidated by writes)
+		"git_diff":   true, // Git diff (short TTL, invalidated by writes)
+		"code_graph": true, // Code structure analysis
 	}
 
 	return cacheableTools[toolName]
@@ -112,7 +115,7 @@ func (c *ToolResultCache) Get(toolName string, args map[string]any) (ToolResult,
 
 	logging.Debug("cache hit",
 		"tool", toolName,
-		"key", key[:8]+"...",
+		"key", truncKey(key),
 		"hits", entry.HitCount)
 
 	return entry.Result, true
@@ -160,7 +163,7 @@ func (c *ToolResultCache) Put(toolName string, args map[string]any, result ToolR
 
 	logging.Debug("cached result",
 		"tool", toolName,
-		"key", key[:8]+"...",
+		"key", truncKey(key),
 		"size", len(result.Content),
 		"total_entries", len(c.entries))
 }
@@ -178,7 +181,7 @@ func (c *ToolResultCache) Invalidate(toolName string, args map[string]any) {
 
 		logging.Debug("cache invalidated",
 			"tool", toolName,
-			"key", key[:8]+"...")
+			"key", truncKey(key))
 	}
 }
 
@@ -305,6 +308,14 @@ type CacheStats struct {
 	TTL        time.Duration // Time-to-live
 }
 
+// truncKey safely truncates a cache key for logging.
+func truncKey(key string) string {
+	if len(key) > 8 {
+		return key[:8] + "..."
+	}
+	return key
+}
+
 // makeKey creates a cache key from tool name and arguments.
 func (c *ToolResultCache) makeKey(toolName string, args map[string]any) string {
 	// Create a deterministic hash of the arguments
@@ -341,7 +352,7 @@ func (c *ToolResultCache) evictLRU() {
 	c.lruList = c.lruList[1:]
 
 	logging.Debug("cache evicted LRU",
-		"key", key[:8]+"...",
+		"key", truncKey(key),
 		"remaining", len(c.entries))
 }
 

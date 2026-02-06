@@ -60,17 +60,20 @@ func (s Status) Icon() string {
 
 // Step represents a single step in a plan.
 type Step struct {
-	ID          int       `json:"id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description"`
-	Status      Status    `json:"status"`
-	Output      string    `json:"output"`
-	Error       string    `json:"error"`
-	StartTime   time.Time `json:"start_time,omitempty"`
-	EndTime     time.Time `json:"end_time,omitempty"`
-	Parallel    bool      `json:"parallel"` // Can execute in parallel with other steps
-	DependsOn   []int     `json:"depends_on,omitempty"` // Step IDs this step depends on
-	Children    []*Step   `json:"children,omitempty"`    // Nested sub-steps
+	ID          int           `json:"id"`
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	Status      Status        `json:"status"`
+	Output      string        `json:"output"`
+	Error       string        `json:"error"`
+	StartTime   time.Time     `json:"start_time,omitempty"`
+	EndTime     time.Time     `json:"end_time,omitempty"`
+	Parallel    bool          `json:"parallel"`                // Can execute in parallel with other steps
+	DependsOn   []int         `json:"depends_on,omitempty"`    // Step IDs this step depends on
+	Children    []*Step       `json:"children,omitempty"`      // Nested sub-steps
+	MaxRetries  int           `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
+	Timeout     time.Duration `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
+	RetryCount  int           `json:"retry_count,omitempty"`   // Current retry count
 }
 
 // Duration returns the step execution duration.
@@ -443,6 +446,86 @@ func (p *Plan) PendingCount() int {
 		}
 	}
 	return count
+}
+
+// CanRetry returns true if the step can be retried.
+func (s *Step) CanRetry() bool {
+	return s.Status == StatusFailed && s.MaxRetries > 0 && s.RetryCount < s.MaxRetries
+}
+
+// RetryStep resets a failed step for retry.
+func (p *Plan) RetryStep(id int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, step := range p.Steps {
+		if step.ID == id {
+			if step.Status != StatusFailed || step.MaxRetries == 0 || step.RetryCount >= step.MaxRetries {
+				return false
+			}
+			step.RetryCount++
+			step.Status = StatusPending
+			step.Error = ""
+			step.Output = ""
+			step.StartTime = time.Time{}
+			step.EndTime = time.Time{}
+			p.Status = StatusInProgress
+			p.UpdatedAt = time.Now()
+			return true
+		}
+	}
+	return false
+}
+
+// HasTimedOut returns true if the step has exceeded its timeout.
+func (s *Step) HasTimedOut() bool {
+	if s.Timeout <= 0 || s.StartTime.IsZero() || s.Status != StatusInProgress {
+		return false
+	}
+	return time.Since(s.StartTime) > s.Timeout
+}
+
+// AddStepFull adds a step with all options including retry and timeout.
+func (p *Plan) AddStepFull(title, description string, parallel bool, dependsOn []int, maxRetries int, timeout time.Duration) *Step {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	step := &Step{
+		ID:          len(p.Steps) + 1,
+		Title:       title,
+		Description: description,
+		Status:      StatusPending,
+		Parallel:    parallel,
+		DependsOn:   dependsOn,
+		MaxRetries:  maxRetries,
+		Timeout:     timeout,
+	}
+	p.Steps = append(p.Steps, step)
+	p.UpdatedAt = time.Now()
+	return step
+}
+
+// CheckTimeouts checks all in-progress steps for timeouts and fails them.
+func (p *Plan) CheckTimeouts() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var timedOut []int
+	for _, step := range p.Steps {
+		if step.Status == StatusInProgress && step.Timeout > 0 && !step.StartTime.IsZero() {
+			if time.Since(step.StartTime) > step.Timeout {
+				step.Status = StatusFailed
+				step.Error = fmt.Sprintf("step timed out after %s", step.Timeout)
+				step.EndTime = time.Now()
+				timedOut = append(timedOut, step.ID)
+			}
+		}
+	}
+
+	if len(timedOut) > 0 {
+		p.UpdatedAt = time.Now()
+	}
+	return timedOut
 }
 
 // PauseStep marks a step as paused (can be resumed later).

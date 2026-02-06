@@ -95,8 +95,26 @@ func (t *EditTool) Declaration() *genai.FunctionDeclaration {
 					Type:        genai.TypeBoolean,
 					Description: "If true, treat old_string as a regular expression pattern.",
 				},
+				"edits": {
+					Type:        genai.TypeArray,
+					Description: "Array of {old_string, new_string} pairs for multiple edits in one call. Each edit is applied sequentially to the result of the previous one.",
+					Items: &genai.Schema{
+						Type: genai.TypeObject,
+						Properties: map[string]*genai.Schema{
+							"old_string": {
+								Type:        genai.TypeString,
+								Description: "The text to find",
+							},
+							"new_string": {
+								Type:        genai.TypeString,
+								Description: "The text to replace with",
+							},
+						},
+						Required: []string{"old_string", "new_string"},
+					},
+				},
 			},
-			Required: []string{"file_path", "old_string", "new_string"},
+			Required: []string{"file_path"},
 		},
 	}
 }
@@ -106,10 +124,31 @@ func (t *EditTool) Validate(args map[string]any) error {
 	if !ok || filePath == "" {
 		return NewValidationError("file_path", "is required")
 	}
+	_ = filePath
 
+	// Multi-edit mode: edits array takes precedence
+	if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
+		for i, e := range edits {
+			editMap, ok := e.(map[string]any)
+			if !ok {
+				return NewValidationError("edits", fmt.Sprintf("edit[%d] is not an object", i))
+			}
+			oldStr, _ := editMap["old_string"].(string)
+			newStr, _ := editMap["new_string"].(string)
+			if oldStr == "" {
+				return NewValidationError("edits", fmt.Sprintf("edit[%d].old_string is required", i))
+			}
+			if oldStr == newStr {
+				return NewValidationError("edits", fmt.Sprintf("edit[%d]: new_string must differ from old_string", i))
+			}
+		}
+		return nil
+	}
+
+	// Single edit mode
 	oldStr, ok := GetString(args, "old_string")
 	if !ok || oldStr == "" {
-		return NewValidationError("old_string", "is required")
+		return NewValidationError("old_string", "is required (or provide edits array)")
 	}
 
 	newStr, ok := GetString(args, "new_string")
@@ -126,6 +165,12 @@ func (t *EditTool) Validate(args map[string]any) error {
 
 func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	filePath, _ := GetString(args, "file_path")
+
+	// Check for multi-edit mode
+	if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
+		return t.executeMultiEdit(ctx, filePath, edits)
+	}
+
 	oldStr, _ := GetString(args, "old_string")
 	newStr, _ := GetString(args, "new_string")
 	replaceAll := GetBoolDefault(args, "replace_all", false)
@@ -213,6 +258,8 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 			loc := re.FindStringIndex(content)
 			if loc != nil {
 				newContent = content[:loc[0]] + re.ReplaceAllString(content[loc[0]:loc[1]], newStr) + content[loc[1]:]
+			} else {
+				newContent = content // Safety fallback: no match, no change
 			}
 		}
 	} else {
@@ -279,4 +326,81 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 
 	return NewSuccessResult(status), nil
+}
+
+// executeMultiEdit applies multiple edits to a single file sequentially.
+// Each edit operates on the result of the previous one.
+func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits []any) (ToolResult, error) {
+	// Validate path
+	if t.pathValidator == nil {
+		return NewErrorResult("security error: path validator not initialized"), nil
+	}
+	validPath, err := t.pathValidator.ValidateFile(filePath)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
+	}
+	filePath = validPath
+
+	// Read file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NewErrorResult(fmt.Sprintf("file not found: %s", filePath)), nil
+		}
+		return NewErrorResult(fmt.Sprintf("error reading file: %s", err)), nil
+	}
+
+	content := string(data)
+	oldContent := data
+	totalReplacements := 0
+
+	// Apply each edit sequentially
+	for i, e := range edits {
+		editMap, ok := e.(map[string]any)
+		if !ok {
+			return NewErrorResult(fmt.Sprintf("edit[%d] is not an object", i)), nil
+		}
+
+		oldStr, ok1 := editMap["old_string"].(string)
+		newStr, ok2 := editMap["new_string"].(string)
+		if !ok1 || oldStr == "" {
+			return NewErrorResult(fmt.Sprintf("edit[%d]: old_string is required and must be a non-empty string", i)), nil
+		}
+		if !ok2 {
+			newStr = "" // Allow deletion (replace with nothing)
+		}
+
+		count := strings.Count(content, oldStr)
+		if count == 0 {
+			return NewErrorResult(fmt.Sprintf("edit[%d]: old_string not found in file after previous edits", i)), nil
+		}
+
+		content = strings.Replace(content, oldStr, newStr, 1)
+		totalReplacements++
+	}
+
+	// Show combined diff preview
+	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
+		approved, err := t.diffHandler.PromptDiff(ctx, filePath, string(oldContent), content, "edit", false)
+		if err != nil {
+			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
+		}
+		if !approved {
+			return NewErrorResult("changes rejected by user"), nil
+		}
+	}
+
+	// Write atomically
+	newContentBytes := []byte(content)
+	if err := AtomicWrite(filePath, newContentBytes, 0644); err != nil {
+		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
+	}
+
+	// Record single undo for all edits
+	if t.undoManager != nil {
+		change := undo.NewFileChange(filePath, "edit", oldContent, newContentBytes, false)
+		t.undoManager.Record(*change)
+	}
+
+	return NewSuccessResult(fmt.Sprintf("Applied %d edit(s) to %s", totalReplacements, filePath)), nil
 }

@@ -134,6 +134,14 @@ func (t *GrepTool) Declaration() *genai.FunctionDeclaration {
 					Type:        genai.TypeInteger,
 					Description: "Number of context lines to show before and after matches",
 				},
+				"invert": {
+					Type:        genai.TypeBoolean,
+					Description: "If true, show lines that do NOT match the pattern (like grep -v)",
+				},
+				"count_only": {
+					Type:        genai.TypeBoolean,
+					Description: "If true, return only the count of matches per file instead of matching lines",
+				},
 			},
 			Required: []string{"pattern"},
 		},
@@ -161,6 +169,8 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	globPattern := GetStringDefault(args, "glob", "")
 	caseInsensitive := GetBoolDefault(args, "case_insensitive", false)
 	contextLines := GetIntDefault(args, "context_lines", 0)
+	invertMatch := GetBoolDefault(args, "invert", false)
+	countOnly := GetBoolDefault(args, "count_only", false)
 
 	// Make path absolute first (relative to workDir)
 	if !filepath.IsAbs(searchPath) {
@@ -230,9 +240,38 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewErrorResult(err.Error()), nil
 	}
 
-	// Search files in parallel
+	// Search files
 	const maxMatches = 500
-	fileMatches := t.searchParallel(ctx, files, re, contextLines)
+	var fileMatches []fileMatch
+	if invertMatch {
+		fileMatches = t.invertMatches(ctx, files, re)
+	} else {
+		fileMatches = t.searchParallel(ctx, files, re, contextLines)
+	}
+
+	// Count-only mode
+	if countOnly {
+		var results strings.Builder
+		totalCount := 0
+		fileCount := 0
+		for _, fm := range fileMatches {
+			relPath, _ := filepath.Rel(t.workDir, fm.path)
+			if relPath == "" {
+				relPath = fm.path
+			}
+			count := len(fm.matches)
+			if count > 0 {
+				results.WriteString(fmt.Sprintf("%s: %d\n", relPath, count))
+				totalCount += count
+				fileCount++
+			}
+		}
+		if totalCount == 0 {
+			return NewSuccessResult("No matches found."), nil
+		}
+		summary := fmt.Sprintf("Total: %d match(es) in %d file(s):\n\n", totalCount, fileCount)
+		return NewSuccessResult(summary + results.String()), nil
+	}
 
 	// Build results and cache data
 	var results strings.Builder
@@ -282,11 +321,59 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewSuccessResult("No matches found."), nil
 	}
 
-	summary := fmt.Sprintf("Found %d match(es) in %d file(s):\n\n", matchCount, fileCount)
+	label := "Found"
+	if invertMatch {
+		label = "Found (inverted)"
+	}
+	summary := fmt.Sprintf("%s %d match(es) in %d file(s):\n\n", label, matchCount, fileCount)
 	if matchCount >= maxMatches {
-		summary = fmt.Sprintf("Found %d+ match(es) in %d file(s) (capped at %d — refine pattern for complete results):\n\n", matchCount, fileCount, maxMatches)
+		summary = fmt.Sprintf("%s %d+ match(es) in %d file(s) (capped at %d — refine pattern for complete results):\n\n", label, matchCount, fileCount, maxMatches)
 	}
 	return NewSuccessResult(summary + results.String()), nil
+}
+
+// invertMatches returns lines that do NOT match the regex for each file.
+func (t *GrepTool) invertMatches(ctx context.Context, files []string, re *regexp.Regexp) []fileMatch {
+	var results []fileMatch
+
+	for _, file := range files {
+		select {
+		case <-ctx.Done():
+			return results
+		default:
+		}
+
+		f, err := os.Open(file)
+		if err != nil {
+			continue
+		}
+
+		var matches []grepMatch
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			line := scanner.Text()
+			if !re.MatchString(line) {
+				if len(line) > 500 {
+					line = line[:500] + "..."
+				}
+				matches = append(matches, grepMatch{lineNum: lineNum, line: line})
+			}
+		}
+		f.Close()
+
+		if len(matches) > 0 {
+			results = append(results, fileMatch{path: file, matches: matches})
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].path < results[j].path
+	})
+
+	return results
 }
 
 // searchParallel searches files concurrently using a worker pool.

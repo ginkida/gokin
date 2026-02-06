@@ -12,22 +12,41 @@ func DefaultRules() *Rules {
 	return &Rules{
 		DefaultPolicy: LevelAsk,
 		ToolPolicies: map[string]Level{
-			// Read-only tools - allow by default
-			"read":     LevelAllow,
-			"glob":     LevelAllow,
-			"grep":     LevelAllow,
-			"tree":     LevelAllow,
-			"diff":     LevelAllow,
-			"env":      LevelAllow,
-			"list_dir": LevelAllow,
-			"todo":     LevelAllow,
+			// Read-only tools - auto-allow (safe)
+			"read":            LevelAllow,
+			"glob":            LevelAllow,
+			"grep":            LevelAllow,
+			"tree":            LevelAllow,
+			"diff":            LevelAllow,
+			"env":             LevelAllow,
+			"list_dir":        LevelAllow,
+			"todo":            LevelAllow,
+			"git_status":      LevelAllow,
+			"git_log":         LevelAllow,
+			"git_diff":        LevelAllow,
+			"git_blame":       LevelAllow,
+			"code_graph":      LevelAllow,
+			"semantic_search": LevelAllow,
+			"history_search":  LevelAllow,
+			"web_search":      LevelAllow,
+			"web_fetch":       LevelAllow,
+			"task_output":     LevelAllow,
+			"task_stop":       LevelAllow,
 
-			// File modification tools - ask before executing
-			"write": LevelAsk,
-			"edit":  LevelAsk,
+			// File modification tools - ask before executing (caution)
+			"write":       LevelAsk,
+			"atomicwrite": LevelAsk,
+			"edit":    LevelAsk,
+			"git_add": LevelAsk,
+			"copy":    LevelAsk,
+			"move":    LevelAsk,
+			"mkdir":   LevelAsk,
 
-			// System tools - ask before executing
-			"bash": LevelAsk,
+			// System/dangerous tools - always ask (dangerous)
+			"bash":       LevelAsk,
+			"delete":     LevelAsk,
+			"git_commit": LevelAsk,
+			"ssh":        LevelAsk,
 		},
 	}
 }

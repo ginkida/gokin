@@ -83,11 +83,16 @@ type Response struct {
 // GetToolRiskLevel returns the risk level for a tool.
 func GetToolRiskLevel(toolName string) RiskLevel {
 	switch toolName {
-	case "read", "glob", "grep", "tree", "diff", "env", "list_dir":
+	case "read", "glob", "grep", "tree", "diff", "env", "list_dir",
+		"git_status", "git_log", "git_diff", "git_blame",
+		"code_graph", "semantic_search", "history_search",
+		"web_search", "web_fetch", "todo",
+		"task_output", "task_stop":
 		return RiskLow
-	case "write", "edit":
+	case "write", "edit", "git_add", "copy", "move", "mkdir",
+		"atomicwrite", "task", "batch":
 		return RiskMedium
-	case "bash":
+	case "bash", "delete", "git_commit", "ssh":
 		return RiskHigh
 	default:
 		return RiskMedium

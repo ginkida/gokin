@@ -918,6 +918,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			if path, ok := call.Args["file_path"].(string); ok {
 				e.toolCache.InvalidateByFile(path)
 			}
+			// Invalidate git caches when files change
+			e.toolCache.InvalidateByTool("git_status")
+			e.toolCache.InvalidateByTool("git_diff")
 		}
 	}
 

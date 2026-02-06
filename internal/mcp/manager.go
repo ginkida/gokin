@@ -17,13 +17,21 @@ type Manager struct {
 	tools   []tools.Tool             // All registered tools from all servers
 	health  map[string]*ServerHealth
 	mu      sync.RWMutex
+
+	// Auto-healing
+	healMu        sync.Mutex // protects healingCancel and healingDone (separate from mu to avoid deadlock)
+	healingCancel context.CancelFunc
+	healingDone   chan struct{}
 }
 
 // ServerHealth tracks health status of an MCP server.
 type ServerHealth struct {
-	Healthy          bool
-	LastCheck        time.Time
-	ConsecutiveFails int
+	Healthy            bool
+	LastCheck          time.Time
+	ConsecutiveFails   int
+	ReconnectAttempts  int
+	MaxReconnects      int
+	LastReconnectError string
 }
 
 // NewManager creates a new MCP manager.
@@ -238,8 +246,10 @@ func (m *Manager) RemoveServer(name string) error {
 	return nil
 }
 
-// Shutdown disconnects from all servers.
+// Shutdown disconnects from all servers and stops background processes.
 func (m *Manager) Shutdown(ctx context.Context) error {
+	m.StopHealthCheck()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -397,4 +407,133 @@ func (m *Manager) RefreshTools(ctx context.Context, name string) error {
 
 	logging.Debug("MCP tools refreshed", "name", name, "tools", len(mcpTools))
 	return nil
+}
+
+// StartHealthCheck starts a background goroutine that periodically checks
+// server health and attempts to reconnect unhealthy servers.
+func (m *Manager) StartHealthCheck(ctx context.Context, interval time.Duration) {
+	m.healMu.Lock()
+	defer m.healMu.Unlock()
+
+	// Stop existing health check if running
+	if m.healingCancel != nil {
+		m.healingCancel()
+		if m.healingDone != nil {
+			<-m.healingDone
+		}
+	}
+
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	healCtx, cancel := context.WithCancel(ctx)
+	m.healingCancel = cancel
+	m.healingDone = make(chan struct{})
+
+	go m.healthCheckLoop(healCtx, interval)
+}
+
+// StopHealthCheck stops the background health check goroutine.
+func (m *Manager) StopHealthCheck() {
+	m.healMu.Lock()
+	cancel := m.healingCancel
+	done := m.healingDone
+	m.healingCancel = nil
+	m.healingDone = nil
+	m.healMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+		if done != nil {
+			<-done
+		}
+	}
+}
+
+const maxReconnectAttempts = 10
+
+// healthCheckLoop runs periodically to check health and reconnect unhealthy servers.
+func (m *Manager) healthCheckLoop(ctx context.Context, interval time.Duration) {
+	defer close(m.healingDone)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.CheckHealth(ctx)
+			m.tryReconnectUnhealthy(ctx)
+		}
+	}
+}
+
+// tryReconnectUnhealthy attempts to reconnect servers marked as unhealthy.
+func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for name, h := range m.health {
+		if h.Healthy {
+			continue
+		}
+
+		if h.MaxReconnects == 0 {
+			h.MaxReconnects = maxReconnectAttempts
+		}
+
+		if h.ReconnectAttempts >= h.MaxReconnects {
+			continue // Gave up on this server
+		}
+
+		cfg, exists := m.servers[name]
+		if !exists {
+			continue
+		}
+
+		h.ReconnectAttempts++
+		logging.Info("MCP auto-reconnect attempt",
+			"name", name,
+			"attempt", h.ReconnectAttempts,
+			"max", h.MaxReconnects)
+
+		// Close old client if exists
+		if oldClient, ok := m.clients[name]; ok {
+			oldClient.Close()
+			delete(m.clients, name)
+
+			// Remove old tools from this server
+			newTools := make([]tools.Tool, 0, len(m.tools))
+			for _, t := range m.tools {
+				if mcpTool, ok := t.(*MCPTool); ok {
+					if mcpTool.GetServerName() != name {
+						newTools = append(newTools, t)
+					}
+				} else {
+					newTools = append(newTools, t)
+				}
+			}
+			m.tools = newTools
+		}
+
+		// Try to reconnect
+		if err := m.connectServer(ctx, cfg); err != nil {
+			h.LastReconnectError = err.Error()
+			logging.Warn("MCP auto-reconnect failed",
+				"name", name,
+				"attempt", h.ReconnectAttempts,
+				"error", err)
+			continue
+		}
+
+		// Reconnect succeeded
+		h.Healthy = true
+		h.ConsecutiveFails = 0
+		h.ReconnectAttempts = 0
+		h.LastReconnectError = ""
+		logging.Info("MCP server auto-reconnected successfully", "name", name)
+	}
 }

@@ -34,6 +34,15 @@ type ContextManager struct {
 	lastUsage     *TokenUsage
 	updateVersion uint64 // Monotonically increasing version to prevent stale watcher updates
 
+	// Async token counting
+	lastEstimatedTokens int            // Cached estimate for fast path
+	lastHistoryLen      int            // History length at last count
+
+	// Background summarization
+	summarizing     bool              // Whether summarization is in progress
+	summarizeDone   chan struct{}      // Signal when summarization completes
+	lastSummaryDur  time.Duration     // Duration of last summarization
+
 	// New components
 	metrics            *ContextMetrics
 	summaryCache       *SummaryCache
@@ -171,7 +180,7 @@ func (m *ContextManager) onSessionChange(event chat.ChangeEvent) {
 }
 
 // PrepareForRequest prepares the context before sending a request.
-// It counts tokens and triggers optimization if needed.
+// Uses fast estimation for immediate decisions; precise count runs async.
 func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 	startTime := time.Now()
 
@@ -180,41 +189,73 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 	// Compress large function responses
 	history = m.responseCompressor.CompressContents(history)
 
-	// Count tokens
-	tokens, err := m.tokenCounter.CountContents(ctx, history)
+	// Fast path: use estimation if history delta is small (< 5 messages since last count)
+	m.mu.RLock()
+	historyDelta := len(history) - m.lastHistoryLen
+	cachedTokens := m.lastEstimatedTokens
+	m.mu.RUnlock()
+
+	var tokens int
 	isEstimate := false
-	if err != nil {
-		// Fall back to estimation if API call fails
-		tokens = EstimateContentsTokens(history)
+
+	if cachedTokens > 0 && historyDelta >= 0 && historyDelta < 5 {
+		// Use cached estimate + delta estimation for speed
+		tokens = cachedTokens + EstimateContentsTokens(history[len(history)-max(historyDelta, 0):])
 		isEstimate = true
 		m.metrics.RecordEstimation()
 	} else {
-		m.metrics.RecordAPICount()
+		// Need full count - use estimate first, then async precise count
+		tokens = EstimateContentsTokens(history)
+		isEstimate = true
+		m.metrics.RecordEstimation()
 	}
 
 	m.mu.Lock()
-	m.updateVersion++ // Invalidate any in-flight watcher updates
+	m.updateVersion++
 	m.currentTokens = tokens
+	m.lastEstimatedTokens = tokens
+	m.lastHistoryLen = len(history)
 	usage := m.tokenCounter.GetUsage(tokens)
 	usage.IsEstimate = isEstimate
 	m.lastUsage = &usage
 	m.tokenHistory = append(m.tokenHistory, tokenSnapshot{tokens: tokens, timestamp: time.Now()})
-	// Keep only last 20 snapshots
 	if len(m.tokenHistory) > 20 {
 		m.tokenHistory = m.tokenHistory[len(m.tokenHistory)-20:]
 	}
 	m.mu.Unlock()
 
+	// Launch async precise token count in background
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in async token count", "error", r)
+			}
+		}()
+
+		asyncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		precise, err := m.tokenCounter.CountContents(asyncCtx, history)
+		if err != nil {
+			return // Keep using estimate
+		}
+		m.metrics.RecordAPICount()
+
+		m.mu.Lock()
+		m.lastEstimatedTokens = precise
+		m.currentTokens = precise
+		u := m.tokenCounter.GetUsage(precise)
+		u.IsEstimate = false
+		m.lastUsage = &u
+		m.mu.Unlock()
+	}()
+
 	// Record metrics
 	m.metrics.RecordPrepare(time.Since(startTime), tokens)
 
-	// Optimize if near limit
+	// Optimize if near limit — launch in background to avoid blocking
 	if usage.NearLimit && m.summarizer != nil && m.config.EnableAutoSummary {
-		if err := m.OptimizeContext(ctx); err != nil {
-			// Log error but don't fail the request
-			// The request might still succeed with the current context
-			logging.Warn("context optimization failed", "error", err)
-		}
+		m.backgroundOptimize(ctx)
 	}
 
 	// Predictive: check if next request will exceed limit based on trend
@@ -226,14 +267,45 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 					"current_tokens", tokens,
 					"predicted_tokens", predicted,
 					"predicted_pct", predUsage.PercentUsed)
-				if err := m.OptimizeContext(ctx); err != nil {
-					logging.Warn("predictive summarization failed", "error", err)
-				}
+				m.backgroundOptimize(ctx)
 			}
 		}
 	}
 
 	return nil
+}
+
+// backgroundOptimize runs context optimization in a background goroutine.
+// Only one optimization runs at a time; concurrent calls are no-ops.
+func (m *ContextManager) backgroundOptimize(ctx context.Context) {
+	m.mu.Lock()
+	if m.summarizing {
+		m.mu.Unlock()
+		return // Already running
+	}
+	m.summarizing = true
+	m.summarizeDone = make(chan struct{})
+	m.mu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in background optimization", "error", r)
+			}
+			m.mu.Lock()
+			m.summarizing = false
+			close(m.summarizeDone)
+			m.mu.Unlock()
+		}()
+
+		start := time.Now()
+		if err := m.OptimizeContext(ctx); err != nil {
+			logging.Warn("background context optimization failed", "error", err)
+		}
+		m.mu.Lock()
+		m.lastSummaryDur = time.Since(start)
+		m.mu.Unlock()
+	}()
 }
 
 // OptimizeContext optimizes the context by summarizing old messages.
