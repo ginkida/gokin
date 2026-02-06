@@ -1142,7 +1142,7 @@ func (b *Builder) wireDependencies() error {
 		},
 		OnToolEnd: func(name string, result tools.ToolResult) {
 			if app.program != nil {
-				app.program.Send(ui.ToolResultMsg(result.Content))
+				app.program.Send(ui.ToolResultMsg{Name: name, Content: result.Content})
 			}
 
 			// Refresh token count after each tool completes (context grew)

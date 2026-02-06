@@ -49,7 +49,7 @@ type OutputModel struct {
 // NewOutputModel creates a new output model.
 func NewOutputModel(styles *Styles) OutputModel {
 	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStandardStyle("dark"),
 		glamour.WithWordWrap(0), // Disable fixed word wrap, handled by viewport
 	)
 

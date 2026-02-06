@@ -410,9 +410,9 @@ func ToolCall(name string, args map[string]any) tea.Cmd {
 }
 
 // ToolResult sends a tool result message.
-func ToolResult(result string) tea.Cmd {
+func ToolResult(name string, result string) tea.Cmd {
 	return func() tea.Msg {
-		return ToolResultMsg(result)
+		return ToolResultMsg{Name: name, Content: result}
 	}
 }
 

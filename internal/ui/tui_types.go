@@ -67,7 +67,10 @@ type (
 		Name string
 		Args map[string]any
 	}
-	ToolResultMsg string
+	ToolResultMsg struct {
+		Name    string
+		Content string
+	}
 	// ToolProgressMsg is sent periodically during long-running tool execution.
 	ToolProgressMsg struct {
 		Name           string

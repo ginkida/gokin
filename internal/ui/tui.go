@@ -183,8 +183,8 @@ type Model struct {
 	backgroundTasks map[string]*BackgroundTaskState
 
 	// Activity feed panel
-	activityFeed  *ActivityFeedPanel
-	currentToolID string // For tracking active tool
+	activityFeed    *ActivityFeedPanel
+	activeToolCalls []activeToolCall // Stack of active parallel tool calls
 
 	// Compact mode
 	CompactMode bool
@@ -213,6 +213,14 @@ type BackgroundTaskState struct {
 	Description string
 	Status      string // "running", "completed", "failed", "cancelled"
 	StartTime   time.Time
+}
+
+// activeToolCall tracks a single in-flight tool call for parallel execution.
+type activeToolCall struct {
+	activityID string    // ID in activity feed
+	name       string    // tool name
+	info       string    // tool info (e.g., file path)
+	startTime  time.Time // when the tool call started
 }
 
 // CoordinatedTaskState tracks the state of a coordinated task for UI display.
@@ -357,6 +365,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.slowWarningShown = false
 			m.currentTool = ""
 			m.currentToolInfo = ""
+			m.activeToolCalls = nil
 			m.responseHeaderShown = false
 			m.output.FlushStream() // Flush any remaining streamed content
 			m.output.AppendLine("")
@@ -1031,6 +1040,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.state = StateInput
 			m.currentTool = ""
 			m.currentToolInfo = ""
+			m.activeToolCalls = nil
 			m.output.AppendLine("")
 			m.output.AppendLine(m.styles.Warning.Render(" Operation cancelled"))
 			m.output.AppendLine("")
@@ -1051,6 +1061,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.state = StateInput
 			m.currentTool = ""
 			m.currentToolInfo = ""
+			m.activeToolCalls = nil
 			m.streamStartTime = time.Time{} // Reset timeout tracking
 			// Hide tool progress bar if visible
 			if m.toolProgressBar != nil {
@@ -1147,9 +1158,6 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamStartTime = time.Now() // Reset timeout on tool activity
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
-		m.currentTool = msg.Name
-		m.currentToolInfo = "" // Reset tool info
-		m.toolStartTime = time.Now()
 
 		// Mark response as started (no header in Claude Code style)
 		if !m.responseHeaderShown {
@@ -1157,17 +1165,27 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 		// Generate tool info for status line display
-		m.currentToolInfo = m.extractToolInfoFromArgs(msg.Name, msg.Args)
+		toolInfo := m.extractToolInfoFromArgs(msg.Name, msg.Args)
+
+		// Update status bar spinner with the latest tool (last one shown)
+		m.currentTool = msg.Name
+		m.currentToolInfo = toolInfo
+		m.toolStartTime = time.Now()
 
 		// Update plan progress panel with current tool (live activity)
 		if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
-			m.planProgressPanel.SetCurrentTool(msg.Name, m.currentToolInfo)
+			m.planProgressPanel.SetCurrentTool(msg.Name, toolInfo)
 		}
 
-		// Add to activity feed
+		// Add to activity feed and track in activeToolCalls
+		toolID := fmt.Sprintf("tool-%d", time.Now().UnixNano())
+		m.activeToolCalls = append(m.activeToolCalls, activeToolCall{
+			activityID: toolID,
+			name:       msg.Name,
+			info:       toolInfo,
+			startTime:  time.Now(),
+		})
 		if m.activityFeed != nil {
-			toolID := fmt.Sprintf("tool-%d", time.Now().UnixNano())
-			m.currentToolID = toolID
 			m.activityFeed.AddEntry(ActivityFeedEntry{
 				ID:          toolID,
 				Type:        ActivityTypeTool,
@@ -1186,24 +1204,56 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamStartTime = time.Now() // Reset timeout on tool result
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
-		m.handleToolResult(string(msg))
 
-		// Complete entry in activity feed
-		if m.activityFeed != nil && m.currentToolID != "" {
-			m.activityFeed.CompleteEntry(m.currentToolID, true, "")
-			m.currentToolID = ""
+		// Find the first matching active tool call by name
+		matchIdx := -1
+		for i, tc := range m.activeToolCalls {
+			if tc.name == msg.Name {
+				matchIdx = i
+				break
+			}
 		}
 
-		// Clear current tool after result - next ToolCallMsg will set new tool
-		m.currentTool = ""
-		m.currentToolInfo = ""
-		// Hide tool progress bar
-		if m.toolProgressBar != nil {
-			m.toolProgressBar.Hide()
+		if matchIdx >= 0 {
+			matched := m.activeToolCalls[matchIdx]
+
+			// Complete entry in activity feed
+			if m.activityFeed != nil {
+				m.activityFeed.CompleteEntry(matched.activityID, true, "")
+			}
+
+			// Handle tool result using matched tool's info and timing
+			m.handleToolResultWithInfo(msg.Content, matched.name, matched.info, matched.startTime)
+
+			// Remove matched entry from slice
+			m.activeToolCalls = append(m.activeToolCalls[:matchIdx], m.activeToolCalls[matchIdx+1:]...)
+
+			// Update status bar from remaining active calls (or clear if empty)
+			if len(m.activeToolCalls) > 0 {
+				last := m.activeToolCalls[len(m.activeToolCalls)-1]
+				m.currentTool = last.name
+				m.currentToolInfo = last.info
+				m.toolStartTime = last.startTime
+			} else {
+				m.currentTool = ""
+				m.currentToolInfo = ""
+			}
+		} else {
+			// Fallback: no matching active call (shouldn't happen, but be safe)
+			m.handleToolResultWithInfo(msg.Content, msg.Name, "", time.Time{})
+			m.currentTool = ""
+			m.currentToolInfo = ""
 		}
-		// Clear current tool in plan progress panel
-		if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
-			m.planProgressPanel.ClearCurrentTool()
+
+		// Hide tool progress bar when no active tools remain
+		if len(m.activeToolCalls) == 0 {
+			if m.toolProgressBar != nil {
+				m.toolProgressBar.Hide()
+			}
+			// Clear current tool in plan progress panel
+			if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
+				m.planProgressPanel.ClearCurrentTool()
+			}
 		}
 
 	case ToolProgressMsg:
@@ -1220,6 +1270,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.state = StateInput
 		m.currentTool = ""
 		m.currentToolInfo = ""
+		m.activeToolCalls = nil
 		m.streamStartTime = time.Time{}  // Reset timeout tracking
 		m.lastActivityTime = time.Time{} // Reset activity tracking
 		m.slowWarningShown = false       // Reset slow warning
@@ -1246,6 +1297,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.state = StateInput
 		m.currentTool = ""
 		m.currentToolInfo = ""
+		m.activeToolCalls = nil
 		m.streamStartTime = time.Time{} // Reset timeout tracking
 		m.responseHeaderShown = false   // Reset for next response
 		m.currentResponseBuf.Reset()    // Discard partial response on error
@@ -1610,17 +1662,20 @@ func (m *Model) extractToolInfoFromArgs(name string, args map[string]any) string
 	return ""
 }
 
-// handleToolResult handles tool result message with clean, minimal formatting.
-func (m *Model) handleToolResult(content string) {
+// handleToolResultWithInfo handles tool result message with clean, minimal formatting.
+// It uses the provided tool name, info, and start time from the matched active call
+// rather than relying on m.currentTool/m.toolStartTime (which may have been overwritten
+// by later parallel tool calls).
+func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, startTime time.Time) {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	contentStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	// Build summary and duration
 	var summary string
 	var dur string
-	if m.currentTool != "" && !m.toolStartTime.IsZero() {
-		duration := time.Since(m.toolStartTime)
-		summary = generateToolResultSummary(m.currentTool, content, m.currentToolInfo)
+	if toolName != "" && !startTime.IsZero() {
+		duration := time.Since(startTime)
+		summary = generateToolResultSummary(toolName, content, toolInfo)
 
 		// Format duration
 		if duration < time.Second {
@@ -1656,7 +1711,7 @@ func (m *Model) handleToolResult(content string) {
 
 	// Store for expand/collapse
 	if m.toolOutput != nil {
-		m.lastToolOutputIndex = m.toolOutput.AddEntry(m.currentTool, content)
+		m.lastToolOutputIndex = m.toolOutput.AddEntry(toolName, content)
 	}
 
 	// When all outputs are collapsed via ToggleAll, show compact summary
