@@ -972,8 +972,12 @@ Long commands can run in background:
 | `Enter` | Send message |
 | `Ctrl+C` | Interrupt operation / Exit |
 | `Ctrl+P` | Open command palette |
+| `Ctrl+G` | Toggle select mode (freezes viewport, enables native text selection) |
+| `Option+C` | Copy last AI response to clipboard (macOS, requires "Option sends Esc+" in terminal) |
 | `↑` / `↓` | Input history |
 | `Tab` | Autocomplete |
+
+> **Text selection:** `Ctrl+G` switches to select mode — the viewport freezes so you can drag to select text and copy with `Cmd+C`. Press `Ctrl+G` again to return to scroll mode. For quick copy of the last AI response, use `Option+C`.
 
 ## Usage Examples
 

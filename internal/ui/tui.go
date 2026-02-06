@@ -973,6 +973,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		m.output.SetMouseEnabled(m.mouseEnabled)
 		m.output.SetFrozen(!m.mouseEnabled)
 		if m.mouseEnabled {
+			m.output.ScrollToBottom() // Catch up after freeze
 			if m.toastManager != nil {
 				m.toastManager.ShowInfo("Scroll mode")
 			}
@@ -1013,7 +1014,6 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 					m.output.AppendLine(m.styles.Dim.Render(fmt.Sprintf("  [%s]", codeBlocks.RenderSelectionIndicator())))
 				}
 				return nil
-				// Single-char hotkeys (c, y, Y) removed - use /copy command instead
 			}
 		}
 	}
@@ -1456,15 +1456,6 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	case CloseOverlayMsg:
 		m.state = StateInput
 		cmds = append(cmds, m.input.Focus())
-
-	// Unused message types - no-op for backward compatibility
-	case ShowDependencyGraphMsg, ShowParallelExecutionMsg, ShowTaskQueueMsg:
-		// These features were removed
-
-	case DependencyGraphTickMsg, DependencyGraphUpdatedMsg,
-		ParallelExecutionTickMsg, ParallelExecutionUpdatedMsg,
-		TaskQueueTickMsg, TaskQueueUpdatedMsg:
-		// These features were removed
 
 	// Config update message - refresh UI state
 	case ConfigUpdateMsg:
@@ -2114,20 +2105,6 @@ func (m *Model) ShowCommandPalette() {
 	if m.commandPalette != nil {
 		m.commandPalette.Show()
 		m.state = StateCommandPalette
-	}
-}
-
-// SetCommandPaletteCommands sets the available commands in the palette.
-func (m *Model) SetCommandPaletteCommands(commands []PaletteCommand) {
-	if m.commandPalette != nil {
-		m.commandPalette.SetCommands(commands)
-	}
-}
-
-// AddCommandPaletteCommand adds a command to the palette.
-func (m *Model) AddCommandPaletteCommand(cmd PaletteCommand) {
-	if m.commandPalette != nil {
-		m.commandPalette.AddCommand(cmd)
 	}
 }
 

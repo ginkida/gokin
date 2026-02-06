@@ -390,9 +390,6 @@ func (m *Model) ResetInput() {
 	m.input.Reset()
 }
 
-// printWelcomeTips is no longer used - tips are in Welcome()
-func (m *Model) printWelcomeTips() {}
-
 // StreamText sends a stream text message.
 func StreamText(text string) tea.Cmd {
 	return func() tea.Msg {

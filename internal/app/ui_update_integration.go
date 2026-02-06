@@ -52,20 +52,6 @@ func (a *App) setupOrchestratorCallbacks() {
 	logging.Debug("orchestrator UI callbacks configured")
 }
 
-// NotifyPlanStepStarted notifies the UI that a plan step has started.
-func (a *App) NotifyPlanStepStarted(stepID int, title string) {
-	// Plan executor integration removed
-}
-
-// NotifyPlanStepCompleted notifies the UI that a plan step has completed.
-func (a *App) NotifyPlanStepCompleted(stepID int, title string, success bool, duration time.Duration, err error) {
-	// Plan executor integration removed
-}
-
-// NotifyPlanStepProgress notifies the UI about plan step progress.
-func (a *App) NotifyPlanStepProgress(stepID int, progress float64, message string) {
-	// Plan executor integration removed
-}
 
 // BroadcastTaskStart broadcasts a task start event to the UI.
 func (a *App) BroadcastTaskStart(taskID, message, taskType string) {
@@ -93,10 +79,3 @@ func (a *App) GetUIUpdateManager() *UIUpdateManager {
 	return a.uiUpdateManager
 }
 
-// wirePlanExecutorNotifications wires up plan executor to send UI notifications.
-func (a *App) wirePlanExecutorNotifications() {
-	if a.planManager == nil {
-		return
-	}
-	logging.Debug("plan executor notifications wired to UI")
-}

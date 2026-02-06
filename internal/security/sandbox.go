@@ -220,62 +220,6 @@ func IsSandboxSupported() (chroot, seccomp bool) {
 	return runtime.GOOS == "linux", runtime.GOOS == "linux"
 }
 
-// SetupChroot prepares a chroot environment (requires CAP_SYS_CHROOT)
-// This is a placeholder for future implementation
-func SetupChroot(rootDir string) error {
-	// Chroot requires:
-	// 1. CAP_SYS_CHROOT capability (run as root)
-	// 2. A valid root filesystem with necessary binaries
-	// 3. Proper setup of /dev, /proc, etc.
-
-	// For now, we don't implement full chroot because:
-	// 1. Requires root privileges (security risk)
-	// 2. Complex to set up properly
-	// 3. May break user workflows
-
-	// Instead, we rely on:
-	// - Working directory restriction
-	// - Environment sanitization
-	// - Process group isolation
-
-	return fmt.Errorf("chroot not implemented (requires root privileges)")
-}
-
-// FilterSyscalls applies seccomp filter to restrict syscalls (requires libseccomp)
-// This is a placeholder for future implementation
-func FilterSyscalls() error {
-	// Seccomp would be implemented here using libseccomp-golang
-	// Blocked syscalls would include:
-	// - ptrace (prevent debugging other processes)
-	// - kexec_load (prevent loading new kernels)
-	// - reboot (prevent system reboot)
-	// - swapon/off (prevent modifying swap)
-	// - mount/umount (prevent mounting filesystems)
-
-	return fmt.Errorf("seccomp not implemented (requires libseccomp)")
-}
-
-// DangerousSyscalls returns a list of dangerous syscalls that should be blocked
-// This is for documentation purposes and future seccomp implementation
-func DangerousSyscalls() []string {
-	return []string{
-		"ptrace",        // Process tracing/debugging
-		"kexec_load",    // Load a new kernel
-		"reboot",        // Reboot system
-		"swapon",        // Enable swap
-		"swapoff",       // Disable swap
-		"mount",         // Mount filesystem
-		"umount",        // Unmount filesystem
-		"pivot_root",    // Change root filesystem
-		"chroot",        // Change root directory
-		"init_module",   // Load kernel module
-		"delete_module", // Remove kernel module
-		"settimeofday",  // Set system time
-		"stime",         // Set system time
-		"clock_settime", // Set clock
-	}
-}
-
 // IsLinux checks if the current OS is Linux
 func IsLinux() bool {
 	return runtime.GOOS == "linux"

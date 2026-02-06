@@ -701,26 +701,6 @@ func (p *CommandPalette) renderPreview(width int) string {
 	return previewStyle.Render(content.String())
 }
 
-// Legacy compatibility types and functions
-
-// PaletteCommand is kept for backward compatibility.
-type PaletteCommand = EnhancedPaletteCommand
-
-// DefaultPaletteCommands returns empty list - commands now come from handler.
-func DefaultPaletteCommands() []PaletteCommand {
-	return nil
-}
-
-// SetCommands is a no-op for backward compatibility.
-func (p *CommandPalette) SetCommands(commands []PaletteCommand) {
-	// No-op - use RefreshCommands instead
-}
-
-// AddCommand is a no-op for backward compatibility.
-func (p *CommandPalette) AddCommand(cmd PaletteCommand) {
-	// No-op - use RefreshCommands instead
-}
-
 // Helper functions
 func min(a, b int) int {
 	if a < b {
