@@ -69,7 +69,7 @@ func (i *Installer) Install(ctx context.Context, newBinaryPath string, version s
 		// Try to rollback
 		i.reportProgress(StatusInstalling, "Installation failed, rolling back...")
 		if rollbackErr := i.rollbackMgr.Rollback(backupInfo.ID); rollbackErr != nil {
-			return fmt.Errorf("%w: install failed (%v) and rollback failed (%v)",
+			return fmt.Errorf("%w: install failed (%w) and rollback failed (%w)",
 				ErrInstallFailed, err, rollbackErr)
 		}
 		return fmt.Errorf("%w (rolled back successfully): %w", ErrInstallFailed, err)

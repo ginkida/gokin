@@ -413,25 +413,27 @@ func (t *ReadTool) readPDF(filePath string) (ToolResult, error) {
 	}), nil
 }
 
-// readImage reads an image file and returns base64-encoded data.
+// readImage reads an image file and returns metadata plus multimodal data for LLM vision.
 func (t *ReadTool) readImage(filePath string) (ToolResult, error) {
 	result, err := t.imageReader.Read(filePath)
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("error reading image: %s", err)), nil
 	}
 
-	// For display purposes, we return metadata
-	// The actual image data is included in the structured data
 	displayText := fmt.Sprintf("[Image: %s, %d bytes]\nMIME Type: %s\nFile: %s",
 		result.MimeType, result.Size, result.MimeType, filePath)
 
-	return NewSuccessResultWithData(displayText, map[string]any{
+	tr := NewSuccessResultWithData(displayText, map[string]any{
 		"type":      "image",
 		"mime_type": result.MimeType,
 		"size":      result.Size,
 		"file_path": filePath,
-		"data":      result.Data, // Raw bytes for multimodal processing
-	}), nil
+	})
+	tr.MultimodalParts = []*MultimodalPart{{
+		MimeType: result.MimeType,
+		Data:     result.Data,
+	}}
+	return tr, nil
 }
 
 // readNotebook reads a Jupyter notebook file.

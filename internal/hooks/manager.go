@@ -272,7 +272,7 @@ func (m *Manager) executeHook(ctx context.Context, hook *Hook, hctx *Context, ti
 	if cancelled {
 		return Result{
 			Hook:    hook,
-			Error:   fmt.Errorf("hook '%s' cancelled: %v", hook.Name, execCtx.Err()),
+			Error:   fmt.Errorf("hook '%s' cancelled: %w", hook.Name, execCtx.Err()),
 			Elapsed: elapsed,
 		}
 	}

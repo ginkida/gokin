@@ -160,8 +160,8 @@ func sanitizeContents(contents []*genai.Content) []*genai.Content {
 			if part == nil {
 				continue
 			}
-			// Part is valid if it has FunctionCall, FunctionResponse, or non-empty Text
-			if part.FunctionCall != nil || part.FunctionResponse != nil || part.Text != "" {
+			// Part is valid if it has FunctionCall, FunctionResponse, non-empty Text, or InlineData (images)
+			if part.FunctionCall != nil || part.FunctionResponse != nil || part.Text != "" || part.InlineData != nil {
 				validParts = append(validParts, part)
 			}
 		}

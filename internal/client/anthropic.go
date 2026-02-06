@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1154,8 +1155,14 @@ func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, re
 }
 
 // buildUserMessage builds a user message from parts.
+// Parts arrive in order: [FunctionResponse, InlineData, FunctionResponse, InlineData, ...]
+// InlineData (images) follow their associated FunctionResponse and must be merged
+// into the preceding tool_result for Anthropic's multimodal tool_result format.
 func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]interface{} {
 	content := make([]map[string]interface{}, 0)
+
+	// Index of the last tool_result in content, for attaching trailing InlineData
+	lastToolResultIdx := -1
 
 	for _, part := range parts {
 		if part.Text != "" {
@@ -1163,6 +1170,37 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 				"type": "text",
 				"text": part.Text,
 			})
+		}
+		// Handle InlineData parts (images from multimodal tools).
+		// These follow their FunctionResponse in the parts list, so we
+		// retroactively enrich the last emitted tool_result.
+		if part.InlineData != nil {
+			imageBlock := map[string]interface{}{
+				"type": "image",
+				"source": map[string]interface{}{
+					"type":       "base64",
+					"media_type": part.InlineData.MIMEType,
+					"data":       base64.StdEncoding.EncodeToString(part.InlineData.Data),
+				},
+			}
+
+			if lastToolResultIdx >= 0 {
+				tr := content[lastToolResultIdx]
+				// Upgrade plain string content to array format if needed
+				switch existing := tr["content"].(type) {
+				case string:
+					tr["content"] = []map[string]interface{}{
+						{"type": "text", "text": existing},
+						imageBlock,
+					}
+				case []map[string]interface{}:
+					tr["content"] = append(existing, imageBlock)
+				}
+			} else {
+				// No preceding tool_result — add as standalone image block
+				content = append(content, imageBlock)
+			}
+			continue
 		}
 		// Handle FunctionResponse parts (tool_result)
 		if part.FunctionResponse != nil {
@@ -1195,9 +1233,10 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 			content = append(content, map[string]interface{}{
 				"type":        "tool_result",
 				"tool_use_id": toolUseID,
-				"id":          toolUseID, // Z.AI compatibility: some backends expect 'id' field
+				"id":          toolUseID,
 				"content":     contentStr,
 			})
+			lastToolResultIdx = len(content) - 1
 		}
 	}
 

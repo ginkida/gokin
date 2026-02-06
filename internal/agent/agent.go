@@ -1368,11 +1368,16 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 			results := a.executeTools(ctx, resp.FunctionCalls)
 
-			// Add function response to history
-			funcParts := make([]*genai.Part, len(results))
-			for j, result := range results {
-				funcParts[j] = genai.NewPartFromFunctionResponse(result.Name, result.Response)
-				funcParts[j].FunctionResponse.ID = result.ID
+			// Add function response to history (with multimodal parts if present)
+			var funcParts []*genai.Part
+			for _, result := range results {
+				part := genai.NewPartFromFunctionResponse(result.Response.Name, result.Response.Response)
+				part.FunctionResponse.ID = result.Response.ID
+				funcParts = append(funcParts, part)
+				// Append inline image data so the LLM can "see" images
+				for _, mp := range result.MultimodalData {
+					funcParts = append(funcParts, genai.NewPartFromBytes(mp.Data, mp.MimeType))
+				}
 			}
 			funcContent := &genai.Content{
 				Role:  genai.RoleUser,
@@ -1591,6 +1596,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 	// to avoid sending an empty message string to APIs that reject it.
 	if lastContent.Role == genai.RoleUser {
 		var funcResponses []*genai.FunctionResponse
+		var hasInlineData bool
 		for _, part := range lastContent.Parts {
 			if part.FunctionResponse != nil {
 				funcResponses = append(funcResponses, &genai.FunctionResponse{
@@ -1599,16 +1605,30 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 					Response: part.FunctionResponse.Response,
 				})
 			}
+			if part.InlineData != nil {
+				hasInlineData = true
+			}
 		}
 
 		if len(funcResponses) > 0 {
-			// Route through SendFunctionResponse for proper API formatting
 			// Copy history under lock
 			a.stateMu.RLock()
 			historyWithoutLast := make([]*genai.Content, len(a.history)-1)
 			copy(historyWithoutLast, a.history[:len(a.history)-1])
 			a.stateMu.RUnlock()
 
+			if hasInlineData {
+				// When multimodal parts (images) are present alongside function responses,
+				// include the full lastContent in history to preserve InlineData parts.
+				// SendFunctionResponse would only send FunctionResponse parts, losing images.
+				stream, err := a.client.SendMessageWithHistory(ctx, append(historyWithoutLast, lastContent), "Continue processing the tool results above.")
+				if err != nil {
+					return nil, err
+				}
+				return stream.Collect()
+			}
+
+			// Route through SendFunctionResponse for proper API formatting
 			stream, err := a.client.SendFunctionResponse(ctx, historyWithoutLast, funcResponses)
 			if err != nil {
 				return nil, err
@@ -1648,8 +1668,8 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 }
 
 // executeTools executes the function calls with parallel execution for read-only tools.
-func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) []*genai.FunctionResponse {
-	results := make([]*genai.FunctionResponse, len(calls))
+func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) []toolCallResult {
+	results := make([]toolCallResult, len(calls))
 
 	// Build index for result placement
 	callIndex := make(map[*genai.FunctionCall]int)
@@ -1681,21 +1701,27 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 
 // executeToolsParallel executes multiple tools concurrently.
 func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.FunctionCall,
-	results []*genai.FunctionResponse, indexMap map[*genai.FunctionCall]int) {
+	results []toolCallResult, indexMap map[*genai.FunctionCall]int) {
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	semaphore := make(chan struct{}, 5) // Max 5 concurrent executions
 
+	cancelledResult := func(fc *genai.FunctionCall) toolCallResult {
+		return toolCallResult{
+			Response: &genai.FunctionResponse{
+				ID:       fc.ID,
+				Name:     fc.Name,
+				Response: tools.NewErrorResult("cancelled").ToMap(),
+			},
+		}
+	}
+
 	for _, call := range calls {
 		// Check context before spawning goroutine to avoid unnecessary work
 		if ctx.Err() != nil {
 			mu.Lock()
-			results[indexMap[call]] = &genai.FunctionResponse{
-				ID:       call.ID,
-				Name:     call.Name,
-				Response: tools.NewErrorResult("cancelled").ToMap(),
-			}
+			results[indexMap[call]] = cancelledResult(call)
 			mu.Unlock()
 			continue
 		}
@@ -1707,11 +1733,7 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 			// Check context again before trying to acquire semaphore
 			if ctx.Err() != nil {
 				mu.Lock()
-				results[indexMap[fc]] = &genai.FunctionResponse{
-					ID:       fc.ID,
-					Name:     fc.Name,
-					Response: tools.NewErrorResult("cancelled").ToMap(),
-				}
+				results[indexMap[fc]] = cancelledResult(fc)
 				mu.Unlock()
 				return
 			}
@@ -1723,11 +1745,7 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 				acquired = true
 			case <-ctx.Done():
 				mu.Lock()
-				results[indexMap[fc]] = &genai.FunctionResponse{
-					ID:       fc.ID,
-					Name:     fc.Name,
-					Response: tools.NewErrorResult("cancelled").ToMap(),
-				}
+				results[indexMap[fc]] = cancelledResult(fc)
 				mu.Unlock()
 				return
 			}
@@ -1765,8 +1783,15 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 	}
 }
 
+// toolCallResult bundles a function response with optional multimodal parts
+// (e.g., images) that should be sent alongside the response to the LLM.
+type toolCallResult struct {
+	Response       *genai.FunctionResponse
+	MultimodalData []*tools.MultimodalPart
+}
+
 // executeToolWithReflection executes a tool with reflection and delegation on failure.
-func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.FunctionCall) *genai.FunctionResponse {
+func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.FunctionCall) toolCallResult {
 	result := a.executeTool(ctx, call)
 
 	var reflection *Reflection
@@ -1819,15 +1844,21 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 		}
 	}
 
+	// Capture multimodal parts before compaction (compaction only affects text)
+	multimodalData := result.MultimodalParts
+
 	// Compact result if it's too large before converting to map
 	if a.compactor != nil {
 		result = a.compactor.CompactForType(call.Name, result)
 	}
 
-	return &genai.FunctionResponse{
-		ID:       call.ID, // Must match tool_use.id for Anthropic/DeepSeek API
-		Name:     call.Name,
-		Response: result.ToMap(),
+	return toolCallResult{
+		Response: &genai.FunctionResponse{
+			ID:       call.ID, // Must match tool_use.id for Anthropic/DeepSeek API
+			Name:     call.Name,
+			Response: result.ToMap(),
+		},
+		MultimodalData: multimodalData,
 	}
 }
 
@@ -2144,8 +2175,8 @@ func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, star
 	if len(resp.FunctionCalls) > 0 {
 		results := a.executeTools(ctx, resp.FunctionCalls)
 		for _, r := range results {
-			if r.Response != nil {
-				if content, ok := r.Response["content"].(string); ok {
+			if r.Response != nil && r.Response.Response != nil {
+				if content, ok := r.Response.Response["content"].(string); ok {
 					output.WriteString("\n")
 					output.WriteString(content)
 				}

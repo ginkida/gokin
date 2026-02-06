@@ -39,6 +39,13 @@ type Messenger interface {
 	ReceiveResponse(ctx context.Context, messageID string) (string, error)
 }
 
+// MultimodalPart represents binary data (image, etc.) to be sent to the LLM
+// alongside the text response for visual analysis.
+type MultimodalPart struct {
+	MimeType string
+	Data     []byte
+}
+
 // ToolResult represents the result of a tool execution.
 type ToolResult struct {
 	// Content is the main result content (usually text).
@@ -57,6 +64,10 @@ type ToolResult struct {
 	ExecutionSummary *ExecutionSummary // Summary of what was done
 	SafetyLevel      SafetyLevel       // Risk level of the operation
 	Duration         string            // Human-readable duration
+
+	// MultimodalParts contains binary data (images) for LLM visual analysis.
+	// These are sent as separate inline data parts, not serialized in ToMap().
+	MultimodalParts []*MultimodalPart
 }
 
 // NewSuccessResult creates a successful tool result.

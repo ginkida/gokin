@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -476,6 +477,14 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 					"functionResponse": map[string]interface{}{
 						"name":     part.FunctionResponse.Name,
 						"response": part.FunctionResponse.Response,
+					},
+				})
+			}
+			if part.InlineData != nil {
+				parts = append(parts, map[string]interface{}{
+					"inlineData": map[string]interface{}{
+						"mimeType": part.InlineData.MIMEType,
+						"data":     base64.StdEncoding.EncodeToString(part.InlineData.Data),
 					},
 				})
 			}
