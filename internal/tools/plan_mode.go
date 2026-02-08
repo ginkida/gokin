@@ -290,6 +290,10 @@ func (t *UpdatePlanProgressTool) Execute(ctx context.Context, args map[string]an
 		return NewErrorResult("plan manager not configured"), nil
 	}
 
+	if t.manager.IsExecuting() {
+		return NewSuccessResult("progress is managed automatically by the orchestrator — no action needed"), nil
+	}
+
 	if !t.manager.IsActive() {
 		return NewErrorResult("no active plan"), nil
 	}
@@ -495,6 +499,10 @@ func (t *ExitPlanModeTool) Validate(args map[string]any) error {
 func (t *ExitPlanModeTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	if t.manager == nil {
 		return NewErrorResult("plan manager not configured"), nil
+	}
+
+	if t.manager.IsExecuting() {
+		return NewErrorResult("cannot exit plan mode during orchestrated execution — the orchestrator manages plan completion automatically"), nil
 	}
 
 	reason := GetStringDefault(args, "reason", "completed")

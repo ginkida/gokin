@@ -82,6 +82,9 @@ type (
 		Cancellable    bool
 	}
 	ResponseDoneMsg struct{}
+	// ThinkingTickMsg signals that the model is actively thinking/reasoning.
+	// Used to keep the UI alive and update elapsed time during extended thinking.
+	ThinkingTickMsg struct{}
 	// ResponseMetadataMsg carries metadata about the completed response.
 	ResponseMetadataMsg struct {
 		Model        string

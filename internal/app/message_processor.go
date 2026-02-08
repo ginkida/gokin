@@ -250,11 +250,14 @@ func (a *App) restoreSharedMemoryFromPlan(sharedMem *agent.SharedMemory, p *plan
 	}
 }
 
-// executePlanDirectly clears the conversation context and re-executes
-// with a focused plan execution prompt after a plan is approved.
-// This is the original monolithic execution path.
+// executePlanDirectly executes an approved plan step-by-step using the main
+// session executor. Each step gets a targeted prompt, and the orchestrator
+// manages progress, SharedMemory, and auto-completion automatically.
+// Unlike delegated mode, all steps share the same session history for continuity.
 func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) {
-	logging.Debug("executing plan directly (monolithic)",
+	planStart := time.Now()
+
+	logging.Debug("executing plan directly (step-by-step)",
 		"plan_id", approvedPlan.ID,
 		"title", approvedPlan.Title,
 		"steps", approvedPlan.StepCount())
@@ -263,8 +266,12 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 	defer func() {
 		if a.planManager != nil {
 			a.planManager.SetExecutionMode(false)
+			a.planManager.SetCurrentStepID(-1)
 		}
 	}()
+
+	// Skip diff approval prompts — the plan itself was already approved
+	ctx = tools.ContextWithSkipDiff(ctx)
 
 	// 1. Save context snapshot before clearing (preserves planning decisions)
 	contextSnapshot := a.extractContextSnapshot()
@@ -273,10 +280,10 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		logging.Debug("context snapshot saved", "plan_id", approvedPlan.ID, "snapshot_len", len(contextSnapshot))
 	}
 
-	// 2. Convert plan steps to PlanStepInfo
-	steps := make([]appcontext.PlanStepInfo, 0, len(approvedPlan.Steps))
+	// 2. Convert plan steps to PlanStepInfo for the base prompt
+	stepInfos := make([]appcontext.PlanStepInfo, 0, len(approvedPlan.Steps))
 	for _, s := range approvedPlan.Steps {
-		steps = append(steps, appcontext.PlanStepInfo{
+		stepInfos = append(stepInfos, appcontext.PlanStepInfo{
 			ID:          s.ID,
 			Title:       s.Title,
 			Description: s.Description,
@@ -285,61 +292,198 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 
 	// 3. Build plan execution prompt (includes context snapshot if available)
 	planPrompt := a.promptBuilder.BuildPlanExecutionPromptWithContext(
-		approvedPlan.Title, approvedPlan.Description, steps, contextSnapshot)
+		approvedPlan.Title, approvedPlan.Description, stepInfos, contextSnapshot)
 
 	// 3b. Save plan to persistent storage before clearing session
-	// This ensures plan can be resumed if app crashes during execution
 	if a.planManager != nil {
 		if err := a.planManager.SaveCurrentPlan(); err != nil {
 			logging.Warn("failed to save plan before execution", "error", err)
 		}
 	}
 
-	// 4. Clear session history
+	// 4. Clear session and inject plan context
 	a.session.Clear()
-
-	// 4. Inject plan context as system prompt
 	a.session.AddUserMessage(planPrompt)
-	a.session.AddModelMessage("I understand the approved plan. Executing step 1 now.")
+	a.session.AddModelMessage("I understand the approved plan. I will execute each step as instructed.")
 
-	// 5. Notify UI about context clear
-	if a.program != nil {
-		a.program.Send(ui.StreamTextMsg("\n--- Context cleared for plan execution ---\n"))
+	totalSteps := len(approvedPlan.Steps)
+
+	// Get SharedMemory for inter-step communication
+	var sharedMem *agent.SharedMemory
+	if a.agentRunner != nil {
+		sharedMem = a.agentRunner.GetSharedMemory()
 	}
 
-	// 6. Execute via standard executor (bypass taskRouter for focused execution)
-	history := a.session.GetHistory()
-	executeMsg := "Begin executing the plan now. Start with step 1."
-	newHistory, response, err := a.executor.Execute(ctx, history, executeMsg)
-	if err != nil {
-		if a.program != nil {
-			a.program.Send(ui.ErrorMsg(err))
+	// 5. Notify UI with plan banner
+	a.safeSendToProgram(ui.StreamTextMsg(
+		fmt.Sprintf("\n━━━ Executing plan: %s (%d steps) ━━━\n\n", approvedPlan.Title, totalSteps)))
+
+	// 6. Execute each step individually
+	const maxRetries = 3
+	backoffDurations := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+
+	for _, step := range approvedPlan.Steps {
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
-		return
-	}
 
-	// 7. Update session
-	a.session.SetHistory(newHistory)
-
-	// 8. Save session after plan execution
-	if a.sessionManager != nil {
-		if err := a.sessionManager.SaveAfterMessage(); err != nil {
-			logging.Debug("failed to save session after plan execution", "error", err)
+		// Skip non-pending steps (supports plan resume)
+		if step.Status != plan.StatusPending {
+			continue
 		}
-	}
 
-	// 9. Update token count and send to UI
-	if a.contextManager != nil {
-		if err := a.contextManager.UpdateTokenCount(ctx); err != nil {
-			logging.Debug("failed to update token count", "error", err)
+		// Compact history if needed before executing next step
+		if a.contextManager != nil {
+			if err := a.contextManager.PrepareForRequest(ctx); err != nil {
+				logging.Debug("failed to prepare context before step", "step_id", step.ID, "error", err)
+			}
 		}
-		a.sendTokenUsageUpdate()
 
-		usage := a.contextManager.GetTokenUsage()
-		a.mu.Lock()
-		a.totalInputTokens = usage.InputTokens
-		// Use API usage metadata if available, otherwise estimate
+		// Mark step as started and track current step ID
+		a.planManager.StartStep(step.ID)
+		a.planManager.SetCurrentStepID(step.ID)
+
+		// Update plan progress in status bar
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "in_progress",
+		})
+
+		header := fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title)
+		a.safeSendToProgram(ui.StreamTextMsg(header))
+
+		// Build step-specific prompt with context from previous steps
+		prevSummary := a.planManager.GetPreviousStepsSummary(step.ID, 2000)
+		stepMsg := buildDirectStepMessage(step, prevSummary, approvedPlan, totalSteps)
+
+		// Execute step with retry logic
+		var response string
+		var err error
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			history := a.session.GetHistory()
+			var newHistory []*genai.Content
+			newHistory, response, err = a.executor.Execute(ctx, history, stepMsg)
+
+			if err == nil {
+				// Success — update session history
+				a.session.SetHistory(newHistory)
+				break
+			}
+
+			// Retry on retryable errors
+			if isRetryableError(err) && attempt < maxRetries-1 {
+				backoff := backoffDurations[attempt]
+				logging.Warn("step execution error, retrying",
+					"step_id", step.ID, "attempt", attempt+1, "error", err.Error(), "backoff", backoff)
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("\n⚠️ Step %d failed (attempt %d/%d): %s\nRetrying in %v...\n",
+						step.ID, attempt+1, maxRetries, err.Error(), backoff)))
+
+				select {
+				case <-time.After(backoff):
+					continue
+				case <-ctx.Done():
+					err = ctx.Err()
+					break
+				}
+			}
+			break
+		}
+
+		// Handle step failure
+		if err != nil {
+			errMsg := err.Error()
+
+			// Retryable error after all attempts → pause for later resume
+			if isRetryableError(err) {
+				a.planManager.PauseStep(step.ID, errMsg)
+
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s\n"+
+						"Use /resume-plan to continue when ready.\n",
+						step.ID, maxRetries, errMsg)))
+				a.safeSendToProgram(ui.PlanProgressMsg{
+					PlanID:        approvedPlan.ID,
+					CurrentStepID: step.ID,
+					CurrentTitle:  step.Title,
+					TotalSteps:    totalSteps,
+					Completed:     approvedPlan.CompletedCount(),
+					Progress:      approvedPlan.Progress(),
+					Status:        "paused",
+				})
+				a.safeSendToProgram(ui.ResponseDoneMsg{})
+
+				logging.Info("plan paused due to retryable error",
+					"step_id", step.ID, "error", errMsg)
+				return
+			}
+
+			// Non-retryable error
+			a.planManager.FailStep(step.ID, errMsg)
+
+			a.safeSendToProgram(ui.StreamTextMsg(
+				fmt.Sprintf("\n  Step %d failed: %s\n", step.ID, errMsg)))
+
+			if a.config.Plan.AbortOnStepFailure {
+				a.safeSendToProgram(ui.StreamTextMsg("Aborting plan due to step failure.\n"))
+				break
+			}
+			continue
+		}
+
+		// Step succeeded — store output and mark complete
+		output := response
+		if len(output) > 2000 {
+			output = output[:2000] + "..."
+		}
+		a.planManager.CompleteStep(step.ID, output)
+
+		// Store step result in SharedMemory for inter-step communication
+		if sharedMem != nil {
+			sharedMem.Write(
+				fmt.Sprintf("step_%d_result", step.ID),
+				map[string]string{
+					"title":  step.Title,
+					"output": output,
+				},
+				agent.SharedEntryTypeFact,
+				fmt.Sprintf("plan_step_%d", step.ID),
+			)
+			logging.Debug("step result stored in shared memory",
+				"step_id", step.ID, "output_len", len(output))
+		}
+
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("  Step %d complete\n\n", step.ID)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "in_progress",
+		})
+
+		// Update token count after each step
+		if a.contextManager != nil {
+			if err := a.contextManager.UpdateTokenCount(ctx); err != nil {
+				logging.Debug("failed to update token count", "error", err)
+			}
+			a.sendTokenUsageUpdate()
+		}
+
+		// Accumulate token usage for /cost command
 		apiInput, apiOutput := a.executor.GetLastTokenUsage()
+		a.mu.Lock()
 		if apiOutput > 0 {
 			a.totalOutputTokens += apiOutput
 		} else if response != "" {
@@ -349,41 +493,91 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 			a.totalInputTokens = apiInput
 		}
 		a.mu.Unlock()
+
+		// Save session after each completed step (crash recovery)
+		if a.sessionManager != nil {
+			_ = a.sessionManager.SaveAfterMessage()
+		}
 	}
 
-	_ = response // Used for token counting above
-
-	// 10. Signal completion
-	if a.program != nil {
-		a.program.Send(ui.ResponseDoneMsg{})
+	// 7. Auto-complete plan
+	completedCount := approvedPlan.CompletedCount()
+	planFinished := completedCount == totalSteps
+	statusText := "complete"
+	if !planFinished {
+		statusText = "stopped"
 	}
 
-	// Note: SetExecutionMode(false) is handled by defer at function start
+	a.safeSendToProgram(ui.StreamTextMsg(
+		fmt.Sprintf("\n━━━ Plan %s: %d/%d steps done ━━━\n", statusText, completedCount, totalSteps)))
+	a.safeSendToProgram(ui.PlanProgressMsg{
+		PlanID:     approvedPlan.ID,
+		TotalSteps: totalSteps,
+		Completed:  completedCount,
+		Progress:   approvedPlan.Progress(),
+		Status:     statusText,
+	})
 
-	// Send final metadata after verification
-	if a.program != nil {
-		a.mu.Lock()
-		duration := time.Since(a.responseStartTime)
-		toolsUsed := make([]string, len(a.responseToolsUsed))
-		copy(toolsUsed, a.responseToolsUsed)
-		inputTokens := a.totalInputTokens
-		outputTokens := a.totalOutputTokens
-		a.mu.Unlock()
+	// Send response metadata so UI shows duration and token usage
+	a.mu.Lock()
+	inputTokens := a.totalInputTokens
+	outputTokens := a.totalOutputTokens
+	a.mu.Unlock()
+	a.safeSendToProgram(ui.ResponseMetadataMsg{
+		Model:        a.config.Model.Name,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		Duration:     time.Since(planStart),
+	})
 
-		a.program.Send(ui.ResponseMetadataMsg{
-			Model:        a.config.Model.Name,
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Duration:     duration,
-			ToolsUsed:    toolsUsed,
-		})
+	a.safeSendToProgram(ui.ResponseDoneMsg{})
+
+	// Clear plan if fully completed
+	if approvedPlan.IsComplete() && a.planManager != nil {
+		a.planManager.ClearPlan()
+		logging.Debug("plan auto-cleared after completion", "plan_id", approvedPlan.ID)
 	}
+
+	// Save session
+	if a.sessionManager != nil {
+		_ = a.sessionManager.SaveAfterMessage()
+	}
+}
+
+// buildDirectStepMessage creates a focused prompt for executing a single step
+// in the direct (same-session) execution mode.
+func buildDirectStepMessage(step *plan.Step, prevSummary string, _ *plan.Plan, totalSteps int) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("Execute step %d of %d: **%s**\n\n", step.ID, totalSteps, step.Title))
+
+	if step.Description != "" {
+		sb.WriteString(step.Description)
+		sb.WriteString("\n\n")
+	}
+
+	if prevSummary != "" {
+		sb.WriteString("Previous steps summary:\n")
+		sb.WriteString(prevSummary)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Rules:\n")
+	sb.WriteString("- Execute ONLY this step, nothing else\n")
+	sb.WriteString("- Always READ files before editing them\n")
+	sb.WriteString("- Do NOT call update_plan_progress or exit_plan_mode — the orchestrator handles this\n")
+	sb.WriteString("- Provide a brief summary of what was done at the end\n")
+	sb.WriteString("- Report any issues or deviations from the plan\n")
+
+	return sb.String()
 }
 
 // executePlanDelegated executes an approved plan by spawning a sub-agent per step.
 // Each step runs in isolation with project context injected, and only compact
 // summaries are stored in the main session.
 func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan) {
+	planStart := time.Now()
+
 	logging.Debug("executing plan via sub-agent delegation",
 		"plan_id", approvedPlan.ID,
 		"title", approvedPlan.Title,
@@ -441,10 +635,8 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	}
 
 	// Notify UI with plan banner
-	if a.program != nil {
-		a.program.Send(ui.StreamTextMsg(
-			fmt.Sprintf("\n━━━ Executing plan: %s (%d steps) ━━━\n\n", approvedPlan.Title, totalSteps)))
-	}
+	a.safeSendToProgram(ui.StreamTextMsg(
+		fmt.Sprintf("\n━━━ Executing plan: %s (%d steps) ━━━\n\n", approvedPlan.Title, totalSteps)))
 
 	for _, step := range approvedPlan.Steps {
 		select {
@@ -463,21 +655,19 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 		a.planManager.SetCurrentStepID(step.ID)
 
 		// Update plan progress in status bar
-		if a.program != nil {
-			a.program.Send(ui.PlanProgressMsg{
-				PlanID:        approvedPlan.ID,
-				CurrentStepID: step.ID,
-				CurrentTitle:  step.Title,
-				TotalSteps:    totalSteps,
-				Completed:     approvedPlan.CompletedCount(),
-				Progress:      approvedPlan.Progress(),
-				Status:        "in_progress",
-			})
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "in_progress",
+		})
 
-			// Notify UI of step start with structured header
-			header := fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title)
-			a.program.Send(ui.StreamTextMsg(header))
-		}
+		// Notify UI of step start with structured header
+		header := fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title)
+		a.safeSendToProgram(ui.StreamTextMsg(header))
 
 		// Build step prompt with full plan context
 		prevSummary := a.planManager.GetPreviousStepsSummary(step.ID, 2000)
@@ -502,9 +692,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 
 		// Stream sub-agent text to TUI
 		onText := func(text string) {
-			if a.program != nil {
-				a.program.Send(ui.StreamTextMsg(text))
-			}
+			a.safeSendToProgram(ui.StreamTextMsg(text))
 		}
 
 		// Spawn sub-agent for this step with retry on retryable errors
@@ -522,11 +710,9 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				backoff := backoffDurations[attempt]
 				logging.Warn("sub-agent error, retrying step",
 					"step_id", step.ID, "attempt", attempt+1, "error", err.Error(), "backoff", backoff)
-				if a.program != nil {
-					a.program.Send(ui.StreamTextMsg(
-						fmt.Sprintf("\n⚠️ Step %d failed (attempt %d/%d): %s\nRetrying in %v...\n",
-							step.ID, attempt+1, maxRetries, err.Error(), backoff)))
-				}
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("\n⚠️ Step %d failed (attempt %d/%d): %s\nRetrying in %v...\n",
+						step.ID, attempt+1, maxRetries, err.Error(), backoff)))
 
 				// Wait with backoff, but respect context cancellation
 				select {
@@ -553,22 +739,20 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				// Pause the step instead of failing — user can resume later
 				a.planManager.PauseStep(step.ID, errMsg)
 
-				if a.program != nil {
-					a.program.Send(ui.StreamTextMsg(
-						fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s\n"+
-							"Use /resume-plan to continue when ready.\n",
-							step.ID, maxRetries, errMsg)))
-					a.program.Send(ui.PlanProgressMsg{
-						PlanID:        approvedPlan.ID,
-						CurrentStepID: step.ID,
-						CurrentTitle:  step.Title,
-						TotalSteps:    totalSteps,
-						Completed:     approvedPlan.CompletedCount(),
-						Progress:      approvedPlan.Progress(),
-						Status:        "paused",
-					})
-					a.program.Send(ui.ResponseDoneMsg{})
-				}
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s\n"+
+						"Use /resume-plan to continue when ready.\n",
+						step.ID, maxRetries, errMsg)))
+				a.safeSendToProgram(ui.PlanProgressMsg{
+					PlanID:        approvedPlan.ID,
+					CurrentStepID: step.ID,
+					CurrentTitle:  step.Title,
+					TotalSteps:    totalSteps,
+					Completed:     approvedPlan.CompletedCount(),
+					Progress:      approvedPlan.Progress(),
+					Status:        "paused",
+				})
+				a.safeSendToProgram(ui.ResponseDoneMsg{})
 
 				logging.Info("plan paused due to retryable error",
 					"step_id", step.ID, "error", errMsg)
@@ -584,15 +768,11 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				a.planManager.FailStep(step.ID, errMsg)
 			}
 
-			if a.program != nil {
-				a.program.Send(ui.StreamTextMsg(
-					fmt.Sprintf("\n  Step %d failed: %s\n", step.ID, errMsg)))
-			}
+			a.safeSendToProgram(ui.StreamTextMsg(
+				fmt.Sprintf("\n  Step %d failed: %s\n", step.ID, errMsg)))
 
 			if a.config.Plan.AbortOnStepFailure {
-				if a.program != nil {
-					a.program.Send(ui.StreamTextMsg("Aborting plan due to step failure.\n"))
-				}
+				a.safeSendToProgram(ui.StreamTextMsg("Aborting plan due to step failure.\n"))
 				break
 			}
 			continue
@@ -621,34 +801,54 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				"step_id", step.ID, "output_len", len(output))
 		}
 
-		if a.program != nil {
-			a.program.Send(ui.StreamTextMsg(
-				fmt.Sprintf("  Step %d complete\n\n", step.ID)))
-			a.program.Send(ui.PlanProgressMsg{
-				PlanID:        approvedPlan.ID,
-				CurrentStepID: step.ID,
-				CurrentTitle:  step.Title,
-				TotalSteps:    totalSteps,
-				Completed:     approvedPlan.CompletedCount(),
-				Progress:      approvedPlan.Progress(),
-				Status:        "in_progress",
-			})
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("  Step %d complete\n\n", step.ID)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "in_progress",
+		})
+
+		// Save session after each completed step (crash recovery)
+		if a.sessionManager != nil {
+			_ = a.sessionManager.SaveAfterMessage()
 		}
 	}
 
 	// Signal plan completion
-	if a.program != nil {
-		completedCount := approvedPlan.CompletedCount()
-		a.program.Send(ui.StreamTextMsg(
-			fmt.Sprintf("\n━━━ Plan complete: %d/%d steps done ━━━\n", completedCount, totalSteps)))
-		a.program.Send(ui.PlanProgressMsg{
-			PlanID:     approvedPlan.ID,
-			TotalSteps: totalSteps,
-			Completed:  completedCount,
-			Progress:   approvedPlan.Progress(),
-			Status:     "completed",
-		})
-		a.program.Send(ui.ResponseDoneMsg{})
+	completedCount := approvedPlan.CompletedCount()
+	planFinished := completedCount == totalSteps
+	statusText := "complete"
+	if !planFinished {
+		statusText = "stopped"
+	}
+
+	a.safeSendToProgram(ui.StreamTextMsg(
+		fmt.Sprintf("\n━━━ Plan %s: %d/%d steps done ━━━\n", statusText, completedCount, totalSteps)))
+	a.safeSendToProgram(ui.PlanProgressMsg{
+		PlanID:     approvedPlan.ID,
+		TotalSteps: totalSteps,
+		Completed:  completedCount,
+		Progress:   approvedPlan.Progress(),
+		Status:     statusText,
+	})
+
+	// Send response metadata so UI shows duration
+	a.safeSendToProgram(ui.ResponseMetadataMsg{
+		Model:    a.config.Model.Name,
+		Duration: time.Since(planStart),
+	})
+
+	a.safeSendToProgram(ui.ResponseDoneMsg{})
+
+	// Clear plan if fully completed
+	if approvedPlan.IsComplete() && a.planManager != nil {
+		a.planManager.ClearPlan()
+		logging.Debug("plan auto-cleared after completion", "plan_id", approvedPlan.ID)
 	}
 
 	// Note: SetExecutionMode(false) is handled by defer at function start

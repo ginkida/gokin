@@ -65,6 +65,10 @@ func (t *RedoPlanTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		return NewErrorResult("plan manager not configured"), nil
 	}
 
+	if t.manager.IsExecuting() {
+		return NewErrorResult("cannot redo plan during orchestrated execution — wait for the current plan to finish"), nil
+	}
+
 	// Redo file changes through the undo manager
 	var redoneFiles []string
 	if t.undoManager != nil {

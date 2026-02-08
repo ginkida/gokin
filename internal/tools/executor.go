@@ -193,6 +193,9 @@ type ExecutionHandler struct {
 	// OnText is called when text is streamed from the model.
 	OnText func(text string)
 
+	// OnThinking is called when thinking/reasoning content is streamed.
+	OnThinking func(text string)
+
 	// OnToolStart is called when a tool begins execution.
 	OnToolStart func(name string, args map[string]any)
 
@@ -539,11 +542,14 @@ func (e *Executor) collectStreamWithHandler(ctx context.Context, stream *client.
 	// Note: Don't pass OnError here - the executor handles error display
 	// to avoid duplicate error messages
 	var onText func(string)
+	var onThinking func(string)
 	if e.handler != nil {
 		onText = e.handler.OnText
+		onThinking = e.handler.OnThinking
 	}
 	return client.ProcessStream(ctx, stream, &client.StreamHandler{
-		OnText: onText,
+		OnText:     onText,
+		OnThinking: onThinking,
 	})
 }
 

@@ -69,6 +69,10 @@ func (t *UndoPlanTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		return NewErrorResult("plan manager not configured"), nil
 	}
 
+	if t.manager.IsExecuting() {
+		return NewErrorResult("cannot undo plan during orchestrated execution — wait for the current plan to finish"), nil
+	}
+
 	undoExt := t.manager.GetUndoExtension()
 	if undoExt == nil {
 		return NewErrorResult("undo support is not enabled for this plan"), nil

@@ -125,10 +125,10 @@ PHASE 3: WAIT FOR APPROVAL
 Tool blocks until user approves, rejects, or requests modifications.
 
 PHASE 4: EXECUTION
-- For EACH step: call update_plan_progress with action "start"
-- Execute the step's work
-- Call update_plan_progress with action "complete"
-- After all steps: call exit_plan_mode with reason "completed"
+After plan approval, the orchestrator will execute each step automatically.
+- You will receive one step at a time — execute ONLY the requested step
+- Do NOT call update_plan_progress or exit_plan_mode — the orchestrator handles this
+- Provide a brief summary of what was done after each step
 
 PLAN FEEDBACK HANDLING:
 When a user provides feedback on a plan (after pressing ESC or requesting changes), you MUST:
@@ -493,14 +493,12 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 	builder.WriteString("\n═══════════════════════════════════════════════════════════════════════\n")
 	builder.WriteString("                       EXECUTION RULES\n")
 	builder.WriteString("═══════════════════════════════════════════════════════════════════════\n\n")
-	builder.WriteString("1. For EACH step: call update_plan_progress with action \"start\" BEFORE doing work\n")
-	builder.WriteString("2. Execute the step's work thoroughly\n")
-	builder.WriteString("3. Call update_plan_progress with action \"complete\" after finishing\n")
-	builder.WriteString("4. Always READ files before editing them\n")
-	builder.WriteString("5. Do NOT deviate from the plan - execute exactly what was approved\n")
-	builder.WriteString("6. If a step fails, call update_plan_progress with action \"fail\" and continue to next step\n")
-	builder.WriteString("7. After ALL steps: call exit_plan_mode with reason \"completed\"\n")
-	builder.WriteString("8. Provide brief status updates after each step\n")
+	builder.WriteString("1. Execute ONLY the current step described in the user message\n")
+	builder.WriteString("2. Always READ files before editing them\n")
+	builder.WriteString("3. Do NOT deviate from the plan — execute exactly what was approved\n")
+	builder.WriteString("4. Do NOT call update_plan_progress or exit_plan_mode — the orchestrator handles this automatically\n")
+	builder.WriteString("5. Provide a brief summary of what was done at the end\n")
+	builder.WriteString("6. Report any issues or deviations from the plan\n")
 
 	// Working directory
 	builder.WriteString(fmt.Sprintf("\nWorking directory: %s\n", b.workDir))

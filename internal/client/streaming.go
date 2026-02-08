@@ -11,6 +11,9 @@ type StreamHandler struct {
 	// OnText is called for each text chunk received.
 	OnText func(text string)
 
+	// OnThinking is called for each thinking/reasoning chunk received.
+	OnThinking func(text string)
+
 	// OnFunctionCall is called for each function call received.
 	OnFunctionCall func(fc *genai.FunctionCall)
 
@@ -42,6 +45,13 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 					handler.OnError(chunk.Error)
 				}
 				return nil, chunk.Error
+			}
+
+			if chunk.Thinking != "" {
+				resp.Thinking += chunk.Thinking
+				if handler.OnThinking != nil {
+					handler.OnThinking(chunk.Thinking)
+				}
 			}
 
 			if chunk.Text != "" {

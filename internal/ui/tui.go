@@ -1266,6 +1266,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.toolProgressBar.Update(msg)
 		}
 
+	case ThinkingTickMsg:
+		// Model is actively thinking — refresh the view so elapsed time updates
+		m.lastActivityTime = time.Now()
+
 	case ResponseDoneMsg:
 		m.state = StateInput
 		m.currentTool = ""

@@ -1185,6 +1185,13 @@ func (b *Builder) wireDependencies() error {
 				app.sendTokenUsageUpdate()
 			}
 		},
+		OnThinking: func(text string) {
+			// Thinking content keeps the UI alive — send a tick
+			// so the status bar continues to animate and show elapsed time.
+			if app.program != nil {
+				app.program.Send(ui.ThinkingTickMsg{})
+			}
+		},
 		OnToolStart: func(name string, args map[string]any) {
 			// Track tools used for response metadata
 			app.mu.Lock()
