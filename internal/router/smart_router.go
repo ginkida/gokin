@@ -58,6 +58,9 @@ func DefaultSmartRouterConfig() *SmartRouterConfig {
 type SmartRouter struct {
 	*Router
 
+	// Parent context for background operations
+	ctx context.Context
+
 	// Strategy optimizer for learning from outcomes
 	optimizer *agent.StrategyOptimizer
 
@@ -71,7 +74,7 @@ type SmartRouter struct {
 }
 
 // NewSmartRouter creates a new smart router with adaptive capabilities.
-func NewSmartRouter(cfg *SmartRouterConfig, executor *tools.Executor, agentRunner AgentRunner, c client.Client, workDir string) *SmartRouter {
+func NewSmartRouter(ctx context.Context, cfg *SmartRouterConfig, executor *tools.Executor, agentRunner AgentRunner, c client.Client, workDir string) *SmartRouter {
 	if cfg == nil {
 		cfg = DefaultSmartRouterConfig()
 	}
@@ -80,6 +83,7 @@ func NewSmartRouter(cfg *SmartRouterConfig, executor *tools.Executor, agentRunne
 
 	return &SmartRouter{
 		Router:          baseRouter,
+		ctx:             ctx,
 		adaptiveEnabled: cfg.AdaptiveEnabled,
 		minDataPoints:   cfg.MinDataPoints,
 		exampleLimit:    cfg.ExampleLimit,
@@ -172,7 +176,7 @@ func (sr *SmartRouter) Execute(ctx context.Context, history []*genai.Content, me
 	if success && sr.exampleStore != nil {
 		go func() {
 			// Timeout to prevent goroutine leak if store is slow
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(sr.ctx, 10*time.Second)
 			defer cancel()
 
 			done := make(chan struct{})

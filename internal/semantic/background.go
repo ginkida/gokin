@@ -57,6 +57,7 @@ type BackgroundIndexer struct {
 
 // NewBackgroundIndexer creates a new background indexer.
 func NewBackgroundIndexer(
+	ctx context.Context,
 	indexer *IncrementalIndexer,
 	fileWatcher *watcher.Watcher,
 	workDir string,
@@ -66,7 +67,7 @@ func NewBackgroundIndexer(
 		config = DefaultBackgroundIndexerConfig()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 
 	return &BackgroundIndexer{
 		indexer:      indexer,

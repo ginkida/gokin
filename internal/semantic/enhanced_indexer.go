@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // IndexData represents the persistent index data.
@@ -218,7 +220,9 @@ func (ei *EnhancedIndexer) IndexDirectory(ctx context.Context, dir string) error
 	}
 
 	// Persist index after indexing
-	_ = ei.SaveIndex() // Ignore error - indexing succeeded
+	if err := ei.SaveIndex(); err != nil {
+		logging.Warn("failed to save index after indexing", "error", err)
+	}
 
 	return nil
 }
@@ -232,7 +236,9 @@ func (ei *EnhancedIndexer) IndexFile(ctx context.Context, filePath string) error
 	}
 
 	// Persist index after indexing
-	_ = ei.SaveIndex() // Ignore error - indexing succeeded
+	if err := ei.SaveIndex(); err != nil {
+		logging.Warn("failed to save index after indexing", "error", err)
+	}
 
 	return nil
 }

@@ -256,9 +256,11 @@ func (t *StdioTransport) Close() error {
 	}
 
 	// Wait for stderr logging to complete
+	stderrTimer := time.NewTimer(time.Second)
 	select {
 	case <-t.stderrDone:
-	case <-time.After(time.Second):
+		stderrTimer.Stop()
+	case <-stderrTimer.C:
 		// Don't wait forever
 	}
 
@@ -268,11 +270,13 @@ func (t *StdioTransport) Close() error {
 		done <- t.cmd.Wait()
 	}()
 
+	processTimer := time.NewTimer(5 * time.Second)
 	select {
 	case <-done:
 		// Process exited cleanly
+		processTimer.Stop()
 		logging.Debug("MCP server process exited")
-	case <-time.After(5 * time.Second):
+	case <-processTimer.C:
 		// Kill if it doesn't exit in time
 		logging.Warn("MCP server not responding, killing process")
 		if t.cmd.Process != nil {
@@ -301,12 +305,12 @@ type HTTPTransport struct {
 }
 
 // NewHTTPTransport creates a new HTTP transport.
-func NewHTTPTransport(url string, headers map[string]string, timeout time.Duration) (*HTTPTransport, error) {
+func NewHTTPTransport(ctx context.Context, url string, headers map[string]string, timeout time.Duration) (*HTTPTransport, error) {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 
 	t := &HTTPTransport{
 		url:      url,

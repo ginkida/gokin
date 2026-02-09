@@ -52,7 +52,7 @@ type CoordinatorConfig struct {
 }
 
 // NewCoordinator creates a new coordinator.
-func NewCoordinator(runner *Runner, config *CoordinatorConfig) *Coordinator {
+func NewCoordinator(ctx context.Context, runner *Runner, config *CoordinatorConfig) *Coordinator {
 	if config == nil {
 		config = &CoordinatorConfig{MaxParallel: 3}
 	}
@@ -60,7 +60,7 @@ func NewCoordinator(runner *Runner, config *CoordinatorConfig) *Coordinator {
 		config.MaxParallel = 3
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 
 	return &Coordinator{
 		runner:       runner,
@@ -520,10 +520,13 @@ func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentR
 	}
 	c.mu.Unlock()
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case results := <-resultChan:
 		return results, nil
-	case <-time.After(timeout):
+	case <-timer.C:
 		// Clean up: ensure callback won't block if called later
 		once.Do(func() {})
 		return nil, fmt.Errorf("coordination timed out after %v", timeout)

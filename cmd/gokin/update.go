@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gokin/internal/config"
+	"gokin/internal/logging"
 	"gokin/internal/update"
 
 	"github.com/spf13/cobra"
@@ -258,7 +259,8 @@ func CheckForUpdateOnStartup(cfg *config.Config, app update.AppInterface) {
 	updateCfg := convertConfig(&cfg.Update)
 	updater, err := update.NewUpdater(updateCfg, version)
 	if err != nil {
-		return // Silently fail
+		logging.Debug("update check: failed to create updater", "error", err)
+		return
 	}
 	defer updater.Cleanup()
 
@@ -272,7 +274,8 @@ func CheckForUpdateOnStartup(cfg *config.Config, app update.AppInterface) {
 
 	info, err := updater.CheckForUpdateIfDue(ctx)
 	if err != nil {
-		return // Silently fail
+		logging.Debug("update check: failed to check for updates", "error", err)
+		return
 	}
 
 	// Notify user via TUI if available
@@ -284,8 +287,9 @@ func CheckForUpdateOnStartup(cfg *config.Config, app update.AppInterface) {
 			info.CurrentVersion, info.NewVersion)
 
 		// Delay slightly to ensure UI is ready
-		time.Sleep(2 * time.Second)
-		app.AddSystemMessage(msg)
+		time.AfterFunc(2*time.Second, func() {
+			app.AddSystemMessage(msg)
+		})
 	} else {
 		// Fallback to stderr if not in TUI mode
 		fmt.Fprintf(os.Stderr, "\n📦 Update available: %s → %s\n", info.CurrentVersion, info.NewVersion)

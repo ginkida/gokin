@@ -115,7 +115,6 @@ func (c *ListAgentTypesCommand) GetMetadata() CommandMetadata {
 		Category: CategoryTools,
 		Icon:     "list",
 		Priority: 31,
-		Advanced: true,
 	}
 }
 

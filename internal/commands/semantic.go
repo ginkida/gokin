@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"gokin/internal/format"
 )
 
 // SemanticStatsCommand shows semantic search statistics.
@@ -52,8 +54,8 @@ func (c *SemanticStatsCommand) Execute(ctx context.Context, args []string, app A
 	sb.WriteString("📊 Index\n")
 	sb.WriteString(fmt.Sprintf("  Files Indexed:   %d\n", stats.FilesIndexed))
 	sb.WriteString(fmt.Sprintf("  Total Chunks:    %d\n", stats.TotalChunks))
-	sb.WriteString(fmt.Sprintf("  Cache Size:      %s\n", formatBytes(int64(stats.CacheSizeBytes))))
-	sb.WriteString(fmt.Sprintf("  Index Size:      %s\n\n", formatBytes(int64(stats.IndexSizeBytes))))
+	sb.WriteString(fmt.Sprintf("  Cache Size:      %s\n", format.Bytes(int64(stats.CacheSizeBytes))))
+	sb.WriteString(fmt.Sprintf("  Index Size:      %s\n\n", format.Bytes(int64(stats.IndexSizeBytes))))
 
 	// Cache Performance
 	sb.WriteString("⚡ Cache Performance\n")
@@ -70,7 +72,7 @@ func (c *SemanticStatsCommand) Execute(ctx context.Context, args []string, app A
 	sb.WriteString("⚙️  Configuration\n")
 	sb.WriteString(fmt.Sprintf("  Enabled:         %v\n", cfg.Semantic.Enabled))
 	sb.WriteString(fmt.Sprintf("  Chunk Size:      %d chars\n", cfg.Semantic.ChunkSize))
-	sb.WriteString(fmt.Sprintf("  Max File Size:   %s\n", formatBytes(int64(cfg.Semantic.MaxFileSize))))
+	sb.WriteString(fmt.Sprintf("  Max File Size:   %s\n", format.Bytes(int64(cfg.Semantic.MaxFileSize))))
 	sb.WriteString(fmt.Sprintf("  Cache TTL:       %s\n\n", cfg.Semantic.CacheTTL))
 
 	// Patterns

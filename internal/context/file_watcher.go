@@ -104,10 +104,12 @@ func (fw *FileWatcher) Close() {
 
 	// Wait for the watch goroutine to finish with timeout
 	if fw.done != nil {
+		closeTimer := time.NewTimer(5 * time.Second)
 		select {
 		case <-fw.done:
+			closeTimer.Stop()
 			// Goroutine finished cleanly
-		case <-time.After(5 * time.Second):
+		case <-closeTimer.C:
 			// Timeout - goroutine may be stuck
 		}
 	}

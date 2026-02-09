@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"gokin/internal/format"
 )
 
 // StatsCommand shows detailed session statistics.
@@ -92,7 +94,7 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 		if startTime, ok := sessionStartTime.(time.Time); ok {
 			duration := time.Since(startTime)
 			sb.WriteString("⏱️  Duration\n")
-			sb.WriteString(fmt.Sprintf("  Session Length:  %s\n\n", formatDuration(duration)))
+			sb.WriteString(fmt.Sprintf("  Session Length:  %s\n\n", format.Duration(duration)))
 		}
 	}
 

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"gokin/internal/format"
 )
 
 const (
@@ -309,9 +311,9 @@ func (p *ActivityFeedPanel) View(width int) string {
 		// Duration (right-aligned)
 		var duration string
 		if entry.Status == ActivityRunning || entry.Status == ActivityPending {
-			duration = formatDuration(time.Since(entry.StartTime))
+			duration = format.Duration(time.Since(entry.StartTime))
 		} else {
-			duration = formatDuration(entry.Duration)
+			duration = format.Duration(entry.Duration)
 		}
 		// Pad to right
 		padding := width - lipgloss.Width(line.String()) - len(duration) - 6
@@ -361,7 +363,7 @@ func (p *ActivityFeedPanel) formatLogMessage(entry *ActivityFeedEntry, summary s
 	}
 
 	if entry.Duration > 0 {
-		msg += fmt.Sprintf(" (%s)", formatDuration(entry.Duration))
+		msg += fmt.Sprintf(" (%s)", format.Duration(entry.Duration))
 	}
 
 	return msg

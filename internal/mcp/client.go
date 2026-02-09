@@ -44,7 +44,7 @@ type Client struct {
 }
 
 // NewClient creates a new MCP client with the specified transport.
-func NewClient(cfg *ServerConfig) (*Client, error) {
+func NewClient(ctx context.Context, cfg *ServerConfig) (*Client, error) {
 	var transport Transport
 	var err error
 
@@ -52,7 +52,7 @@ func NewClient(cfg *ServerConfig) (*Client, error) {
 	case "stdio":
 		transport, err = NewStdioTransport(cfg.Command, cfg.Args, cfg.Env)
 	case "http":
-		transport, err = NewHTTPTransport(cfg.URL, cfg.Headers, cfg.Timeout)
+		transport, err = NewHTTPTransport(ctx, cfg.URL, cfg.Headers, cfg.Timeout)
 	default:
 		return nil, fmt.Errorf("unknown transport type: %s", cfg.Transport)
 	}
@@ -61,7 +61,7 @@ func NewClient(cfg *ServerConfig) (*Client, error) {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 
 	c := &Client{
 		transport:  transport,
@@ -146,9 +146,11 @@ func (c *Client) reconnect() bool {
 
 	logging.Info("MCP reconnecting", "server", c.serverName, "backoff", currentBackoff)
 
+	backoffTimer := time.NewTimer(currentBackoff)
 	select {
-	case <-time.After(currentBackoff):
+	case <-backoffTimer.C:
 	case <-c.ctx.Done():
+		backoffTimer.Stop()
 		return false
 	}
 
@@ -160,7 +162,7 @@ func (c *Client) reconnect() bool {
 	case "stdio":
 		transport, err = NewStdioTransport(cfg.Command, cfg.Args, cfg.Env)
 	case "http":
-		transport, err = NewHTTPTransport(cfg.URL, cfg.Headers, cfg.Timeout)
+		transport, err = NewHTTPTransport(c.ctx, cfg.URL, cfg.Headers, cfg.Timeout)
 	default:
 		logging.Error("MCP unknown transport for reconnect", "transport", cfg.Transport)
 		return false
@@ -266,13 +268,16 @@ func (c *Client) request(ctx context.Context, method string, params any) (*JSONR
 		timeout = 30 * time.Second
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case resp := <-respCh:
 		if resp.Error != nil {
 			return nil, resp.Error
 		}
 		return resp, nil
-	case <-time.After(timeout):
+	case <-timer.C:
 		return nil, fmt.Errorf("request timeout after %v", timeout)
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -481,9 +486,11 @@ func (c *Client) Close() error {
 	c.cancel()
 
 	// Wait for receive loop to finish
+	closeTimer := time.NewTimer(5 * time.Second)
 	select {
 	case <-c.done:
-	case <-time.After(5 * time.Second):
+		closeTimer.Stop()
+	case <-closeTimer.C:
 		logging.Warn("MCP client receive loop did not stop in time")
 	}
 

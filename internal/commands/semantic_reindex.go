@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"gokin/internal/format"
 )
 
 // SemanticReindexCommand forces a rebuild of the semantic index.
@@ -52,7 +54,7 @@ func (c *SemanticReindexCommand) Execute(ctx context.Context, args []string, app
 	sb.WriteString("Step 2: Rebuilding index...\n")
 	startTime := time.Now()
 
-	if err := indexer.Build(); err != nil {
+	if err := indexer.Build(ctx); err != nil {
 		return fmt.Sprintf("❌ Failed to build index: %v", err), nil
 	}
 
@@ -61,14 +63,14 @@ func (c *SemanticReindexCommand) Execute(ctx context.Context, args []string, app
 	// Get stats
 	stats := indexer.GetStats()
 
-	sb.WriteString(fmt.Sprintf("  ✓ Indexed in %s\n\n", formatDuration(duration)))
+	sb.WriteString(fmt.Sprintf("  ✓ Indexed in %s\n\n", format.Duration(duration)))
 
 	// Results
 	sb.WriteString("📊 Results\n")
 	sb.WriteString(fmt.Sprintf("  Files Indexed:   %d\n", stats.FilesIndexed))
 	sb.WriteString(fmt.Sprintf("  Total Chunks:    %d\n", stats.TotalChunks))
-	sb.WriteString(fmt.Sprintf("  Cache Size:      %s\n", formatBytes(int64(stats.CacheSizeBytes))))
-	sb.WriteString(fmt.Sprintf("  Index Size:      %s\n\n", formatBytes(int64(stats.IndexSizeBytes))))
+	sb.WriteString(fmt.Sprintf("  Cache Size:      %s\n", format.Bytes(int64(stats.CacheSizeBytes))))
+	sb.WriteString(fmt.Sprintf("  Index Size:      %s\n\n", format.Bytes(int64(stats.IndexSizeBytes))))
 
 	// Footer
 	sb.WriteString(strings.Repeat("─", 50))

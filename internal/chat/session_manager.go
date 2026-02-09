@@ -67,15 +67,14 @@ func (sm *SessionManager) Start(ctx context.Context) {
 	}
 
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	// Clean up old sessions in background (non-blocking)
-	go sm.CleanupOldSessions()
-
 	// Start periodic save timer
 	sm.saveTimer = time.AfterFunc(sm.config.SaveInterval, func() {
 		sm.periodicSave()
 	})
+	sm.mu.Unlock()
+
+	// Clean up old sessions in background (outside lock)
+	go sm.CleanupOldSessions()
 }
 
 // Note: Stop() is responsible for cleaning up the timer.

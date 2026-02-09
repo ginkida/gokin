@@ -7,6 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"gokin/internal/format"
 )
 
 const (
@@ -164,9 +166,9 @@ func (m *ToolProgressBarModel) View(width int) string {
 	// Bytes if available
 	if m.totalBytes > 0 {
 		builder.WriteString(dimStyle.Render(fmt.Sprintf(" %s/%s",
-			formatBytes(m.processedBytes), formatBytes(m.totalBytes))))
+			format.Bytes(m.processedBytes), format.Bytes(m.totalBytes))))
 	} else if m.processedBytes > 0 {
-		builder.WriteString(dimStyle.Render(fmt.Sprintf(" %s", formatBytes(m.processedBytes))))
+		builder.WriteString(dimStyle.Render(fmt.Sprintf(" %s", format.Bytes(m.processedBytes))))
 	}
 
 	// Elapsed time (right side)
@@ -176,22 +178,3 @@ func (m *ToolProgressBarModel) View(width int) string {
 	return builder.String()
 }
 
-// formatBytes formats bytes for display.
-func formatBytes(b int64) string {
-	const (
-		KB = 1024
-		MB = 1024 * KB
-		GB = 1024 * MB
-	)
-
-	switch {
-	case b >= GB:
-		return fmt.Sprintf("%.1fGB", float64(b)/GB)
-	case b >= MB:
-		return fmt.Sprintf("%.1fMB", float64(b)/MB)
-	case b >= KB:
-		return fmt.Sprintf("%.1fKB", float64(b)/KB)
-	default:
-		return fmt.Sprintf("%dB", b)
-	}
-}

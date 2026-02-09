@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -55,6 +56,9 @@ const (
 
 	// MinSamplesForConfidence is the minimum number of samples needed for confident decisions
 	MinSamplesForConfidence = 5
+
+	// MaxDelegationPaths is the maximum number of delegation paths to track.
+	MaxDelegationPaths = 200
 )
 
 // NewDelegationMetrics creates a new delegation metrics tracker.
@@ -101,19 +105,24 @@ func (dm *DelegationMetrics) load() error {
 }
 
 // save persists metrics to disk.
-func (dm *DelegationMetrics) save() error {
-	dir := filepath.Dir(dm.storagePath())
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
+// Caller must hold dm.mu (read or write lock).
+func (dm *DelegationMetrics) save() ([]byte, error) {
 	dm.UpdatedAt = time.Now()
 
 	data, err := json.MarshalIndent(dm, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	return data, nil
+}
+
+// writeSnapshot writes pre-serialized data to disk without holding any locks.
+func (dm *DelegationMetrics) writeSnapshot(data []byte) error {
+	dir := filepath.Dir(dm.storagePath())
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
 	return os.WriteFile(dm.storagePath(), data, 0644)
 }
 
@@ -130,9 +139,15 @@ func (dm *DelegationMetrics) RecordExecution(fromAgent, toAgent, contextType str
 			FromAgent:     fromAgent,
 			ToAgent:       toAgent,
 			ContextType:   contextType,
+			LastUsed:      time.Now(), // Initialize before eviction to avoid evicting new entry
 			RecentResults: make([]DelegationResult, 0, MaxRecentResults),
 		}
 		dm.PathMetrics[key] = stats
+
+		// Evict oldest paths if over limit
+		if len(dm.PathMetrics) > MaxDelegationPaths {
+			dm.evictOldest(MaxDelegationPaths)
+		}
 	}
 
 	// Update counts
@@ -161,12 +176,44 @@ func (dm *DelegationMetrics) RecordExecution(fromAgent, toAgent, contextType str
 	// Update rule weights based on new data
 	dm.updateRuleWeight(key, success)
 
-	// Save asynchronously
+	// Snapshot data under lock, write to disk asynchronously
+	snapshot, err := dm.save()
+	if err != nil {
+		logging.Debug("failed to serialize delegation metrics", "error", err)
+		return
+	}
 	go func() {
-		if err := dm.save(); err != nil {
+		if err := dm.writeSnapshot(snapshot); err != nil {
 			logging.Debug("failed to save delegation metrics", "error", err)
 		}
 	}()
+}
+
+// evictOldest removes the oldest paths by LastUsed until map is at maxSize.
+// Caller must hold dm.mu write lock.
+func (dm *DelegationMetrics) evictOldest(maxSize int) {
+	if len(dm.PathMetrics) <= maxSize {
+		return
+	}
+
+	type entry struct {
+		key      string
+		lastUsed time.Time
+	}
+	entries := make([]entry, 0, len(dm.PathMetrics))
+	for k, v := range dm.PathMetrics {
+		entries = append(entries, entry{k, v.LastUsed})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].lastUsed.Before(entries[j].lastUsed)
+	})
+
+	toRemove := len(dm.PathMetrics) - maxSize
+	for i := 0; i < toRemove; i++ {
+		key := entries[i].key
+		delete(dm.PathMetrics, key)
+		delete(dm.RuleWeights, key)
+	}
 }
 
 // updateRuleWeight adjusts the weight of a delegation rule based on outcomes.
@@ -346,7 +393,11 @@ func (dm *DelegationMetrics) Clear() error {
 	dm.PathMetrics = make(map[string]*PathStats)
 	dm.RuleWeights = make(map[string]float64)
 
-	return dm.save()
+	snapshot, err := dm.save()
+	if err != nil {
+		return err
+	}
+	return dm.writeSnapshot(snapshot)
 }
 
 // Helper functions

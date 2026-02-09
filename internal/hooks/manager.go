@@ -188,7 +188,8 @@ func (m *Manager) RunOnExit(ctx context.Context) []Result {
 }
 
 // killHookProcess attempts graceful shutdown with SIGTERM, then SIGKILL after grace period.
-func killHookProcess(cmd *exec.Cmd, gracePeriod time.Duration) {
+// The done channel should signal when the process has exited (from the caller's cmd.Wait goroutine).
+func killHookProcess(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan struct{}) {
 	if cmd.Process == nil {
 		return
 	}
@@ -200,11 +201,15 @@ func killHookProcess(cmd *exec.Cmd, gracePeriod time.Duration) {
 		return
 	}
 
-	// Wait briefly for graceful shutdown
-	time.Sleep(gracePeriod)
-
-	// Escalate to SIGKILL if process is still running
-	cmd.Process.Kill()
+	// Wait for process exit or grace period expiry
+	graceTimer := time.NewTimer(gracePeriod)
+	select {
+	case <-done:
+		graceTimer.Stop()
+		return // Exited gracefully
+	case <-graceTimer.C:
+		cmd.Process.Kill()
+	}
 }
 
 // executeHook executes a single hook.
@@ -261,7 +266,7 @@ func (m *Manager) executeHook(ctx context.Context, hook *Hook, hctx *Context, ti
 	case <-execCtx.Done():
 		// Context cancelled or timeout - kill process with graceful shutdown
 		cancelled = true
-		killHookProcess(cmd, 2*time.Second)
+		killHookProcess(cmd, 2*time.Second, cmdDone)
 		// Wait for the Wait() goroutine to complete to avoid goroutine leak
 		wg.Wait()
 	}

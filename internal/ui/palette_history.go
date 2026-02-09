@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 const (
@@ -38,7 +40,9 @@ func NewCommandHistory() *CommandHistory {
 	configDir, err := getConfigDir()
 	if err == nil {
 		ch.filePath = filepath.Join(configDir, historyFileName)
-		_ = ch.load()
+		if err := ch.load(); err != nil {
+			logging.Debug("failed to load command history", "error", err)
+		}
 	}
 
 	return ch
@@ -189,6 +193,12 @@ func (ch *CommandHistory) load() error {
 	}
 
 	return nil
+}
+
+// Flush synchronously saves the command history to disk.
+// Call during shutdown to ensure no history is lost from async saves.
+func (ch *CommandHistory) Flush() error {
+	return ch.save()
 }
 
 // save saves the history to disk.

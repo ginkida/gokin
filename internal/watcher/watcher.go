@@ -9,6 +9,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"gokin/internal/git"
+	"gokin/internal/logging"
 )
 
 // Watcher monitors file system changes in a directory.
@@ -204,7 +205,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 				w.mu.Lock()
 				watchCount := len(w.fsWatcher.WatchList())
 				if watchCount < w.maxWatches {
-					_ = w.fsWatcher.Add(path)
+					if err := w.fsWatcher.Add(path); err != nil {
+						logging.Debug("failed to watch new directory", "path", path, "error", err)
+					}
 				}
 				w.mu.Unlock()
 			}

@@ -11,6 +11,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"gokin/internal/format"
 )
 
 const (
@@ -1815,7 +1817,7 @@ func (m Model) View() string {
 				} else if toolElapsed > 5*time.Second {
 					durationColor = ColorWarning
 				}
-				status += "  " + lipgloss.NewStyle().Foreground(durationColor).Render(formatDuration(toolElapsed))
+				status += "  " + lipgloss.NewStyle().Foreground(durationColor).Render(format.Duration(toolElapsed))
 			}
 			builder.WriteString(status)
 		} else if m.state == StateProcessing {
@@ -1824,7 +1826,7 @@ func (m Model) View() string {
 
 			// Show elapsed after 3 seconds
 			if elapsed >= 3*time.Second {
-				status += "  " + dimStyle.Render(formatDuration(elapsed))
+				status += "  " + dimStyle.Render(format.Duration(elapsed))
 			}
 
 			// Plan step context

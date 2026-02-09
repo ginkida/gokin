@@ -433,7 +433,7 @@ func (b *Builder) initSession() error {
 	b.promptBuilder.SetProjectMemory(b.projectMemory)
 	b.promptBuilder.SetPlanAutoDetect(b.cfg.Plan.AutoDetect)
 
-	b.contextManager = appcontext.NewContextManager(b.session, b.geminiClient, &b.cfg.Context)
+	b.contextManager = appcontext.NewContextManager(b.ctx, b.session, b.geminiClient, &b.cfg.Context)
 	b.contextAgent = appcontext.NewContextAgent(b.contextManager, b.session, b.configDir)
 
 	// Initialize context predictor for predictive file loading
@@ -529,7 +529,7 @@ func (b *Builder) initManagers() error {
 	b.undoManager = undo.NewManager()
 
 	// Agent runner
-	b.agentRunner = agent.NewRunner(b.geminiClient, b.registry, b.workDir)
+	b.agentRunner = agent.NewRunner(b.ctx, b.geminiClient, b.registry, b.workDir)
 	b.agentRunner.SetPermissions(b.permManager)
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
 
@@ -583,13 +583,14 @@ func (b *Builder) initManagers() error {
 
 	// 3. Coordinator for task orchestration
 	coordConfig := &agent.CoordinatorConfig{MaxParallel: 3}
-	b.coordinator = agent.NewCoordinator(b.agentRunner, coordConfig)
+	b.coordinator = agent.NewCoordinator(b.ctx, b.agentRunner, coordConfig)
 	b.coordinator.Start()
 	logging.Debug("coordinator initialized", "max_parallel", 3)
 
 	// 4. Meta-Agent (monitors and optimizes agents)
 	metaConfig := agent.DefaultMetaAgentConfig()
 	b.metaAgent = agent.NewMetaAgent(
+		b.ctx,
 		b.agentRunner,
 		b.coordinator,
 		b.strategyOptimizer,
@@ -666,7 +667,7 @@ func (b *Builder) initManagers() error {
 
 	// 4. Smart Router with adaptive selection
 	smartRouterCfg := router.DefaultSmartRouterConfig()
-	b.smartRouter = router.NewSmartRouter(smartRouterCfg, b.executor, b.agentRunner, b.geminiClient, b.workDir)
+	b.smartRouter = router.NewSmartRouter(b.ctx, smartRouterCfg, b.executor, b.agentRunner, b.geminiClient, b.workDir)
 	if b.strategyOptimizer != nil {
 		b.smartRouter.SetStrategyOptimizer(b.strategyOptimizer)
 	}
@@ -1007,6 +1008,7 @@ func (b *Builder) initIntegrations() error {
 
 			// Create background indexer for watcher-driven incremental indexing
 			b.backgroundIdx = semantic.NewBackgroundIndexer(
+				b.ctx,
 				b.incrementalIdx,
 				b.fileWatcher,
 				b.workDir,

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -116,8 +117,7 @@ func randomExampleSuffix() string {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	result := make([]byte, 6)
 	for i := range result {
-		result[i] = chars[time.Now().UnixNano()%int64(len(chars))]
-		time.Sleep(time.Nanosecond) // Ensure uniqueness
+		result[i] = chars[rand.IntN(len(chars))]
 	}
 	return string(result)
 }

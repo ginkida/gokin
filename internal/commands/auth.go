@@ -218,6 +218,7 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 	switch target {
 	case "gemini":
 		cfg.API.GeminiKey = ""
+		cfg.API.GeminiOAuth = nil
 		if currentProvider == "gemini" {
 			cfg.API.APIKey = ""
 		}
@@ -238,6 +239,7 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 	case "all":
 		cfg.API.GeminiKey = ""
+		cfg.API.GeminiOAuth = nil
 		cfg.API.GLMKey = ""
 		cfg.API.DeepSeekKey = ""
 		cfg.API.OllamaKey = ""
@@ -268,14 +270,22 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		availableProviders = append(availableProviders, "ollama")
 	}
 
-	// Save config directly without re-initializing client
-	// (ApplyConfig would fail if no API key is available)
-	if err := cfg.Save(); err != nil {
-		return fmt.Sprintf("Failed to save: %v", err), nil
+	// Apply config to reinitialize the client (drops the old client from memory)
+	applyFailed := false
+	if err := app.ApplyConfig(cfg); err != nil {
+		applyFailed = true
+		// ApplyConfig may fail if no credentials remain.
+		// Still save to disk so credentials are removed on restart.
+		if saveErr := cfg.Save(); saveErr != nil {
+			return fmt.Sprintf("Failed to save: %v", saveErr), nil
+		}
 	}
 
 	var result strings.Builder
 	result.WriteString(fmt.Sprintf("✓ %s API key removed.\n", strings.Title(target)))
+	if applyFailed {
+		result.WriteString("⚠ Client could not be re-initialized (no valid credentials remain).\n")
+	}
 
 	// Build response based on available providers
 	if len(availableProviders) == 0 {
@@ -305,7 +315,13 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 			cfg.API.ActiveProvider = newProvider
 			cfg.Model.Provider = newProvider
 			cfg.Model.Name = providerModels[newProvider]
-			cfg.Save()
+			if err := app.ApplyConfig(cfg); err != nil {
+				// ApplyConfig may fail if no credentials remain.
+				// Still save to disk so the provider switch persists on restart.
+				if saveErr := cfg.Save(); saveErr != nil {
+					return fmt.Sprintf("Failed to save: %v", saveErr), nil
+				}
+			}
 
 			result.WriteString(fmt.Sprintf("\n✓ Auto-switched to %s\n", newProvider))
 		}
@@ -494,7 +510,6 @@ func (c *OAuthLoginCommand) GetMetadata() CommandMetadata {
 		Category: CategoryAuthSetup,
 		Icon:     "google",
 		Priority: 5,
-		Advanced: true,
 	}
 }
 
@@ -599,7 +614,6 @@ func (c *OAuthLogoutCommand) GetMetadata() CommandMetadata {
 		Category: CategoryAuthSetup,
 		Icon:     "logout",
 		Priority: 15,
-		Advanced: true,
 	}
 }
 
@@ -618,9 +632,15 @@ func (c *OAuthLogoutCommand) Execute(ctx context.Context, args []string, app App
 	// Remove OAuth token
 	cfg.API.GeminiOAuth = nil
 
-	// Save config
-	if err := cfg.Save(); err != nil {
-		return "", fmt.Errorf("failed to save config: %w", err)
+	// Apply config to reinitialize the client (drops the OAuth client from memory)
+	applyFailed := false
+	if err := app.ApplyConfig(cfg); err != nil {
+		applyFailed = true
+		// ApplyConfig may fail if no other credentials are available.
+		// Still save the config to disk so OAuth is removed on restart.
+		if saveErr := cfg.Save(); saveErr != nil {
+			return "", fmt.Errorf("failed to save config: %w", saveErr)
+		}
 	}
 
 	var sb strings.Builder
@@ -628,6 +648,9 @@ func (c *OAuthLogoutCommand) Execute(ctx context.Context, args []string, app App
 		sb.WriteString(fmt.Sprintf("Logged out from %s\n\n", email))
 	} else {
 		sb.WriteString("OAuth credentials removed.\n\n")
+	}
+	if applyFailed {
+		sb.WriteString("⚠ Client could not be re-initialized (no valid credentials remain).\n")
 	}
 
 	// Check if API key is available

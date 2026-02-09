@@ -96,7 +96,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			res := serverResult{name: cfg.Name}
 
 			// Create client (no lock needed — pure network I/O)
-			client, err := NewClient(cfg)
+			client, err := NewClient(serverCtx, cfg)
 			if err != nil {
 				res.err = fmt.Errorf("failed to create client: %w", err)
 				results <- res
@@ -166,7 +166,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 // Must be called with m.mu held.
 func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 	// Create client
-	client, err := NewClient(cfg)
+	client, err := NewClient(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}

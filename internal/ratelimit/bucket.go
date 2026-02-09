@@ -69,20 +69,22 @@ func (b *TokenBucket) Consume(tokens float64) {
 		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
 		b.mu.Unlock()
 
-		// Wait a bit before retrying
 		if waitTime < 10*time.Millisecond {
 			waitTime = 10 * time.Millisecond
 		}
-		time.Sleep(waitTime)
+		timer := time.NewTimer(waitTime)
+		<-timer.C
+		timer.Stop()
 	}
 }
 
 // ConsumeWithTimeout attempts to consume tokens within the given timeout.
 // Returns true if successful, false if timeout expired.
 func (b *TokenBucket) ConsumeWithTimeout(tokens float64, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 
-	for time.Now().Before(deadline) {
+	for {
 		b.mu.Lock()
 		b.refill()
 
@@ -97,19 +99,18 @@ func (b *TokenBucket) ConsumeWithTimeout(tokens float64, timeout time.Duration) 
 		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
 		b.mu.Unlock()
 
-		// Don't wait longer than remaining time
-		remaining := time.Until(deadline)
-		if waitTime > remaining {
-			waitTime = remaining
-		}
 		if waitTime < 10*time.Millisecond {
 			waitTime = 10 * time.Millisecond
 		}
-
-		time.Sleep(waitTime)
+		wait := time.NewTimer(waitTime)
+		select {
+		case <-wait.C:
+			// Try again
+		case <-deadline.C:
+			wait.Stop()
+			return false
+		}
 	}
-
-	return false
 }
 
 // Available returns the current number of available tokens.

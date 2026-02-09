@@ -29,6 +29,7 @@ type ActivityReporter interface {
 
 // Runner manages the execution of multiple agents.
 type Runner struct {
+	ctx          context.Context
 	client       client.Client
 	baseRegistry tools.ToolRegistry
 	workDir      string
@@ -378,8 +379,9 @@ func (r *Runner) reportActivity() {
 }
 
 // NewRunner creates a new agent runner.
-func NewRunner(c client.Client, registry tools.ToolRegistry, workDir string) *Runner {
+func NewRunner(ctx context.Context, c client.Client, registry tools.ToolRegistry, workDir string) *Runner {
 	r := &Runner{
+		ctx:          ctx,
 		client:       c,
 		baseRegistry: registry,
 		workDir:      workDir,
@@ -388,7 +390,7 @@ func NewRunner(c client.Client, registry tools.ToolRegistry, workDir string) *Ru
 	}
 	// Set up messenger factory
 	r.messengerFactory = func(agentID string) *AgentMessenger {
-		return NewAgentMessenger(r, agentID)
+		return NewAgentMessenger(ctx, r, agentID)
 	}
 	return r
 }
@@ -562,6 +564,17 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 
 	// Save agent state for potential resume
 	r.saveAgentState(agent)
+
+	if result == nil {
+		result = &AgentResult{
+			AgentID:   agent.ID,
+			Type:      AgentType(agentType),
+			Status:    AgentStatusFailed,
+			Error:     "agent returned nil result",
+			Completed: true,
+			Duration:  duration,
+		}
+	}
 
 	r.mu.Lock()
 	r.results[agent.ID] = result
@@ -947,14 +960,16 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		if result.Status == AgentStatusCompleted && exampleStore != nil {
 			// Learn from successful executions
 			go func() {
-				_ = exampleStore.LearnFromSuccess(
+				if err := exampleStore.LearnFromSuccess(
 					agentType,
 					prompt,
 					agentType,
 					result.Output,
 					duration,
 					0, // Token count not tracked at this level
-				)
+				); err != nil {
+					logging.Debug("failed to learn from success", "error", err)
+				}
 			}()
 		}
 

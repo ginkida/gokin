@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"gokin/internal/logging"
 )
 
 // ApprovalDecision represents the user's decision on a plan.
@@ -207,7 +209,9 @@ func (m *Manager) StartStep(stepID int) {
 
 	// Save progress (for crash recovery - we know which step was running)
 	if store != nil {
-		_ = store.Save(plan)
+		if err := store.Save(plan); err != nil {
+			logging.Warn("failed to save plan progress", "error", err)
+		}
 	}
 
 	// Send progress update
@@ -252,7 +256,9 @@ func (m *Manager) CompleteStep(stepID int, output string) {
 
 	// Save progress (for crash recovery)
 	if store != nil {
-		_ = store.Save(plan)
+		if err := store.Save(plan); err != nil {
+			logging.Warn("failed to save plan progress", "error", err)
+		}
 	}
 
 	// Send progress update
@@ -300,7 +306,9 @@ func (m *Manager) FailStep(stepID int, errMsg string) {
 
 	// Auto-save failed plan for potential retry
 	if store != nil {
-		_ = store.Save(plan)
+		if err := store.Save(plan); err != nil {
+			logging.Warn("failed to save plan progress", "error", err)
+		}
 	}
 
 	// Send progress update
@@ -696,7 +704,9 @@ func (m *Manager) PauseStep(stepID int, reason string) {
 
 	// Auto-save paused plan for later resume
 	if store != nil {
-		_ = store.Save(plan)
+		if err := store.Save(plan); err != nil {
+			logging.Warn("failed to save plan progress", "error", err)
+		}
 	}
 
 	// Send progress update

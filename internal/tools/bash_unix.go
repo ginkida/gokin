@@ -33,21 +33,15 @@ func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration) {
 		}
 	}
 
-	// Wait briefly for graceful shutdown
-	done := make(chan struct{})
-	go func() {
-		time.Sleep(gracePeriod)
-		close(done)
-	}()
+	// Wait for grace period before escalating to SIGKILL
+	graceTimer := time.NewTimer(gracePeriod)
+	<-graceTimer.C
 
-	select {
-	case <-done:
-		// Grace period expired - escalate to SIGKILL
-		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-			// Fallback to killing just the process
-			if err := cmd.Process.Kill(); err != nil {
-				logging.Warn("failed to kill process", "error", err)
-			}
+	// Grace period expired - escalate to SIGKILL
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		// Fallback to killing just the process
+		if err := cmd.Process.Kill(); err != nil {
+			logging.Warn("failed to kill process", "error", err)
 		}
 	}
 }

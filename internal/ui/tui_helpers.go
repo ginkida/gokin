@@ -312,17 +312,6 @@ func extractToolInfo(args map[string]any) string {
 	return ""
 }
 
-// formatDuration formats a duration for display.
-func formatDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
-	return fmt.Sprintf("%.1fm", d.Minutes())
-}
-
 // renderResponseMetadata renders the response metadata as a compact dim footer.
 // Format: 1.2k in · 3.4k out · 4.1s
 func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {

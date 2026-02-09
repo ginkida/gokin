@@ -1246,7 +1246,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						// Build replan context with reflection
 						var reflection *Reflection
 						if a.reflector != nil && firstFailure.action.ToolName != "" {
-							reflection = a.reflector.Reflect(firstFailure.action.ToolName, firstFailure.action.ToolArgs, firstFailure.result.Error)
+							reflection = a.reflector.Reflect(ctx, firstFailure.action.ToolName, firstFailure.action.ToolArgs, firstFailure.result.Error)
 						}
 
 						// Find the node in the tree for replanning
@@ -1491,8 +1491,14 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		return a.forceCompactHistory(ctx)
 	}
 
-	// 1. Get current token usage
-	tokenCount, err := a.tokenCounter.CountContents(ctx, a.history)
+	// 1. Snapshot history under read lock for safe concurrent access
+	a.stateMu.RLock()
+	historySnapshot := make([]*genai.Content, len(a.history))
+	copy(historySnapshot, a.history)
+	a.stateMu.RUnlock()
+
+	// 2. Count tokens on snapshot (no lock needed)
+	tokenCount, err := a.tokenCounter.CountContents(ctx, historySnapshot)
 	if err != nil {
 		return fmt.Errorf("failed to count tokens: %w", err)
 	}
@@ -1505,7 +1511,6 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 
 	percentUsed := float64(tokenCount) / float64(limits.MaxInputTokens)
 
-	// 2. If below threshold, do nothing
 	if percentUsed < threshold {
 		return nil
 	}
@@ -1515,26 +1520,36 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		"usage", fmt.Sprintf("%.1f%%", percentUsed*100),
 		"tokens", tokenCount)
 
-	// 3. Summarize history
-	// We keep the system prompt (first 2 messages) and the last few turns
-	if len(a.history) <= 6 {
-		return nil // Not enough history to summarize effectively
+	// 3. Summarize on snapshot (potentially slow API call — no lock held)
+	if len(historySnapshot) <= 6 {
+		return nil
 	}
 
-	// Keep first 2 (system context) and last 4 (recent turns)
-	historyToSummarize := a.history[2 : len(a.history)-4]
-	remainingHistory := a.history[len(a.history)-4:]
+	historyToSummarize := historySnapshot[2 : len(historySnapshot)-4]
+	recentFromSnapshot := historySnapshot[len(historySnapshot)-4:]
 
 	summary, err := a.summarizer.Summarize(ctx, historyToSummarize)
 	if err != nil {
 		return fmt.Errorf("summarization failed: %w", err)
 	}
 
-	// 4. Reconstruct history: [System Context] + [Summary] + [Recent Turns]
-	newHistory := make([]*genai.Content, 0, len(remainingHistory)+3)
-	newHistory = append(newHistory, a.history[0], a.history[1])
+	// 4. Reconstruct under write lock, preserving messages added since snapshot
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
+	// If history shrunk (another compaction ran), skip
+	if len(a.history) < historyLen {
+		return nil
+	}
+
+	// Messages appended by concurrent goroutines since our snapshot
+	newMessages := a.history[historyLen:]
+
+	newHistory := make([]*genai.Content, 0, 3+len(recentFromSnapshot)+len(newMessages))
+	newHistory = append(newHistory, a.history[0], a.history[1]) // System context
 	newHistory = append(newHistory, summary)
-	newHistory = append(newHistory, remainingHistory...)
+	newHistory = append(newHistory, recentFromSnapshot...)
+	newHistory = append(newHistory, newMessages...)
 
 	a.history = newHistory
 
@@ -1775,9 +1790,11 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 	case <-ctx.Done():
 		// Context cancelled, but goroutines should exit on their own
 		// Wait a bit more for cleanup
+		cleanupTimer := time.NewTimer(5 * time.Second)
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+			cleanupTimer.Stop()
+		case <-cleanupTimer.C:
 			logging.Warn("executeToolsParallel: some goroutines did not exit in time")
 		}
 	}
@@ -1798,7 +1815,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 
 	// Apply self-reflection on errors to provide recovery suggestions
 	if !result.Success && a.reflector != nil {
-		reflection = a.reflector.Reflect(call.Name, call.Args, result.Content)
+		reflection = a.reflector.Reflect(ctx, call.Name, call.Args, result.Content)
 		if reflection.Intervention != "" {
 			// Enrich the error result with reflection analysis
 			result.Content = fmt.Sprintf("%s\n\n---\n**Self-Reflection:**\n%s",
@@ -1814,7 +1831,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	}
 
 	// Check for autonomous delegation opportunity
-	if !result.Success && a.delegation != nil && a.delegation.messenger != nil {
+	if !result.Success && a.delegation != nil && a.delegation.HasMessenger() {
 		delCtx := &DelegationContext{
 			AgentType:      a.Type,
 			CurrentTurn:    a.currentStep,
@@ -1930,11 +1947,13 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools
 
 		// Exponential backoff: 1s, 2s, 4s...
 		backoffDuration := time.Duration(1<<uint(attempt)) * time.Second
+		backoffTimer := time.NewTimer(backoffDuration)
 		select {
-		case <-time.After(backoffDuration):
+		case <-backoffTimer.C:
 			// Continue to next attempt
 		case <-ctx.Done():
 			// Context cancelled - stop retrying
+			backoffTimer.Stop()
 			return tools.NewErrorResult("cancelled during retry backoff")
 		}
 	}
@@ -2109,7 +2128,7 @@ func (a *Agent) executeToolAction(ctx context.Context, action *PlannedAction, st
 
 // executeDelegateAction delegates work to a sub-agent.
 func (a *Agent) executeDelegateAction(ctx context.Context, action *PlannedAction, startTime time.Time) *AgentResult {
-	if a.delegation == nil || a.delegation.messenger == nil {
+	if a.delegation == nil || !a.delegation.HasMessenger() {
 		// No delegation support, execute directly with current agent
 		return a.executeDirectly(ctx, action, startTime)
 	}
@@ -2151,7 +2170,9 @@ func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, star
 
 	// Add the action prompt to history temporarily
 	promptContent := genai.NewContentFromText(action.Prompt, genai.RoleUser)
+	a.stateMu.Lock()
 	a.history = append(a.history, promptContent)
+	a.stateMu.Unlock()
 
 	// Get model response
 	resp, err := a.getModelResponse(ctx)
@@ -2202,7 +2223,7 @@ func (a *Agent) executeVerifyAction(ctx context.Context, action *PlannedAction, 
 	// Use bash agent to run tests if available
 	verifyPrompt := "Verify the implementation is complete. " + action.Prompt
 
-	if a.delegation != nil && a.delegation.messenger != nil {
+	if a.delegation != nil && a.delegation.HasMessenger() {
 		decision := &DelegationDecision{
 			ShouldDelegate: true,
 			TargetType:     string(AgentTypeBash),

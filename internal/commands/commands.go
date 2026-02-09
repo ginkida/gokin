@@ -61,8 +61,12 @@ type AppInterface interface {
 }
 
 // Handler manages slash commands.
+// The commands map is populated exclusively during NewHandler() and becomes
+// immutable once the constructor returns (frozen == true). This makes Handler
+// safe for concurrent use without a mutex on the commands map.
 type Handler struct {
 	commands map[string]Command
+	frozen   bool
 }
 
 // NewHandler creates a new command handler with built-in commands.
@@ -98,6 +102,7 @@ func NewHandler() *Handler {
 
 	// Register interactive commands
 	h.Register(&BrowseCommand{})
+	h.Register(&OpenCommand{})
 	h.Register(&ClearTodosCommand{})
 
 	// Register context commands
@@ -136,11 +141,16 @@ func NewHandler() *Handler {
 	// Register update command
 	h.Register(&UpdateCommand{})
 
+	h.frozen = true
 	return h
 }
 
 // Register adds a command to the handler.
+// Must only be called during NewHandler construction; panics if called after.
 func (h *Handler) Register(cmd Command) {
+	if h.frozen {
+		panic("commands: Register called after NewHandler completed")
+	}
 	h.commands[cmd.Name()] = cmd
 }
 

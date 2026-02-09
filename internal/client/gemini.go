@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"gokin/internal/config"
@@ -18,6 +19,7 @@ import (
 
 // GeminiClient wraps the Google Gemini API.
 type GeminiClient struct {
+	mu                sync.RWMutex
 	client            *genai.Client
 	model             string
 	config            *genai.GenerateContentConfig
@@ -85,21 +87,29 @@ func NewGeminiClient(ctx context.Context, cfg *config.Config) (Client, error) {
 
 // SetSystemInstruction sets the system-level instruction for the model.
 func (c *GeminiClient) SetSystemInstruction(instruction string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.systemInstruction = instruction
 }
 
 // SetThinkingBudget configures the thinking/reasoning budget.
 func (c *GeminiClient) SetThinkingBudget(budget int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.thinkingBudget = budget
 }
 
 // SetTools sets the tools available for function calling.
 func (c *GeminiClient) SetTools(tools []*genai.Tool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.tools = tools
 }
 
 // SetRateLimiter sets the rate limiter for API calls.
 func (c *GeminiClient) SetRateLimiter(limiter interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if rl, ok := limiter.(*ratelimit.Limiter); ok {
 		c.rateLimiter = rl
 	}
@@ -107,6 +117,8 @@ func (c *GeminiClient) SetRateLimiter(limiter interface{}) {
 
 // SetStatusCallback sets the callback for status updates during operations.
 func (c *GeminiClient) SetStatusCallback(cb StatusCallback) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.statusCallback = cb
 }
 
@@ -241,6 +253,11 @@ func (c *GeminiClient) generateContentStream(ctx context.Context, contents []*ge
 	// Sanitize contents before sending to API
 	contents = sanitizeContents(contents)
 
+	// Snapshot status callback for retry notifications
+	c.mu.RLock()
+	retryCb := c.statusCallback
+	c.mu.RUnlock()
+
 	var lastErr error
 
 	// Retry loop
@@ -252,7 +269,7 @@ func (c *GeminiClient) generateContentStream(ctx context.Context, contents []*ge
 			logging.Info("retrying Gemini request", "attempt", attempt, "delay", delay)
 
 			// Notify UI about retry
-			if c.statusCallback != nil {
+			if retryCb != nil {
 				reason := "API error"
 				if lastErr != nil {
 					reason = lastErr.Error()
@@ -267,12 +284,14 @@ func (c *GeminiClient) generateContentStream(ctx context.Context, contents []*ge
 						reason = reason[:47] + "..."
 					}
 				}
-				c.statusCallback.OnRetry(attempt, c.maxRetries, delay, reason)
+				retryCb.OnRetry(attempt, c.maxRetries, delay, reason)
 			}
 
+			backoffTimer := time.NewTimer(delay)
 			select {
-			case <-time.After(delay):
+			case <-backoffTimer.C:
 			case <-ctx.Done():
+				backoffTimer.Stop()
 				return nil, ctx.Err()
 			}
 		}
@@ -308,34 +327,44 @@ func resetTimer(t *time.Timer, d time.Duration) {
 
 // doGenerateContentStream performs a single streaming request attempt.
 func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*genai.Content) (*StreamingResponse, error) {
+	// Snapshot mutable fields under read lock
+	c.mu.RLock()
+	rateLimiter := c.rateLimiter
+	statusCb := c.statusCallback
+	sysInstruction := c.systemInstruction
+	thinkingBudget := c.thinkingBudget
+	tools := c.tools
+	model := c.model
+	c.mu.RUnlock()
+
 	// Track tokens for potential return on error
 	var estimatedTokens int64
-	if c.rateLimiter != nil {
+	if rateLimiter != nil {
 		estimatedTokens = ratelimit.EstimateTokensFromContents(len(contents), 500)
-		if err := c.rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
+		if err := rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
 			// Notify about rate limit
-			if c.statusCallback != nil {
-				c.statusCallback.OnRateLimit(5 * time.Second) // Estimate wait time
+			if statusCb != nil {
+				statusCb.OnRateLimit(5 * time.Second) // Estimate wait time
 			}
 			return nil, fmt.Errorf("rate limit: %w", err)
 		}
 	}
 
 	config := *c.config
-	if c.systemInstruction != "" {
-		config.SystemInstruction = genai.NewContentFromText(c.systemInstruction, genai.RoleUser)
+	if sysInstruction != "" {
+		config.SystemInstruction = genai.NewContentFromText(sysInstruction, genai.RoleUser)
 	}
-	if c.thinkingBudget > 0 {
+	if thinkingBudget > 0 {
 		config.ThinkingConfig = &genai.ThinkingConfig{
 			IncludeThoughts: true,
-			ThinkingBudget:  Ptr(c.thinkingBudget),
+			ThinkingBudget:  Ptr(thinkingBudget),
 		}
 	}
-	if len(c.tools) > 0 {
-		config.Tools = c.tools
+	if len(tools) > 0 {
+		config.Tools = tools
 	}
 
-	iter := c.client.Models.GenerateContentStream(ctx, c.model, contents, &config)
+	iter := c.client.Models.GenerateContentStream(ctx, model, contents, &config)
 
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
@@ -344,11 +373,7 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 	const streamIdleTimeout = 30 * time.Second
 	const streamIdleWarning = 15 * time.Second
 
-	// Capture rate limiter and estimated tokens for the goroutine
-	rateLimiter := c.rateLimiter
 	estimatedForGoroutine := estimatedTokens
-	// Capture status callback for goroutine
-	statusCb := c.statusCallback
 
 	go func() {
 		defer close(chunks)
@@ -537,6 +562,12 @@ func (c *GeminiClient) Close() error {
 
 // CountTokens counts tokens for the given contents with retry logic.
 func (c *GeminiClient) CountTokens(ctx context.Context, contents []*genai.Content) (*genai.CountTokensResponse, error) {
+	// Snapshot mutable fields
+	c.mu.RLock()
+	statusCb := c.statusCallback
+	model := c.model
+	c.mu.RUnlock()
+
 	var lastErr error
 
 	maxDelay := 30 * time.Second
@@ -545,7 +576,7 @@ func (c *GeminiClient) CountTokens(ctx context.Context, contents []*genai.Conten
 			delay := CalculateBackoff(c.retryDelay, attempt-1, maxDelay)
 
 			// Notify UI about retry
-			if c.statusCallback != nil {
+			if statusCb != nil {
 				reason := "token count failed"
 				if lastErr != nil {
 					reason = lastErr.Error()
@@ -553,17 +584,19 @@ func (c *GeminiClient) CountTokens(ctx context.Context, contents []*genai.Conten
 						reason = reason[:47] + "..."
 					}
 				}
-				c.statusCallback.OnRetry(attempt, c.maxRetries, delay, reason)
+				statusCb.OnRetry(attempt, c.maxRetries, delay, reason)
 			}
 
+			backoffTimer := time.NewTimer(delay)
 			select {
-			case <-time.After(delay):
+			case <-backoffTimer.C:
 			case <-ctx.Done():
+				backoffTimer.Stop()
 				return nil, ctx.Err()
 			}
 		}
 
-		resp, err := c.client.Models.CountTokens(ctx, c.model, contents, nil)
+		resp, err := c.client.Models.CountTokens(ctx, model, contents, nil)
 		if err == nil {
 			return resp, nil
 		}
@@ -581,16 +614,22 @@ func (c *GeminiClient) CountTokens(ctx context.Context, contents []*genai.Conten
 
 // GetModel returns the model name.
 func (c *GeminiClient) GetModel() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.model
 }
 
 // SetModel changes the model for this client.
 func (c *GeminiClient) SetModel(modelName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.model = modelName
 }
 
 // WithModel returns a new client configured for the specified model.
 func (c *GeminiClient) WithModel(modelName string) Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return &GeminiClient{
 		client:            c.client,
 		model:             modelName,

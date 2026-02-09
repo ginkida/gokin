@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/logging"
 	"gokin/internal/security"
 	"gokin/internal/tasks"
 
@@ -548,6 +549,11 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 
 		readerWg.Add(2)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("panic in bash stdout reader", "error", r)
+				}
+			}()
 			defer readerWg.Done()
 			buf := make([]byte, 4096)
 			for {
@@ -563,6 +569,11 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 			}
 		}()
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("panic in bash stderr reader", "error", r)
+				}
+			}()
 			defer readerWg.Done()
 			buf := make([]byte, 4096)
 			for {
@@ -582,6 +593,11 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 		streamStop := make(chan struct{})
 		streamDone := make(chan struct{})
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("panic in bash streaming flush", "error", r)
+				}
+			}()
 			defer close(streamDone)
 			ticker := time.NewTicker(StreamingFlushInterval)
 			defer ticker.Stop()
@@ -607,8 +623,13 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 		var cmdErr error
 		cmdDone := make(chan struct{})
 		go func() {
+			defer close(cmdDone) // Guarantees close on any exit path (including panic)
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("panic in bash cmd.Wait", "error", r)
+				}
+			}()
 			cmdErr = cmd.Wait()
-			close(cmdDone)
 		}()
 
 		timedOut := false

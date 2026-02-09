@@ -6,6 +6,13 @@ import (
 	"google.golang.org/genai"
 )
 
+// Default base URLs for API providers.
+const (
+	DefaultAnthropicBaseURL = "https://api.anthropic.com"
+	DefaultGLMBaseURL       = "https://api.z.ai/api/anthropic"
+	DefaultDeepSeekBaseURL  = "https://api.deepseek.com/anthropic"
+)
+
 // ModelInfo contains information about an available model.
 type ModelInfo struct {
 	ID          string // Model identifier (e.g., "gemini-2.5-flash", "glm-4.7")
@@ -49,7 +56,7 @@ var AvailableModels = []ModelInfo{
 		Name:        "GLM-4.7",
 		Description: "Powerful coding assistant: 131K max output",
 		Provider:    "glm",
-		BaseURL:     "https://api.z.ai/api/anthropic",
+		BaseURL:     DefaultGLMBaseURL,
 	},
 	// DeepSeek models (via Anthropic-compatible API)
 	{
@@ -57,14 +64,14 @@ var AvailableModels = []ModelInfo{
 		Name:        "DeepSeek Chat",
 		Description: "Powerful coding assistant from DeepSeek",
 		Provider:    "deepseek",
-		BaseURL:     "https://api.deepseek.com/anthropic",
+		BaseURL:     DefaultDeepSeekBaseURL,
 	},
 	{
 		ID:          "deepseek-reasoner",
 		Name:        "DeepSeek Reasoner",
 		Description: "Extended reasoning model (thinking)",
 		Provider:    "deepseek",
-		BaseURL:     "https://api.deepseek.com/anthropic",
+		BaseURL:     DefaultDeepSeekBaseURL,
 	},
 	// Ollama (local models - use exact name from 'ollama list')
 	{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"gokin/internal/config"
 	"gokin/internal/logging"
@@ -11,25 +12,32 @@ import (
 )
 
 // globalPool is the shared client connection pool.
-var globalPool *ClientPool
+var (
+	globalPool *ClientPool
+	poolOnce   sync.Once
+	poolMu     sync.Mutex
+)
 
 // GetPool returns the global client connection pool, creating it if necessary.
 func GetPool(cfg *config.Config) *ClientPool {
-	if globalPool == nil {
+	poolOnce.Do(func() {
 		maxSize := cfg.Model.MaxPoolSize
 		if maxSize <= 0 {
 			maxSize = DefaultMaxPoolSize
 		}
 		globalPool = NewClientPool(maxSize)
-	}
+	})
 	return globalPool
 }
 
 // ClosePool closes the global client connection pool.
 func ClosePool() {
+	poolMu.Lock()
+	defer poolMu.Unlock()
 	if globalPool != nil {
 		globalPool.Close()
 		globalPool = nil
+		poolOnce = sync.Once{} // Allow re-initialization
 	}
 }
 
@@ -218,7 +226,7 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	// Use custom base URL if provided, otherwise use default GLM endpoint
 	baseURL := cfg.Model.CustomBaseURL
 	if baseURL == "" {
-		baseURL = "https://api.z.ai/api/anthropic"
+		baseURL = DefaultGLMBaseURL
 	}
 
 	anthropicConfig := AnthropicConfig{
@@ -250,9 +258,9 @@ func newAnthropicClientForModel(cfg *config.Config, modelInfo ModelInfo) (Client
 	// If still no base URL, use default for provider
 	if baseURL == "" {
 		if strings.Contains(modelInfo.ID, "glm") {
-			baseURL = "https://api.z.ai/api/anthropic"
+			baseURL = DefaultGLMBaseURL
 		} else {
-			baseURL = "https://api.anthropic.com"
+			baseURL = DefaultAnthropicBaseURL
 		}
 	}
 
@@ -296,10 +304,10 @@ func newAnthropicClientForModelID(cfg *config.Config, modelID string) (Client, e
 	} else if strings.HasPrefix(modelID, "glm") {
 		// Set default base URL for GLM models
 		modelInfo.Provider = "anthropic"
-		modelInfo.BaseURL = "https://api.z.ai/api/anthropic"
+		modelInfo.BaseURL = DefaultGLMBaseURL
 	} else {
 		modelInfo.Provider = "anthropic"
-		modelInfo.BaseURL = "https://api.anthropic.com"
+		modelInfo.BaseURL = DefaultAnthropicBaseURL
 	}
 
 	return newAnthropicClientForModel(cfg, modelInfo)
@@ -327,7 +335,7 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	// Use custom base URL if provided, otherwise use default DeepSeek endpoint
 	baseURL := cfg.Model.CustomBaseURL
 	if baseURL == "" {
-		baseURL = "https://api.deepseek.com/anthropic"
+		baseURL = DefaultDeepSeekBaseURL
 	}
 
 	anthropicConfig := AnthropicConfig{

@@ -36,6 +36,9 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 	warningTimer := time.NewTimer(warningDelay)
 	defer warningTimer.Stop()
 
+	permTimer := time.NewTimer(PermissionTimeout)
+	defer permTimer.Stop()
+
 	// Wait for response from TUI with timeout and periodic warnings
 	for {
 		select {
@@ -53,7 +56,7 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 			}
 			// Reset timer for next reminder
 			warningTimer.Reset(repeatDelay)
-		case <-time.After(PermissionTimeout):
+		case <-permTimer.C:
 			logging.Warn("permission prompt timed out", "tool", req.ToolName)
 			return permission.DecisionDeny, fmt.Errorf("permission prompt timed out after %v", PermissionTimeout)
 		}
@@ -78,9 +81,12 @@ func (a *App) handlePermissionDecision(decision ui.PermissionDecision) {
 	}
 
 	// Send decision to the waiting promptPermission call with timeout
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case a.permResponseChan <- permDecision:
-	case <-time.After(30 * time.Second):
+	case <-timer.C:
 		logging.Warn("permission response channel timeout - no listener")
 	}
 }
@@ -102,12 +108,15 @@ func (a *App) promptQuestion(ctx context.Context, question string, options []str
 	})
 
 	// Wait for response from TUI with timeout to prevent deadlock
+	questionTimer := time.NewTimer(QuestionTimeout)
+	defer questionTimer.Stop()
+
 	select {
 	case answer := <-a.questionResponseChan:
 		return answer, nil
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case <-time.After(QuestionTimeout):
+	case <-questionTimer.C:
 		logging.Warn("question prompt timed out")
 		return "", fmt.Errorf("question prompt timed out after %v", QuestionTimeout)
 	}
@@ -116,9 +125,12 @@ func (a *App) promptQuestion(ctx context.Context, question string, options []str
 // handleQuestionAnswer is called by the TUI when the user answers a question.
 func (a *App) handleQuestionAnswer(answer string) {
 	// Send answer to the waiting promptQuestion call with timeout
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case a.questionResponseChan <- answer:
-	case <-time.After(30 * time.Second):
+	case <-timer.C:
 		logging.Warn("question response channel timeout - no listener")
 	}
 }
@@ -153,12 +165,15 @@ func (a *App) promptPlanApproval(ctx context.Context, p *plan.Plan) (plan.Approv
 	a.program.Send(msg)
 
 	// Wait for response from TUI with timeout to prevent deadlock
+	planTimer := time.NewTimer(PlanApprovalTimeout)
+	defer planTimer.Stop()
+
 	select {
 	case decision := <-a.planApprovalChan:
 		return decision, nil
 	case <-ctx.Done():
 		return plan.ApprovalRejected, ctx.Err()
-	case <-time.After(PlanApprovalTimeout):
+	case <-planTimer.C:
 		logging.Warn("plan approval prompt timed out")
 		return plan.ApprovalRejected, fmt.Errorf("plan approval prompt timed out after %v", PlanApprovalTimeout)
 	}
@@ -199,9 +214,12 @@ func (a *App) handlePlanApprovalWithFeedback(decision ui.PlanApprovalDecision, f
 	}
 
 	// Send decision to the waiting promptPlanApproval call with timeout
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case a.planApprovalChan <- planDecision:
-	case <-time.After(30 * time.Second):
+	case <-timer.C:
 		logging.Warn("plan approval response channel timeout - no listener")
 	}
 }
@@ -226,18 +244,13 @@ func (a *App) handlePlanProgressUpdate(progress *plan.ProgressUpdate) {
 
 // handleModelSelect is called by the TUI when the user selects a model.
 func (a *App) handleModelSelect(modelID string) {
-	a.client.SetModel(modelID)
-
-	// Save model selection to config for persistence across sessions
-	if a.config != nil {
-		a.config.Model.Name = modelID
-		// Also update provider based on model name for correct client creation on restart
-		a.config.Model.Provider = config.DetectProvider(modelID)
-		if err := a.config.Save(); err != nil {
-			logging.Warn("failed to save model selection to config", "error", err)
-		} else {
-			logging.Debug("model selection saved to config", "model", modelID, "provider", a.config.Model.Provider)
-		}
+	if a.config == nil {
+		return
+	}
+	a.config.Model.Name = modelID
+	a.config.Model.Provider = config.DetectProvider(modelID)
+	if err := a.ApplyConfig(a.config); err != nil {
+		logging.Warn("failed to apply model selection", "error", err)
 	}
 }
 
@@ -261,12 +274,15 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 	})
 
 	// Wait for response from TUI with timeout to prevent deadlock
+	diffTimer := time.NewTimer(DiffDecisionTimeout)
+	defer diffTimer.Stop()
+
 	select {
 	case decision := <-a.diffResponseChan:
 		return decision, nil
 	case <-ctx.Done():
 		return ui.DiffReject, ctx.Err()
-	case <-time.After(DiffDecisionTimeout):
+	case <-diffTimer.C:
 		logging.Warn("diff decision prompt timed out", "file", filePath)
 		return ui.DiffReject, fmt.Errorf("diff decision prompt timed out after %v", DiffDecisionTimeout)
 	}
@@ -275,9 +291,12 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 // handleDiffDecision is called by the TUI when the user makes a diff preview decision.
 func (a *App) handleDiffDecision(decision ui.DiffDecision) {
 	// Send decision to the waiting promptDiffDecision call with timeout
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case a.diffResponseChan <- decision:
-	case <-time.After(30 * time.Second):
+	case <-timer.C:
 		logging.Warn("diff response channel timeout - no listener")
 	}
 }

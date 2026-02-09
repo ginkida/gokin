@@ -344,7 +344,7 @@ func (tp *TreePlanner) ExpandNode(ctx context.Context, tree *PlanTree, node *Pla
 		if tp.config.UseLLMExpansion && tp.client != nil {
 			actions = tp.generateRecoveryActionsWithLLM(ctx, node, goal)
 		} else {
-			actions = tp.generateRecoveryActions(node)
+			actions = tp.generateRecoveryActions(ctx, node)
 		}
 	case PlanNodeSucceeded:
 		// Generate follow-up actions
@@ -378,7 +378,7 @@ func (tp *TreePlanner) ExpandNode(ctx context.Context, tree *PlanTree, node *Pla
 }
 
 // generateRecoveryActions creates actions to recover from a failure.
-func (tp *TreePlanner) generateRecoveryActions(failedNode *PlanNode) []*PlannedAction {
+func (tp *TreePlanner) generateRecoveryActions(ctx context.Context, failedNode *PlanNode) []*PlannedAction {
 	var actions []*PlannedAction
 
 	if failedNode.Action == nil {
@@ -388,6 +388,7 @@ func (tp *TreePlanner) generateRecoveryActions(failedNode *PlanNode) []*PlannedA
 	// If we have reflection data, use it
 	if tp.reflector != nil && failedNode.Error != "" {
 		reflection := tp.reflector.Reflect(
+			ctx,
 			failedNode.Action.ToolName,
 			failedNode.Action.ToolArgs,
 			failedNode.Error,
@@ -814,7 +815,7 @@ STEP: <explore|plan|general|bash|decompose> | <prompt>`, goal.Description, node.
 	actions, err := tp.generateActionsWithLLM(ctx, prompt, goal)
 	if err != nil {
 		logging.Warn("LLM recovery generation failed, falling back", "error", err)
-		return tp.generateRecoveryActions(node)
+		return tp.generateRecoveryActions(ctx, node)
 	}
 	return actions
 }

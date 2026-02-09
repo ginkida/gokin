@@ -89,10 +89,7 @@ func (m *Manager) StartWithArgs(ctx context.Context, program string, args []stri
 
 // monitorTask waits for task completion and calls the handler.
 func (m *Manager) monitorTask(task *Task, onComplete CompletionHandler) {
-	// Poll for completion
-	for !task.IsComplete() {
-		time.Sleep(100 * time.Millisecond)
-	}
+	<-task.Done()
 
 	if onComplete != nil {
 		onComplete(task)

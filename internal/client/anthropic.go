@@ -89,7 +89,7 @@ func NewAnthropicClient(config AnthropicConfig) (*AnthropicClient, error) {
 
 	// Set defaults
 	if config.BaseURL == "" {
-		config.BaseURL = "https://api.anthropic.com"
+		config.BaseURL = DefaultAnthropicBaseURL
 	}
 	if config.MaxTokens == 0 {
 		config.MaxTokens = 4096
@@ -144,11 +144,15 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 		"history_roles", strings.Join(historyRoles, ","),
 		"message_len", len(message))
 
-	// Use explicit system instruction if set, otherwise fall back to heuristic extraction
+	// Snapshot mutable fields under read lock
 	c.mu.RLock()
 	sysInstruction := c.systemInstruction
 	enableThinking := c.config.EnableThinking
 	thinkingBudget := c.config.ThinkingBudget
+	model := c.config.Model
+	maxTokens := c.config.MaxTokens
+	temperature := c.config.Temperature
+	tools := c.tools
 	c.mu.RUnlock()
 
 	var messages []map[string]interface{}
@@ -164,8 +168,8 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 
 	// Build request
 	requestBody := map[string]interface{}{
-		"model":      c.config.Model,
-		"max_tokens": c.config.MaxTokens,
+		"model":      model,
+		"max_tokens": maxTokens,
 		"messages":   messages,
 		"stream":     true,
 	}
@@ -183,15 +187,15 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 		}
 		// Extended thinking requires temperature=1 (Anthropic requirement)
 		requestBody["temperature"] = 1.0
-	} else if c.config.Temperature > 0 {
-		requestBody["temperature"] = c.config.Temperature
+	} else if temperature > 0 {
+		requestBody["temperature"] = temperature
 	}
 
-	if len(c.tools) > 0 {
-		// Convert tools to Anthropic format
-		tools := c.convertToolsToAnthropic()
-		if len(tools) > 0 {
-			requestBody["tools"] = tools
+	if len(tools) > 0 {
+		// Convert tools to Anthropic format (uses snapshot)
+		anthropicTools := c.convertToolsToAnthropicFrom(tools)
+		if len(anthropicTools) > 0 {
+			requestBody["tools"] = anthropicTools
 		}
 	}
 
@@ -200,11 +204,15 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 
 // SendFunctionResponse sends function call results back to the model.
 func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*genai.Content, results []*genai.FunctionResponse) (*StreamingResponse, error) {
-	// Use explicit system instruction if set, otherwise fall back to heuristic extraction
+	// Snapshot mutable fields under read lock
 	c.mu.RLock()
 	sysInstruction := c.systemInstruction
 	enableThinking := c.config.EnableThinking
 	thinkingBudget := c.config.ThinkingBudget
+	model := c.config.Model
+	maxTokens := c.config.MaxTokens
+	temperature := c.config.Temperature
+	tools := c.tools
 	c.mu.RUnlock()
 
 	var messages []map[string]interface{}
@@ -217,8 +225,8 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 	}
 
 	requestBody := map[string]interface{}{
-		"model":      c.config.Model,
-		"max_tokens": c.config.MaxTokens,
+		"model":      model,
+		"max_tokens": maxTokens,
 		"messages":   messages,
 		"stream":     true,
 	}
@@ -235,12 +243,12 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 			"budget_tokens": thinkingBudget,
 		}
 		requestBody["temperature"] = 1.0
-	} else if c.config.Temperature > 0 {
-		requestBody["temperature"] = c.config.Temperature
+	} else if temperature > 0 {
+		requestBody["temperature"] = temperature
 	}
 
-	if len(c.tools) > 0 {
-		requestBody["tools"] = c.convertToolsToAnthropic()
+	if len(tools) > 0 {
+		requestBody["tools"] = c.convertToolsToAnthropicFrom(tools)
 	}
 
 	return c.streamRequest(ctx, requestBody)
@@ -325,6 +333,8 @@ func (c *AnthropicClient) CountTokens(ctx context.Context, contents []*genai.Con
 
 // GetModel returns the model name.
 func (c *AnthropicClient) GetModel() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.config.Model
 }
 
@@ -337,14 +347,18 @@ func (c *AnthropicClient) SetModel(modelName string) {
 
 // WithModel returns a new client configured for the specified model.
 func (c *AnthropicClient) WithModel(modelName string) Client {
+	c.mu.RLock()
 	newConfig := c.config
+	tools := c.tools
+	c.mu.RUnlock()
+
 	newConfig.Model = modelName
 	newClient, err := NewAnthropicClient(newConfig)
 	if err != nil {
 		logging.Error("failed to create client with new model", "model", modelName, "error", err)
 		return c // Return original client on error
 	}
-	newClient.SetTools(c.tools)
+	newClient.SetTools(tools)
 	return newClient
 }
 
@@ -440,9 +454,11 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 				cb.OnRetry(attempt, c.config.MaxRetries, delay, reason)
 			}
 
+			backoffTimer := time.NewTimer(delay)
 			select {
-			case <-time.After(delay):
+			case <-backoffTimer.C:
 			case <-ctx.Done():
+				backoffTimer.Stop()
 				return nil, ctx.Err()
 			}
 		}
@@ -491,9 +507,9 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	// Create HTTP request
 	// Handle different URL patterns for different providers
 	var url string
-	if c.config.BaseURL == "https://api.anthropic.com" || c.config.BaseURL == "" {
+	if c.config.BaseURL == DefaultAnthropicBaseURL || c.config.BaseURL == "" {
 		// Standard Anthropic API
-		url = "https://api.anthropic.com/v1/messages"
+		url = DefaultAnthropicBaseURL + "/v1/messages"
 	} else if strings.Contains(c.config.BaseURL, "api.z.ai") {
 		// GLM-4.7 / Z.AI API - use Anthropic-compatible endpoint
 		if strings.HasSuffix(c.config.BaseURL, "/anthropic") {
@@ -1369,9 +1385,17 @@ func convertSchemaToJSON(schema *genai.Schema) map[string]interface{} {
 
 // convertToolsToAnthropic converts Gemini tools to Anthropic format.
 func (c *AnthropicClient) convertToolsToAnthropic() []map[string]interface{} {
+	c.mu.RLock()
+	tools := c.tools
+	c.mu.RUnlock()
+	return c.convertToolsToAnthropicFrom(tools)
+}
+
+// convertToolsToAnthropicFrom converts the given Gemini tools to Anthropic format.
+func (c *AnthropicClient) convertToolsToAnthropicFrom(genaiTools []*genai.Tool) []map[string]interface{} {
 	tools := make([]map[string]interface{}, 0)
 
-	for _, tool := range c.tools {
+	for _, tool := range genaiTools {
 		for _, decl := range tool.FunctionDeclarations {
 			// Convert parameters schema properly using recursive conversion
 			inputSchema := convertSchemaToJSON(decl.Parameters)

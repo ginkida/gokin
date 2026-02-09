@@ -217,6 +217,11 @@ func (i *IncrementalIndexer) indexFilesParallel(ctx context.Context, files []str
 	for w := 0; w < i.workers; w++ {
 		wg.Add(1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("panic in indexing worker", "error", r)
+				}
+			}()
 			defer wg.Done()
 			for path := range filesChan {
 				select {
@@ -238,6 +243,11 @@ func (i *IncrementalIndexer) indexFilesParallel(ctx context.Context, files []str
 
 	// Wait for workers and close results
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in indexing results waiter", "error", r)
+			}
+		}()
 		wg.Wait()
 		close(resultsChan)
 	}()

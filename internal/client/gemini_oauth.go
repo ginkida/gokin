@@ -174,11 +174,15 @@ func (c *GeminiOAuthClient) SetThinkingBudget(budget int32) {
 
 // SetTools sets the tools available for function calling
 func (c *GeminiOAuthClient) SetTools(tools []*genai.Tool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.tools = tools
 }
 
 // SetRateLimiter sets the rate limiter for API calls
 func (c *GeminiOAuthClient) SetRateLimiter(limiter interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if rl, ok := limiter.(*ratelimit.Limiter); ok {
 		c.rateLimiter = rl
 	}
@@ -186,6 +190,8 @@ func (c *GeminiOAuthClient) SetRateLimiter(limiter interface{}) {
 
 // SetStatusCallback sets the callback for status updates
 func (c *GeminiOAuthClient) SetStatusCallback(cb StatusCallback) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.statusCallback = cb
 }
 
@@ -250,11 +256,15 @@ func (c *GeminiOAuthClient) CountTokens(ctx context.Context, contents []*genai.C
 
 // GetModel returns the model name
 func (c *GeminiOAuthClient) GetModel() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.model
 }
 
 // SetModel changes the model for this client
 func (c *GeminiOAuthClient) SetModel(modelName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.model = modelName
 }
 
@@ -360,9 +370,11 @@ func (c *GeminiOAuthClient) generateContentStream(ctx context.Context, contents 
 				c.statusCallback.OnRetry(attempt, c.maxRetries, delay, reason)
 			}
 
+			backoffTimer := time.NewTimer(delay)
 			select {
-			case <-time.After(delay):
+			case <-backoffTimer.C:
 			case <-ctx.Done():
+				backoffTimer.Stop()
 				return nil, ctx.Err()
 			}
 		}

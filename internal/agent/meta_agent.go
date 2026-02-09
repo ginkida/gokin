@@ -61,6 +61,7 @@ type MetaAgent struct {
 
 // NewMetaAgent creates a new meta agent.
 func NewMetaAgent(
+	ctx context.Context,
 	runner *Runner,
 	coordinator *Coordinator,
 	strategyOpt *StrategyOptimizer,
@@ -71,7 +72,7 @@ func NewMetaAgent(
 		config = DefaultMetaAgentConfig()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 
 	return &MetaAgent{
 		runner:       runner,

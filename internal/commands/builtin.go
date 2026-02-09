@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"gokin/internal/config"
+	"gokin/internal/logging"
 )
 
 const (
@@ -65,7 +66,6 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"model", "Switch AI model"},
 		{"clear", "Clear conversation history"},
 		{"save", "Save current session"},
-		{"undo", "Undo the last file change"},
 		{"commit", "Create a git commit with AI-generated message"},
 		{"plan", "Toggle planning mode"},
 		{"doctor", "Check environment and configuration"},
@@ -83,12 +83,12 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		commands []string
 	}{
 		{"Getting Started", []string{"help", "quickstart"}},
-		{"Session", []string{"model", "clear", "compact", "save", "resume", "sessions", "stats", "undo", "instructions"}},
+		{"Session", []string{"model", "clear", "compact", "save", "resume", "sessions", "stats", "instructions"}},
 		{"Auth & Setup", []string{"login", "logout", "oauth-login", "oauth-logout", "provider", "status", "doctor", "config", "update"}},
 		{"Git", []string{"init", "commit", "pr"}},
 		{"Planning", []string{"plan", "resume-plan", "tree-stats"}},
 		{"Tools", []string{"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
-			"semantic-stats", "semantic-reindex", "semantic-cleanup",
+			"semantic-stats", "semantic-reindex",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"}},
 	}
 
@@ -175,7 +175,9 @@ func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// Save current plan before clearing (so it can be resumed with /resume-plan)
 	if pm := app.GetPlanManager(); pm != nil {
 		if currentPlan := pm.GetCurrentPlan(); currentPlan != nil && !currentPlan.IsComplete() {
-			_ = pm.SaveCurrentPlan()
+			if err := pm.SaveCurrentPlan(); err != nil {
+				logging.Warn("failed to save plan before clear", "error", err)
+			}
 		}
 	}
 
@@ -198,7 +200,6 @@ func (c *CompactCommand) GetMetadata() CommandMetadata {
 		Category: CategorySession,
 		Icon:     "compress",
 		Priority: 20,
-		Advanced: true,
 	}
 }
 

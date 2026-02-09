@@ -17,9 +17,7 @@ func (ei *EnhancedIndexer) Clear() error {
 }
 
 // Build rebuilds the index from scratch.
-func (ei *EnhancedIndexer) Build() error {
-	ctx := context.Background()
-
+func (ei *EnhancedIndexer) Build(ctx context.Context) error {
 	// Clear existing data
 	if err := ei.Clear(); err != nil {
 		return fmt.Errorf("failed to clear index: %w", err)

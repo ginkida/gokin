@@ -43,8 +43,11 @@ func NewContextAgent(m *ContextManager, s *chat.Session, storageDir string) *Con
 func (a *ContextAgent) Start(ctx context.Context) {
 	logging.Info("ContextAgent started")
 
-	ticker := time.NewTicker(a.checkpointInterval)
-	defer ticker.Stop()
+	checkpointTicker := time.NewTicker(a.checkpointInterval)
+	defer checkpointTicker.Stop()
+
+	compactTicker := time.NewTicker(1 * time.Minute)
+	defer compactTicker.Stop()
 
 	for {
 		select {
@@ -52,10 +55,9 @@ func (a *ContextAgent) Start(ctx context.Context) {
 			return
 		case <-a.stopChan:
 			return
-		case <-ticker.C:
+		case <-checkpointTicker.C:
 			a.Checkpoint(ctx)
-		case <-time.After(1 * time.Minute):
-			// Every minute check if we need compaction
+		case <-compactTicker.C:
 			a.CheckAndCompact(ctx)
 		}
 	}
@@ -146,7 +148,10 @@ func (a *ContextAgent) rotateCheckpoints(dir string, max int) {
 	var checkpoints []os.FileInfo
 	for _, f := range files {
 		if !f.IsDir() && filepath.Ext(f.Name()) == ".json" {
-			info, _ := f.Info()
+			info, err := f.Info()
+			if err != nil {
+				continue
+			}
 			checkpoints = append(checkpoints, info)
 		}
 	}

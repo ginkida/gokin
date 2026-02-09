@@ -94,7 +94,7 @@ func (r *Reflector) SetPredictor(p PredictorInterface) {
 }
 
 // Reflect examines a tool error and returns recovery recommendations.
-func (r *Reflector) Reflect(toolName string, args map[string]any, errorMsg string) *Reflection {
+func (r *Reflector) Reflect(ctx context.Context, toolName string, args map[string]any, errorMsg string) *Reflection {
 	reflection := &Reflection{
 		ToolName: toolName,
 		Error:    errorMsg,
@@ -156,7 +156,7 @@ func (r *Reflector) Reflect(toolName string, args map[string]any, errorMsg strin
 
 	// For unmatched errors, try semantic analysis with LLM
 	if r.enableSemanticAnalysis && r.client != nil {
-		semanticReflection := r.semanticAnalyze(toolName, args, errorMsg)
+		semanticReflection := r.semanticAnalyze(ctx, toolName, args, errorMsg)
 		if semanticReflection != nil && semanticReflection.Category != "unknown" {
 			// Append learned context if available
 			if reflection.LearnedContext != "" {
@@ -191,12 +191,12 @@ type SemanticAnalysisResult struct {
 }
 
 // semanticAnalyze uses LLM to analyze errors that don't match known patterns.
-func (r *Reflector) semanticAnalyze(toolName string, args map[string]any, errorMsg string) *Reflection {
+func (r *Reflector) semanticAnalyze(ctx context.Context, toolName string, args map[string]any, errorMsg string) *Reflection {
 	if r.client == nil {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// Build analysis prompt
@@ -277,7 +277,9 @@ Be concise and practical. Focus on actionable solutions.`
 		if result.Alternative != "" {
 			tags = append(tags, "alt:"+result.Alternative)
 		}
-		_ = r.errorStore.LearnError(result.Category, errorMsg, result.Suggestion, tags)
+		if err := r.errorStore.LearnError(result.Category, errorMsg, result.Suggestion, tags); err != nil {
+			logging.Debug("failed to learn error", "error", err)
+		}
 	}
 
 	return reflection

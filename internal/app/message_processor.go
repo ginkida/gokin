@@ -387,10 +387,12 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 					fmt.Sprintf("\n⚠️ Step %d failed (attempt %d/%d): %s\nRetrying in %v...\n",
 						step.ID, attempt+1, maxRetries, err.Error(), backoff)))
 
+				backoffTimer := time.NewTimer(backoff)
 				select {
-				case <-time.After(backoff):
+				case <-backoffTimer.C:
 					continue
 				case <-ctx.Done():
+					backoffTimer.Stop()
 					err = ctx.Err()
 					break
 				}
@@ -496,7 +498,9 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 
 		// Save session after each completed step (crash recovery)
 		if a.sessionManager != nil {
-			_ = a.sessionManager.SaveAfterMessage()
+			if err := a.sessionManager.SaveAfterMessage(); err != nil {
+			logging.Warn("failed to save session after message", "error", err)
+		}
 		}
 	}
 
@@ -540,7 +544,9 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 
 	// Save session
 	if a.sessionManager != nil {
-		_ = a.sessionManager.SaveAfterMessage()
+		if err := a.sessionManager.SaveAfterMessage(); err != nil {
+			logging.Warn("failed to save session after message", "error", err)
+		}
 	}
 }
 
@@ -715,10 +721,12 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 						step.ID, attempt+1, maxRetries, err.Error(), backoff)))
 
 				// Wait with backoff, but respect context cancellation
+				backoffTimer := time.NewTimer(backoff)
 				select {
-				case <-time.After(backoff):
+				case <-backoffTimer.C:
 					continue
 				case <-ctx.Done():
+					backoffTimer.Stop()
 					err = ctx.Err()
 					break
 				}
@@ -815,7 +823,9 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 
 		// Save session after each completed step (crash recovery)
 		if a.sessionManager != nil {
-			_ = a.sessionManager.SaveAfterMessage()
+			if err := a.sessionManager.SaveAfterMessage(); err != nil {
+			logging.Warn("failed to save session after message", "error", err)
+		}
 		}
 	}
 
@@ -855,7 +865,9 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 
 	// Save session
 	if a.sessionManager != nil {
-		_ = a.sessionManager.SaveAfterMessage()
+		if err := a.sessionManager.SaveAfterMessage(); err != nil {
+			logging.Warn("failed to save session after message", "error", err)
+		}
 	}
 }
 

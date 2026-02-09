@@ -11,6 +11,7 @@ import (
 
 	"gokin/internal/audit"
 	"gokin/internal/client"
+	"gokin/internal/format"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/permission"
@@ -171,6 +172,7 @@ type Executor struct {
 	lastOutputTokens int
 
 	// Circuit breakers for tools
+	breakerMu    sync.Mutex
 	toolBreakers map[string]*robustness.CircuitBreaker
 
 	// Tool result cache
@@ -661,12 +663,14 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 // executeTool executes a single tool call with enhanced safety and user awareness.
 func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) ToolResult {
 	// Step 0: Check circuit breaker
+	e.breakerMu.Lock()
 	breaker, ok := e.toolBreakers[call.Name]
 	if !ok {
 		// Initialize with default threshold (5 failures) and timeout (1 minute)
 		breaker = robustness.NewCircuitBreaker(5, 1*time.Minute)
 		e.toolBreakers[call.Name] = breaker
 	}
+	e.breakerMu.Unlock()
 
 	var result ToolResult
 	err := breaker.Execute(ctx, func() error {
@@ -902,7 +906,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		result.ExecutionSummary = summary
 	}
 	result.SafetyLevel = execInfo.SafetyLevel
-	result.Duration = formatDuration(duration)
+	result.Duration = format.Duration(duration)
 
 	// Step 9: Log to audit
 	if e.auditLogger != nil {
@@ -1011,19 +1015,6 @@ func (e *Executor) buildResponseParts(resp *client.Response) []*genai.Part {
 	return parts
 }
 
-// formatDuration converts duration to human-readable string
-func formatDuration(d time.Duration) string {
-	if d < time.Millisecond {
-		return "< 1ms"
-	}
-	if d < time.Second {
-		return d.Round(time.Millisecond).String()
-	}
-	if d < time.Minute {
-		return d.Round(time.Second).String()
-	}
-	return d.Round(time.Second).String()
-}
 
 // executeStreamingTool executes a streaming tool and collects results.
 // Streams chunks to the handler for real-time feedback.

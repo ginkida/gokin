@@ -302,6 +302,9 @@ func (qm *QueueManager) SetCallbacks(onStart func(*QueueTask), onComplete func(*
 // ProcessQueue processes tasks from the queue in priority order.
 // This should be run as a goroutine.
 func (qm *QueueManager) ProcessQueue(ctx context.Context) {
+	pollTicker := time.NewTicker(100 * time.Millisecond)
+	defer pollTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -315,7 +318,7 @@ func (qm *QueueManager) ProcessQueue(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(100 * time.Millisecond):
+			case <-pollTicker.C:
 				continue
 			}
 		}

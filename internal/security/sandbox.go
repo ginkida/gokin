@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // SandboxConfig holds sandbox configuration
@@ -157,8 +159,15 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 	}
 
 	// Read output
-	result.Stdout, _ = readWithTimeout(stdout, timeout)
-	result.Stderr, _ = readWithTimeout(stderr, timeout)
+	var readErr error
+	result.Stdout, readErr = readWithTimeout(stdout, timeout)
+	if readErr != nil {
+		logging.Debug("failed to read sandbox stdout", "error", readErr)
+	}
+	result.Stderr, readErr = readWithTimeout(stderr, timeout)
+	if readErr != nil {
+		logging.Debug("failed to read sandbox stderr", "error", readErr)
+	}
 
 	// Wait for command to finish
 	err = sc.cmd.Wait()
@@ -197,6 +206,12 @@ func readWithTimeout(pipe interface{}, timeout time.Duration) ([]byte, error) {
 
 	// Read in a goroutine
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in sandbox reader", "error", r)
+				resultChan <- readResult{err: fmt.Errorf("panic in sandbox reader: %v", r)}
+			}
+		}()
 		var buf bytes.Buffer
 		_, err := io.Copy(&buf, reader)
 		resultChan <- readResult{data: buf.Bytes(), err: err}

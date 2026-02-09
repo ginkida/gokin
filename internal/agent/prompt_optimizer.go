@@ -11,6 +11,9 @@ import (
 	"gokin/internal/logging"
 )
 
+// MaxPromptVariants is the maximum number of prompt variants to keep in memory.
+const MaxPromptVariants = 500
+
 // PromptVariant represents a variation of a prompt with its performance metrics.
 type PromptVariant struct {
 	ID          string        `json:"id"`
@@ -98,18 +101,22 @@ func (po *PromptOptimizer) load() error {
 	return nil
 }
 
-// save persists variants to disk.
-func (po *PromptOptimizer) save() error {
+// save serializes variants under the caller's lock and returns the snapshot.
+// Caller must hold po.mu (read or write lock).
+func (po *PromptOptimizer) save() ([]byte, error) {
+	data, err := json.MarshalIndent(po.variants, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// writeSnapshot writes pre-serialized data to disk without holding any locks.
+func (po *PromptOptimizer) writeSnapshot(data []byte) error {
 	dir := filepath.Dir(po.storagePath())
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-
-	data, err := json.MarshalIndent(po.variants, "", "  ")
-	if err != nil {
-		return err
-	}
-
 	return os.WriteFile(po.storagePath(), data, 0644)
 }
 
@@ -141,6 +148,11 @@ func (po *PromptOptimizer) RecordExecution(basePrompt, variation string, success
 		}
 		po.variants[variant.ID] = variant
 		po.byBase[basePrompt] = append(po.byBase[basePrompt], variant.ID)
+
+		// Evict oldest variants if over limit
+		if len(po.variants) > MaxPromptVariants {
+			po.evictOldest(MaxPromptVariants)
+		}
 	}
 
 	// Update metrics
@@ -164,12 +176,58 @@ func (po *PromptOptimizer) RecordExecution(basePrompt, variation string, success
 		variant.AvgDuration = (variant.AvgDuration*time.Duration(variant.UseCount-1) + duration) / time.Duration(variant.UseCount)
 	}
 
-	// Save asynchronously
+	// Snapshot data under lock, write to disk asynchronously
+	snapshot, err := po.save()
+	if err != nil {
+		logging.Debug("failed to serialize prompt optimizer", "error", err)
+		return
+	}
 	go func() {
-		if err := po.save(); err != nil {
+		if err := po.writeSnapshot(snapshot); err != nil {
 			logging.Debug("failed to save prompt optimizer", "error", err)
 		}
 	}()
+}
+
+// evictOldest removes the oldest variants by LastUsed until map is at maxSize.
+// Caller must hold po.mu write lock.
+func (po *PromptOptimizer) evictOldest(maxSize int) {
+	if len(po.variants) <= maxSize {
+		return
+	}
+
+	// Find oldest variants
+	type entry struct {
+		id       string
+		lastUsed time.Time
+	}
+	entries := make([]entry, 0, len(po.variants))
+	for id, v := range po.variants {
+		entries = append(entries, entry{id, v.LastUsed})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].lastUsed.Before(entries[j].lastUsed)
+	})
+
+	toRemove := len(po.variants) - maxSize
+	for i := 0; i < toRemove; i++ {
+		victim := entries[i]
+		v := po.variants[victim.id]
+		if v != nil {
+			// Remove from byBase index
+			baseIDs := po.byBase[v.BasePrompt]
+			for j, bid := range baseIDs {
+				if bid == victim.id {
+					po.byBase[v.BasePrompt] = append(baseIDs[:j], baseIDs[j+1:]...)
+					break
+				}
+			}
+			if len(po.byBase[v.BasePrompt]) == 0 {
+				delete(po.byBase, v.BasePrompt)
+			}
+		}
+		delete(po.variants, victim.id)
+	}
 }
 
 // GetBestVariant returns the best performing variant for a base prompt.
@@ -297,5 +355,10 @@ func (po *PromptOptimizer) Clear() error {
 
 	po.variants = make(map[string]*PromptVariant)
 	po.byBase = make(map[string][]string)
-	return po.save()
+
+	snapshot, err := po.save()
+	if err != nil {
+		return err
+	}
+	return po.writeSnapshot(snapshot)
 }

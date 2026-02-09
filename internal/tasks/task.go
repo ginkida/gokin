@@ -126,6 +126,8 @@ type Task struct {
 
 	cmd        *exec.Cmd
 	cancelFunc context.CancelFunc
+	done       chan struct{} // closed when task reaches a terminal state
+	doneOnce   sync.Once
 	mu         sync.RWMutex
 }
 
@@ -136,6 +138,7 @@ func NewTask(id, command, workDir string) *Task {
 		Command: command,
 		Status:  StatusPending,
 		WorkDir: workDir,
+		done:    make(chan struct{}),
 	}
 }
 
@@ -149,6 +152,7 @@ func NewTaskWithArgs(id, program string, args []string, workDir string) *Task {
 		Args:    args,
 		Status:  StatusPending,
 		WorkDir: workDir,
+		done:    make(chan struct{}),
 	}
 }
 
@@ -197,6 +201,7 @@ func (t *Task) run() {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer t.doneOnce.Do(func() { close(t.done) }) // Guarantees done is closed on any exit path
 
 	t.EndTime = time.Now()
 
@@ -229,8 +234,12 @@ func (t *Task) Cancel() {
 		t.cancelFunc()
 		t.Status = StatusCancelled
 		t.EndTime = time.Now()
+		t.doneOnce.Do(func() { close(t.done) })
 	}
 }
+
+// Done returns a channel that is closed when the task reaches a terminal state.
+func (t *Task) Done() <-chan struct{} { return t.done }
 
 // GetStatus returns the current status.
 func (t *Task) GetStatus() Status {

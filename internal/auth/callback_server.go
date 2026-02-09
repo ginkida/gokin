@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 )
@@ -31,21 +32,22 @@ func (s *CallbackServer) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth2callback", s.handleCallback)
 
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", s.port))
+	if err != nil {
+		return fmt.Errorf("failed to listen on port %d: %w", s.port, err)
+	}
+
 	s.server = &http.Server{
-		Addr:              fmt.Sprintf(":%d", s.port),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Start server in goroutine
 	go func() {
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			s.errChan <- fmt.Errorf("callback server error: %w", err)
 		}
 	}()
 
-	// Give server time to start
-	time.Sleep(100 * time.Millisecond)
 	return nil
 }
 
@@ -60,12 +62,15 @@ func (s *CallbackServer) Stop() {
 
 // WaitForCode waits for the authorization code from the callback
 func (s *CallbackServer) WaitForCode(timeout time.Duration) (string, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case code := <-s.codeChan:
 		return code, nil
 	case err := <-s.errChan:
 		return "", err
-	case <-time.After(timeout):
+	case <-timer.C:
 		return "", fmt.Errorf("timeout waiting for OAuth callback (did you complete the login in browser?)")
 	}
 }

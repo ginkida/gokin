@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // Store manages persistent memory storage.
@@ -315,7 +317,9 @@ func (s *Store) Remove(idOrKey string) bool {
 		if entry.Key != "" {
 			delete(s.byKey, entry.Key)
 		}
-		_ = s.save()
+		if err := s.save(); err != nil {
+			logging.Warn("failed to persist memory store", "error", err)
+		}
 		return true
 	}
 	if entry, ok := s.globalEntries[idOrKey]; ok {
@@ -323,7 +327,9 @@ func (s *Store) Remove(idOrKey string) bool {
 		if entry.Key != "" {
 			delete(s.byKey, entry.Key)
 		}
-		_ = s.save()
+		if err := s.save(); err != nil {
+			logging.Warn("failed to persist memory store", "error", err)
+		}
 		return true
 	}
 

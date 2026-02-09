@@ -95,82 +95,79 @@ func NewInputModel(styles *Styles) InputModel {
 // defaultCommands returns the default list of slash commands.
 func defaultCommands() []CommandInfo {
 	return []CommandInfo{
-		// Session commands
-		{Name: "help", Description: "Show help for commands", Category: "Session"},
+		// Getting Started
+		{Name: "help", Description: "Show help for commands", Category: "Getting Started",
+			Args: []ArgInfo{{Name: "command", Required: false, Type: "string"}}, Usage: "/help [command]"},
+		{Name: "quickstart", Description: "Interactive onboarding guide", Category: "Getting Started"},
+
+		// Session
+		{Name: "model", Description: "Switch AI model", Category: "Session",
+			Args: []ArgInfo{{Name: "model", Required: false, Type: "string"}}, Usage: "/model [name]"},
 		{Name: "clear", Description: "Clear conversation history", Category: "Session"},
 		{Name: "compact", Description: "Force context compaction", Category: "Session"},
-		{
-			Name:        "save",
-			Description: "Save current session",
-			Category:    "Session",
-			Args:        []ArgInfo{{Name: "name", Required: false, Type: "string"}},
-			Usage:       "/save [name]",
-		},
-		{
-			Name:        "resume",
-			Description: "Resume a saved session",
-			Category:    "Session",
-			Args:        []ArgInfo{{Name: "session", Required: true, Type: "string"}},
-			Usage:       "/resume <session>",
-		},
+		{Name: "save", Description: "Save current session", Category: "Session",
+			Args: []ArgInfo{{Name: "name", Required: false, Type: "string"}}, Usage: "/save [name]"},
+		{Name: "resume", Description: "Resume a saved session", Category: "Session",
+			Args: []ArgInfo{{Name: "session", Required: true, Type: "string"}}, Usage: "/resume <session>"},
 		{Name: "sessions", Description: "List saved sessions", Category: "Session"},
+		{Name: "stats", Description: "Show session statistics", Category: "Session"},
+		{Name: "instructions", Description: "Show project instructions", Category: "Session"},
 
-		// History commands
-		{
-			Name:        "checkpoint",
-			Description: "Create a checkpoint",
-			Category:    "History",
-			Args:        []ArgInfo{{Name: "name", Required: false, Type: "string"}},
-			Usage:       "/checkpoint [name]",
-		},
-		{Name: "checkpoints", Description: "List all checkpoints", Category: "History"},
-		{
-			Name:        "restore",
-			Description: "Restore a checkpoint",
-			Category:    "History",
-			Args:        []ArgInfo{{Name: "checkpoint", Required: true, Type: "string"}},
-			Usage:       "/restore <checkpoint>",
-		},
+		// Auth & Setup
+		{Name: "login", Description: "Set API key for Gemini or GLM", Category: "Auth",
+			Args: []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: []string{"gemini", "glm"}},
+				{Name: "key", Required: false, Type: "string"}}, Usage: "/login [gemini|glm] [key]"},
+		{Name: "logout", Description: "Remove API key", Category: "Auth",
+			Args: []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: []string{"gemini", "glm", "deepseek", "ollama", "all"}}},
+			Usage: "/logout [gemini|glm|deepseek|ollama|all]"},
+		{Name: "oauth-login", Description: "Login to Gemini using Google account", Category: "Auth"},
+		{Name: "oauth-logout", Description: "Remove OAuth credentials", Category: "Auth"},
+		{Name: "provider", Description: "Switch AI provider", Category: "Auth",
+			Args: []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: []string{"gemini", "deepseek", "glm", "ollama"}}},
+			Usage: "/provider [name]"},
+		{Name: "status", Description: "Show configuration status", Category: "Auth"},
+		{Name: "doctor", Description: "Check environment and configuration", Category: "Auth"},
+		{Name: "config", Description: "Show current configuration", Category: "Auth"},
+		{Name: "update", Description: "Update gokin to latest version", Category: "Auth"},
 
-		// Git commands
-		{Name: "init", Description: "Initialize GOKIN.md", Category: "Git"},
-		{
-			Name:        "commit",
-			Description: "Commit changes",
-			Category:    "Git",
-			Args: []ArgInfo{
-				{Name: "message", Required: true, Type: "string"},
-				{Name: "--amend", Required: false, Type: "option"},
-			},
-			Usage: "/commit <message> [--amend]",
-		},
+		// Git
+		{Name: "init", Description: "Initialize GOKIN.md for this project", Category: "Git"},
+		{Name: "commit", Description: "Create a git commit with AI-generated message", Category: "Git",
+			Args: []ArgInfo{{Name: "message", Required: false, Type: "string"}}, Usage: "/commit [message]"},
+		{Name: "pr", Description: "Create a pull request", Category: "Git"},
 
-		// Auth commands
-		{Name: "login", Description: "Login with API key or OAuth", Category: "Auth"},
-		{Name: "logout", Description: "Clear stored credentials", Category: "Auth"},
-		{Name: "auth-status", Description: "Show authentication status", Category: "Auth"},
+		// Planning
+		{Name: "plan", Description: "Toggle planning mode", Category: "Planning"},
+		{Name: "resume-plan", Description: "Resume a saved plan", Category: "Planning"},
+		{Name: "tree-stats", Description: "Show tree planner statistics", Category: "Planning"},
 
-		// Utility commands
-		{Name: "doctor", Description: "Check environment", Category: "Utility"},
-		{Name: "config", Description: "Show configuration", Category: "Utility"},
-		{Name: "cost", Description: "Show token usage", Category: "Utility"},
-		{
-			Name:        "copy",
-			Description: "Copy code block to clipboard",
-			Category:    "Utility",
-			Args: []ArgInfo{
-				{Name: "n", Required: false, Type: "number"},
-				{Name: "filename", Required: false, Type: "path"},
-			},
-			Usage: "/copy [n] [filename]",
-		},
-		{
-			Name:        "browse",
-			Description: "Open file browser",
-			Category:    "Utility",
-			Args:        []ArgInfo{{Name: "path", Required: false, Type: "path"}},
-			Usage:       "/browse [path]",
-		},
+		// Tools
+		{Name: "browse", Description: "Open interactive file browser", Category: "Tools",
+			Args: []ArgInfo{{Name: "path", Required: false, Type: "path"}}, Usage: "/browse [path]"},
+		{Name: "open", Description: "Open a file in your editor", Category: "Tools",
+			Args: []ArgInfo{{Name: "file", Required: true, Type: "path"}}, Usage: "/open <file>"},
+		{Name: "copy", Description: "Copy code block to clipboard", Category: "Tools",
+			Args: []ArgInfo{{Name: "n", Required: false, Type: "number"}, {Name: "filename", Required: false, Type: "path"}},
+			Usage: "/copy [n] [filename]"},
+		{Name: "paste", Description: "Paste from clipboard", Category: "Tools"},
+		{Name: "clear-todos", Description: "Clear all todo items", Category: "Tools"},
+		{Name: "ql", Description: "Quick look at a file", Category: "Tools",
+			Args: []ArgInfo{{Name: "path", Required: true, Type: "path"}}, Usage: "/ql <path>"},
+		{Name: "permissions", Description: "Toggle permission prompts", Category: "Tools",
+			Args: []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
+			Usage: "/permissions [on|off]"},
+		{Name: "sandbox", Description: "Toggle bash sandbox mode", Category: "Tools",
+			Args: []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
+			Usage: "/sandbox [on|off]"},
+		{Name: "theme", Description: "Change UI theme", Category: "Tools"},
+		{Name: "semantic-stats", Description: "Show semantic index statistics", Category: "Tools"},
+		{Name: "semantic-reindex", Description: "Reindex semantic search", Category: "Tools"},
+		{Name: "register-agent-type", Description: "Register a custom agent type", Category: "Tools",
+			Args: []ArgInfo{{Name: "name", Required: true, Type: "string"}, {Name: "description", Required: true, Type: "string"}},
+			Usage: `/register-agent-type <name> "<desc>" [--tools ...]`},
+		{Name: "list-agent-types", Description: "List all registered agent types", Category: "Tools"},
+		{Name: "unregister-agent-type", Description: "Remove a custom agent type", Category: "Tools",
+			Args: []ArgInfo{{Name: "name", Required: true, Type: "string"}}, Usage: "/unregister-agent-type <name>"},
 	}
 }
 

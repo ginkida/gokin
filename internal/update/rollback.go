@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // RollbackManager manages backups and rollbacks.
@@ -210,7 +212,13 @@ func (rm *RollbackManager) RollbackToBackup(backup *BackupInfo) error {
 		if err != nil {
 			return fmt.Errorf("%w: cannot determine target path", ErrRollbackFailed)
 		}
-		targetPath, _ = filepath.EvalSymlinks(exe)
+		resolved, evalErr := filepath.EvalSymlinks(exe)
+		if evalErr != nil {
+			logging.Warn("failed to resolve symlinks for rollback target", "path", exe, "error", evalErr)
+			targetPath = exe
+		} else {
+			targetPath = resolved
+		}
 	}
 
 	// Restore the backup

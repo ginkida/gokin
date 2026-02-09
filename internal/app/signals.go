@@ -61,10 +61,13 @@ func (t *GoroutineTracker) WaitWithTimeout(timeout time.Duration) bool {
 		close(done)
 	}()
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case <-done:
 		return true
-	case <-time.After(timeout):
+	case <-timer.C:
 		return false
 	}
 }

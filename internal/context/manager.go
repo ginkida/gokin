@@ -23,6 +23,9 @@ type tokenSnapshot struct {
 // ContextManager orchestrates context management including token counting,
 // auto-summarization, and optimization.
 type ContextManager struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	session      *chat.Session
 	tokenCounter *TokenCounter
 	summarizer   *Summarizer
@@ -58,10 +61,12 @@ type ContextManager struct {
 
 // NewContextManager creates a new context manager.
 func NewContextManager(
+	ctx context.Context,
 	session *chat.Session,
 	c client.Client,
 	cfg *config.ContextConfig,
 ) *ContextManager {
+	ctx, cancel := context.WithCancel(ctx)
 	tokenCounter := NewTokenCounter(c, c.GetModel(), cfg)
 
 	var summarizer *Summarizer
@@ -93,6 +98,8 @@ func NewContextManager(
 	}
 
 	return &ContextManager{
+		ctx:                ctx,
+		cancel:             cancel,
 		session:            session,
 		tokenCounter:       tokenCounter,
 		summarizer:         summarizer,
@@ -157,11 +164,11 @@ func (m *ContextManager) onSessionChange(event chat.ChangeEvent) {
 		versionBefore := m.updateVersion
 		m.mu.RUnlock()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		tctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 		defer cancel()
 
 		history := m.session.GetHistory()
-		tokens, err := m.tokenCounter.CountContents(ctx, history)
+		tokens, err := m.tokenCounter.CountContents(tctx, history)
 		isEstimate := false
 		if err != nil {
 			tokens = EstimateContentsTokens(history)
@@ -179,7 +186,7 @@ func (m *ContextManager) onSessionChange(event chat.ChangeEvent) {
 		m.mu.Unlock()
 
 		// Auto-compact if threshold exceeded
-		m.tryAutoCompact(ctx, tokens)
+		m.tryAutoCompact(tctx, tokens)
 	}()
 }
 
@@ -239,7 +246,7 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 				}
 			}()
 
-			asyncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			asyncCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 			defer cancel()
 
 			precise, err := m.tokenCounter.CountContents(asyncCtx, history)
@@ -642,6 +649,11 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 		"messages_preserved", len(recentMessages))
 
 	return nil
+}
+
+// Close cancels the lifecycle context, stopping any background goroutines.
+func (m *ContextManager) Close() {
+	m.cancel()
 }
 
 // GetKeyFiles returns the set of files tracked as critical to the session.

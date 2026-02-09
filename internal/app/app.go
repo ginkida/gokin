@@ -602,8 +602,8 @@ func (a *App) refreshTokenCount() {
 	if a.contextManager == nil {
 		return
 	}
-	ctx := context.Background()
-	if err := a.contextManager.UpdateTokenCount(ctx); err != nil {
+	if err := a.contextManager.UpdateTokenCount(a.ctx); err != nil {
+		logging.Debug("failed to refresh token count", "error", err)
 		return
 	}
 	a.sendTokenUsageUpdate()
@@ -836,6 +836,15 @@ func (a *App) ToggleSandbox() bool {
 		logging.Warn("failed to save sandbox setting", "error", err)
 	}
 
+	// Update bash tool sandbox setting
+	if a.registry != nil {
+		if bashTool, ok := a.registry.Get("bash"); ok {
+			if bt, ok := bashTool.(*tools.BashTool); ok {
+				bt.SetSandboxEnabled(newEnabled)
+			}
+		}
+	}
+
 	// Update TUI display
 	if a.tui != nil {
 		a.tui.SetSandboxEnabled(newEnabled)
@@ -953,7 +962,11 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to re-initialize client: %w", err)
 	}
+	oldClient := a.client
 	a.client = newClient
+	if oldClient != nil {
+		go oldClient.Close() // Close old client asynchronously to avoid blocking
+	}
 
 	// 4. Update executor's client and sync tools
 	if a.executor != nil {

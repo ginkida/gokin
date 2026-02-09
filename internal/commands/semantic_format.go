@@ -5,20 +5,6 @@ import (
 	"time"
 )
 
-// formatBytes formats a byte size in human-readable format.
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
 // formatTime formats a unix timestamp in a human-readable way.
 func formatTime(unix int64) string {
 	if unix == 0 {
@@ -42,22 +28,5 @@ func formatTime(unix int64) string {
 		return fmt.Sprintf("%dd %dh ago", days, hours)
 	} else {
 		return t.Format("2006-01-02")
-	}
-}
-
-// formatDuration formats a duration in a human-readable way.
-func formatDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	} else if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	} else if d < time.Hour {
-		minutes := int(d.Minutes())
-		seconds := int(d.Seconds()) % 60
-		return fmt.Sprintf("%dm %ds", minutes, seconds)
-	} else {
-		hours := int(d.Hours())
-		minutes := int(d.Minutes()) % 60
-		return fmt.Sprintf("%dh %dm", hours, minutes)
 	}
 }

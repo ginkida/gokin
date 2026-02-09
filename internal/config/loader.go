@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 
+	"gokin/internal/logging"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,6 +60,7 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 func loadProjectConfig(cfg *Config) {
 	dir, err := os.Getwd()
 	if err != nil {
+		logging.Debug("failed to get working directory for project config", "error", err)
 		return
 	}
 

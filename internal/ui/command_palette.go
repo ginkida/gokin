@@ -384,6 +384,15 @@ func (p *CommandPalette) Execute() *EnhancedPaletteCommand {
 	return cmd
 }
 
+// Flush synchronously saves command history to disk.
+// Call during app shutdown to ensure pending async saves complete.
+func (p *CommandPalette) Flush() error {
+	if p.history != nil {
+		return p.history.Flush()
+	}
+	return nil
+}
+
 // SetSize sets the available size for rendering.
 func (p *CommandPalette) SetSize(width, height int) {
 	p.width = width

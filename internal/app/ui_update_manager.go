@@ -81,10 +81,12 @@ func (m *UIUpdateManager) Stop() {
 		}
 	}()
 
+	stopTimer := time.NewTimer(5 * time.Second)
 	select {
 	case <-done:
+		stopTimer.Stop()
 		logging.Debug("UI update manager stopped gracefully")
-	case <-time.After(5 * time.Second):
+	case <-stopTimer.C:
 		logging.Warn("UI update manager stop timed out, continuing anyway")
 	}
 	close(done)

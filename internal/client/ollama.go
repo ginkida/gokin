@@ -128,6 +128,12 @@ func (c *OllamaClient) SendMessage(ctx context.Context, message string) (*Stream
 
 // SendMessageWithHistory sends a message with conversation history.
 func (c *OllamaClient) SendMessageWithHistory(ctx context.Context, history []*genai.Content, message string) (*StreamingResponse, error) {
+	// Snapshot mutable fields under read lock
+	c.mu.RLock()
+	model := c.config.Model
+	tools := c.tools
+	c.mu.RUnlock()
+
 	var messages []api.Message
 
 	// For fallback models, convert FunctionCall/FunctionResponse parts to text
@@ -142,7 +148,7 @@ func (c *OllamaClient) SendMessageWithHistory(ctx context.Context, history []*ge
 
 	// Build request
 	req := &api.ChatRequest{
-		Model:    c.config.Model,
+		Model:    model,
 		Messages: messages,
 		Stream:   Ptr(true),
 		Options: map[string]interface{}{
@@ -156,12 +162,8 @@ func (c *OllamaClient) SendMessageWithHistory(ctx context.Context, history []*ge
 	}
 
 	// Only include native tools for models that support them
-	if !c.NeedsToolCallFallback() {
-		c.mu.RLock()
-		if len(c.tools) > 0 {
-			req.Tools = c.convertToolsToOllama()
-		}
-		c.mu.RUnlock()
+	if !c.NeedsToolCallFallback() && len(tools) > 0 {
+		req.Tools = c.convertToolsToOllamaFrom(tools)
 	}
 
 	return c.streamChat(ctx, req)
@@ -169,6 +171,12 @@ func (c *OllamaClient) SendMessageWithHistory(ctx context.Context, history []*ge
 
 // SendFunctionResponse sends function call results back to the model.
 func (c *OllamaClient) SendFunctionResponse(ctx context.Context, history []*genai.Content, results []*genai.FunctionResponse) (*StreamingResponse, error) {
+	// Snapshot mutable fields under read lock
+	c.mu.RLock()
+	model := c.config.Model
+	tools := c.tools
+	c.mu.RUnlock()
+
 	var messages []api.Message
 
 	// For models without native tool support, convert tool results to user messages
@@ -180,7 +188,7 @@ func (c *OllamaClient) SendFunctionResponse(ctx context.Context, history []*gena
 	}
 
 	req := &api.ChatRequest{
-		Model:    c.config.Model,
+		Model:    model,
 		Messages: messages,
 		Stream:   Ptr(true),
 		Options: map[string]interface{}{
@@ -193,12 +201,8 @@ func (c *OllamaClient) SendFunctionResponse(ctx context.Context, history []*gena
 	}
 
 	// Only include native tools for models that support them
-	if !c.NeedsToolCallFallback() {
-		c.mu.RLock()
-		if len(c.tools) > 0 {
-			req.Tools = c.convertToolsToOllama()
-		}
-		c.mu.RUnlock()
+	if !c.NeedsToolCallFallback() && len(tools) > 0 {
+		req.Tools = c.convertToolsToOllamaFrom(tools)
 	}
 
 	return c.streamChat(ctx, req)
@@ -247,9 +251,11 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 				cb.OnRetry(attempt, c.config.MaxRetries, delay, reason)
 			}
 
+			backoffTimer := time.NewTimer(delay)
 			select {
-			case <-time.After(delay):
+			case <-backoffTimer.C:
 			case <-ctx.Done():
+				backoffTimer.Stop()
 				return nil, ctx.Err()
 			}
 		}
@@ -425,6 +431,8 @@ func (c *OllamaClient) CountTokens(ctx context.Context, contents []*genai.Conten
 
 // GetModel returns the model name.
 func (c *OllamaClient) GetModel() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.config.Model
 }
 
@@ -458,7 +466,10 @@ func (c *OllamaClient) GetRawClient() interface{} {
 // NeedsToolCallFallback returns true if this client should use text-based
 // tool call parsing as a fallback (for models without native function calling).
 func (c *OllamaClient) NeedsToolCallFallback() bool {
-	profile := GetModelProfile(c.config.Model)
+	c.mu.RLock()
+	model := c.config.Model
+	c.mu.RUnlock()
+	profile := GetModelProfile(model)
 	return !profile.SupportsTools
 }
 
@@ -735,10 +746,16 @@ func (c *OllamaClient) convertHistoryWithResults(history []*genai.Content, resul
 }
 
 // convertToolsToOllama converts genai.Tool to Ollama api.Tool format.
+// Caller must hold c.mu.RLock or pass tools via convertToolsToOllamaFrom.
 func (c *OllamaClient) convertToolsToOllama() []api.Tool {
+	return c.convertToolsToOllamaFrom(c.tools)
+}
+
+// convertToolsToOllamaFrom converts the given genai tools to Ollama api.Tool format.
+func (c *OllamaClient) convertToolsToOllamaFrom(genaiTools []*genai.Tool) []api.Tool {
 	tools := make([]api.Tool, 0)
 
-	for _, tool := range c.tools {
+	for _, tool := range genaiTools {
 		for _, decl := range tool.FunctionDeclarations {
 			// Build parameters
 			params := api.ToolFunctionParameters{

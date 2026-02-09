@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gokin/internal/format"
 )
 
 // NotificationManager handles user notifications for tool execution
@@ -173,7 +175,7 @@ func (nm *NotificationManager) NotifyInfo(toolName, message string) {
 
 // NotifySuccess sends a success notification
 func (nm *NotificationManager) NotifySuccess(toolName, message string, summary *ExecutionSummary, duration time.Duration) {
-	details := fmt.Sprintf("Completed in %s", formatDuration(duration))
+	details := fmt.Sprintf("Completed in %s", format.Duration(duration))
 	nm.Notify(NotificationTypeSuccess, toolName, message, details, summary)
 }
 

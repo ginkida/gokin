@@ -23,6 +23,7 @@ type Message struct {
 // AgentMessenger enables communication between agents.
 // It implements the tools.Messenger interface.
 type AgentMessenger struct {
+	ctx        context.Context
 	runner     *Runner
 	fromAgentID string
 
@@ -35,8 +36,9 @@ type AgentMessenger struct {
 }
 
 // NewAgentMessenger creates a messenger for an agent.
-func NewAgentMessenger(runner *Runner, fromAgentID string) *AgentMessenger {
+func NewAgentMessenger(ctx context.Context, runner *Runner, fromAgentID string) *AgentMessenger {
 	return &AgentMessenger{
+		ctx:        ctx,
 		runner:     runner,
 		fromAgentID: fromAgentID,
 		inbox:      make(map[string]chan Message),
@@ -97,6 +99,9 @@ func (m *AgentMessenger) ReceiveResponse(ctx context.Context, messageID string) 
 		return "", fmt.Errorf("no pending message with ID: %s", messageID)
 	}
 
+	timer := time.NewTimer(5 * time.Minute)
+	defer timer.Stop()
+
 	select {
 	case response := <-responseChan:
 		// Clean up
@@ -106,7 +111,7 @@ func (m *AgentMessenger) ReceiveResponse(ctx context.Context, messageID string) 
 		return response, nil
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case <-time.After(5 * time.Minute):
+	case <-timer.C:
 		// Cleanup on timeout to prevent goroutine leak
 		m.mu.Lock()
 		delete(m.pending, messageID)
@@ -117,7 +122,7 @@ func (m *AgentMessenger) ReceiveResponse(ctx context.Context, messageID string) 
 
 // handleHelpRequest spawns a sub-agent to answer a help request.
 func (m *AgentMessenger) handleHelpRequest(msg Message) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(m.ctx, 3*time.Minute)
 	defer cancel()
 
 	// Map role to agent type
@@ -135,14 +140,14 @@ func (m *AgentMessenger) handleHelpRequest(msg Message) {
 		"requester", msg.From)
 
 	// Spawn the helper agent
-	_, err := m.runner.Spawn(ctx, agentType, prompt, 15, "")
+	agentID, err := m.runner.Spawn(ctx, agentType, prompt, 15, "")
 
 	var response string
 	if err != nil {
 		response = fmt.Sprintf("Error from %s agent: %v", agentType, err)
 	} else {
-		// Get the result
-		result, ok := m.getLatestResultForType(agentType)
+		// Get the result using exact agent ID (not by type which may return wrong result)
+		result, ok := m.runner.GetResult(agentID)
 		if ok && result.Output != "" {
 			response = result.Output
 		} else {
@@ -168,7 +173,7 @@ func (m *AgentMessenger) handleHelpRequest(msg Message) {
 
 // handleDelegation spawns a sub-agent to handle a delegated task.
 func (m *AgentMessenger) handleDelegation(msg Message) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Minute)
 	defer cancel()
 
 	agentType := msg.To

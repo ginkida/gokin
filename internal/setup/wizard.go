@@ -321,11 +321,8 @@ func setupGeminiOAuth() error {
 	fmt.Printf("\n%s✓ Authentication successful!%s\n", colorGreen, colorReset)
 
 	// Exchange code for tokens
-	done := make(chan bool)
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		done <- true
-	}()
+	done := make(chan bool, 1)
+	time.AfterFunc(500*time.Millisecond, func() { done <- true })
 	spin("Exchanging authorization code...", done)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -626,16 +623,17 @@ func showOllamaCloudNextSteps() {
 
 // spin shows a spinner animation while waiting for a task to complete.
 func spin(message string, done <-chan bool) {
+	ticker := time.NewTicker(80 * time.Millisecond)
+	defer ticker.Stop()
 	i := 0
 	for {
 		select {
 		case <-done:
 			fmt.Printf("\r%s\r", strings.Repeat(" ", len(message)+10))
 			return
-		default:
+		case <-ticker.C:
 			fmt.Printf("\r%s %s", spinnerFrames[i%len(spinnerFrames)], message)
 			i++
-			time.Sleep(80 * time.Millisecond)
 		}
 	}
 }

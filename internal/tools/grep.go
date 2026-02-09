@@ -217,15 +217,18 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		re, compileErr = regexp.Compile(regexPattern)
 	}()
 
+	compileTimer := time.NewTimer(5 * time.Second)
 	select {
 	case <-compileDone:
+		compileTimer.Stop()
 		if compileErr != nil {
 			return NewErrorResult(fmt.Sprintf("invalid regex: %s", compileErr)), nil
 		}
-	case <-time.After(5 * time.Second):
+	case <-compileTimer.C:
 		// Goroutine will leak but this is acceptable for rare pathological patterns
 		return NewErrorResult("regex compilation timeout: pattern too complex"), nil
 	case <-ctx.Done():
+		compileTimer.Stop()
 		return NewErrorResult("cancelled"), ctx.Err()
 	}
 

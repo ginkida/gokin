@@ -6,18 +6,21 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // FileTransaction provides atomic multi-file operations with rollback support.
 // Uses a two-phase commit pattern: prepare (backup) then apply.
 type FileTransaction struct {
-	id         string
-	operations []FileOperation
-	tempDir    string
-	committed  bool
-	rolledBack bool
-	startTime  time.Time
-	mu         sync.Mutex
+	id             string
+	operations     []FileOperation
+	tempDir        string
+	committed      bool
+	rolledBack     bool
+	startTime      time.Time
+	mu             sync.Mutex
+	RollbackErrors []error
 }
 
 // FileOperation represents a single file operation in a transaction.
@@ -325,6 +328,8 @@ func (tx *FileTransaction) Rollback() error {
 
 // rollbackInternal performs the actual rollback (must be called with lock held).
 func (tx *FileTransaction) rollbackInternal() {
+	tx.RollbackErrors = nil
+
 	// Roll back in reverse order
 	for i := len(tx.operations) - 1; i >= 0; i-- {
 		op := &tx.operations[i]
@@ -336,29 +341,48 @@ func (tx *FileTransaction) rollbackInternal() {
 		case OpWrite:
 			if op.BackupFile != "" {
 				// Restore from backup
-				_ = copyFile(op.BackupFile, op.Path)
+				if err := copyFile(op.BackupFile, op.Path); err != nil {
+					tx.RollbackErrors = append(tx.RollbackErrors, fmt.Errorf("rollback write (restore) %s: %w", op.Path, err))
+				}
 			} else {
 				// Remove created file
-				_ = os.Remove(op.Path)
+				if err := os.Remove(op.Path); err != nil {
+					tx.RollbackErrors = append(tx.RollbackErrors, fmt.Errorf("rollback write (remove) %s: %w", op.Path, err))
+				}
 			}
 
 		case OpDelete:
 			if op.BackupFile != "" {
 				// Restore deleted file
-				_ = copyFile(op.BackupFile, op.Path)
+				if err := copyFile(op.BackupFile, op.Path); err != nil {
+					tx.RollbackErrors = append(tx.RollbackErrors, fmt.Errorf("rollback delete (restore) %s: %w", op.Path, err))
+				}
 			}
 
 		case OpRename:
 			// Reverse the rename
-			_ = os.Rename(op.NewPath, op.Path)
+			if err := os.Rename(op.NewPath, op.Path); err != nil {
+				tx.RollbackErrors = append(tx.RollbackErrors, fmt.Errorf("rollback rename %s -> %s: %w", op.NewPath, op.Path, err))
+			}
 
 		case OpChmod:
 			// Restore original permissions from backup (if we had them)
 			if op.BackupFile != "" {
 				if info, err := os.Stat(op.BackupFile); err == nil {
-					_ = os.Chmod(op.Path, info.Mode())
+					if err := os.Chmod(op.Path, info.Mode()); err != nil {
+						tx.RollbackErrors = append(tx.RollbackErrors, fmt.Errorf("rollback chmod %s: %w", op.Path, err))
+					}
 				}
 			}
+		}
+	}
+
+	if len(tx.RollbackErrors) > 0 {
+		logging.Warn("transaction rollback encountered errors",
+			"tx_id", tx.id,
+			"error_count", len(tx.RollbackErrors))
+		for _, err := range tx.RollbackErrors {
+			logging.Warn("transaction rollback error", "tx_id", tx.id, "error", err)
 		}
 	}
 
