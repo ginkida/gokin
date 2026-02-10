@@ -230,10 +230,14 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = DefaultGLMBaseURL
 	}
 
-	// GLM/Z.AI needs longer idle timeout — server pauses are common
-	streamIdleTimeout := 90 * time.Second
+	// GLM/Z.AI needs longer timeouts — server is slower than Anthropic
+	streamIdleTimeout := 120 * time.Second
 	if cfg.API.Retry.StreamIdleTimeout > 0 {
 		streamIdleTimeout = cfg.API.Retry.StreamIdleTimeout
+	}
+	httpTimeout := 5 * time.Minute
+	if cfg.API.Retry.HTTPTimeout > 0 {
+		httpTimeout = cfg.API.Retry.HTTPTimeout
 	}
 
 	anthropicConfig := AnthropicConfig{
@@ -249,7 +253,7 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		// Retry configuration from config
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
-		HTTPTimeout: cfg.API.Retry.HTTPTimeout,
+		HTTPTimeout: httpTimeout,
 	}
 
 	return NewAnthropicClient(anthropicConfig)
