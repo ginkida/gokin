@@ -279,7 +279,11 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 		}
 
 		// Extract result fields via type assertion or JSON
-		resultJSON, _ := json.Marshal(resultAny)
+		resultJSON, err := json.Marshal(resultAny)
+		if err != nil {
+			logging.Debug("failed to marshal task result", "error", err)
+			resultJSON = []byte("{}")
+		}
 		var result struct {
 			Status string `json:"status"`
 			Output string `json:"output"`

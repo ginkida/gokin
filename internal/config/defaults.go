@@ -60,6 +60,9 @@ const (
 	DefaultRequestsPerMinute = 60
 	DefaultTokensPerMinute   = 100000
 
+	// Ollama
+	DefaultOllamaBaseURL = "http://localhost:11434"
+
 	// UI update intervals
 	DefaultGraphUpdateInterval    = 500 * time.Millisecond
 	DefaultParallelUpdateInterval = 300 * time.Millisecond

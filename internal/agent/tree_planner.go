@@ -1172,6 +1172,7 @@ STEP: bash | Run tests to verify the implementation works correctly`, prompt)
 	var fullText strings.Builder
 	var incompleteLine string
 
+streamLoop:
 	for {
 		select {
 		case <-llmCtx.Done():
@@ -1181,7 +1182,7 @@ STEP: bash | Run tests to verify the implementation works correctly`, prompt)
 			return nil, llmCtx.Err()
 		case chunk, ok := <-stream.Chunks:
 			if !ok {
-				goto Done
+				break streamLoop
 			}
 			if chunk.Error != nil {
 				return nil, chunk.Error
@@ -1224,7 +1225,6 @@ STEP: bash | Run tests to verify the implementation works correctly`, prompt)
 		}
 	}
 
-Done:
 	// Process remaining text
 	remaining := strings.TrimSpace(incompleteLine)
 	if remaining != "" {

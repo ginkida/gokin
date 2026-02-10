@@ -327,7 +327,11 @@ func (a *SharedMemoryAdapter) Read(key string) (SharedMemoryEntry, bool) {
 			}, true
 		}
 		// Handle direct struct conversion via JSON
-		data, _ := json.Marshal(entry)
+		data, err := json.Marshal(entry)
+		if err != nil {
+			logging.Debug("failed to marshal shared memory entry", "error", err, "key", key)
+			return SharedMemoryEntry{}, false
+		}
 		var result SharedMemoryEntry
 		if err := json.Unmarshal(data, &result); err != nil {
 			logging.Debug("failed to unmarshal shared memory entry", "error", err, "key", key)

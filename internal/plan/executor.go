@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"gokin/internal/logging"
 )
@@ -26,6 +27,11 @@ type ApprovalHandler func(ctx context.Context, plan *Plan) (ApprovalDecision, er
 // It can be used to show progress or confirm individual steps.
 type StepHandler func(step *Step)
 
+// ReplanHandler generates replacement steps when a step fails fatally.
+// It receives the current plan and the failed step, and returns new steps to replace
+// the remaining pending steps.
+type ReplanHandler func(ctx context.Context, plan *Plan, failedStep *Step) ([]*Step, error)
+
 // Manager manages plan mode state and execution.
 type Manager struct {
 	enabled         bool
@@ -35,6 +41,7 @@ type Manager struct {
 	lastRejectedPlan *Plan  // Store the last rejected plan for context
 	lastFeedback     string // Store the last user feedback for plan modifications
 	approvalHandler  ApprovalHandler
+	replanHandler    ReplanHandler
 	onStepStart      StepHandler
 	onStepComplete   StepHandler
 	onProgressUpdate func(progress *ProgressUpdate) // Progress update handler
@@ -69,6 +76,95 @@ func (m *Manager) SetApprovalHandler(handler ApprovalHandler) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.approvalHandler = handler
+}
+
+// SetReplanHandler sets the handler for adaptive replanning on fatal errors.
+func (m *Manager) SetReplanHandler(handler ReplanHandler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replanHandler = handler
+}
+
+// HasReplanHandler returns true if a replan handler is configured.
+func (m *Manager) HasReplanHandler() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.replanHandler != nil
+}
+
+// RequestReplan invokes the replan handler to replace remaining pending steps
+// after a fatal step failure. Increments plan.Version on success.
+func (m *Manager) RequestReplan(ctx context.Context, failedStep *Step) error {
+	m.mu.RLock()
+	handler := m.replanHandler
+	plan := m.currentPlan
+	m.mu.RUnlock()
+
+	if handler == nil {
+		return fmt.Errorf("no replan handler configured")
+	}
+	if plan == nil {
+		return fmt.Errorf("no active plan")
+	}
+	if failedStep == nil {
+		return fmt.Errorf("failed step is nil")
+	}
+
+	newSteps, err := handler(ctx, plan, failedStep)
+	if err != nil {
+		return fmt.Errorf("replan failed: %w", err)
+	}
+
+	// Replace remaining pending steps with new steps
+	plan.mu.Lock()
+	defer plan.mu.Unlock()
+
+	// Keep completed/failed/skipped steps, replace pending ones
+	var kept []*Step
+	for _, s := range plan.Steps {
+		if s.Status != StatusPending {
+			kept = append(kept, s)
+		}
+	}
+
+	// Assign new IDs starting after the last kept step
+	nextID := len(kept) + 1
+	for _, s := range newSteps {
+		s.ID = nextID
+		s.Status = StatusPending
+		nextID++
+	}
+
+	// Validate DependsOn references in new steps
+	validIDs := make(map[int]bool)
+	for _, s := range kept {
+		validIDs[s.ID] = true
+	}
+	for _, s := range newSteps {
+		validIDs[s.ID] = true
+	}
+	for _, s := range newSteps {
+		var validDeps []int
+		for _, dep := range s.DependsOn {
+			if validIDs[dep] {
+				validDeps = append(validDeps, dep)
+			}
+		}
+		s.DependsOn = validDeps
+	}
+
+	plan.Steps = append(kept, newSteps...)
+	plan.Version++
+	plan.Status = StatusInProgress
+	plan.UpdatedAt = time.Now()
+
+	logging.Info("plan replanned",
+		"plan_id", plan.ID,
+		"version", plan.Version,
+		"new_steps", len(newSteps),
+		"total_steps", len(plan.Steps))
+
+	return nil
 }
 
 // SetStepHandlers sets the step lifecycle handlers.
@@ -430,7 +526,17 @@ func (m *Manager) GetPreviousStepsSummary(currentStepID int, maxLen int) string 
 			sb.WriteString(output)
 			sb.WriteString("\n")
 		} else if step.Status == StatusFailed {
-			sb.WriteString(fmt.Sprintf("Step %d (%s): FAILED\n", step.ID, step.Title))
+			errDetail := step.Error
+			if len(errDetail) > 200 {
+				errDetail = errDetail[:200] + "..."
+			}
+			if errDetail != "" {
+				sb.WriteString(fmt.Sprintf("Step %d (%s): FAILED - %s\n", step.ID, step.Title, errDetail))
+			} else {
+				sb.WriteString(fmt.Sprintf("Step %d (%s): FAILED\n", step.ID, step.Title))
+			}
+		} else if step.Status == StatusSkipped {
+			sb.WriteString(fmt.Sprintf("Step %d (%s): SKIPPED\n", step.ID, step.Title))
 		}
 	}
 	return sb.String()

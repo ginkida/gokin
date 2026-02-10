@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gokin/internal/auth"
+	"gokin/internal/config"
 
 	"github.com/ollama/ollama/api"
 )
@@ -475,7 +476,7 @@ func setupOllamaLocal(reader *bufio.Reader) error {
 	}
 
 	// Ask for remote URL (optional)
-	fmt.Printf("\n%sOllama server URL (press Enter for local 'http://localhost:11434'):%s ", colorGreen, colorReset)
+	fmt.Printf("\n%sOllama server URL (press Enter for local '%s'):%s ", colorGreen, config.DefaultOllamaBaseURL, colorReset)
 
 	serverURL, err := reader.ReadString('\n')
 	if err != nil {
@@ -654,7 +655,7 @@ func getConfigPath() (string, error) {
 // detectInstalledOllamaModels returns a list of installed Ollama models.
 func detectInstalledOllamaModels(serverURL string) ([]string, error) {
 	if serverURL == "" {
-		serverURL = "http://localhost:11434"
+		serverURL = config.DefaultOllamaBaseURL
 	}
 
 	baseURL, err := url.Parse(serverURL)

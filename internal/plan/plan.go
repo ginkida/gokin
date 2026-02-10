@@ -1,7 +1,10 @@
 package plan
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +77,8 @@ type Step struct {
 	MaxRetries  int           `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
 	Timeout     time.Duration `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
 	RetryCount  int           `json:"retry_count,omitempty"`   // Current retry count
+	TokensUsed  int           `json:"tokens_used,omitempty"`   // Tokens consumed by this step
+	Condition   string        `json:"condition,omitempty"`     // Condition: "step_N_failed", "step_N_succeeded"
 }
 
 // Duration returns the step execution duration.
@@ -97,6 +102,7 @@ type Plan struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	Request     string    `json:"request"` // Original user request
+	Version     int       `json:"version"` // Incremented on replan
 
 	// Context snapshot from planning conversation (preserved across session clear)
 	ContextSnapshot string `json:"context_snapshot,omitempty"`
@@ -543,4 +549,168 @@ func (p *Plan) PauseStep(id int, reason string) {
 			break
 		}
 	}
+}
+
+// ShouldSkip evaluates the step's Condition against the plan's current state.
+// Supported conditions: "step_N_failed", "step_N_succeeded".
+// Returns true if the condition is NOT met (i.e., the step should be skipped).
+func (s *Step) ShouldSkip(p *Plan) bool {
+	if s.Condition == "" {
+		return false
+	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	cond := strings.TrimSpace(s.Condition)
+
+	// Parse "step_N_failed" or "step_N_succeeded"
+	var refID int
+	var condType string
+	if n, _ := fmt.Sscanf(cond, "step_%d_%s", &refID, &condType); n == 2 {
+		var refStep *Step
+		for _, st := range p.Steps {
+			if st.ID == refID {
+				refStep = st
+				break
+			}
+		}
+		if refStep == nil {
+			return true // Referenced step doesn't exist — skip
+		}
+		switch condType {
+		case "failed":
+			return refStep.Status != StatusFailed
+		case "succeeded":
+			return refStep.Status != StatusCompleted
+		}
+	}
+
+	return false // Unknown condition format — don't skip
+}
+
+// NextReadySteps returns all steps that are ready to execute.
+// A step is ready when it's pending, all its DependsOn are completed/skipped,
+// and its condition (if any) is met.
+// If the first ready step is not Parallel, only that step is returned.
+// Otherwise, all ready Parallel steps are returned for concurrent execution.
+func (p *Plan) NextReadySteps() []*Step {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	// Build set of completed/skipped step IDs
+	done := make(map[int]bool)
+	for _, step := range p.Steps {
+		if step.Status == StatusCompleted || step.Status == StatusSkipped {
+			done[step.ID] = true
+		}
+	}
+
+	var ready []*Step
+	for _, step := range p.Steps {
+		if step.Status != StatusPending {
+			continue
+		}
+
+		// Check all dependencies are done
+		allDepsDone := true
+		for _, depID := range step.DependsOn {
+			if !done[depID] {
+				allDepsDone = false
+				break
+			}
+		}
+		if !allDepsDone {
+			continue
+		}
+
+		ready = append(ready, step)
+	}
+
+	if len(ready) == 0 {
+		return nil
+	}
+
+	// If the first ready step is not parallel, return only it
+	if !ready[0].Parallel {
+		return ready[:1]
+	}
+
+	// Collect all leading parallel steps
+	var parallel []*Step
+	for _, s := range ready {
+		if s.Parallel {
+			parallel = append(parallel, s)
+		} else {
+			break
+		}
+	}
+	return parallel
+}
+
+// ErrorCategory classifies plan step errors for retry/replan decisions.
+type ErrorCategory int
+
+const (
+	ErrorTransient ErrorCategory = iota // timeout, network, rate limit — retry
+	ErrorLogic                          // wrong args, validation — retry with different approach
+	ErrorFatal                          // permission denied, not found — skip/replan
+	ErrorUnknown
+)
+
+// String returns a human-readable name for the error category.
+func (c ErrorCategory) String() string {
+	switch c {
+	case ErrorTransient:
+		return "transient"
+	case ErrorLogic:
+		return "logic"
+	case ErrorFatal:
+		return "fatal"
+	default:
+		return "unknown"
+	}
+}
+
+// ClassifyError categorizes an error for retry/replan decisions.
+func ClassifyError(err error, errMsg string) ErrorCategory {
+	if err != nil {
+		// Transient: timeout, network, rate limit
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return ErrorTransient
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return ErrorTransient
+		}
+	}
+
+	msg := errMsg
+	if msg == "" && err != nil {
+		msg = err.Error()
+	}
+	lower := strings.ToLower(msg)
+
+	// Transient patterns
+	for _, p := range []string{"rate limit", "timeout", "connection refused", "eof", "503", "502", "429"} {
+		if strings.Contains(lower, p) {
+			return ErrorTransient
+		}
+	}
+
+	// Fatal patterns
+	for _, p := range []string{"permission denied", "not found", "no such file", "access denied", "forbidden"} {
+		if strings.Contains(lower, p) {
+			return ErrorFatal
+		}
+	}
+
+	// Logic patterns
+	for _, p := range []string{"validation error", "invalid argument", "wrong", "syntax error", "parse error"} {
+		if strings.Contains(lower, p) {
+			return ErrorLogic
+		}
+	}
+
+	return ErrorUnknown
 }

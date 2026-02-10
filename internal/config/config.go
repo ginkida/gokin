@@ -233,6 +233,7 @@ type PlanConfig struct {
 	DelegateSteps      bool          `yaml:"delegate_steps"`        // Run each step in isolated sub-agent
 	AbortOnStepFailure bool          `yaml:"abort_on_step_failure"` // Stop plan on step failure
 	PlanningTimeout    time.Duration `yaml:"planning_timeout"`      // Timeout for LLM plan generation
+	DefaultStepTimeout time.Duration `yaml:"default_step_timeout"`  // Default timeout per step (0 = 5min)
 	UseLLMExpansion    bool          `yaml:"use_llm_expansion"`     // Use LLM for dynamic plan expansion
 	Algorithm          string        `yaml:"algorithm"`             // Tree search algorithm: beam, mcts, astar
 }

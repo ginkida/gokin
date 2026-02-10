@@ -150,7 +150,10 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	}
 
 	// Convert to JSON for structured data
-	resultsJSON, _ := json.Marshal(results)
+	resultsJSON, err := json.Marshal(results)
+	if err != nil {
+		resultsJSON = []byte("[]")
+	}
 
 	return NewSuccessResultWithData(output.String(), map[string]any{
 		"query":   query,

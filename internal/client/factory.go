@@ -371,7 +371,7 @@ func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 	// Use custom base URL if provided, otherwise use default
 	baseURL := cfg.API.OllamaBaseURL
 	if baseURL == "" {
-		baseURL = "http://localhost:11434"
+		baseURL = config.DefaultOllamaBaseURL
 	}
 
 	ollamaConfig := OllamaConfig{

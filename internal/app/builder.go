@@ -279,7 +279,7 @@ func (b *Builder) validateOllamaModel() error {
 			fmt.Fprintf(os.Stderr, "  Then restart gokin.\n\n")
 			baseURL := b.cfg.API.OllamaBaseURL
 			if baseURL == "" {
-				baseURL = "http://localhost:11434"
+				baseURL = config.DefaultOllamaBaseURL
 			}
 			return fmt.Errorf("Ollama server not running at %s", baseURL)
 		}
@@ -484,6 +484,50 @@ func (b *Builder) initManagers() error {
 	// Plan manager
 	b.planManager = plan.NewManager(b.cfg.Plan.Enabled, b.cfg.Plan.RequireApproval)
 	b.planManager.SetWorkDir(b.workDir)
+
+	// Adaptive replan handler: uses LLM to generate replacement steps on fatal errors
+	b.planManager.SetReplanHandler(func(ctx context.Context, p *plan.Plan, failedStep *plan.Step) ([]*plan.Step, error) {
+		prompt := fmt.Sprintf(
+			"A plan step failed with a fatal error.\n"+
+				"Plan: %s\nFailed step %d: %s\nError: %s\n\n"+
+				"Generate 1-3 replacement steps to work around this failure and achieve the original goal.\n"+
+				"Return each step as a line: STEP: <title> | <description>\n"+
+				"Be concise.",
+			p.Title, failedStep.ID, failedStep.Title, failedStep.Error)
+
+		onText := func(_ string) {} // discard streaming text
+		_, result, err := b.agentRunner.SpawnWithContext(ctx, "plan", prompt, 10, "", "", onText, false)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil || result.Output == "" {
+			return nil, fmt.Errorf("empty replan response")
+		}
+
+		// Parse "STEP: title | description" lines
+		var steps []*plan.Step
+		for _, line := range strings.Split(result.Output, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "STEP:") {
+				continue
+			}
+			line = strings.TrimPrefix(line, "STEP:")
+			line = strings.TrimSpace(line)
+			parts := strings.SplitN(line, "|", 2)
+			title := strings.TrimSpace(parts[0])
+			desc := ""
+			if len(parts) > 1 {
+				desc = strings.TrimSpace(parts[1])
+			}
+			if title != "" {
+				steps = append(steps, &plan.Step{Title: title, Description: desc})
+			}
+		}
+		if len(steps) == 0 {
+			return nil, fmt.Errorf("no steps parsed from replan response")
+		}
+		return steps, nil
+	})
 
 	// Plan persistence store
 	if b.configDirErr == nil {

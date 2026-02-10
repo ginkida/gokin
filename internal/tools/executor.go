@@ -1052,12 +1052,13 @@ func (e *Executor) executeStreamingTool(ctx context.Context, tool StreamingTool,
 	var content strings.Builder
 	chunkCount := 0
 
+streamLoop:
 	for {
 		select {
 		case chunk, ok := <-stream.Chunks:
 			if !ok {
 				// Chunks channel closed
-				goto done
+				break streamLoop
 			}
 			content.WriteString(chunk)
 			chunkCount++
@@ -1078,14 +1079,13 @@ func (e *Executor) executeStreamingTool(ctx context.Context, tool StreamingTool,
 			for chunk := range stream.Chunks {
 				content.WriteString(chunk)
 			}
-			goto done
+			break streamLoop
 
 		case <-ctx.Done():
 			return NewErrorResult("streaming cancelled"), ctx.Err()
 		}
 	}
 
-done:
 	result := content.String()
 	if result == "" {
 		return NewSuccessResult("No output."), nil

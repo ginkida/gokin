@@ -361,8 +361,14 @@ func (t *TaskOutputTool) listTasks() (ToolResult, error) {
 	}
 
 	// JSON data for structured access
-	shellData, _ := json.Marshal(shellTasks)
-	agentData, _ := json.Marshal(agentTasks)
+	shellData, err := json.Marshal(shellTasks)
+	if err != nil {
+		shellData = []byte("[]")
+	}
+	agentData, err := json.Marshal(agentTasks)
+	if err != nil {
+		agentData = []byte("[]")
+	}
 
 	return NewSuccessResultWithData(builder.String(), map[string]any{
 		"shell_tasks": string(shellData),

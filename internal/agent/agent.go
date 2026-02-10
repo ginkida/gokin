@@ -1341,39 +1341,67 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				a.delegation.TrackProgress(strings.Join(toolsList, ","))
 			}
 
-			// Mental Loop Detection
+			// Mental Loop Detection (exact args match + broad tool counter)
 			for _, fc := range resp.FunctionCalls {
-				argsJSON, _ := json.Marshal(fc.Args)
-				key := fmt.Sprintf("%s:%s", fc.Name, string(argsJSON))
+				key := normalizeCallKey(fc.Name, fc.Args)
+				broadKey := "tool:" + fc.Name
 
 				a.callHistoryMu.Lock()
 				a.callHistory[key]++
-				count := a.callHistory[key]
+				a.callHistory[broadKey]++
+				exactCount := a.callHistory[key]
+				broadCount := a.callHistory[broadKey]
 				intervened := a.loopIntervened
 				a.callHistoryMu.Unlock()
 
-				if count > 3 && !intervened {
-					logging.Warn("mental loop detected", "tool", fc.Name, "count", count)
+				// Exact-match loop: same tool + same (normalized) args > 3 times
+				if exactCount > 3 && !intervened {
+					logging.Warn("mental loop detected (exact)", "tool", fc.Name, "count", exactCount)
 					a.callHistoryMu.Lock()
 					a.loopIntervened = true
 					a.callHistoryMu.Unlock()
 
-					// Notify user
 					if a.onText != nil {
-						a.safeOnText(fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, count))
+						a.safeOnText(fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, exactCount))
 					}
 
-					// Build reflection-based intervention with strategy switching
-					intervention := a.buildLoopRecoveryIntervention(fc.Name, fc.Args, count)
+					intervention := a.buildLoopRecoveryIntervention(fc.Name, fc.Args, exactCount)
 
-					// Clear this specific call from history to allow retry with different args
 					a.callHistoryMu.Lock()
 					delete(a.callHistory, key)
 					a.callHistoryMu.Unlock()
 
 					a.stateMu.Lock()
 					a.history = append(a.history, genai.NewContentFromText(intervention, genai.RoleUser))
-					// Give bounded extra turns to recover (max 3)
+					if loopRecoveryTurns < 3 {
+						loopRecoveryTurns++
+						a.maxTurns++
+					}
+					a.stateMu.Unlock()
+					continue
+				}
+
+				// Broad loop: same tool called > 8 times (any args)
+				if broadCount > 8 && !intervened {
+					logging.Warn("broad loop detected", "tool", fc.Name, "total_calls", broadCount)
+					a.callHistoryMu.Lock()
+					a.loopIntervened = true
+					a.callHistoryMu.Unlock()
+
+					if a.onText != nil {
+						a.safeOnText(fmt.Sprintf("\n[Broad loop: %s used %d times — try a different approach]\n", fc.Name, broadCount))
+					}
+
+					intervention := fmt.Sprintf(
+						"STOP. I've called `%s` %d times total in this session. "+
+							"This strongly suggests I'm stuck. I need to:\n"+
+							"1. Step back and reconsider my overall approach\n"+
+							"2. Try a completely different tool or strategy\n"+
+							"3. Summarize what I've learned so far and proceed differently\n",
+						fc.Name, broadCount)
+
+					a.stateMu.Lock()
+					a.history = append(a.history, genai.NewContentFromText(intervention, genai.RoleUser))
 					if loopRecoveryTurns < 3 {
 						loopRecoveryTurns++
 						a.maxTurns++
@@ -1435,6 +1463,36 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	}
 
 	return a.history, output.String(), nil
+}
+
+// normalizeCallKey creates a stable key for loop detection by filtering out zero-value arguments.
+// This catches semantic loops where arguments differ only in default/zero fields.
+func normalizeCallKey(name string, args map[string]any) string {
+	if len(args) == 0 {
+		return name + ":{}"
+	}
+	filtered := make(map[string]any, len(args))
+	for k, v := range args {
+		switch val := v.(type) {
+		case string:
+			if val == "" {
+				continue
+			}
+		case float64:
+			if val == 0 {
+				continue
+			}
+		case bool:
+			if !val {
+				continue
+			}
+		case nil:
+			continue
+		}
+		filtered[k] = v
+	}
+	argsJSON, _ := json.Marshal(filtered)
+	return fmt.Sprintf("%s:%s", name, string(argsJSON))
 }
 
 // buildLoopRecoveryIntervention creates a reflection-based intervention message for mental loop recovery.
@@ -1583,7 +1641,7 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 }
 
 // forceCompactHistory aggressively compacts history when MaxHistorySize is exceeded.
-// This is a safety measure to prevent memory exhaustion.
+// Uses importance scoring to preserve the most valuable messages from the middle.
 func (a *Agent) forceCompactHistory(ctx context.Context) error {
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
@@ -1592,28 +1650,87 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 		return nil // Not enough to compact
 	}
 
-	// Keep only the first 2 messages (system context) and last 8 (recent turns)
-	// Everything else is discarded (not summarized) to ensure we reduce memory
 	keepStart := 2
-	keepEnd := 8
-	if len(a.history) < keepStart+keepEnd {
+	keepEnd := 6
+	keepMiddle := 4 // Top N by importance from middle section
+
+	if len(a.history) < keepStart+keepEnd+keepMiddle {
 		return nil
 	}
 
-	newHistory := make([]*genai.Content, 0, keepStart+keepEnd+1)
+	middle := a.history[keepStart : len(a.history)-keepEnd]
+
+	// Score each middle message by importance
+	type scored struct {
+		idx   int
+		score int
+		msg   *genai.Content
+	}
+	scores := make([]scored, len(middle))
+	for i, msg := range middle {
+		s := 0
+		if msg == nil {
+			scores[i] = scored{idx: i, score: 0, msg: msg}
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+			if part.FunctionResponse != nil {
+				s += 3 // Tool results are high value
+			} else if part.FunctionCall != nil {
+				s += 1 // Tool calls are lower value
+			} else if part.Text != "" {
+				lower := strings.ToLower(part.Text)
+				if strings.Contains(lower, "error") || strings.Contains(lower, "failed") {
+					s += 2 // Error messages are valuable
+				}
+			}
+		}
+		scores[i] = scored{idx: i, score: s, msg: msg}
+	}
+
+	// Sort by score descending (simple selection — keepMiddle is small)
+	for i := 0; i < keepMiddle && i < len(scores); i++ {
+		best := i
+		for j := i + 1; j < len(scores); j++ {
+			if scores[j].score > scores[best].score {
+				best = j
+			}
+		}
+		scores[i], scores[best] = scores[best], scores[i]
+	}
+
+	// Take top keepMiddle, then sort by original index to preserve order
+	topN := scores[:keepMiddle]
+	for i := 0; i < len(topN); i++ {
+		for j := i + 1; j < len(topN); j++ {
+			if topN[i].idx > topN[j].idx {
+				topN[i], topN[j] = topN[j], topN[i]
+			}
+		}
+	}
+
+	newHistory := make([]*genai.Content, 0, keepStart+1+keepMiddle+keepEnd)
 	newHistory = append(newHistory, a.history[:keepStart]...)
 
-	// Add a placeholder indicating history was truncated
 	truncateNotice := genai.NewContentFromText(
-		"[Previous conversation history was truncated to prevent memory exhaustion. "+
-			"Context may be incomplete.]",
+		"[Conversation compacted. Key tool results and errors preserved.]",
 		genai.RoleUser)
 	newHistory = append(newHistory, truncateNotice)
+
+	for _, s := range topN {
+		if s.msg != nil {
+			newHistory = append(newHistory, s.msg)
+		}
+	}
 
 	newHistory = append(newHistory, a.history[len(a.history)-keepEnd:]...)
 
 	a.history = newHistory
-	logging.Info("history force-compacted", "agent_id", a.ID, "new_len", len(a.history))
+	logging.Info("history force-compacted (importance-based)", "agent_id", a.ID,
+		"old_len", len(middle)+keepStart+keepEnd, "new_len", len(a.history))
 
 	return nil
 }

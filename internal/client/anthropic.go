@@ -762,8 +762,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 					// Handle Z.AI/GLM error format
 					if errObj, ok := event["error"].(map[string]interface{}); ok {
-						errCode, _ := errObj["code"].(string)
-						errMsg, _ := errObj["message"].(string)
+						errCode := stringFromMap(errObj, "code")
+						errMsg := stringFromMap(errObj, "message")
 						logging.Error("Z.AI API error", "code", errCode, "message", errMsg)
 						chunks <- ResponseChunk{
 							Error: fmt.Errorf("API error (%s): %s", errCode, errMsg),
@@ -817,7 +817,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 	case "content_block_start":
 		// Check if this is a tool_use, thinking, or text content block
 		if contentBlock, ok := event["content_block"].(map[string]interface{}); ok {
-			blockType, _ := contentBlock["type"].(string)
+			blockType := stringFromMap(contentBlock, "type")
 			logging.Debug("content_block_start", "type", blockType)
 
 			// Track current block type for delta processing
@@ -847,8 +847,8 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 	case "error":
 		// Handle API error events
 		if errData, ok := event["error"].(map[string]interface{}); ok {
-			errType, _ := errData["type"].(string)
-			errMsg, _ := errData["message"].(string)
+			errType := stringFromMap(errData, "type")
+			errMsg := stringFromMap(errData, "message")
 			logging.Error("API error event", "type", errType, "message", errMsg)
 			chunk.Error = fmt.Errorf("API error: %s - %s", errType, errMsg)
 			chunk.Done = true
@@ -857,7 +857,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 	case "content_block_delta":
 		logging.Debug("SSE content_block_delta event", "event", event)
 		if delta, ok := event["delta"].(map[string]interface{}); ok {
-			deltaType, _ := delta["type"].(string)
+			deltaType := stringFromMap(delta, "type")
 			logging.Debug("SSE delta content", "delta", delta, "type", deltaType)
 
 			// Handle thinking delta
@@ -1049,7 +1049,7 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 	// Log final messages structure
 	var msgRoles []string
 	for i, m := range messages {
-		role, _ := m["role"].(string)
+		role := stringFromMap(m, "role")
 		msgRoles = append(msgRoles, fmt.Sprintf("[%d]%s", i, role))
 	}
 	logging.Debug("final messages", "count", len(messages), "roles", strings.Join(msgRoles, ","))
@@ -1410,6 +1410,16 @@ func (c *AnthropicClient) convertToolsToAnthropicFrom(genaiTools []*genai.Tool) 
 	}
 
 	return tools
+}
+
+// stringFromMap safely extracts a string value from a map.
+func stringFromMap(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // randomID generates a unique ID for tool_use.

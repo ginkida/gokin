@@ -168,7 +168,7 @@ type App struct {
 	// Agent Scratchpad (shared)
 	scratchpad string
 
-	// Unified Task Orchestrator (replacing QueueManager, DependencyManager, ParallelExecutor)
+	// Unified Task Orchestrator
 	orchestrator *TaskOrchestrator
 
 	uiUpdateManager *UIUpdateManager // Coordinates periodic UI updates
