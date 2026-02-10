@@ -1821,8 +1821,12 @@ func (m Model) View() string {
 			}
 			builder.WriteString(status)
 		} else if m.state == StateProcessing {
-			// Thinking: ⠋ Thinking  5s
-			status := spinner + " " + dimStyle.Render("Thinking")
+			// Thinking/Planning: ⠋ Thinking  5s
+			label := "Thinking"
+			if m.planningModeEnabled && !m.planProgressMode {
+				label = "Planning"
+			}
+			status := spinner + " " + dimStyle.Render(label)
 
 			// Show elapsed after 3 seconds
 			if elapsed >= 3*time.Second {

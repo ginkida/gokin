@@ -151,9 +151,10 @@ func (c *APIConfig) SetProviderKey(provider, key string) {
 
 // RetryConfig holds retry settings for API calls.
 type RetryConfig struct {
-	MaxRetries  int           `yaml:"max_retries"`  // Maximum number of retry attempts (default: 3)
-	RetryDelay  time.Duration `yaml:"retry_delay"`  // Initial delay between retries (default: 1s)
-	HTTPTimeout time.Duration `yaml:"http_timeout"` // HTTP request timeout (default: 120s)
+	MaxRetries        int           `yaml:"max_retries"`         // Maximum number of retry attempts (default: 3)
+	RetryDelay        time.Duration `yaml:"retry_delay"`         // Initial delay between retries (default: 1s)
+	HTTPTimeout       time.Duration `yaml:"http_timeout"`        // HTTP request timeout (default: 120s)
+	StreamIdleTimeout time.Duration `yaml:"stream_idle_timeout"` // Max pause between SSE chunks (0 = provider default)
 }
 
 // ModelConfig holds model-related settings.

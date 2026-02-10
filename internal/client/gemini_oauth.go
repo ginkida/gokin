@@ -544,9 +544,19 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 			genConfig["maxOutputTokens"] = c.genConfig.MaxOutputTokens
 		}
 		if thinkingBudget > 0 {
+			// Ensure MaxOutputTokens accommodates thinking + response text
+			minRequired := thinkingBudget + 4096
+			if maxTokens, ok := genConfig["maxOutputTokens"].(int32); ok && maxTokens > 0 && maxTokens < minRequired {
+				genConfig["maxOutputTokens"] = minRequired
+			}
 			genConfig["thinkingConfig"] = map[string]interface{}{
 				"includeThoughts": true,
 				"thinkingBudget":  thinkingBudget,
+			}
+		} else {
+			// Explicitly disable thinking for models that enable it by default
+			genConfig["thinkingConfig"] = map[string]interface{}{
+				"thinkingBudget": 0,
 			}
 		}
 		if len(genConfig) > 0 {

@@ -1376,6 +1376,17 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			}
 		}
 
+		// Warn when response was truncated by token limit
+		if resp.FinishReason == genai.FinishReasonMaxTokens {
+			truncMsg := "\n\n⚠ Response truncated (max_tokens limit reached)."
+			output.WriteString(truncMsg)
+			if a.onText != nil {
+				a.safeOnText(truncMsg)
+			}
+			logging.Warn("agent response truncated by max_tokens limit",
+				"agent_type", a.Type, "output_tokens", resp.OutputTokens)
+		}
+
 		// If there are function calls, execute them
 		if len(resp.FunctionCalls) > 0 {
 			// Track progress for delegation strategy

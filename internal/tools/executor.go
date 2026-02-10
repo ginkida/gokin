@@ -482,6 +482,13 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// No more function calls, we have the final response
 		finalText = resp.Text
 
+		// Warn user when response was truncated by token limit
+		if resp.FinishReason == genai.FinishReasonMaxTokens {
+			finalText += "\n\n⚠ Response truncated (max_tokens limit reached). Use /config to increase max_output_tokens."
+			logging.Warn("response truncated by max_tokens limit",
+				"output_tokens", resp.OutputTokens)
+		}
+
 		// Capture token usage metadata from API response
 		if resp.InputTokens > 0 || resp.OutputTokens > 0 {
 			e.lastInputTokens = resp.InputTokens

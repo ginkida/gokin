@@ -52,6 +52,24 @@ var ModelPresets = map[string]ModelPreset{
 		Temperature:     0.7,
 		MaxOutputTokens: 131072,
 	},
+	"gemini": {
+		Provider:        "gemini",
+		Name:            "gemini-3-flash-preview",
+		Temperature:     1.0,
+		MaxOutputTokens: 8192,
+	},
+	"deepseek": {
+		Provider:        "deepseek",
+		Name:            "deepseek-chat",
+		Temperature:     1.0,
+		MaxOutputTokens: 8192,
+	},
+	"ollama": {
+		Provider:        "ollama",
+		Name:            "llama3.2",
+		Temperature:     0.7,
+		MaxOutputTokens: 4096,
+	},
 }
 
 // ApplyPreset applies a model preset to the ModelConfig.

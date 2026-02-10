@@ -27,6 +27,7 @@ type GeminiClient struct {
 	rateLimiter       *ratelimit.Limiter
 	maxRetries        int            // Maximum number of retry attempts (default: 3)
 	retryDelay        time.Duration  // Initial delay between retries (default: 1s)
+	streamIdleTimeout time.Duration  // Max pause between stream chunks (default: 30s)
 	statusCallback    StatusCallback // Optional callback for status updates
 	systemInstruction string         // System-level instruction passed via API parameter
 	thinkingBudget    int32          // Thinking budget (0 = disabled)
@@ -76,12 +77,18 @@ func NewGeminiClient(ctx context.Context, cfg *config.Config) (Client, error) {
 		retryDelay = 1 * time.Second // Default: 1 second initial delay
 	}
 
+	streamIdleTimeout := cfg.API.Retry.StreamIdleTimeout
+	if streamIdleTimeout == 0 {
+		streamIdleTimeout = 30 * time.Second
+	}
+
 	return &GeminiClient{
-		client:     client,
-		model:      cfg.Model.Name,
-		config:     genConfig,
-		maxRetries: maxRetries,
-		retryDelay: retryDelay,
+		client:            client,
+		model:             cfg.Model.Name,
+		config:            genConfig,
+		maxRetries:        maxRetries,
+		retryDelay:        retryDelay,
+		streamIdleTimeout: streamIdleTimeout,
 	}, nil
 }
 
@@ -355,9 +362,20 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 		config.SystemInstruction = genai.NewContentFromText(sysInstruction, genai.RoleUser)
 	}
 	if thinkingBudget > 0 {
+		// Ensure MaxOutputTokens accommodates thinking + response text
+		minRequired := thinkingBudget + 4096
+		if config.MaxOutputTokens > 0 && config.MaxOutputTokens < minRequired {
+			config.MaxOutputTokens = minRequired
+		}
 		config.ThinkingConfig = &genai.ThinkingConfig{
 			IncludeThoughts: true,
 			ThinkingBudget:  Ptr(thinkingBudget),
+		}
+	} else {
+		// Explicitly disable thinking for models that enable it by default
+		// when ThinkingConfig is nil (e.g. Gemini 3 Flash)
+		config.ThinkingConfig = &genai.ThinkingConfig{
+			ThinkingBudget: Ptr(int32(0)),
 		}
 	}
 	if len(tools) > 0 {
@@ -369,9 +387,9 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
 
-	// Stream idle timeout and warning
-	const streamIdleTimeout = 30 * time.Second
-	const streamIdleWarning = 15 * time.Second
+	// Stream idle timeout (configurable) and warning
+	streamIdleTimeout := c.streamIdleTimeout
+	streamIdleWarning := streamIdleTimeout / 2
 
 	estimatedForGoroutine := estimatedTokens
 

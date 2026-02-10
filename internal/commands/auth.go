@@ -425,6 +425,11 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 	cfg.Model.Provider = newProvider
 	cfg.Model.Name = providerModels[newProvider]
 
+	// Apply MaxOutputTokens from preset if available for the new provider
+	if preset, ok := config.ModelPresets[newProvider]; ok {
+		cfg.Model.MaxOutputTokens = preset.MaxOutputTokens
+	}
+
 	if err := app.ApplyConfig(cfg); err != nil {
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}

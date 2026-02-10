@@ -21,14 +21,15 @@ const (
 
 // PlanStepState holds the state of a single plan step.
 type PlanStepState struct {
-	ID          int
-	Title       string
-	Description string
-	Status      PlanStepStatus
-	StartedAt   time.Time
-	CompletedAt time.Time
-	Output      string
-	Error       string
+	ID            int
+	Title         string
+	Description   string
+	Status        PlanStepStatus
+	StartedAt     time.Time
+	CompletedAt   time.Time
+	Output        string
+	Error         string
+	FilesModified int
 }
 
 // ActivityEntry represents a single activity log entry.
@@ -176,6 +177,17 @@ func (p *PlanProgressPanel) SetCurrentTool(toolName, toolInfo string) {
 	p.currentTool = toolName
 	p.currentInfo = toolInfo
 
+	// Track file modifications for current step
+	switch toolName {
+	case "write", "edit", "delete", "copy", "move":
+		for i := range p.steps {
+			if p.steps[i].ID == p.currentStepID {
+				p.steps[i].FilesModified++
+				break
+			}
+		}
+	}
+
 	// Add to activity log
 	msg := toolName
 	if toolInfo != "" {
@@ -309,29 +321,15 @@ func (p *PlanProgressPanel) View(width int) string {
 	// Steps
 	if !p.collapsed {
 		for _, step := range p.steps {
-			stepLine := p.renderStep(step, panelWidth-4)
-			content.WriteString(borderStyle.Render("│ "))
-			content.WriteString(stepLine)
-			padding := panelWidth - 3 - lipgloss.Width(stepLine)
-			if padding > 0 {
-				content.WriteString(strings.Repeat(" ", padding))
-			}
-			content.WriteString(borderStyle.Render(" │"))
-			content.WriteString("\n")
+			stepRendered := p.renderStep(step, panelWidth-4)
+			p.writeBoxLines(&content, borderStyle, stepRendered, panelWidth)
 		}
 	} else {
 		// Collapsed: show only current step
 		for _, step := range p.steps {
 			if step.Status == PlanStepInProgress {
-				stepLine := p.renderStep(step, panelWidth-4)
-				content.WriteString(borderStyle.Render("│ "))
-				content.WriteString(stepLine)
-				padding := panelWidth - 3 - lipgloss.Width(stepLine)
-				if padding > 0 {
-					content.WriteString(strings.Repeat(" ", padding))
-				}
-				content.WriteString(borderStyle.Render(" │"))
-				content.WriteString("\n")
+				stepRendered := p.renderStep(step, panelWidth-4)
+				p.writeBoxLines(&content, borderStyle, stepRendered, panelWidth)
 				break
 			}
 		}
@@ -427,6 +425,21 @@ func (p *PlanProgressPanel) View(width int) string {
 	return content.String()
 }
 
+// writeBoxLines writes a possibly multi-line rendered string inside the bordered box.
+func (p *PlanProgressPanel) writeBoxLines(content *strings.Builder, borderStyle lipgloss.Style, rendered string, panelWidth int) {
+	lines := strings.Split(rendered, "\n")
+	for _, line := range lines {
+		content.WriteString(borderStyle.Render("│ "))
+		content.WriteString(line)
+		padding := panelWidth - 3 - lipgloss.Width(line)
+		if padding > 0 {
+			content.WriteString(strings.Repeat(" ", padding))
+		}
+		content.WriteString(borderStyle.Render(" │"))
+		content.WriteString("\n")
+	}
+}
+
 // renderStep renders a single step with tree-style status icon.
 // Uses symbols: "✓" (completed), "→" (in progress), "○" (pending), "✗" (failed), "⊘" (skipped).
 func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string {
@@ -468,7 +481,12 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	if step.Status == PlanStepCompleted || step.Status == PlanStepFailed {
 		if !step.CompletedAt.IsZero() && !step.StartedAt.IsZero() {
 			duration := step.CompletedAt.Sub(step.StartedAt)
-			durationStr = " " + lipgloss.NewStyle().Foreground(ColorDim).Render("("+formatElapsed(duration)+")")
+			if step.FilesModified > 0 {
+				durationStr = " " + lipgloss.NewStyle().Foreground(ColorDim).Render(
+					fmt.Sprintf("(%s · %d files)", formatElapsed(duration), step.FilesModified))
+			} else {
+				durationStr = " " + lipgloss.NewStyle().Foreground(ColorDim).Render("("+formatElapsed(duration)+")")
+			}
 			maxTitleWidth -= lipgloss.Width(durationStr)
 		}
 	}
@@ -490,7 +508,31 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 		title = title[:maxTitleWidth-3] + "..."
 	}
 
-	return iconStyle.Render(icon) + " " + titleStyle.Render(title) + statusSuffix + durationStr
+	result := iconStyle.Render(icon) + " " + titleStyle.Render(title) + statusSuffix + durationStr
+
+	// Show description for in-progress steps
+	if step.Status == PlanStepInProgress && step.Description != "" {
+		desc := step.Description
+		if len(desc) > maxWidth-6 {
+			desc = desc[:maxWidth-9] + "..."
+		}
+		descStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+		result += "\n    " + descStyle.Render(desc)
+	}
+
+	// Show first line of output for completed steps
+	if step.Status == PlanStepCompleted && step.Output != "" {
+		summary := firstLine(step.Output)
+		if len(summary) > maxWidth-6 {
+			summary = summary[:maxWidth-9] + "..."
+		}
+		if summary != "" {
+			descStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+			result += "\n    " + descStyle.Render(summary)
+		}
+	}
+
+	return result
 }
 
 // renderProgressBar renders a visual progress bar.
@@ -512,6 +554,17 @@ func (p *PlanProgressPanel) renderProgressBar(filled, width int, progress float6
 		emptyStyle.Render(strings.Repeat("░", width-filled))
 
 	return bar
+}
+
+// firstLine returns the first non-empty line from text.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // formatElapsed formats a duration for display.

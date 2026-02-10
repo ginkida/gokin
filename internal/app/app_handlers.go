@@ -249,6 +249,12 @@ func (a *App) handleModelSelect(modelID string) {
 	}
 	a.config.Model.Name = modelID
 	a.config.Model.Provider = config.DetectProvider(modelID)
+
+	// Apply MaxOutputTokens from preset for new provider
+	if preset, ok := config.ModelPresets[a.config.Model.Provider]; ok {
+		a.config.Model.MaxOutputTokens = preset.MaxOutputTokens
+	}
+
 	if err := a.ApplyConfig(a.config); err != nil {
 		logging.Warn("failed to apply model selection", "error", err)
 	}

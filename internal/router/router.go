@@ -647,11 +647,11 @@ func (r *Router) selectThinkingBudget(analysis *TaskComplexity) int32 {
 		return 1024
 	case StrategyExecutor:
 		if analysis.Score >= 5 {
-			return 4096
+			return 2048
 		}
 		return 1024
 	case StrategySubAgent:
-		return 8192
+		return 4096
 	}
 	return 0
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"gokin/internal/config"
 	"gokin/internal/logging"
@@ -229,15 +230,22 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = DefaultGLMBaseURL
 	}
 
+	// GLM/Z.AI needs longer idle timeout — server pauses are common
+	streamIdleTimeout := 90 * time.Second
+	if cfg.API.Retry.StreamIdleTimeout > 0 {
+		streamIdleTimeout = cfg.API.Retry.StreamIdleTimeout
+	}
+
 	anthropicConfig := AnthropicConfig{
-		APIKey:         loadedKey.Value,
-		BaseURL:        baseURL,
-		Model:          modelID,
-		MaxTokens:      cfg.Model.MaxOutputTokens,
-		Temperature:    cfg.Model.Temperature,
-		StreamEnabled:  true,
-		EnableThinking: cfg.Model.EnableThinking,
-		ThinkingBudget: cfg.Model.ThinkingBudget,
+		APIKey:            loadedKey.Value,
+		BaseURL:           baseURL,
+		Model:             modelID,
+		MaxTokens:         cfg.Model.MaxOutputTokens,
+		Temperature:       cfg.Model.Temperature,
+		StreamEnabled:     true,
+		EnableThinking:    cfg.Model.EnableThinking,
+		ThinkingBudget:    cfg.Model.ThinkingBudget,
+		StreamIdleTimeout: streamIdleTimeout,
 		// Retry configuration from config
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
@@ -272,14 +280,15 @@ func newAnthropicClientForModel(cfg *config.Config, modelInfo ModelInfo) (Client
 	}
 
 	anthropicConfig := AnthropicConfig{
-		APIKey:         apiKey,
-		BaseURL:        baseURL,
-		Model:          modelInfo.ID,
-		MaxTokens:      cfg.Model.MaxOutputTokens,
-		Temperature:    cfg.Model.Temperature,
-		StreamEnabled:  true,
-		EnableThinking: cfg.Model.EnableThinking,
-		ThinkingBudget: cfg.Model.ThinkingBudget,
+		APIKey:            apiKey,
+		BaseURL:           baseURL,
+		Model:             modelInfo.ID,
+		MaxTokens:         cfg.Model.MaxOutputTokens,
+		Temperature:       cfg.Model.Temperature,
+		StreamEnabled:     true,
+		EnableThinking:    cfg.Model.EnableThinking,
+		ThinkingBudget:    cfg.Model.ThinkingBudget,
+		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout, // 0 = use default 30s
 		// Retry configuration from config
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
@@ -339,14 +348,15 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	anthropicConfig := AnthropicConfig{
-		APIKey:         loadedKey.Value,
-		BaseURL:        baseURL,
-		Model:          modelID,
-		MaxTokens:      cfg.Model.MaxOutputTokens,
-		Temperature:    cfg.Model.Temperature,
-		StreamEnabled:  true,
-		EnableThinking: cfg.Model.EnableThinking,
-		ThinkingBudget: cfg.Model.ThinkingBudget,
+		APIKey:            loadedKey.Value,
+		BaseURL:           baseURL,
+		Model:             modelID,
+		MaxTokens:         cfg.Model.MaxOutputTokens,
+		Temperature:       cfg.Model.Temperature,
+		StreamEnabled:     true,
+		EnableThinking:    cfg.Model.EnableThinking,
+		ThinkingBudget:    cfg.Model.ThinkingBudget,
+		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout, // 0 = use default 30s
 		// Retry configuration from config
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,

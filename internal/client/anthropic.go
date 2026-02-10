@@ -49,9 +49,10 @@ type AnthropicConfig struct {
 	Temperature   float32
 	StreamEnabled bool
 	// Retry configuration
-	MaxRetries  int           // Maximum number of retry attempts
-	RetryDelay  time.Duration // Initial delay between retries
-	HTTPTimeout time.Duration // HTTP request timeout
+	MaxRetries        int           // Maximum number of retry attempts
+	RetryDelay        time.Duration // Initial delay between retries
+	HTTPTimeout       time.Duration // HTTP request timeout
+	StreamIdleTimeout time.Duration // Max pause between SSE chunks (default: 30s)
 	// Extended Thinking
 	EnableThinking bool  // Enable extended thinking mode
 	ThinkingBudget int32 // Max tokens for thinking (0 = disabled)
@@ -92,7 +93,7 @@ func NewAnthropicClient(config AnthropicConfig) (*AnthropicClient, error) {
 		config.BaseURL = DefaultAnthropicBaseURL
 	}
 	if config.MaxTokens == 0 {
-		config.MaxTokens = 4096
+		config.MaxTokens = 8192
 	}
 	if config.MaxTokens < 1 {
 		return nil, fmt.Errorf("MaxTokens must be positive, got: %d", config.MaxTokens)
@@ -111,6 +112,9 @@ func NewAnthropicClient(config AnthropicConfig) (*AnthropicClient, error) {
 	}
 	if config.HTTPTimeout < time.Second {
 		return nil, fmt.Errorf("HTTPTimeout too short: %v (minimum: 1s)", config.HTTPTimeout)
+	}
+	if config.StreamIdleTimeout == 0 {
+		config.StreamIdleTimeout = 30 * time.Second // Default 30s between SSE chunks
 	}
 
 		// Create secure HTTP client with TLS 1.2+ enforcement
@@ -565,10 +569,10 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
 
-	// Stream idle timeout (30 seconds between chunks)
-	const streamIdleTimeout = 30 * time.Second
-	// Stream idle warning (15 seconds) - notify UI before timeout
-	const streamIdleWarning = 15 * time.Second
+	// Stream idle timeout (configurable, default 30s between chunks)
+	streamIdleTimeout := c.config.StreamIdleTimeout
+	// Stream idle warning - half of idle timeout
+	streamIdleWarning := streamIdleTimeout / 2
 
 	// Capture status callback for goroutine
 	c.mu.RLock()
