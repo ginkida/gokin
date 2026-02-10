@@ -80,49 +80,49 @@ func (t *GoroutineTracker) Close() {
 }
 
 // setupSignalHandler sets up signal handling for graceful shutdown.
+// First Ctrl+C cancels current operation; second Ctrl+C forces full shutdown.
 // Returns a cleanup function that should be called when the app exits.
 func (a *App) setupSignalHandler() func() {
-	sigChan := make(chan os.Signal, 1)
+	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 
 	// Done channel to signal goroutine termination
 	done := make(chan struct{})
 
 	go func() {
-		select {
-		case sig := <-sigChan:
-			logging.Debug("received signal", "signal", sig)
+		for {
+			select {
+			case sig := <-sigChan:
+				logging.Debug("received signal", "signal", sig)
 
-			// Start shutdown timer for forced exit
-			forceExitTimer := time.AfterFunc(ForcedShutdownTimeout, func() {
-				logging.Warn("forced shutdown due to timeout")
-				os.Exit(1)
-			})
-			defer forceExitTimer.Stop()
+				// SIGTERM/SIGQUIT — always full shutdown
+				if sig == syscall.SIGTERM || sig == syscall.SIGQUIT {
+					a.forceShutdown(sig)
+					return
+				}
 
-			// Create shutdown context with timeout
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
-			defer cancel()
+				// First Ctrl+C: cancel current processing if active
+				a.processingMu.Lock()
+				cancelFn := a.processingCancel
+				a.processingMu.Unlock()
 
-			// Perform graceful shutdown
-			a.gracefulShutdown(shutdownCtx)
+				if cancelFn != nil {
+					logging.Debug("cancelling current operation (first Ctrl+C)")
+					cancelFn()
+					// Wait for second signal for full shutdown
+					continue
+				}
 
-			// If the signal is SIGQUIT, exit with core dump
-			if sig == syscall.SIGQUIT {
-				logging.Info("exiting with core dump")
-				os.Exit(128 + int(syscall.SIGQUIT))
+				// No active processing — full shutdown
+				a.forceShutdown(sig)
+				return
+
+			case <-done:
+				return
+
+			case <-a.ctx.Done():
+				return
 			}
-
-			// Normal exit for other signals
-			os.Exit(0)
-
-		case <-done:
-			// Cleanup requested, exit goroutine
-			return
-
-		case <-a.ctx.Done():
-			// App context cancelled, exit goroutine
-			return
 		}
 	}()
 
@@ -131,6 +131,26 @@ func (a *App) setupSignalHandler() func() {
 		signal.Stop(sigChan)
 		close(done)
 	}
+}
+
+// forceShutdown performs a full graceful shutdown and exits.
+func (a *App) forceShutdown(sig os.Signal) {
+	forceExitTimer := time.AfterFunc(ForcedShutdownTimeout, func() {
+		logging.Warn("forced shutdown due to timeout")
+		os.Exit(1)
+	})
+	defer forceExitTimer.Stop()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
+	defer cancel()
+
+	a.gracefulShutdown(shutdownCtx)
+
+	if sig == syscall.SIGQUIT {
+		logging.Info("exiting with core dump")
+		os.Exit(128 + int(syscall.SIGQUIT))
+	}
+	os.Exit(0)
 }
 
 // gracefulShutdown performs a graceful shutdown with timeout.

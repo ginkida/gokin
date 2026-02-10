@@ -320,6 +320,11 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	case ".ipynb":
 		return t.readNotebook(filePath)
 	default:
+		// Detect binary files by checking first 512 bytes for null bytes
+		if isBinaryFile(filePath) {
+			return NewSuccessResult(fmt.Sprintf("Binary file (%s, %d bytes). Cannot display as text.", ext, info.Size())), nil
+		}
+
 		// Check if file is large
 		isLarge := info.Size() > LargeFileSizeMB*1024*1024
 		if isLarge {
@@ -522,3 +527,5 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 
 	return NewSuccessResult(content), nil
 }
+
+// Note: isBinaryFile is defined in grep.go and shared across the tools package.

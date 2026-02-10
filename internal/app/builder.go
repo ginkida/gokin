@@ -1198,6 +1198,7 @@ func (b *Builder) wireDependencies() error {
 			// Track tools used for response metadata
 			app.mu.Lock()
 			app.responseToolsUsed = append(app.responseToolsUsed, name)
+			app.currentToolContext = toolContextSummary(name, args)
 			app.mu.Unlock()
 
 			// Task 5.8: Record tool usage for pattern learning
@@ -1208,6 +1209,10 @@ func (b *Builder) wireDependencies() error {
 			}
 		},
 		OnToolEnd: func(name string, result tools.ToolResult) {
+			app.mu.Lock()
+			app.currentToolContext = ""
+			app.mu.Unlock()
+
 			if app.program != nil {
 				app.program.Send(ui.ToolResultMsg{Name: name, Content: result.Content})
 			}
@@ -1218,7 +1223,10 @@ func (b *Builder) wireDependencies() error {
 		OnToolProgress: func(name string, elapsed time.Duration) {
 			// Heartbeat for long-running tools - keeps UI timeout from triggering
 			if app.program != nil {
-				app.program.Send(ui.ToolProgressMsg{Name: name, Elapsed: elapsed})
+				app.mu.Lock()
+				ctx := app.currentToolContext
+				app.mu.Unlock()
+				app.program.Send(ui.ToolProgressMsg{Name: name, Elapsed: elapsed, CurrentStep: ctx})
 			}
 		},
 		OnError: func(err error) {

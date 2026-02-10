@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -195,6 +196,9 @@ type App struct {
 	toolPatterns []toolPattern // Detected repeating tool sequences
 	recentTools  []string      // Last 20 tool names used
 	messageCount int           // Total messages processed (for periodic hint injection)
+
+	// Current tool context for progress bar display
+	currentToolContext string
 
 	mu         sync.Mutex
 	running    bool
@@ -1081,6 +1085,40 @@ func (a *App) stripLegacySystemMessages() {
 		a.session.SetHistory(history[stripCount:])
 		logging.Info("stripped legacy system messages from restored session", "count", stripCount)
 	}
+}
+
+// toolContextSummary extracts a brief context string from tool args for progress display.
+// Examples: "read internal/app/app.go", "bash go build ./...", "grep pattern in *.go"
+func toolContextSummary(name string, args map[string]any) string {
+	switch name {
+	case "read":
+		if fp, ok := args["file_path"].(string); ok {
+			return filepath.Base(fp)
+		}
+	case "write", "edit":
+		if fp, ok := args["file_path"].(string); ok {
+			return filepath.Base(fp)
+		}
+	case "bash":
+		if cmd, ok := args["command"].(string); ok {
+			if len(cmd) > 30 {
+				cmd = cmd[:30] + "…"
+			}
+			return cmd
+		}
+	case "grep":
+		if p, ok := args["pattern"].(string); ok {
+			if len(p) > 20 {
+				p = p[:20] + "…"
+			}
+			return p
+		}
+	case "glob":
+		if p, ok := args["pattern"].(string); ok {
+			return p
+		}
+	}
+	return ""
 }
 
 // buildModelEnhancement returns model-specific prompt enhancements.

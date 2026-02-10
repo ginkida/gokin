@@ -911,6 +911,13 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
+	// Enrich error results with actionable suggestions
+	if !result.Success && result.Error != "" {
+		if suggestion := getErrorSuggestion(result.Error); suggestion != "" {
+			result.Error = result.Error + "\nSuggestion: " + suggestion
+		}
+	}
+
 	// Enrich empty successful results with diagnostic hints
 	if result.Success && result.Content == "" {
 		if hint := getEmptyResultHint(call.Name); hint != "" {
@@ -1156,6 +1163,29 @@ func getEmptyResultHint(toolName string) string {
 	}
 	if hint, ok := hints[toolName]; ok {
 		return hint
+	}
+	return ""
+}
+
+// errorSuggestions maps common error patterns to helpful suggestions.
+var errorSuggestions = []struct {
+	pattern    string
+	suggestion string
+}{
+	{"permission denied", "Try running with appropriate permissions or check file ownership."},
+	{"no such file", "Use glob to find the correct path."},
+	{"command not found", "Check if the tool is installed: which <command>."},
+	{"connection refused", "Check if the service is running."},
+	{"timed out", "Try a simpler operation or use run_in_background=true."},
+}
+
+// getErrorSuggestion returns a suggestion for a given error message.
+func getErrorSuggestion(errMsg string) string {
+	lower := strings.ToLower(errMsg)
+	for _, es := range errorSuggestions {
+		if strings.Contains(lower, es.pattern) {
+			return es.suggestion
+		}
 	}
 	return ""
 }
