@@ -95,25 +95,71 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.mu.Unlock()
 
 	// === IMPROVEMENT 1: Use Task Router for intelligent routing ===
+	// Auto-retry transient errors (timeout, connection) with backoff
+	const maxRequestRetries = 3
+	requestBackoff := []time.Duration{3 * time.Second, 8 * time.Second, 20 * time.Second}
+
 	var newHistory []*genai.Content
 	var response string
 	var err error
 
-	if a.taskRouter != nil {
-		// Route the task intelligently
-		newHistory, response, err = a.taskRouter.Execute(ctx, history, message)
+	for attempt := 0; attempt < maxRequestRetries; attempt++ {
+		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
 
-		// Log routing decision for debugging
-		if analysis := a.taskRouter.GetAnalysis(message); analysis != nil {
-			logging.Debug("task routed",
-				"complexity", analysis.Score,
-				"type", analysis.Type,
-				"strategy", analysis.Strategy,
-				"reasoning", analysis.Reasoning)
+		if a.taskRouter != nil {
+			// Route the task intelligently
+			newHistory, response, err = a.taskRouter.Execute(ctx, history, message)
+
+			// Log routing decision for debugging
+			if analysis := a.taskRouter.GetAnalysis(message); analysis != nil {
+				logging.Debug("task routed",
+					"complexity", analysis.Score,
+					"type", analysis.Type,
+					"strategy", analysis.Strategy,
+					"reasoning", analysis.Reasoning)
+			}
+		} else {
+			// Fallback to standard executor
+			newHistory, response, err = a.executor.Execute(ctx, history, message)
 		}
-	} else {
-		// Fallback to standard executor
-		newHistory, response, err = a.executor.Execute(ctx, history, message)
+
+		if err == nil {
+			break
+		}
+
+		// Don't retry if context cancelled (user abort)
+		if ctx.Err() != nil {
+			break
+		}
+
+		// Only retry transient errors; stop on last attempt
+		if !isRetryableError(err) || attempt >= maxRequestRetries-1 {
+			break
+		}
+
+		// Save partial history before retry (preserves tool side effects)
+		if len(newHistory) > len(history) {
+			a.session.SetHistory(newHistory)
+			if a.sessionManager != nil {
+				_ = a.sessionManager.SaveAfterMessage()
+			}
+		}
+
+		// Warn user about retry
+		backoff := requestBackoff[attempt]
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("\n⚠️ Request failed: %s\nRetrying in %v (%d/%d)...\n",
+				err.Error(), backoff, attempt+1, maxRequestRetries)))
+
+		backoffTimer := time.NewTimer(backoff)
+		select {
+		case <-backoffTimer.C:
+			continue
+		case <-ctx.Done():
+			backoffTimer.Stop()
+			err = ctx.Err()
+		}
+		break
 	}
 
 	if err != nil {
