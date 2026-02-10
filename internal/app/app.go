@@ -200,6 +200,10 @@ type App struct {
 	// Current tool context for progress bar display
 	currentToolContext string
 
+	// Error context for retry awareness
+	lastError     string    // Last error message for context on retry
+	lastErrorTime time.Time // When the last error occurred
+
 	mu         sync.Mutex
 	running    bool
 	processing bool // Guards against concurrent message processing

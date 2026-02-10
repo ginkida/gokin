@@ -290,6 +290,17 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 		}
 	}
 
+	// Proactive summarization when approaching message limit (sliding window)
+	if m.summarizer != nil && m.config.EnableAutoSummary {
+		maxHistory := config.DefaultMaxSessionHistory
+		if historyLen := len(history); historyLen > maxHistory*3/4 {
+			logging.Info("message count summarization triggered",
+				"history_len", historyLen,
+				"max_history", maxHistory)
+			m.backgroundOptimize(ctx)
+		}
+	}
+
 	return nil
 }
 

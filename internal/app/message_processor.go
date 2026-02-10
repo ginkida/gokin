@@ -86,6 +86,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// Get current history
 	history := a.session.GetHistory()
 
+	// Inject error context if retrying after a recent failure
+	a.mu.Lock()
+	if a.lastError != "" && time.Since(a.lastErrorTime) < 2*time.Minute {
+		message = fmt.Sprintf("[Note: previous attempt failed with: %s. The context from that attempt is preserved in history.]\n\n%s", a.lastError, message)
+		a.lastError = "" // Clear after use
+	}
+	a.mu.Unlock()
+
 	// === IMPROVEMENT 1: Use Task Router for intelligent routing ===
 	var newHistory []*genai.Content
 	var response string
@@ -109,6 +117,20 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	}
 
 	if err != nil {
+		// Save history even on error — preserves user message and any partial context.
+		// This prevents context loss when tools already executed with side effects.
+		if len(newHistory) > len(history) {
+			a.session.SetHistory(newHistory)
+			if a.sessionManager != nil {
+				_ = a.sessionManager.SaveAfterMessage()
+			}
+		}
+		// Store error for context injection on retry
+		a.mu.Lock()
+		a.lastError = err.Error()
+		a.lastErrorTime = time.Now()
+		a.mu.Unlock()
+
 		a.safeSendToProgram(ui.ErrorMsg(err))
 		return
 	}

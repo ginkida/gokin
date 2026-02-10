@@ -233,7 +233,8 @@ func (sr *StreamingResponse) Collect() (*Response, error) {
 
 	for chunk := range sr.Chunks {
 		if chunk.Error != nil {
-			return nil, chunk.Error
+			// Return accumulated partial response alongside the error
+			return resp, chunk.Error
 		}
 
 		resp.Text += chunk.Text

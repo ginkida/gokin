@@ -51,7 +51,7 @@ const (
 	DefaultContextSummarizationRatio = 0.5
 
 	// Session settings
-	DefaultMaxSessionHistory = 100
+	DefaultMaxSessionHistory = 200
 
 	// Memory settings
 	DefaultMaxMemoryEntries = 100

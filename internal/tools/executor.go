@@ -360,7 +360,16 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// Get response from model
 		resp, err := e.getModelResponse(ctx, history)
 		if err != nil {
-			// Error will be returned and displayed by UI - no need to call OnError here
+			// Preserve partial response in history if available
+			if resp != nil && resp.Text != "" {
+				partialContent := &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{genai.NewPartFromText(resp.Text)},
+				}
+				e.historyMu.Lock()
+				history = append(history, partialContent)
+				e.historyMu.Unlock()
+			}
 			return history, "", fmt.Errorf("model response error: %w", err)
 		}
 
@@ -408,30 +417,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				lastToolResult = ToolResult{Content: content, Success: success, Error: errMsg}
 			}
 
-			// Send function responses back to model
-			stream, err := e.client.SendFunctionResponse(ctx, history, results)
-			if err != nil {
-				return history, "", fmt.Errorf("function response error: %w", err)
-			}
-
-			// Collect the response
-			resp, err = e.collectStreamWithHandler(ctx, stream)
-			if err != nil {
-				return history, "", err
-			}
-
-			// Text-based tool call fallback for chained calls
-			if len(resp.FunctionCalls) == 0 && resp.Text != "" {
-				if fallbackClient, ok := e.client.(interface{ NeedsToolCallFallback() bool }); ok && fallbackClient.NeedsToolCallFallback() {
-					if parsed := client.ParseToolCallsFromText(resp.Text); len(parsed) > 0 {
-						resp.FunctionCalls = parsed
-						resp.Text = ""
-						logging.Info("fallback: parsed chained tool calls from text", "count", len(parsed))
-					}
-				}
-			}
-
-			// CRITICAL: Add function results to history for chained tool calls
+			// Add function results to history BEFORE sending to model.
+			// This ensures tool results are preserved even if the API call fails.
 			funcResultParts := make([]*genai.Part, len(results))
 			for j, result := range results {
 				funcResultParts[j] = genai.NewPartFromFunctionResponse(result.Name, result.Response)
@@ -445,6 +432,41 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			e.historyMu.Lock()
 			history = append(history, funcResultContent)
 			e.historyMu.Unlock()
+
+			// Send function responses back to model.
+			// Pass history without the just-appended tool results since
+			// all client implementations append results themselves.
+			stream, err := e.client.SendFunctionResponse(ctx, history[:len(history)-1], results)
+			if err != nil {
+				return history, "", fmt.Errorf("function response error: %w", err)
+			}
+
+			// Collect the response
+			resp, err = e.collectStreamWithHandler(ctx, stream)
+			if err != nil {
+				// Preserve partial response from chained tool call
+				if resp != nil && resp.Text != "" {
+					partialContent := &genai.Content{
+						Role:  genai.RoleModel,
+						Parts: []*genai.Part{genai.NewPartFromText(resp.Text)},
+					}
+					e.historyMu.Lock()
+					history = append(history, partialContent)
+					e.historyMu.Unlock()
+				}
+				return history, "", err
+			}
+
+			// Text-based tool call fallback for chained calls
+			if len(resp.FunctionCalls) == 0 && resp.Text != "" {
+				if fallbackClient, ok := e.client.(interface{ NeedsToolCallFallback() bool }); ok && fallbackClient.NeedsToolCallFallback() {
+					if parsed := client.ParseToolCallsFromText(resp.Text); len(parsed) > 0 {
+						resp.FunctionCalls = parsed
+						resp.Text = ""
+						logging.Info("fallback: parsed chained tool calls from text", "count", len(parsed))
+					}
+				}
+			}
 
 			// Add model response to history (with mutex protection)
 			modelContent = &genai.Content{
