@@ -421,6 +421,7 @@ func (b *Builder) isInGitRepo() bool {
 // initSession creates the chat session and context management.
 func (b *Builder) initSession() error {
 	b.session = chat.NewSession()
+	b.session.SetWorkDir(b.workDir)
 
 	b.projectInfo = appcontext.DetectProject(b.workDir)
 

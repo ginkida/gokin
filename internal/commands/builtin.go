@@ -267,7 +267,7 @@ type ResumeCommand struct{}
 
 func (c *ResumeCommand) Name() string        { return "resume" }
 func (c *ResumeCommand) Description() string { return "Resume a saved session" }
-func (c *ResumeCommand) Usage() string       { return "/resume <session_id>" }
+func (c *ResumeCommand) Usage() string       { return "/resume <session_id> [--force]" }
 func (c *ResumeCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategorySession,
@@ -280,7 +280,7 @@ func (c *ResumeCommand) GetMetadata() CommandMetadata {
 
 func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	if len(args) == 0 {
-		return "Usage: /resume <session_id>\nUse /sessions to list available sessions.", nil
+		return "Usage: /resume <session_id> [--force]\nUse /sessions to list available sessions.", nil
 	}
 
 	hm, err := app.GetHistoryManager()
@@ -289,9 +289,19 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	sessionID := args[0]
+	force := len(args) > 1 && args[1] == "--force"
+
 	state, err := hm.LoadFull(sessionID)
 	if err != nil {
 		return fmt.Sprintf("Failed to load session '%s': %v", sessionID, err), nil
+	}
+
+	// Warn if session is from a different project
+	currentDir := app.GetWorkDir()
+	if !force && state.WorkDir != "" && currentDir != "" &&
+		filepath.Clean(state.WorkDir) != filepath.Clean(currentDir) {
+		return fmt.Sprintf("Session '%s' was created in %s (current: %s).\nUse /resume %s --force to load anyway.",
+			sessionID, state.WorkDir, currentDir, sessionID), nil
 	}
 
 	session := app.GetSession()
@@ -312,7 +322,7 @@ type SessionsCommand struct{}
 
 func (c *SessionsCommand) Name() string        { return "sessions" }
 func (c *SessionsCommand) Description() string { return "List saved sessions" }
-func (c *SessionsCommand) Usage() string       { return "/sessions" }
+func (c *SessionsCommand) Usage() string       { return "/sessions [--all]" }
 func (c *SessionsCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategorySession,
@@ -336,9 +346,26 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 		return "No saved sessions found.", nil
 	}
 
+	workDir := app.GetWorkDir()
+	showAll := len(args) > 0 && args[0] == "--all"
+
 	var sb strings.Builder
-	sb.WriteString("Saved sessions:\n")
+	shown := 0
+
+	if showAll {
+		sb.WriteString("All saved sessions:\n")
+	} else {
+		sb.WriteString("Saved sessions (current project):\n")
+	}
+
 	for _, info := range sessions {
+		if !showAll && workDir != "" {
+			sessionDir := filepath.Clean(info.WorkDir)
+			if info.WorkDir == "" || sessionDir != filepath.Clean(workDir) {
+				continue
+			}
+		}
+
 		summary := info.Summary
 		if len(summary) > 50 {
 			summary = summary[:47] + "..."
@@ -346,7 +373,25 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 		if summary == "" {
 			summary = "(no summary)"
 		}
-		sb.WriteString(fmt.Sprintf("  %s (%d messages) - %s\n", info.ID, info.MessageCount, summary))
+
+		dirLabel := ""
+		if showAll && info.WorkDir != "" {
+			dirLabel = fmt.Sprintf(" [%s]", filepath.Base(info.WorkDir))
+		}
+
+		sb.WriteString(fmt.Sprintf("  %s (%d messages) - %s%s\n", info.ID, info.MessageCount, summary, dirLabel))
+		shown++
+	}
+
+	if shown == 0 {
+		if showAll {
+			return "No saved sessions found.", nil
+		}
+		return "No sessions for current project.\nUse /sessions --all to see sessions from all projects.", nil
+	}
+
+	if !showAll {
+		sb.WriteString("\nUse /sessions --all to see sessions from all projects.")
 	}
 
 	return sb.String(), nil
