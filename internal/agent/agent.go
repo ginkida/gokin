@@ -723,6 +723,28 @@ func (a *Agent) buildSystemPrompt() string {
 	sb.WriteString("4. Structure responses with markdown: headers, bullets, code blocks\n")
 	sb.WriteString("5. Include specific file:line references when discussing code\n\n")
 
+	// Tool limitations awareness
+	sb.WriteString("## Tool Limitations\n")
+	sb.WriteString("- bash: Output truncated at 30,000 characters. Use grep/head/tail for large outputs.\n")
+	sb.WriteString("- grep: Returns max 500 matches. Use more specific patterns for large codebases.\n")
+	sb.WriteString("- glob: Returns max 1000 files. Use specific patterns instead of `**/*`.\n")
+	sb.WriteString("- read: Returns max 2000 lines. Use offset/limit for large files.\n\n")
+
+	// Error recovery guidance
+	sb.WriteString("## Error Recovery\n")
+	sb.WriteString("- If a tool fails, analyze the error before retrying.\n")
+	sb.WriteString("- If read fails with \"not found\", use glob to find the correct path.\n")
+	sb.WriteString("- If bash fails, check if the command exists and try alternatives.\n")
+	sb.WriteString("- Never retry the exact same call more than once.\n\n")
+
+	// Effective patterns
+	sb.WriteString("## Effective Patterns\n")
+	sb.WriteString("- Find then read: glob to locate, then read specific files.\n")
+	sb.WriteString("- Search then edit: grep to find occurrences, then edit with context.\n")
+	sb.WriteString("- Verify after change: after write/edit, read to confirm.\n")
+	sb.WriteString("- For long-running operations (builds, tests), use run_in_background=true.\n")
+	sb.WriteString("- Check background task output periodically with task_output.\n\n")
+
 	switch a.Type {
 	case AgentTypeExplore:
 		sb.WriteString(a.buildExplorePrompt())
@@ -1059,6 +1081,8 @@ KEY RULES:
 - Be specific about file paths and line numbers
 - Consider existing patterns in the codebase
 - Break down into small, verifiable steps
+- Identify dependencies between steps (which steps must complete before others)
+- Mark steps that can be parallelized vs sequential
 - Identify potential risks upfront
 
 ═══════════════════════════════════════════════════════════════════════
