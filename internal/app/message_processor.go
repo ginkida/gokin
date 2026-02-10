@@ -19,6 +19,14 @@ import (
 
 // processMessageWithContext handles user messages with full context management.
 func (a *App) processMessageWithContext(ctx context.Context, message string) {
+	// Outer timeout to prevent indefinite hangs if API becomes unresponsive
+	timeout := 10 * time.Minute
+	if a.config.Plan.PlanningTimeout > 0 {
+		timeout = a.config.Plan.PlanningTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	defer func() {
 		a.mu.Lock()
 		a.processing = false

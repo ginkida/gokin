@@ -441,8 +441,12 @@ func (a *App) handleSubmit(message string) {
 		program := a.program
 		a.mu.Unlock()
 
-		// Save as pending message instead of discarding
+		// Save as pending message (replaces any previous pending)
 		a.pendingMu.Lock()
+		if a.pendingMessage != "" {
+			logging.Debug("pending message replaced — previous message dropped",
+				"dropped_len", len(a.pendingMessage))
+		}
 		a.pendingMessage = message
 		a.pendingMu.Unlock()
 

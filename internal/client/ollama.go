@@ -527,9 +527,14 @@ func (c *OllamaClient) PullModel(ctx context.Context, modelName string, progress
 }
 
 // Healthcheck verifies that the Ollama server is accessible.
+// Uses a short timeout to avoid long waits when server is down.
 func (c *OllamaClient) Healthcheck(ctx context.Context) error {
+	// Use 5s timeout for healthcheck — fail fast when server is unavailable
+	hcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	// Ollama SDK doesn't have an explicit ping, use List as healthcheck
-	_, err := c.client.List(ctx)
+	_, err := c.client.List(hcCtx)
 	if err != nil {
 		return c.wrapOllamaError(err)
 	}

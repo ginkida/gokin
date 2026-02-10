@@ -350,6 +350,13 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	var lastToolResult ToolResult // Track the last tool result for context
 
 	for i := 0; i < maxIterations; i++ {
+		// Check context cancellation between iterations
+		select {
+		case <-ctx.Done():
+			return history, finalText, ctx.Err()
+		default:
+		}
+
 		// Get response from model
 		resp, err := e.getModelResponse(ctx, history)
 		if err != nil {
@@ -887,11 +894,21 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	duration := time.Since(start)
 
 	if err != nil {
-		logging.Error("tool execution failed",
-			"tool", call.Name,
-			"error", err,
-			"duration", duration)
-		result = NewErrorResult(err.Error())
+		// Provide informative timeout message with tool name and duration
+		if errors.Is(err, context.DeadlineExceeded) {
+			errMsg := fmt.Sprintf("tool '%s' timed out after %v (limit: %v)", call.Name, duration.Round(time.Millisecond), e.timeout)
+			logging.Error("tool execution timed out",
+				"tool", call.Name,
+				"duration", duration,
+				"timeout", e.timeout)
+			result = NewErrorResult(errMsg)
+		} else {
+			logging.Error("tool execution failed",
+				"tool", call.Name,
+				"error", err,
+				"duration", duration)
+			result = NewErrorResult(err.Error())
+		}
 	}
 
 	// Enrich empty successful results with diagnostic hints

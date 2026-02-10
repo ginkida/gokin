@@ -156,6 +156,7 @@ func getSessionsDir() (string, error) {
 }
 
 // SaveFull saves a complete session state including all content.
+// Uses atomic write (tmp + rename) to prevent corruption on crash.
 func (m *HistoryManager) SaveFull(session *Session) error {
 	sessionsDir, err := getSessionsDir()
 	if err != nil {
@@ -175,9 +176,14 @@ func (m *HistoryManager) SaveFull(session *Session) error {
 		return err
 	}
 
-	// Write file (0600: only owner can read/write session data)
+	// Atomic write: write to temp file first, then rename
 	filename := filepath.Join(sessionsDir, session.ID+".json")
-	return os.WriteFile(filename, data, 0600)
+	tmpFilename := filename + ".tmp"
+
+	if err := os.WriteFile(tmpFilename, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmpFilename, filename)
 }
 
 // LoadFull loads a complete session state.

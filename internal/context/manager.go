@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gokin/internal/chat"
@@ -42,7 +43,7 @@ type ContextManager struct {
 	lastHistoryLen      int            // History length at last count
 
 	// Background summarization
-	summarizing     bool              // Whether summarization is in progress
+	summarizing     atomic.Bool       // Whether summarization is in progress (lock-free)
 	summarizeDone   chan struct{}      // Signal when summarization completes
 	lastSummaryDur  time.Duration     // Duration of last summarization
 
@@ -295,12 +296,12 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 // backgroundOptimize runs context optimization in a background goroutine.
 // Only one optimization runs at a time; concurrent calls are no-ops.
 func (m *ContextManager) backgroundOptimize(ctx context.Context) {
-	m.mu.Lock()
-	if m.summarizing {
-		m.mu.Unlock()
+	// Atomic CAS prevents concurrent summarization without holding the mutex
+	if !m.summarizing.CompareAndSwap(false, true) {
 		return // Already running
 	}
-	m.summarizing = true
+
+	m.mu.Lock()
 	m.summarizeDone = make(chan struct{})
 	m.mu.Unlock()
 
@@ -309,8 +310,8 @@ func (m *ContextManager) backgroundOptimize(ctx context.Context) {
 			if r := recover(); r != nil {
 				logging.Error("panic in background optimization", "error", r)
 			}
+			m.summarizing.Store(false)
 			m.mu.Lock()
-			m.summarizing = false
 			close(m.summarizeDone)
 			m.mu.Unlock()
 		}()
