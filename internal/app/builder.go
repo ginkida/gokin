@@ -496,7 +496,7 @@ func (b *Builder) initManagers() error {
 			p.Title, failedStep.ID, failedStep.Title, failedStep.Error)
 
 		onText := func(_ string) {} // discard streaming text
-		_, result, err := b.agentRunner.SpawnWithContext(ctx, "plan", prompt, 10, "", "", onText, false)
+		_, result, err := b.agentRunner.SpawnWithContext(ctx, "plan", prompt, 10, "", "", onText, false, nil)
 		if err != nil {
 			return nil, err
 		}

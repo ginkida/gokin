@@ -208,6 +208,7 @@ func (m *Manager) CreatePlan(title, description, request string) *Plan {
 
 	plan := NewPlan(title, description)
 	plan.Request = request
+	plan.WorkDir = m.workDir
 	m.currentPlan = plan
 	return plan
 }
@@ -690,13 +691,14 @@ func (m *Manager) SaveCurrentPlan() error {
 func (m *Manager) LoadPausedPlan() (*Plan, error) {
 	m.mu.RLock()
 	store := m.planStore
+	workDir := m.workDir
 	m.mu.RUnlock()
 
 	if store == nil {
 		return nil, fmt.Errorf("plan store not configured")
 	}
 
-	plan, err := store.LoadLast()
+	plan, err := store.LoadLast(workDir)
 	if err != nil {
 		return nil, err
 	}
@@ -749,13 +751,14 @@ func (m *Manager) ListSavedPlans() ([]PlanInfo, error) {
 func (m *Manager) ListResumablePlans() ([]PlanInfo, error) {
 	m.mu.RLock()
 	store := m.planStore
+	workDir := m.workDir
 	m.mu.RUnlock()
 
 	if store == nil {
 		return nil, fmt.Errorf("plan store not configured")
 	}
 
-	return store.ListResumable()
+	return store.ListResumable(workDir)
 }
 
 // DeleteSavedPlan deletes a plan from storage.
@@ -776,6 +779,7 @@ func (m *Manager) HasPausedPlan() bool {
 	m.mu.RLock()
 	plan := m.currentPlan
 	store := m.planStore
+	workDir := m.workDir
 	m.mu.RUnlock()
 
 	// Check current plan in memory
@@ -785,7 +789,7 @@ func (m *Manager) HasPausedPlan() bool {
 
 	// Check storage
 	if store != nil {
-		plans, err := store.ListResumable()
+		plans, err := store.ListResumable(workDir)
 		if err == nil && len(plans) > 0 {
 			return true
 		}

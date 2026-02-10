@@ -89,7 +89,8 @@ func (s *PlanStore) Load(planID string) (*Plan, error) {
 }
 
 // LoadLast loads the most recently updated plan that is resumable.
-func (s *PlanStore) LoadLast() (*Plan, error) {
+// If workDir is non-empty, only plans matching that directory (or plans without a WorkDir) are considered.
+func (s *PlanStore) LoadLast(workDir string) (*Plan, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -119,6 +120,12 @@ func (s *PlanStore) LoadLast() (*Plan, error) {
 
 		// Only consider resumable plans (paused or in_progress with pending steps)
 		if !s.isResumable(plan) {
+			continue
+		}
+
+		// Filter by working directory: skip plans from other directories
+		if workDir != "" && plan.WorkDir != "" &&
+			filepath.Clean(plan.WorkDir) != filepath.Clean(workDir) {
 			continue
 		}
 
@@ -203,6 +210,7 @@ func (s *PlanStore) List() ([]PlanInfo, error) {
 			Progress:    plan.Progress(),
 			CreatedAt:   plan.CreatedAt,
 			UpdatedAt:   plan.UpdatedAt,
+			WorkDir:     plan.WorkDir,
 			Request:     truncateString(plan.Request, 100),
 			IsResumable: s.isResumable(&plan),
 		})
@@ -217,7 +225,8 @@ func (s *PlanStore) List() ([]PlanInfo, error) {
 }
 
 // ListResumable returns only resumable plans.
-func (s *PlanStore) ListResumable() ([]PlanInfo, error) {
+// If workDir is non-empty, only plans matching that directory (or plans without a WorkDir) are returned.
+func (s *PlanStore) ListResumable(workDir string) ([]PlanInfo, error) {
 	all, err := s.List()
 	if err != nil {
 		return nil, err
@@ -225,9 +234,15 @@ func (s *PlanStore) ListResumable() ([]PlanInfo, error) {
 
 	var resumable []PlanInfo
 	for _, p := range all {
-		if p.IsResumable {
-			resumable = append(resumable, p)
+		if !p.IsResumable {
+			continue
 		}
+		// Filter by working directory
+		if workDir != "" && p.WorkDir != "" &&
+			filepath.Clean(p.WorkDir) != filepath.Clean(workDir) {
+			continue
+		}
+		resumable = append(resumable, p)
 	}
 
 	return resumable, nil

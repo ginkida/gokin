@@ -154,6 +154,7 @@ type (
 		Completed     int
 		Progress      float64 // 0.0 to 1.0
 		Status        string  // "in_progress", "completed", "failed"
+		SubStepInfo   string  // Sub-agent progress detail
 	}
 	// PlanCompleteMsg indicates a plan execution is complete.
 	PlanCompleteMsg struct {

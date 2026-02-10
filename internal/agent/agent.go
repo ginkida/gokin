@@ -88,6 +88,7 @@ type Agent struct {
 	// Tree planning (Phase 6)
 	treePlanner     *TreePlanner
 	activePlan      *PlanTree
+	lastPlanTree    *PlanTree // preserved after activePlan is cleared
 	planningMode    bool
 	requireApproval bool
 	planGoal        *PlanGoal
@@ -510,6 +511,9 @@ func (a *Agent) EnablePlanningMode(goal *PlanGoal) {
 func (a *Agent) DisablePlanningMode() {
 	a.planningMode = false
 	a.planGoal = nil
+	if a.activePlan != nil {
+		a.lastPlanTree = a.activePlan
+	}
 	a.activePlan = nil
 }
 
@@ -655,6 +659,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		// Update progress with failure
 		a.SetProgress(a.currentStep, a.totalSteps, "Failed: "+err.Error())
 
+		a.collectTreeMetrics(result)
 		return result, err
 	}
 
@@ -676,7 +681,44 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	// Update progress with completion
 	a.SetProgress(a.totalSteps, a.totalSteps, "Completed")
 
+	a.collectTreeMetrics(result)
 	return result, nil
+}
+
+// collectTreeMetrics gathers tree planner statistics into AgentResult.Metadata.
+func (a *Agent) collectTreeMetrics(result *AgentResult) {
+	tree := a.activePlan
+	if tree == nil {
+		tree = a.lastPlanTree
+	}
+	if tree == nil {
+		return
+	}
+	if result.Metadata == nil {
+		result.Metadata = make(map[string]interface{})
+	}
+	result.Metadata["tree_total_nodes"] = tree.TotalNodes
+	result.Metadata["tree_max_depth"] = tree.MaxDepth
+	result.Metadata["tree_expanded_nodes"] = tree.ExpandedNodes
+	result.Metadata["tree_replan_count"] = tree.ReplanCount
+
+	succeeded := len(tree.GetSucceededPath())
+	failed := 0
+	var countFailed func(n *PlanNode)
+	countFailed = func(n *PlanNode) {
+		if n.Status == PlanNodeFailed {
+			failed++
+		}
+		for _, child := range n.Children {
+			countFailed(child)
+		}
+	}
+	if tree.Root != nil {
+		countFailed(tree.Root)
+	}
+
+	result.Metadata["tree_succeeded_nodes"] = succeeded
+	result.Metadata["tree_failed_nodes"] = failed
 }
 
 // clearCallHistory clears the call history map to prevent memory leaks.
@@ -1216,6 +1258,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			if err != nil {
 				// No more actions in plan, check if completed
 				a.safeOnText("\n[Plan completed or no more actions available]\n")
+				a.lastPlanTree = a.activePlan
 				a.activePlan = nil // Exit planned mode
 			} else if len(actions) > 0 {
 				type parallelResult struct {
@@ -1278,6 +1321,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						if !nodeFound || node == nil {
 							logging.Warn("failed node not found in tree, switching to reactive mode",
 								"node_id", firstFailure.action.NodeID)
+							a.lastPlanTree = a.activePlan
 							a.activePlan = nil
 							continue
 						}
@@ -1294,11 +1338,13 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 						if err := a.treePlanner.Replan(ctx, a.activePlan, replanCtx); err != nil {
 							logging.Warn("replan failed", "error", err)
+							a.lastPlanTree = a.activePlan
 							a.activePlan = nil // Exit planned mode on replan failure
 						}
 					} else {
 						// Max replans exceeded or should not replan
 						a.safeOnText("\n[Plan failed, switching to reactive mode]\n")
+						a.lastPlanTree = a.activePlan
 						a.activePlan = nil
 					}
 				}

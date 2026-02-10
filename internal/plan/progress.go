@@ -9,4 +9,5 @@ type ProgressUpdate struct {
 	Completed     int
 	Progress      float64 // 0.0 to 1.0
 	Status        string  // "in_progress", "completed", "failed"
+	SubStepInfo   string  // Sub-agent progress detail, e.g. "Agent: 3/5 nodes, depth 2"
 }

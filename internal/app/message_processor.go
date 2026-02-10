@@ -908,7 +908,19 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		_, result, err = a.agentRunner.SpawnWithContext(
-			stepCtx, "general", stepPrompt, 30, "", projectCtx, onText, true)
+			stepCtx, "general", stepPrompt, 30, "", projectCtx, onText, true,
+			func(progress *agent.AgentProgress) {
+				a.safeSendToProgram(ui.PlanProgressMsg{
+					PlanID:        approvedPlan.ID,
+					CurrentStepID: step.ID,
+					CurrentTitle:  step.Title,
+					TotalSteps:    totalSteps,
+					Completed:     approvedPlan.CompletedCount(),
+					Progress:      approvedPlan.Progress(),
+					Status:        "in_progress",
+					SubStepInfo:   progress.FormatProgress(),
+				})
+			})
 
 		if err != nil {
 			errCat = plan.ClassifyError(err, err.Error())
@@ -1010,6 +1022,34 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 
 	a.planManager.CompleteStep(step.ID, output)
 
+	// Extract agent metrics from result metadata
+	if result.Metadata != nil {
+		metrics := &plan.StepAgentMetrics{
+			Duration: result.Duration,
+		}
+		if v, ok := result.Metadata["tree_total_nodes"].(int); ok {
+			metrics.TotalNodes = v
+		}
+		if v, ok := result.Metadata["tree_max_depth"].(int); ok {
+			metrics.MaxDepth = v
+		}
+		if v, ok := result.Metadata["tree_expanded_nodes"].(int); ok {
+			metrics.ExpandedNodes = v
+		}
+		if v, ok := result.Metadata["tree_replan_count"].(int); ok {
+			metrics.ReplanCount = v
+		}
+		if v, ok := result.Metadata["tree_succeeded_nodes"].(int); ok {
+			metrics.SucceededNodes = v
+		}
+		if v, ok := result.Metadata["tree_failed_nodes"].(int); ok {
+			metrics.FailedNodes = v
+		}
+		if metrics.TotalNodes > 0 {
+			step.AgentMetrics = metrics
+		}
+	}
+
 	// Store step result in SharedMemory for inter-step communication
 	if sharedMem != nil {
 		sharedMem.Write(
@@ -1086,6 +1126,14 @@ func (a *App) formatPlanSummary(p *plan.Plan, duration time.Duration) string {
 			sb.WriteString(fmt.Sprintf("  ⏸ Step %d: %s (paused)\n", step.ID, step.Title))
 		default:
 			sb.WriteString(fmt.Sprintf("  ○ Step %d: %s (pending)\n", step.ID, step.Title))
+		}
+		if step.AgentMetrics != nil {
+			m := step.AgentMetrics
+			fmt.Fprintf(&sb, "    Agent: %d nodes, depth %d", m.TotalNodes, m.MaxDepth)
+			if m.ReplanCount > 0 {
+				fmt.Fprintf(&sb, ", %d replans", m.ReplanCount)
+			}
+			sb.WriteString("\n")
 		}
 	}
 

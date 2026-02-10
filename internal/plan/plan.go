@@ -77,8 +77,20 @@ type Step struct {
 	MaxRetries  int           `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
 	Timeout     time.Duration `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
 	RetryCount  int           `json:"retry_count,omitempty"`   // Current retry count
-	TokensUsed  int           `json:"tokens_used,omitempty"`   // Tokens consumed by this step
-	Condition   string        `json:"condition,omitempty"`     // Condition: "step_N_failed", "step_N_succeeded"
+	TokensUsed   int               `json:"tokens_used,omitempty"`    // Tokens consumed by this step
+	Condition    string            `json:"condition,omitempty"`      // Condition: "step_N_failed", "step_N_succeeded"
+	AgentMetrics *StepAgentMetrics `json:"agent_metrics,omitempty"` // Metrics from sub-agent tree planner
+}
+
+// StepAgentMetrics contains metrics from sub-agent tree planner execution.
+type StepAgentMetrics struct {
+	TotalNodes     int           `json:"total_nodes,omitempty"`
+	MaxDepth       int           `json:"max_depth,omitempty"`
+	ExpandedNodes  int           `json:"expanded_nodes,omitempty"`
+	ReplanCount    int           `json:"replan_count,omitempty"`
+	SucceededNodes int           `json:"succeeded_nodes,omitempty"`
+	FailedNodes    int           `json:"failed_nodes,omitempty"`
+	Duration       time.Duration `json:"duration,omitempty"`
 }
 
 // Duration returns the step execution duration.
@@ -101,8 +113,9 @@ type Plan struct {
 	Status      Status    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	Request     string    `json:"request"` // Original user request
-	Version     int       `json:"version"` // Incremented on replan
+	Request     string    `json:"request"`              // Original user request
+	Version     int       `json:"version"`              // Incremented on replan
+	WorkDir     string    `json:"work_dir,omitempty"`   // Project directory this plan belongs to
 
 	// Context snapshot from planning conversation (preserved across session clear)
 	ContextSnapshot string `json:"context_snapshot,omitempty"`

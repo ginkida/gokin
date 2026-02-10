@@ -34,5 +34,14 @@ func renderPlanProgress(planProgress *PlanProgressMsg, width int, mutedStyle lip
 		progressText += fmt.Sprintf(" • %s", title)
 	}
 
+	// Show sub-agent progress if available
+	if planProgress.SubStepInfo != "" && width >= 120 {
+		info := planProgress.SubStepInfo
+		if len(info) > 30 {
+			info = info[:27] + "..."
+		}
+		progressText += fmt.Sprintf(" [%s]", info)
+	}
+
 	return lipgloss.NewStyle().Foreground(ColorPlan).Render("⚡ ") + mutedStyle.Render(progressText)
 }

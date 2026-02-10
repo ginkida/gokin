@@ -600,6 +600,7 @@ func (r *Runner) SpawnWithContext(
 	projectContext string,
 	onText func(string),
 	skipPermissions bool,
+	progressCallback ProgressCallback,
 ) (string, *AgentResult, error) {
 	at := ParseAgentType(agentType)
 	r.mu.RLock()
@@ -645,6 +646,11 @@ func (r *Runner) SpawnWithContext(
 	// Inject project context and streaming callback
 	agent.SetProjectContext(projectContext)
 	agent.SetOnText(onText)
+
+	// Wire progress callback for real-time sub-agent progress
+	if progressCallback != nil {
+		agent.SetProgressCallback(progressCallback)
+	}
 
 	// Wire sub-agent activity callback
 	r.mu.RLock()
