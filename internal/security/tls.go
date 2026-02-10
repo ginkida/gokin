@@ -151,14 +151,18 @@ func CreateSecureHTTPClient(cfg TLSConfig, timeout time.Duration) (*http.Client,
 	}
 
 	// Create HTTP transport with TLS configuration
+	// Use ResponseHeaderTimeout instead of http.Client.Timeout:
+	// Client.Timeout covers the ENTIRE transaction (connect → headers → body read),
+	// which kills SSE streaming that can last minutes. ResponseHeaderTimeout only
+	// limits the time waiting for the first response header — once headers arrive,
+	// the body (SSE stream) can be read indefinitely.
 	transport := &http.Transport{
 		TLSClientConfig: tlsCfg,
 		// Set reasonable defaults
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		// Disable HTTP/2 if needed (can be re-enabled)
-		// ForceAttemptHTTP2: false,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: timeout,
 	}
 
 	// Configure dialer with timeout
@@ -168,9 +172,11 @@ func CreateSecureHTTPClient(cfg TLSConfig, timeout time.Duration) (*http.Client,
 	}).DialContext
 
 	// Create HTTP client
+	// Note: Client.Timeout is intentionally NOT set — it would kill SSE streaming.
+	// Timeout is enforced via Transport.ResponseHeaderTimeout (connect → first header)
+	// and StreamIdleTimeout (pauses between SSE chunks) at the application level.
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
 	}
 
 	return client, nil

@@ -68,7 +68,9 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 
 	client := &GeminiOAuthClient{
 		httpClient: &http.Client{
-			Timeout: httpTimeout,
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: httpTimeout,
+			},
 		},
 		accessToken:  oauth.AccessToken,
 		refreshToken: oauth.RefreshToken,

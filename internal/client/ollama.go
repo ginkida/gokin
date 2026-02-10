@@ -96,20 +96,26 @@ func NewOllamaClient(config OllamaConfig) (*OllamaClient, error) {
 		}
 	}
 
-	// Create HTTP client with timeout and optional auth
+	// Create HTTP client with ResponseHeaderTimeout instead of Client.Timeout.
+	// Client.Timeout covers the entire transaction including body read, which
+	// kills SSE streaming. ResponseHeaderTimeout only limits connect → first header.
 	var httpClient *http.Client
 	if config.APIKey != "" {
 		// Add Authorization header for remote Ollama servers with auth
+		base := &http.Transport{
+			ResponseHeaderTimeout: config.HTTPTimeout,
+		}
 		httpClient = &http.Client{
-			Timeout: config.HTTPTimeout,
 			Transport: &authTransport{
-				base:   http.DefaultTransport,
+				base:   base,
 				apiKey: config.APIKey,
 			},
 		}
 	} else {
 		httpClient = &http.Client{
-			Timeout: config.HTTPTimeout,
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: config.HTTPTimeout,
+			},
 		}
 	}
 

@@ -424,6 +424,14 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 	return false
 }
 
+// isEOFError returns true if the error is an EOF (connection closed by server).
+func isEOFError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return containsLower(err.Error(), "eof")
+}
+
 // calculateBackoffWithJitter is a convenience wrapper around CalculateBackoff.
 func calculateBackoffWithJitter(baseDelay time.Duration, attempt int, maxDelay time.Duration) time.Duration {
 	return CalculateBackoff(baseDelay, attempt, maxDelay)
@@ -485,6 +493,13 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 
 		// Store error for potential retry
 		lastErr = err
+
+		// Close idle connections on EOF to force fresh TCP connection on retry.
+		// The server (e.g. Z.AI) may close keep-alive connections under load,
+		// and Go can reuse a broken connection for the next POST request.
+		if isEOFError(err) {
+			c.httpClient.CloseIdleConnections()
+		}
 
 		// Extract status code if available
 		var httpErr *HTTPError
