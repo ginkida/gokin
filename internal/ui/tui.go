@@ -33,6 +33,7 @@ type Model struct {
 	currentTool     string
 	currentToolInfo string // Brief info about current tool operation (e.g., file path)
 	toolStartTime   time.Time
+	processingLabel string // Status label between tool calls: "Thinking", "Analyzing", "Running agent"
 	todoItems       []string
 	workDir         string
 
@@ -1147,6 +1148,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
 		m.state = StateStreaming
+		m.processingLabel = "" // Text streaming is the feedback itself
 
 		// Mark response as started (no header in Claude Code style)
 		if !m.responseHeaderShown {
@@ -1160,6 +1162,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamStartTime = time.Now() // Reset timeout on tool activity
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
+		m.processingLabel = "" // Tool name takes over in status bar
 
 		// Mark response as started (no header in Claude Code style)
 		if !m.responseHeaderShown {
@@ -1239,12 +1242,18 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			} else {
 				m.currentTool = ""
 				m.currentToolInfo = ""
+				if m.processingLabel == "" {
+					m.processingLabel = "Analyzing"
+				}
 			}
 		} else {
 			// Fallback: no matching active call (shouldn't happen, but be safe)
 			m.handleToolResultWithInfo(msg.Content, msg.Name, "", time.Time{})
 			m.currentTool = ""
 			m.currentToolInfo = ""
+			if m.processingLabel == "" {
+				m.processingLabel = "Analyzing"
+			}
 		}
 
 		// Hide tool progress bar when no active tools remain
@@ -1276,6 +1285,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.state = StateInput
 		m.currentTool = ""
 		m.currentToolInfo = ""
+		m.processingLabel = ""
 		m.activeToolCalls = nil
 		m.streamStartTime = time.Time{}  // Reset timeout tracking
 		m.lastActivityTime = time.Time{} // Reset activity tracking
@@ -1549,6 +1559,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	// Sub-agent activity tracking
 	case SubAgentActivityMsg:
+		switch msg.Status {
+		case "start":
+			m.processingLabel = "Running agent"
+		case "complete", "failed":
+			m.processingLabel = ""
+		}
 		if m.activityFeed != nil {
 			switch msg.Status {
 			case "start":
@@ -1820,11 +1836,14 @@ func (m Model) View() string {
 				status += "  " + lipgloss.NewStyle().Foreground(durationColor).Render(format.Duration(toolElapsed))
 			}
 			builder.WriteString(status)
-		} else if m.state == StateProcessing {
-			// Thinking/Planning: ⠋ Thinking  5s
-			label := "Thinking"
-			if m.planningModeEnabled && !m.planProgressMode {
-				label = "Planning"
+		} else if m.state == StateProcessing || m.processingLabel != "" {
+			// Thinking/Planning/Analyzing: ⠋ Label  5s  [step 2/5]
+			label := m.processingLabel
+			if label == "" {
+				label = "Thinking"
+				if m.planningModeEnabled && !m.planProgressMode {
+					label = "Planning"
+				}
 			}
 			status := spinner + " " + dimStyle.Render(label)
 
