@@ -387,9 +387,8 @@ func DefaultConfig() *Config {
 		API: APIConfig{
 			Backend: "gemini",
 			Retry: RetryConfig{
-				MaxRetries:  3,
-				RetryDelay:  1 * time.Second,
-				HTTPTimeout: 120 * time.Second,
+				MaxRetries: 3,
+				RetryDelay: 1 * time.Second,
 			},
 		},
 		Model: ModelConfig{
