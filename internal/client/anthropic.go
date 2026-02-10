@@ -481,10 +481,19 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 			}
 		}
 
-		response, err := c.doStreamRequest(ctx, requestBody)
+		// Each attempt gets its own deadline so that a per-attempt timeout
+		// doesn't poison the parent context — retries get a fresh window.
+		// attemptCtx inherits from ctx: if the user cancels, all attempts stop.
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, c.config.HTTPTimeout)
+		response, err := c.doStreamRequest(attemptCtx, requestBody)
 		if err == nil {
+			// Don't cancel — the streaming response still reads from the
+			// connection through this context. It will be GC'd when the
+			// response body is closed.
+			_ = attemptCancel
 			return response, nil
 		}
+		attemptCancel()
 
 		// Don't retry if parent context is cancelled (user abort, agent timeout)
 		if ctx.Err() != nil {
