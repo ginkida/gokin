@@ -627,6 +627,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		}()
 
 		eventCount := 0
+		contentReceived := false
 		idleTimer := time.NewTimer(streamIdleTimeout)
 		defer idleTimer.Stop()
 
@@ -662,9 +663,9 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					continue waitLoop
 
 				case <-idleTimer.C:
-					logging.Warn("stream idle timeout exceeded", "timeout", streamIdleTimeout)
+					logging.Warn("stream idle timeout exceeded", "timeout", streamIdleTimeout, "partial", contentReceived)
 					chunks <- ResponseChunk{
-						Error: fmt.Errorf("stream idle timeout: no data received for %v", streamIdleTimeout),
+						Error: &ErrStreamIdleTimeout{Timeout: streamIdleTimeout, Partial: contentReceived},
 						Done:  true,
 					}
 					return
@@ -778,6 +779,9 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 					// Process event
 					chunk := c.processStreamEvent(event, accumulator)
+					if chunk.Text != "" {
+						contentReceived = true
+					}
 					if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 {
 						select {
 						case chunks <- chunk:

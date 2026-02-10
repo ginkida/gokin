@@ -231,7 +231,7 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	// GLM/Z.AI needs longer timeouts — server is slower than Anthropic
-	streamIdleTimeout := 120 * time.Second
+	streamIdleTimeout := 180 * time.Second
 	if cfg.API.Retry.StreamIdleTimeout > 0 {
 		streamIdleTimeout = cfg.API.Retry.StreamIdleTimeout
 	}

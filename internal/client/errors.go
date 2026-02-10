@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 )
 
 // APIError represents an API error with HTTP status code.
@@ -15,6 +16,25 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
+}
+
+// ErrStreamIdleTimeout indicates the SSE stream stalled (no data for configured timeout).
+type ErrStreamIdleTimeout struct {
+	Timeout time.Duration
+	Partial bool // true if some content was received before timeout
+}
+
+func (e *ErrStreamIdleTimeout) Error() string {
+	if e.Partial {
+		return fmt.Sprintf("stream idle timeout after partial response: no data for %v", e.Timeout)
+	}
+	return fmt.Sprintf("stream idle timeout: no data received for %v", e.Timeout)
+}
+
+// IsStreamIdleTimeout checks whether err is an ErrStreamIdleTimeout.
+func IsStreamIdleTimeout(err error) bool {
+	var sitErr *ErrStreamIdleTimeout
+	return errors.As(err, &sitErr)
 }
 
 // IsRetryableAPIError returns true if the API error has a retryable status code.

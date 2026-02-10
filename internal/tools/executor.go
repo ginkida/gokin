@@ -27,6 +27,8 @@ const (
 	MaxFunctionCallsPerResponse = 10
 	// MaxConcurrentToolExecutions limits parallel goroutines for tool execution.
 	MaxConcurrentToolExecutions = 5
+	// maxStreamRetries is the maximum number of retries for stream idle timeouts.
+	maxStreamRetries = 2
 )
 
 // ResultCompactor interface for compacting tool results.
@@ -348,6 +350,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	var finalText string
 	var toolsUsed []string        // Track which tools were used for smart fallback
 	var lastToolResult ToolResult // Track the last tool result for context
+	streamRetries := 0
 
 	for i := 0; i < maxIterations; i++ {
 		// Check context cancellation between iterations
@@ -360,6 +363,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// Get response from model
 		resp, err := e.getModelResponse(ctx, history)
 		if err != nil {
+			// Retry stream idle timeout if no partial content was received
+			var sitErr *client.ErrStreamIdleTimeout
+			if errors.As(err, &sitErr) && !sitErr.Partial && streamRetries < maxStreamRetries {
+				streamRetries++
+				if e.handler != nil && e.handler.OnWarning != nil {
+					e.handler.OnWarning(fmt.Sprintf("Stream stalled, retrying (%d/%d)...", streamRetries, maxStreamRetries))
+				}
+				continue // retry outer loop
+			}
 			// Preserve partial response in history if available
 			if resp != nil && resp.Text != "" {
 				partialContent := &genai.Content{
@@ -372,6 +384,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			}
 			return history, "", fmt.Errorf("model response error: %w", err)
 		}
+		streamRetries = 0 // reset on success
 
 		// Text-based tool call fallback for models without native function calling
 		if len(resp.FunctionCalls) == 0 && resp.Text != "" {
@@ -444,18 +457,37 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// Collect the response
 			resp, err = e.collectStreamWithHandler(ctx, stream)
 			if err != nil {
-				// Preserve partial response from chained tool call
-				if resp != nil && resp.Text != "" {
-					partialContent := &genai.Content{
-						Role:  genai.RoleModel,
-						Parts: []*genai.Part{genai.NewPartFromText(resp.Text)},
+				// Retry stream idle timeout if no partial content was received
+				var sitErr *client.ErrStreamIdleTimeout
+				if errors.As(err, &sitErr) && !sitErr.Partial && streamRetries < maxStreamRetries {
+					streamRetries++
+					if e.handler != nil && e.handler.OnWarning != nil {
+						e.handler.OnWarning(fmt.Sprintf("Stream stalled after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
 					}
-					e.historyMu.Lock()
-					history = append(history, partialContent)
-					e.historyMu.Unlock()
+					// Re-send function response
+					stream, err = e.client.SendFunctionResponse(ctx, history[:len(history)-1], results)
+					if err != nil {
+						return history, "", fmt.Errorf("function response retry error: %w", err)
+					}
+					resp, err = e.collectStreamWithHandler(ctx, stream)
+					if err != nil {
+						return history, "", err
+					}
+				} else {
+					// Preserve partial response from chained tool call
+					if resp != nil && resp.Text != "" {
+						partialContent := &genai.Content{
+							Role:  genai.RoleModel,
+							Parts: []*genai.Part{genai.NewPartFromText(resp.Text)},
+						}
+						e.historyMu.Lock()
+						history = append(history, partialContent)
+						e.historyMu.Unlock()
+					}
+					return history, "", err
 				}
-				return history, "", err
 			}
+			streamRetries = 0 // reset on success
 
 			// Text-based tool call fallback for chained calls
 			if len(resp.FunctionCalls) == 0 && resp.Text != "" {
