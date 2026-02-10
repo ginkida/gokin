@@ -1805,8 +1805,9 @@ func (m Model) View() string {
 		builder.WriteString("\n")
 	}
 
-	// Processing indicator — minimal braille spinner
-	if m.state == StateProcessing || m.state == StateStreaming {
+	// Processing indicator — minimal braille spinner (skip when tool progress bar is visible)
+	toolProgressVisible := m.toolProgressBar != nil && m.toolProgressBar.IsVisible()
+	if (m.state == StateProcessing || m.state == StateStreaming) && !toolProgressVisible {
 		dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
 		// Braille spinner
