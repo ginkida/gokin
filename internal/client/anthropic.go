@@ -406,6 +406,12 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 
 	// Only retry on specific network-related errors, not all errors
 	if err != nil {
+		// Typed check: HTTP client timeout wraps context.DeadlineExceeded
+		if errors.Is(err, context.DeadlineExceeded) {
+			return true
+		}
+
+		// String fallback for untyped errors
 		errStr := err.Error()
 		if strings.Contains(errStr, "timeout") ||
 			strings.Contains(errStr, "connection refused") ||
@@ -449,7 +455,7 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 						reason = "rate limit"
 					} else if strings.Contains(reason, "connection") {
 						reason = "connection error"
-					} else if strings.Contains(reason, "timeout") {
+					} else if strings.Contains(reason, "timeout") || strings.Contains(reason, "deadline exceeded") {
 						reason = "timeout"
 					} else if len(reason) > 50 {
 						reason = reason[:47] + "..."
@@ -470,6 +476,11 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 		response, err := c.doStreamRequest(ctx, requestBody)
 		if err == nil {
 			return response, nil
+		}
+
+		// Don't retry if parent context is cancelled (user abort, agent timeout)
+		if ctx.Err() != nil {
+			return nil, err
 		}
 
 		// Store error for potential retry

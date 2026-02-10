@@ -372,6 +372,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				}
 				continue // retry outer loop
 			}
+			// Retry transient request errors (timeout, connection) if parent context is still alive
+			if ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
+				streamRetries++
+				if e.handler != nil && e.handler.OnWarning != nil {
+					e.handler.OnWarning(fmt.Sprintf("Request failed, retrying (%d/%d)...", streamRetries, maxStreamRetries))
+				}
+				continue
+			}
 			// Preserve partial response in history if available
 			if resp != nil && resp.Text != "" {
 				partialContent := &genai.Content{
@@ -463,6 +471,21 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					streamRetries++
 					if e.handler != nil && e.handler.OnWarning != nil {
 						e.handler.OnWarning(fmt.Sprintf("Stream stalled after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
+					}
+					// Re-send function response
+					stream, err = e.client.SendFunctionResponse(ctx, history[:len(history)-1], results)
+					if err != nil {
+						return history, "", fmt.Errorf("function response retry error: %w", err)
+					}
+					resp, err = e.collectStreamWithHandler(ctx, stream)
+					if err != nil {
+						return history, "", err
+					}
+				} else if ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
+					// Retry transient request errors (timeout, connection) if parent context is still alive
+					streamRetries++
+					if e.handler != nil && e.handler.OnWarning != nil {
+						e.handler.OnWarning(fmt.Sprintf("Request failed after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
 					}
 					// Re-send function response
 					stream, err = e.client.SendFunctionResponse(ctx, history[:len(history)-1], results)
