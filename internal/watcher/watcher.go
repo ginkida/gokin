@@ -25,6 +25,7 @@ type Watcher struct {
 	done         chan struct{}
 	running      bool
 	stopOnce     sync.Once
+	wg           sync.WaitGroup
 }
 
 // NewWatcher creates a new file watcher for the specified directory.
@@ -86,6 +87,7 @@ func (w *Watcher) Start() error {
 	}
 
 	// Start event processing
+	w.wg.Add(2)
 	go w.processEvents()
 
 	// Start debounce processor
@@ -111,7 +113,9 @@ func (w *Watcher) Stop() error {
 	w.stopOnce.Do(func() {
 		close(w.done)
 	})
-	return w.fsWatcher.Close()
+	err := w.fsWatcher.Close()
+	w.wg.Wait()
+	return err
 }
 
 // addDirectories adds directories to the watcher up to maxWatches.
@@ -159,6 +163,7 @@ func (w *Watcher) addDirectories() error {
 
 // processEvents processes raw fsnotify events.
 func (w *Watcher) processEvents() {
+	defer w.wg.Done()
 	for {
 		select {
 		case <-w.done:
@@ -168,11 +173,11 @@ func (w *Watcher) processEvents() {
 				return
 			}
 			w.handleEvent(event)
-		case _, ok := <-w.fsWatcher.Errors:
+		case err, ok := <-w.fsWatcher.Errors:
 			if !ok {
 				return
 			}
-			// Log error but continue watching
+			logging.Warn("file watcher error", "error", err)
 		}
 	}
 }
@@ -222,6 +227,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 // processDebounce processes debounced events.
 func (w *Watcher) processDebounce() {
+	defer w.wg.Done()
 	ticker := time.NewTicker(time.Duration(w.debounceMs/2) * time.Millisecond)
 	defer ticker.Stop()
 
