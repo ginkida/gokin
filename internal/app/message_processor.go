@@ -27,11 +27,12 @@ const (
 
 // processMessageWithContext handles user messages with full context management.
 func (a *App) processMessageWithContext(ctx context.Context, message string) {
-	// Outer timeout to prevent indefinite hangs if API becomes unresponsive
+	// Outer timeout to prevent indefinite hangs if API becomes unresponsive.
+	// This covers the ENTIRE message processing cycle (multiple LLM calls,
+	// tool executions, etc.), not just a single LLM call.
+	// PlanningTimeout is for individual plan-step LLM calls (default 60s)
+	// and must NOT be used here — it would kill normal conversations.
 	timeout := 10 * time.Minute
-	if a.config.Plan.PlanningTimeout > 0 {
-		timeout = a.config.Plan.PlanningTimeout
-	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
