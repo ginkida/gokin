@@ -481,19 +481,16 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 			}
 		}
 
-		// Each attempt gets its own deadline so that a per-attempt timeout
-		// doesn't poison the parent context — retries get a fresh window.
-		// requestCtx bounds the HTTP phase (connect → headers); the parent
-		// ctx is passed separately for SSE streaming which can run much longer.
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, c.config.HTTPTimeout)
-		response, err := c.doStreamRequest(attemptCtx, ctx, requestBody)
+		// Per-attempt timeout is handled at the Transport level:
+		// - DialContext.Timeout (30s) for TCP connect
+		// - TLSHandshakeTimeout (10s) for TLS
+		// - ResponseHeaderTimeout (HTTPTimeout) for waiting for first header
+		// Each http.Client.Do() gets fresh transport timeouts automatically.
+		// The parent ctx governs the overall lifetime including SSE streaming.
+		response, err := c.doStreamRequest(ctx, requestBody)
 		if err == nil {
-			// Cancel the attempt context — streaming uses the parent ctx,
-			// so the per-attempt deadline is no longer needed.
-			attemptCancel()
 			return response, nil
 		}
-		attemptCancel()
 
 		// Don't retry if parent context is cancelled (user abort, agent timeout)
 		if ctx.Err() != nil {
@@ -503,10 +500,9 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 		// Store error for potential retry
 		lastErr = err
 
-		// Close idle connections on EOF to force fresh TCP connection on retry.
-		// The server (e.g. Z.AI) may close keep-alive connections under load,
-		// and Go can reuse a broken connection for the next POST request.
-		if isEOFError(err) {
+		// Close idle connections on EOF or timeout to force fresh TCP connection
+		// on retry — stale/broken connections shouldn't be reused.
+		if isEOFError(err) || errors.Is(err, context.DeadlineExceeded) {
 			c.httpClient.CloseIdleConnections()
 		}
 
@@ -528,10 +524,10 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 }
 
 // doStreamRequest performs a single streaming request attempt.
-// requestCtx bounds the HTTP phase (connect, TLS, headers) and should carry
-// a per-attempt timeout. streamCtx is the caller's long-lived context used
-// for the SSE stream — it must NOT have a short deadline.
-func (c *AnthropicClient) doStreamRequest(requestCtx, streamCtx context.Context, requestBody map[string]interface{}) (*StreamingResponse, error) {
+// Per-attempt timeouts are enforced at the Transport level (DialContext,
+// TLSHandshakeTimeout, ResponseHeaderTimeout). The ctx governs the overall
+// lifetime of the request and SSE stream.
+func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[string]interface{}) (*StreamingResponse, error) {
 	// Marshal request body
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
@@ -568,7 +564,7 @@ func (c *AnthropicClient) doStreamRequest(requestCtx, streamCtx context.Context,
 
 	logging.Debug("anthropic API request", "url", url, "model", c.config.Model)
 
-	req, err := http.NewRequestWithContext(requestCtx, "POST", url, bytes.NewReader(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -621,7 +617,7 @@ func (c *AnthropicClient) doStreamRequest(requestCtx, streamCtx context.Context,
 	// unblocking any blocked scanner.Scan() call.
 	go func() {
 		select {
-		case <-streamCtx.Done():
+		case <-ctx.Done():
 			resp.Body.Close()
 		case <-done:
 			// Stream finished normally, nothing to do
@@ -658,7 +654,7 @@ func (c *AnthropicClient) doStreamRequest(requestCtx, streamCtx context.Context,
 					if !ok {
 						return
 					}
-				case <-streamCtx.Done():
+				case <-ctx.Done():
 					return
 				}
 			}
@@ -680,11 +676,11 @@ func (c *AnthropicClient) doStreamRequest(requestCtx, streamCtx context.Context,
 			for {
 				// Wait for scan result with timeout
 				select {
-				case <-streamCtx.Done():
+				case <-ctx.Done():
 					logging.Debug("context cancelled, stopping stream processing")
 					// Non-blocking send - channel might be full or receiver gone
 					select {
-					case chunks <- ResponseChunk{Error: streamCtx.Err(), Done: true}:
+					case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
 					default:
 					}
 					return
@@ -781,7 +777,7 @@ func (c *AnthropicClient) doStreamRequest(requestCtx, streamCtx context.Context,
 						} else {
 							select {
 							case chunks <- ResponseChunk{Done: true}:
-							case <-streamCtx.Done():
+							case <-ctx.Done():
 								return
 							}
 						}
@@ -823,7 +819,7 @@ func (c *AnthropicClient) doStreamRequest(requestCtx, streamCtx context.Context,
 					if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 {
 						select {
 						case chunks <- chunk:
-						case <-streamCtx.Done():
+						case <-ctx.Done():
 							logging.Debug("context cancelled during chunk send")
 							return
 						}

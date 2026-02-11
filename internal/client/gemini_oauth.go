@@ -402,19 +402,16 @@ func (c *GeminiOAuthClient) generateContentStream(ctx context.Context, contents 
 			}
 		}
 
-		// Each attempt gets its own deadline so that a per-attempt timeout
-		// doesn't poison the parent context — retries get a fresh window.
-		// requestCtx bounds the HTTP phase (connect → headers); the parent
-		// ctx is passed separately for SSE streaming which can run much longer.
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, c.httpTimeout)
-		response, err := c.doGenerateContentStream(attemptCtx, ctx, contents)
+		// Per-attempt timeout is handled at the Transport level:
+		// - DialContext.Timeout (30s) for TCP connect
+		// - TLSHandshakeTimeout (10s) for TLS
+		// - ResponseHeaderTimeout (httpTimeout) for waiting for first header
+		// Each http.Client.Do() gets fresh transport timeouts automatically.
+		// The parent ctx governs the overall lifetime including SSE streaming.
+		response, err := c.doGenerateContentStream(ctx, contents)
 		if err == nil {
-			// Cancel the attempt context — streaming uses the parent ctx,
-			// so the per-attempt deadline is no longer needed.
-			attemptCancel()
 			return response, nil
 		}
-		attemptCancel()
 
 		// Don't retry if parent context is cancelled
 		if ctx.Err() != nil {
@@ -426,9 +423,9 @@ func (c *GeminiOAuthClient) generateContentStream(ctx context.Context, contents 
 			return nil, err
 		}
 
-		// Close idle connections on EOF to force a fresh TCP connection on
-		// retry — the server may have closed keep-alive connections.
-		if isEOFError(err) {
+		// Close idle connections on EOF or timeout to force a fresh TCP
+		// connection on retry — stale/broken connections shouldn't be reused.
+		if isEOFError(err) || errors.Is(err, context.DeadlineExceeded) {
 			c.httpClient.CloseIdleConnections()
 		}
 
@@ -439,11 +436,11 @@ func (c *GeminiOAuthClient) generateContentStream(ctx context.Context, contents 
 }
 
 // doGenerateContentStream performs a single streaming request.
-// requestCtx bounds the HTTP phase (connect, TLS, headers) and should carry
-// a per-attempt timeout. streamCtx is the caller's long-lived context used
-// for the SSE stream — it must NOT have a short deadline.
-func (c *GeminiOAuthClient) doGenerateContentStream(requestCtx, streamCtx context.Context, contents []*genai.Content) (*StreamingResponse, error) {
-	if err := c.ensureValidToken(requestCtx); err != nil {
+// Per-attempt timeouts are enforced at the Transport level (DialContext,
+// TLSHandshakeTimeout, ResponseHeaderTimeout). The ctx governs the overall
+// lifetime of the request and SSE stream.
+func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, contents []*genai.Content) (*StreamingResponse, error) {
+	if err := c.ensureValidToken(ctx); err != nil {
 		return nil, err
 	}
 
@@ -451,7 +448,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(requestCtx, streamCtx contex
 	var estimatedTokens int64
 	if c.rateLimiter != nil {
 		estimatedTokens = ratelimit.EstimateTokensFromContents(len(contents), 500)
-		if err := c.rateLimiter.AcquireWithContext(requestCtx, estimatedTokens); err != nil {
+		if err := c.rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
 			if c.statusCallback != nil {
 				c.statusCallback.OnRateLimit(5 * time.Second)
 			}
@@ -479,7 +476,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(requestCtx, streamCtx contex
 		return nil, fmt.Errorf("no project ID available")
 	}
 
-	req, err := http.NewRequestWithContext(requestCtx, "POST", url, bytes.NewReader(reqJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqJSON))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -495,6 +492,15 @@ func (c *GeminiOAuthClient) doGenerateContentStream(requestCtx, streamCtx contex
 	if err != nil {
 		if c.rateLimiter != nil && estimatedTokens > 0 {
 			c.rateLimiter.ReturnTokens(1, estimatedTokens)
+		}
+		// Log detailed error info for debugging connection issues
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			logging.Warn("OAuth HTTP request failed",
+				"timeout", netErr.Timeout(),
+				"error", err)
+		} else {
+			logging.Warn("OAuth HTTP request failed", "error", err)
 		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -512,7 +518,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(requestCtx, streamCtx contex
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
 
-	go c.processSSEStream(streamCtx, resp.Body, chunks, done, estimatedTokens)
+	go c.processSSEStream(ctx, resp.Body, chunks, done, estimatedTokens)
 
 	return &StreamingResponse{
 		Chunks: chunks,
