@@ -354,7 +354,13 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 		return ""
 	}
 
-	return dimStyle.Render(strings.Join(parts, " · "))
+	content := strings.Join(parts, " · ")
+
+	// Framed footer: ─── content ───
+	leftDash := strings.Repeat("─", 3)
+	rightDash := strings.Repeat("─", 3)
+
+	return dimStyle.Render(leftDash+" ") + dimStyle.Render(content) + dimStyle.Render(" "+rightDash)
 }
 
 // AppendOutput appends text to the output.

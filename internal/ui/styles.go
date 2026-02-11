@@ -471,19 +471,27 @@ func (s *Styles) FormatToolExecuting(name string, args map[string]any) string {
 }
 
 // FormatToolExecutingBlock formats a tool execution as a compact line.
-// Format: ◦ ToolName(args)
+// Format: ▸ Read /path/to/file.go  (per-tool colored icon)
 func (s *Styles) FormatToolExecutingBlock(name string, args map[string]any) string {
-	bulletStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	nameStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	argsStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	// Per-tool colored icon (using existing ToolIcons + GetToolIconColor)
+	icon := GetToolIcon(name)
+	iconColor := GetToolIconColor(name)
+	iconStyle := lipgloss.NewStyle().Foreground(iconColor).Bold(true)
+
+	// Tool name — same color as icon but not bold
+	nameStyle := lipgloss.NewStyle().Foreground(iconColor)
+
+	// Args — soft white, not gray (more readable)
+	argsStyle := lipgloss.NewStyle().Foreground(ColorText)
 
 	var result strings.Builder
-	result.WriteString(bulletStyle.Render("◦ "))
+	result.WriteString(iconStyle.Render(icon + " "))
 	result.WriteString(nameStyle.Render(capitalizeToolName(name)))
 
 	argsStr := buildClaudeCodeArgs(name, args)
 	if argsStr != "" {
-		result.WriteString(argsStyle.Render("(" + argsStr + ")"))
+		result.WriteString(" ")
+		result.WriteString(argsStyle.Render(argsStr))
 	}
 
 	return result.String()

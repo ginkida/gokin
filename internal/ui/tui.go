@@ -204,6 +204,10 @@ type Model struct {
 	retryAttempt       int
 	retryMax           int
 
+	// Error dedup
+	lastErrorMsg   string // Last error message for dedup
+	lastErrorCount int    // Consecutive repeat count
+
 	// Copy support: track last AI response
 	lastResponseText   string           // Last AI response text (saved on ResponseDoneMsg)
 	currentResponseBuf *strings.Builder // Accumulates current streaming response (pointer to survive Bubble Tea copies)
@@ -1267,6 +1271,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			}
 		}
 
+	case InlineDiffMsg:
+		m.renderInlineDiff(msg)
+
 	case ToolProgressMsg:
 		// Reset timeout on progress heartbeat (keeps UI alive during long operations)
 		m.streamStartTime = time.Now()
@@ -1291,6 +1298,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Time{} // Reset activity tracking
 		m.slowWarningShown = false       // Reset slow warning
 		m.responseHeaderShown = false    // Reset for next response
+		m.lastErrorMsg = ""              // Reset error dedup
+		m.lastErrorCount = 0
 		if m.currentResponseBuf.Len() > 0 {
 			m.lastResponseText = m.currentResponseBuf.String()
 			m.currentResponseBuf.Reset()
@@ -1319,11 +1328,18 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.currentResponseBuf.Reset()    // Discard partial response on error
 		m.output.FlushStream()          // Flush any remaining streamed content
 
-		// Use enhanced error guidance system
 		errStr := msg.Error()
-		m.output.AppendLine("")
-		m.output.AppendLine(FormatErrorWithGuidance(m.styles, errStr))
-		m.output.AppendLine("")
+		if errStr == m.lastErrorMsg {
+			m.lastErrorCount++
+			dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+			m.output.AppendLine(dimStyle.Render(fmt.Sprintf("  ✗ Same error repeated (%dx)", m.lastErrorCount+1)))
+		} else {
+			m.lastErrorMsg = errStr
+			m.lastErrorCount = 0
+			m.output.AppendLine("")
+			m.output.AppendLine(FormatErrorWithGuidance(m.styles, errStr))
+			m.output.AppendLine("")
+		}
 		cmds = append(cmds, m.input.Focus())
 
 	case TodoUpdateMsg:
@@ -1576,9 +1592,31 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				// Tool completed, but agent continues
 				m.activityFeed.UpdateSubAgentTool(msg.AgentID, "", nil)
 			case "complete":
+				var elapsed time.Duration
+				if state := m.activityFeed.GetSubAgentState(msg.AgentID); state != nil {
+					elapsed = time.Since(state.StartTime)
+				}
 				m.activityFeed.CompleteSubAgent(msg.AgentID, true, "")
+				checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+				typeStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+				durStyle := lipgloss.NewStyle().Foreground(ColorDim)
+				connStyle := lipgloss.NewStyle().Foreground(ColorDim)
+				summary := connStyle.Render("  ↳ ") + typeStyle.Render(msg.AgentType) + " " +
+					checkStyle.Render("✓") + "  " + durStyle.Render(format.Duration(elapsed))
+				m.output.AppendLine(summary)
 			case "failed":
+				var elapsed time.Duration
+				if state := m.activityFeed.GetSubAgentState(msg.AgentID); state != nil {
+					elapsed = time.Since(state.StartTime)
+				}
 				m.activityFeed.CompleteSubAgent(msg.AgentID, false, "")
+				crossStyle := lipgloss.NewStyle().Foreground(ColorError)
+				typeStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+				durStyle := lipgloss.NewStyle().Foreground(ColorDim)
+				connStyle := lipgloss.NewStyle().Foreground(ColorDim)
+				summary := connStyle.Render("  ↳ ") + typeStyle.Render(msg.AgentType) + " " +
+					crossStyle.Render("✗") + "  " + durStyle.Render(format.Duration(elapsed))
+				m.output.AppendLine(summary)
 			}
 		}
 
@@ -1710,10 +1748,11 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 		}
 	}
 
-	// Append summary to the tool call line: "  summary    duration"
+	// Summary with connector: "  ⎿  summary  duration"
 	if summary != "" || dur != "" {
+		connStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		var summaryLine strings.Builder
-		summaryLine.WriteString("  ")
+		summaryLine.WriteString(connStyle.Render("  ⎿  "))
 		if summary != "" {
 			summaryLine.WriteString(dimStyle.Render(summary))
 		}
@@ -1814,11 +1853,14 @@ func (m Model) View() string {
 		spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		elapsed := time.Since(m.streamStartTime)
 		frameIdx := int(elapsed.Milliseconds()/80) % len(spinnerFrames)
-		spinner := dimStyle.Render(spinnerFrames[frameIdx])
 
 		if m.currentTool != "" {
-			// Tool execution: ⠋ bash  go build ./...  3.2s
-			toolNameStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+			// Tool execution: spinner + name in tool's color
+			toolColor := GetToolIconColor(m.currentTool)
+			spinnerStyle := lipgloss.NewStyle().Foreground(toolColor)
+			spinner := spinnerStyle.Render(spinnerFrames[frameIdx])
+
+			toolNameStyle := lipgloss.NewStyle().Foreground(toolColor)
 			status := spinner + " " + toolNameStyle.Render(m.currentTool)
 
 			if m.currentToolInfo != "" {
@@ -1838,7 +1880,11 @@ func (m Model) View() string {
 			}
 			builder.WriteString(status)
 		} else if m.state == StateProcessing || m.processingLabel != "" {
-			// Thinking/Planning/Analyzing: ⠋ Label  5s  [step 2/5]
+			// Thinking/Planning/Analyzing: spinner in primary color, label in muted
+			spinnerStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+			spinner := spinnerStyle.Render(spinnerFrames[frameIdx])
+			labelStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
 			label := m.processingLabel
 			if label == "" {
 				label = "Thinking"
@@ -1846,7 +1892,7 @@ func (m Model) View() string {
 					label = "Planning"
 				}
 			}
-			status := spinner + " " + dimStyle.Render(label)
+			status := spinner + " " + labelStyle.Render(label)
 
 			// Show elapsed after 3 seconds
 			if elapsed >= 3*time.Second {
@@ -1862,7 +1908,9 @@ func (m Model) View() string {
 			}
 			builder.WriteString(status)
 		} else {
-			// Streaming: just the spinner, content is the feedback
+			// Streaming: just the spinner in primary color, content is the feedback
+			spinnerStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+			spinner := spinnerStyle.Render(spinnerFrames[frameIdx])
 			builder.WriteString(spinner)
 		}
 		builder.WriteString("\n")
@@ -2072,6 +2120,32 @@ func (m *Model) handleTaskProgress(msg TaskProgressEvent) {
 }
 
 // renderProgressBar renders a simple progress bar.
+func (m *Model) renderInlineDiff(msg InlineDiffMsg) {
+	oldLines := strings.Split(msg.OldText, "\n")
+	newLines := strings.Split(msg.NewText, "\n")
+
+	// Skip large diffs — they'll use fullscreen preview
+	if len(oldLines)+len(newLines) > 20 {
+		return
+	}
+
+	connStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	removedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+	addedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+
+	m.output.AppendLine(connStyle.Render("  ⎿  diff:"))
+	for _, line := range oldLines {
+		if line != "" {
+			m.output.AppendLine("    " + removedStyle.Render("- "+line))
+		}
+	}
+	for _, line := range newLines {
+		if line != "" {
+			m.output.AppendLine("    " + addedStyle.Render("+ "+line))
+		}
+	}
+}
+
 func (m *Model) renderProgressBar(progress float64, width int) string {
 	filled := int(progress * float64(width))
 	if filled > width {

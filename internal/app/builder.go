@@ -1286,6 +1286,15 @@ func (b *Builder) wireDependencies() error {
 				app.program.Send(ui.ErrorMsg(err))
 			}
 		},
+		OnInlineDiff: func(filePath, oldText, newText string) {
+			if app.program != nil {
+				app.program.Send(ui.InlineDiffMsg{
+					FilePath: filePath,
+					OldText:  oldText,
+					NewText:  newText,
+				})
+			}
+		},
 	})
 
 	// Set up TUI callbacks

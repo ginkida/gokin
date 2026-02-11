@@ -165,6 +165,19 @@ func (p *ActivityFeedPanel) UpdateSubAgentTool(agentID, toolName string, args ma
 	}
 }
 
+// GetSubAgentState returns the state for a sub-agent (read-only snapshot).
+func (p *ActivityFeedPanel) GetSubAgentState(agentID string) *SubAgentState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if state, ok := p.subAgentActivities[agentID]; ok {
+		// Return a copy to avoid data races
+		cp := *state
+		return &cp
+	}
+	return nil
+}
+
 // CompleteSubAgent marks a sub-agent as completed.
 func (p *ActivityFeedPanel) CompleteSubAgent(agentID string, success bool, summary string) {
 	p.mu.Lock()

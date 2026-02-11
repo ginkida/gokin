@@ -88,16 +88,10 @@ func (m Model) renderStatusBarCompact() string {
 
 	var rightParts []string
 
-	// Context % (compact, no label)
+	// Context bar (compact)
 	contextPct := m.getContextPercent()
 	if contextPct > 0 {
-		usageColor := ColorDim
-		if contextPct > 80 {
-			usageColor = ColorError
-		} else if contextPct > 50 {
-			usageColor = ColorWarning
-		}
-		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(usageColor).Render(fmt.Sprintf("%.0f%%", contextPct)))
+		rightParts = append(rightParts, renderContextBar(contextPct, 6))
 	}
 
 	left := strings.Join(leftParts, " · ")
@@ -128,16 +122,10 @@ func (m Model) renderStatusBarMedium() string {
 		leftParts = append(leftParts, dimStyle.Render(shortenModelName(m.currentModel)))
 	}
 
-	// Context %
+	// Context bar
 	contextPct := m.getContextPercent()
 	if contextPct > 0 {
-		usageColor := ColorDim
-		if contextPct > 80 {
-			usageColor = ColorError
-		} else if contextPct > 50 {
-			usageColor = ColorWarning
-		}
-		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(usageColor).Render(fmt.Sprintf("%.0f%%", contextPct)))
+		leftParts = append(leftParts, renderContextBar(contextPct, 8))
 	}
 
 	// Mode indicator (plan mode only — it's the one that changes behavior)
@@ -189,16 +177,10 @@ func (m Model) renderStatusBarFull() string {
 		leftParts = append(leftParts, dimStyle.Render(shortenModelName(m.currentModel)))
 	}
 
-	// Context %
+	// Context bar
 	contextPct := m.getContextPercent()
 	if contextPct > 0 {
-		usageColor := ColorDim
-		if contextPct > 80 {
-			usageColor = ColorError
-		} else if contextPct > 50 {
-			usageColor = ColorWarning
-		}
-		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(usageColor).Render(fmt.Sprintf("%.0f%%", contextPct)))
+		leftParts = append(leftParts, renderContextBar(contextPct, 8))
 	}
 
 	// Plan mode
@@ -244,6 +226,38 @@ func (m Model) renderStatusBarFull() string {
 
 	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
 	return left + strings.Repeat(" ", padding) + right
+}
+
+// renderContextBar returns a visual progress bar for context usage.
+func renderContextBar(pct float64, barWidth int) string {
+	if pct <= 0 {
+		return ""
+	}
+
+	filled := int(pct / 100.0 * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
+	}
+
+	// Color based on usage level
+	var barColor lipgloss.Color
+	switch {
+	case pct > 80:
+		barColor = ColorError
+	case pct > 50:
+		barColor = ColorWarning
+	default:
+		barColor = ColorDim
+	}
+
+	filledStyle := lipgloss.NewStyle().Foreground(barColor)
+	emptyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#374151"))
+	pctStyle := lipgloss.NewStyle().Foreground(barColor)
+
+	bar := filledStyle.Render(strings.Repeat("█", filled)) +
+		emptyStyle.Render(strings.Repeat("░", barWidth-filled))
+
+	return bar + " " + pctStyle.Render(fmt.Sprintf("%.0f%%", pct))
 }
 
 // getContextPercent returns the context usage percentage from available sources.

@@ -227,6 +227,9 @@ type ExecutionHandler struct {
 
 	// OnWarning is called when a warning is issued.
 	OnWarning func(warning string)
+
+	// OnInlineDiff is called after successful edit to show inline diff.
+	OnInlineDiff func(filePath, oldText, newText string)
 }
 
 // NewExecutor creates a new tool executor.
@@ -1054,6 +1057,18 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		if call.Name == "write" || call.Name == "edit" {
 			if filePath, ok := call.Args["file_path"].(string); ok {
 				_ = e.formatter.Format(ctx, filePath)
+			}
+		}
+	}
+
+	// Step 10.7: Emit inline diff for edit operations
+	if e.handler != nil && e.handler.OnInlineDiff != nil && result.Success {
+		if call.Name == "edit" {
+			oldText, _ := call.Args["old_string"].(string)
+			newText, _ := call.Args["new_string"].(string)
+			if oldText != "" && oldText != newText {
+				filePath, _ := call.Args["file_path"].(string)
+				e.handler.OnInlineDiff(filePath, oldText, newText)
 			}
 		}
 	}

@@ -206,6 +206,13 @@ type (
 		Status    string        // "start", "tool_start", "tool_end", "complete", "failed"
 		Elapsed   time.Duration // Time elapsed since agent start
 	}
+
+	// InlineDiffMsg carries a compact diff for display in the output stream.
+	InlineDiffMsg struct {
+		FilePath string
+		OldText  string
+		NewText  string
+	}
 )
 
 // ActivityType distinguishes sources of activity.
