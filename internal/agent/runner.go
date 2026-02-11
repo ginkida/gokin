@@ -652,6 +652,14 @@ func (r *Runner) SpawnWithContext(
 	agent.SetProjectContext(projectContext)
 	agent.SetOnText(onText)
 
+	// Wire checkpoint store and enable auto-checkpoint for long-running agents
+	if r.store != nil {
+		agent.SetStore(r.store)
+		if maxTurns > 10 {
+			agent.EnableAutoCheckpoint(5)
+		}
+	}
+
 	// Wire progress callback for real-time sub-agent progress
 	if progressCallback != nil {
 		agent.SetProgressCallback(progressCallback)
@@ -674,6 +682,13 @@ func (r *Runner) SpawnWithContext(
 	r.reportActivity()
 
 	result, err := agent.Run(ctx, prompt)
+
+	// Save error checkpoint on failure for potential recovery
+	if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
+		if _, cpErr := agent.SaveCheckpoint("error"); cpErr != nil {
+			logging.Debug("failed to save error checkpoint", "agent_id", agent.ID, "error", cpErr)
+		}
+	}
 
 	r.reportActivity()
 	r.saveAgentState(agent)
@@ -710,6 +725,14 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	// Wire file predictor for enhanced error recovery
 	if predictor != nil && agent.reflector != nil {
 		agent.reflector.SetPredictor(predictor)
+	}
+
+	// Wire checkpoint store and enable auto-checkpoint for long-running agents
+	if r.store != nil {
+		agent.SetStore(r.store)
+		if maxTurns > 10 {
+			agent.EnableAutoCheckpoint(5)
+		}
 	}
 
 	r.mu.Lock()
@@ -803,6 +826,13 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		if err != nil {
 			result.Error = err.Error()
 			result.Status = AgentStatusFailed
+		}
+
+		// Save error checkpoint on failure for potential recovery
+		if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
+			if _, cpErr := agent.SaveCheckpoint("error"); cpErr != nil {
+				logging.Debug("failed to save error checkpoint", "agent_id", agent.ID, "error", cpErr)
+			}
 		}
 
 		// Save agent state for potential resume
@@ -1467,6 +1497,130 @@ func (r *Runner) saveAgentState(agent *Agent) {
 	}
 }
 
+// CleanupOldCheckpoints removes checkpoint files older than maxAge.
+func (r *Runner) CleanupOldCheckpoints(maxAge time.Duration) {
+	if r.store == nil {
+		return
+	}
+	cleaned, err := r.store.CleanupOldCheckpointFiles(maxAge)
+	if err != nil {
+		logging.Debug("checkpoint cleanup error", "error", err)
+	} else if cleaned > 0 {
+		logging.Debug("cleaned up old checkpoint files", "count", cleaned)
+	}
+}
+
+// ResumeErrorCheckpoints finds error checkpoints and silently resumes agents in the background.
+// Each checkpoint is deleted before resume to prevent infinite retry loops.
+// Resumed agents do NOT get auto-checkpoint enabled — if they fail again, no new error checkpoint is created.
+// Returns the number of agents successfully resumed.
+func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
+	if r.store == nil {
+		return 0
+	}
+
+	checkpoints, err := r.store.ListErrorCheckpoints()
+	if err != nil || len(checkpoints) == 0 {
+		return 0
+	}
+
+	resumed := 0
+	for _, cp := range checkpoints {
+		if cp.AgentState == nil {
+			_ = r.store.DeleteCheckpoint(cp.CheckpointID)
+			continue
+		}
+
+		// Delete BEFORE resume — anti-infinite-retry
+		_ = r.store.DeleteCheckpoint(cp.CheckpointID)
+
+		// Create agent, restore from checkpoint
+		state := cp.AgentState
+		r.mu.RLock()
+		ctxCfg := r.ctxCfg
+		errorStore := r.errorStore
+		predictor := r.predictor
+		r.mu.RUnlock()
+
+		agent := NewAgent(state.Type, r.client, r.baseRegistry, r.workDir, state.MaxTurns, state.Model, r.permissions, ctxCfg)
+		agent.ID = state.ID
+
+		// Wire messenger, error store, predictor (same as ResumeAsync)
+		if r.messengerFactory != nil {
+			agent.SetMessenger(r.messengerFactory(agent.ID))
+		}
+		if errorStore != nil && agent.reflector != nil {
+			agent.reflector.SetErrorStore(errorStore)
+		}
+		if predictor != nil && agent.reflector != nil {
+			agent.reflector.SetPredictor(predictor)
+		}
+
+		// Store without auto-checkpoint (if it fails again, no new error cp)
+		if r.store != nil {
+			agent.SetStore(r.store)
+		}
+
+		if err := agent.RestoreFromCheckpoint(cp); err != nil {
+			logging.Debug("failed to restore from checkpoint", "checkpoint_id", cp.CheckpointID, "error", err)
+			continue
+		}
+
+		r.mu.Lock()
+		r.agents[agent.ID] = agent
+		r.results[agent.ID] = &AgentResult{AgentID: agent.ID, Type: state.Type, Status: AgentStatusPending}
+		onComplete := r.onAgentComplete
+		r.mu.Unlock()
+
+		go func(a *Agent) {
+			defer func() {
+				if p := recover(); p != nil {
+					logging.Debug("auto-resumed agent panicked", "agent_id", a.ID, "panic", fmt.Sprintf("%v", p))
+					r.mu.Lock()
+					if result, ok := r.results[a.ID]; ok {
+						result.Error = fmt.Sprintf("agent panic on resume: %v", p)
+						result.Status = AgentStatusFailed
+						result.Completed = true
+					}
+					r.mu.Unlock()
+				}
+			}()
+
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			result, err := a.Run(ctx, "You were restarted after an error. Continue your previous task or report what went wrong.")
+			if result == nil {
+				result = &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: "nil result", Completed: true}
+			}
+			if err != nil {
+				result.Error = err.Error()
+				result.Status = AgentStatusFailed
+			}
+
+			r.saveAgentState(a)
+
+			r.mu.Lock()
+			r.results[a.ID] = result
+			r.mu.Unlock()
+
+			if onComplete != nil {
+				onComplete(a.ID, result)
+			}
+		}(agent)
+
+		resumed++
+	}
+
+	if resumed > 0 {
+		logging.Debug("auto-resumed agents from error checkpoints", "count", resumed)
+	}
+	return resumed
+}
+
 // Close flushes all agent data (project learning) to prevent data loss on shutdown.
 func (r *Runner) Close() {
 	r.mu.RLock()
@@ -1475,6 +1629,15 @@ func (r *Runner) Close() {
 	for _, agent := range r.agents {
 		if err := agent.Close(); err != nil {
 			logging.Warn("failed to close agent", "agent_id", agent.ID, "error", err)
+		}
+	}
+
+	// Cleanup old checkpoints on shutdown, keeping only 2 most recent per agent
+	if r.store != nil {
+		for _, agent := range r.agents {
+			if cleaned, err := r.store.CleanupCheckpoints(agent.ID, 2); err == nil && cleaned > 0 {
+				logging.Debug("cleaned up agent checkpoints", "agent_id", agent.ID, "cleaned", cleaned)
+			}
 		}
 	}
 }

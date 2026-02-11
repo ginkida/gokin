@@ -590,6 +590,16 @@ func (b *Builder) initManagers() error {
 	b.agentRunner.SetPermissions(b.permManager)
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
 
+	// Wire agent store for checkpoint persistence
+	if b.configDirErr == nil {
+		agentStore, err := agent.NewAgentStore(b.configDir)
+		if err != nil {
+			logging.Warn("failed to create agent store", "error", err)
+		} else {
+			b.agentRunner.SetStore(agentStore)
+		}
+	}
+
 	// Command handler
 	b.commandHandler = commands.NewHandler()
 

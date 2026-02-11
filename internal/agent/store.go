@@ -303,3 +303,70 @@ func (s *AgentStore) CleanupCheckpoints(agentID string, keepCount int) (int, err
 
 	return removed, nil
 }
+
+// DeleteCheckpoint removes a single checkpoint file by its ID.
+func (s *AgentStore) DeleteCheckpoint(checkpointID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	filePath := filepath.Join(s.dir, "checkpoints", checkpointID+".json")
+	if err := os.Remove(filePath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete checkpoint: %w", err)
+	}
+	return nil
+}
+
+// ListErrorCheckpoints returns all checkpoints with TriggerReason "error".
+func (s *AgentStore) ListErrorCheckpoints() ([]*AgentCheckpoint, error) {
+	ids, err := s.ListCheckpoints("") // empty = all checkpoints
+	if err != nil {
+		return nil, err
+	}
+	var result []*AgentCheckpoint
+	for _, id := range ids {
+		cp, err := s.LoadCheckpoint(id)
+		if err != nil {
+			continue
+		}
+		if cp.TriggerReason == "error" {
+			result = append(result, cp)
+		}
+	}
+	return result, nil
+}
+
+// CleanupOldCheckpointFiles removes all checkpoint files older than maxAge.
+func (s *AgentStore) CleanupOldCheckpointFiles(maxAge time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	checkpointsDir := filepath.Join(s.dir, "checkpoints")
+	entries, err := os.ReadDir(checkpointsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	cleaned := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if os.Remove(filepath.Join(checkpointsDir, entry.Name())) == nil {
+				cleaned++
+			}
+		}
+	}
+	return cleaned, nil
+}

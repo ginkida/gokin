@@ -349,6 +349,11 @@ func (a *App) Run() error {
 		}
 	}
 
+	// Auto-resume agents from error checkpoints (silent, debug log only)
+	if a.agentRunner != nil {
+		a.agentRunner.ResumeErrorCheckpoints(a.ctx)
+	}
+
 	// Create and run the program
 	a.program = a.tui.GetProgram()
 
@@ -385,6 +390,10 @@ func (a *App) Run() error {
 					if cleaned > 0 {
 						logging.Debug("cleaned up completed tasks", "count", cleaned)
 					}
+				}
+				// Clean up old agent checkpoint files
+				if a.agentRunner != nil {
+					a.agentRunner.CleanupOldCheckpoints(24 * time.Hour)
 				}
 			case <-a.ctx.Done():
 				return
@@ -599,6 +608,7 @@ func (a *App) sendTokenUsageUpdate() {
 
 	a.mu.Lock()
 	program := a.program
+	streamedChars := a.streamedChars
 	a.mu.Unlock()
 
 	if program == nil {
@@ -609,12 +619,28 @@ func (a *App) sendTokenUsageUpdate() {
 	if usage == nil {
 		return
 	}
+
+	tokens := usage.InputTokens
+	isEstimate := usage.IsEstimate
+	percentUsed := usage.PercentUsed
+	nearLimit := usage.NearLimit
+
+	// Add streaming estimate: ~4 chars per token
+	if streamedChars > 0 {
+		tokens += streamedChars / 4
+		isEstimate = true
+		if usage.MaxTokens > 0 {
+			percentUsed = float64(tokens) / float64(usage.MaxTokens)
+			nearLimit = percentUsed > 0.8
+		}
+	}
+
 	program.Send(ui.TokenUsageMsg{
-		Tokens:      usage.InputTokens,
+		Tokens:      tokens,
 		MaxTokens:   usage.MaxTokens,
-		PercentUsed: usage.PercentUsed,
-		NearLimit:   usage.NearLimit,
-		IsEstimate:  usage.IsEstimate,
+		PercentUsed: percentUsed,
+		NearLimit:   nearLimit,
+		IsEstimate:  isEstimate,
 	})
 }
 
