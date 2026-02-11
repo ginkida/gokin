@@ -11,7 +11,7 @@ import (
 
 // SessionInfo represents information about an active SSH session.
 type SessionInfo struct {
-	Key       string    // "user@host:port"
+	Key       string // "user@host:port"
 	Host      string
 	Port      int
 	User      string

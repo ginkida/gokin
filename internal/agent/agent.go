@@ -2746,4 +2746,3 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 		}
 	}
 }
-

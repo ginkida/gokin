@@ -56,8 +56,8 @@ type Manager struct {
 	approvedPlanSnapshot  *Plan
 
 	// Execution mode tracking - distinguishes between plan creation and plan execution phases
-	executionMode   bool // true = executing approved plan, false = creating/designing plan
-	currentStepID   int  // ID of the step currently being executed (-1 if none)
+	executionMode bool // true = executing approved plan, false = creating/designing plan
+	currentStepID int  // ID of the step currently being executed (-1 if none)
 
 	mu sync.RWMutex
 }

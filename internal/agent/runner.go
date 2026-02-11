@@ -1621,6 +1621,119 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 	return resumed
 }
 
+// ResumeLastCheckpoint finds the most recent checkpoint across all agents and resumes it.
+// The checkpoint is deleted before resume to prevent duplicate runs.
+// Returns the agent ID and any error.
+func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
+	if r.store == nil {
+		return "", fmt.Errorf("agent store not configured")
+	}
+
+	// List all checkpoints (empty agentID = no filter)
+	ids, err := r.store.ListCheckpoints("")
+	if err != nil {
+		return "", fmt.Errorf("failed to list checkpoints: %w", err)
+	}
+	if len(ids) == 0 {
+		return "", fmt.Errorf("no checkpoints found")
+	}
+
+	// Checkpoint names include timestamps — pick the lexicographically latest
+	latestID := ids[0]
+	for _, id := range ids[1:] {
+		if id > latestID {
+			latestID = id
+		}
+	}
+
+	cp, err := r.store.LoadCheckpoint(latestID)
+	if err != nil {
+		return "", fmt.Errorf("failed to load checkpoint %s: %w", latestID, err)
+	}
+	if cp.AgentState == nil {
+		_ = r.store.DeleteCheckpoint(cp.CheckpointID)
+		return "", fmt.Errorf("checkpoint %s has no agent state", latestID)
+	}
+
+	// Delete before resume to prevent duplicate runs
+	_ = r.store.DeleteCheckpoint(cp.CheckpointID)
+
+	state := cp.AgentState
+	r.mu.RLock()
+	ctxCfg := r.ctxCfg
+	errorStore := r.errorStore
+	predictor := r.predictor
+	r.mu.RUnlock()
+
+	agent := NewAgent(state.Type, r.client, r.baseRegistry, r.workDir, state.MaxTurns, state.Model, r.permissions, ctxCfg)
+	agent.ID = state.ID
+
+	if r.messengerFactory != nil {
+		agent.SetMessenger(r.messengerFactory(agent.ID))
+	}
+	if errorStore != nil && agent.reflector != nil {
+		agent.reflector.SetErrorStore(errorStore)
+	}
+	if predictor != nil && agent.reflector != nil {
+		agent.reflector.SetPredictor(predictor)
+	}
+	if r.store != nil {
+		agent.SetStore(r.store)
+	}
+
+	if err := agent.RestoreFromCheckpoint(cp); err != nil {
+		return "", fmt.Errorf("failed to restore from checkpoint: %w", err)
+	}
+
+	r.mu.Lock()
+	r.agents[agent.ID] = agent
+	r.results[agent.ID] = &AgentResult{AgentID: agent.ID, Type: state.Type, Status: AgentStatusPending}
+	onStart := r.onAgentStart
+	onComplete := r.onAgentComplete
+	r.mu.Unlock()
+
+	if onStart != nil {
+		onStart(agent.ID, string(state.Type), "Resumed from checkpoint")
+	}
+
+	go func(a *Agent) {
+		defer func() {
+			if p := recover(); p != nil {
+				logging.Debug("resumed agent panicked", "agent_id", a.ID, "panic", fmt.Sprintf("%v", p))
+				r.mu.Lock()
+				if result, ok := r.results[a.ID]; ok {
+					result.Error = fmt.Sprintf("agent panic on resume: %v", p)
+					result.Status = AgentStatusFailed
+					result.Completed = true
+				}
+				r.mu.Unlock()
+			}
+		}()
+
+		result, err := a.Run(ctx, "You were resumed from a checkpoint. Continue your previous task.")
+		if result == nil {
+			result = &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: "nil result", Completed: true}
+		}
+		if err != nil {
+			result.Error = err.Error()
+			result.Status = AgentStatusFailed
+		}
+
+		r.saveAgentState(a)
+
+		r.mu.Lock()
+		r.results[a.ID] = result
+		r.mu.Unlock()
+
+		if onComplete != nil {
+			onComplete(a.ID, result)
+		}
+	}(agent)
+
+	logging.Debug("resumed agent from last checkpoint", "agent_id", agent.ID, "checkpoint_id", latestID)
+	return agent.ID, nil
+}
+
 // Close flushes all agent data (project learning) to prevent data loss on shutdown.
 func (r *Runner) Close() {
 	r.mu.RLock()

@@ -177,4 +177,3 @@ func (m *ToolProgressBarModel) View(width int) string {
 
 	return builder.String()
 }
-

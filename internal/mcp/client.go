@@ -13,19 +13,19 @@ import (
 
 // Client handles JSON-RPC communication with an MCP server.
 type Client struct {
-	transport   Transport
-	serverInfo  *ServerInfo
-	tools       []*ToolInfo
-	resources   []*Resource
+	transport  Transport
+	serverInfo *ServerInfo
+	tools      []*ToolInfo
+	resources  []*Resource
 
 	// Connection state
 	initialized bool
 	mu          sync.RWMutex
 
 	// Request tracking
-	nextID     int64
-	pending    map[int64]chan *JSONRPCMessage
-	pendingMu  sync.Mutex
+	nextID    int64
+	pending   map[int64]chan *JSONRPCMessage
+	pendingMu sync.Mutex
 
 	// Configuration
 	serverName string
@@ -64,13 +64,13 @@ func NewClient(ctx context.Context, cfg *ServerConfig) (*Client, error) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	c := &Client{
-		transport:  transport,
-		serverName: cfg.Name,
-		config:     cfg,
-		pending:    make(map[int64]chan *JSONRPCMessage),
-		ctx:        ctx,
-		cancel:     cancel,
-		done:       make(chan struct{}),
+		transport:            transport,
+		serverName:           cfg.Name,
+		config:               cfg,
+		pending:              make(map[int64]chan *JSONRPCMessage),
+		ctx:                  ctx,
+		cancel:               cancel,
+		done:                 make(chan struct{}),
 		backoff:              100 * time.Millisecond,
 		maxBackoff:           30 * time.Second,
 		maxReconnectAttempts: 10,

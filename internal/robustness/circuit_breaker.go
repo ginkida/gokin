@@ -62,7 +62,7 @@ func (cb *CircuitBreaker) allowRequest() bool {
 	if cb.state == StateOpen {
 		if time.Since(cb.lastFailure) > cb.resetTimeout {
 			// Transition to half-open is handled in recordSuccess/Failure or here
-			return true 
+			return true
 		}
 		return false
 	}

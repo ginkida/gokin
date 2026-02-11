@@ -502,8 +502,10 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 // OAuthLoginCommand handles /oauth-login for Google Account authentication
 type OAuthLoginCommand struct{}
 
-func (c *OAuthLoginCommand) Name() string        { return "oauth-login" }
-func (c *OAuthLoginCommand) Description() string { return "Login to Gemini using Google account (OAuth)" }
+func (c *OAuthLoginCommand) Name() string { return "oauth-login" }
+func (c *OAuthLoginCommand) Description() string {
+	return "Login to Gemini using Google account (OAuth)"
+}
 func (c *OAuthLoginCommand) Usage() string {
 	return `/oauth-login - Login to Gemini using your Google account
 

@@ -56,7 +56,7 @@ const defaultServerTimeout = 15 * time.Second
 
 // serverResult holds the result of a single server connection attempt.
 type serverResult struct {
-	name  string
+	name   string
 	client *Client
 	tools  []tools.Tool
 	err    error
@@ -396,12 +396,12 @@ func (m *Manager) IsHealthy(name string) bool {
 
 // ServerStatus contains status information about an MCP server.
 type ServerStatus struct {
-	Name        string
-	Connected   bool
-	Healthy     bool
-	ServerInfo  *ServerInfo
-	ToolCount   int
-	ToolNames   []string
+	Name       string
+	Connected  bool
+	Healthy    bool
+	ServerInfo *ServerInfo
+	ToolCount  int
+	ToolNames  []string
 }
 
 // GetServerStatus returns status information for all servers.

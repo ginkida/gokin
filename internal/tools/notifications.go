@@ -19,7 +19,7 @@ type NotificationManager struct {
 	onNotify            func(Notification)
 	quietMode           bool
 	verboseMode         bool
-	nativeNotifications bool            // Send native macOS notifications (disabled by default)
+	nativeNotifications bool            // Send native macOS notifications (enabled by default)
 	silentTools         map[string]bool // Tools that shouldn't notify
 }
 
@@ -49,9 +49,10 @@ const (
 // NewNotificationManager creates a new notification manager
 func NewNotificationManager() *NotificationManager {
 	return &NotificationManager{
-		history:     make([]Notification, 0),
-		maxHistory:  100,
-		silentTools: make(map[string]bool),
+		history:             make([]Notification, 0),
+		maxHistory:          100,
+		nativeNotifications: true,
+		silentTools:         make(map[string]bool),
 	}
 }
 
@@ -77,7 +78,7 @@ func (nm *NotificationManager) EnableVerboseMode(enabled bool) {
 }
 
 // EnableNativeNotifications enables/disables native macOS Notification Center alerts.
-// Disabled by default to avoid intrusive notifications during work.
+// Enabled by default; can be toggled off via config.
 func (nm *NotificationManager) EnableNativeNotifications(enabled bool) {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()

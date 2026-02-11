@@ -36,18 +36,18 @@ func DefaultBackgroundIndexerConfig() *BackgroundIndexerConfig {
 
 // BackgroundIndexer handles automatic re-indexing in the background.
 type BackgroundIndexer struct {
-	indexer      *IncrementalIndexer
-	watcher      *watcher.Watcher
-	config       *BackgroundIndexerConfig
-	workDir      string
+	indexer *IncrementalIndexer
+	watcher *watcher.Watcher
+	config  *BackgroundIndexerConfig
+	workDir string
 
 	pendingFiles map[string]time.Time
 	pendingMu    sync.Mutex
 
-	ctx        context.Context
-	cancel     context.CancelFunc
-	running    bool
-	runningMu  sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	running   bool
+	runningMu sync.Mutex
 
 	// Callbacks
 	onIndexStart    func()

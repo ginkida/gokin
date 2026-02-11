@@ -399,7 +399,6 @@ func (p *CommandPalette) SetSize(width, height int) {
 	p.height = height
 }
 
-
 // View renders the command palette.
 func (p *CommandPalette) View(width, height int) string {
 	if !p.visible {
@@ -453,17 +452,17 @@ func (p *CommandPalette) View(width, height int) string {
 		Background(ColorSecondary).
 		Foreground(ColorBg).
 		Bold(true).
-		Width(paletteWidth - 6).
+		Width(paletteWidth-6).
 		Padding(0, 1)
 
 	normalStyle := lipgloss.NewStyle().
 		Foreground(ColorText).
-		Width(paletteWidth - 6).
+		Width(paletteWidth-6).
 		Padding(0, 1)
 
 	disabledStyle := lipgloss.NewStyle().
 		Foreground(ColorMuted).
-		Width(paletteWidth - 6).
+		Width(paletteWidth-6).
 		Padding(0, 1)
 
 	shortcutStyle := lipgloss.NewStyle().

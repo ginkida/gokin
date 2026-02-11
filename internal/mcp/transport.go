@@ -80,10 +80,10 @@ func buildSafeEnv() []string {
 
 // StdioTransport communicates with an MCP server via stdio.
 type StdioTransport struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	stderr  io.ReadCloser
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
 
 	encoder *json.Encoder
 	scanner *bufio.Scanner

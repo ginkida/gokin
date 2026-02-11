@@ -145,19 +145,19 @@ func loadFromFile(cfg *Config, path string) error {
 // safeEnvVars is the whitelist of environment variables that can be expanded in config files.
 // This prevents accidental exposure of sensitive variables like API keys, secrets, etc.
 var safeEnvVars = map[string]bool{
-	"HOME":            true,
-	"USER":            true,
+	"HOME":             true,
+	"USER":             true,
 	"GOKIN_CONFIG_DIR": true,
-	"XDG_CONFIG_HOME": true,
-	"XDG_DATA_HOME":   true,
-	"XDG_CACHE_HOME":  true,
-	"TMPDIR":          true,
-	"TMP":             true,
-	"TEMP":            true,
-	"PWD":             true,
-	"SHELL":           true,
-	"LANG":            true,
-	"LC_ALL":          true,
+	"XDG_CONFIG_HOME":  true,
+	"XDG_DATA_HOME":    true,
+	"XDG_CACHE_HOME":   true,
+	"TMPDIR":           true,
+	"TMP":              true,
+	"TEMP":             true,
+	"PWD":              true,
+	"SHELL":            true,
+	"LANG":             true,
+	"LC_ALL":           true,
 }
 
 // expandSafeEnvVars expands only whitelisted environment variables.

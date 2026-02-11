@@ -15,10 +15,10 @@ import (
 
 // FileState represents the state of a file for incremental indexing.
 type FileState struct {
-	Path       string    `json:"path"`
-	ModTime    time.Time `json:"mod_time"`
-	Size       int64     `json:"size"`
-	Hash       string    `json:"hash"`
+	Path        string    `json:"path"`
+	ModTime     time.Time `json:"mod_time"`
+	Size        int64     `json:"size"`
+	Hash        string    `json:"hash"`
 	LastIndexed time.Time `json:"last_indexed"`
 }
 
@@ -205,10 +205,10 @@ func (i *IncrementalIndexer) indexFilesParallel(ctx context.Context, files []str
 
 	// Results channel
 	type result struct {
-		path      string
-		chunks    []ChunkInfo
+		path       string
+		chunks     []ChunkInfo
 		embedBatch int
-		err       error
+		err        error
 	}
 	resultsChan := make(chan result, len(files))
 
@@ -232,10 +232,10 @@ func (i *IncrementalIndexer) indexFilesParallel(ctx context.Context, files []str
 
 				chunks, batches, err := i.indexFileWithBatch(ctx, path)
 				resultsChan <- result{
-					path:      path,
-					chunks:    chunks,
+					path:       path,
+					chunks:     chunks,
 					embedBatch: batches,
-					err:       err,
+					err:        err,
 				}
 			}
 		}()

@@ -1250,9 +1250,15 @@ func (b *Builder) wireDependencies() error {
 			chars := app.streamedChars
 			app.mu.Unlock()
 
-			// Send estimated token update every ~2000 chars (~500 tokens)
-			if chars%2000 < len(text) {
-				app.sendTokenUsageUpdate()
+			// Send estimated token update every ~500 chars (~125 tokens) for smoother UI
+			if chars/500 > (chars-len(text))/500 {
+				// Estimate: 1 token ~= 4 chars
+				estimatedTokens := chars / 4
+				if app.program != nil {
+					app.program.Send(ui.StreamTokenUpdateMsg{
+						EstimatedOutputTokens: estimatedTokens,
+					})
+				}
 			}
 		},
 		OnThinking: func(text string) {

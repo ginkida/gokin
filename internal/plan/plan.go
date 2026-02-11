@@ -63,22 +63,22 @@ func (s Status) Icon() string {
 
 // Step represents a single step in a plan.
 type Step struct {
-	ID          int           `json:"id"`
-	Title       string        `json:"title"`
-	Description string        `json:"description"`
-	Status      Status        `json:"status"`
-	Output      string        `json:"output"`
-	Error       string        `json:"error"`
-	StartTime   time.Time     `json:"start_time,omitempty"`
-	EndTime     time.Time     `json:"end_time,omitempty"`
-	Parallel    bool          `json:"parallel"`                // Can execute in parallel with other steps
-	DependsOn   []int         `json:"depends_on,omitempty"`    // Step IDs this step depends on
-	Children    []*Step       `json:"children,omitempty"`      // Nested sub-steps
-	MaxRetries  int           `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
-	Timeout     time.Duration `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
-	RetryCount  int           `json:"retry_count,omitempty"`   // Current retry count
-	TokensUsed   int               `json:"tokens_used,omitempty"`    // Tokens consumed by this step
-	Condition    string            `json:"condition,omitempty"`      // Condition: "step_N_failed", "step_N_succeeded"
+	ID           int               `json:"id"`
+	Title        string            `json:"title"`
+	Description  string            `json:"description"`
+	Status       Status            `json:"status"`
+	Output       string            `json:"output"`
+	Error        string            `json:"error"`
+	StartTime    time.Time         `json:"start_time,omitempty"`
+	EndTime      time.Time         `json:"end_time,omitempty"`
+	Parallel     bool              `json:"parallel"`                // Can execute in parallel with other steps
+	DependsOn    []int             `json:"depends_on,omitempty"`    // Step IDs this step depends on
+	Children     []*Step           `json:"children,omitempty"`      // Nested sub-steps
+	MaxRetries   int               `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
+	Timeout      time.Duration     `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
+	RetryCount   int               `json:"retry_count,omitempty"`   // Current retry count
+	TokensUsed   int               `json:"tokens_used,omitempty"`   // Tokens consumed by this step
+	Condition    string            `json:"condition,omitempty"`     // Condition: "step_N_failed", "step_N_succeeded"
 	AgentMetrics *StepAgentMetrics `json:"agent_metrics,omitempty"` // Metrics from sub-agent tree planner
 }
 
@@ -113,9 +113,9 @@ type Plan struct {
 	Status      Status    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	Request     string    `json:"request"`              // Original user request
-	Version     int       `json:"version"`              // Incremented on replan
-	WorkDir     string    `json:"work_dir,omitempty"`   // Project directory this plan belongs to
+	Request     string    `json:"request"`            // Original user request
+	Version     int       `json:"version"`            // Incremented on replan
+	WorkDir     string    `json:"work_dir,omitempty"` // Project directory this plan belongs to
 
 	// Context snapshot from planning conversation (preserved across session clear)
 	ContextSnapshot string `json:"context_snapshot,omitempty"`

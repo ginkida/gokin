@@ -4,27 +4,27 @@ import "time"
 
 // Config represents the main application configuration.
 type Config struct {
-	API           APIConfig           `yaml:"api"`
-	Model         ModelConfig         `yaml:"model"`
-	Tools         ToolsConfig         `yaml:"tools"`
-	UI            UIConfig            `yaml:"ui"`
-	Context       ContextConfig       `yaml:"context"`
-	Permission    PermissionConfig    `yaml:"permission"`
-	Plan          PlanConfig          `yaml:"plan"`
-	Hooks         HooksConfig         `yaml:"hooks"`
-	Web           WebConfig           `yaml:"web"`
-	Session       SessionConfig       `yaml:"session"`
-	Memory        MemoryConfig        `yaml:"memory"`
-	Logging       LoggingConfig       `yaml:"logging"`
-	Audit         AuditConfig         `yaml:"audit"`
-	RateLimit     RateLimitConfig     `yaml:"rate_limit"`
-	Cache   CacheConfig   `yaml:"cache"`
-	Watcher WatcherConfig `yaml:"watcher"`
-	DiffPreview   DiffPreviewConfig   `yaml:"diff_preview"`
-	Semantic      SemanticConfig      `yaml:"semantic"`
-	Contract      ContractConfig      `yaml:"contract"`
-	MCP           MCPConfig           `yaml:"mcp"`
-	Update        UpdateConfig        `yaml:"update"`
+	API         APIConfig         `yaml:"api"`
+	Model       ModelConfig       `yaml:"model"`
+	Tools       ToolsConfig       `yaml:"tools"`
+	UI          UIConfig          `yaml:"ui"`
+	Context     ContextConfig     `yaml:"context"`
+	Permission  PermissionConfig  `yaml:"permission"`
+	Plan        PlanConfig        `yaml:"plan"`
+	Hooks       HooksConfig       `yaml:"hooks"`
+	Web         WebConfig         `yaml:"web"`
+	Session     SessionConfig     `yaml:"session"`
+	Memory      MemoryConfig      `yaml:"memory"`
+	Logging     LoggingConfig     `yaml:"logging"`
+	Audit       AuditConfig       `yaml:"audit"`
+	RateLimit   RateLimitConfig   `yaml:"rate_limit"`
+	Cache       CacheConfig       `yaml:"cache"`
+	Watcher     WatcherConfig     `yaml:"watcher"`
+	DiffPreview DiffPreviewConfig `yaml:"diff_preview"`
+	Semantic    SemanticConfig    `yaml:"semantic"`
+	Contract    ContractConfig    `yaml:"contract"`
+	MCP         MCPConfig         `yaml:"mcp"`
+	Update      UpdateConfig      `yaml:"update"`
 
 	// Runtime version information
 	Version string `yaml:"-"`
@@ -198,27 +198,27 @@ type BashConfig struct {
 
 // UIConfig holds UI-related settings.
 type UIConfig struct {
-	StreamOutput      bool   `yaml:"stream_output"`
-	MarkdownRendering bool   `yaml:"markdown_rendering"`
-	ShowToolCalls     bool   `yaml:"show_tool_calls"`
-	ShowTokenUsage    bool   `yaml:"show_token_usage"`
-	MouseMode         string `yaml:"mouse_mode"`    // "enabled" (default) or "disabled"
-	Theme             string `yaml:"theme"`         // Theme name: dark, light, sepia, cyber, forest, ocean, monokai, dracula, high_contrast
-	ShowWelcome       bool   `yaml:"show_welcome"`  // Show welcome message on first launch
-	HintsEnabled      bool   `yaml:"hints_enabled"` // Show contextual hints for features
+	StreamOutput        bool   `yaml:"stream_output"`
+	MarkdownRendering   bool   `yaml:"markdown_rendering"`
+	ShowToolCalls       bool   `yaml:"show_tool_calls"`
+	ShowTokenUsage      bool   `yaml:"show_token_usage"`
+	MouseMode           string `yaml:"mouse_mode"`    // "enabled" (default) or "disabled"
+	Theme               string `yaml:"theme"`         // Theme name: dark, light, sepia, cyber, forest, ocean, monokai, dracula, high_contrast
+	ShowWelcome         bool   `yaml:"show_welcome"`  // Show welcome message on first launch
+	HintsEnabled        bool   `yaml:"hints_enabled"` // Show contextual hints for features
 	CompactMode         bool   `yaml:"compact_mode"`
-	Bell                bool   `yaml:"bell"`                  // Terminal bell on prompts (default: true)
+	Bell                bool   `yaml:"bell"`                 // Terminal bell on prompts (default: true)
 	NativeNotifications bool   `yaml:"native_notifications"` // macOS Notification Center (default: false)
 }
 
 // ContextConfig holds context management settings.
 type ContextConfig struct {
-	MaxInputTokens     int     `yaml:"max_input_tokens"`      // 0 = use model default
-	WarningThreshold   float64 `yaml:"warning_threshold"`     // 0.8 = warn at 80%
-	SummarizationRatio float64 `yaml:"summarization_ratio"`   // 0.5 = summarize to 50%
-	ToolResultMaxChars int     `yaml:"tool_result_max_chars"` // Max chars for tool results
+	MaxInputTokens       int     `yaml:"max_input_tokens"`       // 0 = use model default
+	WarningThreshold     float64 `yaml:"warning_threshold"`      // 0.8 = warn at 80%
+	SummarizationRatio   float64 `yaml:"summarization_ratio"`    // 0.5 = summarize to 50%
+	ToolResultMaxChars   int     `yaml:"tool_result_max_chars"`  // Max chars for tool results
 	AutoCompactThreshold float64 `yaml:"auto_compact_threshold"` // 0.75 = compact at 75% usage
-	EnableAutoSummary  bool    `yaml:"enable_auto_summary"`   // Enable auto-summarization
+	EnableAutoSummary    bool    `yaml:"enable_auto_summary"`    // Enable auto-summarization
 }
 
 // PermissionConfig holds permission system settings.
@@ -535,17 +535,17 @@ func DefaultConfig() *Config {
 			Servers: []MCPServerConfig{},
 		},
 		Update: UpdateConfig{
-			Enabled:           true,              // Enabled by default
-			AutoCheck:         true,              // Check on startup
-			CheckInterval:     24 * time.Hour,    // Check once per day
-			AutoDownload:      false,             // Require manual download
-			IncludePrerelease: false,             // Only stable releases
-			Channel:           "stable",          // Stable channel
-			GitHubRepo:        "user/gokin",      // Should be updated to actual repo
-			MaxBackups:        3,                 // Keep 3 backups
-			VerifyChecksum:    true,              // Always verify checksums
-			NotifyOnly:        false,             // Allow prompting for install
-			Timeout:           30 * time.Second,  // HTTP request timeout
+			Enabled:           true,             // Enabled by default
+			AutoCheck:         true,             // Check on startup
+			CheckInterval:     24 * time.Hour,   // Check once per day
+			AutoDownload:      false,            // Require manual download
+			IncludePrerelease: false,            // Only stable releases
+			Channel:           "stable",         // Stable channel
+			GitHubRepo:        "user/gokin",     // Should be updated to actual repo
+			MaxBackups:        3,                // Keep 3 backups
+			VerifyChecksum:    true,             // Always verify checksums
+			NotifyOnly:        false,            // Allow prompting for install
+			Timeout:           30 * time.Second, // HTTP request timeout
 		},
 	}
 }

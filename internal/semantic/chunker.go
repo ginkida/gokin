@@ -167,11 +167,11 @@ func (c *StructuralChunker) chunkGo(filePath, content string) []ChunkInfo {
 // chunkHeuristic uses regexes to find potential structure in other languages.
 func (c *StructuralChunker) chunkHeuristic(filePath, content string) []ChunkInfo {
 	lines := strings.Split(content, "\n")
-	
+
 	// Regexes for common language structures (start of line)
 	// (e.g. func, def, class, interface, type)
 	structRegex := regexp.MustCompile(`^(func|def|class|interface|type|struct|enum|namespace|module|async\s+func|export\s+(class|func))\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
-	
+
 	var chunks []ChunkInfo
 	var currentStart = -1
 
@@ -183,7 +183,7 @@ func (c *StructuralChunker) chunkHeuristic(filePath, content string) []ChunkInfo
 			}
 			currentStart = i
 		}
-		
+
 		// If chunk gets too big, force split it
 		if currentStart != -1 && i-currentStart >= c.baseChunkSize*2 {
 			c.addChunk(filePath, lines, currentStart, i, &chunks)
@@ -209,7 +209,7 @@ func (c *StructuralChunker) addChunk(filePath string, lines []string, start, end
 	if strings.TrimSpace(chunkContent) == "" {
 		return
 	}
-	
+
 	*chunks = append(*chunks, ChunkInfo{
 		FilePath:  filePath,
 		LineStart: start + 1,

@@ -12,24 +12,24 @@ import (
 // Message represents a message exchanged between agents.
 type Message struct {
 	ID        string         `json:"id"`
-	From      string         `json:"from"`       // Sender agent ID
-	To        string         `json:"to"`         // Target role (explore, bash, etc.) or agent ID
-	Type      string         `json:"type"`       // help_request, response, delegate, etc.
-	Content   string         `json:"content"`    // The message text
-	Data      map[string]any `json:"data"`       // Additional structured data
+	From      string         `json:"from"`    // Sender agent ID
+	To        string         `json:"to"`      // Target role (explore, bash, etc.) or agent ID
+	Type      string         `json:"type"`    // help_request, response, delegate, etc.
+	Content   string         `json:"content"` // The message text
+	Data      map[string]any `json:"data"`    // Additional structured data
 	Timestamp time.Time      `json:"timestamp"`
 }
 
 // AgentMessenger enables communication between agents.
 // It implements the tools.Messenger interface.
 type AgentMessenger struct {
-	ctx        context.Context
-	runner     *Runner
+	ctx         context.Context
+	runner      *Runner
 	fromAgentID string
 
 	// Message tracking
-	inbox   map[string]chan Message // agentID -> incoming messages
-	pending map[string]chan string  // messageID -> response channel
+	inbox      map[string]chan Message // agentID -> incoming messages
+	pending    map[string]chan string  // messageID -> response channel
 	msgCounter int
 
 	mu sync.RWMutex
@@ -38,11 +38,11 @@ type AgentMessenger struct {
 // NewAgentMessenger creates a messenger for an agent.
 func NewAgentMessenger(ctx context.Context, runner *Runner, fromAgentID string) *AgentMessenger {
 	return &AgentMessenger{
-		ctx:        ctx,
-		runner:     runner,
+		ctx:         ctx,
+		runner:      runner,
 		fromAgentID: fromAgentID,
-		inbox:      make(map[string]chan Message),
-		pending:    make(map[string]chan string),
+		inbox:       make(map[string]chan Message),
+		pending:     make(map[string]chan string),
 	}
 }
 
@@ -131,7 +131,7 @@ func (m *AgentMessenger) handleHelpRequest(msg Message) {
 	// Build prompt for the helper agent
 	prompt := fmt.Sprintf(
 		"Another agent (ID: %s) is asking for help:\n\n%s\n\n"+
-		"Please provide a helpful response to assist them.",
+			"Please provide a helpful response to assist them.",
 		msg.From, msg.Content)
 
 	logging.Info("spawning helper agent",

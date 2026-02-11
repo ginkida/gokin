@@ -34,10 +34,10 @@ type DelegationStrategy struct {
 	stuckThreshold     int
 	lastProgress       string
 	sameProgressCount  int
-	currentDepth       int                 // Current delegation depth
-	strategyOpt        *StrategyOptimizer  // For historical success rate lookup
-	delegationMetrics  *DelegationMetrics  // For adaptive delegation rules
-	currentContextType string              // Current task context type for metrics
+	currentDepth       int                  // Current delegation depth
+	strategyOpt        *StrategyOptimizer   // For historical success rate lookup
+	delegationMetrics  *DelegationMetrics   // For adaptive delegation rules
+	currentContextType string               // Current task context type for metrics
 	failedRules        map[string]time.Time // Rule suppression cache: rule_key -> failure_time
 	activeAgents       int                  // Number of currently active delegated agents
 }

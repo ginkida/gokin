@@ -76,7 +76,7 @@ var dangerousEnvVars = map[string]bool{
 	"DYLD_LIBRARY_PATH":     true,
 	"BASH_ENV":              true,
 	"ENV":                   true,
-	"PROMPT_COMMAND":         true,
+	"PROMPT_COMMAND":        true,
 	"IFS":                   true,
 	"CDPATH":                true,
 	"SHELLOPTS":             true,

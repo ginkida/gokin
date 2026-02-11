@@ -38,8 +38,8 @@ func (t *ToolsListTool) Declaration() *genai.FunctionDeclaration {
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties:   map[string]*genai.Schema{},
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{},
 		},
 	}
 }

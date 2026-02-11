@@ -118,18 +118,18 @@ func NewAnthropicClient(config AnthropicConfig) (*AnthropicClient, error) {
 		config.StreamIdleTimeout = 30 * time.Second // Default 30s between SSE chunks
 	}
 
-		// Create secure HTTP client with TLS 1.2+ enforcement
-		tlsConfig := security.DefaultTLSConfig()
-		httpClient, err := security.CreateSecureHTTPClient(tlsConfig, config.HTTPTimeout)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create secure HTTP client: %w", err)
-		}
+	// Create secure HTTP client with TLS 1.2+ enforcement
+	tlsConfig := security.DefaultTLSConfig()
+	httpClient, err := security.CreateSecureHTTPClient(tlsConfig, config.HTTPTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secure HTTP client: %w", err)
+	}
 
-		return &AnthropicClient{
-			config:     config,
-			httpClient: httpClient,
-			tools:      make([]*genai.Tool, 0),
-		}, nil
+	return &AnthropicClient{
+		config:     config,
+		httpClient: httpClient,
+		tools:      make([]*genai.Tool, 0),
+	}, nil
 }
 
 // SendMessage sends a message and returns a streaming response.

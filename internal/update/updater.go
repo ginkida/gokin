@@ -13,17 +13,17 @@ import (
 
 // Updater is the main orchestrator for the update system.
 type Updater struct {
-	config      *Config
-	checker     *Checker
-	downloader  *Downloader
-	installer   *Installer
-	currentVer  string
-	cacheDir    string
-	tempDir     string
-	mu          sync.Mutex
-	inProgress  bool
-	lastCheck   time.Time
-	cachedInfo  *UpdateInfo
+	config     *Config
+	checker    *Checker
+	downloader *Downloader
+	installer  *Installer
+	currentVer string
+	cacheDir   string
+	tempDir    string
+	mu         sync.Mutex
+	inProgress bool
+	lastCheck  time.Time
+	cachedInfo *UpdateInfo
 }
 
 // NewUpdater creates a new updater.

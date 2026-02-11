@@ -28,9 +28,9 @@ type Store struct {
 	byKey         map[string]string // Key -> ID (All types)
 
 	// Debounced write support
-	dirty     bool         // Whether there are unsaved changes
-	saveTimer *time.Timer  // Timer for debounced save
-	saveMu    sync.Mutex   // Protects saveTimer
+	dirty     bool        // Whether there are unsaved changes
+	saveTimer *time.Timer // Timer for debounced save
+	saveMu    sync.Mutex  // Protects saveTimer
 
 	mu sync.RWMutex
 }
@@ -47,13 +47,13 @@ func NewStore(configDir, projectPath string, maxEntries int) (*Store, error) {
 	projectHash := hashPath(projectPath)
 
 	store := &Store{
-		configDir:   configDir,
-		projectPath: projectPath,
-		projectHash: projectHash,
-		maxEntries:  maxEntries,
-		entries:     make(map[string]*Entry),
+		configDir:     configDir,
+		projectPath:   projectPath,
+		projectHash:   projectHash,
+		maxEntries:    maxEntries,
+		entries:       make(map[string]*Entry),
 		globalEntries: make(map[string]*Entry),
-		byKey:       make(map[string]string),
+		byKey:         make(map[string]string),
 	}
 
 	// Load existing entries
@@ -68,9 +68,9 @@ func NewStore(configDir, projectPath string, maxEntries int) (*Store, error) {
 
 // Auto-tagging regex patterns.
 var (
-	reFilePath     = regexp.MustCompile(`(?:^|\s)(/[a-zA-Z0-9_.\-/]+)`)
-	reFuncName     = regexp.MustCompile(`(?:func|function)\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
-	rePackageName  = regexp.MustCompile(`package\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
+	reFilePath    = regexp.MustCompile(`(?:^|\s)(/[a-zA-Z0-9_.\-/]+)`)
+	reFuncName    = regexp.MustCompile(`(?:func|function)\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
+	rePackageName = regexp.MustCompile(`package\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
 )
 
 // extractContentTags extracts key concepts from content and returns them as tags.

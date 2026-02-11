@@ -44,8 +44,8 @@ type Model struct {
 	streamTimeout   time.Duration
 
 	// Slow operation warning
-	lastActivityTime   time.Time // Last time we received any activity (tool call, stream, etc.)
-	slowWarningShown   bool      // Whether we've shown the slow warning for current operation
+	lastActivityTime time.Time // Last time we received any activity (tool call, stream, etc.)
+	slowWarningShown bool      // Whether we've shown the slow warning for current operation
 
 	// Rate limiting / debounce for message submission
 	lastSubmitTime time.Time
@@ -229,7 +229,7 @@ type BackgroundTaskState struct {
 	Description   string
 	Status        string // "running", "completed", "failed", "cancelled"
 	StartTime     time.Time
-	Progress      float64  // 0.0-1.0
+	Progress      float64 // 0.0-1.0
 	CurrentStep   int
 	TotalSteps    int
 	CurrentAction string
@@ -1307,7 +1307,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.lastResponseText = m.currentResponseBuf.String()
 			m.currentResponseBuf.Reset()
 		}
-		m.output.FlushStream()           // Flush any remaining streamed content
+		m.output.FlushStream() // Flush any remaining streamed content
 		m.output.AppendLine("")
 		cmds = append(cmds, m.input.Focus())
 
@@ -1351,6 +1351,20 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	case LoopIterationMsg:
 		m.loopIteration = msg.Iteration
 		m.loopToolsUsed = msg.ToolsUsed
+
+	case StreamTokenUpdateMsg:
+		if m.tokenUsage != nil {
+			// Update only output tokens with estimate
+			// Keep input tokens same as they don't change during stream
+			m.tokenUsage.Tokens = msg.EstimatedOutputTokens
+			m.tokenUsage.IsEstimate = true
+
+			// Recalculate percentage if MaxTokens is set
+			if m.tokenUsage.MaxTokens > 0 {
+				total := m.tokenUsage.Tokens // Simplified for estimate
+				m.tokenUsage.PercentUsed = float64(total) / float64(m.tokenUsage.MaxTokens) * 100
+			}
+		}
 
 	case TokenUsageMsg:
 		m.tokenUsage = &msg
@@ -2404,31 +2418,31 @@ func (m *Model) EndPlanExecution() {
 
 // UIDebugState is a serializable snapshot of key TUI fields for debugging.
 type UIDebugState struct {
-	Timestamp         time.Time                      `json:"timestamp"`
-	State             string                         `json:"state"`
-	Width             int                            `json:"width"`
-	Height            int                            `json:"height"`
-	CompactMode       bool                           `json:"compact_mode"`
-	ProcessingLabel   string                         `json:"processing_label"`
-	CurrentTool       string                         `json:"current_tool"`
-	CurrentToolInfo   string                         `json:"current_tool_info"`
-	ActiveToolCalls   int                            `json:"active_tool_calls"`
+	Timestamp         time.Time                       `json:"timestamp"`
+	State             string                          `json:"state"`
+	Width             int                             `json:"width"`
+	Height            int                             `json:"height"`
+	CompactMode       bool                            `json:"compact_mode"`
+	ProcessingLabel   string                          `json:"processing_label"`
+	CurrentTool       string                          `json:"current_tool"`
+	CurrentToolInfo   string                          `json:"current_tool_info"`
+	ActiveToolCalls   int                             `json:"active_tool_calls"`
 	BackgroundTasks   map[string]*BackgroundTaskState `json:"background_tasks"`
-	PlanningMode      bool                           `json:"planning_mode"`
-	PermissionsActive bool                           `json:"permissions_enabled"`
-	SandboxEnabled    bool                           `json:"sandbox_enabled"`
-	TokenUsagePct     float64                        `json:"token_usage_pct"`
-	MCPHealthy        int                            `json:"mcp_healthy"`
-	MCPTotal          int                            `json:"mcp_total"`
-	ConversationMode  string                         `json:"conversation_mode"`
-	GitBranch         string                         `json:"git_branch"`
-	WorkDir           string                         `json:"work_dir"`
-	SessionStart      time.Time                      `json:"session_start"`
-	TodoCount         int                            `json:"todo_count"`
-	FileBrowserActive bool                           `json:"file_browser_active"`
-	ModelSelectorOpen bool                           `json:"model_selector_open"`
-	CurrentModel      string                         `json:"current_model"`
-	PlanProgressMode  bool                           `json:"plan_progress_mode"`
+	PlanningMode      bool                            `json:"planning_mode"`
+	PermissionsActive bool                            `json:"permissions_enabled"`
+	SandboxEnabled    bool                            `json:"sandbox_enabled"`
+	TokenUsagePct     float64                         `json:"token_usage_pct"`
+	MCPHealthy        int                             `json:"mcp_healthy"`
+	MCPTotal          int                             `json:"mcp_total"`
+	ConversationMode  string                          `json:"conversation_mode"`
+	GitBranch         string                          `json:"git_branch"`
+	WorkDir           string                          `json:"work_dir"`
+	SessionStart      time.Time                       `json:"session_start"`
+	TodoCount         int                             `json:"todo_count"`
+	FileBrowserActive bool                            `json:"file_browser_active"`
+	ModelSelectorOpen bool                            `json:"model_selector_open"`
+	CurrentModel      string                          `json:"current_model"`
+	PlanProgressMode  bool                            `json:"plan_progress_mode"`
 }
 
 // DebugState returns a serializable snapshot of the current UI state.

@@ -113,6 +113,11 @@ type (
 		Iteration int
 		ToolsUsed int
 	}
+	// StreamTokenUpdateMsg is sent during streaming to update token estimates.
+	StreamTokenUpdateMsg struct {
+		EstimatedOutputTokens int
+	}
+
 	TokenUsageMsg struct {
 		Tokens      int
 		MaxTokens   int
@@ -256,8 +261,8 @@ const (
 type ActivityFeedEntry struct {
 	ID          string
 	Type        ActivityType
-	Name        string        // Tool or agent name
-	Description string        // "Reading /path/to/file.go"
+	Name        string // Tool or agent name
+	Description string // "Reading /path/to/file.go"
 	Status      ActivityStatus
 	StartTime   time.Time
 	Duration    time.Duration

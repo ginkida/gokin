@@ -368,18 +368,18 @@ type PaletteCommandForUI struct {
 }
 
 // Implement ui.PaletteCommandData interface
-func (c *PaletteCommandForUI) GetName() string           { return c.name }
-func (c *PaletteCommandForUI) GetDescription() string    { return c.description }
-func (c *PaletteCommandForUI) GetUsage() string          { return c.usage }
-func (c *PaletteCommandForUI) GetCategoryName() string   { return c.categoryName }
-func (c *PaletteCommandForUI) GetCategoryIcon() string   { return c.categoryIcon }
-func (c *PaletteCommandForUI) GetCategoryPriority() int  { return c.categoryPrio }
-func (c *PaletteCommandForUI) GetIcon() string           { return c.icon }
-func (c *PaletteCommandForUI) GetArgHint() string        { return c.argHint }
-func (c *PaletteCommandForUI) IsEnabled() bool           { return c.enabled }
-func (c *PaletteCommandForUI) GetReason() string         { return c.reason }
-func (c *PaletteCommandForUI) GetPriority() int          { return c.priority }
-func (c *PaletteCommandForUI) IsAdvanced() bool          { return c.advanced }
+func (c *PaletteCommandForUI) GetName() string          { return c.name }
+func (c *PaletteCommandForUI) GetDescription() string   { return c.description }
+func (c *PaletteCommandForUI) GetUsage() string         { return c.usage }
+func (c *PaletteCommandForUI) GetCategoryName() string  { return c.categoryName }
+func (c *PaletteCommandForUI) GetCategoryIcon() string  { return c.categoryIcon }
+func (c *PaletteCommandForUI) GetCategoryPriority() int { return c.categoryPrio }
+func (c *PaletteCommandForUI) GetIcon() string          { return c.icon }
+func (c *PaletteCommandForUI) GetArgHint() string       { return c.argHint }
+func (c *PaletteCommandForUI) IsEnabled() bool          { return c.enabled }
+func (c *PaletteCommandForUI) GetReason() string        { return c.reason }
+func (c *PaletteCommandForUI) GetPriority() int         { return c.priority }
+func (c *PaletteCommandForUI) IsAdvanced() bool         { return c.advanced }
 
 // GetPaletteCommandsForUI implements ui.PaletteProvider interface.
 // Returns []any where each element implements ui.PaletteCommandData.

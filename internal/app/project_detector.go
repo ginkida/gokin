@@ -80,17 +80,17 @@ func (a *App) extractGoModInfo(goModPath string) string {
 	var moduleName string
 	var deps []string
 	knownFrameworks := map[string]string{
-		"github.com/labstack/echo":            "Echo",
-		"github.com/gin-gonic/gin":            "Gin",
-		"github.com/gofiber/fiber":            "Fiber",
-		"github.com/gorilla/mux":              "Gorilla Mux",
-		"github.com/go-chi/chi":               "Chi",
-		"google.golang.org/grpc":              "gRPC",
-		"github.com/spf13/cobra":              "Cobra CLI",
-		"github.com/spf13/viper":              "Viper",
-		"gorm.io/gorm":                        "GORM",
-		"github.com/jmoiron/sqlx":             "sqlx",
-		"github.com/charmbracelet/bubbletea":  "Bubble Tea TUI",
+		"github.com/labstack/echo":           "Echo",
+		"github.com/gin-gonic/gin":           "Gin",
+		"github.com/gofiber/fiber":           "Fiber",
+		"github.com/gorilla/mux":             "Gorilla Mux",
+		"github.com/go-chi/chi":              "Chi",
+		"google.golang.org/grpc":             "gRPC",
+		"github.com/spf13/cobra":             "Cobra CLI",
+		"github.com/spf13/viper":             "Viper",
+		"gorm.io/gorm":                       "GORM",
+		"github.com/jmoiron/sqlx":            "sqlx",
+		"github.com/charmbracelet/bubbletea": "Bubble Tea TUI",
 	}
 
 	scanner := bufio.NewScanner(f)

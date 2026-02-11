@@ -15,8 +15,8 @@ import (
 type DebugDumpCommand struct{}
 
 func (c *DebugDumpCommand) Name() string        { return "debug-dump" }
-func (c *DebugDumpCommand) Description() string  { return "Dump UI state to JSON file for debugging" }
-func (c *DebugDumpCommand) Usage() string        { return "/debug-dump" }
+func (c *DebugDumpCommand) Description() string { return "Dump UI state to JSON file for debugging" }
+func (c *DebugDumpCommand) Usage() string       { return "/debug-dump" }
 
 func (c *DebugDumpCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{

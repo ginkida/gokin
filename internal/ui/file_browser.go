@@ -68,13 +68,13 @@ type FileBrowserModel struct {
 	errorTimeout int // Countdown ticks to clear error
 
 	// Preview panel
-	previewEnabled    bool
-	previewContent    string
-	previewFilePath   string
-	previewViewport   viewport.Model
+	previewEnabled     bool
+	previewContent     string
+	previewFilePath    string
+	previewViewport    viewport.Model
 	previewHighlighter *highlight.Highlighter
-	previewMaxLines   int  // Max lines to preview (default: 100)
-	previewLoadError  string
+	previewMaxLines    int // Max lines to preview (default: 100)
+	previewLoadError   string
 
 	// Split dimensions
 	listWidth    int

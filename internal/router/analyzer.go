@@ -57,8 +57,8 @@ type TaskAnalyzer struct {
 	multiToolPatterns   []*regexp.Regexp
 
 	// LLM-based decomposition (Phase 2)
-	llmClient     client.Client
-	llmConfig     *LLMDecomposerConfig
+	llmClient client.Client
+	llmConfig *LLMDecomposerConfig
 }
 
 // NewTaskAnalyzer creates a new task analyzer
@@ -437,11 +437,11 @@ type Subtask struct {
 
 // DecompositionResult contains the result of task decomposition.
 type DecompositionResult struct {
-	Original     string
-	Subtasks     []Subtask
-	CanParallel  bool
-	TotalSteps   int
-	Reasoning    string
+	Original    string
+	Subtasks    []Subtask
+	CanParallel bool
+	TotalSteps  int
+	Reasoning   string
 }
 
 // Decompose breaks a complex task into subtasks.
@@ -452,8 +452,8 @@ func (ta *TaskAnalyzer) Decompose(message string) *DecompositionResult {
 // DecomposeWithContext breaks a complex task into subtasks with context support.
 func (ta *TaskAnalyzer) DecomposeWithContext(ctx context.Context, message string) *DecompositionResult {
 	result := &DecompositionResult{
-		Original:   message,
-		Subtasks:   make([]Subtask, 0),
+		Original:    message,
+		Subtasks:    make([]Subtask, 0),
 		CanParallel: false,
 	}
 
@@ -559,8 +559,8 @@ func (ta *TaskAnalyzer) decomposeWithLLM(ctx context.Context, message string) (*
 // decomposeWithRegex uses regex patterns to decompose a task.
 func (ta *TaskAnalyzer) decomposeWithRegex(message string) *DecompositionResult {
 	result := &DecompositionResult{
-		Original:   message,
-		Subtasks:   make([]Subtask, 0),
+		Original:    message,
+		Subtasks:    make([]Subtask, 0),
 		CanParallel: false,
 	}
 
@@ -831,17 +831,17 @@ type LLMDecomposer interface {
 
 // LLMDecomposerConfig holds configuration for the LLM decomposer.
 type LLMDecomposerConfig struct {
-	Enabled          bool
-	Model            string
-	MaxSubtasks      int
-	FallbackToRegex  bool
+	Enabled         bool
+	Model           string
+	MaxSubtasks     int
+	FallbackToRegex bool
 }
 
 // DefaultLLMDecomposerConfig returns the default configuration.
 func DefaultLLMDecomposerConfig() *LLMDecomposerConfig {
 	return &LLMDecomposerConfig{
 		Enabled:         true,
-		Model:           "",  // Use default model
+		Model:           "", // Use default model
 		MaxSubtasks:     10,
 		FallbackToRegex: true,
 	}

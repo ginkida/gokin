@@ -17,6 +17,7 @@ var (
 	cfgFile  string
 	model    string
 	runSetup bool
+	resume   bool
 )
 
 func main() {
@@ -33,6 +34,7 @@ and editing files, running commands, and more.`,
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/gokin/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&model, "model", "", "model to use (default is gemini-3-flash-preview)")
 	rootCmd.PersistentFlags().BoolVar(&runSetup, "setup", false, "run the setup wizard")
+	rootCmd.PersistentFlags().BoolVar(&resume, "resume", false, "resume the last session")
 
 	// Version command
 	rootCmd.AddCommand(&cobra.Command{
@@ -105,6 +107,18 @@ func runApp(cmd *cobra.Command, args []string) error {
 	application, err := app.New(cfg, workDir)
 	if err != nil {
 		return fmt.Errorf("failed to create application: %w", err)
+	}
+
+	// Attempt to resume session if requested
+	if resume {
+		if err := application.ResumeLastSession(); err != nil {
+			// Don't fail completely, just warn
+			fmt.Printf("Warning: failed to resume session: %v\nStarting new session instead.\n", err)
+			// Small pause to let user read the warning
+			// (not ideal but better than complex UI logic here)
+		} else {
+			fmt.Println("Resumed previous session.")
+		}
 	}
 
 	// Check for updates on startup (non-blocking notification)

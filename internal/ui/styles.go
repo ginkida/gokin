@@ -57,39 +57,39 @@ var MessageIcons = map[string]string{
 
 // ToolIcons provides minimal Unicode glyphs for tool calls — no emoji, consistent rendering.
 var ToolIcons = map[string]string{
-	"read":           "▸",
-	"write":          "✦",
-	"edit":           "△",
-	"bash":           "$",
-	"glob":           "◇",
-	"grep":           "⊙",
-	"todo":           "☐",
-	"diff":           "±",
-	"tree":           "⊞",
-	"web_fetch":      "↗",
-	"web_search":     "↗",
-	"list_files":     "◇",
-	"list_dir":       "◇",
-	"file_search":    "⊙",
-	"code_search":    "⊙",
-	"ask_question":   "?",
-	"git_log":        "⎇",
-	"git_diff":       "⎇",
-	"git_blame":      "⎇",
-	"git_add":        "⎇",
-	"git_commit":     "⎇",
-	"git_status":     "⎇",
-	"commit":         "⎇",
-	"redo":           "↪",
-	"memory":         "◈",
-	"memorize":       "◈",
-	"refactor":       "△",
-	"code_graph":     "◈",
-	"batch":          "▪",
-	"task":           "▪",
-	"test":           "▪",
-	"build":          "▪",
-	"default":        "·",
+	"read":         "▸",
+	"write":        "✦",
+	"edit":         "△",
+	"bash":         "$",
+	"glob":         "◇",
+	"grep":         "⊙",
+	"todo":         "☐",
+	"diff":         "±",
+	"tree":         "⊞",
+	"web_fetch":    "↗",
+	"web_search":   "↗",
+	"list_files":   "◇",
+	"list_dir":     "◇",
+	"file_search":  "⊙",
+	"code_search":  "⊙",
+	"ask_question": "?",
+	"git_log":      "⎇",
+	"git_diff":     "⎇",
+	"git_blame":    "⎇",
+	"git_add":      "⎇",
+	"git_commit":   "⎇",
+	"git_status":   "⎇",
+	"commit":       "⎇",
+	"redo":         "↪",
+	"memory":       "◈",
+	"memorize":     "◈",
+	"refactor":     "△",
+	"code_graph":   "◈",
+	"batch":        "▪",
+	"task":         "▪",
+	"test":         "▪",
+	"build":        "▪",
+	"default":      "·",
 }
 
 // GetToolIcon returns the icon for a given tool name.
@@ -110,27 +110,27 @@ func GetToolIconColor(toolName string) lipgloss.Color {
 
 	// Tool-specific semantic colors
 	colors := map[string]lipgloss.Color{
-		"read":           ColorPrimary,   // Purple - file operations
-		"write":          ColorSuccess,   // Green - creation
-		"edit":           ColorWarning,   // Amber - modification
-		"bash":           ColorRunning,   // Blue - execution
-		"glob":           ColorSecondary, // Cyan - search
-		"grep":           ColorInfo,      // Teal - pattern search
-		"todo":           ColorAccent,    // Pink - tasks
-		"diff":           ColorPrimary,   // Purple - comparison
-		"tree":           ColorSuccess,   // Green - structure
-		"web_fetch":      ColorGradient2, // Indigo - network
-		"web_search":     ColorGradient2, // Indigo - network
-		"git_log":        ColorWarning,   // Amber - history
-		"git_diff":       ColorPrimary,   // Purple - changes
-		"git_blame":      ColorSecondary, // Cyan - attribution
-		"commit":         ColorSuccess,   // Green - save
-		"memory":         ColorGradient1, // Purple - storage
-		"refactor":       ColorWarning,   // Amber - transformation
-		"code_graph":     ColorGradient3, // Sky - visualization
-		"batch":          ColorAccent,    // Pink - bulk
-		"test":           ColorRunning,   // Blue - testing
-		"build":          ColorWarning,   // Amber - compilation
+		"read":       ColorPrimary,   // Purple - file operations
+		"write":      ColorSuccess,   // Green - creation
+		"edit":       ColorWarning,   // Amber - modification
+		"bash":       ColorRunning,   // Blue - execution
+		"glob":       ColorSecondary, // Cyan - search
+		"grep":       ColorInfo,      // Teal - pattern search
+		"todo":       ColorAccent,    // Pink - tasks
+		"diff":       ColorPrimary,   // Purple - comparison
+		"tree":       ColorSuccess,   // Green - structure
+		"web_fetch":  ColorGradient2, // Indigo - network
+		"web_search": ColorGradient2, // Indigo - network
+		"git_log":    ColorWarning,   // Amber - history
+		"git_diff":   ColorPrimary,   // Purple - changes
+		"git_blame":  ColorSecondary, // Cyan - attribution
+		"commit":     ColorSuccess,   // Green - save
+		"memory":     ColorGradient1, // Purple - storage
+		"refactor":   ColorWarning,   // Amber - transformation
+		"code_graph": ColorGradient3, // Sky - visualization
+		"batch":      ColorAccent,    // Pink - bulk
+		"test":       ColorRunning,   // Blue - testing
+		"build":      ColorWarning,   // Amber - compilation
 	}
 
 	if color, ok := colors[normalized]; ok {

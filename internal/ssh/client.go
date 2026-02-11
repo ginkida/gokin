@@ -26,7 +26,7 @@ type SSHConfig struct {
 	User           string
 	KeyPath        string
 	KeyPassphrase  string
-	Password       string        // Fallback if no key
+	Password       string // Fallback if no key
 	Timeout        time.Duration
 	KnownHostsPath string
 }

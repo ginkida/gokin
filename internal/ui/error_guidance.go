@@ -18,8 +18,8 @@ type ErrorGuidance struct {
 // errorGuidancePatterns contains known error patterns with guidance.
 var errorGuidancePatterns = []ErrorGuidance{
 	{
-		Pattern:     regexp.MustCompile(`stream idle timeout`),
-		Title:       "Stream Stalled",
+		Pattern: regexp.MustCompile(`stream idle timeout`),
+		Title:   "Stream Stalled",
 		Suggestions: []string{
 			"The model stopped sending data mid-response",
 			"This is usually a temporary server issue — try again",

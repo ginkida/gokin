@@ -218,10 +218,10 @@ func (t *TaskOutputTool) waitForShellTask(ctx context.Context, taskID string, ti
 			builder.WriteString("**Timeout waiting for task completion**\n\n")
 			builder.WriteString(t.formatShellTaskResult(info).Content)
 			return NewSuccessResultWithData(builder.String(), map[string]any{
-				"task_id":  taskID,
-				"status":   info.Status,
-				"running":  info.Status == "running",
-				"timeout":  true,
+				"task_id": taskID,
+				"status":  info.Status,
+				"running": info.Status == "running",
+				"timeout": true,
 			}), nil
 
 		case <-ticker.C:

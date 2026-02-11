@@ -97,21 +97,21 @@ func NewCommandValidator() *CommandValidator {
 	// Compile regex patterns for more complex detection
 	cv.blockedPatterns = []*regexp.Regexp{
 		// Fork bomb patterns
-		regexp.MustCompile(`:\s*\(\s*\)\s*\{`),                // :(){
-		regexp.MustCompile(`\$\{?0\}?\s*[&|]\s*\$\{?0\}?`),    // $0 & $0 or $0 | $0
-		regexp.MustCompile(`while\s+true\s*;\s*do.*&`),        // while true; do ... &
-		regexp.MustCompile(`(?i)fork\s*bomb`),                 // "fork bomb" mention
-		regexp.MustCompile(`\byes\s*\|\s*sh`),                 // yes | sh
-		regexp.MustCompile(`\beval\s+\$\(`),                   // eval $(...)
-		regexp.MustCompile(`\bexec\s+\$\{?0\}?`),              // exec $0
+		regexp.MustCompile(`:\s*\(\s*\)\s*\{`),             // :(){
+		regexp.MustCompile(`\$\{?0\}?\s*[&|]\s*\$\{?0\}?`), // $0 & $0 or $0 | $0
+		regexp.MustCompile(`while\s+true\s*;\s*do.*&`),     // while true; do ... &
+		regexp.MustCompile(`(?i)fork\s*bomb`),              // "fork bomb" mention
+		regexp.MustCompile(`\byes\s*\|\s*sh`),              // yes | sh
+		regexp.MustCompile(`\beval\s+\$\(`),                // eval $(...)
+		regexp.MustCompile(`\bexec\s+\$\{?0\}?`),           // exec $0
 
 		// Recursive deletion with variable expansion
-		regexp.MustCompile(`rm\s+(-[rRf]+\s+)+/`),             // rm -rf / variants
-		regexp.MustCompile(`rm\s+(-[rRf]+\s+)+\$`),            // rm -rf $VAR
+		regexp.MustCompile(`rm\s+(-[rRf]+\s+)+/`),  // rm -rf / variants
+		regexp.MustCompile(`rm\s+(-[rRf]+\s+)+\$`), // rm -rf $VAR
 
 		// dd to block devices
-		regexp.MustCompile(`dd\s+.*of=/dev/[snhv]d`),          // dd of=/dev/sd*
-		regexp.MustCompile(`dd\s+.*of=/dev/nvme`),             // dd of=/dev/nvme*
+		regexp.MustCompile(`dd\s+.*of=/dev/[snhv]d`), // dd of=/dev/sd*
+		regexp.MustCompile(`dd\s+.*of=/dev/nvme`),    // dd of=/dev/nvme*
 
 		// Wget/curl piped to shell (potential malware download)
 		regexp.MustCompile(`(?i)(wget|curl)\s+.*\|\s*(ba)?sh`),
@@ -125,7 +125,7 @@ func NewCommandValidator() *CommandValidator {
 		regexp.MustCompile(`perl\s+-e\s+['"].*socket.*exec`),
 
 		// Overwriting MBR/bootloader
-		regexp.MustCompile(`dd\s+.*of=/dev/[snhv]d[a-z]$`),    // dd to disk (no partition)
+		regexp.MustCompile(`dd\s+.*of=/dev/[snhv]d[a-z]$`), // dd to disk (no partition)
 
 		// Mounting attacks
 		regexp.MustCompile(`mount\s+.*-o\s+.*remount.*rw\s+/`),
@@ -149,27 +149,27 @@ func NewCommandValidator() *CommandValidator {
 		regexp.MustCompile(`LD_PRELOAD.*\.so`),
 
 		// Obfuscated commands (hex/octal escapes)
-		regexp.MustCompile(`\\[0-7]{3}`),                       // \OOO
-		regexp.MustCompile(`(?i)printf\s+.*\\`),                // printf with escapes
+		regexp.MustCompile(`\\[0-7]{3}`),        // \OOO
+		regexp.MustCompile(`(?i)printf\s+.*\\`), // printf with escapes
 
 		// Shell injection separators and constructs
-		regexp.MustCompile(`[;&|]\s*(ba)?sh`),                 // ;sh, |sh, &sh
+		regexp.MustCompile(`[;&|]\s*(ba)?sh`),                      // ;sh, |sh, &sh
 		regexp.MustCompile(`(?i)eval\s+.*(base64|curl|wget|nc\b)`), // eval with known-dangerous commands
-		regexp.MustCompile(`>\s*/dev/(tcp|udp)/`),              // redundant but safer with separators
+		regexp.MustCompile(`>\s*/dev/(tcp|udp)/`),                  // redundant but safer with separators
 
 		// Additional eval patterns
-		regexp.MustCompile(`\beval\s+["']`),                    // eval "..." / eval '...'
-		regexp.MustCompile(`\beval\s+\$`),                      // eval $var
-		regexp.MustCompile(`\bsource\s+/dev/`),                 // source /dev/tcp
+		regexp.MustCompile(`\beval\s+["']`),    // eval "..." / eval '...'
+		regexp.MustCompile(`\beval\s+\$`),      // eval $var
+		regexp.MustCompile(`\bsource\s+/dev/`), // source /dev/tcp
 	}
 
 	// Caution patterns: suspicious but not outright blocked.
 	// These are checked only by ValidateWithLevel() for elevated permission prompts.
 	cv.cautionPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`\\x[0-9a-fA-F]{2}`),   // \xXX hex escapes
-		regexp.MustCompile(`\$\(\s*.*\s*\)`),       // $( ... ) command substitution
-		regexp.MustCompile("`[^`]*`"),               // `...` backtick substitution
-		regexp.MustCompile(`\$\{[^}]+\}`),           // ${...} parameter expansion
+		regexp.MustCompile(`\\x[0-9a-fA-F]{2}`), // \xXX hex escapes
+		regexp.MustCompile(`\$\(\s*.*\s*\)`),    // $( ... ) command substitution
+		regexp.MustCompile("`[^`]*`"),           // `...` backtick substitution
+		regexp.MustCompile(`\$\{[^}]+\}`),       // ${...} parameter expansion
 	}
 
 	return cv

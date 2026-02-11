@@ -39,13 +39,13 @@ type ContextManager struct {
 	updateVersion uint64 // Monotonically increasing version to prevent stale watcher updates
 
 	// Async token counting
-	lastEstimatedTokens int            // Cached estimate for fast path
-	lastHistoryLen      int            // History length at last count
+	lastEstimatedTokens int // Cached estimate for fast path
+	lastHistoryLen      int // History length at last count
 
 	// Background summarization
-	summarizing     atomic.Bool       // Whether summarization is in progress (lock-free)
-	summarizeDone   chan struct{}      // Signal when summarization completes
-	lastSummaryDur  time.Duration     // Duration of last summarization
+	summarizing    atomic.Bool   // Whether summarization is in progress (lock-free)
+	summarizeDone  chan struct{} // Signal when summarization completes
+	lastSummaryDur time.Duration // Duration of last summarization
 
 	// New components
 	metrics            *ContextMetrics
@@ -54,7 +54,7 @@ type ContextManager struct {
 	summaryStrategy    SummaryStrategy
 	responseCompressor *ResponseCompressor
 	keyFiles           map[string]bool // Files critical to the session, always preserved
-	tokenHistory       []tokenSnapshot  // Token usage history for trend prediction
+	tokenHistory       []tokenSnapshot // Token usage history for trend prediction
 
 	// Semaphore to limit concurrent async token count goroutines
 	tokenCountSem chan struct{}

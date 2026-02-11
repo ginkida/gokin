@@ -41,33 +41,33 @@ func NewIPValidator() *IPValidator {
 	// Define blocked CIDR ranges
 	blockedCIDRs := []string{
 		// IPv4 private ranges
-		"10.0.0.0/8",       // Class A private
-		"172.16.0.0/12",    // Class B private
-		"192.168.0.0/16",   // Class C private
-		"127.0.0.0/8",      // Loopback
-		"169.254.0.0/16",   // Link-local
-		"100.64.0.0/10",    // Carrier-grade NAT
-		"192.0.0.0/24",     // IETF Protocol Assignments
-		"192.0.2.0/24",     // TEST-NET-1
-		"198.51.100.0/24",  // TEST-NET-2
-		"203.0.113.0/24",   // TEST-NET-3
-		"192.88.99.0/24",   // 6to4 Relay Anycast
-		"198.18.0.0/15",    // Network benchmark tests
-		"224.0.0.0/4",      // Multicast
-		"240.0.0.0/4",      // Reserved for future use
+		"10.0.0.0/8",         // Class A private
+		"172.16.0.0/12",      // Class B private
+		"192.168.0.0/16",     // Class C private
+		"127.0.0.0/8",        // Loopback
+		"169.254.0.0/16",     // Link-local
+		"100.64.0.0/10",      // Carrier-grade NAT
+		"192.0.0.0/24",       // IETF Protocol Assignments
+		"192.0.2.0/24",       // TEST-NET-1
+		"198.51.100.0/24",    // TEST-NET-2
+		"203.0.113.0/24",     // TEST-NET-3
+		"192.88.99.0/24",     // 6to4 Relay Anycast
+		"198.18.0.0/15",      // Network benchmark tests
+		"224.0.0.0/4",        // Multicast
+		"240.0.0.0/4",        // Reserved for future use
 		"255.255.255.255/32", // Broadcast
 
 		// IPv6 private/special ranges
-		"::1/128",          // Loopback
-		"fe80::/10",        // Link-local
-		"fc00::/7",         // Unique local address
-		"ff00::/8",         // Multicast
-		"::ffff:0:0/96",    // IPv4-mapped IPv6 (needs special handling)
-		"64:ff9b::/96",     // NAT64
-		"100::/64",         // Discard prefix
-		"2001:db8::/32",    // Documentation
-		"2001::/32",        // Teredo
-		"2002::/16",        // 6to4
+		"::1/128",       // Loopback
+		"fe80::/10",     // Link-local
+		"fc00::/7",      // Unique local address
+		"ff00::/8",      // Multicast
+		"::ffff:0:0/96", // IPv4-mapped IPv6 (needs special handling)
+		"64:ff9b::/96",  // NAT64
+		"100::/64",      // Discard prefix
+		"2001:db8::/32", // Documentation
+		"2001::/32",     // Teredo
+		"2002::/16",     // 6to4
 	}
 
 	v.blockedNetworks = make([]*net.IPNet, 0, len(blockedCIDRs))

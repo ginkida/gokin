@@ -45,8 +45,8 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 					handler.OnError(chunk.Error)
 				}
 				// Return accumulated partial response alongside the error
-			// so callers can preserve context from partial model output
-			return resp, chunk.Error
+				// so callers can preserve context from partial model output
+				return resp, chunk.Error
 			}
 
 			if chunk.Thinking != "" {

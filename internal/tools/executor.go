@@ -1176,7 +1176,6 @@ func (e *Executor) buildResponseParts(resp *client.Response) []*genai.Part {
 	return parts
 }
 
-
 // executeStreamingTool executes a streaming tool and collects results.
 // Streams chunks to the handler for real-time feedback.
 func (e *Executor) executeStreamingTool(ctx context.Context, tool StreamingTool, args map[string]any) (ToolResult, error) {

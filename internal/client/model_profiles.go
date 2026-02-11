@@ -14,10 +14,10 @@ type ModelProfile struct {
 // knownModelProfiles maps model name prefixes to their profiles.
 var knownModelProfiles = map[string]ModelProfile{
 	// Llama family
-	"llama3.2":  {Family: "llama", ContextWindow: 128000, SupportsTools: true, IsSmall: true},
-	"llama3.1":  {Family: "llama", ContextWindow: 128000, SupportsTools: true},
-	"llama3":    {Family: "llama", ContextWindow: 8192, SupportsTools: true},
-	"llama2":    {Family: "llama", ContextWindow: 4096, SupportsTools: false},
+	"llama3.2": {Family: "llama", ContextWindow: 128000, SupportsTools: true, IsSmall: true},
+	"llama3.1": {Family: "llama", ContextWindow: 128000, SupportsTools: true},
+	"llama3":   {Family: "llama", ContextWindow: 8192, SupportsTools: true},
+	"llama2":   {Family: "llama", ContextWindow: 4096, SupportsTools: false},
 
 	// Qwen family
 	"qwen2.5-coder": {Family: "qwen", ContextWindow: 32768, SupportsTools: true, IsCoding: true},
@@ -26,13 +26,13 @@ var knownModelProfiles = map[string]ModelProfile{
 	"qwen":          {Family: "qwen", ContextWindow: 8192, SupportsTools: false},
 
 	// Mistral family
-	"mistral-nemo":  {Family: "mistral", ContextWindow: 128000, SupportsTools: true},
-	"mistral":       {Family: "mistral", ContextWindow: 32768, SupportsTools: true},
-	"mixtral":       {Family: "mistral", ContextWindow: 32768, SupportsTools: true},
+	"mistral-nemo": {Family: "mistral", ContextWindow: 128000, SupportsTools: true},
+	"mistral":      {Family: "mistral", ContextWindow: 32768, SupportsTools: true},
+	"mixtral":      {Family: "mistral", ContextWindow: 32768, SupportsTools: true},
 
 	// Phi family (Microsoft)
-	"phi4":  {Family: "phi", ContextWindow: 16384, SupportsTools: true, IsSmall: true},
-	"phi3":  {Family: "phi", ContextWindow: 4096, SupportsTools: false, IsSmall: true},
+	"phi4": {Family: "phi", ContextWindow: 16384, SupportsTools: true, IsSmall: true},
+	"phi3": {Family: "phi", ContextWindow: 4096, SupportsTools: false, IsSmall: true},
 
 	// Code-specialized
 	"codellama":      {Family: "codellama", ContextWindow: 16384, SupportsTools: false, IsCoding: true},

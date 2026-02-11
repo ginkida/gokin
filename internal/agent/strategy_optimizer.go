@@ -13,12 +13,12 @@ import (
 
 // StrategyMetrics tracks performance metrics for a strategy.
 type StrategyMetrics struct {
-	StrategyName string        `json:"strategy_name"`
-	SuccessCount int           `json:"success_count"`
-	FailureCount int           `json:"failure_count"`
-	TotalTime    time.Duration `json:"total_time"`
-	AvgDuration  time.Duration `json:"avg_duration"`
-	LastUsed     time.Time     `json:"last_used"`
+	StrategyName string         `json:"strategy_name"`
+	SuccessCount int            `json:"success_count"`
+	FailureCount int            `json:"failure_count"`
+	TotalTime    time.Duration  `json:"total_time"`
+	AvgDuration  time.Duration  `json:"avg_duration"`
+	LastUsed     time.Time      `json:"last_used"`
 	TaskTypes    map[string]int `json:"task_types"` // TaskType -> count
 }
 

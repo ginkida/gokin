@@ -161,4 +161,3 @@ func (t *CodeGraphTool) findCycles(ctx context.Context) (ToolResult, error) {
 	return NewSuccessResult(fmt.Sprintf("Found %d circular dependency cycle(s):\n%s",
 		len(cycles), strings.Join(output, "\n"))), nil
 }
-

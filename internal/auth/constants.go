@@ -28,9 +28,9 @@ const (
 
 // Code Assist API headers (required for proper request routing)
 var CodeAssistHeaders = map[string]string{
-	"User-Agent":      "google-api-nodejs-client/9.15.1",
+	"User-Agent":        "google-api-nodejs-client/9.15.1",
 	"X-Goog-Api-Client": "gl-node/22.17.0",
-	"Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
+	"Client-Metadata":   "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
 }
 
 // OAuth scopes

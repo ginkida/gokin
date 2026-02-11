@@ -31,4 +31,3 @@ type TaskProgressEvent struct {
 	Progress float64
 	Message  string
 }
-

@@ -22,11 +22,11 @@ type FileAccessPattern struct {
 
 // CoAccessEntry tracks files that are frequently accessed together.
 type CoAccessEntry struct {
-	FileA     string  `json:"file_a"`
-	FileB     string  `json:"file_b"`
-	Count     int     `json:"count"`
-	Strength  float64 `json:"strength"` // 0.0 to 1.0
-	LastSeen  time.Time `json:"last_seen"`
+	FileA    string    `json:"file_a"`
+	FileB    string    `json:"file_b"`
+	Count    int       `json:"count"`
+	Strength float64   `json:"strength"` // 0.0 to 1.0
+	LastSeen time.Time `json:"last_seen"`
 }
 
 // ContextPredictor predicts which files might be needed next based on access patterns.

@@ -36,11 +36,11 @@ func DefaultRules() *Rules {
 			// File modification tools - ask before executing (caution)
 			"write":       LevelAsk,
 			"atomicwrite": LevelAsk,
-			"edit":    LevelAsk,
-			"git_add": LevelAsk,
-			"copy":    LevelAsk,
-			"move":    LevelAsk,
-			"mkdir":   LevelAsk,
+			"edit":        LevelAsk,
+			"git_add":     LevelAsk,
+			"copy":        LevelAsk,
+			"move":        LevelAsk,
+			"mkdir":       LevelAsk,
 
 			// System/dangerous tools - always ask (dangerous)
 			"bash":       LevelAsk,

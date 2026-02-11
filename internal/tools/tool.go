@@ -241,9 +241,9 @@ func ShouldSkipDiff(ctx context.Context) bool {
 
 // StreamingToolResult represents a tool result that streams its output.
 type StreamingToolResult struct {
-	Chunks <-chan string    // Chunks of output
-	Done   <-chan struct{}  // Signals completion
-	Error  <-chan error     // Error channel
+	Chunks <-chan string   // Chunks of output
+	Done   <-chan struct{} // Signals completion
+	Error  <-chan error    // Error channel
 }
 
 // StreamingTool is an optional interface for tools with large outputs.

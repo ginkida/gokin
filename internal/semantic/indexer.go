@@ -200,8 +200,6 @@ func (i *Indexer) SaveCache() error {
 	return nil
 }
 
-
-
 // isCodeFile checks if a file is likely a code file based on extension.
 func isCodeFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))

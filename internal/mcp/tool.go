@@ -13,12 +13,12 @@ import (
 // MCPTool wraps an MCP server tool as a Gokin tool.
 // Similar to SemanticSearchTool wrapping EnhancedIndexer.
 type MCPTool struct {
-	client      *Client     // MCP client connection
-	serverName  string      // Server name for identification
-	toolName    string      // Original MCP tool name
-	displayName string      // Prefixed name for Gemini
-	description string      // Tool description
-	inputSchema *JSONSchema // MCP input schema
+	client      *Client                    // MCP client connection
+	serverName  string                     // Server name for identification
+	toolName    string                     // Original MCP tool name
+	displayName string                     // Prefixed name for Gemini
+	description string                     // Tool description
+	inputSchema *JSONSchema                // MCP input schema
 	declaration *genai.FunctionDeclaration // Cached declaration
 }
 

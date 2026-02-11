@@ -20,10 +20,10 @@ type CoordinatedTask struct {
 	Prompt       string
 	AgentType    AgentType
 	Priority     TaskPriority
-	Dependencies []string      // IDs of tasks that must complete first
+	Dependencies []string // IDs of tasks that must complete first
 	Status       TaskStatus
 	Result       *AgentResult
-	index        int           // Index in heap
+	index        int // Index in heap
 }
 
 // TaskStatus represents the status of a coordinated task.
@@ -31,8 +31,8 @@ type TaskStatus string
 
 const (
 	TaskStatusPending   TaskStatus = "pending"
-	TaskStatusBlocked   TaskStatus = "blocked"   // Waiting on dependencies
-	TaskStatusReady     TaskStatus = "ready"     // Ready to run (dependencies met)
+	TaskStatusBlocked   TaskStatus = "blocked" // Waiting on dependencies
+	TaskStatusReady     TaskStatus = "ready"   // Ready to run (dependencies met)
 	TaskStatusRunning   TaskStatus = "running"
 	TaskStatusCompleted TaskStatus = "completed"
 	TaskStatusFailed    TaskStatus = "failed"

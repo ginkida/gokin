@@ -18,8 +18,8 @@ import (
 	"gokin/internal/client"
 	"gokin/internal/commands"
 	"gokin/internal/config"
-	"gokin/internal/git"
 	appcontext "gokin/internal/context"
+	"gokin/internal/git"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/mcp"
@@ -155,9 +155,9 @@ type App struct {
 	sessionManager *chat.SessionManager
 
 	// New feature integrations
-	searchCache     *cache.SearchCache
-	rateLimiter     *ratelimit.Limiter
-	auditLogger     *audit.Logger
+	searchCache       *cache.SearchCache
+	rateLimiter       *ratelimit.Limiter
+	auditLogger       *audit.Logger
 	fileWatcher       *watcher.Watcher
 	semanticIndexer   *semantic.EnhancedIndexer
 	backgroundIndexer *semantic.BackgroundIndexer
@@ -215,6 +215,9 @@ type App struct {
 	// Signal handler cleanup
 	signalCleanup func()
 
+	// Session pre-load flag (set by ResumeLastSession before Run)
+	sessionPreloaded bool
+
 	// Pending message queue
 	pendingMessage string
 	pendingMu      sync.Mutex
@@ -263,9 +266,11 @@ func (a *App) Run() error {
 		logging.Debug("failed to load input history", "error", err)
 	}
 
-	// Auto-load previous session if enabled
+	// Auto-load previous session if enabled (skip if already pre-loaded via ResumeLastSession)
 	var sessionRestored bool
-	if a.sessionManager != nil {
+	if a.sessionPreloaded {
+		sessionRestored = true
+	} else if a.sessionManager != nil {
 		state, info, err := a.sessionManager.LoadLast()
 		if err == nil && state != nil {
 			// Check if session has any content
@@ -575,6 +580,37 @@ func (a *App) GetAgentTypeRegistry() *agent.AgentTypeRegistry {
 // GetSession returns the current session.
 func (a *App) GetSession() *chat.Session {
 	return a.session
+}
+
+// ResumeLastSession loads and restores the most recent session before Run() is called.
+func (a *App) ResumeLastSession() error {
+	if a.sessionManager == nil {
+		return fmt.Errorf("session manager not configured")
+	}
+
+	state, info, err := a.sessionManager.LoadLast()
+	if err != nil {
+		return fmt.Errorf("failed to load last session: %w", err)
+	}
+	if state == nil || len(state.History) == 0 {
+		return fmt.Errorf("no previous session found")
+	}
+
+	if err := a.sessionManager.RestoreFromState(state); err != nil {
+		return fmt.Errorf("failed to restore session: %w", err)
+	}
+
+	a.mu.Lock()
+	a.scratchpad = a.session.GetScratchpad()
+	a.sessionPreloaded = true
+	a.mu.Unlock()
+
+	if a.agentRunner != nil {
+		a.agentRunner.SetSharedScratchpad(a.scratchpad)
+	}
+
+	logging.Info("pre-loaded session", "session_id", info.ID, "messages", info.MessageCount)
+	return nil
 }
 
 // GetHistoryManager returns a new history manager.

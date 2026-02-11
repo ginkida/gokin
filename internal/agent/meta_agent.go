@@ -11,23 +11,23 @@ import (
 
 // AgentMonitor tracks the state of a running agent.
 type AgentMonitor struct {
-	AgentID       string
-	AgentType     AgentType
-	StartTime     time.Time
-	LastActivity  time.Time
-	CurrentTool   string
-	TurnCount     int
-	StuckCount    int
-	Intervened    bool
+	AgentID         string
+	AgentType       AgentType
+	StartTime       time.Time
+	LastActivity    time.Time
+	CurrentTool     string
+	TurnCount       int
+	StuckCount      int
+	Intervened      bool
 	InterventionMsg string
 }
 
 // MetaAgentConfig holds configuration for the meta agent.
 type MetaAgentConfig struct {
-	Enabled           bool
-	CheckInterval     time.Duration // How often to check agent health
-	StuckThreshold    time.Duration // Duration before considering an agent stuck
-	MaxInterventions  int           // Max interventions before giving up
+	Enabled          bool
+	CheckInterval    time.Duration // How often to check agent health
+	StuckThreshold   time.Duration // Duration before considering an agent stuck
+	MaxInterventions int           // Max interventions before giving up
 }
 
 // DefaultMetaAgentConfig returns the default configuration.

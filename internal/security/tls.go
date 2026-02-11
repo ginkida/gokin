@@ -114,8 +114,8 @@ func CreateTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-		tls.TLS_AES_128_GCM_SHA256,    // TLS 1.3
-		tls.TLS_AES_256_GCM_SHA384,    // TLS 1.3
+		tls.TLS_AES_128_GCM_SHA256,       // TLS 1.3
+		tls.TLS_AES_256_GCM_SHA384,       // TLS 1.3
 		tls.TLS_CHACHA20_POLY1305_SHA256, // TLS 1.3
 	}
 
@@ -168,12 +168,12 @@ func CreateSecureHTTPClient(cfg TLSConfig, timeout time.Duration) (*http.Client,
 		Proxy:                 http.ProxyFromEnvironment,
 		TLSClientConfig:       tlsCfg,
 		TLSHandshakeTimeout:   tlsHandshakeTimeout,
-		ForceAttemptHTTP2:      true,
-		MaxIdleConns:           100,
-		MaxIdleConnsPerHost:    10,
-		IdleConnTimeout:        90 * time.Second,
-		ResponseHeaderTimeout:  timeout,
-		ExpectContinueTimeout:  1 * time.Second,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 
 	// Configure dialer with timeout and keep-alive

@@ -14,10 +14,10 @@ import (
 type SharedEntryType string
 
 const (
-	SharedEntryTypeFact           SharedEntryType = "fact"
-	SharedEntryTypeInsight        SharedEntryType = "insight"
-	SharedEntryTypeFileState      SharedEntryType = "file_state"
-	SharedEntryTypeDecision       SharedEntryType = "decision"
+	SharedEntryTypeFact            SharedEntryType = "fact"
+	SharedEntryTypeInsight         SharedEntryType = "insight"
+	SharedEntryTypeFileState       SharedEntryType = "file_state"
+	SharedEntryTypeDecision        SharedEntryType = "decision"
 	SharedEntryTypeContextSnapshot SharedEntryType = "context_snapshot"
 
 	// MaxSharedEntries is the maximum number of entries to keep in shared memory

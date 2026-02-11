@@ -7,11 +7,11 @@ import "time"
 // JSONRPCMessage represents a JSON-RPC 2.0 message (request, response, or notification).
 type JSONRPCMessage struct {
 	JSONRPC string `json:"jsonrpc"`
-	ID      any    `json:"id,omitempty"`      // Can be string, int, or nil for notifications
-	Method  string `json:"method,omitempty"`  // For requests/notifications
-	Params  any    `json:"params,omitempty"`  // For requests/notifications
-	Result  any    `json:"result,omitempty"`  // For successful responses
-	Error   *Error `json:"error,omitempty"`   // For error responses
+	ID      any    `json:"id,omitempty"`     // Can be string, int, or nil for notifications
+	Method  string `json:"method,omitempty"` // For requests/notifications
+	Params  any    `json:"params,omitempty"` // For requests/notifications
+	Result  any    `json:"result,omitempty"` // For successful responses
+	Error   *Error `json:"error,omitempty"`  // For error responses
 }
 
 // IsRequest returns true if the message is a request (has ID and method).
@@ -214,32 +214,32 @@ type GetPromptResult struct {
 
 // PromptMessage represents a message in a prompt result.
 type PromptMessage struct {
-	Role    string          `json:"role"` // "user" or "assistant"
-	Content *ContentBlock   `json:"content"`
+	Role    string        `json:"role"` // "user" or "assistant"
+	Content *ContentBlock `json:"content"`
 }
 
 // ServerConfig holds configuration for an MCP server connection.
 type ServerConfig struct {
-	Name        string            `yaml:"name" json:"name"`                   // Unique identifier
-	Transport   string            `yaml:"transport" json:"transport"`         // "stdio" or "http"
+	Name      string `yaml:"name" json:"name"`           // Unique identifier
+	Transport string `yaml:"transport" json:"transport"` // "stdio" or "http"
 
 	// STDIO transport
-	Command     string            `yaml:"command,omitempty" json:"command,omitempty"`       // e.g., "npx"
-	Args        []string          `yaml:"args,omitempty" json:"args,omitempty"`             // e.g., ["-y", "@mcp/server-github"]
-	Env         map[string]string `yaml:"env,omitempty" json:"env,omitempty"`               // Additional env vars
+	Command string            `yaml:"command,omitempty" json:"command,omitempty"` // e.g., "npx"
+	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`       // e.g., ["-y", "@mcp/server-github"]
+	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`         // Additional env vars
 
 	// HTTP transport
-	URL         string            `yaml:"url,omitempty" json:"url,omitempty"`               // Server URL
-	Headers     map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`       // Custom headers
+	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`         // Server URL
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"` // Custom headers
 
 	// Connection settings
-	AutoConnect bool              `yaml:"auto_connect" json:"autoConnect"`                   // Connect on startup
-	Timeout     time.Duration     `yaml:"timeout,omitempty" json:"timeout,omitempty"`       // Request timeout
-	MaxRetries  int               `yaml:"max_retries,omitempty" json:"maxRetries,omitempty"` // Retry count
-	RetryDelay  time.Duration     `yaml:"retry_delay,omitempty" json:"retryDelay,omitempty"` // Between retries
+	AutoConnect bool          `yaml:"auto_connect" json:"autoConnect"`                   // Connect on startup
+	Timeout     time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`        // Request timeout
+	MaxRetries  int           `yaml:"max_retries,omitempty" json:"maxRetries,omitempty"` // Retry count
+	RetryDelay  time.Duration `yaml:"retry_delay,omitempty" json:"retryDelay,omitempty"` // Between retries
 
 	// Tool settings
-	ToolPrefix  string            `yaml:"tool_prefix,omitempty" json:"toolPrefix,omitempty"` // Prefix for tool names
+	ToolPrefix string `yaml:"tool_prefix,omitempty" json:"toolPrefix,omitempty"` // Prefix for tool names
 }
 
 // MCP protocol version
@@ -247,13 +247,13 @@ const ProtocolVersion = "2024-11-05"
 
 // MCP method names
 const (
-	MethodInitialize     = "initialize"
-	MethodInitialized    = "notifications/initialized"
-	MethodToolsList      = "tools/list"
-	MethodToolsCall      = "tools/call"
-	MethodResourcesList  = "resources/list"
-	MethodResourcesRead  = "resources/read"
-	MethodPromptsList    = "prompts/list"
-	MethodPromptsGet     = "prompts/get"
-	MethodPing           = "ping"
+	MethodInitialize    = "initialize"
+	MethodInitialized   = "notifications/initialized"
+	MethodToolsList     = "tools/list"
+	MethodToolsCall     = "tools/call"
+	MethodResourcesList = "resources/list"
+	MethodResourcesRead = "resources/read"
+	MethodPromptsList   = "prompts/list"
+	MethodPromptsGet    = "prompts/get"
+	MethodPing          = "ping"
 )

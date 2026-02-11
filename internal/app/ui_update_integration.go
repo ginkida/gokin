@@ -52,7 +52,6 @@ func (a *App) setupOrchestratorCallbacks() {
 	logging.Debug("orchestrator UI callbacks configured")
 }
 
-
 // BroadcastTaskStart broadcasts a task start event to the UI.
 func (a *App) BroadcastTaskStart(taskID, message, taskType string) {
 	if a.uiUpdateManager != nil {
@@ -78,4 +77,3 @@ func (a *App) BroadcastTaskProgress(taskID string, progress float64, message str
 func (a *App) GetUIUpdateManager() *UIUpdateManager {
 	return a.uiUpdateManager
 }
-

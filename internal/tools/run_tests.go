@@ -229,11 +229,11 @@ func parseTestResults(framework, output string, execErr error, duration time.Dur
 // parseGoTestResults parses Go's JSON test output.
 func parseGoTestResults(output string, execErr error, duration time.Duration) string {
 	var (
-		passed    int
-		failed    int
-		skipped   int
-		failures  []string
-		packages  = make(map[string]string) // package -> status
+		passed     int
+		failed     int
+		skipped    int
+		failures   []string
+		packages   = make(map[string]string)   // package -> status
 		failOutput = make(map[string][]string) // test -> output lines
 	)
 

@@ -87,10 +87,10 @@ func (t *TreeTool) Validate(args map[string]any) error {
 
 // Tree drawing characters
 type treeChars struct {
-	Branch    string // ├── or |--
+	Branch     string // ├── or |--
 	LastBranch string // └── or `--
-	Vertical  string // │   or |
-	Space     string // spaces
+	Vertical   string // │   or |
+	Space      string // spaces
 }
 
 var unicodeChars = treeChars{

@@ -171,7 +171,7 @@ func (v *PathValidator) checkSymlink(path string) error {
 	// Handle cross-platform paths
 	sep := string(filepath.Separator)
 	components := strings.Split(filepath.Clean(path), sep)
-	
+
 	current := ""
 	if filepath.IsAbs(path) {
 		if runtime.GOOS == "windows" {

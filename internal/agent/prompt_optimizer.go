@@ -16,17 +16,17 @@ const MaxPromptVariants = 500
 
 // PromptVariant represents a variation of a prompt with its performance metrics.
 type PromptVariant struct {
-	ID          string        `json:"id"`
-	BasePrompt  string        `json:"base_prompt"`  // Category/template (e.g., "explore", "implement")
-	Variation   string        `json:"variation"`    // The actual prompt text
-	SuccessRate float64       `json:"success_rate"` // 0-1
-	AvgTokens   int           `json:"avg_tokens"`
-	AvgDuration time.Duration `json:"avg_duration"`
-	UseCount    int           `json:"use_count"`
-	SuccessCount int          `json:"success_count"`
-	FailureCount int          `json:"failure_count"`
-	LastUsed    time.Time     `json:"last_used"`
-	Created     time.Time     `json:"created"`
+	ID           string        `json:"id"`
+	BasePrompt   string        `json:"base_prompt"`  // Category/template (e.g., "explore", "implement")
+	Variation    string        `json:"variation"`    // The actual prompt text
+	SuccessRate  float64       `json:"success_rate"` // 0-1
+	AvgTokens    int           `json:"avg_tokens"`
+	AvgDuration  time.Duration `json:"avg_duration"`
+	UseCount     int           `json:"use_count"`
+	SuccessCount int           `json:"success_count"`
+	FailureCount int           `json:"failure_count"`
+	LastUsed     time.Time     `json:"last_used"`
+	Created      time.Time     `json:"created"`
 }
 
 // Score calculates a combined score for ranking variants.

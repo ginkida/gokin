@@ -7,7 +7,7 @@ import (
 
 // SecretRedactor masks sensitive information in strings using common patterns.
 type SecretRedactor struct {
-	patterns []*regexp.Regexp
+	patterns  []*regexp.Regexp
 	whitelist map[string]bool
 }
 
@@ -258,11 +258,11 @@ func (r *SecretRedactor) redactSubmatches(text string, pattern *regexp.Regexp) s
 func (r *SecretRedactor) isWhitelisted(value string) bool {
 	lower := strings.ToLower(value)
 	lower = strings.Trim(lower, "\"'")
-	
+
 	if r.whitelist[lower] {
 		return true
 	}
-	
+
 	// Don't redact short words
 	if len(lower) <= 4 {
 		return true
@@ -277,13 +277,13 @@ func (r *SecretRedactor) isWhitelisted(value string) bool {
 		"config", "settings", "options",
 		"database", "server", "host",
 	}
-	
+
 	for _, safe := range safePatterns {
 		if strings.Contains(lower, safe) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 

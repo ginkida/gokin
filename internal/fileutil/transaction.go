@@ -450,12 +450,12 @@ func copyFile(src, dst string) error {
 
 // TransactionResult contains information about a completed transaction.
 type TransactionResult struct {
-	ID            string
-	Committed     bool
-	RolledBack    bool
-	Duration      time.Duration
+	ID             string
+	Committed      bool
+	RolledBack     bool
+	Duration       time.Duration
 	OperationCount int
-	FilesModified []string
+	FilesModified  []string
 }
 
 // Result returns a summary of the transaction.
@@ -472,11 +472,11 @@ func (tx *FileTransaction) Result() TransactionResult {
 	}
 
 	return TransactionResult{
-		ID:            tx.id,
-		Committed:     tx.committed,
-		RolledBack:    tx.rolledBack,
-		Duration:      time.Since(tx.startTime),
+		ID:             tx.id,
+		Committed:      tx.committed,
+		RolledBack:     tx.rolledBack,
+		Duration:       time.Since(tx.startTime),
 		OperationCount: len(tx.operations),
-		FilesModified: files,
+		FilesModified:  files,
 	}
 }

@@ -7,19 +7,19 @@ import (
 
 // UndoState stores the state before plan execution for undo functionality.
 type UndoState struct {
-	PlanID      string       `json:"plan_id"`
-	PlanTitle   string       `json:"plan_title"`
-	Description string       `json:"description"`
-	Request     string       `json:"request"`
-	Steps       []*Step      `json:"steps"`
-	Timestamp   time.Time    `json:"timestamp"`
-	Executed    []int        `json:"executed"` // IDs of steps that were executed
+	PlanID      string    `json:"plan_id"`
+	PlanTitle   string    `json:"plan_title"`
+	Description string    `json:"description"`
+	Request     string    `json:"request"`
+	Steps       []*Step   `json:"steps"`
+	Timestamp   time.Time `json:"timestamp"`
+	Executed    []int     `json:"executed"` // IDs of steps that were executed
 }
 
 // ManagerUndoExtension extends the plan Manager with undo/redo capabilities.
 type ManagerUndoExtension struct {
-	manager *Manager
-	history []*UndoState
+	manager    *Manager
+	history    []*UndoState
 	maxHistory int
 }
 
@@ -29,8 +29,8 @@ func NewManagerUndoExtension(manager *Manager, maxHistory int) *ManagerUndoExten
 		maxHistory = 10 // Default to 10 history entries
 	}
 	return &ManagerUndoExtension{
-		manager: manager,
-		history: make([]*UndoState, 0, maxHistory),
+		manager:    manager,
+		history:    make([]*UndoState, 0, maxHistory),
 		maxHistory: maxHistory,
 	}
 }
