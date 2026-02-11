@@ -206,8 +206,9 @@ type UIConfig struct {
 	Theme             string `yaml:"theme"`         // Theme name: dark, light, sepia, cyber, forest, ocean, monokai, dracula, high_contrast
 	ShowWelcome       bool   `yaml:"show_welcome"`  // Show welcome message on first launch
 	HintsEnabled      bool   `yaml:"hints_enabled"` // Show contextual hints for features
-	CompactMode       bool   `yaml:"compact_mode"`
-	Bell              bool   `yaml:"bell"`         // Terminal bell on prompts (default: true)
+	CompactMode         bool   `yaml:"compact_mode"`
+	Bell                bool   `yaml:"bell"`                  // Terminal bell on prompts (default: true)
+	NativeNotifications bool   `yaml:"native_notifications"` // macOS Notification Center (default: false)
 }
 
 // ContextConfig holds context management settings.

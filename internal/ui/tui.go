@@ -34,6 +34,8 @@ type Model struct {
 	currentToolInfo string // Brief info about current tool operation (e.g., file path)
 	toolStartTime   time.Time
 	processingLabel string // Status label between tool calls: "Thinking", "Analyzing", "Running agent"
+	loopIteration   int    // Current executor loop iteration (0 = first/unknown)
+	loopToolsUsed   int    // Total tools used across loop iterations
 	todoItems       []string
 	workDir         string
 
@@ -1292,6 +1294,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.currentTool = ""
 		m.currentToolInfo = ""
 		m.processingLabel = ""
+		m.loopIteration = 0
+		m.loopToolsUsed = 0
 		m.activeToolCalls = nil
 		m.streamStartTime = time.Time{}  // Reset timeout tracking
 		m.lastActivityTime = time.Time{} // Reset activity tracking
@@ -1343,6 +1347,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case TodoUpdateMsg:
 		m.todoItems = msg
+
+	case LoopIterationMsg:
+		m.loopIteration = msg.Iteration
+		m.loopToolsUsed = msg.ToolsUsed
 
 	case TokenUsageMsg:
 		m.tokenUsage = &msg
@@ -1953,6 +1961,12 @@ func (m Model) View() string {
 					m.planProgress.CurrentStepID,
 					m.planProgress.TotalSteps)
 				status += " " + dimStyle.Render(stepInfo)
+			}
+
+			// Loop iteration context
+			if m.loopIteration > 1 {
+				iterInfo := fmt.Sprintf(" (iteration %d, %d tools)", m.loopIteration, m.loopToolsUsed)
+				status += " " + dimStyle.Render(iterInfo)
 			}
 			builder.WriteString(status)
 		} else {

@@ -370,6 +370,11 @@ func (b *Builder) initTools() error {
 	toolCache := tools.NewToolResultCache(tools.DefaultCacheConfig())
 	b.executor.SetToolCache(toolCache)
 
+	// Enable native macOS notifications if configured
+	if b.cfg.UI.NativeNotifications {
+		b.executor.GetNotificationManager().EnableNativeNotifications(true)
+	}
+
 	return nil
 }
 
@@ -1296,6 +1301,14 @@ func (b *Builder) wireDependencies() error {
 				})
 			}
 		},
+		OnLoopIteration: func(iteration int, toolsUsed int) {
+			if app.program != nil {
+				app.program.Send(ui.LoopIterationMsg{
+					Iteration: iteration,
+					ToolsUsed: toolsUsed,
+				})
+			}
+		},
 	})
 
 	// Set up TUI callbacks
@@ -1366,6 +1379,16 @@ func (b *Builder) wireDependencies() error {
 				Type:   "agent",
 				Status: status,
 			})
+		}
+
+		// Send native notification on agent completion
+		nm := app.executor.GetNotificationManager()
+		if nm != nil {
+			if result != nil && result.Status == agent.AgentStatusFailed {
+				nm.NotifyError("agent", "Task failed", result.Error)
+			} else {
+				nm.NotifySuccess("agent", "Task completed", nil, 0)
+			}
 		}
 	})
 

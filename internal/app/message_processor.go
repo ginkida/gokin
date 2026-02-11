@@ -265,6 +265,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		})
 	}
 
+	// Notify on long message processing completion (for background terminals)
+	if duration > 30*time.Second {
+		if nm := a.executor.GetNotificationManager(); nm != nil {
+			nm.NotifySuccess("assistant", fmt.Sprintf("Response ready (%s)", formatDuration(duration)), nil, duration)
+		}
+	}
+
 	// Update todos display
 	todoTool, ok := a.registry.Get("todo")
 	if ok {

@@ -108,6 +108,11 @@ type (
 	}
 	ErrorMsg      error
 	TodoUpdateMsg []string
+	// LoopIterationMsg carries executor loop iteration progress.
+	LoopIterationMsg struct {
+		Iteration int
+		ToolsUsed int
+	}
 	TokenUsageMsg struct {
 		Tokens      int
 		MaxTokens   int

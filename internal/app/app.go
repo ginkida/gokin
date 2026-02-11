@@ -268,8 +268,8 @@ func (a *App) Run() error {
 	if a.sessionManager != nil {
 		state, info, err := a.sessionManager.LoadLast()
 		if err == nil && state != nil {
-			// Check if session has meaningful content (more than just system prompt)
-			if len(state.History) > 2 {
+			// Check if session has any content
+			if len(state.History) > 0 {
 				if restoreErr := a.sessionManager.RestoreFromState(state); restoreErr != nil {
 					logging.Warn("failed to restore session", "error", restoreErr)
 				} else {
@@ -319,6 +319,16 @@ func (a *App) Run() error {
 	if a.sessionManager != nil {
 		a.sessionManager.Start(a.ctx)
 	}
+
+	// Save session on panic before re-panicking
+	defer func() {
+		if r := recover(); r != nil {
+			if a.sessionManager != nil {
+				_ = a.sessionManager.Save()
+			}
+			panic(r)
+		}
+	}()
 
 	// Show welcome message
 	a.tui.Welcome()

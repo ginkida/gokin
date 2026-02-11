@@ -230,6 +230,9 @@ type ExecutionHandler struct {
 
 	// OnInlineDiff is called after successful edit to show inline diff.
 	OnInlineDiff func(filePath, oldText, newText string)
+
+	// OnLoopIteration is called at the start of each executor loop iteration (from 2nd onwards).
+	OnLoopIteration func(iteration int, totalToolsUsed int)
 }
 
 // NewExecutor creates a new tool executor.
@@ -369,6 +372,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		case <-ctx.Done():
 			return history, finalText, ctx.Err()
 		default:
+		}
+
+		// Notify about loop iteration progress (from 2nd iteration onwards)
+		if i > 0 && e.handler != nil && e.handler.OnLoopIteration != nil {
+			e.handler.OnLoopIteration(i+1, len(toolsUsed))
 		}
 
 		// Get response from model
