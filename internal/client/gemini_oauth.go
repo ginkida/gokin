@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/ratelimit"
+	"gokin/internal/security"
 
 	"google.golang.org/genai"
 )
@@ -37,6 +40,9 @@ type GeminiOAuthClient struct {
 	maxRetries   int
 	retryDelay   time.Duration
 	genConfig    *genai.GenerateContentConfig
+
+	httpTimeout       time.Duration
+	streamIdleTimeout time.Duration
 
 	statusCallback    StatusCallback
 	systemInstruction string
@@ -66,12 +72,18 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 		httpTimeout = 120 * time.Second
 	}
 
+	streamIdleTimeout := cfg.API.Retry.StreamIdleTimeout
+	if streamIdleTimeout == 0 {
+		streamIdleTimeout = 30 * time.Second
+	}
+
+	httpClient, err := security.CreateSecureHTTPClient(security.DefaultTLSConfig(), httpTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
+	}
+
 	client := &GeminiOAuthClient{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: httpTimeout,
-			},
-		},
+		httpClient:   httpClient,
 		accessToken:  oauth.AccessToken,
 		refreshToken: oauth.RefreshToken,
 		expiresAt:    time.Unix(oauth.ExpiresAt, 0),
@@ -85,6 +97,8 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 			Temperature:     Ptr(cfg.Model.Temperature),
 			MaxOutputTokens: cfg.Model.MaxOutputTokens,
 		},
+		httpTimeout:       httpTimeout,
+		streamIdleTimeout: streamIdleTimeout,
 	}
 
 	// Ensure token is valid
@@ -289,6 +303,8 @@ func (c *GeminiOAuthClient) WithModel(modelName string) Client {
 		maxRetries:        c.maxRetries,
 		retryDelay:        c.retryDelay,
 		genConfig:         c.genConfig,
+		httpTimeout:       c.httpTimeout,
+		streamIdleTimeout: c.streamIdleTimeout,
 		statusCallback:    c.statusCallback,
 		systemInstruction: c.systemInstruction,
 		thinkingBudget:    c.thinkingBudget,
@@ -300,8 +316,13 @@ func (c *GeminiOAuthClient) GetRawClient() interface{} {
 	return nil
 }
 
-// Close closes the client connection
+// Close closes the client connection and releases transport resources.
 func (c *GeminiOAuthClient) Close() error {
+	if c.httpClient != nil {
+		if transport, ok := c.httpClient.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
+	}
 	return nil
 }
 
@@ -381,14 +402,34 @@ func (c *GeminiOAuthClient) generateContentStream(ctx context.Context, contents 
 			}
 		}
 
-		response, err := c.doGenerateContentStream(ctx, contents)
+		// Each attempt gets its own deadline so that a per-attempt timeout
+		// doesn't poison the parent context — retries get a fresh window.
+		// requestCtx bounds the HTTP phase (connect → headers); the parent
+		// ctx is passed separately for SSE streaming which can run much longer.
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, c.httpTimeout)
+		response, err := c.doGenerateContentStream(attemptCtx, ctx, contents)
 		if err == nil {
+			// Cancel the attempt context — streaming uses the parent ctx,
+			// so the per-attempt deadline is no longer needed.
+			attemptCancel()
 			return response, nil
+		}
+		attemptCancel()
+
+		// Don't retry if parent context is cancelled
+		if ctx.Err() != nil {
+			return nil, err
 		}
 
 		lastErr = err
 		if !c.isRetryableError(err) {
 			return nil, err
+		}
+
+		// Close idle connections on EOF to force a fresh TCP connection on
+		// retry — the server may have closed keep-alive connections.
+		if isEOFError(err) {
+			c.httpClient.CloseIdleConnections()
 		}
 
 		logging.Warn("OAuth Gemini request failed, will retry", "attempt", attempt, "error", err)
@@ -397,9 +438,12 @@ func (c *GeminiOAuthClient) generateContentStream(ctx context.Context, contents 
 	return nil, fmt.Errorf("max retries (%d) exceeded: %w", c.maxRetries, lastErr)
 }
 
-// doGenerateContentStream performs a single streaming request
-func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, contents []*genai.Content) (*StreamingResponse, error) {
-	if err := c.ensureValidToken(ctx); err != nil {
+// doGenerateContentStream performs a single streaming request.
+// requestCtx bounds the HTTP phase (connect, TLS, headers) and should carry
+// a per-attempt timeout. streamCtx is the caller's long-lived context used
+// for the SSE stream — it must NOT have a short deadline.
+func (c *GeminiOAuthClient) doGenerateContentStream(requestCtx, streamCtx context.Context, contents []*genai.Content) (*StreamingResponse, error) {
+	if err := c.ensureValidToken(requestCtx); err != nil {
 		return nil, err
 	}
 
@@ -407,7 +451,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 	var estimatedTokens int64
 	if c.rateLimiter != nil {
 		estimatedTokens = ratelimit.EstimateTokensFromContents(len(contents), 500)
-		if err := c.rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
+		if err := c.rateLimiter.AcquireWithContext(requestCtx, estimatedTokens); err != nil {
 			if c.statusCallback != nil {
 				c.statusCallback.OnRateLimit(5 * time.Second)
 			}
@@ -435,7 +479,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 		return nil, fmt.Errorf("no project ID available")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqJSON))
+	req, err := http.NewRequestWithContext(requestCtx, "POST", url, bytes.NewReader(reqJSON))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -468,7 +512,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
 
-	go c.processSSEStream(ctx, resp.Body, chunks, done, estimatedTokens)
+	go c.processSSEStream(streamCtx, resp.Body, chunks, done, estimatedTokens)
 
 	return &StreamingResponse{
 		Chunks: chunks,
@@ -600,67 +644,190 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 	}
 }
 
-// processSSEStream processes Server-Sent Events from the API
-func (c *GeminiOAuthClient) processSSEStream(ctx context.Context, body io.ReadCloser, chunks chan<- ResponseChunk, done chan<- struct{}, estimatedTokens int64) {
+// processSSEStream processes Server-Sent Events from the API.
+// Uses a scanner goroutine + ctx→body.Close() pattern to prevent hangs
+// when the server stops sending data (matching anthropic.go approach).
+func (c *GeminiOAuthClient) processSSEStream(ctx context.Context, body io.ReadCloser, chunks chan<- ResponseChunk, doneCh chan<- struct{}, estimatedTokens int64) {
 	defer close(chunks)
-	defer close(done)
+	defer close(doneCh)
 	defer body.Close()
 
 	hasError := false
+
+	// Snapshot status callback under lock
+	c.mu.RLock()
+	statusCb := c.statusCallback
+	streamIdleTimeout := c.streamIdleTimeout
+	c.mu.RUnlock()
+
+	// Monitor context cancellation to force-close response body,
+	// unblocking any blocked scanner.Scan() call.
+	localDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			body.Close()
+		case <-localDone:
+		}
+	}()
+	defer close(localDone)
+
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max line size
 
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			hasError = true
-			chunks <- ResponseChunk{Error: ctx.Err(), Done: true}
-			return
-		default:
+	// Channel for scanner results — single goroutine reads all lines.
+	// It will exit when resp.Body is closed (by defer or ctx goroutine above).
+	type scanResult struct {
+		line string
+		ok   bool
+		err  error
+	}
+	scanCh := make(chan scanResult)
+	go func() {
+		defer close(scanCh)
+		for {
+			ok := scanner.Scan()
+			select {
+			case scanCh <- scanResult{line: scanner.Text(), ok: ok, err: scanner.Err()}:
+				if !ok {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	contentReceived := false
+	idleTimer := time.NewTimer(streamIdleTimeout)
+	defer idleTimer.Stop()
+
+	// Warning timer for UI feedback (fires at half the idle timeout)
+	streamIdleWarning := streamIdleTimeout / 2
+	warningTimer := time.NewTimer(streamIdleWarning)
+	defer warningTimer.Stop()
+	lastWarningAt := time.Duration(0)
+
+	var currentLine string
+
+scanLoop:
+	for {
+	waitLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				logging.Debug("context cancelled, stopping OAuth SSE stream")
+				select {
+				case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
+				default:
+				}
+				hasError = true
+				break scanLoop
+
+			case <-warningTimer.C:
+				lastWarningAt += streamIdleWarning
+				if statusCb != nil {
+					statusCb.OnStreamIdle(lastWarningAt)
+				}
+				warningTimer.Reset(10 * time.Second)
+				continue waitLoop
+
+			case <-idleTimer.C:
+				logging.Warn("OAuth SSE stream idle timeout exceeded",
+					"timeout", streamIdleTimeout, "partial", contentReceived)
+				chunks <- ResponseChunk{
+					Error: &ErrStreamIdleTimeout{Timeout: streamIdleTimeout, Partial: contentReceived},
+					Done:  true,
+				}
+				hasError = true
+				break scanLoop
+
+			case result, ok := <-scanCh:
+				// Got data — notify resume if we had warned
+				if lastWarningAt > 0 && statusCb != nil {
+					statusCb.OnStreamResume()
+				}
+				lastWarningAt = 0
+
+				// Reset timers
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(streamIdleTimeout)
+
+				if !warningTimer.Stop() {
+					select {
+					case <-warningTimer.C:
+					default:
+					}
+				}
+				warningTimer.Reset(streamIdleWarning)
+
+				if !ok {
+					if result.err != nil {
+						hasError = true
+						chunks <- ResponseChunk{Error: result.err, Done: true}
+					}
+					break scanLoop
+				}
+
+				if result.err != nil {
+					hasError = true
+					chunks <- ResponseChunk{Error: result.err, Done: true}
+					break scanLoop
+				}
+
+				currentLine = result.line
+				break waitLoop
+			}
 		}
 
-		line := scanner.Text()
-
 		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, ":") {
+		if currentLine == "" || strings.HasPrefix(currentLine, ":") {
 			continue
 		}
 
 		// Parse SSE data
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
+		if !strings.HasPrefix(currentLine, "data: ") {
+			continue
+		}
 
-			// Check for end of stream
-			if data == "[DONE]" {
-				break
-			}
+		data := strings.TrimPrefix(currentLine, "data: ")
 
-			chunk, err := c.parseSSEData(data)
-			if err != nil {
-				logging.Debug("failed to parse SSE data", "error", err, "data", data)
-				continue
-			}
+		// Check for end of stream
+		if data == "[DONE]" {
+			break scanLoop
+		}
 
+		chunk, err := c.parseSSEData(data)
+		if err != nil {
+			logging.Debug("failed to parse SSE data", "error", err, "data", data)
+			continue
+		}
+
+		if chunk.Text != "" || len(chunk.FunctionCalls) > 0 {
+			contentReceived = true
+		}
+
+		select {
+		case chunks <- chunk:
+		case <-ctx.Done():
+			hasError = true
 			select {
-			case chunks <- chunk:
-			case <-ctx.Done():
-				hasError = true
-				chunks <- ResponseChunk{Error: ctx.Err(), Done: true}
-				return
+			case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
+			default:
 			}
+			break scanLoop
+		}
 
-			if chunk.Done {
-				break
-			}
+		if chunk.Done {
+			break scanLoop
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		hasError = true
-		chunks <- ResponseChunk{Error: err, Done: true}
-	}
-
-	// Return tokens if error
 	if hasError && c.rateLimiter != nil && estimatedTokens > 0 {
 		c.rateLimiter.ReturnTokens(1, estimatedTokens)
 	}
@@ -798,10 +965,22 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 	return chunk, nil
 }
 
-// isRetryableError returns true if the error should trigger a retry
+// isRetryableError returns true if the error should trigger a retry.
 func (c *GeminiOAuthClient) isRetryableError(err error) bool {
 	if err == nil {
 		return false
+	}
+
+	// Typed checks first — preferred over string matching
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if IsStreamIdleTimeout(err) {
+		return true
 	}
 
 	errStr := err.Error()
@@ -814,18 +993,20 @@ func (c *GeminiOAuthClient) isRetryableError(err error) bool {
 		}
 	}
 
-	// Check for network errors
+	// String fallback for untyped errors
 	networkPatterns := []string{
 		"connection refused",
 		"connection reset",
 		"no such host",
 		"timeout",
 		"temporary failure",
-		"UNAVAILABLE",
-		"RESOURCE_EXHAUSTED",
+		"unavailable",
+		"resource_exhausted",
+		"eof",
 	}
+	lowerErr := strings.ToLower(errStr)
 	for _, pattern := range networkPatterns {
-		if strings.Contains(strings.ToLower(errStr), strings.ToLower(pattern)) {
+		if strings.Contains(lowerErr, pattern) {
 			return true
 		}
 	}

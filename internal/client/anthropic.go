@@ -483,14 +483,14 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 
 		// Each attempt gets its own deadline so that a per-attempt timeout
 		// doesn't poison the parent context — retries get a fresh window.
-		// attemptCtx inherits from ctx: if the user cancels, all attempts stop.
+		// requestCtx bounds the HTTP phase (connect → headers); the parent
+		// ctx is passed separately for SSE streaming which can run much longer.
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, c.config.HTTPTimeout)
-		response, err := c.doStreamRequest(attemptCtx, requestBody)
+		response, err := c.doStreamRequest(attemptCtx, ctx, requestBody)
 		if err == nil {
-			// Don't cancel — the streaming response still reads from the
-			// connection through this context. It will be GC'd when the
-			// response body is closed.
-			_ = attemptCancel
+			// Cancel the attempt context — streaming uses the parent ctx,
+			// so the per-attempt deadline is no longer needed.
+			attemptCancel()
 			return response, nil
 		}
 		attemptCancel()
@@ -528,7 +528,10 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 }
 
 // doStreamRequest performs a single streaming request attempt.
-func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[string]interface{}) (*StreamingResponse, error) {
+// requestCtx bounds the HTTP phase (connect, TLS, headers) and should carry
+// a per-attempt timeout. streamCtx is the caller's long-lived context used
+// for the SSE stream — it must NOT have a short deadline.
+func (c *AnthropicClient) doStreamRequest(requestCtx, streamCtx context.Context, requestBody map[string]interface{}) (*StreamingResponse, error) {
 	// Marshal request body
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
@@ -565,7 +568,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 	logging.Debug("anthropic API request", "url", url, "model", c.config.Model)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
+	req, err := http.NewRequestWithContext(requestCtx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -618,7 +621,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	// unblocking any blocked scanner.Scan() call.
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-streamCtx.Done():
 			resp.Body.Close()
 		case <-done:
 			// Stream finished normally, nothing to do
@@ -655,7 +658,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					if !ok {
 						return
 					}
-				case <-ctx.Done():
+				case <-streamCtx.Done():
 					return
 				}
 			}
@@ -677,11 +680,11 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 			for {
 				// Wait for scan result with timeout
 				select {
-				case <-ctx.Done():
+				case <-streamCtx.Done():
 					logging.Debug("context cancelled, stopping stream processing")
 					// Non-blocking send - channel might be full or receiver gone
 					select {
-					case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
+					case chunks <- ResponseChunk{Error: streamCtx.Err(), Done: true}:
 					default:
 					}
 					return
@@ -778,7 +781,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 						} else {
 							select {
 							case chunks <- ResponseChunk{Done: true}:
-							case <-ctx.Done():
+							case <-streamCtx.Done():
 								return
 							}
 						}
@@ -820,7 +823,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 {
 						select {
 						case chunks <- chunk:
-						case <-ctx.Done():
+						case <-streamCtx.Done():
 							logging.Debug("context cancelled during chunk send")
 							return
 						}
