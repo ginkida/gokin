@@ -371,9 +371,10 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 			IncludeThoughts: true,
 			ThinkingBudget:  Ptr(thinkingBudget),
 		}
-	} else {
-		// Explicitly disable thinking for models that enable it by default
-		// when ThinkingConfig is nil (e.g. Gemini 3 Flash)
+	} else if !strings.Contains(model, "-pro") {
+		// Explicitly disable thinking for non-pro models that enable it by default
+		// when ThinkingConfig is nil (e.g. Gemini 3 Flash).
+		// Pro models require thinking — leave ThinkingConfig nil for API default.
 		config.ThinkingConfig = &genai.ThinkingConfig{
 			ThinkingBudget: Ptr(int32(0)),
 		}
@@ -539,6 +540,8 @@ func processResponse(resp *genai.GenerateContentResponse) ResponseChunk {
 	}
 
 	if len(resp.Candidates) == 0 {
+		logging.Warn("gemini: response has no candidates",
+			"has_usage", resp.UsageMetadata != nil)
 		chunk.Done = true
 		return chunk
 	}

@@ -420,6 +420,13 @@ func (m *OutputModel) Content() string {
 	return m.state.content.String()
 }
 
+// IsEmpty returns whether the output has no content.
+func (m OutputModel) IsEmpty() bool {
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	return m.state.content.Len() == 0
+}
+
 // SetMouseEnabled enables or disables mouse wheel scrolling in the viewport.
 func (m *OutputModel) SetMouseEnabled(enabled bool) {
 	m.viewport.MouseWheelEnabled = enabled
@@ -433,6 +440,13 @@ func (m OutputModel) ScrollPercent() int {
 // IsAtBottom returns whether the viewport is scrolled to the bottom.
 func (m OutputModel) IsAtBottom() bool {
 	return m.viewport.AtBottom()
+}
+
+// IsFrozen returns whether the viewport auto-scroll is frozen.
+func (m OutputModel) IsFrozen() bool {
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	return m.state.frozen
 }
 
 // SetFrozen freezes or unfreezes the viewport auto-scroll.

@@ -1349,6 +1349,27 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					}
 				}
 				continue
+			} else {
+				// No actions and no error — check if plan is stalled or genuinely complete
+				blocked := a.treePlanner.GetBlockedNodes(a.activePlan)
+				if len(blocked) > 0 {
+					// Plan stalled: pending steps exist but can't proceed
+					var msg strings.Builder
+					msg.WriteString("\n[Plan Execution Stalled — blocked steps cannot proceed]\n")
+					for _, b := range blocked {
+						stepLabel := b.Node.ID
+						if b.Node.Action != nil && b.Node.Action.Prompt != "" {
+							stepLabel = b.Node.Action.Prompt
+						}
+						msg.WriteString(fmt.Sprintf("  • %s: %s\n", stepLabel, b.Reason))
+					}
+					msg.WriteString("[Switching to reactive mode]\n")
+					a.safeOnText(msg.String())
+				} else {
+					a.safeOnText("\n[Plan completed]\n")
+				}
+				a.lastPlanTree = a.activePlan
+				a.activePlan = nil
 			}
 		}
 
@@ -2072,6 +2093,21 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 		wg.Add(1)
 		go func(fc *genai.FunctionCall) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("panic in parallel tool execution",
+						"tool", fc.Name, "panic", fmt.Sprintf("%v", r))
+					mu.Lock()
+					results[indexMap[fc]] = toolCallResult{
+						Response: &genai.FunctionResponse{
+							ID:       fc.ID,
+							Name:     fc.Name,
+							Response: tools.NewErrorResult(fmt.Sprintf("tool execution panic: %v", r)).ToMap(),
+						},
+					}
+					mu.Unlock()
+				}
+			}()
 
 			// Check context again before trying to acquire semaphore
 			if ctx.Err() != nil {
@@ -2161,14 +2197,15 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	// Check for autonomous delegation opportunity
 	if !result.Success && a.delegation != nil && a.delegation.HasMessenger() {
 		delCtx := &DelegationContext{
-			AgentType:      a.Type,
-			CurrentTurn:    a.currentStep,
-			MaxTurns:       a.maxTurns,
-			LastToolName:   call.Name,
-			LastToolError:  result.Content,
-			LastToolArgs:   call.Args,
-			ReflectionInfo: reflection,
-			StuckCount:     a.delegation.GetStuckCount(),
+			AgentType:       a.Type,
+			CurrentTurn:     a.currentStep,
+			MaxTurns:        a.maxTurns,
+			LastToolName:    call.Name,
+			LastToolError:   result.Content,
+			LastToolArgs:    call.Args,
+			ReflectionInfo:  reflection,
+			StuckCount:      a.delegation.GetStuckCount(),
+			DelegationDepth: a.delegation.GetDepth(),
 		}
 
 		decision := a.delegation.Evaluate(delCtx)

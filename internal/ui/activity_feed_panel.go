@@ -254,9 +254,14 @@ func (p *ActivityFeedPanel) View(width int) string {
 		return ""
 	}
 
-	// Only show if there are entries
+	// Show empty state placeholder when visible but no data
 	if len(p.entries) == 0 && len(p.recentLog) == 0 {
-		return ""
+		dimStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+		borderStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorBorder).
+			Padding(0, 1)
+		return borderStyle.Width(width - 2).Render(dimStyle.Render("  No activity yet"))
 	}
 
 	var builder strings.Builder

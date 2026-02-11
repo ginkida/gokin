@@ -9,6 +9,22 @@ import (
 	"gokin/internal/logging"
 )
 
+// delegationDepthKey is a context key for passing delegation depth to spawned agents.
+type delegationDepthKey struct{}
+
+// WithDelegationDepth returns a context carrying the delegation depth value.
+func WithDelegationDepth(ctx context.Context, depth int) context.Context {
+	return context.WithValue(ctx, delegationDepthKey{}, depth)
+}
+
+// DelegationDepthFromContext extracts delegation depth from context, returns 0 if not set.
+func DelegationDepthFromContext(ctx context.Context) int {
+	if v, ok := ctx.Value(delegationDepthKey{}).(int); ok {
+		return v
+	}
+	return 0
+}
+
 // DelegationStrategy determines when and how an agent should delegate to sub-agents.
 type DelegationStrategy struct {
 	mu                 sync.RWMutex

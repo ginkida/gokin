@@ -1243,6 +1243,14 @@ func (a *agentRunnerAdapter) GetResult(agentID string) (tools.AgentResult, bool)
 
 // diffHandlerAdapter is in app_handlers.go
 
+// GetUIDebugState returns a serializable snapshot of the TUI state.
+func (a *App) GetUIDebugState() (any, error) {
+	if a.tui == nil {
+		return nil, fmt.Errorf("TUI not initialized")
+	}
+	return a.tui.DebugState(), nil
+}
+
 // GetVersion returns the current application version.
 func (a *App) GetVersion() string {
 	return a.config.Version

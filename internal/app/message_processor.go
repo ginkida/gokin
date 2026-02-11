@@ -103,6 +103,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	var newHistory []*genai.Content
 	var response string
 	var err error
+	contextTruncated := false // Guard against infinite truncation loop
 
 	for attempt := 0; attempt < maxRequestRetries; attempt++ {
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
@@ -131,6 +132,15 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		// Don't retry if context cancelled (user abort)
 		if ctx.Err() != nil {
 			break
+		}
+
+		// Context too long — emergency truncate and retry (once only)
+		if client.IsContextTooLongError(err) && a.contextManager != nil && !contextTruncated {
+			contextTruncated = true
+			removed := a.contextManager.EmergencyTruncate()
+			a.safeSendToProgram(ui.StreamTextMsg(
+				fmt.Sprintf("\n⚠️ Context window exceeded — emergency truncated %d messages. Retrying...\n", removed)))
+			continue
 		}
 
 		// Only retry transient errors; stop on last attempt

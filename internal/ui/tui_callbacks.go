@@ -123,10 +123,9 @@ func (m *Model) SetShowTokens(show bool) {
 	m.showTokens = show
 }
 
-// SetMouseEnabled enables or disables mouse capture.
+// SetMouseEnabled is a no-op kept for API compatibility.
+// Mouse is always captured; text selection uses native terminal shortcuts.
 func (m *Model) SetMouseEnabled(enabled bool) {
-	m.mouseEnabled = enabled
-	m.output.SetMouseEnabled(enabled)
 }
 
 // SetProjectInfo sets the project information for display.
@@ -174,19 +173,6 @@ func (m *Model) RegisterPaletteActions() {
 	}
 
 	actions := []EnhancedPaletteCommand{
-		{
-			Name:        "Toggle Mouse Mode",
-			Description: "Switch between scroll and select modes",
-			Shortcut:    "Ctrl+G",
-			Category:    PaletteCategoryInfo{Name: "Tools", Icon: "gear", Priority: 5},
-			Enabled:     true,
-			Priority:    550,
-			Type:        CommandTypeAction,
-			Action: func() {
-				m.mouseEnabled = !m.mouseEnabled
-				m.output.SetMouseEnabled(m.mouseEnabled)
-			},
-		},
 		{
 			Name:        "Toggle Task List",
 			Description: "Show or hide the task list panel",
@@ -270,9 +256,6 @@ func (m *Model) SetState(state State) {
 
 // GetProgram returns a new Bubbletea program.
 func (m *Model) GetProgram() *tea.Program {
-	opts := []tea.ProgramOption{tea.WithAltScreen()}
-	if m.mouseEnabled {
-		opts = append(opts, tea.WithMouseCellMotion())
-	}
+	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
 	return tea.NewProgram(m, opts...)
 }

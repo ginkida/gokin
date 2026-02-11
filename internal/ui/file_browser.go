@@ -700,6 +700,13 @@ func (m FileBrowserModel) View() string {
 
 	builder.WriteString("\n")
 
+	// Empty state when no files found
+	if len(m.entries) == 0 {
+		emptyStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+		builder.WriteString(emptyStyle.Render("  No files found"))
+		builder.WriteString("\n")
+	}
+
 	// Content area - split view or single view
 	if m.previewEnabled {
 		builder.WriteString(m.renderSplitView())

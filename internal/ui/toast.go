@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -34,10 +35,13 @@ func (t *Toast) IsExpired() bool {
 	return time.Since(t.CreatedAt) > t.Duration
 }
 
+const maxToastHistory = 50
+
 // ToastManager manages toast notifications.
 type ToastManager struct {
 	mu        sync.Mutex
 	toasts    []Toast
+	history   []Toast // ring buffer of expired toasts
 	maxToasts int
 	styles    *Styles
 	nextID    int
@@ -47,7 +51,7 @@ type ToastManager struct {
 func NewToastManager(styles *Styles) *ToastManager {
 	return &ToastManager{
 		toasts:    make([]Toast, 0),
-		maxToasts: 2, // Reduced to minimize visual noise
+		maxToasts: 5, // Allow enough for error bursts
 		styles:    styles,
 		nextID:    1,
 	}
@@ -72,9 +76,17 @@ func (m *ToastManager) Show(toastType ToastType, title, message string, duration
 	// Add to the beginning (newest first)
 	m.toasts = append([]Toast{toast}, m.toasts...)
 
-	// Limit the number of toasts
+	// Evict non-error toasts first when over limit
 	if len(m.toasts) > m.maxToasts {
-		m.toasts = m.toasts[:m.maxToasts]
+		for i := len(m.toasts) - 1; i >= 0 && len(m.toasts) > m.maxToasts; i-- {
+			if m.toasts[i].Type != ToastError {
+				m.toasts = append(m.toasts[:i], m.toasts[i+1:]...)
+			}
+		}
+		// If still over limit, truncate oldest
+		if len(m.toasts) > m.maxToasts {
+			m.toasts = m.toasts[:m.maxToasts]
+		}
 	}
 }
 
@@ -121,7 +133,7 @@ func (m *ToastManager) Dismiss(id int) {
 	}
 }
 
-// Update removes expired toasts.
+// Update removes expired toasts, archiving them to history.
 func (m *ToastManager) Update() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -130,9 +142,24 @@ func (m *ToastManager) Update() {
 	for _, toast := range m.toasts {
 		if !toast.IsExpired() {
 			active = append(active, toast)
+		} else {
+			// Archive expired toasts (newest first)
+			m.history = append([]Toast{toast}, m.history...)
+			if len(m.history) > maxToastHistory {
+				m.history = m.history[:maxToastHistory]
+			}
 		}
 	}
 	m.toasts = active
+}
+
+// History returns a copy of the toast history (newest first).
+func (m *ToastManager) History() []Toast {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]Toast, len(m.history))
+	copy(result, m.history)
+	return result
 }
 
 // Count returns the number of active toasts.
@@ -198,8 +225,10 @@ func (m *ToastManager) renderToast(toast Toast, width int) string {
 	if maxLen < 20 {
 		maxLen = 20
 	}
-	if len(msg) > maxLen {
-		msg = msg[:maxLen-1] + "…"
+	if utf8.RuneCountInString(msg) > maxLen {
+		runes := []rune(msg)
+		half := (maxLen - 1) / 2
+		msg = string(runes[:half]) + "…" + string(runes[len(runes)-half:])
 	}
 
 	return iconStyle.Render(icon) + " " + msgStyle.Render(msg)

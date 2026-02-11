@@ -58,6 +58,7 @@ type AppInterface interface {
 	GetVersion() string
 	AddSystemMessage(msg string)
 	GetAgentTypeRegistry() *agent.AgentTypeRegistry
+	GetUIDebugState() (any, error)
 }
 
 // Handler manages slash commands.
@@ -140,6 +141,9 @@ func NewHandler() *Handler {
 
 	// Register update command
 	h.Register(&UpdateCommand{})
+
+	// Register debug command (hidden)
+	h.Register(&DebugDumpCommand{})
 
 	h.frozen = true
 	return h

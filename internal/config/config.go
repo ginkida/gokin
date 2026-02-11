@@ -123,7 +123,7 @@ func (c *APIConfig) GetActiveProvider() string {
 func (c *APIConfig) HasProvider(provider string) bool {
 	switch provider {
 	case "gemini":
-		return c.GeminiKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "gemini")
+		return c.GeminiKey != "" || c.HasOAuthToken("gemini") || (c.APIKey != "" && c.GetActiveProvider() == "gemini")
 	case "glm":
 		return c.GLMKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "glm")
 	case "deepseek":
@@ -207,6 +207,7 @@ type UIConfig struct {
 	ShowWelcome       bool   `yaml:"show_welcome"`  // Show welcome message on first launch
 	HintsEnabled      bool   `yaml:"hints_enabled"` // Show contextual hints for features
 	CompactMode       bool   `yaml:"compact_mode"`
+	Bell              bool   `yaml:"bell"`         // Terminal bell on prompts (default: true)
 }
 
 // ContextConfig holds context management settings.
@@ -415,6 +416,7 @@ func DefaultConfig() *Config {
 			Theme:             "dark",
 			ShowWelcome:       true,
 			HintsEnabled:      true,
+			Bell:              true,
 		},
 		Context: ContextConfig{
 			MaxInputTokens:     0,     // Use model default

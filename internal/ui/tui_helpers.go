@@ -16,15 +16,23 @@ import (
 // getTextSelectionHint returns a platform/terminal-specific hint for text selection.
 func getTextSelectionHint() string {
 	term := os.Getenv("TERM_PROGRAM")
+	termEnv := os.Getenv("TERM")
+
 	switch {
 	case runtime.GOOS == "darwin" && term == "iTerm.app":
-		return "Ctrl+G for select mode, or Option+drag"
+		return "Hold ⌥+Drag to select text"
 	case runtime.GOOS == "darwin" && term == "Apple_Terminal":
-		return "Ctrl+G for select mode, or Fn+drag"
+		return "Hold Fn+Drag to select text"
+	case term == "WezTerm":
+		return "Hold Shift+Drag to select text"
+	case strings.Contains(termEnv, "kitty") || term == "kitty":
+		return "Hold Shift+Drag to select text"
+	case term == "Alacritty" || strings.Contains(termEnv, "alacritty"):
+		return "Hold Shift+Drag to select text"
 	case runtime.GOOS == "darwin":
-		return "Ctrl+G for select mode"
+		return "Hold ⌥+Drag (iTerm) or Fn+Drag (Terminal) to select"
 	default:
-		return "Ctrl+G for select mode, or Shift+drag"
+		return "Hold Shift+Drag to select text"
 	}
 }
 
@@ -492,4 +500,26 @@ func ResponseMetadata(model string, inputTokens, outputTokens int, duration time
 			ToolsUsed:    toolsUsed,
 		}
 	}
+}
+
+// lastStreamSnippet returns the last non-empty line from the current streaming buffer,
+// truncated to 40 runes, for use as a live preview in the frozen viewport indicator.
+func (m Model) lastStreamSnippet() string {
+	buf := m.currentResponseBuf.String()
+	if buf == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(buf, "\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if last == "" && len(lines) > 1 {
+		last = strings.TrimSpace(lines[len(lines)-2])
+	}
+	if last == "" {
+		return ""
+	}
+	runes := []rune(last)
+	if len(runes) > 40 {
+		return "…" + string(runes[len(runes)-40:])
+	}
+	return last
 }

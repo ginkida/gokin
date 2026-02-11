@@ -52,9 +52,6 @@ type Model struct {
 	// Response header tracking
 	responseHeaderShown bool // True if assistant header was shown for current response
 
-	// Mouse mode (for toggling between scroll/select modes)
-	mouseEnabled bool
-
 	// Token usage tracking
 	tokenUsage *TokenUsageMsg
 	showTokens bool
@@ -211,15 +208,30 @@ type Model struct {
 	// Copy support: track last AI response
 	lastResponseText   string           // Last AI response text (saved on ResponseDoneMsg)
 	currentResponseBuf *strings.Builder // Accumulates current streaming response (pointer to survive Bubble Tea copies)
+
+	// Terminal bell on prompts
+	bellEnabled bool
+
+	// Quit confirmation: requires double Ctrl+C within 2 seconds
+	quitConfirmTime time.Time // When first Ctrl+C was pressed
+
+	// Resize debounce: buffer rapid WindowSizeMsg to prevent flickering
+	pendingResize  *tea.WindowSizeMsg // nil if no pending resize
+	resizeDeadline time.Time          // when to apply the pending resize
 }
 
 // BackgroundTaskState tracks the state of a background task for UI display.
 type BackgroundTaskState struct {
-	ID          string
-	Type        string // "agent" or "shell"
-	Description string
-	Status      string // "running", "completed", "failed", "cancelled"
-	StartTime   time.Time
+	ID            string
+	Type          string // "agent" or "shell"
+	Description   string
+	Status        string // "running", "completed", "failed", "cancelled"
+	StartTime     time.Time
+	Progress      float64  // 0.0-1.0
+	CurrentStep   int
+	TotalSteps    int
+	CurrentAction string
+	ToolsUsed     []string
 }
 
 // activeToolCall tracks a single in-flight tool call for parallel execution.
@@ -245,9 +257,14 @@ type CoordinatedTaskState struct {
 func NewModel() *Model {
 	styles := DefaultStyles()
 
-	// Auto-apply macOS theme if on darwin
-	if runtime.GOOS == "darwin" {
-		styles.ApplyTheme(ThemeMacOS)
+	// Auto-detect terminal background and apply appropriate theme
+	if lipgloss.HasDarkBackground() {
+		if runtime.GOOS == "darwin" {
+			styles.ApplyTheme(ThemeMacOS)
+		}
+		// else: ThemeDark already default
+	} else {
+		styles.ApplyTheme(ThemeLight)
 	}
 
 	s := spinner.New()
@@ -260,7 +277,6 @@ func NewModel() *Model {
 		spinner:              s,
 		styles:               styles,
 		state:                StateInput,
-		mouseEnabled:         true,                   // Default to scroll mode (mouse enabled)
 		streamTimeout:        15 * time.Minute,       // Timeout for stuck streaming states (generous for long operations)
 		minSubmitDelay:       500 * time.Millisecond, // Debounce: 500ms between submissions
 		sessionStart:         time.Now(),
@@ -286,6 +302,7 @@ func NewModel() *Model {
 		toolProgressBar:      NewToolProgressBarModel(styles),
 		activityFeed:         NewActivityFeedPanel(styles),
 		currentResponseBuf:   &strings.Builder{},
+		bellEnabled:          true, // Terminal bell enabled by default
 	}
 }
 
@@ -312,32 +329,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scratchpad = string(msg)
 		return m, nil
 	case tea.WindowSizeMsg:
-		// This is critical for initializing the viewport
-		m.width = msg.Width
-		m.height = msg.Height
-		m.input.SetWidth(msg.Width)
-		if m.CompactMode {
-			m.output.SetSize(msg.Width, msg.Height/3)
-		} else {
-			m.output.SetSize(msg.Width, msg.Height-5)
-		}
-
-		if m.planFeedbackMode {
-			m.planFeedbackInput.SetWidth(msg.Width - 4)
-		}
-		if m.state == StateQuestionPrompt {
-			m.questionInputModel.SetWidth(msg.Width)
-		}
-
-		var cmd tea.Cmd
-		m.output, cmd = m.output.Update(msg)
-		cmds = append(cmds, cmd)
+		// Debounce resize: buffer rapid events, apply after 50ms of quiet
+		m.pendingResize = &msg
+		m.resizeDeadline = time.Now().Add(50 * time.Millisecond)
 
 	case spinner.TickMsg:
 		// Always process spinner ticks for animation
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
+
+		// Flush pending resize (debounced)
+		if m.pendingResize != nil && time.Now().After(m.resizeDeadline) {
+			resizeCmd := m.applyResize(m.pendingResize)
+			m.pendingResize = nil
+			if resizeCmd != nil {
+				cmds = append(cmds, resizeCmd)
+			}
+		}
 
 		// Flush pending viewport updates (debounced content)
 		m.output.FlushPendingUpdate()
@@ -423,8 +432,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Update input when in input state
-	if m.state == StateInput {
+	// Update input only in StateInput — prevents key leak into input during modals/processing
+	if m.state == StateInput && !m.isModalState() {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -983,24 +992,6 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Ctrl+G: toggle mouse mode (scroll ↔ select) with viewport freeze
-	if msg.Type == tea.KeyCtrlG && m.state == StateInput {
-		m.mouseEnabled = !m.mouseEnabled
-		m.output.SetMouseEnabled(m.mouseEnabled)
-		m.output.SetFrozen(!m.mouseEnabled)
-		if m.mouseEnabled {
-			m.output.ScrollToBottom() // Catch up after freeze
-			if m.toastManager != nil {
-				m.toastManager.ShowInfo("Scroll mode")
-			}
-			return tea.EnableMouseCellMotion
-		}
-		if m.toastManager != nil {
-			m.toastManager.ShowInfo("Select mode — drag to select, Cmd+C to copy | Ctrl+G to exit")
-		}
-		return tea.DisableMouse
-	}
-
 	// Option+C: copy last AI response to clipboard
 	if msg.String() == "alt+c" && m.state == StateInput {
 		if m.lastResponseText != "" {
@@ -1053,10 +1044,18 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.output.AppendLine("")
 			return m.input.Focus()
 		}
-		if m.onQuit != nil {
-			m.onQuit()
+		// Double Ctrl+C confirmation: quit only if pressed twice within 2 seconds
+		now := time.Now()
+		if !m.quitConfirmTime.IsZero() && now.Sub(m.quitConfirmTime) < 2*time.Second {
+			if m.onQuit != nil {
+				m.onQuit()
+			}
+			return tea.Quit
 		}
-		return tea.Quit
+		m.quitConfirmTime = now
+		if m.toastManager != nil {
+			m.toastManager.ShowWarning("Press Ctrl+C again to quit")
+		}
 
 	case tea.KeyEscape:
 		// ESC interrupts processing/streaming and returns to input
@@ -1364,12 +1363,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.permRequest = &msg
 		m.permSelectedOption = 0
 		m.state = StatePermissionPrompt
+		m.ringBell()
 
 	case QuestionRequestMsg:
 		m.questionRequest = &msg
 		m.questionSelectedOption = 0
 		m.questionCustomInput = false
 		m.state = StateQuestionPrompt
+		m.ringBell()
 		// If no options, initialize input model for free text
 		if len(msg.Options) == 0 {
 			m.questionInputModel = NewInputModel(m.styles)
@@ -1381,6 +1382,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.planRequest = &msg
 		m.planSelectedOption = 0
 		m.state = StatePlanApproval
+		m.ringBell()
 
 	case PlanProgressMsg:
 		m.planProgress = &msg
@@ -1572,6 +1574,16 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	// Background task tracking
 	case BackgroundTaskMsg:
 		m.handleBackgroundTask(msg)
+
+	// Background task progress updates
+	case BackgroundTaskProgressMsg:
+		if task, ok := m.backgroundTasks[msg.ID]; ok {
+			task.Progress = msg.Progress
+			task.CurrentStep = msg.CurrentStep
+			task.TotalSteps = msg.TotalSteps
+			task.CurrentAction = msg.CurrentAction
+			task.ToolsUsed = msg.ToolsUsed
+		}
 
 	// Sub-agent activity tracking
 	case SubAgentActivityMsg:
@@ -1810,38 +1822,62 @@ func (m Model) View() string {
 		}
 	}
 
-	// Output viewport
-	builder.WriteString(m.output.View())
+	// Output viewport (dimmed when modal is active)
+	outputView := m.output.View()
+	isModal := m.isModalState()
+	if isModal {
+		outputView = lipgloss.NewStyle().Faint(true).Render(outputView)
+	}
+	builder.WriteString(outputView)
 	builder.WriteString("\n")
+
+	// Welcome hint when output is empty and user is at input
+	if m.output.IsEmpty() && m.state == StateInput {
+		dimStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+		hint := getTextSelectionHint()
+		builder.WriteString(dimStyle.Render("  Type a message to start. " + hint))
+		builder.WriteString("\n\n")
+	}
+
+	// Background panels (dimmed when modal is active)
+	var panelBuilder strings.Builder
 
 	// Scratchpad panel
 	if m.scratchpad != "" {
-		builder.WriteString(m.renderScratchpad())
-		builder.WriteString("\n")
+		panelBuilder.WriteString(m.renderScratchpad())
+		panelBuilder.WriteString("\n")
 	}
 
 	// Plan progress panel (when actively executing a plan)
 	if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
-		builder.WriteString(m.planProgressPanel.View(m.width))
-		builder.WriteString("\n")
+		panelBuilder.WriteString(m.planProgressPanel.View(m.width))
+		panelBuilder.WriteString("\n")
 	}
 
 	// Activity feed panel
 	if m.activityFeed != nil && m.activityFeed.IsVisible() && m.activityFeed.HasActiveEntries() {
-		builder.WriteString(m.activityFeed.View(m.width))
-		builder.WriteString("\n")
+		panelBuilder.WriteString(m.activityFeed.View(m.width))
+		panelBuilder.WriteString("\n")
 	}
 
 	// Status line with todos
 	if len(m.todoItems) > 0 && m.todosVisible {
-		builder.WriteString(m.renderTodos())
-		builder.WriteString("\n")
+		panelBuilder.WriteString(m.renderTodos())
+		panelBuilder.WriteString("\n")
 	}
 
 	// Tool progress bar (for long-running operations)
 	if m.toolProgressBar != nil && m.toolProgressBar.IsVisible() {
-		builder.WriteString(m.toolProgressBar.View(m.width))
-		builder.WriteString("\n")
+		panelBuilder.WriteString(m.toolProgressBar.View(m.width))
+		panelBuilder.WriteString("\n")
+	}
+
+	// Write panels (dimmed if modal)
+	if panelContent := panelBuilder.String(); panelContent != "" {
+		if isModal {
+			panelContent = lipgloss.NewStyle().Faint(true).Render(panelContent)
+		}
+		builder.WriteString(panelContent)
 	}
 
 	// Processing indicator — minimal braille spinner (skip when tool progress bar is visible)
@@ -1894,9 +1930,21 @@ func (m Model) View() string {
 			}
 			status := spinner + " " + labelStyle.Render(label)
 
-			// Show elapsed after 3 seconds
+			// Show elapsed after 3 seconds with color escalation
 			if elapsed >= 3*time.Second {
-				status += "  " + dimStyle.Render(format.Duration(elapsed))
+				durationColor := ColorDim
+				if elapsed > 2*time.Minute {
+					durationColor = ColorRose
+				} else if elapsed > 30*time.Second {
+					durationColor = ColorWarning
+				}
+				status += "  " + lipgloss.NewStyle().Foreground(durationColor).Render(format.Duration(elapsed))
+			}
+
+			// Slow warning hint (no activity for >3s)
+			if m.slowWarningShown {
+				warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+				status += "  " + warnStyle.Render("(waiting…)")
 			}
 
 			// Plan step context
@@ -2026,6 +2074,39 @@ func (m Model) View() string {
 	builder.WriteString(m.renderStatusBar())
 
 	return m.styles.App.Render(builder.String())
+}
+
+// applyResize applies a buffered WindowSizeMsg to all components.
+func (m *Model) applyResize(msg *tea.WindowSizeMsg) tea.Cmd {
+	m.width = msg.Width
+	m.height = msg.Height
+	m.input.SetWidth(msg.Width)
+	if m.CompactMode {
+		m.output.SetSize(msg.Width, msg.Height/3)
+	} else {
+		m.output.SetSize(msg.Width, msg.Height-5)
+	}
+	if m.planFeedbackMode {
+		m.planFeedbackInput.SetWidth(msg.Width - 4)
+	}
+	if m.state == StateQuestionPrompt {
+		m.questionInputModel.SetWidth(msg.Width)
+	}
+	var cmd tea.Cmd
+	m.output, cmd = m.output.Update(*msg)
+	return cmd
+}
+
+// SetBellEnabled enables or disables the terminal bell on prompts.
+func (m *Model) SetBellEnabled(enabled bool) {
+	m.bellEnabled = enabled
+}
+
+// ringBell emits a terminal bell character if bell is enabled.
+func (m *Model) ringBell() {
+	if m.bellEnabled {
+		fmt.Print("\a")
+	}
 }
 
 // SetHintsEnabled enables or disables contextual hints.
@@ -2204,6 +2285,10 @@ func (m *Model) handleBackgroundTask(msg BackgroundTaskMsg) {
 		}
 
 	case "completed", "failed", "cancelled":
+		// Bell on task completion or failure
+		if msg.Status == "completed" || msg.Status == "failed" {
+			m.ringBell()
+		}
 		// Task finished - remove from tracking
 		if task, ok := m.backgroundTasks[msg.ID]; ok {
 			// Only show toast for failures
@@ -2300,6 +2385,98 @@ func (m *Model) UpdatePlanStep(stepID int, status PlanStepStatus, message string
 func (m *Model) EndPlanExecution() {
 	if m.planProgressPanel != nil {
 		m.planProgressPanel.EndPlan()
+	}
+}
+
+// UIDebugState is a serializable snapshot of key TUI fields for debugging.
+type UIDebugState struct {
+	Timestamp         time.Time                      `json:"timestamp"`
+	State             string                         `json:"state"`
+	Width             int                            `json:"width"`
+	Height            int                            `json:"height"`
+	CompactMode       bool                           `json:"compact_mode"`
+	ProcessingLabel   string                         `json:"processing_label"`
+	CurrentTool       string                         `json:"current_tool"`
+	CurrentToolInfo   string                         `json:"current_tool_info"`
+	ActiveToolCalls   int                            `json:"active_tool_calls"`
+	BackgroundTasks   map[string]*BackgroundTaskState `json:"background_tasks"`
+	PlanningMode      bool                           `json:"planning_mode"`
+	PermissionsActive bool                           `json:"permissions_enabled"`
+	SandboxEnabled    bool                           `json:"sandbox_enabled"`
+	TokenUsagePct     float64                        `json:"token_usage_pct"`
+	MCPHealthy        int                            `json:"mcp_healthy"`
+	MCPTotal          int                            `json:"mcp_total"`
+	ConversationMode  string                         `json:"conversation_mode"`
+	GitBranch         string                         `json:"git_branch"`
+	WorkDir           string                         `json:"work_dir"`
+	SessionStart      time.Time                      `json:"session_start"`
+	TodoCount         int                            `json:"todo_count"`
+	FileBrowserActive bool                           `json:"file_browser_active"`
+	ModelSelectorOpen bool                           `json:"model_selector_open"`
+	CurrentModel      string                         `json:"current_model"`
+	PlanProgressMode  bool                           `json:"plan_progress_mode"`
+}
+
+// DebugState returns a serializable snapshot of the current UI state.
+func (m *Model) DebugState() UIDebugState {
+	stateName := "unknown"
+	switch m.state {
+	case StateInput:
+		stateName = "input"
+	case StateProcessing:
+		stateName = "processing"
+	case StateStreaming:
+		stateName = "streaming"
+	case StatePermissionPrompt:
+		stateName = "permission_prompt"
+	case StateQuestionPrompt:
+		stateName = "question_prompt"
+	case StatePlanApproval:
+		stateName = "plan_approval"
+	case StateModelSelector:
+		stateName = "model_selector"
+	case StateShortcutsOverlay:
+		stateName = "shortcuts_overlay"
+	case StateCommandPalette:
+		stateName = "command_palette"
+	case StateDiffPreview:
+		stateName = "diff_preview"
+	case StateSearchResults:
+		stateName = "search_results"
+	case StateGitStatus:
+		stateName = "git_status"
+	case StateFileBrowser:
+		stateName = "file_browser"
+	case StateBatchProgress:
+		stateName = "batch_progress"
+	}
+
+	return UIDebugState{
+		Timestamp:         time.Now(),
+		State:             stateName,
+		Width:             m.width,
+		Height:            m.height,
+		CompactMode:       m.CompactMode,
+		ProcessingLabel:   m.processingLabel,
+		CurrentTool:       m.currentTool,
+		CurrentToolInfo:   m.currentToolInfo,
+		ActiveToolCalls:   len(m.activeToolCalls),
+		BackgroundTasks:   m.backgroundTasks,
+		PlanningMode:      m.planningModeEnabled,
+		PermissionsActive: m.permissionsEnabled,
+		SandboxEnabled:    m.sandboxEnabled,
+		TokenUsagePct:     m.tokenUsagePercent,
+		MCPHealthy:        m.mcpHealthy,
+		MCPTotal:          m.mcpTotal,
+		ConversationMode:  m.conversationMode,
+		GitBranch:         m.gitBranch,
+		WorkDir:           m.workDir,
+		SessionStart:      m.sessionStart,
+		TodoCount:         len(m.todoItems),
+		FileBrowserActive: m.fileBrowserActive,
+		ModelSelectorOpen: m.state == StateModelSelector,
+		CurrentModel:      m.currentModel,
+		PlanProgressMode:  m.planProgressMode,
 	}
 }
 

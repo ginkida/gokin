@@ -50,7 +50,14 @@ var AvailableModels = []ModelInfo{
 		Description: "Advanced model (Code Assist)",
 		Provider:    "gemini",
 	},
-	// GLM model (via Anthropic-compatible API)
+	// GLM models (via Anthropic-compatible API)
+	{
+		ID:          "glm-5",
+		Name:        "GLM-5",
+		Description: "Latest GLM model with enhanced reasoning",
+		Provider:    "glm",
+		BaseURL:     DefaultGLMBaseURL,
+	},
 	{
 		ID:          "glm-4.7",
 		Name:        "GLM-4.7",

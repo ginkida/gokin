@@ -134,13 +134,9 @@ func (m Model) renderStatusBarMedium() string {
 		leftParts = append(leftParts, planStyle.Render("PLAN"))
 	}
 
-	if !m.mouseEnabled {
-		leftParts = append(leftParts, dimStyle.Render("SELECT"))
-	}
-
-	// Background tasks (compact)
+	// Background tasks (compact, with progress if available)
 	if bgCount := len(m.backgroundTasks); bgCount > 0 {
-		leftParts = append(leftParts, dimStyle.Render(fmt.Sprintf("%d bg", bgCount)))
+		leftParts = append(leftParts, dimStyle.Render(m.formatBackgroundTaskStatus(bgCount)))
 	}
 
 	left := strings.Join(leftParts, " · ")
@@ -189,13 +185,9 @@ func (m Model) renderStatusBarFull() string {
 		leftParts = append(leftParts, planStyle.Render("PLAN"))
 	}
 
-	if !m.mouseEnabled {
-		leftParts = append(leftParts, dimStyle.Render("SELECT"))
-	}
-
-	// Background tasks
+	// Background tasks (with progress if available)
 	if bgCount := len(m.backgroundTasks); bgCount > 0 {
-		leftParts = append(leftParts, dimStyle.Render(fmt.Sprintf("%d bg", bgCount)))
+		leftParts = append(leftParts, dimStyle.Render(m.formatBackgroundTaskStatus(bgCount)))
 	}
 
 	var rightParts []string
@@ -269,6 +261,25 @@ func (m Model) getContextPercent() float64 {
 		return m.tokenUsage.PercentUsed * 100
 	}
 	return 0
+}
+
+// formatBackgroundTaskStatus returns a compact status string for background tasks.
+// Shows current action if a task has progress info, otherwise falls back to "N bg".
+func (m Model) formatBackgroundTaskStatus(bgCount int) string {
+	var bestAction string
+	for _, t := range m.backgroundTasks {
+		if t.CurrentAction != "" {
+			bestAction = t.CurrentAction
+			break
+		}
+	}
+	if bestAction != "" {
+		if len(bestAction) > 25 {
+			bestAction = bestAction[:22] + "..."
+		}
+		return bestAction
+	}
+	return fmt.Sprintf("%d bg", bgCount)
 }
 
 // shortenModelName returns a shortened model name.

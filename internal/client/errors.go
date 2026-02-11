@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -123,4 +124,36 @@ func equalFold(a, b string) bool {
 		}
 	}
 	return true
+}
+
+// IsContextTooLongError returns true if the error indicates the request exceeded
+// the model's context window (HTTP 400 with context/token-related message).
+func IsContextTooLongError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check typed HTTPError (Anthropic/GLM/DeepSeek)
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == 400 {
+		msg := strings.ToLower(httpErr.Message)
+		return strings.Contains(msg, "context") ||
+			strings.Contains(msg, "token") ||
+			strings.Contains(msg, "too long") ||
+			strings.Contains(msg, "too large") ||
+			strings.Contains(msg, "maximum")
+	}
+	// Check typed APIError (Gemini)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == 400 {
+		msg := strings.ToLower(apiErr.Message)
+		return strings.Contains(msg, "context") ||
+			strings.Contains(msg, "token") ||
+			strings.Contains(msg, "too long") ||
+			strings.Contains(msg, "too large") ||
+			strings.Contains(msg, "maximum")
+	}
+	// String fallback for untyped errors
+	msg := strings.ToLower(err.Error())
+	return (strings.Contains(msg, "400") || strings.Contains(msg, "bad request")) &&
+		(strings.Contains(msg, "context") || strings.Contains(msg, "token limit") || strings.Contains(msg, "too long"))
 }

@@ -236,6 +236,23 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 
+	// Emergency: if estimated tokens EXCEED limit, truncate synchronously (no LLM needed)
+	if usage.ExceedsLimit {
+		logging.Warn("context exceeds token limit, performing emergency truncation",
+			"tokens", tokens, "limit", m.tokenCounter.limits.MaxInputTokens)
+		m.EmergencyTruncate()
+		// Re-estimate after truncation
+		history = m.session.GetHistory()
+		tokens = EstimateContentsTokens(history)
+		m.mu.Lock()
+		m.currentTokens = tokens
+		m.lastEstimatedTokens = tokens
+		m.lastHistoryLen = len(history)
+		usage = m.tokenCounter.GetUsage(tokens)
+		m.lastUsage = &usage
+		m.mu.Unlock()
+	}
+
 	// Launch async precise token count in background (bounded by semaphore)
 	select {
 	case m.tokenCountSem <- struct{}{}:
@@ -661,6 +678,64 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 		"messages_preserved", len(recentMessages))
 
 	return nil
+}
+
+// EmergencyTruncate performs hard truncation of history when token count exceeds the model limit.
+// Unlike summarization, this is synchronous and guaranteed to succeed.
+// Strategy: keep first 2 messages (system context) + last N messages that fit within 70% of limit.
+func (m *ContextManager) EmergencyTruncate() int {
+	history := m.session.GetHistory()
+	if len(history) <= 4 {
+		return 0
+	}
+
+	targetTokens := int(float64(m.tokenCounter.limits.MaxInputTokens) * 0.7)
+
+	// Always preserve first 2 messages (system/greeting) and build from the end
+	preserved := history[:2]
+	tail := history[2:]
+
+	// Scan from newest to oldest, accumulating until we hit target
+	tailTokens := 0
+	cutoff := len(tail)
+	for i := len(tail) - 1; i >= 0; i-- {
+		msgTokens := EstimateContentsTokens([]*genai.Content{tail[i]})
+		if tailTokens+msgTokens > targetTokens {
+			cutoff = i + 1
+			break
+		}
+		tailTokens += msgTokens
+	}
+
+	// If cutoff didn't move, nothing was too large
+	if cutoff == 0 {
+		return 0
+	}
+
+	newHistory := make([]*genai.Content, 0, len(preserved)+len(tail)-cutoff)
+	newHistory = append(newHistory, preserved...)
+	newHistory = append(newHistory, tail[cutoff:]...)
+
+	m.session.SetHistory(newHistory)
+
+	// Update cached token count
+	tokens := EstimateContentsTokens(newHistory)
+	m.mu.Lock()
+	m.currentTokens = tokens
+	usage := m.tokenCounter.GetUsage(tokens)
+	m.lastUsage = &usage
+	m.lastEstimatedTokens = tokens
+	m.lastHistoryLen = len(newHistory)
+	m.mu.Unlock()
+
+	removed := len(history) - len(newHistory)
+	logging.Warn("emergency truncation performed",
+		"removed", removed,
+		"before", len(history),
+		"after", len(newHistory),
+		"estimated_tokens", tokens)
+
+	return removed
 }
 
 // Close cancels the lifecycle context, stopping any background goroutines.

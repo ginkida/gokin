@@ -24,6 +24,19 @@ const (
 	StateBatchProgress
 )
 
+// isModalState returns true if the current state is a modal overlay
+// where the main input should not receive events.
+func (m *Model) isModalState() bool {
+	switch m.state {
+	case StatePermissionPrompt, StateQuestionPrompt, StatePlanApproval,
+		StateModelSelector, StateShortcutsOverlay, StateCommandPalette,
+		StateDiffPreview, StateSearchResults, StateGitStatus,
+		StateFileBrowser, StateBatchProgress:
+		return true
+	}
+	return false
+}
+
 // StatusBarLayout determines the level of detail shown in the status bar based on terminal width.
 type StatusBarLayout int
 

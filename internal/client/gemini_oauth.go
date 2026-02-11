@@ -601,6 +601,7 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 	c.mu.RLock()
 	sysInstruction := c.systemInstruction
 	thinkingBudget := c.thinkingBudget
+	model := c.model
 	c.mu.RUnlock()
 	if sysInstruction != "" {
 		requestPayload["systemInstruction"] = map[string]interface{}{
@@ -629,8 +630,9 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 				"includeThoughts": true,
 				"thinkingBudget":  thinkingBudget,
 			}
-		} else {
-			// Explicitly disable thinking for models that enable it by default
+		} else if !strings.Contains(model, "-pro") {
+			// Explicitly disable thinking for non-pro models that enable it by default.
+			// Pro models require thinking — omit thinkingConfig for API default.
 			genConfig["thinkingConfig"] = map[string]interface{}{
 				"thinkingBudget": 0,
 			}
@@ -963,6 +965,7 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 	}
 
 	if len(resp.Candidates) == 0 {
+		logging.Warn("gemini oauth: response has no candidates")
 		chunk.Done = true
 		return chunk, nil
 	}

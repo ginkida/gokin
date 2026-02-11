@@ -561,9 +561,18 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			e.lastOutputTokens = resp.OutputTokens
 		}
 
-		if finalText != "" {
+		// Detect empty response — model returned no text and no function calls.
+		// Break immediately instead of looping, the fallback below will provide a message.
+		if finalText == "" {
+			logging.Warn("model returned empty response",
+				"finish_reason", string(resp.FinishReason),
+				"input_tokens", resp.InputTokens,
+				"output_tokens", resp.OutputTokens,
+				"iteration", i)
 			break
 		}
+
+		break
 	}
 
 	// CRITICAL: Ensure we always have a response
@@ -578,8 +587,12 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				e.handler.OnText(finalText)
 			}
 		} else {
-			// No tools used in this request - simple conversation
-			finalText = e.fallback.EmptyResponseText
+			// No tools used and no text — model returned empty response
+			finalText = fmt.Sprintf("⚠ Model returned an empty response. This may indicate:\n"+
+				"- The model doesn't support the current configuration\n"+
+				"- ThinkingBudget may need adjustment (try /config)\n"+
+				"- Try switching to a different model with /model\n\n"+
+				"Model: %s", e.client.GetModel())
 			if e.handler != nil && e.handler.OnText != nil {
 				e.handler.OnText(finalText)
 			}

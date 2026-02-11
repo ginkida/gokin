@@ -225,8 +225,9 @@ func (m *AgentMessenger) handleDelegation(msg Message) {
 		"from", msg.From,
 		"msg_id", msg.ID)
 
-	// Spawn the delegate agent
-	agentID, err := m.runner.Spawn(ctx, agentType, msg.Content, maxTurns, model)
+	// Spawn the delegate agent with delegation depth propagated via context
+	spawnCtx := WithDelegationDepth(ctx, delegationDepth)
+	agentID, err := m.runner.Spawn(spawnCtx, agentType, msg.Content, maxTurns, model)
 
 	var response string
 	if err != nil {

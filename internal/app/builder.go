@@ -1167,6 +1167,7 @@ func (b *Builder) initUI() error {
 
 	enableMouse := b.cfg.UI.MouseMode != "disabled"
 	b.tuiModel.SetMouseEnabled(enableMouse)
+	b.tuiModel.SetBellEnabled(b.cfg.UI.Bell)
 
 	// Filter models by current provider/backend
 	provider := b.cfg.Model.Provider
@@ -1364,6 +1365,24 @@ func (b *Builder) wireDependencies() error {
 				ID:     id,
 				Type:   "agent",
 				Status: status,
+			})
+		}
+	})
+
+	b.agentRunner.SetOnAgentProgress(func(id string, progress *agent.AgentProgress) {
+		if app.program != nil {
+			total := progress.TotalSteps
+			if total < 1 {
+				total = 1
+			}
+			app.program.Send(ui.BackgroundTaskProgressMsg{
+				ID:            id,
+				Progress:      float64(progress.CurrentStep) / float64(total),
+				CurrentStep:   progress.CurrentStep,
+				TotalSteps:    progress.TotalSteps,
+				CurrentAction: progress.CurrentAction,
+				ToolsUsed:     progress.ToolsUsed,
+				Elapsed:       progress.Elapsed,
 			})
 		}
 	})

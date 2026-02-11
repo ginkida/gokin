@@ -10,6 +10,7 @@ type ThemeType string
 const (
 	ThemeDark  ThemeType = "dark"  // Default dark theme (soft purple/cyan)
 	ThemeMacOS ThemeType = "macos" // Apple-inspired theme
+	ThemeLight ThemeType = "light" // Light theme for light terminal backgrounds
 )
 
 // ThemeColorScheme defines the color palette for a theme.
@@ -27,6 +28,11 @@ type ThemeColorScheme struct {
 	Highlight  lipgloss.Color
 	Accent     lipgloss.Color
 	Info       lipgloss.Color
+
+	// Extended semantic colors (optional — zero value means "keep default")
+	Dim     lipgloss.Color
+	Running lipgloss.Color
+	Context lipgloss.Color
 }
 
 // predefinedThemes returns all available theme color schemes.
@@ -62,6 +68,24 @@ func predefinedThemes() map[ThemeType]ThemeColorScheme {
 			Accent:     lipgloss.Color("#FF2D55"), // SF Pink
 			Info:       lipgloss.Color("#00C7BE"), // SF Mint
 		},
+		ThemeLight: {
+			Name:       "Light",
+			Primary:    lipgloss.Color("#7C3AED"), // Purple 600
+			Secondary:  lipgloss.Color("#0891B2"), // Cyan 600
+			Success:    lipgloss.Color("#059669"), // Emerald 600
+			Warning:    lipgloss.Color("#D97706"), // Amber 600
+			Error:      lipgloss.Color("#DC2626"), // Red 600
+			Muted:      lipgloss.Color("#6B7280"), // Gray 500
+			Text:       lipgloss.Color("#1E293B"), // Slate 800
+			Background: lipgloss.Color("#F8FAFC"), // Slate 50
+			Border:     lipgloss.Color("#CBD5E1"), // Slate 300
+			Highlight:  lipgloss.Color("#7C3AED"), // Purple 600
+			Accent:     lipgloss.Color("#DB2777"), // Pink 600
+			Info:       lipgloss.Color("#0D9488"), // Teal 600
+			Dim:        lipgloss.Color("#9CA3AF"), // Gray 400
+			Running:    lipgloss.Color("#2563EB"), // Blue 600
+			Context:    lipgloss.Color("#475569"), // Slate 600
+		},
 	}
 }
 
@@ -91,6 +115,17 @@ func (s *Styles) ApplyTheme(theme ThemeType) {
 	ColorHighlight = colors.Highlight
 	ColorAccent = colors.Accent
 	ColorInfo = colors.Info
+
+	// Update extended semantic colors if provided by the theme
+	if colors.Dim != "" {
+		ColorDim = colors.Dim
+	}
+	if colors.Running != "" {
+		ColorRunning = colors.Running
+	}
+	if colors.Context != "" {
+		ColorContext = colors.Context
+	}
 
 	// Rebuild styles with new colors
 	s.rebuildStyles()

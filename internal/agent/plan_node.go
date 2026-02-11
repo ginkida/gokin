@@ -288,6 +288,67 @@ func (t *PlanTree) arePrerequisitesMet(node *PlanNode) bool {
 	return true
 }
 
+// BlockedNode describes a pending node that cannot proceed and why.
+type BlockedNode struct {
+	Node   *PlanNode
+	Reason string // human-readable explanation
+}
+
+// GetBlockedNodes returns pending nodes that are not ready (blocked by failed/incomplete dependencies).
+func (t *PlanTree) GetBlockedNodes() []BlockedNode {
+	pending := t.GetPendingNodes()
+	var blocked []BlockedNode
+
+	for _, node := range pending {
+		if t.arePrerequisitesMet(node) {
+			continue // this node is ready, not blocked
+		}
+		reason := t.blockedReason(node)
+		blocked = append(blocked, BlockedNode{Node: node, Reason: reason})
+	}
+
+	return blocked
+}
+
+// blockedReason returns a human-readable explanation of why a node is blocked.
+func (t *PlanTree) blockedReason(node *PlanNode) string {
+	if node.Action != nil && len(node.Action.Prerequisites) > 0 {
+		for _, prereqID := range node.Action.Prerequisites {
+			prereq, ok := t.GetNode(prereqID)
+			if !ok {
+				return "prerequisite " + prereqID + " not found"
+			}
+			if prereq.Status == PlanNodeFailed {
+				label := prereqID
+				if prereq.Action != nil && prereq.Action.Prompt != "" {
+					label = prereq.Action.Prompt
+				}
+				return "dependency failed: " + label
+			}
+			if prereq.Status != PlanNodeSucceeded {
+				return "waiting on " + prereqID + " (status: " + string(prereq.Status) + ")"
+			}
+		}
+	}
+
+	if node.ParentID != "" {
+		parent, ok := t.GetNode(node.ParentID)
+		if !ok {
+			return "parent " + node.ParentID + " not found"
+		}
+		if parent.Status == PlanNodeFailed {
+			label := node.ParentID
+			if parent.Action != nil && parent.Action.Prompt != "" {
+				label = parent.Action.Prompt
+			}
+			return "parent failed: " + label
+		}
+		return "parent " + node.ParentID + " not ready (status: " + string(parent.Status) + ")"
+	}
+
+	return "unknown blocker"
+}
+
 // rebuildIndex rebuilds the node index from the tree structure.
 func (t *PlanTree) rebuildIndex() {
 	t.nodeIndex = make(map[string]*PlanNode)

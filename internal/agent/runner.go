@@ -508,6 +508,11 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 		agent.reflector.SetPredictor(predictor)
 	}
 
+	// Propagate delegation depth from context (set by messenger.handleDelegation)
+	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
+		agent.delegation.SetDepth(depth)
+	}
+
 	// Wire delegation metrics for adaptive delegation rules
 	if delegationMetrics != nil && agent.delegation != nil {
 		agent.delegation.SetDelegationMetrics(delegationMetrics)
@@ -716,6 +721,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	}
 	onStart := r.onAgentStart
 	onComplete := r.onAgentComplete
+	onAgentProgress := r.onAgentProgress
 	r.mu.Unlock()
 
 	// Report activity to coordinator
@@ -728,11 +734,13 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 
 	// Run agent asynchronously with proper cleanup
 	go func() {
+		agentID := agent.ID
+
 		// Ensure cleanup happens even on panic
 		defer func() {
 			if p := recover(); p != nil {
 				r.mu.Lock()
-				if result, ok := r.results[agent.ID]; ok {
+				if result, ok := r.results[agentID]; ok {
 					result.Error = fmt.Sprintf("agent panic: %v", p)
 					result.Status = AgentStatusFailed
 					result.Completed = true
@@ -745,8 +753,8 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		select {
 		case <-ctx.Done():
 			r.mu.Lock()
-			r.results[agent.ID] = &AgentResult{
-				AgentID:   agent.ID,
+			r.results[agentID] = &AgentResult{
+				AgentID:   agentID,
 				Type:      at,
 				Status:    AgentStatusCancelled,
 				Error:     ctx.Err().Error(),
@@ -757,12 +765,33 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		default:
 		}
 
+		// Start progress ticker for periodic updates
+		progressTicker := time.NewTicker(2 * time.Second)
+		defer progressTicker.Stop()
+
+		progressCtx, progressCancel := context.WithCancel(ctx)
+		defer progressCancel()
+
+		go func() {
+			for {
+				select {
+				case <-progressTicker.C:
+					progress := agent.GetProgress()
+					if onAgentProgress != nil {
+						onAgentProgress(agentID, &progress)
+					}
+				case <-progressCtx.Done():
+					return
+				}
+			}
+		}()
+
 		result, err := agent.Run(ctx, prompt)
 
 		// Ensure result is never nil
 		if result == nil {
 			result = &AgentResult{
-				AgentID:   agent.ID,
+				AgentID:   agentID,
 				Type:      at,
 				Status:    AgentStatusFailed,
 				Error:     "nil result from agent",
@@ -780,12 +809,12 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		r.saveAgentState(agent)
 
 		r.mu.Lock()
-		r.results[agent.ID] = result
+		r.results[agentID] = result
 		r.mu.Unlock()
 
 		// Notify UI about agent completion
 		if onComplete != nil {
-			onComplete(agent.ID, result)
+			onComplete(agentID, result)
 		}
 	}()
 

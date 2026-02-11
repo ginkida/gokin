@@ -12,7 +12,7 @@ type ModelPreset struct {
 var ModelPresets = map[string]ModelPreset{
 	"coding": {
 		Provider:        "glm",
-		Name:            "glm-4.7",
+		Name:            "glm-5",
 		Temperature:     0.7,
 		MaxOutputTokens: 131072,
 	},
@@ -48,7 +48,7 @@ var ModelPresets = map[string]ModelPreset{
 	},
 	"glm": {
 		Provider:        "glm",
-		Name:            "glm-4.7",
+		Name:            "glm-5",
 		Temperature:     0.7,
 		MaxOutputTokens: 131072,
 	},

@@ -673,6 +673,19 @@ func (tp *TreePlanner) GetReadyActions(tree *PlanTree) ([]*PlannedAction, error)
 	return actions, nil
 }
 
+// GetBlockedNodes returns pending nodes that cannot proceed due to failed dependencies.
+// Thread-safe: acquires tree lock.
+func (tp *TreePlanner) GetBlockedNodes(tree *PlanTree) []BlockedNode {
+	if tree == nil || tree.Root == nil {
+		return nil
+	}
+
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+
+	return tree.GetBlockedNodes()
+}
+
 // RecordResult records the result of executing an action.
 func (tp *TreePlanner) RecordResult(tree *PlanTree, nodeID string, result *AgentResult) error {
 	tree.mu.Lock()
