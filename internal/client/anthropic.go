@@ -26,6 +26,7 @@ import (
 type HTTPError struct {
 	StatusCode int
 	Message    string
+	RetryAfter time.Duration // Parsed Retry-After header, 0 if absent
 	Err        error
 }
 
@@ -448,6 +449,13 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 		if attempt > 0 {
 			// Exponential backoff with jitter
 			delay := calculateBackoffWithJitter(c.config.RetryDelay, attempt-1, maxDelay)
+
+			// Respect Retry-After header from server (typically on 429)
+			var httpErr *HTTPError
+			if errors.As(lastErr, &httpErr) && httpErr.RetryAfter > 0 && httpErr.RetryAfter > delay {
+				delay = httpErr.RetryAfter
+			}
+
 			logging.Debug("retrying request", "attempt", attempt, "delay", delay, "last_status", lastStatusCode)
 
 			// Notify UI about retry
@@ -586,6 +594,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		retryAfter := ParseRetryAfter(resp)
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			logging.Error("failed to read error response", "error", err)
@@ -595,6 +604,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		logging.Warn("anthropic API error", "status", resp.StatusCode, "body", string(body))
 		return nil, &HTTPError{
 			StatusCode: resp.StatusCode,
+			RetryAfter: retryAfter,
 			Message:    fmt.Sprintf("API error (status %d): %s", resp.StatusCode, string(body)),
 		}
 	}

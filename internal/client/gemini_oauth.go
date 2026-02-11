@@ -375,17 +375,36 @@ func (c *GeminiOAuthClient) generateContentStream(ctx context.Context, contents 
 	contents = sanitizeContents(contents)
 
 	var lastErr error
+	var lastStatusCode int
+	maxDelay := 30 * time.Second
+
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
-			delay := c.retryDelay * time.Duration(1<<uint(attempt-1))
-			logging.Info("retrying OAuth Gemini request", "attempt", attempt, "delay", delay)
+			// Calculate backoff with jitter
+			delay := CalculateBackoff(c.retryDelay, attempt-1, maxDelay)
+
+			// Respect Retry-After header from server (typically on 429)
+			var httpErr *HTTPError
+			if errors.As(lastErr, &httpErr) {
+				lastStatusCode = httpErr.StatusCode
+				if httpErr.RetryAfter > 0 && httpErr.RetryAfter > delay {
+					delay = httpErr.RetryAfter
+				}
+			}
+
+			logging.Info("retrying OAuth Gemini request",
+				"attempt", attempt, "delay", delay, "status", lastStatusCode)
 
 			if c.statusCallback != nil {
 				reason := "API error"
-				if lastErr != nil {
+				if lastStatusCode == 429 {
+					reason = "rate limit"
+				} else if lastErr != nil {
 					reason = lastErr.Error()
-					if strings.Contains(reason, "429") {
-						reason = "rate limit"
+					if strings.Contains(reason, "connection") {
+						reason = "connection error"
+					} else if strings.Contains(reason, "timeout") || strings.Contains(reason, "deadline exceeded") {
+						reason = "timeout"
 					} else if len(reason) > 50 {
 						reason = reason[:47] + "..."
 					}
@@ -506,12 +525,17 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		retryAfter := ParseRetryAfter(resp)
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if c.rateLimiter != nil && estimatedTokens > 0 {
 			c.rateLimiter.ReturnTokens(1, estimatedTokens)
 		}
-		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+		return nil, &HTTPError{
+			StatusCode: resp.StatusCode,
+			RetryAfter: retryAfter,
+			Message:    fmt.Sprintf("API error (%d): %s", resp.StatusCode, string(body)),
+		}
 	}
 
 	// Create streaming response

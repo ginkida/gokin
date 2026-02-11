@@ -2,6 +2,8 @@ package client
 
 import (
 	"math/rand"
+	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -33,4 +35,32 @@ func CalculateBackoff(baseDelay time.Duration, attempt int, maxDelay time.Durati
 	// Add jitter: random value between 0 and 25% of delay
 	jitter := time.Duration(rand.Int63n(int64(delay / 4)))
 	return delay + jitter
+}
+
+// ParseRetryAfter extracts Retry-After duration from an HTTP response.
+// Supports both seconds (integer) and HTTP-date formats.
+// Returns 0 if the header is absent or unparseable.
+func ParseRetryAfter(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	header := resp.Header.Get("Retry-After")
+	if header == "" {
+		return 0
+	}
+
+	// Try parsing as integer seconds first (most common for APIs)
+	if seconds, err := strconv.Atoi(header); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+
+	// Try parsing as HTTP-date
+	if t, err := http.ParseTime(header); err == nil {
+		d := time.Until(t)
+		if d > 0 {
+			return d
+		}
+	}
+
+	return 0
 }
