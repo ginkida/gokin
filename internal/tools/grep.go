@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -534,19 +535,47 @@ func (t *GrepTool) searchFile(filePath string, re *regexp.Regexp, contextLines i
 	return matches
 }
 
-// isBinaryFile checks if a file is likely binary based on extension.
+// isBinaryFile checks if a file is likely binary based on extension or content.
 func isBinaryFile(path string) bool {
+	// Fast path: known binary extensions (no I/O)
 	binaryExts := map[string]bool{
 		".exe": true, ".dll": true, ".so": true, ".dylib": true,
+		".o": true, ".a": true, ".lib": true,
 		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".ico": true,
+		".bmp": true, ".webp": true, ".tiff": true, ".tif": true,
 		".pdf": true, ".zip": true, ".tar": true, ".gz": true, ".rar": true,
+		".7z": true, ".bz2": true, ".xz": true, ".zst": true,
 		".mp3": true, ".mp4": true, ".avi": true, ".mov": true,
+		".wav": true, ".flac": true, ".mkv": true,
+		".woff": true, ".woff2": true, ".ttf": true, ".eot": true, ".otf": true,
+		".wasm": true, ".class": true, ".pyc": true, ".pyo": true,
 		".bin": true, ".dat": true, ".db": true, ".sqlite": true,
-		".woff": true, ".woff2": true, ".ttf": true, ".eot": true,
+		".sqlite3": true,
 	}
 
 	ext := strings.ToLower(filepath.Ext(path))
-	return binaryExts[ext]
+	if binaryExts[ext] {
+		return true
+	}
+
+	// Content sniffing: read first 512 bytes, look for null bytes
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 512)
+	n, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		return false
+	}
+	for i := 0; i < n; i++ {
+		if buf[i] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // SupportsStreaming returns true as grep supports streaming output.

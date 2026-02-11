@@ -776,12 +776,19 @@ func (t *BashTool) buildResult(stdoutStr, stderrStr string) ToolResult {
 		output.WriteString(stderrStr)
 	}
 
-	// Truncate if too long
+	// Truncate if too long — use head+tail strategy so errors/summaries at the end are preserved
 	result := output.String()
 	const maxLen = 30000
+	const headSize = 10000
+	const tailSize = 20000
 	if len(result) > maxLen {
-		totalLen := len(result)
-		result = result[:maxLen] + fmt.Sprintf("\n... (output truncated: showing %d of %d characters)", maxLen, totalLen)
+		head := result[:headSize]
+		tail := result[len(result)-tailSize:]
+		omitted := result[headSize : len(result)-tailSize]
+		omittedLines := strings.Count(omitted, "\n")
+		result = head +
+			fmt.Sprintf("\n\n... [%d lines, %d chars omitted] ...\n\n", omittedLines, len(omitted)) +
+			tail
 	}
 
 	if result == "" {

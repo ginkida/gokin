@@ -324,7 +324,7 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	case ".ipynb":
 		return t.readNotebook(filePath)
 	default:
-		// Detect binary files by checking first 512 bytes for null bytes
+		// Detect binary files by extension or null bytes in first 512 bytes
 		if isBinaryFile(filePath) {
 			return NewSuccessResult(fmt.Sprintf("Binary file (%s, %d bytes). Cannot display as text.", ext, info.Size())), nil
 		}
