@@ -301,7 +301,11 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	info, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return NewErrorResult(fmt.Sprintf("file not found: %s", filePath)), nil
+			errMsg := fmt.Sprintf("file not found: %s", filePath)
+			if suggestions := suggestSimilarFiles(filePath); len(suggestions) > 0 {
+				errMsg += "\n\nDid you mean:\n" + strings.Join(suggestions, "\n")
+			}
+			return NewErrorResult(errMsg), nil
 		}
 		return NewErrorResult(fmt.Sprintf("error accessing file: %s", err)), nil
 	}
@@ -526,6 +530,39 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 	}
 
 	return NewSuccessResult(content), nil
+}
+
+// suggestSimilarFiles returns up to 5 file paths similar to the given (non-existent) path.
+// Uses case-insensitive substring matching on filenames in the same directory.
+func suggestSimilarFiles(path string) []string {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	baseLower := strings.ToLower(base)
+	nameOnly := strings.TrimSuffix(baseLower, filepath.Ext(baseLower))
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var suggestions []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		entryLower := strings.ToLower(e.Name())
+		entryNameOnly := strings.TrimSuffix(entryLower, filepath.Ext(entryLower))
+		// Case-insensitive exact match, or basename substring containment
+		if entryLower == baseLower ||
+			strings.Contains(entryLower, nameOnly) ||
+			strings.Contains(nameOnly, entryNameOnly) {
+			suggestions = append(suggestions, "  - "+filepath.Join(dir, e.Name()))
+		}
+		if len(suggestions) >= 5 {
+			break
+		}
+	}
+	return suggestions
 }
 
 // Note: isBinaryFile is defined in grep.go and shared across the tools package.

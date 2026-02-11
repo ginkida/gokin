@@ -1399,6 +1399,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			}
 
 			// Mental Loop Detection (exact args match + broad tool counter)
+			loopDetectedThisTurn := false
 			for _, fc := range resp.FunctionCalls {
 				key := normalizeCallKey(fc.Name, fc.Args)
 				broadKey := "tool:" + fc.Name
@@ -1413,6 +1414,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 				// Exact-match loop: same tool + same (normalized) args > 3 times
 				if exactCount > 3 && !intervened {
+					loopDetectedThisTurn = true
 					logging.Warn("mental loop detected (exact)", "tool", fc.Name, "count", exactCount)
 					a.callHistoryMu.Lock()
 					a.loopIntervened = true
@@ -1440,6 +1442,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 				// Broad loop: same tool called > 8 times (any args)
 				if broadCount > 8 && !intervened {
+					loopDetectedThisTurn = true
 					logging.Warn("broad loop detected", "tool", fc.Name, "total_calls", broadCount)
 					a.callHistoryMu.Lock()
 					a.loopIntervened = true
@@ -1466,6 +1469,14 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					a.stateMu.Unlock()
 					continue
 				}
+			}
+
+			// Reset intervention flag after a turn with no loop detected,
+			// so future loops can be caught again.
+			if !loopDetectedThisTurn {
+				a.callHistoryMu.Lock()
+				a.loopIntervened = false
+				a.callHistoryMu.Unlock()
 			}
 
 			// Update progress to show tool execution
@@ -1654,6 +1665,28 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		return nil
 	}
 
+	// 2.5. Try pruning old tool outputs first (cheaper than full summarization)
+	freedChars := a.pruneToolOutputs(120000) // protect last ~120k chars
+	if freedChars > 0 {
+		logging.Info("pruned old tool outputs", "agent_id", a.ID, "freed_chars", freedChars)
+		// Re-check: maybe pruning was enough
+		a.stateMu.RLock()
+		newSnapshot := make([]*genai.Content, len(a.history))
+		copy(newSnapshot, a.history)
+		a.stateMu.RUnlock()
+		newCount, countErr := a.tokenCounter.CountContents(ctx, newSnapshot)
+		if countErr == nil {
+			newPercent := float64(newCount) / float64(limits.MaxInputTokens)
+			if newPercent < threshold {
+				return nil // Pruning was sufficient
+			}
+			historySnapshot = newSnapshot // Use pruned snapshot for summarization
+			historyLen = len(newSnapshot)
+			tokenCount = newCount
+			percentUsed = newPercent
+		}
+	}
+
 	logging.Info("context threshold reached, compacting history",
 		"agent_id", a.ID,
 		"usage", fmt.Sprintf("%.1f%%", percentUsed*100),
@@ -1691,6 +1724,9 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	newHistory = append(newHistory, newMessages...)
 
 	a.history = newHistory
+
+	// Inject continuation hint after compaction
+	a.injectContinuationHint()
 
 	logging.Info("context history compacted", "agent_id", a.ID, "new_message_count", len(a.history))
 
@@ -1786,10 +1822,104 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 	newHistory = append(newHistory, a.history[len(a.history)-keepEnd:]...)
 
 	a.history = newHistory
+
+	// Inject continuation hint after compaction
+	a.injectContinuationHint()
+
 	logging.Info("history force-compacted (importance-based)", "agent_id", a.ID,
 		"old_len", len(middle)+keepStart+keepEnd, "new_len", len(a.history))
 
 	return nil
+}
+
+// pruneToolOutputs truncates old FunctionResponse contents in history,
+// protecting the last protectChars characters of tool output.
+// Returns estimated characters freed. Must NOT be called under stateMu lock.
+func (a *Agent) pruneToolOutputs(protectChars int) int {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
+	if len(a.history) <= 6 {
+		return 0
+	}
+
+	// Walk from end to start, accumulating recent tool output chars.
+	// Skip first 2 (system context) and last 4 (recent messages).
+	start := 2
+	end := len(a.history) - 4
+
+	// First pass: collect truncation candidates from the end backwards
+	type truncCandidate struct {
+		msgIdx  int
+		partIdx int
+		content string
+		name    string
+	}
+	var candidates []truncCandidate
+
+	for i := end - 1; i >= start; i-- {
+		msg := a.history[i]
+		if msg == nil {
+			continue
+		}
+		for j := len(msg.Parts) - 1; j >= 0; j-- {
+			part := msg.Parts[j]
+			if part == nil || part.FunctionResponse == nil {
+				continue
+			}
+			contentStr := ""
+			if resp := part.FunctionResponse.Response; resp != nil {
+				if c, ok := resp["content"].(string); ok {
+					contentStr = c
+				}
+			}
+			if len(contentStr) <= 200 {
+				continue // Already small, skip
+			}
+			candidates = append(candidates, truncCandidate{
+				msgIdx:  i,
+				partIdx: j,
+				content: contentStr,
+				name:    part.FunctionResponse.Name,
+			})
+		}
+	}
+
+	// Second pass: truncate candidates beyond the protection window.
+	// Candidates are ordered from newest to oldest (we walked backwards).
+	var freed int
+	var protectedSoFar int
+	for _, c := range candidates {
+		protectedSoFar += len(c.content)
+		if protectedSoFar <= protectChars {
+			continue // Still within protection window
+		}
+		// Truncate this tool output
+		replacement := fmt.Sprintf("[%s output truncated, was %d chars]", c.name, len(c.content))
+		part := a.history[c.msgIdx].Parts[c.partIdx]
+		part.FunctionResponse.Response = map[string]any{
+			"content": replacement,
+		}
+		freed += len(c.content) - len(replacement)
+	}
+
+	return freed
+}
+
+// injectContinuationHint appends a synthetic user message after compaction
+// so the model continues without pausing. Must be called under stateMu write lock.
+func (a *Agent) injectContinuationHint() {
+	hint := "[System: Conversation was automatically compacted to free context space. Continue with your current task.]"
+	if len(a.history) == 0 {
+		return
+	}
+	last := a.history[len(a.history)-1]
+	if last.Role == genai.RoleUser {
+		// Append to existing user message to avoid consecutive same-role issues
+		last.Parts = append(last.Parts, genai.NewPartFromText(hint))
+	} else {
+		a.history = append(a.history, genai.NewContentFromText(hint, genai.RoleUser))
+	}
 }
 
 // getModelResponse gets a response from the model.

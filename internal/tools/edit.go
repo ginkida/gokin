@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"gokin/internal/logging"
 	"gokin/internal/security"
 	"gokin/internal/undo"
 )
@@ -297,6 +298,38 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		count = strings.Count(content, oldStr)
 
 		if count == 0 {
+			// Try progressive fuzzy matching (auto-apply on unique match)
+			if result, strategy, err := tryFuzzyReplace(content, oldStr, newStr, replaceAll); err == nil {
+				newContent = result
+				logging.Debug("edit fuzzy match applied", "strategy", strategy, "file", filePath)
+				count = 1 // Mark as matched for status message below
+
+				// Show diff preview and wait for approval if enabled
+				if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
+					approved, approveErr := t.diffHandler.PromptDiff(ctx, filePath, content, newContent, "edit", false)
+					if approveErr != nil {
+						return NewErrorResult(fmt.Sprintf("diff preview error: %s", approveErr)), nil
+					}
+					if !approved {
+						return NewErrorResult("changes rejected by user"), nil
+					}
+				}
+
+				// Write back atomically
+				newContentBytes := []byte(newContent)
+				if err := AtomicWrite(filePath, newContentBytes, 0644); err != nil {
+					return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
+				}
+				if t.undoManager != nil {
+					change := undo.NewFileChange(filePath, "edit", oldContent, newContentBytes, false)
+					t.undoManager.Record(*change)
+				}
+
+				status := fmt.Sprintf("Edited (fuzzy: %s): %s", strategy, filePath)
+				return NewSuccessResult(status), nil
+			}
+
+			// Fuzzy matching failed — fall back to error with suggestion
 			errMsg := fmt.Sprintf("old_string not found in file: %s", filePath)
 			if actual, line := findFuzzyMatch(content, oldStr); actual != "" {
 				errMsg += fmt.Sprintf("\n\nFuzzy match at line %d (whitespace differs). Actual text:\n```\n%s\n```\nUse this exact text as old_string.", line, actual)
@@ -407,6 +440,14 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 
 		count := strings.Count(content, oldStr)
 		if count == 0 {
+			// Try progressive fuzzy matching
+			if result, strategy, err := tryFuzzyReplace(content, oldStr, newStr, false); err == nil {
+				content = result
+				logging.Debug("multi-edit fuzzy match applied", "strategy", strategy, "edit_index", i, "file", filePath)
+				totalReplacements++
+				continue
+			}
+
 			errMsg := fmt.Sprintf("edit[%d]: old_string not found in file after previous edits", i)
 			if actual, line := findFuzzyMatch(content, oldStr); actual != "" {
 				errMsg += fmt.Sprintf("\n\nFuzzy match at line %d. Actual text:\n```\n%s\n```", line, actual)
@@ -598,4 +639,141 @@ func findFuzzyMatch(content, oldStr string) (string, int) {
 
 	actual := strings.Join(contentLines[startLine:endLine+1], "\n")
 	return actual, startLine + 1 // 1-indexed line number
+}
+
+// fuzzyStrategy defines a normalization strategy for progressive edit matching.
+type fuzzyStrategy struct {
+	name      string
+	normalize func(string) string
+}
+
+// fuzzyStrategies is the ordered chain of normalization strategies.
+var fuzzyStrategies = []fuzzyStrategy{
+	{
+		name: "TrailingWhitespace",
+		normalize: func(s string) string {
+			lines := strings.Split(s, "\n")
+			for i, line := range lines {
+				lines[i] = strings.TrimRight(line, " \t\r")
+			}
+			return strings.Join(lines, "\n")
+		},
+	},
+	{
+		name: "LeadingWhitespace",
+		normalize: func(s string) string {
+			lines := strings.Split(s, "\n")
+			for i, line := range lines {
+				lines[i] = strings.TrimSpace(line)
+			}
+			return strings.Join(lines, "\n")
+		},
+	},
+	{
+		name: "WhitespaceCollapse",
+		normalize: func(s string) string {
+			lines := strings.Split(s, "\n")
+			wsRun := regexp.MustCompile(`[ \t]+`)
+			for i, line := range lines {
+				lines[i] = strings.TrimSpace(wsRun.ReplaceAllString(line, " "))
+			}
+			return strings.Join(lines, "\n")
+		},
+	},
+	{
+		name: "BlankLines",
+		normalize: func(s string) string {
+			lines := strings.Split(s, "\n")
+			wsRun := regexp.MustCompile(`[ \t]+`)
+			var result []string
+			for _, line := range lines {
+				normalized := strings.TrimSpace(wsRun.ReplaceAllString(line, " "))
+				if normalized != "" {
+					result = append(result, normalized)
+				}
+			}
+			return strings.Join(result, "\n")
+		},
+	},
+}
+
+// tryFuzzyReplace tries a chain of normalization strategies to find and replace old in content.
+// Returns (newContent, strategyName, error).
+// If no strategy finds a match, or a strategy finds ambiguous matches (>1 && !replaceAll), returns an error.
+func tryFuzzyReplace(content, old, new string, replaceAll bool) (string, string, error) {
+	contentLines := strings.Split(content, "\n")
+
+	for _, strategy := range fuzzyStrategies {
+		normalizedOld := strategy.normalize(old)
+		// If normalization doesn't change old, this strategy won't help
+		if normalizedOld == old {
+			continue
+		}
+
+		normalizedContent := strategy.normalize(content)
+		// If normalization doesn't change content either, skip
+		if normalizedContent == content {
+			continue
+		}
+
+		count := strings.Count(normalizedContent, normalizedOld)
+		if count == 0 {
+			continue
+		}
+		if count > 1 && !replaceAll {
+			return "", strategy.name, fmt.Errorf(
+				"fuzzy match (%s) found %d occurrences — ambiguous. Provide more context or set replace_all=true",
+				strategy.name, count)
+		}
+
+		// Map normalized positions back to original lines and replace.
+		normalizedLines := strings.Split(normalizedContent, "\n")
+		normalizedOldLines := strings.Split(normalizedOld, "\n")
+		normalizedNewLines := strings.Split(new, "\n")
+		oldLineCount := len(normalizedOldLines)
+
+		// Find all match start positions (by line index in normalizedLines)
+		var matchStarts []int
+		for i := 0; i <= len(normalizedLines)-oldLineCount; i++ {
+			match := true
+			for j := 0; j < oldLineCount; j++ {
+				if normalizedLines[i+j] != normalizedOldLines[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				matchStarts = append(matchStarts, i)
+			}
+		}
+
+		if len(matchStarts) == 0 {
+			continue
+		}
+		if len(matchStarts) > 1 && !replaceAll {
+			return "", strategy.name, fmt.Errorf(
+				"fuzzy match (%s) found %d occurrences — ambiguous",
+				strategy.name, len(matchStarts))
+		}
+
+		// Build result by replacing matched line ranges in the original content.
+		// Process matches in reverse order so earlier indices stay valid.
+		resultLines := make([]string, len(contentLines))
+		copy(resultLines, contentLines)
+
+		for mi := len(matchStarts) - 1; mi >= 0; mi-- {
+			start := matchStarts[mi]
+			end := start + oldLineCount
+			// Replace the original lines [start:end) with new lines
+			var newLines []string
+			newLines = append(newLines, resultLines[:start]...)
+			newLines = append(newLines, normalizedNewLines...)
+			newLines = append(newLines, resultLines[end:]...)
+			resultLines = newLines
+		}
+
+		return strings.Join(resultLines, "\n"), strategy.name, nil
+	}
+
+	return "", "", fmt.Errorf("no fuzzy strategy matched")
 }

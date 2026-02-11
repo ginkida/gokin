@@ -567,6 +567,13 @@ func (b *Builder) initManagers() error {
 	}
 	b.executor.SetHooks(b.hooksManager)
 
+	// Auto-formatter
+	formatters := tools.DefaultFormatters()
+	for ext, cmd := range b.cfg.Tools.Formatters {
+		formatters[ext] = cmd // User overrides
+	}
+	b.executor.SetFormatter(tools.NewFormatter(formatters, 5*time.Second))
+
 	// Task manager
 	b.taskManager = tasks.NewManager(b.workDir)
 

@@ -184,9 +184,10 @@ type ModelConfig struct {
 
 // ToolsConfig holds tool-related settings.
 type ToolsConfig struct {
-	Timeout     time.Duration `yaml:"timeout"`
-	Bash        BashConfig    `yaml:"bash"`
-	AllowedDirs []string      `yaml:"allowed_dirs"` // Additional allowed directories (besides workDir)
+	Timeout     time.Duration     `yaml:"timeout"`
+	Bash        BashConfig        `yaml:"bash"`
+	AllowedDirs []string          `yaml:"allowed_dirs"` // Additional allowed directories (besides workDir)
+	Formatters  map[string]string `yaml:"formatters"`   // ext → command, e.g. {".py": "black"}
 }
 
 // BashConfig holds bash tool settings.

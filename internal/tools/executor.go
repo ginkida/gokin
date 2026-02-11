@@ -179,6 +179,9 @@ type Executor struct {
 
 	// Tool result cache
 	toolCache *ToolResultCache
+
+	// Auto-formatter for write/edit operations
+	formatter *Formatter
 }
 
 // ExecutionInfo holds information about an active tool execution
@@ -305,6 +308,11 @@ func (e *Executor) SetPermissions(mgr *permission.Manager) {
 // SetHooks sets the hooks manager for tool execution.
 func (e *Executor) SetHooks(mgr *hooks.Manager) {
 	e.hooks = mgr
+}
+
+// SetFormatter sets the auto-formatter for post-write/edit formatting.
+func (e *Executor) SetFormatter(f *Formatter) {
+	e.formatter = f
 }
 
 // SetAuditLogger sets the audit logger for tool execution.
@@ -1038,6 +1046,15 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			e.hooks.RunPostTool(ctx, call.Name, call.Args, result.Content)
 		} else {
 			e.hooks.RunOnError(ctx, call.Name, call.Args, result.Error)
+		}
+	}
+
+	// Step 10.5: Auto-format written files
+	if e.formatter != nil && result.Success {
+		if call.Name == "write" || call.Name == "edit" {
+			if filePath, ok := call.Args["file_path"].(string); ok {
+				_ = e.formatter.Format(ctx, filePath)
+			}
 		}
 	}
 
