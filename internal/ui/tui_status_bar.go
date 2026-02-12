@@ -76,13 +76,15 @@ func (m Model) compactStatusSegments() []string {
 	}
 	parts = append(parts, "m:"+mode)
 
-	step := "-"
-	if m.planProgress != nil && m.planProgress.TotalSteps > 0 {
+	if m.hasActivePlanStatus() {
+		step := "-"
 		step = fmt.Sprintf("%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+		parts = append(parts, "pl:"+step)
 	}
-	parts = append(parts, "s:"+step)
 
-	parts = append(parts, "b:"+shortBreakerState(m.runtimeStatus.RequestBreaker)+"/"+shortBreakerState(m.runtimeStatus.StepBreaker))
+	if m.shouldShowBreaker() {
+		parts = append(parts, "bk:"+shortBreakerState(m.runtimeStatus.RequestBreaker)+"/"+shortBreakerState(m.runtimeStatus.StepBreaker))
+	}
 
 	provider := m.runtimeStatus.Provider
 	if provider == "" {
@@ -99,11 +101,6 @@ func (m Model) compactStatusSegments() []string {
 		parts = append(parts, "t:n/a")
 	}
 
-	hb := "n/a"
-	if m.runtimeStatus.HasHeartbeat {
-		hb = m.runtimeStatus.HeartbeatAge.Round(time.Second).String()
-	}
-	parts = append(parts, "h:"+hb)
 	return parts
 }
 
@@ -191,12 +188,11 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		parts = append(parts, modeStyle.Render("mode:normal"))
 	}
 
-	activeStep := "step:-"
-	if m.planProgress != nil && m.planProgress.TotalSteps > 0 {
-		activeStep = fmt.Sprintf("step:%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+	if m.hasActivePlanStatus() {
+		activeStep := fmt.Sprintf("plan:%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+		parts = append(parts, dimStyle.Render(activeStep))
 	}
-	parts = append(parts, dimStyle.Render(activeStep))
-	if withContextBar && m.planProgress != nil && m.planProgress.CurrentTitle != "" {
+	if withContextBar && m.hasActivePlanStatus() && m.planProgress.CurrentTitle != "" {
 		title := m.planProgress.CurrentTitle
 		if len(title) > 24 {
 			title = title[:21] + "..."
@@ -204,9 +200,11 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		parts = append(parts, dimStyle.Render("task:"+title))
 	}
 
-	reqBreaker := shortBreakerState(m.runtimeStatus.RequestBreaker)
-	stepBreaker := shortBreakerState(m.runtimeStatus.StepBreaker)
-	parts = append(parts, breakerStyle.Render(fmt.Sprintf("br:%s/%s", reqBreaker, stepBreaker)))
+	if m.shouldShowBreaker() {
+		reqBreaker := shortBreakerState(m.runtimeStatus.RequestBreaker)
+		stepBreaker := shortBreakerState(m.runtimeStatus.StepBreaker)
+		parts = append(parts, breakerStyle.Render(fmt.Sprintf("breaker:req=%s,step=%s", reqBreaker, stepBreaker)))
+	}
 
 	provider := m.runtimeStatus.Provider
 	if provider == "" {
@@ -230,13 +228,49 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		parts = append(parts, dimStyle.Render(m.formatBackgroundTaskStatus(bgCount)))
 	}
 
-	hb := "hb:n/a"
-	if m.runtimeStatus.HasHeartbeat {
-		hb = "hb:" + m.runtimeStatus.HeartbeatAge.Round(time.Second).String()
+	if m.shouldShowHeartbeat() {
+		hb := "heartbeat:waiting"
+		if m.runtimeStatus.HasHeartbeat {
+			hb = "heartbeat:" + m.runtimeStatus.HeartbeatAge.Round(time.Second).String()
+		}
+		parts = append(parts, heartbeatStyle.Render(hb))
 	}
-	parts = append(parts, heartbeatStyle.Render(hb))
 
 	return parts
+}
+
+func (m Model) hasActivePlanStatus() bool {
+	if m.planProgress == nil {
+		return false
+	}
+	if m.planProgress.TotalSteps <= 0 {
+		return false
+	}
+	switch m.planProgress.Status {
+	case "in_progress", "paused":
+		return true
+	default:
+		return m.planProgress.Completed < m.planProgress.TotalSteps
+	}
+}
+
+func (m Model) shouldShowBreaker() bool {
+	req := strings.ToLower(m.runtimeStatus.RequestBreaker)
+	step := strings.ToLower(m.runtimeStatus.StepBreaker)
+	isClosedOrEmpty := func(s string) bool {
+		return s == "" || s == "closed" || s == "n/a"
+	}
+	return !isClosedOrEmpty(req) || !isClosedOrEmpty(step)
+}
+
+func (m Model) shouldShowHeartbeat() bool {
+	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
+		return true
+	}
+	if m.hasActivePlanStatus() {
+		return true
+	}
+	return m.state == StateProcessing || m.state == StateStreaming
 }
 
 func shortBreakerState(state string) string {

@@ -86,7 +86,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"Session", []string{"model", "clear", "compact", "save", "resume", "sessions", "stats", "instructions"}},
 		{"Auth & Setup", []string{"login", "logout", "oauth-login", "oauth-logout", "provider", "status", "doctor", "config", "update"}},
 		{"Git", []string{"init", "commit", "pr"}},
-		{"Planning", []string{"plan", "resume-plan", "health", "policy", "ledger", "tree-stats"}},
+		{"Planning", []string{"plan", "resume-plan", "health", "policy", "ledger", "journal", "recovery", "observability", "memory-governance", "tree-stats"}},
 		{"Tools", []string{"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
 			"semantic-stats", "semantic-reindex",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"}},

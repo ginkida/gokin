@@ -62,6 +62,10 @@ type AppInterface interface {
 	GetRuntimeHealthReport() string
 	GetPolicyReport() string
 	GetLedgerReport() string
+	GetJournalReport() string
+	GetRecoveryReport() string
+	GetObservabilityReport() string
+	GetSessionGovernanceReport() string
 }
 
 // Handler manages slash commands.
@@ -131,6 +135,10 @@ func NewHandler() *Handler {
 	h.Register(&HealthCommand{})
 	h.Register(&PolicyCommand{})
 	h.Register(&LedgerCommand{})
+	h.Register(&JournalCommand{})
+	h.Register(&RecoveryCommand{})
+	h.Register(&ObservabilityCommand{})
+	h.Register(&MemoryGovernanceCommand{})
 
 	// Register tree planner command
 	h.Register(&TreeStatsCommand{})

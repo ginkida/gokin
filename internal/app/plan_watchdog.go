@@ -56,6 +56,11 @@ func (a *App) startPlanWatchdog(ctx context.Context, cancel context.CancelFunc, 
 						"plan_id", planID, "step_id", stepID, "idle", age.String())
 
 					a.planManager.PausePlan()
+					a.journalEvent("plan_watchdog_pause", map[string]any{
+						"plan_id": planID,
+						"step_id": stepID,
+						"idle":    age.Round(time.Second).String(),
+					})
 					if a.reliability != nil {
 						a.reliability.RecordFailure()
 					}

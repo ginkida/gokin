@@ -907,6 +907,9 @@ func (m *Manager) ResumePlan() (*Plan, error) {
 	plan.mu.Lock()
 	for _, step := range plan.Steps {
 		if step.Status == StatusPaused || step.Status == StatusFailed {
+			if strings.Contains(strings.ToLower(step.Error), "checkpoint required") {
+				step.CheckpointPassed = true
+			}
 			step.Status = StatusPending
 			step.Error = ""
 			if plan.RunLedger != nil {

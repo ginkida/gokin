@@ -55,3 +55,77 @@ func (c *LedgerCommand) GetMetadata() CommandMetadata {
 func (c *LedgerCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	return app.GetLedgerReport(), nil
 }
+
+// JournalCommand displays recent execution journal events.
+type JournalCommand struct{}
+
+func (c *JournalCommand) Name() string        { return "journal" }
+func (c *JournalCommand) Description() string { return "Show recent execution journal events" }
+func (c *JournalCommand) Usage() string       { return "/journal" }
+func (c *JournalCommand) GetMetadata() CommandMetadata {
+	return CommandMetadata{
+		Category: CategoryPlanning,
+		Icon:     "history",
+		Priority: 50,
+	}
+}
+
+func (c *JournalCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	return app.GetJournalReport(), nil
+}
+
+// RecoveryCommand displays persisted recovery snapshot.
+type RecoveryCommand struct{}
+
+func (c *RecoveryCommand) Name() string        { return "recovery" }
+func (c *RecoveryCommand) Description() string { return "Show latest recovery snapshot" }
+func (c *RecoveryCommand) Usage() string       { return "/recovery" }
+func (c *RecoveryCommand) GetMetadata() CommandMetadata {
+	return CommandMetadata{
+		Category: CategoryPlanning,
+		Icon:     "restore",
+		Priority: 60,
+	}
+}
+
+func (c *RecoveryCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	return app.GetRecoveryReport(), nil
+}
+
+// ObservabilityCommand provides a unified reliability dashboard.
+type ObservabilityCommand struct{}
+
+func (c *ObservabilityCommand) Name() string        { return "observability" }
+func (c *ObservabilityCommand) Description() string { return "Show unified observability dashboard" }
+func (c *ObservabilityCommand) Usage() string       { return "/observability" }
+func (c *ObservabilityCommand) GetMetadata() CommandMetadata {
+	return CommandMetadata{
+		Category: CategoryPlanning,
+		Icon:     "dashboard",
+		Priority: 70,
+	}
+}
+
+func (c *ObservabilityCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	return app.GetObservabilityReport(), nil
+}
+
+// MemoryGovernanceCommand shows session memory governance stats.
+type MemoryGovernanceCommand struct{}
+
+func (c *MemoryGovernanceCommand) Name() string { return "memory-governance" }
+func (c *MemoryGovernanceCommand) Description() string {
+	return "Show session memory governance status"
+}
+func (c *MemoryGovernanceCommand) Usage() string { return "/memory-governance" }
+func (c *MemoryGovernanceCommand) GetMetadata() CommandMetadata {
+	return CommandMetadata{
+		Category: CategoryPlanning,
+		Icon:     "memory",
+		Priority: 80,
+	}
+}
+
+func (c *MemoryGovernanceCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	return app.GetSessionGovernanceReport(), nil
+}

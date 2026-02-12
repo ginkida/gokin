@@ -1284,6 +1284,11 @@ func (b *Builder) wireDependencies() error {
 			if app.program != nil {
 				app.program.Send(ui.ToolCallMsg{Name: name, Args: args})
 			}
+			app.journalEvent("tool_start", map[string]any{
+				"tool": name,
+				"args": args,
+			})
+			app.saveRecoverySnapshot("")
 
 			// Record side effects for active plan step (idempotency guard).
 			if app.planManager != nil && app.planManager.IsExecuting() {
@@ -1305,6 +1310,10 @@ func (b *Builder) wireDependencies() error {
 			if app.program != nil {
 				app.program.Send(ui.ToolResultMsg{Name: name, Content: result.Content})
 			}
+			app.journalEvent("tool_end", map[string]any{
+				"tool":    name,
+				"success": result.Success,
+			})
 
 			// Refresh token count after each tool completes (context grew)
 			go app.refreshTokenCount()
@@ -1320,6 +1329,9 @@ func (b *Builder) wireDependencies() error {
 			}
 		},
 		OnError: func(err error) {
+			app.journalEvent("tool_error", map[string]any{
+				"error": err.Error(),
+			})
 			if app.program != nil {
 				app.program.Send(ui.ErrorMsg(err))
 			}
@@ -1619,6 +1631,14 @@ func (b *Builder) assembleApp() *App {
 		planningModeEnabled: b.cfg.Plan.Enabled,
 		// MCP (Model Context Protocol)
 		mcpManager: b.mcpManager,
+		// Auto retry tracking
+		rateLimitRetryCount: make(map[string]int),
+	}
+
+	if j, err := NewExecutionJournal(b.workDir); err == nil {
+		b.cachedApp.journal = j
+	} else {
+		logging.Warn("failed to initialize execution journal", "error", err)
 	}
 
 	// Wire up user input callback for agents

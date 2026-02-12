@@ -219,6 +219,15 @@ type App struct {
 	stepHeartbeatMu   sync.RWMutex
 	lastStepHeartbeat time.Time
 
+	// Execution journal and recovery
+	journal *ExecutionJournal
+
+	// Session memory governance
+	sessionArchiveMu         sync.Mutex
+	sessionArchivedMessages  int
+	sessionArchiveOperations int
+	lastSessionArchive       time.Time
+
 	// Signal handler cleanup
 	signalCleanup func()
 
@@ -228,6 +237,10 @@ type App struct {
 	// Pending message queue
 	pendingMessage string
 	pendingMu      sync.Mutex
+
+	// Automatic retry tracking for rate-limit failures.
+	rateLimitRetryMu    sync.Mutex
+	rateLimitRetryCount map[string]int
 }
 
 // toolPattern, detectPatterns, getToolHints, recordToolUsage are in pattern_detector.go
@@ -344,6 +357,9 @@ func (a *App) Run() error {
 
 	// Show welcome message
 	a.tui.Welcome()
+	a.journalEvent("app_started", map[string]any{
+		"workdir": a.workDir,
+	})
 
 	// Check for paused plans and notify user
 	if a.planManager != nil && a.planManager.HasPausedPlan() {
@@ -358,6 +374,15 @@ func (a *App) Run() error {
 				"plan_id", latestPlan.ID,
 				"title", latestPlan.Title,
 				"progress", fmt.Sprintf("%d/%d", latestPlan.Completed, latestPlan.StepCount))
+		}
+	}
+
+	// Show recovery hint if previous run was interrupted mid-processing.
+	if a.journal != nil {
+		if snap, err := a.journal.LoadRecovery(); err == nil && snap != nil && snap.Processing {
+			msg := fmt.Sprintf("Recovery snapshot found from %s.\nProcessing was interrupted with %d messages in session.\nUse /recovery and /journal for details.",
+				snap.Timestamp.Format("2006-01-02 15:04"), snap.HistoryLen)
+			a.tui.AddSystemMessage(msg)
 		}
 	}
 
@@ -488,6 +513,10 @@ func (a *App) handleSubmit(message string) {
 		}
 		a.pendingMessage = message
 		a.pendingMu.Unlock()
+		a.journalEvent("request_queued", map[string]any{
+			"message_preview": previewForJournal(message),
+		})
+		a.saveRecoverySnapshot(message)
 
 		// Notify user that message is queued (using copied reference)
 		if program != nil {
@@ -496,6 +525,10 @@ func (a *App) handleSubmit(message string) {
 		return
 	}
 	a.processing = true
+	a.journalEvent("request_accept", map[string]any{
+		"message_preview": previewForJournal(message),
+	})
+	a.saveRecoverySnapshot("")
 
 	// Parse command BEFORE unlocking to avoid race condition
 	// (parsing is fast and doesn't need to be concurrent)
@@ -531,11 +564,16 @@ func (a *App) executeCommand(name string, args []string) {
 		a.mu.Lock()
 		a.processing = false
 		a.mu.Unlock()
+		a.saveRecoverySnapshot("")
 	}()
 
 	a.mu.Lock()
 	a.diffBatchDecision = ui.DiffPending
 	a.mu.Unlock()
+	a.journalEvent("command_started", map[string]any{
+		"command": name,
+		"args":    args,
+	})
 
 	ctx := a.ctx
 	result, err := a.commandHandler.Execute(ctx, name, args, a)
@@ -547,8 +585,15 @@ func (a *App) executeCommand(name string, args []string) {
 
 	if program != nil {
 		if err != nil {
+			a.journalEvent("command_failed", map[string]any{
+				"command": name,
+				"error":   err.Error(),
+			})
 			program.Send(ui.ErrorMsg(err))
 		} else {
+			a.journalEvent("command_completed", map[string]any{
+				"command": name,
+			})
 			// Display command result as assistant message
 			program.Send(ui.StreamTextMsg(result))
 		}
@@ -558,6 +603,12 @@ func (a *App) executeCommand(name string, args []string) {
 
 // handleQuit handles quit request.
 func (a *App) handleQuit() {
+	a.mu.Lock()
+	a.processing = false
+	a.mu.Unlock()
+	a.saveRecoverySnapshot("")
+	a.journalEvent("app_quit", nil)
+
 	// Use graceful shutdown with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
 	defer cancel()
@@ -686,12 +737,93 @@ func (a *App) GetLedgerReport() string {
 			status = "partial_effects"
 		}
 		sb.WriteString(fmt.Sprintf(
-			"- step %d (%s): %s, tool_calls=%d, files=%d, commands=%d\n",
-			step.ID, step.Title, status, entry.ToolCalls, len(entry.FilesTouched), len(entry.Commands),
+			"- step %d (%s): %s, tool_calls=%d, files=%d, commands=%d, duplicates=%d\n",
+			step.ID, step.Title, status, entry.ToolCalls, len(entry.FilesTouched), len(entry.Commands), entry.DuplicateEffects,
 		))
 	}
 
 	return sb.String()
+}
+
+// GetJournalReport returns recent execution journal entries.
+func (a *App) GetJournalReport() string {
+	if a.journal == nil {
+		return "Execution journal is not initialized."
+	}
+	entries, err := a.journal.Tail(30)
+	if err != nil {
+		return fmt.Sprintf("Failed to read execution journal: %v", err)
+	}
+	if len(entries) == 0 {
+		return "Execution journal is empty."
+	}
+	var sb strings.Builder
+	sb.WriteString("Execution journal (latest 30):\n")
+	for _, e := range entries {
+		sb.WriteString(fmt.Sprintf("- %s  %s", e.Timestamp.Format("15:04:05"), e.Event))
+		if len(e.Details) > 0 {
+			if p, ok := e.Details["message_preview"].(string); ok && p != "" {
+				sb.WriteString(fmt.Sprintf(" | %s", p))
+			} else if r, ok := e.Details["reason"].(string); ok && r != "" {
+				sb.WriteString(fmt.Sprintf(" | %s", r))
+			}
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// GetRecoveryReport returns the latest persisted recovery snapshot.
+func (a *App) GetRecoveryReport() string {
+	if a.journal == nil {
+		return "Recovery snapshot unavailable: journal not initialized."
+	}
+	snap, err := a.journal.LoadRecovery()
+	if err != nil {
+		return fmt.Sprintf("Failed to load recovery snapshot: %v", err)
+	}
+	if snap == nil {
+		return "No recovery snapshot found."
+	}
+	return fmt.Sprintf(
+		"Recovery snapshot:\n- updated: %s\n- session: %s\n- processing: %v\n- pending_message: %q\n- history_len: %d\n- plan_id: %s\n- current_step: %d",
+		snap.Timestamp.Format("2006-01-02 15:04:05"), snap.SessionID, snap.Processing, snap.PendingMessage, snap.HistoryLen, snap.PlanID, snap.CurrentStepID,
+	)
+}
+
+// GetObservabilityReport returns a unified operational report.
+func (a *App) GetObservabilityReport() string {
+	var sb strings.Builder
+	sb.WriteString(a.GetRuntimeHealthReport())
+	sb.WriteString("\n\n")
+	sb.WriteString(a.GetPolicyReport())
+	sb.WriteString("\n\n")
+	sb.WriteString(a.GetLedgerReport())
+	sb.WriteString("\n\n")
+	sb.WriteString(a.GetRecoveryReport())
+	sb.WriteString("\n\n")
+	sb.WriteString(a.GetSessionGovernanceReport())
+	sb.WriteString("\n\n")
+	sb.WriteString(a.GetJournalReport())
+	return sb.String()
+}
+
+// GetSessionGovernanceReport returns memory-governance statistics.
+func (a *App) GetSessionGovernanceReport() string {
+	a.sessionArchiveMu.Lock()
+	defer a.sessionArchiveMu.Unlock()
+	last := "never"
+	if !a.lastSessionArchive.IsZero() {
+		last = a.lastSessionArchive.Format("2006-01-02 15:04:05")
+	}
+	return fmt.Sprintf(
+		"Session memory governance:\n- archive_ops: %d\n- archived_messages: %d\n- last_archive: %s\n- soft_limit: %d\n- keep_tail: %d",
+		a.sessionArchiveOperations,
+		a.sessionArchivedMessages,
+		last,
+		sessionGovernanceSoftLimit,
+		sessionGovernanceKeepTail,
+	)
 }
 
 // GetAgentTypeRegistry returns the agent type registry.

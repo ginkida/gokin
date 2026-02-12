@@ -50,6 +50,26 @@ func IsRetryableAPIError(err error) bool {
 	return false
 }
 
+// IsRateLimitError returns true when the error indicates API rate limiting (429).
+func IsRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == 429 {
+		return true
+	}
+
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == 429 {
+		return true
+	}
+
+	msg := err.Error()
+	return containsLower(msg, "rate limit") || containsLower(msg, "too many requests")
+}
+
 // IsRetryableError checks if an error is retryable using proper type checks.
 // Uses errors.Is/errors.As for typed errors, with string fallback only for untyped errors.
 func IsRetryableError(err error) bool {

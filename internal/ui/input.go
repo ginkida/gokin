@@ -139,6 +139,13 @@ func defaultCommands() []CommandInfo {
 		// Planning
 		{Name: "plan", Description: "Toggle planning mode", Category: "Planning"},
 		{Name: "resume-plan", Description: "Resume a saved plan", Category: "Planning"},
+		{Name: "health", Description: "Show runtime health", Category: "Planning"},
+		{Name: "policy", Description: "Show policy engine status", Category: "Planning"},
+		{Name: "ledger", Description: "Show plan run ledger", Category: "Planning"},
+		{Name: "journal", Description: "Show execution journal", Category: "Planning"},
+		{Name: "recovery", Description: "Show recovery snapshot", Category: "Planning"},
+		{Name: "observability", Description: "Show reliability dashboard", Category: "Planning"},
+		{Name: "memory-governance", Description: "Show session memory governance", Category: "Planning"},
 		{Name: "tree-stats", Description: "Show tree planner statistics", Category: "Planning"},
 
 		// Tools

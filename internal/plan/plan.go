@@ -2,6 +2,9 @@ package plan
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -63,23 +66,24 @@ func (s Status) Icon() string {
 
 // Step represents a single step in a plan.
 type Step struct {
-	ID           int               `json:"id"`
-	Title        string            `json:"title"`
-	Description  string            `json:"description"`
-	Status       Status            `json:"status"`
-	Output       string            `json:"output"`
-	Error        string            `json:"error"`
-	StartTime    time.Time         `json:"start_time,omitempty"`
-	EndTime      time.Time         `json:"end_time,omitempty"`
-	Parallel     bool              `json:"parallel"`                // Can execute in parallel with other steps
-	DependsOn    []int             `json:"depends_on,omitempty"`    // Step IDs this step depends on
-	Children     []*Step           `json:"children,omitempty"`      // Nested sub-steps
-	MaxRetries   int               `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
-	Timeout      time.Duration     `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
-	RetryCount   int               `json:"retry_count,omitempty"`   // Current retry count
-	TokensUsed   int               `json:"tokens_used,omitempty"`   // Tokens consumed by this step
-	Condition    string            `json:"condition,omitempty"`     // Condition: "step_N_failed", "step_N_succeeded"
-	AgentMetrics *StepAgentMetrics `json:"agent_metrics,omitempty"` // Metrics from sub-agent tree planner
+	ID               int               `json:"id"`
+	Title            string            `json:"title"`
+	Description      string            `json:"description"`
+	Status           Status            `json:"status"`
+	Output           string            `json:"output"`
+	Error            string            `json:"error"`
+	StartTime        time.Time         `json:"start_time,omitempty"`
+	EndTime          time.Time         `json:"end_time,omitempty"`
+	Parallel         bool              `json:"parallel"`                // Can execute in parallel with other steps
+	DependsOn        []int             `json:"depends_on,omitempty"`    // Step IDs this step depends on
+	Children         []*Step           `json:"children,omitempty"`      // Nested sub-steps
+	MaxRetries       int               `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
+	Timeout          time.Duration     `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
+	RetryCount       int               `json:"retry_count,omitempty"`   // Current retry count
+	TokensUsed       int               `json:"tokens_used,omitempty"`   // Tokens consumed by this step
+	Condition        string            `json:"condition,omitempty"`     // Condition: "step_N_failed", "step_N_succeeded"
+	AgentMetrics     *StepAgentMetrics `json:"agent_metrics,omitempty"` // Metrics from sub-agent tree planner
+	CheckpointPassed bool              `json:"checkpoint_passed,omitempty"`
 }
 
 // StepAgentMetrics contains metrics from sub-agent tree planner execution.
@@ -96,16 +100,18 @@ type StepAgentMetrics struct {
 // RunLedgerEntry tracks side effects produced by a plan step.
 // It is used for safer resume and idempotency guardrails.
 type RunLedgerEntry struct {
-	StepID         int       `json:"step_id"`
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	LastHeartbeat  time.Time `json:"last_heartbeat,omitempty"`
-	CompletedAt    time.Time `json:"completed_at,omitempty"`
-	ToolCalls      int       `json:"tool_calls,omitempty"`
-	Tools          []string  `json:"tools,omitempty"`
-	FilesTouched   []string  `json:"files_touched,omitempty"`
-	Commands       []string  `json:"commands,omitempty"`
-	PartialEffects bool      `json:"partial_effects"`
-	Completed      bool      `json:"completed"`
+	StepID           int       `json:"step_id"`
+	StartedAt        time.Time `json:"started_at,omitempty"`
+	LastHeartbeat    time.Time `json:"last_heartbeat,omitempty"`
+	CompletedAt      time.Time `json:"completed_at,omitempty"`
+	ToolCalls        int       `json:"tool_calls,omitempty"`
+	Tools            []string  `json:"tools,omitempty"`
+	FilesTouched     []string  `json:"files_touched,omitempty"`
+	Commands         []string  `json:"commands,omitempty"`
+	EffectSignatures []string  `json:"effect_signatures,omitempty"`
+	DuplicateEffects int       `json:"duplicate_effects,omitempty"`
+	PartialEffects   bool      `json:"partial_effects"`
+	Completed        bool      `json:"completed"`
 }
 
 // Duration returns the step execution duration.
@@ -462,6 +468,7 @@ func (p *Plan) GetRunLedgerSnapshot() map[int]*RunLedgerEntry {
 		copyEntry.Tools = append([]string(nil), entry.Tools...)
 		copyEntry.FilesTouched = append([]string(nil), entry.FilesTouched...)
 		copyEntry.Commands = append([]string(nil), entry.Commands...)
+		copyEntry.EffectSignatures = append([]string(nil), entry.EffectSignatures...)
 		out[id] = &copyEntry
 	}
 	return out
@@ -618,6 +625,13 @@ func (p *Plan) RecordStepEffect(stepID int, toolName string, args map[string]any
 	}
 
 	entry := p.ensureLedgerEntryLocked(stepID)
+	signature := stepEffectSignature(toolName, args)
+	if signature != "" {
+		if containsString(entry.EffectSignatures, signature) {
+			entry.DuplicateEffects++
+		}
+		entry.EffectSignatures = appendUniqueLimited(entry.EffectSignatures, signature, 120)
+	}
 	entry.ToolCalls++
 	entry.PartialEffects = true
 	entry.LastHeartbeat = time.Now()
@@ -634,6 +648,18 @@ func (p *Plan) RecordStepEffect(stepID int, toolName string, args map[string]any
 	if cmd, ok := args["command"].(string); ok && cmd != "" {
 		entry.Commands = appendUniqueLimited(entry.Commands, cmd, 20)
 	}
+}
+
+// HasDuplicateRisk returns true when a step repeatedly generated the same side
+// effects without reaching completion, which is a strong idempotency warning.
+func (p *Plan) HasDuplicateRisk(stepID int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.RunLedger[stepID]
+	if !ok || entry == nil || entry.Completed {
+		return false
+	}
+	return entry.DuplicateEffects >= 2
 }
 
 // HasPartialEffects returns true when a step has recorded effects but no completion marker.
@@ -659,6 +685,7 @@ func (p *Plan) markStepCompletedLocked(stepID int) {
 	entry.CompletedAt = now
 	entry.Completed = true
 	entry.PartialEffects = false
+	entry.DuplicateEffects = 0
 }
 
 func (p *Plan) markStepFailedLocked(stepID int) {
@@ -691,6 +718,43 @@ func appendUniqueLimited(items []string, value string, limit int) []string {
 	return items
 }
 
+func stepEffectSignature(toolName string, args map[string]any) string {
+	if toolName == "" {
+		return ""
+	}
+	normalized := map[string]any{}
+	for k, v := range args {
+		switch k {
+		case "timestamp", "ts", "nonce":
+			continue
+		default:
+			normalized[k] = v
+		}
+	}
+
+	encodedArgs, err := marshalDeterministic(normalized)
+	if err != nil {
+		return ""
+	}
+	sum := sha1.Sum([]byte(toolName + "|" + encodedArgs))
+	return hex.EncodeToString(sum[:])
+}
+
+func marshalDeterministic(v map[string]any) (string, error) {
+	// json.Marshal sorts map keys since Go 1.12.
+	b, err := json.Marshal(v)
+	return string(b), err
+}
+
+func containsString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
 // HasPausedSteps returns true if any step has StatusPaused.
 func (p *Plan) HasPausedSteps() bool {
 	p.mu.RLock()
@@ -713,6 +777,9 @@ func (p *Plan) ResumePausedSteps() int {
 	count := 0
 	for _, step := range p.Steps {
 		if step.Status == StatusPaused {
+			if strings.Contains(strings.ToLower(step.Error), "checkpoint required") {
+				step.CheckpointPassed = true
+			}
 			step.Status = StatusPending
 			step.Error = ""
 			step.StartTime = time.Time{}

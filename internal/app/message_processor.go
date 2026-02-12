@@ -28,6 +28,11 @@ const (
 
 // processMessageWithContext handles user messages with full context management.
 func (a *App) processMessageWithContext(ctx context.Context, message string) {
+	a.journalEvent("request_started", map[string]any{
+		"message_preview": previewForJournal(message),
+	})
+	a.saveRecoverySnapshot("")
+
 	// Outer timeout to prevent indefinite hangs if API becomes unresponsive.
 	// This covers the ENTIRE message processing cycle (multiple LLM calls,
 	// tool executions, etc.), not just a single LLM call.
@@ -54,6 +59,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			// Recursively handle the pending message
 			go a.handleSubmit(pending)
 		}
+		a.saveRecoverySnapshot("")
 	}()
 
 	// Track response start time and reset tools used
@@ -189,6 +195,10 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	}
 
 	if err != nil {
+		a.journalEvent("request_failed", map[string]any{
+			"error":           err.Error(),
+			"message_preview": previewForJournal(message),
+		})
 		if a.reliability != nil {
 			a.reliability.RecordFailure()
 		}
@@ -216,9 +226,39 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				fmt.Sprintf("\n⚠️ Switching to safe mode for stability (%v).\n", a.reliability.DegradedRemaining())))
 		}
 
+		if client.IsRateLimitError(err) {
+			attempt, delay, ok := a.scheduleRateLimitAutoRetry(message)
+			if ok {
+				a.journalEvent("rate_limit_auto_retry_scheduled", map[string]any{
+					"attempt": attempt,
+					"delay":   delay.String(),
+				})
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("\n⏳ API rate limit reached. Auto-retrying in %v (attempt %d/%d). You don't need to resend.\n",
+						delay.Round(time.Second), attempt, maxAutoRateLimitRetries)))
+				a.safeSendToProgram(ui.ResponseDoneMsg{})
+
+				go func(msg string, wait time.Duration) {
+					timer := time.NewTimer(wait)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+						a.handleSubmit(msg)
+					case <-a.ctx.Done():
+						return
+					}
+				}(message, delay)
+				return
+			}
+		}
+
+		a.clearRateLimitRetry(message)
+
 		a.safeSendToProgram(ui.ErrorMsg(err))
 		return
 	}
+
+	a.clearRateLimitRetry(message)
 
 	if a.reliability != nil {
 		a.reliability.RecordSuccess()
@@ -588,6 +628,10 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 	})
 
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
+	a.journalEvent("request_completed", map[string]any{
+		"message_preview": previewForJournal(approvedPlan.Request),
+	})
+	a.enforceSessionMemoryGovernance("request_completed")
 
 	a.finalizePlanLifecycleState(approvedPlan)
 
@@ -634,10 +678,19 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 
 	// Idempotency guard: if previous attempt already produced side effects for
 	// this step but never reached completion, avoid automatic re-execution.
-	if approvedPlan.HasPartialEffects(step.ID) {
-		a.planManager.PauseStep(step.ID, "partial effects from previous attempt detected")
+	if approvedPlan.HasPartialEffects(step.ID) || approvedPlan.HasDuplicateRisk(step.ID) {
+		reason := "partial effects from previous attempt detected"
+		if approvedPlan.HasDuplicateRisk(step.ID) {
+			reason = "duplicate side effects detected across retries"
+		}
+		a.planManager.PauseStep(step.ID, reason)
+		a.journalEvent("plan_step_paused", map[string]any{
+			"plan_id": approvedPlan.ID,
+			"step_id": step.ID,
+			"reason":  reason,
+		})
 		a.safeSendToProgram(ui.StreamTextMsg(
-			fmt.Sprintf("⏸ Step %d paused for safety: previous partial effects detected. Review and /resume-plan when ready.\n", step.ID)))
+			fmt.Sprintf("⏸ Step %d paused for safety: %s. Review and /resume-plan when ready.\n", step.ID, reason)))
 		a.safeSendToProgram(ui.PlanProgressMsg{
 			PlanID:        approvedPlan.ID,
 			CurrentStepID: step.ID,
@@ -646,7 +699,31 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 			Completed:     approvedPlan.CompletedCount(),
 			Progress:      approvedPlan.Progress(),
 			Status:        "paused",
-			Reason:        "partial effects from previous attempt detected",
+			Reason:        reason,
+		})
+		return
+	}
+
+	if requiresHumanCheckpoint(step) && !step.CheckpointPassed {
+		reason := "checkpoint required: high-risk step needs operator confirmation"
+		a.planManager.PauseStep(step.ID, reason)
+		a.journalEvent("plan_checkpoint_pause", map[string]any{
+			"plan_id": approvedPlan.ID,
+			"step_id": step.ID,
+			"title":   step.Title,
+		})
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("⏸ Step %d requires checkpoint approval.\nWhy: %s\nRun /resume-plan to approve and continue.\n",
+				step.ID, step.Title)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "paused",
+			Reason:        reason,
 		})
 		return
 	}
@@ -662,6 +739,13 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	a.planManager.StartStep(step.ID)
 	a.planManager.SetCurrentStepID(step.ID)
 	a.touchStepHeartbeat()
+	a.journalEvent("plan_step_started", map[string]any{
+		"plan_id":   approvedPlan.ID,
+		"step_id":   step.ID,
+		"step":      step.Title,
+		"execution": "direct",
+	})
+	a.saveRecoverySnapshot("")
 
 	// Update plan progress in status bar
 	a.safeSendToProgram(ui.PlanProgressMsg{
@@ -762,6 +846,11 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		// Transient error after all attempts → pause step, plan continues with other steps
 		if errCat == plan.ErrorTransient {
 			a.planManager.PauseStep(step.ID, errMsg)
+			a.journalEvent("plan_step_paused", map[string]any{
+				"plan_id": approvedPlan.ID,
+				"step_id": step.ID,
+				"reason":  errMsg,
+			})
 
 			a.safeSendToProgram(ui.StreamTextMsg(
 				fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s (will auto-retry later)\n",
@@ -785,6 +874,11 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 
 		// Fatal/logic/unknown error
 		a.planManager.FailStep(step.ID, errMsg)
+		a.journalEvent("plan_step_failed", map[string]any{
+			"plan_id": approvedPlan.ID,
+			"step_id": step.ID,
+			"reason":  errMsg,
+		})
 
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("\n  Step %d failed (%s): %s\n", step.ID, errCat.String(), errMsg)))
@@ -822,6 +916,11 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	step.TokensUsed = apiInput + apiOutput
 
 	a.planManager.CompleteStep(step.ID, output)
+	a.journalEvent("plan_step_completed", map[string]any{
+		"plan_id": approvedPlan.ID,
+		"step_id": step.ID,
+		"output":  previewForJournal(output),
+	})
 
 	// Store step result in SharedMemory for inter-step communication
 	if sharedMem != nil {
@@ -877,6 +976,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 			logging.Warn("failed to save session after message", "error", err)
 		}
 	}
+	a.enforceSessionMemoryGovernance("plan_step_completed")
 }
 
 // buildDirectStepMessage creates a focused prompt for executing a single step
@@ -1140,10 +1240,19 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	}
 
 	// Idempotency guard for delegated execution.
-	if approvedPlan.HasPartialEffects(step.ID) {
-		a.planManager.PauseStep(step.ID, "partial effects from previous attempt detected")
+	if approvedPlan.HasPartialEffects(step.ID) || approvedPlan.HasDuplicateRisk(step.ID) {
+		reason := "partial effects from previous attempt detected"
+		if approvedPlan.HasDuplicateRisk(step.ID) {
+			reason = "duplicate side effects detected across retries"
+		}
+		a.planManager.PauseStep(step.ID, reason)
+		a.journalEvent("plan_step_paused", map[string]any{
+			"plan_id": approvedPlan.ID,
+			"step_id": step.ID,
+			"reason":  reason,
+		})
 		a.safeSendToProgram(ui.StreamTextMsg(
-			fmt.Sprintf("⏸ Step %d paused for safety: previous partial effects detected. Review and /resume-plan when ready.\n", step.ID)))
+			fmt.Sprintf("⏸ Step %d paused for safety: %s. Review and /resume-plan when ready.\n", step.ID, reason)))
 		a.safeSendToProgram(ui.PlanProgressMsg{
 			PlanID:        approvedPlan.ID,
 			CurrentStepID: step.ID,
@@ -1152,7 +1261,31 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 			Completed:     approvedPlan.CompletedCount(),
 			Progress:      approvedPlan.Progress(),
 			Status:        "paused",
-			Reason:        "partial effects from previous attempt detected",
+			Reason:        reason,
+		})
+		return
+	}
+
+	if requiresHumanCheckpoint(step) && !step.CheckpointPassed {
+		reason := "checkpoint required: high-risk step needs operator confirmation"
+		a.planManager.PauseStep(step.ID, reason)
+		a.journalEvent("plan_checkpoint_pause", map[string]any{
+			"plan_id": approvedPlan.ID,
+			"step_id": step.ID,
+			"title":   step.Title,
+		})
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("⏸ Step %d requires checkpoint approval.\nWhy: %s\nRun /resume-plan to approve and continue.\n",
+				step.ID, step.Title)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "paused",
+			Reason:        reason,
 		})
 		return
 	}
@@ -1161,6 +1294,13 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	a.planManager.StartStep(step.ID)
 	a.planManager.SetCurrentStepID(step.ID)
 	a.touchStepHeartbeat()
+	a.journalEvent("plan_step_started", map[string]any{
+		"plan_id":   approvedPlan.ID,
+		"step_id":   step.ID,
+		"step":      step.Title,
+		"execution": "delegated",
+	})
+	a.saveRecoverySnapshot("")
 
 	// Update plan progress in status bar
 	a.safeSendToProgram(ui.PlanProgressMsg{
@@ -1286,6 +1426,11 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		// Transient error after all retries → pause step, plan continues with other steps
 		if errCat == plan.ErrorTransient {
 			a.planManager.PauseStep(step.ID, errMsg)
+			a.journalEvent("plan_step_paused", map[string]any{
+				"plan_id": approvedPlan.ID,
+				"step_id": step.ID,
+				"reason":  errMsg,
+			})
 
 			a.safeSendToProgram(ui.StreamTextMsg(
 				fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s (will auto-retry later)\n",
@@ -1314,6 +1459,11 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 				"step_id", step.ID, "output_len", len(result.Output))
 		} else {
 			a.planManager.FailStep(step.ID, errMsg)
+			a.journalEvent("plan_step_failed", map[string]any{
+				"plan_id": approvedPlan.ID,
+				"step_id": step.ID,
+				"reason":  errMsg,
+			})
 		}
 
 		a.safeSendToProgram(ui.StreamTextMsg(
@@ -1351,6 +1501,11 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	step.TokensUsed = len(output) / 4
 
 	a.planManager.CompleteStep(step.ID, output)
+	a.journalEvent("plan_step_completed", map[string]any{
+		"plan_id": approvedPlan.ID,
+		"step_id": step.ID,
+		"output":  previewForJournal(output),
+	})
 
 	// Extract agent metrics from result metadata
 	if result.Metadata != nil {
@@ -1414,6 +1569,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 			logging.Warn("failed to save session after message", "error", err)
 		}
 	}
+	a.enforceSessionMemoryGovernance("plan_step_completed")
 }
 
 // isRetryableError checks if an error is retryable (network, timeout, rate limit).
@@ -1437,6 +1593,27 @@ func maxPlanExecutionRounds(totalSteps int) int {
 		return 600
 	}
 	return rounds
+}
+
+func requiresHumanCheckpoint(step *plan.Step) bool {
+	if step == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(step.Title + " " + step.Description))
+	if text == "" {
+		return false
+	}
+	keywords := []string{
+		"migration", "migrate", "drop table", "drop database",
+		"mass update", "bulk delete", "deploy", "production",
+		"billing", "payment",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(text, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // finalizePlanLifecycleState applies a validated terminal/non-terminal lifecycle state
