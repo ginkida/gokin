@@ -885,3 +885,61 @@ func (m *Manager) IsPlanPaused() bool {
 	}
 	return m.currentPlan.Status == StatusPaused
 }
+
+// PausePlan explicitly sets the current plan's status to StatusPaused.
+// Use this when auto-resume is exhausted and the plan should fully stop.
+func (m *Manager) PausePlan() {
+	m.mu.Lock()
+	plan := m.currentPlan
+	store := m.planStore
+	onProgress := m.onProgressUpdate
+	m.mu.Unlock()
+
+	if plan == nil {
+		return
+	}
+
+	plan.mu.Lock()
+	plan.Status = StatusPaused
+	plan.UpdatedAt = time.Now()
+	plan.mu.Unlock()
+
+	if store != nil {
+		if err := store.Save(plan); err != nil {
+			logging.Warn("failed to save paused plan", "error", err)
+		}
+	}
+
+	if onProgress != nil {
+		onProgress(&ProgressUpdate{
+			PlanID:     plan.ID,
+			TotalSteps: plan.StepCount(),
+			Completed:  plan.CompletedCount(),
+			Progress:   plan.Progress(),
+			Status:     "paused",
+		})
+	}
+}
+
+// ResumePausedSteps resets all paused steps in the current plan back to pending.
+// Returns the number of steps resumed.
+func (m *Manager) ResumePausedSteps() int {
+	m.mu.RLock()
+	plan := m.currentPlan
+	store := m.planStore
+	m.mu.RUnlock()
+
+	if plan == nil {
+		return 0
+	}
+
+	count := plan.ResumePausedSteps()
+
+	if count > 0 && store != nil {
+		if err := store.Save(plan); err != nil {
+			logging.Warn("failed to save plan after resuming paused steps", "error", err)
+		}
+	}
+
+	return count
+}

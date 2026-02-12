@@ -180,6 +180,14 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		a.taskManager.CancelAll()
 	}
 
+	// 4b. Cancel all running background agents
+	if a.agentRunner != nil {
+		for _, agentID := range a.agentRunner.ListRunning() {
+			logging.Debug("cancelling background agent", "agent_id", agentID)
+			_ = a.agentRunner.Cancel(agentID)
+		}
+	}
+
 	// 5. Shutdown MCP servers
 	if a.mcpManager != nil {
 		logging.Debug("shutting down MCP servers")

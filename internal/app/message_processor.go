@@ -424,6 +424,12 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 	const maxRetries = 3
 	backoffDurations := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
 
+	// Auto-resume: when all ready steps are exhausted but paused steps remain,
+	// wait a cooldown period and retry them automatically.
+	const maxAutoResumeRounds = 2
+	const autoResumeCooldown = 60 * time.Second
+	autoResumeCount := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -433,7 +439,36 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 
 		readySteps := approvedPlan.NextReadySteps()
 		if len(readySteps) == 0 {
-			break
+			// No ready steps. Check if there are paused steps to auto-resume.
+			if approvedPlan.HasPausedSteps() && autoResumeCount < maxAutoResumeRounds {
+				autoResumeCount++
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("\n⏳ Waiting %v before auto-resuming paused steps (round %d/%d)...\n",
+						autoResumeCooldown, autoResumeCount, maxAutoResumeRounds)))
+
+				cooldownTimer := time.NewTimer(autoResumeCooldown)
+				select {
+				case <-cooldownTimer.C:
+				case <-ctx.Done():
+					cooldownTimer.Stop()
+					return
+				}
+
+				resumed := a.planManager.ResumePausedSteps()
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("🔄 Resumed %d paused step(s)\n\n", resumed)))
+				continue
+			}
+
+			// Auto-resume exhausted or no paused steps — exit loop
+			if approvedPlan.HasPausedSteps() {
+				a.planManager.PausePlan()
+				a.safeSendToProgram(ui.StreamTextMsg(
+					"\n⏸ Plan paused — auto-resume exhausted. Use /resume-plan to continue.\n"))
+				a.safeSendToProgram(ui.ResponseDoneMsg{})
+				return
+			}
+			break // All steps done — proceed to summary
 		}
 
 		if len(readySteps) == 1 {
@@ -449,11 +484,6 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 				}(step)
 			}
 			wg.Wait()
-		}
-
-		// Check if plan was paused (a step paused and returned)
-		if a.planManager.IsPlanPaused() {
-			return
 		}
 	}
 
@@ -612,13 +642,12 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	if err != nil {
 		errMsg := err.Error()
 
-		// Transient error after all attempts → pause for later resume
+		// Transient error after all attempts → pause step, plan continues with other steps
 		if errCat == plan.ErrorTransient {
 			a.planManager.PauseStep(step.ID, errMsg)
 
 			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s\n"+
-					"Use /resume-plan to continue when ready.\n",
+				fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s (will auto-retry later)\n",
 					step.ID, maxRetries, errMsg)))
 			a.safeSendToProgram(ui.PlanProgressMsg{
 				PlanID:        approvedPlan.ID,
@@ -629,9 +658,9 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 				Progress:      approvedPlan.Progress(),
 				Status:        "paused",
 			})
-			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			// No ResponseDoneMsg — plan continues with other steps
 
-			logging.Info("plan paused due to transient error",
+			logging.Info("step paused due to transient error, plan continues",
 				"step_id", step.ID, "error", errMsg, "category", errCat.String())
 			return
 		}
@@ -821,6 +850,12 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	a.safeSendToProgram(ui.StreamTextMsg(
 		fmt.Sprintf("\n━━━ Executing plan: %s (%d steps) ━━━\n\n", approvedPlan.Title, totalSteps)))
 
+	// Auto-resume: when all ready steps are exhausted but paused steps remain,
+	// wait a cooldown period and retry them automatically.
+	const maxAutoResumeRounds = 2
+	const autoResumeCooldown = 60 * time.Second
+	autoResumeCount := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -830,7 +865,36 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 
 		readySteps := approvedPlan.NextReadySteps()
 		if len(readySteps) == 0 {
-			break
+			// No ready steps. Check if there are paused steps to auto-resume.
+			if approvedPlan.HasPausedSteps() && autoResumeCount < maxAutoResumeRounds {
+				autoResumeCount++
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("\n⏳ Waiting %v before auto-resuming paused steps (round %d/%d)...\n",
+						autoResumeCooldown, autoResumeCount, maxAutoResumeRounds)))
+
+				cooldownTimer := time.NewTimer(autoResumeCooldown)
+				select {
+				case <-cooldownTimer.C:
+				case <-ctx.Done():
+					cooldownTimer.Stop()
+					return
+				}
+
+				resumed := a.planManager.ResumePausedSteps()
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("🔄 Resumed %d paused step(s)\n\n", resumed)))
+				continue
+			}
+
+			// Auto-resume exhausted or no paused steps — exit loop
+			if approvedPlan.HasPausedSteps() {
+				a.planManager.PausePlan()
+				a.safeSendToProgram(ui.StreamTextMsg(
+					"\n⏸ Plan paused — auto-resume exhausted. Use /resume-plan to continue.\n"))
+				a.safeSendToProgram(ui.ResponseDoneMsg{})
+				return
+			}
+			break // All steps done — proceed to summary
 		}
 
 		if len(readySteps) == 1 {
@@ -846,11 +910,6 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				}(step)
 			}
 			wg.Wait()
-		}
-
-		// Check if plan was paused
-		if a.planManager.IsPlanPaused() {
-			return
 		}
 	}
 
@@ -1021,13 +1080,12 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 			errCat = plan.ClassifyError(err, errMsg)
 		}
 
-		// Transient error after all retries → pause for later resume
+		// Transient error after all retries → pause step, plan continues with other steps
 		if errCat == plan.ErrorTransient {
 			a.planManager.PauseStep(step.ID, errMsg)
 
 			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s\n"+
-					"Use /resume-plan to continue when ready.\n",
+				fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s (will auto-retry later)\n",
 					step.ID, maxRetries, errMsg)))
 			a.safeSendToProgram(ui.PlanProgressMsg{
 				PlanID:        approvedPlan.ID,
@@ -1038,9 +1096,9 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 				Progress:      approvedPlan.Progress(),
 				Status:        "paused",
 			})
-			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			// No ResponseDoneMsg — plan continues with other steps
 
-			logging.Info("plan paused due to transient error",
+			logging.Info("step paused due to transient error, plan continues",
 				"step_id", step.ID, "error", errMsg, "category", errCat.String())
 			return
 		}

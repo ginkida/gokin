@@ -86,7 +86,7 @@ func (t *TaskOutputTool) Execute(ctx context.Context, args map[string]any) (Tool
 	action := GetStringDefault(args, "action", "get")
 	taskID, _ := GetString(args, "task_id")
 	block := GetBoolDefault(args, "block", false)
-	timeoutMs := GetIntDefault(args, "timeout_ms", 60000)
+	timeoutMs := GetIntDefault(args, "timeout_ms", 120000)
 
 	// Clamp timeout to reasonable range
 	if timeoutMs < 100 {

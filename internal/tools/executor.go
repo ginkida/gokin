@@ -182,6 +182,10 @@ type Executor struct {
 
 	// Auto-formatter for write/edit operations
 	formatter *Formatter
+
+	// Pending background task completion notifications
+	pendingNotifications []string
+	pendingNotifMu       sync.Mutex
 }
 
 // ExecutionInfo holds information about an active tool execution
@@ -260,6 +264,25 @@ func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Du
 		toolBreakers:     make(map[string]*robustness.CircuitBreaker),
 		redactor:         security.NewSecretRedactor(),
 	}
+}
+
+// AddPendingNotification queues a background task completion notification.
+func (e *Executor) AddPendingNotification(msg string) {
+	e.pendingNotifMu.Lock()
+	defer e.pendingNotifMu.Unlock()
+	e.pendingNotifications = append(e.pendingNotifications, msg)
+}
+
+// drainPendingNotifications returns and clears all queued notifications.
+func (e *Executor) drainPendingNotifications() []string {
+	e.pendingNotifMu.Lock()
+	defer e.pendingNotifMu.Unlock()
+	if len(e.pendingNotifications) == 0 {
+		return nil
+	}
+	n := e.pendingNotifications
+	e.pendingNotifications = nil
+	return n
 }
 
 // SetClient updates the underlying client.
@@ -470,13 +493,25 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			}
 
 			e.historyMu.Lock()
+			historyBeforeResults := len(history)
 			history = append(history, funcResultContent)
 			e.historyMu.Unlock()
+
+			// Inject pending background task completion notifications
+			if notifications := e.drainPendingNotifications(); len(notifications) > 0 {
+				notifText := "[System: " + strings.Join(notifications, "; ") + "]"
+				e.historyMu.Lock()
+				history = append(history, &genai.Content{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{genai.NewPartFromText(notifText)},
+				})
+				e.historyMu.Unlock()
+			}
 
 			// Send function responses back to model.
 			// Pass history without the just-appended tool results since
 			// all client implementations append results themselves.
-			stream, err := e.client.SendFunctionResponse(ctx, history[:len(history)-1], results)
+			stream, err := e.client.SendFunctionResponse(ctx, history[:historyBeforeResults], results)
 			if err != nil {
 				return history, "", fmt.Errorf("function response error: %w", err)
 			}
@@ -492,7 +527,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						e.handler.OnWarning(fmt.Sprintf("Stream stalled after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
 					}
 					// Re-send function response
-					stream, err = e.client.SendFunctionResponse(ctx, history[:len(history)-1], results)
+					stream, err = e.client.SendFunctionResponse(ctx, history[:historyBeforeResults], results)
 					if err != nil {
 						return history, "", fmt.Errorf("function response retry error: %w", err)
 					}
@@ -507,7 +542,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						e.handler.OnWarning(fmt.Sprintf("Request failed after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
 					}
 					// Re-send function response
-					stream, err = e.client.SendFunctionResponse(ctx, history[:len(history)-1], results)
+					stream, err = e.client.SendFunctionResponse(ctx, history[:historyBeforeResults], results)
 					if err != nil {
 						return history, "", fmt.Errorf("function response retry error: %w", err)
 					}

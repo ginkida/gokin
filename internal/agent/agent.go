@@ -103,6 +103,9 @@ type Agent struct {
 	// State protection for concurrent access to status, history, startTime, endTime
 	stateMu sync.RWMutex
 
+	// Explicit cancellation for background agents (set by Runner)
+	cancelFunc context.CancelFunc
+
 	// Agent Scratchpad (Phase 7)
 	Scratchpad string
 
@@ -2367,7 +2370,17 @@ func (a *Agent) Cancel() {
 	if a.status == AgentStatusRunning {
 		a.status = AgentStatusCancelled
 		a.endTime = time.Now()
+		if a.cancelFunc != nil {
+			a.cancelFunc()
+		}
 	}
+}
+
+// SetCancelFunc sets the cancel function for explicit agent cancellation.
+func (a *Agent) SetCancelFunc(cancel context.CancelFunc) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	a.cancelFunc = cancel
 }
 
 // safeOnText streams text to the UI in a thread-safe manner.

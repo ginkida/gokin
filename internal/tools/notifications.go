@@ -19,7 +19,8 @@ type NotificationManager struct {
 	onNotify            func(Notification)
 	quietMode           bool
 	verboseMode         bool
-	nativeNotifications bool            // Send native macOS notifications (enabled by default)
+	nativeNotifications bool            // Send native macOS notifications (off by default, enabled via config)
+	minNotifyDuration   time.Duration   // Minimum duration for success notifications to trigger callback/native (default 5s)
 	silentTools         map[string]bool // Tools that shouldn't notify
 }
 
@@ -32,6 +33,7 @@ type Notification struct {
 	Details   string
 	Timestamp time.Time
 	Summary   *ExecutionSummary
+	Duration  time.Duration // Duration of the operation (0 = unknown)
 	Read      bool
 }
 
@@ -51,7 +53,8 @@ func NewNotificationManager() *NotificationManager {
 	return &NotificationManager{
 		history:             make([]Notification, 0),
 		maxHistory:          100,
-		nativeNotifications: true,
+		nativeNotifications: false,
+		minNotifyDuration:   5 * time.Second,
 		silentTools:         make(map[string]bool),
 	}
 }
@@ -97,7 +100,7 @@ func (nm *NotificationManager) SetSilentTool(toolName string, silent bool) {
 }
 
 // Notify sends a notification to the user
-func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, details string, summary *ExecutionSummary) {
+func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, details string, summary *ExecutionSummary, duration time.Duration) {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 
@@ -122,13 +125,19 @@ func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, d
 		Details:   details,
 		Timestamp: time.Now(),
 		Summary:   summary,
+		Duration:  duration,
 		Read:      false,
 	}
 
-	// Add to history
+	// Always add to history for audit/stats
 	nm.history = append(nm.history, notif)
 	if len(nm.history) > nm.maxHistory {
 		nm.history = nm.history[1:]
+	}
+
+	// Suppress callback/native for fast success operations
+	if typ == NotificationTypeSuccess && duration > 0 && duration < nm.minNotifyDuration {
+		return
 	}
 
 	// Call callback if set
@@ -137,16 +146,25 @@ func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, d
 		go nm.onNotify(notif)
 	}
 
-	// Native macOS notifications (opt-in)
+	// Native macOS notifications (opt-in via config)
 	if runtime.GOOS == "darwin" && nm.nativeNotifications {
 		go nm.sendNativeNotification(notif)
 	}
 }
 
 // sendNativeNotification sends a native macOS notification using AppleScript.
+// Filtering: Error/Warning always shown; Success only if Duration >= 10s; Info/Progress suppressed.
 func (nm *NotificationManager) sendNativeNotification(n Notification) {
-	// Only notify for critical/important events or long-running successes
-	if n.Type != NotificationTypeError && n.Type != NotificationTypeWarning && n.Type != NotificationTypeSuccess {
+	switch n.Type {
+	case NotificationTypeError, NotificationTypeWarning:
+		// Always show
+	case NotificationTypeSuccess:
+		// Only show for long-running operations (10s+)
+		if n.Duration > 0 && n.Duration < 10*time.Second {
+			return
+		}
+	default:
+		// Info/Progress — suppress native notifications
 		return
 	}
 
@@ -160,24 +178,18 @@ func (nm *NotificationManager) sendNativeNotification(n Notification) {
 	msg = strings.ReplaceAll(msg, "'", "\\'")
 
 	script := fmt.Sprintf("display notification \"%s\" with title \"%s\"", msg, title)
-	if n.Type == NotificationTypeSuccess {
-		script += " sound name \"Glass\""
-	} else if n.Type == NotificationTypeError {
-		script += " sound name \"Basso\""
-	}
-
 	_ = exec.Command("osascript", "-e", script).Run()
 }
 
 // NotifyInfo sends an info notification
 func (nm *NotificationManager) NotifyInfo(toolName, message string) {
-	nm.Notify(NotificationTypeInfo, toolName, message, "", nil)
+	nm.Notify(NotificationTypeInfo, toolName, message, "", nil, 0)
 }
 
 // NotifySuccess sends a success notification
 func (nm *NotificationManager) NotifySuccess(toolName, message string, summary *ExecutionSummary, duration time.Duration) {
 	details := fmt.Sprintf("Completed in %s", format.Duration(duration))
-	nm.Notify(NotificationTypeSuccess, toolName, message, details, summary)
+	nm.Notify(NotificationTypeSuccess, toolName, message, details, summary, duration)
 }
 
 // NotifyWarning sends a warning notification
@@ -186,18 +198,18 @@ func (nm *NotificationManager) NotifyWarning(toolName, message string, details [
 	if len(details) > 0 {
 		detailStr = fmt.Sprintf("Warnings:\n• %s", joinStrings(details, "\n• "))
 	}
-	nm.Notify(NotificationTypeWarning, toolName, message, detailStr, nil)
+	nm.Notify(NotificationTypeWarning, toolName, message, detailStr, nil, 0)
 }
 
 // NotifyError sends an error notification
 func (nm *NotificationManager) NotifyError(toolName, message, error string) {
-	nm.Notify(NotificationTypeError, toolName, message, error, nil)
+	nm.Notify(NotificationTypeError, toolName, message, error, nil, 0)
 }
 
 // NotifyProgress sends a progress notification
 func (nm *NotificationManager) NotifyProgress(toolName string, elapsed time.Duration) {
 	message := fmt.Sprintf("Running... (%s)", FormatDuration(elapsed))
-	nm.Notify(NotificationTypeProgress, toolName, message, "", nil)
+	nm.Notify(NotificationTypeProgress, toolName, message, "", nil, 0)
 }
 
 // NotifyValidation sends validation warnings
@@ -210,13 +222,13 @@ func (nm *NotificationManager) NotifyValidation(toolName string, check *PreFligh
 
 // NotifyDenied sends a permission denied notification
 func (nm *NotificationManager) NotifyDenied(toolName, reason string) {
-	nm.Notify(NotificationTypeError, toolName, "Permission denied", reason, nil)
+	nm.Notify(NotificationTypeError, toolName, "Permission denied", reason, nil, 0)
 }
 
 // NotifyApproved sends a permission approved notification
 func (nm *NotificationManager) NotifyApproved(toolName string, summary *ExecutionSummary) {
 	message := fmt.Sprintf("Approved: %s", summary.DisplayName)
-	nm.Notify(NotificationTypeInfo, toolName, message, "", summary)
+	nm.Notify(NotificationTypeInfo, toolName, message, "", summary, 0)
 }
 
 // GetHistory returns notification history

@@ -1406,6 +1406,26 @@ func (b *Builder) wireDependencies() error {
 				nm.NotifySuccess("agent", "Task completed", nil, 0)
 			}
 		}
+
+		// Inject completion notification for model awareness
+		if result != nil && result.Completed {
+			var msg string
+			switch result.Status {
+			case agent.AgentStatusCompleted:
+				output := result.Output
+				if len(output) > 500 {
+					output = output[:500] + "..."
+				}
+				msg = fmt.Sprintf("Background agent %s (%s) completed in %s. Output: %s",
+					id, result.Type, result.Duration.Round(time.Millisecond), output)
+			case agent.AgentStatusFailed:
+				msg = fmt.Sprintf("Background agent %s (%s) failed: %s",
+					id, result.Type, result.Error)
+			}
+			if msg != "" {
+				app.executor.AddPendingNotification(msg)
+			}
+		}
 	})
 
 	b.agentRunner.SetOnAgentProgress(func(id string, progress *agent.AgentProgress) {
@@ -1450,6 +1470,30 @@ func (b *Builder) wireDependencies() error {
 				ToolArgs:  args,
 				Status:    status,
 			})
+		}
+	})
+
+	// Wire shell task completion notifications for model awareness
+	b.taskManager.SetCompletionHandler(func(task *tasks.Task) {
+		info := task.GetInfo()
+		var msg string
+		if info.Status == "completed" {
+			output := info.Output
+			if len(output) > 500 {
+				output = output[:500] + "..."
+			}
+			msg = fmt.Sprintf("Background shell task %s completed (exit %d). Output: %s",
+				info.ID, info.ExitCode, output)
+		} else if info.Status == "failed" {
+			output := info.Output
+			if len(output) > 500 {
+				output = output[:500] + "..."
+			}
+			msg = fmt.Sprintf("Background shell task %s failed (exit %d). Output: %s",
+				info.ID, info.ExitCode, output)
+		}
+		if msg != "" {
+			app.executor.AddPendingNotification(msg)
 		}
 	})
 

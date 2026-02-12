@@ -331,7 +331,12 @@ func (t *BashTool) executeBackground(ctx context.Context, command string) (ToolR
 		return NewErrorResult("background tasks not configured"), nil
 	}
 
-	taskID, err := t.taskManager.Start(ctx, command)
+	// Detach from caller's context so the task survives tool timeout.
+	// WithoutCancel preserves context values but removes cancellation.
+	// Task.Cancel() via task_stop still works (task has its own cancelFunc).
+	bgCtx := context.WithoutCancel(ctx)
+
+	taskID, err := t.taskManager.Start(bgCtx, command)
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("failed to start background task: %s", err)), nil
 	}

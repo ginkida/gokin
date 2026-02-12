@@ -548,6 +548,7 @@ func (p *Plan) CheckTimeouts() []int {
 }
 
 // PauseStep marks a step as paused (can be resumed later).
+// The plan itself stays InProgress so other non-dependent steps can continue.
 func (p *Plan) PauseStep(id int, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -557,11 +558,47 @@ func (p *Plan) PauseStep(id int, reason string) {
 			step.Status = StatusPaused
 			step.Error = reason
 			step.EndTime = time.Now()
-			p.Status = StatusPaused
+			// Plan stays InProgress — other steps may still execute.
+			// Use PausePlan() on Manager to explicitly pause the whole plan.
 			p.UpdatedAt = time.Now()
 			break
 		}
 	}
+}
+
+// HasPausedSteps returns true if any step has StatusPaused.
+func (p *Plan) HasPausedSteps() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	for _, step := range p.Steps {
+		if step.Status == StatusPaused {
+			return true
+		}
+	}
+	return false
+}
+
+// ResumePausedSteps resets all paused steps back to StatusPending.
+// Returns the number of steps resumed. Does not touch failed/skipped steps.
+func (p *Plan) ResumePausedSteps() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	count := 0
+	for _, step := range p.Steps {
+		if step.Status == StatusPaused {
+			step.Status = StatusPending
+			step.Error = ""
+			step.StartTime = time.Time{}
+			step.EndTime = time.Time{}
+			count++
+		}
+	}
+	if count > 0 {
+		p.UpdatedAt = time.Now()
+	}
+	return count
 }
 
 // ShouldSkip evaluates the step's Condition against the plan's current state.

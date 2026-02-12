@@ -92,7 +92,7 @@ func (m *ToastManager) Show(toastType ToastType, title, message string, duration
 
 // ShowSuccess displays a success toast.
 func (m *ToastManager) ShowSuccess(message string) {
-	m.Show(ToastSuccess, "", message, 2*time.Second)
+	m.Show(ToastSuccess, "", message, 1500*time.Millisecond)
 }
 
 // ShowError displays an error toast.
@@ -112,7 +112,7 @@ func (m *ToastManager) ShowErrorWithHint(message string) {
 
 // ShowInfo displays an info toast.
 func (m *ToastManager) ShowInfo(message string) {
-	m.Show(ToastInfo, "", message, 2*time.Second)
+	m.Show(ToastInfo, "", message, 1500*time.Millisecond)
 }
 
 // ShowWarning displays a warning toast.

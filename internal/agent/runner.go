@@ -772,7 +772,15 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 			}
 		}()
 
-		// Check if context is already cancelled
+		// Detach from caller's context so agent survives tool timeout.
+		bgCtx := context.WithoutCancel(ctx)
+		agentCtx, agentCancel := context.WithCancel(bgCtx)
+		defer agentCancel()
+
+		// Store cancel func for explicit Agent.Cancel()
+		agent.SetCancelFunc(agentCancel)
+
+		// Check if original context is already cancelled
 		select {
 		case <-ctx.Done():
 			r.mu.Lock()
@@ -792,7 +800,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		progressTicker := time.NewTicker(2 * time.Second)
 		defer progressTicker.Stop()
 
-		progressCtx, progressCancel := context.WithCancel(ctx)
+		progressCtx, progressCancel := context.WithCancel(agentCtx)
 		defer progressCancel()
 
 		go func() {
@@ -809,7 +817,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 			}
 		}()
 
-		result, err := agent.Run(ctx, prompt)
+		result, err := agent.Run(agentCtx, prompt)
 
 		// Ensure result is never nil
 		if result == nil {
@@ -948,12 +956,20 @@ func (r *Runner) SpawnAsyncWithStreaming(
 			}
 		}()
 
+		// Detach from caller's context so agent survives tool timeout.
+		bgCtx := context.WithoutCancel(ctx)
+		agentCtx, agentCancel := context.WithCancel(bgCtx)
+		defer agentCancel()
+
+		// Store cancel func for explicit Agent.Cancel()
+		agent.SetCancelFunc(agentCancel)
+
 		// Start progress ticker for periodic updates
 		progressTicker := time.NewTicker(2 * time.Second)
 		defer progressTicker.Stop()
 
 		// Create a context with cancellation for the progress goroutine
-		progressCtx, progressCancel := context.WithCancel(ctx)
+		progressCtx, progressCancel := context.WithCancel(agentCtx)
 		defer progressCancel()
 
 		// Progress update goroutine
@@ -984,7 +1000,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 			agent.SetOnScratchpadUpdate(callback)
 		}
 
-		// Check if context is already cancelled
+		// Check if original context is already cancelled
 		select {
 		case <-ctx.Done():
 			r.mu.Lock()
@@ -1001,7 +1017,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		}
 
 		startTime := time.Now()
-		result, err := agent.Run(ctx, prompt)
+		result, err := agent.Run(agentCtx, prompt)
 		duration := time.Since(startTime)
 
 		// Ensure result is never nil
