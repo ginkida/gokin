@@ -355,8 +355,15 @@ func (a *App) Run() error {
 		}
 	}()
 
-	// Show welcome message
-	a.tui.Welcome()
+	// Show one-time onboarding welcome on first launch.
+	if a.config.UI.ShowWelcome {
+		a.tui.Welcome()
+		a.tui.AddSystemMessage("Getting started:\n• /quickstart for examples\n• /doctor to verify setup\n• /plan to enable step-by-step execution\n• /update to check for new versions")
+		a.config.UI.ShowWelcome = false
+		if err := a.config.Save(); err != nil {
+			logging.Warn("failed to persist onboarding welcome state", "error", err)
+		}
+	}
 	a.journalEvent("app_started", map[string]any{
 		"workdir": a.workDir,
 	})

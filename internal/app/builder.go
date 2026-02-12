@@ -1382,7 +1382,7 @@ func (b *Builder) wireDependencies() error {
 	b.tuiModel.SetPlanningModeToggleCallback(app.TogglePlanningModeAsync)
 
 	// Set up command palette integration
-	hasAuth := b.cfg.API.APIKey != "" || b.cfg.API.GeminiKey != "" || b.cfg.API.GLMKey != "" || b.cfg.API.HasOAuthToken("gemini")
+	hasAuth := b.cfg.API.APIKey != "" || b.cfg.API.GeminiKey != "" || b.cfg.API.AnthropicKey != "" || b.cfg.API.GLMKey != "" || b.cfg.API.DeepSeekKey != "" || b.cfg.API.HasOAuthToken("gemini")
 	paletteCtx := commands.NewPaletteContext(b.workDir, hasAuth)
 	paletteProvider := commands.NewPaletteProvider(b.commandHandler, paletteCtx)
 	b.tuiModel.SetPaletteProvider(paletteProvider)

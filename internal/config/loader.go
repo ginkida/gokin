@@ -174,6 +174,37 @@ func expandSafeEnvVars(data string) string {
 
 // loadFromEnv loads configuration from environment variables.
 func loadFromEnv(cfg *Config) {
+	// Provider-specific keys (explicit env vars)
+	if key := os.Getenv("GOKIN_GEMINI_KEY"); key != "" {
+		cfg.API.GeminiKey = key
+	} else if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+		cfg.API.GeminiKey = key
+	}
+
+	if key := os.Getenv("GOKIN_ANTHROPIC_KEY"); key != "" {
+		cfg.API.AnthropicKey = key
+	} else if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		cfg.API.AnthropicKey = key
+	}
+
+	if key := os.Getenv("GOKIN_GLM_KEY"); key != "" {
+		cfg.API.GLMKey = key
+	} else if key := os.Getenv("GLM_API_KEY"); key != "" {
+		cfg.API.GLMKey = key
+	}
+
+	if key := os.Getenv("GOKIN_DEEPSEEK_KEY"); key != "" {
+		cfg.API.DeepSeekKey = key
+	} else if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
+		cfg.API.DeepSeekKey = key
+	}
+
+	if key := os.Getenv("GOKIN_OLLAMA_KEY"); key != "" {
+		cfg.API.OllamaKey = key
+	} else if key := os.Getenv("OLLAMA_API_KEY"); key != "" {
+		cfg.API.OllamaKey = key
+	}
+
 	// API key from environment (check multiple sources)
 	// Priority: GOKIN_API_KEY > GLM_API_KEY > GEMINI_API_KEY
 	if apiKey := os.Getenv("GOKIN_API_KEY"); apiKey != "" {
@@ -204,7 +235,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Check API keys
-	if c.API.APIKey != "" || c.API.GeminiKey != "" || c.API.GLMKey != "" || c.API.DeepSeekKey != "" {
+	if c.API.APIKey != "" || c.API.GeminiKey != "" || c.API.AnthropicKey != "" || c.API.GLMKey != "" || c.API.DeepSeekKey != "" {
 		return nil
 	}
 
@@ -224,7 +255,7 @@ func (e ConfigError) Error() string {
 }
 
 const (
-	ErrMissingAuth ConfigError = "missing authentication: set GEMINI_API_KEY or GLM_API_KEY environment variable, or use /login <api_key>"
+	ErrMissingAuth ConfigError = "missing authentication: set GEMINI_API_KEY, ANTHROPIC_API_KEY, GLM_API_KEY, or DEEPSEEK_API_KEY, or use /login <provider> <api_key>"
 )
 
 // GetConfigPath returns the path to the config file (exported for external use).

@@ -18,7 +18,10 @@ func (c *ModelCommand) Usage() string {
 /model 3-flash   - Switch to Gemini 3 Flash
 /model 3-pro     - Switch to Gemini 3 Pro
 /model 2.5-flash - Switch to Gemini 2.5 Flash
-/model 2.5-pro   - Switch to Gemini 2.5 Pro`
+/model 2.5-pro   - Switch to Gemini 2.5 Pro
+/model sonnet    - Switch to Claude Sonnet 4.5
+/model opus      - Switch to Claude Opus 4.6
+/model haiku     - Switch to Claude Haiku 4.5`
 }
 func (c *ModelCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
@@ -68,8 +71,11 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		}
 
 		sb.WriteString("\nUsage: /model <name>")
-		if activeProvider == "gemini" {
+		switch activeProvider {
+		case "gemini":
 			sb.WriteString("\nExamples: /model 3-flash  or  /model 2.5-pro")
+		case "anthropic":
+			sb.WriteString("\nExamples: /model sonnet  or  /model opus")
 		}
 		sb.WriteString("\n\nUse /provider to switch providers")
 
@@ -135,6 +141,20 @@ func (c *ModelCommand) formatProviderModels(models []client.ModelInfo) string {
 
 // extractShortName extracts a short name from model ID
 func extractShortName(modelID string) string {
+	// Claude models
+	if strings.HasPrefix(modelID, "claude") {
+		if strings.Contains(modelID, "opus") {
+			return "opus"
+		}
+		if strings.Contains(modelID, "sonnet") {
+			return "sonnet"
+		}
+		if strings.Contains(modelID, "haiku") {
+			return "haiku"
+		}
+		return modelID
+	}
+
 	// GLM models
 	if strings.HasPrefix(modelID, "glm") {
 		return modelID // Return full ID for GLM (e.g., "glm-4.7")

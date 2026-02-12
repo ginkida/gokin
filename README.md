@@ -66,7 +66,9 @@ go build -o gokin ./cmd/gokin
 - **Go 1.25+** (for building from source)
 - **One AI provider** — any of:
   - [Gemini API key](https://aistudio.google.com/apikey) (free tier available)
-  - Anthropic, DeepSeek, or GLM API key
+  - [Anthropic API key](https://console.anthropic.com/settings/keys) (Claude models)
+  - [DeepSeek API key](https://platform.deepseek.com/api_keys)
+  - GLM API key
   - [Ollama](https://ollama.ai) installed locally (no API key needed)
 
 ---
@@ -78,12 +80,15 @@ go build -o gokin ./cmd/gokin
 ```bash
 # Option A: Environment variable
 export GEMINI_API_KEY="your-key"
+# or: export ANTHROPIC_API_KEY="your-key"
 
-# Option B: Interactive setup
+# Option B: Interactive setup (walks you through all providers)
 gokin --setup
 
 # Option C: Login command inside Gokin
 > /login gemini <your-key>
+> /login anthropic <your-key>
+> /login deepseek <your-key>
 ```
 
 **2. Launch in your project:**
@@ -108,18 +113,20 @@ gokin
 
 | Provider | Models | Auth | Notes |
 |----------|--------|------|-------|
-| **Gemini** | gemini-2.5-flash, gemini-2.5-pro | API key or OAuth | Free tier, streaming, native tools |
-| **Anthropic** | claude-3.5-sonnet, claude-3.5-haiku | API key | Extended thinking support |
+| **Gemini** | gemini-3-flash, gemini-3-pro, gemini-2.5-flash, gemini-2.5-pro | API key or OAuth | Free tier, streaming, native tools |
+| **Anthropic** | claude-opus-4-6, claude-sonnet-4-5, claude-haiku-4-5 | API key | Extended thinking, first-class support |
 | **DeepSeek** | deepseek-chat, deepseek-reasoner | API key | Great value for coding |
-| **GLM/Z.AI** | glm-4.7, glm-4-flash | API key | Budget-friendly |
+| **GLM/Z.AI** | glm-5, glm-4.7 | API key | Budget-friendly |
 | **Ollama** | Any local model | None | Fully offline, auto-detects models |
 
 Switch anytime:
 
 ```bash
-> /model gemini-2.5-flash     # fast iteration
-> /model claude-3.5-sonnet    # complex reasoning
-> /model llama3.2             # local, private
+> /provider gemini             # switch provider
+> /model 3-flash               # switch model (short names work)
+> /provider anthropic          # switch to Claude
+> /model sonnet                # Claude Sonnet 4.5
+> /model llama3.2              # local via Ollama
 ```
 
 Automatic fallback — if one provider is down, Gokin tries the next configured one.
@@ -232,9 +239,10 @@ Plus: sandbox mode for bash, undo/redo for all file changes, diff preview before
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help |
-| `/model <name>` | Switch AI model |
-| `/login <provider> <key>` | Set API key |
-| `/logout` | Remove saved API key |
+| `/provider <name>` | Switch AI provider (gemini, anthropic, deepseek, glm, ollama) |
+| `/model <name>` | Switch AI model (short names: sonnet, opus, 3-flash, etc.) |
+| `/login <provider> <key>` | Set API key (gemini, anthropic, deepseek, glm) |
+| `/logout [provider]` | Remove saved API key |
 | `/oauth-login` | Login via Google OAuth |
 | `/save [name]` | Save session |
 | `/sessions` | List saved sessions |
@@ -337,12 +345,19 @@ Config file: `~/.config/gokin/config.yaml`
 ### Minimal config
 
 ```yaml
+# Gemini
 api:
   gemini_key: ""               # or set GEMINI_API_KEY env var
   active_provider: "gemini"
-
 model:
-  name: "gemini-2.5-flash-preview"
+  name: "gemini-3-flash-preview"
+
+# — or Anthropic —
+api:
+  anthropic_key: ""            # or set ANTHROPIC_API_KEY env var
+  active_provider: "anthropic"
+model:
+  name: "claude-sonnet-4-5-20250929"
 ```
 
 ### Full reference
@@ -361,7 +376,7 @@ api:
 
 model:
   preset: "fast"               # fast, balanced, creative, coding, advanced, local
-  name: "gemini-2.5-flash-preview"
+  name: "gemini-3-flash-preview"
   temperature: 1.0
   max_output_tokens: 8192
   enable_thinking: false       # Anthropic extended thinking
@@ -476,6 +491,10 @@ diff_preview:
 | `ANTHROPIC_API_KEY` | Anthropic Claude API key |
 | `DEEPSEEK_API_KEY` | DeepSeek API key |
 | `GLM_API_KEY` | GLM/Z.AI API key |
+| `GOKIN_GEMINI_KEY` | Gokin-specific Gemini key (highest priority) |
+| `GOKIN_ANTHROPIC_KEY` | Gokin-specific Anthropic key (highest priority) |
+| `GOKIN_DEEPSEEK_KEY` | Gokin-specific DeepSeek key (highest priority) |
+| `GOKIN_GLM_KEY` | Gokin-specific GLM key (highest priority) |
 | `OLLAMA_HOST` | Ollama server URL |
 | `GOKIN_MODEL` | Override model name |
 | `GOKIN_BACKEND` | Override provider |

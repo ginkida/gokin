@@ -118,21 +118,43 @@ func GetGeminiKey(configGeminiKey, configLegacyKey string) *LoadedKey {
 	return GetAPIKey(envVars, configValue, "")
 }
 
+// GetAnthropicKey loads the Anthropic API key from environment or config
+//
+// Environment variables checked (in priority order):
+//   - GOKIN_ANTHROPIC_KEY (recommended, explicit)
+//   - ANTHROPIC_API_KEY (generic, for compatibility)
+//
+// Config fallback:
+//   - api.anthropic_key (new field)
+//   - api.api_key (legacy field, for backward compatibility)
+func GetAnthropicKey(configAnthropicKey, configLegacyKey string) *LoadedKey {
+	envVars := []string{
+		"GOKIN_ANTHROPIC_KEY", // Preferred, explicit
+		"ANTHROPIC_API_KEY",   // Generic Anthropic
+	}
+
+	// Try new config field first, then legacy
+	configValue := configAnthropicKey
+	if configValue == "" {
+		configValue = configLegacyKey
+	}
+
+	return GetAPIKey(envVars, configValue, "")
+}
+
 // GetGLMKey loads the GLM (GLM-4.7) API key from environment or config
 //
 // Environment variables checked (in priority order):
 //   - GOKIN_GLM_KEY (recommended, explicit)
 //   - GLM_API_KEY (generic)
-//   - ANTHROPIC_API_KEY (for Anthropic-compatible APIs)
 //
 // Config fallback:
 //   - api.glm_key (new field)
-//   - api.anthropic_api_key (legacy field, for backward compatibility)
+//   - api.api_key (legacy field, for backward compatibility)
 func GetGLMKey(configGLMKey, configLegacyKey string) *LoadedKey {
 	envVars := []string{
-		"GOKIN_GLM_KEY",     // Preferred, explicit
-		"GLM_API_KEY",       // Generic GLM
-		"ANTHROPIC_API_KEY", // Anthropic-compatible
+		"GOKIN_GLM_KEY", // Preferred, explicit
+		"GLM_API_KEY",   // Generic GLM
 	}
 
 	// Try new config field first, then legacy

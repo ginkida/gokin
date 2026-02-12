@@ -36,10 +36,11 @@ type APIConfig struct {
 	APIKey string `yaml:"api_key,omitempty"`
 
 	// Separate keys for each provider
-	GeminiKey   string `yaml:"gemini_key,omitempty"`
-	GLMKey      string `yaml:"glm_key,omitempty"`
-	DeepSeekKey string `yaml:"deepseek_key,omitempty"`
-	OllamaKey   string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
+	GeminiKey    string `yaml:"gemini_key,omitempty"`
+	AnthropicKey string `yaml:"anthropic_key,omitempty"`
+	GLMKey       string `yaml:"glm_key,omitempty"`
+	DeepSeekKey  string `yaml:"deepseek_key,omitempty"`
+	OllamaKey    string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
 
 	// OAuth tokens for Gemini (via Google Account)
 	GeminiOAuth *OAuthTokenConfig `yaml:"gemini_oauth,omitempty"`
@@ -94,6 +95,10 @@ func (c *APIConfig) GetActiveKey() string {
 		if c.DeepSeekKey != "" {
 			return c.DeepSeekKey
 		}
+	case "anthropic":
+		if c.AnthropicKey != "" {
+			return c.AnthropicKey
+		}
 	case "gemini":
 		if c.GeminiKey != "" {
 			return c.GeminiKey
@@ -128,6 +133,8 @@ func (c *APIConfig) HasProvider(provider string) bool {
 		return c.GLMKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "glm")
 	case "deepseek":
 		return c.DeepSeekKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "deepseek")
+	case "anthropic":
+		return c.AnthropicKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "anthropic")
 	case "ollama":
 		// Ollama is always "available" since it doesn't require an API key
 		return true
@@ -144,6 +151,8 @@ func (c *APIConfig) SetProviderKey(provider, key string) {
 		c.GLMKey = key
 	case "deepseek":
 		c.DeepSeekKey = key
+	case "anthropic":
+		c.AnthropicKey = key
 	case "ollama":
 		c.OllamaKey = key
 	}

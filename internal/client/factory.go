@@ -178,7 +178,7 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 		}
 		return NewGeminiClient(ctx, cfg)
 	case "anthropic":
-		return newAnthropicClientForModelID(cfg, modelID)
+		return newAnthropicNativeClient(cfg, modelID)
 	case "ollama":
 		return newOllamaClient(cfg, modelID)
 	default:
@@ -198,7 +198,7 @@ func autoDetectClient(ctx context.Context, cfg *config.Config, modelID string) (
 
 	// Check Claude models
 	if strings.HasPrefix(modelID, "claude") {
-		return newAnthropicClientForModelID(cfg, modelID)
+		return newAnthropicNativeClient(cfg, modelID)
 	}
 
 	// Check DeepSeek models (API, not Ollama)
@@ -382,6 +382,50 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	baseURL := cfg.Model.CustomBaseURL
 	if baseURL == "" {
 		baseURL = DefaultDeepSeekBaseURL
+	}
+
+	anthropicConfig := AnthropicConfig{
+		APIKey:            loadedKey.Value,
+		BaseURL:           baseURL,
+		Model:             modelID,
+		MaxTokens:         cfg.Model.MaxOutputTokens,
+		Temperature:       cfg.Model.Temperature,
+		StreamEnabled:     true,
+		EnableThinking:    cfg.Model.EnableThinking,
+		ThinkingBudget:    cfg.Model.ThinkingBudget,
+		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout, // 0 = use default 30s
+		// Retry configuration from config
+		MaxRetries:  cfg.API.Retry.MaxRetries,
+		RetryDelay:  cfg.API.Retry.RetryDelay,
+		HTTPTimeout: cfg.API.Retry.HTTPTimeout,
+	}
+
+	return NewAnthropicClient(anthropicConfig)
+}
+
+// newAnthropicNativeClient creates a native Anthropic client for Claude models.
+func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error) {
+	// Load API key from environment or config (try AnthropicKey first, then legacy APIKey)
+	loadedKey := security.GetAnthropicKey(cfg.API.AnthropicKey, cfg.API.APIKey)
+
+	if !loadedKey.IsSet() {
+		return nil, fmt.Errorf("Anthropic API key required (set GOKIN_ANTHROPIC_KEY environment variable or use /login anthropic <key>)")
+	}
+
+	// Log key source for debugging (without exposing the key)
+	logging.Debug("loaded Anthropic API key",
+		"source", loadedKey.Source,
+		"model", modelID)
+
+	// Validate key format
+	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
+		return nil, fmt.Errorf("invalid Anthropic API key: %w", err)
+	}
+
+	// Use custom base URL if provided, otherwise use default Anthropic endpoint
+	baseURL := cfg.Model.CustomBaseURL
+	if baseURL == "" {
+		baseURL = DefaultAnthropicBaseURL
 	}
 
 	anthropicConfig := AnthropicConfig{

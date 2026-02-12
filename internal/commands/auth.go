@@ -16,11 +16,13 @@ import (
 type LoginCommand struct{}
 
 func (c *LoginCommand) Name() string        { return "login" }
-func (c *LoginCommand) Description() string { return "Set API key for Gemini or GLM" }
+func (c *LoginCommand) Description() string { return "Set API key for a provider" }
 func (c *LoginCommand) Usage() string {
-	return `/login                    - Show current status
-/login gemini <api_key>   - Set Gemini API key
-/login glm <api_key>      - Set GLM API key
+	return `/login                        - Show current status
+/login gemini <api_key>       - Set Gemini API key
+/login glm <api_key>          - Set GLM API key
+/login deepseek <api_key>     - Set DeepSeek API key
+/login anthropic <api_key>    - Set Anthropic API key
 
 Tip: Use /oauth-login for Google account authentication (uses your Gemini subscription)`
 }
@@ -30,7 +32,7 @@ func (c *LoginCommand) GetMetadata() CommandMetadata {
 		Icon:     "key",
 		Priority: 0,
 		HasArgs:  true,
-		ArgHint:  "gemini|glm <key>",
+		ArgHint:  "gemini|glm|deepseek|anthropic <key>",
 	}
 }
 
@@ -49,29 +51,41 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 	provider := strings.ToLower(args[0])
 
 	// Validate provider
-	if provider != "gemini" && provider != "glm" {
+	validProviders := map[string]bool{"gemini": true, "glm": true, "deepseek": true, "anthropic": true}
+	if !validProviders[provider] {
 		return fmt.Sprintf(`Unknown provider: %s
 
 Usage:
-  /login gemini <api_key>   - Set Gemini API key
-  /login glm <api_key>      - Set GLM API key
-
-Get your Gemini API key at: https://aistudio.google.com/apikey`, provider), nil
+  /login gemini <api_key>    - Set Gemini API key
+  /login glm <api_key>       - Set GLM API key
+  /login deepseek <api_key>  - Set DeepSeek API key
+  /login anthropic <api_key> - Set Anthropic API key`, provider), nil
 	}
 
 	// Check for API key
 	if len(args) < 2 {
-		if provider == "gemini" {
+		switch provider {
+		case "gemini":
 			return `Usage: /login gemini <api_key>
 
 Get your free Gemini API key at: https://aistudio.google.com/apikey
 
 Alternatively, use /oauth-login to sign in with your Google account
 (this uses your Gemini subscription instead of API credits).`, nil
-		}
-		return `Usage: /login glm <api_key>
+		case "glm":
+			return `Usage: /login glm <api_key>
 
-Get your GLM API key from your provider.`, nil
+Uses Z.ai Coding Plan endpoint.
+Get your GLM API key at: https://open.bigmodel.cn`, nil
+		case "deepseek":
+			return `Usage: /login deepseek <api_key>
+
+Get your DeepSeek API key at: https://platform.deepseek.com/api_keys`, nil
+		case "anthropic":
+			return `Usage: /login anthropic <api_key>
+
+Get your Anthropic API key at: https://console.anthropic.com/settings/keys`, nil
+		}
 	}
 
 	apiKey := args[1]
@@ -88,11 +102,15 @@ Get your GLM API key from your provider.`, nil
 	cfg.API.ActiveProvider = provider
 
 	// Set default model for the provider
-	if provider == "glm" {
-		cfg.Model.Provider = "glm"
+	cfg.Model.Provider = provider
+	switch provider {
+	case "glm":
 		cfg.Model.Name = "glm-4.7"
-	} else {
-		cfg.Model.Provider = "gemini"
+	case "deepseek":
+		cfg.Model.Name = "deepseek-chat"
+	case "anthropic":
+		cfg.Model.Name = "claude-sonnet-4-5-20250929"
+	default:
 		cfg.Model.Name = "gemini-3-flash-preview"
 	}
 
@@ -101,10 +119,13 @@ Get your GLM API key from your provider.`, nil
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
-	providerName := "Gemini"
-	if provider == "glm" {
-		providerName = "GLM"
+	providerNames := map[string]string{
+		"gemini":    "Gemini",
+		"glm":       "GLM Coding Plan",
+		"deepseek":  "DeepSeek",
+		"anthropic": "Anthropic",
 	}
+	providerName := providerNames[provider]
 
 	return fmt.Sprintf(`%s API key saved!
 
@@ -120,46 +141,68 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 
 	sb.WriteString("API Key Status:\n\n")
 
-	// Gemini status
-	geminiStatus := "not configured"
+	activeProvider := cfg.API.GetActiveProvider()
+
+	// Helper to get provider status
+	providerStatus := func(name string) (marker, status string) {
+		marker = "  "
+		if activeProvider == name {
+			marker = "> "
+		}
+		status = "not configured"
+		return
+	}
+
+	// Gemini
+	geminiMarker, geminiStatus := providerStatus("gemini")
 	if cfg.API.HasOAuthToken("gemini") {
 		geminiStatus = fmt.Sprintf("OAuth (%s)", cfg.API.GeminiOAuth.Email)
 	} else if cfg.API.GeminiKey != "" {
 		geminiStatus = "configured " + maskKey(cfg.API.GeminiKey)
-	} else if cfg.API.APIKey != "" && cfg.API.GetActiveProvider() == "gemini" {
+	} else if cfg.API.APIKey != "" && activeProvider == "gemini" {
 		geminiStatus = "configured " + maskKey(cfg.API.APIKey)
 	}
 
-	// GLM status
-	glmStatus := "not configured"
+	// Anthropic
+	anthropicMarker, anthropicStatus := providerStatus("anthropic")
+	if cfg.API.AnthropicKey != "" {
+		anthropicStatus = "configured " + maskKey(cfg.API.AnthropicKey)
+	} else if cfg.API.APIKey != "" && activeProvider == "anthropic" {
+		anthropicStatus = "configured " + maskKey(cfg.API.APIKey)
+	}
+
+	// GLM
+	glmMarker, glmStatus := providerStatus("glm")
 	if cfg.API.GLMKey != "" {
 		glmStatus = "configured " + maskKey(cfg.API.GLMKey)
-	} else if cfg.API.APIKey != "" && cfg.API.GetActiveProvider() == "glm" {
+	} else if cfg.API.APIKey != "" && activeProvider == "glm" {
 		glmStatus = "configured " + maskKey(cfg.API.APIKey)
 	}
 
-	activeProvider := cfg.API.GetActiveProvider()
-
-	geminiMarker := "  "
-	glmMarker := "  "
-	if activeProvider == "gemini" {
-		geminiMarker = "> "
-	} else if activeProvider == "glm" {
-		glmMarker = "> "
+	// DeepSeek
+	deepseekMarker, deepseekStatus := providerStatus("deepseek")
+	if cfg.API.DeepSeekKey != "" {
+		deepseekStatus = "configured " + maskKey(cfg.API.DeepSeekKey)
+	} else if cfg.API.APIKey != "" && activeProvider == "deepseek" {
+		deepseekStatus = "configured " + maskKey(cfg.API.APIKey)
 	}
 
 	sb.WriteString(fmt.Sprintf("%sGemini: %s\n", geminiMarker, geminiStatus))
-	sb.WriteString(fmt.Sprintf("%sGLM:    %s\n", glmMarker, glmStatus))
+	sb.WriteString(fmt.Sprintf("%sAnthropic: %s\n", anthropicMarker, anthropicStatus))
+	sb.WriteString(fmt.Sprintf("%sGLM (Coding Plan): %s\n", glmMarker, glmStatus))
+	sb.WriteString(fmt.Sprintf("%sDeepSeek: %s\n", deepseekMarker, deepseekStatus))
 
 	sb.WriteString(fmt.Sprintf("\nActive: %s\n", activeProvider))
 	sb.WriteString(fmt.Sprintf("Model:  %s\n", cfg.Model.Name))
 
 	sb.WriteString("\nCommands:\n")
-	sb.WriteString("  /login gemini <key>  - Set Gemini API key\n")
-	sb.WriteString("  /login glm <key>     - Set GLM API key\n")
-	sb.WriteString("  /oauth-login         - Login via Google account\n")
-	sb.WriteString("  /provider            - Switch provider\n")
-	sb.WriteString("  /model               - Switch model\n")
+	sb.WriteString("  /login gemini <key>    - Set Gemini API key\n")
+	sb.WriteString("  /login anthropic <key> - Set Anthropic API key\n")
+	sb.WriteString("  /login glm <key>       - Set GLM API key\n")
+	sb.WriteString("  /login deepseek <key>  - Set DeepSeek API key\n")
+	sb.WriteString("  /oauth-login           - Login via Google account\n")
+	sb.WriteString("  /provider              - Switch provider\n")
+	sb.WriteString("  /model                 - Switch model\n")
 
 	return sb.String()
 }
@@ -180,12 +223,13 @@ func (c *LogoutCommand) Description() string {
 	return "Remove API key"
 }
 func (c *LogoutCommand) Usage() string {
-	return `/logout           - Remove active provider key
-/logout gemini    - Remove Gemini key
-/logout glm       - Remove GLM key
-/logout deepseek  - Remove DeepSeek key
-/logout ollama    - Remove Ollama key
-/logout all       - Remove all keys`
+	return `/logout            - Remove active provider key
+/logout gemini     - Remove Gemini key
+/logout anthropic  - Remove Anthropic key
+/logout glm        - Remove GLM key
+/logout deepseek   - Remove DeepSeek key
+/logout ollama     - Remove Ollama key
+/logout all        - Remove all keys`
 }
 func (c *LogoutCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
@@ -193,7 +237,7 @@ func (c *LogoutCommand) GetMetadata() CommandMetadata {
 		Icon:     "logout",
 		Priority: 10,
 		HasArgs:  true,
-		ArgHint:  "[gemini|glm|deepseek|ollama|all]",
+		ArgHint:  "[gemini|anthropic|glm|deepseek|ollama|all]",
 	}
 }
 
@@ -232,6 +276,11 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		if currentProvider == "deepseek" {
 			cfg.API.APIKey = ""
 		}
+	case "anthropic":
+		cfg.API.AnthropicKey = ""
+		if currentProvider == "anthropic" {
+			cfg.API.APIKey = ""
+		}
 	case "ollama":
 		cfg.API.OllamaKey = ""
 		if currentProvider == "ollama" {
@@ -240,25 +289,30 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 	case "all":
 		cfg.API.GeminiKey = ""
 		cfg.API.GeminiOAuth = nil
+		cfg.API.AnthropicKey = ""
 		cfg.API.GLMKey = ""
 		cfg.API.DeepSeekKey = ""
 		cfg.API.OllamaKey = ""
 		cfg.API.APIKey = ""
 	default:
-		return fmt.Sprintf("Unknown provider: %s\n\nUsage: /logout [gemini|glm|deepseek|ollama|all]", target), nil
+		return fmt.Sprintf("Unknown provider: %s\n\nUsage: /logout [gemini|anthropic|glm|deepseek|ollama|all]", target), nil
 	}
 
 	// Collect available providers with keys
 	availableProviders := []string{}
 	providerModels := map[string]string{
-		"gemini":   "gemini-3-flash-preview",
-		"glm":      "glm-4.7",
-		"deepseek": "deepseek-chat",
-		"ollama":   "llama3.2",
+		"gemini":    "gemini-3-flash-preview",
+		"anthropic": "claude-sonnet-4-5-20250929",
+		"glm":       "glm-4.7",
+		"deepseek":  "deepseek-chat",
+		"ollama":    "llama3.2",
 	}
 
 	if cfg.API.GeminiKey != "" {
 		availableProviders = append(availableProviders, "gemini")
+	}
+	if cfg.API.AnthropicKey != "" {
+		availableProviders = append(availableProviders, "anthropic")
 	}
 	if cfg.API.GLMKey != "" {
 		availableProviders = append(availableProviders, "glm")
@@ -292,10 +346,11 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		result.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		result.WriteString("No API keys configured.\n\n")
 		result.WriteString("Choose AI provider:\n")
-		result.WriteString("  /login gemini <key>   - Google Gemini\n")
-		result.WriteString("  /login deepseek <key> - DeepSeek\n")
-		result.WriteString("  /login glm <key>      - GLM (Zhipu AI)\n")
-		result.WriteString("  /login ollama         - Ollama (local)\n")
+		result.WriteString("  /login gemini <key>    - Google Gemini\n")
+		result.WriteString("  /login anthropic <key> - Anthropic (Claude)\n")
+		result.WriteString("  /login deepseek <key>  - DeepSeek\n")
+		result.WriteString("  /login glm <key>       - GLM Coding Plan (Z.ai)\n")
+		result.WriteString("  /login ollama          - Ollama (local)\n")
 	} else if target == currentProvider || target == "all" {
 		// Active provider was removed, need to switch
 		result.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
@@ -336,11 +391,12 @@ type ProviderCommand struct{}
 func (c *ProviderCommand) Name() string        { return "provider" }
 func (c *ProviderCommand) Description() string { return "Switch AI provider" }
 func (c *ProviderCommand) Usage() string {
-	return `/provider          - Show current provider
-/provider gemini   - Switch to Gemini
-/provider deepseek - Switch to DeepSeek
-/provider glm      - Switch to GLM
-/provider ollama   - Switch to Ollama (local)`
+	return `/provider            - Show current provider
+/provider gemini     - Switch to Gemini
+/provider anthropic  - Switch to Anthropic (Claude)
+/provider deepseek   - Switch to DeepSeek
+/provider glm        - Switch to GLM
+/provider ollama     - Switch to Ollama (local)`
 }
 func (c *ProviderCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
@@ -348,7 +404,7 @@ func (c *ProviderCommand) GetMetadata() CommandMetadata {
 		Icon:     "provider",
 		Priority: 20,
 		HasArgs:  true,
-		ArgHint:  "[gemini|deepseek|glm|ollama]",
+		ArgHint:  "[gemini|anthropic|deepseek|glm|ollama]",
 	}
 }
 
@@ -367,8 +423,9 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 		description string
 	}{
 		{"gemini", "gemini-3-flash-preview", "Google Gemini"},
+		{"anthropic", "claude-sonnet-4-5-20250929", "Anthropic (Claude)"},
 		{"deepseek", "deepseek-chat", "DeepSeek"},
-		{"glm", "glm-4.7", "GLM (Zhipu AI)"},
+		{"glm", "glm-4.7", "GLM Coding Plan (Z.ai)"},
 		{"ollama", "llama3.2", "Ollama (local)"},
 	}
 
@@ -408,7 +465,7 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 	newProvider := strings.ToLower(args[0])
 
 	if !validProviders[newProvider] {
-		return fmt.Sprintf("Unknown provider: %s\n\nAvailable: gemini, deepseek, glm, ollama", newProvider), nil
+		return fmt.Sprintf("Unknown provider: %s\n\nAvailable: gemini, anthropic, deepseek, glm, ollama", newProvider), nil
 	}
 
 	if newProvider == currentProvider {
@@ -481,6 +538,15 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 		geminiStatus = maskKey(key)
 	}
 
+	anthropicStatus := "not set"
+	if cfg.API.HasProvider("anthropic") {
+		key := cfg.API.AnthropicKey
+		if key == "" {
+			key = cfg.API.APIKey
+		}
+		anthropicStatus = maskKey(key)
+	}
+
 	glmStatus := "not set"
 	if cfg.API.HasProvider("glm") {
 		key := cfg.API.GLMKey
@@ -490,8 +556,19 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 		glmStatus = maskKey(key)
 	}
 
+	deepseekStatus := "not set"
+	if cfg.API.HasProvider("deepseek") {
+		key := cfg.API.DeepSeekKey
+		if key == "" {
+			key = cfg.API.APIKey
+		}
+		deepseekStatus = maskKey(key)
+	}
+
 	sb.WriteString(fmt.Sprintf("  Gemini: %s\n", geminiStatus))
-	sb.WriteString(fmt.Sprintf("  GLM:    %s\n", glmStatus))
+	sb.WriteString(fmt.Sprintf("  Anthropic: %s\n", anthropicStatus))
+	sb.WriteString(fmt.Sprintf("  GLM (Coding Plan): %s\n", glmStatus))
+	sb.WriteString(fmt.Sprintf("  DeepSeek: %s\n", deepseekStatus))
 
 	// Config path
 	sb.WriteString(fmt.Sprintf("\nConfig: %s\n", config.GetConfigPath()))

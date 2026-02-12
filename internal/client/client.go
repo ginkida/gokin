@@ -54,14 +54,14 @@ var AvailableModels = []ModelInfo{
 	{
 		ID:          "glm-5",
 		Name:        "GLM-5",
-		Description: "Latest GLM model with enhanced reasoning",
+		Description: "Latest GLM model (Coding Plan)",
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},
 	{
 		ID:          "glm-4.7",
 		Name:        "GLM-4.7",
-		Description: "Powerful coding assistant: 131K max output",
+		Description: "Coding assistant: 131K max output (Coding Plan)",
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},
@@ -79,6 +79,25 @@ var AvailableModels = []ModelInfo{
 		Description: "Extended reasoning model (thinking)",
 		Provider:    "deepseek",
 		BaseURL:     DefaultDeepSeekBaseURL,
+	},
+	// Anthropic models (native API)
+	{
+		ID:          "claude-opus-4-6",
+		Name:        "Claude Opus 4.6",
+		Description: "Most capable Claude model",
+		Provider:    "anthropic",
+	},
+	{
+		ID:          "claude-sonnet-4-5-20250929",
+		Name:        "Claude Sonnet 4.5",
+		Description: "Balanced: fast & capable",
+		Provider:    "anthropic",
+	},
+	{
+		ID:          "claude-haiku-4-5-20251001",
+		Name:        "Claude Haiku 4.5",
+		Description: "Fast & affordable",
+		Provider:    "anthropic",
 	},
 	// Ollama (local models - use exact name from 'ollama list')
 	{

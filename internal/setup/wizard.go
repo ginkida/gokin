@@ -34,7 +34,7 @@ const (
 %s╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
 ║                    %sWelcome to Gokin!%s                        ║
-║   AI coding assistant: Gemini, GLM, DeepSeek & Ollama   ║
+║  AI assistant: Gemini, Anthropic, GLM, DeepSeek & Ollama ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝%s
 
@@ -60,19 +60,24 @@ Choose your AI provider to get started.
                        • Free tier available
                        • Get key at: https://aistudio.google.com/apikey
 
-  %s[3]%s GLM (Cloud)      • GLM-4 models
+  %s[3]%s GLM Coding Plan  • GLM-4/GLM-5 models via Z.ai
+                       • Optimized for code tasks
                        • Budget-friendly (~$3/month)
-                       • Get key from your GLM provider
+                       • Get key at open.bigmodel.cn
 
   %s[4]%s DeepSeek (Cloud) • DeepSeek Chat & Reasoner models
                        • Powerful coding assistant
                        • Get key at: https://platform.deepseek.com/api_keys
 
-  %s[5]%s Ollama (Local)   • Run LLMs locally, no API key needed
+  %s[5]%s Anthropic (Cloud)• Claude Sonnet & Haiku models
+                       • Extended thinking support
+                       • Get key at: console.anthropic.com
+
+  %s[6]%s Ollama (Local)   • Run LLMs locally, no API key needed
                        • Privacy-focused, works offline
                        • Requires: ollama serve
 
-%sEnter your choice (1-5):%s `
+%sEnter your choice (1-6):%s `
 )
 
 // Spinner animation frames
@@ -163,7 +168,7 @@ func RunSetupWizard() error {
 	}
 
 	for {
-		fmt.Printf(authChoiceMessage, colorYellow, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorCyan, colorReset)
+		fmt.Printf(authChoiceMessage, colorYellow, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorCyan, colorReset)
 
 		choice, err := reader.ReadString('\n')
 		if err != nil {
@@ -182,9 +187,11 @@ func RunSetupWizard() error {
 		case "4":
 			return setupAPIKey(reader, "deepseek")
 		case "5":
+			return setupAPIKey(reader, "anthropic")
+		case "6":
 			return setupOllama(reader)
 		default:
-			fmt.Printf("\n%s⚠ Invalid choice. Please enter 1, 2, 3, 4, or 5.%s\n", colorRed, colorReset)
+			fmt.Printf("\n%s⚠ Invalid choice. Please enter 1, 2, 3, 4, 5, or 6.%s\n", colorRed, colorReset)
 		}
 	}
 }
@@ -194,11 +201,14 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 	keyURL := "https://aistudio.google.com/apikey"
 	switch backend {
 	case "glm":
-		keyType = "GLM"
-		keyURL = "your GLM provider"
+		keyType = "GLM Coding Plan"
+		keyURL = "https://open.bigmodel.cn"
 	case "deepseek":
 		keyType = "DeepSeek"
 		keyURL = "https://platform.deepseek.com/api_keys"
+	case "anthropic":
+		keyType = "Anthropic"
+		keyURL = "https://console.anthropic.com/settings/keys"
 	}
 
 	fmt.Printf("\n%s─── %s API Key Setup ───%s\n", colorCyan, keyType, colorReset)
@@ -247,6 +257,8 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 		defaultModel = "glm-4.7"
 	case "deepseek":
 		defaultModel = "deepseek-chat"
+	case "anthropic":
+		defaultModel = "claude-sonnet-4-5-20250929"
 	}
 
 	content := fmt.Sprintf("api:\n  api_key: %s\n  backend: %s\nmodel:\n  provider: %s\n  name: %s\n", apiKey, backend, backend, defaultModel)
@@ -256,6 +268,9 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 
 	fmt.Printf("\n%s✓ %s API key saved!%s\n", colorGreen, keyType, colorReset)
 	fmt.Printf("  %sConfig:%s %s\n", colorYellow, colorReset, configPath)
+	if backend == "glm" {
+		fmt.Printf("  %sEndpoint:%s Z.ai Coding Plan\n", colorYellow, colorReset)
+	}
 
 	// Show next steps
 	showNextSteps()
@@ -586,11 +601,12 @@ func showNextSteps() {
 %s─── Next Steps ───%s
 
   1. Run %sgokin%s in your project directory
-  2. Start chatting with the AI assistant
-  3. Use %s/help%s to see available commands
+  2. Run %s/quickstart%s to see practical examples
+  3. Run %s/doctor%s to validate setup and connectivity
+  4. Use %s/help%s to see all commands
 
 %sHappy coding!%s 🚀
-`, colorCyan, colorReset, colorBold, colorReset, colorBold, colorReset, colorGreen, colorReset)
+`, colorCyan, colorReset, colorBold, colorReset, colorBold, colorReset, colorBold, colorReset, colorBold, colorReset, colorGreen, colorReset)
 }
 
 func showOllamaLocalNextSteps(modelName string) {
@@ -600,12 +616,13 @@ func showOllamaLocalNextSteps(modelName string) {
   1. Make sure Ollama is running: %sollama serve%s
   2. Pull your model if needed:   %sollama pull %s%s
   3. Run %sgokin%s in your project directory
-  4. Use %s/help%s to see available commands
+  4. Run %s/quickstart%s and %s/doctor%s
+  5. Use %s/help%s to see all commands
 
 %sTip:%s List installed models with: %sollama list%s
 
 %sHappy coding!%s 🚀
-`, colorCyan, colorReset, colorBold, colorReset, colorBold, modelName, colorReset, colorBold, colorReset, colorBold, colorReset, colorYellow, colorReset, colorBold, colorReset, colorGreen, colorReset)
+`, colorCyan, colorReset, colorBold, colorReset, colorBold, modelName, colorReset, colorBold, colorReset, colorBold, colorReset, colorBold, colorReset, colorBold, colorReset, colorYellow, colorReset, colorBold, colorReset, colorGreen, colorReset)
 }
 
 func showOllamaCloudNextSteps() {
@@ -613,13 +630,14 @@ func showOllamaCloudNextSteps() {
 %s─── Next Steps ───%s
 
   1. Run %sgokin%s in your project directory
-  2. Start chatting with the AI assistant
-  3. Use %s/help%s to see available commands
+  2. Run %s/quickstart%s to see practical examples
+  3. Run %s/doctor%s to validate setup and connectivity
+  4. Use %s/help%s to see all commands
 
 %sTip:%s No local GPU needed — processing runs on Ollama Cloud!
 
 %sHappy coding!%s 🚀
-`, colorCyan, colorReset, colorBold, colorReset, colorBold, colorReset, colorYellow, colorReset, colorGreen, colorReset)
+`, colorCyan, colorReset, colorBold, colorReset, colorBold, colorReset, colorBold, colorReset, colorBold, colorReset, colorYellow, colorReset, colorGreen, colorReset)
 }
 
 // spin shows a spinner animation while waiting for a task to complete.
@@ -718,6 +736,28 @@ func validateAPIKeyReal(backend, apiKey string) error {
 		resp.Body.Close()
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
 			return fmt.Errorf("invalid API key (HTTP %d)", resp.StatusCode)
+		}
+		return nil
+
+	case "anthropic":
+		// Test with Anthropic models endpoint
+		req, err := http.NewRequestWithContext(ctx, "GET",
+			"https://api.anthropic.com/v1/models", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("connection error: %w", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			return fmt.Errorf("invalid API key (HTTP %d)", resp.StatusCode)
+		}
+		if resp.StatusCode != 200 {
+			return fmt.Errorf("unexpected response (HTTP %d)", resp.StatusCode)
 		}
 		return nil
 

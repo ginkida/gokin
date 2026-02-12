@@ -63,9 +63,12 @@ and helps with coding using natural language.
 %s──── Key Commands ───%s
 
   %s/help%s       - Help for all commands
+  %s/quickstart%s - Open this guide again
   %s/doctor%s     - Check setup and diagnostics
+  %s/plan%s       - Toggle plan mode for complex tasks
+  %s/resume-plan%s- Continue paused plan execution
   %s/model%s      - Switch AI model
-  %s/config%s     - Show or edit configuration
+  %s/update%s     - Check/install updates
   %s/clear%s      - Clear chat history
 
 %s──── Ready to Start? ───%s
@@ -103,8 +106,22 @@ func (c *QuickstartCommand) Execute(ctx context.Context, args []string, app AppI
 func (c *QuickstartCommand) getQuickstart() string {
 	header := fmt.Sprintf(quickstartHeader, colorCyan, colorReset, colorYellow, colorReset)
 	examples := fmt.Sprintf(quickstartExamples, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset)
-	tips := fmt.Sprintf(quickstartTips, colorYellow, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset,
-		colorYellow, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset,
-		colorYellow, colorReset, colorCyan, colorReset)
+	tips := fmt.Sprintf(quickstartTips,
+		colorYellow, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorYellow, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset,
+		colorYellow, colorReset,
+		colorCyan, colorReset)
 	return header + examples + tips
 }
