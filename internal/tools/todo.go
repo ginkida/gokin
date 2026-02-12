@@ -239,3 +239,17 @@ func (t *TodoTool) ClearItems() {
 
 	t.items = make([]TodoItem, 0)
 }
+
+// ResetInProgress resets all in_progress items back to pending.
+// Called at the start of each new user message to prevent stale spinners
+// when a previous response was interrupted or context was compressed.
+func (t *TodoTool) ResetInProgress() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for i := range t.items {
+		if t.items[i].Status == "in_progress" {
+			t.items[i].Status = "pending"
+		}
+	}
+}

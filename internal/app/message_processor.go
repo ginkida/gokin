@@ -64,6 +64,12 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	currentMsgCount := a.messageCount
 	a.mu.Unlock()
 
+	// Reset stale in_progress todos from previous turn.
+	// The model will re-set them to in_progress as it works.
+	if tt := a.GetTodoTool(); tt != nil {
+		tt.ResetInProgress()
+	}
+
 	// === Task 5.8: Inject tool hints every 10 messages ===
 	if currentMsgCount > 0 && currentMsgCount%10 == 0 && a.promptBuilder != nil {
 		hints := a.getToolHints()
