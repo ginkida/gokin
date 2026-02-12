@@ -525,15 +525,17 @@ func (a *App) handleSubmit(message string) {
 		return
 	}
 	a.processing = true
-	a.journalEvent("request_accept", map[string]any{
-		"message_preview": previewForJournal(message),
-	})
-	a.saveRecoverySnapshot("")
 
 	// Parse command BEFORE unlocking to avoid race condition
 	// (parsing is fast and doesn't need to be concurrent)
 	name, args, isCmd := a.commandHandler.Parse(message)
 	a.mu.Unlock()
+
+	// Journal and recovery AFTER unlock (saveRecoverySnapshot takes a.mu internally)
+	a.journalEvent("request_accept", map[string]any{
+		"message_preview": previewForJournal(message),
+	})
+	a.saveRecoverySnapshot("")
 
 	// Now safely start the goroutine
 	if isCmd {
