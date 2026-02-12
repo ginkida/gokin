@@ -122,7 +122,8 @@ type App struct {
 	questionResponseChan chan string
 
 	// Diff preview handling
-	diffResponseChan chan ui.DiffDecision
+	diffResponseChan  chan ui.DiffDecision
+	diffBatchDecision ui.DiffDecision
 
 	// Plan management
 	planManager      *plan.Manager
@@ -532,6 +533,10 @@ func (a *App) executeCommand(name string, args []string) {
 		a.mu.Unlock()
 	}()
 
+	a.mu.Lock()
+	a.diffBatchDecision = ui.DiffPending
+	a.mu.Unlock()
+
 	ctx := a.ctx
 	result, err := a.commandHandler.Execute(ctx, name, args, a)
 
@@ -603,6 +608,44 @@ func (a *App) GetRuntimeHealthReport() string {
 	sb.WriteString("\n")
 	sb.WriteString(client.GetProviderHealthReport())
 	return sb.String()
+}
+
+// GetUIRuntimeStatus returns a compact runtime snapshot for TUI status bar rendering.
+func (a *App) GetUIRuntimeStatus() ui.RuntimeStatusSnapshot {
+	out := ui.RuntimeStatusSnapshot{
+		Mode:           "normal",
+		RequestBreaker: "n/a",
+		StepBreaker:    "n/a",
+	}
+
+	if a.config != nil {
+		out.Provider = a.config.API.GetActiveProvider()
+	}
+	if a.reliability != nil {
+		s := a.reliability.Snapshot()
+		if s.Degraded {
+			out.Mode = "degraded"
+			out.DegradedRemaining = s.DegradedRemaining
+		}
+		out.ConsecutiveFailure = s.ConsecutiveFailures
+	}
+	if a.policy != nil {
+		s := a.policy.Snapshot()
+		if s.RequestBreakerState != "" {
+			out.RequestBreaker = s.RequestBreakerState
+		}
+		if s.StepBreakerState != "" {
+			out.StepBreaker = s.StepBreakerState
+		}
+	}
+
+	age := a.stepHeartbeatAge()
+	if age > 0 {
+		out.HasHeartbeat = true
+		out.HeartbeatAge = age
+	}
+
+	return out
 }
 
 // GetPolicyReport returns current policy engine state.

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -47,99 +48,69 @@ func (m Model) renderStatusBar() string {
 }
 
 // renderStatusBarMinimal renders a minimal status bar for very narrow terminals (< 60 chars).
-// Shows only safety-critical warnings.
+// Shows compact core reliability fields.
 func (m Model) renderStatusBarMinimal() string {
-	var parts []string
-
-	yoloStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
-	sandboxStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
-
-	if !m.permissionsEnabled {
-		parts = append(parts, yoloStyle.Render("YOLO"))
-	}
-
-	if !m.sandboxEnabled {
-		parts = append(parts, sandboxStyle.Render("!SANDBOX"))
-	}
-
+	parts := m.compactStatusSegments()
 	return strings.Join(parts, " ")
 }
 
 // renderStatusBarCompact renders a compact status bar for narrow terminals (60-79 chars).
-// Shows: warnings + model + context%.
+// Shows all mandatory fields in short form.
 func (m Model) renderStatusBarCompact() string {
-	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	yoloStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
-	sandboxStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
-
-	var leftParts []string
-
-	if !m.permissionsEnabled {
-		leftParts = append(leftParts, yoloStyle.Render("YOLO"))
+	left := strings.Join(m.compactStatusSegments(), " · ")
+	right := ""
+	if !m.output.IsAtBottom() {
+		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
+		right = scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent()))
 	}
-	if !m.sandboxEnabled {
-		leftParts = append(leftParts, sandboxStyle.Render("!SANDBOX"))
-	}
-
-	// Model
-	if m.currentModel != "" {
-		leftParts = append(leftParts, dimStyle.Render(shortenModelName(m.currentModel)))
-	}
-
-	var rightParts []string
-
-	// Context bar (compact)
-	contextPct := m.getContextPercent()
-	if contextPct > 0 {
-		rightParts = append(rightParts, renderContextBar(contextPct, 6))
-	}
-
-	left := strings.Join(leftParts, " · ")
-	right := strings.Join(rightParts, " ")
 
 	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
 	return left + strings.Repeat(" ", padding) + right
 }
 
+func (m Model) compactStatusSegments() []string {
+	var parts []string
+	mode := "N"
+	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
+		mode = "D"
+	}
+	parts = append(parts, "m:"+mode)
+
+	step := "-"
+	if m.planProgress != nil && m.planProgress.TotalSteps > 0 {
+		step = fmt.Sprintf("%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+	}
+	parts = append(parts, "s:"+step)
+
+	parts = append(parts, "b:"+shortBreakerState(m.runtimeStatus.RequestBreaker)+"/"+shortBreakerState(m.runtimeStatus.StepBreaker))
+
+	provider := m.runtimeStatus.Provider
+	if provider == "" {
+		provider = "?"
+	}
+	if len(provider) > 6 {
+		provider = provider[:6]
+	}
+	parts = append(parts, "p:"+provider)
+
+	if pct := m.getContextPercent(); pct > 0 {
+		parts = append(parts, fmt.Sprintf("t:%.0f%%", pct))
+	} else {
+		parts = append(parts, "t:n/a")
+	}
+
+	hb := "n/a"
+	if m.runtimeStatus.HasHeartbeat {
+		hb = m.runtimeStatus.HeartbeatAge.Round(time.Second).String()
+	}
+	parts = append(parts, "h:"+hb)
+	return parts
+}
+
 // renderStatusBarMedium renders a medium status bar for standard terminals (80-119 chars).
-// Shows: model · context% · [warnings].
+// Shows mandatory fields plus warnings.
 func (m Model) renderStatusBarMedium() string {
-	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	yoloStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
-	sandboxStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
-
-	var leftParts []string
-
-	if !m.permissionsEnabled {
-		leftParts = append(leftParts, yoloStyle.Render("YOLO"))
-	}
-	if !m.sandboxEnabled {
-		leftParts = append(leftParts, sandboxStyle.Render("!SANDBOX"))
-	}
-
-	// Model
-	if m.currentModel != "" {
-		leftParts = append(leftParts, dimStyle.Render(shortenModelName(m.currentModel)))
-	}
-
-	// Context bar
-	contextPct := m.getContextPercent()
-	if contextPct > 0 {
-		leftParts = append(leftParts, renderContextBar(contextPct, 8))
-	}
-
-	// Mode indicator (plan mode only — it's the one that changes behavior)
-	if m.planningModeEnabled {
-		planStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
-		leftParts = append(leftParts, planStyle.Render("PLAN"))
-	}
-
-	// Background tasks (compact, with progress if available)
-	if bgCount := len(m.backgroundTasks); bgCount > 0 {
-		leftParts = append(leftParts, dimStyle.Render(m.formatBackgroundTaskStatus(bgCount)))
-	}
-
-	left := strings.Join(leftParts, " · ")
+	left := strings.Join(m.baseStatusSegments(true), " · ")
 
 	// Scroll indicator on the right
 	var right string
@@ -153,41 +124,11 @@ func (m Model) renderStatusBarMedium() string {
 }
 
 // renderStatusBarFull renders the full status bar for wide terminals (>= 120 chars).
-// Shows: model · context% · [mode] · [warnings] on left; retry/MCP warnings on right.
+// Shows full Status Bar 2.0 with all reliability and runtime details.
 func (m Model) renderStatusBarFull() string {
-	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	yoloStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
-	sandboxStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
-
-	var leftParts []string
-
-	if !m.permissionsEnabled {
-		leftParts = append(leftParts, yoloStyle.Render("YOLO"))
-	}
-	if !m.sandboxEnabled {
-		leftParts = append(leftParts, sandboxStyle.Render("!SANDBOX"))
-	}
-
-	// Model
+	leftParts := m.baseStatusSegments(true)
 	if m.currentModel != "" {
-		leftParts = append(leftParts, dimStyle.Render(shortenModelName(m.currentModel)))
-	}
-
-	// Context bar
-	contextPct := m.getContextPercent()
-	if contextPct > 0 {
-		leftParts = append(leftParts, renderContextBar(contextPct, 8))
-	}
-
-	// Plan mode
-	if m.planningModeEnabled {
-		planStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
-		leftParts = append(leftParts, planStyle.Render("PLAN"))
-	}
-
-	// Background tasks (with progress if available)
-	if bgCount := len(m.backgroundTasks); bgCount > 0 {
-		leftParts = append(leftParts, dimStyle.Render(m.formatBackgroundTaskStatus(bgCount)))
+		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(ColorDim).Render(shortenModelName(m.currentModel)))
 	}
 
 	var rightParts []string
@@ -218,6 +159,115 @@ func (m Model) renderStatusBarFull() string {
 
 	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
 	return left + strings.Repeat(" ", padding) + right
+}
+
+func (m Model) baseStatusSegments(withContextBar bool) []string {
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	modeStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
+	degradedStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+	providerStyle := lipgloss.NewStyle().Foreground(ColorAccent)
+	breakerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	heartbeatStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+	var parts []string
+	if !m.permissionsEnabled {
+		parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("YOLO"))
+	}
+	if !m.sandboxEnabled {
+		parts = append(parts, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("!SANDBOX"))
+	}
+
+	mode := "normal"
+	if m.runtimeStatus.Mode != "" {
+		mode = m.runtimeStatus.Mode
+	}
+	if strings.HasPrefix(mode, "degraded") {
+		modeText := "mode:degraded"
+		if m.runtimeStatus.DegradedRemaining > 0 && withContextBar {
+			modeText = fmt.Sprintf("mode:degraded(%s)", m.runtimeStatus.DegradedRemaining.Round(time.Second))
+		}
+		parts = append(parts, degradedStyle.Render(modeText))
+	} else {
+		parts = append(parts, modeStyle.Render("mode:normal"))
+	}
+
+	activeStep := "step:-"
+	if m.planProgress != nil && m.planProgress.TotalSteps > 0 {
+		activeStep = fmt.Sprintf("step:%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+	}
+	parts = append(parts, dimStyle.Render(activeStep))
+	if withContextBar && m.planProgress != nil && m.planProgress.CurrentTitle != "" {
+		title := m.planProgress.CurrentTitle
+		if len(title) > 24 {
+			title = title[:21] + "..."
+		}
+		parts = append(parts, dimStyle.Render("task:"+title))
+	}
+
+	reqBreaker := shortBreakerState(m.runtimeStatus.RequestBreaker)
+	stepBreaker := shortBreakerState(m.runtimeStatus.StepBreaker)
+	parts = append(parts, breakerStyle.Render(fmt.Sprintf("br:%s/%s", reqBreaker, stepBreaker)))
+
+	provider := m.runtimeStatus.Provider
+	if provider == "" {
+		provider = "unknown"
+	}
+	parts = append(parts, providerStyle.Render("provider:"+provider))
+
+	tokenText := m.formatTokenStatus(withContextBar)
+	if tokenText != "" {
+		parts = append(parts, tokenText)
+	}
+
+	// Plan mode indicator
+	if m.planningModeEnabled {
+		planStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+		parts = append(parts, planStyle.Render("PLAN"))
+	}
+
+	// Background tasks
+	if bgCount := len(m.backgroundTasks); bgCount > 0 {
+		parts = append(parts, dimStyle.Render(m.formatBackgroundTaskStatus(bgCount)))
+	}
+
+	hb := "hb:n/a"
+	if m.runtimeStatus.HasHeartbeat {
+		hb = "hb:" + m.runtimeStatus.HeartbeatAge.Round(time.Second).String()
+	}
+	parts = append(parts, heartbeatStyle.Render(hb))
+
+	return parts
+}
+
+func shortBreakerState(state string) string {
+	switch strings.ToLower(state) {
+	case "open":
+		return "open"
+	case "half_open":
+		return "half"
+	case "closed":
+		return "closed"
+	default:
+		if state == "" {
+			return "n/a"
+		}
+		return state
+	}
+}
+
+func (m Model) formatTokenStatus(withContextBar bool) string {
+	pct := m.getContextPercent()
+	if withContextBar && pct > 0 {
+		return renderContextBar(pct, 8)
+	}
+	if m.tokenUsage != nil && m.tokenUsage.MaxTokens > 0 {
+		return lipgloss.NewStyle().Foreground(ColorMuted).Render(
+			fmt.Sprintf("tok:%d/%d", m.tokenUsage.Tokens, m.tokenUsage.MaxTokens))
+	}
+	if pct > 0 {
+		return lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf("tok:%.0f%%", pct))
+	}
+	return ""
 }
 
 // renderContextBar returns a visual progress bar for context usage.

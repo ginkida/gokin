@@ -240,6 +240,7 @@ func (a *App) handlePlanProgressUpdate(progress *plan.ProgressUpdate) {
 		Completed:     progress.Completed,
 		Progress:      progress.Progress,
 		Status:        progress.Status,
+		Reason:        progress.Reason,
 	})
 }
 
@@ -267,6 +268,16 @@ const DiffDecisionTimeout = 5 * time.Minute
 // promptDiffDecision is called by tools to request user approval for file changes.
 // It sends a request to the TUI and waits for a response with timeout.
 func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newContent, toolName string, isNewFile bool) (ui.DiffDecision, error) {
+	a.mu.Lock()
+	batch := a.diffBatchDecision
+	a.mu.Unlock()
+	if batch == ui.DiffApplyAll {
+		return ui.DiffApply, nil
+	}
+	if batch == ui.DiffRejectAll {
+		return ui.DiffReject, nil
+	}
+
 	if a.program == nil {
 		return ui.DiffApply, nil
 	}
@@ -286,6 +297,18 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 
 	select {
 	case decision := <-a.diffResponseChan:
+		if decision == ui.DiffApplyAll {
+			a.mu.Lock()
+			a.diffBatchDecision = ui.DiffApplyAll
+			a.mu.Unlock()
+			return ui.DiffApply, nil
+		}
+		if decision == ui.DiffRejectAll {
+			a.mu.Lock()
+			a.diffBatchDecision = ui.DiffRejectAll
+			a.mu.Unlock()
+			return ui.DiffReject, nil
+		}
 		return decision, nil
 	case <-ctx.Done():
 		return ui.DiffReject, ctx.Err()

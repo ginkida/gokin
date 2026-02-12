@@ -62,6 +62,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.responseToolsUsed = nil
 	a.streamedChars = 0 // Reset streaming accumulator
 	a.messageCount++
+	a.diffBatchDecision = ui.DiffPending
 	currentMsgCount := a.messageCount
 	a.mu.Unlock()
 
@@ -483,6 +484,14 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 			a.planManager.PausePlan()
 			a.safeSendToProgram(ui.StreamTextMsg(
 				"\n⏸ Plan paused — execution safety limit reached. Use /resume-plan to continue.\n"))
+			a.safeSendToProgram(ui.PlanProgressMsg{
+				PlanID:     approvedPlan.ID,
+				TotalSteps: totalSteps,
+				Completed:  approvedPlan.CompletedCount(),
+				Progress:   approvedPlan.Progress(),
+				Status:     "paused",
+				Reason:     "execution safety limit reached",
+			})
 			a.safeSendToProgram(ui.ResponseDoneMsg{})
 			return
 		}
@@ -521,6 +530,14 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 				a.planManager.PausePlan()
 				a.safeSendToProgram(ui.StreamTextMsg(
 					"\n⏸ Plan paused — auto-resume exhausted. Use /resume-plan to continue.\n"))
+				a.safeSendToProgram(ui.PlanProgressMsg{
+					PlanID:     approvedPlan.ID,
+					TotalSteps: totalSteps,
+					Completed:  approvedPlan.CompletedCount(),
+					Progress:   approvedPlan.Progress(),
+					Status:     "paused",
+					Reason:     "auto-resume exhausted",
+				})
 				a.safeSendToProgram(ui.ResponseDoneMsg{})
 				return
 			}
@@ -544,9 +561,9 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 	a.safeSendToProgram(ui.StreamTextMsg(summary))
 
 	completedCount := approvedPlan.CompletedCount()
-	statusText := "complete"
+	statusText := "completed"
 	if completedCount < approvedPlan.StepCount() {
-		statusText = "stopped"
+		statusText = "paused"
 	}
 
 	a.safeSendToProgram(ui.PlanProgressMsg{
@@ -555,6 +572,7 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		Completed:  completedCount,
 		Progress:   approvedPlan.Progress(),
 		Status:     statusText,
+		Reason:     "plan execution round finished",
 	})
 
 	// Send response metadata so UI shows duration and token usage
@@ -620,6 +638,16 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		a.planManager.PauseStep(step.ID, "partial effects from previous attempt detected")
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("⏸ Step %d paused for safety: previous partial effects detected. Review and /resume-plan when ready.\n", step.ID)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "paused",
+			Reason:        "partial effects from previous attempt detected",
+		})
 		return
 	}
 
@@ -644,6 +672,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		Completed:     approvedPlan.CompletedCount(),
 		Progress:      approvedPlan.Progress(),
 		Status:        "in_progress",
+		Reason:        "step started",
 	})
 
 	header := fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title)
@@ -745,6 +774,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 				Completed:     approvedPlan.CompletedCount(),
 				Progress:      approvedPlan.Progress(),
 				Status:        "paused",
+				Reason:        errMsg,
 			})
 			// No ResponseDoneMsg — plan continues with other steps
 
@@ -817,7 +847,8 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		TotalSteps:    totalSteps,
 		Completed:     approvedPlan.CompletedCount(),
 		Progress:      approvedPlan.Progress(),
-		Status:        "in_progress",
+		Status:        "completed",
+		Reason:        "step completed",
 	})
 
 	// Update token count after each step
@@ -956,6 +987,14 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			a.planManager.PausePlan()
 			a.safeSendToProgram(ui.StreamTextMsg(
 				"\n⏸ Plan paused — execution safety limit reached. Use /resume-plan to continue.\n"))
+			a.safeSendToProgram(ui.PlanProgressMsg{
+				PlanID:     approvedPlan.ID,
+				TotalSteps: totalSteps,
+				Completed:  approvedPlan.CompletedCount(),
+				Progress:   approvedPlan.Progress(),
+				Status:     "paused",
+				Reason:     "execution safety limit reached",
+			})
 			a.safeSendToProgram(ui.ResponseDoneMsg{})
 			return
 		}
@@ -994,6 +1033,14 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				a.planManager.PausePlan()
 				a.safeSendToProgram(ui.StreamTextMsg(
 					"\n⏸ Plan paused — auto-resume exhausted. Use /resume-plan to continue.\n"))
+				a.safeSendToProgram(ui.PlanProgressMsg{
+					PlanID:     approvedPlan.ID,
+					TotalSteps: totalSteps,
+					Completed:  approvedPlan.CompletedCount(),
+					Progress:   approvedPlan.Progress(),
+					Status:     "paused",
+					Reason:     "auto-resume exhausted",
+				})
 				a.safeSendToProgram(ui.ResponseDoneMsg{})
 				return
 			}
@@ -1036,9 +1083,9 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	a.safeSendToProgram(ui.StreamTextMsg(summary))
 
 	delegatedCompletedCount := approvedPlan.CompletedCount()
-	delegatedStatusText := "complete"
+	delegatedStatusText := "completed"
 	if delegatedCompletedCount < approvedPlan.StepCount() {
-		delegatedStatusText = "stopped"
+		delegatedStatusText = "paused"
 	}
 
 	a.safeSendToProgram(ui.PlanProgressMsg{
@@ -1047,6 +1094,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 		Completed:  delegatedCompletedCount,
 		Progress:   approvedPlan.Progress(),
 		Status:     delegatedStatusText,
+		Reason:     "plan execution round finished",
 	})
 
 	// Send response metadata so UI shows duration
@@ -1096,6 +1144,16 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		a.planManager.PauseStep(step.ID, "partial effects from previous attempt detected")
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("⏸ Step %d paused for safety: previous partial effects detected. Review and /resume-plan when ready.\n", step.ID)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "paused",
+			Reason:        "partial effects from previous attempt detected",
+		})
 		return
 	}
 
@@ -1113,6 +1171,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		Completed:     approvedPlan.CompletedCount(),
 		Progress:      approvedPlan.Progress(),
 		Status:        "in_progress",
+		Reason:        "step started",
 	})
 
 	// Notify UI of step start with structured header
@@ -1171,6 +1230,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 						Progress:      approvedPlan.Progress(),
 						Status:        "in_progress",
 						SubStepInfo:   progress.FormatProgress(),
+						Reason:        "agent progress update",
 					})
 				})
 			return err
@@ -1238,6 +1298,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 				Completed:     approvedPlan.CompletedCount(),
 				Progress:      approvedPlan.Progress(),
 				Status:        "paused",
+				Reason:        errMsg,
 			})
 			// No ResponseDoneMsg — plan continues with other steps
 
@@ -1343,7 +1404,8 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		TotalSteps:    totalSteps,
 		Completed:     approvedPlan.CompletedCount(),
 		Progress:      approvedPlan.Progress(),
-		Status:        "in_progress",
+		Status:        "completed",
+		Reason:        "step completed",
 	})
 
 	// Save session after each completed step (crash recovery)

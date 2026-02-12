@@ -63,6 +63,19 @@ func (a *App) startPlanWatchdog(ctx context.Context, cancel context.CancelFunc, 
 					a.safeSendToProgram(ui.StreamTextMsg(
 						fmt.Sprintf("\n⏸ Step %d paused by watchdog after %v without progress. Use /resume-plan to continue safely.\n",
 							stepID, age.Round(time.Second))))
+					if a.planManager != nil {
+						if p := a.planManager.GetCurrentPlan(); p != nil {
+							a.safeSendToProgram(ui.PlanProgressMsg{
+								PlanID:        p.ID,
+								CurrentStepID: stepID,
+								TotalSteps:    p.StepCount(),
+								Completed:     p.CompletedCount(),
+								Progress:      p.Progress(),
+								Status:        "paused",
+								Reason:        fmt.Sprintf("watchdog timeout after %v", age.Round(time.Second)),
+							})
+						}
+					}
 					cancel()
 					return
 				}

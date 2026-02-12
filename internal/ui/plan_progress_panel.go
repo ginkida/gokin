@@ -17,6 +17,7 @@ const (
 	PlanStepCompleted
 	PlanStepFailed
 	PlanStepSkipped
+	PlanStepPaused
 )
 
 // PlanStepState holds the state of a single plan step.
@@ -30,6 +31,16 @@ type PlanStepState struct {
 	Output        string
 	Error         string
 	FilesModified int
+}
+
+// StepTransition tracks a single state transition in the plan timeline.
+type StepTransition struct {
+	StepID  int
+	From    PlanStepStatus
+	To      PlanStepStatus
+	Reason  string
+	At      time.Time
+	StepRef string
 }
 
 // ActivityEntry represents a single activity log entry.
@@ -57,6 +68,7 @@ type PlanProgressPanel struct {
 	maxActivities int    // Max entries to keep (default: 5)
 	currentTool   string // Currently executing tool
 	currentInfo   string // Tool info (file path, command, etc.)
+	timeline      []StepTransition
 }
 
 // NewPlanProgressPanel creates a new plan progress panel.
@@ -69,6 +81,7 @@ func NewPlanProgressPanel(styles *Styles) *PlanProgressPanel {
 		frame:         0,
 		activities:    make([]ActivityEntry, 0),
 		maxActivities: 5,
+		timeline:      make([]StepTransition, 0, 32),
 	}
 }
 
@@ -81,6 +94,7 @@ func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps [
 	p.startedAt = time.Now()
 	p.currentStepID = 0
 	p.collapsed = false
+	p.timeline = p.timeline[:0]
 
 	p.steps = make([]PlanStepState, len(steps))
 	for i, step := range steps {
@@ -90,6 +104,7 @@ func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps [
 			Description: step.Description,
 			Status:      PlanStepPending,
 		}
+		p.appendTransition(step.ID, PlanStepPending, PlanStepPending, "queued")
 	}
 }
 
@@ -97,46 +112,92 @@ func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps [
 func (p *PlanProgressPanel) StartStep(stepID int) {
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
+			prev := p.steps[i].Status
 			p.steps[i].Status = PlanStepInProgress
 			p.steps[i].StartedAt = time.Now()
 			p.currentStepID = stepID
+			p.appendTransition(stepID, prev, PlanStepInProgress, "")
 			break
 		}
 	}
 }
 
 // CompleteStep marks a step as completed.
-func (p *PlanProgressPanel) CompleteStep(stepID int, output string) {
+func (p *PlanProgressPanel) CompleteStep(stepID int, output string, reason string) {
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
+			prev := p.steps[i].Status
 			p.steps[i].Status = PlanStepCompleted
 			p.steps[i].CompletedAt = time.Now()
 			p.steps[i].Output = output
+			p.appendTransition(stepID, prev, PlanStepCompleted, reason)
 			break
 		}
 	}
 }
 
 // FailStep marks a step as failed.
-func (p *PlanProgressPanel) FailStep(stepID int, errorMsg string) {
+func (p *PlanProgressPanel) FailStep(stepID int, errorMsg string, reason string) {
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
+			prev := p.steps[i].Status
 			p.steps[i].Status = PlanStepFailed
 			p.steps[i].CompletedAt = time.Now()
 			p.steps[i].Error = errorMsg
+			p.appendTransition(stepID, prev, PlanStepFailed, reason)
 			break
 		}
 	}
 }
 
 // SkipStep marks a step as skipped.
-func (p *PlanProgressPanel) SkipStep(stepID int) {
+func (p *PlanProgressPanel) SkipStep(stepID int, reason string) {
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
+			prev := p.steps[i].Status
 			p.steps[i].Status = PlanStepSkipped
 			p.steps[i].CompletedAt = time.Now()
+			p.appendTransition(stepID, prev, PlanStepSkipped, reason)
 			break
 		}
+	}
+}
+
+// PauseStep marks a step as paused.
+func (p *PlanProgressPanel) PauseStep(stepID int, reason string) {
+	for i := range p.steps {
+		if p.steps[i].ID == stepID {
+			prev := p.steps[i].Status
+			p.steps[i].Status = PlanStepPaused
+			p.steps[i].CompletedAt = time.Now()
+			p.steps[i].Error = reason
+			p.appendTransition(stepID, prev, PlanStepPaused, reason)
+			break
+		}
+	}
+}
+
+func (p *PlanProgressPanel) appendTransition(stepID int, from, to PlanStepStatus, reason string) {
+	if from == to && reason == "" {
+		return
+	}
+	stepRef := fmt.Sprintf("step %d", stepID)
+	for _, s := range p.steps {
+		if s.ID == stepID && s.Title != "" {
+			stepRef = fmt.Sprintf("step %d (%s)", stepID, s.Title)
+			break
+		}
+	}
+	p.timeline = append(p.timeline, StepTransition{
+		StepID:  stepID,
+		From:    from,
+		To:      to,
+		Reason:  reason,
+		At:      time.Now(),
+		StepRef: stepRef,
+	})
+	if len(p.timeline) > 40 {
+		p.timeline = p.timeline[len(p.timeline)-40:]
 	}
 }
 
@@ -419,6 +480,45 @@ func (p *PlanProgressPanel) View(width int) string {
 		}
 	}
 
+	// Compact plan timeline with transition reasons.
+	if len(p.timeline) > 0 {
+		content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤"))
+		content.WriteString("\n")
+
+		title := lipgloss.NewStyle().Foreground(ColorPlan).Bold(true).Render("  Timeline")
+		content.WriteString(borderStyle.Render("│"))
+		content.WriteString(title)
+		padding := panelWidth - 1 - lipgloss.Width(title)
+		if padding > 0 {
+			content.WriteString(strings.Repeat(" ", padding))
+		}
+		content.WriteString(borderStyle.Render("│"))
+		content.WriteString("\n")
+
+		start := 0
+		if len(p.timeline) > 4 {
+			start = len(p.timeline) - 4
+		}
+		for i := start; i < len(p.timeline); i++ {
+			tr := p.timeline[i]
+			line := fmt.Sprintf("  %s: %s -> %s", tr.StepRef, timelineStatusLabel(tr.From), timelineStatusLabel(tr.To))
+			if tr.Reason != "" {
+				line += " (" + tr.Reason + ")"
+			}
+			if len(line) > panelWidth-3 {
+				line = line[:panelWidth-6] + "..."
+			}
+			content.WriteString(borderStyle.Render("│"))
+			content.WriteString(line)
+			padding = panelWidth - 1 - lipgloss.Width(line)
+			if padding > 0 {
+				content.WriteString(strings.Repeat(" ", padding))
+			}
+			content.WriteString(borderStyle.Render("│"))
+			content.WriteString("\n")
+		}
+	}
+
 	// Footer
 	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", panelWidth-1) + "╯"))
 
@@ -453,6 +553,9 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 		iconStyle = lipgloss.NewStyle().Foreground(ColorDim)
 	case PlanStepInProgress:
 		icon = "→"
+		iconStyle = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+	case PlanStepPaused:
+		icon = "⏸"
 		iconStyle = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	case PlanStepCompleted:
 		icon = "✓"
@@ -496,6 +599,9 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	if step.Status == PlanStepInProgress {
 		statusSuffix = " " + lipgloss.NewStyle().Foreground(ColorWarning).Italic(true).Render("(in progress)")
 		maxTitleWidth -= lipgloss.Width(statusSuffix)
+	} else if step.Status == PlanStepPaused {
+		statusSuffix = " " + lipgloss.NewStyle().Foreground(ColorWarning).Italic(true).Render("(paused)")
+		maxTitleWidth -= lipgloss.Width(statusSuffix)
 	} else if step.Status == PlanStepPending {
 		statusSuffix = " " + lipgloss.NewStyle().Foreground(ColorDim).Italic(true).Render("(pending)")
 		maxTitleWidth -= lipgloss.Width(statusSuffix)
@@ -530,6 +636,14 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 			descStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 			result += "\n    " + descStyle.Render(summary)
 		}
+	}
+	if step.Status == PlanStepPaused && step.Error != "" {
+		summary := step.Error
+		if len(summary) > maxWidth-6 {
+			summary = summary[:maxWidth-9] + "..."
+		}
+		descStyle := lipgloss.NewStyle().Foreground(ColorWarning).Italic(true)
+		result += "\n    " + descStyle.Render(summary)
 	}
 
 	return result
@@ -579,6 +693,25 @@ func formatElapsed(d time.Duration) string {
 		return fmt.Sprintf("%.1fm", d.Minutes())
 	}
 	return fmt.Sprintf("%.1fh", d.Hours())
+}
+
+func timelineStatusLabel(s PlanStepStatus) string {
+	switch s {
+	case PlanStepPending:
+		return "queued"
+	case PlanStepInProgress:
+		return "running"
+	case PlanStepPaused:
+		return "paused"
+	case PlanStepCompleted:
+		return "done"
+	case PlanStepFailed:
+		return "failed"
+	case PlanStepSkipped:
+		return "skipped"
+	default:
+		return "unknown"
+	}
 }
 
 // ViewCompact renders a compact single-line version for status bar.

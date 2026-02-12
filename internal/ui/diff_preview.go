@@ -19,6 +19,8 @@ const (
 	DiffApply
 	DiffReject
 	DiffEdit
+	DiffApplyAll
+	DiffRejectAll
 )
 
 // DiffPreviewModel is the UI component for displaying diff previews.
@@ -40,6 +42,9 @@ type DiffPreviewModel struct {
 
 	// Ignore whitespace-only changes
 	ignoreWhitespace bool
+	sideBySide       bool
+	changeOffsets    []int
+	currentChange    int
 
 	// Callback when user makes a decision
 	onDecision func(decision DiffDecision)
@@ -71,6 +76,7 @@ func NewDiffPreviewModel(styles *Styles) DiffPreviewModel {
 		styles:       styles,
 		decision:     DiffPending,
 		contextLines: 3,
+		sideBySide:   true,
 	}
 }
 
@@ -103,7 +109,16 @@ func (m *DiffPreviewModel) SetContent(filePath, oldContent, newContent, toolName
 // refreshDiffView regenerates and re-renders the diff with current settings.
 func (m *DiffPreviewModel) refreshDiffView() {
 	m.diff = m.generateDiff(m.oldContent, m.newContent)
-	m.viewport.SetContent(m.highlightDiff(m.diff))
+	var content string
+	if m.sideBySide {
+		content = m.renderSideBySide()
+		m.changeOffsets = m.detectChangeOffsets(content)
+	} else {
+		content = m.highlightDiff(m.diff)
+		m.changeOffsets = m.detectChangeOffsets(m.diff)
+	}
+	m.viewport.SetContent(content)
+	m.currentChange = -1
 	m.viewport.GotoTop()
 }
 
@@ -453,6 +468,31 @@ func (m DiffPreviewModel) Update(msg tea.Msg) (DiffPreviewModel, tea.Cmd) {
 					NewContent: m.newContent,
 				}
 			}
+		case "A":
+			m.decision = DiffApplyAll
+			if m.onDecision != nil {
+				m.onDecision(DiffApplyAll)
+			}
+			return m, func() tea.Msg {
+				return DiffPreviewResponseMsg{
+					Decision:   DiffApplyAll,
+					FilePath:   m.filePath,
+					NewContent: m.newContent,
+				}
+			}
+
+		case "R":
+			m.decision = DiffRejectAll
+			if m.onDecision != nil {
+				m.onDecision(DiffRejectAll)
+			}
+			return m, func() tea.Msg {
+				return DiffPreviewResponseMsg{
+					Decision:   DiffRejectAll,
+					FilePath:   m.filePath,
+					NewContent: m.newContent,
+				}
+			}
 
 		case "j", "down":
 			m.viewport, cmd = m.viewport.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -497,6 +537,16 @@ func (m DiffPreviewModel) Update(msg tea.Msg) (DiffPreviewModel, tea.Cmd) {
 		case "I":
 			m.ignoreWhitespace = !m.ignoreWhitespace
 			m.refreshDiffView()
+			return m, nil
+		case "s":
+			m.sideBySide = !m.sideBySide
+			m.refreshDiffView()
+			return m, nil
+		case "]":
+			m.jumpToChange(true)
+			return m, nil
+		case "[":
+			m.jumpToChange(false)
 			return m, nil
 		}
 
@@ -549,6 +599,11 @@ func (m DiffPreviewModel) View() string {
 		wsLabel = "on"
 	}
 	settings := settingsStyle.Render(fmt.Sprintf("  context: %d | ignore-ws: %s", m.contextLines, wsLabel))
+	viewMode := "split"
+	if !m.sideBySide {
+		viewMode = "unified"
+	}
+	settings += settingsStyle.Render(" | view: " + viewMode)
 	builder.WriteString(markerStyle.Render("     ") + stats + settings)
 	builder.WriteString("\n\n")
 
@@ -598,7 +653,120 @@ func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 	builder.WriteString(rejectStyle.Render("n Reject"))
 	builder.WriteString("\n\n")
 
-	builder.WriteString(hintStyle.Render("j/k: Scroll | g/G: Top/Bottom | Ctrl+D/U: Half page | +/-: Context | I: Ignore whitespace"))
+	builder.WriteString(hintStyle.Render("j/k: Scroll | g/G: Top/Bottom | [ ]: Prev/Next change | Ctrl+D/U: Half page | +/-: Context | I: Ignore whitespace"))
+	builder.WriteString("\n")
+	builder.WriteString(hintStyle.Render("s: Toggle split/unified | A: Accept all diffs | R: Reject all diffs"))
+}
+
+func (m DiffPreviewModel) renderSideBySide() string {
+	leftHeader := lipgloss.NewStyle().Foreground(ColorDim).Bold(true).Render("OLD")
+	rightHeader := lipgloss.NewStyle().Foreground(ColorDim).Bold(true).Render("NEW")
+
+	oldLines := strings.Split(m.oldContent, "\n")
+	newLines := strings.Split(m.newContent, "\n")
+	maxLines := len(oldLines)
+	if len(newLines) > maxLines {
+		maxLines = len(newLines)
+	}
+	if maxLines == 0 {
+		return ""
+	}
+
+	leftW := m.viewport.Width/2 - 4
+	if leftW < 20 {
+		leftW = 20
+	}
+	rightW := m.viewport.Width - leftW - 7
+	if rightW < 20 {
+		rightW = 20
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%-4s %-*s | %-4s %-*s | Δ\n", "#", leftW, leftHeader, "#", rightW, rightHeader))
+	b.WriteString(strings.Repeat("-", leftW+rightW+18))
+	b.WriteString("\n")
+
+	addedStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+	removedStyle := lipgloss.NewStyle().Foreground(ColorError)
+	sameStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
+	for i := 0; i < maxLines; i++ {
+		var oldLine, newLine string
+		if i < len(oldLines) {
+			oldLine = oldLines[i]
+		}
+		if i < len(newLines) {
+			newLine = newLines[i]
+		}
+
+		left := truncateForWidth(oldLine, leftW)
+		right := truncateForWidth(newLine, rightW)
+
+		marker := sameStyle.Render(" ")
+		if oldLine != newLine {
+			if oldLine == "" && newLine != "" {
+				marker = addedStyle.Render("+")
+			} else if oldLine != "" && newLine == "" {
+				marker = removedStyle.Render("-")
+			} else {
+				marker = lipgloss.NewStyle().Foreground(ColorWarning).Render("≠")
+			}
+		}
+
+		b.WriteString(fmt.Sprintf("%-4d %-*s | %-4d %-*s | %s\n",
+			i+1, leftW, left, i+1, rightW, right, marker))
+	}
+
+	return b.String()
+}
+
+func truncateForWidth(s string, max int) string {
+	runes := []rune(s)
+	if max <= 0 || len(runes) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func (m *DiffPreviewModel) detectChangeOffsets(content string) []int {
+	lines := strings.Split(content, "\n")
+	offsets := make([]int, 0, 16)
+	for i, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+			offsets = append(offsets, i)
+		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+			offsets = append(offsets, i)
+		case strings.Contains(line, "| +"), strings.Contains(line, "| -"), strings.Contains(line, "| ≠"):
+			offsets = append(offsets, i)
+		}
+	}
+	return offsets
+}
+
+func (m *DiffPreviewModel) jumpToChange(next bool) {
+	if len(m.changeOffsets) == 0 {
+		return
+	}
+
+	if next {
+		m.currentChange++
+		if m.currentChange >= len(m.changeOffsets) {
+			m.currentChange = 0
+		}
+	} else {
+		if m.currentChange <= 0 {
+			m.currentChange = len(m.changeOffsets) - 1
+		} else {
+			m.currentChange--
+		}
+	}
+
+	target := m.changeOffsets[m.currentChange]
+	m.viewport.SetYOffset(target)
 }
 
 // GetDecision returns the current decision.

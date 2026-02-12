@@ -411,6 +411,7 @@ func (m *Manager) CompleteStep(stepID int, output string) {
 				Completed:     plan.CompletedCount(),
 				Progress:      plan.Progress(),
 				Status:        status,
+				Reason:        "step completed",
 			})
 		}
 	}
@@ -457,6 +458,7 @@ func (m *Manager) FailStep(stepID int, errMsg string) {
 				Completed:     plan.CompletedCount(),
 				Progress:      plan.Progress(),
 				Status:        "failed",
+				Reason:        errMsg,
 			})
 		}
 	}
@@ -488,6 +490,7 @@ func (m *Manager) SkipStep(stepID int) {
 				Completed:     plan.CompletedCount(),
 				Progress:      plan.Progress(),
 				Status:        "skipped",
+				Reason:        "condition not met",
 			})
 		}
 	}
@@ -867,6 +870,7 @@ func (m *Manager) PauseStep(stepID int, reason string) {
 				Completed:     plan.CompletedCount(),
 				Progress:      plan.Progress(),
 				Status:        "paused",
+				Reason:        reason,
 			})
 		}
 	}
@@ -971,6 +975,7 @@ func (m *Manager) PausePlan() {
 			Completed:  plan.CompletedCount(),
 			Progress:   plan.Progress(),
 			Status:     "paused",
+			Reason:     "plan paused by orchestrator",
 		})
 	}
 }

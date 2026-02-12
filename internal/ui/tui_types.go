@@ -178,6 +178,7 @@ type (
 		Progress      float64 // 0.0 to 1.0
 		Status        string  // "in_progress", "completed", "failed"
 		SubStepInfo   string  // Sub-agent progress detail
+		Reason        string  // Transition reason (pause/fail/skip/completion context)
 	}
 	// PlanCompleteMsg indicates a plan execution is complete.
 	PlanCompleteMsg struct {
@@ -292,4 +293,16 @@ type StatusUpdateMsg struct {
 // PlanningModeToggledMsg is sent after async toggle completes.
 type PlanningModeToggledMsg struct {
 	Enabled bool
+}
+
+// RuntimeStatusSnapshot is a compact runtime health snapshot for Status Bar 2.0.
+type RuntimeStatusSnapshot struct {
+	Mode               string
+	Provider           string
+	RequestBreaker     string
+	StepBreaker        string
+	HeartbeatAge       time.Duration
+	HasHeartbeat       bool
+	DegradedRemaining  time.Duration
+	ConsecutiveFailure int
 }

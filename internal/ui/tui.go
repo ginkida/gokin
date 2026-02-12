@@ -197,6 +197,11 @@ type Model struct {
 	conversationMode     string // exploring/implementing/debugging
 	mcpHealthy           int
 	mcpTotal             int
+	runtimeStatus        RuntimeStatusSnapshot
+	lastRuntimeRefresh   time.Time
+
+	// Plan pause/resume UX block
+	planPauseNotice *PlanProgressMsg
 
 	// Request latency tracking
 	lastRequestLatency time.Duration
@@ -371,6 +376,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update activity feed animation
 		if m.activityFeed != nil {
 			m.activityFeed.Tick()
+		}
+
+		// Refresh runtime health snapshot for status bar.
+		if m.lastRuntimeRefresh.IsZero() || time.Since(m.lastRuntimeRefresh) >= time.Second {
+			m.refreshRuntimeStatus()
 		}
 
 		// Check for streaming timeout
@@ -1408,7 +1418,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case PlanProgressMsg:
 		m.planProgress = &msg
-		m.planProgressMode = (msg.Status == "in_progress")
+		m.planProgressMode = (msg.Status == "in_progress" || msg.Status == "paused" || (msg.Status == "completed" && msg.Completed < msg.TotalSteps))
 
 		// Update plan progress panel
 		if m.planProgressPanel != nil {
@@ -1427,14 +1437,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				// Step completed
 				stepID := msg.CurrentStepID
 				if stepID > 0 {
-					m.planProgressPanel.CompleteStep(stepID, "")
+					m.planProgressPanel.CompleteStep(stepID, "", msg.Reason)
 				}
 
 			case "failed":
 				// Step failed - show toast only for failures
 				stepID := msg.CurrentStepID
 				if stepID > 0 {
-					m.planProgressPanel.FailStep(stepID, "")
+					m.planProgressPanel.FailStep(stepID, msg.Reason, msg.Reason)
 					if m.toastManager != nil {
 						m.toastManager.ShowError(fmt.Sprintf("Step %d failed", stepID))
 					}
@@ -1444,14 +1454,27 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				// Step skipped
 				stepID := msg.CurrentStepID
 				if stepID > 0 {
-					m.planProgressPanel.SkipStep(stepID)
+					m.planProgressPanel.SkipStep(stepID, msg.Reason)
+				}
+			case "paused":
+				stepID := msg.CurrentStepID
+				if stepID > 0 {
+					m.planProgressPanel.PauseStep(stepID, msg.Reason)
 				}
 			}
+		}
+
+		if msg.Status == "paused" {
+			copyMsg := msg
+			m.planPauseNotice = &copyMsg
+		} else if msg.Status == "in_progress" || msg.Status == "completed" {
+			m.planPauseNotice = nil
 		}
 
 	case PlanCompleteMsg:
 		m.planProgressMode = false
 		m.planProgress = nil
+		m.planPauseNotice = nil
 
 		// End plan in progress panel
 		if m.planProgressPanel != nil {
@@ -1470,7 +1493,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case DiffPreviewResponseMsg:
 		m.diffRequest = nil
-		if msg.Decision == DiffApply {
+		if msg.Decision == DiffApply || msg.Decision == DiffApplyAll {
 			m.state = StateProcessing
 			if m.onDiffDecision != nil {
 				m.onDiffDecision(msg.Decision)
@@ -1873,6 +1896,11 @@ func (m Model) View() string {
 	// Plan progress panel (when actively executing a plan)
 	if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
 		panelBuilder.WriteString(m.planProgressPanel.View(m.width))
+		panelBuilder.WriteString("\n")
+	}
+
+	if m.planPauseNotice != nil {
+		panelBuilder.WriteString(m.renderPlanPauseBlock(*m.planPauseNotice))
 		panelBuilder.WriteString("\n")
 	}
 
@@ -2401,11 +2429,13 @@ func (m *Model) UpdatePlanStep(stepID int, status PlanStepStatus, message string
 	case PlanStepInProgress:
 		m.planProgressPanel.StartStep(stepID)
 	case PlanStepCompleted:
-		m.planProgressPanel.CompleteStep(stepID, message)
+		m.planProgressPanel.CompleteStep(stepID, message, "")
 	case PlanStepFailed:
-		m.planProgressPanel.FailStep(stepID, message)
+		m.planProgressPanel.FailStep(stepID, message, "")
 	case PlanStepSkipped:
-		m.planProgressPanel.SkipStep(stepID)
+		m.planProgressPanel.SkipStep(stepID, "")
+	case PlanStepPaused:
+		m.planProgressPanel.PauseStep(stepID, message)
 	}
 }
 
