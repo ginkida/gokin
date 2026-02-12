@@ -47,6 +47,9 @@ func (i *Installer) SetProgressCallback(callback ProgressCallback) {
 
 // Install installs the new binary, creating a backup of the current one.
 func (i *Installer) Install(ctx context.Context, newBinaryPath string, version string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrCancelled, err)
+	}
 	i.reportProgress(StatusInstalling, "Creating backup...")
 
 	// Create backup first
@@ -56,6 +59,9 @@ func (i *Installer) Install(ctx context.Context, newBinaryPath string, version s
 	}
 
 	i.reportProgress(StatusInstalling, "Verifying new binary...")
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrCancelled, err)
+	}
 
 	// Verify the new binary is executable
 	if err := i.verifyBinary(newBinaryPath); err != nil {
@@ -63,9 +69,12 @@ func (i *Installer) Install(ctx context.Context, newBinaryPath string, version s
 	}
 
 	i.reportProgress(StatusInstalling, "Installing update...")
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrCancelled, err)
+	}
 
 	// Perform the installation
-	if err := i.replaceBinary(newBinaryPath); err != nil {
+	if err := i.replaceBinary(ctx, newBinaryPath); err != nil {
 		// Try to rollback
 		i.reportProgress(StatusInstalling, "Installation failed, rolling back...")
 		if rollbackErr := i.rollbackMgr.Rollback(backupInfo.ID); rollbackErr != nil {
@@ -123,18 +132,24 @@ func (i *Installer) verifyBinary(binaryPath string) error {
 }
 
 // replaceBinary replaces the current binary with the new one.
-func (i *Installer) replaceBinary(newBinaryPath string) error {
+func (i *Installer) replaceBinary(ctx context.Context, newBinaryPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// On Windows, we can't replace a running binary directly
 	// We need to rename it first, then copy the new one
 	if runtime.GOOS == "windows" {
-		return i.replaceWindows(newBinaryPath)
+		return i.replaceWindows(ctx, newBinaryPath)
 	}
 
-	return i.replaceUnix(newBinaryPath)
+	return i.replaceUnix(ctx, newBinaryPath)
 }
 
 // replaceUnix replaces the binary on Unix systems.
-func (i *Installer) replaceUnix(newBinaryPath string) error {
+func (i *Installer) replaceUnix(ctx context.Context, newBinaryPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Get info about current binary
 	info, err := os.Stat(i.currentBinary)
 	if err != nil {
@@ -182,7 +197,10 @@ func (i *Installer) replaceUnix(newBinaryPath string) error {
 }
 
 // replaceWindows replaces the binary on Windows.
-func (i *Installer) replaceWindows(newBinaryPath string) error {
+func (i *Installer) replaceWindows(ctx context.Context, newBinaryPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// On Windows, rename the old binary first
 	oldPath := i.currentBinary + ".old"
 
@@ -195,7 +213,7 @@ func (i *Installer) replaceWindows(newBinaryPath string) error {
 	}
 
 	// Copy new binary
-	if err := copyFile(newBinaryPath, i.currentBinary); err != nil {
+	if err := copyFileWithContext(ctx, newBinaryPath, i.currentBinary); err != nil {
 		// Try to restore
 		os.Rename(oldPath, i.currentBinary)
 		return fmt.Errorf("failed to copy new binary: %w", err)
@@ -248,4 +266,42 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+func copyFileWithContext(ctx context.Context, src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	buf := make([]byte, 128*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, readErr := srcFile.Read(buf)
+		if n > 0 {
+			if _, err := dstFile.Write(buf[:n]); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }

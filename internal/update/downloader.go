@@ -85,10 +85,14 @@ func (d *Downloader) Download(ctx context.Context, url string, progress Progress
 	}
 
 	// Download with progress
-	_, err = io.Copy(pw, resp.Body)
+	written, err := io.Copy(pw, resp.Body)
 	if err != nil {
 		os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("%w: %w", ErrDownloadFailed, err)
+	}
+	if totalSize > 0 && written != totalSize {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("%w: incomplete download (%d/%d bytes)", ErrDownloadFailed, written, totalSize)
 	}
 
 	return tmpFile.Name(), nil
@@ -206,6 +210,10 @@ func (d *Downloader) ExtractBinary(archivePath, binaryName string) (string, erro
 
 // extractTarGz extracts a binary from a tar.gz archive.
 func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error) {
+	if err := os.MkdirAll(d.tempDir, 0755); err != nil {
+		return "", err
+	}
+
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return "", err
@@ -238,18 +246,23 @@ func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error
 		baseName := filepath.Base(header.Name)
 		if baseName == binaryName || baseName == binaryName+".exe" {
 			if header.Typeflag == tar.TypeReg {
-				// Extract to temp file
-				outPath := filepath.Join(d.tempDir, baseName)
-				outFile, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
+				// Extract to unique temp file
+				outFile, err := os.CreateTemp(d.tempDir, "gokin-bin-*")
 				if err != nil {
 					return "", err
 				}
+				outPath := outFile.Name()
 
 				if _, err := io.Copy(outFile, tr); err != nil {
 					outFile.Close()
+					os.Remove(outPath)
 					return "", err
 				}
 				outFile.Close()
+				if err := os.Chmod(outPath, os.FileMode(header.Mode)); err != nil {
+					os.Remove(outPath)
+					return "", err
+				}
 
 				return outPath, nil
 			}
@@ -261,6 +274,10 @@ func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error
 
 // extractZip extracts a binary from a zip archive.
 func (d *Downloader) extractZip(archivePath, binaryName string) (string, error) {
+	if err := os.MkdirAll(d.tempDir, 0755); err != nil {
+		return "", err
+	}
+
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return "", err
@@ -281,20 +298,26 @@ func (d *Downloader) extractZip(archivePath, binaryName string) (string, error) 
 					return "", err
 				}
 
-				outPath := filepath.Join(d.tempDir, baseName)
-				outFile, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY, f.Mode())
+				outFile, err := os.CreateTemp(d.tempDir, "gokin-bin-*")
 				if err != nil {
 					rc.Close()
 					return "", err
 				}
+				outPath := outFile.Name()
 
 				if _, err := io.Copy(outFile, rc); err != nil {
 					outFile.Close()
+					os.Remove(outPath)
 					rc.Close()
 					return "", err
 				}
 
 				outFile.Close()
+				if err := os.Chmod(outPath, f.Mode()); err != nil {
+					os.Remove(outPath)
+					rc.Close()
+					return "", err
+				}
 				rc.Close()
 
 				return outPath, nil

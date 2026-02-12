@@ -26,6 +26,22 @@ type Updater struct {
 	cachedInfo *UpdateInfo
 }
 
+func (u *Updater) beginOperation() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.inProgress {
+		return ErrUpdateInProgress
+	}
+	u.inProgress = true
+	return nil
+}
+
+func (u *Updater) endOperation() {
+	u.mu.Lock()
+	u.inProgress = false
+	u.mu.Unlock()
+}
+
 // NewUpdater creates a new updater.
 func NewUpdater(config *Config, currentVersion string) (*Updater, error) {
 	if config == nil {
@@ -74,14 +90,15 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	u.mu.Lock()
-	defer u.mu.Unlock()
-
 	// Try to use cache first
 	if u.cachedInfo != nil && time.Since(u.lastCheck) < u.config.CheckInterval {
-		return u.cachedInfo, nil
+		info := u.cachedInfo
+		u.mu.Unlock()
+		return info, nil
 	}
+	u.mu.Unlock()
 
-	// Fetch latest release
+	// Fetch latest release without holding lock.
 	release, err := u.checker.GetLatestRelease(ctx)
 	if err != nil {
 		return nil, err
@@ -117,8 +134,10 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	// Cache the result
+	u.mu.Lock()
 	u.cachedInfo = info
 	u.lastCheck = time.Now()
+	u.mu.Unlock()
 
 	// Save to persistent cache
 	u.saveCache()
@@ -154,19 +173,10 @@ func (u *Updater) Download(ctx context.Context, info *UpdateInfo, progress Progr
 		return "", fmt.Errorf("no update info provided")
 	}
 
-	u.mu.Lock()
-	if u.inProgress {
-		u.mu.Unlock()
-		return "", ErrUpdateInProgress
+	if err := u.beginOperation(); err != nil {
+		return "", err
 	}
-	u.inProgress = true
-	u.mu.Unlock()
-
-	defer func() {
-		u.mu.Lock()
-		u.inProgress = false
-		u.mu.Unlock()
-	}()
+	defer u.endOperation()
 
 	// Download the asset
 	downloadedPath, err := u.downloader.Download(ctx, info.AssetURL, progress)
@@ -239,6 +249,11 @@ func (u *Updater) Install(ctx context.Context, binaryPath string, version string
 
 // Update performs a full update: check, download, install.
 func (u *Updater) Update(ctx context.Context, progress ProgressCallback) (*UpdateInfo, error) {
+	if err := u.beginOperation(); err != nil {
+		return nil, err
+	}
+	defer u.endOperation()
+
 	// Check for update
 	if progress != nil {
 		progress(&UpdateProgress{
@@ -252,8 +267,8 @@ func (u *Updater) Update(ctx context.Context, progress ProgressCallback) (*Updat
 		return nil, err
 	}
 
-	// Download
-	binaryPath, err := u.Download(ctx, info, progress)
+	// Download (without nested operation guard)
+	binaryPath, err := u.downloadWithChecksum(ctx, info, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -265,6 +280,62 @@ func (u *Updater) Update(ctx context.Context, progress ProgressCallback) (*Updat
 	}
 
 	return info, nil
+}
+
+// downloadWithChecksum performs download path without operation locking.
+// Used by Update() which already holds operation lock.
+func (u *Updater) downloadWithChecksum(ctx context.Context, info *UpdateInfo, progress ProgressCallback) (string, error) {
+	// Download the asset
+	downloadedPath, err := u.downloader.Download(ctx, info.AssetURL, progress)
+	if err != nil {
+		return "", err
+	}
+
+	// Verify checksum
+	if info.ChecksumURL != "" {
+		if progress != nil {
+			progress(&UpdateProgress{
+				Status:  StatusVerifying,
+				Message: "Verifying checksum...",
+			})
+		}
+
+		checksums, err := u.downloader.DownloadChecksum(ctx, info.ChecksumURL)
+		if err != nil {
+			os.Remove(downloadedPath)
+			return "", fmt.Errorf("failed to download checksum: %w", err)
+		}
+
+		expectedChecksum, ok := checksums[info.AssetName]
+		if !ok {
+			for name, sum := range checksums {
+				if filepath.Base(name) == info.AssetName {
+					expectedChecksum = sum
+					ok = true
+					break
+				}
+			}
+		}
+		if ok {
+			if err := u.downloader.VerifyChecksum(downloadedPath, expectedChecksum); err != nil {
+				os.Remove(downloadedPath)
+				return "", err
+			}
+		}
+	} else if u.config.VerifyChecksum {
+		os.Remove(downloadedPath)
+		return "", fmt.Errorf("checksum verification required but no checksum URL available for this release")
+	}
+
+	binaryPath, err := u.downloader.ExtractBinary(downloadedPath, "gokin")
+	if err != nil {
+		os.Remove(downloadedPath)
+		return "", fmt.Errorf("failed to extract binary: %w", err)
+	}
+	if binaryPath != downloadedPath {
+		os.Remove(downloadedPath)
+	}
+	return binaryPath, nil
 }
 
 // Rollback rolls back to the previous version.
