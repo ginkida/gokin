@@ -836,6 +836,9 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 			result.Status = AgentStatusFailed
 		}
 
+		// Ensure Completed is always true so WaitWithContext doesn't spin
+		result.Completed = true
+
 		// Save error checkpoint on failure for potential recovery
 		if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
 			if _, cpErr := agent.SaveCheckpoint("error"); cpErr != nil {
@@ -1037,6 +1040,9 @@ func (r *Runner) SpawnAsyncWithStreaming(
 			result.Status = AgentStatusFailed
 		}
 
+		// Ensure Completed is always true so WaitWithContext doesn't spin
+		result.Completed = true
+
 		// Record successful execution for learning
 		if result.Status == AgentStatusCompleted && exampleStore != nil {
 			// Learn from successful executions
@@ -1227,9 +1233,10 @@ func (r *Runner) Cancel(agentID string) error {
 
 	agent.Cancel()
 
-	// Update result
+	// Update result — must set Completed so WaitWithContext doesn't spin
 	if result, ok := r.results[agentID]; ok {
 		result.Status = AgentStatusCancelled
+		result.Completed = true
 	}
 
 	return nil
@@ -1447,7 +1454,15 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 			}
 		}()
 
-		// Check if context is already cancelled
+		// Detach from caller's context so resumed agent survives tool timeout.
+		bgCtx := context.WithoutCancel(ctx)
+		agentCtx, agentCancel := context.WithCancel(bgCtx)
+		defer agentCancel()
+
+		// Store cancel func for explicit Agent.Cancel()
+		agent.SetCancelFunc(agentCancel)
+
+		// Check if original context is already cancelled
 		select {
 		case <-ctx.Done():
 			r.mu.Lock()
@@ -1463,7 +1478,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 		default:
 		}
 
-		result, err := agent.Run(ctx, prompt)
+		result, err := agent.Run(agentCtx, prompt)
 
 		// Ensure result is never nil
 		if result == nil {
@@ -1481,6 +1496,9 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 			result.Error = err.Error()
 			result.Status = AgentStatusFailed
 		}
+
+		// Ensure Completed is always true so WaitWithContext doesn't spin
+		result.Completed = true
 
 		// Save updated state
 		if r.store != nil {
@@ -1602,13 +1620,19 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 				}
 			}()
 
+			// Detach from caller's context so resumed agent survives tool timeout.
+			bgCtx := context.WithoutCancel(ctx)
+			agentCtx, agentCancel := context.WithCancel(bgCtx)
+			defer agentCancel()
+			a.SetCancelFunc(agentCancel)
+
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
 
-			result, err := a.Run(ctx, "You were restarted after an error. Continue your previous task or report what went wrong.")
+			result, err := a.Run(agentCtx, "You were restarted after an error. Continue your previous task or report what went wrong.")
 			if result == nil {
 				result = &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: "nil result", Completed: true}
 			}
@@ -1616,6 +1640,7 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 				result.Error = err.Error()
 				result.Status = AgentStatusFailed
 			}
+			result.Completed = true
 
 			r.saveAgentState(a)
 
@@ -1726,7 +1751,13 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 			}
 		}()
 
-		result, err := a.Run(ctx, "You were resumed from a checkpoint. Continue your previous task.")
+		// Detach from caller's context so resumed agent survives tool timeout.
+		bgCtx := context.WithoutCancel(ctx)
+		agentCtx, agentCancel := context.WithCancel(bgCtx)
+		defer agentCancel()
+		a.SetCancelFunc(agentCancel)
+
+		result, err := a.Run(agentCtx, "You were resumed from a checkpoint. Continue your previous task.")
 		if result == nil {
 			result = &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: "nil result", Completed: true}
 		}
@@ -1734,6 +1765,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 			result.Error = err.Error()
 			result.Status = AgentStatusFailed
 		}
+		result.Completed = true
 
 		r.saveAgentState(a)
 

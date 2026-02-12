@@ -480,7 +480,8 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		if len(readySteps) == 1 {
 			a.executeDirectStep(ctx, readySteps[0], approvedPlan, totalSteps, sharedMem, maxRetries, backoffDurations)
 		} else {
-			// Parallel execution
+			// Parallel execution with context cancellation support
+			done := make(chan struct{})
 			var wg sync.WaitGroup
 			for _, step := range readySteps {
 				wg.Add(1)
@@ -489,7 +490,17 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 					a.executeDirectStep(ctx, s, approvedPlan, totalSteps, sharedMem, maxRetries, backoffDurations)
 				}(step)
 			}
-			wg.Wait()
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				// Context cancelled — steps will exit via their own ctx checks.
+				// Wait for them to finish cleanup.
+				<-done
+			}
 		}
 	}
 
@@ -607,13 +618,24 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	var errCat plan.ErrorCategory
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		history := a.session.GetHistory()
+		history, histVersion := a.session.GetHistoryWithVersion()
 		var newHistory []*genai.Content
 		newHistory, response, err = a.executor.Execute(stepCtx, history, stepMsg)
 
 		if err == nil {
-			// Success — update session history
-			a.session.SetHistory(newHistory)
+			// Success — update session history with version check.
+			// For parallel plan steps, another step may have updated history
+			// while we were executing. In that case, append only the new entries
+			// that our execution produced to the current history.
+			if !a.session.SetHistoryIfVersion(newHistory, histVersion) {
+				// Version changed — merge by appending our new entries
+				delta := newHistory[len(history):]
+				currentHistory := a.session.GetHistory()
+				merged := make([]*genai.Content, len(currentHistory)+len(delta))
+				copy(merged, currentHistory)
+				copy(merged[len(currentHistory):], delta)
+				a.session.SetHistory(merged)
+			}
 			break
 		}
 
@@ -906,7 +928,8 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 		if len(readySteps) == 1 {
 			a.executeDelegatedStep(ctx, readySteps[0], approvedPlan, totalSteps, sharedMem, projectCtx, contextSnapshot)
 		} else {
-			// Parallel execution of ready steps
+			// Parallel execution of ready steps with context cancellation support
+			done := make(chan struct{})
 			var wg sync.WaitGroup
 			for _, step := range readySteps {
 				wg.Add(1)
@@ -915,7 +938,15 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 					a.executeDelegatedStep(ctx, s, approvedPlan, totalSteps, sharedMem, projectCtx, contextSnapshot)
 				}(step)
 			}
-			wg.Wait()
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				<-done
+			}
 		}
 	}
 
