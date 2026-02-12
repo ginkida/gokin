@@ -823,6 +823,10 @@ func (a *App) TogglePlanningMode() bool {
 	a.planningModeEnabled = !a.planningModeEnabled
 	newEnabled := a.planningModeEnabled
 
+	if a.planManager != nil {
+		a.planManager.SetEnabled(newEnabled)
+	}
+
 	// Update agent runner
 	if a.agentRunner != nil {
 		a.agentRunner.SetPlanningModeEnabled(newEnabled)
@@ -873,6 +877,10 @@ func (a *App) TogglePlanningModeAsync() {
 		a.mu.Lock()
 		a.planningModeEnabled = !a.planningModeEnabled
 		newEnabled := a.planningModeEnabled
+
+		if a.planManager != nil {
+			a.planManager.SetEnabled(newEnabled)
+		}
 
 		if a.agentRunner != nil {
 			a.agentRunner.SetPlanningModeEnabled(newEnabled)

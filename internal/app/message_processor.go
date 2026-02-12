@@ -309,6 +309,9 @@ func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *pla
 	// Enter execution mode - this blocks creation of new plans during execution
 	if a.planManager != nil {
 		a.planManager.SetExecutionMode(true)
+		if err := a.planManager.TransitionCurrentPlanLifecycle(plan.LifecycleExecuting); err != nil {
+			logging.Warn("failed to transition plan lifecycle to executing", "error", err)
+		}
 	}
 
 	if a.agentRunner != nil {
@@ -536,6 +539,8 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 	})
 
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
+
+	a.finalizePlanLifecycleState(approvedPlan)
 
 	// Clear plan if fully completed
 	if approvedPlan.IsComplete() && a.planManager != nil {
@@ -977,6 +982,8 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
 
+	a.finalizePlanLifecycleState(approvedPlan)
+
 	// Clear plan if fully completed
 	if approvedPlan.IsComplete() && a.planManager != nil {
 		a.planManager.ClearPlan()
@@ -1247,6 +1254,30 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 // isRetryableError checks if an error is retryable (network, timeout, rate limit).
 func isRetryableError(err error) bool {
 	return client.IsRetryableError(err)
+}
+
+// finalizePlanLifecycleState applies a validated terminal/non-terminal lifecycle state
+// after an execution round finishes.
+func (a *App) finalizePlanLifecycleState(p *plan.Plan) {
+	if a.planManager == nil || p == nil {
+		return
+	}
+
+	target := plan.LifecycleFailed
+	switch {
+	case p.Status == plan.StatusPaused || p.HasPausedSteps():
+		target = plan.LifecyclePaused
+	case p.Status == plan.StatusCompleted:
+		target = plan.LifecycleCompleted
+	case p.Status == plan.StatusFailed:
+		target = plan.LifecycleFailed
+	case p.StepCount() > 0 && p.CompletedCount() == p.StepCount():
+		target = plan.LifecycleCompleted
+	}
+
+	if err := a.planManager.TransitionCurrentPlanLifecycle(target); err != nil {
+		logging.Warn("failed to finalize plan lifecycle state", "target", string(target), "error", err)
+	}
 }
 
 // formatPlanSummary generates a rich summary after plan execution completes.

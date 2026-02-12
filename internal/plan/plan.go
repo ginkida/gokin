@@ -111,6 +111,7 @@ type Plan struct {
 	Description string    `json:"description"`
 	Steps       []*Step   `json:"steps"`
 	Status      Status    `json:"status"`
+	Lifecycle   Lifecycle `json:"lifecycle"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	Request     string    `json:"request"`            // Original user request
@@ -146,6 +147,7 @@ func NewPlan(title, description string) *Plan {
 		Description: description,
 		Steps:       make([]*Step, 0),
 		Status:      StatusPending,
+		Lifecycle:   LifecycleDraft,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}

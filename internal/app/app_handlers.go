@@ -205,6 +205,7 @@ func (a *App) handlePlanApprovalWithFeedback(decision ui.PlanApprovalDecision, f
 		}
 		// Handle feedback - send as a new message to the model
 		if feedback != "" {
+			a.planManager.SetFeedback(feedback)
 			feedbackMsg := fmt.Sprintf("Please modify the plan according to this feedback:\n\n%s", feedback)
 			// Process feedback as a new message
 			go a.handleSubmit(feedbackMsg)

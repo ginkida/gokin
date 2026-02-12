@@ -177,6 +177,8 @@ func (m *Manager) SetStepHandlers(onStart, onComplete StepHandler) {
 
 // IsEnabled returns whether plan mode is enabled.
 func (m *Manager) IsEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.enabled
 }
 
@@ -213,6 +215,32 @@ func (m *Manager) CreatePlan(title, description, request string) *Plan {
 	return plan
 }
 
+// TransitionCurrentPlanLifecycle applies a validated lifecycle transition
+// to the currently active plan.
+func (m *Manager) TransitionCurrentPlanLifecycle(next Lifecycle) error {
+	m.mu.RLock()
+	current := m.currentPlan
+	m.mu.RUnlock()
+
+	if current == nil {
+		return fmt.Errorf("no active plan")
+	}
+
+	return current.TransitionLifecycle(next)
+}
+
+// GetCurrentPlanLifecycle returns the lifecycle state for the active plan.
+func (m *Manager) GetCurrentPlanLifecycle() Lifecycle {
+	m.mu.RLock()
+	current := m.currentPlan
+	m.mu.RUnlock()
+
+	if current == nil {
+		return ""
+	}
+	return current.LifecycleState()
+}
+
 // SetPlan sets the current plan.
 func (m *Manager) SetPlan(plan *Plan) {
 	m.mu.Lock()
@@ -226,6 +254,10 @@ func (m *Manager) ClearPlan() *Plan {
 	defer m.mu.Unlock()
 	plan := m.currentPlan
 	m.currentPlan = nil
+	m.contextClearRequested = false
+	m.approvedPlanSnapshot = nil
+	m.executionMode = false
+	m.currentStepID = -1
 	return plan
 }
 
@@ -275,6 +307,10 @@ func (m *Manager) RequestApproval(ctx context.Context) (ApprovalDecision, error)
 
 	if plan == nil {
 		return ApprovalRejected, nil
+	}
+
+	if err := plan.TransitionLifecycle(LifecycleAwaitingApproval); err != nil {
+		return ApprovalRejected, err
 	}
 
 	if !m.requireApproval {
@@ -872,6 +908,10 @@ func (m *Manager) ResumePlan() (*Plan, error) {
 	// Reset plan status to in_progress
 	plan.Status = StatusInProgress
 
+	if err := plan.TransitionLifecycle(LifecycleApproved); err != nil {
+		return nil, err
+	}
+
 	return plan, nil
 }
 
@@ -903,6 +943,10 @@ func (m *Manager) PausePlan() {
 	plan.Status = StatusPaused
 	plan.UpdatedAt = time.Now()
 	plan.mu.Unlock()
+
+	if err := plan.TransitionLifecycle(LifecyclePaused); err != nil {
+		logging.Warn("failed to transition plan lifecycle to paused", "error", err)
+	}
 
 	if store != nil {
 		if err := store.Save(plan); err != nil {

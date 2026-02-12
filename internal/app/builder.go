@@ -1597,7 +1597,8 @@ func (b *Builder) assembleApp() *App {
 		strategyOptimizer: b.strategyOptimizer,
 		metaAgent:         b.metaAgent,
 		// Phase 6: Tree Planner
-		treePlanner: b.treePlanner,
+		treePlanner:         b.treePlanner,
+		planningModeEnabled: b.cfg.Plan.Enabled,
 		// MCP (Model Context Protocol)
 		mcpManager: b.mcpManager,
 	}

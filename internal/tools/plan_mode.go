@@ -176,6 +176,10 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 	// Handle decision
 	switch decision {
 	case plan.ApprovalApproved:
+		if err := t.manager.TransitionCurrentPlanLifecycle(plan.LifecycleApproved); err != nil {
+			t.manager.ClearPlan()
+			return NewErrorResult(fmt.Sprintf("failed to apply plan approval transition: %s", err)), nil
+		}
 		// Signal context clear for focused plan execution
 		t.manager.RequestContextClear(p)
 		return NewSuccessResultWithData(
@@ -191,6 +195,7 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 		), nil
 
 	case plan.ApprovalRejected:
+		_ = t.manager.TransitionCurrentPlanLifecycle(plan.LifecycleCancelled)
 		t.manager.ClearPlan()
 		return NewSuccessResultWithData(
 			"Plan rejected by user. Please ask for clarification or propose a different approach.",
@@ -202,6 +207,8 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 
 	case plan.ApprovalModified:
 		// User requested modifications
+		_ = t.manager.TransitionCurrentPlanLifecycle(plan.LifecycleCancelled)
+		t.manager.ClearPlan()
 		return NewSuccessResultWithData(
 			"User requested modifications to the plan. Please revise and resubmit.",
 			map[string]any{
@@ -211,6 +218,7 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 		), nil
 
 	default:
+		_ = t.manager.TransitionCurrentPlanLifecycle(plan.LifecycleCancelled)
 		t.manager.ClearPlan()
 		return NewErrorResult("unknown approval decision"), nil
 	}
@@ -439,6 +447,7 @@ func (t *GetPlanStatusTool) Execute(ctx context.Context, args map[string]any) (T
 		"title":       p.Title,
 		"description": p.Description,
 		"status":      p.Status.String(),
+		"lifecycle":   p.LifecycleState(),
 		"steps":       steps,
 		"completed":   p.CompletedCount(),
 		"total":       p.StepCount(),
@@ -511,12 +520,21 @@ func (t *ExitPlanModeTool) Execute(ctx context.Context, args map[string]any) (To
 	p := t.manager.GetCurrentPlan()
 	var planInfo map[string]any
 	if p != nil {
+		target := plan.LifecycleCancelled
+		if reason == "completed" {
+			target = plan.LifecycleCompleted
+		}
+		if err := t.manager.TransitionCurrentPlanLifecycle(target); err != nil {
+			return NewErrorResult(fmt.Sprintf("cannot exit plan mode from state %s: %s", p.LifecycleState(), err)), nil
+		}
+
 		planInfo = map[string]any{
 			"plan_id":   p.ID,
 			"title":     p.Title,
 			"completed": p.CompletedCount(),
 			"total":     p.StepCount(),
 			"progress":  p.Progress() * 100,
+			"lifecycle": p.LifecycleState(),
 		}
 	}
 
