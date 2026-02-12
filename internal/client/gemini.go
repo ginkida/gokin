@@ -36,7 +36,15 @@ type GeminiClient struct {
 // NewGeminiClient creates a new Gemini API client (returns Client interface).
 func NewGeminiClient(ctx context.Context, cfg *config.Config) (Client, error) {
 	// Load API key from environment or config (try GeminiKey first, then legacy APIKey)
-	loadedKey := security.GetGeminiKey(cfg.API.GeminiKey, cfg.API.APIKey)
+	p := config.GetProvider("gemini")
+	if p == nil {
+		return nil, fmt.Errorf("provider registry missing entry for gemini")
+	}
+	legacyKey := ""
+	if p.UsesLegacyKey {
+		legacyKey = cfg.API.APIKey
+	}
+	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
 
 	if !loadedKey.IsSet() {
 		return nil, fmt.Errorf("Gemini API key required.\n\nGet your free API key at: https://aistudio.google.com/apikey\n\nThen set it with: /login gemini <your-api-key>")

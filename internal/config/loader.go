@@ -174,38 +174,17 @@ func expandSafeEnvVars(data string) string {
 
 // loadFromEnv loads configuration from environment variables.
 func loadFromEnv(cfg *Config) {
-	// Provider-specific keys (explicit env vars)
-	if key := os.Getenv("GOKIN_GEMINI_KEY"); key != "" {
-		cfg.API.GeminiKey = key
-	} else if key := os.Getenv("GEMINI_API_KEY"); key != "" {
-		cfg.API.GeminiKey = key
+	// Load provider-specific keys from environment via registry
+	for _, p := range Providers {
+		for _, envVar := range p.EnvVars {
+			if key := os.Getenv(envVar); key != "" {
+				p.SetKey(&cfg.API, key)
+				break
+			}
+		}
 	}
 
-	if key := os.Getenv("GOKIN_ANTHROPIC_KEY"); key != "" {
-		cfg.API.AnthropicKey = key
-	} else if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		cfg.API.AnthropicKey = key
-	}
-
-	if key := os.Getenv("GOKIN_GLM_KEY"); key != "" {
-		cfg.API.GLMKey = key
-	} else if key := os.Getenv("GLM_API_KEY"); key != "" {
-		cfg.API.GLMKey = key
-	}
-
-	if key := os.Getenv("GOKIN_DEEPSEEK_KEY"); key != "" {
-		cfg.API.DeepSeekKey = key
-	} else if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
-		cfg.API.DeepSeekKey = key
-	}
-
-	if key := os.Getenv("GOKIN_OLLAMA_KEY"); key != "" {
-		cfg.API.OllamaKey = key
-	} else if key := os.Getenv("OLLAMA_API_KEY"); key != "" {
-		cfg.API.OllamaKey = key
-	}
-
-	// API key from environment (check multiple sources)
+	// Legacy API key from environment (check multiple sources)
 	// Priority: GOKIN_API_KEY > GLM_API_KEY > GEMINI_API_KEY
 	if apiKey := os.Getenv("GOKIN_API_KEY"); apiKey != "" {
 		cfg.API.APIKey = apiKey
@@ -234,8 +213,15 @@ func (c *Config) Validate() error {
 		return nil
 	}
 
-	// Check API keys
-	if c.API.APIKey != "" || c.API.GeminiKey != "" || c.API.AnthropicKey != "" || c.API.GLMKey != "" || c.API.DeepSeekKey != "" {
+	// Check provider keys via registry
+	for _, p := range Providers {
+		if p.GetKey(&c.API) != "" {
+			return nil
+		}
+	}
+
+	// Legacy API key
+	if c.API.APIKey != "" {
 		return nil
 	}
 
@@ -254,9 +240,20 @@ func (e ConfigError) Error() string {
 	return string(e)
 }
 
-const (
-	ErrMissingAuth ConfigError = "missing authentication: set GEMINI_API_KEY, ANTHROPIC_API_KEY, GLM_API_KEY, or DEEPSEEK_API_KEY, or use /login <provider> <api_key>"
-)
+// ErrMissingAuth is built dynamically from the provider registry.
+var ErrMissingAuth = newMissingAuthError()
+
+func newMissingAuthError() ConfigError {
+	var envVars []string
+	for _, p := range Providers {
+		if !p.KeyOptional && len(p.EnvVars) > 0 {
+			envVars = append(envVars, p.EnvVars[0])
+		}
+	}
+	return ConfigError(fmt.Sprintf(
+		"missing authentication: set %s, or use /login <provider> <api_key>",
+		strings.Join(envVars, ", ")))
+}
 
 // GetConfigPath returns the path to the config file (exported for external use).
 func GetConfigPath() string {

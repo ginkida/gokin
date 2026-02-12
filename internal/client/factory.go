@@ -191,70 +191,36 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 func autoDetectClient(ctx context.Context, cfg *config.Config, modelID string) (Client, error) {
 	logging.Debug("unknown provider, auto-detecting from model name", "modelID", modelID)
 
-	// Check GLM models first
-	if strings.HasPrefix(modelID, "glm") {
-		return newGLMClient(cfg, modelID)
-	}
-
-	// Check Claude models
-	if strings.HasPrefix(modelID, "claude") {
-		return newAnthropicNativeClient(cfg, modelID)
-	}
-
-	// Check DeepSeek models (API, not Ollama)
-	modelLower := strings.ToLower(modelID)
-	if strings.HasPrefix(modelLower, "deepseek") {
-		return newDeepSeekClient(cfg, modelID)
-	}
-
-	// Check common open-source model prefixes (typically run via Ollama)
-	ollamaPrefixes := []string{
-		"llama", "qwen", "codellama", "mistral", "phi", "gemma",
-		"vicuna", "yi", "starcoder", "wizardcoder", "orca", "neural", "solar",
-		"openchat", "zephyr", "dolphin", "nous", "tinyllama", "stablelm",
-	}
-	for _, prefix := range ollamaPrefixes {
-		if strings.HasPrefix(modelLower, prefix) {
-			return newOllamaClient(cfg, modelID)
-		}
-	}
-
-	// Default to Gemini (check OAuth first)
-	if cfg.API.HasOAuthToken("gemini") {
-		logging.Debug("using Gemini OAuth client (default)", "email", cfg.API.GeminiOAuth.Email)
-		oauthClient, err := NewGeminiOAuthClient(ctx, cfg)
-		if err == nil {
-			return oauthClient, nil
-		}
-
-		logging.Warn("failed to initialize default Gemini OAuth client, falling back to API key if available", "error", err)
-		apiClient, keyErr := NewGeminiClient(ctx, cfg)
-		if keyErr == nil {
-			return apiClient, nil
-		}
-
-		return nil, fmt.Errorf("gemini auth failed (oauth error: %v; api-key fallback error: %v)", err, keyErr)
-	}
-	return NewGeminiClient(ctx, cfg)
+	provider := config.DetectProviderFromModel(modelID)
+	return createClientForProvider(ctx, cfg, provider, modelID)
 }
 
 // newGLMClient creates a GLM (GLM-4.7) client using Anthropic-compatible API.
 func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
-	// Load API key from environment or config (try GLMKey first, then legacy APIKey)
-	loadedKey := security.GetGLMKey(cfg.API.GLMKey, cfg.API.APIKey)
+	// Load API key from environment or config via registry
+	p := config.GetProvider("glm")
+	if p == nil {
+		return nil, fmt.Errorf("provider registry missing entry for glm")
+	}
+	legacyKey := ""
+	if p.UsesLegacyKey {
+		legacyKey = cfg.API.APIKey
+	}
+	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
 
 	if !loadedKey.IsSet() {
-		return nil, fmt.Errorf("GLM API key required (set GOKIN_GLM_KEY environment variable or use /login glm <key>)")
+		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
 	}
 
 	// Log key source for debugging (without exposing the key)
-	logging.Debug("loaded GLM API key",
+	logging.Debug("loaded API key",
+		"provider", p.Name,
 		"source", loadedKey.Source,
 		"model", modelID)
 
 	// Validate key format
 	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
-		return nil, fmt.Errorf("invalid GLM API key: %w", err)
+		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
 	}
 
 	// Use custom base URL if provided, otherwise use default GLM endpoint
@@ -361,21 +327,30 @@ func newAnthropicClientForModelID(cfg *config.Config, modelID string) (Client, e
 
 // newDeepSeekClient creates a DeepSeek client using Anthropic-compatible API.
 func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
-	// Load API key from environment or config (try DeepSeekKey first, then legacy APIKey)
-	loadedKey := security.GetDeepSeekKey(cfg.API.DeepSeekKey, cfg.API.APIKey)
+	// Load API key from environment or config via registry
+	p := config.GetProvider("deepseek")
+	if p == nil {
+		return nil, fmt.Errorf("provider registry missing entry for deepseek")
+	}
+	legacyKey := ""
+	if p.UsesLegacyKey {
+		legacyKey = cfg.API.APIKey
+	}
+	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
 
 	if !loadedKey.IsSet() {
-		return nil, fmt.Errorf("DeepSeek API key required (set GOKIN_DEEPSEEK_KEY environment variable or use /login deepseek <key>)")
+		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
 	}
 
 	// Log key source for debugging (without exposing the key)
-	logging.Debug("loaded DeepSeek API key",
+	logging.Debug("loaded API key",
+		"provider", p.Name,
 		"source", loadedKey.Source,
 		"model", modelID)
 
 	// Validate key format
 	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
-		return nil, fmt.Errorf("invalid DeepSeek API key: %w", err)
+		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
 	}
 
 	// Use custom base URL if provided, otherwise use default DeepSeek endpoint
@@ -405,21 +380,30 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 
 // newAnthropicNativeClient creates a native Anthropic client for Claude models.
 func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error) {
-	// Load API key from environment or config (try AnthropicKey first, then legacy APIKey)
-	loadedKey := security.GetAnthropicKey(cfg.API.AnthropicKey, cfg.API.APIKey)
+	// Load API key from environment or config via registry
+	p := config.GetProvider("anthropic")
+	if p == nil {
+		return nil, fmt.Errorf("provider registry missing entry for anthropic")
+	}
+	legacyKey := ""
+	if p.UsesLegacyKey {
+		legacyKey = cfg.API.APIKey
+	}
+	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
 
 	if !loadedKey.IsSet() {
-		return nil, fmt.Errorf("Anthropic API key required (set GOKIN_ANTHROPIC_KEY environment variable or use /login anthropic <key>)")
+		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
 	}
 
 	// Log key source for debugging (without exposing the key)
-	logging.Debug("loaded Anthropic API key",
+	logging.Debug("loaded API key",
+		"provider", p.Name,
 		"source", loadedKey.Source,
 		"model", modelID)
 
 	// Validate key format
 	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
-		return nil, fmt.Errorf("invalid Anthropic API key: %w", err)
+		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
 	}
 
 	// Use custom base URL if provided, otherwise use default Anthropic endpoint
@@ -450,7 +434,8 @@ func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error
 // newOllamaClient creates an Ollama client for local LLM inference.
 func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 	// Load optional API key (for remote Ollama servers with auth)
-	loadedKey := security.GetOllamaKey(cfg.API.OllamaKey)
+	p := config.GetProvider("ollama")
+	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), "")
 
 	// Log key source for debugging (without exposing the key)
 	if loadedKey.IsSet() {

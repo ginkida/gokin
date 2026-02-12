@@ -92,120 +92,13 @@ func GetAPIKey(envVarNames []string, configValue string, keyringService string) 
 	}
 }
 
-// GetGeminiKey loads the Gemini API key from environment or config
-//
-// Environment variables checked (in priority order):
-//   - GOKIN_GEMINI_KEY (recommended, explicit)
-//   - GEMINI_API_KEY (generic, for compatibility)
-//   - GOOGLE_API_KEY (generic Google API key)
-//
-// Config fallback:
-//   - api.gemini_key (new field)
-//   - api.api_key (legacy field, for backward compatibility)
-func GetGeminiKey(configGeminiKey, configLegacyKey string) *LoadedKey {
-	envVars := []string{
-		"GOKIN_GEMINI_KEY", // Preferred, explicit
-		"GEMINI_API_KEY",   // Generic Gemini
-		"GOOGLE_API_KEY",   // Generic Google
-	}
-
-	// Try new config field first, then legacy
-	configValue := configGeminiKey
+// GetProviderKey loads an API key for a provider using the given env vars and config values.
+// configKey is the provider-specific config field value; legacyKey is the legacy api_key fallback.
+func GetProviderKey(envVars []string, configKey, legacyKey string) *LoadedKey {
+	configValue := configKey
 	if configValue == "" {
-		configValue = configLegacyKey
+		configValue = legacyKey
 	}
-
-	return GetAPIKey(envVars, configValue, "")
-}
-
-// GetAnthropicKey loads the Anthropic API key from environment or config
-//
-// Environment variables checked (in priority order):
-//   - GOKIN_ANTHROPIC_KEY (recommended, explicit)
-//   - ANTHROPIC_API_KEY (generic, for compatibility)
-//
-// Config fallback:
-//   - api.anthropic_key (new field)
-//   - api.api_key (legacy field, for backward compatibility)
-func GetAnthropicKey(configAnthropicKey, configLegacyKey string) *LoadedKey {
-	envVars := []string{
-		"GOKIN_ANTHROPIC_KEY", // Preferred, explicit
-		"ANTHROPIC_API_KEY",   // Generic Anthropic
-	}
-
-	// Try new config field first, then legacy
-	configValue := configAnthropicKey
-	if configValue == "" {
-		configValue = configLegacyKey
-	}
-
-	return GetAPIKey(envVars, configValue, "")
-}
-
-// GetGLMKey loads the GLM (GLM-4.7) API key from environment or config
-//
-// Environment variables checked (in priority order):
-//   - GOKIN_GLM_KEY (recommended, explicit)
-//   - GLM_API_KEY (generic)
-//
-// Config fallback:
-//   - api.glm_key (new field)
-//   - api.api_key (legacy field, for backward compatibility)
-func GetGLMKey(configGLMKey, configLegacyKey string) *LoadedKey {
-	envVars := []string{
-		"GOKIN_GLM_KEY", // Preferred, explicit
-		"GLM_API_KEY",   // Generic GLM
-	}
-
-	// Try new config field first, then legacy
-	configValue := configGLMKey
-	if configValue == "" {
-		configValue = configLegacyKey
-	}
-
-	return GetAPIKey(envVars, configValue, "")
-}
-
-// GetOllamaKey loads the optional Ollama API key from environment or config.
-// Note: Ollama doesn't require an API key for local servers,
-// but remote Ollama servers may require authentication.
-//
-// Environment variables checked (in priority order):
-//   - GOKIN_OLLAMA_KEY (recommended, explicit)
-//   - OLLAMA_API_KEY (generic)
-//
-// Config fallback:
-//   - api.ollama_key
-func GetOllamaKey(configOllamaKey string) *LoadedKey {
-	envVars := []string{
-		"GOKIN_OLLAMA_KEY", // Preferred, explicit
-		"OLLAMA_API_KEY",   // Generic Ollama
-	}
-
-	return GetAPIKey(envVars, configOllamaKey, "")
-}
-
-// GetDeepSeekKey loads the DeepSeek API key from environment or config
-//
-// Environment variables checked (in priority order):
-//   - GOKIN_DEEPSEEK_KEY (recommended, explicit)
-//   - DEEPSEEK_API_KEY (generic)
-//
-// Config fallback:
-//   - api.deepseek_key (new field)
-//   - api.api_key (legacy field, for backward compatibility)
-func GetDeepSeekKey(configDeepSeekKey, configLegacyKey string) *LoadedKey {
-	envVars := []string{
-		"GOKIN_DEEPSEEK_KEY", // Preferred, explicit
-		"DEEPSEEK_API_KEY",   // Generic DeepSeek
-	}
-
-	// Try new config field first, then legacy
-	configValue := configDeepSeekKey
-	if configValue == "" {
-		configValue = configLegacyKey
-	}
-
 	return GetAPIKey(envVars, configValue, "")
 }
 

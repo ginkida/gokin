@@ -78,36 +78,16 @@ func (c *APIConfig) HasOAuthToken(provider string) bool {
 
 // GetActiveKey returns the API key for the active provider.
 func (c *APIConfig) GetActiveKey() string {
-	provider := c.ActiveProvider
-	if provider == "" {
-		provider = c.Backend
+	provider := c.GetActiveProvider()
+	if p := GetProvider(provider); p != nil {
+		if key := p.GetKey(c); key != "" {
+			return key
+		}
+		if p.UsesLegacyKey {
+			return c.APIKey
+		}
+		return ""
 	}
-	if provider == "" {
-		provider = "gemini"
-	}
-
-	switch provider {
-	case "glm":
-		if c.GLMKey != "" {
-			return c.GLMKey
-		}
-	case "deepseek":
-		if c.DeepSeekKey != "" {
-			return c.DeepSeekKey
-		}
-	case "anthropic":
-		if c.AnthropicKey != "" {
-			return c.AnthropicKey
-		}
-	case "gemini":
-		if c.GeminiKey != "" {
-			return c.GeminiKey
-		}
-	case "ollama":
-		// Ollama key is optional (local server doesn't need it)
-		return c.OllamaKey
-	}
-
 	// Fallback to legacy APIKey field
 	return c.APIKey
 }
@@ -126,17 +106,20 @@ func (c *APIConfig) GetActiveProvider() string {
 // HasProvider checks if a provider has an API key configured.
 // Note: Ollama doesn't require an API key for local servers.
 func (c *APIConfig) HasProvider(provider string) bool {
-	switch provider {
-	case "gemini":
-		return c.GeminiKey != "" || c.HasOAuthToken("gemini") || (c.APIKey != "" && c.GetActiveProvider() == "gemini")
-	case "glm":
-		return c.GLMKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "glm")
-	case "deepseek":
-		return c.DeepSeekKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "deepseek")
-	case "anthropic":
-		return c.AnthropicKey != "" || (c.APIKey != "" && c.GetActiveProvider() == "anthropic")
-	case "ollama":
-		// Ollama is always "available" since it doesn't require an API key
+	p := GetProvider(provider)
+	if p == nil {
+		return false
+	}
+	if p.KeyOptional {
+		return true
+	}
+	if p.GetKey(c) != "" {
+		return true
+	}
+	if p.HasOAuth && c.HasOAuthToken(provider) {
+		return true
+	}
+	if p.UsesLegacyKey && c.APIKey != "" && c.GetActiveProvider() == provider {
 		return true
 	}
 	return false
@@ -144,17 +127,8 @@ func (c *APIConfig) HasProvider(provider string) bool {
 
 // SetProviderKey sets the API key for a specific provider.
 func (c *APIConfig) SetProviderKey(provider, key string) {
-	switch provider {
-	case "gemini":
-		c.GeminiKey = key
-	case "glm":
-		c.GLMKey = key
-	case "deepseek":
-		c.DeepSeekKey = key
-	case "anthropic":
-		c.AnthropicKey = key
-	case "ollama":
-		c.OllamaKey = key
+	if p := GetProvider(provider); p != nil {
+		p.SetKey(c, key)
 	}
 }
 

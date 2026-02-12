@@ -38,22 +38,7 @@ func MigrateConfig(cfg *Config) {
 
 // DetectProvider determines the provider from model name.
 func DetectProvider(modelName string) string {
-	if modelName == "" {
-		return "gemini" // default
-	}
-
-	lower := strings.ToLower(modelName)
-
-	switch {
-	case strings.HasPrefix(lower, "gemini") || strings.HasPrefix(lower, "models/"):
-		return "gemini"
-	case strings.HasPrefix(lower, "glm"):
-		return "glm"
-	case strings.HasPrefix(lower, "claude"):
-		return "anthropic"
-	default:
-		return "gemini" // default
-	}
+	return DetectProviderFromModel(modelName)
 }
 
 // NormalizeConfig ensures configuration is consistent and valid.

@@ -8,10 +8,21 @@ import (
 	"sort"
 	"strings"
 
+	"gokin/internal/config"
+
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// defaultProviderNames returns all provider names from the registry.
+func defaultProviderNames() []string { return config.ProviderNames() }
+
+// defaultKeyProviderNames returns provider names that require API keys.
+func defaultKeyProviderNames() []string { return config.KeyProviderNames() }
+
+// defaultAllProviderNames returns all provider names plus "all".
+func defaultAllProviderNames() []string { return config.AllProviderNames() }
 
 const (
 	maxHistorySize = 100
@@ -115,15 +126,15 @@ func defaultCommands() []CommandInfo {
 
 		// Auth & Setup
 		{Name: "login", Description: "Set API key for a provider", Category: "Auth",
-			Args: []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: []string{"gemini", "anthropic", "glm", "deepseek"}},
-				{Name: "key", Required: false, Type: "string"}}, Usage: "/login [gemini|anthropic|glm|deepseek] [key]"},
+			Args: []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: defaultKeyProviderNames()},
+				{Name: "key", Required: false, Type: "string"}}, Usage: "/login [provider] [key]"},
 		{Name: "logout", Description: "Remove API key", Category: "Auth",
-			Args:  []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: []string{"gemini", "anthropic", "glm", "deepseek", "ollama", "all"}}},
-			Usage: "/logout [gemini|anthropic|glm|deepseek|ollama|all]"},
+			Args:  []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: defaultAllProviderNames()}},
+			Usage: "/logout [provider|all]"},
 		{Name: "oauth-login", Description: "Login to Gemini using Google account", Category: "Auth"},
 		{Name: "oauth-logout", Description: "Remove OAuth credentials", Category: "Auth"},
 		{Name: "provider", Description: "Switch AI provider", Category: "Auth",
-			Args:  []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: []string{"gemini", "anthropic", "deepseek", "glm", "ollama"}}},
+			Args:  []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: defaultProviderNames()}},
 			Usage: "/provider [name]"},
 		{Name: "status", Description: "Show configuration status", Category: "Auth"},
 		{Name: "doctor", Description: "Check environment and configuration", Category: "Auth"},

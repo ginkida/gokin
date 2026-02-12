@@ -473,27 +473,34 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	issues := []string{}
 	solutions := []string{}
 
-	// Check API key
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("GLM_API_KEY")
-	}
-	if apiKey == "" && cfg != nil {
-		apiKey = cfg.API.APIKey
-	}
-
+	// Check API key via provider registry
 	backend := "gemini"
 	if cfg != nil && cfg.API.Backend != "" {
 		backend = cfg.API.Backend
 	}
-
 	sb.WriteString(fmt.Sprintf("  Backend: %s%s%s\n", colorGreen, backend, colorReset))
-	if apiKey != "" {
+
+	hasKey := false
+	if cfg != nil {
+		hasKey = config.AnyProviderHasKey(&cfg.API)
+	}
+	if !hasKey {
+		// Check legacy env var
+		if os.Getenv("GOKIN_API_KEY") != "" {
+			hasKey = true
+		}
+	}
+
+	if hasKey {
 		sb.WriteString(fmt.Sprintf("  Status: %s✓ API key configured%s\n", colorGreen, colorReset))
 	} else {
 		sb.WriteString(fmt.Sprintf("  Status: %s✗ API key not configured%s\n", colorRed, colorReset))
 		issues = append(issues, "API key not found")
-		solutions = append(solutions, "Use /login <api_key> or set GEMINI_API_KEY/GLM_API_KEY")
+		envHint := "GEMINI_API_KEY"
+		if p := config.GetProvider(backend); p != nil && len(p.EnvVars) > 0 {
+			envHint = p.EnvVars[0]
+		}
+		solutions = append(solutions, fmt.Sprintf("Use /login <provider> <api_key> or set %s", envHint))
 	}
 
 	sb.WriteString(fmt.Sprintf("\n%s─── Environment ───%s\n", colorCyan, colorReset))

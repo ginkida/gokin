@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/config"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -377,23 +379,27 @@ func containsAny(s string, substrs ...string) bool {
 func getAuthSuggestions() []string {
 	suggestions := []string{}
 
-	envKeys := map[string]string{
-		"GEMINI_API_KEY":    "Gemini",
-		"ANTHROPIC_API_KEY": "Anthropic",
-		"DEEPSEEK_API_KEY":  "DeepSeek",
-		"GOKIN_API_KEY":     "Gokin",
-	}
-
 	found := false
-	for envVar, name := range envKeys {
-		if os.Getenv(envVar) != "" {
-			suggestions = append(suggestions, fmt.Sprintf("Found %s (%s) — verify it is valid", envVar, name))
-			found = true
+	for _, p := range config.Providers {
+		for _, envVar := range p.EnvVars {
+			if os.Getenv(envVar) != "" {
+				suggestions = append(suggestions, fmt.Sprintf("Found %s (%s) — verify it is valid", envVar, p.DisplayName))
+				found = true
+				break
+			}
 		}
+	}
+	if os.Getenv("GOKIN_API_KEY") != "" {
+		suggestions = append(suggestions, "Found GOKIN_API_KEY (legacy) — verify it is valid")
+		found = true
 	}
 
 	if !found {
-		suggestions = append(suggestions, "No API key env vars detected. Set GEMINI_API_KEY or run gokin --setup")
+		envHint := "GEMINI_API_KEY"
+		if ps := config.Providers; len(ps) > 0 && len(ps[0].EnvVars) > 0 {
+			envHint = ps[0].EnvVars[0]
+		}
+		suggestions = append(suggestions, fmt.Sprintf("No API key env vars detected. Set %s or run gokin --setup", envHint))
 	}
 
 	suggestions = append(suggestions,

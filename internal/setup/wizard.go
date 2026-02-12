@@ -86,19 +86,19 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 // detectEnvAPIKeys checks for API key environment variables and returns the first found.
 // Returns (envVarName, backend, apiKey) or empty strings if none found.
 func detectEnvAPIKeys() (string, string, string) {
-	envKeys := []struct {
-		envVar  string
-		backend string
-	}{
-		{"GOKIN_API_KEY", "gemini"},
-		{"GEMINI_API_KEY", "gemini"},
-		{"ANTHROPIC_API_KEY", "anthropic"},
-		{"DEEPSEEK_API_KEY", "deepseek"},
+	// Check legacy key first
+	if key := os.Getenv("GOKIN_API_KEY"); key != "" {
+		return "GOKIN_API_KEY", "gemini", key
 	}
-
-	for _, ek := range envKeys {
-		if key := os.Getenv(ek.envVar); key != "" {
-			return ek.envVar, ek.backend, key
+	// Check provider-specific env vars via registry
+	for _, p := range config.Providers {
+		if p.KeyOptional {
+			continue
+		}
+		for _, envVar := range p.EnvVars {
+			if key := os.Getenv(envVar); key != "" {
+				return envVar, p.Name, key
+			}
 		}
 	}
 	return "", "", ""
@@ -147,11 +147,8 @@ func RunSetupWizard() error {
 				}
 
 				defaultModel := "gemini-3-flash-preview"
-				switch backend {
-				case "deepseek":
-					defaultModel = "deepseek-chat"
-				case "anthropic":
-					defaultModel = "claude-sonnet-4-5-20250929"
+				if ep := config.GetProvider(backend); ep != nil {
+					defaultModel = ep.DefaultModel
 				}
 
 				content := fmt.Sprintf("api:\n  api_key: %s\n  backend: %s\nmodel:\n  provider: %s\n  name: %s\n", apiKey, backend, backend, defaultModel)
@@ -197,19 +194,12 @@ func RunSetupWizard() error {
 }
 
 func setupAPIKey(reader *bufio.Reader, backend string) error {
-	keyType := "Gemini"
-	keyURL := "https://aistudio.google.com/apikey"
-	switch backend {
-	case "glm":
-		keyType = "GLM Coding Plan"
-		keyURL = "https://open.bigmodel.cn"
-	case "deepseek":
-		keyType = "DeepSeek"
-		keyURL = "https://platform.deepseek.com/api_keys"
-	case "anthropic":
-		keyType = "Anthropic"
-		keyURL = "https://console.anthropic.com/settings/keys"
+	p := config.GetProvider(backend)
+	if p == nil {
+		return fmt.Errorf("unsupported provider: %s", backend)
 	}
+	keyType := p.DisplayName
+	keyURL := p.SetupKeyURL
 
 	fmt.Printf("\n%s─── %s API Key Setup ───%s\n", colorCyan, keyType, colorReset)
 	fmt.Printf("\n%sGet your key at:%s\n", colorYellow, colorReset)
@@ -251,15 +241,7 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 	}
 
 	// Set default model based on backend
-	defaultModel := "gemini-3-flash-preview"
-	switch backend {
-	case "glm":
-		defaultModel = "glm-4.7"
-	case "deepseek":
-		defaultModel = "deepseek-chat"
-	case "anthropic":
-		defaultModel = "claude-sonnet-4-5-20250929"
-	}
+	defaultModel := p.DefaultModel
 
 	content := fmt.Sprintf("api:\n  api_key: %s\n  backend: %s\nmodel:\n  provider: %s\n  name: %s\n", apiKey, backend, backend, defaultModel)
 	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
