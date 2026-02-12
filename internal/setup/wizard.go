@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,41 +48,88 @@ Gokin helps you work with code:
 
 Choose your AI provider to get started.
 `
-
-	authChoiceMessage = `
-%sChoose AI provider:%s
-
-  %s[1]%s Gemini (Google Account)
-                       • Use your Gemini subscription
-                       • Login with Google Account (OAuth)
-                       • No API key needed
-
-  %s[2]%s Gemini (API Key) • Google's Gemini models
-                       • Free tier available
-                       • Get key at: https://aistudio.google.com/apikey
-
-  %s[3]%s GLM Coding Plan  • GLM-4/GLM-5 models via Z.ai
-                       • Optimized for code tasks
-                       • Budget-friendly (~$3/month)
-                       • Get key at open.bigmodel.cn
-
-  %s[4]%s DeepSeek (Cloud) • DeepSeek Chat & Reasoner models
-                       • Powerful coding assistant
-                       • Get key at: https://platform.deepseek.com/api_keys
-
-  %s[5]%s Anthropic (Cloud)• Claude Sonnet & Haiku models
-                       • Extended thinking support
-                       • Get key at: console.anthropic.com
-
-  %s[6]%s Ollama (Local)   • Run LLMs locally, no API key needed
-                       • Privacy-focused, works offline
-                       • Requires: ollama serve
-
-%sEnter your choice (1-6):%s `
 )
 
 // Spinner animation frames
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+type setupChoice struct {
+	Action string
+	Title  string
+	Lines  []string
+}
+
+func buildSetupChoices() []setupChoice {
+	choices := []setupChoice{
+		{
+			Action: "oauth-gemini",
+			Title:  "Gemini (Google Account)",
+			Lines: []string{
+				"Use your Gemini subscription",
+				"Login with Google Account (OAuth)",
+				"No API key needed",
+			},
+		},
+	}
+
+	for _, p := range config.Providers {
+		switch p.Name {
+		case "gemini":
+			choices = append(choices, setupChoice{
+				Action: "api:" + p.Name,
+				Title:  "Gemini (API Key)",
+				Lines: []string{
+					"Google's Gemini models",
+					"Free tier available",
+					"Get key at: " + p.SetupKeyURL,
+				},
+			})
+		case "glm":
+			choices = append(choices, setupChoice{
+				Action: "api:" + p.Name,
+				Title:  "GLM Coding Plan",
+				Lines: []string{
+					"GLM-4/GLM-5 models via Z.ai",
+					"Optimized for code tasks",
+					"Budget-friendly (~$3/month)",
+					"Get key at: " + p.SetupKeyURL,
+				},
+			})
+		case "deepseek":
+			choices = append(choices, setupChoice{
+				Action: "api:" + p.Name,
+				Title:  "DeepSeek (Cloud)",
+				Lines: []string{
+					"DeepSeek Chat & Reasoner models",
+					"Powerful coding assistant",
+					"Get key at: " + p.SetupKeyURL,
+				},
+			})
+		case "anthropic":
+			choices = append(choices, setupChoice{
+				Action: "api:" + p.Name,
+				Title:  "Anthropic (Cloud)",
+				Lines: []string{
+					"Claude Sonnet & Haiku models",
+					"Extended thinking support",
+					"Get key at: " + p.SetupKeyURL,
+				},
+			})
+		case "ollama":
+			choices = append(choices, setupChoice{
+				Action: "ollama",
+				Title:  "Ollama (Local)",
+				Lines: []string{
+					"Run LLMs locally, no API key needed",
+					"Privacy-focused, works offline",
+					"Requires: ollama serve",
+				},
+			})
+		}
+	}
+
+	return choices
+}
 
 // detectEnvAPIKeys checks for API key environment variables and returns the first found.
 // Returns (envVarName, backend, apiKey) or empty strings if none found.
@@ -164,8 +212,17 @@ func RunSetupWizard() error {
 		}
 	}
 
+	choices := buildSetupChoices()
 	for {
-		fmt.Printf(authChoiceMessage, colorYellow, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorGreen, colorReset, colorCyan, colorReset)
+		fmt.Printf("\n%sChoose AI provider:%s\n\n", colorYellow, colorReset)
+		for i, ch := range choices {
+			fmt.Printf("  %s[%d]%s %s\n", colorGreen, i+1, colorReset, ch.Title)
+			for _, line := range ch.Lines {
+				fmt.Printf("                       • %s\n", line)
+			}
+			fmt.Println()
+		}
+		fmt.Printf("%sEnter your choice (1-%d):%s ", colorCyan, len(choices), colorReset)
 
 		choice, err := reader.ReadString('\n')
 		if err != nil {
@@ -173,22 +230,22 @@ func RunSetupWizard() error {
 		}
 
 		choice = strings.TrimSpace(choice)
+		idx, parseErr := strconv.Atoi(choice)
+		if parseErr != nil || idx < 1 || idx > len(choices) {
+			fmt.Printf("\n%s⚠ Invalid choice. Please enter a number from 1 to %d.%s\n", colorRed, len(choices), colorReset)
+			continue
+		}
 
-		switch choice {
-		case "1":
+		selected := choices[idx-1]
+		switch {
+		case selected.Action == "oauth-gemini":
 			return setupGeminiOAuth()
-		case "2":
-			return setupAPIKey(reader, "gemini")
-		case "3":
-			return setupAPIKey(reader, "glm")
-		case "4":
-			return setupAPIKey(reader, "deepseek")
-		case "5":
-			return setupAPIKey(reader, "anthropic")
-		case "6":
+		case selected.Action == "ollama":
 			return setupOllama(reader)
+		case strings.HasPrefix(selected.Action, "api:"):
+			return setupAPIKey(reader, strings.TrimPrefix(selected.Action, "api:"))
 		default:
-			fmt.Printf("\n%s⚠ Invalid choice. Please enter 1, 2, 3, 4, 5, or 6.%s\n", colorRed, colorReset)
+			return fmt.Errorf("unsupported setup action: %s", selected.Action)
 		}
 	}
 }
@@ -682,72 +739,63 @@ func validateAPIKeyReal(backend, apiKey string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	switch backend {
-	case "gemini":
-		// Test with Gemini models.list endpoint
-		req, err := http.NewRequestWithContext(ctx, "GET",
-			"https://generativelanguage.googleapis.com/v1beta/models?key="+apiKey, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("connection error: %w", err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return fmt.Errorf("invalid API key (HTTP %d)", resp.StatusCode)
-		}
-		if resp.StatusCode != 200 {
-			return fmt.Errorf("unexpected response (HTTP %d)", resp.StatusCode)
-		}
-		return nil
-
-	case "deepseek":
-		// Test with DeepSeek models endpoint
-		req, err := http.NewRequestWithContext(ctx, "GET",
-			"https://api.deepseek.com/models", nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("connection error: %w", err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return fmt.Errorf("invalid API key (HTTP %d)", resp.StatusCode)
-		}
-		return nil
-
-	case "anthropic":
-		// Test with Anthropic models endpoint
-		req, err := http.NewRequestWithContext(ctx, "GET",
-			"https://api.anthropic.com/v1/models", nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("x-api-key", apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("connection error: %w", err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return fmt.Errorf("invalid API key (HTTP %d)", resp.StatusCode)
-		}
-		if resp.StatusCode != 200 {
-			return fmt.Errorf("unexpected response (HTTP %d)", resp.StatusCode)
-		}
-		return nil
-
-	default:
-		// For unknown backends, just check key length
-		if len(apiKey) < 20 {
-			return fmt.Errorf("API key seems too short for %s", backend)
-		}
-		return nil
+	if p := config.GetProvider(backend); p != nil && p.KeyValidation.URL != "" {
+		return validateWithProviderConfig(ctx, p, apiKey)
 	}
+
+	// For unknown backends, just check key length
+	if len(apiKey) < 20 {
+		return fmt.Errorf("API key seems too short for %s", backend)
+	}
+	return nil
+}
+
+func validateWithProviderConfig(ctx context.Context, p *config.ProviderDef, apiKey string) error {
+	v := p.KeyValidation
+	reqURL := v.URL
+
+	if v.AuthMode == "query" && v.QueryParam != "" {
+		reqURL += "?" + v.QueryParam + "=" + apiKey
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return err
+	}
+
+	switch v.AuthMode {
+	case "bearer":
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	case "header":
+		if v.HeaderName == "" {
+			return fmt.Errorf("provider %s key validation misconfigured: missing header name", p.Name)
+		}
+		req.Header.Set(v.HeaderName, apiKey)
+	}
+
+	for k, val := range v.ExtraHeaders {
+		req.Header.Set(k, val)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection error: %w", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fmt.Errorf("invalid API key (HTTP %d)", resp.StatusCode)
+	}
+
+	okStatuses := v.SuccessStatuses
+	if len(okStatuses) == 0 {
+		okStatuses = []int{200}
+	}
+	for _, status := range okStatuses {
+		if resp.StatusCode == status {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("unexpected response (HTTP %d)", resp.StatusCode)
 }

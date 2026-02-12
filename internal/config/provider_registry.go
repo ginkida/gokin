@@ -6,21 +6,33 @@ import "strings"
 // All provider-specific logic (loadFromEnv, Validate, HasProvider, SetProviderKey,
 // GetActiveKey, commands, wizard, UI) iterates Providers instead of switch/case.
 type ProviderDef struct {
-	Name          string                          // "anthropic"
-	DisplayName   string                          // "Anthropic (Claude)"
-	DefaultModel  string                          // "claude-sonnet-4-5-20250929"
-	EnvVars       []string                        // {"GOKIN_ANTHROPIC_KEY", "ANTHROPIC_API_KEY"}
-	UsesLegacyKey bool                            // true = fallback to APIKey
-	KeyOptional   bool                            // true for ollama
-	HasOAuth      bool                            // true for gemini
-	GetKey        func(api *APIConfig) string     // read the key field
+	Name          string                           // "anthropic"
+	DisplayName   string                           // "Anthropic (Claude)"
+	DefaultModel  string                           // "claude-sonnet-4-5-20250929"
+	EnvVars       []string                         // {"GOKIN_ANTHROPIC_KEY", "ANTHROPIC_API_KEY"}
+	UsesLegacyKey bool                             // true = fallback to APIKey
+	KeyOptional   bool                             // true for ollama
+	HasOAuth      bool                             // true for gemini
+	GetKey        func(api *APIConfig) string      // read the key field
 	SetKey        func(api *APIConfig, key string) // write the key field
-	ModelPrefixes []string                        // {"claude"} — auto-detect provider by model name
-	SetupKeyURL   string                          // "https://console.anthropic.com/settings/keys"
+	ModelPrefixes []string                         // {"claude"} — auto-detect provider by model name
+	SetupKeyURL   string                           // "https://console.anthropic.com/settings/keys"
+	KeyValidation KeyValidationDef                 // Optional online API key validation settings
+}
+
+// KeyValidationDef describes how to validate an API key online for a provider.
+type KeyValidationDef struct {
+	URL             string            // Endpoint used for lightweight key validation
+	AuthMode        string            // "query", "bearer", or "header"
+	QueryParam      string            // For AuthMode=query, e.g. "key"
+	HeaderName      string            // For AuthMode=header, e.g. "x-api-key"
+	ExtraHeaders    map[string]string // Additional static headers
+	SuccessStatuses []int             // Accepted HTTP status codes (default: 200)
 }
 
 // Providers is the ordered list of all supported providers.
 // Add a new provider here + one field in APIConfig + one factory case in client/factory.go.
+// Optional but recommended: add key validation endpoint and setup copy in internal/setup/wizard.go.
 var Providers = []ProviderDef{
 	{
 		Name:          "gemini",
@@ -33,6 +45,12 @@ var Providers = []ProviderDef{
 		SetKey:        func(api *APIConfig, key string) { api.GeminiKey = key },
 		ModelPrefixes: []string{"gemini", "models/"},
 		SetupKeyURL:   "https://aistudio.google.com/apikey",
+		KeyValidation: KeyValidationDef{
+			URL:             "https://generativelanguage.googleapis.com/v1beta/models",
+			AuthMode:        "query",
+			QueryParam:      "key",
+			SuccessStatuses: []int{200},
+		},
 	},
 	{
 		Name:          "anthropic",
@@ -44,6 +62,15 @@ var Providers = []ProviderDef{
 		SetKey:        func(api *APIConfig, key string) { api.AnthropicKey = key },
 		ModelPrefixes: []string{"claude"},
 		SetupKeyURL:   "https://console.anthropic.com/settings/keys",
+		KeyValidation: KeyValidationDef{
+			URL:        "https://api.anthropic.com/v1/models",
+			AuthMode:   "header",
+			HeaderName: "x-api-key",
+			ExtraHeaders: map[string]string{
+				"anthropic-version": "2023-06-01",
+			},
+			SuccessStatuses: []int{200},
+		},
 	},
 	{
 		Name:          "glm",
@@ -55,6 +82,11 @@ var Providers = []ProviderDef{
 		SetKey:        func(api *APIConfig, key string) { api.GLMKey = key },
 		ModelPrefixes: []string{"glm"},
 		SetupKeyURL:   "https://open.bigmodel.cn",
+		KeyValidation: KeyValidationDef{
+			URL:             "https://open.bigmodel.cn/api/paas/v4/models",
+			AuthMode:        "bearer",
+			SuccessStatuses: []int{200},
+		},
 	},
 	{
 		Name:          "deepseek",
@@ -66,6 +98,11 @@ var Providers = []ProviderDef{
 		SetKey:        func(api *APIConfig, key string) { api.DeepSeekKey = key },
 		ModelPrefixes: []string{"deepseek"},
 		SetupKeyURL:   "https://platform.deepseek.com/api_keys",
+		KeyValidation: KeyValidationDef{
+			URL:             "https://api.deepseek.com/models",
+			AuthMode:        "bearer",
+			SuccessStatuses: []int{200},
+		},
 	},
 	{
 		Name:         "ollama",

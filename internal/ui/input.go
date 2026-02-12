@@ -139,7 +139,9 @@ func defaultCommands() []CommandInfo {
 		{Name: "status", Description: "Show configuration status", Category: "Auth"},
 		{Name: "doctor", Description: "Check environment and configuration", Category: "Auth"},
 		{Name: "config", Description: "Show current configuration", Category: "Auth"},
-		{Name: "update", Description: "Update gokin to latest version", Category: "Auth"},
+		{Name: "update", Description: "Check/install updates and rollback", Category: "Auth",
+			Args:  []ArgInfo{{Name: "action", Required: false, Type: "option", Options: []string{"install", "backups", "rollback"}}},
+			Usage: "/update [install|backups|rollback [backup-id]]"},
 
 		// Git
 		{Name: "init", Description: "Initialize GOKIN.md for this project", Category: "Git"},

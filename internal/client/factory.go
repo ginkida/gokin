@@ -258,73 +258,6 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	return NewAnthropicClient(anthropicConfig)
 }
 
-// newAnthropicClientForModel creates an Anthropic-compatible client for a specific model (from ModelInfo).
-func newAnthropicClientForModel(cfg *config.Config, modelInfo ModelInfo) (Client, error) {
-	// Check for custom base URL override in config
-	baseURL := modelInfo.BaseURL
-	if cfg.Model.CustomBaseURL != "" && cfg.Model.Name == modelInfo.ID {
-		baseURL = cfg.Model.CustomBaseURL
-	}
-
-	// If still no base URL, use default for provider
-	if baseURL == "" {
-		if strings.Contains(modelInfo.ID, "glm") {
-			baseURL = DefaultGLMBaseURL
-		} else {
-			baseURL = DefaultAnthropicBaseURL
-		}
-	}
-
-	// Determine API key to use
-	apiKey := cfg.API.APIKey
-
-	if apiKey == "" {
-		return nil, fmt.Errorf("API key required for Anthropic-compatible model %s", modelInfo.ID)
-	}
-
-	anthropicConfig := AnthropicConfig{
-		APIKey:            apiKey,
-		BaseURL:           baseURL,
-		Model:             modelInfo.ID,
-		MaxTokens:         cfg.Model.MaxOutputTokens,
-		Temperature:       cfg.Model.Temperature,
-		StreamEnabled:     true,
-		EnableThinking:    cfg.Model.EnableThinking,
-		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout, // 0 = use default 30s
-		// Retry configuration from config
-		MaxRetries:  cfg.API.Retry.MaxRetries,
-		RetryDelay:  cfg.API.Retry.RetryDelay,
-		HTTPTimeout: cfg.API.Retry.HTTPTimeout,
-	}
-
-	return NewAnthropicClient(anthropicConfig)
-}
-
-// newAnthropicClientForModelID creates an Anthropic-compatible client from a model ID string.
-func newAnthropicClientForModelID(cfg *config.Config, modelID string) (Client, error) {
-	// Create a synthetic ModelInfo from model ID
-	modelInfo := ModelInfo{
-		ID:   modelID,
-		Name: modelID,
-	}
-
-	// Check if user has overridden the base URL in config
-	if cfg.Model.CustomBaseURL != "" {
-		modelInfo.BaseURL = cfg.Model.CustomBaseURL
-		modelInfo.Provider = "anthropic"
-	} else if strings.HasPrefix(modelID, "glm") {
-		// Set default base URL for GLM models
-		modelInfo.Provider = "anthropic"
-		modelInfo.BaseURL = DefaultGLMBaseURL
-	} else {
-		modelInfo.Provider = "anthropic"
-		modelInfo.BaseURL = DefaultAnthropicBaseURL
-	}
-
-	return newAnthropicClientForModel(cfg, modelInfo)
-}
-
 // newDeepSeekClient creates a DeepSeek client using Anthropic-compatible API.
 func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	// Load API key from environment or config via registry
@@ -435,6 +368,9 @@ func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error
 func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 	// Load optional API key (for remote Ollama servers with auth)
 	p := config.GetProvider("ollama")
+	if p == nil {
+		return nil, fmt.Errorf("provider registry missing entry for ollama")
+	}
 	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), "")
 
 	// Log key source for debugging (without exposing the key)

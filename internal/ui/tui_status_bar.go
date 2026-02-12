@@ -50,7 +50,7 @@ func (m Model) renderStatusBar() string {
 // renderStatusBarMinimal renders a minimal status bar for very narrow terminals (< 60 chars).
 // Shows compact core reliability fields.
 func (m Model) renderStatusBarMinimal() string {
-	parts := m.compactStatusSegments()
+	parts := m.minimalStatusSegments()
 	return strings.Join(parts, " ")
 }
 
@@ -70,35 +70,66 @@ func (m Model) renderStatusBarCompact() string {
 
 func (m Model) compactStatusSegments() []string {
 	var parts []string
-	mode := "N"
+	mode := "normal"
 	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
-		mode = "D"
+		mode = "degraded"
 	}
-	parts = append(parts, "m:"+mode)
+	parts = append(parts, "mode:"+mode)
 
 	if m.hasActivePlanStatus() {
-		step := "-"
-		step = fmt.Sprintf("%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
-		parts = append(parts, "pl:"+step)
+		step := fmt.Sprintf("%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+		parts = append(parts, "step:"+step)
 	}
 
 	if m.shouldShowBreaker() {
-		parts = append(parts, "bk:"+shortBreakerState(m.runtimeStatus.RequestBreaker)+"/"+shortBreakerState(m.runtimeStatus.StepBreaker))
+		parts = append(parts, "breaker:"+shortBreakerState(m.runtimeStatus.RequestBreaker)+"/"+shortBreakerState(m.runtimeStatus.StepBreaker))
 	}
 
 	provider := m.runtimeStatus.Provider
 	if provider == "" {
 		provider = "?"
 	}
-	if len(provider) > 6 {
-		provider = provider[:6]
+	if len(provider) > 12 {
+		provider = provider[:12]
 	}
-	parts = append(parts, "p:"+provider)
+	parts = append(parts, "provider:"+provider)
 
 	if pct := m.getContextPercent(); pct > 0 {
-		parts = append(parts, fmt.Sprintf("t:%.0f%%", pct))
+		parts = append(parts, fmt.Sprintf("ctx:%.0f%%", pct))
 	} else {
-		parts = append(parts, "t:n/a")
+		parts = append(parts, "ctx:n/a")
+	}
+
+	return parts
+}
+
+func (m Model) minimalStatusSegments() []string {
+	var parts []string
+	mode := "normal"
+	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
+		mode = "degraded"
+	}
+	parts = append(parts, "mode:"+mode)
+
+	if m.hasActivePlanStatus() {
+		parts = append(parts, fmt.Sprintf("step:%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps))
+	}
+
+	if m.shouldShowBreaker() {
+		parts = append(parts, "breaker:"+shortBreakerState(m.runtimeStatus.RequestBreaker)+"/"+shortBreakerState(m.runtimeStatus.StepBreaker))
+	}
+
+	provider := m.runtimeStatus.Provider
+	if provider == "" {
+		provider = "?"
+	}
+	if len(provider) > 10 {
+		provider = provider[:10]
+	}
+	parts = append(parts, "provider:"+provider)
+
+	if pct := m.getContextPercent(); pct > 0 {
+		parts = append(parts, fmt.Sprintf("ctx:%.0f%%", pct))
 	}
 
 	return parts
