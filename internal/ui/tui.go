@@ -1372,7 +1372,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			// Recalculate percentage if MaxTokens is set
 			if m.tokenUsage.MaxTokens > 0 {
 				total := m.tokenUsage.Tokens // Simplified for estimate
-				m.tokenUsage.PercentUsed = float64(total) / float64(m.tokenUsage.MaxTokens) * 100
+				// PercentUsed is stored as ratio 0..1.
+				m.tokenUsage.PercentUsed = float64(total) / float64(m.tokenUsage.MaxTokens)
 			}
 		}
 

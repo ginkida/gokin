@@ -266,6 +266,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	// Update session history
 	a.session.SetHistory(newHistory)
+	a.applyToolOutputHygiene()
 
 	// Check for context-clear request after plan approval
 	if a.planManager != nil && a.planManager.IsContextClearRequested() {

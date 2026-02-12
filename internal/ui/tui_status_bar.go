@@ -333,7 +333,17 @@ func renderContextBar(pct float64, barWidth int) string {
 	bar := filledStyle.Render(strings.Repeat("█", filled)) +
 		emptyStyle.Render(strings.Repeat("░", barWidth-filled))
 
-	return bar + " " + pctStyle.Render(fmt.Sprintf("%.0f%%", pct))
+	var label string
+	switch {
+	case pct < 1:
+		label = "<1%"
+	case pct < 10:
+		label = fmt.Sprintf("%.1f%%", pct)
+	default:
+		label = fmt.Sprintf("%.0f%%", pct)
+	}
+
+	return bar + " " + pctStyle.Render(label)
 }
 
 // getContextPercent returns the context usage percentage from available sources.
@@ -342,7 +352,12 @@ func (m Model) getContextPercent() float64 {
 		return m.tokenUsagePercent
 	}
 	if m.showTokens && m.tokenUsage != nil {
-		return m.tokenUsage.PercentUsed * 100
+		p := m.tokenUsage.PercentUsed
+		// Normalize: some legacy updates may already provide 0..100.
+		if p > 1.0 {
+			return p
+		}
+		return p * 100
 	}
 	return 0
 }

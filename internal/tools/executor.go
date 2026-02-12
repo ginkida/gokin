@@ -29,6 +29,8 @@ const (
 	MaxConcurrentToolExecutions = 5
 	// maxStreamRetries is the maximum number of retries for stream idle timeouts.
 	maxStreamRetries = 2
+	// modelRoundHardTimeout caps a single model round to prevent zombie requests.
+	modelRoundHardTimeout = 4 * time.Minute
 )
 
 // ResultCompactor interface for compacting tool results.
@@ -511,13 +513,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// Send function responses back to model.
 			// Pass history without the just-appended tool results since
 			// all client implementations append results themselves.
-			stream, err := e.client.SendFunctionResponse(ctx, history[:historyBeforeResults], results)
+			roundCtx, roundCancel := e.withModelRoundTimeout(ctx)
+			stream, err := e.client.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
 			if err != nil {
+				roundCancel()
 				return history, "", fmt.Errorf("function response error: %w", err)
 			}
 
 			// Collect the response
-			resp, err = e.collectStreamWithHandler(ctx, stream)
+			resp, err = e.collectStreamWithHandler(roundCtx, stream)
 			if err != nil {
 				// Retry stream idle timeout if no partial content was received
 				var sitErr *client.ErrStreamIdleTimeout
@@ -527,12 +531,16 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						e.handler.OnWarning(fmt.Sprintf("Stream stalled after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
 					}
 					// Re-send function response
-					stream, err = e.client.SendFunctionResponse(ctx, history[:historyBeforeResults], results)
+					roundCancel()
+					roundCtx, roundCancel = e.withModelRoundTimeout(ctx)
+					stream, err = e.client.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
 					if err != nil {
+						roundCancel()
 						return history, "", fmt.Errorf("function response retry error: %w", err)
 					}
-					resp, err = e.collectStreamWithHandler(ctx, stream)
+					resp, err = e.collectStreamWithHandler(roundCtx, stream)
 					if err != nil {
+						roundCancel()
 						return history, "", err
 					}
 				} else if ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
@@ -542,12 +550,16 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						e.handler.OnWarning(fmt.Sprintf("Request failed after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
 					}
 					// Re-send function response
-					stream, err = e.client.SendFunctionResponse(ctx, history[:historyBeforeResults], results)
+					roundCancel()
+					roundCtx, roundCancel = e.withModelRoundTimeout(ctx)
+					stream, err = e.client.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
 					if err != nil {
+						roundCancel()
 						return history, "", fmt.Errorf("function response retry error: %w", err)
 					}
-					resp, err = e.collectStreamWithHandler(ctx, stream)
+					resp, err = e.collectStreamWithHandler(roundCtx, stream)
 					if err != nil {
+						roundCancel()
 						return history, "", err
 					}
 				} else {
@@ -561,9 +573,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						history = append(history, partialContent)
 						e.historyMu.Unlock()
 					}
+					roundCancel()
 					return history, "", err
 				}
 			}
+			roundCancel()
 			streamRetries = 0 // reset on success
 
 			// Text-based tool call fallback for chained calls
@@ -689,12 +703,29 @@ func (e *Executor) getModelResponse(ctx context.Context, history []*genai.Conten
 
 	historyWithoutLast := history[:len(history)-1]
 
-	stream, err := e.client.SendMessageWithHistory(ctx, historyWithoutLast, message)
+	roundCtx, cancel := e.withModelRoundTimeout(ctx)
+	defer cancel()
+
+	stream, err := e.client.SendMessageWithHistory(roundCtx, historyWithoutLast, message)
 	if err != nil {
 		return nil, err
 	}
 
-	return e.collectStreamWithHandler(ctx, stream)
+	return e.collectStreamWithHandler(roundCtx, stream)
+}
+
+func (e *Executor) withModelRoundTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := modelRoundHardTimeout
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return context.WithCancel(parent)
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 // collectStreamWithHandler collects streaming response while calling handlers.
