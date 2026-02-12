@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -113,22 +114,29 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	for attempt := 0; attempt < maxRequestRetries; attempt++ {
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
+		execFn := func() error {
+			if a.taskRouter != nil {
+				// Route the task intelligently
+				newHistory, response, err = a.taskRouter.Execute(ctx, history, message)
 
-		if a.taskRouter != nil {
-			// Route the task intelligently
-			newHistory, response, err = a.taskRouter.Execute(ctx, history, message)
-
-			// Log routing decision for debugging
-			if analysis := a.taskRouter.GetAnalysis(message); analysis != nil {
-				logging.Debug("task routed",
-					"complexity", analysis.Score,
-					"type", analysis.Type,
-					"strategy", analysis.Strategy,
-					"reasoning", analysis.Reasoning)
+				// Log routing decision for debugging
+				if analysis := a.taskRouter.GetAnalysis(message); analysis != nil {
+					logging.Debug("task routed",
+						"complexity", analysis.Score,
+						"type", analysis.Type,
+						"strategy", analysis.Strategy,
+						"reasoning", analysis.Reasoning)
+				}
+			} else {
+				// Fallback to standard executor
+				newHistory, response, err = a.executor.Execute(ctx, history, message)
 			}
+			return err
+		}
+		if a.policy != nil {
+			err = a.policy.ExecuteRequest(ctx, execFn)
 		} else {
-			// Fallback to standard executor
-			newHistory, response, err = a.executor.Execute(ctx, history, message)
+			err = execFn()
 		}
 
 		if err == nil {
@@ -180,6 +188,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	}
 
 	if err != nil {
+		if a.reliability != nil {
+			a.reliability.RecordFailure()
+		}
+		if errors.Is(err, ErrRequestCircuitOpen) {
+			a.safeSendToProgram(ui.StreamTextMsg(
+				"\n⚠️ Request circuit breaker is open. Waiting for recovery window.\n"))
+		}
+
 		// Save history even on error — preserves user message and any partial context.
 		// This prevents context loss when tools already executed with side effects.
 		if len(newHistory) > len(history) {
@@ -194,8 +210,17 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		a.lastErrorTime = time.Now()
 		a.mu.Unlock()
 
+		if a.reliability != nil && a.reliability.IsDegraded() {
+			a.safeSendToProgram(ui.StreamTextMsg(
+				fmt.Sprintf("\n⚠️ Switching to safe mode for stability (%v).\n", a.reliability.DegradedRemaining())))
+		}
+
 		a.safeSendToProgram(ui.ErrorMsg(err))
 		return
+	}
+
+	if a.reliability != nil {
+		a.reliability.RecordSuccess()
 	}
 
 	// Update session history
@@ -306,6 +331,10 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 // executePlanWithClearContext dispatches plan execution to either delegated
 // sub-agent mode or direct monolithic execution.
 func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *plan.Plan) {
+	execCtx, execCancel := context.WithCancel(ctx)
+	defer execCancel()
+	a.startPlanWatchdog(execCtx, execCancel, approvedPlan.ID)
+
 	// Enter execution mode - this blocks creation of new plans during execution
 	if a.planManager != nil {
 		a.planManager.SetExecutionMode(true)
@@ -329,10 +358,17 @@ func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *pla
 		}
 	}
 
-	if a.config.Plan.DelegateSteps && a.agentRunner != nil {
-		a.executePlanDelegated(ctx, approvedPlan)
+	delegated := a.config.Plan.DelegateSteps && a.agentRunner != nil
+	if delegated && a.shouldUseSafeMode() {
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("⚠️ Safe mode active (%v): running plan without delegation.\n", a.reliability.DegradedRemaining())))
+		delegated = false
+	}
+
+	if delegated {
+		a.executePlanDelegated(execCtx, approvedPlan)
 	} else {
-		a.executePlanDirectly(ctx, approvedPlan)
+		a.executePlanDirectly(execCtx, approvedPlan)
 	}
 }
 
@@ -438,8 +474,19 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 	const maxAutoResumeRounds = 2
 	const autoResumeCooldown = 60 * time.Second
 	autoResumeCount := 0
+	maxExecutionRounds := maxPlanExecutionRounds(totalSteps)
+	executionRounds := 0
 
 	for {
+		executionRounds++
+		if executionRounds > maxExecutionRounds {
+			a.planManager.PausePlan()
+			a.safeSendToProgram(ui.StreamTextMsg(
+				"\n⏸ Plan paused — execution safety limit reached. Use /resume-plan to continue.\n"))
+			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			return
+		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -480,29 +527,13 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 			break // All steps done — proceed to summary
 		}
 
-		if len(readySteps) == 1 {
-			a.executeDirectStep(ctx, readySteps[0], approvedPlan, totalSteps, sharedMem, maxRetries, backoffDurations)
-		} else {
-			// Parallel execution with context cancellation support
-			done := make(chan struct{})
-			var wg sync.WaitGroup
-			for _, step := range readySteps {
-				wg.Add(1)
-				go func(s *plan.Step) {
-					defer wg.Done()
-					a.executeDirectStep(ctx, s, approvedPlan, totalSteps, sharedMem, maxRetries, backoffDurations)
-				}(step)
-			}
-			go func() {
-				wg.Wait()
-				close(done)
-			}()
+		// Direct mode shares a single session, so run sequentially for reliability.
+		for _, step := range readySteps {
+			a.executeDirectStep(ctx, step, approvedPlan, totalSteps, sharedMem, maxRetries, backoffDurations)
 			select {
-			case <-done:
 			case <-ctx.Done():
-				// Context cancelled — steps will exit via their own ctx checks.
-				// Wait for them to finish cleanup.
-				<-done
+				return
+			default:
 			}
 		}
 	}
@@ -583,6 +614,15 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		return
 	}
 
+	// Idempotency guard: if previous attempt already produced side effects for
+	// this step but never reached completion, avoid automatic re-execution.
+	if approvedPlan.HasPartialEffects(step.ID) {
+		a.planManager.PauseStep(step.ID, "partial effects from previous attempt detected")
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("⏸ Step %d paused for safety: previous partial effects detected. Review and /resume-plan when ready.\n", step.ID)))
+		return
+	}
+
 	// Compact history if needed before executing next step
 	if a.contextManager != nil {
 		if err := a.contextManager.PrepareForRequest(ctx); err != nil {
@@ -593,6 +633,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	// Mark step as started and track current step ID
 	a.planManager.StartStep(step.ID)
 	a.planManager.SetCurrentStepID(step.ID)
+	a.touchStepHeartbeat()
 
 	// Update plan progress in status bar
 	a.safeSendToProgram(ui.PlanProgressMsg{
@@ -625,7 +666,15 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		history, histVersion := a.session.GetHistoryWithVersion()
 		var newHistory []*genai.Content
-		newHistory, response, err = a.executor.Execute(stepCtx, history, stepMsg)
+		execFn := func() error {
+			newHistory, response, err = a.executor.Execute(stepCtx, history, stepMsg)
+			return err
+		}
+		if a.policy != nil {
+			err = a.policy.ExecutePlanStep(stepCtx, execFn)
+		} else {
+			err = execFn()
+		}
 
 		if err == nil {
 			// Success — update session history with version check.
@@ -646,6 +695,9 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 
 		// Classify the error
 		errCat = plan.ClassifyError(err, err.Error())
+		if errors.Is(err, ErrStepCircuitOpen) {
+			errCat = plan.ErrorTransient
+		}
 
 		// Retry only on transient errors
 		if errCat == plan.ErrorTransient && attempt < maxRetries-1 {
@@ -674,6 +726,9 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	// Handle step failure
 	if err != nil {
 		errMsg := err.Error()
+		if a.reliability != nil {
+			a.reliability.RecordFailure()
+		}
 
 		// Transient error after all attempts → pause step, plan continues with other steps
 		if errCat == plan.ErrorTransient {
@@ -723,6 +778,10 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	}
 
 	// Step succeeded — store output and mark complete
+	if a.reliability != nil {
+		a.reliability.RecordSuccess()
+	}
+
 	output := response
 	if len(output) > planStepOutputMaxChars {
 		output = output[:planStepOutputMaxChars] + "..."
@@ -888,8 +947,19 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	const maxAutoResumeRounds = 2
 	const autoResumeCooldown = 60 * time.Second
 	autoResumeCount := 0
+	maxExecutionRounds := maxPlanExecutionRounds(totalSteps)
+	executionRounds := 0
 
 	for {
+		executionRounds++
+		if executionRounds > maxExecutionRounds {
+			a.planManager.PausePlan()
+			a.safeSendToProgram(ui.StreamTextMsg(
+				"\n⏸ Plan paused — execution safety limit reached. Use /resume-plan to continue.\n"))
+			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			return
+		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -930,8 +1000,13 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			break // All steps done — proceed to summary
 		}
 
-		if len(readySteps) == 1 {
-			a.executeDelegatedStep(ctx, readySteps[0], approvedPlan, totalSteps, sharedMem, projectCtx, contextSnapshot)
+		if len(readySteps) == 1 || a.shouldUseSafeMode() {
+			if len(readySteps) > 1 && a.shouldUseSafeMode() {
+				a.safeSendToProgram(ui.StreamTextMsg("⚠️ Safe mode: running steps sequentially.\n"))
+			}
+			for _, step := range readySteps {
+				a.executeDelegatedStep(ctx, step, approvedPlan, totalSteps, sharedMem, projectCtx, contextSnapshot)
+			}
 		} else {
 			// Parallel execution of ready steps with context cancellation support
 			done := make(chan struct{})
@@ -1016,9 +1091,18 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		return
 	}
 
+	// Idempotency guard for delegated execution.
+	if approvedPlan.HasPartialEffects(step.ID) {
+		a.planManager.PauseStep(step.ID, "partial effects from previous attempt detected")
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("⏸ Step %d paused for safety: previous partial effects detected. Review and /resume-plan when ready.\n", step.ID)))
+		return
+	}
+
 	// Mark step as started and track current step ID
 	a.planManager.StartStep(step.ID)
 	a.planManager.SetCurrentStepID(step.ID)
+	a.touchStepHeartbeat()
 
 	// Update plan progress in status bar
 	a.safeSendToProgram(ui.PlanProgressMsg{
@@ -1074,23 +1158,34 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	backoffDurations := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		_, result, err = a.agentRunner.SpawnWithContext(
-			stepCtx, "general", stepPrompt, 30, "", projectCtx, onText, true,
-			func(progress *agent.AgentProgress) {
-				a.safeSendToProgram(ui.PlanProgressMsg{
-					PlanID:        approvedPlan.ID,
-					CurrentStepID: step.ID,
-					CurrentTitle:  step.Title,
-					TotalSteps:    totalSteps,
-					Completed:     approvedPlan.CompletedCount(),
-					Progress:      approvedPlan.Progress(),
-					Status:        "in_progress",
-					SubStepInfo:   progress.FormatProgress(),
+		execFn := func() error {
+			_, result, err = a.agentRunner.SpawnWithContext(
+				stepCtx, "general", stepPrompt, 30, "", projectCtx, onText, true,
+				func(progress *agent.AgentProgress) {
+					a.safeSendToProgram(ui.PlanProgressMsg{
+						PlanID:        approvedPlan.ID,
+						CurrentStepID: step.ID,
+						CurrentTitle:  step.Title,
+						TotalSteps:    totalSteps,
+						Completed:     approvedPlan.CompletedCount(),
+						Progress:      approvedPlan.Progress(),
+						Status:        "in_progress",
+						SubStepInfo:   progress.FormatProgress(),
+					})
 				})
-			})
+			return err
+		}
+		if a.policy != nil {
+			err = a.policy.ExecutePlanStep(stepCtx, execFn)
+		} else {
+			err = execFn()
+		}
 
 		if err != nil {
 			errCat = plan.ClassifyError(err, err.Error())
+			if errors.Is(err, ErrStepCircuitOpen) {
+				errCat = plan.ErrorTransient
+			}
 			if errCat == plan.ErrorTransient && attempt < maxRetries-1 {
 				backoff := backoffDurations[attempt]
 				logging.Warn("sub-agent error, retrying step",
@@ -1116,6 +1211,10 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	}
 
 	if err != nil || result == nil || result.Status == agent.AgentStatusFailed {
+		if a.reliability != nil {
+			a.reliability.RecordFailure()
+		}
+
 		errMsg := "unknown error"
 		if err != nil {
 			errMsg = err.Error()
@@ -1178,6 +1277,10 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	}
 
 	// Store compact output in step and mark complete
+	if a.reliability != nil {
+		a.reliability.RecordSuccess()
+	}
+
 	output := result.Output
 	if len(output) > planStepOutputMaxChars {
 		output = output[:planStepOutputMaxChars] + "..."
@@ -1254,6 +1357,24 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 // isRetryableError checks if an error is retryable (network, timeout, rate limit).
 func isRetryableError(err error) bool {
 	return client.IsRetryableError(err)
+}
+
+func (a *App) shouldUseSafeMode() bool {
+	return a.reliability != nil && a.reliability.IsDegraded()
+}
+
+func maxPlanExecutionRounds(totalSteps int) int {
+	if totalSteps <= 0 {
+		return 40
+	}
+	rounds := totalSteps * 12
+	if rounds < 40 {
+		return 40
+	}
+	if rounds > 600 {
+		return 600
+	}
+	return rounds
 }
 
 // finalizePlanLifecycleState applies a validated terminal/non-terminal lifecycle state

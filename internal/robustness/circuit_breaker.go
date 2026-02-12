@@ -19,6 +19,19 @@ const (
 	StateOpen
 )
 
+func (s State) String() string {
+	switch s {
+	case StateClosed:
+		return "closed"
+	case StateHalfOpen:
+		return "half_open"
+	case StateOpen:
+		return "open"
+	default:
+		return "unknown"
+	}
+}
+
 type CircuitBreaker struct {
 	mu           sync.RWMutex
 	state        State
@@ -52,8 +65,8 @@ func (cb *CircuitBreaker) Execute(ctx context.Context, fn func() error) error {
 }
 
 func (cb *CircuitBreaker) allowRequest() bool {
-	cb.mu.RLock()
-	defer cb.mu.RUnlock()
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
 
 	if cb.state == StateClosed {
 		return true
@@ -61,13 +74,19 @@ func (cb *CircuitBreaker) allowRequest() bool {
 
 	if cb.state == StateOpen {
 		if time.Since(cb.lastFailure) > cb.resetTimeout {
-			// Transition to half-open is handled in recordSuccess/Failure or here
+			// Allow a probe request in half-open mode.
+			cb.state = StateHalfOpen
 			return true
 		}
 		return false
 	}
 
 	return true // Half-open
+}
+
+// CanExecute returns true if the circuit allows request execution now.
+func (cb *CircuitBreaker) CanExecute() bool {
+	return cb.allowRequest()
 }
 
 func (cb *CircuitBreaker) recordFailure() {

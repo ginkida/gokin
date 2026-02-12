@@ -28,10 +28,15 @@ type OAuthManager struct {
 
 // NewGeminiOAuthManager creates an OAuthManager with Gemini Code Assist credentials
 func NewGeminiOAuthManager() *OAuthManager {
+	return NewGeminiOAuthManagerWithPort(GeminiOAuthCallbackPort)
+}
+
+// NewGeminiOAuthManagerWithPort creates an OAuth manager with a custom callback port.
+func NewGeminiOAuthManagerWithPort(port int) *OAuthManager {
 	return &OAuthManager{
 		clientID:     GeminiOAuthClientID,
 		clientSecret: GeminiOAuthClientSecret,
-		redirectURI:  GeminiOAuthRedirectURI,
+		redirectURI:  fmt.Sprintf("http://localhost:%d/oauth2callback", port),
 		scopes: []string{
 			ScopeCloudPlatform,
 			ScopeUserInfoEmail,

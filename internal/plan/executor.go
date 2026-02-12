@@ -886,27 +886,37 @@ func (m *Manager) ResumePlan() (*Plan, error) {
 
 	// Check if there are any resumable steps
 	hasPending := false
+	plan.mu.RLock()
 	for _, step := range plan.Steps {
 		if step.Status == StatusPending || step.Status == StatusPaused || step.Status == StatusFailed {
 			hasPending = true
 			break
 		}
 	}
+	plan.mu.RUnlock()
 
 	if !hasPending {
 		return nil, fmt.Errorf("plan already completed, no steps to resume")
 	}
 
 	// Reset paused and failed steps to pending for retry
+	plan.mu.Lock()
 	for _, step := range plan.Steps {
 		if step.Status == StatusPaused || step.Status == StatusFailed {
 			step.Status = StatusPending
 			step.Error = ""
+			if plan.RunLedger != nil {
+				if entry, ok := plan.RunLedger[step.ID]; ok && entry != nil {
+					entry.PartialEffects = false
+				}
+			}
 		}
 	}
 
 	// Reset plan status to in_progress
 	plan.Status = StatusInProgress
+	plan.UpdatedAt = time.Now()
+	plan.mu.Unlock()
 
 	if err := plan.TransitionLifecycle(LifecycleApproved); err != nil {
 		return nil, err

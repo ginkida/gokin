@@ -85,39 +85,48 @@ func NewClient(ctx context.Context, cfg *config.Config, modelID string) (Client,
 // and each configured fallback provider.
 func newFallbackClientFromConfig(ctx context.Context, cfg *config.Config, primaryProvider, modelID string) (Client, error) {
 	var clients []Client
+	var clientProviders []string
 
-	// Create the primary client
-	primary, err := getOrCreateClient(ctx, cfg, primaryProvider, modelID)
-	if err != nil {
-		logging.Warn("failed to create primary client, trying fallbacks",
-			"provider", primaryProvider,
-			"error", err.Error())
-	} else {
-		clients = append(clients, primary)
+	// Build candidate provider list (primary + configured fallbacks), then
+	// reorder by dynamic health score so unhealthy providers are de-prioritized.
+	candidateProviders := []string{}
+	addProvider := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		for _, existing := range candidateProviders {
+			if existing == p {
+				return
+			}
+		}
+		candidateProviders = append(candidateProviders, p)
+	}
+	addProvider(primaryProvider)
+	for _, fbProvider := range cfg.Model.FallbackProviders {
+		addProvider(fbProvider)
 	}
 
-	// Create fallback clients
-	for _, fbProvider := range cfg.Model.FallbackProviders {
-		fbProvider = strings.TrimSpace(fbProvider)
-		if fbProvider == "" || fbProvider == primaryProvider {
-			continue
-		}
+	orderedProviders := reorderProvidersByHealth(candidateProviders)
 
-		fbClient, fbErr := getOrCreateClient(ctx, cfg, fbProvider, modelID)
-		if fbErr != nil {
-			logging.Warn("failed to create fallback client",
-				"provider", fbProvider,
-				"error", fbErr.Error())
+	// Create clients in health-prioritized order.
+	for _, provider := range orderedProviders {
+		c, err := getOrCreateClient(ctx, cfg, provider, modelID)
+		if err != nil {
+			logging.Warn("failed to create fallback chain client",
+				"provider", provider,
+				"error", err.Error())
 			continue
 		}
-		clients = append(clients, fbClient)
+		clients = append(clients, c)
+		clientProviders = append(clientProviders, provider)
 	}
 
 	if len(clients) == 0 {
 		return nil, fmt.Errorf("failed to create any client: primary provider %q and all fallback providers failed", primaryProvider)
 	}
 
-	return NewFallbackClient(clients)
+	return NewFallbackClient(clients, clientProviders)
 }
 
 // getOrCreateClient retrieves a client from the pool or creates a new one.
@@ -152,7 +161,20 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 		// Check OAuth first
 		if cfg.API.HasOAuthToken("gemini") {
 			logging.Debug("using Gemini OAuth client", "email", cfg.API.GeminiOAuth.Email)
-			return NewGeminiOAuthClient(ctx, cfg)
+			oauthClient, err := NewGeminiOAuthClient(ctx, cfg)
+			if err == nil {
+				return oauthClient, nil
+			}
+
+			logging.Warn("failed to initialize Gemini OAuth client, falling back to API key if available", "error", err)
+
+			// Graceful fallback: if OAuth is stale/broken but API key exists, continue with API key client.
+			apiClient, keyErr := NewGeminiClient(ctx, cfg)
+			if keyErr == nil {
+				return apiClient, nil
+			}
+
+			return nil, fmt.Errorf("gemini auth failed (oauth error: %v; api-key fallback error: %v)", err, keyErr)
 		}
 		return NewGeminiClient(ctx, cfg)
 	case "anthropic":
@@ -200,7 +222,18 @@ func autoDetectClient(ctx context.Context, cfg *config.Config, modelID string) (
 	// Default to Gemini (check OAuth first)
 	if cfg.API.HasOAuthToken("gemini") {
 		logging.Debug("using Gemini OAuth client (default)", "email", cfg.API.GeminiOAuth.Email)
-		return NewGeminiOAuthClient(ctx, cfg)
+		oauthClient, err := NewGeminiOAuthClient(ctx, cfg)
+		if err == nil {
+			return oauthClient, nil
+		}
+
+		logging.Warn("failed to initialize default Gemini OAuth client, falling back to API key if available", "error", err)
+		apiClient, keyErr := NewGeminiClient(ctx, cfg)
+		if keyErr == nil {
+			return apiClient, nil
+		}
+
+		return nil, fmt.Errorf("gemini auth failed (oauth error: %v; api-key fallback error: %v)", err, keyErr)
 	}
 	return NewGeminiClient(ctx, cfg)
 }

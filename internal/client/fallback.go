@@ -13,21 +13,33 @@ import (
 // FallbackClient wraps multiple Client instances and tries each in order
 // on failure, providing automatic failover between providers.
 type FallbackClient struct {
-	clients []Client
-	current int
-	mu      sync.RWMutex
+	clients   []Client
+	providers []string
+	current   int
+	mu        sync.RWMutex
 }
 
 // NewFallbackClient creates a new FallbackClient with the given clients.
 // At least one client must be provided.
-func NewFallbackClient(clients []Client) (*FallbackClient, error) {
+func NewFallbackClient(clients []Client, providers []string) (*FallbackClient, error) {
 	if len(clients) == 0 {
 		return nil, fmt.Errorf("fallback client requires at least one client")
 	}
+	if len(providers) != len(clients) {
+		providers = make([]string, len(clients))
+	}
 	return &FallbackClient{
-		clients: clients,
-		current: 0,
+		clients:   clients,
+		providers: providers,
+		current:   0,
 	}, nil
+}
+
+func (fc *FallbackClient) providerAt(index int) string {
+	if index < 0 || index >= len(fc.providers) {
+		return ""
+	}
+	return fc.providers[index]
 }
 
 // getCurrent returns the current active client index.
@@ -68,8 +80,10 @@ func (fc *FallbackClient) SendMessage(ctx context.Context, message string) (*Str
 
 		resp, err := fc.clients[i].SendMessage(ctx, message)
 		if err == nil {
+			recordProviderSuccess(fc.providerAt(i))
 			return resp, nil
 		}
+		recordProviderFailure(fc.providerAt(i), IsRetryableError(err))
 
 		logging.Warn("client failed in SendMessage",
 			"index", i,
@@ -99,8 +113,10 @@ func (fc *FallbackClient) SendMessageWithHistory(ctx context.Context, history []
 
 		resp, err := fc.clients[i].SendMessageWithHistory(ctx, history, message)
 		if err == nil {
+			recordProviderSuccess(fc.providerAt(i))
 			return resp, nil
 		}
+		recordProviderFailure(fc.providerAt(i), IsRetryableError(err))
 
 		logging.Warn("client failed in SendMessageWithHistory",
 			"index", i,
@@ -128,8 +144,10 @@ func (fc *FallbackClient) SendFunctionResponse(ctx context.Context, history []*g
 
 		resp, err := fc.clients[i].SendFunctionResponse(ctx, history, results)
 		if err == nil {
+			recordProviderSuccess(fc.providerAt(i))
 			return resp, nil
 		}
+		recordProviderFailure(fc.providerAt(i), IsRetryableError(err))
 
 		logging.Warn("client failed in SendFunctionResponse",
 			"index", i,

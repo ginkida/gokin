@@ -93,6 +93,21 @@ type StepAgentMetrics struct {
 	Duration       time.Duration `json:"duration,omitempty"`
 }
 
+// RunLedgerEntry tracks side effects produced by a plan step.
+// It is used for safer resume and idempotency guardrails.
+type RunLedgerEntry struct {
+	StepID         int       `json:"step_id"`
+	StartedAt      time.Time `json:"started_at,omitempty"`
+	LastHeartbeat  time.Time `json:"last_heartbeat,omitempty"`
+	CompletedAt    time.Time `json:"completed_at,omitempty"`
+	ToolCalls      int       `json:"tool_calls,omitempty"`
+	Tools          []string  `json:"tools,omitempty"`
+	FilesTouched   []string  `json:"files_touched,omitempty"`
+	Commands       []string  `json:"commands,omitempty"`
+	PartialEffects bool      `json:"partial_effects"`
+	Completed      bool      `json:"completed"`
+}
+
 // Duration returns the step execution duration.
 func (s *Step) Duration() time.Duration {
 	if s.StartTime.IsZero() {
@@ -119,7 +134,8 @@ type Plan struct {
 	WorkDir     string    `json:"work_dir,omitempty"` // Project directory this plan belongs to
 
 	// Context snapshot from planning conversation (preserved across session clear)
-	ContextSnapshot string `json:"context_snapshot,omitempty"`
+	ContextSnapshot string                  `json:"context_snapshot,omitempty"`
+	RunLedger       map[int]*RunLedgerEntry `json:"run_ledger,omitempty"`
 
 	mu sync.RWMutex
 }
@@ -150,6 +166,7 @@ func NewPlan(title, description string) *Plan {
 		Lifecycle:   LifecycleDraft,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
+		RunLedger:   make(map[int]*RunLedgerEntry),
 	}
 }
 
@@ -230,6 +247,7 @@ func (p *Plan) StartStep(id int) {
 			step.Status = StatusInProgress
 			step.StartTime = time.Now()
 			p.Status = StatusInProgress
+			p.markStepStartedLocked(id)
 			p.UpdatedAt = time.Now()
 			break
 		}
@@ -246,6 +264,7 @@ func (p *Plan) CompleteStep(id int, output string) {
 			step.Status = StatusCompleted
 			step.Output = output
 			step.EndTime = time.Now()
+			p.markStepCompletedLocked(id)
 			p.UpdatedAt = time.Now()
 			break
 		}
@@ -275,6 +294,7 @@ func (p *Plan) FailStep(id int, errMsg string) {
 			step.Error = errMsg
 			step.EndTime = time.Now()
 			p.Status = StatusFailed
+			p.markStepFailedLocked(id)
 			p.UpdatedAt = time.Now()
 			break
 		}
@@ -289,6 +309,7 @@ func (p *Plan) SkipStep(id int) {
 	for _, step := range p.Steps {
 		if step.ID == id {
 			step.Status = StatusSkipped
+			p.markStepFailedLocked(id)
 			p.UpdatedAt = time.Now()
 			break
 		}
@@ -427,6 +448,25 @@ func (p *Plan) GetStepsSnapshot() []*Step {
 	return snapshot
 }
 
+// GetRunLedgerSnapshot returns a copy of run ledger entries keyed by step ID.
+func (p *Plan) GetRunLedgerSnapshot() map[int]*RunLedgerEntry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make(map[int]*RunLedgerEntry, len(p.RunLedger))
+	for id, entry := range p.RunLedger {
+		if entry == nil {
+			continue
+		}
+		copyEntry := *entry
+		copyEntry.Tools = append([]string(nil), entry.Tools...)
+		copyEntry.FilesTouched = append([]string(nil), entry.FilesTouched...)
+		copyEntry.Commands = append([]string(nil), entry.Commands...)
+		out[id] = &copyEntry
+	}
+	return out
+}
+
 // deepCopyStep performs a deep copy of a Step, including its Children.
 func deepCopyStep(step *Step) *Step {
 	stepCopy := *step
@@ -560,12 +600,95 @@ func (p *Plan) PauseStep(id int, reason string) {
 			step.Status = StatusPaused
 			step.Error = reason
 			step.EndTime = time.Now()
+			p.markStepFailedLocked(id)
 			// Plan stays InProgress — other steps may still execute.
 			// Use PausePlan() on Manager to explicitly pause the whole plan.
 			p.UpdatedAt = time.Now()
 			break
 		}
 	}
+}
+
+// RecordStepEffect records a tool-level side effect for the given step.
+func (p *Plan) RecordStepEffect(stepID int, toolName string, args map[string]any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if stepID <= 0 {
+		return
+	}
+
+	entry := p.ensureLedgerEntryLocked(stepID)
+	entry.ToolCalls++
+	entry.PartialEffects = true
+	entry.LastHeartbeat = time.Now()
+	if toolName != "" {
+		entry.Tools = appendUniqueLimited(entry.Tools, toolName, 20)
+	}
+
+	for _, key := range []string{"file_path", "path", "source", "destination", "src", "dst", "from", "to"} {
+		if v, ok := args[key].(string); ok && v != "" {
+			entry.FilesTouched = appendUniqueLimited(entry.FilesTouched, v, 50)
+		}
+	}
+
+	if cmd, ok := args["command"].(string); ok && cmd != "" {
+		entry.Commands = appendUniqueLimited(entry.Commands, cmd, 20)
+	}
+}
+
+// HasPartialEffects returns true when a step has recorded effects but no completion marker.
+func (p *Plan) HasPartialEffects(stepID int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.RunLedger[stepID]
+	return ok && entry.PartialEffects && !entry.Completed
+}
+
+func (p *Plan) markStepStartedLocked(stepID int) {
+	entry := p.ensureLedgerEntryLocked(stepID)
+	if entry.StartedAt.IsZero() {
+		entry.StartedAt = time.Now()
+	}
+	entry.LastHeartbeat = time.Now()
+}
+
+func (p *Plan) markStepCompletedLocked(stepID int) {
+	entry := p.ensureLedgerEntryLocked(stepID)
+	now := time.Now()
+	entry.LastHeartbeat = now
+	entry.CompletedAt = now
+	entry.Completed = true
+	entry.PartialEffects = false
+}
+
+func (p *Plan) markStepFailedLocked(stepID int) {
+	entry := p.ensureLedgerEntryLocked(stepID)
+	entry.LastHeartbeat = time.Now()
+}
+
+func (p *Plan) ensureLedgerEntryLocked(stepID int) *RunLedgerEntry {
+	if p.RunLedger == nil {
+		p.RunLedger = make(map[int]*RunLedgerEntry)
+	}
+	entry, ok := p.RunLedger[stepID]
+	if !ok || entry == nil {
+		entry = &RunLedgerEntry{StepID: stepID}
+		p.RunLedger[stepID] = entry
+	}
+	return entry
+}
+
+func appendUniqueLimited(items []string, value string, limit int) []string {
+	for _, existing := range items {
+		if existing == value {
+			return items
+		}
+	}
+	items = append(items, value)
+	if limit > 0 && len(items) > limit {
+		return items[len(items)-limit:]
+	}
+	return items
 }
 
 // HasPausedSteps returns true if any step has StatusPaused.

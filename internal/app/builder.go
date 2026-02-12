@@ -1240,6 +1240,7 @@ func (b *Builder) wireDependencies() error {
 	// Set up executor handler
 	b.executor.SetHandler(&tools.ExecutionHandler{
 		OnText: func(text string) {
+			app.touchStepHeartbeat()
 			if app.program != nil {
 				app.program.Send(ui.StreamTextMsg(text))
 			}
@@ -1262,6 +1263,7 @@ func (b *Builder) wireDependencies() error {
 			}
 		},
 		OnThinking: func(text string) {
+			app.touchStepHeartbeat()
 			// Thinking content keeps the UI alive — send a tick
 			// so the status bar continues to animate and show elapsed time.
 			if app.program != nil {
@@ -1269,6 +1271,7 @@ func (b *Builder) wireDependencies() error {
 			}
 		},
 		OnToolStart: func(name string, args map[string]any) {
+			app.touchStepHeartbeat()
 			// Track tools used for response metadata
 			app.mu.Lock()
 			app.responseToolsUsed = append(app.responseToolsUsed, name)
@@ -1281,8 +1284,20 @@ func (b *Builder) wireDependencies() error {
 			if app.program != nil {
 				app.program.Send(ui.ToolCallMsg{Name: name, Args: args})
 			}
+
+			// Record side effects for active plan step (idempotency guard).
+			if app.planManager != nil && app.planManager.IsExecuting() {
+				if p := app.planManager.GetCurrentPlan(); p != nil {
+					stepID := app.planManager.GetCurrentStepID()
+					if stepID > 0 {
+						p.RecordStepEffect(stepID, name, args)
+						_ = app.planManager.SaveCurrentPlan()
+					}
+				}
+			}
 		},
 		OnToolEnd: func(name string, result tools.ToolResult) {
+			app.touchStepHeartbeat()
 			app.mu.Lock()
 			app.currentToolContext = ""
 			app.mu.Unlock()
@@ -1295,6 +1310,7 @@ func (b *Builder) wireDependencies() error {
 			go app.refreshTokenCount()
 		},
 		OnToolProgress: func(name string, elapsed time.Duration) {
+			app.touchStepHeartbeat()
 			// Heartbeat for long-running tools - keeps UI timeout from triggering
 			if app.program != nil {
 				app.mu.Lock()
@@ -1589,6 +1605,8 @@ func (b *Builder) assembleApp() *App {
 		backgroundIndexer:    b.backgroundIdx,
 		taskRouter:           b.taskRouter,
 		orchestrator:         b.taskOrchestrator,
+		reliability:          NewReliabilityManager(),
+		policy:               NewPolicyEngine(),
 		// Phase 4: UI Auto-Update System (initialized separately)
 		uiUpdateManager: nil, // Will be set after assembly
 		// Phase 5: Agent System Improvements

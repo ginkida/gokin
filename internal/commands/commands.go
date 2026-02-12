@@ -59,6 +59,9 @@ type AppInterface interface {
 	AddSystemMessage(msg string)
 	GetAgentTypeRegistry() *agent.AgentTypeRegistry
 	GetUIDebugState() (any, error)
+	GetRuntimeHealthReport() string
+	GetPolicyReport() string
+	GetLedgerReport() string
 }
 
 // Handler manages slash commands.
@@ -125,6 +128,9 @@ func NewHandler() *Handler {
 	// Register planning mode command
 	h.Register(&PlanCommand{})
 	h.Register(&ResumePlanCommand{})
+	h.Register(&HealthCommand{})
+	h.Register(&PolicyCommand{})
+	h.Register(&LedgerCommand{})
 
 	// Register tree planner command
 	h.Register(&TreeStatsCommand{})

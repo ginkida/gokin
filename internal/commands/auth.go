@@ -531,19 +531,37 @@ func (c *OAuthLoginCommand) Execute(ctx context.Context, args []string, app AppI
 		return fmt.Sprintf("Already logged in via OAuth as %s.\n\nUse /oauth-logout to sign out first.", cfg.API.GeminiOAuth.Email), nil
 	}
 
-	// Create OAuth manager
-	manager := auth.NewGeminiOAuthManager()
-
-	// Generate auth URL
-	authURL, err := manager.GenerateAuthURL()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate auth URL: %w", err)
+	// Create OAuth manager and callback server with port fallback.
+	// 8085 remains preferred for compatibility; neighboring ports are used if occupied.
+	candidatePorts := []int{
+		auth.GeminiOAuthCallbackPort,
+		auth.GeminiOAuthCallbackPort + 1,
+		auth.GeminiOAuthCallbackPort + 2,
 	}
 
-	// Start callback server
-	server := auth.NewCallbackServer(auth.GeminiOAuthCallbackPort, manager.GetState())
-	if err := server.Start(); err != nil {
-		return "", fmt.Errorf("failed to start callback server: %w", err)
+	var manager *auth.OAuthManager
+	var server *auth.CallbackServer
+	var authURL string
+	var callbackPort int
+	var startErr error
+	var err error
+
+	for _, port := range candidatePorts {
+		manager = auth.NewGeminiOAuthManagerWithPort(port)
+		authURL, err = manager.GenerateAuthURL()
+		if err != nil {
+			return "", fmt.Errorf("failed to generate auth URL: %w", err)
+		}
+
+		server = auth.NewCallbackServer(port, manager.GetState())
+		if startErr = server.Start(); startErr == nil {
+			callbackPort = port
+			break
+		}
+	}
+
+	if startErr != nil {
+		return "", fmt.Errorf("failed to start OAuth callback server: %w", startErr)
 	}
 	defer server.Stop()
 
@@ -552,6 +570,9 @@ func (c *OAuthLoginCommand) Execute(ctx context.Context, args []string, app AppI
 
 	var sb strings.Builder
 	sb.WriteString("Opening browser for Google authentication...\n\n")
+	if callbackPort != auth.GeminiOAuthCallbackPort {
+		sb.WriteString(fmt.Sprintf("Using fallback callback port: %d\n\n", callbackPort))
+	}
 	if !browserOpened {
 		sb.WriteString("Could not open browser automatically.\n")
 		sb.WriteString("Please open this URL in your browser:\n\n")

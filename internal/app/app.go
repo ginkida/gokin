@@ -170,6 +170,8 @@ type App struct {
 
 	// Unified Task Orchestrator
 	orchestrator *TaskOrchestrator
+	reliability  *ReliabilityManager
+	policy       *PolicyEngine
 
 	uiUpdateManager *UIUpdateManager // Coordinates periodic UI updates
 
@@ -211,6 +213,10 @@ type App struct {
 	// Processing cancellation for ESC interrupt
 	processingCancel context.CancelFunc
 	processingMu     sync.Mutex
+
+	// Plan execution watchdog
+	stepHeartbeatMu   sync.RWMutex
+	lastStepHeartbeat time.Time
 
 	// Signal handler cleanup
 	signalCleanup func()
@@ -568,6 +574,81 @@ func (a *App) GetPlanManager() *plan.Manager {
 // GetTreePlanner returns the tree planner.
 func (a *App) GetTreePlanner() *agent.TreePlanner {
 	return a.treePlanner
+}
+
+// GetRuntimeHealthReport returns runtime reliability and provider health diagnostics.
+func (a *App) GetRuntimeHealthReport() string {
+	var sb strings.Builder
+	sb.WriteString("Runtime health:\n")
+
+	if a.reliability != nil {
+		s := a.reliability.Snapshot()
+		mode := "normal"
+		if s.Degraded {
+			mode = fmt.Sprintf("degraded (%v remaining)", s.DegradedRemaining)
+		}
+		sb.WriteString(fmt.Sprintf("- mode: %s\n", mode))
+		sb.WriteString(fmt.Sprintf("- consecutive_failures: %d\n", s.ConsecutiveFailures))
+		sb.WriteString(fmt.Sprintf("- window_failures: %d (start: %s)\n",
+			s.WindowFailures, s.WindowStartedAt.Format("2006-01-02 15:04:05")))
+	}
+
+	age := a.stepHeartbeatAge()
+	if age > 0 {
+		sb.WriteString(fmt.Sprintf("- step_heartbeat_age: %v\n", age.Round(time.Second)))
+	} else {
+		sb.WriteString("- step_heartbeat_age: n/a\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(client.GetProviderHealthReport())
+	return sb.String()
+}
+
+// GetPolicyReport returns current policy engine state.
+func (a *App) GetPolicyReport() string {
+	if a.policy == nil {
+		return "Policy engine not initialized."
+	}
+	s := a.policy.Snapshot()
+	return fmt.Sprintf("Policy engine:\n- request_breaker: %s\n- step_breaker: %s",
+		s.RequestBreakerState, s.StepBreakerState)
+}
+
+// GetLedgerReport returns run ledger details for the active plan.
+func (a *App) GetLedgerReport() string {
+	if a.planManager == nil {
+		return "Ledger unavailable: plan manager not initialized."
+	}
+	p := a.planManager.GetCurrentPlan()
+	if p == nil {
+		return "Ledger: no active plan."
+	}
+
+	steps := p.GetStepsSnapshot()
+	ledger := p.GetRunLedgerSnapshot()
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Run ledger for %s (%s)\n", p.Title, p.ID))
+
+	for _, step := range steps {
+		entry := ledger[step.ID]
+		if entry == nil {
+			sb.WriteString(fmt.Sprintf("- step %d (%s): no side effects recorded\n", step.ID, step.Title))
+			continue
+		}
+		status := "incomplete"
+		if entry.Completed {
+			status = "completed"
+		} else if entry.PartialEffects {
+			status = "partial_effects"
+		}
+		sb.WriteString(fmt.Sprintf(
+			"- step %d (%s): %s, tool_calls=%d, files=%d, commands=%d\n",
+			step.ID, step.Title, status, entry.ToolCalls, len(entry.FilesTouched), len(entry.Commands),
+		))
+	}
+
+	return sb.String()
 }
 
 // GetAgentTypeRegistry returns the agent type registry.

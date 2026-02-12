@@ -331,8 +331,13 @@ func (c *GeminiOAuthClient) ensureValidToken(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if token is still valid (with 5 minute buffer)
-	if time.Now().Before(c.expiresAt.Add(-auth.TokenRefreshBuffer)) {
+	if c.refreshToken == "" {
+		return fmt.Errorf("missing OAuth refresh token; run /oauth-login again")
+	}
+
+	// Check if token is still valid (with 5 minute buffer).
+	// We also require a non-empty access token; otherwise force refresh.
+	if c.accessToken != "" && !c.expiresAt.IsZero() && time.Now().Before(c.expiresAt.Add(-auth.TokenRefreshBuffer)) {
 		return nil
 	}
 
@@ -343,7 +348,7 @@ func (c *GeminiOAuthClient) ensureValidToken(ctx context.Context) error {
 	manager := auth.NewGeminiOAuthManager()
 	newToken, err := manager.RefreshToken(ctx, c.refreshToken)
 	if err != nil {
-		return fmt.Errorf("failed to refresh token: %w", err)
+		return fmt.Errorf("failed to refresh OAuth token: %w (try /oauth-login)", err)
 	}
 
 	// Update client state
