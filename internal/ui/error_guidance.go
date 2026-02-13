@@ -63,7 +63,13 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Command:     "",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(model.*not.*found|invalid.*model|unknown.*model)`),
+		Pattern:     regexp.MustCompile(`(?i)400.*model.*not.*found`),
+		Title:       "Provider API Temporarily Unavailable",
+		Suggestions: []string{"The provider returned a transient error — try sending your message again", "If persistent, switch provider with /provider or check /health"},
+		Command:     "/health",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(invalid.*model|unknown.*model)`),
 		Title:       "Model Not Found",
 		Suggestions: []string{"Check the model name is correct", "List available models with /model", "The model may have been deprecated"},
 		Command:     "/model list",
