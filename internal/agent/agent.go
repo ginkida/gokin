@@ -1384,7 +1384,18 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		// === Reactive mode: Get response from model ===
 		resp, err := a.getModelResponse(ctx)
 		if err != nil {
+			// If context was cancelled (Esc pressed), return immediately without wrapping
+			if ctx.Err() != nil {
+				return a.history, output.String(), ctx.Err()
+			}
 			return a.history, output.String(), fmt.Errorf("model response error: %w", err)
+		}
+
+		// Check cancellation after model response (Esc may have been pressed during streaming)
+		select {
+		case <-ctx.Done():
+			return a.history, output.String(), ctx.Err()
+		default:
 		}
 
 		// Add model response to history (protected by mutex)
@@ -1516,6 +1527,13 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.SetProgress(i+1, a.maxTurns, fmt.Sprintf("Executing tools: %v", toolsList))
 
 			results := a.executeTools(ctx, resp.FunctionCalls)
+
+			// Check cancellation after tool execution (Esc may have been pressed during tools)
+			select {
+			case <-ctx.Done():
+				return a.history, output.String(), ctx.Err()
+			default:
+			}
 
 			// Add function response to history (with multimodal parts if present)
 			var funcParts []*genai.Part

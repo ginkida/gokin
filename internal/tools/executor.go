@@ -463,6 +463,13 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 		// Handle chained function calls in an inner loop
 		for len(resp.FunctionCalls) > 0 {
+			// Check context cancellation between chained tool calls (Esc pressed)
+			select {
+			case <-ctx.Done():
+				return history, finalText, ctx.Err()
+			default:
+			}
+
 			// Track tools being called
 			for _, fc := range resp.FunctionCalls {
 				toolsUsed = append(toolsUsed, fc.Name)
