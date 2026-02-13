@@ -64,6 +64,12 @@ var ModelPresets = map[string]ModelPreset{
 		Temperature:     1.0,
 		MaxOutputTokens: 8192,
 	},
+	"kimi": {
+		Provider:        "kimi",
+		Name:            "kimi-k2.5",
+		Temperature:     0.6,
+		MaxOutputTokens: 32768,
+	},
 	"ollama": {
 		Provider:        "ollama",
 		Name:            "llama3.2",

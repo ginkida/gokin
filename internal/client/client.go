@@ -12,6 +12,7 @@ const (
 	DefaultGLMBaseURL       = "https://api.z.ai/api/anthropic"
 	DefaultDeepSeekBaseURL  = "https://api.deepseek.com/anthropic"
 	DefaultMiniMaxBaseURL   = "https://api.minimax.io/anthropic"
+	DefaultKimiBaseURL      = "https://api.moonshot.ai/anthropic"
 )
 
 // ModelInfo contains information about an available model.
@@ -88,6 +89,28 @@ var AvailableModels = []ModelInfo{
 		Description: "Flagship model: 1M context, strong coding",
 		Provider:    "minimax",
 		BaseURL:     DefaultMiniMaxBaseURL,
+	},
+	// Kimi models (via Anthropic-compatible API)
+	{
+		ID:          "kimi-k2.5",
+		Name:        "Kimi K2.5",
+		Description: "Latest multimodal model from Moonshot AI",
+		Provider:    "kimi",
+		BaseURL:     DefaultKimiBaseURL,
+	},
+	{
+		ID:          "kimi-k2-thinking-turbo",
+		Name:        "Kimi K2 Thinking Turbo",
+		Description: "Extended reasoning, fast output (60-100 tok/s)",
+		Provider:    "kimi",
+		BaseURL:     DefaultKimiBaseURL,
+	},
+	{
+		ID:          "kimi-k2-turbo-preview",
+		Name:        "Kimi K2 Turbo",
+		Description: "Fast coding model, 256K context",
+		Provider:    "kimi",
+		BaseURL:     DefaultKimiBaseURL,
 	},
 	// Anthropic models (native API)
 	{

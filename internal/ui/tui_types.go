@@ -260,15 +260,16 @@ const (
 
 // ActivityFeedEntry represents an entry in the activity feed.
 type ActivityFeedEntry struct {
-	ID          string
-	Type        ActivityType
-	Name        string // Tool or agent name
-	Description string // "Reading /path/to/file.go"
-	Status      ActivityStatus
-	StartTime   time.Time
-	Duration    time.Duration
-	AgentID     string         // For sub-agent tool calls
-	Details     map[string]any // Additional details
+	ID            string
+	Type          ActivityType
+	Name          string // Tool or agent name
+	Description   string // "Reading /path/to/file.go"
+	Status        ActivityStatus
+	StartTime     time.Time
+	Duration      time.Duration
+	AgentID       string         // For sub-agent tool calls
+	Details       map[string]any // Additional details
+	ResultSummary string         // Brief summary of result (e.g. "42 files", "150 lines")
 }
 
 // StatusType indicates the type of status update.

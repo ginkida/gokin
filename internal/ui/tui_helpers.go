@@ -100,7 +100,7 @@ func (m *Model) Welcome() {
 	// 4 lines of content
 	line1 := titleStyle.Render("GOKIN")
 	line2 := infoStyle.Render(dir + " · " + modelName + " · " + contextStr)
-	line3 := dimStyle.Render("Ctrl+P commands · Shift+Tab plan mode")
+	line3 := dimStyle.Render("Ctrl+P commands · Shift+Tab plan mode · ? shortcuts")
 	line4 := dimStyle.Render(getTextSelectionHint())
 
 	content := line1 + "\n" + line2 + "\n" + line3 + "\n" + line4

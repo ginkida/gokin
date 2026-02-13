@@ -121,6 +121,22 @@ var Providers = []ProviderDef{
 		},
 	},
 	{
+		Name:          "kimi",
+		DisplayName:   "Kimi Code (Moonshot)",
+		DefaultModel:  "kimi-k2.5",
+		EnvVars:       []string{"GOKIN_KIMI_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY"},
+		UsesLegacyKey: true,
+		GetKey:        func(api *APIConfig) string { return api.KimiKey },
+		SetKey:        func(api *APIConfig, key string) { api.KimiKey = key },
+		ModelPrefixes: []string{"kimi", "moonshot"},
+		SetupKeyURL:   "https://platform.moonshot.ai/console/api-keys",
+		KeyValidation: KeyValidationDef{
+			URL:             "https://api.moonshot.ai/v1/models",
+			AuthMode:        "bearer",
+			SuccessStatuses: []int{200},
+		},
+	},
+	{
 		Name:         "ollama",
 		DisplayName:  "Ollama (local)",
 		DefaultModel: "llama3.2",

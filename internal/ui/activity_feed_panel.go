@@ -26,6 +26,9 @@ type SubAgentState struct {
 	CurrentTool string
 	ToolArgs    map[string]any
 	StartTime   time.Time
+	CurrentStep int     // Current step number (e.g. tool call count)
+	TotalSteps  int     // Total expected steps (0 = unknown)
+	Progress    float64 // 0.0-1.0, -1 for indeterminate
 }
 
 // ActivityFeedPanel displays real-time activity from tools and sub-agents.
@@ -93,10 +96,16 @@ func (p *ActivityFeedPanel) CompleteEntry(id string, success bool, summary strin
 
 	entry := &p.entries[idx]
 	entry.Duration = time.Since(entry.StartTime)
+	entry.ResultSummary = summary
 	if success {
 		entry.Status = ActivityCompleted
 	} else {
 		entry.Status = ActivityFailed
+	}
+
+	// Append result summary to description if available
+	if summary != "" {
+		entry.Description = fmt.Sprintf("%s -> %s", entry.Description, summary)
 	}
 
 	// Add to recent log
@@ -114,6 +123,7 @@ func (p *ActivityFeedPanel) StartSubAgent(agentID, agentType, description string
 		AgentType:   agentType,
 		Description: description,
 		StartTime:   time.Now(),
+		Progress:    -1, // indeterminate until progress data arrives
 	}
 
 	// Add as activity entry
@@ -153,6 +163,11 @@ func (p *ActivityFeedPanel) UpdateSubAgentTool(agentID, toolName string, args ma
 	state.CurrentTool = toolName
 	state.ToolArgs = args
 
+	// Increment step counter on each new tool start
+	if toolName != "" {
+		state.CurrentStep++
+	}
+
 	// Update the entry description
 	entryID := "agent-" + agentID
 	if idx, ok := p.activeEntries[entryID]; ok && idx < len(p.entries) {
@@ -162,6 +177,25 @@ func (p *ActivityFeedPanel) UpdateSubAgentTool(agentID, toolName string, args ma
 			desc = fmt.Sprintf("%s -> %s", state.AgentType, toolInfo)
 		}
 		p.entries[idx].Description = desc
+	}
+}
+
+// UpdateSubAgentProgress updates progress data for a sub-agent.
+func (p *ActivityFeedPanel) UpdateSubAgentProgress(agentID string, progress float64, currentStep, totalSteps int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	state, ok := p.subAgentActivities[agentID]
+	if !ok {
+		return
+	}
+
+	state.Progress = progress
+	if currentStep > 0 {
+		state.CurrentStep = currentStep
+	}
+	if totalSteps > 0 {
+		state.TotalSteps = totalSteps
 	}
 }
 
@@ -290,10 +324,19 @@ func (p *ActivityFeedPanel) View(width int) string {
 	// Spinner frames
 	spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
+	progressStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+	stepStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+	timestampStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
 	// Render active entries (most recent first)
 	for i := len(p.entries) - 1; i >= 0 && i >= len(p.entries)-5; i-- {
 		entry := p.entries[i]
 		var line strings.Builder
+
+		// Timestamp
+		line.WriteString(timestampStyle.Render(entry.StartTime.Format("15:04:05")))
+		line.WriteString(" ")
 
 		// Status icon
 		switch entry.Status {
@@ -315,8 +358,41 @@ func (p *ActivityFeedPanel) View(width int) string {
 		}
 		line.WriteString(" ")
 
+		// For running agents, show inline progress bar
+		if entry.Type == ActivityTypeAgent && (entry.Status == ActivityRunning || entry.Status == ActivityPending) {
+			if state, ok := p.subAgentActivities[entry.AgentID]; ok && state.CurrentStep > 0 {
+				barWidth := 10
+				var filled int
+				if state.TotalSteps > 0 {
+					filled = state.CurrentStep * barWidth / state.TotalSteps
+					if filled > barWidth {
+						filled = barWidth
+					}
+				} else {
+					// Indeterminate: animate bouncing position
+					pos := (p.frame / 2) % (barWidth * 2)
+					if pos >= barWidth {
+						pos = barWidth*2 - pos - 1
+					}
+					filled = pos + 1
+				}
+				bar := progressStyle.Render(strings.Repeat("━", filled)) +
+					dimStyle.Render(strings.Repeat("─", barWidth-filled))
+				line.WriteString(bar)
+				line.WriteString(" ")
+
+				// Step counter
+				if state.TotalSteps > 0 {
+					line.WriteString(stepStyle.Render(fmt.Sprintf("%d/%d", state.CurrentStep, state.TotalSteps)))
+				} else {
+					line.WriteString(stepStyle.Render(fmt.Sprintf("%d steps", state.CurrentStep)))
+				}
+				line.WriteString(dimStyle.Render(" — "))
+			}
+		}
+
 		// Description (truncated to fit)
-		maxDescLen := width - 30
+		maxDescLen := width - lipgloss.Width(line.String()) - 14
 		if maxDescLen < 20 {
 			maxDescLen = 20
 		}
@@ -364,19 +440,19 @@ func (p *ActivityFeedPanel) View(width int) string {
 
 // formatLogMessage formats an entry for the recent log.
 func (p *ActivityFeedPanel) formatLogMessage(entry *ActivityFeedEntry, summary string) string {
-	if summary != "" {
-		return summary
-	}
-
 	var msg string
 	switch entry.Type {
 	case ActivityTypeAgent:
+		if summary != "" {
+			return summary
+		}
 		if entry.Status == ActivityCompleted {
 			msg = fmt.Sprintf("Sub-agent [%s] completed", entry.Name)
 		} else {
 			msg = fmt.Sprintf("Sub-agent [%s] failed", entry.Name)
 		}
 	default:
+		// Use enriched description (includes "-> summary" if available)
 		msg = entry.Description
 	}
 
@@ -465,6 +541,51 @@ func formatToolActivity(toolName string, args map[string]any) string {
 		}
 	}
 	return toolName
+}
+
+// GenerateResultSummary generates a brief summary from a tool result.
+func GenerateResultSummary(toolName, result string) string {
+	switch toolName {
+	case "read":
+		lines := strings.Count(result, "\n")
+		if lines > 0 {
+			return fmt.Sprintf("%d lines", lines)
+		}
+	case "glob":
+		lines := strings.Count(strings.TrimSpace(result), "\n") + 1
+		if strings.TrimSpace(result) == "" {
+			return "0 files"
+		}
+		return fmt.Sprintf("%d files", lines)
+	case "grep":
+		lines := strings.Count(strings.TrimSpace(result), "\n") + 1
+		if strings.TrimSpace(result) == "" {
+			return "0 matches"
+		}
+		return fmt.Sprintf("%d matches", lines)
+	case "bash":
+		lines := strings.Count(strings.TrimSpace(result), "\n") + 1
+		if strings.TrimSpace(result) == "" {
+			return "done"
+		}
+		if lines == 1 {
+			r := strings.TrimSpace(result)
+			if len(r) > 30 {
+				r = r[:27] + "..."
+			}
+			return r
+		}
+		return fmt.Sprintf("%d lines output", lines)
+	case "edit":
+		return "applied"
+	case "write":
+		lines := strings.Count(result, "\n")
+		if lines > 0 {
+			return fmt.Sprintf("%d lines written", lines)
+		}
+		return "written"
+	}
+	return ""
 }
 
 // Clear removes all entries from the activity feed.

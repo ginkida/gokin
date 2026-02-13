@@ -159,6 +159,8 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 		return newDeepSeekClient(cfg, modelID)
 	case "minimax":
 		return newMiniMaxClient(cfg, modelID)
+	case "kimi":
+		return newKimiClient(cfg, modelID)
 	case "gemini":
 		// Check OAuth first
 		if cfg.API.HasOAuthToken("gemini") {
@@ -341,6 +343,54 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 	baseURL := cfg.Model.CustomBaseURL
 	if baseURL == "" {
 		baseURL = DefaultMiniMaxBaseURL
+	}
+
+	anthropicConfig := AnthropicConfig{
+		APIKey:            loadedKey.Value,
+		BaseURL:           baseURL,
+		Model:             modelID,
+		MaxTokens:         cfg.Model.MaxOutputTokens,
+		Temperature:       cfg.Model.Temperature,
+		StreamEnabled:     true,
+		EnableThinking:    cfg.Model.EnableThinking,
+		ThinkingBudget:    cfg.Model.ThinkingBudget,
+		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout,
+		MaxRetries:        cfg.API.Retry.MaxRetries,
+		RetryDelay:        cfg.API.Retry.RetryDelay,
+		HTTPTimeout:       cfg.API.Retry.HTTPTimeout,
+	}
+
+	return NewAnthropicClient(anthropicConfig)
+}
+
+// newKimiClient creates a Kimi Code client using Anthropic-compatible API.
+func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
+	p := config.GetProvider("kimi")
+	if p == nil {
+		return nil, fmt.Errorf("provider registry missing entry for kimi")
+	}
+	legacyKey := ""
+	if p.UsesLegacyKey {
+		legacyKey = cfg.API.APIKey
+	}
+	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
+
+	if !loadedKey.IsSet() {
+		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
+	}
+
+	logging.Debug("loaded API key",
+		"provider", p.Name,
+		"source", loadedKey.Source,
+		"model", modelID)
+
+	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
+		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
+	}
+
+	baseURL := cfg.Model.CustomBaseURL
+	if baseURL == "" {
+		baseURL = DefaultKimiBaseURL
 	}
 
 	anthropicConfig := AnthropicConfig{

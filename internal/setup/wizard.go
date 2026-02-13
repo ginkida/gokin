@@ -32,12 +32,12 @@ const (
 
 const (
 	welcomeMessage = `
-%s╔════════════════════════════════════════════════════════════════════╗
-║                                                                    ║
-║                         %sWelcome to Gokin!%s                          ║
-║  AI assistant: Gemini, Anthropic, GLM, DeepSeek, MiniMax & Ollama  ║
-║                                                                    ║
-╚════════════════════════════════════════════════════════════════════╝%s
+%s╔══════════════════════════════════════════════════════════════════════════╗
+║                                                                          ║
+║                            %sWelcome to Gokin!%s                             ║
+║  AI assistant: Gemini, Anthropic, GLM, DeepSeek, MiniMax, Kimi & Ollama  ║
+║                                                                          ║
+╚══════════════════════════════════════════════════════════════════════════╝%s
 
 Gokin helps you work with code:
   • Read, create, and edit files
@@ -122,6 +122,16 @@ func buildSetupChoices() []setupChoice {
 				Lines: []string{
 					"MiniMax M2.5: 1M context window",
 					"Anthropic-compatible API",
+					"Get key at: " + p.SetupKeyURL,
+				},
+			})
+		case "kimi":
+			choices = append(choices, setupChoice{
+				Action: "api:" + p.Name,
+				Title:  "Kimi Code (Moonshot)",
+				Lines: []string{
+					"Kimi K2.5 & thinking models",
+					"256K context, fast coding",
 					"Get key at: " + p.SetupKeyURL,
 				},
 			})

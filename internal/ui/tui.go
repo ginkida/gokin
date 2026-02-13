@@ -1035,6 +1035,12 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 		}
+
+		// '?' opens keyboard shortcuts overlay
+		if msg.String() == "?" {
+			m.state = StateShortcutsOverlay
+			return nil
+		}
 	}
 
 	// All commands accessible via Ctrl+P (Command Palette) and slash commands
@@ -1237,9 +1243,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if matchIdx >= 0 {
 			matched := m.activeToolCalls[matchIdx]
 
-			// Complete entry in activity feed
+			// Complete entry in activity feed with result summary
 			if m.activityFeed != nil {
-				m.activityFeed.CompleteEntry(matched.activityID, true, "")
+				summary := GenerateResultSummary(matched.name, msg.Content)
+				m.activityFeed.CompleteEntry(matched.activityID, true, summary)
 			}
 
 			// Handle tool result using matched tool's info and timing
@@ -1630,6 +1637,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			task.CurrentAction = msg.CurrentAction
 			task.ToolsUsed = msg.ToolsUsed
 		}
+		// Also forward to activity feed for sub-agent progress
+		if m.activityFeed != nil {
+			m.activityFeed.UpdateSubAgentProgress(msg.ID, msg.Progress, msg.CurrentStep, msg.TotalSteps)
+		}
 
 	// Sub-agent activity tracking
 	case SubAgentActivityMsg:
@@ -1881,7 +1892,7 @@ func (m Model) View() string {
 	if m.output.IsEmpty() && m.state == StateInput {
 		dimStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 		hint := getTextSelectionHint()
-		builder.WriteString(dimStyle.Render("  Type a message to start. " + hint))
+		builder.WriteString(dimStyle.Render("  Type a message to start. Press ? for shortcuts. " + hint))
 		builder.WriteString("\n\n")
 	}
 
