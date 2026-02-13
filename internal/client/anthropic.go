@@ -1106,6 +1106,9 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 		},
 	})
 
+	// Ensure strict role alternation (merge consecutive same-role messages)
+	messages = mergeConsecutiveMessages(messages)
+
 	// Log final messages structure
 	var msgRoles []string
 	for i, m := range messages {
@@ -1243,6 +1246,9 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 		"role":    "user",
 		"content": resultContents,
 	})
+
+	// Ensure strict role alternation (merge consecutive same-role messages)
+	messages = mergeConsecutiveMessages(messages)
 
 	return messages, systemPrompt
 }
@@ -1489,6 +1495,50 @@ func randomID() string {
 		return fmt.Sprintf("toolu_%d", time.Now().UnixNano())
 	}
 	return "toolu_" + hex.EncodeToString(b)
+}
+
+// mergeConsecutiveMessages ensures strict user/assistant role alternation
+// required by Anthropic-compatible APIs (Anthropic, MiniMax, DeepSeek, etc.).
+// Consecutive messages with the same role are merged by combining their content arrays.
+func mergeConsecutiveMessages(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) <= 1 {
+		return messages
+	}
+
+	merged := make([]map[string]interface{}, 0, len(messages))
+	merged = append(merged, messages[0])
+
+	for i := 1; i < len(messages); i++ {
+		prev := merged[len(merged)-1]
+		curr := messages[i]
+
+		prevRole := stringFromMap(prev, "role")
+		currRole := stringFromMap(curr, "role")
+
+		if prevRole == currRole {
+			// Merge content arrays
+			prevContent := extractContentArray(prev["content"])
+			currContent := extractContentArray(curr["content"])
+			prev["content"] = append(prevContent, currContent...)
+			logging.Debug("merged consecutive messages", "role", prevRole, "index", i)
+		} else {
+			merged = append(merged, curr)
+		}
+	}
+
+	return merged
+}
+
+// extractContentArray normalizes message content to []map[string]interface{}.
+func extractContentArray(v interface{}) []map[string]interface{} {
+	switch c := v.(type) {
+	case []map[string]interface{}:
+		return c
+	case string:
+		return []map[string]interface{}{{"type": "text", "text": c}}
+	default:
+		return nil
+	}
 }
 
 // truncateString truncates a string to maxLen characters with ellipsis.
