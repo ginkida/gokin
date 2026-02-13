@@ -32,7 +32,7 @@
 | Feature | Gokin | Claude Code | Cursor |
 |---------|-------|-------------|--------|
 | **Price** | Free → Pay-per-use | $20+/month | $20+/month |
-| **Providers** | 5 (Gemini, Claude, DeepSeek, GLM, Ollama) | 1 (Claude) | 1 (Claude) |
+| **Providers** | 7 (Gemini, Claude, DeepSeek, GLM, Kimi, MiniMax, Ollama) | 1 (Claude) | 1 (Claude) |
 | **Offline** | ✅ Ollama | ❌ | ❌ |
 | **52 Tools** | ✅ | ~30 | ~30 |
 | **Multi-agent** | ✅ 5 parallel | Basic | ❌ |
@@ -46,6 +46,8 @@
 | **Gokin + Ollama** | 🆓 Free | Privacy, offline, no API costs |
 | **Gokin + Gemini Flash** | 🆓 Free tier | Fast iterations, prototyping |
 | **Gokin + DeepSeek** | ~$1/month | Daily coding, best value |
+| **Gokin + Kimi** | Pay-per-use | Fast reasoning, 256K context |
+| **Gokin + MiniMax** | Pay-per-use | 1M context, strong coding |
 | **Gokin + Claude** | Pay-per-use | Complex reasoning |
 
 ---
@@ -152,6 +154,8 @@ gokin
 | **Gemini** | 2.5-pro, 2.5-flash, 3-pro | API key / OAuth | Free tier, native tools |
 | **Anthropic** | Opus 4, Sonnet 4, Haiku | API key | Best reasoning |
 | **DeepSeek** | Chat, Reasoner | API key | Best price/quality |
+| **Kimi** | K2.5, K2 Thinking Turbo, K2 Turbo | API key | Fast reasoning, 256K context |
+| **MiniMax** | M2.5 | API key | 1M context, strong coding |
 | **GLM** | GLM-5, GLM-4.7 | API key | Budget option |
 | **Ollama** | Any local model | None | 100% offline |
 
@@ -214,6 +218,8 @@ api:
   anthropic_key: ""
   deepseek_key: ""
   glm_key: ""
+  kimi_key: ""
+  minimax_key: ""
   active_provider: "gemini"
   ollama_base_url: "http://localhost:11434"
 
@@ -253,7 +259,7 @@ gokin/
 ├── internal/
 │   ├── app/            # Orchestrator & message loop
 │   ├── agent/          # Multi-agent system
-│   ├── client/         # 5 API providers
+│   ├── client/         # 7 API providers
 │   ├── tools/          # 52 built-in tools
 │   ├── ui/             # Bubble Tea TUI
 │   ├── config/         # YAML config
