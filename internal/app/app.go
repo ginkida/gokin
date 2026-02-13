@@ -1319,6 +1319,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to re-initialize client: %w", err)
 	}
+	attachStatusCallback(newClient, &appStatusCallback{app: a})
 	oldClient := a.client
 	a.client = newClient
 	if oldClient != nil {

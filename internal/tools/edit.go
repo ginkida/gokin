@@ -68,7 +68,7 @@ func (t *EditTool) Name() string {
 }
 
 func (t *EditTool) Description() string {
-	return "Performs string replacement in a file. Supports three modes: (1) old_string/new_string for exact match replacement, (2) regex=true for regex replacement, (3) line_start/line_end/new_string for line-based replacement."
+	return "Performs string replacement in a file. Supports four modes: (1) old_string/new_string for exact match replacement, (2) regex=true for regex replacement, (3) line_start/line_end/new_string for line-based replacement, (4) insert_after_line/new_string for inserting without deleting."
 }
 
 func (t *EditTool) Declaration() *genai.FunctionDeclaration {
@@ -105,6 +105,10 @@ func (t *EditTool) Declaration() *genai.FunctionDeclaration {
 				"line_end": {
 					Type:        genai.TypeInteger,
 					Description: "End line (1-indexed, inclusive). Used with line_start.",
+				},
+					"insert_after_line": {
+					Type:        genai.TypeInteger,
+					Description: "Line number after which to insert new_string (0 = beginning of file). No lines are deleted.",
 				},
 				"edits": {
 					Type:        genai.TypeArray,
@@ -156,6 +160,17 @@ func (t *EditTool) Validate(args map[string]any) error {
 		return nil
 	}
 
+	// Insert mode
+	if insertLine, hasInsert := GetInt(args, "insert_after_line"); hasInsert {
+		if insertLine < 0 {
+			return NewValidationError("insert_after_line", "must be >= 0")
+		}
+		if _, ok := GetString(args, "new_string"); !ok {
+			return NewValidationError("new_string", "required for insert mode")
+		}
+		return nil
+	}
+
 	// Line-based edit mode
 	if lineStart, hasStart := GetInt(args, "line_start"); hasStart && lineStart > 0 {
 		if _, hasEnd := GetInt(args, "line_end"); !hasEnd {
@@ -191,6 +206,12 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// Check for multi-edit mode
 	if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
 		return t.executeMultiEdit(ctx, filePath, edits)
+	}
+
+	// Check for insert mode
+	if insertLine, hasInsert := GetInt(args, "insert_after_line"); hasInsert {
+		newStr, _ := GetString(args, "new_string")
+		return t.executeInsertAfterLine(ctx, filePath, insertLine, newStr)
 	}
 
 	// Check for line-based edit mode
@@ -568,6 +589,85 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 
 	replacedCount := lineEnd - lineStart + 1
 	return NewSuccessResult(fmt.Sprintf("Replaced lines %d-%d (%d lines) in %s", lineStart, lineEnd, replacedCount, filePath)), nil
+}
+
+// executeInsertAfterLine inserts new text after the specified line without deleting anything.
+// afterLine=0 inserts before the first line; afterLine=totalLines appends at the end.
+func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, afterLine int, newStr string) (ToolResult, error) {
+	// Validate path
+	if t.pathValidator == nil {
+		return NewErrorResult("security error: path validator not initialized"), nil
+	}
+	validPath, err := t.pathValidator.ValidateFile(filePath)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
+	}
+	filePath = validPath
+
+	// Read file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NewErrorResult(fmt.Sprintf("file not found: %s", filePath)), nil
+		}
+		return NewErrorResult(fmt.Sprintf("error reading file: %s", err)), nil
+	}
+
+	// Detect binary files
+	checkLen := len(data)
+	if checkLen > 512 {
+		checkLen = 512
+	}
+	for _, b := range data[:checkLen] {
+		if b == 0 {
+			return NewErrorResult(fmt.Sprintf("cannot edit binary file: %s", filePath)), nil
+		}
+	}
+
+	content := string(data)
+	lines := strings.Split(content, "\n")
+	totalLines := len(lines)
+
+	// Validate afterLine
+	if afterLine < 0 {
+		return NewErrorResult("insert_after_line must be >= 0"), nil
+	}
+	if afterLine > totalLines {
+		return NewErrorResult(fmt.Sprintf("insert_after_line (%d) exceeds file length (%d lines)", afterLine, totalLines)), nil
+	}
+
+	// Build new content: lines[:afterLine] + newLines + lines[afterLine:]
+	newLines := strings.Split(newStr, "\n")
+	var parts []string
+	parts = append(parts, lines[:afterLine]...)
+	parts = append(parts, newLines...)
+	parts = append(parts, lines[afterLine:]...)
+	newContent := strings.Join(parts, "\n")
+
+	// Show diff preview
+	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
+		approved, err := t.diffHandler.PromptDiff(ctx, filePath, content, newContent, "edit", false)
+		if err != nil {
+			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
+		}
+		if !approved {
+			return NewErrorResult("changes rejected by user"), nil
+		}
+	}
+
+	// Write atomically
+	newContentBytes := []byte(newContent)
+	if err := AtomicWrite(filePath, newContentBytes, 0644); err != nil {
+		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
+	}
+
+	// Record change for undo
+	if t.undoManager != nil {
+		change := undo.NewFileChange(filePath, "edit", data, newContentBytes, false)
+		t.undoManager.Record(*change)
+	}
+
+	return NewSuccessResult(fmt.Sprintf("Inserted %d lines after line %d in %s", len(newLines), afterLine, filePath)), nil
 }
 
 // extractFileContext formats file content with line numbers for error context.

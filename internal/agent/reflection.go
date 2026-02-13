@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -34,6 +35,15 @@ type Reflector struct {
 	predictor              PredictorInterface // For file predictions on file_not_found errors
 }
 
+// AutoFixAction describes a concrete recovery action that can be executed automatically.
+type AutoFixAction struct {
+	FixType      string                                                      // "retry_with_args" | "run_tool_first" | "modify_and_retry"
+	ToolName     string                                                      // Tool to run for the fix (e.g., "glob")
+	ToolArgs     map[string]any                                              // Static arguments for the fix tool
+	ModifiedArgs map[string]any                                              // Modified arguments for direct retry
+	ArgModifier  func(originalArgs map[string]any, fixResult string) map[string]any // Builds modified args from fix result
+}
+
 // ErrorPattern matches an error and provides a recommendation.
 type ErrorPattern struct {
 	Pattern            *regexp.Regexp
@@ -43,6 +53,7 @@ type ErrorPattern struct {
 	ShouldRetryWithFix bool   // Whether we can suggest a specific fix
 	SuggestedFix       string // The command or step to fix the error
 	Alternative        string // Alternative tool or approach to suggest
+	AutoFix            *AutoFixAction
 }
 
 // Reflection contains analysis of a tool failure.
@@ -58,6 +69,7 @@ type Reflection struct {
 	Intervention       string // Message to inject into agent history
 	LearnedContext     string // Context from previously learned errors
 	LearnedEntryID     string // ID of the learned entry used (for feedback)
+	AutoFix            *AutoFixAction
 }
 
 // NewReflector creates a new reflector with default error patterns.
@@ -125,6 +137,7 @@ func (r *Reflector) Reflect(ctx context.Context, toolName string, args map[strin
 			reflection.ShouldRetryWithFix = pattern.ShouldRetryWithFix
 			reflection.SuggestedFix = pattern.SuggestedFix
 			reflection.Alternative = pattern.Alternative
+			reflection.AutoFix = pattern.AutoFix
 
 			// Build intervention message based on context
 			reflection.Intervention = r.buildIntervention(toolName, args, pattern, errorMsg)
@@ -410,6 +423,28 @@ func defaultErrorPatterns() []ErrorPattern {
 			Suggestion:  "The file or directory doesn't exist. Use glob tool to search for similar files, or check the exact path spelling.",
 			ShouldRetry: false,
 			Alternative: "glob",
+			AutoFix: &AutoFixAction{
+				FixType:  "modify_and_retry",
+				ToolName: "glob",
+				ArgModifier: func(originalArgs map[string]any, fixResult string) map[string]any {
+					foundPath := firstGlobPath(fixResult)
+					if foundPath == "" {
+						return nil
+					}
+					modified := make(map[string]any, len(originalArgs))
+					for k, v := range originalArgs {
+						modified[k] = v
+					}
+					for _, key := range []string{"file_path", "path", "filepath", "file"} {
+						if _, ok := originalArgs[key]; ok {
+							modified[key] = foundPath
+							return modified
+						}
+					}
+					modified["file_path"] = foundPath
+					return modified
+				},
+			},
 		},
 		{
 			Pattern:     regexp.MustCompile(`cannot find|could not find|unable to (find|locate)`),
@@ -417,6 +452,28 @@ func defaultErrorPatterns() []ErrorPattern {
 			Suggestion:  "The target wasn't found. Try using glob with a broader pattern to locate similar files.",
 			ShouldRetry: false,
 			Alternative: "glob",
+			AutoFix: &AutoFixAction{
+				FixType:  "modify_and_retry",
+				ToolName: "glob",
+				ArgModifier: func(originalArgs map[string]any, fixResult string) map[string]any {
+					foundPath := firstGlobPath(fixResult)
+					if foundPath == "" {
+						return nil
+					}
+					modified := make(map[string]any, len(originalArgs))
+					for k, v := range originalArgs {
+						modified[k] = v
+					}
+					for _, key := range []string{"file_path", "path", "filepath", "file"} {
+						if _, ok := originalArgs[key]; ok {
+							modified[key] = foundPath
+							return modified
+						}
+					}
+					modified["file_path"] = foundPath
+					return modified
+				},
+			},
 		},
 
 		// Permission errors
@@ -435,6 +492,21 @@ func defaultErrorPatterns() []ErrorPattern {
 			Alternative: "",
 		},
 
+		// Edit unique match errors
+		{
+			Pattern:            regexp.MustCompile(`old_string appears \d+ times|old_string not found in file`),
+			Category:           "unique_match_error",
+			Suggestion:         "The edit target was not unique or not found. Read the file first to see its actual content, then use exact text for old_string.",
+			ShouldRetry:        false,
+			ShouldRetryWithFix: true,
+			SuggestedFix:       "Read the file to see actual content, then retry with exact text.",
+			Alternative:        "read",
+			AutoFix: &AutoFixAction{
+				FixType:  "run_tool_first",
+				ToolName: "read",
+			},
+		},
+
 		// Command/executable errors
 		{
 			Pattern:            regexp.MustCompile(`command not found|executable.*not found|unknown command|not recognized`),
@@ -444,6 +516,10 @@ func defaultErrorPatterns() []ErrorPattern {
 			ShouldRetryWithFix: true,
 			SuggestedFix:       "Check if the binary is installed or use full path.",
 			Alternative:        "",
+			AutoFix: &AutoFixAction{
+				FixType:  "run_tool_first",
+				ToolName: "bash",
+			},
 		},
 		{
 			Pattern:     regexp.MustCompile(`no such (program|command|binary)`),
@@ -601,6 +677,64 @@ func defaultErrorPatterns() []ErrorPattern {
 			Alternative: "",
 		},
 	}
+}
+
+// firstGlobPath extracts the first real file path from glob output,
+// skipping status lines like "(no matches)" or "(showing N of M+)".
+func firstGlobPath(output string) string {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "(") {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+// buildGlobArgs constructs glob arguments from the original tool args to search for a missing file.
+func buildGlobArgs(originalArgs map[string]any) map[string]any {
+	filePath := ""
+	for _, key := range []string{"file_path", "path", "filepath", "file"} {
+		if v, ok := originalArgs[key].(string); ok && v != "" {
+			filePath = v
+			break
+		}
+	}
+	if filePath == "" {
+		return nil
+	}
+	filename := filepath.Base(filePath)
+	return map[string]any{"pattern": "**/" + filename}
+}
+
+// buildReadArgs constructs read tool arguments from the original edit args.
+func buildReadArgs(originalArgs map[string]any) map[string]any {
+	filePath := ""
+	for _, key := range []string{"file_path", "path"} {
+		if v, ok := originalArgs[key].(string); ok && v != "" {
+			filePath = v
+			break
+		}
+	}
+	if filePath == "" {
+		return nil
+	}
+	return map[string]any{"file_path": filePath}
+}
+
+// buildWhichArgs constructs a bash which command from the original error.
+func buildWhichArgs(originalArgs map[string]any) map[string]any {
+	command, _ := originalArgs["command"].(string)
+	if command == "" {
+		return nil
+	}
+	// Extract the first word (the binary name)
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return nil
+	}
+	return map[string]any{"command": "which " + parts[0] + " 2>/dev/null || echo 'not found'"}
 }
 
 // AddPattern adds a custom error pattern to the reflector.

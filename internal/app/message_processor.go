@@ -113,6 +113,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// Auto-retry transient errors (timeout, connection) with backoff
 	const maxRequestRetries = 3
 	requestBackoff := []time.Duration{3 * time.Second, 8 * time.Second, 20 * time.Second}
+	failoverTriggered := false
+	originalMessage := message
+	retryMessage := originalMessage
 
 	var newHistory []*genai.Content
 	var response string
@@ -121,10 +124,11 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	for attempt := 0; attempt < maxRequestRetries; attempt++ {
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
+		currentMessage := retryMessage
 		execFn := func() error {
 			if a.taskRouter != nil {
 				// Route the task intelligently
-				newHistory, response, err = a.taskRouter.Execute(ctx, history, message)
+				newHistory, response, err = a.taskRouter.Execute(ctx, history, currentMessage)
 
 				// Log routing decision for debugging
 				if analysis := a.taskRouter.GetAnalysis(message); analysis != nil {
@@ -136,7 +140,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				}
 			} else {
 				// Fallback to standard executor
-				newHistory, response, err = a.executor.Execute(ctx, history, message)
+				newHistory, response, err = a.executor.Execute(ctx, history, currentMessage)
 			}
 			return err
 		}
@@ -164,6 +168,24 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			continue
 		}
 
+		// If stream stalled mid-response, retry with an explicit continuation hint
+		// so the model resumes instead of restarting from scratch.
+		if client.IsStreamIdleTimeout(err) {
+			retryMessage = buildContinuationRetryMessage(originalMessage, newHistory)
+		}
+
+		// After repeated transient failures, auto-enable provider failover chain.
+		// This avoids user-visible dead-ends when a provider/model is unstable.
+		if !failoverTriggered && attempt >= 1 && isRetryableError(err) {
+			if chain, failoverErr := a.activateEmergencyFailoverClient(); failoverErr == nil {
+				failoverTriggered = true
+				a.safeSendToProgram(ui.StreamTextMsg(
+					fmt.Sprintf("\n🔁 Automatic provider failover activated: %s\n", chain)))
+			} else {
+				logging.Debug("automatic failover not activated", "error", failoverErr)
+			}
+		}
+
 		// Only retry transient errors; stop on last attempt
 		if !isRetryableError(err) || attempt >= maxRequestRetries-1 {
 			break
@@ -179,9 +201,15 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 		// Warn user about retry
 		backoff := requestBackoff[attempt]
-		a.safeSendToProgram(ui.StreamTextMsg(
-			fmt.Sprintf("\n⚠️ Request failed: %s\nRetrying in %v (%d/%d)...\n",
-				err.Error(), backoff, attempt+1, maxRequestRetries)))
+		if client.IsStreamIdleTimeout(err) {
+			a.safeSendToProgram(ui.StreamTextMsg(
+				fmt.Sprintf("\n⚠️ Response stream stalled. Auto-retry #%d/%d in %v...\n",
+					attempt+1, maxRequestRetries, backoff)))
+		} else {
+			a.safeSendToProgram(ui.StreamTextMsg(
+				fmt.Sprintf("\n⚠️ Request failed: %s\nRetrying in %v (%d/%d)...\n",
+					err.Error(), backoff, attempt+1, maxRequestRetries)))
+		}
 
 		backoffTimer := time.NewTimer(backoff)
 		select {
@@ -1580,6 +1608,74 @@ func isRetryableError(err error) bool {
 
 func (a *App) shouldUseSafeMode() bool {
 	return a.reliability != nil && a.reliability.IsDegraded()
+}
+
+func buildContinuationRetryMessage(baseMessage string, history []*genai.Content) string {
+	baseMessage = strings.TrimSpace(baseMessage)
+	last := lastModelText(history)
+	if last == "" {
+		return "[System note: previous response was interrupted. Continue from where you stopped without repeating completed parts.]\n\n" + baseMessage
+	}
+
+	anchor := lastCompleteSentence(last)
+	if anchor == "" {
+		anchor = truncateTail(last, 220)
+	}
+	anchor = strings.TrimSpace(anchor)
+	if anchor == "" {
+		return "[System note: previous response was interrupted. Continue from where you stopped without repeating completed parts.]\n\n" + baseMessage
+	}
+
+	return fmt.Sprintf(
+		"[System note: previous response was interrupted by a stream timeout. Continue from the last complete sentence without repeating earlier text. Last complete sentence: %q]\n\n%s",
+		anchor,
+		baseMessage,
+	)
+}
+
+func lastModelText(history []*genai.Content) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg == nil || msg.Role != genai.RoleModel {
+			continue
+		}
+
+		var sb strings.Builder
+		for _, part := range msg.Parts {
+			if part != nil && strings.TrimSpace(part.Text) != "" {
+				sb.WriteString(part.Text)
+			}
+		}
+
+		text := strings.TrimSpace(sb.String())
+		if text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func lastCompleteSentence(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+
+	for i := len(text) - 1; i >= 0; i-- {
+		switch text[i] {
+		case '.', '!', '?', '\n':
+			return strings.TrimSpace(text[:i+1])
+		}
+	}
+	return ""
+}
+
+func truncateTail(text string, max int) string {
+	text = strings.TrimSpace(text)
+	if max <= 0 || len(text) <= max {
+		return text
+	}
+	return "..." + strings.TrimSpace(text[len(text)-max:])
 }
 
 func maxPlanExecutionRounds(totalSteps int) int {

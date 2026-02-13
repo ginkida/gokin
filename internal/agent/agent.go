@@ -79,8 +79,11 @@ type Agent struct {
 	compactor    *ctxmgr.ResultCompactor
 
 	// Self-reflection for error recovery
-	reflector *Reflector
-	learning  *memory.ProjectLearning
+	reflector         *Reflector
+	recoveryExecutor  *RecoveryExecutor
+	autoFixAttempts   map[string]int
+	autoFixAttemptsMu sync.Mutex
+	learning          *memory.ProjectLearning
 
 	// Autonomous delegation strategy
 	delegation *DelegationStrategy
@@ -154,8 +157,10 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		history:      make([]*genai.Content, 0),
 		status:       AgentStatusPending,
 		maxTurns:     maxTurns,
-		callHistory:  make(map[string]int),
-		ctxCfg:       ctxCfg,
+		callHistory:      make(map[string]int),
+		ctxCfg:          ctxCfg,
+		recoveryExecutor: NewRecoveryExecutor(2),
+		autoFixAttempts:  make(map[string]int),
 	}
 
 	// Wire up RequestTool tool if it exists in the registry
@@ -2183,6 +2188,42 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	// Apply self-reflection on errors to provide recovery suggestions
 	if !result.Success && a.reflector != nil {
 		reflection = a.reflector.Reflect(ctx, call.Name, call.Args, result.Content)
+
+		// Auto-fix attempt before enrichment
+		if reflection.AutoFix != nil && a.recoveryExecutor != nil {
+			key := normalizeCallKey(call.Name, call.Args)
+			a.autoFixAttemptsMu.Lock()
+			attempt := a.autoFixAttempts[key]
+			a.autoFixAttemptsMu.Unlock()
+
+			fixResult, handled := a.recoveryExecutor.AttemptAutoFix(ctx, a, call, reflection, attempt)
+			if handled {
+				a.autoFixAttemptsMu.Lock()
+				a.autoFixAttempts[key]++
+				a.autoFixAttemptsMu.Unlock()
+
+				if fixResult.Success {
+					// Fully recovered — return the successful result
+					logging.Info("auto-fix recovered", "tool", call.Name, "category", reflection.Category)
+					if reflection.LearnedEntryID != "" {
+						a.reflector.RecordSolutionSuccess(reflection.LearnedEntryID)
+					}
+				} else {
+					// Enriched context — return as error with extra context for the model
+					logging.Info("auto-fix enriched context", "tool", call.Name, "category", reflection.Category)
+				}
+
+				// Compact if needed
+				if a.compactor != nil {
+					fixResult = a.compactor.CompactForType(call.Name, fixResult)
+				}
+
+				return toolCallResult{Response: &genai.FunctionResponse{
+					ID: call.ID, Name: call.Name, Response: fixResult.ToMap(),
+				}}
+			}
+		}
+
 		if reflection.Intervention != "" {
 			// Enrich the error result with reflection analysis
 			result.Content = fmt.Sprintf("%s\n\n---\n**Self-Reflection:**\n%s",

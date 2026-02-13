@@ -429,6 +429,7 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 		warningTimer := time.NewTimer(streamIdleWarning)
 		defer warningTimer.Stop()
 		lastWarningAt := time.Duration(0)
+		contentReceived := false
 
 		// Process iterator results with context checking
 	streamLoop:
@@ -458,9 +459,9 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 				case <-idleTimer.C:
 					// Stream idle timeout - fail the stream
 					hasError = true
-					logging.Warn("stream idle timeout exceeded", "timeout", streamIdleTimeout)
+					logging.Warn("stream idle timeout exceeded", "timeout", streamIdleTimeout, "partial", contentReceived)
 					chunks <- ResponseChunk{
-						Error: fmt.Errorf("stream idle timeout: no data received for %v", streamIdleTimeout),
+						Error: &ErrStreamIdleTimeout{Timeout: streamIdleTimeout, Partial: contentReceived},
 						Done:  true,
 					}
 					return
@@ -501,6 +502,9 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 					}
 
 					chunk := processResponse(result.resp)
+					if chunk.Text != "" || chunk.Thinking != "" || len(chunk.FunctionCalls) > 0 {
+						contentReceived = true
+					}
 
 					// Use select to prevent goroutine leak if receiver stops reading
 					select {

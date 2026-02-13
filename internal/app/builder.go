@@ -1227,15 +1227,7 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up status callback for clients
 	statusCb := &appStatusCallback{app: app}
-	if gc, ok := b.geminiClient.(*client.GeminiClient); ok {
-		gc.SetStatusCallback(statusCb)
-	}
-	if ac, ok := b.geminiClient.(*client.AnthropicClient); ok {
-		ac.SetStatusCallback(statusCb)
-	}
-	if oc, ok := b.geminiClient.(*client.OllamaClient); ok {
-		oc.SetStatusCallback(statusCb)
-	}
+	attachStatusCallback(b.geminiClient, statusCb)
 
 	// Set up executor handler
 	b.executor.SetHandler(&tools.ExecutionHandler{

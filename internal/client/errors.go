@@ -84,6 +84,9 @@ func IsRetryableError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return true
 	}
+	if IsStreamIdleTimeout(err) {
+		return true
+	}
 
 	// Network errors
 	var netErr net.Error

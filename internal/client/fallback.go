@@ -245,3 +245,18 @@ func (fc *FallbackClient) Close() error {
 	}
 	return lastErr
 }
+
+// SetStatusCallback sets status callbacks on all clients that support it.
+func (fc *FallbackClient) SetStatusCallback(cb StatusCallback) {
+	if cb == nil {
+		return
+	}
+
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	for _, c := range fc.clients {
+		if setter, ok := c.(interface{ SetStatusCallback(StatusCallback) }); ok {
+			setter.SetStatusCallback(cb)
+		}
+	}
+}

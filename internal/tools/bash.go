@@ -234,6 +234,7 @@ func (t *BashTool) Description() string {
 PARAMETERS:
 - command (required): The bash command to execute
 - description (optional): Brief description of what the command does
+- stdin (optional): Content to pipe as stdin to the command
 - run_in_background (optional): If true, run in background and return task ID
 
 TIMEOUT:
@@ -282,6 +283,10 @@ func (t *BashTool) Declaration() *genai.FunctionDeclaration {
 					Type:        genai.TypeString,
 					Description: "A brief description of what the command does",
 				},
+				"stdin": {
+					Type:        genai.TypeString,
+					Description: "Content to pipe as stdin to the command",
+				},
 				"run_in_background": {
 					Type:        genai.TypeBoolean,
 					Description: "If true, run the command in background and return task ID immediately",
@@ -314,15 +319,19 @@ func (t *BashTool) Validate(args map[string]any) error {
 
 func (t *BashTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	command, _ := GetString(args, "command")
+	stdinContent, _ := GetString(args, "stdin")
 
 	// Check if should run in background
 	runInBackground, _ := args["run_in_background"].(bool)
 
 	if runInBackground {
+		if stdinContent != "" {
+			return NewErrorResult("stdin is not supported with run_in_background=true"), nil
+		}
 		return t.executeBackground(ctx, command)
 	}
 
-	return t.executeForeground(ctx, command)
+	return t.executeForeground(ctx, command, stdinContent)
 }
 
 // executeBackground starts a command in background and returns task ID.
@@ -496,7 +505,7 @@ func (t *BashTool) updateSessionAfterCommandLegacy(command string) {
 }
 
 // executeForeground runs a command and waits for completion.
-func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolResult, error) {
+func (t *BashTool) executeForeground(ctx context.Context, command string, stdinContent string) (ToolResult, error) {
 	// Create context with explicit timeout to prevent indefinite hangs
 	execCtx := ctx
 	if t.timeout > 0 {
@@ -507,6 +516,9 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 
 	// Apply sandboxing if enabled
 	if t.sandboxEnabled {
+		if stdinContent != "" {
+			return NewErrorResult("stdin is not supported in sandbox mode"), nil
+		}
 		// Use sandbox wrapper for command execution
 		return t.executeSandboxed(execCtx, command)
 	}
@@ -526,6 +538,11 @@ func (t *BashTool) executeForeground(ctx context.Context, command string) (ToolR
 
 	// Set up process group for proper cleanup of child processes
 	setBashProcAttr(cmd)
+
+	// Set stdin if provided
+	if stdinContent != "" {
+		cmd.Stdin = strings.NewReader(stdinContent)
+	}
 
 	// Get progress callback for streaming output
 	onProgress := GetProgressCallback(ctx)

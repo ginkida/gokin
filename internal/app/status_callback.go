@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"gokin/internal/client"
 	"gokin/internal/ui"
 )
 
@@ -102,4 +103,14 @@ func (c *appStatusCallback) OnError(err error, recoverable bool) {
 			"error":       err.Error(),
 		},
 	})
+}
+
+// attachStatusCallback binds status callbacks to any client that supports it.
+func attachStatusCallback(c client.Client, cb client.StatusCallback) {
+	if c == nil || cb == nil {
+		return
+	}
+	if setter, ok := c.(interface{ SetStatusCallback(client.StatusCallback) }); ok {
+		setter.SetStatusCallback(cb)
+	}
 }

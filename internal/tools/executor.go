@@ -30,7 +30,8 @@ const (
 	// maxStreamRetries is the maximum number of retries for stream idle timeouts.
 	maxStreamRetries = 2
 	// modelRoundHardTimeout caps a single model round to prevent zombie requests.
-	modelRoundHardTimeout = 4 * time.Minute
+	// Keep this strict so stalled providers don't block the agent loop indefinitely.
+	modelRoundHardTimeout = 2 * time.Minute
 )
 
 // ResultCompactor interface for compacting tool results.
