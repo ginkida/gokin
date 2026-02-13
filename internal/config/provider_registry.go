@@ -105,6 +105,22 @@ var Providers = []ProviderDef{
 		},
 	},
 	{
+		Name:          "minimax",
+		DisplayName:   "MiniMax",
+		DefaultModel:  "MiniMax-M2.5",
+		EnvVars:       []string{"GOKIN_MINIMAX_KEY", "MINIMAX_API_KEY"},
+		UsesLegacyKey: true,
+		GetKey:        func(api *APIConfig) string { return api.MiniMaxKey },
+		SetKey:        func(api *APIConfig, key string) { api.MiniMaxKey = key },
+		ModelPrefixes: []string{"minimax"},
+		SetupKeyURL:   "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+		KeyValidation: KeyValidationDef{
+			URL:             "https://api.minimax.io/v1/models",
+			AuthMode:        "bearer",
+			SuccessStatuses: []int{200},
+		},
+	},
+	{
 		Name:         "ollama",
 		DisplayName:  "Ollama (local)",
 		DefaultModel: "llama3.2",

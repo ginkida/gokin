@@ -565,6 +565,9 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 			// Add full anthropic path
 			url = strings.TrimSuffix(c.config.BaseURL, "/") + "/anthropic/v1/messages"
 		}
+	} else if strings.Contains(c.config.BaseURL, "minimax") {
+		// MiniMax API - Anthropic-compatible endpoint
+		url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
 	} else {
 		// Other custom endpoints - assume Anthropic-compatible
 		url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
@@ -584,6 +587,11 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 	// Z.AI also accepts Authorization header
 	if strings.Contains(c.config.BaseURL, "api.z.ai") {
+		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+	}
+
+	// MiniMax uses Bearer token authentication
+	if strings.Contains(c.config.BaseURL, "minimax") {
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 	}
 

@@ -32,12 +32,12 @@ const (
 
 const (
 	welcomeMessage = `
-%s╔═══════════════════════════════════════════════════════════════╗
-║                                                               ║
-║                    %sWelcome to Gokin!%s                        ║
-║  AI assistant: Gemini, Anthropic, GLM, DeepSeek & Ollama ║
-║                                                               ║
-╚═══════════════════════════════════════════════════════════════╝%s
+%s╔════════════════════════════════════════════════════════════════════╗
+║                                                                    ║
+║                         %sWelcome to Gokin!%s                          ║
+║  AI assistant: Gemini, Anthropic, GLM, DeepSeek, MiniMax & Ollama  ║
+║                                                                    ║
+╚════════════════════════════════════════════════════════════════════╝%s
 
 Gokin helps you work with code:
   • Read, create, and edit files
@@ -112,6 +112,16 @@ func buildSetupChoices() []setupChoice {
 				Lines: []string{
 					"Claude Sonnet & Haiku models",
 					"Extended thinking support",
+					"Get key at: " + p.SetupKeyURL,
+				},
+			})
+		case "minimax":
+			choices = append(choices, setupChoice{
+				Action: "api:" + p.Name,
+				Title:  "MiniMax (Cloud)",
+				Lines: []string{
+					"MiniMax M2.5: 1M context window",
+					"Anthropic-compatible API",
 					"Get key at: " + p.SetupKeyURL,
 				},
 			})

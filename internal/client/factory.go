@@ -157,6 +157,8 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 		return newGLMClient(cfg, modelID)
 	case "deepseek":
 		return newDeepSeekClient(cfg, modelID)
+	case "minimax":
+		return newMiniMaxClient(cfg, modelID)
 	case "gemini":
 		// Check OAuth first
 		if cfg.API.HasOAuthToken("gemini") {
@@ -306,6 +308,54 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 		HTTPTimeout: cfg.API.Retry.HTTPTimeout,
+	}
+
+	return NewAnthropicClient(anthropicConfig)
+}
+
+// newMiniMaxClient creates a MiniMax client using Anthropic-compatible API.
+func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
+	p := config.GetProvider("minimax")
+	if p == nil {
+		return nil, fmt.Errorf("provider registry missing entry for minimax")
+	}
+	legacyKey := ""
+	if p.UsesLegacyKey {
+		legacyKey = cfg.API.APIKey
+	}
+	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
+
+	if !loadedKey.IsSet() {
+		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
+	}
+
+	logging.Debug("loaded API key",
+		"provider", p.Name,
+		"source", loadedKey.Source,
+		"model", modelID)
+
+	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
+		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
+	}
+
+	baseURL := cfg.Model.CustomBaseURL
+	if baseURL == "" {
+		baseURL = DefaultMiniMaxBaseURL
+	}
+
+	anthropicConfig := AnthropicConfig{
+		APIKey:            loadedKey.Value,
+		BaseURL:           baseURL,
+		Model:             modelID,
+		MaxTokens:         cfg.Model.MaxOutputTokens,
+		Temperature:       cfg.Model.Temperature,
+		StreamEnabled:     true,
+		EnableThinking:    cfg.Model.EnableThinking,
+		ThinkingBudget:    cfg.Model.ThinkingBudget,
+		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout,
+		MaxRetries:        cfg.API.Retry.MaxRetries,
+		RetryDelay:        cfg.API.Retry.RetryDelay,
+		HTTPTimeout:       cfg.API.Retry.HTTPTimeout,
 	}
 
 	return NewAnthropicClient(anthropicConfig)

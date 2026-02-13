@@ -47,6 +47,10 @@ var knownModelProfiles = map[string]ModelProfile{
 	// Command R family
 	"command-r-plus": {Family: "command-r", ContextWindow: 128000, SupportsTools: true},
 	"command-r":      {Family: "command-r", ContextWindow: 128000, SupportsTools: true},
+
+	// MiniMax family
+	"minimax-m2.5": {Family: "minimax", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+	"minimax":      {Family: "minimax", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 }
 
 // GetModelProfile returns the profile for a given model name.

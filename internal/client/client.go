@@ -11,6 +11,7 @@ const (
 	DefaultAnthropicBaseURL = "https://api.anthropic.com"
 	DefaultGLMBaseURL       = "https://api.z.ai/api/anthropic"
 	DefaultDeepSeekBaseURL  = "https://api.deepseek.com/anthropic"
+	DefaultMiniMaxBaseURL   = "https://api.minimax.io/anthropic"
 )
 
 // ModelInfo contains information about an available model.
@@ -79,6 +80,14 @@ var AvailableModels = []ModelInfo{
 		Description: "Extended reasoning model (thinking)",
 		Provider:    "deepseek",
 		BaseURL:     DefaultDeepSeekBaseURL,
+	},
+	// MiniMax models (via Anthropic-compatible API)
+	{
+		ID:          "MiniMax-M2.5",
+		Name:        "MiniMax M2.5",
+		Description: "Flagship model: 1M context, strong coding",
+		Provider:    "minimax",
+		BaseURL:     DefaultMiniMaxBaseURL,
 	},
 	// Anthropic models (native API)
 	{

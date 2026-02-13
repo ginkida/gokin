@@ -40,6 +40,7 @@ type APIConfig struct {
 	AnthropicKey string `yaml:"anthropic_key,omitempty"`
 	GLMKey       string `yaml:"glm_key,omitempty"`
 	DeepSeekKey  string `yaml:"deepseek_key,omitempty"`
+	MiniMaxKey   string `yaml:"minimax_key,omitempty"`
 	OllamaKey    string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
 
 	// OAuth tokens for Gemini (via Google Account)
