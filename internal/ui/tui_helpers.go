@@ -218,7 +218,7 @@ func (m Model) getCommandHint(input string) string {
 		"resume":            "Resume a previously saved session",
 		"sessions":          "List all saved sessions",
 		"stats":             "Show session stats, usage and health snapshot",
-		"instructions":      "Show project-specific instructions (AGENTS/GOKIN)",
+		"instructions":      "Show project-specific instructions (GOKIN/CLAUDE/.gokin)",
 		"commit":            "Create a git commit with AI-generated message",
 		"pr":                "Create a pull request",
 		"checkpoint":        "Save a checkpoint of the current state",

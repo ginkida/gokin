@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"gokin/internal/config"
+	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
 )
 
@@ -529,13 +530,20 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 		sb.WriteString(fmt.Sprintf("  %s○%s gh (GitHub CLI) not installed (optional for /pr)\n", colorYellow, colorReset))
 	}
 
-	// GOKIN.md
+	// Project instruction file (GOKIN.md/CLAUDE.md and other supported paths)
 	workDir := app.GetWorkDir()
-	gokinPath := filepath.Join(workDir, "GOKIN.md")
-	if _, err := os.Stat(gokinPath); err == nil {
-		sb.WriteString(fmt.Sprintf("  %s✓%s GOKIN.md found\n", colorGreen, colorReset))
+	foundInstruction := ""
+	for _, filename := range appcontext.InstructionFileNames() {
+		path := filepath.Join(workDir, filename)
+		if _, err := os.Stat(path); err == nil {
+			foundInstruction = filename
+			break
+		}
+	}
+	if foundInstruction != "" {
+		sb.WriteString(fmt.Sprintf("  %s✓%s Instruction file found: %s\n", colorGreen, colorReset, foundInstruction))
 	} else {
-		sb.WriteString(fmt.Sprintf("  %s○%s GOKIN.md not found (use /init to create)\n", colorYellow, colorReset))
+		sb.WriteString(fmt.Sprintf("  %s○%s No project instruction file found (GOKIN.md/CLAUDE.md)\n", colorYellow, colorReset))
 	}
 
 	// Data directories
@@ -563,7 +571,7 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	sb.WriteString(fmt.Sprintf("\n%sCommands to fix issues:%s\n", colorCyan, colorReset))
 	sb.WriteString(fmt.Sprintf("  %s/login%s    - Set up authentication\n", colorGreen, colorReset))
 	sb.WriteString(fmt.Sprintf("  %s/test%s     - Test all settings\n", colorGreen, colorReset))
-	sb.WriteString(fmt.Sprintf("  %s/init%s     - Create GOKIN.md\n", colorGreen, colorReset))
+	sb.WriteString(fmt.Sprintf("  %s/init%s     - Create GOKIN.md template\n", colorGreen, colorReset))
 
 	return sb.String(), nil
 }

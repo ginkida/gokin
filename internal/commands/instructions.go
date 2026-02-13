@@ -18,7 +18,7 @@ func (c *InstructionsCommand) Name() string {
 
 // Description returns the command description.
 func (c *InstructionsCommand) Description() string {
-	return "Show loaded project instructions (GOKIN.md)"
+	return "Show loaded project instructions (GOKIN.md/CLAUDE.md)"
 }
 
 // Usage returns the command usage.
@@ -59,10 +59,10 @@ func (c *InstructionsCommand) Execute(ctx context.Context, args []string, app Ap
 	if !projectMemory.HasInstructions() {
 		output.WriteString("# No Project Instructions Found\n\n")
 		output.WriteString("Searched for:\n")
-		output.WriteString("  - GOKIN.md\n")
-		output.WriteString("  - .gokin/instructions.md\n")
-		output.WriteString("  - .gokin/INSTRUCTIONS.md\n")
-		output.WriteString("  - .gokin.md\n\n")
+		for _, filename := range appcontext.InstructionFileNames() {
+			output.WriteString(fmt.Sprintf("  - %s\n", filename))
+		}
+		output.WriteString("\n")
 		output.WriteString("Create one of these files to provide project-specific context.")
 		return output.String(), nil
 	}

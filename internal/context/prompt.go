@@ -301,7 +301,7 @@ func (b *PromptBuilder) Build() string {
 		builder.WriteString(b.buildProjectSection())
 	}
 
-	// Add project memory instructions (from GOKIN.md)
+	// Add project memory instructions (from project instruction files)
 	if b.projectMemory != nil && b.projectMemory.HasInstructions() {
 		builder.WriteString("\n\n## Project Instructions\n")
 		builder.WriteString("The following instructions are specific to this project:\n\n")
@@ -447,7 +447,7 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 		builder.WriteString("\n\n")
 	}
 
-	// Add project instructions (from GOKIN.md)
+	// Add project instructions (from project instruction files)
 	if b.projectMemory != nil && b.projectMemory.HasInstructions() {
 		builder.WriteString("## Project Instructions\n")
 		builder.WriteString(b.projectMemory.GetInstructions())
@@ -534,7 +534,7 @@ func (b *PromptBuilder) BuildPlanExecutionPromptWithContext(title, description s
 
 // BuildSubAgentPrompt builds a compact project context for injection into sub-agents.
 // Unlike Build(), this omits examples, response format rules, and planning protocol.
-// It provides project guidelines, GOKIN.md instructions, memory, and working directory.
+// It provides project guidelines, project instructions, memory, and working directory.
 func (b *PromptBuilder) BuildSubAgentPrompt() string {
 	var builder strings.Builder
 
@@ -544,7 +544,7 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 		builder.WriteString("\n")
 	}
 
-	// Project instructions from GOKIN.md
+	// Project instructions from project instruction files
 	if b.projectMemory != nil && b.projectMemory.HasInstructions() {
 		builder.WriteString("\n## Project Instructions\n")
 		builder.WriteString(b.projectMemory.GetInstructions())

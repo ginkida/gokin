@@ -26,11 +26,20 @@ type ProjectMemory struct {
 // instructionFiles is the ordered list of files to search for instructions.
 var instructionFiles = []string{
 	"GOKIN.md",
+	"CLAUDE.md",
+	"Claude.md",
 	".gokin/rules.md",
 	".gokin/instructions.md",
 	".gokin/INSTRUCTIONS.md",
 	".gokin.md",
 	"rules.md",
+}
+
+// InstructionFileNames returns the instruction discovery order.
+func InstructionFileNames() []string {
+	files := make([]string, len(instructionFiles))
+	copy(files, instructionFiles)
+	return files
 }
 
 // NewProjectMemory creates a new ProjectMemory instance.
@@ -41,7 +50,7 @@ func NewProjectMemory(workDir string) *ProjectMemory {
 }
 
 // Load searches for and loads project instructions.
-// It checks files in order: GOKIN.md, .gokin/instructions.md, etc.
+// It checks files in order: GOKIN.md, CLAUDE.md, .gokin/instructions.md, etc.
 // Returns nil error even if no file is found (instructions are optional).
 func (m *ProjectMemory) Load() error {
 	for _, filename := range instructionFiles {
@@ -67,7 +76,7 @@ func (m *ProjectMemory) Load() error {
 	}
 
 	// No instructions file found - this is not an error
-	logging.Debug("no project instructions found (checked GOKIN.md, .gokin/instructions.md, .gokin.md)")
+	logging.Debug("no project instructions found", "checked_files", strings.Join(instructionFiles, ", "))
 	return nil
 }
 
@@ -122,9 +131,9 @@ func (m *ProjectMemory) StartWatching(ctx context.Context, debounceMs int) error
 	}
 
 	if watchPath == "" {
-		// No file found yet, watch for creation of any instruction file
-		watchPath = filepath.Join(m.workDir, ".gokin")
-		os.MkdirAll(watchPath, 0755)
+		// No file found yet, watch project root so newly created GOKIN.md/CLAUDE.md
+		// and .gokin/* files are detected without restart.
+		watchPath = m.workDir
 	}
 
 	watcherCtx, cancel := context.WithCancel(ctx)
