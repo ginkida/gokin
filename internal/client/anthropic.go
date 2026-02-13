@@ -405,6 +405,16 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 		return true
 	}
 
+	// Some providers (MiniMax) return transient 400 errors that resolve on retry.
+	// Only retry 400s with known transient patterns, not all bad requests.
+	if statusCode == 400 && err != nil {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "model_not_found") || strings.Contains(errStr, "model not found") {
+			logging.Warn("transient 400 model_not_found, will retry", "error", err)
+			return true
+		}
+	}
+
 	// Only retry on specific network-related errors, not all errors
 	if err != nil {
 		// Typed check: HTTP client timeout wraps context.DeadlineExceeded

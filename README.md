@@ -27,7 +27,7 @@
 
 ---
 
-## ✨ Why Gokin?
+## ✨ Why Gokin? <a id="why-gokin"></a>
 
 | Feature | Gokin | Claude Code | Cursor |
 |---------|-------|-------------|--------|
@@ -50,7 +50,7 @@
 
 ---
 
-## 🚀 Installation
+## 🚀 Installation <a id="installation"></a>
 
 ### One-liner (recommended)
 
@@ -74,7 +74,7 @@ go build -o gokin ./cmd/gokin
 
 ---
 
-## ⚡ Quick Start
+## ⚡ Quick Start <a id="quick-start"></a>
 
 ```bash
 # Launch with interactive setup
@@ -97,7 +97,7 @@ gokin
 
 ---
 
-## 🎯 Key Features
+## 🎯 Key Features <a id="features"></a>
 
 ### 🧠 Smart Code Understanding
 - **Semantic Search** — Find code by meaning, not just keywords
@@ -145,7 +145,7 @@ gokin
 
 ---
 
-## ☁️ Providers
+## ☁️ Providers <a id="providers"></a>
 
 | Provider | Models | Auth | Notes |
 |----------|--------|------|-------|
@@ -165,7 +165,7 @@ Switch anytime:
 
 ---
 
-## ⌨️ Commands
+## ⌨️ Commands <a id="commands"></a>
 
 | Command | Description |
 |---------|-------------|
@@ -192,7 +192,7 @@ Switch anytime:
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ Configuration <a id="configuration"></a>
 
 **Location:** `~/.config/gokin/config.yaml`
 
@@ -245,7 +245,7 @@ ui:
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture <a id="architecture"></a>
 
 ```
 gokin/
@@ -267,7 +267,7 @@ gokin/
 
 ---
 
-## 🤝 Contributing
+## 🤝 Contributing <a id="contributing"></a>
 
 Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
@@ -292,13 +292,13 @@ go vet ./...
 
 ---
 
-## 📝 License
+## 📝 License <a id="license"></a>
 
 [MIT](LICENSE) — Use freely, modify, distribute.
 
 ---
 
-## 🙏 Acknowledgments
+## 🙏 Acknowledgments <a id="acknowledgments"></a>
 
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) — TUI framework
 - [Gemini API](https://github.com/google/generative-ai-go) — Google AI SDK

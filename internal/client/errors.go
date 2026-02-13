@@ -47,6 +47,14 @@ func IsRetryableAPIError(err error) bool {
 			return true
 		}
 	}
+	// Some providers (MiniMax) return transient 400 "model_not_found" that resolves on retry.
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == 400 {
+		msg := strings.ToLower(httpErr.Message)
+		if strings.Contains(msg, "model_not_found") || strings.Contains(msg, "model not found") {
+			return true
+		}
+	}
 	return false
 }
 
