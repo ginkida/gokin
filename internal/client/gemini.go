@@ -78,7 +78,7 @@ func NewGeminiClient(ctx context.Context, cfg *config.Config) (Client, error) {
 	// Use retry config from config, with defaults
 	maxRetries := cfg.API.Retry.MaxRetries
 	if maxRetries == 0 {
-		maxRetries = 3 // Default: 3 retries
+		maxRetries = config.DefaultMaxRetries
 	}
 	retryDelay := cfg.API.Retry.RetryDelay
 	if retryDelay == 0 {

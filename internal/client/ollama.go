@@ -74,7 +74,7 @@ func NewOllamaClient(config OllamaConfig) (*OllamaClient, error) {
 		config.HTTPTimeout = 120 * time.Second
 	}
 	if config.MaxRetries == 0 {
-		config.MaxRetries = 3
+		config.MaxRetries = 10
 	}
 	if config.RetryDelay == 0 {
 		config.RetryDelay = 1 * time.Second

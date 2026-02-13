@@ -17,7 +17,7 @@ type RetryConfig struct {
 // DefaultRetryConfig returns sensible retry defaults.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
-		MaxRetries: 3,
+		MaxRetries: 10,
 		RetryDelay: 1 * time.Second,
 		MaxDelay:   30 * time.Second,
 	}

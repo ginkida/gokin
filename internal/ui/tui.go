@@ -1696,7 +1696,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			if attempt, ok := msg.Details["attempt"].(int); ok {
 				m.retryAttempt = attempt
 			}
-			if maxAttempts, ok := msg.Details["max_attempts"].(int); ok {
+			if maxAttempts, ok := msg.Details["maxAttempts"].(int); ok {
 				m.retryMax = maxAttempts
 			}
 		case StatusRateLimit:

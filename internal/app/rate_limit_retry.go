@@ -8,12 +8,13 @@ import (
 )
 
 const (
-	maxAutoRateLimitRetries = 2
+	maxAutoRateLimitRetries = 3
 )
 
 var autoRateLimitDelays = []time.Duration{
+	15 * time.Second,
 	30 * time.Second,
-	75 * time.Second,
+	60 * time.Second,
 }
 
 func rateLimitRetryKey(message string) string {

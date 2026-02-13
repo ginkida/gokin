@@ -60,7 +60,7 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 
 	maxRetries := cfg.API.Retry.MaxRetries
 	if maxRetries == 0 {
-		maxRetries = 3
+		maxRetries = config.DefaultMaxRetries
 	}
 	retryDelay := cfg.API.Retry.RetryDelay
 	if retryDelay == 0 {

@@ -111,8 +111,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	// === IMPROVEMENT 1: Use Task Router for intelligent routing ===
 	// Auto-retry transient errors (timeout, connection) with backoff
-	const maxRequestRetries = 3
-	requestBackoff := []time.Duration{3 * time.Second, 8 * time.Second, 20 * time.Second}
+	const maxRequestRetries = 2
+	requestBackoff := []time.Duration{2 * time.Second, 5 * time.Second}
 	failoverTriggered := false
 	originalMessage := message
 	retryMessage := originalMessage

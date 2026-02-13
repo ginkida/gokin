@@ -26,7 +26,7 @@ const (
 	DefaultAuditMaxEntries = 10000
 
 	// Retry settings
-	DefaultMaxRetries  = 3
+	DefaultMaxRetries  = 10
 	DefaultRetryDelay  = 1 * time.Second
 	DefaultHTTPTimeout = 120 * time.Second
 

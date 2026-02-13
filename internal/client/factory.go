@@ -345,11 +345,6 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = DefaultMiniMaxBaseURL
 	}
 
-	maxRetries := cfg.API.Retry.MaxRetries
-	if maxRetries < 5 {
-		maxRetries = 5 // MiniMax API returns transient 400 model_not_found; extra retries help
-	}
-
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
 		BaseURL:           baseURL,
@@ -360,7 +355,7 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
 		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout,
-		MaxRetries:        maxRetries,
+		MaxRetries:        cfg.API.Retry.MaxRetries,
 		RetryDelay:        cfg.API.Retry.RetryDelay,
 		HTTPTimeout:       cfg.API.Retry.HTTPTimeout,
 	}
