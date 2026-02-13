@@ -1,7 +1,10 @@
 package chat
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"google.golang.org/genai"
@@ -187,6 +190,58 @@ func (s *SessionState) UnmarshalJSON(data []byte) error {
 		Alias: (*Alias)(s),
 	}
 	return json.Unmarshal(data, aux)
+}
+
+// fixEmptyToolIDs assigns matching IDs to FunctionCall/FunctionResponse pairs
+// that were serialized without IDs (legacy sessions).
+// It pairs them positionally: assistant Content[i] with FunctionCall parts
+// matches user Content[i+1] with FunctionResponse parts.
+func fixEmptyToolIDs(history []*genai.Content) {
+	for i := 0; i < len(history)-1; i++ {
+		cur := history[i]
+		next := history[i+1]
+
+		if cur.Role != genai.RoleModel || next.Role != genai.RoleUser {
+			continue
+		}
+
+		// Collect FunctionCall parts with empty IDs
+		var calls []*genai.FunctionCall
+		for _, p := range cur.Parts {
+			if p.FunctionCall != nil && p.FunctionCall.ID == "" {
+				calls = append(calls, p.FunctionCall)
+			}
+		}
+		if len(calls) == 0 {
+			continue
+		}
+
+		// Collect FunctionResponse parts with empty IDs
+		var responses []*genai.FunctionResponse
+		for _, p := range next.Parts {
+			if p.FunctionResponse != nil && p.FunctionResponse.ID == "" {
+				responses = append(responses, p.FunctionResponse)
+			}
+		}
+
+		// Assign matching IDs positionally
+		for j, fc := range calls {
+			id := generateToolID()
+			fc.ID = id
+			if j < len(responses) {
+				responses[j].ID = id
+			}
+		}
+	}
+}
+
+// generateToolID creates a unique ID for tool calls.
+func generateToolID() string {
+	b := make([]byte, 12)
+	if _, err := cryptorand.Read(b); err != nil {
+		return fmt.Sprintf("toolu_%d", time.Now().UnixNano())
+	}
+	return "toolu_" + hex.EncodeToString(b)
 }
 
 // GenerateSummary creates a brief summary of the session based on messages.

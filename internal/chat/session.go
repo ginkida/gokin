@@ -374,6 +374,9 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 		history[i] = content
 	}
 
+	// Fix legacy sessions that have empty tool call IDs
+	fixEmptyToolIDs(history)
+
 	s.ID = state.ID
 	s.StartTime = state.StartTime
 	s.WorkDir = state.WorkDir
