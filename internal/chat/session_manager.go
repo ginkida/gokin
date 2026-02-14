@@ -67,6 +67,7 @@ func (sm *SessionManager) Start(ctx context.Context) {
 	}
 
 	sm.mu.Lock()
+	sm.lastSaveTime = time.Now()
 	// Start periodic save timer
 	sm.saveTimer = time.AfterFunc(sm.config.SaveInterval, func() {
 		sm.periodicSave()
@@ -201,7 +202,18 @@ func (sm *SessionManager) SaveAfterMessage() error {
 }
 
 // periodicSave performs periodic save and resets the timer.
+// Detects sleep/wake gaps: if the interval since lastSaveTime exceeds
+// 2x the configured SaveInterval, the system likely slept.
 func (sm *SessionManager) periodicSave() {
+	sm.mu.Lock()
+	gap := time.Since(sm.lastSaveTime)
+	sm.mu.Unlock()
+
+	if gap > 2*sm.config.SaveInterval {
+		logging.Info("session save gap detected (possible sleep/wake)",
+			"gap", gap.Round(time.Second).String())
+	}
+
 	if err := sm.Save(); err != nil {
 		logging.Warn("periodic session save failed", "error", err)
 	}

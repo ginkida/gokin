@@ -26,10 +26,19 @@ func NewTokenBucket(maxTokens float64, refillRate float64) *TokenBucket {
 	}
 }
 
+// maxRefillSeconds caps the elapsed time used for token refill calculation.
+// This prevents a burst of tokens after system sleep/wake: e.g. 1 hour of sleep
+// would otherwise add 3600 * refillRate tokens instantly. With a 120s cap and
+// typical maxTokens=10, the bucket simply fills to capacity without overflow.
+const maxRefillSeconds = 120.0
+
 // refill adds tokens based on elapsed time since last refill.
 func (b *TokenBucket) refill() {
 	now := time.Now()
 	elapsed := now.Sub(b.lastRefill).Seconds()
+	if elapsed > maxRefillSeconds {
+		elapsed = maxRefillSeconds
+	}
 	b.tokens += elapsed * b.refillRate
 	if b.tokens > b.maxTokens {
 		b.tokens = b.maxTokens

@@ -24,6 +24,13 @@ const (
 	planStepOutputMaxChars = 8000
 	// planSummaryMaxChars is the max characters for previous steps summary context.
 	planSummaryMaxChars = 2000
+	// messageIdleTimeout is the maximum time without any model activity
+	// (text, tool calls, thinking) before we cancel message processing.
+	// Unlike a wall-clock timeout, this survives system sleep/wake cycles
+	// because the heartbeat freezes during sleep and resumes on wake.
+	messageIdleTimeout = 10 * time.Minute
+	// idleCheckInterval is how often we check for idle timeout.
+	idleCheckInterval = 30 * time.Second
 )
 
 // processMessageWithContext handles user messages with full context management.
@@ -33,14 +40,32 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	})
 	a.saveRecoverySnapshot("")
 
-	// Outer timeout to prevent indefinite hangs if API becomes unresponsive.
-	// This covers the ENTIRE message processing cycle (multiple LLM calls,
-	// tool executions, etc.), not just a single LLM call.
+	// Activity-based idle timeout: cancel if no model activity (text, tool calls,
+	// thinking) for messageIdleTimeout. Unlike wall-clock context.WithTimeout,
+	// this survives system sleep/wake — heartbeat freezes during sleep, and
+	// resumes when callbacks fire on wake.
 	// PlanningTimeout is for individual plan-step LLM calls (default 60s)
 	// and must NOT be used here — it would kill normal conversations.
-	timeout := 10 * time.Minute
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	a.touchStepHeartbeat()
+	go func() {
+		ticker := time.NewTicker(idleCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if age := a.stepHeartbeatAge(); age > messageIdleTimeout {
+					logging.Warn("message processing idle timeout",
+						"idle", age.Round(time.Second).String())
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 
 	defer func() {
 		a.mu.Lock()
