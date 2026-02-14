@@ -104,6 +104,10 @@ func (e *Entry) Matches(filter QueryFilter) bool {
 	return true
 }
 
+// argsRedactor is a cached redactor for SanitizeArgs to avoid
+// recompiling 24 regex patterns on every call.
+var argsRedactor = security.NewSecretRedactor()
+
 // SanitizeArgs creates a copy of args with sensitive values redacted.
 // It uses security.SecretRedactor for comprehensive masking.
 func SanitizeArgs(args map[string]any) map[string]any {
@@ -111,8 +115,7 @@ func SanitizeArgs(args map[string]any) map[string]any {
 		return nil
 	}
 
-	redactor := security.NewSecretRedactor()
-	return redactor.RedactMap(args)
+	return argsRedactor.RedactMap(args)
 }
 
 // TruncateResult truncates a result string to the specified maximum length.

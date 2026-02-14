@@ -255,6 +255,18 @@ func (r *SecretRedactor) redactSubmatches(text string, pattern *regexp.Regexp) s
 	})
 }
 
+// safeValues is a set of values that should never be redacted.
+// Exact match only — no substring matching to prevent bypass.
+var safeValues = map[string]bool{
+	"example": true, "test": true, "demo": true,
+	"sample": true, "mock": true, "localhost": true,
+	"127.0.0.1": true, "::1": true, "development": true,
+	"staging": true, "production": true, "readme": true,
+	"license": true, "changelog": true, "undefined": true,
+	"placeholder": true, "dummy": true, "foobar": true,
+	"redacted": true,
+}
+
 // isWhitelisted checks if a value should not be redacted.
 func (r *SecretRedactor) isWhitelisted(value string) bool {
 	lower := strings.ToLower(strings.TrimSpace(value))
@@ -269,16 +281,6 @@ func (r *SecretRedactor) isWhitelisted(value string) bool {
 		return true
 	}
 
-	// Exact match only — no Contains to prevent bypass
-	safeValues := map[string]bool{
-		"example": true, "test": true, "demo": true,
-		"sample": true, "mock": true, "localhost": true,
-		"127.0.0.1": true, "::1": true, "development": true,
-		"staging": true, "production": true, "readme": true,
-		"license": true, "changelog": true, "undefined": true,
-		"placeholder": true, "dummy": true, "foobar": true,
-		"redacted": true,
-	}
 	return safeValues[lower]
 }
 
@@ -294,6 +296,9 @@ func (r *SecretRedactor) AddPattern(pattern string) error {
 
 // RedactMap redacts values in a map that might contain secrets.
 func (r *SecretRedactor) RedactMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
 	redacted := make(map[string]any)
 	for k, v := range m {
 		redacted[k] = r.RedactAny(v)
@@ -331,6 +336,13 @@ func (r *SecretRedactor) RedactAny(v any) any {
 		if err := json.Unmarshal(data, &generic); err != nil {
 			return v
 		}
-		return r.RedactAny(generic)
+		// Only recurse if JSON produced a redactable type (string, map, slice).
+		// Primitives (float64, bool) would loop forever — return as-is.
+		switch generic.(type) {
+		case string, map[string]any, []any:
+			return r.RedactAny(generic)
+		default:
+			return v
+		}
 	}
 }

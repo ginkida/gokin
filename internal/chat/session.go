@@ -675,6 +675,22 @@ func redactMapValues(m map[string]any) {
 			m[k] = sessionRedactor.Redact(val)
 		case map[string]any:
 			redactMapValues(val)
+		case []any:
+			redactSliceValues(val)
+		}
+	}
+}
+
+// redactSliceValues recursively redacts sensitive data in slice values.
+func redactSliceValues(s []any) {
+	for i, v := range s {
+		switch val := v.(type) {
+		case string:
+			s[i] = sessionRedactor.Redact(val)
+		case map[string]any:
+			redactMapValues(val)
+		case []any:
+			redactSliceValues(val)
 		}
 	}
 }

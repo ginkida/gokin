@@ -90,8 +90,10 @@ func (l *Logger) Log(entry *Entry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Sanitize args and redact/truncate result
-	entry.Args = SanitizeArgs(entry.Args)
+	// Redact args, result, and error
+	if entry.Args != nil {
+		entry.Args = l.redactor.RedactMap(entry.Args)
+	}
 	entry.Result = l.redactor.Redact(entry.Result)
 	entry.Error = l.redactor.Redact(entry.Error)
 	entry.Result = TruncateResult(entry.Result, l.maxResultLen)
