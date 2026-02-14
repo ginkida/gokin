@@ -27,6 +27,10 @@
 
 ## ✨ Why Gokin? <a id="why-gokin"></a>
 
+Most AI coding tools are closed-source, route your code through third-party servers, and give you zero control over what gets sent to the model. Gokin was built with a different goal: **a fast, secure, zero-telemetry CLI where your code goes directly to the provider you chose — and nothing else leaves your machine.**
+
+This matters especially when you work with multiple LLM providers across different jurisdictions (DeepSeek, GLM, Kimi, MiniMax, Gemini, Claude). Gokin ensures that secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data. You pick the provider — Gokin handles the rest.
+
 | Feature | Gokin | Claude Code | Cursor |
 |---------|-------|-------------|--------|
 | **Price** | Free → Pay-per-use | $20+/month | $20+/month |
@@ -35,7 +39,7 @@
 | **52 Tools** | ✅ | ~30 | ~30 |
 | **Multi-agent** | ✅ 5 parallel | Basic | ❌ |
 | **Direct API** | ✅ Zero proxies | ✅ | ❌ Routes through Cursor servers |
-| **Secret redaction** | ✅ 41 patterns | ❌ | ❌ |
+| **Security** | ✅ TLS 1.2+, secret redaction (24 patterns), sandbox, 3-level permissions | Basic | ❌ |
 | **Open Source** | ✅ | ❌ | ❌ |
 | **Self-hosting** | ✅ | ❌ | ❌ |
 
@@ -166,7 +170,7 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 | Credentials | Database URIs (`postgres://user:pass@...`), Redis, MongoDB |
 | Crypto material | PEM private keys, SSH keys |
 
-41 regex patterns, applied to every tool result. Custom patterns supported via API.
+24 regex patterns, applied to every tool result and audit log. Handles any data type — strings, maps, typed slices, structs. Custom patterns supported via API.
 
 ### Defense in Depth
 
