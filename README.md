@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://minio.ginkida.dev/minion/github/Gokin-cli.gif" alt="Gokin Demo" width="800">
+  <img src="https://minio.ginkida.dev/minion/github/gokin-cli-cut.gif" alt="Gokin Demo" width="800">
 </p>
 
 <h3 align="center">🤖 AI-powered coding assistant for your terminal<br>Multi-provider • Multi-agent • 100% Open Source</h3>
