@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"gokin/internal/security"
 )
 
 // OAuthManager handles the OAuth 2.0 flow for Gemini authentication
@@ -33,6 +35,10 @@ func NewGeminiOAuthManager() *OAuthManager {
 
 // NewGeminiOAuthManagerWithPort creates an OAuth manager with a custom callback port.
 func NewGeminiOAuthManagerWithPort(port int) *OAuthManager {
+	httpClient, err := security.CreateDefaultHTTPClient()
+	if err != nil {
+		httpClient = &http.Client{Timeout: OAuthHTTPTimeout}
+	}
 	return &OAuthManager{
 		clientID:     GeminiOAuthClientID,
 		clientSecret: GeminiOAuthClientSecret,
@@ -42,9 +48,7 @@ func NewGeminiOAuthManagerWithPort(port int) *OAuthManager {
 			ScopeUserInfoEmail,
 			ScopeUserInfoProfile,
 		},
-		httpClient: &http.Client{
-			Timeout: OAuthHTTPTimeout,
-		},
+		httpClient: httpClient,
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/logging"
 	"gokin/internal/security"
 
 	"google.golang.org/genai"
@@ -37,10 +38,8 @@ func NewWebSearchTool() *WebSearchTool {
 	// Create secure HTTP client with TLS 1.2+ enforcement
 	secureClient, err := security.CreateDefaultHTTPClient()
 	if err != nil {
-		// Fall back to default client if secure client creation fails
-		secureClient = &http.Client{
-			Timeout: 30 * time.Second,
-		}
+		secureClient = &http.Client{Timeout: 30 * time.Second}
+		logging.Warn("failed to create secure HTTP client, using default", "error", err)
 	}
 
 	return &WebSearchTool{

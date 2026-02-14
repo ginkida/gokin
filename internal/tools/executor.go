@@ -1182,7 +1182,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	if e.redactor != nil {
 		result.Content = e.redactor.Redact(result.Content)
 		result.Error = e.redactor.Redact(result.Error)
-		// Also redact in response map if needed, but Content/Error are primary
+		if result.Data != nil {
+			result.Data = e.redactor.RedactAny(result.Data)
+		}
 	}
 
 	// Step 12: Apply compaction if configured

@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gokin/internal/security"
 )
 
 // Downloader handles downloading update files.
@@ -25,12 +27,15 @@ type Downloader struct {
 
 // NewDownloader creates a new downloader.
 func NewDownloader(config *Config, tempDir string) *Downloader {
+	tlsConfig := security.DefaultTLSConfig()
+	httpClient, err := security.CreateSecureHTTPClient(tlsConfig, 10*time.Minute)
+	if err != nil {
+		httpClient = &http.Client{Timeout: 10 * time.Minute}
+	}
 	return &Downloader{
-		httpClient: &http.Client{
-			Timeout: 10 * time.Minute, // Safety timeout for downloads
-		},
-		config:  config,
-		tempDir: tempDir,
+		httpClient: httpClient,
+		config:     config,
+		tempDir:    tempDir,
 	}
 }
 

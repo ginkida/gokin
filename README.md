@@ -34,6 +34,8 @@
 | **Offline** | ✅ Ollama | ❌ | ❌ |
 | **52 Tools** | ✅ | ~30 | ~30 |
 | **Multi-agent** | ✅ 5 parallel | Basic | ❌ |
+| **Direct API** | ✅ Zero proxies | ✅ | ❌ Routes through Cursor servers |
+| **Secret redaction** | ✅ 41 patterns | ❌ | ❌ |
 | **Open Source** | ✅ | ❌ | ❌ |
 | **Self-hosting** | ✅ | ❌ | ❌ |
 
@@ -127,12 +129,63 @@ gokin
 - Shared memory between agents
 - Automatic task decomposition
 
-### 🛡️ Safety First
+### 🛡️ Safety & Permissions
 - **3-level permissions**: Low (auto), Medium (ask once), High (always ask)
 - **Sandbox mode** for bash commands
 - **Diff preview** before applying changes
 - **Undo/Redo** for all file operations
 - **Audit logging**
+
+---
+
+## 🔒 Security & Privacy <a id="security"></a>
+
+### Zero Proxies — Your Code Goes Nowhere Except the LLM
+
+```
+┌──────────┐          ┌──────────────────┐
+│  Gokin   │ ──TLS──▶ │  Provider API    │
+│  (local) │          │  (Gemini/Claude/  │
+│          │ ◀──TLS── │   DeepSeek/etc.) │
+└──────────┘          └──────────────────┘
+
+No middle servers. No Vercel. No telemetry proxies.
+Your API key, your code, your conversation — direct.
+```
+
+Some CLI tools route requests through their own proxy servers (Vercel Edge, custom gateways) for telemetry, analytics, or API key management. **Gokin does none of this.** Every API call goes directly from your machine to the provider's endpoint. You can verify this — it's open source.
+
+### Secret Redaction in Terminal Output
+
+LLM tool calls can accidentally expose secrets found in your codebase. Gokin automatically redacts them **before** they reach the model or your terminal:
+
+| Category | Examples |
+|----------|----------|
+| API keys | `AKIA...`, `ghp_...`, `sk_live_...`, `AIza...` |
+| Tokens | Bearer tokens, JWT (`eyJ...`), Slack/Discord tokens |
+| Credentials | Database URIs (`postgres://user:pass@...`), Redis, MongoDB |
+| Crypto material | PEM private keys, SSH keys |
+
+41 regex patterns, applied to every tool result. Custom patterns supported via API.
+
+### Defense in Depth
+
+| Layer | What it does |
+|-------|-------------|
+| **TLS 1.2+ enforced** | No weak ciphers, certificate verification always on |
+| **Sandbox mode** | Bash runs in isolated namespace (Linux), safe env whitelist (~35 vars) — API keys never leak to subprocesses |
+| **Command validation** | 50+ blocked patterns: fork bombs, reverse shells, `rm -rf /`, credential theft, env injection |
+| **SSH validation** | Host allowlist, loopback blocked, username injection prevention |
+| **Path validation** | Symlink resolution, directory traversal blocked, TOCTOU prevention |
+| **SSRF protection** | Private IPs, loopback, link-local blocked; all DNS results checked |
+| **Audit trail** | Every tool call logged with sanitized args |
+
+### Keys Stay Local
+
+- API keys loaded from env vars or local config (`~/.config/gokin/config.yaml`)
+- Keys are **masked** in all UI displays (`sk-12****cdef`)
+- Keys are **never** included in conversation history or tool results
+- Ollama mode: **zero network calls** — fully airgapped
 
 ### 💾 Memory That Persists
 ```

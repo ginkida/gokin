@@ -3,11 +3,12 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"gokin/internal/security"
 
 	"google.golang.org/genai"
 )
@@ -549,29 +550,11 @@ func (s *Session) ListCheckpoints() []string {
 
 // --- Sensitive Data Redaction ---
 
-// sensitivePatterns are compiled regex patterns for detecting sensitive data.
-var sensitivePatterns = []*regexp.Regexp{
-	// API keys: sk-... (OpenAI style)
-	regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`),
-	// API keys: AIza... (Google style)
-	regexp.MustCompile(`AIza[A-Za-z0-9_-]{20,}`),
-	// Generic long hex/base64 tokens (40+ chars)
-	regexp.MustCompile(`(?i)(?:password|passwd|token|secret|api_key|apikey|api-key|access_key|auth)\s*[=:]\s*["']?([^\s"']{8,})["']?`),
-	// Bearer tokens
-	regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9_\-.]+`),
-	// AWS access keys
-	regexp.MustCompile(`AKIA[A-Z0-9]{16}`),
-	// Generic key=value patterns
-	regexp.MustCompile(`(?i)(?:key|token|password)\s*=\s*\S{8,}`),
-}
+var sessionRedactor = security.NewSecretRedactor()
 
 // redactSensitiveData scans text and replaces sensitive patterns with [REDACTED].
 func redactSensitiveData(text string) string {
-	result := text
-	for _, pattern := range sensitivePatterns {
-		result = pattern.ReplaceAllString(result, "[REDACTED]")
-	}
-	return result
+	return sessionRedactor.Redact(text)
 }
 
 // --- Export ---
@@ -689,7 +672,7 @@ func redactMapValues(m map[string]any) {
 	for k, v := range m {
 		switch val := v.(type) {
 		case string:
-			m[k] = redactSensitiveData(val)
+			m[k] = sessionRedactor.Redact(val)
 		case map[string]any:
 			redactMapValues(val)
 		}

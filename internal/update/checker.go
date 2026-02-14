@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"gokin/internal/security"
 )
 
 // Checker handles version checking against GitHub releases.
@@ -24,23 +26,25 @@ type Checker struct {
 
 // NewChecker creates a new version checker.
 func NewChecker(config *Config, cacheDir string) *Checker {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	tlsConfig := security.DefaultTLSConfig()
+	secureClient, err := security.CreateSecureHTTPClient(tlsConfig, config.Timeout)
+	if err != nil {
+		// Fall back to basic client if secure creation fails
+		secureClient = &http.Client{Timeout: config.Timeout}
+	}
 
 	// Set proxy if configured
 	if config.Proxy != "" {
 		proxyURL, err := url.Parse(config.Proxy)
 		if err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
+			if transport, ok := secureClient.Transport.(*http.Transport); ok {
+				transport.Proxy = http.ProxyURL(proxyURL)
+			}
 		}
 	}
 
-	client := &http.Client{
-		Timeout:   config.Timeout,
-		Transport: transport,
-	}
-
 	return &Checker{
-		httpClient: client,
+		httpClient: secureClient,
 		repo:       config.GitHubRepo,
 		cacheDir:   cacheDir,
 		config:     config,

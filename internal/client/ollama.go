@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gokin/internal/logging"
+	"gokin/internal/security"
 
 	"github.com/ollama/ollama/api"
 	"google.golang.org/genai"
@@ -96,28 +97,27 @@ func NewOllamaClient(config OllamaConfig) (*OllamaClient, error) {
 		}
 	}
 
-	// Create HTTP client with ResponseHeaderTimeout instead of Client.Timeout.
-	// Client.Timeout covers the entire transaction including body read, which
-	// kills SSE streaming. ResponseHeaderTimeout only limits connect → first header.
+	// Create HTTP client with TLS hardening.
+	// Use ResponseHeaderTimeout instead of Client.Timeout — Client.Timeout covers
+	// the entire transaction including body read, which kills SSE streaming.
+	tlsConfig := security.DefaultTLSConfig()
+	secureClient, err := security.CreateSecureHTTPClient(tlsConfig, 0) // no client timeout for streaming
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
+	}
+	// Set ResponseHeaderTimeout on the transport
+	if transport, ok := secureClient.Transport.(*http.Transport); ok {
+		transport.ResponseHeaderTimeout = config.HTTPTimeout
+	}
+
 	var httpClient *http.Client
 	if config.APIKey != "" {
-		// Add Authorization header for remote Ollama servers with auth
-		base := &http.Transport{
-			ResponseHeaderTimeout: config.HTTPTimeout,
-		}
-		httpClient = &http.Client{
-			Transport: &authTransport{
-				base:   base,
-				apiKey: config.APIKey,
-			},
-		}
-	} else {
-		httpClient = &http.Client{
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: config.HTTPTimeout,
-			},
+		secureClient.Transport = &authTransport{
+			base:   secureClient.Transport,
+			apiKey: config.APIKey,
 		}
 	}
+	httpClient = secureClient
 
 	// Create Ollama client
 	ollamaClient := api.NewClient(baseURL, httpClient)

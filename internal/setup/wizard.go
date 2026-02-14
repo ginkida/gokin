@@ -16,6 +16,7 @@ import (
 
 	"gokin/internal/auth"
 	"gokin/internal/config"
+	"gokin/internal/security"
 
 	"github.com/ollama/ollama/api"
 )
@@ -797,7 +798,11 @@ func validateWithProviderConfig(ctx context.Context, p *config.ProviderDef, apiK
 		req.Header.Set(k, val)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	httpClient, err := security.CreateDefaultHTTPClient()
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP client: %w", err)
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("connection error: %w", err)
 	}

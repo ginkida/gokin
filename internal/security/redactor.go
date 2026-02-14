@@ -1,6 +1,7 @@
 package security
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -256,7 +257,7 @@ func (r *SecretRedactor) redactSubmatches(text string, pattern *regexp.Regexp) s
 
 // isWhitelisted checks if a value should not be redacted.
 func (r *SecretRedactor) isWhitelisted(value string) bool {
-	lower := strings.ToLower(value)
+	lower := strings.ToLower(strings.TrimSpace(value))
 	lower = strings.Trim(lower, "\"'")
 
 	if r.whitelist[lower] {
@@ -268,23 +269,17 @@ func (r *SecretRedactor) isWhitelisted(value string) bool {
 		return true
 	}
 
-	// Don't redact obviously safe patterns
-	safePatterns := []string{
-		"example", "test", "demo", "sample", "mock",
-		"localhost", "127.0.0.1", "::1",
-		"dev", "staging", "prod",
-		"readme", "license", "changelog",
-		"config", "settings", "options",
-		"database", "server", "host",
+	// Exact match only — no Contains to prevent bypass
+	safeValues := map[string]bool{
+		"example": true, "test": true, "demo": true,
+		"sample": true, "mock": true, "localhost": true,
+		"127.0.0.1": true, "::1": true, "development": true,
+		"staging": true, "production": true, "readme": true,
+		"license": true, "changelog": true, "undefined": true,
+		"placeholder": true, "dummy": true, "foobar": true,
+		"redacted": true,
 	}
-
-	for _, safe := range safePatterns {
-		if strings.Contains(lower, safe) {
-			return true
-		}
-	}
-
-	return false
+	return safeValues[lower]
 }
 
 // AddPattern adds a custom regex pattern to the redactor.
@@ -301,13 +296,41 @@ func (r *SecretRedactor) AddPattern(pattern string) error {
 func (r *SecretRedactor) RedactMap(m map[string]any) map[string]any {
 	redacted := make(map[string]any)
 	for k, v := range m {
-		if s, ok := v.(string); ok {
-			redacted[k] = r.Redact(s)
-		} else if nm, ok := v.(map[string]any); ok {
-			redacted[k] = r.RedactMap(nm)
-		} else {
-			redacted[k] = v
-		}
+		redacted[k] = r.RedactAny(v)
 	}
 	return redacted
+}
+
+// RedactAny redacts secrets in values of any type.
+// Handles string, map[string]any, []any natively.
+// For typed slices/structs (e.g. []SearchResult), falls back to JSON
+// round-trip to convert to generic types before redacting.
+func (r *SecretRedactor) RedactAny(v any) any {
+	if v == nil {
+		return nil
+	}
+	switch val := v.(type) {
+	case string:
+		return r.Redact(val)
+	case map[string]any:
+		return r.RedactMap(val)
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = r.RedactAny(item)
+		}
+		return out
+	default:
+		// Typed slices ([]SomeStruct), typed maps (map[string]string), structs —
+		// convert via JSON round-trip to generic types, then redact.
+		data, err := json.Marshal(val)
+		if err != nil {
+			return v
+		}
+		var generic any
+		if err := json.Unmarshal(data, &generic); err != nil {
+			return v
+		}
+		return r.RedactAny(generic)
+	}
 }

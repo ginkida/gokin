@@ -28,11 +28,8 @@ func NewWebFetchTool() *WebFetchTool {
 	// Create secure HTTP client with TLS 1.2+ enforcement
 	secureClient, err := security.CreateDefaultHTTPClient()
 	if err != nil {
-		// Fall back to default client if secure client creation fails
-		// This should never happen with default config
-		secureClient = &http.Client{
-			Timeout: 30 * time.Second,
-		}
+		secureClient = &http.Client{Timeout: 30 * time.Second}
+		logging.Warn("failed to create secure HTTP client, using default", "error", err)
 	}
 
 	return &WebFetchTool{

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"gokin/internal/security"
 )
 
 // Logger handles audit logging for tool operations.
@@ -21,6 +23,7 @@ type Logger struct {
 	wg           sync.WaitGroup // Track pending async saves
 	enabled      bool
 	retention    time.Duration
+	redactor     *security.SecretRedactor
 
 	// Debounced save support
 	dirty     bool
@@ -49,7 +52,7 @@ func DefaultConfig() Config {
 // NewLogger creates a new audit logger.
 func NewLogger(configDir, sessionID string, cfg Config) (*Logger, error) {
 	if !cfg.Enabled {
-		return &Logger{enabled: false}, nil
+		return &Logger{enabled: false, redactor: security.NewSecretRedactor()}, nil
 	}
 
 	auditDir := filepath.Join(configDir, "audit")
@@ -66,6 +69,7 @@ func NewLogger(configDir, sessionID string, cfg Config) (*Logger, error) {
 		entries:      make([]*Entry, 0),
 		enabled:      true,
 		retention:    time.Duration(cfg.RetentionDays) * 24 * time.Hour,
+		redactor:     security.NewSecretRedactor(),
 	}
 
 	// Load existing entries for this session
@@ -86,8 +90,10 @@ func (l *Logger) Log(entry *Entry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Sanitize args and truncate result
+	// Sanitize args and redact/truncate result
 	entry.Args = SanitizeArgs(entry.Args)
+	entry.Result = l.redactor.Redact(entry.Result)
+	entry.Error = l.redactor.Redact(entry.Error)
 	entry.Result = TruncateResult(entry.Result, l.maxResultLen)
 
 	l.entries = append(l.entries, entry)
