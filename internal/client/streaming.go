@@ -90,6 +90,12 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 			if chunk.OutputTokens > 0 {
 				resp.OutputTokens += chunk.OutputTokens
 			}
+			if chunk.CacheCreationInputTokens > 0 {
+				resp.CacheCreationInputTokens = chunk.CacheCreationInputTokens
+			}
+			if chunk.CacheReadInputTokens > 0 {
+				resp.CacheReadInputTokens = chunk.CacheReadInputTokens
+			}
 
 			if chunk.Done {
 				resp.FinishReason = chunk.FinishReason

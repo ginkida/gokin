@@ -376,6 +376,17 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 		parts = append(parts, s)
 	}
 
+	// Cache read tokens (prompt caching)
+	if meta.CacheReadInputTokens > 0 {
+		var s string
+		if meta.CacheReadInputTokens >= 1000 {
+			s = fmt.Sprintf("%.1fk cached", float64(meta.CacheReadInputTokens)/1000)
+		} else {
+			s = fmt.Sprintf("%d cached", meta.CacheReadInputTokens)
+		}
+		parts = append(parts, s)
+	}
+
 	// Duration
 	if meta.Duration > 0 {
 		if meta.Duration < time.Second {

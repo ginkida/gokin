@@ -100,11 +100,12 @@ type (
 	ThinkingTickMsg struct{}
 	// ResponseMetadataMsg carries metadata about the completed response.
 	ResponseMetadataMsg struct {
-		Model        string
-		InputTokens  int
-		OutputTokens int
-		Duration     time.Duration
-		ToolsUsed    []string
+		Model                string
+		InputTokens          int
+		OutputTokens         int
+		CacheReadInputTokens int
+		Duration             time.Duration
+		ToolsUsed            []string
 	}
 	ErrorMsg      error
 	TodoUpdateMsg []string

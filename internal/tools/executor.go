@@ -173,8 +173,10 @@ type Executor struct {
 	unrestrictedMode bool                      // Full freedom when both sandbox and permissions are off
 
 	// Token usage from last response (from API usage metadata)
-	lastInputTokens  int
-	lastOutputTokens int
+	lastInputTokens         int
+	lastOutputTokens        int
+	lastCacheCreationTokens int
+	lastCacheReadTokens     int
 
 	// Circuit breakers for tools
 	breakerMu    sync.Mutex
@@ -371,6 +373,12 @@ func (e *Executor) GetNotificationManager() *NotificationManager {
 // Returns (inputTokens, outputTokens). Values are 0 if metadata was unavailable.
 func (e *Executor) GetLastTokenUsage() (int, int) {
 	return e.lastInputTokens, e.lastOutputTokens
+}
+
+// GetLastCacheMetrics returns the prompt cache metrics from the last API response.
+// Returns (cacheCreationInputTokens, cacheReadInputTokens).
+func (e *Executor) GetLastCacheMetrics() (int, int) {
+	return e.lastCacheCreationTokens, e.lastCacheReadTokens
 }
 
 // Execute processes a user message through the function calling loop.
@@ -625,6 +633,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			e.lastInputTokens = resp.InputTokens
 			e.lastOutputTokens = resp.OutputTokens
 		}
+		e.lastCacheCreationTokens = resp.CacheCreationInputTokens
+		e.lastCacheReadTokens = resp.CacheReadInputTokens
 
 		// Detect empty response — model returned no text and no function calls.
 		// Break immediately instead of looping, the fallback below will provide a message.

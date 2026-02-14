@@ -259,6 +259,12 @@ type ResponseChunk struct {
 
 	// OutputTokens from API usage metadata (if available).
 	OutputTokens int
+
+	// CacheCreationInputTokens from prompt caching (Anthropic/MiniMax).
+	CacheCreationInputTokens int
+
+	// CacheReadInputTokens from prompt caching (Anthropic/MiniMax).
+	CacheReadInputTokens int
 }
 
 // Response represents a complete response from the model.
@@ -283,6 +289,12 @@ type Response struct {
 
 	// OutputTokens from API usage metadata (completion tokens, if available).
 	OutputTokens int
+
+	// CacheCreationInputTokens from prompt caching (Anthropic/MiniMax).
+	CacheCreationInputTokens int
+
+	// CacheReadInputTokens from prompt caching (Anthropic/MiniMax).
+	CacheReadInputTokens int
 }
 
 // Collect collects all chunks from a streaming response into a single Response.
@@ -310,6 +322,12 @@ func (sr *StreamingResponse) Collect() (*Response, error) {
 		}
 		if chunk.OutputTokens > 0 {
 			resp.OutputTokens += chunk.OutputTokens
+		}
+		if chunk.CacheCreationInputTokens > 0 {
+			resp.CacheCreationInputTokens = chunk.CacheCreationInputTokens
+		}
+		if chunk.CacheReadInputTokens > 0 {
+			resp.CacheReadInputTokens = chunk.CacheReadInputTokens
 		}
 	}
 

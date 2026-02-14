@@ -382,12 +382,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		program.Send(ui.ResponseDoneMsg{})
 
 		// Send response metadata
+		_, cacheRead := a.executor.GetLastCacheMetrics()
 		program.Send(ui.ResponseMetadataMsg{
-			Model:        a.config.Model.Name,
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Duration:     duration,
-			ToolsUsed:    toolsUsed,
+			Model:                a.config.Model.Name,
+			InputTokens:          inputTokens,
+			OutputTokens:         outputTokens,
+			CacheReadInputTokens: cacheRead,
+			Duration:             duration,
+			ToolsUsed:            toolsUsed,
 		})
 	}
 

@@ -204,6 +204,7 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 		}
 	}
 
+	c.applyCacheControl(requestBody)
 	return c.streamRequest(ctx, requestBody)
 }
 
@@ -256,6 +257,7 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 		requestBody["tools"] = c.convertToolsToAnthropicFrom(tools)
 	}
 
+	c.applyCacheControl(requestBody)
 	return c.streamRequest(ctx, requestBody)
 }
 
@@ -264,6 +266,42 @@ func (c *AnthropicClient) SetSystemInstruction(instruction string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.systemInstruction = instruction
+}
+
+// supportsPromptCaching returns true if the provider supports Anthropic prompt caching.
+// Currently Anthropic (native) and MiniMax support cache_control; GLM and DeepSeek do not.
+func (c *AnthropicClient) supportsPromptCaching() bool {
+	base := c.config.BaseURL
+	if base == DefaultAnthropicBaseURL || base == "" {
+		return true
+	}
+	return strings.Contains(base, "minimax")
+}
+
+// applyCacheControl injects cache_control markers into the request body
+// for providers that support Anthropic prompt caching.
+// System instruction is converted to array-of-blocks format with cache_control,
+// and the last tool gets a cache_control marker.
+func (c *AnthropicClient) applyCacheControl(requestBody map[string]interface{}) {
+	if !c.supportsPromptCaching() {
+		return
+	}
+	// System: string → array-of-blocks with cache_control
+	if sys, ok := requestBody["system"].(string); ok && sys != "" {
+		requestBody["system"] = []map[string]interface{}{
+			{
+				"type":          "text",
+				"text":          sys,
+				"cache_control": map[string]string{"type": "ephemeral"},
+			},
+		}
+	}
+	// Tools: cache_control on the last tool
+	if toolsRaw, ok := requestBody["tools"]; ok {
+		if tools, ok := toolsRaw.([]map[string]interface{}); ok && len(tools) > 0 {
+			tools[len(tools)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
+		}
+	}
 }
 
 // SetThinkingBudget configures the thinking/reasoning budget.
@@ -844,7 +882,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					if chunk.Text != "" {
 						contentReceived = true
 					}
-					if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 {
+					if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 ||
+					chunk.InputTokens > 0 || chunk.CacheCreationInputTokens > 0 || chunk.CacheReadInputTokens > 0 {
 						select {
 						case chunks <- chunk:
 						case <-ctx.Done():
@@ -994,7 +1033,19 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 		acc.currentBlockType = ""
 
 	case "message_start":
-		// Message starting - no action needed
+		if msg, ok := event["message"].(map[string]interface{}); ok {
+			if usage, ok := msg["usage"].(map[string]interface{}); ok {
+				if v, ok := usage["input_tokens"].(float64); ok && v > 0 {
+					chunk.InputTokens = int(v)
+				}
+				if v, ok := usage["cache_creation_input_tokens"].(float64); ok && v > 0 {
+					chunk.CacheCreationInputTokens = int(v)
+				}
+				if v, ok := usage["cache_read_input_tokens"].(float64); ok && v > 0 {
+					chunk.CacheReadInputTokens = int(v)
+				}
+			}
+		}
 
 	case "message_delta":
 		// Message metadata (usage, stop_reason, etc.)
@@ -1013,6 +1064,12 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 					}
 					chunk.FinishReason = genai.FinishReasonStop
 				}
+			}
+		}
+		// Parse usage from message_delta (output tokens)
+		if usage, ok := event["usage"].(map[string]interface{}); ok {
+			if v, ok := usage["output_tokens"].(float64); ok && v > 0 {
+				chunk.OutputTokens = int(v)
 			}
 		}
 
