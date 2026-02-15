@@ -323,7 +323,13 @@ func shortBreakerState(state string) string {
 func (m Model) formatTokenStatus(withContextBar bool) string {
 	pct := m.getContextPercent()
 	if withContextBar && pct > 0 {
-		return renderContextBar(pct, 8)
+		bar := renderContextBar(pct, 8)
+		if m.tokenUsage != nil && m.tokenUsage.MaxTokens > 0 {
+			abs := lipgloss.NewStyle().Foreground(ColorMuted).Render(
+				fmt.Sprintf("tok:%d/%d", m.tokenUsage.Tokens, m.tokenUsage.MaxTokens))
+			return bar + " " + abs
+		}
+		return bar
 	}
 	if m.tokenUsage != nil && m.tokenUsage.MaxTokens > 0 {
 		return lipgloss.NewStyle().Foreground(ColorMuted).Render(
