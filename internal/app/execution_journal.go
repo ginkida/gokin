@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gokin/internal/security"
 )
 
 type JournalEntry struct {
@@ -31,16 +33,18 @@ type ExecutionJournal struct {
 	mu           sync.Mutex
 	journalPath  string
 	recoveryPath string
+	redactor     *security.SecretRedactor
 }
 
 func NewExecutionJournal(workDir string) (*ExecutionJournal, error) {
 	dir := filepath.Join(workDir, ".gokin")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create journal dir: %w", err)
 	}
 	return &ExecutionJournal{
 		journalPath:  filepath.Join(dir, "execution_journal.jsonl"),
 		recoveryPath: filepath.Join(dir, "recovery_snapshot.json"),
+		redactor:     security.NewSecretRedactor(),
 	}, nil
 }
 
@@ -51,7 +55,12 @@ func (j *ExecutionJournal) Append(event string, details map[string]any) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	f, err := os.OpenFile(j.journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// Redact secrets from details before writing to disk
+	if j.redactor != nil && details != nil {
+		details = j.redactor.RedactMap(details)
+	}
+
+	f, err := os.OpenFile(j.journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
@@ -75,12 +84,18 @@ func (j *ExecutionJournal) SaveRecovery(snapshot RecoverySnapshot) {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+
+	// Redact secrets from pending message before writing to disk
+	if j.redactor != nil && snapshot.PendingMessage != "" {
+		snapshot.PendingMessage = j.redactor.Redact(snapshot.PendingMessage)
+	}
+
 	snapshot.Timestamp = time.Now()
 	b, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(j.recoveryPath, b, 0o644)
+	_ = os.WriteFile(j.recoveryPath, b, 0o600)
 }
 
 func (j *ExecutionJournal) LoadRecovery() (*RecoverySnapshot, error) {

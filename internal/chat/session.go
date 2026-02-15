@@ -143,7 +143,9 @@ func (s *Session) SetHistory(history []*genai.Content) {
 	// Apply sliding window if history exceeds max.
 	// System instruction is now passed via API parameter, not stored in history.
 	if len(history) > MaxMessages {
-		history = history[len(history)-MaxMessages:]
+		boundary := len(history) - MaxMessages
+		boundary = adjustBoundaryForToolPairs(history, boundary)
+		history = history[boundary:]
 	}
 
 	s.History = history
@@ -166,7 +168,9 @@ func (s *Session) SetHistoryIfVersion(history []*genai.Content, expectedVersion 
 	// Apply sliding window if history exceeds max.
 	// System instruction is now passed via API parameter, not stored in history.
 	if len(history) > MaxMessages {
-		history = history[len(history)-MaxMessages:]
+		boundary := len(history) - MaxMessages
+		boundary = adjustBoundaryForToolPairs(history, boundary)
+		history = history[boundary:]
 	}
 
 	s.History = history
@@ -227,11 +231,13 @@ func (s *Session) trimHistoryLocked() {
 		return
 	}
 
-	s.History = s.History[len(s.History)-MaxMessages:]
+	boundary := len(s.History) - MaxMessages
+	boundary = adjustBoundaryForToolPairs(s.History, boundary)
+	s.History = s.History[boundary:]
 
 	// Sync tokenCounts with History to avoid desynchronization
-	if len(s.tokenCounts) > MaxMessages {
-		s.tokenCounts = s.tokenCounts[len(s.tokenCounts)-MaxMessages:]
+	if len(s.tokenCounts) > boundary {
+		s.tokenCounts = s.tokenCounts[boundary:]
 
 		// Recalculate totalTokens from remaining tokenCounts
 		s.totalTokens = 0
@@ -287,6 +293,9 @@ func (s *Session) ReplaceWithSummary(upToIndex int, summary *genai.Content, summ
 	if upToIndex > len(s.History) {
 		upToIndex = len(s.History)
 	}
+
+	// Adjust boundary to avoid splitting tool pairs
+	upToIndex = adjustBoundaryForToolPairs(s.History, upToIndex)
 
 	// Keep messages after upToIndex
 	remaining := s.History[upToIndex:]
@@ -494,14 +503,16 @@ func (s *Session) RestoreCheckpoint(name string) bool {
 		return false
 	}
 
-	// Truncate history to checkpoint index
+	// Truncate history to checkpoint index, then remove any orphaned tool responses
 	if idx < len(s.History) {
 		s.History = s.History[:idx]
+		s.History = removeOrphanedToolParts(s.History)
 	}
 
-	// Truncate token counts to match
-	if idx < len(s.tokenCounts) {
-		s.tokenCounts = s.tokenCounts[:idx]
+	// Truncate token counts to match actual history length after orphan removal
+	newLen := len(s.History)
+	if newLen < len(s.tokenCounts) {
+		s.tokenCounts = s.tokenCounts[:newLen]
 		// Recalculate total tokens
 		s.totalTokens = 0
 		for _, count := range s.tokenCounts {
@@ -546,6 +557,147 @@ func (s *Session) ListCheckpoints() []string {
 		names[i] = e.name
 	}
 	return names
+}
+
+// --- Tool Pair Safety ---
+
+// adjustBoundaryForToolPairs shifts a trim boundary so that FunctionCall/FunctionResponse
+// pairs are not split. Scans ±10 messages around boundary.
+// This is a local copy of context.AdjustBoundaryForToolPairs to avoid an import cycle
+// (chat cannot import internal/context).
+func adjustBoundaryForToolPairs(history []*genai.Content, boundary int) int {
+	if boundary <= 0 || boundary >= len(history) {
+		return boundary
+	}
+
+	adjusted := boundary
+
+	for iter := 0; iter < 3; iter++ {
+		prev := adjusted
+
+		rightCallIDs, rightResponseIDs := collectToolIDs(history, adjusted)
+
+		// Case 1: FunctionCall left of boundary with FunctionResponse on right — move left
+		for i := adjusted - 1; i >= 0 && i >= adjusted-10; i-- {
+			if history[i] == nil {
+				continue
+			}
+			for _, part := range history[i].Parts {
+				if part != nil && part.FunctionCall != nil && part.FunctionCall.ID != "" {
+					if rightResponseIDs[part.FunctionCall.ID] {
+						if i < adjusted {
+							adjusted = i
+						}
+					}
+				}
+			}
+		}
+
+		// Case 2: orphaned FunctionResponse at/after boundary — move right past it
+		if adjusted != prev {
+			rightCallIDs, _ = collectToolIDs(history, adjusted)
+		}
+		scanStart := adjusted
+		for i := scanStart; i < len(history) && i < scanStart+10; i++ {
+			if history[i] == nil {
+				continue
+			}
+			hasOrphan := false
+			for _, part := range history[i].Parts {
+				if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+					if !rightCallIDs[part.FunctionResponse.ID] {
+						hasOrphan = true
+					}
+				}
+			}
+			if hasOrphan {
+				adjusted = i + 1
+			} else {
+				break
+			}
+		}
+
+		if adjusted == prev {
+			break
+		}
+	}
+
+	if adjusted < 0 {
+		adjusted = 0
+	}
+	if adjusted > len(history) {
+		adjusted = len(history)
+	}
+	return adjusted
+}
+
+// collectToolIDs collects FunctionCall IDs and FunctionResponse IDs from history[boundary:].
+func collectToolIDs(history []*genai.Content, boundary int) (callIDs, responseIDs map[string]bool) {
+	callIDs = make(map[string]bool)
+	responseIDs = make(map[string]bool)
+	for i := boundary; i < len(history); i++ {
+		if history[i] == nil {
+			continue
+		}
+		for _, part := range history[i].Parts {
+			if part == nil {
+				continue
+			}
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				callIDs[part.FunctionCall.ID] = true
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+				responseIDs[part.FunctionResponse.ID] = true
+			}
+		}
+	}
+	return
+}
+
+// removeOrphanedToolParts removes trailing orphaned FunctionResponse messages
+// that have no matching FunctionCall in history. Used after right-truncation (:idx).
+func removeOrphanedToolParts(history []*genai.Content) []*genai.Content {
+	// Collect all FunctionCall IDs in the history
+	callIDs := make(map[string]bool)
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part != nil && part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				callIDs[part.FunctionCall.ID] = true
+			}
+		}
+	}
+
+	// Remove trailing messages that only contain orphaned FunctionResponses
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i] == nil {
+			history = history[:i]
+			continue
+		}
+		allOrphaned := true
+		hasFuncResp := false
+		for _, part := range history[i].Parts {
+			if part == nil {
+				continue
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+				hasFuncResp = true
+				if callIDs[part.FunctionResponse.ID] {
+					allOrphaned = false
+				}
+			} else if part.Text != "" || part.FunctionCall != nil {
+				allOrphaned = false
+			}
+		}
+		if hasFuncResp && allOrphaned {
+			history = history[:i]
+		} else {
+			break
+		}
+	}
+	return history
 }
 
 // --- Sensitive Data Redaction ---

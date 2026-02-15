@@ -56,6 +56,9 @@ build/
 debug/
 *.prof
 
+# Runtime data (execution journal, recovery snapshots)
+.gokin/
+
 # AI assistant files
 .claude/
 CLAUDE.md

@@ -260,12 +260,24 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				"\n⚠️ Request circuit breaker is open. Waiting for recovery window.\n"))
 		}
 
-		// Save history even on error — preserves user message and any partial context.
-		// This prevents context loss when tools already executed with side effects.
+		// Save history on error only if it ends with a model message (complete turn).
+		// If it ends with a user/tool-result message, the model never responded —
+		// saving it would create an orphaned tool_result that breaks subsequent API calls.
 		if len(newHistory) > len(history) {
-			a.session.SetHistory(newHistory)
-			if a.sessionManager != nil {
-				_ = a.sessionManager.SaveAfterMessage()
+			if last := newHistory[len(newHistory)-1]; last != nil && last.Role == genai.RoleModel {
+				a.session.SetHistory(newHistory)
+				if a.sessionManager != nil {
+					_ = a.sessionManager.SaveAfterMessage()
+				}
+			} else {
+				// Trim back to the last model message to avoid orphaned tool results
+				trimmed := trimToLastModelMessage(newHistory, len(history))
+				if len(trimmed) > len(history) {
+					a.session.SetHistory(trimmed)
+					if a.sessionManager != nil {
+						_ = a.sessionManager.SaveAfterMessage()
+					}
+				}
 			}
 		}
 		// Store error for context injection on retry
@@ -1703,6 +1715,18 @@ func truncateTail(text string, max int) string {
 		return text
 	}
 	return "..." + strings.TrimSpace(text[len(text)-max:])
+}
+
+// trimToLastModelMessage trims history back to the last model message,
+// ensuring we don't persist orphaned tool results. minLen is the minimum
+// length to preserve (original history before this request).
+func trimToLastModelMessage(history []*genai.Content, minLen int) []*genai.Content {
+	for i := len(history) - 1; i >= minLen; i-- {
+		if history[i] != nil && history[i].Role == genai.RoleModel {
+			return history[:i+1]
+		}
+	}
+	return history[:minLen]
 }
 
 func maxPlanExecutionRounds(totalSteps int) int {
