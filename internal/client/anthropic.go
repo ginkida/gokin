@@ -1096,7 +1096,7 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 	var systemPrompt string
 	skipFirst := 0
 
-	// Sanitize tool pairs before conversion — last defense against corrupted history
+	// Sanitize tool pairs before conversion — last defense against corrupted history.
 	history = sanitizeToolPairs(history)
 
 	// Check if first message is a system prompt (user message with system prompt markers)
@@ -1209,8 +1209,9 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 
 	logging.Debug("convertHistoryWithResultsAndSystem", "history_len", len(history), "results_len", len(results))
 
-	// Sanitize tool pairs before conversion — last defense against corrupted history
-	history = sanitizeToolPairs(history)
+	// Sanitize tool pairs before conversion — last defense against corrupted history.
+	// Include pending results so current tool_use IDs are preserved in SendFunctionResponse.
+	history = sanitizeToolPairsWithPendingResults(history, results)
 
 	// Check if first message is a system prompt using stricter heuristics
 	if len(history) >= 1 && history[0].Role == genai.RoleUser {

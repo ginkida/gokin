@@ -11,6 +11,14 @@ import (
 // such as MiniMax 400 "tool result's tool id not found". This is a last-defense sanitizer
 // called before history conversion in the Anthropic client.
 func sanitizeToolPairs(history []*genai.Content) []*genai.Content {
+	return sanitizeToolPairsWithPendingResults(history, nil)
+}
+
+// sanitizeToolPairsWithPendingResults is like sanitizeToolPairs, but treats the provided
+// pending function results as if they were already present in history.
+// This is required in SendFunctionResponse paths where tool_result is carried separately
+// and not yet appended to history at sanitization time.
+func sanitizeToolPairsWithPendingResults(history []*genai.Content, pendingResults []*genai.FunctionResponse) []*genai.Content {
 	if len(history) == 0 {
 		return history
 	}
@@ -32,6 +40,11 @@ func sanitizeToolPairs(history []*genai.Content) []*genai.Content {
 			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
 				responseIDs[part.FunctionResponse.ID] = true
 			}
+		}
+	}
+	for _, result := range pendingResults {
+		if result != nil && result.ID != "" {
+			responseIDs[result.ID] = true
 		}
 	}
 
@@ -68,7 +81,9 @@ func sanitizeToolPairs(history []*genai.Content) []*genai.Content {
 		"orphaned_calls", orphanedCalls,
 		"orphaned_responses", orphanedResponses)
 
-	// Pass 3: build cleaned history, removing orphaned parts
+	// Pass 3: build cleaned history, removing orphaned parts.
+	// IMPORTANT: create new Content objects — never mutate originals, which are
+	// shared with Session via shallow-copied slice from GetHistory().
 	result := make([]*genai.Content, 0, len(history))
 	for _, msg := range history {
 		if msg == nil {
@@ -100,8 +115,11 @@ func sanitizeToolPairs(history []*genai.Content) []*genai.Content {
 
 		// Drop messages that became empty after cleanup
 		if len(keptParts) > 0 {
-			msg.Parts = keptParts
-			result = append(result, msg)
+			cleaned := &genai.Content{
+				Role:  msg.Role,
+				Parts: keptParts,
+			}
+			result = append(result, cleaned)
 		}
 	}
 
