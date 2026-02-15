@@ -122,11 +122,21 @@ func CreateSummaryPlan(
 		}
 	}
 
+	// Adjust boundaries so FunctionCall/FunctionResponse pairs are not split
+	startBoundary := AdjustBoundaryForToolPairs(messages, keepStart)
+	endBoundary := AdjustBoundaryForToolPairs(messages, len(messages)-keepEnd)
+
+	// Safety: if adjustments caused boundaries to overlap or invert, fall back to originals
+	if startBoundary >= endBoundary {
+		startBoundary = keepStart
+		endBoundary = len(messages) - keepEnd
+	}
+
 	// Build the plan
 	plan := &SummaryPlan{
-		KeepStart:   messages[:keepStart],
-		ToSummarize: messages[keepStart : len(messages)-keepEnd],
-		KeepEnd:     messages[len(messages)-keepEnd:],
+		KeepStart:   messages[:startBoundary],
+		ToSummarize: messages[startBoundary:endBoundary],
+		KeepEnd:     messages[endBoundary:],
 		Reason:      "Standard summarization plan",
 	}
 

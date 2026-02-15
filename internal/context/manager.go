@@ -638,8 +638,10 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	}
 
 	// Split: old messages to summarize, recent to preserve
-	oldMessages := history[:len(history)-preserveCount]
-	recentMessages := history[len(history)-preserveCount:]
+	// Adjust boundary so FunctionCall/FunctionResponse pairs are not split
+	splitPoint := AdjustBoundaryForToolPairs(history, len(history)-preserveCount)
+	oldMessages := history[:splitPoint]
+	recentMessages := history[splitPoint:]
 
 	if len(oldMessages) < m.summaryStrategy.MinMessagesForSummary {
 		return nil
@@ -711,6 +713,9 @@ func (m *ContextManager) EmergencyTruncate() int {
 	if cutoff == 0 {
 		return 0
 	}
+
+	// Adjust boundary so FunctionCall/FunctionResponse pairs are not split
+	cutoff = AdjustBoundaryForToolPairs(tail, cutoff)
 
 	newHistory := make([]*genai.Content, 0, len(preserved)+len(tail)-cutoff)
 	newHistory = append(newHistory, preserved...)

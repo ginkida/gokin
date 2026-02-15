@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gokin/internal/chat"
+	ctxutil "gokin/internal/context"
 	"gokin/internal/ui"
 	"google.golang.org/genai"
 )
@@ -36,6 +37,12 @@ func (a *App) enforceSessionMemoryGovernance(reason string) {
 		return
 	}
 	archiveCount := len(history) - sessionGovernanceKeepTail
+	if archiveCount <= 0 {
+		return
+	}
+
+	// Adjust boundary so FunctionCall/FunctionResponse pairs are not split
+	archiveCount = ctxutil.AdjustBoundaryForToolPairs(history, archiveCount)
 	if archiveCount <= 0 {
 		return
 	}

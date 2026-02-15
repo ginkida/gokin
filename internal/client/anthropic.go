@@ -430,6 +430,7 @@ type toolCallAccumulator struct {
 	currentToolName  string
 	currentToolInput strings.Builder
 	completedCalls   []*genai.FunctionCall
+	callsEmitted     bool // true once completedCalls have been sent in a chunk
 	// Thinking block tracking
 	currentBlockType string          // "thinking", "text", or "tool_use"
 	thinkingBuilder  strings.Builder // Accumulates thinking content
@@ -1061,6 +1062,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 					// Include accumulated tool calls in the final chunk
 					if len(acc.completedCalls) > 0 {
 						chunk.FunctionCalls = acc.completedCalls
+						acc.callsEmitted = true
 					}
 					chunk.FinishReason = genai.FinishReasonStop
 				}
@@ -1075,8 +1077,10 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 
 	case "message_stop":
 		chunk.Done = true
-		// Include any accumulated tool calls
-		if len(acc.completedCalls) > 0 {
+		// Include any accumulated tool calls only if not already emitted
+		// by message_delta (stop_reason: "tool_use"). Emitting them twice
+		// causes duplicate tool_use blocks which MiniMax rejects with 400.
+		if len(acc.completedCalls) > 0 && !acc.callsEmitted {
 			chunk.FunctionCalls = acc.completedCalls
 		}
 	}
@@ -1091,6 +1095,9 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 	messages := make([]map[string]interface{}, 0)
 	var systemPrompt string
 	skipFirst := 0
+
+	// Sanitize tool pairs before conversion — last defense against corrupted history
+	history = sanitizeToolPairs(history)
 
 	// Check if first message is a system prompt (user message with system prompt markers)
 	// This handles both cases:
@@ -1201,6 +1208,9 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 	skipFirst := 0
 
 	logging.Debug("convertHistoryWithResultsAndSystem", "history_len", len(history), "results_len", len(results))
+
+	// Sanitize tool pairs before conversion — last defense against corrupted history
+	history = sanitizeToolPairs(history)
 
 	// Check if first message is a system prompt using stricter heuristics
 	if len(history) >= 1 && history[0].Role == genai.RoleUser {

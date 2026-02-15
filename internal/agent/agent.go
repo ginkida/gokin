@@ -1868,6 +1868,9 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 
 	newHistory = append(newHistory, a.history[len(a.history)-keepEnd:]...)
 
+	// Ensure tool pairs are consistent after importance-based compaction
+	newHistory = ensureToolPairConsistency(newHistory)
+
 	a.history = newHistory
 
 	// Inject continuation hint after compaction
@@ -1877,6 +1880,89 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 		"old_len", len(middle)+keepStart+keepEnd, "new_len", len(a.history))
 
 	return nil
+}
+
+// ensureToolPairConsistency removes orphaned FunctionCall/FunctionResponse parts
+// from a history slice. This is a local implementation to avoid import cycles
+// with the context package.
+func ensureToolPairConsistency(history []*genai.Content) []*genai.Content {
+	// Collect all FunctionCall IDs and FunctionResponse IDs
+	callIDs := make(map[string]bool)
+	responseIDs := make(map[string]bool)
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				callIDs[part.FunctionCall.ID] = true
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+				responseIDs[part.FunctionResponse.ID] = true
+			}
+		}
+	}
+
+	// Quick check: count orphans to avoid unnecessary allocations
+	orphans := 0
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" && !responseIDs[part.FunctionCall.ID] {
+				orphans++
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" && !callIDs[part.FunctionResponse.ID] {
+				orphans++
+			}
+		}
+	}
+
+	if orphans == 0 {
+		return history
+	}
+
+	// Remove orphaned parts
+	result := make([]*genai.Content, 0, len(history))
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		keptParts := make([]*genai.Part, 0, len(msg.Parts))
+		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+			keep := true
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				if !responseIDs[part.FunctionCall.ID] {
+					keep = false
+				}
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+				if !callIDs[part.FunctionResponse.ID] {
+					keep = false
+				}
+			}
+			if keep {
+				keptParts = append(keptParts, part)
+			}
+		}
+		if len(keptParts) > 0 {
+			msg.Parts = keptParts
+			result = append(result, msg)
+		}
+	}
+
+	logging.Debug("ensureToolPairConsistency removed orphaned parts", "count", orphans)
+	return result
 }
 
 // pruneToolOutputs truncates old FunctionResponse contents in history,
