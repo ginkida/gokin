@@ -264,7 +264,7 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 			case <-backoffTimer.C:
 			case <-ctx.Done():
 				backoffTimer.Stop()
-				return nil, ctx.Err()
+				return nil, ContextErr(ctx)
 			}
 		}
 
@@ -273,18 +273,18 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 			return response, nil
 		}
 
-		lastErr = err
+		lastErr = WrapProviderHTTPTimeout(err, "ollama", c.config.HTTPTimeout)
 
 		// Check if error is retryable
-		if !c.isRetryableError(err) {
+		if !c.isRetryableError(lastErr) {
 			// Return tokens on permanent failure
 			if rateLimiter != nil {
 				rateLimiter.ReturnTokens(1, estimatedTokens)
 			}
-			return nil, c.wrapOllamaError(err)
+			return nil, c.wrapOllamaError(lastErr)
 		}
 
-		logging.Warn("Ollama request failed, will retry", "attempt", attempt, "error", err)
+		logging.Warn("Ollama request failed, will retry", "attempt", attempt, "error", lastErr)
 	}
 
 	// Return tokens on exhausted retries
@@ -345,7 +345,7 @@ func (c *OllamaClient) doStreamChat(ctx context.Context, req *api.ChatRequest) (
 			select {
 			case chunks <- chunk:
 			case <-ctx.Done():
-				return ctx.Err()
+				return ContextErr(ctx)
 			}
 
 			return nil

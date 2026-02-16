@@ -31,7 +31,7 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, ContextErr(ctx)
 		case chunk, ok := <-sr.Chunks:
 			if !ok {
 				if handler.OnComplete != nil {

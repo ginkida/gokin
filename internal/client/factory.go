@@ -199,7 +199,7 @@ func autoDetectClient(ctx context.Context, cfg *config.Config, modelID string) (
 	return createClientForProvider(ctx, cfg, provider, modelID)
 }
 
-func resolveProviderTimeouts(cfg *config.Config, defaultStreamIdle, defaultHTTP time.Duration) (time.Duration, time.Duration) {
+func resolveProviderTimeouts(cfg *config.Config, provider string, defaultStreamIdle, defaultHTTP time.Duration) (time.Duration, time.Duration) {
 	streamIdleTimeout := defaultStreamIdle
 	if cfg.API.Retry.StreamIdleTimeout > 0 {
 		streamIdleTimeout = cfg.API.Retry.StreamIdleTimeout
@@ -207,6 +207,16 @@ func resolveProviderTimeouts(cfg *config.Config, defaultStreamIdle, defaultHTTP 
 	httpTimeout := defaultHTTP
 	if cfg.API.Retry.HTTPTimeout > 0 {
 		httpTimeout = cfg.API.Retry.HTTPTimeout
+	}
+	if provider != "" && len(cfg.API.Retry.Providers) > 0 {
+		if override, ok := cfg.API.Retry.Providers[strings.ToLower(strings.TrimSpace(provider))]; ok {
+			if override.StreamIdleTimeout > 0 {
+				streamIdleTimeout = override.StreamIdleTimeout
+			}
+			if override.HTTPTimeout > 0 {
+				httpTimeout = override.HTTPTimeout
+			}
+		}
 	}
 	return streamIdleTimeout, httpTimeout
 }
@@ -246,7 +256,7 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	// GLM/Z.AI needs longer timeouts — server is slower than Anthropic.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 180*time.Second, 5*time.Minute)
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "glm", 180*time.Second, 5*time.Minute)
 
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
@@ -262,6 +272,7 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 		HTTPTimeout: httpTimeout,
+		Provider:    "glm",
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -302,7 +313,7 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	// DeepSeek may have long silent reasoning/tool phases on complex prompts.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 120*time.Second, 5*time.Minute)
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "deepseek", 120*time.Second, 5*time.Minute)
 
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
@@ -318,6 +329,7 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 		HTTPTimeout: httpTimeout,
+		Provider:    "deepseek",
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -355,7 +367,7 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 
 	// MiniMax may have long silent reasoning/tool phases.
 	// Use relaxed defaults unless user explicitly configured stricter values.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 120*time.Second, 5*time.Minute)
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "minimax", 120*time.Second, 5*time.Minute)
 
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
@@ -370,6 +382,7 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 		MaxRetries:        cfg.API.Retry.MaxRetries,
 		RetryDelay:        cfg.API.Retry.RetryDelay,
 		HTTPTimeout:       httpTimeout,
+		Provider:          "minimax",
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -406,7 +419,7 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	// Kimi may pause longer between chunks on complex tool chains.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 120*time.Second, 5*time.Minute)
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "kimi", 120*time.Second, 5*time.Minute)
 
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
@@ -421,6 +434,7 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 		MaxRetries:        cfg.API.Retry.MaxRetries,
 		RetryDelay:        cfg.API.Retry.RetryDelay,
 		HTTPTimeout:       httpTimeout,
+		Provider:          "kimi",
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -461,7 +475,7 @@ func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error
 	}
 
 	// Anthropic can also produce long silent phases with extended thinking/tools.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 120*time.Second, 5*time.Minute)
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "anthropic", 120*time.Second, 5*time.Minute)
 
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
@@ -477,6 +491,7 @@ func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 		HTTPTimeout: httpTimeout,
+		Provider:    "anthropic",
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -504,13 +519,15 @@ func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = config.DefaultOllamaBaseURL
 	}
 
+	_, httpTimeout := resolveProviderTimeouts(cfg, "ollama", 0, config.DefaultHTTPTimeout)
+
 	ollamaConfig := OllamaConfig{
 		BaseURL:     baseURL,
 		APIKey:      loadedKey.Value, // Optional
 		Model:       modelID,
 		Temperature: cfg.Model.Temperature,
 		MaxTokens:   cfg.Model.MaxOutputTokens,
-		HTTPTimeout: cfg.API.Retry.HTTPTimeout,
+		HTTPTimeout: httpTimeout,
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 	}

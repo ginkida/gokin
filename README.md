@@ -277,6 +277,24 @@ api:
   minimax_key: ""
   active_provider: "gemini"
   ollama_base_url: "http://localhost:11434"
+  retry:
+    max_retries: 10
+    retry_delay: 1s
+    http_timeout: 120s
+    stream_idle_timeout: 30s
+    providers:
+      anthropic:
+        http_timeout: 5m
+        stream_idle_timeout: 120s
+      deepseek:
+        http_timeout: 5m
+        stream_idle_timeout: 120s
+      minimax:
+        http_timeout: 5m
+        stream_idle_timeout: 120s
+      kimi:
+        http_timeout: 5m
+        stream_idle_timeout: 120s
 
 model:
   name: "gemini-3-flash-preview"
@@ -286,6 +304,7 @@ model:
 
 tools:
   timeout: 2m
+  model_round_timeout: 5m
   bash:
     sandbox: true
   allowed_dirs: []

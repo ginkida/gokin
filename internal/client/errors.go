@@ -38,6 +38,183 @@ func IsStreamIdleTimeout(err error) bool {
 	return errors.As(err, &sitErr)
 }
 
+// FailureReason is a stable machine-readable category for request failures.
+type FailureReason string
+
+const (
+	FailureReasonOther             FailureReason = "other"
+	FailureReasonStreamIdleTimeout FailureReason = "stream_idle_timeout"
+	FailureReasonModelRoundTimeout FailureReason = "model_round_timeout"
+	FailureReasonContextCancel     FailureReason = "context_cancel"
+	FailureReasonHTTPTimeout       FailureReason = "http_timeout"
+)
+
+// ErrModelRoundTimeout is the sentinel for executor-enforced round timeout.
+var ErrModelRoundTimeout = errors.New("model round timeout")
+
+// TimeoutError carries typed timeout telemetry details.
+type TimeoutError struct {
+	Reason   FailureReason
+	Provider string
+	Timeout  time.Duration
+	Err      error
+}
+
+func (e *TimeoutError) Error() string {
+	base := string(e.Reason)
+	if e.Provider != "" && e.Timeout > 0 {
+		return fmt.Sprintf("%s (%s, %s): %v", base, e.Provider, e.Timeout, e.Err)
+	}
+	if e.Provider != "" {
+		return fmt.Sprintf("%s (%s): %v", base, e.Provider, e.Err)
+	}
+	if e.Timeout > 0 {
+		return fmt.Sprintf("%s (%s): %v", base, e.Timeout, e.Err)
+	}
+	return fmt.Sprintf("%s: %v", base, e.Err)
+}
+
+func (e *TimeoutError) Unwrap() error {
+	return e.Err
+}
+
+// FailureTelemetry contains structured diagnostics for timeout/retry failures.
+type FailureTelemetry struct {
+	Reason   string
+	Partial  bool
+	Timeout  time.Duration
+	Provider string
+}
+
+// ContextErr returns context cause when available (preserves timeout reason),
+// falling back to ctx.Err().
+func ContextErr(ctx context.Context) error {
+	if ctx == nil || ctx.Err() == nil {
+		return nil
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return ctx.Err()
+}
+
+// NewModelRoundTimeoutError creates a typed model round timeout error.
+func NewModelRoundTimeoutError(timeout time.Duration) error {
+	return &TimeoutError{
+		Reason:  FailureReasonModelRoundTimeout,
+		Timeout: timeout,
+		Err:     ErrModelRoundTimeout,
+	}
+}
+
+// WrapProviderHTTPTimeout wraps timeout-like transport errors with typed telemetry.
+func WrapProviderHTTPTimeout(err error, provider string, timeout time.Duration) error {
+	if err == nil {
+		return nil
+	}
+	if !isLikelyHTTPTimeout(err) {
+		return err
+	}
+	return &TimeoutError{
+		Reason:   FailureReasonHTTPTimeout,
+		Provider: provider,
+		Timeout:  timeout,
+		Err:      err,
+	}
+}
+
+// IsHTTPTimeout checks whether the error likely represents transport/header timeout.
+func IsHTTPTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	var timeoutErr *TimeoutError
+	if errors.As(err, &timeoutErr) {
+		return timeoutErr.Reason == FailureReasonHTTPTimeout
+	}
+	return isLikelyHTTPTimeout(err)
+}
+
+// DetectFailureTelemetry classifies common failure reasons for logging/journaling.
+func DetectFailureTelemetry(err error) FailureTelemetry {
+	t := FailureTelemetry{Reason: string(FailureReasonOther)}
+	if err == nil {
+		return t
+	}
+
+	var timeoutErr *TimeoutError
+	if errors.As(err, &timeoutErr) {
+		if timeoutErr.Reason != "" {
+			t.Reason = string(timeoutErr.Reason)
+		}
+		t.Provider = timeoutErr.Provider
+		if timeoutErr.Timeout > 0 {
+			t.Timeout = timeoutErr.Timeout
+		}
+	}
+
+	var sitErr *ErrStreamIdleTimeout
+	if errors.As(err, &sitErr) {
+		t.Reason = string(FailureReasonStreamIdleTimeout)
+		t.Partial = sitErr.Partial
+		t.Timeout = sitErr.Timeout
+		return t
+	}
+
+	if errors.Is(err, ErrModelRoundTimeout) {
+		t.Reason = string(FailureReasonModelRoundTimeout)
+		return t
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Reason = string(FailureReasonContextCancel)
+		return t
+	}
+	if IsHTTPTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
+		t.Reason = string(FailureReasonHTTPTimeout)
+		return t
+	}
+
+	return t
+}
+
+func isLikelyHTTPTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Exclude explicit non-HTTP timeout categories.
+	if errors.Is(err, ErrModelRoundTimeout) || IsStreamIdleTimeout(err) || errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// Typed timeout checks.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// String fallback for wrapped third-party errors.
+	msg := strings.ToLower(err.Error())
+	patterns := []string{
+		"client.timeout exceeded",
+		"timeout awaiting response headers",
+		"response header timeout",
+		"awaiting headers",
+		"i/o timeout",
+		"tls handshake timeout",
+		"http timeout",
+	}
+	for _, p := range patterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsRetryableAPIError returns true if the API error has a retryable status code.
 func IsRetryableAPIError(err error) bool {
 	var apiErr *APIError
@@ -86,13 +263,19 @@ func IsRetryableError(err error) bool {
 	}
 
 	// Typed checks first
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, ErrModelRoundTimeout) {
+		return false
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	if errors.Is(err, context.Canceled) {
+	if IsStreamIdleTimeout(err) {
 		return true
 	}
-	if IsStreamIdleTimeout(err) {
+	if IsHTTPTimeout(err) {
 		return true
 	}
 

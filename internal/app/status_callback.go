@@ -94,6 +94,7 @@ func (c *appStatusCallback) OnError(err error, recoverable bool) {
 	if recoverable {
 		msg = "Восстанавливаемая ошибка: " + msg
 	}
+	ft := client.DetectFailureTelemetry(err)
 
 	c.app.program.Send(ui.StatusUpdateMsg{
 		Type:    ui.StatusRecoverableError,
@@ -101,6 +102,10 @@ func (c *appStatusCallback) OnError(err error, recoverable bool) {
 		Details: map[string]any{
 			"recoverable": recoverable,
 			"error":       err.Error(),
+			"reason":      ft.Reason,
+			"partial":     ft.Partial,
+			"timeout":     ft.Timeout,
+			"provider":    ft.Provider,
 		},
 	})
 }

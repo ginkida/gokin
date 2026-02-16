@@ -1,6 +1,8 @@
 package client
 
 import (
+	"context"
+	"errors"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -20,6 +22,127 @@ func DefaultRetryConfig() RetryConfig {
 		MaxRetries: 10,
 		RetryDelay: 1 * time.Second,
 		MaxDelay:   30 * time.Second,
+	}
+}
+
+// StreamRetryPolicy defines provider-agnostic retry behavior for stream failures.
+type StreamRetryPolicy struct {
+	// MaxRetries applies to cold stream idle timeouts and generic retryable errors.
+	MaxRetries int
+	// MaxPartialRetries applies when stream idle happened after partial output.
+	MaxPartialRetries int
+	// BaseDelay is the initial backoff delay before retry.
+	BaseDelay time.Duration
+	// MaxDelay caps exponential backoff growth.
+	MaxDelay time.Duration
+}
+
+// StreamRetryOptions controls policy behavior for a specific call site.
+type StreamRetryOptions struct {
+	// AllowPartial enables retries for partial stream-idle errors.
+	AllowPartial bool
+}
+
+// StreamRetryDecision is the result of retry policy evaluation.
+type StreamRetryDecision struct {
+	ShouldRetry bool
+	Delay       time.Duration
+	Reason      string
+	Partial     bool
+}
+
+// DefaultStreamRetryPolicy returns defaults shared across providers and runtimes.
+func DefaultStreamRetryPolicy() StreamRetryPolicy {
+	return StreamRetryPolicy{
+		MaxRetries:        2,
+		MaxPartialRetries: 1,
+		BaseDelay:         2 * time.Second,
+		MaxDelay:          30 * time.Second,
+	}
+}
+
+func normalizeStreamRetryPolicy(policy StreamRetryPolicy) StreamRetryPolicy {
+	def := DefaultStreamRetryPolicy()
+	if policy.MaxRetries < 0 {
+		policy.MaxRetries = 0
+	}
+	if policy.MaxPartialRetries < 0 {
+		policy.MaxPartialRetries = 0
+	}
+	if policy.MaxRetries == 0 {
+		policy.MaxRetries = def.MaxRetries
+	}
+	if policy.MaxPartialRetries == 0 {
+		policy.MaxPartialRetries = def.MaxPartialRetries
+	}
+	if policy.BaseDelay <= 0 {
+		policy.BaseDelay = def.BaseDelay
+	}
+	if policy.MaxDelay <= 0 {
+		policy.MaxDelay = def.MaxDelay
+	}
+	return policy
+}
+
+// DecideStreamRetry evaluates whether a failed stream request should be retried.
+// retryCount and partialRetryCount are already-used retries for their categories.
+func DecideStreamRetry(
+	policy StreamRetryPolicy,
+	err error,
+	retryCount int,
+	partialRetryCount int,
+	ctx context.Context,
+	options StreamRetryOptions,
+) StreamRetryDecision {
+	if err == nil {
+		return StreamRetryDecision{}
+	}
+	if ctx != nil && ContextErr(ctx) != nil {
+		return StreamRetryDecision{}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrModelRoundTimeout) {
+		return StreamRetryDecision{}
+	}
+
+	policy = normalizeStreamRetryPolicy(policy)
+
+	var sitErr *ErrStreamIdleTimeout
+	if errors.As(err, &sitErr) {
+		// Partial stream-idle retries are expensive, make them explicit and capped.
+		if sitErr.Partial {
+			if !options.AllowPartial || partialRetryCount >= policy.MaxPartialRetries {
+				return StreamRetryDecision{}
+			}
+			return StreamRetryDecision{
+				ShouldRetry: true,
+				Delay:       CalculateBackoff(policy.BaseDelay, partialRetryCount, policy.MaxDelay),
+				Reason:      string(FailureReasonStreamIdleTimeout),
+				Partial:     true,
+			}
+		}
+
+		if retryCount >= policy.MaxRetries {
+			return StreamRetryDecision{}
+		}
+		return StreamRetryDecision{
+			ShouldRetry: true,
+			Delay:       CalculateBackoff(policy.BaseDelay, retryCount, policy.MaxDelay),
+			Reason:      string(FailureReasonStreamIdleTimeout),
+		}
+	}
+
+	if !IsRetryableError(err) || retryCount >= policy.MaxRetries {
+		return StreamRetryDecision{}
+	}
+
+	reason := DetectFailureTelemetry(err).Reason
+	if reason == "" {
+		reason = string(FailureReasonOther)
+	}
+	return StreamRetryDecision{
+		ShouldRetry: true,
+		Delay:       CalculateBackoff(policy.BaseDelay, retryCount, policy.MaxDelay),
+		Reason:      reason,
 	}
 }
 

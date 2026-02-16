@@ -45,6 +45,7 @@ func (e *HTTPError) Unwrap() error {
 type AnthropicConfig struct {
 	APIKey        string
 	BaseURL       string // Default: "https://api.anthropic.com" for Anthropic, custom for GLM-4.7
+	Provider      string // For telemetry/logging (anthropic, glm, deepseek, minimax, kimi)
 	Model         string
 	MaxTokens     int32
 	Temperature   float32
@@ -92,6 +93,9 @@ func NewAnthropicClient(config AnthropicConfig) (*AnthropicClient, error) {
 	// Set defaults
 	if config.BaseURL == "" {
 		config.BaseURL = DefaultAnthropicBaseURL
+	}
+	if config.Provider == "" {
+		config.Provider = "anthropic-compatible"
 	}
 	if config.MaxTokens == 0 {
 		config.MaxTokens = 8192
@@ -534,7 +538,7 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 			case <-backoffTimer.C:
 			case <-ctx.Done():
 				backoffTimer.Stop()
-				return nil, ctx.Err()
+				return nil, ContextErr(ctx)
 			}
 		}
 
@@ -647,6 +651,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	// Perform request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		err = WrapProviderHTTPTimeout(err, c.config.Provider, c.config.HTTPTimeout)
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 
@@ -750,7 +755,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					logging.Debug("context cancelled, stopping stream processing")
 					// Non-blocking send - channel might be full or receiver gone
 					select {
-					case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
+					case chunks <- ResponseChunk{Error: ContextErr(ctx), Done: true}:
 					default:
 					}
 					return

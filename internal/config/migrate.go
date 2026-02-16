@@ -71,6 +71,19 @@ func NormalizeConfig(cfg *Config) error {
 		}
 	}
 
+	// Normalize retry provider keys for case-insensitive lookups.
+	if len(cfg.API.Retry.Providers) > 0 {
+		normalized := make(map[string]ProviderRetryConfig, len(cfg.API.Retry.Providers))
+		for provider, override := range cfg.API.Retry.Providers {
+			key := strings.ToLower(strings.TrimSpace(provider))
+			if key == "" {
+				continue
+			}
+			normalized[key] = override
+		}
+		cfg.API.Retry.Providers = normalized
+	}
+
 	return nil
 }
 

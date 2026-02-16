@@ -364,6 +364,7 @@ func (b *Builder) initTools() error {
 	b.geminiClient.SetTools(geminiTools)
 
 	b.executor = tools.NewExecutor(b.registry, b.geminiClient, b.cfg.Tools.Timeout)
+	b.executor.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	compactor := appcontext.NewResultCompactor(b.cfg.Context.ToolResultMaxChars)
 	b.executor.SetCompactor(compactor)
 

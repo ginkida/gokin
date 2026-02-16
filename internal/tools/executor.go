@@ -27,12 +27,10 @@ const (
 	MaxFunctionCallsPerResponse = 10
 	// MaxConcurrentToolExecutions limits parallel goroutines for tool execution.
 	MaxConcurrentToolExecutions = 5
-	// maxStreamRetries is the maximum number of retries for stream idle timeouts.
-	maxStreamRetries = 2
-	// modelRoundHardTimeout caps a single model round to prevent zombie requests.
+	// defaultModelRoundTimeout caps a single model round to prevent zombie requests.
 	// Keep this generous for reasoning-heavy models; SSE idle timeout still protects
 	// against truly stalled streams.
-	modelRoundHardTimeout = 5 * time.Minute
+	defaultModelRoundTimeout = 5 * time.Minute
 )
 
 // ResultCompactor interface for compacting tool results.
@@ -152,17 +150,18 @@ type ToolRegistry interface {
 
 // Executor handles the function calling loop with enhanced safety and user awareness.
 type Executor struct {
-	registry    ToolRegistry
-	client      client.Client
-	timeout     time.Duration
-	handler     *ExecutionHandler
-	compactor   ResultCompactor
-	permissions *permission.Manager
-	hooks       *hooks.Manager
-	auditLogger *audit.Logger
-	sessionID   string
-	fallback    FallbackConfig
-	historyMu   sync.Mutex // Protects history modifications in executeLoop
+	registry          ToolRegistry
+	client            client.Client
+	timeout           time.Duration
+	modelRoundTimeout time.Duration
+	handler           *ExecutionHandler
+	compactor         ResultCompactor
+	permissions       *permission.Manager
+	hooks             *hooks.Manager
+	auditLogger       *audit.Logger
+	sessionID         string
+	fallback          FallbackConfig
+	historyMu         sync.Mutex // Protects history modifications in executeLoop
 
 	// Enhanced safety features
 	safetyValidator  SafetyValidator
@@ -258,17 +257,18 @@ func NewExecutorLazy(registry *LazyRegistry, c client.Client, timeout time.Durat
 // newExecutorInternal creates the executor with any ToolRegistry implementation.
 func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Duration) *Executor {
 	return &Executor{
-		registry:         registry,
-		client:           c,
-		timeout:          timeout,
-		handler:          &ExecutionHandler{},
-		fallback:         DefaultFallbackConfig(),
-		safetyValidator:  NewDefaultSafetyValidator(),
-		preFlightChecks:  true,
-		executionContext: make(map[string]*ExecutionInfo),
-		notificationMgr:  NewNotificationManager(),
-		toolBreakers:     make(map[string]*robustness.CircuitBreaker),
-		redactor:         security.NewSecretRedactor(),
+		registry:          registry,
+		client:            c,
+		timeout:           timeout,
+		modelRoundTimeout: defaultModelRoundTimeout,
+		handler:           &ExecutionHandler{},
+		fallback:          DefaultFallbackConfig(),
+		safetyValidator:   NewDefaultSafetyValidator(),
+		preFlightChecks:   true,
+		executionContext:  make(map[string]*ExecutionInfo),
+		notificationMgr:   NewNotificationManager(),
+		toolBreakers:      make(map[string]*robustness.CircuitBreaker),
+		redactor:          security.NewSecretRedactor(),
 	}
 }
 
@@ -294,6 +294,16 @@ func (e *Executor) drainPendingNotifications() []string {
 // SetClient updates the underlying client.
 func (e *Executor) SetClient(c client.Client) {
 	e.client = c
+}
+
+// SetModelRoundTimeout sets timeout for a single model round.
+// Non-positive values reset to the default timeout.
+func (e *Executor) SetModelRoundTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		e.modelRoundTimeout = defaultModelRoundTimeout
+		return
+	}
+	e.modelRoundTimeout = timeout
 }
 
 // SetSafetyValidator sets the safety validator.
@@ -400,12 +410,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	var toolsUsed []string        // Track which tools were used for smart fallback
 	var lastToolResult ToolResult // Track the last tool result for context
 	streamRetries := 0
+	partialStreamRetries := 0
+	retryPolicy := client.DefaultStreamRetryPolicy()
 
 	for i := 0; i < maxIterations; i++ {
 		// Check context cancellation between iterations
 		select {
 		case <-ctx.Done():
-			return history, finalText, ctx.Err()
+			return history, finalText, client.ContextErr(ctx)
 		default:
 		}
 
@@ -417,29 +429,43 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// Get response from model
 		resp, err := e.getModelResponse(ctx, history)
 		if err != nil {
-			// Retry cold stream idle timeouts (no content received at all).
-			// If some content was already received, let caller handle continuation
-			// instead of replaying the same round and wasting tokens.
-			var sitErr *client.ErrStreamIdleTimeout
-			isStreamIdle := errors.As(err, &sitErr)
-			partialStreamIdle := isStreamIdle && sitErr.Partial
-			if isStreamIdle && !partialStreamIdle && streamRetries < maxStreamRetries {
-				streamRetries++
+			ft := client.DetectFailureTelemetry(err)
+			logging.Warn("model round failed",
+				"reason", ft.Reason,
+				"partial", ft.Partial,
+				"timeout", ft.Timeout,
+				"provider", ft.Provider,
+				"retry_count", streamRetries,
+				"partial_retry_count", partialStreamRetries,
+				"error", err)
+
+			decision := client.DecideStreamRetry(
+				retryPolicy,
+				err,
+				streamRetries,
+				partialStreamRetries,
+				ctx,
+				client.StreamRetryOptions{AllowPartial: false}, // partial continuation is handled at App level
+			)
+			if decision.ShouldRetry {
+				if decision.Partial {
+					partialStreamRetries++
+				} else {
+					streamRetries++
+				}
 				if e.handler != nil && e.handler.OnWarning != nil {
-					e.handler.OnWarning(fmt.Sprintf("Stream stalled, retrying (%d/%d)...", streamRetries, maxStreamRetries))
+					e.handler.OnWarning(fmt.Sprintf(
+						"Request failed (%s), retrying (%d/%d) in %s...",
+						decision.Reason,
+						streamRetries,
+						retryPolicy.MaxRetries,
+						decision.Delay.Round(time.Second),
+					))
+				}
+				if err := waitForRetry(ctx, decision.Delay); err != nil {
+					return history, finalText, err
 				}
 				continue // retry outer loop
-			}
-			if partialStreamIdle {
-				logging.Debug("stream idle timeout after partial response; skipping internal retry")
-			}
-			// Retry transient request errors (timeout, connection) if parent context is still alive
-			if !partialStreamIdle && ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
-				streamRetries++
-				if e.handler != nil && e.handler.OnWarning != nil {
-					e.handler.OnWarning(fmt.Sprintf("Request failed, retrying (%d/%d)...", streamRetries, maxStreamRetries))
-				}
-				continue
 			}
 			// Preserve partial response in history if available
 			if resp != nil && resp.Text != "" {
@@ -451,9 +477,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				history = append(history, partialContent)
 				e.historyMu.Unlock()
 			}
-			return history, "", fmt.Errorf("model response error: %w", err)
+			return history, "", fmt.Errorf("model response error (%s): %w", ft.Reason, err)
 		}
-		streamRetries = 0 // reset on success
+		streamRetries = 0        // reset on success
+		partialStreamRetries = 0 // reset on success
 
 		// Text-based tool call fallback for models without native function calling
 		if len(resp.FunctionCalls) == 0 && resp.Text != "" {
@@ -482,7 +509,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// Check context cancellation between chained tool calls (Esc pressed)
 			select {
 			case <-ctx.Done():
-				return history, finalText, ctx.Err()
+				return history, finalText, client.ContextErr(ctx)
 			default:
 			}
 
@@ -537,59 +564,42 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// Send function responses back to model.
 			// Pass history without the just-appended tool results since
 			// all client implementations append results themselves.
-			roundCtx, roundCancel := e.withModelRoundTimeout(ctx)
-			stream, err := e.client.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
-			if err != nil {
-				roundCancel()
-				return history, "", fmt.Errorf("function response error: %w", err)
-			}
+			for {
+				roundCtx, roundCancel := e.withModelRoundTimeout(ctx)
+				stream, err := e.client.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
+				if err != nil {
+					roundCancel()
+					return history, "", fmt.Errorf("function response error: %w", err)
+				}
 
-			// Collect the response
-			resp, err = e.collectStreamWithHandler(roundCtx, stream)
-			if err != nil {
-				// Retry cold stream idle timeouts only. Partial idle timeouts are
-				// forwarded so the outer request retry can continue from context.
-				var sitErr *client.ErrStreamIdleTimeout
-				isStreamIdle := errors.As(err, &sitErr)
-				partialStreamIdle := isStreamIdle && sitErr.Partial
-				if isStreamIdle && !partialStreamIdle && streamRetries < maxStreamRetries {
-					streamRetries++
-					if e.handler != nil && e.handler.OnWarning != nil {
-						e.handler.OnWarning(fmt.Sprintf("Stream stalled after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
-					}
-					// Re-send function response
-					roundCancel()
-					roundCtx, roundCancel = e.withModelRoundTimeout(ctx)
-					stream, err = e.client.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
-					if err != nil {
-						roundCancel()
-						return history, "", fmt.Errorf("function response retry error: %w", err)
-					}
-					resp, err = e.collectStreamWithHandler(roundCtx, stream)
-					if err != nil {
-						roundCancel()
-						return history, "", err
-					}
-				} else if !partialStreamIdle && ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
-					// Retry transient request errors (timeout, connection) if parent context is still alive
-					streamRetries++
-					if e.handler != nil && e.handler.OnWarning != nil {
-						e.handler.OnWarning(fmt.Sprintf("Request failed after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
-					}
-					// Re-send function response
-					roundCancel()
-					roundCtx, roundCancel = e.withModelRoundTimeout(ctx)
-					stream, err = e.client.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
-					if err != nil {
-						roundCancel()
-						return history, "", fmt.Errorf("function response retry error: %w", err)
-					}
-					resp, err = e.collectStreamWithHandler(roundCtx, stream)
-					if err != nil {
-						roundCancel()
-						return history, "", err
-					}
-				} else {
+				// Collect the response
+				resp, err = e.collectStreamWithHandler(roundCtx, stream)
+				roundCancel()
+				if err == nil {
+					streamRetries = 0
+					partialStreamRetries = 0
+					break
+				}
+
+				ft := client.DetectFailureTelemetry(err)
+				logging.Warn("function response round failed",
+					"reason", ft.Reason,
+					"partial", ft.Partial,
+					"timeout", ft.Timeout,
+					"provider", ft.Provider,
+					"retry_count", streamRetries,
+					"partial_retry_count", partialStreamRetries,
+					"error", err)
+
+				decision := client.DecideStreamRetry(
+					retryPolicy,
+					err,
+					streamRetries,
+					partialStreamRetries,
+					ctx,
+					client.StreamRetryOptions{AllowPartial: false}, // partial continuation is handled at App level
+				)
+				if !decision.ShouldRetry {
 					// Preserve partial response from chained tool call
 					if resp != nil && resp.Text != "" {
 						partialContent := &genai.Content{
@@ -600,12 +610,27 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						history = append(history, partialContent)
 						e.historyMu.Unlock()
 					}
-					roundCancel()
+					return history, "", fmt.Errorf("function response error (%s): %w", ft.Reason, err)
+				}
+
+				if decision.Partial {
+					partialStreamRetries++
+				} else {
+					streamRetries++
+				}
+				if e.handler != nil && e.handler.OnWarning != nil {
+					e.handler.OnWarning(fmt.Sprintf(
+						"Request after tool results failed (%s), retrying (%d/%d) in %s...",
+						decision.Reason,
+						streamRetries,
+						retryPolicy.MaxRetries,
+						decision.Delay.Round(time.Second),
+					))
+				}
+				if err := waitForRetry(ctx, decision.Delay); err != nil {
 					return history, "", err
 				}
 			}
-			roundCancel()
-			streamRetries = 0 // reset on success
 
 			// Text-based tool call fallback for chained calls
 			if len(resp.FunctionCalls) == 0 && resp.Text != "" {
@@ -744,17 +769,33 @@ func (e *Executor) getModelResponse(ctx context.Context, history []*genai.Conten
 }
 
 func (e *Executor) withModelRoundTimeout(parent context.Context) (context.Context, context.CancelFunc) {
-	timeout := modelRoundHardTimeout
+	timeout := e.modelRoundTimeout
+	if timeout <= 0 {
+		timeout = defaultModelRoundTimeout
+	}
 	if deadline, ok := parent.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return context.WithCancel(parent)
 		}
 		if remaining < timeout {
-			timeout = remaining
+			// Parent context is stricter; preserve its cause chain.
+			return context.WithTimeout(parent, remaining)
 		}
 	}
-	return context.WithTimeout(parent, timeout)
+	return context.WithTimeoutCause(parent, timeout, client.NewModelRoundTimeoutError(timeout))
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return client.ContextErr(ctx)
+	}
 }
 
 // collectStreamWithHandler collects streaming response while calling handlers.
@@ -1315,7 +1356,7 @@ streamLoop:
 			break streamLoop
 
 		case <-ctx.Done():
-			return NewErrorResult("streaming cancelled"), ctx.Err()
+			return NewErrorResult("streaming cancelled"), client.ContextErr(ctx)
 		}
 	}
 

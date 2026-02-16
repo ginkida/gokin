@@ -135,9 +135,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.mu.Unlock()
 
 	// === IMPROVEMENT 1: Use Task Router for intelligent routing ===
-	// Auto-retry transient errors (timeout, connection) with backoff
-	const maxRequestRetries = 2
-	requestBackoff := []time.Duration{2 * time.Second, 5 * time.Second}
+	// Auto-retry transient errors with unified stream retry policy.
+	retryPolicy := client.DefaultStreamRetryPolicy()
 	failoverTriggered := false
 	originalMessage := message
 	retryMessage := originalMessage
@@ -145,10 +144,11 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	var newHistory []*genai.Content
 	var response string
 	var err error
-	contextTruncated := false  // Guard against infinite truncation loop
-	partialIdleRetryCount := 0 // Cap costly retries when stream already produced partial output
+	contextTruncated := false
+	requestRetryCount := 0
+	partialIdleRetryCount := 0
 
-	for attempt := 0; attempt < maxRequestRetries; attempt++ {
+	for {
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
 		currentMessage := retryMessage
 		execFn := func() error {
@@ -180,8 +180,19 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			break
 		}
 
+		ft := client.DetectFailureTelemetry(err)
+		logging.Warn("request attempt failed",
+			"reason", ft.Reason,
+			"partial", ft.Partial,
+			"timeout", ft.Timeout,
+			"provider", ft.Provider,
+			"request_retries", requestRetryCount,
+			"partial_retries", partialIdleRetryCount,
+			"error", err)
+
 		// Don't retry if context cancelled (user abort)
 		if ctx.Err() != nil {
+			err = client.ContextErr(ctx)
 			break
 		}
 
@@ -194,18 +205,30 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			continue
 		}
 
-		var sitErr *client.ErrStreamIdleTimeout
-		partialStreamIdle := errors.As(err, &sitErr) && sitErr.Partial
+		decision := client.DecideStreamRetry(
+			retryPolicy,
+			err,
+			requestRetryCount,
+			partialIdleRetryCount,
+			ctx,
+			client.StreamRetryOptions{AllowPartial: true},
+		)
+		if !decision.ShouldRetry {
+			break
+		}
 
-		// If stream stalled mid-response, retry with an explicit continuation hint
-		// so the model resumes instead of restarting from scratch.
-		if client.IsStreamIdleTimeout(err) {
+		if decision.Partial {
+			partialIdleRetryCount++
+			// Partial stream retries should continue from the last complete sentence.
 			retryMessage = buildContinuationRetryMessage(originalMessage, newHistory)
+		} else {
+			requestRetryCount++
 		}
 
 		// After repeated transient failures, auto-enable provider failover chain.
 		// This avoids user-visible dead-ends when a provider/model is unstable.
-		if !failoverTriggered && attempt >= 1 && isRetryableError(err) {
+		totalRetries := requestRetryCount + partialIdleRetryCount
+		if !failoverTriggered && totalRetries >= 2 && isRetryableError(err) {
 			if chain, failoverErr := a.activateEmergencyFailoverClient(); failoverErr == nil {
 				failoverTriggered = true
 				a.safeSendToProgram(ui.StreamTextMsg(
@@ -213,20 +236,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			} else {
 				logging.Debug("automatic failover not activated", "error", failoverErr)
 			}
-		}
-
-		// Partial stream idle already consumed tokens; limit automatic retries
-		// to one continuation attempt to avoid repeated expensive replays.
-		if partialStreamIdle && partialIdleRetryCount >= 1 {
-			break
-		}
-
-		// Only retry transient errors; stop on last attempt
-		if !isRetryableError(err) || attempt >= maxRequestRetries-1 {
-			break
-		}
-		if partialStreamIdle {
-			partialIdleRetryCount++
 		}
 
 		// Save partial history before retry (preserves tool side effects)
@@ -238,15 +247,19 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 
 		// Warn user about retry
-		backoff := requestBackoff[attempt]
-		if client.IsStreamIdleTimeout(err) {
+		backoff := decision.Delay
+		if decision.Partial {
+			a.safeSendToProgram(ui.StreamTextMsg(
+				fmt.Sprintf("\n⚠️ Response stream stalled after partial output. Auto-retry #%d/%d in %v...\n",
+					partialIdleRetryCount, retryPolicy.MaxPartialRetries, backoff.Round(time.Second))))
+		} else if ft.Reason == string(client.FailureReasonStreamIdleTimeout) {
 			a.safeSendToProgram(ui.StreamTextMsg(
 				fmt.Sprintf("\n⚠️ Response stream stalled. Auto-retry #%d/%d in %v...\n",
-					attempt+1, maxRequestRetries, backoff)))
+					requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second))))
 		} else {
 			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⚠️ Request failed: %s\nRetrying in %v (%d/%d)...\n",
-					err.Error(), backoff, attempt+1, maxRequestRetries)))
+				fmt.Sprintf("\n⚠️ Request failed (%s): %s\nRetrying in %v (%d/%d)...\n",
+					ft.Reason, err.Error(), backoff.Round(time.Second), requestRetryCount, retryPolicy.MaxRetries)))
 		}
 
 		backoffTimer := time.NewTimer(backoff)
@@ -255,15 +268,20 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			continue
 		case <-ctx.Done():
 			backoffTimer.Stop()
-			err = ctx.Err()
+			err = client.ContextErr(ctx)
 		}
 		break
 	}
 
 	if err != nil {
+		ft := client.DetectFailureTelemetry(err)
 		a.journalEvent("request_failed", map[string]any{
 			"error":           err.Error(),
 			"message_preview": previewForJournal(message),
+			"failure_reason":  ft.Reason,
+			"partial":         ft.Partial,
+			"timeout":         ft.Timeout.String(),
+			"provider":        ft.Provider,
 		})
 		if a.reliability != nil {
 			a.reliability.RecordFailure()

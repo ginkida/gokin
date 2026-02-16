@@ -422,7 +422,7 @@ func (c *GeminiOAuthClient) generateContentStream(ctx context.Context, contents 
 			case <-backoffTimer.C:
 			case <-ctx.Done():
 				backoffTimer.Stop()
-				return nil, ctx.Err()
+				return nil, ContextErr(ctx)
 			}
 		}
 
@@ -517,6 +517,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 		if c.rateLimiter != nil && estimatedTokens > 0 {
 			c.rateLimiter.ReturnTokens(1, estimatedTokens)
 		}
+		err = WrapProviderHTTPTimeout(err, "gemini", c.httpTimeout)
 		// Log detailed error info for debugging connection issues
 		var netErr net.Error
 		if errors.As(err, &netErr) {
@@ -756,7 +757,7 @@ scanLoop:
 			case <-ctx.Done():
 				logging.Debug("context cancelled, stopping OAuth SSE stream")
 				select {
-				case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
+				case chunks <- ResponseChunk{Error: ContextErr(ctx), Done: true}:
 				default:
 				}
 				hasError = true
@@ -855,7 +856,7 @@ scanLoop:
 		case <-ctx.Done():
 			hasError = true
 			select {
-			case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
+			case chunks <- ResponseChunk{Error: ContextErr(ctx), Done: true}:
 			default:
 			}
 			break scanLoop

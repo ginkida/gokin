@@ -136,10 +136,17 @@ func (c *APIConfig) SetProviderKey(provider, key string) {
 
 // RetryConfig holds retry settings for API calls.
 type RetryConfig struct {
-	MaxRetries        int           `yaml:"max_retries"`         // Maximum number of retry attempts (default: 3)
-	RetryDelay        time.Duration `yaml:"retry_delay"`         // Initial delay between retries (default: 1s)
-	HTTPTimeout       time.Duration `yaml:"http_timeout"`        // HTTP request timeout (default: 120s)
-	StreamIdleTimeout time.Duration `yaml:"stream_idle_timeout"` // Max pause between SSE chunks (0 = provider default)
+	MaxRetries        int                            `yaml:"max_retries"`         // Maximum number of retry attempts (default: 3)
+	RetryDelay        time.Duration                  `yaml:"retry_delay"`         // Initial delay between retries (default: 1s)
+	HTTPTimeout       time.Duration                  `yaml:"http_timeout"`        // HTTP request timeout (default: 120s)
+	StreamIdleTimeout time.Duration                  `yaml:"stream_idle_timeout"` // Max pause between SSE chunks (0 = provider default)
+	Providers         map[string]ProviderRetryConfig `yaml:"providers,omitempty"` // Per-provider timeout overrides (e.g. minimax/deepseek/kimi/anthropic).
+}
+
+// ProviderRetryConfig holds retry timeout overrides for a specific provider.
+type ProviderRetryConfig struct {
+	HTTPTimeout       time.Duration `yaml:"http_timeout,omitempty"`        // Provider-specific HTTP timeout
+	StreamIdleTimeout time.Duration `yaml:"stream_idle_timeout,omitempty"` // Provider-specific stream idle timeout
 }
 
 // ModelConfig holds model-related settings.
@@ -169,10 +176,11 @@ type ModelConfig struct {
 
 // ToolsConfig holds tool-related settings.
 type ToolsConfig struct {
-	Timeout     time.Duration     `yaml:"timeout"`
-	Bash        BashConfig        `yaml:"bash"`
-	AllowedDirs []string          `yaml:"allowed_dirs"` // Additional allowed directories (besides workDir)
-	Formatters  map[string]string `yaml:"formatters"`   // ext → command, e.g. {".py": "black"}
+	Timeout           time.Duration     `yaml:"timeout"`
+	ModelRoundTimeout time.Duration     `yaml:"model_round_timeout"` // Hard timeout for a single model round.
+	Bash              BashConfig        `yaml:"bash"`
+	AllowedDirs       []string          `yaml:"allowed_dirs"` // Additional allowed directories (besides workDir)
+	Formatters        map[string]string `yaml:"formatters"`   // ext → command, e.g. {".py": "black"}
 }
 
 // BashConfig holds bash tool settings.
@@ -388,7 +396,8 @@ func DefaultConfig() *Config {
 			MaxPoolSize:     5,     // Default pool size
 		},
 		Tools: ToolsConfig{
-			Timeout: 2 * time.Minute,
+			Timeout:           2 * time.Minute,
+			ModelRoundTimeout: DefaultModelRoundTimeout,
 			Bash: BashConfig{
 				Sandbox:         true,
 				BlockedCommands: []string{"rm -rf /", "mkfs"},

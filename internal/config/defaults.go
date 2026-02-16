@@ -33,6 +33,7 @@ const (
 	// Timeout settings
 	DefaultToolTimeout         = 30 * time.Second
 	DefaultBashTimeout         = 30 * time.Second
+	DefaultModelRoundTimeout   = 5 * time.Minute
 	DefaultGracefulShutdown    = 10 * time.Second
 	DefaultForcedShutdown      = 15 * time.Second
 	DefaultPermissionTimeout   = 5 * time.Minute

@@ -307,7 +307,7 @@ func (c *GeminiClient) generateContentStream(ctx context.Context, contents []*ge
 			case <-backoffTimer.C:
 			case <-ctx.Done():
 				backoffTimer.Stop()
-				return nil, ctx.Err()
+				return nil, ContextErr(ctx)
 			}
 		}
 
@@ -441,7 +441,7 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 					hasError = true
 					// Non-blocking send - channel might be full or receiver gone
 					select {
-					case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
+					case chunks <- ResponseChunk{Error: ContextErr(ctx), Done: true}:
 					default:
 					}
 					return
@@ -513,7 +513,7 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 						hasError = true // Treat context cancellation as error for token return
 						// Non-blocking send - channel might be full or receiver gone
 						select {
-						case chunks <- ResponseChunk{Error: ctx.Err(), Done: true}:
+						case chunks <- ResponseChunk{Error: ContextErr(ctx), Done: true}:
 						default:
 						}
 						return
@@ -625,7 +625,7 @@ func (c *GeminiClient) CountTokens(ctx context.Context, contents []*genai.Conten
 			case <-backoffTimer.C:
 			case <-ctx.Done():
 				backoffTimer.Stop()
-				return nil, ctx.Err()
+				return nil, ContextErr(ctx)
 			}
 		}
 

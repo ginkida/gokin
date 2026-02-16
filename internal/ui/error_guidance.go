@@ -18,6 +18,24 @@ type ErrorGuidance struct {
 // errorGuidancePatterns contains known error patterns with guidance.
 var errorGuidancePatterns = []ErrorGuidance{
 	{
+		Pattern: regexp.MustCompile(`model_round_timeout`),
+		Title:   "Model Round Timeout",
+		Suggestions: []string{
+			"A single model round hit the hard safety cap",
+			"Increase tools.model_round_timeout for heavy reasoning/tool chains",
+			"Try a narrower prompt to reduce round duration",
+		},
+	},
+	{
+		Pattern: regexp.MustCompile(`http_timeout`),
+		Title:   "Provider HTTP Timeout",
+		Suggestions: []string{
+			"The provider did not return headers/data in time",
+			"Increase api.retry.http_timeout or provider-specific override",
+			"Check network stability and provider status",
+		},
+	},
+	{
 		Pattern: regexp.MustCompile(`stream idle timeout`),
 		Title:   "Stream Stalled",
 		Suggestions: []string{
