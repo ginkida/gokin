@@ -51,6 +51,7 @@ logs/
 # Build output
 dist/
 build/
+.gocache/
 
 # Debug
 debug/
@@ -62,3 +63,6 @@ debug/
 # AI assistant files
 .claude/
 CLAUDE.md
+
+# Wiki
+wiki/

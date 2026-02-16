@@ -698,6 +698,9 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		defer resp.Body.Close()
 
 		scanner := bufio.NewScanner(resp.Body)
+		// Large tool inputs/results can produce long SSE data lines.
+		// Default scanner token limit (64K) is too small and causes token-too-long errors.
+		scanner.Buffer(make([]byte, 64*1024), 8*1024*1024) // 8MB max line
 		accumulator := &toolCallAccumulator{
 			completedCalls: make([]*genai.FunctionCall, 0),
 		}
@@ -880,11 +883,13 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 					// Process event
 					chunk := c.processStreamEvent(event, accumulator)
-					if chunk.Text != "" {
+					// Mark partial progress when we received meaningful model output.
+					// This prevents treating "thinking/tool_use then idle" as a cold timeout.
+					if chunk.Text != "" || chunk.Thinking != "" || len(chunk.FunctionCalls) > 0 {
 						contentReceived = true
 					}
 					if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 ||
-					chunk.InputTokens > 0 || chunk.CacheCreationInputTokens > 0 || chunk.CacheReadInputTokens > 0 {
+						chunk.InputTokens > 0 || chunk.CacheCreationInputTokens > 0 || chunk.CacheReadInputTokens > 0 {
 						select {
 						case chunks <- chunk:
 						case <-ctx.Done():
@@ -1285,11 +1290,13 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 
 	// Add function result as user message
 	resultContents := make([]map[string]interface{}, 0)
-	for _, result := range results {
+	for idx, result := range results {
 		toolUseID := result.ID
 		if toolUseID == "" {
-			logging.Warn("tool result missing ID, using Name as fallback", "name", result.Name)
-			toolUseID = result.Name
+			toolUseID = fallbackToolID(result.Name, idx)
+			logging.Warn("tool result missing ID, using generated fallback ID",
+				"name", result.Name,
+				"tool_use_id", toolUseID)
 		}
 		logging.Debug("adding tool result", "tool_use_id", toolUseID, "name", result.Name)
 
@@ -1346,6 +1353,7 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 
 	// Index of the last tool_result in content, for attaching trailing InlineData
 	lastToolResultIdx := -1
+	toolResultOrdinal := 0
 
 	for _, part := range parts {
 		if part.Text != "" {
@@ -1389,8 +1397,10 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 		if part.FunctionResponse != nil {
 			toolUseID := part.FunctionResponse.ID
 			if toolUseID == "" {
-				toolUseID = part.FunctionResponse.Name
-				logging.Warn("FunctionResponse missing ID in buildUserMessage", "name", part.FunctionResponse.Name)
+				toolUseID = fallbackToolID(part.FunctionResponse.Name, toolResultOrdinal)
+				logging.Warn("FunctionResponse missing ID in buildUserMessage",
+					"name", part.FunctionResponse.Name,
+					"fallback_tool_use_id", toolUseID)
 			}
 
 			// Extract content string from the response map
@@ -1420,6 +1430,7 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 				"content":     contentStr,
 			})
 			lastToolResultIdx = len(content) - 1
+			toolResultOrdinal++
 		}
 	}
 
@@ -1441,6 +1452,7 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 // buildAssistantMessage builds an assistant message from parts.
 func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]interface{} {
 	content := make([]map[string]interface{}, 0)
+	toolUseOrdinal := 0
 
 	for _, part := range parts {
 		if part.Text != "" {
@@ -1454,10 +1466,11 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 			// Use original ID from model response - this MUST match tool_use_id in tool_result
 			toolID := part.FunctionCall.ID
 			if toolID == "" {
-				// Fallback: use Name as ID for consistency with tool_result
-				// This handles old sessions that didn't save IDs
-				logging.Warn("FunctionCall missing ID in buildAssistantMessage, using name as ID", "name", part.FunctionCall.Name)
-				toolID = part.FunctionCall.Name
+				// Generate deterministic fallback ID so repeated tool names don't collide.
+				toolID = fallbackToolID(part.FunctionCall.Name, toolUseOrdinal)
+				logging.Warn("FunctionCall missing ID in buildAssistantMessage, using generated fallback ID",
+					"name", part.FunctionCall.Name,
+					"fallback_tool_use_id", toolID)
 			}
 			logging.Debug("buildAssistantMessage tool_use", "id", toolID, "name", part.FunctionCall.Name)
 			content = append(content, map[string]interface{}{
@@ -1466,6 +1479,7 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 				"name":  part.FunctionCall.Name,
 				"input": part.FunctionCall.Args,
 			})
+			toolUseOrdinal++
 		}
 	}
 
@@ -1573,6 +1587,30 @@ func randomID() string {
 		return fmt.Sprintf("toolu_%d", time.Now().UnixNano())
 	}
 	return "toolu_" + hex.EncodeToString(b)
+}
+
+func sanitizeToolIDComponent(s string) string {
+	if s == "" {
+		return "tool"
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "tool"
+	}
+	return out
+}
+
+func fallbackToolID(name string, ordinal int) string {
+	return fmt.Sprintf("fallback_%s_%d", sanitizeToolIDComponent(name), ordinal)
 }
 
 // mergeConsecutiveMessages ensures strict user/assistant role alternation

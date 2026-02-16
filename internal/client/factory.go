@@ -199,6 +199,18 @@ func autoDetectClient(ctx context.Context, cfg *config.Config, modelID string) (
 	return createClientForProvider(ctx, cfg, provider, modelID)
 }
 
+func resolveProviderTimeouts(cfg *config.Config, defaultStreamIdle, defaultHTTP time.Duration) (time.Duration, time.Duration) {
+	streamIdleTimeout := defaultStreamIdle
+	if cfg.API.Retry.StreamIdleTimeout > 0 {
+		streamIdleTimeout = cfg.API.Retry.StreamIdleTimeout
+	}
+	httpTimeout := defaultHTTP
+	if cfg.API.Retry.HTTPTimeout > 0 {
+		httpTimeout = cfg.API.Retry.HTTPTimeout
+	}
+	return streamIdleTimeout, httpTimeout
+}
+
 // newGLMClient creates a GLM (GLM-4.7) client using Anthropic-compatible API.
 func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	// Load API key from environment or config via registry
@@ -233,15 +245,8 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = DefaultGLMBaseURL
 	}
 
-	// GLM/Z.AI needs longer timeouts — server is slower than Anthropic
-	streamIdleTimeout := 180 * time.Second
-	if cfg.API.Retry.StreamIdleTimeout > 0 {
-		streamIdleTimeout = cfg.API.Retry.StreamIdleTimeout
-	}
-	httpTimeout := 5 * time.Minute
-	if cfg.API.Retry.HTTPTimeout > 0 {
-		httpTimeout = cfg.API.Retry.HTTPTimeout
-	}
+	// GLM/Z.AI needs longer timeouts — server is slower than Anthropic.
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 180*time.Second, 5*time.Minute)
 
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
@@ -296,6 +301,9 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = DefaultDeepSeekBaseURL
 	}
 
+	// DeepSeek may have long silent reasoning/tool phases on complex prompts.
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 120*time.Second, 5*time.Minute)
+
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
 		BaseURL:           baseURL,
@@ -305,11 +313,11 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout, // 0 = use default 30s
+		StreamIdleTimeout: streamIdleTimeout,
 		// Retry configuration from config
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
-		HTTPTimeout: cfg.API.Retry.HTTPTimeout,
+		HTTPTimeout: httpTimeout,
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -345,6 +353,10 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = DefaultMiniMaxBaseURL
 	}
 
+	// MiniMax may have long silent reasoning/tool phases.
+	// Use relaxed defaults unless user explicitly configured stricter values.
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 120*time.Second, 5*time.Minute)
+
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
 		BaseURL:           baseURL,
@@ -354,10 +366,10 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout,
+		StreamIdleTimeout: streamIdleTimeout,
 		MaxRetries:        cfg.API.Retry.MaxRetries,
 		RetryDelay:        cfg.API.Retry.RetryDelay,
-		HTTPTimeout:       cfg.API.Retry.HTTPTimeout,
+		HTTPTimeout:       httpTimeout,
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -393,6 +405,9 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = DefaultKimiBaseURL
 	}
 
+	// Kimi may pause longer between chunks on complex tool chains.
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 120*time.Second, 5*time.Minute)
+
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
 		BaseURL:           baseURL,
@@ -402,10 +417,10 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout,
+		StreamIdleTimeout: streamIdleTimeout,
 		MaxRetries:        cfg.API.Retry.MaxRetries,
 		RetryDelay:        cfg.API.Retry.RetryDelay,
-		HTTPTimeout:       cfg.API.Retry.HTTPTimeout,
+		HTTPTimeout:       httpTimeout,
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -445,6 +460,9 @@ func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error
 		baseURL = DefaultAnthropicBaseURL
 	}
 
+	// Anthropic can also produce long silent phases with extended thinking/tools.
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, 120*time.Second, 5*time.Minute)
+
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
 		BaseURL:           baseURL,
@@ -454,11 +472,11 @@ func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error
 		StreamEnabled:     true,
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: cfg.API.Retry.StreamIdleTimeout, // 0 = use default 30s
+		StreamIdleTimeout: streamIdleTimeout,
 		// Retry configuration from config
 		MaxRetries:  cfg.API.Retry.MaxRetries,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
-		HTTPTimeout: cfg.API.Retry.HTTPTimeout,
+		HTTPTimeout: httpTimeout,
 	}
 
 	return NewAnthropicClient(anthropicConfig)

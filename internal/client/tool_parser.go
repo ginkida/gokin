@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"gokin/internal/logging"
 
 	"google.golang.org/genai"
 )
+
+var textToolCallSeq atomic.Uint64
 
 // ToolCallFromText represents a tool call parsed from text output.
 type ToolCallFromText struct {
@@ -166,10 +169,25 @@ func parseToolCallJSON(jsonStr string) *genai.FunctionCall {
 	logging.Debug("parsed tool call from text", "tool", toolName, "args_count", len(tc.Args))
 
 	return &genai.FunctionCall{
-		ID:   fmt.Sprintf("text_call_%s", toolName),
+		ID:   nextTextToolCallID(toolName),
 		Name: toolName,
 		Args: tc.Args,
 	}
+}
+
+func nextTextToolCallID(toolName string) string {
+	seq := textToolCallSeq.Add(1)
+	safeName := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, toolName)
+	safeName = strings.Trim(safeName, "_")
+	if safeName == "" {
+		safeName = "tool"
+	}
+	return fmt.Sprintf("text_call_%s_%d", safeName, seq)
 }
 
 // ToolCallFallbackPrompt returns the system prompt addition that instructs models

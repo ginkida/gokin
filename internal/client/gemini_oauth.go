@@ -710,7 +710,8 @@ func (c *GeminiOAuthClient) processSSEStream(ctx context.Context, body io.ReadCl
 	defer close(localDone)
 
 	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max line size
+	// Large tool payloads can produce long SSE lines; default scanner limit is too small.
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024) // 8MB max line size
 
 	// Channel for scanner results — single goroutine reads all lines.
 	// It will exit when resp.Body is closed (by defer or ctx goroutine above).
@@ -845,7 +846,7 @@ scanLoop:
 			continue
 		}
 
-		if chunk.Text != "" || len(chunk.FunctionCalls) > 0 {
+		if chunk.Text != "" || chunk.Thinking != "" || len(chunk.FunctionCalls) > 0 {
 			contentReceived = true
 		}
 

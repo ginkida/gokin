@@ -30,8 +30,9 @@ const (
 	// maxStreamRetries is the maximum number of retries for stream idle timeouts.
 	maxStreamRetries = 2
 	// modelRoundHardTimeout caps a single model round to prevent zombie requests.
-	// Keep this strict so stalled providers don't block the agent loop indefinitely.
-	modelRoundHardTimeout = 2 * time.Minute
+	// Keep this generous for reasoning-heavy models; SSE idle timeout still protects
+	// against truly stalled streams.
+	modelRoundHardTimeout = 5 * time.Minute
 )
 
 // ResultCompactor interface for compacting tool results.
@@ -416,17 +417,24 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// Get response from model
 		resp, err := e.getModelResponse(ctx, history)
 		if err != nil {
-			// Retry stream idle timeout if no partial content was received
+			// Retry cold stream idle timeouts (no content received at all).
+			// If some content was already received, let caller handle continuation
+			// instead of replaying the same round and wasting tokens.
 			var sitErr *client.ErrStreamIdleTimeout
-			if errors.As(err, &sitErr) && !sitErr.Partial && streamRetries < maxStreamRetries {
+			isStreamIdle := errors.As(err, &sitErr)
+			partialStreamIdle := isStreamIdle && sitErr.Partial
+			if isStreamIdle && !partialStreamIdle && streamRetries < maxStreamRetries {
 				streamRetries++
 				if e.handler != nil && e.handler.OnWarning != nil {
 					e.handler.OnWarning(fmt.Sprintf("Stream stalled, retrying (%d/%d)...", streamRetries, maxStreamRetries))
 				}
 				continue // retry outer loop
 			}
+			if partialStreamIdle {
+				logging.Debug("stream idle timeout after partial response; skipping internal retry")
+			}
 			// Retry transient request errors (timeout, connection) if parent context is still alive
-			if ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
+			if !partialStreamIdle && ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
 				streamRetries++
 				if e.handler != nil && e.handler.OnWarning != nil {
 					e.handler.OnWarning(fmt.Sprintf("Request failed, retrying (%d/%d)...", streamRetries, maxStreamRetries))
@@ -539,9 +547,12 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// Collect the response
 			resp, err = e.collectStreamWithHandler(roundCtx, stream)
 			if err != nil {
-				// Retry stream idle timeout if no partial content was received
+				// Retry cold stream idle timeouts only. Partial idle timeouts are
+				// forwarded so the outer request retry can continue from context.
 				var sitErr *client.ErrStreamIdleTimeout
-				if errors.As(err, &sitErr) && !sitErr.Partial && streamRetries < maxStreamRetries {
+				isStreamIdle := errors.As(err, &sitErr)
+				partialStreamIdle := isStreamIdle && sitErr.Partial
+				if isStreamIdle && !partialStreamIdle && streamRetries < maxStreamRetries {
 					streamRetries++
 					if e.handler != nil && e.handler.OnWarning != nil {
 						e.handler.OnWarning(fmt.Sprintf("Stream stalled after tool results, retrying (%d/%d)...", streamRetries, maxStreamRetries))
@@ -559,7 +570,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						roundCancel()
 						return history, "", err
 					}
-				} else if ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
+				} else if !partialStreamIdle && ctx.Err() == nil && client.IsRetryableError(err) && streamRetries < maxStreamRetries {
 					// Retry transient request errors (timeout, connection) if parent context is still alive
 					streamRetries++
 					if e.handler != nil && e.handler.OnWarning != nil {

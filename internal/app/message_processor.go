@@ -145,7 +145,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	var newHistory []*genai.Content
 	var response string
 	var err error
-	contextTruncated := false // Guard against infinite truncation loop
+	contextTruncated := false  // Guard against infinite truncation loop
+	partialIdleRetryCount := 0 // Cap costly retries when stream already produced partial output
 
 	for attempt := 0; attempt < maxRequestRetries; attempt++ {
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
@@ -193,6 +194,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			continue
 		}
 
+		var sitErr *client.ErrStreamIdleTimeout
+		partialStreamIdle := errors.As(err, &sitErr) && sitErr.Partial
+
 		// If stream stalled mid-response, retry with an explicit continuation hint
 		// so the model resumes instead of restarting from scratch.
 		if client.IsStreamIdleTimeout(err) {
@@ -211,9 +215,18 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			}
 		}
 
+		// Partial stream idle already consumed tokens; limit automatic retries
+		// to one continuation attempt to avoid repeated expensive replays.
+		if partialStreamIdle && partialIdleRetryCount >= 1 {
+			break
+		}
+
 		// Only retry transient errors; stop on last attempt
 		if !isRetryableError(err) || attempt >= maxRequestRetries-1 {
 			break
+		}
+		if partialStreamIdle {
+			partialIdleRetryCount++
 		}
 
 		// Save partial history before retry (preserves tool side effects)
