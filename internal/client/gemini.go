@@ -75,11 +75,8 @@ func NewGeminiClient(ctx context.Context, cfg *config.Config) (Client, error) {
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
 	}
 
-	// Use retry config from config, with defaults
-	maxRetries := cfg.API.Retry.MaxRetries
-	if maxRetries == 0 {
-		maxRetries = config.DefaultMaxRetries
-	}
+	// Request retries are orchestrated at App layer to avoid retry multiplication.
+	maxRetries := 0
 	retryDelay := cfg.API.Retry.RetryDelay
 	if retryDelay == 0 {
 		retryDelay = 1 * time.Second // Default: 1 second initial delay

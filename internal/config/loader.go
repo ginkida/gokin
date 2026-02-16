@@ -208,6 +208,10 @@ func loadFromEnv(cfg *Config) {
 
 // Validate validates the configuration.
 func (c *Config) Validate() error {
+	if err := ValidateRetryConfig(c); err != nil {
+		return err
+	}
+
 	// Check OAuth first
 	if c.API.HasOAuthToken("gemini") {
 		return nil

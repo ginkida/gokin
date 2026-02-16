@@ -103,9 +103,6 @@ func NewAnthropicClient(config AnthropicConfig) (*AnthropicClient, error) {
 	if config.MaxTokens < 1 {
 		return nil, fmt.Errorf("MaxTokens must be positive, got: %d", config.MaxTokens)
 	}
-	if config.MaxRetries == 0 {
-		config.MaxRetries = 10 // Default to 10 retries for transient API errors
-	}
 	if config.MaxRetries < 0 {
 		return nil, fmt.Errorf("MaxRetries cannot be negative, got: %d", config.MaxRetries)
 	}

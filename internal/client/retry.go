@@ -63,17 +63,18 @@ func DefaultStreamRetryPolicy() StreamRetryPolicy {
 
 func normalizeStreamRetryPolicy(policy StreamRetryPolicy) StreamRetryPolicy {
 	def := DefaultStreamRetryPolicy()
+
+	// Backward-compatible defaulting for zero-value policy.
+	// This keeps existing callers that pass StreamRetryPolicy{} working.
+	if policy == (StreamRetryPolicy{}) {
+		return def
+	}
+
 	if policy.MaxRetries < 0 {
 		policy.MaxRetries = 0
 	}
 	if policy.MaxPartialRetries < 0 {
 		policy.MaxPartialRetries = 0
-	}
-	if policy.MaxRetries == 0 {
-		policy.MaxRetries = def.MaxRetries
-	}
-	if policy.MaxPartialRetries == 0 {
-		policy.MaxPartialRetries = def.MaxPartialRetries
 	}
 	if policy.BaseDelay <= 0 {
 		policy.BaseDelay = def.BaseDelay

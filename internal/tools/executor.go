@@ -2,6 +2,9 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -188,6 +191,12 @@ type Executor struct {
 	// Auto-formatter for write/edit operations
 	formatter *Formatter
 
+	// Retry-time side effect deduplication (write/bash tools).
+	sideEffectDedupEnabled bool
+	sideEffectLedgerMu     sync.Mutex
+	sideEffectsByCallID    map[string]ToolResult
+	sideEffectsBySignature map[string]ToolResult
+
 	// Pending background task completion notifications
 	pendingNotifications []string
 	pendingNotifMu       sync.Mutex
@@ -257,18 +266,20 @@ func NewExecutorLazy(registry *LazyRegistry, c client.Client, timeout time.Durat
 // newExecutorInternal creates the executor with any ToolRegistry implementation.
 func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Duration) *Executor {
 	return &Executor{
-		registry:          registry,
-		client:            c,
-		timeout:           timeout,
-		modelRoundTimeout: defaultModelRoundTimeout,
-		handler:           &ExecutionHandler{},
-		fallback:          DefaultFallbackConfig(),
-		safetyValidator:   NewDefaultSafetyValidator(),
-		preFlightChecks:   true,
-		executionContext:  make(map[string]*ExecutionInfo),
-		notificationMgr:   NewNotificationManager(),
-		toolBreakers:      make(map[string]*robustness.CircuitBreaker),
-		redactor:          security.NewSecretRedactor(),
+		registry:               registry,
+		client:                 c,
+		timeout:                timeout,
+		modelRoundTimeout:      defaultModelRoundTimeout,
+		handler:                &ExecutionHandler{},
+		fallback:               DefaultFallbackConfig(),
+		safetyValidator:        NewDefaultSafetyValidator(),
+		preFlightChecks:        true,
+		executionContext:       make(map[string]*ExecutionInfo),
+		notificationMgr:        NewNotificationManager(),
+		toolBreakers:           make(map[string]*robustness.CircuitBreaker),
+		redactor:               security.NewSecretRedactor(),
+		sideEffectsByCallID:    make(map[string]ToolResult),
+		sideEffectsBySignature: make(map[string]ToolResult),
 	}
 }
 
@@ -304,6 +315,22 @@ func (e *Executor) SetModelRoundTimeout(timeout time.Duration) {
 		return
 	}
 	e.modelRoundTimeout = timeout
+}
+
+// SetSideEffectDedup enables/disables deduplication for side-effecting tools.
+// Intended for retry windows to avoid duplicate write/bash effects.
+func (e *Executor) SetSideEffectDedup(enabled bool) {
+	e.sideEffectLedgerMu.Lock()
+	defer e.sideEffectLedgerMu.Unlock()
+	e.sideEffectDedupEnabled = enabled
+}
+
+// ResetSideEffectLedger clears deduplication ledger for a new top-level request.
+func (e *Executor) ResetSideEffectLedger() {
+	e.sideEffectLedgerMu.Lock()
+	defer e.sideEffectLedgerMu.Unlock()
+	e.sideEffectsByCallID = make(map[string]ToolResult)
+	e.sideEffectsBySignature = make(map[string]ToolResult)
 }
 
 // SetSafetyValidator sets the safety validator.
@@ -412,6 +439,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	streamRetries := 0
 	partialStreamRetries := 0
 	retryPolicy := client.DefaultStreamRetryPolicy()
+	// Retries are orchestrated at App/message processor level to avoid retry multiplication.
+	retryPolicy.MaxRetries = 0
+	retryPolicy.MaxPartialRetries = 0
 
 	for i := 0; i < maxIterations; i++ {
 		// Check context cancellation between iterations
@@ -968,6 +998,18 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		return NewErrorResult(fmt.Sprintf("validation error: %s", err))
 	}
 
+	// Retry dedup guard: skip duplicate side-effect calls during retry windows.
+	if deduped, reason, ok := e.lookupDuplicateSideEffect(call); ok {
+		logging.Warn("skipping duplicate side-effect tool call",
+			"tool", call.Name,
+			"call_id", call.ID,
+			"reason", reason)
+		if e.handler != nil && e.handler.OnWarning != nil {
+			e.handler.OnWarning(fmt.Sprintf("Skipped duplicate side-effect tool call '%s' (%s). Reusing previous result.", call.Name, reason))
+		}
+		return deduped
+	}
+
 	// Step 2: Pre-flight safety checks
 	var preFlight *PreFlightCheck
 	if e.preFlightChecks && e.safetyValidator != nil {
@@ -1288,7 +1330,79 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		"duration", duration,
 		"safety_level", execInfo.SafetyLevel)
 
+	// Record side effects for retry deduplication.
+	e.recordSideEffect(call, result)
+
 	return result
+}
+
+func (e *Executor) lookupDuplicateSideEffect(call *genai.FunctionCall) (ToolResult, string, bool) {
+	if call == nil || !isWriteOperation(call.Name) {
+		return ToolResult{}, "", false
+	}
+
+	e.sideEffectLedgerMu.Lock()
+	defer e.sideEffectLedgerMu.Unlock()
+
+	if !e.sideEffectDedupEnabled {
+		return ToolResult{}, "", false
+	}
+
+	if call.ID != "" {
+		if prev, ok := e.sideEffectsByCallID[call.ID]; ok {
+			return prev, "tool_call_id", true
+		}
+	}
+
+	signature := sideEffectSignature(call.Name, call.Args)
+	if signature != "" {
+		if prev, ok := e.sideEffectsBySignature[signature]; ok {
+			return prev, "fingerprint", true
+		}
+	}
+
+	return ToolResult{}, "", false
+}
+
+func (e *Executor) recordSideEffect(call *genai.FunctionCall, result ToolResult) {
+	if call == nil || !isWriteOperation(call.Name) {
+		return
+	}
+
+	e.sideEffectLedgerMu.Lock()
+	defer e.sideEffectLedgerMu.Unlock()
+
+	// Store result as-is: failed side-effecting calls can still have partial effects.
+	if call.ID != "" {
+		e.sideEffectsByCallID[call.ID] = result
+	}
+	if signature := sideEffectSignature(call.Name, call.Args); signature != "" {
+		e.sideEffectsBySignature[signature] = result
+	}
+}
+
+func sideEffectSignature(toolName string, args map[string]any) string {
+	if toolName == "" {
+		return ""
+	}
+
+	normalized := make(map[string]any, len(args))
+	for k, v := range args {
+		key := strings.ToLower(strings.TrimSpace(k))
+		switch key {
+		case "timestamp", "ts", "nonce", "request_id":
+			continue
+		default:
+			normalized[k] = v
+		}
+	}
+
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(toolName + "|" + string(encoded)))
+	return hex.EncodeToString(sum[:])
 }
 
 // buildResponseParts returns Parts from a response.

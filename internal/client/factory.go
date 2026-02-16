@@ -268,8 +268,8 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
 		StreamIdleTimeout: streamIdleTimeout,
-		// Retry configuration from config
-		MaxRetries:  cfg.API.Retry.MaxRetries,
+		// Request retries are orchestrated at App layer.
+		MaxRetries:  0,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 		HTTPTimeout: httpTimeout,
 		Provider:    "glm",
@@ -325,8 +325,8 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
 		StreamIdleTimeout: streamIdleTimeout,
-		// Retry configuration from config
-		MaxRetries:  cfg.API.Retry.MaxRetries,
+		// Request retries are orchestrated at App layer.
+		MaxRetries:  0,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 		HTTPTimeout: httpTimeout,
 		Provider:    "deepseek",
@@ -379,7 +379,7 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
 		StreamIdleTimeout: streamIdleTimeout,
-		MaxRetries:        cfg.API.Retry.MaxRetries,
+		MaxRetries:        0, // Request retries are orchestrated at App layer.
 		RetryDelay:        cfg.API.Retry.RetryDelay,
 		HTTPTimeout:       httpTimeout,
 		Provider:          "minimax",
@@ -431,7 +431,7 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
 		StreamIdleTimeout: streamIdleTimeout,
-		MaxRetries:        cfg.API.Retry.MaxRetries,
+		MaxRetries:        0, // Request retries are orchestrated at App layer.
 		RetryDelay:        cfg.API.Retry.RetryDelay,
 		HTTPTimeout:       httpTimeout,
 		Provider:          "kimi",
@@ -487,8 +487,8 @@ func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
 		StreamIdleTimeout: streamIdleTimeout,
-		// Retry configuration from config
-		MaxRetries:  cfg.API.Retry.MaxRetries,
+		// Request retries are orchestrated at App layer.
+		MaxRetries:  0,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 		HTTPTimeout: httpTimeout,
 		Provider:    "anthropic",
@@ -528,7 +528,7 @@ func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 		Temperature: cfg.Model.Temperature,
 		MaxTokens:   cfg.Model.MaxOutputTokens,
 		HTTPTimeout: httpTimeout,
-		MaxRetries:  cfg.API.Retry.MaxRetries,
+		MaxRetries:  0, // Request retries are orchestrated at App layer.
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 	}
 

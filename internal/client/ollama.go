@@ -74,8 +74,8 @@ func NewOllamaClient(config OllamaConfig) (*OllamaClient, error) {
 	if config.HTTPTimeout == 0 {
 		config.HTTPTimeout = 120 * time.Second
 	}
-	if config.MaxRetries == 0 {
-		config.MaxRetries = 10
+	if config.MaxRetries < 0 {
+		return nil, fmt.Errorf("MaxRetries cannot be negative, got: %d", config.MaxRetries)
 	}
 	if config.RetryDelay == 0 {
 		config.RetryDelay = 1 * time.Second

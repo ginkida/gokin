@@ -71,6 +71,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		a.mu.Lock()
 		a.processing = false
 		a.mu.Unlock()
+		if a.executor != nil {
+			a.executor.SetSideEffectDedup(false)
+		}
 
 		// Check for pending message and process it
 		a.pendingMu.Lock()
@@ -96,6 +99,12 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.diffBatchDecision = ui.DiffPending
 	currentMsgCount := a.messageCount
 	a.mu.Unlock()
+
+	// New top-level request: clear side-effect ledger.
+	if a.executor != nil {
+		a.executor.ResetSideEffectLedger()
+		a.executor.SetSideEffectDedup(false)
+	}
 
 	// Reset stale in_progress todos from previous turn.
 	// The model will re-set them to in_progress as it works.
@@ -199,6 +208,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		// Context too long — emergency truncate and retry (once only)
 		if client.IsContextTooLongError(err) && a.contextManager != nil && !contextTruncated {
 			contextTruncated = true
+			if a.executor != nil {
+				a.executor.SetSideEffectDedup(true)
+			}
 			removed := a.contextManager.EmergencyTruncate()
 			a.safeSendToProgram(ui.StreamTextMsg(
 				fmt.Sprintf("\n⚠️ Context window exceeded — emergency truncated %d messages. Retrying...\n", removed)))
@@ -215,6 +227,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		)
 		if !decision.ShouldRetry {
 			break
+		}
+		if a.executor != nil {
+			a.executor.SetSideEffectDedup(true)
 		}
 
 		if decision.Partial {

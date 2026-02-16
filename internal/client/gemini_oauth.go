@@ -58,10 +58,8 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 		return nil, fmt.Errorf("no OAuth token configured")
 	}
 
-	maxRetries := cfg.API.Retry.MaxRetries
-	if maxRetries == 0 {
-		maxRetries = config.DefaultMaxRetries
-	}
+	// Request retries are orchestrated at App layer to avoid retry multiplication.
+	maxRetries := 0
 	retryDelay := cfg.API.Retry.RetryDelay
 	if retryDelay == 0 {
 		retryDelay = 1 * time.Second

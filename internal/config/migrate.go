@@ -43,6 +43,10 @@ func DetectProvider(modelName string) string {
 
 // NormalizeConfig ensures configuration is consistent and valid.
 func NormalizeConfig(cfg *Config) error {
+	if err := ValidateRetryConfig(cfg); err != nil {
+		return err
+	}
+
 	// Ensure provider is set
 	if cfg.Model.Provider == "" {
 		cfg.Model.Provider = DetectProvider(cfg.Model.Name)
