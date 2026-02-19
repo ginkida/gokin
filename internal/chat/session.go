@@ -149,6 +149,8 @@ func (s *Session) SetHistory(history []*genai.Content) {
 	}
 
 	s.History = history
+	s.tokenCounts = make([]int, 0)
+	s.totalTokens = 0
 	s.version++
 	s.notifyChange(oldCount)
 }
@@ -174,6 +176,8 @@ func (s *Session) SetHistoryIfVersion(history []*genai.Content, expectedVersion 
 	}
 
 	s.History = history
+	s.tokenCounts = make([]int, 0)
+	s.totalTokens = 0
 	s.version++
 	s.notifyChange(oldCount)
 	return true
@@ -209,9 +213,14 @@ func (s *Session) GetHistory() []*genai.Content {
 // Clear clears the session history.
 func (s *Session) Clear() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
+	oldCount := len(s.History)
 	s.History = make([]*genai.Content, 0)
+	s.tokenCounts = make([]int, 0)
+	s.totalTokens = 0
+	s.version++
+
+	s.notifyChange(oldCount) // unlocks mu
 }
 
 // MessageCount returns the number of messages in the session.
@@ -321,6 +330,7 @@ func (s *Session) ReplaceWithSummary(upToIndex int, summary *genai.Content, summ
 	for _, t := range remainingTokens {
 		s.totalTokens += t
 	}
+	s.version++
 }
 
 // GetTokenCounts returns token counts per message.
@@ -435,13 +445,14 @@ func (s *Session) Fork(name string) *Session {
 	copy(tokenCountsCopy, s.tokenCounts)
 
 	branch := &Session{
-		ID:          generateSessionID() + "-" + name,
-		StartTime:   time.Now(),
-		WorkDir:     s.WorkDir,
-		History:     historyCopy,
-		tokenCounts: tokenCountsCopy,
-		totalTokens: s.totalTokens,
-		scratchpad:  s.scratchpad,
+		ID:                generateSessionID() + "-" + name,
+		StartTime:         time.Now(),
+		WorkDir:           s.WorkDir,
+		History:           historyCopy,
+		tokenCounts:       tokenCountsCopy,
+		totalTokens:       s.totalTokens,
+		scratchpad:        s.scratchpad,
+		SystemInstruction: s.SystemInstruction,
 	}
 
 	s.Branches[name] = branch

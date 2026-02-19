@@ -30,6 +30,11 @@ type ErrorStore struct {
 	entries   map[string]*ErrorEntry // ID -> Entry
 	byType    map[string][]string    // ErrorType -> []EntryID
 	mu        sync.RWMutex
+
+	// Debounced write support
+	dirty     bool
+	saveMu    sync.Mutex
+	saveTimer *time.Timer
 }
 
 // NewErrorStore creates a new error store.
@@ -100,6 +105,61 @@ func (es *ErrorStore) save() error {
 	return os.WriteFile(es.storagePath(), data, 0644)
 }
 
+// scheduleSave schedules a debounced save operation.
+func (es *ErrorStore) scheduleSave() {
+	es.saveMu.Lock()
+	defer es.saveMu.Unlock()
+
+	if es.saveTimer != nil {
+		es.saveTimer.Stop()
+	}
+
+	es.saveTimer = time.AfterFunc(2*time.Second, func() {
+		es.mu.Lock()
+		if !es.dirty {
+			es.mu.Unlock()
+			return
+		}
+		// Snapshot entries under lock
+		entries := make([]*ErrorEntry, 0, len(es.entries))
+		for _, entry := range es.entries {
+			entries = append(entries, entry)
+		}
+		es.dirty = false
+		es.mu.Unlock()
+
+		// Save outside lock
+		data, err := json.MarshalIndent(entries, "", "  ")
+		if err != nil {
+			return
+		}
+		os.WriteFile(es.storagePath(), data, 0644)
+	})
+}
+
+// Flush forces an immediate save of any pending changes.
+func (es *ErrorStore) Flush() error {
+	es.saveMu.Lock()
+	if es.saveTimer != nil {
+		es.saveTimer.Stop()
+		es.saveTimer = nil
+	}
+	es.saveMu.Unlock()
+
+	es.mu.Lock()
+	defer es.mu.Unlock()
+
+	if !es.dirty {
+		return nil
+	}
+
+	err := es.save()
+	if err == nil {
+		es.dirty = false
+	}
+	return err
+}
+
 // LearnError stores a new error pattern with its solution.
 func (es *ErrorStore) LearnError(errorType, pattern, solution string, tags []string) error {
 	es.mu.Lock()
@@ -112,7 +172,9 @@ func (es *ErrorStore) LearnError(errorType, pattern, solution string, tags []str
 			entry.Solution = solution
 			entry.Tags = tags
 			entry.LastUsed = time.Now()
-			return es.save()
+			es.dirty = true
+			es.scheduleSave()
+			return nil
 		}
 	}
 
@@ -132,7 +194,9 @@ func (es *ErrorStore) LearnError(errorType, pattern, solution string, tags []str
 	es.entries[entry.ID] = entry
 	es.byType[errorType] = append(es.byType[errorType], entry.ID)
 
-	return es.save()
+	es.dirty = true
+	es.scheduleSave()
+	return nil
 }
 
 // GetLearnedErrors finds error entries matching the given error message.
@@ -204,7 +268,9 @@ func (es *ErrorStore) RecordSuccess(entryID string) error {
 	entry.SuccessRate = entry.SuccessRate*(1-alpha) + 1.0*alpha
 	entry.LastUsed = time.Now()
 
-	return es.save()
+	es.dirty = true
+	es.scheduleSave()
+	return nil
 }
 
 // RecordFailure records that a learned solution did not work.
@@ -223,7 +289,9 @@ func (es *ErrorStore) RecordFailure(entryID string) error {
 	entry.SuccessRate = entry.SuccessRate * (1 - alpha)
 	entry.LastUsed = time.Now()
 
-	return es.save()
+	es.dirty = true
+	es.scheduleSave()
+	return nil
 }
 
 // GetByType returns all error entries of a specific type.
@@ -254,7 +322,9 @@ func (es *ErrorStore) Clear() error {
 	es.entries = make(map[string]*ErrorEntry)
 	es.byType = make(map[string][]string)
 
-	return es.save()
+	es.dirty = true
+	es.scheduleSave()
+	return nil
 }
 
 // Count returns the number of learned error patterns.
@@ -292,5 +362,9 @@ func (es *ErrorStore) PruneOldEntries(maxAge time.Duration) error {
 		}
 	}
 
-	return es.save()
+	if len(toDelete) > 0 {
+		es.dirty = true
+		es.scheduleSave()
+	}
+	return nil
 }

@@ -173,10 +173,22 @@ func (es *ExampleStore) LearnFromSuccessWithTools(taskType, prompt, agentType, o
 	// Limit examples per type to prevent unbounded growth
 	es.pruneOldExamples(taskType, 50) // Keep top 50 per type
 
-	// Save asynchronously
+	// Snapshot data under lock for async save (map is not safe for concurrent read/write)
+	data, err := json.MarshalIndent(es.examples, "", "  ")
+	if err != nil {
+		return nil
+	}
+	path := es.storagePath()
+
+	// Save asynchronously — write pre-marshalled data outside lock
 	go func() {
-		if err := es.save(); err != nil {
-			logging.Debug("failed to save example store", "error", err)
+		dir := filepath.Dir(path)
+		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+			logging.Debug("failed to create example store dir", "error", mkErr)
+			return
+		}
+		if wErr := os.WriteFile(path, data, 0644); wErr != nil {
+			logging.Debug("failed to save example store", "error", wErr)
 		}
 	}()
 
@@ -396,10 +408,21 @@ func (es *ExampleStore) RecordFeedback(exampleID string, positive bool) {
 		ex.SuccessScore = ex.SuccessScore * (1.0 - adjustment)
 	}
 
-	// Save asynchronously
+	// Snapshot data under lock for async save
+	data, err := json.MarshalIndent(es.examples, "", "  ")
+	if err != nil {
+		return
+	}
+	path := es.storagePath()
+
+	// Save asynchronously — write pre-marshalled data outside lock
 	go func() {
-		if err := es.save(); err != nil {
-			logging.Debug("failed to save example store", "error", err)
+		dir := filepath.Dir(path)
+		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+			return
+		}
+		if wErr := os.WriteFile(path, data, 0644); wErr != nil {
+			logging.Debug("failed to save example store", "error", wErr)
 		}
 	}()
 }

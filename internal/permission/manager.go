@@ -78,8 +78,14 @@ func (m *Manager) cacheKey(toolName string, args map[string]any) string {
 // Check checks if a tool is allowed to execute.
 // Returns a Response indicating whether execution is allowed.
 func (m *Manager) Check(ctx context.Context, toolName string, args map[string]any) (*Response, error) {
+	// Snapshot config fields under lock to avoid races with SetEnabled/SetRules
+	m.mu.RLock()
+	enabled := m.enabled
+	rules := m.rules
+	m.mu.RUnlock()
+
 	// If permissions are disabled, allow everything
-	if !m.enabled {
+	if !enabled {
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 	}
 
@@ -101,7 +107,7 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 	}
 
 	// Get policy from rules
-	policy := m.rules.GetPolicy(toolName)
+	policy := rules.GetPolicy(toolName)
 
 	switch policy {
 	case LevelAllow:
@@ -236,6 +242,8 @@ func (m *Manager) ClearSession() {
 
 // IsEnabled returns whether the permission system is enabled.
 func (m *Manager) IsEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.enabled
 }
 
@@ -248,6 +256,8 @@ func (m *Manager) SetEnabled(enabled bool) {
 
 // GetRules returns the current rules.
 func (m *Manager) GetRules() *Rules {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.rules
 }
 

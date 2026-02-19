@@ -48,6 +48,15 @@ func (v *PathValidator) Validate(path string) (string, error) {
 		return "", fmt.Errorf("failed to resolve absolute path: %w", err)
 	}
 
+	// Check for symlink if not allowed (check ORIGINAL path before resolution,
+	// because EvalSymlinks resolves all symlinks and checkSymlink would find
+	// nothing on the resolved path)
+	if !v.allowSymlinks {
+		if err := v.checkSymlink(absPath); err != nil {
+			return "", err
+		}
+	}
+
 	// Use EvalSymlinks for atomic symlink resolution (prevents TOCTOU race)
 	// This resolves all symlinks in the path atomically
 	resolvedPath, err := filepath.EvalSymlinks(absPath)
@@ -69,13 +78,6 @@ func (v *PathValidator) Validate(path string) (string, error) {
 			}
 		} else {
 			return "", fmt.Errorf("failed to resolve symlinks: %w", err)
-		}
-	}
-
-	// Check for symlink if not allowed (additional check after resolution)
-	if !v.allowSymlinks {
-		if err := v.checkSymlink(resolvedPath); err != nil {
-			return "", err
 		}
 	}
 

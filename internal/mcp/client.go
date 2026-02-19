@@ -183,17 +183,84 @@ func (c *Client) reconnect() bool {
 	// Close old transport (ignore errors)
 	_ = oldTransport.Close()
 
-	// Re-initialize
-	initCtx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
-	defer cancel()
-
-	if err := c.Initialize(initCtx); err != nil {
+	// Re-initialize using direct transport I/O.
+	// We must NOT use Initialize() here because it calls request() which waits
+	// for receiveLoop to deliver the response via handleMessage(). But we ARE
+	// receiveLoop — so that would deadlock.
+	if err := c.initializeDirect(); err != nil {
 		logging.Warn("MCP re-initialize failed", "error", err, "consecutive_fails", c.consecutiveFails)
 		return true // Keep trying (consecutiveFails will be checked next iteration)
 	}
 
 	logging.Info("MCP reconnected successfully", "server", c.serverName)
 	return true
+}
+
+// initializeDirect performs MCP initialization using direct transport I/O.
+// Called from reconnect() which runs inside receiveLoop — the normal
+// Initialize() → request() path would deadlock because request() waits for
+// receiveLoop to route the response, but receiveLoop is the caller.
+func (c *Client) initializeDirect() error {
+	params := &InitializeParams{
+		ProtocolVersion: ProtocolVersion,
+		ClientInfo: &ClientInfo{
+			Name:    "gokin",
+			Version: "1.0.0",
+		},
+		Capabilities: map[string]any{},
+	}
+
+	id := atomic.AddInt64(&c.nextID, 1)
+	msg := &JSONRPCMessage{
+		ID:     id,
+		Method: MethodInitialize,
+		Params: params,
+	}
+
+	if err := c.transport.Send(msg); err != nil {
+		return fmt.Errorf("initialize send failed: %w", err)
+	}
+
+	// Read response directly from transport.
+	// We're in receiveLoop, so we're the sole reader — no concurrent access.
+	// The server was just started, so the initialize response should arrive quickly.
+	resp, err := c.transport.Receive()
+	if err != nil {
+		return fmt.Errorf("initialize receive failed: %w", err)
+	}
+
+	if resp.Error != nil {
+		return resp.Error
+	}
+
+	// Parse result
+	resultBytes, err := json.Marshal(resp.Result)
+	if err != nil {
+		return fmt.Errorf("failed to marshal initialize result: %w", err)
+	}
+
+	var result InitializeResult
+	if err := json.Unmarshal(resultBytes, &result); err != nil {
+		return fmt.Errorf("failed to parse initialize result: %w", err)
+	}
+
+	// Send initialized notification
+	if err := c.notify(MethodInitialized, nil); err != nil {
+		return fmt.Errorf("failed to send initialized notification: %w", err)
+	}
+
+	// Update state under lock
+	c.mu.Lock()
+	c.serverInfo = result.ServerInfo
+	c.initialized = true
+	c.mu.Unlock()
+
+	logging.Info("MCP server re-initialized",
+		"name", c.serverName,
+		"server", result.ServerInfo.Name,
+		"version", result.ServerInfo.Version)
+
+	return nil
 }
 
 // handleMessage routes an incoming message to the appropriate handler.

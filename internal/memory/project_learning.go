@@ -100,11 +100,18 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 				pl.mu.Unlock()
 				return
 			}
-			err := pl.save()
-			if err == nil {
-				pl.dirty = false
+			// Snapshot data under lock
+			pl.data.LastUpdated = time.Now()
+			data, err := yaml.Marshal(pl.data)
+			if err != nil {
+				pl.mu.Unlock()
+				return
 			}
+			pl.dirty = false
 			pl.mu.Unlock()
+
+			// Write outside lock — disk I/O no longer blocks readers/writers
+			os.WriteFile(pl.path, data, 0644)
 		})
 	}
 

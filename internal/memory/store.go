@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"gokin/internal/logging"
 )
 
 // Store manages persistent memory storage.
@@ -311,31 +310,35 @@ func (s *Store) Remove(idOrKey string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Try as ID first
-	if entry, ok := s.entries[idOrKey]; ok {
-		delete(s.entries, idOrKey)
-		if entry.Key != "" {
-			delete(s.byKey, entry.Key)
+	// Resolve key to ID if needed (avoids recursive Lock which would deadlock)
+	actualID := idOrKey
+	if _, ok := s.entries[idOrKey]; !ok {
+		if _, ok := s.globalEntries[idOrKey]; !ok {
+			if id, ok := s.byKey[idOrKey]; ok {
+				actualID = id
+			} else {
+				return false
+			}
 		}
-		if err := s.save(); err != nil {
-			logging.Warn("failed to persist memory store", "error", err)
-		}
-		return true
-	}
-	if entry, ok := s.globalEntries[idOrKey]; ok {
-		delete(s.globalEntries, idOrKey)
-		if entry.Key != "" {
-			delete(s.byKey, entry.Key)
-		}
-		if err := s.save(); err != nil {
-			logging.Warn("failed to persist memory store", "error", err)
-		}
-		return true
 	}
 
-	// Try as key
-	if id, ok := s.byKey[idOrKey]; ok {
-		return s.Remove(id)
+	if entry, ok := s.entries[actualID]; ok {
+		delete(s.entries, actualID)
+		if entry.Key != "" {
+			delete(s.byKey, entry.Key)
+		}
+		s.dirty = true
+		s.scheduleSave()
+		return true
+	}
+	if entry, ok := s.globalEntries[actualID]; ok {
+		delete(s.globalEntries, actualID)
+		if entry.Key != "" {
+			delete(s.byKey, entry.Key)
+		}
+		s.dirty = true
+		s.scheduleSave()
+		return true
 	}
 
 	return false
@@ -476,8 +479,11 @@ func (s *Store) Clear() error {
 	defer s.mu.Unlock()
 
 	s.entries = make(map[string]*Entry)
+	s.globalEntries = make(map[string]*Entry)
 	s.byKey = make(map[string]string)
-	return s.save()
+	s.dirty = true
+	s.scheduleSave()
+	return nil
 }
 
 // storagePath returns the path to the memory file for the current project.
@@ -622,11 +628,23 @@ func (s *Store) scheduleSave() {
 			s.mu.Unlock()
 			return
 		}
-		err := s.save()
-		if err == nil {
-			s.dirty = false
+		// Snapshot entry lists under lock
+		projectEntries := make([]*Entry, 0)
+		for _, entry := range s.entries {
+			if entry.Type == MemoryProject {
+				projectEntries = append(projectEntries, entry)
+			}
 		}
+		globalEntries := make([]*Entry, 0, len(s.globalEntries))
+		for _, entry := range s.globalEntries {
+			globalEntries = append(globalEntries, entry)
+		}
+		s.dirty = false
 		s.mu.Unlock()
+
+		// Save outside lock — disk I/O no longer blocks readers/writers
+		s.saveFile(s.storagePath(), projectEntries)
+		s.saveFile(s.globalStoragePath(), globalEntries)
 	})
 }
 

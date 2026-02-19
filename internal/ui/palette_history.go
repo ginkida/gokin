@@ -204,28 +204,29 @@ func (ch *CommandHistory) Flush() error {
 // save saves the history to disk.
 func (ch *CommandHistory) save() error {
 	ch.mu.RLock()
-	defer ch.mu.RUnlock()
-
-	if ch.filePath == "" {
+	filePath := ch.filePath
+	if filePath == "" {
+		ch.mu.RUnlock()
 		return nil
 	}
 
-	// Ensure directory exists
-	dir := filepath.Dir(ch.filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	// Convert to slice
+	// Snapshot entries under lock
 	entries := make([]*HistoryEntry, 0, len(ch.entries))
 	for _, e := range ch.entries {
 		entries = append(entries, e)
 	}
+	ch.mu.RUnlock()
 
+	// Marshal and write outside lock — disk I/O no longer blocks readers/writers
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(ch.filePath, data, 0644)
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	return os.WriteFile(filePath, data, 0644)
 }
