@@ -10,6 +10,7 @@ import (
 
 	"gokin/internal/client"
 	"gokin/internal/logging"
+	"gokin/internal/tools"
 )
 
 // SearchAlgorithm defines the algorithm used for tree search.
@@ -68,6 +69,24 @@ func DefaultTreePlannerConfig() *TreePlannerConfig {
 		ProgressWeight:    0.3,
 		ExplorationC:      1.414, // sqrt(2) - standard UCB1 constant
 		UseLLMExpansion:   true,
+	}
+}
+
+// ApplyThoroughness adjusts tree planner config based on thoroughness level.
+func (tp *TreePlanner) ApplyThoroughness(t tools.Thoroughness) {
+	switch t {
+	case tools.ThoroughnessQuick:
+		tp.config.BeamWidth = 3
+		tp.config.MCTSIterations = 50
+		tp.config.MaxTreeDepth = 5
+		tp.config.MaxReplans = 1
+		tp.config.PlanningTimeout = 30 * time.Second
+	case tools.ThoroughnessThorough:
+		tp.config.BeamWidth = 7
+		tp.config.MCTSIterations = 200
+		tp.config.MaxTreeDepth = 15
+		tp.config.MaxReplans = 5
+		tp.config.PlanningTimeout = 120 * time.Second
 	}
 }
 

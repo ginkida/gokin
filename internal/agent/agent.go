@@ -22,9 +22,8 @@ import (
 )
 
 const (
-	// MaxHistorySize is the maximum number of messages in history before forced compaction.
-	// This prevents unbounded memory growth during long sessions.
-	MaxHistorySize = 200
+	// DefaultMaxHistorySize is the default maximum number of messages in history before forced compaction.
+	DefaultMaxHistorySize = 200
 
 	// MaxTurnLimit is the absolute maximum number of turns an agent can take.
 	// This prevents infinite loops even if mental loop detection fails.
@@ -61,6 +60,14 @@ type Agent struct {
 	callHistory    map[string]int // Map of tool_name:arguments -> count
 	callHistoryMu  sync.Mutex     // Protects callHistory map
 	loopIntervened bool           // Flag to indicate if loop intervention occurred
+	loopThreshold  int            // Broad loop threshold (default: 8, quick: 4, thorough: 15)
+
+	// Context summarization settings (adjusted by thoroughness)
+	pruneProtectChars  int // Chars protected from pruning (default: 120000)
+	summarizeProtect   int // Recent messages protected during summarization (default: 4)
+	summarizeMinMsgs   int // Minimum messages before summarization kicks in (default: 6)
+	pruneMinOutputSize int // Minimum tool output size to consider for pruning (default: 200)
+	maxHistorySize     int // Max messages before forced compaction (default: 200)
 
 	// Project context injection for sub-agents
 	projectContext string            // Injected project guidelines/instructions
@@ -159,10 +166,16 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		history:      make([]*genai.Content, 0),
 		status:       AgentStatusPending,
 		maxTurns:     maxTurns,
-		callHistory:      make(map[string]int),
-		ctxCfg:          ctxCfg,
-		recoveryExecutor: NewRecoveryExecutor(2),
-		autoFixAttempts:  make(map[string]int),
+		loopThreshold:      8,
+		pruneProtectChars:  120000,
+		summarizeProtect:   4,
+		summarizeMinMsgs:   6,
+		pruneMinOutputSize: 200,
+		maxHistorySize:     DefaultMaxHistorySize,
+		callHistory:        make(map[string]int),
+		ctxCfg:             ctxCfg,
+		recoveryExecutor:   NewRecoveryExecutor(2),
+		autoFixAttempts:    make(map[string]int),
 	}
 
 	// Wire up RequestTool tool if it exists in the registry
@@ -255,21 +268,27 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	}
 
 	agent := &Agent{
-		ID:               id,
-		Type:             AgentType(dynType.Name), // Use dynamic type name
-		Model:            model,
-		client:           agentClient,
-		registry:         filteredRegistry,
-		baseRegistry:     baseRegistry,
-		permissions:      permManager,
-		timeout:          2 * time.Minute,
-		history:          make([]*genai.Content, 0),
-		status:           AgentStatusPending,
-		maxTurns:         maxTurns,
-		callHistory:      make(map[string]int),
-		ctxCfg:           ctxCfg,
-		recoveryExecutor: NewRecoveryExecutor(2),
-		autoFixAttempts:  make(map[string]int),
+		ID:                 id,
+		Type:               AgentType(dynType.Name), // Use dynamic type name
+		Model:              model,
+		client:             agentClient,
+		registry:           filteredRegistry,
+		baseRegistry:       baseRegistry,
+		permissions:        permManager,
+		timeout:            2 * time.Minute,
+		history:            make([]*genai.Content, 0),
+		status:             AgentStatusPending,
+		maxTurns:           maxTurns,
+		loopThreshold:      8,
+		pruneProtectChars:  120000,
+		summarizeProtect:   4,
+		summarizeMinMsgs:   6,
+		pruneMinOutputSize: 200,
+		maxHistorySize:     DefaultMaxHistorySize,
+		callHistory:        make(map[string]int),
+		ctxCfg:             ctxCfg,
+		recoveryExecutor:   NewRecoveryExecutor(2),
+		autoFixAttempts:    make(map[string]int),
 		// Store custom prompt for dynamic type
 		projectContext: dynType.SystemPrompt,
 	}
@@ -360,7 +379,8 @@ func (a *Agent) SetThoroughness(t tools.Thoroughness) {
 }
 
 // ApplyThoroughness sets thoroughness, adjusts maxTurns (if still at default),
-// and sets per-agent timeout based on type and thoroughness level.
+// sets per-agent timeout, loop detection threshold, and tool result compaction
+// based on type and thoroughness level.
 func (a *Agent) ApplyThoroughness(t tools.Thoroughness, defaultMaxTurns int) {
 	a.thoroughness = t
 	canOverrideMaxTurns := a.maxTurns == defaultMaxTurns
@@ -406,6 +426,76 @@ func (a *Agent) ApplyThoroughness(t tools.Thoroughness, defaultMaxTurns int) {
 		case tools.ThoroughnessThorough:
 			a.timeout = 10 * time.Minute
 		}
+	}
+
+	// Adjust loop detection threshold per thoroughness
+	switch t {
+	case tools.ThoroughnessQuick:
+		a.loopThreshold = 4
+	case tools.ThoroughnessThorough:
+		a.loopThreshold = 15
+	default:
+		a.loopThreshold = 8
+	}
+
+	// Adjust tool result compaction per thoroughness
+	if a.compactor != nil {
+		switch t {
+		case tools.ThoroughnessQuick:
+			a.compactor.SetMaxChars(10000)
+		case tools.ThoroughnessThorough:
+			a.compactor.SetMaxChars(50000)
+		}
+	}
+
+	// Adjust tree planner settings per thoroughness
+	if a.treePlanner != nil {
+		a.treePlanner.ApplyThoroughness(t)
+	}
+
+	// Adjust delegation settings per thoroughness
+	if a.delegation != nil {
+		a.delegation.ApplyThoroughness(t)
+	}
+
+	// Adjust context summarization settings per thoroughness
+	a.applyContextThoroughness(t)
+}
+
+// applyContextThoroughness adjusts context summarization, history limits,
+// recovery attempts, checkpoint interval, and compactor head/tail lines.
+func (a *Agent) applyContextThoroughness(t tools.Thoroughness) {
+	switch t {
+	case tools.ThoroughnessQuick:
+		a.pruneProtectChars = 60000
+		a.summarizeProtect = 2
+		a.summarizeMinMsgs = 4
+		a.pruneMinOutputSize = 300
+		a.maxHistorySize = 100
+		a.recoveryExecutor = NewRecoveryExecutor(1)
+		a.checkpointInterval = 10
+		if a.compactor != nil {
+			a.compactor.SetHeadTailLines(5, 2)
+		}
+	case tools.ThoroughnessThorough:
+		a.pruneProtectChars = 200000
+		a.summarizeProtect = 6
+		a.summarizeMinMsgs = 8
+		a.pruneMinOutputSize = 100
+		a.maxHistorySize = 300
+		a.recoveryExecutor = NewRecoveryExecutor(3)
+		a.checkpointInterval = 3
+		if a.compactor != nil {
+			a.compactor.SetHeadTailLines(15, 10)
+		}
+	default:
+		a.pruneProtectChars = 120000
+		a.summarizeProtect = 4
+		a.summarizeMinMsgs = 6
+		a.pruneMinOutputSize = 200
+		a.maxHistorySize = DefaultMaxHistorySize
+		a.recoveryExecutor = NewRecoveryExecutor(2)
+		a.checkpointInterval = 5
 	}
 }
 
@@ -460,10 +550,14 @@ func (a *Agent) SetStore(store *AgentStore) {
 	a.store = store
 }
 
-// EnableAutoCheckpoint enables automatic checkpointing every N turns.
+// EnableAutoCheckpoint enables automatic checkpointing.
+// If interval > 0, sets the checkpoint interval explicitly.
+// If interval <= 0, uses the existing interval (set by ApplyThoroughness) or defaults to 5.
 func (a *Agent) EnableAutoCheckpoint(interval int) {
 	a.autoCheckpoint = true
-	a.checkpointInterval = interval
+	if interval > 0 {
+		a.checkpointInterval = interval
+	}
 	if a.checkpointInterval <= 0 {
 		a.checkpointInterval = 5 // Default: every 5 turns
 	}
@@ -1341,6 +1435,40 @@ func (a *Agent) buildOutputStyleSection() string {
 }
 
 func (a *Agent) buildGeneralPrompt() string {
+	switch a.thoroughness {
+	case tools.ThoroughnessQuick:
+		return a.buildGeneralPromptQuick()
+	case tools.ThoroughnessThorough:
+		return a.buildGeneralPromptThorough()
+	default:
+		return a.buildGeneralPromptNormal()
+	}
+}
+
+func (a *Agent) buildGeneralPromptQuick() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                    GENERAL AGENT (QUICK MODE)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Complete the task as fast as possible with minimal overhead.
+
+RULES:
+- Skip deep exploration. Read only the files you need to edit.
+- Make the change directly. No detailed planning.
+- Brief summary only — no Verification or Recommendations sections.
+
+RESPONSE FORMAT:
+## Changes Made
+- **file.go:N**: [What changed]
+
+## Summary
+[1-2 sentences]
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
+func (a *Agent) buildGeneralPromptNormal() string {
 	return `═══════════════════════════════════════════════════════════════════════
                          GENERAL AGENT
 ═══════════════════════════════════════════════════════════════════════
@@ -1380,7 +1508,98 @@ KEY RULES:
 `
 }
 
+func (a *Agent) buildGeneralPromptThorough() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                  GENERAL AGENT (THOROUGH MODE)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Complete the task with comprehensive analysis and verification.
+
+RULES:
+- Read surrounding code to understand context before editing.
+- Verify assumptions by reading implementations, not just interfaces.
+- Check for related files that need consistent changes (tests, configs, docs).
+- Consider edge cases, error handling, and concurrency safety.
+- Run verification commands (build, vet, tests) after making changes.
+
+APPROACH:
+1. Explore codebase to understand existing patterns
+2. Identify all files that need modification (including tests)
+3. Plan changes to maintain consistency
+4. Execute changes step by step
+5. Verify with build/vet/tests
+6. Summarize with full detail
+
+RESPONSE FORMAT:
+## Task Summary
+[What was requested and why]
+
+## Analysis
+[Existing code patterns, dependencies, constraints discovered]
+
+## Changes Made
+- **file1.go:N**: [What changed, why, and how it fits existing patterns]
+- **file2.go:N**: [What changed, why, and how it fits existing patterns]
+
+## Related Changes
+[Tests updated, configs modified, documentation changes]
+
+## Verification
+` + "```" + `bash
+# Commands run to verify
+` + "```" + `
+[Results and interpretation]
+
+## Edge Cases Considered
+[What edge cases were checked and how they're handled]
+
+## Summary
+[Comprehensive summary of all changes and their impact]
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
 func (a *Agent) buildPlanPrompt() string {
+	switch a.thoroughness {
+	case tools.ThoroughnessQuick:
+		return a.buildPlanPromptQuick()
+	case tools.ThoroughnessThorough:
+		return a.buildPlanPromptThorough()
+	default:
+		return a.buildPlanPromptNormal()
+	}
+}
+
+func (a *Agent) buildPlanPromptQuick() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                    PLAN AGENT (QUICK MODE, READ-ONLY)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Outline a high-level implementation plan. No deep analysis.
+NOTE: You are READ-ONLY - you cannot modify files.
+
+RULES:
+- Skim key files, don't read everything.
+- List files to change and rough steps. Skip testing/risk sections.
+- Keep plan to 10-15 lines max.
+
+PLAN FORMAT:
+## Overview
+[1-2 sentences]
+
+## Files to Modify
+1. **path/to/file.go** - [Brief change]
+
+## Steps
+1. [Step description]
+2. [Step description]
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
+func (a *Agent) buildPlanPromptNormal() string {
 	return `═══════════════════════════════════════════════════════════════════════
                          PLAN AGENT (READ-ONLY)
 ═══════════════════════════════════════════════════════════════════════
@@ -1433,7 +1652,114 @@ KEY RULES:
 `
 }
 
+func (a *Agent) buildPlanPromptThorough() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                  PLAN AGENT (THOROUGH MODE, READ-ONLY)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Design a comprehensive, production-ready implementation plan.
+NOTE: You are READ-ONLY - you cannot modify files.
+
+RULES:
+- Read all relevant files thoroughly — implementations, tests, configs.
+- Trace call chains end-to-end to understand data flow.
+- Identify all touch points: code, tests, configs, documentation.
+- Analyze multiple approaches and justify the chosen one.
+- Map step dependencies and mark parallelizable work.
+
+APPROACH:
+1. Deep exploration of codebase patterns, conventions, and architecture
+2. Identify ALL files that need modification (including tests, configs, docs)
+3. Analyze multiple implementation approaches with trade-offs
+4. Create detailed step-by-step plan with dependencies
+5. Consider edge cases, migration paths, and backward compatibility
+
+PLAN FORMAT:
+## Overview
+[Description with context on why this change is needed]
+
+## Current Architecture
+[How the existing code works in the relevant area]
+
+## Approach Analysis
+### Option A: [Name]
+- Pros: [...]
+- Cons: [...]
+
+### Option B: [Name]
+- Pros: [...]
+- Cons: [...]
+
+**Chosen:** [Option] because [rationale]
+
+## Files to Modify
+1. **path/to/file.go:N** - [Detailed change description]
+2. **path/to/other.go:N** - [Detailed change description]
+3. **path/to/test.go** - [Test updates needed]
+
+## Implementation Steps
+### Step 1: [Title] (sequential)
+- [ ] Task 1.1 — [Details with file:line references]
+- [ ] Task 1.2 — [Details]
+
+### Step 2: [Title] (can parallelize with Step 3)
+- [ ] Task 2.1 — [Details]
+
+### Step 3: [Title] (can parallelize with Step 2)
+- [ ] Task 3.1 — [Details]
+
+## Testing Strategy
+- Unit tests: [specific test functions to add/modify]
+- Integration tests: [specific flows to verify]
+- Manual verification: [steps to test manually]
+
+## Edge Cases & Error Handling
+- [Edge case 1]: How it's handled
+- [Edge case 2]: How it's handled
+
+## Risks & Mitigations
+- [Risk 1]: [Mitigation strategy]
+- [Risk 2]: [Mitigation strategy]
+
+## Migration / Backward Compatibility
+[Any migration steps needed, backward compat considerations]
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
 func (a *Agent) buildGuidePrompt() string {
+	switch a.thoroughness {
+	case tools.ThoroughnessQuick:
+		return a.buildGuidePromptQuick()
+	case tools.ThoroughnessThorough:
+		return a.buildGuidePromptThorough()
+	default:
+		return a.buildGuidePromptNormal()
+	}
+}
+
+func (a *Agent) buildGuidePromptQuick() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                    GUIDE AGENT (QUICK MODE)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Answer the question about Gokin CLI briefly and directly.
+
+RULES:
+- Direct answer only. No detailed exploration.
+- Skip Details and Related Information sections.
+- One example max, only if essential.
+
+RESPONSE FORMAT:
+## Answer
+[Direct answer in 1-3 sentences]
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
+func (a *Agent) buildGuidePromptNormal() string {
 	return `═══════════════════════════════════════════════════════════════════════
                          GUIDE AGENT
 ═══════════════════════════════════════════════════════════════════════
@@ -1469,6 +1795,63 @@ KEY RULES:
 - Include practical examples
 - Mention relevant config options
 - Link to related features
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
+func (a *Agent) buildGuidePromptThorough() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                  GUIDE AGENT (THOROUGH MODE)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Provide a comprehensive answer about Gokin CLI with full detail.
+
+RULES:
+- Search all relevant documentation, code, and configs.
+- Verify information by reading actual implementations.
+- Include multiple examples covering different use cases.
+- Explain configuration options and their defaults.
+- Cross-reference related features and how they interact.
+
+APPROACH:
+1. Search documentation and source code thoroughly
+2. Verify claims by reading implementations
+3. Provide clear explanations with multiple examples
+4. Cover edge cases and common pitfalls
+5. Include configuration reference
+
+RESPONSE FORMAT:
+## Answer
+[Comprehensive answer with full context]
+
+## How It Works
+[Technical explanation of the implementation]
+
+## Examples
+` + "```" + `bash
+# Basic usage
+gokin [command] [options]
+` + "```" + `
+
+` + "```" + `bash
+# Advanced usage
+gokin [command] --flag [value]
+` + "```" + `
+
+## Configuration
+` + "```" + `yaml
+# Relevant config options with defaults
+section:
+  option: default_value  # Description
+` + "```" + `
+
+## Common Pitfalls
+- [Pitfall 1]: How to avoid
+- [Pitfall 2]: How to avoid
+
+## Related Features
+[Other features that interact with this, with cross-references]
 
 ═══════════════════════════════════════════════════════════════════════
 `
@@ -1774,8 +2157,8 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					continue
 				}
 
-				// Broad loop: same tool called > 8 times (any args)
-				if broadCount > 8 && !intervened {
+				// Broad loop: same tool called > loopThreshold times (any args)
+				if broadCount > a.loopThreshold && !intervened {
 					loopDetectedThisTurn = true
 					logging.Warn("broad loop detected", "tool", fc.Name, "total_calls", broadCount)
 					a.callHistoryMu.Lock()
@@ -1995,9 +2378,9 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	historyLen := len(a.history)
 	a.stateMu.RUnlock()
 
-	if historyLen > MaxHistorySize {
-		logging.Warn("history size exceeded MaxHistorySize, forcing compaction",
-			"agent_id", a.ID, "history_len", historyLen, "max", MaxHistorySize)
+	if historyLen > a.maxHistorySize {
+		logging.Warn("history size exceeded maxHistorySize, forcing compaction",
+			"agent_id", a.ID, "history_len", historyLen, "max", a.maxHistorySize)
 		return a.forceCompactHistory(ctx)
 	}
 
@@ -2026,7 +2409,7 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	}
 
 	// 2.5. Try pruning old tool outputs first (cheaper than full summarization)
-	freedChars := a.pruneToolOutputs(120000) // protect last ~120k chars
+	freedChars := a.pruneToolOutputs(a.pruneProtectChars)
 	if freedChars > 0 {
 		logging.Info("pruned old tool outputs", "agent_id", a.ID, "freed_chars", freedChars)
 		// Re-check: maybe pruning was enough
@@ -2053,12 +2436,16 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		"tokens", tokenCount)
 
 	// 3. Summarize on snapshot (potentially slow API call — no lock held)
-	if len(historySnapshot) <= 6 {
+	if len(historySnapshot) <= a.summarizeMinMsgs {
 		return nil
 	}
 
-	historyToSummarize := historySnapshot[2 : len(historySnapshot)-4]
-	recentFromSnapshot := historySnapshot[len(historySnapshot)-4:]
+	protectRecent := a.summarizeProtect
+	if protectRecent >= len(historySnapshot)-2 {
+		protectRecent = len(historySnapshot) - 3 // ensure at least 1 message to summarize
+	}
+	historyToSummarize := historySnapshot[2 : len(historySnapshot)-protectRecent]
+	recentFromSnapshot := historySnapshot[len(historySnapshot)-protectRecent:]
 
 	summary, err := a.summarizer.Summarize(ctx, historyToSummarize)
 	if err != nil {
@@ -2293,14 +2680,21 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 
-	if len(a.history) <= 6 {
+	minMsgs := a.summarizeMinMsgs
+	if minMsgs < 4 {
+		minMsgs = 4
+	}
+	if len(a.history) <= minMsgs {
 		return 0
 	}
 
 	// Walk from end to start, accumulating recent tool output chars.
-	// Skip first 2 (system context) and last 4 (recent messages).
+	// Skip first 2 (system context) and last N (recent messages).
 	start := 2
-	end := len(a.history) - 4
+	end := len(a.history) - a.summarizeProtect
+	if end <= start {
+		return 0
+	}
 
 	// First pass: collect truncation candidates from the end backwards
 	type truncCandidate struct {
@@ -2327,7 +2721,7 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 					contentStr = c
 				}
 			}
-			if len(contentStr) <= 200 {
+			if len(contentStr) <= a.pruneMinOutputSize {
 				continue // Already small, skip
 			}
 			candidates = append(candidates, truncCandidate{

@@ -111,7 +111,7 @@ func (t *TaskTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"thoroughness": {
 					Type:        genai.TypeString,
-					Description: "Depth of agent investigation: 'quick' (fast, minimal analysis), 'normal' (default), 'thorough' (comprehensive, deep analysis). Applies to explore and bash types.",
+					Description: "Depth of agent investigation: 'quick' (fast, minimal analysis), 'normal' (default), 'thorough' (comprehensive, deep analysis). Applies to all agent types.",
 					Enum:        []string{"quick", "normal", "thorough"},
 				},
 				"output_style": {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gokin/internal/logging"
+	"gokin/internal/tools"
 )
 
 // delegationDepthKey is a context key for passing delegation depth to spawned agents.
@@ -36,6 +37,9 @@ type DelegationStrategy struct {
 	lastProgress       string
 	sameProgressCount  int
 	currentDepth       int                  // Current delegation depth
+	maxDepth           int                  // Max delegation depth (default: MaxDelegationDepth)
+	depthPenalty       int                  // Turns penalty per depth level (default: 3)
+	maxDelegationTurns int                  // Max turns for delegated sub-agents (default: 15)
 	strategyOpt        *StrategyOptimizer   // For historical success rate lookup
 	delegationMetrics  *DelegationMetrics   // For adaptive delegation rules
 	currentContextType string               // Current task context type for metrics
@@ -79,10 +83,13 @@ type DelegationContext struct {
 // NewDelegationStrategy creates a new delegation strategy for an agent.
 func NewDelegationStrategy(agentType AgentType, messenger *AgentMessenger) *DelegationStrategy {
 	return &DelegationStrategy{
-		messenger:      messenger,
-		agentType:      agentType,
-		stuckThreshold: 5,
-		failedRules:    make(map[string]time.Time),
+		messenger:          messenger,
+		agentType:          agentType,
+		stuckThreshold:     5,
+		maxDepth:           MaxDelegationDepth,
+		depthPenalty:       3,
+		maxDelegationTurns: 15,
+		failedRules:        make(map[string]time.Time),
 	}
 }
 
@@ -105,6 +112,29 @@ func (d *DelegationStrategy) SetDelegationMetrics(dm *DelegationMetrics) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.delegationMetrics = dm
+}
+
+// ApplyThoroughness adjusts delegation parameters based on thoroughness level.
+func (d *DelegationStrategy) ApplyThoroughness(t tools.Thoroughness) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch t {
+	case tools.ThoroughnessQuick:
+		d.stuckThreshold = 3
+		d.maxDepth = 3
+		d.depthPenalty = 5
+		d.maxDelegationTurns = 10
+	case tools.ThoroughnessThorough:
+		d.stuckThreshold = 7
+		d.maxDepth = 6
+		d.depthPenalty = 2
+		d.maxDelegationTurns = 20
+	default:
+		d.stuckThreshold = 5
+		d.maxDepth = MaxDelegationDepth
+		d.depthPenalty = 3
+		d.maxDelegationTurns = 15
+	}
 }
 
 // SetContextType sets the current task context type for metrics tracking.
@@ -189,8 +219,9 @@ func (d *DelegationStrategy) SetActiveAgents(count int) {
 func (d *DelegationStrategy) AdaptiveMaxTurns(baseTurns int) int {
 	d.mu.RLock()
 	depth := d.currentDepth
+	penalty := d.depthPenalty
 	d.mu.RUnlock()
-	adapted := baseTurns - (depth * 3)
+	adapted := baseTurns - (depth * penalty)
 	if adapted < 5 {
 		adapted = 5
 	}
@@ -204,10 +235,14 @@ func (d *DelegationStrategy) Evaluate(ctx *DelegationContext) *DelegationDecisio
 	defer d.mu.RUnlock()
 
 	// Check delegation depth limit to prevent infinite recursion
-	if ctx.DelegationDepth >= MaxDelegationDepth {
+	maxDepth := d.maxDepth
+	if maxDepth <= 0 {
+		maxDepth = MaxDelegationDepth
+	}
+	if ctx.DelegationDepth >= maxDepth {
 		logging.Debug("delegation depth limit reached",
 			"depth", ctx.DelegationDepth,
-			"max", MaxDelegationDepth)
+			"max", maxDepth)
 		return &DelegationDecision{ShouldDelegate: false}
 	}
 
@@ -404,6 +439,7 @@ func (d *DelegationStrategy) ExecuteDelegation(ctx context.Context, decision *De
 	messenger := d.messenger
 	agentType := d.agentType
 	depth := d.currentDepth
+	delegationTurns := d.maxDelegationTurns
 	d.mu.RUnlock()
 
 	if messenger == nil {
@@ -419,7 +455,7 @@ func (d *DelegationStrategy) ExecuteDelegation(ctx context.Context, decision *De
 	// Send delegation request with depth tracking
 	msgID, err := messenger.SendMessage("delegate", decision.TargetType, decision.Query, map[string]any{
 		"reason":           decision.Reason,
-		"max_turns":        15,
+		"max_turns":        delegationTurns,
 		"delegation_depth": depth,
 	})
 	if err != nil {

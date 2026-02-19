@@ -681,7 +681,7 @@ func (r *Runner) SpawnWithContext(
 	if r.store != nil {
 		agent.SetStore(r.store)
 		if maxTurns > 10 {
-			agent.EnableAutoCheckpoint(5)
+			agent.EnableAutoCheckpoint(0)
 		}
 	}
 
@@ -772,7 +772,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	if r.store != nil {
 		agent.SetStore(r.store)
 		if maxTurns > 10 {
-			agent.EnableAutoCheckpoint(5)
+			agent.EnableAutoCheckpoint(0)
 		}
 	}
 

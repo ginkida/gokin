@@ -28,6 +28,24 @@ func NewResultCompactor(maxChars int) *ResultCompactor {
 	}
 }
 
+// SetMaxChars dynamically changes the maximum chars limit for tool results.
+func (c *ResultCompactor) SetMaxChars(maxChars int) {
+	if maxChars > 0 {
+		c.maxChars = maxChars
+	}
+}
+
+// SetHeadTailLines dynamically changes how many lines are preserved
+// at the head and tail of truncated tool results.
+func (c *ResultCompactor) SetHeadTailLines(head, tail int) {
+	if head > 0 {
+		c.headLines = head
+	}
+	if tail > 0 {
+		c.tailLines = tail
+	}
+}
+
 // maxErrorChars is the maximum size for error results. Error results beyond
 // this limit are truncated while preserving the most relevant parts.
 const maxErrorChars = 10000
