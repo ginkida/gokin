@@ -310,7 +310,7 @@ func (t *BatchTool) replaceInFile(path, search, replacement string, dryRun bool)
 	newContent := strings.ReplaceAll(content, search, replacement)
 	newData := []byte(newContent)
 
-	if err := os.WriteFile(path, newData, 0644); err != nil {
+	if err := AtomicWrite(path, newData, 0644); err != nil {
 		return err
 	}
 

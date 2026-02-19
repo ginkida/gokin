@@ -61,6 +61,15 @@ func (c *SummaryCache) Get(messageHash string) (*CachedSummary, bool) {
 	// Update last used time
 	entry.LastUsedAt = time.Now()
 
+	// Move to front of LRU list
+	for i, key := range c.lruList {
+		if key == messageHash {
+			c.lruList = append(c.lruList[:i], c.lruList[i+1:]...)
+			c.lruList = append([]string{messageHash}, c.lruList...)
+			break
+		}
+	}
+
 	// Return a COPY to prevent use-after-free when entry is evicted
 	result := &CachedSummary{
 		Summary:     entry.Summary,

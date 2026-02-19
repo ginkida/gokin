@@ -18,7 +18,8 @@ func setBashProcAttr(cmd *exec.Cmd) {
 }
 
 // killBashProcessGroup attempts graceful shutdown with SIGTERM, then SIGKILL after timeout.
-func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration) {
+// done is closed when cmd.Wait() completes, allowing early exit from the grace period.
+func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan struct{}) {
 	if cmd.Process == nil {
 		return
 	}
@@ -33,9 +34,16 @@ func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration) {
 		}
 	}
 
-	// Wait for grace period before escalating to SIGKILL
+	// Wait for process exit or grace period expiry
 	graceTimer := time.NewTimer(gracePeriod)
-	<-graceTimer.C
+	defer graceTimer.Stop()
+
+	select {
+	case <-done:
+		// Process exited after SIGTERM — no need for SIGKILL
+		return
+	case <-graceTimer.C:
+	}
 
 	// Grace period expired - escalate to SIGKILL
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {

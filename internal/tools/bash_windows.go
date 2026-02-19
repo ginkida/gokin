@@ -15,7 +15,7 @@ func setBashProcAttr(cmd *exec.Cmd) {
 }
 
 // killBashProcessGroup kills the process on Windows
-func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration) {
+func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan struct{}) {
 	if cmd.Process == nil {
 		return
 	}

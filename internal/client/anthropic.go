@@ -714,9 +714,10 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 			err  error
 		}
 		scanCh := make(chan scanResult)
+		stopScan := make(chan struct{})
 
-		// Start a single scanner goroutine that reads all lines
-		// It will exit when resp.Body is closed (in defer above)
+		// Start a single scanner goroutine that reads all lines.
+		// Exits when: scanner ends, context cancelled, or stopScan closed (scanLoop exited).
 		go func() {
 			defer close(scanCh)
 			for {
@@ -727,6 +728,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 						return
 					}
 				case <-ctx.Done():
+					return
+				case <-stopScan:
 					return
 				}
 			}
@@ -909,6 +912,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 				}
 			}
 		}
+		close(stopScan) // Signal scanner goroutine to exit
 	}()
 
 	return &StreamingResponse{

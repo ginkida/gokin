@@ -327,36 +327,41 @@ func (c *GeminiOAuthClient) Close() error {
 // ensureValidToken checks if the token is valid and refreshes if needed
 func (c *GeminiOAuthClient) ensureValidToken(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if c.refreshToken == "" {
+		c.mu.Unlock()
 		return fmt.Errorf("missing OAuth refresh token; run /oauth-login again")
 	}
 
 	// Check if token is still valid (with 5 minute buffer).
 	// We also require a non-empty access token; otherwise force refresh.
 	if c.accessToken != "" && !c.expiresAt.IsZero() && time.Now().Before(c.expiresAt.Add(-auth.TokenRefreshBuffer)) {
+		c.mu.Unlock()
 		return nil
 	}
 
+	refreshTok := c.refreshToken
 	logging.Debug("OAuth token expired, refreshing",
 		"expiresAt", c.expiresAt.Format(time.RFC3339))
+	c.mu.Unlock()
 
-	// Refresh the token
+	// Refresh the token (network I/O — outside lock)
 	manager := auth.NewGeminiOAuthManager()
-	newToken, err := manager.RefreshToken(ctx, c.refreshToken)
+	newToken, err := manager.RefreshToken(ctx, refreshTok)
 	if err != nil {
 		return fmt.Errorf("failed to refresh OAuth token: %w (try /oauth-login)", err)
 	}
 
-	// Update client state
+	// Update client state under lock
+	c.mu.Lock()
 	c.accessToken = newToken.AccessToken
 	c.expiresAt = newToken.ExpiresAt
 	if newToken.RefreshToken != "" {
 		c.refreshToken = newToken.RefreshToken
 	}
+	c.mu.Unlock()
 
-	// Persist to config
+	// Persist to config (disk I/O — outside lock)
 	c.config.API.GeminiOAuth.AccessToken = newToken.AccessToken
 	c.config.API.GeminiOAuth.ExpiresAt = newToken.ExpiresAt.Unix()
 	if newToken.RefreshToken != "" {
@@ -368,7 +373,7 @@ func (c *GeminiOAuthClient) ensureValidToken(ctx context.Context) error {
 	}
 
 	logging.Debug("OAuth token refreshed",
-		"expiresAt", c.expiresAt.Format(time.RFC3339))
+		"expiresAt", newToken.ExpiresAt.Format(time.RFC3339))
 
 	return nil
 }
@@ -722,6 +727,7 @@ func (c *GeminiOAuthClient) processSSEStream(ctx context.Context, body io.ReadCl
 		err  error
 	}
 	scanCh := make(chan scanResult)
+	stopScan := make(chan struct{})
 	go func() {
 		defer close(scanCh)
 		for {
@@ -732,6 +738,8 @@ func (c *GeminiOAuthClient) processSSEStream(ctx context.Context, body io.ReadCl
 					return
 				}
 			case <-ctx.Done():
+				return
+			case <-stopScan:
 				return
 			}
 		}
@@ -866,6 +874,7 @@ scanLoop:
 			break scanLoop
 		}
 	}
+	close(stopScan) // Signal scanner goroutine to exit
 
 	if hasError && c.rateLimiter != nil && estimatedTokens > 0 {
 		c.rateLimiter.ReturnTokens(1, estimatedTokens)

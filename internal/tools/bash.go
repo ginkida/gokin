@@ -660,7 +660,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 			// Command completed
 		case <-execCtx.Done():
 			timedOut = true
-			killBashProcessGroup(cmd, 5*time.Second)
+			killBashProcessGroup(cmd, 5*time.Second, cmdDone)
 			<-cmdDone
 		}
 
@@ -738,7 +738,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		// Context was cancelled or timed out
 		timedOut = true
 		// Kill the process group with graceful shutdown (5 second grace period)
-		killBashProcessGroup(cmd, 5*time.Second)
+		killBashProcessGroup(cmd, 5*time.Second, cmdDone)
 		// Wait for the Wait() goroutine to complete to avoid goroutine leak
 		wg.Wait()
 	}

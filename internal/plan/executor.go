@@ -891,23 +891,24 @@ func (m *Manager) ResumePlan() (*Plan, error) {
 
 	plan := m.currentPlan
 
+	// Single lock acquisition: check + modify atomically
+	plan.mu.Lock()
+
 	// Check if there are any resumable steps
 	hasPending := false
-	plan.mu.RLock()
 	for _, step := range plan.Steps {
 		if step.Status == StatusPending || step.Status == StatusPaused || step.Status == StatusFailed {
 			hasPending = true
 			break
 		}
 	}
-	plan.mu.RUnlock()
 
 	if !hasPending {
+		plan.mu.Unlock()
 		return nil, fmt.Errorf("plan already completed, no steps to resume")
 	}
 
 	// Reset paused and failed steps to pending for retry
-	plan.mu.Lock()
 	for _, step := range plan.Steps {
 		if step.Status == StatusPaused || step.Status == StatusFailed {
 			if strings.Contains(strings.ToLower(step.Error), "checkpoint required") {

@@ -321,11 +321,11 @@ func (c *ToolResultCache) makeKey(toolName string, args map[string]any) string {
 	// Create a deterministic hash of the arguments
 	keyData := fmt.Sprintf("%s:%v", toolName, args)
 
-	// For grep/glob, normalize the pattern to be case-insensitive for key
+	// For grep/glob, include pattern + path for a correct key
 	if toolName == "grep" || toolName == "glob" {
-		if pattern, ok := args["pattern"].(string); ok {
-			keyData = fmt.Sprintf("%s:%s", toolName, pattern)
-		}
+		pattern, _ := args["pattern"].(string)
+		path, _ := args["path"].(string)
+		keyData = fmt.Sprintf("%s:%s:%s:%v", toolName, pattern, path, args)
 	}
 
 	hash := sha256.Sum256([]byte(keyData))
@@ -334,9 +334,8 @@ func (c *ToolResultCache) makeKey(toolName string, args map[string]any) string {
 
 // updateLRU updates the LRU list for a cache hit.
 func (c *ToolResultCache) updateLRU(key string) {
-	// Remove from current position
-	c.lruList = c.removeLRU(key)
-	// Add to end (most recently used)
+	// Remove from current position, then add to end (most recently used)
+	c.removeLRU(key)
 	c.lruList = append(c.lruList, key)
 }
 
@@ -356,12 +355,12 @@ func (c *ToolResultCache) evictLRU() {
 		"remaining", len(c.entries))
 }
 
-// removeLRU removes a key from the LRU list and returns the updated list.
-func (c *ToolResultCache) removeLRU(key string) []string {
+// removeLRU removes a key from the LRU list.
+func (c *ToolResultCache) removeLRU(key string) {
 	for i, k := range c.lruList {
 		if k == key {
-			return append(c.lruList[:i], c.lruList[i+1:]...)
+			c.lruList = append(c.lruList[:i], c.lruList[i+1:]...)
+			return
 		}
 	}
-	return c.lruList
 }

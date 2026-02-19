@@ -2,6 +2,7 @@ package plan
 
 import (
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,7 @@ type UndoState struct {
 // ManagerUndoExtension extends the plan Manager with undo/redo capabilities.
 type ManagerUndoExtension struct {
 	manager    *Manager
+	mu         sync.Mutex
 	history    []*UndoState
 	maxHistory int
 }
@@ -42,7 +44,8 @@ func (e *ManagerUndoExtension) SaveCheckpoint() error {
 		return fmt.Errorf("no active plan to checkpoint")
 	}
 
-	// Create undo state
+	// Snapshot plan fields under plan's read lock
+	plan.mu.RLock()
 	state := &UndoState{
 		PlanID:      plan.ID,
 		PlanTitle:   plan.Title,
@@ -56,24 +59,29 @@ func (e *ManagerUndoExtension) SaveCheckpoint() error {
 	// Deep copy steps to isolate checkpoint from future modifications
 	for i, step := range plan.Steps {
 		if step != nil {
-			stepCopy := *step
-			state.Steps[i] = &stepCopy
+			state.Steps[i] = deepCopyStep(step)
 		}
 	}
+	plan.mu.RUnlock()
 
-	// Add to history
+	// Add to history under own lock
+	e.mu.Lock()
 	e.history = append(e.history, state)
 
 	// Trim history if needed
 	if len(e.history) > e.maxHistory {
 		e.history = e.history[1:]
 	}
+	e.mu.Unlock()
 
 	return nil
 }
 
 // RecordExecutedStep records that a step has been executed.
 func (e *ManagerUndoExtension) RecordExecutedStep(stepID int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if len(e.history) == 0 {
 		return
 	}
@@ -84,6 +92,9 @@ func (e *ManagerUndoExtension) RecordExecutedStep(stepID int) {
 
 // GetLastCheckpoint returns the most recent checkpoint.
 func (e *ManagerUndoExtension) GetLastCheckpoint() *UndoState {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if len(e.history) == 0 {
 		return nil
 	}
@@ -92,15 +103,24 @@ func (e *ManagerUndoExtension) GetLastCheckpoint() *UndoState {
 
 // GetHistory returns all saved checkpoints.
 func (e *ManagerUndoExtension) GetHistory() []*UndoState {
-	return e.history
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	result := make([]*UndoState, len(e.history))
+	copy(result, e.history)
+	return result
 }
 
 // ClearHistory clears all saved checkpoints.
 func (e *ManagerUndoExtension) ClearHistory() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.history = make([]*UndoState, 0, e.maxHistory)
 }
 
 // CanUndo returns true if there's a checkpoint to restore.
 func (e *ManagerUndoExtension) CanUndo() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return len(e.history) > 0
 }

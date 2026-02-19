@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gokin/internal/logging"
 	"gokin/internal/security"
@@ -180,8 +181,9 @@ type ReadTool struct {
 	pdfReader      *readers.PDFReader
 	workDir        string
 	pathValidator  *security.PathValidator
-	predictor      ContextPredictorInterface
-	lastReadFile   string // Track last file read for co-access learning
+	predictor    ContextPredictorInterface
+	lastReadMu   sync.Mutex
+	lastReadFile string // Track last file read for co-access learning
 }
 
 // NewReadTool creates a new ReadTool instance with the given working directory.
@@ -524,9 +526,12 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 
 	// Record access pattern for predictive loading
 	if t.predictor != nil {
-		t.predictor.RecordAccess(filePath, "read", t.lastReadFile)
-		t.predictor.LearnImports(filePath)
+		t.lastReadMu.Lock()
+		prev := t.lastReadFile
 		t.lastReadFile = filePath
+		t.lastReadMu.Unlock()
+		t.predictor.RecordAccess(filePath, "read", prev)
+		t.predictor.LearnImports(filePath)
 	}
 
 	return NewSuccessResult(content), nil

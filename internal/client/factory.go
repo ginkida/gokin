@@ -15,19 +15,20 @@ import (
 // globalPool is the shared client connection pool.
 var (
 	globalPool *ClientPool
-	poolOnce   sync.Once
 	poolMu     sync.Mutex
 )
 
 // GetPool returns the global client connection pool, creating it if necessary.
 func GetPool(cfg *config.Config) *ClientPool {
-	poolOnce.Do(func() {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	if globalPool == nil {
 		maxSize := cfg.Model.MaxPoolSize
 		if maxSize <= 0 {
 			maxSize = DefaultMaxPoolSize
 		}
 		globalPool = NewClientPool(maxSize)
-	})
+	}
 	return globalPool
 }
 
@@ -38,7 +39,6 @@ func ClosePool() {
 	if globalPool != nil {
 		globalPool.Close()
 		globalPool = nil
-		poolOnce = sync.Once{} // Allow re-initialization
 	}
 }
 

@@ -19,6 +19,7 @@ type FileWatcher struct {
 	mu      sync.Mutex
 	lastMod time.Time
 	timer   *time.Timer
+	closed  bool
 }
 
 // NewFileWatcher creates a new file watcher.
@@ -91,7 +92,12 @@ func (fw *FileWatcher) checkChanges() {
 		}
 
 		fw.timer = time.AfterFunc(time.Duration(fw.debounceMs)*time.Millisecond, func() {
-			fw.callback(fw.path)
+			fw.mu.Lock()
+			closed := fw.closed
+			fw.mu.Unlock()
+			if !closed {
+				fw.callback(fw.path)
+			}
 		})
 	}
 }
@@ -115,6 +121,7 @@ func (fw *FileWatcher) Close() {
 	}
 
 	fw.mu.Lock()
+	fw.closed = true
 	if fw.timer != nil {
 		fw.timer.Stop()
 	}

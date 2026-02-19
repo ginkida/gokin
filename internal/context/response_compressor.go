@@ -151,6 +151,9 @@ func (rc *ResponseCompressor) isImportantField(key string) bool {
 
 // CompressContent compresses a content part if it's a function response.
 func (rc *ResponseCompressor) CompressContent(part *genai.Part) *genai.Part {
+	if part == nil {
+		return part
+	}
 	if part.FunctionResponse != nil {
 		return &genai.Part{
 			FunctionResponse: rc.CompressFunctionResponse(part.FunctionResponse),

@@ -74,12 +74,11 @@ func (fc *FallbackClient) resetCurrent() {
 func (fc *FallbackClient) SendMessage(ctx context.Context, message string) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
 	for i := startIdx; i < len(fc.clients); i++ {
-		fc.mu.Lock()
-		fc.current = i
-		fc.mu.Unlock()
-
 		resp, err := fc.clients[i].SendMessage(ctx, message)
 		if err == nil {
+			fc.mu.Lock()
+			fc.current = i
+			fc.mu.Unlock()
 			recordProviderSuccess(fc.providerAt(i))
 			return resp, nil
 		}
@@ -107,12 +106,11 @@ func (fc *FallbackClient) SendMessage(ctx context.Context, message string) (*Str
 func (fc *FallbackClient) SendMessageWithHistory(ctx context.Context, history []*genai.Content, message string) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
 	for i := startIdx; i < len(fc.clients); i++ {
-		fc.mu.Lock()
-		fc.current = i
-		fc.mu.Unlock()
-
 		resp, err := fc.clients[i].SendMessageWithHistory(ctx, history, message)
 		if err == nil {
+			fc.mu.Lock()
+			fc.current = i
+			fc.mu.Unlock()
 			recordProviderSuccess(fc.providerAt(i))
 			return resp, nil
 		}
@@ -138,12 +136,11 @@ func (fc *FallbackClient) SendMessageWithHistory(ctx context.Context, history []
 func (fc *FallbackClient) SendFunctionResponse(ctx context.Context, history []*genai.Content, results []*genai.FunctionResponse) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
 	for i := startIdx; i < len(fc.clients); i++ {
-		fc.mu.Lock()
-		fc.current = i
-		fc.mu.Unlock()
-
 		resp, err := fc.clients[i].SendFunctionResponse(ctx, history, results)
 		if err == nil {
+			fc.mu.Lock()
+			fc.current = i
+			fc.mu.Unlock()
 			recordProviderSuccess(fc.providerAt(i))
 			return resp, nil
 		}

@@ -170,12 +170,13 @@ type Executor struct {
 	safetyValidator  SafetyValidator
 	preFlightChecks  bool                      // Enable pre-flight safety checks
 	userNotified     bool                      // Track if user was notified about tool execution
-	executionContext map[string]*ExecutionInfo // Track active executions
 	notificationMgr  *NotificationManager      // User notifications
 	redactor         *security.SecretRedactor  // Redact secrets from output
 	unrestrictedMode bool                      // Full freedom when both sandbox and permissions are off
 
-	// Token usage from last response (from API usage metadata)
+	// Token usage from last response (from API usage metadata).
+	// Protected by tokenMu for concurrent read/write safety.
+	tokenMu                 sync.Mutex
 	lastInputTokens         int
 	lastOutputTokens        int
 	lastCacheCreationTokens int
@@ -274,7 +275,6 @@ func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Du
 		fallback:               DefaultFallbackConfig(),
 		safetyValidator:        NewDefaultSafetyValidator(),
 		preFlightChecks:        true,
-		executionContext:       make(map[string]*ExecutionInfo),
 		notificationMgr:        NewNotificationManager(),
 		toolBreakers:           make(map[string]*robustness.CircuitBreaker),
 		redactor:               security.NewSecretRedactor(),
@@ -420,13 +420,19 @@ func (e *Executor) GetNotificationManager() *NotificationManager {
 // GetLastTokenUsage returns the token usage from the last API response.
 // Returns (inputTokens, outputTokens). Values are 0 if metadata was unavailable.
 func (e *Executor) GetLastTokenUsage() (int, int) {
-	return e.lastInputTokens, e.lastOutputTokens
+	e.tokenMu.Lock()
+	in, out := e.lastInputTokens, e.lastOutputTokens
+	e.tokenMu.Unlock()
+	return in, out
 }
 
 // GetLastCacheMetrics returns the prompt cache metrics from the last API response.
 // Returns (cacheCreationInputTokens, cacheReadInputTokens).
 func (e *Executor) GetLastCacheMetrics() (int, int) {
-	return e.lastCacheCreationTokens, e.lastCacheReadTokens
+	e.tokenMu.Lock()
+	creation, read := e.lastCacheCreationTokens, e.lastCacheReadTokens
+	e.tokenMu.Unlock()
+	return creation, read
 }
 
 // Execute processes a user message through the function calling loop.
@@ -696,12 +702,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 
 		// Capture token usage metadata from API response
+		e.tokenMu.Lock()
 		if resp.InputTokens > 0 || resp.OutputTokens > 0 {
 			e.lastInputTokens = resp.InputTokens
 			e.lastOutputTokens = resp.OutputTokens
 		}
 		e.lastCacheCreationTokens = resp.CacheCreationInputTokens
 		e.lastCacheReadTokens = resp.CacheReadInputTokens
+		e.tokenMu.Unlock()
 
 		// Detect empty response — model returned no text and no function calls.
 		// Break immediately instead of looping, the fallback below will provide a message.
@@ -872,10 +880,28 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 	// Check for file dependencies between parallel calls
 	orderedCalls, reordered := orderByDependencies(calls)
 	if reordered {
-		logging.Debug("reordered parallel tool calls for file dependencies",
-			"original_count", len(calls),
-			"reordered_count", len(orderedCalls))
-		calls = orderedCalls
+		logging.Debug("executing tool calls sequentially due to file dependencies",
+			"count", len(orderedCalls))
+		// Execute sequentially so write-before-read ordering is respected
+		for i, call := range orderedCalls {
+			select {
+			case <-ctx.Done():
+				results[i] = &genai.FunctionResponse{
+					ID:       call.ID,
+					Name:     call.Name,
+					Response: NewErrorResult("cancelled").ToMap(),
+				}
+				continue
+			default:
+			}
+			result := e.executeTool(ctx, call)
+			results[i] = &genai.FunctionResponse{
+				ID:       call.ID,
+				Name:     call.Name,
+				Response: result.ToMap(),
+			}
+		}
+		return results, nil
 	}
 
 	// For multiple tools, execute in parallel with semaphore to limit concurrency
@@ -1465,6 +1491,12 @@ streamLoop:
 			break streamLoop
 
 		case <-ctx.Done():
+			// Drain chunks in background to unblock the producer goroutine.
+			// The producer defers complete() which closes Chunks, so this goroutine will exit.
+			go func() {
+				for range stream.Chunks {
+				}
+			}()
 			return NewErrorResult("streaming cancelled"), client.ContextErr(ctx)
 		}
 	}

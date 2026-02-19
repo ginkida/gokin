@@ -29,15 +29,19 @@ func NewToolEntry(factory ToolFactory) *ToolEntry {
 // This is thread-safe and will only create the instance once.
 func (e *ToolEntry) Get() Tool {
 	e.once.Do(func() {
-		e.instance = e.factory()
+		instance := e.factory()
 
-		// Apply all pending configurations
+		// Set instance and grab pending configs under configMu
+		// so that concurrent Configure() sees instance and applies immediately
+		// instead of queuing (which would be lost).
 		e.configMu.Lock()
+		e.instance = instance
 		configs := e.configFuncs
+		e.configFuncs = nil
 		e.configMu.Unlock()
 
 		for _, cfg := range configs {
-			cfg(e.instance)
+			cfg(instance)
 		}
 	})
 	return e.instance
