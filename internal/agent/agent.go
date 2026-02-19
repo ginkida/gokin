@@ -47,6 +47,8 @@ type Agent struct {
 	startTime    time.Time
 	endTime      time.Time
 	maxTurns     int
+	thoroughness tools.Thoroughness
+	outputStyle  tools.OutputStyle
 
 	// === IMPROVEMENT 4: Progress tracking ===
 	currentStep      int
@@ -350,6 +352,71 @@ func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.To
 	}
 
 	return filtered
+}
+
+// SetThoroughness sets the exploration thoroughness level.
+func (a *Agent) SetThoroughness(t tools.Thoroughness) {
+	a.thoroughness = t
+}
+
+// ApplyThoroughness sets thoroughness, adjusts maxTurns (if still at default),
+// and sets per-agent timeout based on type and thoroughness level.
+func (a *Agent) ApplyThoroughness(t tools.Thoroughness, defaultMaxTurns int) {
+	a.thoroughness = t
+	canOverrideMaxTurns := a.maxTurns == defaultMaxTurns
+
+	switch a.Type {
+	case AgentTypeExplore:
+		switch t {
+		case tools.ThoroughnessQuick:
+			if canOverrideMaxTurns {
+				a.maxTurns = 8
+			}
+			a.timeout = 1 * time.Minute
+		case tools.ThoroughnessThorough:
+			if canOverrideMaxTurns {
+				a.maxTurns = 50
+			}
+			a.timeout = 5 * time.Minute
+		}
+	case AgentTypeBash:
+		switch t {
+		case tools.ThoroughnessQuick:
+			if canOverrideMaxTurns {
+				a.maxTurns = 5
+			}
+			a.timeout = 1 * time.Minute
+		case tools.ThoroughnessThorough:
+			if canOverrideMaxTurns {
+				a.maxTurns = 20
+			}
+			a.timeout = 3 * time.Minute
+		}
+	case AgentTypeGeneral:
+		switch t {
+		case tools.ThoroughnessQuick:
+			a.timeout = 2 * time.Minute
+		case tools.ThoroughnessThorough:
+			a.timeout = 10 * time.Minute
+		}
+	case AgentTypePlan:
+		switch t {
+		case tools.ThoroughnessQuick:
+			a.timeout = 2 * time.Minute
+		case tools.ThoroughnessThorough:
+			a.timeout = 10 * time.Minute
+		}
+	}
+}
+
+// GetTimeout returns the agent's timeout duration.
+func (a *Agent) GetTimeout() time.Duration {
+	return a.timeout
+}
+
+// SetOutputStyle sets the response output style.
+func (a *Agent) SetOutputStyle(s tools.OutputStyle) {
+	a.outputStyle = s
 }
 
 // SetProjectContext injects project guidelines for sub-agent system prompts.
@@ -848,6 +915,9 @@ func (a *Agent) buildSystemPrompt() string {
 		sb.WriteString("Complete the assigned task using available tools.\n")
 	}
 
+	// Inject output style instructions (orthogonal to thoroughness)
+	sb.WriteString(a.buildOutputStyleSection())
+
 	// Inject project context if provided (for delegated sub-agents)
 	if a.projectContext != "" {
 		sb.WriteString("\n")
@@ -936,6 +1006,40 @@ func (a *Agent) buildToolGuidesSection() string {
 }
 
 func (a *Agent) buildExplorePrompt() string {
+	switch a.thoroughness {
+	case tools.ThoroughnessQuick:
+		return a.buildExplorePromptQuick()
+	case tools.ThoroughnessThorough:
+		return a.buildExplorePromptThorough()
+	default:
+		return a.buildExplorePromptNormal()
+	}
+}
+
+func (a *Agent) buildExplorePromptQuick() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                    EXPLORE AGENT (QUICK MODE)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Answer fast. Minimal exploration.
+
+RULES:
+- Use 1-2 glob/grep calls max. Do NOT over-explore.
+- Give a brief, direct answer. No deep analysis needed.
+- Skip Architecture and Recommendations sections.
+
+RESPONSE FORMAT:
+## Summary
+[Direct answer in 1-2 sentences]
+
+## Key Findings
+- **Finding** (file.go:123): Brief description
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
+func (a *Agent) buildExplorePromptNormal() string {
 	return `═══════════════════════════════════════════════════════════════════════
                          EXPLORE AGENT
 ═══════════════════════════════════════════════════════════════════════
@@ -1015,7 +1119,88 @@ User: "How does authentication work?"
 `
 }
 
+func (a *Agent) buildExplorePromptThorough() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                  EXPLORE AGENT (THOROUGH MODE)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Perform a comprehensive, exhaustive exploration of the codebase.
+
+RULES:
+- Be extremely thorough. Check multiple directories and naming conventions.
+- Cross-reference findings by reading actual code, not just file names.
+- Verify assumptions — read implementations, not just interfaces.
+- Consider edge cases, error paths, and alternative implementations.
+- Search for related tests, configs, and documentation.
+
+RECOMMENDED APPROACH:
+1. glob - Broad search across multiple patterns and directories
+2. grep - Search for usages, references, and cross-cutting concerns
+3. read - Read all relevant files in full, not just snippets
+4. Analyze data flow end-to-end, trace through call chains
+5. Summarize with comprehensive detail
+
+RESPONSE FORMAT:
+## Summary
+[Comprehensive answer with full context]
+
+## Key Findings
+- **Finding 1** (file.go:123): Detailed description with cross-references
+- **Finding 2** (other.go:45): Detailed description with cross-references
+
+## Code Examples
+` + "```" + `go
+// Key code with full context and explanation
+` + "```" + `
+
+## Architecture
+[Full component diagram, data flow, dependencies, lifecycle]
+
+## Cross-References
+[Related files, tests, configs that interact with the findings]
+
+## Edge Cases & Caveats
+[Known limitations, error paths, race conditions, TODOs]
+
+## Recommendations
+[Detailed actionable suggestions with rationale]
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
 func (a *Agent) buildBashPrompt() string {
+	switch a.thoroughness {
+	case tools.ThoroughnessQuick:
+		return a.buildBashPromptQuick()
+	case tools.ThoroughnessThorough:
+		return a.buildBashPromptThorough()
+	default:
+		return a.buildBashPromptNormal()
+	}
+}
+
+func (a *Agent) buildBashPromptQuick() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                      BASH AGENT (QUICK MODE)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Execute the command and report the result briefly.
+
+RULES:
+- Run the command, report success/failure and key output.
+- Skip detailed analysis. No Next Steps section.
+- Keep response to 2-3 sentences max.
+
+RESPONSE FORMAT:
+## Result
+[Command + outcome in 1-2 sentences]
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
+func (a *Agent) buildBashPromptNormal() string {
 	return `═══════════════════════════════════════════════════════════════════════
                          BASH AGENT
 ═══════════════════════════════════════════════════════════════════════
@@ -1082,6 +1267,77 @@ or
 
 ═══════════════════════════════════════════════════════════════════════
 `
+}
+
+func (a *Agent) buildBashPromptThorough() string {
+	return `═══════════════════════════════════════════════════════════════════════
+                    BASH AGENT (THOROUGH MODE)
+═══════════════════════════════════════════════════════════════════════
+
+YOUR MISSION: Execute commands with deep analysis of results.
+
+RULES:
+- Analyze output thoroughly: errors, warnings, performance, edge cases.
+- For failures: identify root cause, check related files, suggest fixes.
+- Run follow-up commands if needed to gather more context.
+- Check for related issues that might not be immediately obvious.
+
+APPROACH:
+1. Execute the primary command
+2. Analyze output in detail (errors, warnings, patterns)
+3. Run diagnostic commands if issues found
+4. Provide root cause analysis and actionable fixes
+
+RESPONSE FORMAT:
+## Command Executed
+` + "```" + `bash
+[The command you ran]
+` + "```" + `
+
+## Results Summary
+[What the command did and outcome overview]
+
+## Detailed Analysis
+[In-depth analysis of output, error patterns, performance metrics]
+
+## Root Cause Analysis
+[For failures: why it failed, what triggered the issue]
+
+## Related Issues
+[Other problems discovered, warnings worth noting, dependencies affected]
+
+## Fix Recommendations
+[Step-by-step actionable fixes with rationale]
+
+## Verification
+[Commands to verify the fixes work]
+
+═══════════════════════════════════════════════════════════════════════
+`
+}
+
+func (a *Agent) buildOutputStyleSection() string {
+	switch a.outputStyle {
+	case tools.OutputStyleConcise:
+		return `
+## Output Style: CONCISE
+- Use bullet points, not paragraphs.
+- Omit examples unless critical.
+- No filler phrases ("Let me explain...", "Here's what I found...").
+- Maximum 5-7 lines for the entire response.
+`
+	case tools.OutputStyleDetailed:
+		return `
+## Output Style: DETAILED
+- Provide full explanations with context and rationale.
+- Include code examples with surrounding context.
+- Explain trade-offs, alternatives considered, and why.
+- Add cross-references to related files and functions.
+- Use paragraphs for complex explanations, not just bullets.
+`
+	default:
+		return "" // normal — no override, use agent type's default format
+	}
 }
 
 func (a *Agent) buildGeneralPrompt() string {

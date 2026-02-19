@@ -106,12 +106,14 @@ type AgentResult struct {
 
 // AgentTask represents a task to be executed by an agent.
 type AgentTask struct {
-	Prompt      string    `json:"prompt"`
-	Type        AgentType `json:"type"`
-	Background  bool      `json:"background"`
-	Description string    `json:"description,omitempty"`
-	MaxTurns    int       `json:"max_turns,omitempty"`
-	Model       string    `json:"model,omitempty"`
+	Prompt       string    `json:"prompt"`
+	Type         AgentType `json:"type"`
+	Background   bool      `json:"background"`
+	Description  string    `json:"description,omitempty"`
+	MaxTurns     int       `json:"max_turns,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	Thoroughness string    `json:"thoroughness,omitempty"`
+	OutputStyle  string    `json:"output_style,omitempty"`
 }
 
 // IsSuccess returns true if the agent completed successfully.

@@ -282,6 +282,17 @@ func (r *Router) executeViaSubAgent(ctx context.Context, message string, agentTy
 		return nil, "", fmt.Errorf("sub-agent requested but agent runner is not configured")
 	}
 
+	// Auto-infer thoroughness for explore/bash agents based on task complexity
+	if agentType == "explore" || agentType == "bash" {
+		analysis := r.analyzer.Analyze(message)
+		switch {
+		case analysis.Score <= 3:
+			ctx = tools.WithThoroughness(ctx, tools.ThoroughnessQuick)
+		case analysis.Score >= 7:
+			ctx = tools.WithThoroughness(ctx, tools.ThoroughnessThorough)
+		}
+	}
+
 	logging.Info("spawning sub-agent",
 		"type", agentType,
 		"background", background,

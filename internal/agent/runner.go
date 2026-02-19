@@ -498,6 +498,10 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 		agent = NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
 	}
 
+	// Apply thoroughness from context
+	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
+	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
+
 	// Set input callback
 	if onInput != nil {
 		agent.SetOnInput(onInput)
@@ -559,9 +563,15 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	// Report activity to coordinator
 	r.reportActivity()
 
-	// Run agent synchronously
+	// Run agent synchronously with per-agent timeout
+	runCtx := ctx
+	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, agentTimeout)
+		defer cancel()
+	}
 	startTime := time.Now()
-	result, err := agent.Run(ctx, prompt)
+	result, err := agent.Run(runCtx, prompt)
 	duration := time.Since(startTime)
 
 	// Report activity after completion
@@ -638,6 +648,10 @@ func (r *Runner) SpawnWithContext(
 	}
 	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
 
+	// Apply thoroughness from context
+	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
+	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
+
 	// Set input callback
 	if onInput != nil {
 		agent.SetOnInput(onInput)
@@ -692,7 +706,14 @@ func (r *Runner) SpawnWithContext(
 
 	r.reportActivity()
 
-	result, err := agent.Run(ctx, prompt)
+	// Apply per-agent timeout
+	runCtx := ctx
+	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, agentTimeout)
+		defer cancel()
+	}
+	result, err := agent.Run(runCtx, prompt)
 
 	// Save error checkpoint on failure for potential recovery
 	if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
@@ -726,6 +747,10 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	messengerFact := r.messengerFactory
 	r.mu.RUnlock()
 	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
+
+	// Apply thoroughness from context
+	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
+	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
 
 	// Set up messenger for inter-agent communication
 	if messengerFact != nil {
@@ -790,7 +815,13 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 
 		// Detach from caller's context so agent survives tool timeout.
 		bgCtx := context.WithoutCancel(ctx)
-		agentCtx, agentCancel := context.WithCancel(bgCtx)
+		var agentCtx context.Context
+		var agentCancel context.CancelFunc
+		if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
+			agentCtx, agentCancel = context.WithTimeout(bgCtx, agentTimeout)
+		} else {
+			agentCtx, agentCancel = context.WithCancel(bgCtx)
+		}
 		defer agentCancel()
 
 		// Store cancel func for explicit Agent.Cancel()
@@ -907,6 +938,10 @@ func (r *Runner) SpawnAsyncWithStreaming(
 
 	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
 
+	// Apply thoroughness from context
+	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
+	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
+
 	// Set up streaming callback
 	if onText != nil {
 		agent.SetOnText(onText)
@@ -982,7 +1017,13 @@ func (r *Runner) SpawnAsyncWithStreaming(
 
 		// Detach from caller's context so agent survives tool timeout.
 		bgCtx := context.WithoutCancel(ctx)
-		agentCtx, agentCancel := context.WithCancel(bgCtx)
+		var agentCtx context.Context
+		var agentCancel context.CancelFunc
+		if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
+			agentCtx, agentCancel = context.WithTimeout(bgCtx, agentTimeout)
+		} else {
+			agentCtx, agentCancel = context.WithCancel(bgCtx)
+		}
 		defer agentCancel()
 
 		// Store cancel func for explicit Agent.Cancel()
@@ -1126,6 +1167,18 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			r.mu.RUnlock()
 			agent := NewAgent(t.Type, c, baseReg, workDir, t.MaxTurns, t.Model, perms, ctxCfg)
 
+			// Apply thoroughness from task or context
+			th := tools.ThoroughnessFromContext(ctx)
+			if t.Thoroughness != "" {
+				th = tools.ParseThoroughness(t.Thoroughness)
+			}
+			agent.ApplyThoroughness(th, t.MaxTurns)
+			os := tools.OutputStyleFromContext(ctx)
+			if t.OutputStyle != "" {
+				os = tools.ParseOutputStyle(t.OutputStyle)
+			}
+			agent.SetOutputStyle(os)
+
 			// Set up messenger for inter-agent communication
 			if messengerFact != nil {
 				messenger := messengerFact(agent.ID)
@@ -1136,7 +1189,14 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			r.agents[agent.ID] = agent
 			r.mu.Unlock()
 
-			result, err := agent.Run(ctx, t.Prompt)
+			// Apply per-agent timeout
+			runCtx := ctx
+			if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
+				var cancel context.CancelFunc
+				runCtx, cancel = context.WithTimeout(ctx, agentTimeout)
+				defer cancel()
+			}
+			result, err := agent.Run(runCtx, t.Prompt)
 
 			mu.Lock()
 			ids[idx] = agent.ID

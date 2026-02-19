@@ -109,6 +109,16 @@ func (t *TaskTool) Declaration() *genai.FunctionDeclaration {
 					Type:        genai.TypeString,
 					Description: "Agent ID to resume from previous execution. If provided, continues from saved state.",
 				},
+				"thoroughness": {
+					Type:        genai.TypeString,
+					Description: "Depth of agent investigation: 'quick' (fast, minimal analysis), 'normal' (default), 'thorough' (comprehensive, deep analysis). Applies to explore and bash types.",
+					Enum:        []string{"quick", "normal", "thorough"},
+				},
+				"output_style": {
+					Type:        genai.TypeString,
+					Description: "Response format style: 'concise' (bullet points, minimal), 'normal' (default), 'detailed' (verbose with full explanations). Applies to all agent types.",
+					Enum:        []string{"concise", "normal", "detailed"},
+				},
 			},
 			Required: []string{"prompt"},
 		},
@@ -154,6 +164,18 @@ func (t *TaskTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	maxTurns := GetIntDefault(args, "max_turns", 30)
 	model := GetStringDefault(args, "model", "")
 	resume := GetStringDefault(args, "resume", "")
+	thoroughnessStr := GetStringDefault(args, "thoroughness", "")
+	outputStyleStr := GetStringDefault(args, "output_style", "")
+
+	// Inject thoroughness into context
+	if thoroughnessStr != "" {
+		ctx = WithThoroughness(ctx, ParseThoroughness(thoroughnessStr))
+	}
+
+	// Inject output style into context
+	if outputStyleStr != "" {
+		ctx = WithOutputStyle(ctx, ParseOutputStyle(outputStyleStr))
+	}
 
 	// If resuming an existing agent
 	if resume != "" {
