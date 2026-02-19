@@ -2573,6 +2573,13 @@ func (a *Agent) GetStatus() AgentStatus {
 	return a.status
 }
 
+// GetEndTime returns the agent's end time (thread-safe).
+func (a *Agent) GetEndTime() time.Time {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.endTime
+}
+
 // Cancel cancels the agent's execution.
 func (a *Agent) Cancel() {
 	a.stateMu.Lock()

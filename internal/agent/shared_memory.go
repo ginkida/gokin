@@ -84,7 +84,6 @@ type SharedMemory struct {
 	entries     map[string]*SharedEntry
 	byType      map[SharedEntryType][]string // Type -> list of keys
 	subscribers map[string]chan<- *SharedEntry
-	closingCh   map[string]bool // Track channels that are being closed
 	mu          sync.RWMutex
 
 	// Metrics for monitoring
@@ -97,7 +96,6 @@ func NewSharedMemory() *SharedMemory {
 		entries:     make(map[string]*SharedEntry),
 		byType:      make(map[SharedEntryType][]string),
 		subscribers: make(map[string]chan<- *SharedEntry),
-		closingCh:   make(map[string]bool),
 	}
 }
 
@@ -150,12 +148,8 @@ func (sm *SharedMemory) WriteWithTTL(key string, value any, entryType SharedEntr
 		sm.byType[entryType] = append(sm.byType[entryType], key)
 	}
 
-	// Notify subscribers (skip channels that are being closed)
+	// Notify subscribers
 	for subscriberID, ch := range sm.subscribers {
-		// Skip channels marked for closing to prevent send-on-closed-channel panic
-		if sm.closingCh[subscriberID] {
-			continue
-		}
 		select {
 		case ch <- entry:
 		default:
@@ -266,14 +260,12 @@ func (sm *SharedMemory) Unsubscribe(agentID string) {
 		return
 	}
 
-	// Mark as closing BEFORE removing from subscribers map
-	// This prevents Write() from sending to this channel while we close it
-	sm.closingCh[agentID] = true
+	// Remove subscriber and close channel under the same lock to prevent
+	// a rapid re-subscribe from seeing a stale closingCh marker.
 	delete(sm.subscribers, agentID)
-	sm.mu.Unlock()
 
-	// Close the channel outside the lock
-	// Using recover to handle any potential panic from double-close
+	// Close the channel under the lock (close is non-blocking).
+	// Using recover to handle any potential panic from double-close.
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -284,9 +276,6 @@ func (sm *SharedMemory) Unsubscribe(agentID string) {
 		close(ch)
 	}()
 
-	// Clean up the closing marker (safe to do without lock since it's only read under lock)
-	sm.mu.Lock()
-	delete(sm.closingCh, agentID)
 	sm.mu.Unlock()
 }
 

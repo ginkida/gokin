@@ -99,7 +99,9 @@ type Runner struct {
 
 // SetPermissions sets the permission manager for agents.
 func (r *Runner) SetPermissions(mgr *permission.Manager) {
+	r.mu.Lock()
 	r.permissions = mgr
+	r.mu.Unlock()
 }
 
 // SetActivityReporter sets the activity reporter.
@@ -397,12 +399,16 @@ func NewRunner(ctx context.Context, c client.Client, registry tools.ToolRegistry
 
 // GetClient returns the underlying client.
 func (r *Runner) GetClient() client.Client {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.client
 }
 
 // SetClient updates the underlying client.
 func (r *Runner) SetClient(c client.Client) {
+	r.mu.Lock()
 	r.client = c
+	r.mu.Unlock()
 }
 
 // cleanupOldResults removes old completed agents and results to prevent unbounded growth.
@@ -470,6 +476,11 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	requireApproval := r.requireApprovalEnabled
 	planApprovedCallback := r.onPlanApproved
 	onInput := r.onInput
+	c := r.client
+	baseReg := r.baseRegistry
+	workDir := r.workDir
+	perms := r.permissions
+	messengerFact := r.messengerFactory
 	r.mu.RUnlock()
 
 	// Check for dynamic type first
@@ -477,14 +488,14 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	if typeRegistry != nil {
 		if dynType, ok := typeRegistry.GetDynamic(agentType); ok {
 			// Create agent with dynamic type configuration
-			agent = NewAgentWithDynamicType(dynType, r.client, r.baseRegistry, r.workDir, maxTurns, model, r.permissions, ctxCfg)
+			agent = NewAgentWithDynamicType(dynType, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
 		}
 	}
 
 	// Fall back to built-in types
 	if agent == nil {
 		at := ParseAgentType(agentType)
-		agent = NewAgent(at, r.client, r.baseRegistry, r.workDir, maxTurns, model, r.permissions, ctxCfg)
+		agent = NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
 	}
 
 	// Set input callback
@@ -493,8 +504,8 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	}
 
 	// Set up messenger for inter-agent communication
-	if r.messengerFactory != nil {
-		messenger := r.messengerFactory(agent.ID)
+	if messengerFact != nil {
+		messenger := messengerFact(agent.ID)
 		agent.SetMessenger(messenger)
 	}
 
@@ -613,14 +624,19 @@ func (r *Runner) SpawnWithContext(
 	errorStore := r.errorStore
 	predictor := r.predictor
 	onInput := r.onInput
+	c := r.client
+	baseReg := r.baseRegistry
+	workDir := r.workDir
+	allPerms := r.permissions
+	messengerFact := r.messengerFactory
 	r.mu.RUnlock()
 
 	// Pass nil permissions for approved plan execution to avoid per-tool prompts
 	var perms *permission.Manager
 	if !skipPermissions {
-		perms = r.permissions
+		perms = allPerms
 	}
-	agent := NewAgent(at, r.client, r.baseRegistry, r.workDir, maxTurns, model, perms, ctxCfg)
+	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
 
 	// Set input callback
 	if onInput != nil {
@@ -628,14 +644,9 @@ func (r *Runner) SpawnWithContext(
 	}
 
 	// Set up messenger for inter-agent communication
-	if r.messengerFactory != nil {
-		messenger := r.messengerFactory(agent.ID)
+	if messengerFact != nil {
+		messenger := messengerFact(agent.ID)
 		agent.SetMessenger(messenger)
-	}
-
-	// Set input callback
-	if onInput != nil {
-		agent.SetOnInput(onInput)
 	}
 
 	// Wire error store for learning from errors
@@ -708,12 +719,17 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	ctxCfg := r.ctxCfg
 	errorStore := r.errorStore
 	predictor := r.predictor
+	c := r.client
+	baseReg := r.baseRegistry
+	workDir := r.workDir
+	perms := r.permissions
+	messengerFact := r.messengerFactory
 	r.mu.RUnlock()
-	agent := NewAgent(at, r.client, r.baseRegistry, r.workDir, maxTurns, model, r.permissions, ctxCfg)
+	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
 
 	// Set up messenger for inter-agent communication
-	if r.messengerFactory != nil {
-		messenger := r.messengerFactory(agent.ID)
+	if messengerFact != nil {
+		messenger := messengerFact(agent.ID)
 		agent.SetMessenger(messenger)
 	}
 
@@ -882,9 +898,14 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	sharedMem := r.sharedMemory
 	exampleStore := r.exampleStore
 	promptOpt := r.promptOptimizer
+	c := r.client
+	baseReg := r.baseRegistry
+	workDir := r.workDir
+	perms := r.permissions
+	messengerFact := r.messengerFactory
 	r.mu.RUnlock()
 
-	agent := NewAgent(at, r.client, r.baseRegistry, r.workDir, maxTurns, model, r.permissions, ctxCfg)
+	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
 
 	// Set up streaming callback
 	if onText != nil {
@@ -892,8 +913,8 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	}
 
 	// Set up messenger for inter-agent communication
-	if r.messengerFactory != nil {
-		messenger := r.messengerFactory(agent.ID)
+	if messengerFact != nil {
+		messenger := messengerFact(agent.ID)
 		agent.SetMessenger(messenger)
 	}
 
@@ -1097,12 +1118,17 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 
 			r.mu.RLock()
 			ctxCfg := r.ctxCfg
+			c := r.client
+			baseReg := r.baseRegistry
+			workDir := r.workDir
+			perms := r.permissions
+			messengerFact := r.messengerFactory
 			r.mu.RUnlock()
-			agent := NewAgent(t.Type, r.client, r.baseRegistry, r.workDir, t.MaxTurns, t.Model, r.permissions, ctxCfg)
+			agent := NewAgent(t.Type, c, baseReg, workDir, t.MaxTurns, t.Model, perms, ctxCfg)
 
 			// Set up messenger for inter-agent communication
-			if r.messengerFactory != nil {
-				messenger := r.messengerFactory(agent.ID)
+			if messengerFact != nil {
+				messenger := messengerFact(agent.ID)
 				agent.SetMessenger(messenger)
 			}
 
@@ -1277,8 +1303,10 @@ func (r *Runner) Cleanup(maxAge time.Duration) int {
 	cleaned := 0
 
 	for id, agent := range r.agents {
-		if agent.status == AgentStatusCompleted || agent.status == AgentStatusFailed {
-			if !agent.endTime.IsZero() && agent.endTime.Before(cutoff) {
+		status := agent.GetStatus()
+		if status == AgentStatusCompleted || status == AgentStatusFailed {
+			endTime := agent.GetEndTime()
+			if !endTime.IsZero() && endTime.Before(cutoff) {
 				delete(r.agents, id)
 				delete(r.results, id)
 				cleaned++
@@ -1334,7 +1362,9 @@ func (r *Runner) cleanupOldResultsLocked() {
 
 // SetStore sets the agent store for persistence.
 func (r *Runner) SetStore(store *AgentStore) {
+	r.mu.Lock()
 	r.store = store
+	r.mu.Unlock()
 }
 
 // Resume resumes an agent from a saved state.
@@ -1352,14 +1382,19 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 	// Create a new agent with the same configuration
 	r.mu.RLock()
 	ctxCfg := r.ctxCfg
+	c := r.client
+	baseReg := r.baseRegistry
+	workDir := r.workDir
+	perms := r.permissions
+	messengerFact := r.messengerFactory
 	r.mu.RUnlock()
-	agent := NewAgent(state.Type, r.client, r.baseRegistry, r.workDir, state.MaxTurns, state.Model, r.permissions, ctxCfg)
+	agent := NewAgent(state.Type, c, baseReg, workDir, state.MaxTurns, state.Model, perms, ctxCfg)
 	// Override ID to match the resumed agent
 	agent.ID = state.ID
 
 	// Set up messenger for inter-agent communication
-	if r.messengerFactory != nil {
-		messenger := r.messengerFactory(agent.ID)
+	if messengerFact != nil {
+		messenger := messengerFact(agent.ID)
 		agent.SetMessenger(messenger)
 	}
 
@@ -1408,13 +1443,18 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 	// Create a new agent with the same configuration
 	r.mu.RLock()
 	ctxCfg := r.ctxCfg
+	c := r.client
+	baseReg := r.baseRegistry
+	workDir := r.workDir
+	perms := r.permissions
+	messengerFact := r.messengerFactory
 	r.mu.RUnlock()
-	agent := NewAgent(state.Type, r.client, r.baseRegistry, r.workDir, state.MaxTurns, state.Model, r.permissions, ctxCfg)
+	agent := NewAgent(state.Type, c, baseReg, workDir, state.MaxTurns, state.Model, perms, ctxCfg)
 	agent.ID = state.ID
 
 	// Set up messenger for inter-agent communication
-	if r.messengerFactory != nil {
-		messenger := r.messengerFactory(agent.ID)
+	if messengerFact != nil {
+		messenger := messengerFact(agent.ID)
 		agent.SetMessenger(messenger)
 	}
 
@@ -1574,14 +1614,19 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 		ctxCfg := r.ctxCfg
 		errorStore := r.errorStore
 		predictor := r.predictor
+		c := r.client
+		baseReg := r.baseRegistry
+		workDir := r.workDir
+		perms := r.permissions
+		messengerFact := r.messengerFactory
 		r.mu.RUnlock()
 
-		agent := NewAgent(state.Type, r.client, r.baseRegistry, r.workDir, state.MaxTurns, state.Model, r.permissions, ctxCfg)
+		agent := NewAgent(state.Type, c, baseReg, workDir, state.MaxTurns, state.Model, perms, ctxCfg)
 		agent.ID = state.ID
 
 		// Wire messenger, error store, predictor (same as ResumeAsync)
-		if r.messengerFactory != nil {
-			agent.SetMessenger(r.messengerFactory(agent.ID))
+		if messengerFact != nil {
+			agent.SetMessenger(messengerFact(agent.ID))
 		}
 		if errorStore != nil && agent.reflector != nil {
 			agent.reflector.SetErrorStore(errorStore)
@@ -1704,13 +1749,18 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 	ctxCfg := r.ctxCfg
 	errorStore := r.errorStore
 	predictor := r.predictor
+	c := r.client
+	baseReg := r.baseRegistry
+	workDir := r.workDir
+	perms := r.permissions
+	messengerFact := r.messengerFactory
 	r.mu.RUnlock()
 
-	agent := NewAgent(state.Type, r.client, r.baseRegistry, r.workDir, state.MaxTurns, state.Model, r.permissions, ctxCfg)
+	agent := NewAgent(state.Type, c, baseReg, workDir, state.MaxTurns, state.Model, perms, ctxCfg)
 	agent.ID = state.ID
 
-	if r.messengerFactory != nil {
-		agent.SetMessenger(r.messengerFactory(agent.ID))
+	if messengerFact != nil {
+		agent.SetMessenger(messengerFact(agent.ID))
 	}
 	if errorStore != nil && agent.reflector != nil {
 		agent.reflector.SetErrorStore(errorStore)

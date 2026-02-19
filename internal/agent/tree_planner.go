@@ -514,6 +514,9 @@ func (tp *TreePlanner) GetNextAction(tree *PlanTree) (*PlannedAction, error) {
 		return nil, fmt.Errorf("invalid plan tree")
 	}
 
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+
 	// Find the first ready node in the best path
 	for _, node := range tree.BestPath {
 		if node.Status == PlanNodePending && tree.arePrerequisitesMet(node) {
@@ -841,7 +844,7 @@ func (tp *TreePlanner) ExpandMilestone(ctx context.Context, tree *PlanTree, node
 
 	logging.Info("expanding milestone", "node_id", node.ID, "prompt", node.Action.Prompt)
 
-	// Call LLM to generate sub-actions
+	// Call LLM to generate sub-actions (done outside lock — may block on network)
 	goal := &PlanGoal{
 		Description: node.Action.Prompt,
 	}
@@ -850,6 +853,7 @@ func (tp *TreePlanner) ExpandMilestone(ctx context.Context, tree *PlanTree, node
 		return fmt.Errorf("failed to generate sub-actions: %w", err)
 	}
 
+	tree.mu.Lock()
 	// Add actions as children of the milestone node
 	for _, action := range actions {
 		tree.AddNode(node.ID, action)
@@ -857,6 +861,7 @@ func (tp *TreePlanner) ExpandMilestone(ctx context.Context, tree *PlanTree, node
 
 	// Recalculate best path to include new children
 	tree.BestPath = tp.SelectBestPath(tree)
+	tree.mu.Unlock()
 
 	return nil
 }
@@ -872,6 +877,7 @@ func (tp *TreePlanner) Replan(ctx context.Context, tree *PlanTree, rctx *ReplanC
 		return fmt.Errorf("cannot replan: FailedNode is nil")
 	}
 
+	tree.mu.Lock()
 	tree.ReplanCount++
 	tree.UpdatedAt = time.Now()
 
@@ -891,15 +897,18 @@ func (tp *TreePlanner) Replan(ctx context.Context, tree *PlanTree, rctx *ReplanC
 	// 3. Expand from parent of failed node
 	parent, ok := tree.GetParent(rctx.FailedNode.ID)
 	if !ok {
-		// Failed at root, need to regenerate entire tree
+		tree.mu.Unlock()
 		return fmt.Errorf("cannot replan from root failure")
 	}
+	tree.mu.Unlock()
 
+	// ExpandNode may call LLM — do it outside the lock
 	newChildren, err := tp.ExpandNode(ctx, tree, parent, tree.Goal)
 	if err != nil {
 		logging.Warn("failed to expand alternatives", "error", err)
 	}
 
+	tree.mu.Lock()
 	// 4. Boost alternatives suggested by reflection
 	if rctx.Reflection != nil && rctx.Reflection.Alternative != "" {
 		for _, child := range newChildren {
@@ -914,6 +923,7 @@ func (tp *TreePlanner) Replan(ctx context.Context, tree *PlanTree, rctx *ReplanC
 
 	// 5. Recalculate best path
 	tree.BestPath = tp.SelectBestPath(tree)
+	tree.mu.Unlock()
 
 	if tp.onReplan != nil {
 		tp.onReplan(tree, rctx)

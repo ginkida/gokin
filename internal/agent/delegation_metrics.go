@@ -105,7 +105,7 @@ func (dm *DelegationMetrics) load() error {
 }
 
 // save persists metrics to disk.
-// Caller must hold dm.mu (read or write lock).
+// Caller must hold dm.mu write lock (writes UpdatedAt).
 func (dm *DelegationMetrics) save() ([]byte, error) {
 	dm.UpdatedAt = time.Now()
 
@@ -279,7 +279,12 @@ func (dm *DelegationMetrics) GetRuleWeight(fromAgent, toAgent, contextType strin
 func (dm *DelegationMetrics) GetRecentTrend(fromAgent, toAgent, contextType string) float64 {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
+	return dm.getRecentTrendLocked(fromAgent, toAgent, contextType)
+}
 
+// getRecentTrendLocked is the lock-free internal version of GetRecentTrend.
+// Caller must hold dm.mu (read or write).
+func (dm *DelegationMetrics) getRecentTrendLocked(fromAgent, toAgent, contextType string) float64 {
 	key := buildPathKey(fromAgent, toAgent, contextType)
 	stats, ok := dm.PathMetrics[key]
 	if !ok || len(stats.RecentResults) < MinSamplesForConfidence {
@@ -325,7 +330,7 @@ func (dm *DelegationMetrics) GetBestTarget(fromAgent, contextType string, candid
 
 		successRate := float64(stats.SuccessCount) / float64(total)
 		weight := dm.RuleWeights[key]
-		trend := dm.GetRecentTrend(fromAgent, candidate, contextType)
+		trend := dm.getRecentTrendLocked(fromAgent, candidate, contextType)
 
 		// Combined score: weighted success rate + trend bonus
 		score := successRate*weight + trend*0.1
@@ -341,9 +346,30 @@ func (dm *DelegationMetrics) GetBestTarget(fromAgent, contextType string, candid
 
 // ShouldUseDelegation returns whether delegation should be used based on historical performance.
 func (dm *DelegationMetrics) ShouldUseDelegation(fromAgent, toAgent, contextType string) bool {
-	successRate := dm.GetSuccessRate(fromAgent, toAgent, contextType)
-	weight := dm.GetRuleWeight(fromAgent, toAgent, contextType)
-	trend := dm.GetRecentTrend(fromAgent, toAgent, contextType)
+	dm.mu.RLock()
+	key := buildPathKey(fromAgent, toAgent, contextType)
+
+	// Read all values atomically under a single lock
+	stats, ok := dm.PathMetrics[key]
+	var successRate float64
+	if !ok {
+		successRate = 0.5
+	} else {
+		total := stats.SuccessCount + stats.FailureCount
+		if total == 0 {
+			successRate = 0.5
+		} else {
+			successRate = float64(stats.SuccessCount) / float64(total)
+		}
+	}
+
+	weight, wOk := dm.RuleWeights[key]
+	if !wOk {
+		weight = 1.0
+	}
+
+	trend := dm.getRecentTrendLocked(fromAgent, toAgent, contextType)
+	dm.mu.RUnlock()
 
 	// Calculate decision threshold
 	threshold := 0.3 // Minimum success rate to continue using delegation
