@@ -399,16 +399,17 @@ func DefaultStyles() *Styles {
 
 		// Card styles (Glassmorphism-lite)
 		UserCard: lipgloss.NewStyle().
-			Border(lipgloss.ThickBorder(), false, false, false, true).
+			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorSecondary).
-			PaddingLeft(2).
+			Padding(0, 1).
 			MarginTop(1).
 			MarginBottom(1),
 
 		AssistantCard: lipgloss.NewStyle().
-			Border(lipgloss.ThickBorder(), false, false, false, true).
+			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorPrimary).
-			PaddingLeft(2).
+			Background(ColorBorder).
+			Padding(0, 1). // keeping padding relatively small so it doesn't waste too much screen real estate
 			MarginTop(1).
 			MarginBottom(1),
 	}
