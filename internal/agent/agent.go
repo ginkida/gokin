@@ -180,7 +180,13 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	// Wire up HistorySearch tool (Custom Improvement)
 	if ht, ok := agent.registry.Get("history_search"); ok {
 		if htt, ok := ht.(*tools.HistorySearchTool); ok {
-			htt.SetHistoryGetter(func() []*genai.Content { return agent.history })
+			htt.SetHistoryGetter(func() []*genai.Content {
+				agent.stateMu.RLock()
+				snap := make([]*genai.Content, len(agent.history))
+				copy(snap, agent.history)
+				agent.stateMu.RUnlock()
+				return snap
+			})
 		}
 	}
 
@@ -278,7 +284,13 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	// Wire up HistorySearch tool (Custom Improvement)
 	if ht, ok := agent.registry.Get("history_search"); ok {
 		if htt, ok := ht.(*tools.HistorySearchTool); ok {
-			htt.SetHistoryGetter(func() []*genai.Content { return agent.history })
+			htt.SetHistoryGetter(func() []*genai.Content {
+				agent.stateMu.RLock()
+				snap := make([]*genai.Content, len(agent.history))
+				copy(snap, agent.history)
+				agent.stateMu.RUnlock()
+				return snap
+			})
 		}
 	}
 
@@ -1474,7 +1486,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					a.history = append(a.history, genai.NewContentFromText(intervention, genai.RoleUser))
 					if loopRecoveryTurns < 3 {
 						loopRecoveryTurns++
-						a.maxTurns++
+						effectiveMaxTurns++
 					}
 					a.stateMu.Unlock()
 					continue
@@ -1504,7 +1516,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					a.history = append(a.history, genai.NewContentFromText(intervention, genai.RoleUser))
 					if loopRecoveryTurns < 3 {
 						loopRecoveryTurns++
-						a.maxTurns++
+						effectiveMaxTurns++
 					}
 					a.stateMu.Unlock()
 					continue

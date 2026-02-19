@@ -340,9 +340,12 @@ func (p *Plan) Progress() float64 {
 	return float64(completed) / float64(len(p.Steps))
 }
 
-// IsComplete returns true if the plan is complete.
+// IsComplete returns true if the plan is complete (thread-safe).
 func (p *Plan) IsComplete() bool {
-	return p.Status == StatusCompleted || p.Status == StatusFailed
+	p.mu.RLock()
+	status := p.Status
+	p.mu.RUnlock()
+	return status == StatusCompleted || status == StatusFailed
 }
 
 // Format returns a formatted string representation of the plan using tree view.

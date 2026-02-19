@@ -549,8 +549,11 @@ func (m *Manager) GetPreviousStepsSummary(currentStepID int, maxLen int) string 
 		return ""
 	}
 
+	// Use thread-safe snapshot to avoid racing with step completion.
+	steps := plan.GetStepsSnapshot()
+
 	var sb strings.Builder
-	for _, step := range plan.Steps {
+	for _, step := range steps {
 		if step.ID >= currentStepID {
 			break
 		}

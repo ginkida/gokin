@@ -329,8 +329,9 @@ func (m *ContextManager) backgroundOptimize(ctx context.Context) {
 		return // Already running
 	}
 
+	done := make(chan struct{})
 	m.mu.Lock()
-	m.summarizeDone = make(chan struct{})
+	m.summarizeDone = done
 	m.mu.Unlock()
 
 	go func() {
@@ -339,9 +340,7 @@ func (m *ContextManager) backgroundOptimize(ctx context.Context) {
 				logging.Error("panic in background optimization", "error", r)
 			}
 			m.summarizing.Store(false)
-			m.mu.Lock()
-			close(m.summarizeDone)
-			m.mu.Unlock()
+			close(done)
 		}()
 
 		start := time.Now()

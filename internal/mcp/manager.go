@@ -356,24 +356,34 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 
 // CheckHealth checks the health of all connected servers.
 func (m *Manager) CheckHealth(ctx context.Context) {
+	// Read client fail counts under read lock to avoid blocking tool execution.
+	m.mu.RLock()
+	type healthUpdate struct {
+		name  string
+		fails int
+	}
+	updates := make([]healthUpdate, 0, len(m.clients))
+	for name, client := range m.clients {
+		updates = append(updates, healthUpdate{name: name, fails: client.ConsecutiveFails()})
+	}
+	m.mu.RUnlock()
+
+	// Write health state under write lock.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	for name, client := range m.clients {
-		fails := client.ConsecutiveFails()
-
-		h, ok := m.health[name]
+	for _, u := range updates {
+		h, ok := m.health[u.name]
 		if !ok {
 			h = &ServerHealth{Healthy: true}
-			m.health[name] = h
+			m.health[u.name] = h
 		}
 
-		h.ConsecutiveFails = fails
+		h.ConsecutiveFails = u.fails
 		h.LastCheck = time.Now()
 
-		if fails >= 3 {
+		if u.fails >= 3 {
 			if h.Healthy {
-				logging.Warn("MCP server marked unhealthy", "name", name, "fails", fails)
+				logging.Warn("MCP server marked unhealthy", "name", u.name, "fails", u.fails)
 			}
 			h.Healthy = false
 		} else {
@@ -557,24 +567,30 @@ func (m *Manager) healthCheckLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// tryReconnectUnhealthy attempts to reconnect servers marked as unhealthy.
-func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// reconnectCandidate holds the info needed to reconnect a single unhealthy server.
+type reconnectCandidate struct {
+	name      string
+	cfg       *ServerConfig
+	health    *ServerHealth
+	oldClient *Client
+}
 
+// tryReconnectUnhealthy attempts to reconnect servers marked as unhealthy.
+// Network I/O is performed outside the lock to avoid blocking other operations.
+func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
+	// Phase 1: collect candidates and clean up old state under lock.
+	m.mu.Lock()
+	var candidates []reconnectCandidate
 	for name, h := range m.health {
 		if h.Healthy {
 			continue
 		}
-
 		if h.MaxReconnects == 0 {
 			h.MaxReconnects = maxReconnectAttempts
 		}
-
 		if h.ReconnectAttempts >= h.MaxReconnects {
-			continue // Gave up on this server
+			continue
 		}
-
 		cfg, exists := m.servers[name]
 		if !exists {
 			continue
@@ -586,9 +602,11 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 			"attempt", h.ReconnectAttempts,
 			"max", h.MaxReconnects)
 
-		// Close old client if exists
+		c := reconnectCandidate{name: name, cfg: cfg, health: h}
+
+		// Detach old client so we can close it outside the lock.
 		if oldClient, ok := m.clients[name]; ok {
-			oldClient.Close()
+			c.oldClient = oldClient
 			delete(m.clients, name)
 
 			// Remove old tools from this server
@@ -605,21 +623,61 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 			m.tools = newTools
 		}
 
-		// Try to reconnect
-		if err := m.connectServer(ctx, cfg); err != nil {
-			h.LastReconnectError = err.Error()
-			logging.Warn("MCP auto-reconnect failed",
-				"name", name,
-				"attempt", h.ReconnectAttempts,
-				"error", err)
+		candidates = append(candidates, c)
+	}
+	m.mu.Unlock()
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	// Phase 2: perform network I/O without holding the lock.
+	for _, c := range candidates {
+		if c.oldClient != nil {
+			c.oldClient.Close()
+		}
+
+		client, err := NewClient(ctx, c.cfg)
+		if err != nil {
+			m.mu.Lock()
+			c.health.LastReconnectError = err.Error()
+			m.mu.Unlock()
+			logging.Warn("MCP auto-reconnect failed", "name", c.name, "error", err)
 			continue
 		}
 
-		// Reconnect succeeded
-		h.Healthy = true
-		h.ConsecutiveFails = 0
-		h.ReconnectAttempts = 0
-		h.LastReconnectError = ""
-		logging.Info("MCP server auto-reconnected successfully", "name", name)
+		if err := client.Initialize(ctx); err != nil {
+			client.Close()
+			m.mu.Lock()
+			c.health.LastReconnectError = err.Error()
+			m.mu.Unlock()
+			logging.Warn("MCP auto-reconnect failed", "name", c.name, "error", err)
+			continue
+		}
+
+		mcpTools, err := client.ListTools(ctx)
+		if err != nil {
+			client.Close()
+			m.mu.Lock()
+			c.health.LastReconnectError = err.Error()
+			m.mu.Unlock()
+			logging.Warn("MCP auto-reconnect failed", "name", c.name, "error", err)
+			continue
+		}
+
+		// Phase 3: commit results under lock.
+		m.mu.Lock()
+		m.clients[c.name] = client
+		for _, t := range mcpTools {
+			tool := NewMCPTool(client, c.cfg.Name, c.cfg.ToolPrefix, t)
+			m.tools = append(m.tools, tool)
+		}
+		c.health.Healthy = true
+		c.health.ConsecutiveFails = 0
+		c.health.ReconnectAttempts = 0
+		c.health.LastReconnectError = ""
+		m.mu.Unlock()
+
+		logging.Info("MCP server auto-reconnected successfully", "name", c.name, "tools", len(mcpTools))
 	}
 }
