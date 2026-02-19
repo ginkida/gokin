@@ -216,9 +216,12 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	if t, ok := agent.registry.Get("update_scratchpad"); ok {
 		if ust, ok := t.(*tools.UpdateScratchpadTool); ok {
 			ust.SetUpdater(func(content string) {
+				agent.stateMu.Lock()
 				agent.Scratchpad = content
-				if agent.onScratchpadUpdate != nil {
-					agent.onScratchpadUpdate(content)
+				cb := agent.onScratchpadUpdate
+				agent.stateMu.Unlock()
+				if cb != nil {
+					cb(content)
 				}
 			})
 		}
@@ -250,19 +253,21 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	}
 
 	agent := &Agent{
-		ID:           id,
-		Type:         AgentType(dynType.Name), // Use dynamic type name
-		Model:        model,
-		client:       agentClient,
-		registry:     filteredRegistry,
-		baseRegistry: baseRegistry,
-		permissions:  permManager,
-		timeout:      2 * time.Minute,
-		history:      make([]*genai.Content, 0),
-		status:       AgentStatusPending,
-		maxTurns:     maxTurns,
-		callHistory:  make(map[string]int),
-		ctxCfg:       ctxCfg,
+		ID:               id,
+		Type:             AgentType(dynType.Name), // Use dynamic type name
+		Model:            model,
+		client:           agentClient,
+		registry:         filteredRegistry,
+		baseRegistry:     baseRegistry,
+		permissions:      permManager,
+		timeout:          2 * time.Minute,
+		history:          make([]*genai.Content, 0),
+		status:           AgentStatusPending,
+		maxTurns:         maxTurns,
+		callHistory:      make(map[string]int),
+		ctxCfg:           ctxCfg,
+		recoveryExecutor: NewRecoveryExecutor(2),
+		autoFixAttempts:  make(map[string]int),
 		// Store custom prompt for dynamic type
 		projectContext: dynType.SystemPrompt,
 	}
@@ -359,16 +364,22 @@ func (a *Agent) SetOnText(onText func(string)) {
 
 // SetOnScratchpadUpdate sets the callback for scratchpad updates.
 func (a *Agent) SetOnScratchpadUpdate(fn func(string)) {
+	a.stateMu.Lock()
 	a.onScratchpadUpdate = fn
+	a.stateMu.Unlock()
 }
 
 // SetPinnedContext sets the pinned context for the agent.
 func (a *Agent) SetPinnedContext(content string) {
+	a.stateMu.Lock()
 	a.PinnedContext = content
+	a.stateMu.Unlock()
 }
 
 // GetPinnedContext returns the pinned context.
 func (a *Agent) GetPinnedContext() string {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
 	return a.PinnedContext
 }
 
@@ -529,21 +540,27 @@ func (a *Agent) EnablePlanningMode(goal *PlanGoal) {
 
 // DisablePlanningMode disables tree-based planning.
 func (a *Agent) DisablePlanningMode() {
+	a.stateMu.Lock()
 	a.planningMode = false
 	a.planGoal = nil
 	if a.activePlan != nil {
 		a.lastPlanTree = a.activePlan
 	}
 	a.activePlan = nil
+	a.stateMu.Unlock()
 }
 
 // GetActivePlan returns the currently active plan tree.
 func (a *Agent) GetActivePlan() *PlanTree {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
 	return a.activePlan
 }
 
 // IsPlanningMode returns whether the agent is in planning mode.
 func (a *Agent) IsPlanningMode() bool {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
 	return a.planningMode
 }
 
@@ -698,8 +715,11 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	result.Duration = endTime.Sub(startTime)
 	result.Completed = true
 
-	// Update progress with completion
-	a.SetProgress(a.totalSteps, a.totalSteps, "Completed")
+	// Update progress with completion — read totalSteps under progressMu
+	a.progressMu.Lock()
+	total := a.totalSteps
+	a.progressMu.Unlock()
+	a.SetProgress(total, total, "Completed")
 
 	a.collectTreeMetrics(result)
 	return result, nil
@@ -750,6 +770,12 @@ func (a *Agent) clearCallHistory() {
 
 // buildSystemPrompt creates the system prompt based on agent type.
 func (a *Agent) buildSystemPrompt() string {
+	// Snapshot mutable fields under stateMu to avoid races
+	a.stateMu.RLock()
+	pinnedCtx := a.PinnedContext
+	scratchpad := a.Scratchpad
+	a.stateMu.RUnlock()
+
 	var sb strings.Builder
 
 	sb.WriteString("You are a specialized sub-agent with limited tool access.\n")
@@ -761,11 +787,11 @@ func (a *Agent) buildSystemPrompt() string {
 	sb.WriteString("\n\n")
 
 	// Inject Pinned Context if provided (Custom Improvement)
-	if a.PinnedContext != "" {
+	if pinnedCtx != "" {
 		sb.WriteString("═══════════════════════════════════════════════════════════════════════\n")
 		sb.WriteString("                         PINNED CONTEXT\n")
 		sb.WriteString("═══════════════════════════════════════════════════════════════════════\n")
-		sb.WriteString(a.PinnedContext)
+		sb.WriteString(pinnedCtx)
 		sb.WriteString("\n═══════════════════════════════════════════════════════════════════════\n\n")
 	}
 
@@ -830,12 +856,12 @@ func (a *Agent) buildSystemPrompt() string {
 	}
 
 	// Inject scratchpad if not empty
-	if a.Scratchpad != "" {
+	if scratchpad != "" {
 		sb.WriteString("\n═══════════════════════════════════════════════════════════════════════\n")
 		sb.WriteString("                         YOUR SCRATCHPAD\n")
 		sb.WriteString("═══════════════════════════════════════════════════════════════════════\n")
 		sb.WriteString("This is your persistent memory. Use it to store facts, thoughts, or plans.\n\n")
-		sb.WriteString(a.Scratchpad)
+		sb.WriteString(scratchpad)
 		sb.WriteString("\n═══════════════════════════════════════════════════════════════════════\n")
 	}
 
@@ -1529,6 +1555,25 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				a.callHistoryMu.Lock()
 				a.loopIntervened = false
 				a.callHistoryMu.Unlock()
+			} else {
+				// Loop was detected — skip real tool execution for this turn.
+				// Synthesize dummy function responses so the API protocol
+				// (function calls must be followed by function responses) is satisfied.
+				var dummyParts []*genai.Part
+				for _, fc := range resp.FunctionCalls {
+					part := genai.NewPartFromFunctionResponse(fc.Name, map[string]any{
+						"error": "Skipped: loop detected, try a different approach",
+					})
+					part.FunctionResponse.ID = fc.ID
+					dummyParts = append(dummyParts, part)
+				}
+				a.stateMu.Lock()
+				a.history = append(a.history, &genai.Content{
+					Role:  genai.RoleUser,
+					Parts: dummyParts,
+				})
+				a.stateMu.Unlock()
+				continue
 			}
 
 			// Update progress to show tool execution
@@ -1968,8 +2013,16 @@ func ensureToolPairConsistency(history []*genai.Content) []*genai.Content {
 			}
 		}
 		if len(keptParts) > 0 {
-			msg.Parts = keptParts
-			result = append(result, msg)
+			if len(keptParts) == len(msg.Parts) {
+				// No parts removed — reuse original Content
+				result = append(result, msg)
+			} else {
+				// Clone Content to avoid mutating shared pointer
+				result = append(result, &genai.Content{
+					Role:  msg.Role,
+					Parts: keptParts,
+				})
+			}
 		}
 	}
 

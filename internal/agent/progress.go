@@ -86,8 +86,17 @@ func (a *Agent) IncrementStep(description string) {
 
 // GetProgress returns the current progress state.
 func (a *Agent) GetProgress() AgentProgress {
+	// Snapshot stateMu-protected fields first (separate lock domain)
+	a.stateMu.RLock()
+	startTime := a.startTime
+	status := a.status
+	a.stateMu.RUnlock()
+
 	a.progressMu.Lock()
-	defer a.progressMu.Unlock()
+	currentStep := a.currentStep
+	totalSteps := a.totalSteps
+	stepDesc := a.stepDescription
+	a.progressMu.Unlock()
 
 	// Get tools used
 	a.toolsMu.Lock()
@@ -98,12 +107,12 @@ func (a *Agent) GetProgress() AgentProgress {
 	return AgentProgress{
 		AgentID:       a.ID,
 		AgentType:     a.Type,
-		CurrentStep:   a.currentStep,
-		TotalSteps:    a.totalSteps,
-		CurrentAction: a.stepDescription,
-		StartTime:     a.startTime,
-		Elapsed:       time.Since(a.startTime),
-		Status:        a.status,
+		CurrentStep:   currentStep,
+		TotalSteps:    totalSteps,
+		CurrentAction: stepDesc,
+		StartTime:     startTime,
+		Elapsed:       time.Since(startTime),
+		Status:        status,
 		ToolsUsed:     toolsUsed,
 	}
 }
