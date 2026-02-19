@@ -55,8 +55,9 @@ type Model struct {
 	responseHeaderShown bool // True if assistant header was shown for current response
 
 	// Token usage tracking
-	tokenUsage *TokenUsageMsg
-	showTokens bool
+	tokenUsage      *TokenUsageMsg
+	baseTokenCount  int // Last authoritative total from TokenUsageMsg, before streaming estimate
+	showTokens      bool
 
 	// Project info
 	projectType string
@@ -1371,21 +1372,19 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case StreamTokenUpdateMsg:
 		if m.tokenUsage != nil {
-			// Update only output tokens with estimate
-			// Keep input tokens same as they don't change during stream
-			m.tokenUsage.Tokens = msg.EstimatedOutputTokens
+			// Add estimated output tokens to the last known base total
+			m.tokenUsage.Tokens = m.baseTokenCount + msg.EstimatedOutputTokens
 			m.tokenUsage.IsEstimate = true
 
 			// Recalculate percentage if MaxTokens is set
 			if m.tokenUsage.MaxTokens > 0 {
-				total := m.tokenUsage.Tokens // Simplified for estimate
-				// PercentUsed is stored as ratio 0..1.
-				m.tokenUsage.PercentUsed = float64(total) / float64(m.tokenUsage.MaxTokens)
+				m.tokenUsage.PercentUsed = float64(m.tokenUsage.Tokens) / float64(m.tokenUsage.MaxTokens)
 			}
 		}
 
 	case TokenUsageMsg:
 		m.tokenUsage = &msg
+		m.baseTokenCount = msg.Tokens
 
 	case ProjectInfoMsg:
 		m.projectType = msg.ProjectType
@@ -1403,14 +1402,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.permRequest = &msg
 		m.permSelectedOption = 0
 		m.state = StatePermissionPrompt
-		m.ringBell()
+		cmds = append(cmds, m.bellCmd())
 
 	case QuestionRequestMsg:
 		m.questionRequest = &msg
 		m.questionSelectedOption = 0
 		m.questionCustomInput = false
 		m.state = StateQuestionPrompt
-		m.ringBell()
+		cmds = append(cmds, m.bellCmd())
 		// If no options, initialize input model for free text
 		if len(msg.Options) == 0 {
 			m.questionInputModel = NewInputModel(m.styles)
@@ -1422,7 +1421,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.planRequest = &msg
 		m.planSelectedOption = 0
 		m.state = StatePlanApproval
-		m.ringBell()
+		cmds = append(cmds, m.bellCmd())
 
 	case PlanProgressMsg:
 		m.planProgress = &msg
@@ -1626,7 +1625,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	// Background task tracking
 	case BackgroundTaskMsg:
-		m.handleBackgroundTask(msg)
+		cmds = append(cmds, m.handleBackgroundTask(msg))
 
 	// Background task progress updates
 	case BackgroundTaskProgressMsg:
@@ -2170,10 +2169,15 @@ func (m *Model) SetBellEnabled(enabled bool) {
 	m.bellEnabled = enabled
 }
 
-// ringBell emits a terminal bell character if bell is enabled.
-func (m *Model) ringBell() {
-	if m.bellEnabled {
-		fmt.Print("\a")
+// bellCmd returns a tea.Cmd that emits a terminal bell if bell is enabled.
+// Must be used instead of writing directly to stdout inside Update().
+func (m *Model) bellCmd() tea.Cmd {
+	if !m.bellEnabled {
+		return nil
+	}
+	return func() tea.Msg {
+		fmt.Fprintf(os.Stderr, "\a")
+		return nil
 	}
 }
 
@@ -2268,7 +2272,7 @@ func (m *Model) handleTaskProgress(msg TaskProgressEvent) {
 	}
 }
 
-// renderProgressBar renders a simple progress bar.
+// renderInlineDiff renders an inline diff for small text changes.
 func (m *Model) renderInlineDiff(msg InlineDiffMsg) {
 	oldLines := strings.Split(msg.OldText, "\n")
 	newLines := strings.Split(msg.NewText, "\n")
@@ -2340,7 +2344,7 @@ func (m *Model) ClearCoordinatedTasks() {
 // ========== Background Task Handlers ==========
 
 // handleBackgroundTask handles the BackgroundTaskMsg message.
-func (m *Model) handleBackgroundTask(msg BackgroundTaskMsg) {
+func (m *Model) handleBackgroundTask(msg BackgroundTaskMsg) tea.Cmd {
 	switch msg.Status {
 	case "running":
 		// New task started - track silently (shown in status bar)
@@ -2353,23 +2357,26 @@ func (m *Model) handleBackgroundTask(msg BackgroundTaskMsg) {
 		}
 
 	case "completed", "failed", "cancelled":
+		var cmd tea.Cmd
 		// Bell on task completion or failure
 		if msg.Status == "completed" || msg.Status == "failed" {
-			m.ringBell()
+			cmd = m.bellCmd()
 		}
 		// Task finished - remove from tracking
 		if task, ok := m.backgroundTasks[msg.ID]; ok {
 			// Only show toast for failures
 			if m.toastManager != nil && msg.Status == "failed" {
 				desc := task.Description
-				if len(desc) > 30 {
-					desc = desc[:27] + "..."
+				if runes := []rune(desc); len(runes) > 30 {
+					desc = string(runes[:27]) + "..."
 				}
 				m.toastManager.ShowError(fmt.Sprintf("Task failed: %s", desc))
 			}
 			delete(m.backgroundTasks, msg.ID)
 		}
+		return cmd
 	}
+	return nil
 }
 
 // GetBackgroundTaskCount returns the number of running background tasks.

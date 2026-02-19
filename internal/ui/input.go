@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"gokin/internal/config"
 
@@ -411,7 +412,8 @@ func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
 	case tea.KeyBackspace:
 		// Remove last character from query
 		if len(m.historySearchQuery) > 0 {
-			m.historySearchQuery = m.historySearchQuery[:len(m.historySearchQuery)-1]
+			_, size := utf8.DecodeLastRuneInString(m.historySearchQuery)
+			m.historySearchQuery = m.historySearchQuery[:len(m.historySearchQuery)-size]
 			m.historySearchIndex = len(m.history)
 			m.searchHistory()
 		}

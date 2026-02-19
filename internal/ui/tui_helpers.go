@@ -45,21 +45,23 @@ func copyViaOSC52(text string) {
 // getMacOSBattery removed as battery monitoring is disabled.
 
 // SetBadgeCmd returns a tea.Cmd that sets the iTerm2 badge.
+// Uses stderr to avoid corrupting Bubble Tea's stdout rendering.
 func SetBadgeCmd(badge string) tea.Cmd {
 	return func() tea.Msg {
 		if os.Getenv("TERM_PROGRAM") == "iTerm.app" {
 			encoded := base64.StdEncoding.EncodeToString([]byte(badge))
-			fmt.Printf("\033]1337;SetBadgeFormat=%s\a", encoded)
+			fmt.Fprintf(os.Stderr, "\033]1337;SetBadgeFormat=%s\a", encoded)
 		}
 		return nil
 	}
 }
 
 // ClearBadgeCmd returns a tea.Cmd that clears the iTerm2 badge.
+// Uses stderr to avoid corrupting Bubble Tea's stdout rendering.
 func ClearBadgeCmd() tea.Cmd {
 	return func() tea.Msg {
 		if os.Getenv("TERM_PROGRAM") == "iTerm.app" {
-			fmt.Print("\033]1337;SetBadgeFormat=\a")
+			fmt.Fprintf(os.Stderr, "\033]1337;SetBadgeFormat=\a")
 		}
 		return nil
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -397,8 +398,9 @@ func (p *ActivityFeedPanel) View(width int) string {
 			maxDescLen = 20
 		}
 		desc := entry.Description
-		if len(desc) > maxDescLen {
-			desc = desc[:maxDescLen-3] + "..."
+		if utf8.RuneCountInString(desc) > maxDescLen {
+			runes := []rune(desc)
+			desc = string(runes[:maxDescLen-3]) + "..."
 		}
 		line.WriteString(dimStyle.Render(desc))
 
