@@ -15,60 +15,47 @@ type entry[K comparable, V any] struct {
 }
 
 // LRUCache is a generic LRU cache with TTL support.
+// Expired entries are cleaned up lazily during Set operations.
 type LRUCache[K comparable, V any] struct {
-	capacity  int
-	ttl       time.Duration
-	entries   map[K]*entry[K, V]
-	evictList *list.List
-	mu        sync.RWMutex
-
-	// Background cleanup
-	cleanupStop chan struct{}
+	capacity    int
+	ttl         time.Duration
+	entries     map[K]*entry[K, V]
+	evictList   *list.List
+	mu          sync.RWMutex
+	lastCleanup time.Time
 }
 
 // NewLRUCache creates a new LRU cache with the given capacity and TTL.
-// A background goroutine periodically removes expired entries.
-// Call Close() to stop the background cleanup goroutine.
+// Expired entries are cleaned up lazily during Set operations (every 5 minutes).
 func NewLRUCache[K comparable, V any](capacity int, ttl time.Duration) *LRUCache[K, V] {
 	if capacity < 1 {
 		capacity = 1
 	}
-	c := &LRUCache[K, V]{
+	return &LRUCache[K, V]{
 		capacity:    capacity,
 		ttl:         ttl,
 		entries:     make(map[K]*entry[K, V]),
 		evictList:   list.New(),
-		cleanupStop: make(chan struct{}),
+		lastCleanup: time.Now(),
 	}
-
-	// Start background cleanup goroutine
-	go c.cleanupLoop()
-
-	return c
 }
 
-// cleanupLoop periodically removes expired entries.
-func (c *LRUCache[K, V]) cleanupLoop() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
+// cleanupInterval is how often lazy cleanup runs during Set operations.
+const cleanupInterval = 5 * time.Minute
 
-	for {
-		select {
-		case <-ticker.C:
-			c.Cleanup()
-		case <-c.cleanupStop:
-			return
+// maybeCleanup runs cleanup if enough time has passed since the last one.
+// Must be called with c.mu already held for writing.
+func (c *LRUCache[K, V]) maybeCleanup() {
+	now := time.Now()
+	if now.Sub(c.lastCleanup) < cleanupInterval {
+		return
+	}
+	c.lastCleanup = now
+	for key, e := range c.entries {
+		if now.After(e.expiresAt) {
+			c.evictList.Remove(e.element)
+			delete(c.entries, key)
 		}
-	}
-}
-
-// Close stops the background cleanup goroutine and releases resources.
-func (c *LRUCache[K, V]) Close() {
-	select {
-	case <-c.cleanupStop:
-		// Already closed
-	default:
-		close(c.cleanupStop)
 	}
 }
 
@@ -122,6 +109,9 @@ func (c *LRUCache[K, V]) Set(key K, value V) {
 	for c.evictList.Len() > c.capacity {
 		c.evictOldest()
 	}
+
+	// Lazy cleanup of expired entries
+	c.maybeCleanup()
 }
 
 // Put is an alias for Set for backward compatibility.

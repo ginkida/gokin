@@ -255,12 +255,20 @@ func (rm *RollbackManager) restoreBackup(backupPath, targetPath string) error {
 
 	_, err = io.Copy(tmpFile, backupFile)
 	backupFile.Close()
-	tmpFile.Close()
 
 	if err != nil {
+		tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to copy backup: %w", err)
 	}
+
+	// Sync to ensure data is flushed to disk before atomic rename
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+	tmpFile.Close()
 
 	// Set permissions
 	if err := os.Chmod(tmpPath, backupInfo.Mode()); err != nil {

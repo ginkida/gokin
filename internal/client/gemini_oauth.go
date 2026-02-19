@@ -601,11 +601,13 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 		"contents": apiContents,
 	}
 
-	// Add system instruction and thinking budget if set
+	// Snapshot all mutable fields under lock to avoid data races.
 	c.mu.RLock()
 	sysInstruction := c.systemInstruction
 	thinkingBudget := c.thinkingBudget
 	model := c.model
+	genCfg := c.genConfig
+	toolsSnap := c.tools
 	c.mu.RUnlock()
 	if sysInstruction != "" {
 		requestPayload["systemInstruction"] = map[string]interface{}{
@@ -616,13 +618,13 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 	}
 
 	// Add generation config
-	if c.genConfig != nil {
+	if genCfg != nil {
 		genConfig := map[string]interface{}{}
-		if c.genConfig.Temperature != nil {
-			genConfig["temperature"] = *c.genConfig.Temperature
+		if genCfg.Temperature != nil {
+			genConfig["temperature"] = *genCfg.Temperature
 		}
-		if c.genConfig.MaxOutputTokens > 0 {
-			genConfig["maxOutputTokens"] = c.genConfig.MaxOutputTokens
+		if genCfg.MaxOutputTokens > 0 {
+			genConfig["maxOutputTokens"] = genCfg.MaxOutputTokens
 		}
 		if thinkingBudget > 0 {
 			// Ensure MaxOutputTokens accommodates thinking + response text
@@ -647,9 +649,9 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 	}
 
 	// Add tools
-	if len(c.tools) > 0 {
+	if len(toolsSnap) > 0 {
 		toolDefs := make([]map[string]interface{}, 0)
-		for _, tool := range c.tools {
+		for _, tool := range toolsSnap {
 			if tool.FunctionDeclarations != nil {
 				funcs := make([]map[string]interface{}, 0, len(tool.FunctionDeclarations))
 				for _, fd := range tool.FunctionDeclarations {

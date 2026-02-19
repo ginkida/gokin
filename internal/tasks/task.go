@@ -108,12 +108,32 @@ func (s Status) String() string {
 	}
 }
 
+// safeBuffer is a bytes.Buffer protected by its own mutex for concurrent access.
+// This is needed because exec.Cmd writes to Stdout/Stderr from OS goroutines
+// while GetOutput/GetInfo read concurrently.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // Task represents a background task.
 type Task struct {
 	ID        string
 	Command   string
 	Status    Status
-	Output    bytes.Buffer
+	Output    safeBuffer
 	Error     string
 	ExitCode  int
 	StartTime time.Time
@@ -202,6 +222,11 @@ func (t *Task) run() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	defer t.doneOnce.Do(func() { close(t.done) }) // Guarantees done is closed on any exit path
+
+	// Release context resources regardless of how the command finished.
+	if t.cancelFunc != nil {
+		t.cancelFunc()
+	}
 
 	t.EndTime = time.Now()
 

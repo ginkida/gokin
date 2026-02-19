@@ -158,18 +158,36 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 		return result
 	}
 
-	// Read output
-	var readErr error
-	result.Stdout, readErr = readWithTimeout(stdout, timeout)
-	if readErr != nil {
-		logging.Debug("failed to read sandbox stdout", "error", readErr)
+	// Read stdout and stderr concurrently to avoid goroutine leaks and
+	// cmd.Wait() hangs when one pipe times out while the other is still open.
+	type pipeResult struct {
+		data []byte
+		err  error
 	}
-	result.Stderr, readErr = readWithTimeout(stderr, timeout)
-	if readErr != nil {
-		logging.Debug("failed to read sandbox stderr", "error", readErr)
+	stdoutCh := make(chan pipeResult, 1)
+	stderrCh := make(chan pipeResult, 1)
+
+	go func() {
+		data, err := readWithTimeout(stdout, timeout)
+		stdoutCh <- pipeResult{data, err}
+	}()
+	go func() {
+		data, err := readWithTimeout(stderr, timeout)
+		stderrCh <- pipeResult{data, err}
+	}()
+
+	stdoutRes := <-stdoutCh
+	stderrRes := <-stderrCh
+	result.Stdout = stdoutRes.data
+	result.Stderr = stderrRes.data
+	if stdoutRes.err != nil {
+		logging.Debug("failed to read sandbox stdout", "error", stdoutRes.err)
+	}
+	if stderrRes.err != nil {
+		logging.Debug("failed to read sandbox stderr", "error", stderrRes.err)
 	}
 
-	// Wait for command to finish
+	// Wait for command to finish (safe now — both pipes are drained or timed out)
 	err = sc.cmd.Wait()
 
 	// Get exit code
