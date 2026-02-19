@@ -619,8 +619,8 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	// Show description for in-progress steps
 	if step.Status == PlanStepInProgress && step.Description != "" {
 		desc := step.Description
-		if len(desc) > maxWidth-6 {
-			desc = desc[:maxWidth-9] + "..."
+		if runes := []rune(desc); len(runes) > maxWidth-6 {
+			desc = string(runes[:maxWidth-9]) + "..."
 		}
 		descStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 		result += "\n    " + descStyle.Render(desc)
@@ -629,8 +629,8 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	// Show first line of output for completed steps
 	if step.Status == PlanStepCompleted && step.Output != "" {
 		summary := firstLine(step.Output)
-		if len(summary) > maxWidth-6 {
-			summary = summary[:maxWidth-9] + "..."
+		if runes := []rune(summary); len(runes) > maxWidth-6 {
+			summary = string(runes[:maxWidth-9]) + "..."
 		}
 		if summary != "" {
 			descStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)

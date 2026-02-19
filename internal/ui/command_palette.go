@@ -592,8 +592,8 @@ func (p *CommandPalette) View(width, height int) string {
 			// Description (truncate to 60 chars max)
 			desc := cmd.Description
 			const maxDescLen = 60
-			if len(desc) > maxDescLen {
-				desc = desc[:maxDescLen] + "..."
+			if runes := []rune(desc); len(runes) > maxDescLen {
+				desc = string(runes[:maxDescLen]) + "..."
 			}
 			maxDesc := paletteWidth - 25
 			if cmd.ArgHint != "" {
@@ -602,8 +602,10 @@ func (p *CommandPalette) View(width, height int) string {
 			if !cmd.Enabled && cmd.Reason != "" {
 				maxDesc -= len(cmd.Reason) + 3
 			}
-			if maxDesc > 5 && len(desc) > maxDesc {
-				desc = desc[:maxDesc-3] + "..."
+			if maxDesc > 5 {
+				if runes := []rune(desc); len(runes) > maxDesc {
+					desc = string(runes[:maxDesc-3]) + "..."
+				}
 			}
 			line.WriteString(desc)
 

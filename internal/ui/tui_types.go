@@ -308,3 +308,8 @@ type RuntimeStatusSnapshot struct {
 	DegradedRemaining  time.Duration
 	ConsecutiveFailure int
 }
+
+// RuntimeStatusMsg delivers a runtime status snapshot fetched in the background.
+type RuntimeStatusMsg struct {
+	Status RuntimeStatusSnapshot
+}

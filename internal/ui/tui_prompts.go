@@ -318,8 +318,8 @@ func (m Model) renderPlanApproval() string {
 	// Description (if present)
 	if m.planRequest.Description != "" {
 		desc := m.planRequest.Description
-		if len(desc) > panelWidth-6 {
-			desc = desc[:panelWidth-9] + "..."
+		if runes := []rune(desc); len(runes) > panelWidth-6 {
+			desc = string(runes[:panelWidth-9]) + "..."
 		}
 		descLine := "  " + descStyle.Render(desc)
 		builder.WriteString(borderStyle.Render("│"))
@@ -369,8 +369,8 @@ func (m Model) renderPlanApproval() string {
 		if step.Description != "" {
 			desc := step.Description
 			maxDescLen := panelWidth - 10
-			if len(desc) > maxDescLen {
-				desc = desc[:maxDescLen-3] + "..."
+			if runes := []rune(desc); len(runes) > maxDescLen {
+				desc = string(runes[:maxDescLen-3]) + "..."
 			}
 			descLine := "     " + stepDescStyle.Render(desc)
 			builder.WriteString(borderStyle.Render("│"))

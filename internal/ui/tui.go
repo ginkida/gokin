@@ -379,9 +379,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activityFeed.Tick()
 		}
 
-		// Refresh runtime health snapshot for status bar.
+		// Refresh runtime health snapshot for status bar (async to avoid blocking on App locks).
 		if m.lastRuntimeRefresh.IsZero() || time.Since(m.lastRuntimeRefresh) >= time.Second {
-			m.refreshRuntimeStatus()
+			m.lastRuntimeRefresh = time.Now() // Prevent re-scheduling until response arrives
+			cmds = append(cmds, m.runtimeStatusCmd())
 		}
 
 		// Check for streaming timeout
@@ -1386,6 +1387,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.tokenUsage = &msg
 		m.baseTokenCount = msg.Tokens
 
+	case RuntimeStatusMsg:
+		m.handleRuntimeStatusMsg(msg)
+
 	case ProjectInfoMsg:
 		m.projectType = msg.ProjectType
 		m.projectName = msg.ProjectName
@@ -2384,9 +2388,13 @@ func (m *Model) GetBackgroundTaskCount() int {
 	return len(m.backgroundTasks)
 }
 
-// GetBackgroundTasks returns all background tasks.
+// GetBackgroundTasks returns a snapshot of all background tasks.
 func (m *Model) GetBackgroundTasks() map[string]*BackgroundTaskState {
-	return m.backgroundTasks
+	result := make(map[string]*BackgroundTaskState, len(m.backgroundTasks))
+	for k, v := range m.backgroundTasks {
+		result[k] = v
+	}
+	return result
 }
 
 // ========== Toast Notification Methods ==========
