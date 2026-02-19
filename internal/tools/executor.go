@@ -164,7 +164,7 @@ type Executor struct {
 	auditLogger       *audit.Logger
 	sessionID         string
 	fallback          FallbackConfig
-	historyMu         sync.Mutex // Protects history modifications in executeLoop
+	clientMu sync.RWMutex // Protects client field
 
 	// Enhanced safety features
 	safetyValidator  SafetyValidator
@@ -304,7 +304,17 @@ func (e *Executor) drainPendingNotifications() []string {
 
 // SetClient updates the underlying client.
 func (e *Executor) SetClient(c client.Client) {
+	e.clientMu.Lock()
 	e.client = c
+	e.clientMu.Unlock()
+}
+
+// getClient returns the current client under read lock.
+func (e *Executor) getClient() client.Client {
+	e.clientMu.RLock()
+	c := e.client
+	e.clientMu.RUnlock()
+	return c
 }
 
 // SetModelRoundTimeout sets timeout for a single model round.
@@ -430,6 +440,9 @@ func (e *Executor) Execute(ctx context.Context, history []*genai.Content, messag
 
 // executeLoop runs the function calling loop until a final text response is received.
 func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([]*genai.Content, string, error) {
+	// Snapshot client once per executeLoop to avoid racing with SetClient.
+	cl := e.getClient()
+
 	// === IMPROVEMENT 3: Dynamic max iterations based on context complexity ===
 	maxIterations := e.calculateMaxIterations(history)
 
@@ -457,7 +470,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 
 		// Get response from model
-		resp, err := e.getModelResponse(ctx, history)
+		resp, err := e.getModelResponse(ctx, cl, history)
 		if err != nil {
 			ft := client.DetectFailureTelemetry(err)
 			logging.Warn("model round failed",
@@ -503,9 +516,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					Role:  genai.RoleModel,
 					Parts: []*genai.Part{genai.NewPartFromText(resp.Text)},
 				}
-				e.historyMu.Lock()
 				history = append(history, partialContent)
-				e.historyMu.Unlock()
 			}
 			return history, "", fmt.Errorf("model response error (%s): %w", ft.Reason, err)
 		}
@@ -514,7 +525,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 		// Text-based tool call fallback for models without native function calling
 		if len(resp.FunctionCalls) == 0 && resp.Text != "" {
-			if fallbackClient, ok := e.client.(interface{ NeedsToolCallFallback() bool }); ok && fallbackClient.NeedsToolCallFallback() {
+			if fallbackClient, ok := cl.(interface{ NeedsToolCallFallback() bool }); ok && fallbackClient.NeedsToolCallFallback() {
 				if parsed := client.ParseToolCallsFromText(resp.Text); len(parsed) > 0 {
 					resp.FunctionCalls = parsed
 					// Strip the JSON from text since we're treating it as a tool call
@@ -524,15 +535,13 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			}
 		}
 
-		// Add model response to history (with mutex protection)
+		// Add model response to history
 		modelContent := &genai.Content{
 			Role:  genai.RoleModel,
 			Parts: e.buildResponseParts(resp),
 		}
 
-		e.historyMu.Lock()
 		history = append(history, modelContent)
-		e.historyMu.Unlock()
 
 		// Handle chained function calls in an inner loop
 		for len(resp.FunctionCalls) > 0 {
@@ -575,20 +584,16 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				Parts: funcResultParts,
 			}
 
-			e.historyMu.Lock()
 			historyBeforeResults := len(history)
 			history = append(history, funcResultContent)
-			e.historyMu.Unlock()
 
 			// Inject pending background task completion notifications
 			if notifications := e.drainPendingNotifications(); len(notifications) > 0 {
 				notifText := "[System: " + strings.Join(notifications, "; ") + "]"
-				e.historyMu.Lock()
 				history = append(history, &genai.Content{
 					Role:  genai.RoleUser,
 					Parts: []*genai.Part{genai.NewPartFromText(notifText)},
 				})
-				e.historyMu.Unlock()
 			}
 
 			// Send function responses back to model.
@@ -596,7 +601,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// all client implementations append results themselves.
 			for {
 				roundCtx, roundCancel := e.withModelRoundTimeout(ctx)
-				stream, err := e.client.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
+				stream, err := cl.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
 				if err != nil {
 					roundCancel()
 					return history, "", fmt.Errorf("function response error: %w", err)
@@ -636,9 +641,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 							Role:  genai.RoleModel,
 							Parts: []*genai.Part{genai.NewPartFromText(resp.Text)},
 						}
-						e.historyMu.Lock()
 						history = append(history, partialContent)
-						e.historyMu.Unlock()
 					}
 					return history, "", fmt.Errorf("function response error (%s): %w", ft.Reason, err)
 				}
@@ -664,7 +667,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			// Text-based tool call fallback for chained calls
 			if len(resp.FunctionCalls) == 0 && resp.Text != "" {
-				if fallbackClient, ok := e.client.(interface{ NeedsToolCallFallback() bool }); ok && fallbackClient.NeedsToolCallFallback() {
+				if fallbackClient, ok := cl.(interface{ NeedsToolCallFallback() bool }); ok && fallbackClient.NeedsToolCallFallback() {
 					if parsed := client.ParseToolCallsFromText(resp.Text); len(parsed) > 0 {
 						resp.FunctionCalls = parsed
 						resp.Text = ""
@@ -673,15 +676,13 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				}
 			}
 
-			// Add model response to history (with mutex protection)
+			// Add model response to history
 			modelContent = &genai.Content{
 				Role:  genai.RoleModel,
 				Parts: e.buildResponseParts(resp),
 			}
 
-			e.historyMu.Lock()
 			history = append(history, modelContent)
-			e.historyMu.Unlock()
 		}
 
 		// No more function calls, we have the final response
@@ -733,7 +734,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				"- The model doesn't support the current configuration\n"+
 				"- ThinkingBudget may need adjustment (try /config)\n"+
 				"- Try switching to a different model with /model\n\n"+
-				"Model: %s", e.client.GetModel())
+				"Model: %s", cl.GetModel())
 			if e.handler != nil && e.handler.OnText != nil {
 				e.handler.OnText(finalText)
 			}
@@ -769,7 +770,8 @@ func (e *Executor) calculateMaxIterations(history []*genai.Content) int {
 }
 
 // getModelResponse gets an initial response from the model.
-func (e *Executor) getModelResponse(ctx context.Context, history []*genai.Content) (*client.Response, error) {
+// The cl parameter is a snapshot of the client taken at the start of the execute loop.
+func (e *Executor) getModelResponse(ctx context.Context, cl client.Client, history []*genai.Content) (*client.Response, error) {
 	if len(history) == 0 {
 		return nil, fmt.Errorf("cannot get model response: empty history")
 	}
@@ -790,7 +792,7 @@ func (e *Executor) getModelResponse(ctx context.Context, history []*genai.Conten
 	roundCtx, cancel := e.withModelRoundTimeout(ctx)
 	defer cancel()
 
-	stream, err := e.client.SendMessageWithHistory(roundCtx, historyWithoutLast, message)
+	stream, err := cl.SendMessageWithHistory(roundCtx, historyWithoutLast, message)
 	if err != nil {
 		return nil, err
 	}
@@ -1146,6 +1148,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Use 500ms interval for responsive UI feedback (was 5s)
 	done := make(chan struct{})
 	if e.handler != nil && e.handler.OnToolProgress != nil {
+		onProgress := e.handler.OnToolProgress // snapshot to avoid nil checks in goroutine
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -1153,20 +1156,12 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				}
 			}()
 
-			// Send immediate progress notification on tool start
-			if e.handler != nil && e.handler.OnToolProgress != nil {
-				e.handler.OnToolProgress(call.Name, 0)
-			}
-
 			ticker := time.NewTicker(500 * time.Millisecond)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					elapsed := time.Since(start)
-					if e.handler != nil && e.handler.OnToolProgress != nil {
-						e.handler.OnToolProgress(call.Name, elapsed)
-					}
+					onProgress(call.Name, time.Since(start))
 				case <-done:
 					return
 				case <-execCtx.Done():
@@ -1523,20 +1518,22 @@ func (e *Executor) trySelfHeal(ctx context.Context, call *genai.FunctionCall) To
 	return ToolResult{Success: false}
 }
 
+// writeTools is a set of tools that modify files/state, used for deduplication.
+var writeTools = map[string]bool{
+	"write":       true,
+	"edit":        true,
+	"delete":      true,
+	"atomicwrite": true,
+	"copy":        true,
+	"move":        true,
+	"mkdir":       true,
+	"bash":        true, // bash can modify anything
+	"git_add":     true,
+	"git_commit":  true,
+}
+
 // isWriteOperation returns true if the tool modifies files/state.
 func isWriteOperation(toolName string) bool {
-	writeTools := map[string]bool{
-		"write":       true,
-		"edit":        true,
-		"delete":      true,
-		"atomicwrite": true,
-		"copy":        true,
-		"move":        true,
-		"mkdir":       true,
-		"bash":        true, // bash can modify anything
-		"git_add":     true,
-		"git_commit":  true,
-	}
 	return writeTools[toolName]
 }
 
@@ -1588,11 +1585,6 @@ func getToolFilePath(call *genai.FunctionCall) string {
 	}
 	if path, ok := call.Args["file_path"].(string); ok {
 		return path
-	}
-	if path, ok := call.Args["command"].(string); ok {
-		// For bash, we can't easily detect file paths
-		_ = path
-		return ""
 	}
 	return ""
 }

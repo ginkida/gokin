@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -495,7 +496,7 @@ func defaultDelegationRules() []DelegationRule {
 			BuildQuery: func(ctx *DelegationContext) string {
 				return "I'm stuck on this task. Please help me break it down into smaller steps:\n\n" +
 					"Last action: " + ctx.LastToolName + "\n" +
-					"I've been trying the same approach for " + string(rune(ctx.StuckCount+'0')) + " turns."
+					"I've been trying the same approach for " + strconv.Itoa(ctx.StuckCount) + " turns."
 			},
 			Reason: "General agent stuck - needs task decomposition",
 		},

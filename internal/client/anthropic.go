@@ -1543,14 +1543,6 @@ func convertSchemaToJSON(schema *genai.Schema) map[string]interface{} {
 	return result
 }
 
-// convertToolsToAnthropic converts Gemini tools to Anthropic format.
-func (c *AnthropicClient) convertToolsToAnthropic() []map[string]interface{} {
-	c.mu.RLock()
-	tools := c.tools
-	c.mu.RUnlock()
-	return c.convertToolsToAnthropicFrom(tools)
-}
-
 // convertToolsToAnthropicFrom converts the given Gemini tools to Anthropic format.
 func (c *AnthropicClient) convertToolsToAnthropicFrom(genaiTools []*genai.Tool) []map[string]interface{} {
 	tools := make([]map[string]interface{}, 0)

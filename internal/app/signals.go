@@ -174,6 +174,16 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		a.uiUpdateManager.Stop()
 	}
 
+	// 3b. Stop coordinator and meta-agent goroutines
+	if a.coordinator != nil {
+		logging.Debug("stopping coordinator")
+		a.coordinator.Stop()
+	}
+	if a.metaAgent != nil {
+		logging.Debug("stopping meta-agent")
+		a.metaAgent.Stop()
+	}
+
 	// 4. Cancel all running background tasks
 	if a.taskManager != nil {
 		logging.Debug("cancelling background tasks")

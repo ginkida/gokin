@@ -1139,45 +1139,8 @@ func (a *App) IsPlanningModeEnabled() bool {
 // This is safe to call from UI callbacks as it doesn't block the Bubble Tea event loop.
 func (a *App) TogglePlanningModeAsync() {
 	go func() {
-		a.mu.Lock()
-		a.planningModeEnabled = !a.planningModeEnabled
-		newEnabled := a.planningModeEnabled
-
-		if a.planManager != nil {
-			a.planManager.SetEnabled(newEnabled)
-		}
-
-		if a.agentRunner != nil {
-			a.agentRunner.SetPlanningModeEnabled(newEnabled)
-		}
-
-		if a.tui != nil {
-			a.tui.SetPlanningModeEnabled(newEnabled)
-		}
-
-		if newEnabled {
-			logging.Debug("planning mode enabled")
-		} else {
-			logging.Debug("planning mode disabled")
-		}
-
-		program := a.program
-		permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
-		sandboxEnabled := a.config.Tools.Bash.Sandbox
-		modelName := a.config.Model.Name
-		a.mu.Unlock()
-
-		if program != nil {
-			// Send toggled message for UI feedback
-			program.Send(ui.PlanningModeToggledMsg{Enabled: newEnabled})
-			// Send config update for status bar
-			program.Send(ui.ConfigUpdateMsg{
-				PermissionsEnabled:  permissionsEnabled,
-				SandboxEnabled:      sandboxEnabled,
-				PlanningModeEnabled: newEnabled,
-				ModelName:           modelName,
-			})
-		}
+		newEnabled := a.TogglePlanningMode()
+		a.safeSendToProgram(ui.PlanningModeToggledMsg{Enabled: newEnabled})
 	}()
 }
 
@@ -1187,11 +1150,6 @@ func (a *App) ToggleSandbox() bool {
 
 	a.config.Tools.Bash.Sandbox = !a.config.Tools.Bash.Sandbox
 	newEnabled := a.config.Tools.Bash.Sandbox
-
-	// Save config
-	if err := a.config.Save(); err != nil {
-		logging.Warn("failed to save sandbox setting", "error", err)
-	}
 
 	// Update bash tool sandbox setting
 	if a.registry != nil {
@@ -1217,11 +1175,17 @@ func (a *App) ToggleSandbox() bool {
 	a.updateUnrestrictedModeLocked()
 
 	// Copy state for UI message before unlocking
+	cfg := a.config
 	program := a.program
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	planningModeEnabled := a.planningModeEnabled
 	modelName := a.config.Model.Name
 	a.mu.Unlock()
+
+	// Save config outside of mutex to avoid blocking on file I/O
+	if err := cfg.Save(); err != nil {
+		logging.Warn("failed to save sandbox setting", "error", err)
+	}
 
 	// Send UI update message to trigger proper refresh
 	if program != nil {
@@ -1323,7 +1287,11 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	oldClient := a.client
 	a.client = newClient
 	if oldClient != nil {
-		go oldClient.Close() // Close old client asynchronously to avoid blocking
+		go func() {
+			if err := oldClient.Close(); err != nil {
+				logging.Warn("failed to close old client", "error", err)
+			}
+		}()
 	}
 
 	// 4. Update executor's client and sync tools
