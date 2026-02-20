@@ -95,7 +95,9 @@ func (m Model) compactStatusSegments() []string {
 	parts = append(parts, "provider:"+provider)
 
 	if pct := m.getContextPercent(); pct > 0 {
-		parts = append(parts, fmt.Sprintf("ctx:%.0f%%", pct))
+		color := contextUrgencyColor(pct)
+		hint := contextUrgencyHint(pct)
+		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("ctx:%.0f%%", pct)+hint))
 	} else {
 		parts = append(parts, "ctx:n/a")
 	}
@@ -129,7 +131,8 @@ func (m Model) minimalStatusSegments() []string {
 	parts = append(parts, "provider:"+provider)
 
 	if pct := m.getContextPercent(); pct > 0 {
-		parts = append(parts, fmt.Sprintf("ctx:%.0f%%", pct))
+		color := contextUrgencyColor(pct)
+		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("ctx:%.0f%%", pct)))
 	}
 
 	return parts
@@ -210,10 +213,7 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		mode = m.runtimeStatus.Mode
 	}
 	if strings.HasPrefix(mode, "degraded") {
-		modeText := "mode:degraded"
-		if m.runtimeStatus.DegradedRemaining > 0 && withContextBar {
-			modeText = fmt.Sprintf("mode:degraded(%s)", m.runtimeStatus.DegradedRemaining.Round(time.Second))
-		}
+		modeText := m.degradedModeLabel(withContextBar)
 		parts = append(parts, degradedStyle.Render(modeText))
 	} else {
 		parts = append(parts, modeStyle.Render("mode:normal"))
@@ -332,13 +332,41 @@ func (m Model) formatTokenStatus(withContextBar bool) string {
 		return bar
 	}
 	if m.tokenUsage != nil && m.tokenUsage.MaxTokens > 0 {
-		return lipgloss.NewStyle().Foreground(ColorMuted).Render(
+		color := contextUrgencyColor(pct)
+		return lipgloss.NewStyle().Foreground(color).Render(
 			fmt.Sprintf("tok:%d/%d", m.tokenUsage.Tokens, m.tokenUsage.MaxTokens))
 	}
 	if pct > 0 {
-		return lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf("tok:%.0f%%", pct))
+		color := contextUrgencyColor(pct)
+		return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("tok:%.0f%%", pct))
 	}
 	return ""
+}
+
+// contextUrgencyColor returns a color based on context usage percentage.
+func contextUrgencyColor(pct float64) lipgloss.Color {
+	switch {
+	case pct > 95:
+		return ColorError // Red — critical
+	case pct > 80:
+		return lipgloss.Color("#F97316") // Orange 500 — high
+	case pct > 60:
+		return ColorWarning // Amber — elevated
+	default:
+		return ColorSuccess // Green — healthy
+	}
+}
+
+// contextUrgencyHint returns a short hint when context is getting full.
+func contextUrgencyHint(pct float64) string {
+	switch {
+	case pct > 95:
+		return " /compact now"
+	case pct > 80:
+		return " compact soon"
+	default:
+		return ""
+	}
 }
 
 // renderContextBar returns a visual progress bar for context usage.
@@ -352,16 +380,7 @@ func renderContextBar(pct float64, barWidth int) string {
 		filled = barWidth
 	}
 
-	// Color based on usage level
-	var barColor lipgloss.Color
-	switch {
-	case pct > 80:
-		barColor = ColorError
-	case pct > 50:
-		barColor = ColorWarning
-	default:
-		barColor = ColorDim
-	}
+	barColor := contextUrgencyColor(pct)
 
 	filledStyle := lipgloss.NewStyle().Foreground(barColor)
 	emptyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#374151"))
@@ -380,6 +399,10 @@ func renderContextBar(pct float64, barWidth int) string {
 		label = fmt.Sprintf("%.0f%%", pct)
 	}
 
+	hint := contextUrgencyHint(pct)
+	if hint != "" {
+		return bar + " " + pctStyle.Render(label) + " " + lipgloss.NewStyle().Foreground(barColor).Bold(true).Render(hint)
+	}
 	return bar + " " + pctStyle.Render(label)
 }
 
@@ -416,6 +439,94 @@ func (m Model) formatBackgroundTaskStatus(bgCount int) string {
 		return bestAction
 	}
 	return fmt.Sprintf("%d bg", bgCount)
+}
+
+// degradedModeLabel returns a specific label for degraded mode based on runtime state.
+func (m Model) degradedModeLabel(withDetail bool) string {
+	rs := m.runtimeStatus
+
+	// Determine the specific reason
+	reqOpen := strings.EqualFold(rs.RequestBreaker, "open")
+	stepOpen := strings.EqualFold(rs.StepBreaker, "open")
+	reqHalf := strings.EqualFold(rs.RequestBreaker, "half_open")
+
+	var reason string
+	switch {
+	case reqOpen && stepOpen:
+		reason = "breakers-open"
+	case reqOpen:
+		reason = "req-breaker-open"
+	case stepOpen:
+		reason = "step-breaker-open"
+	case reqHalf:
+		reason = "recovering"
+	case rs.ConsecutiveFailure > 0:
+		reason = fmt.Sprintf("failures:%d", rs.ConsecutiveFailure)
+	default:
+		reason = "degraded"
+	}
+
+	if withDetail && rs.DegradedRemaining > 0 {
+		return fmt.Sprintf("mode:%s(retry %s)", reason, rs.DegradedRemaining.Round(time.Second))
+	}
+	return "mode:" + reason
+}
+
+// contextualShortcutHints returns a compact line of shortcuts relevant to current state.
+func (m Model) contextualShortcutHints() string {
+	keyStyle := lipgloss.NewStyle().Foreground(ColorMuted).Bold(true)
+	descStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	sep := descStyle.Render(" · ")
+
+	var parts []string
+	add := func(key, desc string) {
+		parts = append(parts, keyStyle.Render(key)+" "+descStyle.Render(desc))
+	}
+
+	switch m.state {
+	case StatePermissionPrompt:
+		add("y", "Allow")
+		add("a", "Always")
+		add("n", "Deny")
+		add("esc", "Cancel")
+	case StatePlanApproval:
+		add("y", "Approve")
+		add("n", "Reject")
+		add("m", "Modify")
+		add("↑↓", "Navigate")
+	case StateDiffPreview:
+		add("Enter", "Accept")
+		add("e", "Edit")
+		add("n", "Reject")
+		add("q", "Close")
+	case StateQuestionPrompt:
+		add("↑↓", "Navigate")
+		add("Enter", "Confirm")
+		add("esc", "Cancel")
+	case StateModelSelector:
+		add("↑↓", "Navigate")
+		add("Enter", "Select")
+		add("esc", "Cancel")
+	case StateInput:
+		// Only show when output is non-empty (user has been interacting)
+		if !m.output.IsEmpty() {
+			add("?", "Shortcuts")
+			add("Ctrl+P", "Commands")
+			if !m.output.IsAtBottom() {
+				add("PgDn", "Scroll")
+			}
+		}
+	case StateProcessing, StateStreaming:
+		add("esc", "Interrupt")
+	default:
+		return ""
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return strings.Join(parts, sep)
 }
 
 // shortenModelName returns a shortened model name.

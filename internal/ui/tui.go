@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"gokin/internal/format"
+	"gokin/internal/highlight"
 )
 
 const (
@@ -204,6 +205,13 @@ type Model struct {
 	// Plan pause/resume UX block
 	planPauseNotice *PlanProgressMsg
 
+	// Syntax highlighting for tool output
+	highlighter *highlight.Highlighter
+
+	// Response timing breakdown
+	responseToolDuration time.Duration // Total time spent in tool calls during current response
+	responseToolCount    int           // Number of tool calls in current response
+
 	// Request latency tracking
 	lastRequestLatency time.Duration
 	retryAttempt       int
@@ -311,6 +319,7 @@ func NewModel() *Model {
 		activityFeed:         NewActivityFeedPanel(styles),
 		currentResponseBuf:   &strings.Builder{},
 		bellEnabled:          true, // Terminal bell enabled by default
+		highlighter:          highlight.New("monokai"),
 	}
 }
 
@@ -848,6 +857,8 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 				// Slash command - submit to the app
 				m.state = StateProcessing
 				m.streamStartTime = time.Now()
+				m.responseToolDuration = 0 // Reset tool timing for new response
+				m.responseToolCount = 0
 				m.output.AppendLine(m.styles.FormatUserMessage(cmd.Shortcut))
 				m.output.AppendLine("")
 				if m.onSubmit != nil {
@@ -1120,6 +1131,8 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.lastActivityTime = time.Now() // Start activity tracking
 				m.slowWarningShown = false      // Reset slow warning
 				m.responseHeaderShown = false   // Reset for new response
+				m.responseToolDuration = 0      // Reset tool timing for new response
+				m.responseToolCount = 0
 				m.output.AppendLine(m.styles.FormatUserMessage(value))
 				m.output.AppendLine("")
 
@@ -1245,6 +1258,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if matchIdx >= 0 {
 			matched := m.activeToolCalls[matchIdx]
 
+			// Track tool execution time for response timing breakdown
+			if !matched.startTime.IsZero() {
+				m.responseToolDuration += time.Since(matched.startTime)
+				m.responseToolCount++
+			}
+
 			// Complete entry in activity feed with result summary
 			if m.activityFeed != nil {
 				summary := GenerateResultSummary(matched.name, msg.Content)
@@ -1322,6 +1341,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.responseHeaderShown = false    // Reset for next response
 		m.lastErrorMsg = ""              // Reset error dedup
 		m.lastErrorCount = 0
+		m.responseToolDuration = 0 // Reset tool timing
+		m.responseToolCount = 0
 		if m.currentResponseBuf.Len() > 0 {
 			m.lastResponseText = m.currentResponseBuf.String()
 			m.currentResponseBuf.Reset()
@@ -1344,11 +1365,18 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.state = StateInput
 		m.currentTool = ""
 		m.currentToolInfo = ""
+		m.processingLabel = ""
+		m.loopIteration = 0
+		m.loopToolsUsed = 0
 		m.activeToolCalls = nil
-		m.streamStartTime = time.Time{} // Reset timeout tracking
-		m.responseHeaderShown = false   // Reset for next response
-		m.currentResponseBuf.Reset()    // Discard partial response on error
-		m.output.FlushStream()          // Flush any remaining streamed content
+		m.streamStartTime = time.Time{}  // Reset timeout tracking
+		m.lastActivityTime = time.Time{} // Reset activity tracking
+		m.slowWarningShown = false       // Reset slow warning
+		m.responseHeaderShown = false    // Reset for next response
+		m.responseToolDuration = 0       // Reset tool timing
+		m.responseToolCount = 0
+		m.currentResponseBuf.Reset() // Discard partial response on error
+		m.output.FlushStream()       // Flush any remaining streamed content
 
 		errStr := msg.Error()
 		if errStr == m.lastErrorMsg {
@@ -1806,8 +1834,9 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 	// Build summary and duration
 	var summary string
 	var dur string
+	var duration time.Duration
 	if toolName != "" && !startTime.IsZero() {
-		duration := time.Since(startTime)
+		duration = time.Since(startTime)
 		summary = generateToolResultSummary(toolName, content, toolInfo)
 
 		// Format duration
@@ -1820,8 +1849,8 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 		}
 	}
 
-	// Summary with connector: "  ⎿  summary  duration"
-	if summary != "" || dur != "" {
+	// Summary with connector: "  ⎿  ✓ summary  duration"
+	{
 		connStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		var summaryLine strings.Builder
 		summaryLine.WriteString(connStyle.Render("  ⎿  "))
@@ -1832,7 +1861,14 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 			if summary != "" {
 				summaryLine.WriteString("  ")
 			}
-			summaryLine.WriteString(dimStyle.Render(dur))
+			// Color duration by speed: fast=dim, slow=warning, very slow=rose
+			durColor := ColorDim
+			if duration > 30*time.Second {
+				durColor = ColorRose
+			} else if duration > 5*time.Second {
+				durColor = ColorWarning
+			}
+			summaryLine.WriteString(lipgloss.NewStyle().Foreground(durColor).Render(dur))
 		}
 		m.output.AppendLine(summaryLine.String())
 	}
@@ -1860,10 +1896,26 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 
 	// Content lines (truncated) with simple indent
 	displayContent := FormatToolOutput(content, 6, false)
+
+	// Apply syntax highlighting for read tool AFTER truncation
+	highlighted := false
+	if toolName == "read" && toolInfo != "" && m.highlighter != nil {
+		lang := m.highlighter.DetectLanguage(toolInfo)
+		if lang != "" && lang != "text" {
+			displayContent = m.highlighter.Highlight(displayContent, lang)
+			highlighted = true
+		}
+	}
+
 	lines := strings.Split(displayContent, "\n")
 	for _, line := range lines {
 		if line != "" {
-			m.output.AppendLine("    " + contentStyle.Render(line))
+			if highlighted {
+				// Already has ANSI color codes — don't wrap in contentStyle
+				m.output.AppendLine("    " + line)
+			} else {
+				m.output.AppendLine("    " + contentStyle.Render(line))
+			}
 		}
 	}
 	m.output.AppendLine("")
@@ -2138,6 +2190,12 @@ func (m Model) View() string {
 			hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 			builder.WriteString("\n" + hintStyle.Render("  "+strings.Join(hiddenPanelHints, " • ")))
 		}
+	}
+
+	// Contextual shortcut hints (compact, state-aware)
+	if hints := m.contextualShortcutHints(); hints != "" {
+		builder.WriteString("\n")
+		builder.WriteString(hints)
 	}
 
 	// Enhanced status bar

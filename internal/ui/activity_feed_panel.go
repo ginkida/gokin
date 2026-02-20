@@ -423,6 +423,14 @@ func (p *ActivityFeedPanel) View(width int) string {
 		builder.WriteString("\n")
 	}
 
+	// Metrics summary line
+	if metricsLine := p.buildMetricsSummary(); metricsLine != "" {
+		builder.WriteString(dimStyle.Render(strings.Repeat("─", width-4)))
+		builder.WriteString("\n")
+		builder.WriteString(dimStyle.Render("  " + metricsLine))
+		builder.WriteString("\n")
+	}
+
 	// Separator if we have recent log
 	if len(p.recentLog) > 0 && len(p.entries) > 0 {
 		builder.WriteString(dimStyle.Render(strings.Repeat("─", width-4)))
@@ -588,6 +596,47 @@ func GenerateResultSummary(toolName, result string) string {
 		return "written"
 	}
 	return ""
+}
+
+// buildMetricsSummary returns a compact metrics line like "2 agents · 8 tools · 3.2s".
+// Must be called under read lock.
+func (p *ActivityFeedPanel) buildMetricsSummary() string {
+	if len(p.entries) == 0 {
+		return ""
+	}
+
+	var agentCount, toolCount int
+	var totalDuration time.Duration
+
+	for _, entry := range p.entries {
+		switch entry.Type {
+		case ActivityTypeAgent:
+			agentCount++
+		case ActivityTypeTool:
+			toolCount++
+		}
+		if entry.Duration > 0 {
+			totalDuration += entry.Duration
+		} else if entry.Status == ActivityRunning || entry.Status == ActivityPending {
+			totalDuration += time.Since(entry.StartTime)
+		}
+	}
+
+	var parts []string
+	if agentCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d agents", agentCount))
+	}
+	if toolCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d tools", toolCount))
+	}
+	if totalDuration > 0 {
+		parts = append(parts, format.Duration(totalDuration))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ")
 }
 
 // Clear removes all entries from the activity feed.

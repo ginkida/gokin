@@ -35,17 +35,18 @@ func (m Model) renderPermissionPrompt() string {
 	builder.WriteString(riskDot + " " + titleStyle.Render("Permission Required"))
 	builder.WriteString("\n")
 
-	// Tool info
-	builder.WriteString(markerStyle.Render("  ⎿  ") + labelStyle.Render("Tool: ") + valueStyle.Render(m.permRequest.ToolName))
+	// Tool info with operation context
+	opLabel := formatPermissionOperation(m.permRequest.ToolName, m.permRequest.Args)
+	builder.WriteString(markerStyle.Render("  ⎿  ") + labelStyle.Render("Tool: ") + valueStyle.Render(opLabel))
 	builder.WriteString("\n")
 
-	// Command/Details
+	// Command/Details — show the key argument value
 	if len(m.permRequest.Args) > 0 {
 		detail := ""
 		for _, key := range []string{"command", "file_path", "path", "pattern", "url"} {
 			if val, ok := m.permRequest.Args[key].(string); ok && val != "" {
-				if len(val) > 60 {
-					val = val[:57] + "..."
+				if len(val) > 72 {
+					val = val[:69] + "..."
 				}
 				detail = val
 				break
@@ -97,98 +98,48 @@ func (m Model) renderPermissionPrompt() string {
 	return builder.String()
 }
 
-// formatArgsPreview creates a preview of tool arguments for display.
-// Shows up to 5 arguments with smart truncation for strings.
-func formatArgsPreview(args map[string]any, maxLen int) string {
-	if len(args) == 0 {
-		return ""
-	}
-
-	// Priority keys to show first (most informative)
-	priorityKeys := []string{"file_path", "path", "command", "pattern", "content", "query", "url"}
-	shown := make(map[string]bool)
-	var parts []string
-
-	// Add priority keys first
-	for _, key := range priorityKeys {
-		if val, ok := args[key]; ok {
-			formatted := formatArgPreviewValue(key, val)
-			if formatted != "" {
-				parts = append(parts, formatted)
-				shown[key] = true
-			}
-			if len(parts) >= 5 {
-				break
+// formatPermissionOperation returns a descriptive label like "bash → Run command"
+// instead of just the tool name.
+func formatPermissionOperation(toolName string, args map[string]any) string {
+	switch toolName {
+	case "bash":
+		if cmd, ok := args["command"].(string); ok && cmd != "" {
+			// Extract first word of command as verb
+			parts := strings.Fields(cmd)
+			if len(parts) > 0 {
+				return fmt.Sprintf("bash → Run: %s", parts[0])
 			}
 		}
-	}
-
-	// Add remaining keys
-	for key, val := range args {
-		if shown[key] {
-			continue
+		return "bash → Run command"
+	case "write":
+		if _, ok := args["file_path"].(string); ok {
+			return "write → Create/overwrite file"
 		}
-		if len(parts) >= 5 {
-			break
+		return "write → Create file"
+	case "edit":
+		return "edit → Modify file"
+	case "delete":
+		return "delete → Remove file"
+	case "ssh":
+		return "ssh → Remote command"
+	case "git_commit":
+		return "git_commit → Create commit"
+	case "git_add":
+		return "git_add → Stage files"
+	case "copy":
+		return "copy → Copy file"
+	case "move":
+		return "move → Move/rename file"
+	case "mkdir":
+		return "mkdir → Create directory"
+	case "task":
+		if t, ok := args["type"].(string); ok && t != "" {
+			return fmt.Sprintf("task → Spawn %s agent", t)
 		}
-		formatted := formatArgPreviewValue(key, val)
-		if formatted != "" {
-			parts = append(parts, formatted)
-		}
-	}
-
-	if len(parts) == 0 {
-		return ""
-	}
-
-	// If there are more arguments not shown
-	remaining := len(args) - len(parts)
-	if remaining > 0 {
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorDim).Render(fmt.Sprintf("(+%d more)", remaining)))
-	}
-
-	result := strings.Join(parts, "\n")
-	return result
-}
-
-// formatArgPreviewValue formats a single argument value with smart truncation.
-func formatArgPreviewValue(key string, val any) string {
-	switch v := val.(type) {
-	case string:
-		return fmt.Sprintf("%s: %s", key, smartTruncateString(v, 60))
-	case float64:
-		return fmt.Sprintf("%s: %.0f", key, v)
-	case int:
-		return fmt.Sprintf("%s: %d", key, v)
-	case bool:
-		return fmt.Sprintf("%s: %v", key, v)
-	case []any:
-		return fmt.Sprintf("%s: [%d items]", key, len(v))
-	case map[string]any:
-		return fmt.Sprintf("%s: {%d fields}", key, len(v))
+		return "task → Spawn sub-agent"
 	default:
-		return ""
+		return toolName
 	}
-}
-
-// smartTruncateString truncates a string showing first 60 chars and last 15 chars for long strings.
-func smartTruncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return fmt.Sprintf("%q", s)
-	}
-
-	// For very long strings, show beginning and end
-	headLen := 45
-	tailLen := 12
-
-	head := s[:headLen]
-	tail := s[len(s)-tailLen:]
-
-	// Clean up any partial escape sequences
-	head = strings.TrimSuffix(head, "\\")
-	tail = strings.TrimPrefix(tail, "\\")
-
-	return fmt.Sprintf("%q...%q", head, tail)
 }
 
 // renderQuestionPrompt renders the question prompt UI.

@@ -3,6 +3,7 @@ package ui
 import (
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -225,10 +226,11 @@ func (p *CommandPalette) AppendQuery(char string) {
 	p.SetQuery(p.query + char)
 }
 
-// BackspaceQuery removes the last character from the query.
+// BackspaceQuery removes the last character (rune) from the query.
 func (p *CommandPalette) BackspaceQuery() {
 	if len(p.query) > 0 {
-		p.SetQuery(p.query[:len(p.query)-1])
+		_, size := utf8.DecodeLastRuneInString(p.query)
+		p.SetQuery(p.query[:len(p.query)-size])
 	}
 }
 
@@ -278,14 +280,16 @@ func (p *CommandPalette) filterCommands(query string) {
 }
 
 // fuzzyMatch checks if all characters in query appear in str in order.
+// Both str and query are iterated as runes for correct Unicode handling.
 func fuzzyMatch(str, query string) bool {
+	qRunes := []rune(query)
 	qi := 0
 	for _, c := range str {
-		if qi < len(query) && byte(c) == query[qi] {
+		if qi < len(qRunes) && c == qRunes[qi] {
 			qi++
 		}
 	}
-	return qi == len(query)
+	return qi == len(qRunes)
 }
 
 // SelectNext moves selection to the next item.
@@ -561,14 +565,25 @@ func (p *CommandPalette) View(width, height int) string {
 		for i := startIdx; i < endIdx; i++ {
 			cmd := p.filtered[i]
 
-			// Category header (only when not searching and not in recent section)
+			// Category header with icon and separator (only when not searching and not in recent section)
 			if p.query == "" && !cmd.IsRecent {
 				catName := cmd.Category.Name
 				if catName != lastCategory {
 					if lastCategory != "" || showingRecent {
+						// Separator line between categories
+						sepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
+						content.WriteString(sepStyle.Render("  " + strings.Repeat("─", paletteWidth-8)))
 						content.WriteString("\n")
 					}
-					content.WriteString(categoryStyle.Render("  " + catName))
+					icon := cmd.Category.Icon
+					if icon == "" {
+						icon = categoryIcon(catName)
+					}
+					if icon != "" {
+						content.WriteString(categoryStyle.Render("  " + icon + " " + catName))
+					} else {
+						content.WriteString(categoryStyle.Render("  " + catName))
+					}
 					content.WriteString("\n")
 					lastCategory = catName
 				}
@@ -711,19 +726,32 @@ func (p *CommandPalette) renderPreview(width int) string {
 	return previewStyle.Render(content.String())
 }
 
-// Helper functions
-func min(a, b int) int {
-	if a < b {
-		return a
+// categoryIcon returns a minimal icon for a palette category name.
+func categoryIcon(name string) string {
+	switch strings.ToLower(name) {
+	case "getting started":
+		return "›"
+	case "session":
+		return "◐"
+	case "auth", "auth & setup":
+		return "◇"
+	case "git":
+		return "⎇"
+	case "planning":
+		return "○"
+	case "tools":
+		return "▸"
+	default:
+		return "·"
 	}
-	return b
 }
 
 func padRight(s string, length int) string {
-	if len(s) >= length {
+	w := lipgloss.Width(s)
+	if w >= length {
 		return s
 	}
-	return s + strings.Repeat(" ", length-len(s))
+	return s + strings.Repeat(" ", length-w)
 }
 
 func itoa(n int) string {
