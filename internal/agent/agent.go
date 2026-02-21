@@ -342,7 +342,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	agent.reflector = NewReflector()
 	agent.reflector.SetClient(agentClient)
 
-	agent.delegation = NewDelegationStrategy(AgentTypeGeneral, nil)
+	agent.delegation = NewDelegationStrategy(AgentType(dynType.Name), nil)
 
 	return agent
 }
@@ -888,16 +888,21 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 
 // collectTreeMetrics gathers tree planner statistics into AgentResult.Metadata.
 func (a *Agent) collectTreeMetrics(result *AgentResult) {
+	a.stateMu.RLock()
 	tree := a.activePlan
 	if tree == nil {
 		tree = a.lastPlanTree
 	}
+	a.stateMu.RUnlock()
+
 	if tree == nil {
 		return
 	}
 	if result.Metadata == nil {
 		result.Metadata = make(map[string]interface{})
 	}
+
+	tree.mu.RLock()
 	result.Metadata["tree_total_nodes"] = tree.TotalNodes
 	result.Metadata["tree_max_depth"] = tree.MaxDepth
 	result.Metadata["tree_expanded_nodes"] = tree.ExpandedNodes
@@ -917,6 +922,7 @@ func (a *Agent) collectTreeMetrics(result *AgentResult) {
 	if tree.Root != nil {
 		countFailed(tree.Root)
 	}
+	tree.mu.RUnlock()
 
 	result.Metadata["tree_succeeded_nodes"] = succeeded
 	result.Metadata["tree_failed_nodes"] = failed
@@ -1933,7 +1939,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		}
 
 		// Update progress at start of each turn
-		if i > 0 && a.activePlan == nil {
+		if a.activePlan == nil {
 			a.SetProgress(i+1, a.maxTurns, fmt.Sprintf("Turn %d: Executing tools", i+1))
 		}
 
@@ -2149,7 +2155,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 					a.stateMu.Lock()
 					a.history = append(a.history, genai.NewContentFromText(intervention, genai.RoleUser))
-					if loopRecoveryTurns < 3 {
+					if loopRecoveryTurns < 3 && effectiveMaxTurns < MaxTurnLimit {
 						loopRecoveryTurns++
 						effectiveMaxTurns++
 					}
@@ -2179,7 +2185,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 					a.stateMu.Lock()
 					a.history = append(a.history, genai.NewContentFromText(intervention, genai.RoleUser))
-					if loopRecoveryTurns < 3 {
+					if loopRecoveryTurns < 3 && effectiveMaxTurns < MaxTurnLimit {
 						loopRecoveryTurns++
 						effectiveMaxTurns++
 					}
@@ -2506,6 +2512,20 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 		score int
 		msg   *genai.Content
 	}
+	// Collect FunctionCall IDs that have matching FunctionResponse in the middle section
+	// so we can boost FunctionCall messages to keep pairs together.
+	responseCallIDs := make(map[string]bool)
+	for _, msg := range middle {
+		if msg == nil {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+				responseCallIDs[part.FunctionResponse.ID] = true
+			}
+		}
+	}
+
 	scores := make([]scored, len(middle))
 	for i, msg := range middle {
 		s := 0
@@ -2520,7 +2540,13 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 			if part.FunctionResponse != nil {
 				s += 3 // Tool results are high value
 			} else if part.FunctionCall != nil {
-				s += 1 // Tool calls are lower value
+				// Boost FunctionCall to match FunctionResponse score when paired,
+				// so they survive or die together during compaction.
+				if part.FunctionCall.ID != "" && responseCallIDs[part.FunctionCall.ID] {
+					s += 3
+				} else {
+					s += 1
+				}
 			} else if part.Text != "" {
 				lower := strings.ToLower(part.Text)
 				if strings.Contains(lower, "error") || strings.Contains(lower, "failed") {
@@ -3061,7 +3087,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	if !result.Success && a.delegation != nil && a.delegation.HasMessenger() {
 		delCtx := &DelegationContext{
 			AgentType:       a.Type,
-			CurrentTurn:     a.currentStep,
+			CurrentTurn:     a.GetTurnCount(),
 			MaxTurns:        a.maxTurns,
 			LastToolName:    call.Name,
 			LastToolError:   result.Content,
@@ -3074,17 +3100,27 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 		decision := a.delegation.Evaluate(delCtx)
 		if decision.ShouldDelegate {
 			// Execute delegation
+			delegationStart := time.Now()
 			delegationResponse, err := a.delegation.ExecuteDelegation(ctx, decision)
+			delegationDuration := time.Since(delegationStart)
+
 			if err == nil && delegationResponse != "" {
 				// Append delegation result to the tool response
 				result.Content = fmt.Sprintf("%s\n\n---\n**Delegated to %s agent:**\n%s",
 					result.Content, decision.TargetType, delegationResponse)
 				result.Success = true // Mark as recovered
 
+				a.delegation.RecordDelegationResult(decision.TargetType, true, delegationDuration, "")
 				logging.Info("delegation successful",
 					"agent_id", a.ID,
 					"delegated_to", decision.TargetType,
 					"reason", decision.Reason)
+			} else {
+				errType := "empty_response"
+				if err != nil {
+					errType = err.Error()
+				}
+				a.delegation.RecordDelegationResult(decision.TargetType, false, delegationDuration, errType)
 			}
 		}
 	}
@@ -3410,44 +3446,78 @@ func (a *Agent) executeDelegateAction(ctx context.Context, action *PlannedAction
 
 // executeDirectly executes an action without delegation.
 func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, startTime time.Time) *AgentResult {
-	// For non-delegation actions, run the prompt through the model
+	// For non-delegation actions, run the prompt through the model in a loop
+	// until there are no more tool calls (multi-round execution).
 	var output strings.Builder
+	const maxDirectRounds = 15
 
-	// Add the action prompt to history temporarily
+	// Add the action prompt to history
 	promptContent := genai.NewContentFromText(action.Prompt, genai.RoleUser)
 	a.stateMu.Lock()
 	a.history = append(a.history, promptContent)
 	a.stateMu.Unlock()
 
-	// Get model response
-	resp, err := a.getModelResponse(ctx)
-	if err != nil {
-		return &AgentResult{
-			AgentID:   a.ID,
-			Type:      a.Type,
-			Status:    AgentStatusFailed,
-			Error:     err.Error(),
-			Duration:  time.Since(startTime),
-			Completed: true,
+	for round := 0; round < maxDirectRounds; round++ {
+		select {
+		case <-ctx.Done():
+			return &AgentResult{
+				AgentID:   a.ID,
+				Type:      a.Type,
+				Status:    AgentStatusFailed,
+				Error:     ctx.Err().Error(),
+				Output:    output.String(),
+				Duration:  time.Since(startTime),
+				Completed: true,
+			}
+		default:
 		}
-	}
 
-	// Process response
-	if resp.Text != "" {
-		output.WriteString(resp.Text)
-	}
+		resp, err := a.getModelResponse(ctx)
+		if err != nil {
+			return &AgentResult{
+				AgentID:   a.ID,
+				Type:      a.Type,
+				Status:    AgentStatusFailed,
+				Error:     err.Error(),
+				Output:    output.String(),
+				Duration:  time.Since(startTime),
+				Completed: true,
+			}
+		}
 
-	// Execute any function calls
-	if len(resp.FunctionCalls) > 0 {
+		if resp.Text != "" {
+			output.WriteString(resp.Text)
+		}
+
+		// No tool calls — model is done
+		if len(resp.FunctionCalls) == 0 {
+			break
+		}
+
+		// Execute tools and feed results back to the model
 		results := a.executeTools(ctx, resp.FunctionCalls)
+
+		var funcParts []*genai.Part
 		for _, r := range results {
-			if r.Response != nil && r.Response.Response != nil {
-				if content, ok := r.Response.Response["content"].(string); ok {
-					output.WriteString("\n")
-					output.WriteString(content)
+			if r.Response != nil {
+				part := genai.NewPartFromFunctionResponse(r.Response.Name, r.Response.Response)
+				part.FunctionResponse.ID = r.Response.ID
+				funcParts = append(funcParts, part)
+				if r.Response.Response != nil {
+					if content, ok := r.Response.Response["content"].(string); ok {
+						output.WriteString("\n")
+						output.WriteString(content)
+					}
 				}
 			}
 		}
+		funcContent := &genai.Content{
+			Role:  genai.RoleUser,
+			Parts: funcParts,
+		}
+		a.stateMu.Lock()
+		a.history = append(a.history, funcContent)
+		a.stateMu.Unlock()
 	}
 
 	return &AgentResult{
@@ -3490,9 +3560,11 @@ func (a *Agent) executeVerifyAction(ctx context.Context, action *PlannedAction, 
 
 		output.WriteString(response)
 
-		// Check for test failures in output
-		if strings.Contains(strings.ToLower(response), "fail") ||
-			strings.Contains(strings.ToLower(response), "error") {
+		// Check for test failures in output (exclude negated forms like "no errors")
+		lower := strings.ToLower(response)
+		hasFailure := (strings.Contains(lower, "fail") && !strings.Contains(lower, "no fail") && !strings.Contains(lower, "0 fail")) ||
+			(strings.Contains(lower, "error") && !strings.Contains(lower, "no error") && !strings.Contains(lower, "0 error") && !strings.Contains(lower, "without error"))
+		if hasFailure {
 			return &AgentResult{
 				AgentID:   a.ID,
 				Type:      a.Type,
@@ -3612,8 +3684,8 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 				Prompt:    prompt,
 			})
 			if agentType == "" { // Was decompose
-				node, _ := tree.GetNode(tree.Root.ID)
-				if len(node.Children) > 0 {
+				node, ok := tree.GetNode(tree.Root.ID)
+				if ok && len(node.Children) > 0 {
 					lastChild := node.Children[len(node.Children)-1]
 					lastChild.Action.Type = ActionDecompose
 				}

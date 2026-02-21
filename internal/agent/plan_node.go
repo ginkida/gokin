@@ -151,12 +151,23 @@ func NewPlanTree(goal *PlanGoal) *PlanTree {
 }
 
 // GetNode retrieves a node by ID.
+// Caller must hold tree.mu (read or write lock).
 func (t *PlanTree) GetNode(id string) (*PlanNode, bool) {
 	if t.nodeIndex == nil {
+		// nodeIndex can be nil after JSON deserialization (json:"-").
+		// Caller must hold a write lock if this path is possible.
 		t.rebuildIndex()
 	}
 	node, ok := t.nodeIndex[id]
 	return node, ok
+}
+
+// EnsureIndex rebuilds the nodeIndex if nil (e.g. after deserialization).
+// Must be called under tree.mu write lock or before sharing the tree.
+func (t *PlanTree) EnsureIndex() {
+	if t.nodeIndex == nil {
+		t.rebuildIndex()
+	}
 }
 
 // AddNode adds a new child node to the parent.
@@ -275,8 +286,8 @@ func (t *PlanTree) arePrerequisitesMet(node *PlanNode) bool {
 		if !ok {
 			return false
 		}
-		// Parent must be succeeded or executing for children to proceed
-		return parent.Status == PlanNodeSucceeded || parent.Status == PlanNodeExecuting
+		// Parent must have succeeded for children to proceed
+		return parent.Status == PlanNodeSucceeded
 	}
 
 	for _, prereqID := range node.Action.Prerequisites {

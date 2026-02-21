@@ -191,9 +191,16 @@ func (ma *MetaAgent) checkAgentHealth() {
 			if !monitor.Intervened && monitor.StuckCount <= ma.config.MaxInterventions {
 				ma.handleStuckAgent(agentID, monitor)
 			} else if monitor.StuckCount > ma.config.MaxInterventions {
-				logging.Warn("meta agent: agent exceeded max interventions",
+				logging.Warn("meta agent: cancelling stuck agent",
 					"agent_id", agentID,
 					"stuck_count", monitor.StuckCount)
+				// Cancel the agent through the runner
+				if ma.runner != nil {
+					if err := ma.runner.Cancel(agentID); err != nil {
+						logging.Debug("meta agent: failed to cancel stuck agent",
+							"agent_id", agentID, "error", err)
+					}
+				}
 			}
 		} else {
 			// Agent is active, reset stuck count
@@ -251,9 +258,8 @@ func (ma *MetaAgent) handleStuckAgent(agentID string, monitor *AgentMonitor) {
 		ma.onIntervention(agentID, reason, action)
 	}
 
-	// Note: Actual intervention would require injecting a message into the agent's
-	// conversation history. This would be done through the Runner or Agent interface.
-	// For now, we just log the intended intervention.
+	// Log-based intervention for now. If the agent remains stuck past MaxInterventions,
+	// checkAgentHealth will cancel it via runner.Cancel().
 }
 
 // runOptimization performs periodic optimization based on metrics.

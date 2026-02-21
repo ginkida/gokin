@@ -1114,6 +1114,19 @@ func (b *Builder) initIntegrations() error {
 		}
 	}
 
+	// Wire up coordinate tool with coordinator factory
+	if coordTool, ok := b.registry.Get("coordinate"); ok {
+		if ct, ok := coordTool.(*tools.CoordinateTool); ok {
+			runner := b.agentRunner
+			ct.SetCoordinatorFactory(func() any {
+				coordConfig := &agent.CoordinatorConfig{MaxParallel: 3}
+				coord := agent.NewCoordinator(b.ctx, runner, coordConfig)
+				return &coordinatorToolAdapter{coord: coord}
+			})
+			logging.Debug("coordinate tool wired")
+		}
+	}
+
 	// Initialize MCP (Model Context Protocol)
 	if b.cfg.MCP.Enabled && len(b.cfg.MCP.Servers) > 0 {
 		// Convert config to MCP server configs
@@ -1838,4 +1851,43 @@ func (a *contextPredictorAdapter) PredictFiles(currentFile string, limit int) []
 		}
 	}
 	return result
+}
+
+// ========== Coordinator Tool Adapter ==========
+
+// coordinatorToolAdapter wraps *agent.Coordinator to match the coordinate tool's interface.
+type coordinatorToolAdapter struct {
+	coord *agent.Coordinator
+}
+
+func (a *coordinatorToolAdapter) AddTask(prompt string, agentType any, priority any, deps []string) string {
+	at := agent.ParseAgentType(fmt.Sprintf("%v", agentType))
+	p := agent.TaskPriority(5)
+	switch v := priority.(type) {
+	case int:
+		p = agent.TaskPriority(v)
+	case float64:
+		p = agent.TaskPriority(int(v))
+	}
+	return a.coord.AddTask(prompt, at, p, deps)
+}
+
+func (a *coordinatorToolAdapter) Start() {
+	a.coord.Start()
+}
+
+func (a *coordinatorToolAdapter) WaitWithTimeout(timeout time.Duration) (map[string]any, error) {
+	results, err := a.coord.WaitWithTimeout(timeout)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]any, len(results))
+	for k, v := range results {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (a *coordinatorToolAdapter) GetStatus() any {
+	return a.coord.GetStatus()
 }

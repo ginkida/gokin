@@ -59,6 +59,7 @@ func (a *Agent) updateProgress() {
 		Elapsed:       time.Since(startTime),
 		Status:        status,
 	}
+	progress.EstimatedRemaining = progress.EstimateRemaining()
 
 	callback(progress)
 }

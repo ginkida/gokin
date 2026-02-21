@@ -31,6 +31,18 @@ func (sm *StrategyMetrics) SuccessRate() float64 {
 	return float64(sm.SuccessCount) / float64(total)
 }
 
+// clone returns a deep copy of the metrics.
+func (sm *StrategyMetrics) clone() *StrategyMetrics {
+	c := *sm
+	if sm.TaskTypes != nil {
+		c.TaskTypes = make(map[string]int, len(sm.TaskTypes))
+		for k, v := range sm.TaskTypes {
+			c.TaskTypes[k] = v
+		}
+	}
+	return &c
+}
+
 // StrategyOptimizer analyzes and optimizes agent strategies based on outcomes.
 type StrategyOptimizer struct {
 	metrics   map[string]*StrategyMetrics // strategy name -> metrics
@@ -77,18 +89,22 @@ func (so *StrategyOptimizer) load() error {
 	return nil
 }
 
-// save persists metrics to disk.
-func (so *StrategyOptimizer) save() error {
+// save serializes metrics under the caller's lock and returns the snapshot.
+// Caller must hold so.mu (read or write lock).
+func (so *StrategyOptimizer) save() ([]byte, error) {
+	data, err := json.MarshalIndent(so.metrics, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// writeSnapshot writes pre-serialized data to disk without holding any locks.
+func (so *StrategyOptimizer) writeSnapshot(data []byte) error {
 	dir := filepath.Dir(so.storagePath())
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-
-	data, err := json.MarshalIndent(so.metrics, "", "  ")
-	if err != nil {
-		return err
-	}
-
 	return os.WriteFile(so.storagePath(), data, 0644)
 }
 
@@ -118,9 +134,14 @@ func (so *StrategyOptimizer) RecordExecution(strategyName string, taskType strin
 	metrics.LastUsed = time.Now()
 	metrics.TaskTypes[taskType]++
 
-	// Save asynchronously
+	// Snapshot data under lock, write to disk asynchronously
+	snapshot, err := so.save()
+	if err != nil {
+		logging.Debug("failed to serialize strategy metrics", "error", err)
+		return
+	}
 	go func() {
-		if err := so.save(); err != nil {
+		if err := so.writeSnapshot(snapshot); err != nil {
 			logging.Debug("failed to save strategy metrics", "error", err)
 		}
 	}()
@@ -139,13 +160,16 @@ func (so *StrategyOptimizer) GetSuccessRate(strategyName string) float64 {
 	return metrics.SuccessRate()
 }
 
-// GetMetrics returns the metrics for a strategy.
+// GetMetrics returns a copy of the metrics for a strategy.
 func (so *StrategyOptimizer) GetMetrics(strategyName string) (*StrategyMetrics, bool) {
 	so.mu.RLock()
 	defer so.mu.RUnlock()
 
 	metrics, ok := so.metrics[strategyName]
-	return metrics, ok
+	if !ok {
+		return nil, false
+	}
+	return metrics.clone(), true
 }
 
 // RecommendStrategy recommends the best strategy for a task type.
@@ -197,27 +221,26 @@ func (so *StrategyOptimizer) RecommendStrategy(taskType string) string {
 	return scores[0].name
 }
 
-// GetAllMetrics returns all strategy metrics.
+// GetAllMetrics returns a deep copy of all strategy metrics.
 func (so *StrategyOptimizer) GetAllMetrics() map[string]*StrategyMetrics {
 	so.mu.RLock()
 	defer so.mu.RUnlock()
 
-	// Return a copy to avoid data races
-	copy := make(map[string]*StrategyMetrics)
+	result := make(map[string]*StrategyMetrics, len(so.metrics))
 	for k, v := range so.metrics {
-		copy[k] = v
+		result[k] = v.clone()
 	}
-	return copy
+	return result
 }
 
-// GetTopStrategies returns the top N strategies by success rate.
+// GetTopStrategies returns deep copies of the top N strategies by success rate.
 func (so *StrategyOptimizer) GetTopStrategies(n int) []*StrategyMetrics {
 	so.mu.RLock()
 	defer so.mu.RUnlock()
 
 	metrics := make([]*StrategyMetrics, 0, len(so.metrics))
 	for _, m := range so.metrics {
-		metrics = append(metrics, m)
+		metrics = append(metrics, m.clone())
 	}
 
 	sort.Slice(metrics, func(i, j int) bool {
@@ -237,5 +260,9 @@ func (so *StrategyOptimizer) Clear() error {
 	defer so.mu.Unlock()
 
 	so.metrics = make(map[string]*StrategyMetrics)
-	return so.save()
+	snapshot, err := so.save()
+	if err != nil {
+		return err
+	}
+	return so.writeSnapshot(snapshot)
 }

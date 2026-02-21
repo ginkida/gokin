@@ -462,8 +462,14 @@ func (d *DelegationStrategy) ExecuteDelegation(ctx context.Context, decision *De
 		return "", err
 	}
 
-	// Wait for response with timeout
-	timeoutCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	// Wait for response with timeout, respecting parent deadline
+	timeout := 3 * time.Minute
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	return messenger.ReceiveResponse(timeoutCtx, msgID)

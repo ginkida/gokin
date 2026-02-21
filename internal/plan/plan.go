@@ -881,16 +881,73 @@ func (p *Plan) NextReadySteps() []*Step {
 		return ready[:1]
 	}
 
-	// Collect all leading parallel steps
+	// Collect all leading parallel steps, capped to prevent resource exhaustion
+	const maxParallelSteps = 4
 	var parallel []*Step
 	for _, s := range ready {
-		if s.Parallel {
-			parallel = append(parallel, s)
-		} else {
+		if !s.Parallel {
+			break
+		}
+		parallel = append(parallel, s)
+		if len(parallel) >= maxParallelSteps {
 			break
 		}
 	}
+
+	// Filter out steps that would conflict with currently executing steps
+	parallel = p.filterFileConflictsLocked(parallel)
+
 	return parallel
+}
+
+// filterFileConflictsLocked removes steps from candidates that would touch files
+// already being modified by currently executing steps (based on RunLedger).
+// Caller must hold p.mu.RLock.
+func (p *Plan) filterFileConflictsLocked(candidates []*Step) []*Step {
+	if len(candidates) <= 1 || len(p.RunLedger) == 0 {
+		return candidates
+	}
+
+	// Build set of files touched by currently executing steps
+	executingFiles := make(map[string]bool)
+	for _, step := range p.Steps {
+		if step.Status != StatusInProgress {
+			continue
+		}
+		if entry, ok := p.RunLedger[step.ID]; ok && entry != nil {
+			for _, f := range entry.FilesTouched {
+				executingFiles[f] = true
+			}
+		}
+	}
+
+	if len(executingFiles) == 0 {
+		return candidates
+	}
+
+	// Filter candidates that overlap with executing files
+	safe := make([]*Step, 0, len(candidates))
+	for _, step := range candidates {
+		if entry, ok := p.RunLedger[step.ID]; ok && entry != nil {
+			conflict := false
+			for _, f := range entry.FilesTouched {
+				if executingFiles[f] {
+					conflict = true
+					break
+				}
+			}
+			if conflict {
+				continue
+			}
+		}
+		safe = append(safe, step)
+	}
+
+	if len(safe) == 0 {
+		// All candidates conflict — return just the first one for sequential execution
+		return candidates[:1]
+	}
+	return safe
 }
 
 // ErrorCategory classifies plan step errors for retry/replan decisions.

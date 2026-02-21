@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -419,19 +420,27 @@ func (r *Runner) cleanupOldResults() {
 
 	// Clean up completed agents if we exceed the limit
 	if len(r.agents) > MaxCompletedAgents {
-		var completedIDs []string
+		type agentEntry struct {
+			id      string
+			endTime time.Time
+		}
+		var completed []agentEntry
 		for id, agent := range r.agents {
 			if agent.GetStatus() == AgentStatusCompleted ||
 				agent.GetStatus() == AgentStatusFailed ||
 				agent.GetStatus() == AgentStatusCancelled {
-				completedIDs = append(completedIDs, id)
+				completed = append(completed, agentEntry{id, agent.GetEndTime()})
 			}
 		}
+		// Sort oldest first
+		sort.Slice(completed, func(i, j int) bool {
+			return completed[i].endTime.Before(completed[j].endTime)
+		})
 		// Remove oldest completed agents (keep MaxCompletedAgents/2)
-		removeCount := len(completedIDs) - MaxCompletedAgents/2
-		if removeCount > 0 && removeCount <= len(completedIDs) {
+		removeCount := len(completed) - MaxCompletedAgents/2
+		if removeCount > 0 {
 			for i := 0; i < removeCount; i++ {
-				delete(r.agents, completedIDs[i])
+				delete(r.agents, completed[i].id)
 			}
 			logging.Debug("cleaned up old agents", "removed", removeCount)
 		}
@@ -439,17 +448,28 @@ func (r *Runner) cleanupOldResults() {
 
 	// Clean up old results if we exceed the limit
 	if len(r.results) > MaxAgentResults {
-		// Keep only MaxAgentResults/2 results
-		var oldestIDs []string
+		type resultEntry struct {
+			id      string
+			endTime time.Time
+		}
+		var completed []resultEntry
 		for id, result := range r.results {
 			if result.Completed {
-				oldestIDs = append(oldestIDs, id)
+				endTime := time.Time{}
+				if agent, ok := r.agents[id]; ok {
+					endTime = agent.GetEndTime()
+				}
+				completed = append(completed, resultEntry{id, endTime})
 			}
 		}
-		removeCount := len(oldestIDs) - MaxAgentResults/2
-		if removeCount > 0 && removeCount <= len(oldestIDs) {
+		// Sort oldest first
+		sort.Slice(completed, func(i, j int) bool {
+			return completed[i].endTime.Before(completed[j].endTime)
+		})
+		removeCount := len(completed) - MaxAgentResults/2
+		if removeCount > 0 {
 			for i := 0; i < removeCount; i++ {
-				delete(r.results, oldestIDs[i])
+				delete(r.results, completed[i].id)
 			}
 			logging.Debug("cleaned up old results", "removed", removeCount)
 		}
@@ -555,9 +575,15 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	r.agents[agent.ID] = agent
 	r.mu.Unlock()
 
-	// Register with meta-agent for monitoring
+	// Register with meta-agent for monitoring and wire activity updates
 	if metaAgent != nil {
 		metaAgent.RegisterAgent(agent.ID, agent.Type)
+		agentID := agent.ID
+		agent.SetOnToolActivity(func(_ string, toolName string, _ map[string]any, status string) {
+			if status == "start" {
+				metaAgent.UpdateActivity(agentID, toolName, agent.GetTurnCount())
+			}
+		})
 	}
 
 	// Report activity to coordinator
@@ -639,6 +665,9 @@ func (r *Runner) SpawnWithContext(
 	workDir := r.workDir
 	allPerms := r.permissions
 	messengerFact := r.messengerFactory
+	strategyOpt := r.strategyOptimizer
+	delegationMetrics := r.delegationMetrics
+	metaAgent := r.metaAgent
 	r.mu.RUnlock()
 
 	// Pass nil permissions for approved plan execution to avoid per-tool prompts
@@ -673,6 +702,21 @@ func (r *Runner) SpawnWithContext(
 		agent.reflector.SetPredictor(predictor)
 	}
 
+	// Propagate delegation depth from context
+	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
+		agent.delegation.SetDepth(depth)
+	}
+
+	// Wire delegation metrics for adaptive delegation rules
+	if delegationMetrics != nil && agent.delegation != nil {
+		agent.delegation.SetDelegationMetrics(delegationMetrics)
+	}
+
+	// Wire strategy optimizer to delegation strategy
+	if strategyOpt != nil && agent.delegation != nil {
+		agent.delegation.SetStrategyOptimizer(strategyOpt)
+	}
+
 	// Inject project context and streaming callback
 	agent.SetProjectContext(projectContext)
 	agent.SetOnText(onText)
@@ -690,19 +734,28 @@ func (r *Runner) SpawnWithContext(
 		agent.SetProgressCallback(progressCallback)
 	}
 
-	// Wire sub-agent activity callback
+	// Wire sub-agent activity callback (chain with meta-agent UpdateActivity)
 	r.mu.RLock()
 	onSubAgentActivity := r.onSubAgentActivity
 	r.mu.RUnlock()
-	if onSubAgentActivity != nil {
-		agent.SetOnToolActivity(func(agentID, toolName string, args map[string]any, status string) {
-			onSubAgentActivity(agentID, string(agent.Type), toolName, args, "tool_"+status)
-		})
-	}
+	agentID := agent.ID
+	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string) {
+		if onSubAgentActivity != nil {
+			onSubAgentActivity(id, string(agent.Type), toolName, args, "tool_"+status)
+		}
+		if metaAgent != nil && status == "start" {
+			metaAgent.UpdateActivity(agentID, toolName, agent.GetTurnCount())
+		}
+	})
 
 	r.mu.Lock()
 	r.agents[agent.ID] = agent
 	r.mu.Unlock()
+
+	// Register with meta-agent for monitoring
+	if metaAgent != nil {
+		metaAgent.RegisterAgent(agentID, agent.Type)
+	}
 
 	r.reportActivity()
 
@@ -713,7 +766,9 @@ func (r *Runner) SpawnWithContext(
 		runCtx, cancel = context.WithTimeout(ctx, agentTimeout)
 		defer cancel()
 	}
+	startTime := time.Now()
 	result, err := agent.Run(runCtx, prompt)
+	duration := time.Since(startTime)
 
 	// Save error checkpoint on failure for potential recovery
 	if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
@@ -723,6 +778,18 @@ func (r *Runner) SpawnWithContext(
 	}
 
 	r.reportActivity()
+
+	// Unregister from meta-agent
+	if metaAgent != nil {
+		metaAgent.UnregisterAgent(agentID)
+	}
+
+	// Record outcome with strategy optimizer
+	if strategyOpt != nil && result != nil {
+		success := result.Status == AgentStatusCompleted && result.Error == ""
+		strategyOpt.RecordExecution(agentType, "spawn_with_context", success, duration)
+	}
+
 	r.saveAgentState(agent)
 
 	r.mu.Lock()
@@ -740,17 +807,37 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	ctxCfg := r.ctxCfg
 	errorStore := r.errorStore
 	predictor := r.predictor
+	onInput := r.onInput
+	strategyOpt := r.strategyOptimizer
+	delegationMetrics := r.delegationMetrics
+	metaAgent := r.metaAgent
 	c := r.client
 	baseReg := r.baseRegistry
 	workDir := r.workDir
 	perms := r.permissions
 	messengerFact := r.messengerFactory
+	typeRegistry := r.typeRegistry
 	r.mu.RUnlock()
-	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
+
+	// Check for dynamic type first
+	var agent *Agent
+	if typeRegistry != nil {
+		if dynType, ok := typeRegistry.GetDynamic(agentType); ok {
+			agent = NewAgentWithDynamicType(dynType, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
+		}
+	}
+	if agent == nil {
+		agent = NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
+	}
 
 	// Apply thoroughness from context
 	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
 	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
+
+	// Set input callback
+	if onInput != nil {
+		agent.SetOnInput(onInput)
+	}
 
 	// Set up messenger for inter-agent communication
 	if messengerFact != nil {
@@ -766,6 +853,21 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	// Wire file predictor for enhanced error recovery
 	if predictor != nil && agent.reflector != nil {
 		agent.reflector.SetPredictor(predictor)
+	}
+
+	// Propagate delegation depth from context
+	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
+		agent.delegation.SetDepth(depth)
+	}
+
+	// Wire delegation metrics for adaptive delegation rules
+	if delegationMetrics != nil && agent.delegation != nil {
+		agent.delegation.SetDelegationMetrics(delegationMetrics)
+	}
+
+	// Wire strategy optimizer to delegation strategy
+	if strategyOpt != nil && agent.delegation != nil {
+		agent.delegation.SetStrategyOptimizer(strategyOpt)
 	}
 
 	// Wire checkpoint store and enable auto-checkpoint for long-running agents
@@ -787,6 +889,17 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	onComplete := r.onAgentComplete
 	onAgentProgress := r.onAgentProgress
 	r.mu.Unlock()
+
+	// Register with meta-agent for monitoring and wire activity updates
+	if metaAgent != nil {
+		metaAgent.RegisterAgent(agent.ID, agent.Type)
+		agentIDForMeta := agent.ID
+		agent.SetOnToolActivity(func(_ string, toolName string, _ map[string]any, status string) {
+			if status == "start" {
+				metaAgent.UpdateActivity(agentIDForMeta, toolName, agent.GetTurnCount())
+			}
+		})
+	}
 
 	// Report activity to coordinator
 	r.reportActivity()
@@ -864,7 +977,9 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 			}
 		}()
 
+		startTime := time.Now()
 		result, err := agent.Run(agentCtx, prompt)
+		duration := time.Since(startTime)
 
 		// Ensure result is never nil
 		if result == nil {
@@ -885,6 +1000,17 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 
 		// Ensure Completed is always true so WaitWithContext doesn't spin
 		result.Completed = true
+
+		// Unregister from meta-agent
+		if metaAgent != nil {
+			metaAgent.UnregisterAgent(agentID)
+		}
+
+		// Record outcome with strategy optimizer
+		if strategyOpt != nil {
+			success := result.Status == AgentStatusCompleted && result.Error == ""
+			strategyOpt.RecordExecution(agentType, "spawn_async", success, duration)
+		}
 
 		// Save error checkpoint on failure for potential recovery
 		if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
@@ -929,6 +1055,9 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	sharedMem := r.sharedMemory
 	exampleStore := r.exampleStore
 	promptOpt := r.promptOptimizer
+	strategyOpt := r.strategyOptimizer
+	delegationMetrics := r.delegationMetrics
+	metaAgent := r.metaAgent
 	c := r.client
 	baseReg := r.baseRegistry
 	workDir := r.workDir
@@ -968,15 +1097,33 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		agent.SetSharedMemory(sharedMem)
 	}
 
-	// Wire sub-agent activity callback
+	// Propagate delegation depth from context
+	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
+		agent.delegation.SetDepth(depth)
+	}
+
+	// Wire delegation metrics for adaptive delegation rules
+	if delegationMetrics != nil && agent.delegation != nil {
+		agent.delegation.SetDelegationMetrics(delegationMetrics)
+	}
+
+	// Wire strategy optimizer to delegation strategy
+	if strategyOpt != nil && agent.delegation != nil {
+		agent.delegation.SetStrategyOptimizer(strategyOpt)
+	}
+
+	// Wire sub-agent activity callback (chain with meta-agent UpdateActivity)
 	r.mu.RLock()
 	onSubAgentActivity := r.onSubAgentActivity
 	r.mu.RUnlock()
-	if onSubAgentActivity != nil {
-		agent.SetOnToolActivity(func(agentID, toolName string, args map[string]any, status string) {
-			onSubAgentActivity(agentID, string(agent.Type), toolName, args, "tool_"+status)
-		})
-	}
+	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string) {
+		if onSubAgentActivity != nil {
+			onSubAgentActivity(id, string(agent.Type), toolName, args, "tool_"+status)
+		}
+		if metaAgent != nil && status == "start" {
+			metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
+		}
+	})
 
 	r.mu.Lock()
 	r.agents[agent.ID] = agent
@@ -989,6 +1136,11 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	onComplete := r.onAgentComplete
 	onAgentProgress := r.onAgentProgress
 	r.mu.Unlock()
+
+	// Register with meta-agent for monitoring
+	if metaAgent != nil {
+		metaAgent.RegisterAgent(agent.ID, agent.Type)
+	}
 
 	// Report activity to coordinator
 	r.reportActivity()
@@ -1057,9 +1209,13 @@ func (r *Runner) SpawnAsyncWithStreaming(
 
 		// Set scratchpad update callback and initial content
 		r.mu.RLock()
-		agent.Scratchpad = r.sharedScratchpad
+		scratchpad := r.sharedScratchpad
 		callback := r.onScratchpadUpdate
 		r.mu.RUnlock()
+
+		agent.stateMu.Lock()
+		agent.Scratchpad = scratchpad
+		agent.stateMu.Unlock()
 
 		if callback != nil {
 			agent.SetOnScratchpadUpdate(callback)
@@ -1104,6 +1260,17 @@ func (r *Runner) SpawnAsyncWithStreaming(
 
 		// Ensure Completed is always true so WaitWithContext doesn't spin
 		result.Completed = true
+
+		// Unregister from meta-agent
+		if metaAgent != nil {
+			metaAgent.UnregisterAgent(agentID)
+		}
+
+		// Record outcome with strategy optimizer
+		if strategyOpt != nil {
+			success := result.Status == AgentStatusCompleted && result.Error == ""
+			strategyOpt.RecordExecution(agentType, "spawn_async_streaming", success, duration)
+		}
 
 		// Record successful execution for learning
 		if result.Status == AgentStatusCompleted && exampleStore != nil {
@@ -1164,8 +1331,27 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			workDir := r.workDir
 			perms := r.permissions
 			messengerFact := r.messengerFactory
+			errorStore := r.errorStore
+			predictor := r.predictor
+			delegationMetrics := r.delegationMetrics
+			strategyOpt := r.strategyOptimizer
 			r.mu.RUnlock()
 			agent := NewAgent(t.Type, c, baseReg, workDir, t.MaxTurns, t.Model, perms, ctxCfg)
+
+			// Wire error store and predictor for reflection
+			if errorStore != nil && agent.reflector != nil {
+				agent.reflector.SetErrorStore(errorStore)
+			}
+			if predictor != nil && agent.reflector != nil {
+				agent.reflector.SetPredictor(predictor)
+			}
+			// Wire delegation metrics and strategy optimizer
+			if delegationMetrics != nil && agent.delegation != nil {
+				agent.delegation.SetDelegationMetrics(delegationMetrics)
+			}
+			if strategyOpt != nil && agent.delegation != nil {
+				agent.delegation.SetStrategyOptimizer(strategyOpt)
+			}
 
 			// Apply thoroughness from task or context
 			th := tools.ThoroughnessFromContext(ctx)
@@ -1364,7 +1550,7 @@ func (r *Runner) Cleanup(maxAge time.Duration) int {
 
 	for id, agent := range r.agents {
 		status := agent.GetStatus()
-		if status == AgentStatusCompleted || status == AgentStatusFailed {
+		if status == AgentStatusCompleted || status == AgentStatusFailed || status == AgentStatusCancelled {
 			endTime := agent.GetEndTime()
 			if !endTime.IsZero() && endTime.Before(cutoff) {
 				delete(r.agents, id)
@@ -1375,49 +1561,6 @@ func (r *Runner) Cleanup(maxAge time.Duration) int {
 	}
 
 	return cleaned
-}
-
-// setResultLocked stores an agent result and triggers cleanup if needed.
-// Must be called with r.mu held.
-func (r *Runner) setResultLocked(agentID string, result *AgentResult) {
-	r.results[agentID] = result
-
-	// Check if we need to cleanup old results
-	if len(r.results) > MaxAgentResults {
-		r.cleanupOldResultsLocked()
-	}
-}
-
-// cleanupOldResultsLocked removes old completed/failed results to prevent memory leak.
-// Must be called with r.mu held.
-func (r *Runner) cleanupOldResultsLocked() {
-	// Find completed results older than 10 minutes
-	cutoff := time.Now().Add(-10 * time.Minute)
-	toDelete := make([]string, 0)
-
-	for id, result := range r.results {
-		if result.Completed {
-			// Check if corresponding agent exists and has old endTime
-			if agent, ok := r.agents[id]; ok {
-				if !agent.endTime.IsZero() && agent.endTime.Before(cutoff) {
-					toDelete = append(toDelete, id)
-				}
-			} else {
-				// No agent, just delete the orphaned result
-				toDelete = append(toDelete, id)
-			}
-		}
-	}
-
-	// Delete old results
-	for _, id := range toDelete {
-		delete(r.results, id)
-		delete(r.agents, id)
-	}
-
-	if len(toDelete) > 0 {
-		logging.Debug("runner: cleaned up old results", "count", len(toDelete))
-	}
 }
 
 // SetStore sets the agent store for persistence.

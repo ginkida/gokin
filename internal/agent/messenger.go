@@ -104,15 +104,16 @@ func (m *AgentMessenger) ReceiveResponse(ctx context.Context, messageID string) 
 
 	select {
 	case response := <-responseChan:
-		// Clean up
 		m.mu.Lock()
 		delete(m.pending, messageID)
 		m.mu.Unlock()
 		return response, nil
 	case <-ctx.Done():
+		m.mu.Lock()
+		delete(m.pending, messageID)
+		m.mu.Unlock()
 		return "", ctx.Err()
 	case <-timer.C:
-		// Cleanup on timeout to prevent goroutine leak
 		m.mu.Lock()
 		delete(m.pending, messageID)
 		m.mu.Unlock()
@@ -185,12 +186,16 @@ func (m *AgentMessenger) handleDelegation(msg Message) {
 	if msg.Data != nil {
 		if mt, ok := msg.Data["max_turns"].(int); ok {
 			maxTurns = mt
+		} else if mt, ok := msg.Data["max_turns"].(float64); ok {
+			maxTurns = int(mt)
 		}
 		if mdl, ok := msg.Data["model"].(string); ok {
 			model = mdl
 		}
 		if depth, ok := msg.Data["delegation_depth"].(int); ok {
 			delegationDepth = depth
+		} else if depth, ok := msg.Data["delegation_depth"].(float64); ok {
+			delegationDepth = int(depth)
 		}
 	}
 
@@ -268,9 +273,16 @@ func (m *AgentMessenger) getLatestResultForType(agentType string) (*AgentResult,
 	defer m.runner.mu.RUnlock()
 
 	var latest *AgentResult
-	for _, result := range m.runner.results {
+	var latestEnd time.Time
+	for id, result := range m.runner.results {
 		if result.Type == at && result.Completed {
-			if latest == nil || result.Duration > 0 {
+			if agent, ok := m.runner.agents[id]; ok {
+				endTime := agent.GetEndTime()
+				if latest == nil || endTime.After(latestEnd) {
+					latest = result
+					latestEnd = endTime
+				}
+			} else if latest == nil {
 				latest = result
 			}
 		}
@@ -281,36 +293,40 @@ func (m *AgentMessenger) getLatestResultForType(agentType string) (*AgentResult,
 
 // Broadcast sends a message to all agents of a given type.
 func (m *AgentMessenger) Broadcast(msgType string, targetType string, content string) error {
-	m.runner.mu.RLock()
-	defer m.runner.mu.RUnlock()
-
 	at := ParseAgentType(targetType)
-	count := 0
 
+	// Snapshot matching agent IDs under runner lock to avoid nested locking
+	m.runner.mu.RLock()
+	var targetIDs []string
 	for _, agent := range m.runner.agents {
 		if agent.Type == at && agent.GetStatus() == AgentStatusRunning {
-			// Deliver to inbox
-			m.mu.Lock()
-			if inbox, ok := m.inbox[agent.ID]; ok {
-				msg := Message{
-					ID:        fmt.Sprintf("broadcast_%d", m.msgCounter),
-					From:      m.fromAgentID,
-					To:        agent.ID,
-					Type:      msgType,
-					Content:   content,
-					Timestamp: time.Now(),
-				}
-				m.msgCounter++
-				select {
-				case inbox <- msg:
-					count++
-				default:
-					// Inbox full, skip
-				}
-			}
-			m.mu.Unlock()
+			targetIDs = append(targetIDs, agent.ID)
 		}
 	}
+	m.runner.mu.RUnlock()
+
+	count := 0
+	m.mu.Lock()
+	for _, agentID := range targetIDs {
+		if inbox, ok := m.inbox[agentID]; ok {
+			msg := Message{
+				ID:        fmt.Sprintf("broadcast_%d", m.msgCounter),
+				From:      m.fromAgentID,
+				To:        agentID,
+				Type:      msgType,
+				Content:   content,
+				Timestamp: time.Now(),
+			}
+			m.msgCounter++
+			select {
+			case inbox <- msg:
+				count++
+			default:
+				// Inbox full, skip
+			}
+		}
+	}
+	m.mu.Unlock()
 
 	logging.Debug("broadcast sent", "type", targetType, "recipients", count)
 	return nil

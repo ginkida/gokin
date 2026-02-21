@@ -381,6 +381,7 @@ func (tp *TreePlanner) ExpandNode(ctx context.Context, tree *PlanTree, node *Pla
 		}
 	}
 
+	tree.mu.Lock()
 	var newNodes []*PlanNode
 	for _, action := range actions {
 		child := tree.AddNode(node.ID, action)
@@ -390,8 +391,8 @@ func (tp *TreePlanner) ExpandNode(ctx context.Context, tree *PlanTree, node *Pla
 			newNodes = append(newNodes, child)
 		}
 	}
-
 	tree.ExpandedNodes++
+	tree.mu.Unlock()
 
 	return newNodes, nil
 }
@@ -676,6 +677,12 @@ func (tp *TreePlanner) GetReadyActions(tree *PlanTree) ([]*PlannedAction, error)
 		return nil, nil // No ready actions available
 	}
 
+	// Cap parallel execution to prevent resource exhaustion
+	const maxParallelNodes = 4
+	if len(readyNodes) > maxParallelNodes {
+		readyNodes = readyNodes[:maxParallelNodes]
+	}
+
 	var actions []*PlannedAction
 	for _, node := range readyNodes {
 		node.Status = PlanNodeExecuting
@@ -778,17 +785,26 @@ func (tp *TreePlanner) ShouldReplan(tree *PlanTree, result *AgentResult) bool {
 		return false
 	}
 
-	if tree.ReplanCount >= tp.config.MaxReplans {
+	tree.mu.Lock()
+	tree.EnsureIndex()
+	tree.mu.Unlock()
+
+	tree.mu.RLock()
+	replanCount := tree.ReplanCount
+	currentNode := tree.CurrentNode
+	var hasSiblings bool
+	if currentNode != nil {
+		parent, ok := tree.GetParent(currentNode.ID)
+		hasSiblings = ok && len(parent.Children) > 1
+	}
+	tree.mu.RUnlock()
+
+	if replanCount >= tp.config.MaxReplans {
 		return false
 	}
 
-	// Check if there are alternative paths available
-	if tree.CurrentNode != nil {
-		parent, ok := tree.GetParent(tree.CurrentNode.ID)
-		if ok && len(parent.Children) > 1 {
-			// There are siblings to try
-			return true
-		}
+	if hasSiblings {
+		return true
 	}
 
 	// Always allow replanning for failures within limit
@@ -1007,8 +1023,10 @@ func (tp *TreePlanner) GetStats() map[string]any {
 	totalNodes := 0
 	totalReplans := 0
 	for _, tree := range tp.trees {
+		tree.mu.RLock()
 		totalNodes += tree.TotalNodes
 		totalReplans += tree.ReplanCount
+		tree.mu.RUnlock()
 	}
 
 	return map[string]any{
@@ -1036,7 +1054,7 @@ func (tp *TreePlanner) reorderByHistoricalSuccess(actions []*PlannedAction) []*P
 		key := buildStrategyKey(action)
 		rate := tp.strategyOpt.GetSuccessRate(key)
 		// Default score of 0.5 for unknown strategies
-		if rate <= 0 || rate >= 1 {
+		if rate <= 0 {
 			rate = 0.5
 		}
 		scored[i] = scoredAction{action: action, score: rate}

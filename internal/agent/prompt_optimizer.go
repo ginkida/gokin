@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -122,7 +124,11 @@ func (po *PromptOptimizer) writeSnapshot(data []byte) error {
 
 // generateVariantID creates a unique ID for a variant.
 func generateVariantID() string {
-	return time.Now().Format("20060102150405.000")
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return hex.EncodeToString([]byte(time.Now().String()))
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // RecordExecution records the outcome of a prompt execution.
