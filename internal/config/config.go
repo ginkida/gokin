@@ -22,7 +22,6 @@ type Config struct {
 	Watcher     WatcherConfig     `yaml:"watcher"`
 	DiffPreview DiffPreviewConfig `yaml:"diff_preview"`
 	Semantic    SemanticConfig    `yaml:"semantic"`
-	Contract    ContractConfig    `yaml:"contract"`
 	MCP         MCPConfig         `yaml:"mcp"`
 	Update      UpdateConfig      `yaml:"update"`
 
@@ -195,7 +194,6 @@ type UIConfig struct {
 	MarkdownRendering   bool   `yaml:"markdown_rendering"`
 	ShowToolCalls       bool   `yaml:"show_tool_calls"`
 	ShowTokenUsage      bool   `yaml:"show_token_usage"`
-	MouseMode           string `yaml:"mouse_mode"`    // "enabled" (default) or "disabled"
 	Theme               string `yaml:"theme"`         // Theme name: dark, light, sepia, cyber, forest, ocean, monokai, dracula, high_contrast
 	ShowWelcome         bool   `yaml:"show_welcome"`  // Show welcome message on first launch
 	HintsEnabled        bool   `yaml:"hints_enabled"` // Show contextual hints for features
@@ -324,26 +322,13 @@ type SemanticConfig struct {
 	TopK            int           `yaml:"top_k"`            // Default number of results
 	ChunkSize       int           `yaml:"chunk_size"`       // Chunk size (characters)
 	ChunkOverlap    int           `yaml:"chunk_overlap"`    // Overlap between chunks
-	AutoCleanup     bool          `yaml:"auto_cleanup"`     // Auto-cleanup old projects
-	IndexPatterns   []string      `yaml:"index_patterns"`   // File patterns to index
-	ExcludePatterns []string      `yaml:"exclude_patterns"` // Patterns to exclude
-}
-
-// ContractConfig holds contract-driven development settings.
-type ContractConfig struct {
-	Enabled         bool          `yaml:"enabled"`          // Enable/disable contract system
-	RequireApproval bool          `yaml:"require_approval"` // Require user approval for contracts
-	AutoDetect      bool          `yaml:"auto_detect"`      // AI auto-proposes contracts
-	AutoVerify      bool          `yaml:"auto_verify"`      // Auto-verify after implementation
-	VerifyTimeout   time.Duration `yaml:"verify_timeout"`   // Timeout for verification commands
-	StorePath       string        `yaml:"store_path"`       // Path for contract storage
-	InjectContext   bool          `yaml:"inject_context"`   // Inject active contract into context
 }
 
 // MCPConfig holds MCP (Model Context Protocol) settings.
 type MCPConfig struct {
-	Enabled bool              `yaml:"enabled"` // Enable/disable MCP support
-	Servers []MCPServerConfig `yaml:"servers"` // MCP server configurations
+	Enabled             bool              `yaml:"enabled"`               // Enable/disable MCP support
+	Servers             []MCPServerConfig `yaml:"servers"`               // MCP server configurations
+	HealthCheckInterval time.Duration     `yaml:"health_check_interval"` // Interval for health checks (0 = disabled)
 }
 
 // MCPServerConfig holds configuration for a single MCP server.
@@ -442,9 +427,6 @@ func DefaultConfig() *Config {
 				"update_plan_progress": "allow",
 				"get_plan_status":      "allow",
 				"exit_plan_mode":       "allow",
-				"contract_propose":     "allow",
-				"contract_verify":      "allow",
-				"contract_status":      "allow",
 				"write":                "ask",
 				"edit":                 "ask",
 				"bash":                 "ask",
@@ -515,18 +497,10 @@ func DefaultConfig() *Config {
 			CacheTTL:     24 * time.Hour,       // Cache embeddings for 24 hours
 			TopK:         10,                   // Return top 10 results
 		},
-		Contract: ContractConfig{
-			Enabled:         true,
-			RequireApproval: true,
-			AutoDetect:      true,
-			AutoVerify:      true,
-			VerifyTimeout:   2 * time.Minute,
-			StorePath:       ".gokin/contracts/",
-			InjectContext:   true,
-		},
 		MCP: MCPConfig{
-			Enabled: false, // Disabled by default
-			Servers: []MCPServerConfig{},
+			Enabled:             false,            // Disabled by default
+			Servers:             []MCPServerConfig{},
+			HealthCheckInterval: 30 * time.Second, // Check every 30s when MCP is enabled
 		},
 		Update: UpdateConfig{
 			Enabled:           true,             // Enabled by default

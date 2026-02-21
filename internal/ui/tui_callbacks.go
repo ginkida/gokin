@@ -123,11 +123,6 @@ func (m *Model) SetShowTokens(show bool) {
 	m.showTokens = show
 }
 
-// SetMouseEnabled is a no-op kept for API compatibility.
-// Mouse is always captured; text selection uses native terminal shortcuts.
-func (m *Model) SetMouseEnabled(enabled bool) {
-}
-
 // SetProjectInfo sets the project information for display.
 func (m *Model) SetProjectInfo(projectType, projectName string) {
 	m.projectType = projectType

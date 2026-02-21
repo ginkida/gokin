@@ -277,7 +277,7 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 
 	// 13. Close client
 	if a.client != nil {
-		a.client.Close()
+		_ = a.client.Close()
 	}
 
 	// 14. Close logging last

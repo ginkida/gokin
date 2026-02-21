@@ -105,7 +105,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 			// Initialize connection
 			if err := client.Initialize(serverCtx); err != nil {
-				client.Close()
+				_ = client.Close()
 				res.err = fmt.Errorf("initialization failed: %w", err)
 				results <- res
 				return
@@ -114,7 +114,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			// List tools
 			mcpTools, err := client.ListTools(serverCtx)
 			if err != nil {
-				client.Close()
+				_ = client.Close()
 				res.err = fmt.Errorf("failed to list tools: %w", err)
 				results <- res
 				return
@@ -173,14 +173,14 @@ func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 
 	// Initialize connection
 	if err := client.Initialize(ctx); err != nil {
-		client.Close()
+		_ = client.Close()
 		return fmt.Errorf("initialization failed: %w", err)
 	}
 
 	// List tools
 	mcpTools, err := client.ListTools(ctx)
 	if err != nil {
-		client.Close()
+		_ = client.Close()
 		return fmt.Errorf("failed to list tools: %w", err)
 	}
 
@@ -323,7 +323,7 @@ func (m *Manager) RemoveServer(name string) error {
 
 	// Disconnect if connected
 	if client, exists := m.clients[name]; exists {
-		client.Close()
+		_ = client.Close()
 		delete(m.clients, name)
 	}
 
@@ -634,7 +634,7 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 	// Phase 2: perform network I/O without holding the lock.
 	for _, c := range candidates {
 		if c.oldClient != nil {
-			c.oldClient.Close()
+			_ = c.oldClient.Close()
 		}
 
 		client, err := NewClient(ctx, c.cfg)
@@ -647,7 +647,7 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 		}
 
 		if err := client.Initialize(ctx); err != nil {
-			client.Close()
+			_ = client.Close()
 			m.mu.Lock()
 			c.health.LastReconnectError = err.Error()
 			m.mu.Unlock()
@@ -657,7 +657,7 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 
 		mcpTools, err := client.ListTools(ctx)
 		if err != nil {
-			client.Close()
+			_ = client.Close()
 			m.mu.Lock()
 			c.health.LastReconnectError = err.Error()
 			m.mu.Unlock()

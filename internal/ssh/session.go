@@ -149,7 +149,7 @@ func (m *SessionManager) CleanupIdle() int {
 		idleTime := now.Sub(client.LastUse())
 		if idleTime > m.maxIdle {
 			logging.Info("closing idle SSH session", "key", key, "idle", idleTime)
-			client.Close()
+			_ = client.Close()
 			delete(m.sessions, key)
 			cleaned++
 		}

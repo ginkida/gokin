@@ -37,7 +37,7 @@ func EnableFileLogging(configDir string, level Level) error {
 
 	// Close previous log file if any
 	if logFile != nil {
-		logFile.Close()
+		_ = logFile.Close()
 	}
 	logFile = f
 
@@ -68,7 +68,7 @@ func DisableLogging() {
 	defer mu.Unlock()
 
 	if logFile != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		logFile = nil
 	}
 
@@ -83,7 +83,7 @@ func Close() {
 	defer mu.Unlock()
 
 	if logFile != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		logFile = nil
 	}
 }

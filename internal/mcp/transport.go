@@ -252,7 +252,7 @@ func (t *StdioTransport) Close() error {
 
 	// Close stdin first to signal the server to exit
 	if t.stdin != nil {
-		t.stdin.Close()
+		_ = t.stdin.Close()
 	}
 
 	// Wait for stderr logging to complete
@@ -366,7 +366,7 @@ func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {

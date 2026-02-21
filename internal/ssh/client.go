@@ -79,7 +79,7 @@ func (c *SSHClient) Connect(ctx context.Context) error {
 			return nil // Connection still good
 		}
 		// Connection dead, close and reconnect
-		c.conn.Close()
+		_ = c.conn.Close()
 		c.conn = nil
 	}
 
@@ -105,7 +105,7 @@ func (c *SSHClient) Connect(ctx context.Context) error {
 	// Perform SSH handshake
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, sshConfig)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("SSH handshake failed: %w", err)
 	}
 

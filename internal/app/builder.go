@@ -73,9 +73,6 @@ type Builder struct {
 	taskRouter       *router.Router
 	taskOrchestrator *TaskOrchestrator // Unified Task Orchestrator
 
-	// Phase 4: UI Auto-Update System
-	uiUpdateManager *UIUpdateManager
-
 	// Phase 5: Agent System Improvements (6→10)
 	agentTypeRegistry *agent.AgentTypeRegistry
 	strategyOptimizer *agent.StrategyOptimizer
@@ -158,9 +155,6 @@ func (b *Builder) Build() (*App, error) {
 		b.addError(err)
 	}
 	if err := b.initUI(); err != nil {
-		b.addError(err)
-	}
-	if err := b.initUIUpdateSystem(); err != nil {
 		b.addError(err)
 	}
 	if err := b.wireDependencies(); err != nil {
@@ -749,14 +743,6 @@ func (b *Builder) initManagers() error {
 	return nil
 }
 
-// initUIUpdateSystem initializes the Phase 4 UI Auto-Update System.
-func (b *Builder) initUIUpdateSystem() error {
-	// This will be called after initUI() when we have access to the TUI model
-	// For now, we'll create placeholder instances
-	// Actual initialization will happen in wireDependencies()
-	return nil
-}
-
 // initIntegrations initializes optional feature integrations.
 func (b *Builder) initIntegrations() error {
 	// Wire up task manager to bash tool and apply config
@@ -1168,6 +1154,12 @@ func (b *Builder) initIntegrations() error {
 		// Refresh tools on client
 		b.geminiClient.SetTools(b.registry.GeminiTools())
 
+		// Start health check for connected servers
+		if len(b.mcpManager.GetConnectedServers()) > 0 && b.cfg.MCP.HealthCheckInterval > 0 {
+			b.mcpManager.StartHealthCheck(b.ctx, b.cfg.MCP.HealthCheckInterval)
+			logging.Debug("MCP health check started", "interval", b.cfg.MCP.HealthCheckInterval)
+		}
+
 		logging.Debug("MCP initialized",
 			"servers", len(b.cfg.MCP.Servers),
 			"tools", len(b.mcpManager.GetTools()))
@@ -1181,8 +1173,6 @@ func (b *Builder) initUI() error {
 	b.tuiModel = ui.NewModel()
 	b.tuiModel.SetShowTokens(b.cfg.UI.ShowTokenUsage)
 
-	enableMouse := b.cfg.UI.MouseMode != "disabled"
-	b.tuiModel.SetMouseEnabled(enableMouse)
 	b.tuiModel.SetBellEnabled(b.cfg.UI.Bell)
 
 	// Filter models by current provider/backend
@@ -1554,11 +1544,6 @@ func (b *Builder) wireDependencies() error {
 		}
 	}
 
-	// === PHASE 4: Initialize UI Auto-Update System ===
-	// Create UI update manager with app instance (will be set in assembleApp)
-	// We need to defer this until after app is assembled
-	logging.Debug("UI update system will be initialized after app assembly")
-
 	// === PHASE 5: Wire UIBroadcaster to Coordinator ===
 	if b.coordinator != nil {
 		broadcaster := &uiBroadcasterAdapter{app: app}
@@ -1610,10 +1595,8 @@ func (b *Builder) assembleApp() *App {
 		backgroundIndexer:    b.backgroundIdx,
 		taskRouter:           b.taskRouter,
 		orchestrator:         b.taskOrchestrator,
-		reliability:          NewReliabilityManager(),
-		policy:               NewPolicyEngine(),
-		// Phase 4: UI Auto-Update System (initialized separately)
-		uiUpdateManager: nil, // Will be set after assembly
+		reliability: NewReliabilityManager(),
+		policy:      NewPolicyEngine(),
 		// Phase 5: Agent System Improvements
 		coordinator:       b.coordinator,
 		agentTypeRegistry: b.agentTypeRegistry,

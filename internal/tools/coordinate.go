@@ -182,10 +182,6 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	if !ok {
 		return NewErrorResult("tasks must be an array"), nil
 	}
-	_ = 3 // maxParallel default (used by coordinator)
-	if _, ok := args["max_parallel"].(float64); ok {
-		// maxParallel configured via coordinator factory
-	}
 	timeoutMinutes := 10
 	if tm, ok := args["timeout_minutes"].(float64); ok {
 		timeoutMinutes = int(tm)

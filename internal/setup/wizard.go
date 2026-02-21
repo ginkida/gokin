@@ -806,7 +806,7 @@ func validateWithProviderConfig(ctx context.Context, p *config.ProviderDef, apiK
 	if err != nil {
 		return fmt.Errorf("connection error: %w", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		return fmt.Errorf("invalid API key (HTTP %d)", resp.StatusCode)

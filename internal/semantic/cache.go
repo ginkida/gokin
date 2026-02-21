@@ -168,7 +168,7 @@ func (c *EmbeddingCache) Save() error {
 
 	encoder := gob.NewEncoder(f)
 	if err := encoder.Encode(c.entries); err != nil {
-		f.Close()
+		_ = f.Close()
 		os.Remove(tmpPath)
 		return err
 	}

@@ -167,27 +167,27 @@ func (i *Installer) replaceUnix(ctx context.Context, newBinaryPath string) error
 	// Copy new binary to temp file
 	newFile, err := os.Open(newBinaryPath)
 	if err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to open new binary: %w", err)
 	}
 
 	_, err = io.Copy(tmpFile, newFile)
-	newFile.Close()
+	_ = newFile.Close()
 
 	if err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to copy new binary: %w", err)
 	}
 
 	// Sync to ensure data is flushed to disk before atomic rename
 	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	// Set permissions
 	if err := os.Chmod(tmpPath, info.Mode()); err != nil {

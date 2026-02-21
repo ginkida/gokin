@@ -14,8 +14,6 @@ const (
 	KeySourceEnvironment KeySource = "environment"
 	// KeySourceConfig indicates the key was loaded from config file
 	KeySourceConfig KeySource = "config"
-	// KeySourceKeyring indicates the key was loaded from system keyring
-	KeySourceKeyring KeySource = "keyring"
 	// KeySourceNotSet indicates no key was found
 	KeySourceNotSet KeySource = "not_set"
 )
@@ -49,19 +47,10 @@ func (k *LoadedKey) IsSet() bool {
 // GetAPIKey loads an API key from multiple sources in priority order:
 // 1. Environment variables (highest priority)
 // 2. Config file value (fallback)
-// 3. System keyring (optional, future enhancement)
 //
 // Priority ensures that environment variables override config files,
 // allowing secure deployment without storing keys in configs.
-//
-// Parameters:
-//   - envVarNames: List of environment variable names to check (in priority order)
-//   - configValue: Fallback value from config file
-//   - keyringService: Optional service name for keyring lookup (empty string = skip keyring)
-//
-// Returns:
-//   - LoadedKey: The loaded key with source information
-func GetAPIKey(envVarNames []string, configValue string, keyringService string) *LoadedKey {
+func GetAPIKey(envVarNames []string, configValue string) *LoadedKey {
 	// Priority 1: Environment variables (highest priority)
 	for _, envVar := range envVarNames {
 		if value := os.Getenv(envVar); value != "" {
@@ -80,11 +69,6 @@ func GetAPIKey(envVarNames []string, configValue string, keyringService string) 
 		}
 	}
 
-	// Priority 3: System keyring (reserved for future use)
-	// Keyring support is not implemented to avoid external dependencies.
-	// Use environment variables for secure key storage instead.
-	_ = keyringService
-
 	// No key found
 	return &LoadedKey{
 		Value:  "",
@@ -99,7 +83,7 @@ func GetProviderKey(envVars []string, configKey, legacyKey string) *LoadedKey {
 	if configValue == "" {
 		configValue = legacyKey
 	}
-	return GetAPIKey(envVars, configValue, "")
+	return GetAPIKey(envVars, configValue)
 }
 
 // MaskKey masks an API key for safe logging/display

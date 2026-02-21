@@ -536,7 +536,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 	if resp.StatusCode != http.StatusOK {
 		retryAfter := ParseRetryAfter(resp)
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if c.rateLimiter != nil && estimatedTokens > 0 {
 			c.rateLimiter.ReturnTokens(1, estimatedTokens)
 		}
@@ -709,7 +709,7 @@ func (c *GeminiOAuthClient) processSSEStream(ctx context.Context, body io.ReadCl
 	go func() {
 		select {
 		case <-ctx.Done():
-			body.Close()
+			_ = body.Close()
 		case <-localDone:
 		}
 	}()

@@ -29,13 +29,13 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 
 	// Write data to temporary file
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 
 	// Sync to disk to ensure data is persisted before rename
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 

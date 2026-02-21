@@ -366,7 +366,7 @@ func (t *GrepTool) invertMatches(ctx context.Context, files []string, re *regexp
 				matches = append(matches, grepMatch{lineNum: lineNum, line: line})
 			}
 		}
-		f.Close()
+		_ = f.Close()
 
 		if len(matches) > 0 {
 			results = append(results, fileMatch{path: file, matches: matches})

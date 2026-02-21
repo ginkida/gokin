@@ -55,7 +55,7 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	a.mu.Unlock()
 
 	if oldClient != nil {
-		go oldClient.Close()
+		go func() { _ = oldClient.Close() }()
 	}
 
 	summary := fmt.Sprintf("%s -> %s", candidates[0], strings.Join(candidates[1:], " -> "))

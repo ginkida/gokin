@@ -75,28 +75,10 @@ func (c *SemanticStatsCommand) Execute(ctx context.Context, args []string, app A
 	sb.WriteString(fmt.Sprintf("  Max File Size:   %s\n", format.Bytes(int64(cfg.Semantic.MaxFileSize))))
 	sb.WriteString(fmt.Sprintf("  Cache TTL:       %s\n\n", cfg.Semantic.CacheTTL))
 
-	// Patterns
-	sb.WriteString("📋 Index Patterns\n")
-	for _, pattern := range cfg.Semantic.IndexPatterns {
-		sb.WriteString(fmt.Sprintf("  ✓ %s\n", pattern))
-	}
-	sb.WriteString("\n")
-
-	// Exclusions
-	if len(cfg.Semantic.ExcludePatterns) > 0 {
-		sb.WriteString("🚫 Excluded Patterns\n")
-		for _, pattern := range cfg.Semantic.ExcludePatterns {
-			sb.WriteString(fmt.Sprintf("  ✗ %s\n", pattern))
-		}
-		sb.WriteString("\n")
-	}
-
 	// Footer
 	sb.WriteString(strings.Repeat("─", 50))
 	sb.WriteString("\n")
-	sb.WriteString("💡 Tips:\n")
-	sb.WriteString("  Use /semantic-reindex to rebuild the index\n")
-	sb.WriteString("  Use /semantic-cleanup to remove old projects")
+	sb.WriteString("💡 Tip: Use /semantic-reindex to rebuild the index")
 
 	return sb.String(), nil
 }

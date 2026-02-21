@@ -659,7 +659,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 			logging.Error("failed to read error response", "error", err)
 			body = []byte("(failed to read response body)")
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		logging.Warn("anthropic API error", "status", resp.StatusCode, "body", string(body))
 		return nil, &HTTPError{
 			StatusCode: resp.StatusCode,
@@ -687,7 +687,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	go func() {
 		select {
 		case <-ctx.Done():
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		case <-done:
 			// Stream finished normally, nothing to do
 		}

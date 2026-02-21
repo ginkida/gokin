@@ -259,11 +259,11 @@ func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error
 				outPath := outFile.Name()
 
 				if _, err := io.Copy(outFile, tr); err != nil {
-					outFile.Close()
+					_ = outFile.Close()
 					os.Remove(outPath)
 					return "", err
 				}
-				outFile.Close()
+				_ = outFile.Close()
 				if err := os.Chmod(outPath, os.FileMode(header.Mode)); err != nil {
 					os.Remove(outPath)
 					return "", err
@@ -305,25 +305,25 @@ func (d *Downloader) extractZip(archivePath, binaryName string) (string, error) 
 
 				outFile, err := os.CreateTemp(d.tempDir, "gokin-bin-*")
 				if err != nil {
-					rc.Close()
+					_ = rc.Close()
 					return "", err
 				}
 				outPath := outFile.Name()
 
 				if _, err := io.Copy(outFile, rc); err != nil {
-					outFile.Close()
+					_ = outFile.Close()
 					os.Remove(outPath)
-					rc.Close()
+					_ = rc.Close()
 					return "", err
 				}
 
-				outFile.Close()
+				_ = outFile.Close()
 				if err := os.Chmod(outPath, f.Mode()); err != nil {
 					os.Remove(outPath)
-					rc.Close()
+					_ = rc.Close()
 					return "", err
 				}
-				rc.Close()
+				_ = rc.Close()
 
 				return outPath, nil
 			}

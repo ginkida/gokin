@@ -78,7 +78,7 @@ func (p *ClientPool) Put(provider, model string, client Client) {
 
 	// If client already exists for this key, close the old one
 	if existing, ok := p.clients[key]; ok {
-		existing.Close()
+		_ = existing.Close()
 	}
 
 	// If pool is full, evict the oldest idle client
@@ -110,7 +110,7 @@ func (p *ClientPool) evictOldest() {
 
 	if oldestKey != "" {
 		if c, ok := p.clients[oldestKey]; ok {
-			c.Close()
+			_ = c.Close()
 		}
 		delete(p.clients, oldestKey)
 		delete(p.lastUsed, oldestKey)
@@ -133,7 +133,7 @@ func (p *ClientPool) Cleanup() {
 	for key, t := range p.lastUsed {
 		if now.Sub(t) > DefaultIdleTimeout {
 			if c, ok := p.clients[key]; ok {
-				c.Close()
+				_ = c.Close()
 			}
 			delete(p.clients, key)
 			delete(p.lastUsed, key)
@@ -162,7 +162,7 @@ func (p *ClientPool) Close() {
 
 	p.closed = true
 	for key, c := range p.clients {
-		c.Close()
+		_ = c.Close()
 		delete(p.clients, key)
 		delete(p.lastUsed, key)
 	}
