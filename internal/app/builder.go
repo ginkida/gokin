@@ -365,6 +365,9 @@ func (b *Builder) initTools() error {
 	toolCache := tools.NewToolResultCache(tools.DefaultCacheConfig())
 	b.executor.SetToolCache(toolCache)
 
+	readTracker := tools.NewFileReadTracker()
+	b.executor.SetReadTracker(readTracker)
+
 	// Enable native macOS notifications if configured
 	if b.cfg.UI.NativeNotifications {
 		b.executor.GetNotificationManager().EnableNativeNotifications(true)
@@ -428,6 +431,10 @@ func (b *Builder) initSession() error {
 	b.projectMemory = appcontext.NewProjectMemory(b.workDir)
 	if err := b.projectMemory.Load(); err != nil {
 		logging.Debug("project memory not loaded", "error", err)
+	}
+	// Start watching for instruction file changes (GOKIN.md, CLAUDE.md, etc.)
+	if err := b.projectMemory.StartWatching(b.ctx, 500); err != nil {
+		logging.Debug("project memory file watching not started", "error", err)
 	}
 
 	b.promptBuilder = appcontext.NewPromptBuilder(b.workDir, b.projectInfo)
@@ -943,6 +950,21 @@ func (b *Builder) initIntegrations() error {
 			// Wire error store to agent runner for reflector integration
 			b.agentRunner.SetErrorStore(errorStore)
 			logging.Debug("error store initialized for learning from errors")
+		}
+	}
+
+	// Initialize project learning for memorize tool
+	if b.workDir != "" {
+		projectLearning, err := memory.NewProjectLearning(b.workDir)
+		if err != nil {
+			logging.Debug("failed to create project learning", "error", err)
+		} else {
+			if memorizeTool, ok := b.registry.Get("memorize"); ok {
+				if mt, ok := memorizeTool.(*tools.MemorizeTool); ok {
+					mt.SetLearning(projectLearning)
+					logging.Debug("memorize tool wired with project learning")
+				}
+			}
 		}
 	}
 

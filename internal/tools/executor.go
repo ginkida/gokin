@@ -189,6 +189,9 @@ type Executor struct {
 	// Tool result cache
 	toolCache *ToolResultCache
 
+	// File read deduplication tracker
+	readTracker *FileReadTracker
+
 	// Auto-formatter for write/edit operations
 	formatter *Formatter
 
@@ -410,6 +413,11 @@ func (e *Executor) SetSessionID(id string) {
 // SetToolCache sets the tool result cache for caching read-only tool results.
 func (e *Executor) SetToolCache(cache *ToolResultCache) {
 	e.toolCache = cache
+}
+
+// SetReadTracker sets the file read deduplication tracker.
+func (e *Executor) SetReadTracker(tracker *FileReadTracker) {
+	e.readTracker = tracker
 }
 
 // GetNotificationManager returns the notification manager.
@@ -1128,6 +1136,28 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	if e.toolCache != nil {
 		if cached, hit := e.toolCache.Get(call.Name, call.Args); hit {
 			logging.Debug("tool cache hit", "tool", call.Name)
+			// For read tool: replace cached content with stub if file unchanged,
+			// saving context window space on repeated reads.
+			if call.Name == "read" && e.readTracker != nil && cached.Success {
+				filePath, _ := call.Args["file_path"].(string)
+				offset := 1
+				limit := 2000
+				if v, ok := call.Args["offset"].(float64); ok {
+					offset = int(v)
+				}
+				if v, ok := call.Args["limit"].(float64); ok {
+					limit = int(v)
+				}
+				if filePath != "" {
+					isDup, origRec, _ := e.readTracker.CheckAndRecord(filePath, offset, limit, len(cached.Content))
+					if isDup && origRec != nil {
+						cached.Content = fmt.Sprintf(
+							"[File already read at turn %d, content unchanged (%d chars). Path: %s]",
+							origRec.TurnIndex, origRec.ContentLen, filePath)
+						return cached
+					}
+				}
+			}
 			return cached
 		}
 	}
@@ -1323,6 +1353,38 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			// Invalidate git caches when files change
 			e.toolCache.InvalidateByTool("git_status")
 			e.toolCache.InvalidateByTool("git_diff")
+		}
+	}
+
+	// Step 12.7: Deduplicate read content for history optimization
+	if e.readTracker != nil {
+		if call.Name == "read" && result.Success {
+			filePath, _ := call.Args["file_path"].(string)
+			offset := 1
+			limit := 2000
+			if v, ok := call.Args["offset"].(float64); ok {
+				offset = int(v)
+			}
+			if v, ok := call.Args["limit"].(float64); ok {
+				limit = int(v)
+			}
+			if filePath != "" {
+				isDup, origRec, _ := e.readTracker.CheckAndRecord(filePath, offset, limit, len(result.Content))
+				if isDup && origRec != nil {
+					result.Content = fmt.Sprintf(
+						"[File already read at turn %d, content unchanged (%d chars). Path: %s]",
+						origRec.TurnIndex, origRec.ContentLen, filePath)
+				}
+			}
+		}
+		// Invalidate read tracker on write operations
+		if isWriteOperation(call.Name) {
+			if path, ok := call.Args["path"].(string); ok {
+				e.readTracker.InvalidateFile(path)
+			}
+			if path, ok := call.Args["file_path"].(string); ok {
+				e.readTracker.InvalidateFile(path)
+			}
 		}
 	}
 

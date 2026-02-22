@@ -82,10 +82,12 @@ type Agent struct {
 	onScratchpadUpdate func(content string)
 
 	// Context management
-	ctxCfg       *config.ContextConfig
-	tokenCounter *ctxmgr.TokenCounter
-	summarizer   *ctxmgr.Summarizer
-	compactor    *ctxmgr.ResultCompactor
+	ctxCfg          *config.ContextConfig
+	tokenCounter    *ctxmgr.TokenCounter
+	summarizer      *ctxmgr.Summarizer
+	compactor       *ctxmgr.ResultCompactor
+	fileTracker     *ctxmgr.FileActivityTracker
+	relevanceScorer *ctxmgr.RelevanceScorer
 
 	// Self-reflection for error recovery
 	reflector         *Reflector
@@ -212,6 +214,10 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		agent.compactor = ctxmgr.NewResultCompactor(ctxCfg.ToolResultMaxChars)
 	}
 
+	// Initialize relevance scoring for smarter compaction
+	agent.fileTracker = ctxmgr.NewFileActivityTracker()
+	agent.relevanceScorer = ctxmgr.NewRelevanceScorer()
+
 	// Initialize project learning
 	if pl, err := memory.NewProjectLearning(workDir); err == nil {
 		agent.learning = pl
@@ -326,6 +332,10 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		agent.summarizer = ctxmgr.NewSummarizer(agent.client)
 		agent.compactor = ctxmgr.NewResultCompactor(ctxCfg.ToolResultMaxChars)
 	}
+
+	// Initialize relevance scoring for smarter compaction
+	agent.fileTracker = ctxmgr.NewFileActivityTracker()
+	agent.relevanceScorer = ctxmgr.NewRelevanceScorer()
 
 	// Initialize project learning
 	if pl, err := memory.NewProjectLearning(workDir); err == nil {
@@ -2230,6 +2240,16 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 			results := a.executeTools(ctx, resp.FunctionCalls)
 
+			// Track file activity for relevance scoring
+			if a.fileTracker != nil {
+				a.stateMu.RLock()
+				msgIdx := len(a.history)
+				a.stateMu.RUnlock()
+				for _, fc := range resp.FunctionCalls {
+					a.fileTracker.RecordToolCall(fc.Name, fc.Args, msgIdx)
+				}
+			}
+
 			// Check cancellation after tool execution (Esc may have been pressed during tools)
 			select {
 			case <-ctx.Done():
@@ -2506,53 +2526,27 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 
 	middle := a.history[keepStart : len(a.history)-keepEnd]
 
-	// Score each middle message by importance
+	// Score each middle message using multi-signal relevance scoring
 	type scored struct {
 		idx   int
-		score int
+		score float64
 		msg   *genai.Content
 	}
-	// Collect FunctionCall IDs that have matching FunctionResponse in the middle section
-	// so we can boost FunctionCall messages to keep pairs together.
-	responseCallIDs := make(map[string]bool)
-	for _, msg := range middle {
-		if msg == nil {
-			continue
-		}
-		for _, part := range msg.Parts {
-			if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
-				responseCallIDs[part.FunctionResponse.ID] = true
-			}
-		}
+
+	// Use RelevanceScorer for smart multi-signal scoring (recency, tool type, edit proximity, etc.)
+	var floatScores []float64
+	if a.relevanceScorer != nil {
+		floatScores = a.relevanceScorer.ScoreMessages(middle, a.fileTracker, keepStart)
 	}
 
 	scores := make([]scored, len(middle))
 	for i, msg := range middle {
-		s := 0
-		if msg == nil {
-			scores[i] = scored{idx: i, score: 0, msg: msg}
-			continue
-		}
-		for _, part := range msg.Parts {
-			if part == nil {
-				continue
-			}
-			if part.FunctionResponse != nil {
-				s += 3 // Tool results are high value
-			} else if part.FunctionCall != nil {
-				// Boost FunctionCall to match FunctionResponse score when paired,
-				// so they survive or die together during compaction.
-				if part.FunctionCall.ID != "" && responseCallIDs[part.FunctionCall.ID] {
-					s += 3
-				} else {
-					s += 1
-				}
-			} else if part.Text != "" {
-				lower := strings.ToLower(part.Text)
-				if strings.Contains(lower, "error") || strings.Contains(lower, "failed") {
-					s += 2 // Error messages are valuable
-				}
-			}
+		var s float64
+		if floatScores != nil {
+			s = floatScores[i]
+		} else {
+			// Fallback: primitive scoring if scorer not available
+			s = primitiveScore(msg)
 		}
 		scores[i] = scored{idx: i, score: s, msg: msg}
 	}
@@ -2606,6 +2600,30 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 		"old_len", len(middle)+keepStart+keepEnd, "new_len", len(a.history))
 
 	return nil
+}
+
+// primitiveScore is the fallback scoring when RelevanceScorer is not available.
+func primitiveScore(msg *genai.Content) float64 {
+	if msg == nil {
+		return 0
+	}
+	var s float64
+	for _, part := range msg.Parts {
+		if part == nil {
+			continue
+		}
+		if part.FunctionResponse != nil {
+			s += 3
+		} else if part.FunctionCall != nil {
+			s += 1
+		} else if part.Text != "" {
+			lower := strings.ToLower(part.Text)
+			if strings.Contains(lower, "error") || strings.Contains(lower, "failed") {
+				s += 2
+			}
+		}
+	}
+	return s
 }
 
 // ensureToolPairConsistency removes orphaned FunctionCall/FunctionResponse parts
@@ -2759,11 +2777,21 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 		}
 	}
 
+	// Pre-compute relevance scores for all history messages to protect high-value outputs.
+	var msgScores []float64
+	if a.relevanceScorer != nil {
+		msgScores = a.relevanceScorer.ScoreMessages(a.history, a.fileTracker)
+	}
+
 	// Second pass: truncate candidates beyond the protection window.
 	// Candidates are ordered from newest to oldest (we walked backwards).
 	var freed int
 	var protectedSoFar int
 	for _, c := range candidates {
+		// Skip high-value messages (score > 5.0) — they contain important context
+		if msgScores != nil && c.msgIdx < len(msgScores) && msgScores[c.msgIdx] > 5.0 {
+			continue
+		}
 		protectedSoFar += len(c.content)
 		if protectedSoFar <= protectChars {
 			continue // Still within protection window
@@ -3496,6 +3524,16 @@ func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, star
 
 		// Execute tools and feed results back to the model
 		results := a.executeTools(ctx, resp.FunctionCalls)
+
+		// Track file activity for relevance scoring
+		if a.fileTracker != nil {
+			a.stateMu.RLock()
+			msgIdx := len(a.history)
+			a.stateMu.RUnlock()
+			for _, fc := range resp.FunctionCalls {
+				a.fileTracker.RecordToolCall(fc.Name, fc.Args, msgIdx)
+			}
+		}
 
 		var funcParts []*genai.Part
 		for _, r := range results {
