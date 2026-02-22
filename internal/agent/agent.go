@@ -95,6 +95,7 @@ type Agent struct {
 	autoFixAttempts   map[string]int
 	autoFixAttemptsMu sync.Mutex
 	learning          *memory.ProjectLearning
+	fixCache          *FixCache // Session-local error→fix cache
 
 	// Autonomous delegation strategy
 	delegation *DelegationStrategy
@@ -178,6 +179,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		ctxCfg:             ctxCfg,
 		recoveryExecutor:   NewRecoveryExecutor(2),
 		autoFixAttempts:    make(map[string]int),
+		fixCache:           NewFixCache(),
 	}
 
 	// Wire up RequestTool tool if it exists in the registry
@@ -295,6 +297,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		ctxCfg:             ctxCfg,
 		recoveryExecutor:   NewRecoveryExecutor(2),
 		autoFixAttempts:    make(map[string]int),
+		fixCache:           NewFixCache(),
 		// Store custom prompt for dynamic type
 		projectContext: dynType.SystemPrompt,
 	}
@@ -3056,14 +3059,53 @@ type toolCallResult struct {
 func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.FunctionCall) toolCallResult {
 	result := a.executeTool(ctx, call)
 
+	// On success, feed into fix cache for fix detection
+	if result.Success && a.fixCache != nil {
+		a.fixCache.RecordSuccess(call.Name, call.Args)
+	}
+
 	var reflection *Reflection
 
 	// Apply self-reflection on errors to provide recovery suggestions
 	if !result.Success && a.reflector != nil {
-		reflection = a.reflector.Reflect(ctx, call.Name, call.Args, result.Content)
+		// --- Fix Cache: fast path ---
+		// Try session-local cache before full Reflect pipeline
+		category := a.reflector.QuickCategorize(result.Content)
+		var cacheHit *FixRecord
+		if category != "" && a.fixCache != nil {
+			cacheHit, _ = a.fixCache.Lookup(call.Name, category, result.Content)
+		}
 
-		// Auto-fix attempt before enrichment
-		if reflection.AutoFix != nil && a.recoveryExecutor != nil {
+		if cacheHit != nil {
+			// Cache hit: build synthetic reflection with cached fix info
+			reflection = &Reflection{
+				ToolName:     call.Name,
+				Error:        result.Content,
+				Category:     category,
+				Suggestion:   "Apply the previously successful fix sequence.",
+				ShouldRetry:  true,
+				Intervention: FormatCachedFix(cacheHit),
+			}
+			// Record hit only; success/fail is determined by whether the same error recurs
+			a.fixCache.RecordHit(cacheHit.Signature.Key())
+			logging.Info("fix cache hit", "tool", call.Name, "category", category,
+				"hit_count", cacheHit.HitCount)
+		} else {
+			// Cache miss: full Reflect pipeline (unchanged)
+			reflection = a.reflector.Reflect(ctx, call.Name, call.Args, result.Content)
+		}
+
+		// Record error in fix cache for future fix detection
+		if a.fixCache != nil && category == "" && reflection != nil {
+			category = reflection.Category
+		}
+		turnIdx := a.GetTurnCount()
+		if a.fixCache != nil && category != "" {
+			a.fixCache.RecordError(call.Name, call.Args, category, result.Content, turnIdx)
+		}
+
+		// Auto-fix attempt before enrichment (only on cache miss)
+		if cacheHit == nil && reflection.AutoFix != nil && a.recoveryExecutor != nil {
 			key := normalizeCallKey(call.Name, call.Args)
 			a.autoFixAttemptsMu.Lock()
 			attempt := a.autoFixAttempts[key]
@@ -3101,6 +3143,13 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 			// Enrich the error result with reflection analysis
 			result.Content = fmt.Sprintf("%s\n\n---\n**Self-Reflection:**\n%s",
 				result.Content, reflection.Intervention)
+
+			// Append aggregation guidance if error category is recurring
+			if a.fixCache != nil && category != "" {
+				if agg := a.fixCache.GetAggregation(category); agg != "" {
+					result.Content += "\n\n" + agg
+				}
+			}
 
 			// Log reflection
 			logging.Info("agent reflected on error",

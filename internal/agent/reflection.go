@@ -105,6 +105,19 @@ func (r *Reflector) SetPredictor(p PredictorInterface) {
 	r.predictor = p
 }
 
+// QuickCategorize runs only the built-in regex patterns (no LLM, no ErrorStore)
+// and returns the error category, or "" if no pattern matches.
+// Used by FixCache to build a signature without full Reflect cost.
+func (r *Reflector) QuickCategorize(errorMsg string) string {
+	lowerError := strings.ToLower(errorMsg)
+	for _, pattern := range r.patterns {
+		if pattern.Pattern.MatchString(lowerError) {
+			return pattern.Category
+		}
+	}
+	return ""
+}
+
 // Reflect examines a tool error and returns recovery recommendations.
 func (r *Reflector) Reflect(ctx context.Context, toolName string, args map[string]any, errorMsg string) *Reflection {
 	reflection := &Reflection{
