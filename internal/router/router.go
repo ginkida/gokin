@@ -684,44 +684,81 @@ func (r *Router) selectCostAwareModel(analysis *TaskComplexity) string {
 }
 
 // selectToolSets determines which tool sets to include based on task analysis.
+// Uses both Strategy and TaskType to minimize tool declarations per request,
+// reducing token overhead (~60 tokens per tool declaration).
 func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
-	// Base: core is always included
+	// Base: core is always included (read, write, edit, bash, glob, grep, etc.)
 	sets := []tools.ToolSet{tools.ToolSetCore}
-
-	// Git — always if in repo
-	if r.isGitRepo {
-		sets = append(sets, tools.ToolSetGit)
-	}
 
 	switch analysis.Strategy {
 	case StrategyDirect:
-		// Questions — only core (+git). No file ops, no web, no planning.
+		// Pure Q&A — only core, no git/fileops/web needed.
 		return sets
 
 	case StrategySingleTool:
-		// Simple tool calls — add fileops
-		sets = append(sets, tools.ToolSetFileOps)
-		return sets
-
-	case StrategyExecutor:
-		// Standard execution — add fileops + web
-		sets = append(sets, tools.ToolSetFileOps, tools.ToolSetWeb)
-
-		// Add advanced for refactoring/complex code tasks
-		if analysis.Type == TaskTypeRefactoring || analysis.Type == TaskTypeComplex {
-			sets = append(sets, tools.ToolSetAdvanced)
+		// Single tool call: core covers read/write/edit/bash/glob/grep.
+		// Only add git if in a git repo (for git_status, git_diff, etc.)
+		if r.isGitRepo {
+			sets = append(sets, tools.ToolSetGit)
 		}
 		return sets
 
+	case StrategyExecutor:
+		// Task-type-aware filtering within executor strategy.
+		switch analysis.Type {
+		case TaskTypeQuestion:
+			// Questions that need tool calls (e.g. "what does function X do?")
+			// Core is sufficient — read, grep, glob cover it.
+			return sets
+
+		case TaskTypeExploration:
+			// Read-heavy: needs read, glob, grep, tree, diff + git for history.
+			// No write-oriented sets (fileops, web, advanced).
+			if r.isGitRepo {
+				sets = append(sets, tools.ToolSetGit)
+			}
+			return sets
+
+		case TaskTypeRefactoring:
+			// Code changes: needs edit/write + git + advanced analysis tools.
+			if r.isGitRepo {
+				sets = append(sets, tools.ToolSetGit)
+			}
+			sets = append(sets, tools.ToolSetFileOps, tools.ToolSetAdvanced)
+			return sets
+
+		case TaskTypeComplex:
+			// Complex multi-step: broad set but still skip semantic/memory/planning.
+			if r.isGitRepo {
+				sets = append(sets, tools.ToolSetGit)
+			}
+			sets = append(sets, tools.ToolSetFileOps, tools.ToolSetWeb, tools.ToolSetAdvanced)
+			return sets
+
+		default: // multi_tool, background
+			if r.isGitRepo {
+				sets = append(sets, tools.ToolSetGit)
+			}
+			sets = append(sets, tools.ToolSetFileOps)
+			return sets
+		}
+
 	case StrategySubAgent:
-		// Sub-agents / complex — full set
+		// Sub-agents have their own per-type tool filtering via createFilteredRegistry,
+		// but the main client still needs the full set for coordination.
+		if r.isGitRepo {
+			sets = append(sets, tools.ToolSetGit)
+		}
 		sets = append(sets, tools.ToolSetFileOps, tools.ToolSetWeb,
 			tools.ToolSetAdvanced, tools.ToolSetPlanning,
 			tools.ToolSetAgent, tools.ToolSetMemory, tools.ToolSetSemantic)
 		return sets
 	}
 
-	// Fallback: core + fileops
+	// Fallback: core + git + fileops
+	if r.isGitRepo {
+		sets = append(sets, tools.ToolSetGit)
+	}
 	sets = append(sets, tools.ToolSetFileOps)
 	return sets
 }

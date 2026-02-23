@@ -276,6 +276,11 @@ func (c *Coordinator) startTask(task *CoordinatedTask) {
 
 // checkCompletedAgents checks for completed agents and updates tasks.
 func (c *Coordinator) checkCompletedAgents() {
+	type callbackInfo struct {
+		task   *CoordinatedTask
+		result *AgentResult
+	}
+
 	c.mu.Lock()
 
 	// Collect completed agents first to avoid modifying map during iteration
@@ -293,6 +298,10 @@ func (c *Coordinator) checkCompletedAgents() {
 		}
 		completed = append(completed, completedAgent{agentID, taskID, result})
 	}
+
+	// Snapshot callback for invocation outside lock
+	onComplete := c.onTaskComplete
+	var callbacks []callbackInfo
 
 	// Now process completed agents
 	for _, ca := range completed {
@@ -323,17 +332,22 @@ func (c *Coordinator) checkCompletedAgents() {
 			"status", task.Status,
 			"duration", ca.result.Duration)
 
-		if c.onTaskComplete != nil {
-			c.onTaskComplete(task, ca.result)
+		if onComplete != nil {
+			callbacks = append(callbacks, callbackInfo{task, ca.result})
 		}
 
-		// Unblock dependent tasks
+		// Unblock dependent tasks (needs lock — accesses c.tasks, c.dependencies, c.queue)
 		c.unblockDependents(ca.taskID)
 	}
 
 	// Check if cleanup is needed (threshold reached)
 	needsCleanup := len(c.completed) > MaxCoordinatorTasks
 	c.mu.Unlock()
+
+	// Callbacks OUTSIDE lock
+	for _, cb := range callbacks {
+		onComplete(cb.task, cb.result)
+	}
 
 	// Cleanup old completed tasks if needed (after releasing lock)
 	if needsCleanup {
@@ -400,20 +414,22 @@ func (c *Coordinator) unblockDependents(completedID string) {
 // handleAgentCompletion handles a single agent completion event.
 func (c *Coordinator) handleAgentCompletion(agentID string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	taskID, ok := c.running[agentID]
 	if !ok {
+		c.mu.Unlock()
 		return
 	}
 
 	result, ok := c.runner.GetResult(agentID)
 	if !ok || !result.Completed {
+		c.mu.Unlock()
 		return
 	}
 
 	task := c.tasks[taskID]
 	if task == nil {
+		c.mu.Unlock()
 		return
 	}
 
@@ -434,12 +450,15 @@ func (c *Coordinator) handleAgentCompletion(agentID string) {
 		"status", task.Status,
 		"duration", result.Duration)
 
-	if c.onTaskComplete != nil {
-		c.onTaskComplete(task, result)
-	}
-
-	// Unblock dependent tasks
+	// Snapshot callback and unblock dependents under lock
+	onComplete := c.onTaskComplete
 	c.unblockDependents(taskID)
+	c.mu.Unlock()
+
+	// Callback OUTSIDE lock
+	if onComplete != nil {
+		onComplete(task, result)
+	}
 }
 
 // isAllComplete checks if all tasks are done.

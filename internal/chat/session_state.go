@@ -23,6 +23,8 @@ type SessionState struct {
 	Summary           string              `json:"summary,omitempty"`
 	Scratchpad        string              `json:"scratchpad,omitempty"`
 	SystemInstruction string              `json:"system_instruction,omitempty"`
+	Branches          map[string]*SessionState `json:"branches,omitempty"`
+	Checkpoints       map[string]int           `json:"checkpoints,omitempty"`
 }
 
 // SerializedContent represents a serializable conversation content.

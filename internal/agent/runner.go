@@ -95,6 +95,9 @@ type Runner struct {
 	// Sub-agent activity callback for UI updates
 	onSubAgentActivity func(agentID, agentType, toolName string, args map[string]any, status string)
 
+	// Event-driven notification for result completion (replaces polling in WaitWithContext)
+	resultReady chan struct{}
+
 	mu sync.RWMutex
 }
 
@@ -390,6 +393,7 @@ func NewRunner(ctx context.Context, c client.Client, registry tools.ToolRegistry
 		workDir:      workDir,
 		agents:       make(map[string]*Agent),
 		results:      make(map[string]*AgentResult),
+		resultReady:  make(chan struct{}, 1),
 	}
 	// Set up messenger factory
 	r.messengerFactory = func(agentID string) *AgentMessenger {
@@ -631,6 +635,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	r.mu.Lock()
 	r.results[agent.ID] = result
 	r.mu.Unlock()
+	r.notifyResultReady()
 
 	if err != nil {
 		return agent.ID, err
@@ -795,6 +800,7 @@ func (r *Runner) SpawnWithContext(
 	r.mu.Lock()
 	r.results[agent.ID] = result
 	r.mu.Unlock()
+	r.notifyResultReady()
 
 	return agent.ID, result, err
 }
@@ -923,6 +929,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 					result.Completed = true
 				}
 				r.mu.Unlock()
+				r.notifyResultReady()
 			}
 		}()
 
@@ -952,6 +959,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 				Completed: true,
 			}
 			r.mu.Unlock()
+			r.notifyResultReady()
 			return
 		default:
 		}
@@ -1025,6 +1033,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		r.mu.Lock()
 		r.results[agentID] = result
 		r.mu.Unlock()
+		r.notifyResultReady()
 
 		// Notify UI about agent completion
 		if onComplete != nil {
@@ -1164,6 +1173,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 					result.Completed = true
 				}
 				r.mu.Unlock()
+				r.notifyResultReady()
 			}
 		}()
 
@@ -1233,6 +1243,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 				Completed: true,
 			}
 			r.mu.Unlock()
+			r.notifyResultReady()
 			return
 		default:
 		}
@@ -1301,6 +1312,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		r.mu.Lock()
 		r.results[agentID] = result
 		r.mu.Unlock()
+		r.notifyResultReady()
 
 		// Notify UI about agent completion
 		if onComplete != nil {
@@ -1395,6 +1407,7 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			r.mu.Lock()
 			r.results[agent.ID] = result
 			r.mu.Unlock()
+			r.notifyResultReady()
 		}(i, task)
 	}
 
@@ -1411,20 +1424,33 @@ func (r *Runner) Wait(agentID string) (*AgentResult, error) {
 	return r.WaitWithContext(ctx, agentID)
 }
 
+// notifyResultReady signals that an agent result became complete.
+// Non-blocking: if the channel already has a pending signal, the send is skipped.
+func (r *Runner) notifyResultReady() {
+	select {
+	case r.resultReady <- struct{}{}:
+	default:
+	}
+}
+
 // WaitWithContext waits for an agent to complete, respecting context cancellation.
 func (r *Runner) WaitWithContext(ctx context.Context, agentID string) (*AgentResult, error) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	// Fast path: check immediately
+	r.mu.RLock()
+	result, ok := r.results[agentID]
+	r.mu.RUnlock()
+	if ok && result.Completed {
+		return result, nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-ticker.C:
+		case <-r.resultReady:
 			r.mu.RLock()
 			result, ok := r.results[agentID]
 			r.mu.RUnlock()
-
 			if ok && result.Completed {
 				return result, nil
 			}
@@ -1496,19 +1522,26 @@ func (r *Runner) GetAgent(agentID string) (*Agent, bool) {
 // Cancel cancels an agent's execution.
 func (r *Runner) Cancel(agentID string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	agent, ok := r.agents[agentID]
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("agent not found: %s", agentID)
 	}
 
 	agent.Cancel()
 
 	// Update result — must set Completed so WaitWithContext doesn't spin
+	completed := false
 	if result, ok := r.results[agentID]; ok {
 		result.Status = AgentStatusCancelled
 		result.Completed = true
+		completed = true
+	}
+	r.mu.Unlock()
+
+	if completed {
+		r.notifyResultReady()
 	}
 
 	return nil
@@ -1623,6 +1656,7 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 	r.mu.Lock()
 	r.results[agent.ID] = result
 	r.mu.Unlock()
+	r.notifyResultReady()
 
 	if err != nil {
 		return agent.ID, err
@@ -1694,6 +1728,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 					result.Completed = true
 				}
 				r.mu.Unlock()
+				r.notifyResultReady()
 			}
 		}()
 
@@ -1717,6 +1752,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 				Completed: true,
 			}
 			r.mu.Unlock()
+			r.notifyResultReady()
 			return
 		default:
 		}
@@ -1755,6 +1791,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 		r.mu.Lock()
 		r.results[agent.ID] = result
 		r.mu.Unlock()
+		r.notifyResultReady()
 
 		// Notify UI about agent completion
 		if onComplete != nil {
@@ -1865,6 +1902,7 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 						result.Completed = true
 					}
 					r.mu.Unlock()
+					r.notifyResultReady()
 				}
 			}()
 
@@ -1895,6 +1933,7 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 			r.mu.Lock()
 			r.results[a.ID] = result
 			r.mu.Unlock()
+			r.notifyResultReady()
 
 			if onComplete != nil {
 				onComplete(a.ID, result)
@@ -2001,6 +2040,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 					result.Completed = true
 				}
 				r.mu.Unlock()
+				r.notifyResultReady()
 			}
 		}()
 
@@ -2025,6 +2065,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 		r.mu.Lock()
 		r.results[a.ID] = result
 		r.mu.Unlock()
+		r.notifyResultReady()
 
 		if onComplete != nil {
 			onComplete(a.ID, result)

@@ -268,8 +268,9 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		a.auditLogger.Flush()
 	}
 
-	// 14. Save session history via session manager (preferred) or fallback
+	// 14. Stop and save session history via session manager (preferred) or fallback
 	if a.sessionManager != nil {
+		a.sessionManager.Stop()
 		_ = a.sessionManager.Save()
 	} else {
 		a.saveSessionHistory()

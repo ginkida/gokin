@@ -159,6 +159,11 @@ func NewHandler() *Handler {
 	// Register debug command (hidden)
 	h.Register(&DebugDumpCommand{})
 
+	// Register undo/redo/cost commands
+	h.Register(&UndoCommand{})
+	h.Register(&RedoCommand{})
+	h.Register(&CostCommand{})
+
 	h.frozen = true
 	return h
 }

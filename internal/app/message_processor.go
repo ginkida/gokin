@@ -40,6 +40,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	})
 	a.saveRecoverySnapshot("")
 
+	// Group all file changes from this message for atomic undo.
+	if a.undoManager != nil {
+		groupID := fmt.Sprintf("msg-%d", time.Now().UnixNano())
+		a.undoManager.SetActiveGroup(groupID)
+		defer a.undoManager.ClearActiveGroup()
+	}
+
 	// Activity-based idle timeout: cancel if no model activity (text, tool calls,
 	// thinking) for messageIdleTimeout. Unlike wall-clock context.WithTimeout,
 	// this survives system sleep/wake — heartbeat freezes during sleep, and

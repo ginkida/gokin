@@ -19,6 +19,7 @@ import (
 	"gokin/internal/security"
 
 	"github.com/ollama/ollama/api"
+	"gopkg.in/yaml.v3"
 )
 
 // ANSI color codes for enhanced output
@@ -220,8 +221,21 @@ func RunSetupWizard() error {
 					defaultModel = ep.DefaultModel
 				}
 
-				content := fmt.Sprintf("api:\n  api_key: %s\n  backend: %s\nmodel:\n  provider: %s\n  name: %s\n", apiKey, backend, backend, defaultModel)
-				if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+				cfg := map[string]any{
+					"api": map[string]any{
+						"api_key": apiKey,
+						"backend": backend,
+					},
+					"model": map[string]any{
+						"provider": backend,
+						"name":     defaultModel,
+					},
+				}
+				content, marshalErr := yaml.Marshal(cfg)
+				if marshalErr != nil {
+					return fmt.Errorf("failed to marshal config: %w", marshalErr)
+				}
+				if err := os.WriteFile(configPath, content, 0600); err != nil {
 					return fmt.Errorf("failed to save config: %w", err)
 				}
 
@@ -321,8 +335,21 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 	// Set default model based on backend
 	defaultModel := p.DefaultModel
 
-	content := fmt.Sprintf("api:\n  api_key: %s\n  backend: %s\nmodel:\n  provider: %s\n  name: %s\n", apiKey, backend, backend, defaultModel)
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+	cfg := map[string]any{
+		"api": map[string]any{
+			"api_key": apiKey,
+			"backend": backend,
+		},
+		"model": map[string]any{
+			"provider": backend,
+			"name":     defaultModel,
+		},
+	}
+	content, marshalErr := yaml.Marshal(cfg)
+	if marshalErr != nil {
+		return fmt.Errorf("failed to marshal config: %w", marshalErr)
+	}
+	if err := os.WriteFile(configPath, content, 0600); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -421,19 +448,26 @@ func setupGeminiOAuth() error {
 
 	// Build config with OAuth
 	// Note: Code Assist API supports: gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash-preview, gemini-3-pro-preview
-	content := fmt.Sprintf(`api:
-  active_provider: gemini
-  gemini_oauth:
-    access_token: %s
-    refresh_token: %s
-    expires_at: %d
-    email: %s
-model:
-  provider: gemini
-  name: gemini-2.5-flash
-`, token.AccessToken, token.RefreshToken, token.ExpiresAt.Unix(), token.Email)
-
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+	cfg := map[string]any{
+		"api": map[string]any{
+			"active_provider": "gemini",
+			"gemini_oauth": map[string]any{
+				"access_token":  token.AccessToken,
+				"refresh_token": token.RefreshToken,
+				"expires_at":    token.ExpiresAt.Unix(),
+				"email":         token.Email,
+			},
+		},
+		"model": map[string]any{
+			"provider": "gemini",
+			"name":     "gemini-2.5-flash",
+		},
+	}
+	content, marshalErr := yaml.Marshal(cfg)
+	if marshalErr != nil {
+		return fmt.Errorf("failed to marshal config: %w", marshalErr)
+	}
+	if err := os.WriteFile(configPath, content, 0600); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 

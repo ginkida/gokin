@@ -23,6 +23,10 @@ func init() {
 	}))
 }
 
+const (
+	maxLogFileSize = 10 * 1024 * 1024 // 10 MB
+)
+
 // EnableFileLogging enables logging to a file in the config directory.
 // This should be called before the TUI starts.
 func EnableFileLogging(configDir string, level Level) error {
@@ -30,6 +34,15 @@ func EnableFileLogging(configDir string, level Level) error {
 	defer mu.Unlock()
 
 	logPath := filepath.Join(configDir, "gokin.log")
+
+	// Rotate if the log file exceeds the size limit
+	if info, err := os.Stat(logPath); err == nil && info.Size() > maxLogFileSize {
+		// Keep one backup
+		backupPath := logPath + ".old"
+		_ = os.Remove(backupPath)
+		_ = os.Rename(logPath, backupPath)
+	}
+
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return err

@@ -91,11 +91,21 @@ func NewSandboxedCommand(ctx context.Context, workDir string, command string, co
 	return sandboxed, nil
 }
 
+// sandboxPATH returns a safe PATH that includes platform-specific directories.
+func sandboxPATH() string {
+	base := "/usr/local/bin:/usr/bin:/bin"
+	if runtime.GOOS == "darwin" {
+		// Homebrew on Apple Silicon installs to /opt/homebrew/bin
+		return "/opt/homebrew/bin:" + base
+	}
+	return base
+}
+
 // safeEnvironment returns a sanitized environment with safe defaults
 func safeEnvironment(workDir string) []string {
 	// Safe environment variables whitelist
 	safeVars := map[string]string{
-		"PATH":        "/usr/local/bin:/usr/bin:/bin",
+		"PATH":        sandboxPATH(),
 		"HOME":        workDir,
 		"USER":        os.Getenv("USER"),
 		"TERM":        "xterm",

@@ -11,10 +11,11 @@ import (
 
 // Manager provides undo and redo functionality.
 type Manager struct {
-	tracker *Tracker
-	undone  []FileChange // stack of undone changes for redo
-	maxRedo int
-	mu      sync.Mutex
+	tracker      *Tracker
+	undone       []FileChange // stack of undone changes for redo
+	maxRedo      int
+	activeGroup  string // Current group ID stamped on all recorded changes
+	mu           sync.Mutex
 }
 
 // NewManager creates a new undo/redo Manager.
@@ -35,11 +36,30 @@ func NewManagerWithTracker(tracker *Tracker) *Manager {
 	}
 }
 
-// Record records a new file change.
+// SetActiveGroup sets the group ID that will be stamped on all subsequent recorded changes.
+// Use this before a multi-file operation to group related changes for atomic undo.
+func (m *Manager) SetActiveGroup(groupID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeGroup = groupID
+}
+
+// ClearActiveGroup removes the active group, returning to ungrouped recording.
+func (m *Manager) ClearActiveGroup() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeGroup = ""
+}
+
+// Record records a new file change. If an active group is set, the change
+// is stamped with the group ID for later atomic undo via UndoGroup.
 func (m *Manager) Record(change FileChange) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.activeGroup != "" && change.GroupID == "" {
+		change.GroupID = m.activeGroup
+	}
 	m.tracker.Record(change)
 	// Clear redo stack when new changes are made
 	m.undone = make([]FileChange, 0)
@@ -95,6 +115,94 @@ func (m *Manager) Redo() (*FileChange, error) {
 	m.tracker.Record(change)
 
 	return &change, nil
+}
+
+// UndoGroup reverts all changes with the given group ID atomically.
+// Changes are undone in reverse order. If any revert fails, already-reverted
+// changes are re-applied to maintain consistency.
+func (m *Manager) UndoGroup(groupID string) ([]*FileChange, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.undoGroupLocked(groupID)
+}
+
+// UndoLastGroup reverts all changes belonging to the same group as the most recent change.
+// If the most recent change has no group, it behaves like a single Undo.
+func (m *Manager) UndoLastGroup() ([]*FileChange, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	lastChange := m.tracker.GetLastUnlocked()
+	if lastChange == nil {
+		return nil, fmt.Errorf("nothing to undo")
+	}
+
+	if lastChange.GroupID == "" {
+		// No group — single undo via internal path
+		change := m.tracker.PopLastUnlocked()
+		if change == nil {
+			return nil, fmt.Errorf("nothing to undo")
+		}
+		if err := m.revertChange(change); err != nil {
+			m.tracker.RecordUnlocked(*change)
+			return nil, fmt.Errorf("failed to undo: %w", err)
+		}
+		if len(m.undone) >= m.maxRedo {
+			m.undone = m.undone[1:]
+		}
+		m.undone = append(m.undone, *change)
+		return []*FileChange{change}, nil
+	}
+
+	return m.undoGroupLocked(lastChange.GroupID)
+}
+
+// undoGroupLocked implements group undo. Caller must hold m.mu.
+func (m *Manager) undoGroupLocked(groupID string) ([]*FileChange, error) {
+	// Collect all changes with this group ID (newest first)
+	var grouped []*FileChange
+	for i := len(m.tracker.changes) - 1; i >= 0; i-- {
+		if m.tracker.changes[i].GroupID == groupID {
+			change := m.tracker.changes[i]
+			grouped = append(grouped, &change)
+		}
+	}
+
+	if len(grouped) == 0 {
+		return nil, fmt.Errorf("no changes found for group %s", groupID)
+	}
+
+	// Revert all in reverse order (newest first)
+	var reverted []*FileChange
+	for _, change := range grouped {
+		if err := m.revertChange(change); err != nil {
+			// Rollback: re-apply already reverted changes
+			for j := len(reverted) - 1; j >= 0; j-- {
+				_ = m.applyChange(reverted[j])
+			}
+			return nil, fmt.Errorf("failed to undo group (rolled back): %w", err)
+		}
+		reverted = append(reverted, change)
+	}
+
+	// Remove grouped changes from tracker
+	remaining := make([]FileChange, 0, len(m.tracker.changes))
+	for _, c := range m.tracker.changes {
+		if c.GroupID != groupID {
+			remaining = append(remaining, c)
+		}
+	}
+	m.tracker.changes = remaining
+
+	// Add to redo stack
+	for _, change := range reverted {
+		if len(m.undone) >= m.maxRedo {
+			m.undone = m.undone[1:]
+		}
+		m.undone = append(m.undone, *change)
+	}
+
+	return reverted, nil
 }
 
 // CanUndo returns whether there are changes to undo.

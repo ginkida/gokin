@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -118,6 +119,33 @@ func (b *TokenBucket) ConsumeWithTimeout(tokens float64, timeout time.Duration) 
 		case <-deadline.C:
 			wait.Stop()
 			return false
+		}
+	}
+}
+
+// ConsumeWithContext blocks until tokens are available or context is cancelled.
+func (b *TokenBucket) ConsumeWithContext(ctx context.Context, tokens float64) error {
+	for {
+		b.mu.Lock()
+		b.refill()
+		if b.tokens >= tokens {
+			b.tokens -= tokens
+			b.mu.Unlock()
+			return nil
+		}
+		deficit := tokens - b.tokens
+		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
+		b.mu.Unlock()
+
+		if waitTime < 10*time.Millisecond {
+			waitTime = 10 * time.Millisecond
+		}
+		timer := time.NewTimer(waitTime)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
 		}
 	}
 }

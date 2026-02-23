@@ -517,6 +517,9 @@ func (a *App) handleSubmit(message string) {
 		if a.pendingMessage != "" {
 			logging.Debug("pending message replaced — previous message dropped",
 				"dropped_len", len(a.pendingMessage))
+			if program != nil {
+				program.Send(ui.StreamTextMsg("⚠ Previous queued message was replaced by new input\n"))
+			}
 		}
 		a.pendingMessage = message
 		a.pendingMu.Unlock()
@@ -603,8 +606,14 @@ func (a *App) executeCommand(name string, args []string) {
 			a.journalEvent("command_completed", map[string]any{
 				"command": name,
 			})
-			// Display command result as assistant message
-			program.Send(ui.StreamTextMsg(result))
+			// Handle special command markers
+			if strings.HasPrefix(result, "__browse:") {
+				browsePath := strings.TrimPrefix(result, "__browse:")
+				program.Send(ui.FileBrowserRequestMsg{StartPath: browsePath})
+			} else {
+				// Display command result as assistant message
+				program.Send(ui.StreamTextMsg(result))
+			}
 		}
 		program.Send(ui.ResponseDoneMsg{})
 	}

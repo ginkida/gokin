@@ -1,6 +1,8 @@
 package chat
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -265,7 +267,9 @@ func (s *Session) TrimHistory() {
 
 // generateSessionID generates a unique session ID.
 func generateSessionID() string {
-	return time.Now().Format("20060102-150405")
+	b := make([]byte, 3)
+	_, _ = cryptorand.Read(b)
+	return time.Now().Format("20060102-150405") + "-" + hex.EncodeToString(b)
 }
 
 // AddContentWithTokens adds content with its token count.
@@ -374,6 +378,22 @@ func (s *Session) GetState() *SessionState {
 	}
 	copy(state.TokenCounts, s.tokenCounts)
 
+	// Persist checkpoints
+	if len(s.Checkpoints) > 0 {
+		state.Checkpoints = make(map[string]int, len(s.Checkpoints))
+		for k, v := range s.Checkpoints {
+			state.Checkpoints[k] = v
+		}
+	}
+
+	// Persist branches (recursive — each branch is a Session)
+	if len(s.Branches) > 0 {
+		state.Branches = make(map[string]*SessionState, len(s.Branches))
+		for name, branch := range s.Branches {
+			state.Branches[name] = branch.GetState()
+		}
+	}
+
 	// Generate summary
 	state.Summary = state.GenerateSummary()
 
@@ -407,6 +427,26 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.version = state.Version
 	s.scratchpad = state.Scratchpad
 	s.SystemInstruction = state.SystemInstruction
+
+	// Restore checkpoints
+	if len(state.Checkpoints) > 0 {
+		s.Checkpoints = make(map[string]int, len(state.Checkpoints))
+		for k, v := range state.Checkpoints {
+			s.Checkpoints[k] = v
+		}
+	}
+
+	// Restore branches (recursive)
+	if len(state.Branches) > 0 {
+		s.Branches = make(map[string]*Session, len(state.Branches))
+		for name, branchState := range state.Branches {
+			branch := NewSession()
+			if err := branch.RestoreFromState(branchState); err != nil {
+				return fmt.Errorf("failed to restore branch %q: %w", name, err)
+			}
+			s.Branches[name] = branch
+		}
+	}
 
 	return nil
 }

@@ -165,7 +165,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		registry:     filteredRegistry,
 		baseRegistry: baseRegistry,
 		permissions:  permManager,
-		timeout:      2 * time.Minute,
+		timeout:      config.DefaultAgentTimeout,
 		history:      make([]*genai.Content, 0),
 		status:       AgentStatusPending,
 		maxTurns:     maxTurns,
@@ -181,6 +181,9 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		autoFixAttempts:    make(map[string]int),
 		fixCache:           NewFixCache(),
 	}
+
+	// Apply per-agent-type context budgets before other wiring
+	agent.applyAgentTypeDefaults()
 
 	// Wire up RequestTool tool if it exists in the registry
 	if rt, ok := agent.registry.Get("request_tool"); ok {
@@ -302,6 +305,9 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		projectContext: dynType.SystemPrompt,
 	}
 
+	// Apply per-agent-type context budgets before other wiring
+	agent.applyAgentTypeDefaults()
+
 	// Wire up RequestTool tool if it exists
 	if rt, ok := agent.registry.Get("request_tool"); ok {
 		if rtt, ok := rt.(*tools.RequestToolTool); ok {
@@ -384,6 +390,34 @@ func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.To
 	}
 
 	return filtered
+}
+
+// applyAgentTypeDefaults sets context budget defaults per agent type.
+// Explore/bash agents are short-lived and don't need large history windows,
+// while plan agents need more history to track multi-step plans.
+// Called once during construction; ApplyThoroughness may further adjust these.
+func (a *Agent) applyAgentTypeDefaults() {
+	switch a.Type {
+	case AgentTypeExplore:
+		a.maxHistorySize = 50
+		a.pruneProtectChars = 40000
+		a.summarizeProtect = 2
+		a.pruneMinOutputSize = 300
+	case AgentTypeBash:
+		a.maxHistorySize = 30
+		a.pruneProtectChars = 30000
+		a.summarizeProtect = 2
+		a.pruneMinOutputSize = 400
+	case AgentTypePlan:
+		a.maxHistorySize = 100
+		a.pruneProtectChars = 150000
+		a.summarizeProtect = 6
+	case AgentTypeGuide:
+		a.maxHistorySize = 40
+		a.pruneProtectChars = 40000
+		a.summarizeProtect = 2
+		// default (AgentTypeGeneral and dynamic types): keep constructor defaults
+	}
 }
 
 // SetThoroughness sets the exploration thoroughness level.
@@ -514,22 +548,30 @@ func (a *Agent) applyContextThoroughness(t tools.Thoroughness) {
 
 // GetTimeout returns the agent's timeout duration.
 func (a *Agent) GetTimeout() time.Duration {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
 	return a.timeout
 }
 
 // SetOutputStyle sets the response output style.
 func (a *Agent) SetOutputStyle(s tools.OutputStyle) {
+	a.stateMu.Lock()
 	a.outputStyle = s
+	a.stateMu.Unlock()
 }
 
 // SetProjectContext injects project guidelines for sub-agent system prompts.
 func (a *Agent) SetProjectContext(ctx string) {
+	a.stateMu.Lock()
 	a.projectContext = ctx
+	a.stateMu.Unlock()
 }
 
 // SetOnText sets the streaming callback for real-time output.
 func (a *Agent) SetOnText(onText func(string)) {
+	a.stateMu.Lock()
 	a.onText = onText
+	a.stateMu.Unlock()
 }
 
 // SetOnScratchpadUpdate sets the callback for scratchpad updates.
@@ -555,7 +597,9 @@ func (a *Agent) GetPinnedContext() string {
 
 // SetOnToolActivity sets the callback for tool activity reporting.
 func (a *Agent) SetOnToolActivity(fn func(agentID, toolName string, args map[string]any, status string)) {
+	a.stateMu.Lock()
 	a.onToolActivity = fn
+	a.stateMu.Unlock()
 }
 
 // SetStore sets the agent store for checkpoint persistence.
@@ -608,13 +652,17 @@ func (a *Agent) maybeAutoCheckpoint() {
 
 // SetOnInput sets the callback for requesting user input.
 func (a *Agent) SetOnInput(onInput func(string) (string, error)) {
+	a.stateMu.Lock()
 	a.onInput = onInput
+	a.stateMu.Unlock()
 }
 
 // SetOnPlanApproved sets a callback for when a plan is built and ready.
 // The callback receives a plan summary and should clear/compact context.
 func (a *Agent) SetOnPlanApproved(callback func(planSummary string)) {
+	a.stateMu.Lock()
 	a.onPlanApproved = callback
+	a.stateMu.Unlock()
 }
 
 // SetMessenger sets the messenger for inter-agent communication.
@@ -644,26 +692,18 @@ func (a *Agent) SetTreePlanner(tp *TreePlanner) {
 		tp.SetCallbacks(
 			func(tree *PlanTree, node *PlanNode) {
 				a.IncrementStep("Executing step: " + node.Action.Prompt)
-				if a.onText != nil {
-					a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
-				}
+				a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
 			},
 			func(tree *PlanTree, node *PlanNode, success bool) {
-				if a.onText != nil {
-					a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
-				}
+				a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
 			},
 			func(tree *PlanTree, ctx *ReplanContext) {
-				if a.onText != nil {
-					a.safeOnText(fmt.Sprintf("\n[Replanning: %s]\n", ctx.Error))
-					a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
-				}
+				a.safeOnText(fmt.Sprintf("\n[Replanning: %s]\n", ctx.Error))
+				a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
 			},
 			func(action *PlannedAction) {
 				// Record planning progress
-				if a.onText != nil {
-					a.safeOnText(fmt.Sprintf("  • %s: %s\n", action.AgentType, action.Prompt))
-				}
+				a.safeOnText(fmt.Sprintf("  • %s: %s\n", action.AgentType, action.Prompt))
 				a.SetProgress(0, 0, "Planning: "+action.Prompt)
 			},
 		)
@@ -698,18 +738,24 @@ func (a *Agent) GetToolsUsed() []string {
 
 // SetPlanGoal sets the goal for the plan.
 func (a *Agent) SetPlanGoal(goal *PlanGoal) {
+	a.stateMu.Lock()
 	a.planGoal = goal
+	a.stateMu.Unlock()
 }
 
 // SetRequireApproval sets whether plan approval is required.
 func (a *Agent) SetRequireApproval(required bool) {
+	a.stateMu.Lock()
 	a.requireApproval = required
+	a.stateMu.Unlock()
 }
 
 // EnablePlanningMode enables tree-based planning for agent execution.
 func (a *Agent) EnablePlanningMode(goal *PlanGoal) {
+	a.stateMu.Lock()
 	a.planningMode = true
 	a.planGoal = goal
+	a.stateMu.Unlock()
 }
 
 // DisablePlanningMode disables tree-based planning.
@@ -954,6 +1000,8 @@ func (a *Agent) buildSystemPrompt() string {
 	a.stateMu.RLock()
 	pinnedCtx := a.PinnedContext
 	scratchpad := a.Scratchpad
+	projectContext := a.projectContext
+	outputStyle := a.outputStyle
 	a.stateMu.RUnlock()
 
 	var sb strings.Builder
@@ -975,43 +1023,54 @@ func (a *Agent) buildSystemPrompt() string {
 		sb.WriteString("\n═══════════════════════════════════════════════════════════════════════\n\n")
 	}
 
-	// Inject project-specific knowledge
-	if a.learning != nil {
+	// Lightweight sub-agents (explore, bash, guide) get a minimal prompt:
+	// skip learning, detailed rules, tool guides to reduce token overhead.
+	// General/plan agents get the full prompt with all context.
+	lightweight := a.Type == AgentTypeExplore || a.Type == AgentTypeBash || a.Type == AgentTypeGuide
+
+	// Inject project-specific knowledge (skip for lightweight — they don't need learned patterns)
+	if !lightweight && a.learning != nil {
 		sb.WriteString(a.learning.FormatForPrompt())
 		sb.WriteString("\n")
 	}
 
-	// Universal instructions for all agents
-	sb.WriteString("═══════════════════════════════════════════════════════════════════════\n")
-	sb.WriteString("                         MANDATORY RULES\n")
-	sb.WriteString("═══════════════════════════════════════════════════════════════════════\n\n")
-	sb.WriteString("1. ALWAYS use tools to complete your task - don't just say you can't\n")
-	sb.WriteString("2. After using ANY tool, provide a CLEAR summary of what you found\n")
-	sb.WriteString("3. NEVER respond with just 'OK' or 'Done' - always explain\n")
-	sb.WriteString("4. Structure responses with markdown: headers, bullets, code blocks\n")
-	sb.WriteString("5. Include specific file:line references when discussing code\n\n")
+	if lightweight {
+		// Compact rules for short-lived sub-agents
+		sb.WriteString("RULES: Use tools to complete the task. Summarize findings clearly with file:line refs.\n")
+		sb.WriteString("If a tool fails, try an alternative approach. Never retry the same call.\n\n")
+	} else {
+		// Universal instructions for all agents
+		sb.WriteString("═══════════════════════════════════════════════════════════════════════\n")
+		sb.WriteString("                         MANDATORY RULES\n")
+		sb.WriteString("═══════════════════════════════════════════════════════════════════════\n\n")
+		sb.WriteString("1. ALWAYS use tools to complete your task - don't just say you can't\n")
+		sb.WriteString("2. After using ANY tool, provide a CLEAR summary of what you found\n")
+		sb.WriteString("3. NEVER respond with just 'OK' or 'Done' - always explain\n")
+		sb.WriteString("4. Structure responses with markdown: headers, bullets, code blocks\n")
+		sb.WriteString("5. Include specific file:line references when discussing code\n\n")
 
-	// Tool limitations awareness
-	sb.WriteString("## Tool Limitations\n")
-	sb.WriteString("- bash: Output truncated at 30,000 characters. Use grep/head/tail for large outputs.\n")
-	sb.WriteString("- grep: Returns max 500 matches. Use more specific patterns for large codebases.\n")
-	sb.WriteString("- glob: Returns max 1000 files. Use specific patterns instead of `**/*`.\n")
-	sb.WriteString("- read: Returns max 2000 lines. Use offset/limit for large files.\n\n")
+		// Tool limitations awareness
+		sb.WriteString("## Tool Limitations\n")
+		sb.WriteString("- bash: Output truncated at 30,000 characters. Use grep/head/tail for large outputs.\n")
+		sb.WriteString("- grep: Returns max 500 matches. Use more specific patterns for large codebases.\n")
+		sb.WriteString("- glob: Returns max 1000 files. Use specific patterns instead of `**/*`.\n")
+		sb.WriteString("- read: Returns max 2000 lines. Use offset/limit for large files.\n\n")
 
-	// Error recovery guidance
-	sb.WriteString("## Error Recovery\n")
-	sb.WriteString("- If a tool fails, analyze the error before retrying.\n")
-	sb.WriteString("- If read fails with \"not found\", use glob to find the correct path.\n")
-	sb.WriteString("- If bash fails, check if the command exists and try alternatives.\n")
-	sb.WriteString("- Never retry the exact same call more than once.\n\n")
+		// Error recovery guidance
+		sb.WriteString("## Error Recovery\n")
+		sb.WriteString("- If a tool fails, analyze the error before retrying.\n")
+		sb.WriteString("- If read fails with \"not found\", use glob to find the correct path.\n")
+		sb.WriteString("- If bash fails, check if the command exists and try alternatives.\n")
+		sb.WriteString("- Never retry the exact same call more than once.\n\n")
 
-	// Effective patterns
-	sb.WriteString("## Effective Patterns\n")
-	sb.WriteString("- Find then read: glob to locate, then read specific files.\n")
-	sb.WriteString("- Search then edit: grep to find occurrences, then edit with context.\n")
-	sb.WriteString("- Verify after change: after write/edit, read to confirm.\n")
-	sb.WriteString("- For long-running operations (builds, tests), use run_in_background=true.\n")
-	sb.WriteString("- Check background task output periodically with task_output.\n\n")
+		// Effective patterns
+		sb.WriteString("## Effective Patterns\n")
+		sb.WriteString("- Find then read: glob to locate, then read specific files.\n")
+		sb.WriteString("- Search then edit: grep to find occurrences, then edit with context.\n")
+		sb.WriteString("- Verify after change: after write/edit, read to confirm.\n")
+		sb.WriteString("- For long-running operations (builds, tests), use run_in_background=true.\n")
+		sb.WriteString("- Check background task output periodically with task_output.\n\n")
+	}
 
 	switch a.Type {
 	case AgentTypeExplore:
@@ -1029,13 +1088,24 @@ func (a *Agent) buildSystemPrompt() string {
 	}
 
 	// Inject output style instructions (orthogonal to thoroughness)
-	sb.WriteString(a.buildOutputStyleSection())
+	sb.WriteString(buildOutputStyleSection(outputStyle))
 
-	// Inject project context if provided (for delegated sub-agents)
-	if a.projectContext != "" {
-		sb.WriteString("\n")
-		sb.WriteString(a.projectContext)
-		sb.WriteString("\n")
+	// Inject project context if provided (for delegated sub-agents).
+	// Lightweight agents get only working directory, not full project instructions.
+	if projectContext != "" {
+		if lightweight {
+			// Extract just the working directory line from project context
+			for _, line := range strings.Split(projectContext, "\n") {
+				if strings.HasPrefix(line, "Working directory:") || strings.HasPrefix(line, "Project:") {
+					sb.WriteString(line)
+					sb.WriteString("\n")
+				}
+			}
+		} else {
+			sb.WriteString("\n")
+			sb.WriteString(projectContext)
+			sb.WriteString("\n")
+		}
 	}
 
 	// Inject scratchpad if not empty
@@ -1048,8 +1118,10 @@ func (a *Agent) buildSystemPrompt() string {
 		sb.WriteString("\n═══════════════════════════════════════════════════════════════════════\n")
 	}
 
-	// Inject tool usage guides for available tools
-	sb.WriteString(a.buildToolGuidesSection())
+	// Inject tool usage guides (skip for lightweight — type-specific prompt already covers their tools)
+	if !lightweight {
+		sb.WriteString(a.buildToolGuidesSection())
+	}
 
 	return sb.String()
 }
@@ -1429,8 +1501,8 @@ RESPONSE FORMAT:
 `
 }
 
-func (a *Agent) buildOutputStyleSection() string {
-	switch a.outputStyle {
+func buildOutputStyleSection(style tools.OutputStyle) string {
+	switch style {
 	case tools.OutputStyleConcise:
 		return `
 ## Output Style: CONCISE
@@ -1887,33 +1959,43 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	// Update progress
 	a.SetProgress(1, a.maxTurns, "Processing request")
 
+	// Snapshot planning-related fields under stateMu to avoid races with setters
+	a.stateMu.RLock()
+	planningMode := a.planningMode
+	planGoal := a.planGoal
+	requireApproval := a.requireApproval
+	onText := a.onText
+	onInput := a.onInput
+	onPlanApproved := a.onPlanApproved
+	a.stateMu.RUnlock()
+
 	// === Tree planning mode: Build plan tree if enabled ===
-	if a.treePlanner != nil && a.planningMode {
-		tree, err := a.treePlanner.BuildTree(ctx, prompt, a.planGoal)
+	if a.treePlanner != nil && planningMode {
+		tree, err := a.treePlanner.BuildTree(ctx, prompt, planGoal)
 		if err != nil {
 			logging.Warn("failed to build plan tree, falling back to reactive mode", "error", err)
 		} else {
 			a.activePlan = tree
-			if a.onText != nil {
+			if onText != nil {
 				a.safeOnText(fmt.Sprintf("\n[Plan tree built: %d nodes, best path: %d steps]\n",
 					tree.TotalNodes, len(tree.BestPath)))
 			}
 
 			// Notify plan approval callback for context compaction
-			if a.onPlanApproved != nil {
+			if onPlanApproved != nil {
 				planSummary := a.treePlanner.GeneratePlanSummary(tree)
-				a.onPlanApproved(planSummary)
+				onPlanApproved(planSummary)
 			}
 
 			// Set total steps to best path length using SetProgress for thread safety
 			a.SetProgress(0, len(tree.BestPath), "Building plan...")
 
 			// === Interactive Plan Review ===
-			if a.onInput != nil && a.requireApproval {
+			if onInput != nil && requireApproval {
 				if err := a.requestPlanApproval(ctx, tree); err != nil {
 					return a.history, output.String(), err
 				}
-			} else if a.onText != nil {
+			} else if onText != nil {
 				// Show plan tree even if approval not required
 				a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
 			}
@@ -1945,9 +2027,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		if a.tokenCounter != nil && a.summarizer != nil && a.ctxCfg != nil && a.ctxCfg.EnableAutoSummary {
 			if err := a.checkAndSummarize(ctx); err != nil {
 				logging.Warn("auto-summarization failed", "agent_id", a.ID, "error", err)
-				if a.onText != nil {
-					a.safeOnText("\n[Warning: context optimization failed — conversation may hit length limits]\n")
-				}
+				a.safeOnText("\n[Warning: context optimization failed — conversation may hit length limits]\n")
 			}
 		}
 
@@ -2107,18 +2187,14 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		if resp.Text != "" {
 			output.WriteString(resp.Text)
 			// Stream text to UI in real-time
-			if a.onText != nil {
-				a.safeOnText(resp.Text)
-			}
+			a.safeOnText(resp.Text)
 		}
 
 		// Warn when response was truncated by token limit
 		if resp.FinishReason == genai.FinishReasonMaxTokens {
 			truncMsg := "\n\n⚠ Response truncated (max_tokens limit reached)."
 			output.WriteString(truncMsg)
-			if a.onText != nil {
-				a.safeOnText(truncMsg)
-			}
+			a.safeOnText(truncMsg)
 			logging.Warn("agent response truncated by max_tokens limit",
 				"agent_type", a.Type, "output_tokens", resp.OutputTokens)
 		}
@@ -2156,9 +2232,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					a.loopIntervened = true
 					a.callHistoryMu.Unlock()
 
-					if a.onText != nil {
-						a.safeOnText(fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, exactCount))
-					}
+					a.safeOnText(fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, exactCount))
 
 					intervention := a.buildLoopRecoveryIntervention(fc.Name, fc.Args, exactCount)
 
@@ -2184,9 +2258,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					a.loopIntervened = true
 					a.callHistoryMu.Unlock()
 
-					if a.onText != nil {
-						a.safeOnText(fmt.Sprintf("\n[Broad loop: %s used %d times — try a different approach]\n", fc.Name, broadCount))
-					}
+					a.safeOnText(fmt.Sprintf("\n[Broad loop: %s used %d times — try a different approach]\n", fc.Name, broadCount))
 
 					intervention := fmt.Sprintf(
 						"STOP. I've called `%s` %d times total in this session. "+
@@ -2290,16 +2362,12 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	if output.Len() == 0 {
 		emptyMsg := "\n[Model returned an empty response — try rephrasing your request]\n"
 		output.WriteString(emptyMsg)
-		if a.onText != nil {
-			a.safeOnText(emptyMsg)
-		}
+		a.safeOnText(emptyMsg)
 	}
 
 	// Notify user if we hit the max turn limit
 	if i >= a.maxTurns {
-		if a.onText != nil {
-			a.safeOnText("\n[Reached maximum turn limit — stopping]\n")
-		}
+		a.safeOnText("\n[Reached maximum turn limit — stopping]\n")
 	}
 
 	return a.history, output.String(), nil
@@ -2799,8 +2867,13 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 		if protectedSoFar <= protectChars {
 			continue // Still within protection window
 		}
-		// Truncate this tool output
-		replacement := fmt.Sprintf("[%s output truncated, was %d chars]", c.name, len(c.content))
+		// Truncate this tool output — produce informative summary instead of blank placeholder
+		var replacement string
+		if a.compactor != nil {
+			replacement = a.compactor.SummarizeForPrune(c.name, c.content)
+		} else {
+			replacement = fmt.Sprintf("[%s output truncated, was %d chars]", c.name, len(c.content))
+		}
 		part := a.history[c.msgIdx].Parts[c.partIdx]
 		part.FunctionResponse.Response = map[string]any{
 			"content": replacement,
@@ -3247,9 +3320,14 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools
 		}
 	}
 
+	// Snapshot callback under stateMu to avoid races with SetOnToolActivity
+	a.stateMu.RLock()
+	onToolActivity := a.onToolActivity
+	a.stateMu.RUnlock()
+
 	// Report tool start to UI
-	if a.onToolActivity != nil {
-		a.onToolActivity(a.ID, call.Name, call.Args, "start")
+	if onToolActivity != nil {
+		onToolActivity(a.ID, call.Name, call.Args, "start")
 	}
 
 	// === IMPROVEMENT 2: Retry mechanism with exponential backoff ===
@@ -3262,8 +3340,8 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools
 		result, err := tool.Execute(ctx, call.Args)
 		if err == nil {
 			// Report tool end to UI
-			if a.onToolActivity != nil {
-				a.onToolActivity(a.ID, call.Name, call.Args, "end")
+			if onToolActivity != nil {
+				onToolActivity(a.ID, call.Name, call.Args, "end")
 			}
 
 			// Success - return result
@@ -3365,12 +3443,15 @@ func (a *Agent) SetCancelFunc(cancel context.CancelFunc) {
 
 // safeOnText streams text to the UI in a thread-safe manner.
 func (a *Agent) safeOnText(text string) {
-	if a.onText == nil {
+	a.stateMu.RLock()
+	fn := a.onText
+	a.stateMu.RUnlock()
+	if fn == nil {
 		return
 	}
 	a.onTextMu.Lock()
 	defer a.onTextMu.Unlock()
-	a.onText(text)
+	fn(text)
 }
 
 // executePlannedAction executes a single planned action and returns the result.
@@ -3427,9 +3508,7 @@ func (a *Agent) executeDecomposeAction(ctx context.Context, action *PlannedActio
 		}
 	}
 
-	if a.onText != nil {
-		a.safeOnText(fmt.Sprintf("\n[Expanding milestone: %s]\n", action.Prompt))
-	}
+	a.safeOnText(fmt.Sprintf("\n[Expanding milestone: %s]\n", action.Prompt))
 
 	// Expand the milestone into sub-tasks
 	if err := a.treePlanner.ExpandMilestone(ctx, a.activePlan, node); err != nil {
@@ -3678,7 +3757,10 @@ func (a *Agent) executeVerifyAction(ctx context.Context, action *PlannedAction, 
 
 // requestPlanApproval handles the interactive review and editing of a plan.
 func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
-	if a.onInput == nil || a.onText == nil {
+	a.stateMu.RLock()
+	onInput := a.onInput
+	a.stateMu.RUnlock()
+	if onInput == nil {
 		return nil
 	}
 
@@ -3688,7 +3770,7 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 		a.safeOnText("Commands: [Enter] approve | e <n> <prompt> | d <n> | a [type] <prompt> | c cancel\n")
 		a.safeOnText("Types: explore, plan, general, bash, decompose (default: general)\n")
 
-		response, err := a.onInput("Plan approval > ")
+		response, err := onInput("Plan approval > ")
 		if err != nil {
 			return err
 		}

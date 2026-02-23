@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -355,6 +356,9 @@ func (c *PreFlightCheck) validateWritePath(path string) {
 		return
 	}
 
+	// Normalize to prevent traversal bypasses (e.g. "/../etc/passwd")
+	path = filepath.Clean(path)
+
 	// Warn about system paths
 	dangerousPaths := []string{
 		"/etc/",
@@ -388,7 +392,11 @@ func (c *PreFlightCheck) validateEditPath(path string, args map[string]any) {
 	if path == "" {
 		c.Errors = append(c.Errors, "file_path is required")
 		c.IsValid = false
+		return
 	}
+
+	// Normalize to prevent traversal bypasses (e.g. "/../etc/passwd")
+	path = filepath.Clean(path)
 
 	// Line-based mode — no old_string needed
 	if lineStart, ok := GetInt(args, "line_start"); ok && lineStart > 0 {

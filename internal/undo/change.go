@@ -15,6 +15,7 @@ type FileChange struct {
 	OldContent []byte    `json:"old_content"` // nil for new files
 	NewContent []byte    `json:"new_content"`
 	WasNew     bool      `json:"was_new"` // file was created (didn't exist before)
+	GroupID    string    `json:"group_id,omitempty"` // Groups related changes for atomic undo
 }
 
 // NewFileChange creates a new FileChange with a generated ID.

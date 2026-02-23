@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gokin/internal/audit"
+	"gokin/internal/cache"
 	"gokin/internal/client"
 	"gokin/internal/format"
 	"gokin/internal/hooks"
@@ -188,6 +189,9 @@ type Executor struct {
 
 	// Tool result cache
 	toolCache *ToolResultCache
+
+	// Search cache (grep/glob results) for invalidation on writes
+	searchCache *cache.SearchCache
 
 	// File read deduplication tracker
 	readTracker *FileReadTracker
@@ -411,8 +415,13 @@ func (e *Executor) SetSessionID(id string) {
 }
 
 // SetToolCache sets the tool result cache for caching read-only tool results.
-func (e *Executor) SetToolCache(cache *ToolResultCache) {
-	e.toolCache = cache
+func (e *Executor) SetToolCache(c *ToolResultCache) {
+	e.toolCache = c
+}
+
+// SetSearchCache sets the search cache for invalidation on write operations.
+func (e *Executor) SetSearchCache(c *cache.SearchCache) {
+	e.searchCache = c
 }
 
 // SetReadTracker sets the file read deduplication tracker.
@@ -1338,22 +1347,31 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Step 12.5: Cache result or invalidate cache for write operations
-	if e.toolCache != nil {
-		if result.Success {
-			e.toolCache.Put(call.Name, call.Args, result)
-		}
-		// Invalidate cache on write operations
-		if isWriteOperation(call.Name) {
-			if path, ok := call.Args["path"].(string); ok {
-				e.toolCache.InvalidateByFile(path)
+	if isWriteOperation(call.Name) {
+		// Invalidate all caches that might reference the modified file
+		filePaths := extractFilePaths(call)
+		if e.toolCache != nil {
+			for _, p := range filePaths {
+				e.toolCache.InvalidateByFile(p)
 			}
-			if path, ok := call.Args["file_path"].(string); ok {
-				e.toolCache.InvalidateByFile(path)
-			}
-			// Invalidate git caches when files change
+			// Git state changes when files are modified
 			e.toolCache.InvalidateByTool("git_status")
 			e.toolCache.InvalidateByTool("git_diff")
+			// tree/list_dir may be stale after file create/delete
+			if call.Name == "write" || call.Name == "delete" || call.Name == "mkdir" ||
+				call.Name == "copy" || call.Name == "move" {
+				e.toolCache.InvalidateByTool("tree")
+				e.toolCache.InvalidateByTool("list_dir")
+			}
 		}
+		if e.searchCache != nil {
+			for _, p := range filePaths {
+				e.searchCache.InvalidateByPath(p)
+			}
+		}
+	} else if e.toolCache != nil && result.Success {
+		// Only cache read-only tool results
+		e.toolCache.Put(call.Name, call.Args, result)
 	}
 
 	// Step 12.7: Deduplicate read content for history optimization
@@ -1624,6 +1642,18 @@ var writeTools = map[string]bool{
 	"bash":        true, // bash can modify anything
 	"git_add":     true,
 	"git_commit":  true,
+}
+
+// extractFilePaths returns all file paths from a tool call's arguments.
+// Handles file_path, path, source, destination, and new_path argument names.
+func extractFilePaths(call *genai.FunctionCall) []string {
+	var paths []string
+	for _, key := range []string{"file_path", "path", "source", "destination", "new_path"} {
+		if p, ok := call.Args[key].(string); ok && p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
 }
 
 // isWriteOperation returns true if the tool modifies files/state.

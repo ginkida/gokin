@@ -149,37 +149,26 @@ func (l *Limiter) AcquireWithTimeout(estimatedTokens int64, timeout time.Duratio
 }
 
 // AcquireWithContext attempts to acquire a request slot respecting context cancellation.
+// Uses context-aware bucket consumption directly — no goroutines leaked on cancel.
 func (l *Limiter) AcquireWithContext(ctx context.Context, estimatedTokens int64) error {
 	if !l.isEnabled() {
 		return nil
 	}
 
-	// Use a reasonable default timeout if context has no deadline
-	timeout := 30 * time.Second
-	if deadline, ok := ctx.Deadline(); ok {
-		timeout = time.Until(deadline)
-	}
+	l.mu.Lock()
+	l.totalRequests++
+	l.mu.Unlock()
 
-	// Create a channel to signal completion
-	done := make(chan error, 1)
-
-	go func() {
-		err := l.AcquireWithTimeout(estimatedTokens, timeout)
-		// Protected send - don't block if context is cancelled
-		select {
-		case done <- err:
-		case <-ctx.Done():
-			// Context cancelled, don't block on channel send
-			// The goroutine will exit cleanly
-		}
-	}()
-
-	select {
-	case err := <-done:
+	if err := l.requestBucket.ConsumeWithContext(ctx, 1); err != nil {
 		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
+	if estimatedTokens > 0 {
+		if err := l.tokenBucket.ConsumeWithContext(ctx, float64(estimatedTokens)); err != nil {
+			l.requestBucket.Return(1)
+			return err
+		}
+	}
+	return nil
 }
 
 // RecordUsage records actual token usage after a request completes.

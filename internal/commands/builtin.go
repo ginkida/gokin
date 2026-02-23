@@ -818,7 +818,7 @@ func (c *BrowseCommand) Execute(ctx context.Context, args []string, app AppInter
 		startPath = filepath.Dir(startPath)
 	}
 
-	return fmt.Sprintf("Opening file browser at: %s\n\nUse the interactive browser to navigate. Press 'q' to close.", startPath), nil
+	return "__browse:" + startPath, nil
 }
 
 // getDataDir returns the data directory for the application.

@@ -92,10 +92,18 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 		return result.String(), nil
 	}
 
-	// Stage all changes
-	_, err = runGitCommand(workDir, "add", "-A")
+	// Stage only tracked (modified/deleted) files — safe default
+	_, err = runGitCommand(workDir, "add", "-u")
 	if err != nil {
 		return fmt.Sprintf("Failed to stage changes: %v", err), nil
+	}
+
+	// Warn about untracked files that won't be committed
+	if len(untracked) > 0 {
+		result.WriteString(fmt.Sprintf("\nNote: %d untracked file(s) not staged (use git add manually):\n", len(untracked)))
+		for _, f := range untracked {
+			result.WriteString(fmt.Sprintf("  %s\n", f))
+		}
 	}
 
 	// Create commit

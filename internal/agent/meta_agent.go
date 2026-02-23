@@ -170,42 +170,62 @@ func (ma *MetaAgent) monitorLoop() {
 
 // checkAgentHealth checks all active agents for stuck state.
 func (ma *MetaAgent) checkAgentHealth() {
-	ma.mu.Lock()
-	defer ma.mu.Unlock()
+	type stuckInfo struct {
+		agentID          string
+		inactiveDuration time.Duration
+		monitor          *AgentMonitor
+		shouldIntervene  bool
+		shouldCancel     bool
+		stuckCount       int
+	}
 
+	ma.mu.Lock()
+	// Snapshot callback and collect stuck agents under lock
+	onStuck := ma.onStuckAgent
 	now := time.Now()
+	var stuckAgents []stuckInfo
 
 	for agentID, monitor := range ma.activeAgents {
 		inactiveDuration := now.Sub(monitor.LastActivity)
 
-		// Check if agent appears stuck
 		if inactiveDuration > ma.config.StuckThreshold {
 			monitor.StuckCount++
-
-			// Notify callback
-			if ma.onStuckAgent != nil {
-				ma.onStuckAgent(agentID, inactiveDuration)
+			si := stuckInfo{
+				agentID:          agentID,
+				inactiveDuration: inactiveDuration,
+				monitor:          monitor,
+				stuckCount:       monitor.StuckCount,
 			}
-
-			// Attempt intervention if not already intervened too many times
 			if !monitor.Intervened && monitor.StuckCount <= ma.config.MaxInterventions {
-				ma.handleStuckAgent(agentID, monitor)
+				si.shouldIntervene = true
 			} else if monitor.StuckCount > ma.config.MaxInterventions {
-				logging.Warn("meta agent: cancelling stuck agent",
-					"agent_id", agentID,
-					"stuck_count", monitor.StuckCount)
-				// Cancel the agent through the runner
-				if ma.runner != nil {
-					if err := ma.runner.Cancel(agentID); err != nil {
-						logging.Debug("meta agent: failed to cancel stuck agent",
-							"agent_id", agentID, "error", err)
-					}
-				}
+				si.shouldCancel = true
 			}
+			stuckAgents = append(stuckAgents, si)
 		} else {
-			// Agent is active, reset stuck count
 			monitor.StuckCount = 0
 			monitor.Intervened = false
+		}
+	}
+	ma.mu.Unlock()
+
+	// Callbacks and side-effects OUTSIDE lock
+	for _, si := range stuckAgents {
+		if onStuck != nil {
+			onStuck(si.agentID, si.inactiveDuration)
+		}
+		if si.shouldIntervene {
+			ma.handleStuckAgent(si.agentID, si.monitor)
+		} else if si.shouldCancel {
+			logging.Warn("meta agent: cancelling stuck agent",
+				"agent_id", si.agentID,
+				"stuck_count", si.stuckCount)
+			if ma.runner != nil {
+				if err := ma.runner.Cancel(si.agentID); err != nil {
+					logging.Debug("meta agent: failed to cancel stuck agent",
+						"agent_id", si.agentID, "error", err)
+				}
+			}
 		}
 	}
 }

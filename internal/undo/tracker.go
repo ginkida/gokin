@@ -59,6 +59,35 @@ func (t *Tracker) GetLast() *FileChange {
 	return &change
 }
 
+// GetLastUnlocked returns the most recent change without acquiring the tracker's lock.
+// Caller must hold an external lock (e.g., Manager.mu) to ensure thread safety.
+func (t *Tracker) GetLastUnlocked() *FileChange {
+	if len(t.changes) == 0 {
+		return nil
+	}
+	change := t.changes[len(t.changes)-1]
+	return &change
+}
+
+// PopLastUnlocked removes and returns the most recent change without locking.
+// Caller must hold an external lock.
+func (t *Tracker) PopLastUnlocked() *FileChange {
+	if len(t.changes) == 0 {
+		return nil
+	}
+	change := t.changes[len(t.changes)-1]
+	t.changes = t.changes[:len(t.changes)-1]
+	return &change
+}
+
+// RecordUnlocked adds a change without locking. Caller must hold an external lock.
+func (t *Tracker) RecordUnlocked(change FileChange) {
+	if len(t.changes) >= t.maxSize {
+		t.changes = t.changes[1:]
+	}
+	t.changes = append(t.changes, change)
+}
+
 // PopLast removes and returns the most recent change.
 func (t *Tracker) PopLast() *FileChange {
 	t.mu.Lock()

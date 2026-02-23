@@ -73,8 +73,6 @@ func DefaultShortcuts() []ShortcutCategory {
 			Shortcuts: []Shortcut{
 				{Keys: []string{"/undo"}, Description: "Undo last change"},
 				{Keys: []string{"/redo"}, Description: "Redo undone change"},
-				{Keys: []string{"/checkpoint"}, Description: "Create checkpoint"},
-				{Keys: []string{"/restore"}, Description: "Restore checkpoint"},
 			},
 		},
 		{

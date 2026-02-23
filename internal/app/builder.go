@@ -365,6 +365,11 @@ func (b *Builder) initTools() error {
 	toolCache := tools.NewToolResultCache(tools.DefaultCacheConfig())
 	b.executor.SetToolCache(toolCache)
 
+	// Wire search cache to executor for invalidation on write operations
+	if b.searchCache != nil {
+		b.executor.SetSearchCache(b.searchCache)
+	}
+
 	readTracker := tools.NewFileReadTracker()
 	b.executor.SetReadTracker(readTracker)
 
@@ -1027,6 +1032,12 @@ func (b *Builder) initIntegrations() error {
 		} else {
 			b.auditLogger = auditLogger
 			b.executor.SetAuditLogger(auditLogger)
+			// Cleanup old audit files at startup
+			if removed, err := auditLogger.CleanupOldFiles(); err != nil {
+				logging.Debug("failed to cleanup old audit files", "error", err)
+			} else if removed > 0 {
+				logging.Debug("cleaned up old audit files", "removed", removed)
+			}
 		}
 	}
 	b.executor.SetSessionID(b.session.ID)

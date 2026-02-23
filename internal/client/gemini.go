@@ -75,8 +75,9 @@ func NewGeminiClient(ctx context.Context, cfg *config.Config) (Client, error) {
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
 	}
 
-	// Request retries are orchestrated at App layer to avoid retry multiplication.
-	maxRetries := 0
+	// Retry transient server errors (503, 500, 502) at client level.
+	// Rate-limit retries (429) are additionally handled at App layer.
+	maxRetries := 3
 	retryDelay := cfg.API.Retry.RetryDelay
 	if retryDelay == 0 {
 		retryDelay = 1 * time.Second // Default: 1 second initial delay
@@ -584,9 +585,13 @@ func processResponse(resp *genai.GenerateContentResponse) ResponseChunk {
 	return chunk
 }
 
-// Close closes the client connection.
+// Close closes the client connection and releases resources.
 func (c *GeminiClient) Close() error {
-	// The genai client doesn't have an explicit close method
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// The genai SDK does not expose a Close method or transport.
+	// Nil out the reference to allow GC to reclaim the underlying HTTP resources.
+	c.client = nil
 	return nil
 }
 
