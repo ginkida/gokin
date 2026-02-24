@@ -128,6 +128,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 	}
 
+	// Keep dynamic system instruction in sync (contract/memory/hints can change between turns).
+	a.refreshSystemInstruction()
+
 	// Prepare context (check tokens, optimize if needed)
 	if a.contextManager != nil {
 		if err := a.contextManager.PrepareForRequest(ctx); err != nil {
@@ -396,7 +399,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	}
 
 	// Hard done-gate before response completion.
-	a.enforceDoneGate(ctx, message)
+	if !a.enforceDoneGate(ctx, message) {
+		return
+	}
 
 	// Save session after each message
 	if a.sessionManager != nil {
@@ -720,7 +725,9 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 	}
 
 	// Enforce final verification gate before producing terminal plan summary.
-	a.enforceDoneGate(ctx, approvedPlan.Request)
+	if !a.enforceDoneGate(ctx, approvedPlan.Request) {
+		return
+	}
 
 	// 7. Plan completion summary
 	planDuration := time.Since(planStart)
@@ -865,6 +872,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	// Mark step as started and track current step ID
 	a.planManager.StartStep(step.ID)
 	a.planManager.SetCurrentStepID(step.ID)
+	a.refreshSystemInstruction()
 	a.touchStepHeartbeat()
 	a.journalEvent("plan_step_started", map[string]any{
 		"plan_id":   approvedPlan.ID,
@@ -1203,9 +1211,6 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	// the plan itself was already approved by the user.
 	ctx = tools.ContextWithSkipDiff(ctx)
 
-	// Build compact project context for sub-agents
-	projectCtx := a.promptBuilder.BuildSubAgentPrompt()
-
 	totalSteps := len(approvedPlan.Steps)
 
 	// Get SharedMemory for inter-step communication
@@ -1325,7 +1330,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				a.safeSendToProgram(ui.StreamTextMsg("⚠️ Safe mode: running steps sequentially.\n"))
 			}
 			for _, step := range readySteps {
-				a.executeDelegatedStep(ctx, step, approvedPlan, totalSteps, sharedMem, projectCtx, contextSnapshot)
+				a.executeDelegatedStep(ctx, step, approvedPlan, totalSteps, sharedMem, contextSnapshot)
 			}
 		} else {
 			// Parallel execution of ready steps with context cancellation support
@@ -1335,7 +1340,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 				wg.Add(1)
 				go func(s *plan.Step) {
 					defer wg.Done()
-					a.executeDelegatedStep(ctx, s, approvedPlan, totalSteps, sharedMem, projectCtx, contextSnapshot)
+					a.executeDelegatedStep(ctx, s, approvedPlan, totalSteps, sharedMem, contextSnapshot)
 				}(step)
 			}
 			go func() {
@@ -1351,7 +1356,9 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	}
 
 	// Enforce final verification gate before producing terminal plan summary.
-	a.enforceDoneGate(ctx, approvedPlan.Request)
+	if !a.enforceDoneGate(ctx, approvedPlan.Request) {
+		return
+	}
 
 	// Plan completion summary
 	planDuration := time.Since(planStart)
@@ -1400,7 +1407,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 }
 
 // executeDelegatedStep executes a single step via sub-agent delegation.
-func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approvedPlan *plan.Plan, totalSteps int, sharedMem *agent.SharedMemory, projectCtx, contextSnapshot string) {
+func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approvedPlan *plan.Plan, totalSteps int, sharedMem *agent.SharedMemory, contextSnapshot string) {
 	select {
 	case <-ctx.Done():
 		return
@@ -1469,6 +1476,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	// Mark step as started and track current step ID
 	a.planManager.StartStep(step.ID)
 	a.planManager.SetCurrentStepID(step.ID)
+	a.refreshSystemInstruction()
 	a.touchStepHeartbeat()
 	a.journalEvent("plan_step_started", map[string]any{
 		"plan_id":   approvedPlan.ID,
@@ -1496,6 +1504,10 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 
 	// Build step prompt with full plan context
 	prevSummary := a.planManager.GetPreviousStepsSummary(step.ID, planSummaryMaxChars)
+	projectCtx := ""
+	if a.promptBuilder != nil {
+		projectCtx = a.promptBuilder.BuildSubAgentPrompt()
+	}
 
 	// Get SharedMemory context for this sub-agent
 	sharedMemCtx := ""
@@ -2002,42 +2014,93 @@ func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output 
 	ledger := p.GetRunLedgerSnapshot()
 	entry := ledger[step.ID]
 
-	evidence := make([]string, 0, 8)
+	evidence := make([]string, 0, 14)
+	hasToolCalls := false
+	hasTools := false
+	hasFiles := false
+	hasCommands := false
+	verificationByCommand := false
 	if entry != nil {
 		if entry.ToolCalls > 0 {
 			evidence = append(evidence, fmt.Sprintf("tool_calls=%d", entry.ToolCalls))
+			hasToolCalls = true
 		}
 		if len(entry.Tools) > 0 {
 			evidence = append(evidence, "tools="+joinLimited(entry.Tools, 4))
+			hasTools = true
 		}
 		if len(entry.FilesTouched) > 0 {
 			evidence = append(evidence, "files="+joinLimited(entry.FilesTouched, 4))
+			hasFiles = true
 		}
 		if len(entry.Commands) > 0 {
 			evidence = append(evidence, "commands="+joinLimited(entry.Commands, 3))
+			hasCommands = true
+			verificationByCommand = commandsContainVerificationSignals(entry.Commands)
 		}
 	}
 
 	output = strings.TrimSpace(output)
+	hasOutput := false
 	if output != "" {
 		compact := output
 		if len(compact) > 260 {
 			compact = compact[:260] + "..."
 		}
 		evidence = append(evidence, "output="+compact)
+		hasOutput = true
 	}
 
-	hasArtifactProof := len(evidence) > 0
-	if strings.TrimSpace(step.ExpectedArtifact) != "" && !hasArtifactProof {
+	hasOperationalProof := hasToolCalls || hasTools || hasFiles || hasCommands
+	hasArtifactProof := hasFiles || hasCommands || hasOutput
+	requiresArtifactProof := strings.TrimSpace(step.ExpectedArtifact) != ""
+	requiresVerificationProof := criteriaRequireVerificationSignals(step.SuccessCriteria, step.Description)
+	verificationByOutput := outputContainsVerificationSignals(output)
+	hasVerificationProof := verificationByCommand || verificationByOutput
+
+	evidenceClasses := 0
+	if hasOperationalProof {
+		evidenceClasses++
+	}
+	if hasOutput {
+		evidenceClasses++
+	}
+	if hasVerificationProof {
+		evidenceClasses++
+	}
+
+	requiredClasses := 1
+	if requiresArtifactProof || len(step.SuccessCriteria) > 0 {
+		requiredClasses = 2
+	}
+
+	if requiresArtifactProof && !hasArtifactProof {
 		return nil, "", false, fmt.Sprintf("step %d lacks proof for expected artifact", step.ID)
+	}
+	if requiresVerificationProof && !hasVerificationProof {
+		return nil, "", false, fmt.Sprintf("step %d lacks verification proof for success criteria", step.ID)
+	}
+	if evidenceClasses < requiredClasses {
+		return nil, "", false, fmt.Sprintf(
+			"step %d needs stronger proof (%d/%d evidence classes: operational/output/verification)",
+			step.ID, evidenceClasses, requiredClasses,
+		)
 	}
 
 	if len(evidence) == 0 {
 		return nil, "", false, "cannot complete step without proof (no diff/command/output evidence)"
 	}
 
+	evidence = append(evidence, fmt.Sprintf("contract.artifact_proof=%t", hasArtifactProof))
+	evidence = append(evidence, fmt.Sprintf("contract.verification_proof=%t", hasVerificationProof))
+	evidence = append(evidence, fmt.Sprintf("contract.evidence_classes=%d/%d", evidenceClasses, requiredClasses))
+
 	note := fmt.Sprintf(
-		"Verified against %d success criteria; expected artifact: %s; evidence items: %d.",
+		"Contract verification: artifact_proof=%t, verification_proof=%t, evidence_classes=%d/%d; success_criteria=%d; expected_artifact=%s; evidence_items=%d.",
+		hasArtifactProof,
+		hasVerificationProof,
+		evidenceClasses,
+		requiredClasses,
 		len(step.SuccessCriteria),
 		strings.TrimSpace(step.ExpectedArtifact),
 		len(evidence),
@@ -2053,6 +2116,77 @@ func joinLimited(items []string, limit int) string {
 		return strings.Join(items, ", ")
 	}
 	return strings.Join(items[:limit], ", ") + fmt.Sprintf(", ...(+%d)", len(items)-limit)
+}
+
+func criteriaRequireVerificationSignals(criteria []string, description string) bool {
+	keywords := []string{
+		"verify", "verification", "test", "lint", "build", "compile",
+		"check", "typecheck", "vet", "pass", "validate", "validated",
+		"проверь", "провер", "тест", "линт", "сборк", "валидац",
+	}
+
+	texts := make([]string, 0, len(criteria)+1)
+	for _, c := range criteria {
+		c = strings.TrimSpace(strings.ToLower(c))
+		if c != "" {
+			texts = append(texts, c)
+		}
+	}
+	desc := strings.TrimSpace(strings.ToLower(description))
+	if desc != "" {
+		texts = append(texts, desc)
+	}
+
+	for _, text := range texts {
+		for _, kw := range keywords {
+			if strings.Contains(text, kw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commandsContainVerificationSignals(commands []string) bool {
+	keywords := []string{
+		" test", "go test", "pytest", "cargo test", "npm test", "pnpm test", "yarn test", "bun test",
+		"lint", "typecheck", "check", "verify", "vet", "build", "compile",
+	}
+	for _, cmd := range commands {
+		lower := " " + strings.ToLower(strings.TrimSpace(cmd))
+		for _, kw := range keywords {
+			if strings.Contains(lower, kw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func outputContainsVerificationSignals(output string) bool {
+	lower := strings.ToLower(strings.TrimSpace(output))
+	if lower == "" {
+		return false
+	}
+
+	negative := []string{" failed", " failure", " error", "panic", "traceback", "assertionerror"}
+	for _, marker := range negative {
+		if strings.Contains(" "+lower, marker) {
+			return false
+		}
+	}
+
+	positive := []string{
+		"passed", "successful", "verified", "no issues", "no errors",
+		"build succeeded", "all tests passed", "lint passed", "check passed",
+		"успеш", "проверен", "проверка пройдена", "без ошибок",
+	}
+	for _, marker := range positive {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // StepPromptContext holds context for building step prompts.

@@ -133,6 +133,7 @@ func autoTag(entry *Entry) {
 
 const (
 	staleArchiveWindow = 90 * 24 * time.Hour
+	maxContextMemories = 12
 )
 
 func normalizeMemoryText(s string) string {
@@ -393,6 +394,12 @@ type scoredEntry struct {
 	score float64
 }
 
+// contextScoredEntry represents a memory item ranked for prompt injection.
+type contextScoredEntry struct {
+	entry *Entry
+	score float64
+}
+
 // scoreEntry calculates retrieval score from relevance + freshness + prior success.
 func scoreEntry(entry *Entry, query SearchQuery, now time.Time) float64 {
 	score := 0.0
@@ -441,6 +448,45 @@ func scoreEntry(entry *Entry, query SearchQuery, now time.Time) float64 {
 	score += 3.0 * entry.SuccessRate()
 	score += 0.35 * math.Log1p(float64(entry.Reinforcement))
 	score += 0.25 * math.Log1p(float64(entry.AccessCount))
+
+	return score
+}
+
+// scoreEntryForContext ranks memories for prompt injection.
+// It prioritizes recency + demonstrated usefulness + reinforced facts.
+func scoreEntryForContext(entry *Entry, now time.Time) float64 {
+	if entry == nil {
+		return 0
+	}
+
+	ageHours := now.Sub(entry.Timestamp).Hours()
+	if ageHours < 0 {
+		ageHours = 0
+	}
+	freshness := math.Exp(-ageHours / (24 * 21))
+
+	accessHours := ageHours
+	if !entry.LastAccessed.IsZero() {
+		accessHours = now.Sub(entry.LastAccessed).Hours()
+		if accessHours < 0 {
+			accessHours = 0
+		}
+	}
+	accessFreshness := math.Exp(-accessHours / (24 * 30))
+
+	score := 0.0
+	score += 4.0 * freshness
+	score += 3.0 * entry.SuccessRate()
+	score += 0.40 * math.Log1p(float64(entry.Reinforcement))
+	score += 0.30 * math.Log1p(float64(entry.AccessCount))
+	score += 1.0 * accessFreshness
+
+	if strings.TrimSpace(entry.Key) != "" {
+		score += 0.6
+	}
+	if len(entry.Tags) > 0 {
+		score += 0.2 * math.Log1p(float64(len(entry.Tags)))
+	}
 
 	return score
 }
@@ -692,9 +738,35 @@ func (s *Store) GetForContext(projectOnly bool) string {
 		return ""
 	}
 
+	now := time.Now()
+	scored := make([]contextScoredEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		scored = append(scored, contextScoredEntry{
+			entry: entry,
+			score: scoreEntryForContext(entry, now),
+		})
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].entry.Timestamp.After(scored[j].entry.Timestamp)
+	})
+	if len(scored) > maxContextMemories {
+		scored = scored[:maxContextMemories]
+	}
+
+	selected := make([]*Entry, 0, len(scored))
+	for _, item := range scored {
+		selected = append(selected, item.entry)
+	}
+
 	// Group by type
 	byType := make(map[MemoryType][]*Entry)
-	for _, entry := range entries {
+	for _, entry := range selected {
 		byType[entry.Type] = append(byType[entry.Type], entry)
 	}
 
@@ -714,10 +786,14 @@ func (s *Store) GetForContext(projectOnly bool) string {
 		if items, ok := byType[tc.t]; ok && len(items) > 0 {
 			builder.WriteString(fmt.Sprintf("### %s\n", tc.label))
 			for _, entry := range items {
+				content := strings.TrimSpace(entry.Content)
+				if len(content) > 220 {
+					content = content[:220] + "..."
+				}
 				if entry.Key != "" {
-					builder.WriteString(fmt.Sprintf("- **%s**: %s\n", entry.Key, entry.Content))
+					builder.WriteString(fmt.Sprintf("- **%s**: %s\n", entry.Key, content))
 				} else {
-					builder.WriteString(fmt.Sprintf("- %s\n", entry.Content))
+					builder.WriteString(fmt.Sprintf("- %s\n", content))
 				}
 			}
 			builder.WriteString("\n")

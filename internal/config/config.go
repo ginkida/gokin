@@ -11,6 +11,7 @@ type Config struct {
 	Context     ContextConfig     `yaml:"context"`
 	Permission  PermissionConfig  `yaml:"permission"`
 	Plan        PlanConfig        `yaml:"plan"`
+	DoneGate    DoneGateConfig    `yaml:"done_gate"`
 	Hooks       HooksConfig       `yaml:"hooks"`
 	Web         WebConfig         `yaml:"web"`
 	Session     SessionConfig     `yaml:"session"`
@@ -233,6 +234,15 @@ type PlanConfig struct {
 	Algorithm          string        `yaml:"algorithm"`             // Tree search algorithm: beam, mcts, astar
 }
 
+// DoneGateConfig holds hard finalization gate settings.
+type DoneGateConfig struct {
+	Enabled         bool          `yaml:"enabled"`           // Enable/disable done-gate enforcement
+	Mode            string        `yaml:"mode"`              // Gate mode: normal or strict
+	FailClosed      bool          `yaml:"fail_closed"`       // Block finalization if no checks can be prepared
+	CheckTimeout    time.Duration `yaml:"check_timeout"`     // Timeout per verification check
+	AutoFixAttempts int           `yaml:"auto_fix_attempts"` // Number of autonomous fix rounds before blocking
+}
+
 // HooksConfig holds hooks system settings.
 type HooksConfig struct {
 	Enabled bool         `yaml:"enabled"` // Enable/disable hooks
@@ -314,14 +324,14 @@ type DiffPreviewConfig struct {
 
 // SemanticConfig holds semantic search settings.
 type SemanticConfig struct {
-	Enabled         bool          `yaml:"enabled"`          // Enable/disable semantic search
-	Model           string        `yaml:"model"`            // Embedding model (e.g., text-embedding-004)
-	IndexOnStart    bool          `yaml:"index_on_start"`   // Index workspace on startup
-	MaxFileSize     int64         `yaml:"max_file_size"`    // Max file size to index (bytes)
-	CacheTTL        time.Duration `yaml:"cache_ttl"`        // Cache TTL for embeddings
-	TopK            int           `yaml:"top_k"`            // Default number of results
-	ChunkSize       int           `yaml:"chunk_size"`       // Chunk size (characters)
-	ChunkOverlap    int           `yaml:"chunk_overlap"`    // Overlap between chunks
+	Enabled      bool          `yaml:"enabled"`        // Enable/disable semantic search
+	Model        string        `yaml:"model"`          // Embedding model (e.g., text-embedding-004)
+	IndexOnStart bool          `yaml:"index_on_start"` // Index workspace on startup
+	MaxFileSize  int64         `yaml:"max_file_size"`  // Max file size to index (bytes)
+	CacheTTL     time.Duration `yaml:"cache_ttl"`      // Cache TTL for embeddings
+	TopK         int           `yaml:"top_k"`          // Default number of results
+	ChunkSize    int           `yaml:"chunk_size"`     // Chunk size (characters)
+	ChunkOverlap int           `yaml:"chunk_overlap"`  // Overlap between chunks
 }
 
 // MCPConfig holds MCP (Model Context Protocol) settings.
@@ -444,6 +454,13 @@ func DefaultConfig() *Config {
 			UseLLMExpansion:    true,
 			Algorithm:          "beam", // Tree search algorithm: beam, mcts, astar
 		},
+		DoneGate: DoneGateConfig{
+			Enabled:         true,            // Enabled by default
+			Mode:            "strict",        // Strict by default: stronger checks and fail-closed behavior
+			FailClosed:      true,            // Never finalize if checks cannot be prepared
+			CheckTimeout:    3 * time.Minute, // Per-check timeout
+			AutoFixAttempts: 2,               // Retry with autonomous fixes up to 2 times
+		},
 		Hooks: HooksConfig{
 			Enabled: false, // Disabled by default
 			Hooks:   []HookConfig{},
@@ -498,7 +515,7 @@ func DefaultConfig() *Config {
 			TopK:         10,                   // Return top 10 results
 		},
 		MCP: MCPConfig{
-			Enabled:             false,            // Disabled by default
+			Enabled:             false, // Disabled by default
 			Servers:             []MCPServerConfig{},
 			HealthCheckInterval: 30 * time.Second, // Check every 30s when MCP is enabled
 		},

@@ -204,6 +204,104 @@ func (m *Manager) GetCurrentPlan() *Plan {
 	return m.currentPlan
 }
 
+// GetActiveContractContext returns a compact contract block for prompt injection.
+// It includes active plan metadata and the current/next actionable step contract.
+func (m *Manager) GetActiveContractContext() string {
+	m.mu.RLock()
+	currentPlan := m.currentPlan
+	executing := m.executionMode
+	currentStepID := m.currentStepID
+	m.mu.RUnlock()
+
+	if currentPlan == nil {
+		return ""
+	}
+
+	steps := currentPlan.GetStepsSnapshot()
+	if len(steps) == 0 {
+		return ""
+	}
+
+	activeStep := findActiveContractStep(steps, currentStepID)
+	if activeStep == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Plan: %s\n", strings.TrimSpace(currentPlan.Title)))
+	if desc := strings.TrimSpace(currentPlan.Description); desc != "" {
+		sb.WriteString(fmt.Sprintf("Goal: %s\n", desc))
+	}
+	if req := strings.TrimSpace(currentPlan.Request); req != "" {
+		req = compactContractText(req, 240)
+		sb.WriteString(fmt.Sprintf("Request: %s\n", req))
+	}
+	sb.WriteString(fmt.Sprintf("Status: %s", currentPlan.Status.String()))
+	if executing {
+		sb.WriteString(" (executing)")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("Progress: %d/%d\n", currentPlan.CompletedCount(), currentPlan.StepCount()))
+
+	sb.WriteString("\nCurrent Step Contract:\n")
+	sb.WriteString(fmt.Sprintf("- Step %d: %s\n", activeStep.ID, strings.TrimSpace(activeStep.Title)))
+	if d := strings.TrimSpace(activeStep.Description); d != "" {
+		sb.WriteString(fmt.Sprintf("- Description: %s\n", compactContractText(d, 280)))
+	}
+	if len(activeStep.Inputs) > 0 {
+		sb.WriteString("- Inputs: ")
+		sb.WriteString(compactContractText(strings.Join(activeStep.Inputs, "; "), 260))
+		sb.WriteString("\n")
+	}
+	if ea := strings.TrimSpace(activeStep.ExpectedArtifact); ea != "" {
+		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", compactContractText(ea, 260)))
+	}
+	if len(activeStep.SuccessCriteria) > 0 {
+		sb.WriteString("- Success criteria: ")
+		sb.WriteString(compactContractText(strings.Join(activeStep.SuccessCriteria, "; "), 320))
+		sb.WriteString("\n")
+	}
+	if rb := strings.TrimSpace(activeStep.Rollback); rb != "" {
+		sb.WriteString(fmt.Sprintf("- Rollback: %s\n", compactContractText(rb, 220)))
+	}
+	sb.WriteString("- Completion proof required: changed files and/or commands/output evidence\n")
+	sb.WriteString("- Do not complete the step without objective proof")
+
+	return sb.String()
+}
+
+func findActiveContractStep(steps []*Step, currentStepID int) *Step {
+	if len(steps) == 0 {
+		return nil
+	}
+	if currentStepID > 0 {
+		for _, step := range steps {
+			if step != nil && step.ID == currentStepID {
+				return step
+			}
+		}
+	}
+	for _, step := range steps {
+		if step != nil && step.Status == StatusInProgress {
+			return step
+		}
+	}
+	for _, step := range steps {
+		if step != nil && step.Status == StatusPending {
+			return step
+		}
+	}
+	return nil
+}
+
+func compactContractText(s string, maxLen int) string {
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // CreatePlan creates a new plan and sets it as current.
 func (m *Manager) CreatePlan(title, description, request string) *Plan {
 	m.mu.Lock()

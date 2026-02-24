@@ -497,6 +497,9 @@ func (b *Builder) initManagers() error {
 	// Plan manager
 	b.planManager = plan.NewManager(b.cfg.Plan.Enabled, b.cfg.Plan.RequireApproval)
 	b.planManager.SetWorkDir(b.workDir)
+	if b.promptBuilder != nil {
+		b.promptBuilder.SetPlanManager(b.planManager)
+	}
 
 	// Adaptive replan handler: uses LLM to generate replacement steps on fatal errors
 	b.planManager.SetReplanHandler(func(ctx context.Context, p *plan.Plan, failedStep *plan.Step) ([]*plan.Step, error) {

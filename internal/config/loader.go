@@ -211,6 +211,16 @@ func (c *Config) Validate() error {
 	if err := ValidateRetryConfig(c); err != nil {
 		return err
 	}
+	mode := strings.ToLower(strings.TrimSpace(c.DoneGate.Mode))
+	if mode != "" && mode != "normal" && mode != "strict" {
+		return fmt.Errorf("invalid done_gate.mode %q: expected normal or strict", c.DoneGate.Mode)
+	}
+	if c.DoneGate.AutoFixAttempts < 0 {
+		return fmt.Errorf("done_gate.auto_fix_attempts must be >= 0")
+	}
+	if c.DoneGate.CheckTimeout < 0 {
+		return fmt.Errorf("done_gate.check_timeout must be >= 0")
+	}
 
 	// Check OAuth first
 	if c.API.HasOAuthToken("gemini") {

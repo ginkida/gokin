@@ -1481,6 +1481,20 @@ func (a *App) buildModelEnhancement() string {
 	return ""
 }
 
+// refreshSystemInstruction rebuilds and reapplies the dynamic system instruction.
+// This keeps active contract/memory/tool-hints in sync with current runtime state.
+func (a *App) refreshSystemInstruction() {
+	if a.promptBuilder == nil || a.client == nil || a.session == nil {
+		return
+	}
+	systemPrompt := a.promptBuilder.Build() + a.buildModelEnhancement()
+	if strings.TrimSpace(systemPrompt) == "" {
+		return
+	}
+	a.client.SetSystemInstruction(systemPrompt)
+	a.session.SystemInstruction = systemPrompt
+}
+
 // getActiveToolDeclarations returns declarations for the tools actually available
 // to the current model (matching selectToolSets logic in builder).
 func (a *App) getActiveToolDeclarations() []*genai.FunctionDeclaration {
