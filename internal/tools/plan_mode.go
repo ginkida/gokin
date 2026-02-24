@@ -35,8 +35,12 @@ func (t *EnterPlanModeTool) Description() string {
 
 // StepInput represents a step in the plan.
 type StepInput struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	Title            string   `json:"title"`
+	Description      string   `json:"description"`
+	Inputs           []string `json:"inputs,omitempty"`
+	ExpectedArtifact string   `json:"expected_artifact,omitempty"`
+	SuccessCriteria  []string `json:"success_criteria,omitempty"`
+	Rollback         string   `json:"rollback,omitempty"`
 }
 
 func (t *EnterPlanModeTool) Declaration() *genai.FunctionDeclaration {
@@ -67,6 +71,24 @@ func (t *EnterPlanModeTool) Declaration() *genai.FunctionDeclaration {
 							"description": {
 								Type:        genai.TypeString,
 								Description: "Detailed description of what the step involves",
+							},
+							"inputs": {
+								Type:        genai.TypeArray,
+								Items:       &genai.Schema{Type: genai.TypeString},
+								Description: "Inputs/dependencies required before starting this step",
+							},
+							"expected_artifact": {
+								Type:        genai.TypeString,
+								Description: "Concrete artifact expected after step completion (file change, command output, etc.)",
+							},
+							"success_criteria": {
+								Type:        genai.TypeArray,
+								Items:       &genai.Schema{Type: genai.TypeString},
+								Description: "Objective criteria used to verify this step is done",
+							},
+							"rollback": {
+								Type:        genai.TypeString,
+								Description: "Rollback strategy if this step causes issues",
 							},
 						},
 						Required: []string{"title"},
@@ -161,7 +183,14 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 			if step, ok := stepRaw.(map[string]any); ok {
 				stepTitle, _ := step["title"].(string)
 				stepDesc, _ := step["description"].(string)
-				p.AddStep(stepTitle, stepDesc)
+				planStep := p.AddStep(stepTitle, stepDesc)
+				if planStep != nil {
+					planStep.Inputs = getStringSliceField(step, "inputs")
+					planStep.ExpectedArtifact = getStringField(step, "expected_artifact")
+					planStep.SuccessCriteria = getStringSliceField(step, "success_criteria")
+					planStep.Rollback = getStringField(step, "rollback")
+					planStep.EnsureContractDefaults()
+				}
 			}
 		}
 	}
@@ -564,4 +593,25 @@ func getStringField(m map[string]any, key string) string {
 		}
 	}
 	return ""
+}
+
+func getStringSliceField(m map[string]any, key string) []string {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return nil
+	}
+	rawSlice, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(rawSlice))
+	for _, item := range rawSlice {
+		if s, ok := item.(string); ok {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }

@@ -49,6 +49,11 @@ func (t *SharedMemoryTool) SetMemory(memory SharedMemoryInterface) {
 	t.memory = memory
 }
 
+// GetMemory returns the configured shared memory interface.
+func (t *SharedMemoryTool) GetMemory() SharedMemoryInterface {
+	return t.memory
+}
+
 // SetAgentID sets the agent ID for this tool instance.
 func (t *SharedMemoryTool) SetAgentID(agentID string) {
 	t.agentID = agentID

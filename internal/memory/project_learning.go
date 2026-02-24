@@ -8,7 +8,13 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/logging"
 	"gopkg.in/yaml.v3"
+)
+
+var (
+	projectLearningMu    sync.Mutex
+	projectLearningCache = make(map[string]*ProjectLearning)
 )
 
 // ProjectLearning manages project-specific learned patterns and preferences.
@@ -110,12 +116,50 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 			pl.dirty = false
 			pl.mu.Unlock()
 
-			// Write outside lock — disk I/O no longer blocks readers/writers
-			os.WriteFile(pl.path, data, 0644)
+			// Write outside lock — disk I/O no longer blocks readers/writers.
+			if err := os.WriteFile(pl.path, data, 0644); err != nil {
+				logging.Warn("failed to save project learning", "path", pl.path, "error", err)
+				pl.mu.Lock()
+				pl.dirty = true
+				pl.mu.Unlock()
+			}
 		})
 	}
 
 	return pl, nil
+}
+
+// GetSharedProjectLearning returns a shared ProjectLearning instance for a
+// project root to avoid concurrent writers managing the same file independently.
+func GetSharedProjectLearning(projectRoot string) (*ProjectLearning, error) {
+	cacheKey := normalizeProjectRoot(projectRoot)
+
+	projectLearningMu.Lock()
+	if cached, ok := projectLearningCache[cacheKey]; ok {
+		projectLearningMu.Unlock()
+		return cached, nil
+	}
+
+	pl, err := NewProjectLearning(cacheKey)
+	if err != nil {
+		projectLearningMu.Unlock()
+		return nil, err
+	}
+
+	projectLearningCache[cacheKey] = pl
+	projectLearningMu.Unlock()
+	return pl, nil
+}
+
+func normalizeProjectRoot(projectRoot string) string {
+	root := projectRoot
+	if abs, err := filepath.Abs(projectRoot); err == nil {
+		root = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	return filepath.Clean(root)
 }
 
 // load reads data from the YAML file.

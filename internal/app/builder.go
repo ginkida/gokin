@@ -960,7 +960,7 @@ func (b *Builder) initIntegrations() error {
 
 	// Initialize project learning for memorize tool
 	if b.workDir != "" {
-		projectLearning, err := memory.NewProjectLearning(b.workDir)
+		projectLearning, err := memory.GetSharedProjectLearning(b.workDir)
 		if err != nil {
 			logging.Debug("failed to create project learning", "error", err)
 		} else {
@@ -1641,8 +1641,8 @@ func (b *Builder) assembleApp() *App {
 		backgroundIndexer:    b.backgroundIdx,
 		taskRouter:           b.taskRouter,
 		orchestrator:         b.taskOrchestrator,
-		reliability: NewReliabilityManager(),
-		policy:      NewPolicyEngine(),
+		reliability:          NewReliabilityManager(),
+		policy:               NewPolicyEngine(),
 		// Phase 5: Agent System Improvements
 		coordinator:       b.coordinator,
 		agentTypeRegistry: b.agentTypeRegistry,

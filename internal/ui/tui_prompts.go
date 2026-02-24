@@ -249,12 +249,6 @@ func (m Model) renderPlanApproval() string {
 	builder.WriteString(borderStyle.Render("─╮"))
 	builder.WriteString("\n")
 
-	// Empty line
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString(strings.Repeat(" ", panelWidth-1))
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString("\n")
-
 	// Plan title
 	titleLine := "  " + planTitleStyle.Render(m.planRequest.Title)
 	builder.WriteString(borderStyle.Render("│"))
@@ -282,12 +276,6 @@ func (m Model) renderPlanApproval() string {
 		builder.WriteString(borderStyle.Render("│"))
 		builder.WriteString("\n")
 	}
-
-	// Empty line
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString(strings.Repeat(" ", panelWidth-1))
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString("\n")
 
 	// Steps header
 	stepsHeader := "  Steps:"

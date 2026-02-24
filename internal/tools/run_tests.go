@@ -109,6 +109,13 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 
 	// Parse results based on framework
 	result := parseTestResults(framework, outStr, err, duration)
+	if err != nil {
+		return ToolResult{
+			Success: false,
+			Error:   fmt.Sprintf("tests failed (%s)", framework),
+			Content: result,
+		}, nil
+	}
 
 	return NewSuccessResult(result), nil
 }

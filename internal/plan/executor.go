@@ -132,6 +132,7 @@ func (m *Manager) RequestReplan(ctx context.Context, failedStep *Step) error {
 	for _, s := range newSteps {
 		s.ID = nextID
 		s.Status = StatusPending
+		s.EnsureContractDefaults()
 		nextID++
 	}
 
@@ -385,6 +386,15 @@ func (m *Manager) CompleteStep(stepID int, output string) {
 		return
 	}
 
+	// Ensure manual completions still include minimal evidence.
+	if step := plan.GetStep(stepID); step != nil && len(step.Evidence) == 0 {
+		evidence := []string{"manual completion marker"}
+		if strings.TrimSpace(output) != "" {
+			evidence = append(evidence, "output provided")
+		}
+		plan.RecordStepVerification(stepID, evidence, "Completed via plan manager")
+	}
+
 	plan.CompleteStep(stepID, output)
 
 	// Save progress (for crash recovery)
@@ -422,6 +432,28 @@ func (m *Manager) CompleteStep(stepID int, output string) {
 			onComplete(step)
 		}
 	}
+}
+
+// RecordStepVerification records proof/evidence for a step before completion.
+func (m *Manager) RecordStepVerification(stepID int, evidence []string, note string) bool {
+	m.mu.Lock()
+	plan := m.currentPlan
+	store := m.planStore
+	m.mu.Unlock()
+
+	if plan == nil {
+		return false
+	}
+	if !plan.RecordStepVerification(stepID, evidence, note) {
+		return false
+	}
+
+	if store != nil {
+		if err := store.Save(plan); err != nil {
+			logging.Warn("failed to save step verification", "step_id", stepID, "error", err)
+		}
+	}
+	return true
 }
 
 // FailStep marks a step as failed.

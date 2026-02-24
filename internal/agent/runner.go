@@ -491,6 +491,9 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	ctxCfg := r.ctxCfg
 	errorStore := r.errorStore
 	predictor := r.predictor
+	sharedMem := r.sharedMemory
+	sharedScratchpad := r.sharedScratchpad
+	scratchpadCallback := r.onScratchpadUpdate
 	typeRegistry := r.typeRegistry
 	strategyOpt := r.strategyOptimizer
 	delegationMetrics := r.delegationMetrics
@@ -545,6 +548,21 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	// Wire file predictor for enhanced error recovery
 	if predictor != nil && agent.reflector != nil {
 		agent.reflector.SetPredictor(predictor)
+	}
+
+	// Wire shared memory if available.
+	if sharedMem != nil {
+		agent.SetSharedMemory(sharedMem)
+	}
+
+	// Initialize shared scratchpad state for this agent.
+	if sharedScratchpad != "" {
+		agent.stateMu.Lock()
+		agent.Scratchpad = sharedScratchpad
+		agent.stateMu.Unlock()
+	}
+	if scratchpadCallback != nil {
+		agent.SetOnScratchpadUpdate(scratchpadCallback)
 	}
 
 	// Propagate delegation depth from context (set by messenger.handleDelegation)
@@ -664,6 +682,9 @@ func (r *Runner) SpawnWithContext(
 	ctxCfg := r.ctxCfg
 	errorStore := r.errorStore
 	predictor := r.predictor
+	sharedMem := r.sharedMemory
+	sharedScratchpad := r.sharedScratchpad
+	scratchpadCallback := r.onScratchpadUpdate
 	onInput := r.onInput
 	c := r.client
 	baseReg := r.baseRegistry
@@ -705,6 +726,21 @@ func (r *Runner) SpawnWithContext(
 	// Wire file predictor for enhanced error recovery
 	if predictor != nil && agent.reflector != nil {
 		agent.reflector.SetPredictor(predictor)
+	}
+
+	// Wire shared memory if available.
+	if sharedMem != nil {
+		agent.SetSharedMemory(sharedMem)
+	}
+
+	// Initialize shared scratchpad state for this sub-agent.
+	if sharedScratchpad != "" {
+		agent.stateMu.Lock()
+		agent.Scratchpad = sharedScratchpad
+		agent.stateMu.Unlock()
+	}
+	if scratchpadCallback != nil {
+		agent.SetOnScratchpadUpdate(scratchpadCallback)
 	}
 
 	// Propagate delegation depth from context

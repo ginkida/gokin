@@ -451,25 +451,56 @@ func KillShellToolDeclaration() *genai.FunctionDeclaration {
 func MemoryToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "memory",
-		Description: "Manages persistent memory across sessions.",
+		Description: "Persistent memory storage for remembering and recalling information across sessions",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
 				"action": {
 					Type:        genai.TypeString,
-					Description: "Action to perform: add, get, search, list, remove",
+					Description: "Action to perform: 'remember' (save), 'recall' (retrieve), 'forget' (delete), 'list' (show all), 'feedback' (mark retrieval success/failure)",
+					Enum:        []string{"remember", "recall", "forget", "list", "feedback"},
 				},
 				"key": {
 					Type:        genai.TypeString,
-					Description: "The memory key",
+					Description: "Optional key to identify the memory. Makes it easier to recall or update later",
 				},
-				"value": {
+				"content": {
 					Type:        genai.TypeString,
-					Description: "The memory value (for add)",
+					Description: "Content to remember (required for 'remember' action)",
 				},
 				"query": {
 					Type:        genai.TypeString,
-					Description: "Search query (for search)",
+					Description: "Search query for 'recall' action (searches in content and key)",
+				},
+				"tags": {
+					Type:        genai.TypeArray,
+					Items:       &genai.Schema{Type: genai.TypeString},
+					Description: "Tags for organizing memories. Use for filtering in 'recall'",
+				},
+				"scope": {
+					Type:        genai.TypeString,
+					Description: "Scope of the memory: 'session' (current session only), 'project' (this repository only), 'global' (all projects). Default: 'project'",
+					Enum:        []string{"session", "project", "global"},
+				},
+				"id": {
+					Type:        genai.TypeString,
+					Description: "Memory ID for 'forget'/'feedback' actions",
+				},
+				"project_only": {
+					Type:        genai.TypeBoolean,
+					Description: "If true, only show/search memories for current project",
+				},
+				"ttl_minutes": {
+					Type:        genai.TypeInteger,
+					Description: "Optional TTL in minutes for remembered memory. After expiration, memory is archived.",
+				},
+				"include_archived": {
+					Type:        genai.TypeBoolean,
+					Description: "Include archived memories in search/list results (default: false)",
+				},
+				"success": {
+					Type:        genai.TypeBoolean,
+					Description: "For 'feedback' action: true if retrieved memory was useful, false otherwise.",
 				},
 			},
 			Required: []string{"action"},

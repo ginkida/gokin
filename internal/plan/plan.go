@@ -84,6 +84,12 @@ type Step struct {
 	Condition        string            `json:"condition,omitempty"`     // Condition: "step_N_failed", "step_N_succeeded"
 	AgentMetrics     *StepAgentMetrics `json:"agent_metrics,omitempty"` // Metrics from sub-agent tree planner
 	CheckpointPassed bool              `json:"checkpoint_passed,omitempty"`
+	Inputs           []string          `json:"inputs,omitempty"`
+	ExpectedArtifact string            `json:"expected_artifact,omitempty"` // Expected output artifact/deliverable
+	SuccessCriteria  []string          `json:"success_criteria,omitempty"`  // Objective completion criteria
+	Rollback         string            `json:"rollback,omitempty"`          // Rollback strategy if step causes issues
+	Evidence         []string          `json:"evidence,omitempty"`          // Execution evidence (diff/commands/facts)
+	VerificationNote string            `json:"verification_note,omitempty"` // Verification summary recorded by orchestrator
 }
 
 // StepAgentMetrics contains metrics from sub-agent tree planner execution.
@@ -123,6 +129,40 @@ func (s *Step) Duration() time.Duration {
 		return time.Since(s.StartTime)
 	}
 	return s.EndTime.Sub(s.StartTime)
+}
+
+// EnsureContractDefaults initializes missing step contract fields with safe defaults.
+func (s *Step) EnsureContractDefaults() {
+	if s == nil {
+		return
+	}
+	s.Title = strings.TrimSpace(s.Title)
+	s.Description = strings.TrimSpace(s.Description)
+	for i := range s.Inputs {
+		s.Inputs[i] = strings.TrimSpace(s.Inputs[i])
+	}
+	for i := range s.SuccessCriteria {
+		s.SuccessCriteria[i] = strings.TrimSpace(s.SuccessCriteria[i])
+	}
+	s.Rollback = strings.TrimSpace(s.Rollback)
+	s.ExpectedArtifact = strings.TrimSpace(s.ExpectedArtifact)
+
+	if len(s.Inputs) == 0 {
+		s.Inputs = []string{"Repository state at step start"}
+	}
+	if s.ExpectedArtifact == "" {
+		s.ExpectedArtifact = "Concrete, verifiable change related to this step"
+	}
+	if len(s.SuccessCriteria) == 0 {
+		if s.Description != "" {
+			s.SuccessCriteria = []string{s.Description}
+		} else {
+			s.SuccessCriteria = []string{"Step objective is implemented and validated"}
+		}
+	}
+	if s.Rollback == "" {
+		s.Rollback = "Revert modified files and restore previous working state"
+	}
 }
 
 // Plan represents an execution plan.
@@ -194,6 +234,7 @@ func (p *Plan) AddStepWithOptions(title, description string, parallel bool, depe
 		Parallel:    parallel,
 		DependsOn:   dependsOn,
 	}
+	step.EnsureContractDefaults()
 	p.Steps = append(p.Steps, step)
 	p.UpdatedAt = time.Now()
 	return step
@@ -267,6 +308,15 @@ func (p *Plan) CompleteStep(id int, output string) {
 
 	for _, step := range p.Steps {
 		if step.ID == id {
+			if len(step.Evidence) == 0 {
+				step.Status = StatusPaused
+				step.Error = "missing completion evidence (diff/output/command/fact)"
+				step.EndTime = time.Now()
+				p.markStepFailedLocked(id)
+				p.Status = StatusInProgress
+				p.UpdatedAt = time.Now()
+				return
+			}
 			step.Status = StatusCompleted
 			step.Output = output
 			step.EndTime = time.Now()
@@ -287,6 +337,33 @@ func (p *Plan) CompleteStep(id int, output string) {
 	if allCompleted {
 		p.Status = StatusCompleted
 	}
+}
+
+// RecordStepVerification stores evidence and verification notes for a step.
+func (p *Plan) RecordStepVerification(id int, evidence []string, note string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	normalized := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		normalized = appendUniqueLimited(normalized, item, 40)
+	}
+	note = strings.TrimSpace(note)
+
+	for _, step := range p.Steps {
+		if step.ID != id {
+			continue
+		}
+		step.Evidence = normalized
+		step.VerificationNote = note
+		p.UpdatedAt = time.Now()
+		return true
+	}
+	return false
 }
 
 // FailStep marks a step as failed.
@@ -480,6 +557,14 @@ func (p *Plan) GetRunLedgerSnapshot() map[int]*RunLedgerEntry {
 // deepCopyStep performs a deep copy of a Step, including its Children.
 func deepCopyStep(step *Step) *Step {
 	stepCopy := *step
+	stepCopy.DependsOn = append([]int(nil), step.DependsOn...)
+	stepCopy.Inputs = append([]string(nil), step.Inputs...)
+	stepCopy.SuccessCriteria = append([]string(nil), step.SuccessCriteria...)
+	stepCopy.Evidence = append([]string(nil), step.Evidence...)
+	if step.AgentMetrics != nil {
+		metricsCopy := *step.AgentMetrics
+		stepCopy.AgentMetrics = &metricsCopy
+	}
 	if len(step.Children) > 0 {
 		stepCopy.Children = make([]*Step, len(step.Children))
 		for i, child := range step.Children {
@@ -571,6 +656,7 @@ func (p *Plan) AddStepFull(title, description string, parallel bool, dependsOn [
 		MaxRetries:  maxRetries,
 		Timeout:     timeout,
 	}
+	step.EnsureContractDefaults()
 	p.Steps = append(p.Steps, step)
 	p.UpdatedAt = time.Now()
 	return step

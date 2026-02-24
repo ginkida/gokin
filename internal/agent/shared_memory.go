@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -289,33 +290,43 @@ func (sm *SharedMemory) GetForContext(agentID string, maxEntries int) string {
 		return ""
 	}
 
-	var sb strings.Builder
-	sb.WriteString("\n## Shared Memory Context\n")
-	sb.WriteString("The following information has been shared by other agents:\n\n")
-
-	count := 0
+	entries := make([]*SharedEntry, 0, len(sm.entries))
 	for _, entry := range sm.entries {
 		if entry.IsExpired() {
 			continue
 		}
-
 		// Skip entries from the same agent (they already know this)
 		if entry.Source == agentID {
 			continue
 		}
-
-		if count >= maxEntries {
-			sb.WriteString(fmt.Sprintf("... and %d more entries\n", len(sm.entries)-count))
-			break
-		}
-
-		sb.WriteString(fmt.Sprintf("- **%s** [%s from %s]: %v\n",
-			entry.Key, entry.Type, entry.Source, entry.Value))
-		count++
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		return ""
 	}
 
-	if count == 0 {
-		return "" // No relevant entries
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Timestamp.Equal(entries[j].Timestamp) {
+			return entries[i].Key < entries[j].Key
+		}
+		return entries[i].Timestamp.After(entries[j].Timestamp)
+	})
+
+	if maxEntries <= 0 {
+		maxEntries = len(entries)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## Shared Memory Context\n")
+	sb.WriteString("The following information has been shared by other agents:\n\n")
+
+	for i, entry := range entries {
+		if i >= maxEntries {
+			sb.WriteString(fmt.Sprintf("... and %d more entries\n", len(entries)-i))
+			break
+		}
+		sb.WriteString(fmt.Sprintf("- **%s** [%s from %s]: %v\n",
+			entry.Key, entry.Type, entry.Source, entry.Value))
 	}
 
 	sb.WriteString("\n")

@@ -158,17 +158,17 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	}
 
 	agent := &Agent{
-		ID:           id,
-		Type:         agentType,
-		Model:        model,
-		client:       agentClient,
-		registry:     filteredRegistry,
-		baseRegistry: baseRegistry,
-		permissions:  permManager,
-		timeout:      config.DefaultAgentTimeout,
-		history:      make([]*genai.Content, 0),
-		status:       AgentStatusPending,
-		maxTurns:     maxTurns,
+		ID:                 id,
+		Type:               agentType,
+		Model:              model,
+		client:             agentClient,
+		registry:           filteredRegistry,
+		baseRegistry:       baseRegistry,
+		permissions:        permManager,
+		timeout:            config.DefaultAgentTimeout,
+		history:            make([]*genai.Content, 0),
+		status:             AgentStatusPending,
+		maxTurns:           maxTurns,
 		loopThreshold:      8,
 		pruneProtectChars:  120000,
 		summarizeProtect:   4,
@@ -212,6 +212,13 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		}
 	}
 
+	// Wire up SharedMemory tool with this agent ID.
+	if smt, ok := agent.registry.Get("shared_memory"); ok {
+		if smtt, ok := smt.(*tools.SharedMemoryTool); ok {
+			smtt.SetAgentID(agent.ID)
+		}
+	}
+
 	// Initialize context management tools if config provided
 	if ctxCfg != nil {
 		agent.tokenCounter = ctxmgr.NewTokenCounter(agent.client, agent.Model, ctxCfg)
@@ -224,7 +231,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	agent.relevanceScorer = ctxmgr.NewRelevanceScorer()
 
 	// Initialize project learning
-	if pl, err := memory.NewProjectLearning(workDir); err == nil {
+	if pl, err := memory.GetSharedProjectLearning(workDir); err == nil {
 		agent.learning = pl
 		// Inject into memorize tool if it exists
 		if mt, ok := agent.registry.Get("memorize"); ok {
@@ -335,6 +342,13 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		}
 	}
 
+	// Wire up SharedMemory tool with this agent ID.
+	if smt, ok := agent.registry.Get("shared_memory"); ok {
+		if smtt, ok := smt.(*tools.SharedMemoryTool); ok {
+			smtt.SetAgentID(agent.ID)
+		}
+	}
+
 	// Initialize context management
 	if ctxCfg != nil {
 		agent.tokenCounter = ctxmgr.NewTokenCounter(agent.client, agent.Model, ctxCfg)
@@ -347,7 +361,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	agent.relevanceScorer = ctxmgr.NewRelevanceScorer()
 
 	// Initialize project learning
-	if pl, err := memory.NewProjectLearning(workDir); err == nil {
+	if pl, err := memory.GetSharedProjectLearning(workDir); err == nil {
 		agent.learning = pl
 		// Inject into memorize tool if it exists
 		if mt, ok := agent.registry.Get("memorize"); ok {
@@ -361,6 +375,21 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	agent.reflector = NewReflector()
 	agent.reflector.SetClient(agentClient)
 
+	// Wire up scratchpad if it exists
+	if t, ok := agent.registry.Get("update_scratchpad"); ok {
+		if ust, ok := t.(*tools.UpdateScratchpadTool); ok {
+			ust.SetUpdater(func(content string) {
+				agent.stateMu.Lock()
+				agent.Scratchpad = content
+				cb := agent.onScratchpadUpdate
+				agent.stateMu.Unlock()
+				if cb != nil {
+					cb(content)
+				}
+			})
+		}
+	}
+
 	agent.delegation = NewDelegationStrategy(AgentType(dynType.Name), nil)
 
 	return agent
@@ -373,7 +402,7 @@ func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.To
 	if len(allowedTools) == 0 {
 		// All tools allowed - copy all from base registry
 		for _, tool := range baseRegistry.List() {
-			_ = filtered.Register(tool)
+			_ = filtered.Register(cloneToolForAgent(tool))
 		}
 		return filtered
 	}
@@ -385,11 +414,36 @@ func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.To
 
 	for _, tool := range baseRegistry.List() {
 		if allowedMap[tool.Name()] {
-			_ = filtered.Register(tool)
+			_ = filtered.Register(cloneToolForAgent(tool))
 		}
 	}
 
 	return filtered
+}
+
+// cloneToolForAgent returns an agent-local tool instance for tools that carry
+// per-agent callbacks/state. Stateless/shared tools are returned as-is.
+func cloneToolForAgent(tool tools.Tool) tools.Tool {
+	switch t := tool.(type) {
+	case *tools.RequestToolTool:
+		return tools.NewRequestToolTool()
+	case *tools.AskAgentTool:
+		return tools.NewAskAgentTool()
+	case *tools.PinContextTool:
+		return tools.NewPinContextTool(nil)
+	case *tools.HistorySearchTool:
+		return tools.NewHistorySearchTool(nil)
+	case *tools.UpdateScratchpadTool:
+		return tools.NewUpdateScratchpadTool(nil)
+	case *tools.SharedMemoryTool:
+		cloned := tools.NewSharedMemoryTool()
+		cloned.SetMemory(t.GetMemory())
+		return cloned
+	case *tools.MemorizeTool:
+		return tools.NewMemorizeTool(t.GetLearning())
+	default:
+		return tool
+	}
 }
 
 // applyAgentTypeDefaults sets context budget defaults per agent type.
@@ -712,11 +766,15 @@ func (a *Agent) SetTreePlanner(tp *TreePlanner) {
 
 // SetSharedMemory sets the shared memory instance for inter-agent communication.
 func (a *Agent) SetSharedMemory(sm *SharedMemory) {
+	a.stateMu.Lock()
 	a.sharedMemory = sm
+	a.stateMu.Unlock()
 }
 
 // GetSharedMemory returns the shared memory instance.
 func (a *Agent) GetSharedMemory() *SharedMemory {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
 	return a.sharedMemory
 }
 
@@ -814,7 +872,7 @@ func createFilteredRegistry(agentType AgentType, baseRegistry tools.ToolRegistry
 		// Copy all tools to a new Registry
 		filtered := tools.NewRegistry()
 		for _, tool := range baseRegistry.List() {
-			_ = filtered.Register(tool)
+			_ = filtered.Register(cloneToolForAgent(tool))
 		}
 		return filtered
 	}
@@ -828,7 +886,7 @@ func createFilteredRegistry(agentType AgentType, baseRegistry tools.ToolRegistry
 
 	for _, tool := range baseRegistry.List() {
 		if allowedMap[tool.Name()] {
-			_ = filtered.Register(tool)
+			_ = filtered.Register(cloneToolForAgent(tool))
 		}
 	}
 
@@ -847,7 +905,7 @@ func (a *Agent) RequestTool(name string) error {
 		return fmt.Errorf("tool not found in system: %s", name)
 	}
 
-	return a.registry.Register(tool)
+	return a.registry.Register(cloneToolForAgent(tool))
 }
 
 // SendMessage sends a message to another agent via the messenger.
@@ -1002,6 +1060,7 @@ func (a *Agent) buildSystemPrompt() string {
 	scratchpad := a.Scratchpad
 	projectContext := a.projectContext
 	outputStyle := a.outputStyle
+	sharedMemory := a.sharedMemory
 	a.stateMu.RUnlock()
 
 	var sb strings.Builder
@@ -1032,6 +1091,14 @@ func (a *Agent) buildSystemPrompt() string {
 	if !lightweight && a.learning != nil {
 		sb.WriteString(a.learning.FormatForPrompt())
 		sb.WriteString("\n")
+	}
+
+	// Inject recent shared-memory context from other agents (if available).
+	if sharedMemory != nil {
+		if sharedCtx := sharedMemory.GetForContext(a.ID, 15); sharedCtx != "" {
+			sb.WriteString(sharedCtx)
+			sb.WriteString("\n")
+		}
 	}
 
 	if lightweight {
@@ -2403,6 +2470,19 @@ func normalizeCallKey(name string, args map[string]any) string {
 	return fmt.Sprintf("%s:%s", name, string(argsJSON))
 }
 
+func recoveryAttemptKey(name string, args map[string]any, category, alternative string) string {
+	base := normalizeCallKey(name, args)
+	category = strings.TrimSpace(strings.ToLower(category))
+	alternative = strings.TrimSpace(strings.ToLower(alternative))
+	if category == "" {
+		category = "unknown"
+	}
+	if alternative == "" {
+		return fmt.Sprintf("%s|%s", base, category)
+	}
+	return fmt.Sprintf("%s|%s|alt=%s", base, category, alternative)
+}
+
 // buildLoopRecoveryIntervention creates a reflection-based intervention message for mental loop recovery.
 // This helps the agent understand what went wrong and suggests alternative approaches.
 func (a *Agent) buildLoopRecoveryIntervention(toolName string, args map[string]any, count int) string {
@@ -3177,9 +3257,10 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 			a.fixCache.RecordError(call.Name, call.Args, category, result.Content, turnIdx)
 		}
 
-		// Auto-fix attempt before enrichment (only on cache miss)
-		if cacheHit == nil && reflection.AutoFix != nil && a.recoveryExecutor != nil {
-			key := normalizeCallKey(call.Name, call.Args)
+		// Auto-fix attempt before enrichment (only on cache miss).
+		// Recovery attempts are budgeted per tool+category key.
+		if cacheHit == nil && reflection != nil && a.recoveryExecutor != nil {
+			key := recoveryAttemptKey(call.Name, call.Args, category, reflection.Alternative)
 			a.autoFixAttemptsMu.Lock()
 			attempt := a.autoFixAttempts[key]
 			a.autoFixAttemptsMu.Unlock()

@@ -1,5 +1,6 @@
 # Binaries
 /gokin
+/gokin_test
 *.exe
 *.exe~
 *.dll

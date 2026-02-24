@@ -395,6 +395,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 	}
 
+	// Hard done-gate before response completion.
+	a.enforceDoneGate(ctx, message)
+
 	// Save session after each message
 	if a.sessionManager != nil {
 		if err := a.sessionManager.SaveAfterMessage(); err != nil {
@@ -716,6 +719,9 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		}
 	}
 
+	// Enforce final verification gate before producing terminal plan summary.
+	a.enforceDoneGate(ctx, approvedPlan.Request)
+
 	// 7. Plan completion summary
 	planDuration := time.Since(planStart)
 	summary := a.formatPlanSummary(approvedPlan, planDuration)
@@ -1036,6 +1042,30 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	apiInput, apiOutput := a.executor.GetLastTokenUsage()
 	step.TokensUsed = apiInput + apiOutput
 
+	evidence, verificationNote, evidenceOK, evidenceReason := a.buildStepCompletionEvidence(approvedPlan, step, output)
+	if !evidenceOK {
+		a.planManager.PauseStep(step.ID, evidenceReason)
+		a.journalEvent("plan_step_paused", map[string]any{
+			"plan_id": approvedPlan.ID,
+			"step_id": step.ID,
+			"reason":  evidenceReason,
+		})
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("⏸ Step %d paused: %s\n", step.ID, evidenceReason)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "paused",
+			Reason:        evidenceReason,
+		})
+		return
+	}
+	a.planManager.RecordStepVerification(step.ID, evidence, verificationNote)
+
 	a.planManager.CompleteStep(step.ID, output)
 	a.journalEvent("plan_step_completed", map[string]any{
 		"plan_id": approvedPlan.ID,
@@ -1112,6 +1142,27 @@ func buildDirectStepMessage(step *plan.Step, prevSummary string, totalSteps int)
 		sb.WriteString("\n\n")
 	}
 
+	sb.WriteString("Step Contract:\n")
+	if len(step.Inputs) > 0 {
+		sb.WriteString("- Inputs:\n")
+		for _, in := range step.Inputs {
+			sb.WriteString(fmt.Sprintf("  - %s\n", in))
+		}
+	}
+	if step.ExpectedArtifact != "" {
+		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", step.ExpectedArtifact))
+	}
+	if len(step.SuccessCriteria) > 0 {
+		sb.WriteString("- Success criteria:\n")
+		for _, c := range step.SuccessCriteria {
+			sb.WriteString(fmt.Sprintf("  - %s\n", c))
+		}
+	}
+	if step.Rollback != "" {
+		sb.WriteString(fmt.Sprintf("- Rollback: %s\n", step.Rollback))
+	}
+	sb.WriteString("\n")
+
 	if prevSummary != "" {
 		sb.WriteString("Previous steps summary:\n")
 		sb.WriteString(prevSummary)
@@ -1123,6 +1174,7 @@ func buildDirectStepMessage(step *plan.Step, prevSummary string, totalSteps int)
 	sb.WriteString("- Always READ files before editing them\n")
 	sb.WriteString("- Do NOT call update_plan_progress or exit_plan_mode — the orchestrator handles this\n")
 	sb.WriteString("- Provide a brief summary of what was done at the end\n")
+	sb.WriteString("- Include evidence: changed files, executed commands, and verification facts\n")
 	sb.WriteString("- Report any issues or deviations from the plan\n")
 
 	return sb.String()
@@ -1297,6 +1349,9 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			}
 		}
 	}
+
+	// Enforce final verification gate before producing terminal plan summary.
+	a.enforceDoneGate(ctx, approvedPlan.Request)
 
 	// Plan completion summary
 	planDuration := time.Since(planStart)
@@ -1621,6 +1676,30 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	// Record token usage for this step (estimate from output length for delegated steps)
 	step.TokensUsed = len(output) / 4
 
+	evidence, verificationNote, evidenceOK, evidenceReason := a.buildStepCompletionEvidence(approvedPlan, step, output)
+	if !evidenceOK {
+		a.planManager.PauseStep(step.ID, evidenceReason)
+		a.journalEvent("plan_step_paused", map[string]any{
+			"plan_id": approvedPlan.ID,
+			"step_id": step.ID,
+			"reason":  evidenceReason,
+		})
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("⏸ Step %d paused: %s\n", step.ID, evidenceReason)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "paused",
+			Reason:        evidenceReason,
+		})
+		return
+	}
+	a.planManager.RecordStepVerification(step.ID, evidence, verificationNote)
+
 	a.planManager.CompleteStep(step.ID, output)
 	a.journalEvent("plan_step_completed", map[string]any{
 		"plan_id": approvedPlan.ID,
@@ -1915,6 +1994,67 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
+func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output string) ([]string, string, bool, string) {
+	if p == nil || step == nil {
+		return nil, "", false, "missing step context"
+	}
+
+	ledger := p.GetRunLedgerSnapshot()
+	entry := ledger[step.ID]
+
+	evidence := make([]string, 0, 8)
+	if entry != nil {
+		if entry.ToolCalls > 0 {
+			evidence = append(evidence, fmt.Sprintf("tool_calls=%d", entry.ToolCalls))
+		}
+		if len(entry.Tools) > 0 {
+			evidence = append(evidence, "tools="+joinLimited(entry.Tools, 4))
+		}
+		if len(entry.FilesTouched) > 0 {
+			evidence = append(evidence, "files="+joinLimited(entry.FilesTouched, 4))
+		}
+		if len(entry.Commands) > 0 {
+			evidence = append(evidence, "commands="+joinLimited(entry.Commands, 3))
+		}
+	}
+
+	output = strings.TrimSpace(output)
+	if output != "" {
+		compact := output
+		if len(compact) > 260 {
+			compact = compact[:260] + "..."
+		}
+		evidence = append(evidence, "output="+compact)
+	}
+
+	hasArtifactProof := len(evidence) > 0
+	if strings.TrimSpace(step.ExpectedArtifact) != "" && !hasArtifactProof {
+		return nil, "", false, fmt.Sprintf("step %d lacks proof for expected artifact", step.ID)
+	}
+
+	if len(evidence) == 0 {
+		return nil, "", false, "cannot complete step without proof (no diff/command/output evidence)"
+	}
+
+	note := fmt.Sprintf(
+		"Verified against %d success criteria; expected artifact: %s; evidence items: %d.",
+		len(step.SuccessCriteria),
+		strings.TrimSpace(step.ExpectedArtifact),
+		len(evidence),
+	)
+	return evidence, note, true, ""
+}
+
+func joinLimited(items []string, limit int) string {
+	if len(items) == 0 {
+		return ""
+	}
+	if limit <= 0 || len(items) <= limit {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:limit], ", ") + fmt.Sprintf(", ...(+%d)", len(items)-limit)
+}
+
 // StepPromptContext holds context for building step prompts.
 type StepPromptContext struct {
 	Step            *plan.Step
@@ -1961,6 +2101,25 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 		sb.WriteString(ctx.Step.Description)
 		sb.WriteString("\n")
 	}
+	sb.WriteString("\n### Step Contract\n")
+	if len(ctx.Step.Inputs) > 0 {
+		sb.WriteString("- Inputs:\n")
+		for _, in := range ctx.Step.Inputs {
+			sb.WriteString(fmt.Sprintf("  - %s\n", in))
+		}
+	}
+	if ctx.Step.ExpectedArtifact != "" {
+		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", ctx.Step.ExpectedArtifact))
+	}
+	if len(ctx.Step.SuccessCriteria) > 0 {
+		sb.WriteString("- Success criteria:\n")
+		for _, c := range ctx.Step.SuccessCriteria {
+			sb.WriteString(fmt.Sprintf("  - %s\n", c))
+		}
+	}
+	if ctx.Step.Rollback != "" {
+		sb.WriteString(fmt.Sprintf("- Rollback: %s\n", ctx.Step.Rollback))
+	}
 
 	// Previous steps summary (compact)
 	if ctx.PrevSummary != "" {
@@ -1973,6 +2132,7 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 	sb.WriteString("- Execute exactly what this step describes\n")
 	sb.WriteString("- Build upon work from previous steps\n")
 	sb.WriteString("- Provide a brief summary of what was done\n")
+	sb.WriteString("- Provide explicit evidence (files/commands/output) for completion\n")
 	sb.WriteString("- Report any issues or deviations from the plan\n")
 
 	return sb.String()

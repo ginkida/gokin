@@ -441,84 +441,6 @@ func (p *PlanProgressPanel) View(width int) string {
 		content.WriteString("\n")
 	}
 
-	// Recent activity log
-	if len(p.activities) > 0 {
-		if p.currentTool == "" {
-			content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤"))
-			content.WriteString("\n")
-		}
-
-		activityStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-
-		// Show last few activities
-		startIdx := 0
-		if len(p.activities) > 3 {
-			startIdx = len(p.activities) - 3
-		}
-
-		for i := startIdx; i < len(p.activities); i++ {
-			act := p.activities[i]
-			age := time.Since(act.Timestamp)
-			ageStr := ""
-			if age < time.Minute {
-				ageStr = fmt.Sprintf("%ds ago", int(age.Seconds()))
-			}
-
-			actLine := "  " + activityStyle.Render("› "+act.Message)
-			if ageStr != "" && panelWidth > 60 {
-				actLine += " " + dimStyle.Render(ageStr)
-			}
-
-			content.WriteString(borderStyle.Render("│"))
-			content.WriteString(actLine)
-			padding := panelWidth - 1 - lipgloss.Width(actLine)
-			if padding > 0 {
-				content.WriteString(strings.Repeat(" ", padding))
-			}
-			content.WriteString(borderStyle.Render("│"))
-			content.WriteString("\n")
-		}
-	}
-
-	// Compact plan timeline with transition reasons.
-	if len(p.timeline) > 0 {
-		content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤"))
-		content.WriteString("\n")
-
-		title := lipgloss.NewStyle().Foreground(ColorPlan).Bold(true).Render("  Timeline")
-		content.WriteString(borderStyle.Render("│"))
-		content.WriteString(title)
-		padding := panelWidth - 1 - lipgloss.Width(title)
-		if padding > 0 {
-			content.WriteString(strings.Repeat(" ", padding))
-		}
-		content.WriteString(borderStyle.Render("│"))
-		content.WriteString("\n")
-
-		start := 0
-		if len(p.timeline) > 4 {
-			start = len(p.timeline) - 4
-		}
-		for i := start; i < len(p.timeline); i++ {
-			tr := p.timeline[i]
-			line := fmt.Sprintf("  %s: %s -> %s", tr.StepRef, timelineStatusLabel(tr.From), timelineStatusLabel(tr.To))
-			if tr.Reason != "" {
-				line += " (" + tr.Reason + ")"
-			}
-			if len(line) > panelWidth-3 {
-				line = line[:panelWidth-6] + "..."
-			}
-			content.WriteString(borderStyle.Render("│"))
-			content.WriteString(line)
-			padding = panelWidth - 1 - lipgloss.Width(line)
-			if padding > 0 {
-				content.WriteString(strings.Repeat(" ", padding))
-			}
-			content.WriteString(borderStyle.Render("│"))
-			content.WriteString("\n")
-		}
-	}
-
 	// Footer
 	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", panelWidth-1) + "╯"))
 
@@ -594,19 +516,6 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 		}
 	}
 
-	// Add "(in progress)" suffix for in-progress steps
-	statusSuffix := ""
-	if step.Status == PlanStepInProgress {
-		statusSuffix = " " + lipgloss.NewStyle().Foreground(ColorWarning).Italic(true).Render("(in progress)")
-		maxTitleWidth -= lipgloss.Width(statusSuffix)
-	} else if step.Status == PlanStepPaused {
-		statusSuffix = " " + lipgloss.NewStyle().Foreground(ColorWarning).Italic(true).Render("(paused)")
-		maxTitleWidth -= lipgloss.Width(statusSuffix)
-	} else if step.Status == PlanStepPending {
-		statusSuffix = " " + lipgloss.NewStyle().Foreground(ColorDim).Italic(true).Render("(pending)")
-		maxTitleWidth -= lipgloss.Width(statusSuffix)
-	}
-
 	if maxTitleWidth < 10 {
 		maxTitleWidth = 10
 	}
@@ -614,7 +523,7 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 		title = title[:maxTitleWidth-3] + "..."
 	}
 
-	result := iconStyle.Render(icon) + " " + titleStyle.Render(title) + statusSuffix + durationStr
+	result := iconStyle.Render(icon) + " " + titleStyle.Render(title) + durationStr
 
 	// Show description for in-progress steps
 	if step.Status == PlanStepInProgress && step.Description != "" {
@@ -693,25 +602,6 @@ func formatElapsed(d time.Duration) string {
 		return fmt.Sprintf("%.1fm", d.Minutes())
 	}
 	return fmt.Sprintf("%.1fh", d.Hours())
-}
-
-func timelineStatusLabel(s PlanStepStatus) string {
-	switch s {
-	case PlanStepPending:
-		return "queued"
-	case PlanStepInProgress:
-		return "running"
-	case PlanStepPaused:
-		return "paused"
-	case PlanStepCompleted:
-		return "done"
-	case PlanStepFailed:
-		return "failed"
-	case PlanStepSkipped:
-		return "skipped"
-	default:
-		return "unknown"
-	}
 }
 
 // ViewCompact renders a compact single-line version for status bar.

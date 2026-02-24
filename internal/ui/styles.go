@@ -268,33 +268,10 @@ func DefaultStyles() *Styles {
 			Foreground(ColorSuccess),
 
 		// Box styles for structured output
-		InfoBox: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorInfo).
-			Padding(0, 1).
-			MarginTop(1).
-			MarginBottom(1),
-
-		WarningBox: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorWarning).
-			Padding(0, 1).
-			MarginTop(1).
-			MarginBottom(1),
-
-		SuccessBox: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorSuccess).
-			Padding(0, 1).
-			MarginTop(1).
-			MarginBottom(1),
-
-		ErrorBox: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorError).
-			Padding(0, 1).
-			MarginTop(1).
-			MarginBottom(1),
+		InfoBox:    lipgloss.NewStyle().MarginTop(1),
+		WarningBox: lipgloss.NewStyle().MarginTop(1),
+		SuccessBox: lipgloss.NewStyle().MarginTop(1),
+		ErrorBox:   lipgloss.NewStyle().MarginTop(1),
 
 		// Additional styles
 		Dim: lipgloss.NewStyle().
@@ -397,20 +374,14 @@ func DefaultStyles() *Styles {
 		StatusSectionValue: lipgloss.NewStyle().
 			Foreground(ColorText),
 
-		// Card styles (Glassmorphism-lite)
+		// Card styles
 		UserCard: lipgloss.NewStyle().
-			Border(lipgloss.ThickBorder(), false, false, false, true).
-			BorderForeground(ColorSecondary).
 			PaddingLeft(2).
-			MarginTop(1).
-			MarginBottom(1),
+			MarginTop(1),
 
 		AssistantCard: lipgloss.NewStyle().
-			Border(lipgloss.ThickBorder(), false, false, false, true).
-			BorderForeground(ColorPrimary).
 			PaddingLeft(2).
-			MarginTop(1).
-			MarginBottom(1),
+			MarginTop(1),
 	}
 }
 
@@ -476,7 +447,7 @@ func (s *Styles) FormatToolExecutingBlock(name string, args map[string]any) stri
 	// Per-tool colored icon (using existing ToolIcons + GetToolIconColor)
 	icon := GetToolIcon(name)
 	iconColor := GetToolIconColor(name)
-	iconStyle := lipgloss.NewStyle().Foreground(iconColor).Bold(true)
+	iconStyle := lipgloss.NewStyle().Foreground(iconColor)
 
 	// Tool name — same color as icon but not bold
 	nameStyle := lipgloss.NewStyle().Foreground(iconColor)
@@ -688,57 +659,6 @@ func (s *Styles) FormatErrorWithSuggestion(err, suggestion, code string) string 
 		result.WriteString("\n" + markerStyle.Render("     ") + codeStyle.Render("("+code+")"))
 	}
 	return result.String()
-}
-
-// FormatSuccess formats a success message with proper styling - Enhanced with celebration.
-func (s *Styles) FormatSuccess(msg string) string {
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorSuccess).
-		PaddingBottom(1)
-
-	bodyStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#A7F3D0")). // Softer green (Emerald 200)
-		PaddingLeft(2)
-
-	header := headerStyle.Render("✓ Success")
-	body := bodyStyle.Render(msg)
-
-	return s.SuccessBox.Render(header + "\n" + body)
-}
-
-// FormatInfo formats an informational message - Enhanced with friendly styling.
-func (s *Styles) FormatInfo(msg string) string {
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorInfo).
-		PaddingBottom(1)
-
-	bodyStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#A5F3FC")). // Softer cyan (Cyan 200)
-		PaddingLeft(2)
-
-	header := headerStyle.Render("ℹ Info")
-	body := bodyStyle.Render(msg)
-
-	return s.InfoBox.Render(header + "\n" + body)
-}
-
-// FormatWarningBox formats a warning message in a box - Enhanced with friendly styling.
-func (s *Styles) FormatWarningBox(msg string) string {
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorWarning).
-		PaddingBottom(1)
-
-	bodyStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FDE68A")). // Softer amber (Amber 200)
-		PaddingLeft(2)
-
-	header := headerStyle.Render("⚠ Warning")
-	body := bodyStyle.Render(msg)
-
-	return s.WarningBox.Render(header + "\n" + body)
 }
 
 // wrapErrorText wraps error text at word boundaries.
@@ -1075,24 +995,18 @@ func (s *Styles) FormatMessage(msgType, title, body string) string {
 	}
 
 	var color lipgloss.Color
-	var boxStyle lipgloss.Style
 
 	switch msgType {
 	case "success", "done":
 		color = ColorSuccess
-		boxStyle = s.SuccessBox
 	case "error":
 		color = ColorError
-		boxStyle = s.ErrorBox
 	case "warning":
 		color = ColorWarning
-		boxStyle = s.WarningBox
 	case "hint":
 		color = ColorAccent
-		boxStyle = s.InfoBox.BorderForeground(ColorAccent)
 	default: // info, loading
 		color = ColorInfo
-		boxStyle = s.InfoBox
 	}
 
 	headerStyle := lipgloss.NewStyle().
@@ -1108,7 +1022,7 @@ func (s *Styles) FormatMessage(msgType, title, body string) string {
 		return header
 	}
 
-	return boxStyle.Render(header + "\n" + bodyStyle.Render(body))
+	return header + "\n" + bodyStyle.Render(body)
 }
 
 // FormatHint formats a contextual hint message.

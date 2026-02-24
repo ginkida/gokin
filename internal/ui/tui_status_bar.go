@@ -70,15 +70,8 @@ func (m Model) renderStatusBarCompact() string {
 
 func (m Model) compactStatusSegments() []string {
 	var parts []string
-	mode := "normal"
 	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
-		mode = "degraded"
-	}
-	parts = append(parts, "mode:"+mode)
-
-	if m.hasActivePlanStatus() {
-		step := fmt.Sprintf("%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
-		parts = append(parts, "step:"+step)
+		parts = append(parts, "mode:degraded")
 	}
 
 	if m.shouldShowBreaker() {
@@ -107,14 +100,8 @@ func (m Model) compactStatusSegments() []string {
 
 func (m Model) minimalStatusSegments() []string {
 	var parts []string
-	mode := "normal"
 	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
-		mode = "degraded"
-	}
-	parts = append(parts, "mode:"+mode)
-
-	if m.hasActivePlanStatus() {
-		parts = append(parts, fmt.Sprintf("step:%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps))
+		parts = append(parts, "mode:degraded")
 	}
 
 	if m.shouldShowBreaker() {
@@ -194,7 +181,6 @@ func (m Model) renderStatusBarFull() string {
 
 func (m Model) baseStatusSegments(withContextBar bool) []string {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	modeStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
 	degradedStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	providerStyle := lipgloss.NewStyle().Foreground(ColorAccent)
 	breakerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
@@ -215,22 +201,12 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	if strings.HasPrefix(mode, "degraded") {
 		modeText := m.degradedModeLabel(withContextBar)
 		parts = append(parts, degradedStyle.Render(modeText))
-	} else {
-		parts = append(parts, modeStyle.Render("mode:normal"))
 	}
 
 	if m.hasActivePlanStatus() {
 		activeStep := fmt.Sprintf("plan:%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
 		parts = append(parts, dimStyle.Render(activeStep))
 	}
-	if withContextBar && m.hasActivePlanStatus() && m.planProgress.CurrentTitle != "" {
-		title := m.planProgress.CurrentTitle
-		if len(title) > 24 {
-			title = title[:21] + "..."
-		}
-		parts = append(parts, dimStyle.Render("task:"+title))
-	}
-
 	if m.shouldShowBreaker() {
 		reqBreaker := shortBreakerState(m.runtimeStatus.RequestBreaker)
 		stepBreaker := shortBreakerState(m.runtimeStatus.StepBreaker)
@@ -295,13 +271,7 @@ func (m Model) shouldShowBreaker() bool {
 }
 
 func (m Model) shouldShowHeartbeat() bool {
-	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
-		return true
-	}
-	if m.hasActivePlanStatus() {
-		return true
-	}
-	return m.state == StateProcessing || m.state == StateStreaming
+	return strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded")
 }
 
 func shortBreakerState(state string) string {
@@ -323,18 +293,7 @@ func shortBreakerState(state string) string {
 func (m Model) formatTokenStatus(withContextBar bool) string {
 	pct := m.getContextPercent()
 	if withContextBar && pct > 0 {
-		bar := renderContextBar(pct, 8)
-		if m.tokenUsage != nil && m.tokenUsage.MaxTokens > 0 {
-			abs := lipgloss.NewStyle().Foreground(ColorMuted).Render(
-				fmt.Sprintf("tok:%d/%d", m.tokenUsage.Tokens, m.tokenUsage.MaxTokens))
-			return bar + " " + abs
-		}
-		return bar
-	}
-	if m.tokenUsage != nil && m.tokenUsage.MaxTokens > 0 {
-		color := contextUrgencyColor(pct)
-		return lipgloss.NewStyle().Foreground(color).Render(
-			fmt.Sprintf("tok:%d/%d", m.tokenUsage.Tokens, m.tokenUsage.MaxTokens))
+		return renderContextBar(pct, 8)
 	}
 	if pct > 0 {
 		color := contextUrgencyColor(pct)
@@ -507,15 +466,6 @@ func (m Model) contextualShortcutHints() string {
 		add("↑↓", "Navigate")
 		add("Enter", "Select")
 		add("esc", "Cancel")
-	case StateInput:
-		// Only show when output is non-empty (user has been interacting)
-		if !m.output.IsEmpty() {
-			add("?", "Shortcuts")
-			add("Ctrl+P", "Commands")
-			if !m.output.IsAtBottom() {
-				add("PgDn", "Scroll")
-			}
-		}
 	case StateProcessing, StateStreaming:
 		add("esc", "Interrupt")
 	default:

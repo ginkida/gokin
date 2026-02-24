@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,7 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"gokin/internal/logging"
 )
 
 // Store manages persistent memory storage.
@@ -24,6 +27,8 @@ type Store struct {
 
 	entries       map[string]*Entry // ID -> Entry (Project & Session)
 	globalEntries map[string]*Entry // ID -> Global Entry
+	archived      map[string]*Entry // ID -> Archived project/session entries
+	globalArchive map[string]*Entry // ID -> Archived global entries
 	byKey         map[string]string // Key -> ID (All types)
 
 	// Debounced write support
@@ -52,6 +57,8 @@ func NewStore(configDir, projectPath string, maxEntries int) (*Store, error) {
 		maxEntries:    maxEntries,
 		entries:       make(map[string]*Entry),
 		globalEntries: make(map[string]*Entry),
+		archived:      make(map[string]*Entry),
+		globalArchive: make(map[string]*Entry),
 		byKey:         make(map[string]string),
 	}
 
@@ -59,6 +66,9 @@ func NewStore(configDir, projectPath string, maxEntries int) (*Store, error) {
 	if err := store.load(); err != nil {
 		// Non-fatal - start fresh if load fails
 		store.entries = make(map[string]*Entry)
+		store.globalEntries = make(map[string]*Entry)
+		store.archived = make(map[string]*Entry)
+		store.globalArchive = make(map[string]*Entry)
 		store.byKey = make(map[string]string)
 	}
 
@@ -121,19 +131,133 @@ func autoTag(entry *Entry) {
 	}
 }
 
+const (
+	staleArchiveWindow = 90 * 24 * time.Hour
+)
+
+func normalizeMemoryText(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '/' || r == '_' || r == '-' || r == '.' {
+			b.WriteRune(r)
+			space = false
+			continue
+		}
+		if !space {
+			b.WriteByte(' ')
+			space = true
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func tokenSetFromText(s string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, w := range strings.Fields(normalizeMemoryText(s)) {
+		if len(w) < 3 {
+			continue
+		}
+		set[w] = struct{}{}
+	}
+	return set
+}
+
+func jaccardSimilarity(a, b map[string]struct{}) float64 {
+	if len(a) == 0 && len(b) == 0 {
+		return 1
+	}
+	intersection := 0
+	union := len(a)
+	seen := make(map[string]struct{}, len(a)+len(b))
+	for k := range a {
+		seen[k] = struct{}{}
+	}
+	for k := range b {
+		if _, ok := a[k]; ok {
+			intersection++
+		}
+		if _, ok := seen[k]; !ok {
+			union++
+			seen[k] = struct{}{}
+		}
+	}
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
+func mergeTags(existing, incoming []string) []string {
+	seen := make(map[string]bool, len(existing)+len(incoming))
+	out := make([]string, 0, len(existing)+len(incoming))
+	for _, t := range existing {
+		normalized := strings.ToLower(strings.TrimSpace(t))
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, t)
+	}
+	for _, t := range incoming {
+		normalized := strings.ToLower(strings.TrimSpace(t))
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, t)
+	}
+	return out
+}
+
 // Add adds a new entry to the store.
 func (s *Store) Add(entry *Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
+
+	// Housekeeping keeps hot set small and removes expired entries.
+	s.archiveExpiredLocked(now)
+	s.archiveStaleLowValueLocked(now)
+	s.cleanupArchivedLocked(now)
+
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = now
+	}
+
 	// Auto-tag: extract key concepts from content
 	autoTag(entry)
+
+	// Semantic dedup: reinforce existing memories instead of creating near-duplicates.
+	if existing, ok := s.findSemanticDuplicateLocked(entry); ok {
+		existing.Reinforcement++
+		existing.Timestamp = now
+		existing.Tags = mergeTags(existing.Tags, entry.Tags)
+		if entry.Key != "" {
+			if oldID, exists := s.byKey[entry.Key]; exists && oldID != existing.ID {
+				delete(s.entries, oldID)
+				delete(s.globalEntries, oldID)
+			}
+			existing.Key = entry.Key
+			s.byKey[entry.Key] = existing.ID
+		}
+		existing.Archived = false
+		existing.ArchiveReason = ""
+		s.dirty = true
+		s.scheduleSave()
+		return nil
+	}
 
 	// If key exists, remove old ID from both stores and index
 	if entry.Key != "" {
 		if oldID, ok := s.byKey[entry.Key]; ok {
 			delete(s.entries, oldID)
 			delete(s.globalEntries, oldID)
+			delete(s.archived, oldID)
+			delete(s.globalArchive, oldID)
 		}
 		s.byKey[entry.Key] = entry.ID
 	}
@@ -164,13 +288,23 @@ func (s *Store) Add(entry *Entry) error {
 func (s *Store) Get(key string) (*Entry, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now()
 
 	id, ok := s.byKey[key]
 	if !ok {
 		return nil, false
 	}
 
-	entry, ok := s.entries[id]
+	if entry, ok := s.entries[id]; ok {
+		if entry.IsExpired(now) {
+			return nil, false
+		}
+		return entry, true
+	}
+	entry, ok := s.globalEntries[id]
+	if ok && entry.IsExpired(now) {
+		return nil, false
+	}
 	return entry, ok
 }
 
@@ -178,9 +312,55 @@ func (s *Store) Get(key string) (*Entry, bool) {
 func (s *Store) GetByID(id string) (*Entry, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now()
+
+	if entry, ok := s.entries[id]; ok {
+		if entry.IsExpired(now) {
+			return nil, false
+		}
+		return entry, true
+	}
+	entry, ok := s.globalEntries[id]
+	if ok && entry.IsExpired(now) {
+		return nil, false
+	}
+	return entry, ok
+}
+
+// RecordAccess marks an entry as accessed to improve ranking based on usage.
+func (s *Store) RecordAccess(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	entry, ok := s.entries[id]
-	return entry, ok
+	if !ok {
+		entry, ok = s.globalEntries[id]
+	}
+	if !ok {
+		return
+	}
+	entry.RecordAccess()
+	s.dirty = true
+	s.scheduleSave()
+}
+
+// RecordFeedback updates retrieval success/failure metrics for an entry.
+func (s *Store) RecordFeedback(id string, success bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.entries[id]
+	if !ok {
+		entry, ok = s.globalEntries[id]
+	}
+	if !ok {
+		return false
+	}
+
+	entry.RecordOutcome(success)
+	s.dirty = true
+	s.scheduleSave()
+	return true
 }
 
 // Edit updates the content of an existing entry by ID, re-runs auto-tagging,
@@ -210,38 +390,57 @@ func (s *Store) Edit(id string, newContent string) error {
 // scoredEntry holds an entry and its relevance score for search ranking.
 type scoredEntry struct {
 	entry *Entry
-	score int
+	score float64
 }
 
-// scoreEntry calculates a relevance score for an entry against the query.
-// Exact key match = 10, tag match = 5 per tag, content substring = 1.
-func scoreEntry(entry *Entry, query SearchQuery) int {
-	score := 0
-	queryLower := strings.ToLower(query.Query)
+// scoreEntry calculates retrieval score from relevance + freshness + prior success.
+func scoreEntry(entry *Entry, query SearchQuery, now time.Time) float64 {
+	score := 0.0
 
-	// Exact key match
-	if query.Query != "" && strings.EqualFold(entry.Key, query.Query) {
-		score += 10
+	queryText := strings.TrimSpace(strings.ToLower(query.Query))
+	if queryText == "" {
+		score += 1.0
 	}
 
-	// Tag matches
-	if query.Query != "" {
+	if queryText != "" {
+		if strings.EqualFold(entry.Key, query.Query) {
+			score += 12.0
+		} else if entry.Key != "" && strings.Contains(strings.ToLower(entry.Key), queryText) {
+			score += 5.0
+		}
+
 		for _, tag := range entry.Tags {
 			if strings.EqualFold(tag, query.Query) {
-				score += 5
+				score += 3.5
 			}
 		}
+
+		contentNorm := normalizeMemoryText(entry.Content)
+		queryNorm := normalizeMemoryText(query.Query)
+		if strings.Contains(contentNorm, queryNorm) {
+			score += 4.0
+		}
+
+		queryTokens := tokenSetFromText(query.Query)
+		contentTokens := tokenSetFromText(entry.Content)
+		tagTokens := tokenSetFromText(strings.Join(entry.Tags, " "))
+
+		score += 6.0 * jaccardSimilarity(queryTokens, contentTokens)
+		score += 2.0 * jaccardSimilarity(queryTokens, tagTokens)
 	}
 
-	// Content substring match
-	if query.Query != "" && strings.Contains(strings.ToLower(entry.Content), queryLower) {
-		score += 1
+	ageHours := now.Sub(entry.Timestamp).Hours()
+	if ageHours < 0 {
+		ageHours = 0
 	}
+	// Half-life style freshness decay (recent memories get a small boost).
+	freshness := math.Exp(-ageHours / (24 * 14))
+	score += 2.5 * freshness
 
-	// If no query text provided, give a base score so entries aren't filtered out
-	if query.Query == "" {
-		score = 1
-	}
+	// Retrieval quality from prior outcomes.
+	score += 3.0 * entry.SuccessRate()
+	score += 0.35 * math.Log1p(float64(entry.Reinforcement))
+	score += 0.25 * math.Log1p(float64(entry.AccessCount))
 
 	return score
 }
@@ -256,15 +455,19 @@ func (s *Store) Search(query SearchQuery) []*Entry {
 
 	// Set current project for filtering
 	query.Project = s.projectHash
+	now := time.Now()
 
 	var scored []scoredEntry
 
 	// Search project and session entries
 	for _, entry := range s.entries {
+		if entry.IsExpired(now) {
+			continue
+		}
 		if !entry.Matches(query) {
 			continue
 		}
-		sc := scoreEntry(entry, query)
+		sc := scoreEntry(entry, query, now)
 		if sc > 0 {
 			scored = append(scored, scoredEntry{entry: entry, score: sc})
 		}
@@ -273,12 +476,38 @@ func (s *Store) Search(query SearchQuery) []*Entry {
 	// Search global entries (unless ProjectOnly is specified)
 	if !query.ProjectOnly {
 		for _, entry := range s.globalEntries {
+			if entry.IsExpired(now) {
+				continue
+			}
 			if !entry.Matches(query) {
 				continue
 			}
-			sc := scoreEntry(entry, query)
+			sc := scoreEntry(entry, query, now)
 			if sc > 0 {
 				scored = append(scored, scoredEntry{entry: entry, score: sc})
+			}
+		}
+	}
+
+	if query.IncludeArchived {
+		for _, entry := range s.archived {
+			if !entry.Matches(query) {
+				continue
+			}
+			sc := scoreEntry(entry, query, now) * 0.65 // Archived entries are lower priority.
+			if sc > 0 {
+				scored = append(scored, scoredEntry{entry: entry, score: sc})
+			}
+		}
+		if !query.ProjectOnly {
+			for _, entry := range s.globalArchive {
+				if !entry.Matches(query) {
+					continue
+				}
+				sc := scoreEntry(entry, query, now) * 0.65
+				if sc > 0 {
+					scored = append(scored, scoredEntry{entry: entry, score: sc})
+				}
 			}
 		}
 	}
@@ -314,10 +543,17 @@ func (s *Store) Remove(idOrKey string) bool {
 	actualID := idOrKey
 	if _, ok := s.entries[idOrKey]; !ok {
 		if _, ok := s.globalEntries[idOrKey]; !ok {
+			if _, ok := s.archived[idOrKey]; !ok {
+				if _, ok := s.globalArchive[idOrKey]; !ok {
+					if id, ok := s.byKey[idOrKey]; ok {
+						actualID = id
+					} else {
+						return false
+					}
+				}
+			}
 			if id, ok := s.byKey[idOrKey]; ok {
 				actualID = id
-			} else {
-				return false
 			}
 		}
 	}
@@ -333,6 +569,24 @@ func (s *Store) Remove(idOrKey string) bool {
 	}
 	if entry, ok := s.globalEntries[actualID]; ok {
 		delete(s.globalEntries, actualID)
+		if entry.Key != "" {
+			delete(s.byKey, entry.Key)
+		}
+		s.dirty = true
+		s.scheduleSave()
+		return true
+	}
+	if entry, ok := s.archived[actualID]; ok {
+		delete(s.archived, actualID)
+		if entry.Key != "" {
+			delete(s.byKey, entry.Key)
+		}
+		s.dirty = true
+		s.scheduleSave()
+		return true
+	}
+	if entry, ok := s.globalArchive[actualID]; ok {
+		delete(s.globalArchive, actualID)
 		if entry.Key != "" {
 			delete(s.byKey, entry.Key)
 		}
@@ -356,12 +610,19 @@ func (s *Store) List(projectOnly bool) []*Entry {
 func (s *Store) ListAll() []*Entry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now()
 
 	results := make([]*Entry, 0, len(s.entries)+len(s.globalEntries))
 	for _, entry := range s.entries {
+		if entry.IsExpired(now) {
+			continue
+		}
 		results = append(results, entry)
 	}
 	for _, entry := range s.globalEntries {
+		if entry.IsExpired(now) {
+			continue
+		}
 		results = append(results, entry)
 	}
 
@@ -470,7 +731,7 @@ func (s *Store) GetForContext(projectOnly bool) string {
 func (s *Store) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.entries)
+	return len(s.entries) + len(s.globalEntries)
 }
 
 // Clear removes all entries.
@@ -480,6 +741,8 @@ func (s *Store) Clear() error {
 
 	s.entries = make(map[string]*Entry)
 	s.globalEntries = make(map[string]*Entry)
+	s.archived = make(map[string]*Entry)
+	s.globalArchive = make(map[string]*Entry)
 	s.byKey = make(map[string]string)
 	s.dirty = true
 	s.scheduleSave()
@@ -496,6 +759,16 @@ func (s *Store) globalStoragePath() string {
 	return filepath.Join(s.configDir, "memory", "global.json")
 }
 
+// archiveStoragePath returns the path to archived memory entries for current project.
+func (s *Store) archiveStoragePath() string {
+	return filepath.Join(s.configDir, "memory", s.projectHash+".archive.json")
+}
+
+// globalArchivePath returns the path to archived global memory entries.
+func (s *Store) globalArchivePath() string {
+	return filepath.Join(s.configDir, "memory", "global.archive.json")
+}
+
 // load loads entries from disk.
 func (s *Store) load() error {
 	// Load project entries
@@ -504,6 +777,13 @@ func (s *Store) load() error {
 	}
 	// Load global entries
 	if err := s.loadFile(s.globalStoragePath(), s.globalEntries); err != nil {
+		return err
+	}
+	// Load archived entries
+	if err := s.loadFile(s.archiveStoragePath(), s.archived); err != nil {
+		return err
+	}
+	if err := s.loadFile(s.globalArchivePath(), s.globalArchive); err != nil {
 		return err
 	}
 
@@ -542,8 +822,128 @@ func (s *Store) loadFile(path string, target map[string]*Entry) error {
 	return nil
 }
 
+// findSemanticDuplicateLocked returns an existing active entry that is a semantic
+// near-duplicate of the provided entry. Must be called with s.mu held.
+func (s *Store) findSemanticDuplicateLocked(entry *Entry) (*Entry, bool) {
+	if entry == nil || strings.TrimSpace(entry.Content) == "" {
+		return nil, false
+	}
+
+	candidates := s.entries
+	if entry.Type == MemoryGlobal {
+		candidates = s.globalEntries
+	}
+
+	normalizedNew := normalizeMemoryText(entry.Content)
+	newTokens := tokenSetFromText(entry.Content)
+
+	for _, existing := range candidates {
+		if existing == nil || existing.Archived {
+			continue
+		}
+		if entry.Type != MemoryGlobal && existing.Project != "" && existing.Project != s.projectHash {
+			continue
+		}
+		normalizedExisting := normalizeMemoryText(existing.Content)
+		if normalizedExisting == normalizedNew {
+			return existing, true
+		}
+		existingTokens := tokenSetFromText(existing.Content)
+		if sim := jaccardSimilarity(newTokens, existingTokens); sim >= 0.90 {
+			return existing, true
+		}
+	}
+
+	return nil, false
+}
+
+func (s *Store) archiveEntryLocked(entry *Entry, reason string) {
+	if entry == nil {
+		return
+	}
+	if entry.Key != "" {
+		delete(s.byKey, entry.Key)
+	}
+	entry.Archived = true
+	entry.ArchiveReason = reason
+	if entry.Type == MemoryGlobal {
+		s.globalArchive[entry.ID] = entry
+	} else {
+		s.archived[entry.ID] = entry
+	}
+}
+
+func (s *Store) archiveExpiredLocked(now time.Time) {
+	for id, entry := range s.entries {
+		if entry != nil && entry.IsExpired(now) {
+			delete(s.entries, id)
+			s.archiveEntryLocked(entry, "ttl_expired")
+		}
+	}
+	for id, entry := range s.globalEntries {
+		if entry != nil && entry.IsExpired(now) {
+			delete(s.globalEntries, id)
+			s.archiveEntryLocked(entry, "ttl_expired")
+		}
+	}
+}
+
+func (s *Store) archiveStaleLowValueLocked(now time.Time) {
+	archiveIfStale := func(id string, entry *Entry, from map[string]*Entry) {
+		if entry == nil || entry.Type == MemorySession {
+			return
+		}
+		if now.Sub(entry.Timestamp) < staleArchiveWindow {
+			return
+		}
+		if entry.Reinforcement > 0 || entry.AccessCount > 0 || entry.SuccessCount > 0 {
+			return
+		}
+		delete(from, id)
+		s.archiveEntryLocked(entry, "stale_low_value")
+	}
+
+	for id, entry := range s.entries {
+		archiveIfStale(id, entry, s.entries)
+	}
+	for id, entry := range s.globalEntries {
+		archiveIfStale(id, entry, s.globalEntries)
+	}
+}
+
+func (s *Store) cleanupArchivedLocked(now time.Time) {
+	cleanup := func(store map[string]*Entry) {
+		for id, entry := range store {
+			if entry == nil {
+				delete(store, id)
+				continue
+			}
+			if !entry.ExpiresAt.IsZero() && now.After(entry.ExpiresAt.Add(30*24*time.Hour)) {
+				if entry.Key != "" {
+					delete(s.byKey, entry.Key)
+				}
+				delete(store, id)
+				continue
+			}
+			if now.Sub(entry.Timestamp) > 365*24*time.Hour {
+				if entry.Key != "" {
+					delete(s.byKey, entry.Key)
+				}
+				delete(store, id)
+			}
+		}
+	}
+	cleanup(s.archived)
+	cleanup(s.globalArchive)
+}
+
 // save persists entries to disk.
 func (s *Store) save() error {
+	now := time.Now()
+	s.archiveExpiredLocked(now)
+	s.archiveStaleLowValueLocked(now)
+	s.cleanupArchivedLocked(now)
+
 	// Save project entries (filter out session entries)
 	projectEntries := make([]*Entry, 0)
 	for _, entry := range s.entries {
@@ -560,7 +960,23 @@ func (s *Store) save() error {
 	for _, entry := range s.globalEntries {
 		globalEntries = append(globalEntries, entry)
 	}
-	return s.saveFile(s.globalStoragePath(), globalEntries)
+	if err := s.saveFile(s.globalStoragePath(), globalEntries); err != nil {
+		return err
+	}
+
+	projectArchive := make([]*Entry, 0, len(s.archived))
+	for _, entry := range s.archived {
+		projectArchive = append(projectArchive, entry)
+	}
+	if err := s.saveFile(s.archiveStoragePath(), projectArchive); err != nil {
+		return err
+	}
+
+	globalArchive := make([]*Entry, 0, len(s.globalArchive))
+	for _, entry := range s.globalArchive {
+		globalArchive = append(globalArchive, entry)
+	}
+	return s.saveFile(s.globalArchivePath(), globalArchive)
 }
 
 func (s *Store) saveFile(path string, entries []*Entry) error {
@@ -606,7 +1022,16 @@ func (s *Store) pruneOldest() {
 
 // hashPath generates a deterministic hash for a file path.
 func hashPath(path string) string {
-	hash := sha256.Sum256([]byte(path))
+	normalized := path
+	if abs, err := filepath.Abs(path); err == nil {
+		normalized = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(normalized); err == nil {
+		normalized = resolved
+	}
+	normalized = filepath.Clean(normalized)
+
+	hash := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(hash[:8])
 }
 
@@ -628,6 +1053,12 @@ func (s *Store) scheduleSave() {
 			s.mu.Unlock()
 			return
 		}
+
+		now := time.Now()
+		s.archiveExpiredLocked(now)
+		s.archiveStaleLowValueLocked(now)
+		s.cleanupArchivedLocked(now)
+
 		// Snapshot entry lists under lock
 		projectEntries := make([]*Entry, 0)
 		for _, entry := range s.entries {
@@ -639,12 +1070,32 @@ func (s *Store) scheduleSave() {
 		for _, entry := range s.globalEntries {
 			globalEntries = append(globalEntries, entry)
 		}
+		projectArchive := make([]*Entry, 0, len(s.archived))
+		for _, entry := range s.archived {
+			projectArchive = append(projectArchive, entry)
+		}
+		globalArchive := make([]*Entry, 0, len(s.globalArchive))
+		for _, entry := range s.globalArchive {
+			globalArchive = append(globalArchive, entry)
+		}
 		s.dirty = false
 		s.mu.Unlock()
 
-		// Save outside lock — disk I/O no longer blocks readers/writers
-		s.saveFile(s.storagePath(), projectEntries)
-		s.saveFile(s.globalStoragePath(), globalEntries)
+		// Save outside lock — disk I/O no longer blocks readers/writers.
+		projectErr := s.saveFile(s.storagePath(), projectEntries)
+		globalErr := s.saveFile(s.globalStoragePath(), globalEntries)
+		projectArchiveErr := s.saveFile(s.archiveStoragePath(), projectArchive)
+		globalArchiveErr := s.saveFile(s.globalArchivePath(), globalArchive)
+		if projectErr != nil || globalErr != nil || projectArchiveErr != nil || globalArchiveErr != nil {
+			logging.Warn("failed to save memory store",
+				"project_error", projectErr,
+				"global_error", globalErr,
+				"project_archive_error", projectArchiveErr,
+				"global_archive_error", globalArchiveErr)
+			s.mu.Lock()
+			s.dirty = true
+			s.mu.Unlock()
+		}
 	})
 }
 

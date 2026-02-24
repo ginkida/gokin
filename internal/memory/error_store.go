@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // ErrorEntry represents a learned error pattern with solution.
@@ -133,7 +135,12 @@ func (es *ErrorStore) scheduleSave() {
 		if err != nil {
 			return
 		}
-		os.WriteFile(es.storagePath(), data, 0644)
+		if err := os.WriteFile(es.storagePath(), data, 0644); err != nil {
+			logging.Warn("failed to save error store", "path", es.storagePath(), "error", err)
+			es.mu.Lock()
+			es.dirty = true
+			es.mu.Unlock()
+		}
 	})
 }
 

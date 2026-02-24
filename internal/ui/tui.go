@@ -988,11 +988,10 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		if m.toolOutput != nil && m.toolOutput.EntryCount() > 0 {
 			m.toolOutput.ToggleAll()
 			if m.toolOutput.AllExpanded {
-				m.output.AppendLine(m.styles.Dim.Render("  [All tool outputs expanded]"))
+				m.toastManager.ShowInfo("All tool outputs expanded")
 			} else {
-				m.output.AppendLine(m.styles.Dim.Render("  [All tool outputs collapsed]"))
+				m.toastManager.ShowInfo("All tool outputs collapsed")
 			}
-			m.output.AppendLine("")
 		}
 		return nil
 	}
@@ -1005,13 +1004,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				wasExpanded := m.toolOutput.IsExpanded(m.lastToolOutputIndex)
 				m.toolOutput.ToggleExpand(m.lastToolOutputIndex)
 				if wasExpanded {
-					m.output.AppendLine(m.styles.Dim.Render("  [Tool output collapsed]"))
+					m.toastManager.ShowInfo("Tool output collapsed")
 				} else {
-					// Re-render the last tool output expanded
-					m.output.AppendLine(m.styles.Dim.Render("  [Tool output expanded]"))
+					m.toastManager.ShowInfo("Tool output expanded")
 					m.output.AppendLine(m.styles.ToolResult.Render("   " + strings.ReplaceAll(entry.FullContent, "\n", "\n    ")))
 				}
-				m.output.AppendLine("")
 			}
 		}
 		return nil
@@ -1037,13 +1034,13 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			case "]":
 				// Navigate to next code block
 				if codeBlocks.SelectNext() {
-					m.output.AppendLine(m.styles.Dim.Render(fmt.Sprintf("  [%s]", codeBlocks.RenderSelectionIndicator())))
+					m.toastManager.ShowInfo(codeBlocks.RenderSelectionIndicator())
 				}
 				return nil
 			case "[":
 				// Navigate to previous code block
 				if codeBlocks.SelectPrev() {
-					m.output.AppendLine(m.styles.Dim.Render(fmt.Sprintf("  [%s]", codeBlocks.RenderSelectionIndicator())))
+					m.toastManager.ShowInfo(codeBlocks.RenderSelectionIndicator())
 				}
 				return nil
 			}
@@ -1853,7 +1850,7 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 	{
 		connStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		var summaryLine strings.Builder
-		summaryLine.WriteString(connStyle.Render("  ⎿  "))
+		summaryLine.WriteString(connStyle.Render("    "))
 		if summary != "" {
 			summaryLine.WriteString(dimStyle.Render(summary))
 		}
@@ -2058,12 +2055,6 @@ func (m Model) View() string {
 				status += "  " + lipgloss.NewStyle().Foreground(durationColor).Render(format.Duration(elapsed))
 			}
 
-			// Slow warning hint (no activity for >3s)
-			if m.slowWarningShown {
-				warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-				status += "  " + warnStyle.Render("(waiting…)")
-			}
-
 			// Plan step context
 			if m.planProgress != nil && m.planProgressMode {
 				stepInfo := fmt.Sprintf(" [step %d/%d]",
@@ -2167,14 +2158,6 @@ func (m Model) View() string {
 					Italic(true).
 					MarginTop(0)
 				builder.WriteString("\n" + hintStyle.Render("  "+hint))
-			}
-		}
-
-		// Contextual hints (only when input is empty)
-		if inputText == "" && m.hintsEnabled && m.hintSystem != nil {
-			if hint := m.hintSystem.GetContextualHint(m.state, m.currentTool, time.Since(m.sessionStart)); hint != "" {
-				hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-				builder.WriteString("\n" + hintStyle.Render("  Tip: "+hint))
 			}
 		}
 

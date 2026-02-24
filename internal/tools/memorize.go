@@ -26,6 +26,11 @@ func (t *MemorizeTool) SetLearning(learning *memory.ProjectLearning) {
 	t.learning = learning
 }
 
+// GetLearning returns the configured project learning store.
+func (t *MemorizeTool) GetLearning() *memory.ProjectLearning {
+	return t.learning
+}
+
 func (t *MemorizeTool) Name() string {
 	return "memorize"
 }
