@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -146,7 +147,7 @@ func (i *IncrementalIndexer) IndexChanged(ctx context.Context, dir string) (*Ind
 	i.stateMu.Lock()
 	for _, path := range deletedFiles {
 		delete(i.fileStates, path)
-		delete(i.chunks, path)
+		i.RemoveFile(path)
 	}
 	i.stateMu.Unlock()
 
@@ -207,6 +208,7 @@ func (i *IncrementalIndexer) indexFilesParallel(ctx context.Context, files []str
 	type result struct {
 		path       string
 		chunks     []ChunkInfo
+		symbols    fileSymbolIndex
 		embedBatch int
 		err        error
 	}
@@ -230,10 +232,11 @@ func (i *IncrementalIndexer) indexFilesParallel(ctx context.Context, files []str
 				default:
 				}
 
-				chunks, batches, err := i.indexFileWithBatch(ctx, path)
+				chunks, symbols, batches, err := i.indexFileWithBatch(ctx, path)
 				resultsChan <- result{
 					path:       path,
 					chunks:     chunks,
+					symbols:    symbols,
 					embedBatch: batches,
 					err:        err,
 				}
@@ -262,9 +265,14 @@ func (i *IncrementalIndexer) indexFilesParallel(ctx context.Context, files []str
 		if len(res.chunks) > 0 {
 			i.mu.Lock()
 			i.chunks[res.path] = res.chunks
+			i.fileSymbols[res.path] = res.symbols
 			i.mu.Unlock()
 			chunksIndexed += len(res.chunks)
 			embedBatches += res.embedBatch
+		} else {
+			i.mu.Lock()
+			i.fileSymbols[res.path] = res.symbols
+			i.mu.Unlock()
 		}
 	}
 
@@ -272,26 +280,27 @@ func (i *IncrementalIndexer) indexFilesParallel(ctx context.Context, files []str
 }
 
 // indexFileWithBatch indexes a single file using batched embedding.
-func (i *IncrementalIndexer) indexFileWithBatch(ctx context.Context, filePath string) ([]ChunkInfo, int, error) {
+func (i *IncrementalIndexer) indexFileWithBatch(ctx context.Context, filePath string) ([]ChunkInfo, fileSymbolIndex, int, error) {
 	// Check file size
 	info, err := os.Stat(filePath)
 	if err != nil {
-		return nil, 0, err
+		return nil, fileSymbolIndex{}, 0, err
 	}
 	if info.Size() > i.maxFileSize {
-		return nil, 0, nil // Skip large files
+		return nil, fileSymbolIndex{}, 0, nil // Skip large files
 	}
 
 	// Read file
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, 0, err
+		return nil, fileSymbolIndex{}, 0, err
 	}
+	symbols := extractFileSymbols(filePath, string(content))
 
 	// Get chunks
 	chunks := i.chunker.Chunk(filePath, string(content))
 	if len(chunks) == 0 {
-		return nil, 0, nil
+		return nil, symbols, 0, nil
 	}
 
 	// Separate cached and uncached chunks
@@ -326,7 +335,7 @@ func (i *IncrementalIndexer) indexFileWithBatch(ctx context.Context, filePath st
 
 			select {
 			case <-ctx.Done():
-				return nil, embedBatches, ctx.Err()
+				return nil, symbols, embedBatches, ctx.Err()
 			default:
 			}
 
@@ -367,7 +376,7 @@ func (i *IncrementalIndexer) indexFileWithBatch(ctx context.Context, filePath st
 		return result[a].LineStart < result[b].LineStart
 	})
 
-	return result, embedBatches, nil
+	return result, symbols, embedBatches, nil
 }
 
 // updateFileStates updates file states after indexing.
@@ -452,7 +461,7 @@ func (i *IncrementalIndexer) SetWorkers(workers int) {
 
 // chunkCacheKey generates a cache key for a chunk.
 func chunkCacheKey(filePath string, lineStart int) string {
-	return filePath + ":" + string(rune(lineStart))
+	return fmt.Sprintf("%s:%d", filePath, lineStart)
 }
 
 // ReindexAll forces a full re-index, ignoring cached states.

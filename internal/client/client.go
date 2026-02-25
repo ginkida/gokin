@@ -26,7 +26,14 @@ type ModelInfo struct {
 
 // AvailableModels is the list of supported models across all providers.
 var AvailableModels = []ModelInfo{
-	// Gemini models (API key)
+	// Gemini 3.1 models (API key)
+	{
+		ID:          "gemini-3.1-pro-preview",
+		Name:        "Gemini 3.1 Pro",
+		Description: "Top reasoning: ARC-AGI-2 77%, 1M context",
+		Provider:    "gemini",
+	},
+	// Gemini 3 models (API key)
 	{
 		ID:          "gemini-3-flash-preview",
 		Name:        "Gemini 3 Flash",
@@ -36,20 +43,20 @@ var AvailableModels = []ModelInfo{
 	{
 		ID:          "gemini-3-pro-preview",
 		Name:        "Gemini 3 Pro",
-		Description: "Most capable: $2/$12 per 1M tokens",
+		Description: "Advanced reasoning: $2/$12 per 1M tokens",
 		Provider:    "gemini",
 	},
 	// Gemini models (OAuth / Code Assist API)
 	{
 		ID:          "gemini-2.5-flash",
 		Name:        "Gemini 2.5 Flash",
-		Description: "Fast model (Code Assist)",
+		Description: "Fast model (Code Assist, retiring Mar 2026)",
 		Provider:    "gemini",
 	},
 	{
 		ID:          "gemini-2.5-pro",
 		Name:        "Gemini 2.5 Pro",
-		Description: "Advanced model (Code Assist)",
+		Description: "Advanced model (Code Assist, retiring Mar 2026)",
 		Provider:    "gemini",
 	},
 	// GLM models (via Anthropic-compatible API)
@@ -86,7 +93,14 @@ var AvailableModels = []ModelInfo{
 	{
 		ID:          "MiniMax-M2.5",
 		Name:        "MiniMax M2.5",
-		Description: "Flagship model: 1M context, strong coding",
+		Description: "Peak performance, 200K context (~60 tps)",
+		Provider:    "minimax",
+		BaseURL:     DefaultMiniMaxBaseURL,
+	},
+	{
+		ID:          "MiniMax-M2.5-highspeed",
+		Name:        "MiniMax M2.5 Highspeed",
+		Description: "Same performance, faster (~100 tps)",
 		Provider:    "minimax",
 		BaseURL:     DefaultMiniMaxBaseURL,
 	},
@@ -130,6 +144,55 @@ var AvailableModels = []ModelInfo{
 		Name:        "Claude Haiku 4.5",
 		Description: "Fast & affordable",
 		Provider:    "anthropic",
+	},
+	// OpenAI models (OAuth / ChatGPT subscription)
+	{
+		ID:          "gpt-5.3-codex",
+		Name:        "GPT-5.3 Codex",
+		Description: "Most capable coding model, 25% faster than 5.2",
+		Provider:    "openai",
+	},
+	{
+		ID:          "gpt-5.3-codex-spark",
+		Name:        "GPT-5.3 Codex Spark",
+		Description: "Near-instant coding, 1000+ tok/s (Pro only)",
+		Provider:    "openai",
+	},
+	{
+		ID:          "gpt-5.2-codex",
+		Name:        "GPT-5.2 Codex",
+		Description: "Advanced coding model, 400K context",
+		Provider:    "openai",
+	},
+	{
+		ID:          "gpt-5.1-codex-max",
+		Name:        "GPT-5.1 Codex Max",
+		Description: "Long-running project-scale coding",
+		Provider:    "openai",
+	},
+	{
+		ID:          "gpt-5.1-codex",
+		Name:        "GPT-5.1 Codex",
+		Description: "Agentic coding tasks, 400K context",
+		Provider:    "openai",
+	},
+	{
+		ID:          "gpt-5-codex",
+		Name:        "GPT-5 Codex",
+		Description: "Coding model, 400K context",
+		Provider:    "openai",
+	},
+	{
+		ID:          "gpt-5-codex-mini",
+		Name:        "GPT-5 Codex Mini",
+		Description: "Cost-effective, 4x more usage",
+		Provider:    "openai",
+	},
+	{
+		ID:          "gpt-5.2",
+		Name:        "GPT-5.2",
+		Description: "General agentic model, 400K context",
+		Provider:    "openai",
 	},
 	// Ollama (local models - use exact name from 'ollama list')
 	{

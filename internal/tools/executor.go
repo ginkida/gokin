@@ -156,6 +156,7 @@ type ToolRegistry interface {
 type Executor struct {
 	registry          ToolRegistry
 	client            client.Client
+	workDir           string
 	timeout           time.Duration
 	modelRoundTimeout time.Duration
 	handler           *ExecutionHandler
@@ -165,15 +166,15 @@ type Executor struct {
 	auditLogger       *audit.Logger
 	sessionID         string
 	fallback          FallbackConfig
-	clientMu sync.RWMutex // Protects client field
+	clientMu          sync.RWMutex // Protects client field
 
 	// Enhanced safety features
 	safetyValidator  SafetyValidator
-	preFlightChecks  bool                      // Enable pre-flight safety checks
-	userNotified     bool                      // Track if user was notified about tool execution
-	notificationMgr  *NotificationManager      // User notifications
-	redactor         *security.SecretRedactor  // Redact secrets from output
-	unrestrictedMode bool                      // Full freedom when both sandbox and permissions are off
+	preFlightChecks  bool                     // Enable pre-flight safety checks
+	userNotified     bool                     // Track if user was notified about tool execution
+	notificationMgr  *NotificationManager     // User notifications
+	redactor         *security.SecretRedactor // Redact secrets from output
+	unrestrictedMode bool                     // Full freedom when both sandbox and permissions are off
 
 	// Token usage from last response (from API usage metadata).
 	// Protected by tokenMu for concurrent read/write safety.
@@ -198,6 +199,20 @@ type Executor struct {
 
 	// Auto-formatter for write/edit operations
 	formatter *Formatter
+
+	// Delta-check guardrail for mutating operations.
+	deltaCheckEnabled     bool
+	deltaCheckWarnOnly    bool
+	deltaCheckTimeout     time.Duration
+	deltaCheckMaxModules  int
+	deltaCheckMu          sync.Mutex
+	deltaCheckBlocked     bool
+	deltaCheckBlockReason string
+	deltaCheckLastHash    string
+	deltaCheckLastResult  *deltaCheckResult
+	deltaBaselineCaptured bool
+	deltaBaselinePaths    map[string]struct{}
+	deltaPendingPaths     map[string]struct{}
 
 	// Retry-time side effect deduplication (write/bash tools).
 	sideEffectDedupEnabled bool
@@ -285,6 +300,12 @@ func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Du
 		notificationMgr:        NewNotificationManager(),
 		toolBreakers:           make(map[string]*robustness.CircuitBreaker),
 		redactor:               security.NewSecretRedactor(),
+		deltaCheckEnabled:      true,
+		deltaCheckWarnOnly:     false,
+		deltaCheckTimeout:      90 * time.Second,
+		deltaCheckMaxModules:   8,
+		deltaBaselinePaths:     make(map[string]struct{}),
+		deltaPendingPaths:      make(map[string]struct{}),
 		sideEffectsByCallID:    make(map[string]ToolResult),
 		sideEffectsBySignature: make(map[string]ToolResult),
 	}
@@ -314,6 +335,28 @@ func (e *Executor) SetClient(c client.Client) {
 	e.clientMu.Lock()
 	e.client = c
 	e.clientMu.Unlock()
+}
+
+// SetWorkDir sets the working directory used by guardrails that need repository context.
+func (e *Executor) SetWorkDir(workDir string) {
+	e.workDir = strings.TrimSpace(workDir)
+}
+
+// SetDeltaCheckConfig configures automatic post-edit delta-check behavior.
+func (e *Executor) SetDeltaCheckConfig(enabled bool, timeout time.Duration, warnOnly bool, maxModules int) {
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	if maxModules <= 0 {
+		maxModules = 8
+	}
+
+	e.deltaCheckMu.Lock()
+	defer e.deltaCheckMu.Unlock()
+	e.deltaCheckEnabled = enabled
+	e.deltaCheckTimeout = timeout
+	e.deltaCheckWarnOnly = warnOnly
+	e.deltaCheckMaxModules = maxModules
 }
 
 // getClient returns the current client under read lock.
@@ -1055,6 +1098,19 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		return deduped
 	}
 
+	// Pre-mutation barrier: if previous delta-check failed, block further mutating calls.
+	if shouldRunDeltaCheckCall(call) {
+		if reason, blocked := e.enforceDeltaCheckBarrier(ctx, call); blocked {
+			if e.handler != nil && e.handler.OnToolDenied != nil {
+				e.handler.OnToolDenied(call.Name, reason)
+			}
+			if e.notificationMgr != nil {
+				e.notificationMgr.NotifyDenied(call.Name, reason)
+			}
+			return NewErrorResult(reason)
+		}
+	}
+
 	// Step 2: Pre-flight safety checks
 	var preFlight *PreFlightCheck
 	if e.preFlightChecks && e.safetyValidator != nil {
@@ -1105,6 +1161,26 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				}
 				return NewErrorResult(fmt.Sprintf("Safety check failed: %s", reasons))
 			}
+		}
+	}
+
+	// Step 2.5: Mandatory pre-edit impact gate (fail-closed).
+	if impact := e.evaluateImpactGate(ctx, call); impact != nil {
+		if impact.Summary != "" && e.handler != nil && e.handler.OnWarning != nil {
+			e.handler.OnWarning(fmt.Sprintf("[%s] %s", call.Name, impact.Summary))
+		}
+		if !impact.Allowed {
+			reason := impact.Reason
+			if reason == "" {
+				reason = "impact gate blocked execution"
+			}
+			if e.handler != nil && e.handler.OnToolDenied != nil {
+				e.handler.OnToolDenied(call.Name, reason)
+			}
+			if e.notificationMgr != nil {
+				e.notificationMgr.NotifyDenied(call.Name, reason)
+			}
+			return NewErrorResult(reason)
 		}
 	}
 
@@ -1406,6 +1482,26 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
+	// Step 12.9: Post-edit delta-check on changed modules (format/lint/build; no tests).
+	if result.Success && shouldRunDeltaCheckCall(call) {
+		if delta := e.runDeltaCheckAfterMutation(ctx, call); delta != nil {
+			if !delta.Passed {
+				logDeltaCheckFailure(*delta)
+				if e.handler != nil && e.handler.OnWarning != nil {
+					e.handler.OnWarning(delta.Summary)
+				}
+				if result.Content != "" {
+					result.Content += "\n\n" + delta.Summary
+				} else {
+					result.Content = delta.Summary
+				}
+				if detail := strings.TrimSpace(delta.Details); detail != "" {
+					result.Content += "\n" + trimDeltaOutput(detail, 1200)
+				}
+			}
+		}
+	}
+
 	// Step 13: Notify completion and send notifications
 	if e.handler != nil && e.handler.OnToolEnd != nil {
 		e.handler.OnToolEnd(call.Name, result)
@@ -1639,6 +1735,8 @@ var writeTools = map[string]bool{
 	"copy":        true,
 	"move":        true,
 	"mkdir":       true,
+	"batch":       true,
+	"refactor":    true,
 	"bash":        true, // bash can modify anything
 	"git_add":     true,
 	"git_commit":  true,

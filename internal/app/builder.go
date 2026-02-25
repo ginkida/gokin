@@ -358,7 +358,14 @@ func (b *Builder) initTools() error {
 	b.geminiClient.SetTools(geminiTools)
 
 	b.executor = tools.NewExecutor(b.registry, b.geminiClient, b.cfg.Tools.Timeout)
+	b.executor.SetWorkDir(b.workDir)
 	b.executor.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
+	b.executor.SetDeltaCheckConfig(
+		b.cfg.Tools.DeltaCheck.Enabled,
+		b.cfg.Tools.DeltaCheck.Timeout,
+		b.cfg.Tools.DeltaCheck.WarnOnly,
+		b.cfg.Tools.DeltaCheck.MaxModules,
+	)
 	compactor := appcontext.NewResultCompactor(b.cfg.Context.ToolResultMaxChars)
 	b.executor.SetCompactor(compactor)
 
@@ -1327,6 +1334,7 @@ func (b *Builder) wireDependencies() error {
 				if p := app.planManager.GetCurrentPlan(); p != nil {
 					stepID := app.planManager.GetCurrentStepID()
 					if stepID > 0 {
+						app.captureStepRollbackFromToolArgs(p, stepID, name, args)
 						p.RecordStepEffect(stepID, name, args)
 						_ = app.planManager.SaveCurrentPlan()
 					}
@@ -1572,6 +1580,7 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up plan approval
 	b.planManager.SetApprovalHandler(app.promptPlanApproval)
+	b.planManager.SetLintHandler(app.lintPlanBeforeApproval)
 
 	// Set up plan progress updates
 	b.planManager.SetProgressUpdateHandler(app.handlePlanProgressUpdate)
@@ -1658,6 +1667,8 @@ func (b *Builder) assembleApp() *App {
 		mcpManager: b.mcpManager,
 		// Auto retry tracking
 		rateLimitRetryCount: make(map[string]int),
+		// Step rollback snapshots
+		stepRollbackSnapshots: make(map[string]*stepRollbackSnapshot),
 	}
 
 	if j, err := NewExecutionJournal(b.workDir); err == nil {

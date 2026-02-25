@@ -512,20 +512,70 @@ func MemoryToolDeclaration() *genai.FunctionDeclaration {
 func EnterPlanModeToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "enter_plan_mode",
-		Description: "Enters planning mode to create a structured plan before execution.",
+		Description: "Create an execution plan and request user approval before proceeding with implementation.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
 				"title": {
 					Type:        genai.TypeString,
-					Description: "The title of the plan",
+					Description: "Title of the plan (short description of what will be done)",
 				},
 				"description": {
 					Type:        genai.TypeString,
-					Description: "A description of what the plan will accomplish",
+					Description: "Detailed description of the plan",
+				},
+				"steps": {
+					Type:        genai.TypeArray,
+					Description: "List of steps in the plan",
+					Items: &genai.Schema{
+						Type: genai.TypeObject,
+						Properties: map[string]*genai.Schema{
+							"title": {
+								Type:        genai.TypeString,
+								Description: "Short title for the step",
+							},
+							"description": {
+								Type:        genai.TypeString,
+								Description: "Detailed description of what the step involves",
+							},
+							"inputs": {
+								Type:        genai.TypeArray,
+								Items:       &genai.Schema{Type: genai.TypeString},
+								Description: "Inputs/dependencies required before starting this step",
+							},
+							"expected_artifact": {
+								Type:        genai.TypeString,
+								Description: "Concrete artifact expected after step completion (file change, command output, etc.)",
+							},
+							"expected_artifact_paths": {
+								Type:        genai.TypeArray,
+								Items:       &genai.Schema{Type: genai.TypeString},
+								Description: "Explicit file/path artifacts expected from this step (preferred for deterministic proof)",
+							},
+							"success_criteria": {
+								Type:        genai.TypeArray,
+								Items:       &genai.Schema{Type: genai.TypeString},
+								Description: "Objective criteria used to verify this step is done",
+							},
+							"verify_commands": {
+								Type:        genai.TypeArray,
+								Items:       &genai.Schema{Type: genai.TypeString},
+								Description: "Commands the orchestrator must run to verify this step before marking it complete",
+							},
+							"rollback": {
+								Type:        genai.TypeString,
+								Description: "Rollback strategy if this step causes issues",
+							},
+						},
+						Required: []string{"title"},
+					},
+				},
+				"request": {
+					Type:        genai.TypeString,
+					Description: "The original user request that prompted this plan",
 				},
 			},
-			Required: []string{"title"},
+			Required: []string{"title", "steps"},
 		},
 	}
 }

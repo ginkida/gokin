@@ -12,6 +12,7 @@ func (ei *EnhancedIndexer) Clear() error {
 
 	// Clear chunks
 	ei.Indexer.chunks = make(map[string][]ChunkInfo)
+	ei.Indexer.fileSymbols = make(map[string]fileSymbolIndex)
 
 	return nil
 }

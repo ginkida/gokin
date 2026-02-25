@@ -70,6 +70,24 @@ var ModelPresets = map[string]ModelPreset{
 		Temperature:     0.6,
 		MaxOutputTokens: 32768,
 	},
+	"anthropic": {
+		Provider:        "anthropic",
+		Name:            "claude-sonnet-4-5-20250929",
+		Temperature:     1.0,
+		MaxOutputTokens: 16384,
+	},
+	"openai": {
+		Provider:        "openai",
+		Name:            "gpt-5.3-codex",
+		Temperature:     1.0,
+		MaxOutputTokens: 16384,
+	},
+	"minimax": {
+		Provider:        "minimax",
+		Name:            "MiniMax-M2.5",
+		Temperature:     0.7,
+		MaxOutputTokens: 16384,
+	},
 	"ollama": {
 		Provider:        "ollama",
 		Name:            "llama3.2",

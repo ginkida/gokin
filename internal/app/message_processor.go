@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,8 @@ import (
 const (
 	// planStepOutputMaxChars is the max characters stored per step output.
 	planStepOutputMaxChars = 8000
+	// planStepVerifyTimeout bounds orchestrator-run verify_commands per step.
+	planStepVerifyTimeout = 2 * time.Minute
 	// planSummaryMaxChars is the max characters for previous steps summary context.
 	planSummaryMaxChars = 2000
 	// messageIdleTimeout is the maximum time without any model activity
@@ -809,6 +813,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 			fmt.Sprintf("  Step %d skipped (condition: %s)\n", step.ID, step.Condition)))
 		return
 	}
+	step.EnsureContractDefaults()
 
 	// Idempotency guard: if previous attempt already produced side effects for
 	// this step but never reached completion, avoid automatic re-execution.
@@ -881,6 +886,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		"execution": "direct",
 	})
 	a.saveRecoverySnapshot("")
+	a.startStepRollbackSnapshot(approvedPlan, step)
 
 	// Update plan progress in status bar
 	a.safeSendToProgram(ui.PlanProgressMsg{
@@ -909,7 +915,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	// Execute step with retry logic
 	var response string
 	var err error
-	var errCat plan.ErrorCategory
+	errCat := plan.ErrorUnknown
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		history, histVersion := a.session.GetHistoryWithVersion()
@@ -980,27 +986,8 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 
 		// Transient error after all attempts → pause step, plan continues with other steps
 		if errCat == plan.ErrorTransient {
-			a.planManager.PauseStep(step.ID, errMsg)
-			a.journalEvent("plan_step_paused", map[string]any{
-				"plan_id": approvedPlan.ID,
-				"step_id": step.ID,
-				"reason":  errMsg,
-			})
-
-			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s (will auto-retry later)\n",
-					step.ID, maxRetries, errMsg)))
-			a.safeSendToProgram(ui.PlanProgressMsg{
-				PlanID:        approvedPlan.ID,
-				CurrentStepID: step.ID,
-				CurrentTitle:  step.Title,
-				TotalSteps:    totalSteps,
-				Completed:     approvedPlan.CompletedCount(),
-				Progress:      approvedPlan.Progress(),
-				Status:        "paused",
-				Reason:        errMsg,
-			})
-			// No ResponseDoneMsg — plan continues with other steps
+			reason := fmt.Sprintf("%s (after %d attempts; will auto-retry later)", errMsg, maxRetries)
+			a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, reason)
 
 			logging.Info("step paused due to transient error, plan continues",
 				"step_id", step.ID, "error", errMsg, "category", errCat.String())
@@ -1009,6 +996,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 
 		// Fatal/logic/unknown error
 		a.planManager.FailStep(step.ID, errMsg)
+		a.commitStepRollbackSnapshot(approvedPlan.ID, step.ID)
 		a.journalEvent("plan_step_failed", map[string]any{
 			"plan_id": approvedPlan.ID,
 			"step_id": step.ID,
@@ -1050,31 +1038,37 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	apiInput, apiOutput := a.executor.GetLastTokenUsage()
 	step.TokensUsed = apiInput + apiOutput
 
-	evidence, verificationNote, evidenceOK, evidenceReason := a.buildStepCompletionEvidence(approvedPlan, step, output)
-	if !evidenceOK {
-		a.planManager.PauseStep(step.ID, evidenceReason)
-		a.journalEvent("plan_step_paused", map[string]any{
+	verificationSummary, verificationOutput, verificationOK, verificationReason := a.runStepVerificationCommands(ctx, approvedPlan, step)
+	if !verificationOK {
+		a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, verificationReason)
+		return
+	}
+	if verificationOutput != "" {
+		if output != "" {
+			output += "\n\n"
+		}
+		output += verificationOutput
+		if len(output) > planStepOutputMaxChars {
+			output = output[:planStepOutputMaxChars] + "..."
+		}
+	}
+	if verificationSummary != "" {
+		a.journalEvent("plan_step_verification_passed", map[string]any{
 			"plan_id": approvedPlan.ID,
 			"step_id": step.ID,
-			"reason":  evidenceReason,
+			"summary": verificationSummary,
 		})
-		a.safeSendToProgram(ui.StreamTextMsg(
-			fmt.Sprintf("⏸ Step %d paused: %s\n", step.ID, evidenceReason)))
-		a.safeSendToProgram(ui.PlanProgressMsg{
-			PlanID:        approvedPlan.ID,
-			CurrentStepID: step.ID,
-			CurrentTitle:  step.Title,
-			TotalSteps:    totalSteps,
-			Completed:     approvedPlan.CompletedCount(),
-			Progress:      approvedPlan.Progress(),
-			Status:        "paused",
-			Reason:        evidenceReason,
-		})
+	}
+
+	evidence, verificationNote, evidenceOK, evidenceReason := a.buildStepCompletionEvidence(approvedPlan, step, output)
+	if !evidenceOK {
+		a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, evidenceReason)
 		return
 	}
 	a.planManager.RecordStepVerification(step.ID, evidence, verificationNote)
 
 	a.planManager.CompleteStep(step.ID, output)
+	a.commitStepRollbackSnapshot(approvedPlan.ID, step.ID)
 	a.journalEvent("plan_step_completed", map[string]any{
 		"plan_id": approvedPlan.ID,
 		"step_id": step.ID,
@@ -1160,16 +1154,35 @@ func buildDirectStepMessage(step *plan.Step, prevSummary string, totalSteps int)
 	if step.ExpectedArtifact != "" {
 		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", step.ExpectedArtifact))
 	}
+	if len(step.ExpectedArtifactPaths) > 0 {
+		sb.WriteString("- Expected artifact paths:\n")
+		for _, path := range step.ExpectedArtifactPaths {
+			sb.WriteString(fmt.Sprintf("  - %s\n", path))
+		}
+	}
 	if len(step.SuccessCriteria) > 0 {
 		sb.WriteString("- Success criteria:\n")
 		for _, c := range step.SuccessCriteria {
 			sb.WriteString(fmt.Sprintf("  - %s\n", c))
 		}
 	}
+	if len(step.VerifyCommands) > 0 {
+		sb.WriteString("- Verify commands:\n")
+		for _, cmd := range step.VerifyCommands {
+			sb.WriteString(fmt.Sprintf("  - %s\n", cmd))
+		}
+	}
 	if step.Rollback != "" {
 		sb.WriteString(fmt.Sprintf("- Rollback: %s\n", step.Rollback))
 	}
 	sb.WriteString("\n")
+
+	if contractJSON := buildStepContractJSON(step, totalSteps); contractJSON != "" {
+		sb.WriteString("StepContractJSON:\n")
+		sb.WriteString("```json\n")
+		sb.WriteString(contractJSON)
+		sb.WriteString("\n```\n\n")
+	}
 
 	if prevSummary != "" {
 		sb.WriteString("Previous steps summary:\n")
@@ -1183,6 +1196,7 @@ func buildDirectStepMessage(step *plan.Step, prevSummary string, totalSteps int)
 	sb.WriteString("- Do NOT call update_plan_progress or exit_plan_mode — the orchestrator handles this\n")
 	sb.WriteString("- Provide a brief summary of what was done at the end\n")
 	sb.WriteString("- Include evidence: changed files, executed commands, and verification facts\n")
+	sb.WriteString("- Treat verify_commands as mandatory completion gate\n")
 	sb.WriteString("- Report any issues or deviations from the plan\n")
 
 	return sb.String()
@@ -1421,6 +1435,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 			fmt.Sprintf("  Step %d skipped (condition: %s)\n", step.ID, step.Condition)))
 		return
 	}
+	step.EnsureContractDefaults()
 
 	// Idempotency guard for delegated execution.
 	if approvedPlan.HasPartialEffects(step.ID) || approvedPlan.HasDuplicateRisk(step.ID) {
@@ -1485,6 +1500,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		"execution": "delegated",
 	})
 	a.saveRecoverySnapshot("")
+	a.startStepRollbackSnapshot(approvedPlan, step)
 
 	// Update plan progress in status bar
 	a.safeSendToProgram(ui.PlanProgressMsg{
@@ -1540,7 +1556,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	// Spawn sub-agent for this step with retry on transient errors
 	var result *agent.AgentResult
 	var err error
-	var errCat plan.ErrorCategory
+	errCat := plan.ErrorUnknown
 	const maxRetries = 3
 	backoffDurations := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
 
@@ -1613,27 +1629,8 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 
 		// Transient error after all retries → pause step, plan continues with other steps
 		if errCat == plan.ErrorTransient {
-			a.planManager.PauseStep(step.ID, errMsg)
-			a.journalEvent("plan_step_paused", map[string]any{
-				"plan_id": approvedPlan.ID,
-				"step_id": step.ID,
-				"reason":  errMsg,
-			})
-
-			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⏸ Step %d paused after %d attempts: %s (will auto-retry later)\n",
-					step.ID, maxRetries, errMsg)))
-			a.safeSendToProgram(ui.PlanProgressMsg{
-				PlanID:        approvedPlan.ID,
-				CurrentStepID: step.ID,
-				CurrentTitle:  step.Title,
-				TotalSteps:    totalSteps,
-				Completed:     approvedPlan.CompletedCount(),
-				Progress:      approvedPlan.Progress(),
-				Status:        "paused",
-				Reason:        errMsg,
-			})
-			// No ResponseDoneMsg — plan continues with other steps
+			reason := fmt.Sprintf("%s (after %d attempts; will auto-retry later)", errMsg, maxRetries)
+			a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, reason)
 
 			logging.Info("step paused due to transient error, plan continues",
 				"step_id", step.ID, "error", errMsg, "category", errCat.String())
@@ -1643,10 +1640,12 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		// Non-transient error: preserve partial output if available
 		if result != nil && result.Output != "" {
 			a.planManager.CompleteStep(step.ID, "(partial) "+result.Output)
+			a.commitStepRollbackSnapshot(approvedPlan.ID, step.ID)
 			logging.Debug("step failed but partial output preserved",
 				"step_id", step.ID, "output_len", len(result.Output))
 		} else {
 			a.planManager.FailStep(step.ID, errMsg)
+			a.commitStepRollbackSnapshot(approvedPlan.ID, step.ID)
 			a.journalEvent("plan_step_failed", map[string]any{
 				"plan_id": approvedPlan.ID,
 				"step_id": step.ID,
@@ -1688,31 +1687,37 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	// Record token usage for this step (estimate from output length for delegated steps)
 	step.TokensUsed = len(output) / 4
 
-	evidence, verificationNote, evidenceOK, evidenceReason := a.buildStepCompletionEvidence(approvedPlan, step, output)
-	if !evidenceOK {
-		a.planManager.PauseStep(step.ID, evidenceReason)
-		a.journalEvent("plan_step_paused", map[string]any{
+	verificationSummary, verificationOutput, verificationOK, verificationReason := a.runStepVerificationCommands(ctx, approvedPlan, step)
+	if !verificationOK {
+		a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, verificationReason)
+		return
+	}
+	if verificationOutput != "" {
+		if output != "" {
+			output += "\n\n"
+		}
+		output += verificationOutput
+		if len(output) > planStepOutputMaxChars {
+			output = output[:planStepOutputMaxChars] + "..."
+		}
+	}
+	if verificationSummary != "" {
+		a.journalEvent("plan_step_verification_passed", map[string]any{
 			"plan_id": approvedPlan.ID,
 			"step_id": step.ID,
-			"reason":  evidenceReason,
+			"summary": verificationSummary,
 		})
-		a.safeSendToProgram(ui.StreamTextMsg(
-			fmt.Sprintf("⏸ Step %d paused: %s\n", step.ID, evidenceReason)))
-		a.safeSendToProgram(ui.PlanProgressMsg{
-			PlanID:        approvedPlan.ID,
-			CurrentStepID: step.ID,
-			CurrentTitle:  step.Title,
-			TotalSteps:    totalSteps,
-			Completed:     approvedPlan.CompletedCount(),
-			Progress:      approvedPlan.Progress(),
-			Status:        "paused",
-			Reason:        evidenceReason,
-		})
+	}
+
+	evidence, verificationNote, evidenceOK, evidenceReason := a.buildStepCompletionEvidence(approvedPlan, step, output)
+	if !evidenceOK {
+		a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, evidenceReason)
 		return
 	}
 	a.planManager.RecordStepVerification(step.ID, evidence, verificationNote)
 
 	a.planManager.CompleteStep(step.ID, output)
+	a.commitStepRollbackSnapshot(approvedPlan.ID, step.ID)
 	a.journalEvent("plan_step_completed", map[string]any{
 		"plan_id": approvedPlan.ID,
 		"step_id": step.ID,
@@ -2006,6 +2011,141 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
+func (a *App) pauseStepWithRollback(ctx context.Context, approvedPlan *plan.Plan, step *plan.Step, totalSteps int, reason string) {
+	if approvedPlan == nil || step == nil {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "step paused by contract gate"
+	}
+
+	rollbackApplied, rollbackSummary := a.rollbackStepSnapshot(ctx, approvedPlan, step)
+	finalReason := reason
+	if rollbackSummary != "" {
+		finalReason = reason + " | " + rollbackSummary
+	}
+
+	a.planManager.PauseStep(step.ID, finalReason)
+	a.journalEvent("plan_step_paused", map[string]any{
+		"plan_id":          approvedPlan.ID,
+		"step_id":          step.ID,
+		"reason":           finalReason,
+		"rollback_applied": rollbackApplied,
+		"rollback_summary": rollbackSummary,
+	})
+
+	message := fmt.Sprintf("⏸ Step %d paused: %s\n", step.ID, reason)
+	if rollbackSummary != "" {
+		if rollbackApplied {
+			message += fmt.Sprintf("↩ %s\n", rollbackSummary)
+		} else {
+			message += fmt.Sprintf("⚠ Rollback issue: %s\n", rollbackSummary)
+		}
+	}
+	a.safeSendToProgram(ui.StreamTextMsg(message))
+	a.safeSendToProgram(ui.PlanProgressMsg{
+		PlanID:        approvedPlan.ID,
+		CurrentStepID: step.ID,
+		CurrentTitle:  step.Title,
+		TotalSteps:    totalSteps,
+		Completed:     approvedPlan.CompletedCount(),
+		Progress:      approvedPlan.Progress(),
+		Status:        "paused",
+		Reason:        finalReason,
+	})
+}
+
+func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *plan.Plan, step *plan.Step) (string, string, bool, string) {
+	if step == nil {
+		return "", "", false, "missing step context for verification"
+	}
+
+	required := normalizeVerifyCommands(step.VerifyCommands)
+	if len(required) == 0 {
+		return "", "", false, fmt.Sprintf("step %d is missing verify_commands contract", step.ID)
+	}
+
+	bashTool, ok := a.registry.Get("bash")
+	if !ok {
+		return "", "", false, "cannot run verify_commands: bash tool is unavailable"
+	}
+
+	verifyCtx, cancel := context.WithTimeout(ctx, planStepVerifyTimeout)
+	defer cancel()
+	projectProfile := detectDoneGateProfile(a.workDir)
+
+	lines := make([]string, 0, len(required))
+	for i, cmd := range required {
+		if safe, safetyReason := a.validateVerifyCommandSafety(cmd, projectProfile); !safe {
+			return "", "", false, fmt.Sprintf("unsafe verify command blocked: %s (%s)", cmd, safetyReason)
+		}
+
+		wrapped := cmd
+		if wd := strings.TrimSpace(a.workDir); wd != "" {
+			wrapped = "cd " + shellQuote(wd) + " && " + cmd
+		}
+
+		args := map[string]any{
+			"command":     wrapped,
+			"description": fmt.Sprintf("plan step %d verify %d/%d", step.ID, i+1, len(required)),
+		}
+
+		if a.permManager != nil && a.permManager.IsEnabled() {
+			resp, err := a.permManager.Check(verifyCtx, "bash", args)
+			if err != nil {
+				return "", "", false, fmt.Sprintf("verify command blocked: %v", err)
+			}
+			if resp != nil && !resp.Allowed {
+				reason := strings.TrimSpace(resp.Reason)
+				if reason == "" {
+					reason = "permission denied"
+				}
+				return "", "", false, fmt.Sprintf("verify command blocked: %s", reason)
+			}
+		}
+
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("  ↳ verify %d/%d: %s\n", i+1, len(required), cmd)))
+
+		if approvedPlan != nil {
+			approvedPlan.RecordStepEffect(step.ID, "bash", map[string]any{"command": wrapped})
+			if a.planManager != nil {
+				_ = a.planManager.SaveCurrentPlan()
+			}
+		}
+
+		result, err := bashTool.Execute(verifyCtx, args)
+		if err != nil {
+			return "", "", false, fmt.Sprintf("verify command failed: %s (%v)", cmd, err)
+		}
+
+		detail := strings.TrimSpace(result.Content)
+		if len(detail) > 240 {
+			detail = detail[:240] + "..."
+		}
+		if !result.Success {
+			failure := strings.TrimSpace(result.Error)
+			if failure == "" {
+				failure = detail
+			}
+			if failure == "" {
+				failure = "command returned non-success status"
+			}
+			return "", "", false, fmt.Sprintf("verify command failed: %s (%s)", cmd, failure)
+		}
+
+		if detail == "" {
+			lines = append(lines, fmt.Sprintf("PASS `%s`", cmd))
+		} else {
+			lines = append(lines, fmt.Sprintf("PASS `%s`: %s", cmd, detail))
+		}
+	}
+
+	summary := fmt.Sprintf("verify_commands_passed=%d/%d", len(required), len(required))
+	return summary, "Verification results:\n- " + strings.Join(lines, "\n- "), true, ""
+}
+
 func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output string) ([]string, string, bool, string) {
 	if p == nil || step == nil {
 		return nil, "", false, "missing step context"
@@ -2052,11 +2192,27 @@ func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output 
 	}
 
 	hasOperationalProof := hasToolCalls || hasTools || hasFiles || hasCommands
+	artifactHints := collectExpectedArtifactHints(step)
+	explicitArtifactPaths := normalizeExpectedArtifactPaths(step.ExpectedArtifactPaths)
+	if a != nil && a.config != nil && a.config.Plan.RequireExpectedArtifactPaths {
+		if stepLikelyMutatesFiles(step, entry) && len(explicitArtifactPaths) == 0 {
+			return nil, "", false, fmt.Sprintf(
+				"step %d is missing expected_artifact_paths while mutating files (strict mode)",
+				step.ID,
+			)
+		}
+	}
+	artifactHintsProof, matchedArtifactHints, missingArtifactHints := artifactHintsCovered(artifactHints, entry, output)
 	hasArtifactProof := hasFiles || hasCommands || hasOutput
+	if len(artifactHints) > 0 {
+		hasArtifactProof = hasArtifactProof && artifactHintsProof
+	}
 	requiresArtifactProof := strings.TrimSpace(step.ExpectedArtifact) != ""
-	requiresVerificationProof := criteriaRequireVerificationSignals(step.SuccessCriteria, step.Description)
+	requiredVerifyCommands := normalizeVerifyCommands(step.VerifyCommands)
+	verifyCommandsSatisfied := verifyCommandsCovered(requiredVerifyCommands, entry)
+	requiresVerificationProof := len(requiredVerifyCommands) > 0 || criteriaRequireVerificationSignals(step.SuccessCriteria, step.Description)
 	verificationByOutput := outputContainsVerificationSignals(output)
-	hasVerificationProof := verificationByCommand || verificationByOutput
+	hasVerificationProof := verificationByCommand || verificationByOutput || verifyCommandsSatisfied
 
 	evidenceClasses := 0
 	if hasOperationalProof {
@@ -2074,8 +2230,18 @@ func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output 
 		requiredClasses = 2
 	}
 
+	if requiresArtifactProof && len(artifactHints) > 0 && !artifactHintsProof {
+		return nil, "", false, fmt.Sprintf(
+			"step %d missing artifact proof for expected paths: %s",
+			step.ID,
+			joinLimited(missingArtifactHints, 4),
+		)
+	}
 	if requiresArtifactProof && !hasArtifactProof {
 		return nil, "", false, fmt.Sprintf("step %d lacks proof for expected artifact", step.ID)
+	}
+	if len(requiredVerifyCommands) > 0 && !verifyCommandsSatisfied {
+		return nil, "", false, fmt.Sprintf("step %d missing proof that required verify_commands were executed", step.ID)
 	}
 	if requiresVerificationProof && !hasVerificationProof {
 		return nil, "", false, fmt.Sprintf("step %d lacks verification proof for success criteria", step.ID)
@@ -2091,14 +2257,45 @@ func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output 
 		return nil, "", false, "cannot complete step without proof (no diff/command/output evidence)"
 	}
 
+	proofJSON := buildStepCompletionProofJSON(
+		step,
+		hasArtifactProof,
+		hasVerificationProof,
+		hasOperationalProof,
+		hasOutput,
+		evidenceClasses,
+		requiredClasses,
+		len(requiredVerifyCommands),
+		verifyCommandsSatisfied,
+		len(artifactHints),
+		artifactHintsProof,
+		matchedArtifactHints,
+		missingArtifactHints,
+		entry,
+	)
+	if proofJSON != "" {
+		evidence = append(evidence, "proof_json="+proofJSON)
+	}
+
 	evidence = append(evidence, fmt.Sprintf("contract.artifact_proof=%t", hasArtifactProof))
+	evidence = append(evidence, fmt.Sprintf("contract.artifact_hints=%d", len(artifactHints)))
+	evidence = append(evidence, fmt.Sprintf("contract.artifact_hints_proof=%t", artifactHintsProof))
+	if len(matchedArtifactHints) > 0 {
+		evidence = append(evidence, "artifact_hints_matched="+joinLimited(matchedArtifactHints, 6))
+	}
 	evidence = append(evidence, fmt.Sprintf("contract.verification_proof=%t", hasVerificationProof))
+	evidence = append(evidence, fmt.Sprintf("contract.verify_commands=%d", len(requiredVerifyCommands)))
+	evidence = append(evidence, fmt.Sprintf("contract.verify_commands_proof=%t", verifyCommandsSatisfied))
 	evidence = append(evidence, fmt.Sprintf("contract.evidence_classes=%d/%d", evidenceClasses, requiredClasses))
 
 	note := fmt.Sprintf(
-		"Contract verification: artifact_proof=%t, verification_proof=%t, evidence_classes=%d/%d; success_criteria=%d; expected_artifact=%s; evidence_items=%d.",
+		"Contract verification: artifact_proof=%t, artifact_hints=%d(proof=%t), verification_proof=%t, verify_commands=%d(proof=%t), evidence_classes=%d/%d; success_criteria=%d; expected_artifact=%s; evidence_items=%d.",
 		hasArtifactProof,
+		len(artifactHints),
+		artifactHintsProof,
 		hasVerificationProof,
+		len(requiredVerifyCommands),
+		verifyCommandsSatisfied,
 		evidenceClasses,
 		requiredClasses,
 		len(step.SuccessCriteria),
@@ -2189,6 +2386,614 @@ func outputContainsVerificationSignals(output string) bool {
 	return false
 }
 
+func (a *App) validateVerifyCommandSafety(command string, projectProfile doneGateProfile) (bool, string) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false, "empty command"
+	}
+
+	lower := strings.ToLower(command)
+
+	denyContains := normalizePolicyMarkers(defaultVerifyPolicyDenyContains())
+	allowContains := make([]string, 0)
+	requireIntent := true
+	if a != nil && a.config != nil {
+		policy := a.config.Plan.VerifyPolicy
+		if policy.Enabled {
+			requireIntent = policy.RequireVerificationIntent
+			allowContains = append(allowContains, normalizePolicyMarkers(policy.AllowContains)...)
+			denyContains = append(denyContains, normalizePolicyMarkers(policy.DenyContains)...)
+			for _, profileKey := range a.resolveVerifyPolicyProfiles(lower, projectProfile) {
+				profileCfg, ok := policy.Profiles[profileKey]
+				if !ok {
+					continue
+				}
+				allowContains = append(allowContains, normalizePolicyMarkers(profileCfg.AllowContains)...)
+				denyContains = append(denyContains, normalizePolicyMarkers(profileCfg.DenyContains)...)
+			}
+		} else {
+			requireIntent = false
+		}
+	}
+	allowContains = dedupePolicyMarkers(allowContains)
+	denyContains = dedupePolicyMarkers(denyContains)
+	if commandContainsAny(lower, denyContains) {
+		return false, "contains disallowed mutating operation"
+	}
+	if len(allowContains) > 0 && !commandContainsAny(lower, allowContains) {
+		return false, "command does not match allowlist markers for active verify policy"
+	}
+
+	// Allow /dev/null redirection, deny file-writing redirects in verify stage.
+	if strings.Contains(lower, ">>") {
+		return false, "append redirection is not allowed in verify commands"
+	}
+	redirectionCheck := lower
+	for _, allowed := range []string{"2>&1", "1>/dev/null", "2>/dev/null", ">/dev/null"} {
+		redirectionCheck = strings.ReplaceAll(redirectionCheck, allowed, "")
+	}
+	if strings.Contains(redirectionCheck, ">") {
+		return false, "output redirection to files is not allowed in verify commands"
+	}
+
+	validator := tools.NewDefaultSafetyValidator()
+	check, err := validator.ValidateSafety(context.Background(), "bash", map[string]any{"command": command})
+	if err != nil {
+		return false, err.Error()
+	}
+	if check != nil {
+		if !check.IsValid {
+			return false, strings.Join(check.Errors, "; ")
+		}
+		for _, warning := range check.Warnings {
+			if strings.Contains(strings.ToLower(warning), "destructive operation detected") {
+				return false, warning
+			}
+		}
+	}
+
+	if requireIntent && !looksLikeVerificationCommand(lower) {
+		return false, "command does not match verification intent"
+	}
+
+	return true, ""
+}
+
+func defaultVerifyPolicyDenyContains() []string {
+	return []string{
+		"rm -", "rm -rf", " mv ", " cp ", " chmod ", " chown ", "sudo ",
+		"mkfs", " dd ", "git reset", "git clean", "git checkout --",
+		"git commit", "git push", "git stash", "npm install", "npm i ",
+		"pnpm add", "yarn add", "pip install", "go get ", "cargo add ",
+		"brew install", "apt install", "apk add", "dnf install", "pacman -s",
+		"curl |", "wget |",
+	}
+}
+
+func normalizePolicyMarkers(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		if value == "" {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func dedupePolicyMarkers(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func commandContainsAny(lowerCommand string, markers []string) bool {
+	lowerCommand = strings.ToLower(lowerCommand)
+	guarded := " " + lowerCommand
+	for _, marker := range markers {
+		marker = strings.TrimSpace(strings.ToLower(marker))
+		if marker == "" {
+			continue
+		}
+		if strings.Contains(guarded, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func stepLikelyMutatesFiles(step *plan.Step, entry *plan.RunLedgerEntry) bool {
+	if entry == nil {
+		return false
+	}
+
+	for _, toolName := range entry.Tools {
+		if isMutatingToolName(toolName) {
+			return true
+		}
+	}
+
+	requiredVerify := normalizeVerifyCommands(nil)
+	if step != nil {
+		requiredVerify = normalizeVerifyCommands(step.VerifyCommands)
+	}
+	for _, cmd := range entry.Commands {
+		if isCommandCoveredByVerify(cmd, requiredVerify) {
+			continue
+		}
+		if commandLooksMutating(cmd) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMutatingToolName(name string) bool {
+	switch strings.TrimSpace(strings.ToLower(name)) {
+	case "write", "edit", "batch", "move", "delete", "mkdir", "atomicwrite":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCommandCoveredByVerify(command string, required []string) bool {
+	if len(required) == 0 {
+		return false
+	}
+	fingerprint := normalizeCommandFingerprint(command)
+	if fingerprint == "" {
+		return false
+	}
+	for _, verifyCmd := range required {
+		v := normalizeCommandFingerprint(verifyCmd)
+		if v == "" {
+			continue
+		}
+		if fingerprint == v || strings.Contains(fingerprint, v) || strings.Contains(v, fingerprint) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandLooksMutating(command string) bool {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	if lower == "" {
+		return false
+	}
+	if looksLikeVerificationCommand(lower) {
+		return false
+	}
+	markers := []string{
+		"rm -", "mv ", "cp ", "chmod ", "chown ", "truncate ", "touch ",
+		"tee ", "sed -i", "perl -pi", "cat >", "echo >", ">>", "apply_patch",
+		"git add", "git rm", "git mv", "git commit", "git checkout --",
+		"npm install", "npm i ", "pnpm add", "yarn add", "pip install",
+		"go get ", "cargo add ", "mkdir ", "rmdir ",
+	}
+	return commandContainsAny(lower, markers)
+}
+
+func (a *App) resolveVerifyPolicyProfiles(lowerCommand string, profile doneGateProfile) []string {
+	keys := []string{"default"}
+	seen := map[string]bool{"default": true}
+	appendKey := func(key string) {
+		key = strings.TrimSpace(strings.ToLower(key))
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+
+	present := a.projectVerifyStacks(profile)
+	if len(present) == 1 {
+		appendKey(present[0])
+		return keys
+	}
+
+	stackKeywords := map[string][]string{
+		"go":     {"go test", "go vet", "go build"},
+		"node":   {"npm ", "pnpm ", "yarn ", "bun ", "eslint", "vitest", "jest", "tsc"},
+		"python": {"pytest", "ruff", "mypy", "python -m"},
+		"rust":   {"cargo "},
+		"java":   {"mvn ", "gradle", "./gradlew"},
+		"cmake":  {"cmake", "ctest"},
+		"bazel":  {"bazel "},
+		"make":   {"make "},
+		"php":    {"composer", "phpunit", "phpstan"},
+	}
+
+	for _, stack := range present {
+		keywords := stackKeywords[stack]
+		for _, kw := range keywords {
+			if strings.Contains(lowerCommand, kw) {
+				appendKey(stack)
+				break
+			}
+		}
+	}
+
+	return keys
+}
+
+func (a *App) projectVerifyStacks(profile doneGateProfile) []string {
+	stacks := make([]string, 0, 9)
+	if len(profile.GoModules) > 0 {
+		stacks = append(stacks, "go")
+	}
+	if len(profile.NodeProjects) > 0 {
+		stacks = append(stacks, "node")
+	}
+	if len(profile.PythonRoots) > 0 {
+		stacks = append(stacks, "python")
+	}
+	if len(profile.RustModules) > 0 {
+		stacks = append(stacks, "rust")
+	}
+	if len(profile.JavaProjects) > 0 {
+		stacks = append(stacks, "java")
+	}
+	if len(profile.CMakeProjects) > 0 {
+		stacks = append(stacks, "cmake")
+	}
+	if len(profile.BazelRoots) > 0 {
+		stacks = append(stacks, "bazel")
+	}
+	if len(profile.MakeProjects) > 0 {
+		stacks = append(stacks, "make")
+	}
+	if len(profile.PHPProjects) > 0 {
+		stacks = append(stacks, "php")
+	}
+	return stacks
+}
+
+func looksLikeVerificationCommand(lowerCommand string) bool {
+	if strings.TrimSpace(lowerCommand) == "" {
+		return false
+	}
+	signals := []string{
+		" test", "go test", "pytest", "cargo test", "npm test", "pnpm test", "yarn test", "bun test",
+		"lint", "typecheck", "check", "verify", "vet", "build", "compile", "validate",
+		"git diff --check", "git status", "git rev-parse", "mvn test", "gradle test", "composer validate",
+		"bazel test", "cmake --build", "make test", "phpstan", "ruff", "mypy",
+	}
+	padded := " " + lowerCommand
+	for _, signal := range signals {
+		if strings.Contains(padded, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeVerifyCommands(commands []string) []string {
+	if len(commands) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(commands))
+	seen := make(map[string]bool, len(commands))
+	for _, cmd := range commands {
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" {
+			continue
+		}
+		fingerprint := normalizeCommandFingerprint(cmd)
+		if fingerprint == "" || seen[fingerprint] {
+			continue
+		}
+		seen[fingerprint] = true
+		out = append(out, cmd)
+	}
+	return out
+}
+
+func normalizeExpectedArtifactPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		fingerprint := normalizePathHintForMatch(path)
+		if fingerprint == "" || seen[fingerprint] {
+			continue
+		}
+		seen[fingerprint] = true
+		out = append(out, path)
+	}
+	return out
+}
+
+func normalizeCommandFingerprint(cmd string) string {
+	cmd = strings.TrimSpace(strings.ToLower(cmd))
+	if cmd == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(cmd), " ")
+}
+
+func verifyCommandsCovered(required []string, entry *plan.RunLedgerEntry) bool {
+	if len(required) == 0 {
+		return true
+	}
+	if entry == nil || len(entry.Commands) == 0 {
+		return false
+	}
+
+	executed := make([]string, 0, len(entry.Commands))
+	for _, cmd := range entry.Commands {
+		fingerprint := normalizeCommandFingerprint(cmd)
+		if fingerprint == "" {
+			continue
+		}
+		executed = append(executed, fingerprint)
+	}
+	if len(executed) == 0 {
+		return false
+	}
+
+	for _, requiredCmd := range required {
+		requiredFingerprint := normalizeCommandFingerprint(requiredCmd)
+		if requiredFingerprint == "" {
+			continue
+		}
+		found := false
+		for _, executedCmd := range executed {
+			if executedCmd == requiredFingerprint ||
+				strings.Contains(executedCmd, requiredFingerprint) ||
+				strings.Contains(requiredFingerprint, executedCmd) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func extractArtifactPathHints(expectedArtifact string) []string {
+	expectedArtifact = strings.TrimSpace(expectedArtifact)
+	if expectedArtifact == "" {
+		return nil
+	}
+
+	tokens := strings.FieldsFunc(expectedArtifact, func(r rune) bool {
+		switch r {
+		case ' ', '\n', '\t', ',', ';', '|':
+			return true
+		default:
+			return false
+		}
+	})
+
+	hints := make([]string, 0, len(tokens))
+	seen := make(map[string]bool)
+	for _, token := range tokens {
+		candidate := normalizePathToken(token)
+		if !looksLikeArtifactPathHint(candidate) {
+			continue
+		}
+		normalized := normalizePathHintForMatch(candidate)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		hints = append(hints, candidate)
+	}
+	return hints
+}
+
+func collectExpectedArtifactHints(step *plan.Step) []string {
+	if step == nil {
+		return nil
+	}
+	hints := make([]string, 0, len(step.ExpectedArtifactPaths)+4)
+	seen := make(map[string]bool)
+	appendHint := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		fingerprint := normalizePathHintForMatch(raw)
+		if fingerprint == "" || seen[fingerprint] {
+			return
+		}
+		seen[fingerprint] = true
+		hints = append(hints, raw)
+	}
+
+	for _, p := range normalizeExpectedArtifactPaths(step.ExpectedArtifactPaths) {
+		appendHint(p)
+	}
+	for _, inferred := range extractArtifactPathHints(step.ExpectedArtifact) {
+		appendHint(inferred)
+	}
+	return hints
+}
+
+func looksLikeArtifactPathHint(token string) bool {
+	if token == "" {
+		return false
+	}
+	if strings.HasPrefix(token, "/") || strings.HasPrefix(token, "./") || strings.HasPrefix(token, "../") {
+		return true
+	}
+	if strings.Contains(token, "/") || strings.Contains(token, "\\") {
+		return true
+	}
+	ext := filepath.Ext(token)
+	if ext != "" && len(ext) <= 8 && len(token) > len(ext) {
+		return true
+	}
+	return false
+}
+
+func normalizePathHintForMatch(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.ReplaceAll(value, "\\", "/")
+	value = strings.Trim(value, "\"'`")
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.TrimPrefix(value, "./")
+	value = strings.TrimPrefix(value, "/")
+	value = strings.Trim(value, "/")
+	return value
+}
+
+func artifactHintsCovered(hints []string, entry *plan.RunLedgerEntry, output string) (bool, []string, []string) {
+	if len(hints) == 0 {
+		return true, nil, nil
+	}
+
+	candidates := make([]string, 0, 16)
+	addCandidate := func(raw string) {
+		normalized := normalizePathHintForMatch(raw)
+		if normalized == "" {
+			return
+		}
+		candidates = append(candidates, normalized)
+	}
+
+	if entry != nil {
+		for _, file := range entry.FilesTouched {
+			addCandidate(file)
+		}
+		for _, cmd := range entry.Commands {
+			for _, pathHint := range extractCommandPathHints(cmd) {
+				addCandidate(pathHint)
+			}
+		}
+	}
+	for _, outputHint := range extractArtifactPathHints(output) {
+		addCandidate(outputHint)
+	}
+
+	matched := make([]string, 0, len(hints))
+	missing := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		hintNorm := normalizePathHintForMatch(hint)
+		if hintNorm == "" {
+			continue
+		}
+		found := false
+		for _, candidate := range candidates {
+			if candidate == hintNorm ||
+				strings.HasSuffix(candidate, "/"+hintNorm) ||
+				strings.Contains(candidate, hintNorm) ||
+				strings.Contains(hintNorm, candidate) {
+				found = true
+				break
+			}
+		}
+		if found {
+			matched = append(matched, hint)
+		} else {
+			missing = append(missing, hint)
+		}
+	}
+	return len(missing) == 0, matched, missing
+}
+
+func buildStepContractJSON(step *plan.Step, totalSteps int) string {
+	if step == nil {
+		return ""
+	}
+
+	payload := map[string]any{
+		"step_id":                 step.ID,
+		"total_steps":             totalSteps,
+		"title":                   strings.TrimSpace(step.Title),
+		"description":             strings.TrimSpace(step.Description),
+		"inputs":                  step.Inputs,
+		"expected_artifact":       strings.TrimSpace(step.ExpectedArtifact),
+		"expected_artifact_paths": normalizeExpectedArtifactPaths(step.ExpectedArtifactPaths),
+		"success_criteria":        step.SuccessCriteria,
+		"verify_commands":         normalizeVerifyCommands(step.VerifyCommands),
+		"rollback":                strings.TrimSpace(step.Rollback),
+	}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func buildStepCompletionProofJSON(
+	step *plan.Step,
+	hasArtifactProof, hasVerificationProof, hasOperationalProof, hasOutput bool,
+	evidenceClasses, requiredClasses int,
+	verifyCommandsCount int,
+	verifyCommandsProof bool,
+	artifactHintsCount int,
+	artifactHintsProof bool,
+	artifactHintsMatched []string,
+	artifactHintsMissing []string,
+	entry *plan.RunLedgerEntry,
+) string {
+	if step == nil {
+		return ""
+	}
+
+	proof := map[string]any{
+		"step_id":                 step.ID,
+		"expected_artifact":       strings.TrimSpace(step.ExpectedArtifact),
+		"expected_artifact_paths": normalizeExpectedArtifactPaths(step.ExpectedArtifactPaths),
+		"success_criteria_count":  len(step.SuccessCriteria),
+		"artifact_proof":          hasArtifactProof,
+		"verification_proof":      hasVerificationProof,
+		"operational_proof":       hasOperationalProof,
+		"output_proof":            hasOutput,
+		"evidence_classes":        evidenceClasses,
+		"required_classes":        requiredClasses,
+		"verify_commands_count":   verifyCommandsCount,
+		"verify_commands_proof":   verifyCommandsProof,
+		"artifact_hints_count":    artifactHintsCount,
+		"artifact_hints_proof":    artifactHintsProof,
+	}
+	if len(artifactHintsMatched) > 0 {
+		proof["artifact_hints_matched"] = artifactHintsMatched
+	}
+	if len(artifactHintsMissing) > 0 {
+		proof["artifact_hints_missing"] = artifactHintsMissing
+	}
+
+	if entry != nil {
+		proof["tool_calls"] = entry.ToolCalls
+		proof["tools"] = entry.Tools
+		proof["files_touched"] = entry.FilesTouched
+		proof["commands"] = entry.Commands
+	}
+
+	data, err := json.Marshal(proof)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
 // StepPromptContext holds context for building step prompts.
 type StepPromptContext struct {
 	Step            *plan.Step
@@ -2245,14 +3050,32 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 	if ctx.Step.ExpectedArtifact != "" {
 		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", ctx.Step.ExpectedArtifact))
 	}
+	if len(ctx.Step.ExpectedArtifactPaths) > 0 {
+		sb.WriteString("- Expected artifact paths:\n")
+		for _, path := range ctx.Step.ExpectedArtifactPaths {
+			sb.WriteString(fmt.Sprintf("  - %s\n", path))
+		}
+	}
 	if len(ctx.Step.SuccessCriteria) > 0 {
 		sb.WriteString("- Success criteria:\n")
 		for _, c := range ctx.Step.SuccessCriteria {
 			sb.WriteString(fmt.Sprintf("  - %s\n", c))
 		}
 	}
+	if len(ctx.Step.VerifyCommands) > 0 {
+		sb.WriteString("- Verify commands:\n")
+		for _, cmd := range ctx.Step.VerifyCommands {
+			sb.WriteString(fmt.Sprintf("  - %s\n", cmd))
+		}
+	}
 	if ctx.Step.Rollback != "" {
 		sb.WriteString(fmt.Sprintf("- Rollback: %s\n", ctx.Step.Rollback))
+	}
+	if contractJSON := buildStepContractJSON(ctx.Step, ctx.TotalSteps); contractJSON != "" {
+		sb.WriteString("\n### StepContractJSON\n")
+		sb.WriteString("```json\n")
+		sb.WriteString(contractJSON)
+		sb.WriteString("\n```\n")
 	}
 
 	// Previous steps summary (compact)
@@ -2267,6 +3090,7 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 	sb.WriteString("- Build upon work from previous steps\n")
 	sb.WriteString("- Provide a brief summary of what was done\n")
 	sb.WriteString("- Provide explicit evidence (files/commands/output) for completion\n")
+	sb.WriteString("- Verify commands are mandatory and must pass before completion\n")
 	sb.WriteString("- Report any issues or deviations from the plan\n")
 
 	return sb.String()

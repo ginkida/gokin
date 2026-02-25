@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -218,6 +219,10 @@ type App struct {
 	// Plan execution watchdog
 	stepHeartbeatMu   sync.RWMutex
 	lastStepHeartbeat time.Time
+
+	// Step rollback snapshots (rollback-first guardrail)
+	stepRollbackMu        sync.Mutex
+	stepRollbackSnapshots map[string]*stepRollbackSnapshot
 
 	// Execution journal and recovery
 	journal *ExecutionJournal
@@ -761,6 +766,184 @@ func (a *App) GetLedgerReport() string {
 	}
 
 	return sb.String()
+}
+
+// GetPlanProofReport returns contract/evidence proof diagnostics for one plan step.
+// stepID: 0 means auto-select current/most-recent actionable step.
+func (a *App) GetPlanProofReport(stepID int) string {
+	if a.planManager == nil {
+		return "Plan proof unavailable: plan manager not initialized."
+	}
+	p := a.planManager.GetCurrentPlan()
+	if p == nil {
+		return "Plan proof: no active plan."
+	}
+
+	steps := p.GetStepsSnapshot()
+	if len(steps) == 0 {
+		return fmt.Sprintf("Plan proof: active plan %s has no steps.", p.ID)
+	}
+	target := selectPlanProofStep(steps, a.planManager.GetCurrentStepID(), stepID)
+	if target == nil {
+		return fmt.Sprintf("Plan proof: step %d not found.", stepID)
+	}
+
+	ledger := p.GetRunLedgerSnapshot()
+	entry := ledger[target.ID]
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Plan proof for %s (%s)\n", p.Title, p.ID))
+	sb.WriteString(fmt.Sprintf("Step %d: %s\n", target.ID, target.Title))
+	sb.WriteString(fmt.Sprintf("- status: %s\n", target.Status.String()))
+	if !target.StartTime.IsZero() {
+		sb.WriteString(fmt.Sprintf("- started: %s\n", target.StartTime.Format("2006-01-02 15:04:05")))
+	}
+	if !target.EndTime.IsZero() {
+		sb.WriteString(fmt.Sprintf("- ended: %s\n", target.EndTime.Format("2006-01-02 15:04:05")))
+	}
+	if strings.TrimSpace(target.Error) != "" {
+		sb.WriteString(fmt.Sprintf("- error: %s\n", target.Error))
+	}
+
+	sb.WriteString("\nContract:\n")
+	if len(target.Inputs) > 0 {
+		sb.WriteString(fmt.Sprintf("- inputs: %s\n", strings.Join(target.Inputs, "; ")))
+	}
+	if ea := strings.TrimSpace(target.ExpectedArtifact); ea != "" {
+		sb.WriteString(fmt.Sprintf("- expected_artifact: %s\n", ea))
+	}
+	if len(target.ExpectedArtifactPaths) > 0 {
+		sb.WriteString(fmt.Sprintf("- expected_artifact_paths: %s\n", strings.Join(target.ExpectedArtifactPaths, ", ")))
+	} else {
+		sb.WriteString("- expected_artifact_paths: (none)\n")
+	}
+	if len(target.SuccessCriteria) > 0 {
+		sb.WriteString(fmt.Sprintf("- success_criteria: %s\n", strings.Join(target.SuccessCriteria, "; ")))
+	}
+	if len(target.VerifyCommands) > 0 {
+		sb.WriteString(fmt.Sprintf("- verify_commands: %s\n", strings.Join(target.VerifyCommands, "; ")))
+	}
+	if rb := strings.TrimSpace(target.Rollback); rb != "" {
+		sb.WriteString(fmt.Sprintf("- rollback: %s\n", rb))
+	}
+
+	sb.WriteString("\nProof:\n")
+	if note := strings.TrimSpace(target.VerificationNote); note != "" {
+		sb.WriteString(fmt.Sprintf("- verification_note: %s\n", note))
+	} else {
+		sb.WriteString("- verification_note: (empty)\n")
+	}
+	sb.WriteString(fmt.Sprintf("- evidence_items: %d\n", len(target.Evidence)))
+	for _, evidence := range target.Evidence {
+		evidence = strings.TrimSpace(evidence)
+		if evidence == "" {
+			continue
+		}
+		if strings.HasPrefix(evidence, "proof_json=") {
+			raw := strings.TrimSpace(strings.TrimPrefix(evidence, "proof_json="))
+			if pretty := prettyProofJSON(raw); pretty != "" {
+				sb.WriteString("- proof_json:\n")
+				sb.WriteString(pretty)
+				sb.WriteString("\n")
+				continue
+			}
+		}
+		sb.WriteString("- ")
+		sb.WriteString(evidence)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\nRun ledger:\n")
+	if entry == nil {
+		sb.WriteString("- no ledger entry for step\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("- tool_calls: %d\n", entry.ToolCalls))
+		sb.WriteString(fmt.Sprintf("- tools: %d\n", len(entry.Tools)))
+		if len(entry.Tools) > 0 {
+			sb.WriteString("  ")
+			sb.WriteString(strings.Join(entry.Tools, ", "))
+			sb.WriteString("\n")
+		}
+		sb.WriteString(fmt.Sprintf("- files_touched: %d\n", len(entry.FilesTouched)))
+		if len(entry.FilesTouched) > 0 {
+			sb.WriteString("  ")
+			sb.WriteString(strings.Join(entry.FilesTouched, ", "))
+			sb.WriteString("\n")
+		}
+		sb.WriteString(fmt.Sprintf("- commands: %d\n", len(entry.Commands)))
+		if len(entry.Commands) > 0 {
+			for _, cmd := range entry.Commands {
+				sb.WriteString("  - ")
+				sb.WriteString(cmd)
+				sb.WriteString("\n")
+			}
+		}
+		sb.WriteString(fmt.Sprintf("- duplicate_effects: %d\n", entry.DuplicateEffects))
+		sb.WriteString(fmt.Sprintf("- partial_effects: %t\n", entry.PartialEffects))
+		sb.WriteString(fmt.Sprintf("- completed: %t\n", entry.Completed))
+	}
+
+	if a.config != nil && a.config.Plan.RequireExpectedArtifactPaths {
+		sb.WriteString("\nStrict mode:\n- require_expected_artifact_paths: enabled\n")
+	} else {
+		sb.WriteString("\nStrict mode:\n- require_expected_artifact_paths: disabled\n")
+	}
+
+	return sb.String()
+}
+
+func selectPlanProofStep(steps []*plan.Step, currentStepID int, requestedStepID int) *plan.Step {
+	if requestedStepID > 0 {
+		for _, step := range steps {
+			if step != nil && step.ID == requestedStepID {
+				return step
+			}
+		}
+		return nil
+	}
+	if currentStepID > 0 {
+		for _, step := range steps {
+			if step != nil && step.ID == currentStepID {
+				return step
+			}
+		}
+	}
+	for _, step := range steps {
+		if step != nil && (step.Status == plan.StatusInProgress || step.Status == plan.StatusPaused || step.Status == plan.StatusFailed) {
+			return step
+		}
+	}
+	for i := len(steps) - 1; i >= 0; i-- {
+		step := steps[i]
+		if step == nil {
+			continue
+		}
+		if len(step.Evidence) > 0 || strings.TrimSpace(step.VerificationNote) != "" {
+			return step
+		}
+	}
+	for _, step := range steps {
+		if step != nil {
+			return step
+		}
+	}
+	return nil
+}
+
+func prettyProofJSON(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	b, err := json.MarshalIndent(payload, "  ", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // GetJournalReport returns recent execution journal entries.

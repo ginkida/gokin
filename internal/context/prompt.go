@@ -5,6 +5,12 @@ import (
 	"strings"
 )
 
+const (
+	maxSystemPromptChars       = 28000
+	maxPlanExecutionPromptChar = 20000
+	maxSubAgentPromptChars     = 12000
+)
+
 // baseSystemPrompt is the foundation for all prompts.
 const baseSystemPrompt = `You are Gokin, an AI coding assistant. You help users work with code through tools for reading, writing, searching, and executing commands.
 
@@ -119,7 +125,8 @@ Call enter_plan_mode with:
 - Description explaining approach and WHY
 - Concrete steps mapping to specific file changes
 - Steps ordered by dependency
-- Include verification steps (tests, builds)
+- Include per-step verify_commands that the orchestrator can run deterministically
+- Include per-step expected_artifact_paths when concrete files/paths are known
 
 PHASE 3: WAIT FOR APPROVAL
 Tool blocks until user approves, rejects, or requests modifications.
@@ -143,6 +150,7 @@ STEP QUALITY:
 - Specific: "Add validateEmail function to internal/auth/validator.go" not "add validation"
 - Atomic: One logical change per step
 - Verifiable: Include HOW to verify the step worked
+- Contract-complete: Include verify_commands and expected_artifact_paths for each step
 - Ordered: Dependencies before dependents
 
 CONTRACT-FIRST PLANNING:
@@ -360,7 +368,7 @@ func (b *PromptBuilder) Build() string {
 		builder.WriteString(fmt.Sprintf("**%s:** %s\n\n", name, pattern))
 	}
 
-	return builder.String()
+	return applyPromptBudget(builder.String(), maxSystemPromptChars)
 }
 
 // buildProjectSection builds the project-specific section.
@@ -412,7 +420,7 @@ func (b *PromptBuilder) BuildWithContext(additionalContext string) string {
 		return base
 	}
 
-	return base + "\n\nAdditional context:\n" + additionalContext
+	return applyPromptBudget(base+"\n\nAdditional context:\n"+additionalContext, maxSystemPromptChars)
 }
 
 // GetProjectSummary returns a brief summary of the detected project.
@@ -497,13 +505,14 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 	builder.WriteString("2. Always READ files before editing them\n")
 	builder.WriteString("3. Do NOT deviate from the plan — execute exactly what was approved\n")
 	builder.WriteString("4. Do NOT call update_plan_progress or exit_plan_mode — the orchestrator handles this automatically\n")
-	builder.WriteString("5. Provide a brief summary of what was done at the end\n")
-	builder.WriteString("6. Report any issues or deviations from the plan\n")
+	builder.WriteString("5. verify_commands are mandatory and must pass before a step is completed\n")
+	builder.WriteString("6. Provide a brief summary of what was done at the end\n")
+	builder.WriteString("7. Report any issues or deviations from the plan\n")
 
 	// Working directory
 	builder.WriteString(fmt.Sprintf("\nWorking directory: %s\n", b.workDir))
 
-	return builder.String()
+	return applyPromptBudget(builder.String(), maxPlanExecutionPromptChar)
 }
 
 // BuildPlanExecutionPromptWithContext is like BuildPlanExecutionPrompt but includes
@@ -529,7 +538,7 @@ func (b *PromptBuilder) BuildPlanExecutionPromptWithContext(title, description s
 		builder.WriteString(lines[1])
 	}
 
-	return builder.String()
+	return applyPromptBudget(builder.String(), maxPlanExecutionPromptChar)
 }
 
 // BuildSubAgentPrompt builds a compact project context for injection into sub-agents.
@@ -578,5 +587,153 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 		builder.WriteString(fmt.Sprintf("Project: %s\n", b.projectInfo.Name))
 	}
 
-	return builder.String()
+	return applyPromptBudget(builder.String(), maxSubAgentPromptChars)
+}
+
+func applyPromptBudget(prompt string, maxChars int) string {
+	prompt = strings.TrimSpace(prompt)
+	if maxChars <= 0 || len(prompt) <= maxChars {
+		return prompt
+	}
+
+	contractBlock := extractContractBlock(prompt)
+
+	trimmed := prompt
+	trimmed = removeHeadingSection(trimmed, "## Common Task Patterns")
+	trimmed = truncateHeadingSection(trimmed, "## Tool Usage Hints", 1000)
+	trimmed = truncateHeadingSection(trimmed, "## Detected Project Context", 1800)
+	trimmed = truncateHeadingSection(trimmed, "## Project Instructions", 2200)
+	trimmed = truncateHeadingSection(trimmed, "## Memory", 2800)
+	trimmed = truncatePlanningProtocolSection(trimmed, 2600)
+	trimmed = strings.TrimSpace(trimmed)
+
+	if contractBlock != "" && !strings.Contains(trimmed, "=== ACTIVE CONTRACT ===") {
+		trimmed += "\n\n" + contractBlock
+	}
+
+	if len(trimmed) <= maxChars {
+		return trimmed
+	}
+
+	if contractBlock != "" {
+		prefixBudget := maxChars - len(contractBlock) - len("\n\n")
+		if prefixBudget > 200 {
+			if len(trimmed) > prefixBudget {
+				trimmed = strings.TrimSpace(trimmed[:prefixBudget]) + "\n\n[Prompt compacted due to budget]"
+			}
+			trimmed += "\n\n" + contractBlock
+			if len(trimmed) <= maxChars {
+				return trimmed
+			}
+		}
+	}
+
+	if maxChars > 40 {
+		return strings.TrimSpace(trimmed[:maxChars-40]) + "\n\n[Prompt compacted due to budget]"
+	}
+	return strings.TrimSpace(trimmed[:maxChars])
+}
+
+func extractContractBlock(prompt string) string {
+	start := strings.Index(prompt, "=== ACTIVE CONTRACT ===")
+	if start < 0 {
+		return ""
+	}
+	endRel := strings.Index(prompt[start:], "=== END CONTRACT ===")
+	if endRel < 0 {
+		return ""
+	}
+	end := start + endRel + len("=== END CONTRACT ===")
+	if tailRel := strings.Index(prompt[end:], "\nOperate strictly within this contract's boundaries."); tailRel >= 0 {
+		end += tailRel + len("\nOperate strictly within this contract's boundaries.")
+	}
+	if end > len(prompt) {
+		end = len(prompt)
+	}
+	return strings.TrimSpace(prompt[start:end])
+}
+
+func removeHeadingSection(prompt, heading string) string {
+	start := strings.Index(prompt, heading)
+	if start < 0 {
+		return prompt
+	}
+
+	sectionEnd := findNextHeading(prompt, start+len(heading))
+	if sectionEnd < 0 {
+		return strings.TrimSpace(prompt[:start])
+	}
+	return strings.TrimSpace(prompt[:start] + prompt[sectionEnd:])
+}
+
+func truncateHeadingSection(prompt, heading string, maxSectionChars int) string {
+	if maxSectionChars <= 0 {
+		return removeHeadingSection(prompt, heading)
+	}
+
+	start := strings.Index(prompt, heading)
+	if start < 0 {
+		return prompt
+	}
+	sectionEnd := findNextHeading(prompt, start+len(heading))
+	if sectionEnd < 0 {
+		sectionEnd = len(prompt)
+	}
+
+	section := prompt[start:sectionEnd]
+	if len(section) <= maxSectionChars {
+		return prompt
+	}
+
+	truncated := strings.TrimSpace(section[:maxSectionChars]) + "\n[section compacted]"
+	return strings.TrimSpace(prompt[:start] + truncated + prompt[sectionEnd:])
+}
+
+func truncatePlanningProtocolSection(prompt string, maxSectionChars int) string {
+	start := strings.Index(prompt, "AUTOMATIC PLANNING PROTOCOL")
+	if start < 0 {
+		return prompt
+	}
+
+	sectionStart := strings.LastIndex(prompt[:start], "\n")
+	if sectionStart < 0 {
+		sectionStart = start
+	}
+	sectionEnd := strings.Index(prompt[start:], "## Common Task Patterns")
+	if sectionEnd < 0 {
+		sectionEnd = len(prompt)
+	} else {
+		sectionEnd = start + sectionEnd
+	}
+
+	section := prompt[sectionStart:sectionEnd]
+	if len(section) <= maxSectionChars {
+		return prompt
+	}
+	truncated := strings.TrimSpace(section[:maxSectionChars]) + "\n[planning protocol compacted]"
+	return strings.TrimSpace(prompt[:sectionStart] + "\n" + truncated + prompt[sectionEnd:])
+}
+
+func findNextHeading(prompt string, from int) int {
+	if from < 0 || from >= len(prompt) {
+		return -1
+	}
+
+	candidates := []string{
+		"\n## ",
+		"\n=== ACTIVE CONTRACT ===",
+		"\n═══════════════════════════════════════════════════════════════════════",
+	}
+	next := -1
+	for _, marker := range candidates {
+		idx := strings.Index(prompt[from:], marker)
+		if idx < 0 {
+			continue
+		}
+		pos := from + idx
+		if next == -1 || pos < next {
+			next = pos
+		}
+	}
+	return next
 }

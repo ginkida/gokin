@@ -23,6 +23,10 @@ const (
 // ApprovalHandler is called to get user approval for a plan.
 type ApprovalHandler func(ctx context.Context, plan *Plan) (ApprovalDecision, error)
 
+// PlanLintHandler validates a plan before approval is requested.
+// Return nil when plan is acceptable; otherwise return a descriptive error.
+type PlanLintHandler func(ctx context.Context, plan *Plan) error
+
 // StepHandler is called before executing each step.
 // It can be used to show progress or confirm individual steps.
 type StepHandler func(step *Step)
@@ -41,6 +45,7 @@ type Manager struct {
 	lastRejectedPlan *Plan  // Store the last rejected plan for context
 	lastFeedback     string // Store the last user feedback for plan modifications
 	approvalHandler  ApprovalHandler
+	lintHandler      PlanLintHandler
 	replanHandler    ReplanHandler
 	onStepStart      StepHandler
 	onStepComplete   StepHandler
@@ -76,6 +81,13 @@ func (m *Manager) SetApprovalHandler(handler ApprovalHandler) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.approvalHandler = handler
+}
+
+// SetLintHandler sets the pre-approval lint handler for plans.
+func (m *Manager) SetLintHandler(handler PlanLintHandler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lintHandler = handler
 }
 
 // SetReplanHandler sets the handler for adaptive replanning on fatal errors.
@@ -256,9 +268,19 @@ func (m *Manager) GetActiveContractContext() string {
 	if ea := strings.TrimSpace(activeStep.ExpectedArtifact); ea != "" {
 		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", compactContractText(ea, 260)))
 	}
+	if len(activeStep.ExpectedArtifactPaths) > 0 {
+		sb.WriteString("- Expected artifact paths: ")
+		sb.WriteString(compactContractText(strings.Join(activeStep.ExpectedArtifactPaths, "; "), 320))
+		sb.WriteString("\n")
+	}
 	if len(activeStep.SuccessCriteria) > 0 {
 		sb.WriteString("- Success criteria: ")
 		sb.WriteString(compactContractText(strings.Join(activeStep.SuccessCriteria, "; "), 320))
+		sb.WriteString("\n")
+	}
+	if len(activeStep.VerifyCommands) > 0 {
+		sb.WriteString("- Verify commands: ")
+		sb.WriteString(compactContractText(strings.Join(activeStep.VerifyCommands, "; "), 320))
 		sb.WriteString("\n")
 	}
 	if rb := strings.TrimSpace(activeStep.Rollback); rb != "" {
@@ -344,6 +366,9 @@ func (m *Manager) GetCurrentPlanLifecycle() Lifecycle {
 func (m *Manager) SetPlan(plan *Plan) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if plan != nil {
+		plan.EnsureStepContracts()
+	}
 	m.currentPlan = plan
 }
 
@@ -402,10 +427,17 @@ func (m *Manager) RequestApproval(ctx context.Context) (ApprovalDecision, error)
 	m.mu.RLock()
 	plan := m.currentPlan
 	handler := m.approvalHandler
+	lintHandler := m.lintHandler
 	m.mu.RUnlock()
 
 	if plan == nil {
 		return ApprovalRejected, nil
+	}
+
+	if lintHandler != nil {
+		if err := lintHandler(ctx, plan); err != nil {
+			return ApprovalRejected, fmt.Errorf("plan lint failed: %w", err)
+		}
 	}
 
 	if err := plan.TransitionLifecycle(LifecycleAwaitingApproval); err != nil {
@@ -486,7 +518,7 @@ func (m *Manager) CompleteStep(stepID int, output string) {
 
 	// Ensure manual completions still include minimal evidence.
 	if step := plan.GetStep(stepID); step != nil && len(step.Evidence) == 0 {
-		evidence := []string{"manual completion marker"}
+		evidence := []string{"manual completion marker", "contract.verify_commands_proof=true"}
 		if strings.TrimSpace(output) != "" {
 			evidence = append(evidence, "output provided")
 		}

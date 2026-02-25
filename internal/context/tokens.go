@@ -19,29 +19,120 @@ import (
 // DefaultModelLimits provides default token limits for known models.
 // Keys are used both for exact match and as substrings for fuzzy matching.
 var DefaultModelLimits = map[string]TokenLimits{
+	// Gemini
 	"gemini-2.0-flash": {
 		MaxInputTokens:  1048576, // 1M tokens
 		MaxOutputTokens: 8192,
 	},
 	"gemini-2.5-flash": {
-		MaxInputTokens:  1048576, // 1M tokens
+		MaxInputTokens:  1048576,
 		MaxOutputTokens: 8192,
 	},
 	"gemini-2.5-pro": {
-		MaxInputTokens:  1048576, // 1M tokens
+		MaxInputTokens:  1048576,
 		MaxOutputTokens: 8192,
 	},
+	"gemini-3.1-pro": {
+		MaxInputTokens:  1048576,
+		MaxOutputTokens: 65536,
+	},
 	"gemini-3-flash": {
-		MaxInputTokens:  1048576, // 1M tokens
+		MaxInputTokens:  1048576,
 		MaxOutputTokens: 65536,
 	},
 	"gemini-3-pro": {
-		MaxInputTokens:  1048576, // 1M tokens
+		MaxInputTokens:  1048576,
 		MaxOutputTokens: 65536,
+	},
+	// Anthropic Claude
+	"claude-opus": {
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 32000,
+	},
+	"claude-sonnet": {
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 16384,
+	},
+	"claude-haiku": {
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 8192,
+	},
+	// OpenAI Codex
+	"gpt-5.3-codex-spark": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 16384,
+	},
+	"gpt-5.3-codex": {
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 16384,
+	},
+	"gpt-5.2-codex": {
+		MaxInputTokens:  400000,
+		MaxOutputTokens: 16384,
+	},
+	"gpt-5.1-codex": {
+		MaxInputTokens:  400000,
+		MaxOutputTokens: 16384,
+	},
+	"gpt-5-codex": {
+		MaxInputTokens:  400000,
+		MaxOutputTokens: 16384,
+	},
+	"gpt-5.2": {
+		MaxInputTokens:  400000,
+		MaxOutputTokens: 16384,
+	},
+	"gpt-5.1": {
+		MaxInputTokens:  400000,
+		MaxOutputTokens: 16384,
+	},
+	"gpt-5": {
+		MaxInputTokens:  400000,
+		MaxOutputTokens: 16384,
+	},
+	"gpt-4o": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 16384,
+	},
+	"o1": {
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 100000,
+	},
+	"o3": {
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 100000,
+	},
+	"o4-mini": {
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 100000,
+	},
+	// GLM
+	"glm-5": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 131072,
 	},
 	"glm-4.7": {
 		MaxInputTokens:  128000,
 		MaxOutputTokens: 131072,
+	},
+	// DeepSeek
+	"deepseek-chat": {
+		MaxInputTokens:  64000,
+		MaxOutputTokens: 8192,
+	},
+	"deepseek-reasoner": {
+		MaxInputTokens:  64000,
+		MaxOutputTokens: 8192,
+	},
+	// MiniMax
+	"minimax": {
+		MaxInputTokens:  204800,
+		MaxOutputTokens: 16384,
+	},
+	// Kimi
+	"kimi": {
+		MaxInputTokens:  256000,
+		MaxOutputTokens: 32768,
 	},
 }
 
@@ -58,9 +149,45 @@ var DefaultPricing = map[string]ModelPricing{
 	"gemini-2.0-flash": {InputCostPer1M: 0.10, OutputCostPer1M: 0.40},
 	"gemini-flash":     {InputCostPer1M: 0.10, OutputCostPer1M: 0.40},
 	"gemini-pro":       {InputCostPer1M: 3.50, OutputCostPer1M: 10.50},
+	"gemini-3.1-pro":   {InputCostPer1M: 2.00, OutputCostPer1M: 12.00},
 	"gemini-3-flash":   {InputCostPer1M: 0.50, OutputCostPer1M: 3.00},
 	"gemini-3-pro":     {InputCostPer1M: 2.00, OutputCostPer1M: 12.00},
-	"glm-4":            {InputCostPer1M: 1.00, OutputCostPer1M: 1.00}, // Placeholder
+	"gemini-2.5-flash": {InputCostPer1M: 0.15, OutputCostPer1M: 0.60},
+	"gemini-2.5-pro":   {InputCostPer1M: 1.25, OutputCostPer1M: 10.00},
+
+	// Anthropic
+	"claude-opus":   {InputCostPer1M: 15.00, OutputCostPer1M: 75.00},
+	"claude-sonnet": {InputCostPer1M: 3.00, OutputCostPer1M: 15.00},
+	"claude-haiku":  {InputCostPer1M: 0.80, OutputCostPer1M: 4.00},
+
+	// OpenAI Codex (ChatGPT subscription — no per-token cost)
+	"gpt-5.3-codex-spark": {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
+	"gpt-5.3-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
+	"gpt-5.2-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
+	"gpt-5.1-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
+	"gpt-5-codex":         {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
+	"gpt-5.2":       {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
+	"gpt-5.1":       {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
+	"gpt-5":         {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
+	"gpt-4o":        {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
+	"o1":            {InputCostPer1M: 15.00, OutputCostPer1M: 60.00},
+	"o3":            {InputCostPer1M: 10.00, OutputCostPer1M: 40.00},
+	"o4-mini":       {InputCostPer1M: 1.10, OutputCostPer1M: 4.40},
+
+	// DeepSeek
+	"deepseek-chat":     {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},
+	"deepseek-reasoner": {InputCostPer1M: 0.55, OutputCostPer1M: 2.19},
+
+	// GLM
+	"glm-5":   {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
+	"glm-4.7": {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
+	"glm-4":   {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
+
+	// MiniMax
+	"minimax": {InputCostPer1M: 1.10, OutputCostPer1M: 1.10},
+
+	// Kimi / Moonshot
+	"kimi": {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
 }
 
 // TokenLimits defines token limits for a model.
@@ -134,6 +261,11 @@ func (t *TokenCounter) SetClient(c client.Client) {
 	// Also update model limits as model might have changed
 	t.model = c.GetModel()
 	t.limits = getModelLimits(t.model)
+}
+
+// GetModelLimits returns limits for a model, with fallback defaults.
+func GetModelLimits(model string) TokenLimits {
+	return getModelLimits(model)
 }
 
 // getModelLimits returns limits for a model, with fallback defaults.

@@ -32,7 +32,7 @@ and editing files, running commands, and more.`,
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/gokin/config.yaml)")
-	rootCmd.PersistentFlags().StringVar(&model, "model", "", "model to use (default is gemini-3-flash-preview)")
+	rootCmd.PersistentFlags().StringVar(&model, "model", "", "model to use (default depends on provider)")
 	rootCmd.PersistentFlags().BoolVar(&runSetup, "setup", false, "run the setup wizard")
 	rootCmd.PersistentFlags().BoolVar(&resume, "resume", false, "resume the last session")
 

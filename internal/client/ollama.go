@@ -461,8 +461,21 @@ func (c *OllamaClient) WithModel(modelName string) Client {
 		return c
 	}
 	c.mu.RLock()
-	newClient.SetTools(c.tools)
+	tools := c.tools
+	rl := c.rateLimiter
+	sc := c.statusCallback
+	si := c.systemInstruction
 	c.mu.RUnlock()
+	newClient.SetTools(tools)
+	if rl != nil {
+		newClient.SetRateLimiter(rl)
+	}
+	if sc != nil {
+		newClient.SetStatusCallback(sc)
+	}
+	if si != "" {
+		newClient.SetSystemInstruction(si)
+	}
 	return newClient
 }
 

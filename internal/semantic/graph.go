@@ -363,32 +363,77 @@ func (p *PatternMatcher) findPatternByExt(ctx context.Context, ext string, patte
 // BuildDependencyGraph builds a code dependency graph.
 func BuildDependencyGraph(workDir string) (*CodeGraph, error) {
 	graph := NewCodeGraph()
+	files := make([]string, 0, 256)
+	relToAbs := make(map[string]string)
+	absToRel := make(map[string]string)
+	dirToFiles := make(map[string][]string)
 
 	err := filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return err
+		if err != nil {
+			// Skip unreadable paths to keep graph building robust.
+			return nil
 		}
-
+		if info.IsDir() {
+			name := info.Name()
+			if strings.HasPrefix(name, ".") || isSkipDir(name) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if !isCodeFile(path) {
 			return nil
 		}
 
-		// Add file node
-		relPath, _ := filepath.Rel(workDir, path)
-		nodeID := fmt.Sprintf("file:%s", relPath)
-		lang := DetectLanguage(path)
+		absPath := filepath.Clean(path)
+		relPath := normalizeRelPath(relativeToWorkDir(workDir, absPath))
+		if relPath == "" {
+			return nil
+		}
 
+		files = append(files, absPath)
+		relToAbs[relPath] = absPath
+		absToRel[absPath] = relPath
+		dirToFiles[normalizeRelPath(filepath.Dir(relPath))] = append(
+			dirToFiles[normalizeRelPath(filepath.Dir(relPath))],
+			absPath,
+		)
+
+		lang := DetectLanguage(absPath)
+		nodeID := fmt.Sprintf("file:%s", relPath)
 		graph.AddNode(&GraphNode{
 			ID:       nodeID,
 			Type:     "file",
-			Path:     path,
-			Name:     filepath.Base(path),
+			Path:     absPath,
+			Name:     filepath.Base(absPath),
 			Language: lang,
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 
-		// Extract imports/dependencies
-		deps := extractDependencies(path, lang)
-		for _, dep := range deps {
+	modulePath := readGoModulePath(workDir)
+	for _, filePath := range files {
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		lang := DetectLanguage(filePath)
+		relPath := absToRel[filePath]
+		sourceNode := fmt.Sprintf("file:%s", relPath)
+		imports := extractImportPaths(string(content), lang)
+		if len(imports) == 0 {
+			continue
+		}
+
+		// Preserve external/package-level deps for high-level visibility.
+		for _, dep := range imports {
+			dep = strings.TrimSpace(dep)
+			if dep == "" {
+				continue
+			}
 			depNodeID := fmt.Sprintf("dep:%s", dep)
 			graph.AddNode(&GraphNode{
 				ID:       depNodeID,
@@ -397,56 +442,28 @@ func BuildDependencyGraph(workDir string) (*CodeGraph, error) {
 				Language: lang,
 			})
 			graph.AddEdge(&GraphEdge{
-				From: nodeID,
+				From: sourceNode,
 				To:   depNodeID,
 				Type: "imports",
 			})
 		}
 
-		return nil
-	})
-
-	return graph, err
-}
-
-// extractDependencies extracts import/require dependencies from a file.
-func extractDependencies(filePath, lang string) []string {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil
-	}
-	defer file.Close()
-
-	var deps []string
-	scanner := bufio.NewScanner(file)
-
-	var importPattern *regexp.Regexp
-	switch lang {
-	case "go":
-		importPattern = regexp.MustCompile(`import\s+(?:"(.+?)"|'(.+?)')`)
-	case "python":
-		importPattern = regexp.MustCompile(`(?:import|from)\s+(\w+)`)
-	case "javascript", "typescript":
-		importPattern = regexp.MustCompile(`import.*from\s+['"](.+?)['"]`)
-	case "java":
-		importPattern = regexp.MustCompile(`import\s+([\w.]+);`)
-	}
-
-	if importPattern == nil {
-		return nil
-	}
-
-	for scanner.Scan() {
-		matches := importPattern.FindStringSubmatch(scanner.Text())
-		if len(matches) > 1 {
-			dep := matches[1]
-			if dep != "" {
-				deps = append(deps, dep)
+		// Add file->file edges for local imports (critical for impact analysis).
+		localTargets := resolveLocalImportTargets(relPath, lang, imports, relToAbs, dirToFiles, modulePath)
+		for targetAbs := range localTargets {
+			targetRel := absToRel[targetAbs]
+			if targetRel == "" || targetRel == relPath {
+				continue
 			}
+			graph.AddEdge(&GraphEdge{
+				From: sourceNode,
+				To:   fmt.Sprintf("file:%s", targetRel),
+				Type: "imports_local",
+			})
 		}
 	}
 
-	return deps
+	return graph, nil
 }
 
 // DetectLanguage detects the programming language from file extension.

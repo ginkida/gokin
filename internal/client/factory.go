@@ -183,6 +183,12 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 		return NewGeminiClient(ctx, cfg)
 	case "anthropic":
 		return newAnthropicNativeClient(cfg, modelID)
+	case "openai":
+		if cfg.API.HasOAuthToken("openai") {
+			logging.Debug("using OpenAI OAuth client", "email", cfg.API.OpenAIOAuth.Email)
+			return NewOpenAIOAuthClient(ctx, cfg)
+		}
+		return nil, fmt.Errorf("OpenAI requires OAuth login. Use /oauth-login openai to authenticate with your ChatGPT account")
 	case "ollama":
 		return newOllamaClient(cfg, modelID)
 	default:

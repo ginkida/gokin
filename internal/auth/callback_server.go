@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"time"
@@ -12,16 +14,23 @@ import (
 type CallbackServer struct {
 	port          int
 	expectedState string
+	callbackPath  string
 	codeChan      chan string
 	errChan       chan error
 	server        *http.Server
 }
 
-// NewCallbackServer creates a new callback server
+// NewCallbackServer creates a new callback server with the default path /oauth2callback.
 func NewCallbackServer(port int, expectedState string) *CallbackServer {
+	return NewCallbackServerWithPath(port, expectedState, "/oauth2callback")
+}
+
+// NewCallbackServerWithPath creates a new callback server with a custom callback path.
+func NewCallbackServerWithPath(port int, expectedState, path string) *CallbackServer {
 	return &CallbackServer{
 		port:          port,
 		expectedState: expectedState,
+		callbackPath:  path,
 		codeChan:      make(chan string, 1),
 		errChan:       make(chan error, 1),
 	}
@@ -30,7 +39,7 @@ func NewCallbackServer(port int, expectedState string) *CallbackServer {
 // Start starts the callback server in the background
 func (s *CallbackServer) Start() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth2callback", s.handleCallback)
+	mux.HandleFunc(s.callbackPath, s.handleCallback)
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
 	if err != nil {
@@ -44,7 +53,7 @@ func (s *CallbackServer) Start() error {
 
 	go func() {
 		if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
-			s.errChan <- fmt.Errorf("callback server error: %w", err)
+			s.trySendError(fmt.Errorf("callback server error: %w", err))
 		}
 	}()
 
@@ -77,18 +86,24 @@ func (s *CallbackServer) WaitForCode(timeout time.Duration) (string, error) {
 
 // handleCallback handles the OAuth callback request
 func (s *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
+	// Only accept GET requests (OAuth callbacks are always GET)
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	// Check for error
 	if errMsg := r.URL.Query().Get("error"); errMsg != "" {
 		errDesc := r.URL.Query().Get("error_description")
-		s.errChan <- fmt.Errorf("OAuth error: %s - %s", errMsg, errDesc)
+		s.trySendError(fmt.Errorf("OAuth error: %s - %s", errMsg, errDesc))
 		s.renderResponse(w, false, "Authentication failed: "+errMsg)
 		return
 	}
 
-	// Validate state
+	// Validate state (constant-time comparison to prevent timing attacks)
 	state := r.URL.Query().Get("state")
-	if state != s.expectedState {
-		s.errChan <- fmt.Errorf("state mismatch: expected %s, got %s", s.expectedState, state)
+	if subtle.ConstantTimeCompare([]byte(state), []byte(s.expectedState)) != 1 {
+		s.trySendError(fmt.Errorf("state mismatch (possible CSRF attack)"))
 		s.renderResponse(w, false, "Invalid state parameter (possible CSRF attack)")
 		return
 	}
@@ -96,18 +111,30 @@ func (s *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	// Get authorization code
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		s.errChan <- fmt.Errorf("no authorization code received")
+		s.trySendError(fmt.Errorf("no authorization code received"))
 		s.renderResponse(w, false, "No authorization code received")
 		return
 	}
 
-	// Send code to channel
-	s.codeChan <- code
+	// Send code to channel (non-blocking to handle duplicate callbacks)
+	select {
+	case s.codeChan <- code:
+	default:
+	}
 	s.renderResponse(w, true, "Authentication successful! You can close this window.")
+}
+
+// trySendError sends an error on the error channel without blocking (handles duplicate callbacks).
+func (s *CallbackServer) trySendError(err error) {
+	select {
+	case s.errChan <- err:
+	default:
+	}
 }
 
 // renderResponse renders an HTML response page
 func (s *CallbackServer) renderResponse(w http.ResponseWriter, success bool, message string) {
+	message = html.EscapeString(message)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	icon := "&#10060;" // Red X
@@ -119,7 +146,7 @@ func (s *CallbackServer) renderResponse(w http.ResponseWriter, success bool, mes
 		title = "Authentication Successful"
 	}
 
-	html := fmt.Sprintf(`<!DOCTYPE html>
+	page := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
     <title>Gokin - %s</title>
@@ -167,5 +194,5 @@ func (s *CallbackServer) renderResponse(w http.ResponseWriter, success bool, mes
 </body>
 </html>`, title, color, icon, title, message)
 
-	w.Write([]byte(html))
+	w.Write([]byte(page))
 }

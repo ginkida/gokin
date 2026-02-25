@@ -1,6 +1,11 @@
 package commands
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // HealthCommand displays runtime reliability and provider health information.
 type HealthCommand struct{}
@@ -54,6 +59,41 @@ func (c *LedgerCommand) GetMetadata() CommandMetadata {
 
 func (c *LedgerCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	return app.GetLedgerReport(), nil
+}
+
+// PlanProofCommand displays contract/evidence proof for a plan step.
+type PlanProofCommand struct{}
+
+func (c *PlanProofCommand) Name() string { return "plan-proof" }
+func (c *PlanProofCommand) Description() string {
+	return "Show contract/evidence proof for a plan step"
+}
+func (c *PlanProofCommand) Usage() string { return "/plan-proof [step_id]" }
+func (c *PlanProofCommand) GetMetadata() CommandMetadata {
+	return CommandMetadata{
+		Category: CategoryPlanning,
+		Icon:     "check",
+		Priority: 45,
+		HasArgs:  true,
+		ArgHint:  "[step_id]",
+	}
+}
+
+func (c *PlanProofCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	if len(args) > 1 {
+		return fmt.Sprintf("Usage: %s", c.Usage()), nil
+	}
+
+	stepID := 0
+	if len(args) == 1 {
+		value := strings.TrimSpace(args[0])
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return fmt.Sprintf("Invalid step_id %q. Expected a positive integer.", value), nil
+		}
+		stepID = parsed
+	}
+	return app.GetPlanProofReport(stepID), nil
 }
 
 // JournalCommand displays recent execution journal events.

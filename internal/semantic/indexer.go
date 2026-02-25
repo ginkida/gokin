@@ -30,6 +30,7 @@ type Indexer struct {
 	maxFileSize int64
 	chunker     Chunker
 	chunks      map[string][]ChunkInfo // filePath -> chunks
+	fileSymbols map[string]fileSymbolIndex
 	mu          sync.RWMutex
 }
 
@@ -46,6 +47,7 @@ func NewIndexer(embedder *Embedder, workDir string, cache *EmbeddingCache, maxFi
 		maxFileSize: maxFileSize,
 		chunker:     NewStructuralChunker(50, 10),
 		chunks:      make(map[string][]ChunkInfo),
+		fileSymbols: make(map[string]fileSymbolIndex),
 	}
 }
 
@@ -80,10 +82,14 @@ func (i *Indexer) IndexFile(ctx context.Context, filePath string) error {
 	if err != nil {
 		return err
 	}
+	symbolIndex := extractFileSymbols(filePath, string(content))
 
 	// Split into chunks using structural chunker
 	chunks := i.chunker.Chunk(filePath, string(content))
 	if len(chunks) == 0 {
+		i.mu.Lock()
+		i.fileSymbols[filePath] = symbolIndex
+		i.mu.Unlock()
 		return nil
 	}
 
@@ -116,6 +122,7 @@ func (i *Indexer) IndexFile(ctx context.Context, filePath string) error {
 	// Store indexed chunks
 	i.mu.Lock()
 	i.chunks[filePath] = indexedChunks
+	i.fileSymbols[filePath] = symbolIndex
 	i.mu.Unlock()
 
 	return nil
@@ -150,34 +157,92 @@ func (i *Indexer) IndexDirectory(ctx context.Context, dir string) error {
 
 // Search performs semantic search across indexed files.
 func (i *Indexer) Search(ctx context.Context, query string, topK int) ([]SearchResult, error) {
+	if topK <= 0 {
+		topK = 10
+	}
+
 	// Generate query embedding
 	queryEmbedding, err := i.embedder.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}
 
-	// Search all chunks
+	// Snapshot indexed chunks so ranking can run lock-free.
 	i.mu.RLock()
-	var results SearchResults
-	for _, chunks := range i.chunks {
+	chunksByFile := make(map[string][]ChunkInfo, len(i.chunks))
+	symbolsByFile := make(map[string]fileSymbolIndex, len(i.fileSymbols))
+	for filePath, chunks := range i.chunks {
+		copied := make([]ChunkInfo, len(chunks))
+		copy(copied, chunks)
+		chunksByFile[filePath] = copied
+	}
+	for filePath, symbols := range i.fileSymbols {
+		symbolsByFile[filePath] = symbols.clone()
+	}
+	i.mu.RUnlock()
+
+	signals := buildSearchSignals(ctx, i.workDir, query, chunksByFile, symbolsByFile)
+	var ranked SearchResults
+
+	for filePath, chunks := range chunksByFile {
+		fileSignals := signals.FileSignals[filePath]
 		for _, chunk := range chunks {
 			if chunk.Embedding == nil {
 				continue
 			}
-			score := CosineSimilarity(queryEmbedding, chunk.Embedding)
-			results = append(results, SearchResult{
-				FilePath:  chunk.FilePath,
-				Score:     score,
-				Content:   chunk.Content,
-				LineStart: chunk.LineStart,
-				LineEnd:   chunk.LineEnd,
+
+			embeddingScore := float64(CosineSimilarity(queryEmbedding, chunk.Embedding))
+			lexicalScore := lexicalRelevance(signals.Query, chunk.Content)
+			pathScore := fileSignals.PathHintScore
+			dependencyScore := fileSignals.DependencyScore
+			changeProximity := fileSignals.ChangeProximity
+			freshnessScore := fileSignals.FreshnessScore
+				symbolBonus := symbolHintBonus(signals.Query, chunk.Content)
+				symbolIndexScore := fileSignals.SymbolIndexScore
+
+				// Hybrid scoring:
+				// semantic signal dominates, lexical/path/dependency/freshness/change
+				// refine ranking toward practical edit impact.
+				// Weights sum to 1.00: 0.55 + 0.18 + 0.08 + 0.06 + 0.03 + 0.03 + 0.07
+				finalScore := 0.55*embeddingScore +
+					0.18*lexicalScore +
+					0.08*pathScore +
+					0.06*dependencyScore +
+					0.03*freshnessScore +
+					0.03*changeProximity +
+					0.07*symbolIndexScore +
+					symbolBonus
+
+			if finalScore <= 0 {
+				continue
+			}
+
+			ranked = append(ranked, SearchResult{
+				FilePath:          chunk.FilePath,
+				Score:             float32(finalScore),
+				BaseScore:         float32(embeddingScore),
+				LexicalScore:      float32(lexicalScore),
+				PathScore:         float32(pathScore),
+				DependencyScore:   float32(dependencyScore),
+				FreshnessScore:    float32(freshnessScore),
+					ChangeProximity:   float32(changeProximity),
+					SymbolHintBonus:   float32(symbolBonus),
+					SymbolIndexScore:  float32(symbolIndexScore),
+					DefinitionHits:    fileSignals.DefinitionHits,
+					CallerHits:        fileSignals.CallerHits,
+					UsageHits:         fileSignals.UsageHits,
+					Content:           chunk.Content,
+					LineStart:         chunk.LineStart,
+					LineEnd:           chunk.LineEnd,
+				DependencyDegree:  fileSignals.DependencyDegree,
+				DependentDegree:   fileSignals.DependentDegree,
+				ChangedFileDirect: fileSignals.ChangedFileDirect,
 			})
 		}
 	}
-	i.mu.RUnlock()
 
-	// Sort by score and take top K
-	sort.Sort(results)
+	sort.Sort(ranked)
+	results := deduplicateSearchResults(ranked, topK)
 	if len(results) > topK {
 		results = results[:topK]
 	}
@@ -198,6 +263,14 @@ func (i *Indexer) SaveCache() error {
 		return i.cache.Save()
 	}
 	return nil
+}
+
+// RemoveFile removes a file's chunks and symbol index entries.
+func (i *Indexer) RemoveFile(filePath string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	delete(i.chunks, filePath)
+	delete(i.fileSymbols, filePath)
 }
 
 // isCodeFile checks if a file is likely a code file based on extension.

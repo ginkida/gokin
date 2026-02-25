@@ -96,6 +96,28 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, args map[string]any) (
 	for i, result := range results {
 		output.WriteString(fmt.Sprintf("### Result %d (score: %.3f)\n", i+1, result.Score))
 		output.WriteString(fmt.Sprintf("**File:** %s (lines %d-%d)\n", result.FilePath, result.LineStart, result.LineEnd))
+		output.WriteString(fmt.Sprintf(
+			"**Signals:** semantic=%.3f lexical=%.3f path=%.3f deps=%.3f fresh=%.3f changed=%.3f symbol=%.3f\n",
+			result.BaseScore,
+			result.LexicalScore,
+			result.PathScore,
+			result.DependencyScore,
+			result.FreshnessScore,
+			result.ChangeProximity,
+			result.SymbolHintBonus+result.SymbolIndexScore,
+		))
+		if result.DependencyDegree > 0 || result.DependentDegree > 0 || result.ChangedFileDirect ||
+			result.DefinitionHits > 0 || result.CallerHits > 0 || result.UsageHits > 0 {
+			output.WriteString(fmt.Sprintf(
+				"**Impact:** outgoing_deps=%d incoming_dependents=%d symbol_defs=%d symbol_callers=%d symbol_usages=%d direct_changed=%t\n",
+				result.DependencyDegree,
+				result.DependentDegree,
+				result.DefinitionHits,
+				result.CallerHits,
+				result.UsageHits,
+				result.ChangedFileDirect,
+			))
+		}
 		output.WriteString("```\n")
 
 		// Truncate content if too long

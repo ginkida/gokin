@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"gokin/internal/logging"
@@ -40,13 +39,14 @@ type ChunkMeta struct {
 }
 
 // EnhancedIndexer extends Indexer with persistent storage.
+// Uses the embedded Indexer.mu for synchronization to avoid data races
+// between EnhancedIndexer methods and promoted Indexer methods (e.g. Search).
 type EnhancedIndexer struct {
-	*Indexer   // Embedded indexer
+	*Indexer   // Embedded indexer (provides mu sync.RWMutex)
 	configDir  string
 	projectID  string
 	indexPath  string
 	projectMgr *ProjectManager
-	mu         sync.RWMutex
 }
 
 // NewEnhancedIndexer creates a new enhanced indexer with persistence.
@@ -140,6 +140,9 @@ func (ei *EnhancedIndexer) LoadIndex(maxAge time.Duration) (bool, error) {
 
 		if len(chunks) > 0 {
 			ei.chunks[filePath] = chunks
+			if content, readErr := os.ReadFile(filePath); readErr == nil {
+				ei.fileSymbols[filePath] = extractFileSymbols(filePath, string(content))
+			}
 			loaded++
 		}
 	}

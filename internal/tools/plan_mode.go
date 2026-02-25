@@ -35,12 +35,14 @@ func (t *EnterPlanModeTool) Description() string {
 
 // StepInput represents a step in the plan.
 type StepInput struct {
-	Title            string   `json:"title"`
-	Description      string   `json:"description"`
-	Inputs           []string `json:"inputs,omitempty"`
-	ExpectedArtifact string   `json:"expected_artifact,omitempty"`
-	SuccessCriteria  []string `json:"success_criteria,omitempty"`
-	Rollback         string   `json:"rollback,omitempty"`
+	Title                 string   `json:"title"`
+	Description           string   `json:"description"`
+	Inputs                []string `json:"inputs,omitempty"`
+	ExpectedArtifact      string   `json:"expected_artifact,omitempty"`
+	ExpectedArtifactPaths []string `json:"expected_artifact_paths,omitempty"`
+	SuccessCriteria       []string `json:"success_criteria,omitempty"`
+	VerifyCommands        []string `json:"verify_commands,omitempty"`
+	Rollback              string   `json:"rollback,omitempty"`
 }
 
 func (t *EnterPlanModeTool) Declaration() *genai.FunctionDeclaration {
@@ -81,10 +83,20 @@ func (t *EnterPlanModeTool) Declaration() *genai.FunctionDeclaration {
 								Type:        genai.TypeString,
 								Description: "Concrete artifact expected after step completion (file change, command output, etc.)",
 							},
+							"expected_artifact_paths": {
+								Type:        genai.TypeArray,
+								Items:       &genai.Schema{Type: genai.TypeString},
+								Description: "Explicit file/path artifacts expected from this step (preferred for deterministic proof)",
+							},
 							"success_criteria": {
 								Type:        genai.TypeArray,
 								Items:       &genai.Schema{Type: genai.TypeString},
 								Description: "Objective criteria used to verify this step is done",
+							},
+							"verify_commands": {
+								Type:        genai.TypeArray,
+								Items:       &genai.Schema{Type: genai.TypeString},
+								Description: "Commands the orchestrator must run to verify this step before marking it complete",
 							},
 							"rollback": {
 								Type:        genai.TypeString,
@@ -187,7 +199,9 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 				if planStep != nil {
 					planStep.Inputs = getStringSliceField(step, "inputs")
 					planStep.ExpectedArtifact = getStringField(step, "expected_artifact")
+					planStep.ExpectedArtifactPaths = getStringSliceField(step, "expected_artifact_paths")
 					planStep.SuccessCriteria = getStringSliceField(step, "success_criteria")
+					planStep.VerifyCommands = getStringSliceField(step, "verify_commands")
 					planStep.Rollback = getStringField(step, "rollback")
 					planStep.EnsureContractDefaults()
 				}
@@ -199,6 +213,10 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 	decision, err := t.manager.RequestApproval(ctx)
 	if err != nil {
 		t.manager.ClearPlan()
+		msg := err.Error()
+		if strings.Contains(strings.ToLower(msg), "plan lint failed") {
+			return NewErrorResult(fmt.Sprintf("plan validation failed before approval:\n%s", msg)), nil
+		}
 		return NewErrorResult(fmt.Sprintf("approval request failed: %s", err)), nil
 	}
 

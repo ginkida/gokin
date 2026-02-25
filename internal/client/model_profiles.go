@@ -48,9 +48,54 @@ var knownModelProfiles = map[string]ModelProfile{
 	"command-r-plus": {Family: "command-r", ContextWindow: 128000, SupportsTools: true},
 	"command-r":      {Family: "command-r", ContextWindow: 128000, SupportsTools: true},
 
+	// Anthropic Claude family
+	"claude-opus":   {Family: "anthropic", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
+	"claude-sonnet": {Family: "anthropic", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
+	"claude-haiku":  {Family: "anthropic", ContextWindow: 200000, SupportsTools: true, IsSmall: true},
+
+	// DeepSeek family
+	"deepseek-chat":     {Family: "deepseek", ContextWindow: 64000, SupportsTools: true, IsCoding: true},
+	"deepseek-reasoner": {Family: "deepseek", ContextWindow: 64000, SupportsTools: true, IsCoding: true},
+
+	// GLM family
+	"glm-5":   {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"glm-4.7": {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"glm-4":   {Family: "glm", ContextWindow: 128000, SupportsTools: true},
+	"glm":     {Family: "glm", ContextWindow: 128000, SupportsTools: true},
+
+	// Kimi / Moonshot family
+	"kimi-k2.5":    {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},
+	"kimi-k2":      {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},
+	"kimi":         {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
+	"moonshot":     {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
+
+	// Gemini family
+	"gemini-3.1-pro": {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+	"gemini-3-flash":  {Family: "gemini", ContextWindow: 1000000, SupportsTools: true},
+	"gemini-3-pro":    {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+	"gemini-2.5-flash": {Family: "gemini", ContextWindow: 1000000, SupportsTools: true},
+	"gemini-2.5-pro":  {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+
 	// MiniMax family
-	"minimax-m2.5": {Family: "minimax", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
-	"minimax":      {Family: "minimax", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+	"minimax-m2.5-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
+	"minimax-m2.5":           {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
+	"minimax":                {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
+
+	// OpenAI Codex family
+	"gpt-5.3-codex":       {Family: "openai", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
+	"gpt-5.3-codex-spark": {Family: "openai", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"gpt-5.2-codex":       {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},
+	"gpt-5.1-codex-max":   {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},
+	"gpt-5.1-codex":       {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},
+	"gpt-5-codex":         {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},
+	"gpt-5-codex-mini":    {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true, IsSmall: true},
+	"gpt-5.2":             {Family: "openai", ContextWindow: 400000, SupportsTools: true},
+	"gpt-5.1":             {Family: "openai", ContextWindow: 400000, SupportsTools: true},
+	"gpt-5":               {Family: "openai", ContextWindow: 400000, SupportsTools: true},
+	"gpt-4o":              {Family: "openai", ContextWindow: 128000, SupportsTools: true},
+	"o1":                  {Family: "openai", ContextWindow: 200000, SupportsTools: true},
+	"o3":                  {Family: "openai", ContextWindow: 200000, SupportsTools: true},
+	"o4-mini":             {Family: "openai", ContextWindow: 200000, SupportsTools: true, IsSmall: true},
 }
 
 // GetModelProfile returns the profile for a given model name.

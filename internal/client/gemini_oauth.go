@@ -47,6 +47,7 @@ type GeminiOAuthClient struct {
 	statusCallback    StatusCallback
 	systemInstruction string
 	thinkingBudget    int32
+	reasoningEffort   string
 
 	mu sync.RWMutex
 }
@@ -97,6 +98,7 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 		},
 		httpTimeout:       httpTimeout,
 		streamIdleTimeout: streamIdleTimeout,
+		reasoningEffort:   cfg.Model.ReasoningEffort,
 	}
 
 	// Ensure token is valid
@@ -306,6 +308,7 @@ func (c *GeminiOAuthClient) WithModel(modelName string) Client {
 		statusCallback:    c.statusCallback,
 		systemInstruction: c.systemInstruction,
 		thinkingBudget:    c.thinkingBudget,
+		reasoningEffort:   c.reasoningEffort,
 	}
 }
 
@@ -610,7 +613,9 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 	c.mu.RLock()
 	sysInstruction := c.systemInstruction
 	thinkingBudget := c.thinkingBudget
+	cfgEffort := c.reasoningEffort
 	model := c.model
+	projectID := c.projectID
 	genCfg := c.genConfig
 	toolsSnap := c.tools
 	c.mu.RUnlock()
@@ -631,22 +636,27 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 		if genCfg.MaxOutputTokens > 0 {
 			genConfig["maxOutputTokens"] = genCfg.MaxOutputTokens
 		}
-		if thinkingBudget > 0 {
-			// Ensure MaxOutputTokens accommodates thinking + response text
-			minRequired := thinkingBudget + 4096
-			if maxTokens, ok := genConfig["maxOutputTokens"].(int32); ok && maxTokens > 0 && maxTokens < minRequired {
-				genConfig["maxOutputTokens"] = minRequired
+		tc := geminiThinkingConfig(model, cfgEffort, thinkingBudget)
+		if tc != nil {
+			thinkingJSON := map[string]interface{}{}
+			if tc.ThinkingLevel != "" {
+				thinkingJSON["thinkingLevel"] = string(tc.ThinkingLevel)
 			}
-			genConfig["thinkingConfig"] = map[string]interface{}{
-				"includeThoughts": true,
-				"thinkingBudget":  thinkingBudget,
+			if tc.ThinkingBudget != nil {
+				thinkingJSON["thinkingBudget"] = *tc.ThinkingBudget
+				if *tc.ThinkingBudget > 0 {
+					thinkingJSON["includeThoughts"] = true
+					// Ensure MaxOutputTokens accommodates thinking + response text
+					minRequired := *tc.ThinkingBudget + 4096
+					if maxTokens, ok := genConfig["maxOutputTokens"].(int32); ok && maxTokens > 0 && maxTokens < minRequired {
+						genConfig["maxOutputTokens"] = minRequired
+					}
+				}
 			}
-		} else if !strings.Contains(model, "-pro") {
-			// Explicitly disable thinking for non-pro models that enable it by default.
-			// Pro models require thinking — omit thinkingConfig for API default.
-			genConfig["thinkingConfig"] = map[string]interface{}{
-				"thinkingBudget": 0,
+			if tc.IncludeThoughts {
+				thinkingJSON["includeThoughts"] = true
 			}
+			genConfig["thinkingConfig"] = thinkingJSON
 		}
 		if len(genConfig) > 0 {
 			requestPayload["generationConfig"] = genConfig
@@ -681,8 +691,8 @@ func (c *GeminiOAuthClient) buildRequest(contents []*genai.Content) map[string]i
 
 	// Wrap in Code Assist format
 	return map[string]interface{}{
-		"project": c.projectID,
-		"model":   c.model,
+		"project": projectID,
+		"model":   model,
 		"request": requestPayload,
 	}
 }

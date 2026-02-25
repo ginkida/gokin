@@ -75,7 +75,7 @@ var Providers = []ProviderDef{
 	{
 		Name:          "glm",
 		DisplayName:   "GLM Coding Plan (Z.ai)",
-		DefaultModel:  "glm-4.7",
+		DefaultModel:  "glm-5",
 		EnvVars:       []string{"GOKIN_GLM_KEY", "GLM_API_KEY"},
 		UsesLegacyKey: true,
 		GetKey:        func(api *APIConfig) string { return api.GLMKey },
@@ -135,6 +135,16 @@ var Providers = []ProviderDef{
 			AuthMode:        "bearer",
 			SuccessStatuses: []int{200},
 		},
+	},
+	{
+		Name:          "openai",
+		DisplayName:   "OpenAI (ChatGPT)",
+		DefaultModel:  "gpt-5.3-codex",
+		KeyOptional:   true, // Only OAuth, no API key
+		HasOAuth:      true,
+		GetKey:        func(api *APIConfig) string { return "" },
+		SetKey:        func(api *APIConfig, key string) {},
+		ModelPrefixes: []string{"gpt", "o1", "o3", "o4"},
 	},
 	{
 		Name:         "ollama",
@@ -218,5 +228,5 @@ func AnyProviderHasKey(api *APIConfig) bool {
 			return true
 		}
 	}
-	return api.APIKey != "" || api.HasOAuthToken("gemini")
+	return api.APIKey != "" || api.HasOAuthToken("gemini") || api.HasOAuthToken("openai")
 }

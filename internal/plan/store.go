@@ -50,15 +50,20 @@ func (s *PlanStore) Save(plan *Plan) error {
 		return fmt.Errorf("cannot save nil plan")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// Snapshot plan data under plan's lock to prevent data races
+	// with concurrent CompleteStep/FailStep/StartStep calls.
+	plan.mu.RLock()
 	data, err := json.MarshalIndent(plan, "", "  ")
+	planID := plan.ID
+	plan.mu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("failed to marshal plan: %w", err)
 	}
 
-	filePath := filepath.Join(s.dir, plan.ID+".json")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	filePath := filepath.Join(s.dir, planID+".json")
 	if err := os.WriteFile(filePath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write plan: %w", err)
 	}
@@ -84,6 +89,7 @@ func (s *PlanStore) Load(planID string) (*Plan, error) {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal plan: %w", err)
 	}
+	plan.EnsureStepContracts()
 
 	return &plan, nil
 }
@@ -117,6 +123,7 @@ func (s *PlanStore) LoadLast(workDir string) (*Plan, error) {
 		if err := json.Unmarshal(data, plan); err != nil {
 			continue
 		}
+		plan.EnsureStepContracts()
 
 		// Only consider resumable plans (paused or in_progress with pending steps)
 		if !s.isResumable(plan) {
@@ -139,6 +146,7 @@ func (s *PlanStore) LoadLast(workDir string) (*Plan, error) {
 		return nil, fmt.Errorf("no resumable plan found")
 	}
 
+	latestPlan.EnsureStepContracts()
 	return latestPlan, nil
 }
 

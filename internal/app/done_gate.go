@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -22,6 +23,8 @@ const (
 	doneGateDefaultCheckTimeout = 3 * time.Minute
 	doneGateMaxScanDepth        = 4
 	doneGateMaxModulesPerStack  = 8
+	doneGateMonorepoModuleLimit = 4
+	doneGateGitProbeTimeout     = 2 * time.Second
 )
 
 type doneGateCheck struct {
@@ -50,12 +53,29 @@ type doneGateNodeProject struct {
 	Scripts map[string]string
 }
 
+type doneGateJavaProject struct {
+	Dir    string
+	Runner string // maven | gradle_wrapper | gradle
+}
+
+type doneGatePHPProject struct {
+	Dir     string
+	Scripts map[string]string
+}
+
 type doneGateProfile struct {
 	GoModules         []string
 	RustModules       []string
 	NodeProjects      []doneGateNodeProject
+	JavaProjects      []doneGateJavaProject
+	CMakeProjects     []string
+	BazelRoots        []string
+	MakeProjects      []string
+	PHPProjects       []doneGatePHPProject
 	PythonRoots       []string
 	PythonTestsLikely bool
+	TouchedPaths      []string
+	Monorepo          bool
 }
 
 func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
@@ -190,6 +210,92 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 				moduleDir,
 				command,
 			))
+		}
+		for _, project := range profile.JavaProjects {
+			rel := relPathOrDot(a.workDir, project.Dir)
+			name := "java_verify@" + rel
+			command := ""
+			switch project.Runner {
+			case "maven":
+				command = "mvn -q -DskipTests verify"
+			case "gradle_wrapper":
+				command = "./gradlew -q build -x test"
+			default:
+				command = "gradle -q build -x test"
+			}
+			checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+				bashTool,
+				name,
+				project.Dir,
+				command,
+			))
+		}
+		for _, moduleDir := range profile.CMakeProjects {
+			name := "cmake_configure@" + relPathOrDot(a.workDir, moduleDir)
+			command := "cmake -S . -B .gokin-donegate-build"
+			if policy.Mode == "strict" {
+				command += " && cmake --build .gokin-donegate-build"
+			}
+			command += "; ret=$?; rm -rf .gokin-donegate-build; exit $ret"
+			checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+				bashTool,
+				name,
+				moduleDir,
+				command,
+			))
+		}
+		for _, moduleDir := range profile.BazelRoots {
+			name := "bazel_nobuild@" + relPathOrDot(a.workDir, moduleDir)
+			command := "bazel build --nobuild //..."
+			checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+				bashTool,
+				name,
+				moduleDir,
+				command,
+			))
+		}
+		for _, moduleDir := range profile.MakeProjects {
+			name := "make_dry_run@" + relPathOrDot(a.workDir, moduleDir)
+			command := "make -n"
+			checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+				bashTool,
+				name,
+				moduleDir,
+				command,
+			))
+		}
+		for _, project := range profile.PHPProjects {
+			rel := relPathOrDot(a.workDir, project.Dir)
+			if scriptName, _, ok := pickComposerScript(project.Scripts, "lint"); ok {
+				name := "php_lint@" + rel
+				command := "composer run --no-interaction --quiet " + shellQuote(scriptName)
+				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+					bashTool,
+					name,
+					project.Dir,
+					command,
+				))
+			}
+			if scriptName, _, ok := pickComposerScript(project.Scripts, "static"); ok {
+				name := "php_static@" + rel
+				command := "composer run --no-interaction --quiet " + shellQuote(scriptName)
+				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+					bashTool,
+					name,
+					project.Dir,
+					command,
+				))
+			}
+			if policy.Mode == "strict" || len(project.Scripts) == 0 {
+				name := "composer_validate@" + rel
+				command := "composer validate --no-interaction --strict"
+				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+					bashTool,
+					name,
+					project.Dir,
+					command,
+				))
+			}
 		}
 		for _, project := range profile.NodeProjects {
 			if scriptName, _, ok := pickNodeScript(project.Scripts, "lint"); ok {
@@ -480,31 +586,74 @@ func shouldRunDoneGateToolTests(userMessage string, toolsUsed []string, profile 
 
 func detectDoneGateProfile(workDir string) doneGateProfile {
 	markers := discoverDoneGateMarkers(workDir)
+	touched := discoverDoneGateTouchedPaths(workDir)
+
+	goAll := pruneNestedDirs(limitAndSortDirs(markers.GoModules, 0))
+	rustAll := pruneNestedDirs(limitAndSortDirs(markers.RustModules, 0))
+	pythonAll := pruneNestedDirs(limitAndSortDirs(markers.PythonRoots, 0))
+	nodeAll := pruneNestedDirs(limitAndSortDirs(markers.NodeProjects, 0))
+	javaAll := pruneNestedDirs(limitAndSortDirs(markers.JavaProjects, 0))
+	cmakeAll := pruneNestedDirs(limitAndSortDirs(markers.CMakeProjects, 0))
+	bazelAll := pruneNestedDirs(limitAndSortDirs(markers.BazelRoots, 0))
+	makeAll := pruneNestedDirs(limitAndSortDirs(markers.MakeProjects, 0))
+	phpAll := pruneNestedDirs(limitAndSortDirs(markers.PHPProjects, 0))
+
+	monorepo := isMonorepoWorkspace(workDir, goAll, rustAll, nodeAll, pythonAll, javaAll, cmakeAll, bazelAll, makeAll, phpAll)
+	moduleLimit := doneGateMaxModulesPerStack
+	if monorepo {
+		moduleLimit = doneGateMonorepoModuleLimit
+	}
+
+	goDirs := prioritizeDirsByTouched(workDir, goAll, touched, moduleLimit)
+	rustDirs := prioritizeDirsByTouched(workDir, rustAll, touched, moduleLimit)
+	pythonDirs := prioritizeDirsByTouched(workDir, pythonAll, touched, moduleLimit)
+	nodeDirs := prioritizeDirsByTouched(workDir, nodeAll, touched, moduleLimit)
+	javaDirs := prioritizeDirsByTouched(workDir, javaAll, touched, moduleLimit)
+	cmakeDirs := prioritizeDirsByTouched(workDir, cmakeAll, touched, moduleLimit)
+	bazelDirs := prioritizeDirsByTouched(workDir, bazelAll, touched, moduleLimit)
+	makeDirs := prioritizeDirsByTouched(workDir, makeAll, touched, moduleLimit)
+	phpDirs := prioritizeDirsByTouched(workDir, phpAll, touched, moduleLimit)
 
 	profile := doneGateProfile{
-		GoModules:   pruneNestedDirs(limitAndSortDirs(markers.GoModules, doneGateMaxModulesPerStack)),
-		RustModules: pruneNestedDirs(limitAndSortDirs(markers.RustModules, doneGateMaxModulesPerStack)),
-		PythonRoots: pruneNestedDirs(limitAndSortDirs(markers.PythonRoots, doneGateMaxModulesPerStack)),
+		GoModules:     goDirs,
+		RustModules:   rustDirs,
+		CMakeProjects: cmakeDirs,
+		BazelRoots:    bazelDirs,
+		MakeProjects:  makeDirs,
+		PythonRoots:   pythonDirs,
+		TouchedPaths:  touched,
+		Monorepo:      monorepo,
 	}
-	nodeDirs := limitAndSortDirs(markers.NodeProjects, doneGateMaxModulesPerStack)
 	profile.NodeProjects = loadNodeProjects(workDir, nodeDirs)
+	profile.JavaProjects = loadJavaProjects(workDir, javaDirs)
+	profile.PHPProjects = loadPHPProjects(phpDirs)
 	profile.PythonTestsLikely = detectPythonTestsLikely(profile.PythonRoots)
 	return profile
 }
 
 type doneGateMarkers struct {
-	GoModules    map[string]struct{}
-	RustModules  map[string]struct{}
-	NodeProjects map[string]struct{}
-	PythonRoots  map[string]struct{}
+	GoModules     map[string]struct{}
+	RustModules   map[string]struct{}
+	NodeProjects  map[string]struct{}
+	JavaProjects  map[string]struct{}
+	CMakeProjects map[string]struct{}
+	BazelRoots    map[string]struct{}
+	MakeProjects  map[string]struct{}
+	PHPProjects   map[string]struct{}
+	PythonRoots   map[string]struct{}
 }
 
 func discoverDoneGateMarkers(workDir string) doneGateMarkers {
 	markers := doneGateMarkers{
-		GoModules:    make(map[string]struct{}),
-		RustModules:  make(map[string]struct{}),
-		NodeProjects: make(map[string]struct{}),
-		PythonRoots:  make(map[string]struct{}),
+		GoModules:     make(map[string]struct{}),
+		RustModules:   make(map[string]struct{}),
+		NodeProjects:  make(map[string]struct{}),
+		JavaProjects:  make(map[string]struct{}),
+		CMakeProjects: make(map[string]struct{}),
+		BazelRoots:    make(map[string]struct{}),
+		MakeProjects:  make(map[string]struct{}),
+		PHPProjects:   make(map[string]struct{}),
+		PythonRoots:   make(map[string]struct{}),
 	}
 
 	_ = filepath.WalkDir(workDir, func(path string, d fs.DirEntry, err error) error {
@@ -537,6 +686,16 @@ func discoverDoneGateMarkers(workDir string) doneGateMarkers {
 			markers.RustModules[dir] = struct{}{}
 		case "package.json":
 			markers.NodeProjects[dir] = struct{}{}
+		case "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew":
+			markers.JavaProjects[dir] = struct{}{}
+		case "CMakeLists.txt":
+			markers.CMakeProjects[dir] = struct{}{}
+		case "BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel":
+			markers.BazelRoots[dir] = struct{}{}
+		case "Makefile", "makefile", "GNUmakefile":
+			markers.MakeProjects[dir] = struct{}{}
+		case "composer.json":
+			markers.PHPProjects[dir] = struct{}{}
 		case "pyproject.toml", "requirements.txt", "setup.py":
 			markers.PythonRoots[dir] = struct{}{}
 		}
@@ -550,7 +709,7 @@ func discoverDoneGateMarkers(workDir string) doneGateMarkers {
 func shouldSkipDoneGateDir(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case ".git", "node_modules", "vendor", "dist", "build", "target", ".next", ".turbo",
-		".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".idea", ".vscode":
+		".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".idea", ".vscode", ".gokin-donegate-build":
 		return true
 	default:
 		return false
@@ -582,6 +741,165 @@ func limitAndSortDirs(set map[string]struct{}, limit int) []string {
 		out = out[:limit]
 	}
 	return out
+}
+
+func prioritizeDirsByTouched(workDir string, dirs []string, touched []string, limit int) []string {
+	if len(dirs) == 0 {
+		return nil
+	}
+	if len(touched) == 0 {
+		if limit > 0 && len(dirs) > limit {
+			return dirs[:limit]
+		}
+		return dirs
+	}
+
+	normalizedTouched := make([]string, 0, len(touched))
+	seenTouched := make(map[string]bool, len(touched))
+	for _, p := range touched {
+		p = filepath.Clean(strings.TrimSpace(p))
+		if p == "" || p == "." || strings.HasPrefix(p, "..") {
+			continue
+		}
+		p = filepath.ToSlash(p)
+		if seenTouched[p] {
+			continue
+		}
+		seenTouched[p] = true
+		normalizedTouched = append(normalizedTouched, p)
+	}
+	if len(normalizedTouched) == 0 {
+		if limit > 0 && len(dirs) > limit {
+			return dirs[:limit]
+		}
+		return dirs
+	}
+
+	matched := make([]string, 0, len(dirs))
+	rest := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		rel := relPathOrDot(workDir, dir)
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if rel == "." {
+			matched = append(matched, dir)
+			continue
+		}
+		prefix := rel + "/"
+		hit := false
+		for _, changed := range normalizedTouched {
+			if changed == rel || strings.HasPrefix(changed, prefix) {
+				hit = true
+				break
+			}
+		}
+		if hit {
+			matched = append(matched, dir)
+		} else {
+			rest = append(rest, dir)
+		}
+	}
+
+	ordered := append(matched, rest...)
+	if limit > 0 && len(ordered) > limit {
+		ordered = ordered[:limit]
+	}
+	return ordered
+}
+
+func isMonorepoWorkspace(workDir string, stacks ...[]string) bool {
+	workspaceMarkers := []string{
+		"go.work",
+		"pnpm-workspace.yaml",
+		"turbo.json",
+		"nx.json",
+		"lerna.json",
+		"WORKSPACE",
+		"WORKSPACE.bazel",
+	}
+	for _, marker := range workspaceMarkers {
+		if fileExists(filepath.Join(workDir, marker)) {
+			return true
+		}
+	}
+
+	stackKinds := 0
+	total := 0
+	for _, stack := range stacks {
+		n := len(stack)
+		if n > 1 {
+			return true
+		}
+		if n > 0 {
+			stackKinds++
+			total += n
+		}
+	}
+	return stackKinds >= 2 && total >= 3
+}
+
+func discoverDoneGateTouchedPaths(workDir string) []string {
+	if !isGitWorkTree(workDir) {
+		return nil
+	}
+
+	commands := [][]string{
+		{"git", "-C", workDir, "diff", "--name-only", "--relative"},
+		{"git", "-C", workDir, "diff", "--cached", "--name-only", "--relative"},
+		{"git", "-C", workDir, "ls-files", "--others", "--exclude-standard"},
+	}
+
+	seen := make(map[string]bool)
+	var paths []string
+	for _, cmdArgs := range commands {
+		if len(cmdArgs) == 0 {
+			continue
+		}
+		out, err := runCommandWithTimeout(doneGateGitProbeTimeout, cmdArgs[0], cmdArgs[1:]...)
+		if err != nil || strings.TrimSpace(out) == "" {
+			continue
+		}
+		for _, line := range strings.Split(out, "\n") {
+			p := strings.TrimSpace(line)
+			if p == "" {
+				continue
+			}
+			p = filepath.Clean(p)
+			if p == "." || strings.HasPrefix(p, "..") {
+				continue
+			}
+			p = filepath.ToSlash(p)
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func isGitWorkTree(workDir string) bool {
+	out, err := runCommandWithTimeout(doneGateGitProbeTimeout, "git", "-C", workDir, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) == "true"
+}
+
+func runCommandWithTimeout(timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", ctx.Err()
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func pruneNestedDirs(dirs []string) []string {
@@ -634,6 +952,53 @@ func loadNodeProjects(workDir string, dirs []string) []doneGateNodeProject {
 	return projects
 }
 
+func loadJavaProjects(workDir string, dirs []string) []doneGateJavaProject {
+	if len(dirs) == 0 {
+		return nil
+	}
+	projects := make([]doneGateJavaProject, 0, len(dirs))
+	for _, dir := range dirs {
+		runner := "gradle"
+		switch {
+		case fileExists(filepath.Join(dir, "pom.xml")):
+			runner = "maven"
+		case fileExists(filepath.Join(dir, "gradlew")):
+			runner = "gradle_wrapper"
+		case fileExists(filepath.Join(dir, "build.gradle")) || fileExists(filepath.Join(dir, "build.gradle.kts")):
+			runner = "gradle"
+		default:
+			if fileExists(filepath.Join(workDir, "mvnw")) || fileExists(filepath.Join(workDir, "pom.xml")) {
+				runner = "maven"
+			}
+		}
+		projects = append(projects, doneGateJavaProject{
+			Dir:    dir,
+			Runner: runner,
+		})
+	}
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].Dir < projects[j].Dir
+	})
+	return projects
+}
+
+func loadPHPProjects(dirs []string) []doneGatePHPProject {
+	if len(dirs) == 0 {
+		return nil
+	}
+	projects := make([]doneGatePHPProject, 0, len(dirs))
+	for _, dir := range dirs {
+		projects = append(projects, doneGatePHPProject{
+			Dir:     dir,
+			Scripts: readComposerScripts(filepath.Join(dir, "composer.json")),
+		})
+	}
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].Dir < projects[j].Dir
+	})
+	return projects
+}
+
 func readNodeScripts(packageJSONPath string) map[string]string {
 	scripts := make(map[string]string)
 	data, err := os.ReadFile(packageJSONPath)
@@ -656,6 +1021,39 @@ func readNodeScripts(packageJSONPath string) map[string]string {
 		}
 		scripts[name] = script
 	}
+	return scripts
+}
+
+func readComposerScripts(path string) map[string]string {
+	scripts := make(map[string]string)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return scripts
+	}
+
+	var pkg struct {
+		Scripts map[string]any `json:"scripts"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return scripts
+	}
+
+	for name, raw := range pkg.Scripts {
+		name = strings.TrimSpace(strings.ToLower(name))
+		if name == "" {
+			continue
+		}
+		script, ok := raw.(string)
+		if !ok {
+			continue
+		}
+		script = strings.TrimSpace(script)
+		if script == "" {
+			continue
+		}
+		scripts[name] = script
+	}
+
 	return scripts
 }
 
@@ -712,6 +1110,35 @@ func nodeScriptAliases(category string) []string {
 		return []string{"test", "test:ci", "ci:test", "unit", "test:unit"}
 	case "build":
 		return []string{"build", "build:ci", "check", "compile"}
+	default:
+		return []string{category}
+	}
+}
+
+func pickComposerScript(scripts map[string]string, category string) (string, string, bool) {
+	if len(scripts) == 0 {
+		return "", "", false
+	}
+
+	aliases := composerScriptAliases(category)
+	for _, alias := range aliases {
+		if script, ok := scripts[alias]; ok {
+			script = strings.TrimSpace(script)
+			if script == "" {
+				continue
+			}
+			return alias, script, true
+		}
+	}
+	return "", "", false
+}
+
+func composerScriptAliases(category string) []string {
+	switch category {
+	case "lint":
+		return []string{"lint", "cs", "cs-check", "phpcs", "style"}
+	case "static":
+		return []string{"phpstan", "psalm", "analyse", "analyze", "static", "typecheck"}
 	default:
 		return []string{category}
 	}

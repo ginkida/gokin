@@ -394,6 +394,9 @@ func (c *AnthropicClient) WithModel(modelName string) Client {
 	c.mu.RLock()
 	newConfig := c.config
 	tools := c.tools
+	rl := c.rateLimiter
+	sc := c.statusCallback
+	si := c.systemInstruction
 	c.mu.RUnlock()
 
 	newConfig.Model = modelName
@@ -403,6 +406,15 @@ func (c *AnthropicClient) WithModel(modelName string) Client {
 		return c // Return original client on error
 	}
 	newClient.SetTools(tools)
+	if rl != nil {
+		newClient.SetRateLimiter(rl)
+	}
+	if sc != nil {
+		newClient.SetStatusCallback(sc)
+	}
+	if si != "" {
+		newClient.SetSystemInstruction(si)
+	}
 	return newClient
 }
 

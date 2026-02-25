@@ -28,6 +28,11 @@ const (
 	// MaxTurnLimit is the absolute maximum number of turns an agent can take.
 	// This prevents infinite loops even if mental loop detection fails.
 	MaxTurnLimit = 100
+
+	// Long-loop stability guardrails.
+	stagnationTurnThreshold   = 3
+	stagnationRecoveryBudget  = 3
+	repeatedPlanTurnThreshold = 3
 )
 
 // Agent represents an isolated executor for subtasks.
@@ -2071,6 +2076,12 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 	loopRecoveryTurns := 0
 	replanAttempts := 0
+	noProgressTurns := 0
+	recoveryInterventions := 0
+	lastCallPlanFingerprint := ""
+	samePlanTurns := 0
+	lastTextFingerprint := ""
+	seenFailureFingerprints := make(map[string]struct{})
 	var i int
 	// Use min(maxTurns, MaxTurnLimit) to prevent infinite loops
 	effectiveMaxTurns := a.maxTurns
@@ -2250,11 +2261,21 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		a.history = append(a.history, modelContent)
 		a.stateMu.Unlock()
 
+		turnMadeProgress := false
+
 		// Accumulate text output
 		if resp.Text != "" {
 			output.WriteString(resp.Text)
 			// Stream text to UI in real-time
 			a.safeOnText(resp.Text)
+
+			textFingerprint := normalizeProgressFingerprint(resp.Text)
+			if textFingerprint != "" && textFingerprint != lastTextFingerprint {
+				turnMadeProgress = true
+			}
+			if textFingerprint != "" {
+				lastTextFingerprint = textFingerprint
+			}
 		}
 
 		// Warn when response was truncated by token limit
@@ -2277,9 +2298,48 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				a.delegation.TrackProgress(strings.Join(toolsList, ","))
 			}
 
+			planFingerprint := normalizeToolPlanFingerprint(resp.FunctionCalls)
+			if planFingerprint != "" && planFingerprint == lastCallPlanFingerprint {
+				samePlanTurns++
+			} else {
+				samePlanTurns = 1
+				lastCallPlanFingerprint = planFingerprint
+			}
+
 			// Mental Loop Detection (exact args match + broad tool counter)
 			loopDetectedThisTurn := false
+			loopSkipReason := "Skipped: loop detected, try a different approach"
+
+			// Plan-level loop: same tool-call plan repeated across turns.
+			if samePlanTurns >= repeatedPlanTurnThreshold {
+				loopDetectedThisTurn = true
+				loopSkipReason = fmt.Sprintf("Skipped: repeated tool plan detected for %d turns", samePlanTurns)
+				logging.Warn("repeated tool plan detected",
+					"agent_id", a.ID,
+					"turns", samePlanTurns,
+					"plan", planFingerprint)
+				if recoveryInterventions < stagnationRecoveryBudget {
+					recoveryInterventions++
+					recoveryMsg := a.buildStagnationRecoveryIntervention(
+						recoveryInterventions,
+						fmt.Sprintf("repeated tool plan (%d turns)", samePlanTurns),
+					)
+					a.safeOnText(fmt.Sprintf("\n[Execution stagnation detected — recovery #%d]\n", recoveryInterventions))
+					a.stateMu.Lock()
+					a.history = append(a.history, genai.NewContentFromText(recoveryMsg, genai.RoleUser))
+					if loopRecoveryTurns < 3 && effectiveMaxTurns < MaxTurnLimit {
+						loopRecoveryTurns++
+						effectiveMaxTurns++
+					}
+					a.stateMu.Unlock()
+					noProgressTurns = 0
+				}
+			}
+
 			for _, fc := range resp.FunctionCalls {
+				if loopDetectedThisTurn {
+					break
+				}
 				key := normalizeCallKey(fc.Name, fc.Args)
 				broadKey := "tool:" + fc.Name
 
@@ -2359,7 +2419,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				var dummyParts []*genai.Part
 				for _, fc := range resp.FunctionCalls {
 					part := genai.NewPartFromFunctionResponse(fc.Name, map[string]any{
-						"error": "Skipped: loop detected, try a different approach",
+						"error": loopSkipReason,
 					})
 					part.FunctionResponse.ID = fc.ID
 					dummyParts = append(dummyParts, part)
@@ -2370,6 +2430,8 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					Parts: dummyParts,
 				})
 				a.stateMu.Unlock()
+				// Loop-skipped turns count as no-progress so stagnation detection works.
+				noProgressTurns++
 				continue
 			}
 
@@ -2381,6 +2443,21 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.SetProgress(i+1, a.maxTurns, fmt.Sprintf("Executing tools: %v", toolsList))
 
 			results := a.executeTools(ctx, resp.FunctionCalls)
+
+			successCount, newFailureSignals, repeatedFailureSignals := summarizeToolProgress(resp.FunctionCalls, results, seenFailureFingerprints)
+			if successCount > 0 || newFailureSignals > 0 {
+				turnMadeProgress = true
+				noProgressTurns = 0
+			} else {
+				noProgressTurns++
+			}
+
+			if repeatedFailureSignals > 0 && newFailureSignals == 0 {
+				logging.Debug("tool errors repeating without new signal",
+					"agent_id", a.ID,
+					"repeated_failures", repeatedFailureSignals,
+					"no_progress_turns", noProgressTurns)
+			}
 
 			// Track file activity for relevance scoring
 			if a.fileTracker != nil {
@@ -2418,10 +2495,40 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.history = append(a.history, funcContent)
 			a.stateMu.Unlock()
 
+			// Long-loop watchdog: deterministic recovery path for repeated no-progress turns.
+			if !turnMadeProgress {
+				if noProgressTurns >= stagnationTurnThreshold {
+					if recoveryInterventions < stagnationRecoveryBudget {
+						recoveryInterventions++
+						recoveryMsg := a.buildStagnationRecoveryIntervention(
+							recoveryInterventions,
+							fmt.Sprintf("no meaningful progress for %d turns", noProgressTurns),
+						)
+						a.safeOnText(fmt.Sprintf("\n[No-progress streak detected — recovery #%d]\n", recoveryInterventions))
+						a.stateMu.Lock()
+						a.history = append(a.history, genai.NewContentFromText(recoveryMsg, genai.RoleUser))
+						if loopRecoveryTurns < 3 && effectiveMaxTurns < MaxTurnLimit {
+							loopRecoveryTurns++
+							effectiveMaxTurns++
+						}
+						a.stateMu.Unlock()
+						noProgressTurns = 0
+					} else {
+						return a.history, output.String(), fmt.Errorf(
+							"execution stalled: no progress for %d consecutive turns (recovery budget exhausted)",
+							stagnationTurnThreshold,
+						)
+					}
+				}
+			}
+
 			continue
 		}
 
 		// No more function calls, we're done
+		if turnMadeProgress {
+			noProgressTurns = 0
+		}
 		break
 	}
 
@@ -2468,6 +2575,85 @@ func normalizeCallKey(name string, args map[string]any) string {
 	}
 	argsJSON, _ := json.Marshal(filtered)
 	return fmt.Sprintf("%s:%s", name, string(argsJSON))
+}
+
+func normalizeToolPlanFingerprint(calls []*genai.FunctionCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(calls))
+	for _, fc := range calls {
+		if fc == nil {
+			continue
+		}
+		parts = append(parts, normalizeCallKey(fc.Name, fc.Args))
+	}
+	return strings.Join(parts, "|")
+}
+
+func normalizeProgressFingerprint(text string) string {
+	text = strings.TrimSpace(strings.ToLower(text))
+	if text == "" {
+		return ""
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > 240 {
+		text = text[:240]
+	}
+	return text
+}
+
+func summarizeToolProgress(
+	calls []*genai.FunctionCall,
+	results []toolCallResult,
+	seenFailureFingerprints map[string]struct{},
+) (successCount, newFailureSignals, repeatedFailureSignals int) {
+	if len(results) == 0 {
+		return 0, 0, 0
+	}
+
+	for idx, result := range results {
+		if result.Response == nil {
+			continue
+		}
+		respMap := result.Response.Response
+		success, _ := respMap["success"].(bool)
+		if success {
+			successCount++
+			continue
+		}
+
+		toolName := result.Response.Name
+		if idx < len(calls) && calls[idx] != nil && calls[idx].Name != "" {
+			toolName = calls[idx].Name
+		}
+		errText := extractToolErrorFromMap(respMap)
+		fp := normalizeProgressFingerprint(toolName + ":" + errText)
+		if fp == "" {
+			continue
+		}
+		if _, exists := seenFailureFingerprints[fp]; exists {
+			repeatedFailureSignals++
+			continue
+		}
+		seenFailureFingerprints[fp] = struct{}{}
+		newFailureSignals++
+	}
+
+	return successCount, newFailureSignals, repeatedFailureSignals
+}
+
+func extractToolErrorFromMap(resp map[string]any) string {
+	if resp == nil {
+		return ""
+	}
+	if errText, ok := resp["error"].(string); ok && strings.TrimSpace(errText) != "" {
+		return errText
+	}
+	if content, ok := resp["content"].(string); ok && strings.TrimSpace(content) != "" {
+		return content
+	}
+	return ""
 }
 
 func recoveryAttemptKey(name string, args map[string]any, category, alternative string) string {
@@ -2544,6 +2730,26 @@ func (a *Agent) buildLoopRecoveryIntervention(toolName string, args map[string]a
 	}
 
 	sb.WriteString("\nI will now try a DIFFERENT approach to achieve my goal.\n")
+
+	return sb.String()
+}
+
+func (a *Agent) buildStagnationRecoveryIntervention(attempt int, reason string) string {
+	var sb strings.Builder
+
+	sb.WriteString("EXECUTION WATCHDOG: progress has stalled.\n\n")
+	sb.WriteString(fmt.Sprintf("Recovery attempt: %d/%d\n", attempt, stagnationRecoveryBudget))
+	if strings.TrimSpace(reason) != "" {
+		sb.WriteString("Observed issue: ")
+		sb.WriteString(reason)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\nYou MUST change strategy now:\n")
+	sb.WriteString("1. Do not repeat the previous tool plan.\n")
+	sb.WriteString("2. Pick a different first tool to gather missing evidence.\n")
+	sb.WriteString("3. Propose a 2-3 step micro-plan, then execute step 1 immediately.\n")
+	sb.WriteString("4. If blocked, produce a concrete fallback path instead of retrying blindly.\n")
+	sb.WriteString("5. Keep responses concise and evidence-based.\n")
 
 	return sb.String()
 }

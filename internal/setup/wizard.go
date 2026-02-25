@@ -74,6 +74,16 @@ func buildSetupChoices() []setupChoice {
 		},
 	}
 
+	choices = append(choices, setupChoice{
+		Action: "oauth-openai",
+		Title:  "OpenAI (ChatGPT Account)",
+		Lines: []string{
+			"Use your ChatGPT subscription (Plus/Pro)",
+			"GPT-5.3 Codex, Spark, and more",
+			"Login with ChatGPT Account (OAuth)",
+		},
+	})
+
 	for _, p := range config.Providers {
 		switch p.Name {
 		case "gemini":
@@ -122,7 +132,7 @@ func buildSetupChoices() []setupChoice {
 				Action: "api:" + p.Name,
 				Title:  "MiniMax (Cloud)",
 				Lines: []string{
-					"MiniMax M2.5: 1M context window",
+					"MiniMax M2.5: 200K context, M2.5-highspeed available",
 					"Anthropic-compatible API",
 					"Get key at: " + p.SetupKeyURL,
 				},
@@ -212,7 +222,7 @@ func RunSetupWizard() error {
 					return fmt.Errorf("failed to get config path: %w", err)
 				}
 
-				if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+				if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 					return fmt.Errorf("failed to create directory: %w", err)
 				}
 
@@ -275,6 +285,8 @@ func RunSetupWizard() error {
 		switch {
 		case selected.Action == "oauth-gemini":
 			return setupGeminiOAuth()
+		case selected.Action == "oauth-openai":
+			return setupOpenAIOAuth()
 		case selected.Action == "ollama":
 			return setupOllama(reader)
 		case strings.HasPrefix(selected.Action, "api:"):
@@ -328,7 +340,7 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 		return fmt.Errorf("failed to get config path: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -370,19 +382,27 @@ func setupGeminiOAuth() error {
 	fmt.Printf("\n%sThis will open your browser for Google authentication.%s\n", colorYellow, colorReset)
 	fmt.Printf("%sYou'll use your Gemini subscription (not API credits).%s\n\n", colorYellow, colorReset)
 
-	// Create OAuth manager
-	manager := auth.NewGeminiOAuthManager()
-
-	// Generate auth URL
-	authURL, err := manager.GenerateAuthURL()
-	if err != nil {
-		return fmt.Errorf("failed to generate auth URL: %w", err)
+	// Start callback server with port fallback — create manager per port
+	// so redirect_uri matches the actual listening port
+	candidatePorts := []int{auth.GeminiOAuthCallbackPort, auth.GeminiOAuthCallbackPort + 1, auth.GeminiOAuthCallbackPort + 2}
+	var manager *auth.OAuthManager
+	var authURL string
+	var server *auth.CallbackServer
+	var serverErr error
+	for _, port := range candidatePorts {
+		manager = auth.NewGeminiOAuthManagerWithPort(port)
+		var err error
+		authURL, err = manager.GenerateAuthURL()
+		if err != nil {
+			return fmt.Errorf("failed to generate auth URL: %w", err)
+		}
+		server = auth.NewCallbackServer(port, manager.GetState())
+		if serverErr = server.Start(); serverErr == nil {
+			break
+		}
 	}
-
-	// Start callback server
-	server := auth.NewCallbackServer(auth.GeminiOAuthCallbackPort, manager.GetState())
-	if err := server.Start(); err != nil {
-		return fmt.Errorf("failed to start callback server: %w", err)
+	if serverErr != nil {
+		return fmt.Errorf("failed to start callback server (tried ports %v): %w", candidatePorts, serverErr)
 	}
 	defer server.Stop()
 
@@ -442,7 +462,7 @@ func setupGeminiOAuth() error {
 		return fmt.Errorf("failed to get config path: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -481,6 +501,135 @@ func setupGeminiOAuth() error {
 	fmt.Printf("  %sModel:%s gemini-2.5-flash\n", colorYellow, colorReset)
 
 	// Show next steps
+	showNextSteps()
+
+	return nil
+}
+
+func setupOpenAIOAuth() error {
+	defaultModel := "gpt-5.3-codex"
+	if p := config.GetProvider("openai"); p != nil {
+		defaultModel = p.DefaultModel
+	}
+
+	fmt.Printf("\n%s─── OpenAI OAuth Setup ───%s\n", colorCyan, colorReset)
+	fmt.Printf("\n%sThis will open your browser for ChatGPT authentication.%s\n", colorYellow, colorReset)
+	fmt.Printf("%sYou'll use your ChatGPT subscription (Plus/Pro).%s\n\n", colorYellow, colorReset)
+
+	// Start callback server with port fallback
+	candidatePorts := []int{
+		auth.OpenAIOAuthCallbackPort,
+		auth.OpenAIOAuthCallbackPort + 1,
+		auth.OpenAIOAuthCallbackPort + 2,
+	}
+
+	var manager *auth.OpenAIOAuthManager
+	var server *auth.CallbackServer
+	var authURL string
+	var startErr error
+
+	for _, port := range candidatePorts {
+		manager = auth.NewOpenAIOAuthManagerWithPort(port)
+		var genErr error
+		authURL, genErr = manager.GenerateAuthURL()
+		if genErr != nil {
+			return fmt.Errorf("failed to generate auth URL: %w", genErr)
+		}
+
+		server = auth.NewCallbackServerWithPath(port, manager.GetState(), auth.OpenAIOAuthCallbackPath)
+		if startErr = server.Start(); startErr == nil {
+			break
+		}
+	}
+
+	if startErr != nil {
+		return fmt.Errorf("failed to start callback server: %w", startErr)
+	}
+	defer server.Stop()
+
+	// Try to open browser
+	browserOpened := openBrowserForOAuth(authURL)
+
+	if browserOpened {
+		fmt.Printf("%sOpening browser for authentication...%s\n", colorGreen, colorReset)
+	} else {
+		fmt.Printf("%sCould not open browser automatically.%s\n", colorYellow, colorReset)
+		fmt.Printf("%sPlease open this URL in your browser:%s\n\n", colorYellow, colorReset)
+		fmt.Printf("  %s%s%s\n\n", colorBold, authURL, colorReset)
+	}
+
+	fmt.Printf("%sWaiting for authentication (timeout: 5 minutes)...%s\n", colorYellow, colorReset)
+
+	// Wait for callback
+	code, waitErr := server.WaitForCode(auth.OAuthCallbackTimeout)
+	if waitErr != nil {
+		return fmt.Errorf("authentication failed: %w", waitErr)
+	}
+
+	fmt.Printf("\n%s✓ Authentication successful!%s\n", colorGreen, colorReset)
+
+	// Exchange code for tokens
+	done := make(chan bool, 1)
+	time.AfterFunc(500*time.Millisecond, func() { done <- true })
+	spin("Exchanging authorization code...", done)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	token, err := manager.ExchangeCode(ctx, code)
+	if err != nil {
+		return fmt.Errorf("failed to exchange code: %w", err)
+	}
+
+	// Extract account ID from JWT
+	accountID := ""
+	if id, extractErr := auth.ExtractOpenAIAccountID(token.AccessToken); extractErr == nil {
+		accountID = id
+	}
+
+	// Save to config
+	configPath, err := getConfigPath()
+	if err != nil {
+		return fmt.Errorf("failed to get config path: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	cfg := map[string]any{
+		"api": map[string]any{
+			"active_provider": "openai",
+			"openai_oauth": map[string]any{
+				"access_token":  token.AccessToken,
+				"refresh_token": token.RefreshToken,
+				"expires_at":    token.ExpiresAt.Unix(),
+				"email":         token.Email,
+				"account_id":    accountID,
+			},
+		},
+		"model": map[string]any{
+			"provider": "openai",
+			"name":     defaultModel,
+		},
+	}
+	content, marshalErr := yaml.Marshal(cfg)
+	if marshalErr != nil {
+		return fmt.Errorf("failed to marshal config: %w", marshalErr)
+	}
+	if err := os.WriteFile(configPath, content, 0600); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	email := token.Email
+	if email == "" {
+		email = "ChatGPT Account"
+	}
+
+	fmt.Printf("\n%s✓ Logged in as %s via OpenAI OAuth!%s\n", colorGreen, email, colorReset)
+	fmt.Printf("  %sConfig:%s %s\n", colorYellow, colorReset, configPath)
+	fmt.Printf("  %sModel:%s %s\n", colorYellow, colorReset, defaultModel)
+
 	showNextSteps()
 
 	return nil
@@ -600,7 +749,7 @@ func setupOllamaLocal(reader *bufio.Reader) error {
 		return fmt.Errorf("failed to get config path: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -663,7 +812,7 @@ func setupOllamaCloud(reader *bufio.Reader) error {
 		return fmt.Errorf("failed to get config path: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -752,16 +901,29 @@ func spin(message string, done <-chan bool) {
 }
 
 // getConfigPath returns the path to the config file.
+// Mirrors the logic in config/loader.go: on macOS, uses ~/Library/Application Support/gokin
+// unless a config already exists at ~/.config/gokin.
 func getConfigPath() (string, error) {
-	configDir := os.Getenv("XDG_CONFIG_HOME")
-	if configDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		configDir = filepath.Join(home, ".config")
+	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
+		return filepath.Join(xdgConfig, "gokin", "config.yaml"), nil
 	}
-	return filepath.Join(configDir, "gokin", "config.yaml"), nil
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	if runtime.GOOS == "darwin" {
+		appSupport := filepath.Join(home, "Library", "Application Support", "gokin", "config.yaml")
+		dotConfig := filepath.Join(home, ".config", "gokin", "config.yaml")
+		// Use .config if it already exists there
+		if _, err := os.Stat(dotConfig); err == nil {
+			return dotConfig, nil
+		}
+		return appSupport, nil
+	}
+
+	return filepath.Join(home, ".config", "gokin", "config.yaml"), nil
 }
 
 // detectInstalledOllamaModels returns a list of installed Ollama models.

@@ -66,30 +66,32 @@ func (s Status) Icon() string {
 
 // Step represents a single step in a plan.
 type Step struct {
-	ID               int               `json:"id"`
-	Title            string            `json:"title"`
-	Description      string            `json:"description"`
-	Status           Status            `json:"status"`
-	Output           string            `json:"output"`
-	Error            string            `json:"error"`
-	StartTime        time.Time         `json:"start_time,omitempty"`
-	EndTime          time.Time         `json:"end_time,omitempty"`
-	Parallel         bool              `json:"parallel"`                // Can execute in parallel with other steps
-	DependsOn        []int             `json:"depends_on,omitempty"`    // Step IDs this step depends on
-	Children         []*Step           `json:"children,omitempty"`      // Nested sub-steps
-	MaxRetries       int               `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
-	Timeout          time.Duration     `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
-	RetryCount       int               `json:"retry_count,omitempty"`   // Current retry count
-	TokensUsed       int               `json:"tokens_used,omitempty"`   // Tokens consumed by this step
-	Condition        string            `json:"condition,omitempty"`     // Condition: "step_N_failed", "step_N_succeeded"
-	AgentMetrics     *StepAgentMetrics `json:"agent_metrics,omitempty"` // Metrics from sub-agent tree planner
-	CheckpointPassed bool              `json:"checkpoint_passed,omitempty"`
-	Inputs           []string          `json:"inputs,omitempty"`
-	ExpectedArtifact string            `json:"expected_artifact,omitempty"` // Expected output artifact/deliverable
-	SuccessCriteria  []string          `json:"success_criteria,omitempty"`  // Objective completion criteria
-	Rollback         string            `json:"rollback,omitempty"`          // Rollback strategy if step causes issues
-	Evidence         []string          `json:"evidence,omitempty"`          // Execution evidence (diff/commands/facts)
-	VerificationNote string            `json:"verification_note,omitempty"` // Verification summary recorded by orchestrator
+	ID                    int               `json:"id"`
+	Title                 string            `json:"title"`
+	Description           string            `json:"description"`
+	Status                Status            `json:"status"`
+	Output                string            `json:"output"`
+	Error                 string            `json:"error"`
+	StartTime             time.Time         `json:"start_time,omitempty"`
+	EndTime               time.Time         `json:"end_time,omitempty"`
+	Parallel              bool              `json:"parallel"`                // Can execute in parallel with other steps
+	DependsOn             []int             `json:"depends_on,omitempty"`    // Step IDs this step depends on
+	Children              []*Step           `json:"children,omitempty"`      // Nested sub-steps
+	MaxRetries            int               `json:"max_retries,omitempty"`   // Max retry attempts (0 = no retries)
+	Timeout               time.Duration     `json:"timeout,omitempty"`       // Per-step timeout (0 = no timeout)
+	RetryCount            int               `json:"retry_count,omitempty"`   // Current retry count
+	TokensUsed            int               `json:"tokens_used,omitempty"`   // Tokens consumed by this step
+	Condition             string            `json:"condition,omitempty"`     // Condition: "step_N_failed", "step_N_succeeded"
+	AgentMetrics          *StepAgentMetrics `json:"agent_metrics,omitempty"` // Metrics from sub-agent tree planner
+	CheckpointPassed      bool              `json:"checkpoint_passed,omitempty"`
+	Inputs                []string          `json:"inputs,omitempty"`
+	ExpectedArtifact      string            `json:"expected_artifact,omitempty"`       // Expected output artifact/deliverable
+	ExpectedArtifactPaths []string          `json:"expected_artifact_paths,omitempty"` // Explicit file/path artifacts expected from the step
+	SuccessCriteria       []string          `json:"success_criteria,omitempty"`        // Objective completion criteria
+	VerifyCommands        []string          `json:"verify_commands,omitempty"`         // Commands orchestrator must run before completion
+	Rollback              string            `json:"rollback,omitempty"`                // Rollback strategy if step causes issues
+	Evidence              []string          `json:"evidence,omitempty"`                // Execution evidence (diff/commands/facts)
+	VerificationNote      string            `json:"verification_note,omitempty"`       // Verification summary recorded by orchestrator
 }
 
 // StepAgentMetrics contains metrics from sub-agent tree planner execution.
@@ -144,6 +146,24 @@ func (s *Step) EnsureContractDefaults() {
 	for i := range s.SuccessCriteria {
 		s.SuccessCriteria[i] = strings.TrimSpace(s.SuccessCriteria[i])
 	}
+	artifactPaths := make([]string, 0, len(s.ExpectedArtifactPaths))
+	for _, path := range s.ExpectedArtifactPaths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		artifactPaths = appendUniqueLimited(artifactPaths, path, 30)
+	}
+	s.ExpectedArtifactPaths = artifactPaths
+	verifyCommands := make([]string, 0, len(s.VerifyCommands))
+	for _, cmd := range s.VerifyCommands {
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" {
+			continue
+		}
+		verifyCommands = appendUniqueLimited(verifyCommands, cmd, 20)
+	}
+	s.VerifyCommands = verifyCommands
 	s.Rollback = strings.TrimSpace(s.Rollback)
 	s.ExpectedArtifact = strings.TrimSpace(s.ExpectedArtifact)
 
@@ -158,6 +178,11 @@ func (s *Step) EnsureContractDefaults() {
 			s.SuccessCriteria = []string{s.Description}
 		} else {
 			s.SuccessCriteria = []string{"Step objective is implemented and validated"}
+		}
+	}
+	if len(s.VerifyCommands) == 0 {
+		s.VerifyCommands = []string{
+			"if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git diff --check; else true; fi",
 		}
 	}
 	if s.Rollback == "" {
@@ -199,6 +224,25 @@ func (p *Plan) GetContextSnapshot() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.ContextSnapshot
+}
+
+// EnsureStepContracts normalizes step contract defaults for all steps.
+// Useful after loading plans from disk where newer contract fields may be missing.
+func (p *Plan) EnsureStepContracts() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, step := range p.Steps {
+		if step != nil {
+			step.EnsureContractDefaults()
+		}
+	}
+	if p.RunLedger == nil {
+		p.RunLedger = make(map[int]*RunLedgerEntry)
+	}
 }
 
 // NewPlan creates a new plan.
@@ -311,6 +355,15 @@ func (p *Plan) CompleteStep(id int, output string) {
 			if len(step.Evidence) == 0 {
 				step.Status = StatusPaused
 				step.Error = "missing completion evidence (diff/output/command/fact)"
+				step.EndTime = time.Now()
+				p.markStepFailedLocked(id)
+				p.Status = StatusInProgress
+				p.UpdatedAt = time.Now()
+				return
+			}
+			if len(step.VerifyCommands) > 0 && !containsEvidenceToken(step.Evidence, "contract.verify_commands_proof=true") {
+				step.Status = StatusPaused
+				step.Error = "missing verify_commands execution proof"
 				step.EndTime = time.Now()
 				p.markStepFailedLocked(id)
 				p.Status = StatusInProgress
@@ -559,7 +612,9 @@ func deepCopyStep(step *Step) *Step {
 	stepCopy := *step
 	stepCopy.DependsOn = append([]int(nil), step.DependsOn...)
 	stepCopy.Inputs = append([]string(nil), step.Inputs...)
+	stepCopy.ExpectedArtifactPaths = append([]string(nil), step.ExpectedArtifactPaths...)
 	stepCopy.SuccessCriteria = append([]string(nil), step.SuccessCriteria...)
+	stepCopy.VerifyCommands = append([]string(nil), step.VerifyCommands...)
 	stepCopy.Evidence = append([]string(nil), step.Evidence...)
 	if step.AgentMetrics != nil {
 		metricsCopy := *step.AgentMetrics
@@ -838,6 +893,20 @@ func marshalDeterministic(v map[string]any) (string, error) {
 func containsString(items []string, value string) bool {
 	for _, item := range items {
 		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEvidenceToken(evidence []string, token string) bool {
+	token = strings.TrimSpace(strings.ToLower(token))
+	if token == "" {
+		return false
+	}
+	for _, item := range evidence {
+		current := strings.TrimSpace(strings.ToLower(item))
+		if current == token || strings.Contains(current, token) {
 			return true
 		}
 	}

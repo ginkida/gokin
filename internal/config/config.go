@@ -47,6 +47,9 @@ type APIConfig struct {
 	// OAuth tokens for Gemini (via Google Account)
 	GeminiOAuth *OAuthTokenConfig `yaml:"gemini_oauth,omitempty"`
 
+	// OAuth tokens for OpenAI (via ChatGPT Account)
+	OpenAIOAuth *OAuthTokenConfig `yaml:"openai_oauth,omitempty"`
+
 	// Ollama server URL (default: http://localhost:11434)
 	OllamaBaseURL string `yaml:"ollama_base_url,omitempty"`
 
@@ -66,7 +69,8 @@ type OAuthTokenConfig struct {
 	RefreshToken string `yaml:"refresh_token"`
 	ExpiresAt    int64  `yaml:"expires_at"` // Unix timestamp
 	Email        string `yaml:"email,omitempty"`
-	ProjectID    string `yaml:"project_id,omitempty"` // Code Assist project ID
+	ProjectID    string `yaml:"project_id,omitempty"` // Code Assist project ID (Gemini)
+	AccountID    string `yaml:"account_id,omitempty"` // chatgpt_account_id (OpenAI)
 }
 
 // HasOAuthToken checks if OAuth is configured for a provider
@@ -74,6 +78,8 @@ func (c *APIConfig) HasOAuthToken(provider string) bool {
 	switch provider {
 	case "gemini":
 		return c.GeminiOAuth != nil && c.GeminiOAuth.RefreshToken != ""
+	case "openai":
+		return c.OpenAIOAuth != nil && c.OpenAIOAuth.RefreshToken != ""
 	}
 	return false
 }
@@ -167,6 +173,11 @@ type ModelConfig struct {
 	EnableThinking bool  `yaml:"enable_thinking"` // Enable extended thinking mode
 	ThinkingBudget int32 `yaml:"thinking_budget"` // Max tokens for thinking (0 = disabled)
 
+	// Reasoning Effort for OpenAI models (none/low/medium/high/xhigh)
+	// Overrides the router's automatic thinking budget mapping when set.
+	// Default: "xhigh" for OpenAI provider.
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty"`
+
 	// Fallback providers to try when the primary provider fails
 	FallbackProviders []string `yaml:"fallback_providers"`
 
@@ -179,6 +190,7 @@ type ToolsConfig struct {
 	Timeout           time.Duration     `yaml:"timeout"`
 	ModelRoundTimeout time.Duration     `yaml:"model_round_timeout"` // Hard timeout for a single model round.
 	Bash              BashConfig        `yaml:"bash"`
+	DeltaCheck        DeltaCheckConfig  `yaml:"delta_check"`
 	AllowedDirs       []string          `yaml:"allowed_dirs"` // Additional allowed directories (besides workDir)
 	Formatters        map[string]string `yaml:"formatters"`   // ext → command, e.g. {".py": "black"}
 }
@@ -187,6 +199,14 @@ type ToolsConfig struct {
 type BashConfig struct {
 	Sandbox         bool     `yaml:"sandbox"`
 	BlockedCommands []string `yaml:"blocked_commands"`
+}
+
+// DeltaCheckConfig controls lightweight post-edit verification.
+type DeltaCheckConfig struct {
+	Enabled    bool          `yaml:"enabled"`     // Enable/disable automatic delta-check after mutating tools
+	Timeout    time.Duration `yaml:"timeout"`     // Per-check timeout
+	WarnOnly   bool          `yaml:"warn_only"`   // If true, report failures but do not block further mutating operations
+	MaxModules int           `yaml:"max_modules"` // Maximum distinct module roots to check per cycle
 }
 
 // UIConfig holds UI-related settings.
@@ -222,16 +242,33 @@ type PermissionConfig struct {
 
 // PlanConfig holds plan mode settings.
 type PlanConfig struct {
-	Enabled            bool          `yaml:"enabled"`               // Enable/disable plan mode
-	RequireApproval    bool          `yaml:"require_approval"`      // Require user approval before execution
-	AutoDetect         bool          `yaml:"auto_detect"`           // Auto-trigger planning for complex tasks
-	ClearContext       bool          `yaml:"clear_context"`         // Clear context before plan execution
-	DelegateSteps      bool          `yaml:"delegate_steps"`        // Run each step in isolated sub-agent
-	AbortOnStepFailure bool          `yaml:"abort_on_step_failure"` // Stop plan on step failure
-	PlanningTimeout    time.Duration `yaml:"planning_timeout"`      // Timeout for LLM plan generation
-	DefaultStepTimeout time.Duration `yaml:"default_step_timeout"`  // Default timeout per step (0 = 5min)
-	UseLLMExpansion    bool          `yaml:"use_llm_expansion"`     // Use LLM for dynamic plan expansion
-	Algorithm          string        `yaml:"algorithm"`             // Tree search algorithm: beam, mcts, astar
+	Enabled                      bool                   `yaml:"enabled"`                         // Enable/disable plan mode
+	RequireApproval              bool                   `yaml:"require_approval"`                // Require user approval before execution
+	AutoDetect                   bool                   `yaml:"auto_detect"`                     // Auto-trigger planning for complex tasks
+	ClearContext                 bool                   `yaml:"clear_context"`                   // Clear context before plan execution
+	DelegateSteps                bool                   `yaml:"delegate_steps"`                  // Run each step in isolated sub-agent
+	AbortOnStepFailure           bool                   `yaml:"abort_on_step_failure"`           // Stop plan on step failure
+	PlanningTimeout              time.Duration          `yaml:"planning_timeout"`                // Timeout for LLM plan generation
+	DefaultStepTimeout           time.Duration          `yaml:"default_step_timeout"`            // Default timeout per step (0 = 5min)
+	UseLLMExpansion              bool                   `yaml:"use_llm_expansion"`               // Use LLM for dynamic plan expansion
+	Algorithm                    string                 `yaml:"algorithm"`                       // Tree search algorithm: beam, mcts, astar
+	RequireExpectedArtifactPaths bool                   `yaml:"require_expected_artifact_paths"` // Fail-closed completion when mutating step has no explicit artifact paths
+	VerifyPolicy                 PlanVerifyPolicyConfig `yaml:"verify_policy"`                   // Verification command safety policy
+}
+
+// PlanVerifyPolicyConfig controls safety filtering for plan step verify_commands.
+type PlanVerifyPolicyConfig struct {
+	Enabled                   bool                                     `yaml:"enabled"`                     // Enable policy filtering
+	RequireVerificationIntent bool                                     `yaml:"require_verification_intent"` // Require command to look like validation/test/build/lint/check
+	AllowContains             []string                                 `yaml:"allow_contains"`              // Optional allowlist markers (substring match)
+	DenyContains              []string                                 `yaml:"deny_contains"`               // Denylist markers (substring match)
+	Profiles                  map[string]PlanVerifyPolicyProfileConfig `yaml:"profiles"`                    // Per-stack overrides (go,node,python,rust,java,cmake,bazel,make,php,default)
+}
+
+// PlanVerifyPolicyProfileConfig overrides policy markers for a stack profile.
+type PlanVerifyPolicyProfileConfig struct {
+	AllowContains []string `yaml:"allow_contains"` // Additional allowlist markers
+	DenyContains  []string `yaml:"deny_contains"`  // Additional denylist markers
 }
 
 // DoneGateConfig holds hard finalization gate settings.
@@ -397,6 +434,12 @@ func DefaultConfig() *Config {
 				Sandbox:         true,
 				BlockedCommands: []string{"rm -rf /", "mkfs"},
 			},
+			DeltaCheck: DeltaCheckConfig{
+				Enabled:    true,
+				Timeout:    90 * time.Second,
+				WarnOnly:   false,
+				MaxModules: 8,
+			},
 		},
 		UI: UIConfig{
 			StreamOutput:      true,
@@ -444,15 +487,41 @@ func DefaultConfig() *Config {
 			},
 		},
 		Plan: PlanConfig{
-			Enabled:            true,  // Enabled by default
-			RequireApproval:    true,  // Require approval when enabled
-			AutoDetect:         true,  // Auto-trigger planning for complex tasks
-			ClearContext:       true,  // Clear context before plan execution
-			DelegateSteps:      true,  // Run each step in isolated sub-agent
-			AbortOnStepFailure: false, // Continue by default on step failure
-			PlanningTimeout:    60 * time.Second,
-			UseLLMExpansion:    true,
-			Algorithm:          "beam", // Tree search algorithm: beam, mcts, astar
+			Enabled:                      true,  // Enabled by default
+			RequireApproval:              true,  // Require approval when enabled
+			AutoDetect:                   true,  // Auto-trigger planning for complex tasks
+			ClearContext:                 true,  // Clear context before plan execution
+			DelegateSteps:                true,  // Run each step in isolated sub-agent
+			AbortOnStepFailure:           false, // Continue by default on step failure
+			PlanningTimeout:              60 * time.Second,
+			UseLLMExpansion:              true,
+			Algorithm:                    "beam", // Tree search algorithm: beam, mcts, astar
+			RequireExpectedArtifactPaths: false,
+			VerifyPolicy: PlanVerifyPolicyConfig{
+				Enabled:                   true,
+				RequireVerificationIntent: true,
+				AllowContains:             []string{},
+				DenyContains: []string{
+					"rm -", "rm -rf", " mv ", " cp ", " chmod ", " chown ", "sudo ",
+					"mkfs", " dd ", "git reset", "git clean", "git checkout --",
+					"git commit", "git push", "git stash", "npm install", "npm i ",
+					"pnpm add", "yarn add", "pip install", "go get ", "cargo add ",
+					"brew install", "apt install", "apk add", "dnf install", "pacman -s",
+					"curl |", "wget |",
+				},
+				Profiles: map[string]PlanVerifyPolicyProfileConfig{
+					"default": {AllowContains: []string{"check", "verify", "test", "lint", "build", "validate", "git diff --check", "git status", "git rev-parse"}},
+					"go":      {AllowContains: []string{"go test", "go vet", "go build", "golangci-lint"}},
+					"node":    {AllowContains: []string{"npm test", "pnpm test", "yarn test", "bun test", "eslint", "tsc", "vitest", "jest"}},
+					"python":  {AllowContains: []string{"pytest", "ruff", "mypy", "python -m"}},
+					"rust":    {AllowContains: []string{"cargo test", "cargo check", "cargo clippy", "cargo build"}},
+					"java":    {AllowContains: []string{"mvn test", "mvn verify", "gradle test", "gradle check"}},
+					"cmake":   {AllowContains: []string{"cmake --build", "ctest"}},
+					"bazel":   {AllowContains: []string{"bazel test", "bazel build"}},
+					"make":    {AllowContains: []string{"make test", "make check", "make verify"}},
+					"php":     {AllowContains: []string{"composer validate", "phpunit", "phpstan"}},
+				},
+			},
 		},
 		DoneGate: DoneGateConfig{
 			Enabled:         true,            // Enabled by default

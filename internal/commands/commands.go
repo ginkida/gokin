@@ -62,6 +62,7 @@ type AppInterface interface {
 	GetRuntimeHealthReport() string
 	GetPolicyReport() string
 	GetLedgerReport() string
+	GetPlanProofReport(stepID int) string
 	GetJournalReport() string
 	GetRecoveryReport() string
 	GetObservabilityReport() string
@@ -105,6 +106,7 @@ func NewHandler() *Handler {
 	h.Register(&ProviderCommand{})
 	h.Register(&StatusCommand{})
 	h.Register(&ModelCommand{})
+	h.Register(&ReasoningCommand{})
 	h.Register(&PermissionsCommand{})
 	h.Register(&SandboxCommand{})
 
@@ -135,6 +137,7 @@ func NewHandler() *Handler {
 	h.Register(&HealthCommand{})
 	h.Register(&PolicyCommand{})
 	h.Register(&LedgerCommand{})
+	h.Register(&PlanProofCommand{})
 	h.Register(&JournalCommand{})
 	h.Register(&RecoveryCommand{})
 	h.Register(&ObservabilityCommand{})

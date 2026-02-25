@@ -221,9 +221,18 @@ func (c *Config) Validate() error {
 	if c.DoneGate.CheckTimeout < 0 {
 		return fmt.Errorf("done_gate.check_timeout must be >= 0")
 	}
+	if c.Tools.DeltaCheck.Timeout < 0 {
+		return fmt.Errorf("tools.delta_check.timeout must be >= 0")
+	}
+	if c.Tools.DeltaCheck.MaxModules < 0 {
+		return fmt.Errorf("tools.delta_check.max_modules must be >= 0")
+	}
+	if err := validatePlanVerifyPolicy(c.Plan.VerifyPolicy); err != nil {
+		return err
+	}
 
 	// Check OAuth first
-	if c.API.HasOAuthToken("gemini") {
+	if c.API.HasOAuthToken("gemini") || c.API.HasOAuthToken("openai") {
 		return nil
 	}
 
@@ -245,6 +254,56 @@ func (c *Config) Validate() error {
 	}
 
 	return ErrMissingAuth
+}
+
+func validatePlanVerifyPolicy(policy PlanVerifyPolicyConfig) error {
+	if !policy.Enabled {
+		return nil
+	}
+
+	normalize := func(values []string) []string {
+		out := make([]string, 0, len(values))
+		for _, v := range values {
+			v = strings.TrimSpace(strings.ToLower(v))
+			if v == "" {
+				continue
+			}
+			out = append(out, v)
+		}
+		return out
+	}
+
+	globalAllow := normalize(policy.AllowContains)
+	globalDeny := normalize(policy.DenyContains)
+	denySet := make(map[string]bool, len(globalDeny))
+	for _, d := range globalDeny {
+		denySet[d] = true
+	}
+	for _, a := range globalAllow {
+		if denySet[a] {
+			return fmt.Errorf("plan.verify_policy conflict: %q is in both allow_contains and deny_contains", a)
+		}
+	}
+
+	for profile, cfg := range policy.Profiles {
+		profile = strings.TrimSpace(profile)
+		if profile == "" {
+			return fmt.Errorf("plan.verify_policy.profiles contains an empty profile key")
+		}
+		pAllow := normalize(cfg.AllowContains)
+		pDeny := normalize(cfg.DenyContains)
+		pDenySet := make(map[string]bool, len(pDeny))
+		for _, d := range pDeny {
+			pDenySet[d] = true
+		}
+		for _, a := range pAllow {
+			if pDenySet[a] {
+				return fmt.Errorf("plan.verify_policy.profiles.%s conflict: %q is in both allow_contains and deny_contains", profile, a)
+			}
+		}
+	}
+
+	return nil
 }
 
 // Error types for configuration validation.

@@ -31,6 +31,7 @@ type GeminiClient struct {
 	statusCallback    StatusCallback // Optional callback for status updates
 	systemInstruction string         // System-level instruction passed via API parameter
 	thinkingBudget    int32          // Thinking budget (0 = disabled)
+	reasoningEffort   string         // Reasoning effort level from config (low/medium/high)
 }
 
 // NewGeminiClient creates a new Gemini API client (returns Client interface).
@@ -95,6 +96,7 @@ func NewGeminiClient(ctx context.Context, cfg *config.Config) (Client, error) {
 		maxRetries:        maxRetries,
 		retryDelay:        retryDelay,
 		streamIdleTimeout: streamIdleTimeout,
+		reasoningEffort:   cfg.Model.ReasoningEffort,
 	}, nil
 }
 
@@ -346,6 +348,7 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 	statusCb := c.statusCallback
 	sysInstruction := c.systemInstruction
 	thinkingBudget := c.thinkingBudget
+	cfgEffort := c.reasoningEffort
 	tools := c.tools
 	model := c.model
 	c.mu.RUnlock()
@@ -367,22 +370,12 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 	if sysInstruction != "" {
 		config.SystemInstruction = genai.NewContentFromText(sysInstruction, genai.RoleUser)
 	}
-	if thinkingBudget > 0 {
-		// Ensure MaxOutputTokens accommodates thinking + response text
-		minRequired := thinkingBudget + 4096
+	config.ThinkingConfig = geminiThinkingConfig(model, cfgEffort, thinkingBudget)
+	// Ensure MaxOutputTokens accommodates thinking + response for budget-based configs
+	if tc := config.ThinkingConfig; tc != nil && tc.ThinkingBudget != nil && *tc.ThinkingBudget > 0 {
+		minRequired := *tc.ThinkingBudget + 4096
 		if config.MaxOutputTokens > 0 && config.MaxOutputTokens < minRequired {
 			config.MaxOutputTokens = minRequired
-		}
-		config.ThinkingConfig = &genai.ThinkingConfig{
-			IncludeThoughts: true,
-			ThinkingBudget:  Ptr(thinkingBudget),
-		}
-	} else if !strings.Contains(model, "-pro") {
-		// Explicitly disable thinking for non-pro models that enable it by default
-		// when ThinkingConfig is nil (e.g. Gemini 3 Flash).
-		// Pro models require thinking — leave ThinkingConfig nil for API default.
-		config.ThinkingConfig = &genai.ThinkingConfig{
-			ThinkingBudget: Ptr(int32(0)),
 		}
 	}
 	if len(tools) > 0 {
@@ -673,10 +666,80 @@ func (c *GeminiClient) WithModel(modelName string) Client {
 		rateLimiter:       c.rateLimiter,
 		maxRetries:        c.maxRetries,
 		retryDelay:        c.retryDelay,
+		streamIdleTimeout: c.streamIdleTimeout,
 		statusCallback:    c.statusCallback,
 		systemInstruction: c.systemInstruction,
 		thinkingBudget:    c.thinkingBudget,
+		reasoningEffort:   c.reasoningEffort,
 	}
+}
+
+// geminiThinkingConfig builds the ThinkingConfig for a Gemini request.
+// Gemini 3.x supports ThinkingLevel (low/medium/high); Gemini 2.5 uses ThinkingBudget (int32).
+// reasoningEffort from config overrides the router's thinkingBudget when set.
+func geminiThinkingConfig(model, reasoningEffort string, thinkingBudget int32) *genai.ThinkingConfig {
+	isGemini3 := strings.Contains(model, "gemini-3")
+	isPro := strings.Contains(model, "-pro")
+
+	// Config-level reasoning effort takes priority
+	if reasoningEffort != "" {
+		switch reasoningEffort {
+		case "none":
+			if isPro {
+				// Pro models cannot disable thinking; use lowest available
+				if isGemini3 {
+					return &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}
+				}
+				return nil // 2.5 Pro: leave default
+			}
+			return &genai.ThinkingConfig{ThinkingBudget: Ptr(int32(0))}
+		case "low":
+			if isGemini3 {
+				return &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}
+			}
+			return &genai.ThinkingConfig{ThinkingBudget: Ptr(int32(1024)), IncludeThoughts: true}
+		case "medium":
+			if isGemini3 {
+				return &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}
+			}
+			return &genai.ThinkingConfig{ThinkingBudget: Ptr(int32(8192)), IncludeThoughts: true}
+		case "high", "xhigh":
+			if isGemini3 {
+				return &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}
+			}
+			return &genai.ThinkingConfig{ThinkingBudget: Ptr(int32(32768)), IncludeThoughts: true}
+		}
+	}
+
+	// Fallback: use router's thinkingBudget
+	if thinkingBudget > 0 {
+		if isGemini3 {
+			// Map budget to ThinkingLevel for Gemini 3.x
+			var level genai.ThinkingLevel
+			switch {
+			case thinkingBudget <= 1024:
+				level = genai.ThinkingLevelLow
+			case thinkingBudget <= 2048:
+				level = genai.ThinkingLevelMedium
+			default:
+				level = genai.ThinkingLevelHigh
+			}
+			return &genai.ThinkingConfig{ThinkingLevel: level}
+		}
+		return &genai.ThinkingConfig{
+			IncludeThoughts: true,
+			ThinkingBudget:  Ptr(thinkingBudget),
+		}
+	}
+
+	// Default: disable for non-pro models, leave nil for pro
+	if !isPro {
+		if isGemini3 {
+			return &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}
+		}
+		return &genai.ThinkingConfig{ThinkingBudget: Ptr(int32(0))}
+	}
+	return nil
 }
 
 // Ptr returns a pointer to the given value.
