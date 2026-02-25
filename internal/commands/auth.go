@@ -133,7 +133,7 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 		}
 		status := "not configured"
 		if p.HasOAuth && cfg.API.HasOAuthToken(p.Name) {
-			status = c.getOAuthStatus(cfg, p.Name)
+			status = getOAuthStatus(cfg, p.Name)
 		} else if key := p.GetKey(&cfg.API); key != "" {
 			status = "configured " + maskKey(key)
 		} else if p.UsesLegacyKey && cfg.API.APIKey != "" && activeProvider == p.Name {
@@ -163,7 +163,7 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 }
 
 // getOAuthStatus returns the OAuth status display string for a provider.
-func (c *LoginCommand) getOAuthStatus(cfg *config.Config, provider string) string {
+func getOAuthStatus(cfg *config.Config, provider string) string {
 	switch provider {
 	case "gemini":
 		if cfg.API.GeminiOAuth != nil {
@@ -384,8 +384,14 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 			}
 
 			status := "not configured"
-			if cfg.API.HasProvider(p.Name) {
+			if p.HasOAuth && cfg.API.HasOAuthToken(p.Name) {
+				status = getOAuthStatus(cfg, p.Name)
+			} else if key := p.GetKey(&cfg.API); key != "" {
 				status = "✓ ready"
+			} else if p.UsesLegacyKey && cfg.API.APIKey != "" && p.Name == currentProvider {
+				status = "✓ ready"
+			} else if p.KeyOptional && !p.HasOAuth {
+				status = "available (no key required)"
 			}
 
 			sb.WriteString(fmt.Sprintf("%s%-10s %-16s %s\n", marker, p.Name, p.DisplayName, status))

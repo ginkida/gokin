@@ -118,8 +118,11 @@ func (c *APIConfig) HasProvider(provider string) bool {
 	if p == nil {
 		return false
 	}
-	if p.KeyOptional {
-		return true
+	if p.KeyOptional && !p.HasOAuth {
+		return true // e.g. ollama — no key needed
+	}
+	if p.KeyOptional && p.HasOAuth {
+		return c.HasOAuthToken(provider) // e.g. openai — requires OAuth
 	}
 	if p.GetKey(c) != "" {
 		return true
