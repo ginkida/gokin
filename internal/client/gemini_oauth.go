@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -106,7 +107,16 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 		return nil, fmt.Errorf("failed to validate OAuth token: %w", err)
 	}
 
-	// Load project ID if not cached
+	// Load project ID: check env vars first, then API
+	if client.projectID == "" {
+		for _, env := range []string{"GOKIN_GEMINI_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"} {
+			if v := os.Getenv(env); v != "" {
+				client.projectID = v
+				logging.Debug("using project ID from env", "env", env, "projectID", v)
+				break
+			}
+		}
+	}
 	if client.projectID == "" {
 		if err := client.loadProjectID(ctx); err != nil {
 			return nil, fmt.Errorf("failed to load project ID: %w", err)
@@ -122,19 +132,79 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 	return client, nil
 }
 
-// loadProjectID loads the project ID from Code Assist API
+// loadCodeAssistResponse represents the full response from /v1internal:loadCodeAssist
+type loadCodeAssistResponse struct {
+	CloudaicompanionProject interface{} `json:"cloudaicompanionProject"` // string or {"id": string}
+	CurrentTier             *struct {
+		ID string `json:"id"`
+	} `json:"currentTier"`
+	AllowedTiers []struct {
+		ID        string `json:"id"`
+		IsDefault bool   `json:"isDefault"`
+	} `json:"allowedTiers"`
+}
+
+// extractProjectID extracts the project ID from the cloudaicompanionProject field,
+// which may be a plain string or an object with an "id" field.
+func (r *loadCodeAssistResponse) extractProjectID() string {
+	if r.CloudaicompanionProject == nil {
+		return ""
+	}
+	// Try string first
+	if s, ok := r.CloudaicompanionProject.(string); ok {
+		return s
+	}
+	// Try object with "id" field
+	if m, ok := r.CloudaicompanionProject.(map[string]interface{}); ok {
+		if id, ok := m["id"].(string); ok {
+			return id
+		}
+	}
+	return ""
+}
+
+// selectTierID picks the best tier from the response: isDefault=true, then first, then fallback.
+func (r *loadCodeAssistResponse) selectTierID() string {
+	for _, t := range r.AllowedTiers {
+		if t.IsDefault {
+			return t.ID
+		}
+	}
+	if len(r.AllowedTiers) > 0 {
+		return r.AllowedTiers[0].ID
+	}
+	return "free-tier"
+}
+
+// loadProjectID loads the project ID from Code Assist API.
+// If the API returns no project (new free-tier user), it triggers onboardProject().
 func (c *GeminiOAuthClient) loadProjectID(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	token := c.accessToken
+	c.mu.RUnlock()
 
-	url := auth.GeminiCodeAssistAPI + "/v1internal:loadCodeAssist"
+	apiURL := auth.GeminiCodeAssistAPI + "/v1internal:loadCodeAssist"
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader([]byte("{}")))
+	// Build request body with metadata (matching reference implementation)
+	reqBody := map[string]interface{}{
+		"metadata": map[string]string{
+			"ideType":    "IDE_UNSPECIFIED",
+			"platform":   "PLATFORM_UNSPECIFIED",
+			"pluginType": "GEMINI",
+		},
+	}
+
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal loadCodeAssist request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(reqJSON))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range auth.CodeAssistHeaders {
 		req.Header.Set(k, v)
@@ -151,26 +221,194 @@ func (c *GeminiOAuthClient) loadProjectID(ctx context.Context) error {
 		return fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
 	}
 
-	var result struct {
-		CloudaicompanionProject string `json:"cloudaicompanionProject"`
-	}
+	var result loadCodeAssistResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("failed to parse loadCodeAssist response: %w", err)
 	}
 
-	if result.CloudaicompanionProject == "" {
-		return fmt.Errorf("no project ID returned from Code Assist API")
+	projectID := result.extractProjectID()
+	if projectID == "" {
+		// New user without a project — trigger provisioning via onboardUser
+		tierID := result.selectTierID()
+		logging.Debug("no project ID from loadCodeAssist, onboarding", "tierID", tierID)
+		if err := c.onboardProject(ctx, tierID); err != nil {
+			return fmt.Errorf("project onboarding failed: %w", err)
+		}
+		return nil
 	}
 
-	c.projectID = result.CloudaicompanionProject
+	c.mu.Lock()
+	c.projectID = projectID
+	c.mu.Unlock()
 
 	// Save to config
-	c.config.API.GeminiOAuth.ProjectID = c.projectID
+	c.config.API.GeminiOAuth.ProjectID = projectID
 	if err := c.config.Save(); err != nil {
 		logging.Warn("failed to save project ID to config", "error", err)
 	}
 
-	logging.Debug("loaded Code Assist project ID", "projectID", c.projectID)
+	logging.Debug("loaded Code Assist project ID", "projectID", projectID)
+	return nil
+}
+
+// onboardProject provisions a new Code Assist project via /v1internal:onboardUser.
+// It polls the returned long-running operation until completion.
+func (c *GeminiOAuthClient) onboardProject(ctx context.Context, tierID string) error {
+	c.mu.RLock()
+	token := c.accessToken
+	c.mu.RUnlock()
+
+	apiURL := auth.GeminiCodeAssistAPI + "/v1internal:onboardUser"
+
+	reqBody := map[string]interface{}{
+		"tierId": tierID,
+		"metadata": map[string]string{
+			"ideType":    "IDE_UNSPECIFIED",
+			"platform":   "PLATFORM_UNSPECIFIED",
+			"pluginType": "GEMINI",
+		},
+	}
+
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal onboardUser request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(reqJSON))
+	if err != nil {
+		return fmt.Errorf("failed to create onboard request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range auth.CodeAssistHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("onboardUser request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("onboardUser failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var operation struct {
+		Name     string `json:"name"`
+		Done     bool   `json:"done"`
+		Response *struct {
+			CloudaicompanionProject interface{} `json:"cloudaicompanionProject"`
+		} `json:"response"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&operation); err != nil {
+		return fmt.Errorf("failed to parse onboardUser response: %w", err)
+	}
+
+	// If the operation completed immediately, extract the project ID
+	if operation.Done {
+		return c.extractOnboardResult(&operation)
+	}
+
+	// Poll the operation until completion
+	const maxPolls = 10
+	const pollInterval = 5 * time.Second
+
+	logging.Info("provisioning Code Assist project, this may take a moment...")
+
+	for i := 0; i < maxPolls; i++ {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("onboarding cancelled: %w", ctx.Err())
+		case <-time.After(pollInterval):
+		}
+
+		// Refresh token if needed — polling can take up to 50s
+		if err := c.ensureValidToken(ctx); err != nil {
+			return fmt.Errorf("token expired during onboarding: %w", err)
+		}
+
+		pollURL := auth.GeminiCodeAssistAPI + "/v1internal/" + operation.Name
+
+		c.mu.RLock()
+		token = c.accessToken
+		c.mu.RUnlock()
+
+		pollReq, err := http.NewRequestWithContext(ctx, "GET", pollURL, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create poll request: %w", err)
+		}
+
+		pollReq.Header.Set("Authorization", "Bearer "+token)
+		for k, v := range auth.CodeAssistHeaders {
+			pollReq.Header.Set(k, v)
+		}
+
+		pollResp, err := c.httpClient.Do(pollReq)
+		if err != nil {
+			logging.Warn("onboard poll failed, retrying", "attempt", i+1, "error", err)
+			continue
+		}
+
+		if pollResp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(pollResp.Body)
+			pollResp.Body.Close()
+			logging.Warn("onboard poll non-200", "status", pollResp.StatusCode, "body", string(body))
+			continue
+		}
+
+		if err := json.NewDecoder(pollResp.Body).Decode(&operation); err != nil {
+			pollResp.Body.Close()
+			logging.Warn("onboard poll parse failed", "attempt", i+1, "error", err)
+			continue
+		}
+		pollResp.Body.Close()
+
+		if operation.Done {
+			return c.extractOnboardResult(&operation)
+		}
+
+		logging.Debug("onboarding in progress", "attempt", i+1, "operation", operation.Name)
+	}
+
+	return fmt.Errorf("onboarding timed out after %d polls", maxPolls)
+}
+
+// extractOnboardResult extracts the project ID from a completed onboard operation
+// and saves it to the client and config.
+func (c *GeminiOAuthClient) extractOnboardResult(operation *struct {
+	Name     string `json:"name"`
+	Done     bool   `json:"done"`
+	Response *struct {
+		CloudaicompanionProject interface{} `json:"cloudaicompanionProject"`
+	} `json:"response"`
+}) error {
+	if operation.Response == nil {
+		return fmt.Errorf("onboard operation completed but response is nil")
+	}
+
+	// Reuse the same extraction logic
+	r := &loadCodeAssistResponse{
+		CloudaicompanionProject: operation.Response.CloudaicompanionProject,
+	}
+	projectID := r.extractProjectID()
+	if projectID == "" {
+		return fmt.Errorf("onboard operation completed but no project ID in response")
+	}
+
+	c.mu.Lock()
+	c.projectID = projectID
+	c.mu.Unlock()
+
+	// Save to config
+	c.config.API.GeminiOAuth.ProjectID = projectID
+	if err := c.config.Save(); err != nil {
+		logging.Warn("failed to save onboarded project ID to config", "error", err)
+	}
+
+	logging.Debug("onboarded Code Assist project", "projectID", projectID)
 	return nil
 }
 

@@ -55,8 +55,13 @@ func (b *TokenBucket) TryConsume(tokens float64) bool {
 
 	b.refill()
 
-	if b.tokens >= tokens {
-		b.tokens -= tokens
+	consumeAmount := tokens
+	if consumeAmount > b.maxTokens {
+		consumeAmount = b.maxTokens
+	}
+
+	if b.tokens >= consumeAmount {
+		b.tokens -= consumeAmount
 		return true
 	}
 	return false
@@ -68,14 +73,19 @@ func (b *TokenBucket) Consume(tokens float64) {
 		b.mu.Lock()
 		b.refill()
 
-		if b.tokens >= tokens {
-			b.tokens -= tokens
+		consumeAmount := tokens
+		if consumeAmount > b.maxTokens {
+			consumeAmount = b.maxTokens
+		}
+
+		if b.tokens >= consumeAmount {
+			b.tokens -= consumeAmount
 			b.mu.Unlock()
 			return
 		}
 
 		// Calculate wait time for required tokens
-		deficit := tokens - b.tokens
+		deficit := consumeAmount - b.tokens
 		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
 		b.mu.Unlock()
 
@@ -98,14 +108,19 @@ func (b *TokenBucket) ConsumeWithTimeout(tokens float64, timeout time.Duration) 
 		b.mu.Lock()
 		b.refill()
 
-		if b.tokens >= tokens {
-			b.tokens -= tokens
+		consumeAmount := tokens
+		if consumeAmount > b.maxTokens {
+			consumeAmount = b.maxTokens
+		}
+
+		if b.tokens >= consumeAmount {
+			b.tokens -= consumeAmount
 			b.mu.Unlock()
 			return true
 		}
 
 		// Calculate wait time for required tokens
-		deficit := tokens - b.tokens
+		deficit := consumeAmount - b.tokens
 		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
 		b.mu.Unlock()
 
@@ -128,12 +143,18 @@ func (b *TokenBucket) ConsumeWithContext(ctx context.Context, tokens float64) er
 	for {
 		b.mu.Lock()
 		b.refill()
-		if b.tokens >= tokens {
-			b.tokens -= tokens
+
+		consumeAmount := tokens
+		if consumeAmount > b.maxTokens {
+			consumeAmount = b.maxTokens
+		}
+
+		if b.tokens >= consumeAmount {
+			b.tokens -= consumeAmount
 			b.mu.Unlock()
 			return nil
 		}
-		deficit := tokens - b.tokens
+		deficit := consumeAmount - b.tokens
 		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
 		b.mu.Unlock()
 
