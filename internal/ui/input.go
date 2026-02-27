@@ -316,8 +316,13 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				} else if m.historyIndex > 0 {
 					m.historyIndex--
 				}
-				m.textarea.SetValue(m.history[m.historyIndex])
-				m.textarea.CursorEnd()
+				// Bounds check: historyIndex may exceed len if history was externally trimmed
+				if m.historyIndex >= 0 && m.historyIndex < len(m.history) {
+					m.textarea.SetValue(m.history[m.historyIndex])
+					m.textarea.CursorEnd()
+				} else {
+					m.historyIndex = -1
+				}
 			}
 			return m, nil
 
@@ -333,7 +338,12 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 			if m.historyIndex >= 0 {
 				if m.historyIndex < len(m.history)-1 {
 					m.historyIndex++
-					m.textarea.SetValue(m.history[m.historyIndex])
+					if m.historyIndex < len(m.history) {
+						m.textarea.SetValue(m.history[m.historyIndex])
+					} else {
+						m.historyIndex = -1
+						m.textarea.SetValue(m.savedInput)
+					}
 				} else {
 					m.historyIndex = -1
 					m.textarea.SetValue(m.savedInput)
@@ -751,7 +761,7 @@ func (m *InputModel) AddToHistory(cmd string) {
 
 // SetWidth sets the input width.
 func (m *InputModel) SetWidth(width int) {
-	m.textarea.SetWidth(width - 4) // Account for border padding
+	m.textarea.SetWidth(max(width-4, 1)) // Account for border padding, minimum 1
 }
 
 // Focus focuses the input.

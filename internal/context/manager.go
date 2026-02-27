@@ -708,8 +708,8 @@ func (m *ContextManager) EmergencyTruncate() int {
 		tailTokens += msgTokens
 	}
 
-	// If cutoff didn't move, nothing was too large
-	if cutoff == 0 {
+	// If loop completed without breaking, all messages fit — nothing to truncate
+	if cutoff >= len(tail) {
 		return 0
 	}
 

@@ -554,7 +554,19 @@ func (a *App) handleSubmit(message string) {
 
 	// Now safely start the goroutine
 	if isCmd {
-		go a.executeCommand(name, args)
+		a.processingMu.Lock()
+		cmdCtx, cmdCancel := context.WithCancel(a.ctx)
+		a.processingCancel = cmdCancel
+		a.processingMu.Unlock()
+
+		go func() {
+			defer func() {
+				a.processingMu.Lock()
+				a.processingCancel = nil
+				a.processingMu.Unlock()
+			}()
+			a.executeCommandCtx(cmdCtx, name, args)
+		}()
 		return
 	}
 
@@ -577,6 +589,10 @@ func (a *App) handleSubmit(message string) {
 
 // executeCommand executes a slash command.
 func (a *App) executeCommand(name string, args []string) {
+	a.executeCommandCtx(a.ctx, name, args)
+}
+
+func (a *App) executeCommandCtx(ctx context.Context, name string, args []string) {
 	defer func() {
 		a.mu.Lock()
 		a.processing = false
@@ -591,8 +607,6 @@ func (a *App) executeCommand(name string, args []string) {
 		"command": name,
 		"args":    args,
 	})
-
-	ctx := a.ctx
 	result, err := a.commandHandler.Execute(ctx, name, args, a)
 
 	// Copy program reference under lock for safe access

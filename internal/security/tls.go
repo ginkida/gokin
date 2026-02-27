@@ -95,8 +95,8 @@ func CreateTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 		MaxVersion:         parseTLSVersion(cfg.MaxVersion),
 	}
 
-	// Validate TLS version configuration
-	if tlsCfg.MinVersion < tls.VersionTLS12 {
+	// Validate TLS version configuration (0 = Go default, which is TLS 1.2+)
+	if tlsCfg.MinVersion != 0 && tlsCfg.MinVersion < tls.VersionTLS12 {
 		return nil, fmt.Errorf("minimum TLS version must be at least 1.2")
 	}
 
@@ -104,7 +104,7 @@ func CreateTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("maximum TLS version must be at most 1.3")
 	}
 
-	if tlsCfg.MinVersion > tlsCfg.MaxVersion {
+	if tlsCfg.MinVersion != 0 && tlsCfg.MaxVersion != 0 && tlsCfg.MinVersion > tlsCfg.MaxVersion {
 		return nil, fmt.Errorf("minimum TLS version cannot be greater than maximum")
 	}
 
@@ -203,9 +203,9 @@ func CreateDefaultHTTPClient() (*http.Client, error) {
 func ValidateTLSConfig(cfg *tls.Config) []string {
 	warnings := []string{}
 
-	// Check minimum version
-	if cfg.MinVersion < tls.VersionTLS12 {
-		warnings = append(warnings, fmt.Sprintf("minimum TLS version is 1.%d, should be at least 1.2", cfg.MinVersion>>8))
+	// Check minimum version (0 = Go default which is TLS 1.2+, so skip warning)
+	if cfg.MinVersion != 0 && cfg.MinVersion < tls.VersionTLS12 {
+		warnings = append(warnings, fmt.Sprintf("minimum TLS version is %s, should be at least 1.2", TLSVersionString(cfg.MinVersion)))
 	}
 
 	// Check if InsecureSkipVerify is enabled

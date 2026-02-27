@@ -86,6 +86,12 @@ func (b *TokenBucket) Consume(tokens float64) {
 
 		// Calculate wait time for required tokens
 		deficit := consumeAmount - b.tokens
+		if b.refillRate <= 0 {
+			// Will never refill — allow immediately to avoid infinite hang
+			b.tokens = 0
+			b.mu.Unlock()
+			return
+		}
 		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
 		b.mu.Unlock()
 
@@ -121,6 +127,11 @@ func (b *TokenBucket) ConsumeWithTimeout(tokens float64, timeout time.Duration) 
 
 		// Calculate wait time for required tokens
 		deficit := consumeAmount - b.tokens
+		if b.refillRate <= 0 {
+			b.tokens = 0
+			b.mu.Unlock()
+			return true
+		}
 		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
 		b.mu.Unlock()
 
@@ -155,6 +166,11 @@ func (b *TokenBucket) ConsumeWithContext(ctx context.Context, tokens float64) er
 			return nil
 		}
 		deficit := consumeAmount - b.tokens
+		if b.refillRate <= 0 {
+			b.tokens = 0
+			b.mu.Unlock()
+			return nil
+		}
 		waitTime := time.Duration(deficit/b.refillRate*1000) * time.Millisecond
 		b.mu.Unlock()
 

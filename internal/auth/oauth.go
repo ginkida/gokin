@@ -111,7 +111,7 @@ func (m *OAuthManager) ExchangeCode(ctx context.Context, code string) (*OAuthTok
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB max
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
@@ -164,7 +164,7 @@ func (m *OAuthManager) RefreshToken(ctx context.Context, refreshToken string) (*
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB max
 	if err != nil {
 		return nil, fmt.Errorf("failed to read refresh response: %w", err)
 	}

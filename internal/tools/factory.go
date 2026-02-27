@@ -1,7 +1,10 @@
 package tools
 
 import (
+	"fmt"
 	"sync"
+
+	"gokin/internal/logging"
 )
 
 // ToolFactory is a function that creates a tool instance.
@@ -27,9 +30,24 @@ func NewToolEntry(factory ToolFactory) *ToolEntry {
 
 // Get returns the tool instance, creating it if necessary.
 // This is thread-safe and will only create the instance once.
+// If the factory panics, the panic is recovered and logged instead of crashing
+// the process. Subsequent calls will return nil (sync.Once marks completion
+// even on panic in Go).
 func (e *ToolEntry) Get() Tool {
 	e.once.Do(func() {
-		instance := e.factory()
+		var instance Tool
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("tool factory panicked", "panic", fmt.Sprintf("%v", r))
+				}
+			}()
+			instance = e.factory()
+		}()
+
+		if instance == nil {
+			return // Factory panicked or returned nil
+		}
 
 		// Set instance and grab pending configs under configMu
 		// so that concurrent Configure() sees instance and applies immediately

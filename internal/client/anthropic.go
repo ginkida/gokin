@@ -694,12 +694,18 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	statusCb := c.statusCallback
 	c.mu.RUnlock()
 
+	// Use sync.Once to prevent double-close of response body.
+	// Both the context-cancellation goroutine and the streaming goroutine
+	// may attempt to close the body.
+	var closeBody sync.Once
+	closeBodyFn := func() { _ = resp.Body.Close() }
+
 	// Monitor context cancellation to force-close response body,
 	// unblocking any blocked scanner.Scan() call.
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = resp.Body.Close()
+			closeBody.Do(closeBodyFn)
 		case <-done:
 			// Stream finished normally, nothing to do
 		}
@@ -709,7 +715,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	go func() {
 		defer close(chunks)
 		defer close(done)
-		defer resp.Body.Close()
+		defer closeBody.Do(closeBodyFn)
 
 		scanner := bufio.NewScanner(resp.Body)
 		// Large tool inputs/results can produce long SSE data lines.

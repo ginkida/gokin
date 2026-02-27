@@ -31,7 +31,6 @@ const (
 
 	// Long-loop stability guardrails.
 	stagnationTurnThreshold   = 3
-	stagnationRecoveryBudget  = 3
 	repeatedPlanTurnThreshold = 3
 )
 
@@ -150,7 +149,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	filteredRegistry := createFilteredRegistry(agentType, baseRegistry)
 
 	if maxTurns <= 0 {
-		maxTurns = 30 // default
+		maxTurns = 15 // default — keep low to prevent excessive exploration
 	}
 
 	// Use a different model if specified
@@ -2077,7 +2076,8 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	loopRecoveryTurns := 0
 	replanAttempts := 0
 	noProgressTurns := 0
-	recoveryInterventions := 0
+	repeatedPlanRecoveries := 0 // Per-category budget: max 2
+	noProgressRecoveries := 0   // Per-category budget: max 2
 	lastCallPlanFingerprint := ""
 	samePlanTurns := 0
 	lastTextFingerprint := ""
@@ -2110,18 +2110,28 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		}
 
 		// Update progress at start of each turn
-		if a.activePlan == nil {
+		a.stateMu.RLock()
+		hasPlan := a.activePlan != nil
+		a.stateMu.RUnlock()
+		if !hasPlan {
 			a.SetProgress(i+1, a.maxTurns, fmt.Sprintf("Turn %d: Executing tools", i+1))
 		}
 
 		// === Planned mode: Execute from plan tree ===
-		if a.activePlan != nil {
-			actions, err := a.treePlanner.GetReadyActions(a.activePlan)
+		// Snapshot activePlan under stateMu to avoid races with external readers
+		a.stateMu.RLock()
+		planTree := a.activePlan
+		a.stateMu.RUnlock()
+
+		if planTree != nil {
+			actions, err := a.treePlanner.GetReadyActions(planTree)
 			if err != nil {
 				// No more actions in plan, check if completed
 				a.safeOnText("\n[Plan completed or no more actions available]\n")
-				a.lastPlanTree = a.activePlan
+				a.stateMu.Lock()
+				a.lastPlanTree = planTree
 				a.activePlan = nil // Exit planned mode
+				a.stateMu.Unlock()
 			} else if len(actions) > 0 {
 				type parallelResult struct {
 					action *PlannedAction
@@ -2143,7 +2153,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						result := a.executePlannedAction(ctx, action)
 
 						// Record result in tree (RecordResult is thread-safe)
-						if err := a.treePlanner.RecordResult(a.activePlan, action.NodeID, result); err != nil {
+						if err := a.treePlanner.RecordResult(planTree, action.NodeID, result); err != nil {
 							logging.Warn("failed to record plan result", "error", err)
 						}
 
@@ -2169,7 +2179,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 				// Handle failure with single replan attempt
 				if firstFailure != nil {
-					if a.treePlanner.ShouldReplan(a.activePlan, firstFailure.result) && replanAttempts < 3 {
+					if a.treePlanner.ShouldReplan(planTree, firstFailure.result) && replanAttempts < 3 {
 						replanAttempts++
 
 						// Build replan context with reflection
@@ -2179,12 +2189,14 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						}
 
 						// Find the node in the tree for replanning
-						node, nodeFound := a.activePlan.GetNode(firstFailure.action.NodeID)
+						node, nodeFound := planTree.GetNode(firstFailure.action.NodeID)
 						if !nodeFound || node == nil {
 							logging.Warn("failed node not found in tree, switching to reactive mode",
 								"node_id", firstFailure.action.NodeID)
-							a.lastPlanTree = a.activePlan
+							a.stateMu.Lock()
+							a.lastPlanTree = planTree
 							a.activePlan = nil
+							a.stateMu.Unlock()
 							continue
 						}
 
@@ -2198,22 +2210,26 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						a.safeOnText(fmt.Sprintf("\n[Replanning after failure of step \"%s\" (attempt %d)...]\n",
 							firstFailure.action.Prompt, replanAttempts))
 
-						if err := a.treePlanner.Replan(ctx, a.activePlan, replanCtx); err != nil {
+						if err := a.treePlanner.Replan(ctx, planTree, replanCtx); err != nil {
 							logging.Warn("replan failed", "error", err)
-							a.lastPlanTree = a.activePlan
+							a.stateMu.Lock()
+							a.lastPlanTree = planTree
 							a.activePlan = nil // Exit planned mode on replan failure
+							a.stateMu.Unlock()
 						}
 					} else {
 						// Max replans exceeded or should not replan
 						a.safeOnText("\n[Plan failed, switching to reactive mode]\n")
-						a.lastPlanTree = a.activePlan
+						a.stateMu.Lock()
+						a.lastPlanTree = planTree
 						a.activePlan = nil
+						a.stateMu.Unlock()
 					}
 				}
 				continue
 			} else {
 				// No actions and no error — check if plan is stalled or genuinely complete
-				blocked := a.treePlanner.GetBlockedNodes(a.activePlan)
+				blocked := a.treePlanner.GetBlockedNodes(planTree)
 				if len(blocked) > 0 {
 					// Plan stalled: pending steps exist but can't proceed
 					var msg strings.Builder
@@ -2230,8 +2246,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				} else {
 					a.safeOnText("\n[Plan completed]\n")
 				}
-				a.lastPlanTree = a.activePlan
+				a.stateMu.Lock()
+				a.lastPlanTree = planTree
 				a.activePlan = nil
+				a.stateMu.Unlock()
 			}
 		}
 
@@ -2318,13 +2336,13 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					"agent_id", a.ID,
 					"turns", samePlanTurns,
 					"plan", planFingerprint)
-				if recoveryInterventions < stagnationRecoveryBudget {
-					recoveryInterventions++
+				if repeatedPlanRecoveries < 2 {
+					repeatedPlanRecoveries++
 					recoveryMsg := a.buildStagnationRecoveryIntervention(
-						recoveryInterventions,
+						repeatedPlanRecoveries,
 						fmt.Sprintf("repeated tool plan (%d turns)", samePlanTurns),
 					)
-					a.safeOnText(fmt.Sprintf("\n[Execution stagnation detected — recovery #%d]\n", recoveryInterventions))
+					a.safeOnText(fmt.Sprintf("\n[Execution stagnation detected — recovery #%d]\n", repeatedPlanRecoveries))
 					a.stateMu.Lock()
 					a.history = append(a.history, genai.NewContentFromText(recoveryMsg, genai.RoleUser))
 					if loopRecoveryTurns < 3 && effectiveMaxTurns < MaxTurnLimit {
@@ -2495,16 +2513,26 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.history = append(a.history, funcContent)
 			a.stateMu.Unlock()
 
+			// Detect permission denials and inject recovery guidance
+			if permDeniedTools := detectPermissionDenials(results); len(permDeniedTools) > 0 {
+				recoveryMsg := fmt.Sprintf(
+					"Permission was denied for: %s. Do NOT retry these tools. Use a different approach or ask the user for guidance.",
+					strings.Join(permDeniedTools, ", "))
+				a.stateMu.Lock()
+				a.history = append(a.history, genai.NewContentFromText(recoveryMsg, genai.RoleUser))
+				a.stateMu.Unlock()
+			}
+
 			// Long-loop watchdog: deterministic recovery path for repeated no-progress turns.
 			if !turnMadeProgress {
 				if noProgressTurns >= stagnationTurnThreshold {
-					if recoveryInterventions < stagnationRecoveryBudget {
-						recoveryInterventions++
+					if noProgressRecoveries < 2 {
+						noProgressRecoveries++
 						recoveryMsg := a.buildStagnationRecoveryIntervention(
-							recoveryInterventions,
+							noProgressRecoveries,
 							fmt.Sprintf("no meaningful progress for %d turns", noProgressTurns),
 						)
-						a.safeOnText(fmt.Sprintf("\n[No-progress streak detected — recovery #%d]\n", recoveryInterventions))
+						a.safeOnText(fmt.Sprintf("\n[No-progress streak detected — recovery #%d]\n", noProgressRecoveries))
 						a.stateMu.Lock()
 						a.history = append(a.history, genai.NewContentFromText(recoveryMsg, genai.RoleUser))
 						if loopRecoveryTurns < 3 && effectiveMaxTurns < MaxTurnLimit {
@@ -2643,6 +2671,22 @@ func summarizeToolProgress(
 	return successCount, newFailureSignals, repeatedFailureSignals
 }
 
+// detectPermissionDenials checks tool call results for permission denials
+// and returns the names of tools that were denied.
+func detectPermissionDenials(results []toolCallResult) []string {
+	var denied []string
+	for _, result := range results {
+		if result.Response == nil {
+			continue
+		}
+		respMap := result.Response.Response
+		if errText, ok := respMap["error"].(string); ok && strings.Contains(errText, "Permission denied") {
+			denied = append(denied, result.Response.Name)
+		}
+	}
+	return denied
+}
+
 func extractToolErrorFromMap(resp map[string]any) string {
 	if resp == nil {
 		return ""
@@ -2738,7 +2782,7 @@ func (a *Agent) buildStagnationRecoveryIntervention(attempt int, reason string) 
 	var sb strings.Builder
 
 	sb.WriteString("EXECUTION WATCHDOG: progress has stalled.\n\n")
-	sb.WriteString(fmt.Sprintf("Recovery attempt: %d/%d\n", attempt, stagnationRecoveryBudget))
+	sb.WriteString(fmt.Sprintf("Recovery attempt: %d/2\n", attempt))
 	if strings.TrimSpace(reason) != "" {
 		sb.WriteString("Observed issue: ")
 		sb.WriteString(reason)
@@ -2773,16 +2817,23 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	copy(historySnapshot, a.history)
 	a.stateMu.RUnlock()
 
-	// 2. Count tokens on snapshot (no lock needed)
-	tokenCount, err := a.tokenCounter.CountContents(ctx, historySnapshot)
-	if err != nil {
-		return fmt.Errorf("failed to count tokens: %w", err)
-	}
-
+	// 2. Fast path: estimate tokens locally to avoid API call when clearly under threshold
 	limits := a.tokenCounter.GetLimits()
 	threshold := limits.WarningThreshold
 	if threshold == 0 {
 		threshold = 0.8
+	}
+
+	estimatedTokens := ctxmgr.EstimateContentsTokens(historySnapshot)
+	estimatedPercent := float64(estimatedTokens) / float64(limits.MaxInputTokens)
+	if estimatedPercent < threshold*0.85 {
+		return nil // Clearly under threshold — skip API call
+	}
+
+	// Near threshold — use precise API counting
+	tokenCount, err := a.tokenCounter.CountContents(ctx, historySnapshot)
+	if err != nil {
+		return fmt.Errorf("failed to count tokens: %w", err)
 	}
 
 	percentUsed := float64(tokenCount) / float64(limits.MaxInputTokens)
@@ -3775,7 +3826,11 @@ func (a *Agent) executePlannedAction(ctx context.Context, action *PlannedAction)
 
 // executeDecomposeAction handles a decomposition milestone.
 func (a *Agent) executeDecomposeAction(ctx context.Context, action *PlannedAction, startTime time.Time) *AgentResult {
-	if a.activePlan == nil || a.treePlanner == nil {
+	a.stateMu.RLock()
+	plan := a.activePlan
+	a.stateMu.RUnlock()
+
+	if plan == nil || a.treePlanner == nil {
 		return &AgentResult{
 			AgentID: a.ID,
 			Type:    a.Type,
@@ -3785,7 +3840,7 @@ func (a *Agent) executeDecomposeAction(ctx context.Context, action *PlannedActio
 	}
 
 	// Find the node in the active plan
-	node, ok := a.activePlan.GetNode(action.NodeID)
+	node, ok := plan.GetNode(action.NodeID)
 	if !ok {
 		return &AgentResult{
 			AgentID: a.ID,
@@ -3798,7 +3853,7 @@ func (a *Agent) executeDecomposeAction(ctx context.Context, action *PlannedActio
 	a.safeOnText(fmt.Sprintf("\n[Expanding milestone: %s]\n", action.Prompt))
 
 	// Expand the milestone into sub-tasks
-	if err := a.treePlanner.ExpandMilestone(ctx, a.activePlan, node); err != nil {
+	if err := a.treePlanner.ExpandMilestone(ctx, plan, node); err != nil {
 		return &AgentResult{
 			AgentID: a.ID,
 			Type:    a.Type,
@@ -3931,6 +3986,15 @@ func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, star
 		if resp.Text != "" {
 			output.WriteString(resp.Text)
 		}
+
+		// Add model response to history (required before function responses)
+		modelContent := &genai.Content{
+			Role:  genai.RoleModel,
+			Parts: a.buildResponseParts(resp),
+		}
+		a.stateMu.Lock()
+		a.history = append(a.history, modelContent)
+		a.stateMu.Unlock()
 
 		// No tool calls — model is done
 		if len(resp.FunctionCalls) == 0 {

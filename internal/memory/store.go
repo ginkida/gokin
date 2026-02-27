@@ -36,6 +36,10 @@ type Store struct {
 	saveTimer *time.Timer // Timer for debounced save
 	saveMu    sync.Mutex  // Protects saveTimer
 
+	// GetForContext cache: invalidated on any mutation
+	contextCache map[string]string // keyed by "project"/"all"
+	cacheVersion uint64            // incremented on every mutation
+
 	mu sync.RWMutex
 }
 
@@ -73,6 +77,14 @@ func NewStore(configDir, projectPath string, maxEntries int) (*Store, error) {
 	}
 
 	return store, nil
+}
+
+// markDirty marks the store as dirty and invalidates the GetForContext cache.
+// Must be called under s.mu.Lock().
+func (s *Store) markDirty() {
+	s.dirty = true
+	s.cacheVersion++
+	s.contextCache = nil
 }
 
 // Auto-tagging regex patterns.
@@ -247,7 +259,7 @@ func (s *Store) Add(entry *Entry) error {
 		}
 		existing.Archived = false
 		existing.ArchiveReason = ""
-		s.dirty = true
+		s.markDirty()
 		s.scheduleSave()
 		return nil
 	}
@@ -280,7 +292,7 @@ func (s *Store) Add(entry *Entry) error {
 	}
 
 	// Mark dirty and schedule debounced save
-	s.dirty = true
+	s.markDirty()
 	s.scheduleSave()
 	return nil
 }
@@ -341,7 +353,7 @@ func (s *Store) RecordAccess(id string) {
 		return
 	}
 	entry.RecordAccess()
-	s.dirty = true
+	s.markDirty()
 	s.scheduleSave()
 }
 
@@ -359,7 +371,7 @@ func (s *Store) RecordFeedback(id string, success bool) bool {
 	}
 
 	entry.RecordOutcome(success)
-	s.dirty = true
+	s.markDirty()
 	s.scheduleSave()
 	return true
 }
@@ -383,7 +395,7 @@ func (s *Store) Edit(id string, newContent string) error {
 	entry.Tags = nil
 	autoTag(entry)
 
-	s.dirty = true
+	s.markDirty()
 	s.scheduleSave()
 	return nil
 }
@@ -609,7 +621,7 @@ func (s *Store) Remove(idOrKey string) bool {
 		if entry.Key != "" {
 			delete(s.byKey, entry.Key)
 		}
-		s.dirty = true
+		s.markDirty()
 		s.scheduleSave()
 		return true
 	}
@@ -618,7 +630,7 @@ func (s *Store) Remove(idOrKey string) bool {
 		if entry.Key != "" {
 			delete(s.byKey, entry.Key)
 		}
-		s.dirty = true
+		s.markDirty()
 		s.scheduleSave()
 		return true
 	}
@@ -627,7 +639,7 @@ func (s *Store) Remove(idOrKey string) bool {
 		if entry.Key != "" {
 			delete(s.byKey, entry.Key)
 		}
-		s.dirty = true
+		s.markDirty()
 		s.scheduleSave()
 		return true
 	}
@@ -636,7 +648,7 @@ func (s *Store) Remove(idOrKey string) bool {
 		if entry.Key != "" {
 			delete(s.byKey, entry.Key)
 		}
-		s.dirty = true
+		s.markDirty()
 		s.scheduleSave()
 		return true
 	}
@@ -726,13 +738,31 @@ func (s *Store) Import(data []byte) error {
 		}
 	}
 
-	s.dirty = true
+	s.markDirty()
 	s.scheduleSave()
 	return nil
 }
 
 // GetForContext returns a formatted string of memories for injection into prompts.
+// Results are cached and invalidated when the store is mutated.
 func (s *Store) GetForContext(projectOnly bool) string {
+	cacheKey := "all"
+	if projectOnly {
+		cacheKey = "project"
+	}
+
+	// Check cache under read lock
+	s.mu.RLock()
+	ver := s.cacheVersion
+	if s.contextCache != nil {
+		if cached, ok := s.contextCache[cacheKey]; ok {
+			s.mu.RUnlock()
+			return cached
+		}
+	}
+	s.mu.RUnlock()
+
+	// Cache miss — compute (List/Search acquires its own RLock)
 	entries := s.List(projectOnly)
 	if len(entries) == 0 {
 		return ""
@@ -800,7 +830,19 @@ func (s *Store) GetForContext(projectOnly bool) string {
 		}
 	}
 
-	return builder.String()
+	result := builder.String()
+
+	// Store in cache only if no mutations happened during computation
+	s.mu.Lock()
+	if s.cacheVersion == ver {
+		if s.contextCache == nil {
+			s.contextCache = make(map[string]string, 2)
+		}
+		s.contextCache[cacheKey] = result
+	}
+	s.mu.Unlock()
+
+	return result
 }
 
 // Count returns the number of entries.
@@ -820,7 +862,7 @@ func (s *Store) Clear() error {
 	s.archived = make(map[string]*Entry)
 	s.globalArchive = make(map[string]*Entry)
 	s.byKey = make(map[string]string)
-	s.dirty = true
+	s.markDirty()
 	s.scheduleSave()
 	return nil
 }
@@ -1169,7 +1211,7 @@ func (s *Store) scheduleSave() {
 				"project_archive_error", projectArchiveErr,
 				"global_archive_error", globalArchiveErr)
 			s.mu.Lock()
-			s.dirty = true
+			s.markDirty()
 			s.mu.Unlock()
 		}
 	})

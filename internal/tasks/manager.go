@@ -191,7 +191,7 @@ func (m *Manager) Cleanup(maxAge time.Duration) int {
 	cutoff := time.Now().Add(-maxAge)
 
 	for id, task := range m.tasks {
-		if task.IsComplete() && task.EndTime.Before(cutoff) {
+		if task.IsCompleteAndBefore(cutoff) {
 			delete(m.tasks, id)
 			count++
 		}

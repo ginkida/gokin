@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"gokin/internal/agent"
@@ -71,6 +72,9 @@ type SmartRouter struct {
 	adaptiveEnabled bool
 	minDataPoints   int
 	exampleLimit    int
+
+	// Protects optimizer and exampleStore from concurrent access
+	mu sync.RWMutex
 }
 
 // NewSmartRouter creates a new smart router with adaptive capabilities.
@@ -92,11 +96,15 @@ func NewSmartRouter(ctx context.Context, cfg *SmartRouterConfig, executor *tools
 
 // SetStrategyOptimizer sets the strategy optimizer for learning.
 func (sr *SmartRouter) SetStrategyOptimizer(optimizer *agent.StrategyOptimizer) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
 	sr.optimizer = optimizer
 }
 
 // SetExampleStore sets the example store for few-shot learning.
 func (sr *SmartRouter) SetExampleStore(store ExampleStoreInterface) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
 	sr.exampleStore = store
 }
 
@@ -105,9 +113,15 @@ func (sr *SmartRouter) Route(message string) *RoutingDecision {
 	// Get base routing decision
 	decision := sr.Router.Route(message)
 
+	// Snapshot fields under lock
+	sr.mu.RLock()
+	exampleStore := sr.exampleStore
+	optimizer := sr.optimizer
+	sr.mu.RUnlock()
+
 	// Add learned examples if available
-	if sr.exampleStore != nil && sr.exampleLimit > 0 {
-		examples := sr.exampleStore.GetSimilarExamples(message, sr.exampleLimit)
+	if exampleStore != nil && sr.exampleLimit > 0 {
+		examples := exampleStore.GetSimilarExamples(message, sr.exampleLimit)
 		if len(examples) > 0 {
 			decision.LearnedExamples = make([]LearnedExample, len(examples))
 			for i, ex := range examples {
@@ -127,12 +141,12 @@ func (sr *SmartRouter) Route(message string) *RoutingDecision {
 	}
 
 	// Override agent selection if we have enough data
-	if decision.Handler == HandlerSubAgent && sr.adaptiveEnabled && sr.optimizer != nil {
+	if decision.Handler == HandlerSubAgent && sr.adaptiveEnabled && optimizer != nil {
 		taskType := string(decision.Analysis.Type)
-		metrics, hasData := sr.optimizer.GetMetrics(taskType)
+		metrics, hasData := optimizer.GetMetrics(taskType)
 
 		if hasData && totalCount(metrics) >= sr.minDataPoints {
-			recommended := sr.optimizer.RecommendStrategy(taskType)
+			recommended := optimizer.RecommendStrategy(taskType)
 			if recommended != decision.SubAgentType {
 				logging.Debug("adaptive override",
 					"original", decision.SubAgentType,
@@ -166,14 +180,20 @@ func (sr *SmartRouter) Execute(ctx context.Context, history []*genai.Content, me
 		agentType = string(decision.Handler)
 	}
 
+	// Snapshot fields under lock
+	sr.mu.RLock()
+	execOptimizer := sr.optimizer
+	execExampleStore := sr.exampleStore
+	sr.mu.RUnlock()
+
 	// Record with strategy optimizer
-	if sr.optimizer != nil {
-		sr.optimizer.RecordExecution(agentType, taskType, success, duration)
+	if execOptimizer != nil {
+		execOptimizer.RecordExecution(agentType, taskType, success, duration)
 	}
 
 	// Record successful executions for few-shot learning
 	// Use a bounded goroutine with timeout to prevent hanging
-	if success && sr.exampleStore != nil {
+	if success && execExampleStore != nil {
 		go func() {
 			// Timeout to prevent goroutine leak if store is slow
 			ctx, cancel := context.WithTimeout(sr.ctx, 10*time.Second)
@@ -182,7 +202,7 @@ func (sr *SmartRouter) Execute(ctx context.Context, history []*genai.Content, me
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				if err := sr.exampleStore.LearnFromSuccess(taskType, message, agentType, output, duration, 0); err != nil {
+				if err := execExampleStore.LearnFromSuccess(taskType, message, agentType, output, duration, 0); err != nil {
 					logging.Debug("failed to learn from success", "error", err)
 				}
 			}()

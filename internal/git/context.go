@@ -115,8 +115,11 @@ func (p *GitContextProvider) refresh(ctx context.Context) (*GitContext, error) {
 		}
 	}
 
-	// Get recent commits
-	gc.RecentCommits = p.getRecentCommits(ctx, p.maxCommits)
+	// Get recent commits (snapshot maxCommits under lock to avoid race)
+	p.mu.RLock()
+	maxCommits := p.maxCommits
+	p.mu.RUnlock()
+	gc.RecentCommits = p.getRecentCommits(ctx, maxCommits)
 
 	// Get status
 	p.parseStatus(ctx, gc)
@@ -238,8 +241,8 @@ func parseBlameOutput(output string) []BlameInfo {
 			continue
 		}
 
-		// Commit hash line (40 hex chars + line numbers)
-		if len(line) >= 40 && isHex(line[:40]) {
+		// Commit hash line (40 hex chars + space + line numbers)
+		if len(line) >= 42 && isHex(line[:40]) {
 			if current.Hash != "" {
 				result = append(result, current)
 			}

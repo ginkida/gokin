@@ -190,8 +190,8 @@ func (c *Coordinator) Stop() {
 // processLoop is the main coordination loop.
 // Uses event-driven approach with fallback ticker to reduce CPU usage.
 func (c *Coordinator) processLoop() {
-	// Fallback ticker for periodic checks (30s instead of 100ms)
-	ticker := time.NewTicker(30 * time.Second)
+	// Fallback ticker for periodic checks (5s safety net — primary notification is event-driven)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -272,6 +272,16 @@ func (c *Coordinator) startTask(task *CoordinatedTask) {
 	// Spawn async agent
 	agentID := c.runner.SpawnAsync(c.ctx, string(task.AgentType), task.Prompt, 30, "")
 	c.running[agentID] = task.ID
+
+	// Monitor completion and notify coordinator immediately via agentDoneCh
+	go func() {
+		if _, err := c.runner.WaitWithContext(c.ctx, agentID); err == nil || c.ctx.Err() == nil {
+			select {
+			case c.agentDoneCh <- agentID:
+			case <-c.ctx.Done():
+			}
+		}
+	}()
 }
 
 // checkCompletedAgents checks for completed agents and updates tasks.

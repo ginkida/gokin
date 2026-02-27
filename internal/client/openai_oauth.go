@@ -702,7 +702,7 @@ func (c *OpenAIOAuthClient) processSSEStream(ctx context.Context, body io.ReadCl
 	go func() {
 		defer close(lineCh)
 		scanner := bufio.NewScanner(body)
-		scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+		scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
 			select {

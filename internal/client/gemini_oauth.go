@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"gokin/internal/auth"
 	"gokin/internal/config"
 	"gokin/internal/logging"
@@ -49,6 +51,8 @@ type GeminiOAuthClient struct {
 	systemInstruction string
 	thinkingBudget    int32
 	reasoningEffort   string
+
+	refreshGroup *singleflight.Group // serializes concurrent token refreshes
 
 	mu sync.RWMutex
 }
@@ -100,6 +104,7 @@ func NewGeminiOAuthClient(ctx context.Context, cfg *config.Config) (*GeminiOAuth
 		httpTimeout:       httpTimeout,
 		streamIdleTimeout: streamIdleTimeout,
 		reasoningEffort:   cfg.Model.ReasoningEffort,
+		refreshGroup:      &singleflight.Group{},
 	}
 
 	// Ensure token is valid
@@ -547,6 +552,7 @@ func (c *GeminiOAuthClient) WithModel(modelName string) Client {
 		systemInstruction: c.systemInstruction,
 		thinkingBudget:    c.thinkingBudget,
 		reasoningEffort:   c.reasoningEffort,
+		refreshGroup:      c.refreshGroup, // share to serialize refreshes across clones
 	}
 }
 
@@ -565,58 +571,74 @@ func (c *GeminiOAuthClient) Close() error {
 	return nil
 }
 
-// ensureValidToken checks if the token is valid and refreshes if needed
+// ensureValidToken checks if the token is valid and refreshes if needed.
+// Uses singleflight to serialize concurrent refresh attempts.
 func (c *GeminiOAuthClient) ensureValidToken(ctx context.Context) error {
-	c.mu.Lock()
+	c.mu.RLock()
 
 	if c.refreshToken == "" {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 		return fmt.Errorf("missing OAuth refresh token; run /oauth-login again")
 	}
 
 	// Check if token is still valid (with 5 minute buffer).
 	// We also require a non-empty access token; otherwise force refresh.
 	if c.accessToken != "" && !c.expiresAt.IsZero() && time.Now().Before(c.expiresAt.Add(-auth.TokenRefreshBuffer)) {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 		return nil
 	}
+	c.mu.RUnlock()
 
-	refreshTok := c.refreshToken
-	logging.Debug("OAuth token expired, refreshing",
-		"expiresAt", c.expiresAt.Format(time.RFC3339))
-	c.mu.Unlock()
+	// Use singleflight to ensure only one refresh happens at a time
+	_, err, _ := c.refreshGroup.Do("refresh", func() (interface{}, error) {
+		// Re-check under lock — another goroutine may have already refreshed
+		c.mu.RLock()
+		if c.accessToken != "" && !c.expiresAt.IsZero() && time.Now().Before(c.expiresAt.Add(-auth.TokenRefreshBuffer)) {
+			c.mu.RUnlock()
+			return nil, nil
+		}
+		refreshTok := c.refreshToken
+		c.mu.RUnlock()
 
-	// Refresh the token (network I/O — outside lock)
-	manager := auth.NewGeminiOAuthManager()
-	newToken, err := manager.RefreshToken(ctx, refreshTok)
-	if err != nil {
-		return fmt.Errorf("failed to refresh OAuth token: %w (try /oauth-login)", err)
-	}
+		logging.Debug("OAuth token expired, refreshing",
+			"expiresAt", c.expiresAt.Format(time.RFC3339))
 
-	// Update client state under lock
-	c.mu.Lock()
-	c.accessToken = newToken.AccessToken
-	c.expiresAt = newToken.ExpiresAt
-	if newToken.RefreshToken != "" {
-		c.refreshToken = newToken.RefreshToken
-	}
-	c.mu.Unlock()
+		// Refresh the token (network I/O — outside lock)
+		manager := auth.NewGeminiOAuthManager()
+		newToken, err := manager.RefreshToken(ctx, refreshTok)
+		if err != nil {
+			return nil, fmt.Errorf("failed to refresh OAuth token: %w (try /oauth-login)", err)
+		}
 
-	// Persist to config (disk I/O — outside lock)
-	c.config.API.GeminiOAuth.AccessToken = newToken.AccessToken
-	c.config.API.GeminiOAuth.ExpiresAt = newToken.ExpiresAt.Unix()
-	if newToken.RefreshToken != "" {
-		c.config.API.GeminiOAuth.RefreshToken = newToken.RefreshToken
-	}
+		// Update client state under lock
+		c.mu.Lock()
+		c.accessToken = newToken.AccessToken
+		c.expiresAt = newToken.ExpiresAt
+		if newToken.RefreshToken != "" {
+			c.refreshToken = newToken.RefreshToken
+		}
+		c.mu.Unlock()
 
-	if err := c.config.Save(); err != nil {
-		logging.Warn("failed to save refreshed OAuth token", "error", err)
-	}
+		// Persist to config (disk I/O — outside lock).
+		// Snapshot OAuth pointer to avoid race with concurrent logout.
+		if oauth := c.config.API.GeminiOAuth; oauth != nil {
+			oauth.AccessToken = newToken.AccessToken
+			oauth.ExpiresAt = newToken.ExpiresAt.Unix()
+			if newToken.RefreshToken != "" {
+				oauth.RefreshToken = newToken.RefreshToken
+			}
+			if err := c.config.Save(); err != nil {
+				logging.Warn("failed to save refreshed OAuth token", "error", err)
+			}
+		}
 
-	logging.Debug("OAuth token refreshed",
-		"expiresAt", newToken.ExpiresAt.Format(time.RFC3339))
+		logging.Debug("OAuth token refreshed",
+			"expiresAt", newToken.ExpiresAt.Format(time.RFC3339))
 
-	return nil
+		return nil, nil
+	})
+
+	return err
 }
 
 // generateContentStream handles the streaming content generation
@@ -714,6 +736,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 
 	// Rate limiting
 	var estimatedTokens int64
+	var rateLimiterAcquired bool
 	if c.rateLimiter != nil {
 		estimatedTokens = ratelimit.EstimateTokensFromContents(len(contents), 500)
 		if err := c.rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
@@ -722,6 +745,14 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 			}
 			return nil, fmt.Errorf("rate limit: %w", err)
 		}
+		rateLimiterAcquired = true
+	}
+
+	// Helper to return tokens on error paths before HTTP request
+	returnTokens := func() {
+		if rateLimiterAcquired && c.rateLimiter != nil && estimatedTokens > 0 {
+			c.rateLimiter.ReturnTokens(1, estimatedTokens)
+		}
 	}
 
 	// Build request body in Code Assist format
@@ -729,6 +760,7 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 
 	reqJSON, err := json.Marshal(reqBody)
 	if err != nil {
+		returnTokens()
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
@@ -741,11 +773,13 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 	c.mu.RUnlock()
 
 	if projectID == "" {
+		returnTokens()
 		return nil, fmt.Errorf("no project ID available")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqJSON))
 	if err != nil {
+		returnTokens()
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 

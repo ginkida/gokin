@@ -22,17 +22,11 @@ func (pm *ProjectManager) ListCachedProjects() ([]CachedProjectInfo, error) {
 	var projects []CachedProjectInfo
 
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if !entry.IsDir() {
 			continue
 		}
 
-		// Skip non-.gob files
-		if filepath.Ext(entry.Name()) != ".gob" {
-			continue
-		}
-
-		// Extract project ID from filename (remove .gob extension)
-		projectID := ProjectID(entry.Name()[:len(entry.Name())-4])
+		projectID := ProjectID(entry.Name())
 
 		// Load metadata
 		metadata, err := pm.LoadMetadata(projectID)

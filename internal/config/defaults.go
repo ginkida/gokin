@@ -36,7 +36,7 @@ const (
 	DefaultModelRoundTimeout   = 5 * time.Minute
 	DefaultGracefulShutdown    = 10 * time.Second
 	DefaultForcedShutdown      = 15 * time.Second
-	DefaultPermissionTimeout   = 5 * time.Minute
+	DefaultPermissionTimeout   = 2 * time.Minute
 	DefaultQuestionTimeout     = 5 * time.Minute
 	DefaultPlanApprovalTimeout = 10 * time.Minute
 	DefaultDiffDecisionTimeout = 5 * time.Minute

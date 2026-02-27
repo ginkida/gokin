@@ -45,6 +45,7 @@ type DelegationStrategy struct {
 	currentContextType string               // Current task context type for metrics
 	failedRules        map[string]time.Time // Rule suppression cache: rule_key -> failure_time
 	activeAgents       int                  // Number of currently active delegated agents
+	delegationHistory  map[string]int       // Tracks from:to delegation pair counts
 }
 
 // DelegationDecision represents a decision to delegate work to another agent.
@@ -90,6 +91,7 @@ func NewDelegationStrategy(agentType AgentType, messenger *AgentMessenger) *Dele
 		depthPenalty:       3,
 		maxDelegationTurns: 15,
 		failedRules:        make(map[string]time.Time),
+		delegationHistory:  make(map[string]int),
 	}
 }
 
@@ -231,8 +233,8 @@ func (d *DelegationStrategy) AdaptiveMaxTurns(baseTurns int) int {
 // Evaluate checks if delegation should occur based on current state.
 // Uses StrategyOptimizer to prefer agents with higher historical success rates.
 func (d *DelegationStrategy) Evaluate(ctx *DelegationContext) *DelegationDecision {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	// Check delegation depth limit to prevent infinite recursion
 	maxDepth := d.maxDepth
@@ -279,18 +281,38 @@ func (d *DelegationStrategy) Evaluate(ctx *DelegationContext) *DelegationDecisio
 
 	matchingDecisions = activeDecisions
 
-	// If only one match, return it
-	if len(matchingDecisions) == 1 {
-		return matchingDecisions[0]
+	// Filter out delegation pairs that have looped too many times (>2).
+	// Each agent has its own DelegationStrategy, so delegationHistory
+	// is not accessed concurrently.
+	var nonLoopingDecisions []*DelegationDecision
+	for _, dec := range matchingDecisions {
+		pairKey := string(d.agentType) + ":" + dec.TargetType
+		if d.delegationHistory[pairKey] > 2 {
+			logging.Warn("delegation loop detected, blocking",
+				"from", d.agentType,
+				"to", dec.TargetType,
+				"count", d.delegationHistory[pairKey])
+			continue
+		}
+		nonLoopingDecisions = append(nonLoopingDecisions, dec)
 	}
 
-	// Multiple matches - use StrategyOptimizer to pick the best one
-	if d.strategyOpt != nil {
-		return d.selectBestDelegation(matchingDecisions)
+	if len(nonLoopingDecisions) == 0 {
+		return &DelegationDecision{ShouldDelegate: false}
+	}
+	matchingDecisions = nonLoopingDecisions
+
+	// Select the best delegation target
+	chosen := matchingDecisions[0]
+	if len(matchingDecisions) > 1 && d.strategyOpt != nil {
+		chosen = d.selectBestDelegation(matchingDecisions)
 	}
 
-	// Fall back to first match
-	return matchingDecisions[0]
+	// Track the chosen delegation pair
+	pairKey := string(d.agentType) + ":" + chosen.TargetType
+	d.delegationHistory[pairKey]++
+
+	return chosen
 }
 
 // selectBestDelegation chooses the delegation target with the highest historical success rate.

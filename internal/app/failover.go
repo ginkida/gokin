@@ -52,6 +52,14 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	if a.contextManager != nil {
 		a.contextManager.SetClient(newClient)
 	}
+
+	// Carry over system instruction and thinking budget to the new client
+	if a.session != nil && a.session.SystemInstruction != "" {
+		newClient.SetSystemInstruction(a.session.SystemInstruction)
+	}
+	if a.config.Model.ThinkingBudget > 0 {
+		newClient.SetThinkingBudget(int32(a.config.Model.ThinkingBudget))
+	}
 	a.mu.Unlock()
 
 	if oldClient != nil {

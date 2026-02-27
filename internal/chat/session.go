@@ -255,6 +255,10 @@ func (s *Session) trimHistoryLocked() {
 		for _, count := range s.tokenCounts {
 			s.totalTokens += count
 		}
+	} else {
+		// tokenCounts is shorter than boundary — reset entirely
+		s.tokenCounts = nil
+		s.totalTokens = 0
 	}
 }
 

@@ -82,16 +82,22 @@ func NewBackgroundIndexer(
 
 // SetOnIndexStart sets callback for when indexing starts.
 func (bi *BackgroundIndexer) SetOnIndexStart(fn func()) {
+	bi.runningMu.Lock()
+	defer bi.runningMu.Unlock()
 	bi.onIndexStart = fn
 }
 
 // SetOnIndexComplete sets callback for when indexing completes.
 func (bi *BackgroundIndexer) SetOnIndexComplete(fn func(stats *IndexingStats)) {
+	bi.runningMu.Lock()
+	defer bi.runningMu.Unlock()
 	bi.onIndexComplete = fn
 }
 
 // SetOnError sets callback for errors.
 func (bi *BackgroundIndexer) SetOnError(fn func(error)) {
+	bi.runningMu.Lock()
+	defer bi.runningMu.Unlock()
 	bi.onError = fn
 }
 
@@ -252,8 +258,14 @@ func (bi *BackgroundIndexer) indexFiles(files []string) {
 
 	logging.Debug("indexing changed files", "count", len(files))
 
-	if bi.onIndexStart != nil {
-		bi.onIndexStart()
+	// Snapshot callbacks under lock
+	bi.runningMu.Lock()
+	onStart := bi.onIndexStart
+	onComplete := bi.onIndexComplete
+	bi.runningMu.Unlock()
+
+	if onStart != nil {
+		onStart()
 	}
 
 	startTime := time.Now()
@@ -285,8 +297,8 @@ func (bi *BackgroundIndexer) indexFiles(files []string) {
 		Duration:      time.Since(startTime),
 	}
 
-	if bi.onIndexComplete != nil {
-		bi.onIndexComplete(stats)
+	if onComplete != nil {
+		onComplete(stats)
 	}
 
 	logging.Debug("file indexing complete",
@@ -302,21 +314,28 @@ func (bi *BackgroundIndexer) runIncrementalIndex() {
 
 	logging.Debug("starting periodic incremental index")
 
-	if bi.onIndexStart != nil {
-		bi.onIndexStart()
+	// Snapshot callbacks under lock
+	bi.runningMu.Lock()
+	onStart := bi.onIndexStart
+	onComplete := bi.onIndexComplete
+	onErr := bi.onError
+	bi.runningMu.Unlock()
+
+	if onStart != nil {
+		onStart()
 	}
 
 	stats, err := bi.indexer.IndexChanged(bi.ctx, bi.workDir)
 	if err != nil {
-		if bi.onError != nil {
-			bi.onError(err)
+		if onErr != nil {
+			onErr(err)
 		}
 		logging.Warn("incremental index failed", "error", err)
 		return
 	}
 
-	if bi.onIndexComplete != nil {
-		bi.onIndexComplete(stats)
+	if onComplete != nil {
+		onComplete(stats)
 	}
 
 	logging.Debug("incremental index complete",
@@ -334,20 +353,27 @@ func (bi *BackgroundIndexer) ForceReindex() (*IndexingStats, error) {
 
 	logging.Debug("forcing full re-index")
 
-	if bi.onIndexStart != nil {
-		bi.onIndexStart()
+	// Snapshot callbacks under lock
+	bi.runningMu.Lock()
+	onStart := bi.onIndexStart
+	onComplete := bi.onIndexComplete
+	onErr := bi.onError
+	bi.runningMu.Unlock()
+
+	if onStart != nil {
+		onStart()
 	}
 
 	stats, err := bi.indexer.ReindexAll(bi.ctx, bi.workDir)
 	if err != nil {
-		if bi.onError != nil {
-			bi.onError(err)
+		if onErr != nil {
+			onErr(err)
 		}
 		return nil, err
 	}
 
-	if bi.onIndexComplete != nil {
-		bi.onIndexComplete(stats)
+	if onComplete != nil {
+		onComplete(stats)
 	}
 
 	return stats, nil

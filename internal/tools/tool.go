@@ -116,7 +116,10 @@ func (r ToolResult) ToMap() map[string]any {
 			content := r.Content
 			maxChars := config.DefaultToolResultMaxChars
 			if len(content) > maxChars {
-				content = content[:maxChars] + fmt.Sprintf("\n... (output truncated: showing %d of %d characters)", maxChars, len(r.Content))
+				omitted := 100 - (maxChars * 100 / len(r.Content))
+				content = content[:maxChars] + fmt.Sprintf(
+					"\n\n⚠ OUTPUT TRUNCATED: showing %d of %d characters (%d%% omitted). Important data may be missing. Use more specific queries (grep with pattern, head/tail) to see full content.",
+					maxChars, len(r.Content), omitted)
 			}
 			result["content"] = content
 		}
@@ -130,8 +133,10 @@ func (r ToolResult) ToMap() map[string]any {
 			content := r.Content
 			maxChars := config.DefaultToolResultMaxChars
 			if len(content) > maxChars {
+				omitted := 100 - (maxChars * 100 / len(r.Content))
 				content = content[:maxChars] + fmt.Sprintf(
-					"\n... (truncated: %d of %d chars)", maxChars, len(r.Content))
+					"\n\n⚠ OUTPUT TRUNCATED: showing %d of %d characters (%d%% omitted). Important data may be missing. Use more specific queries to see full content.",
+					maxChars, len(r.Content), omitted)
 			}
 			result["content"] = content
 		}

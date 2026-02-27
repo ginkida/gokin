@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	"gokin/internal/logging"
+
 	"gokin/internal/fileutil"
 )
 
@@ -177,8 +179,17 @@ func (m *Manager) undoGroupLocked(groupID string) ([]*FileChange, error) {
 	for _, change := range grouped {
 		if err := m.revertChange(change); err != nil {
 			// Rollback: re-apply already reverted changes
+			rollbackFailed := false
 			for j := len(reverted) - 1; j >= 0; j-- {
-				_ = m.applyChange(reverted[j])
+				if rbErr := m.applyChange(reverted[j]); rbErr != nil {
+					logging.Error("undo group rollback failed",
+						"file", reverted[j].FilePath,
+						"error", rbErr)
+					rollbackFailed = true
+				}
+			}
+			if rollbackFailed {
+				return nil, fmt.Errorf("failed to undo group AND rollback incomplete (check logs): %w", err)
 			}
 			return nil, fmt.Errorf("failed to undo group (rolled back): %w", err)
 		}

@@ -898,7 +898,11 @@ func openBrowser(url string) bool {
 		return false
 	}
 
-	return cmd.Start() == nil
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	go cmd.Wait() // prevent zombie process
+	return true
 }
 
 func padSpaces(n int) string {

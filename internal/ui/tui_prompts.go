@@ -263,8 +263,16 @@ func (m Model) renderPlanApproval() string {
 	// Description (if present)
 	if m.planRequest.Description != "" {
 		desc := m.planRequest.Description
-		if runes := []rune(desc); len(runes) > panelWidth-6 {
-			desc = string(runes[:panelWidth-9]) + "..."
+		if lipgloss.Width(desc) > panelWidth-6 {
+			// Truncate by visual width, not rune count (handles CJK/emoji correctly)
+			runes := []rune(desc)
+			for i := len(runes); i > 0; i-- {
+				candidate := string(runes[:i]) + "..."
+				if lipgloss.Width(candidate) <= panelWidth-6 {
+					desc = candidate
+					break
+				}
+			}
 		}
 		descLine := "  " + descStyle.Render(desc)
 		builder.WriteString(borderStyle.Render("│"))
@@ -308,8 +316,15 @@ func (m Model) renderPlanApproval() string {
 		if step.Description != "" {
 			desc := step.Description
 			maxDescLen := panelWidth - 10
-			if runes := []rune(desc); len(runes) > maxDescLen {
-				desc = string(runes[:maxDescLen-3]) + "..."
+			if lipgloss.Width(desc) > maxDescLen {
+				runes := []rune(desc)
+				for i := len(runes); i > 0; i-- {
+					candidate := string(runes[:i]) + "..."
+					if lipgloss.Width(candidate) <= maxDescLen {
+						desc = candidate
+						break
+					}
+				}
 			}
 			descLine := "     " + stepDescStyle.Render(desc)
 			builder.WriteString(borderStyle.Render("│"))

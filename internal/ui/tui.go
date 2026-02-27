@@ -1428,29 +1428,49 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case PermissionRequestMsg:
-		m.permRequest = &msg
-		m.permSelectedOption = 0
-		m.state = StatePermissionPrompt
-		cmds = append(cmds, m.bellCmd())
+		// Guard: don't overwrite an active modal prompt (prevents lost responses).
+		// Auto-deny so the blocked caller doesn't hang until timeout.
+		if m.isModalState() {
+			if m.onPermission != nil {
+				m.onPermission(PermissionDeny)
+			}
+		} else {
+			m.permRequest = &msg
+			m.permSelectedOption = 0
+			m.state = StatePermissionPrompt
+			cmds = append(cmds, m.bellCmd())
+		}
 
 	case QuestionRequestMsg:
-		m.questionRequest = &msg
-		m.questionSelectedOption = 0
-		m.questionCustomInput = false
-		m.state = StateQuestionPrompt
-		cmds = append(cmds, m.bellCmd())
-		// If no options, initialize input model for free text
-		if len(msg.Options) == 0 {
-			m.questionInputModel = NewInputModel(m.styles)
-			m.questionInputModel.SetWidth(m.width)
-			cmds = append(cmds, m.questionInputModel.Focus())
+		if m.isModalState() {
+			if m.onQuestion != nil {
+				m.onQuestion("")
+			}
+		} else {
+			m.questionRequest = &msg
+			m.questionSelectedOption = 0
+			m.questionCustomInput = false
+			m.state = StateQuestionPrompt
+			cmds = append(cmds, m.bellCmd())
+			// If no options, initialize input model for free text
+			if len(msg.Options) == 0 {
+				m.questionInputModel = NewInputModel(m.styles)
+				m.questionInputModel.SetWidth(m.width)
+				cmds = append(cmds, m.questionInputModel.Focus())
+			}
 		}
 
 	case PlanApprovalRequestMsg:
-		m.planRequest = &msg
-		m.planSelectedOption = 0
-		m.state = StatePlanApproval
-		cmds = append(cmds, m.bellCmd())
+		if m.isModalState() {
+			if m.onPlanApproval != nil {
+				m.onPlanApproval(PlanRejected)
+			}
+		} else {
+			m.planRequest = &msg
+			m.planSelectedOption = 0
+			m.state = StatePlanApproval
+			cmds = append(cmds, m.bellCmd())
+		}
 
 	case PlanProgressMsg:
 		m.planProgress = &msg
@@ -2190,19 +2210,19 @@ func (m Model) View() string {
 
 // applyResize applies a buffered WindowSizeMsg to all components.
 func (m *Model) applyResize(msg *tea.WindowSizeMsg) tea.Cmd {
-	m.width = msg.Width
-	m.height = msg.Height
-	m.input.SetWidth(msg.Width)
+	m.width = max(msg.Width, 10)
+	m.height = max(msg.Height, 6)
+	m.input.SetWidth(m.width)
 	if m.CompactMode {
-		m.output.SetSize(msg.Width, msg.Height/3)
+		m.output.SetSize(m.width, max(m.height/3, 1))
 	} else {
-		m.output.SetSize(msg.Width, msg.Height-5)
+		m.output.SetSize(m.width, max(m.height-5, 1))
 	}
 	if m.planFeedbackMode {
-		m.planFeedbackInput.SetWidth(msg.Width - 4)
+		m.planFeedbackInput.SetWidth(max(m.width-4, 1))
 	}
 	if m.state == StateQuestionPrompt {
-		m.questionInputModel.SetWidth(msg.Width)
+		m.questionInputModel.SetWidth(max(m.width-4, 1))
 	}
 	var cmd tea.Cmd
 	m.output, cmd = m.output.Update(*msg)

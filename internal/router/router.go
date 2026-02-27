@@ -108,6 +108,8 @@ func NewRouter(cfg *RouterConfig, executor *tools.Executor, agentRunner AgentRun
 
 // SetPlanChecker sets the plan checker for plan-aware routing.
 func (r *Router) SetPlanChecker(checker PlanChecker) {
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
 	r.planChecker = checker
 }
 
@@ -117,7 +119,10 @@ func (r *Router) Route(message string) *RoutingDecision {
 
 	// If a plan is actively being executed, prefer simpler strategies
 	// to avoid nested planning/coordination
-	planActive := r.planChecker != nil && r.planChecker.IsActive()
+	r.historyMu.RLock()
+	planChecker := r.planChecker
+	r.historyMu.RUnlock()
+	planActive := planChecker != nil && planChecker.IsActive()
 	if planActive {
 		logging.Debug("plan active, using simplified routing",
 			"original_score", analysis.Score,

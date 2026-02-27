@@ -284,45 +284,48 @@ func (p *Plan) AddStepWithOptions(title, description string, parallel bool, depe
 	return step
 }
 
-// GetStep returns a step by ID.
+// GetStep returns a deep copy of a step by ID.
+// The returned copy is safe to read without holding the plan lock.
 func (p *Plan) GetStep(id int) *Step {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	for _, step := range p.Steps {
 		if step.ID == id {
-			return step
+			return deepCopyStep(step)
 		}
 	}
 	return nil
 }
 
-// CurrentStep returns the current in-progress step, or next pending step.
+// CurrentStep returns a deep copy of the current in-progress step, or next pending step.
+// The returned copy is safe to read without holding the plan lock.
 func (p *Plan) CurrentStep() *Step {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	for _, step := range p.Steps {
 		if step.Status == StatusInProgress {
-			return step
+			return deepCopyStep(step)
 		}
 	}
 	for _, step := range p.Steps {
 		if step.Status == StatusPending {
-			return step
+			return deepCopyStep(step)
 		}
 	}
 	return nil
 }
 
-// NextStep returns the next pending step.
+// NextStep returns a deep copy of the next pending step.
+// The returned copy is safe to read without holding the plan lock.
 func (p *Plan) NextStep() *Step {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	for _, step := range p.Steps {
 		if step.Status == StatusPending {
-			return step
+			return deepCopyStep(step)
 		}
 	}
 	return nil
@@ -906,7 +909,7 @@ func containsEvidenceToken(evidence []string, token string) bool {
 	}
 	for _, item := range evidence {
 		current := strings.TrimSpace(strings.ToLower(item))
-		if current == token || strings.Contains(current, token) {
+		if current == token {
 			return true
 		}
 	}
@@ -1031,28 +1034,34 @@ func (p *Plan) NextReadySteps() []*Step {
 		return nil
 	}
 
+	var result []*Step
+
 	// If the first ready step is not parallel, return only it
 	if !ready[0].Parallel {
-		return ready[:1]
+		result = ready[:1]
+	} else {
+		// Collect all leading parallel steps, capped to prevent resource exhaustion
+		const maxParallelSteps = 4
+		for _, s := range ready {
+			if !s.Parallel {
+				break
+			}
+			result = append(result, s)
+			if len(result) >= maxParallelSteps {
+				break
+			}
+		}
+
+		// Filter out steps that would conflict with currently executing steps
+		result = p.filterFileConflictsLocked(result)
 	}
 
-	// Collect all leading parallel steps, capped to prevent resource exhaustion
-	const maxParallelSteps = 4
-	var parallel []*Step
-	for _, s := range ready {
-		if !s.Parallel {
-			break
-		}
-		parallel = append(parallel, s)
-		if len(parallel) >= maxParallelSteps {
-			break
-		}
+	// Return deep copies so callers can safely read/modify without holding the lock
+	copies := make([]*Step, len(result))
+	for i, s := range result {
+		copies[i] = deepCopyStep(s)
 	}
-
-	// Filter out steps that would conflict with currently executing steps
-	parallel = p.filterFileConflictsLocked(parallel)
-
-	return parallel
+	return copies
 }
 
 // filterFileConflictsLocked removes steps from candidates that would touch files

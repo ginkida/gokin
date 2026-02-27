@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,7 +38,7 @@ type SearchCache struct {
 	fileToKeys  map[string]map[string]bool // file path -> set of cache keys
 	keyToFiles  map[string]map[string]bool // cache key -> set of file paths
 	indexMu     sync.RWMutex
-	enabled     bool
+	enabled     atomic.Bool
 	cleanupDone chan struct{}
 }
 
@@ -48,9 +49,9 @@ func NewSearchCache(capacity int, ttl time.Duration) *SearchCache {
 		globCache:   NewLRUCache[string, GlobResult](capacity, ttl),
 		fileToKeys:  make(map[string]map[string]bool),
 		keyToFiles:  make(map[string]map[string]bool),
-		enabled:     true,
 		cleanupDone: make(chan struct{}),
 	}
+	sc.enabled.Store(true)
 	go sc.backgroundCleanup(ttl)
 	return sc
 }
@@ -120,12 +121,12 @@ func (c *SearchCache) removeKeyFromIndex(key string) {
 
 // SetEnabled enables or disables the cache.
 func (c *SearchCache) SetEnabled(enabled bool) {
-	c.enabled = enabled
+	c.enabled.Store(enabled)
 }
 
 // IsEnabled returns whether the cache is enabled.
 func (c *SearchCache) IsEnabled() bool {
-	return c.enabled
+	return c.enabled.Load()
 }
 
 // GrepKey generates a cache key for grep operations.
@@ -144,7 +145,7 @@ func GlobKey(pattern, path string) string {
 
 // GetGrep retrieves cached grep results.
 func (c *SearchCache) GetGrep(key string) (GrepResult, bool) {
-	if !c.enabled {
+	if !c.enabled.Load() {
 		return GrepResult{}, false
 	}
 	return c.grepCache.Get(key)
@@ -152,7 +153,7 @@ func (c *SearchCache) GetGrep(key string) (GrepResult, bool) {
 
 // SetGrep stores grep results in the cache.
 func (c *SearchCache) SetGrep(key string, result GrepResult) {
-	if !c.enabled {
+	if !c.enabled.Load() {
 		return
 	}
 	result.CachedAt = time.Now()
@@ -172,7 +173,7 @@ func (c *SearchCache) SetGrep(key string, result GrepResult) {
 
 // GetGlob retrieves cached glob results.
 func (c *SearchCache) GetGlob(key string) (GlobResult, bool) {
-	if !c.enabled {
+	if !c.enabled.Load() {
 		return GlobResult{}, false
 	}
 	return c.globCache.Get(key)
@@ -180,7 +181,7 @@ func (c *SearchCache) GetGlob(key string) (GlobResult, bool) {
 
 // SetGlob stores glob results in the cache.
 func (c *SearchCache) SetGlob(key string, result GlobResult) {
-	if !c.enabled {
+	if !c.enabled.Load() {
 		return
 	}
 	result.CachedAt = time.Now()
@@ -193,7 +194,7 @@ func (c *SearchCache) SetGlob(key string, result GlobResult) {
 // InvalidateByPath invalidates cache entries that match the given path.
 // This should be called when a file is modified.
 func (c *SearchCache) InvalidateByPath(path string) {
-	if !c.enabled {
+	if !c.enabled.Load() {
 		return
 	}
 
@@ -220,7 +221,7 @@ func (c *SearchCache) InvalidateByPath(path string) {
 
 // InvalidateByDir invalidates all cache entries for files in the given directory.
 func (c *SearchCache) InvalidateByDir(dir string) {
-	if !c.enabled {
+	if !c.enabled.Load() {
 		return
 	}
 
@@ -264,7 +265,7 @@ func (c *SearchCache) Stats() CacheStats {
 	return CacheStats{
 		GrepEntries: c.grepCache.Len(),
 		GlobEntries: c.globCache.Len(),
-		Enabled:     c.enabled,
+		Enabled:     c.enabled.Load(),
 	}
 }
 

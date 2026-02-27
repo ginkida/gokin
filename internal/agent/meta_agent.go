@@ -239,33 +239,39 @@ func (ma *MetaAgent) handleStuckAgent(agentID string, monitor *AgentMonitor) {
 		"current_tool", monitor.CurrentTool,
 		"turn_count", monitor.TurnCount)
 
-	monitor.Intervened = true
-
 	// Determine intervention strategy based on agent type and state
 	var action string
 	var reason string
+	var interventionMsg string
 
 	switch {
 	case monitor.CurrentTool == "bash" && monitor.TurnCount > 10:
 		action = "suggest_decompose"
 		reason = "Agent stuck on bash execution - may need task decomposition"
-		monitor.InterventionMsg = "The task seems complex. Consider breaking it into smaller steps."
+		interventionMsg = "The task seems complex. Consider breaking it into smaller steps."
 
 	case monitor.CurrentTool == "" && monitor.TurnCount > 15:
 		action = "suggest_reset"
 		reason = "Agent appears to be in a decision loop - suggesting fresh approach"
-		monitor.InterventionMsg = "Let me reconsider the approach from the beginning."
+		interventionMsg = "Let me reconsider the approach from the beginning."
 
 	case monitor.AgentType == AgentTypeExplore && monitor.TurnCount > 20:
 		action = "suggest_summarize"
 		reason = "Explore agent may have found enough information"
-		monitor.InterventionMsg = "I have gathered enough information. Let me summarize what I found."
+		interventionMsg = "I have gathered enough information. Let me summarize what I found."
 
 	default:
 		action = "generic_nudge"
 		reason = "Agent inactive for too long"
-		monitor.InterventionMsg = "I should take action now rather than waiting."
+		interventionMsg = "I should take action now rather than waiting."
 	}
+
+	// Update monitor under lock
+	ma.mu.Lock()
+	monitor.Intervened = true
+	monitor.InterventionMsg = interventionMsg
+	callback := ma.onIntervention
+	ma.mu.Unlock()
 
 	// Log the intervention
 	logging.Info("meta agent: intervening",
@@ -273,9 +279,9 @@ func (ma *MetaAgent) handleStuckAgent(agentID string, monitor *AgentMonitor) {
 		"action", action,
 		"reason", reason)
 
-	// Notify callback
-	if ma.onIntervention != nil {
-		ma.onIntervention(agentID, reason, action)
+	// Notify callback outside lock
+	if callback != nil {
+		callback(agentID, reason, action)
 	}
 
 	// Log-based intervention for now. If the agent remains stuck past MaxInterventions,
@@ -309,11 +315,15 @@ func (ma *MetaAgent) runOptimization() {
 
 // SetInterventionCallback sets the callback for intervention notifications.
 func (ma *MetaAgent) SetInterventionCallback(callback func(agentID string, reason string, action string)) {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
 	ma.onIntervention = callback
 }
 
 // SetStuckAgentCallback sets the callback for stuck agent notifications.
 func (ma *MetaAgent) SetStuckAgentCallback(callback func(agentID string, duration time.Duration)) {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
 	ma.onStuckAgent = callback
 }
 
@@ -322,12 +332,13 @@ func (ma *MetaAgent) GetActiveAgents() map[string]*AgentMonitor {
 	ma.mu.RLock()
 	defer ma.mu.RUnlock()
 
-	// Return a copy
-	copy := make(map[string]*AgentMonitor)
+	// Deep copy to avoid shared pointer mutations
+	result := make(map[string]*AgentMonitor, len(ma.activeAgents))
 	for k, v := range ma.activeAgents {
-		copy[k] = v
+		copied := *v
+		result[k] = &copied
 	}
-	return copy
+	return result
 }
 
 // GetAgentStatus returns the status of a specific agent.
@@ -336,7 +347,11 @@ func (ma *MetaAgent) GetAgentStatus(agentID string) (*AgentMonitor, bool) {
 	defer ma.mu.RUnlock()
 
 	monitor, ok := ma.activeAgents[agentID]
-	return monitor, ok
+	if !ok {
+		return nil, false
+	}
+	copied := *monitor
+	return &copied, true
 }
 
 // GetStats returns meta agent statistics.

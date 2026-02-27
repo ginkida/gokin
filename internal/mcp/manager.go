@@ -527,7 +527,8 @@ func (m *Manager) StartHealthCheck(ctx context.Context, interval time.Duration) 
 	m.healingCancel = cancel
 	m.healingDone = make(chan struct{})
 
-	go m.healthCheckLoop(healCtx, interval)
+	done := m.healingDone
+	go m.healthCheckLoop(healCtx, interval, done)
 }
 
 // StopHealthCheck stops the background health check goroutine.
@@ -542,7 +543,11 @@ func (m *Manager) StopHealthCheck() {
 	if cancel != nil {
 		cancel()
 		if done != nil {
-			<-done
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				logging.Warn("health check loop did not exit in time")
+			}
 		}
 	}
 }
@@ -550,8 +555,8 @@ func (m *Manager) StopHealthCheck() {
 const maxReconnectAttempts = 10
 
 // healthCheckLoop runs periodically to check health and reconnect unhealthy servers.
-func (m *Manager) healthCheckLoop(ctx context.Context, interval time.Duration) {
-	defer close(m.healingDone)
+func (m *Manager) healthCheckLoop(ctx context.Context, interval time.Duration, done chan struct{}) {
+	defer close(done)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

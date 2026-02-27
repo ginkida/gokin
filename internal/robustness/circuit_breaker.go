@@ -84,9 +84,19 @@ func (cb *CircuitBreaker) allowRequest() bool {
 	return true // Half-open
 }
 
-// CanExecute returns true if the circuit allows request execution now.
+// CanExecute returns true if the circuit would allow request execution now.
+// This is a read-only query that does not transition state.
 func (cb *CircuitBreaker) CanExecute() bool {
-	return cb.allowRequest()
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+
+	if cb.state == StateClosed {
+		return true
+	}
+	if cb.state == StateOpen {
+		return time.Since(cb.lastFailure) > cb.resetTimeout
+	}
+	return true // Half-open
 }
 
 func (cb *CircuitBreaker) recordFailure() {

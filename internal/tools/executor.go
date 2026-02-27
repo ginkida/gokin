@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -112,33 +113,33 @@ func GetSmartFallback(toolName string, result ToolResult, toolsUsed []string) st
 	// Handle error cases - but only if there's an actual error message
 	if !result.Success && result.Error != "" {
 		if hasConfig {
-			return fmt.Sprintf(config.Error, result.Error) + toolContext
+			return "[Auto] " + fmt.Sprintf(config.Error, result.Error) + toolContext
 		}
-		return fmt.Sprintf("Operation encountered an issue: %s\n\nWould you like me to try a different approach?", result.Error) + toolContext
+		return "[Auto] " + fmt.Sprintf("Operation encountered an issue: %s\n\nWould you like me to try a different approach?", result.Error) + toolContext
 	}
 
 	// Handle empty/default result - provide helpful generic message
 	if isEmptyResult {
 		if hasConfig {
-			return config.Success + toolContext
+			return "[Auto] " + config.Success + toolContext
 		}
-		return "I've completed the requested operations. The results should be shown above.\n\nIs there anything specific you'd like me to explain or analyze further?" + toolContext
+		return "[Auto] I've completed the requested operations. The results should be shown above.\n\nIs there anything specific you'd like me to explain or analyze further?" + toolContext
 	}
 
 	// Handle empty content results (tool ran but returned nothing)
 	if result.Content == "" || result.Content == "(empty file)" || result.Content == "(no output)" || result.Content == "No matches found." {
 		if hasConfig {
-			return config.Empty + toolContext
+			return "[Auto] " + config.Empty + toolContext
 		}
-		return "The operation completed but returned no results. This may be expected depending on the context." + toolContext
+		return "[Auto] The operation completed but returned no results. This may be expected depending on the context." + toolContext
 	}
 
 	// Handle success with content
 	if hasConfig {
-		return config.Success + toolContext
+		return "[Auto] " + config.Success + toolContext
 	}
 
-	return "I've completed the operation. The results are shown above. Would you like me to analyze them further?" + toolContext
+	return "[Auto] I've completed the operation. The results are shown above. Would you like me to analyze them further?" + toolContext
 }
 
 // ToolRegistry is an interface for tool registries.
@@ -513,8 +514,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	maxIterations := e.calculateMaxIterations(history)
 
 	var finalText string
-	var toolsUsed []string        // Track which tools were used for smart fallback
-	var lastToolResult ToolResult // Track the last tool result for context
+	var toolsUsed []string         // Track which tools were used for smart fallback
+	var lastToolResult ToolResult  // Track the last tool result for context
+	var recentToolPatterns []string // Track tool name patterns per iteration for stagnation detection
+	const stagnationLimit = 5      // Consecutive identical tool patterns before aborting
 	streamRetries := 0
 	partialStreamRetries := 0
 	retryPolicy := client.DefaultStreamRetryPolicy()
@@ -619,8 +622,30 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			}
 
 			// Track tools being called
+			iterationTools := make([]string, 0, len(resp.FunctionCalls))
 			for _, fc := range resp.FunctionCalls {
 				toolsUsed = append(toolsUsed, fc.Name)
+				iterationTools = append(iterationTools, fc.Name)
+			}
+			sort.Strings(iterationTools)
+			pattern := strings.Join(iterationTools, ",")
+			recentToolPatterns = append(recentToolPatterns, pattern)
+
+			// Stagnation detection: if the same tool pattern repeats too many times, abort
+			if len(recentToolPatterns) >= stagnationLimit {
+				tail := recentToolPatterns[len(recentToolPatterns)-stagnationLimit:]
+				allSame := true
+				for _, p := range tail[1:] {
+					if p != tail[0] {
+						allSame = false
+						break
+					}
+				}
+				if allSame {
+					logging.Warn("executor stagnation detected: same tool pattern repeated",
+						"pattern", pattern, "count", stagnationLimit)
+					return history, "", fmt.Errorf("executor stagnation: tool pattern %q repeated %d times consecutively", pattern, stagnationLimit)
+				}
 			}
 
 			results, err := e.executeTools(ctx, resp.FunctionCalls)
@@ -650,10 +675,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				Parts: funcResultParts,
 			}
 
-			historyBeforeResults := len(history)
-			history = append(history, funcResultContent)
-
 			// Inject pending background task completion notifications
+			// before recording historyBeforeResults so they are visible to the model.
 			if notifications := e.drainPendingNotifications(); len(notifications) > 0 {
 				notifText := "[System: " + strings.Join(notifications, "; ") + "]"
 				history = append(history, &genai.Content{
@@ -661,6 +684,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					Parts: []*genai.Part{genai.NewPartFromText(notifText)},
 				})
 			}
+
+			historyBeforeResults := len(history)
+			history = append(history, funcResultContent)
 
 			// Send function responses back to model.
 			// Pass history without the just-appended tool results since
@@ -815,7 +841,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 // calculateMaxIterations determines the optimal iteration limit based on context complexity.
 // More complex tasks with longer history get more iterations.
 func (e *Executor) calculateMaxIterations(history []*genai.Content) int {
-	baseLimit := 50
+	baseLimit := 20
 
 	// Count conversation turns (pairs of user/model messages)
 	turnCount := len(history) / 2
@@ -823,14 +849,14 @@ func (e *Executor) calculateMaxIterations(history []*genai.Content) int {
 	// Estimate complexity based on history length
 	switch {
 	case turnCount > 30:
-		// Very long conversation - allow many iterations
-		return baseLimit + 100
+		// Very long conversation - allow more iterations
+		return baseLimit + 30
 	case turnCount > 20:
-		// Long conversation - significantly more iterations
-		return baseLimit + 50
+		// Long conversation - moderately more iterations
+		return baseLimit + 20
 	case turnCount > 10:
-		// Medium conversation - moderately more iterations
-		return baseLimit + 25
+		// Medium conversation - slightly more iterations
+		return baseLimit + 10
 	default:
 		// Short conversation - base limit
 		return baseLimit
@@ -1053,10 +1079,10 @@ func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) To
 	err := breaker.Execute(ctx, func() error {
 		res := e.doExecuteTool(ctx, call)
 		result = res
-		if !res.Success {
+		if !res.Success && isExecutionFailure(res.Error) {
 			return fmt.Errorf("tool execution failed: %s", res.Error)
 		}
-		return nil
+		return nil // validation/permission errors don't count as circuit breaker failures
 	})
 
 	if err != nil {
@@ -1072,6 +1098,21 @@ func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) To
 	}
 
 	return result
+}
+
+// isExecutionFailure returns true if the error message represents a real tool execution
+// failure (as opposed to validation, permission, or lookup errors that should not
+// trip the circuit breaker).
+func isExecutionFailure(errMsg string) bool {
+	for _, prefix := range []string{
+		"validation error:", "Permission denied:", "permission error:",
+		"Safety check failed:", "unknown tool:",
+	} {
+		if strings.HasPrefix(errMsg, prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 // doExecuteTool handles the actual execution logic (previously body of executeTool).

@@ -3,6 +3,7 @@ package context
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -31,53 +32,20 @@ When multiple independent operations are needed, call tools in parallel.
 2. Analyze meaning — why it matters for the user's task
 3. Suggest next steps — concrete actions
 
-Never: dump raw output without analysis, say "Done" without explanation, give vague answers.
+Provide analysis, not raw output. Use file:line references for code locations.
 
-## Security
+## Security & Git
 
-- Never run destructive commands (rm -rf /, drop database) without explicit user confirmation
-- Don't commit secrets (.env, API keys, credentials)
-- Don't introduce injection vulnerabilities (SQL, XSS, command injection)
-- Read files before editing — understand context first
-- Prefer edit over write for existing files to avoid data loss
-
-## Git Workflow
-
-- Check git_status before committing
-- Review changes with git_diff before commit
-- Never force push without explicit user request
-- Write descriptive commit messages explaining WHY, not just WHAT
-- Stage specific files, not everything blindly
+- Confirm before destructive commands (rm -rf, drop database, force push)
+- Read files before editing; prefer edit over write for existing files
+- Check git_status/git_diff before committing; stage specific files
+- Write commit messages explaining WHY; protect secrets (.env, API keys)
 
 ## Response Style
 
 - Be concise but thorough — explain what matters, skip what doesn't
-- Use file:line references for specific code locations
-- When referencing code, show the relevant snippet
 - For multi-step tasks, use todo to track progress
-- Handle errors gracefully and suggest fixes
-
-## Example
-
-User: "Where is error handling done?"
-
-Good response after using grep:
-"Found error handling in 12 locations across 5 files:
-
-**Core handlers:**
-- internal/errors/handler.go:25 — Central error handler, wraps with stack traces
-- internal/middleware/recovery.go:12 — Panic recovery middleware
-
-**Usage in API:**
-- api/users.go:45, 67, 89 — User endpoint errors
-- api/orders.go:34 — Order validation
-
-Pattern: All errors are wrapped with context before returning to the caller."
-
-Guidelines:
-- Always read files before editing them
-- Prefer editing existing files over creating new ones
-- When executing commands, explain what they do`
+- Handle errors gracefully and suggest fixes`
 
 // legacyPlanInstructions is used when auto-detect planning is disabled.
 const legacyPlanInstructions = `
@@ -96,28 +64,27 @@ const autoPlanningProtocol = `
                     AUTOMATIC PLANNING PROTOCOL
 ═══════════════════════════════════════════════════════════════════════
 
-You MUST automatically enter plan mode when the user's request meets ANY of these criteria:
-- Implementation or feature request (adding new functionality)
-- Multi-file changes (refactoring, renaming, migrating)
-- Bug fixes requiring understanding multiple components
-- Architecture or design changes
-- Any task requiring more than 3 sequential tool calls
-- Any task where getting it wrong would require significant undo
+You MUST automatically enter plan mode when the user's request meets ALL of these criteria:
+- The task involves creating or modifying code (not just answering questions)
+- The task spans 3+ files OR requires architectural decisions
+- Getting it wrong would require significant undo
 
 You MUST NOT enter plan mode for:
-- Simple questions about code
-- Single-file reads or searches
+- Simple questions about code — answer directly
+- Single-file reads, searches, or explanations
 - Running a single command
-- Explaining concepts
+- Small edits (< 3 files) where the change is obvious
+- When the user just wants a quick answer
 
-PLANNING WORKFLOW (MANDATORY):
+IMPORTANT: When in doubt, prefer answering directly over entering plan mode.
+If you can answer without tools or with 1-2 tool calls, do so immediately.
 
-PHASE 1: EXPLORATION
-1. Use glob to understand project structure
-2. Use grep to find relevant patterns/usages
-3. Use read to examine key files
-4. Identify dependencies, interfaces, existing patterns
-5. NEVER skip exploration
+PLANNING WORKFLOW (when plan mode IS needed):
+
+PHASE 1: TARGETED EXPLORATION (only what's needed)
+1. Use glob/grep/read ONLY for files directly relevant to the task
+2. Do NOT explore the entire project structure for every task
+3. If you already know enough to plan, skip exploration and go to Phase 2
 
 PHASE 2: PLAN CREATION
 Call enter_plan_mode with:
@@ -156,14 +123,6 @@ STEP QUALITY:
 CONTRACT-FIRST PLANNING:
 For tasks with clear I/O (functions, APIs, endpoints): fill contract fields in enter_plan_mode.
 For exploratory/refactoring tasks: skip contract fields.
-
-Example - "Add email validation function":
-  contract_name: "email_validator"
-  intent: "Validate email format per RFC 5322 and return bool"
-  boundaries: [{type: "input", name: "email", description: "email address string"}]
-  invariants: [{type: "always", name: "rfc5322", description: "RFC 5322 compliant addresses return true"}]
-  examples: [{name: "valid_email", command: "go test ./... -run TestEmailValid", expected_output: "PASS", match_type: "contains"}]
-  steps: [{title: "Create validator", description: "Add ValidateEmail to internal/auth/"}]
 
 ═══════════════════════════════════════════════════════════════════════
 `
@@ -256,6 +215,7 @@ type PromptBuilder struct {
 	planManager     PlanManagerProvider
 	detectedContext string // Auto-detected project context (frameworks, docs, etc.)
 	toolHints       string // Tool usage pattern hints
+	lastMessage     string // Last user message for conditional prompt injection
 }
 
 // NewPromptBuilder creates a new prompt builder.
@@ -294,6 +254,12 @@ func (b *PromptBuilder) SetDetectedContext(ctx string) {
 // SetToolHints sets the tool usage pattern hints for periodic injection.
 func (b *PromptBuilder) SetToolHints(hints string) {
 	b.toolHints = hints
+}
+
+// SetLastMessage sets the last user message for conditional prompt injection.
+// Used to skip planning protocol for simple question-only messages.
+func (b *PromptBuilder) SetLastMessage(msg string) {
+	b.lastMessage = msg
 }
 
 // Build constructs the full system prompt.
@@ -345,10 +311,11 @@ func (b *PromptBuilder) Build() string {
 		builder.WriteString(b.toolHints)
 	}
 
-	// Add plan mode instructions (conditional on auto-detect)
-	if b.planAutoDetect {
+	// Add plan mode instructions (conditional on auto-detect).
+	// Skip planning protocol for question-only messages to save ~3.5K chars.
+	if b.planAutoDetect && !b.isQuestionOnly() {
 		builder.WriteString(autoPlanningProtocol)
-	} else {
+	} else if !b.planAutoDetect {
 		builder.WriteString(legacyPlanInstructions)
 	}
 
@@ -362,11 +329,8 @@ func (b *PromptBuilder) Build() string {
 		}
 	}
 
-	// Add tool chain patterns for common tasks
-	builder.WriteString("\n\n## Common Task Patterns\n")
-	for name, pattern := range ToolChainPatterns {
-		builder.WriteString(fmt.Sprintf("**%s:** %s\n\n", name, pattern))
-	}
+	// Tool chain patterns removed from system prompt to avoid
+	// encouraging excessive exploration on simple tasks.
 
 	return applyPromptBudget(builder.String(), maxSystemPromptChars)
 }
@@ -590,6 +554,47 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 	return applyPromptBudget(builder.String(), maxSubAgentPromptChars)
 }
 
+// isQuestionOnly returns true if the last user message appears to be a simple question
+// with no action-oriented content. Used to skip planning protocol injection.
+func (b *PromptBuilder) isQuestionOnly() bool {
+	msg := strings.TrimSpace(b.lastMessage)
+	if msg == "" {
+		return false // Safe default: inject planning protocol
+	}
+	lower := strings.ToLower(msg)
+
+	// Action patterns indicate the user wants changes — inject planning protocol
+	actionPatterns := []string{
+		"добавь", "создай", "измени", "удали", "исправь", "сделай", "реализуй", "напиши", "перепиши",
+		"add", "create", "implement", "refactor", "fix", "migrate", "build", "write", "change",
+		"update", "modify", "remove", "delete", "rename", "move", "install", "configure", "set up",
+	}
+	for _, p := range actionPatterns {
+		if strings.Contains(lower, p) {
+			return false
+		}
+	}
+
+	// Question patterns indicate the user is asking, not doing
+	questionPatterns := []string{
+		"что", "где", "как", "почему", "зачем", "какой", "сколько", "когда", "покажи", "объясни",
+		"what", "where", "how", "why", "which", "when", "show", "explain", "describe", "list",
+		"does", "is ", "are ", "can ", "could ", "would ", "should ", "do ",
+	}
+	for _, p := range questionPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+
+	// Ends with ? is a question
+	if strings.HasSuffix(msg, "?") {
+		return true
+	}
+
+	return false // Safe default: inject planning protocol
+}
+
 func applyPromptBudget(prompt string, maxChars int) string {
 	prompt = strings.TrimSpace(prompt)
 	if maxChars <= 0 || len(prompt) <= maxChars {
@@ -619,7 +624,7 @@ func applyPromptBudget(prompt string, maxChars int) string {
 		prefixBudget := maxChars - len(contractBlock) - len("\n\n")
 		if prefixBudget > 200 {
 			if len(trimmed) > prefixBudget {
-				trimmed = strings.TrimSpace(trimmed[:prefixBudget]) + "\n\n[Prompt compacted due to budget]"
+				trimmed = strings.TrimSpace(truncateUTF8Safe(trimmed, prefixBudget)) + "\n\n[Prompt compacted due to budget]"
 			}
 			trimmed += "\n\n" + contractBlock
 			if len(trimmed) <= maxChars {
@@ -629,9 +634,20 @@ func applyPromptBudget(prompt string, maxChars int) string {
 	}
 
 	if maxChars > 40 {
-		return strings.TrimSpace(trimmed[:maxChars-40]) + "\n\n[Prompt compacted due to budget]"
+		return strings.TrimSpace(truncateUTF8Safe(trimmed, maxChars-40)) + "\n\n[Prompt compacted due to budget]"
 	}
-	return strings.TrimSpace(trimmed[:maxChars])
+	return strings.TrimSpace(truncateUTF8Safe(trimmed, maxChars))
+}
+
+// truncateUTF8Safe truncates a string to maxBytes without splitting multi-byte characters.
+func truncateUTF8Safe(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 func extractContractBlock(prompt string) string {

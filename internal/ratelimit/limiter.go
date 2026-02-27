@@ -138,6 +138,7 @@ func (l *Limiter) AcquireWithTimeout(estimatedTokens int64, timeout time.Duratio
 	// Try to acquire token capacity with remaining timeout
 	if estimatedTokens > 0 {
 		if !l.tokenBucket.ConsumeWithTimeout(float64(estimatedTokens), timeout) {
+			l.requestBucket.Return(1) // Return the request slot acquired above
 			l.mu.Lock()
 			l.blockedRequests++
 			l.mu.Unlock()

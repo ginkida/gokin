@@ -132,6 +132,11 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 	}
 
+	// Set last user message for conditional planning protocol injection.
+	if a.promptBuilder != nil {
+		a.promptBuilder.SetLastMessage(message)
+	}
+
 	// Keep dynamic system instruction in sync (contract/memory/hints can change between turns).
 	a.refreshSystemInstruction()
 

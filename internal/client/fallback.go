@@ -74,6 +74,9 @@ func (fc *FallbackClient) resetCurrent() {
 func (fc *FallbackClient) SendMessage(ctx context.Context, message string) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
 	for i := startIdx; i < len(fc.clients); i++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		resp, err := fc.clients[i].SendMessage(ctx, message)
 		if err == nil {
 			fc.mu.Lock()
@@ -106,6 +109,9 @@ func (fc *FallbackClient) SendMessage(ctx context.Context, message string) (*Str
 func (fc *FallbackClient) SendMessageWithHistory(ctx context.Context, history []*genai.Content, message string) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
 	for i := startIdx; i < len(fc.clients); i++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		resp, err := fc.clients[i].SendMessageWithHistory(ctx, history, message)
 		if err == nil {
 			fc.mu.Lock()
@@ -136,6 +142,9 @@ func (fc *FallbackClient) SendMessageWithHistory(ctx context.Context, history []
 func (fc *FallbackClient) SendFunctionResponse(ctx context.Context, history []*genai.Content, results []*genai.FunctionResponse) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
 	for i := startIdx; i < len(fc.clients); i++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		resp, err := fc.clients[i].SendFunctionResponse(ctx, history, results)
 		if err == nil {
 			fc.mu.Lock()
@@ -181,11 +190,14 @@ func (fc *FallbackClient) SetThinkingBudget(budget int32) {
 }
 
 // SetTools sets tools on ALL clients in the fallback chain.
+// Each client gets its own copy of the slice to prevent cross-client mutation.
 func (fc *FallbackClient) SetTools(tools []*genai.Tool) {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 	for _, c := range fc.clients {
-		c.SetTools(tools)
+		clone := make([]*genai.Tool, len(tools))
+		copy(clone, tools)
+		c.SetTools(clone)
 	}
 }
 
@@ -216,11 +228,19 @@ func (fc *FallbackClient) SetModel(modelName string) {
 	fc.clients[idx].SetModel(modelName)
 }
 
-// WithModel returns a new client configured for the specified model.
-// Uses the current active client's WithModel implementation.
+// WithModel returns a new FallbackClient with all clients configured for the specified model.
+// Preserves the fallback chain so failover continues to work.
 func (fc *FallbackClient) WithModel(modelName string) Client {
-	idx := fc.getCurrent()
-	return fc.clients[idx].WithModel(modelName)
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	newClients := make([]Client, len(fc.clients))
+	for i, c := range fc.clients {
+		newClients[i] = c.WithModel(modelName)
+	}
+	newProviders := make([]string, len(fc.providers))
+	copy(newProviders, fc.providers)
+	fb, _ := NewFallbackClient(newClients, newProviders)
+	return fb
 }
 
 // GetRawClient returns the current active client's raw client.

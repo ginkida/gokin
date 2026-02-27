@@ -76,8 +76,11 @@ func (a *Agent) SaveCheckpoint(reason string) (*AgentCheckpoint, error) {
 	}
 
 	// Capture plan tree if active
-	if a.activePlan != nil {
-		cp.PlanTreeSnapshot = serializePlanTree(a.activePlan)
+	a.stateMu.RLock()
+	planTree := a.activePlan
+	a.stateMu.RUnlock()
+	if planTree != nil {
+		cp.PlanTreeSnapshot = serializePlanTree(planTree)
 	}
 
 	// Capture reflector state if available

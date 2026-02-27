@@ -301,11 +301,17 @@ func (t *Task) IsComplete() bool {
 	return t.Status == StatusCompleted || t.Status == StatusFailed || t.Status == StatusCancelled
 }
 
-// Duration returns the task duration.
-func (t *Task) Duration() time.Duration {
+// IsCompleteAndBefore returns true if the task is complete and ended before cutoff.
+// Reads both Status and EndTime atomically under one lock.
+func (t *Task) IsCompleteAndBefore(cutoff time.Time) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	return (t.Status == StatusCompleted || t.Status == StatusFailed || t.Status == StatusCancelled) &&
+		t.EndTime.Before(cutoff)
+}
 
+// durationLocked returns the task duration. Caller must hold t.mu.
+func (t *Task) durationLocked() time.Duration {
 	if t.StartTime.IsZero() {
 		return 0
 	}
@@ -313,6 +319,13 @@ func (t *Task) Duration() time.Duration {
 		return time.Since(t.StartTime)
 	}
 	return t.EndTime.Sub(t.StartTime)
+}
+
+// Duration returns the task duration.
+func (t *Task) Duration() time.Duration {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.durationLocked()
 }
 
 // Info returns a summary of the task.
@@ -340,7 +353,7 @@ func (t *Task) GetInfo() Info {
 		Output:    t.Output.String(),
 		Error:     t.Error,
 		ExitCode:  t.ExitCode,
-		Duration:  t.Duration(),
+		Duration:  t.durationLocked(),
 		StartTime: t.StartTime,
 		EndTime:   t.EndTime,
 	}

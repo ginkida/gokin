@@ -141,33 +141,33 @@ func (c *Context) GetCapturedOutput() string {
 func (c *Context) ExpandCommand(command string) string {
 	result := command
 
-	// Built-in variables
-	result = strings.ReplaceAll(result, "${TOOL_NAME}", c.ToolName)
-	result = strings.ReplaceAll(result, "${WORK_DIR}", c.WorkDir)
-	result = strings.ReplaceAll(result, "${RESULT}", c.ToolResult)
-	result = strings.ReplaceAll(result, "${ERROR}", c.ToolError)
+	// Built-in variables (shell-escaped to prevent injection)
+	result = strings.ReplaceAll(result, "${TOOL_NAME}", shellEscape(c.ToolName))
+	result = strings.ReplaceAll(result, "${WORK_DIR}", shellEscape(c.WorkDir))
+	result = strings.ReplaceAll(result, "${RESULT}", shellEscape(c.ToolResult))
+	result = strings.ReplaceAll(result, "${ERROR}", shellEscape(c.ToolError))
 
 	// Tool arguments
 	if filePath, ok := c.ToolArgs["file_path"].(string); ok {
-		result = strings.ReplaceAll(result, "${FILE_PATH}", filePath)
+		result = strings.ReplaceAll(result, "${FILE_PATH}", shellEscape(filePath))
 	}
 	if cmd, ok := c.ToolArgs["command"].(string); ok {
-		result = strings.ReplaceAll(result, "${COMMAND}", cmd)
+		result = strings.ReplaceAll(result, "${COMMAND}", shellEscape(cmd))
 	}
 	if pattern, ok := c.ToolArgs["pattern"].(string); ok {
-		result = strings.ReplaceAll(result, "${PATTERN}", pattern)
+		result = strings.ReplaceAll(result, "${PATTERN}", shellEscape(pattern))
 	}
 	if content, ok := c.ToolArgs["content"].(string); ok {
 		// Truncate content if too long
 		if len(content) > 100 {
 			content = content[:100] + "..."
 		}
-		result = strings.ReplaceAll(result, "${CONTENT}", content)
+		result = strings.ReplaceAll(result, "${CONTENT}", shellEscape(content))
 	}
 
 	// Extra variables
 	for key, val := range c.Extra {
-		result = strings.ReplaceAll(result, "${"+key+"}", val)
+		result = strings.ReplaceAll(result, "${"+key+"}", shellEscape(val))
 	}
 
 	// Environment variables (fallback)
@@ -179,6 +179,12 @@ func (c *Context) ExpandCommand(command string) string {
 	})
 
 	return result
+}
+
+// shellEscape wraps a string in single quotes for safe shell interpolation.
+// Internal single quotes are escaped via the standard POSIX pattern.
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // Matches checks if the hook should trigger for the given context.

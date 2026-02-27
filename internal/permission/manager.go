@@ -121,15 +121,18 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		}, nil
 
 	case LevelAsk:
-		// Auto-approve caution-level tools if previously approved this session
+		// Auto-approve caution-level tools if previously approved this session.
+		// Use full Lock to prevent TOCTOU race where concurrent calls both see
+		// autoApproved=false and both prompt the user.
 		risk := GetToolRiskLevel(toolName)
 		if risk == RiskMedium {
-			m.mu.RLock()
+			m.mu.Lock()
 			autoApproved := m.autoApprovedTools[toolName]
-			m.mu.RUnlock()
 			if autoApproved {
+				m.mu.Unlock()
 				return &Response{Allowed: true, Decision: DecisionAllowSession}, nil
 			}
+			m.mu.Unlock()
 		}
 		return m.askUser(ctx, toolName, args)
 	}

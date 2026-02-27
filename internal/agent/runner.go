@@ -800,16 +800,39 @@ func (r *Runner) SpawnWithContext(
 
 	r.reportActivity()
 
-	// Apply per-agent timeout
-	runCtx := ctx
+	// Apply per-agent timeout and store cancel func for explicit Cancel()
+	var runCtx context.Context
+	var runCancel context.CancelFunc
 	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, agentTimeout)
-		defer cancel()
+		runCtx, runCancel = context.WithTimeout(ctx, agentTimeout)
+	} else {
+		runCtx, runCancel = context.WithCancel(ctx)
 	}
+	defer runCancel()
+	agent.SetCancelFunc(runCancel)
+
 	startTime := time.Now()
 	result, err := agent.Run(runCtx, prompt)
 	duration := time.Since(startTime)
+
+	// Ensure result is never nil (matches SpawnAsync pattern)
+	if result == nil {
+		result = &AgentResult{
+			AgentID:   agent.ID,
+			Type:      AgentType(agentType),
+			Status:    AgentStatusFailed,
+			Error:     "nil result from agent",
+			Completed: true,
+		}
+	}
+
+	if err != nil {
+		result.Error = err.Error()
+		result.Status = AgentStatusFailed
+	}
+
+	// Ensure Completed is always true so WaitWithContext doesn't spin
+	result.Completed = true
 
 	// Save error checkpoint on failure for potential recovery
 	if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
@@ -826,7 +849,7 @@ func (r *Runner) SpawnWithContext(
 	}
 
 	// Record outcome with strategy optimizer
-	if strategyOpt != nil && result != nil {
+	if strategyOpt != nil {
 		success := result.Status == AgentStatusCompleted && result.Error == ""
 		strategyOpt.RecordExecution(agentType, "spawn_with_context", success, duration)
 	}
@@ -1383,6 +1406,7 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			predictor := r.predictor
 			delegationMetrics := r.delegationMetrics
 			strategyOpt := r.strategyOptimizer
+			metaAgent := r.metaAgent
 			r.mu.RUnlock()
 			agent := NewAgent(t.Type, c, baseReg, workDir, t.MaxTurns, t.Model, perms, ctxCfg)
 
@@ -1423,6 +1447,11 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			r.agents[agent.ID] = agent
 			r.mu.Unlock()
 
+			// Register with meta-agent for monitoring (matches other Spawn variants)
+			if metaAgent != nil {
+				metaAgent.RegisterAgent(agent.ID, agent.Type)
+			}
+
 			// Apply per-agent timeout
 			runCtx := ctx
 			if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
@@ -1430,7 +1459,36 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 				runCtx, cancel = context.WithTimeout(ctx, agentTimeout)
 				defer cancel()
 			}
+			startTime := time.Now()
 			result, err := agent.Run(runCtx, t.Prompt)
+			duration := time.Since(startTime)
+
+			// Ensure result is never nil (matches SpawnAsync pattern)
+			if result == nil {
+				result = &AgentResult{
+					AgentID:   agent.ID,
+					Type:      t.Type,
+					Status:    AgentStatusFailed,
+					Error:     "nil result from agent",
+					Completed: true,
+				}
+			}
+			if err != nil {
+				result.Error = err.Error()
+				result.Status = AgentStatusFailed
+			}
+			result.Completed = true
+
+			// Unregister from meta-agent
+			if metaAgent != nil {
+				metaAgent.UnregisterAgent(agent.ID)
+			}
+
+			// Record outcome with strategy optimizer
+			if strategyOpt != nil {
+				success := result.Status == AgentStatusCompleted && result.Error == ""
+				strategyOpt.RecordExecution(string(t.Type), "spawn_multiple", success, duration)
+			}
 
 			mu.Lock()
 			ids[idx] = agent.ID

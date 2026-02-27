@@ -151,11 +151,11 @@ func (ei *EnhancedIndexer) LoadIndex(maxAge time.Duration) (bool, error) {
 }
 
 // SaveIndex saves the current index to disk.
+// Uses snapshot-then-async pattern: snapshots data under RLock, writes outside lock.
 func (ei *EnhancedIndexer) SaveIndex() error {
-	ei.mu.Lock()
-	defer ei.mu.Unlock()
+	ei.mu.RLock()
 
-	// Build index data
+	// Snapshot index data under lock
 	indexData := IndexData{
 		Version:     "1.0",
 		ProjectPath: ei.workDir,
@@ -165,13 +165,7 @@ func (ei *EnhancedIndexer) SaveIndex() error {
 		Files:       make(map[string]FileIndex),
 	}
 
-	// Collect file metadata
 	for filePath, chunks := range ei.chunks {
-		fileInfo, err := os.Stat(filePath)
-		if err != nil {
-			continue
-		}
-
 		chunkMetas := make([]ChunkMeta, 0, len(chunks))
 		for _, chunk := range chunks {
 			chunkMetas = append(chunkMetas, ChunkMeta{
@@ -185,33 +179,43 @@ func (ei *EnhancedIndexer) SaveIndex() error {
 		indexData.Files[filePath] = FileIndex{
 			FilePath:    filePath,
 			LastIndexed: time.Now(),
-			ModTime:     fileInfo.ModTime(),
-			Size:        fileInfo.Size(),
 			ChunkCount:  len(chunks),
 			Chunks:      chunkMetas,
 		}
 	}
+	indexPath := ei.indexPath
+	ei.mu.RUnlock()
 
-	// Marshal to JSON
+	// Stat files and marshal outside the lock to avoid blocking searches
+	for filePath, fi := range indexData.Files {
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			delete(indexData.Files, filePath)
+			continue
+		}
+		fi.ModTime = fileInfo.ModTime()
+		fi.Size = fileInfo.Size()
+		indexData.Files[filePath] = fi
+	}
+
 	data, err := json.MarshalIndent(indexData, "", "  ")
 	if err != nil {
 		return err
 	}
 
 	// Ensure directory exists
-	dir := filepath.Dir(ei.indexPath)
+	dir := filepath.Dir(indexPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	// Write to temp file
-	tmpPath := ei.indexPath + ".tmp"
+	// Write to temp file then atomic rename
+	tmpPath := indexPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return err
 	}
 
-	// Atomic rename
-	return os.Rename(tmpPath, ei.indexPath)
+	return os.Rename(tmpPath, indexPath)
 }
 
 // IndexDirectory indexes all files and persists the index.
