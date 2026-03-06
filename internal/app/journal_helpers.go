@@ -3,6 +3,8 @@ package app
 import (
 	"strings"
 	"time"
+
+	"gokin/internal/chat"
 )
 
 func (a *App) journalEvent(event string, details map[string]any) {
@@ -46,6 +48,54 @@ func (a *App) journalSessionArchive(archived int, reason string) {
 		"archived_messages": archived,
 		"reason":            reason,
 	})
+}
+
+// restoreToolCheckpoints loads persisted tool checkpoints from the session back
+// into the executor's checkpoint journal after session restore.
+func (a *App) restoreToolCheckpoints() {
+	if a == nil || a.executor == nil || a.session == nil {
+		return
+	}
+	checkpoints := a.session.GetToolCheckpoints()
+	if len(checkpoints) == 0 {
+		return
+	}
+	journal := a.executor.GetCheckpointJournal()
+	if journal == nil {
+		return
+	}
+	journal.Clear()
+	for _, cp := range checkpoints {
+		journal.RecordSerialized(cp.CallID, cp.ToolName, cp.Args, cp.Result, cp.Signature, cp.Timestamp)
+	}
+}
+
+// syncToolCheckpoints snapshots the executor's checkpoint journal into the session
+// for cross-session persistence. Called before session saves.
+func (a *App) syncToolCheckpoints() {
+	if a == nil || a.executor == nil || a.session == nil {
+		return
+	}
+	journal := a.executor.GetCheckpointJournal()
+	if journal == nil {
+		return
+	}
+	entries := journal.Entries()
+	if len(entries) == 0 {
+		return
+	}
+	serialized := make([]chat.SerializedToolCheckpoint, len(entries))
+	for i, e := range entries {
+		serialized[i] = chat.SerializedToolCheckpoint{
+			CallID:    e.CallID,
+			ToolName:  e.ToolName,
+			Args:      e.Args,
+			Result:    e.Result.Content,
+			Signature: e.Signature,
+			Timestamp: e.Timestamp,
+		}
+	}
+	a.session.SetToolCheckpoints(serialized)
 }
 
 func previewForJournal(s string) string {

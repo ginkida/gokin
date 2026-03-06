@@ -337,9 +337,111 @@ func (c *AnthropicClient) SetStatusCallback(cb StatusCallback) {
 }
 
 // CountTokens counts tokens for the given contents.
+// For native Anthropic, uses the /v1/messages/count_tokens API endpoint.
+// For compatible providers (GLM, DeepSeek, MiniMax, Kimi), falls back to estimation.
 func (c *AnthropicClient) CountTokens(ctx context.Context, contents []*genai.Content) (*genai.CountTokensResponse, error) {
-	// Anthropic doesn't have a dedicated count endpoint.
-	// Estimate by counting characters across all part types (text, function calls, function responses).
+	// Only native Anthropic has the count_tokens endpoint
+	c.mu.RLock()
+	baseURL := c.config.BaseURL
+	model := c.config.Model
+	apiKey := c.config.APIKey
+	sysInstruction := c.systemInstruction
+	tools := c.tools
+	c.mu.RUnlock()
+
+	if baseURL == DefaultAnthropicBaseURL || baseURL == "" {
+		resp, err := c.countTokensNative(ctx, contents, model, apiKey, sysInstruction, tools)
+		if err != nil {
+			// Fall back to estimation if native counting fails
+			logging.Debug("native token counting failed, using estimation", "error", err)
+			return c.estimateTokens(contents, model)
+		}
+		return resp, nil
+	}
+
+	return c.estimateTokens(contents, model)
+}
+
+// countTokensNative uses Anthropic's /v1/messages/count_tokens endpoint.
+func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*genai.Content, model, apiKey, sysInstruction string, tools []*genai.Tool) (*genai.CountTokensResponse, error) {
+	messages := c.convertHistoryToMessages(contents, "")
+
+	// Remove empty trailing message if convertHistoryToMessages appended one
+	if len(messages) > 0 {
+		last := messages[len(messages)-1]
+		if content, ok := last["content"].([]map[string]interface{}); ok && len(content) == 1 {
+			if text, ok := content[0]["text"].(string); ok && text == "" {
+				messages = messages[:len(messages)-1]
+			}
+		}
+		// Also handle string content
+		if content, ok := last["content"].(string); ok && content == "" {
+			messages = messages[:len(messages)-1]
+		}
+	}
+
+	// Need at least one message for the API
+	if len(messages) == 0 {
+		return &genai.CountTokensResponse{TotalTokens: 0}, nil
+	}
+
+	requestBody := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+	}
+
+	if sysInstruction != "" {
+		requestBody["system"] = sysInstruction
+	}
+
+	if len(tools) > 0 {
+		anthropicTools := c.convertToolsToAnthropicFrom(tools)
+		if len(anthropicTools) > 0 {
+			requestBody["tools"] = anthropicTools
+		}
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal count_tokens request: %w", err)
+	}
+
+	url := DefaultAnthropicBaseURL + "/v1/messages/count_tokens"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create count_tokens request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-beta", "token-counting-2024-11-01")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("count_tokens request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("count_tokens returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		InputTokens int32 `json:"input_tokens"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode count_tokens response: %w", err)
+	}
+
+	return &genai.CountTokensResponse{
+		TotalTokens: result.InputTokens,
+	}, nil
+}
+
+// estimateTokens provides a character-based token estimation for non-Anthropic providers.
+func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model string) (*genai.CountTokensResponse, error) {
 	totalChars := 0
 	for _, content := range contents {
 		totalChars += 4 * 4 // role overhead (~4 tokens)
@@ -348,7 +450,7 @@ func (c *AnthropicClient) CountTokens(ctx context.Context, contents []*genai.Con
 				totalChars += len(part.Text)
 			}
 			if part.FunctionCall != nil {
-				totalChars += len(part.FunctionCall.Name) + 40 // name + structural overhead
+				totalChars += len(part.FunctionCall.Name) + 40
 				if argsJSON, err := json.Marshal(part.FunctionCall.Args); err == nil {
 					totalChars += len(argsJSON)
 				}
@@ -362,11 +464,9 @@ func (c *AnthropicClient) CountTokens(ctx context.Context, contents []*genai.Con
 		}
 	}
 
-	// Adjust multiplier based on model type
-	// GLM models (GLM-4, GLM-4.7) are more efficient than standard tokenizers
-	multiplier := 4.0 // Default for most models
-	if strings.HasPrefix(strings.ToLower(c.config.Model), "glm") {
-		multiplier = 3.5 // GLM tokenizes more efficiently (more chars per token)
+	multiplier := 4.0
+	if strings.HasPrefix(strings.ToLower(model), "glm") {
+		multiplier = 3.5
 	}
 
 	estimatedTokens := int32(float64(totalChars) / multiplier)

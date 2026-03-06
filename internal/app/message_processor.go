@@ -163,8 +163,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.mu.Unlock()
 
 	// === IMPROVEMENT 1: Use Task Router for intelligent routing ===
-	// Auto-retry transient errors with unified stream retry policy.
-	retryPolicy := client.DefaultStreamRetryPolicy()
+	// Auto-retry transient errors with adaptive stream retry policy.
+	retryPolicy := client.AdaptiveStreamRetryPolicy(a.config.API.GetActiveProvider())
 	failoverTriggered := false
 	originalMessage := message
 	retryMessage := originalMessage
@@ -275,6 +275,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		// Save partial history before retry (preserves tool side effects)
 		if len(newHistory) > len(history) {
 			a.session.SetHistory(newHistory)
+			a.syncToolCheckpoints()
 			if a.sessionManager != nil {
 				_ = a.sessionManager.SaveAfterMessage()
 			}
@@ -412,7 +413,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		return
 	}
 
-	// Save session after each message
+	// Sync tool checkpoints and save session after each message
+	a.syncToolCheckpoints()
 	if a.sessionManager != nil {
 		if err := a.sessionManager.SaveAfterMessage(); err != nil {
 			logging.Debug("failed to save session after message", "error", err)
@@ -1806,24 +1808,55 @@ func (a *App) shouldUseSafeMode() bool {
 func buildContinuationRetryMessage(baseMessage string, history []*genai.Content) string {
 	baseMessage = strings.TrimSpace(baseMessage)
 	last := lastModelText(history)
-	if last == "" {
+
+	// Also gather tool call context from the last model message
+	toolContext := lastModelToolContext(history)
+
+	if last == "" && toolContext == "" {
 		return "[System note: previous response was interrupted. Continue from where you stopped without repeating completed parts.]\n\n" + baseMessage
 	}
 
-	anchor := lastCompleteSentence(last)
-	if anchor == "" {
-		anchor = truncateTail(last, 220)
-	}
-	anchor = strings.TrimSpace(anchor)
-	if anchor == "" {
-		return "[System note: previous response was interrupted. Continue from where you stopped without repeating completed parts.]\n\n" + baseMessage
+	var anchor string
+	if last != "" {
+		anchor = lastCompleteSentence(last)
+		if anchor == "" {
+			anchor = truncateTail(last, 220)
+		}
+		anchor = strings.TrimSpace(anchor)
 	}
 
-	return fmt.Sprintf(
-		"[System note: previous response was interrupted by a stream timeout. Continue from the last complete sentence without repeating earlier text. Last complete sentence: %q]\n\n%s",
-		anchor,
-		baseMessage,
-	)
+	var parts []string
+	parts = append(parts, "[System note: previous response was interrupted by a stream timeout.")
+	if anchor != "" {
+		parts = append(parts, fmt.Sprintf(" Last complete sentence: %q.", anchor))
+	}
+	if toolContext != "" {
+		parts = append(parts, " "+toolContext)
+	}
+	parts = append(parts, " Continue from where you stopped without repeating completed parts.]")
+
+	return strings.Join(parts, "") + "\n\n" + baseMessage
+}
+
+// lastModelToolContext extracts tool call information from the last model response
+// to help the model resume with awareness of what tools were called before the interruption.
+func lastModelToolContext(history []*genai.Content) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg == nil || msg.Role != genai.RoleModel {
+			continue
+		}
+		var tools []string
+		for _, part := range msg.Parts {
+			if part != nil && part.FunctionCall != nil {
+				tools = append(tools, part.FunctionCall.Name)
+			}
+		}
+		if len(tools) > 0 {
+			return fmt.Sprintf("Tools already called in interrupted response: [%s].", strings.Join(tools, ", "))
+		}
+	}
+	return ""
 }
 
 func lastModelText(history []*genai.Content) string {

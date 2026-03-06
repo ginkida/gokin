@@ -147,6 +147,69 @@ func DecideStreamRetry(
 	}
 }
 
+// AdaptiveRetryConfig returns a retry config adjusted by the provider's health score.
+// Healthy providers (score > 0) get shorter delays and more retries.
+// Unhealthy providers (score < 0) get longer delays and fewer retries.
+func AdaptiveRetryConfig(provider string) RetryConfig {
+	base := DefaultRetryConfig()
+	h := getProviderHealth(provider)
+
+	switch {
+	case h.Score >= 5:
+		// Very healthy — trust this provider, retry aggressively
+		base.RetryDelay = 500 * time.Millisecond
+		base.MaxDelay = 15 * time.Second
+	case h.Score >= 0:
+		// Healthy or new — normal retries
+		// keep defaults
+	case h.Score >= -5:
+		// Slightly unhealthy — back off a bit
+		base.RetryDelay = 2 * time.Second
+		base.MaxDelay = 45 * time.Second
+		base.MaxRetries = 7
+	case h.Score >= -10:
+		// Unhealthy — longer backoff, fewer retries
+		base.RetryDelay = 4 * time.Second
+		base.MaxDelay = 60 * time.Second
+		base.MaxRetries = 5
+	default:
+		// Very unhealthy (score < -10) — minimal retries, long delays
+		base.RetryDelay = 8 * time.Second
+		base.MaxDelay = 90 * time.Second
+		base.MaxRetries = 3
+	}
+
+	if h.FailureStreak >= 5 {
+		base.RetryDelay = max(base.RetryDelay, 5*time.Second)
+		base.MaxRetries = min(base.MaxRetries, 4)
+	}
+
+	return base
+}
+
+// AdaptiveStreamRetryPolicy returns a stream retry policy adjusted by provider health.
+func AdaptiveStreamRetryPolicy(provider string) StreamRetryPolicy {
+	base := DefaultStreamRetryPolicy()
+	h := getProviderHealth(provider)
+
+	switch {
+	case h.Score >= 5:
+		base.MaxRetries = 3
+		base.BaseDelay = 1 * time.Second
+	case h.Score >= 0:
+		// keep defaults
+	case h.Score >= -5:
+		base.BaseDelay = 3 * time.Second
+		base.MaxDelay = 45 * time.Second
+	default:
+		base.MaxRetries = 1
+		base.BaseDelay = 5 * time.Second
+		base.MaxDelay = 60 * time.Second
+	}
+
+	return base
+}
+
 // CalculateBackoff calculates exponential backoff with jitter.
 // This prevents thundering herd problem when many clients retry simultaneously.
 func CalculateBackoff(baseDelay time.Duration, attempt int, maxDelay time.Duration) time.Duration {

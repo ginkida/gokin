@@ -239,7 +239,11 @@ func (fc *FallbackClient) WithModel(modelName string) Client {
 	}
 	newProviders := make([]string, len(fc.providers))
 	copy(newProviders, fc.providers)
-	fb, _ := NewFallbackClient(newClients, newProviders)
+	fb, err := NewFallbackClient(newClients, newProviders)
+	if err != nil {
+		logging.Debug("FallbackClient.WithModel: NewFallbackClient failed", "error", err)
+		return fc.clients[fc.current].WithModel(modelName)
+	}
 	return fb
 }
 

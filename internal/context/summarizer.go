@@ -35,9 +35,51 @@ CONVERSATION TO SUMMARIZE:
 
 SUMMARY:`
 
+// taskAwareSummarizationPrompt extends the base prompt with task context.
+const taskAwareSummarizationPrompt = `Summarize this development conversation for context preservation.
+
+CURRENT TASK CONTEXT:
+%s
+
+PRIORITIES (highest to lowest — weighted by relevance to the current task):
+1. File paths and code changes DIRECTLY related to the current task
+2. Error messages encountered during this task and their resolutions
+3. Dependencies and interactions discovered for the current task
+4. Other specific file paths and modified functions/methods
+5. Key architectural decisions and their reasoning
+6. Configuration values set or changed
+7. Unresolved issues or next steps for the current task
+
+CRITICAL: Preserve ALL information relevant to completing the current task.
+Any file paths, function signatures, error messages, or decisions that affect
+the current task must be included even if they seem routine.
+
+DO NOT include:
+- Verbose tool output or raw logs unrelated to the current task
+- Intermediate failed attempts (only final solutions)
+- UI confirmations or acknowledgments
+- Repeated file reads of the same content
+
+Format: Use bullet points grouped by topic. Start each group with the relevant file path.
+
+CONVERSATION TO SUMMARIZE:
+%s
+
+SUMMARY:`
+
+// TaskContext holds information about the current task for task-aware summarization.
+type TaskContext struct {
+	Title           string
+	Description     string
+	CurrentStep     string
+	SuccessCriteria []string
+	ArtifactPaths   []string
+}
+
 // Summarizer handles conversation summarization.
 type Summarizer struct {
-	client client.Client
+	client      client.Client
+	taskContext *TaskContext
 }
 
 // NewSummarizer creates a new summarizer.
@@ -58,6 +100,41 @@ func (s *Summarizer) SetConfig(cfg *config.ContextConfig) {
 	// but this keeps it consistent for future use.
 }
 
+// SetTaskContext updates the current task context for task-aware summarization.
+// Pass nil to clear task context and revert to generic summarization.
+func (s *Summarizer) SetTaskContext(tc *TaskContext) {
+	s.taskContext = tc
+}
+
+// formatTaskContext creates a human-readable summary of the current task.
+func (s *Summarizer) formatTaskContext() string {
+	tc := s.taskContext
+	if tc == nil {
+		return ""
+	}
+	var parts []string
+	if tc.Title != "" {
+		parts = append(parts, "Task: "+tc.Title)
+	}
+	if tc.Description != "" {
+		desc := tc.Description
+		if len(desc) > 300 {
+			desc = desc[:300] + "..."
+		}
+		parts = append(parts, "Goal: "+desc)
+	}
+	if tc.CurrentStep != "" {
+		parts = append(parts, "Current step: "+tc.CurrentStep)
+	}
+	if len(tc.SuccessCriteria) > 0 {
+		parts = append(parts, "Success criteria: "+strings.Join(tc.SuccessCriteria, "; "))
+	}
+	if len(tc.ArtifactPaths) > 0 {
+		parts = append(parts, "Key files: "+strings.Join(tc.ArtifactPaths, ", "))
+	}
+	return strings.Join(parts, "\n")
+}
+
 // Summarize creates a summary of the given messages.
 func (s *Summarizer) Summarize(ctx context.Context, messages []*genai.Content) (*genai.Content, error) {
 	// If too many messages, summarize in chunks first to avoid prompt blowup
@@ -72,8 +149,13 @@ func (s *Summarizer) doSummarize(ctx context.Context, messages []*genai.Content)
 	// Format messages for summarization
 	formatted := s.formatMessages(messages)
 
-	// Create summarization prompt
-	prompt := fmt.Sprintf(summarizationPrompt, formatted)
+	// Create summarization prompt — use task-aware version when context is available
+	var prompt string
+	if tc := s.formatTaskContext(); tc != "" {
+		prompt = fmt.Sprintf(taskAwareSummarizationPrompt, tc, formatted)
+	} else {
+		prompt = fmt.Sprintf(summarizationPrompt, formatted)
+	}
 
 	// Send to model for summarization
 	stream, err := s.client.SendMessage(ctx, prompt)

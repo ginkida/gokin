@@ -90,7 +90,12 @@ func (m Model) compactStatusSegments() []string {
 	if pct := m.getContextPercent(); pct > 0 {
 		color := contextUrgencyColor(pct)
 		hint := contextUrgencyHint(pct)
-		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("ctx:%.0f%%", pct)+hint))
+		tokens, maxTokens := m.getTokenCounts()
+		label := formatAbsoluteTokens(tokens, maxTokens)
+		if label == "" {
+			label = fmt.Sprintf("ctx:%.0f%%", pct)
+		}
+		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(label+hint))
 	} else {
 		parts = append(parts, "ctx:n/a")
 	}
@@ -292,12 +297,33 @@ func shortBreakerState(state string) string {
 
 func (m Model) formatTokenStatus(withContextBar bool) string {
 	pct := m.getContextPercent()
-	if withContextBar && pct > 0 {
-		return renderContextBar(pct, 8)
+	if pct <= 0 {
+		return ""
 	}
-	if pct > 0 {
-		color := contextUrgencyColor(pct)
-		return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("tok:%.0f%%", pct))
+	tokens, maxTokens := m.getTokenCounts()
+	if withContextBar {
+		return renderContextBar(pct, 8, tokens, maxTokens)
+	}
+	color := contextUrgencyColor(pct)
+	if label := formatAbsoluteTokens(tokens, maxTokens); label != "" {
+		return lipgloss.NewStyle().Foreground(color).Render(label)
+	}
+	return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("tok:%.0f%%", pct))
+}
+
+// getTokenCounts returns the current and max token counts if available.
+func (m Model) getTokenCounts() (tokens int, maxTokens int) {
+	if m.tokenUsage != nil {
+		return m.tokenUsage.Tokens, m.tokenUsage.MaxTokens
+	}
+	return 0, 0
+}
+
+// formatAbsoluteTokens returns "45.0K/128.0K" if absolute counts are available,
+// otherwise returns empty string so callers can fall back to percentage display.
+func formatAbsoluteTokens(tokens, maxTokens int) string {
+	if tokens > 0 && maxTokens > 0 {
+		return fmt.Sprintf("%s/%s", formatTokens(tokens), formatTokens(maxTokens))
 	}
 	return ""
 }
@@ -329,7 +355,8 @@ func contextUrgencyHint(pct float64) string {
 }
 
 // renderContextBar returns a visual progress bar for context usage.
-func renderContextBar(pct float64, barWidth int) string {
+// When absolute token counts are available, displays them alongside the bar.
+func renderContextBar(pct float64, barWidth int, tokens int, maxTokens int) string {
 	if pct <= 0 {
 		return ""
 	}
@@ -348,14 +375,16 @@ func renderContextBar(pct float64, barWidth int) string {
 	bar := filledStyle.Render(strings.Repeat("█", filled)) +
 		emptyStyle.Render(strings.Repeat("░", barWidth-filled))
 
-	var label string
-	switch {
-	case pct < 1:
-		label = "<1%"
-	case pct < 10:
-		label = fmt.Sprintf("%.1f%%", pct)
-	default:
-		label = fmt.Sprintf("%.0f%%", pct)
+	label := formatAbsoluteTokens(tokens, maxTokens)
+	if label == "" {
+		switch {
+		case pct < 1:
+			label = "<1%"
+		case pct < 10:
+			label = fmt.Sprintf("%.1f%%", pct)
+		default:
+			label = fmt.Sprintf("%.0f%%", pct)
+		}
 	}
 
 	hint := contextUrgencyHint(pct)

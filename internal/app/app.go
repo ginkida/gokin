@@ -312,6 +312,9 @@ func (a *App) Run() error {
 					// Notify TUI about restored scratchpad
 					a.safeSendToProgram(ui.ScratchpadMsg(a.scratchpad))
 
+					// Restore tool checkpoints into the executor's journal
+					a.restoreToolCheckpoints()
+
 					// Notify user about restored session
 					a.tui.AddSystemMessage(fmt.Sprintf("Restored session from %s (%d messages)",
 						info.LastActive.Format("2006-01-02 15:04"), len(state.History)))
@@ -1079,6 +1082,9 @@ func (a *App) ResumeLastSession() error {
 	if a.agentRunner != nil {
 		a.agentRunner.SetSharedScratchpad(a.scratchpad)
 	}
+
+	// Restore tool checkpoints into the executor's journal
+	a.restoreToolCheckpoints()
 
 	logging.Info("pre-loaded session", "session_id", info.ID, "messages", info.MessageCount)
 	return nil

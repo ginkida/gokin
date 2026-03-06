@@ -23,8 +23,19 @@ type SessionState struct {
 	Summary           string              `json:"summary,omitempty"`
 	Scratchpad        string              `json:"scratchpad,omitempty"`
 	SystemInstruction string              `json:"system_instruction,omitempty"`
-	Branches          map[string]*SessionState `json:"branches,omitempty"`
-	Checkpoints       map[string]int           `json:"checkpoints,omitempty"`
+	Branches          map[string]*SessionState     `json:"branches,omitempty"`
+	Checkpoints       map[string]int               `json:"checkpoints,omitempty"`
+	ToolCheckpoints   []SerializedToolCheckpoint   `json:"tool_checkpoints,omitempty"`
+}
+
+// SerializedToolCheckpoint is the persisted form of a tool checkpoint entry.
+type SerializedToolCheckpoint struct {
+	CallID    string         `json:"call_id"`
+	ToolName  string         `json:"tool_name"`
+	Args      map[string]any `json:"args,omitempty"`
+	Result    string         `json:"result,omitempty"` // Tool result content for replay
+	Signature string         `json:"signature"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // SerializedContent represents a serializable conversation content.

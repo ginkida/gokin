@@ -29,17 +29,17 @@
 
 Most AI coding tools are closed-source, route your code through third-party servers, and give you zero control over what gets sent to the model. Gokin was built with a different goal: **a fast, secure, zero-telemetry CLI where your code goes directly to the provider you chose — and nothing else leaves your machine.**
 
-This matters especially when you work with multiple LLM providers across different jurisdictions (DeepSeek, GLM, Kimi, MiniMax, Gemini, Claude). Gokin ensures that secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data. You pick the provider — Gokin handles the rest.
+This matters especially when you work with multiple LLM providers across different jurisdictions (DeepSeek, GLM, Kimi, MiniMax, Gemini, Claude, OpenAI). Gokin ensures that secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data. You pick the provider — Gokin handles the rest.
 
 | Feature | Gokin | Claude Code | Cursor |
 |---------|-------|-------------|--------|
 | **Price** | Free → Pay-per-use | $20+/month | $20+/month |
-| **Providers** | 7 (Gemini, Claude, DeepSeek, GLM, Kimi, MiniMax, Ollama) | 1 (Claude) | 1 (Claude) |
+| **Providers** | 8 (Gemini, Claude, OpenAI, DeepSeek, GLM, Kimi, MiniMax, Ollama) | 1 (Claude) | Multi |
 | **Offline** | ✅ Ollama | ❌ | ❌ |
-| **52 Tools** | ✅ | ~30 | ~30 |
+| **54 Tools** | ✅ | ~30 | ~30 |
 | **Multi-agent** | ✅ 5 parallel | Basic | ❌ |
 | **Direct API** | ✅ Zero proxies | ✅ | ❌ Routes through Cursor servers |
-| **Security** | ✅ TLS 1.2+, secret redaction (24 patterns), sandbox, 3-level permissions | Basic | ❌ |
+| **Security** | ✅ TLS 1.2+, secret redaction (24 patterns), sandbox, 3-level permissions | Basic | Basic |
 | **Open Source** | ✅ | ❌ | ❌ |
 | **Self-hosting** | ✅ | ❌ | ❌ |
 
@@ -53,6 +53,7 @@ This matters especially when you work with multiple LLM providers across differe
 | **Gokin + Kimi** | Pay-per-use | Fast reasoning, 256K context |
 | **Gokin + MiniMax** | Pay-per-use | 1M context, strong coding |
 | **Gokin + Claude** | Pay-per-use | Complex reasoning |
+| **Gokin + OpenAI** | Pay-per-use | Codex models, o3 reasoning |
 
 ---
 
@@ -110,13 +111,13 @@ gokin
 - **Code Graph** — Dependency visualization
 - **Multi-file Analysis** — Understand entire modules
 
-### ⚒️ 52 Built-in Tools
-- **Files**: read, write, edit, diff, batch
-- **Search**: glob, grep, semantic_search, tree
-- **Git**: status, commit, diff, branch, PR
-- **Run**: bash, run_tests, ssh
-- **Plan**: todo, task, enter_plan_mode
-- **Memory**: memorize, shared_memory
+### ⚒️ 54 Built-in Tools
+- **Files**: read, write, edit, diff, batch, copy, move, delete
+- **Search**: glob, grep, semantic_search, tree, code_graph
+- **Git**: status, commit, diff, branch, log, blame, PR
+- **Run**: bash, run_tests, ssh, env
+- **Plan**: todo, task, enter_plan_mode, coordinate
+- **Memory**: memorize, shared_memory, pin_context
 
 ### 🤝 Multi-Agent System
 ```
@@ -206,8 +207,9 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 
 | Provider | Models | Auth | Notes |
 |----------|--------|------|-------|
-| **Gemini** | 2.5-pro, 2.5-flash, 3-pro | API key / OAuth | Free tier, native tools |
-| **Anthropic** | Opus 4, Sonnet 4, Haiku | API key | Best reasoning |
+| **Gemini** | 3.1-pro, 3-flash, 2.5-pro | API key / OAuth | Free tier, native tools |
+| **Anthropic** | Opus 4, Sonnet 4.5, Haiku | API key | Best reasoning |
+| **OpenAI** | GPT-5.3 Codex, o3, o4-mini | OAuth | Codex models |
 | **DeepSeek** | Chat, Reasoner | API key | Best price/quality |
 | **Kimi** | K2.5, K2 Thinking Turbo, K2 Turbo | API key | Fast reasoning, 256K context |
 | **MiniMax** | M2.5 | API key | 1M context, strong coding |
@@ -217,9 +219,11 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 Switch anytime:
 ```
 > /provider gemini
-> /model 2.5-flash
+> /model 3-flash
 > /provider anthropic
 > /model sonnet
+> /provider openai
+> /oauth-login openai
 ```
 
 ---
@@ -229,12 +233,14 @@ Switch anytime:
 | Command | Description |
 |---------|-------------|
 | `/login <provider> <key>` | Set API key |
+| `/oauth-login <provider>` | OAuth login (Gemini, OpenAI) |
 | `/provider <name>` | Switch provider |
 | `/model <name>` | Switch model |
 | `/plan` | Enter planning mode |
 | `/save` / `/load` | Session management |
 | `/commit [-m "msg"]` | Git commit |
 | `/pr --title "..."` | Create GitHub PR |
+| `/undo` | Undo last file change |
 | `/theme` | Switch UI theme |
 | `/help` | Show all commands |
 
@@ -275,6 +281,9 @@ api:
   glm_key: ""
   kimi_key: ""
   minimax_key: ""
+  openai_oauth:                   # OAuth-only provider
+    access_token: ""
+    refresh_token: ""
   active_provider: "gemini"
   ollama_base_url: "http://localhost:11434"
   retry:
@@ -333,8 +342,8 @@ gokin/
 ├── internal/
 │   ├── app/            # Orchestrator & message loop
 │   ├── agent/          # Multi-agent system
-│   ├── client/         # 7 API providers
-│   ├── tools/          # 52 built-in tools
+│   ├── client/         # 8 API providers
+│   ├── tools/          # 54 built-in tools
 │   ├── ui/             # Bubble Tea TUI
 │   ├── config/         # YAML config
 │   ├── permission/     # 3-level security
@@ -343,7 +352,7 @@ gokin/
 │   └── ...
 ```
 
-**~100K LOC • 100% Go • Production-ready**
+**~120K LOC • 100% Go • Production-ready**
 
 ---
 

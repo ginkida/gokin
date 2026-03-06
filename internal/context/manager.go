@@ -3,6 +3,7 @@ package context
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,6 +59,9 @@ type ContextManager struct {
 
 	// Semaphore to limit concurrent async token count goroutines
 	tokenCountSem chan struct{}
+
+	// Plan manager for task-aware summarization
+	planManager PlanManagerProvider
 }
 
 // NewContextManager creates a new context manager.
@@ -98,6 +102,11 @@ func NewContextManager(
 		}
 	}
 
+	// Enable semantic scoring when auto-summary is available (requires LLM)
+	if cfg != nil && cfg.EnableAutoSummary && c != nil {
+		messageScorer.SetSemanticClient(c)
+	}
+
 	return &ContextManager{
 		ctx:                ctx,
 		cancel:             cancel,
@@ -117,6 +126,67 @@ func NewContextManager(
 	}
 }
 
+// SetPlanManager sets the plan manager for task-aware summarization.
+func (m *ContextManager) SetPlanManager(pm PlanManagerProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.planManager = pm
+}
+
+// syncTaskContext extracts current task info from the plan manager
+// and updates the summarizer's task context.
+func (m *ContextManager) syncTaskContext() {
+	if m.summarizer == nil {
+		return
+	}
+	m.mu.RLock()
+	pm := m.planManager
+	m.mu.RUnlock()
+
+	if pm == nil {
+		m.summarizer.SetTaskContext(nil)
+		return
+	}
+
+	contract := pm.GetActiveContractContext()
+	if contract == "" {
+		m.summarizer.SetTaskContext(nil)
+		return
+	}
+
+	// Parse the contract text into structured TaskContext
+	tc := &TaskContext{}
+	for _, line := range strings.Split(contract, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "**Plan:**"):
+			tc.Title = strings.TrimSpace(strings.TrimPrefix(line, "**Plan:**"))
+		case strings.HasPrefix(line, "Plan:"):
+			tc.Title = strings.TrimSpace(strings.TrimPrefix(line, "Plan:"))
+		case strings.HasPrefix(line, "**Goal:**"):
+			tc.Description = strings.TrimSpace(strings.TrimPrefix(line, "**Goal:**"))
+		case strings.HasPrefix(line, "Goal:"):
+			tc.Description = strings.TrimSpace(strings.TrimPrefix(line, "Goal:"))
+		case strings.HasPrefix(line, "**Current step:**"):
+			tc.CurrentStep = strings.TrimSpace(strings.TrimPrefix(line, "**Current step:**"))
+		case strings.HasPrefix(line, "Current step:"):
+			tc.CurrentStep = strings.TrimSpace(strings.TrimPrefix(line, "Current step:"))
+		case strings.HasPrefix(line, "- ") && tc.CurrentStep != "":
+			tc.SuccessCriteria = append(tc.SuccessCriteria, strings.TrimPrefix(line, "- "))
+		}
+	}
+
+	if tc.Title == "" && tc.Description == "" {
+		// Fallback: use the raw contract text as description
+		tc.Description = contract
+		if len(tc.Description) > 500 {
+			tc.Description = tc.Description[:500] + "..."
+		}
+	}
+
+	m.summarizer.SetTaskContext(tc)
+}
+
 // SetClient updates the underlying client for token counting and summarization.
 func (m *ContextManager) SetClient(c client.Client) {
 	m.mu.Lock()
@@ -125,6 +195,9 @@ func (m *ContextManager) SetClient(c client.Client) {
 	m.tokenCounter.SetClient(c)
 	if m.summarizer != nil {
 		m.summarizer.SetClient(c)
+	}
+	if m.messageScorer != nil {
+		m.messageScorer.SetSemanticClient(c)
 	}
 }
 
@@ -362,6 +435,9 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 		// Not enough messages to summarize
 		return nil
 	}
+
+	// Sync task context for task-aware summarization
+	m.syncTaskContext()
 
 	// Create summary plan using strategy
 	plan := CreateSummaryPlan(history, m.summaryStrategy, m.messageScorer)
@@ -624,6 +700,9 @@ func (m *ContextManager) tryAutoCompact(ctx context.Context, currentTokens int) 
 // IncrementalCompact performs incremental compaction: summarizes oldest messages first,
 // preserves recent messages and key file references.
 func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
+	// Sync task context for task-aware summarization
+	m.syncTaskContext()
+
 	history := m.session.GetHistory()
 
 	// Preserve last 50 messages in full fidelity

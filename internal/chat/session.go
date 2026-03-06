@@ -44,6 +44,7 @@ type Session struct {
 	version           int64               // version for optimistic concurrency control
 	onChange          ChangeHandler
 	scratchpad        string
+	toolCheckpoints   []SerializedToolCheckpoint // persisted tool checkpoint journal
 	mu                sync.RWMutex
 }
 
@@ -398,6 +399,12 @@ func (s *Session) GetState() *SessionState {
 		}
 	}
 
+	// Persist tool checkpoints
+	if len(s.toolCheckpoints) > 0 {
+		state.ToolCheckpoints = make([]SerializedToolCheckpoint, len(s.toolCheckpoints))
+		copy(state.ToolCheckpoints, s.toolCheckpoints)
+	}
+
 	// Generate summary
 	state.Summary = state.GenerateSummary()
 
@@ -452,6 +459,12 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 		}
 	}
 
+	// Restore tool checkpoints
+	if len(state.ToolCheckpoints) > 0 {
+		s.toolCheckpoints = make([]SerializedToolCheckpoint, len(state.ToolCheckpoints))
+		copy(s.toolCheckpoints, state.ToolCheckpoints)
+	}
+
 	return nil
 }
 
@@ -467,6 +480,23 @@ func (s *Session) SetScratchpad(content string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.scratchpad = content
+}
+
+// GetToolCheckpoints returns persisted tool checkpoint entries.
+func (s *Session) GetToolCheckpoints() []SerializedToolCheckpoint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]SerializedToolCheckpoint, len(s.toolCheckpoints))
+	copy(out, s.toolCheckpoints)
+	return out
+}
+
+// SetToolCheckpoints sets the persisted tool checkpoint entries.
+func (s *Session) SetToolCheckpoints(checkpoints []SerializedToolCheckpoint) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toolCheckpoints = make([]SerializedToolCheckpoint, len(checkpoints))
+	copy(s.toolCheckpoints, checkpoints)
 }
 
 // --- Session Branching (Forking) ---

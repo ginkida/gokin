@@ -224,6 +224,9 @@ type Executor struct {
 	// Pending background task completion notifications
 	pendingNotifications []string
 	pendingNotifMu       sync.Mutex
+
+	// Checkpoint journal for tool execution recovery on API failure.
+	checkpoint *CheckpointJournal
 }
 
 // ExecutionInfo holds information about an active tool execution
@@ -309,6 +312,7 @@ func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Du
 		deltaPendingPaths:      make(map[string]struct{}),
 		sideEffectsByCallID:    make(map[string]ToolResult),
 		sideEffectsBySignature: make(map[string]ToolResult),
+		checkpoint:             NewCheckpointJournal(),
 	}
 }
 
@@ -386,12 +390,22 @@ func (e *Executor) SetSideEffectDedup(enabled bool) {
 	e.sideEffectDedupEnabled = enabled
 }
 
+// GetCheckpointJournal returns the checkpoint journal for inspection or persistence.
+func (e *Executor) GetCheckpointJournal() *CheckpointJournal {
+	return e.checkpoint
+}
+
 // ResetSideEffectLedger clears deduplication ledger for a new top-level request.
 func (e *Executor) ResetSideEffectLedger() {
 	e.sideEffectLedgerMu.Lock()
 	defer e.sideEffectLedgerMu.Unlock()
 	e.sideEffectsByCallID = make(map[string]ToolResult)
 	e.sideEffectsBySignature = make(map[string]ToolResult)
+
+	// Also clear the checkpoint journal — it belongs to the previous request.
+	if e.checkpoint != nil {
+		e.checkpoint.Clear()
+	}
 }
 
 // SetSafetyValidator sets the safety validator.
@@ -510,6 +524,12 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// Snapshot client once per executeLoop to avoid racing with SetClient.
 	cl := e.getClient()
 
+	// NOTE: checkpoint journal is NOT cleared here — it persists across retries
+	// within the same handleSubmit() so that write operations completed before
+	// an API failure can be replayed from cache instead of re-executed.
+	// The journal is cleared in ResetSideEffectLedger() at the start of each
+	// new top-level user request.
+
 	// === IMPROVEMENT 3: Dynamic max iterations based on context complexity ===
 	maxIterations := e.calculateMaxIterations(history)
 
@@ -579,13 +599,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				}
 				continue // retry outer loop
 			}
-			// Preserve partial response in history if available
-			if resp != nil && resp.Text != "" {
-				partialContent := &genai.Content{
-					Role:  genai.RoleModel,
-					Parts: []*genai.Part{genai.NewPartFromText(resp.Text)},
+			// Preserve partial response in history — include all structured content
+			// (text, thinking, function calls) not just text.
+			if resp != nil {
+				if parts := e.buildResponsePartsRaw(resp); len(parts) > 0 {
+					history = append(history, &genai.Content{
+						Role:  genai.RoleModel,
+						Parts: parts,
+					})
 				}
-				history = append(history, partialContent)
 			}
 			return history, "", fmt.Errorf("model response error (%s): %w", ft.Reason, err)
 		}
@@ -727,13 +749,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					client.StreamRetryOptions{AllowPartial: false}, // partial continuation is handled at App level
 				)
 				if !decision.ShouldRetry {
-					// Preserve partial response from chained tool call
-					if resp != nil && resp.Text != "" {
-						partialContent := &genai.Content{
-							Role:  genai.RoleModel,
-							Parts: []*genai.Part{genai.NewPartFromText(resp.Text)},
+					// Preserve partial response from chained tool call — include all
+					// structured content (text, thinking, function calls).
+					if resp != nil {
+						if parts := e.buildResponsePartsRaw(resp); len(parts) > 0 {
+							history = append(history, &genai.Content{
+								Role:  genai.RoleModel,
+								Parts: parts,
+							})
 						}
-						history = append(history, partialContent)
 					}
 					return history, "", fmt.Errorf("function response error (%s): %w", ft.Reason, err)
 				}
@@ -1137,6 +1161,20 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			e.handler.OnWarning(fmt.Sprintf("Skipped duplicate side-effect tool call '%s' (%s). Reusing previous result.", call.Name, reason))
 		}
 		return deduped
+	}
+
+	// Checkpoint recovery: reuse result for write operations that already completed
+	// in a previous iteration (e.g., API failure after tool executed successfully).
+	if e.checkpoint != nil && isWriteOperation(call.Name) {
+		if cached, reason, ok := e.checkpoint.Lookup(call); ok {
+			logging.Info("checkpoint recovery: reusing previous tool result",
+				"tool", call.Name,
+				"reason", reason)
+			if e.handler != nil && e.handler.OnWarning != nil {
+				e.handler.OnWarning(fmt.Sprintf("Recovered result for '%s' from checkpoint (%s).", call.Name, reason))
+			}
+			return cached
+		}
 	}
 
 	// Pre-mutation barrier: if previous delta-check failed, block further mutating calls.
@@ -1571,6 +1609,11 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Record side effects for retry deduplication.
 	e.recordSideEffect(call, result)
 
+	// Record in checkpoint journal for API failure recovery (write operations only).
+	if e.checkpoint != nil && isWriteOperation(call.Name) {
+		e.checkpoint.Record(call, result)
+	}
+
 	return result
 }
 
@@ -1644,7 +1687,18 @@ func sideEffectSignature(toolName string, args map[string]any) string {
 }
 
 // buildResponseParts returns Parts from a response.
+// Adds a fallback " " text part if the response has no content to ensure valid history.
 func (e *Executor) buildResponseParts(resp *client.Response) []*genai.Part {
+	parts := e.buildResponsePartsRaw(resp)
+	if len(parts) == 0 {
+		parts = append(parts, genai.NewPartFromText(" "))
+	}
+	return parts
+}
+
+// buildResponsePartsRaw returns Parts from a response without a fallback placeholder.
+// Used for partial response preservation where empty means "nothing to preserve".
+func (e *Executor) buildResponsePartsRaw(resp *client.Response) []*genai.Part {
 	if len(resp.Parts) > 0 {
 		return resp.Parts
 	}
@@ -1657,10 +1711,6 @@ func (e *Executor) buildResponseParts(resp *client.Response) []*genai.Part {
 
 	for _, fc := range resp.FunctionCalls {
 		parts = append(parts, &genai.Part{FunctionCall: fc})
-	}
-
-	if len(parts) == 0 {
-		parts = append(parts, genai.NewPartFromText(" "))
 	}
 
 	return parts
