@@ -58,6 +58,10 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxOutputTokens: 8192,
 	},
 	// OpenAI Codex
+	"gpt-5.4": {
+		MaxInputTokens:  1050000,
+		MaxOutputTokens: 128000,
+	},
 	"gpt-5.3-codex-spark": {
 		MaxInputTokens:  128000,
 		MaxOutputTokens: 16384,
@@ -161,6 +165,7 @@ var DefaultPricing = map[string]ModelPricing{
 	"claude-haiku":  {InputCostPer1M: 0.80, OutputCostPer1M: 4.00},
 
 	// OpenAI Codex (ChatGPT subscription — no per-token cost)
+	"gpt-5.4":             {InputCostPer1M: 2.50, OutputCostPer1M: 15.00},
 	"gpt-5.3-codex-spark": {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
 	"gpt-5.3-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
 	"gpt-5.2-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},

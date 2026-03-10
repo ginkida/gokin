@@ -82,6 +82,7 @@ var knownModelProfiles = map[string]ModelProfile{
 	"minimax":                {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 
 	// OpenAI Codex family
+	"gpt-5.4":             {Family: "openai", ContextWindow: 1050000, SupportsTools: true, IsCoding: true},
 	"gpt-5.3-codex":       {Family: "openai", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
 	"gpt-5.3-codex-spark": {Family: "openai", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
 	"gpt-5.2-codex":       {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},

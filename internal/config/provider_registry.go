@@ -139,7 +139,7 @@ var Providers = []ProviderDef{
 	{
 		Name:          "openai",
 		DisplayName:   "OpenAI (ChatGPT)",
-		DefaultModel:  "gpt-5.3-codex",
+		DefaultModel:  "gpt-5.4",
 		KeyOptional:   true, // Only OAuth, no API key
 		HasOAuth:      true,
 		GetKey:        func(api *APIConfig) string { return "" },

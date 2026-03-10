@@ -18,6 +18,7 @@ func (c *ModelCommand) Usage() string {
 /model 3.1-pro   - Gemini 3.1 Pro (top reasoning)
 /model 3-flash   - Gemini 3 Flash (fast & cheap)
 /model 3-pro     - Gemini 3 Pro (advanced)
+/model 5.4             - GPT-5.4 (frontier, 1M context)
 /model 5.3-codex-spark - GPT-5.3 Codex Spark (near-instant)
 /model 5.3-codex       - GPT-5.3 Codex (most capable)
 /model 5.2-codex       - GPT-5.2 Codex (400K context)
@@ -78,7 +79,7 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		case "anthropic":
 			sb.WriteString("\nExamples: /model sonnet  or  /model opus")
 		case "openai":
-			sb.WriteString("\nExamples: /model 5.3-codex  or  /model 5.3-codex-spark  or  /model 5.2-codex")
+			sb.WriteString("\nExamples: /model 5.4  or  /model 5.3-codex  or  /model 5.3-codex-spark")
 		case "minimax":
 			sb.WriteString("\nExamples: /model M2.5  or  /model M2.5-highspeed")
 		case "kimi":

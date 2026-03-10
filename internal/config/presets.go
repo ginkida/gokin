@@ -78,9 +78,9 @@ var ModelPresets = map[string]ModelPreset{
 	},
 	"openai": {
 		Provider:        "openai",
-		Name:            "gpt-5.3-codex",
+		Name:            "gpt-5.4",
 		Temperature:     1.0,
-		MaxOutputTokens: 16384,
+		MaxOutputTokens: 128000,
 	},
 	"minimax": {
 		Provider:        "minimax",

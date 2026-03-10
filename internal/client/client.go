@@ -147,6 +147,12 @@ var AvailableModels = []ModelInfo{
 	},
 	// OpenAI models (OAuth / ChatGPT subscription)
 	{
+		ID:          "gpt-5.4",
+		Name:        "GPT-5.4",
+		Description: "Frontier model, reasoning + coding + agentic, 1M context",
+		Provider:    "openai",
+	},
+	{
 		ID:          "gpt-5.3-codex",
 		Name:        "GPT-5.3 Codex",
 		Description: "Most capable coding model, 25% faster than 5.2",
