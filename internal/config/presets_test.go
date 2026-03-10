@@ -16,7 +16,7 @@ func TestApplyPreset(t *testing.T) {
 		{"balanced", true, "gemini-3-flash-preview", "gemini"},
 		{"creative", true, "gemini-3-pro-preview", "gemini"},
 		{"anthropic", true, "claude-sonnet-4-5-20250929", "anthropic"},
-		{"openai", true, "gpt-5.3-codex", "openai"},
+		{"openai", true, "gpt-5.4", "openai"},
 		{"ollama", true, "llama3.2", "ollama"},
 		{"kimi", true, "kimi-k2.5", "kimi"},
 		{"deepseek", true, "deepseek-chat", "deepseek"},

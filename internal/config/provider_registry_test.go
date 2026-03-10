@@ -172,7 +172,7 @@ func TestProviderDefaultModels(t *testing.T) {
 	expected := map[string]string{
 		"gemini":    "gemini-3-flash-preview",
 		"anthropic": "claude-sonnet-4-5-20250929",
-		"openai":    "gpt-5.3-codex",
+		"openai":    "gpt-5.4",
 		"glm":       "glm-5",
 		"deepseek":  "deepseek-chat",
 		"minimax":   "MiniMax-M2.5",
