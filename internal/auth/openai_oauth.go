@@ -65,17 +65,16 @@ func (m *OpenAIOAuthManager) GenerateAuthURL() (string, error) {
 	}
 
 	params := url.Values{
-		"client_id":                     {m.clientID},
-		"redirect_uri":                  {m.redirectURI},
-		"response_type":                 {"code"},
-		"scope":                         {strings.Join(m.scopes, " ")},
-		"code_challenge":                {m.codeChallenge},
-		"code_challenge_method":         {"S256"},
-		"state":                         {m.state},
-		"audience":                      {OpenAIOAuthAudience},
-		"id_token_add_organizations":    {"true"},
-		"codex_cli_simplified_flow":     {"true"},
-		"originator":                    {"codex_cli_rs"},
+		"client_id":                  {m.clientID},
+		"redirect_uri":               {m.redirectURI},
+		"response_type":              {"code"},
+		"scope":                      {strings.Join(m.scopes, " ")},
+		"code_challenge":             {m.codeChallenge},
+		"code_challenge_method":      {"S256"},
+		"state":                      {m.state},
+		"id_token_add_organizations": {"true"},
+		"codex_cli_simplified_flow":  {"true"},
+		"originator":                 {"codex_cli_rs"},
 	}
 
 	return OpenAIAuthURL + "?" + params.Encode(), nil
