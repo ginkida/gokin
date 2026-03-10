@@ -103,7 +103,8 @@ func (c *ToolResultCache) Get(toolName string, args map[string]any) (ToolResult,
 
 	// Check if expired
 	if time.Since(entry.Timestamp) > c.ttl {
-		// Entry expired, will be cleaned up by next Put
+		delete(c.entries, key)
+		c.removeLRU(key)
 		c.misses++
 		return ToolResult{}, false
 	}
@@ -144,6 +145,15 @@ func (c *ToolResultCache) Put(toolName string, args map[string]any, result ToolR
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if entry, exists := c.entries[key]; exists {
+		entry.Result = result
+		entry.Timestamp = time.Now()
+		entry.ToolName = toolName
+		entry.Args = args
+		c.updateLRU(key)
+		return
+	}
 
 	// Check if we need to evict
 	if len(c.entries) >= c.maxEntries {

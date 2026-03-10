@@ -144,11 +144,12 @@ type Task struct {
 	Program string
 	Args    []string
 
-	cmd        *exec.Cmd
-	cancelFunc context.CancelFunc
-	done       chan struct{} // closed when task reaches a terminal state
-	doneOnce   sync.Once
-	mu         sync.RWMutex
+	cmd            *exec.Cmd
+	cancelFunc     context.CancelFunc
+	processStarted bool
+	done           chan struct{} // closed when task reaches a terminal state
+	doneOnce       sync.Once
+	mu             sync.RWMutex
 }
 
 // NewTask creates a new background task.
@@ -217,7 +218,39 @@ func (t *Task) Start(ctx context.Context) error {
 
 // run executes the command and updates status.
 func (t *Task) run() {
-	err := t.cmd.Run()
+	err := t.cmd.Start()
+
+	t.mu.Lock()
+	if err != nil {
+		defer t.mu.Unlock()
+		defer t.doneOnce.Do(func() { close(t.done) }) // Guarantees done is closed on any exit path
+
+		// Release context resources regardless of how the command finished.
+		if t.cancelFunc != nil {
+			t.cancelFunc()
+		}
+
+		t.EndTime = time.Now()
+
+		if t.Status == StatusCancelled {
+			return
+		}
+
+		t.Status = StatusFailed
+		t.Error = err.Error()
+		t.ExitCode = -1
+		return
+	}
+
+	t.processStarted = true
+	cancelled := t.Status == StatusCancelled
+	t.mu.Unlock()
+
+	if cancelled {
+		killProcessGroup(t.cmd)
+	}
+
+	err = t.cmd.Wait()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -230,11 +263,18 @@ func (t *Task) run() {
 
 	t.EndTime = time.Now()
 
-	if err != nil {
-		if t.Status == StatusCancelled {
-			// Already cancelled, keep that status
-			return
+	if t.Status == StatusCancelled {
+		if err == nil {
+			t.ExitCode = 0
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			t.ExitCode = exitErr.ExitCode()
+		} else {
+			t.ExitCode = -1
 		}
+		return
+	}
+
+	if err != nil {
 		t.Status = StatusFailed
 		t.Error = err.Error()
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -251,15 +291,24 @@ func (t *Task) run() {
 // Cancel cancels the task.
 func (t *Task) Cancel() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if t.Status != StatusRunning || t.cancelFunc == nil {
+		t.mu.Unlock()
+		return
+	}
 
-	if t.Status == StatusRunning && t.cancelFunc != nil {
-		// Kill entire process group for proper cleanup
-		killProcessGroup(t.cmd)
-		t.cancelFunc()
-		t.Status = StatusCancelled
-		t.EndTime = time.Now()
-		t.doneOnce.Do(func() { close(t.done) })
+	cancel := t.cancelFunc
+	cmd := t.cmd
+	processStarted := t.processStarted
+
+	t.Status = StatusCancelled
+	t.EndTime = time.Now()
+	t.mu.Unlock()
+
+	cancel()
+
+	if processStarted {
+		// Kill entire process group for proper cleanup once Start() has published cmd.Process.
+		killProcessGroup(cmd)
 	}
 }
 

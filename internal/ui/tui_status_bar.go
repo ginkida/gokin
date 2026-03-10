@@ -487,6 +487,11 @@ func (m Model) contextualShortcutHints() string {
 		add("e", "Edit")
 		add("n", "Reject")
 		add("q", "Close")
+	case StateMultiDiffPreview:
+		add("y", "Apply all")
+		add("n", "Reject all")
+		add("Tab", "Switch pane")
+		add("↑↓", "Browse")
 	case StateQuestionPrompt:
 		add("↑↓", "Navigate")
 		add("Enter", "Confirm")

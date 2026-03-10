@@ -182,8 +182,16 @@ func (c *SummaryCache) GetStats() CacheStats {
 func HashMessages(messages []*genai.Content) string {
 	h := sha256.New()
 	for _, msg := range messages {
+		if msg == nil {
+			continue
+		}
+
 		h.Write([]byte(msg.Role))
 		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+
 			if part.Text != "" {
 				// For text, hash first 500 chars to avoid huge computations
 				text := part.Text

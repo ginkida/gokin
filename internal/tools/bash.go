@@ -149,12 +149,15 @@ func (s *BashSession) Env() map[string]string {
 
 // BashTool executes bash commands.
 type BashTool struct {
-	workDir          string
-	session          *BashSession
-	taskManager      *tasks.Manager
-	timeout          time.Duration // Explicit timeout for commands
-	sandboxEnabled   bool          // Enable sandboxing for bash commands
-	unrestrictedMode bool          // Skip command validation when both sandbox and permissions are off
+	workDir                   string
+	session                   *BashSession
+	taskManager               *tasks.Manager
+	timeout                   time.Duration // Explicit timeout for commands
+	sandboxEnabled            bool          // Enable sandboxing for bash commands
+	unrestrictedMode          bool          // Skip command validation when both sandbox and permissions are off
+	workspaceRoot             string
+	workspaceBoundaryEnabled  bool
+	managedWorkspaceApplyBack bool
 }
 
 // NewBashTool creates a new BashTool instance.
@@ -222,6 +225,39 @@ func (t *BashTool) SetSandboxEnabled(enabled bool) {
 // When enabled (both sandbox and permissions are off), command validation is skipped.
 func (t *BashTool) SetUnrestrictedMode(enabled bool) {
 	t.unrestrictedMode = enabled
+}
+
+// SetWorkspaceBoundary constrains the persistent shell session to stay rooted at
+// the provided workspace. It does not fully sandbox commands, but prevents the
+// session from drifting outside the repo across turns.
+func (t *BashTool) SetWorkspaceBoundary(root string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		t.workspaceRoot = ""
+		t.workspaceBoundaryEnabled = false
+		return
+	}
+
+	cleanRoot := filepath.Clean(root)
+	t.workspaceRoot = cleanRoot
+	t.workspaceBoundaryEnabled = true
+	if !t.isWithinWorkspace(t.session.WorkDir()) {
+		t.session.SetWorkDir(cleanRoot)
+	}
+}
+
+// EnableManagedWorkspaceApplyBackMode enables stricter containment used for
+// isolated apply-back workspaces. Background tasks are disabled and commands
+// that mutate git history are blocked because they cannot be replayed safely.
+func (t *BashTool) EnableManagedWorkspaceApplyBackMode(root string) {
+	t.managedWorkspaceApplyBack = true
+	t.SetWorkspaceBoundary(root)
+}
+
+// ManagedWorkspaceApplyBackModeEnabled reports whether stricter apply-back
+// containment is enabled.
+func (t *BashTool) ManagedWorkspaceApplyBackModeEnabled() bool {
+	return t.managedWorkspaceApplyBack
 }
 
 func (t *BashTool) Name() string {
@@ -314,6 +350,10 @@ func (t *BashTool) Validate(args map[string]any) error {
 		return NewValidationError("command", fmt.Sprintf("blocked: %s", result.Reason))
 	}
 
+	if err := t.validateManagedWorkspaceCommand(command); err != nil {
+		return NewValidationError("command", err.Error())
+	}
+
 	return nil
 }
 
@@ -321,10 +361,17 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	command, _ := GetString(args, "command")
 	stdinContent, _ := GetString(args, "stdin")
 
+	if err := t.validateManagedWorkspaceCommand(command); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+
 	// Check if should run in background
 	runInBackground, _ := args["run_in_background"].(bool)
 
 	if runInBackground {
+		if t.managedWorkspaceApplyBack {
+			return NewErrorResult("run_in_background is not supported in isolated apply-back bash mode"), nil
+		}
 		if stdinContent != "" {
 			return NewErrorResult("stdin is not supported with run_in_background=true"), nil
 		}
@@ -363,9 +410,24 @@ func (t *BashTool) executeBackground(ctx context.Context, command string) (ToolR
 func (t *BashTool) buildSessionEnv() []string {
 	env := buildSafeEnv()
 
+	if t.managedWorkspaceApplyBack && t.workspaceRoot != "" {
+		tmpDir := filepath.Join(t.workspaceRoot, ".gokin-tmp")
+		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			logging.Debug("failed to create managed bash tmp dir", "dir", tmpDir, "error", err)
+		}
+		env = upsertEnvVar(env, "HOME", t.workspaceRoot)
+		env = upsertEnvVar(env, "PWD", t.sessionWorkDir())
+		env = upsertEnvVar(env, "TMPDIR", tmpDir)
+		env = upsertEnvVar(env, "TMP", tmpDir)
+		env = upsertEnvVar(env, "TEMP", tmpDir)
+	}
+
 	// Inject session environment variables
 	sessionEnv := t.session.Env()
 	for key, val := range sessionEnv {
+		if t.managedWorkspaceApplyBack && isManagedBashProtectedEnv(key) {
+			continue
+		}
 		// For PATH, append instead of replacing to prevent hijacking
 		if strings.ToUpper(key) == "PATH" {
 			for i, e := range env {
@@ -441,6 +503,11 @@ func (t *BashTool) updateSessionFromPWD(detectedDir string) {
 		return
 	}
 	detectedDir = filepath.Clean(detectedDir)
+	if t.workspaceBoundaryEnabled && !t.isWithinWorkspace(detectedDir) {
+		logging.Debug("bash session attempted to leave workspace boundary", "detected_dir", detectedDir, "workspace_root", t.workspaceRoot)
+		t.session.SetWorkDir(t.workspaceRoot)
+		return
+	}
 	if info, err := os.Stat(detectedDir); err == nil && info.IsDir() {
 		t.session.SetWorkDir(detectedDir)
 	}
@@ -498,6 +565,10 @@ func (t *BashTool) updateSessionAfterCommandLegacy(command string) {
 	}
 
 	target = filepath.Clean(target)
+	if t.workspaceBoundaryEnabled && !t.isWithinWorkspace(target) {
+		t.session.SetWorkDir(t.workspaceRoot)
+		return
+	}
 
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		t.session.SetWorkDir(target)
@@ -524,9 +595,12 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 	}
 
 	// Use session working directory
-	workDir := t.session.WorkDir()
+	workDir := t.sessionWorkDir()
 
 	// Wrap command with pwd probe for reliable directory tracking
+	if t.managedWorkspaceApplyBack {
+		command = t.wrapManagedWorkspaceCommand(command)
+	}
 	wrappedCommand := wrapCommandWithPWD(command)
 
 	// Fall back to standard execution (legacy behavior)
@@ -863,4 +937,120 @@ func (t *BashTool) executeSandboxed(ctx context.Context, command string) (ToolRe
 	}
 
 	return NewSuccessResult(output.String()), nil
+}
+
+var managedWorkspaceBlockedFragments = []struct {
+	fragment string
+	reason   string
+}{
+	{"git commit", "git commits inside isolated workspaces cannot be applied back safely"},
+	{"git checkout", "git checkouts inside isolated workspaces can rewrite HEAD and break apply-back"},
+	{"git switch", "git switches inside isolated workspaces can rewrite HEAD and break apply-back"},
+	{"git merge", "git merges inside isolated workspaces cannot be replayed safely"},
+	{"git rebase", "git rebases inside isolated workspaces cannot be replayed safely"},
+	{"git cherry-pick", "git cherry-picks inside isolated workspaces cannot be replayed safely"},
+	{"git pull", "git pull changes repository state outside the apply-back flow"},
+	{"git fetch", "git fetch changes repository state outside the apply-back flow"},
+	{"git push", "git push has external side effects"},
+	{"git branch", "git branch mutations inside isolated workspaces cannot be applied back safely"},
+	{"git stash", "git stash mutates git state outside the apply-back flow"},
+	{"git reset", "git reset can rewrite git state outside the apply-back flow"},
+	{"git clean", "git clean can delete files outside the apply-back review flow"},
+	{"git tag", "git tag mutates git refs outside the apply-back flow"},
+}
+
+func (t *BashTool) validateManagedWorkspaceCommand(command string) error {
+	if !t.managedWorkspaceApplyBack {
+		return nil
+	}
+
+	normalized := strings.Join(strings.Fields(strings.ToLower(command)), " ")
+	for _, blocked := range managedWorkspaceBlockedFragments {
+		if strings.Contains(normalized, blocked.fragment) {
+			return fmt.Errorf("blocked in isolated apply-back mode: %s", blocked.reason)
+		}
+	}
+
+	return nil
+}
+
+func (t *BashTool) sessionWorkDir() string {
+	workDir := t.session.WorkDir()
+	if t.workspaceBoundaryEnabled && !t.isWithinWorkspace(workDir) {
+		t.session.SetWorkDir(t.workspaceRoot)
+		return t.workspaceRoot
+	}
+	return workDir
+}
+
+func (t *BashTool) isWithinWorkspace(path string) bool {
+	if !t.workspaceBoundaryEnabled || strings.TrimSpace(t.workspaceRoot) == "" {
+		return true
+	}
+
+	cleanPath := filepath.Clean(path)
+	rel, err := filepath.Rel(t.workspaceRoot, cleanPath)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func (t *BashTool) wrapManagedWorkspaceCommand(command string) string {
+	root := shellSingleQuote(t.workspaceRoot)
+	return fmt.Sprintf(`workspace_root=%s
+__gokin_assert_workspace() {
+  current_dir="$(pwd -P)"
+  case "$current_dir" in
+    "$workspace_root"|"$workspace_root"/*) return 0 ;;
+  esac
+  printf 'workspace boundary violation: %%s\n' "$current_dir" >&2
+  return 98
+}
+cd() {
+  if [ "$#" -eq 0 ]; then
+    builtin cd "$HOME" || return $?
+  else
+    builtin cd "$@" || return $?
+  fi
+  __gokin_assert_workspace
+}
+pushd() {
+  builtin pushd "$@" >/dev/null || return $?
+  __gokin_assert_workspace
+}
+popd() {
+  builtin popd "$@" >/dev/null || return $?
+  __gokin_assert_workspace
+}
+builtin cd "$workspace_root" || exit 1
+__gokin_assert_workspace || exit $?
+%s`, root, command)
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func isManagedBashProtectedEnv(key string) bool {
+	switch strings.ToUpper(strings.TrimSpace(key)) {
+	case "PATH", "HOME", "PWD", "TMPDIR", "TMP", "TEMP":
+		return true
+	default:
+		return false
+	}
+}
+
+func upsertEnvVar(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			env[i] = key + "=" + value
+			return env
+		}
+	}
+	return append(env, key+"="+value)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"gokin/internal/agent"
 	"gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/permission"
@@ -265,9 +266,38 @@ func (a *App) handleModelSelect(modelID string) {
 // DiffDecisionTimeout is the maximum time to wait for a diff decision response.
 const DiffDecisionTimeout = 5 * time.Minute
 
+func drainDiffDecisionChan(ch <-chan ui.DiffDecision) {
+	if ch == nil {
+		return
+	}
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+func drainMultiDiffDecisionChan(ch <-chan map[string]ui.DiffDecision) {
+	if ch == nil {
+		return
+	}
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
 // promptDiffDecision is called by tools to request user approval for file changes.
 // It sends a request to the TUI and waits for a response with timeout.
 func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newContent, toolName string, isNewFile bool) (ui.DiffDecision, error) {
+	a.diffPromptMu.Lock()
+	defer a.diffPromptMu.Unlock()
+
 	a.mu.Lock()
 	batch := a.diffBatchDecision
 	a.mu.Unlock()
@@ -281,6 +311,8 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 	if a.program == nil {
 		return ui.DiffApply, nil
 	}
+
+	drainDiffDecisionChan(a.diffResponseChan)
 
 	// Send diff preview request to TUI
 	a.program.Send(ui.DiffPreviewRequestMsg{
@@ -329,6 +361,109 @@ func (a *App) handleDiffDecision(decision ui.DiffDecision) {
 	case <-timer.C:
 		logging.Warn("diff response channel timeout - no listener")
 	}
+}
+
+func (a *App) promptMultiDiffDecision(ctx context.Context, files []ui.DiffFile) (map[string]ui.DiffDecision, error) {
+	a.diffPromptMu.Lock()
+	defer a.diffPromptMu.Unlock()
+
+	if len(files) == 0 {
+		return map[string]ui.DiffDecision{}, nil
+	}
+
+	drainMultiDiffDecisionChan(a.multiDiffResponseChan)
+
+	if a.program == nil {
+		decisions := make(map[string]ui.DiffDecision, len(files))
+		for _, file := range files {
+			decisions[file.FilePath] = ui.DiffApply
+		}
+		return decisions, nil
+	}
+
+	a.program.Send(ui.MultiDiffPreviewRequestMsg{Files: files})
+
+	diffTimer := time.NewTimer(DiffDecisionTimeout)
+	defer diffTimer.Stop()
+
+	select {
+	case decisions := <-a.multiDiffResponseChan:
+		return decisions, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-diffTimer.C:
+		logging.Warn("multi diff decision prompt timed out", "files", len(files))
+		return nil, fmt.Errorf("multi diff decision prompt timed out after %v", DiffDecisionTimeout)
+	}
+}
+
+func (a *App) handleMultiDiffDecision(decisions map[string]ui.DiffDecision) {
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case a.multiDiffResponseChan <- decisions:
+	case <-timer.C:
+		logging.Warn("multi diff response channel timeout - no listener")
+	}
+}
+
+func (a *App) reviewWorkspaceChanges(ctx context.Context, changes []agent.WorkspaceChangePreview) (bool, error) {
+	if len(changes) == 0 {
+		return true, nil
+	}
+
+	if len(changes) > 1 {
+		files := make([]ui.DiffFile, 0, len(changes))
+		for _, change := range changes {
+			files = append(files, ui.DiffFile{
+				FilePath:   change.FilePath,
+				OldContent: change.OldContent,
+				NewContent: change.NewContent,
+				IsNewFile:  change.IsNewFile,
+			})
+		}
+
+		decisions, err := a.promptMultiDiffDecision(ctx, files)
+		if err != nil {
+			return false, err
+		}
+		for _, decision := range decisions {
+			if decision != ui.DiffApply {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+
+	a.mu.Lock()
+	prevBatch := a.diffBatchDecision
+	a.diffBatchDecision = ui.DiffPending
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.diffBatchDecision = prevBatch
+		a.mu.Unlock()
+	}()
+
+	for _, change := range changes {
+		decision, err := a.promptDiffDecision(
+			ctx,
+			change.FilePath,
+			change.OldContent,
+			change.NewContent,
+			"apply_back",
+			change.IsNewFile,
+		)
+		if err != nil {
+			return false, err
+		}
+		if decision == ui.DiffReject || decision == ui.DiffRejectAll {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 // handleApplyCodeBlock handles applying a code block to a file.

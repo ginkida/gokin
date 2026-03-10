@@ -42,6 +42,7 @@ type Agent struct {
 	client       client.Client
 	registry     *tools.Registry
 	baseRegistry tools.ToolRegistry
+	workDir      string
 	messenger    tools.Messenger
 	permissions  *permission.Manager
 	timeout      time.Duration
@@ -139,6 +140,10 @@ type Agent struct {
 	autoCheckpoint     bool // Enable auto-checkpoint every N turns
 	checkpointInterval int  // Number of turns between auto-checkpoints
 	lastCheckpointTurn int  // Last turn when checkpoint was saved
+
+	// Workspace isolation state
+	isolatedWorkspace     *isolatedWorkspace
+	allowedRequestedTools map[string]struct{}
 }
 
 // NewAgent creates a new agent with the specified type and filtered tools.
@@ -168,6 +173,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		client:             agentClient,
 		registry:           filteredRegistry,
 		baseRegistry:       baseRegistry,
+		workDir:            workDir,
 		permissions:        permManager,
 		timeout:            config.DefaultAgentTimeout,
 		history:            make([]*genai.Content, 0),
@@ -193,6 +199,11 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	if rt, ok := agent.registry.Get("request_tool"); ok {
 		if rtt, ok := rt.(*tools.RequestToolTool); ok {
 			rtt.SetRequester(agent)
+		}
+	}
+	if bt, ok := agent.registry.Get("bash"); ok {
+		if bashTool, ok := bt.(*tools.BashTool); ok {
+			bashTool.SetWorkspaceBoundary(workDir)
 		}
 	}
 
@@ -296,6 +307,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		client:             agentClient,
 		registry:           filteredRegistry,
 		baseRegistry:       baseRegistry,
+		workDir:            workDir,
 		permissions:        permManager,
 		timeout:            2 * time.Minute,
 		history:            make([]*genai.Content, 0),
@@ -323,6 +335,11 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	if rt, ok := agent.registry.Get("request_tool"); ok {
 		if rtt, ok := rt.(*tools.RequestToolTool); ok {
 			rtt.SetRequester(agent)
+		}
+	}
+	if bt, ok := agent.registry.Get("bash"); ok {
+		if bashTool, ok := bt.(*tools.BashTool); ok {
+			bashTool.SetWorkspaceBoundary(workDir)
 		}
 	}
 
@@ -428,26 +445,11 @@ func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.To
 // cloneToolForAgent returns an agent-local tool instance for tools that carry
 // per-agent callbacks/state. Stateless/shared tools are returned as-is.
 func cloneToolForAgent(tool tools.Tool) tools.Tool {
-	switch t := tool.(type) {
-	case *tools.RequestToolTool:
-		return tools.NewRequestToolTool()
-	case *tools.AskAgentTool:
-		return tools.NewAskAgentTool()
-	case *tools.PinContextTool:
-		return tools.NewPinContextTool(nil)
-	case *tools.HistorySearchTool:
-		return tools.NewHistorySearchTool(nil)
-	case *tools.UpdateScratchpadTool:
-		return tools.NewUpdateScratchpadTool(nil)
-	case *tools.SharedMemoryTool:
-		cloned := tools.NewSharedMemoryTool()
-		cloned.SetMemory(t.GetMemory())
-		return cloned
-	case *tools.MemorizeTool:
-		return tools.NewMemorizeTool(t.GetLearning())
-	default:
-		return tool
-	}
+	return cloneToolForAgentWithWorkDir(tool, "")
+}
+
+func cloneToolForAgentWithWorkDir(tool tools.Tool, workDir string) tools.Tool {
+	return tools.CloneToolForWorkDir(tool, workDir)
 }
 
 // applyAgentTypeDefaults sets context budget defaults per agent type.
@@ -904,12 +906,33 @@ func (a *Agent) RequestTool(name string) error {
 		return nil // Already have this tool
 	}
 
+	if len(a.allowedRequestedTools) > 0 {
+		if _, ok := a.allowedRequestedTools[name]; !ok {
+			return fmt.Errorf("tool is not allowed in this agent environment: %s", name)
+		}
+	}
+
 	tool, ok := a.baseRegistry.Get(name)
 	if !ok {
 		return fmt.Errorf("tool not found in system: %s", name)
 	}
 
-	return a.registry.Register(cloneToolForAgent(tool))
+	return a.registry.Register(cloneToolForAgentWithWorkDir(tool, a.workDir))
+}
+
+// SetAllowedRequestedTools restricts which tools may be added via request_tool.
+// A nil or empty list means no additional restriction.
+func (a *Agent) SetAllowedRequestedTools(names []string) {
+	if len(names) == 0 {
+		a.allowedRequestedTools = nil
+		return
+	}
+
+	allowed := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		allowed[name] = struct{}{}
+	}
+	a.allowedRequestedTools = allowed
 }
 
 // SendMessage sends a message to another agent via the messenger.
@@ -933,6 +956,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.stateMu.Lock()
 	a.status = AgentStatusRunning
 	a.startTime = time.Now()
+	hasHistory := len(a.history) > 0
 	a.stateMu.Unlock()
 
 	// Initialize progress
@@ -945,16 +969,18 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		Completed: false,
 	}
 
-	// Build system prompt for the agent
-	systemPrompt := a.buildSystemPrompt()
-
-	// Initialize history with system context
-	a.stateMu.Lock()
-	a.history = []*genai.Content{
-		genai.NewContentFromText(systemPrompt, genai.RoleUser),
-		genai.NewContentFromText("I understand. I'll help with the task using only my allowed tools.", genai.RoleModel),
+	if !hasHistory {
+		// Build fresh history only for new agents; resumed agents must preserve restored context.
+		systemPrompt := a.buildSystemPrompt()
+		a.stateMu.Lock()
+		if len(a.history) == 0 {
+			a.history = []*genai.Content{
+				genai.NewContentFromText(systemPrompt, genai.RoleUser),
+				genai.NewContentFromText("I understand. I'll help with the task using only my allowed tools.", genai.RoleModel),
+			}
+		}
+		a.stateMu.Unlock()
 	}
-	a.stateMu.Unlock()
 
 	// Execute the prompt through the function calling loop
 	var finalOutput strings.Builder
@@ -974,6 +1000,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		result.Error = err.Error()
 		result.Output = output // Preserve partial output on failure
 		result.Duration = endTime.Sub(startTime)
+		result.Completed = true
 
 		// Update progress with failure
 		a.SetProgress(a.currentStep, a.totalSteps, "Failed: "+err.Error())
@@ -1065,6 +1092,7 @@ func (a *Agent) buildSystemPrompt() string {
 	projectContext := a.projectContext
 	outputStyle := a.outputStyle
 	sharedMemory := a.sharedMemory
+	workDir := a.workDir
 	a.stateMu.RUnlock()
 
 	var sb strings.Builder
@@ -1075,7 +1103,11 @@ func (a *Agent) buildSystemPrompt() string {
 
 	toolNames := a.registry.Names()
 	sb.WriteString(strings.Join(toolNames, ", "))
-	sb.WriteString("\n\n")
+	sb.WriteString("\n")
+	if workDir != "" {
+		sb.WriteString(fmt.Sprintf("Working directory: %s\n", workDir))
+	}
+	sb.WriteString("\n")
 
 	// Inject Pinned Context if provided (Custom Improvement)
 	if pinnedCtx != "" {

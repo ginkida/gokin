@@ -171,6 +171,10 @@ func (rc *ResponseCompressor) CompressContents(contents []*genai.Content) []*gen
 	compressed := make([]*genai.Content, len(contents))
 
 	for i, content := range contents {
+		if content == nil {
+			continue
+		}
+
 		newContent := &genai.Content{
 			Role:  content.Role,
 			Parts: make([]*genai.Part, len(content.Parts)),

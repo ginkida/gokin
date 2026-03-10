@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -98,7 +99,37 @@ type Runner struct {
 	// Event-driven notification for result completion (replaces polling in WaitWithContext)
 	resultReady chan struct{}
 
+	// Workspace isolation for supported sub-agents
+	workspaceIsolationEnabled bool
+	workspaceReviewHandler    func(context.Context, []WorkspaceChangePreview) (bool, error)
+
 	mu sync.RWMutex
+}
+
+type runnerAgentDeps struct {
+	ctxCfg              *config.ContextConfig
+	errorStore          *memory.ErrorStore
+	predictor           PredictorInterface
+	sharedMemory        *SharedMemory
+	sharedScratchpad    string
+	scratchpadCallback  func(string)
+	typeRegistry        *AgentTypeRegistry
+	onInput             func(string) (string, error)
+	client              client.Client
+	baseRegistry        tools.ToolRegistry
+	workDir             string
+	permissions         *permission.Manager
+	messengerFactory    func(agentID string) *AgentMessenger
+	strategyOptimizer   *StrategyOptimizer
+	delegationMetrics   *DelegationMetrics
+	metaAgent           *MetaAgent
+	treePlanner         *TreePlanner
+	planningModeEnabled bool
+	requireApproval     bool
+	onPlanApproved      func(planSummary string)
+	exampleStore        ExampleStoreInterface
+	promptOptimizer     *PromptOptimizer
+	workspaceIsolation  bool
 }
 
 // SetPermissions sets the permission manager for agents.
@@ -359,6 +390,21 @@ func (r *Runner) SetPromptOptimizer(optimizer *PromptOptimizer) {
 	r.mu.Unlock()
 }
 
+// SetWorkspaceIsolationEnabled toggles per-agent isolated workspaces for safe read-only agents.
+func (r *Runner) SetWorkspaceIsolationEnabled(enabled bool) {
+	r.mu.Lock()
+	r.workspaceIsolationEnabled = enabled
+	r.mu.Unlock()
+}
+
+// SetWorkspaceReviewHandler sets the callback used to review isolated workspace
+// changes before apply-back into the primary workspace.
+func (r *Runner) SetWorkspaceReviewHandler(handler func(context.Context, []WorkspaceChangePreview) (bool, error)) {
+	r.mu.Lock()
+	r.workspaceReviewHandler = handler
+	r.mu.Unlock()
+}
+
 // SetOnSubAgentActivity sets the callback for sub-agent activity reporting.
 func (r *Runner) SetOnSubAgentActivity(fn func(agentID, agentType, toolName string, args map[string]any, status string)) {
 	r.mu.Lock()
@@ -400,6 +446,417 @@ func NewRunner(ctx context.Context, c client.Client, registry tools.ToolRegistry
 		return NewAgentMessenger(ctx, r, agentID)
 	}
 	return r
+}
+
+func (r *Runner) snapshotAgentDeps() runnerAgentDeps {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return runnerAgentDeps{
+		ctxCfg:              r.ctxCfg,
+		errorStore:          r.errorStore,
+		predictor:           r.predictor,
+		sharedMemory:        r.sharedMemory,
+		sharedScratchpad:    r.sharedScratchpad,
+		scratchpadCallback:  r.onScratchpadUpdate,
+		typeRegistry:        r.typeRegistry,
+		onInput:             r.onInput,
+		client:              r.client,
+		baseRegistry:        r.baseRegistry,
+		workDir:             r.workDir,
+		permissions:         r.permissions,
+		messengerFactory:    r.messengerFactory,
+		strategyOptimizer:   r.strategyOptimizer,
+		delegationMetrics:   r.delegationMetrics,
+		metaAgent:           r.metaAgent,
+		treePlanner:         r.treePlanner,
+		planningModeEnabled: r.planningModeEnabled,
+		requireApproval:     r.requireApprovalEnabled,
+		onPlanApproved:      r.onPlanApproved,
+		exampleStore:        r.exampleStore,
+		promptOptimizer:     r.promptOptimizer,
+		workspaceIsolation:  r.workspaceIsolationEnabled,
+	}
+}
+
+func cloneTreePlanner(tp *TreePlanner) *TreePlanner {
+	if tp == nil {
+		return nil
+	}
+
+	tp.mu.RLock()
+	defer tp.mu.RUnlock()
+
+	var cfgCopy *TreePlannerConfig
+	if tp.config != nil {
+		cfg := *tp.config
+		cfgCopy = &cfg
+	}
+
+	return &TreePlanner{
+		config:      cfgCopy,
+		strategyOpt: tp.strategyOpt,
+		reflector:   tp.reflector,
+		client:      tp.client,
+		trees:       make(map[string]*PlanTree),
+	}
+}
+
+func (r *Runner) newConfiguredAgent(
+	ctx context.Context,
+	deps runnerAgentDeps,
+	agentType string,
+	maxTurns int,
+	model string,
+	perms *permission.Manager,
+) *Agent {
+	agentBaseRegistry := deps.baseRegistry
+	agentWorkDir := strings.TrimSpace(deps.workDir)
+	var isolated *isolatedWorkspace
+
+	isolationMode := resolveWorkspaceIsolationMode(agentType, deps)
+	if isolationMode != workspaceIsolationDisabled {
+		ws, err := prepareIsolatedWorkspace(agentWorkDir, isolationMode)
+		if err != nil {
+			logging.Debug("failed to prepare isolated workspace", "agent_type", agentType, "workdir", agentWorkDir, "mode", isolationMode, "error", err)
+		} else {
+			isolated = ws
+			agentBaseRegistry = tools.CloneRegistryForWorkDir(deps.baseRegistry, ws.Root)
+		}
+	}
+
+	var agent *Agent
+	if deps.typeRegistry != nil {
+		if dynType, ok := deps.typeRegistry.GetDynamic(agentType); ok {
+			agent = NewAgentWithDynamicType(
+				dynType,
+				deps.client,
+				agentBaseRegistry,
+				agentWorkDir,
+				maxTurns,
+				model,
+				perms,
+				deps.ctxCfg,
+			)
+		}
+	}
+	if agent == nil {
+		agent = NewAgent(
+			ParseAgentType(agentType),
+			deps.client,
+			agentBaseRegistry,
+			agentWorkDir,
+			maxTurns,
+			model,
+			perms,
+			deps.ctxCfg,
+		)
+	}
+
+	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
+	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
+
+	if deps.onInput != nil {
+		agent.SetOnInput(deps.onInput)
+	}
+	if isolated != nil {
+		agent.workDir = isolated.Root
+		agent.isolatedWorkspace = isolated
+		agent.SetAllowedRequestedTools(allowedRequestedToolsForIsolationMode(isolationMode))
+		if bt, ok := agent.registry.Get("bash"); ok {
+			if bashTool, ok := bt.(*tools.BashTool); ok && isolated.ApplyBackOnSuccess {
+				bashTool.EnableManagedWorkspaceApplyBackMode(agent.workDir)
+			}
+		}
+	}
+
+	if deps.messengerFactory != nil {
+		messenger := deps.messengerFactory(agent.ID)
+		agent.SetMessenger(messenger)
+	}
+
+	if deps.errorStore != nil && agent.reflector != nil {
+		agent.reflector.SetErrorStore(deps.errorStore)
+	}
+	if deps.predictor != nil && agent.reflector != nil {
+		agent.reflector.SetPredictor(deps.predictor)
+	}
+	if deps.sharedMemory != nil {
+		agent.SetSharedMemory(deps.sharedMemory)
+	}
+	if deps.sharedScratchpad != "" {
+		agent.stateMu.Lock()
+		agent.Scratchpad = deps.sharedScratchpad
+		agent.stateMu.Unlock()
+	}
+	if deps.scratchpadCallback != nil {
+		agent.SetOnScratchpadUpdate(deps.scratchpadCallback)
+	}
+
+	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
+		agent.delegation.SetDepth(depth)
+	}
+	if deps.delegationMetrics != nil && agent.delegation != nil {
+		agent.delegation.SetDelegationMetrics(deps.delegationMetrics)
+	}
+	if deps.strategyOptimizer != nil && agent.delegation != nil {
+		agent.delegation.SetStrategyOptimizer(deps.strategyOptimizer)
+	}
+
+	if deps.treePlanner != nil {
+		planner := cloneTreePlanner(deps.treePlanner)
+		agent.SetTreePlanner(planner)
+		if deps.planningModeEnabled {
+			agent.EnablePlanningMode(nil)
+		}
+		agent.SetRequireApproval(deps.requireApproval)
+		if deps.onPlanApproved != nil {
+			agent.SetOnPlanApproved(deps.onPlanApproved)
+		}
+	}
+
+	return agent
+}
+
+func (r *Runner) recordAgentExecutionLearning(
+	deps runnerAgentDeps,
+	agentType string,
+	prompt string,
+	result *AgentResult,
+	duration time.Duration,
+	strategyName string,
+) {
+	if result == nil {
+		return
+	}
+
+	success := result.Status == AgentStatusCompleted && result.Error == ""
+
+	if deps.strategyOptimizer != nil {
+		deps.strategyOptimizer.RecordExecution(agentType, strategyName, success, duration)
+	}
+
+	if success && deps.exampleStore != nil {
+		output := result.Output
+		go func() {
+			if err := deps.exampleStore.LearnFromSuccess(
+				agentType,
+				prompt,
+				agentType,
+				output,
+				duration,
+				0,
+			); err != nil {
+				logging.Debug("failed to learn from success", "error", err)
+			}
+		}()
+	}
+
+	if deps.promptOptimizer != nil {
+		deps.promptOptimizer.RecordExecution(agentType, prompt, success, 0, duration)
+	}
+}
+
+func (r *Runner) newRestoredAgent(
+	ctx context.Context,
+	deps runnerAgentDeps,
+	state *AgentState,
+	perms *permission.Manager,
+) *Agent {
+	agent := r.newConfiguredAgent(ctx, deps, string(state.Type), state.MaxTurns, state.Model, perms)
+	agent.ID = state.ID
+	return agent
+}
+
+func attachMetaAgentMonitoring(agent *Agent, meta *MetaAgent) {
+	if meta == nil {
+		return
+	}
+
+	meta.RegisterAgent(agent.ID, agent.Type)
+	agentID := agent.ID
+	agent.SetOnToolActivity(func(_ string, toolName string, _ map[string]any, status string) {
+		if status == "start" {
+			meta.UpdateActivity(agentID, toolName, agent.GetTurnCount())
+		}
+	})
+}
+
+var workspaceIsolationReadOnlyTools = toolNameSet(
+	"read", "glob", "grep", "tree", "list_dir", "diff", "todo", "env",
+	"web_fetch", "web_search", "ask_user",
+	"tools_list", "request_tool", "ask_agent",
+	"enter_plan_mode", "update_plan_progress", "get_plan_status", "exit_plan_mode",
+	"undo_plan", "redo_plan",
+	"git_status", "git_diff", "git_log", "git_blame",
+	"run_tests", "verify_code", "check_impact",
+	"semantic_search", "code_graph",
+	"shared_memory", "update_scratchpad", "pin_context", "history_search",
+	"memory", "memorize",
+)
+
+var workspaceIsolationApplyBackTools = toolNameSet(
+	"read", "glob", "grep", "tree", "list_dir", "diff", "todo", "env",
+	"web_fetch", "web_search", "ask_user",
+	"tools_list", "request_tool", "ask_agent",
+	"enter_plan_mode", "update_plan_progress", "get_plan_status", "exit_plan_mode",
+	"undo_plan", "redo_plan",
+	"git_status", "git_diff", "git_log", "git_blame",
+	"run_tests", "verify_code", "check_impact",
+	"semantic_search", "code_graph",
+	"shared_memory", "update_scratchpad", "pin_context", "history_search",
+	"memory", "memorize",
+	"write", "edit", "batch", "refactor", "copy", "move", "delete", "mkdir",
+	"bash",
+)
+
+func toolNameSet(names ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}
+
+func allowedRequestedToolsForIsolationMode(mode workspaceIsolationMode) []string {
+	switch mode {
+	case workspaceIsolationReadOnly:
+		return toolNameList(workspaceIsolationReadOnlyTools)
+	case workspaceIsolationApplyBack:
+		return toolNameList(workspaceIsolationApplyBackTools)
+	default:
+		return nil
+	}
+}
+
+func toolNameList(set map[string]struct{}) []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func resolveAgentAllowedTools(agentType string, deps runnerAgentDeps) []string {
+	if deps.typeRegistry != nil {
+		if dynType, ok := deps.typeRegistry.GetDynamic(agentType); ok {
+			return dynType.AllowedTools
+		}
+	}
+	return ParseAgentType(agentType).AllowedTools()
+}
+
+func supportedWorkspaceIsolationMode(agentType string, deps runnerAgentDeps, supported map[string]struct{}, mode workspaceIsolationMode) workspaceIsolationMode {
+	if !deps.workspaceIsolation || strings.TrimSpace(deps.workDir) == "" {
+		return workspaceIsolationDisabled
+	}
+
+	allowedTools := resolveAgentAllowedTools(agentType, deps)
+	if len(allowedTools) == 0 {
+		return workspaceIsolationDisabled
+	}
+
+	for _, name := range allowedTools {
+		if _, ok := supported[name]; !ok {
+			return workspaceIsolationDisabled
+		}
+	}
+
+	return mode
+}
+
+func resolveWorkspaceIsolationMode(agentType string, deps runnerAgentDeps) workspaceIsolationMode {
+	if mode := supportedWorkspaceIsolationMode(agentType, deps, workspaceIsolationReadOnlyTools, workspaceIsolationReadOnly); mode != workspaceIsolationDisabled {
+		return mode
+	}
+	return supportedWorkspaceIsolationMode(agentType, deps, workspaceIsolationApplyBackTools, workspaceIsolationApplyBack)
+}
+
+func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error {
+	if agent == nil || agent.isolatedWorkspace == nil || result == nil {
+		return nil
+	}
+
+	if result.Metadata == nil {
+		result.Metadata = make(map[string]interface{})
+	}
+	result.Metadata["isolated_workspace"] = true
+	result.Metadata["isolated_workspace_strategy"] = agent.isolatedWorkspace.Strategy
+	if agent.isolatedWorkspace.ApplyBackOnSuccess {
+		result.Metadata["isolated_workspace_apply_back_enabled"] = true
+	}
+
+	if result.IsSuccess() {
+		if agent.isolatedWorkspace.ApplyBackOnSuccess {
+			r.mu.RLock()
+			reviewHandler := r.workspaceReviewHandler
+			r.mu.RUnlock()
+
+			if reviewHandler != nil {
+				previews, err := agent.isolatedWorkspace.ChangePreviews()
+				if err != nil {
+					reviewErr := fmt.Errorf("failed to review isolated workspace changes: %w", err)
+					result.Status = AgentStatusFailed
+					result.Error = reviewErr.Error()
+					result.Metadata["isolated_workspace_review_error"] = reviewErr.Error()
+					result.Metadata["isolated_workspace_dir"] = agent.workDir
+					return reviewErr
+				}
+				if len(previews) > 0 {
+					result.Metadata["isolated_workspace_review_required"] = true
+					approved, err := reviewHandler(context.Background(), previews)
+					if err != nil {
+						reviewErr := fmt.Errorf("failed to review isolated workspace changes: %w", err)
+						result.Status = AgentStatusFailed
+						result.Error = reviewErr.Error()
+						result.Metadata["isolated_workspace_review_error"] = reviewErr.Error()
+						result.Metadata["isolated_workspace_dir"] = agent.workDir
+						return reviewErr
+					}
+					if !approved {
+						reviewErr := fmt.Errorf("isolated workspace changes rejected by user")
+						result.Status = AgentStatusFailed
+						result.Error = reviewErr.Error()
+						result.Metadata["isolated_workspace_review_rejected"] = true
+						result.Metadata["isolated_workspace_dir"] = agent.workDir
+						return reviewErr
+					}
+					result.Metadata["isolated_workspace_reviewed"] = true
+					result.Metadata["isolated_workspace_review_files"] = len(previews)
+				}
+			}
+
+			applyResult, err := agent.isolatedWorkspace.ApplyBack()
+			if err != nil {
+				applyErr := fmt.Errorf("failed to apply isolated workspace changes: %w", err)
+				result.Status = AgentStatusFailed
+				result.Error = applyErr.Error()
+				result.Metadata["isolated_workspace_apply_back_error"] = applyErr.Error()
+				result.Metadata["isolated_workspace_dir"] = agent.workDir
+				return applyErr
+			}
+			if applyResult != nil {
+				result.Metadata["isolated_workspace_apply_back"] = len(applyResult.ChangedFiles) > 0
+				result.Metadata["isolated_workspace_applied_files"] = applyResult.ChangedFiles
+				result.Metadata["isolated_workspace_patch_bytes"] = applyResult.PatchBytes
+				if applyResult.Mode != "" {
+					result.Metadata["isolated_workspace_apply_back_mode"] = applyResult.Mode
+				}
+			}
+		}
+
+		if err := agent.isolatedWorkspace.Cleanup(); err != nil {
+			result.Metadata["isolated_workspace_cleanup_error"] = err.Error()
+			result.Metadata["isolated_workspace_dir"] = agent.workDir
+			return nil
+		}
+		result.Metadata["isolated_workspace_cleaned"] = true
+		return nil
+	}
+
+	result.Metadata["isolated_workspace_dir"] = agent.workDir
+	return nil
 }
 
 // GetClient returns the underlying client.
@@ -487,123 +944,20 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	// Cleanup old completed agents and results to prevent unbounded growth
 	r.cleanupOldResults()
 
-	r.mu.RLock()
-	ctxCfg := r.ctxCfg
-	errorStore := r.errorStore
-	predictor := r.predictor
-	sharedMem := r.sharedMemory
-	sharedScratchpad := r.sharedScratchpad
-	scratchpadCallback := r.onScratchpadUpdate
-	typeRegistry := r.typeRegistry
-	strategyOpt := r.strategyOptimizer
-	delegationMetrics := r.delegationMetrics
-	metaAgent := r.metaAgent
-	treePlanner := r.treePlanner
-	planningMode := r.planningModeEnabled
-	requireApproval := r.requireApprovalEnabled
-	planApprovedCallback := r.onPlanApproved
-	onInput := r.onInput
-	c := r.client
-	baseReg := r.baseRegistry
-	workDir := r.workDir
-	perms := r.permissions
-	messengerFact := r.messengerFactory
-	r.mu.RUnlock()
-
-	// Check for dynamic type first
-	var agent *Agent
-	if typeRegistry != nil {
-		if dynType, ok := typeRegistry.GetDynamic(agentType); ok {
-			// Create agent with dynamic type configuration
-			agent = NewAgentWithDynamicType(dynType, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
-		}
-	}
-
-	// Fall back to built-in types
-	if agent == nil {
-		at := ParseAgentType(agentType)
-		agent = NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
-	}
-
-	// Apply thoroughness from context
-	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
-	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
-
-	// Set input callback
-	if onInput != nil {
-		agent.SetOnInput(onInput)
-	}
-
-	// Set up messenger for inter-agent communication
-	if messengerFact != nil {
-		messenger := messengerFact(agent.ID)
-		agent.SetMessenger(messenger)
-	}
-
-	// Wire error store for learning from errors
-	if errorStore != nil && agent.reflector != nil {
-		agent.reflector.SetErrorStore(errorStore)
-	}
-
-	// Wire file predictor for enhanced error recovery
-	if predictor != nil && agent.reflector != nil {
-		agent.reflector.SetPredictor(predictor)
-	}
-
-	// Wire shared memory if available.
-	if sharedMem != nil {
-		agent.SetSharedMemory(sharedMem)
-	}
-
-	// Initialize shared scratchpad state for this agent.
-	if sharedScratchpad != "" {
-		agent.stateMu.Lock()
-		agent.Scratchpad = sharedScratchpad
-		agent.stateMu.Unlock()
-	}
-	if scratchpadCallback != nil {
-		agent.SetOnScratchpadUpdate(scratchpadCallback)
-	}
-
-	// Propagate delegation depth from context (set by messenger.handleDelegation)
-	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
-		agent.delegation.SetDepth(depth)
-	}
-
-	// Wire delegation metrics for adaptive delegation rules
-	if delegationMetrics != nil && agent.delegation != nil {
-		agent.delegation.SetDelegationMetrics(delegationMetrics)
-	}
-
-	// Wire strategy optimizer to delegation strategy
-	if strategyOpt != nil && agent.delegation != nil {
-		agent.delegation.SetStrategyOptimizer(strategyOpt)
-	}
-
-	// Wire tree planner and planning capabilities
-	if treePlanner != nil {
-		agent.SetTreePlanner(treePlanner)
-		if planningMode {
-			agent.EnablePlanningMode(nil)
-		}
-		agent.SetRequireApproval(requireApproval)
-		// Wire plan approval callback for context compaction
-		if planApprovedCallback != nil {
-			agent.SetOnPlanApproved(planApprovedCallback)
-		}
-	}
+	deps := r.snapshotAgentDeps()
+	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
 
 	r.mu.Lock()
 	r.agents[agent.ID] = agent
 	r.mu.Unlock()
 
 	// Register with meta-agent for monitoring and wire activity updates
-	if metaAgent != nil {
-		metaAgent.RegisterAgent(agent.ID, agent.Type)
+	if deps.metaAgent != nil {
+		deps.metaAgent.RegisterAgent(agent.ID, agent.Type)
 		agentID := agent.ID
 		agent.SetOnToolActivity(func(_ string, toolName string, _ map[string]any, status string) {
 			if status == "start" {
-				metaAgent.UpdateActivity(agentID, toolName, agent.GetTurnCount())
+				deps.metaAgent.UpdateActivity(agentID, toolName, agent.GetTurnCount())
 			}
 		})
 	}
@@ -626,14 +980,8 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	r.reportActivity()
 
 	// Unregister from meta-agent
-	if metaAgent != nil {
-		metaAgent.UnregisterAgent(agent.ID)
-	}
-
-	// Record outcome with strategy optimizer
-	if strategyOpt != nil && result != nil {
-		success := result.Status == AgentStatusCompleted && result.Error == ""
-		strategyOpt.RecordExecution(agentType, "spawn", success, duration)
+	if deps.metaAgent != nil {
+		deps.metaAgent.UnregisterAgent(agent.ID)
 	}
 
 	// Save agent state for potential resume
@@ -642,19 +990,24 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	if result == nil {
 		result = &AgentResult{
 			AgentID:   agent.ID,
-			Type:      AgentType(agentType),
+			Type:      agent.Type,
 			Status:    AgentStatusFailed,
 			Error:     "agent returned nil result",
 			Completed: true,
 			Duration:  duration,
 		}
 	}
+	workspaceErr := r.finalizeAgentWorkspace(agent, result)
+	r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, "spawn")
 
 	r.mu.Lock()
 	r.results[agent.ID] = result
 	r.mu.Unlock()
 	r.notifyResultReady()
 
+	if err == nil && workspaceErr != nil {
+		err = workspaceErr
+	}
 	if err != nil {
 		return agent.ID, err
 	}
@@ -677,86 +1030,14 @@ func (r *Runner) SpawnWithContext(
 	skipPermissions bool,
 	progressCallback ProgressCallback,
 ) (string, *AgentResult, error) {
-	at := ParseAgentType(agentType)
-	r.mu.RLock()
-	ctxCfg := r.ctxCfg
-	errorStore := r.errorStore
-	predictor := r.predictor
-	sharedMem := r.sharedMemory
-	sharedScratchpad := r.sharedScratchpad
-	scratchpadCallback := r.onScratchpadUpdate
-	onInput := r.onInput
-	c := r.client
-	baseReg := r.baseRegistry
-	workDir := r.workDir
-	allPerms := r.permissions
-	messengerFact := r.messengerFactory
-	strategyOpt := r.strategyOptimizer
-	delegationMetrics := r.delegationMetrics
-	metaAgent := r.metaAgent
-	r.mu.RUnlock()
+	deps := r.snapshotAgentDeps()
 
 	// Pass nil permissions for approved plan execution to avoid per-tool prompts
 	var perms *permission.Manager
 	if !skipPermissions {
-		perms = allPerms
+		perms = deps.permissions
 	}
-	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
-
-	// Apply thoroughness from context
-	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
-	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
-
-	// Set input callback
-	if onInput != nil {
-		agent.SetOnInput(onInput)
-	}
-
-	// Set up messenger for inter-agent communication
-	if messengerFact != nil {
-		messenger := messengerFact(agent.ID)
-		agent.SetMessenger(messenger)
-	}
-
-	// Wire error store for learning from errors
-	if errorStore != nil && agent.reflector != nil {
-		agent.reflector.SetErrorStore(errorStore)
-	}
-
-	// Wire file predictor for enhanced error recovery
-	if predictor != nil && agent.reflector != nil {
-		agent.reflector.SetPredictor(predictor)
-	}
-
-	// Wire shared memory if available.
-	if sharedMem != nil {
-		agent.SetSharedMemory(sharedMem)
-	}
-
-	// Initialize shared scratchpad state for this sub-agent.
-	if sharedScratchpad != "" {
-		agent.stateMu.Lock()
-		agent.Scratchpad = sharedScratchpad
-		agent.stateMu.Unlock()
-	}
-	if scratchpadCallback != nil {
-		agent.SetOnScratchpadUpdate(scratchpadCallback)
-	}
-
-	// Propagate delegation depth from context
-	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
-		agent.delegation.SetDepth(depth)
-	}
-
-	// Wire delegation metrics for adaptive delegation rules
-	if delegationMetrics != nil && agent.delegation != nil {
-		agent.delegation.SetDelegationMetrics(delegationMetrics)
-	}
-
-	// Wire strategy optimizer to delegation strategy
-	if strategyOpt != nil && agent.delegation != nil {
-		agent.delegation.SetStrategyOptimizer(strategyOpt)
-	}
+	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, perms)
 
 	// Inject project context and streaming callback
 	agent.SetProjectContext(projectContext)
@@ -784,8 +1065,8 @@ func (r *Runner) SpawnWithContext(
 		if onSubAgentActivity != nil {
 			onSubAgentActivity(id, string(agent.Type), toolName, args, "tool_"+status)
 		}
-		if metaAgent != nil && status == "start" {
-			metaAgent.UpdateActivity(agentID, toolName, agent.GetTurnCount())
+		if deps.metaAgent != nil && status == "start" {
+			deps.metaAgent.UpdateActivity(agentID, toolName, agent.GetTurnCount())
 		}
 	})
 
@@ -794,8 +1075,8 @@ func (r *Runner) SpawnWithContext(
 	r.mu.Unlock()
 
 	// Register with meta-agent for monitoring
-	if metaAgent != nil {
-		metaAgent.RegisterAgent(agentID, agent.Type)
+	if deps.metaAgent != nil {
+		deps.metaAgent.RegisterAgent(agentID, agent.Type)
 	}
 
 	r.reportActivity()
@@ -819,7 +1100,7 @@ func (r *Runner) SpawnWithContext(
 	if result == nil {
 		result = &AgentResult{
 			AgentID:   agent.ID,
-			Type:      AgentType(agentType),
+			Type:      agent.Type,
 			Status:    AgentStatusFailed,
 			Error:     "nil result from agent",
 			Completed: true,
@@ -844,22 +1125,22 @@ func (r *Runner) SpawnWithContext(
 	r.reportActivity()
 
 	// Unregister from meta-agent
-	if metaAgent != nil {
-		metaAgent.UnregisterAgent(agentID)
+	if deps.metaAgent != nil {
+		deps.metaAgent.UnregisterAgent(agentID)
 	}
 
-	// Record outcome with strategy optimizer
-	if strategyOpt != nil {
-		success := result.Status == AgentStatusCompleted && result.Error == ""
-		strategyOpt.RecordExecution(agentType, "spawn_with_context", success, duration)
-	}
-
+	workspaceErr := r.finalizeAgentWorkspace(agent, result)
 	r.saveAgentState(agent)
+	r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, "spawn_with_context")
 
 	r.mu.Lock()
 	r.results[agent.ID] = result
 	r.mu.Unlock()
 	r.notifyResultReady()
+
+	if err == nil && workspaceErr != nil {
+		err = workspaceErr
+	}
 
 	return agent.ID, result, err
 }
@@ -867,73 +1148,8 @@ func (r *Runner) SpawnWithContext(
 // SpawnAsync creates and starts a new agent asynchronously.
 // agentType should be "explore", "bash", "general", "plan", "claude-code-guide", or "coordinator".
 func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string, maxTurns int, model string) string {
-	at := ParseAgentType(agentType)
-	r.mu.RLock()
-	ctxCfg := r.ctxCfg
-	errorStore := r.errorStore
-	predictor := r.predictor
-	onInput := r.onInput
-	strategyOpt := r.strategyOptimizer
-	delegationMetrics := r.delegationMetrics
-	metaAgent := r.metaAgent
-	c := r.client
-	baseReg := r.baseRegistry
-	workDir := r.workDir
-	perms := r.permissions
-	messengerFact := r.messengerFactory
-	typeRegistry := r.typeRegistry
-	r.mu.RUnlock()
-
-	// Check for dynamic type first
-	var agent *Agent
-	if typeRegistry != nil {
-		if dynType, ok := typeRegistry.GetDynamic(agentType); ok {
-			agent = NewAgentWithDynamicType(dynType, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
-		}
-	}
-	if agent == nil {
-		agent = NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
-	}
-
-	// Apply thoroughness from context
-	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
-	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
-
-	// Set input callback
-	if onInput != nil {
-		agent.SetOnInput(onInput)
-	}
-
-	// Set up messenger for inter-agent communication
-	if messengerFact != nil {
-		messenger := messengerFact(agent.ID)
-		agent.SetMessenger(messenger)
-	}
-
-	// Wire error store for learning from errors
-	if errorStore != nil && agent.reflector != nil {
-		agent.reflector.SetErrorStore(errorStore)
-	}
-
-	// Wire file predictor for enhanced error recovery
-	if predictor != nil && agent.reflector != nil {
-		agent.reflector.SetPredictor(predictor)
-	}
-
-	// Propagate delegation depth from context
-	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
-		agent.delegation.SetDepth(depth)
-	}
-
-	// Wire delegation metrics for adaptive delegation rules
-	if delegationMetrics != nil && agent.delegation != nil {
-		agent.delegation.SetDelegationMetrics(delegationMetrics)
-	}
-
-	// Wire strategy optimizer to delegation strategy
-	if strategyOpt != nil && agent.delegation != nil {
-		agent.delegation.SetStrategyOptimizer(strategyOpt)
-	}
+	deps := r.snapshotAgentDeps()
+	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
 
 	// Wire checkpoint store and enable auto-checkpoint for long-running agents
 	if r.store != nil {
@@ -947,7 +1163,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	r.agents[agent.ID] = agent
 	r.results[agent.ID] = &AgentResult{
 		AgentID: agent.ID,
-		Type:    at,
+		Type:    agent.Type,
 		Status:  AgentStatusPending,
 	}
 	onStart := r.onAgentStart
@@ -956,12 +1172,12 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	r.mu.Unlock()
 
 	// Register with meta-agent for monitoring and wire activity updates
-	if metaAgent != nil {
-		metaAgent.RegisterAgent(agent.ID, agent.Type)
+	if deps.metaAgent != nil {
+		deps.metaAgent.RegisterAgent(agent.ID, agent.Type)
 		agentIDForMeta := agent.ID
 		agent.SetOnToolActivity(func(_ string, toolName string, _ map[string]any, status string) {
 			if status == "start" {
-				metaAgent.UpdateActivity(agentIDForMeta, toolName, agent.GetTurnCount())
+				deps.metaAgent.UpdateActivity(agentIDForMeta, toolName, agent.GetTurnCount())
 			}
 		})
 	}
@@ -1009,14 +1225,19 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		// Check if original context is already cancelled
 		select {
 		case <-ctx.Done():
-			r.mu.Lock()
-			r.results[agentID] = &AgentResult{
+			if deps.metaAgent != nil {
+				deps.metaAgent.UnregisterAgent(agentID)
+			}
+			cancelledResult := &AgentResult{
 				AgentID:   agentID,
-				Type:      at,
+				Type:      agent.Type,
 				Status:    AgentStatusCancelled,
 				Error:     ctx.Err().Error(),
 				Completed: true,
 			}
+			r.finalizeAgentWorkspace(agent, cancelledResult)
+			r.mu.Lock()
+			r.results[agentID] = cancelledResult
 			r.mu.Unlock()
 			r.notifyResultReady()
 			return
@@ -1052,7 +1273,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		if result == nil {
 			result = &AgentResult{
 				AgentID:   agentID,
-				Type:      at,
+				Type:      agent.Type,
 				Status:    AgentStatusFailed,
 				Error:     "nil result from agent",
 				Completed: true,
@@ -1069,14 +1290,8 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		result.Completed = true
 
 		// Unregister from meta-agent
-		if metaAgent != nil {
-			metaAgent.UnregisterAgent(agentID)
-		}
-
-		// Record outcome with strategy optimizer
-		if strategyOpt != nil {
-			success := result.Status == AgentStatusCompleted && result.Error == ""
-			strategyOpt.RecordExecution(agentType, "spawn_async", success, duration)
+		if deps.metaAgent != nil {
+			deps.metaAgent.UnregisterAgent(agentID)
 		}
 
 		// Save error checkpoint on failure for potential recovery
@@ -1087,7 +1302,9 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		}
 
 		// Save agent state for potential resume
+		r.finalizeAgentWorkspace(agent, result)
 		r.saveAgentState(agent)
+		r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, "spawn_async")
 
 		r.mu.Lock()
 		r.results[agentID] = result
@@ -1115,69 +1332,12 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	onText func(string),
 	onProgress func(id string, progress *AgentProgress),
 ) string {
-	at := ParseAgentType(agentType)
-	r.mu.RLock()
-	ctxCfg := r.ctxCfg
-	errorStore := r.errorStore
-	predictor := r.predictor
-	sharedMem := r.sharedMemory
-	exampleStore := r.exampleStore
-	promptOpt := r.promptOptimizer
-	strategyOpt := r.strategyOptimizer
-	delegationMetrics := r.delegationMetrics
-	metaAgent := r.metaAgent
-	c := r.client
-	baseReg := r.baseRegistry
-	workDir := r.workDir
-	perms := r.permissions
-	messengerFact := r.messengerFactory
-	r.mu.RUnlock()
-
-	agent := NewAgent(at, c, baseReg, workDir, maxTurns, model, perms, ctxCfg)
-
-	// Apply thoroughness from context
-	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
-	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
+	deps := r.snapshotAgentDeps()
+	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
 
 	// Set up streaming callback
 	if onText != nil {
 		agent.SetOnText(onText)
-	}
-
-	// Set up messenger for inter-agent communication
-	if messengerFact != nil {
-		messenger := messengerFact(agent.ID)
-		agent.SetMessenger(messenger)
-	}
-
-	// Wire error store for learning from errors
-	if errorStore != nil && agent.reflector != nil {
-		agent.reflector.SetErrorStore(errorStore)
-	}
-
-	// Wire file predictor for enhanced error recovery
-	if predictor != nil && agent.reflector != nil {
-		agent.reflector.SetPredictor(predictor)
-	}
-
-	// Wire shared memory if available
-	if sharedMem != nil {
-		agent.SetSharedMemory(sharedMem)
-	}
-
-	// Propagate delegation depth from context
-	if depth := DelegationDepthFromContext(ctx); depth > 0 && agent.delegation != nil {
-		agent.delegation.SetDepth(depth)
-	}
-
-	// Wire delegation metrics for adaptive delegation rules
-	if delegationMetrics != nil && agent.delegation != nil {
-		agent.delegation.SetDelegationMetrics(delegationMetrics)
-	}
-
-	// Wire strategy optimizer to delegation strategy
-	if strategyOpt != nil && agent.delegation != nil {
-		agent.delegation.SetStrategyOptimizer(strategyOpt)
 	}
 
 	// Wire sub-agent activity callback (chain with meta-agent UpdateActivity)
@@ -1188,8 +1348,8 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		if onSubAgentActivity != nil {
 			onSubAgentActivity(id, string(agent.Type), toolName, args, "tool_"+status)
 		}
-		if metaAgent != nil && status == "start" {
-			metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
+		if deps.metaAgent != nil && status == "start" {
+			deps.metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
 		}
 	})
 
@@ -1197,7 +1357,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	r.agents[agent.ID] = agent
 	r.results[agent.ID] = &AgentResult{
 		AgentID: agent.ID,
-		Type:    at,
+		Type:    agent.Type,
 		Status:  AgentStatusPending,
 	}
 	onStart := r.onAgentStart
@@ -1206,8 +1366,8 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	r.mu.Unlock()
 
 	// Register with meta-agent for monitoring
-	if metaAgent != nil {
-		metaAgent.RegisterAgent(agent.ID, agent.Type)
+	if deps.metaAgent != nil {
+		deps.metaAgent.RegisterAgent(agent.ID, agent.Type)
 	}
 
 	// Report activity to coordinator
@@ -1276,31 +1436,22 @@ func (r *Runner) SpawnAsyncWithStreaming(
 			}
 		}()
 
-		// Set scratchpad update callback and initial content
-		r.mu.RLock()
-		scratchpad := r.sharedScratchpad
-		callback := r.onScratchpadUpdate
-		r.mu.RUnlock()
-
-		agent.stateMu.Lock()
-		agent.Scratchpad = scratchpad
-		agent.stateMu.Unlock()
-
-		if callback != nil {
-			agent.SetOnScratchpadUpdate(callback)
-		}
-
 		// Check if original context is already cancelled
 		select {
 		case <-ctx.Done():
-			r.mu.Lock()
-			r.results[agentID] = &AgentResult{
+			if deps.metaAgent != nil {
+				deps.metaAgent.UnregisterAgent(agentID)
+			}
+			cancelledResult := &AgentResult{
 				AgentID:   agentID,
-				Type:      at,
+				Type:      agent.Type,
 				Status:    AgentStatusCancelled,
 				Error:     ctx.Err().Error(),
 				Completed: true,
 			}
+			r.finalizeAgentWorkspace(agent, cancelledResult)
+			r.mu.Lock()
+			r.results[agentID] = cancelledResult
 			r.mu.Unlock()
 			r.notifyResultReady()
 			return
@@ -1315,7 +1466,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		if result == nil {
 			result = &AgentResult{
 				AgentID:   agentID,
-				Type:      at,
+				Type:      agent.Type,
 				Status:    AgentStatusFailed,
 				Error:     "nil result from agent",
 				Completed: true,
@@ -1332,41 +1483,14 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		result.Completed = true
 
 		// Unregister from meta-agent
-		if metaAgent != nil {
-			metaAgent.UnregisterAgent(agentID)
-		}
-
-		// Record outcome with strategy optimizer
-		if strategyOpt != nil {
-			success := result.Status == AgentStatusCompleted && result.Error == ""
-			strategyOpt.RecordExecution(agentType, "spawn_async_streaming", success, duration)
-		}
-
-		// Record successful execution for learning
-		if result.Status == AgentStatusCompleted && exampleStore != nil {
-			// Learn from successful executions
-			go func() {
-				if err := exampleStore.LearnFromSuccess(
-					agentType,
-					prompt,
-					agentType,
-					result.Output,
-					duration,
-					0, // Token count not tracked at this level
-				); err != nil {
-					logging.Debug("failed to learn from success", "error", err)
-				}
-			}()
-		}
-
-		// Record with prompt optimizer
-		if promptOpt != nil {
-			success := result.Status == AgentStatusCompleted && result.Error == ""
-			promptOpt.RecordExecution(agentType, prompt, success, 0, duration)
+		if deps.metaAgent != nil {
+			deps.metaAgent.UnregisterAgent(agentID)
 		}
 
 		// Save agent state for potential resume
+		r.finalizeAgentWorkspace(agent, result)
 		r.saveAgentState(agent)
+		r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, "spawn_async_streaming")
 
 		r.mu.Lock()
 		r.results[agentID] = result
@@ -1395,35 +1519,8 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 		go func(idx int, t AgentTask) {
 			defer wg.Done()
 
-			r.mu.RLock()
-			ctxCfg := r.ctxCfg
-			c := r.client
-			baseReg := r.baseRegistry
-			workDir := r.workDir
-			perms := r.permissions
-			messengerFact := r.messengerFactory
-			errorStore := r.errorStore
-			predictor := r.predictor
-			delegationMetrics := r.delegationMetrics
-			strategyOpt := r.strategyOptimizer
-			metaAgent := r.metaAgent
-			r.mu.RUnlock()
-			agent := NewAgent(t.Type, c, baseReg, workDir, t.MaxTurns, t.Model, perms, ctxCfg)
-
-			// Wire error store and predictor for reflection
-			if errorStore != nil && agent.reflector != nil {
-				agent.reflector.SetErrorStore(errorStore)
-			}
-			if predictor != nil && agent.reflector != nil {
-				agent.reflector.SetPredictor(predictor)
-			}
-			// Wire delegation metrics and strategy optimizer
-			if delegationMetrics != nil && agent.delegation != nil {
-				agent.delegation.SetDelegationMetrics(delegationMetrics)
-			}
-			if strategyOpt != nil && agent.delegation != nil {
-				agent.delegation.SetStrategyOptimizer(strategyOpt)
-			}
+			deps := r.snapshotAgentDeps()
+			agent := r.newConfiguredAgent(ctx, deps, string(t.Type), t.MaxTurns, t.Model, deps.permissions)
 
 			// Apply thoroughness from task or context
 			th := tools.ThoroughnessFromContext(ctx)
@@ -1437,20 +1534,11 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			}
 			agent.SetOutputStyle(os)
 
-			// Set up messenger for inter-agent communication
-			if messengerFact != nil {
-				messenger := messengerFact(agent.ID)
-				agent.SetMessenger(messenger)
-			}
-
 			r.mu.Lock()
 			r.agents[agent.ID] = agent
 			r.mu.Unlock()
 
-			// Register with meta-agent for monitoring (matches other Spawn variants)
-			if metaAgent != nil {
-				metaAgent.RegisterAgent(agent.ID, agent.Type)
-			}
+			attachMetaAgentMonitoring(agent, deps.metaAgent)
 
 			// Apply per-agent timeout
 			runCtx := ctx
@@ -1467,7 +1555,7 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			if result == nil {
 				result = &AgentResult{
 					AgentID:   agent.ID,
-					Type:      t.Type,
+					Type:      agent.Type,
 					Status:    AgentStatusFailed,
 					Error:     "nil result from agent",
 					Completed: true,
@@ -1480,14 +1568,15 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			result.Completed = true
 
 			// Unregister from meta-agent
-			if metaAgent != nil {
-				metaAgent.UnregisterAgent(agent.ID)
+			if deps.metaAgent != nil {
+				deps.metaAgent.UnregisterAgent(agent.ID)
 			}
 
-			// Record outcome with strategy optimizer
-			if strategyOpt != nil {
-				success := result.Status == AgentStatusCompleted && result.Error == ""
-				strategyOpt.RecordExecution(string(t.Type), "spawn_multiple", success, duration)
+			workspaceErr := r.finalizeAgentWorkspace(agent, result)
+			r.saveAgentState(agent)
+			r.recordAgentExecutionLearning(deps, string(t.Type), t.Prompt, result, duration, "spawn_multiple")
+			if err == nil && workspaceErr != nil {
+				err = workspaceErr
 			}
 
 			mu.Lock()
@@ -1710,22 +1799,10 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 	}
 
 	// Create a new agent with the same configuration
-	r.mu.RLock()
-	ctxCfg := r.ctxCfg
-	c := r.client
-	baseReg := r.baseRegistry
-	workDir := r.workDir
-	perms := r.permissions
-	messengerFact := r.messengerFactory
-	r.mu.RUnlock()
-	agent := NewAgent(state.Type, c, baseReg, workDir, state.MaxTurns, state.Model, perms, ctxCfg)
-	// Override ID to match the resumed agent
-	agent.ID = state.ID
-
-	// Set up messenger for inter-agent communication
-	if messengerFact != nil {
-		messenger := messengerFact(agent.ID)
-		agent.SetMessenger(messenger)
+	deps := r.snapshotAgentDeps()
+	agent := r.newRestoredAgent(ctx, deps, state, deps.permissions)
+	if r.store != nil {
+		agent.SetStore(r.store)
 	}
 
 	// Restore history
@@ -1737,9 +1814,29 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 	r.agents[agent.ID] = agent
 	r.mu.Unlock()
 
-	// Run agent with the new prompt (continuing from previous context)
-	result, err := agent.Run(ctx, prompt)
+	attachMetaAgentMonitoring(agent, deps.metaAgent)
 
+	// Run agent with the new prompt (continuing from previous context)
+	startTime := time.Now()
+	result, err := agent.Run(ctx, prompt)
+	duration := time.Since(startTime)
+
+	if result == nil {
+		result = &AgentResult{
+			AgentID:   agent.ID,
+			Type:      agent.Type,
+			Status:    AgentStatusFailed,
+			Error:     "nil result from agent",
+			Completed: true,
+			Duration:  duration,
+		}
+	}
+
+	if deps.metaAgent != nil {
+		deps.metaAgent.UnregisterAgent(agent.ID)
+	}
+
+	workspaceErr := r.finalizeAgentWorkspace(agent, result)
 	// Save updated state
 	if r.store != nil {
 		if err := r.store.Save(agent); err != nil {
@@ -1751,7 +1848,11 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 	r.results[agent.ID] = result
 	r.mu.Unlock()
 	r.notifyResultReady()
+	r.recordAgentExecutionLearning(deps, string(state.Type), prompt, result, duration, "resume")
 
+	if err == nil && workspaceErr != nil {
+		err = workspaceErr
+	}
 	if err != nil {
 		return agent.ID, err
 	}
@@ -1772,21 +1873,10 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 	}
 
 	// Create a new agent with the same configuration
-	r.mu.RLock()
-	ctxCfg := r.ctxCfg
-	c := r.client
-	baseReg := r.baseRegistry
-	workDir := r.workDir
-	perms := r.permissions
-	messengerFact := r.messengerFactory
-	r.mu.RUnlock()
-	agent := NewAgent(state.Type, c, baseReg, workDir, state.MaxTurns, state.Model, perms, ctxCfg)
-	agent.ID = state.ID
-
-	// Set up messenger for inter-agent communication
-	if messengerFact != nil {
-		messenger := messengerFact(agent.ID)
-		agent.SetMessenger(messenger)
+	deps := r.snapshotAgentDeps()
+	agent := r.newRestoredAgent(ctx, deps, state, deps.permissions)
+	if r.store != nil {
+		agent.SetStore(r.store)
 	}
 
 	// Restore history
@@ -1798,12 +1888,14 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 	r.agents[agent.ID] = agent
 	r.results[agent.ID] = &AgentResult{
 		AgentID: agent.ID,
-		Type:    state.Type,
+		Type:    agent.Type,
 		Status:  AgentStatusPending,
 	}
 	onStart := r.onAgentStart
 	onComplete := r.onAgentComplete
 	r.mu.Unlock()
+
+	attachMetaAgentMonitoring(agent, deps.metaAgent)
 
 	// Notify UI about agent start (resumed)
 	if onStart != nil {
@@ -1837,14 +1929,19 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 		// Check if original context is already cancelled
 		select {
 		case <-ctx.Done():
-			r.mu.Lock()
-			r.results[agent.ID] = &AgentResult{
+			if deps.metaAgent != nil {
+				deps.metaAgent.UnregisterAgent(agent.ID)
+			}
+			cancelledResult := &AgentResult{
 				AgentID:   agent.ID,
 				Type:      state.Type,
 				Status:    AgentStatusCancelled,
 				Error:     ctx.Err().Error(),
 				Completed: true,
 			}
+			r.finalizeAgentWorkspace(agent, cancelledResult)
+			r.mu.Lock()
+			r.results[agent.ID] = cancelledResult
 			r.mu.Unlock()
 			r.notifyResultReady()
 			return
@@ -1852,12 +1949,16 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 		}
 
 		result, err := agent.Run(agentCtx, prompt)
+		var duration time.Duration
+		if result != nil {
+			duration = result.Duration
+		}
 
 		// Ensure result is never nil
 		if result == nil {
 			result = &AgentResult{
 				AgentID:   agent.ID,
-				Type:      state.Type,
+				Type:      agent.Type,
 				Status:    AgentStatusFailed,
 				Error:     "nil result from agent",
 				Completed: true,
@@ -1873,6 +1974,11 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 		// Ensure Completed is always true so WaitWithContext doesn't spin
 		result.Completed = true
 
+		if deps.metaAgent != nil {
+			deps.metaAgent.UnregisterAgent(agent.ID)
+		}
+
+		r.finalizeAgentWorkspace(agent, result)
 		// Save updated state
 		if r.store != nil {
 			if saveErr := r.store.Save(agent); saveErr != nil {
@@ -1886,6 +1992,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 		r.results[agent.ID] = result
 		r.mu.Unlock()
 		r.notifyResultReady()
+		r.recordAgentExecutionLearning(deps, string(state.Type), prompt, result, duration, "resume_async")
 
 		// Notify UI about agent completion
 		if onComplete != nil {
@@ -1944,30 +2051,8 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 
 		// Create agent, restore from checkpoint
 		state := cp.AgentState
-		r.mu.RLock()
-		ctxCfg := r.ctxCfg
-		errorStore := r.errorStore
-		predictor := r.predictor
-		c := r.client
-		baseReg := r.baseRegistry
-		workDir := r.workDir
-		perms := r.permissions
-		messengerFact := r.messengerFactory
-		r.mu.RUnlock()
-
-		agent := NewAgent(state.Type, c, baseReg, workDir, state.MaxTurns, state.Model, perms, ctxCfg)
-		agent.ID = state.ID
-
-		// Wire messenger, error store, predictor (same as ResumeAsync)
-		if messengerFact != nil {
-			agent.SetMessenger(messengerFact(agent.ID))
-		}
-		if errorStore != nil && agent.reflector != nil {
-			agent.reflector.SetErrorStore(errorStore)
-		}
-		if predictor != nil && agent.reflector != nil {
-			agent.reflector.SetPredictor(predictor)
-		}
+		deps := r.snapshotAgentDeps()
+		agent := r.newRestoredAgent(ctx, deps, state, deps.permissions)
 
 		// Store without auto-checkpoint (if it fails again, no new error cp)
 		if r.store != nil {
@@ -1981,11 +2066,16 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 
 		r.mu.Lock()
 		r.agents[agent.ID] = agent
-		r.results[agent.ID] = &AgentResult{AgentID: agent.ID, Type: state.Type, Status: AgentStatusPending}
+		r.results[agent.ID] = &AgentResult{AgentID: agent.ID, Type: agent.Type, Status: AgentStatusPending}
 		onComplete := r.onAgentComplete
 		r.mu.Unlock()
 
-		go func(a *Agent) {
+		attachMetaAgentMonitoring(agent, deps.metaAgent)
+
+		stateType := string(state.Type)
+		resumePrompt := "You were restarted after an error. Continue your previous task or report what went wrong."
+
+		go func(a *Agent, runDeps runnerAgentDeps, restoredType string, continuationPrompt string) {
 			defer func() {
 				if p := recover(); p != nil {
 					logging.Debug("auto-resumed agent panicked", "agent_id", a.ID, "panic", fmt.Sprintf("%v", p))
@@ -2008,11 +2098,30 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 
 			select {
 			case <-ctx.Done():
+				if runDeps.metaAgent != nil {
+					runDeps.metaAgent.UnregisterAgent(a.ID)
+				}
+				cancelledResult := &AgentResult{
+					AgentID:   a.ID,
+					Type:      a.Type,
+					Status:    AgentStatusCancelled,
+					Error:     ctx.Err().Error(),
+					Completed: true,
+				}
+				r.finalizeAgentWorkspace(a, cancelledResult)
+				r.mu.Lock()
+				r.results[a.ID] = cancelledResult
+				r.mu.Unlock()
+				r.notifyResultReady()
 				return
 			default:
 			}
 
-			result, err := a.Run(agentCtx, "You were restarted after an error. Continue your previous task or report what went wrong.")
+			result, err := a.Run(agentCtx, continuationPrompt)
+			var duration time.Duration
+			if result != nil {
+				duration = result.Duration
+			}
 			if result == nil {
 				result = &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: "nil result", Completed: true}
 			}
@@ -2022,7 +2131,20 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 			}
 			result.Completed = true
 
+			if runDeps.metaAgent != nil {
+				runDeps.metaAgent.UnregisterAgent(a.ID)
+			}
+
+			r.finalizeAgentWorkspace(a, result)
 			r.saveAgentState(a)
+			r.recordAgentExecutionLearning(
+				runDeps,
+				restoredType,
+				continuationPrompt,
+				result,
+				duration,
+				"resume_error_checkpoint",
+			)
 
 			r.mu.Lock()
 			r.results[a.ID] = result
@@ -2032,7 +2154,7 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 			if onComplete != nil {
 				onComplete(a.ID, result)
 			}
-		}(agent)
+		}(agent, deps, stateType, resumePrompt)
 
 		resumed++
 	}
@@ -2081,29 +2203,8 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 	_ = r.store.DeleteCheckpoint(cp.CheckpointID)
 
 	state := cp.AgentState
-	r.mu.RLock()
-	ctxCfg := r.ctxCfg
-	errorStore := r.errorStore
-	predictor := r.predictor
-	c := r.client
-	baseReg := r.baseRegistry
-	workDir := r.workDir
-	perms := r.permissions
-	messengerFact := r.messengerFactory
-	r.mu.RUnlock()
-
-	agent := NewAgent(state.Type, c, baseReg, workDir, state.MaxTurns, state.Model, perms, ctxCfg)
-	agent.ID = state.ID
-
-	if messengerFact != nil {
-		agent.SetMessenger(messengerFact(agent.ID))
-	}
-	if errorStore != nil && agent.reflector != nil {
-		agent.reflector.SetErrorStore(errorStore)
-	}
-	if predictor != nil && agent.reflector != nil {
-		agent.reflector.SetPredictor(predictor)
-	}
+	deps := r.snapshotAgentDeps()
+	agent := r.newRestoredAgent(ctx, deps, state, deps.permissions)
 	if r.store != nil {
 		agent.SetStore(r.store)
 	}
@@ -2114,16 +2215,18 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 
 	r.mu.Lock()
 	r.agents[agent.ID] = agent
-	r.results[agent.ID] = &AgentResult{AgentID: agent.ID, Type: state.Type, Status: AgentStatusPending}
+	r.results[agent.ID] = &AgentResult{AgentID: agent.ID, Type: agent.Type, Status: AgentStatusPending}
 	onStart := r.onAgentStart
 	onComplete := r.onAgentComplete
 	r.mu.Unlock()
+
+	attachMetaAgentMonitoring(agent, deps.metaAgent)
 
 	if onStart != nil {
 		onStart(agent.ID, string(state.Type), "Resumed from checkpoint")
 	}
 
-	go func(a *Agent) {
+	go func(a *Agent, runDeps runnerAgentDeps) {
 		defer func() {
 			if p := recover(); p != nil {
 				logging.Debug("resumed agent panicked", "agent_id", a.ID, "panic", fmt.Sprintf("%v", p))
@@ -2145,6 +2248,10 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 		a.SetCancelFunc(agentCancel)
 
 		result, err := a.Run(agentCtx, "You were resumed from a checkpoint. Continue your previous task.")
+		var duration time.Duration
+		if result != nil {
+			duration = result.Duration
+		}
 		if result == nil {
 			result = &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: "nil result", Completed: true}
 		}
@@ -2154,7 +2261,20 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 		}
 		result.Completed = true
 
+		if runDeps.metaAgent != nil {
+			runDeps.metaAgent.UnregisterAgent(a.ID)
+		}
+
+		r.finalizeAgentWorkspace(a, result)
 		r.saveAgentState(a)
+		r.recordAgentExecutionLearning(
+			runDeps,
+			string(state.Type),
+			"You were resumed from a checkpoint. Continue your previous task.",
+			result,
+			duration,
+			"resume_last_checkpoint",
+		)
 
 		r.mu.Lock()
 		r.results[a.ID] = result
@@ -2164,7 +2284,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 		if onComplete != nil {
 			onComplete(a.ID, result)
 		}
-	}(agent)
+	}(agent, deps)
 
 	logging.Debug("resumed agent from last checkpoint", "agent_id", agent.ID, "checkpoint_id", latestID)
 	return agent.ID, nil

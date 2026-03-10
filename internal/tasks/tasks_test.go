@@ -109,8 +109,6 @@ func TestTaskFailed(t *testing.T) {
 }
 
 func TestTaskCancel(t *testing.T) {
-	// Note: Cancel has a known race on cmd.Process (killProcessGroup reads it
-	// while cmd.Run/Start writes it). Use -count=1 without -race for this test.
 	task := NewTask("t1", "echo done-before-cancel", t.TempDir())
 
 	task.Start(context.Background())
@@ -121,6 +119,26 @@ func TestTaskCancel(t *testing.T) {
 
 	if !task.IsComplete() {
 		t.Error("task should be complete")
+	}
+}
+
+func TestTaskCancelImmediatelyWhileStarting(t *testing.T) {
+	task := NewTask("t1", "sleep 5", t.TempDir())
+
+	if err := task.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	task.Cancel()
+
+	select {
+	case <-task.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled task should complete within 5 seconds")
+	}
+
+	if task.GetStatus() != StatusCancelled {
+		t.Errorf("Status = %v, want cancelled", task.GetStatus())
 	}
 }
 

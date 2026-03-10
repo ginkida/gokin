@@ -991,42 +991,27 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 			return m, cmd
 
 		case "y":
-			// Accept current file
-			m.decisions[m.currentIndex] = DiffApply
-			// Move to next pending file
-			m.moveToNextPending()
-			return m, nil
+			m.setAllDecisions(DiffApply)
+			return m, m.finish()
 
 		case "n":
-			// Reject current file
-			m.decisions[m.currentIndex] = DiffReject
-			// Move to next pending file
-			m.moveToNextPending()
-			return m, nil
+			m.setAllDecisions(DiffReject)
+			return m, m.finish()
 
 		case "Y":
-			// Accept all
-			for i := range m.files {
-				m.decisions[i] = DiffApply
-			}
+			m.setAllDecisions(DiffApply)
 			return m, m.finish()
 
 		case "N":
-			// Reject all
-			for i := range m.files {
-				m.decisions[i] = DiffReject
-			}
+			m.setAllDecisions(DiffReject)
 			return m, m.finish()
 
 		case "enter":
-			// Apply decisions and exit
+			m.setAllDecisions(DiffApply)
 			return m, m.finish()
 
 		case "esc":
-			// Cancel - reject all
-			for i := range m.files {
-				m.decisions[i] = DiffReject
-			}
+			m.setAllDecisions(DiffReject)
 			return m, m.finish()
 
 		case "g":
@@ -1066,6 +1051,12 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 	}
 
 	return m, nil
+}
+
+func (m *MultiDiffPreviewModel) setAllDecisions(decision DiffDecision) {
+	for i := range m.files {
+		m.decisions[i] = decision
+	}
 }
 
 // moveToNextPending moves to the next file with pending decision.
@@ -1141,27 +1132,19 @@ func (m MultiDiffPreviewModel) View() string {
 	listContent.WriteString("\n\n")
 
 	for i, file := range m.files {
-		var icon string
-		switch m.decisions[i] {
-		case DiffApply:
-			icon = lipgloss.NewStyle().Foreground(ColorSuccess).Render("✓")
-		case DiffReject:
-			icon = lipgloss.NewStyle().Foreground(ColorError).Render("✗")
-		default:
-			icon = lipgloss.NewStyle().Foreground(ColorMuted).Render("?")
-		}
-
 		fileName := filepath.Base(file.FilePath)
 		if len(fileName) > listWidth-8 {
 			fileName = fileName[:listWidth-11] + "..."
 		}
 
 		lineStyle := lipgloss.NewStyle()
+		marker := " "
 		if i == m.currentIndex {
 			lineStyle = lineStyle.Background(lipgloss.Color("#374151")).Bold(true)
+			marker = ">"
 		}
 
-		listContent.WriteString(lineStyle.Render(fmt.Sprintf(" %s %s", icon, fileName)))
+		listContent.WriteString(lineStyle.Render(fmt.Sprintf(" %s %s", marker, fileName)))
 		listContent.WriteString("\n")
 	}
 
@@ -1227,38 +1210,26 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 	hintStyle := lipgloss.NewStyle().
 		Foreground(ColorDim)
 
-	// Count decisions
-	accepted, rejected, pending := 0, 0, 0
-	for _, d := range m.decisions {
-		switch d {
-		case DiffApply:
-			accepted++
-		case DiffReject:
-			rejected++
-		default:
-			pending++
-		}
-	}
-
-	// Status line
 	statusStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	status := fmt.Sprintf("Accepted: %d | Rejected: %d | Pending: %d", accepted, rejected, pending)
+	status := fmt.Sprintf(
+		"Reviewing %d files as one apply-back batch | File %d/%d",
+		len(m.files),
+		m.currentIndex+1,
+		len(m.files),
+	)
 	builder.WriteString(statusStyle.Render(status))
 	builder.WriteString("\n\n")
 
-	// Buttons
-	builder.WriteString(applyStyle.Render("y Accept"))
+	builder.WriteString(applyStyle.Render("y Apply all"))
 	builder.WriteString("  ")
-	builder.WriteString(rejectStyle.Render("n Reject"))
+	builder.WriteString(rejectStyle.Render("n Reject all"))
 	builder.WriteString("  ")
-	builder.WriteString(allStyle.Render("Y All"))
+	builder.WriteString(allStyle.Render("Enter Apply all"))
 	builder.WriteString("  ")
-	builder.WriteString(allStyle.Render("N None"))
-	builder.WriteString("  ")
-	builder.WriteString(applyStyle.Render("Enter Apply"))
+	builder.WriteString(allStyle.Render("Esc Reject all"))
 	builder.WriteString("\n\n")
 
-	builder.WriteString(hintStyle.Render("Tab: Switch focus | ↑/↓: Navigate | j/k: Scroll | Esc: Cancel"))
+	builder.WriteString(hintStyle.Render("Tab: Switch focus | ↑/↓: Files | j/k: Scroll diff | y/Enter: Apply all | n/Esc: Reject all"))
 }
 
 // GetDecisions returns the current decisions map.

@@ -56,9 +56,9 @@ type Model struct {
 	responseHeaderShown bool // True if assistant header was shown for current response
 
 	// Token usage tracking
-	tokenUsage      *TokenUsageMsg
-	baseTokenCount  int // Last authoritative total from TokenUsageMsg, before streaming estimate
-	showTokens      bool
+	tokenUsage     *TokenUsageMsg
+	baseTokenCount int // Last authoritative total from TokenUsageMsg, before streaming estimate
+	showTokens     bool
 
 	// Project info
 	projectType string
@@ -101,9 +101,12 @@ type Model struct {
 	onModelSelect      func(modelID string)
 
 	// Diff preview state
-	diffPreview    DiffPreviewModel
-	diffRequest    *DiffPreviewRequestMsg
-	onDiffDecision func(decision DiffDecision)
+	diffPreview         DiffPreviewModel
+	diffRequest         *DiffPreviewRequestMsg
+	multiDiffPreview    MultiDiffPreviewModel
+	multiDiffRequest    *MultiDiffPreviewRequestMsg
+	onDiffDecision      func(decision DiffDecision)
+	onMultiDiffDecision func(decisions map[string]DiffDecision)
 
 	// Search results state
 	searchResults  SearchResultsModel
@@ -297,6 +300,7 @@ func NewModel() *Model {
 		minSubmitDelay:       500 * time.Millisecond, // Debounce: 500ms between submissions
 		sessionStart:         time.Now(),
 		diffPreview:          NewDiffPreviewModel(styles),
+		multiDiffPreview:     NewMultiDiffPreviewModel(styles),
 		searchResults:        NewSearchResultsModel(styles),
 		gitStatusModel:       NewGitStatusModel(styles),
 		fileBrowser:          NewFileBrowserModel(styles),
@@ -503,6 +507,13 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 	if m.state == StateDiffPreview {
 		var cmd tea.Cmd
 		m.diffPreview, cmd = m.diffPreview.Update(msg)
+		return cmd
+	}
+
+	// Handle multi diff preview keys
+	if m.state == StateMultiDiffPreview {
+		var cmd tea.Cmd
+		m.multiDiffPreview, cmd = m.multiDiffPreview.Update(msg)
 		return cmd
 	}
 
@@ -1547,6 +1558,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.diffPreview.SetContent(msg.FilePath, msg.OldContent, msg.NewContent, msg.ToolName, msg.IsNewFile)
 		m.state = StateDiffPreview
 
+	case MultiDiffPreviewRequestMsg:
+		m.multiDiffRequest = &msg
+		m.multiDiffPreview.SetSize(m.width, m.height)
+		m.multiDiffPreview.SetFiles(msg.Files)
+		m.state = StateMultiDiffPreview
+
 	case DiffPreviewResponseMsg:
 		m.diffRequest = nil
 		if msg.Decision == DiffApply || msg.Decision == DiffApplyAll {
@@ -1562,6 +1579,27 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				m.onDiffDecision(msg.Decision)
 			}
 			cmds = append(cmds, m.input.Focus())
+		}
+
+	case MultiDiffPreviewResponseMsg:
+		m.multiDiffRequest = nil
+		allApplied := true
+		for _, decision := range msg.Decisions {
+			if decision != DiffApply {
+				allApplied = false
+				break
+			}
+		}
+		if allApplied {
+			m.state = StateProcessing
+		} else {
+			m.state = StateInput
+			m.output.AppendLine(m.styles.Warning.Render(" Changes rejected"))
+			m.output.AppendLine("")
+			cmds = append(cmds, m.input.Focus())
+		}
+		if m.onMultiDiffDecision != nil {
+			m.onMultiDiffDecision(msg.Decisions)
 		}
 
 	case SearchResultsRequestMsg:
@@ -2140,6 +2178,12 @@ func (m Model) View() string {
 		builder.WriteString("\n")
 	}
 
+	// Multi-file diff preview
+	if m.state == StateMultiDiffPreview {
+		builder.WriteString(m.multiDiffPreview.View())
+		builder.WriteString("\n")
+	}
+
 	// Search results
 	if m.state == StateSearchResults {
 		builder.WriteString(m.searchResults.View())
@@ -2587,6 +2631,8 @@ func (m *Model) DebugState() UIDebugState {
 		stateName = "command_palette"
 	case StateDiffPreview:
 		stateName = "diff_preview"
+	case StateMultiDiffPreview:
+		stateName = "multi_diff_preview"
 	case StateSearchResults:
 		stateName = "search_results"
 	case StateGitStatus:

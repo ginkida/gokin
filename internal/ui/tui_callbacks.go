@@ -93,6 +93,11 @@ func (m *Model) SetDiffDecisionCallback(onDiffDecision func(DiffDecision)) {
 	m.onDiffDecision = onDiffDecision
 }
 
+// SetMultiDiffDecisionCallback sets the callback for multi-file diff preview decisions.
+func (m *Model) SetMultiDiffDecisionCallback(onMultiDiffDecision func(map[string]DiffDecision)) {
+	m.onMultiDiffDecision = onMultiDiffDecision
+}
+
 // SetSearchActionCallback sets the callback for search result actions.
 func (m *Model) SetSearchActionCallback(onSearchAction func(SearchAction)) {
 	m.onSearchAction = onSearchAction

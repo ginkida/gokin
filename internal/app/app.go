@@ -123,8 +123,9 @@ type App struct {
 	questionResponseChan chan string
 
 	// Diff preview handling
-	diffResponseChan  chan ui.DiffDecision
-	diffBatchDecision ui.DiffDecision
+	diffResponseChan      chan ui.DiffDecision
+	multiDiffResponseChan chan map[string]ui.DiffDecision
+	diffBatchDecision     ui.DiffDecision
 
 	// Plan management
 	planManager      *plan.Manager
@@ -208,9 +209,10 @@ type App struct {
 	lastError     string    // Last error message for context on retry
 	lastErrorTime time.Time // When the last error occurred
 
-	mu         sync.Mutex
-	running    bool
-	processing bool // Guards against concurrent message processing
+	mu           sync.Mutex
+	diffPromptMu sync.Mutex
+	running      bool
+	processing   bool // Guards against concurrent message processing
 
 	// Processing cancellation for ESC interrupt
 	processingCancel context.CancelFunc
@@ -1518,6 +1520,12 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	if a.agentRunner != nil {
 		a.agentRunner.SetClient(newClient)
 		a.agentRunner.SetContextConfig(&a.config.Context)
+		a.agentRunner.SetWorkspaceIsolationEnabled(a.config.Plan.WorkspaceIsolation)
+		if a.config.DiffPreview.Enabled && a.config.Permission.Enabled {
+			a.agentRunner.SetWorkspaceReviewHandler(a.reviewWorkspaceChanges)
+		} else {
+			a.agentRunner.SetWorkspaceReviewHandler(nil)
+		}
 	}
 
 	// 6. Update context manager

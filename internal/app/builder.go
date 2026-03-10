@@ -609,6 +609,7 @@ func (b *Builder) initManagers() error {
 	b.agentRunner = agent.NewRunner(b.ctx, b.geminiClient, b.registry, b.workDir)
 	b.agentRunner.SetPermissions(b.permManager)
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
+	b.agentRunner.SetWorkspaceIsolationEnabled(b.cfg.Plan.WorkspaceIsolation)
 
 	// Wire agent store for checkpoint persistence
 	if b.configDirErr == nil {
@@ -1409,6 +1410,7 @@ func (b *Builder) wireDependencies() error {
 	b.tuiModel.SetPlanApprovalCallback(app.handlePlanApproval)
 	b.tuiModel.SetModelSelectCallback(app.handleModelSelect)
 	b.tuiModel.SetDiffDecisionCallback(app.handleDiffDecision)
+	b.tuiModel.SetMultiDiffDecisionCallback(app.handleMultiDiffDecision)
 
 	// Set up cancel callback for ESC interrupt
 	b.tuiModel.SetCancelCallback(app.CancelProcessing)
@@ -1606,6 +1608,9 @@ func (b *Builder) wireDependencies() error {
 				et.SetDiffEnabled(true)
 			}
 		}
+		if b.agentRunner != nil {
+			b.agentRunner.SetWorkspaceReviewHandler(app.reviewWorkspaceChanges)
+		}
 	}
 
 	// === PHASE 5: Wire UIBroadcaster to Coordinator ===
@@ -1626,41 +1631,42 @@ func (b *Builder) assembleApp() *App {
 	}
 
 	b.cachedApp = &App{
-		config:               b.cfg,
-		workDir:              b.workDir,
-		client:               b.geminiClient,
-		registry:             b.registry,
-		executor:             b.executor,
-		session:              b.session,
-		tui:                  b.tuiModel,
-		ctx:                  b.ctx,
-		cancel:               b.cancel, // Use the saved cancel function
-		projectInfo:          b.projectInfo,
-		contextManager:       b.contextManager,
-		promptBuilder:        b.promptBuilder,
-		contextAgent:         b.contextAgent,
-		permManager:          b.permManager,
-		permResponseChan:     make(chan permission.Decision, 2),
-		questionResponseChan: make(chan string, 1),
-		diffResponseChan:     make(chan ui.DiffDecision, 1),
-		planManager:          b.planManager,
-		planApprovalChan:     make(chan plan.ApprovalDecision, 1),
-		hooksManager:         b.hooksManager,
-		taskManager:          b.taskManager,
-		undoManager:          b.undoManager,
-		agentRunner:          b.agentRunner,
-		commandHandler:       b.commandHandler,
-		sessionManager:       b.sessionManager,
-		searchCache:          b.searchCache,
-		rateLimiter:          b.rateLimiter,
-		auditLogger:          b.auditLogger,
-		fileWatcher:          b.fileWatcher,
-		semanticIndexer:      b.semanticIdx,
-		backgroundIndexer:    b.backgroundIdx,
-		taskRouter:           b.taskRouter,
-		orchestrator:         b.taskOrchestrator,
-		reliability:          NewReliabilityManager(),
-		policy:               NewPolicyEngine(),
+		config:                b.cfg,
+		workDir:               b.workDir,
+		client:                b.geminiClient,
+		registry:              b.registry,
+		executor:              b.executor,
+		session:               b.session,
+		tui:                   b.tuiModel,
+		ctx:                   b.ctx,
+		cancel:                b.cancel, // Use the saved cancel function
+		projectInfo:           b.projectInfo,
+		contextManager:        b.contextManager,
+		promptBuilder:         b.promptBuilder,
+		contextAgent:          b.contextAgent,
+		permManager:           b.permManager,
+		permResponseChan:      make(chan permission.Decision, 2),
+		questionResponseChan:  make(chan string, 1),
+		diffResponseChan:      make(chan ui.DiffDecision, 1),
+		multiDiffResponseChan: make(chan map[string]ui.DiffDecision, 1),
+		planManager:           b.planManager,
+		planApprovalChan:      make(chan plan.ApprovalDecision, 1),
+		hooksManager:          b.hooksManager,
+		taskManager:           b.taskManager,
+		undoManager:           b.undoManager,
+		agentRunner:           b.agentRunner,
+		commandHandler:        b.commandHandler,
+		sessionManager:        b.sessionManager,
+		searchCache:           b.searchCache,
+		rateLimiter:           b.rateLimiter,
+		auditLogger:           b.auditLogger,
+		fileWatcher:           b.fileWatcher,
+		semanticIndexer:       b.semanticIdx,
+		backgroundIndexer:     b.backgroundIdx,
+		taskRouter:            b.taskRouter,
+		orchestrator:          b.taskOrchestrator,
+		reliability:           NewReliabilityManager(),
+		policy:                NewPolicyEngine(),
 		// Phase 5: Agent System Improvements
 		coordinator:       b.coordinator,
 		agentTypeRegistry: b.agentTypeRegistry,

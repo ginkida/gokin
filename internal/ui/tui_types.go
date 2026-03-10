@@ -18,6 +18,7 @@ const (
 	StateShortcutsOverlay
 	StateCommandPalette
 	StateDiffPreview
+	StateMultiDiffPreview
 	StateSearchResults
 	StateGitStatus
 	StateFileBrowser
@@ -30,7 +31,7 @@ func (m *Model) isModalState() bool {
 	switch m.state {
 	case StatePermissionPrompt, StateQuestionPrompt, StatePlanApproval,
 		StateModelSelector, StateShortcutsOverlay, StateCommandPalette,
-		StateDiffPreview, StateSearchResults, StateGitStatus,
+		StateDiffPreview, StateMultiDiffPreview, StateSearchResults, StateGitStatus,
 		StateFileBrowser, StateBatchProgress:
 		return true
 	}
