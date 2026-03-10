@@ -930,9 +930,12 @@ func (b *Builder) initIntegrations() error {
 			if b.cfg.Web.SearchAPIKey != "" {
 				wst.SetAPIKey(b.cfg.Web.SearchAPIKey)
 			}
-			if b.cfg.Web.SearchProvider == "google" {
+			switch b.cfg.Web.SearchProvider {
+			case "google":
 				wst.SetProvider(tools.SearchProviderGoogle)
 				wst.SetGoogleCX(b.cfg.Web.GoogleCX)
+			case "duckduckgo":
+				wst.SetProvider(tools.SearchProviderDuckDuckGo)
 			}
 		}
 	}

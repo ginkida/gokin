@@ -13,6 +13,7 @@ import (
 	"gokin/internal/logging"
 	"gokin/internal/security"
 
+	"golang.org/x/net/html"
 	"google.golang.org/genai"
 )
 
@@ -20,8 +21,9 @@ import (
 type SearchProvider string
 
 const (
-	SearchProviderSerpAPI SearchProvider = "serpapi"
-	SearchProviderGoogle  SearchProvider = "google"
+	SearchProviderSerpAPI    SearchProvider = "serpapi"
+	SearchProviderGoogle     SearchProvider = "google"
+	SearchProviderDuckDuckGo SearchProvider = "duckduckgo"
 )
 
 // WebSearchTool performs web searches using external APIs.
@@ -99,8 +101,10 @@ func (t *WebSearchTool) Validate(args map[string]any) error {
 		return NewValidationError("query", "is required")
 	}
 
-	if t.apiKey == "" {
-		return NewValidationError("api_key", "web search API key not configured")
+	// DuckDuckGo doesn't require an API key; when no key is configured
+	// Execute() auto-falls back to DuckDuckGo, so validation passes.
+	if t.apiKey == "" && t.provider == SearchProviderGoogle {
+		return NewValidationError("api_key", "Google Custom Search API key not configured")
 	}
 
 	return nil
@@ -123,8 +127,15 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	switch t.provider {
 	case SearchProviderGoogle:
 		results, err = t.searchGoogle(ctx, query, numResults)
+	case SearchProviderDuckDuckGo:
+		results, err = t.searchDuckDuckGo(ctx, query, numResults)
 	default:
-		results, err = t.searchSerpAPI(ctx, query, numResults)
+		if t.apiKey == "" {
+			// Auto-fallback to DuckDuckGo when no API key is configured
+			results, err = t.searchDuckDuckGo(ctx, query, numResults)
+		} else {
+			results, err = t.searchSerpAPI(ctx, query, numResults)
+		}
 	}
 
 	if err != nil {
@@ -302,4 +313,120 @@ func (t *WebSearchTool) searchGoogle(ctx context.Context, query string, numResul
 	}
 
 	return results, nil
+}
+
+// searchDuckDuckGo performs a search using DuckDuckGo Lite (no API key required).
+func (t *WebSearchTool) searchDuckDuckGo(ctx context.Context, query string, numResults int) ([]SearchResult, error) {
+	data := url.Values{}
+	data.Set("q", query)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://lite.duckduckgo.com/lite/", strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "Gokin/1.0")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("DuckDuckGo request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("DuckDuckGo returned status %d", resp.StatusCode)
+	}
+
+	// Limit response to 2MB to guard against unexpected large payloads.
+	return parseDuckDuckGoLite(io.LimitReader(resp.Body, 2<<20), numResults)
+}
+
+// parseDuckDuckGoLite extracts search results from DuckDuckGo Lite HTML.
+//
+// The lite page renders results as a flat sequence of <tr> rows inside a
+// single <table>.  Each organic result occupies 4 consecutive rows:
+//
+//  1. link row   – contains an <a class="result-link"> with href and title text
+//  2. snippet row – contains a <td class="result-snippet"> with the description
+//  3. URL row    – display URL (we already have the real one from step 1)
+//  4. spacer row – empty separator
+//
+// We walk the HTML token stream looking for these class markers, which are
+// stable across DuckDuckGo Lite revisions.
+func parseDuckDuckGoLite(r io.Reader, maxResults int) ([]SearchResult, error) {
+	doc, err := html.Parse(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse HTML: %w", err)
+	}
+
+	var results []SearchResult
+
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if len(results) >= maxResults {
+			return
+		}
+
+		if n.Type == html.ElementNode && n.Data == "a" && htmlHasClass(n, "result-link") {
+			href := htmlGetAttr(n, "href")
+			title := htmlTextContent(n)
+			if href != "" && title != "" {
+				results = append(results, SearchResult{
+					Title: strings.TrimSpace(title),
+					URL:   href,
+				})
+			}
+		}
+
+		if n.Type == html.ElementNode && n.Data == "td" && htmlHasClass(n, "result-snippet") {
+			snippet := strings.TrimSpace(htmlTextContent(n))
+			if snippet != "" && len(results) > 0 && results[len(results)-1].Snippet == "" {
+				results[len(results)-1].Snippet = snippet
+			}
+		}
+
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+
+	return results, nil
+}
+
+func htmlHasClass(n *html.Node, class string) bool {
+	for _, a := range n.Attr {
+		if a.Key == "class" {
+			for _, c := range strings.Fields(a.Val) {
+				if c == class {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func htmlGetAttr(n *html.Node, key string) string {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return a.Val
+		}
+	}
+	return ""
+}
+
+func htmlTextContent(n *html.Node) string {
+	var sb strings.Builder
+	var collect func(*html.Node)
+	collect = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			sb.WriteString(n.Data)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			collect(c)
+		}
+	}
+	collect(n)
+	return sb.String()
 }
