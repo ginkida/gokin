@@ -463,7 +463,7 @@ const pwdMarker = "___GOKIN_PWD___"
 // wrapCommandWithPWD appends a pwd probe to the command so we can reliably
 // track working directory changes across compound commands, subshells, cd -, etc.
 func wrapCommandWithPWD(command string) string {
-	return command + "; echo '" + pwdMarker + "'$(pwd)"
+	return command + "\n__gokin_rc=$?; echo '" + pwdMarker + "'$(pwd); exit $__gokin_rc"
 }
 
 // extractPWDFromOutput finds the pwd marker in output, extracts the real pwd,
