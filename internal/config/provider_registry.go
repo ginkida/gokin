@@ -115,9 +115,9 @@ var Providers = []ProviderDef{
 		ModelPrefixes: []string{"minimax"},
 		SetupKeyURL:   "https://platform.minimaxi.com/user-center/basic-information/interface-key",
 		KeyValidation: KeyValidationDef{
-			URL:             "https://api.minimax.io/v1/models",
+			URL:             "https://api.minimax.io/anthropic/v1/models",
 			AuthMode:        "bearer",
-			SuccessStatuses: []int{200},
+			SuccessStatuses: []int{200, 404},
 		},
 	},
 	{

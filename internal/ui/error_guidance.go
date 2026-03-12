@@ -65,7 +65,7 @@ var errorGuidancePatterns = []ErrorGuidance{
 	{
 		Pattern:     regexp.MustCompile(`(?i)(unauthorized|401|invalid.*key|api.*key.*invalid)`),
 		Title:       "Authentication Failed",
-		Suggestions: []string{"Check your API key is correct", "Regenerate your API key at aistudio.google.com", "Run setup wizard again"},
+		Suggestions: []string{"Check your API key is correct", "Regenerate your API key at your provider's dashboard", "Run 'gokin --setup' to reconfigure"},
 		Command:     "/auth",
 	},
 	{

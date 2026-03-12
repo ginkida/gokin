@@ -277,7 +277,7 @@ func ClassifyError(err error, context string) *EnhancedError {
 	case containsAny(errStr, "unauthorized", "401", "invalid.*key", "api.*key.*invalid"):
 		enhanced.Category = ErrorCategoryAuth
 		enhanced.Suggestions = getAuthSuggestions()
-		enhanced.Documentation = "https://ai.google.dev/tutorials/setup"
+		enhanced.Documentation = ""
 
 	case containsAny(errStr, "rate limit", "429", "too many requests", "quota"):
 		enhanced.Category = ErrorCategoryRateLimit
