@@ -78,8 +78,9 @@ func (m *Model) Welcome() {
 	titleStyle := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	infoStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	accentStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
 
-	// Build info line: ~/project • model • 0%
+	// Build info line
 	dir := m.workDir
 	if dir == "" {
 		dir = "."
@@ -91,51 +92,49 @@ func (m *Model) Welcome() {
 		modelName = "no model"
 	}
 
-	contextStr := "0%"
-	if m.tokenUsage != nil {
-		contextStr = fmt.Sprintf("%.0f%%", m.tokenUsage.PercentUsed*100)
-	}
-
 	// Set terminal window title
 	setTerminalTitle(fmt.Sprintf("Gokin · %s · %s", modelName, dir))
 
-	// 4 lines of content
+	// Build welcome content
 	line1 := titleStyle.Render("GOKIN")
-	line2 := infoStyle.Render(dir + " · " + modelName + " · " + contextStr)
-	line3 := dimStyle.Render("Ctrl+P commands · Shift+Tab plan mode · ? shortcuts")
-	line4 := dimStyle.Render(getTextSelectionHint())
+	line2 := infoStyle.Render(dir) + dimStyle.Render(" · ") + accentStyle.Render(modelName)
+	line3 := ""
+	line4 := dimStyle.Render("Ctrl+P") + infoStyle.Render(" commands") +
+		dimStyle.Render("  ·  Shift+Tab") + infoStyle.Render(" plan mode") +
+		dimStyle.Render("  ·  /") + infoStyle.Render(" explore")
 
 	content := line1 + "\n" + line2 + "\n" + line3 + "\n" + line4
 
 	// Wrap in lipgloss rounded border
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorDim).
-		Padding(1, 2).
+		BorderForeground(ColorBorder).
+		Padding(1, 3).
 		Align(lipgloss.Center)
 
 	m.output.AppendLine(boxStyle.Render(content))
 	m.output.AppendLine("")
 
-	// Suggestion prompts for new users
+	// Quick start suggestions
 	suggestionStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	promptStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
-	suggestions := suggestionStyle.Render("  Try: ") +
-		promptStyle.Render("\"describe this project\"") +
-		suggestionStyle.Render(" · ") +
-		promptStyle.Render("/quickstart") +
-		suggestionStyle.Render(" · ") +
+	suggestions := suggestionStyle.Render("  Quick start: ") +
+		promptStyle.Render("\"explain this codebase\"") +
+		suggestionStyle.Render("  ·  ") +
+		promptStyle.Render("\"fix the failing test\"") +
+		suggestionStyle.Render("  ·  ") +
 		promptStyle.Render("/help")
 	m.output.AppendLine(suggestions)
 }
 
 // AddSystemMessage adds a system message to the output.
 func (m *Model) AddSystemMessage(msg string) {
-	infoStyle := lipgloss.NewStyle().
+	iconStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	textStyle := lipgloss.NewStyle().
 		Foreground(ColorInfo).
 		Bold(true).
 		MarginBottom(1)
-	m.output.AppendLine(infoStyle.Render("  " + msg))
+	m.output.AppendLine(iconStyle.Render("  ▸ ") + textStyle.Render(msg))
 }
 
 // renderTodos renders the current todo items.
@@ -408,13 +407,18 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 		}
 	}
 
+	// Cost estimation
+	if meta.Cost > 0 {
+		parts = append(parts, fmt.Sprintf("$%.4f", meta.Cost))
+	}
+
 	if len(parts) == 0 {
 		return ""
 	}
 
-	content := strings.Join(parts, " · ")
+	content := strings.Join(parts, "  ·  ")
 
-	// Framed footer: ─── content ───
+	// Framed footer with subtle separators
 	leftDash := strings.Repeat("─", 3)
 	rightDash := strings.Repeat("─", 3)
 

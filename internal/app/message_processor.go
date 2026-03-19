@@ -465,8 +465,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	if program != nil {
 		program.Send(ui.ResponseDoneMsg{})
 
-		// Send response metadata
+		// Send response metadata with cost estimation
 		_, cacheRead := a.executor.GetLastCacheMetrics()
+		var cost float64
+		if a.contextManager != nil {
+			if tc := a.contextManager.GetTokenCounter(); tc != nil {
+				cost = tc.CalculateCost(inputTokens, outputTokens)
+			}
+		}
 		program.Send(ui.ResponseMetadataMsg{
 			Model:                a.config.Model.Name,
 			InputTokens:          inputTokens,
@@ -474,6 +480,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			CacheReadInputTokens: cacheRead,
 			Duration:             duration,
 			ToolsUsed:            toolsUsed,
+			Cost:                 cost,
 		})
 	}
 

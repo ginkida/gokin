@@ -107,6 +107,7 @@ type (
 		CacheReadInputTokens int
 		Duration             time.Duration
 		ToolsUsed            []string
+		Cost                 float64 // Estimated cost in USD (0 = unknown)
 	}
 	ErrorMsg      error
 	TodoUpdateMsg []string

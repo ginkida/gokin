@@ -2063,17 +2063,18 @@ func (m Model) View() string {
 		frameIdx := int(elapsed.Milliseconds()/80) % len(spinnerFrames)
 
 		if m.currentTool != "" {
-			// Tool execution: spinner + name in tool's color
+			// Tool execution: spinner + name in tool's color + info
 			toolColor := GetToolIconColor(m.currentTool)
 			spinnerStyle := lipgloss.NewStyle().Foreground(toolColor)
 			spinner := spinnerStyle.Render(spinnerFrames[frameIdx])
 
-			toolNameStyle := lipgloss.NewStyle().Foreground(toolColor)
+			toolNameStyle := lipgloss.NewStyle().Foreground(toolColor).Bold(true)
 			status := spinner + " " + toolNameStyle.Render(m.currentTool)
 
 			if m.currentToolInfo != "" {
 				infoStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-				status += "  " + infoStyle.Render(m.currentToolInfo)
+				arrowStyle := lipgloss.NewStyle().Foreground(ColorDim)
+				status += " " + arrowStyle.Render("→") + " " + infoStyle.Render(m.currentToolInfo)
 			}
 
 			if !m.toolStartTime.IsZero() {
