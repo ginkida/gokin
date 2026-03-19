@@ -524,6 +524,16 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// Snapshot client once per executeLoop to avoid racing with SetClient.
 	cl := e.getClient()
 
+	// Reset token counters for this execution cycle.
+	// OutputTokens accumulates across rounds (each round generates new output).
+	// InputTokens is overwritten (last round has full context).
+	e.tokenMu.Lock()
+	e.lastInputTokens = 0
+	e.lastOutputTokens = 0
+	e.lastCacheCreationTokens = 0
+	e.lastCacheReadTokens = 0
+	e.tokenMu.Unlock()
+
 	// NOTE: checkpoint journal is NOT cleared here — it persists across retries
 	// within the same handleSubmit() so that write operations completed before
 	// an API failure can be replayed from cache instead of re-executed.
@@ -811,11 +821,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				"output_tokens", resp.OutputTokens)
 		}
 
-		// Capture token usage metadata from API response
+		// Capture token usage metadata from API response.
+		// InputTokens: use latest value (last round includes full history context).
+		// OutputTokens: accumulate across rounds (each round generates new output).
 		e.tokenMu.Lock()
-		if resp.InputTokens > 0 || resp.OutputTokens > 0 {
+		if resp.InputTokens > 0 {
 			e.lastInputTokens = resp.InputTokens
-			e.lastOutputTokens = resp.OutputTokens
+		}
+		if resp.OutputTokens > 0 {
+			e.lastOutputTokens += resp.OutputTokens
 		}
 		e.lastCacheCreationTokens = resp.CacheCreationInputTokens
 		e.lastCacheReadTokens = resp.CacheReadInputTokens

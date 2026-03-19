@@ -87,12 +87,13 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 				}
 			}
 
-			// Keep the latest non-zero usage metadata (typically from the final chunk)
+			// Keep the latest non-zero usage metadata (typically from the final chunk).
+			// All providers report cumulative totals, not per-chunk deltas.
 			if chunk.InputTokens > 0 {
 				resp.InputTokens = chunk.InputTokens
 			}
 			if chunk.OutputTokens > 0 {
-				resp.OutputTokens += chunk.OutputTokens
+				resp.OutputTokens = chunk.OutputTokens
 			}
 			if chunk.CacheCreationInputTokens > 0 {
 				resp.CacheCreationInputTokens = chunk.CacheCreationInputTokens
