@@ -1198,6 +1198,10 @@ func (a *App) CompactContextWithPlan(planSummary string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Notify user about context clear
+	a.safeSendToProgram(ui.StreamTextMsg(
+		"\n📋 Context cleared for plan execution. Previous conversation archived.\n"))
+
 	// Clear the session
 	a.session.Clear()
 

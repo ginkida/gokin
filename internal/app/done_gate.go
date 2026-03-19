@@ -505,11 +505,16 @@ func (a *App) runDoneGateAutoFix(ctx context.Context, userMessage string, result
 		return nil
 	}
 
+	a.safeSendToProgram(ui.StreamTextMsg(
+		fmt.Sprintf("\n🔧 Auto-fix attempt %d/%d — resolving %d incomplete check(s)...\n", attempt, max, len(failed))))
+
 	fixPrompt := buildDoneGateFixPrompt(userMessage, failed, attempt, max)
 	history := a.session.GetHistory()
 
 	newHistory, _, err := a.executor.Execute(ctx, history, fixPrompt)
 	if err != nil {
+		a.safeSendToProgram(ui.StreamTextMsg(
+			fmt.Sprintf("   Auto-fix attempt %d failed: %s\n", attempt, err.Error())))
 		return err
 	}
 
@@ -518,6 +523,9 @@ func (a *App) runDoneGateAutoFix(ctx context.Context, userMessage string, result
 	if a.sessionManager != nil {
 		_ = a.sessionManager.SaveAfterMessage()
 	}
+
+	a.safeSendToProgram(ui.StreamTextMsg(
+		fmt.Sprintf("   Auto-fix attempt %d complete.\n", attempt)))
 	return nil
 }
 

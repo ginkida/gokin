@@ -1301,9 +1301,18 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 		}
 	}
 
-	// Notify UI with plan banner
-	a.safeSendToProgram(ui.StreamTextMsg(
-		fmt.Sprintf("\n━━━ Executing plan: %s (%d steps) ━━━\n\n", approvedPlan.Title, totalSteps)))
+	// Notify UI with plan banner and step overview
+	var delegatedBannerBuf strings.Builder
+	delegatedBannerBuf.WriteString(fmt.Sprintf("\n━━━ Executing plan: %s (%d steps, delegated) ━━━\n", approvedPlan.Title, totalSteps))
+	if approvedPlan.Description != "" {
+		delegatedBannerBuf.WriteString(fmt.Sprintf("    %s\n", approvedPlan.Description))
+	}
+	delegatedBannerBuf.WriteString("\n")
+	for i, s := range approvedPlan.Steps {
+		delegatedBannerBuf.WriteString(fmt.Sprintf("  %d. %s\n", i+1, s.Title))
+	}
+	delegatedBannerBuf.WriteString("\n")
+	a.safeSendToProgram(ui.StreamTextMsg(delegatedBannerBuf.String()))
 
 	// Auto-resume: when all ready steps are exhausted but paused steps remain,
 	// wait a cooldown period and retry them automatically.
