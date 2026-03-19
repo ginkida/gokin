@@ -97,17 +97,24 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	// Find matching model within current provider
 	var matchedModel string
+
+	// First pass: exact match on ID or short name
 	for _, m := range providerModels {
-		if m.ID == newModel {
+		if m.ID == newModel || extractShortName(m.ID) == newModel {
 			matchedModel = m.ID
 			break
 		}
-		// Partial match (e.g., "flash" matches "gemini-3-flash-preview")
-		if strings.Contains(m.ID, newModel) || strings.Contains(extractShortName(m.ID), newModel) {
-			if matchedModel != "" {
-				return fmt.Sprintf("Ambiguous model name '%s'. Please be more specific.", newModel), nil
+	}
+
+	// Second pass: partial/substring match (only if no exact match)
+	if matchedModel == "" {
+		for _, m := range providerModels {
+			if strings.Contains(m.ID, newModel) || strings.Contains(extractShortName(m.ID), newModel) {
+				if matchedModel != "" {
+					return fmt.Sprintf("Ambiguous model name '%s'. Please be more specific.", newModel), nil
+				}
+				matchedModel = m.ID
 			}
-			matchedModel = m.ID
 		}
 	}
 
