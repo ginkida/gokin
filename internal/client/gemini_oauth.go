@@ -1172,8 +1172,9 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 				Content struct {
 					Role  string `json:"role"`
 					Parts []struct {
-						Text         string `json:"text,omitempty"`
-						Thought      bool   `json:"thought,omitempty"`
+						Text             string `json:"text,omitempty"`
+						Thought          bool   `json:"thought,omitempty"`
+						ThoughtSignature []byte `json:"thoughtSignature,omitempty"`
 						FunctionCall *struct {
 							Name string                 `json:"name"`
 							Args map[string]interface{} `json:"args"`
@@ -1204,8 +1205,9 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 				Content struct {
 					Role  string `json:"role"`
 					Parts []struct {
-						Text         string `json:"text,omitempty"`
-						Thought      bool   `json:"thought,omitempty"`
+						Text             string `json:"text,omitempty"`
+						Thought          bool   `json:"thought,omitempty"`
+						ThoughtSignature []byte `json:"thoughtSignature,omitempty"`
 						FunctionCall *struct {
 							Name string                 `json:"name"`
 							Args map[string]interface{} `json:"args"`
@@ -1233,21 +1235,29 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 			}
 
 			for _, part := range candidate.Content.Parts {
+				// Construct genai.Part preserving ThoughtSignature for Gemini 3
+				gPart := &genai.Part{
+					Text:             part.Text,
+					Thought:          part.Thought,
+					ThoughtSignature: part.ThoughtSignature,
+				}
+				if part.FunctionCall != nil {
+					gPart.FunctionCall = &genai.FunctionCall{
+						Name: part.FunctionCall.Name,
+						Args: part.FunctionCall.Args,
+					}
+				}
+				chunk.Parts = append(chunk.Parts, gPart)
+
 				if part.Thought {
 					chunk.Thinking += part.Text
 					continue
 				}
 				if part.Text != "" {
 					chunk.Text += part.Text
-					chunk.Parts = append(chunk.Parts, genai.NewPartFromText(part.Text))
 				}
-				if part.FunctionCall != nil {
-					fc := &genai.FunctionCall{
-						Name: part.FunctionCall.Name,
-						Args: part.FunctionCall.Args,
-					}
-					chunk.FunctionCalls = append(chunk.FunctionCalls, fc)
-					chunk.Parts = append(chunk.Parts, &genai.Part{FunctionCall: fc})
+				if gPart.FunctionCall != nil {
+					chunk.FunctionCalls = append(chunk.FunctionCalls, gPart.FunctionCall)
 				}
 			}
 			return chunk, nil
@@ -1275,21 +1285,29 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 	}
 
 	for _, part := range candidate.Content.Parts {
+		// Construct genai.Part preserving ThoughtSignature for Gemini 3
+		gPart := &genai.Part{
+			Text:             part.Text,
+			Thought:          part.Thought,
+			ThoughtSignature: part.ThoughtSignature,
+		}
+		if part.FunctionCall != nil {
+			gPart.FunctionCall = &genai.FunctionCall{
+				Name: part.FunctionCall.Name,
+				Args: part.FunctionCall.Args,
+			}
+		}
+		chunk.Parts = append(chunk.Parts, gPart)
+
 		if part.Thought {
 			chunk.Thinking += part.Text
 			continue
 		}
 		if part.Text != "" {
 			chunk.Text += part.Text
-			chunk.Parts = append(chunk.Parts, genai.NewPartFromText(part.Text))
 		}
-		if part.FunctionCall != nil {
-			fc := &genai.FunctionCall{
-				Name: part.FunctionCall.Name,
-				Args: part.FunctionCall.Args,
-			}
-			chunk.FunctionCalls = append(chunk.FunctionCalls, fc)
-			chunk.Parts = append(chunk.Parts, &genai.Part{FunctionCall: fc})
+		if gPart.FunctionCall != nil {
+			chunk.FunctionCalls = append(chunk.FunctionCalls, gPart.FunctionCall)
 		}
 	}
 

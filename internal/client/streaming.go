@@ -63,23 +63,27 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 				}
 			}
 
-			for _, fc := range chunk.FunctionCalls {
-				resp.FunctionCalls = append(resp.FunctionCalls, fc)
-				// CRITICAL: Also add to Parts so history reconstruction works correctly
-				// Without this, tool_use blocks are missing when we rebuild assistant messages
-				resp.Parts = append(resp.Parts, &genai.Part{FunctionCall: fc})
-				if handler.OnFunctionCall != nil {
-					handler.OnFunctionCall(fc)
+			// Accumulate original Parts (preserves ThoughtSignature for Gemini 3).
+			// Track which FunctionCalls came with original parts to avoid duplicates.
+			fcInParts := make(map[*genai.FunctionCall]bool)
+			for _, part := range chunk.Parts {
+				if part != nil {
+					resp.Parts = append(resp.Parts, part)
+					if part.FunctionCall != nil {
+						fcInParts[part.FunctionCall] = true
+					}
 				}
 			}
 
-			// Accumulate original Parts (preserves ThoughtSignature for Gemini 3).
-			// Skip FunctionCall parts since they are already added explicitly above;
-			// including them again causes duplicate FunctionCalls in history which
-			// triggers Gemini API 400 errors (mismatched call/response count).
-			for _, part := range chunk.Parts {
-				if part != nil && part.FunctionCall == nil {
-					resp.Parts = append(resp.Parts, part)
+			for _, fc := range chunk.FunctionCalls {
+				resp.FunctionCalls = append(resp.FunctionCalls, fc)
+				// CRITICAL: Also add to Parts so history reconstruction works correctly
+				// Only add if not already added from original chunk.Parts!
+				if !fcInParts[fc] {
+					resp.Parts = append(resp.Parts, &genai.Part{FunctionCall: fc})
+				}
+				if handler.OnFunctionCall != nil {
+					handler.OnFunctionCall(fc)
 				}
 			}
 
