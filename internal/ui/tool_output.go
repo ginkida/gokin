@@ -311,14 +311,40 @@ func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary interface
 		icon = "🔧"
 	case "bash":
 		icon = "⚡"
-	case "grep", "glob":
-		icon = "🔍"
-	case "git_log", "git_diff", "git_blame":
+	case "grep":
+		icon = "🎯"
+	case "glob":
+		icon = "📂"
+	case "diff", "git_diff":
+		icon = "📊"
+	case "git_log", "git_blame":
 		icon = "📜"
+	case "git_status", "git_add", "git_commit", "git_branch", "git_pr":
+		icon = "🔀"
 	case "web_fetch", "web_search":
 		icon = "🌐"
 	case "batch":
 		icon = "📦"
+	case "ask_agent", "coordinate":
+		icon = "🤖"
+	case "task", "run_tests":
+		icon = "🧪"
+	case "delete":
+		icon = "🗑️ "
+	case "copy", "move":
+		icon = "📋"
+	case "mkdir":
+		icon = "📁"
+	case "memory", "memorize", "history_search":
+		icon = "🧠"
+	case "enter_plan_mode", "update_plan_progress", "get_plan_status", "exit_plan_mode":
+		icon = "📋"
+	case "semantic_search", "code_graph":
+		icon = "🔬"
+	case "ssh":
+		icon = "🔒"
+	case "list_dir", "tree":
+		icon = "🗂️ "
 	default:
 		icon = "🔧"
 	}
@@ -366,7 +392,7 @@ func (r *ExecutionStatusRenderer) RenderSuccess(toolName string, duration time.D
 }
 
 // RenderError renders failed tool execution
-func (r *ExecutionStatusRenderer) RenderError(toolName string, errMsg string) string {
+func (r *ExecutionStatusRenderer) RenderError(toolName string, errMsg string, duration ...time.Duration) string {
 	errorStyle := lipgloss.NewStyle().
 		Foreground(ColorError).
 		Bold(true)
@@ -375,6 +401,10 @@ func (r *ExecutionStatusRenderer) RenderError(toolName string, errMsg string) st
 
 	var result strings.Builder
 	result.WriteString(errorStyle.Render("  ✗ " + toolName))
+	if len(duration) > 0 && duration[0] > 0 {
+		result.WriteString(" ")
+		result.WriteString(dimStyle.Render(fmt.Sprintf("(%v)", duration[0].Round(time.Millisecond))))
+	}
 	result.WriteString("\n")
 	result.WriteString(dimStyle.Render("    Error: " + errMsg))
 	result.WriteString("\n")

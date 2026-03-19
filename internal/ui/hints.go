@@ -39,24 +39,25 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 	var hint string
 	hintID := ""
 
-	// Context-aware hints (simplified)
+	// Context-aware hints with benefit-focused wording
 	switch {
 	case sessionDuration < 2*time.Minute:
-		hint = "Shift+Tab toggles planning mode for complex tasks"
+		hint = "Shift+Tab — tackle complex tasks step-by-step with planning mode"
 		hintID = "first_message"
 
 	case state == StateStreaming:
-		hint = "Esc cancels response"
+		hint = "Esc — cancel current response"
 		hintID = "cancel_streaming"
 
 	default:
-		// Rotate through general hints (shorter)
+		// Rotate through general hints (benefit-focused)
 		generalHints := []string{
-			"Shift+Tab toggles planning mode",
-			"Ctrl+P opens command palette",
-			"Option+C copies last response",
-			"Ctrl+T toggles task list",
-			"Ctrl+O shows activity feed",
+			"Shift+Tab — break complex tasks into reviewable steps",
+			"Ctrl+P — quickly find any command",
+			"Option+C — copy the last response to clipboard",
+			"Ctrl+T — track background tasks",
+			"Ctrl+O — see what agents are doing in real time",
+			"Type / to explore all available commands",
 			getTextSelectionHint(),
 		}
 

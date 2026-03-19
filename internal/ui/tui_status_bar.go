@@ -188,7 +188,6 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	degradedStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	providerStyle := lipgloss.NewStyle().Foreground(ColorAccent)
-	breakerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	heartbeatStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	var parts []string
@@ -209,20 +208,32 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	}
 
 	if m.hasActivePlanStatus() {
-		activeStep := fmt.Sprintf("plan:%d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
-		parts = append(parts, dimStyle.Render(activeStep))
+		planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
+		activeStep := fmt.Sprintf("📋 %d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+		if m.planProgress.CurrentTitle != "" {
+			title := m.planProgress.CurrentTitle
+			if len(title) > 20 {
+				title = title[:17] + "..."
+			}
+			activeStep += " " + title
+		}
+		parts = append(parts, planStyle.Render(activeStep))
 	}
 	if m.shouldShowBreaker() {
 		reqBreaker := shortBreakerState(m.runtimeStatus.RequestBreaker)
 		stepBreaker := shortBreakerState(m.runtimeStatus.StepBreaker)
-		parts = append(parts, breakerStyle.Render(fmt.Sprintf("breaker:req=%s,step=%s", reqBreaker, stepBreaker)))
+		if reqBreaker == "open" || stepBreaker == "open" {
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("🔴 circuit open"))
+		} else if reqBreaker == "half" || stepBreaker == "half" {
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Render("🟡 recovering"))
+		}
 	}
 
 	provider := m.runtimeStatus.Provider
 	if provider == "" {
 		provider = "unknown"
 	}
-	parts = append(parts, providerStyle.Render("provider:"+provider))
+	parts = append(parts, providerStyle.Render(provider))
 
 	tokenText := m.formatTokenStatus(withContextBar)
 	if tokenText != "" {
@@ -231,8 +242,8 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 
 	// Plan mode indicator
 	if m.planningModeEnabled {
-		planStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
-		parts = append(parts, planStyle.Render("PLAN"))
+		planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
+		parts = append(parts, planStyle.Render("📝 plan mode"))
 	}
 
 	// Background tasks
