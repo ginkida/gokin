@@ -122,7 +122,7 @@ func TestGetModelProfile_IsCoding(t *testing.T) {
 		"claude-opus", "claude-sonnet", "deepseek-chat",
 		"glm-5", "glm-4.7", "kimi-k2.5", "kimi-k2",
 		"gemini-3.1-pro", "gemini-3-pro", "gemini-2.5-pro",
-		"gpt-5.3-codex", "minimax-m2.5",
+		"gpt-5.3-codex", "minimax-m2.7", "minimax-m2.5",
 	}
 	for _, m := range codingModels {
 		p := GetModelProfile(m)

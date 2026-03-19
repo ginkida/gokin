@@ -20,7 +20,7 @@ func TestApplyPreset(t *testing.T) {
 		{"ollama", true, "llama3.2", "ollama"},
 		{"kimi", true, "kimi-k2.5", "kimi"},
 		{"deepseek", true, "deepseek-chat", "deepseek"},
-		{"minimax", true, "MiniMax-M2.5", "minimax"},
+		{"minimax", true, "MiniMax-M2.7", "minimax"},
 		{"nonexistent", false, "", ""},
 	}
 

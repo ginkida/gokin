@@ -77,6 +77,8 @@ var knownModelProfiles = map[string]ModelProfile{
 	"gemini-2.5-pro":  {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 
 	// MiniMax family
+	"minimax-m2.7-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
+	"minimax-m2.7":           {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 	"minimax-m2.5-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 	"minimax-m2.5":           {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 	"minimax":                {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},

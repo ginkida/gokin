@@ -91,6 +91,20 @@ var AvailableModels = []ModelInfo{
 	},
 	// MiniMax models (via Anthropic-compatible API)
 	{
+		ID:          "MiniMax-M2.7",
+		Name:        "MiniMax M2.7",
+		Description: "Recursive self-improvement, top real-world engineering",
+		Provider:    "minimax",
+		BaseURL:     DefaultMiniMaxBaseURL,
+	},
+	{
+		ID:          "MiniMax-M2.7-highspeed",
+		Name:        "MiniMax M2.7 Highspeed",
+		Description: "Same as M2.7, faster inference, low latency",
+		Provider:    "minimax",
+		BaseURL:     DefaultMiniMaxBaseURL,
+	},
+	{
 		ID:          "MiniMax-M2.5",
 		Name:        "MiniMax M2.5",
 		Description: "Peak performance, 200K context (~60 tps)",

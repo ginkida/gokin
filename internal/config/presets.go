@@ -84,7 +84,7 @@ var ModelPresets = map[string]ModelPreset{
 	},
 	"minimax": {
 		Provider:        "minimax",
-		Name:            "MiniMax-M2.5",
+		Name:            "MiniMax-M2.7",
 		Temperature:     0.7,
 		MaxOutputTokens: 16384,
 	},

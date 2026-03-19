@@ -107,7 +107,7 @@ var Providers = []ProviderDef{
 	{
 		Name:          "minimax",
 		DisplayName:   "MiniMax",
-		DefaultModel:  "MiniMax-M2.5",
+		DefaultModel:  "MiniMax-M2.7",
 		EnvVars:       []string{"GOKIN_MINIMAX_KEY", "MINIMAX_API_KEY"},
 		UsesLegacyKey: true,
 		GetKey:        func(api *APIConfig) string { return api.MiniMaxKey },

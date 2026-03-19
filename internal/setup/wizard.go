@@ -132,7 +132,7 @@ func buildSetupChoices() []setupChoice {
 				Action: "api:" + p.Name,
 				Title:  "MiniMax (Cloud)",
 				Lines: []string{
-					"MiniMax M2.5: 200K context, M2.5-highspeed available",
+					"MiniMax M2.7: 200K context, M2.7-highspeed available",
 					"Anthropic-compatible API",
 					"Get key at: " + p.SetupKeyURL,
 				},

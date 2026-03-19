@@ -175,7 +175,7 @@ func TestProviderDefaultModels(t *testing.T) {
 		"openai":    "gpt-5.4",
 		"glm":       "glm-5",
 		"deepseek":  "deepseek-chat",
-		"minimax":   "MiniMax-M2.5",
+		"minimax":   "MiniMax-M2.7",
 		"kimi":      "kimi-k2.5",
 		"ollama":    "llama3.2",
 	}

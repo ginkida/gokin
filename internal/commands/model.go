@@ -81,7 +81,7 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		case "openai":
 			sb.WriteString("\nExamples: /model 5.4  or  /model 5.3-codex  or  /model 5.3-codex-spark")
 		case "minimax":
-			sb.WriteString("\nExamples: /model M2.5  or  /model M2.5-highspeed")
+			sb.WriteString("\nExamples: /model M2.7  or  /model M2.7-highspeed  or  /model M2.5")
 		case "kimi":
 			sb.WriteString("\nExamples: /model k2.5  or  /model k2-thinking-turbo")
 		case "deepseek":

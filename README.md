@@ -212,7 +212,7 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 | **OpenAI** | GPT-5.3 Codex, o3, o4-mini | OAuth | Codex models |
 | **DeepSeek** | Chat, Reasoner | API key | Best price/quality |
 | **Kimi** | K2.5, K2 Thinking Turbo, K2 Turbo | API key | Fast reasoning, 256K context |
-| **MiniMax** | M2.5 | API key | 1M context, strong coding |
+| **MiniMax** | M2.7, M2.5 | API key | 200K context, strong coding |
 | **GLM** | GLM-5, GLM-4.7 | API key | Budget option |
 | **Ollama** | Any local model | None | 100% offline |
 
