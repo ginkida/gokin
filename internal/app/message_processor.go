@@ -642,9 +642,18 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		sharedMem = a.agentRunner.GetSharedMemory()
 	}
 
-	// 5. Notify UI with plan banner
-	a.safeSendToProgram(ui.StreamTextMsg(
-		fmt.Sprintf("\n━━━ Executing plan: %s (%d steps) ━━━\n\n", approvedPlan.Title, totalSteps)))
+	// 5. Notify UI with plan banner and step overview
+	var bannerBuf strings.Builder
+	bannerBuf.WriteString(fmt.Sprintf("\n━━━ Executing plan: %s (%d steps) ━━━\n", approvedPlan.Title, totalSteps))
+	if approvedPlan.Description != "" {
+		bannerBuf.WriteString(fmt.Sprintf("    %s\n", approvedPlan.Description))
+	}
+	bannerBuf.WriteString("\n")
+	for i, s := range approvedPlan.Steps {
+		bannerBuf.WriteString(fmt.Sprintf("  %d. %s\n", i+1, s.Title))
+	}
+	bannerBuf.WriteString("\n")
+	a.safeSendToProgram(ui.StreamTextMsg(bannerBuf.String()))
 
 	// 6. Execute steps using NextReadySteps for dependency-aware + parallel execution
 	const maxRetries = 3
@@ -818,6 +827,16 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		a.planManager.SkipStep(step.ID)
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("  Step %d skipped (condition: %s)\n", step.ID, step.Condition)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "skipped",
+			Reason:        step.Condition,
+		})
 		return
 	}
 	step.EnsureContractDefaults()
@@ -907,8 +926,12 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		Reason:        "step started",
 	})
 
-	header := fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title)
-	a.safeSendToProgram(ui.StreamTextMsg(header))
+	var headerBuf strings.Builder
+	headerBuf.WriteString(fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title))
+	if step.Description != "" {
+		headerBuf.WriteString(fmt.Sprintf("     %s\n", step.Description))
+	}
+	a.safeSendToProgram(ui.StreamTextMsg(headerBuf.String()))
 
 	// Build step-specific prompt with context from previous steps
 	prevSummary := a.planManager.GetPreviousStepsSummary(step.ID, planSummaryMaxChars)
@@ -1012,6 +1035,16 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("\n  Step %d failed (%s): %s\n", step.ID, errCat.String(), errMsg)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "failed",
+			Reason:        errMsg,
+		})
 
 		// Attempt adaptive replan on fatal errors
 		if errCat == plan.ErrorFatal && a.planManager.HasReplanHandler() {
@@ -1098,7 +1131,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	}
 
 	a.safeSendToProgram(ui.StreamTextMsg(
-		fmt.Sprintf("  Step %d complete\n\n", step.ID)))
+		fmt.Sprintf("  Step %d complete: %s\n\n", step.ID, step.Title)))
 	a.safeSendToProgram(ui.PlanProgressMsg{
 		PlanID:        approvedPlan.ID,
 		CurrentStepID: step.ID,
@@ -1440,6 +1473,16 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		a.planManager.SkipStep(step.ID)
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("  Step %d skipped (condition: %s)\n", step.ID, step.Condition)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "skipped",
+			Reason:        step.Condition,
+		})
 		return
 	}
 	step.EnsureContractDefaults()
@@ -1522,8 +1565,12 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	})
 
 	// Notify UI of step start with structured header
-	header := fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title)
-	a.safeSendToProgram(ui.StreamTextMsg(header))
+	var delegatedHeaderBuf strings.Builder
+	delegatedHeaderBuf.WriteString(fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title))
+	if step.Description != "" {
+		delegatedHeaderBuf.WriteString(fmt.Sprintf("     %s\n", step.Description))
+	}
+	a.safeSendToProgram(ui.StreamTextMsg(delegatedHeaderBuf.String()))
 
 	// Build step prompt with full plan context
 	prevSummary := a.planManager.GetPreviousStepsSummary(step.ID, planSummaryMaxChars)
@@ -1662,6 +1709,16 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("\n  Step %d failed (%s): %s\n", step.ID, errCat.String(), errMsg)))
+		a.safeSendToProgram(ui.PlanProgressMsg{
+			PlanID:        approvedPlan.ID,
+			CurrentStepID: step.ID,
+			CurrentTitle:  step.Title,
+			TotalSteps:    totalSteps,
+			Completed:     approvedPlan.CompletedCount(),
+			Progress:      approvedPlan.Progress(),
+			Status:        "failed",
+			Reason:        errMsg,
+		})
 
 		// Attempt adaptive replan on fatal errors
 		if errCat == plan.ErrorFatal && a.planManager.HasReplanHandler() {
@@ -1775,7 +1832,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	}
 
 	a.safeSendToProgram(ui.StreamTextMsg(
-		fmt.Sprintf("  Step %d complete\n\n", step.ID)))
+		fmt.Sprintf("  Step %d complete: %s\n\n", step.ID, step.Title)))
 	a.safeSendToProgram(ui.PlanProgressMsg{
 		PlanID:        approvedPlan.ID,
 		CurrentStepID: step.ID,
