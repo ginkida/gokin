@@ -13,8 +13,12 @@ import (
 )
 
 const (
-	// viewportUpdateInterval is the minimum time between viewport updates (60Hz)
-	viewportUpdateInterval = 16 * time.Millisecond
+	// Adaptive debounce intervals based on content size.
+	// Short content gets faster updates for responsiveness.
+	// Large content gets slower updates to reduce flicker.
+	viewportUpdateFast   = 8 * time.Millisecond  // < 5K chars: near-instant (120Hz)
+	viewportUpdateNormal = 16 * time.Millisecond  // 5K-50K chars: smooth (60Hz)
+	viewportUpdateSlow   = 32 * time.Millisecond  // > 50K chars: reduced flicker (30Hz)
 )
 
 // outputState holds the mutable state protected by a mutex.
@@ -260,18 +264,26 @@ func (m *OutputModel) ScrollToBottom() {
 func (m *OutputModel) updateViewport() {
 	m.state.mu.Lock()
 	ready := m.state.ready
+	contentSize := m.state.content.Len()
 	m.state.mu.Unlock()
 
 	if !ready {
 		return
 	}
 
+	// Adaptive debounce: faster updates for small content, slower for large
+	interval := viewportUpdateNormal
+	if contentSize < 5000 {
+		interval = viewportUpdateFast
+	} else if contentSize > 50000 {
+		interval = viewportUpdateSlow
+	}
+
 	now := time.Now().UnixNano()
 	lastUpdate := atomic.LoadInt64(&m.lastUpdateNano)
 	timeSinceLastUpdate := time.Duration(now - lastUpdate)
 
-	// Debounce: if updated recently, mark as dirty and skip
-	if timeSinceLastUpdate < viewportUpdateInterval {
+	if timeSinceLastUpdate < interval {
 		atomic.StoreInt64(&m.contentDirty, 1)
 		return
 	}
@@ -353,8 +365,20 @@ func (m *OutputModel) doViewportUpdate() {
 	m.state.mu.Lock()
 	frozen := m.state.frozen
 	m.state.mu.Unlock()
+
 	if !frozen {
 		m.viewport.GotoBottom()
+	} else {
+		// Smart unfreeze: if user is near the bottom (within 3 lines), auto-unfreeze
+		// so new streaming content becomes visible without manual scroll
+		totalLines := m.viewport.TotalLineCount()
+		visibleBottom := m.viewport.YOffset + m.viewport.Height
+		if totalLines > 0 && totalLines-visibleBottom <= 3 {
+			m.state.mu.Lock()
+			m.state.frozen = false
+			m.state.mu.Unlock()
+			m.viewport.GotoBottom()
+		}
 	}
 }
 

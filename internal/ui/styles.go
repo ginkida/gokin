@@ -535,6 +535,40 @@ func (s *Styles) FormatToolError(name string, err error) string {
 	return errorStyle.Render("✗ "+name) + "  " + msgStyle.Render(err.Error())
 }
 
+// --- Agent Activity Formatting ---
+// Agent tool calls shown with dim type prefix:
+//   explore ▸ Read internal/app/app.go
+//   explore ▸ Grep "pattern" ./internal/
+//   explore ✓ 5.2s
+// Flat format because background agents are async — their events
+// interleave with other output, making tree connectors unreliable.
+
+// FormatAgentToolCall renders an agent's tool call with type prefix.
+func (s *Styles) FormatAgentToolCall(agentType string, toolName string, args map[string]any) string {
+	prefixStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	return prefixStyle.Render("  "+agentType+" ") + s.FormatToolExecutingBlock(toolName, args)
+}
+
+// FormatAgentComplete renders agent completion.
+func (s *Styles) FormatAgentComplete(agentType string, elapsed time.Duration) string {
+	prefixStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+	durStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
+	dur := formatCompactDuration(elapsed)
+	return prefixStyle.Render("  "+agentType+" ") + checkStyle.Render("✓") + " " + durStyle.Render(dur)
+}
+
+// FormatAgentFailed renders agent failure.
+func (s *Styles) FormatAgentFailed(agentType string, elapsed time.Duration) string {
+	prefixStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	crossStyle := lipgloss.NewStyle().Foreground(ColorError)
+	durStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
+	dur := formatCompactDuration(elapsed)
+	return prefixStyle.Render("  "+agentType+" ") + crossStyle.Render("✗") + " " + durStyle.Render(dur)
+}
+
 // formatArgsSummary creates a brief summary of tool arguments.
 func formatArgsSummary(args map[string]any) string {
 	if len(args) == 0 {

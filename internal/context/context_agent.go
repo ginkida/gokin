@@ -23,6 +23,11 @@ type ContextAgent struct {
 	checkpointInterval  time.Duration
 	storageDir          string
 
+	// Predictive compaction: track token growth to compact before hitting limit
+	prevTokens    int
+	prevCheckTime time.Time
+	growthRate    float64 // tokens per second (smoothed)
+
 	mu       sync.Mutex
 	stopChan chan struct{}
 }
@@ -69,22 +74,70 @@ func (a *ContextAgent) Stop() {
 }
 
 // CheckAndCompact checks token usage and triggers compaction if threshold exceeded.
+// Uses both threshold-based and predictive compaction strategies.
 func (a *ContextAgent) CheckAndCompact(ctx context.Context) {
 	usage := a.manager.GetTokenUsage()
 	if usage == nil || usage.MaxTokens == 0 {
 		return
 	}
 
-	ratio := float64(usage.InputTokens) / float64(usage.MaxTokens)
+	currentTokens := usage.InputTokens
+	ratio := float64(currentTokens) / float64(usage.MaxTokens)
+
+	// Update growth rate estimate (exponential moving average)
+	// Protected by mu since CheckAndCompact can be called from the background ticker goroutine.
+	a.mu.Lock()
+	now := time.Now()
+	if a.prevTokens > 0 && !a.prevCheckTime.IsZero() {
+		elapsed := now.Sub(a.prevCheckTime).Seconds()
+		if elapsed > 0 {
+			instantRate := float64(currentTokens-a.prevTokens) / elapsed
+			if a.growthRate == 0 {
+				a.growthRate = instantRate
+			} else {
+				a.growthRate = a.growthRate*0.7 + instantRate*0.3 // EMA smoothing
+			}
+		}
+	}
+	a.prevTokens = currentTokens
+	a.prevCheckTime = now
+	growthRate := a.growthRate
+	a.mu.Unlock()
+
+	// Strategy 1: Threshold-based compaction (existing behavior)
 	if ratio >= a.compactionThreshold {
 		logging.Info("ContextAgent: threshold reached, starting auto-compaction",
 			"ratio", fmt.Sprintf("%.2f", ratio))
+		a.runCompaction(ctx)
+		return
+	}
 
-		if err := a.manager.OptimizeContext(ctx); err != nil {
-			logging.Error("auto-compaction failed", "error", err)
-		} else {
-			logging.Info("auto-compaction successful")
+	// Strategy 2: Predictive compaction — if growth rate suggests we'll hit the limit
+	// within the next 2 minutes, compact preemptively.
+	if growthRate > 0 && ratio > 0.5 {
+		tokensRemaining := float64(usage.MaxTokens) - float64(currentTokens)
+		secondsToLimit := tokensRemaining / growthRate
+		if secondsToLimit < 120 { // Less than 2 minutes to limit
+			logging.Info("ContextAgent: predictive compaction triggered",
+				"ratio", fmt.Sprintf("%.2f", ratio),
+				"growth_rate", fmt.Sprintf("%.0f tok/s", growthRate),
+				"seconds_to_limit", fmt.Sprintf("%.0f", secondsToLimit))
+			a.runCompaction(ctx)
+			return
 		}
+	}
+}
+
+func (a *ContextAgent) runCompaction(ctx context.Context) {
+	if err := a.manager.OptimizeContext(ctx); err != nil {
+		logging.Error("auto-compaction failed", "error", err)
+	} else {
+		logging.Info("auto-compaction successful")
+		// Reset growth tracking after compaction (token count changed dramatically)
+		a.mu.Lock()
+		a.prevTokens = 0
+		a.growthRate = 0
+		a.mu.Unlock()
 	}
 }
 

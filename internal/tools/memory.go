@@ -159,14 +159,16 @@ func (t *MemoryTool) remember(args map[string]any) (ToolResult, error) {
 	tagsRaw, _ := args["tags"]
 	ttlMinutes := GetIntDefault(args, "ttl_minutes", 0)
 
-	// Parse scope
+	// Parse scope — all memories are scoped to the current project directory.
+	// Global scope is disabled to prevent cross-project memory leaks.
 	scopeName, _ := GetString(args, "scope")
 	memType := memory.MemoryProject
 	switch scopeName {
 	case "session":
 		memType = memory.MemorySession
 	case "global":
-		memType = memory.MemoryGlobal
+		// Redirect global to project — memories should stay within the working directory
+		memType = memory.MemoryProject
 	}
 
 	// Create entry
@@ -217,7 +219,7 @@ func (t *MemoryTool) recall(args map[string]any) (ToolResult, error) {
 	key, _ := GetString(args, "key")
 	query, _ := GetString(args, "query")
 	tagsRaw, _ := args["tags"]
-	projectOnly := GetBoolDefault(args, "project_only", false)
+	projectOnly := GetBoolDefault(args, "project_only", true) // Default: only current directory
 	includeArchived := GetBoolDefault(args, "include_archived", false)
 
 	// If key is specified, try exact match first
@@ -338,7 +340,7 @@ func (t *MemoryTool) forget(args map[string]any) (ToolResult, error) {
 }
 
 func (t *MemoryTool) list(args map[string]any) (ToolResult, error) {
-	projectOnly := GetBoolDefault(args, "project_only", false)
+	projectOnly := GetBoolDefault(args, "project_only", true) // Default: only current directory
 	includeArchived := GetBoolDefault(args, "include_archived", false)
 
 	var entries []*memory.Entry

@@ -110,6 +110,21 @@ gokin
 - **Semantic Search** — Find code by meaning, not just keywords
 - **Code Graph** — Dependency visualization
 - **Multi-file Analysis** — Understand entire modules
+- **Session Memory** — Auto-summarizes your session (files, tools, errors, decisions). Survives context compaction. Optional LLM-based summarization every 3rd extraction.
+
+### 📝 Multi-Layer Project Instructions
+```
+Priority:  Low ──────────────────────────────── High
+           Global → User → Project → Local
+
+Global:    ~/.config/gokin/GOKIN.md
+User:      ~/.gokin/GOKIN.md
+Project:   ./GOKIN.md, .gokin/rules/*.md
+Local:     ./GOKIN.local.md (git-ignored)
+```
+- All layers merged automatically
+- `@include` directive: `@./path`, `@~/path`, `@/absolute/path`
+- File watching with auto-reload on changes
 
 ### ⚒️ 54 Built-in Tools
 - **Files**: read, write, edit, diff, batch, copy, move, delete
@@ -118,6 +133,7 @@ gokin
 - **Run**: bash, run_tests, ssh, env
 - **Plan**: todo, task, enter_plan_mode, coordinate
 - **Memory**: memorize, shared_memory, pin_context
+- **Parallel execution**: Read-only tools (read, grep, glob) run in parallel when model calls multiple
 
 ### 🤝 Multi-Agent System
 ```
@@ -133,13 +149,29 @@ gokin
 - Up to 5 parallel agents
 - Shared memory between agents
 - Automatic task decomposition
+- **API retry with exponential backoff** — agents survive transient API errors (rate limits, timeouts, 500s)
+- **Provider failover** — agents automatically try fallback providers when primary fails
+- **Real-time streaming** — agent output streamed to UI as it's generated
+- **Git worktree support** — parallel branch work with isolated sessions
+
+### 💰 Cost Tracking
+- Per-model pricing for all 20+ models across 8 providers
+- Real-time cost in status bar (`$0.0243`)
+- Per-response cost in message footer
+- `/cost` and `/stats` commands with accurate model-specific pricing
+
+### 🔄 Prompt Caching
+- Explicit `cache_control` breakpoints for Anthropic, MiniMax, and Kimi
+- System prompt, tools, and conversation prefix cached — up to 90% input cost savings
+- Cache break detection with efficiency tracking
 
 ### 🛡️ Safety & Permissions
 - **3-level permissions**: Low (auto), Medium (ask once), High (always ask)
 - **Sandbox mode** for bash commands
-- **Diff preview** before applying changes
+- **Diff preview** before applying changes (single-file and multi-file)
 - **Undo/Redo** for all file operations
 - **Audit logging**
+- **Proactive context compaction** — predicts token growth and compacts before hitting model limits
 
 ---
 

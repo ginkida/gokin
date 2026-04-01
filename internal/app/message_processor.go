@@ -115,6 +115,11 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	if a.executor != nil {
 		a.executor.ResetSideEffectLedger()
 		a.executor.SetSideEffectDedup(false)
+
+		// Track prompt cache state for cache break detection
+		if ct := a.executor.GetCacheTracker(); ct != nil {
+			ct.RecordState(a.session.SystemInstruction, "")
+		}
 	}
 
 	// Reset stale in_progress todos from previous turn.
@@ -398,6 +403,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// Update session history
 	a.session.SetHistory(newHistory)
 	a.applyToolOutputHygiene()
+
+	// Extract session memory if thresholds are met.
+	// Copy the history slice to avoid races — Extract runs in a goroutine.
+	if a.sessionMemory != nil && a.sessionMemory.ShouldExtract(a.totalInputTokens) {
+		histSnapshot := make([]*genai.Content, len(newHistory))
+		copy(histSnapshot, newHistory)
+		go a.sessionMemory.Extract(histSnapshot, a.totalInputTokens)
+	}
 
 	// Check for context-clear request after plan approval
 	if a.planManager != nil && a.planManager.IsContextClearRequested() {

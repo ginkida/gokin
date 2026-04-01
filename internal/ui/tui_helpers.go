@@ -407,10 +407,7 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 		}
 	}
 
-	// Cost estimation
-	if meta.Cost > 0 {
-		parts = append(parts, fmt.Sprintf("$%.4f", meta.Cost))
-	}
+	// Cost available via /cost command
 
 	if len(parts) == 0 {
 		return ""

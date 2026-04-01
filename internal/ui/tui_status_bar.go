@@ -177,6 +177,8 @@ func (m Model) renderStatusBarFull() string {
 		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(mcpColor).Render(fmt.Sprintf("MCP %d/%d", m.mcpHealthy, m.mcpTotal)))
 	}
 
+	// Session cost — disabled in status bar (available via /cost command)
+
 	left := strings.Join(leftParts, " · ")
 	right := strings.Join(rightParts, " · ")
 

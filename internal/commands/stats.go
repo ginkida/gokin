@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	appcontext "gokin/internal/context"
 	"gokin/internal/format"
 )
 
@@ -47,13 +48,16 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	sb.WriteString(fmt.Sprintf("  Output Tokens:    %s\n", formatNumber(int64(tokenStats.OutputTokens))))
 	sb.WriteString(fmt.Sprintf("  Total Tokens:     %s\n", formatNumber(int64(tokenStats.TotalTokens))))
 
-	// Calculate cost (rough estimation)
-	// Gemini 2.5 Flash: $0.075/1M input, $0.30/1M output
-	inputCost := float64(tokenStats.InputTokens) / 1_000_000 * 0.075
-	outputCost := float64(tokenStats.OutputTokens) / 1_000_000 * 0.30
-	totalCost := inputCost + outputCost
-
-	sb.WriteString(fmt.Sprintf("  Est. Cost:       $%.4f USD\n\n", totalCost))
+	// Calculate cost using per-model pricing from TokenCounter
+	var totalCost float64
+	contextManager := app.GetContextManager()
+	if contextManager != nil {
+		tc := contextManager.GetTokenCounter()
+		if tc != nil {
+			totalCost = tc.CalculateCost(tokenStats.InputTokens, tokenStats.OutputTokens)
+		}
+	}
+	sb.WriteString(fmt.Sprintf("  Est. Cost:       %s\n\n", appcontext.FormatCost(totalCost)))
 
 	// Model Info
 	sb.WriteString("🤖 Model\n")
@@ -63,7 +67,9 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	// Context Info
 	sb.WriteString("📚 Context\n")
-	contextManager := app.GetContextManager()
+	if contextManager == nil {
+		contextManager = app.GetContextManager()
+	}
 	if contextManager != nil {
 		metrics := contextManager.GetMetrics()
 		summary := metrics.GetSummary()

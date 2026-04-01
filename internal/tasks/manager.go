@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -192,6 +193,10 @@ func (m *Manager) Cleanup(maxAge time.Duration) int {
 
 	for id, task := range m.tasks {
 		if task.IsCompleteAndBefore(cutoff) {
+			// Clean up output file if it exists
+			if fp := task.Output.FilePath(); fp != "" {
+				os.Remove(fp)
+			}
 			delete(m.tasks, id)
 			count++
 		}

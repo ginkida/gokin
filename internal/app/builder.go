@@ -101,6 +101,9 @@ type Builder struct {
 	// Context Predictor (predictive file loading)
 	contextPredictor *appcontext.ContextPredictor
 
+	// Session Memory (automatic conversation summary)
+	sessionMemory *appcontext.SessionMemoryManager
+
 	// For error collection during build
 	buildErrors []error
 	mu          sync.Mutex
@@ -452,6 +455,32 @@ func (b *Builder) initSession() error {
 	b.promptBuilder = appcontext.NewPromptBuilder(b.workDir, b.projectInfo)
 	b.promptBuilder.SetProjectMemory(b.projectMemory)
 	b.promptBuilder.SetPlanAutoDetect(b.cfg.Plan.AutoDetect)
+
+	// Initialize session memory for automatic context extraction
+	smConfig := appcontext.SessionMemoryConfig{
+		Enabled:                 b.cfg.SessionMemory.Enabled,
+		MinTokensToInit:         b.cfg.SessionMemory.MinTokensToInit,
+		MinTokensBetweenUpdates: b.cfg.SessionMemory.MinTokensBetweenUpdates,
+		ToolCallsBetweenUpdates: b.cfg.SessionMemory.ToolCallsBetweenUpdates,
+	}
+	if smConfig.MinTokensToInit == 0 {
+		smConfig = appcontext.DefaultSessionMemoryConfig()
+	}
+	b.sessionMemory = appcontext.NewSessionMemoryManager(b.workDir, smConfig)
+	b.sessionMemory.LoadFromDisk()
+	b.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(b.geminiClient))
+	b.promptBuilder.SetSessionMemory(b.sessionMemory)
+
+	// Ensure .gokin working files are in .gitignore
+	appcontext.EnsureGokinGitignore(b.workDir)
+
+	// Detect git worktree for session isolation awareness
+	if wt := git.DetectWorktree(b.workDir); wt != nil && !wt.IsMainWorktree {
+		logging.Info("running inside git worktree",
+			"branch", wt.Branch,
+			"head", wt.Head,
+			"main_root", git.GetMainWorktreeRoot(b.workDir))
+	}
 
 	b.contextManager = appcontext.NewContextManager(b.ctx, b.session, b.geminiClient, &b.cfg.Context)
 	b.contextAgent = appcontext.NewContextAgent(b.contextManager, b.session, b.configDir)
@@ -1327,6 +1356,11 @@ func (b *Builder) wireDependencies() error {
 			// Task 5.8: Record tool usage for pattern learning
 			app.recordToolUsage(name)
 
+			// Session memory: track tool call for extraction threshold
+			if app.sessionMemory != nil {
+				app.sessionMemory.RecordToolCall()
+			}
+
 			if app.program != nil {
 				app.program.Send(ui.ToolCallMsg{Name: name, Args: args})
 			}
@@ -1676,7 +1710,8 @@ func (b *Builder) assembleApp() *App {
 		treePlanner:         b.treePlanner,
 		planningModeEnabled: b.cfg.Plan.Enabled,
 		// MCP (Model Context Protocol)
-		mcpManager: b.mcpManager,
+		mcpManager:    b.mcpManager,
+		sessionMemory: b.sessionMemory,
 		// Auto retry tracking
 		rateLimitRetryCount: make(map[string]int),
 		// Step rollback snapshots

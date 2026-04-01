@@ -185,6 +185,9 @@ type Executor struct {
 	lastCacheCreationTokens int
 	lastCacheReadTokens     int
 
+	// Prompt cache break detection
+	cacheTracker *client.CacheTracker
+
 	// Circuit breakers for tools
 	breakerMu    sync.Mutex
 	toolBreakers map[string]*robustness.CircuitBreaker
@@ -313,6 +316,7 @@ func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Du
 		sideEffectsByCallID:    make(map[string]ToolResult),
 		sideEffectsBySignature: make(map[string]ToolResult),
 		checkpoint:             NewCheckpointJournal(),
+		cacheTracker:           client.NewCacheTracker(),
 	}
 }
 
@@ -508,6 +512,11 @@ func (e *Executor) GetLastCacheMetrics() (int, int) {
 	creation, read := e.lastCacheCreationTokens, e.lastCacheReadTokens
 	e.tokenMu.Unlock()
 	return creation, read
+}
+
+// GetCacheTracker returns the prompt cache break tracker.
+func (e *Executor) GetCacheTracker() *client.CacheTracker {
+	return e.cacheTracker
 }
 
 // Execute processes a user message through the function calling loop.
@@ -835,6 +844,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		e.lastCacheReadTokens = resp.CacheReadInputTokens
 		e.tokenMu.Unlock()
 
+		// Track prompt cache usage for cache break detection
+		if e.cacheTracker != nil && (resp.CacheCreationInputTokens > 0 || resp.CacheReadInputTokens > 0) {
+			e.cacheTracker.RecordUsage(resp.CacheCreationInputTokens, resp.CacheReadInputTokens)
+		}
+
 		// Detect empty response — model returned no text and no function calls.
 		// Break immediately instead of looping, the fallback below will provide a message.
 		if finalText == "" {
@@ -990,114 +1004,71 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 
 	results := make([]*genai.FunctionResponse, len(calls))
 
-	// For single tool, execute directly
-	if len(calls) == 1 {
-		result := e.executeTool(ctx, calls[0])
-		results[0] = &genai.FunctionResponse{
-			ID:       calls[0].ID,
-			Name:     calls[0].Name,
-			Response: result.ToMap(),
-		}
-		return results, nil
-	}
+	// Classify tools into dependency groups for optimal parallel execution.
+	// Read-only tools (read, grep, glob, etc.) run in parallel within their group.
+	// Write tools (edit, write, bash, etc.) run sequentially in their own group.
+	// Groups execute sequentially to preserve write-before-read ordering.
+	groups := defaultClassifier.classifyDependencies(calls)
 
-	// Check for file dependencies between parallel calls
-	orderedCalls, reordered := orderByDependencies(calls)
-	if reordered {
-		logging.Debug("executing tool calls sequentially due to file dependencies",
-			"count", len(orderedCalls))
-		// Execute sequentially so write-before-read ordering is respected
-		for i, call := range orderedCalls {
-			select {
-			case <-ctx.Done():
-				results[i] = &genai.FunctionResponse{
-					ID:       call.ID,
-					Name:     call.Name,
-					Response: NewErrorResult("cancelled").ToMap(),
-				}
-				continue
-			default:
-			}
-			result := e.executeTool(ctx, call)
-			results[i] = &genai.FunctionResponse{
-				ID:       call.ID,
-				Name:     call.Name,
-				Response: result.ToMap(),
-			}
-		}
-		return results, nil
-	}
-
-	// For multiple tools, execute in parallel with semaphore to limit concurrency
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	semaphore := make(chan struct{}, MaxConcurrentToolExecutions)
-
+	callToIdx := make(map[*genai.FunctionCall]int) // map call pointer to results index
 	for i, call := range calls {
-		wg.Add(1)
-		go func(idx int, fc *genai.FunctionCall) {
-			defer wg.Done()
-
-			// Acquire semaphore slot
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }() // Release slot when done
-			case <-ctx.Done():
-				mu.Lock()
-				results[idx] = &genai.FunctionResponse{
-					ID:       fc.ID,
-					Name:     fc.Name,
-					Response: NewErrorResult("cancelled").ToMap(),
-				}
-				mu.Unlock()
-				return
-			}
-
-			defer func() {
-				if r := recover(); r != nil {
-					stack := make([]byte, 4096)
-					length := runtime.Stack(stack, false)
-					logging.Error("tool execution panic",
-						"tool", fc.Name,
-						"panic", r,
-						"stack", string(stack[:length]))
-
-					mu.Lock()
-					results[idx] = &genai.FunctionResponse{
-						ID:       fc.ID,
-						Name:     fc.Name,
-						Response: NewErrorResult(fmt.Sprintf("panic: %v", r)).ToMap(),
-					}
-					mu.Unlock()
-				}
-			}()
-
-			select {
-			case <-ctx.Done():
-				mu.Lock()
-				results[idx] = &genai.FunctionResponse{
-					ID:       fc.ID,
-					Name:     fc.Name,
-					Response: NewErrorResult("cancelled").ToMap(),
-				}
-				mu.Unlock()
-				return
-			default:
-			}
-
-			result := e.executeTool(ctx, fc)
-
-			mu.Lock()
-			results[idx] = &genai.FunctionResponse{
-				ID:       fc.ID,
-				Name:     fc.Name,
-				Response: result.ToMap(),
-			}
-			mu.Unlock()
-		}(i, call)
+		callToIdx[call] = i
 	}
 
-	wg.Wait()
+	for _, group := range groups {
+		if group.Parallel && len(group.Calls) > 1 {
+			// Execute read-only tools in parallel
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			semaphore := make(chan struct{}, MaxConcurrentToolExecutions)
+
+			for _, call := range group.Calls {
+				idx := callToIdx[call]
+				wg.Add(1)
+				go func(i int, fc *genai.FunctionCall) {
+					defer wg.Done()
+					select {
+					case semaphore <- struct{}{}:
+						defer func() { <-semaphore }()
+					case <-ctx.Done():
+						mu.Lock()
+						results[i] = &genai.FunctionResponse{ID: fc.ID, Name: fc.Name, Response: NewErrorResult("cancelled").ToMap()}
+						mu.Unlock()
+						return
+					}
+					defer func() {
+						if r := recover(); r != nil {
+							stack := make([]byte, 4096)
+							length := runtime.Stack(stack, false)
+							logging.Error("tool execution panic", "tool", fc.Name, "panic", r, "stack", string(stack[:length]))
+							mu.Lock()
+							results[i] = &genai.FunctionResponse{ID: fc.ID, Name: fc.Name, Response: NewErrorResult(fmt.Sprintf("panic: %v", r)).ToMap()}
+							mu.Unlock()
+						}
+					}()
+					result := e.executeTool(ctx, fc)
+					mu.Lock()
+					results[i] = &genai.FunctionResponse{ID: fc.ID, Name: fc.Name, Response: result.ToMap()}
+					mu.Unlock()
+				}(idx, call)
+			}
+			wg.Wait()
+		} else {
+			// Execute sequentially (write tools or single tool)
+			for _, call := range group.Calls {
+				idx := callToIdx[call]
+				select {
+				case <-ctx.Done():
+					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: NewErrorResult("cancelled").ToMap()}
+					continue
+				default:
+				}
+				result := e.executeTool(ctx, call)
+				results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}
+			}
+		}
+	}
+
 	return results, nil
 }
 
@@ -1375,6 +1346,11 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Step 8: Execute with timeout
 	execCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
+
+	// Inject streaming callback so tools (e.g. task/agent) can stream output to UI
+	if e.handler != nil && e.handler.OnText != nil {
+		execCtx = ContextWithStreamingCallback(execCtx, StreamingCallback(e.handler.OnText))
+	}
 
 	start := time.Now()
 

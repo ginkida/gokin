@@ -23,8 +23,9 @@ type Config struct {
 	Watcher     WatcherConfig     `yaml:"watcher"`
 	DiffPreview DiffPreviewConfig `yaml:"diff_preview"`
 	Semantic    SemanticConfig    `yaml:"semantic"`
-	MCP         MCPConfig         `yaml:"mcp"`
-	Update      UpdateConfig      `yaml:"update"`
+	MCP           MCPConfig         `yaml:"mcp"`
+	Update        UpdateConfig      `yaml:"update"`
+	SessionMemory SessionMemoryConfig `yaml:"session_memory"`
 
 	// Runtime version information
 	Version string `yaml:"-"`
@@ -314,6 +315,14 @@ type SessionConfig struct {
 	Enabled      bool          `yaml:"enabled"`       // Enable session persistence
 	SaveInterval time.Duration `yaml:"save_interval"` // Auto-save interval (default: 2m)
 	AutoLoad     bool          `yaml:"auto_load"`     // Auto-load last session on startup
+}
+
+// SessionMemoryConfig holds automatic session memory extraction settings.
+type SessionMemoryConfig struct {
+	Enabled                 bool `yaml:"enabled"`                      // Enable session memory extraction
+	MinTokensToInit         int  `yaml:"min_tokens_to_init"`          // Tokens before first extraction (default: 10000)
+	MinTokensBetweenUpdates int  `yaml:"min_tokens_between_updates"`  // Token delta for re-extraction (default: 5000)
+	ToolCallsBetweenUpdates int  `yaml:"tool_calls_between_updates"`  // Tool calls before re-extraction (default: 3)
 }
 
 // MemoryConfig holds memory system settings.

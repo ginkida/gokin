@@ -978,6 +978,20 @@ func (m *Manager) DeleteSavedPlan(planID string) error {
 	return store.Delete(planID)
 }
 
+// CleanupOldPlans removes old plans from storage.
+// Completed plans are removed after maxAge, paused plans are kept 3x longer.
+func (m *Manager) CleanupOldPlans(maxAge time.Duration) (int, error) {
+	m.mu.RLock()
+	store := m.planStore
+	m.mu.RUnlock()
+
+	if store == nil {
+		return 0, nil
+	}
+
+	return store.Cleanup(maxAge)
+}
+
 // HasPausedPlan checks if there's a paused plan (in memory or storage).
 func (m *Manager) HasPausedPlan() bool {
 	m.mu.RLock()

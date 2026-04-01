@@ -276,7 +276,8 @@ func (c *AnthropicClient) supportsPromptCaching() bool {
 	if base == DefaultAnthropicBaseURL || base == "" {
 		return true
 	}
-	return strings.Contains(base, "minimax")
+	// MiniMax and Kimi support Anthropic-compatible prompt caching
+	return strings.Contains(base, "minimax") || strings.Contains(base, "moonshot")
 }
 
 // applyCacheControl injects cache_control markers into the request body
@@ -301,6 +302,45 @@ func (c *AnthropicClient) applyCacheControl(requestBody map[string]interface{}) 
 	if toolsRaw, ok := requestBody["tools"]; ok {
 		if tools, ok := toolsRaw.([]map[string]interface{}); ok && len(tools) > 0 {
 			tools[len(tools)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
+		}
+	}
+
+	// Messages: cache_control on the second-to-last user turn for conversation prefix caching.
+	// This allows the API to cache all messages up to the penultimate user turn,
+	// so only the latest exchange (user message + model response) is uncached.
+	if msgsRaw, ok := requestBody["messages"]; ok {
+		// Handle both []map[string]interface{} (pre-marshal) and []interface{} (post-unmarshal)
+		var msgs []map[string]interface{}
+		switch typed := msgsRaw.(type) {
+		case []map[string]interface{}:
+			msgs = typed
+		case []interface{}:
+			for _, item := range typed {
+				if m, ok := item.(map[string]interface{}); ok {
+					msgs = append(msgs, m)
+				}
+			}
+		}
+		if len(msgs) >= 4 {
+			// Find the second-to-last user message
+			for i := len(msgs) - 3; i >= 0; i-- {
+				if role, _ := msgs[i]["role"].(string); role == "user" {
+					// Add cache_control to the last content block of this message
+					switch contentTyped := msgs[i]["content"].(type) {
+					case []map[string]interface{}:
+						if len(contentTyped) > 0 {
+							contentTyped[len(contentTyped)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
+						}
+					case []interface{}:
+						if len(contentTyped) > 0 {
+							if block, ok := contentTyped[len(contentTyped)-1].(map[string]interface{}); ok {
+								block["cache_control"] = map[string]string{"type": "ephemeral"}
+							}
+						}
+					}
+					break
+				}
+			}
 		}
 	}
 }
@@ -1099,13 +1139,19 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 			deltaType := stringFromMap(delta, "type")
 			logging.Debug("SSE delta content", "delta", delta, "type", deltaType)
 
-			// Handle thinking delta
+			// Handle thinking delta (Anthropic native)
 			if deltaType == "thinking_delta" {
 				if thinking, ok := delta["thinking"].(string); ok && thinking != "" {
 					acc.thinkingBuilder.WriteString(thinking)
 					chunk.Thinking = thinking
 					logging.Debug("SSE thinking delta received", "thinking_length", len(thinking))
 				}
+			}
+
+			// Handle reasoning_content (DeepSeek Reasoner sends thinking via this field)
+			if reasoning, ok := delta["reasoning_content"].(string); ok && reasoning != "" {
+				acc.thinkingBuilder.WriteString(reasoning)
+				chunk.Thinking = reasoning
 			}
 
 			// Handle text delta

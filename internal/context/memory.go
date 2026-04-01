@@ -23,7 +23,7 @@ type ProjectMemory struct {
 	onReload      func() // Callback when instructions are reloaded
 }
 
-// instructionFiles is the ordered list of files to search for instructions.
+// instructionFiles is the ordered list of files to search for instructions in the project directory.
 var instructionFiles = []string{
 	"GOKIN.md",
 	"CLAUDE.md",
@@ -33,6 +33,75 @@ var instructionFiles = []string{
 	".gokin/INSTRUCTIONS.md",
 	".gokin.md",
 	"rules.md",
+}
+
+// memoryLayerPaths returns paths for the multi-layer memory hierarchy.
+// Layers are loaded in order (lowest to highest priority):
+//  1. Global: ~/.config/gokin/GOKIN.md
+//  2. User:   ~/.gokin/GOKIN.md
+//  3. Project: ./GOKIN.md (or .gokin/GOKIN.md, .gokin/rules/*.md)
+//  4. Local:   ./GOKIN.local.md (git-ignored, private)
+func memoryLayerPaths(workDir string) []struct {
+	label string
+	paths []string // multiple paths per layer (e.g., rules/*.md)
+} {
+	homeDir, _ := os.UserHomeDir()
+	layers := []struct {
+		label string
+		paths []string
+	}{
+		{
+			label: "global",
+			paths: []string{
+				filepath.Join(homeDir, ".config", "gokin", "GOKIN.md"),
+			},
+		},
+		{
+			label: "user",
+			paths: []string{
+				filepath.Join(homeDir, ".gokin", "GOKIN.md"),
+			},
+		},
+	}
+
+	// Project layer: split into two sub-layers so that the "first match" break
+	// in Load() only applies to instructionFiles, not to rules/*.md.
+	projectMainPaths := []string{}
+	for _, name := range instructionFiles {
+		projectMainPaths = append(projectMainPaths, filepath.Join(workDir, name))
+	}
+	layers = append(layers, struct {
+		label string
+		paths []string
+	}{
+		label: "project",
+		paths: projectMainPaths,
+	})
+
+	// Project rules layer: all .gokin/rules/*.md (always loaded, no "first match" break)
+	rulesGlob := filepath.Join(workDir, ".gokin", "rules", "*.md")
+	if matches, err := filepath.Glob(rulesGlob); err == nil && len(matches) > 0 {
+		layers = append(layers, struct {
+			label string
+			paths []string
+		}{
+			label: "project-rules",
+			paths: matches,
+		})
+	}
+
+	// Local layer (highest priority, git-ignored)
+	layers = append(layers, struct {
+		label string
+		paths []string
+	}{
+		label: "local",
+		paths: []string{
+			filepath.Join(workDir, "GOKIN.local.md"),
+		},
+	})
+
+	return layers
 }
 
 // InstructionFileNames returns the instruction discovery order.
@@ -49,35 +118,111 @@ func NewProjectMemory(workDir string) *ProjectMemory {
 	}
 }
 
-// Load searches for and loads project instructions.
-// It checks files in order: GOKIN.md, CLAUDE.md, .gokin/instructions.md, etc.
+// Load searches for and loads project instructions from the multi-layer hierarchy.
+// Layers (lowest to highest priority): Global → User → Project → Local.
+// All found layers are merged, with higher priority layers appended last.
 // Returns nil error even if no file is found (instructions are optional).
 func (m *ProjectMemory) Load() error {
-	for _, filename := range instructionFiles {
-		path := filepath.Join(m.workDir, filename)
-		content, err := os.ReadFile(path)
-		if err == nil {
-			m.instructions = strings.TrimSpace(string(content))
-			m.sourcePath = path
-			// Log successful load with file info
-			logging.Info("✓ Loaded project instructions",
-				"source", filename,
+	var merged strings.Builder
+	var sources []string
+
+	layers := memoryLayerPaths(m.workDir)
+	for _, layer := range layers {
+		for _, path := range layer.paths {
+			content, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			text := strings.TrimSpace(string(content))
+			if text == "" {
+				continue
+			}
+			// Process @include directives
+			text = processIncludes(text, filepath.Dir(path))
+
+			if merged.Len() > 0 {
+				merged.WriteString("\n\n")
+			}
+			merged.WriteString(text)
+			sources = append(sources, path)
+			logging.Info("✓ Loaded instructions layer",
+				"layer", layer.label,
 				"path", path,
-				"size_bytes", len(content),
-				"lines", strings.Count(m.instructions, "\n")+1)
-			return nil
-		}
-		// Continue searching if file not found
-		if !os.IsNotExist(err) {
-			// Log other errors but continue
-			logging.Warn("failed to read instructions file", "file", path, "error", err)
-			continue
+				"size_bytes", len(content))
+
+			// For project layer, only load the FIRST matching file from instructionFiles
+			// (but still load all rules/*.md)
+			if layer.label == "project" {
+				break
+			}
 		}
 	}
 
-	// No instructions file found - this is not an error
-	logging.Debug("no project instructions found", "checked_files", strings.Join(instructionFiles, ", "))
+	if merged.Len() > 0 {
+		m.instructions = merged.String()
+		m.sourcePath = strings.Join(sources, ", ")
+		logging.Info("✓ Loaded project instructions",
+			"sources", len(sources),
+			"total_size", len(m.instructions))
+	} else {
+		logging.Debug("no project instructions found")
+	}
 	return nil
+}
+
+// processIncludes resolves @include directives in instruction content.
+// Supports: @path, @./relative/path, @~/home/path, @/absolute/path
+// Included paths are restricted to prevent directory traversal outside the project or home.
+func processIncludes(content string, baseDir string) string {
+	lines := strings.Split(content, "\n")
+	var result strings.Builder
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "@") && !strings.HasPrefix(trimmed, "@[") {
+			// Resolve include path
+			includePath := strings.TrimPrefix(trimmed, "@")
+			includePath = strings.TrimSpace(includePath)
+
+			if strings.HasPrefix(includePath, "~/") {
+				if home, err := os.UserHomeDir(); err == nil {
+					includePath = filepath.Join(home, includePath[2:])
+				}
+			} else if strings.HasPrefix(includePath, "./") || !filepath.IsAbs(includePath) {
+				includePath = filepath.Join(baseDir, includePath)
+			}
+
+			// Security: for relative includes, block directory traversal that escapes baseDir.
+			// Absolute paths (@/path) and home paths (@~/path) are allowed — the user
+			// explicitly specified them. The threat model is ../../../etc/passwd in shared repos.
+			if !filepath.IsAbs(includePath) {
+				// Relative path — verify it stays within baseDir after resolution
+				resolvedInclude := includePath
+				if resolved, err := filepath.EvalSymlinks(includePath); err == nil {
+					resolvedInclude = resolved
+				}
+				resolvedBase := baseDir
+				if resolved, err := filepath.EvalSymlinks(baseDir); err == nil {
+					resolvedBase = resolved
+				}
+				if !strings.HasPrefix(filepath.Clean(resolvedInclude), filepath.Clean(resolvedBase)) {
+					result.WriteString(line)
+					result.WriteString("\n")
+					continue
+				}
+				includePath = resolvedInclude
+			}
+
+			if data, err := os.ReadFile(includePath); err == nil {
+				result.WriteString(strings.TrimSpace(string(data)))
+				result.WriteString("\n")
+				continue
+			}
+			// Include failed — keep the original line as-is
+		}
+		result.WriteString(line)
+		result.WriteString("\n")
+	}
+	return result.String()
 }
 
 // GetInstructions returns the loaded instructions.

@@ -194,6 +194,9 @@ type App struct {
 	// Streaming token estimation
 	streamedChars int // Accumulated chars during current streaming session
 
+	// Session Memory
+	sessionMemory *appcontext.SessionMemoryManager
+
 	// === Task 5.7: Project Context Auto-Injection ===
 	detectedProjectContext string // Computed once at startup
 
@@ -448,6 +451,12 @@ func (a *App) Run() error {
 				// Clean up old agent checkpoint files
 				if a.agentRunner != nil {
 					a.agentRunner.CleanupOldCheckpoints(24 * time.Hour)
+				}
+				// Clean up old plan files (completed: 7 days, paused: 21 days)
+				if a.planManager != nil {
+					if cleaned, err := a.planManager.CleanupOldPlans(7 * 24 * time.Hour); err == nil && cleaned > 0 {
+						logging.Debug("cleaned up old plans", "count", cleaned)
+					}
 				}
 			case <-a.ctx.Done():
 				return

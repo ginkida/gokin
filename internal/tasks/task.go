@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -111,21 +112,94 @@ func (s Status) String() string {
 // safeBuffer is a bytes.Buffer protected by its own mutex for concurrent access.
 // This is needed because exec.Cmd writes to Stdout/Stderr from OS goroutines
 // while GetOutput/GetInfo read concurrently.
+//
+// When OutputFile is set, writes go to both the in-memory buffer and a file.
+// The in-memory buffer is capped at maxMemoryOutputBytes; beyond that, only
+// the file contains the full output. String() returns in-memory content.
+// FullString() reads from file if available and in-memory buffer was truncated.
 type safeBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu         sync.Mutex
+	buf        bytes.Buffer
+	file       *os.File
+	filePath   string
+	totalBytes int64
+	truncated  bool
 }
+
+const maxMemoryOutputBytes = 10 * 1024 * 1024 // 10 MB cap for in-memory output
 
 func (b *safeBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(p)
+
+	// Always write to file if available
+	if b.file != nil {
+		b.file.Write(p)
+	}
+
+	b.totalBytes += int64(len(p))
+
+	// Write to in-memory buffer only if under cap
+	if !b.truncated && b.buf.Len()+len(p) <= maxMemoryOutputBytes {
+		return b.buf.Write(p)
+	}
+
+	if !b.truncated {
+		b.truncated = true
+	}
+	return len(p), nil // Accept write but don't store in memory
 }
 
 func (b *safeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.String()
+	s := b.buf.String()
+	if b.truncated {
+		s += fmt.Sprintf("\n\n[Output truncated in memory: %d bytes total. Full output in: %s]",
+			b.totalBytes, b.filePath)
+	}
+	return s
+}
+
+// SetOutputFile configures file-backed output streaming.
+func (b *safeBuffer) SetOutputFile(path string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	b.file = f
+	b.filePath = path
+	return nil
+}
+
+// Close closes the output file if open.
+func (b *safeBuffer) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.file != nil {
+		b.file.Close()
+		b.file = nil
+	}
+}
+
+// FilePath returns the path to the output file, or empty string if none.
+func (b *safeBuffer) FilePath() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.filePath
+}
+
+// TotalBytes returns the total bytes written (including file-only output).
+func (b *safeBuffer) TotalBytes() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.totalBytes
 }
 
 // Task represents a background task.
@@ -200,6 +274,13 @@ func (t *Task) Start(ctx context.Context) error {
 	t.cmd.Stdout = &t.Output
 	t.cmd.Stderr = &t.Output
 
+	// Set up file-backed output streaming for long-running tasks
+	outputDir := filepath.Join(t.WorkDir, ".gokin", "task-output")
+	if err := t.Output.SetOutputFile(filepath.Join(outputDir, t.ID+".log")); err != nil {
+		// Non-fatal: continue without file output
+		_ = err
+	}
+
 	// Use sanitized environment to prevent leaking sensitive env vars
 	t.cmd.Env = buildSafeEnv()
 
@@ -218,6 +299,8 @@ func (t *Task) Start(ctx context.Context) error {
 
 // run executes the command and updates status.
 func (t *Task) run() {
+	defer t.Output.Close() // Close output file when task finishes
+
 	err := t.cmd.Start()
 
 	t.mu.Lock()

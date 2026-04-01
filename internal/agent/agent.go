@@ -2114,6 +2114,15 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	samePlanTurns := 0
 	lastTextFingerprint := ""
 	seenFailureFingerprints := make(map[string]struct{})
+
+	// API retry state — agents have no outer retry layer (unlike executor+message_processor),
+	// so we handle retries here to survive transient API errors (rate limits, timeouts, 500s).
+	streamRetryPolicy := client.DefaultStreamRetryPolicy()
+	streamRetryPolicy.MaxRetries = 3        // More generous than default (2) since agents do long work
+	streamRetryPolicy.MaxPartialRetries = 2 // Allow partial stream retries
+	var streamRetries, partialStreamRetries int
+	var contextCompactAttempts int
+
 	var i int
 	// Use min(maxTurns, MaxTurnLimit) to prevent infinite loops
 	effectiveMaxTurns := a.maxTurns
@@ -2285,14 +2294,92 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			}
 		}
 
-		// === Reactive mode: Get response from model ===
-		resp, err := a.getModelResponse(ctx)
-		if err != nil {
-			// If context was cancelled (Esc pressed), return immediately without wrapping
+		// === Reactive mode: Get response from model with retry ===
+		var resp *client.Response
+		for {
+			var apiErr error
+			resp, apiErr = a.getModelResponse(ctx)
+			if apiErr == nil {
+				// Success — reset retry counters
+				streamRetries = 0
+				partialStreamRetries = 0
+				break
+			}
+
+			// Context cancelled (Esc pressed) — return immediately
 			if ctx.Err() != nil {
 				return a.history, output.String(), ctx.Err()
 			}
-			return a.history, output.String(), fmt.Errorf("model response error: %w", err)
+
+			// Context too long — try compacting history before retry
+			if client.IsContextTooLongError(apiErr) && contextCompactAttempts < 2 {
+				contextCompactAttempts++
+				freed := a.pruneToolOutputs(a.pruneProtectChars / 2)
+				if freed > 0 {
+					logging.Info("agent compacted history after context-too-long error",
+						"agent_id", a.ID, "freed_chars", freed, "attempt", contextCompactAttempts)
+					a.safeOnText(fmt.Sprintf("\n[Context too long — compacted %d chars, retrying...]\n", freed))
+					continue // retry immediately after compaction
+				}
+			}
+
+			ft := client.DetectFailureTelemetry(apiErr)
+			logging.Warn("agent model response failed",
+				"agent_id", a.ID,
+				"reason", ft.Reason,
+				"partial", ft.Partial,
+				"provider", ft.Provider,
+				"retry_count", streamRetries,
+				"partial_retry_count", partialStreamRetries,
+				"error", apiErr)
+
+			decision := client.DecideStreamRetry(
+				streamRetryPolicy,
+				apiErr,
+				streamRetries,
+				partialStreamRetries,
+				ctx,
+				client.StreamRetryOptions{AllowPartial: true},
+			)
+
+			if !decision.ShouldRetry {
+				// If the client supports failover, reset its position so the NEXT
+				// agent-level retry (if any) starts from the first provider again.
+				client.ResetClientFallback(a.client)
+
+				// Preserve partial response in history before failing
+				if resp != nil {
+					if parts := a.buildResponseParts(resp); len(parts) > 0 {
+						a.stateMu.Lock()
+						a.history = append(a.history, &genai.Content{
+							Role:  genai.RoleModel,
+							Parts: parts,
+						})
+						a.stateMu.Unlock()
+					}
+				}
+				return a.history, output.String(), fmt.Errorf("model response error: %w", apiErr)
+			}
+
+			if decision.Partial {
+				partialStreamRetries++
+			} else {
+				streamRetries++
+			}
+
+			a.safeOnText(fmt.Sprintf("\n[API error (%s), retrying %d/%d in %s...]\n",
+				decision.Reason,
+				streamRetries, streamRetryPolicy.MaxRetries,
+				decision.Delay.Round(time.Second)))
+
+			// Wait with context cancellation support
+			retryTimer := time.NewTimer(decision.Delay)
+			select {
+			case <-retryTimer.C:
+			case <-ctx.Done():
+				retryTimer.Stop()
+				return a.history, output.String(), ctx.Err()
+			}
 		}
 
 		// Check cancellation after model response (Esc may have been pressed during streaming)
@@ -3700,54 +3787,45 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools
 		onToolActivity(a.ID, call.Name, call.Args, "start")
 	}
 
+	// Guarantee "end" event is sent regardless of outcome (panic, error, success)
+	defer func() {
+		if onToolActivity != nil {
+			onToolActivity(a.ID, call.Name, call.Args, "end")
+		}
+	}()
+
 	// === IMPROVEMENT 2: Retry mechanism with exponential backoff ===
 	maxRetries := 3
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Execute the tool with parent context for cancellation support
-		// The tool itself (e.g., bash) is responsible for implementing its own timeout
 		result, err := tool.Execute(ctx, call.Args)
 		if err == nil {
-			// Report tool end to UI
-			if onToolActivity != nil {
-				onToolActivity(a.ID, call.Name, call.Args, "end")
-			}
-
-			// Success - return result
 			return result
 		}
 
-		// Record error for potential retry
 		lastErr = err
 
-		// Check if this is a retryable error
 		if !isRetryableError(err) || attempt == maxRetries-1 {
-			// Not retryable or last attempt - return error immediately
 			return tools.NewErrorResult(err.Error())
 		}
 
-		// Log retry attempt
 		logging.Warn("tool execution failed, retrying",
 			"tool", call.Name,
 			"attempt", attempt+1,
 			"max_retries", maxRetries,
 			"error", err.Error())
 
-		// Exponential backoff: 1s, 2s, 4s...
 		backoffDuration := time.Duration(1<<uint(attempt)) * time.Second
 		backoffTimer := time.NewTimer(backoffDuration)
 		select {
 		case <-backoffTimer.C:
-			// Continue to next attempt
 		case <-ctx.Done():
-			// Context cancelled - stop retrying
 			backoffTimer.Stop()
 			return tools.NewErrorResult("cancelled during retry backoff")
 		}
 	}
 
-	// All retries exhausted
 	return tools.NewErrorResult(fmt.Sprintf("failed after %d retries: %s", maxRetries, lastErr.Error()))
 }
 

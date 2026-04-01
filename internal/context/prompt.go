@@ -211,6 +211,7 @@ type PromptBuilder struct {
 	projectInfo     *ProjectInfo
 	projectMemory   *ProjectMemory
 	memoryStore     MemoryProvider
+	sessionMemory   *SessionMemoryManager
 	planAutoDetect  bool
 	planManager     PlanManagerProvider
 	detectedContext string // Auto-detected project context (frameworks, docs, etc.)
@@ -234,6 +235,11 @@ func (b *PromptBuilder) SetProjectMemory(memory *ProjectMemory) {
 // SetMemoryStore sets the memory store for persistent memory injection.
 func (b *PromptBuilder) SetMemoryStore(store MemoryProvider) {
 	b.memoryStore = store
+}
+
+// SetSessionMemory sets the session memory manager for automatic context injection.
+func (b *PromptBuilder) SetSessionMemory(sm *SessionMemoryManager) {
+	b.sessionMemory = sm
 }
 
 // SetPlanAutoDetect enables or disables auto-planning in the system prompt.
@@ -291,6 +297,14 @@ func (b *PromptBuilder) Build() string {
 		}
 	}
 
+	// Add session memory (auto-extracted conversation summary)
+	if b.sessionMemory != nil {
+		if smContent := b.sessionMemory.GetContent(); smContent != "" {
+			builder.WriteString("\n\n")
+			builder.WriteString(smContent)
+		}
+	}
+
 	// Add working directory
 	builder.WriteString(fmt.Sprintf("\n\nThe user's working directory is: %s", b.workDir))
 
@@ -299,23 +313,27 @@ func (b *PromptBuilder) Build() string {
 		builder.WriteString(fmt.Sprintf("\nProject name: %s", b.projectInfo.Name))
 	}
 
-	// Inject auto-detected project context (frameworks, doc summaries, dependencies)
-	if b.detectedContext != "" {
+	// Smart context injection: skip heavy sections for simple questions.
+	// Questions only need base prompt + project instructions + memory.
+	// Action-oriented tasks get the full prompt with planning, tool hints, detected context.
+	questionOnly := b.isQuestionOnly()
+
+	// Inject auto-detected project context (skip for questions — saves ~2K chars)
+	if b.detectedContext != "" && !questionOnly {
 		builder.WriteString("\n\n## Detected Project Context\n")
 		builder.WriteString(b.detectedContext)
 	}
 
-	// Inject tool usage pattern hints (populated periodically)
-	if b.toolHints != "" {
+	// Inject tool usage pattern hints (skip for questions — saves ~1K chars)
+	if b.toolHints != "" && !questionOnly {
 		builder.WriteString("\n\n## Tool Usage Hints\n")
 		builder.WriteString(b.toolHints)
 	}
 
-	// Add plan mode instructions (conditional on auto-detect).
-	// Skip planning protocol for question-only messages to save ~3.5K chars.
-	if b.planAutoDetect && !b.isQuestionOnly() {
+	// Add plan mode instructions (skip for questions — saves ~3.5K chars).
+	if b.planAutoDetect && !questionOnly {
 		builder.WriteString(autoPlanningProtocol)
-	} else if !b.planAutoDetect {
+	} else if !b.planAutoDetect && !questionOnly {
 		builder.WriteString(legacyPlanInstructions)
 	}
 
@@ -436,6 +454,14 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 		}
 	}
 
+	// Add session memory for plan execution context
+	if b.sessionMemory != nil {
+		if smContent := b.sessionMemory.GetContent(); smContent != "" {
+			builder.WriteString(smContent)
+			builder.WriteString("\n")
+		}
+	}
+
 	// Inject active contract context from plan manager
 	if b.planManager != nil {
 		if ctx := b.planManager.GetActiveContractContext(); ctx != "" {
@@ -531,6 +557,14 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 			builder.WriteString("\n## Project Knowledge\n")
 			builder.WriteString(memoryContent)
 			builder.WriteString("\n")
+		}
+	}
+
+	// Add session memory for sub-agent context
+	if b.sessionMemory != nil {
+		if smContent := b.sessionMemory.GetContent(); smContent != "" {
+			builder.WriteString("\n")
+			builder.WriteString(smContent)
 		}
 	}
 

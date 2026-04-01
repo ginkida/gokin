@@ -371,3 +371,14 @@ func IsContextTooLongError(err error) bool {
 	return (strings.Contains(msg, "400") || strings.Contains(msg, "bad request")) &&
 		(strings.Contains(msg, "context") || strings.Contains(msg, "token limit") || strings.Contains(msg, "too long"))
 }
+
+// ResetClientFallback resets the fallback position on a client if it supports failover.
+// This is a no-op for non-FallbackClient instances.
+func ResetClientFallback(c Client) {
+	type fallbackResetter interface {
+		ResetFallbackPosition()
+	}
+	if fc, ok := c.(fallbackResetter); ok {
+		fc.ResetFallbackPosition()
+	}
+}

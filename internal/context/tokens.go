@@ -188,11 +188,18 @@ var DefaultPricing = map[string]ModelPricing{
 	"glm-4.7": {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
 	"glm-4":   {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
 
-	// MiniMax
-	"minimax": {InputCostPer1M: 1.10, OutputCostPer1M: 1.10},
+	// MiniMax (prices in USD equivalent from CNY: 1 CNY ≈ $0.14)
+	"MiniMax-M2.7":           {InputCostPer1M: 1.40, OutputCostPer1M: 5.60},
+	"MiniMax-M2.7-highspeed": {InputCostPer1M: 1.40, OutputCostPer1M: 5.60},
+	"MiniMax-M2.5":           {InputCostPer1M: 1.10, OutputCostPer1M: 1.10},
+	"MiniMax-M2.5-highspeed": {InputCostPer1M: 1.10, OutputCostPer1M: 1.10},
+	"minimax":                {InputCostPer1M: 1.10, OutputCostPer1M: 1.10}, // fallback
 
-	// Kimi / Moonshot
-	"kimi": {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
+	// Kimi / Moonshot (prices in USD equivalent from CNY)
+	"kimi-k2.5":             {InputCostPer1M: 1.12, OutputCostPer1M: 4.48},
+	"kimi-k2-thinking-turbo": {InputCostPer1M: 1.40, OutputCostPer1M: 5.60},
+	"kimi-k2-turbo":         {InputCostPer1M: 0.56, OutputCostPer1M: 2.24},
+	"kimi":                  {InputCostPer1M: 1.00, OutputCostPer1M: 1.00}, // fallback
 }
 
 // TokenLimits defines token limits for a model.

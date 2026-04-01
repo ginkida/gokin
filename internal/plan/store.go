@@ -245,9 +245,13 @@ func (s *PlanStore) ListResumable(workDir string) ([]PlanInfo, error) {
 		if !p.IsResumable {
 			continue
 		}
-		// Filter by working directory
+		// Filter by working directory — strict match when workDir is specified
 		if workDir != "" && p.WorkDir != "" &&
 			filepath.Clean(p.WorkDir) != filepath.Clean(workDir) {
+			continue
+		}
+		// Skip plans with no WorkDir when filtering by directory
+		if workDir != "" && p.WorkDir == "" {
 			continue
 		}
 		resumable = append(resumable, p)

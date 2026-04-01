@@ -1730,12 +1730,53 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	// Sub-agent activity tracking
 	case SubAgentActivityMsg:
+		// Agent activity shown inline with dim prefix showing agent type.
+		// Background agents are async — their events interleave with other output,
+		// so we use a flat prefix format instead of tree connectors.
+
 		switch msg.Status {
 		case "start":
-			m.processingLabel = "Running agent"
-		case "complete", "failed":
+			m.processingLabel = fmt.Sprintf("Agent: %s", msg.AgentType)
+			m.streamStartTime = time.Now()
+			m.lastActivityTime = time.Now()
+		case "tool_start":
+			m.processingLabel = fmt.Sprintf("Agent: %s → %s", msg.AgentType, msg.ToolName)
+			m.currentTool = msg.ToolName
+			m.currentToolInfo = m.extractToolInfoFromArgs(msg.ToolName, msg.ToolArgs)
+			m.toolStartTime = time.Now()
+			m.lastActivityTime = time.Now()
+			// Show tool call inline with agent type prefix
+			m.output.AppendLine(m.styles.FormatAgentToolCall(msg.AgentType, msg.ToolName, msg.ToolArgs))
+		case "tool_end":
+			m.processingLabel = fmt.Sprintf("Agent: %s", msg.AgentType)
+			m.currentTool = ""
+			m.currentToolInfo = ""
+			m.lastActivityTime = time.Now()
+		case "complete":
 			m.processingLabel = ""
+			m.currentTool = ""
+			m.currentToolInfo = ""
+			var elapsed time.Duration
+			if m.activityFeed != nil {
+				if state := m.activityFeed.GetSubAgentState(msg.AgentID); state != nil {
+					elapsed = time.Since(state.StartTime)
+				}
+			}
+			m.output.AppendLine(m.styles.FormatAgentComplete(msg.AgentType, elapsed))
+		case "failed":
+			m.processingLabel = ""
+			m.currentTool = ""
+			m.currentToolInfo = ""
+			var elapsed time.Duration
+			if m.activityFeed != nil {
+				if state := m.activityFeed.GetSubAgentState(msg.AgentID); state != nil {
+					elapsed = time.Since(state.StartTime)
+				}
+			}
+			m.output.AppendLine(m.styles.FormatAgentFailed(msg.AgentType, elapsed))
 		}
+
+		// Activity feed panel (Ctrl+O)
 		if m.activityFeed != nil {
 			switch msg.Status {
 			case "start":
@@ -1744,34 +1785,11 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			case "tool_start":
 				m.activityFeed.UpdateSubAgentTool(msg.AgentID, msg.ToolName, msg.ToolArgs)
 			case "tool_end":
-				// Tool completed, but agent continues
 				m.activityFeed.UpdateSubAgentTool(msg.AgentID, "", nil)
 			case "complete":
-				var elapsed time.Duration
-				if state := m.activityFeed.GetSubAgentState(msg.AgentID); state != nil {
-					elapsed = time.Since(state.StartTime)
-				}
 				m.activityFeed.CompleteSubAgent(msg.AgentID, true, "")
-				checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
-				typeStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-				durStyle := lipgloss.NewStyle().Foreground(ColorDim)
-				connStyle := lipgloss.NewStyle().Foreground(ColorDim)
-				summary := connStyle.Render("  ↳ ") + typeStyle.Render(msg.AgentType) + " " +
-					checkStyle.Render("✓") + "  " + durStyle.Render(format.Duration(elapsed))
-				m.output.AppendLine(summary)
 			case "failed":
-				var elapsed time.Duration
-				if state := m.activityFeed.GetSubAgentState(msg.AgentID); state != nil {
-					elapsed = time.Since(state.StartTime)
-				}
 				m.activityFeed.CompleteSubAgent(msg.AgentID, false, "")
-				crossStyle := lipgloss.NewStyle().Foreground(ColorError)
-				typeStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-				durStyle := lipgloss.NewStyle().Foreground(ColorDim)
-				connStyle := lipgloss.NewStyle().Foreground(ColorDim)
-				summary := connStyle.Render("  ↳ ") + typeStyle.Render(msg.AgentType) + " " +
-					crossStyle.Render("✗") + "  " + durStyle.Render(format.Duration(elapsed))
-				m.output.AppendLine(summary)
 			}
 		}
 
@@ -1904,18 +1922,18 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 		}
 	}
 
-	// Summary with connector: "  ⎿  ✓ summary  duration"
+	// Summary line: "    ✓ summary  duration"
 	{
-		connStyle := lipgloss.NewStyle().Foreground(ColorDim)
+		checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 		var summaryLine strings.Builder
-		summaryLine.WriteString(connStyle.Render("    "))
+		summaryLine.WriteString("    ")
+		summaryLine.WriteString(checkStyle.Render("✓"))
 		if summary != "" {
+			summaryLine.WriteString(" ")
 			summaryLine.WriteString(dimStyle.Render(summary))
 		}
 		if dur != "" {
-			if summary != "" {
-				summaryLine.WriteString("  ")
-			}
+			summaryLine.WriteString("  ")
 			// Color duration by speed: fast=dim, slow=warning, very slow=rose
 			durColor := ColorDim
 			if duration > 30*time.Second {

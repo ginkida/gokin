@@ -3,6 +3,8 @@ package commands
 import (
 	"context"
 	"fmt"
+
+	appcontext "gokin/internal/context"
 )
 
 // UndoCommand reverts the last file change.
@@ -77,6 +79,17 @@ func (c *CostCommand) GetMetadata() CommandMetadata {
 
 func (c *CostCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	stats := app.GetTokenStats()
-	return fmt.Sprintf("Token usage:\n  Input:  %d\n  Output: %d\n  Total:  %d\n\nUse /stats for detailed session statistics.",
-		stats.InputTokens, stats.OutputTokens, stats.TotalTokens), nil
+
+	var costStr string
+	cm := app.GetContextManager()
+	if cm != nil {
+		tc := cm.GetTokenCounter()
+		if tc != nil {
+			cost := tc.CalculateCost(stats.InputTokens, stats.OutputTokens)
+			costStr = fmt.Sprintf("\n  Est. Cost: %s", appcontext.FormatCost(cost))
+		}
+	}
+
+	return fmt.Sprintf("Token usage:\n  Input:  %d\n  Output: %d\n  Total:  %d%s\n\nUse /stats for detailed session statistics.",
+		stats.InputTokens, stats.OutputTokens, stats.TotalTokens, costStr), nil
 }

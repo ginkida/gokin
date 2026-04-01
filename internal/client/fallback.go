@@ -70,6 +70,12 @@ func (fc *FallbackClient) resetCurrent() {
 	fc.current = 0
 }
 
+// ResetFallbackPosition resets the fallback chain to start from the first provider.
+// This allows retrying the full chain after a delay (e.g., after stream-level retries exhaust).
+func (fc *FallbackClient) ResetFallbackPosition() {
+	fc.resetCurrent()
+}
+
 // SendMessage sends a message, trying fallback clients on error.
 func (fc *FallbackClient) SendMessage(ctx context.Context, message string) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
