@@ -262,6 +262,18 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		a.agentRunner.Close()
 	}
 
+	// 12b. Flush persistent memory stores
+	if a.errorStore != nil {
+		if err := a.errorStore.Flush(); err != nil {
+			logging.Debug("failed to flush error store", "error", err)
+		}
+	}
+	if a.exampleStore != nil {
+		if err := a.exampleStore.Flush(); err != nil {
+			logging.Debug("failed to flush example store", "error", err)
+		}
+	}
+
 	// 13. Flush audit logger to ensure all entries are persisted
 	if a.auditLogger != nil {
 		logging.Debug("flushing audit logger")

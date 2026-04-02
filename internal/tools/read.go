@@ -181,9 +181,9 @@ type ReadTool struct {
 	pdfReader      *readers.PDFReader
 	workDir        string
 	pathValidator  *security.PathValidator
-	predictor    ContextPredictorInterface
-	lastReadMu   sync.Mutex
-	lastReadFile string // Track last file read for co-access learning
+	predictor      ContextPredictorInterface
+	lastReadMu     sync.Mutex
+	lastReadFile   string // Track last file read for co-access learning
 }
 
 // NewReadTool creates a new ReadTool instance with the given working directory.

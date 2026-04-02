@@ -171,13 +171,13 @@ var DefaultPricing = map[string]ModelPricing{
 	"gpt-5.2-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
 	"gpt-5.1-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
 	"gpt-5-codex":         {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
-	"gpt-5.2":       {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
-	"gpt-5.1":       {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
-	"gpt-5":         {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
-	"gpt-4o":        {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
-	"o1":            {InputCostPer1M: 15.00, OutputCostPer1M: 60.00},
-	"o3":            {InputCostPer1M: 10.00, OutputCostPer1M: 40.00},
-	"o4-mini":       {InputCostPer1M: 1.10, OutputCostPer1M: 4.40},
+	"gpt-5.2":             {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
+	"gpt-5.1":             {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
+	"gpt-5":               {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
+	"gpt-4o":              {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
+	"o1":                  {InputCostPer1M: 15.00, OutputCostPer1M: 60.00},
+	"o3":                  {InputCostPer1M: 10.00, OutputCostPer1M: 40.00},
+	"o4-mini":             {InputCostPer1M: 1.10, OutputCostPer1M: 4.40},
 
 	// DeepSeek
 	"deepseek-chat":     {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},
@@ -196,10 +196,10 @@ var DefaultPricing = map[string]ModelPricing{
 	"minimax":                {InputCostPer1M: 1.10, OutputCostPer1M: 1.10}, // fallback
 
 	// Kimi / Moonshot (prices in USD equivalent from CNY)
-	"kimi-k2.5":             {InputCostPer1M: 1.12, OutputCostPer1M: 4.48},
+	"kimi-k2.5":              {InputCostPer1M: 1.12, OutputCostPer1M: 4.48},
 	"kimi-k2-thinking-turbo": {InputCostPer1M: 1.40, OutputCostPer1M: 5.60},
-	"kimi-k2-turbo":         {InputCostPer1M: 0.56, OutputCostPer1M: 2.24},
-	"kimi":                  {InputCostPer1M: 1.00, OutputCostPer1M: 1.00}, // fallback
+	"kimi-k2-turbo":          {InputCostPer1M: 0.56, OutputCostPer1M: 2.24},
+	"kimi":                   {InputCostPer1M: 1.00, OutputCostPer1M: 1.00}, // fallback
 }
 
 // TokenLimits defines token limits for a model.

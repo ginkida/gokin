@@ -172,7 +172,7 @@ func (m *ProjectMemory) Load() error {
 
 // processIncludes resolves @include directives in instruction content.
 // Supports: @path, @./relative/path, @~/home/path, @/absolute/path
-// Included paths are restricted to prevent directory traversal outside the project or home.
+// Relative includes are restricted to prevent directory traversal outside the project.
 func processIncludes(content string, baseDir string) string {
 	lines := strings.Split(content, "\n")
 	var result strings.Builder
@@ -183,19 +183,19 @@ func processIncludes(content string, baseDir string) string {
 			includePath := strings.TrimPrefix(trimmed, "@")
 			includePath = strings.TrimSpace(includePath)
 
+			wasRelative := false
 			if strings.HasPrefix(includePath, "~/") {
 				if home, err := os.UserHomeDir(); err == nil {
 					includePath = filepath.Join(home, includePath[2:])
 				}
 			} else if strings.HasPrefix(includePath, "./") || !filepath.IsAbs(includePath) {
+				wasRelative = true
 				includePath = filepath.Join(baseDir, includePath)
 			}
 
-			// Security: for relative includes, block directory traversal that escapes baseDir.
-			// Absolute paths (@/path) and home paths (@~/path) are allowed — the user
-			// explicitly specified them. The threat model is ../../../etc/passwd in shared repos.
-			if !filepath.IsAbs(includePath) {
-				// Relative path — verify it stays within baseDir after resolution
+			// Security: for originally-relative includes, block directory traversal
+			// that escapes baseDir. Absolute (@/path) and home (@~/path) are allowed.
+			if wasRelative {
 				resolvedInclude := includePath
 				if resolved, err := filepath.EvalSymlinks(includePath); err == nil {
 					resolvedInclude = resolved

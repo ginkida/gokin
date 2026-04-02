@@ -13,11 +13,11 @@ import (
 
 // Manager provides undo and redo functionality.
 type Manager struct {
-	tracker      *Tracker
-	undone       []FileChange // stack of undone changes for redo
-	maxRedo      int
-	activeGroup  string // Current group ID stamped on all recorded changes
-	mu           sync.Mutex
+	tracker     *Tracker
+	undone      []FileChange // stack of undone changes for redo
+	maxRedo     int
+	activeGroup string // Current group ID stamped on all recorded changes
+	mu          sync.Mutex
 }
 
 // NewManager creates a new undo/redo Manager.

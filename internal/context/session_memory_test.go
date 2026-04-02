@@ -416,15 +416,15 @@ func TestSessionMemory_extractFileActivity_SearchDoesNotOverrideRead(t *testing.
 	}
 }
 
-func TestSessionMemory_extractFileActivity_LimitsTo20Files(t *testing.T) {
+func TestSessionMemory_extractFileActivity_LimitsTo40Files(t *testing.T) {
 	var history []*genai.Content
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 50; i++ {
 		path := "/file" + strings.Repeat("0", 3-len(itoa(i))) + itoa(i) + ".go"
 		history = append(history, funcCallMsg("read", map[string]any{"file_path": path}))
 	}
 	files := extractFileActivity(history)
-	if len(files) > 20 {
-		t.Errorf("expected at most 20 files, got %d", len(files))
+	if len(files) > 40 {
+		t.Errorf("expected at most 40 files, got %d", len(files))
 	}
 }
 
@@ -562,16 +562,16 @@ func TestSessionMemory_extractErrors_DeduplicatesErrors(t *testing.T) {
 	}
 }
 
-func TestSessionMemory_extractErrors_LimitsTo10(t *testing.T) {
+func TestSessionMemory_extractErrors_LimitsTo20(t *testing.T) {
 	var history []*genai.Content
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 30; i++ {
 		history = append(history, funcRespMsg("bash", map[string]any{
 			"content": "error: unique failure " + itoa(i),
 		}))
 	}
 	errors := extractErrors(history)
-	if len(errors) > 10 {
-		t.Errorf("expected at most 10 errors, got %d", len(errors))
+	if len(errors) > 20 {
+		t.Errorf("expected at most 20 errors, got %d", len(errors))
 	}
 }
 

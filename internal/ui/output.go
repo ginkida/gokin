@@ -17,8 +17,8 @@ const (
 	// Short content gets faster updates for responsiveness.
 	// Large content gets slower updates to reduce flicker.
 	viewportUpdateFast   = 8 * time.Millisecond  // < 5K chars: near-instant (120Hz)
-	viewportUpdateNormal = 16 * time.Millisecond  // 5K-50K chars: smooth (60Hz)
-	viewportUpdateSlow   = 32 * time.Millisecond  // > 50K chars: reduced flicker (30Hz)
+	viewportUpdateNormal = 16 * time.Millisecond // 5K-50K chars: smooth (60Hz)
+	viewportUpdateSlow   = 32 * time.Millisecond // > 50K chars: reduced flicker (30Hz)
 )
 
 // outputState holds the mutable state protected by a mutex.
@@ -33,6 +33,7 @@ type outputState struct {
 	width          int
 	ready          bool
 	frozen         bool // When true, viewport won't auto-scroll to bottom
+	thinkingActive bool // True while streaming thinking content
 }
 
 // OutputModel represents the output/viewport component.
@@ -156,6 +157,46 @@ func (m *OutputModel) AppendTextStream(text string) {
 	}
 	m.state.mu.Unlock()
 	m.updateViewport()
+}
+
+// Thinking display — quiet, elegant, stays out of the way.
+var thinkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Italic(true)
+
+// AppendThinkingStream appends streaming thinking content.
+// Minimal style: dim italic text, no borders, just a soft label on first chunk.
+//
+//	💭 reasoning text flows naturally here
+//	   continuing the thought...
+func (m *OutputModel) AppendThinkingStream(text string) {
+	m.state.mu.Lock()
+
+	if !m.state.thinkingActive {
+		m.state.thinkingActive = true
+	}
+
+	// Just dim italic text — nothing else
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if line != "" {
+			m.state.content.WriteString(thinkingStyle.Render(line))
+		}
+		if i < len(lines)-1 {
+			m.state.content.WriteString("\n")
+		}
+	}
+
+	m.state.mu.Unlock()
+	m.updateViewport()
+}
+
+// EndThinking closes the thinking block with a blank line separator.
+func (m *OutputModel) EndThinking() {
+	m.state.mu.Lock()
+	if m.state.thinkingActive {
+		m.state.thinkingActive = false
+		m.state.content.WriteString("\n\n")
+	}
+	m.state.mu.Unlock()
 }
 
 // FlushStream flushes any remaining content in the stream parser.

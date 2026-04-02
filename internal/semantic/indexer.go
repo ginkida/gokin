@@ -197,21 +197,21 @@ func (i *Indexer) Search(ctx context.Context, query string, topK int) ([]SearchR
 			dependencyScore := fileSignals.DependencyScore
 			changeProximity := fileSignals.ChangeProximity
 			freshnessScore := fileSignals.FreshnessScore
-				symbolBonus := symbolHintBonus(signals.Query, chunk.Content)
-				symbolIndexScore := fileSignals.SymbolIndexScore
+			symbolBonus := symbolHintBonus(signals.Query, chunk.Content)
+			symbolIndexScore := fileSignals.SymbolIndexScore
 
-				// Hybrid scoring:
-				// semantic signal dominates, lexical/path/dependency/freshness/change
-				// refine ranking toward practical edit impact.
-				// Weights sum to 1.00: 0.55 + 0.18 + 0.08 + 0.06 + 0.03 + 0.03 + 0.07
-				finalScore := 0.55*embeddingScore +
-					0.18*lexicalScore +
-					0.08*pathScore +
-					0.06*dependencyScore +
-					0.03*freshnessScore +
-					0.03*changeProximity +
-					0.07*symbolIndexScore +
-					symbolBonus
+			// Hybrid scoring:
+			// semantic signal dominates, lexical/path/dependency/freshness/change
+			// refine ranking toward practical edit impact.
+			// Weights sum to 1.00: 0.55 + 0.18 + 0.08 + 0.06 + 0.03 + 0.03 + 0.07
+			finalScore := 0.55*embeddingScore +
+				0.18*lexicalScore +
+				0.08*pathScore +
+				0.06*dependencyScore +
+				0.03*freshnessScore +
+				0.03*changeProximity +
+				0.07*symbolIndexScore +
+				symbolBonus
 
 			if finalScore <= 0 {
 				continue
@@ -225,15 +225,15 @@ func (i *Indexer) Search(ctx context.Context, query string, topK int) ([]SearchR
 				PathScore:         float32(pathScore),
 				DependencyScore:   float32(dependencyScore),
 				FreshnessScore:    float32(freshnessScore),
-					ChangeProximity:   float32(changeProximity),
-					SymbolHintBonus:   float32(symbolBonus),
-					SymbolIndexScore:  float32(symbolIndexScore),
-					DefinitionHits:    fileSignals.DefinitionHits,
-					CallerHits:        fileSignals.CallerHits,
-					UsageHits:         fileSignals.UsageHits,
-					Content:           chunk.Content,
-					LineStart:         chunk.LineStart,
-					LineEnd:           chunk.LineEnd,
+				ChangeProximity:   float32(changeProximity),
+				SymbolHintBonus:   float32(symbolBonus),
+				SymbolIndexScore:  float32(symbolIndexScore),
+				DefinitionHits:    fileSignals.DefinitionHits,
+				CallerHits:        fileSignals.CallerHits,
+				UsageHits:         fileSignals.UsageHits,
+				Content:           chunk.Content,
+				LineStart:         chunk.LineStart,
+				LineEnd:           chunk.LineEnd,
 				DependencyDegree:  fileSignals.DependencyDegree,
 				DependentDegree:   fileSignals.DependentDegree,
 				ChangedFileDirect: fileSignals.ChangedFileDirect,

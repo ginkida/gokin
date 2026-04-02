@@ -533,6 +533,10 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 }
 
 // processResponse converts a Gemini response to a ResponseChunk.
+// geminiThinkTagParser is a package-level parser for <think> tags in Gemini responses.
+// Used for Ollama and other models that embed reasoning in text.
+var geminiThinkTagParser ThinkTagParser
+
 func processResponse(resp *genai.GenerateContentResponse) ResponseChunk {
 	chunk := ResponseChunk{}
 
@@ -562,7 +566,15 @@ func processResponse(resp *genai.GenerateContentResponse) ResponseChunk {
 				continue
 			}
 			if part.Text != "" {
-				chunk.Text += part.Text
+				// Parse <think> tags for models that embed reasoning in text
+				// (Ollama local models, QwQ, etc.)
+				thinking, regular := geminiThinkTagParser.Process(part.Text)
+				if thinking != "" {
+					chunk.Thinking += thinking
+				}
+				if regular != "" {
+					chunk.Text += regular
+				}
 			}
 			if part.FunctionCall != nil {
 				chunk.FunctionCalls = append(chunk.FunctionCalls, part.FunctionCall)

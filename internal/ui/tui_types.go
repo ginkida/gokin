@@ -76,8 +76,9 @@ const (
 
 // Message types for communication.
 type (
-	StreamTextMsg string
-	ToolCallMsg   struct {
+	StreamTextMsg     string
+	StreamThinkingMsg string
+	ToolCallMsg       struct {
 		Name string
 		Args map[string]any
 	}

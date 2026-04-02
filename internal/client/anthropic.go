@@ -322,10 +322,8 @@ func (c *AnthropicClient) applyCacheControl(requestBody map[string]interface{}) 
 			}
 		}
 		if len(msgs) >= 4 {
-			// Find the second-to-last user message
 			for i := len(msgs) - 3; i >= 0; i-- {
 				if role, _ := msgs[i]["role"].(string); role == "user" {
-					// Add cache_control to the last content block of this message
 					switch contentTyped := msgs[i]["content"].(type) {
 					case []map[string]interface{}:
 						if len(contentTyped) > 0 {
@@ -587,6 +585,8 @@ type toolCallAccumulator struct {
 	// Thinking block tracking
 	currentBlockType string          // "thinking", "text", or "tool_use"
 	thinkingBuilder  strings.Builder // Accumulates thinking content
+	// Inline <think> tag parsing for models that embed reasoning in text
+	thinkTagParser ThinkTagParser
 }
 
 // isRetryableError returns true if the error should trigger a retry.
@@ -1051,7 +1051,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					if chunk.Text != "" || chunk.Thinking != "" || len(chunk.FunctionCalls) > 0 {
 						contentReceived = true
 					}
-					if chunk.Text != "" || chunk.Done || len(chunk.FunctionCalls) > 0 ||
+					if chunk.Text != "" || chunk.Thinking != "" || chunk.Done || len(chunk.FunctionCalls) > 0 ||
 						chunk.InputTokens > 0 || chunk.CacheCreationInputTokens > 0 || chunk.CacheReadInputTokens > 0 {
 						select {
 						case chunks <- chunk:
@@ -1154,11 +1154,20 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 				chunk.Thinking = reasoning
 			}
 
-			// Handle text delta
+			// Handle text delta — also parse <think> tags for models that
+			// embed reasoning in-line (MiniMax, DeepSeek R1, QwQ, etc.)
 			if deltaType == "text_delta" || (deltaType == "" && acc.currentBlockType == "text") {
 				if text, ok := delta["text"].(string); ok && text != "" {
-					chunk.Text = text
-					logging.Debug("SSE text delta received", "text_length", len(text))
+					thinking, regular := acc.thinkTagParser.Process(text)
+					if thinking != "" {
+						acc.thinkingBuilder.WriteString(thinking)
+						chunk.Thinking = thinking
+					}
+					if regular != "" {
+						chunk.Text = regular
+					}
+					logging.Debug("SSE text delta received", "text_length", len(text),
+						"thinking_length", len(thinking), "regular_length", len(regular))
 				}
 			}
 

@@ -64,17 +64,17 @@ var knownModelProfiles = map[string]ModelProfile{
 	"glm":     {Family: "glm", ContextWindow: 128000, SupportsTools: true},
 
 	// Kimi / Moonshot family
-	"kimi-k2.5":    {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},
-	"kimi-k2":      {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},
-	"kimi":         {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
-	"moonshot":     {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
+	"kimi-k2.5": {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},
+	"kimi-k2":   {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},
+	"kimi":      {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
+	"moonshot":  {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
 
 	// Gemini family
-	"gemini-3.1-pro": {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
-	"gemini-3-flash":  {Family: "gemini", ContextWindow: 1000000, SupportsTools: true},
-	"gemini-3-pro":    {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+	"gemini-3.1-pro":   {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+	"gemini-3-flash":   {Family: "gemini", ContextWindow: 1000000, SupportsTools: true},
+	"gemini-3-pro":     {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 	"gemini-2.5-flash": {Family: "gemini", ContextWindow: 1000000, SupportsTools: true},
-	"gemini-2.5-pro":  {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+	"gemini-2.5-pro":   {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 
 	// MiniMax family
 	"minimax-m2.7-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},

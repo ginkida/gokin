@@ -93,11 +93,17 @@ type Runner struct {
 	// File predictor for enhanced error recovery
 	predictor PredictorInterface
 
+	// Thinking callback for UI display
+	onThinking func(text string)
+
 	// Sub-agent activity callback for UI updates
 	onSubAgentActivity func(agentID, agentType, toolName string, args map[string]any, status string)
 
 	// Event-driven notification for result completion (replaces polling in WaitWithContext)
 	resultReady chan struct{}
+
+	// Weak model mode: extra guidance for weaker models
+	weakModelMode bool
 
 	// Workspace isolation for supported sub-agents
 	workspaceIsolationEnabled bool
@@ -298,6 +304,20 @@ func (r *Runner) SetOnAgentComplete(callback func(id string, result *AgentResult
 func (r *Runner) SetOnAgentProgress(callback func(id string, progress *AgentProgress)) {
 	r.mu.Lock()
 	r.onAgentProgress = callback
+	r.mu.Unlock()
+}
+
+// SetWeakModelMode enables extra guidance for all agents created by this runner.
+func (r *Runner) SetWeakModelMode(enabled bool) {
+	r.mu.Lock()
+	r.weakModelMode = enabled
+	r.mu.Unlock()
+}
+
+// SetOnThinking sets the callback for thinking/reasoning content from agents.
+func (r *Runner) SetOnThinking(fn func(string)) {
+	r.mu.Lock()
+	r.onThinking = fn
 	r.mu.Unlock()
 }
 
@@ -555,6 +575,15 @@ func (r *Runner) newConfiguredAgent(
 
 	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
 	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
+	agent.LoadPinnedContext()
+
+	// Apply weak model mode from runner to all agents
+	r.mu.RLock()
+	weakMode := r.weakModelMode
+	r.mu.RUnlock()
+	if weakMode {
+		agent.SetWeakModelMode(true)
+	}
 
 	if deps.onInput != nil {
 		agent.SetOnInput(deps.onInput)
@@ -936,4 +965,3 @@ func (r *Runner) cleanupOldResults() {
 		}
 	}
 }
-

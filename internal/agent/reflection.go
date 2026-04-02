@@ -37,10 +37,10 @@ type Reflector struct {
 
 // AutoFixAction describes a concrete recovery action that can be executed automatically.
 type AutoFixAction struct {
-	FixType      string                                                      // "retry_with_args" | "run_tool_first" | "modify_and_retry"
-	ToolName     string                                                      // Tool to run for the fix (e.g., "glob")
-	ToolArgs     map[string]any                                              // Static arguments for the fix tool
-	ModifiedArgs map[string]any                                              // Modified arguments for direct retry
+	FixType      string                                                             // "retry_with_args" | "run_tool_first" | "modify_and_retry"
+	ToolName     string                                                             // Tool to run for the fix (e.g., "glob")
+	ToolArgs     map[string]any                                                     // Static arguments for the fix tool
+	ModifiedArgs map[string]any                                                     // Modified arguments for direct retry
 	ArgModifier  func(originalArgs map[string]any, fixResult string) map[string]any // Builds modified args from fix result
 }
 

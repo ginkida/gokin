@@ -45,11 +45,11 @@ func DefaultSummaryStrategy() SummaryStrategy {
 func CompactStrategy() SummaryStrategy {
 	return SummaryStrategy{
 		KeepSystemPrompts:     true,
-		KeepToolCalls:         false,
+		KeepToolCalls:         true, // Keep tool calls — losing them makes agent forget what it did
 		KeepFileReferences:    true,
-		RecentMessageCount:    6,
+		RecentMessageCount:    8,
 		InitialMessageCount:   2,
-		TargetRatio:           0.3,
+		TargetRatio:           0.35,
 		UseImportanceScoring:  true,
 		MinMessagesForSummary: 8,
 		MaxHistorySize:        30,

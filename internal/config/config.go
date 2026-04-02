@@ -4,27 +4,27 @@ import "time"
 
 // Config represents the main application configuration.
 type Config struct {
-	API         APIConfig         `yaml:"api"`
-	Model       ModelConfig       `yaml:"model"`
-	Tools       ToolsConfig       `yaml:"tools"`
-	UI          UIConfig          `yaml:"ui"`
-	Context     ContextConfig     `yaml:"context"`
-	Permission  PermissionConfig  `yaml:"permission"`
-	Plan        PlanConfig        `yaml:"plan"`
-	DoneGate    DoneGateConfig    `yaml:"done_gate"`
-	Hooks       HooksConfig       `yaml:"hooks"`
-	Web         WebConfig         `yaml:"web"`
-	Session     SessionConfig     `yaml:"session"`
-	Memory      MemoryConfig      `yaml:"memory"`
-	Logging     LoggingConfig     `yaml:"logging"`
-	Audit       AuditConfig       `yaml:"audit"`
-	RateLimit   RateLimitConfig   `yaml:"rate_limit"`
-	Cache       CacheConfig       `yaml:"cache"`
-	Watcher     WatcherConfig     `yaml:"watcher"`
-	DiffPreview DiffPreviewConfig `yaml:"diff_preview"`
-	Semantic    SemanticConfig    `yaml:"semantic"`
-	MCP           MCPConfig         `yaml:"mcp"`
-	Update        UpdateConfig      `yaml:"update"`
+	API           APIConfig           `yaml:"api"`
+	Model         ModelConfig         `yaml:"model"`
+	Tools         ToolsConfig         `yaml:"tools"`
+	UI            UIConfig            `yaml:"ui"`
+	Context       ContextConfig       `yaml:"context"`
+	Permission    PermissionConfig    `yaml:"permission"`
+	Plan          PlanConfig          `yaml:"plan"`
+	DoneGate      DoneGateConfig      `yaml:"done_gate"`
+	Hooks         HooksConfig         `yaml:"hooks"`
+	Web           WebConfig           `yaml:"web"`
+	Session       SessionConfig       `yaml:"session"`
+	Memory        MemoryConfig        `yaml:"memory"`
+	Logging       LoggingConfig       `yaml:"logging"`
+	Audit         AuditConfig         `yaml:"audit"`
+	RateLimit     RateLimitConfig     `yaml:"rate_limit"`
+	Cache         CacheConfig         `yaml:"cache"`
+	Watcher       WatcherConfig       `yaml:"watcher"`
+	DiffPreview   DiffPreviewConfig   `yaml:"diff_preview"`
+	Semantic      SemanticConfig      `yaml:"semantic"`
+	MCP           MCPConfig           `yaml:"mcp"`
+	Update        UpdateConfig        `yaml:"update"`
 	SessionMemory SessionMemoryConfig `yaml:"session_memory"`
 
 	// Runtime version information
@@ -191,12 +191,13 @@ type ModelConfig struct {
 
 // ToolsConfig holds tool-related settings.
 type ToolsConfig struct {
-	Timeout           time.Duration     `yaml:"timeout"`
-	ModelRoundTimeout time.Duration     `yaml:"model_round_timeout"` // Hard timeout for a single model round.
-	Bash              BashConfig        `yaml:"bash"`
-	DeltaCheck        DeltaCheckConfig  `yaml:"delta_check"`
-	AllowedDirs       []string          `yaml:"allowed_dirs"` // Additional allowed directories (besides workDir)
-	Formatters        map[string]string `yaml:"formatters"`   // ext → command, e.g. {".py": "black"}
+	Timeout           time.Duration         `yaml:"timeout"`
+	ModelRoundTimeout time.Duration         `yaml:"model_round_timeout"` // Hard timeout for a single model round.
+	Bash              BashConfig            `yaml:"bash"`
+	DeltaCheck        DeltaCheckConfig      `yaml:"delta_check"`
+	SmartValidation   SmartValidationConfig `yaml:"smart_validation"`
+	AllowedDirs       []string              `yaml:"allowed_dirs"` // Additional allowed directories (besides workDir)
+	Formatters        map[string]string     `yaml:"formatters"`   // ext → command, e.g. {".py": "black"}
 }
 
 // BashConfig holds bash tool settings.
@@ -211,6 +212,12 @@ type DeltaCheckConfig struct {
 	Timeout    time.Duration `yaml:"timeout"`     // Per-check timeout
 	WarnOnly   bool          `yaml:"warn_only"`   // If true, report failures but do not block further mutating operations
 	MaxModules int           `yaml:"max_modules"` // Maximum distinct module roots to check per cycle
+}
+
+// SmartValidationConfig controls semantic validators, context enrichment, and self-review.
+type SmartValidationConfig struct {
+	Enabled             bool `yaml:"enabled"`               // Enable semantic validators and context enrichment (default: true)
+	SelfReviewThreshold int  `yaml:"self_review_threshold"` // Mutated file count that triggers self-review (default: 4, 0=disabled)
 }
 
 // UIConfig holds UI-related settings.
@@ -319,10 +326,10 @@ type SessionConfig struct {
 
 // SessionMemoryConfig holds automatic session memory extraction settings.
 type SessionMemoryConfig struct {
-	Enabled                 bool `yaml:"enabled"`                      // Enable session memory extraction
-	MinTokensToInit         int  `yaml:"min_tokens_to_init"`          // Tokens before first extraction (default: 10000)
-	MinTokensBetweenUpdates int  `yaml:"min_tokens_between_updates"`  // Token delta for re-extraction (default: 5000)
-	ToolCallsBetweenUpdates int  `yaml:"tool_calls_between_updates"`  // Tool calls before re-extraction (default: 3)
+	Enabled                 bool `yaml:"enabled"`                    // Enable session memory extraction
+	MinTokensToInit         int  `yaml:"min_tokens_to_init"`         // Tokens before first extraction (default: 10000)
+	MinTokensBetweenUpdates int  `yaml:"min_tokens_between_updates"` // Token delta for re-extraction (default: 5000)
+	ToolCallsBetweenUpdates int  `yaml:"tool_calls_between_updates"` // Tool calls before re-extraction (default: 3)
 }
 
 // MemoryConfig holds memory system settings.
@@ -452,6 +459,10 @@ func DefaultConfig() *Config {
 				Timeout:    90 * time.Second,
 				WarnOnly:   false,
 				MaxModules: 8,
+			},
+			SmartValidation: SmartValidationConfig{
+				Enabled:             true,
+				SelfReviewThreshold: 4,
 			},
 		},
 		UI: UIConfig{

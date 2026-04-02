@@ -24,6 +24,7 @@ import (
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/mcp"
+	"gokin/internal/memory"
 	"gokin/internal/permission"
 	"gokin/internal/plan"
 	"gokin/internal/ratelimit"
@@ -196,6 +197,10 @@ type App struct {
 
 	// Session Memory
 	sessionMemory *appcontext.SessionMemoryManager
+
+	// Persistent stores (for flush on shutdown)
+	errorStore   *memory.ErrorStore
+	exampleStore *memory.ExampleStore
 
 	// === Task 5.7: Project Context Auto-Injection ===
 	detectedProjectContext string // Computed once at startup
@@ -1675,7 +1680,6 @@ func toolContextSummary(name string, args map[string]any) string {
 // buildModelEnhancement returns model-specific prompt enhancements.
 func (a *App) buildModelEnhancement() string {
 	modelName := a.config.Model.Name
-
 	if strings.HasPrefix(modelName, "glm") {
 		return "\n\n**GLM Model Note:** After every tool call, you MUST respond with analysis of results. Never call tools and stop silently. Structure: What I Found → Key Points → Next Steps."
 	}

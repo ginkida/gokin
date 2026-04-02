@@ -92,10 +92,10 @@ func TestRedactPEMKey(t *testing.T) {
 func TestRedactMap(t *testing.T) {
 	r := NewSecretRedactor()
 	m := map[string]any{
-		"name":    "test",
-		"secret":  "AKIAIOSFODNN7EXAMPLE",
-		"normal":  "hello world",
-		"nested":  map[string]any{"key": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"},
+		"name":   "test",
+		"secret": "AKIAIOSFODNN7EXAMPLE",
+		"normal": "hello world",
+		"nested": map[string]any{"key": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"},
 	}
 
 	result := r.RedactMap(m)

@@ -30,13 +30,13 @@ type SearchResult struct {
 	Score    float32 // Final hybrid score (semantic + retrieval signals)
 
 	// Score breakdown for explainability/debugging.
-	BaseScore       float32 // Embedding cosine similarity component
-	LexicalScore    float32 // Query-token lexical overlap
-	PathScore       float32 // Path hint match score
-	DependencyScore float32 // Dependency centrality/impact score
-	FreshnessScore  float32 // Recency score from file modification time
-	ChangeProximity float32 // Boost for changed files and neighbors
-	SymbolHintBonus float32 // Bonus when symbol-like hints are present
+	BaseScore        float32 // Embedding cosine similarity component
+	LexicalScore     float32 // Query-token lexical overlap
+	PathScore        float32 // Path hint match score
+	DependencyScore  float32 // Dependency centrality/impact score
+	FreshnessScore   float32 // Recency score from file modification time
+	ChangeProximity  float32 // Boost for changed files and neighbors
+	SymbolHintBonus  float32 // Bonus when symbol-like hints are present
 	SymbolIndexScore float32 // Symbol-index (definition/usage/caller) + hop score
 
 	DependencyDegree  int  // Outgoing dependency count for file

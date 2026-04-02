@@ -6,9 +6,9 @@ import (
 
 func TestApplyPreset(t *testing.T) {
 	tests := []struct {
-		preset      string
-		wantOK      bool
-		wantModel   string
+		preset       string
+		wantOK       bool
+		wantModel    string
 		wantProvider string
 	}{
 		{"coding", true, "glm-5", "glm"},

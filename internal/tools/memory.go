@@ -241,10 +241,10 @@ func (t *MemoryTool) recall(args map[string]any) (ToolResult, error) {
 
 	// Build search query
 	searchQuery := memory.SearchQuery{
-		Key:         key,
-		Query:       query,
-		ProjectOnly: projectOnly,
-		Limit:       20, // Reasonable default
+		Key:             key,
+		Query:           query,
+		ProjectOnly:     projectOnly,
+		Limit:           20, // Reasonable default
 		IncludeArchived: includeArchived,
 	}
 
@@ -303,12 +303,12 @@ func (t *MemoryTool) recall(args map[string]any) (ToolResult, error) {
 					builder.WriteString(fmt.Sprintf("- %s\n", entry.Content))
 				}
 				resultData = append(resultData, map[string]any{
-					"id":      entry.ID,
-					"key":     entry.Key,
-					"content": entry.Content,
-					"type":    entry.Type,
-					"tags":    entry.Tags,
-					"archived": entry.Archived,
+					"id":           entry.ID,
+					"key":          entry.Key,
+					"content":      entry.Content,
+					"type":         entry.Type,
+					"tags":         entry.Tags,
+					"archived":     entry.Archived,
 					"success_rate": entry.SuccessRate(),
 				})
 			}

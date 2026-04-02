@@ -466,7 +466,6 @@ func fileNodeToRel(nodeID string) (string, bool) {
 	return rel, true
 }
 
-
 func stringListFromAny(raw any) []string {
 	switch v := raw.(type) {
 	case []string:

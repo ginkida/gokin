@@ -20,9 +20,9 @@ import (
 // SessionMemoryConfig holds configuration for automatic session memory extraction.
 type SessionMemoryConfig struct {
 	Enabled                 bool `yaml:"enabled"`
-	MinTokensToInit         int  `yaml:"min_tokens_to_init"`          // Start after N tokens (default: 10000)
-	MinTokensBetweenUpdates int  `yaml:"min_tokens_between_updates"`  // Update every N new tokens (default: 5000)
-	ToolCallsBetweenUpdates int  `yaml:"tool_calls_between_updates"`  // Or every N tool calls (default: 3)
+	MinTokensToInit         int  `yaml:"min_tokens_to_init"`         // Start after N tokens (default: 10000)
+	MinTokensBetweenUpdates int  `yaml:"min_tokens_between_updates"` // Update every N new tokens (default: 5000)
+	ToolCallsBetweenUpdates int  `yaml:"tool_calls_between_updates"` // Or every N tool calls (default: 3)
 }
 
 // DefaultSessionMemoryConfig returns default session memory configuration.
@@ -353,8 +353,8 @@ func extractFileActivity(history []*genai.Content) []fileActivity {
 	sort.Slice(result, func(i, j int) bool { return result[i].Path < result[j].Path })
 
 	// Limit to most important files
-	if len(result) > 20 {
-		result = result[:20]
+	if len(result) > 40 {
+		result = result[:40]
 	}
 	return result
 }
@@ -413,9 +413,9 @@ func extractErrors(history []*genai.Content) []string {
 		}
 	}
 
-	// Limit to last 10 errors
-	if len(errors) > 10 {
-		errors = errors[len(errors)-10:]
+	// Limit to last 20 errors
+	if len(errors) > 20 {
+		errors = errors[len(errors)-20:]
 	}
 	return errors
 }

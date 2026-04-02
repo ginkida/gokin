@@ -54,8 +54,8 @@ type MessageScorer struct {
 
 	// Incremental semantic score cache: per-message hash → cached score.
 	// Avoids re-scoring messages that haven't changed between compaction cycles.
-	scoreCacheMu sync.RWMutex
-	scoreCache   map[string]cachedScore
+	scoreCacheMu  sync.RWMutex
+	scoreCache    map[string]cachedScore
 	scoreCacheTTL time.Duration
 }
 

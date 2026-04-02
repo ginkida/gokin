@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -230,6 +232,20 @@ type Executor struct {
 
 	// Checkpoint journal for tool execution recovery on API failure.
 	checkpoint *CheckpointJournal
+
+	// Smart validation: semantic validators for post-write checks.
+	semanticValidators *SemanticValidatorRegistry
+
+	// Smart validation: context enrichment for post-write hints.
+	contextEnricher *ContextEnricher
+
+	// Smart validation: self-review injection for multi-file mutations.
+	selfReviewThreshold  int
+	mutatedFilesThisTurn map[string]bool
+	mutatedFilesMu       sync.Mutex
+
+	// Smart validation: persistent learning from validator warnings.
+	errorLearner ErrorLearner
 }
 
 // ExecutionInfo holds information about an active tool execution
@@ -281,6 +297,9 @@ type ExecutionHandler struct {
 
 	// OnLoopIteration is called at the start of each executor loop iteration (from 2nd onwards).
 	OnLoopIteration func(iteration int, totalToolsUsed int)
+
+	// OnTokenUpdate is called when the streaming response provides token usage from the API.
+	OnTokenUpdate func(inputTokens, outputTokens int)
 }
 
 // NewExecutor creates a new tool executor.
@@ -366,6 +385,40 @@ func (e *Executor) SetDeltaCheckConfig(enabled bool, timeout time.Duration, warn
 	e.deltaCheckTimeout = timeout
 	e.deltaCheckWarnOnly = warnOnly
 	e.deltaCheckMaxModules = maxModules
+}
+
+// SetSemanticValidators configures post-write semantic validators.
+func (e *Executor) SetSemanticValidators(r *SemanticValidatorRegistry) {
+	e.semanticValidators = r
+}
+
+// SetContextEnricher configures post-write context enrichment.
+func (e *Executor) SetContextEnricher(ce *ContextEnricher) {
+	e.contextEnricher = ce
+}
+
+// GetContextEnricher returns the context enricher for late-binding (e.g. predictor wiring).
+func (e *Executor) GetContextEnricher() *ContextEnricher {
+	return e.contextEnricher
+}
+
+// ErrorLearner persists error/warning patterns for future prevention.
+type ErrorLearner interface {
+	LearnError(errorType, pattern, solution string, tags []string) error
+}
+
+// SetErrorLearner configures persistent learning from validator warnings.
+func (e *Executor) SetErrorLearner(el ErrorLearner) {
+	e.errorLearner = el
+}
+
+// SetSelfReviewThreshold sets the number of mutated files per turn
+// that triggers a self-review injection. 0 disables.
+func (e *Executor) SetSelfReviewThreshold(n int) {
+	e.selfReviewThreshold = n
+	if n > 0 {
+		e.mutatedFilesThisTurn = make(map[string]bool)
+	}
 }
 
 // getClient returns the current client under read lock.
@@ -553,10 +606,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	maxIterations := e.calculateMaxIterations(history)
 
 	var finalText string
-	var toolsUsed []string         // Track which tools were used for smart fallback
-	var lastToolResult ToolResult  // Track the last tool result for context
+	var toolsUsed []string          // Track which tools were used for smart fallback
+	var lastToolResult ToolResult   // Track the last tool result for context
 	var recentToolPatterns []string // Track tool name patterns per iteration for stagnation detection
-	const stagnationLimit = 5      // Consecutive identical tool patterns before aborting
+	const stagnationLimit = 5       // Consecutive identical tool patterns before aborting
 	streamRetries := 0
 	partialStreamRetries := 0
 	retryPolicy := client.DefaultStreamRetryPolicy()
@@ -714,6 +767,27 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			funcResultContent := &genai.Content{
 				Role:  genai.RoleUser,
 				Parts: funcResultParts,
+			}
+
+			// Self-review injection: if many files were mutated this turn,
+			// add a notification nudging the model to verify consistency.
+			if e.selfReviewThreshold > 0 {
+				e.mutatedFilesMu.Lock()
+				count := len(e.mutatedFilesThisTurn)
+				var files []string
+				if count >= e.selfReviewThreshold {
+					for f := range e.mutatedFilesThisTurn {
+						files = append(files, f)
+					}
+					sort.Strings(files)
+				}
+				e.mutatedFilesThisTurn = make(map[string]bool)
+				e.mutatedFilesMu.Unlock()
+
+				if count >= e.selfReviewThreshold {
+					hint := fmt.Sprintf("[smart-validation] You modified %d files this turn: %s. Briefly verify version consistency and correctness across these files.", count, strings.Join(files, ", "))
+					e.AddPendingNotification(hint)
+				}
 			}
 
 			// Inject pending background task completion notifications
@@ -982,13 +1056,16 @@ func (e *Executor) collectStreamWithHandler(ctx context.Context, stream *client.
 	// to avoid duplicate error messages
 	var onText func(string)
 	var onThinking func(string)
+	var onTokenUpdate func(int, int)
 	if e.handler != nil {
 		onText = e.handler.OnText
 		onThinking = e.handler.OnThinking
+		onTokenUpdate = e.handler.OnTokenUpdate
 	}
 	return client.ProcessStream(ctx, stream, &client.StreamHandler{
-		OnText:     onText,
-		OnThinking: onThinking,
+		OnText:        onText,
+		OnThinking:    onThinking,
+		OnTokenUpdate: onTokenUpdate,
 	})
 }
 
@@ -1010,6 +1087,7 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 	// Groups execute sequentially to preserve write-before-read ordering.
 	groups := defaultClassifier.classifyDependencies(calls)
 
+	resultIdx := 0                                 // tracks position in the flat results array
 	callToIdx := make(map[*genai.FunctionCall]int) // map call pointer to results index
 	for i, call := range calls {
 		callToIdx[call] = i
@@ -1067,6 +1145,7 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 				results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}
 			}
 		}
+		resultIdx += len(group.Calls)
 	}
 
 	return results, nil
@@ -1569,6 +1648,51 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				}
 			}
 		}
+	}
+
+	// Step 12.9b: Semantic validators (test quality, CI workflow, version consistency).
+	if result.Success && shouldRunDeltaCheckCall(call) && e.semanticValidators != nil {
+		for _, fp := range extractFilePaths(call) {
+			content, err := os.ReadFile(fp)
+			if err != nil {
+				continue
+			}
+			warnings := e.semanticValidators.RunAll(ctx, fp, content, e.workDir)
+			if formatted := FormatWarnings(warnings); formatted != "" {
+				result.Content += "\n\n" + formatted
+			}
+			// Learn from warnings for future prevention
+			if e.errorLearner != nil {
+				for _, w := range warnings {
+					if w.Severity == "error" || w.Severity == "warning" {
+						_ = e.errorLearner.LearnError(
+							"validation_"+w.Validator,
+							w.Message,
+							"Before writing "+filepath.Ext(fp)+" files, check: "+w.Message,
+							[]string{w.Validator, filepath.Ext(fp)},
+						)
+					}
+				}
+			}
+		}
+	}
+
+	// Step 12.9c: Context enrichment (inject canonical versions, function signatures).
+	if result.Success && shouldRunDeltaCheckCall(call) && e.contextEnricher != nil {
+		for _, fp := range extractFilePaths(call) {
+			if hint := e.contextEnricher.Enrich(fp); hint != "" {
+				result.Content += "\n\n" + hint
+			}
+		}
+	}
+
+	// Step 12.9d: Track mutated files for self-review injection.
+	if result.Success && isWriteOperation(call.Name) && e.selfReviewThreshold > 0 {
+		e.mutatedFilesMu.Lock()
+		for _, fp := range extractFilePaths(call) {
+			e.mutatedFilesThisTurn[fp] = true
+		}
+		e.mutatedFilesMu.Unlock()
 	}
 
 	// Step 13: Notify completion and send notifications

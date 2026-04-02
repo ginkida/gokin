@@ -33,9 +33,9 @@ func NewCacheTracker() *CacheTracker {
 type CacheBreakType string
 
 const (
-	CacheBreakNone          CacheBreakType = ""
-	CacheBreakSystemPrompt  CacheBreakType = "system_prompt_changed"
-	CacheBreakToolsChanged  CacheBreakType = "tools_changed"
+	CacheBreakNone         CacheBreakType = ""
+	CacheBreakSystemPrompt CacheBreakType = "system_prompt_changed"
+	CacheBreakToolsChanged CacheBreakType = "tools_changed"
 )
 
 // RecordState records the current state of cacheable components.

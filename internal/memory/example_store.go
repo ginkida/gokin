@@ -108,6 +108,13 @@ func (es *ExampleStore) save() error {
 	return os.WriteFile(es.storagePath(), data, 0644)
 }
 
+// Flush forces an immediate save to disk. Call on graceful shutdown.
+func (es *ExampleStore) Flush() error {
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	return es.save()
+}
+
 // generateExampleID creates a unique ID for an example.
 func generateExampleID() string {
 	return time.Now().Format("20060102150405") + "-" + randomExampleSuffix()

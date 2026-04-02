@@ -52,6 +52,7 @@ type Router struct {
 	parallelThreshold  int
 	costAware          bool
 	fastModel          string
+	modelCapability    *ModelCapability
 
 	// Learned routing
 	routingHistory []routingRecord
@@ -73,10 +74,11 @@ type AgentRunner interface {
 // RouterConfig holds configuration for the router
 type RouterConfig struct {
 	Enabled            bool
-	DecomposeThreshold int    // Default: 4
-	ParallelThreshold  int    // Default: 7
-	CostAware          bool   // Enable cost-aware model selection
-	FastModel          string // Model for simple tasks (e.g., "gemini-2.0-flash")
+	DecomposeThreshold int              // Default: 4
+	ParallelThreshold  int              // Default: 7
+	CostAware          bool             // Enable cost-aware model selection
+	FastModel          string           // Model for simple tasks (e.g., "gemini-2.0-flash")
+	ModelCapability    *ModelCapability // Model capability for adaptive routing
 }
 
 // NewRouter creates a new task router
@@ -102,6 +104,7 @@ func NewRouter(cfg *RouterConfig, executor *tools.Executor, agentRunner AgentRun
 		parallelThreshold:  cfg.ParallelThreshold,
 		costAware:          cfg.CostAware,
 		fastModel:          cfg.FastModel,
+		modelCapability:    cfg.ModelCapability,
 		routingHistory:     make([]routingRecord, 0, 100),
 	}
 }
@@ -116,6 +119,9 @@ func (r *Router) SetPlanChecker(checker PlanChecker) {
 // Route determines the best execution strategy and returns a routing decision
 func (r *Router) Route(message string) *RoutingDecision {
 	analysis := r.analyzer.Analyze(message)
+
+	// Model capability adjustments: weaker models decompose earlier
+	r.applyCapabilityAdjustments(analysis)
 
 	// If a plan is actively being executed, prefer simpler strategies
 	// to avoid nested planning/coordination
@@ -651,25 +657,33 @@ func (h HandlerType) String() string {
 	return string(h)
 }
 
-// selectThinkingBudget returns the thinking token budget based on task complexity.
+// selectThinkingBudget returns the thinking token budget based on task complexity
+// and model capability. Weaker models get proportionally more thinking budget.
 func (r *Router) selectThinkingBudget(analysis *TaskComplexity) int32 {
+	var budget int32
 	switch analysis.Strategy {
 	case StrategyDirect:
-		return 0
+		budget = 0
 	case StrategySingleTool:
 		if analysis.Score <= 2 {
-			return 0
+			budget = 0
+		} else {
+			budget = 1024
 		}
-		return 1024
 	case StrategyExecutor:
 		if analysis.Score >= 5 {
-			return 2048
+			budget = 2048
+		} else {
+			budget = 1024
 		}
-		return 1024
 	case StrategySubAgent:
-		return 4096
+		budget = 4096
 	}
-	return 0
+
+	if budget > 0 && r.modelCapability != nil {
+		budget = int32(float64(budget) * r.modelCapability.ThinkingMultiplier)
+	}
+	return budget
 }
 
 // selectCostAwareModel returns the fast model for simple tasks, empty for complex ones.
@@ -688,6 +702,26 @@ func (r *Router) selectCostAwareModel(analysis *TaskComplexity) string {
 	return ""
 }
 
+// applyCapabilityAdjustments modifies task analysis based on model capability.
+// Weaker models get lower decompose thresholds (complex tasks split earlier).
+func (r *Router) applyCapabilityAdjustments(analysis *TaskComplexity) {
+	if r.modelCapability == nil || r.modelCapability.DecomposeAdjust == 0 {
+		return
+	}
+
+	effectiveThreshold := r.decomposeThreshold + r.modelCapability.DecomposeAdjust
+	if effectiveThreshold < 2 {
+		effectiveThreshold = 2
+	}
+
+	// If task exceeds adjusted threshold but not original, force sub-agent strategy
+	if analysis.Score >= effectiveThreshold && analysis.Score < r.decomposeThreshold {
+		analysis.Strategy = StrategySubAgent
+		analysis.Reasoning += fmt.Sprintf(" (model-adjusted: %s tier lowers decompose threshold to %d)",
+			r.modelCapability.Tier, effectiveThreshold)
+	}
+}
+
 // selectToolSets determines which tool sets to include based on task analysis.
 // Uses both Strategy and TaskType to minimize tool declarations per request,
 // reducing token overhead (~60 tokens per tool declaration).
@@ -698,66 +732,57 @@ func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
 	switch analysis.Strategy {
 	case StrategyDirect:
 		// Pure Q&A — only core, no git/fileops/web needed.
-		return sets
+		return r.filterToolSetsByCapability(sets)
 
 	case StrategySingleTool:
 		// Single tool call: core covers read/write/edit/bash/glob/grep.
-		// Only add git if in a git repo (for git_status, git_diff, etc.)
 		if r.isGitRepo {
 			sets = append(sets, tools.ToolSetGit)
 		}
-		return sets
+		return r.filterToolSetsByCapability(sets)
 
 	case StrategyExecutor:
 		// Task-type-aware filtering within executor strategy.
 		switch analysis.Type {
 		case TaskTypeQuestion:
-			// Questions that need tool calls (e.g. "what does function X do?")
-			// Core is sufficient — read, grep, glob cover it.
-			return sets
+			return r.filterToolSetsByCapability(sets)
 
 		case TaskTypeExploration:
-			// Read-heavy: needs read, glob, grep, tree, diff + git for history.
-			// No write-oriented sets (fileops, web, advanced).
 			if r.isGitRepo {
 				sets = append(sets, tools.ToolSetGit)
 			}
-			return sets
+			return r.filterToolSetsByCapability(sets)
 
 		case TaskTypeRefactoring:
-			// Code changes: needs edit/write + git + advanced analysis tools.
 			if r.isGitRepo {
 				sets = append(sets, tools.ToolSetGit)
 			}
 			sets = append(sets, tools.ToolSetFileOps, tools.ToolSetAdvanced)
-			return sets
+			return r.filterToolSetsByCapability(sets)
 
 		case TaskTypeComplex:
-			// Complex multi-step: broad set but still skip semantic/memory/planning.
 			if r.isGitRepo {
 				sets = append(sets, tools.ToolSetGit)
 			}
 			sets = append(sets, tools.ToolSetFileOps, tools.ToolSetWeb, tools.ToolSetAdvanced)
-			return sets
+			return r.filterToolSetsByCapability(sets)
 
-		default: // multi_tool, background
+		default:
 			if r.isGitRepo {
 				sets = append(sets, tools.ToolSetGit)
 			}
 			sets = append(sets, tools.ToolSetFileOps)
-			return sets
+			return r.filterToolSetsByCapability(sets)
 		}
 
 	case StrategySubAgent:
-		// Sub-agents have their own per-type tool filtering via createFilteredRegistry,
-		// but the main client still needs the full set for coordination.
 		if r.isGitRepo {
 			sets = append(sets, tools.ToolSetGit)
 		}
 		sets = append(sets, tools.ToolSetFileOps, tools.ToolSetWeb,
 			tools.ToolSetAdvanced, tools.ToolSetPlanning,
 			tools.ToolSetAgent, tools.ToolSetMemory, tools.ToolSetSemantic)
-		return sets
+		return r.filterToolSetsByCapability(sets)
 	}
 
 	// Fallback: core + git + fileops
@@ -765,7 +790,34 @@ func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
 		sets = append(sets, tools.ToolSetGit)
 	}
 	sets = append(sets, tools.ToolSetFileOps)
-	return sets
+	return r.filterToolSetsByCapability(sets)
+}
+
+// filterToolSetsByCapability removes complex tool sets for weaker models
+// to reduce confusion from too many options.
+func (r *Router) filterToolSetsByCapability(sets []tools.ToolSet) []tools.ToolSet {
+	if r.modelCapability == nil || r.modelCapability.Tier >= CapabilityStrong {
+		return sets
+	}
+
+	// For weak models: keep only Core, Git, FileOps
+	// For medium models: also keep Advanced but drop Web, Planning, Semantic, Memory, Agent
+	var filtered []tools.ToolSet
+	for _, s := range sets {
+		switch {
+		case r.modelCapability.Tier == CapabilityWeak:
+			if s == tools.ToolSetCore || s == tools.ToolSetGit || s == tools.ToolSetFileOps {
+				filtered = append(filtered, s)
+			}
+		case r.modelCapability.Tier == CapabilityMedium:
+			if s == tools.ToolSetCore || s == tools.ToolSetGit || s == tools.ToolSetFileOps || s == tools.ToolSetAdvanced {
+				filtered = append(filtered, s)
+			}
+		default:
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
 }
 
 // toolHint returns an optional prompt hint based on task type.

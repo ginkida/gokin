@@ -8,12 +8,12 @@ import (
 
 // WorktreeInfo describes a git worktree.
 type WorktreeInfo struct {
-	Path            string // Absolute path to worktree root
-	Branch          string // Branch name or "(detached)" for detached HEAD
-	Head            string // SHA of HEAD commit
-	IsMainWorktree  bool   // True if this is the main repository
-	IsCurrent       bool   // True if this worktree contains the current working directory
-	IsBare          bool   // True if this is a bare worktree entry
+	Path           string // Absolute path to worktree root
+	Branch         string // Branch name or "(detached)" for detached HEAD
+	Head           string // SHA of HEAD commit
+	IsMainWorktree bool   // True if this is the main repository
+	IsCurrent      bool   // True if this worktree contains the current working directory
+	IsBare         bool   // True if this is a bare worktree entry
 }
 
 // DetectWorktree checks if the given directory is inside a git worktree.

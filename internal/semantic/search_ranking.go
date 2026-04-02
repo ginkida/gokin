@@ -42,10 +42,10 @@ type searchQuerySignals struct {
 }
 
 type fileSearchSignals struct {
-	PathHintScore   float64
-	DependencyScore float64
-	FreshnessScore  float64
-	ChangeProximity float64
+	PathHintScore    float64
+	DependencyScore  float64
+	FreshnessScore   float64
+	ChangeProximity  float64
 	SymbolIndexScore float64
 
 	DependencyDegree int

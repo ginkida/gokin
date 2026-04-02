@@ -20,6 +20,9 @@ type StreamHandler struct {
 	// OnError is called when an error occurs.
 	OnError func(err error)
 
+	// OnTokenUpdate is called when the stream provides token usage metadata.
+	OnTokenUpdate func(inputTokens, outputTokens int)
+
 	// OnComplete is called when the response is complete.
 	OnComplete func(response *Response)
 }
@@ -94,6 +97,9 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 			}
 			if chunk.OutputTokens > 0 {
 				resp.OutputTokens = chunk.OutputTokens
+			}
+			if handler.OnTokenUpdate != nil && (chunk.InputTokens > 0 || chunk.OutputTokens > 0) {
+				handler.OnTokenUpdate(resp.InputTokens, resp.OutputTokens)
 			}
 			if chunk.CacheCreationInputTokens > 0 {
 				resp.CacheCreationInputTokens = chunk.CacheCreationInputTokens

@@ -162,8 +162,8 @@ func TestStrategyOptimizerGetTopStrategies(t *testing.T) {
 	}
 
 	so.RecordExecution("a", "t", true, time.Second)  // 100%
-	so.RecordExecution("b", "t", false, time.Second)  // 0%
-	so.RecordExecution("c", "t", true, time.Second)   // 100%
+	so.RecordExecution("b", "t", false, time.Second) // 0%
+	so.RecordExecution("c", "t", true, time.Second)  // 100%
 
 	top := so.GetTopStrategies(2)
 	if len(top) != 2 {

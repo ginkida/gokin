@@ -68,7 +68,17 @@ func (t *EditTool) Name() string {
 }
 
 func (t *EditTool) Description() string {
-	return "Performs string replacement in a file. Supports four modes: (1) old_string/new_string for exact match replacement, (2) regex=true for regex replacement, (3) line_start/line_end/new_string for line-based replacement, (4) insert_after_line/new_string for inserting without deleting."
+	return `Performs string replacement in a file. IMPORTANT: Read the file first to get exact text.
+
+Modes:
+1. Exact match: {"file_path": "f.go", "old_string": "func old()", "new_string": "func new()"}
+2. Replace all:  add "replace_all": true to replace every occurrence
+3. Regex:        add "regex": true, old_string is a regex pattern
+4. Line range:   {"file_path": "f.go", "line_start": 10, "line_end": 15, "new_string": "..."}
+5. Insert:       {"file_path": "f.go", "insert_after_line": 5, "new_string": "new line"}
+6. Multi-edit:   {"file_path": "f.go", "edits": [{"old_string": "a", "new_string": "b"}, ...]}
+
+The old_string must EXACTLY match file content (whitespace matters). If not unique, provide more surrounding context.`
 }
 
 func (t *EditTool) Declaration() *genai.FunctionDeclaration {
@@ -106,7 +116,7 @@ func (t *EditTool) Declaration() *genai.FunctionDeclaration {
 					Type:        genai.TypeInteger,
 					Description: "End line (1-indexed, inclusive). Used with line_start.",
 				},
-					"insert_after_line": {
+				"insert_after_line": {
 					Type:        genai.TypeInteger,
 					Description: "Line number after which to insert new_string (0 = beginning of file). No lines are deleted.",
 				},

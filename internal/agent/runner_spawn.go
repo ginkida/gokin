@@ -133,9 +133,17 @@ func (r *Runner) SpawnWithContext(
 	}
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, perms)
 
-	// Inject project context and streaming callback
+	// Inject project context and streaming callbacks
 	agent.SetProjectContext(projectContext)
 	agent.SetOnText(onText)
+
+	// Wire thinking callback from runner
+	r.mu.RLock()
+	onThinking := r.onThinking
+	r.mu.RUnlock()
+	if onThinking != nil {
+		agent.SetOnThinking(onThinking)
+	}
 
 	// Wire checkpoint store and enable auto-checkpoint for long-running agents
 	if r.store != nil {
@@ -447,9 +455,17 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	deps := r.snapshotAgentDeps()
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
 
-	// Set up streaming callback
+	// Set up streaming callbacks
 	if onText != nil {
 		agent.SetOnText(onText)
+	}
+
+	// Wire thinking callback from runner
+	r.mu.RLock()
+	onThinking := r.onThinking
+	r.mu.RUnlock()
+	if onThinking != nil {
+		agent.SetOnThinking(onThinking)
 	}
 
 	// Wire sub-agent activity callback (chain with meta-agent UpdateActivity)
@@ -710,4 +726,3 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 
 	return ids, firstErr
 }
-

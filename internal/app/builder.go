@@ -88,6 +88,7 @@ type Builder struct {
 	// Phase 2: Learning infrastructure
 	sharedMemory    *agent.SharedMemory
 	exampleStore    *memory.ExampleStore
+	errorStore      *memory.ErrorStore
 	promptOptimizer *agent.PromptOptimizer
 	smartRouter     *router.SmartRouter
 
@@ -100,6 +101,9 @@ type Builder struct {
 
 	// Context Predictor (predictive file loading)
 	contextPredictor *appcontext.ContextPredictor
+
+	// Model capability (inferred from provider/model name)
+	modelCapability *router.ModelCapability
 
 	// Session Memory (automatic conversation summary)
 	sessionMemory *appcontext.SessionMemoryManager
@@ -369,6 +373,26 @@ func (b *Builder) initTools() error {
 		b.cfg.Tools.DeltaCheck.WarnOnly,
 		b.cfg.Tools.DeltaCheck.MaxModules,
 	)
+	// Smart validation: semantic validators + context enrichment + self-review
+	if b.cfg.Tools.SmartValidation.Enabled {
+		registry := tools.NewSemanticValidatorRegistry()
+		registry.Register(&tools.TestQualityValidator{})
+		registry.Register(&tools.CIWorkflowValidator{})
+		registry.Register(&tools.VersionConsistencyValidator{})
+		registry.Register(&tools.GoQualityValidator{})
+		registry.Register(&tools.DockerfileValidator{})
+		registry.Register(&tools.SecurityValidator{})
+		registry.Register(&tools.ShellValidator{})
+		b.executor.SetSemanticValidators(registry)
+
+		enricher := tools.NewContextEnricher(b.workDir)
+		// Predictor wiring deferred to wireDependencies when contextPredictor is available
+		b.executor.SetContextEnricher(enricher)
+	}
+	if threshold := b.cfg.Tools.SmartValidation.SelfReviewThreshold; threshold > 0 {
+		b.executor.SetSelfReviewThreshold(threshold)
+	}
+
 	compactor := appcontext.NewResultCompactor(b.cfg.Context.ToolResultMaxChars)
 	b.executor.SetCompactor(compactor)
 
@@ -769,7 +793,7 @@ func (b *Builder) initManagers() error {
 		if err != nil {
 			logging.Warn("failed to create example store", "error", err)
 		} else {
-			// Wrap for runner interface
+			memory.SeedDefaults(b.exampleStore)
 			b.agentRunner.SetExampleStore(&exampleStoreAdapter{store: b.exampleStore})
 			logging.Debug("example store initialized")
 		}
@@ -782,8 +806,20 @@ func (b *Builder) initManagers() error {
 		logging.Debug("prompt optimizer initialized")
 	}
 
-	// 4. Smart Router with adaptive selection
+	// 4. Smart Router with adaptive selection + model capability
 	smartRouterCfg := router.DefaultSmartRouterConfig()
+	b.modelCapability = router.InferModelCapability(b.cfg.API.GetActiveProvider(), b.cfg.Model.Name)
+	smartRouterCfg.ModelCapability = b.modelCapability
+	logging.Debug("model capability inferred", "provider", b.modelCapability.Provider, "tier", b.modelCapability.Tier.String())
+
+	// Adapt for weaker models: self-review boost, weak model guidance, compact history
+	if b.modelCapability.Tier < router.CapabilityStrong {
+		if b.modelCapability.SelfReviewBoost && b.cfg.Tools.SmartValidation.SelfReviewThreshold > 2 {
+			b.executor.SetSelfReviewThreshold(2)
+		}
+		b.agentRunner.SetWeakModelMode(true)
+	}
+
 	b.smartRouter = router.NewSmartRouter(b.ctx, smartRouterCfg, b.executor, b.agentRunner, b.geminiClient, b.workDir)
 	if b.strategyOptimizer != nil {
 		b.smartRouter.SetStrategyOptimizer(b.strategyOptimizer)
@@ -998,8 +1034,9 @@ func (b *Builder) initIntegrations() error {
 		if err != nil {
 			logging.Warn("failed to create error store", "error", err)
 		} else {
-			// Wire error store to agent runner for reflector integration
+			b.errorStore = errorStore
 			b.agentRunner.SetErrorStore(errorStore)
+			b.executor.SetErrorLearner(&errorLearnerAdapter{store: errorStore})
 			logging.Debug("error store initialized for learning from errors")
 		}
 	}
@@ -1023,6 +1060,18 @@ func (b *Builder) initIntegrations() error {
 	if b.contextPredictor != nil {
 		b.agentRunner.SetPredictor(&contextPredictorAdapter{predictor: b.contextPredictor})
 		logging.Debug("context predictor wired to agent runner")
+
+		// Also wire to context enricher for prediction-based enrichment
+		if enricher := b.executor.GetContextEnricher(); enricher != nil {
+			enricher.SetPredictor(&contextPredictorToolsAdapter{predictor: b.contextPredictor})
+			logging.Debug("context predictor wired to context enricher")
+		}
+	}
+
+	// Use compact history strategy for weaker models (smaller effective context)
+	if b.modelCapability != nil && b.modelCapability.Tier < router.CapabilityStrong && b.contextManager != nil {
+		b.contextManager.SetSummaryStrategy(appcontext.CompactStrategy())
+		logging.Debug("using compact summary strategy for model tier", "tier", b.modelCapability.Tier.String())
 	}
 
 	// Initialize search cache
@@ -1339,10 +1388,9 @@ func (b *Builder) wireDependencies() error {
 		},
 		OnThinking: func(text string) {
 			app.touchStepHeartbeat()
-			// Thinking content keeps the UI alive — send a tick
-			// so the status bar continues to animate and show elapsed time.
+			logging.Debug("OnThinking callback fired", "text_length", len(text), "text_preview", text[:min(len(text), 80)])
 			if app.program != nil {
-				app.program.Send(ui.ThinkingTickMsg{})
+				app.program.Send(ui.StreamThinkingMsg(text))
 			}
 		},
 		OnToolStart: func(name string, args map[string]any) {
@@ -1431,6 +1479,29 @@ func (b *Builder) wireDependencies() error {
 				app.program.Send(ui.LoopIterationMsg{
 					Iteration: iteration,
 					ToolsUsed: toolsUsed,
+				})
+			}
+			// Refresh token display between executor rounds so the bar stays current
+			app.sendTokenUsageUpdate()
+		},
+		OnTokenUpdate: func(inputTokens, outputTokens int) {
+			if app.program != nil && inputTokens > 0 {
+				maxTokens := 0
+				if app.contextManager != nil {
+					if usage := app.contextManager.GetTokenUsage(); usage != nil {
+						maxTokens = usage.MaxTokens
+					}
+				}
+				total := inputTokens + outputTokens
+				var pct float64
+				if maxTokens > 0 {
+					pct = float64(total) / float64(maxTokens)
+				}
+				app.program.Send(ui.TokenUsageMsg{
+					Tokens:      total,
+					MaxTokens:   maxTokens,
+					PercentUsed: pct,
+					NearLimit:   pct > 0.8,
 				})
 			}
 		},
@@ -1567,6 +1638,13 @@ func (b *Builder) wireDependencies() error {
 
 		if app.program != nil {
 			app.program.Send(ui.ScratchpadMsg(content))
+		}
+	})
+
+	// Wire thinking callback for sub-agents
+	b.agentRunner.SetOnThinking(func(text string) {
+		if app.program != nil {
+			app.program.Send(ui.StreamThinkingMsg(text))
 		}
 	})
 
@@ -1712,6 +1790,9 @@ func (b *Builder) assembleApp() *App {
 		// MCP (Model Context Protocol)
 		mcpManager:    b.mcpManager,
 		sessionMemory: b.sessionMemory,
+		// Persistent stores for flush on shutdown
+		errorStore:   b.errorStore,
+		exampleStore: b.exampleStore,
 		// Auto retry tracking
 		rateLimitRetryCount: make(map[string]int),
 		// Step rollback snapshots
@@ -1945,6 +2026,33 @@ func (a *contextPredictorAdapter) PredictFiles(currentFile string, limit int) []
 		}
 	}
 	return result
+}
+
+// contextPredictorToolsAdapter adapts appcontext.ContextPredictor to tools.FilePredictor.
+type contextPredictorToolsAdapter struct {
+	predictor *appcontext.ContextPredictor
+}
+
+func (a *contextPredictorToolsAdapter) PredictFiles(currentFile string, limit int) []tools.PredictedFile {
+	predictions := a.predictor.PredictFiles(currentFile, limit)
+	result := make([]tools.PredictedFile, len(predictions))
+	for i, p := range predictions {
+		result[i] = tools.PredictedFile{
+			Path:       p.Path,
+			Confidence: p.Confidence,
+			Reason:     p.Reason,
+		}
+	}
+	return result
+}
+
+// errorLearnerAdapter adapts *memory.ErrorStore to tools.ErrorLearner.
+type errorLearnerAdapter struct {
+	store *memory.ErrorStore
+}
+
+func (a *errorLearnerAdapter) LearnError(errorType, pattern, solution string, tags []string) error {
+	return a.store.LearnError(errorType, pattern, solution, tags)
 }
 
 // ========== Coordinator Tool Adapter ==========

@@ -193,4 +193,3 @@ func (r *Runner) SetStore(store *AgentStore) {
 	r.store = store
 	r.mu.Unlock()
 }
-

@@ -1175,7 +1175,7 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 						Text             string `json:"text,omitempty"`
 						Thought          bool   `json:"thought,omitempty"`
 						ThoughtSignature []byte `json:"thoughtSignature,omitempty"`
-						FunctionCall *struct {
+						FunctionCall     *struct {
 							Name string                 `json:"name"`
 							Args map[string]interface{} `json:"args"`
 						} `json:"functionCall,omitempty"`
@@ -1208,7 +1208,7 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 						Text             string `json:"text,omitempty"`
 						Thought          bool   `json:"thought,omitempty"`
 						ThoughtSignature []byte `json:"thoughtSignature,omitempty"`
-						FunctionCall *struct {
+						FunctionCall     *struct {
 							Name string                 `json:"name"`
 							Args map[string]interface{} `json:"args"`
 						} `json:"functionCall,omitempty"`

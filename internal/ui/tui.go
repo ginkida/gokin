@@ -74,8 +74,9 @@ type Model struct {
 	planProgress     *PlanProgressMsg
 	planProgressMode bool // True when plan is actively executing
 
-	// Session timing
+	// Session timing and cost
 	sessionStart time.Time
+	sessionCost  float64 // Cumulative USD cost this session
 
 	// Permission prompt state
 	permRequest        *PermissionRequestMsg
@@ -1187,12 +1188,27 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case StreamThinkingMsg:
+		m.streamStartTime = time.Now()
+		m.lastActivityTime = time.Now()
+		m.slowWarningShown = false
+		m.state = StateStreaming
+
+		if !m.responseHeaderShown {
+			m.responseHeaderShown = true
+		}
+
+		m.output.AppendThinkingStream(string(msg))
+
 	case StreamTextMsg:
 		m.streamStartTime = time.Now() // Reset timeout on streaming activity
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
 		m.state = StateStreaming
 		m.processingLabel = "" // Text streaming is the feedback itself
+
+		// Close thinking block when text starts
+		m.output.EndThinking()
 
 		// Mark response as started (no header in Claude Code style)
 		if !m.responseHeaderShown {
@@ -1207,6 +1223,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
 		m.processingLabel = "" // Tool name takes over in status bar
+
+		// Close thinking block when tool call starts
+		m.output.EndThinking()
 
 		// Mark response as started (no header in Claude Code style)
 		if !m.responseHeaderShown {
@@ -1336,6 +1355,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Now()
 
 	case ResponseDoneMsg:
+		m.output.EndThinking()
 		m.state = StateInput
 		m.currentTool = ""
 		m.currentToolInfo = ""
@@ -1363,6 +1383,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// Track request latency for status bar
 		if msg.Duration > 0 {
 			m.lastRequestLatency = msg.Duration
+		}
+		// Accumulate session cost
+		if msg.Cost > 0 {
+			m.sessionCost += msg.Cost
 		}
 		// Render response metadata footer
 		footer := m.renderResponseMetadata(msg)

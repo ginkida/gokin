@@ -475,6 +475,13 @@ func StreamText(text string) tea.Cmd {
 	}
 }
 
+// StreamThinking sends a stream thinking message.
+func StreamThinking(text string) tea.Cmd {
+	return func() tea.Msg {
+		return StreamThinkingMsg(text)
+	}
+}
+
 // ToolCall sends a tool call message.
 func ToolCall(name string, args map[string]any) tea.Cmd {
 	return func() tea.Msg {

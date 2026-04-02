@@ -84,8 +84,8 @@ func (a *ContextAgent) CheckAndCompact(ctx context.Context) {
 	currentTokens := usage.InputTokens
 	ratio := float64(currentTokens) / float64(usage.MaxTokens)
 
-	// Update growth rate estimate (exponential moving average)
-	// Protected by mu since CheckAndCompact can be called from the background ticker goroutine.
+	// Update growth rate estimate (exponential moving average).
+	// Protected by mu — CheckAndCompact is called from the background ticker goroutine.
 	a.mu.Lock()
 	now := time.Now()
 	if a.prevTokens > 0 && !a.prevCheckTime.IsZero() {

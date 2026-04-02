@@ -90,9 +90,9 @@ func TestGetModelLimits_Exported(t *testing.T) {
 
 func TestGetPricing_KnownModels(t *testing.T) {
 	tests := []struct {
-		model       string
-		wantInput   float64
-		wantOutput  float64
+		model      string
+		wantInput  float64
+		wantOutput float64
 	}{
 		{"gemini-2.0-flash", 0.10, 0.40},
 		{"claude-opus", 15.00, 75.00},

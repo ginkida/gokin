@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -78,7 +80,12 @@ type Agent struct {
 	projectContext string            // Injected project guidelines/instructions
 	onText         func(text string) // Streaming callback for real-time output
 	onTextMu       sync.Mutex        // Protects onText from interleaving
+	onThinking     func(text string) // Streaming callback for thinking/reasoning output
+	onThinkingMu   sync.Mutex        // Protects onThinking from interleaving
 	onInput        func(prompt string) (string, error)
+
+	// Model capability adaptation
+	weakModelMode bool // When true, include more guidance for weaker models
 
 	// Plan approval callback for context compaction
 	onPlanApproved func(planSummary string) // Called when plan is built, allows context clearing
@@ -634,6 +641,21 @@ func (a *Agent) SetOnText(onText func(string)) {
 	a.stateMu.Unlock()
 }
 
+// SetOnThinking sets the streaming callback for thinking/reasoning output.
+func (a *Agent) SetOnThinking(onThinking func(string)) {
+	a.stateMu.Lock()
+	a.onThinking = onThinking
+	a.stateMu.Unlock()
+}
+
+// SetWeakModelMode enables additional guidance for weaker models
+// (more tool examples, tool guides for lightweight agents, directive rules).
+func (a *Agent) SetWeakModelMode(enabled bool) {
+	a.stateMu.Lock()
+	a.weakModelMode = enabled
+	a.stateMu.Unlock()
+}
+
 // SetOnScratchpadUpdate sets the callback for scratchpad updates.
 func (a *Agent) SetOnScratchpadUpdate(fn func(string)) {
 	a.stateMu.Lock()
@@ -641,11 +663,45 @@ func (a *Agent) SetOnScratchpadUpdate(fn func(string)) {
 	a.stateMu.Unlock()
 }
 
-// SetPinnedContext sets the pinned context for the agent.
+// SetPinnedContext sets the pinned context for the agent and persists to disk.
 func (a *Agent) SetPinnedContext(content string) {
 	a.stateMu.Lock()
 	a.PinnedContext = content
+	workDir := a.workDir
 	a.stateMu.Unlock()
+
+	// Persist to disk so it survives restarts
+	if workDir != "" {
+		pinnedPath := filepath.Join(workDir, ".gokin", "pinned_context.md")
+		if content == "" {
+			os.Remove(pinnedPath)
+		} else {
+			os.MkdirAll(filepath.Dir(pinnedPath), 0750)
+			os.WriteFile(pinnedPath, []byte(content), 0644)
+		}
+	}
+}
+
+// LoadPinnedContext loads pinned context from disk if it exists.
+func (a *Agent) LoadPinnedContext() {
+	a.stateMu.RLock()
+	workDir := a.workDir
+	a.stateMu.RUnlock()
+
+	if workDir == "" {
+		return
+	}
+	pinnedPath := filepath.Join(workDir, ".gokin", "pinned_context.md")
+	data, err := os.ReadFile(pinnedPath)
+	if err != nil {
+		return
+	}
+	content := strings.TrimSpace(string(data))
+	if content != "" {
+		a.stateMu.Lock()
+		a.PinnedContext = content
+		a.stateMu.Unlock()
+	}
 }
 
 // GetPinnedContext returns the pinned context.
@@ -1123,8 +1179,9 @@ func (a *Agent) buildSystemPrompt() string {
 	// General/plan agents get the full prompt with all context.
 	lightweight := a.Type == AgentTypeExplore || a.Type == AgentTypeBash || a.Type == AgentTypeGuide
 
-	// Inject project-specific knowledge (skip for lightweight — they don't need learned patterns)
-	if !lightweight && a.learning != nil {
+	// Inject project-specific knowledge.
+	// Include for non-lightweight agents always; also for lightweight in weak model mode.
+	if (!lightweight || a.weakModelMode) && a.learning != nil {
 		sb.WriteString(a.learning.FormatForPrompt())
 		sb.WriteString("\n")
 	}
@@ -1221,12 +1278,51 @@ func (a *Agent) buildSystemPrompt() string {
 		sb.WriteString("\n═══════════════════════════════════════════════════════════════════════\n")
 	}
 
-	// Inject tool usage guides (skip for lightweight — type-specific prompt already covers their tools)
-	if !lightweight {
+	// Inject tool usage guides.
+	// Include for non-lightweight agents always; also for lightweight when weak model needs guidance.
+	if !lightweight || a.weakModelMode {
 		sb.WriteString(a.buildToolGuidesSection())
 	}
 
+	// For weak/medium models, add explicit guidance to prevent common mistakes.
+	if a.weakModelMode {
+		sb.WriteString(a.buildWeakModelGuidance())
+	}
+
 	return sb.String()
+}
+
+// buildWeakModelGuidance returns a concise set of rules that prevent
+// the most common mistakes made by weaker models.
+func (a *Agent) buildWeakModelGuidance() string {
+	return `
+## IMPORTANT RULES (read carefully)
+
+### File editing
+- ALWAYS use old_string/new_string with EXACT text from the file (copy-paste)
+- Include enough surrounding context to make old_string unique
+- NEVER guess file contents — read the file first
+
+### Version consistency
+- ALWAYS read go.mod before writing CI/workflow files
+- Use the EXACT Go version from go.mod (e.g. go-version: '1.25.7')
+- All workflow files must use the same version
+
+### Testing patterns
+- ALWAYS check errors: if err != nil { t.Fatal(err) } — never _ = err
+- ALWAYS add testing.Short() guard before HTTP/network calls
+- Every Test function MUST have at least one assertion (t.Error, t.Fatal, if check)
+
+### Shell / CI
+- GitHub Actions: use ${{ steps.ID.outputs.NAME }} for step outputs, not ${NAME}
+- Heredocs: use << EOF (unquoted) when you need shell variable interpolation
+- Pin actions to tags: uses: actions/checkout@v4, never @master
+- Scripts: start with set -euo pipefail
+
+### Security
+- NEVER hardcode API keys, tokens, or passwords — use environment variables
+- NEVER commit .env files or credentials
+`
 }
 
 // buildToolGuidesSection creates a section with usage guides for available tools.
@@ -2400,11 +2496,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 
 		turnMadeProgress := false
 
-		// Accumulate text output
+		// Accumulate text output (already streamed to UI via collectStream callbacks)
 		if resp.Text != "" {
 			output.WriteString(resp.Text)
-			// Stream text to UI in real-time
-			a.safeOnText(resp.Text)
 
 			textFingerprint := normalizeProgressFingerprint(resp.Text)
 			if textFingerprint != "" && textFingerprint != lastTextFingerprint {
@@ -3356,6 +3450,19 @@ func (a *Agent) injectContinuationHint() {
 	}
 }
 
+// collectStream collects a streaming response while firing onText and onThinking
+// callbacks in real-time, so the TUI can display content as it arrives.
+func (a *Agent) collectStream(ctx context.Context, stream *client.StreamingResponse) (*client.Response, error) {
+	return client.ProcessStream(ctx, stream, &client.StreamHandler{
+		OnText: func(text string) {
+			a.safeOnText(text)
+		},
+		OnThinking: func(text string) {
+			a.safeOnThinking(text)
+		},
+	})
+}
+
 // getModelResponse gets a response from the model.
 func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) {
 	// Read history under lock for thread safety
@@ -3402,7 +3509,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 				if err != nil {
 					return nil, err
 				}
-				return stream.Collect()
+				return a.collectStream(ctx, stream)
 			}
 
 			// Route through SendFunctionResponse for proper API formatting
@@ -3410,7 +3517,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 			if err != nil {
 				return nil, err
 			}
-			return stream.Collect()
+			return a.collectStream(ctx, stream)
 		}
 	}
 
@@ -3441,7 +3548,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 		return nil, err
 	}
 
-	return stream.Collect()
+	return a.collectStream(ctx, stream)
 }
 
 // executeTools executes the function calls with parallel execution for read-only tools.
@@ -3899,6 +4006,19 @@ func (a *Agent) safeOnText(text string) {
 	}
 	a.onTextMu.Lock()
 	defer a.onTextMu.Unlock()
+	fn(text)
+}
+
+// safeOnThinking streams thinking content to the UI in a thread-safe manner.
+func (a *Agent) safeOnThinking(text string) {
+	a.stateMu.RLock()
+	fn := a.onThinking
+	a.stateMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	a.onThinkingMu.Lock()
+	defer a.onThinkingMu.Unlock()
 	fn(text)
 }
 

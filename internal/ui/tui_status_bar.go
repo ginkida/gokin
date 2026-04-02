@@ -378,6 +378,9 @@ func renderContextBar(pct float64, barWidth int, tokens int, maxTokens int) stri
 	if filled > barWidth {
 		filled = barWidth
 	}
+	if filled == 0 && pct > 0 {
+		filled = 1
+	}
 
 	barColor := contextUrgencyColor(pct)
 

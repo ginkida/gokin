@@ -58,8 +58,8 @@ type CategoryCounter struct {
 // tool calls after a failure and provides instant lookup on recurrence.
 type FixCache struct {
 	mu               sync.RWMutex
-	fixes            map[string]*FixRecord  // key → fix record
-	pending          []*PendingError        // errors awaiting fix detection
+	fixes            map[string]*FixRecord // key → fix record
+	pending          []*PendingError       // errors awaiting fix detection
 	categoryCounters map[string]*CategoryCounter
 	maxPending       int // max pending errors to track
 	maxFixes         int // max fix records to keep
