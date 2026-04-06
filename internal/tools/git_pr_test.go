@@ -84,7 +84,7 @@ func TestGitPRTool_Execute_RequiresGH(t *testing.T) {
 	// Actual gh commands require gh CLI to be installed
 	t.Skip("Requires gh CLI to be installed")
 
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitPRTool(tmpDir)

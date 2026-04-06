@@ -112,7 +112,7 @@ func TestGlobTool_SetAllowedDirs(t *testing.T) {
 }
 
 func TestGlobTool_Execute_SinglePattern(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create test files
 	file1 := filepath.Join(tmpDir, "test.go")
@@ -142,7 +142,7 @@ func TestGlobTool_Execute_SinglePattern(t *testing.T) {
 }
 
 func TestGlobTool_Execute_RecursivePattern(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create nested files
 	subDir := filepath.Join(tmpDir, "sub")
@@ -178,7 +178,7 @@ func TestGlobTool_Execute_RecursivePattern(t *testing.T) {
 }
 
 func TestGlobTool_Execute_MaxResults(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create multiple files
 	for i := 0; i < 5; i++ {
@@ -205,7 +205,7 @@ func TestGlobTool_Execute_MaxResults(t *testing.T) {
 }
 
 func TestGlobTool_Execute_NoMatches(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create a file that won't match
 	filePath := filepath.Join(tmpDir, "test.txt")
@@ -229,7 +229,7 @@ func TestGlobTool_Execute_NoMatches(t *testing.T) {
 }
 
 func TestGlobTool_Execute_InvalidPattern(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	tool := NewGlobTool(tmpDir)
 
@@ -246,7 +246,7 @@ func TestGlobTool_Execute_InvalidPattern(t *testing.T) {
 }
 
 func TestGlobTool_Execute_ExcludeGitignore(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create .gitignore
 	gitignore := filepath.Join(tmpDir, ".gitignore")

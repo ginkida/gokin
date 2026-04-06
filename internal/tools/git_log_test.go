@@ -78,7 +78,7 @@ func TestGitLogTool_NewGitLogTool(t *testing.T) {
 }
 
 func TestGitLogTool_Execute_NotAGitRepo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewGitLogTool(tmpDir)
 
 	ctx := context.Background()
@@ -93,7 +93,7 @@ func TestGitLogTool_Execute_NotAGitRepo(t *testing.T) {
 }
 
 func TestGitLogTool_Execute_EmptyHistory(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitLogTool(tmpDir)
@@ -111,7 +111,7 @@ func TestGitLogTool_Execute_EmptyHistory(t *testing.T) {
 }
 
 func TestGitLogTool_Execute_WithCommits(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create first commit
@@ -154,7 +154,7 @@ func TestGitLogTool_Execute_WithCommits(t *testing.T) {
 }
 
 func TestGitLogTool_Execute_LimitCount(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	filePath := filepath.Join(tmpDir, "test.txt")
@@ -189,7 +189,7 @@ func TestGitLogTool_Execute_LimitCount(t *testing.T) {
 }
 
 func TestGitLogTool_Execute_OnelineFormat(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	filePath := filepath.Join(tmpDir, "test.txt")
@@ -221,7 +221,7 @@ func TestGitLogTool_Execute_OnelineFormat(t *testing.T) {
 }
 
 func TestGitLogTool_Execute_FileHistory(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create file

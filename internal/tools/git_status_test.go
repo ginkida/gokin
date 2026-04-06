@@ -89,7 +89,7 @@ func initGitRepo(t *testing.T, dir string) {
 }
 
 func TestGitStatusTool_Execute_NotAGitRepo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewGitStatusTool(tmpDir)
 
 	ctx := context.Background()
@@ -105,7 +105,7 @@ func TestGitStatusTool_Execute_NotAGitRepo(t *testing.T) {
 }
 
 func TestGitStatusTool_Execute_CleanRepo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitStatusTool(tmpDir)
@@ -122,7 +122,7 @@ func TestGitStatusTool_Execute_CleanRepo(t *testing.T) {
 }
 
 func TestGitStatusTool_Execute_WithChanges(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create a file
@@ -149,7 +149,7 @@ func TestGitStatusTool_Execute_WithChanges(t *testing.T) {
 }
 
 func TestGitStatusTool_Execute_ShortFormat(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create a file
@@ -175,7 +175,7 @@ func TestGitStatusTool_Execute_ShortFormat(t *testing.T) {
 }
 
 func TestGitStatusTool_Execute_CustomPath(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create a file
@@ -201,7 +201,7 @@ func TestGitStatusTool_Execute_CustomPath(t *testing.T) {
 }
 
 func TestGitStatusTool_Execute_StagedChanges(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create and stage a file

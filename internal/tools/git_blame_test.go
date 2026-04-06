@@ -77,7 +77,7 @@ func TestGitBlameTool_NewGitBlameTool(t *testing.T) {
 }
 
 func TestGitBlameTool_Execute_NotAGitRepo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewGitBlameTool(tmpDir)
 
 	ctx := context.Background()
@@ -94,7 +94,7 @@ func TestGitBlameTool_Execute_NotAGitRepo(t *testing.T) {
 }
 
 func TestGitBlameTool_Execute_UntrackedFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create but don't commit
@@ -119,7 +119,7 @@ func TestGitBlameTool_Execute_UntrackedFile(t *testing.T) {
 }
 
 func TestGitBlameTool_Execute_TrackedFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create and commit
@@ -152,7 +152,7 @@ func TestGitBlameTool_Execute_TrackedFile(t *testing.T) {
 }
 
 func TestGitBlameTool_Execute_LineRange(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create file with multiple lines
@@ -188,7 +188,7 @@ func TestGitBlameTool_Execute_LineRange(t *testing.T) {
 }
 
 func TestGitBlameTool_Execute_NonexistentFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitBlameTool(tmpDir)

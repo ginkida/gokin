@@ -111,6 +111,14 @@ func (s *SessionMemoryManager) RecordToolCall() {
 	s.toolCallsSinceUpdate++
 }
 
+// ExtractAsync copies the history slice and runs extraction in a background goroutine.
+// This is the safe entry point — callers don't need to worry about race conditions.
+func (s *SessionMemoryManager) ExtractAsync(history []*genai.Content, currentTokens int) {
+	snapshot := make([]*genai.Content, len(history))
+	copy(snapshot, history)
+	go s.Extract(snapshot, currentTokens)
+}
+
 // Extract extracts session memory from conversation history using heuristic analysis.
 // This does NOT make any LLM calls — it uses pattern matching on the history.
 func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens int) {

@@ -360,10 +360,19 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 				return NewSuccessResult(status), nil
 			}
 
-			// Fuzzy matching failed — fall back to error with suggestion
+			// Fuzzy matching failed — build a helpful error message.
 			errMsg := fmt.Sprintf("old_string not found in file: %s", filePath)
+
+			// 1. Check whitespace-only mismatch
 			if actual, line := findFuzzyMatch(content, oldStr); actual != "" {
 				errMsg += fmt.Sprintf("\n\nFuzzy match at line %d (whitespace differs). Actual text:\n```\n%s\n```\nUse this exact text as old_string.", line, actual)
+			} else {
+				// 2. Find the closest matching line(s) to help the model self-correct
+				if bestLine, bestLineNum, score := findClosestLines(content, oldStr); score > 0.4 {
+					errMsg += fmt.Sprintf("\n\nClosest match at line %d (%.0f%% similar):\n```\n%s\n```\nRead the file first to get the exact text.", bestLineNum, score*100, bestLine)
+				} else {
+					errMsg += "\n\nHint: Read the file first with the read tool to see current content."
+				}
 			}
 			fileCtx := extractFileContext(content, editContextMaxChars)
 			return NewErrorResultWithContext(errMsg, fileCtx), nil
@@ -749,6 +758,112 @@ func findFuzzyMatch(content, oldStr string) (string, int) {
 
 	actual := strings.Join(contentLines[startLine:endLine+1], "\n")
 	return actual, startLine + 1 // 1-indexed line number
+}
+
+// findClosestLines finds the most similar contiguous block in content to oldStr.
+// Uses a simple line-level similarity score (longest common subsequence ratio).
+// Returns the best matching block, its 1-indexed line number, and similarity score (0-1).
+func findClosestLines(content, oldStr string) (string, int, float64) {
+	contentLines := strings.Split(content, "\n")
+	oldLines := strings.Split(oldStr, "\n")
+	oldLineCount := len(oldLines)
+
+	if oldLineCount == 0 || len(contentLines) == 0 {
+		return "", 0, 0
+	}
+
+	// For single-line search, find best matching line
+	if oldLineCount == 1 {
+		target := strings.TrimSpace(oldLines[0])
+		if target == "" {
+			return "", 0, 0
+		}
+		bestScore := 0.0
+		bestIdx := 0
+		for i, line := range contentLines {
+			score := lineSimilarity(target, strings.TrimSpace(line))
+			if score > bestScore {
+				bestScore = score
+				bestIdx = i
+			}
+		}
+		if bestScore > 0.4 {
+			return contentLines[bestIdx], bestIdx + 1, bestScore
+		}
+		return "", 0, 0
+	}
+
+	// For multi-line search, slide a window and score each position
+	bestScore := 0.0
+	bestIdx := 0
+	for i := 0; i <= len(contentLines)-oldLineCount; i++ {
+		score := blockSimilarity(oldLines, contentLines[i:i+oldLineCount])
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+
+	if bestScore > 0.4 {
+		block := strings.Join(contentLines[bestIdx:bestIdx+oldLineCount], "\n")
+		return block, bestIdx + 1, bestScore
+	}
+	return "", 0, 0
+}
+
+// lineSimilarity returns a similarity score (0-1) between two strings
+// based on longest common subsequence length ratio.
+func lineSimilarity(a, b string) float64 {
+	if a == b {
+		return 1.0
+	}
+	if len(a) == 0 || len(b) == 0 {
+		return 0.0
+	}
+	lcs := lcsLength(a, b)
+	maxLen := len(a)
+	if len(b) > maxLen {
+		maxLen = len(b)
+	}
+	return float64(lcs) / float64(maxLen)
+}
+
+// blockSimilarity returns the average line similarity between two same-length blocks.
+func blockSimilarity(a, b []string) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var total float64
+	for i := range a {
+		total += lineSimilarity(strings.TrimSpace(a[i]), strings.TrimSpace(b[i]))
+	}
+	return total / float64(len(a))
+}
+
+// lcsLength computes the length of the longest common subsequence.
+// Uses O(min(m,n)) space with two-row DP.
+func lcsLength(a, b string) int {
+	if len(a) > len(b) {
+		a, b = b, a // ensure a is shorter
+	}
+	prev := make([]int, len(a)+1)
+	curr := make([]int, len(a)+1)
+	for j := 1; j <= len(b); j++ {
+		for i := 1; i <= len(a); i++ {
+			if a[i-1] == b[j-1] {
+				curr[i] = prev[i-1] + 1
+			} else if prev[i] > curr[i-1] {
+				curr[i] = prev[i]
+			} else {
+				curr[i] = curr[i-1]
+			}
+		}
+		prev, curr = curr, prev
+		for i := range curr {
+			curr[i] = 0
+		}
+	}
+	return prev[len(a)]
 }
 
 // fuzzyStrategy defines a normalization strategy for progressive edit matching.

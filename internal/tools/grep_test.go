@@ -129,7 +129,7 @@ type mockPredictor struct{}
 func (m *mockPredictor) RecordAccess(path, accessType, fromFile string) {}
 
 func TestGrepTool_Execute_SimplePattern(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create a file with content
 	filePath := filepath.Join(tmpDir, "test.go")
@@ -155,7 +155,7 @@ func TestGrepTool_Execute_SimplePattern(t *testing.T) {
 }
 
 func TestGrepTool_Execute_SpecificFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create files
 	file1 := filepath.Join(tmpDir, "match.go")
@@ -186,7 +186,7 @@ func TestGrepTool_Execute_SpecificFile(t *testing.T) {
 }
 
 func TestGrepTool_Execute_CaseInsensitive(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	filePath := filepath.Join(tmpDir, "test.go")
 	content := "package main\n\nfunc Test() {}\n"
@@ -212,7 +212,7 @@ func TestGrepTool_Execute_CaseInsensitive(t *testing.T) {
 }
 
 func TestGrepTool_Execute_NoMatches(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	filePath := filepath.Join(tmpDir, "test.go")
 	content := "package main\n\nfunc test() {}\n"
@@ -236,7 +236,7 @@ func TestGrepTool_Execute_NoMatches(t *testing.T) {
 }
 
 func TestGrepTool_Execute_MultipleFiles(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create multiple files
 	for i := 0; i < 3; i++ {
@@ -263,7 +263,7 @@ func TestGrepTool_Execute_MultipleFiles(t *testing.T) {
 }
 
 func TestGrepTool_Execute_WithContext(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	filePath := filepath.Join(tmpDir, "test.go")
 	content := "line1\nline2\nline3\nline4\nline5\n"
@@ -289,7 +289,7 @@ func TestGrepTool_Execute_WithContext(t *testing.T) {
 }
 
 func TestGrepTool_Execute_InvalidRegex(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	filePath := filepath.Join(tmpDir, "test.go")
 	err := os.WriteFile(filePath, []byte("content"), 0644)
@@ -312,7 +312,7 @@ func TestGrepTool_Execute_InvalidRegex(t *testing.T) {
 }
 
 func TestGrepTool_Execute_NonexistentFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	tool := NewGrepTool(tmpDir)
 

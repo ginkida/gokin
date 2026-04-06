@@ -67,7 +67,7 @@ func TestGitDiffTool_NewGitDiffTool(t *testing.T) {
 }
 
 func TestGitDiffTool_Execute_NoChanges(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Commit initial empty state
@@ -89,7 +89,7 @@ func TestGitDiffTool_Execute_NoChanges(t *testing.T) {
 }
 
 func TestGitDiffTool_Execute_UnstagedChanges(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create and commit a file
@@ -127,7 +127,7 @@ func TestGitDiffTool_Execute_UnstagedChanges(t *testing.T) {
 }
 
 func TestGitDiffTool_Execute_NameStatus(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create a file
@@ -153,7 +153,7 @@ func TestGitDiffTool_Execute_NameStatus(t *testing.T) {
 }
 
 func TestGitDiffTool_Execute_SpecificFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create two files
@@ -184,7 +184,7 @@ func TestGitDiffTool_Execute_SpecificFile(t *testing.T) {
 }
 
 func TestGitDiffTool_Execute_Staged(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create and add a file (but don't commit)
@@ -216,7 +216,7 @@ func TestGitDiffTool_Execute_Staged(t *testing.T) {
 }
 
 func TestGitDiffTool_Execute_FromTo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create initial commit
@@ -265,7 +265,7 @@ func TestGitDiffTool_Execute_FromTo(t *testing.T) {
 }
 
 func TestGitDiffTool_Execute_NotAGitRepo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewGitDiffTool(tmpDir)
 
 	ctx := context.Background()

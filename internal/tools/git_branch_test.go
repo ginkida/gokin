@@ -82,7 +82,7 @@ func TestGitBranchTool_NewGitBranchTool(t *testing.T) {
 }
 
 func TestGitBranchTool_Execute_NotAGitRepo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewGitBranchTool(tmpDir)
 
 	ctx := context.Background()
@@ -99,7 +99,7 @@ func TestGitBranchTool_Execute_NotAGitRepo(t *testing.T) {
 }
 
 func TestGitBranchTool_Execute_Current(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitBranchTool(tmpDir)
@@ -118,7 +118,7 @@ func TestGitBranchTool_Execute_Current(t *testing.T) {
 }
 
 func TestGitBranchTool_Execute_List(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitBranchTool(tmpDir)
@@ -137,7 +137,7 @@ func TestGitBranchTool_Execute_List(t *testing.T) {
 }
 
 func TestGitBranchTool_Execute_CreateBranch(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitBranchTool(tmpDir)
@@ -157,7 +157,7 @@ func TestGitBranchTool_Execute_CreateBranch(t *testing.T) {
 }
 
 func TestGitBranchTool_Execute_DeleteBranch(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create a commit first (required for branch)
@@ -195,7 +195,7 @@ func TestGitBranchTool_Execute_DeleteBranch(t *testing.T) {
 }
 
 func TestGitBranchTool_Execute_SwitchBranch(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create and commit a file (for switch)
@@ -234,7 +234,7 @@ func TestGitBranchTool_Execute_SwitchBranch(t *testing.T) {
 }
 
 func TestGitBranchTool_Execute_Merge(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create initial commit

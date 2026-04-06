@@ -77,7 +77,7 @@ func TestGitAddTool_NewGitAddTool(t *testing.T) {
 }
 
 func TestGitAddTool_Execute_NotAGitRepo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewGitAddTool(tmpDir)
 
 	ctx := context.Background()
@@ -94,7 +94,7 @@ func TestGitAddTool_Execute_NotAGitRepo(t *testing.T) {
 }
 
 func TestGitAddTool_Execute_SingleFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create a file
@@ -120,7 +120,7 @@ func TestGitAddTool_Execute_SingleFile(t *testing.T) {
 }
 
 func TestGitAddTool_Execute_MultipleFiles(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create multiple files
@@ -151,7 +151,7 @@ func TestGitAddTool_Execute_MultipleFiles(t *testing.T) {
 }
 
 func TestGitAddTool_Execute_All(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create multiple files
@@ -182,7 +182,7 @@ func TestGitAddTool_Execute_All(t *testing.T) {
 }
 
 func TestGitAddTool_Execute_Update(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create and commit a file
@@ -221,7 +221,7 @@ func TestGitAddTool_Execute_Update(t *testing.T) {
 }
 
 func TestGitAddTool_Execute_NonexistentFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitAddTool(tmpDir)

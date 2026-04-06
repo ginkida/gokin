@@ -404,12 +404,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.session.SetHistory(newHistory)
 	a.applyToolOutputHygiene()
 
-	// Extract session memory if thresholds are met.
-	// Copy the history slice to avoid races — Extract runs in a goroutine.
+	// Extract session memory if thresholds are met
 	if a.sessionMemory != nil && a.sessionMemory.ShouldExtract(a.totalInputTokens) {
-		histSnapshot := make([]*genai.Content, len(newHistory))
-		copy(histSnapshot, newHistory)
-		go a.sessionMemory.Extract(histSnapshot, a.totalInputTokens)
+		a.sessionMemory.ExtractAsync(a.session.GetHistory(), a.totalInputTokens)
 	}
 
 	// Check for context-clear request after plan approval

@@ -147,7 +147,7 @@ func (m *mockDiffHandler) PromptDiff(ctx context.Context, path, oldContent, newC
 // ============================================================
 
 func TestWriteTool_Execute_CreateNewFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 
 	filePath := filepath.Join(tmpDir, "new_file.txt")
@@ -176,7 +176,7 @@ func TestWriteTool_Execute_CreateNewFile(t *testing.T) {
 }
 
 func TestWriteTool_Execute_OverwriteFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 
 	filePath := filepath.Join(tmpDir, "existing_file.txt")
@@ -211,7 +211,7 @@ func TestWriteTool_Execute_OverwriteFile(t *testing.T) {
 }
 
 func TestWriteTool_Execute_AppendMode(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 
 	filePath := filepath.Join(tmpDir, "append_file.txt")
@@ -247,7 +247,7 @@ func TestWriteTool_Execute_AppendMode(t *testing.T) {
 }
 
 func TestWriteTool_Execute_CreateParentDirs(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 
 	// Try to write to a file with non-existent parent directories
@@ -277,7 +277,7 @@ func TestWriteTool_Execute_CreateParentDirs(t *testing.T) {
 }
 
 func TestWriteTool_Execute_EmptyContent(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 
 	filePath := filepath.Join(tmpDir, "empty_file.txt")
@@ -307,7 +307,7 @@ func TestWriteTool_Execute_EmptyContent(t *testing.T) {
 }
 
 func TestWriteTool_Execute_BinaryContent(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 
 	filePath := filepath.Join(tmpDir, "binary_file.bin")
@@ -359,7 +359,7 @@ func TestWriteTool_Execute_NoPathValidator(t *testing.T) {
 // ============================================================
 
 func TestWriteTool_Execute_DiffEnabled_Approved(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 	tool.SetDiffEnabled(true)
 	tool.SetDiffHandler(&mockDiffHandler{approve: true})
@@ -381,7 +381,7 @@ func TestWriteTool_Execute_DiffEnabled_Approved(t *testing.T) {
 }
 
 func TestWriteTool_Execute_DiffEnabled_Rejected(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 	tool.SetDiffEnabled(true)
 	tool.SetDiffHandler(&mockDiffHandler{approve: false})
@@ -406,7 +406,7 @@ func TestWriteTool_Execute_DiffEnabled_Rejected(t *testing.T) {
 }
 
 func TestWriteTool_Execute_DiffEnabled_FileCreated(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 	tool.SetDiffEnabled(true)
 	tool.SetDiffHandler(&mockDiffHandler{approve: true})
@@ -432,7 +432,7 @@ func TestWriteTool_Execute_DiffEnabled_FileCreated(t *testing.T) {
 // ============================================================
 
 func TestWriteTool_Execute_AppendToNewFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 
 	filePath := filepath.Join(tmpDir, "append_to_new.txt")
@@ -462,7 +462,7 @@ func TestWriteTool_Execute_AppendToNewFile(t *testing.T) {
 }
 
 func TestWriteTool_Execute_PathValidation(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewWriteTool(tmpDir)
 
 	ctx := context.Background()

@@ -87,7 +87,7 @@ func TestTreeTool_SetAllowedDirs(t *testing.T) {
 }
 
 func TestTreeTool_Execute_EmptyDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	tool := NewTreeTool(tmpDir)
 
@@ -103,7 +103,7 @@ func TestTreeTool_Execute_EmptyDir(t *testing.T) {
 }
 
 func TestTreeTool_Execute_WithFiles(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create some files
 	files := []string{"file1.txt", "file2.go"}
@@ -129,7 +129,7 @@ func TestTreeTool_Execute_WithFiles(t *testing.T) {
 }
 
 func TestTreeTool_Execute_NestedDirs(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create nested structure
 	subDir := filepath.Join(tmpDir, "src")
@@ -167,7 +167,7 @@ func TestTreeTool_Execute_NestedDirs(t *testing.T) {
 }
 
 func TestTreeTool_Execute_WithDepth(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create nested structure
 	subDir := filepath.Join(tmpDir, "level1")
@@ -206,7 +206,7 @@ func TestTreeTool_Execute_WithDepth(t *testing.T) {
 }
 
 func TestTreeTool_Execute_WithAll(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create hidden file
 	err := os.WriteFile(filepath.Join(tmpDir, "visible.txt"), []byte("visible"), 0644)
@@ -234,7 +234,7 @@ func TestTreeTool_Execute_WithAll(t *testing.T) {
 }
 
 func TestTreeTool_Execute_SpecificDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create sub directory with files
 	subDir := filepath.Join(tmpDir, "src")
@@ -263,7 +263,7 @@ func TestTreeTool_Execute_SpecificDir(t *testing.T) {
 }
 
 func TestTreeTool_Execute_DirOnly(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	// Create only directories
 	subDir := filepath.Join(tmpDir, "empty_dir")

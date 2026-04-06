@@ -136,7 +136,7 @@ func (m *mockContextPredictor) LearnImports(filePath string)                   {
 func createTestFile(t *testing.T, content string) string {
 	t.Helper()
 
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	filePath := filepath.Join(tmpDir, "test.txt")
 
 	err := os.WriteFile(filePath, []byte(content), 0644)
@@ -229,7 +229,7 @@ func TestReadTool_Execute_FileNotFound(t *testing.T) {
 }
 
 func TestReadTool_Execute_Directory(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 
 	tool := NewReadTool(tmpDir)
 

@@ -78,7 +78,7 @@ func TestGitCommitTool_NewGitCommitTool(t *testing.T) {
 }
 
 func TestGitCommitTool_Execute_NotAGitRepo(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := NewGitCommitTool(tmpDir)
 
 	ctx := context.Background()
@@ -95,7 +95,7 @@ func TestGitCommitTool_Execute_NotAGitRepo(t *testing.T) {
 }
 
 func TestGitCommitTool_Execute_NoStagedChanges(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitCommitTool(tmpDir)
@@ -115,7 +115,7 @@ func TestGitCommitTool_Execute_NoStagedChanges(t *testing.T) {
 }
 
 func TestGitCommitTool_Execute_Success(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create and stage a file
@@ -147,7 +147,7 @@ func TestGitCommitTool_Execute_Success(t *testing.T) {
 }
 
 func TestGitCommitTool_Execute_AllFlag(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create a file
@@ -194,7 +194,7 @@ func TestGitCommitTool_Execute_AllFlag(t *testing.T) {
 }
 
 func TestGitCommitTool_Execute_Amend(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	// Create initial commit
@@ -228,7 +228,7 @@ func TestGitCommitTool_Execute_Amend(t *testing.T) {
 }
 
 func TestGitCommitTool_Execute_NilArgs(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	initGitRepo(t, tmpDir)
 
 	tool := NewGitCommitTool(tmpDir)
