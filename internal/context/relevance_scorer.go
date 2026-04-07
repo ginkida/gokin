@@ -2,6 +2,7 @@ package context
 
 import (
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,34 @@ func (t *FileActivityTracker) Reset() {
 	defer t.mu.Unlock()
 	t.fileEvents = make(map[string][]fileEvent)
 	t.externalChanges = make(map[string]time.Time)
+}
+
+// GetActiveFiles returns the most recently interacted with files.
+func (t *FileActivityTracker) GetActiveFiles(limit int) []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	type fileInfo struct {
+		path  string
+		lastI int
+	}
+	var files []fileInfo
+	for path, events := range t.fileEvents {
+		if len(events) > 0 {
+			files = append(files, fileInfo{path, events[len(events)-1].MessageIndex})
+		}
+	}
+
+	// Sort by MessageIndex descending (most recent first)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].lastI > files[j].lastI
+	})
+
+	var result []string
+	for i := 0; i < len(files) && i < limit; i++ {
+		result = append(result, files[i].path)
+	}
+	return result
 }
 
 // getEvents returns events for a file (caller must hold at least RLock).

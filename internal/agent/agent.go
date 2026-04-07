@@ -82,6 +82,7 @@ type Agent struct {
 	onTextMu       sync.Mutex        // Protects onText from interleaving
 	onThinking     func(text string) // Streaming callback for thinking/reasoning output
 	onThinkingMu   sync.Mutex        // Protects onThinking from interleaving
+	onRateLimit    func(rl *client.RateLimitMetadata)
 	onInput        func(prompt string) (string, error)
 
 	// Model capability adaptation
@@ -151,6 +152,59 @@ type Agent struct {
 	// Workspace isolation state
 	isolatedWorkspace     *isolatedWorkspace
 	allowedRequestedTools map[string]struct{}
+}
+
+// SetOnRateLimit sets the rate limit callback.
+func (a *Agent) SetOnRateLimit(cb func(rl *client.RateLimitMetadata)) {
+	a.onRateLimit = cb
+}
+
+// ContextHealth represents a snapshot of the agent's current context state.
+type ContextHealth struct {
+	TotalTokens       int
+	MaxTokens         int
+	PercentUsed       float64
+	SystemTokens      int
+	InstructionTokens int
+	HistoryTokens     int
+	ToolTokens        int
+	ActiveFiles       []string
+	LastPruningTime   time.Time
+	PruningAlert      string
+}
+
+// GetContextHealth returns a snapshot of the agent's context health.
+func (a *Agent) GetContextHealth() ContextHealth {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+
+	h := ContextHealth{
+		MaxTokens: a.ctxCfg.MaxInputTokens,
+	}
+
+	if a.tokenCounter != nil {
+		ctx := context.Background()
+		history := make([]*genai.Content, len(a.history))
+		copy(history, a.history)
+
+		usage, _ := a.tokenCounter.CountContents(ctx, history)
+		h.TotalTokens = usage
+		if h.MaxTokens > 0 {
+			h.PercentUsed = float64(usage) / float64(h.MaxTokens) * 100
+		}
+
+		// Estimate breakdown (simplified)
+		h.SystemTokens = 2000 // typical base
+		if len(history) > 0 {
+			h.HistoryTokens = usage - h.SystemTokens
+		}
+	}
+
+	if a.fileTracker != nil {
+		h.ActiveFiles = a.fileTracker.GetActiveFiles(10)
+	}
+
+	return h
 }
 
 // NewAgent creates a new agent with the specified type and filtered tools.
@@ -3459,6 +3513,11 @@ func (a *Agent) collectStream(ctx context.Context, stream *client.StreamingRespo
 		},
 		OnThinking: func(text string) {
 			a.safeOnThinking(text)
+		},
+		OnRateLimit: func(rl *client.RateLimitMetadata) {
+			if a.onRateLimit != nil {
+				a.onRateLimit(rl)
+			}
 		},
 	})
 }

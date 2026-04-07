@@ -1141,7 +1141,6 @@ func (a *App) sendTokenUsageUpdate() {
 
 	a.mu.Lock()
 	program := a.program
-	streamedChars := a.streamedChars
 	a.mu.Unlock()
 
 	if program == nil {
@@ -1153,28 +1152,85 @@ func (a *App) sendTokenUsageUpdate() {
 		return
 	}
 
-	tokens := usage.InputTokens
-	isEstimate := usage.IsEstimate
-	percentUsed := usage.PercentUsed
-	nearLimit := usage.NearLimit
+	program.Send(ui.TokenUsageMsg{
+		Tokens:      usage.InputTokens,
+		MaxTokens:   usage.MaxTokens,
+		PercentUsed: usage.PercentUsed,
+		NearLimit:   usage.NearLimit,
+		IsEstimate:  usage.IsEstimate,
+	})
 
-	// Add streaming estimate: ~4 chars per token
-	if streamedChars > 0 {
-		tokens += streamedChars / 4
-		isEstimate = true
-		if usage.MaxTokens > 0 {
-			percentUsed = float64(tokens) / float64(usage.MaxTokens)
-			nearLimit = percentUsed > 0.8
+	// Also send full health data for observatory if context tracking is active
+	a.sendContextHealthUpdate()
+}
+
+// handleRateLimitMetadata updates the app's rate limiters with metadata from provider.
+func (a *App) handleRateLimitMetadata(rl *client.RateLimitMetadata) {
+	if rl == nil || a.rateLimiter == nil {
+		return
+	}
+
+	a.rateLimiter.UpdateLimits(
+		rl.RequestsLimit, rl.RequestsRemaining, rl.RequestsReset,
+		rl.TokensLimit, rl.TokensRemaining, rl.TokensReset,
+	)
+
+	// Refresh UI health observatory
+	a.sendContextHealthUpdate()
+}
+
+// sendContextHealthUpdate sends a detailed context health update to the UI.
+func (a *App) sendContextHealthUpdate() {
+	a.mu.Lock()
+	program := a.program
+	a.mu.Unlock()
+
+	if program == nil {
+		return
+	}
+
+	var msg ui.ContextHealthMsg
+
+	// Priority: check active agent in runner first (for sub-agents/plans)
+	if a.agentRunner != nil {
+		if agent := a.agentRunner.GetActiveAgent(""); agent != nil {
+			health := agent.GetContextHealth()
+			msg = ui.ContextHealthMsg{
+				TotalTokens:       health.TotalTokens,
+				MaxTokens:         health.MaxTokens,
+				PercentUsed:       health.PercentUsed,
+				SystemTokens:      health.SystemTokens,
+				InstructionTokens: health.InstructionTokens,
+				HistoryTokens:     health.HistoryTokens,
+				ToolTokens:        health.ToolTokens,
+				ActiveFiles:       health.ActiveFiles,
+				LastPruningTime:   health.LastPruningTime,
+				PruningAlert:      health.PruningAlert,
+			}
 		}
 	}
 
-	program.Send(ui.TokenUsageMsg{
-		Tokens:      tokens,
-		MaxTokens:   usage.MaxTokens,
-		PercentUsed: percentUsed,
-		NearLimit:   nearLimit,
-		IsEstimate:  isEstimate,
-	})
+	// Fallback to main context if agent not found or no data
+	if msg.TotalTokens == 0 && a.contextManager != nil {
+		total, max, percent := a.contextManager.GetContextHealth()
+		msg = ui.ContextHealthMsg{
+			TotalTokens: total,
+			MaxTokens:   max,
+			PercentUsed: percent,
+			// Approximate breakdown for main session
+			SystemTokens:  2000,
+			HistoryTokens: total - 2000,
+		}
+	}
+
+	// Add rate limit info if available
+	if a.rateLimiter != nil {
+		stats := a.rateLimiter.Stats()
+		msg.RequestsRemaining = int64(stats.AvailableRequests)
+		msg.TokensRemaining = int64(stats.AvailableTokens)
+	}
+
+	program.Send(msg)
 }
 
 // refreshTokenCount recalculates token count from session history and sends update to UI.

@@ -23,6 +23,7 @@ const (
 	StateGitStatus
 	StateFileBrowser
 	StateBatchProgress
+	StateContextObservatory
 )
 
 // isModalState returns true if the current state is a modal overlay
@@ -32,7 +33,7 @@ func (m *Model) isModalState() bool {
 	case StatePermissionPrompt, StateQuestionPrompt, StatePlanApproval,
 		StateModelSelector, StateShortcutsOverlay, StateCommandPalette,
 		StateDiffPreview, StateMultiDiffPreview, StateSearchResults, StateGitStatus,
-		StateFileBrowser, StateBatchProgress:
+		StateFileBrowser, StateBatchProgress, StateContextObservatory:
 		return true
 	}
 	return false
@@ -250,6 +251,28 @@ type (
 	// LearningInsightMsg carries a learning insight for display as a toast.
 	LearningInsightMsg struct {
 		Message string
+	}
+
+	// ContextHealthMsg delivers detailed context health data for the observatory.
+	ContextHealthMsg struct {
+		TotalTokens       int
+		MaxTokens         int
+		PercentUsed       float64
+		SystemTokens      int
+		InstructionTokens int
+		HistoryTokens     int
+		ToolTokens        int
+		ActiveFiles       []string // List of files currently in context
+		LastPruningTime   time.Time
+		PruningAlert      string // Current pruning status message
+
+		// Rate limit metadata for observatory
+		RequestsRemaining int64
+		RequestsLimit     int64
+		RequestsReset     time.Duration
+		TokensRemaining   int64
+		TokensLimit       int64
+		TokensReset       time.Duration
 	}
 )
 

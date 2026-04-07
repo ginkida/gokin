@@ -828,9 +828,17 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 		}
 	}
 
+	// Capture rate limit metadata
+	rateLimit := extractGeminiRateLimits(resp)
+
 	// Create streaming response
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
+
+	// Inject rate limit info in first chunk
+	if rateLimit != nil {
+		chunks <- ResponseChunk{RateLimit: rateLimit}
+	}
 
 	go c.processSSEStream(ctx, resp.Body, chunks, done, estimatedTokens)
 

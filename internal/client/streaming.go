@@ -23,6 +23,9 @@ type StreamHandler struct {
 	// OnTokenUpdate is called when the stream provides token usage metadata.
 	OnTokenUpdate func(inputTokens, outputTokens int)
 
+	// OnRateLimit is called when the stream provides rate limit metadata.
+	OnRateLimit func(rl *RateLimitMetadata)
+
 	// OnComplete is called when the response is complete.
 	OnComplete func(response *Response)
 }
@@ -101,11 +104,14 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 			if handler.OnTokenUpdate != nil && (chunk.InputTokens > 0 || chunk.OutputTokens > 0) {
 				handler.OnTokenUpdate(resp.InputTokens, resp.OutputTokens)
 			}
-			if chunk.CacheCreationInputTokens > 0 {
-				resp.CacheCreationInputTokens = chunk.CacheCreationInputTokens
-			}
 			if chunk.CacheReadInputTokens > 0 {
 				resp.CacheReadInputTokens = chunk.CacheReadInputTokens
+			}
+			if chunk.RateLimit != nil {
+				resp.RateLimit = chunk.RateLimit
+				if handler.OnRateLimit != nil {
+					handler.OnRateLimit(chunk.RateLimit)
+				}
 			}
 
 			if chunk.Done {

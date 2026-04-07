@@ -460,9 +460,17 @@ func (c *OpenAIOAuthClient) doRequest(ctx context.Context, contents []*genai.Con
 		}
 	}
 
+	// Capture rate limit metadata
+	rateLimit := extractOpenAIRateLimits(resp)
+
 	// Create streaming response
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
+
+	// Inject rate limit info in first chunk
+	if rateLimit != nil {
+		chunks <- ResponseChunk{RateLimit: rateLimit}
+	}
 
 	go c.processSSEStream(ctx, resp.Body, chunks, done, estimatedTokens, rl)
 

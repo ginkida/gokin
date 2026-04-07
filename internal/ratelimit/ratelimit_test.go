@@ -241,11 +241,12 @@ func TestLimiterAcquireWithContext(t *testing.T) {
 
 	l.TryAcquire(0) // drain burst
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	// Increased timeout to 2s to accommodate the 1s safety delay in Danger Zone (< 5%)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := l.AcquireWithContext(ctx, 0)
 	if err != nil {
-		t.Errorf("should succeed with fast refill: %v", err)
+		t.Errorf("should succeed with fast refill (including safety delay): %v", err)
 	}
 }
 

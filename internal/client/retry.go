@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -250,4 +251,123 @@ func ParseRetryAfter(resp *http.Response) time.Duration {
 	}
 
 	return 0
+}
+
+// ParseHeaderInt64 parses an integer value from the specified header.
+// Returns 0 if the header is absent or unparseable.
+func ParseHeaderInt64(resp *http.Response, headerName string) int64 {
+	if resp == nil {
+		return 0
+	}
+	val := resp.Header.Get(headerName)
+	if val == "" {
+		return 0
+	}
+	if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+		return i
+	}
+	return 0
+}
+
+// ParseHeaderDuration parses a duration from the specified header.
+// Supports seconds (integer) and standard duration strings (e.g., "1m30s", "45s").
+// Returns 0 if the header is absent or unparseable.
+func ParseHeaderDuration(resp *http.Response, headerName string) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	val := resp.Header.Get(headerName)
+	if val == "" {
+		return 0
+	}
+
+	// Try parsing as integer seconds first
+	if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+
+	// Try parsing as Go duration string (e.g. from some proxies or Kimi)
+	if d, err := time.ParseDuration(val); err == nil {
+		return d
+	}
+
+	// Try parsing Anthropic format (e.g. "45s", "1m30s") which might not have "s" sometimes
+	// or might have different separators. Go's ParseDuration is quite robust for suffix-based strings.
+	if !strings.HasSuffix(val, "s") && !strings.Contains(val, "m") && !strings.Contains(val, "h") {
+		// Bare number, assume seconds if the previous strconv.Atoi failed (e.g. "45.5")
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return time.Duration(f * float64(time.Second))
+		}
+	}
+
+	return 0
+}
+
+// extractAnthropicRateLimits extracts Anthropic rate limit headers from response.
+func extractAnthropicRateLimits(resp *http.Response) *RateLimitMetadata {
+	if resp == nil {
+		return nil
+	}
+
+	metadata := &RateLimitMetadata{
+		RequestsLimit:     ParseHeaderInt64(resp, "anthropic-ratelimit-requests-limit"),
+		RequestsRemaining: ParseHeaderInt64(resp, "anthropic-ratelimit-requests-remaining"),
+		RequestsReset:     ParseHeaderDuration(resp, "anthropic-ratelimit-requests-reset"),
+		TokensLimit:       ParseHeaderInt64(resp, "anthropic-ratelimit-tokens-limit"),
+		TokensRemaining:   ParseHeaderInt64(resp, "anthropic-ratelimit-tokens-remaining"),
+		TokensReset:       ParseHeaderDuration(resp, "anthropic-ratelimit-tokens-reset"),
+	}
+
+	// If no headers were found (all 0), return nil
+	if metadata.RequestsLimit == 0 && metadata.TokensLimit == 0 {
+		return nil
+	}
+
+	return metadata
+}
+
+// extractOpenAIRateLimits extracts OpenAI rate limit headers from response.
+func extractOpenAIRateLimits(resp *http.Response) *RateLimitMetadata {
+	if resp == nil {
+		return nil
+	}
+
+	metadata := &RateLimitMetadata{
+		RequestsLimit:     ParseHeaderInt64(resp, "x-ratelimit-limit-requests"),
+		RequestsRemaining: ParseHeaderInt64(resp, "x-ratelimit-remaining-requests"),
+		RequestsReset:     ParseHeaderDuration(resp, "x-ratelimit-reset-requests"),
+		TokensLimit:       ParseHeaderInt64(resp, "x-ratelimit-limit-tokens"),
+		TokensRemaining:   ParseHeaderInt64(resp, "x-ratelimit-remaining-tokens"),
+		TokensReset:       ParseHeaderDuration(resp, "x-ratelimit-reset-tokens"),
+	}
+
+	// If no headers were found (all 0), return nil
+	if metadata.RequestsLimit == 0 && metadata.TokensLimit == 0 {
+		return nil
+	}
+
+	return metadata
+}
+
+// extractGeminiRateLimits extracts Gemini rate limit headers from response.
+func extractGeminiRateLimits(resp *http.Response) *RateLimitMetadata {
+	if resp == nil {
+		return nil
+	}
+
+	metadata := &RateLimitMetadata{
+		RequestsLimit:     ParseHeaderInt64(resp, "x-ratelimit-limit-requests"),
+		RequestsRemaining: ParseHeaderInt64(resp, "x-ratelimit-remaining-requests"),
+		RequestsReset:     ParseHeaderDuration(resp, "x-ratelimit-reset-requests"),
+		TokensLimit:       ParseHeaderInt64(resp, "x-ratelimit-limit-tokens"),
+		TokensRemaining:   ParseHeaderInt64(resp, "x-ratelimit-remaining-tokens"),
+		TokensReset:       ParseHeaderDuration(resp, "x-ratelimit-reset-tokens"),
+	}
+
+	// If no headers were found (all 0), return nil
+	if metadata.RequestsLimit == 0 && metadata.TokensLimit == 0 {
+		return nil
+	}
+
+	return metadata
 }

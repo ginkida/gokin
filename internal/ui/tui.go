@@ -187,6 +187,9 @@ type Model struct {
 	// Plan progress panel (detailed plan execution view)
 	planProgressPanel *PlanProgressPanel
 
+	// Context technical observatory dashboard (Ctrl+O)
+	observatoryPanel *ContextObservatoryPanel
+
 	// Background task tracking
 	backgroundTasks map[string]*BackgroundTaskState
 
@@ -321,6 +324,7 @@ func NewModel() *Model {
 		commandPalette:       NewCommandPalette(styles),
 		toastManager:         NewToastManager(styles),
 		planProgressPanel:    NewPlanProgressPanel(styles),
+		observatoryPanel:     NewContextObservatoryPanel(styles),
 		backgroundTasks:      make(map[string]*BackgroundTaskState),
 		toolProgressBar:      NewToolProgressBarModel(styles),
 		activityFeed:         NewActivityFeedPanel(styles),
@@ -992,6 +996,17 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// Handle Ctrl+H for context observatory dashboard
+	if msg.Type == tea.KeyCtrlH && m.state == StateInput {
+		if m.observatoryPanel != nil {
+			m.observatoryPanel.Toggle()
+			if m.observatoryPanel.IsVisible() {
+				m.state = StateContextObservatory
+			}
+		}
+		return nil
+	}
+
 	// Handle Ctrl+T for todos toggle
 	if msg.Type == tea.KeyCtrlT && m.state == StateInput {
 		m.todosVisible = !m.todosVisible
@@ -1112,6 +1127,15 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case tea.KeyEscape:
+		// Handle Esc for Context Observatory
+		if m.state == StateContextObservatory {
+			if m.observatoryPanel != nil {
+				m.observatoryPanel.Hide()
+			}
+			m.state = StateInput
+			return m.input.Focus()
+		}
+
 		// ESC interrupts processing/streaming and returns to input
 		if m.state == StateProcessing || m.state == StateStreaming {
 			// Cancel the current processing (API request)
@@ -1202,6 +1226,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case ContextHealthMsg:
+		if m.observatoryPanel != nil {
+			m.observatoryPanel.UpdateHealth(msg)
+		}
+		return nil
+
 	case StreamThinkingMsg:
 		m.streamStartTime = time.Now()
 		m.lastActivityTime = time.Now()
@@ -2337,6 +2367,16 @@ func (m Model) View() string {
 	// Enhanced status bar
 	builder.WriteString("\n")
 	builder.WriteString(m.renderStatusBar())
+
+	// Overlay Context Observatory panel if visible
+	if m.observatoryPanel != nil && m.observatoryPanel.IsVisible() {
+		observatoryView := m.observatoryPanel.View(m.width)
+		if observatoryView != "" {
+			builder.WriteString("\n")
+			builder.WriteString(observatoryView)
+			builder.WriteString("\n")
+		}
+	}
 
 	return m.styles.App.Render(builder.String())
 }

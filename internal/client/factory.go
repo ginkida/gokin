@@ -264,6 +264,14 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	// GLM/Z.AI needs longer timeouts — server is slower than Anthropic.
 	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "glm", 180*time.Second, 5*time.Minute)
 
+	// GLM 4.7+ supports extended thinking — enable by default if user hasn't explicitly configured it
+	enableThinking := cfg.Model.EnableThinking
+	thinkingBudget := cfg.Model.ThinkingBudget
+	if !enableThinking && thinkingBudget == 0 && supportsGLMThinking(modelID) {
+		enableThinking = true
+		thinkingBudget = 2048
+	}
+
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
 		BaseURL:           baseURL,
@@ -271,8 +279,8 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		MaxTokens:         cfg.Model.MaxOutputTokens,
 		Temperature:       cfg.Model.Temperature,
 		StreamEnabled:     true,
-		EnableThinking:    cfg.Model.EnableThinking,
-		ThinkingBudget:    cfg.Model.ThinkingBudget,
+		EnableThinking:    enableThinking,
+		ThinkingBudget:    thinkingBudget,
 		StreamIdleTimeout: streamIdleTimeout,
 		// Request retries are orchestrated at App layer.
 		MaxRetries:  0,
@@ -282,6 +290,12 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	return NewAnthropicClient(anthropicConfig)
+}
+
+// supportsGLMThinking returns true for GLM models that support extended thinking.
+func supportsGLMThinking(modelID string) bool {
+	m := strings.ToLower(modelID)
+	return strings.HasPrefix(m, "glm-5") || strings.HasPrefix(m, "glm-4.7")
 }
 
 // newDeepSeekClient creates a DeepSeek client using Anthropic-compatible API.

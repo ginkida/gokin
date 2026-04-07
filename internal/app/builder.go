@@ -1767,6 +1767,15 @@ func (b *Builder) wireDependencies() error {
 		})
 	}
 
+	// Wire Agent Runner onThinking callback to TUI
+	if b.agentRunner != nil {
+		b.agentRunner.SetOnThinking(func(text string) {
+			if app.program != nil {
+				app.program.Send(ui.StreamThinkingMsg(text))
+			}
+		})
+	}
+
 	return nil
 }
 
@@ -1832,6 +1841,13 @@ func (b *Builder) assembleApp() *App {
 		rateLimitRetryCount: make(map[string]int),
 		// Step rollback snapshots
 		stepRollbackSnapshots: make(map[string]*stepRollbackSnapshot),
+	}
+
+	// Wire rate limit callback from runner to app's limiter
+	if b.agentRunner != nil && b.rateLimiter != nil {
+		b.agentRunner.SetRateLimitCallback(func(rl *client.RateLimitMetadata) {
+			b.cachedApp.handleRateLimitMetadata(rl)
+		})
 	}
 
 	if j, err := NewExecutionJournal(b.workDir); err == nil {

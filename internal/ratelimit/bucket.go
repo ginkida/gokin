@@ -47,6 +47,33 @@ func (b *TokenBucket) refill() {
 	b.lastRefill = now
 }
 
+// UpdateParameters adjustments max capacity and refill rate without resetting current tokens.
+// If tokens exceed new max, they are capped.
+func (b *TokenBucket) UpdateParameters(max float64, refill float64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.refill()
+	b.maxTokens = max
+	b.refillRate = refill
+	if b.tokens > b.maxTokens {
+		b.tokens = b.maxTokens
+	}
+}
+
+// Sync forces the current token count to a specific value.
+// This is used when a provider returns explicit remaining token counts.
+func (b *TokenBucket) Sync(tokens float64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.tokens = tokens
+	if b.tokens > b.maxTokens {
+		b.tokens = b.maxTokens
+	}
+	b.lastRefill = time.Now()
+}
+
 // TryConsume attempts to consume the specified number of tokens.
 // Returns true if successful, false if not enough tokens available.
 func (b *TokenBucket) TryConsume(tokens float64) bool {
@@ -217,6 +244,13 @@ func (b *TokenBucket) Available() float64 {
 
 	b.refill()
 	return b.tokens
+}
+
+// Capacity returns the maximum number of tokens the bucket can hold.
+func (b *TokenBucket) Capacity() float64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.maxTokens
 }
 
 // Reset resets the bucket to full capacity.

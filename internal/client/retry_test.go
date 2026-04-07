@@ -1,6 +1,7 @@
 package client
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
@@ -107,5 +108,85 @@ func TestCalculateBackoffMaxCap(t *testing.T) {
 	delay := CalculateBackoff(1*time.Second, 10, 5*time.Second)
 	if delay > 7*time.Second { // 5s + 25% jitter
 		t.Errorf("should be capped at ~5s+jitter, got %v", delay)
+	}
+}
+
+func TestParseHeaderInt64(t *testing.T) {
+	resp := &http.Response{
+		Header: make(http.Header),
+	}
+	resp.Header.Set("x-limit", "100")
+	resp.Header.Set("x-empty", "")
+	resp.Header.Set("x-not-num", "abc")
+
+	if val := ParseHeaderInt64(resp, "x-limit"); val != 100 {
+		t.Errorf("ParseHeaderInt64: got %d, want 100", val)
+	}
+	if val := ParseHeaderInt64(resp, "x-empty"); val != 0 {
+		t.Errorf("ParseHeaderInt64 (empty): got %d, want 0", val)
+	}
+	if val := ParseHeaderInt64(resp, "x-not-num"); val != 0 {
+		t.Errorf("ParseHeaderInt64 (invalid): got %d, want 0", val)
+	}
+}
+
+func TestParseHeaderDuration(t *testing.T) {
+	resp := &http.Response{
+		Header: make(http.Header),
+	}
+	
+	// Test cases: Go duration, Bare seconds, Anthropic style
+	tests := []struct {
+		val  string
+		want time.Duration
+	}{
+		{"1s", time.Second},
+		{"45", 45 * time.Second},
+		{"45.5", 45500 * time.Millisecond},
+		{"1m30s", 90 * time.Second},
+		{"", 0},
+		{"abc", 0},
+	}
+
+	for _, tt := range tests {
+		resp.Header.Set("x-dur", tt.val)
+		if got := ParseHeaderDuration(resp, "x-dur"); got != tt.want {
+			t.Errorf("ParseHeaderDuration(%s): got %v, want %v", tt.val, got, tt.want)
+		}
+	}
+}
+
+func TestExtractAnthropicRateLimits(t *testing.T) {
+	resp := &http.Response{
+		Header: make(http.Header),
+	}
+	resp.Header.Set("anthropic-ratelimit-requests-limit", "1000")
+	resp.Header.Set("anthropic-ratelimit-requests-remaining", "999")
+	resp.Header.Set("anthropic-ratelimit-requests-reset", "2026-04-07T20:00:00Z") // Note: my parser handles seconds/durations, checking if it ignores ISO
+	resp.Header.Set("anthropic-ratelimit-tokens-limit", "100000")
+	
+	rl := extractAnthropicRateLimits(resp)
+	if rl == nil {
+		t.Fatal("extractAnthropicRateLimits returned nil")
+	}
+	if rl.RequestsLimit != 1000 || rl.RequestsRemaining != 999 || rl.TokensLimit != 100000 {
+		t.Errorf("Unexpected values: %+v", rl)
+	}
+}
+
+func TestExtractOpenAIRateLimits(t *testing.T) {
+	resp := &http.Response{
+		Header: make(http.Header),
+	}
+	resp.Header.Set("x-ratelimit-limit-requests", "200")
+	resp.Header.Set("x-ratelimit-remaining-tokens", "50000")
+	resp.Header.Set("x-ratelimit-reset-requests", "1.5s")
+
+	rl := extractOpenAIRateLimits(resp)
+	if rl == nil {
+		t.Fatal("extractOpenAIRateLimits returned nil")
+	}
+	if rl.RequestsLimit != 200 || rl.TokensRemaining != 50000 || rl.RequestsReset != 1500*time.Millisecond {
+		t.Errorf("Unexpected values: %+v", rl)
 	}
 }

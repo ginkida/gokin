@@ -109,7 +109,27 @@ type Runner struct {
 	workspaceIsolationEnabled bool
 	workspaceReviewHandler    func(context.Context, []WorkspaceChangePreview) (bool, error)
 
+	// Rate limiting callback (adaptive)
+	onRateLimit func(rl *client.RateLimitMetadata)
+
 	mu sync.RWMutex
+}
+
+// GetActiveAgent returns an agent by ID, or the first active agent if ID is empty.
+func (r *Runner) GetActiveAgent(id string) *Agent {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if id != "" {
+		return r.agents[id]
+	}
+
+	// Fallback: return the first agent (in plans, there is usually one active at a time)
+	for _, a := range r.agents {
+		return a
+	}
+
+	return nil
 }
 
 type runnerAgentDeps struct {
@@ -133,6 +153,7 @@ type runnerAgentDeps struct {
 	planningModeEnabled bool
 	requireApproval     bool
 	onPlanApproved      func(planSummary string)
+	onThinking          func(text string)
 	exampleStore        ExampleStoreInterface
 	promptOptimizer     *PromptOptimizer
 	workspaceIsolation  bool
@@ -493,6 +514,7 @@ func (r *Runner) snapshotAgentDeps() runnerAgentDeps {
 		planningModeEnabled: r.planningModeEnabled,
 		requireApproval:     r.requireApprovalEnabled,
 		onPlanApproved:      r.onPlanApproved,
+		onThinking:          r.onThinking,
 		exampleStore:        r.exampleStore,
 		promptOptimizer:     r.promptOptimizer,
 		workspaceIsolation:  r.workspaceIsolationEnabled,
@@ -577,12 +599,17 @@ func (r *Runner) newConfiguredAgent(
 	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
 	agent.LoadPinnedContext()
 
-	// Apply weak model mode from runner to all agents
+	// Apply settings from runner
 	r.mu.RLock()
 	weakMode := r.weakModelMode
+	onRL := r.onRateLimit
 	r.mu.RUnlock()
+
 	if weakMode {
 		agent.SetWeakModelMode(true)
+	}
+	if onRL != nil {
+		agent.SetOnRateLimit(onRL)
 	}
 
 	if deps.onInput != nil {
@@ -642,6 +669,10 @@ func (r *Runner) newConfiguredAgent(
 		if deps.onPlanApproved != nil {
 			agent.SetOnPlanApproved(deps.onPlanApproved)
 		}
+	}
+
+	if deps.onThinking != nil {
+		agent.SetOnThinking(deps.onThinking)
 	}
 
 	return agent
@@ -964,4 +995,10 @@ func (r *Runner) cleanupOldResults() {
 			logging.Debug("cleaned up old results", "removed", removeCount)
 		}
 	}
+}
+// SetRateLimitCallback sets the rate limit callback for agents.
+func (r *Runner) SetRateLimitCallback(cb func(rl *client.RateLimitMetadata)) {
+	r.mu.Lock()
+	r.onRateLimit = cb
+	r.mu.Unlock()
 }

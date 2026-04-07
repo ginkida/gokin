@@ -519,6 +519,25 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 	return nil
 }
 
+// GetContextHealth returns a snapshot of context health.
+func (m *ContextManager) GetContextHealth() (int, int, float64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	total := m.currentTokens
+	max := 0
+	if m.tokenCounter != nil {
+		max = m.tokenCounter.GetLimits().MaxInputTokens
+	}
+	
+	percent := 0.0
+	if max > 0 {
+		percent = float64(total) / float64(max) * 100
+	}
+
+	return total, max, percent
+}
+
 // GetTokenUsage returns the current token usage.
 func (m *ContextManager) GetTokenUsage() *TokenUsage {
 	m.mu.RLock()

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // Limiter provides rate limiting for API requests.
@@ -191,6 +193,27 @@ func (l *Limiter) AcquireWithContext(ctx context.Context, estimatedTokens int64)
 			return err
 		}
 	}
+
+	// Proactive Adaptation: If we are in the "Danger Zone" (< 5% tokens/requests),
+	// add a small safety delay to slow down and avoid hard 429s.
+	l.mu.RLock()
+	reqRem := l.requestBucket.Available()
+	reqCap := l.requestBucket.Capacity()
+	tokRem := l.tokenBucket.Available()
+	tokCap := l.tokenBucket.Capacity()
+	l.mu.RUnlock()
+
+	isDanger := (reqCap > 0 && reqRem/reqCap < 0.05) || (tokCap > 0 && tokRem/tokCap < 0.05)
+	if isDanger {
+		logging.Debug("Rate limit danger zone detected, injecting safety delay", "req_rem", reqRem, "tok_rem", tokRem)
+		select {
+		case <-time.After(1 * time.Second):
+			// Safety burst completed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	return nil
 }
 
@@ -200,6 +223,41 @@ func (l *Limiter) RecordUsage(actualTokens int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.totalTokens += actualTokens
+}
+
+// UpdateLimits updates the rate limiter parameters based on provider metadata.
+func (l *Limiter) UpdateLimits(reqLimit, reqRemaining int64, reqReset time.Duration, tokLimit, tokRemaining int64, tokReset time.Duration) {
+	if !l.isEnabled() {
+		return
+	}
+
+	// Update requests bucket
+	if reqLimit > 0 {
+		// refill rate = limit / reset_time_in_seconds
+		// If reset is 0, assume 60s (per minute)
+		resetSec := reqReset.Seconds()
+		if resetSec <= 0 {
+			resetSec = 60
+		}
+		refillRate := float64(reqLimit) / resetSec
+		l.requestBucket.UpdateParameters(float64(reqLimit), refillRate)
+	}
+	if reqRemaining > 0 {
+		l.requestBucket.Sync(float64(reqRemaining))
+	}
+
+	// Update tokens bucket
+	if tokLimit > 0 {
+		resetSec := tokReset.Seconds()
+		if resetSec <= 0 {
+			resetSec = 60
+		}
+		refillRate := float64(tokLimit) / resetSec
+		l.tokenBucket.UpdateParameters(float64(tokLimit), refillRate)
+	}
+	if tokRemaining > 0 {
+		l.tokenBucket.Sync(float64(tokRemaining))
+	}
 }
 
 // ReturnTokens returns tokens back to the buckets.

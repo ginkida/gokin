@@ -328,6 +328,16 @@ type RateLimiter interface {
 	EstimateWaitTime(tokens int64) time.Duration
 }
 
+// RateLimitMetadata contains rate limit information from the API provider.
+type RateLimitMetadata struct {
+	RequestsLimit     int64
+	RequestsRemaining int64
+	RequestsReset     time.Duration
+	TokensLimit       int64
+	TokensRemaining   int64
+	TokensReset       time.Duration
+}
+
 // StreamingResponse represents a streaming response from the model.
 type StreamingResponse struct {
 	// Chunks is a channel that receives response chunks.
@@ -371,6 +381,9 @@ type ResponseChunk struct {
 
 	// CacheReadInputTokens from prompt caching (Anthropic/MiniMax).
 	CacheReadInputTokens int
+
+	// RateLimit from provider (if available).
+	RateLimit *RateLimitMetadata
 }
 
 // Response represents a complete response from the model.
@@ -401,6 +414,9 @@ type Response struct {
 
 	// CacheReadInputTokens from prompt caching (Anthropic/MiniMax).
 	CacheReadInputTokens int
+
+	// RateLimit from provider (if available).
+	RateLimit *RateLimitMetadata
 }
 
 // Collect collects all chunks from a streaming response into a single Response.
@@ -436,6 +452,9 @@ func (sr *StreamingResponse) Collect() (*Response, error) {
 		}
 		if chunk.CacheReadInputTokens > 0 {
 			resp.CacheReadInputTokens = chunk.CacheReadInputTokens
+		}
+		if chunk.RateLimit != nil {
+			resp.RateLimit = chunk.RateLimit
 		}
 	}
 

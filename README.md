@@ -237,15 +237,22 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 
 ## ☁️ Providers <a id="providers"></a>
 
+> [!IMPORTANT]
+> **Рекомендуемые провайдеры:** Gokin поддерживает множество провайдеров, но протестировать все комбинации моделей нереально. Я **уверен в стабильной работе** только с двумя:
+> - **MiniMax Coding Plan** (M2.7 / M2.5) — лучший выбор для кодинга
+> - **GLM Coding Plan** (GLM-5 / GLM-4.7) — отличный бюджетный вариант
+>
+> Остальные провайдеры работают, но могут иметь нюансы поведения, которые я не проверял. Если хотите максимально стабильный опыт — используйте MiniMax или GLM.
+
 | Provider | Models | Auth | Notes |
 |----------|--------|------|-------|
+| **MiniMax** ⭐ | M2.7, M2.5 | API key | 200K context, **рекомендуется для кодинга** |
+| **GLM** ⭐ | GLM-5, GLM-4.7 | API key | **рекомендуется, бюджетный вариант** |
 | **Gemini** | 3.1-pro, 3-flash, 2.5-pro | API key / OAuth | Free tier, native tools |
 | **Anthropic** | Opus 4, Sonnet 4.5, Haiku | API key | Best reasoning |
 | **OpenAI** | GPT-5.3 Codex, o3, o4-mini | OAuth | Codex models |
 | **DeepSeek** | Chat, Reasoner | API key | Best price/quality |
 | **Kimi** | K2.5, K2 Thinking Turbo, K2 Turbo | API key | Fast reasoning, 256K context |
-| **MiniMax** | M2.7, M2.5 | API key | 200K context, strong coding |
-| **GLM** | GLM-5, GLM-4.7 | API key | Budget option |
 | **Ollama** | Any local model | None | 100% offline |
 
 Switch anytime:

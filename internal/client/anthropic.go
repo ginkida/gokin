@@ -846,9 +846,17 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		}
 	}
 
+	// Capture rate limit metadata
+	rateLimit := extractAnthropicRateLimits(resp)
+
 	// Create streaming response
 	chunks := make(chan ResponseChunk, 10)
 	done := make(chan struct{})
+
+	// Inject rate limit info in first chunk
+	if rateLimit != nil {
+		chunks <- ResponseChunk{RateLimit: rateLimit}
+	}
 
 	// Stream idle timeout (configurable, default 30s between chunks)
 	streamIdleTimeout := c.config.StreamIdleTimeout
