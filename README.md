@@ -238,16 +238,16 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 ## ☁️ Providers <a id="providers"></a>
 
 > [!IMPORTANT]
-> **Рекомендуемые провайдеры:** Gokin поддерживает множество провайдеров, но протестировать все комбинации моделей нереально. Я **уверен в стабильной работе** только с двумя:
-> - **MiniMax Coding Plan** (M2.7 / M2.5) — лучший выбор для кодинга
-> - **GLM Coding Plan** (GLM-5 / GLM-4.7) — отличный бюджетный вариант
+> **Recommended providers:** Gokin supports many providers, but testing every model combination is not feasible. I am **confident in stable operation** with these two:
+> - **MiniMax Coding Plan** (M2.7 / M2.5) — best choice for coding
+> - **GLM Coding Plan** (GLM-5 / GLM-4.7) — excellent budget option
 >
-> Остальные провайдеры работают, но могут иметь нюансы поведения, которые я не проверял. Если хотите максимально стабильный опыт — используйте MiniMax или GLM.
+> Other providers work but may have behavioral quirks that haven't been fully tested. For the most stable experience, use MiniMax or GLM.
 
 | Provider | Models | Auth | Notes |
 |----------|--------|------|-------|
-| **MiniMax** ⭐ | M2.7, M2.5 | API key | 200K context, **рекомендуется для кодинга** |
-| **GLM** ⭐ | GLM-5, GLM-4.7 | API key | **рекомендуется, бюджетный вариант** |
+| **MiniMax** ⭐ | M2.7, M2.5 | API key | 200K context, **recommended for coding** |
+| **GLM** ⭐ | GLM-5, GLM-4.7 | API key | **recommended, budget option** |
 | **Gemini** | 3.1-pro, 3-flash, 2.5-pro | API key / OAuth | Free tier, native tools |
 | **Anthropic** | Opus 4, Sonnet 4.5, Haiku | API key | Best reasoning |
 | **OpenAI** | GPT-5.3 Codex, o3, o4-mini | OAuth | Codex models |
