@@ -67,3 +67,10 @@ CLAUDE.md
 
 # Wiki
 wiki/
+
+# Gokin working files
+.gokin/.session-memory.md
+.gokin/task-output/
+.gokin/checkpoints/
+.gokin/learning.yaml
+GOKIN.local.md

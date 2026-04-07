@@ -19,12 +19,14 @@ import (
 )
 
 const (
-	doneGateOutputLimit         = 1600
-	doneGateDefaultCheckTimeout = 3 * time.Minute
-	doneGateMaxScanDepth        = 4
-	doneGateMaxModulesPerStack  = 8
-	doneGateMonorepoModuleLimit = 4
-	doneGateGitProbeTimeout     = 2 * time.Second
+	doneGateOutputLimit           = 1600
+	doneGateDefaultCheckTimeout   = 3 * time.Minute
+	doneGateValidateCheckTimeout  = 30 * time.Second // Fast checks (validate, lint) don't need 3 min
+	doneGateMaxScanDepth          = 4
+	doneGateMaxModulesPerStack    = 8
+	doneGateMonorepoModuleLimit   = 4
+	doneGateGitProbeTimeout       = 2 * time.Second
+	doneGateCommandProbeTimeout   = 2 * time.Second // Quick check if a command exists
 )
 
 type doneGateCheck struct {
@@ -268,32 +270,37 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 			rel := relPathOrDot(a.workDir, project.Dir)
 			if scriptName, _, ok := pickComposerScript(project.Scripts, "lint"); ok {
 				name := "php_lint@" + rel
-				command := "composer run --no-interaction --quiet " + shellQuote(scriptName)
-				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+				command := "command -v composer >/dev/null 2>&1 || { echo 'composer not found — skipping'; exit 0; }; composer run --no-interaction --quiet " + shellQuote(scriptName)
+				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithTimeout(
 					bashTool,
 					name,
 					project.Dir,
 					command,
+					doneGateDefaultCheckTimeout,
 				))
 			}
 			if scriptName, _, ok := pickComposerScript(project.Scripts, "static"); ok {
 				name := "php_static@" + rel
-				command := "composer run --no-interaction --quiet " + shellQuote(scriptName)
-				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+				command := "command -v composer >/dev/null 2>&1 || { echo 'composer not found — skipping'; exit 0; }; composer run --no-interaction --quiet " + shellQuote(scriptName)
+				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithTimeout(
 					bashTool,
 					name,
 					project.Dir,
 					command,
+					doneGateDefaultCheckTimeout,
 				))
 			}
 			if policy.Mode == "strict" || len(project.Scripts) == 0 {
 				name := "composer_validate@" + rel
-				command := "composer validate --no-interaction --strict"
-				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+				// Probe composer existence first — skip if not installed (exit 127 is "not found").
+				// Use short timeout: validate is a fast local operation, no network needed.
+				command := "command -v composer >/dev/null 2>&1 || { echo 'composer not found in PATH — skipping'; exit 0; }; composer validate --no-interaction --strict"
+				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithTimeout(
 					bashTool,
 					name,
 					project.Dir,
 					command,
+					doneGateValidateCheckTimeout,
 				))
 			}
 		}
@@ -422,6 +429,29 @@ func (a *App) newBashDoneGateCheckWithDir(bashTool tools.Tool, name, dir, comman
 
 	wrapped := "cd " + shellQuote(dir) + " && " + command
 	return a.newBashDoneGateCheck(bashTool, name, wrapped)
+}
+
+// newBashDoneGateCheckWithTimeout creates a done-gate check with a custom timeout.
+// Used for fast checks (validate, lint) that shouldn't block for 3 minutes.
+func (a *App) newBashDoneGateCheckWithTimeout(bashTool tools.Tool, name, dir, command string, timeout time.Duration) doneGateCheck {
+	if strings.TrimSpace(dir) == "" || dir == "." {
+		dir = ""
+	}
+	wrapped := command
+	if dir != "" {
+		wrapped = "cd " + shellQuote(dir) + " && " + command
+	}
+	return doneGateCheck{
+		Name: name,
+		Run: func(ctx context.Context) (tools.ToolResult, error) {
+			checkCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return bashTool.Execute(checkCtx, map[string]any{
+				"command":     wrapped,
+				"description": "done-gate check: " + name,
+			})
+		},
+	}
 }
 
 func (a *App) runDoneGateChecks(ctx context.Context, checks []doneGateCheck, checkTimeout time.Duration) []doneGateResult {

@@ -67,6 +67,29 @@ func (b *TokenBucket) TryConsume(tokens float64) bool {
 	return false
 }
 
+// EstimateWaitTime returns the estimated wait time to acquire the given tokens without consuming them.
+func (b *TokenBucket) EstimateWaitTime(tokens float64) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.refill()
+
+	consumeAmount := tokens
+	if consumeAmount > b.maxTokens {
+		consumeAmount = b.maxTokens
+	}
+
+	if b.tokens >= consumeAmount {
+		return 0
+	}
+
+	deficit := consumeAmount - b.tokens
+	if b.refillRate <= 0 {
+		return 0
+	}
+	return time.Duration(deficit/b.refillRate*1000) * time.Millisecond
+}
+
 // Consume blocks until the specified number of tokens are available.
 func (b *TokenBucket) Consume(tokens float64) {
 	for {

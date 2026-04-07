@@ -116,6 +116,28 @@ func (l *Limiter) TryAcquire(estimatedTokens int64) bool {
 	return true
 }
 
+// EstimateWaitTime returns the estimated wait time for a request without acquiring slots.
+func (l *Limiter) EstimateWaitTime(estimatedTokens int64) time.Duration {
+	if !l.isEnabled() {
+		return 0
+	}
+
+	var maxWait time.Duration
+	reqWait := l.requestBucket.EstimateWaitTime(1)
+	if reqWait > maxWait {
+		maxWait = reqWait
+	}
+
+	if estimatedTokens > 0 {
+		tokWait := l.tokenBucket.EstimateWaitTime(float64(estimatedTokens))
+		if tokWait > maxWait {
+			maxWait = tokWait
+		}
+	}
+
+	return maxWait
+}
+
 // AcquireWithTimeout attempts to acquire a request slot with a timeout.
 // Returns nil on success, error if timeout expired.
 func (l *Limiter) AcquireWithTimeout(estimatedTokens int64, timeout time.Duration) error {

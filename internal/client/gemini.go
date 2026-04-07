@@ -248,11 +248,14 @@ func (c *GeminiClient) isRetryableError(err error) bool {
 	networkPatterns := []string{
 		"connection refused",
 		"connection reset",
+		"broken pipe",
+		"eof",
+		"unexpected eof",
 		"no such host",
 		"timeout",
 		"temporary failure",
-		"UNAVAILABLE",
-		"RESOURCE_EXHAUSTED",
+		"unavailable",
+		"resource_exhausted",
 	}
 	for _, pattern := range networkPatterns {
 		if strings.Contains(strings.ToLower(errStr), strings.ToLower(pattern)) {
@@ -352,20 +355,24 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 	tools := c.tools
 	model := c.model
 	c.mu.RUnlock()
-
 	// Track tokens for potential return on error
 	var estimatedTokens int64
 	if rateLimiter != nil {
 		estimatedTokens = ratelimit.EstimateTokensFromContents(len(contents), 500)
+		
+		waitTime := rateLimiter.EstimateWaitTime(estimatedTokens)
+		if waitTime > 500*time.Millisecond && statusCb != nil {
+			statusCb.OnRateLimit(waitTime)
+		}
+
 		if err := rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
-			// Notify about rate limit
+			// Notify about rate limit abort
 			if statusCb != nil {
-				statusCb.OnRateLimit(5 * time.Second) // Estimate wait time
+				statusCb.OnRateLimit(time.Second) 
 			}
-			return nil, fmt.Errorf("rate limit: %w", err)
+			return nil, fmt.Errorf("rate limit aborted: %w", err)
 		}
 	}
-
 	config := *c.config
 	if sysInstruction != "" {
 		config.SystemInstruction = genai.NewContentFromText(sysInstruction, genai.RoleUser)

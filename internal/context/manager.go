@@ -62,6 +62,9 @@ type ContextManager struct {
 
 	// Plan manager for task-aware summarization
 	planManager PlanManagerProvider
+
+	// Notification callback when context is compacted
+	OnCompact func(oldTokens, newTokens, removedMessages int, reason string)
 }
 
 // NewContextManager creates a new context manager.
@@ -509,6 +512,10 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 		"saved", oldTokens-tokens,
 		"from_cache", fromCache)
 
+	if m.OnCompact != nil {
+		m.OnCompact(oldTokens, tokens, len(history)-len(newHistory), "Full Strategy Compaction")
+	}
+
 	return nil
 }
 
@@ -757,6 +764,10 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 		"messages_summarized", len(oldMessages),
 		"messages_preserved", len(recentMessages))
 
+	if m.OnCompact != nil {
+		m.OnCompact(oldTokens, tokens, len(history)-len(newHistory), "Incremental Compaction")
+	}
+
 	return nil
 }
 
@@ -801,9 +812,10 @@ func (m *ContextManager) EmergencyTruncate() int {
 
 	m.session.SetHistory(newHistory)
 
-	// Update cached token count
+	// Update cached token count — save old value BEFORE overwriting for the callback
 	tokens := EstimateContentsTokens(newHistory)
 	m.mu.Lock()
+	oldTokensEstimate := m.lastEstimatedTokens
 	m.currentTokens = tokens
 	usage := m.tokenCounter.GetUsage(tokens)
 	m.lastUsage = &usage
@@ -817,6 +829,10 @@ func (m *ContextManager) EmergencyTruncate() int {
 		"before", len(history),
 		"after", len(newHistory),
 		"estimated_tokens", tokens)
+
+	if m.OnCompact != nil {
+		m.OnCompact(oldTokensEstimate, tokens, removed, "Emergency Truncation (Limits hit)")
+	}
 
 	return removed
 }

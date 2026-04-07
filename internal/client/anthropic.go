@@ -646,6 +646,25 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 	var lastStatusCode int
 	maxDelay := 30 * time.Second // Cap maximum delay at 30 seconds
 
+	c.mu.RLock()
+	rateLimiter := c.rateLimiter
+	statusCb := c.statusCallback
+	c.mu.RUnlock()
+
+	var estimatedTokens int64 = 500
+	if rateLimiter != nil {
+		waitTime := rateLimiter.EstimateWaitTime(estimatedTokens)
+		if waitTime > 500*time.Millisecond && statusCb != nil {
+			statusCb.OnRateLimit(waitTime)
+		}
+		if err := rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
+			if statusCb != nil {
+				statusCb.OnRateLimit(time.Second) 
+			}
+			return nil, fmt.Errorf("rate limit aborted: %w", err)
+		}
+	}
+
 	// Retry loop
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {

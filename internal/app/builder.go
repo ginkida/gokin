@@ -1544,6 +1544,17 @@ func (b *Builder) wireDependencies() error {
 	// Set up plan approval callback for context compaction
 	b.agentRunner.SetOnPlanApproved(app.CompactContextWithPlan)
 
+	// Set up context compaction notifications
+	if b.contextManager != nil {
+		b.contextManager.OnCompact = func(oldTokens, newTokens, removedMessages int, reason string) {
+			if app.tui != nil {
+				saved := oldTokens - newTokens
+				msg := fmt.Sprintf("✂️ Context Compacted (%s) - Saved %d tokens.", reason, saved)
+				app.tui.AddSystemMessage(msg)
+			}
+		}
+	}
+
 	// Set up background task tracking callbacks for UI
 	b.agentRunner.SetOnAgentStart(func(id, agentType, description string) {
 		if app.program != nil {

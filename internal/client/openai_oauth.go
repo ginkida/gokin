@@ -375,8 +375,17 @@ func (c *OpenAIOAuthClient) doRequest(ctx context.Context, contents []*genai.Con
 	var estimatedTokens int64
 	if rl != nil {
 		estimatedTokens = ratelimit.EstimateTokensFromContents(len(contents), 500)
+		
+		waitTime := rl.EstimateWaitTime(estimatedTokens)
+		if waitTime > 500*time.Millisecond && c.statusCallback != nil {
+			c.statusCallback.OnRateLimit(waitTime)
+		}
+
 		if err := rl.AcquireWithContext(ctx, estimatedTokens); err != nil {
-			return nil, fmt.Errorf("rate limit: %w", err)
+			if c.statusCallback != nil {
+				c.statusCallback.OnRateLimit(time.Second) 
+			}
+			return nil, fmt.Errorf("rate limit aborted: %w", err)
 		}
 	}
 

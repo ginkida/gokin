@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -303,6 +304,7 @@ type Client interface {
 type RateLimiter interface {
 	AcquireWithContext(ctx context.Context, tokens int64) error
 	ReturnTokens(requests int, tokens int64)
+	EstimateWaitTime(tokens int64) time.Duration
 }
 
 // StreamingResponse represents a streaming response from the model.

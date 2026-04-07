@@ -225,8 +225,19 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 	c.mu.RUnlock()
 
 	if rateLimiter != nil {
+		waitTime := rateLimiter.EstimateWaitTime(estimatedTokens)
+		c.mu.RLock()
+		statusCb := c.statusCallback
+		c.mu.RUnlock()
+		if waitTime > 500*time.Millisecond && statusCb != nil {
+			statusCb.OnRateLimit(waitTime)
+		}
+
 		if err := rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
-			return nil, fmt.Errorf("rate limit: %w", err)
+			if statusCb != nil {
+				statusCb.OnRateLimit(time.Second) 
+			}
+			return nil, fmt.Errorf("rate limit aborted: %w", err)
 		}
 	}
 

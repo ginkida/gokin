@@ -220,6 +220,7 @@ type Model struct {
 	lastRequestLatency time.Duration
 	retryAttempt       int
 	retryMax           int
+	rateLimitWaitUntil time.Time
 
 	// Error dedup
 	lastErrorMsg   string // Last error message for dedup
@@ -1771,6 +1772,16 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.lastActivityTime = time.Now()
 			// Show tool call inline with agent type prefix
 			m.output.AppendLine(m.styles.FormatAgentToolCall(msg.AgentType, msg.ToolName, msg.ToolArgs))
+		case "tool_recovery":
+			msgTxt := msg.ToolName
+			if msg.ToolArgs != nil {
+				if r, ok := msg.ToolArgs["reason"].(string); ok {
+					msgTxt = r
+				}
+			}
+			m.processingLabel = fmt.Sprintf("Recovery: %s → %s", msg.AgentType, msg.ToolName)
+			m.output.AppendLine(m.styles.Warning.Render(fmt.Sprintf("    ↻ Auto-Fixing: %s Error (%s)", msg.ToolName, msgTxt)))
+			m.lastActivityTime = time.Now()
 		case "tool_end":
 			m.processingLabel = fmt.Sprintf("Agent: %s", msg.AgentType)
 			m.currentTool = ""
@@ -1831,11 +1842,15 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			if m.toastManager != nil {
 				m.toastManager.ShowWarning(msg.Message)
 			}
+			if wt, ok := msg.Details["waitTime"].(time.Duration); ok {
+				m.rateLimitWaitUntil = time.Now().Add(wt)
+			}
 		case StatusStreamIdle:
 			// Silent
 		case StatusStreamResume:
 			m.retryAttempt = 0
 			m.retryMax = 0
+			m.rateLimitWaitUntil = time.Time{}
 		case StatusRecoverableError:
 			if m.toastManager != nil {
 				m.toastManager.ShowError(msg.Message)

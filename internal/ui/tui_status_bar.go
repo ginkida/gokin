@@ -160,6 +160,10 @@ func (m Model) renderStatusBarFull() string {
 	if m.retryAttempt > 0 && m.retryMax > 0 {
 		retryStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 		rightParts = append(rightParts, retryStyle.Render(fmt.Sprintf("↻ %d/%d", m.retryAttempt, m.retryMax)))
+	} else if !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil) {
+		wait := time.Until(m.rateLimitWaitUntil).Round(time.Second)
+		waitStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+		rightParts = append(rightParts, waitStyle.Render(fmt.Sprintf("⏳ Rate Limit %s", wait)))
 	}
 
 	// Scroll indicator

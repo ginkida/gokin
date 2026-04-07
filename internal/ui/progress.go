@@ -242,8 +242,8 @@ func (m ProgressModel) View() string {
 	if barWidth < 20 {
 		barWidth = 20
 	}
-	if barWidth > 60 {
-		barWidth = 60
+	if barWidth > 80 {
+		barWidth = 80
 	}
 
 	progress := float64(m.current) / float64(m.total)
@@ -291,12 +291,12 @@ func (m ProgressModel) View() string {
 	// Current item with indent
 	if !m.isComplete && m.currentItem != "" {
 		itemStyle := lipgloss.NewStyle().Foreground(ColorAccent)
-		builder.WriteString(fmt.Sprintf(" └─ %s\n", itemStyle.Render(shortenPath(m.currentItem, 50))))
+		builder.WriteString(fmt.Sprintf(" └─ %s\n", itemStyle.Render(shortenPath(m.currentItem, 80))))
 	}
 
 	// Message
 	if m.message != "" {
-		msgStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		msgStyle := lipgloss.NewStyle().Foreground(ColorWarning) // Change to Warning color for better visibility of what is happening
 		builder.WriteString(fmt.Sprintf("    %s\n", msgStyle.Render(m.message)))
 	}
 

@@ -739,11 +739,17 @@ func (c *GeminiOAuthClient) doGenerateContentStream(ctx context.Context, content
 	var rateLimiterAcquired bool
 	if c.rateLimiter != nil {
 		estimatedTokens = ratelimit.EstimateTokensFromContents(len(contents), 500)
+		
+		waitTime := c.rateLimiter.EstimateWaitTime(estimatedTokens)
+		if waitTime > 500*time.Millisecond && c.statusCallback != nil {
+			c.statusCallback.OnRateLimit(waitTime)
+		}
+
 		if err := c.rateLimiter.AcquireWithContext(ctx, estimatedTokens); err != nil {
 			if c.statusCallback != nil {
-				c.statusCallback.OnRateLimit(5 * time.Second)
+				c.statusCallback.OnRateLimit(time.Second)
 			}
-			return nil, fmt.Errorf("rate limit: %w", err)
+			return nil, fmt.Errorf("rate limit aborted: %w", err)
 		}
 		rateLimiterAcquired = true
 	}
