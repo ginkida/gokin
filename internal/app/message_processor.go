@@ -323,7 +323,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			"timeout":         ft.Timeout.String(),
 			"provider":        ft.Provider,
 		})
-		if a.reliability != nil {
+		// Don't count user cancellation (Esc) as a failure — only real API errors
+		if a.reliability != nil && !errors.Is(err, context.Canceled) {
 			a.reliability.RecordFailure()
 		}
 		if errors.Is(err, ErrRequestCircuitOpen) {
@@ -1027,7 +1028,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	// Handle step failure
 	if err != nil {
 		errMsg := err.Error()
-		if a.reliability != nil {
+		if a.reliability != nil && !errors.Is(err, context.Canceled) {
 			a.reliability.RecordFailure()
 		}
 
@@ -1695,7 +1696,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	}
 
 	if err != nil || result == nil || result.Status == agent.AgentStatusFailed {
-		if a.reliability != nil {
+		if a.reliability != nil && !errors.Is(err, context.Canceled) {
 			a.reliability.RecordFailure()
 		}
 
