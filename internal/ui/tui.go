@@ -192,6 +192,7 @@ type Model struct {
 
 	// Activity feed panel
 	activityFeed    *ActivityFeedPanel
+	agentTreePanel  *AgentTreePanel
 	activeToolCalls []activeToolCall // Stack of active parallel tool calls
 
 	// Compact mode
@@ -323,6 +324,7 @@ func NewModel() *Model {
 		backgroundTasks:      make(map[string]*BackgroundTaskState),
 		toolProgressBar:      NewToolProgressBarModel(styles),
 		activityFeed:         NewActivityFeedPanel(styles),
+		agentTreePanel:       NewAgentTreePanel(styles),
 		currentResponseBuf:   &strings.Builder{},
 		bellEnabled:          true, // Terminal bell enabled by default
 		highlighter:          highlight.New("monokai"),
@@ -392,6 +394,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update activity feed animation
 		if m.activityFeed != nil {
 			m.activityFeed.Tick()
+		}
+		if m.agentTreePanel != nil {
+			m.agentTreePanel.Tick()
 		}
 
 		// Refresh runtime health snapshot for status bar (async to avoid blocking on App locks).
@@ -975,6 +980,14 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if msg.Type == tea.KeyCtrlO && m.state == StateInput {
 		if m.activityFeed != nil {
 			m.activityFeed.Toggle()
+		}
+		return nil
+	}
+
+	// Handle Ctrl+A for agent tree panel toggle
+	if msg.Type == tea.KeyCtrlA && m.state == StateInput {
+		if m.agentTreePanel != nil {
+			m.agentTreePanel.Toggle()
 		}
 		return nil
 	}
@@ -1828,6 +1841,18 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			}
 		}
 
+	// Agent tree updates from Coordinator
+	case AgentTreeUpdateMsg:
+		if m.agentTreePanel != nil {
+			m.agentTreePanel.UpdateTree(msg.Nodes)
+		}
+
+	// Learning insight notification
+	case LearningInsightMsg:
+		if m.toastManager != nil && msg.Message != "" {
+			m.toastManager.Show(ToastInfo, "", msg.Message, 4*time.Second)
+		}
+
 	// Status updates from client (retry, rate limit, stream idle)
 	case StatusUpdateMsg:
 		switch msg.Type {
@@ -2086,6 +2111,12 @@ func (m Model) View() string {
 	// Activity feed panel
 	if m.activityFeed != nil && m.activityFeed.IsVisible() && m.activityFeed.HasActiveEntries() {
 		panelBuilder.WriteString(m.activityFeed.View(m.width))
+		panelBuilder.WriteString("\n")
+	}
+
+	// Agent tree panel
+	if m.agentTreePanel != nil && m.agentTreePanel.IsVisible() && m.agentTreePanel.NodeCount() > 0 {
+		panelBuilder.WriteString(m.agentTreePanel.View(m.width))
 		panelBuilder.WriteString("\n")
 	}
 

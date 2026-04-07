@@ -142,6 +142,7 @@ func NewHandler() *Handler {
 	h.Register(&RecoveryCommand{})
 	h.Register(&ObservabilityCommand{})
 	h.Register(&MemoryGovernanceCommand{})
+	h.Register(&InsightsCommand{})
 
 	// Register tree planner command
 	h.Register(&TreeStatsCommand{})

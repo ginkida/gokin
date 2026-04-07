@@ -185,11 +185,18 @@ func loadFromEnv(cfg *Config) {
 	}
 
 	// Legacy API key from environment (check multiple sources)
-	// Priority: GOKIN_API_KEY > GLM_API_KEY > GEMINI_API_KEY
+	// Priority: GOKIN_API_KEY > GOKIN_GLM_KEY > GLM_API_KEY > GEMINI_API_KEY
 	if apiKey := os.Getenv("GOKIN_API_KEY"); apiKey != "" {
 		cfg.API.APIKey = apiKey
+	} else if apiKey := os.Getenv("GOKIN_GLM_KEY"); apiKey != "" {
+		cfg.API.APIKey = apiKey
+		cfg.API.GLMKey = apiKey
+		if cfg.API.Backend == "" {
+			cfg.API.Backend = "glm"
+		}
 	} else if apiKey := os.Getenv("GLM_API_KEY"); apiKey != "" {
 		cfg.API.APIKey = apiKey
+		cfg.API.GLMKey = apiKey
 		if cfg.API.Backend == "" {
 			cfg.API.Backend = "glm"
 		}

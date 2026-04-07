@@ -58,10 +58,15 @@ var knownModelProfiles = map[string]ModelProfile{
 	"deepseek-reasoner": {Family: "deepseek", ContextWindow: 64000, SupportsTools: true, IsCoding: true},
 
 	// GLM family
-	"glm-5":   {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
-	"glm-4.7": {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
-	"glm-4":   {Family: "glm", ContextWindow: 128000, SupportsTools: true},
-	"glm":     {Family: "glm", ContextWindow: 128000, SupportsTools: true},
+	"glm-5.1":     {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"glm-5":       {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"glm-5-turbo": {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"glm-4.7":     {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"glm-4.6":     {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"glm-4.5":     {Family: "glm", ContextWindow: 128000, SupportsTools: true},
+	"glm-4.5-air": {Family: "glm", ContextWindow: 128000, SupportsTools: true},
+	"glm-4":       {Family: "glm", ContextWindow: 128000, SupportsTools: true},
+	"glm":         {Family: "glm", ContextWindow: 128000, SupportsTools: true},
 
 	// Kimi / Moonshot family
 	"kimi-k2.5": {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},

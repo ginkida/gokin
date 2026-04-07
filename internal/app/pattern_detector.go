@@ -3,6 +3,9 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	"gokin/internal/ui"
 )
 
 // toolPattern represents a detected repeating tool usage sequence.
@@ -40,6 +43,9 @@ func (a *App) detectPatterns() []string {
 			seq := strings.Split(key, "->")
 			patterns = append(patterns, toolPattern{sequence: seq, count: count})
 			descriptions = append(descriptions, fmt.Sprintf("You often follow %s (seen %d times)", strings.Join(seq, " -> "), count))
+
+			// Notify about new patterns (throttled)
+			a.notifyNewPattern(key, seq, count)
 		}
 	}
 
@@ -48,6 +54,42 @@ func (a *App) detectPatterns() []string {
 	a.mu.Unlock()
 
 	return descriptions
+}
+
+// notifyNewPattern sends a toast when a new tool pattern is first detected.
+// Throttled to max 1 notification per 30 seconds.
+func (a *App) notifyNewPattern(key string, sequence []string, count int) {
+	a.mu.Lock()
+	// Initialize if nil
+	if a.knownPatterns == nil {
+		a.knownPatterns = make(map[string]bool)
+	}
+	if a.lastPatternNotify.IsZero() {
+		a.lastPatternNotify = time.Time{}
+	}
+
+	// Skip if already known
+	if a.knownPatterns[key] {
+		a.mu.Unlock()
+		return
+	}
+
+	// Throttle: max 1 per 30s
+	if time.Since(a.lastPatternNotify) < 30*time.Second {
+		a.mu.Unlock()
+		return
+	}
+
+	a.knownPatterns[key] = true
+	a.lastPatternNotify = time.Now()
+	prog := a.program
+	a.mu.Unlock()
+
+	// Send toast notification
+	if prog != nil {
+		msg := fmt.Sprintf("🧠 Pattern: %s (seen %dx)", strings.Join(sequence, " → "), count)
+		prog.Send(ui.LearningInsightMsg{Message: msg})
+	}
 }
 
 // getToolHints generates hints based on detected tool usage patterns.
@@ -86,3 +128,4 @@ func (a *App) recordToolUsage(name string) {
 		a.recentTools = a.recentTools[len(a.recentTools)-20:]
 	}
 }
+

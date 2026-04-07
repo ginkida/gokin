@@ -183,10 +183,15 @@ var DefaultPricing = map[string]ModelPricing{
 	"deepseek-chat":     {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},
 	"deepseek-reasoner": {InputCostPer1M: 0.55, OutputCostPer1M: 2.19},
 
-	// GLM
-	"glm-5":   {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
-	"glm-4.7": {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
-	"glm-4":   {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
+	// GLM (prices in USD equivalent from CNY)
+	"glm-5.1":     {InputCostPer1M: 4.00, OutputCostPer1M: 16.00},
+	"glm-5":       {InputCostPer1M: 1.00, OutputCostPer1M: 4.00},
+	"glm-5-turbo": {InputCostPer1M: 0.70, OutputCostPer1M: 2.80},
+	"glm-4.7":     {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
+	"glm-4.6":     {InputCostPer1M: 0.70, OutputCostPer1M: 0.70},
+	"glm-4.5":     {InputCostPer1M: 0.50, OutputCostPer1M: 0.50},
+	"glm-4.5-air": {InputCostPer1M: 0.14, OutputCostPer1M: 0.14},
+	"glm-4":       {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
 
 	// MiniMax (prices in USD equivalent from CNY: 1 CNY ≈ $0.14)
 	"MiniMax-M2.7":           {InputCostPer1M: 1.40, OutputCostPer1M: 5.60},

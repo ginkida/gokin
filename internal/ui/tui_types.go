@@ -241,6 +241,16 @@ type (
 		OldText  string
 		NewText  string
 	}
+
+	// AgentTreeUpdateMsg carries a snapshot of the coordinated agent tree.
+	AgentTreeUpdateMsg struct {
+		Nodes []AgentTreeNode
+	}
+
+	// LearningInsightMsg carries a learning insight for display as a toast.
+	LearningInsightMsg struct {
+		Message string
+	}
 )
 
 // ActivityType distinguishes sources of activity.

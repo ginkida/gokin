@@ -1740,7 +1740,31 @@ func (b *Builder) wireDependencies() error {
 	if b.coordinator != nil {
 		broadcaster := &uiBroadcasterAdapter{app: app}
 		b.coordinator.SetUIBroadcaster(broadcaster)
+
+		// Wire coordinator task callbacks to push agent tree snapshots to TUI
+		b.coordinator.SetCallbacks(
+			func(task *agent.CoordinatedTask) {
+				// On task start — rebuild tree snapshot
+				app.sendAgentTreeUpdate()
+			},
+			func(task *agent.CoordinatedTask, result *agent.AgentResult) {
+				// On task complete — rebuild tree snapshot
+				app.sendAgentTreeUpdate()
+			},
+			nil, // onAllComplete not needed for UI
+		)
+
 		logging.Debug("coordinator UI broadcaster wired")
+	}
+
+	// Wire MetaAgent intervention callback to TUI toast
+	if b.metaAgent != nil {
+		b.metaAgent.SetInterventionCallback(func(agentID string, reason string, action string) {
+			if app.program != nil {
+				msg := fmt.Sprintf("⚡ Meta-Agent: %s → %s", action, reason)
+				app.program.Send(ui.LearningInsightMsg{Message: msg})
+			}
+		})
 	}
 
 	return nil

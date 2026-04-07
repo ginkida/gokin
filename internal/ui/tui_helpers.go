@@ -261,6 +261,8 @@ func (m Model) getCommandHint(input string) string {
 		"tree-stats":        "Show planner tree depth, branches and limits",
 		"semantic-stats":    "Show semantic search index status",
 		"semantic-reindex":  "Rebuild semantic index for better retrieval",
+		"agents":            "Show/hide agent orchestrator tree (Ctrl+A)",
+		"insights":          "Show learning insights: strategy metrics, patterns, delegation stats",
 	}
 
 	if hint, ok := hints[cmd]; ok {

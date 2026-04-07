@@ -60,11 +60,25 @@ var AvailableModels = []ModelInfo{
 		Description: "Advanced model (Code Assist, retiring Mar 2026)",
 		Provider:    "gemini",
 	},
-	// GLM models (via Anthropic-compatible API)
+	// GLM models (via Anthropic-compatible API on Z.AI)
+	{
+		ID:          "glm-5.1",
+		Name:        "GLM-5.1",
+		Description: "Most capable GLM model — Max tier (Coding Plan)",
+		Provider:    "glm",
+		BaseURL:     DefaultGLMBaseURL,
+	},
 	{
 		ID:          "glm-5",
 		Name:        "GLM-5",
-		Description: "Latest GLM model (Coding Plan)",
+		Description: "Flagship GLM model (Coding Plan)",
+		Provider:    "glm",
+		BaseURL:     DefaultGLMBaseURL,
+	},
+	{
+		ID:          "glm-5-turbo",
+		Name:        "GLM-5 Turbo",
+		Description: "Fast GLM-5 variant — lower latency (Coding Plan)",
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},
@@ -72,6 +86,13 @@ var AvailableModels = []ModelInfo{
 		ID:          "glm-4.7",
 		Name:        "GLM-4.7",
 		Description: "Coding assistant: 131K max output (Coding Plan)",
+		Provider:    "glm",
+		BaseURL:     DefaultGLMBaseURL,
+	},
+	{
+		ID:          "glm-4.5",
+		Name:        "GLM-4.5",
+		Description: "Balanced GLM model — good quality/speed (Coding Plan)",
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},

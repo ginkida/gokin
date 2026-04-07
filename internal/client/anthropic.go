@@ -786,6 +786,13 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 			// Add full anthropic path
 			url = strings.TrimSuffix(c.config.BaseURL, "/") + "/anthropic/v1/messages"
 		}
+	} else if strings.Contains(c.config.BaseURL, "bigmodel.cn") {
+		// BigModel / Zhipu AI - Anthropic-compatible endpoint
+		if strings.HasSuffix(c.config.BaseURL, "/anthropic") {
+			url = c.config.BaseURL + "/v1/messages"
+		} else {
+			url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
+		}
 	} else if strings.Contains(c.config.BaseURL, "minimax") {
 		// MiniMax API - Anthropic-compatible endpoint
 		url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
@@ -806,8 +813,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	req.Header.Set("x-api-key", c.config.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	// Z.AI also accepts Authorization header
-	if strings.Contains(c.config.BaseURL, "api.z.ai") {
+	// Z.AI / BigModel accept both x-api-key and Authorization: Bearer
+	if strings.Contains(c.config.BaseURL, "api.z.ai") || strings.Contains(c.config.BaseURL, "bigmodel.cn") {
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 	}
 

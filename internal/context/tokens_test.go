@@ -98,7 +98,7 @@ func TestGetPricing_KnownModels(t *testing.T) {
 		{"claude-opus", 15.00, 75.00},
 		{"claude-sonnet", 3.00, 15.00},
 		{"deepseek-chat", 0.27, 1.10},
-		{"glm-5", 1.00, 1.00},
+		{"glm-5", 1.00, 4.00},
 	}
 
 	for _, tt := range tests {

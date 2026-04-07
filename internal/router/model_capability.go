@@ -53,7 +53,14 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 		if strings.Contains(m, "flash") || strings.Contains(m, "lite") {
 			cap.Tier = CapabilityMedium
 		}
-	case "deepseek", "kimi", "glm", "minimax":
+	case "glm":
+		cap.Tier = CapabilityMedium
+		// GLM-5+ models are strong-tier
+		m := strings.ToLower(modelName)
+		if strings.HasPrefix(m, "glm-5") {
+			cap.Tier = CapabilityStrong
+		}
+	case "deepseek", "kimi", "minimax":
 		cap.Tier = CapabilityMedium
 	case "ollama":
 		cap.Tier = CapabilityWeak

@@ -173,7 +173,7 @@ func TestProviderDefaultModels(t *testing.T) {
 		"gemini":    "gemini-3-flash-preview",
 		"anthropic": "claude-sonnet-4-5-20250929",
 		"openai":    "gpt-5.4",
-		"glm":       "glm-5",
+		"glm":       "glm-5.1",
 		"deepseek":  "deepseek-chat",
 		"minimax":   "MiniMax-M2.7",
 		"kimi":      "kimi-k2.5",

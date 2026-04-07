@@ -74,3 +74,4 @@ wiki/
 .gokin/checkpoints/
 .gokin/learning.yaml
 GOKIN.local.md
+ARCHITECTURE_AGENT_MEMORY.md

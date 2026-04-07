@@ -202,6 +202,10 @@ type App struct {
 	errorStore   *memory.ErrorStore
 	exampleStore *memory.ExampleStore
 
+	// Pattern detection throttling
+	knownPatterns     map[string]bool
+	lastPatternNotify time.Time
+
 	// === Task 5.7: Project Context Auto-Injection ===
 	detectedProjectContext string // Computed once at startup
 
@@ -1826,4 +1830,73 @@ func (a *App) AddSystemMessage(msg string) {
 	if a.tui != nil {
 		a.tui.AddSystemMessage(msg)
 	}
+}
+
+// sendAgentTreeUpdate snapshots the coordinator task tree and sends it to TUI.
+func (a *App) sendAgentTreeUpdate() {
+	if a.program == nil || a.coordinator == nil {
+		return
+	}
+
+	tasks := a.coordinator.GetAllTasks()
+	if len(tasks) == 0 {
+		return
+	}
+
+	// Build dependency depth map
+	depthMap := make(map[string]int)
+	for _, t := range tasks {
+		if len(t.Dependencies) == 0 {
+			depthMap[t.ID] = 0
+		}
+	}
+	// Simple BFS to compute depths
+	changed := true
+	for changed {
+		changed = false
+		for _, t := range tasks {
+			if _, ok := depthMap[t.ID]; ok {
+				continue
+			}
+			maxParentDepth := -1
+			allResolved := true
+			for _, depID := range t.Dependencies {
+				d, ok := depthMap[depID]
+				if !ok {
+					allResolved = false
+					break
+				}
+				if d > maxParentDepth {
+					maxParentDepth = d
+				}
+			}
+			if allResolved {
+				depthMap[t.ID] = maxParentDepth + 1
+				changed = true
+			}
+		}
+	}
+
+	nodes := make([]ui.AgentTreeNode, 0, len(tasks))
+	for _, t := range tasks {
+		node := ui.AgentTreeNode{
+			ID:          t.ID,
+			AgentType:   string(t.AgentType),
+			Description: t.Prompt,
+			Status:      string(t.Status),
+			Depth:       depthMap[t.ID],
+		}
+
+		if len(node.Description) > 60 {
+			node.Description = node.Description[:57] + "..."
+		}
+
+		if t.Result != nil {
+			node.Duration = t.Result.Duration
+		}
+
+		nodes = append(nodes, node)
+	}
+
+	a.program.Send(ui.AgentTreeUpdateMsg{Nodes: nodes})
 }
