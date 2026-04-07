@@ -162,8 +162,32 @@ func (m Model) renderTodos() string {
 	builder.WriteString(titleStyle.Render(" Tasks"))
 	builder.WriteString("\n")
 
+	spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	idx := int(time.Now().UnixNano()/100000000) % len(spinner)
+	spinChar := spinner[idx]
+
 	for _, item := range m.todoItems {
-		builder.WriteString(itemStyle.Render(item))
+		text := strings.TrimSpace(item)
+		if strings.HasPrefix(text, "- ") {
+			text = strings.TrimSpace(text[2:])
+		}
+
+		var styledItem string
+		if strings.HasPrefix(text, "[ ]") {
+			content := strings.TrimSpace(text[3:])
+			styledItem = m.styles.TodoPending.Render("○ " + content)
+		} else if strings.HasPrefix(text, "[/]") {
+			content := strings.TrimSpace(text[3:])
+			styledItem = m.styles.TodoActive.Render(spinChar + " " + content)
+		} else if strings.HasPrefix(text, "[x]") || strings.HasPrefix(text, "[X]") {
+			content := strings.TrimSpace(text[3:])
+			styledItem = m.styles.TodoDone.Render("✓ " + content)
+		} else {
+			// Fallback if no known prefix
+			styledItem = itemStyle.Render("• " + text)
+		}
+
+		builder.WriteString(m.styles.TodoItem.Render(styledItem))
 		builder.WriteString("\n")
 	}
 
