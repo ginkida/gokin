@@ -722,11 +722,20 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			default:
 			}
 
-			// Track tools being called
+			// Track tools being called, including file targets for write-heavy operations.
+			// This prevents false stagnation when creating multiple different files.
 			iterationTools := make([]string, 0, len(resp.FunctionCalls))
 			for _, fc := range resp.FunctionCalls {
 				toolsUsed = append(toolsUsed, fc.Name)
-				iterationTools = append(iterationTools, fc.Name)
+				toolKey := fc.Name
+				// For file operations, include the target path to distinguish
+				// "write foo.go" from "write bar.go" — both are legitimate.
+				if fc.Name == "write" || fc.Name == "edit" || fc.Name == "read" {
+					if fp, ok := fc.Args["file_path"].(string); ok {
+						toolKey = fc.Name + ":" + filepath.Base(fp)
+					}
+				}
+				iterationTools = append(iterationTools, toolKey)
 			}
 			sort.Strings(iterationTools)
 			pattern := strings.Join(iterationTools, ",")
