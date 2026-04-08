@@ -44,8 +44,9 @@ type Agent struct {
 	client       client.Client
 	registry     *tools.Registry
 	baseRegistry tools.ToolRegistry
-	workDir      string
-	messenger    tools.Messenger
+	workDir       string
+	originalPrompt string // Preserved for continuation after compaction
+	messenger     tools.Messenger
 	permissions  *permission.Manager
 	timeout      time.Duration
 	history      []*genai.Content
@@ -1068,6 +1069,9 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.status = AgentStatusRunning
 	a.startTime = time.Now()
 	hasHistory := len(a.history) > 0
+	if a.originalPrompt == "" {
+		a.originalPrompt = prompt // Preserve for continuation after compaction
+	}
 	a.stateMu.Unlock()
 
 	// Initialize progress
@@ -3156,11 +3160,18 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		return nil
 	}
 
-	protectRecent := a.summarizeProtect
-	if protectRecent >= len(historySnapshot)-2 {
-		protectRecent = len(historySnapshot) - 3 // ensure at least 1 message to summarize
+	// Preserve first 3 messages: system prompt [0], greeting [1], original task prompt [2].
+	// Summarize from [3] onward so the agent never forgets its task.
+	preserveStart := 3
+	if len(historySnapshot) <= preserveStart+2 {
+		return nil // Not enough messages to summarize
 	}
-	historyToSummarize := historySnapshot[2 : len(historySnapshot)-protectRecent]
+
+	protectRecent := a.summarizeProtect
+	if protectRecent >= len(historySnapshot)-preserveStart {
+		protectRecent = len(historySnapshot) - preserveStart - 1
+	}
+	historyToSummarize := historySnapshot[preserveStart : len(historySnapshot)-protectRecent]
 	recentFromSnapshot := historySnapshot[len(historySnapshot)-protectRecent:]
 
 	summary, err := a.summarizer.Summarize(ctx, historyToSummarize)
@@ -3180,8 +3191,8 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	// Messages appended by concurrent goroutines since our snapshot
 	newMessages := a.history[historyLen:]
 
-	newHistory := make([]*genai.Content, 0, 3+len(recentFromSnapshot)+len(newMessages))
-	newHistory = append(newHistory, a.history[0], a.history[1]) // System context
+	newHistory := make([]*genai.Content, 0, preserveStart+1+len(recentFromSnapshot)+len(newMessages))
+	newHistory = append(newHistory, a.history[:preserveStart]...) // System + greeting + original task
 	newHistory = append(newHistory, summary)
 	newHistory = append(newHistory, recentFromSnapshot...)
 	newHistory = append(newHistory, newMessages...)
@@ -3206,7 +3217,7 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 		return nil // Not enough to compact
 	}
 
-	keepStart := 2
+	keepStart := 3  // system prompt + greeting + original task prompt
 	keepEnd := 6
 	keepMiddle := 4 // Top N by importance from middle section
 
@@ -3504,12 +3515,25 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 }
 
 // injectContinuationHint appends a synthetic user message after compaction
-// so the model continues without pausing. Must be called under stateMu write lock.
+// so the model continues without pausing. Includes the original task prompt
+// to prevent the agent from forgetting what it was doing.
+// Must be called under stateMu write lock.
 func (a *Agent) injectContinuationHint() {
-	hint := "[System: Conversation was automatically compacted to free context space. Continue with your current task.]"
 	if len(a.history) == 0 {
 		return
 	}
+
+	hint := "[System: Conversation was automatically compacted to free context space."
+	if a.originalPrompt != "" {
+		// Truncate long prompts to avoid bloating the hint
+		taskReminder := a.originalPrompt
+		if len(taskReminder) > 500 {
+			taskReminder = taskReminder[:500] + "..."
+		}
+		hint += "\nYour original task: " + taskReminder
+	}
+	hint += "\nContinue with your current task.]"
+
 	last := a.history[len(a.history)-1]
 	if last.Role == genai.RoleUser {
 		// Append to existing user message to avoid consecutive same-role issues
