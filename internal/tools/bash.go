@@ -885,8 +885,8 @@ func (t *BashTool) buildResult(stdoutStr, stderrStr string) ToolResult {
 		output.WriteString(stderrStr)
 	}
 
-	// Truncate if too long — use head+tail strategy so errors/summaries at the end are preserved
-	result := output.String()
+	// Smart filter: deduplicate, remove noise, collapse blanks (before truncation)
+	result := FilterBashOutput(output.String())
 	const maxLen = 30000
 	const headSize = 10000
 	const tailSize = 20000
