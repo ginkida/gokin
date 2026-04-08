@@ -277,6 +277,10 @@ type ExecutionHandler struct {
 	// This helps keep the UI alive and prevents timeout during long operations.
 	OnToolProgress func(name string, elapsed time.Duration)
 
+	// OnToolDetailedProgress is called when a tool reports granular progress.
+	// Tools use ProgressCallback to report progress, currentStep, and bytes processed.
+	OnToolDetailedProgress func(name string, progress float64, currentStep string)
+
 	// OnToolValidating is called before tool execution to show safety checks.
 	OnToolValidating func(name string, check *PreFlightCheck)
 
@@ -300,6 +304,9 @@ type ExecutionHandler struct {
 
 	// OnTokenUpdate is called when the streaming response provides token usage from the API.
 	OnTokenUpdate func(inputTokens, outputTokens int)
+
+	// OnFilePeek is called to show a transient high-resolution snippet of a file.
+	OnFilePeek func(filePath, title, content, action string)
 }
 
 // NewExecutor creates a new tool executor.
@@ -1124,6 +1131,10 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 							mu.Unlock()
 						}
 					}()
+					if e.handler != nil && e.handler.OnFilePeek != nil {
+						ctx = ContextWithFilePeekCallback(ctx, e.handler.OnFilePeek)
+					}
+
 					result := e.executeTool(ctx, fc)
 					mu.Lock()
 					results[i] = &genai.FunctionResponse{ID: fc.ID, Name: fc.Name, Response: result.ToMap()}
@@ -1140,6 +1151,9 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: NewErrorResult("cancelled").ToMap()}
 					continue
 				default:
+				}
+				if e.handler != nil && e.handler.OnFilePeek != nil {
+					ctx = ContextWithFilePeekCallback(ctx, e.handler.OnFilePeek)
 				}
 				result := e.executeTool(ctx, call)
 				results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}
@@ -1429,6 +1443,15 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Inject streaming callback so tools (e.g. task/agent) can stream output to UI
 	if e.handler != nil && e.handler.OnText != nil {
 		execCtx = ContextWithStreamingCallback(execCtx, StreamingCallback(e.handler.OnText))
+	}
+
+	// Inject progress callback so tools can report granular progress to UI
+	if e.handler != nil && e.handler.OnToolDetailedProgress != nil {
+		toolName := call.Name
+		onDetailed := e.handler.OnToolDetailedProgress
+		execCtx = ContextWithProgressCallback(execCtx, func(progress float64, currentStep string) {
+			onDetailed(toolName, progress, currentStep)
+		})
 	}
 
 	start := time.Now()

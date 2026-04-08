@@ -23,7 +23,8 @@ type CoordinatedTask struct {
 	Dependencies []string // IDs of tasks that must complete first
 	Status       TaskStatus
 	Result       *AgentResult
-	index        int // Index in heap
+	Thought      string // Accumulated reasoning/thought
+	index        int    // Index in heap
 }
 
 // TaskStatus represents the status of a coordinated task.

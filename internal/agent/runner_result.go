@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -165,6 +166,7 @@ func (r *Runner) ListRunning() []string {
 }
 
 // Cleanup removes completed agents older than the specified duration.
+// Also removes associated output files from disk.
 func (r *Runner) Cleanup(maxAge time.Duration) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -177,6 +179,10 @@ func (r *Runner) Cleanup(maxAge time.Duration) int {
 		if status == AgentStatusCompleted || status == AgentStatusFailed || status == AgentStatusCancelled {
 			endTime := agent.GetEndTime()
 			if !endTime.IsZero() && endTime.Before(cutoff) {
+				// Clean up agent output file if it exists
+				if result, ok := r.results[id]; ok && result.OutputFile != "" {
+					os.Remove(result.OutputFile)
+				}
 				delete(r.agents, id)
 				delete(r.results, id)
 				cleaned++

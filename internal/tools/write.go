@@ -173,5 +173,8 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 		status = fmt.Sprintf("Updated file: %s (%d bytes)", filePath, len(content))
 	}
 
+	// Emit FilePeek
+	EmitFilePeek(ctx, filePath, "Writing", finalContent, "write")
+
 	return NewSuccessResult(status), nil
 }

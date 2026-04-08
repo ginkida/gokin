@@ -573,6 +573,19 @@ func (c *Coordinator) GetTask(taskID string) *CoordinatedTask {
 	return c.tasks[taskID]
 }
 
+// GetTaskAgentID returns the agent ID assigned to a task, if it's currently running.
+func (c *Coordinator) GetTaskAgentID(taskID string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for agentID, tid := range c.running {
+		if tid == taskID {
+			return agentID
+		}
+	}
+	return ""
+}
+
 // GetAllTasks returns all tasks.
 func (c *Coordinator) GetAllTasks() []*CoordinatedTask {
 	c.mu.RLock()

@@ -57,7 +57,6 @@ func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolR
 		// Use declarations to avoid instantiating tools
 		decls := t.lister.Declarations()
 		for _, decl := range decls {
-			// Truncate description for display
 			desc := decl.Description
 			if len(desc) > 100 {
 				desc = desc[:97] + "..."

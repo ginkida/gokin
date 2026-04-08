@@ -16,6 +16,7 @@ type AgentTreeNode struct {
 	ID           string
 	AgentType    string
 	Description  string
+	Thought      string // reasoning/thought process
 	Status       string // "pending", "blocked", "ready", "running", "completed", "failed", "skipped"
 	Dependencies []string
 	Depth        int // indentation level based on dependency chain
@@ -24,6 +25,7 @@ type AgentTreeNode struct {
 	Progress     float64 // 0.0-1.0, -1 for indeterminate
 	ToolsUsed    int
 	CurrentTool  string // currently executing tool name
+	Reflection   string // self-correction/reflection info
 }
 
 // AgentTreePanel displays a live tree of coordinated agent tasks.
@@ -121,7 +123,7 @@ func (p *AgentTreePanel) View(width int) string {
 		Padding(0, 1)
 
 	headerStyle := lipgloss.NewStyle().
-		Foreground(ColorGradient2).
+		Foreground(ColorSecondary).
 		Bold(true)
 
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
@@ -132,6 +134,7 @@ func (p *AgentTreePanel) View(width int) string {
 	agentTypeStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	timeStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	toolStyle := lipgloss.NewStyle().Foreground(ColorInfo).Italic(true)
+	thoughtStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 
 	spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
@@ -230,6 +233,59 @@ func (p *AgentTreePanel) View(width int) string {
 
 		builder.WriteString(line.String())
 		builder.WriteString("\n")
+
+		// Thought rendering (if present and agent is active)
+		if node.Thought != "" && (node.Status == "running" || node.Status == "completed") {
+			var thoughtLine strings.Builder
+			indentStr := strings.Repeat("  ", node.Depth)
+			connector := "   │ "
+			if node.Depth > 0 {
+				connector = "  │ "
+			}
+			thoughtLine.WriteString(dimStyle.Render(indentStr + connector))
+
+			// Truncate thought to fit width
+			maxThoughtLen := width - lipgloss.Width(thoughtLine.String()) - 10
+			if maxThoughtLen < 20 {
+				maxThoughtLen = 20
+			}
+			thought := node.Thought
+			if len(thought) > maxThoughtLen {
+				thought = thought[:maxThoughtLen-3] + "..."
+			}
+
+			thoughtLine.WriteString(thoughtStyle.Render("💭 " + thought))
+			builder.WriteString(thoughtLine.String())
+			builder.WriteString("\n")
+		}
+
+		// Reflection rendering (Self-correction)
+		if node.Reflection != "" {
+			var reflLine strings.Builder
+			indentStr := strings.Repeat("  ", node.Depth)
+			connector := "   │ "
+			if node.Depth > 0 {
+				connector = "  │ "
+			}
+			reflLine.WriteString(dimStyle.Render(indentStr + connector))
+
+			reflBadgeStyle := lipgloss.NewStyle().
+				Foreground(ColorWarning).
+				Padding(0, 1).
+				Bold(true)
+
+			reflection := node.Reflection
+			maxReflLen := width - lipgloss.Width(reflLine.String()) - 20
+			if len(reflection) > maxReflLen && maxReflLen > 20 {
+				reflection = reflection[:maxReflLen-3] + "..."
+			}
+
+			reflLine.WriteString(reflBadgeStyle.Render("RECOVERY"))
+			reflLine.WriteString(" ")
+			reflLine.WriteString(lipgloss.NewStyle().Foreground(ColorWarning).Render(reflection))
+			builder.WriteString(reflLine.String())
+			builder.WriteString("\n")
+		}
 	}
 
 	// Summary footer

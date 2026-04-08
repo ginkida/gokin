@@ -534,6 +534,9 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 		t.predictor.LearnImports(filePath)
 	}
 
+	// Emit FilePeek
+	EmitFilePeek(ctx, filePath, "Reading", content, "read")
+
 	return NewSuccessResult(content), nil
 }
 

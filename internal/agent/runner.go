@@ -132,6 +132,20 @@ func (r *Runner) GetActiveAgent(id string) *Agent {
 	return nil
 }
 
+// GetThought returns the accumulated reasoning/thought for an agent.
+func (r *Runner) GetThought(id string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if a, ok := r.agents[id]; ok {
+		a.onThinkingMu.Lock()
+		defer a.onThinkingMu.Unlock()
+		return a.Thought
+	}
+
+	return ""
+}
+
 type runnerAgentDeps struct {
 	ctxCfg              *config.ContextConfig
 	errorStore          *memory.ErrorStore

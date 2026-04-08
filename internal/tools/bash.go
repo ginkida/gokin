@@ -643,6 +643,9 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		var readerWg sync.WaitGroup
 		var stdoutMu, stderrMu sync.Mutex
 
+		var totalBytesRead int64
+		var totalBytesMu sync.Mutex
+
 		readerWg.Add(2)
 		go func() {
 			defer func() {
@@ -658,6 +661,16 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 					stdoutMu.Lock()
 					stdout.Write(buf[:n])
 					stdoutMu.Unlock()
+
+					totalBytesMu.Lock()
+					totalBytesRead += int64(n)
+					total := totalBytesRead
+					totalBytesMu.Unlock()
+
+					// Report output progress for long-running commands
+					if onProgress != nil && total > 0 && total%(32*1024) < 4096 {
+						onProgress(-1, fmt.Sprintf("Output: %d KB", total/1024))
+					}
 				}
 				if err != nil {
 					break

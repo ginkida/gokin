@@ -33,12 +33,14 @@ var (
 	ColorPlan     = ColorInfo                 // Teal
 
 	// Gradient colors (used sparingly)
-	ColorGradient1 = lipgloss.Color("#C084FC") // Purple 500
-	ColorGradient2 = lipgloss.Color("#818CF8") // Indigo 500
-	ColorGradient3 = lipgloss.Color("#38BDF8") // Sky 500
-	ColorGolden    = lipgloss.Color("#FCD34D") // Amber 300
+	ColorGradient1 = lipgloss.Color("#A855F7") // Vibrant Purple (600)
+	ColorGradient2 = lipgloss.Color("#6366F1") // Vibrant Indigo (600)
+	ColorGradient3 = lipgloss.Color("#06B6D4") // Vibrant Cyan (600)
+	ColorGolden    = lipgloss.Color("#FBBF24") // Vibrant Amber (400)
 	ColorRose      = lipgloss.Color("#FB7185") // Rose 400
-	ColorMint      = lipgloss.Color("#6EE7B7") // Emerald 300
+	ColorMint      = lipgloss.Color("#34D399") // Emerald 400
+	ColorLavender  = lipgloss.Color("#C4B5FD") // Lavender 300
+	ColorSlate     = lipgloss.Color("#1E293B") // Slate 800
 )
 
 // MessageIcons provides consistent icons for different message types
@@ -145,6 +147,7 @@ type Styles struct {
 	Header        lipgloss.Style
 	UserPrompt    lipgloss.Style
 	AssistantText lipgloss.Style
+	ThoughtText   lipgloss.Style
 	ToolCall      lipgloss.Style
 	ToolResult    lipgloss.Style
 	Error         lipgloss.Style
@@ -220,11 +223,18 @@ func DefaultStyles() *Styles {
 			Bold(true),
 
 		AssistantText: lipgloss.NewStyle().
-			Foreground(ColorText),
+			Foreground(ColorText).
+			Padding(0, 1),
+
+		ThoughtText: lipgloss.NewStyle().
+			Foreground(ColorDim).
+			Italic(true),
 
 		ToolCall: lipgloss.NewStyle().
-			Foreground(ColorWarning).
-			Italic(true),
+			Foreground(ColorSecondary).
+			Bold(true).
+			Background(ColorSlate).
+			Padding(0, 1),
 
 		ToolResult: lipgloss.NewStyle().
 			Foreground(ColorMuted).
@@ -306,8 +316,8 @@ func DefaultStyles() *Styles {
 
 		// Markdown styles
 		InlineCode: lipgloss.NewStyle().
-			Foreground(ColorHighlight).
-			Background(ColorBorder).
+			Foreground(ColorLavender).
+			Background(ColorSlate).
 			Padding(0, 1),
 
 		// Code block styles
@@ -334,6 +344,8 @@ func DefaultStyles() *Styles {
 		ToolHeader: lipgloss.NewStyle().
 			Bold(true).
 			Foreground(ColorPrimary).
+			Background(ColorSlate).
+			Padding(0, 1).
 			MarginBottom(1),
 
 		ToolContent: lipgloss.NewStyle().

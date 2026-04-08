@@ -244,13 +244,19 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewErrorResult(err.Error()), nil
 	}
 
+	// Report progress: searching N files
+	onProgress := GetProgressCallback(ctx)
+	if onProgress != nil && len(files) > 10 {
+		onProgress(-1, fmt.Sprintf("Searching %d files for '%s'", len(files), pattern))
+	}
+
 	// Search files
 	const maxMatches = 500
 	var fileMatches []fileMatch
 	if invertMatch {
 		fileMatches = t.invertMatches(ctx, files, re)
 	} else {
-		fileMatches = t.searchParallel(ctx, files, re, contextLines)
+		fileMatches = t.searchParallel(ctx, files, re, contextLines, onProgress)
 	}
 
 	// Count-only mode
@@ -381,13 +387,16 @@ func (t *GrepTool) invertMatches(ctx context.Context, files []string, re *regexp
 }
 
 // searchParallel searches files concurrently using a worker pool.
-func (t *GrepTool) searchParallel(ctx context.Context, files []string, re *regexp.Regexp, contextLines int) []fileMatch {
+func (t *GrepTool) searchParallel(ctx context.Context, files []string, re *regexp.Regexp, contextLines int, onProgress ProgressCallback) []fileMatch {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	results := make([]fileMatch, 0)
 
 	// Limit concurrency to 10 workers
 	semaphore := make(chan struct{}, 10)
+
+	totalFiles := len(files)
+	var searchedCount int64
 
 searchLoop:
 	for _, file := range files {
@@ -405,10 +414,21 @@ searchLoop:
 			defer func() { <-semaphore }()
 
 			matches := t.searchFile(f, re, contextLines)
+
+			mu.Lock()
+			searchedCount++
+			searched := searchedCount
+			matchCount := len(results)
 			if len(matches) > 0 {
-				mu.Lock()
 				results = append(results, fileMatch{path: f, matches: matches})
-				mu.Unlock()
+				matchCount = len(results)
+			}
+			mu.Unlock()
+
+			// Report progress every 50 files to avoid UI spam
+			if onProgress != nil && totalFiles > 20 && searched%50 == 0 {
+				progress := float64(searched) / float64(totalFiles)
+				onProgress(progress, fmt.Sprintf("%d/%d files, %d matches", searched, totalFiles, matchCount))
 			}
 		}(file)
 	}

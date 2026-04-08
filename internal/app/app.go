@@ -1856,13 +1856,14 @@ func (a *agentRunnerAdapter) GetResult(agentID string) (tools.AgentResult, bool)
 		return tools.AgentResult{}, false
 	}
 	return tools.AgentResult{
-		AgentID:   result.AgentID,
-		Type:      string(result.Type),
-		Status:    string(result.Status),
-		Output:    result.Output,
-		Error:     result.Error,
-		Duration:  result.Duration,
-		Completed: result.Completed,
+		AgentID:    result.AgentID,
+		Type:       string(result.Type),
+		Status:     string(result.Status),
+		Output:     result.Output,
+		Error:      result.Error,
+		Duration:   result.Duration,
+		Completed:  result.Completed,
+		OutputFile: result.OutputFile,
 	}, true
 }
 
@@ -1949,6 +1950,14 @@ func (a *App) sendAgentTreeUpdate() {
 
 		if t.Result != nil {
 			node.Duration = t.Result.Duration
+		}
+
+		// Include agent reasoning (thought) if running
+		if t.Status == "running" && a.agentRunner != nil {
+			agentID := a.coordinator.GetTaskAgentID(t.ID)
+			if agentID != "" {
+				node.Thought = a.agentRunner.GetThought(agentID)
+			}
 		}
 
 		nodes = append(nodes, node)

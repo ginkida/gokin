@@ -196,6 +196,7 @@ type Model struct {
 	// Activity feed panel
 	activityFeed    *ActivityFeedPanel
 	agentTreePanel  *AgentTreePanel
+	filePeek        *FilePeekPanel
 	activeToolCalls []activeToolCall // Stack of active parallel tool calls
 
 	// Compact mode
@@ -297,7 +298,7 @@ func NewModel() *Model {
 	s.Style = styles.Spinner
 
 	return &Model{
-		input:                NewInputModel(styles),
+		input:                NewInputModel(styles, ""), // Initialized with empty workDir, set later in SetWorkDir
 		output:               NewOutputModel(styles),
 		spinner:              s,
 		styles:               styles,
@@ -329,6 +330,7 @@ func NewModel() *Model {
 		toolProgressBar:      NewToolProgressBarModel(styles),
 		activityFeed:         NewActivityFeedPanel(styles),
 		agentTreePanel:       NewAgentTreePanel(styles),
+		filePeek:             NewFilePeekPanel(styles),
 		currentResponseBuf:   &strings.Builder{},
 		bellEnabled:          true, // Terminal bell enabled by default
 		highlighter:          highlight.New("monokai"),
@@ -401,6 +403,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.agentTreePanel != nil {
 			m.agentTreePanel.Tick()
+		}
+		if m.filePeek != nil {
+			m.filePeek.Tick()
 		}
 
 		// Refresh runtime health snapshot for status bar (async to avoid blocking on App locks).
@@ -725,7 +730,7 @@ func (m *Model) handleQuestionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 		} else {
 			// Selected "Other" - switch to custom input
 			m.questionCustomInput = true
-			m.questionInputModel = NewInputModel(m.styles)
+			m.questionInputModel = NewInputModel(m.styles, m.workDir)
 			m.questionInputModel.SetWidth(m.width)
 			return m.questionInputModel.Focus()
 		}
@@ -791,7 +796,7 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		if decision == PlanModifyRequested {
 			// Enter feedback mode
 			m.planFeedbackMode = true
-			m.planFeedbackInput = NewInputModel(m.styles)
+			m.planFeedbackInput = NewInputModel(m.styles, m.workDir)
 			m.planFeedbackInput.SetWidth(m.width - 4)
 			m.planFeedbackInput.SetPlaceholder("Enter your feedback for plan modifications...")
 			return m.planFeedbackInput.Focus()
@@ -835,7 +840,7 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 	case "m":
 		// Quick modify - enter feedback mode
 		m.planFeedbackMode = true
-		m.planFeedbackInput = NewInputModel(m.styles)
+		m.planFeedbackInput = NewInputModel(m.styles, m.workDir)
 		m.planFeedbackInput.SetWidth(m.width - 4)
 		m.planFeedbackInput.SetPlaceholder("Enter your feedback for plan modifications...")
 		return m.planFeedbackInput.Focus()
@@ -1394,6 +1399,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.toolProgressBar.Update(msg)
 		}
 
+	case FilePeekMsg:
+		m.lastActivityTime = time.Now()
+		if m.filePeek != nil {
+			m.filePeek.ShowPeek(msg)
+		}
+
 	case ThinkingTickMsg:
 		// Model is actively thinking — refresh the view so elapsed time updates
 		m.lastActivityTime = time.Now()
@@ -1533,7 +1544,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, m.bellCmd())
 			// If no options, initialize input model for free text
 			if len(msg.Options) == 0 {
-				m.questionInputModel = NewInputModel(m.styles)
+				m.questionInputModel = NewInputModel(m.styles, m.workDir)
 				m.questionInputModel.SetWidth(m.width)
 				cmds = append(cmds, m.questionInputModel.Focus())
 			}
@@ -2159,6 +2170,12 @@ func (m Model) View() string {
 	// Tool progress bar (for long-running operations)
 	if m.toolProgressBar != nil && m.toolProgressBar.IsVisible() {
 		panelBuilder.WriteString(m.toolProgressBar.View(m.width))
+		panelBuilder.WriteString("\n")
+	}
+
+	// File peek panel (transient overlay)
+	if m.filePeek != nil && m.filePeek.visible {
+		panelBuilder.WriteString(m.filePeek.View(m.width))
 		panelBuilder.WriteString("\n")
 	}
 

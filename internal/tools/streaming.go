@@ -72,3 +72,29 @@ func GetToolsTracker(ctx context.Context) *ToolsUsedTracker {
 	}
 	return nil
 }
+
+// filePeekCallbackKey is the context key for file peek callbacks.
+type filePeekCallbackKey struct{}
+
+// FilePeekCallback is a function that receives file peek updates.
+type FilePeekCallback func(filePath, title, content, action string)
+
+// ContextWithFilePeekCallback returns a new context with the file peek callback attached.
+func ContextWithFilePeekCallback(ctx context.Context, onFilePeek FilePeekCallback) context.Context {
+	return context.WithValue(ctx, filePeekCallbackKey{}, onFilePeek)
+}
+
+// GetFilePeekCallback retrieves the file peek callback from the context, if present.
+func GetFilePeekCallback(ctx context.Context) FilePeekCallback {
+	if cb, ok := ctx.Value(filePeekCallbackKey{}).(FilePeekCallback); ok {
+		return cb
+	}
+	return nil
+}
+
+// EmitFilePeek is a helper to safely emit a file peek if the callback is present.
+func EmitFilePeek(ctx context.Context, filePath, title, content, action string) {
+	if cb := GetFilePeekCallback(ctx); cb != nil {
+		cb(filePath, title, content, action)
+	}
+}

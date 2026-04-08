@@ -82,6 +82,7 @@ type Agent struct {
 	onTextMu       sync.Mutex        // Protects onText from interleaving
 	onThinking     func(text string) // Streaming callback for thinking/reasoning output
 	onThinkingMu   sync.Mutex        // Protects onThinking from interleaving
+	Thought        string            // Accumulated reasoning/thought for the current turn
 	onRateLimit    func(rl *client.RateLimitMetadata)
 	onInput        func(prompt string) (string, error)
 
@@ -1072,6 +1073,10 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	// Initialize progress
 	a.SetProgress(0, a.maxTurns, "Starting agent execution")
 
+	// Create file-backed output writer for streaming to disk
+	outputWriter := NewAgentOutputWriter(a.workDir, a.ID)
+	defer outputWriter.Close()
+
 	result := &AgentResult{
 		AgentID:   a.ID,
 		Type:      a.Type,
@@ -1095,6 +1100,10 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	// Execute the prompt through the function calling loop
 	var finalOutput strings.Builder
 	_, output, err := a.executeLoop(ctx, prompt, &finalOutput)
+
+	// Stream output to file-backed writer
+	outputWriter.WriteString(output)
+
 	if err != nil {
 		a.stateMu.Lock()
 		a.status = AgentStatusFailed
@@ -1108,7 +1117,8 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 
 		result.Status = AgentStatusFailed
 		result.Error = err.Error()
-		result.Output = output // Preserve partial output on failure
+		result.Output = outputWriter.String() // Use writer's in-memory portion
+		result.OutputFile = outputWriter.FilePath()
 		result.Duration = endTime.Sub(startTime)
 		result.Completed = true
 
@@ -1130,7 +1140,8 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.clearCallHistory()
 
 	result.Status = AgentStatusCompleted
-	result.Output = output
+	result.Output = outputWriter.String() // Use writer's in-memory portion
+	result.OutputFile = outputWriter.FilePath()
 	result.Duration = endTime.Sub(startTime)
 	result.Completed = true
 
@@ -2445,6 +2456,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		}
 
 		// === Reactive mode: Get response from model with retry ===
+		a.onThinkingMu.Lock()
+		a.Thought = "" // New turn, reset thought
+		a.onThinkingMu.Unlock()
+
 		var resp *client.Response
 		for {
 			var apiErr error
@@ -4081,6 +4096,11 @@ func (a *Agent) safeOnThinking(text string) {
 	a.stateMu.RLock()
 	fn := a.onThinking
 	a.stateMu.RUnlock()
+
+	a.onThinkingMu.Lock()
+	a.Thought += text // Accumulate thought
+	a.onThinkingMu.Unlock()
+
 	if fn == nil {
 		return
 	}

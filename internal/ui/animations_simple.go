@@ -18,12 +18,12 @@ const (
 
 // Spinners provides different animation frames for different contexts.
 var Spinners = map[SpinnerType][]string{
-	SpinnerThinking: {".", "..", "...", ""},                             // Thinking dots
-	SpinnerNetwork:  {"◜", "◠", "◝", "◞", "◡", "◟"},                     // Rotating arc
-	SpinnerFile:     {"◐", "◓", "◑", "◒"},                               // Quarter circles
-	SpinnerSearch:   {"◴", "◷", "◶", "◵"},                               // Clock-like
-	SpinnerBuild:    {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"},           // Building blocks
-	SpinnerDefault:  {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}, // Braille dots
+	SpinnerThinking: {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}, // High-res Braille thinking
+	SpinnerNetwork:  {"◜", "◠", "◝", "◞", "◡", "◟"},                             // Rotating arc
+	SpinnerFile:     {"◐", "◓", "◑", "◒"},                                       // Quarter circles
+	SpinnerSearch:   {"◴", "◷", "◶", "◵"},                                       // Clock-like
+	SpinnerBuild:    {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"},                   // Building blocks
+	SpinnerDefault:  {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},         // Braille dots
 }
 
 // GetSpinnerFrame returns the current frame for a spinner type.

@@ -265,7 +265,36 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		parts = append(parts, heartbeatStyle.Render(hb))
 	}
 
+	// Live Engine Status
+	engineStatus := m.renderEngineStatus()
+	if engineStatus != "" {
+		parts = append(parts, engineStatus)
+	}
+
 	return parts
+}
+
+// renderEngineStatus returns a compact status indicator for the AI engine.
+func (m Model) renderEngineStatus() string {
+	engineStyle := lipgloss.NewStyle().Bold(true)
+
+	switch m.state {
+	case StateProcessing:
+		status := "THINKING"
+		if m.currentTool != "" {
+			status = "RUNNING " + strings.ToUpper(m.currentTool)
+		}
+		return engineStyle.Foreground(ColorSecondary).Render("● " + status)
+
+	case StateStreaming:
+		return engineStyle.Foreground(ColorSuccess).Render("○ TYPING")
+
+	case StateQuestionPrompt, StatePermissionPrompt, StatePlanApproval:
+		return engineStyle.Foreground(ColorWarning).Render("● WAITING")
+
+	default:
+		return engineStyle.Foreground(ColorMuted).Render("● IDLE")
+	}
 }
 
 func (m Model) hasActivePlanStatus() bool {

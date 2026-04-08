@@ -1457,6 +1457,22 @@ func (b *Builder) wireDependencies() error {
 				app.program.Send(ui.ToolProgressMsg{Name: name, Elapsed: elapsed, CurrentStep: ctx})
 			}
 		},
+		OnToolDetailedProgress: func(name string, progress float64, currentStep string) {
+			app.touchStepHeartbeat()
+			// Rich progress from within tools — update both context and UI
+			if currentStep != "" {
+				app.mu.Lock()
+				app.currentToolContext = currentStep
+				app.mu.Unlock()
+			}
+			if app.program != nil {
+				app.program.Send(ui.ToolProgressMsg{
+					Name:        name,
+					Progress:    progress,
+					CurrentStep: currentStep,
+				})
+			}
+		},
 		OnError: func(err error) {
 			app.journalEvent("tool_error", map[string]any{
 				"error": err.Error(),
@@ -1502,6 +1518,16 @@ func (b *Builder) wireDependencies() error {
 					MaxTokens:   maxTokens,
 					PercentUsed: pct,
 					NearLimit:   pct > 0.8,
+				})
+			}
+		},
+		OnFilePeek: func(filePath, title, content, action string) {
+			if app.program != nil {
+				app.program.Send(ui.FilePeekMsg{
+					FilePath: filePath,
+					Title:    title,
+					Content:  content,
+					Action:   action,
 				})
 			}
 		},
@@ -2144,3 +2170,4 @@ func (a *coordinatorToolAdapter) WaitWithTimeout(timeout time.Duration) (map[str
 func (a *coordinatorToolAdapter) GetStatus() any {
 	return a.coord.GetStatus()
 }
+

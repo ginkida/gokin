@@ -24,6 +24,7 @@ const (
 	StateFileBrowser
 	StateBatchProgress
 	StateContextObservatory
+	StateFilePeek
 )
 
 // isModalState returns true if the current state is a modal overlay
@@ -273,6 +274,14 @@ type (
 		TokensRemaining   int64
 		TokensLimit       int64
 		TokensReset       time.Duration
+	}
+
+	// FilePeekMsg delivers a snippet of a file for transient "peeking".
+	FilePeekMsg struct {
+		FilePath string
+		Title    string
+		Content  string // Markdown or plaintext
+		Action   string // "reading", "modifying", "created"
 	}
 )
 

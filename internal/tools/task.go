@@ -32,13 +32,14 @@ type AgentRunner interface {
 
 // AgentResult represents the result from an agent execution.
 type AgentResult struct {
-	AgentID   string
-	Type      string
-	Status    string
-	Output    string
-	Error     string
-	Duration  time.Duration
-	Completed bool
+	AgentID    string
+	Type       string
+	Status     string
+	Output     string
+	Error      string
+	Duration   time.Duration
+	Completed  bool
+	OutputFile string // Path to file-backed output stream (for incremental reads)
 }
 
 // TaskTool spawns subagents to handle complex tasks.

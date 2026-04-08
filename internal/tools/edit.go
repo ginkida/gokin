@@ -433,6 +433,9 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		status = fmt.Sprintf("Replaced 1 occurrence in %s", filePath)
 	}
 
+	// Emit FilePeek
+	EmitFilePeek(ctx, filePath, "Editing", newContent, "edit")
+
 	return NewSuccessResult(status), nil
 }
 
@@ -523,6 +526,9 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 		t.undoManager.Record(*change)
 	}
 
+	// Emit FilePeek
+	EmitFilePeek(ctx, filePath, "Editing", content, "edit")
+
 	return NewSuccessResult(fmt.Sprintf("Applied %d edit(s) to %s", totalReplacements, filePath)), nil
 }
 
@@ -606,6 +612,9 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 		t.undoManager.Record(*change)
 	}
 
+	// Emit FilePeek
+	EmitFilePeek(ctx, filePath, "Editing", newContent, "edit")
+
 	replacedCount := lineEnd - lineStart + 1
 	return NewSuccessResult(fmt.Sprintf("Replaced lines %d-%d (%d lines) in %s", lineStart, lineEnd, replacedCount, filePath)), nil
 }
@@ -685,6 +694,9 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 		change := undo.NewFileChange(filePath, "edit", data, newContentBytes, false)
 		t.undoManager.Record(*change)
 	}
+
+	// Emit FilePeek
+	EmitFilePeek(ctx, filePath, "Inserting", newContent, "edit")
 
 	return NewSuccessResult(fmt.Sprintf("Inserted %d lines after line %d in %s", len(newLines), afterLine, filePath)), nil
 }

@@ -47,6 +47,14 @@ type CommandInfo struct {
 	Usage       string    // Usage pattern (e.g., "/copy <n> [filename]")
 }
 
+// SuggestionType represents the type of autocomplete suggestion.
+type SuggestionType int
+
+const (
+	SuggestionCommand SuggestionType = iota
+	SuggestionFile
+)
+
 // InputModel represents the input component.
 type InputModel struct {
 	textarea     textarea.Model
@@ -54,10 +62,13 @@ type InputModel struct {
 	history      []string // Command history
 	historyIndex int      // Current position in history (-1 = new input)
 	savedInput   string   // Saved current input when browsing history
+	workDir      string   // Working directory for file suggestions
 
 	// Autocomplete
 	commands        []CommandInfo
 	suggestions     []CommandInfo
+	suggestionType  SuggestionType
+	fileSuggestions []string
 	suggestionIndex int
 	showSuggestions bool
 
@@ -80,7 +91,7 @@ type InputModel struct {
 }
 
 // NewInputModel creates a new input model.
-func NewInputModel(styles *Styles) InputModel {
+func NewInputModel(styles *Styles, workDir string) InputModel {
 	ta := textarea.New()
 	ta.Placeholder = "Message or /command (Tab: complete)"
 	ta.Focus()
@@ -91,11 +102,14 @@ func NewInputModel(styles *Styles) InputModel {
 	return InputModel{
 		textarea:           ta,
 		styles:             styles,
+		workDir:            workDir,
 		history:            make([]string, 0, maxHistorySize),
 		historyIndex:       -1,
 		savedInput:         "",
 		commands:           defaultCommands(),
 		suggestions:        nil,
+		suggestionType:     SuggestionCommand,
+		fileSuggestions:    nil,
 		suggestionIndex:    0,
 		showSuggestions:    false,
 		ghostText:          "",
@@ -230,35 +244,30 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				m.textarea.SetValue(m.textarea.Value() + m.ghostText)
 				m.textarea.CursorEnd()
 				m.ghostText = ""
-				// Check if we should show arg hints
-				value := m.textarea.Value()
-				if strings.HasPrefix(value, "/") && strings.HasSuffix(value, " ") {
-					cmdName := strings.TrimPrefix(strings.TrimSuffix(value, " "), "/")
-					for _, cmd := range m.commands {
-						if strings.EqualFold(cmd.Name, cmdName) && len(cmd.Args) > 0 {
-							m.showArgHints = true
-							m.currentCommand = &cmd
-							break
-						}
-					}
-				}
 				return m, nil
 			}
 
 			// Accept suggestion from dropdown
-			if m.showSuggestions && len(m.suggestions) > 0 {
-				selected := m.suggestions[m.suggestionIndex]
-				m.textarea.SetValue("/" + selected.Name + " ")
-				m.textarea.CursorEnd()
-				m.showSuggestions = false
-				m.suggestions = nil
-				m.ghostText = ""
-				// Show arg hints if command has arguments
-				if len(selected.Args) > 0 {
-					m.showArgHints = true
-					m.currentCommand = &selected
+			if m.showSuggestions {
+				if m.suggestionType == SuggestionCommand && len(m.suggestions) > 0 {
+					selected := m.suggestions[m.suggestionIndex]
+					m.textarea.SetValue("/" + selected.Name + " ")
+					m.textarea.CursorEnd()
+					m.showSuggestions = false
+					m.suggestions = nil
+					m.ghostText = ""
+					// Show arg hints if command has arguments
+					if len(selected.Args) > 0 {
+						m.showArgHints = true
+						m.currentCommand = &selected
+					}
+					return m, nil
+				} else if m.suggestionType == SuggestionFile && len(m.fileSuggestions) > 0 {
+					selected := m.fileSuggestions[m.suggestionIndex]
+					rel, _ := filepath.Rel(m.workDir, selected)
+					m.acceptFileSuggestion(rel)
+					return m, nil
 				}
-				return m, nil
 			}
 
 			// Try to trigger suggestions
@@ -279,35 +288,50 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 						m.currentCommand = &selected
 					}
 				}
+			} else if m.shouldSuggestFiles(value) {
+				m.updateFileSuggestions(value)
 			}
 			return m, nil
 
 		case tea.KeyEnter:
 			// Handle autocomplete on Enter
-			if m.showSuggestions && len(m.suggestions) > 0 {
-				// Accept current suggestion
-				selected := m.suggestions[m.suggestionIndex]
-				m.textarea.SetValue("/" + selected.Name + " ")
-				m.textarea.CursorEnd()
-				m.showSuggestions = false
-				m.suggestions = nil
-				m.ghostText = ""
-				// Show arg hints
-				if len(selected.Args) > 0 {
-					m.showArgHints = true
-					m.currentCommand = &selected
+			if m.showSuggestions {
+				if m.suggestionType == SuggestionCommand && len(m.suggestions) > 0 {
+					selected := m.suggestions[m.suggestionIndex]
+					m.textarea.SetValue("/" + selected.Name + " ")
+					m.textarea.CursorEnd()
+					m.showSuggestions = false
+					m.suggestions = nil
+					m.ghostText = ""
+					// Show arg hints
+					if len(selected.Args) > 0 {
+						m.showArgHints = true
+						m.currentCommand = &selected
+					}
+					return m, nil
+				} else if m.suggestionType == SuggestionFile && len(m.fileSuggestions) > 0 {
+					selected := m.fileSuggestions[m.suggestionIndex]
+					rel, _ := filepath.Rel(m.workDir, selected)
+					m.acceptFileSuggestion(rel)
+					return m, nil
 				}
-				return m, nil
 			}
 
 		case tea.KeyUp:
 			// Navigate suggestions or history
-			if m.showSuggestions && len(m.suggestions) > 0 {
-				if m.suggestionIndex > 0 {
+			if m.showSuggestions {
+				count := 0
+				if m.suggestionType == SuggestionCommand {
+					count = len(m.suggestions)
+				} else {
+					count = len(m.fileSuggestions)
+				}
+				if count > 0 && m.suggestionIndex > 0 {
 					m.suggestionIndex--
 				}
 				return m, nil
 			}
+			// Navigate to older history (rest of logic continues...)
 			// Navigate to older history
 			if len(m.history) > 0 {
 				if m.historyIndex == -1 {
@@ -328,8 +352,14 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 
 		case tea.KeyDown:
 			// Navigate suggestions or history
-			if m.showSuggestions && len(m.suggestions) > 0 {
-				if m.suggestionIndex < len(m.suggestions)-1 {
+			if m.showSuggestions {
+				count := 0
+				if m.suggestionType == SuggestionCommand {
+					count = len(m.suggestions)
+				} else {
+					count = len(m.fileSuggestions)
+				}
+				if count > 0 && m.suggestionIndex < count-1 {
 					m.suggestionIndex++
 				}
 				return m, nil
@@ -376,13 +406,18 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 		// Update suggestions based on input
 		value := m.textarea.Value()
 		if strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
+			m.suggestionType = SuggestionCommand
 			m.updateSuggestions(value)
 			// Clear arg hints when typing command
 			m.showArgHints = false
 			m.currentCommand = nil
+		} else if m.shouldSuggestFiles(value) {
+			m.suggestionType = SuggestionFile
+			m.updateFileSuggestions(value)
 		} else {
 			m.showSuggestions = false
 			m.suggestions = nil
+			m.fileSuggestions = nil
 			m.ghostText = ""
 			// Clear arg hints when not in command context
 			if !strings.HasPrefix(value, "/") {
@@ -564,28 +599,134 @@ func (m *InputModel) updateSuggestions(input string) {
 
 	m.suggestionIndex = 0
 	m.showSuggestions = len(m.suggestions) > 0
+	m.suggestionType = SuggestionCommand
 
 	// Update ghost text with top suggestion
 	m.updateGhostText(prefix)
 }
 
-// updateGhostText updates the ghost text based on current input and suggestions.
 func (m *InputModel) updateGhostText(prefix string) {
-	if !m.ghostEnabled || len(m.suggestions) == 0 {
+	if !m.ghostEnabled {
 		m.ghostText = ""
 		return
 	}
 
-	topCmd := m.suggestions[0]
-	cmdLower := strings.ToLower(topCmd.Name)
-	prefixLower := strings.ToLower(prefix)
+	if m.suggestionType == SuggestionCommand && len(m.suggestions) > 0 {
+		topCmd := m.suggestions[0]
+		cmdLower := strings.ToLower(topCmd.Name)
+		prefixLower := strings.ToLower(prefix)
 
-	// Only show ghost text for prefix matches (not fuzzy matches)
-	if strings.HasPrefix(cmdLower, prefixLower) && len(topCmd.Name) > len(prefix) {
-		m.ghostText = topCmd.Name[len(prefix):]
+		// Only show ghost text for prefix matches (not fuzzy matches)
+		if strings.HasPrefix(cmdLower, prefixLower) && len(topCmd.Name) > len(prefix) {
+			m.ghostText = topCmd.Name[len(prefix):]
+		} else {
+			m.ghostText = ""
+		}
+	} else if m.suggestionType == SuggestionFile && len(m.fileSuggestions) > 0 {
+		top := m.fileSuggestions[0]
+		rel, err := filepath.Rel(m.workDir, top)
+		if err == nil {
+			words := strings.Fields(prefix)
+			if len(words) > 0 {
+				lastWord := words[len(words)-1]
+				if strings.HasPrefix(rel, lastWord) && len(rel) > len(lastWord) {
+					m.ghostText = rel[len(lastWord):]
+				} else {
+					m.ghostText = ""
+				}
+			}
+		}
 	} else {
 		m.ghostText = ""
 	}
+}
+
+// shouldSuggestFiles returns true if the input looks like a path or command argument.
+func (m InputModel) shouldSuggestFiles(input string) bool {
+	if input == "" {
+		return false
+	}
+
+	// Suggest for specific commands
+	if strings.HasPrefix(input, "/open ") || strings.HasPrefix(input, "/browse ") ||
+		strings.HasPrefix(input, "/copy ") || strings.HasPrefix(input, "/ql ") {
+		return true
+	}
+
+	// Suggest if current word looks like a path (contains /, ., or is part of a known path)
+	words := strings.Fields(input)
+	if len(words) == 0 {
+		return false
+	}
+	lastWord := words[len(words)-1]
+	return len(lastWord) >= 2 && (strings.Contains(lastWord, "/") || strings.Contains(lastWord, "."))
+}
+
+// updateFileSuggestions finds file matches for the current input.
+func (m *InputModel) updateFileSuggestions(input string) {
+	if m.workDir == "" {
+		m.showSuggestions = false
+		return
+	}
+
+	words := strings.Fields(input)
+	if len(words) == 0 {
+		m.showSuggestions = false
+		return
+	}
+	lastWord := words[len(words)-1]
+
+	// Simple glob matching for now
+	pattern := filepath.Join(m.workDir, lastWord+"*")
+	matches, _ := filepath.Glob(pattern)
+
+	// Fallback: search in current dir if not absolute
+	if len(matches) == 0 && !filepath.IsAbs(lastWord) {
+		pattern = filepath.Join(m.workDir, "**", lastWord+"*")
+		// Limit search for performance
+		matches = m.searchFilesFuzzy(lastWord)
+	}
+
+	m.fileSuggestions = matches
+	m.suggestionIndex = 0
+	m.showSuggestions = len(m.fileSuggestions) > 0
+
+	// Update ghost text for files
+	if len(m.fileSuggestions) > 0 {
+		top := m.fileSuggestions[0]
+		rel, err := filepath.Rel(m.workDir, top)
+		if err == nil {
+			if strings.HasPrefix(rel, lastWord) && len(rel) > len(lastWord) {
+				m.ghostText = rel[len(lastWord):]
+			} else {
+				m.ghostText = ""
+			}
+		}
+	}
+}
+
+// searchFilesFuzzy performs a shallow search for files matching a query.
+func (m InputModel) searchFilesFuzzy(query string) []string {
+	var results []string
+	maxResults := 10
+
+	filepath.Walk(m.workDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || len(results) >= maxResults {
+			return filepath.SkipDir
+		}
+		// Skip hidden dirs
+		if info.IsDir() && strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
+			return filepath.SkipDir
+		}
+
+		rel, _ := filepath.Rel(m.workDir, path)
+		if fuzzyScore(rel, query) > 0 {
+			results = append(results, path)
+		}
+		return nil
+	})
+
+	return results
 }
 
 // View renders the input component.
@@ -689,39 +830,77 @@ func (m InputModel) renderSuggestions() string {
 
 	var lines []string
 	maxShow := 6
-	if len(m.suggestions) < maxShow {
-		maxShow = len(m.suggestions)
-	}
 
-	// Determine visible range
-	start := 0
-	if m.suggestionIndex >= maxShow {
-		start = m.suggestionIndex - maxShow + 1
-	}
-	end := start + maxShow
-	if end > len(m.suggestions) {
-		end = len(m.suggestions)
-	}
-
-	for i := start; i < end; i++ {
-		cmd := m.suggestions[i]
-		style := normalStyle
-		prefix := "  "
-		if i == m.suggestionIndex {
-			style = selectedStyle
-			prefix = "> "
+	if m.suggestionType == SuggestionCommand {
+		if len(m.suggestions) < maxShow {
+			maxShow = len(m.suggestions)
 		}
 
-		line := prefix + style.Render("/"+cmd.Name) + " " + descStyle.Render(cmd.Description)
-		lines = append(lines, line)
-	}
+		// Determine visible range
+		start := 0
+		if m.suggestionIndex >= maxShow {
+			start = m.suggestionIndex - maxShow + 1
+		}
+		end := start + maxShow
+		if end > len(m.suggestions) {
+			end = len(m.suggestions)
+		}
 
-	// Add scroll indicator if needed
-	if len(m.suggestions) > maxShow {
-		indicator := lipgloss.NewStyle().Foreground(ColorDim).Render(
-			fmt.Sprintf("↑↓ %d", len(m.suggestions)),
-		)
-		lines = append(lines, indicator)
+		for i := start; i < end; i++ {
+			cmd := m.suggestions[i]
+			style := normalStyle
+			prefix := "  "
+			if i == m.suggestionIndex {
+				style = selectedStyle
+				prefix = "> "
+			}
+
+			line := prefix + style.Render("/"+cmd.Name) + " " + descStyle.Render(cmd.Description)
+			lines = append(lines, line)
+		}
+
+		// Add scroll indicator if needed
+		if len(m.suggestions) > maxShow {
+			indicator := lipgloss.NewStyle().Foreground(ColorDim).Render(
+				fmt.Sprintf("↑↓ %d", len(m.suggestions)),
+			)
+			lines = append(lines, indicator)
+		}
+	} else {
+		// File suggestions
+		if len(m.fileSuggestions) < maxShow {
+			maxShow = len(m.fileSuggestions)
+		}
+
+		start := 0
+		if m.suggestionIndex >= maxShow {
+			start = m.suggestionIndex - maxShow + 1
+		}
+		end := start + maxShow
+		if end > len(m.fileSuggestions) {
+			end = len(m.fileSuggestions)
+		}
+
+		for i := start; i < end; i++ {
+			path := m.fileSuggestions[i]
+			rel, _ := filepath.Rel(m.workDir, path)
+			style := normalStyle
+			prefix := "  "
+			if i == m.suggestionIndex {
+				style = selectedStyle
+				prefix = "> "
+			}
+
+			line := prefix + style.Render(rel)
+			lines = append(lines, line)
+		}
+
+		if len(m.fileSuggestions) > maxShow {
+			indicator := lipgloss.NewStyle().Foreground(ColorDim).Render(
+				fmt.Sprintf("↑↓ %d", len(m.fileSuggestions)),
+			)
+			lines = append(lines, indicator)
+		}
 	}
 
 	return boxStyle.Render(strings.Join(lines, "\n"))
@@ -918,4 +1097,21 @@ func (m *InputModel) IsHistorySearchMode() bool {
 // ShowingSuggestions returns whether suggestions are being shown.
 func (m *InputModel) ShowingSuggestions() bool {
 	return m.showSuggestions
+}
+
+// acceptFileSuggestion replaces the last word with the selected file path.
+func (m *InputModel) acceptFileSuggestion(path string) {
+	value := m.textarea.Value()
+	words := strings.Fields(value)
+	if len(words) == 0 {
+		return
+	}
+
+	// Replace last word
+	words[len(words)-1] = path
+	m.textarea.SetValue(strings.Join(words, " ") + " ")
+	m.textarea.CursorEnd()
+	m.showSuggestions = false
+	m.fileSuggestions = nil
+	m.ghostText = ""
 }
