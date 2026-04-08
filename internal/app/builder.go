@@ -381,6 +381,7 @@ func (b *Builder) initTools() error {
 		registry.Register(&tools.VersionConsistencyValidator{})
 		registry.Register(&tools.GoQualityValidator{})
 		registry.Register(&tools.DockerfileValidator{})
+		registry.Register(&tools.DockerComposeValidator{})
 		registry.Register(&tools.SecurityValidator{})
 		registry.Register(&tools.ShellValidator{})
 		b.executor.SetSemanticValidators(registry)

@@ -183,7 +183,49 @@ var errorGuidancePatterns = []ErrorGuidance{
 	{
 		Pattern:     regexp.MustCompile(`(?i)(Cannot connect to the Docker daemon|docker.*not running)`),
 		Title:       "Docker Not Running",
-		Suggestions: []string{"Start Docker Desktop or Docker daemon", "Check Docker service status", "Verify Docker installation"},
+		Suggestions: []string{"Start Docker Desktop or Docker daemon", "Check Docker service status: systemctl status docker", "Verify Docker installation: docker --version"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(docker:.*command not found|compose.*command not found)`),
+		Title:       "Docker Not Installed",
+		Suggestions: []string{"Install Docker: https://docs.docker.com/get-docker/", "If using docker compose plugin, update Docker to latest version", "Check PATH includes Docker binary location"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(Error response from daemon.*pull|manifest.*not found|no matching manifest|image.*not found)`),
+		Title:       "Docker Image Not Found",
+		Suggestions: []string{"Check the image name and tag for typos", "Verify the image exists in the registry: docker search <name>", "Check your registry authentication: docker login"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(Error response from daemon.*Conflict|container name.*already in use)`),
+		Title:       "Docker Container Name Conflict",
+		Suggestions: []string{"Remove the existing container: docker rm <name>", "Use 'docker compose down' to clean up", "Use a different container name"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(Bind for 0\.0\.0\.0:\d+.*failed|port is already allocated)`),
+		Title:       "Docker Port Conflict",
+		Suggestions: []string{"Another container or process is using this port", "Check what's using the port: lsof -i :<port>", "Change the port mapping in docker-compose.yml", "Stop conflicting containers: docker compose down"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(mount.*denied|volume.*permission denied|error while creating mount)`),
+		Title:       "Docker Volume/Mount Error",
+		Suggestions: []string{"Check that the host path exists and is readable", "Verify file permissions on the mounted directory", "On macOS/Windows, ensure the path is shared in Docker settings"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(service.*failed to build|failed to solve|executor failed running)`),
+		Title:       "Docker Build Failed",
+		Suggestions: []string{"Check Dockerfile syntax and base image availability", "Review the build output for the specific error", "Try building with --no-cache: docker compose build --no-cache"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(network.*not found|could not find.*network)`),
+		Title:       "Docker Network Error",
+		Suggestions: []string{"Create the network: docker network create <name>", "Use 'docker compose up' to auto-create networks", "List existing networks: docker network ls"},
 		Command:     "",
 	},
 	// Memory errors

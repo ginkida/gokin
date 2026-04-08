@@ -45,6 +45,13 @@ type ProjectInfo struct {
 	MainFiles      []string
 	TestFramework  string
 	BuildTool      string
+
+	// Docker context (overlay — any project type can have Docker)
+	HasDocker        bool     // Dockerfile exists
+	HasDockerCompose bool     // docker-compose.yml/yaml exists
+	ComposeFile      string   // path to compose file ("docker-compose.yml" or "compose.yml")
+	DockerServices   []string // service names from compose file
+	DockerBaseImage  string   // base image from Dockerfile (first FROM)
 }
 
 // projectMarkers maps file patterns to project types.
@@ -72,10 +79,16 @@ func DetectProject(workDir string) *ProjectInfo {
 			if _, err := os.Stat(markerPath); err == nil {
 				info.Type = projectType
 				info.extractProjectDetails(workDir, marker)
-				return info
+				break
 			}
 		}
+		if info.Type != ProjectTypeUnknown {
+			break
+		}
 	}
+
+	// Detect Docker overlay (any project type can have Docker)
+	info.detectDocker(workDir)
 
 	return info
 }
@@ -235,6 +248,105 @@ func (p *ProjectInfo) extractPythonDetails(workDir string) {
 			break
 		}
 	}
+}
+
+// detectDocker checks for Docker and docker-compose files in the project.
+func (p *ProjectInfo) detectDocker(workDir string) {
+	// Check for Dockerfile
+	if _, err := os.Stat(filepath.Join(workDir, "Dockerfile")); err == nil {
+		p.HasDocker = true
+		p.DockerBaseImage = extractDockerBaseImage(filepath.Join(workDir, "Dockerfile"))
+	}
+
+	// Check for docker-compose files (multiple naming conventions)
+	composeFiles := []string{
+		"docker-compose.yml",
+		"docker-compose.yaml",
+		"compose.yml",
+		"compose.yaml",
+	}
+	for _, cf := range composeFiles {
+		cfPath := filepath.Join(workDir, cf)
+		if _, err := os.Stat(cfPath); err == nil {
+			p.HasDockerCompose = true
+			p.ComposeFile = cf
+			p.DockerServices = extractComposeServices(cfPath)
+			break
+		}
+	}
+}
+
+// extractDockerBaseImage reads the first FROM instruction from a Dockerfile.
+func extractDockerBaseImage(dockerfilePath string) string {
+	data, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToUpper(line), "FROM ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				return parts[1]
+			}
+		}
+	}
+	return ""
+}
+
+// extractComposeServices parses service names from a docker-compose YAML file.
+// Uses simple line parsing to avoid a YAML dependency.
+func extractComposeServices(composePath string) []string {
+	data, err := os.ReadFile(composePath)
+	if err != nil {
+		return nil
+	}
+
+	var services []string
+	inServices := false
+	lines := strings.Split(string(data), "\n")
+
+	for _, line := range lines {
+		// Top-level "services:" key
+		if strings.TrimSpace(line) == "services:" {
+			inServices = true
+			continue
+		}
+
+		if !inServices {
+			continue
+		}
+
+		// Another top-level key ends the services block
+		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && strings.TrimSpace(line) != "" {
+			break
+		}
+
+		// Service name: exactly 2-space or 1-tab indent, ends with ":"
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		// Check indent level — service names are at first indent level under "services:"
+		indent := 0
+		for _, ch := range line {
+			if ch == ' ' {
+				indent++
+			} else if ch == '\t' {
+				indent += 2
+			} else {
+				break
+			}
+		}
+
+		if indent >= 2 && indent <= 4 && strings.HasSuffix(trimmed, ":") && !strings.Contains(trimmed, " ") {
+			serviceName := strings.TrimSuffix(trimmed, ":")
+			services = append(services, serviceName)
+		}
+	}
+
+	return services
 }
 
 // findFiles finds files matching a pattern in the directory.

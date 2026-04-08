@@ -188,6 +188,28 @@ var projectGuidelines = map[ProjectType]string{
 - Follow PSR coding standards`,
 }
 
+// dockerGuidelines is injected when Docker/docker-compose is detected.
+// This is separate from projectGuidelines because Docker is an overlay on any project type.
+const dockerGuidelines = `
+## Docker Guidelines
+- The project has Docker configuration — use it for running services and commands
+- Check container status with 'docker ps' before running dependent commands
+- Use 'docker compose logs <service>' to debug service issues
+- Pin base image versions in Dockerfile (avoid :latest)
+- Prefer COPY over ADD for local files in Dockerfile`
+
+const dockerComposeGuidelines = `
+## Docker Compose Guidelines
+- Start services: 'docker compose -f %s up -d'
+- Stop services: 'docker compose -f %s down'
+- View logs: 'docker compose -f %s logs -f <service>'
+- Restart a service: 'docker compose -f %s restart <service>'
+- Rebuild after Dockerfile changes: 'docker compose -f %s up -d --build'
+- Run a command in a service: 'docker compose -f %s exec <service> <command>'
+- Available services: %s
+- Before running tests or builds that need services (DB, Redis, etc.), ensure they are up with 'docker compose -f %s ps'
+- If a command fails because a service is not running, start it first with docker compose`
+
 // MemoryProvider provides memory entries for prompt injection.
 type MemoryProvider interface {
 	GetForContext(projectOnly bool) string
@@ -390,6 +412,25 @@ func (b *PromptBuilder) buildProjectSection() string {
 
 	if b.projectInfo.BuildTool != "" {
 		builder.WriteString(fmt.Sprintf("\nBuild tool: %s", b.projectInfo.BuildTool))
+	}
+
+	// Append Docker context if detected
+	if b.projectInfo.HasDocker {
+		builder.WriteString("\n")
+		builder.WriteString(dockerGuidelines)
+		if b.projectInfo.DockerBaseImage != "" {
+			builder.WriteString(fmt.Sprintf("\nBase image: %s", b.projectInfo.DockerBaseImage))
+		}
+	}
+
+	if b.projectInfo.HasDockerCompose {
+		cf := b.projectInfo.ComposeFile
+		services := strings.Join(b.projectInfo.DockerServices, ", ")
+		if services == "" {
+			services = "(check compose file)"
+		}
+		builder.WriteString("\n")
+		builder.WriteString(fmt.Sprintf(dockerComposeGuidelines, cf, cf, cf, cf, cf, cf, services, cf))
 	}
 
 	return builder.String()

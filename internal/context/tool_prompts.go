@@ -356,4 +356,16 @@ var ToolChainPatterns = map[string]string{
 3. edit/write - Make changes
 4. bash - Run tests
 5. Summarize what was done`,
+
+	"docker_debug": `To debug Docker/compose issues:
+1. bash 'docker compose ps' - Check service status
+2. bash 'docker compose logs <service>' - Read logs
+3. read docker-compose.yml - Check configuration
+4. Explain root cause and fix`,
+
+	"docker_setup": `To set up a Docker-based project:
+1. read Dockerfile and docker-compose.yml - Understand setup
+2. bash 'docker compose up -d' - Start services
+3. bash 'docker compose ps' - Verify all services healthy
+4. Proceed with the task`,
 }
