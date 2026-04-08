@@ -1502,6 +1502,9 @@ func (b *Builder) wireDependencies() error {
 			app.sendTokenUsageUpdate()
 		},
 		OnTokenUpdate: func(inputTokens, outputTokens int) {
+			// Use input tokens only for context bar — output tokens from this turn
+			// become input tokens on the next turn, but the context manager tracks
+			// the actual accumulated context more accurately via UpdateTokenCount.
 			if app.program != nil && inputTokens > 0 {
 				maxTokens := 0
 				if app.contextManager != nil {
@@ -1509,13 +1512,12 @@ func (b *Builder) wireDependencies() error {
 						maxTokens = usage.MaxTokens
 					}
 				}
-				total := inputTokens + outputTokens
 				var pct float64
 				if maxTokens > 0 {
-					pct = float64(total) / float64(maxTokens)
+					pct = float64(inputTokens) / float64(maxTokens)
 				}
 				app.program.Send(ui.TokenUsageMsg{
-					Tokens:      total,
+					Tokens:      inputTokens,
 					MaxTokens:   maxTokens,
 					PercentUsed: pct,
 					NearLimit:   pct > 0.8,
