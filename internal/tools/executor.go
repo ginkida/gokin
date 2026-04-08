@@ -2119,9 +2119,15 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 		}
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
-			// Use first 40 chars of command as fingerprint
-			if len(cmd) > 40 {
-				cmd = cmd[:40]
+			// Strip leading "cd /path && " prefix — models often prepend this,
+			// making all commands look identical in the first 40 chars.
+			// Use first occurrence of " && " to split cd from actual command.
+			if idx := strings.Index(cmd, " && "); idx >= 0 && strings.HasPrefix(strings.TrimSpace(cmd), "cd ") {
+				cmd = cmd[idx+4:]
+			}
+			// Use first 60 chars of the actual command
+			if len(cmd) > 60 {
+				cmd = cmd[:60]
 			}
 			return cmd
 		}
