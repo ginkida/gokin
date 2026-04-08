@@ -337,6 +337,26 @@ func (a *App) Run() error {
 		}
 	}
 
+	// After session restore, check if context exceeds model limits and compact if needed.
+	// Some models (MiniMax, weak models) silently return empty responses on context overflow
+	// instead of returning a 400 error, so we must proactively manage context size.
+	if sessionRestored && a.contextManager != nil {
+		history := a.session.GetHistory()
+		tokens := appcontext.EstimateContentsTokens(history)
+		limits := appcontext.GetModelLimits(a.config.Model.Name)
+		if limits.MaxInputTokens > 0 && tokens > int(float64(limits.MaxInputTokens)*0.8) {
+			before := len(history)
+			truncated := a.contextManager.EmergencyTruncate()
+			if truncated > 0 {
+				logging.Info("compacted restored session to fit model context",
+					"messages_before", before,
+					"messages_after", len(a.session.GetHistory()),
+					"tokens_estimated", tokens,
+					"model_limit", limits.MaxInputTokens)
+			}
+		}
+	}
+
 	// Build model-specific enhancement
 	modelEnhancement := a.buildModelEnhancement()
 

@@ -210,6 +210,26 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 
 		if err == nil {
+			// Detect empty response from model (common with MiniMax and weak models
+			// when context is too large — they return 200 OK with empty text instead
+			// of a proper 400 context-too-long error).
+			if !contextTruncated && a.contextManager != nil &&
+				strings.HasPrefix(response, "⚠ Model returned an empty response") {
+				history := a.session.GetHistory()
+				tokens := appcontext.EstimateContentsTokens(history)
+				limits := appcontext.GetModelLimits(a.config.Model.Name)
+				// If context is >50% of limit, try compaction + retry
+				if limits.MaxInputTokens > 0 && tokens > limits.MaxInputTokens/2 {
+					contextTruncated = true
+					removed := a.contextManager.EmergencyTruncate()
+					if removed > 0 {
+						a.safeSendToProgram(ui.StreamTextMsg(
+							fmt.Sprintf("\n⚠️ Empty response — compacted %d messages and retrying...\n", removed)))
+						response = ""
+						continue
+					}
+				}
+			}
 			break
 		}
 
