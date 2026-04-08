@@ -722,19 +722,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			default:
 			}
 
-			// Track tools being called, including file targets for write-heavy operations.
-			// This prevents false stagnation when creating multiple different files.
+			// Track tools being called, including distinguishing arguments.
+			// This prevents false stagnation when the same tool is called
+			// multiple times with different targets (e.g., writing 5 different
+			// files, running 5 different bash commands, searching 5 patterns).
 			iterationTools := make([]string, 0, len(resp.FunctionCalls))
 			for _, fc := range resp.FunctionCalls {
 				toolsUsed = append(toolsUsed, fc.Name)
-				toolKey := fc.Name
-				// For file operations, include the target path to distinguish
-				// "write foo.go" from "write bar.go" — both are legitimate.
-				if fc.Name == "write" || fc.Name == "edit" || fc.Name == "read" {
-					if fp, ok := fc.Args["file_path"].(string); ok {
-						toolKey = fc.Name + ":" + filepath.Base(fp)
-					}
-				}
+				toolKey := fc.Name + ":" + stagnationFingerprint(fc.Name, fc.Args)
 				iterationTools = append(iterationTools, toolKey)
 			}
 			sort.Strings(iterationTools)
@@ -2109,4 +2104,55 @@ func orderByDependencies(calls []*genai.FunctionCall) ([]*genai.FunctionCall, bo
 	}
 
 	return ordered, true
+}
+
+// stagnationFingerprint returns a short string that distinguishes different
+// invocations of the same tool. For example, writing 5 different files should
+// produce 5 different fingerprints, while writing the same file 5 times
+// produces the same fingerprint (true stagnation).
+func stagnationFingerprint(toolName string, args map[string]any) string {
+	// Extract the key distinguishing argument per tool
+	switch toolName {
+	case "write", "edit", "read", "delete":
+		if fp, ok := args["file_path"].(string); ok {
+			return filepath.Base(fp)
+		}
+	case "bash":
+		if cmd, ok := args["command"].(string); ok {
+			// Use first 40 chars of command as fingerprint
+			if len(cmd) > 40 {
+				cmd = cmd[:40]
+			}
+			return cmd
+		}
+	case "grep":
+		if p, ok := args["pattern"].(string); ok {
+			return p
+		}
+	case "glob":
+		if p, ok := args["pattern"].(string); ok {
+			return p
+		}
+	case "copy", "move":
+		if src, ok := args["source"].(string); ok {
+			return filepath.Base(src)
+		}
+	case "git_add":
+		if p, ok := args["path"].(string); ok {
+			return p
+		}
+	case "web_fetch":
+		if u, ok := args["url"].(string); ok {
+			if len(u) > 50 {
+				u = u[:50]
+			}
+			return u
+		}
+	case "web_search":
+		if q, ok := args["query"].(string); ok {
+			return q
+		}
+	}
+	// Default: no distinguishing argument, tool name alone is the pattern
+	return ""
 }
