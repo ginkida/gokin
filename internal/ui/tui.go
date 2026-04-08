@@ -37,6 +37,7 @@ type Model struct {
 	processingLabel string // Status label between tool calls: "Thinking", "Analyzing", "Running agent"
 	loopIteration   int    // Current executor loop iteration (0 = first/unknown)
 	loopToolsUsed   int    // Total tools used across loop iterations
+	agentToolCount  int    // Tools used by current sub-agent (for progress display)
 	todoItems       []string
 	workDir         string
 
@@ -1821,10 +1822,17 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.processingLabel = fmt.Sprintf("Agent: %s", msg.AgentType)
 			m.streamStartTime = time.Now()
 			m.lastActivityTime = time.Now()
+			m.agentToolCount = 0
 		case "tool_start":
-			m.processingLabel = fmt.Sprintf("Agent: %s → %s", msg.AgentType, msg.ToolName)
+			m.agentToolCount++
+			info := m.extractToolInfoFromArgs(msg.ToolName, msg.ToolArgs)
+			if info != "" {
+				m.processingLabel = fmt.Sprintf("Agent: %s → %s %s", msg.AgentType, msg.ToolName, info)
+			} else {
+				m.processingLabel = fmt.Sprintf("Agent: %s → %s", msg.AgentType, msg.ToolName)
+			}
 			m.currentTool = msg.ToolName
-			m.currentToolInfo = m.extractToolInfoFromArgs(msg.ToolName, msg.ToolArgs)
+			m.currentToolInfo = info
 			m.toolStartTime = time.Now()
 			m.lastActivityTime = time.Now()
 			// Show tool call inline with agent type prefix
@@ -1840,7 +1848,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.output.AppendLine(m.styles.Warning.Render(fmt.Sprintf("    ↻ Auto-Fixing: %s Error (%s)", msg.ToolName, msgTxt)))
 			m.lastActivityTime = time.Now()
 		case "tool_end":
-			m.processingLabel = fmt.Sprintf("Agent: %s", msg.AgentType)
+			// Between tool calls, show "thinking" with tool count so user knows agent is alive
+			m.processingLabel = fmt.Sprintf("Agent: %s · thinking (%d tools used)", msg.AgentType, m.agentToolCount)
 			m.currentTool = ""
 			m.currentToolInfo = ""
 			m.lastActivityTime = time.Now()
