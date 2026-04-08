@@ -1907,6 +1907,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			if maxAttempts, ok := msg.Details["maxAttempts"].(int); ok {
 				m.retryMax = maxAttempts
 			}
+			if m.toastManager != nil && msg.Message != "" {
+				m.toastManager.ShowWarning(msg.Message)
+			}
 		case StatusRateLimit:
 			if m.toastManager != nil {
 				m.toastManager.ShowWarning(msg.Message)

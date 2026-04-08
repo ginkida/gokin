@@ -566,7 +566,7 @@ func (a *App) handleSubmit(message string) {
 			logging.Debug("pending message replaced — previous message dropped",
 				"dropped_len", len(a.pendingMessage))
 			if program != nil {
-				program.Send(ui.StreamTextMsg("⚠ Previous queued message was replaced by new input\n"))
+				program.Send(ui.StatusUpdateMsg{Type: ui.StatusRetry, Message: "Previous queued message replaced by new input"})
 			}
 		}
 		a.pendingMessage = message

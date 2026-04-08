@@ -36,7 +36,7 @@ func (p *PolicyEngine) ExecuteRequest(ctx context.Context, fn func() error) erro
 
 	err := p.requestBreaker.Execute(ctx, fn)
 	if errors.Is(err, robustness.ErrCircuitOpen) {
-		return fmt.Errorf("%w: too many recent request failures", ErrRequestCircuitOpen)
+		return fmt.Errorf("%w: API temporarily unavailable (rate limited or down) — try again in a minute or switch provider with /model", ErrRequestCircuitOpen)
 	}
 	return err
 }

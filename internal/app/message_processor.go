@@ -223,8 +223,10 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 					contextTruncated = true
 					removed := a.contextManager.EmergencyTruncate()
 					if removed > 0 {
-						a.safeSendToProgram(ui.StreamTextMsg(
-							fmt.Sprintf("\n⚠️ Empty response — compacted %d messages and retrying...\n", removed)))
+						a.safeSendToProgram(ui.StatusUpdateMsg{
+							Type:    ui.StatusRetry,
+							Message: fmt.Sprintf("Empty response — compacted %d messages, retrying", removed),
+						})
 						response = ""
 						continue
 					}
@@ -256,8 +258,11 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				a.executor.SetSideEffectDedup(true)
 			}
 			removed := a.contextManager.EmergencyTruncate()
-			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⚠️ Context window exceeded — emergency truncated %d messages. Retrying...\n", removed)))
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRetry,
+				Message: fmt.Sprintf("Context too long — truncated %d messages, retrying", removed),
+				Details: map[string]any{"attempt": 1, "maxAttempts": 1},
+			})
 			continue
 		}
 
@@ -308,19 +313,25 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 		// Warn user about retry
 		backoff := decision.Delay
+
+		// Show retry as a non-intrusive status toast instead of inline text.
+		// This keeps the output clean and focused on the model's actual response.
+		var retryMsg string
 		if decision.Partial {
-			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⚠️ Response stream stalled after partial output. Auto-retry #%d/%d in %v...\n",
-					partialIdleRetryCount, retryPolicy.MaxPartialRetries, backoff.Round(time.Second))))
+			retryMsg = fmt.Sprintf("Stream stalled — retry %d/%d in %v", partialIdleRetryCount, retryPolicy.MaxPartialRetries, backoff.Round(time.Second))
 		} else if ft.Reason == string(client.FailureReasonStreamIdleTimeout) {
-			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⚠️ Response stream stalled. Auto-retry #%d/%d in %v...\n",
-					requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second))))
+			retryMsg = fmt.Sprintf("Stream stalled — retry %d/%d in %v", requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second))
 		} else {
-			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⚠️ Request failed (%s): %s\nRetrying in %v (%d/%d)...\n",
-					ft.Reason, err.Error(), backoff.Round(time.Second), requestRetryCount, retryPolicy.MaxRetries)))
+			retryMsg = fmt.Sprintf("Retry %d/%d in %v (%s)", requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second), ft.Reason)
 		}
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusRetry,
+			Message: retryMsg,
+			Details: map[string]any{
+				"attempt":     requestRetryCount,
+				"maxAttempts": retryPolicy.MaxRetries,
+			},
+		})
 
 		backoffTimer := time.NewTimer(backoff)
 		select {
@@ -348,8 +359,10 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			a.reliability.RecordFailure()
 		}
 		if errors.Is(err, ErrRequestCircuitOpen) {
-			a.safeSendToProgram(ui.StreamTextMsg(
-				"\n⚠️ Request circuit breaker is open. Waiting for recovery window.\n"))
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRecoverableError,
+				Message: "Too many failures — pausing requests, will retry automatically",
+			})
 		}
 
 		// Save history on error only if it ends with a model message (complete turn).
@@ -379,8 +392,10 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		a.mu.Unlock()
 
 		if a.reliability != nil && a.reliability.IsDegraded() {
-			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⚠️ Switching to safe mode for stability (%v).\n", a.reliability.DegradedRemaining())))
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRetry,
+				Message: fmt.Sprintf("Safe mode enabled (%v) — reduced concurrency for stability", a.reliability.DegradedRemaining().Round(time.Second)),
+			})
 		}
 
 		if client.IsRateLimitError(err) {
@@ -390,9 +405,11 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 					"attempt": attempt,
 					"delay":   delay.String(),
 				})
-				a.safeSendToProgram(ui.StreamTextMsg(
-					fmt.Sprintf("\n⏳ API rate limit reached. Auto-retrying in %v (attempt %d/%d). You don't need to resend.\n",
-						delay.Round(time.Second), attempt, maxAutoRateLimitRetries)))
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusRateLimit,
+					Message: fmt.Sprintf("Rate limit — auto-retry in %v (%d/%d)", delay.Round(time.Second), attempt, maxAutoRateLimitRetries),
+					Details: map[string]any{"waitTime": delay},
+				})
 				a.safeSendToProgram(ui.ResponseDoneMsg{})
 
 				go func(msg string, wait time.Duration) {
@@ -1027,9 +1044,11 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 			logging.Warn("step execution error, retrying",
 				"step_id", step.ID, "attempt", attempt+1, "error", err.Error(),
 				"category", errCat.String(), "backoff", backoff)
-			a.safeSendToProgram(ui.StreamTextMsg(
-				fmt.Sprintf("\n⚠️ Step %d failed (attempt %d/%d): %s\nRetrying in %v...\n",
-					step.ID, attempt+1, maxRetries, err.Error(), backoff)))
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRetry,
+				Message: fmt.Sprintf("Step %d failed — retry %d/%d in %v", step.ID, attempt+1, maxRetries, backoff),
+				Details: map[string]any{"attempt": attempt + 1, "maxAttempts": maxRetries},
+			})
 
 			backoffTimer := time.NewTimer(backoff)
 			select {
@@ -1087,7 +1106,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		// Attempt adaptive replan on fatal errors
 		if errCat == plan.ErrorFatal && a.planManager.HasReplanHandler() {
 			if replanErr := a.planManager.RequestReplan(ctx, step); replanErr == nil {
-				a.safeSendToProgram(ui.StreamTextMsg("[Plan adjusted after step failure. Continuing.]\n"))
+				a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry, Message: "Plan adjusted after step failure — continuing"})
 				logging.Info("plan replanned after fatal step error",
 					"step_id", step.ID, "plan_version", approvedPlan.Version)
 				return // Don't abort — the loop will pick up new steps
@@ -1097,7 +1116,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		}
 
 		if a.config.Plan.AbortOnStepFailure {
-			a.safeSendToProgram(ui.StreamTextMsg("Aborting plan due to step failure.\n"))
+			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRecoverableError, Message: "Aborting plan due to step failure"})
 		}
 		return
 	}
@@ -1428,7 +1447,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 
 		if len(readySteps) == 1 || a.shouldUseSafeMode() {
 			if len(readySteps) > 1 && a.shouldUseSafeMode() {
-				a.safeSendToProgram(ui.StreamTextMsg("⚠️ Safe mode: running steps sequentially.\n"))
+				a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry, Message: "Safe mode: running steps sequentially"})
 			}
 			for _, step := range readySteps {
 				a.executeDelegatedStep(ctx, step, approvedPlan, totalSteps, sharedMem, contextSnapshot)
@@ -1696,9 +1715,11 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 				logging.Warn("sub-agent error, retrying step",
 					"step_id", step.ID, "attempt", attempt+1, "error", err.Error(),
 					"category", errCat.String(), "backoff", backoff)
-				a.safeSendToProgram(ui.StreamTextMsg(
-					fmt.Sprintf("\n⚠️ Step %d failed (attempt %d/%d): %s\nRetrying in %v...\n",
-						step.ID, attempt+1, maxRetries, err.Error(), backoff)))
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusRetry,
+					Message: fmt.Sprintf("Step %d failed — retry %d/%d in %v", step.ID, attempt+1, maxRetries, backoff),
+					Details: map[string]any{"attempt": attempt + 1, "maxAttempts": maxRetries},
+				})
 
 				backoffTimer := time.NewTimer(backoff)
 				select {
@@ -1770,7 +1791,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		// Attempt adaptive replan on fatal errors
 		if errCat == plan.ErrorFatal && a.planManager.HasReplanHandler() {
 			if replanErr := a.planManager.RequestReplan(ctx, step); replanErr == nil {
-				a.safeSendToProgram(ui.StreamTextMsg("[Plan adjusted after step failure. Continuing.]\n"))
+				a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry, Message: "Plan adjusted after step failure — continuing"})
 				logging.Info("plan replanned after fatal step error",
 					"step_id", step.ID, "plan_version", approvedPlan.Version)
 				return // Don't abort — the loop will pick up new steps
@@ -1780,7 +1801,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		}
 
 		if a.config.Plan.AbortOnStepFailure {
-			a.safeSendToProgram(ui.StreamTextMsg("Aborting plan due to step failure.\n"))
+			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRecoverableError, Message: "Aborting plan due to step failure"})
 		}
 		return
 	}
