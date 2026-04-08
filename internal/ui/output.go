@@ -34,6 +34,11 @@ type outputState struct {
 	ready          bool
 	frozen         bool // When true, viewport won't auto-scroll to bottom
 	thinkingActive bool // True while streaming thinking content
+
+	// Smooth scroll state: instead of jumping to bottom instantly,
+	// we scroll a few lines per frame toward the target.
+	scrollTarget int  // Target YOffset (usually total lines - viewport height)
+	scrolling    bool // True while smooth scroll animation is in progress
 }
 
 // OutputModel represents the output/viewport component.
@@ -405,22 +410,93 @@ func (m *OutputModel) doViewportUpdate() {
 	m.viewport.SetContent(wrapped)
 	m.state.mu.Lock()
 	frozen := m.state.frozen
-	m.state.mu.Unlock()
 
 	if !frozen {
-		m.viewport.GotoBottom()
+		// Set smooth scroll target to bottom instead of jumping instantly.
+		// The actual scrolling happens in TickSmoothScroll() called every frame.
+		totalLines := m.viewport.TotalLineCount()
+		target := totalLines - m.viewport.Height
+		if target < 0 {
+			target = 0
+		}
+		m.state.scrollTarget = target
+		m.state.scrolling = true
+		m.state.mu.Unlock()
+
+		// If the gap is small (≤3 lines), jump directly to avoid visible lag
+		// on character-by-character streaming
+		gap := target - m.viewport.YOffset
+		if gap <= 3 {
+			m.viewport.GotoBottom()
+			m.state.mu.Lock()
+			m.state.scrolling = false
+			m.state.mu.Unlock()
+		}
 	} else {
 		// Smart unfreeze: if user is near the bottom (within 3 lines), auto-unfreeze
-		// so new streaming content becomes visible without manual scroll
 		totalLines := m.viewport.TotalLineCount()
 		visibleBottom := m.viewport.YOffset + m.viewport.Height
 		if totalLines > 0 && totalLines-visibleBottom <= 3 {
-			m.state.mu.Lock()
 			m.state.frozen = false
-			m.state.mu.Unlock()
-			m.viewport.GotoBottom()
+			m.state.scrollTarget = totalLines - m.viewport.Height
+			m.state.scrolling = true
 		}
+		m.state.mu.Unlock()
 	}
+}
+
+// TickSmoothScroll advances the smooth scroll animation by one step.
+// Call this on every frame tick (e.g., spinner tick at 60Hz).
+// Returns true if the viewport moved (caller should re-render).
+func (m *OutputModel) TickSmoothScroll() bool {
+	m.state.mu.Lock()
+	scrolling := m.state.scrolling
+	target := m.state.scrollTarget
+	m.state.mu.Unlock()
+
+	if !scrolling {
+		return false
+	}
+
+	current := m.viewport.YOffset
+	gap := target - current
+
+	if gap <= 0 {
+		// Already at or past target
+		m.state.mu.Lock()
+		m.state.scrolling = false
+		m.state.mu.Unlock()
+		return false
+	}
+
+	// Scroll speed: proportional to gap, with minimum step of 1 and max of 8.
+	// This creates an ease-out effect: fast when far, slow when close.
+	step := gap / 3
+	if step < 1 {
+		step = 1
+	}
+	if step > 8 {
+		step = 8
+	}
+
+	m.viewport.SetYOffset(current + step)
+
+	// Check if we've arrived
+	if m.viewport.YOffset >= target {
+		m.viewport.GotoBottom()
+		m.state.mu.Lock()
+		m.state.scrolling = false
+		m.state.mu.Unlock()
+	}
+
+	return true
+}
+
+// IsScrolling returns true if smooth scroll animation is in progress.
+func (m *OutputModel) IsScrolling() bool {
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	return m.state.scrolling
 }
 
 // wrapText wraps text to the specified width using lipgloss for ANSI-aware wrapping.

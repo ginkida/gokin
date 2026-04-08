@@ -382,6 +382,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Flush pending viewport updates (debounced content)
 		m.output.FlushPendingUpdate()
 
+		// Advance smooth scroll animation (ease-out toward target)
+		m.output.TickSmoothScroll()
+
 		// Update toast manager (clean up expired toasts)
 		if m.toastManager != nil {
 			m.toastManager.Update()
