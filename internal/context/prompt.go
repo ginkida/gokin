@@ -423,7 +423,7 @@ func (b *PromptBuilder) buildProjectSection() string {
 		}
 	}
 
-	if b.projectInfo.HasDockerCompose {
+	if b.projectInfo.HasDockerCompose && b.projectInfo.ComposeFile != "" {
 		cf := b.projectInfo.ComposeFile
 		services := strings.Join(b.projectInfo.DockerServices, ", ")
 		if services == "" {

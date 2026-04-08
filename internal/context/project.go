@@ -296,6 +296,10 @@ func extractDockerBaseImage(dockerfilePath string) string {
 
 // extractComposeServices parses service names from a docker-compose YAML file.
 // Uses simple line parsing to avoid a YAML dependency.
+//
+// Strategy: find the `services:` top-level key, then collect lines at exactly
+// the next indent level (the service names). Deeper-indented lines (service
+// properties like `image:`, `volumes:`, `ports:`) are skipped.
 func extractComposeServices(composePath string) []string {
 	data, err := os.ReadFile(composePath)
 	if err != nil {
@@ -304,49 +308,71 @@ func extractComposeServices(composePath string) []string {
 
 	var services []string
 	inServices := false
+	serviceIndent := -1 // indent level of service names (detected from first service)
 	lines := strings.Split(string(data), "\n")
 
 	for _, line := range lines {
-		// Top-level "services:" key
-		if strings.TrimSpace(line) == "services:" {
-			inServices = true
-			continue
-		}
-
-		if !inServices {
-			continue
-		}
-
-		// Another top-level key ends the services block
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && strings.TrimSpace(line) != "" {
-			break
-		}
-
-		// Service name: exactly 2-space or 1-tab indent, ends with ":"
 		trimmed := strings.TrimSpace(line)
+
+		// Skip empty lines and comments
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 
-		// Check indent level — service names are at first indent level under "services:"
-		indent := 0
-		for _, ch := range line {
-			if ch == ' ' {
-				indent++
-			} else if ch == '\t' {
-				indent += 2
-			} else {
-				break
+		// Detect top-level "services:" key (no leading whitespace)
+		if !inServices {
+			if trimmed == "services:" && countIndent(line) == 0 {
+				inServices = true
 			}
+			continue
 		}
 
-		if indent >= 2 && indent <= 4 && strings.HasSuffix(trimmed, ":") && !strings.Contains(trimmed, " ") {
-			serviceName := strings.TrimSuffix(trimmed, ":")
-			services = append(services, serviceName)
+		indent := countIndent(line)
+
+		// Another top-level key (indent 0) ends the services block
+		if indent == 0 {
+			break
+		}
+
+		// First non-empty indented line after "services:" sets the service indent level
+		if serviceIndent < 0 {
+			serviceIndent = indent
+		}
+
+		// Only lines at exactly the service indent level are service names.
+		// Deeper lines are properties of a service (image, ports, volumes, etc.)
+		if indent != serviceIndent {
+			continue
+		}
+
+		// Service name: ends with ":" (optionally followed by space/anchor),
+		// extract just the name part
+		if idx := strings.Index(trimmed, ":"); idx > 0 {
+			name := trimmed[:idx]
+			// Skip YAML merge keys and variable references
+			if name == "<<" || strings.HasPrefix(name, "$") {
+				continue
+			}
+			services = append(services, name)
 		}
 	}
 
 	return services
+}
+
+// countIndent returns the number of leading spaces (tabs count as 2).
+func countIndent(line string) int {
+	indent := 0
+	for _, ch := range line {
+		if ch == ' ' {
+			indent++
+		} else if ch == '\t' {
+			indent += 2
+		} else {
+			break
+		}
+	}
+	return indent
 }
 
 // findFiles finds files matching a pattern in the directory.
