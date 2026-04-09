@@ -295,10 +295,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		if !failoverTriggered && totalRetries >= 2 && isRetryableError(err) {
 			if chain, failoverErr := a.activateEmergencyFailoverClient(); failoverErr == nil {
 				failoverTriggered = true
-				// Reset retry counters — new provider gets fresh attempts
+				// Reset retry counters and circuit breakers — new provider gets clean slate
 				requestRetryCount = 0
 				partialIdleRetryCount = 0
 				retryPolicy = client.AdaptiveStreamRetryPolicy(a.config.API.GetActiveProvider())
+				if a.policy != nil {
+					a.policy.ResetBreakers()
+				}
 				a.safeSendToProgram(ui.StatusUpdateMsg{
 					Type:    ui.StatusRetry,
 					Message: fmt.Sprintf("Provider failover: %s", chain),

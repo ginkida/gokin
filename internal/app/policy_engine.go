@@ -54,6 +54,20 @@ func (p *PolicyEngine) ExecutePlanStep(ctx context.Context, fn func() error) err
 	return err
 }
 
+// ResetBreakers resets both circuit breakers to closed state.
+// Called after provider failover to give the new provider a clean slate.
+func (p *PolicyEngine) ResetBreakers() {
+	if p == nil {
+		return
+	}
+	if p.requestBreaker != nil {
+		p.requestBreaker.Reset()
+	}
+	if p.stepBreaker != nil {
+		p.stepBreaker.Reset()
+	}
+}
+
 type PolicySnapshot struct {
 	RequestBreakerState string
 	StepBreakerState    string

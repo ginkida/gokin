@@ -128,3 +128,12 @@ func (cb *CircuitBreaker) GetState() State {
 	defer cb.mu.RUnlock()
 	return cb.state
 }
+
+// Reset forces the circuit breaker back to closed state with zero failures.
+// Used after provider failover to give the new provider a clean slate.
+func (cb *CircuitBreaker) Reset() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.state = StateClosed
+	cb.failures = 0
+}

@@ -477,8 +477,11 @@ func (a *App) Run() error {
 						logging.Debug("cleaned up completed tasks", "count", cleaned)
 					}
 				}
-				// Clean up old agent checkpoint files
+				// Clean up old agent results and their output files from disk
 				if a.agentRunner != nil {
+					if cleaned := a.agentRunner.Cleanup(30 * time.Minute); cleaned > 0 {
+						logging.Debug("cleaned up agent results and output files", "count", cleaned)
+					}
 					a.agentRunner.CleanupOldCheckpoints(24 * time.Hour)
 				}
 				// Clean up old plan files (completed: 7 days, paused: 21 days)
