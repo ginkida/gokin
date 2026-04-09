@@ -67,7 +67,9 @@ func (a *App) startStepRollbackSnapshot(approvedPlan *plan.Plan, step *plan.Step
 	a.stepRollbackMu.Lock()
 	if existing := a.stepRollbackSnapshots[key]; existing != nil {
 		if existing.BackupDir != "" {
-			_ = os.RemoveAll(existing.BackupDir)
+			if err := os.RemoveAll(existing.BackupDir); err != nil {
+				logging.Debug("failed to remove old backup dir", "path", existing.BackupDir, "error", err)
+			}
 		}
 		delete(a.stepRollbackSnapshots, key)
 	}
@@ -91,7 +93,9 @@ func (a *App) commitStepRollbackSnapshot(planID string, stepID int) {
 		return
 	}
 	if snapshot.BackupDir != "" {
-		_ = os.RemoveAll(snapshot.BackupDir)
+		if err := os.RemoveAll(snapshot.BackupDir); err != nil {
+			logging.Debug("failed to remove backup dir", "path", snapshot.BackupDir, "error", err)
+		}
 	}
 }
 
@@ -105,7 +109,9 @@ func (a *App) rollbackStepSnapshot(_ context.Context, approvedPlan *plan.Plan, s
 	}
 	defer func() {
 		if snapshot.BackupDir != "" {
-			_ = os.RemoveAll(snapshot.BackupDir)
+			if err := os.RemoveAll(snapshot.BackupDir); err != nil {
+			logging.Debug("failed to remove backup dir", "path", snapshot.BackupDir, "error", err)
+		}
 		}
 	}()
 

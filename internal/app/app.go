@@ -1159,9 +1159,17 @@ func (a *App) safeSendToProgram(msg tea.Msg) {
 	program := a.program
 	a.mu.Unlock()
 
-	if program != nil {
-		program.Send(msg)
+	if program == nil {
+		return
 	}
+
+	// Recover from panic if program channel is closed during shutdown.
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Debug("safeSendToProgram recovered from panic (shutdown race)", "error", r)
+		}
+	}()
+	program.Send(msg)
 }
 
 // sendTokenUsageUpdate sends a token usage update to the UI.

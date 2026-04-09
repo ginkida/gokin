@@ -163,7 +163,7 @@ func (a *App) promptPlanApproval(ctx context.Context, p *plan.Plan) (plan.Approv
 	}
 
 	// Send plan approval request to TUI
-	a.program.Send(msg)
+	a.safeSendToProgram(msg)
 
 	// Wait for response from TUI with timeout to prevent deadlock
 	planTimer := time.NewTimer(PlanApprovalTimeout)

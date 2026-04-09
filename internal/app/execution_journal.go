@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/logging"
 	"gokin/internal/security"
 )
 
@@ -95,7 +96,9 @@ func (j *ExecutionJournal) SaveRecovery(snapshot RecoverySnapshot) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(j.recoveryPath, b, 0o600)
+	if err := os.WriteFile(j.recoveryPath, b, 0o600); err != nil {
+		logging.Warn("failed to write recovery snapshot", "path", j.recoveryPath, "error", err)
+	}
 }
 
 func (j *ExecutionJournal) LoadRecovery() (*RecoverySnapshot, error) {
