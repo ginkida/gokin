@@ -219,8 +219,16 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		}
 	}
 
-	// Add to pending with current time (for debouncing)
+	// Add to pending with current time (for debouncing).
+	// Cap prevents unbounded growth during high-velocity file changes (builds, syncs).
+	const maxPending = 5000
 	w.mu.Lock()
+	if len(w.pending) >= maxPending {
+		// Force-flush all pending to prevent memory leak
+		for k := range w.pending {
+			delete(w.pending, k)
+		}
+	}
 	w.pending[path] = time.Now()
 	w.mu.Unlock()
 }

@@ -419,8 +419,12 @@ func (m *ContextManager) backgroundOptimize(ctx context.Context) {
 			close(done)
 		}()
 
+		// Timeout prevents hang if LLM API is unresponsive during summarization.
+		sumCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+
 		start := time.Now()
-		if err := m.OptimizeContext(ctx); err != nil {
+		if err := m.OptimizeContext(sumCtx); err != nil {
 			logging.Warn("background context optimization failed", "error", err)
 		}
 		m.mu.Lock()

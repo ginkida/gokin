@@ -239,6 +239,10 @@ type PromptBuilder struct {
 	detectedContext string // Auto-detected project context (frameworks, docs, etc.)
 	toolHints       string // Tool usage pattern hints
 	lastMessage     string // Last user message for conditional prompt injection
+
+	// Prompt caching: avoids rebuilding when inputs haven't changed
+	cachedPrompt string
+	promptDirty  bool
 }
 
 // NewPromptBuilder creates a new prompt builder.
@@ -246,52 +250,79 @@ func NewPromptBuilder(workDir string, projectInfo *ProjectInfo) *PromptBuilder {
 	return &PromptBuilder{
 		workDir:     workDir,
 		projectInfo: projectInfo,
+		promptDirty: true,
 	}
+}
+
+// Invalidate marks the cached prompt as stale so Build() regenerates it.
+func (b *PromptBuilder) Invalidate() {
+	b.promptDirty = true
 }
 
 // SetProjectMemory sets the project memory for custom instructions.
 func (b *PromptBuilder) SetProjectMemory(memory *ProjectMemory) {
 	b.projectMemory = memory
+	b.promptDirty = true
 }
 
 // SetMemoryStore sets the memory store for persistent memory injection.
 func (b *PromptBuilder) SetMemoryStore(store MemoryProvider) {
 	b.memoryStore = store
+	b.promptDirty = true
 }
 
 // SetSessionMemory sets the session memory manager for automatic context injection.
 func (b *PromptBuilder) SetSessionMemory(sm *SessionMemoryManager) {
 	b.sessionMemory = sm
+	b.promptDirty = true
 }
 
 // SetPlanAutoDetect enables or disables auto-planning in the system prompt.
 func (b *PromptBuilder) SetPlanAutoDetect(enabled bool) {
-	b.planAutoDetect = enabled
+	if b.planAutoDetect != enabled {
+		b.planAutoDetect = enabled
+		b.promptDirty = true
+	}
 }
 
 // SetPlanManager sets the plan manager for contract context injection.
 func (b *PromptBuilder) SetPlanManager(pm PlanManagerProvider) {
 	b.planManager = pm
+	b.promptDirty = true
 }
 
 // SetDetectedContext sets the auto-detected project context (frameworks, docs summaries).
 func (b *PromptBuilder) SetDetectedContext(ctx string) {
-	b.detectedContext = ctx
+	if b.detectedContext != ctx {
+		b.detectedContext = ctx
+		b.promptDirty = true
+	}
 }
 
 // SetToolHints sets the tool usage pattern hints for periodic injection.
 func (b *PromptBuilder) SetToolHints(hints string) {
-	b.toolHints = hints
+	if b.toolHints != hints {
+		b.toolHints = hints
+		b.promptDirty = true
+	}
 }
 
 // SetLastMessage sets the last user message for conditional prompt injection.
 // Used to skip planning protocol for simple question-only messages.
 func (b *PromptBuilder) SetLastMessage(msg string) {
-	b.lastMessage = msg
+	if b.lastMessage != msg {
+		b.lastMessage = msg
+		b.promptDirty = true
+	}
 }
 
-// Build constructs the full system prompt.
+// Build constructs the full system prompt. Returns cached version if inputs
+// haven't changed since the last call.
 func (b *PromptBuilder) Build() string {
+	if !b.promptDirty && b.cachedPrompt != "" {
+		return b.cachedPrompt
+	}
+
 	var builder strings.Builder
 
 	// Base prompt
@@ -372,7 +403,10 @@ func (b *PromptBuilder) Build() string {
 	// Tool chain patterns removed from system prompt to avoid
 	// encouraging excessive exploration on simple tasks.
 
-	return applyPromptBudget(builder.String(), maxSystemPromptChars)
+	result := applyPromptBudget(builder.String(), maxSystemPromptChars)
+	b.cachedPrompt = result
+	b.promptDirty = false
+	return result
 }
 
 // buildProjectSection builds the project-specific section.

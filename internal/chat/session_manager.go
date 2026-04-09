@@ -21,6 +21,7 @@ type SessionManager struct {
 	lastSaveTime   time.Time
 	saveTimer      *time.Timer
 	stopChan       chan struct{}
+	asyncSaveCh    chan struct{} // Buffered channel for async save dedup
 }
 
 // SessionManagerConfig configures session persistence behavior.
@@ -68,11 +69,34 @@ func (sm *SessionManager) Start(ctx context.Context) {
 
 	sm.mu.Lock()
 	sm.lastSaveTime = time.Now()
+	sm.asyncSaveCh = make(chan struct{}, 1)
 	// Start periodic save timer
 	sm.saveTimer = time.AfterFunc(sm.config.SaveInterval, func() {
 		sm.periodicSave()
 	})
 	sm.mu.Unlock()
+
+	// Background async saver: deduplicates rapid save requests.
+	// Multiple SaveAfterMessage() calls within a short window produce one Save().
+	go func() {
+		for {
+			select {
+			case <-sm.asyncSaveCh:
+				// Debounce: wait briefly to coalesce rapid saves
+				time.Sleep(100 * time.Millisecond)
+				// Drain any extra signals that arrived during sleep
+				select {
+				case <-sm.asyncSaveCh:
+				default:
+				}
+				if err := sm.Save(); err != nil {
+					logging.Debug("async save failed", "error", err)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// Clean up old sessions in background (outside lock)
 	go sm.CleanupOldSessions()
@@ -199,8 +223,15 @@ func (sm *SessionManager) SaveAfterMessage() error {
 		return nil
 	}
 
-	// Save immediately after message
-	return sm.Save()
+	// Non-blocking async save: signals background goroutine.
+	// If a save is already pending, this is a no-op (dedup).
+	if sm.asyncSaveCh != nil {
+		select {
+		case sm.asyncSaveCh <- struct{}{}:
+		default: // save already pending
+		}
+	}
+	return nil
 }
 
 // periodicSave performs periodic save and resets the timer.

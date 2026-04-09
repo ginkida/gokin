@@ -1159,8 +1159,20 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 				if e.handler != nil && e.handler.OnFilePeek != nil {
 					ctx = ContextWithFilePeekCallback(ctx, e.handler.OnFilePeek)
 				}
-				result := e.executeTool(ctx, call)
-				results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}
+				// Recover from panics in sequential execution (parallel path already has this)
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							logging.Error("panic in sequential tool execution", "tool", call.Name, "panic", r)
+							results[idx] = &genai.FunctionResponse{
+								ID: call.ID, Name: call.Name,
+								Response: NewErrorResult(fmt.Sprintf("tool panicked: %v", r)).ToMap(),
+							}
+						}
+					}()
+					result := e.executeTool(ctx, call)
+					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}
+				}()
 			}
 		}
 		resultIdx += len(group.Calls)
