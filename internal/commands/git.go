@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"gokin/internal/tools"
 )
 
 // CommitCommand creates a git commit.
@@ -79,17 +81,22 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 	}
 
-	// If no message provided, we just show the status and ask user to provide message
+	// Auto-generate commit message if not provided
 	if message == "" {
-		// Get recent commits for style reference
-		log, _ := runGitCommand(workDir, "log", "-3", "--oneline")
-		if log != "" {
-			result.WriteString("\nRecent commits (for style reference):\n")
-			result.WriteString(log)
+		generated := autoGenerateCommitMessage(workDir)
+		if generated != "" {
+			message = generated
+			result.WriteString(fmt.Sprintf("\nAuto-generated message: %s\n", message))
+		} else {
+			// Fallback if auto-generation fails
+			log, _ := runGitCommand(workDir, "log", "-3", "--oneline")
+			if log != "" {
+				result.WriteString("\nRecent commits (for style reference):\n")
+				result.WriteString(log)
+			}
+			result.WriteString("\nUse /commit -m \"your message\" to commit these changes.")
+			return result.String(), nil
 		}
-
-		result.WriteString("\nUse /commit -m \"your message\" to commit these changes.")
-		return result.String(), nil
 	}
 
 	// Stage only tracked (modified/deleted) files — safe default
@@ -289,6 +296,65 @@ func detectBaseBranch(dir string) string {
 
 	// Default to main
 	return "main"
+}
+
+// autoGenerateCommitMessage analyzes staged changes and generates a conventional
+// commit message (e.g., "feat(ui): add multi-line input support").
+func autoGenerateCommitMessage(workDir string) string {
+	// Get staged diff stats
+	stat, err := runGitCommand(workDir, "diff", "--cached", "--stat")
+	if err != nil || strings.TrimSpace(stat) == "" {
+		return ""
+	}
+
+	// Get detailed diff (limited for analysis)
+	diff, _ := runGitCommand(workDir, "diff", "--cached")
+	if len(diff) > 4000 {
+		diff = diff[:4000]
+	}
+
+	// Parse file list and change counts from stat
+	var files []string
+	var totalAdded, totalRemoved int
+	for _, line := range strings.Split(stat, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "files changed") || strings.Contains(line, "file changed") {
+			parts := strings.Fields(line)
+			for i, p := range parts {
+				if (p == "insertions(+)" || p == "insertion(+)") && i > 0 {
+					fmt.Sscanf(parts[i-1], "%d", &totalAdded)
+				}
+				if (p == "deletions(-)" || p == "deletion(-)") && i > 0 {
+					fmt.Sscanf(parts[i-1], "%d", &totalRemoved)
+				}
+			}
+			continue
+		}
+		if idx := strings.Index(line, "|"); idx > 0 {
+			files = append(files, strings.TrimSpace(line[:idx]))
+		}
+	}
+
+	if len(files) == 0 {
+		return ""
+	}
+
+	changeType := tools.DetectChangeType(files, diff)
+	scope := tools.DetectScope(files)
+	desc := tools.GenerateDescription(files, totalAdded, totalRemoved, diff)
+
+	var msg strings.Builder
+	msg.WriteString(changeType)
+	if scope != "" {
+		msg.WriteString("(" + scope + ")")
+	}
+	msg.WriteString(": ")
+	msg.WriteString(desc)
+
+	return msg.String()
 }
 
 func formatCommitsAsMarkdown(commits string) string {

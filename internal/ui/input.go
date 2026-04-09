@@ -93,7 +93,7 @@ type InputModel struct {
 // NewInputModel creates a new input model.
 func NewInputModel(styles *Styles, workDir string) InputModel {
 	ta := textarea.New()
-	ta.Placeholder = "Message or /command (Tab: complete)"
+	ta.Placeholder = "Message or /command (Tab: complete, Ctrl+J: newline)"
 	ta.Focus()
 	ta.CharLimit = 10000
 	ta.ShowLineNumbers = false
@@ -914,8 +914,29 @@ func (m InputModel) Value() string {
 // Reset clears the input and optionally saves to history.
 func (m *InputModel) Reset() {
 	m.textarea.Reset()
+	m.textarea.SetHeight(1) // Shrink back to single line after send
 	m.historyIndex = -1
 	m.savedInput = ""
+}
+
+// InsertNewline adds a newline at the cursor position and grows the input height.
+// Used for multi-line input with Alt+Enter.
+func (m *InputModel) InsertNewline() {
+	m.textarea.InsertString("\n")
+	// Grow height to fit content, up to maxInputLines
+	const maxInputLines = 6
+	lines := strings.Count(m.textarea.Value(), "\n") + 1
+	if lines > maxInputLines {
+		lines = maxInputLines
+	}
+	if lines > 1 {
+		m.textarea.SetHeight(lines)
+	}
+}
+
+// Height returns the current input height in lines.
+func (m InputModel) Height() int {
+	return m.textarea.Height()
 }
 
 // AddToHistory adds a command to the history.

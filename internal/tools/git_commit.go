@@ -213,10 +213,10 @@ func (t *GitCommitTool) analyzeChanges(stat, diff string) string {
 	}
 
 	// Determine change type
-	changeType := detectChangeType(files, diff)
+	changeType := DetectChangeType(files, diff)
 
 	// Determine scope from file paths
-	scope := detectScope(files)
+	scope := DetectScope(files)
 
 	// Build message
 	var msg strings.Builder
@@ -227,14 +227,14 @@ func (t *GitCommitTool) analyzeChanges(stat, diff string) string {
 	msg.WriteString(": ")
 
 	// Generate description based on analysis
-	desc := generateDescription(files, totalAdded, totalRemoved, diff)
+	desc := GenerateDescription(files, totalAdded, totalRemoved, diff)
 	msg.WriteString(desc)
 
 	return msg.String()
 }
 
 // detectChangeType determines the conventional commit type from changes.
-func detectChangeType(files []string, diff string) string {
+func DetectChangeType(files []string, diff string) string {
 	diffLower := strings.ToLower(diff)
 
 	// Check for test files
@@ -287,7 +287,7 @@ func detectChangeType(files []string, diff string) string {
 }
 
 // detectScope determines the scope from file paths.
-func detectScope(files []string) string {
+func DetectScope(files []string) string {
 	if len(files) == 0 {
 		return ""
 	}
@@ -320,7 +320,7 @@ func detectScope(files []string) string {
 }
 
 // generateDescription creates a human-readable description of changes.
-func generateDescription(files []string, added, removed int, _ string) string {
+func GenerateDescription(files []string, added, removed int, _ string) string {
 	if len(files) == 1 {
 		action := "update"
 		if added > 0 && removed == 0 {

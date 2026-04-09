@@ -1022,6 +1022,64 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// Scroll shortcuts (work in input and streaming states)
+	if m.state == StateInput || m.state == StateStreaming || m.state == StateProcessing {
+		switch msg.String() {
+		case "ctrl+b": // Scroll up
+			newOffset := m.output.viewport.YOffset - 3
+			if newOffset < 0 {
+				newOffset = 0
+			}
+			m.output.viewport.SetYOffset(newOffset)
+			m.output.SetFrozen(true)
+			return nil
+		case "ctrl+f": // Scroll down
+			newOffset := m.output.viewport.YOffset + 3
+			maxOffset := m.output.viewport.TotalLineCount() - m.output.viewport.Height
+			if maxOffset < 0 {
+				maxOffset = 0
+			}
+			if newOffset > maxOffset {
+				newOffset = maxOffset
+			}
+			m.output.viewport.SetYOffset(newOffset)
+			// Unfreeze if at bottom
+			total := m.output.viewport.TotalLineCount()
+			bottom := m.output.viewport.YOffset + m.output.viewport.Height
+			if total-bottom <= 2 {
+				m.output.SetFrozen(false)
+			}
+			return nil
+		case "ctrl+g": // Toggle freeze scroll (for text selection)
+			frozen := !m.output.IsFrozen()
+			m.output.SetFrozen(frozen)
+			if m.toastManager != nil {
+				if frozen {
+					m.toastManager.ShowInfo("Scroll frozen — select text freely")
+				} else {
+					m.toastManager.ShowInfo("Scroll unfrozen")
+				}
+			}
+			return nil
+		}
+	}
+
+	// Ctrl+J: insert newline (standard terminal newline, works in all terminals)
+	if msg.Type == tea.KeyCtrlJ && m.state == StateInput {
+		m.input.InsertNewline()
+		return nil
+	}
+
+	// Ctrl+U: context-aware — clear input when has text, scroll half-page up when empty
+	if msg.Type == tea.KeyCtrlU && m.state == StateInput {
+		if m.input.textarea.Value() == "" {
+			m.output.viewport.SetYOffset(m.output.viewport.YOffset - m.output.viewport.Height/2)
+			m.output.SetFrozen(true)
+			return nil
+		}
+		// Fall through to default handler (clears input)
+	}
+
 	// Handle Ctrl+Shift+C for compact mode toggle (only when in input state)
 	if msg.String() == "ctrl+shift+c" && m.state == StateInput {
 		m.CompactMode = !m.CompactMode
@@ -1170,6 +1228,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case tea.KeyEnter:
+		// Alt+Enter: insert newline for multi-line input
+		if m.state == StateInput && msg.Alt {
+			m.input.InsertNewline()
+			return nil
+		}
 		// Send message on Enter (when input is not empty and no suggestions are shown)
 		if m.state == StateInput && !m.input.ShowingSuggestions() {
 			value := m.input.Value()

@@ -181,7 +181,14 @@ func (m Model) renderStatusBarFull() string {
 		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(mcpColor).Render(fmt.Sprintf("MCP %d/%d", m.mcpHealthy, m.mcpTotal)))
 	}
 
-	// Session cost — disabled in status bar (available via /cost command)
+	// Session cost in status bar
+	if m.sessionCost > 0 {
+		costStr := fmt.Sprintf("$%.2f", m.sessionCost)
+		if m.sessionCost < 0.01 {
+			costStr = fmt.Sprintf("$%.4f", m.sessionCost)
+		}
+		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(ColorDim).Render(costStr))
+	}
 
 	left := strings.Join(leftParts, " · ")
 	right := strings.Join(rightParts, " · ")
