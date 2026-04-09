@@ -6,23 +6,23 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"gokin/internal/logging"
 	"gokin/internal/ui"
 )
 
-// sendTimeout is the maximum time to wait for a UI send operation
-const sendTimeout = 100 * time.Millisecond
-
-// UIEventBroadcaster broadcasts task execution events to UI
+// UIEventBroadcaster broadcasts task execution events to UI.
+// Uses a single goroutine per send with WaitGroup tracking to prevent leaks.
 type UIEventBroadcaster struct {
 	program *tea.Program
 	ctx     context.Context
 	cancel  context.CancelFunc
 	mu      sync.RWMutex
+	wg      sync.WaitGroup // Tracks all pending send goroutines
 	enabled bool
 
 	// Rate limiting to prevent excessive broadcasts
 	lastBroadcast time.Time
-	minInterval   time.Duration // Minimum interval between broadcasts (default 50ms)
+	minInterval   time.Duration
 }
 
 // NewUIEventBroadcaster creates a new UI event broadcaster
@@ -33,7 +33,7 @@ func NewUIEventBroadcaster(program *tea.Program) *UIEventBroadcaster {
 		ctx:         ctx,
 		cancel:      cancel,
 		enabled:     true,
-		minInterval: 50 * time.Millisecond, // Rate limit to prevent excessive broadcasts
+		minInterval: 50 * time.Millisecond,
 	}
 }
 
@@ -45,20 +45,33 @@ func NewUIEventBroadcasterWithContext(ctx context.Context, program *tea.Program)
 		ctx:         childCtx,
 		cancel:      cancel,
 		enabled:     true,
-		minInterval: 50 * time.Millisecond, // Rate limit to prevent excessive broadcasts
+		minInterval: 50 * time.Millisecond,
 	}
 }
 
-// Stop stops the broadcaster and cancels any pending sends
+// Stop stops the broadcaster, cancels pending sends, and waits for goroutine cleanup.
 func (b *UIEventBroadcaster) Stop() {
 	if b.cancel != nil {
-		b.cancel()
+		b.cancel() // Signals all pending goroutines to exit
+	}
+
+	// Wait for all tracked goroutines with timeout
+	done := make(chan struct{})
+	go func() {
+		b.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// All goroutines cleaned up
+	case <-time.After(2 * time.Second):
+		logging.Debug("broadcaster shutdown timeout — some goroutines may still be running")
 	}
 }
 
-// sendAsync sends a message to the UI program with context awareness and timeout protection.
-// This prevents goroutine leaks by ensuring sends don't block indefinitely.
-// Rate limiting prevents excessive broadcasts that could overwhelm the UI.
+// sendAsync sends a message to the UI program in a tracked goroutine.
+// program.Send() in Bubble Tea is non-blocking (buffered channel), so a single
+// goroutine with context check is sufficient — no nested goroutine needed.
 func (b *UIEventBroadcaster) sendAsync(msg tea.Msg) {
 	b.mu.Lock()
 	if !b.enabled || b.program == nil {
@@ -69,7 +82,7 @@ func (b *UIEventBroadcaster) sendAsync(msg tea.Msg) {
 	// Rate limiting: skip if too frequent
 	if time.Since(b.lastBroadcast) < b.minInterval {
 		b.mu.Unlock()
-		return // Skip too frequent broadcasts
+		return
 	}
 	b.lastBroadcast = time.Now()
 
@@ -77,44 +90,29 @@ func (b *UIEventBroadcaster) sendAsync(msg tea.Msg) {
 	ctx := b.ctx
 	b.mu.Unlock()
 
-	// Check if already cancelled
+	// Check if already cancelled before spawning goroutine
 	select {
 	case <-ctx.Done():
 		return
 	default:
 	}
 
-	// Send with timeout protection to prevent goroutine leaks
+	b.wg.Add(1)
 	go func() {
-		// Create timeout context for this send
-		sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
-		defer cancel()
-
-		done := make(chan struct{})
-		var closeOnce sync.Once
-		closeDone := func() {
-			closeOnce.Do(func() {
-				close(done)
-			})
-		}
-
-		go func() {
-			defer func() {
-				// Recover from panic if channel is already closed or program.Send panics
-				recover()
-			}()
-			program.Send(msg)
-			closeDone()
+		defer b.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				// program.Send may panic if channel is closed during shutdown
+				logging.Debug("broadcaster send recovered from panic", "error", r)
+			}
 		}()
 
+		// Final context check inside goroutine
 		select {
-		case <-sendCtx.Done():
-			// Context cancelled or timeout - don't block
-			// Inner goroutine will exit when program.Send returns
+		case <-ctx.Done():
 			return
-		case <-done:
-			// Send completed successfully
-			return
+		default:
+			program.Send(msg)
 		}
 	}()
 }
