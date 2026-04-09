@@ -295,8 +295,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		if !failoverTriggered && totalRetries >= 2 && isRetryableError(err) {
 			if chain, failoverErr := a.activateEmergencyFailoverClient(); failoverErr == nil {
 				failoverTriggered = true
-				a.safeSendToProgram(ui.StreamTextMsg(
-					fmt.Sprintf("\n🔁 Automatic provider failover activated: %s\n", chain)))
+				// Reset retry counters — new provider gets fresh attempts
+				requestRetryCount = 0
+				partialIdleRetryCount = 0
+				retryPolicy = client.AdaptiveStreamRetryPolicy(a.config.API.GetActiveProvider())
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusRetry,
+					Message: fmt.Sprintf("Provider failover: %s", chain),
+				})
 			} else {
 				logging.Debug("automatic failover not activated", "error", failoverErr)
 			}
