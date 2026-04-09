@@ -901,7 +901,7 @@ func (t *BashTool) buildResult(stdoutStr, stderrStr string) ToolResult {
 	}
 
 	if result == "" {
-		result = "(no output)"
+		result = "ok" // Success with no output (git add, mkdir, mv, etc.)
 	}
 
 	return NewSuccessResult(result)

@@ -1194,7 +1194,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 		// Double Ctrl+C confirmation: quit only if pressed twice within 2 seconds
 		now := time.Now()
-		if !m.quitConfirmTime.IsZero() && now.Sub(m.quitConfirmTime) < 2*time.Second {
+		if !m.quitConfirmTime.IsZero() && now.Sub(m.quitConfirmTime) < 3*time.Second {
 			if m.onQuit != nil {
 				m.onQuit()
 			}
@@ -1522,8 +1522,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if msg.Cost > 0 {
 			m.sessionCost += msg.Cost
 		}
-		// Render response metadata footer
+		// Render response metadata footer (or minimal separator if no data)
 		footer := m.renderResponseMetadata(msg)
+		if footer == "" {
+			dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+			footer = dimStyle.Render("───")
+		}
 		m.output.AppendLine(footer)
 		m.output.AppendLine("")
 

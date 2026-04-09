@@ -80,12 +80,12 @@ func (m Model) compactStatusSegments() []string {
 
 	provider := m.runtimeStatus.Provider
 	if provider == "" {
-		provider = "?"
+		provider = "ready"
 	}
 	if len(provider) > 12 {
 		provider = provider[:12]
 	}
-	parts = append(parts, "provider:"+provider)
+	parts = append(parts, provider)
 
 	if pct := m.getContextPercent(); pct > 0 {
 		color := contextUrgencyColor(pct)
@@ -115,12 +115,12 @@ func (m Model) minimalStatusSegments() []string {
 
 	provider := m.runtimeStatus.Provider
 	if provider == "" {
-		provider = "?"
+		provider = "ready"
 	}
 	if len(provider) > 10 {
 		provider = provider[:10]
 	}
-	parts = append(parts, "provider:"+provider)
+	parts = append(parts, provider)
 
 	if pct := m.getContextPercent(); pct > 0 {
 		color := contextUrgencyColor(pct)

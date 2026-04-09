@@ -49,9 +49,9 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		if !exists {
 			return fmt.Sprintf("%sUnknown command: /%s%s\nUse /help to see all commands.", colorRed, args[0], colorReset), nil
 		}
-		return fmt.Sprintf("%s/%s%s - %s\n\n%sUsage:%s %s\n\n%sDescription:%s %s",
-			colorGreen, cmd.Name(), colorReset, colorBold, cmd.Description(), colorReset,
-			cmd.Usage(), colorCyan, colorReset, cmd.Description()), nil
+		return fmt.Sprintf("%s/%s%s — %s\n\n%sUsage:%s %s",
+			colorGreen, cmd.Name(), colorReset, cmd.Description(),
+			colorCyan, colorReset, cmd.Usage()), nil
 	}
 
 	var sb strings.Builder
