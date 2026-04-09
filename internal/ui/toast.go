@@ -203,16 +203,15 @@ func (m *ToastManager) renderToast(toast Toast, width int) string {
 	iconStyle := lipgloss.NewStyle().Foreground(iconColor)
 	msgStyle := lipgloss.NewStyle().Foreground(msgColor)
 
-	// Truncate message to fit width
+	// Truncate message to fit width (head-only, not center-truncation)
 	msg := toast.Message
 	maxLen := width - 5
-	if maxLen < 20 {
-		maxLen = 20
+	if maxLen < 10 {
+		maxLen = 10
 	}
 	if utf8.RuneCountInString(msg) > maxLen {
 		runes := []rune(msg)
-		half := (maxLen - 1) / 2
-		msg = string(runes[:half]) + "…" + string(runes[len(runes)-half:])
+		msg = string(runes[:maxLen-1]) + "…"
 	}
 
 	return iconStyle.Render(icon) + " " + msgStyle.Render(msg)

@@ -448,9 +448,13 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 
 	content := strings.Join(parts, "  ·  ")
 
-	// Framed footer with subtle separators
-	leftDash := strings.Repeat("─", 3)
-	rightDash := strings.Repeat("─", 3)
+	// Framed footer with adaptive dash separators
+	dashLen := 3
+	if len(content) > 60 {
+		dashLen = 1
+	}
+	leftDash := strings.Repeat("─", dashLen)
+	rightDash := strings.Repeat("─", dashLen)
 
 	return dimStyle.Render(leftDash+" ") + dimStyle.Render(content) + dimStyle.Render(" "+rightDash)
 }

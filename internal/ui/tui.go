@@ -1073,7 +1073,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// Ctrl+U: context-aware — clear input when has text, scroll half-page up when empty
 	if msg.Type == tea.KeyCtrlU && m.state == StateInput {
 		if m.input.textarea.Value() == "" {
-			m.output.viewport.SetYOffset(m.output.viewport.YOffset - m.output.viewport.Height/2)
+			newOffset := m.output.viewport.YOffset - m.output.viewport.Height/2
+			if newOffset < 0 {
+				newOffset = 0
+			}
+			m.output.viewport.SetYOffset(newOffset)
 			m.output.SetFrozen(true)
 			return nil
 		}
@@ -1084,9 +1088,17 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if msg.String() == "ctrl+shift+c" && m.state == StateInput {
 		m.CompactMode = !m.CompactMode
 		if m.CompactMode {
-			m.output.SetSize(m.width, m.height/3)
+			h := m.height / 3
+			if h < 3 {
+				h = 3
+			}
+			m.output.SetSize(m.width, h)
 		} else {
-			m.output.SetSize(m.width, m.height-5)
+			h := m.height - 5
+			if h < 3 {
+				h = 3
+			}
+			m.output.SetSize(m.width, h)
 		}
 		return nil
 	}
