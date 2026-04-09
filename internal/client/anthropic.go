@@ -620,6 +620,8 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 			strings.Contains(errStr, "connection refused") ||
 			strings.Contains(errStr, "no such host") ||
 			strings.Contains(errStr, "connection reset") ||
+			strings.Contains(errStr, "overloaded") ||
+			strings.Contains(errStr, "temporarily") ||
 			strings.Contains(errStr, "EOF") {
 			return true
 		}

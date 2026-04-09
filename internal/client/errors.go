@@ -294,6 +294,8 @@ func IsRetryableError(err error) bool {
 	msg := err.Error()
 	untyped := []string{
 		"rate limit",
+		"overloaded",
+		"temporarily",
 		"eof",
 		"tls handshake",
 		"no such host",
