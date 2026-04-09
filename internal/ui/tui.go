@@ -37,7 +37,8 @@ type Model struct {
 	processingLabel string // Status label between tool calls: "Thinking", "Analyzing", "Running agent"
 	loopIteration   int    // Current executor loop iteration (0 = first/unknown)
 	loopToolsUsed   int    // Total tools used across loop iterations
-	agentToolCount  int    // Tools used by current sub-agent (for progress display)
+	agentToolCount  int      // Tools used by current sub-agent (for progress display)
+	agentRecentTools []string // Last N tool names for inline activity display
 	todoItems       []string
 	workDir         string
 
@@ -1902,9 +1903,21 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.streamStartTime = time.Now()
 			m.lastActivityTime = time.Now()
 			m.agentToolCount = 0
+			m.agentRecentTools = nil
 		case "tool_start":
 			m.agentToolCount++
 			info := m.extractToolInfoFromArgs(msg.ToolName, msg.ToolArgs)
+
+			// Track recent tools for inline activity display
+			toolSummary := msg.ToolName
+			if info != "" {
+				toolSummary += " " + info
+			}
+			m.agentRecentTools = append(m.agentRecentTools, toolSummary)
+			if len(m.agentRecentTools) > 5 {
+				m.agentRecentTools = m.agentRecentTools[len(m.agentRecentTools)-5:]
+			}
+
 			if info != "" {
 				m.processingLabel = fmt.Sprintf("Agent: %s → %s %s", msg.AgentType, msg.ToolName, info)
 			} else {
@@ -2331,6 +2344,21 @@ func (m Model) View() string {
 				}
 			}
 			status := spinner + " " + labelStyle.Render(label)
+
+			// Show recent agent tools inline for visibility during long agent runs
+			if len(m.agentRecentTools) > 0 && m.currentTool == "" {
+				recentStyle := lipgloss.NewStyle().Foreground(ColorDim)
+				// Show last 3 tools as breadcrumb trail
+				start := 0
+				if len(m.agentRecentTools) > 3 {
+					start = len(m.agentRecentTools) - 3
+				}
+				trail := strings.Join(m.agentRecentTools[start:], " → ")
+				if len(trail) > 60 {
+					trail = trail[:57] + "..."
+				}
+				status += "\n  " + recentStyle.Render(trail)
+			}
 
 			// Show elapsed after 3 seconds with color escalation
 			if elapsed >= 3*time.Second {
