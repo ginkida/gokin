@@ -2,19 +2,48 @@ package tools
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+
+	"gokin/internal/logging"
 
 	"google.golang.org/genai"
 )
 
 // PinContextTool allows the agent to pin information to the system prompt.
+// Pinned context is persisted to .gokin/pinned_context.md and restored on restart.
 type PinContextTool struct {
 	updater func(content string)
+	workDir string
 }
 
 // NewPinContextTool creates a new PinContextTool.
 func NewPinContextTool(updater func(content string)) *PinContextTool {
 	return &PinContextTool{
 		updater: updater,
+	}
+}
+
+// SetWorkDir sets the working directory for pin persistence.
+func (t *PinContextTool) SetWorkDir(dir string) {
+	t.workDir = dir
+}
+
+// LoadPersistedPin reads pinned context from disk and applies it via updater.
+// Called at app startup to restore the pin from a previous session.
+func (t *PinContextTool) LoadPersistedPin() {
+	if t.workDir == "" || t.updater == nil {
+		return
+	}
+	path := filepath.Join(t.workDir, ".gokin", "pinned_context.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // No pin file or not readable — that's fine
+	}
+	content := string(data)
+	if content != "" {
+		t.updater(content)
+		logging.Debug("restored pinned context from disk", "size", len(content))
 	}
 }
 
@@ -75,9 +104,28 @@ func (t *PinContextTool) Execute(ctx context.Context, args map[string]any) (Tool
 
 	if clear || content == "clear" {
 		t.updater("")
+		t.persistPin("")
+		EmitMemoryNotify(ctx, "unpinned", "")
 		return NewSuccessResult("Pinned context cleared."), nil
 	}
 
 	t.updater(content)
+	t.persistPin(content)
+	EmitMemoryNotify(ctx, "pinned", content)
 	return NewSuccessResult("Information pinned to system prompt."), nil
+}
+
+// persistPin saves or removes the pin file on disk.
+func (t *PinContextTool) persistPin(content string) {
+	if t.workDir == "" {
+		return
+	}
+	path := filepath.Join(t.workDir, ".gokin", "pinned_context.md")
+	if content == "" {
+		os.Remove(path)
+		return
+	}
+	dir := filepath.Dir(path)
+	os.MkdirAll(dir, 0750)
+	os.WriteFile(path, []byte(content), 0644)
 }

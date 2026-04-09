@@ -691,6 +691,70 @@ func (s *Store) ListAll() []*Entry {
 	return results
 }
 
+// GetReport returns a human-readable summary of stored memories.
+func (s *Store) GetReport() string {
+	entries := s.ListAll()
+	if len(entries) == 0 {
+		return "No memories stored. Use the `memory` tool to save and recall information."
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("**Stored Memories** (%d total)\n\n", len(entries)))
+
+	// Group by scope
+	var project, global, session []*Entry
+	for _, e := range entries {
+		switch e.Type {
+		case MemoryProject:
+			project = append(project, e)
+		case MemoryGlobal:
+			global = append(global, e)
+		case MemorySession:
+			session = append(session, e)
+		}
+	}
+
+	writeGroup := func(title string, items []*Entry) {
+		if len(items) == 0 {
+			return
+		}
+		sb.WriteString(fmt.Sprintf("### %s (%d)\n", title, len(items)))
+		for _, e := range items {
+			age := time.Since(e.Timestamp)
+			ageStr := formatAge(age)
+			content := e.Content
+			if len(content) > 80 {
+				content = content[:77] + "..."
+			}
+			if e.Key != "" {
+				sb.WriteString(fmt.Sprintf("- **%s**: %s (%s)\n", e.Key, content, ageStr))
+			} else {
+				sb.WriteString(fmt.Sprintf("- %s (%s)\n", content, ageStr))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	writeGroup("Project", project)
+	writeGroup("Global", global)
+	writeGroup("Session", session)
+
+	return sb.String()
+}
+
+func formatAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
 // Export serializes all entries (project + global) to JSON.
 func (s *Store) Export() ([]byte, error) {
 	s.mu.RLock()

@@ -87,6 +87,7 @@ type Builder struct {
 
 	// Phase 2: Learning infrastructure
 	sharedMemory    *agent.SharedMemory
+	memStore        *memory.Store
 	exampleStore    *memory.ExampleStore
 	errorStore      *memory.ErrorStore
 	promptOptimizer *agent.PromptOptimizer
@@ -1028,6 +1029,8 @@ func (b *Builder) initIntegrations() error {
 			if b.cfg.Memory.AutoInject {
 				b.promptBuilder.SetMemoryStore(memoryStore)
 			}
+			// Store on app for /memory command access
+			b.memStore = memoryStore
 		}
 
 		// Initialize error store for learning from errors (Phase 3)
@@ -1534,7 +1537,34 @@ func (b *Builder) wireDependencies() error {
 				})
 			}
 		},
+		OnMemoryNotify: func(action, summary string) {
+			if app.program != nil {
+				msg := "Memory " + action
+				if summary != "" {
+					if len(summary) > 50 {
+						summary = summary[:47] + "..."
+					}
+					msg += ": " + summary
+				}
+				app.program.Send(ui.LearningInsightMsg{Message: msg})
+			}
+		},
 	})
+
+	// Wire pin_context persistence: set workDir and load from disk
+	if pinTool, ok := b.registry.Get("pin_context"); ok {
+		if pt, ok := pinTool.(*tools.PinContextTool); ok {
+			pt.SetWorkDir(b.workDir)
+			pt.LoadPersistedPin()
+		}
+	}
+
+	// Wire session memory update notifications
+	if app.sessionMemory != nil {
+		app.sessionMemory.SetOnUpdate(func() {
+			app.safeSendToProgram(ui.LearningInsightMsg{Message: "Session memory updated"})
+		})
+	}
 
 	// Set up TUI callbacks
 	b.tuiModel.SetCallbacks(app.handleSubmit, app.handleQuit)
@@ -1864,6 +1894,7 @@ func (b *Builder) assembleApp() *App {
 		mcpManager:    b.mcpManager,
 		sessionMemory: b.sessionMemory,
 		// Persistent stores for flush on shutdown
+		memoryStore:  b.memStore,
 		errorStore:   b.errorStore,
 		exampleStore: b.exampleStore,
 		// Auto retry tracking

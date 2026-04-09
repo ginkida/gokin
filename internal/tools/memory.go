@@ -139,11 +139,23 @@ func (t *MemoryTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 
 	switch action {
 	case "remember":
-		return t.remember(args)
+		result, err := t.remember(args)
+		if err == nil && result.Success {
+			EmitMemoryNotify(ctx, "saved", truncate(GetStringDefault(args, "content", ""), 60))
+		}
+		return result, err
 	case "recall":
-		return t.recall(args)
+		result, err := t.recall(args)
+		if err == nil && result.Success {
+			EmitMemoryNotify(ctx, "recalled", truncate(GetStringDefault(args, "query", ""), 40))
+		}
+		return result, err
 	case "forget":
-		return t.forget(args)
+		result, err := t.forget(args)
+		if err == nil && result.Success {
+			EmitMemoryNotify(ctx, "forgotten", "")
+		}
+		return result, err
 	case "list":
 		return t.list(args)
 	case "feedback":

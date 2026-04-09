@@ -307,6 +307,9 @@ type ExecutionHandler struct {
 
 	// OnFilePeek is called to show a transient high-resolution snippet of a file.
 	OnFilePeek func(filePath, title, content, action string)
+
+	// OnMemoryNotify is called when a memory operation completes (save, recall, forget).
+	OnMemoryNotify func(action, summary string)
 }
 
 // NewExecutor creates a new tool executor.
@@ -1468,6 +1471,11 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		execCtx = ContextWithProgressCallback(execCtx, func(progress float64, currentStep string) {
 			onDetailed(toolName, progress, currentStep)
 		})
+	}
+
+	// Inject memory notification callback
+	if e.handler != nil && e.handler.OnMemoryNotify != nil {
+		execCtx = ContextWithMemoryNotify(execCtx, e.handler.OnMemoryNotify)
 	}
 
 	start := time.Now()

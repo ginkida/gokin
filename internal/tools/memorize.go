@@ -109,5 +109,6 @@ func (t *MemorizeTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		return NewErrorResult(fmt.Sprintf("failed to save memory: %s", err)), nil
 	}
 
+	EmitMemoryNotify(ctx, "memorized", fmt.Sprintf("%s: %s", infoType, key))
 	return NewSuccessResult(fmt.Sprintf("Successfully memorized %s: %s", infoType, key)), nil
 }

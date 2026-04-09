@@ -67,6 +67,7 @@ type AppInterface interface {
 	GetRecoveryReport() string
 	GetObservabilityReport() string
 	GetSessionGovernanceReport() string
+	GetMemoryReport() string
 }
 
 // Handler manages slash commands.
@@ -125,8 +126,9 @@ func NewHandler() *Handler {
 	// Register onboarding commands
 	h.Register(&QuickstartCommand{})
 
-	// Register stats command
+	// Register stats and memory commands
 	h.Register(&StatsCommand{})
+	h.Register(&MemoryCommand{})
 
 	// Register theme command
 	h.Register(&ThemeCommand{})

@@ -51,10 +51,20 @@ type SessionMemoryManager struct {
 	// LLM summarizer (optional — set via SetSummarizer)
 	summarizer SessionSummarizer
 
+	// Callback fired after each successful extraction (for UI notifications)
+	onUpdate func()
+
 	// Extracted content
 	content string
 
 	mu sync.RWMutex
+}
+
+// SetOnUpdate sets a callback invoked after each successful session memory extraction.
+func (s *SessionMemoryManager) SetOnUpdate(cb func()) {
+	s.mu.Lock()
+	s.onUpdate = cb
+	s.mu.Unlock()
 }
 
 // SessionSummarizer generates a text summary from conversation history.
@@ -203,6 +213,11 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 		"tools", len(toolCounts),
 		"errors", len(errors),
 		"tokens", currentTokens)
+
+	// Notify UI about session memory update
+	if s.onUpdate != nil {
+		s.onUpdate()
+	}
 }
 
 // extractWithLLM uses the Summarizer to create a higher-quality session summary.
@@ -242,6 +257,10 @@ Be concise. Each section should be 1-5 bullet points maximum.`
 	s.mu.Unlock()
 	s.writeToDisk()
 	logging.Debug("LLM session memory extraction completed", "size", len(summary))
+
+	if s.onUpdate != nil {
+		s.onUpdate()
+	}
 }
 
 // GetContent returns the current session memory content for prompt injection.

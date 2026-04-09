@@ -199,6 +199,7 @@ type App struct {
 	sessionMemory *appcontext.SessionMemoryManager
 
 	// Persistent stores (for flush on shutdown)
+	memoryStore  *memory.Store
 	errorStore   *memory.ErrorStore
 	exampleStore *memory.ExampleStore
 
@@ -1085,6 +1086,14 @@ func (a *App) GetSessionGovernanceReport() string {
 		sessionGovernanceSoftLimit,
 		sessionGovernanceKeepTail,
 	)
+}
+
+// GetMemoryReport returns a summary of stored memories for the /memory command.
+func (a *App) GetMemoryReport() string {
+	if a.memoryStore == nil {
+		return "Memory store not configured."
+	}
+	return a.memoryStore.GetReport()
 }
 
 // GetAgentTypeRegistry returns the agent type registry.

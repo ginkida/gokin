@@ -98,3 +98,21 @@ func EmitFilePeek(ctx context.Context, filePath, title, content, action string) 
 		cb(filePath, title, content, action)
 	}
 }
+
+// memoryNotifyKey is the context key for memory notification callbacks.
+type memoryNotifyKey struct{}
+
+// MemoryNotifyCallback is called when a memory operation completes (save, recall, forget).
+type MemoryNotifyCallback func(action, summary string)
+
+// ContextWithMemoryNotify attaches a memory notification callback to the context.
+func ContextWithMemoryNotify(ctx context.Context, cb MemoryNotifyCallback) context.Context {
+	return context.WithValue(ctx, memoryNotifyKey{}, cb)
+}
+
+// EmitMemoryNotify sends a memory notification if a callback is present.
+func EmitMemoryNotify(ctx context.Context, action, summary string) {
+	if cb, ok := ctx.Value(memoryNotifyKey{}).(MemoryNotifyCallback); ok && cb != nil {
+		cb(action, summary)
+	}
+}
