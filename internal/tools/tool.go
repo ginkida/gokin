@@ -222,6 +222,14 @@ func GetBoolDefault(args map[string]any, key string, defaultVal bool) bool {
 	return defaultVal
 }
 
+// isValidGitRef checks that a git ref (branch, tag, commit) doesn't start with
+// a dash, which would cause git to interpret it as a command-line option.
+// Git's own naming rules already forbid refs starting with -, but we enforce
+// it here to prevent option injection via exec.Command arguments.
+func isValidGitRef(ref string) bool {
+	return ref != "" && ref[0] != '-'
+}
+
 // DiffHandler is the interface for prompting user approval of file changes.
 type DiffHandler interface {
 	// PromptDiff displays a diff preview and waits for user approval.

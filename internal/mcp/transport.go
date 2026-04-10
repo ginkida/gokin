@@ -102,9 +102,22 @@ func NewStdioTransport(command string, args []string, env map[string]string) (*S
 	// Use sanitized environment to prevent leaking sensitive env vars
 	cmd.Env = buildSafeEnv()
 
-	// Add user-specified env vars with secret expansion
+	// Add user-specified env vars — only expand variables that are already in the
+	// safe env list. os.ExpandEnv would leak any secret from the parent process
+	// (ANTHROPIC_API_KEY, GITHUB_TOKEN, etc.) to potentially untrusted MCP servers.
+	safeEnvMap := make(map[string]string, len(cmd.Env))
+	for _, entry := range cmd.Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			safeEnvMap[k] = v
+		}
+	}
 	for k, v := range env {
-		expanded := os.ExpandEnv(v) // Expands ${VAR}
+		expanded := os.Expand(v, func(key string) string {
+			if val, ok := safeEnvMap[key]; ok {
+				return val
+			}
+			return "${" + key + "}" // keep unexpanded — don't leak parent env
+		})
 		cmd.Env = append(cmd.Env, k+"="+expanded)
 	}
 

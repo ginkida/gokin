@@ -235,6 +235,10 @@ func (t *GitPRTool) generatePRDescription(ctx context.Context, base string) (str
 		base = t.detectDefaultBranch(ctx)
 	}
 
+	if !isValidGitRef(base) {
+		return "Update", ""
+	}
+
 	// Get commits since base
 	logCmd := exec.CommandContext(ctx, "git", "log", base+"..HEAD", "--oneline", "--no-decorate")
 	logCmd.Dir = t.workDir

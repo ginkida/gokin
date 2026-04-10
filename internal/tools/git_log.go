@@ -98,15 +98,15 @@ func (t *GitLogTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	}
 
 	if since != "" {
-		cmdArgs = append(cmdArgs, "--since="+since)
+		cmdArgs = append(cmdArgs, "--since", since)
 	}
 
 	if author != "" {
-		cmdArgs = append(cmdArgs, "--author="+author)
+		cmdArgs = append(cmdArgs, "--author", author)
 	}
 
 	if grepPattern != "" {
-		cmdArgs = append(cmdArgs, "--grep="+grepPattern)
+		cmdArgs = append(cmdArgs, "--grep", grepPattern)
 	}
 
 	if file != "" {

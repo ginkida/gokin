@@ -207,6 +207,23 @@ func (v *PathValidator) checkSymlink(path string) error {
 	return nil
 }
 
+// IsBlockedWritePath returns an error if the resolved path points to a location
+// that must never be written to by tools. The .git/ directory contains hooks,
+// config, and attributes that can execute arbitrary code on git operations.
+func IsBlockedWritePath(path string) error {
+	cleanPath := filepath.Clean(path)
+	sep := string(filepath.Separator)
+	gitComponent := sep + ".git" + sep
+	gitSuffix := sep + ".git"
+	// Block paths inside .git/ (hooks, config, attributes — all can execute code)
+	// and the .git entry itself (in worktrees it's a file with gitdir: redirect
+	// that can point to a directory with malicious hooks).
+	if strings.Contains(cleanPath, gitComponent) || strings.HasSuffix(cleanPath, gitSuffix) {
+		return fmt.Errorf("writing to .git/ directory is blocked for security reasons")
+	}
+	return nil
+}
+
 // SanitizeFilename sanitizes a filename by removing dangerous characters.
 func SanitizeFilename(name string) string {
 	// Remove null bytes and other dangerous characters

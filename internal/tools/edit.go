@@ -246,6 +246,10 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 	filePath = validPath
 
+	if err := security.IsBlockedWritePath(filePath); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+
 	// Read existing file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -452,6 +456,10 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 	}
 	filePath = validPath
 
+	if err := security.IsBlockedWritePath(filePath); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+
 	// Read file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -544,6 +552,10 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 	}
 	filePath = validPath
 
+	if err := security.IsBlockedWritePath(filePath); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+
 	// Read file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -631,6 +643,10 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 		return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
 	}
 	filePath = validPath
+
+	if err := security.IsBlockedWritePath(filePath); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
 
 	// Read file
 	data, err := os.ReadFile(filePath)

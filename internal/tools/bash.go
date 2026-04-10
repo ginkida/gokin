@@ -34,7 +34,6 @@ var SafeEnvVars = []string{
 	"TEMP",
 	"EDITOR",
 	"VISUAL",
-	"PAGER",
 	"XDG_CONFIG_HOME",
 	"XDG_DATA_HOME",
 	"XDG_CACHE_HOME",
@@ -339,15 +338,16 @@ func (t *BashTool) Validate(args map[string]any) error {
 		return NewValidationError("command", "is required")
 	}
 
-	// Skip command validation in unrestricted mode (sandbox=off + permissions=off)
-	if t.unrestrictedMode {
-		return nil
-	}
-
-	// Use unified command validator for comprehensive security checks
+	// Command safety blocklist always applies regardless of mode — fork bombs,
+	// rm -rf /, reverse shells etc. must never execute.
 	result := security.ValidateCommand(command)
 	if !result.Valid {
 		return NewValidationError("command", fmt.Sprintf("blocked: %s", result.Reason))
+	}
+
+	// Skip permission-level validation in unrestricted mode (sandbox=off + permissions=off)
+	if t.unrestrictedMode {
+		return nil
 	}
 
 	if err := t.validateManagedWorkspaceCommand(command); err != nil {

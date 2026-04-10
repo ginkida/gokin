@@ -148,8 +148,15 @@ func (t *GitBranchTool) createBranch(ctx context.Context, args map[string]any) (
 	name, _ := GetString(args, "name")
 	from, _ := GetString(args, "from")
 
+	if !isValidGitRef(name) {
+		return NewErrorResult("invalid branch name: must not start with '-'"), nil
+	}
+
 	cmdArgs := []string{"checkout", "-b", name}
 	if from != "" {
+		if !isValidGitRef(from) {
+			return NewErrorResult("invalid git ref: must not start with '-'"), nil
+		}
 		cmdArgs = append(cmdArgs, from)
 	}
 

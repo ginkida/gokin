@@ -112,6 +112,10 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	}
 	filePath = validPath
 
+	if err := security.IsBlockedWritePath(filePath); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+
 	// Create parent directories if they don't exist (0750: restrict group write, no others)
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0750); err != nil {

@@ -369,6 +369,19 @@ func copyWorkspaceTree(srcRoot, dstRoot string) error {
 			if err != nil {
 				return err
 			}
+			// Validate symlink target is within srcRoot to prevent escape from
+			// isolated workspace. An external symlink (../../etc/passwd) would
+			// let the agent read/write outside the sandbox.
+			absTarget := linkTarget
+			if !filepath.IsAbs(linkTarget) {
+				absTarget = filepath.Join(filepath.Dir(path), linkTarget)
+			}
+			absTarget = filepath.Clean(absTarget)
+			if !strings.HasPrefix(absTarget, srcRoot+string(filepath.Separator)) && absTarget != srcRoot {
+				logging.Debug("skipping external symlink in workspace copy",
+					"link", path, "target", linkTarget)
+				return nil // skip — don't copy symlinks that escape the workspace
+			}
 			return os.Symlink(linkTarget, targetPath)
 		case mode.IsRegular():
 			return copyRegularFile(path, targetPath, mode.Perm())

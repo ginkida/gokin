@@ -83,9 +83,15 @@ func (t *GitDiffTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 
 	// Handle different diff modes
 	if from != "" && to != "" {
+		if !isValidGitRef(from) || !isValidGitRef(to) {
+			return NewErrorResult("invalid git ref: must not start with '-'"), nil
+		}
 		// Diff between two refs
 		cmdArgs = append(cmdArgs, from+".."+to)
 	} else if from != "" {
+		if !isValidGitRef(from) {
+			return NewErrorResult("invalid git ref: must not start with '-'"), nil
+		}
 		// Diff from a ref to working tree
 		cmdArgs = append(cmdArgs, from)
 	} else if staged {
