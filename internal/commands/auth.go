@@ -56,10 +56,10 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 	p := config.GetProvider(provider)
 	if p == nil {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Unknown provider: %s\n\nUsage:\n", provider))
+		fmt.Fprintf(&sb, "Unknown provider: %s\n\nUsage:\n", provider)
 		for _, kp := range config.Providers {
 			if !kp.KeyOptional {
-				sb.WriteString(fmt.Sprintf("  /login %s <api_key>    - Set %s API key\n", kp.Name, kp.DisplayName))
+				fmt.Fprintf(&sb, "  /login %s <api_key>    - Set %s API key\n", kp.Name, kp.DisplayName)
 			}
 		}
 		return sb.String(), nil
@@ -139,21 +139,21 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 		} else if p.UsesLegacyKey && cfg.API.APIKey != "" && activeProvider == p.Name {
 			status = "configured " + maskKey(cfg.API.APIKey)
 		}
-		sb.WriteString(fmt.Sprintf("%s%s: %s\n", marker, p.DisplayName, status))
+		fmt.Fprintf(&sb, "%s%s: %s\n", marker, p.DisplayName, status)
 	}
 
-	sb.WriteString(fmt.Sprintf("\nActive: %s\n", activeProvider))
-	sb.WriteString(fmt.Sprintf("Model:  %s\n", cfg.Model.Name))
+	fmt.Fprintf(&sb, "\nActive: %s\n", activeProvider)
+	fmt.Fprintf(&sb, "Model:  %s\n", cfg.Model.Name)
 
 	sb.WriteString("\nCommands:\n")
 	for _, p := range config.Providers {
 		if !p.KeyOptional && !p.HasOAuth {
-			sb.WriteString(fmt.Sprintf("  /login %s <key>%s- Set %s API key\n", p.Name, padSpaces(12-len(p.Name)), p.DisplayName))
+			fmt.Fprintf(&sb, "  /login %s <key>%s- Set %s API key\n", p.Name, padSpaces(12-len(p.Name)), p.DisplayName)
 		}
 	}
 	for _, p := range config.Providers {
 		if p.HasOAuth {
-			sb.WriteString(fmt.Sprintf("  /oauth-login %s%s- Login via %s\n", p.Name, padSpaces(9-len(p.Name)), p.DisplayName))
+			fmt.Fprintf(&sb, "  /oauth-login %s%s- Login via %s\n", p.Name, padSpaces(9-len(p.Name)), p.DisplayName)
 		}
 	}
 	sb.WriteString("  /provider              - Switch provider\n")
@@ -196,7 +196,7 @@ func (c *LogoutCommand) Usage() string {
 	var sb strings.Builder
 	sb.WriteString("/logout            - Remove active provider credentials\n")
 	for _, p := range config.Providers {
-		sb.WriteString(fmt.Sprintf("/logout %-10s - Remove %s credentials\n", p.Name, p.DisplayName))
+		fmt.Fprintf(&sb, "/logout %-10s - Remove %s credentials\n", p.Name, p.DisplayName)
 	}
 	sb.WriteString("/logout all        - Remove all credentials")
 	return sb.String()
@@ -350,7 +350,7 @@ func (c *ProviderCommand) Usage() string {
 	var sb strings.Builder
 	sb.WriteString("/provider            - Show current provider\n")
 	for _, p := range config.Providers {
-		sb.WriteString(fmt.Sprintf("/provider %-10s - Switch to %s\n", p.Name, p.DisplayName))
+		fmt.Fprintf(&sb, "/provider %-10s - Switch to %s\n", p.Name, p.DisplayName)
 	}
 	return sb.String()
 }
@@ -394,10 +394,10 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 				status = "available (no key required)"
 			}
 
-			sb.WriteString(fmt.Sprintf("%s%-10s %-16s %s\n", marker, p.Name, p.DisplayName, status))
+			fmt.Fprintf(&sb, "%s%-10s %-16s %s\n", marker, p.Name, p.DisplayName, status)
 		}
 
-		sb.WriteString(fmt.Sprintf("\nCurrent: %s (%s)\n", currentProvider, cfg.Model.Name))
+		fmt.Fprintf(&sb, "\nCurrent: %s (%s)\n", currentProvider, cfg.Model.Name)
 		sb.WriteString("\nUsage: /provider <name>")
 
 		return sb.String(), nil
@@ -467,8 +467,8 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 
 	// Provider & Model
 	provider := cfg.API.GetActiveProvider()
-	sb.WriteString(fmt.Sprintf("Provider: %s\n", provider))
-	sb.WriteString(fmt.Sprintf("Model:    %s\n\n", cfg.Model.Name))
+	fmt.Fprintf(&sb, "Provider: %s\n", provider)
+	fmt.Fprintf(&sb, "Model:    %s\n\n", cfg.Model.Name)
 
 	// API Keys
 	sb.WriteString("API Keys:\n")
@@ -496,14 +496,14 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 		} else if p.UsesLegacyKey && cfg.API.APIKey != "" && provider == p.Name {
 			status = maskKey(cfg.API.APIKey)
 		}
-		sb.WriteString(fmt.Sprintf("  %s: %s\n", p.DisplayName, status))
+		fmt.Fprintf(&sb, "  %s: %s\n", p.DisplayName, status)
 	}
 
 	// Working directory and version
-	sb.WriteString(fmt.Sprintf("\nWorkDir: %s\n", app.GetWorkDir()))
-	sb.WriteString(fmt.Sprintf("Config:  %s\n", config.GetConfigPath()))
+	fmt.Fprintf(&sb, "\nWorkDir: %s\n", app.GetWorkDir())
+	fmt.Fprintf(&sb, "Config:  %s\n", config.GetConfigPath())
 	if v := app.GetVersion(); v != "" {
-		sb.WriteString(fmt.Sprintf("Version: %s\n", v))
+		fmt.Fprintf(&sb, "Version: %s\n", v)
 	}
 
 	return sb.String(), nil
@@ -597,7 +597,7 @@ func (c *OAuthLoginCommand) executeGeminiOAuth(ctx context.Context, cfg *config.
 	var sb strings.Builder
 	sb.WriteString("Opening browser for Google authentication...\n\n")
 	if callbackPort != auth.GeminiOAuthCallbackPort {
-		sb.WriteString(fmt.Sprintf("Using fallback callback port: %d\n\n", callbackPort))
+		fmt.Fprintf(&sb, "Using fallback callback port: %d\n\n", callbackPort)
 	}
 	if !browserOpened {
 		sb.WriteString("Could not open browser automatically.\n")
@@ -691,7 +691,7 @@ func (c *OAuthLoginCommand) executeOpenAIOAuth(ctx context.Context, cfg *config.
 	var sb strings.Builder
 	sb.WriteString("Opening browser for OpenAI authentication...\n\n")
 	if callbackPort != auth.OpenAIOAuthCallbackPort {
-		sb.WriteString(fmt.Sprintf("Using fallback callback port: %d\n\n", callbackPort))
+		fmt.Fprintf(&sb, "Using fallback callback port: %d\n\n", callbackPort)
 	}
 	if !browserOpened {
 		sb.WriteString("Could not open browser automatically.\n")
@@ -794,14 +794,14 @@ func (c *OAuthLogoutCommand) Execute(ctx context.Context, args []string, app App
 			if email == "" {
 				email = "Google Account"
 			}
-			sb.WriteString(fmt.Sprintf("  /oauth-logout gemini  - Sign out from %s\n", email))
+			fmt.Fprintf(&sb, "  /oauth-logout gemini  - Sign out from %s\n", email)
 		}
 		if cfg.API.HasOAuthToken("openai") {
 			email := cfg.API.OpenAIOAuth.Email
 			if email == "" {
 				email = "ChatGPT Account"
 			}
-			sb.WriteString(fmt.Sprintf("  /oauth-logout openai  - Sign out from %s\n", email))
+			fmt.Fprintf(&sb, "  /oauth-logout openai  - Sign out from %s\n", email)
 		}
 		if !cfg.API.HasOAuthToken("gemini") && !cfg.API.HasOAuthToken("openai") {
 			sb.WriteString("No OAuth credentials found.\n")
@@ -828,7 +828,7 @@ func (c *OAuthLogoutCommand) logoutGemini(cfg *config.Config, app AppInterface) 
 
 	var sb strings.Builder
 	if email != "" {
-		sb.WriteString(fmt.Sprintf("Logged out from %s (Gemini)\n\n", email))
+		fmt.Fprintf(&sb, "Logged out from %s (Gemini)\n\n", email)
 	} else {
 		sb.WriteString("Gemini OAuth credentials removed.\n\n")
 	}
@@ -865,7 +865,7 @@ func (c *OAuthLogoutCommand) logoutOpenAI(cfg *config.Config, app AppInterface) 
 
 	var sb strings.Builder
 	if email != "" {
-		sb.WriteString(fmt.Sprintf("Logged out from %s (OpenAI)\n\n", email))
+		fmt.Fprintf(&sb, "Logged out from %s (OpenAI)\n\n", email)
 	} else {
 		sb.WriteString("OpenAI OAuth credentials removed.\n\n")
 	}

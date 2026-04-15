@@ -44,9 +44,9 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	// Token Usage
 	sb.WriteString("💰 Token Usage\n")
-	sb.WriteString(fmt.Sprintf("  Input Tokens:     %s\n", formatNumber(int64(tokenStats.InputTokens))))
-	sb.WriteString(fmt.Sprintf("  Output Tokens:    %s\n", formatNumber(int64(tokenStats.OutputTokens))))
-	sb.WriteString(fmt.Sprintf("  Total Tokens:     %s\n", formatNumber(int64(tokenStats.TotalTokens))))
+	fmt.Fprintf(&sb, "  Input Tokens:     %s\n", formatNumber(int64(tokenStats.InputTokens)))
+	fmt.Fprintf(&sb, "  Output Tokens:    %s\n", formatNumber(int64(tokenStats.OutputTokens)))
+	fmt.Fprintf(&sb, "  Total Tokens:     %s\n", formatNumber(int64(tokenStats.TotalTokens)))
 
 	// Calculate cost using per-model pricing from TokenCounter
 	var totalCost float64
@@ -57,13 +57,13 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 			totalCost = tc.CalculateCost(tokenStats.InputTokens, tokenStats.OutputTokens)
 		}
 	}
-	sb.WriteString(fmt.Sprintf("  Est. Cost:       %s\n\n", appcontext.FormatCost(totalCost)))
+	fmt.Fprintf(&sb, "  Est. Cost:       %s\n\n", appcontext.FormatCost(totalCost))
 
 	// Model Info
 	sb.WriteString("🤖 Model\n")
-	sb.WriteString(fmt.Sprintf("  Name:            %s\n", cfg.Model.Name))
-	sb.WriteString(fmt.Sprintf("  Temperature:     %.1f\n", cfg.Model.Temperature))
-	sb.WriteString(fmt.Sprintf("  Max Tokens:      %s\n\n", formatNumber(int64(cfg.Model.MaxOutputTokens))))
+	fmt.Fprintf(&sb, "  Name:            %s\n", cfg.Model.Name)
+	fmt.Fprintf(&sb, "  Temperature:     %.1f\n", cfg.Model.Temperature)
+	fmt.Fprintf(&sb, "  Max Tokens:      %s\n\n", formatNumber(int64(cfg.Model.MaxOutputTokens)))
 
 	// Context Info
 	sb.WriteString("📚 Context\n")
@@ -74,12 +74,12 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 		metrics := contextManager.GetMetrics()
 		summary := metrics.GetSummary()
 
-		sb.WriteString(fmt.Sprintf("  Requests:        %d\n", summary.Requests))
-		sb.WriteString(fmt.Sprintf("  Optimizations:   %d\n", summary.Optimizations))
-		sb.WriteString(fmt.Sprintf("  Summaries:       %d\n", summary.Summaries))
-		sb.WriteString(fmt.Sprintf("  Tokens Processed: %s\n", formatNumber(summary.TokensProcessed)))
-		sb.WriteString(fmt.Sprintf("  Tokens Saved:     %s\n", formatNumber(summary.TokensSaved)))
-		sb.WriteString(fmt.Sprintf("  Cache Hit Rate:  %.1f%%\n\n", summary.CacheHitRate*100))
+		fmt.Fprintf(&sb, "  Requests:        %d\n", summary.Requests)
+		fmt.Fprintf(&sb, "  Optimizations:   %d\n", summary.Optimizations)
+		fmt.Fprintf(&sb, "  Summaries:       %d\n", summary.Summaries)
+		fmt.Fprintf(&sb, "  Tokens Processed: %s\n", formatNumber(summary.TokensProcessed))
+		fmt.Fprintf(&sb, "  Tokens Saved:     %s\n", formatNumber(summary.TokensSaved))
+		fmt.Fprintf(&sb, "  Cache Hit Rate:  %.1f%%\n\n", summary.CacheHitRate*100)
 	} else {
 		sb.WriteString("  (context manager not available)\n\n")
 	}
@@ -88,14 +88,14 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	sb.WriteString("💬 Session\n")
 	if session := app.GetSession(); session != nil {
 		history := session.GetHistory()
-		sb.WriteString(fmt.Sprintf("  Messages:        %d\n", len(history)))
+		fmt.Fprintf(&sb, "  Messages:        %d\n", len(history))
 	}
 
 	// Project Info
 	sb.WriteString("\n📁 Project\n")
 	if projectInfo != nil {
-		sb.WriteString(fmt.Sprintf("  Name:            %s\n", projectInfo.Name))
-		sb.WriteString(fmt.Sprintf("  Type:            %s\n", projectInfo.Type))
+		fmt.Fprintf(&sb, "  Name:            %s\n", projectInfo.Name)
+		fmt.Fprintf(&sb, "  Type:            %s\n", projectInfo.Type)
 		sb.WriteString("\n")
 	} else {
 		sb.WriteString("  (no project info available)\n\n")
@@ -107,7 +107,7 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 		if startTime, ok := sessionStartTime.(time.Time); ok {
 			duration := time.Since(startTime)
 			sb.WriteString("⏱️  Duration\n")
-			sb.WriteString(fmt.Sprintf("  Session Length:  %s\n\n", format.Duration(duration)))
+			fmt.Fprintf(&sb, "  Session Length:  %s\n\n", format.Duration(duration))
 		}
 	}
 

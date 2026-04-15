@@ -67,7 +67,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	var sb strings.Builder
 
 	// Essential Commands — the most useful commands at a glance
-	sb.WriteString(fmt.Sprintf("\n%s─── Essential Commands ───%s\n\n", colorYellow, colorReset))
+	fmt.Fprintf(&sb, "\n%s─── Essential Commands ───%s\n\n", colorYellow, colorReset)
 
 	essentials := []struct {
 		name string
@@ -83,11 +83,11 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	}
 
 	for _, e := range essentials {
-		sb.WriteString(fmt.Sprintf("  %s/%-10s%s %s\n", colorGreen, e.name, colorReset, e.desc))
+		fmt.Fprintf(&sb, "  %s/%-10s%s %s\n", colorGreen, e.name, colorReset, e.desc)
 	}
 
 	// All Commands grouped by 6 categories
-	sb.WriteString(fmt.Sprintf("\n%s─── All Commands ───%s\n", colorYellow, colorReset))
+	fmt.Fprintf(&sb, "\n%s─── All Commands ───%s\n", colorYellow, colorReset)
 
 	categories := []struct {
 		name     string
@@ -122,15 +122,15 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("\n  %s%s%s\n", colorBold, cat.name, colorReset))
+		fmt.Fprintf(&sb, "\n  %s%s%s\n", colorBold, cat.name, colorReset)
 		for _, cmd := range catCmds {
-			sb.WriteString(fmt.Sprintf("    %s/%-22s%s %s%s%s\n", colorGreen, cmd.Name(), colorReset, colorCyan, cmd.Description(), colorReset))
+			fmt.Fprintf(&sb, "    %s/%-22s%s %s%s%s\n", colorGreen, cmd.Name(), colorReset, colorCyan, cmd.Description(), colorReset)
 		}
 	}
 
 	// Show any uncategorized commands
 	if len(cmdMap) > 0 {
-		sb.WriteString(fmt.Sprintf("\n  %sOther%s\n", colorBold, colorReset))
+		fmt.Fprintf(&sb, "\n  %sOther%s\n", colorBold, colorReset)
 		var remaining []Command
 		for _, cmd := range cmdMap {
 			remaining = append(remaining, cmd)
@@ -139,12 +139,12 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 			return remaining[i].Name() < remaining[j].Name()
 		})
 		for _, cmd := range remaining {
-			sb.WriteString(fmt.Sprintf("    %s/%-22s%s %s%s%s\n", colorGreen, cmd.Name(), colorReset, colorCyan, cmd.Description(), colorReset))
+			fmt.Fprintf(&sb, "    %s/%-22s%s %s%s%s\n", colorGreen, cmd.Name(), colorReset, colorCyan, cmd.Description(), colorReset)
 		}
 	}
 
 	// Keyboard Shortcuts
-	sb.WriteString(fmt.Sprintf("\n%s─── Keyboard Shortcuts ───%s\n\n", colorYellow, colorReset))
+	fmt.Fprintf(&sb, "\n%s─── Keyboard Shortcuts ───%s\n\n", colorYellow, colorReset)
 	shortcuts := []struct {
 		key  string
 		desc string
@@ -160,10 +160,10 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"Esc", "Cancel current operation"},
 	}
 	for _, s := range shortcuts {
-		sb.WriteString(fmt.Sprintf("  %s%-14s%s %s\n", colorGreen, s.key, colorReset, s.desc))
+		fmt.Fprintf(&sb, "  %s%-14s%s %s\n", colorGreen, s.key, colorReset, s.desc)
 	}
 
-	sb.WriteString(fmt.Sprintf("\nTip: Use %sCtrl+P%s to access all commands quickly.\n", colorGreen, colorReset))
+	fmt.Fprintf(&sb, "\nTip: Use %sCtrl+P%s to access all commands quickly.\n", colorGreen, colorReset)
 
 	return sb.String(), nil
 }
@@ -350,8 +350,8 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 				summary = "(no summary)"
 			}
 			age := formatTimeAgo(info.LastActive)
-			sb.WriteString(fmt.Sprintf("  %s%s%s  %d msgs, %s — %s\n",
-				colorGreen, info.ID, colorReset, info.MessageCount, age, summary))
+			fmt.Fprintf(&sb, "  %s%s%s  %d msgs, %s — %s\n",
+				colorGreen, info.ID, colorReset, info.MessageCount, age, summary)
 			shown++
 			if shown >= 5 {
 				break
@@ -360,7 +360,7 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 		if shown == 0 {
 			return "No sessions for current project. Use /sessions --all to see all.", nil
 		}
-		sb.WriteString(fmt.Sprintf("\nExample: /resume %s", sessions[0].ID))
+		fmt.Fprintf(&sb, "\nExample: /resume %s", sessions[0].ID)
 		return sb.String(), nil
 	}
 
@@ -464,7 +464,7 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 		}
 
 		age := formatTimeAgo(info.LastActive)
-		sb.WriteString(fmt.Sprintf("  %s (%d messages, %s) — %s%s\n", info.ID, info.MessageCount, age, summary, dirLabel))
+		fmt.Fprintf(&sb, "  %s (%d messages, %s) — %s%s\n", info.ID, info.MessageCount, age, summary, dirLabel)
 		shown++
 	}
 
@@ -546,17 +546,17 @@ func (c *DoctorCommand) GetMetadata() CommandMetadata {
 
 func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`
+	fmt.Fprintf(&sb, `
 %s╔═══════════════════════════════════════════════════════════════╗
 ║                    🔍 System Diagnostics                    ║
 ╚═══════════════════════════════════════════════════════════════╝%s
-`, colorCyan, colorReset))
+`, colorCyan, colorReset)
 
 	if v := app.GetVersion(); v != "" {
-		sb.WriteString(fmt.Sprintf("  Version: %s%s%s\n", colorGreen, v, colorReset))
+		fmt.Fprintf(&sb, "  Version: %s%s%s\n", colorGreen, v, colorReset)
 	}
 
-	sb.WriteString(fmt.Sprintf("\n%s─── Authentication ───%s\n", colorCyan, colorReset))
+	fmt.Fprintf(&sb, "\n%s─── Authentication ───%s\n", colorCyan, colorReset)
 
 	cfg := app.GetConfig()
 	issues := []string{}
@@ -567,7 +567,7 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	if cfg != nil && cfg.API.Backend != "" {
 		backend = cfg.API.Backend
 	}
-	sb.WriteString(fmt.Sprintf("  Backend: %s%s%s\n", colorGreen, backend, colorReset))
+	fmt.Fprintf(&sb, "  Backend: %s%s%s\n", colorGreen, backend, colorReset)
 
 	hasKey := false
 	if cfg != nil {
@@ -581,9 +581,9 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	if hasKey {
-		sb.WriteString(fmt.Sprintf("  Status: %s✓ API key configured%s\n", colorGreen, colorReset))
+		fmt.Fprintf(&sb, "  Status: %s✓ API key configured%s\n", colorGreen, colorReset)
 	} else {
-		sb.WriteString(fmt.Sprintf("  Status: %s✗ API key not configured%s\n", colorRed, colorReset))
+		fmt.Fprintf(&sb, "  Status: %s✗ API key not configured%s\n", colorRed, colorReset)
 		issues = append(issues, "API key not found")
 		envHint := "GEMINI_API_KEY"
 		if p := config.GetProvider(backend); p != nil && len(p.EnvVars) > 0 {
@@ -592,38 +592,38 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 		solutions = append(solutions, fmt.Sprintf("Use /login <provider> <api_key> or set %s", envHint))
 	}
 
-	sb.WriteString(fmt.Sprintf("\n%s─── Environment ───%s\n", colorCyan, colorReset))
+	fmt.Fprintf(&sb, "\n%s─── Environment ───%s\n", colorCyan, colorReset)
 
 	// Config file
 	configPath := config.GetConfigPath()
 	if _, err := os.Stat(configPath); err == nil {
-		sb.WriteString(fmt.Sprintf("  %s✓%s Config: %s\n", colorGreen, colorReset, configPath))
+		fmt.Fprintf(&sb, "  %s✓%s Config: %s\n", colorGreen, colorReset, configPath)
 	} else {
-		sb.WriteString(fmt.Sprintf("  %s○%s Config not found (using defaults)\n", colorYellow, colorReset))
+		fmt.Fprintf(&sb, "  %s○%s Config not found (using defaults)\n", colorYellow, colorReset)
 	}
 
 	// Git
 	if _, err := exec.LookPath("git"); err == nil {
-		sb.WriteString(fmt.Sprintf("  %s✓%s git installed\n", colorGreen, colorReset))
+		fmt.Fprintf(&sb, "  %s✓%s git installed\n", colorGreen, colorReset)
 	} else {
-		sb.WriteString(fmt.Sprintf("  %s✗%s git not installed\n", colorRed, colorReset))
+		fmt.Fprintf(&sb, "  %s✗%s git not installed\n", colorRed, colorReset)
 		issues = append(issues, "Git not installed")
 		solutions = append(solutions, "Install git: apt install git / brew install git")
 	}
 
 	// GitHub CLI
 	if _, err := exec.LookPath("gh"); err == nil {
-		sb.WriteString(fmt.Sprintf("  %s✓%s gh (GitHub CLI) installed\n", colorGreen, colorReset))
+		fmt.Fprintf(&sb, "  %s✓%s gh (GitHub CLI) installed\n", colorGreen, colorReset)
 	} else {
-		sb.WriteString(fmt.Sprintf("  %s○%s gh (GitHub CLI) not installed (optional for /pr)\n", colorYellow, colorReset))
+		fmt.Fprintf(&sb, "  %s○%s gh (GitHub CLI) not installed (optional for /pr)\n", colorYellow, colorReset)
 	}
 
 	// Git repo check
 	workDir := app.GetWorkDir()
 	if _, err := os.Stat(filepath.Join(workDir, ".git")); err == nil {
-		sb.WriteString(fmt.Sprintf("  %s✓%s Working directory is a git repository\n", colorGreen, colorReset))
+		fmt.Fprintf(&sb, "  %s✓%s Working directory is a git repository\n", colorGreen, colorReset)
 	} else {
-		sb.WriteString(fmt.Sprintf("  %s○%s Not a git repository (git tools will be limited)\n", colorYellow, colorReset))
+		fmt.Fprintf(&sb, "  %s○%s Not a git repository (git tools will be limited)\n", colorYellow, colorReset)
 	}
 
 	// Project instruction file (GOKIN.md/CLAUDE.md and other supported paths)
@@ -636,37 +636,37 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 	}
 	if foundInstruction != "" {
-		sb.WriteString(fmt.Sprintf("  %s✓%s Instruction file found: %s\n", colorGreen, colorReset, foundInstruction))
+		fmt.Fprintf(&sb, "  %s✓%s Instruction file found: %s\n", colorGreen, colorReset, foundInstruction)
 	} else {
-		sb.WriteString(fmt.Sprintf("  %s○%s No project instruction file found (GOKIN.md/CLAUDE.md)\n", colorYellow, colorReset))
+		fmt.Fprintf(&sb, "  %s○%s No project instruction file found (GOKIN.md/CLAUDE.md)\n", colorYellow, colorReset)
 	}
 
 	// Data directories
 	dataDir, _ := getDataDir()
-	sb.WriteString(fmt.Sprintf("\n%s─── Directories ───%s\n", colorCyan, colorReset))
-	sb.WriteString(fmt.Sprintf("  Data: %s\n", dataDir))
+	fmt.Fprintf(&sb, "\n%s─── Directories ───%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  Data: %s\n", dataDir)
 
 	// Summary
-	sb.WriteString(fmt.Sprintf("\n%s─── Summary ───%s\n", colorCyan, colorReset))
+	fmt.Fprintf(&sb, "\n%s─── Summary ───%s\n", colorCyan, colorReset)
 
 	if len(issues) == 0 {
-		sb.WriteString(fmt.Sprintf("  %s✓ All systems working properly!%s\n", colorGreen, colorReset))
+		fmt.Fprintf(&sb, "  %s✓ All systems working properly!%s\n", colorGreen, colorReset)
 	} else {
-		sb.WriteString(fmt.Sprintf("  %s⚠ Issues detected:%s\n", colorYellow, colorReset))
+		fmt.Fprintf(&sb, "  %s⚠ Issues detected:%s\n", colorYellow, colorReset)
 		for i, issue := range issues {
-			sb.WriteString(fmt.Sprintf("    %d. %s\n", i+1, issue))
+			fmt.Fprintf(&sb, "    %d. %s\n", i+1, issue)
 		}
 
-		sb.WriteString(fmt.Sprintf("\n%sSolutions:%s\n", colorGreen, colorReset))
+		fmt.Fprintf(&sb, "\n%sSolutions:%s\n", colorGreen, colorReset)
 		for i, solution := range solutions {
-			sb.WriteString(fmt.Sprintf("    %d. %s\n", i+1, solution))
+			fmt.Fprintf(&sb, "    %d. %s\n", i+1, solution)
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n%sCommands to fix issues:%s\n", colorCyan, colorReset))
-	sb.WriteString(fmt.Sprintf("  %s/login%s    - Set up authentication\n", colorGreen, colorReset))
-	sb.WriteString(fmt.Sprintf("  %s/test%s     - Test all settings\n", colorGreen, colorReset))
-	sb.WriteString(fmt.Sprintf("  %s/init%s     - Create GOKIN.md template\n", colorGreen, colorReset))
+	fmt.Fprintf(&sb, "\n%sCommands to fix issues:%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  %s/login%s    - Set up authentication\n", colorGreen, colorReset)
+	fmt.Fprintf(&sb, "  %s/test%s     - Test all settings\n", colorGreen, colorReset)
+	fmt.Fprintf(&sb, "  %s/init%s     - Create GOKIN.md template\n", colorGreen, colorReset)
 
 	return sb.String(), nil
 }
@@ -686,7 +686,7 @@ func (c *ShortcutsCommand) GetMetadata() CommandMetadata {
 
 func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("\n%s Keyboard Shortcuts%s  (also: press ? in empty input)\n\n", colorCyan, colorReset))
+	fmt.Fprintf(&sb, "\n%s Keyboard Shortcuts%s  (also: press ? in empty input)\n\n", colorCyan, colorReset)
 
 	shortcuts := []struct {
 		keys, desc string
@@ -711,7 +711,7 @@ func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppIn
 	}
 
 	for _, s := range shortcuts {
-		sb.WriteString(fmt.Sprintf("  %s%-22s%s %s\n", colorGreen, s.keys, colorReset, s.desc))
+		fmt.Fprintf(&sb, "  %s%-22s%s %s\n", colorGreen, s.keys, colorReset, s.desc)
 	}
 
 	return sb.String(), nil
@@ -745,47 +745,47 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%sCurrent Configuration%s\n\n", colorCyan, colorReset))
+	fmt.Fprintf(&sb, "%sCurrent Configuration%s\n\n", colorCyan, colorReset)
 
 	// API
-	sb.WriteString(fmt.Sprintf("%s─── API ───%s\n", colorCyan, colorReset))
-	sb.WriteString(fmt.Sprintf("  Provider: %s%s%s\n", colorGreen, cfg.API.GetActiveProvider(), colorReset))
+	fmt.Fprintf(&sb, "%s─── API ───%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  Provider: %s%s%s\n", colorGreen, cfg.API.GetActiveProvider(), colorReset)
 
 	// Model
-	sb.WriteString(fmt.Sprintf("\n%s─── Model ───%s\n", colorCyan, colorReset))
-	sb.WriteString(fmt.Sprintf("  Name:        %s%s%s\n", colorGreen, cfg.Model.Name, colorReset))
-	sb.WriteString(fmt.Sprintf("  Temperature: %.1f\n", cfg.Model.Temperature))
-	sb.WriteString(fmt.Sprintf("  Max Output:  %d tokens\n", cfg.Model.MaxOutputTokens))
+	fmt.Fprintf(&sb, "\n%s─── Model ───%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  Name:        %s%s%s\n", colorGreen, cfg.Model.Name, colorReset)
+	fmt.Fprintf(&sb, "  Temperature: %.1f\n", cfg.Model.Temperature)
+	fmt.Fprintf(&sb, "  Max Output:  %d tokens\n", cfg.Model.MaxOutputTokens)
 
 	// UI
-	sb.WriteString(fmt.Sprintf("\n%s─── UI ───%s\n", colorCyan, colorReset))
-	sb.WriteString(fmt.Sprintf("  Theme:  %s\n", cfg.UI.Theme))
-	sb.WriteString(fmt.Sprintf("  Tokens: %v  Stream: %v  Bell: %v\n",
-		cfg.UI.ShowTokenUsage, cfg.UI.StreamOutput, cfg.UI.Bell))
+	fmt.Fprintf(&sb, "\n%s─── UI ───%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  Theme:  %s\n", cfg.UI.Theme)
+	fmt.Fprintf(&sb, "  Tokens: %v  Stream: %v  Bell: %v\n",
+		cfg.UI.ShowTokenUsage, cfg.UI.StreamOutput, cfg.UI.Bell)
 
 	// Context
-	sb.WriteString(fmt.Sprintf("\n%s─── Context ───%s\n", colorCyan, colorReset))
+	fmt.Fprintf(&sb, "\n%s─── Context ───%s\n", colorCyan, colorReset)
 	maxInput := cfg.Context.MaxInputTokens
 	if maxInput == 0 {
 		sb.WriteString("  Max Input: (model default)\n")
 	} else {
-		sb.WriteString(fmt.Sprintf("  Max Input: %d tokens\n", maxInput))
+		fmt.Fprintf(&sb, "  Max Input: %d tokens\n", maxInput)
 	}
-	sb.WriteString(fmt.Sprintf("  Auto-Compact: %v\n", cfg.Context.EnableAutoSummary))
+	fmt.Fprintf(&sb, "  Auto-Compact: %v\n", cfg.Context.EnableAutoSummary)
 
 	// Plan
-	sb.WriteString(fmt.Sprintf("\n%s─── Plan ───%s\n", colorCyan, colorReset))
-	sb.WriteString(fmt.Sprintf("  Delegate: %v  Clear Context: %v\n",
-		cfg.Plan.DelegateSteps, cfg.Plan.ClearContext))
+	fmt.Fprintf(&sb, "\n%s─── Plan ───%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  Delegate: %v  Clear Context: %v\n",
+		cfg.Plan.DelegateSteps, cfg.Plan.ClearContext)
 
 	// Permissions
-	sb.WriteString(fmt.Sprintf("\n%s─── Permissions ───%s\n", colorCyan, colorReset))
-	sb.WriteString(fmt.Sprintf("  Enabled: %v  Policy: %s\n",
-		cfg.Permission.Enabled, cfg.Permission.DefaultPolicy))
+	fmt.Fprintf(&sb, "\n%s─── Permissions ───%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  Enabled: %v  Policy: %s\n",
+		cfg.Permission.Enabled, cfg.Permission.DefaultPolicy)
 
 	// Config path
 	configPath := config.GetConfigPath()
-	sb.WriteString(fmt.Sprintf("\n%sConfig file:%s %s\n", colorCyan, colorReset, configPath))
+	fmt.Fprintf(&sb, "\n%sConfig file:%s %s\n", colorCyan, colorReset, configPath)
 
 	return sb.String(), nil
 }
