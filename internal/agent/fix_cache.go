@@ -293,11 +293,11 @@ func (fc *FixCache) evictLeastUsed() {
 func FormatCachedFix(fix *FixRecord) string {
 	var sb strings.Builder
 	sb.WriteString("**Session Fix Cache Hit:**\n\n")
-	sb.WriteString(fmt.Sprintf("A similar %s error was fixed earlier in this session.\n\n", fix.Signature.Category))
-	sb.WriteString(fmt.Sprintf("**Original error:** %s\n\n", truncateStr(fix.ErrorMsg, 200)))
+	fmt.Fprintf(&sb, "A similar %s error was fixed earlier in this session.\n\n", fix.Signature.Category)
+	fmt.Fprintf(&sb, "**Original error:** %s\n\n", truncateStr(fix.ErrorMsg, 200))
 	sb.WriteString("**Fix sequence:**\n")
 	for i, call := range fix.FixCalls {
-		sb.WriteString(fmt.Sprintf("  %d. `%s`", i+1, call.ToolName))
+		fmt.Fprintf(&sb, "  %d. `%s`", i+1, call.ToolName)
 		if len(call.Args) > 0 {
 			// Show key args briefly
 			var argParts []string
@@ -312,12 +312,12 @@ func FormatCachedFix(fix *FixRecord) string {
 				argParts = argParts[:3]
 				argParts = append(argParts, "...")
 			}
-			sb.WriteString(fmt.Sprintf(" (%s)", strings.Join(argParts, ", ")))
+			fmt.Fprintf(&sb, " (%s)", strings.Join(argParts, ", "))
 		}
 		sb.WriteString("\n")
 	}
 	if fix.HitCount > 0 {
-		sb.WriteString(fmt.Sprintf("\n(Cache stats: %d hits, %d successes)\n", fix.HitCount, fix.SuccessCount))
+		fmt.Fprintf(&sb, "\n(Cache stats: %d hits, %d successes)\n", fix.HitCount, fix.SuccessCount)
 	}
 	sb.WriteString("\nApply a similar fix sequence to resolve this error.\n")
 	return sb.String()

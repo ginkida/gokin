@@ -727,15 +727,15 @@ func (a *App) GetRuntimeHealthReport() string {
 		if s.Degraded {
 			mode = fmt.Sprintf("degraded (%v remaining)", s.DegradedRemaining)
 		}
-		sb.WriteString(fmt.Sprintf("- mode: %s\n", mode))
-		sb.WriteString(fmt.Sprintf("- consecutive_failures: %d\n", s.ConsecutiveFailures))
-		sb.WriteString(fmt.Sprintf("- window_failures: %d (start: %s)\n",
-			s.WindowFailures, s.WindowStartedAt.Format("2006-01-02 15:04:05")))
+		fmt.Fprintf(&sb, "- mode: %s\n", mode)
+		fmt.Fprintf(&sb, "- consecutive_failures: %d\n", s.ConsecutiveFailures)
+		fmt.Fprintf(&sb, "- window_failures: %d (start: %s)\n",
+			s.WindowFailures, s.WindowStartedAt.Format("2006-01-02 15:04:05"))
 	}
 
 	age := a.stepHeartbeatAge()
 	if age > 0 {
-		sb.WriteString(fmt.Sprintf("- step_heartbeat_age: %v\n", age.Round(time.Second)))
+		fmt.Fprintf(&sb, "- step_heartbeat_age: %v\n", age.Round(time.Second))
 	} else {
 		sb.WriteString("- step_heartbeat_age: n/a\n")
 	}
@@ -806,12 +806,12 @@ func (a *App) GetLedgerReport() string {
 	steps := p.GetStepsSnapshot()
 	ledger := p.GetRunLedgerSnapshot()
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Run ledger for %s (%s)\n", p.Title, p.ID))
+	fmt.Fprintf(&sb, "Run ledger for %s (%s)\n", p.Title, p.ID)
 
 	for _, step := range steps {
 		entry := ledger[step.ID]
 		if entry == nil {
-			sb.WriteString(fmt.Sprintf("- step %d (%s): no side effects recorded\n", step.ID, step.Title))
+			fmt.Fprintf(&sb, "- step %d (%s): no side effects recorded\n", step.ID, step.Title)
 			continue
 		}
 		status := "incomplete"
@@ -820,10 +820,10 @@ func (a *App) GetLedgerReport() string {
 		} else if entry.PartialEffects {
 			status = "partial_effects"
 		}
-		sb.WriteString(fmt.Sprintf(
+		fmt.Fprintf(&sb,
 			"- step %d (%s): %s, tool_calls=%d, files=%d, commands=%d, duplicates=%d\n",
 			step.ID, step.Title, status, entry.ToolCalls, len(entry.FilesTouched), len(entry.Commands), entry.DuplicateEffects,
-		))
+		)
 	}
 
 	return sb.String()
@@ -853,48 +853,48 @@ func (a *App) GetPlanProofReport(stepID int) string {
 	entry := ledger[target.ID]
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Plan proof for %s (%s)\n", p.Title, p.ID))
-	sb.WriteString(fmt.Sprintf("Step %d: %s\n", target.ID, target.Title))
-	sb.WriteString(fmt.Sprintf("- status: %s\n", target.Status.String()))
+	fmt.Fprintf(&sb, "Plan proof for %s (%s)\n", p.Title, p.ID)
+	fmt.Fprintf(&sb, "Step %d: %s\n", target.ID, target.Title)
+	fmt.Fprintf(&sb, "- status: %s\n", target.Status.String())
 	if !target.StartTime.IsZero() {
-		sb.WriteString(fmt.Sprintf("- started: %s\n", target.StartTime.Format("2006-01-02 15:04:05")))
+		fmt.Fprintf(&sb, "- started: %s\n", target.StartTime.Format("2006-01-02 15:04:05"))
 	}
 	if !target.EndTime.IsZero() {
-		sb.WriteString(fmt.Sprintf("- ended: %s\n", target.EndTime.Format("2006-01-02 15:04:05")))
+		fmt.Fprintf(&sb, "- ended: %s\n", target.EndTime.Format("2006-01-02 15:04:05"))
 	}
 	if strings.TrimSpace(target.Error) != "" {
-		sb.WriteString(fmt.Sprintf("- error: %s\n", target.Error))
+		fmt.Fprintf(&sb, "- error: %s\n", target.Error)
 	}
 
 	sb.WriteString("\nContract:\n")
 	if len(target.Inputs) > 0 {
-		sb.WriteString(fmt.Sprintf("- inputs: %s\n", strings.Join(target.Inputs, "; ")))
+		fmt.Fprintf(&sb, "- inputs: %s\n", strings.Join(target.Inputs, "; "))
 	}
 	if ea := strings.TrimSpace(target.ExpectedArtifact); ea != "" {
-		sb.WriteString(fmt.Sprintf("- expected_artifact: %s\n", ea))
+		fmt.Fprintf(&sb, "- expected_artifact: %s\n", ea)
 	}
 	if len(target.ExpectedArtifactPaths) > 0 {
-		sb.WriteString(fmt.Sprintf("- expected_artifact_paths: %s\n", strings.Join(target.ExpectedArtifactPaths, ", ")))
+		fmt.Fprintf(&sb, "- expected_artifact_paths: %s\n", strings.Join(target.ExpectedArtifactPaths, ", "))
 	} else {
 		sb.WriteString("- expected_artifact_paths: (none)\n")
 	}
 	if len(target.SuccessCriteria) > 0 {
-		sb.WriteString(fmt.Sprintf("- success_criteria: %s\n", strings.Join(target.SuccessCriteria, "; ")))
+		fmt.Fprintf(&sb, "- success_criteria: %s\n", strings.Join(target.SuccessCriteria, "; "))
 	}
 	if len(target.VerifyCommands) > 0 {
-		sb.WriteString(fmt.Sprintf("- verify_commands: %s\n", strings.Join(target.VerifyCommands, "; ")))
+		fmt.Fprintf(&sb, "- verify_commands: %s\n", strings.Join(target.VerifyCommands, "; "))
 	}
 	if rb := strings.TrimSpace(target.Rollback); rb != "" {
-		sb.WriteString(fmt.Sprintf("- rollback: %s\n", rb))
+		fmt.Fprintf(&sb, "- rollback: %s\n", rb)
 	}
 
 	sb.WriteString("\nProof:\n")
 	if note := strings.TrimSpace(target.VerificationNote); note != "" {
-		sb.WriteString(fmt.Sprintf("- verification_note: %s\n", note))
+		fmt.Fprintf(&sb, "- verification_note: %s\n", note)
 	} else {
 		sb.WriteString("- verification_note: (empty)\n")
 	}
-	sb.WriteString(fmt.Sprintf("- evidence_items: %d\n", len(target.Evidence)))
+	fmt.Fprintf(&sb, "- evidence_items: %d\n", len(target.Evidence))
 	for _, evidence := range target.Evidence {
 		evidence = strings.TrimSpace(evidence)
 		if evidence == "" {
@@ -918,20 +918,20 @@ func (a *App) GetPlanProofReport(stepID int) string {
 	if entry == nil {
 		sb.WriteString("- no ledger entry for step\n")
 	} else {
-		sb.WriteString(fmt.Sprintf("- tool_calls: %d\n", entry.ToolCalls))
-		sb.WriteString(fmt.Sprintf("- tools: %d\n", len(entry.Tools)))
+		fmt.Fprintf(&sb, "- tool_calls: %d\n", entry.ToolCalls)
+		fmt.Fprintf(&sb, "- tools: %d\n", len(entry.Tools))
 		if len(entry.Tools) > 0 {
 			sb.WriteString("  ")
 			sb.WriteString(strings.Join(entry.Tools, ", "))
 			sb.WriteString("\n")
 		}
-		sb.WriteString(fmt.Sprintf("- files_touched: %d\n", len(entry.FilesTouched)))
+		fmt.Fprintf(&sb, "- files_touched: %d\n", len(entry.FilesTouched))
 		if len(entry.FilesTouched) > 0 {
 			sb.WriteString("  ")
 			sb.WriteString(strings.Join(entry.FilesTouched, ", "))
 			sb.WriteString("\n")
 		}
-		sb.WriteString(fmt.Sprintf("- commands: %d\n", len(entry.Commands)))
+		fmt.Fprintf(&sb, "- commands: %d\n", len(entry.Commands))
 		if len(entry.Commands) > 0 {
 			for _, cmd := range entry.Commands {
 				sb.WriteString("  - ")
@@ -939,9 +939,9 @@ func (a *App) GetPlanProofReport(stepID int) string {
 				sb.WriteString("\n")
 			}
 		}
-		sb.WriteString(fmt.Sprintf("- duplicate_effects: %d\n", entry.DuplicateEffects))
-		sb.WriteString(fmt.Sprintf("- partial_effects: %t\n", entry.PartialEffects))
-		sb.WriteString(fmt.Sprintf("- completed: %t\n", entry.Completed))
+		fmt.Fprintf(&sb, "- duplicate_effects: %d\n", entry.DuplicateEffects)
+		fmt.Fprintf(&sb, "- partial_effects: %t\n", entry.PartialEffects)
+		fmt.Fprintf(&sb, "- completed: %t\n", entry.Completed)
 	}
 
 	if a.config != nil && a.config.Plan.RequireExpectedArtifactPaths {
@@ -1022,12 +1022,12 @@ func (a *App) GetJournalReport() string {
 	var sb strings.Builder
 	sb.WriteString("Execution journal (latest 30):\n")
 	for _, e := range entries {
-		sb.WriteString(fmt.Sprintf("- %s  %s", e.Timestamp.Format("15:04:05"), e.Event))
+		fmt.Fprintf(&sb, "- %s  %s", e.Timestamp.Format("15:04:05"), e.Event)
 		if len(e.Details) > 0 {
 			if p, ok := e.Details["message_preview"].(string); ok && p != "" {
-				sb.WriteString(fmt.Sprintf(" | %s", p))
+				fmt.Fprintf(&sb, " | %s", p)
 			} else if r, ok := e.Details["reason"].(string); ok && r != "" {
-				sb.WriteString(fmt.Sprintf(" | %s", r))
+				fmt.Fprintf(&sb, " | %s", r)
 			}
 		}
 		sb.WriteString("\n")

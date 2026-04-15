@@ -69,10 +69,10 @@ func (a *App) HandleInsightsCommand() string {
 					}
 				}
 
-				builder.WriteString(fmt.Sprintf("  %-20s  %8s  %10d  %12s  %s",
+				fmt.Fprintf(&builder, "  %-20s  %8s  %10d  %12s  %s",
 					name, rateStr, total,
 					dimStyle.Render(formatInsightDuration(m.AvgDuration)),
-					dimStyle.Render(lastUsed)))
+					dimStyle.Render(lastUsed))
 				builder.WriteString("\n")
 
 				// Show top task types on second line if any
@@ -120,17 +120,17 @@ func (a *App) HandleInsightsCommand() string {
 
 	if a.metaAgent != nil {
 		stats := a.metaAgent.GetStats()
-		builder.WriteString(fmt.Sprintf("  Active agents:        %s\n",
-			valueStyle.Render(fmt.Sprintf("%d", stats["active_agents"]))))
-		builder.WriteString(fmt.Sprintf("  Total interventions:  %s\n",
-			warnStyle.Render(fmt.Sprintf("%d", stats["total_interventions"]))))
+		fmt.Fprintf(&builder, "  Active agents:        %s\n",
+			valueStyle.Render(fmt.Sprintf("%d", stats["active_agents"])))
+		fmt.Fprintf(&builder, "  Total interventions:  %s\n",
+			warnStyle.Render(fmt.Sprintf("%d", stats["total_interventions"])))
 		if interval, ok := stats["check_interval"].(string); ok {
-			builder.WriteString(fmt.Sprintf("  Check interval:       %s\n",
-				dimStyle.Render(interval)))
+			fmt.Fprintf(&builder, "  Check interval:       %s\n",
+				dimStyle.Render(interval))
 		}
 		if threshold, ok := stats["stuck_threshold"].(string); ok {
-			builder.WriteString(fmt.Sprintf("  Stuck threshold:      %s\n",
-				dimStyle.Render(threshold)))
+			fmt.Fprintf(&builder, "  Stuck threshold:      %s\n",
+				dimStyle.Render(threshold))
 		}
 	} else {
 		builder.WriteString(dimStyle.Render("  Meta-agent not initialized."))
@@ -145,15 +145,15 @@ func (a *App) HandleInsightsCommand() string {
 
 	if a.coordinator != nil {
 		status := a.coordinator.GetStatus()
-		builder.WriteString(fmt.Sprintf("  Total tasks:   %s   Running: %s   Completed: %s   Failed: %s\n",
+		fmt.Fprintf(&builder, "  Total tasks:   %s   Running: %s   Completed: %s   Failed: %s\n",
 			valueStyle.Render(fmt.Sprintf("%d", status.TotalTasks)),
 			warnStyle.Render(fmt.Sprintf("%d", status.RunningTasks)),
 			valueStyle.Render(fmt.Sprintf("%d", status.CompletedTasks)),
-			errorStyle.Render(fmt.Sprintf("%d", status.FailedTasks))))
+			errorStyle.Render(fmt.Sprintf("%d", status.FailedTasks)))
 		if status.BlockedTasks > 0 {
-			builder.WriteString(fmt.Sprintf("  Blocked: %s   Pending: %s\n",
+			fmt.Fprintf(&builder, "  Blocked: %s   Pending: %s\n",
 				dimStyle.Render(fmt.Sprintf("%d", status.BlockedTasks)),
-				dimStyle.Render(fmt.Sprintf("%d", status.PendingTasks))))
+				dimStyle.Render(fmt.Sprintf("%d", status.PendingTasks)))
 		}
 	} else {
 		builder.WriteString(dimStyle.Render("  Coordinator not initialized."))

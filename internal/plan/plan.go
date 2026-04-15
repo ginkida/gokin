@@ -495,9 +495,9 @@ func (p *Plan) RenderTree() string {
 
 	var builder strings.Builder
 
-	builder.WriteString(fmt.Sprintf("## %s\n", p.Title))
+	fmt.Fprintf(&builder, "## %s\n", p.Title)
 	if p.Description != "" {
-		builder.WriteString(fmt.Sprintf("%s\n", p.Description))
+		fmt.Fprintf(&builder, "%s\n", p.Description)
 	}
 	builder.WriteString("\n")
 
@@ -512,8 +512,8 @@ func (p *Plan) RenderTree() string {
 			completedCount++
 		}
 	}
-	builder.WriteString(fmt.Sprintf("\nProgress: %.0f%% (%d/%d steps)\n",
-		progress*100, completedCount, len(p.Steps)))
+	fmt.Fprintf(&builder, "\nProgress: %.0f%% (%d/%d steps)\n",
+		progress*100, completedCount, len(p.Steps))
 
 	return builder.String()
 }
@@ -539,9 +539,9 @@ func renderStepTree(builder *strings.Builder, step *Step, indent string) {
 	icon := stepTreeIcon(step.Status)
 
 	if step.Parallel {
-		builder.WriteString(fmt.Sprintf("%s║ %s Step %d: %s  ║  (parallel)\n", indent, icon, step.ID, step.Title))
+		fmt.Fprintf(builder, "%s║ %s Step %d: %s  ║  (parallel)\n", indent, icon, step.ID, step.Title)
 	} else {
-		builder.WriteString(fmt.Sprintf("%s%s Step %d: %s\n", indent, icon, step.ID, step.Title))
+		fmt.Fprintf(builder, "%s%s Step %d: %s\n", indent, icon, step.ID, step.Title)
 	}
 
 	childIndent := indent + "  "

@@ -250,9 +250,9 @@ func (es *ErrorStore) GetErrorContext(errorMsg string) string {
 		if shown >= 3 {
 			break
 		}
-		sb.WriteString(fmt.Sprintf("### %s (%.0f%% success rate)\n", entry.ErrorType, entry.SuccessRate*100))
-		sb.WriteString(fmt.Sprintf("**Pattern:** %s\n", entry.Pattern))
-		sb.WriteString(fmt.Sprintf("**Solution:** %s\n\n", entry.Solution))
+		fmt.Fprintf(&sb, "### %s (%.0f%% success rate)\n", entry.ErrorType, entry.SuccessRate*100)
+		fmt.Fprintf(&sb, "**Pattern:** %s\n", entry.Pattern)
+		fmt.Fprintf(&sb, "**Solution:** %s\n\n", entry.Solution)
 		shown++
 	}
 

@@ -699,7 +699,7 @@ func (s *Store) GetReport() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("**Stored Memories** (%d total)\n\n", len(entries)))
+	fmt.Fprintf(&sb, "**Stored Memories** (%d total)\n\n", len(entries))
 
 	// Group by scope
 	var project, global, session []*Entry
@@ -718,7 +718,7 @@ func (s *Store) GetReport() string {
 		if len(items) == 0 {
 			return
 		}
-		sb.WriteString(fmt.Sprintf("### %s (%d)\n", title, len(items)))
+		fmt.Fprintf(&sb, "### %s (%d)\n", title, len(items))
 		for _, e := range items {
 			age := time.Since(e.Timestamp)
 			ageStr := formatAge(age)
@@ -727,9 +727,9 @@ func (s *Store) GetReport() string {
 				content = content[:77] + "..."
 			}
 			if e.Key != "" {
-				sb.WriteString(fmt.Sprintf("- **%s**: %s (%s)\n", e.Key, content, ageStr))
+				fmt.Fprintf(&sb, "- **%s**: %s (%s)\n", e.Key, content, ageStr)
 			} else {
-				sb.WriteString(fmt.Sprintf("- %s (%s)\n", content, ageStr))
+				fmt.Fprintf(&sb, "- %s (%s)\n", content, ageStr)
 			}
 		}
 		sb.WriteString("\n")
@@ -878,16 +878,16 @@ func (s *Store) GetForContext(projectOnly bool) string {
 
 	for _, tc := range types {
 		if items, ok := byType[tc.t]; ok && len(items) > 0 {
-			builder.WriteString(fmt.Sprintf("### %s\n", tc.label))
+			fmt.Fprintf(&builder, "### %s\n", tc.label)
 			for _, entry := range items {
 				content := strings.TrimSpace(entry.Content)
 				if len(content) > 220 {
 					content = content[:220] + "..."
 				}
 				if entry.Key != "" {
-					builder.WriteString(fmt.Sprintf("- **%s**: %s\n", entry.Key, content))
+					fmt.Fprintf(&builder, "- **%s**: %s\n", entry.Key, content)
 				} else {
-					builder.WriteString(fmt.Sprintf("- %s\n", content))
+					fmt.Fprintf(&builder, "- %s\n", content)
 				}
 			}
 			builder.WriteString("\n")

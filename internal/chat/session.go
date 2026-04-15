@@ -804,10 +804,10 @@ func (s *Session) ExportMarkdown() string {
 	defer s.mu.RUnlock()
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("# Session %s\n\n", s.ID))
-	sb.WriteString(fmt.Sprintf("**Started:** %s\n\n", s.StartTime.Format("2006-01-02 15:04:05")))
+	fmt.Fprintf(&sb, "# Session %s\n\n", s.ID)
+	fmt.Fprintf(&sb, "**Started:** %s\n\n", s.StartTime.Format("2006-01-02 15:04:05"))
 	if s.WorkDir != "" {
-		sb.WriteString(fmt.Sprintf("**Working Directory:** %s\n\n", s.WorkDir))
+		fmt.Fprintf(&sb, "**Working Directory:** %s\n\n", s.WorkDir)
 	}
 	sb.WriteString("---\n\n")
 
@@ -817,11 +817,11 @@ func (s *Session) ExportMarkdown() string {
 			role = "User"
 		}
 
-		sb.WriteString(fmt.Sprintf("## %s\n\n", role))
+		fmt.Fprintf(&sb, "## %s\n\n", role)
 
 		for _, part := range content.Parts {
 			if part.FunctionCall != nil {
-				sb.WriteString(fmt.Sprintf("**Tool Call:** `%s`\n\n", part.FunctionCall.Name))
+				fmt.Fprintf(&sb, "**Tool Call:** `%s`\n\n", part.FunctionCall.Name)
 				if part.FunctionCall.Args != nil {
 					argsJSON, err := json.MarshalIndent(part.FunctionCall.Args, "", "  ")
 					if err == nil {
@@ -832,7 +832,7 @@ func (s *Session) ExportMarkdown() string {
 					}
 				}
 			} else if part.FunctionResponse != nil {
-				sb.WriteString(fmt.Sprintf("**Tool Response:** `%s`\n\n", part.FunctionResponse.Name))
+				fmt.Fprintf(&sb, "**Tool Response:** `%s`\n\n", part.FunctionResponse.Name)
 				if part.FunctionResponse.Response != nil {
 					respJSON, err := json.MarshalIndent(part.FunctionResponse.Response, "", "  ")
 					if err == nil {

@@ -503,7 +503,7 @@ func (a *App) reportDoneGateResults(results []doneGateResult, attempt int) {
 	if attempt == 0 {
 		sb.WriteString("\nDone-gate checks:\n")
 	} else {
-		sb.WriteString(fmt.Sprintf("\nDone-gate recheck after auto-fix #%d:\n", attempt))
+		fmt.Fprintf(&sb, "\nDone-gate recheck after auto-fix #%d:\n", attempt)
 	}
 
 	for _, r := range results {
@@ -511,7 +511,7 @@ func (a *App) reportDoneGateResults(results []doneGateResult, attempt int) {
 		if !r.Success {
 			status = "FAIL"
 		}
-		sb.WriteString(fmt.Sprintf("- %s: %s\n", r.Name, status))
+		fmt.Fprintf(&sb, "- %s: %s\n", r.Name, status)
 		if !r.Success {
 			if detail := compactDoneGateFailureDetail(r); detail != "" {
 				sb.WriteString("  -> ")
@@ -1295,12 +1295,12 @@ func looksLikeCodingTask(msg string) bool {
 func buildDoneGateFixPrompt(userMessage string, failed []doneGateResult, attempt, max int) string {
 	var sb strings.Builder
 	sb.WriteString("The hard done-gate failed. Autonomously fix the code until checks pass.\n")
-	sb.WriteString(fmt.Sprintf("Auto-fix attempt %d/%d.\n\n", attempt, max))
+	fmt.Fprintf(&sb, "Auto-fix attempt %d/%d.\n\n", attempt, max)
 	sb.WriteString("Original user task:\n")
 	sb.WriteString(userMessage)
 	sb.WriteString("\n\nFailed checks:\n")
 	for _, r := range failed {
-		sb.WriteString(fmt.Sprintf("- %s failed.\n", r.Name))
+		fmt.Fprintf(&sb, "- %s failed.\n", r.Name)
 		if r.Error != "" {
 			sb.WriteString("  Error: ")
 			sb.WriteString(truncateDoneGateText(r.Error))
