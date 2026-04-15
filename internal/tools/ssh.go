@@ -265,14 +265,14 @@ func (t *SSHTool) executeCommand(ctx context.Context, args map[string]any) (Tool
 	// Get or create session
 	client, err := t.sessionManager.GetOrCreate(ctx, config)
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("failed to connect: %s", err)), nil
+		return NewErrorResult(fmt.Sprintf("could not connect to %s: %s (check host, credentials, and network)", config.Host, err)), nil
 	}
 
 	// Execute command
 	logging.Info("executing SSH command", "host", config.Host, "command", command)
 	output, exitCode, err := client.Execute(ctx, command)
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("command failed: %s", err)), nil
+		return NewErrorResult(fmt.Sprintf("SSH command failed on %s: %s", config.Host, err)), nil
 	}
 
 	// Truncate long output
@@ -350,13 +350,13 @@ func (t *SSHTool) uploadFile(ctx context.Context, args map[string]any) (ToolResu
 	// Get or create session
 	client, err := t.sessionManager.GetOrCreate(ctx, config)
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("failed to connect: %s", err)), nil
+		return NewErrorResult(fmt.Sprintf("could not connect to %s: %s (check host, credentials, and network)", config.Host, err)), nil
 	}
 
 	// Upload file
 	logging.Info("uploading file via SSH", "local", localPath, "remote", remotePath, "host", config.Host)
 	if err := client.Upload(ctx, localPath, remotePath); err != nil {
-		return NewErrorResult(fmt.Sprintf("upload failed: %s", err)), nil
+		return NewErrorResult(fmt.Sprintf("upload to %s failed: %s (check remote path permissions)", config.Host, err)), nil
 	}
 
 	return NewSuccessResult(fmt.Sprintf("File uploaded successfully: %s -> %s@%s:%s",
@@ -371,13 +371,13 @@ func (t *SSHTool) downloadFile(ctx context.Context, args map[string]any) (ToolRe
 	// Get or create session
 	client, err := t.sessionManager.GetOrCreate(ctx, config)
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("failed to connect: %s", err)), nil
+		return NewErrorResult(fmt.Sprintf("could not connect to %s: %s (check host, credentials, and network)", config.Host, err)), nil
 	}
 
 	// Download file
 	logging.Info("downloading file via SSH", "remote", remotePath, "local", localPath, "host", config.Host)
 	if err := client.Download(ctx, remotePath, localPath); err != nil {
-		return NewErrorResult(fmt.Sprintf("download failed: %s", err)), nil
+		return NewErrorResult(fmt.Sprintf("download from %s failed: %s (check remote path exists)", config.Host, err)), nil
 	}
 
 	return NewSuccessResult(fmt.Sprintf("File downloaded successfully: %s@%s:%s -> %s",
