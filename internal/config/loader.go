@@ -220,7 +220,7 @@ func (c *Config) Validate() error {
 	}
 	mode := strings.ToLower(strings.TrimSpace(c.DoneGate.Mode))
 	if mode != "" && mode != "normal" && mode != "strict" {
-		return fmt.Errorf("invalid done_gate.mode %q: expected normal or strict", c.DoneGate.Mode)
+		return fmt.Errorf("invalid done_gate.mode %q: expected \"normal\" (verify build/tests pass) or \"strict\" (also verify via LLM review)", c.DoneGate.Mode)
 	}
 	if c.DoneGate.AutoFixAttempts < 0 {
 		return fmt.Errorf("done_gate.auto_fix_attempts must be >= 0")
