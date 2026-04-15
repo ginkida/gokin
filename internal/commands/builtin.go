@@ -332,7 +332,15 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 		return fmt.Sprintf("Failed to restore session: %v", err), nil
 	}
 
-	return fmt.Sprintf("Session '%s' restored. %d messages loaded.", sessionID, len(state.History)), nil
+	msg := fmt.Sprintf("Session '%s' restored. %d messages loaded.", sessionID, len(state.History))
+	if state.Summary != "" {
+		summary := state.Summary
+		if len(summary) > 100 {
+			summary = summary[:97] + "..."
+		}
+		msg += fmt.Sprintf("\nLast topic: %s", summary)
+	}
+	return msg, nil
 }
 
 // SessionsCommand lists saved sessions.
