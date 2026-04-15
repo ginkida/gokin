@@ -11,6 +11,10 @@ import (
 	"gokin/internal/tools"
 )
 
+// HealthChangeCallback is called when an MCP server's health status changes.
+// name is the server name, healthy is the new status.
+type HealthChangeCallback func(name string, healthy bool)
+
 // Manager manages multiple MCP server connections.
 type Manager struct {
 	servers map[string]*ServerConfig // Server configurations
@@ -23,6 +27,9 @@ type Manager struct {
 	healMu        sync.Mutex // protects healingCancel and healingDone (separate from mu to avoid deadlock)
 	healingCancel context.CancelFunc
 	healingDone   chan struct{}
+
+	// Status notifications
+	onHealthChange HealthChangeCallback
 }
 
 // ServerHealth tracks health status of an MCP server.
@@ -49,6 +56,13 @@ func NewManager(servers []*ServerConfig) *Manager {
 	}
 
 	return m
+}
+
+// SetHealthChangeCallback sets a callback invoked when a server's health changes.
+func (m *Manager) SetHealthChangeCallback(cb HealthChangeCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onHealthChange = cb
 }
 
 // defaultServerTimeout is the per-server connection timeout.
@@ -386,6 +400,7 @@ func (m *Manager) CheckHealth(ctx context.Context) {
 		h.ConsecutiveFails = u.fails
 		h.LastCheck = time.Now()
 
+		wasHealthy := h.Healthy
 		if u.fails >= 3 {
 			if h.Healthy {
 				logging.Warn("MCP server marked unhealthy", "name", u.name, "fails", u.fails)
@@ -393,6 +408,11 @@ func (m *Manager) CheckHealth(ctx context.Context) {
 			h.Healthy = false
 		} else {
 			h.Healthy = true
+		}
+
+		// Notify on health transition
+		if wasHealthy != h.Healthy && m.onHealthChange != nil {
+			go m.onHealthChange(u.name, h.Healthy)
 		}
 	}
 }

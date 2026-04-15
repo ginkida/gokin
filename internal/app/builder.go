@@ -1365,6 +1365,23 @@ func (b *Builder) wireDependencies() error {
 	statusCb := &appStatusCallback{app: app}
 	attachStatusCallback(b.geminiClient, statusCb)
 
+	// Notify UI on MCP health changes
+	if b.mcpManager != nil {
+		b.mcpManager.SetHealthChangeCallback(func(name string, healthy bool) {
+			if healthy {
+				app.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusStreamResume,
+					Message: fmt.Sprintf("MCP server %q reconnected", name),
+				})
+			} else {
+				app.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusRecoverableError,
+					Message: fmt.Sprintf("MCP server %q disconnected", name),
+				})
+			}
+		})
+	}
+
 	// Set up executor handler
 	b.executor.SetHandler(&tools.ExecutionHandler{
 		OnText: func(text string) {
