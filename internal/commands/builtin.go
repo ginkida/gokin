@@ -956,6 +956,12 @@ func getCommandExample(name string) string {
 		"theme":   "  /theme dark          — soft purple/cyan dark theme\n  /theme macos          — Apple-inspired theme\n  /theme light          — for light terminal backgrounds",
 		"doctor":  "  /doctor              — check API key, git, config, and project setup",
 		"login":   "  /login gemini AIza...     — set Gemini API key\n  /login anthropic sk-...    — set Anthropic API key",
+		"undo":    "  /undo                — revert the last file change made by the AI",
+		"redo":    "  /redo                — re-apply the last undone change",
+		"stats":   "  /stats               — show tokens, cost, cache hit rate, project info",
+		"status":  "  /status              — show provider, model, API keys, workdir, version",
+		"update":  "  /update              — check for new versions\n  /update install        — download and install latest\n  /update rollback       — revert to previous version",
+		"provider":"  /provider gemini      — switch to Gemini\n  /provider anthropic    — switch to Anthropic",
 	}
 	return examples[name]
 }
@@ -979,6 +985,18 @@ func getRelatedCommands(name string) string {
 		"cost":         "/stats, /compact",
 		"shortcuts":    "/help, /keys",
 		"keys":         "/help, /shortcuts",
+		"undo":         "/redo, /checkpoints",
+		"redo":         "/undo",
+		"stats":        "/cost, /compact, /status",
+		"status":       "/doctor, /config, /stats",
+		"update":       "/doctor, /status",
+		"quickstart":   "/help, /doctor",
+		"pr":           "/commit",
+		"permissions":  "/sandbox, /config",
+		"sandbox":      "/permissions",
+		"provider":     "/model, /login, /status",
+		"reasoning":    "/model",
+		"checkpoints":  "/undo, /plan",
 	}
 	return related[name]
 }
