@@ -370,11 +370,11 @@ func (m SearchResultsModel) View() string {
 	countStyle := lipgloss.NewStyle().
 		Foreground(ColorMuted)
 
-	builder.WriteString(fmt.Sprintf("  %s: %s  %s\n\n",
+	fmt.Fprintf(&builder, "  %s: %s  %s\n\n",
 		m.tool,
 		queryStyle.Render(m.query),
 		countStyle.Render(fmt.Sprintf("(%d results)", len(m.results))),
-	))
+	)
 
 	// Results viewport with border
 	borderStyle := lipgloss.NewStyle().

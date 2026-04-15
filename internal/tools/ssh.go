@@ -392,14 +392,14 @@ func (t *SSHTool) listSessions() (ToolResult, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Active SSH sessions (%d):\n\n", len(sessions)))
+	fmt.Fprintf(&sb, "Active SSH sessions (%d):\n\n", len(sessions))
 
 	for _, s := range sessions {
 		status := "connected"
 		if !s.Connected {
 			status = "disconnected"
 		}
-		sb.WriteString(fmt.Sprintf("  - %s [%s] (idle: %s)\n", s.Key, status, s.IdleTime.Round(time.Second)))
+		fmt.Fprintf(&sb, "  - %s [%s] (idle: %s)\n", s.Key, status, s.IdleTime.Round(time.Second))
 	}
 
 	return NewSuccessResult(sb.String()), nil

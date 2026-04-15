@@ -148,13 +148,13 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]any) (ToolR
 
 	// Format results
 	var output strings.Builder
-	output.WriteString(fmt.Sprintf("Search results for: %s\n\n", query))
+	fmt.Fprintf(&output, "Search results for: %s\n\n", query)
 
 	for i, r := range results {
-		output.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, r.Title))
-		output.WriteString(fmt.Sprintf("   %s\n", r.URL))
+		fmt.Fprintf(&output, "%d. **%s**\n", i+1, r.Title)
+		fmt.Fprintf(&output, "   %s\n", r.URL)
 		if r.Snippet != "" {
-			output.WriteString(fmt.Sprintf("   %s\n", r.Snippet))
+			fmt.Fprintf(&output, "   %s\n", r.Snippet)
 		}
 		output.WriteString("\n")
 	}

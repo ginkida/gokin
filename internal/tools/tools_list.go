@@ -61,12 +61,12 @@ func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolR
 			if len(desc) > 100 {
 				desc = desc[:97] + "..."
 			}
-			output.WriteString(fmt.Sprintf("- **%s**: %s\n", decl.Name, desc))
+			fmt.Fprintf(&output, "- **%s**: %s\n", decl.Name, desc)
 		}
 	} else if t.baseRegistry != nil {
 		tools := t.baseRegistry.List()
 		for _, tool := range tools {
-			output.WriteString(fmt.Sprintf("- **%s**: %s\n", tool.Name(), tool.Description()))
+			fmt.Fprintf(&output, "- **%s**: %s\n", tool.Name(), tool.Description())
 		}
 	} else {
 		return NewErrorResult("no registry or lister configured"), nil

@@ -575,13 +575,13 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 		case "ctrl+j":
 			// Scroll preview down
 			if m.previewEnabled {
-				m.previewViewport.LineDown(3)
+				m.previewViewport.ScrollDown(3)
 			}
 
 		case "ctrl+k":
 			// Scroll preview up
 			if m.previewEnabled {
-				m.previewViewport.LineUp(3)
+				m.previewViewport.ScrollUp(3)
 			}
 
 		case "g":
@@ -670,7 +670,7 @@ func (m FileBrowserModel) View() string {
 	// Current path
 	pathStyle := lipgloss.NewStyle().
 		Foreground(ColorAccent)
-	builder.WriteString(fmt.Sprintf("  %s\n", pathStyle.Render(m.currentDir)))
+	fmt.Fprintf(&builder, "  %s\n", pathStyle.Render(m.currentDir))
 
 	// Selection count
 	if len(m.selectedFiles) > 0 {

@@ -504,12 +504,12 @@ func (m GitStatusModel) View() string {
 	aheadStyle := lipgloss.NewStyle().
 		Foreground(ColorWarning)
 
-	builder.WriteString(fmt.Sprintf("  Branch: %s", branchStyle.Render(m.branch)))
+	fmt.Fprintf(&builder, "  Branch: %s", branchStyle.Render(m.branch))
 	if m.upstream != "" {
-		builder.WriteString(fmt.Sprintf(" → %s", upstreamStyle.Render(m.upstream)))
+		fmt.Fprintf(&builder, " → %s", upstreamStyle.Render(m.upstream))
 	}
 	if m.aheadBehind != "" {
-		builder.WriteString(fmt.Sprintf(" (%s)", aheadStyle.Render(m.aheadBehind)))
+		fmt.Fprintf(&builder, " (%s)", aheadStyle.Render(m.aheadBehind))
 	}
 	builder.WriteString("\n\n")
 

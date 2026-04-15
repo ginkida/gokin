@@ -285,7 +285,7 @@ func FormatCachedGrep(result GrepResult, workDir string) string {
 		if err != nil {
 			relPath = match.FilePath
 		}
-		builder.WriteString(fmt.Sprintf("%s:%d: %s\n", relPath, match.LineNum, match.Line))
+		fmt.Fprintf(&builder, "%s:%d: %s\n", relPath, match.LineNum, match.Line)
 	}
 
 	return builder.String()
