@@ -1629,6 +1629,14 @@ func (b *Builder) wireDependencies() error {
 				app.tui.AddSystemMessage(msg)
 			}
 		}
+		b.contextManager.OnOptimizeStart = func(reason string) {
+			if app.program != nil {
+				app.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusInfo,
+					Message: fmt.Sprintf("Optimizing context (%s)...", reason),
+				})
+			}
+		}
 	}
 
 	// Set up background task tracking callbacks for UI

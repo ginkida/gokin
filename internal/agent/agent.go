@@ -2388,9 +2388,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					if a.treePlanner.ShouldReplan(planTree, firstFailure.result) && replanAttempts < 3 {
 						replanAttempts++
 
-						// Build replan context with reflection
+						// Build replan context with reflection — may invoke LLM (up to 30s)
 						var reflection *Reflection
 						if a.reflector != nil && firstFailure.action.ToolName != "" {
+							a.safeOnText(fmt.Sprintf("\n[Analyzing %s failure...]\n", firstFailure.action.ToolName))
 							reflection = a.reflector.Reflect(ctx, firstFailure.action.ToolName, firstFailure.action.ToolArgs, firstFailure.result.Error)
 						}
 
@@ -3154,6 +3155,7 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		"agent_id", a.ID,
 		"usage", fmt.Sprintf("%.1f%%", percentUsed*100),
 		"tokens", tokenCount)
+	a.safeOnText(fmt.Sprintf("\n[Compacting context (%.0f%% used)...]\n", percentUsed*100))
 
 	// 3. Summarize on snapshot (potentially slow API call — no lock held)
 	if len(historySnapshot) <= a.summarizeMinMsgs {
@@ -3216,6 +3218,8 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 	if len(a.history) <= 10 {
 		return nil // Not enough to compact
 	}
+
+	a.safeOnText(fmt.Sprintf("\n[Force-compacting history (%d messages)...]\n", len(a.history)))
 
 	keepStart := 3  // system prompt + greeting + original task prompt
 	keepEnd := 6
@@ -3825,7 +3829,8 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 			logging.Info("fix cache hit", "tool", call.Name, "category", category,
 				"hit_count", cacheHit.HitCount)
 		} else {
-			// Cache miss: full Reflect pipeline (unchanged)
+			// Cache miss: full Reflect pipeline — may invoke LLM (up to 30s)
+			a.safeOnText(fmt.Sprintf("\n[Analyzing %s error...]\n", call.Name))
 			reflection = a.reflector.Reflect(ctx, call.Name, call.Args, result.Content)
 		}
 

@@ -50,6 +50,9 @@ type Model struct {
 	lastActivityTime time.Time // Last time we received any activity (tool call, stream, etc.)
 	slowWarningShown bool      // Whether we've shown the slow warning for current operation
 
+	// Stream idle feedback (server slow to respond)
+	streamIdleMsg string // Non-empty when stream is idle — shown in status line
+
 	// Rate limiting / debounce for message submission
 	lastSubmitTime time.Time
 	minSubmitDelay time.Duration // Minimum delay between submissions (default: 500ms)
@@ -1333,6 +1336,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamStartTime = time.Now() // Reset timeout on streaming activity
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
+		m.streamIdleMsg = "" // Server responded — clear idle warning
 		m.state = StateStreaming
 		m.processingLabel = "" // Text streaming is the feedback itself
 
@@ -1351,6 +1355,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamStartTime = time.Now() // Reset timeout on tool activity
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
+		m.streamIdleMsg = "" // Server responded — clear idle warning
 		m.processingLabel = "" // Tool name takes over in status bar
 
 		// Close thinking block when tool call starts
@@ -1495,6 +1500,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.currentTool = ""
 		m.currentToolInfo = ""
 		m.processingLabel = ""
+		m.streamIdleMsg = "" // Clear idle warning
 		m.loopIteration = 0
 		m.loopToolsUsed = 0
 		m.activeToolCalls = nil
@@ -1537,6 +1543,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.currentTool = ""
 		m.currentToolInfo = ""
 		m.processingLabel = ""
+		m.streamIdleMsg = "" // Clear idle warning
 		m.loopIteration = 0
 		m.loopToolsUsed = 0
 		m.activeToolCalls = nil
@@ -2026,8 +2033,15 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				m.rateLimitWaitUntil = time.Now().Add(wt)
 			}
 		case StatusStreamIdle:
-			// Silent
+			firstWarning := m.streamIdleMsg == ""
+			if msg.Message != "" {
+				m.streamIdleMsg = msg.Message
+			}
+			if firstWarning && m.toastManager != nil && msg.Message != "" {
+				m.toastManager.ShowWarning(msg.Message)
+			}
 		case StatusStreamResume:
+			m.streamIdleMsg = ""
 			m.retryAttempt = 0
 			m.retryMax = 0
 			m.rateLimitWaitUntil = time.Time{}
@@ -2038,6 +2052,19 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		case StatusCancelled:
 			if m.toastManager != nil {
 				m.toastManager.ShowWarning(msg.Message)
+			}
+		case StatusInfo:
+			if m.toastManager != nil && msg.Message != "" {
+				m.toastManager.Show(ToastInfo, "", msg.Message, 4*time.Second)
+			}
+		case StatusThinkingIdle:
+			// Model is deliberately thinking — show distinct from generic "idle"
+			firstWarning := m.streamIdleMsg == ""
+			if msg.Message != "" {
+				m.streamIdleMsg = msg.Message
+			}
+			if firstWarning && m.toastManager != nil && msg.Message != "" {
+				m.toastManager.Show(ToastInfo, "", msg.Message, 6*time.Second)
 			}
 		}
 	}
@@ -2380,6 +2407,16 @@ func (m Model) View() string {
 					durationColor = ColorWarning
 				}
 				status += "  " + lipgloss.NewStyle().Foreground(durationColor).Render(format.Duration(elapsed))
+			}
+
+			// Show stream idle indicator when server is slow to respond
+			if m.streamIdleMsg != "" {
+				idleStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+				status += "  " + idleStyle.Render("· " + m.streamIdleMsg)
+			} else if m.slowWarningShown && m.currentTool != "" {
+				// Tool is running longer than expected — show brief hint
+				slowStyle := lipgloss.NewStyle().Foreground(ColorDim)
+				status += "  " + slowStyle.Render("· running")
 			}
 
 			// Plan step context

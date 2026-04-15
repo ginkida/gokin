@@ -354,6 +354,7 @@ func (a *App) Run() error {
 					"messages_after", len(a.session.GetHistory()),
 					"tokens_estimated", tokens,
 					"model_limit", limits.MaxInputTokens)
+				a.tui.AddSystemMessage(fmt.Sprintf("Compacted session to fit model context (removed %d messages)", truncated))
 			}
 		}
 	}

@@ -52,7 +52,7 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 			if a.program != nil {
 				a.program.Send(ui.StatusUpdateMsg{
 					Type:    ui.StatusStreamIdle,
-					Message: fmt.Sprintf("Ожидание разрешения для %s...", req.ToolName),
+					Message: fmt.Sprintf("Waiting for permission: %s...", req.ToolName),
 				})
 			}
 			// Reset timer for next reminder

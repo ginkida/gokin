@@ -328,6 +328,8 @@ const (
 	StatusStreamResume
 	StatusRecoverableError
 	StatusCancelled
+	StatusInfo
+	StatusThinkingIdle
 )
 
 // StatusUpdateMsg carries status updates from clients to the UI.

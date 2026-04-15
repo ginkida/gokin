@@ -65,6 +65,9 @@ type ContextManager struct {
 
 	// Notification callback when context is compacted
 	OnCompact func(oldTokens, newTokens, removedMessages int, reason string)
+
+	// Notification callback when background optimization starts (for UI feedback)
+	OnOptimizeStart func(reason string)
 }
 
 // NewContextManager creates a new context manager.
@@ -366,6 +369,7 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 
 	// Optimize if near limit — launch in background to avoid blocking
 	if usage.NearLimit && m.summarizer != nil && m.config.EnableAutoSummary {
+		m.notifyOptimizeStart("context near token limit")
 		m.backgroundOptimize(ctx)
 	}
 
@@ -378,6 +382,7 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 					"current_tokens", tokens,
 					"predicted_tokens", predicted,
 					"predicted_pct", predUsage.PercentUsed)
+				m.notifyOptimizeStart("predictive — approaching token limit")
 				m.backgroundOptimize(ctx)
 			}
 		}
@@ -390,11 +395,19 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 			logging.Info("message count summarization triggered",
 				"history_len", historyLen,
 				"max_history", maxHistory)
+			m.notifyOptimizeStart("conversation history growing large")
 			m.backgroundOptimize(ctx)
 		}
 	}
 
 	return nil
+}
+
+// notifyOptimizeStart fires the OnOptimizeStart callback if registered.
+func (m *ContextManager) notifyOptimizeStart(reason string) {
+	if m.OnOptimizeStart != nil {
+		m.OnOptimizeStart(reason)
+	}
 }
 
 // backgroundOptimize runs context optimization in a background goroutine.

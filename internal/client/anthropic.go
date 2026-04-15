@@ -862,8 +862,11 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 	// Stream idle timeout (configurable, default 30s between chunks)
 	streamIdleTimeout := c.config.StreamIdleTimeout
-	// Stream idle warning - half of idle timeout
+	// Stream idle warning - half of idle timeout, capped at 30s for faster feedback
 	streamIdleWarning := streamIdleTimeout / 2
+	if streamIdleWarning > 30*time.Second {
+		streamIdleWarning = 30 * time.Second
+	}
 
 	// Capture status callback for goroutine
 	c.mu.RLock()
@@ -931,10 +934,11 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 		eventCount := 0
 		contentReceived := false
+		initialTimeoutExtended := false // Track whether we've already extended for thinking phase
 		idleTimer := time.NewTimer(streamIdleTimeout)
 		defer idleTimer.Stop()
 
-		// Warning timer for UI feedback (fires at 15s, then again at 25s)
+		// Warning timer for UI feedback (fires at 30s max, then every 10s)
 		warningTimer := time.NewTimer(streamIdleWarning)
 		defer warningTimer.Stop()
 		lastWarningAt := time.Duration(0)
@@ -956,9 +960,18 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 				case <-warningTimer.C:
 					// Stream idle warning - notify UI
-					lastWarningAt += streamIdleWarning
+					if lastWarningAt == 0 {
+						lastWarningAt = streamIdleWarning
+					} else {
+						lastWarningAt += 10 * time.Second // Match the actual reset interval
+					}
 					if statusCb != nil {
-						statusCb.OnStreamIdle(lastWarningAt)
+						// Distinguish thinking phase from generic idle
+						if !contentReceived && c.config.EnableThinking {
+							statusCb.OnThinkingIdle(lastWarningAt, c.config.Provider)
+						} else {
+							statusCb.OnStreamIdle(lastWarningAt)
+						}
 					}
 					// Reset for next warning (every 10 seconds after first)
 					warningTimer.Reset(10 * time.Second)
@@ -966,6 +979,19 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					continue waitLoop
 
 				case <-idleTimer.C:
+					// If thinking is enabled and no content received yet, the model
+					// is likely in a silent reasoning phase. Extend the timeout once
+					// to avoid killing the request prematurely.
+					if !contentReceived && !initialTimeoutExtended && c.config.EnableThinking {
+						initialTimeoutExtended = true
+						logging.Info("extending idle timeout for thinking model — no content yet",
+							"provider", c.config.Provider, "original_timeout", streamIdleTimeout)
+						idleTimer.Reset(streamIdleTimeout)
+						if statusCb != nil {
+							statusCb.OnThinkingIdle(streamIdleTimeout, c.config.Provider)
+						}
+						continue waitLoop
+					}
 					logging.Warn("stream idle timeout exceeded", "timeout", streamIdleTimeout, "partial", contentReceived)
 					chunks <- ResponseChunk{
 						Error: &ErrStreamIdleTimeout{Timeout: streamIdleTimeout, Partial: contentReceived},

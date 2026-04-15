@@ -19,7 +19,7 @@ func (c *appStatusCallback) OnRetry(attempt, maxAttempts int, delay time.Duratio
 		return
 	}
 
-	msg := fmt.Sprintf("Повторная попытка %d/%d через %s (%s)",
+	msg := fmt.Sprintf("Retry %d/%d in %s (%s)",
 		attempt, maxAttempts, delay.Round(time.Second), reason)
 
 	c.app.program.Send(ui.StatusUpdateMsg{
@@ -40,7 +40,7 @@ func (c *appStatusCallback) OnRateLimit(waitTime time.Duration) {
 		return
 	}
 
-	msg := fmt.Sprintf("Rate limit, ожидание %s...", waitTime.Round(time.Second))
+	msg := fmt.Sprintf("Rate limit, waiting %s...", waitTime.Round(time.Second))
 
 	c.app.program.Send(ui.StatusUpdateMsg{
 		Type:    ui.StatusRateLimit,
@@ -57,9 +57,9 @@ func (c *appStatusCallback) OnStreamIdle(elapsed time.Duration) {
 		return
 	}
 
-	msg := fmt.Sprintf("Ожидание ответа %s...", elapsed.Round(time.Second))
+	msg := fmt.Sprintf("Waiting for response %s...", elapsed.Round(time.Second))
 	if elapsed >= 20*time.Second {
-		msg = fmt.Sprintf("Ожидание ответа %s... (ESC для отмены)", elapsed.Round(time.Second))
+		msg = fmt.Sprintf("Waiting for response %s... (ESC to cancel)", elapsed.Round(time.Second))
 	}
 
 	c.app.program.Send(ui.StatusUpdateMsg{
@@ -67,6 +67,27 @@ func (c *appStatusCallback) OnStreamIdle(elapsed time.Duration) {
 		Message: msg,
 		Details: map[string]any{
 			"elapsed": elapsed,
+		},
+	})
+}
+
+// OnThinkingIdle is called when a thinking-enabled model is in its silent reasoning phase.
+func (c *appStatusCallback) OnThinkingIdle(elapsed time.Duration, provider string) {
+	if c.app == nil || c.app.program == nil {
+		return
+	}
+
+	msg := fmt.Sprintf("%s is thinking %s...", provider, elapsed.Round(time.Second))
+	if elapsed >= 60*time.Second {
+		msg = fmt.Sprintf("%s is thinking %s... (ESC to cancel)", provider, elapsed.Round(time.Second))
+	}
+
+	c.app.program.Send(ui.StatusUpdateMsg{
+		Type:    ui.StatusThinkingIdle,
+		Message: msg,
+		Details: map[string]any{
+			"elapsed":  elapsed,
+			"provider": provider,
 		},
 	})
 }
@@ -92,7 +113,7 @@ func (c *appStatusCallback) OnError(err error, recoverable bool) {
 
 	msg := err.Error()
 	if recoverable {
-		msg = "Восстанавливаемая ошибка: " + msg
+		msg = "Recoverable error: " + msg
 	}
 	ft := client.DetectFailureTelemetry(err)
 
