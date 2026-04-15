@@ -481,6 +481,11 @@ func (a *App) handleApplyCodeBlock(filename, content string) {
 
 	// Execute the write tool
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("write tool goroutine recovered from panic", "error", r)
+			}
+		}()
 		ctx := a.ctx
 		args := map[string]any{
 			"file_path": filename,

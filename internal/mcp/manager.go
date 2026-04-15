@@ -133,6 +133,11 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 	// Close results channel when all goroutines complete
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("MCP result collector recovered from panic", "error", r)
+			}
+		}()
 		wg.Wait()
 		close(results)
 	}()

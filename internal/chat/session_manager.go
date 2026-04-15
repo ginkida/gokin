@@ -79,6 +79,11 @@ func (sm *SessionManager) Start(ctx context.Context) {
 	// Background async saver: deduplicates rapid save requests.
 	// Multiple SaveAfterMessage() calls within a short window produce one Save().
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("async save goroutine recovered from panic", "error", r)
+			}
+		}()
 		for {
 			select {
 			case <-sm.asyncSaveCh:
@@ -99,7 +104,14 @@ func (sm *SessionManager) Start(ctx context.Context) {
 	}()
 
 	// Clean up old sessions in background (outside lock)
-	go sm.CleanupOldSessions()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("session cleanup recovered from panic", "error", r)
+			}
+		}()
+		sm.CleanupOldSessions()
+	}()
 }
 
 // Note: Stop() is responsible for cleaning up the timer.
