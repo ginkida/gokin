@@ -129,7 +129,8 @@ func defaultCommands() []CommandInfo {
 
 		// Session
 		{Name: "model", Description: "Switch AI model", Category: "Session",
-			Args: []ArgInfo{{Name: "model", Required: false, Type: "string"}}, Usage: "/model [name]"},
+			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"gemini-3-flash-preview", "gemini-3-pro", "claude-sonnet-4-5", "gpt-5.4", "deepseek-chat", "ollama"}}},
+			Usage: "/model [name]"},
 		{Name: "reasoning", Description: "Set reasoning effort", Category: "Session",
 			Args:  []ArgInfo{{Name: "level", Required: false, Type: "option", Options: []string{"none", "low", "medium", "high", "xhigh"}}},
 			Usage: "/reasoning [none|low|medium|high|xhigh]"},
@@ -205,7 +206,9 @@ func defaultCommands() []CommandInfo {
 		{Name: "sandbox", Description: "Toggle bash sandbox mode", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
 			Usage: "/sandbox [on|off]"},
-		{Name: "theme", Description: "Change UI theme", Category: "Tools"},
+		{Name: "theme", Description: "Change UI theme", Category: "Tools",
+			Args:  []ArgInfo{{Name: "name", Required: false, Type: "option", Options: []string{"dark", "macos", "light"}}},
+			Usage: "/theme [dark|macos|light]"},
 		{Name: "semantic-stats", Description: "Show semantic index statistics", Category: "Tools"},
 		{Name: "semantic-reindex", Description: "Reindex semantic search", Category: "Tools"},
 		{Name: "register-agent-type", Description: "Register a custom agent type", Category: "Tools",
