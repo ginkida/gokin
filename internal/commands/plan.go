@@ -20,13 +20,27 @@ func (c *PlanCommand) Usage() string {
 }
 
 func (c *PlanCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	// Show current state without toggling if "status" arg given
+	if len(args) > 0 && args[0] == "status" {
+		if app.IsPlanningModeEnabled() {
+			msg := "Planning mode: ON"
+			if pm := app.GetPlanManager(); pm != nil {
+				if plan := pm.GetCurrentPlan(); plan != nil && !plan.IsComplete() {
+					msg += "\nActive plan: " + plan.Title
+				}
+			}
+			return msg, nil
+		}
+		return "Planning mode: OFF", nil
+	}
+
 	// Toggle planning mode
 	enabled := app.TogglePlanningMode()
 
 	if enabled {
-		return "Planning mode ON — complex tasks will be broken into steps with approval\n\nTip: Press Shift+Tab to toggle quickly", nil
+		return "Planning mode ON — complex tasks will be broken into steps with approval\n\nTip: Shift+Tab to toggle, /plan status to check", nil
 	}
-	return "Planning mode OFF — direct execution\n\nTip: Press Shift+Tab to toggle quickly", nil
+	return "Planning mode OFF — direct execution\n\nTip: Shift+Tab to toggle, /plan status to check", nil
 }
 
 // GetMetadata returns command metadata for palette display.
