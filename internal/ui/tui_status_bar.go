@@ -135,12 +135,20 @@ func (m Model) minimalStatusSegments() []string {
 func (m Model) renderStatusBarMedium() string {
 	left := strings.Join(m.baseStatusSegments(true), " · ")
 
-	// Scroll indicator on the right
-	var right string
+	// Right side: cost + scroll indicator
+	var rightParts []string
+	if m.sessionCost > 0 {
+		costStr := fmt.Sprintf("$%.2f", m.sessionCost)
+		if m.sessionCost < 0.01 {
+			costStr = fmt.Sprintf("$%.4f", m.sessionCost)
+		}
+		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(ColorDim).Render(costStr))
+	}
 	if !m.output.IsAtBottom() {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
-		right = scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent()))
+		rightParts = append(rightParts, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
 	}
+	right := strings.Join(rightParts, " · ")
 
 	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
 	return left + strings.Repeat(" ", padding) + right
