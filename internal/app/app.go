@@ -401,7 +401,7 @@ func (a *App) Run() error {
 	// Show one-time onboarding welcome on first launch.
 	if a.config.UI.ShowWelcome {
 		a.tui.Welcome()
-		a.tui.AddSystemMessage("Getting started:\n• /quickstart for examples\n• /doctor to verify setup\n• /plan to enable step-by-step execution\n• /update to check for new versions")
+		a.tui.AddSystemMessage("Type a message to get started, or try a command:\n• /help — see all available commands\n• /doctor — verify your setup\n• /quickstart — guided examples")
 		a.config.UI.ShowWelcome = false
 		if err := a.config.Save(); err != nil {
 			logging.Warn("failed to persist onboarding welcome state", "error", err)
