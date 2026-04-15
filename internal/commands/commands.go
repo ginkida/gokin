@@ -126,6 +126,7 @@ func NewHandler() *Handler {
 	// Register onboarding commands
 	h.Register(&QuickstartCommand{})
 	h.Register(&ShortcutsCommand{})
+	h.Register(&KeysCommand{})
 
 	// Register stats and memory commands
 	h.Register(&StatsCommand{})

@@ -655,6 +655,13 @@ func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppIn
 	return sb.String(), nil
 }
 
+// KeysCommand is an alias for ShortcutsCommand.
+type KeysCommand struct{ ShortcutsCommand }
+
+func (c *KeysCommand) Name() string        { return "keys" }
+func (c *KeysCommand) Description() string { return "Show keyboard shortcuts (alias for /shortcuts)" }
+func (c *KeysCommand) Usage() string       { return "/keys" }
+
 // ConfigCommand shows current configuration.
 type ConfigCommand struct{}
 
