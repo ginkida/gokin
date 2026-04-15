@@ -183,11 +183,20 @@ func (c *ClearCommand) GetMetadata() CommandMetadata {
 }
 
 func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	// Count messages before clearing
+	msgCount := 0
+	if session := app.GetSession(); session != nil {
+		msgCount = len(session.GetHistory())
+	}
+
 	// Save current plan before clearing (so it can be resumed with /resume-plan)
+	planSaved := false
 	if pm := app.GetPlanManager(); pm != nil {
 		if currentPlan := pm.GetCurrentPlan(); currentPlan != nil && !currentPlan.IsComplete() {
 			if err := pm.SaveCurrentPlan(); err != nil {
 				logging.Warn("failed to save plan before clear", "error", err)
+			} else {
+				planSaved = true
 			}
 		}
 	}
@@ -197,7 +206,12 @@ func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterf
 	if todoTool := app.GetTodoTool(); todoTool != nil {
 		todoTool.ClearItems()
 	}
-	return "Conversation and todos cleared. Active plan saved for /resume-plan.", nil
+
+	msg := fmt.Sprintf("Cleared %d messages and todos.", msgCount)
+	if planSaved {
+		msg += " Active plan saved for /resume-plan."
+	}
+	return msg, nil
 }
 
 // CompactCommand forces context compaction.
