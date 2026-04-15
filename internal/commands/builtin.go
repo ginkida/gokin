@@ -210,9 +210,25 @@ func (c *CompactCommand) Execute(ctx context.Context, args []string, app AppInte
 		return "Context manager not available.", nil
 	}
 
+	// Capture token usage before compaction
+	usageBefore := cm.GetTokenUsage()
+	tokensBefore := 0
+	if usageBefore != nil {
+		tokensBefore = usageBefore.InputTokens
+	}
+
 	err := cm.ForceSummarize(ctx)
 	if err != nil {
 		return fmt.Sprintf("Compaction failed: %v", err), nil
+	}
+
+	// Show before/after comparison
+	usageAfter := cm.GetTokenUsage()
+	if usageAfter != nil && tokensBefore > 0 {
+		saved := tokensBefore - usageAfter.InputTokens
+		pct := int(usageAfter.PercentUsed * 100)
+		return fmt.Sprintf("Context compacted: %dk → %dk tokens (freed %dk, now %d%% full)",
+			tokensBefore/1000, usageAfter.InputTokens/1000, saved/1000, pct), nil
 	}
 
 	return "Context compacted successfully.", nil
