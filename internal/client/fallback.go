@@ -254,7 +254,7 @@ func (fc *FallbackClient) WithModel(modelName string) Client {
 }
 
 // GetRawClient returns the current active client's raw client.
-func (fc *FallbackClient) GetRawClient() interface{} {
+func (fc *FallbackClient) GetRawClient() any {
 	idx := fc.getCurrent()
 	return fc.clients[idx].GetRawClient()
 }

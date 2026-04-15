@@ -255,7 +255,7 @@ func (c *OpenAIOAuthClient) WithModel(modelName string) Client {
 }
 
 // GetRawClient returns nil since we use HTTP directly.
-func (c *OpenAIOAuthClient) GetRawClient() interface{} {
+func (c *OpenAIOAuthClient) GetRawClient() any {
 	return nil
 }
 

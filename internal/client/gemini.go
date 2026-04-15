@@ -767,6 +767,6 @@ func Ptr[T any](v T) *T {
 }
 
 // GetRawClient returns the underlying genai.Client for direct API access.
-func (c *GeminiClient) GetRawClient() interface{} {
+func (c *GeminiClient) GetRawClient() any {
 	return c.client
 }

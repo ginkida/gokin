@@ -159,7 +159,7 @@ func (c *OllamaClient) SendMessageWithHistory(ctx context.Context, history []*ge
 		Model:    model,
 		Messages: messages,
 		Stream:   Ptr(true),
-		Options: map[string]interface{}{
+		Options: map[string]any{
 			"num_predict": c.config.MaxTokens,
 		},
 	}
@@ -199,7 +199,7 @@ func (c *OllamaClient) SendFunctionResponse(ctx context.Context, history []*gena
 		Model:    model,
 		Messages: messages,
 		Stream:   Ptr(true),
-		Options: map[string]interface{}{
+		Options: map[string]any{
 			"num_predict": c.config.MaxTokens,
 		},
 	}
@@ -400,7 +400,7 @@ func (c *OllamaClient) SetTools(tools []*genai.Tool) {
 }
 
 // SetRateLimiter sets the rate limiter for API calls.
-func (c *OllamaClient) SetRateLimiter(limiter interface{}) {
+func (c *OllamaClient) SetRateLimiter(limiter any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if rl, ok := limiter.(RateLimiter); ok {
@@ -493,7 +493,7 @@ func (c *OllamaClient) WithModel(modelName string) Client {
 }
 
 // GetRawClient returns the underlying Ollama client.
-func (c *OllamaClient) GetRawClient() interface{} {
+func (c *OllamaClient) GetRawClient() any {
 	return c.client
 }
 

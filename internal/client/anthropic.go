@@ -571,7 +571,7 @@ func (c *AnthropicClient) Close() error {
 }
 
 // GetRawClient returns the underlying HTTP client for direct API access.
-func (c *AnthropicClient) GetRawClient() interface{} {
+func (c *AnthropicClient) GetRawClient() any {
 	return c.httpClient
 }
 

@@ -557,7 +557,7 @@ func (c *GeminiOAuthClient) WithModel(modelName string) Client {
 }
 
 // GetRawClient returns nil since we use HTTP directly
-func (c *GeminiOAuthClient) GetRawClient() interface{} {
+func (c *GeminiOAuthClient) GetRawClient() any {
 	return nil
 }
 
