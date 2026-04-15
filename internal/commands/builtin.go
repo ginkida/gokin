@@ -494,6 +494,10 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 ╚═══════════════════════════════════════════════════════════════╝%s
 `, colorCyan, colorReset))
 
+	if v := app.GetVersion(); v != "" {
+		sb.WriteString(fmt.Sprintf("  Version: %s%s%s\n", colorGreen, v, colorReset))
+	}
+
 	sb.WriteString(fmt.Sprintf("\n%s─── Authentication ───%s\n", colorCyan, colorReset))
 
 	cfg := app.GetConfig()
