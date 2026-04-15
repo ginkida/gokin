@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
@@ -396,7 +397,8 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 			dirLabel = fmt.Sprintf(" [%s]", filepath.Base(info.WorkDir))
 		}
 
-		sb.WriteString(fmt.Sprintf("  %s (%d messages) - %s%s\n", info.ID, info.MessageCount, summary, dirLabel))
+		age := formatTimeAgo(info.LastActive)
+		sb.WriteString(fmt.Sprintf("  %s (%d messages, %s) — %s%s\n", info.ID, info.MessageCount, age, summary, dirLabel))
 		shown++
 	}
 
@@ -901,4 +903,26 @@ func getDataDir() (string, error) {
 		dataDir = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(dataDir, "gokin"), nil
+}
+
+// formatTimeAgo returns a human-readable relative time string.
+func formatTimeAgo(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "yesterday"
+		}
+		return fmt.Sprintf("%dd ago", days)
+	}
 }
