@@ -245,9 +245,9 @@ func ClassifyError(err error, context string) *EnhancedError {
 	case containsAny(errStr, "permission denied", "access denied", "eacces", "operation not permitted"):
 		enhanced.Category = ErrorCategoryPermission
 		enhanced.Suggestions = []string{
-			"Check file/directory permissions",
-			"Try running with elevated privileges if necessary",
-			"Verify you have write access to the target location",
+			"Check file permissions with: ls -la <path>",
+			"Fix with: chmod u+rw <path> (or chmod -R for directories)",
+			"If system file: use sudo or check ownership with ls -la",
 		}
 
 	case containsAny(errStr, "connection refused", "no such host", "network unreachable", "dial tcp", "dns"):
@@ -269,9 +269,9 @@ func ClassifyError(err error, context string) *EnhancedError {
 	case containsAny(errStr, "no such file", "not found", "does not exist", "enoent"):
 		enhanced.Category = ErrorCategoryFile
 		enhanced.Suggestions = []string{
-			"Verify the file path is correct",
-			"Check if the file was moved or deleted",
-			"Use glob patterns to search for the file",
+			"Verify the file path is correct (typo?)",
+			"Search for it: use /glob or /grep to locate the file",
+			"The file may have been moved or deleted",
 		}
 
 	case containsAny(errStr, "unauthorized", "401", "invalid.*key", "api.*key.*invalid"):
@@ -298,9 +298,9 @@ func ClassifyError(err error, context string) *EnhancedError {
 	case containsAny(errStr, "config", "configuration", "yaml", "invalid option"):
 		enhanced.Category = ErrorCategoryConfig
 		enhanced.Suggestions = []string{
-			"Check your configuration file for errors",
-			"Run 'gokin --setup' to reconfigure",
-			"Verify all required fields are present",
+			"Check your config file: ~/.config/gokin/config.yaml",
+			"Run /setup to reconfigure interactively",
+			"Run /doctor to diagnose setup issues",
 		}
 		enhanced.Documentation = "~/.config/gokin/config.yaml"
 
