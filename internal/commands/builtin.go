@@ -321,13 +321,47 @@ func (c *ResumeCommand) GetMetadata() CommandMetadata {
 }
 
 func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
-	if len(args) == 0 {
-		return "Usage: /resume <session_id> [--force]\nUse /sessions to list available sessions.", nil
-	}
-
 	hm, err := app.GetHistoryManager()
 	if err != nil {
 		return fmt.Sprintf("Failed to get history manager: %v", err), nil
+	}
+
+	// No args: show recent sessions for this project to pick from
+	if len(args) == 0 {
+		sessions, err := hm.ListSessions()
+		if err != nil || len(sessions) == 0 {
+			return "No saved sessions. Use /save to save the current session first.", nil
+		}
+
+		workDir := app.GetWorkDir()
+		var sb strings.Builder
+		sb.WriteString("Recent sessions (use /resume <id>):\n\n")
+		shown := 0
+		for _, info := range sessions {
+			if workDir != "" && info.WorkDir != "" &&
+				filepath.Clean(info.WorkDir) != filepath.Clean(workDir) {
+				continue
+			}
+			summary := info.Summary
+			if len(summary) > 60 {
+				summary = summary[:57] + "..."
+			}
+			if summary == "" {
+				summary = "(no summary)"
+			}
+			age := formatTimeAgo(info.LastActive)
+			sb.WriteString(fmt.Sprintf("  %s%s%s  %d msgs, %s — %s\n",
+				colorGreen, info.ID, colorReset, info.MessageCount, age, summary))
+			shown++
+			if shown >= 5 {
+				break
+			}
+		}
+		if shown == 0 {
+			return "No sessions for current project. Use /sessions --all to see all.", nil
+		}
+		sb.WriteString(fmt.Sprintf("\nExample: /resume %s", sessions[0].ID))
+		return sb.String(), nil
 	}
 
 	sessionID := args[0]
