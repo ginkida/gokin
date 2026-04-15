@@ -175,7 +175,9 @@ func defaultCommands() []CommandInfo {
 		{Name: "pr", Description: "Create a pull request", Category: "Git"},
 
 		// Planning
-		{Name: "plan", Description: "Toggle planning mode", Category: "Planning"},
+		{Name: "plan", Description: "Toggle planning mode", Category: "Planning",
+			Args:  []ArgInfo{{Name: "action", Required: false, Type: "option", Options: []string{"status"}}},
+			Usage: "/plan [status]"},
 		{Name: "resume-plan", Description: "Resume a saved plan", Category: "Planning"},
 		{Name: "health", Description: "Show runtime health", Category: "Planning"},
 		{Name: "policy", Description: "Show policy engine status", Category: "Planning"},
