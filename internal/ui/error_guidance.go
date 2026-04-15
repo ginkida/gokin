@@ -65,7 +65,7 @@ var errorGuidancePatterns = []ErrorGuidance{
 	{
 		Pattern:     regexp.MustCompile(`(?i)(unauthorized|401|invalid.*key|api.*key.*invalid)`),
 		Title:       "Authentication Failed",
-		Suggestions: []string{"Check your API key is correct", "Regenerate your API key at your provider's dashboard", "Run 'gokin --setup' to reconfigure"},
+		Suggestions: []string{"Check your API key is correct", "Regenerate your key at provider's dashboard", "Run /setup to reconfigure, or /login <provider> <key>"},
 		Command:     "/auth",
 	},
 	{
@@ -101,13 +101,13 @@ var errorGuidancePatterns = []ErrorGuidance{
 	{
 		Pattern:     regexp.MustCompile(`(?i)(file.*not.*found|no such file|ENOENT)`),
 		Title:       "File Not Found",
-		Suggestions: []string{"Check the file path is correct", "Use /pwd to see current directory", "Search for the file with glob pattern"},
+		Suggestions: []string{"Check the file path (typo?)", "Use /pwd to verify current directory", "Search with /glob or /grep to locate it"},
 		Command:     "",
 	},
 	{
 		Pattern:     regexp.MustCompile(`(?i)(permission.*denied|EACCES|cannot.*write)`),
 		Title:       "File Permission Error",
-		Suggestions: []string{"Check file permissions", "You may need elevated privileges", "Try a different location"},
+		Suggestions: []string{"Check permissions: ls -la <path>", "Fix with: chmod u+rw <path>", "If system file: check ownership or use sudo"},
 		Command:     "",
 	},
 	{
