@@ -151,7 +151,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	// Truncate if too long
 	const maxLen = 50000
 	if len(content) > maxLen {
-		content = content[:maxLen] + "\n\n... (content truncated)"
+		content = content[:maxLen] + "\n\n... (page content truncated at 50,000 chars)"
 	}
 
 	return NewSuccessResultWithData(content, map[string]any{

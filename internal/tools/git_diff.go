@@ -131,7 +131,7 @@ func (t *GitDiffTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 
 	// Truncate if output is too large
 	if len(result) > 50000 {
-		result = result[:50000] + "\n\n... (output truncated)"
+		result = result[:50000] + "\n\n... (diff truncated at 50,000 chars — use specific file paths to narrow the diff)"
 	}
 
 	return NewSuccessResult(result), nil

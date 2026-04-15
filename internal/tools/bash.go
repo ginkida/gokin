@@ -896,7 +896,7 @@ func (t *BashTool) buildResult(stdoutStr, stderrStr string) ToolResult {
 		omitted := result[headSize : len(result)-tailSize]
 		omittedLines := strings.Count(omitted, "\n")
 		result = head +
-			fmt.Sprintf("\n\n... [%d lines, %d chars omitted] ...\n\n", omittedLines, len(omitted)) +
+			fmt.Sprintf("\n\n... [%d lines, %d chars truncated — showing first %d and last %d chars] ...\n\n", omittedLines, len(omitted), headSize, tailSize) +
 			tail
 	}
 
