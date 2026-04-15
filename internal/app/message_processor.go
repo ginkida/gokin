@@ -713,13 +713,13 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 
 	// 5. Notify UI with plan banner and step overview
 	var bannerBuf strings.Builder
-	bannerBuf.WriteString(fmt.Sprintf("\n━━━ Executing plan: %s (%d steps) ━━━\n", approvedPlan.Title, totalSteps))
+	fmt.Fprintf(&bannerBuf, "\n━━━ Executing plan: %s (%d steps) ━━━\n", approvedPlan.Title, totalSteps)
 	if approvedPlan.Description != "" {
-		bannerBuf.WriteString(fmt.Sprintf("    %s\n", approvedPlan.Description))
+		fmt.Fprintf(&bannerBuf, "    %s\n", approvedPlan.Description)
 	}
 	bannerBuf.WriteString("\n")
 	for i, s := range approvedPlan.Steps {
-		bannerBuf.WriteString(fmt.Sprintf("  %d. %s\n", i+1, s.Title))
+		fmt.Fprintf(&bannerBuf, "  %d. %s\n", i+1, s.Title)
 	}
 	bannerBuf.WriteString("\n")
 	a.safeSendToProgram(ui.StreamTextMsg(bannerBuf.String()))
@@ -996,9 +996,9 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	})
 
 	var headerBuf strings.Builder
-	headerBuf.WriteString(fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title))
+	fmt.Fprintf(&headerBuf, "──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title)
 	if step.Description != "" {
-		headerBuf.WriteString(fmt.Sprintf("     %s\n", step.Description))
+		fmt.Fprintf(&headerBuf, "     %s\n", step.Description)
 	}
 	a.safeSendToProgram(ui.StreamTextMsg(headerBuf.String()))
 
@@ -1248,7 +1248,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 func buildDirectStepMessage(step *plan.Step, prevSummary string, totalSteps int) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("Execute step %d of %d: **%s**\n\n", step.ID, totalSteps, step.Title))
+	fmt.Fprintf(&sb, "Execute step %d of %d: **%s**\n\n", step.ID, totalSteps, step.Title)
 
 	if step.Description != "" {
 		sb.WriteString(step.Description)
@@ -1259,32 +1259,32 @@ func buildDirectStepMessage(step *plan.Step, prevSummary string, totalSteps int)
 	if len(step.Inputs) > 0 {
 		sb.WriteString("- Inputs:\n")
 		for _, in := range step.Inputs {
-			sb.WriteString(fmt.Sprintf("  - %s\n", in))
+			fmt.Fprintf(&sb, "  - %s\n", in)
 		}
 	}
 	if step.ExpectedArtifact != "" {
-		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", step.ExpectedArtifact))
+		fmt.Fprintf(&sb, "- Expected artifact: %s\n", step.ExpectedArtifact)
 	}
 	if len(step.ExpectedArtifactPaths) > 0 {
 		sb.WriteString("- Expected artifact paths:\n")
 		for _, path := range step.ExpectedArtifactPaths {
-			sb.WriteString(fmt.Sprintf("  - %s\n", path))
+			fmt.Fprintf(&sb, "  - %s\n", path)
 		}
 	}
 	if len(step.SuccessCriteria) > 0 {
 		sb.WriteString("- Success criteria:\n")
 		for _, c := range step.SuccessCriteria {
-			sb.WriteString(fmt.Sprintf("  - %s\n", c))
+			fmt.Fprintf(&sb, "  - %s\n", c)
 		}
 	}
 	if len(step.VerifyCommands) > 0 {
 		sb.WriteString("- Verify commands:\n")
 		for _, cmd := range step.VerifyCommands {
-			sb.WriteString(fmt.Sprintf("  - %s\n", cmd))
+			fmt.Fprintf(&sb, "  - %s\n", cmd)
 		}
 	}
 	if step.Rollback != "" {
-		sb.WriteString(fmt.Sprintf("- Rollback: %s\n", step.Rollback))
+		fmt.Fprintf(&sb, "- Rollback: %s\n", step.Rollback)
 	}
 	sb.WriteString("\n")
 
@@ -1374,13 +1374,13 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 
 	// Notify UI with plan banner and step overview
 	var delegatedBannerBuf strings.Builder
-	delegatedBannerBuf.WriteString(fmt.Sprintf("\n━━━ Executing plan: %s (%d steps, delegated) ━━━\n", approvedPlan.Title, totalSteps))
+	fmt.Fprintf(&delegatedBannerBuf, "\n━━━ Executing plan: %s (%d steps, delegated) ━━━\n", approvedPlan.Title, totalSteps)
 	if approvedPlan.Description != "" {
-		delegatedBannerBuf.WriteString(fmt.Sprintf("    %s\n", approvedPlan.Description))
+		fmt.Fprintf(&delegatedBannerBuf, "    %s\n", approvedPlan.Description)
 	}
 	delegatedBannerBuf.WriteString("\n")
 	for i, s := range approvedPlan.Steps {
-		delegatedBannerBuf.WriteString(fmt.Sprintf("  %d. %s\n", i+1, s.Title))
+		fmt.Fprintf(&delegatedBannerBuf, "  %d. %s\n", i+1, s.Title)
 	}
 	delegatedBannerBuf.WriteString("\n")
 	a.safeSendToProgram(ui.StreamTextMsg(delegatedBannerBuf.String()))
@@ -1646,9 +1646,9 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 
 	// Notify UI of step start with structured header
 	var delegatedHeaderBuf strings.Builder
-	delegatedHeaderBuf.WriteString(fmt.Sprintf("──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title))
+	fmt.Fprintf(&delegatedHeaderBuf, "──── Step %d/%d: %s ────\n", step.ID, totalSteps, step.Title)
 	if step.Description != "" {
-		delegatedHeaderBuf.WriteString(fmt.Sprintf("     %s\n", step.Description))
+		fmt.Fprintf(&delegatedHeaderBuf, "     %s\n", step.Description)
 	}
 	a.safeSendToProgram(ui.StreamTextMsg(delegatedHeaderBuf.String()))
 
@@ -2122,10 +2122,10 @@ func (a *App) formatPlanSummary(p *plan.Plan, duration time.Duration) string {
 	sb.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 	sb.WriteString("  Plan Execution Summary\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	sb.WriteString(fmt.Sprintf("  Plan: %s\n", p.Title))
-	sb.WriteString(fmt.Sprintf("  Duration: %s", formatDuration(duration)))
+	fmt.Fprintf(&sb, "  Plan: %s\n", p.Title)
+	fmt.Fprintf(&sb, "  Duration: %s", formatDuration(duration))
 	if p.Version > 0 {
-		sb.WriteString(fmt.Sprintf("  (v%d)", p.Version))
+		fmt.Fprintf(&sb, "  (v%d)", p.Version)
 	}
 	sb.WriteString("\n\n")
 
@@ -2135,21 +2135,21 @@ func (a *App) formatPlanSummary(p *plan.Plan, duration time.Duration) string {
 		switch step.Status {
 		case plan.StatusCompleted:
 			completed++
-			sb.WriteString(fmt.Sprintf("  ✓ Step %d: %s (%s)\n", step.ID, step.Title, formatDuration(step.Duration())))
+			fmt.Fprintf(&sb, "  ✓ Step %d: %s (%s)\n", step.ID, step.Title, formatDuration(step.Duration()))
 		case plan.StatusFailed:
 			failed++
 			errMsg := step.Error
 			if len(errMsg) > 80 {
 				errMsg = errMsg[:80] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("  ✗ Step %d: %s — %s\n", step.ID, step.Title, errMsg))
+			fmt.Fprintf(&sb, "  ✗ Step %d: %s — %s\n", step.ID, step.Title, errMsg)
 		case plan.StatusSkipped:
 			skipped++
-			sb.WriteString(fmt.Sprintf("  ⊘ Step %d: %s (skipped)\n", step.ID, step.Title))
+			fmt.Fprintf(&sb, "  ⊘ Step %d: %s (skipped)\n", step.ID, step.Title)
 		case plan.StatusPaused:
-			sb.WriteString(fmt.Sprintf("  ⏸ Step %d: %s (paused)\n", step.ID, step.Title))
+			fmt.Fprintf(&sb, "  ⏸ Step %d: %s (paused)\n", step.ID, step.Title)
 		default:
-			sb.WriteString(fmt.Sprintf("  ○ Step %d: %s (pending)\n", step.ID, step.Title))
+			fmt.Fprintf(&sb, "  ○ Step %d: %s (pending)\n", step.ID, step.Title)
 		}
 		if step.AgentMetrics != nil {
 			m := step.AgentMetrics
@@ -2161,16 +2161,16 @@ func (a *App) formatPlanSummary(p *plan.Plan, duration time.Duration) string {
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n  Results: %d completed", completed))
+	fmt.Fprintf(&sb, "\n  Results: %d completed", completed)
 	if failed > 0 {
-		sb.WriteString(fmt.Sprintf(", %d failed", failed))
+		fmt.Fprintf(&sb, ", %d failed", failed)
 	}
 	if skipped > 0 {
-		sb.WriteString(fmt.Sprintf(", %d skipped", skipped))
+		fmt.Fprintf(&sb, ", %d skipped", skipped)
 	}
-	sb.WriteString(fmt.Sprintf(" / %d total\n", len(steps)))
+	fmt.Fprintf(&sb, " / %d total\n", len(steps))
 	if totalTokens > 0 {
-		sb.WriteString(fmt.Sprintf("  Tokens used: ~%d\n", totalTokens))
+		fmt.Fprintf(&sb, "  Tokens used: ~%d\n", totalTokens)
 	}
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
@@ -3189,15 +3189,15 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 
 	// Plan overview (helps sub-agent understand the overall goal)
 	sb.WriteString("# Plan Execution Context\n\n")
-	sb.WriteString(fmt.Sprintf("**Plan:** %s\n", ctx.PlanTitle))
+	fmt.Fprintf(&sb, "**Plan:** %s\n", ctx.PlanTitle)
 	if ctx.PlanDescription != "" {
-		sb.WriteString(fmt.Sprintf("**Goal:** %s\n", ctx.PlanDescription))
+		fmt.Fprintf(&sb, "**Goal:** %s\n", ctx.PlanDescription)
 	}
 	if ctx.PlanRequest != "" && len(ctx.PlanRequest) < 500 {
-		sb.WriteString(fmt.Sprintf("**Original Request:** %s\n", ctx.PlanRequest))
+		fmt.Fprintf(&sb, "**Original Request:** %s\n", ctx.PlanRequest)
 	}
-	sb.WriteString(fmt.Sprintf("**Progress:** Step %d of %d (%d completed)\n\n",
-		ctx.Step.ID, ctx.TotalSteps, ctx.CompletedCount))
+	fmt.Fprintf(&sb, "**Progress:** Step %d of %d (%d completed)\n\n",
+		ctx.Step.ID, ctx.TotalSteps, ctx.CompletedCount)
 
 	// Context from planning discussion (key decisions)
 	if ctx.ContextSnapshot != "" {
@@ -3212,7 +3212,7 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 	}
 
 	// Current step details
-	sb.WriteString(fmt.Sprintf("## Current Step %d: %s\n", ctx.Step.ID, ctx.Step.Title))
+	fmt.Fprintf(&sb, "## Current Step %d: %s\n", ctx.Step.ID, ctx.Step.Title)
 	if ctx.Step.Description != "" {
 		sb.WriteString(ctx.Step.Description)
 		sb.WriteString("\n")
@@ -3221,32 +3221,32 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 	if len(ctx.Step.Inputs) > 0 {
 		sb.WriteString("- Inputs:\n")
 		for _, in := range ctx.Step.Inputs {
-			sb.WriteString(fmt.Sprintf("  - %s\n", in))
+			fmt.Fprintf(&sb, "  - %s\n", in)
 		}
 	}
 	if ctx.Step.ExpectedArtifact != "" {
-		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", ctx.Step.ExpectedArtifact))
+		fmt.Fprintf(&sb, "- Expected artifact: %s\n", ctx.Step.ExpectedArtifact)
 	}
 	if len(ctx.Step.ExpectedArtifactPaths) > 0 {
 		sb.WriteString("- Expected artifact paths:\n")
 		for _, path := range ctx.Step.ExpectedArtifactPaths {
-			sb.WriteString(fmt.Sprintf("  - %s\n", path))
+			fmt.Fprintf(&sb, "  - %s\n", path)
 		}
 	}
 	if len(ctx.Step.SuccessCriteria) > 0 {
 		sb.WriteString("- Success criteria:\n")
 		for _, c := range ctx.Step.SuccessCriteria {
-			sb.WriteString(fmt.Sprintf("  - %s\n", c))
+			fmt.Fprintf(&sb, "  - %s\n", c)
 		}
 	}
 	if len(ctx.Step.VerifyCommands) > 0 {
 		sb.WriteString("- Verify commands:\n")
 		for _, cmd := range ctx.Step.VerifyCommands {
-			sb.WriteString(fmt.Sprintf("  - %s\n", cmd))
+			fmt.Fprintf(&sb, "  - %s\n", cmd)
 		}
 	}
 	if ctx.Step.Rollback != "" {
-		sb.WriteString(fmt.Sprintf("- Rollback: %s\n", ctx.Step.Rollback))
+		fmt.Fprintf(&sb, "- Rollback: %s\n", ctx.Step.Rollback)
 	}
 	if contractJSON := buildStepContractJSON(ctx.Step, ctx.TotalSteps); contractJSON != "" {
 		sb.WriteString("\n### StepContractJSON\n")
@@ -3320,7 +3320,7 @@ func (a *App) extractContextSnapshot() string {
 				if len(text) > 500 {
 					text = text[:500] + "..."
 				}
-				sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", role, text))
+				fmt.Fprintf(&sb, "**%s**: %s\n\n", role, text)
 				messageCount++
 				break
 			}
