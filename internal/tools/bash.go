@@ -627,16 +627,16 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		// Use pipes for streaming output
 		stdoutPipe, err := cmd.StdoutPipe()
 		if err != nil {
-			return NewErrorResult(fmt.Sprintf("failed to create stdout pipe: %s", err)), nil
+			return NewErrorResult(fmt.Sprintf("could not capture command output: %s", err)), nil
 		}
 		stderrPipe, err := cmd.StderrPipe()
 		if err != nil {
-			return NewErrorResult(fmt.Sprintf("failed to create stderr pipe: %s", err)), nil
+			return NewErrorResult(fmt.Sprintf("could not capture command output: %s", err)), nil
 		}
 
 		// Start command
 		if err := cmd.Start(); err != nil {
-			return NewErrorResult(fmt.Sprintf("failed to start command: %s", err)), nil
+			return NewErrorResult(fmt.Sprintf("could not run command: %s (check that the command exists and is executable)", err)), nil
 		}
 
 		// Read stdout and stderr in goroutines
@@ -782,7 +782,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 					Success: false,
 				}, nil
 			}
-			return NewErrorResult(fmt.Sprintf("command failed: %s", cmdErr)), nil
+			return NewErrorResult(fmt.Sprintf("command error: %s", cmdErr)), nil
 		}
 
 		return t.buildResult(cleanOutput, stderr.String()), nil
@@ -795,7 +795,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 	// Start command
 	err := cmd.Start()
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("failed to start command: %s", err)), nil
+		return NewErrorResult(fmt.Sprintf("could not run command: %s (check that the command exists and is executable)", err)), nil
 	}
 
 	// Use WaitGroup to safely track command completion and avoid race condition
