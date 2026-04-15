@@ -2028,6 +2028,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			if m.toastManager != nil {
 				m.toastManager.ShowError(msg.Message)
 			}
+		case StatusCancelled:
+			if m.toastManager != nil {
+				m.toastManager.ShowWarning(msg.Message)
+			}
 		}
 	}
 

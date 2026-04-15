@@ -10,6 +10,7 @@ import (
 
 	"gokin/internal/commands"
 	"gokin/internal/logging"
+	"gokin/internal/ui"
 )
 
 const (
@@ -108,6 +109,10 @@ func (a *App) setupSignalHandler() func() {
 
 				if cancelFn != nil {
 					logging.Debug("cancelling current operation (first Ctrl+C)")
+					a.safeSendToProgram(ui.StatusUpdateMsg{
+						Type:    ui.StatusCancelled,
+						Message: "Canceling... (Ctrl+C again to exit)",
+					})
 					cancelFn()
 					// Wait for second signal for full shutdown
 					continue
