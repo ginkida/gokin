@@ -916,7 +916,7 @@ func (t *BashTool) executeSandboxed(ctx context.Context, command string) (ToolRe
 	// Create sandboxed command
 	sandboxed, err := security.NewSandboxedCommand(ctx, t.workDir, command, sandboxConfig)
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("failed to create sandboxed command: %s", err)), nil
+		return NewErrorResult(fmt.Sprintf("sandbox setup failed: %s", err)), nil
 	}
 
 	// Run the sandboxed command
@@ -924,7 +924,7 @@ func (t *BashTool) executeSandboxed(ctx context.Context, command string) (ToolRe
 
 	// Handle errors
 	if result.Error != nil {
-		return NewErrorResult(fmt.Sprintf("sandboxed command failed: %s", result.Error)), nil
+		return NewErrorResult(fmt.Sprintf("command failed in sandbox: %s", result.Error)), nil
 	}
 
 	// Build output
