@@ -1223,14 +1223,14 @@ func (a *Agent) buildSystemPrompt() string {
 	var sb strings.Builder
 
 	sb.WriteString("You are a specialized sub-agent with limited tool access.\n")
-	sb.WriteString(fmt.Sprintf("Agent Type: %s\n", a.Type))
+	fmt.Fprintf(&sb, "Agent Type: %s\n", a.Type)
 	sb.WriteString("Available tools: ")
 
 	toolNames := a.registry.Names()
 	sb.WriteString(strings.Join(toolNames, ", "))
 	sb.WriteString("\n")
 	if workDir != "" {
-		sb.WriteString(fmt.Sprintf("Working directory: %s\n", workDir))
+		fmt.Fprintf(&sb, "Working directory: %s\n", workDir)
 	}
 	sb.WriteString("\n")
 
@@ -1415,11 +1415,11 @@ func (a *Agent) buildToolGuidesSection() string {
 				sb.WriteString("═══════════════════════════════════════════════════════════════════════\n\n")
 			}
 
-			sb.WriteString(fmt.Sprintf("### %s\n", name))
-			sb.WriteString(fmt.Sprintf("**When to use:** %s\n\n", guide.WhenToUse))
-			sb.WriteString(fmt.Sprintf("**How to respond:** %s\n\n", guide.HowToRespond))
+			fmt.Fprintf(&sb, "### %s\n", name)
+			fmt.Fprintf(&sb, "**When to use:** %s\n\n", guide.WhenToUse)
+			fmt.Fprintf(&sb, "**How to respond:** %s\n\n", guide.HowToRespond)
 			if guide.CommonMistakes != "" {
-				sb.WriteString(fmt.Sprintf("**Avoid:** %s\n\n", guide.CommonMistakes))
+				fmt.Fprintf(&sb, "**Avoid:** %s\n\n", guide.CommonMistakes)
 			}
 		}
 	}
@@ -2445,7 +2445,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						if b.Node.Action != nil && b.Node.Action.Prompt != "" {
 							stepLabel = b.Node.Action.Prompt
 						}
-						msg.WriteString(fmt.Sprintf("  • %s: %s\n", stepLabel, b.Reason))
+						fmt.Fprintf(&msg, "  • %s: %s\n", stepLabel, b.Reason)
 					}
 					msg.WriteString("[Switching to reactive mode]\n")
 					a.safeOnText(msg.String())
@@ -3006,18 +3006,18 @@ func (a *Agent) buildLoopRecoveryIntervention(toolName string, args map[string]a
 
 	sb.WriteString("STOP. I've detected that I'm stuck in a loop.\n\n")
 	sb.WriteString("**What I was doing:**\n")
-	sb.WriteString(fmt.Sprintf("- Calling `%s` with the same arguments %d times\n", toolName, count))
+	fmt.Fprintf(&sb, "- Calling `%s` with the same arguments %d times\n", toolName, count)
 
 	// Extract key arguments for context
 	if args != nil {
 		if path, ok := args["path"].(string); ok {
-			sb.WriteString(fmt.Sprintf("- Path: `%s`\n", path))
+			fmt.Fprintf(&sb, "- Path: `%s`\n", path)
 		}
 		if pattern, ok := args["pattern"].(string); ok {
-			sb.WriteString(fmt.Sprintf("- Pattern: `%s`\n", pattern))
+			fmt.Fprintf(&sb, "- Pattern: `%s`\n", pattern)
 		}
 		if cmd, ok := args["command"].(string); ok {
-			sb.WriteString(fmt.Sprintf("- Command: `%s`\n", cmd))
+			fmt.Fprintf(&sb, "- Command: `%s`\n", cmd)
 		}
 	}
 
@@ -3068,7 +3068,7 @@ func (a *Agent) buildStagnationRecoveryIntervention(attempt int, reason string) 
 	var sb strings.Builder
 
 	sb.WriteString("EXECUTION WATCHDOG: progress has stalled.\n\n")
-	sb.WriteString(fmt.Sprintf("Recovery attempt: %d/2\n", attempt))
+	fmt.Fprintf(&sb, "Recovery attempt: %d/2\n", attempt)
 	if strings.TrimSpace(reason) != "" {
 		sb.WriteString("Observed issue: ")
 		sb.WriteString(reason)

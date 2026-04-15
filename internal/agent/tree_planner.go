@@ -1581,7 +1581,7 @@ func (tp *TreePlanner) GenerateVisualTree(tree *PlanTree) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("ROOT: %s\n", tree.Goal.Description))
+	fmt.Fprintf(&sb, "ROOT: %s\n", tree.Goal.Description)
 
 	var renderNode func(node *PlanNode, prefix string, isLast bool)
 	renderNode = func(node *PlanNode, prefix string, isLast bool) {
@@ -1627,7 +1627,7 @@ func (tp *TreePlanner) GenerateVisualTree(tree *PlanTree) string {
 			}
 		}
 
-		sb.WriteString(fmt.Sprintf("%s%s%s %s (score: %.2f)\n", prefix, branch, status, actionDesc, node.Score))
+		fmt.Fprintf(&sb, "%s%s%s %s (score: %.2f)\n", prefix, branch, status, actionDesc, node.Score)
 
 		// New prefix for children
 		newPrefix := prefix

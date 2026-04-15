@@ -290,9 +290,9 @@ func (gc *GitContext) FormatForPrompt() string {
 	sb.WriteString("## Git Context\n\n")
 
 	// Branch info
-	sb.WriteString(fmt.Sprintf("**Branch:** `%s`", gc.Branch))
+	fmt.Fprintf(&sb, "**Branch:** `%s`", gc.Branch)
 	if gc.RemoteBranch != "" {
-		sb.WriteString(fmt.Sprintf(" (tracking `%s`)", gc.RemoteBranch))
+		fmt.Fprintf(&sb, " (tracking `%s`)", gc.RemoteBranch)
 	}
 	sb.WriteString("\n")
 
@@ -305,7 +305,7 @@ func (gc *GitContext) FormatForPrompt() string {
 		if gc.AheadBehind.Behind > 0 {
 			parts = append(parts, fmt.Sprintf("%d behind", gc.AheadBehind.Behind))
 		}
-		sb.WriteString(fmt.Sprintf("**Remote:** %s\n", strings.Join(parts, ", ")))
+		fmt.Fprintf(&sb, "**Remote:** %s\n", strings.Join(parts, ", "))
 	}
 
 	// Working tree status
@@ -313,25 +313,25 @@ func (gc *GitContext) FormatForPrompt() string {
 	if hasChanges {
 		sb.WriteString("\n**Working Tree:**\n")
 		if len(gc.StagedFiles) > 0 {
-			sb.WriteString(fmt.Sprintf("- Staged: %d file(s)\n", len(gc.StagedFiles)))
+			fmt.Fprintf(&sb, "- Staged: %d file(s)\n", len(gc.StagedFiles))
 			for _, f := range limitList(gc.StagedFiles, 5) {
-				sb.WriteString(fmt.Sprintf("  - `%s`\n", f))
+				fmt.Fprintf(&sb, "  - `%s`\n", f)
 			}
 		}
 		if len(gc.ModifiedFiles) > 0 {
-			sb.WriteString(fmt.Sprintf("- Modified: %d file(s)\n", len(gc.ModifiedFiles)))
+			fmt.Fprintf(&sb, "- Modified: %d file(s)\n", len(gc.ModifiedFiles))
 			for _, f := range limitList(gc.ModifiedFiles, 5) {
-				sb.WriteString(fmt.Sprintf("  - `%s`\n", f))
+				fmt.Fprintf(&sb, "  - `%s`\n", f)
 			}
 		}
 		if len(gc.UntrackedFiles) > 0 {
-			sb.WriteString(fmt.Sprintf("- Untracked: %d file(s)\n", len(gc.UntrackedFiles)))
+			fmt.Fprintf(&sb, "- Untracked: %d file(s)\n", len(gc.UntrackedFiles))
 		}
 	}
 
 	// Stashes
 	if gc.Stashes > 0 {
-		sb.WriteString(fmt.Sprintf("\n**Stashes:** %d\n", gc.Stashes))
+		fmt.Fprintf(&sb, "\n**Stashes:** %d\n", gc.Stashes)
 	}
 
 	// Recent commits
@@ -339,7 +339,7 @@ func (gc *GitContext) FormatForPrompt() string {
 		sb.WriteString("\n**Recent Commits:**\n")
 		for _, c := range gc.RecentCommits {
 			ago := formatTimeAgo(c.Date)
-			sb.WriteString(fmt.Sprintf("- `%s` %s (%s, %s)\n", c.Hash, c.Subject, c.Author, ago))
+			fmt.Fprintf(&sb, "- `%s` %s (%s, %s)\n", c.Hash, c.Subject, c.Author, ago)
 		}
 	}
 

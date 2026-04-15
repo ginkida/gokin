@@ -322,11 +322,11 @@ func (sm *SharedMemory) GetForContext(agentID string, maxEntries int) string {
 
 	for i, entry := range entries {
 		if i >= maxEntries {
-			sb.WriteString(fmt.Sprintf("... and %d more entries\n", len(entries)-i))
+			fmt.Fprintf(&sb, "... and %d more entries\n", len(entries)-i)
 			break
 		}
-		sb.WriteString(fmt.Sprintf("- **%s** [%s from %s]: %v\n",
-			entry.Key, entry.Type, entry.Source, entry.Value))
+		fmt.Fprintf(&sb, "- **%s** [%s from %s]: %v\n",
+			entry.Key, entry.Type, entry.Source, entry.Value)
 	}
 
 	sb.WriteString("\n")
@@ -496,7 +496,7 @@ func (sm *SharedMemory) GetContextSnapshotForPrompt() string {
 	if len(snapshot.KeyFiles) > 0 {
 		sb.WriteString("**Key Files Analyzed:**\n")
 		for path, summary := range snapshot.KeyFiles {
-			sb.WriteString(fmt.Sprintf("- `%s`: %s\n", path, summary))
+			fmt.Fprintf(&sb, "- `%s`: %s\n", path, summary)
 		}
 		sb.WriteString("\n")
 	}
@@ -505,7 +505,7 @@ func (sm *SharedMemory) GetContextSnapshotForPrompt() string {
 	if len(snapshot.Discoveries) > 0 {
 		sb.WriteString("**Key Discoveries:**\n")
 		for _, discovery := range snapshot.Discoveries {
-			sb.WriteString(fmt.Sprintf("- %s\n", discovery))
+			fmt.Fprintf(&sb, "- %s\n", discovery)
 		}
 		sb.WriteString("\n")
 	}
@@ -514,7 +514,7 @@ func (sm *SharedMemory) GetContextSnapshotForPrompt() string {
 	if len(snapshot.Requirements) > 0 {
 		sb.WriteString("**Requirements:**\n")
 		for _, req := range snapshot.Requirements {
-			sb.WriteString(fmt.Sprintf("- %s\n", req))
+			fmt.Fprintf(&sb, "- %s\n", req)
 		}
 		sb.WriteString("\n")
 	}
@@ -523,7 +523,7 @@ func (sm *SharedMemory) GetContextSnapshotForPrompt() string {
 	if len(snapshot.Decisions) > 0 {
 		sb.WriteString("**Architectural Decisions:**\n")
 		for _, decision := range snapshot.Decisions {
-			sb.WriteString(fmt.Sprintf("- %s\n", decision))
+			fmt.Fprintf(&sb, "- %s\n", decision)
 		}
 		sb.WriteString("\n")
 	}
@@ -532,9 +532,9 @@ func (sm *SharedMemory) GetContextSnapshotForPrompt() string {
 	if len(snapshot.CriticalResults) > 0 {
 		sb.WriteString("**Critical Tool Results:**\n")
 		for _, result := range snapshot.CriticalResults {
-			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", result.ToolName, result.Summary))
+			fmt.Fprintf(&sb, "- **%s**: %s\n", result.ToolName, result.Summary)
 			if result.Details != "" && len(result.Details) < 500 {
-				sb.WriteString(fmt.Sprintf("  Details: %s\n", result.Details))
+				fmt.Fprintf(&sb, "  Details: %s\n", result.Details)
 			}
 		}
 		sb.WriteString("\n")
@@ -544,7 +544,7 @@ func (sm *SharedMemory) GetContextSnapshotForPrompt() string {
 	if len(snapshot.ErrorPatterns) > 0 {
 		sb.WriteString("**Known Error Patterns:**\n")
 		for pattern, solution := range snapshot.ErrorPatterns {
-			sb.WriteString(fmt.Sprintf("- `%s`: %s\n", pattern, solution))
+			fmt.Fprintf(&sb, "- `%s`: %s\n", pattern, solution)
 		}
 		sb.WriteString("\n")
 	}

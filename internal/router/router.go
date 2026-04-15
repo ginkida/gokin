@@ -393,7 +393,7 @@ func (r *Router) executeCoordinated(ctx context.Context, decomposition *Decompos
 
 	var allOutputs strings.Builder
 	allOutputs.WriteString("## Coordinated Execution\n\n")
-	allOutputs.WriteString(fmt.Sprintf("Task decomposed into %d subtasks.\n\n", len(decomposition.Subtasks)))
+	fmt.Fprintf(&allOutputs, "Task decomposed into %d subtasks.\n\n", len(decomposition.Subtasks))
 
 	if decomposition.CanParallel {
 		allOutputs.WriteString("**Mode:** Parallel execution\n\n")
@@ -476,8 +476,8 @@ func (r *Router) executeCoordinated(ctx context.Context, decomposition *Decompos
 			continue
 		}
 
-		allOutputs.WriteString(fmt.Sprintf("### Subtask: %s (%s)\n", st.ID, st.AgentType))
-		allOutputs.WriteString(fmt.Sprintf("Prompt: %s\n\n", st.Prompt))
+		fmt.Fprintf(&allOutputs, "### Subtask: %s (%s)\n", st.ID, st.AgentType)
+		fmt.Fprintf(&allOutputs, "Prompt: %s\n\n", st.Prompt)
 
 		if result.Success {
 			successCount++
@@ -486,17 +486,17 @@ func (r *Router) executeCoordinated(ctx context.Context, decomposition *Decompos
 				output = output[:1000] + "...[truncated]"
 			}
 			allOutputs.WriteString("**Status:** Completed\n\n")
-			allOutputs.WriteString(fmt.Sprintf("**Result:**\n%s\n\n", output))
+			fmt.Fprintf(&allOutputs, "**Result:**\n%s\n\n", output)
 		} else {
 			failedCount++
-			allOutputs.WriteString(fmt.Sprintf("**Status:** Error - %s\n\n", result.Error))
+			fmt.Fprintf(&allOutputs, "**Status:** Error - %s\n\n", result.Error)
 		}
 	}
 
 	// Summary
 	allOutputs.WriteString("---\n")
-	allOutputs.WriteString(fmt.Sprintf("**Total:** %d succeeded, %d failed out of %d subtasks\n",
-		successCount, failedCount, len(decomposition.Subtasks)))
+	fmt.Fprintf(&allOutputs, "**Total:** %d succeeded, %d failed out of %d subtasks\n",
+		successCount, failedCount, len(decomposition.Subtasks))
 
 	response := allOutputs.String()
 	history := []*genai.Content{

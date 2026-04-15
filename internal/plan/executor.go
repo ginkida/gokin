@@ -240,25 +240,25 @@ func (m *Manager) GetActiveContractContext() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Plan: %s\n", strings.TrimSpace(currentPlan.Title)))
+	fmt.Fprintf(&sb, "Plan: %s\n", strings.TrimSpace(currentPlan.Title))
 	if desc := strings.TrimSpace(currentPlan.Description); desc != "" {
-		sb.WriteString(fmt.Sprintf("Goal: %s\n", desc))
+		fmt.Fprintf(&sb, "Goal: %s\n", desc)
 	}
 	if req := strings.TrimSpace(currentPlan.Request); req != "" {
 		req = compactContractText(req, 240)
-		sb.WriteString(fmt.Sprintf("Request: %s\n", req))
+		fmt.Fprintf(&sb, "Request: %s\n", req)
 	}
-	sb.WriteString(fmt.Sprintf("Status: %s", currentPlan.Status.String()))
+	fmt.Fprintf(&sb, "Status: %s", currentPlan.Status.String())
 	if executing {
 		sb.WriteString(" (executing)")
 	}
 	sb.WriteString("\n")
-	sb.WriteString(fmt.Sprintf("Progress: %d/%d\n", currentPlan.CompletedCount(), currentPlan.StepCount()))
+	fmt.Fprintf(&sb, "Progress: %d/%d\n", currentPlan.CompletedCount(), currentPlan.StepCount())
 
 	sb.WriteString("\nCurrent Step Contract:\n")
-	sb.WriteString(fmt.Sprintf("- Step %d: %s\n", activeStep.ID, strings.TrimSpace(activeStep.Title)))
+	fmt.Fprintf(&sb, "- Step %d: %s\n", activeStep.ID, strings.TrimSpace(activeStep.Title))
 	if d := strings.TrimSpace(activeStep.Description); d != "" {
-		sb.WriteString(fmt.Sprintf("- Description: %s\n", compactContractText(d, 280)))
+		fmt.Fprintf(&sb, "- Description: %s\n", compactContractText(d, 280))
 	}
 	if len(activeStep.Inputs) > 0 {
 		sb.WriteString("- Inputs: ")
@@ -266,7 +266,7 @@ func (m *Manager) GetActiveContractContext() string {
 		sb.WriteString("\n")
 	}
 	if ea := strings.TrimSpace(activeStep.ExpectedArtifact); ea != "" {
-		sb.WriteString(fmt.Sprintf("- Expected artifact: %s\n", compactContractText(ea, 260)))
+		fmt.Fprintf(&sb, "- Expected artifact: %s\n", compactContractText(ea, 260))
 	}
 	if len(activeStep.ExpectedArtifactPaths) > 0 {
 		sb.WriteString("- Expected artifact paths: ")
@@ -284,7 +284,7 @@ func (m *Manager) GetActiveContractContext() string {
 		sb.WriteString("\n")
 	}
 	if rb := strings.TrimSpace(activeStep.Rollback); rb != "" {
-		sb.WriteString(fmt.Sprintf("- Rollback: %s\n", compactContractText(rb, 220)))
+		fmt.Fprintf(&sb, "- Rollback: %s\n", compactContractText(rb, 220))
 	}
 	sb.WriteString("- Completion proof required: changed files and/or commands/output evidence\n")
 	sb.WriteString("- Do not complete the step without objective proof")
@@ -720,7 +720,7 @@ func (m *Manager) GetPreviousStepsSummary(currentStepID int, maxLen int) string 
 			break
 		}
 		if step.Status == StatusCompleted {
-			sb.WriteString(fmt.Sprintf("Step %d (%s): ", step.ID, step.Title))
+			fmt.Fprintf(&sb, "Step %d (%s): ", step.ID, step.Title)
 			output := step.Output
 			if len(output) > maxLen {
 				output = output[:maxLen] + "..."
@@ -736,12 +736,12 @@ func (m *Manager) GetPreviousStepsSummary(currentStepID int, maxLen int) string 
 				errDetail = errDetail[:200] + "..."
 			}
 			if errDetail != "" {
-				sb.WriteString(fmt.Sprintf("Step %d (%s): FAILED - %s\n", step.ID, step.Title, errDetail))
+				fmt.Fprintf(&sb, "Step %d (%s): FAILED - %s\n", step.ID, step.Title, errDetail)
 			} else {
-				sb.WriteString(fmt.Sprintf("Step %d (%s): FAILED\n", step.ID, step.Title))
+				fmt.Fprintf(&sb, "Step %d (%s): FAILED\n", step.ID, step.Title)
 			}
 		} else if step.Status == StatusSkipped {
-			sb.WriteString(fmt.Sprintf("Step %d (%s): SKIPPED\n", step.ID, step.Title))
+			fmt.Fprintf(&sb, "Step %d (%s): SKIPPED\n", step.ID, step.Title)
 		}
 	}
 	return sb.String()

@@ -140,8 +140,8 @@ func (m *DiffPreviewModel) generateDiff(oldContent, newContent string) string {
 	var result strings.Builder
 
 	// Header
-	result.WriteString(fmt.Sprintf("--- %s\n", m.filePath))
-	result.WriteString(fmt.Sprintf("+++ %s\n", m.filePath))
+	fmt.Fprintf(&result, "--- %s\n", m.filePath)
+	fmt.Fprintf(&result, "+++ %s\n", m.filePath)
 
 	// Generate line-based diff
 	diffs := dmp.DiffMain(oldContent, newContent, true)
@@ -271,11 +271,11 @@ func (m *DiffPreviewModel) generateDiff(oldContent, newContent string) string {
 			dl := allLines[idx]
 			switch dl.Type {
 			case diffmatchpatch.DiffEqual:
-				result.WriteString(fmt.Sprintf(" %s\n", dl.Text))
+				fmt.Fprintf(&result, " %s\n", dl.Text)
 			case diffmatchpatch.DiffDelete:
-				result.WriteString(fmt.Sprintf("-%s\n", dl.Text))
+				fmt.Fprintf(&result, "-%s\n", dl.Text)
 			case diffmatchpatch.DiffInsert:
-				result.WriteString(fmt.Sprintf("+%s\n", dl.Text))
+				fmt.Fprintf(&result, "+%s\n", dl.Text)
 			}
 		}
 	}
@@ -682,7 +682,7 @@ func (m DiffPreviewModel) renderSideBySide() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%-4s %-*s | %-4s %-*s | Δ\n", "#", leftW, leftHeader, "#", rightW, rightHeader))
+	fmt.Fprintf(&b, "%-4s %-*s | %-4s %-*s | Δ\n", "#", leftW, leftHeader, "#", rightW, rightHeader)
 	b.WriteString(strings.Repeat("-", leftW+rightW+18))
 	b.WriteString("\n")
 
@@ -713,8 +713,8 @@ func (m DiffPreviewModel) renderSideBySide() string {
 			}
 		}
 
-		b.WriteString(fmt.Sprintf("%-4d %-*s | %-4d %-*s | %s\n",
-			i+1, leftW, left, i+1, rightW, right, marker))
+		fmt.Fprintf(&b, "%-4d %-*s | %-4d %-*s | %s\n",
+			i+1, leftW, left, i+1, rightW, right, marker)
 	}
 
 	return b.String()
@@ -883,8 +883,8 @@ func (m *MultiDiffPreviewModel) generateDiff(index int) string {
 	dmp := diffmatchpatch.New()
 
 	var result strings.Builder
-	result.WriteString(fmt.Sprintf("--- %s\n", file.FilePath))
-	result.WriteString(fmt.Sprintf("+++ %s\n", file.FilePath))
+	fmt.Fprintf(&result, "--- %s\n", file.FilePath)
+	fmt.Fprintf(&result, "+++ %s\n", file.FilePath)
 
 	diffs := dmp.DiffMain(file.OldContent, file.NewContent, true)
 	diffs = dmp.DiffCleanupSemantic(diffs)
@@ -897,11 +897,11 @@ func (m *MultiDiffPreviewModel) generateDiff(index int) string {
 			}
 			switch d.Type {
 			case diffmatchpatch.DiffEqual:
-				result.WriteString(fmt.Sprintf(" %s\n", line))
+				fmt.Fprintf(&result, " %s\n", line)
 			case diffmatchpatch.DiffDelete:
-				result.WriteString(fmt.Sprintf("-%s\n", line))
+				fmt.Fprintf(&result, "-%s\n", line)
 			case diffmatchpatch.DiffInsert:
-				result.WriteString(fmt.Sprintf("+%s\n", line))
+				fmt.Fprintf(&result, "+%s\n", line)
 			}
 		}
 	}
