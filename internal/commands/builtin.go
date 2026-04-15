@@ -696,52 +696,47 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Current Configuration:\n\n")
+	sb.WriteString(fmt.Sprintf("%sCurrent Configuration%s\n\n", colorCyan, colorReset))
 
 	// API
-	sb.WriteString("API:\n")
-	sb.WriteString(fmt.Sprintf("  Backend: %s\n", cfg.API.Backend))
-	if cfg.API.APIKey != "" {
-		// Show only last 4 characters
-		if len(cfg.API.APIKey) > 4 {
-			sb.WriteString(fmt.Sprintf("  API Key: ****%s\n", cfg.API.APIKey[len(cfg.API.APIKey)-4:]))
-		} else {
-			sb.WriteString("  API Key: ****\n")
-		}
-	} else {
-		sb.WriteString("  API Key: (not set)\n")
-	}
+	sb.WriteString(fmt.Sprintf("%s─── API ───%s\n", colorCyan, colorReset))
+	sb.WriteString(fmt.Sprintf("  Provider: %s%s%s\n", colorGreen, cfg.API.GetActiveProvider(), colorReset))
 
 	// Model
-	sb.WriteString("\nModel:\n")
-	sb.WriteString(fmt.Sprintf("  Name: %s\n", cfg.Model.Name))
+	sb.WriteString(fmt.Sprintf("\n%s─── Model ───%s\n", colorCyan, colorReset))
+	sb.WriteString(fmt.Sprintf("  Name:        %s%s%s\n", colorGreen, cfg.Model.Name, colorReset))
 	sb.WriteString(fmt.Sprintf("  Temperature: %.1f\n", cfg.Model.Temperature))
-	sb.WriteString(fmt.Sprintf("  Max Output Tokens: %d\n", cfg.Model.MaxOutputTokens))
+	sb.WriteString(fmt.Sprintf("  Max Output:  %d tokens\n", cfg.Model.MaxOutputTokens))
 
 	// UI
-	sb.WriteString("\nUI:\n")
-	sb.WriteString(fmt.Sprintf("  Show Token Usage: %v\n", cfg.UI.ShowTokenUsage))
-	sb.WriteString(fmt.Sprintf("  Stream Output: %v\n", cfg.UI.StreamOutput))
-	sb.WriteString(fmt.Sprintf("  Theme: %s\n", cfg.UI.Theme))
+	sb.WriteString(fmt.Sprintf("\n%s─── UI ───%s\n", colorCyan, colorReset))
+	sb.WriteString(fmt.Sprintf("  Theme:  %s\n", cfg.UI.Theme))
+	sb.WriteString(fmt.Sprintf("  Tokens: %v  Stream: %v  Bell: %v\n",
+		cfg.UI.ShowTokenUsage, cfg.UI.StreamOutput, cfg.UI.Bell))
 
 	// Context
-	sb.WriteString("\nContext:\n")
-	sb.WriteString(fmt.Sprintf("  Max Input Tokens: %d\n", cfg.Context.MaxInputTokens))
-	sb.WriteString(fmt.Sprintf("  Auto-Summary: %v\n", cfg.Context.EnableAutoSummary))
-
-	// Permissions
-	sb.WriteString("\nPermissions:\n")
-	sb.WriteString(fmt.Sprintf("  Enabled: %v\n", cfg.Permission.Enabled))
-	sb.WriteString(fmt.Sprintf("  Default Policy: %s\n", cfg.Permission.DefaultPolicy))
+	sb.WriteString(fmt.Sprintf("\n%s─── Context ───%s\n", colorCyan, colorReset))
+	maxInput := cfg.Context.MaxInputTokens
+	if maxInput == 0 {
+		sb.WriteString("  Max Input: (model default)\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("  Max Input: %d tokens\n", maxInput))
+	}
+	sb.WriteString(fmt.Sprintf("  Auto-Compact: %v\n", cfg.Context.EnableAutoSummary))
 
 	// Plan
-	sb.WriteString("\nPlan:\n")
-	sb.WriteString(fmt.Sprintf("  Delegate Steps: %v\n", cfg.Plan.DelegateSteps))
-	sb.WriteString(fmt.Sprintf("  Clear Context: %v\n", cfg.Plan.ClearContext))
+	sb.WriteString(fmt.Sprintf("\n%s─── Plan ───%s\n", colorCyan, colorReset))
+	sb.WriteString(fmt.Sprintf("  Delegate: %v  Clear Context: %v\n",
+		cfg.Plan.DelegateSteps, cfg.Plan.ClearContext))
+
+	// Permissions
+	sb.WriteString(fmt.Sprintf("\n%s─── Permissions ───%s\n", colorCyan, colorReset))
+	sb.WriteString(fmt.Sprintf("  Enabled: %v  Policy: %s\n",
+		cfg.Permission.Enabled, cfg.Permission.DefaultPolicy))
 
 	// Config path
 	configPath := config.GetConfigPath()
-	sb.WriteString(fmt.Sprintf("\nConfig file: %s\n", configPath))
+	sb.WriteString(fmt.Sprintf("\n%sConfig file:%s %s\n", colorCyan, colorReset, configPath))
 
 	return sb.String(), nil
 }
