@@ -93,7 +93,7 @@ type InputModel struct {
 // NewInputModel creates a new input model.
 func NewInputModel(styles *Styles, workDir string) InputModel {
 	ta := textarea.New()
-	ta.Placeholder = "Message or /command (Tab: complete, Ctrl+J: newline)"
+	ta.Placeholder = "Message or /command (Tab: complete, ?: shortcuts)"
 	ta.Focus()
 	ta.CharLimit = 10000
 	ta.ShowLineNumbers = false
