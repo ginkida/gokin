@@ -70,9 +70,9 @@ func (c *CheckpointCommand) Execute(ctx context.Context, args []string, app AppI
 		ageStr := formatAge(age)
 		sizeStr := formatSize(info.Size())
 
-		sb.WriteString(fmt.Sprintf("  %s\n", name))
-		sb.WriteString(fmt.Sprintf("    Created: %s ago (%s)\n", ageStr, info.ModTime().Format("2006-01-02 15:04")))
-		sb.WriteString(fmt.Sprintf("    Size:    %s\n\n", sizeStr))
+		fmt.Fprintf(&sb, "  %s\n", name)
+		fmt.Fprintf(&sb, "    Created: %s ago (%s)\n", ageStr, info.ModTime().Format("2006-01-02 15:04"))
+		fmt.Fprintf(&sb, "    Size:    %s\n\n", sizeStr)
 		count++
 	}
 
@@ -83,7 +83,7 @@ func (c *CheckpointCommand) Execute(ctx context.Context, args []string, app AppI
 		return "No checkpoints found.", nil
 	}
 
-	sb.WriteString(fmt.Sprintf("Total: %d checkpoint(s)\n", count))
+	fmt.Fprintf(&sb, "Total: %d checkpoint(s)\n", count)
 	return sb.String(), nil
 }
 

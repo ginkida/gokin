@@ -81,15 +81,15 @@ func (c *RegisterAgentTypeCommand) Execute(ctx context.Context, args []string, a
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("✓ Registered agent type: %s\n", name))
-	sb.WriteString(fmt.Sprintf("  Description: %s\n", description))
+	fmt.Fprintf(&sb, "✓ Registered agent type: %s\n", name)
+	fmt.Fprintf(&sb, "  Description: %s\n", description)
 	if len(tools) > 0 {
-		sb.WriteString(fmt.Sprintf("  Tools: %s\n", strings.Join(tools, ", ")))
+		fmt.Fprintf(&sb, "  Tools: %s\n", strings.Join(tools, ", "))
 	} else {
 		sb.WriteString("  Tools: (default for type)\n")
 	}
 	if prompt != "" {
-		sb.WriteString(fmt.Sprintf("  Prompt: %s...\n", truncate(prompt, 50)))
+		fmt.Fprintf(&sb, "  Prompt: %s...\n", truncate(prompt, 50))
 	}
 
 	return sb.String(), nil
@@ -140,7 +140,7 @@ func (c *ListAgentTypesCommand) Execute(ctx context.Context, args []string, app 
 	}
 
 	for _, t := range builtinTypes {
-		sb.WriteString(fmt.Sprintf("• **%s** — %s\n", t.name, t.desc))
+		fmt.Fprintf(&sb, "• **%s** — %s\n", t.name, t.desc)
 	}
 
 	// Dynamic types
@@ -148,9 +148,9 @@ func (c *ListAgentTypesCommand) Execute(ctx context.Context, args []string, app 
 	if len(dynamicTypes) > 0 {
 		sb.WriteString("\n**Custom Agent Types:**\n\n")
 		for _, dt := range dynamicTypes {
-			sb.WriteString(fmt.Sprintf("• **%s** — %s\n", dt.Name, dt.Description))
+			fmt.Fprintf(&sb, "• **%s** — %s\n", dt.Name, dt.Description)
 			if len(dt.AllowedTools) > 0 {
-				sb.WriteString(fmt.Sprintf("  Tools: %s\n", strings.Join(dt.AllowedTools, ", ")))
+				fmt.Fprintf(&sb, "  Tools: %s\n", strings.Join(dt.AllowedTools, ", "))
 			}
 		}
 	} else {

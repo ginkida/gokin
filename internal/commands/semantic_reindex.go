@@ -63,14 +63,14 @@ func (c *SemanticReindexCommand) Execute(ctx context.Context, args []string, app
 	// Get stats
 	stats := indexer.GetStats()
 
-	sb.WriteString(fmt.Sprintf("  ✓ Indexed in %s\n\n", format.Duration(duration)))
+	fmt.Fprintf(&sb, "  ✓ Indexed in %s\n\n", format.Duration(duration))
 
 	// Results
 	sb.WriteString("📊 Results\n")
-	sb.WriteString(fmt.Sprintf("  Files Indexed:   %d\n", stats.FilesIndexed))
-	sb.WriteString(fmt.Sprintf("  Total Chunks:    %d\n", stats.TotalChunks))
-	sb.WriteString(fmt.Sprintf("  Cache Size:      %s\n", format.Bytes(int64(stats.CacheSizeBytes))))
-	sb.WriteString(fmt.Sprintf("  Index Size:      %s\n\n", format.Bytes(int64(stats.IndexSizeBytes))))
+	fmt.Fprintf(&sb, "  Files Indexed:   %d\n", stats.FilesIndexed)
+	fmt.Fprintf(&sb, "  Total Chunks:    %d\n", stats.TotalChunks)
+	fmt.Fprintf(&sb, "  Cache Size:      %s\n", format.Bytes(int64(stats.CacheSizeBytes)))
+	fmt.Fprintf(&sb, "  Index Size:      %s\n\n", format.Bytes(int64(stats.IndexSizeBytes)))
 
 	// Footer
 	sb.WriteString(strings.Repeat("─", 50))

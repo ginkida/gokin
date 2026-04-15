@@ -47,26 +47,26 @@ func (c *TreeStatsCommand) Execute(ctx context.Context, args []string, app AppIn
 		modeStatus = "Planning (tree-based)"
 	}
 	sb.WriteString("Mode\n")
-	sb.WriteString(fmt.Sprintf("  Current Mode:    %s\n", modeStatus))
+	fmt.Fprintf(&sb, "  Current Mode:    %s\n", modeStatus)
 	sb.WriteString("  Toggle:          /plan\n\n")
 
 	// Configuration
 	sb.WriteString("📋 Configuration\n")
 	if alg, ok := stats["algorithm"]; ok {
-		sb.WriteString(fmt.Sprintf("  Algorithm:       %v\n", alg))
+		fmt.Fprintf(&sb, "  Algorithm:       %v\n", alg)
 	}
 	sb.WriteString("\n")
 
 	// Active trees
 	sb.WriteString("📊 Statistics\n")
 	if trees, ok := stats["active_trees"]; ok {
-		sb.WriteString(fmt.Sprintf("  Active Trees:    %v\n", trees))
+		fmt.Fprintf(&sb, "  Active Trees:    %v\n", trees)
 	}
 	if nodes, ok := stats["total_nodes"]; ok {
-		sb.WriteString(fmt.Sprintf("  Total Nodes:     %v\n", nodes))
+		fmt.Fprintf(&sb, "  Total Nodes:     %v\n", nodes)
 	}
 	if replans, ok := stats["total_replans"]; ok {
-		sb.WriteString(fmt.Sprintf("  Total Replans:   %v\n", replans))
+		fmt.Fprintf(&sb, "  Total Replans:   %v\n", replans)
 	}
 	sb.WriteString("\n")
 

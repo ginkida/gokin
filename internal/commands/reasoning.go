@@ -46,8 +46,8 @@ func (c *ReasoningCommand) Execute(ctx context.Context, args []string, app AppIn
 	// No args — show current and available levels
 	if len(args) == 0 {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Provider: %s\n", cfg.API.GetActiveProvider()))
-		sb.WriteString(fmt.Sprintf("Model:    %s\n\n", cfg.Model.Name))
+		fmt.Fprintf(&sb, "Provider: %s\n", cfg.API.GetActiveProvider())
+		fmt.Fprintf(&sb, "Model:    %s\n\n", cfg.Model.Name)
 		sb.WriteString("Reasoning effort levels:\n")
 
 		for _, level := range validReasoningEfforts {
@@ -55,10 +55,10 @@ func (c *ReasoningCommand) Execute(ctx context.Context, args []string, app AppIn
 			if level == current {
 				marker = "> "
 			}
-			sb.WriteString(fmt.Sprintf("%s%-8s %s\n", marker, level, effortDescription(level)))
+			fmt.Fprintf(&sb, "%s%-8s %s\n", marker, level, effortDescription(level))
 		}
 
-		sb.WriteString(fmt.Sprintf("\nCurrent: %s\n", current))
+		fmt.Fprintf(&sb, "\nCurrent: %s\n", current)
 		sb.WriteString("Usage: /reasoning <level>")
 		return sb.String(), nil
 	}

@@ -47,22 +47,22 @@ func (c *SemanticStatsCommand) Execute(ctx context.Context, args []string, app A
 
 	// Project Info
 	sb.WriteString("📁 Project\n")
-	sb.WriteString(fmt.Sprintf("  Work Dir:        %s\n", workDir))
-	sb.WriteString(fmt.Sprintf("  Project ID:      %s\n\n", projectID))
+	fmt.Fprintf(&sb, "  Work Dir:        %s\n", workDir)
+	fmt.Fprintf(&sb, "  Project ID:      %s\n\n", projectID)
 
 	// Index Stats
 	sb.WriteString("📊 Index\n")
-	sb.WriteString(fmt.Sprintf("  Files Indexed:   %d\n", stats.FilesIndexed))
-	sb.WriteString(fmt.Sprintf("  Total Chunks:    %d\n", stats.TotalChunks))
-	sb.WriteString(fmt.Sprintf("  Cache Size:      %s\n", format.Bytes(int64(stats.CacheSizeBytes))))
-	sb.WriteString(fmt.Sprintf("  Index Size:      %s\n\n", format.Bytes(int64(stats.IndexSizeBytes))))
+	fmt.Fprintf(&sb, "  Files Indexed:   %d\n", stats.FilesIndexed)
+	fmt.Fprintf(&sb, "  Total Chunks:    %d\n", stats.TotalChunks)
+	fmt.Fprintf(&sb, "  Cache Size:      %s\n", format.Bytes(int64(stats.CacheSizeBytes)))
+	fmt.Fprintf(&sb, "  Index Size:      %s\n\n", format.Bytes(int64(stats.IndexSizeBytes)))
 
 	// Cache Performance
 	sb.WriteString("⚡ Cache Performance\n")
-	sb.WriteString(fmt.Sprintf("  Embeddings:      %d cached\n", stats.EmbeddingsCached))
-	sb.WriteString(fmt.Sprintf("  Index Loads:     %d\n", stats.IndexLoads))
+	fmt.Fprintf(&sb, "  Embeddings:      %d cached\n", stats.EmbeddingsCached)
+	fmt.Fprintf(&sb, "  Index Loads:     %d\n", stats.IndexLoads)
 	if stats.LastIndexTime > 0 {
-		sb.WriteString(fmt.Sprintf("  Last Index Age:  %s\n\n", formatTime(stats.LastIndexTime)))
+		fmt.Fprintf(&sb, "  Last Index Age:  %s\n\n", formatTime(stats.LastIndexTime))
 	} else {
 		sb.WriteString("  Last Index Age:  never\n\n")
 	}
@@ -70,10 +70,10 @@ func (c *SemanticStatsCommand) Execute(ctx context.Context, args []string, app A
 	// Configuration
 	cfg := app.GetConfig()
 	sb.WriteString("⚙️  Configuration\n")
-	sb.WriteString(fmt.Sprintf("  Enabled:         %v\n", cfg.Semantic.Enabled))
-	sb.WriteString(fmt.Sprintf("  Chunk Size:      %d chars\n", cfg.Semantic.ChunkSize))
-	sb.WriteString(fmt.Sprintf("  Max File Size:   %s\n", format.Bytes(int64(cfg.Semantic.MaxFileSize))))
-	sb.WriteString(fmt.Sprintf("  Cache TTL:       %s\n\n", cfg.Semantic.CacheTTL))
+	fmt.Fprintf(&sb, "  Enabled:         %v\n", cfg.Semantic.Enabled)
+	fmt.Fprintf(&sb, "  Chunk Size:      %d chars\n", cfg.Semantic.ChunkSize)
+	fmt.Fprintf(&sb, "  Max File Size:   %s\n", format.Bytes(int64(cfg.Semantic.MaxFileSize)))
+	fmt.Fprintf(&sb, "  Cache TTL:       %s\n\n", cfg.Semantic.CacheTTL)
 
 	// Footer
 	sb.WriteString(strings.Repeat("─", 50))

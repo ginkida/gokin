@@ -86,12 +86,12 @@ func (c *ResumePlanCommand) listResumablePlans(planMgr *plan.Manager) (string, e
 			statusIcon = "◐"
 		}
 
-		sb.WriteString(fmt.Sprintf("%s %s\n", statusIcon, p.Title))
-		sb.WriteString(fmt.Sprintf("   ID: %s\n", p.ID))
-		sb.WriteString(fmt.Sprintf("   Progress: %d/%d steps (%.0f%%)\n", p.Completed, p.StepCount, p.Progress*100))
-		sb.WriteString(fmt.Sprintf("   Updated: %s\n", p.UpdatedAt.Format("2006-01-02 15:04")))
+		fmt.Fprintf(&sb, "%s %s\n", statusIcon, p.Title)
+		fmt.Fprintf(&sb, "   ID: %s\n", p.ID)
+		fmt.Fprintf(&sb, "   Progress: %d/%d steps (%.0f%%)\n", p.Completed, p.StepCount, p.Progress*100)
+		fmt.Fprintf(&sb, "   Updated: %s\n", p.UpdatedAt.Format("2006-01-02 15:04"))
 		if p.Request != "" {
-			sb.WriteString(fmt.Sprintf("   Request: %s\n", p.Request))
+			fmt.Fprintf(&sb, "   Request: %s\n", p.Request)
 		}
 		sb.WriteString("\n")
 	}

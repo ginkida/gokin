@@ -37,7 +37,7 @@ func (c *ThemeCommand) Execute(ctx context.Context, args []string, app AppInterf
 	if len(args) == 0 {
 		var sb strings.Builder
 		sb.WriteString("  [Set a custom theme for Gokin]\n")
-		sb.WriteString(fmt.Sprintf("Current theme: %s\n\n", currentTheme))
+		fmt.Fprintf(&sb, "Current theme: %s\n\n", currentTheme)
 
 		availableThemes := ui.GetAvailableThemes()
 		sb.WriteString("Available themes:\n")
@@ -46,7 +46,7 @@ func (c *ThemeCommand) Execute(ctx context.Context, args []string, app AppInterf
 			if string(themeInfo.ID) == currentTheme {
 				marker = "> "
 			}
-			sb.WriteString(fmt.Sprintf("%s%-12s  %s\n", marker, string(themeInfo.ID), getThemeDescription(themeInfo.ID)))
+			fmt.Fprintf(&sb, "%s%-12s  %s\n", marker, string(themeInfo.ID), getThemeDescription(themeInfo.ID))
 		}
 		sb.WriteString("\nUsage: /theme dark  or  /theme dracula")
 		sb.WriteString("\n       /theme cyber --save  (save to config)")
@@ -85,10 +85,10 @@ func (c *ThemeCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	if !found {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Unknown theme: %s\n\n", newTheme))
+		fmt.Fprintf(&sb, "Unknown theme: %s\n\n", newTheme)
 		sb.WriteString("Available themes:\n")
 		for _, themeInfo := range availableThemes {
-			sb.WriteString(fmt.Sprintf("  %-12s  %s\n", string(themeInfo.ID), getThemeDescription(themeInfo.ID)))
+			fmt.Fprintf(&sb, "  %-12s  %s\n", string(themeInfo.ID), getThemeDescription(themeInfo.ID))
 		}
 		return sb.String(), nil
 	}
@@ -101,14 +101,14 @@ func (c *ThemeCommand) Execute(ctx context.Context, args []string, app AppInterf
 	themeSetter.SetTheme(matchedTheme)
 
 	var result strings.Builder
-	result.WriteString(fmt.Sprintf("✓ Theme changed to %s", matchedTheme))
+	fmt.Fprintf(&result, "✓ Theme changed to %s", matchedTheme)
 
 	// Save to config if requested
 	if saveToConfig {
 		configSetter, ok := app.(ConfigSetter)
 		if ok {
 			if err := configSetter.SetConfigValue("ui.theme", string(matchedTheme)); err != nil {
-				result.WriteString(fmt.Sprintf("\n⚠ Failed to save to config: %v", err))
+				fmt.Fprintf(&result, "\n⚠ Failed to save to config: %v", err)
 			} else {
 				result.WriteString("\n✓ Theme saved to config file")
 			}

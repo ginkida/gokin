@@ -97,7 +97,7 @@ func (c *CopyCommand) Execute(ctx context.Context, args []string, app AppInterfa
 			}
 			for _, part := range content.Parts {
 				if part.Text != "" {
-					sb.WriteString(fmt.Sprintf("## %s\n\n%s\n\n", role, part.Text))
+					fmt.Fprintf(&sb, "## %s\n\n%s\n\n", role, part.Text)
 				}
 			}
 		}

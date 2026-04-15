@@ -77,7 +77,7 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 	if len(untracked) > 0 {
 		result.WriteString("\nUntracked files:\n")
 		for _, f := range untracked {
-			result.WriteString(fmt.Sprintf("  %s\n", f))
+			fmt.Fprintf(&result, "  %s\n", f)
 		}
 	}
 
@@ -86,7 +86,7 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 		generated := autoGenerateCommitMessage(workDir)
 		if generated != "" {
 			message = generated
-			result.WriteString(fmt.Sprintf("\nAuto-generated message: %s\n", message))
+			fmt.Fprintf(&result, "\nAuto-generated message: %s\n", message)
 		} else {
 			// Fallback if auto-generation fails
 			log, _ := runGitCommand(workDir, "log", "-3", "--oneline")
@@ -107,9 +107,9 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 
 	// Warn about untracked files that won't be committed
 	if len(untracked) > 0 {
-		result.WriteString(fmt.Sprintf("\nNote: %d untracked file(s) not staged (use git add manually):\n", len(untracked)))
+		fmt.Fprintf(&result, "\nNote: %d untracked file(s) not staged (use git add manually):\n", len(untracked))
 		for _, f := range untracked {
-			result.WriteString(fmt.Sprintf("  %s\n", f))
+			fmt.Fprintf(&result, "  %s\n", f)
 		}
 	}
 
@@ -208,7 +208,7 @@ func (c *PRCommand) Execute(ctx context.Context, args []string, app AppInterface
 	}
 
 	var result strings.Builder
-	result.WriteString(fmt.Sprintf("Branch: %s -> %s\n\n", currentBranch, base))
+	fmt.Fprintf(&result, "Branch: %s -> %s\n\n", currentBranch, base)
 	result.WriteString("Commits:\n")
 	result.WriteString(commits)
 	result.WriteString("\n")
@@ -370,7 +370,7 @@ func formatCommitsAsMarkdown(commits string) string {
 	lines := strings.Split(strings.TrimSpace(commits), "\n")
 	for _, line := range lines {
 		if line != "" {
-			result.WriteString(fmt.Sprintf("- %s\n", line))
+			fmt.Fprintf(&result, "- %s\n", line)
 		}
 	}
 	return result.String()
