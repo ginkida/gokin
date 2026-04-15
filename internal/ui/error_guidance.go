@@ -153,6 +153,31 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Suggestions: []string{"Run 'go mod tidy' to fix dependencies", "Check go.mod for correct module path", "Run 'go get <package>' to add missing dependency"},
 		Command:     "",
 	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(FAIL.*Test|--- FAIL:|panic.*test|test.*timed out)`),
+		Title:       "Go Test Failure",
+		Suggestions: []string{"Run the failing test in isolation: go test -run TestName -v ./pkg/", "Check for race conditions: go test -race ./...", "Look for test fixtures or env dependencies"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(go build.*:.*cannot|build constraints exclude|cgo.*not supported)`),
+		Title:       "Go Build Constraint Error",
+		Suggestions: []string{"Check build tags and GOOS/GOARCH settings", "If cgo: install C compiler or set CGO_ENABLED=0", "Verify the target platform supports the dependency"},
+		Command:     "",
+	},
+	// Rust/Cargo errors
+	{
+		Pattern:     regexp.MustCompile(`(?i)(cargo.*error|error\[E\d+\]|cannot find.*crate)`),
+		Title:       "Rust Compilation Error",
+		Suggestions: []string{"Check the error code for detailed explanation: rustc --explain EXXXX", "Run 'cargo check' for faster feedback", "Ensure dependencies are correct in Cargo.toml"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(failed to resolve.*dependencies|perhaps a crate was updated|version.*yanked)`),
+		Title:       "Cargo Dependency Error",
+		Suggestions: []string{"Run 'cargo update' to refresh dependencies", "Check Cargo.toml version constraints", "Clear cache: cargo clean && cargo build"},
+		Command:     "",
+	},
 	// Python-specific errors
 	{
 		Pattern:     regexp.MustCompile(`(?i)(ModuleNotFoundError|ImportError|No module named)`),
