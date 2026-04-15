@@ -393,8 +393,8 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 		}
 
 		summary := info.Summary
-		if len(summary) > 50 {
-			summary = summary[:47] + "..."
+		if len(summary) > 80 {
+			summary = summary[:77] + "..."
 		}
 		if summary == "" {
 			summary = "(no summary)"
