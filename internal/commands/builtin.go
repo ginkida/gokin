@@ -505,29 +505,115 @@ func (c *InitCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		return "GOKIN.md already exists. Edit it manually or delete to reinitialize.", nil
 	}
 
-	template := `# Project Instructions for Gokin
-
-## Project Overview
-<!-- Describe your project here -->
-
-## Coding Guidelines
-<!-- Add specific coding standards for this project -->
-
-## Important Files
-<!-- List key files the AI should be aware of -->
-
-## Testing
-<!-- Describe how to run tests -->
-
-## Build & Deploy
-<!-- Add build and deployment instructions -->
-`
+	// Detect project type for smarter template
+	template := c.detectTemplate(workDir)
 
 	if err := os.WriteFile(gokinPath, []byte(template), 0644); err != nil {
 		return fmt.Sprintf("Failed to create GOKIN.md: %v", err), nil
 	}
 
-	return "Created GOKIN.md - edit it to add project-specific instructions.", nil
+	return "Created GOKIN.md with project-specific template. Edit it to refine instructions.", nil
+}
+
+func (c *InitCommand) detectTemplate(workDir string) string {
+	// Detect Go
+	if _, err := os.Stat(filepath.Join(workDir, "go.mod")); err == nil {
+		return `# Project Instructions
+
+## Build & Test
+` + "```" + `bash
+go build ./...
+go vet ./...
+go test -race ./...
+` + "```" + `
+
+## Architecture
+<!-- Key packages and their responsibilities -->
+
+## Coding Guidelines
+- Follow standard Go conventions (gofmt, go vet)
+- Handle errors explicitly; don't use panic in library code
+- Write table-driven tests
+`
+	}
+
+	// Detect Node.js
+	if _, err := os.Stat(filepath.Join(workDir, "package.json")); err == nil {
+		return `# Project Instructions
+
+## Build & Test
+` + "```" + `bash
+npm install
+npm test
+npm run build
+` + "```" + `
+
+## Architecture
+<!-- Key directories and their purpose -->
+
+## Coding Guidelines
+- Use TypeScript where possible
+- Run linter before committing
+`
+	}
+
+	// Detect Python
+	for _, f := range []string{"pyproject.toml", "setup.py", "requirements.txt"} {
+		if _, err := os.Stat(filepath.Join(workDir, f)); err == nil {
+			return `# Project Instructions
+
+## Build & Test
+` + "```" + `bash
+pip install -e .
+pytest
+` + "```" + `
+
+## Architecture
+<!-- Key modules and their purpose -->
+
+## Coding Guidelines
+- Follow PEP 8
+- Use type hints
+- Write docstrings for public functions
+`
+		}
+	}
+
+	// Detect Rust
+	if _, err := os.Stat(filepath.Join(workDir, "Cargo.toml")); err == nil {
+		return `# Project Instructions
+
+## Build & Test
+` + "```" + `bash
+cargo build
+cargo test
+cargo clippy
+` + "```" + `
+
+## Architecture
+<!-- Key crates and modules -->
+
+## Coding Guidelines
+- Run clippy and fix all warnings
+- Use Result<T, E> for error handling
+`
+	}
+
+	// Generic fallback
+	return `# Project Instructions
+
+## Project Overview
+<!-- Describe your project -->
+
+## Build & Test
+<!-- How to build and test -->
+
+## Architecture
+<!-- Key files and their purpose -->
+
+## Coding Guidelines
+<!-- Project-specific standards -->
+`
 }
 
 // DoctorCommand checks environment and configuration.
