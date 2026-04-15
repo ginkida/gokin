@@ -50,9 +50,18 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		if !exists {
 			return fmt.Sprintf("%sUnknown command: /%s%s\nUse /help to see all commands.", colorRed, args[0], colorReset), nil
 		}
-		return fmt.Sprintf("%s/%s%s — %s\n\n%sUsage:%s %s",
+		result := fmt.Sprintf("%s/%s%s — %s\n\n%sUsage:%s %s",
 			colorGreen, cmd.Name(), colorReset, cmd.Description(),
-			colorCyan, colorReset, cmd.Usage()), nil
+			colorCyan, colorReset, cmd.Usage())
+
+		if example := getCommandExample(cmd.Name()); example != "" {
+			result += fmt.Sprintf("\n\n%sExamples:%s\n%s", colorCyan, colorReset, example)
+		}
+		if related := getRelatedCommands(cmd.Name()); related != "" {
+			result += fmt.Sprintf("\n%sSee also:%s %s", colorCyan, colorReset, related)
+		}
+
+		return result, nil
 	}
 
 	var sb strings.Builder
@@ -922,6 +931,46 @@ func getDataDir() (string, error) {
 		dataDir = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(dataDir, "gokin"), nil
+}
+
+// getCommandExample returns usage examples for a command.
+func getCommandExample(name string) string {
+	examples := map[string]string{
+		"commit":  "  /commit              — AI generates commit message from staged changes\n  /commit fix typo     — commit with custom message",
+		"model":   "  /model gemini-3-flash-preview    — switch to Gemini Flash\n  /model claude-sonnet-4-5         — switch to Claude",
+		"plan":    "  /plan                — toggle planning mode on/off\n  Then type a complex task and it will be broken into steps",
+		"resume":  "  /resume abc123       — restore session abc123\n  /resume abc123 --force — restore even from different project",
+		"save":    "  /save                — save current session for later /resume",
+		"compact": "  /compact             — summarize old messages to free context space",
+		"clear":   "  /clear               — start fresh (saves active plan for /resume-plan)",
+		"theme":   "  /theme dark          — soft purple/cyan dark theme\n  /theme macos          — Apple-inspired theme\n  /theme light          — for light terminal backgrounds",
+		"doctor":  "  /doctor              — check API key, git, config, and project setup",
+		"login":   "  /login gemini AIza...     — set Gemini API key\n  /login anthropic sk-...    — set Anthropic API key",
+	}
+	return examples[name]
+}
+
+// getRelatedCommands returns related commands for a command.
+func getRelatedCommands(name string) string {
+	related := map[string]string{
+		"commit":       "/pr, /save",
+		"save":         "/resume, /sessions, /clear",
+		"resume":       "/save, /sessions",
+		"sessions":     "/save, /resume",
+		"clear":        "/save, /compact, /resume-plan",
+		"compact":      "/clear, /cost, /stats",
+		"model":        "/provider, /config, /reasoning",
+		"plan":         "/resume-plan, /tree-stats",
+		"resume-plan":  "/plan",
+		"login":        "/logout, /oauth-login, /provider, /doctor",
+		"doctor":       "/login, /config, /status",
+		"config":       "/doctor, /model, /theme",
+		"theme":        "/config",
+		"cost":         "/stats, /compact",
+		"shortcuts":    "/help, /keys",
+		"keys":         "/help, /shortcuts",
+	}
+	return related[name]
 }
 
 // formatTimeAgo returns a human-readable relative time string.
