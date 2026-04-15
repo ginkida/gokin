@@ -276,15 +276,3 @@ func totalCount(m *agent.StrategyMetrics) int {
 	return m.SuccessCount + m.FailureCount
 }
 
-// Extend RoutingDecision with learned examples
-func init() {
-	// The LearnedExamples field is added to RoutingDecision below
-}
-
-// min returns the smaller of two integers.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
