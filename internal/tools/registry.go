@@ -2,8 +2,9 @@ package tools
 
 import (
 	"fmt"
-	"log"
 	"sync"
+
+	"gokin/internal/logging"
 
 	"google.golang.org/genai"
 )
@@ -83,7 +84,7 @@ func (r *Registry) Register(tool Tool) error {
 // MustRegister adds a tool to the registry and logs a warning on error.
 func (r *Registry) MustRegister(tool Tool) {
 	if err := r.Register(tool); err != nil {
-		log.Printf("WARNING: failed to register tool %q: %v", tool.Name(), err)
+		logging.Warn("failed to register tool", "tool", tool.Name(), "error", err)
 	}
 }
 
@@ -416,7 +417,7 @@ func (r *LazyRegistry) Register(tool Tool) error {
 // MustRegister adds a tool and logs a warning on error.
 func (r *LazyRegistry) MustRegister(tool Tool) {
 	if err := r.Register(tool); err != nil {
-		log.Printf("WARNING: failed to register tool %q: %v", tool.Name(), err)
+		logging.Warn("failed to register tool", "tool", tool.Name(), "error", err)
 	}
 }
 
