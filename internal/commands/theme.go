@@ -110,7 +110,7 @@ func (c *ThemeCommand) Execute(ctx context.Context, args []string, app AppInterf
 			if err := configSetter.SetConfigValue("ui.theme", string(matchedTheme)); err != nil {
 				result.WriteString(fmt.Sprintf("\n⚠ Failed to save to config: %v", err))
 			} else {
-				result.WriteString(fmt.Sprintf("\n✓ Theme saved to config file"))
+				result.WriteString("\n✓ Theme saved to config file")
 			}
 		} else {
 			result.WriteString("\n⚠ Config saving not available")

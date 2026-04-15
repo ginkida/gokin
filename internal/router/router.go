@@ -392,7 +392,7 @@ func (r *Router) executeCoordinated(ctx context.Context, decomposition *Decompos
 		"can_parallel", decomposition.CanParallel)
 
 	var allOutputs strings.Builder
-	allOutputs.WriteString(fmt.Sprintf("## Coordinated Execution\n\n"))
+	allOutputs.WriteString("## Coordinated Execution\n\n")
 	allOutputs.WriteString(fmt.Sprintf("Task decomposed into %d subtasks.\n\n", len(decomposition.Subtasks)))
 
 	if decomposition.CanParallel {

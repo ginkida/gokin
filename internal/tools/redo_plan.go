@@ -90,7 +90,7 @@ func (t *RedoPlanTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	}
 
 	// Build result message
-	resultMsg := fmt.Sprintf("Plan redone successfully\n")
+	resultMsg := "Plan redone successfully\n"
 	if len(redoneFiles) > 0 {
 		resultMsg += fmt.Sprintf("\nRe-applied %d file changes:\n", len(redoneFiles))
 		for _, file := range redoneFiles {

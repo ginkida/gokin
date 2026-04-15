@@ -220,7 +220,7 @@ func (t *SharedMemoryTool) executeWrite(args map[string]any) (ToolResult, error)
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Entry Written to Shared Memory\n\n"))
+	sb.WriteString("## Entry Written to Shared Memory\n\n")
 	sb.WriteString(fmt.Sprintf("**Key:** %s\n", key))
 	sb.WriteString(fmt.Sprintf("**Type:** %s\n", entryType))
 	sb.WriteString(fmt.Sprintf("**Value:** %s\n", value))
