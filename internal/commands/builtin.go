@@ -530,8 +530,15 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 		sb.WriteString(fmt.Sprintf("  %s○%s gh (GitHub CLI) not installed (optional for /pr)\n", colorYellow, colorReset))
 	}
 
-	// Project instruction file (GOKIN.md/CLAUDE.md and other supported paths)
+	// Git repo check
 	workDir := app.GetWorkDir()
+	if _, err := os.Stat(filepath.Join(workDir, ".git")); err == nil {
+		sb.WriteString(fmt.Sprintf("  %s✓%s Working directory is a git repository\n", colorGreen, colorReset))
+	} else {
+		sb.WriteString(fmt.Sprintf("  %s○%s Not a git repository (git tools will be limited)\n", colorYellow, colorReset))
+	}
+
+	// Project instruction file (GOKIN.md/CLAUDE.md and other supported paths)
 	foundInstruction := ""
 	for _, filename := range appcontext.InstructionFileNames() {
 		path := filepath.Join(workDir, filename)
