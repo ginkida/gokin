@@ -1134,6 +1134,9 @@ func getRelatedCommands(name string) string {
 		"provider":     "/model, /login, /status",
 		"reasoning":    "/model",
 		"checkpoints":  "/undo, /plan",
+		"pwd":          "/status, /browse",
+		"browse":       "/pwd, /open",
+		"init":         "/doctor, /instructions",
 	}
 	return related[name]
 }
