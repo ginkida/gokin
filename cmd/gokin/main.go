@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	version  = "0.1.0"
+	version  = "0.60.0"
 	cfgFile  string
 	model    string
 	runSetup bool
