@@ -277,8 +277,9 @@ func (t *Task) Start(ctx context.Context) error {
 	// Set up file-backed output streaming for long-running tasks
 	outputDir := filepath.Join(t.WorkDir, ".gokin", "task-output")
 	if err := t.Output.SetOutputFile(filepath.Join(outputDir, t.ID+".log")); err != nil {
-		// Non-fatal: continue without file output
-		_ = err
+		// Non-fatal: task runs fine, but /task-output won't have persistent log.
+		// Common cause: .gokin/task-output directory can't be created (e.g., read-only fs).
+		fmt.Fprintf(&t.Output, "[warning: file-backed output unavailable: %s]\n", err)
 	}
 
 	// Use sanitized environment to prevent leaking sensitive env vars
