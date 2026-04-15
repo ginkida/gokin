@@ -84,8 +84,15 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 		sb.WriteString("  (context manager not available)\n\n")
 	}
 
+	// Session Info
+	sb.WriteString("💬 Session\n")
+	if session := app.GetSession(); session != nil {
+		history := session.GetHistory()
+		sb.WriteString(fmt.Sprintf("  Messages:        %d\n", len(history)))
+	}
+
 	// Project Info
-	sb.WriteString("📁 Project\n")
+	sb.WriteString("\n📁 Project\n")
 	if projectInfo != nil {
 		sb.WriteString(fmt.Sprintf("  Name:            %s\n", projectInfo.Name))
 		sb.WriteString(fmt.Sprintf("  Type:            %s\n", projectInfo.Type))
