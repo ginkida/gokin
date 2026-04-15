@@ -1583,8 +1583,15 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case TokenUsageMsg:
+		wasNearLimit := m.tokenUsage != nil && m.tokenUsage.NearLimit
 		m.tokenUsage = &msg
 		m.baseTokenCount = msg.Tokens
+
+		// Warn once when context approaches the limit
+		if msg.NearLimit && !wasNearLimit && m.toastManager != nil {
+			pct := int(msg.PercentUsed * 100)
+			m.toastManager.ShowWarning(fmt.Sprintf("Context %d%% full — use /compact to free space", pct))
+		}
 
 	case RuntimeStatusMsg:
 		m.handleRuntimeStatusMsg(msg)
