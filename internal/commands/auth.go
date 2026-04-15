@@ -499,8 +499,12 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 		sb.WriteString(fmt.Sprintf("  %s: %s\n", p.DisplayName, status))
 	}
 
-	// Config path
-	sb.WriteString(fmt.Sprintf("\nConfig: %s\n", config.GetConfigPath()))
+	// Working directory and version
+	sb.WriteString(fmt.Sprintf("\nWorkDir: %s\n", app.GetWorkDir()))
+	sb.WriteString(fmt.Sprintf("Config:  %s\n", config.GetConfigPath()))
+	if v := app.GetVersion(); v != "" {
+		sb.WriteString(fmt.Sprintf("Version: %s\n", v))
+	}
 
 	return sb.String(), nil
 }
