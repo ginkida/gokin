@@ -300,7 +300,8 @@ func (c *SaveCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	savedID := session.ID
 	session.ID = originalID // Restore original ID
 
-	return fmt.Sprintf("Session saved as: %s", savedID), nil
+	msgCount := len(session.GetHistory())
+	return fmt.Sprintf("Session saved as: %s (%d messages)\nTo restore: /resume %s", savedID, msgCount, savedID), nil
 }
 
 // ResumeCommand resumes a saved session.
