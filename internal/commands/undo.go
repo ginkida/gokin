@@ -90,6 +90,25 @@ func (c *CostCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		}
 	}
 
-	return fmt.Sprintf("Token usage:\n  Input:  %d\n  Output: %d\n  Total:  %d%s\n\nUse /stats for detailed session statistics.",
-		stats.InputTokens, stats.OutputTokens, stats.TotalTokens, costStr), nil
+	modelStr := ""
+	if ms := app.GetModelSetter(); ms != nil {
+		if m := ms.GetModel(); m != "" {
+			modelStr = fmt.Sprintf("\n  Model:  %s", m)
+		}
+	}
+
+	return fmt.Sprintf("Token usage:\n  Input:  %s\n  Output: %s\n  Total:  %s%s%s",
+		formatTokens(stats.InputTokens), formatTokens(stats.OutputTokens),
+		formatTokens(stats.TotalTokens), costStr, modelStr), nil
+}
+
+func formatTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
