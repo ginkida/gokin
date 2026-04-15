@@ -583,6 +583,52 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	return sb.String(), nil
 }
 
+// ShortcutsCommand displays keyboard shortcuts.
+type ShortcutsCommand struct{}
+
+func (c *ShortcutsCommand) Name() string        { return "shortcuts" }
+func (c *ShortcutsCommand) Description() string { return "Show keyboard shortcuts" }
+func (c *ShortcutsCommand) Usage() string       { return "/shortcuts" }
+func (c *ShortcutsCommand) GetMetadata() CommandMetadata {
+	return CommandMetadata{
+		Category: CategoryGettingStarted,
+		Icon:     "shortcuts",
+	}
+}
+
+func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n%s Keyboard Shortcuts%s  (also: press ? in empty input)\n\n", colorCyan, colorReset))
+
+	shortcuts := []struct {
+		keys, desc string
+	}{
+		{"Enter", "Send message"},
+		{"Ctrl+J / Alt+Enter", "Insert newline"},
+		{"Tab", "Autocomplete command"},
+		{"Ctrl+P", "Command palette"},
+		{"Ctrl+R", "Search input history"},
+		{"Ctrl+C", "Cancel operation / Quit"},
+		{"Ctrl+L", "Clear screen"},
+		{"Ctrl+B / Ctrl+F", "Scroll up / down"},
+		{"Ctrl+U / Ctrl+D", "Scroll half page"},
+		{"Ctrl+G", "Select mode (freeze + native copy)"},
+		{"Ctrl+H", "Context observatory"},
+		{"Ctrl+T", "Background tasks"},
+		{"Ctrl+O", "Agent activity"},
+		{"Shift+Tab", "Toggle plan mode"},
+		{"Option+C", "Copy last response"},
+		{"e / E", "Expand/collapse tool output"},
+		{"?", "This shortcuts overlay"},
+	}
+
+	for _, s := range shortcuts {
+		sb.WriteString(fmt.Sprintf("  %s%-22s%s %s\n", colorGreen, s.keys, colorReset, s.desc))
+	}
+
+	return sb.String(), nil
+}
+
 // ConfigCommand shows current configuration.
 type ConfigCommand struct{}
 

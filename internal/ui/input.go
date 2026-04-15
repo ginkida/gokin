@@ -125,6 +125,7 @@ func defaultCommands() []CommandInfo {
 		{Name: "help", Description: "Show help for commands", Category: "Getting Started",
 			Args: []ArgInfo{{Name: "command", Required: false, Type: "string"}}, Usage: "/help [command]"},
 		{Name: "quickstart", Description: "Interactive onboarding guide", Category: "Getting Started"},
+		{Name: "shortcuts", Description: "Show keyboard shortcuts", Category: "Getting Started"},
 
 		// Session
 		{Name: "model", Description: "Switch AI model", Category: "Session",
