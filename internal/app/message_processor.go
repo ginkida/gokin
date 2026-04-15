@@ -39,6 +39,11 @@ const (
 
 // processMessageWithContext handles user messages with full context management.
 func (a *App) processMessageWithContext(ctx context.Context, message string) {
+	if a.session == nil {
+		a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("session not initialized — try /clear or restart")))
+		return
+	}
+
 	a.journalEvent("request_started", map[string]any{
 		"message_preview": previewForJournal(message),
 	})
