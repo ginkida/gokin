@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	appconfig "gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/security"
 
@@ -18,11 +19,10 @@ import (
 	"google.golang.org/genai"
 )
 
-const defaultOllamaBaseURL = "http://localhost:11434"
 
 // OllamaConfig holds configuration for Ollama API client.
 type OllamaConfig struct {
-	BaseURL     string        // Default: defaultOllamaBaseURL
+	BaseURL     string        // Default: config.DefaultOllamaBaseURL
 	APIKey      string        // Optional, for remote Ollama servers with auth
 	Model       string        // e.g., "llama3.2", "qwen2.5-coder"
 	Temperature float32       // Temperature for generation
@@ -66,7 +66,7 @@ func NewOllamaClient(config OllamaConfig) (*OllamaClient, error) {
 
 	// Set defaults
 	if config.BaseURL == "" {
-		config.BaseURL = defaultOllamaBaseURL
+		config.BaseURL = appconfig.DefaultOllamaBaseURL
 	}
 	if config.MaxTokens == 0 {
 		config.MaxTokens = 8192
