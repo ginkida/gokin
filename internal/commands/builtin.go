@@ -803,6 +803,23 @@ func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppIn
 	return sb.String(), nil
 }
 
+// PwdCommand shows the current working directory.
+type PwdCommand struct{}
+
+func (c *PwdCommand) Name() string        { return "pwd" }
+func (c *PwdCommand) Description() string { return "Show current working directory" }
+func (c *PwdCommand) Usage() string       { return "/pwd" }
+func (c *PwdCommand) GetMetadata() CommandMetadata {
+	return CommandMetadata{
+		Category: CategoryTools,
+		Icon:     "folder",
+	}
+}
+
+func (c *PwdCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	return app.GetWorkDir(), nil
+}
+
 // KeysCommand is an alias for ShortcutsCommand.
 type KeysCommand struct{ ShortcutsCommand }
 

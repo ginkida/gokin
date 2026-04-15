@@ -172,8 +172,9 @@ func NewHandler() *Handler {
 	h.Register(&RedoCommand{})
 	h.Register(&CostCommand{})
 
-	// Register checkpoint command
+	// Register checkpoint and utility commands
 	h.Register(&CheckpointCommand{})
+	h.Register(&PwdCommand{})
 
 	h.frozen = true
 	return h

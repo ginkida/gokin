@@ -191,6 +191,7 @@ func defaultCommands() []CommandInfo {
 		{Name: "tree-stats", Description: "Show tree planner statistics", Category: "Planning"},
 
 		// Tools
+		{Name: "pwd", Description: "Show current working directory", Category: "Tools"},
 		{Name: "browse", Description: "Open interactive file browser", Category: "Tools",
 			Args: []ArgInfo{{Name: "path", Required: false, Type: "path"}}, Usage: "/browse [path]"},
 		{Name: "open", Description: "Open a file in your editor", Category: "Tools",
