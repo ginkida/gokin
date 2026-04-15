@@ -52,6 +52,7 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 	default:
 		// Rotate through general hints (benefit-focused)
 		generalHints := []string{
+			"? — show all keyboard shortcuts",
 			"Shift+Tab — break complex tasks into reviewable steps",
 			"Ctrl+P — quickly find any command",
 			"Option+C — copy the last response to clipboard",
