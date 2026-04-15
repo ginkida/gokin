@@ -123,7 +123,15 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 	hash, _ := runGitCommand(workDir, "rev-parse", "--short", "HEAD")
 	hash = strings.TrimSpace(hash)
 
-	return fmt.Sprintf("Created commit %s: %s", hash, message), nil
+	// Count files changed
+	commitStat, _ := runGitCommand(workDir, "diff", "--stat", "HEAD~1..HEAD")
+	fileCount := strings.Count(commitStat, "|")
+
+	msg := fmt.Sprintf("✓ Committed %s: %s", hash, message)
+	if fileCount > 0 {
+		msg += fmt.Sprintf(" (%d file(s))", fileCount)
+	}
+	return msg, nil
 }
 
 // PRCommand creates a pull request.
