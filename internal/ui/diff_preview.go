@@ -511,11 +511,11 @@ func (m DiffPreviewModel) Update(msg tea.Msg) (DiffPreviewModel, tea.Cmd) {
 			return m, nil
 
 		case "ctrl+d":
-			m.viewport.HalfViewDown()
+			m.viewport.HalfPageDown()
 			return m, nil
 
 		case "ctrl+u":
-			m.viewport.HalfViewUp()
+			m.viewport.HalfPageUp()
 			return m, nil
 
 		case "=": // "+" key (shift not needed on most keyboards, use "=" as alias for "+")
@@ -1028,13 +1028,13 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 
 		case "ctrl+d":
 			if !m.focusOnList {
-				m.viewport.HalfViewDown()
+				m.viewport.HalfPageDown()
 			}
 			return m, nil
 
 		case "ctrl+u":
 			if !m.focusOnList {
-				m.viewport.HalfViewUp()
+				m.viewport.HalfPageUp()
 			}
 			return m, nil
 		}
