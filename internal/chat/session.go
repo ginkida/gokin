@@ -247,19 +247,20 @@ func (s *Session) trimHistoryLocked() {
 	boundary = adjustBoundaryForToolPairs(s.History, boundary)
 	s.History = s.History[boundary:]
 
-	// Sync tokenCounts with History to avoid desynchronization
-	if len(s.tokenCounts) > boundary {
-		s.tokenCounts = s.tokenCounts[boundary:]
-
-		// Recalculate totalTokens from remaining tokenCounts
-		s.totalTokens = 0
-		for _, count := range s.tokenCounts {
-			s.totalTokens += count
+	// Align tokenCounts with trimmed History. Missing original counts
+	// (e.g. if AddContent was used without tokens) become 0 so the two
+	// slices always stay the same length.
+	newCounts := make([]int, len(s.History))
+	for i := range newCounts {
+		origIdx := boundary + i
+		if origIdx < len(s.tokenCounts) {
+			newCounts[i] = s.tokenCounts[origIdx]
 		}
-	} else {
-		// tokenCounts is shorter than boundary — reset entirely
-		s.tokenCounts = nil
-		s.totalTokens = 0
+	}
+	s.tokenCounts = newCounts
+	s.totalTokens = 0
+	for _, count := range s.tokenCounts {
+		s.totalTokens += count
 	}
 }
 
@@ -318,10 +319,16 @@ func (s *Session) ReplaceWithSummary(upToIndex int, summary *genai.Content, summ
 	// Keep messages after upToIndex
 	remaining := s.History[upToIndex:]
 
-	// Safely handle tokenCounts which may be shorter than History
-	var remainingTokens []int
-	if upToIndex <= len(s.tokenCounts) {
-		remainingTokens = s.tokenCounts[upToIndex:]
+	// Extract remaining token counts aligned to remaining messages.
+	// If tokenCounts was shorter than upToIndex, the missing counts are 0.
+	// Always produce exactly len(remaining) entries so tokenCounts stays
+	// in sync with History after rebuild.
+	remainingTokens := make([]int, len(remaining))
+	for i := range remaining {
+		origIdx := upToIndex + i
+		if origIdx < len(s.tokenCounts) {
+			remainingTokens[i] = s.tokenCounts[origIdx]
+		}
 	}
 
 	// Build new history with summary
@@ -329,7 +336,7 @@ func (s *Session) ReplaceWithSummary(upToIndex int, summary *genai.Content, summ
 	s.History = append(s.History, summary)
 	s.History = append(s.History, remaining...)
 
-	// Rebuild token counts
+	// Rebuild token counts — length matches History length
 	s.tokenCounts = make([]int, 0, 1+len(remainingTokens))
 	s.tokenCounts = append(s.tokenCounts, summaryTokens)
 	s.tokenCounts = append(s.tokenCounts, remainingTokens...)
@@ -594,15 +601,19 @@ func (s *Session) RestoreCheckpoint(name string) bool {
 		s.History = removeOrphanedToolParts(s.History)
 	}
 
-	// Truncate token counts to match actual history length after orphan removal
+	// Align token counts with history length (pad with 0 if shorter,
+	// truncate if longer) so tokenCounts always matches History.
 	newLen := len(s.History)
 	if newLen < len(s.tokenCounts) {
 		s.tokenCounts = s.tokenCounts[:newLen]
-		// Recalculate total tokens
-		s.totalTokens = 0
-		for _, count := range s.tokenCounts {
-			s.totalTokens += count
-		}
+	} else if newLen > len(s.tokenCounts) {
+		padded := make([]int, newLen)
+		copy(padded, s.tokenCounts)
+		s.tokenCounts = padded
+	}
+	s.totalTokens = 0
+	for _, count := range s.tokenCounts {
+		s.totalTokens += count
 	}
 
 	// Remove any checkpoints that referenced indices beyond the new length
