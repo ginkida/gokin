@@ -22,7 +22,7 @@ func (c *appStatusCallback) OnRetry(attempt, maxAttempts int, delay time.Duratio
 	msg := fmt.Sprintf("Retry %d/%d in %s (%s)",
 		attempt, maxAttempts, delay.Round(time.Second), reason)
 
-	c.app.program.Send(ui.StatusUpdateMsg{
+	c.app.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    ui.StatusRetry,
 		Message: msg,
 		Details: map[string]any{
@@ -42,7 +42,7 @@ func (c *appStatusCallback) OnRateLimit(waitTime time.Duration) {
 
 	msg := fmt.Sprintf("Rate limit, waiting %s...", waitTime.Round(time.Second))
 
-	c.app.program.Send(ui.StatusUpdateMsg{
+	c.app.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    ui.StatusRateLimit,
 		Message: msg,
 		Details: map[string]any{
@@ -62,7 +62,7 @@ func (c *appStatusCallback) OnStreamIdle(elapsed time.Duration) {
 		msg = fmt.Sprintf("Waiting for response %s... (ESC to cancel)", elapsed.Round(time.Second))
 	}
 
-	c.app.program.Send(ui.StatusUpdateMsg{
+	c.app.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    ui.StatusStreamIdle,
 		Message: msg,
 		Details: map[string]any{
@@ -82,7 +82,7 @@ func (c *appStatusCallback) OnThinkingIdle(elapsed time.Duration, provider strin
 		msg = fmt.Sprintf("%s is thinking %s... (ESC to cancel)", provider, elapsed.Round(time.Second))
 	}
 
-	c.app.program.Send(ui.StatusUpdateMsg{
+	c.app.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    ui.StatusThinkingIdle,
 		Message: msg,
 		Details: map[string]any{
@@ -99,7 +99,7 @@ func (c *appStatusCallback) OnStreamResume() {
 	}
 
 	// Send resume message - this can be used to clear any warning toasts
-	c.app.program.Send(ui.StatusUpdateMsg{
+	c.app.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    ui.StatusStreamResume,
 		Message: "",
 	})
@@ -117,7 +117,7 @@ func (c *appStatusCallback) OnError(err error, recoverable bool) {
 	}
 	ft := client.DetectFailureTelemetry(err)
 
-	c.app.program.Send(ui.StatusUpdateMsg{
+	c.app.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    ui.StatusRecoverableError,
 		Message: msg,
 		Details: map[string]any{

@@ -1693,14 +1693,12 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	}
 
 	// 8d. Send ConfigUpdateMsg to Bubbletea program to refresh UI
-	if a.program != nil {
-		a.program.Send(ui.ConfigUpdateMsg{
-			PermissionsEnabled:  a.config.Permission.Enabled,
-			SandboxEnabled:      a.config.Tools.Bash.Sandbox,
-			PlanningModeEnabled: a.planningModeEnabled,
-			ModelName:           a.config.Model.Name,
-		})
-	}
+	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		PermissionsEnabled:  a.config.Permission.Enabled,
+		SandboxEnabled:      a.config.Tools.Bash.Sandbox,
+		PlanningModeEnabled: a.planningModeEnabled,
+		ModelName:           a.config.Model.Name,
+	})
 
 	// 9. Update search cache
 	if a.config.Cache.Enabled && a.searchCache == nil {
@@ -2004,5 +2002,5 @@ func (a *App) sendAgentTreeUpdate() {
 		nodes = append(nodes, node)
 	}
 
-	a.program.Send(ui.AgentTreeUpdateMsg{Nodes: nodes})
+	a.safeSendToProgram(ui.AgentTreeUpdateMsg{Nodes: nodes})
 }

@@ -1228,8 +1228,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.state = StateInput
 			m.currentTool = ""
 			m.currentToolInfo = ""
+			m.processingLabel = ""
+			m.streamIdleMsg = "" // Clear any "X is thinking" / "waiting for response" hint
 			m.activeToolCalls = nil
 			m.streamStartTime = time.Time{} // Reset timeout tracking
+			m.slowWarningShown = false
 			// Hide tool progress bar if visible
 			if m.toolProgressBar != nil {
 				m.toolProgressBar.Hide()
@@ -2050,6 +2053,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				m.toastManager.ShowError(msg.Message)
 			}
 		case StatusCancelled:
+			// Cancellation: clear any in-flight idle/thinking hints so the user
+			// sees a clean state while the operation winds down.
+			m.streamIdleMsg = ""
 			if m.toastManager != nil {
 				m.toastManager.ShowWarning(msg.Message)
 			}

@@ -24,7 +24,7 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 	}
 
 	// Send permission request to TUI
-	a.program.Send(ui.PermissionRequestMsg{
+	a.safeSendToProgram(ui.PermissionRequestMsg{
 		ToolName:  req.ToolName,
 		Args:      req.Args,
 		RiskLevel: req.RiskLevel.String(),
@@ -49,12 +49,10 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 			return permission.DecisionDeny, ctx.Err()
 		case <-warningTimer.C:
 			// Send warning to UI
-			if a.program != nil {
-				a.program.Send(ui.StatusUpdateMsg{
-					Type:    ui.StatusStreamIdle,
-					Message: fmt.Sprintf("Waiting for permission: %s...", req.ToolName),
-				})
-			}
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusStreamIdle,
+				Message: fmt.Sprintf("Waiting for permission: %s...", req.ToolName),
+			})
 			// Reset timer for next reminder
 			warningTimer.Reset(repeatDelay)
 		case <-permTimer.C:
@@ -102,7 +100,7 @@ func (a *App) promptQuestion(ctx context.Context, question string, options []str
 	}
 
 	// Send question request to TUI
-	a.program.Send(ui.QuestionRequestMsg{
+	a.safeSendToProgram(ui.QuestionRequestMsg{
 		Question: question,
 		Options:  options,
 		Default:  defaultOpt,
@@ -233,7 +231,7 @@ func (a *App) handlePlanProgressUpdate(progress *plan.ProgressUpdate) {
 	}
 
 	// Send progress update to TUI
-	a.program.Send(ui.PlanProgressMsg{
+	a.safeSendToProgram(ui.PlanProgressMsg{
 		PlanID:        progress.PlanID,
 		CurrentStepID: progress.CurrentStepID,
 		CurrentTitle:  progress.CurrentTitle,
@@ -315,7 +313,7 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 	drainDiffDecisionChan(a.diffResponseChan)
 
 	// Send diff preview request to TUI
-	a.program.Send(ui.DiffPreviewRequestMsg{
+	a.safeSendToProgram(ui.DiffPreviewRequestMsg{
 		FilePath:   filePath,
 		OldContent: oldContent,
 		NewContent: newContent,
@@ -381,7 +379,7 @@ func (a *App) promptMultiDiffDecision(ctx context.Context, files []ui.DiffFile) 
 		return decisions, nil
 	}
 
-	a.program.Send(ui.MultiDiffPreviewRequestMsg{Files: files})
+	a.safeSendToProgram(ui.MultiDiffPreviewRequestMsg{Files: files})
 
 	diffTimer := time.NewTimer(DiffDecisionTimeout)
 	defer diffTimer.Stop()
@@ -494,16 +492,12 @@ func (a *App) handleApplyCodeBlock(filename, content string) {
 
 		result, err := writeTool.Execute(ctx, args)
 		if err != nil {
-			if a.program != nil {
-				a.program.Send(ui.ErrorMsg(err))
-			}
+			a.safeSendToProgram(ui.ErrorMsg(err))
 			return
 		}
 
 		if !result.Success {
-			if a.program != nil {
-				a.program.Send(ui.ErrorMsg(fmt.Errorf("%s", result.Error)))
-			}
+			a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("%s", result.Error)))
 		}
 	}()
 }

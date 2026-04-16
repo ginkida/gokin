@@ -1387,7 +1387,7 @@ func (b *Builder) wireDependencies() error {
 		OnText: func(text string) {
 			app.touchStepHeartbeat()
 			if app.program != nil {
-				app.program.Send(ui.StreamTextMsg(text))
+				app.safeSendToProgram(ui.StreamTextMsg(text))
 			}
 
 			// Track streamed text for token estimation
@@ -1401,7 +1401,7 @@ func (b *Builder) wireDependencies() error {
 				// Estimate: 1 token ~= 4 chars
 				estimatedTokens := chars / 4
 				if app.program != nil {
-					app.program.Send(ui.StreamTokenUpdateMsg{
+					app.safeSendToProgram(ui.StreamTokenUpdateMsg{
 						EstimatedOutputTokens: estimatedTokens,
 					})
 				}
@@ -1411,7 +1411,7 @@ func (b *Builder) wireDependencies() error {
 			app.touchStepHeartbeat()
 			logging.Debug("OnThinking callback fired", "text_length", len(text), "text_preview", text[:min(len(text), 80)])
 			if app.program != nil {
-				app.program.Send(ui.StreamThinkingMsg(text))
+				app.safeSendToProgram(ui.StreamThinkingMsg(text))
 			}
 		},
 		OnToolStart: func(name string, args map[string]any) {
@@ -1431,7 +1431,7 @@ func (b *Builder) wireDependencies() error {
 			}
 
 			if app.program != nil {
-				app.program.Send(ui.ToolCallMsg{Name: name, Args: args})
+				app.safeSendToProgram(ui.ToolCallMsg{Name: name, Args: args})
 			}
 			app.journalEvent("tool_start", map[string]any{
 				"tool": name,
@@ -1458,7 +1458,7 @@ func (b *Builder) wireDependencies() error {
 			app.mu.Unlock()
 
 			if app.program != nil {
-				app.program.Send(ui.ToolResultMsg{Name: name, Content: result.Content})
+				app.safeSendToProgram(ui.ToolResultMsg{Name: name, Content: result.Content})
 			}
 			app.journalEvent("tool_end", map[string]any{
 				"tool":    name,
@@ -1475,7 +1475,7 @@ func (b *Builder) wireDependencies() error {
 				app.mu.Lock()
 				ctx := app.currentToolContext
 				app.mu.Unlock()
-				app.program.Send(ui.ToolProgressMsg{Name: name, Elapsed: elapsed, CurrentStep: ctx})
+				app.safeSendToProgram(ui.ToolProgressMsg{Name: name, Elapsed: elapsed, CurrentStep: ctx})
 			}
 		},
 		OnToolDetailedProgress: func(name string, progress float64, currentStep string) {
@@ -1487,7 +1487,7 @@ func (b *Builder) wireDependencies() error {
 				app.mu.Unlock()
 			}
 			if app.program != nil {
-				app.program.Send(ui.ToolProgressMsg{
+				app.safeSendToProgram(ui.ToolProgressMsg{
 					Name:        name,
 					Progress:    progress,
 					CurrentStep: currentStep,
@@ -1499,12 +1499,12 @@ func (b *Builder) wireDependencies() error {
 				"error": err.Error(),
 			})
 			if app.program != nil {
-				app.program.Send(ui.ErrorMsg(err))
+				app.safeSendToProgram(ui.ErrorMsg(err))
 			}
 		},
 		OnInlineDiff: func(filePath, oldText, newText string) {
 			if app.program != nil {
-				app.program.Send(ui.InlineDiffMsg{
+				app.safeSendToProgram(ui.InlineDiffMsg{
 					FilePath: filePath,
 					OldText:  oldText,
 					NewText:  newText,
@@ -1513,7 +1513,7 @@ func (b *Builder) wireDependencies() error {
 		},
 		OnLoopIteration: func(iteration int, toolsUsed int) {
 			if app.program != nil {
-				app.program.Send(ui.LoopIterationMsg{
+				app.safeSendToProgram(ui.LoopIterationMsg{
 					Iteration: iteration,
 					ToolsUsed: toolsUsed,
 				})
@@ -1536,7 +1536,7 @@ func (b *Builder) wireDependencies() error {
 				if maxTokens > 0 {
 					pct = float64(inputTokens) / float64(maxTokens)
 				}
-				app.program.Send(ui.TokenUsageMsg{
+				app.safeSendToProgram(ui.TokenUsageMsg{
 					Tokens:      inputTokens,
 					MaxTokens:   maxTokens,
 					PercentUsed: pct,
@@ -1546,7 +1546,7 @@ func (b *Builder) wireDependencies() error {
 		},
 		OnFilePeek: func(filePath, title, content, action string) {
 			if app.program != nil {
-				app.program.Send(ui.FilePeekMsg{
+				app.safeSendToProgram(ui.FilePeekMsg{
 					FilePath: filePath,
 					Title:    title,
 					Content:  content,
@@ -1563,7 +1563,7 @@ func (b *Builder) wireDependencies() error {
 					}
 					msg += ": " + summary
 				}
-				app.program.Send(ui.LearningInsightMsg{Message: msg})
+				app.safeSendToProgram(ui.LearningInsightMsg{Message: msg})
 			}
 		},
 	})
@@ -1647,7 +1647,7 @@ func (b *Builder) wireDependencies() error {
 			if len(desc) > 50 {
 				desc = desc[:47] + "..."
 			}
-			app.program.Send(ui.BackgroundTaskMsg{
+			app.safeSendToProgram(ui.BackgroundTaskMsg{
 				ID:          id,
 				Type:        "agent",
 				Description: desc,
@@ -1666,7 +1666,7 @@ func (b *Builder) wireDependencies() error {
 					status = "cancelled"
 				}
 			}
-			app.program.Send(ui.BackgroundTaskMsg{
+			app.safeSendToProgram(ui.BackgroundTaskMsg{
 				ID:     id,
 				Type:   "agent",
 				Status: status,
@@ -1710,7 +1710,7 @@ func (b *Builder) wireDependencies() error {
 			if total < 1 {
 				total = 1
 			}
-			app.program.Send(ui.BackgroundTaskProgressMsg{
+			app.safeSendToProgram(ui.BackgroundTaskProgressMsg{
 				ID:            id,
 				Progress:      float64(progress.CurrentStep) / float64(total),
 				CurrentStep:   progress.CurrentStep,
@@ -1732,21 +1732,21 @@ func (b *Builder) wireDependencies() error {
 		}
 
 		if app.program != nil {
-			app.program.Send(ui.ScratchpadMsg(content))
+			app.safeSendToProgram(ui.ScratchpadMsg(content))
 		}
 	})
 
 	// Wire thinking callback for sub-agents
 	b.agentRunner.SetOnThinking(func(text string) {
 		if app.program != nil {
-			app.program.Send(ui.StreamThinkingMsg(text))
+			app.safeSendToProgram(ui.StreamThinkingMsg(text))
 		}
 	})
 
 	// Wire sub-agent activity to UI
 	b.agentRunner.SetOnSubAgentActivity(func(agentID, agentType, toolName string, args map[string]any, status string) {
 		if app.program != nil {
-			app.program.Send(ui.SubAgentActivityMsg{
+			app.safeSendToProgram(ui.SubAgentActivityMsg{
 				AgentID:   agentID,
 				AgentType: agentType,
 				ToolName:  toolName,
@@ -1846,7 +1846,7 @@ func (b *Builder) wireDependencies() error {
 		b.metaAgent.SetInterventionCallback(func(agentID string, reason string, action string) {
 			if app.program != nil {
 				msg := fmt.Sprintf("⚡ Meta-Agent: %s → %s", action, reason)
-				app.program.Send(ui.LearningInsightMsg{Message: msg})
+				app.safeSendToProgram(ui.LearningInsightMsg{Message: msg})
 			}
 		})
 	}
@@ -1855,7 +1855,7 @@ func (b *Builder) wireDependencies() error {
 	if b.agentRunner != nil {
 		b.agentRunner.SetOnThinking(func(text string) {
 			if app.program != nil {
-				app.program.Send(ui.StreamThinkingMsg(text))
+				app.safeSendToProgram(ui.StreamThinkingMsg(text))
 			}
 		})
 	}
@@ -1982,7 +1982,7 @@ type uiBroadcasterAdapter struct {
 // BroadcastTaskStarted sends a task started event to the UI.
 func (a *uiBroadcasterAdapter) BroadcastTaskStarted(taskID, message, planType string) {
 	if a.app != nil && a.app.program != nil {
-		a.app.program.Send(ui.TaskStartedEvent{
+		a.app.safeSendToProgram(ui.TaskStartedEvent{
 			TaskID:   taskID,
 			Message:  message,
 			PlanType: planType,
@@ -1993,7 +1993,7 @@ func (a *uiBroadcasterAdapter) BroadcastTaskStarted(taskID, message, planType st
 // BroadcastTaskCompleted sends a task completed event to the UI.
 func (a *uiBroadcasterAdapter) BroadcastTaskCompleted(taskID string, success bool, duration time.Duration, err error, planType string) {
 	if a.app != nil && a.app.program != nil {
-		a.app.program.Send(ui.TaskCompletedEvent{
+		a.app.safeSendToProgram(ui.TaskCompletedEvent{
 			TaskID:   taskID,
 			Success:  success,
 			Duration: duration,
@@ -2006,7 +2006,7 @@ func (a *uiBroadcasterAdapter) BroadcastTaskCompleted(taskID string, success boo
 // BroadcastTaskProgress sends a task progress event to the UI.
 func (a *uiBroadcasterAdapter) BroadcastTaskProgress(taskID string, progress float64, message string) {
 	if a.app != nil && a.app.program != nil {
-		a.app.program.Send(ui.TaskProgressEvent{
+		a.app.safeSendToProgram(ui.TaskProgressEvent{
 			TaskID:   taskID,
 			Progress: progress,
 			Message:  message,
