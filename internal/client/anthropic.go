@@ -629,6 +629,45 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 	return false
 }
 
+// classifyGLMErrorCode maps Z.AI / GLM error codes (returned as `{error:{code,message}}`
+// in SSE events with HTTP 200) to retryability and a user-friendly description.
+// Returns (retryable, keyword, description). `keyword` is embedded in the returned
+// error so isRetryableError can pick it up via its substring matching (e.g. "overloaded",
+// "rate limit"). `description` is what the UI shows the user.
+//
+// Codes derived from Z.AI API error reference:
+//   - 1210: too-many-requests            → retryable
+//   - 1211/1213: insufficient balance    → non-retryable (user must top up)
+//   - 1212: quota exceeded               → non-retryable
+//   - 1214/1215: auth failure            → non-retryable
+//   - 1301: concurrency limit            → retryable
+//   - 1302/1303: throughput limit        → retryable
+//   - 1305: service overloaded           → retryable
+//   - unknown: treated as non-retryable with raw message
+func classifyGLMErrorCode(code, message string) (retryable bool, keyword, description string) {
+	switch code {
+	case "1210":
+		return true, "rate limit", "GLM rate limit — retrying"
+	case "1301":
+		return true, "overloaded", "GLM concurrency limit — retrying"
+	case "1302", "1303":
+		return true, "overloaded", "GLM throughput limit — retrying"
+	case "1305":
+		return true, "overloaded", "GLM server overloaded — retrying"
+	case "1211", "1213":
+		return false, "", "GLM account balance insufficient — top up or switch provider"
+	case "1212":
+		return false, "", "GLM quota exceeded — check billing"
+	case "1214", "1215":
+		return false, "", "GLM authentication failed — check API key"
+	}
+	// Unknown code: keep raw message verbatim.
+	if message != "" {
+		return false, "", message
+	}
+	return false, "", "GLM error " + code
+}
+
 // isEOFError returns true if the error is an EOF (connection closed by server).
 func isEOFError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -1098,9 +1137,19 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					if errObj, ok := event["error"].(map[string]interface{}); ok {
 						errCode := stringFromMap(errObj, "code")
 						errMsg := stringFromMap(errObj, "message")
-						logging.Error("Z.AI API error", "code", errCode, "message", errMsg)
+						retryable, keyword, description := classifyGLMErrorCode(errCode, errMsg)
+						logging.Error("Z.AI API error", "code", errCode, "message", errMsg, "retryable", retryable)
+						// Embed keyword so isRetryableError picks the error up via substring match.
+						// Example: "GLM server overloaded — retrying (1305): <raw>".
+						errText := fmt.Sprintf("%s (%s)", description, errCode)
+						if keyword != "" {
+							errText = fmt.Sprintf("%s [%s] (%s): %s", description, keyword, errCode, errMsg)
+						}
+						if statusCb != nil {
+							statusCb.OnError(errors.New(description), retryable)
+						}
 						chunks <- ResponseChunk{
-							Error: fmt.Errorf("API error (%s): %s", errCode, errMsg),
+							Error: errors.New(errText),
 							Done:  true,
 						}
 						return

@@ -180,6 +180,14 @@ func (es *ExampleStore) LearnFromSuccessWithTools(taskType, prompt, agentType, o
 	// Limit examples per type to prevent unbounded growth
 	es.pruneOldExamples(taskType, 50) // Keep top 50 per type
 
+	// Global cap across all types. Without this, a long-running session with
+	// many task types can accumulate thousands of TaskExamples (each carrying
+	// an unbounded ToolSequence), which bloats memory and the examples.json
+	// file on disk. Cap at 1000 total and prune the lowest-scoring entries.
+	if len(es.examples) > maxGlobalExamples {
+		es.pruneGloballyLocked(maxGlobalExamples)
+	}
+
 	// Snapshot data under lock for async save (map is not safe for concurrent read/write)
 	data, err := json.MarshalIndent(es.examples, "", "  ")
 	if err != nil {
@@ -240,6 +248,51 @@ func extractTags(prompt string) []string {
 }
 
 // pruneOldExamples removes old, low-performing examples.
+// maxGlobalExamples bounds the total number of stored examples across all task
+// types. Hit by long sessions accumulating many low-value entries; prevents
+// unbounded memory + disk growth.
+const maxGlobalExamples = 1000
+
+// pruneGloballyLocked drops the lowest-scoring examples across all task types
+// until the store is at target size. Ties broken by oldest-first. Caller must
+// hold es.mu for writing.
+func (es *ExampleStore) pruneGloballyLocked(target int) {
+	if len(es.examples) <= target {
+		return
+	}
+	allIDs := make([]string, 0, len(es.examples))
+	for id := range es.examples {
+		allIDs = append(allIDs, id)
+	}
+	sort.Slice(allIDs, func(i, j int) bool {
+		ei := es.examples[allIDs[i]]
+		ej := es.examples[allIDs[j]]
+		if ei.SuccessScore != ej.SuccessScore {
+			return ei.SuccessScore > ej.SuccessScore
+		}
+		return ei.Created.After(ej.Created)
+	})
+	toRemove := make(map[string]bool, len(allIDs)-target)
+	for _, id := range allIDs[target:] {
+		toRemove[id] = true
+		delete(es.examples, id)
+	}
+	// Rebuild per-type indexes so they don't hold stale IDs.
+	for t, ids := range es.byType {
+		kept := ids[:0]
+		for _, id := range ids {
+			if !toRemove[id] {
+				kept = append(kept, id)
+			}
+		}
+		if len(kept) == 0 {
+			delete(es.byType, t)
+		} else {
+			es.byType[t] = kept
+		}
+	}
+}
+
 func (es *ExampleStore) pruneOldExamples(taskType string, maxCount int) {
 	ids := es.byType[taskType]
 	if len(ids) <= maxCount {

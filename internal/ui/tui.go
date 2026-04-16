@@ -2025,7 +2025,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				m.retryMax = maxAttempts
 			}
 			if m.toastManager != nil && msg.Message != "" {
-				m.toastManager.ShowWarning(msg.Message)
+				// Collapse consecutive retries into a single live toast so rapid
+				// attempts don't stack up and push other toasts off screen.
+				m.toastManager.ShowTagged("retry", ToastWarning, msg.Message, 4*time.Second)
 			}
 		case StatusRateLimit:
 			if m.toastManager != nil {
@@ -2357,6 +2359,14 @@ func (m Model) View() string {
 
 			toolNameStyle := lipgloss.NewStyle().Foreground(toolColor).Bold(true)
 			status := spinner + " " + toolNameStyle.Render(m.currentTool)
+
+			// Batch awareness: when several tools run in parallel, prefix the
+			// longest-running (currentTool) with a count so the user sees the
+			// full workload instead of a single tool name flickering through.
+			if active := len(m.activeToolCalls); active > 1 {
+				batchStyle := lipgloss.NewStyle().Foreground(ColorDim)
+				status = spinner + " " + batchStyle.Render(fmt.Sprintf("[%d tools]", active)) + " " + toolNameStyle.Render(m.currentTool)
+			}
 
 			if m.currentToolInfo != "" {
 				infoStyle := lipgloss.NewStyle().Foreground(ColorMuted)

@@ -101,6 +101,8 @@ func (s *Session) AddUserMessage(message string) {
 
 	oldCount := len(s.History)
 	s.History = append(s.History, genai.NewContentFromText(message, genai.RoleUser))
+	// Keep tokenCounts aligned with History — zero entry until counted.
+	s.tokenCounts = append(s.tokenCounts, 0)
 	s.version++
 
 	// Auto-trim if history exceeds max
@@ -115,6 +117,7 @@ func (s *Session) AddModelMessage(message string) {
 
 	oldCount := len(s.History)
 	s.History = append(s.History, genai.NewContentFromText(message, genai.RoleModel))
+	s.tokenCounts = append(s.tokenCounts, 0)
 	s.version++
 
 	// Auto-trim if history exceeds max
@@ -129,6 +132,7 @@ func (s *Session) AddContent(content *genai.Content) {
 
 	oldCount := len(s.History)
 	s.History = append(s.History, content)
+	s.tokenCounts = append(s.tokenCounts, 0)
 	s.version++
 
 	// Auto-trim if history exceeds max

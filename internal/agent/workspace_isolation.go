@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -9,11 +10,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"gokin/internal/git"
 	"gokin/internal/logging"
 )
+
+// worktreeRemoveTimeout bounds `git worktree remove --force`. If git hangs
+// (index lock, zombie subprocess), the command is killed so the agent can
+// complete shutdown and the next session can reuse the base workspace.
+const worktreeRemoveTimeout = 30 * time.Second
 
 type workspaceIsolationMode string
 
@@ -138,10 +145,19 @@ func prepareGitWorktree(baseWorkDir string, applyBackOnSuccess bool) (*isolatedW
 		Strategy:           "git_worktree",
 		ApplyBackOnSuccess: applyBackOnSuccess,
 		cleanup: func() error {
-			cmd := exec.Command("git", "-C", baseWorkDir, "worktree", "remove", "--force", worktreeDir)
+			ctx, cancel := context.WithTimeout(context.Background(), worktreeRemoveTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "git", "-C", baseWorkDir, "worktree", "remove", "--force", worktreeDir)
 			output, err := cmd.CombinedOutput()
 			removeErr := os.RemoveAll(parent)
 			if err != nil {
+				if ctx.Err() == context.DeadlineExceeded {
+					logging.Warn("git worktree remove timed out", "dir", worktreeDir, "timeout", worktreeRemoveTimeout)
+					if removeErr != nil {
+						return fmt.Errorf("git worktree remove timed out after %s; cleanup failed: %w", worktreeRemoveTimeout, removeErr)
+					}
+					return fmt.Errorf("git worktree remove timed out after %s", worktreeRemoveTimeout)
+				}
 				if removeErr != nil {
 					return fmt.Errorf("git worktree remove failed: %s; cleanup failed: %w", strings.TrimSpace(string(output)), removeErr)
 				}

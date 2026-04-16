@@ -187,6 +187,13 @@ type ModelConfig struct {
 
 	// Maximum number of clients kept in the connection pool (default: 5)
 	MaxPoolSize int `yaml:"max_pool_size"`
+
+	// ForceWeakOptimizations applies weak-tier agent behavior (lower self-review
+	// threshold, weak-model guidance injection, re-injection after compaction)
+	// regardless of the model's inferred capability tier. Useful for Strong-tier
+	// models that still benefit from extra safeguards, e.g. GLM 5.x in complex
+	// multi-step tasks where stronger self-review reduces silent errors.
+	ForceWeakOptimizations bool `yaml:"force_weak_optimizations,omitempty"`
 }
 
 // ToolsConfig holds tool-related settings.

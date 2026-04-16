@@ -27,6 +27,11 @@ type Toast struct {
 	Duration  time.Duration
 	CreatedAt time.Time
 	FadeOut   bool
+	// Tag groups related toasts. When non-empty, ShowTagged replaces the
+	// existing toast with the same tag instead of stacking a new one, so
+	// repeated status updates (e.g. retry attempts) collapse to a single
+	// live toast rather than spamming the user.
+	Tag string
 }
 
 // IsExpired returns true if the toast should be removed.
@@ -116,6 +121,44 @@ func (m *ToastManager) ShowInfo(message string) {
 // ShowWarning displays a warning toast.
 func (m *ToastManager) ShowWarning(message string) {
 	m.Show(ToastWarning, "", message, 4*time.Second)
+}
+
+// ShowTagged shows a toast that replaces any existing toast with the same tag.
+// Use this for progress-style updates (retries, failover attempts, etc.) where
+// a burst of near-identical messages would otherwise spam the stack — each new
+// message updates the live toast in place.
+func (m *ToastManager) ShowTagged(tag string, toastType ToastType, message string, duration time.Duration) {
+	if tag != "" {
+		for i := range m.toasts {
+			if m.toasts[i].Tag == tag {
+				m.toasts[i].Type = toastType
+				m.toasts[i].Message = message
+				m.toasts[i].Duration = duration
+				m.toasts[i].CreatedAt = time.Now()
+				return
+			}
+		}
+	}
+	toast := Toast{
+		ID:        m.nextID,
+		Type:      toastType,
+		Message:   message,
+		Duration:  duration,
+		CreatedAt: time.Now(),
+		Tag:       tag,
+	}
+	m.nextID++
+	m.toasts = append([]Toast{toast}, m.toasts...)
+	if len(m.toasts) > m.maxToasts {
+		for i := len(m.toasts) - 1; i >= 0 && len(m.toasts) > m.maxToasts; i-- {
+			if m.toasts[i].Type != ToastError {
+				m.toasts = append(m.toasts[:i], m.toasts[i+1:]...)
+			}
+		}
+		if len(m.toasts) > m.maxToasts {
+			m.toasts = m.toasts[:m.maxToasts]
+		}
+	}
 }
 
 // Dismiss removes a toast by ID.

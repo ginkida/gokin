@@ -619,7 +619,12 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	var toolsUsed []string          // Track which tools were used for smart fallback
 	var lastToolResult ToolResult   // Track the last tool result for context
 	var recentToolPatterns []string // Track tool name patterns per iteration for stagnation detection
-	const stagnationLimit = 5       // Consecutive identical tool patterns before aborting
+	amnesiaWarned := map[string]bool{}
+	const (
+		stagnationLimit           = 5  // Consecutive identical tool patterns before aborting
+		stagnationWindowSize      = 15 // Rolling window for amnesia (non-consecutive) repeats
+		stagnationWindowRepeatMin = 5  // Repeats within window to trigger a warning (not an abort)
+	)
 	streamRetries := 0
 	partialStreamRetries := 0
 	retryPolicy := client.DefaultStreamRetryPolicy()
@@ -753,6 +758,29 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					logging.Warn("executor stagnation detected: same tool pattern repeated",
 						"pattern", pattern, "count", stagnationLimit)
 					return history, "", fmt.Errorf("executor stagnation: tool pattern %q repeated %d times consecutively", pattern, stagnationLimit)
+				}
+			}
+
+			// Amnesia detection: model may interleave other tools but keep coming back
+			// to the same pattern (classic "forgot I tried this" loop). Warn — don't
+			// abort — so the user can step in before consecutive stagnation kicks in.
+			if len(recentToolPatterns) >= stagnationWindowSize && !amnesiaWarned[pattern] {
+				windowStart := len(recentToolPatterns) - stagnationWindowSize
+				count := 0
+				for _, p := range recentToolPatterns[windowStart:] {
+					if p == pattern {
+						count++
+					}
+				}
+				if count >= stagnationWindowRepeatMin {
+					amnesiaWarned[pattern] = true
+					logging.Warn("executor amnesia detected: pattern repeated within window",
+						"pattern", pattern, "count", count, "window", stagnationWindowSize)
+					if e.handler != nil && e.handler.OnWarning != nil {
+						e.handler.OnWarning(fmt.Sprintf(
+							"Model may be looping: tool pattern repeated %d times in last %d iterations",
+							count, stagnationWindowSize))
+					}
 				}
 			}
 
@@ -1241,7 +1269,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Step 1: Basic tool lookup and validation
 	tool, ok := e.registry.Get(call.Name)
 	if !ok {
-		return NewErrorResult(fmt.Sprintf("unknown tool: %s", call.Name))
+		return NewErrorResult(formatUnknownToolError(call.Name, e.registry.Names()))
 	}
 
 	if err := tool.Validate(call.Args); err != nil {

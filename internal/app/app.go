@@ -190,7 +190,8 @@ type App struct {
 	planningModeEnabled bool               // toggle for planning mode
 
 	// MCP (Model Context Protocol)
-	mcpManager *mcp.Manager
+	mcpManager        *mcp.Manager
+	mcpInitialSummary string // One-shot toast describing initial MCP connect results
 
 	// Streaming token estimation
 	streamedChars int // Accumulated chars during current streaming session
@@ -511,6 +512,25 @@ func (a *App) Run() error {
 		}
 	})
 
+	// Deferred MCP summary: the UI wasn't running yet when ConnectAll completed
+	// in the builder, so we replay the result as a toast once the program loop
+	// is ready to receive it. Short wait keeps the toast from racing the splash.
+	if a.mcpInitialSummary != "" {
+		summary := a.mcpInitialSummary
+		a.mcpInitialSummary = ""
+		a.safeGo("mcp-initial-summary", func() {
+			select {
+			case <-time.After(800 * time.Millisecond):
+			case <-a.ctx.Done():
+				return
+			}
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusInfo,
+				Message: summary,
+			})
+		})
+	}
+
 	// Start file watcher if enabled
 	if a.fileWatcher != nil {
 		a.fileWatcher.SetOnFileChange(func(path string, op watcher.Operation) {
@@ -533,20 +553,35 @@ func (a *App) Run() error {
 
 	// Start initial indexing for semantic search if enabled
 	if a.semanticIndexer != nil && a.config.Semantic.IndexOnStart {
-		go func() {
+		a.safeGo("semantic-index-on-start", func() {
 			logging.Debug("starting background semantic indexing")
+			start := time.Now()
 
 			// Use LoadOrIndex for intelligent loading from cache
 			maxAge := 24 * time.Hour // Cache is fresh for 24 hours
 			if err := a.semanticIndexer.LoadOrIndex(a.ctx, true, maxAge); err != nil {
 				logging.Error("semantic indexing failed", "error", err)
-			} else {
-				stats := a.semanticIndexer.GetStats()
-				logging.Debug("semantic indexing complete",
-					"files", stats.FileCount,
-					"chunks", stats.ChunkCount)
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusRecoverableError,
+					Message: fmt.Sprintf("Semantic indexing failed: %v", err),
+				})
+				return
 			}
-		}()
+			stats := a.semanticIndexer.GetStats()
+			elapsed := time.Since(start).Round(100 * time.Millisecond)
+			logging.Debug("semantic indexing complete",
+				"files", stats.FileCount,
+				"chunks", stats.ChunkCount,
+				"elapsed", elapsed)
+			// Only surface a toast when the build was actually expensive (skip
+			// cache-hit case which returns in <500ms with no user-visible wait).
+			if elapsed > 2*time.Second {
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusInfo,
+					Message: fmt.Sprintf("Semantic index ready (%d files, %s)", stats.FileCount, elapsed),
+				})
+			}
+		})
 	}
 
 	_, runErr := a.program.Run()
@@ -574,8 +609,6 @@ func (a *App) Run() error {
 func (a *App) handleSubmit(message string) {
 	a.mu.Lock()
 	if a.processing {
-		// Copy program reference while holding lock
-		program := a.program
 		a.mu.Unlock()
 
 		// Save as pending message (replaces any previous pending)
@@ -583,9 +616,7 @@ func (a *App) handleSubmit(message string) {
 		if a.pendingMessage != "" {
 			logging.Debug("pending message replaced — previous message dropped",
 				"dropped_len", len(a.pendingMessage))
-			if program != nil {
-				program.Send(ui.StatusUpdateMsg{Type: ui.StatusRetry, Message: "Previous queued message replaced by new input"})
-			}
+			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry, Message: "Previous queued message replaced by new input"})
 		}
 		a.pendingMessage = message
 		a.pendingMu.Unlock()
@@ -594,10 +625,7 @@ func (a *App) handleSubmit(message string) {
 		})
 		a.saveRecoverySnapshot(message)
 
-		// Notify user that message is queued (using copied reference)
-		if program != nil {
-			program.Send(ui.StreamTextMsg("📥 Message queued - will process after current request completes\n"))
-		}
+		a.safeSendToProgram(ui.StreamTextMsg("📥 Message queued - will process after current request completes\n"))
 		return
 	}
 	a.processing = true
@@ -670,33 +698,26 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 	})
 	result, err := a.commandHandler.Execute(ctx, name, args, a)
 
-	// Copy program reference under lock for safe access
-	a.mu.Lock()
-	program := a.program
-	a.mu.Unlock()
-
-	if program != nil {
-		if err != nil {
-			a.journalEvent("command_failed", map[string]any{
-				"command": name,
-				"error":   err.Error(),
-			})
-			program.Send(ui.ErrorMsg(err))
+	if err != nil {
+		a.journalEvent("command_failed", map[string]any{
+			"command": name,
+			"error":   err.Error(),
+		})
+		a.safeSendToProgram(ui.ErrorMsg(err))
+	} else {
+		a.journalEvent("command_completed", map[string]any{
+			"command": name,
+		})
+		// Handle special command markers
+		if strings.HasPrefix(result, "__browse:") {
+			browsePath := strings.TrimPrefix(result, "__browse:")
+			a.safeSendToProgram(ui.FileBrowserRequestMsg{StartPath: browsePath})
 		} else {
-			a.journalEvent("command_completed", map[string]any{
-				"command": name,
-			})
-			// Handle special command markers
-			if strings.HasPrefix(result, "__browse:") {
-				browsePath := strings.TrimPrefix(result, "__browse:")
-				program.Send(ui.FileBrowserRequestMsg{StartPath: browsePath})
-			} else {
-				// Display command result as assistant message
-				program.Send(ui.StreamTextMsg(result))
-			}
+			// Display command result as assistant message
+			a.safeSendToProgram(ui.StreamTextMsg(result))
 		}
-		program.Send(ui.ResponseDoneMsg{})
 	}
+	a.safeSendToProgram(ui.ResponseDoneMsg{})
 }
 
 // handleQuit handles quit request.
@@ -1208,20 +1229,12 @@ func (a *App) sendTokenUsageUpdate() {
 		return
 	}
 
-	a.mu.Lock()
-	program := a.program
-	a.mu.Unlock()
-
-	if program == nil {
-		return
-	}
-
 	usage := a.contextManager.GetTokenUsage()
 	if usage == nil {
 		return
 	}
 
-	program.Send(ui.TokenUsageMsg{
+	a.safeSendToProgram(ui.TokenUsageMsg{
 		Tokens:      usage.InputTokens,
 		MaxTokens:   usage.MaxTokens,
 		PercentUsed: usage.PercentUsed,
@@ -1250,14 +1263,6 @@ func (a *App) handleRateLimitMetadata(rl *client.RateLimitMetadata) {
 
 // sendContextHealthUpdate sends a detailed context health update to the UI.
 func (a *App) sendContextHealthUpdate() {
-	a.mu.Lock()
-	program := a.program
-	a.mu.Unlock()
-
-	if program == nil {
-		return
-	}
-
 	var msg ui.ContextHealthMsg
 
 	// Priority: check active agent in runner first (for sub-agents/plans)
@@ -1299,7 +1304,7 @@ func (a *App) sendContextHealthUpdate() {
 		msg.TokensRemaining = int64(stats.AvailableTokens)
 	}
 
-	program.Send(msg)
+	a.safeSendToProgram(msg)
 }
 
 // refreshTokenCount recalculates token count from session history and sends update to UI.
@@ -1423,21 +1428,17 @@ func (a *App) TogglePermissions() bool {
 	a.updateUnrestrictedModeLocked()
 
 	// Copy state for UI message before unlocking
-	program := a.program
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
 	planningModeEnabled := a.planningModeEnabled
 	modelName := a.config.Model.Name
 	a.mu.Unlock()
 
-	// Send UI update message (program.Send is thread-safe)
-	if program != nil {
-		program.Send(ui.ConfigUpdateMsg{
-			PermissionsEnabled:  newEnabled,
-			SandboxEnabled:      sandboxEnabled,
-			PlanningModeEnabled: planningModeEnabled,
-			ModelName:           modelName,
-		})
-	}
+	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		PermissionsEnabled:  newEnabled,
+		SandboxEnabled:      sandboxEnabled,
+		PlanningModeEnabled: planningModeEnabled,
+		ModelName:           modelName,
+	})
 
 	return newEnabled
 }
@@ -1470,21 +1471,17 @@ func (a *App) TogglePlanningMode() bool {
 	}
 
 	// Copy state for UI message before unlocking
-	program := a.program
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
 	modelName := a.config.Model.Name
 	a.mu.Unlock()
 
-	// Send UI update message to trigger proper refresh
-	if program != nil {
-		program.Send(ui.ConfigUpdateMsg{
-			PermissionsEnabled:  permissionsEnabled,
-			SandboxEnabled:      sandboxEnabled,
-			PlanningModeEnabled: newEnabled,
-			ModelName:           modelName,
-		})
-	}
+	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		PermissionsEnabled:  permissionsEnabled,
+		SandboxEnabled:      sandboxEnabled,
+		PlanningModeEnabled: newEnabled,
+		ModelName:           modelName,
+	})
 
 	return newEnabled
 }
@@ -1537,7 +1534,6 @@ func (a *App) ToggleSandbox() bool {
 
 	// Copy state for UI message before unlocking
 	cfg := a.config
-	program := a.program
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	planningModeEnabled := a.planningModeEnabled
 	modelName := a.config.Model.Name
@@ -1548,15 +1544,12 @@ func (a *App) ToggleSandbox() bool {
 		logging.Warn("failed to save sandbox setting", "error", err)
 	}
 
-	// Send UI update message to trigger proper refresh
-	if program != nil {
-		program.Send(ui.ConfigUpdateMsg{
-			PermissionsEnabled:  permissionsEnabled,
-			SandboxEnabled:      newEnabled,
-			PlanningModeEnabled: planningModeEnabled,
-			ModelName:           modelName,
-		})
-	}
+	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		PermissionsEnabled:  permissionsEnabled,
+		SandboxEnabled:      newEnabled,
+		PlanningModeEnabled: planningModeEnabled,
+		ModelName:           modelName,
+	})
 
 	return newEnabled
 }

@@ -15,6 +15,7 @@ import (
 	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
 	"gokin/internal/plan"
+	"gokin/internal/router"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
 
@@ -201,6 +202,21 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 						"type", analysis.Type,
 						"strategy", analysis.Strategy,
 						"reasoning", analysis.Reasoning)
+					// Surface non-trivial routing decisions. Direct / single-tool are
+					// the common boring case — no toast. Sub-agent / executor-with-
+					// complexity deserves a one-time heads-up so the user knows why
+					// the first response may take longer than a simple Q&A.
+					if requestRetryCount == 0 && analysis.Strategy != router.StrategyDirect &&
+						analysis.Strategy != router.StrategySingleTool {
+						msg := fmt.Sprintf("Routing: %s (complexity %d)", analysis.Strategy, analysis.Score)
+						if analysis.Reasoning != "" {
+							msg = fmt.Sprintf("Routing: %s — %s", analysis.Strategy, analysis.Reasoning)
+						}
+						a.safeSendToProgram(ui.StatusUpdateMsg{
+							Type:    ui.StatusInfo,
+							Message: msg,
+						})
+					}
 				}
 			} else {
 				// Fallback to standard executor
@@ -330,13 +346,19 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 		// Show retry as a non-intrusive status toast instead of inline text.
 		// This keeps the output clean and focused on the model's actual response.
+		// After a failover, tag each attempt with the current provider so the
+		// user can see which backend is being tried rather than just silent retries.
+		providerTag := ""
+		if failoverTriggered {
+			providerTag = fmt.Sprintf(" via %s", a.config.API.GetActiveProvider())
+		}
 		var retryMsg string
 		if decision.Partial {
-			retryMsg = fmt.Sprintf("Stream stalled — retry %d/%d in %v", partialIdleRetryCount, retryPolicy.MaxPartialRetries, backoff.Round(time.Second))
+			retryMsg = fmt.Sprintf("Stream stalled%s — retry %d/%d in %v", providerTag, partialIdleRetryCount, retryPolicy.MaxPartialRetries, backoff.Round(time.Second))
 		} else if ft.Reason == string(client.FailureReasonStreamIdleTimeout) {
-			retryMsg = fmt.Sprintf("Stream stalled — retry %d/%d in %v", requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second))
+			retryMsg = fmt.Sprintf("Stream stalled%s — retry %d/%d in %v", providerTag, requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second))
 		} else {
-			retryMsg = fmt.Sprintf("Retry %d/%d in %v (%s)", requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second), ft.Reason)
+			retryMsg = fmt.Sprintf("Retry %d/%d%s in %v (%s)", requestRetryCount, retryPolicy.MaxRetries, providerTag, backoff.Round(time.Second), ft.Reason)
 		}
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusRetry,
@@ -344,6 +366,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			Details: map[string]any{
 				"attempt":     requestRetryCount,
 				"maxAttempts": retryPolicy.MaxRetries,
+				"provider":    a.config.API.GetActiveProvider(),
+				"failover":    failoverTriggered,
 			},
 		})
 
@@ -514,9 +538,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// Don't send it again here to avoid duplicate output
 	_ = response // Used for token counting above
 
-	// Signal completion - copy program reference under lock
+	// Signal completion - copy metadata under lock
 	a.mu.Lock()
-	program := a.program
 	duration := time.Since(a.responseStartTime)
 	toolsUsed := make([]string, len(a.responseToolsUsed))
 	copy(toolsUsed, a.responseToolsUsed)
@@ -524,27 +547,25 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	outputTokens := a.totalOutputTokens
 	a.mu.Unlock()
 
-	if program != nil {
-		program.Send(ui.ResponseDoneMsg{})
+	a.safeSendToProgram(ui.ResponseDoneMsg{})
 
-		// Send response metadata with cost estimation
-		_, cacheRead := a.executor.GetLastCacheMetrics()
-		var cost float64
-		if a.contextManager != nil {
-			if tc := a.contextManager.GetTokenCounter(); tc != nil {
-				cost = tc.CalculateCost(inputTokens, outputTokens)
-			}
+	// Send response metadata with cost estimation
+	_, cacheRead := a.executor.GetLastCacheMetrics()
+	var cost float64
+	if a.contextManager != nil {
+		if tc := a.contextManager.GetTokenCounter(); tc != nil {
+			cost = tc.CalculateCost(inputTokens, outputTokens)
 		}
-		program.Send(ui.ResponseMetadataMsg{
-			Model:                a.config.Model.Name,
-			InputTokens:          inputTokens,
-			OutputTokens:         outputTokens,
-			CacheReadInputTokens: cacheRead,
-			Duration:             duration,
-			ToolsUsed:            toolsUsed,
-			Cost:                 cost,
-		})
 	}
+	a.safeSendToProgram(ui.ResponseMetadataMsg{
+		Model:                a.config.Model.Name,
+		InputTokens:          inputTokens,
+		OutputTokens:         outputTokens,
+		CacheReadInputTokens: cacheRead,
+		Duration:             duration,
+		ToolsUsed:            toolsUsed,
+		Cost:                 cost,
+	})
 
 	// Notify on long message processing completion (for background terminals)
 	if duration > 30*time.Second {
@@ -571,9 +592,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				}
 				display = append(display, fmt.Sprintf("%s %s", icon, item.Content))
 			}
-			if program != nil {
-				program.Send(ui.TodoUpdateMsg(display))
-			}
+			a.safeSendToProgram(ui.TodoUpdateMsg(display))
 		}
 	}
 }

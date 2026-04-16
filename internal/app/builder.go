@@ -97,8 +97,9 @@ type Builder struct {
 	sessionManager *chat.SessionManager
 
 	// MCP (Model Context Protocol)
-	mcpManager   *mcp.Manager
-	contextAgent *appcontext.ContextAgent
+	mcpManager        *mcp.Manager
+	mcpConnectSummary string // Deferred UI summary of initial MCP connect results
+	contextAgent      *appcontext.ContextAgent
 
 	// Context Predictor (predictive file loading)
 	contextPredictor *appcontext.ContextPredictor
@@ -814,12 +815,20 @@ func (b *Builder) initManagers() error {
 	smartRouterCfg.ModelCapability = b.modelCapability
 	logging.Debug("model capability inferred", "provider", b.modelCapability.Provider, "tier", b.modelCapability.Tier.String())
 
-	// Adapt for weaker models: self-review boost, weak model guidance, compact history
-	if b.modelCapability.Tier < router.CapabilityStrong {
-		if b.modelCapability.SelfReviewBoost && b.cfg.Tools.SmartValidation.SelfReviewThreshold > 2 {
+	// Adapt for weaker models: self-review boost, weak model guidance, compact history.
+	// Also activates when force_weak_optimizations is set in config — lets users opt
+	// Strong-tier models (e.g. GLM 5.x) into weak-tier safeguards.
+	weakMode := b.modelCapability.Tier < router.CapabilityStrong || b.cfg.Model.ForceWeakOptimizations
+	if weakMode {
+		if b.cfg.Tools.SmartValidation.SelfReviewThreshold > 2 &&
+			(b.modelCapability.SelfReviewBoost || b.cfg.Model.ForceWeakOptimizations) {
 			b.executor.SetSelfReviewThreshold(2)
 		}
 		b.agentRunner.SetWeakModelMode(true)
+		if b.cfg.Model.ForceWeakOptimizations {
+			logging.Info("force_weak_optimizations enabled — applying weak-tier safeguards to strong model",
+				"model", b.cfg.Model.Name, "tier", b.modelCapability.Tier.String())
+		}
 	}
 
 	b.smartRouter = router.NewSmartRouter(b.ctx, smartRouterCfg, b.executor, b.agentRunner, b.geminiClient, b.workDir)
@@ -1282,10 +1291,32 @@ func (b *Builder) initIntegrations() error {
 
 		b.mcpManager = mcp.NewManager(mcpConfigs)
 
+		// Count auto-connect servers so we can summarise connect results for the UI.
+		autoCount := 0
+		for _, cfg := range mcpConfigs {
+			if cfg.AutoConnect {
+				autoCount++
+			}
+		}
+
 		// Connect to auto-connect servers
+		var connectErr error
 		if err := b.mcpManager.ConnectAll(b.ctx); err != nil {
+			connectErr = err
 			logging.Warn("some MCP servers failed to connect", "error", err)
 			// Continue - graceful degradation
+		}
+
+		// Build summary for deferred UI toast (UI is not running yet — we'd lose the message).
+		connected := len(b.mcpManager.GetConnectedServers())
+		toolCount := len(b.mcpManager.GetTools())
+		if autoCount > 0 {
+			if connectErr != nil {
+				b.mcpConnectSummary = fmt.Sprintf("MCP: %d/%d servers connected, %d tools — some servers failed",
+					connected, autoCount, toolCount)
+			} else if connected > 0 {
+				b.mcpConnectSummary = fmt.Sprintf("MCP: %d/%d servers connected, %d tools", connected, autoCount, toolCount)
+			}
 		}
 
 		// Register MCP tools into the registry
@@ -1916,8 +1947,9 @@ func (b *Builder) assembleApp() *App {
 		treePlanner:         b.treePlanner,
 		planningModeEnabled: b.cfg.Plan.Enabled,
 		// MCP (Model Context Protocol)
-		mcpManager:    b.mcpManager,
-		sessionMemory: b.sessionMemory,
+		mcpManager:        b.mcpManager,
+		mcpInitialSummary: b.mcpConnectSummary,
+		sessionMemory:     b.sessionMemory,
 		// Persistent stores for flush on shutdown
 		memoryStore:  b.memStore,
 		errorStore:   b.errorStore,

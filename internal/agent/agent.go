@@ -65,10 +65,11 @@ type Agent struct {
 	progressCallback func(progress *AgentProgress)
 
 	// Mental loop detection tracking
-	callHistory    map[string]int // Map of tool_name:arguments -> count
-	callHistoryMu  sync.Mutex     // Protects callHistory map
-	loopIntervened bool           // Flag to indicate if loop intervention occurred
-	loopThreshold  int            // Broad loop threshold (default: 8, quick: 4, thorough: 15)
+	callHistory     map[string]int  // Map of tool_name:arguments -> count
+	callHistoryMu   sync.Mutex      // Protects callHistory and loopEarlyWarned
+	loopIntervened  bool            // Flag to indicate if loop intervention occurred
+	loopThreshold   int             // Broad loop threshold (default: 8, quick: 4, thorough: 15)
+	loopEarlyWarned map[string]bool // Tracks keys that already got an early-warning message
 
 	// Context summarization settings (adjusted by thoroughness)
 	pruneProtectChars  int // Chars protected from pruning (default: 120000)
@@ -249,6 +250,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		pruneMinOutputSize: 200,
 		maxHistorySize:     DefaultMaxHistorySize,
 		callHistory:        make(map[string]int),
+		loopEarlyWarned:    make(map[string]bool),
 		ctxCfg:             ctxCfg,
 		recoveryExecutor:   NewRecoveryExecutor(2),
 		autoFixAttempts:    make(map[string]int),
@@ -383,6 +385,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		pruneMinOutputSize: 200,
 		maxHistorySize:     DefaultMaxHistorySize,
 		callHistory:        make(map[string]int),
+		loopEarlyWarned:    make(map[string]bool),
 		ctxCfg:             ctxCfg,
 		recoveryExecutor:   NewRecoveryExecutor(2),
 		autoFixAttempts:    make(map[string]int),
@@ -1205,6 +1208,7 @@ func (a *Agent) collectTreeMetrics(result *AgentResult) {
 func (a *Agent) clearCallHistory() {
 	a.callHistoryMu.Lock()
 	a.callHistory = make(map[string]int)
+	a.loopEarlyWarned = make(map[string]bool)
 	a.callHistoryMu.Unlock()
 }
 
@@ -2654,7 +2658,24 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				exactCount := a.callHistory[key]
 				broadCount := a.callHistory[broadKey]
 				intervened := a.loopIntervened
+				// Early warnings: one repetition before intervention kicks in. Fire
+				// each warning at most once per key so we don't spam the user.
+				earlyExactWarn := exactCount == 3 && !intervened && !a.loopEarlyWarned["exact:"+key]
+				earlyBroadWarn := broadCount == a.loopThreshold && !intervened && !a.loopEarlyWarned["broad:"+broadKey]
+				if earlyExactWarn {
+					a.loopEarlyWarned["exact:"+key] = true
+				}
+				if earlyBroadWarn {
+					a.loopEarlyWarned["broad:"+broadKey] = true
+				}
 				a.callHistoryMu.Unlock()
+
+				if earlyExactWarn {
+					a.safeOnText(fmt.Sprintf("\n[Heads up: %s called 3× with same args — one more will trigger loop recovery. Press ESC to intervene.]\n", fc.Name))
+				}
+				if earlyBroadWarn {
+					a.safeOnText(fmt.Sprintf("\n[Heads up: %s used %d× this session — approaching broad-loop threshold. Press ESC to intervene.]\n", fc.Name, broadCount))
+				}
 
 				// Exact-match loop: same tool + same (normalized) args > 3 times
 				if exactCount > 3 && !intervened {
@@ -3155,7 +3176,9 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		"agent_id", a.ID,
 		"usage", fmt.Sprintf("%.1f%%", percentUsed*100),
 		"tokens", tokenCount)
-	a.safeOnText(fmt.Sprintf("\n[Compacting context (%.0f%% used)...]\n", percentUsed*100))
+	compactStart := time.Now()
+	tokensBefore := tokenCount
+	a.safeOnText(fmt.Sprintf("\n[Compacting context (%.0f%% used, %d tokens)...]\n", percentUsed*100, tokenCount))
 
 	// 3. Summarize on snapshot (potentially slow API call — no lock held)
 	if len(historySnapshot) <= a.summarizeMinMsgs {
@@ -3181,30 +3204,59 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		return fmt.Errorf("summarization failed: %w", err)
 	}
 
-	// 4. Reconstruct under write lock, preserving messages added since snapshot
-	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
+	// 4. Reconstruct under write lock, preserving messages added since snapshot.
+	// We snapshot a copy of the new history while holding the lock so we can
+	// do an expensive token recount (potentially an API call) without blocking
+	// concurrent reads/writes on the agent state.
+	var recountSnapshot []*genai.Content
+	func() {
+		a.stateMu.Lock()
+		defer a.stateMu.Unlock()
 
-	// If history shrunk (another compaction ran), skip
-	if len(a.history) < historyLen {
-		return nil
+		// If history shrunk (another compaction ran), skip
+		if len(a.history) < historyLen {
+			return
+		}
+
+		// Messages appended by concurrent goroutines since our snapshot
+		newMessages := a.history[historyLen:]
+
+		newHistory := make([]*genai.Content, 0, preserveStart+1+len(recentFromSnapshot)+len(newMessages))
+		newHistory = append(newHistory, a.history[:preserveStart]...) // System + greeting + original task
+		newHistory = append(newHistory, summary)
+		newHistory = append(newHistory, recentFromSnapshot...)
+		newHistory = append(newHistory, newMessages...)
+
+		a.history = newHistory
+
+		// Inject continuation hint after compaction
+		a.injectContinuationHint()
+
+		logging.Info("context history compacted", "agent_id", a.ID, "new_message_count", len(a.history))
+
+		// Shallow snapshot for the recount outside the lock. Contents are
+		// immutable after they enter history, so sharing pointers is safe.
+		recountSnapshot = make([]*genai.Content, len(a.history))
+		copy(recountSnapshot, a.history)
+	}()
+
+	// Post-compaction feedback: report freed space and elapsed time so the user
+	// understands why the model paused. Recount is best-effort (skipped on error).
+	duration := time.Since(compactStart).Round(100 * time.Millisecond)
+	if len(recountSnapshot) > 0 && a.tokenCounter != nil {
+		newCount, cntErr := a.tokenCounter.CountContents(ctx, recountSnapshot)
+		if cntErr == nil && tokensBefore > 0 && newCount >= 0 {
+			freedPct := 0
+			if newCount < tokensBefore {
+				freedPct = 100 * (tokensBefore - newCount) / tokensBefore
+			}
+			a.safeOnText(fmt.Sprintf("[Context compacted: freed %d%% (%d→%d tokens) in %s]\n", freedPct, tokensBefore, newCount, duration))
+		} else {
+			a.safeOnText(fmt.Sprintf("[Context compacted in %s]\n", duration))
+		}
+	} else {
+		a.safeOnText(fmt.Sprintf("[Context compacted in %s]\n", duration))
 	}
-
-	// Messages appended by concurrent goroutines since our snapshot
-	newMessages := a.history[historyLen:]
-
-	newHistory := make([]*genai.Content, 0, preserveStart+1+len(recentFromSnapshot)+len(newMessages))
-	newHistory = append(newHistory, a.history[:preserveStart]...) // System + greeting + original task
-	newHistory = append(newHistory, summary)
-	newHistory = append(newHistory, recentFromSnapshot...)
-	newHistory = append(newHistory, newMessages...)
-
-	a.history = newHistory
-
-	// Inject continuation hint after compaction
-	a.injectContinuationHint()
-
-	logging.Info("context history compacted", "agent_id", a.ID, "new_message_count", len(a.history))
 
 	return nil
 }
@@ -3535,6 +3587,14 @@ func (a *Agent) injectContinuationHint() {
 			taskReminder = taskReminder[:500] + "..."
 		}
 		hint += "\nYour original task: " + taskReminder
+	}
+	// Re-inject weak-model guidance after compaction: the system prompt that
+	// originally carried these rules is preserved at history[0], but weak models
+	// consistently "forget" them once mid-conversation context is summarized.
+	// Embedding the rules in the continuation hint puts them in the freshest
+	// position in the context window.
+	if a.weakModelMode {
+		hint += "\n\nReminders for the remainder of this task:" + a.buildWeakModelGuidance()
 	}
 	hint += "\nContinue with your current task.]"
 
