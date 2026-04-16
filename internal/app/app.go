@@ -434,6 +434,9 @@ func (a *App) Run() error {
 			age := time.Since(snap.Timestamp).Round(time.Minute)
 			var ageStr string
 			switch {
+			case age < time.Minute:
+				// Clock skew or very fresh snapshot — avoid "-1 min ago"
+				ageStr = "just now"
 			case age < time.Hour:
 				ageStr = fmt.Sprintf("%d min ago", int(age.Minutes()))
 			case age < 24*time.Hour:

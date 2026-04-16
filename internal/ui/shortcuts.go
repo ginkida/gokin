@@ -65,9 +65,11 @@ func DefaultShortcuts() []ShortcutCategory {
 		{
 			Name: "Diff Preview",
 			Shortcuts: []Shortcut{
-				{Keys: []string{"Enter"}, Description: "Apply diff"},
-				{Keys: []string{"r"}, Description: "Reject diff"},
-				{Keys: []string{"Tab"}, Description: "Toggle context lines"},
+				{Keys: []string{"y"}, Description: "Apply this diff"},
+				{Keys: []string{"n", "Esc"}, Description: "Reject this diff"},
+				{Keys: []string{"A"}, Description: "Apply all remaining diffs"},
+				{Keys: []string{"R"}, Description: "Reject all remaining diffs"},
+				{Keys: []string{"Tab"}, Description: "Switch focus (multi-file only)"},
 			},
 		},
 		{

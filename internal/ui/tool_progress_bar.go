@@ -156,9 +156,12 @@ func (m *ToolProgressBarModel) View(width int) string {
 	// non-empty line so the user sees live progress instead of stale head.
 	if m.currentStep != "" {
 		step := lastNonEmptyLine(m.currentStep)
-		maxLen := 60
-		if len(step) > maxLen {
-			step = step[:maxLen-1] + "…"
+		// Rune-aware truncation so multibyte chars (emoji, Cyrillic) don't
+		// get sliced mid-byte and render as replacement chars.
+		const maxRunes = 60
+		runes := []rune(step)
+		if len(runes) > maxRunes {
+			step = string(runes[:maxRunes-1]) + "…"
 		}
 		builder.WriteString(" ")
 		builder.WriteString(dimStyle.Render(step))

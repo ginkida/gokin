@@ -274,23 +274,24 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Suggestions: []string{"The conversation is too long for this model", "Run /clear to start fresh, or /compact to summarize older messages", "Switch to a model with a larger context window via /model"},
 		Command:     "/compact",
 	},
-	// Authentication / API key
+	// Authentication / API key — use word boundaries on status codes so we
+	// don't match "401ms latency" etc.
 	{
-		Pattern:     regexp.MustCompile(`(?i)(invalid api key|authentication failed|unauthorized|401|403.*forbidden|api key.*invalid|authentication_error)`),
+		Pattern:     regexp.MustCompile(`(?i)(invalid api key|authentication failed|unauthorized|\b401\b|\b403\b.*forbidden|api key.*invalid|authentication_error)`),
 		Title:       "Authentication Failed",
 		Suggestions: []string{"Your API key is missing, invalid, or expired", "Run /auth to re-authenticate, or check your config file", "Verify the key at the provider's dashboard"},
 		Command:     "/auth",
 	},
 	// Quota / billing
 	{
-		Pattern:     regexp.MustCompile(`(?i)(quota.*exceed|insufficient.*credit|billing|payment.*required|402)`),
+		Pattern:     regexp.MustCompile(`(?i)(quota.*exceed|insufficient.*credit|billing|payment.*required|\b402\b)`),
 		Title:       "Quota or Billing Issue",
 		Suggestions: []string{"Your account has hit a usage cap or billing issue", "Check your provider dashboard for billing status", "Try a different provider via /model"},
 		Command:     "",
 	},
-	// Server errors (5xx)
+	// Server errors (5xx) — word boundaries so "500ms" doesn't trigger
 	{
-		Pattern:     regexp.MustCompile(`(?i)(500|502|503|504|internal server error|bad gateway|service unavailable|gateway timeout|overloaded|temporarily unavailable)`),
+		Pattern:     regexp.MustCompile(`(?i)(\b5\d\d\b.*(error|server|gateway|unavailable|timeout)|internal server error|bad gateway|service unavailable|gateway timeout|overloaded|temporarily unavailable)`),
 		Title:       "Provider Server Error",
 		Suggestions: []string{"The provider is experiencing issues — this is not your fault", "The retry logic already tried automatically", "Switch providers with /model, or try again in a few minutes"},
 		Command:     "",
