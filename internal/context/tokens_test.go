@@ -52,6 +52,13 @@ func TestGetModelLimits_FuzzyMatch(t *testing.T) {
 		// Case insensitive
 		{"GEMINI-3-FLASH", 1048576, 65536},
 		{"Claude-Sonnet", 200000, 16384},
+		// GLM variants — longest key must win deterministically. A name like
+		// "glm-4.5-preview" is a substring of both "glm-4.5" (131K out) and
+		// "glm-4" (32K out); the longer, more-specific key must be selected.
+		{"glm-5.1-preview", 128000, 131072},
+		{"glm-5-turbo-v2", 128000, 131072},
+		{"glm-4.5-preview", 128000, 131072}, // must not fall back to glm-4 (32K)
+		{"glm-4.6-beta", 128000, 131072},    // must not fall back to glm-4 (32K)
 	}
 
 	for _, tt := range tests {

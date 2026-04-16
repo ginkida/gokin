@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -315,16 +316,26 @@ func GetModelLimits(model string) TokenLimits {
 // getModelLimits returns limits for a model, with fallback defaults.
 // Uses exact match first, then fuzzy matching by checking if the model
 // name contains a known base name (e.g. "gemini-2.5-flash-preview" matches "gemini-2.5-flash").
+// Fuzzy match prefers the LONGEST matching key — "glm-4.5-preview" must map
+// to "glm-4.5" (131K out), not the shorter "glm-4" (32K out). Go map iteration
+// is unordered, so we sort keys by length descending to make the result
+// deterministic.
 func getModelLimits(model string) TokenLimits {
 	// Exact match first
 	if limits, ok := DefaultModelLimits[model]; ok {
 		return limits
 	}
-	// Fuzzy match: check if model name contains a known base name
+	// Fuzzy match: check if model name contains a known base name.
+	// Iterate keys longest-first so the most specific entry wins.
 	modelLower := strings.ToLower(model)
-	for key, limits := range DefaultModelLimits {
+	keys := make([]string, 0, len(DefaultModelLimits))
+	for k := range DefaultModelLimits {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+	for _, key := range keys {
 		if strings.Contains(modelLower, key) {
-			return limits
+			return DefaultModelLimits[key]
 		}
 	}
 	// Default limits for unknown models
