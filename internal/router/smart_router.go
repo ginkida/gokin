@@ -110,8 +110,13 @@ func (sr *SmartRouter) SetExampleStore(store ExampleStoreInterface) {
 
 // Route determines the best execution strategy with adaptive learning.
 func (sr *SmartRouter) Route(message string) *RoutingDecision {
+	return sr.RouteWithContext(context.Background(), message)
+}
+
+// RouteWithContext is like Route but propagates the caller's context.
+func (sr *SmartRouter) RouteWithContext(ctx context.Context, message string) *RoutingDecision {
 	// Get base routing decision
-	decision := sr.Router.Route(message)
+	decision := sr.Router.RouteWithContext(ctx, message)
 
 	// Snapshot fields under lock
 	sr.mu.RLock()
@@ -166,7 +171,7 @@ func (sr *SmartRouter) Route(message string) *RoutingDecision {
 // Execute routes the task with learning from outcomes.
 func (sr *SmartRouter) Execute(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
 	startTime := time.Now()
-	decision := sr.Route(message)
+	decision := sr.RouteWithContext(ctx, message)
 
 	// Execute using base router
 	resultHistory, output, err := sr.Router.Execute(ctx, history, message)

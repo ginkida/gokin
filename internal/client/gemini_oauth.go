@@ -1068,7 +1068,11 @@ scanLoop:
 				break scanLoop
 
 			case <-warningTimer.C:
-				lastWarningAt += streamIdleWarning
+				if lastWarningAt == 0 {
+					lastWarningAt = streamIdleWarning
+				} else {
+					lastWarningAt += 10 * time.Second // Match the actual reset interval
+				}
 				if statusCb != nil {
 					statusCb.OnStreamIdle(lastWarningAt)
 				}
@@ -1248,6 +1252,7 @@ func (c *GeminiOAuthClient) parseSSEData(data string) (ResponseChunk, error) {
 				chunk.FinishReason = genai.FinishReason(candidate.FinishReason)
 			}
 
+			// candidate.Content is a value struct here — ranging over nil Parts is safe
 			for _, part := range candidate.Content.Parts {
 				// Construct genai.Part preserving ThoughtSignature for Gemini 3
 				gPart := &genai.Part{

@@ -203,12 +203,18 @@ func RunSetupWizard() error {
 
 		answer = strings.TrimSpace(strings.ToLower(answer))
 		if answer == "" || answer == "y" || answer == "yes" {
-			// Validate the key
-			done := make(chan bool)
+			// Validate the key — buffered channel prevents goroutine leak
+			// if spin returns early (e.g. panic recovery)
+			done := make(chan bool, 1)
 			var validationErr error
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						validationErr = fmt.Errorf("validation panic: %v", r)
+					}
+					done <- true
+				}()
 				validationErr = validateAPIKeyReal(backend, apiKey)
-				done <- true
 			}()
 			spin("Validating API key...", done)
 
@@ -321,12 +327,18 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 		return fmt.Errorf("invalid API key format (too short)")
 	}
 
-	// Validate API key with a real API call
-	done := make(chan bool)
+	// Validate API key with a real API call — buffered channel prevents
+	// goroutine leak if validation panics or spin returns early
+	done := make(chan bool, 1)
 	var validationErr error
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				validationErr = fmt.Errorf("validation panic: %v", r)
+			}
+			done <- true
+		}()
 		validationErr = validateAPIKeyReal(backend, apiKey)
-		done <- true
 	}()
 	spin("Validating API key...", done)
 

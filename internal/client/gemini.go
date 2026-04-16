@@ -446,7 +446,11 @@ func (c *GeminiClient) doGenerateContentStream(ctx context.Context, contents []*
 
 				case <-warningTimer.C:
 					// Stream idle warning - notify UI
-					lastWarningAt += streamIdleWarning
+					if lastWarningAt == 0 {
+						lastWarningAt = streamIdleWarning
+					} else {
+						lastWarningAt += 10 * time.Second // Match the actual reset interval
+					}
 					if statusCb != nil {
 						statusCb.OnStreamIdle(lastWarningAt)
 					}

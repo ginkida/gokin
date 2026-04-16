@@ -118,6 +118,13 @@ func (r *Router) SetPlanChecker(checker PlanChecker) {
 
 // Route determines the best execution strategy and returns a routing decision
 func (r *Router) Route(message string) *RoutingDecision {
+	return r.RouteWithContext(context.Background(), message)
+}
+
+// RouteWithContext is like Route but propagates the caller's context to
+// LLM-backed decomposition. Prefer this when a context is available so the
+// operation can be cancelled by parent timeout.
+func (r *Router) RouteWithContext(ctx context.Context, message string) *RoutingDecision {
 	analysis := r.analyzer.Analyze(message)
 
 	// Model capability adjustments: weaker models decompose earlier
@@ -173,7 +180,7 @@ func (r *Router) Route(message string) *RoutingDecision {
 
 	// Check for automatic decomposition for high-complexity tasks
 	if analysis.Score >= r.decomposeThreshold {
-		decomposition := r.analyzer.Decompose(message)
+		decomposition := r.analyzer.DecomposeWithContext(ctx, message)
 		if len(decomposition.Subtasks) > 1 {
 			decision.Handler = HandlerCoordinated
 			decision.Decomposition = decomposition
@@ -231,7 +238,7 @@ func (r *Router) Route(message string) *RoutingDecision {
 
 // Execute routes the task to the appropriate handler and returns the result
 func (r *Router) Execute(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
-	decision := r.Route(message)
+	decision := r.RouteWithContext(ctx, message)
 
 	// Apply thinking budget for this request
 	r.client.SetThinkingBudget(decision.ThinkingBudget)
