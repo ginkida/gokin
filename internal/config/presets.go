@@ -125,3 +125,28 @@ func ListPresets() []string {
 	}
 	return presets
 }
+
+// providerDefaultPreset returns the preset name that matches a provider, or
+// empty string if there is no canonical preset. Used by auto-apply logic so a
+// user who sets `provider: glm` without an explicit preset still gets the
+// provider-appropriate output cap and model name.
+func providerDefaultPreset(provider string) string {
+	switch provider {
+	case "glm", "gemini", "anthropic", "openai", "deepseek", "kimi", "minimax", "ollama":
+		return provider
+	}
+	return ""
+}
+
+// looksLikeDefaultModelConfig reports whether a ModelConfig still holds the
+// zero-preset defaults (gemini-3-flash-preview / 8192 output). Used to decide
+// whether auto-applying a provider preset is safe: if the user customised
+// Name or MaxOutputTokens themselves, we leave their values alone.
+func looksLikeDefaultModelConfig(m *ModelConfig) bool {
+	if m == nil {
+		return false
+	}
+	defaultName := m.Name == "" || m.Name == "gemini-3-flash-preview"
+	defaultMax := m.MaxOutputTokens == 0 || m.MaxOutputTokens == 8192
+	return defaultName && defaultMax
+}

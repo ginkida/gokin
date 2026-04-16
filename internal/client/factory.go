@@ -18,6 +18,12 @@ var (
 	poolMu     sync.Mutex
 )
 
+// defaultGLMThinkingBudget is used when the user hasn't configured a budget
+// explicitly. 8192 is a middle-ground — enough for multi-step reasoning without
+// inflating the per-turn cost. The old default (2048) truncated chain-of-thought
+// on moderately complex tasks. Users can override via cfg.Model.ThinkingBudget.
+const defaultGLMThinkingBudget = 8192
+
 // GetPool returns the global client connection pool, creating it if necessary.
 func GetPool(cfg *config.Config) *ClientPool {
 	poolMu.Lock()
@@ -269,7 +275,7 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	thinkingBudget := cfg.Model.ThinkingBudget
 	if !enableThinking && thinkingBudget == 0 && supportsGLMThinking(modelID) {
 		enableThinking = true
-		thinkingBudget = 2048
+		thinkingBudget = defaultGLMThinkingBudget
 	}
 
 	anthropicConfig := AnthropicConfig{

@@ -73,6 +73,13 @@ func NormalizeConfig(cfg *Config) error {
 				cfg.Model.Preset,
 				strings.Join(ListPresets(), ", "))
 		}
+	} else if matchProvider := providerDefaultPreset(cfg.Model.Provider); matchProvider != "" &&
+		looksLikeDefaultModelConfig(&cfg.Model) {
+		// Provider was set explicitly (e.g. "glm") but Name/MaxOutputTokens are
+		// still the zero-preset defaults (gemini-3-flash-preview / 8192). The
+		// user almost certainly wanted the provider's preset — apply it so GLM
+		// output isn't truncated at 8K just because they skipped the preset.
+		_ = cfg.Model.ApplyPreset(matchProvider)
 	}
 
 	// Normalize retry provider keys for case-insensitive lookups.

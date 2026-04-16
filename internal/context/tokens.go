@@ -110,7 +110,18 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  200000,
 		MaxOutputTokens: 100000,
 	},
-	// GLM
+	// GLM — explicit entries avoid relying on substring-fuzzy fallback
+	// (which would either miss 4.x variants entirely or return the generic
+	// 128K/8K default from getModelLimits). Values assume Z.AI's current
+	// context window of 128K; output caps differ per model family.
+	"glm-5.1": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 131072,
+	},
+	"glm-5-turbo": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 131072,
+	},
 	"glm-5": {
 		MaxInputTokens:  128000,
 		MaxOutputTokens: 131072,
@@ -118,6 +129,22 @@ var DefaultModelLimits = map[string]TokenLimits{
 	"glm-4.7": {
 		MaxInputTokens:  128000,
 		MaxOutputTokens: 131072,
+	},
+	"glm-4.6": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 131072,
+	},
+	"glm-4.5-air": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 32768,
+	},
+	"glm-4.5": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 131072,
+	},
+	"glm-4": {
+		MaxInputTokens:  128000,
+		MaxOutputTokens: 32768,
 	},
 	// DeepSeek
 	"deepseek-chat": {

@@ -1366,9 +1366,12 @@ func (a *Agent) buildSystemPrompt() string {
 }
 
 // buildWeakModelGuidance returns a concise set of rules that prevent
-// the most common mistakes made by weaker models.
+// the most common mistakes made by weaker models. Includes a GLM-specific
+// section when the provider is z.ai — those models have a distinct set of
+// failure modes (thinking-budget truncation, malformed tool_use ids,
+// SSE error-object mid-stream) that benefit from explicit guidance.
 func (a *Agent) buildWeakModelGuidance() string {
-	return `
+	base := `
 ## IMPORTANT RULES (read carefully)
 
 ### File editing
@@ -1395,7 +1398,24 @@ func (a *Agent) buildWeakModelGuidance() string {
 ### Security
 - NEVER hardcode API keys, tokens, or passwords — use environment variables
 - NEVER commit .env files or credentials
+
+### Tool selection
+- Before calling a tool, check if a previous call in this conversation already did the work
+- If a tool fails twice with the same args, change approach — don't retry a third time
+- Unknown tool names trigger a hint with the closest real name — use it, don't invent names
+- For parallel-safe reads (grep/read/glob): batch them in one turn
+- For writes (edit/write/bash): go one at a time and verify each result before the next
 `
+	if strings.HasPrefix(strings.ToLower(a.Model), "glm") {
+		base += `
+### GLM-specific
+- Keep reasoning tight: thinking tokens cost the same as output tokens. Plan in 1–2 short paragraphs, then act.
+- tool_use blocks need unique ids per call — do NOT reuse an id from an earlier turn
+- If the previous response ended mid-sentence or mid-tool-call, continue from exactly that point — do not restart the task
+- When answering without tools, prefer short factual replies over long essays; GLM over-generates when prompted to "explain"
+`
+	}
+	return base
 }
 
 // buildToolGuidesSection creates a section with usage guides for available tools.
