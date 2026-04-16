@@ -92,9 +92,10 @@ func (m *ToastManager) ShowSuccess(message string) {
 	m.Show(ToastSuccess, "", message, 1500*time.Millisecond)
 }
 
-// ShowError displays an error toast.
+// ShowError displays an error toast. Errors stay longer than info/success
+// so the user has time to read them (15s vs the old 6s).
 func (m *ToastManager) ShowError(message string) {
-	m.Show(ToastError, "", message, 6*time.Second)
+	m.Show(ToastError, "", message, 15*time.Second)
 }
 
 // ShowErrorWithHint displays an error toast with optional actionable hint.
@@ -104,7 +105,7 @@ func (m *ToastManager) ShowErrorWithHint(message string) {
 	if hint != "" {
 		message = message + " → " + hint
 	}
-	m.Show(ToastError, "Error", message, 5*time.Second)
+	m.Show(ToastError, "Error", message, 15*time.Second)
 }
 
 // ShowInfo displays an info toast.

@@ -153,7 +153,6 @@ type Model struct {
 	onInterrupt                func()                                               // Called when user presses ESC to interrupt
 	onCancel                   func()                                               // Called when user presses ESC to cancel current processing
 	onPermissionsToggle        func() bool                                          // Called to toggle permissions
-	onApplyCodeBlock           func(filename, content string)                       // Called when user presses Tab to apply code block
 
 	// Todos visibility state
 	todosVisible bool
@@ -2050,7 +2049,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.rateLimitWaitUntil = time.Time{}
 		case StatusRecoverableError:
 			if m.toastManager != nil {
-				m.toastManager.ShowError(msg.Message)
+				// Use the hint-enhanced variant so the toast tells the user
+				// what to try next, not just what went wrong.
+				m.toastManager.ShowErrorWithHint(msg.Message)
 			}
 		case StatusCancelled:
 			// Cancellation: clear any in-flight idle/thinking hints so the user
@@ -2382,9 +2383,17 @@ func (m Model) View() string {
 
 			label := m.processingLabel
 			if label == "" {
-				label = "Thinking"
-				if m.planningModeEnabled && !m.planProgressMode {
+				// Pick a phase-appropriate label based on elapsed time so the
+				// user sees something is happening even before the first chunk.
+				switch {
+				case m.planningModeEnabled && !m.planProgressMode:
 					label = "Planning"
+				case elapsed < 800*time.Millisecond:
+					label = "Connecting"
+				case elapsed < 3*time.Second:
+					label = "Thinking"
+				default:
+					label = "Generating"
 				}
 			}
 			status := spinner + " " + labelStyle.Render(label)

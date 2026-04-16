@@ -431,8 +431,18 @@ func (a *App) Run() error {
 	// Show recovery hint if previous run was interrupted mid-processing.
 	if a.journal != nil {
 		if snap, err := a.journal.LoadRecovery(); err == nil && snap != nil && snap.Processing {
-			msg := fmt.Sprintf("Recovery snapshot found from %s.\nProcessing was interrupted with %d messages in session.\nUse /recovery and /journal for details.",
-				snap.Timestamp.Format("2006-01-02 15:04"), snap.HistoryLen)
+			age := time.Since(snap.Timestamp).Round(time.Minute)
+			var ageStr string
+			switch {
+			case age < time.Hour:
+				ageStr = fmt.Sprintf("%d min ago", int(age.Minutes()))
+			case age < 24*time.Hour:
+				ageStr = fmt.Sprintf("%d hours ago", int(age.Hours()))
+			default:
+				ageStr = snap.Timestamp.Format("2006-01-02 15:04")
+			}
+			msg := fmt.Sprintf("⚠️  Previous session was interrupted %s (%d messages). Run /recovery to review, /journal to see the last events.",
+				ageStr, snap.HistoryLen)
 			a.tui.AddSystemMessage(msg)
 		}
 	}

@@ -152,10 +152,11 @@ func (m *ToolProgressBarModel) View(width int) string {
 		builder.WriteString(strings.Repeat(" ", 3-len(dots)))
 	}
 
-	// Current step (shortened)
+	// Current step — for multiline bash output, show only the most recent
+	// non-empty line so the user sees live progress instead of stale head.
 	if m.currentStep != "" {
-		step := m.currentStep
-		maxLen := 25
+		step := lastNonEmptyLine(m.currentStep)
+		maxLen := 60
 		if len(step) > maxLen {
 			step = step[:maxLen-1] + "…"
 		}
@@ -176,4 +177,17 @@ func (m *ToolProgressBarModel) View(width int) string {
 	builder.WriteString(dimStyle.Render(elapsedStr))
 
 	return builder.String()
+}
+
+// lastNonEmptyLine returns the last non-empty line from s, trimmed.
+// Used to surface the most recent progress output from multiline tool stdout.
+func lastNonEmptyLine(s string) string {
+	s = strings.TrimRight(s, "\n\r \t")
+	if s == "" {
+		return ""
+	}
+	if idx := strings.LastIndexAny(s, "\n\r"); idx >= 0 {
+		return strings.TrimSpace(s[idx+1:])
+	}
+	return strings.TrimSpace(s)
 }

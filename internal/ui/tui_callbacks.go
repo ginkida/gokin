@@ -113,9 +113,10 @@ func (m *Model) SetFileSelectCallback(onFileSelect func(string)) {
 	m.onFileSelect = onFileSelect
 }
 
-// SetApplyCodeBlockCallback sets the callback for applying code blocks.
+// SetApplyCodeBlockCallback is retained as a no-op for backwards compatibility.
+// The feature was never wired to a key binding and has no callers in the UI.
 func (m *Model) SetApplyCodeBlockCallback(onApply func(filename, content string)) {
-	m.onApplyCodeBlock = onApply
+	_ = onApply
 }
 
 // SetWorkDir sets the working directory for display.

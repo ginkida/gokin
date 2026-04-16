@@ -46,10 +46,11 @@ func DefaultShortcuts() []ShortcutCategory {
 			Name: "Input",
 			Shortcuts: []Shortcut{
 				{Keys: []string{"Enter"}, Description: "Send message"},
-				{Keys: []string{"Tab"}, Description: "Autocomplete command"},
-				{Keys: []string{"Ctrl", "R"}, Description: "Search history"},
-				{Keys: []string{"Esc"}, Description: "Cancel/close modal"},
-				{Keys: []string{"Ctrl", "C"}, Description: "Quit application"},
+				{Keys: []string{"Alt", "Enter"}, Description: "Insert newline (multi-line)"},
+				{Keys: []string{"Tab"}, Description: "Accept ghost text / autocomplete / select suggestion"},
+				{Keys: []string{"Ctrl", "R"}, Description: "Search input history"},
+				{Keys: []string{"Esc"}, Description: "Interrupt request / close modal"},
+				{Keys: []string{"Ctrl", "C"}, Description: "Cancel (once), quit (twice)"},
 			},
 		},
 		{
@@ -62,11 +63,11 @@ func DefaultShortcuts() []ShortcutCategory {
 			},
 		},
 		{
-			Name: "Code Actions",
+			Name: "Diff Preview",
 			Shortcuts: []Shortcut{
-				{Keys: []string{"Tab"}, Description: "Apply code block"},
-				{Keys: []string{"Enter"}, Description: "Accept diff"},
-				{Keys: []string{"Ctrl", "E"}, Description: "Edit code"},
+				{Keys: []string{"Enter"}, Description: "Apply diff"},
+				{Keys: []string{"r"}, Description: "Reject diff"},
+				{Keys: []string{"Tab"}, Description: "Toggle context lines"},
 			},
 		},
 		{

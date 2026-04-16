@@ -317,19 +317,26 @@ func (m *OutputModel) updateViewport() {
 		return
 	}
 
-	// Adaptive debounce: faster updates for small content, slower for large
-	interval := viewportUpdateNormal
-	if contentSize < 5000 {
+	// Adaptive debounce: faster updates for small content, slower for large.
+	// First ~1KB always renders immediately — makes the first tokens of a
+	// response feel instant instead of waiting for the 8ms quantum.
+	var interval time.Duration
+	switch {
+	case contentSize < 1024:
+		interval = 0 // no debounce — render every chunk
+	case contentSize < 5000:
 		interval = viewportUpdateFast
-	} else if contentSize > 50000 {
+	case contentSize > 50000:
 		interval = viewportUpdateSlow
+	default:
+		interval = viewportUpdateNormal
 	}
 
 	now := time.Now().UnixNano()
 	lastUpdate := atomic.LoadInt64(&m.lastUpdateNano)
 	timeSinceLastUpdate := time.Duration(now - lastUpdate)
 
-	if timeSinceLastUpdate < interval {
+	if interval > 0 && timeSinceLastUpdate < interval {
 		atomic.StoreInt64(&m.contentDirty, 1)
 		return
 	}
