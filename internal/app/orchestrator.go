@@ -192,6 +192,9 @@ func (o *TaskOrchestrator) executeTask(ctx context.Context, t *OrchestratorTask)
 	go func() {
 		defer o.wg.Done()
 		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("orchestrator task panic", "task_id", t.ID, "panic", r)
+			}
 			o.mu.Lock()
 			o.activeCount--
 			o.mu.Unlock()

@@ -32,7 +32,7 @@ func (a *App) stepHeartbeatAge() time.Duration {
 func (a *App) startPlanWatchdog(ctx context.Context, cancel context.CancelFunc, planID string) {
 	a.touchStepHeartbeat()
 
-	go func() {
+	a.safeGo("plan-watchdog", func() {
 		ticker := time.NewTicker(stepWatchdogInterval)
 		defer ticker.Stop()
 
@@ -86,5 +86,5 @@ func (a *App) startPlanWatchdog(ctx context.Context, cancel context.CancelFunc, 
 				}
 			}
 		}
-	}()
+	})
 }

@@ -65,7 +65,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	a.touchStepHeartbeat()
-	go func() {
+	a.safeGo("idle-timeout-watcher", func() {
 		ticker := time.NewTicker(idleCheckInterval)
 		defer ticker.Stop()
 		for {
@@ -81,7 +81,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				}
 			}
 		}
-	}()
+	})
 
 	defer func() {
 		a.mu.Lock()

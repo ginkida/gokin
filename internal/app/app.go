@@ -467,7 +467,7 @@ func (a *App) Run() error {
 	a.signalCleanup = a.setupSignalHandler()
 
 	// Start periodic task cleanup goroutine
-	go func() {
+	a.safeGo("periodic-cleanup", func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -496,7 +496,7 @@ func (a *App) Run() error {
 				return
 			}
 		}
-	}()
+	})
 
 	// Start file watcher if enabled
 	if a.fileWatcher != nil {
@@ -607,14 +607,14 @@ func (a *App) handleSubmit(message string) {
 		a.processingCancel = cmdCancel
 		a.processingMu.Unlock()
 
-		go func() {
+		a.safeGo("command-execution", func() {
 			defer func() {
 				a.processingMu.Lock()
 				a.processingCancel = nil
 				a.processingMu.Unlock()
 			}()
 			a.executeCommandCtx(cmdCtx, name, args)
-		}()
+		})
 		return
 	}
 
@@ -625,14 +625,14 @@ func (a *App) handleSubmit(message string) {
 	a.processingMu.Unlock()
 
 	// Process message normally (coordinator is now integrated in agent system)
-	go func() {
+	a.safeGo("message-processing", func() {
 		defer func() {
 			a.processingMu.Lock()
 			a.processingCancel = nil
 			a.processingMu.Unlock()
 		}()
 		a.processMessageWithContext(ctx, message)
-	}()
+	})
 }
 
 // executeCommand executes a slash command.
@@ -1153,6 +1153,21 @@ func (a *App) GetContextManager() *appcontext.ContextManager {
 	return a.contextManager
 }
 
+// safeGo runs fn in a new goroutine with panic recovery. A panic in a
+// background goroutine would otherwise crash the whole process — use
+// this wrapper for any long-lived or periodic worker goroutine.
+func (a *App) safeGo(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("background goroutine recovered from panic",
+					"name", name, "panic", r)
+			}
+		}()
+		fn()
+	}()
+}
+
 // safeSendToProgram safely sends a message to the Bubbletea program.
 // It copies the program reference under lock to prevent race conditions.
 func (a *App) safeSendToProgram(msg tea.Msg) {
@@ -1471,10 +1486,10 @@ func (a *App) IsPlanningModeEnabled() bool {
 // TogglePlanningModeAsync toggles planning mode asynchronously.
 // This is safe to call from UI callbacks as it doesn't block the Bubble Tea event loop.
 func (a *App) TogglePlanningModeAsync() {
-	go func() {
+	a.safeGo("toggle-planning-mode", func() {
 		newEnabled := a.TogglePlanningMode()
 		a.safeSendToProgram(ui.PlanningModeToggledMsg{Enabled: newEnabled})
-	}()
+	})
 }
 
 // ToggleSandbox toggles the bash sandbox mode on/off.

@@ -91,6 +91,11 @@ func (a *App) setupSignalHandler() func() {
 	done := make(chan struct{})
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("signal handler recovered from panic", "panic", r)
+			}
+		}()
 		for {
 			select {
 			case sig := <-sigChan:
