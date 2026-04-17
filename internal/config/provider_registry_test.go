@@ -5,8 +5,8 @@ import (
 )
 
 func TestGetProvider(t *testing.T) {
-	// All 7 providers must be findable
-	for _, name := range []string{"gemini", "anthropic", "glm", "deepseek", "minimax", "kimi", "ollama"} {
+	// All 6 providers must be findable
+	for _, name := range []string{"anthropic", "glm", "deepseek", "minimax", "kimi", "ollama"} {
 		p := GetProvider(name)
 		if p == nil {
 			t.Errorf("GetProvider(%q) = nil, want non-nil", name)
@@ -24,19 +24,15 @@ func TestGetProvider(t *testing.T) {
 }
 
 func TestProviderCount(t *testing.T) {
-	if len(Providers) != 7 {
-		t.Errorf("len(Providers) = %d, want 7", len(Providers))
+	if len(Providers) != 6 {
+		t.Errorf("len(Providers) = %d, want 6", len(Providers))
 	}
 }
 
 func TestProviderNames(t *testing.T) {
 	names := ProviderNames()
-	if len(names) != 7 {
-		t.Errorf("len(ProviderNames) = %d, want 7", len(names))
-	}
-	// First should be gemini, last should be ollama (ordered)
-	if names[0] != "gemini" {
-		t.Errorf("first provider = %q, want gemini", names[0])
+	if len(names) != 6 {
+		t.Errorf("len(ProviderNames) = %d, want 6", len(names))
 	}
 	if names[len(names)-1] != "ollama" {
 		t.Errorf("last provider = %q, want ollama", names[len(names)-1])
@@ -51,8 +47,8 @@ func TestKeyProviderNames(t *testing.T) {
 			t.Errorf("KeyProviderNames should not contain %q", name)
 		}
 	}
-	if len(names) != 6 {
-		t.Errorf("len(KeyProviderNames) = %d, want 6", len(names))
+	if len(names) != 5 {
+		t.Errorf("len(KeyProviderNames) = %d, want 5", len(names))
 	}
 }
 
@@ -61,8 +57,8 @@ func TestAllProviderNames(t *testing.T) {
 	if names[len(names)-1] != "all" {
 		t.Errorf("AllProviderNames last = %q, want all", names[len(names)-1])
 	}
-	if len(names) != 8 { // 7 providers + "all"
-		t.Errorf("len(AllProviderNames) = %d, want 8", len(names))
+	if len(names) != 7 { // 6 providers + "all"
+		t.Errorf("len(AllProviderNames) = %d, want 7", len(names))
 	}
 }
 
@@ -71,10 +67,6 @@ func TestDetectProviderFromModel(t *testing.T) {
 		model string
 		want  string
 	}{
-		// Gemini models
-		{"gemini-3-flash-preview", "gemini"},
-		{"gemini-2.5-pro", "gemini"},
-		{"models/gemini-3-pro", "gemini"}, // models/ prefix
 		// Anthropic
 		{"claude-sonnet-4-5-20250929", "anthropic"},
 		{"claude-opus-4-6", "anthropic"},
@@ -96,12 +88,11 @@ func TestDetectProviderFromModel(t *testing.T) {
 		{"mistral", "ollama"},
 		{"phi4", "ollama"},
 		// Case insensitive
-		{"GEMINI-3-flash", "gemini"},
 		{"Claude-Opus-4-6", "anthropic"},
-		// Empty -> default gemini
-		{"", "gemini"},
-		// Unknown -> default gemini
-		{"some-unknown-model", "gemini"},
+		// Empty -> default glm
+		{"", "glm"},
+		// Unknown -> default glm
+		{"some-unknown-model", "glm"},
 	}
 
 	for _, tt := range tests {
@@ -126,18 +117,13 @@ func TestAnyProviderHasKey(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "gemini key",
-			api:  APIConfig{GeminiKey: "key"},
+			name: "glm key",
+			api:  APIConfig{GLMKey: "key"},
 			want: true,
 		},
 		{
 			name: "legacy API key",
 			api:  APIConfig{APIKey: "legacy"},
-			want: true,
-		},
-		{
-			name: "gemini OAuth",
-			api:  APIConfig{GeminiOAuth: &OAuthTokenConfig{RefreshToken: "tok"}},
 			want: true,
 		},
 		{
@@ -159,7 +145,6 @@ func TestAnyProviderHasKey(t *testing.T) {
 
 func TestProviderDefaultModels(t *testing.T) {
 	expected := map[string]string{
-		"gemini":    "gemini-3-flash-preview",
 		"anthropic": "claude-sonnet-4-5-20250929",
 		"glm":       "glm-5.1",
 		"deepseek":  "deepseek-chat",
@@ -190,15 +175,15 @@ func TestProviderFlags(t *testing.T) {
 		t.Error("ollama should not have HasOAuth")
 	}
 
-	// Gemini: not KeyOptional, HasOAuth, UsesLegacyKey
-	gem := GetProvider("gemini")
-	if gem.KeyOptional {
-		t.Error("gemini should not be KeyOptional")
+	// GLM: not KeyOptional, no OAuth, UsesLegacyKey
+	gm := GetProvider("glm")
+	if gm.KeyOptional {
+		t.Error("glm should not be KeyOptional")
 	}
-	if !gem.HasOAuth {
-		t.Error("gemini should have HasOAuth")
+	if gm.HasOAuth {
+		t.Error("glm should not have HasOAuth (removed in v0.65.0)")
 	}
-	if !gem.UsesLegacyKey {
-		t.Error("gemini should use legacy key")
+	if !gm.UsesLegacyKey {
+		t.Error("glm should use legacy key")
 	}
 }

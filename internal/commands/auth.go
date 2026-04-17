@@ -3,12 +3,8 @@ package commands
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"runtime"
 	"strings"
-	"time"
 
-	"gokin/internal/auth"
 	"gokin/internal/config"
 )
 
@@ -133,7 +129,7 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 		}
 		status := "not configured"
 		if p.HasOAuth && cfg.API.HasOAuthToken(p.Name) {
-			status = getOAuthStatus(cfg, p.Name)
+			status = "OAuth (configured)"
 		} else if key := p.GetKey(&cfg.API); key != "" {
 			status = "configured " + maskKey(key)
 		} else if p.UsesLegacyKey && cfg.API.APIKey != "" && activeProvider == p.Name {
@@ -160,14 +156,6 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 	sb.WriteString("  /model                 - Switch model\n")
 
 	return sb.String()
-}
-
-// getOAuthStatus returns the OAuth status display string for a provider.
-func getOAuthStatus(cfg *config.Config, provider string) string {
-	if provider == "gemini" && cfg.API.GeminiOAuth != nil {
-		return fmt.Sprintf("OAuth (%s)", cfg.API.GeminiOAuth.Email)
-	}
-	return "OAuth (configured)"
 }
 
 // maskKey masks an API key for display (shows first 4 and last 4 chars).
@@ -226,13 +214,9 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		for _, p := range config.Providers {
 			p.SetKey(&cfg.API, "")
 		}
-		cfg.API.GeminiOAuth = nil
 		cfg.API.APIKey = ""
 	} else if p := config.GetProvider(target); p != nil {
 		p.SetKey(&cfg.API, "")
-		if p.HasOAuth && target == "gemini" {
-			cfg.API.GeminiOAuth = nil
-		}
 		if currentProvider == target {
 			cfg.API.APIKey = ""
 		}
@@ -372,7 +356,7 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 
 			status := "not configured"
 			if p.HasOAuth && cfg.API.HasOAuthToken(p.Name) {
-				status = getOAuthStatus(cfg, p.Name)
+				status = "OAuth (configured)"
 			} else if key := p.GetKey(&cfg.API); key != "" {
 				status = "✓ ready"
 			} else if p.UsesLegacyKey && cfg.API.APIKey != "" && p.Name == currentProvider {
@@ -466,11 +450,7 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 		status := "not set"
 		if p.HasOAuth && cfg.API.HasOAuthToken(p.Name) {
-			if p.Name == "gemini" && cfg.API.GeminiOAuth != nil {
-				status = fmt.Sprintf("OAuth (%s)", cfg.API.GeminiOAuth.Email)
-			} else {
-				status = "OAuth (configured)"
-			}
+			status = "OAuth (configured)"
 		} else if key := p.GetKey(&cfg.API); key != "" {
 			status = maskKey(key)
 		} else if p.UsesLegacyKey && cfg.API.APIKey != "" && provider == p.Name {
@@ -487,260 +467,6 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	return sb.String(), nil
-}
-
-// OAuthLoginCommand handles /oauth-login for Google Account authentication
-type OAuthLoginCommand struct{}
-
-func (c *OAuthLoginCommand) Name() string { return "oauth-login" }
-func (c *OAuthLoginCommand) Description() string {
-	return "Login via OAuth (Gemini or OpenAI)"
-}
-func (c *OAuthLoginCommand) Usage() string {
-	return `/oauth-login           - Show available OAuth providers
-/oauth-login gemini   - Login via Google account (Gemini subscription)
-/oauth-login openai   - Login via ChatGPT account (ChatGPT subscription)`
-}
-func (c *OAuthLoginCommand) GetMetadata() CommandMetadata {
-	return CommandMetadata{
-		Category: CategoryAuthSetup,
-		Icon:     "key",
-		Priority: 5,
-		HasArgs:  true,
-		ArgHint:  "[gemini|openai]",
-	}
-}
-
-func (c *OAuthLoginCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
-	cfg := app.GetConfig()
-	if cfg == nil {
-		return "Failed to get configuration.", nil
-	}
-
-	// Determine provider
-	provider := ""
-	if len(args) > 0 {
-		provider = strings.ToLower(args[0])
-	}
-
-	switch provider {
-	case "gemini":
-		return c.executeGeminiOAuth(ctx, cfg, app)
-	default:
-		return "OAuth Login\n\nAvailable providers:\n" +
-			"  /oauth-login gemini   - Login via Google account (Gemini subscription)\n", nil
-	}
-}
-
-func (c *OAuthLoginCommand) executeGeminiOAuth(ctx context.Context, cfg *config.Config, app AppInterface) (string, error) {
-	if cfg.API.HasOAuthToken("gemini") {
-		return fmt.Sprintf("Already logged in via OAuth as %s.\n\nUse /oauth-logout gemini to sign out first.", cfg.API.GeminiOAuth.Email), nil
-	}
-
-	candidatePorts := []int{
-		auth.GeminiOAuthCallbackPort,
-		auth.GeminiOAuthCallbackPort + 1,
-		auth.GeminiOAuthCallbackPort + 2,
-	}
-
-	var manager *auth.OAuthManager
-	var server *auth.CallbackServer
-	var authURL string
-	var callbackPort int
-	var startErr error
-	var err error
-
-	for _, port := range candidatePorts {
-		manager = auth.NewGeminiOAuthManagerWithPort(port)
-		authURL, err = manager.GenerateAuthURL()
-		if err != nil {
-			return "", fmt.Errorf("failed to generate auth URL: %w", err)
-		}
-
-		server = auth.NewCallbackServer(port, manager.GetState())
-		if startErr = server.Start(); startErr == nil {
-			callbackPort = port
-			break
-		}
-	}
-
-	if startErr != nil {
-		return "", fmt.Errorf("failed to start OAuth callback server: %w", startErr)
-	}
-	defer server.Stop()
-
-	browserOpened := openBrowser(authURL)
-
-	var sb strings.Builder
-	sb.WriteString("Opening browser for Google authentication...\n\n")
-	if callbackPort != auth.GeminiOAuthCallbackPort {
-		fmt.Fprintf(&sb, "Using fallback callback port: %d\n\n", callbackPort)
-	}
-	if !browserOpened {
-		sb.WriteString("Could not open browser automatically.\n")
-		sb.WriteString("Please open this URL in your browser:\n\n")
-		sb.WriteString(authURL + "\n\n")
-	}
-	sb.WriteString("Waiting for authentication (timeout: 5 minutes)...")
-
-	code, err := server.WaitForCode(auth.OAuthCallbackTimeout)
-	if err != nil {
-		return "", fmt.Errorf("authentication failed: %w", err)
-	}
-
-	token, err := manager.ExchangeCode(ctx, code)
-	if err != nil {
-		return "", fmt.Errorf("failed to exchange code: %w", err)
-	}
-
-	cfg.API.GeminiOAuth = &config.OAuthTokenConfig{
-		AccessToken:  token.AccessToken,
-		RefreshToken: token.RefreshToken,
-		ExpiresAt:    token.ExpiresAt.Unix(),
-		Email:        token.Email,
-	}
-	cfg.API.ActiveProvider = "gemini"
-	cfg.Model.Provider = "gemini"
-	if gp := config.GetProvider("gemini"); gp != nil {
-		cfg.Model.Name = gp.DefaultModel
-	}
-
-	if err := app.ApplyConfig(cfg); err != nil {
-		return "", fmt.Errorf("failed to save config: %w", err)
-	}
-
-	email := token.Email
-	if email == "" {
-		email = "Google Account"
-	}
-
-	expiresIn := time.Until(token.ExpiresAt).Round(time.Minute)
-
-	return fmt.Sprintf(`Logged in as %s via OAuth
-
-Provider: gemini (OAuth)
-Model: %s
-Token expires in: %v
-
-Use /status to check your configuration.
-Use /oauth-logout gemini to sign out.`, email, cfg.Model.Name, expiresIn), nil
-}
-
-// OAuthLogoutCommand handles /oauth-logout
-type OAuthLogoutCommand struct{}
-
-func (c *OAuthLogoutCommand) Name() string        { return "oauth-logout" }
-func (c *OAuthLogoutCommand) Description() string { return "Remove OAuth credentials" }
-func (c *OAuthLogoutCommand) Usage() string {
-	return `/oauth-logout           - Show OAuth logout options
-/oauth-logout gemini   - Remove Gemini OAuth credentials
-/oauth-logout openai   - Remove OpenAI OAuth credentials`
-}
-func (c *OAuthLogoutCommand) GetMetadata() CommandMetadata {
-	return CommandMetadata{
-		Category: CategoryAuthSetup,
-		Icon:     "logout",
-		Priority: 15,
-		HasArgs:  true,
-		ArgHint:  "[gemini]",
-	}
-}
-
-func (c *OAuthLogoutCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
-	cfg := app.GetConfig()
-	if cfg == nil {
-		return "Failed to get configuration.", nil
-	}
-
-	provider := ""
-	if len(args) > 0 {
-		provider = strings.ToLower(args[0])
-	}
-
-	if provider == "gemini" {
-		return c.logoutGemini(cfg, app)
-	}
-
-	var sb strings.Builder
-	sb.WriteString("OAuth Logout\n\n")
-	if cfg.API.HasOAuthToken("gemini") {
-		email := cfg.API.GeminiOAuth.Email
-		if email == "" {
-			email = "Google Account"
-		}
-		fmt.Fprintf(&sb, "  /oauth-logout gemini  - Sign out from %s\n", email)
-	} else {
-		sb.WriteString("No OAuth credentials found.\n")
-	}
-	return sb.String(), nil
-}
-
-func (c *OAuthLogoutCommand) logoutGemini(cfg *config.Config, app AppInterface) (string, error) {
-	if !cfg.API.HasOAuthToken("gemini") {
-		return "No Gemini OAuth credentials found.", nil
-	}
-
-	email := cfg.API.GeminiOAuth.Email
-	cfg.API.GeminiOAuth = nil
-
-	applyFailed := false
-	if err := app.ApplyConfig(cfg); err != nil {
-		applyFailed = true
-		if saveErr := cfg.Save(); saveErr != nil {
-			return "", fmt.Errorf("failed to save config: %w", saveErr)
-		}
-	}
-
-	var sb strings.Builder
-	if email != "" {
-		fmt.Fprintf(&sb, "Logged out from %s (Gemini)\n\n", email)
-	} else {
-		sb.WriteString("Gemini OAuth credentials removed.\n\n")
-	}
-	if applyFailed {
-		sb.WriteString("⚠ Client could not be re-initialized (no valid credentials remain).\n")
-	}
-
-	if cfg.API.GeminiKey != "" {
-		sb.WriteString("Falling back to API key authentication.\n")
-	} else {
-		sb.WriteString("No API key configured.\n")
-		sb.WriteString("Use /login gemini <key> to set an API key.\n")
-		sb.WriteString("Or use /oauth-login gemini to sign in again.")
-	}
-
-	return sb.String(), nil
-}
-
-// openBrowser opens a URL in the default browser
-func openBrowser(url string) bool {
-	var cmd *exec.Cmd
-
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		// Try xdg-open first, then common browsers
-		if _, err := exec.LookPath("xdg-open"); err == nil {
-			cmd = exec.Command("xdg-open", url)
-		} else if _, err := exec.LookPath("google-chrome"); err == nil {
-			cmd = exec.Command("google-chrome", url)
-		} else if _, err := exec.LookPath("firefox"); err == nil {
-			cmd = exec.Command("firefox", url)
-		} else {
-			return false
-		}
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
-	default:
-		return false
-	}
-
-	if err := cmd.Start(); err != nil {
-		return false
-	}
-	go cmd.Wait() // prevent zombie process
-	return true
 }
 
 func padSpaces(n int) string {

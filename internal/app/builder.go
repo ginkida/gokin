@@ -343,10 +343,10 @@ func (b *Builder) initClient() error {
 	}
 
 	// Debug: log which client was created
-	if _, ok := b.geminiClient.(*client.GeminiClient); ok {
-		logging.Debug("client created", "type", "Gemini", "model", b.cfg.Model.Name)
-	} else if _, ok := b.geminiClient.(*client.AnthropicClient); ok {
-		logging.Debug("client created", "type", "Anthropic (GLM-4.7)", "model", b.cfg.Model.Name)
+	if _, ok := b.geminiClient.(*client.AnthropicClient); ok {
+		logging.Debug("client created", "type", "Anthropic (GLM/Kimi/MiniMax)", "model", b.cfg.Model.Name)
+	} else if _, ok := b.geminiClient.(*client.OllamaClient); ok {
+		logging.Debug("client created", "type", "Ollama", "model", b.cfg.Model.Name)
 	} else {
 		logging.Debug("client created", "type", "Unknown", "model", b.cfg.Model.Name)
 	}

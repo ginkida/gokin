@@ -12,9 +12,9 @@ func TestApplyPreset(t *testing.T) {
 		wantProvider string
 	}{
 		{"coding", true, "glm-5", "glm"},
-		{"fast", true, "gemini-3-flash-preview", "gemini"},
-		{"balanced", true, "gemini-3-flash-preview", "gemini"},
-		{"creative", true, "gemini-3-pro-preview", "gemini"},
+		{"fast", true, "glm-5", "glm"},
+		{"balanced", true, "glm-5", "glm"},
+		{"creative", true, "MiniMax-M2.7", "minimax"},
 		{"anthropic", true, "claude-sonnet-4-5-20250929", "anthropic"},
 		{"ollama", true, "llama3.2", "ollama"},
 		{"kimi", true, "kimi-k2.5", "kimi"},
@@ -46,7 +46,6 @@ func TestApplyPresetTemperature(t *testing.T) {
 	// Verify specific temperature values
 	cases := map[string]float32{
 		"coding":  0.7,
-		"fast":    1.0,
 		"kimi":    0.6,
 		"ollama":  0.7,
 		"minimax": 0.7,
@@ -63,7 +62,7 @@ func TestApplyPresetTemperature(t *testing.T) {
 func TestApplyPresetMaxTokens(t *testing.T) {
 	cases := map[string]int32{
 		"coding":    131072,
-		"fast":      8192,
+		"fast":      131072,
 		"anthropic": 16384,
 		"kimi":      32768,
 		"ollama":    4096,
@@ -94,8 +93,8 @@ func TestIsValidPreset(t *testing.T) {
 
 func TestListPresets(t *testing.T) {
 	presets := ListPresets()
-	if len(presets) != 13 {
-		t.Errorf("len(ListPresets) = %d, want 13", len(presets))
+	if len(presets) != 10 {
+		t.Errorf("len(ListPresets) = %d, want 10", len(presets))
 	}
 
 	// All returned presets should be valid
@@ -107,15 +106,14 @@ func TestListPresets(t *testing.T) {
 }
 
 func TestPresetCount(t *testing.T) {
-	if len(ModelPresets) != 13 {
-		t.Errorf("len(ModelPresets) = %d, want 13", len(ModelPresets))
+	if len(ModelPresets) != 10 {
+		t.Errorf("len(ModelPresets) = %d, want 10", len(ModelPresets))
 	}
 }
 
 func TestProviderDefaultPreset(t *testing.T) {
 	cases := map[string]string{
 		"glm":       "glm",
-		"gemini":    "gemini",
 		"anthropic": "anthropic",
 		"deepseek":  "deepseek",
 		"kimi":      "kimi",
@@ -139,12 +137,12 @@ func TestLooksLikeDefaultModelConfig(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"empty name, zero tokens", &ModelConfig{}, true},
-		{"empty name, default tokens", &ModelConfig{MaxOutputTokens: 8192}, true},
-		{"gemini default name, default tokens", &ModelConfig{Name: "gemini-3-flash-preview", MaxOutputTokens: 8192}, true},
-		{"gemini default name, zero tokens", &ModelConfig{Name: "gemini-3-flash-preview"}, true},
-		{"custom name blocks auto-apply", &ModelConfig{Name: "glm-4.5", MaxOutputTokens: 8192}, false},
-		{"custom tokens blocks auto-apply", &ModelConfig{Name: "gemini-3-flash-preview", MaxOutputTokens: 131072}, false},
-		{"both custom blocks auto-apply", &ModelConfig{Name: "glm-5", MaxOutputTokens: 131072}, false},
+		{"empty name, default tokens", &ModelConfig{MaxOutputTokens: 131072}, true},
+		{"glm default name, default tokens", &ModelConfig{Name: "glm-5", MaxOutputTokens: 131072}, true},
+		{"glm default name, zero tokens", &ModelConfig{Name: "glm-5"}, true},
+		{"custom name blocks auto-apply", &ModelConfig{Name: "glm-4.5", MaxOutputTokens: 131072}, false},
+		{"custom tokens blocks auto-apply", &ModelConfig{Name: "glm-5", MaxOutputTokens: 16384}, false},
+		{"anthropic custom blocks auto-apply", &ModelConfig{Name: "claude-sonnet-4-5", MaxOutputTokens: 131072}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,20 +154,16 @@ func TestLooksLikeDefaultModelConfig(t *testing.T) {
 }
 
 func TestNormalizeConfig_AutoApplyProviderPreset(t *testing.T) {
-	// GLM provider set, no preset, defaults untouched → preset auto-applied
+	// Explicit preset wins over auto-apply heuristic
 	cfg := &Config{Model: ModelConfig{
-		Provider:        "glm",
-		Name:            "gemini-3-flash-preview",
-		MaxOutputTokens: 8192,
+		Provider: "glm",
+		Preset:   "anthropic",
 	}}
 	if err := NormalizeConfig(cfg); err != nil {
 		t.Fatalf("NormalizeConfig: %v", err)
 	}
-	if cfg.Model.Name != "glm-5" {
-		t.Errorf("Name = %q, want glm-5 (auto-applied)", cfg.Model.Name)
-	}
-	if cfg.Model.MaxOutputTokens != 131072 {
-		t.Errorf("MaxOutputTokens = %d, want 131072 (auto-applied)", cfg.Model.MaxOutputTokens)
+	if cfg.Model.Name != "claude-sonnet-4-5-20250929" {
+		t.Errorf("Name = %q, want claude-sonnet (explicit preset)", cfg.Model.Name)
 	}
 
 	// User customised Name → leave alone (don't override intent)
@@ -183,20 +177,5 @@ func TestNormalizeConfig_AutoApplyProviderPreset(t *testing.T) {
 	}
 	if cfg.Model.Name != "glm-4.5" {
 		t.Errorf("Name = %q, want glm-4.5 preserved", cfg.Model.Name)
-	}
-	if cfg.Model.MaxOutputTokens != 8192 {
-		t.Errorf("MaxOutputTokens = %d, want 8192 preserved", cfg.Model.MaxOutputTokens)
-	}
-
-	// Explicit preset wins over auto-apply heuristic
-	cfg = &Config{Model: ModelConfig{
-		Provider: "glm",
-		Preset:   "anthropic",
-	}}
-	if err := NormalizeConfig(cfg); err != nil {
-		t.Fatalf("NormalizeConfig: %v", err)
-	}
-	if cfg.Model.Name != "claude-sonnet-4-5-20250929" {
-		t.Errorf("Name = %q, want claude-sonnet (explicit preset)", cfg.Model.Name)
 	}
 }

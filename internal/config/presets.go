@@ -17,46 +17,28 @@ var ModelPresets = map[string]ModelPreset{
 		MaxOutputTokens: 131072,
 	},
 	"fast": {
-		Provider:        "gemini",
-		Name:            "gemini-3-flash-preview",
-		Temperature:     1.0,
-		MaxOutputTokens: 8192,
+		Provider:        "glm",
+		Name:            "glm-5",
+		Temperature:     0.7,
+		MaxOutputTokens: 131072,
 	},
 	"balanced": {
-		Provider:        "gemini",
-		Name:            "gemini-3-flash-preview",
-		Temperature:     1.0,
-		MaxOutputTokens: 8192,
+		Provider:        "glm",
+		Name:            "glm-5",
+		Temperature:     0.7,
+		MaxOutputTokens: 131072,
 	},
 	"creative": {
-		Provider:        "gemini",
-		Name:            "gemini-3-pro-preview",
-		Temperature:     1.0,
-		MaxOutputTokens: 8192,
-	},
-	"gemini-flash": {
-		Provider:        "gemini",
-		Name:            "gemini-3-flash-preview",
-		Temperature:     1.0,
-		MaxOutputTokens: 8192,
-	},
-	"gemini-pro": {
-		Provider:        "gemini",
-		Name:            "gemini-3-pro-preview",
-		Temperature:     1.0,
-		MaxOutputTokens: 8192,
+		Provider:        "minimax",
+		Name:            "MiniMax-M2.7",
+		Temperature:     0.7,
+		MaxOutputTokens: 16384,
 	},
 	"glm": {
 		Provider:        "glm",
 		Name:            "glm-5",
 		Temperature:     0.7,
 		MaxOutputTokens: 131072,
-	},
-	"gemini": {
-		Provider:        "gemini",
-		Name:            "gemini-3-flash-preview",
-		Temperature:     1.0,
-		MaxOutputTokens: 8192,
 	},
 	"deepseek": {
 		Provider:        "deepseek",
@@ -126,21 +108,21 @@ func ListPresets() []string {
 // provider-appropriate output cap and model name.
 func providerDefaultPreset(provider string) string {
 	switch provider {
-	case "glm", "gemini", "anthropic", "deepseek", "kimi", "minimax", "ollama":
+	case "glm", "anthropic", "deepseek", "kimi", "minimax", "ollama":
 		return provider
 	}
 	return ""
 }
 
 // looksLikeDefaultModelConfig reports whether a ModelConfig still holds the
-// zero-preset defaults (gemini-3-flash-preview / 8192 output). Used to decide
-// whether auto-applying a provider preset is safe: if the user customised
-// Name or MaxOutputTokens themselves, we leave their values alone.
+// zero-preset defaults (glm-5 / 131072 output). Used to decide whether
+// auto-applying a provider preset is safe: if the user customised Name or
+// MaxOutputTokens themselves, we leave their values alone.
 func looksLikeDefaultModelConfig(m *ModelConfig) bool {
 	if m == nil {
 		return false
 	}
-	defaultName := m.Name == "" || m.Name == "gemini-3-flash-preview"
-	defaultMax := m.MaxOutputTokens == 0 || m.MaxOutputTokens == 8192
+	defaultName := m.Name == "" || m.Name == "glm-5"
+	defaultMax := m.MaxOutputTokens == 0 || m.MaxOutputTokens == 131072
 	return defaultName && defaultMax
 }

@@ -36,7 +36,6 @@ type APIConfig struct {
 	APIKey string `yaml:"api_key,omitempty"`
 
 	// Separate keys for each provider
-	GeminiKey    string `yaml:"gemini_key,omitempty"`
 	AnthropicKey string `yaml:"anthropic_key,omitempty"`
 	GLMKey       string `yaml:"glm_key,omitempty"`
 	DeepSeekKey  string `yaml:"deepseek_key,omitempty"`
@@ -44,36 +43,23 @@ type APIConfig struct {
 	KimiKey      string `yaml:"kimi_key,omitempty"`
 	OllamaKey    string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
 
-	// OAuth tokens for Gemini (via Google Account)
-	GeminiOAuth *OAuthTokenConfig `yaml:"gemini_oauth,omitempty"`
-
 	// Ollama server URL (default: http://localhost:11434)
 	OllamaBaseURL string `yaml:"ollama_base_url,omitempty"`
 
-	// Active provider: gemini, glm, ollama (default: gemini)
+	// Active provider: glm, anthropic, minimax, kimi, deepseek, ollama (default: glm)
 	ActiveProvider string `yaml:"active_provider"`
 
-	// Backend: gemini, glm, ollama, auto (default: gemini) - legacy, use ActiveProvider
+	// Backend: legacy alias for ActiveProvider
 	Backend string `yaml:"backend,omitempty"`
 
 	// Retry configuration for API calls
 	Retry RetryConfig `yaml:"retry"`
 }
 
-// OAuthTokenConfig stores OAuth tokens in config
-type OAuthTokenConfig struct {
-	AccessToken  string `yaml:"access_token"`
-	RefreshToken string `yaml:"refresh_token"`
-	ExpiresAt    int64  `yaml:"expires_at"` // Unix timestamp
-	Email        string `yaml:"email,omitempty"`
-	ProjectID    string `yaml:"project_id,omitempty"` // Code Assist project ID (Gemini)
-}
-
-// HasOAuthToken checks if OAuth is configured for a provider
+// HasOAuthToken is retained as a stub: OAuth flows were removed in v0.65.0,
+// so no provider currently has OAuth credentials. Kept so call sites in the
+// provider registry still compile.
 func (c *APIConfig) HasOAuthToken(provider string) bool {
-	if provider == "gemini" {
-		return c.GeminiOAuth != nil && c.GeminiOAuth.RefreshToken != ""
-	}
 	return false
 }
 
@@ -101,7 +87,7 @@ func (c *APIConfig) GetActiveProvider() string {
 	if c.Backend != "" {
 		return c.Backend
 	}
-	return "gemini"
+	return "glm"
 }
 
 // HasProvider checks if a provider has an API key configured.

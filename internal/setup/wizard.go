@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"gokin/internal/auth"
 	"gokin/internal/config"
 	"gokin/internal/security"
 
@@ -62,30 +61,10 @@ type setupChoice struct {
 }
 
 func buildSetupChoices() []setupChoice {
-	choices := []setupChoice{
-		{
-			Action: "oauth-gemini",
-			Title:  "Gemini (Google Account)",
-			Lines: []string{
-				"Use your Gemini subscription",
-				"Login with Google Account (OAuth)",
-				"No API key needed",
-			},
-		},
-	}
+	var choices []setupChoice
 
 	for _, p := range config.Providers {
 		switch p.Name {
-		case "gemini":
-			choices = append(choices, setupChoice{
-				Action: "api:" + p.Name,
-				Title:  "Gemini (API Key)",
-				Lines: []string{
-					"Google's Gemini models",
-					"Free tier available",
-					"Get key at: " + p.SetupKeyURL,
-				},
-			})
 		case "glm":
 			choices = append(choices, setupChoice{
 				Action: "api:" + p.Name,
@@ -279,8 +258,6 @@ func RunSetupWizard() error {
 
 		selected := choices[idx-1]
 		switch {
-		case selected.Action == "oauth-gemini":
-			return setupGeminiOAuth()
 		case selected.Action == "ollama":
 			return setupOllama(reader)
 		case strings.HasPrefix(selected.Action, "api:"):
@@ -377,133 +354,10 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 	return nil
 }
 
-func setupGeminiOAuth() error {
-	fmt.Printf("\n%s─── Gemini OAuth Setup ───%s\n", colorCyan, colorReset)
-	fmt.Printf("\n%sThis will open your browser for Google authentication.%s\n", colorYellow, colorReset)
-	fmt.Printf("%sYou'll use your Gemini subscription (not API credits).%s\n\n", colorYellow, colorReset)
-
-	// Start callback server with port fallback — create manager per port
-	// so redirect_uri matches the actual listening port
-	candidatePorts := []int{auth.GeminiOAuthCallbackPort, auth.GeminiOAuthCallbackPort + 1, auth.GeminiOAuthCallbackPort + 2}
-	var manager *auth.OAuthManager
-	var authURL string
-	var server *auth.CallbackServer
-	var serverErr error
-	for _, port := range candidatePorts {
-		manager = auth.NewGeminiOAuthManagerWithPort(port)
-		var err error
-		authURL, err = manager.GenerateAuthURL()
-		if err != nil {
-			return fmt.Errorf("failed to generate auth URL: %w", err)
-		}
-		server = auth.NewCallbackServer(port, manager.GetState())
-		if serverErr = server.Start(); serverErr == nil {
-			break
-		}
-	}
-	if serverErr != nil {
-		return fmt.Errorf("failed to start callback server (tried ports %v): %w", candidatePorts, serverErr)
-	}
-	defer server.Stop()
-
-	// Try to open browser
-	browserOpened := openBrowserForOAuth(authURL)
-
-	if browserOpened {
-		fmt.Printf("%sOpening browser for authentication...%s\n", colorGreen, colorReset)
-	} else {
-		fmt.Printf("%sCould not open browser automatically.%s\n", colorYellow, colorReset)
-		fmt.Printf("%sPlease open this URL in your browser:%s\n\n", colorYellow, colorReset)
-		fmt.Printf("  %s%s%s\n\n", colorBold, authURL, colorReset)
-	}
-
-	fmt.Printf("%sWaiting for authentication (timeout: 5 minutes)...%s\n", colorYellow, colorReset)
-
-	// Wait for callback with spinner
-	codeChan := make(chan string, 1)
-	errChan := make(chan error, 1)
-
-	go func() {
-		code, err := server.WaitForCode(auth.OAuthCallbackTimeout)
-		if err != nil {
-			errChan <- err
-		} else {
-			codeChan <- code
-		}
-	}()
-
-	// Show spinner while waiting
-	var code string
-	select {
-	case code = <-codeChan:
-		// Got code
-	case err := <-errChan:
-		return fmt.Errorf("authentication failed: %w", err)
-	}
-
-	fmt.Printf("\n%s✓ Authentication successful!%s\n", colorGreen, colorReset)
-
-	// Exchange code for tokens
-	done := make(chan bool, 1)
-	time.AfterFunc(500*time.Millisecond, func() { done <- true })
-	spin("Exchanging authorization code...", done)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	token, err := manager.ExchangeCode(ctx, code)
-	if err != nil {
-		return fmt.Errorf("failed to exchange code: %w", err)
-	}
-
-	// Save to config
-	configPath, err := getConfigPath()
-	if err != nil {
-		return fmt.Errorf("failed to get config path: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	// Build config with OAuth
-	// Note: Code Assist API supports: gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash-preview, gemini-3-pro-preview
-	cfg := map[string]any{
-		"api": map[string]any{
-			"active_provider": "gemini",
-			"gemini_oauth": map[string]any{
-				"access_token":  token.AccessToken,
-				"refresh_token": token.RefreshToken,
-				"expires_at":    token.ExpiresAt.Unix(),
-				"email":         token.Email,
-			},
-		},
-		"model": map[string]any{
-			"provider": "gemini",
-			"name":     "gemini-2.5-flash",
-		},
-	}
-	content, marshalErr := yaml.Marshal(cfg)
-	if marshalErr != nil {
-		return fmt.Errorf("failed to marshal config: %w", marshalErr)
-	}
-	if err := os.WriteFile(configPath, content, 0600); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
-	}
-
-	email := token.Email
-	if email == "" {
-		email = "Google Account"
-	}
-
-	fmt.Printf("\n%s✓ Logged in as %s via OAuth!%s\n", colorGreen, email, colorReset)
-	fmt.Printf("  %sConfig:%s %s\n", colorYellow, colorReset, configPath)
-	fmt.Printf("  %sModel:%s gemini-2.5-flash\n", colorYellow, colorReset)
-
-	// Show next steps
-	showNextSteps()
-
-	return nil
+// setupGeminiOAuthDeprecated is retained only as a stub so references in old
+// docs don't break; callers have already been removed from the wizard flow.
+func setupGeminiOAuthDeprecated() error {
+	return fmt.Errorf("Gemini OAuth was removed; use /login gemini with an API key if needed")
 }
 
 // openBrowserForOAuth opens a URL in the default browser

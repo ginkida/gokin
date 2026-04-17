@@ -9,25 +9,13 @@ import (
 	"gokin/internal/config"
 )
 
-// TestBuildSetupChoices verifies that setup choices are built correctly
+// TestBuildSetupChoices verifies that setup choices are built correctly.
+// OAuth flows were removed in v0.65.0; only API-key / Ollama choices remain.
 func TestBuildSetupChoices(t *testing.T) {
 	choices := buildSetupChoices()
 
 	if len(choices) == 0 {
 		t.Error("expected at least one setup choice")
-	}
-
-	// Check that we have the expected base choices
-	foundGeminiOAuth := false
-
-	for _, choice := range choices {
-		if choice.Action == "oauth-gemini" {
-			foundGeminiOAuth = true
-		}
-	}
-
-	if !foundGeminiOAuth {
-		t.Error("expected to find oauth-gemini choice")
 	}
 }
 
@@ -333,12 +321,12 @@ func TestProvidersExist(t *testing.T) {
 // TestGetProvider verifies provider lookup
 func TestGetProvider(t *testing.T) {
 	// Test with known provider
-	provider := config.GetProvider("gemini")
+	provider := config.GetProvider("glm")
 	if provider == nil {
-		t.Error("expected to find gemini provider")
+		t.Error("expected to find glm provider")
 	}
-	if provider.Name != "gemini" {
-		t.Errorf("provider.Name = %q, want %q", provider.Name, "gemini")
+	if provider.Name != "glm" {
+		t.Errorf("provider.Name = %q, want %q", provider.Name, "glm")
 	}
 
 	// Test with nil for non-existent provider

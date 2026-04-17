@@ -100,8 +100,6 @@ func NewHandler() *Handler {
 	h.Register(&ConfigCommand{})
 	h.Register(&LoginCommand{})
 	h.Register(&LogoutCommand{})
-	h.Register(&OAuthLoginCommand{})
-	h.Register(&OAuthLogoutCommand{})
 	h.Register(&ProviderCommand{})
 	h.Register(&StatusCommand{})
 	h.Register(&ModelCommand{})

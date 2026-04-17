@@ -167,28 +167,6 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 		return newMiniMaxClient(cfg, modelID)
 	case "kimi":
 		return newKimiClient(cfg, modelID)
-	case "gemini":
-		// Check OAuth first
-		if cfg.API.HasOAuthToken("gemini") {
-			logging.Debug("using Gemini OAuth client", "email", cfg.API.GeminiOAuth.Email)
-			oauthClient, err := NewGeminiOAuthClient(ctx, cfg)
-			if err == nil {
-				return oauthClient, nil
-			}
-
-			logging.Warn("failed to initialize Gemini OAuth client, falling back to API key if available", "error", err)
-
-			// Graceful fallback: if OAuth is stale/broken but API key exists, continue with API key client.
-			apiClient, keyErr := NewGeminiClient(ctx, cfg)
-			if keyErr == nil {
-				return apiClient, nil
-			}
-
-			return nil, fmt.Errorf("gemini auth failed (oauth error: %v; api-key fallback error: %v)", err, keyErr)
-		}
-		return NewGeminiClient(ctx, cfg)
-	case "anthropic":
-		return newAnthropicNativeClient(cfg, modelID)
 	case "ollama":
 		return newOllamaClient(cfg, modelID)
 	default:

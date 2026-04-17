@@ -12,24 +12,6 @@ func TestHasOAuthToken(t *testing.T) {
 		want     bool
 	}{
 		{
-			name:     "gemini with valid OAuth",
-			api:      APIConfig{GeminiOAuth: &OAuthTokenConfig{RefreshToken: "token123"}},
-			provider: "gemini",
-			want:     true,
-		},
-		{
-			name:     "gemini with nil OAuth",
-			api:      APIConfig{},
-			provider: "gemini",
-			want:     false,
-		},
-		{
-			name:     "gemini with empty refresh token",
-			api:      APIConfig{GeminiOAuth: &OAuthTokenConfig{RefreshToken: ""}},
-			provider: "gemini",
-			want:     false,
-		},
-		{
 			name:     "unknown provider",
 			api:      APIConfig{},
 			provider: "unknown",
@@ -70,9 +52,9 @@ func TestGetActiveProvider(t *testing.T) {
 			want: "glm",
 		},
 		{
-			name: "default to gemini",
+			name: "default to glm",
 			api:  APIConfig{},
-			want: "gemini",
+			want: "glm",
 		},
 		{
 			name: "ActiveProvider takes precedence over Backend",
@@ -117,27 +99,21 @@ func TestHasProvider(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "gemini with key",
-			api:      APIConfig{GeminiKey: "AIza123"},
-			provider: "gemini",
+			name:     "glm with key",
+			api:      APIConfig{GLMKey: "glm-123"},
+			provider: "glm",
 			want:     true,
 		},
 		{
-			name:     "gemini with OAuth only",
-			api:      APIConfig{GeminiOAuth: &OAuthTokenConfig{RefreshToken: "tok"}},
-			provider: "gemini",
+			name:     "glm with legacy key and active provider match",
+			api:      APIConfig{APIKey: "legacy-key", ActiveProvider: "glm"},
+			provider: "glm",
 			want:     true,
 		},
 		{
-			name:     "gemini with legacy key and active provider match",
-			api:      APIConfig{APIKey: "legacy-key", ActiveProvider: "gemini"},
-			provider: "gemini",
-			want:     true,
-		},
-		{
-			name:     "gemini with legacy key but different active provider",
+			name:     "glm with legacy key but different active provider",
 			api:      APIConfig{APIKey: "legacy-key", ActiveProvider: "anthropic"},
-			provider: "gemini",
+			provider: "glm",
 			want:     false,
 		},
 		{
@@ -211,9 +187,9 @@ func TestSetProviderKey(t *testing.T) {
 		t.Errorf("SetProviderKey(anthropic) failed: got %q", api.AnthropicKey)
 	}
 
-	api.SetProviderKey("gemini", "AIza-new")
-	if api.GeminiKey != "AIza-new" {
-		t.Errorf("SetProviderKey(gemini) failed: got %q", api.GeminiKey)
+	api.SetProviderKey("glm", "glm-new")
+	if api.GLMKey != "glm-new" {
+		t.Errorf("SetProviderKey(glm) failed: got %q", api.GLMKey)
 	}
 
 	// Unknown provider should not panic

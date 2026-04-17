@@ -35,24 +35,6 @@ type KeyValidationDef struct {
 // Optional but recommended: add key validation endpoint and setup copy in internal/setup/wizard.go.
 var Providers = []ProviderDef{
 	{
-		Name:          "gemini",
-		DisplayName:   "Gemini",
-		DefaultModel:  "gemini-3-flash-preview",
-		EnvVars:       []string{"GOKIN_GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"},
-		UsesLegacyKey: true,
-		HasOAuth:      true,
-		GetKey:        func(api *APIConfig) string { return api.GeminiKey },
-		SetKey:        func(api *APIConfig, key string) { api.GeminiKey = key },
-		ModelPrefixes: []string{"gemini", "models/"},
-		SetupKeyURL:   "https://aistudio.google.com/apikey",
-		KeyValidation: KeyValidationDef{
-			URL:             "https://generativelanguage.googleapis.com/v1beta/models",
-			AuthMode:        "query",
-			QueryParam:      "key",
-			SuccessStatuses: []int{200},
-		},
-	},
-	{
 		Name:          "anthropic",
 		DisplayName:   "Anthropic (Claude)",
 		DefaultModel:  "claude-sonnet-4-5-20250929",
@@ -198,7 +180,7 @@ func AllProviderNames() []string {
 // by matching against each provider's ModelPrefixes.
 func DetectProviderFromModel(modelName string) string {
 	if modelName == "" {
-		return "gemini"
+		return "glm"
 	}
 	lower := strings.ToLower(modelName)
 	for _, p := range Providers {
@@ -208,7 +190,7 @@ func DetectProviderFromModel(modelName string) string {
 			}
 		}
 	}
-	return "gemini" // default
+	return "glm" // default
 }
 
 // AnyProviderHasKey returns true if any provider has a configured key or OAuth.
