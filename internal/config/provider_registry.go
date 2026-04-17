@@ -137,16 +137,6 @@ var Providers = []ProviderDef{
 		},
 	},
 	{
-		Name:          "openai",
-		DisplayName:   "OpenAI (ChatGPT)",
-		DefaultModel:  "gpt-5.4",
-		KeyOptional:   true, // Only OAuth, no API key
-		HasOAuth:      true,
-		GetKey:        func(api *APIConfig) string { return "" },
-		SetKey:        func(api *APIConfig, key string) {},
-		ModelPrefixes: []string{"gpt", "o1", "o3", "o4"},
-	},
-	{
 		Name:         "ollama",
 		DisplayName:  "Ollama (local)",
 		DefaultModel: "llama3.2",
@@ -228,5 +218,5 @@ func AnyProviderHasKey(api *APIConfig) bool {
 			return true
 		}
 	}
-	return api.APIKey != "" || api.HasOAuthToken("gemini") || api.HasOAuthToken("openai")
+	return api.APIKey != "" || api.HasOAuthToken("gemini")
 }

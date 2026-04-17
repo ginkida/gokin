@@ -5,8 +5,8 @@ import (
 )
 
 func TestGetProvider(t *testing.T) {
-	// All 8 providers must be findable
-	for _, name := range []string{"gemini", "anthropic", "glm", "deepseek", "minimax", "kimi", "openai", "ollama"} {
+	// All 7 providers must be findable
+	for _, name := range []string{"gemini", "anthropic", "glm", "deepseek", "minimax", "kimi", "ollama"} {
 		p := GetProvider(name)
 		if p == nil {
 			t.Errorf("GetProvider(%q) = nil, want non-nil", name)
@@ -24,15 +24,15 @@ func TestGetProvider(t *testing.T) {
 }
 
 func TestProviderCount(t *testing.T) {
-	if len(Providers) != 8 {
-		t.Errorf("len(Providers) = %d, want 8", len(Providers))
+	if len(Providers) != 7 {
+		t.Errorf("len(Providers) = %d, want 7", len(Providers))
 	}
 }
 
 func TestProviderNames(t *testing.T) {
 	names := ProviderNames()
-	if len(names) != 8 {
-		t.Errorf("len(ProviderNames) = %d, want 8", len(names))
+	if len(names) != 7 {
+		t.Errorf("len(ProviderNames) = %d, want 7", len(names))
 	}
 	// First should be gemini, last should be ollama (ordered)
 	if names[0] != "gemini" {
@@ -45,9 +45,9 @@ func TestProviderNames(t *testing.T) {
 
 func TestKeyProviderNames(t *testing.T) {
 	names := KeyProviderNames()
-	// Should exclude ollama and openai (both KeyOptional)
+	// Should exclude ollama (KeyOptional)
 	for _, name := range names {
-		if name == "ollama" || name == "openai" {
+		if name == "ollama" {
 			t.Errorf("KeyProviderNames should not contain %q", name)
 		}
 	}
@@ -61,8 +61,8 @@ func TestAllProviderNames(t *testing.T) {
 	if names[len(names)-1] != "all" {
 		t.Errorf("AllProviderNames last = %q, want all", names[len(names)-1])
 	}
-	if len(names) != 9 { // 8 providers + "all"
-		t.Errorf("len(AllProviderNames) = %d, want 9", len(names))
+	if len(names) != 8 { // 7 providers + "all"
+		t.Errorf("len(AllProviderNames) = %d, want 8", len(names))
 	}
 }
 
@@ -78,11 +78,6 @@ func TestDetectProviderFromModel(t *testing.T) {
 		// Anthropic
 		{"claude-sonnet-4-5-20250929", "anthropic"},
 		{"claude-opus-4-6", "anthropic"},
-		// OpenAI
-		{"gpt-5.3-codex", "openai"},
-		{"o1-preview", "openai"},
-		{"o3-mini", "openai"},
-		{"o4-mini", "openai"},
 		// GLM
 		{"glm-5", "glm"},
 		{"glm-4.7", "glm"},
@@ -103,7 +98,6 @@ func TestDetectProviderFromModel(t *testing.T) {
 		// Case insensitive
 		{"GEMINI-3-flash", "gemini"},
 		{"Claude-Opus-4-6", "anthropic"},
-		{"GPT-5.3-codex", "openai"},
 		// Empty -> default gemini
 		{"", "gemini"},
 		// Unknown -> default gemini
@@ -147,11 +141,6 @@ func TestAnyProviderHasKey(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "openai OAuth",
-			api:  APIConfig{OpenAIOAuth: &OAuthTokenConfig{RefreshToken: "tok"}},
-			want: true,
-		},
-		{
 			name: "anthropic key",
 			api:  APIConfig{AnthropicKey: "sk"},
 			want: true,
@@ -172,7 +161,6 @@ func TestProviderDefaultModels(t *testing.T) {
 	expected := map[string]string{
 		"gemini":    "gemini-3-flash-preview",
 		"anthropic": "claude-sonnet-4-5-20250929",
-		"openai":    "gpt-5.4",
 		"glm":       "glm-5.1",
 		"deepseek":  "deepseek-chat",
 		"minimax":   "MiniMax-M2.7",
@@ -193,18 +181,6 @@ func TestProviderDefaultModels(t *testing.T) {
 }
 
 func TestProviderFlags(t *testing.T) {
-	// OpenAI: KeyOptional + HasOAuth, no EnvVars
-	oai := GetProvider("openai")
-	if !oai.KeyOptional {
-		t.Error("openai should be KeyOptional")
-	}
-	if !oai.HasOAuth {
-		t.Error("openai should have HasOAuth")
-	}
-	if len(oai.EnvVars) != 0 {
-		t.Errorf("openai EnvVars should be empty, got %v", oai.EnvVars)
-	}
-
 	// Ollama: KeyOptional, no HasOAuth
 	oll := GetProvider("ollama")
 	if !oll.KeyOptional {

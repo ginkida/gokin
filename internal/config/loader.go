@@ -239,7 +239,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Check OAuth first
-	if c.API.HasOAuthToken("gemini") || c.API.HasOAuthToken("openai") {
+	if c.API.HasOAuthToken("gemini") {
 		return nil
 	}
 

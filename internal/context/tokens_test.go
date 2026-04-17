@@ -16,8 +16,6 @@ func TestGetModelLimits_ExactMatch(t *testing.T) {
 		{"claude-opus", 200000, 32000},
 		{"claude-sonnet", 200000, 16384},
 		{"claude-haiku", 200000, 8192},
-		{"gpt-5.3-codex", 200000, 16384},
-		{"gpt-4o", 128000, 16384},
 		{"glm-5", 128000, 131072},
 		{"deepseek-chat", 64000, 8192},
 		{"minimax", 204800, 16384},
@@ -252,13 +250,13 @@ func TestContainsCamelCase(t *testing.T) {
 }
 
 func TestDefaultModelLimitsCount(t *testing.T) {
-	if len(DefaultModelLimits) < 25 {
-		t.Errorf("DefaultModelLimits has %d entries, want >= 25", len(DefaultModelLimits))
+	if len(DefaultModelLimits) < 15 {
+		t.Errorf("DefaultModelLimits has %d entries, want >= 15", len(DefaultModelLimits))
 	}
 }
 
 func TestDefaultPricingCount(t *testing.T) {
-	if len(DefaultPricing) < 25 {
-		t.Errorf("DefaultPricing has %d entries, want >= 25", len(DefaultPricing))
+	if len(DefaultPricing) < 15 {
+		t.Errorf("DefaultPricing has %d entries, want >= 15", len(DefaultPricing))
 	}
 }

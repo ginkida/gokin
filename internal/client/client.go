@@ -181,61 +181,6 @@ var AvailableModels = []ModelInfo{
 		Description: "Fast & affordable",
 		Provider:    "anthropic",
 	},
-	// OpenAI models (OAuth / ChatGPT subscription)
-	{
-		ID:          "gpt-5.4",
-		Name:        "GPT-5.4",
-		Description: "Frontier model, reasoning + coding + agentic, 1M context",
-		Provider:    "openai",
-	},
-	{
-		ID:          "gpt-5.3-codex",
-		Name:        "GPT-5.3 Codex",
-		Description: "Most capable coding model, 25% faster than 5.2",
-		Provider:    "openai",
-	},
-	{
-		ID:          "gpt-5.3-codex-spark",
-		Name:        "GPT-5.3 Codex Spark",
-		Description: "Near-instant coding, 1000+ tok/s (Pro only)",
-		Provider:    "openai",
-	},
-	{
-		ID:          "gpt-5.2-codex",
-		Name:        "GPT-5.2 Codex",
-		Description: "Advanced coding model, 400K context",
-		Provider:    "openai",
-	},
-	{
-		ID:          "gpt-5.1-codex-max",
-		Name:        "GPT-5.1 Codex Max",
-		Description: "Long-running project-scale coding",
-		Provider:    "openai",
-	},
-	{
-		ID:          "gpt-5.1-codex",
-		Name:        "GPT-5.1 Codex",
-		Description: "Agentic coding tasks, 400K context",
-		Provider:    "openai",
-	},
-	{
-		ID:          "gpt-5-codex",
-		Name:        "GPT-5 Codex",
-		Description: "Coding model, 400K context",
-		Provider:    "openai",
-	},
-	{
-		ID:          "gpt-5-codex-mini",
-		Name:        "GPT-5 Codex Mini",
-		Description: "Cost-effective, 4x more usage",
-		Provider:    "openai",
-	},
-	{
-		ID:          "gpt-5.2",
-		Name:        "GPT-5.2",
-		Description: "General agentic model, 400K context",
-		Provider:    "openai",
-	},
 	// Ollama (local models - use exact name from 'ollama list')
 	{
 		ID:          "ollama",

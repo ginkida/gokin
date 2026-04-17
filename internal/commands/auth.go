@@ -164,15 +164,8 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 
 // getOAuthStatus returns the OAuth status display string for a provider.
 func getOAuthStatus(cfg *config.Config, provider string) string {
-	switch provider {
-	case "gemini":
-		if cfg.API.GeminiOAuth != nil {
-			return fmt.Sprintf("OAuth (%s)", cfg.API.GeminiOAuth.Email)
-		}
-	case "openai":
-		if cfg.API.OpenAIOAuth != nil {
-			return fmt.Sprintf("OAuth (%s)", cfg.API.OpenAIOAuth.Email)
-		}
+	if provider == "gemini" && cfg.API.GeminiOAuth != nil {
+		return fmt.Sprintf("OAuth (%s)", cfg.API.GeminiOAuth.Email)
 	}
 	return "OAuth (configured)"
 }
@@ -234,17 +227,11 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 			p.SetKey(&cfg.API, "")
 		}
 		cfg.API.GeminiOAuth = nil
-		cfg.API.OpenAIOAuth = nil
 		cfg.API.APIKey = ""
 	} else if p := config.GetProvider(target); p != nil {
 		p.SetKey(&cfg.API, "")
-		if p.HasOAuth {
-			switch target {
-			case "gemini":
-				cfg.API.GeminiOAuth = nil
-			case "openai":
-				cfg.API.OpenAIOAuth = nil
-			}
+		if p.HasOAuth && target == "gemini" {
+			cfg.API.GeminiOAuth = nil
 		}
 		if currentProvider == target {
 			cfg.API.APIKey = ""
@@ -479,16 +466,9 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 		status := "not set"
 		if p.HasOAuth && cfg.API.HasOAuthToken(p.Name) {
-			switch p.Name {
-			case "gemini":
-				if cfg.API.GeminiOAuth != nil {
-					status = fmt.Sprintf("OAuth (%s)", cfg.API.GeminiOAuth.Email)
-				}
-			case "openai":
-				if cfg.API.OpenAIOAuth != nil {
-					status = fmt.Sprintf("OAuth (%s)", cfg.API.OpenAIOAuth.Email)
-				}
-			default:
+			if p.Name == "gemini" && cfg.API.GeminiOAuth != nil {
+				status = fmt.Sprintf("OAuth (%s)", cfg.API.GeminiOAuth.Email)
+			} else {
 				status = "OAuth (configured)"
 			}
 		} else if key := p.GetKey(&cfg.API); key != "" {
@@ -546,12 +526,9 @@ func (c *OAuthLoginCommand) Execute(ctx context.Context, args []string, app AppI
 	switch provider {
 	case "gemini":
 		return c.executeGeminiOAuth(ctx, cfg, app)
-	case "openai":
-		return c.executeOpenAIOAuth(ctx, cfg, app)
 	default:
 		return "OAuth Login\n\nAvailable providers:\n" +
-			"  /oauth-login gemini   - Login via Google account (Gemini subscription)\n" +
-			"  /oauth-login openai   - Login via ChatGPT account (ChatGPT subscription)\n", nil
+			"  /oauth-login gemini   - Login via Google account (Gemini subscription)\n", nil
 	}
 }
 
@@ -649,107 +626,6 @@ Use /status to check your configuration.
 Use /oauth-logout gemini to sign out.`, email, cfg.Model.Name, expiresIn), nil
 }
 
-func (c *OAuthLoginCommand) executeOpenAIOAuth(ctx context.Context, cfg *config.Config, app AppInterface) (string, error) {
-	if cfg.API.HasOAuthToken("openai") {
-		return fmt.Sprintf("Already logged in via OpenAI OAuth as %s.\n\nUse /oauth-logout openai to sign out first.", cfg.API.OpenAIOAuth.Email), nil
-	}
-
-	candidatePorts := []int{
-		auth.OpenAIOAuthCallbackPort,
-		auth.OpenAIOAuthCallbackPort + 1,
-		auth.OpenAIOAuthCallbackPort + 2,
-	}
-
-	var manager *auth.OpenAIOAuthManager
-	var server *auth.CallbackServer
-	var authURL string
-	var callbackPort int
-	var startErr error
-	var err error
-
-	for _, port := range candidatePorts {
-		manager = auth.NewOpenAIOAuthManagerWithPort(port)
-		authURL, err = manager.GenerateAuthURL()
-		if err != nil {
-			return "", fmt.Errorf("failed to generate auth URL: %w", err)
-		}
-
-		server = auth.NewCallbackServerWithPath(port, manager.GetState(), auth.OpenAIOAuthCallbackPath)
-		if startErr = server.Start(); startErr == nil {
-			callbackPort = port
-			break
-		}
-	}
-
-	if startErr != nil {
-		return "", fmt.Errorf("failed to start OAuth callback server: %w", startErr)
-	}
-	defer server.Stop()
-
-	browserOpened := openBrowser(authURL)
-
-	var sb strings.Builder
-	sb.WriteString("Opening browser for OpenAI authentication...\n\n")
-	if callbackPort != auth.OpenAIOAuthCallbackPort {
-		fmt.Fprintf(&sb, "Using fallback callback port: %d\n\n", callbackPort)
-	}
-	if !browserOpened {
-		sb.WriteString("Could not open browser automatically.\n")
-		sb.WriteString("Please open this URL in your browser:\n\n")
-		sb.WriteString(authURL + "\n\n")
-	}
-	sb.WriteString("Waiting for authentication (timeout: 5 minutes)...")
-
-	code, err := server.WaitForCode(auth.OAuthCallbackTimeout)
-	if err != nil {
-		return "", fmt.Errorf("authentication failed: %w", err)
-	}
-
-	token, err := manager.ExchangeCode(ctx, code)
-	if err != nil {
-		return "", fmt.Errorf("failed to exchange code: %w", err)
-	}
-
-	// Extract account ID from JWT
-	accountID := ""
-	if id, extractErr := auth.ExtractOpenAIAccountID(token.AccessToken); extractErr == nil {
-		accountID = id
-	}
-
-	cfg.API.OpenAIOAuth = &config.OAuthTokenConfig{
-		AccessToken:  token.AccessToken,
-		RefreshToken: token.RefreshToken,
-		ExpiresAt:    token.ExpiresAt.Unix(),
-		Email:        token.Email,
-		AccountID:    accountID,
-	}
-	cfg.API.ActiveProvider = "openai"
-	cfg.Model.Provider = "openai"
-	if op := config.GetProvider("openai"); op != nil {
-		cfg.Model.Name = op.DefaultModel
-	}
-
-	if err := app.ApplyConfig(cfg); err != nil {
-		return "", fmt.Errorf("failed to save config: %w", err)
-	}
-
-	email := token.Email
-	if email == "" {
-		email = "ChatGPT Account"
-	}
-
-	expiresIn := time.Until(token.ExpiresAt).Round(time.Minute)
-
-	return fmt.Sprintf(`Logged in as %s via OpenAI OAuth
-
-Provider: openai (OAuth)
-Model: %s
-Token expires in: %v
-
-Use /status to check your configuration.
-Use /oauth-logout openai to sign out.`, email, cfg.Model.Name, expiresIn), nil
-}
-
 // OAuthLogoutCommand handles /oauth-logout
 type OAuthLogoutCommand struct{}
 
@@ -766,7 +642,7 @@ func (c *OAuthLogoutCommand) GetMetadata() CommandMetadata {
 		Icon:     "logout",
 		Priority: 15,
 		HasArgs:  true,
-		ArgHint:  "[gemini|openai]",
+		ArgHint:  "[gemini]",
 	}
 }
 
@@ -781,33 +657,22 @@ func (c *OAuthLogoutCommand) Execute(ctx context.Context, args []string, app App
 		provider = strings.ToLower(args[0])
 	}
 
-	switch provider {
-	case "gemini":
+	if provider == "gemini" {
 		return c.logoutGemini(cfg, app)
-	case "openai":
-		return c.logoutOpenAI(cfg, app)
-	default:
-		var sb strings.Builder
-		sb.WriteString("OAuth Logout\n\n")
-		if cfg.API.HasOAuthToken("gemini") {
-			email := cfg.API.GeminiOAuth.Email
-			if email == "" {
-				email = "Google Account"
-			}
-			fmt.Fprintf(&sb, "  /oauth-logout gemini  - Sign out from %s\n", email)
-		}
-		if cfg.API.HasOAuthToken("openai") {
-			email := cfg.API.OpenAIOAuth.Email
-			if email == "" {
-				email = "ChatGPT Account"
-			}
-			fmt.Fprintf(&sb, "  /oauth-logout openai  - Sign out from %s\n", email)
-		}
-		if !cfg.API.HasOAuthToken("gemini") && !cfg.API.HasOAuthToken("openai") {
-			sb.WriteString("No OAuth credentials found.\n")
-		}
-		return sb.String(), nil
 	}
+
+	var sb strings.Builder
+	sb.WriteString("OAuth Logout\n\n")
+	if cfg.API.HasOAuthToken("gemini") {
+		email := cfg.API.GeminiOAuth.Email
+		if email == "" {
+			email = "Google Account"
+		}
+		fmt.Fprintf(&sb, "  /oauth-logout gemini  - Sign out from %s\n", email)
+	} else {
+		sb.WriteString("No OAuth credentials found.\n")
+	}
+	return sb.String(), nil
 }
 
 func (c *OAuthLogoutCommand) logoutGemini(cfg *config.Config, app AppInterface) (string, error) {
@@ -843,37 +708,6 @@ func (c *OAuthLogoutCommand) logoutGemini(cfg *config.Config, app AppInterface) 
 		sb.WriteString("Use /login gemini <key> to set an API key.\n")
 		sb.WriteString("Or use /oauth-login gemini to sign in again.")
 	}
-
-	return sb.String(), nil
-}
-
-func (c *OAuthLogoutCommand) logoutOpenAI(cfg *config.Config, app AppInterface) (string, error) {
-	if !cfg.API.HasOAuthToken("openai") {
-		return "No OpenAI OAuth credentials found.", nil
-	}
-
-	email := cfg.API.OpenAIOAuth.Email
-	cfg.API.OpenAIOAuth = nil
-
-	applyFailed := false
-	if err := app.ApplyConfig(cfg); err != nil {
-		applyFailed = true
-		if saveErr := cfg.Save(); saveErr != nil {
-			return "", fmt.Errorf("failed to save config: %w", saveErr)
-		}
-	}
-
-	var sb strings.Builder
-	if email != "" {
-		fmt.Fprintf(&sb, "Logged out from %s (OpenAI)\n\n", email)
-	} else {
-		sb.WriteString("OpenAI OAuth credentials removed.\n\n")
-	}
-	if applyFailed {
-		sb.WriteString("⚠ Client could not be re-initialized (no valid credentials remain).\n")
-	}
-
-	sb.WriteString("Use /oauth-login openai to sign in again.")
 
 	return sb.String(), nil
 }

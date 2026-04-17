@@ -58,59 +58,6 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  200000,
 		MaxOutputTokens: 8192,
 	},
-	// OpenAI Codex
-	"gpt-5.4": {
-		MaxInputTokens:  1050000,
-		MaxOutputTokens: 128000,
-	},
-	"gpt-5.3-codex-spark": {
-		MaxInputTokens:  128000,
-		MaxOutputTokens: 16384,
-	},
-	"gpt-5.3-codex": {
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 16384,
-	},
-	"gpt-5.2-codex": {
-		MaxInputTokens:  400000,
-		MaxOutputTokens: 16384,
-	},
-	"gpt-5.1-codex": {
-		MaxInputTokens:  400000,
-		MaxOutputTokens: 16384,
-	},
-	"gpt-5-codex": {
-		MaxInputTokens:  400000,
-		MaxOutputTokens: 16384,
-	},
-	"gpt-5.2": {
-		MaxInputTokens:  400000,
-		MaxOutputTokens: 16384,
-	},
-	"gpt-5.1": {
-		MaxInputTokens:  400000,
-		MaxOutputTokens: 16384,
-	},
-	"gpt-5": {
-		MaxInputTokens:  400000,
-		MaxOutputTokens: 16384,
-	},
-	"gpt-4o": {
-		MaxInputTokens:  128000,
-		MaxOutputTokens: 16384,
-	},
-	"o1": {
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 100000,
-	},
-	"o3": {
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 100000,
-	},
-	"o4-mini": {
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 100000,
-	},
 	// GLM — explicit entries avoid relying on substring-fuzzy fallback
 	// (which would either miss 4.x variants entirely or return the generic
 	// 128K/8K default from getModelLimits). Values assume Z.AI's current
@@ -192,20 +139,6 @@ var DefaultPricing = map[string]ModelPricing{
 	"claude-sonnet": {InputCostPer1M: 3.00, OutputCostPer1M: 15.00},
 	"claude-haiku":  {InputCostPer1M: 0.80, OutputCostPer1M: 4.00},
 
-	// OpenAI Codex (ChatGPT subscription — no per-token cost)
-	"gpt-5.4":             {InputCostPer1M: 2.50, OutputCostPer1M: 15.00},
-	"gpt-5.3-codex-spark": {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
-	"gpt-5.3-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
-	"gpt-5.2-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
-	"gpt-5.1-codex":       {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
-	"gpt-5-codex":         {InputCostPer1M: 0.00, OutputCostPer1M: 0.00},
-	"gpt-5.2":             {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
-	"gpt-5.1":             {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
-	"gpt-5":               {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
-	"gpt-4o":              {InputCostPer1M: 2.50, OutputCostPer1M: 10.00},
-	"o1":                  {InputCostPer1M: 15.00, OutputCostPer1M: 60.00},
-	"o3":                  {InputCostPer1M: 10.00, OutputCostPer1M: 40.00},
-	"o4-mini":             {InputCostPer1M: 1.10, OutputCostPer1M: 4.40},
 
 	// DeepSeek
 	"deepseek-chat":     {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},

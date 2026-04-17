@@ -87,23 +87,6 @@ var knownModelProfiles = map[string]ModelProfile{
 	"minimax-m2.5-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 	"minimax-m2.5":           {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 	"minimax":                {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
-
-	// OpenAI Codex family
-	"gpt-5.4":             {Family: "openai", ContextWindow: 1050000, SupportsTools: true, IsCoding: true},
-	"gpt-5.3-codex":       {Family: "openai", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
-	"gpt-5.3-codex-spark": {Family: "openai", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
-	"gpt-5.2-codex":       {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},
-	"gpt-5.1-codex-max":   {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},
-	"gpt-5.1-codex":       {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},
-	"gpt-5-codex":         {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true},
-	"gpt-5-codex-mini":    {Family: "openai", ContextWindow: 400000, SupportsTools: true, IsCoding: true, IsSmall: true},
-	"gpt-5.2":             {Family: "openai", ContextWindow: 400000, SupportsTools: true},
-	"gpt-5.1":             {Family: "openai", ContextWindow: 400000, SupportsTools: true},
-	"gpt-5":               {Family: "openai", ContextWindow: 400000, SupportsTools: true},
-	"gpt-4o":              {Family: "openai", ContextWindow: 128000, SupportsTools: true},
-	"o1":                  {Family: "openai", ContextWindow: 200000, SupportsTools: true},
-	"o3":                  {Family: "openai", ContextWindow: 200000, SupportsTools: true},
-	"o4-mini":             {Family: "openai", ContextWindow: 200000, SupportsTools: true, IsSmall: true},
 }
 
 // GetModelProfile returns the profile for a given model name.

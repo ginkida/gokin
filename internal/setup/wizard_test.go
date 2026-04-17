@@ -19,22 +19,15 @@ func TestBuildSetupChoices(t *testing.T) {
 
 	// Check that we have the expected base choices
 	foundGeminiOAuth := false
-	foundOpenAI := false
 
 	for _, choice := range choices {
 		if choice.Action == "oauth-gemini" {
 			foundGeminiOAuth = true
 		}
-		if choice.Action == "oauth-openai" {
-			foundOpenAI = true
-		}
 	}
 
 	if !foundGeminiOAuth {
 		t.Error("expected to find oauth-gemini choice")
-	}
-	if !foundOpenAI {
-		t.Error("expected to find oauth-openai choice")
 	}
 }
 

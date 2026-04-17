@@ -17,7 +17,6 @@ func TestGetModelProfile_ExactMatch(t *testing.T) {
 		{"deepseek-chat", "deepseek", 64000, true},
 		{"glm-5", "glm", 128000, true},
 		{"kimi-k2.5", "kimi", 256000, true},
-		{"gpt-5.3-codex", "openai", 200000, true},
 		{"minimax-m2.5", "minimax", 204800, true},
 		{"phi3", "phi", 4096, false},
 		{"llama2", "llama", 4096, false},
@@ -50,10 +49,6 @@ func TestGetModelProfile_CaseInsensitive(t *testing.T) {
 		t.Errorf("mixed case Claude-Sonnet: Family = %q, want anthropic", p.Family)
 	}
 
-	p = GetModelProfile("GPT-5.3-CODEX")
-	if p.Family != "openai" {
-		t.Errorf("uppercase GPT-5.3-CODEX: Family = %q, want openai", p.Family)
-	}
 }
 
 func TestGetModelProfile_TagStripping(t *testing.T) {
@@ -122,7 +117,7 @@ func TestGetModelProfile_IsCoding(t *testing.T) {
 		"claude-opus", "claude-sonnet", "deepseek-chat",
 		"glm-5", "glm-4.7", "kimi-k2.5", "kimi-k2",
 		"gemini-3.1-pro", "gemini-3-pro", "gemini-2.5-pro",
-		"gpt-5.3-codex", "minimax-m2.7", "minimax-m2.5",
+		"minimax-m2.7", "minimax-m2.5",
 	}
 	for _, m := range codingModels {
 		p := GetModelProfile(m)

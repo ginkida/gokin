@@ -16,7 +16,6 @@ func TestApplyPreset(t *testing.T) {
 		{"balanced", true, "gemini-3-flash-preview", "gemini"},
 		{"creative", true, "gemini-3-pro-preview", "gemini"},
 		{"anthropic", true, "claude-sonnet-4-5-20250929", "anthropic"},
-		{"openai", true, "gpt-5.4", "openai"},
 		{"ollama", true, "llama3.2", "ollama"},
 		{"kimi", true, "kimi-k2.5", "kimi"},
 		{"deepseek", true, "deepseek-chat", "deepseek"},
@@ -95,8 +94,8 @@ func TestIsValidPreset(t *testing.T) {
 
 func TestListPresets(t *testing.T) {
 	presets := ListPresets()
-	if len(presets) != 14 {
-		t.Errorf("len(ListPresets) = %d, want 14", len(presets))
+	if len(presets) != 13 {
+		t.Errorf("len(ListPresets) = %d, want 13", len(presets))
 	}
 
 	// All returned presets should be valid
@@ -108,8 +107,8 @@ func TestListPresets(t *testing.T) {
 }
 
 func TestPresetCount(t *testing.T) {
-	if len(ModelPresets) != 14 {
-		t.Errorf("len(ModelPresets) = %d, want 14", len(ModelPresets))
+	if len(ModelPresets) != 13 {
+		t.Errorf("len(ModelPresets) = %d, want 13", len(ModelPresets))
 	}
 }
 
@@ -118,7 +117,6 @@ func TestProviderDefaultPreset(t *testing.T) {
 		"glm":       "glm",
 		"gemini":    "gemini",
 		"anthropic": "anthropic",
-		"openai":    "openai",
 		"deepseek":  "deepseek",
 		"kimi":      "kimi",
 		"minimax":   "minimax",

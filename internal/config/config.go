@@ -47,9 +47,6 @@ type APIConfig struct {
 	// OAuth tokens for Gemini (via Google Account)
 	GeminiOAuth *OAuthTokenConfig `yaml:"gemini_oauth,omitempty"`
 
-	// OAuth tokens for OpenAI (via ChatGPT Account)
-	OpenAIOAuth *OAuthTokenConfig `yaml:"openai_oauth,omitempty"`
-
 	// Ollama server URL (default: http://localhost:11434)
 	OllamaBaseURL string `yaml:"ollama_base_url,omitempty"`
 
@@ -70,16 +67,12 @@ type OAuthTokenConfig struct {
 	ExpiresAt    int64  `yaml:"expires_at"` // Unix timestamp
 	Email        string `yaml:"email,omitempty"`
 	ProjectID    string `yaml:"project_id,omitempty"` // Code Assist project ID (Gemini)
-	AccountID    string `yaml:"account_id,omitempty"` // chatgpt_account_id (OpenAI)
 }
 
 // HasOAuthToken checks if OAuth is configured for a provider
 func (c *APIConfig) HasOAuthToken(provider string) bool {
-	switch provider {
-	case "gemini":
+	if provider == "gemini" {
 		return c.GeminiOAuth != nil && c.GeminiOAuth.RefreshToken != ""
-	case "openai":
-		return c.OpenAIOAuth != nil && c.OpenAIOAuth.RefreshToken != ""
 	}
 	return false
 }
@@ -122,7 +115,7 @@ func (c *APIConfig) HasProvider(provider string) bool {
 		return true // e.g. ollama — no key needed
 	}
 	if p.KeyOptional && p.HasOAuth {
-		return c.HasOAuthToken(provider) // e.g. openai — requires OAuth
+		return c.HasOAuthToken(provider)
 	}
 	if p.GetKey(c) != "" {
 		return true

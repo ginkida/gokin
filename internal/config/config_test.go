@@ -30,18 +30,6 @@ func TestHasOAuthToken(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "openai with valid OAuth",
-			api:      APIConfig{OpenAIOAuth: &OAuthTokenConfig{RefreshToken: "oai-token"}},
-			provider: "openai",
-			want:     true,
-		},
-		{
-			name:     "openai with nil OAuth",
-			api:      APIConfig{},
-			provider: "openai",
-			want:     false,
-		},
-		{
 			name:     "unknown provider",
 			api:      APIConfig{},
 			provider: "unknown",
@@ -114,18 +102,6 @@ func TestHasProvider(t *testing.T) {
 			name:     "ollama always true (KeyOptional, no OAuth)",
 			api:      APIConfig{},
 			provider: "ollama",
-			want:     true,
-		},
-		{
-			name:     "openai requires OAuth",
-			api:      APIConfig{},
-			provider: "openai",
-			want:     false,
-		},
-		{
-			name:     "openai with OAuth",
-			api:      APIConfig{OpenAIOAuth: &OAuthTokenConfig{RefreshToken: "tok"}},
-			provider: "openai",
 			want:     true,
 		},
 		{
@@ -209,11 +185,6 @@ func TestGetActiveKey(t *testing.T) {
 			name: "fallback to legacy key",
 			api:  APIConfig{ActiveProvider: "gemini", APIKey: "legacy"},
 			want: "legacy",
-		},
-		{
-			name: "openai has no key (OAuth only)",
-			api:  APIConfig{ActiveProvider: "openai"},
-			want: "",
 		},
 		{
 			name: "unknown provider falls back to legacy",

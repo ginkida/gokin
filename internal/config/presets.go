@@ -76,12 +76,6 @@ var ModelPresets = map[string]ModelPreset{
 		Temperature:     1.0,
 		MaxOutputTokens: 16384,
 	},
-	"openai": {
-		Provider:        "openai",
-		Name:            "gpt-5.4",
-		Temperature:     1.0,
-		MaxOutputTokens: 128000,
-	},
 	"minimax": {
 		Provider:        "minimax",
 		Name:            "MiniMax-M2.7",
@@ -132,7 +126,7 @@ func ListPresets() []string {
 // provider-appropriate output cap and model name.
 func providerDefaultPreset(provider string) string {
 	switch provider {
-	case "glm", "gemini", "anthropic", "openai", "deepseek", "kimi", "minimax", "ollama":
+	case "glm", "gemini", "anthropic", "deepseek", "kimi", "minimax", "ollama":
 		return provider
 	}
 	return ""
