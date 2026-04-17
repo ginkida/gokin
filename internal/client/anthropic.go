@@ -45,7 +45,7 @@ func (e *HTTPError) Unwrap() error {
 type AnthropicConfig struct {
 	APIKey        string
 	BaseURL       string // Default: "https://api.anthropic.com" for Anthropic, custom for GLM-4.7
-	Provider      string // For telemetry/logging (anthropic, glm, deepseek, minimax, kimi)
+	Provider      string // For telemetry/logging (glm, minimax, kimi)
 	Model         string
 	MaxTokens     int32
 	Temperature   float32

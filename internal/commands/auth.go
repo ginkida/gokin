@@ -15,14 +15,10 @@ func (c *LoginCommand) Name() string        { return "login" }
 func (c *LoginCommand) Description() string { return "Set API key for a provider" }
 func (c *LoginCommand) Usage() string {
 	return `/login                        - Show current status
-/login gemini <api_key>       - Set Gemini API key
-/login anthropic <api_key>    - Set Anthropic API key
-/login deepseek <api_key>     - Set DeepSeek API key
 /login glm <api_key>          - Set GLM API key
 /login minimax <api_key>      - Set MiniMax API key
 /login kimi <api_key>         - Set Kimi API key
-
-Tip: Use /oauth-login gemini or /oauth-login openai for OAuth authentication`
+`
 }
 func (c *LoginCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{

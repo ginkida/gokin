@@ -255,8 +255,6 @@ func (m Model) getCommandHint(input string) string {
 		"status":            "Show provider/auth/runtime configuration status",
 		"login":             "Set API key for a provider",
 		"logout":            "Remove provider key or logout from all",
-		"oauth-login":       "Login via OAuth (Gemini or OpenAI)",
-		"oauth-logout":      "Remove OAuth credentials (Gemini or OpenAI)",
 		"provider":          "Switch active AI provider",
 		"update":            "Check/install updates, list backups, rollback",
 		"cost":              "Show token usage and estimated costs",

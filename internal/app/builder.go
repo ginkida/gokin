@@ -46,7 +46,7 @@ type Builder struct {
 	// Optional components (nil means not configured)
 	configDir        string
 	configDirErr     error
-	geminiClient     client.Client
+	mainClient     client.Client
 	registry         *tools.Registry
 	executor         *tools.Executor
 	session          *chat.Session
@@ -260,7 +260,7 @@ func (b *Builder) validateOllamaModel() error {
 		return nil
 	}
 
-	ollamaClient, ok := b.geminiClient.(*client.OllamaClient)
+	ollamaClient, ok := b.mainClient.(*client.OllamaClient)
 	if !ok {
 		return nil
 	}
@@ -337,15 +337,15 @@ func (b *Builder) promptModelPull(c *client.OllamaClient, modelName string) erro
 func (b *Builder) initClient() error {
 	var err error
 	// Use the factory to create the appropriate client (Gemini or Anthropic/GLM-4.7)
-	b.geminiClient, err = client.NewClient(b.ctx, b.cfg, b.cfg.Model.Name)
+	b.mainClient, err = client.NewClient(b.ctx, b.cfg, b.cfg.Model.Name)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 
 	// Debug: log which client was created
-	if _, ok := b.geminiClient.(*client.AnthropicClient); ok {
+	if _, ok := b.mainClient.(*client.AnthropicClient); ok {
 		logging.Debug("client created", "type", "Anthropic (GLM/Kimi/MiniMax)", "model", b.cfg.Model.Name)
-	} else if _, ok := b.geminiClient.(*client.OllamaClient); ok {
+	} else if _, ok := b.mainClient.(*client.OllamaClient); ok {
 		logging.Debug("client created", "type", "Ollama", "model", b.cfg.Model.Name)
 	} else {
 		logging.Debug("client created", "type", "Unknown", "model", b.cfg.Model.Name)
@@ -359,10 +359,10 @@ func (b *Builder) initTools() error {
 	b.registry = tools.DefaultRegistry(b.workDir)
 
 	// Dynamic tool filtering: select tool sets based on context
-	geminiTools := b.selectToolSets()
-	b.geminiClient.SetTools(geminiTools)
+	mainTools := b.selectToolSets()
+	b.mainClient.SetTools(mainTools)
 
-	b.executor = tools.NewExecutor(b.registry, b.geminiClient, b.cfg.Tools.Timeout)
+	b.executor = tools.NewExecutor(b.registry, b.mainClient, b.cfg.Tools.Timeout)
 	b.executor.SetWorkDir(b.workDir)
 	b.executor.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.executor.SetDeltaCheckConfig(
@@ -491,7 +491,7 @@ func (b *Builder) initSession() error {
 	}
 	b.sessionMemory = appcontext.NewSessionMemoryManager(b.workDir, smConfig)
 	b.sessionMemory.LoadFromDisk()
-	b.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(b.geminiClient))
+	b.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(b.mainClient))
 	b.promptBuilder.SetSessionMemory(b.sessionMemory)
 
 	// Ensure .gokin working files are in .gitignore
@@ -505,7 +505,7 @@ func (b *Builder) initSession() error {
 			"main_root", git.GetMainWorktreeRoot(b.workDir))
 	}
 
-	b.contextManager = appcontext.NewContextManager(b.ctx, b.session, b.geminiClient, &b.cfg.Context)
+	b.contextManager = appcontext.NewContextManager(b.ctx, b.session, b.mainClient, &b.cfg.Context)
 	b.contextAgent = appcontext.NewContextAgent(b.contextManager, b.session, b.configDir)
 
 	// Initialize context predictor for predictive file loading
@@ -658,7 +658,7 @@ func (b *Builder) initManagers() error {
 	b.undoManager = undo.NewManager()
 
 	// Agent runner
-	b.agentRunner = agent.NewRunner(b.ctx, b.geminiClient, b.registry, b.workDir)
+	b.agentRunner = agent.NewRunner(b.ctx, b.mainClient, b.registry, b.workDir)
 	b.agentRunner.SetPermissions(b.permManager)
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
 	b.agentRunner.SetWorkspaceIsolationEnabled(b.cfg.Plan.WorkspaceIsolation)
@@ -682,7 +682,7 @@ func (b *Builder) initManagers() error {
 		DecomposeThreshold: 4,
 		ParallelThreshold:  7,
 	}
-	b.taskRouter = router.NewRouter(routerCfg, b.executor, b.agentRunner, b.geminiClient, b.registry, b.isInGitRepo(), b.workDir)
+	b.taskRouter = router.NewRouter(routerCfg, b.executor, b.agentRunner, b.mainClient, b.registry, b.isInGitRepo(), b.workDir)
 
 	// Wire plan manager to router for plan-aware routing
 	// When a plan is active, router avoids nested decomposition
@@ -767,7 +767,7 @@ func (b *Builder) initManagers() error {
 		treePlannerConfig,
 		b.strategyOptimizer,
 		nil, // Reflector will be set per-agent
-		b.geminiClient,
+		b.mainClient,
 	)
 	b.agentRunner.SetTreePlanner(b.treePlanner)
 	b.agentRunner.SetPlanningModeEnabled(b.cfg.Plan.Enabled)
@@ -827,7 +827,7 @@ func (b *Builder) initManagers() error {
 		}
 	}
 
-	b.smartRouter = router.NewSmartRouter(b.ctx, smartRouterCfg, b.executor, b.agentRunner, b.geminiClient, b.workDir)
+	b.smartRouter = router.NewSmartRouter(b.ctx, smartRouterCfg, b.executor, b.agentRunner, b.mainClient, b.workDir)
 	if b.strategyOptimizer != nil {
 		b.smartRouter.SetStrategyOptimizer(b.strategyOptimizer)
 	}
@@ -1120,7 +1120,7 @@ func (b *Builder) initIntegrations() error {
 			TokensPerMinute:   b.cfg.RateLimit.TokensPerMinute,
 			BurstSize:         b.cfg.RateLimit.BurstSize,
 		})
-		b.geminiClient.SetRateLimiter(b.rateLimiter)
+		b.mainClient.SetRateLimiter(b.rateLimiter)
 	}
 
 	// Initialize audit logger
@@ -1269,7 +1269,7 @@ func (b *Builder) initIntegrations() error {
 		}
 
 		// Refresh tools on client
-		b.geminiClient.SetTools(b.registry.GeminiTools())
+		b.mainClient.SetTools(b.registry.GeminiTools())
 
 		// Start health check for connected servers
 		if len(b.mcpManager.GetConnectedServers()) > 0 && b.cfg.MCP.HealthCheckInterval > 0 {
@@ -1298,7 +1298,7 @@ func (b *Builder) initUI() error {
 		provider = b.cfg.API.Backend
 	}
 	if provider == "" {
-		provider = "gemini" // Default
+		provider = "glm" // Default
 	}
 
 	var uiModels []ui.ModelInfo
@@ -1335,7 +1335,7 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up status callback for clients
 	statusCb := &appStatusCallback{app: app}
-	attachStatusCallback(b.geminiClient, statusCb)
+	attachStatusCallback(b.mainClient, statusCb)
 
 	// Notify UI on MCP health changes
 	if b.mcpManager != nil {
@@ -1845,7 +1845,7 @@ func (b *Builder) assembleApp() *App {
 	b.cachedApp = &App{
 		config:                b.cfg,
 		workDir:               b.workDir,
-		client:                b.geminiClient,
+		client:                b.mainClient,
 		registry:              b.registry,
 		executor:              b.executor,
 		session:               b.session,

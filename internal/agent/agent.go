@@ -963,15 +963,15 @@ func (a *Agent) IsPlanningMode() bool {
 	return a.planningMode
 }
 
-// mapModelName maps user-friendly model names to actual Gemini model names.
+// mapModelName maps user-friendly shorthands to actual GLM/MiniMax/Kimi model
+// names. Was previously a Gemini shorthand map; post-v0.65.0 only GLM/Kimi/
+// MiniMax/Ollama providers exist, so the shorthands are adjusted accordingly.
 func mapModelName(name string) string {
 	switch strings.ToLower(name) {
-	case "flash", "haiku":
-		return "gemini-3-flash-preview"
-	case "pro", "sonnet":
-		return "gemini-3-pro-preview"
-	case "ultra", "opus":
-		return "gemini-3-pro-preview" // Use pro for ultra/opus for now
+	case "flash", "fast":
+		return "glm-5"
+	case "pro", "strong":
+		return "glm-5.1"
 	default:
 		return name // Return as is if already a full model name
 	}

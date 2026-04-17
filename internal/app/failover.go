@@ -76,7 +76,7 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 
 func detectPrimaryProvider(cfg *config.Config) string {
 	if cfg == nil {
-		return "gemini"
+		return "glm"
 	}
 
 	if cfg.Model.Provider != "" {

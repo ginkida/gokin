@@ -36,7 +36,7 @@ const (
 %s╔══════════════════════════════════════════════════════════════════════════╗
 ║                                                                          ║
 ║                            %sWelcome to Gokin!%s                             ║
-║  AI assistant: Gemini, Anthropic, GLM, DeepSeek, MiniMax, Kimi & Ollama  ║
+║              AI assistant: GLM, MiniMax, Kimi & Ollama                   ║
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝%s
 

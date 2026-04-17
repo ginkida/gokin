@@ -95,7 +95,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	}{
 		{"Getting Started", []string{"help", "quickstart"}},
 		{"Session", []string{"model", "clear", "compact", "save", "resume", "sessions", "stats", "instructions"}},
-		{"Auth & Setup", []string{"login", "logout", "oauth-login", "oauth-logout", "provider", "status", "doctor", "config", "update"}},
+		{"Auth & Setup", []string{"login", "logout", "provider", "status", "doctor", "config", "update"}},
 		{"Git", []string{"init", "commit", "pr"}},
 		{"Planning", []string{"plan", "resume-plan", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "memory-governance", "tree-stats"}},
 		{"Tools", []string{"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
@@ -1114,7 +1114,7 @@ func getRelatedCommands(name string) string {
 		"model":        "/provider, /config, /reasoning",
 		"plan":         "/resume-plan, /tree-stats",
 		"resume-plan":  "/plan",
-		"login":        "/logout, /oauth-login, /provider, /doctor",
+		"login":        "/logout, /provider, /doctor",
 		"doctor":       "/login, /config, /status",
 		"config":       "/doctor, /model, /theme",
 		"theme":        "/config",

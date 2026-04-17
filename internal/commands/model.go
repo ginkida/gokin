@@ -15,15 +15,11 @@ func (c *ModelCommand) Name() string        { return "model" }
 func (c *ModelCommand) Description() string { return "Switch AI model" }
 func (c *ModelCommand) Usage() string {
 	return `/model           - Show current model and available models
-/model 3.1-pro   - Gemini 3.1 Pro (top reasoning)
-/model 3-flash   - Gemini 3 Flash (fast & cheap)
-/model 3-pro     - Gemini 3 Pro (advanced)
-/model 5.4             - GPT-5.4 (frontier, 1M context)
-/model 5.3-codex-spark - GPT-5.3 Codex Spark (near-instant)
-/model 5.3-codex       - GPT-5.3 Codex (most capable)
-/model 5.2-codex       - GPT-5.2 Codex (400K context)
-/model sonnet    - Claude Sonnet 4.5
-/model opus      - Claude Opus 4.6`
+/model glm-5     - GLM-5 (default, 131K output)
+/model glm-5.1   - GLM-5.1 (newer, same limits)
+/model glm-4.7   - GLM-4.7 (thinking-enabled)
+/model kimi-k2.5 - Kimi K2.5 (256K context)
+/model MiniMax-M2.7 - MiniMax M2.7 (200K context)`
 }
 func (c *ModelCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
@@ -74,18 +70,12 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 		sb.WriteString("\nUsage: /model <name>")
 		switch activeProvider {
-		case "gemini":
-			sb.WriteString("\nExamples: /model 3.1-pro  or  /model 3-flash  or  /model 2.5-pro")
-		case "anthropic":
-			sb.WriteString("\nExamples: /model sonnet  or  /model opus")
-		case "openai":
-			sb.WriteString("\nExamples: /model 5.4  or  /model 5.3-codex  or  /model 5.3-codex-spark")
+		case "glm":
+			sb.WriteString("\nExamples: /model glm-5  or  /model glm-5.1  or  /model glm-4.7")
 		case "minimax":
 			sb.WriteString("\nExamples: /model M2.7  or  /model M2.7-highspeed  or  /model M2.5")
 		case "kimi":
 			sb.WriteString("\nExamples: /model k2.5  or  /model k2-thinking-turbo")
-		case "deepseek":
-			sb.WriteString("\nExamples: /model chat  or  /model reasoner")
 		}
 		sb.WriteString("\n\nUse /provider to switch providers")
 
@@ -158,28 +148,9 @@ func (c *ModelCommand) formatProviderModels(models []client.ModelInfo) string {
 
 // extractShortName extracts a short name from model ID
 func extractShortName(modelID string) string {
-	// Claude models
-	if strings.HasPrefix(modelID, "claude") {
-		if strings.Contains(modelID, "opus") {
-			return "opus"
-		}
-		if strings.Contains(modelID, "sonnet") {
-			return "sonnet"
-		}
-		if strings.Contains(modelID, "haiku") {
-			return "haiku"
-		}
-		return modelID
-	}
-
 	// GLM models
 	if strings.HasPrefix(modelID, "glm") {
 		return modelID // Return full ID for GLM (e.g., "glm-4.7")
-	}
-
-	// OpenAI models: gpt-5.3-codex → 5.3-codex, gpt-5.2 → 5.2
-	if strings.HasPrefix(modelID, "gpt-") {
-		return strings.TrimPrefix(modelID, "gpt-")
 	}
 
 	// MiniMax models
@@ -194,45 +165,6 @@ func extractShortName(modelID string) string {
 		return strings.TrimPrefix(modelID, "kimi-")
 	}
 
-	// DeepSeek models
-	if strings.HasPrefix(modelID, "deepseek-") {
-		return strings.TrimPrefix(modelID, "deepseek-")
-	}
-
-	// Gemini 3.1 models (check before 3 to avoid collision)
-	if strings.Contains(modelID, "gemini-3.1") {
-		if strings.Contains(modelID, "pro") {
-			return "3.1-pro"
-		}
-	}
-
-	// Gemini 3 models
-	if strings.Contains(modelID, "gemini-3") {
-		if strings.Contains(modelID, "flash") {
-			return "3-flash"
-		}
-		if strings.Contains(modelID, "pro") {
-			return "3-pro"
-		}
-	}
-
-	// Gemini 2.5 models
-	if strings.Contains(modelID, "gemini-2.5") {
-		if strings.Contains(modelID, "flash") {
-			return "2.5-flash"
-		}
-		if strings.Contains(modelID, "pro") {
-			return "2.5-pro"
-		}
-	}
-
-	// Generic fallback
-	if strings.Contains(modelID, "flash") {
-		return "flash"
-	}
-	if strings.Contains(modelID, "pro") {
-		return "pro"
-	}
-
+	// Ollama and unknown — return full id
 	return modelID
 }

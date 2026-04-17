@@ -44,7 +44,7 @@ type APIConfig struct {
 	// Ollama server URL (default: http://localhost:11434)
 	OllamaBaseURL string `yaml:"ollama_base_url,omitempty"`
 
-	// Active provider: glm, anthropic, minimax, kimi, deepseek, ollama (default: glm)
+	// Active provider: glm, minimax, kimi, ollama (default: glm)
 	ActiveProvider string `yaml:"active_provider"`
 
 	// Backend: legacy alias for ActiveProvider
@@ -126,7 +126,7 @@ type RetryConfig struct {
 	RetryDelay        time.Duration                  `yaml:"retry_delay"`         // Initial delay between retries (default: 1s)
 	HTTPTimeout       time.Duration                  `yaml:"http_timeout"`        // HTTP request timeout (default: 120s)
 	StreamIdleTimeout time.Duration                  `yaml:"stream_idle_timeout"` // Max pause between SSE chunks (0 = provider default)
-	Providers         map[string]ProviderRetryConfig `yaml:"providers,omitempty"` // Per-provider timeout overrides (e.g. minimax/deepseek/kimi/anthropic).
+	Providers         map[string]ProviderRetryConfig `yaml:"providers,omitempty"` // Per-provider timeout overrides (e.g. glm/minimax/kimi).
 }
 
 // ProviderRetryConfig holds retry timeout overrides for a specific provider.
@@ -152,11 +152,6 @@ type ModelConfig struct {
 	// Extended Thinking (Anthropic API feature)
 	EnableThinking bool  `yaml:"enable_thinking"` // Enable extended thinking mode
 	ThinkingBudget int32 `yaml:"thinking_budget"` // Max tokens for thinking (0 = disabled)
-
-	// Reasoning Effort for OpenAI models (none/low/medium/high/xhigh)
-	// Overrides the router's automatic thinking budget mapping when set.
-	// Default: "xhigh" for OpenAI provider.
-	ReasoningEffort string `yaml:"reasoning_effort,omitempty"`
 
 	// Fallback providers to try when the primary provider fails
 	FallbackProviders []string `yaml:"fallback_providers"`

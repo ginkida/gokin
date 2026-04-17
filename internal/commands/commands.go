@@ -103,7 +103,6 @@ func NewHandler() *Handler {
 	h.Register(&ProviderCommand{})
 	h.Register(&StatusCommand{})
 	h.Register(&ModelCommand{})
-	h.Register(&ReasoningCommand{})
 	h.Register(&PermissionsCommand{})
 	h.Register(&SandboxCommand{})
 
