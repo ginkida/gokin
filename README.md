@@ -11,7 +11,7 @@
   <img src="https://minio.ginkida.dev/minion/github/gokin-cli-cut.gif" alt="Gokin Demo" width="800">
 </p>
 
-<h3 align="center">🤖 AI-powered coding assistant for your terminal<br>Multi-provider • Multi-agent • 100% Open Source</h3>
+<h3 align="center">🤖 AI-powered coding assistant for your terminal<br>GLM · MiniMax · Kimi · Ollama — 100% open source</h3>
 
 <p align="center">
   <a href="#installation">Install</a> •
@@ -29,14 +29,14 @@
 
 Most AI coding tools are closed-source, route your code through third-party servers, and give you zero control over what gets sent to the model. Gokin was built with a different goal: **a fast, secure, zero-telemetry CLI where your code goes directly to the provider you chose — and nothing else leaves your machine.**
 
-This matters especially when you work with multiple LLM providers across different jurisdictions (DeepSeek, GLM, Kimi, MiniMax, Gemini, Claude, OpenAI). Gokin ensures that secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data. You pick the provider — Gokin handles the rest.
+Gokin focuses on a small, well-tested set of providers: **GLM, MiniMax, Kimi** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
 
 | Feature | Gokin | Claude Code | Cursor |
 |---------|-------|-------------|--------|
 | **Price** | Free → Pay-per-use | $20+/month | $20+/month |
-| **Providers** | 8 (Gemini, Claude, OpenAI, DeepSeek, GLM, Kimi, MiniMax, Ollama) | 1 (Claude) | Multi |
+| **Providers** | 4 (GLM, MiniMax, Kimi, Ollama) | 1 (Claude) | Multi |
 | **Offline** | ✅ Ollama | ❌ | ❌ |
-| **54 Tools** | ✅ | ~30 | ~30 |
+| **50 Tools** | ✅ | ~30 | ~30 |
 | **Multi-agent** | ✅ 5 parallel | Basic | ❌ |
 | **Direct API** | ✅ Zero proxies | ✅ | ❌ Routes through Cursor servers |
 | **Security** | ✅ TLS 1.2+, secret redaction (24 patterns), sandbox, 3-level permissions | Basic | Basic |
@@ -48,12 +48,9 @@ This matters especially when you work with multiple LLM providers across differe
 | Stack | Cost | Best For |
 |-------|------|----------|
 | **Gokin + Ollama** | 🆓 Free | Privacy, offline, no API costs |
-| **Gokin + Gemini Flash** | 🆓 Free tier | Fast iterations, prototyping |
-| **Gokin + DeepSeek** | ~$1/month | Daily coding, best value |
+| **Gokin + GLM** | ~$3/month (Coding Plan) | Daily coding, best budget value |
+| **Gokin + MiniMax** | Pay-per-use | 200K context, strong coding |
 | **Gokin + Kimi** | Pay-per-use | Fast reasoning, 256K context |
-| **Gokin + MiniMax** | Pay-per-use | 1M context, strong coding |
-| **Gokin + Claude** | Pay-per-use | Complex reasoning |
-| **Gokin + OpenAI** | Pay-per-use | Codex models, o3 reasoning |
 
 ---
 
@@ -88,7 +85,7 @@ go build -o gokin ./cmd/gokin
 gokin --setup
 
 # Or set API key and run
-export GEMINI_API_KEY="your-key"
+export GOKIN_GLM_KEY="your-glm-key"
 gokin
 ```
 
@@ -107,10 +104,9 @@ gokin
 ## 🎯 Key Features <a id="features"></a>
 
 ### 🧠 Smart Code Understanding
-- **Semantic Search** — Find code by meaning, not just keywords
-- **Code Graph** — Dependency visualization
-- **Multi-file Analysis** — Understand entire modules
+- **Multi-file Analysis** — Understand entire modules via grep + glob + read
 - **Session Memory** — Auto-summarizes your session (files, tools, errors, decisions). Survives context compaction. Optional LLM-based summarization every 3rd extraction.
+- **Context-aware agents** — Read-only tools run in parallel, write tools serialized
 
 ### 📝 Multi-Layer Project Instructions
 ```
@@ -126,9 +122,9 @@ Local:     ./GOKIN.local.md (git-ignored)
 - `@include` directive: `@./path`, `@~/path`, `@/absolute/path`
 - File watching with auto-reload on changes
 
-### ⚒️ 54 Built-in Tools
+### ⚒️ 50 Built-in Tools
 - **Files**: read, write, edit, diff, batch, copy, move, delete
-- **Search**: glob, grep, semantic_search, tree, code_graph
+- **Search**: glob, grep, tree
 - **Git**: status, commit, diff, branch, log, blame, PR
 - **Run**: bash, run_tests, ssh, env
 - **Plan**: todo, task, enter_plan_mode, coordinate
@@ -155,13 +151,13 @@ Local:     ./GOKIN.local.md (git-ignored)
 - **Git worktree support** — parallel branch work with isolated sessions
 
 ### 💰 Cost Tracking
-- Per-model pricing for all 20+ models across 8 providers
+- Per-model pricing for GLM, MiniMax, Kimi models (Ollama is free)
 - Real-time cost in status bar (`$0.0243`)
 - Per-response cost in message footer
 - `/cost` and `/stats` commands with accurate model-specific pricing
 
 ### 🔄 Prompt Caching
-- Explicit `cache_control` breakpoints for Anthropic, MiniMax, and Kimi
+- Explicit `cache_control` breakpoints for MiniMax and Kimi
 - System prompt, tools, and conversation prefix cached — up to 90% input cost savings
 - Cache break detection with efficiency tracking
 
@@ -182,8 +178,8 @@ Local:     ./GOKIN.local.md (git-ignored)
 ```
 ┌──────────┐          ┌──────────────────┐
 │  Gokin   │ ──TLS──▶ │  Provider API    │
-│  (local) │          │  (Gemini/Claude/  │
-│          │ ◀──TLS── │   DeepSeek/etc.) │
+│  (local) │          │  (Z.AI / Kimi /  │
+│          │ ◀──TLS── │   MiniMax / ...) │
 └──────────┘          └──────────────────┘
 
 No middle servers. No Vercel. No telemetry proxies.
@@ -238,31 +234,29 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 ## ☁️ Providers <a id="providers"></a>
 
 > [!IMPORTANT]
-> **Recommended providers:** Gokin supports many providers, but testing every model combination is not feasible. I am **confident in stable operation** with these two:
-> - **MiniMax Coding Plan** (M2.7 / M2.5) — best choice for coding
-> - **GLM Coding Plan** (GLM-5 / GLM-4.7) — excellent budget option
+> **Recommended providers:** Gokin ships with a focused set of 4 providers. Daily-driver confidence is highest on:
+> - **GLM Coding Plan** (GLM-5 / GLM-5.1) — **recommended, budget option** (~$3/month)
+> - **MiniMax** (M2.7 / M2.5) — **recommended for coding**, 200K context
 >
-> Other providers work but may have behavioral quirks that haven't been fully tested. For the most stable experience, use MiniMax or GLM.
+> Kimi and Ollama also work end-to-end; pick whichever matches your workflow.
 
 | Provider | Models | Auth | Notes |
 |----------|--------|------|-------|
-| **MiniMax** ⭐ | M2.7, M2.5 | API key | 200K context, **recommended for coding** |
-| **GLM** ⭐ | GLM-5, GLM-4.7 | API key | **recommended, budget option** |
-| **Gemini** | 3.1-pro, 3-flash, 2.5-pro | API key / OAuth | Free tier, native tools |
-| **Anthropic** | Opus 4, Sonnet 4.5, Haiku | API key | Best reasoning |
-| **OpenAI** | GPT-5.3 Codex, o3, o4-mini | OAuth | Codex models |
-| **DeepSeek** | Chat, Reasoner | API key | Best price/quality |
-| **Kimi** | K2.5, K2 Thinking Turbo, K2 Turbo | API key | Fast reasoning, 256K context |
-| **Ollama** | Any local model | None | 100% offline |
+| **GLM** ⭐ | glm-5.1, glm-5, glm-4.7 | API key | Budget-friendly coding plan, thinking mode supported |
+| **MiniMax** ⭐ | M2.7, M2.7-highspeed, M2.5, M2.5-highspeed | API key | 200K context, strong on agentic coding |
+| **Kimi** | k2.5, k2-thinking-turbo, k2-turbo | API key | Fast reasoning, 256K context |
+| **Ollama** | Any local model | None | 100% offline, no network calls |
+
+All cloud providers use Anthropic-compatible APIs and share the same client (`internal/client/anthropic.go`) — fewer moving parts, consistent behavior. Ollama uses its own native client.
 
 Switch anytime:
 ```
-> /provider gemini
-> /model 3-flash
-> /provider anthropic
-> /model sonnet
-> /provider openai
-> /oauth-login openai
+> /provider glm
+> /model glm-5.1
+> /provider minimax
+> /model M2.7
+> /provider ollama
+> /model llama3.2
 ```
 
 ---
@@ -272,7 +266,6 @@ Switch anytime:
 | Command | Description |
 |---------|-------------|
 | `/login <provider> <key>` | Set API key |
-| `/oauth-login <provider>` | OAuth login (Gemini, OpenAI) |
 | `/provider <name>` | Switch provider |
 | `/model <name>` | Switch model |
 | `/plan` | Enter planning mode |
@@ -304,26 +297,21 @@ Switch anytime:
 
 ```yaml
 api:
-  gemini_key: "your-key"
-  active_provider: "gemini"
+  glm_key: "your-glm-key"
+  active_provider: "glm"
 model:
-  name: "gemini-3-flash-preview"
+  name: "glm-5"
 ```
 
 ### Full Reference
 
 ```yaml
 api:
-  gemini_key: ""
-  anthropic_key: ""
-  deepseek_key: ""
   glm_key: ""
-  kimi_key: ""
   minimax_key: ""
-  openai_oauth:                   # OAuth-only provider
-    access_token: ""
-    refresh_token: ""
-  active_provider: "gemini"
+  kimi_key: ""
+  ollama_key: ""                 # optional, only for remote Ollama with auth
+  active_provider: "glm"
   ollama_base_url: "http://localhost:11434"
   retry:
     max_retries: 10
@@ -331,12 +319,9 @@ api:
     http_timeout: 120s
     stream_idle_timeout: 30s
     providers:
-      anthropic:
+      glm:
         http_timeout: 5m
-        stream_idle_timeout: 120s
-      deepseek:
-        http_timeout: 5m
-        stream_idle_timeout: 120s
+        stream_idle_timeout: 180s
       minimax:
         http_timeout: 5m
         stream_idle_timeout: 120s
@@ -345,10 +330,12 @@ api:
         stream_idle_timeout: 120s
 
 model:
-  name: "gemini-3-flash-preview"
-  temperature: 1.0
-  max_output_tokens: 8192
-  enable_thinking: false       # Anthropic extended thinking
+  name: "glm-5"
+  temperature: 0.7
+  max_output_tokens: 131072
+  enable_thinking: false          # GLM / compat-API extended thinking
+  thinking_budget: 0              # 0 = auto (8192 for GLM 4.7+/5.x when thinking enabled)
+  force_weak_optimizations: false # opt Strong-tier models into weak-tier safeguards
 
 tools:
   timeout: 2m
@@ -359,14 +346,14 @@ tools:
 
 permission:
   enabled: true
-  default_policy: "ask"       # allow, ask, deny
+  default_policy: "ask"           # allow, ask, deny
 
 plan:
   enabled: true
   require_approval: true
 
 ui:
-  theme: "dark"               # dark, macos, light
+  theme: "dark"                   # dark, macos, light
   stream_output: true
   markdown_rendering: true
 ```
@@ -381,13 +368,12 @@ gokin/
 ├── internal/
 │   ├── app/            # Orchestrator & message loop
 │   ├── agent/          # Multi-agent system
-│   ├── client/         # 8 API providers
-│   ├── tools/          # 54 built-in tools
+│   ├── client/         # AnthropicClient (compat) + OllamaClient
+│   ├── tools/          # 50 built-in tools
 │   ├── ui/             # Bubble Tea TUI
 │   ├── config/         # YAML config
 │   ├── permission/     # 3-level security
 │   ├── memory/         # Persistent memory
-│   ├── semantic/       # Embeddings & search
 │   └── ...
 ```
 
@@ -429,8 +415,8 @@ go vet ./...
 ## 🙏 Acknowledgments <a id="acknowledgments"></a>
 
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) — TUI framework
-- [Gemini API](https://github.com/google/generative-ai-go) — Google AI SDK
 - [Lipgloss](https://github.com/charmbracelet/lipgloss) — Terminal styling
+- [Ollama](https://github.com/ollama/ollama) — Local LLM runtime
 
 ---
 
