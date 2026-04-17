@@ -8,10 +8,15 @@ import (
 )
 
 // Default base URLs for API providers.
+// DefaultAnthropicBaseURL is the fallback endpoint inside AnthropicClient when
+// a provider doesn't set its own BaseURL. The anthropic provider itself has
+// been removed from Providers/factory in v0.65.0, but GLM/Kimi/MiniMax still
+// route through AnthropicClient in compat mode with explicit BaseURL values
+// that override this constant, so keeping it here avoids accidental requests
+// against api.anthropic.com.
 const (
 	DefaultAnthropicBaseURL = "https://api.anthropic.com"
 	DefaultGLMBaseURL       = "https://api.z.ai/api/anthropic"
-	DefaultDeepSeekBaseURL  = "https://api.deepseek.com/anthropic"
 	DefaultMiniMaxBaseURL   = "https://api.minimax.io/anthropic"
 	DefaultKimiBaseURL      = "https://api.moonshot.ai/anthropic"
 )
@@ -96,21 +101,6 @@ var AvailableModels = []ModelInfo{
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},
-	// DeepSeek models (via Anthropic-compatible API)
-	{
-		ID:          "deepseek-chat",
-		Name:        "DeepSeek Chat",
-		Description: "Powerful coding assistant from DeepSeek",
-		Provider:    "deepseek",
-		BaseURL:     DefaultDeepSeekBaseURL,
-	},
-	{
-		ID:          "deepseek-reasoner",
-		Name:        "DeepSeek Reasoner",
-		Description: "Extended reasoning model (thinking)",
-		Provider:    "deepseek",
-		BaseURL:     DefaultDeepSeekBaseURL,
-	},
 	// MiniMax models (via Anthropic-compatible API)
 	{
 		ID:          "MiniMax-M2.7",
@@ -161,25 +151,6 @@ var AvailableModels = []ModelInfo{
 		Description: "Fast coding model, 256K context",
 		Provider:    "kimi",
 		BaseURL:     DefaultKimiBaseURL,
-	},
-	// Anthropic models (native API)
-	{
-		ID:          "claude-opus-4-6",
-		Name:        "Claude Opus 4.6",
-		Description: "Most capable Claude model",
-		Provider:    "anthropic",
-	},
-	{
-		ID:          "claude-sonnet-4-5-20250929",
-		Name:        "Claude Sonnet 4.5",
-		Description: "Balanced: fast & capable",
-		Provider:    "anthropic",
-	},
-	{
-		ID:          "claude-haiku-4-5-20251001",
-		Name:        "Claude Haiku 4.5",
-		Description: "Fast & affordable",
-		Provider:    "anthropic",
 	},
 	// Ollama (local models - use exact name from 'ollama list')
 	{

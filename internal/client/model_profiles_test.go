@@ -12,9 +12,7 @@ func TestGetModelProfile_ExactMatch(t *testing.T) {
 		wantTools  bool
 	}{
 		{"llama3.2", "llama", 128000, true},
-		{"claude-sonnet", "anthropic", 200000, true},
 		{"gemini-3-flash", "gemini", 1000000, true},
-		{"deepseek-chat", "deepseek", 64000, true},
 		{"glm-5", "glm", 128000, true},
 		{"kimi-k2.5", "kimi", 256000, true},
 		{"minimax-m2.5", "minimax", 204800, true},
@@ -44,11 +42,10 @@ func TestGetModelProfile_CaseInsensitive(t *testing.T) {
 		t.Errorf("uppercase LLAMA3.2: Family = %q, want llama", p.Family)
 	}
 
-	p = GetModelProfile("Claude-Sonnet")
-	if p.Family != "anthropic" {
-		t.Errorf("mixed case Claude-Sonnet: Family = %q, want anthropic", p.Family)
+	p = GetModelProfile("GLM-5")
+	if p.Family != "glm" {
+		t.Errorf("uppercase GLM-5: Family = %q, want glm", p.Family)
 	}
-
 }
 
 func TestGetModelProfile_TagStripping(t *testing.T) {
@@ -113,10 +110,8 @@ func TestGetModelProfile_Unknown(t *testing.T) {
 
 func TestGetModelProfile_IsCoding(t *testing.T) {
 	codingModels := []string{
-		"qwen2.5-coder", "codellama", "starcoder2", "deepseek-coder",
-		"claude-opus", "claude-sonnet", "deepseek-chat",
+		"qwen2.5-coder", "codellama", "starcoder2",
 		"glm-5", "glm-4.7", "kimi-k2.5", "kimi-k2",
-		"gemini-3.1-pro", "gemini-3-pro", "gemini-2.5-pro",
 		"minimax-m2.7", "minimax-m2.5",
 	}
 	for _, m := range codingModels {
@@ -153,7 +148,7 @@ func TestIsSmallByTag(t *testing.T) {
 }
 
 func TestKnownModelProfilesCount(t *testing.T) {
-	if len(knownModelProfiles) < 45 {
-		t.Errorf("knownModelProfiles has %d entries, expected at least 45", len(knownModelProfiles))
+	if len(knownModelProfiles) < 20 {
+		t.Errorf("knownModelProfiles has %d entries, expected at least 20", len(knownModelProfiles))
 	}
 }

@@ -40,23 +40,11 @@ var ModelPresets = map[string]ModelPreset{
 		Temperature:     0.7,
 		MaxOutputTokens: 131072,
 	},
-	"deepseek": {
-		Provider:        "deepseek",
-		Name:            "deepseek-chat",
-		Temperature:     1.0,
-		MaxOutputTokens: 8192,
-	},
 	"kimi": {
 		Provider:        "kimi",
 		Name:            "kimi-k2.5",
 		Temperature:     0.6,
 		MaxOutputTokens: 32768,
-	},
-	"anthropic": {
-		Provider:        "anthropic",
-		Name:            "claude-sonnet-4-5-20250929",
-		Temperature:     1.0,
-		MaxOutputTokens: 16384,
 	},
 	"minimax": {
 		Provider:        "minimax",
@@ -108,7 +96,7 @@ func ListPresets() []string {
 // provider-appropriate output cap and model name.
 func providerDefaultPreset(provider string) string {
 	switch provider {
-	case "glm", "anthropic", "deepseek", "kimi", "minimax", "ollama":
+	case "glm", "kimi", "minimax", "ollama":
 		return provider
 	}
 	return ""

@@ -36,12 +36,10 @@ type APIConfig struct {
 	APIKey string `yaml:"api_key,omitempty"`
 
 	// Separate keys for each provider
-	AnthropicKey string `yaml:"anthropic_key,omitempty"`
-	GLMKey       string `yaml:"glm_key,omitempty"`
-	DeepSeekKey  string `yaml:"deepseek_key,omitempty"`
-	MiniMaxKey   string `yaml:"minimax_key,omitempty"`
-	KimiKey      string `yaml:"kimi_key,omitempty"`
-	OllamaKey    string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
+	GLMKey     string `yaml:"glm_key,omitempty"`
+	MiniMaxKey string `yaml:"minimax_key,omitempty"`
+	KimiKey    string `yaml:"kimi_key,omitempty"`
+	OllamaKey  string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
 
 	// Ollama server URL (default: http://localhost:11434)
 	OllamaBaseURL string `yaml:"ollama_base_url,omitempty"`
@@ -406,16 +404,16 @@ type UpdateConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		API: APIConfig{
-			Backend: "gemini",
+			Backend: "glm",
 			Retry: RetryConfig{
 				MaxRetries: DefaultMaxRetries,
 				RetryDelay: DefaultRetryDelay,
 			},
 		},
 		Model: ModelConfig{
-			Name:            "gemini-3-flash-preview", // Default - matches default backend "gemini"
-			Temperature:     1.0,
-			MaxOutputTokens: 8192,
+			Name:            "glm-5", // Default - matches default backend "glm"
+			Temperature:     0.7,
+			MaxOutputTokens: 131072,
 			EnableThinking:  false, // Disabled by default
 			ThinkingBudget:  0,     // 0 = disabled
 			MaxPoolSize:     5,     // Default pool size

@@ -87,18 +87,6 @@ func TestHasProvider(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "anthropic with key",
-			api:      APIConfig{AnthropicKey: "sk-ant-123"},
-			provider: "anthropic",
-			want:     true,
-		},
-		{
-			name:     "anthropic without key",
-			api:      APIConfig{},
-			provider: "anthropic",
-			want:     false,
-		},
-		{
 			name:     "glm with key",
 			api:      APIConfig{GLMKey: "glm-123"},
 			provider: "glm",
@@ -111,8 +99,8 @@ func TestHasProvider(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "glm with legacy key but different active provider",
-			api:      APIConfig{APIKey: "legacy-key", ActiveProvider: "anthropic"},
+			name:     "glm without key",
+			api:      APIConfig{},
 			provider: "glm",
 			want:     false,
 		},
@@ -123,15 +111,15 @@ func TestHasProvider(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "glm with key",
-			api:      APIConfig{GLMKey: "glm-key"},
-			provider: "glm",
+			name:     "kimi with key",
+			api:      APIConfig{KimiKey: "kimi-key"},
+			provider: "kimi",
 			want:     true,
 		},
 		{
-			name:     "deepseek with key",
-			api:      APIConfig{DeepSeekKey: "ds-key"},
-			provider: "deepseek",
+			name:     "minimax with key",
+			api:      APIConfig{MiniMaxKey: "mm-key"},
+			provider: "minimax",
 			want:     true,
 		},
 	}
@@ -154,12 +142,12 @@ func TestGetActiveKey(t *testing.T) {
 	}{
 		{
 			name: "provider key found",
-			api:  APIConfig{ActiveProvider: "anthropic", AnthropicKey: "sk-123"},
-			want: "sk-123",
+			api:  APIConfig{ActiveProvider: "glm", GLMKey: "glm-123"},
+			want: "glm-123",
 		},
 		{
 			name: "fallback to legacy key",
-			api:  APIConfig{ActiveProvider: "gemini", APIKey: "legacy"},
+			api:  APIConfig{ActiveProvider: "glm", APIKey: "legacy"},
 			want: "legacy",
 		},
 		{
@@ -182,9 +170,9 @@ func TestGetActiveKey(t *testing.T) {
 func TestSetProviderKey(t *testing.T) {
 	api := APIConfig{}
 
-	api.SetProviderKey("anthropic", "sk-new")
-	if api.AnthropicKey != "sk-new" {
-		t.Errorf("SetProviderKey(anthropic) failed: got %q", api.AnthropicKey)
+	api.SetProviderKey("kimi", "km-new")
+	if api.KimiKey != "km-new" {
+		t.Errorf("SetProviderKey(kimi) failed: got %q", api.KimiKey)
 	}
 
 	api.SetProviderKey("glm", "glm-new")
@@ -199,14 +187,14 @@ func TestSetProviderKey(t *testing.T) {
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Model.Name != "gemini-3-flash-preview" {
-		t.Errorf("Model.Name = %q, want gemini-3-flash-preview", cfg.Model.Name)
+	if cfg.Model.Name != "glm-5" {
+		t.Errorf("Model.Name = %q, want glm-5", cfg.Model.Name)
 	}
-	if cfg.Model.Temperature != 1.0 {
-		t.Errorf("Model.Temperature = %v, want 1.0", cfg.Model.Temperature)
+	if cfg.Model.Temperature != 0.7 {
+		t.Errorf("Model.Temperature = %v, want 0.7", cfg.Model.Temperature)
 	}
-	if cfg.Model.MaxOutputTokens != 8192 {
-		t.Errorf("Model.MaxOutputTokens = %v, want 8192", cfg.Model.MaxOutputTokens)
+	if cfg.Model.MaxOutputTokens != 131072 {
+		t.Errorf("Model.MaxOutputTokens = %v, want 131072", cfg.Model.MaxOutputTokens)
 	}
 	if cfg.Tools.Bash.Sandbox != true {
 		t.Error("Tools.Bash.Sandbox should be true by default")

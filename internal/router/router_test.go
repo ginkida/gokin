@@ -13,15 +13,9 @@ func TestInferModelCapability(t *testing.T) {
 		wantTier CapabilityTier
 	}{
 		// Strong tier
-		{"anthropic", "claude-sonnet-4-5", CapabilityStrong},
-		{"openai", "gpt-5.4", CapabilityStrong},
-		{"gemini", "gemini-3-pro", CapabilityStrong},
 		{"glm", "glm-5-plus", CapabilityStrong},
 
 		// Medium tier
-		{"gemini", "gemini-3-flash-preview", CapabilityMedium},
-		{"gemini", "gemini-2.0-flash-lite", CapabilityMedium},
-		{"deepseek", "deepseek-chat", CapabilityMedium},
 		{"kimi", "kimi-k2.5", CapabilityMedium},
 		{"minimax", "MiniMax-M2.5", CapabilityMedium},
 		{"glm", "glm-4", CapabilityMedium},
@@ -61,7 +55,7 @@ func TestCapabilityTierAdjustments(t *testing.T) {
 		t.Error("weak SelfReviewBoost should be true")
 	}
 
-	medium := InferModelCapability("deepseek", "deepseek-chat")
+	medium := InferModelCapability("kimi", "kimi-k2.5")
 	if medium.DecomposeAdjust != -1 {
 		t.Errorf("medium DecomposeAdjust = %d, want -1", medium.DecomposeAdjust)
 	}
@@ -69,7 +63,7 @@ func TestCapabilityTierAdjustments(t *testing.T) {
 		t.Errorf("medium ThinkingMultiplier = %f, want 1.2", medium.ThinkingMultiplier)
 	}
 
-	strong := InferModelCapability("anthropic", "claude-sonnet-4-5")
+	strong := InferModelCapability("glm", "glm-5.1")
 	if strong.DecomposeAdjust != 0 {
 		t.Errorf("strong DecomposeAdjust = %d, want 0", strong.DecomposeAdjust)
 	}

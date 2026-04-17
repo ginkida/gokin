@@ -116,7 +116,7 @@ func TestValidateRetryConfig(t *testing.T) {
 				API: APIConfig{
 					Retry: RetryConfig{
 						Providers: map[string]ProviderRetryConfig{
-							"anthropic": {HTTPTimeout: 5 * time.Minute},
+							"glm": {HTTPTimeout: 5 * time.Minute},
 						},
 					},
 				},
@@ -142,7 +142,7 @@ func TestValidateRetryConfig(t *testing.T) {
 				API: APIConfig{
 					Retry: RetryConfig{
 						Providers: map[string]ProviderRetryConfig{
-							"gemini": {HTTPTimeout: 500 * time.Millisecond}, // too small
+							"glm": {HTTPTimeout: 500 * time.Millisecond}, // too small
 						},
 					},
 				},

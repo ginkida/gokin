@@ -8,7 +8,7 @@ type CapabilityTier int
 const (
 	CapabilityWeak   CapabilityTier = iota // Ollama small, unknown models
 	CapabilityMedium                       // GLM, DeepSeek, Kimi, MiniMax
-	CapabilityStrong                       // Anthropic, OpenAI, Gemini Pro
+	CapabilityStrong                       // GLM-5+
 )
 
 func (t CapabilityTier) String() string {
@@ -44,15 +44,6 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 
 	p := strings.ToLower(provider)
 	switch p {
-	case "anthropic", "openai":
-		cap.Tier = CapabilityStrong
-	case "gemini":
-		cap.Tier = CapabilityStrong
-		// Downgrade for flash/lite models
-		m := strings.ToLower(modelName)
-		if strings.Contains(m, "flash") || strings.Contains(m, "lite") {
-			cap.Tier = CapabilityMedium
-		}
 	case "glm":
 		cap.Tier = CapabilityMedium
 		// GLM-5+ models are strong-tier
@@ -60,7 +51,7 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 		if strings.HasPrefix(m, "glm-5") {
 			cap.Tier = CapabilityStrong
 		}
-	case "deepseek", "kimi", "minimax":
+	case "kimi", "minimax":
 		cap.Tier = CapabilityMedium
 	case "ollama":
 		cap.Tier = CapabilityWeak

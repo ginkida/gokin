@@ -35,26 +35,6 @@ type KeyValidationDef struct {
 // Optional but recommended: add key validation endpoint and setup copy in internal/setup/wizard.go.
 var Providers = []ProviderDef{
 	{
-		Name:          "anthropic",
-		DisplayName:   "Anthropic (Claude)",
-		DefaultModel:  "claude-sonnet-4-5-20250929",
-		EnvVars:       []string{"GOKIN_ANTHROPIC_KEY", "ANTHROPIC_API_KEY"},
-		UsesLegacyKey: true,
-		GetKey:        func(api *APIConfig) string { return api.AnthropicKey },
-		SetKey:        func(api *APIConfig, key string) { api.AnthropicKey = key },
-		ModelPrefixes: []string{"claude"},
-		SetupKeyURL:   "https://console.anthropic.com/settings/keys",
-		KeyValidation: KeyValidationDef{
-			URL:        "https://api.anthropic.com/v1/models",
-			AuthMode:   "header",
-			HeaderName: "x-api-key",
-			ExtraHeaders: map[string]string{
-				"anthropic-version": "2023-06-01",
-			},
-			SuccessStatuses: []int{200},
-		},
-	},
-	{
 		Name:          "glm",
 		DisplayName:   "GLM (BigModel / Z.AI)",
 		DefaultModel:  "glm-5.1",
@@ -66,22 +46,6 @@ var Providers = []ProviderDef{
 		SetupKeyURL:   "https://open.bigmodel.cn",
 		KeyValidation: KeyValidationDef{
 			URL:             "https://open.bigmodel.cn/api/paas/v4/models",
-			AuthMode:        "bearer",
-			SuccessStatuses: []int{200},
-		},
-	},
-	{
-		Name:          "deepseek",
-		DisplayName:   "DeepSeek",
-		DefaultModel:  "deepseek-chat",
-		EnvVars:       []string{"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY"},
-		UsesLegacyKey: true,
-		GetKey:        func(api *APIConfig) string { return api.DeepSeekKey },
-		SetKey:        func(api *APIConfig, key string) { api.DeepSeekKey = key },
-		ModelPrefixes: []string{"deepseek"},
-		SetupKeyURL:   "https://platform.deepseek.com/api_keys",
-		KeyValidation: KeyValidationDef{
-			URL:             "https://api.deepseek.com/models",
 			AuthMode:        "bearer",
 			SuccessStatuses: []int{200},
 		},

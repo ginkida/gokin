@@ -161,8 +161,6 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 	switch provider {
 	case "glm":
 		return newGLMClient(cfg, modelID)
-	case "deepseek":
-		return newDeepSeekClient(cfg, modelID)
 	case "minimax":
 		return newMiniMaxClient(cfg, modelID)
 	case "kimi":
@@ -276,63 +274,6 @@ func supportsGLMThinking(modelID string) bool {
 	return strings.HasPrefix(m, "glm-5") || strings.HasPrefix(m, "glm-4.7")
 }
 
-// newDeepSeekClient creates a DeepSeek client using Anthropic-compatible API.
-func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
-	// Load API key from environment or config via registry
-	p := config.GetProvider("deepseek")
-	if p == nil {
-		return nil, fmt.Errorf("provider registry missing entry for deepseek")
-	}
-	legacyKey := ""
-	if p.UsesLegacyKey {
-		legacyKey = cfg.API.APIKey
-	}
-	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
-
-	if !loadedKey.IsSet() {
-		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
-	}
-
-	// Log key source for debugging (without exposing the key)
-	logging.Debug("loaded API key",
-		"provider", p.Name,
-		"source", loadedKey.Source,
-		"model", modelID)
-
-	// Validate key format
-	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
-		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
-	}
-
-	// Use custom base URL if provided, otherwise use default DeepSeek endpoint
-	baseURL := cfg.Model.CustomBaseURL
-	if baseURL == "" {
-		baseURL = DefaultDeepSeekBaseURL
-	}
-
-	// DeepSeek may have long silent reasoning/tool phases on complex prompts.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "deepseek", 120*time.Second, 5*time.Minute)
-
-	anthropicConfig := AnthropicConfig{
-		APIKey:            loadedKey.Value,
-		BaseURL:           baseURL,
-		Model:             modelID,
-		MaxTokens:         cfg.Model.MaxOutputTokens,
-		Temperature:       cfg.Model.Temperature,
-		StreamEnabled:     true,
-		EnableThinking:    cfg.Model.EnableThinking,
-		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: streamIdleTimeout,
-		// Request retries are orchestrated at App layer.
-		MaxRetries:  0,
-		RetryDelay:  cfg.API.Retry.RetryDelay,
-		HTTPTimeout: httpTimeout,
-		Provider:    "deepseek",
-	}
-
-	return NewAnthropicClient(anthropicConfig)
-}
-
 // newMiniMaxClient creates a MiniMax client using Anthropic-compatible API.
 func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 	p := config.GetProvider("minimax")
@@ -433,63 +374,6 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 		RetryDelay:        cfg.API.Retry.RetryDelay,
 		HTTPTimeout:       httpTimeout,
 		Provider:          "kimi",
-	}
-
-	return NewAnthropicClient(anthropicConfig)
-}
-
-// newAnthropicNativeClient creates a native Anthropic client for Claude models.
-func newAnthropicNativeClient(cfg *config.Config, modelID string) (Client, error) {
-	// Load API key from environment or config via registry
-	p := config.GetProvider("anthropic")
-	if p == nil {
-		return nil, fmt.Errorf("provider registry missing entry for anthropic")
-	}
-	legacyKey := ""
-	if p.UsesLegacyKey {
-		legacyKey = cfg.API.APIKey
-	}
-	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
-
-	if !loadedKey.IsSet() {
-		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
-	}
-
-	// Log key source for debugging (without exposing the key)
-	logging.Debug("loaded API key",
-		"provider", p.Name,
-		"source", loadedKey.Source,
-		"model", modelID)
-
-	// Validate key format
-	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
-		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
-	}
-
-	// Use custom base URL if provided, otherwise use default Anthropic endpoint
-	baseURL := cfg.Model.CustomBaseURL
-	if baseURL == "" {
-		baseURL = DefaultAnthropicBaseURL
-	}
-
-	// Anthropic can also produce long silent phases with extended thinking/tools.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "anthropic", 120*time.Second, 5*time.Minute)
-
-	anthropicConfig := AnthropicConfig{
-		APIKey:            loadedKey.Value,
-		BaseURL:           baseURL,
-		Model:             modelID,
-		MaxTokens:         cfg.Model.MaxOutputTokens,
-		Temperature:       cfg.Model.Temperature,
-		StreamEnabled:     true,
-		EnableThinking:    cfg.Model.EnableThinking,
-		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: streamIdleTimeout,
-		// Request retries are orchestrated at App layer.
-		MaxRetries:  0,
-		RetryDelay:  cfg.API.Retry.RetryDelay,
-		HTTPTimeout: httpTimeout,
-		Provider:    "anthropic",
 	}
 
 	return NewAnthropicClient(anthropicConfig)

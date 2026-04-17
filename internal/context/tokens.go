@@ -45,19 +45,6 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  1048576,
 		MaxOutputTokens: 65536,
 	},
-	// Anthropic Claude
-	"claude-opus": {
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 32000,
-	},
-	"claude-sonnet": {
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 16384,
-	},
-	"claude-haiku": {
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 8192,
-	},
 	// GLM — explicit entries avoid relying on substring-fuzzy fallback
 	// (which would either miss 4.x variants entirely or return the generic
 	// 128K/8K default from getModelLimits). Values assume Z.AI's current
@@ -94,15 +81,6 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  128000,
 		MaxOutputTokens: 32768,
 	},
-	// DeepSeek
-	"deepseek-chat": {
-		MaxInputTokens:  64000,
-		MaxOutputTokens: 8192,
-	},
-	"deepseek-reasoner": {
-		MaxInputTokens:  64000,
-		MaxOutputTokens: 8192,
-	},
 	// MiniMax
 	"minimax": {
 		MaxInputTokens:  204800,
@@ -135,14 +113,9 @@ var DefaultPricing = map[string]ModelPricing{
 	"gemini-2.5-pro":   {InputCostPer1M: 1.25, OutputCostPer1M: 10.00},
 
 	// Anthropic
-	"claude-opus":   {InputCostPer1M: 15.00, OutputCostPer1M: 75.00},
-	"claude-sonnet": {InputCostPer1M: 3.00, OutputCostPer1M: 15.00},
-	"claude-haiku":  {InputCostPer1M: 0.80, OutputCostPer1M: 4.00},
 
 
 	// DeepSeek
-	"deepseek-chat":     {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},
-	"deepseek-reasoner": {InputCostPer1M: 0.55, OutputCostPer1M: 2.19},
 
 	// GLM (prices in USD equivalent from CNY)
 	"glm-5.1":     {InputCostPer1M: 4.00, OutputCostPer1M: 16.00},

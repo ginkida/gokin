@@ -37,7 +37,6 @@ var knownModelProfiles = map[string]ModelProfile{
 	// Code-specialized
 	"codellama":      {Family: "codellama", ContextWindow: 16384, SupportsTools: false, IsCoding: true},
 	"starcoder2":     {Family: "starcoder", ContextWindow: 16384, SupportsTools: false, IsCoding: true},
-	"deepseek-coder": {Family: "deepseek", ContextWindow: 16384, SupportsTools: false, IsCoding: true},
 	"codegemma":      {Family: "gemma", ContextWindow: 8192, SupportsTools: false, IsCoding: true},
 
 	// Gemma family
@@ -47,15 +46,6 @@ var knownModelProfiles = map[string]ModelProfile{
 	// Command R family
 	"command-r-plus": {Family: "command-r", ContextWindow: 128000, SupportsTools: true},
 	"command-r":      {Family: "command-r", ContextWindow: 128000, SupportsTools: true},
-
-	// Anthropic Claude family
-	"claude-opus":   {Family: "anthropic", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
-	"claude-sonnet": {Family: "anthropic", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
-	"claude-haiku":  {Family: "anthropic", ContextWindow: 200000, SupportsTools: true, IsSmall: true},
-
-	// DeepSeek family
-	"deepseek-chat":     {Family: "deepseek", ContextWindow: 64000, SupportsTools: true, IsCoding: true},
-	"deepseek-reasoner": {Family: "deepseek", ContextWindow: 64000, SupportsTools: true, IsCoding: true},
 
 	// GLM family
 	"glm-5.1":     {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
