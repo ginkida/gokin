@@ -99,7 +99,6 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"Git", []string{"init", "commit", "pr"}},
 		{"Planning", []string{"plan", "resume-plan", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "memory-governance", "tree-stats"}},
 		{"Tools", []string{"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
-			"semantic-stats", "semantic-reindex",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"}},
 	}
 

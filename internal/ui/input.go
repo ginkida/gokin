@@ -212,8 +212,6 @@ func defaultCommands() []CommandInfo {
 		{Name: "theme", Description: "Change UI theme", Category: "Tools",
 			Args:  []ArgInfo{{Name: "name", Required: false, Type: "option", Options: []string{"dark", "macos", "light"}}},
 			Usage: "/theme [dark|macos|light]"},
-		{Name: "semantic-stats", Description: "Show semantic index statistics", Category: "Tools"},
-		{Name: "semantic-reindex", Description: "Reindex semantic search", Category: "Tools"},
 		{Name: "register-agent-type", Description: "Register a custom agent type", Category: "Tools",
 			Args:  []ArgInfo{{Name: "name", Required: true, Type: "string"}, {Name: "description", Required: true, Type: "string"}},
 			Usage: `/register-agent-type <name> "<desc>" [--tools ...]`},

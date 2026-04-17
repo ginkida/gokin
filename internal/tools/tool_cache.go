@@ -77,7 +77,6 @@ func (c *ToolResultCache) IsCacheable(toolName string) bool {
 		"git_blame":  true, // Blame info
 		"git_status": true, // Git status (short TTL, invalidated by writes)
 		"git_diff":   true, // Git diff (short TTL, invalidated by writes)
-		"code_graph": true, // Code structure analysis
 	}
 
 	return cacheableTools[toolName]

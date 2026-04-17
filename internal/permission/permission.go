@@ -85,7 +85,7 @@ func GetToolRiskLevel(toolName string) RiskLevel {
 	switch toolName {
 	case "read", "glob", "grep", "tree", "diff", "env", "list_dir",
 		"git_status", "git_log", "git_diff", "git_blame",
-		"code_graph", "semantic_search", "history_search",
+		"history_search",
 		"web_search", "web_fetch", "todo",
 		"task_output", "task_stop":
 		return RiskLow

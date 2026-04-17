@@ -283,8 +283,6 @@ func (m Model) getCommandHint(input string) string {
 		"observability":     "Unified reliability and execution dashboard",
 		"memory-governance": "Show session archive/retention governance stats",
 		"tree-stats":        "Show planner tree depth, branches and limits",
-		"semantic-stats":    "Show semantic search index status",
-		"semantic-reindex":  "Rebuild semantic index for better retrieval",
 		"agents":            "Show/hide agent orchestrator tree (Ctrl+A)",
 		"insights":          "Show learning insights: strategy metrics, patterns, delegation stats",
 	}

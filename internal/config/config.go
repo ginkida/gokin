@@ -22,7 +22,6 @@ type Config struct {
 	Cache         CacheConfig         `yaml:"cache"`
 	Watcher       WatcherConfig       `yaml:"watcher"`
 	DiffPreview   DiffPreviewConfig   `yaml:"diff_preview"`
-	Semantic      SemanticConfig      `yaml:"semantic"`
 	MCP           MCPConfig           `yaml:"mcp"`
 	Update        UpdateConfig        `yaml:"update"`
 	SessionMemory SessionMemoryConfig `yaml:"session_memory"`
@@ -386,18 +385,6 @@ type DiffPreviewConfig struct {
 	Enabled bool `yaml:"enabled"` // Enable/disable diff preview for write/edit operations
 }
 
-// SemanticConfig holds semantic search settings.
-type SemanticConfig struct {
-	Enabled      bool          `yaml:"enabled"`        // Enable/disable semantic search
-	Model        string        `yaml:"model"`          // Embedding model (e.g., text-embedding-004)
-	IndexOnStart bool          `yaml:"index_on_start"` // Index workspace on startup
-	MaxFileSize  int64         `yaml:"max_file_size"`  // Max file size to index (bytes)
-	CacheTTL     time.Duration `yaml:"cache_ttl"`      // Cache TTL for embeddings
-	TopK         int           `yaml:"top_k"`          // Default number of results
-	ChunkSize    int           `yaml:"chunk_size"`     // Chunk size (characters)
-	ChunkOverlap int           `yaml:"chunk_overlap"`  // Overlap between chunks
-}
-
 // MCPConfig holds MCP (Model Context Protocol) settings.
 type MCPConfig struct {
 	Enabled             bool              `yaml:"enabled"`               // Enable/disable MCP support
@@ -606,14 +593,6 @@ func DefaultConfig() *Config {
 		},
 		DiffPreview: DiffPreviewConfig{
 			Enabled: true, // Enabled by default - show diff preview before write/edit
-		},
-		Semantic: SemanticConfig{
-			Enabled:      false,                // Disabled by default (requires API calls)
-			Model:        "text-embedding-004", // Default embedding model
-			IndexOnStart: false,                // Don't index on startup by default
-			MaxFileSize:  100 * 1024,           // 100KB max file size
-			CacheTTL:     24 * time.Hour,       // Cache embeddings for 24 hours
-			TopK:         10,                   // Return top 10 results
 		},
 		MCP: MCPConfig{
 			Enabled:             false, // Disabled by default

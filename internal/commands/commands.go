@@ -10,7 +10,6 @@ import (
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/plan"
-	"gokin/internal/semantic"
 	"gokin/internal/tools"
 	"gokin/internal/undo"
 )
@@ -49,7 +48,6 @@ type AppInterface interface {
 	GetTokenStats() TokenStats
 	GetModelSetter() ModelSetter
 	GetProjectInfo() *appcontext.ProjectInfo
-	GetSemanticIndexer() (*semantic.EnhancedIndexer, error)
 	GetPlanManager() *plan.Manager
 	GetTreePlanner() *agent.TreePlanner
 	IsPlanningModeEnabled() bool
@@ -118,10 +116,6 @@ func NewHandler() *Handler {
 
 	// Register context commands
 	h.Register(&InstructionsCommand{})
-
-	// Register semantic commands
-	h.Register(&SemanticStatsCommand{})
-	h.Register(&SemanticReindexCommand{})
 
 	// Register onboarding commands
 	h.Register(&QuickstartCommand{})

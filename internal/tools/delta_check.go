@@ -171,21 +171,15 @@ func (e *Executor) addPendingDeltaTargets(ctx context.Context, call *genai.Funct
 
 	pending := make(map[string]struct{})
 
-	if targets, err := resolveImpactTargets(ctx, workDir, call); err == nil {
-		for _, abs := range targets {
-			if rel, ok := deltaAbsToRel(workDir, abs); ok {
-				pending[rel] = struct{}{}
-			}
+	// Previously the impact_gate's dependency graph resolved indirect targets;
+	// with semantic search gone we fall back to explicit file paths from tool args.
+	for _, raw := range extractFilePaths(call) {
+		abs := raw
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(workDir, raw)
 		}
-	} else {
-		for _, raw := range extractFilePaths(call) {
-			abs, pathErr := resolveImpactPath(workDir, raw)
-			if pathErr != nil {
-				continue
-			}
-			if rel, ok := deltaAbsToRel(workDir, abs); ok {
-				pending[rel] = struct{}{}
-			}
+		if rel, ok := deltaAbsToRel(workDir, abs); ok {
+			pending[rel] = struct{}{}
 		}
 	}
 

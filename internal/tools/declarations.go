@@ -717,32 +717,6 @@ func RefactorToolDeclaration() *genai.FunctionDeclaration {
 	}
 }
 
-// CodeGraphToolDeclaration returns the declaration for the code_graph tool.
-func CodeGraphToolDeclaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
-		Name:        "code_graph",
-		Description: "Analyzes code structure and dependencies.",
-		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"action": {
-					Type:        genai.TypeString,
-					Description: "Action to perform: dependencies, references, callers, callees",
-				},
-				"symbol": {
-					Type:        genai.TypeString,
-					Description: "The symbol to analyze",
-				},
-				"file_path": {
-					Type:        genai.TypeString,
-					Description: "The file containing the symbol",
-				},
-			},
-			Required: []string{"action", "symbol"},
-		},
-	}
-}
-
 // ToolsListToolDeclaration returns the declaration for the tools_list tool.
 func ToolsListToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
@@ -1116,28 +1090,6 @@ func UpdateScratchpadToolDeclaration() *genai.FunctionDeclaration {
 	}
 }
 
-// SemanticSearchToolDeclaration returns the declaration for the semantic_search tool.
-func SemanticSearchToolDeclaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
-		Name:        "semantic_search",
-		Description: "Searches code using semantic similarity.",
-		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"query": {
-					Type:        genai.TypeString,
-					Description: "The semantic search query",
-				},
-				"top_k": {
-					Type:        genai.TypeInteger,
-					Description: "Number of results to return (default: 10)",
-				},
-			},
-			Required: []string{"query"},
-		},
-	}
-}
-
 // VerifyCodeToolDeclaration returns the declaration for the verify_code tool.
 func VerifyCodeToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
@@ -1230,7 +1182,6 @@ func GetAllDeclarations() map[string]*genai.FunctionDeclaration {
 		"redo_plan":            RedoPlanToolDeclaration(),
 		"batch":                BatchToolDeclaration(),
 		"refactor":             RefactorToolDeclaration(),
-		"code_graph":           CodeGraphToolDeclaration(),
 		"check_impact":         CheckImpactToolDeclaration(),
 		"memorize":             MemorizeToolDeclaration(),
 		"tools_list":           ToolsListToolDeclaration(),
@@ -1250,7 +1201,6 @@ func GetAllDeclarations() map[string]*genai.FunctionDeclaration {
 		"coordinate":           CoordinateToolDeclaration(),
 		"shared_memory":        SharedMemoryToolDeclaration(),
 		"update_scratchpad":    UpdateScratchpadToolDeclaration(),
-		"semantic_search":      SemanticSearchToolDeclaration(),
 		"verify_code":          VerifyCodeToolDeclaration(),
 		"pin_context":          PinContextToolDeclaration(),
 		"history_search":       HistorySearchToolDeclaration(),

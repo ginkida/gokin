@@ -174,8 +174,6 @@ func estimateToolCost(toolName string) float64 {
 		return 0.4 // Moderate to expensive
 	case "web_search", "web_fetch":
 		return 0.6 // Expensive (network + API)
-	case "semantic_search":
-		return 0.5 // Moderate (embeddings)
 	default:
 		return 0.3
 	}

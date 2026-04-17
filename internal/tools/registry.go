@@ -117,8 +117,6 @@ const (
 	ToolSetMemory ToolSet = "memory"
 	// ToolSetFileOps contains file management tools beyond core read/write/edit.
 	ToolSetFileOps ToolSet = "fileops"
-	// ToolSetSemantic contains semantic search tools (requires embeddings).
-	ToolSetSemantic ToolSet = "semantic"
 	// ToolSetOllamaCore is a minimal set for Ollama models.
 	ToolSetOllamaCore ToolSet = "ollama_core"
 )
@@ -148,9 +146,6 @@ var toolSetDefinitions = map[ToolSet][]string{
 	ToolSetAdvanced: {
 		"batch", "refactor", "check_impact",
 		"verify_code", "run_tests",
-	},
-	ToolSetSemantic: {
-		"semantic_search", "code_graph",
 	},
 	ToolSetMemory: {
 		"memory", "memorize", "pin_context", "history_search",
@@ -235,7 +230,6 @@ func DefaultRegistry(workDir string) *Registry {
 	r.MustRegister(NewRedoPlanTool())
 	r.MustRegister(NewBatchTool(workDir))
 	r.MustRegister(NewRefactorTool())
-	r.MustRegister(NewCodeGraphTool())
 	r.MustRegister(NewToolsListTool(r))
 	r.MustRegister(NewRequestToolTool())
 	r.MustRegister(NewAskAgentTool())
@@ -515,7 +509,6 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	// Code analysis tools
 	r.RegisterFactory("batch", func() Tool { return NewBatchTool(workDir) }, declarations["batch"])
 	r.RegisterFactory("refactor", func() Tool { return NewRefactorTool() }, declarations["refactor"])
-	r.RegisterFactory("code_graph", func() Tool { return NewCodeGraphTool() }, declarations["code_graph"])
 
 	// Git tools
 	r.RegisterFactory("git_log", func() Tool { return NewGitLogTool(workDir) }, declarations["git_log"])

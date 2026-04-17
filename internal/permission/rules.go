@@ -25,8 +25,6 @@ func DefaultRules() *Rules {
 			"git_log":         LevelAllow,
 			"git_diff":        LevelAllow,
 			"git_blame":       LevelAllow,
-			"code_graph":      LevelAllow,
-			"semantic_search": LevelAllow,
 			"history_search":  LevelAllow,
 			"web_search":      LevelAllow,
 			"web_fetch":       LevelAllow,

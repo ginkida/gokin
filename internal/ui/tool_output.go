@@ -339,8 +339,6 @@ func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary interface
 		icon = "🧠"
 	case "enter_plan_mode", "update_plan_progress", "get_plan_status", "exit_plan_mode":
 		icon = "📋"
-	case "semantic_search", "code_graph":
-		icon = "🔬"
 	case "ssh":
 		icon = "🔒"
 	case "list_dir", "tree":

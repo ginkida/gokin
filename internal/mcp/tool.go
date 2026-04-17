@@ -11,7 +11,6 @@ import (
 )
 
 // MCPTool wraps an MCP server tool as a Gokin tool.
-// Similar to SemanticSearchTool wrapping EnhancedIndexer.
 type MCPTool struct {
 	client      *Client                    // MCP client connection
 	serverName  string                     // Server name for identification

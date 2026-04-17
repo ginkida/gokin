@@ -26,7 +26,6 @@ import (
 	"gokin/internal/plan"
 	"gokin/internal/ratelimit"
 	"gokin/internal/router"
-	"gokin/internal/semantic"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
@@ -67,9 +66,6 @@ type Builder struct {
 	rateLimiter      *ratelimit.Limiter
 	auditLogger      *audit.Logger
 	fileWatcher      *watcher.Watcher
-	semanticIdx      *semantic.EnhancedIndexer
-	incrementalIdx   *semantic.IncrementalIndexer
-	backgroundIdx    *semantic.BackgroundIndexer
 	taskRouter       *router.Router
 	taskOrchestrator *TaskOrchestrator // Unified Task Orchestrator
 
@@ -1166,61 +1162,6 @@ func (b *Builder) initIntegrations() error {
 		}
 	}
 
-	// Initialize semantic search
-	if b.cfg.Semantic.Enabled && b.configDirErr == nil {
-		// Always create a separate Gemini client for semantic search embeddings
-		// This works regardless of which chat model is selected (Gemini, GLM-4.7, Claude)
-		genaiClient, err := genai.NewClient(b.ctx, &genai.ClientConfig{
-			APIKey:  b.cfg.API.APIKey,
-			Backend: genai.BackendGeminiAPI,
-		})
-		if err != nil {
-			logging.Error("failed to create Gemini client for semantic search", "error", err)
-			// Continue without semantic search
-		} else {
-			embedder := semantic.NewEmbedder(genaiClient, b.cfg.Semantic.Model)
-			// Use per-project cache (each project gets its own cache file)
-			semanticCache := semantic.NewEmbeddingCache(b.configDir, b.workDir, b.cfg.Semantic.CacheTTL)
-			// Store project path in cache for metadata
-			semanticCache.SetProjectDir(b.workDir)
-
-			// Create enhanced indexer with persistence
-			b.semanticIdx = semantic.NewEnhancedIndexer(
-				embedder,
-				b.workDir,
-				semanticCache,
-				b.cfg.Semantic.MaxFileSize,
-				b.configDir,
-			)
-
-			// Create incremental indexer wrapping enhanced indexer
-			bgConfig := semantic.DefaultBackgroundIndexerConfig()
-			b.incrementalIdx = semantic.NewIncrementalIndexer(
-				b.semanticIdx,
-				bgConfig.BatchSize,
-				bgConfig.Workers,
-			)
-
-			// Create background indexer for watcher-driven incremental indexing
-			b.backgroundIdx = semantic.NewBackgroundIndexer(
-				b.ctx,
-				b.incrementalIdx,
-				b.fileWatcher,
-				b.workDir,
-				bgConfig,
-			)
-			b.backgroundIdx.SetOnError(func(err error) {
-				logging.Warn("background semantic indexing error", "error", err)
-			})
-
-			b.registry.Register(tools.NewSemanticSearchTool(b.semanticIdx, b.workDir, b.cfg.Semantic.TopK))
-
-			logging.Debug("semantic search initialized with per-project storage",
-				"project", b.workDir,
-				"cache_ttl", b.cfg.Semantic.CacheTTL)
-		}
-	}
-
 	// Wire up plan mode tools
 	if enterPlanTool, ok := b.registry.Get("enter_plan_mode"); ok {
 		if ept, ok := enterPlanTool.(*tools.EnterPlanModeTool); ok {
@@ -1932,8 +1873,6 @@ func (b *Builder) assembleApp() *App {
 		rateLimiter:           b.rateLimiter,
 		auditLogger:           b.auditLogger,
 		fileWatcher:           b.fileWatcher,
-		semanticIndexer:       b.semanticIdx,
-		backgroundIndexer:     b.backgroundIdx,
 		taskRouter:            b.taskRouter,
 		orchestrator:          b.taskOrchestrator,
 		reliability:           NewReliabilityManager(),

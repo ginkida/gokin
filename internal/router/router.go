@@ -788,7 +788,7 @@ func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
 		}
 		sets = append(sets, tools.ToolSetFileOps, tools.ToolSetWeb,
 			tools.ToolSetAdvanced, tools.ToolSetPlanning,
-			tools.ToolSetAgent, tools.ToolSetMemory, tools.ToolSetSemantic)
+			tools.ToolSetAgent, tools.ToolSetMemory)
 		return r.filterToolSetsByCapability(sets)
 	}
 

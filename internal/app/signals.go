@@ -224,20 +224,6 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		}
 	}
 
-	// 6b. Stop background semantic indexer
-	if a.backgroundIndexer != nil {
-		logging.Debug("stopping background semantic indexer")
-		a.backgroundIndexer.Stop()
-	}
-
-	// 7. Save semantic search cache
-	if a.semanticIndexer != nil {
-		logging.Debug("saving semantic cache")
-		if err := a.semanticIndexer.SaveCache(); err != nil {
-			logging.Debug("error saving semantic cache", "error", err)
-		}
-	}
-
 	// 7b. Save active plan for later resume
 	if a.planManager != nil {
 		plan := a.planManager.GetCurrentPlan()

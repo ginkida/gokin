@@ -86,7 +86,6 @@ var ToolIcons = map[string]string{
 	"memory":       "◈",
 	"memorize":     "◈",
 	"refactor":     "△",
-	"code_graph":   "◈",
 	"batch":        "▪",
 	"task":         "▪",
 	"test":         "▪",
@@ -129,7 +128,6 @@ func GetToolIconColor(toolName string) lipgloss.Color {
 		"commit":     ColorSuccess,   // Green - save
 		"memory":     ColorGradient1, // Purple - storage
 		"refactor":   ColorWarning,   // Amber - transformation
-		"code_graph": ColorGradient3, // Sky - visualization
 		"batch":      ColorAccent,    // Pink - bulk
 		"test":       ColorRunning,   // Blue - testing
 		"build":      ColorWarning,   // Amber - compilation

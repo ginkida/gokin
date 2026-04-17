@@ -764,7 +764,6 @@ var workspaceIsolationReadOnlyTools = toolNameSet(
 	"undo_plan", "redo_plan",
 	"git_status", "git_diff", "git_log", "git_blame",
 	"run_tests", "verify_code", "check_impact",
-	"semantic_search", "code_graph",
 	"shared_memory", "update_scratchpad", "pin_context", "history_search",
 	"memory", "memorize",
 )
@@ -777,7 +776,6 @@ var workspaceIsolationApplyBackTools = toolNameSet(
 	"undo_plan", "redo_plan",
 	"git_status", "git_diff", "git_log", "git_blame",
 	"run_tests", "verify_code", "check_impact",
-	"semantic_search", "code_graph",
 	"shared_memory", "update_scratchpad", "pin_context", "history_search",
 	"memory", "memorize",
 	"write", "edit", "batch", "refactor", "copy", "move", "delete", "mkdir",

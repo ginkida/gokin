@@ -1368,26 +1368,6 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
-	// Step 2.5: Mandatory pre-edit impact gate (fail-closed).
-	if impact := e.evaluateImpactGate(ctx, call); impact != nil {
-		if impact.Summary != "" && e.handler != nil && e.handler.OnWarning != nil {
-			e.handler.OnWarning(fmt.Sprintf("[%s] %s", call.Name, impact.Summary))
-		}
-		if !impact.Allowed {
-			reason := impact.Reason
-			if reason == "" {
-				reason = "impact gate blocked execution"
-			}
-			if e.handler != nil && e.handler.OnToolDenied != nil {
-				e.handler.OnToolDenied(call.Name, reason)
-			}
-			if e.notificationMgr != nil {
-				e.notificationMgr.NotifyDenied(call.Name, reason)
-			}
-			return NewErrorResult(reason)
-		}
-	}
-
 	// Step 3: Get execution summary for user awareness
 	var summary *ExecutionSummary
 	if e.safetyValidator != nil {

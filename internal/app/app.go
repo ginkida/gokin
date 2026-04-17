@@ -29,7 +29,6 @@ import (
 	"gokin/internal/plan"
 	"gokin/internal/ratelimit"
 	"gokin/internal/router"
-	"gokin/internal/semantic"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
@@ -161,10 +160,8 @@ type App struct {
 	// New feature integrations
 	searchCache       *cache.SearchCache
 	rateLimiter       *ratelimit.Limiter
-	auditLogger       *audit.Logger
-	fileWatcher       *watcher.Watcher
-	semanticIndexer   *semantic.EnhancedIndexer
-	backgroundIndexer *semantic.BackgroundIndexer
+	auditLogger *audit.Logger
+	fileWatcher *watcher.Watcher
 
 	// Task router for intelligent task routing
 	taskRouter *router.Router
@@ -542,46 +539,6 @@ func (a *App) Run() error {
 		if err := a.fileWatcher.Start(); err != nil {
 			logging.Warn("failed to start file watcher", "error", err)
 		}
-	}
-
-	// Start background semantic indexer (watcher-driven incremental indexing)
-	if a.backgroundIndexer != nil {
-		if err := a.backgroundIndexer.Start(); err != nil {
-			logging.Warn("failed to start background semantic indexer", "error", err)
-		}
-	}
-
-	// Start initial indexing for semantic search if enabled
-	if a.semanticIndexer != nil && a.config.Semantic.IndexOnStart {
-		a.safeGo("semantic-index-on-start", func() {
-			logging.Debug("starting background semantic indexing")
-			start := time.Now()
-
-			// Use LoadOrIndex for intelligent loading from cache
-			maxAge := 24 * time.Hour // Cache is fresh for 24 hours
-			if err := a.semanticIndexer.LoadOrIndex(a.ctx, true, maxAge); err != nil {
-				logging.Error("semantic indexing failed", "error", err)
-				a.safeSendToProgram(ui.StatusUpdateMsg{
-					Type:    ui.StatusRecoverableError,
-					Message: fmt.Sprintf("Semantic indexing failed: %v", err),
-				})
-				return
-			}
-			stats := a.semanticIndexer.GetStats()
-			elapsed := time.Since(start).Round(100 * time.Millisecond)
-			logging.Debug("semantic indexing complete",
-				"files", stats.FileCount,
-				"chunks", stats.ChunkCount,
-				"elapsed", elapsed)
-			// Only surface a toast when the build was actually expensive (skip
-			// cache-hit case which returns in <500ms with no user-visible wait).
-			if elapsed > 2*time.Second {
-				a.safeSendToProgram(ui.StatusUpdateMsg{
-					Type:    ui.StatusInfo,
-					Message: fmt.Sprintf("Semantic index ready (%d files, %s)", stats.FileCount, elapsed),
-				})
-			}
-		})
 	}
 
 	_, runErr := a.program.Run()
@@ -1604,18 +1561,6 @@ func (a *App) GetPermissionsState() bool {
 // GetProjectInfo returns the detected project information.
 func (a *App) GetProjectInfo() *appcontext.ProjectInfo {
 	return a.projectInfo
-}
-
-// GetSemanticIndexer returns the semantic search indexer.
-func (a *App) GetSemanticIndexer() (*semantic.EnhancedIndexer, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.semanticIndexer == nil {
-		return nil, fmt.Errorf("semantic search not enabled")
-	}
-
-	return a.semanticIndexer, nil
 }
 
 // ApplyConfig saves the given configuration and re-initializes affected components.

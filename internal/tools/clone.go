@@ -70,10 +70,6 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		cloned.diffHandler = t.diffHandler
 		cloned.diffEnabled = t.diffEnabled
 		return cloned
-	case *CodeGraphTool:
-		cloned := NewCodeGraphTool()
-		cloned.SetWorkDir(pickWorkDir(workDir, t.workDir))
-		return cloned
 	case *CopyTool:
 		return NewCopyTool(pickWorkDir(workDir, t.workDir))
 	case *MoveTool:
@@ -104,8 +100,6 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		return NewVerifyCodeTool(pickWorkDir(workDir, t.workDir))
 	case *CheckImpactTool:
 		return NewCheckImpactTool(pickWorkDir(workDir, t.workDir))
-	case *SemanticSearchTool:
-		return NewSemanticSearchTool(t.indexer, pickWorkDir(workDir, t.workDir), t.topK)
 	case *RequestToolTool:
 		return NewRequestToolTool()
 	case *AskAgentTool:
