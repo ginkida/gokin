@@ -1297,6 +1297,20 @@ func (a *App) ClearConversation() {
 	systemPrompt := a.promptBuilder.Build()
 	a.client.SetSystemInstruction(systemPrompt)
 	a.session.SystemInstruction = systemPrompt
+
+	// Clear per-session telemetry so /stats after /clear reflects the new
+	// conversation instead of accumulating across unrelated tasks. Also
+	// zeros the adaptive-budget depth counters, because old turn/tool
+	// totals shouldn't inflate budget decisions for a fresh task.
+	if a.phaseMetrics != nil {
+		a.phaseMetrics.Reset()
+	}
+	if a.toolMetrics != nil {
+		a.toolMetrics.Reset()
+	}
+	if a.taskRouter != nil {
+		a.taskRouter.ResetDepth()
+	}
 }
 
 // CompactContextWithPlan clears the conversation and injects the plan summary.

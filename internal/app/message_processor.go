@@ -1993,16 +1993,47 @@ func isRetryableError(err error) bool {
 // substrings, HTTP 529 "Site is overloaded". Bounded to these patterns so
 // generic retryable errors (timeouts, connection resets) don't inflate the
 // rate counter — those are already handled by the classic retry loop.
+//
+// Numeric codes are checked with word-ish boundaries (" 1305", "(1305)" etc.)
+// so `"timeout after 1305ms"` or `"elapsed 529ms"` don't false-match.
 func isOverloadError(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "overloaded") ||
+	if strings.Contains(s, "overloaded") ||
 		strings.Contains(s, "rate limit") ||
-		strings.Contains(s, "too many requests") ||
-		strings.Contains(s, "1305") ||
-		strings.Contains(s, "529")
+		strings.Contains(s, "too many requests") {
+		return true
+	}
+	return containsCode(s, "1305") || containsCode(s, "529")
+}
+
+// containsCode reports whether `code` appears in `text` as a standalone
+// numeric token — flanked by non-alphanumeric characters or string edges.
+// Prevents substring matches inside timings like "1305ms" (letter follows)
+// or "11305" (digit precedes).
+func containsCode(text, code string) bool {
+	i := 0
+	for i <= len(text)-len(code) {
+		idx := strings.Index(text[i:], code)
+		if idx < 0 {
+			return false
+		}
+		pos := i + idx
+		leftOK := pos == 0 || !isAlnum(text[pos-1])
+		rightEnd := pos + len(code)
+		rightOK := rightEnd == len(text) || !isAlnum(text[rightEnd])
+		if leftOK && rightOK {
+			return true
+		}
+		i = pos + 1
+	}
+	return false
+}
+
+func isAlnum(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func (a *App) shouldUseSafeMode() bool {
