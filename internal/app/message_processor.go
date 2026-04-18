@@ -312,8 +312,18 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 		// After repeated transient failures, auto-enable provider failover chain.
 		// This avoids user-visible dead-ends when a provider/model is unstable.
+		//
+		// Two triggers:
+		//  1. Classic: >= 2 retries on the same provider.
+		//  2. Rate-based: overload breaker tripped (e.g. GLM 1305 ≥ 3 in 5 min).
+		//     The rate trigger fires earlier than the classic one, skipping the
+		//     2-retry wait when we already have evidence the provider is down.
 		totalRetries := requestRetryCount + partialIdleRetryCount
-		if !failoverTriggered && totalRetries >= 2 && isRetryableError(err) {
+		overloadTripped := false
+		if !failoverTriggered && isOverloadError(err) && a.policy != nil {
+			overloadTripped = a.policy.RecordOverload()
+		}
+		if !failoverTriggered && isRetryableError(err) && (totalRetries >= 2 || overloadTripped) {
 			if chain, failoverErr := a.activateEmergencyFailoverClient(); failoverErr == nil {
 				failoverTriggered = true
 				// Reset retry counters and circuit breakers — new provider gets clean slate
@@ -323,9 +333,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				if a.policy != nil {
 					a.policy.ResetBreakers()
 				}
+				reason := "retry limit"
+				if overloadTripped {
+					reason = "provider overloaded"
+				}
 				a.safeSendToProgram(ui.StatusUpdateMsg{
 					Type:    ui.StatusRetry,
-					Message: fmt.Sprintf("Provider failover: %s", chain),
+					Message: fmt.Sprintf("Provider failover (%s): %s", reason, chain),
 				})
 			} else {
 				logging.Debug("automatic failover not activated", "error", failoverErr)
@@ -546,6 +560,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	inputTokens := a.totalInputTokens
 	outputTokens := a.totalOutputTokens
 	a.mu.Unlock()
+
+	// Feed the router's adaptive thinking-budget logic with this turn's
+	// activity. Pressure is true when we had to retry the request at least
+	// once — a proxy for "budget probably wasn't enough / provider stalled".
+	if a.taskRouter != nil {
+		pressure := requestRetryCount > 0 || partialIdleRetryCount > 0
+		a.taskRouter.RecordTurn(len(toolsUsed), pressure)
+	}
 
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
 
@@ -1957,6 +1979,23 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 // isRetryableError checks if an error is retryable (network, timeout, rate limit).
 func isRetryableError(err error) bool {
 	return client.IsRetryableError(err)
+}
+
+// isOverloadError detects provider-side overload signals that should feed the
+// rate-window breaker: z.ai GLM 1305, "overloaded" / "too many requests"
+// substrings, HTTP 529 "Site is overloaded". Bounded to these patterns so
+// generic retryable errors (timeouts, connection resets) don't inflate the
+// rate counter — those are already handled by the classic retry loop.
+func isOverloadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "overloaded") ||
+		strings.Contains(s, "rate limit") ||
+		strings.Contains(s, "too many requests") ||
+		strings.Contains(s, "1305") ||
+		strings.Contains(s, "529")
 }
 
 func (a *App) shouldUseSafeMode() bool {

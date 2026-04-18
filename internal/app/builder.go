@@ -49,6 +49,7 @@ type Builder struct {
 	mainClient     client.Client
 	registry         *tools.Registry
 	executor         *tools.Executor
+	readTracker      *tools.FileReadTracker
 	session          *chat.Session
 	tuiModel         *ui.Model
 	projectInfo      *appcontext.ProjectInfo
@@ -405,6 +406,7 @@ func (b *Builder) initTools() error {
 
 	readTracker := tools.NewFileReadTracker()
 	b.executor.SetReadTracker(readTracker)
+	b.readTracker = readTracker
 
 	// Enable native macOS notifications if configured
 	if b.cfg.UI.NativeNotifications {
@@ -662,6 +664,12 @@ func (b *Builder) initManagers() error {
 	b.agentRunner.SetPermissions(b.permManager)
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
 	b.agentRunner.SetWorkspaceIsolationEnabled(b.cfg.Plan.WorkspaceIsolation)
+	if b.readTracker != nil {
+		tracker := b.readTracker
+		b.agentRunner.SetRecentFilesProvider(func(limit int) []string {
+			return tracker.RecentlyReadFiles(limit)
+		})
+	}
 
 	// Wire agent store for checkpoint persistence
 	if b.configDirErr == nil {

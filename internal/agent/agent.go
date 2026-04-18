@@ -91,6 +91,12 @@ type Agent struct {
 	// Model capability adaptation
 	weakModelMode bool // When true, include more guidance for weaker models
 
+	// recentFilesProvider returns up to N file paths that the session has
+	// already read. Injected post-compaction into the continuation hint so the
+	// model doesn't waste a turn re-reading files whose content it still has
+	// in compacted form. Nil-safe — no hint is added when unset.
+	recentFilesProvider func(limit int) []string
+
 	// Plan approval callback for context compaction
 	onPlanApproved func(planSummary string) // Called when plan is built, allows context clearing
 
@@ -712,6 +718,15 @@ func (a *Agent) SetOnThinking(onThinking func(string)) {
 func (a *Agent) SetWeakModelMode(enabled bool) {
 	a.stateMu.Lock()
 	a.weakModelMode = enabled
+	a.stateMu.Unlock()
+}
+
+// SetRecentFilesProvider wires a callback that returns up to `limit` recently
+// read file paths. When set, the agent uses it in injectContinuationHint to
+// remind the model about files whose content was compacted away.
+func (a *Agent) SetRecentFilesProvider(fn func(limit int) []string) {
+	a.stateMu.Lock()
+	a.recentFilesProvider = fn
 	a.stateMu.Unlock()
 }
 
@@ -3615,6 +3630,19 @@ func (a *Agent) injectContinuationHint() {
 	// position in the context window.
 	if a.weakModelMode {
 		hint += "\n\nReminders for the remainder of this task:" + a.buildWeakModelGuidance()
+	}
+	// Already-read files registry: compaction drops raw file contents from
+	// history, but the tracker still knows which paths we saw. Surfacing the
+	// list stops the model from re-running `read` as its first action on
+	// familiar files — saves tokens and avoids "I don't have this loaded"
+	// false starts after a summary.
+	if a.recentFilesProvider != nil {
+		if files := a.recentFilesProvider(15); len(files) > 0 {
+			hint += "\n\nAlready-read files in this session (content was compacted; re-read only if you need specific details):"
+			for _, f := range files {
+				hint += "\n- " + f
+			}
+		}
 	}
 	hint += "\nContinue with your current task.]"
 

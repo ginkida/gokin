@@ -118,3 +118,43 @@ func (t *FileReadTracker) Reset() {
 	t.records = make(map[string]*FileReadRecord)
 	t.turnSeq = 0
 }
+
+// RecentlyReadFiles returns up to `limit` distinct file paths that have been
+// read in the current session, most recently read first. Used by the agent
+// to remind the model after compaction: "these files were already loaded, no
+// need to re-read unless something changed". Collapses multiple reads of the
+// same file (different offset/limit ranges) into one entry.
+func (t *FileReadTracker) RecentlyReadFiles(limit int) []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	// Pick the latest TurnIndex per file to break ties.
+	seen := make(map[string]int, len(t.records))
+	for _, rec := range t.records {
+		if prev, ok := seen[rec.FilePath]; !ok || rec.TurnIndex > prev {
+			seen[rec.FilePath] = rec.TurnIndex
+		}
+	}
+	type entry struct {
+		path string
+		turn int
+	}
+	list := make([]entry, 0, len(seen))
+	for path, turn := range seen {
+		list = append(list, entry{path, turn})
+	}
+	// Sort by turn desc (most recent first). Small n (≤ 40-ish), so insertion sort is fine.
+	for i := 1; i < len(list); i++ {
+		for j := i; j > 0 && list[j-1].turn < list[j].turn; j-- {
+			list[j-1], list[j] = list[j], list[j-1]
+		}
+	}
+	if limit > 0 && len(list) > limit {
+		list = list[:limit]
+	}
+	out := make([]string, len(list))
+	for i, e := range list {
+		out[i] = e.path
+	}
+	return out
+}

@@ -17,16 +17,52 @@ var (
 // PolicyEngine centralizes runtime execution policies for request and plan-step
 // execution paths (circuit breakers, degraded-mode gating).
 type PolicyEngine struct {
-	requestBreaker *robustness.CircuitBreaker
-	stepBreaker    *robustness.CircuitBreaker
+	requestBreaker  *robustness.CircuitBreaker
+	stepBreaker     *robustness.CircuitBreaker
+	overloadBreaker *robustness.CircuitBreaker // windowed: tracks overload-style errors
 }
+
+// Thresholds for the windowed overload breaker. Tuned for GLM 1305 patterns:
+// three overload signals inside five minutes means the provider is under real
+// pressure and we should skip the usual 2-retry-on-same-provider wait.
+const (
+	overloadWindow    = 5 * time.Minute
+	overloadThreshold = 3
+	overloadReset     = 5 * time.Minute
+)
 
 func NewPolicyEngine() *PolicyEngine {
 	return &PolicyEngine{
-		requestBreaker: robustness.NewCircuitBreaker(5, 45*time.Second),
-		stepBreaker:    robustness.NewCircuitBreaker(6, 30*time.Second),
+		requestBreaker:  robustness.NewCircuitBreaker(5, 45*time.Second),
+		stepBreaker:     robustness.NewCircuitBreaker(6, 30*time.Second),
+		overloadBreaker: robustness.NewWindowedCircuitBreaker(overloadThreshold, overloadWindow, overloadReset),
 	}
 }
+
+// RecordOverload should be called once per detected provider-side overload
+// (GLM 1305, z.ai "overloaded" strings, HTTP 529 etc.). Returns true iff the
+// windowed breaker is now open — the caller should treat this as a signal to
+// failover immediately rather than keep retrying on the same provider.
+func (p *PolicyEngine) RecordOverload() bool {
+	if p == nil || p.overloadBreaker == nil {
+		return false
+	}
+	// Execute with a no-op failing fn just to record the failure without
+	// actually running anything under the breaker.
+	_ = p.overloadBreaker.Execute(context.Background(), func() error { return errOverload })
+	return !p.overloadBreaker.CanExecute()
+}
+
+// OverloadPressure returns the number of overload events inside the current
+// rolling window. Used for telemetry / UI hints.
+func (p *PolicyEngine) OverloadPressure() int {
+	if p == nil || p.overloadBreaker == nil {
+		return 0
+	}
+	return p.overloadBreaker.WindowedFailureCount()
+}
+
+var errOverload = errors.New("provider overloaded")
 
 // ExecuteRequest runs fn under request-level circuit breaker policy.
 func (p *PolicyEngine) ExecuteRequest(ctx context.Context, fn func() error) error {
@@ -65,6 +101,9 @@ func (p *PolicyEngine) ResetBreakers() {
 	}
 	if p.stepBreaker != nil {
 		p.stepBreaker.Reset()
+	}
+	if p.overloadBreaker != nil {
+		p.overloadBreaker.Reset()
 	}
 }
 

@@ -62,6 +62,13 @@ type Router struct {
 	recentErrors     int
 	recentOps        int
 	conversationMode string // "exploring", "implementing", "debugging", "refactoring"
+
+	// Session-depth counters feed the adaptive thinking-budget logic. Executor
+	// calls RecordTurn after each model turn; ResetDepth clears on /clear.
+	depthMu       sync.RWMutex
+	depthTurns    int
+	depthTools    int
+	depthPressure bool
 }
 
 // AgentRunner interface for spawning agents (implemented by agent.Runner)
@@ -666,6 +673,19 @@ func (h HandlerType) String() string {
 
 // selectThinkingBudget returns the thinking token budget based on task complexity
 // and model capability. Weaker models get proportionally more thinking budget.
+//
+// The base budget scales by strategy (Direct=0 → SubAgent=4096). Two adaptive
+// layers stack on top:
+//
+//  1. Session-depth scaling: once the session has accumulated state (many
+//     turns, many tool calls, or a compaction has fired), the task in front
+//     of the model is usually more involved than its prompt suggests. Scale
+//     by min(1 + turns/10 + tools/20, 2.0).
+//  2. Last-request pressure: if the previous request hit a stream-idle
+//     timeout or returned an empty response, the budget was likely too
+//     small — bump by 1.5x for the next one (decays on success).
+//
+// Hard-capped at 16384 to stop runaway thinking on pathological inputs.
 func (r *Router) selectThinkingBudget(analysis *TaskComplexity) int32 {
 	var budget int32
 	switch analysis.Strategy {
@@ -690,7 +710,70 @@ func (r *Router) selectThinkingBudget(analysis *TaskComplexity) int32 {
 	if budget > 0 && r.modelCapability != nil {
 		budget = int32(float64(budget) * r.modelCapability.ThinkingMultiplier)
 	}
+	if budget > 0 {
+		budget = int32(float64(budget) * r.sessionDepthMultiplier())
+	}
+	if budget > 0 && r.pressureBoost() {
+		budget = int32(float64(budget) * 1.5)
+	}
+	const maxBudget int32 = 16384
+	if budget > maxBudget {
+		budget = maxBudget
+	}
 	return budget
+}
+
+// sessionDepthMultiplier returns a factor in [1.0, 2.0] that grows with
+// accumulated session activity. Linear in (turns/10 + tools/20), clamped.
+// Zero when no session stats are wired — caller gets neutral 1.0.
+func (r *Router) sessionDepthMultiplier() float64 {
+	turns, tools := r.sessionDepthStats()
+	if turns == 0 && tools == 0 {
+		return 1.0
+	}
+	mult := 1.0 + float64(turns)/10.0 + float64(tools)/20.0
+	if mult > 2.0 {
+		mult = 2.0
+	}
+	return mult
+}
+
+// sessionDepthStats returns current (turn count, tool call count) from the
+// router-scoped counters. Hooks are called by Execute() on each turn; in
+// tests they stay zero and the multiplier collapses to 1.0.
+func (r *Router) sessionDepthStats() (turns, tools int) {
+	r.depthMu.RLock()
+	defer r.depthMu.RUnlock()
+	return r.depthTurns, r.depthTools
+}
+
+// pressureBoost reports whether the previous request showed signs of
+// budget starvation (stream-idle or empty-response). One-shot flag —
+// cleared on next successful response.
+func (r *Router) pressureBoost() bool {
+	r.depthMu.RLock()
+	defer r.depthMu.RUnlock()
+	return r.depthPressure
+}
+
+// RecordTurn is invoked by the executor at the end of each model turn to
+// feed the adaptive budget logic with session activity.
+func (r *Router) RecordTurn(toolCalls int, pressure bool) {
+	r.depthMu.Lock()
+	defer r.depthMu.Unlock()
+	r.depthTurns++
+	r.depthTools += toolCalls
+	r.depthPressure = pressure
+}
+
+// ResetDepth clears session activity counters — called on /clear or new
+// session load so old state doesn't leak across conversations.
+func (r *Router) ResetDepth() {
+	r.depthMu.Lock()
+	defer r.depthMu.Unlock()
+	r.depthTurns = 0
+	r.depthTools = 0
+	r.depthPressure = false
 }
 
 // selectCostAwareModel returns the fast model for simple tasks, empty for complex ones.

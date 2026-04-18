@@ -554,6 +554,14 @@ func (e *Executor) SetReadTracker(tracker *FileReadTracker) {
 	e.readTracker = tracker
 }
 
+// GetReadTracker returns the executor's read tracker, or nil if none is
+// configured. Consumers (Agent, commands) read this to surface which files
+// the session has already seen — useful for post-compaction hints and
+// cache-hit heuristics.
+func (e *Executor) GetReadTracker() *FileReadTracker {
+	return e.readTracker
+}
+
 // GetNotificationManager returns the notification manager.
 func (e *Executor) GetNotificationManager() *NotificationManager {
 	return e.notificationMgr

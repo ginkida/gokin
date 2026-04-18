@@ -176,3 +176,87 @@ func TestCircuitBreakerResetOnSuccess(t *testing.T) {
 		t.Errorf("state = %v, want closed (counter should have reset)", cb.GetState())
 	}
 }
+
+func TestWindowedCircuitBreaker_TripsOnRate(t *testing.T) {
+	cb := NewWindowedCircuitBreaker(3, 500*time.Millisecond, time.Second)
+	fail := func() error { return errors.New("boom") }
+
+	// Two failures within the window — not enough to trip.
+	_ = cb.Execute(context.Background(), fail)
+	_ = cb.Execute(context.Background(), fail)
+	if cb.GetState() != StateClosed {
+		t.Fatalf("state after 2 failures = %v, want closed", cb.GetState())
+	}
+
+	// Third failure inside the window flips to open.
+	_ = cb.Execute(context.Background(), fail)
+	if cb.GetState() != StateOpen {
+		t.Fatalf("state after 3 failures in window = %v, want open", cb.GetState())
+	}
+	if got := cb.WindowedFailureCount(); got != 3 {
+		t.Errorf("WindowedFailureCount = %d, want 3", got)
+	}
+}
+
+func TestWindowedCircuitBreaker_AgedFailuresDropped(t *testing.T) {
+	cb := NewWindowedCircuitBreaker(3, 80*time.Millisecond, time.Second)
+	fail := func() error { return errors.New("boom") }
+
+	// Two failures, then wait past the window.
+	_ = cb.Execute(context.Background(), fail)
+	_ = cb.Execute(context.Background(), fail)
+	time.Sleep(100 * time.Millisecond)
+
+	// Next failure sees the window cleared — still closed.
+	_ = cb.Execute(context.Background(), fail)
+	if cb.GetState() != StateClosed {
+		t.Errorf("state after old failures aged out = %v, want closed", cb.GetState())
+	}
+	if got := cb.WindowedFailureCount(); got != 1 {
+		t.Errorf("WindowedFailureCount after aging = %d, want 1", got)
+	}
+}
+
+func TestWindowedCircuitBreaker_SuccessDoesNotClearWindow(t *testing.T) {
+	cb := NewWindowedCircuitBreaker(3, 500*time.Millisecond, time.Second)
+	fail := func() error { return errors.New("boom") }
+	ok := func() error { return nil }
+
+	_ = cb.Execute(context.Background(), fail)
+	_ = cb.Execute(context.Background(), ok) // success between failures
+	_ = cb.Execute(context.Background(), fail)
+	_ = cb.Execute(context.Background(), fail)
+
+	// 3 failures accumulated in the window despite one success → should be open.
+	if cb.GetState() != StateOpen {
+		t.Errorf("state = %v, want open (success must not clear window)", cb.GetState())
+	}
+}
+
+func TestWindowedCircuitBreaker_ResetClearsWindow(t *testing.T) {
+	cb := NewWindowedCircuitBreaker(3, 500*time.Millisecond, time.Second)
+	fail := func() error { return errors.New("boom") }
+
+	for i := 0; i < 3; i++ {
+		_ = cb.Execute(context.Background(), fail)
+	}
+	if cb.GetState() != StateOpen {
+		t.Fatalf("precondition: state = %v, want open", cb.GetState())
+	}
+
+	cb.Reset()
+	if cb.GetState() != StateClosed {
+		t.Errorf("state after Reset = %v, want closed", cb.GetState())
+	}
+	if got := cb.WindowedFailureCount(); got != 0 {
+		t.Errorf("WindowedFailureCount after Reset = %d, want 0", got)
+	}
+}
+
+func TestClassicBreaker_WindowedCountIsZero(t *testing.T) {
+	cb := NewCircuitBreaker(3, time.Second)
+	_ = cb.Execute(context.Background(), func() error { return errors.New("x") })
+	if got := cb.WindowedFailureCount(); got != 0 {
+		t.Errorf("classic breaker WindowedFailureCount = %d, want 0", got)
+	}
+}

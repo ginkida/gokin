@@ -105,6 +105,10 @@ type Runner struct {
 	// Weak model mode: extra guidance for weaker models
 	weakModelMode bool
 
+	// Provider used by spawned agents to fetch the list of files already read
+	// in the session. Wired in from app/builder to the tools.FileReadTracker.
+	recentFilesProvider func(limit int) []string
+
 	// Workspace isolation for supported sub-agents
 	workspaceIsolationEnabled bool
 	workspaceReviewHandler    func(context.Context, []WorkspaceChangePreview) (bool, error)
@@ -346,6 +350,14 @@ func (r *Runner) SetOnAgentProgress(callback func(id string, progress *AgentProg
 func (r *Runner) SetWeakModelMode(enabled bool) {
 	r.mu.Lock()
 	r.weakModelMode = enabled
+	r.mu.Unlock()
+}
+
+// SetRecentFilesProvider wires a callback that spawned agents use to fetch
+// already-read file paths for their post-compaction continuation hint.
+func (r *Runner) SetRecentFilesProvider(fn func(limit int) []string) {
+	r.mu.Lock()
+	r.recentFilesProvider = fn
 	r.mu.Unlock()
 }
 
@@ -617,6 +629,7 @@ func (r *Runner) newConfiguredAgent(
 	r.mu.RLock()
 	weakMode := r.weakModelMode
 	onRL := r.onRateLimit
+	recentFiles := r.recentFilesProvider
 	r.mu.RUnlock()
 
 	if weakMode {
@@ -624,6 +637,9 @@ func (r *Runner) newConfiguredAgent(
 	}
 	if onRL != nil {
 		agent.SetOnRateLimit(onRL)
+	}
+	if recentFiles != nil {
+		agent.SetRecentFilesProvider(recentFiles)
 	}
 
 	if deps.onInput != nil {
