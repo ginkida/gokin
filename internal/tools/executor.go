@@ -203,6 +203,10 @@ type Executor struct {
 	// File read deduplication tracker
 	readTracker *FileReadTracker
 
+	// phaseObserver (optional) receives per-tool timing and outcome. Wired from
+	// internal/app so the tools package stays free of metrics dependencies.
+	phaseObserver func(tool string, d time.Duration, success bool)
+
 	// Auto-formatter for write/edit operations
 	formatter *Formatter
 
@@ -560,6 +564,14 @@ func (e *Executor) SetReadTracker(tracker *FileReadTracker) {
 // cache-hit heuristics.
 func (e *Executor) GetReadTracker() *FileReadTracker {
 	return e.readTracker
+}
+
+// SetPhaseObserver wires a callback that's invoked after each tool execution
+// with the tool name and its wall-clock duration. The app-layer metrics
+// collector uses this to build p50/p95 charts per tool without making
+// internal/tools depend on internal/app. Nil-safe: no calls when unset.
+func (e *Executor) SetPhaseObserver(fn func(tool string, d time.Duration, success bool)) {
+	e.phaseObserver = fn
 }
 
 // GetNotificationManager returns the notification manager.
@@ -1273,7 +1285,17 @@ func isExecutionFailure(errMsg string) bool {
 }
 
 // doExecuteTool handles the actual execution logic (previously body of executeTool).
-func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) ToolResult {
+func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) (result ToolResult) {
+	toolStart := time.Now()
+	defer func() {
+		// Fire phase observer even on early returns. Success is determined by
+		// the final ToolResult — unknown-tool / validation errors all count as
+		// failures in the metrics.
+		if e.phaseObserver != nil {
+			e.phaseObserver(call.Name, time.Since(toolStart), result.Success)
+		}
+	}()
+
 	// Step 1: Basic tool lookup and validation
 	tool, ok := e.registry.Get(call.Name)
 	if !ok {
@@ -1524,7 +1546,6 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Check if tool supports streaming for large outputs
-	var result ToolResult
 	var err error
 	if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
 		result, err = e.executeStreamingTool(execCtx, streamingTool, call.Args)

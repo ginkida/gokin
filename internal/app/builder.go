@@ -1885,6 +1885,8 @@ func (b *Builder) assembleApp() *App {
 		orchestrator:          b.taskOrchestrator,
 		reliability:           NewReliabilityManager(),
 		policy:                NewPolicyEngine(),
+		phaseMetrics:          NewPhaseMetrics(),
+		toolMetrics:           NewToolMetrics(),
 		// Phase 5: Agent System Improvements
 		coordinator:       b.coordinator,
 		agentTypeRegistry: b.agentTypeRegistry,
@@ -1924,6 +1926,27 @@ func (b *Builder) assembleApp() *App {
 	if b.agentRunner != nil {
 		b.agentRunner.SetOnInput(func(prompt string) (string, error) {
 			return b.cachedApp.promptQuestion(b.ctx, prompt, nil, "")
+		})
+	}
+
+	// Wire per-tool phase observer → app-level metrics collectors. Tool
+	// timing feeds both the raw PhaseMetrics buffer (p50/p95 aggregate for
+	// PhaseTool) and the ToolMetrics collector (per-tool counts + error
+	// classifier). Kept inside builder so internal/tools doesn't import
+	// internal/app.
+	if b.executor != nil && b.cachedApp != nil {
+		app := b.cachedApp
+		b.executor.SetPhaseObserver(func(tool string, d time.Duration, success bool) {
+			if app.phaseMetrics != nil {
+				app.phaseMetrics.Record(PhaseTool, d)
+			}
+			if app.toolMetrics != nil {
+				kind := ""
+				if !success {
+					kind = "other"
+				}
+				app.toolMetrics.Record(tool, d, success, kind)
+			}
 		})
 	}
 

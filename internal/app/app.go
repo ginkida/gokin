@@ -173,6 +173,8 @@ type App struct {
 	orchestrator *TaskOrchestrator
 	reliability  *ReliabilityManager
 	policy       *PolicyEngine
+	phaseMetrics *PhaseMetrics
+	toolMetrics  *ToolMetrics
 
 	uiUpdateManager *UIUpdateManager // Coordinates periodic UI updates
 

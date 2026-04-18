@@ -569,6 +569,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		a.taskRouter.RecordTurn(len(toolsUsed), pressure)
 	}
 
+	// Record end-to-end latency so /stats can show p50/p95. Per-phase samples
+	// (router/LLM/tools) are fed from their respective components — this is
+	// the outer wall-clock observation.
+	if a.phaseMetrics != nil {
+		a.phaseMetrics.Record(PhaseEndToEnd, duration)
+	}
+
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
 
 	// Send response metadata with cost estimation

@@ -66,6 +66,7 @@ type AppInterface interface {
 	GetObservabilityReport() string
 	GetSessionGovernanceReport() string
 	GetMemoryReport() string
+	GetPerformanceStats() string
 }
 
 // Handler manages slash commands.

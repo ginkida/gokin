@@ -111,6 +111,11 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 		}
 	}
 
+	// Performance stats (phase latency + tool call breakdown)
+	if perf := app.GetPerformanceStats(); perf != "" {
+		sb.WriteString(perf)
+	}
+
 	// Footer
 	sb.WriteString(strings.Repeat("─", 50))
 	sb.WriteString("\n")
