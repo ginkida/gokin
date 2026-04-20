@@ -144,3 +144,38 @@ func (m *ToolMetrics) Reset() {
 	defer m.mu.Unlock()
 	m.stats = make(map[string]*toolStats)
 }
+
+// MinSamplesForStats is the minimum number of observations required before
+// Lookup reports a stable p95 / success rate. Below this the caller is told
+// ok=false and should fall back to static defaults — otherwise a single
+// unlucky failure would flag an otherwise-reliable tool.
+const MinSamplesForStats = 5
+
+// Lookup returns observed p95 latency and success rate for a tool. Reports
+// ok=false if the tool has fewer than MinSamplesForStats recorded calls so
+// adaptive policies don't react to noise from single-digit sample sizes.
+func (m *ToolMetrics) Lookup(tool string) (p95 time.Duration, successRate float64, ok bool) {
+	if m == nil || tool == "" {
+		return 0, 0, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	s := m.stats[tool]
+	if s == nil {
+		return 0, 0, false
+	}
+	calls := s.successCount + s.failureCount
+	if calls < MinSamplesForStats {
+		return 0, 0, false
+	}
+	// Compute p95 on a local copy to avoid holding the lock through sorting
+	// a long buffer — durations slice could be up to MaxToolDurationSamples.
+	buf := make([]time.Duration, len(s.durations))
+	copy(buf, s.durations)
+	sort.Slice(buf, func(i, j int) bool { return buf[i] < buf[j] })
+	if len(buf) == 0 {
+		return 0, float64(s.successCount) / float64(calls), true
+	}
+	return buf[p95Index(len(buf))], float64(s.successCount) / float64(calls), true
+}

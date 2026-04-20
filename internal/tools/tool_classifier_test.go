@@ -2,6 +2,7 @@ package tools
 
 import (
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -130,4 +131,54 @@ func TestClassifyDependencies_WriteAtEnd(t *testing.T) {
 	assertGroupCount(t, groups, 2)
 	assertGroup(t, groups[0], []string{"read", "read"}, true)
 	assertGroup(t, groups[1], []string{"edit"}, false)
+}
+
+func TestShouldSerializeGroup_NoLookup(t *testing.T) {
+	calls := []*genai.FunctionCall{{Name: "read"}, {Name: "grep"}}
+	if shouldSerializeGroup(calls, nil) {
+		t.Error("nil lookup → should not serialize")
+	}
+}
+
+func TestShouldSerializeGroup_SingleCall(t *testing.T) {
+	lookup := func(string) (time.Duration, float64, bool) {
+		return 0, 0.1, true // very unreliable
+	}
+	calls := []*genai.FunctionCall{{Name: "read"}}
+	if shouldSerializeGroup(calls, lookup) {
+		t.Error("single call → group already has no parallelism to downgrade")
+	}
+}
+
+func TestShouldSerializeGroup_DowngradeOnFlakyTool(t *testing.T) {
+	lookup := func(tool string) (time.Duration, float64, bool) {
+		if tool == "grep" {
+			return 0, 0.4, true // 40% success — below threshold
+		}
+		return 0, 0.99, true
+	}
+	calls := []*genai.FunctionCall{{Name: "read"}, {Name: "grep"}, {Name: "glob"}}
+	if !shouldSerializeGroup(calls, lookup) {
+		t.Error("expected serialize downgrade when any tool < 50% success")
+	}
+}
+
+func TestShouldSerializeGroup_KeepsParallelForReliableTools(t *testing.T) {
+	lookup := func(string) (time.Duration, float64, bool) {
+		return 0, 0.95, true
+	}
+	calls := []*genai.FunctionCall{{Name: "read"}, {Name: "grep"}}
+	if shouldSerializeGroup(calls, lookup) {
+		t.Error("all tools reliable → parallel should be kept")
+	}
+}
+
+func TestShouldSerializeGroup_IgnoresInsufficientSamples(t *testing.T) {
+	lookup := func(string) (time.Duration, float64, bool) {
+		return 0, 0.0, false // pretend tool has < MinSamplesForStats
+	}
+	calls := []*genai.FunctionCall{{Name: "read"}, {Name: "grep"}}
+	if shouldSerializeGroup(calls, lookup) {
+		t.Error("insufficient samples → should not downgrade on unreliable-looking stats")
+	}
 }

@@ -1,6 +1,38 @@
 package tools
 
-import "google.golang.org/genai"
+import (
+	"time"
+
+	"google.golang.org/genai"
+)
+
+// parallelSerializationSuccessThreshold is the success rate under which a
+// tool is considered unreliable enough to serialize the whole group it's in.
+// Set at 0.5 (50%) so a batch of 10 reads isn't derailed by a single tool
+// that's passing 60% of the time, but is downgraded when something is
+// genuinely broken.
+const parallelSerializationSuccessThreshold = 0.5
+
+// shouldSerializeGroup reports whether a parallel group should be downgraded
+// to sequential execution based on observed per-tool reliability.
+// statsLookup is called once per unique tool name in the group; tools with
+// not-enough-samples (ok=false) don't count against reliability.
+func shouldSerializeGroup(calls []*genai.FunctionCall, statsLookup func(string) (time.Duration, float64, bool)) bool {
+	if statsLookup == nil || len(calls) <= 1 {
+		return false
+	}
+	seen := make(map[string]bool, len(calls))
+	for _, c := range calls {
+		if seen[c.Name] {
+			continue
+		}
+		seen[c.Name] = true
+		if _, rate, ok := statsLookup(c.Name); ok && rate < parallelSerializationSuccessThreshold {
+			return true
+		}
+	}
+	return false
+}
 
 // toolDependencyClassifier determines which tools can run in parallel.
 type toolDependencyClassifier struct {

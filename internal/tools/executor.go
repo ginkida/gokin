@@ -207,6 +207,13 @@ type Executor struct {
 	// internal/app so the tools package stays free of metrics dependencies.
 	phaseObserver func(tool string, d time.Duration, success bool)
 
+	// toolStatsLookup (optional) returns observed p95 and success rate for a
+	// tool, or ok=false if there aren't enough samples yet (threshold enforced
+	// on the caller side — typically 5 samples). Used by the executor to
+	// downgrade parallel groups to sequential when a batched tool fails often,
+	// and to cap concurrency for slow tools.
+	toolStatsLookup func(tool string) (p95 time.Duration, successRate float64, ok bool)
+
 	// Auto-formatter for write/edit operations
 	formatter *Formatter
 
@@ -572,6 +579,13 @@ func (e *Executor) GetReadTracker() *FileReadTracker {
 // internal/tools depend on internal/app. Nil-safe: no calls when unset.
 func (e *Executor) SetPhaseObserver(fn func(tool string, d time.Duration, success bool)) {
 	e.phaseObserver = fn
+}
+
+// SetToolStatsLookup wires a callback that returns observed p95 / success
+// rate per tool. The executor uses this to make adaptive concurrency
+// decisions (serialize unreliable tools, cap concurrency for slow ones).
+func (e *Executor) SetToolStatsLookup(fn func(tool string) (p95 time.Duration, successRate float64, ok bool)) {
+	e.toolStatsLookup = fn
 }
 
 // GetNotificationManager returns the notification manager.
@@ -1149,6 +1163,22 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 	// Groups execute sequentially to preserve write-before-read ordering.
 	groups := defaultClassifier.classifyDependencies(calls)
 
+	// Adaptive downgrade: if any tool in a parallel group has observed
+	// success rate below 50% (with enough samples to trust the number),
+	// switch the group to sequential. A batch of flaky tools tends to
+	// compound into one giant failure; serial execution lets us stop early
+	// on the first error and not multiply tokens on unrelated retries.
+	if e.toolStatsLookup != nil {
+		for i := range groups {
+			if !groups[i].Parallel || len(groups[i].Calls) <= 1 {
+				continue
+			}
+			if shouldSerializeGroup(groups[i].Calls, e.toolStatsLookup) {
+				groups[i].Parallel = false
+			}
+		}
+	}
+
 	resultIdx := 0                                 // tracks position in the flat results array
 	callToIdx := make(map[*genai.FunctionCall]int) // map call pointer to results index
 	for i, call := range calls {
@@ -1493,8 +1523,37 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		e.handler.OnToolStart(call.Name, call.Args)
 	}
 
-	// Step 8: Execute with timeout
-	execCtx, cancel := context.WithTimeout(ctx, e.timeout)
+	// If history suggests this tool is slow, give the user a heads-up before
+	// it blocks the status bar for many seconds. Threshold matches adaptive
+	// timeout floor — below 5s we don't consider it "slow" enough to warn.
+	if e.handler != nil && e.handler.OnWarning != nil && e.toolStatsLookup != nil {
+		if p95, _, ok := e.toolStatsLookup(call.Name); ok && p95 >= 5*time.Second {
+			e.handler.OnWarning(fmt.Sprintf(
+				"%s typically takes ~%v (p95 from session history)",
+				call.Name, p95.Round(time.Second)))
+		}
+	}
+
+	// Step 8: Execute with timeout. If we have enough observations for this
+	// tool, auto-tune the timeout to max(default, 5 × observed p95) so fast
+	// tools fail fast (grep stuck for 30s → catch it) while slow tools that
+	// historically take ~5min (bash build step) get the room they need.
+	toolTimeout := e.timeout
+	if e.toolStatsLookup != nil {
+		if p95, _, ok := e.toolStatsLookup(call.Name); ok && p95 > 0 {
+			adaptive := p95 * 5
+			if adaptive > toolTimeout {
+				toolTimeout = adaptive
+			}
+			// Cap at 2× base timeout to prevent runaway — a genuinely hung
+			// tool shouldn't be given unlimited slack.
+			maxTimeout := e.timeout * 2
+			if toolTimeout > maxTimeout {
+				toolTimeout = maxTimeout
+			}
+		}
+	}
+	execCtx, cancel := context.WithTimeout(ctx, toolTimeout)
 	defer cancel()
 
 	// Inject streaming callback so tools (e.g. task/agent) can stream output to UI
@@ -1558,7 +1617,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	if err != nil {
 		// Provide informative timeout message with tool name and duration
 		if errors.Is(err, context.DeadlineExceeded) {
-			errMsg := fmt.Sprintf("tool '%s' timed out after %v (limit: %v)", call.Name, duration.Round(time.Millisecond), e.timeout)
+			errMsg := fmt.Sprintf("tool '%s' timed out after %v (limit: %v)", call.Name, duration.Round(time.Millisecond), toolTimeout)
 			logging.Error("tool execution timed out",
 				"tool", call.Name,
 				"duration", duration,

@@ -97,6 +97,15 @@ type Agent struct {
 	// in compacted form. Nil-safe — no hint is added when unset.
 	recentFilesProvider func(limit int) []string
 
+	// Pre-emptive compaction state: EMA of tokens added per turn. Lets
+	// checkAndSummarize compact when "current % + 3 × EMA" crosses threshold,
+	// catching imminent overflow before we're mid-stream. lastTokenCount ≤ 0
+	// means we don't have a previous observation yet.
+	lastTokenCount    int
+	tokenGrowthEMA    float64
+	tokenGrowthSample int
+	preemptMu         sync.Mutex
+
 	// Plan approval callback for context compaction
 	onPlanApproved func(planSummary string) // Called when plan is built, allows context clearing
 
@@ -3142,6 +3151,62 @@ func (a *Agent) buildStagnationRecoveryIntervention(attempt int, reason string) 
 }
 
 // checkAndSummarize monitors token usage and triggers summarization if thresholds are met.
+// updateTokenGrowthAndProjectOverflow maintains an EMA of tokens-added-per-turn
+// and reports whether the session is projected to cross the compaction
+// threshold within the next ~3 turns at the current growth rate. Pre-emptive
+// compaction lets us run the (slow) summarization between turns instead of
+// catching the user mid-stream when tokens actually exceed the limit.
+//
+// Returns true only once we have enough samples (≥ 3) to trust the EMA — on
+// first few turns we fall back to the plain percent threshold check above.
+func (a *Agent) updateTokenGrowthAndProjectOverflow(tokenCount, maxTokens int, threshold float64) bool {
+	if maxTokens <= 0 {
+		return false
+	}
+	a.preemptMu.Lock()
+	defer a.preemptMu.Unlock()
+
+	delta := 0
+	if a.lastTokenCount > 0 {
+		delta = tokenCount - a.lastTokenCount
+	}
+	a.lastTokenCount = tokenCount
+
+	if delta <= 0 {
+		// Shrinking or flat (e.g. right after a compaction) — don't feed
+		// negative samples into the EMA, just record the current state.
+		return false
+	}
+
+	// Standard EMA with α = 0.3. Smooths spikes but stays responsive to
+	// sustained growth pattern changes.
+	const alpha = 0.3
+	if a.tokenGrowthSample == 0 {
+		a.tokenGrowthEMA = float64(delta)
+	} else {
+		a.tokenGrowthEMA = alpha*float64(delta) + (1-alpha)*a.tokenGrowthEMA
+	}
+	a.tokenGrowthSample++
+
+	if a.tokenGrowthSample < 3 {
+		return false
+	}
+
+	const lookAheadTurns = 3
+	projected := float64(tokenCount) + a.tokenGrowthEMA*lookAheadTurns
+	projectedPercent := projected / float64(maxTokens)
+	if projectedPercent >= threshold {
+		logging.Info("pre-emptive compaction triggered",
+			"agent_id", a.ID,
+			"current_pct", fmt.Sprintf("%.1f%%", float64(tokenCount)/float64(maxTokens)*100),
+			"projected_pct", fmt.Sprintf("%.1f%%", projectedPercent*100),
+			"ema_growth", int(a.tokenGrowthEMA),
+			"look_ahead_turns", lookAheadTurns)
+		return true
+	}
+	return false
+}
+
 func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	// 0. Check hard limit on history size to prevent memory exhaustion
 	a.stateMu.RLock()
@@ -3181,7 +3246,13 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 
 	percentUsed := float64(tokenCount) / float64(limits.MaxInputTokens)
 
-	if percentUsed < threshold {
+	// Pre-emptive compaction: update EMA of per-turn growth, then check if
+	// we're likely to overflow within the next few turns at the current rate.
+	// If so, compact NOW between turns instead of forcing it mid-stream.
+	// Requires at least 3 observations so we don't react to startup noise.
+	preempt := a.updateTokenGrowthAndProjectOverflow(tokenCount, limits.MaxInputTokens, threshold)
+
+	if percentUsed < threshold && !preempt {
 		return nil
 	}
 

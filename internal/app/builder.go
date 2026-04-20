@@ -1948,6 +1948,12 @@ func (b *Builder) assembleApp() *App {
 				app.toolMetrics.Record(tool, d, success, kind)
 			}
 		})
+		// Adaptive parallelism: executor consults ToolMetrics to decide
+		// whether a group of reads should run serialized (when any tool
+		// in the group has low success rate).
+		if app.toolMetrics != nil {
+			b.executor.SetToolStatsLookup(app.toolMetrics.Lookup)
+		}
 	}
 
 	return b.cachedApp
