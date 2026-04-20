@@ -306,34 +306,43 @@ func (a *App) Run() error {
 		logging.Debug("failed to load input history", "error", err)
 	}
 
-	// Auto-load previous session if enabled (skip if already pre-loaded via ResumeLastSession)
+	// Auto-load previous session if enabled (skip if already pre-loaded via
+	// ResumeLastSession). For recent sessions (< autoResumeCutoff), restore
+	// automatically — matches the common case of "closed terminal, reopened
+	// to continue". For older sessions, we only hint at availability so
+	// unrelated work from days ago doesn't surprise-load into a fresh task.
+	const autoResumeCutoff = 12 * time.Hour
 	var sessionRestored bool
 	if a.sessionPreloaded {
 		sessionRestored = true
 	} else if a.sessionManager != nil {
 		state, info, err := a.sessionManager.LoadLast()
-		if err == nil && state != nil {
-			// Check if session has any content
-			if len(state.History) > 0 {
-				if restoreErr := a.sessionManager.RestoreFromState(state); restoreErr != nil {
-					logging.Warn("failed to restore session", "error", restoreErr)
-				} else {
-					sessionRestored = true
-					// Sync scratchpad from restored session
-					a.scratchpad = a.session.GetScratchpad()
-					if a.agentRunner != nil {
-						a.agentRunner.SetSharedScratchpad(a.scratchpad)
-					}
-					// Notify TUI about restored scratchpad
-					a.safeSendToProgram(ui.ScratchpadMsg(a.scratchpad))
-
-					// Restore tool checkpoints into the executor's journal
-					a.restoreToolCheckpoints()
-
-					// Notify user about restored session
-					a.tui.AddSystemMessage(fmt.Sprintf("Restored session from %s (%d messages)",
-						info.LastActive.Format("2006-01-02 15:04"), len(state.History)))
+		if err == nil && state != nil && len(state.History) > 0 {
+			age := time.Since(info.LastActive)
+			if age > autoResumeCutoff {
+				// Too old for surprise restore — surface a hint so the user
+				// can explicitly /resume it if they want.
+				a.tui.AddSystemMessage(fmt.Sprintf(
+					"Previous session available from %s (%d messages). Use /resume %s to load it.",
+					humanizeAge(age), len(state.History), info.ID))
+			} else if restoreErr := a.sessionManager.RestoreFromState(state); restoreErr != nil {
+				logging.Warn("failed to restore session", "error", restoreErr)
+			} else {
+				sessionRestored = true
+				// Sync scratchpad from restored session
+				a.scratchpad = a.session.GetScratchpad()
+				if a.agentRunner != nil {
+					a.agentRunner.SetSharedScratchpad(a.scratchpad)
 				}
+				// Notify TUI about restored scratchpad
+				a.safeSendToProgram(ui.ScratchpadMsg(a.scratchpad))
+
+				// Restore tool checkpoints into the executor's journal
+				a.restoreToolCheckpoints()
+
+				// Notify user about restored session
+				a.tui.AddSystemMessage(fmt.Sprintf("Restored session from %s (%d messages)",
+					humanizeAge(age), len(state.History)))
 			}
 		}
 	}
@@ -431,21 +440,9 @@ func (a *App) Run() error {
 	// Show recovery hint if previous run was interrupted mid-processing.
 	if a.journal != nil {
 		if snap, err := a.journal.LoadRecovery(); err == nil && snap != nil && snap.Processing {
-			age := time.Since(snap.Timestamp).Round(time.Minute)
-			var ageStr string
-			switch {
-			case age < time.Minute:
-				// Clock skew or very fresh snapshot — avoid "-1 min ago"
-				ageStr = "just now"
-			case age < time.Hour:
-				ageStr = fmt.Sprintf("%d min ago", int(age.Minutes()))
-			case age < 24*time.Hour:
-				ageStr = fmt.Sprintf("%d hours ago", int(age.Hours()))
-			default:
-				ageStr = snap.Timestamp.Format("2006-01-02 15:04")
-			}
+			age := time.Since(snap.Timestamp)
 			msg := fmt.Sprintf("⚠️  Previous session was interrupted %s (%d messages). Run /recovery to review, /journal to see the last events.",
-				ageStr, snap.HistoryLen)
+				humanizeAge(age), snap.HistoryLen)
 			a.tui.AddSystemMessage(msg)
 		}
 	}
@@ -667,6 +664,11 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		a.journalEvent("command_completed", map[string]any{
 			"command": name,
 		})
+		// Record for autocomplete frecency — successful commands bubble up in
+		// future suggestions. Failures excluded so typos don't taint ranking.
+		if a.tui != nil {
+			a.tui.RecordRecentCommand(name)
+		}
 		// Handle special command markers
 		if strings.HasPrefix(result, "__browse:") {
 			browsePath := strings.TrimPrefix(result, "__browse:")
@@ -1163,6 +1165,26 @@ func (a *App) safeGo(name string, fn func()) {
 
 // safeSendToProgram safely sends a message to the Bubbletea program.
 // It copies the program reference under lock to prevent race conditions.
+// humanizeAge formats a duration as a short, colloquial age string. Used for
+// user-facing messages about interrupted runs and previous-session hints so
+// they read naturally regardless of how long ago they happened. Negative
+// ages (clock skew) collapse to "just now".
+func humanizeAge(age time.Duration) string {
+	age = age.Round(time.Minute)
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < time.Hour:
+		return fmt.Sprintf("%d min ago", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%d hours ago", int(age.Hours()))
+	case age < 7*24*time.Hour:
+		return fmt.Sprintf("%d days ago", int(age.Hours())/24)
+	default:
+		return fmt.Sprintf("%d+ days ago", int(age.Hours())/24)
+	}
+}
+
 func (a *App) safeSendToProgram(msg tea.Msg) {
 	a.mu.Lock()
 	program := a.program

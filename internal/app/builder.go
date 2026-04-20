@@ -681,8 +681,16 @@ func (b *Builder) initManagers() error {
 		}
 	}
 
-	// Command handler
+	// Command handler — overlays user aliases from ~/.config/gokin/aliases.yaml
+	// on top of the built-in shortcuts. Missing file is silently ignored so
+	// first-time users don't see a scary startup error.
 	b.commandHandler = commands.NewHandler()
+	if b.configDir != "" {
+		aliasPath := filepath.Join(b.configDir, "aliases.yaml")
+		if err := b.commandHandler.LoadAliasesFromFile(aliasPath); err != nil {
+			logging.Warn("failed to load command aliases", "path", aliasPath, "error", err)
+		}
+	}
 
 	// Initialize task router
 	routerCfg := &router.RouterConfig{
@@ -1566,6 +1574,9 @@ func (b *Builder) wireDependencies() error {
 	// Set up TUI callbacks
 	b.tuiModel.SetCallbacks(app.handleSubmit, app.handleQuit)
 	b.tuiModel.SetWorkDir(b.workDir)
+	if b.commandHandler != nil {
+		b.tuiModel.SetCommandAliases(b.commandHandler.Aliases())
+	}
 	b.tuiModel.SetPermissionCallback(app.handlePermissionDecision)
 	b.tuiModel.SetQuestionCallback(app.handleQuestionAnswer)
 	b.tuiModel.SetPlanApprovalCallback(app.handlePlanApproval)

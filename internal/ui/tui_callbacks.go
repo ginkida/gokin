@@ -124,6 +124,18 @@ func (m *Model) SetWorkDir(dir string) {
 	m.workDir = dir
 }
 
+// SetCommandAliases forwards the alias table to the input autocomplete
+// ranker so typing /p resolves to plan as a top suggestion.
+func (m *Model) SetCommandAliases(aliases map[string]string) {
+	m.input.SetCommandAliases(aliases)
+}
+
+// RecordRecentCommand marks the given command as most-recently-used in the
+// input model. Called after successful command dispatch.
+func (m *Model) RecordRecentCommand(name string) {
+	m.input.RecordRecentCommand(name)
+}
+
 // SetShowTokens enables or disables token usage display.
 func (m *Model) SetShowTokens(show bool) {
 	m.showTokens = show

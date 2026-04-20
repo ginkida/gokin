@@ -341,7 +341,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 				// Show diff preview and wait for approval if enabled
 				if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
-					approved, approveErr := t.diffHandler.PromptDiff(ctx, filePath, content, newContent, "edit", false)
+					approved, approveErr := maybePromptDiff(ctx, t.diffHandler, filePath, content, newContent, "edit", false)
 					if approveErr != nil {
 						return NewErrorResult(fmt.Sprintf("diff preview error: %s", approveErr)), nil
 					}
@@ -409,7 +409,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// Show diff preview and wait for approval if enabled
 	// Skip diff approval when running in delegated plan execution (context flag)
 	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
-		approved, err := t.diffHandler.PromptDiff(ctx, filePath, content, newContent, "edit", false)
+		approved, err := maybePromptDiff(ctx, t.diffHandler, filePath, content, newContent, "edit", false)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
 		}
@@ -513,7 +513,7 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 
 	// Show combined diff preview
 	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
-		approved, err := t.diffHandler.PromptDiff(ctx, filePath, string(oldContent), content, "edit", false)
+		approved, err := maybePromptDiff(ctx, t.diffHandler, filePath, string(oldContent), content, "edit", false)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
 		}
@@ -603,7 +603,7 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 
 	// Show diff preview
 	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
-		approved, err := t.diffHandler.PromptDiff(ctx, filePath, content, newContent, "edit", false)
+		approved, err := maybePromptDiff(ctx, t.diffHandler, filePath, content, newContent, "edit", false)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
 		}
@@ -690,7 +690,7 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 
 	// Show diff preview
 	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
-		approved, err := t.diffHandler.PromptDiff(ctx, filePath, content, newContent, "edit", false)
+		approved, err := maybePromptDiff(ctx, t.diffHandler, filePath, content, newContent, "edit", false)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
 		}

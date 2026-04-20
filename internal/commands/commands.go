@@ -76,12 +76,35 @@ type AppInterface interface {
 type Handler struct {
 	commands map[string]Command
 	frozen   bool
+
+	// aliases maps short names to canonical command names. Populated once via
+	// LoadAliases during startup; treated as immutable afterwards. Resolved in
+	// Parse before the canonical lookup so both the real name and the alias
+	// work interchangeably.
+	aliases map[string]string
+}
+
+// defaultAliases hard-codes common short forms so first-time users get useful
+// shortcuts without writing ~/.config/gokin/aliases.yaml. Users can shadow
+// these via the config file.
+var defaultAliases = map[string]string{
+	"p":  "plan",
+	"c":  "commit",
+	"m":  "model",
+	"s":  "status",
+	"u":  "undo",
+	"r":  "redo",
+	"h":  "help",
+	"q":  "clear",
+	"st": "stats",
+	"pr": "pr",
 }
 
 // NewHandler creates a new command handler with built-in commands.
 func NewHandler() *Handler {
 	h := &Handler{
 		commands: make(map[string]Command),
+		aliases:  cloneAliases(defaultAliases),
 	}
 
 	// Register built-in commands
@@ -200,6 +223,16 @@ func (h *Handler) Parse(input string) (string, []string, bool) {
 
 	// Extract command name (without /)
 	name := strings.TrimPrefix(parts[0], "/")
+
+	// Alias resolution: if `name` isn't a direct command but matches a
+	// known alias, swap to the canonical name before the existence check.
+	if _, exists := h.commands[name]; !exists {
+		if target, ok := h.aliases[name]; ok {
+			if _, targetExists := h.commands[target]; targetExists {
+				name = target
+			}
+		}
+	}
 
 	// Check if it's a known command (not a path)
 	if _, exists := h.commands[name]; !exists {

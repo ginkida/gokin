@@ -72,6 +72,15 @@ type InputModel struct {
 	suggestionIndex int
 	showSuggestions bool
 
+	// Alias map: user-typed short name → canonical command. Wired from
+	// commands.Handler at startup so /p resolves to plan in autocomplete
+	// even though "p" isn't in the commands slice.
+	commandAliases map[string]string
+
+	// Recent command names in most-recently-used order (≤ 5 entries). Small
+	// additive score bump so frequently used commands rank first on ties.
+	recentCommands []string
+
 	// Ghost text (inline completion hint)
 	ghostText    string // Suggested completion shown in dim color
 	ghostEnabled bool   // Whether ghost text is enabled
@@ -559,14 +568,33 @@ type scoredCommand struct {
 }
 
 // updateSuggestions updates the autocomplete suggestions with fuzzy matching.
+// Scoring priority (high → low):
+//  1. Exact alias match (e.g. user typed "/p" — show "plan" first).
+//  2. Exact prefix match on command name.
+//  3. Substring match anywhere in the name (not just prefix).
+//  4. Character-by-character fuzzy with consecutive-char bonus.
+// Recent usage bumps all of the above by a small additive, so frequently
+// used commands bubble up when multiple candidates tie.
 func (m *InputModel) updateSuggestions(input string) {
 	prefix := strings.TrimPrefix(input, "/")
 	prefix = strings.ToLower(prefix)
+
+	// Resolve alias up-front: if user typed something that matches an alias
+	// exactly, surface the target command as a strong signal.
+	aliasTarget := ""
+	if target, ok := m.commandAliases[prefix]; ok {
+		aliasTarget = strings.ToLower(target)
+	}
 
 	var scored []scoredCommand
 
 	for _, cmd := range m.commands {
 		cmdLower := strings.ToLower(cmd.Name)
+
+		if aliasTarget != "" && cmdLower == aliasTarget {
+			scored = append(scored, scoredCommand{cmd: cmd, score: 2000})
+			continue
+		}
 
 		// Exact prefix match gets highest priority
 		if strings.HasPrefix(cmdLower, prefix) {
@@ -577,9 +605,30 @@ func (m *InputModel) updateSuggestions(input string) {
 			continue
 		}
 
+		// Substring match anywhere (e.g. "mit" finds "commit"). Lower than
+		// prefix but higher than fuzzy so "mit" ranks commit above abstract
+		// character-by-character matches.
+		if prefix != "" && strings.Contains(cmdLower, prefix) {
+			scored = append(scored, scoredCommand{
+				cmd:   cmd,
+				score: 500 + (100 - len(cmd.Name)),
+			})
+			continue
+		}
+
 		// Fuzzy match
 		if score := fuzzyScore(cmd.Name, prefix); score > 0 {
 			scored = append(scored, scoredCommand{cmd: cmd, score: score})
+		}
+	}
+
+	// Recent-usage bonus — small additive so frequently used commands win
+	// ties but don't override semantic matches. Most-recent = highest bonus.
+	for i, name := range m.recentCommands {
+		for j := range scored {
+			if scored[j].cmd.Name == name {
+				scored[j].score += 30 - i*3
+			}
 		}
 	}
 
@@ -1077,6 +1126,42 @@ func getHistoryPath() (string, error) {
 func (m *InputModel) SetActiveTask(task string) {
 	m.activeTask = task
 	m.updatePlaceholder()
+}
+
+// SetCommandAliases wires the alias map from commands.Handler into the
+// autocomplete ranker. Called once from App during wiring; thread-safe only
+// when invoked before any goroutine dispatches UI events on this model.
+func (m *InputModel) SetCommandAliases(aliases map[string]string) {
+	if aliases == nil {
+		m.commandAliases = nil
+		return
+	}
+	out := make(map[string]string, len(aliases))
+	for k, v := range aliases {
+		out[strings.ToLower(k)] = strings.ToLower(v)
+	}
+	m.commandAliases = out
+}
+
+// RecordRecentCommand pushes `name` to the front of the recent-commands list
+// (dedup, cap at 5). Called from the App after each successful command
+// dispatch so autocomplete can favour commands the user actually runs.
+func (m *InputModel) RecordRecentCommand(name string) {
+	if name == "" {
+		return
+	}
+	// Remove existing entry (dedupe).
+	filtered := m.recentCommands[:0]
+	for _, n := range m.recentCommands {
+		if n != name {
+			filtered = append(filtered, n)
+		}
+	}
+	// Push to front.
+	m.recentCommands = append([]string{name}, filtered...)
+	if len(m.recentCommands) > 5 {
+		m.recentCommands = m.recentCommands[:5]
+	}
 }
 
 // SetPlaceholder sets the placeholder text for the input.
