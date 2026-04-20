@@ -1163,8 +1163,6 @@ func (a *App) safeGo(name string, fn func()) {
 	}()
 }
 
-// safeSendToProgram safely sends a message to the Bubbletea program.
-// It copies the program reference under lock to prevent race conditions.
 // humanizeAge formats a duration as a short, colloquial age string. Used for
 // user-facing messages about interrupted runs and previous-session hints so
 // they read naturally regardless of how long ago they happened. Negative
@@ -1185,6 +1183,8 @@ func humanizeAge(age time.Duration) string {
 	}
 }
 
+// safeSendToProgram safely sends a message to the Bubbletea program.
+// It copies the program reference under lock to prevent race conditions.
 func (a *App) safeSendToProgram(msg tea.Msg) {
 	a.mu.Lock()
 	program := a.program
