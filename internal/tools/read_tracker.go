@@ -13,6 +13,7 @@ type FileReadRecord struct {
 	ModTime    time.Time
 	Size       int64
 	TurnIndex  int
+	Seq        int // monotonic per-record; breaks ties when multiple files share a turn
 	Offset     int
 	Limit      int
 	ContentLen int
@@ -22,9 +23,10 @@ type FileReadRecord struct {
 // If the same file range is requested again and the file hasn't changed (same ModTime+Size),
 // the executor replaces the full content with a short stub, saving context window space.
 type FileReadTracker struct {
-	mu      sync.RWMutex
-	records map[string]*FileReadRecord // key: "filepath|offset|limit"
-	turnSeq int
+	mu       sync.RWMutex
+	records  map[string]*FileReadRecord // key: "filepath|offset|limit"
+	turnSeq  int
+	writeSeq int
 }
 
 // NewFileReadTracker creates a new tracker.
@@ -62,12 +64,13 @@ func (t *FileReadTracker) CheckAndRecord(filePath string, offset, limit, content
 	if found {
 		// File changed since last read?
 		if existing.ModTime != modTime || existing.Size != size {
-			// Update record, not a duplicate
+			t.writeSeq++
 			t.records[key] = &FileReadRecord{
 				FilePath:   filePath,
 				ModTime:    modTime,
 				Size:       size,
 				TurnIndex:  t.turnSeq,
+				Seq:        t.writeSeq,
 				Offset:     offset,
 				Limit:      limit,
 				ContentLen: contentLen,
@@ -78,12 +81,13 @@ func (t *FileReadTracker) CheckAndRecord(filePath string, offset, limit, content
 		return true, existing, false
 	}
 
-	// First read — record it
+	t.writeSeq++
 	t.records[key] = &FileReadRecord{
 		FilePath:   filePath,
 		ModTime:    modTime,
 		Size:       size,
 		TurnIndex:  t.turnSeq,
+		Seq:        t.writeSeq,
 		Offset:     offset,
 		Limit:      limit,
 		ContentLen: contentLen,
@@ -117,6 +121,7 @@ func (t *FileReadTracker) Reset() {
 	defer t.mu.Unlock()
 	t.records = make(map[string]*FileReadRecord)
 	t.turnSeq = 0
+	t.writeSeq = 0
 }
 
 // RecentlyReadFiles returns up to `limit` distinct file paths that have been
@@ -128,24 +133,26 @@ func (t *FileReadTracker) RecentlyReadFiles(limit int) []string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	// Pick the latest TurnIndex per file to break ties.
+	// Pick the latest Seq per file. Seq is per-record and monotonic across all
+	// CheckAndRecord writes, so within the same turn the most recent write wins —
+	// map iteration order can't perturb the ranking.
 	seen := make(map[string]int, len(t.records))
 	for _, rec := range t.records {
-		if prev, ok := seen[rec.FilePath]; !ok || rec.TurnIndex > prev {
-			seen[rec.FilePath] = rec.TurnIndex
+		if prev, ok := seen[rec.FilePath]; !ok || rec.Seq > prev {
+			seen[rec.FilePath] = rec.Seq
 		}
 	}
 	type entry struct {
 		path string
-		turn int
+		seq  int
 	}
 	list := make([]entry, 0, len(seen))
-	for path, turn := range seen {
-		list = append(list, entry{path, turn})
+	for path, seq := range seen {
+		list = append(list, entry{path, seq})
 	}
-	// Sort by turn desc (most recent first). Small n (≤ 40-ish), so insertion sort is fine.
+	// Sort by seq desc (most recent first). Small n (≤ 40-ish), so insertion sort is fine.
 	for i := 1; i < len(list); i++ {
-		for j := i; j > 0 && list[j-1].turn < list[j].turn; j-- {
+		for j := i; j > 0 && list[j-1].seq < list[j].seq; j-- {
 			list[j-1], list[j] = list[j], list[j-1]
 		}
 	}
