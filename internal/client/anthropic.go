@@ -597,6 +597,12 @@ type toolCallAccumulator struct {
 	// Thinking block tracking
 	currentBlockType string          // "thinking", "text", or "tool_use"
 	thinkingBuilder  strings.Builder // Accumulates thinking content
+	// currentThinkingSignature holds the `signature_delta` payload that
+	// closes a thinking block. Anthropic Extended Thinking and Kimi
+	// Coding Plan both require this signature to be echoed back in
+	// multi-turn assistant messages; without it the provider rejects
+	// subsequent requests with "reasoning_content is missing".
+	currentThinkingSignature string
 	// Inline <think> tag parsing for models that embed reasoning in text
 	thinkTagParser ThinkTagParser
 }
@@ -1179,10 +1185,14 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					chunk := c.processStreamEvent(event, accumulator)
 					// Mark partial progress when we received meaningful model output.
 					// This prevents treating "thinking/tool_use then idle" as a cold timeout.
-					if chunk.Text != "" || chunk.Thinking != "" || len(chunk.FunctionCalls) > 0 {
+					if chunk.Text != "" || chunk.Thinking != "" || len(chunk.FunctionCalls) > 0 || len(chunk.Parts) > 0 {
 						contentReceived = true
 					}
+					// Include len(chunk.Parts) — finalized thinking blocks are
+					// emitted as Parts-only chunks (no Text/Thinking/etc) and
+					// MUST reach callers for multi-turn history reconstruction.
 					if chunk.Text != "" || chunk.Thinking != "" || chunk.Done || len(chunk.FunctionCalls) > 0 ||
+						len(chunk.Parts) > 0 ||
 						chunk.InputTokens > 0 || chunk.CacheCreationInputTokens > 0 || chunk.CacheReadInputTokens > 0 {
 						select {
 						case chunks <- chunk:
@@ -1308,11 +1318,45 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 					acc.currentToolInput.WriteString(partialJSON)
 				}
 			}
+
+			// Handle thinking signature — arrives as the last delta in a
+			// thinking block (provider-side Extended Thinking completion).
+			// Captured here and attached to the Part emitted in the
+			// matching content_block_stop so multi-turn assistant messages
+			// can echo it back to satisfy provider requirements.
+			if deltaType == "signature_delta" {
+				if sig, ok := delta["signature"].(string); ok && sig != "" {
+					acc.currentThinkingSignature = sig
+					logging.Debug("SSE signature delta received", "sig_length", len(sig))
+				}
+			}
 		} else {
 			logging.Debug("SSE content_block_delta missing delta", "event", event)
 		}
 
 	case "content_block_stop":
+		// Finalize a thinking block. Emit a genai.Part with Thought=true
+		// and the accumulated signature so the upstream Session can keep
+		// it in history — required for multi-turn Extended Thinking.
+		if acc.currentBlockType == "thinking" {
+			thoughtText := acc.thinkingBuilder.String()
+			if thoughtText != "" {
+				thoughtPart := &genai.Part{
+					Thought: true,
+					Text:    thoughtText,
+				}
+				if acc.currentThinkingSignature != "" {
+					thoughtPart.ThoughtSignature = []byte(acc.currentThinkingSignature)
+				}
+				chunk.Parts = append(chunk.Parts, thoughtPart)
+				logging.Debug("finalized thinking block",
+					"text_len", len(thoughtText),
+					"sig_len", len(acc.currentThinkingSignature))
+			}
+			acc.thinkingBuilder.Reset()
+			acc.currentThinkingSignature = ""
+		}
+
 		// If we were accumulating a tool call, finalize it
 		if acc.currentToolID != "" && acc.currentToolName != "" {
 			inputJSON := acc.currentToolInput.String()
@@ -1764,7 +1808,30 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 	content := make([]map[string]interface{}, 0)
 	toolUseOrdinal := 0
 
+	// First pass: thinking blocks. Anthropic Extended Thinking and Kimi
+	// Coding Plan strictly require thinking blocks (with signature) to
+	// precede tool_use entries in multi-turn assistant messages. Without
+	// this, Kimi rejects the request with "reasoning_content is missing".
 	for _, part := range parts {
+		if !part.Thought || part.Text == "" {
+			continue
+		}
+		block := map[string]interface{}{
+			"type":     "thinking",
+			"thinking": part.Text,
+		}
+		if len(part.ThoughtSignature) > 0 {
+			block["signature"] = string(part.ThoughtSignature)
+		}
+		content = append(content, block)
+	}
+
+	// Second pass: text and tool_use, in original order. Thought parts
+	// are skipped (already emitted above); non-thought text lands here.
+	for _, part := range parts {
+		if part.Thought {
+			continue
+		}
 		if part.Text != "" {
 			content = append(content, map[string]interface{}{
 				"type": "text",

@@ -335,9 +335,15 @@ type Response struct {
 	RateLimit *RateLimitMetadata
 }
 
-// Collect collects all chunks from a streaming response into a single Response.
+// Collect collects all chunks from a streaming response into a single
+// Response. Parallels ProcessStream's accumulator — including the
+// FunctionCall→Parts back-fill so callers can pass Response.Parts to
+// subsequent buildAssistantMessage calls for tool-result round-trips.
+// Without the back-fill, Parts would lose tool_use IDs and the model's
+// next turn would fail with "tool_use_id not found".
 func (sr *StreamingResponse) Collect() (*Response, error) {
 	resp := &Response{}
+	fcInParts := make(map[*genai.FunctionCall]bool)
 
 	for chunk := range sr.Chunks {
 		if chunk.Error != nil {
@@ -348,7 +354,28 @@ func (sr *StreamingResponse) Collect() (*Response, error) {
 		resp.Text += chunk.Text
 		resp.Thinking += chunk.Thinking
 		resp.FunctionCalls = append(resp.FunctionCalls, chunk.FunctionCalls...)
-		resp.Parts = append(resp.Parts, chunk.Parts...)
+
+		// Accumulate original parts first; track which FunctionCalls they
+		// already carry so we don't duplicate below.
+		for _, part := range chunk.Parts {
+			if part != nil {
+				resp.Parts = append(resp.Parts, part)
+				if part.FunctionCall != nil {
+					fcInParts[part.FunctionCall] = true
+				}
+			}
+		}
+
+		// Back-fill Parts from FunctionCalls that weren't already emitted
+		// as structured parts. Anthropic-compatible providers (GLM,
+		// MiniMax, Kimi) stream tool calls as FunctionCall-only, without
+		// Part wrappers; this keeps Response.Parts usable for history
+		// reconstruction in SendFunctionResponse.
+		for _, fc := range chunk.FunctionCalls {
+			if !fcInParts[fc] {
+				resp.Parts = append(resp.Parts, &genai.Part{FunctionCall: fc})
+			}
+		}
 
 		if chunk.Done {
 			resp.FinishReason = chunk.FinishReason

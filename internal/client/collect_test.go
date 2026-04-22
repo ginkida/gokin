@@ -156,6 +156,56 @@ func TestCollect_RateLimitLatestWins(t *testing.T) {
 	}
 }
 
+func TestCollect_BackfillsPartsFromFunctionCalls(t *testing.T) {
+	// Regression: Collect() used to only accumulate chunk.FunctionCalls
+	// without back-filling Response.Parts. Downstream callers that use
+	// Parts to reconstruct history for SendFunctionResponse then lost
+	// tool_use IDs and the provider rejected the follow-up with
+	// "tool_use_id not found". Collect now mirrors ProcessStream's
+	// back-fill so Parts stays populated.
+	fc := &genai.FunctionCall{Name: "get_weather", Args: map[string]any{"city": "Oslo"}}
+	sr := buildStream([]ResponseChunk{
+		{FunctionCalls: []*genai.FunctionCall{fc}},
+		{Done: true, FinishReason: genai.FinishReasonStop},
+	})
+	resp, err := sr.Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(resp.FunctionCalls) != 1 {
+		t.Fatalf("FunctionCalls = %d, want 1", len(resp.FunctionCalls))
+	}
+	if len(resp.Parts) != 1 {
+		t.Fatalf("Parts = %d, want 1 (back-filled)", len(resp.Parts))
+	}
+	if resp.Parts[0].FunctionCall != fc {
+		t.Errorf("Parts[0].FunctionCall mismatch — expected the same pointer back-filled")
+	}
+}
+
+func TestCollect_DoesNotDuplicateWhenChunkAlreadyHasParts(t *testing.T) {
+	// If a chunk emits FunctionCall both through Parts (for Gemini 3's
+	// ThoughtSignature preservation) AND through FunctionCalls (for
+	// Anthropic-compat back-fill), Collect must de-dupe so the same
+	// FunctionCall isn't in Parts twice.
+	fc := &genai.FunctionCall{Name: "read", Args: map[string]any{"path": "/x"}}
+	part := &genai.Part{FunctionCall: fc}
+	sr := buildStream([]ResponseChunk{
+		{
+			Parts:         []*genai.Part{part},
+			FunctionCalls: []*genai.FunctionCall{fc},
+		},
+		{Done: true},
+	})
+	resp, err := sr.Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(resp.Parts) != 1 {
+		t.Errorf("Parts = %d, want 1 (de-duped)", len(resp.Parts))
+	}
+}
+
 func TestCollect_AccumulatesFunctionCalls(t *testing.T) {
 	fc1 := &genai.FunctionCall{Name: "read", Args: map[string]any{"path": "/a"}}
 	fc2 := &genai.FunctionCall{Name: "write", Args: map[string]any{"path": "/b"}}
