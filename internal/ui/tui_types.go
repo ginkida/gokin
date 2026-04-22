@@ -125,11 +125,12 @@ type (
 	}
 
 	TokenUsageMsg struct {
-		Tokens      int
-		MaxTokens   int
-		PercentUsed float64
-		NearLimit   bool
-		IsEstimate  bool // True when token count is an estimate (API call failed)
+		Tokens       int
+		OutputTokens int // Tokens generated in the current response (streaming estimate)
+		MaxTokens    int
+		PercentUsed  float64
+		NearLimit    bool
+		IsEstimate   bool // True when token count is an estimate (API call failed)
 	}
 	ProjectInfoMsg struct {
 		ProjectType string
@@ -228,9 +229,15 @@ type (
 	}
 
 	// SubAgentActivityMsg reports activity from sub-agents.
+	//
+	// Task is populated only on Status=="start" — it carries the prompt the
+	// sub-agent was dispatched with, so the activity feed can display what
+	// each agent is actually working on instead of a generic "Sub-agent: X".
+	// For tool-level events the UI already has the task from the start event.
 	SubAgentActivityMsg struct {
 		AgentID   string
 		AgentType string
+		Task      string // Dispatch prompt, filled only on Status=="start"
 		ToolName  string
 		ToolArgs  map[string]any
 		Status    string        // "start", "tool_start", "tool_end", "complete", "failed"

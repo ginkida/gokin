@@ -6,8 +6,10 @@ import (
 )
 
 func TestRenderContextBarAbsoluteTokens(t *testing.T) {
-	// With absolute token counts
-	result := renderContextBar(50, 8, 50000, 128000)
+	// pct is a fraction in [0.0, 1.0] per the helper's docstring.
+	// outputTokens=0 — the 5th arg (pending output tokens indicator) is
+	// not exercised here.
+	result := renderContextBar(0.5, 8, 50000, 128000, 0)
 	if !strings.Contains(result, "50.0K") {
 		t.Errorf("should contain 50.0K, got: %s", stripAnsi(result))
 	}
@@ -17,22 +19,22 @@ func TestRenderContextBarAbsoluteTokens(t *testing.T) {
 }
 
 func TestRenderContextBarPercentFallback(t *testing.T) {
-	// Without token counts, should fall back to percentage
-	result := renderContextBar(75, 8, 0, 0)
+	// Without token counts, should fall back to percentage (pct * 100).
+	result := renderContextBar(0.75, 8, 0, 0, 0)
 	if !strings.Contains(result, "75%") {
 		t.Errorf("should contain 75%%, got: %s", stripAnsi(result))
 	}
 }
 
 func TestRenderContextBarEmpty(t *testing.T) {
-	result := renderContextBar(0, 8, 0, 0)
+	result := renderContextBar(0, 8, 0, 0, 0)
 	if result != "" {
 		t.Errorf("0%% should return empty, got: %q", result)
 	}
 }
 
 func TestRenderContextBarHighUsage(t *testing.T) {
-	result := renderContextBar(96, 8, 96000, 100000)
+	result := renderContextBar(0.96, 8, 96000, 100000, 0)
 	if !strings.Contains(result, "96.0K") {
 		t.Errorf("should contain 96.0K, got: %s", stripAnsi(result))
 	}

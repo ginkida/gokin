@@ -35,7 +35,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	}
 	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string) {
 		if onSubAgentActivity != nil {
-			onSubAgentActivity(id, string(agent.Type), toolName, args, "tool_"+status)
+			onSubAgentActivity(id, string(agent.Type), "", toolName, args, "tool_"+status)
 		}
 		if deps.metaAgent != nil && status == "start" {
 			deps.metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
@@ -45,9 +45,10 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	// Report activity to coordinator
 	r.reportActivity()
 
-	// Notify UI about agent start
+	// Notify UI about agent start — pass the prompt so the feed can surface
+	// what this agent is actually working on (instead of "Sub-agent: general").
 	if onSubAgentActivity != nil {
-		onSubAgentActivity(agent.ID, string(agent.Type), "", nil, "start")
+		onSubAgentActivity(agent.ID, string(agent.Type), prompt, "", nil, "start")
 	}
 
 	// Run agent synchronously with per-agent timeout
@@ -67,7 +68,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 		if err != nil {
 			status = "failed"
 		}
-		onSubAgentActivity(agent.ID, string(agent.Type), "", nil, status)
+		onSubAgentActivity(agent.ID, string(agent.Type), "", "", nil, status)
 	}
 
 	// Report activity after completion
@@ -165,7 +166,7 @@ func (r *Runner) SpawnWithContext(
 	agentID := agent.ID
 	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string) {
 		if onSubAgentActivity != nil {
-			onSubAgentActivity(id, string(agent.Type), toolName, args, "tool_"+status)
+			onSubAgentActivity(id, string(agent.Type), "", toolName, args, "tool_"+status)
 		}
 		if deps.metaAgent != nil && status == "start" {
 			deps.metaAgent.UpdateActivity(agentID, toolName, agent.GetTurnCount())
@@ -182,6 +183,12 @@ func (r *Runner) SpawnWithContext(
 	}
 
 	r.reportActivity()
+
+	// Notify UI with task description so the activity feed shows what this
+	// agent is actually working on.
+	if onSubAgentActivity != nil {
+		onSubAgentActivity(agent.ID, string(agent.Type), prompt, "", nil, "start")
+	}
 
 	// Apply per-agent timeout and store cancel func for explicit Cancel()
 	var runCtx context.Context
@@ -225,6 +232,18 @@ func (r *Runner) SpawnWithContext(
 	}
 
 	r.reportActivity()
+
+	// Notify UI of completion so the feed stops showing this agent as
+	// "running" after it finishes. Must match the "start" notification
+	// added earlier — without this, agents pile up as permanent Running
+	// entries in the activity feed.
+	if onSubAgentActivity != nil {
+		completionStatus := "complete"
+		if err != nil || result.Status == AgentStatusFailed {
+			completionStatus = "failed"
+		}
+		onSubAgentActivity(agent.ID, string(agent.Type), "", "", nil, completionStatus)
+	}
 
 	// Unregister from meta-agent
 	if deps.metaAgent != nil {
@@ -283,7 +302,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	}
 	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string) {
 		if onSubAgentActivity != nil {
-			onSubAgentActivity(id, string(agent.Type), toolName, args, "tool_"+status)
+			onSubAgentActivity(id, string(agent.Type), "", toolName, args, "tool_"+status)
 		}
 		if deps.metaAgent != nil && status == "start" {
 			deps.metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
@@ -298,7 +317,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		onStart(agent.ID, agentType, prompt)
 	}
 	if onSubAgentActivity != nil {
-		onSubAgentActivity(agent.ID, agentType, "", nil, "start")
+		onSubAgentActivity(agent.ID, agentType, prompt, "", nil, "start")
 	}
 
 	// Run agent asynchronously with proper cleanup
@@ -406,7 +425,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 			if err != nil || result.Status == AgentStatusFailed {
 				completionStatus = "failed"
 			}
-			onSubAgentActivity(agentID, string(agent.Type), "", nil, completionStatus)
+			onSubAgentActivity(agentID, string(agent.Type), "", "", nil, completionStatus)
 		}
 
 		// Unregister from meta-agent
@@ -474,7 +493,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	r.mu.RUnlock()
 	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string) {
 		if onSubAgentActivity != nil {
-			onSubAgentActivity(id, string(agent.Type), toolName, args, "tool_"+status)
+			onSubAgentActivity(id, string(agent.Type), "", toolName, args, "tool_"+status)
 		}
 		if deps.metaAgent != nil && status == "start" {
 			deps.metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
@@ -504,6 +523,9 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	// Notify UI about agent start
 	if onStart != nil {
 		onStart(agent.ID, agentType, prompt)
+	}
+	if onSubAgentActivity != nil {
+		onSubAgentActivity(agent.ID, agentType, prompt, "", nil, "start")
 	}
 
 	// Run agent asynchronously with streaming and progress updates
@@ -609,6 +631,17 @@ func (r *Runner) SpawnAsyncWithStreaming(
 
 		// Ensure Completed is always true so WaitWithContext doesn't spin
 		result.Completed = true
+
+		// Notify UI of completion — matches the "start" notification we
+		// send from this path. Without this the activity feed would keep
+		// showing a long-since-finished agent as Running forever.
+		if onSubAgentActivity != nil {
+			completionStatus := "complete"
+			if err != nil || result.Status == AgentStatusFailed {
+				completionStatus = "failed"
+			}
+			onSubAgentActivity(agentID, string(agent.Type), "", "", nil, completionStatus)
+		}
 
 		// Unregister from meta-agent
 		if deps.metaAgent != nil {

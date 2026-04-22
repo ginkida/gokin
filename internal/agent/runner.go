@@ -96,8 +96,12 @@ type Runner struct {
 	// Thinking callback for UI display
 	onThinking func(text string)
 
-	// Sub-agent activity callback for UI updates
-	onSubAgentActivity func(agentID, agentType, toolName string, args map[string]any, status string)
+	// Sub-agent activity callback for UI updates.
+	//
+	// The `prompt` argument is populated only on the "start" status — for
+	// tool-level events (tool_start, tool_end) and completion (complete,
+	// failed) it's empty because the UI already captured the task at start.
+	onSubAgentActivity func(agentID, agentType, prompt, toolName string, args map[string]any, status string)
 
 	// Event-driven notification for result completion (replaces polling in WaitWithContext)
 	resultReady chan struct{}
@@ -473,7 +477,8 @@ func (r *Runner) SetWorkspaceReviewHandler(handler func(context.Context, []Works
 }
 
 // SetOnSubAgentActivity sets the callback for sub-agent activity reporting.
-func (r *Runner) SetOnSubAgentActivity(fn func(agentID, agentType, toolName string, args map[string]any, status string)) {
+// See the comment on the callback field for the contract of the `prompt` arg.
+func (r *Runner) SetOnSubAgentActivity(fn func(agentID, agentType, prompt, toolName string, args map[string]any, status string)) {
 	r.mu.Lock()
 	r.onSubAgentActivity = fn
 	r.mu.Unlock()

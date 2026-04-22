@@ -27,10 +27,21 @@ type SubAgentState struct {
 	CurrentTool string
 	ToolArgs    map[string]any
 	StartTime   time.Time
-	CurrentStep int     // Current step number (e.g. tool call count)
-	TotalSteps  int     // Total expected steps (0 = unknown)
-	Progress    float64 // 0.0-1.0, -1 for indeterminate
+	// LastToolTime is the wall-clock of the most recent tool_start/tool_end
+	// event. Used to surface an "idle Xm" indicator when a sub-agent stops
+	// making tool calls — lets users distinguish "legitimately slow" from
+	// "stuck", and justifies the wait vs. an unknown hang.
+	LastToolTime time.Time
+	CurrentStep  int     // Current step number (e.g. tool call count)
+	TotalSteps   int     // Total expected steps (0 = unknown)
+	Progress     float64 // 0.0-1.0, -1 for indeterminate
 }
+
+// SubAgentIdleThreshold is the quiet window after which a running sub-agent
+// is considered "idle" — no tool calls observed in that window. Tuned long
+// enough to ignore normal thinking pauses (Kimi thinking + generate can be
+// 30-60s) and short enough to flag genuine stalls before the full timeout.
+const SubAgentIdleThreshold = 2 * time.Minute
 
 // ActivityFeedSnapshot is a lightweight copy of the most relevant activity
 // data for rendering summary UI outside the panel itself.
@@ -135,12 +146,14 @@ func (p *ActivityFeedPanel) StartSubAgent(agentID, agentType, description string
 	defer p.mu.Unlock()
 
 	p.visible = true
+	now := time.Now()
 	p.subAgentActivities[agentID] = &SubAgentState{
-		AgentID:     agentID,
-		AgentType:   agentType,
-		Description: description,
-		StartTime:   time.Now(),
-		Progress:    -1, // indeterminate until progress data arrives
+		AgentID:      agentID,
+		AgentType:    agentType,
+		Description:  description,
+		StartTime:    now,
+		LastToolTime: now, // Seed so idle detection starts from birth.
+		Progress:     -1,  // indeterminate until progress data arrives
 	}
 
 	// Add as activity entry
@@ -179,6 +192,9 @@ func (p *ActivityFeedPanel) UpdateSubAgentTool(agentID, toolName string, args ma
 
 	state.CurrentTool = toolName
 	state.ToolArgs = args
+	// Any tool activity (start OR end) resets the idle clock — the agent is
+	// clearly alive if it's reporting events.
+	state.LastToolTime = time.Now()
 
 	// Increment step counter on each new tool start
 	if toolName != "" {
@@ -471,6 +487,23 @@ func (p *ActivityFeedPanel) View(width int) string {
 			desc = string(runes[:maxDescLen-3]) + "..."
 		}
 		line.WriteString(dimStyle.Render(desc))
+
+		// Idle marker: if this is a running sub-agent that hasn't made a
+		// tool call in SubAgentIdleThreshold, append "· idle Xm". Users
+		// see a clear "may be stuck" signal before the agent hits its
+		// hard timeout — and can decide to cancel.
+		if entry.Type == ActivityTypeAgent &&
+			(entry.Status == ActivityRunning || entry.Status == ActivityPending) {
+			if state, ok := p.subAgentActivities[entry.AgentID]; ok &&
+				!state.LastToolTime.IsZero() {
+				idle := time.Since(state.LastToolTime)
+				if idle >= SubAgentIdleThreshold {
+					warnStyle := lipgloss.NewStyle().Foreground(ColorWarning).Italic(true)
+					line.WriteString(warnStyle.Render(
+						fmt.Sprintf("  · idle %s", format.Duration(idle))))
+				}
+			}
+		}
 
 		// Duration (right-aligned)
 		var duration string

@@ -4,13 +4,35 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"gokin/internal/format"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Visual design of the live activity indicator.
+//
+// Design target: the card adds what the status bar can't show — the specific
+// action happening right now — and nothing else. Provider, model, state
+// (WRITING / WORKING / IDLE), the context-usage bar, and the "esc Interrupt"
+// key hint are all permanently visible in the bottom status bar. Repeating
+// them here just steals vertical space.
+//
+// Current shape (big Live Activity panel closed):
+//
+//   ▎ Writing: - `tui.go` — Model struct fields
+//   ▎ ↳ Editing tui_status_bar.go → applied (63ms)
+//   ▎ → Plan step 3/8
+//
+// The colored left-edge bar (▎) IS the state indicator — its hue matches
+// the status bar's state chip, so state reads from colour, not repeated
+// text. When the big Live Activity panel is open (Ctrl+O), the card
+// collapses to just the current-action line; Recent/Next are already in
+// the panel below.
+//
+// Earlier iterations had a bordered "chip" (● WRITING), repeated meta
+// (kimi · kimi-for-coding), and an "Esc cancel" footer — every one of
+// those duplicated something the status bar already shows. Removed.
 func (m Model) shouldShowLiveActivityCard() bool {
 	if m.isModalState() {
 		return false
@@ -24,75 +46,87 @@ func (m Model) shouldShowLiveActivityCard() bool {
 	return m.activityFeed != nil && m.activityFeed.HasActiveEntries()
 }
 
+// spinnerFramesCard is the braille-dot animation used as an inline leading
+// indicator on the first line of the card when the agent is actively
+// working. We pick the frame from a monotonic wall-clock source so the
+// animation is consistent across every re-render within the same tick.
+var spinnerFramesCard = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 func (m Model) renderLiveActivityCard() string {
 	if !m.shouldShowLiveActivityCard() {
 		return ""
 	}
 
 	width := m.width - 2
-	if width < 48 {
-		width = 48
-	}
-	innerWidth := width - 4
-	if innerWidth < 36 {
-		innerWidth = 36
+	if width < 40 {
+		width = 40
 	}
 
 	accent := m.liveActivityAccentColor()
-	borderStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(accent).
-		Padding(0, 1)
-
-	titleStyle := lipgloss.NewStyle().Foreground(accent).Bold(true)
-	metaStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	labelStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+	barStyle := lipgloss.NewStyle().Foreground(accent)
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	valueStyle := lipgloss.NewStyle().Foreground(ColorText)
-	footerStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 
 	snapshot := ActivityFeedSnapshot{}
 	if m.activityFeed != nil {
 		snapshot = m.activityFeed.Snapshot(4, 2)
 	}
 
-	headerLeft := titleStyle.Render("Now")
-	if chip := m.liveActivityStageChip(); chip != "" {
-		headerLeft += " " + chip
-	}
-	headerRight := metaStyle.Render(m.liveActivityMeta())
+	// When the big Live Activity panel (Ctrl+O) is open, collapse to just
+	// the current-action line — Recent/Next live in the panel below.
+	feedOpen := m.activityFeed != nil && m.activityFeed.IsVisible()
 
-	var content strings.Builder
-	content.WriteString(joinLeftRight(headerLeft, headerRight, innerWidth))
-	content.WriteString("\n")
-
-	rows := []struct {
-		label string
-		value string
-	}{
-		{label: "Doing", value: m.liveActivityCurrentLine(snapshot)},
-		{label: "Recent", value: m.liveActivityRecentLine(snapshot)},
-		{label: "Next", value: m.liveActivityNextLine(snapshot)},
+	// Line 1: the current action — no state badge, no meta. State comes
+	// from the accent color on the left bar; state word + provider + model
+	// are already permanent fixtures in the bottom status bar.
+	current := m.liveActivityCurrentLine(snapshot)
+	if current == "" {
+		// Nothing specific to show and the card would otherwise be empty —
+		// better to render nothing than a bare accent bar with no content.
+		return ""
 	}
 
-	renderedRows := 0
-	for _, row := range rows {
-		if strings.TrimSpace(row.value) == "" {
-			continue
+	// Pick the leading glyph for the first line: animated braille spinner
+	// while the agent is working (Processing/Streaming), static bar (▎)
+	// otherwise. The spinner replaces — not complements — the bar, so the
+	// user sees "⠋ Writing: …" on one line instead of a separate spinner
+	// line below the card. Same colour scheme (state accent) either way.
+	firstGlyph := "▎"
+	if m.state == StateProcessing || m.state == StateStreaming {
+		elapsed := time.Since(m.streamStartTime)
+		frameIdx := int(elapsed.Milliseconds()/80) % len(spinnerFramesCard)
+		firstGlyph = spinnerFramesCard[frameIdx]
+	}
+
+	// Prefix every line with a coloured leading glyph. First line uses the
+	// animated spinner (when active); subsequent lines keep the static bar
+	// so the animation doesn't become visually noisy.
+	var out strings.Builder
+	out.WriteString(barStyle.Render(firstGlyph) + " ")
+	out.WriteString(valueStyle.Render(truncateRunes(current, width-2)))
+
+	if !feedOpen {
+		// Recent: one line of the most recent completed activity, prefixed
+		// with "↳ " so it reads as a trailing consequence of the current
+		// action rather than a competing primary signal.
+		if recent := m.liveActivityRecentLine(snapshot); recent != "" {
+			out.WriteByte('\n')
+			out.WriteString(barStyle.Render("▎") + " " +
+				dimStyle.Render("↳ ") +
+				valueStyle.Render(truncateRunes(recent, width-4)))
 		}
-		content.WriteString(renderLiveActivityRow(row.label, row.value, innerWidth, labelStyle, valueStyle))
-		content.WriteString("\n")
-		renderedRows++
-		if innerWidth < 72 && renderedRows >= 2 {
-			break
+		// Next: only surface truly new signal (retries, rate limits,
+		// plan progression, parallel work). Generic status echoes are
+		// dropped inside liveActivityNextLine.
+		if next := m.liveActivityNextLine(snapshot); next != "" {
+			out.WriteByte('\n')
+			out.WriteString(barStyle.Render("▎") + " " +
+				dimStyle.Render("→ ") +
+				valueStyle.Render(truncateRunes(next, width-4)))
 		}
 	}
 
-	footer := m.liveActivityFooter(snapshot)
-	if footer != "" {
-		content.WriteString(footerStyle.Render(truncateRunes(footer, innerWidth)))
-	}
-
-	return borderStyle.Width(width).Render(strings.TrimRight(content.String(), "\n"))
+	return out.String()
 }
 
 func (m Model) liveActivityAccentColor() lipgloss.Color {
@@ -110,61 +144,11 @@ func (m Model) liveActivityAccentColor() lipgloss.Color {
 	}
 }
 
-func (m Model) liveActivityStageChip() string {
-	text := ""
-	color := ColorMuted
-
-	switch {
-	case !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil):
-		text = "RATE LIMIT"
-		color = ColorWarning
-	case m.retryAttempt > 0 && m.retryMax > 0:
-		text = fmt.Sprintf("RETRY %d/%d", m.retryAttempt, m.retryMax)
-		color = ColorWarning
-	case m.currentTool != "":
-		text = "RUNNING"
-		color = GetToolIconColor(m.currentTool)
-	case m.state == StateStreaming:
-		text = "WRITING"
-		color = ColorSuccess
-	case m.state == StateProcessing:
-		text = "WORKING"
-		color = ColorSecondary
-	default:
-		return ""
-	}
-
-	return lipgloss.NewStyle().
-		Foreground(color).
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(color).
-		Padding(0, 1).
-		Bold(true).
-		Render(text)
-}
-
-func (m Model) liveActivityMeta() string {
-	var parts []string
-	if provider := strings.TrimSpace(m.runtimeStatus.Provider); provider != "" {
-		parts = append(parts, provider)
-	}
-	if model := strings.TrimSpace(m.currentModel); model != "" {
-		parts = append(parts, shortenModelName(model))
-	}
-	if m.planProgressMode && m.planProgress != nil && m.planProgress.TotalSteps > 0 {
-		parts = append(parts, fmt.Sprintf("step %d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps))
-	}
-	if len(parts) == 0 {
-		return "session active"
-	}
-	return strings.Join(parts, " · ")
-}
-
 func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	if m.currentTool != "" {
 		title := capitalizeToolName(m.currentTool)
 		if active := len(m.activeToolCalls); active > 1 {
-			title = fmt.Sprintf("%s · %d tools in flight", title, active)
+			title = fmt.Sprintf("%s · %d in flight", title, active)
 		}
 		if m.currentToolInfo != "" {
 			title += " — " + m.currentToolInfo
@@ -176,17 +160,34 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	}
 
 	if m.state == StateStreaming {
+		// Clean the snippet: strip leading bullets/dashes/stars from the
+		// model's markdown so "Writing: - `tui.go`" doesn't read as a
+		// double-dash. Cleaning may reduce a pure-bullet snippet to "" — in
+		// that case we fall through to the generic "Writing response" label
+		// rather than render "Writing: " with a dangling space.
+		cleaned := ""
+		if raw := m.lastStreamSnippet(); raw != "" {
+			cleaned = cleanStreamSnippet(raw)
+		}
 		switch {
-		case m.lastStreamSnippet() != "":
-			return "Writing response — " + m.lastStreamSnippet()
+		case cleaned != "":
+			return "Writing: " + cleaned
 		case m.responseToolCount > 0:
-			return fmt.Sprintf("Writing response after %d tool calls", m.responseToolCount)
+			return fmt.Sprintf("Writing response · %d tools used", m.responseToolCount)
 		default:
 			return "Writing response"
 		}
 	}
 
 	if label := strings.TrimSpace(m.processingLabel); label != "" {
+		// Append elapsed wall-clock once we're past the "barely started"
+		// threshold. Users ask "has it really been thinking for a while?" —
+		// this answers it without waiting for a tool call to land. Matches
+		// the behaviour the old spinner-status block provided before the
+		// card took over rendering.
+		if elapsed := time.Since(m.streamStartTime); elapsed >= 3*time.Second {
+			label += " · " + format.Duration(elapsed)
+		}
 		return label
 	}
 
@@ -195,35 +196,33 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	}
 
 	if snapshot.RunningAgents > 0 || snapshot.RunningTools > 0 {
-		return fmt.Sprintf("%d agents · %d tools active", snapshot.RunningAgents, snapshot.RunningTools)
+		return fmt.Sprintf("%d agents · %d tools", snapshot.RunningAgents, snapshot.RunningTools)
 	}
 
-	return "Waiting for next action"
+	return ""
 }
 
+// liveActivityRecentLine returns a single line of the most recent log entry,
+// or "" when there's nothing worth echoing back. The previous version
+// fell through to a bag of fallbacks (response tool count, agent tool list
+// joined by arrows) that duplicated information already in the header, so
+// we only surface genuinely new signal now.
 func (m Model) liveActivityRecentLine(snapshot ActivityFeedSnapshot) string {
 	if len(snapshot.RecentLog) > 0 {
 		return snapshot.RecentLog[len(snapshot.RecentLog)-1]
 	}
-	if m.responseToolCount > 0 {
-		return fmt.Sprintf("%d tool calls completed in this response", m.responseToolCount)
-	}
-	if len(m.agentRecentTools) > 0 {
-		start := 0
-		if len(m.agentRecentTools) > 3 {
-			start = len(m.agentRecentTools) - 3
-		}
-		return strings.Join(m.agentRecentTools[start:], " → ")
-	}
 	return ""
 }
 
+// liveActivityNextLine is only rendered when it tells the user something
+// they can't infer from the header. Generic "watching for next tool call"
+// dropped — it was noise.
 func (m Model) liveActivityNextLine(snapshot ActivityFeedSnapshot) string {
 	switch {
 	case !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil):
-		return fmt.Sprintf("Auto-retry scheduled in %s", format.Duration(time.Until(m.rateLimitWaitUntil)))
+		return fmt.Sprintf("Auto-retry in %s", format.Duration(time.Until(m.rateLimitWaitUntil)))
 	case m.retryAttempt > 0 && m.retryMax > 0:
-		return fmt.Sprintf("Provider recovery in progress (%d/%d)", m.retryAttempt, m.retryMax)
+		return fmt.Sprintf("Provider recovery %d/%d", m.retryAttempt, m.retryMax)
 	case m.streamIdleMsg != "":
 		return m.streamIdleMsg
 	}
@@ -233,59 +232,61 @@ func (m Model) liveActivityNextLine(snapshot ActivityFeedSnapshot) string {
 		if title != "" {
 			return title
 		}
-		return fmt.Sprintf("Plan step %d of %d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+		return fmt.Sprintf("Plan step %d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
 	}
 
 	if snapshot.RunningTools > 1 {
-		return fmt.Sprintf("%d tool calls are still running in parallel", snapshot.RunningTools)
+		return fmt.Sprintf("%d tools running in parallel", snapshot.RunningTools)
 	}
 	if snapshot.RunningAgents > 0 {
-		return fmt.Sprintf("%d background agents are still working", snapshot.RunningAgents)
-	}
-	if label := strings.TrimSpace(m.processingLabel); label != "" && !strings.EqualFold(label, "thinking") {
-		return label
-	}
-	if m.state == StateStreaming {
-		return "Watching for the next tool call or final answer"
+		return fmt.Sprintf("%d background agents working", snapshot.RunningAgents)
 	}
 	return ""
 }
 
-func (m Model) liveActivityFooter(snapshot ActivityFeedSnapshot) string {
-	var hints []string
-	if m.state == StateProcessing || m.state == StateStreaming {
-		hints = append(hints, "Esc cancel")
-	}
-	if m.activityFeed != nil && !m.activityFeed.IsVisible() && (snapshot.RunningAgents > 0 || snapshot.RunningTools > 1) {
-		hints = append(hints, "Ctrl+O live activity")
-	}
-	if m.lastToolOutputIndex >= 0 {
-		hints = append(hints, "e last tool output")
-	}
-	if len(hints) == 0 {
+// cleanStreamSnippet removes leading markdown list markers (-, *, •, numbered
+// bullets) and whitespace from a streaming snippet so the "Writing: X"
+// header prefix doesn't collide with the snippet's own leading punctuation.
+// Inline formatting (backticks, inline code) is preserved — that's real
+// content signal.
+//
+// Returns "" for pure-marker inputs (the model emitted just "- " with no
+// content yet) so the caller can fall back to a generic label instead of
+// rendering "Writing: -" or "Writing: " with a dangling suffix.
+func cleanStreamSnippet(snippet string) string {
+	s := strings.TrimSpace(snippet)
+	// A bare bullet character with no trailing content — drop. Upstream
+	// lastStreamSnippet TrimSpace'd away the space after the marker, so
+	// we see "-" / "*" / "•" rather than "- ".
+	switch s {
+	case "", "-", "*", "•":
 		return ""
 	}
-	return strings.Join(hints, " • ")
+	// Strip one leading bullet marker if present.
+	switch {
+	case strings.HasPrefix(s, "- "):
+		s = s[2:]
+	case strings.HasPrefix(s, "* "):
+		s = s[2:]
+	case strings.HasPrefix(s, "• "):
+		s = strings.TrimSpace(s[len("• "):])
+	}
+	// Strip a leading numbered bullet "1. ", "12. " etc.
+	if idx := strings.Index(s, ". "); idx > 0 && idx <= 3 {
+		if allDigits(s[:idx]) {
+			s = s[idx+2:]
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
-func renderLiveActivityRow(label, value string, width int, labelStyle, valueStyle lipgloss.Style) string {
-	labelText := fmt.Sprintf("%-6s", label)
-	maxValue := width - utf8.RuneCountInString(labelText) - 1
-	if maxValue < 12 {
-		maxValue = 12
+func allDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
 	}
-	return labelStyle.Render(labelText) + " " + valueStyle.Render(truncateRunes(value, maxValue))
-}
-
-func joinLeftRight(left, right string, width int) string {
-	if right == "" {
-		return truncateRunes(left, width)
-	}
-	padding := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if padding < 1 {
-		return truncateRunes(left+" · "+right, width)
-	}
-	return left + strings.Repeat(" ", padding) + right
+	return len(s) > 0
 }
 
 func truncateRunes(text string, maxRunes int) string {

@@ -208,7 +208,6 @@ type Model struct {
 
 	// Status line contextual information
 	injectedContextCount int
-	tokenUsagePercent    float64
 	conversationMode     string // exploring/implementing/debugging
 	mcpHealthy           int
 	mcpTotal             int
@@ -1584,14 +1583,11 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case StreamTokenUpdateMsg:
 		if m.tokenUsage != nil {
-			// Add estimated output tokens to the last known base total
-			m.tokenUsage.Tokens = m.baseTokenCount + msg.EstimatedOutputTokens
+			// Track estimated output tokens separately from input context.
+			// Output tokens don't count toward the current context limit
+			// (they become input on the next turn).
+			m.tokenUsage.OutputTokens = msg.EstimatedOutputTokens
 			m.tokenUsage.IsEstimate = true
-
-			// Recalculate percentage if MaxTokens is set
-			if m.tokenUsage.MaxTokens > 0 {
-				m.tokenUsage.PercentUsed = float64(m.tokenUsage.Tokens) / float64(m.tokenUsage.MaxTokens)
-			}
 		}
 
 	case TokenUsageMsg:
@@ -1998,8 +1994,13 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if m.activityFeed != nil {
 			switch msg.Status {
 			case "start":
-				m.activityFeed.StartSubAgent(msg.AgentID, msg.AgentType,
-					fmt.Sprintf("Sub-agent: %s", msg.AgentType))
+				// Prefer the real task (dispatch prompt) over the generic
+				// "Sub-agent: <type>" so users can see what each agent is
+				// actually working on at a glance. Fall back to the type
+				// when no prompt was captured (shouldn't happen, but the
+				// UI must never show an empty row).
+				desc := summarizeSubAgentTask(msg.Task, msg.AgentType)
+				m.activityFeed.StartSubAgent(msg.AgentID, msg.AgentType, desc)
 			case "tool_start":
 				m.activityFeed.UpdateSubAgentTool(msg.AgentID, msg.ToolName, msg.ToolArgs)
 			case "tool_end":
@@ -2287,9 +2288,15 @@ func (m Model) View() string {
 	var panelBuilder strings.Builder
 
 	// Live "Now" card — compact summary of what the agent is doing right now.
+	// The card's content overlaps with the processing/tool spinner-status
+	// block rendered further below (same spinner, same label, same tool
+	// info), so we track whether the card actually drew anything and
+	// suppress the duplicate block in that case.
+	cardRendered := false
 	if card := m.renderLiveActivityCard(); card != "" {
 		panelBuilder.WriteString(card)
 		panelBuilder.WriteString("\n")
+		cardRendered = true
 	}
 
 	// Scratchpad panel
@@ -2349,9 +2356,14 @@ func (m Model) View() string {
 		builder.WriteString(panelContent)
 	}
 
-	// Processing indicator — minimal braille spinner (skip when tool progress bar is visible)
+	// Processing indicator — minimal braille spinner. Skip when:
+	//   (a) the tool progress bar has already claimed the role, or
+	//   (b) the live activity card above already rendered a spinner+status
+	//       line — the two were showing the same spinner+label in parallel
+	//       ("⠇ Analyzing" twice), which is the dup the card was meant to
+	//       replace.
 	toolProgressVisible := m.toolProgressBar != nil && m.toolProgressBar.IsVisible()
-	if (m.state == StateProcessing || m.state == StateStreaming) && !toolProgressVisible {
+	if (m.state == StateProcessing || m.state == StateStreaming) && !toolProgressVisible && !cardRendered {
 		dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
 		// Braille spinner
@@ -2394,6 +2406,7 @@ func (m Model) View() string {
 				status += "  " + lipgloss.NewStyle().Foreground(durationColor).Render(format.Duration(toolElapsed))
 			}
 			builder.WriteString(status)
+			builder.WriteString("\n")
 		} else if m.state == StateProcessing || m.processingLabel != "" {
 			// Thinking/Planning/Analyzing: spinner in primary color, label in muted
 			spinnerStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
@@ -2467,13 +2480,12 @@ func (m Model) View() string {
 				status += " " + dimStyle.Render(iterInfo)
 			}
 			builder.WriteString(status)
-		} else {
-			// Streaming: just the spinner in primary color, content is the feedback
-			spinnerStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
-			spinner := spinnerStyle.Render(spinnerFrames[frameIdx])
-			builder.WriteString(spinner)
+			builder.WriteString("\n")
 		}
-		builder.WriteString("\n")
+		// Streaming-without-tool-or-label intentionally renders nothing
+		// here — the live activity card above already shows an animated
+		// spinner inline with the "Writing: …" text, so a separate line
+		// would just waste a row and create a visual gap.
 	}
 
 	// Permission prompt
@@ -2995,7 +3007,7 @@ func (m *Model) DebugState() UIDebugState {
 		PlanningMode:      m.planningModeEnabled,
 		PermissionsActive: m.permissionsEnabled,
 		SandboxEnabled:    m.sandboxEnabled,
-		TokenUsagePct:     m.tokenUsagePercent,
+		TokenUsagePct:     func() float64 { if m.tokenUsage != nil { return m.tokenUsage.PercentUsed * 100 }; return 0 }(),
 		MCPHealthy:        m.mcpHealthy,
 		MCPTotal:          m.mcpTotal,
 		ConversationMode:  m.conversationMode,
@@ -3020,14 +3032,6 @@ func (m *Model) Cleanup() {
 	}
 }
 
-// UpdateStatusInfo updates the contextual status information displayed in the status bar.
-func (m *Model) UpdateStatusInfo(tokenPercent float64, mode string, mcpHealthy, mcpTotal, memoryCount int) {
-	m.tokenUsagePercent = tokenPercent
-	m.conversationMode = mode
-	m.mcpHealthy = mcpHealthy
-	m.mcpTotal = mcpTotal
-	m.injectedContextCount = memoryCount
-}
 
 // HidePlanProgress hides the plan progress panel.
 func (m *Model) HidePlanProgress() {

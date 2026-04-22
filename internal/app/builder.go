@@ -1428,12 +1428,13 @@ func (b *Builder) wireDependencies() error {
 			app.mu.Lock()
 			app.streamedChars += len(text)
 			chars := app.streamedChars
+			// Use content-aware estimation (code/JSON/prose heuristics)
+			app.streamedEstimatedTokens += appcontext.EstimateTokens(text)
+			estimatedTokens := app.streamedEstimatedTokens
 			app.mu.Unlock()
 
 			// Send estimated token update every ~500 chars (~125 tokens) for smoother UI
 			if chars/500 > (chars-len(text))/500 {
-				// Estimate: 1 token ~= 4 chars
-				estimatedTokens := chars / 4
 				if app.program != nil {
 					app.safeSendToProgram(ui.StreamTokenUpdateMsg{
 						EstimatedOutputTokens: estimatedTokens,
@@ -1791,12 +1792,14 @@ func (b *Builder) wireDependencies() error {
 		}
 	})
 
-	// Wire sub-agent activity to UI
-	b.agentRunner.SetOnSubAgentActivity(func(agentID, agentType, toolName string, args map[string]any, status string) {
+	// Wire sub-agent activity to UI. `prompt` is only set on the "start"
+	// status — it becomes the feed's description for the agent entry.
+	b.agentRunner.SetOnSubAgentActivity(func(agentID, agentType, prompt, toolName string, args map[string]any, status string) {
 		if app.program != nil {
 			app.safeSendToProgram(ui.SubAgentActivityMsg{
 				AgentID:   agentID,
 				AgentType: agentType,
+				Task:      prompt,
 				ToolName:  toolName,
 				ToolArgs:  args,
 				Status:    status,

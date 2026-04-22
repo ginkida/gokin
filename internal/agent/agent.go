@@ -38,24 +38,24 @@ const (
 
 // Agent represents an isolated executor for subtasks.
 type Agent struct {
-	ID           string
-	Type         AgentType
-	Model        string
-	client       client.Client
-	registry     *tools.Registry
-	baseRegistry tools.ToolRegistry
-	workDir       string
+	ID             string
+	Type           AgentType
+	Model          string
+	client         client.Client
+	registry       *tools.Registry
+	baseRegistry   tools.ToolRegistry
+	workDir        string
 	originalPrompt string // Preserved for continuation after compaction
-	messenger     tools.Messenger
-	permissions  *permission.Manager
-	timeout      time.Duration
-	history      []*genai.Content
-	status       AgentStatus
-	startTime    time.Time
-	endTime      time.Time
-	maxTurns     int
-	thoroughness tools.Thoroughness
-	outputStyle  tools.OutputStyle
+	messenger      tools.Messenger
+	permissions    *permission.Manager
+	timeout        time.Duration
+	history        []*genai.Content
+	status         AgentStatus
+	startTime      time.Time
+	endTime        time.Time
+	maxTurns       int
+	thoroughness   tools.Thoroughness
+	outputStyle    tools.OutputStyle
 
 	// === IMPROVEMENT 4: Progress tracking ===
 	currentStep      int
@@ -208,7 +208,7 @@ func (a *Agent) GetContextHealth() ContextHealth {
 		usage, _ := a.tokenCounter.CountContents(ctx, history)
 		h.TotalTokens = usage
 		if h.MaxTokens > 0 {
-			h.PercentUsed = float64(usage) / float64(h.MaxTokens) * 100
+			h.PercentUsed = float64(usage) / float64(h.MaxTokens)
 		}
 
 		// Estimate breakdown (simplified)
@@ -3379,7 +3379,7 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 
 	a.safeOnText(fmt.Sprintf("\n[Force-compacting history (%d messages)...]\n", len(a.history)))
 
-	keepStart := 3  // system prompt + greeting + original task prompt
+	keepStart := 3 // system prompt + greeting + original task prompt
 	keepEnd := 6
 	keepMiddle := 4 // Top N by importance from middle section
 

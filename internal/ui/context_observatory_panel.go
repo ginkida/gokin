@@ -104,22 +104,22 @@ func (p *ContextObservatoryPanel) View(width int) string {
 
 	usagePercent := p.health.PercentUsed
 	barWidth := panelWidth - 30
-	filled := int((usagePercent / 100.0) * float64(barWidth))
+	filled := int(usagePercent * float64(barWidth))
 	if filled > barWidth {
 		filled = barWidth
 	}
 
 	var barColor lipgloss.Color = ColorSuccess
-	if usagePercent > 90 {
+	if usagePercent > 0.90 {
 		barColor = ColorError
-	} else if usagePercent > 70 {
+	} else if usagePercent > 0.70 {
 		barColor = ColorWarning
 	}
 
 	progressBar := lipgloss.NewStyle().Foreground(barColor).Render(strings.Repeat("█", filled)) +
 		dimStyle.Render(strings.Repeat("░", barWidth-filled))
 
-	usageText := fmt.Sprintf("  %d / %d tokens (%.1f%%)", p.health.TotalTokens, p.health.MaxTokens, usagePercent)
+	usageText := fmt.Sprintf("  %d / %d tokens (%.1f%%)", p.health.TotalTokens, p.health.MaxTokens, usagePercent*100)
 	p.writeBoxLine(&content, borderStyle, usageText+"  "+progressBar, titleStyle, panelWidth)
 
 	content.WriteString(borderStyle.Render("│") + strings.Repeat(" ", panelWidth-1) + borderStyle.Render("│") + "\n")

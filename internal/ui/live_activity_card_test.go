@@ -6,7 +6,13 @@ import (
 	"time"
 )
 
-func TestRenderLiveActivityCard_ShowsCurrentWorkAndHints(t *testing.T) {
+// TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup pins the
+// dedupe contract: the compact card must NOT repeat provider/model, the
+// state word (WRITING/RUNNING/WORKING), or the "Esc cancel" hint — all
+// three are permanently visible in the bottom status bar. The card's one
+// unique job is showing what the agent is doing right now. State is
+// carried by the left-edge bar's colour, not by repeated text.
+func TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup(t *testing.T) {
 	m := NewModel()
 	m.width = 110
 	m.state = StateProcessing
@@ -19,20 +25,27 @@ func TestRenderLiveActivityCard_ShowsCurrentWorkAndHints(t *testing.T) {
 	m.activityFeed.recentLog = []string{"Reading internal/ui/tui.go -> 240 lines"}
 
 	view := stripAnsi(m.renderLiveActivityCard())
+
+	// Card must surface the current action + a recent-log echo.
 	for _, want := range []string{
-		"Now",
-		"Doing",
-		"Read",
-		"internal/ui/tui.go",
-		"Recent",
-		"240 lines",
-		"Esc cancel",
-		"e last tool output",
-		"kimi",
-		"for-coding",
+		"Read",               // tool name, capitalized
+		"internal/ui/tui.go", // tool target
+		"240 lines",          // recent-log snippet
 	} {
 		if !strings.Contains(view, want) {
-			t.Fatalf("live activity card missing %q:\n%s", want, view)
+			t.Fatalf("card missing %q:\n%s", want, view)
+		}
+	}
+
+	// Card must NOT repeat status-bar content.
+	for _, dup := range []string{
+		"RUNNING",    // state word — status bar shows ○ RUNNING
+		"WRITING",    //   ditto
+		"Esc cancel", // status bar shows "esc Interrupt"
+		"kimi-for-coding", // model name — status bar shows it
+	} {
+		if strings.Contains(view, dup) {
+			t.Errorf("card duplicates status bar content %q:\n%s", dup, view)
 		}
 	}
 }
@@ -55,11 +68,101 @@ func TestRenderLiveActivityCard_ShowsLiveActivityHintForHiddenFeed(t *testing.T)
 	m.activityFeed.visible = false
 
 	view := stripAnsi(m.renderLiveActivityCard())
-	if !strings.Contains(view, "2 tools in flight") {
-		t.Fatalf("expected parallel tool summary, got:\n%s", view)
+	// Compact form surfaces parallel work in the Next row.
+	if !strings.Contains(view, "in flight") && !strings.Contains(view, "parallel") {
+		t.Fatalf("expected parallel tool signal (in flight / parallel), got:\n%s", view)
 	}
-	if !strings.Contains(view, "Ctrl+O live activity") {
-		t.Fatalf("expected live activity hint when feed is hidden, got:\n%s", view)
+}
+
+// TestRenderLiveActivityCard_CollapsesWhenFeedOpen: when the big Live
+// Activity panel is open, the card must collapse to the single
+// current-action line — Recent/Next duplicate what the big panel shows.
+func TestRenderLiveActivityCard_CollapsesWhenFeedOpen(t *testing.T) {
+	m := NewModel()
+	m.width = 110
+	m.state = StateProcessing
+	m.currentTool = "read"
+	m.currentToolInfo = "internal/ui/tui.go"
+	m.toolStartTime = time.Now().Add(-2 * time.Second)
+	m.currentModel = "kimi-for-coding"
+	m.runtimeStatus.Provider = "kimi"
+	m.lastToolOutputIndex = 0
+	m.activityFeed.recentLog = []string{"Reading internal/ui/tui.go -> 240 lines"}
+	m.activityFeed.visible = true // <-- the key toggle
+
+	view := stripAnsi(m.renderLiveActivityCard())
+
+	// Must still show the current action.
+	if !strings.Contains(view, "internal/ui/tui.go") {
+		t.Errorf("collapsed card must still show current action: %q", view)
+	}
+
+	// Must NOT show Recent (duplicates big panel).
+	if strings.Contains(view, "↳ ") {
+		t.Errorf("collapsed card leaked Recent row: %q", view)
+	}
+
+	// Exactly 1 line (header only) — Recent/Next/footer all suppressed.
+	lineCount := strings.Count(view, "\n") + 1
+	if lineCount > 1 {
+		t.Errorf("collapsed card has %d lines, want 1:\n%s", lineCount, view)
+	}
+}
+
+// TestRenderLiveActivityCard_PureBulletSnippetFallsBackToGeneric: when the
+// stream snippet is just a bullet marker (the model emitted "- " and no
+// content yet), we must not render "Writing: " with a dangling space.
+// Falls through to "Writing response" instead.
+func TestRenderLiveActivityCard_PureBulletSnippetFallsBackToGeneric(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+	m.state = StateStreaming
+	// lastStreamSnippet reads from the response buffer; seed it with a
+	// lone bullet marker like the model emits when it hasn't produced
+	// content yet.
+	m.currentResponseBuf.WriteString("- ")
+	m.responseToolCount = 0
+
+	line := m.liveActivityCurrentLine(ActivityFeedSnapshot{})
+	if strings.HasSuffix(line, ": ") || strings.HasSuffix(line, ":") {
+		t.Errorf("pure-bullet snippet produced dangling label: %q", line)
+	}
+	if !strings.Contains(line, "Writing response") {
+		t.Errorf("expected fallback to 'Writing response', got: %q", line)
+	}
+}
+
+// TestCleanStreamSnippet pins the snippet-cleanup that prevents visual
+// collisions like "Writing: - `tui.go`" where the model-emitted snippet
+// starts with its own markdown bullet. Stripping one leading list marker
+// gives clean output.
+func TestCleanStreamSnippet(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"- `tui.go` — fields", "`tui.go` — fields"},
+		{"* list item", "list item"},
+		{"• bullet item", "bullet item"},
+		{"1. numbered", "numbered"},
+		{"12. numbered", "numbered"},
+		{"   - padded bullet", "padded bullet"},
+		{"plain text", "plain text"},
+		{"`code`", "`code`"},       // no leading bullet to strip
+		{"-not a bullet", "-not a bullet"}, // no space after dash
+		{"", ""},
+		// Bare bullet markers (content hasn't arrived yet) — drop entirely
+		// so caller falls back to a generic label. lastStreamSnippet does
+		// TrimSpace, so we see "-" / "*" / "•", not "- " / "* " / "• ".
+		{"-", ""},
+		{"*", ""},
+		{"•", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			if got := cleanStreamSnippet(c.in); got != c.want {
+				t.Errorf("cleanStreamSnippet(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
 

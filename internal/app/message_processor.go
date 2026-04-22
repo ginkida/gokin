@@ -111,7 +111,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.mu.Lock()
 	a.responseStartTime = time.Now()
 	a.responseToolsUsed = nil
-	a.streamedChars = 0 // Reset streaming accumulator
+	a.streamedChars = 0           // Reset streaming accumulator
+	a.streamedEstimatedTokens = 0 // Reset streaming token estimate
 	a.messageCount++
 	a.diffBatchDecision = ui.DiffPending
 	currentMsgCount := a.messageCount

@@ -193,7 +193,8 @@ type App struct {
 	mcpInitialSummary string // One-shot toast describing initial MCP connect results
 
 	// Streaming token estimation
-	streamedChars int // Accumulated chars during current streaming session
+	streamedChars           int // Accumulated chars during current streaming session
+	streamedEstimatedTokens int // Accumulated estimated tokens during current streaming session
 
 	// Session Memory
 	sessionMemory *appcontext.SessionMemoryManager

@@ -5,6 +5,60 @@ import (
 	"strings"
 )
 
+// summarizeSubAgentTask turns a sub-agent's dispatch prompt into a one-line
+// description for the activity feed. Prompts can be paragraphs long; the
+// feed only has one row per agent, so we pick the first sentence / line and
+// cap to a screen-friendly length.
+//
+// Falls back to "Sub-agent: <type>" when the prompt is empty — spawn sites
+// that haven't been updated, or agents spawned via legacy paths. Better to
+// show *something* than a blank row.
+func summarizeSubAgentTask(prompt, agentType string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		if agentType == "" {
+			return "Sub-agent"
+		}
+		return "Sub-agent: " + agentType
+	}
+
+	// First meaningful line. Prompts often open with "You are a …" system
+	// preamble — cheap heuristic: skip that framing and go for the task.
+	var first string
+	for _, line := range strings.Split(prompt, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "You are ") {
+			continue
+		}
+		first = line
+		break
+	}
+	if first == "" {
+		// Everything was blank or preamble — fall back to the raw first line
+		// so the row isn't empty.
+		first = strings.TrimSpace(strings.SplitN(prompt, "\n", 2)[0])
+	}
+
+	// Truncate at first sentence-ending punctuation (once we have enough
+	// content to not chop mid-verb).
+	if idx := strings.IndexAny(first, ".?!"); idx > 20 {
+		first = first[:idx]
+	}
+
+	// Hard cap so the feed row doesn't wrap or blow past terminal width.
+	const maxLen = 70
+	if runes := []rune(first); len(runes) > maxLen {
+		first = string(runes[:maxLen-1]) + "…"
+	}
+	if agentType != "" {
+		return agentType + " · " + first
+	}
+	return first
+}
+
 // generateToolResultSummary creates compact summaries based on tool type and content.
 func generateToolResultSummary(toolName, content, detail string) string {
 	normalizedTool := strings.ToLower(strings.ReplaceAll(toolName, "-", "_"))

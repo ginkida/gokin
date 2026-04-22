@@ -43,7 +43,14 @@ const (
 
 	// Coordinator settings
 	DefaultMaxConcurrentAgents = 5
-	DefaultAgentTimeout        = 30 * time.Minute
+	// DefaultAgentTimeout is the cap for a single sub-agent run when no
+	// per-type thoroughness override applies. The old 30-minute default
+	// let stuck/looping agents burn 15+ minutes of the user's time before
+	// the runner intervened; 10 minutes matches the "general/thorough"
+	// ceiling which is already the longest intentional budget, and any
+	// agent that legitimately needs more should set its own via type
+	// metadata (AgentTypeGeneral etc.).
+	DefaultAgentTimeout = 10 * time.Minute
 	DefaultDecomposeThreshold  = 5
 	DefaultParallelThreshold   = 8
 
