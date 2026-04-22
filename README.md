@@ -11,7 +11,7 @@
   <img src="https://minio.ginkida.dev/minion/github/gokin-cli-cut.gif" alt="Gokin Demo" width="800">
 </p>
 
-<h3 align="center">🤖 AI-powered coding assistant for your terminal<br>GLM · MiniMax · Kimi · Ollama — 100% open source</h3>
+<h3 align="center">🤖 AI-powered coding assistant for your terminal<br>Kimi · GLM · MiniMax · Ollama — 100% open source</h3>
 
 <p align="center">
   <a href="#installation">Install</a> •
@@ -29,28 +29,30 @@
 
 Most AI coding tools are closed-source, route your code through third-party servers, and give you zero control over what gets sent to the model. Gokin was built with a different goal: **a fast, secure, zero-telemetry CLI where your code goes directly to the provider you chose — and nothing else leaves your machine.**
 
-Gokin focuses on a small, well-tested set of providers: **GLM, MiniMax, Kimi** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
+Gokin focuses on a small, well-tested set of providers: **Kimi, GLM, MiniMax** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
 
 | Feature | Gokin | Claude Code | Cursor |
 |---------|-------|-------------|--------|
 | **Price** | Free → Pay-per-use | $20+/month | $20+/month |
-| **Providers** | 4 (GLM, MiniMax, Kimi, Ollama) | 1 (Claude) | Multi |
+| **Providers** | 4 (Kimi, GLM, MiniMax, Ollama) | 1 (Claude) | Multi |
 | **Offline** | ✅ Ollama | ❌ | ❌ |
-| **50 Tools** | ✅ | ~30 | ~30 |
+| **54 Tools** | ✅ | ~30 | ~30 |
 | **Multi-agent** | ✅ 5 parallel | Basic | ❌ |
 | **Direct API** | ✅ Zero proxies | ✅ | ❌ Routes through Cursor servers |
 | **Security** | ✅ TLS 1.2+, secret redaction (24 patterns), sandbox, 3-level permissions | Basic | Basic |
 | **Open Source** | ✅ | ❌ | ❌ |
 | **Self-hosting** | ✅ | ❌ | ❌ |
 
-**Choose your price tier:**
+**Choose your stack:**
 
 | Stack | Cost | Best For |
 |-------|------|----------|
+| **Gokin + Kimi Coding Plan** ⭐ | Subscription | **Default** — Kimi K2.6, 262K context, thinking + tool use, coding-tuned |
+| **Gokin + GLM Coding Plan** ⭐ | ~$3/month | Budget-friendly daily coding, GLM-5/5.1 with thinking |
+| **Gokin + MiniMax** ⭐ | Pay-per-use | 200K context, strong on agentic coding |
 | **Gokin + Ollama** | 🆓 Free | Privacy, offline, no API costs |
-| **Gokin + GLM** | ~$3/month (Coding Plan) | Daily coding, best budget value |
-| **Gokin + MiniMax** | Pay-per-use | 200K context, strong coding |
-| **Gokin + Kimi** | Pay-per-use | Fast reasoning, 256K context |
+
+All three cloud providers are actively recommended — they're the daily-driver tier gokin is tested against every release.
 
 ---
 
@@ -81,12 +83,17 @@ go build -o gokin ./cmd/gokin
 ## ⚡ Quick Start <a id="quick-start"></a>
 
 ```bash
-# Launch with interactive setup
+# Launch with interactive setup (picks provider + key)
 gokin --setup
 
-# Or set API key and run
-export GOKIN_GLM_KEY="your-glm-key"
+# Or set an API key and run — Kimi Coding Plan is the v0.69+ default
+export GOKIN_KIMI_KEY="sk-kimi-..."
 gokin
+
+# Prefer another provider? Any of these also works out of the box:
+# export GOKIN_GLM_KEY="..."      # GLM Coding Plan
+# export GOKIN_MINIMAX_KEY="..."  # MiniMax
+# (Ollama needs no key — just run a local model)
 ```
 
 **Then just talk naturally:**
@@ -122,13 +129,14 @@ Local:     ./GOKIN.local.md (git-ignored)
 - `@include` directive: `@./path`, `@~/path`, `@/absolute/path`
 - File watching with auto-reload on changes
 
-### ⚒️ 50 Built-in Tools
+### ⚒️ 54 Built-in Tools
 - **Files**: read, write, edit, diff, batch, copy, move, delete
 - **Search**: glob, grep, tree
 - **Git**: status, commit, diff, branch, log, blame, PR
 - **Run**: bash, run_tests, ssh, env
 - **Plan**: todo, task, enter_plan_mode, coordinate
 - **Memory**: memorize, shared_memory, pin_context
+- **MCP servers**: add your own via `/mcp add` (Model Context Protocol, stdio + http transports, per-server permissions)
 - **Parallel execution**: Read-only tools (read, grep, glob) run in parallel when model calls multiple
 
 ### 🤝 Multi-Agent System
@@ -151,15 +159,20 @@ Local:     ./GOKIN.local.md (git-ignored)
 - **Git worktree support** — parallel branch work with isolated sessions
 
 ### 💰 Cost Tracking
-- Per-model pricing for GLM, MiniMax, Kimi models (Ollama is free)
+- Per-model pricing for Kimi, GLM, MiniMax models (Ollama is free)
 - Real-time cost in status bar (`$0.0243`)
 - Per-response cost in message footer
 - `/cost` and `/stats` commands with accurate model-specific pricing
 
 ### 🔄 Prompt Caching
-- Explicit `cache_control` breakpoints for MiniMax and Kimi
+- Explicit `cache_control` breakpoints for Kimi, MiniMax, and GLM (all Anthropic-compat providers)
 - System prompt, tools, and conversation prefix cached — up to 90% input cost savings
 - Cache break detection with efficiency tracking
+
+### 🧠 Extended Thinking with Tools
+- Full multi-turn support for Kimi K2.6 / GLM / Anthropic-style reasoning
+- Thinking blocks (with `signature`) preserved across turns, including tool calls
+- Signature-aware history reconstruction — no "reasoning_content missing" errors
 
 ### 🛡️ Safety & Permissions
 - **3-level permissions**: Low (auto), Medium (ask once), High (always ask)
@@ -176,11 +189,11 @@ Local:     ./GOKIN.local.md (git-ignored)
 ### Zero Proxies — Your Code Goes Nowhere Except the LLM
 
 ```
-┌──────────┐          ┌──────────────────┐
-│  Gokin   │ ──TLS──▶ │  Provider API    │
-│  (local) │          │  (Z.AI / Kimi /  │
-│          │ ◀──TLS── │   MiniMax / ...) │
-└──────────┘          └──────────────────┘
+┌──────────┐          ┌──────────────────────┐
+│  Gokin   │ ──TLS──▶ │  Provider API        │
+│  (local) │          │  (Kimi / Z.AI / ...) │
+│          │ ◀──TLS── │                      │
+└──────────┘          └──────────────────────┘
 
 No middle servers. No Vercel. No telemetry proxies.
 Your API key, your code, your conversation — direct.
@@ -234,30 +247,37 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 ## ☁️ Providers <a id="providers"></a>
 
 > [!IMPORTANT]
-> **Recommended providers:** Gokin ships with a focused set of 4 providers. Daily-driver confidence is highest on:
-> - **GLM Coding Plan** (GLM-5 / GLM-5.1) — **recommended, budget option** (~$3/month)
-> - **MiniMax** (M2.7 / M2.5) — **recommended for coding**, 200K context
+> **Recommended providers** — daily-driver tier, tested every release:
+> - **Kimi Coding Plan** (Kimi K2.6) — **default as of v0.69**, 262K context, thinking + tools
+> - **GLM Coding Plan** (GLM-5 / GLM-5.1) — budget option (~$3/month), thinking supported
+> - **MiniMax** (M2.7 / M2.5) — 200K context, strong on agentic coding
 >
-> Kimi and Ollama also work end-to-end; pick whichever matches your workflow.
+> Ollama is fully supported for offline / zero-cost workflows.
 
-| Provider | Models | Auth | Notes |
-|----------|--------|------|-------|
-| **GLM** ⭐ | glm-5.1, glm-5, glm-4.7 | API key | Budget-friendly coding plan, thinking mode supported |
-| **MiniMax** ⭐ | M2.7, M2.7-highspeed, M2.5, M2.5-highspeed | API key | 200K context, strong on agentic coding |
-| **Kimi** | k2.5, k2-thinking-turbo, k2-turbo | API key | Fast reasoning, 256K context |
-| **Ollama** | Any local model | None | 100% offline, no network calls |
+| Provider | Models | Endpoint | Notes |
+|----------|--------|----------|-------|
+| **Kimi** ⭐ | `kimi-for-coding` (K2.6) | `api.kimi.com/coding` | **Default.** Coding Plan subscription; 262K context, reasoning + vision + video, thinking mode |
+| **GLM** ⭐ | `glm-5.1`, `glm-5`, `glm-4.7` | `api.z.ai/api/anthropic` | Budget-friendly Coding Plan, thinking mode |
+| **MiniMax** ⭐ | `MiniMax-M2.7`, `M2.7-highspeed`, `M2.5`, `M2.5-highspeed` | `api.minimax.io/anthropic` | 200K context, strong on agentic coding |
+| **Ollama** | Any local model (`llama3.2`, `qwen2.5-coder`, ...) | `localhost:11434` | 100% offline, no network calls |
 
-All cloud providers use Anthropic-compatible APIs and share the same client (`internal/client/anthropic.go`) — fewer moving parts, consistent behavior. Ollama uses its own native client.
+All cloud providers use Anthropic-compatible APIs and share the same client (`internal/client/anthropic.go`) — fewer moving parts, consistent behavior. Kimi auth uses Bearer tokens; GLM and MiniMax accept both Bearer and `x-api-key`. Ollama uses its own native client.
 
 Switch anytime:
 ```
+> /provider kimi
+> /model kimi-for-coding
 > /provider glm
 > /model glm-5.1
 > /provider minimax
-> /model M2.7
+> /model MiniMax-M2.7
 > /provider ollama
 > /model llama3.2
 ```
+
+### Moonshot Developer API (legacy)
+
+Gokin's `kimi` provider points at Kimi Coding Plan (`api.kimi.com/coding`) by default — that's where `kimi-for-coding` lives. If you have a Moonshot Developer API key instead, set `model.custom_base_url: https://api.moonshot.ai/anthropic` in your config; gokin will route through the Developer endpoint using your key. Legacy model names (`kimi-k2.5`, `kimi-k2-thinking-turbo`, `kimi-k2-turbo-preview`) are silently migrated to `kimi-for-coding` on load — UNLESS `custom_base_url` is set, in which case gokin respects the name you picked.
 
 ---
 
@@ -268,13 +288,15 @@ Switch anytime:
 | `/login <provider> <key>` | Set API key |
 | `/provider <name>` | Switch provider |
 | `/model <name>` | Switch model |
+| `/mcp [list\|add\|status\|remove]` | Manage MCP servers (Model Context Protocol) |
 | `/plan` | Enter planning mode |
 | `/save` / `/load` | Session management |
 | `/commit [-m "msg"]` | Git commit |
 | `/pr --title "..."` | Create GitHub PR |
-| `/undo` | Undo last file change |
+| `/undo [N]` | Undo last N file changes (max 20) |
+| `/stats` | Session statistics incl. per-provider token/cost |
 | `/theme` | Switch UI theme |
-| `/help` | Show all commands |
+| `/help` | Show all commands (55+ available) |
 
 ### Keyboard Shortcuts
 
@@ -293,25 +315,37 @@ Switch anytime:
 
 **Location:** `~/.config/gokin/config.yaml`
 
-### Minimal
+### Minimal (v0.69+ defaults — Kimi Coding Plan)
 
 ```yaml
 api:
-  glm_key: "your-glm-key"
-  active_provider: "glm"
+  kimi_key: "sk-kimi-..."
+  active_provider: "kimi"
 model:
-  name: "glm-5"
+  name: "kimi-for-coding"
+```
+
+Prefer GLM or MiniMax? Just swap:
+
+```yaml
+# GLM
+api: { glm_key: "...", active_provider: "glm" }
+model: { name: "glm-5" }
+
+# MiniMax
+api: { minimax_key: "...", active_provider: "minimax" }
+model: { name: "MiniMax-M2.7" }
 ```
 
 ### Full Reference
 
 ```yaml
 api:
+  kimi_key: ""                    # Kimi Coding Plan key (sk-kimi-...)
   glm_key: ""
   minimax_key: ""
-  kimi_key: ""
-  ollama_key: ""                 # optional, only for remote Ollama with auth
-  active_provider: "glm"
+  ollama_key: ""                  # optional, only for remote Ollama with auth
+  active_provider: "kimi"         # kimi | glm | minimax | ollama
   ollama_base_url: "http://localhost:11434"
   retry:
     max_retries: 10
@@ -319,23 +353,24 @@ api:
     http_timeout: 120s
     stream_idle_timeout: 30s
     providers:
+      kimi:
+        http_timeout: 5m
+        stream_idle_timeout: 120s
       glm:
         http_timeout: 5m
         stream_idle_timeout: 180s
       minimax:
         http_timeout: 5m
         stream_idle_timeout: 120s
-      kimi:
-        http_timeout: 5m
-        stream_idle_timeout: 120s
 
 model:
-  name: "glm-5"
-  temperature: 0.7
-  max_output_tokens: 131072
-  enable_thinking: false          # GLM / compat-API extended thinking
-  thinking_budget: 0              # 0 = auto (8192 for GLM 4.7+/5.x when thinking enabled)
-  force_weak_optimizations: false # opt Strong-tier models into weak-tier safeguards
+  name: "kimi-for-coding"          # Kimi K2.6 (Coding Plan)
+  temperature: 0.6
+  max_output_tokens: 32768
+  custom_base_url: ""              # override endpoint (e.g. Moonshot Dev API)
+  enable_thinking: false           # Extended thinking — supported on Kimi, GLM, MiniMax
+  thinking_budget: 0               # 0 = provider default (Kimi, GLM 4.7+/5.x)
+  force_weak_optimizations: false  # opt Strong-tier models into weak-tier safeguards
 
 tools:
   timeout: 2m
@@ -368,11 +403,12 @@ gokin/
 ├── internal/
 │   ├── app/            # Orchestrator & message loop
 │   ├── agent/          # Multi-agent system
-│   ├── client/         # AnthropicClient (compat) + OllamaClient
-│   ├── tools/          # 50 built-in tools
+│   ├── client/         # AnthropicClient (compat: Kimi/GLM/MiniMax) + OllamaClient
+│   ├── tools/          # 54 built-in tools
+│   ├── mcp/            # MCP (Model Context Protocol) client + manager
 │   ├── ui/             # Bubble Tea TUI
 │   ├── config/         # YAML config
-│   ├── permission/     # 3-level security
+│   ├── permission/     # 3-level security + per-MCP-server isolation
 │   ├── memory/         # Persistent memory
 │   └── ...
 ```
