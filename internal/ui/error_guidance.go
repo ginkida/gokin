@@ -16,7 +16,45 @@ type ErrorGuidance struct {
 }
 
 // errorGuidancePatterns contains known error patterns with guidance.
+//
+// Order matters: patterns are checked in order, first match wins. MCP-specific
+// patterns live at the top because their error strings (e.g. "permission
+// denied", "no such file or directory") also match the later generic
+// filesystem/permission patterns — without priority ordering users would see
+// "File Not Found" instead of the more actionable "MCP Server Command Not Found".
 var errorGuidancePatterns = []ErrorGuidance{
+	// ─── MCP-specific patterns (first so they win over generic file/permission errors) ───
+	{
+		Pattern:     regexp.MustCompile(`(?i)failed to start MCP server.*(executable file not found|no such file or directory)`),
+		Title:       "MCP Server Command Not Found",
+		Suggestions: []string{"The command you gave /mcp add isn't on $PATH", "Install the server binary (e.g. `npx -y @mcp/server-...`), or use an absolute path", "Run /mcp list to see servers currently configured"},
+		Command:     "/mcp list",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)failed to start MCP server.*(permission denied|fork/exec.*not permitted)`),
+		Title:       "MCP Server Not Executable",
+		Suggestions: []string{"The command path exists but isn't executable", "Check `chmod +x` on the binary, or verify your user has permission", "On macOS, verify the binary isn't quarantined"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(initialize failed|initialization failed).*(timeout|deadline)`),
+		Title:       "MCP Server Did Not Initialize",
+		Suggestions: []string{"The server process started but never responded to the MCP handshake", "Check the server's own logs — it may be crashing on startup", "Try running the command in a shell to see stderr directly"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(protocol version|unsupported protocol|protocolVersion).*(mismatch|not supported|incompatible)`),
+		Title:       "MCP Protocol Mismatch",
+		Suggestions: []string{"This server speaks an MCP protocol version gokin doesn't support yet", "Check if there's a newer gokin release", "Some servers accept a protocol version flag — consult the server's docs"},
+		Command:     "",
+	},
+	{
+		Pattern:     regexp.MustCompile(`(?i)(MCP server.*connect|mcp.*transport.*(failed|closed)|mcp.*not connected)`),
+		Title:       "MCP Connection Failed",
+		Suggestions: []string{"The MCP server isn't reachable right now", "Run /mcp status to see which servers are healthy", "Try /mcp refresh NAME, or /mcp remove + /mcp add to rebuild the connection"},
+		Command:     "/mcp status",
+	},
+	// ─── Generic patterns ───
 	{
 		Pattern: regexp.MustCompile(`model_round_timeout`),
 		Title:   "Model Round Timeout",
@@ -63,7 +101,9 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Command:     "/config show api",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(unauthorized|401|invalid.*key|api.*key.*invalid)`),
+		// \b401\b prevents "401ms" (latency text) from matching. Aligns
+		// with the `\b500\b` rule enforced in the 5xx pattern below.
+		Pattern:     regexp.MustCompile(`(?i)(unauthorized|\b401\b|invalid.*key|api.*key.*invalid)`),
 		Title:       "Authentication Failed",
 		Suggestions: []string{"Check your API key is correct", "Regenerate your key at provider's dashboard", "Run /setup to reconfigure, or /login <provider> <key>"},
 		Command:     "/auth",
@@ -315,7 +355,10 @@ func GetErrorGuidance(errMsg string) *ErrorGuidance {
 	return nil
 }
 
-// FormatErrorWithGuidance formats an error with helpful guidance.
+// FormatErrorWithGuidance formats an error with helpful guidance. Errors
+// are wrapped in styles.ErrorBox (a rounded red border) so they stand out
+// from regular streaming output — users kept missing actionable suggestions
+// when errors blended into plain text.
 func FormatErrorWithGuidance(styles *Styles, errMsg string) string {
 	guidance := GetErrorGuidance(errMsg)
 
@@ -326,30 +369,35 @@ func FormatErrorWithGuidance(styles *Styles, errMsg string) string {
 	cmdStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	var result strings.Builder
+	var body strings.Builder
 
-	// Error message
-	result.WriteString(errorStyle.Render("✗ Error: ") + msgStyle.Render(truncateError(errMsg, 100)))
+	// Error message (first line inside the box)
+	body.WriteString(errorStyle.Render("✗ Error: ") + msgStyle.Render(truncateError(errMsg, 100)))
 
 	if guidance != nil {
 		// Title
-		result.WriteString("\n")
-		result.WriteString(markerStyle.Render("  ⎿  ") + titleStyle.Render(guidance.Title))
+		body.WriteString("\n")
+		body.WriteString(markerStyle.Render("⎿ ") + titleStyle.Render(guidance.Title))
 
 		// Suggestions
 		for _, suggestion := range guidance.Suggestions {
-			result.WriteString("\n")
-			result.WriteString(markerStyle.Render("     • ") + suggestionStyle.Render(suggestion))
+			body.WriteString("\n")
+			body.WriteString(markerStyle.Render("  • ") + suggestionStyle.Render(suggestion))
 		}
 
 		// Command hint
 		if guidance.Command != "" {
-			result.WriteString("\n")
-			result.WriteString(markerStyle.Render("     ") + cmdStyle.Render("Try: "+guidance.Command))
+			body.WriteString("\n")
+			body.WriteString(markerStyle.Render("  ") + cmdStyle.Render("Try: "+guidance.Command))
 		}
 	}
 
-	return result.String()
+	// Fall back to plain rendering if styles isn't provided (tests,
+	// telemetry, etc.) so callers without a Styles value still work.
+	if styles == nil {
+		return body.String()
+	}
+	return styles.ErrorBox.Render(body.String())
 }
 
 // truncateError truncates an error message to a maximum length.

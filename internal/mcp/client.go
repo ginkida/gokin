@@ -11,6 +11,11 @@ import (
 	"gokin/internal/logging"
 )
 
+// NotificationHandler processes an unsolicited JSON-RPC notification from
+// the server (ID is absent, Method is set). Called in its own goroutine —
+// slow handlers do not block the receiveLoop.
+type NotificationHandler func(method string, params any)
+
 // Client handles JSON-RPC communication with an MCP server.
 type Client struct {
 	transport  Transport
@@ -36,11 +41,25 @@ type Client struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	// Reconnection
+	// Reconnection state. Kept under a dedicated mutex so receiveLoop can
+	// update backoff/consecutiveFails without contending with mu, which
+	// request-level methods (Initialize, ListTools, etc.) hold across full
+	// network round-trips — a pre-2026 deadlock we hit when the server
+	// replied while a request was still in flight.
+	reconnectMu          sync.Mutex
 	backoff              time.Duration
 	maxBackoff           time.Duration
 	consecutiveFails     int
 	maxReconnectAttempts int
+
+	// Incoming unsolicited notifications (protected by mu).
+	notificationHandler NotificationHandler
+
+	// notifWg tracks in-flight notification handler goroutines launched by
+	// handleMessage. Close waits for them (with a timeout) so shutdown
+	// doesn't leave orphaned handler goroutines still doing network/registry
+	// work after the client is gone.
+	notifWg sync.WaitGroup
 }
 
 // NewClient creates a new MCP client with the specified transport.
@@ -61,6 +80,12 @@ func NewClient(ctx context.Context, cfg *ServerConfig) (*Client, error) {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
+	return newClientWithTransport(ctx, cfg, transport), nil
+}
+
+// newClientWithTransport builds a client around an already-constructed
+// transport. Used by NewClient and by tests that inject a fake transport.
+func newClientWithTransport(ctx context.Context, cfg *ServerConfig, transport Transport) *Client {
 	ctx, cancel := context.WithCancel(ctx)
 
 	c := &Client{
@@ -79,7 +104,7 @@ func NewClient(ctx context.Context, cfg *ServerConfig) (*Client, error) {
 	// Start message receiver goroutine
 	go c.receiveLoop()
 
-	return c, nil
+	return c
 }
 
 // receiveLoop reads messages from the transport and routes them.
@@ -99,10 +124,10 @@ func (c *Client) receiveLoop() {
 				return
 			}
 
-			c.mu.Lock()
+			c.reconnectMu.Lock()
 			c.consecutiveFails++
 			fails := c.consecutiveFails
-			c.mu.Unlock()
+			c.reconnectMu.Unlock()
 
 			logging.Warn("MCP receive error", "error", err, "consecutive_fails", fails)
 
@@ -113,11 +138,12 @@ func (c *Client) receiveLoop() {
 			continue
 		}
 
-		// Reset backoff on successful receive
-		c.mu.Lock()
+		// Reset backoff on successful receive. Must NOT touch c.mu here —
+		// a request() caller may be holding c.mu across its round-trip.
+		c.reconnectMu.Lock()
 		c.backoff = 100 * time.Millisecond
 		c.consecutiveFails = 0
-		c.mu.Unlock()
+		c.reconnectMu.Unlock()
 
 		c.handleMessage(msg)
 	}
@@ -126,13 +152,14 @@ func (c *Client) receiveLoop() {
 // reconnect attempts to recreate the transport with exponential backoff.
 // Returns true if reconnection should continue, false to stop the receive loop.
 func (c *Client) reconnect() bool {
-	c.mu.Lock()
+	c.reconnectMu.Lock()
 	// Check if we've exceeded max reconnect attempts
 	if c.consecutiveFails >= c.maxReconnectAttempts {
-		c.mu.Unlock()
+		fails := c.consecutiveFails
+		c.reconnectMu.Unlock()
 		logging.Error("MCP max reconnect attempts reached, giving up",
 			"server", c.serverName,
-			"attempts", c.consecutiveFails)
+			"attempts", fails)
 		return false
 	}
 	currentBackoff := c.backoff
@@ -141,8 +168,14 @@ func (c *Client) reconnect() bool {
 	if c.backoff > c.maxBackoff {
 		c.backoff = c.maxBackoff
 	}
+	// Capture for log lines below — reading c.consecutiveFails outside the
+	// lock would race with receiveLoop incrementing it.
+	fails := c.consecutiveFails
+	c.reconnectMu.Unlock()
+
+	// c.config is set once in newClientWithTransport and never reassigned, so
+	// reading fields on it is safe without a lock.
 	cfg := c.config
-	c.mu.Unlock()
 
 	logging.Info("MCP reconnecting", "server", c.serverName, "backoff", currentBackoff)
 
@@ -169,7 +202,7 @@ func (c *Client) reconnect() bool {
 	}
 
 	if err != nil {
-		logging.Warn("MCP transport recreation failed", "error", err, "consecutive_fails", c.consecutiveFails)
+		logging.Warn("MCP transport recreation failed", "error", err, "consecutive_fails", fails)
 		return true // Keep trying (consecutiveFails will be checked next iteration)
 	}
 
@@ -188,7 +221,7 @@ func (c *Client) reconnect() bool {
 	// for receiveLoop to deliver the response via handleMessage(). But we ARE
 	// receiveLoop — so that would deadlock.
 	if err := c.initializeDirect(); err != nil {
-		logging.Warn("MCP re-initialize failed", "error", err, "consecutive_fails", c.consecutiveFails)
+		logging.Warn("MCP re-initialize failed", "error", err, "consecutive_fails", fails)
 		return true // Keep trying (consecutiveFails will be checked next iteration)
 	}
 
@@ -295,10 +328,41 @@ func (c *Client) handleMessage(msg *JSONRPCMessage) {
 			logging.Warn("MCP response for unknown request", "id", id)
 		}
 	} else if msg.IsNotification() {
-		// Handle notifications
 		logging.Debug("MCP notification received", "method", msg.Method)
-		// Could dispatch to notification handlers here
+		c.mu.RLock()
+		h := c.notificationHandler
+		c.mu.RUnlock()
+		if h != nil {
+			// Run the handler in its own goroutine so a slow handler can't
+			// stall the transport receive pump. Track via notifWg so Close
+			// can wait for in-flight handlers.
+			method := msg.Method
+			params := msg.Params
+			c.notifWg.Add(1)
+			go func() {
+				defer c.notifWg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						logging.Warn("MCP notification handler panic",
+							"server", c.serverName,
+							"method", method,
+							"recover", r)
+					}
+				}()
+				h(method, params)
+			}()
+		}
 	}
+}
+
+// SetNotificationHandler installs a handler for unsolicited JSON-RPC
+// notifications such as notifications/tools/list_changed. Safe to call at
+// any time — each notification runs the currently-installed handler.
+// Passing nil removes the handler.
+func (c *Client) SetNotificationHandler(h NotificationHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.notificationHandler = h
 }
 
 // request sends a request and waits for a response.
@@ -543,8 +607,8 @@ func (c *Client) IsInitialized() bool {
 
 // ConsecutiveFails returns the number of consecutive receive failures.
 func (c *Client) ConsecutiveFails() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.reconnectMu.Lock()
+	defer c.reconnectMu.Unlock()
 	return c.consecutiveFails
 }
 
@@ -559,6 +623,22 @@ func (c *Client) Close() error {
 		closeTimer.Stop()
 	case <-closeTimer.C:
 		logging.Warn("MCP client receive loop did not stop in time")
+	}
+
+	// Wait for any in-flight notification handlers. Capped at 2s so a
+	// pathologically slow or hung handler can't block shutdown indefinitely.
+	notifDone := make(chan struct{})
+	go func() {
+		c.notifWg.Wait()
+		close(notifDone)
+	}()
+	notifTimer := time.NewTimer(2 * time.Second)
+	select {
+	case <-notifDone:
+		notifTimer.Stop()
+	case <-notifTimer.C:
+		logging.Warn("MCP notification handlers still running at close",
+			"server", c.serverName)
 	}
 
 	// Close transport

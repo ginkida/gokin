@@ -275,11 +275,17 @@ func DefaultStyles() *Styles {
 		TodoDone: lipgloss.NewStyle().
 			Foreground(ColorSuccess),
 
-		// Box styles for structured output
+		// Box styles for structured output. ErrorBox has a rounded red
+		// border so errors visually separate from streaming output — users
+		// previously missed actionable suggestions that blended into text.
 		InfoBox:    lipgloss.NewStyle().MarginTop(1),
 		WarningBox: lipgloss.NewStyle().MarginTop(1),
 		SuccessBox: lipgloss.NewStyle().MarginTop(1),
-		ErrorBox:   lipgloss.NewStyle().MarginTop(1),
+		ErrorBox: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorError).
+			Padding(0, 1).
+			MarginTop(1),
 
 		// Additional styles
 		Dim: lipgloss.NewStyle().

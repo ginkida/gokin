@@ -152,10 +152,13 @@ func (m *ToolProgressBarModel) View(width int) string {
 		builder.WriteString(strings.Repeat(" ", 3-len(dots)))
 	}
 
-	// Current step — for multiline bash output, show only the most recent
-	// non-empty line so the user sees live progress instead of stale head.
-	if m.currentStep != "" {
-		step := lastNonEmptyLine(m.currentStep)
+	// Current step — single line of output renders inline to keep compact.
+	// Multi-line output (e.g. `npm install` progress) falls through to the
+	// history block below so the user sees recent activity, not just the
+	// last line, and can tell whether the tool is actually making progress.
+	recent := lastNNonEmptyLines(m.currentStep, maxProgressHistoryLines)
+	if len(recent) == 1 {
+		step := recent[0]
 		// Rune-aware truncation so multibyte chars (emoji, Cyrillic) don't
 		// get sliced mid-byte and render as replacement chars.
 		const maxRunes = 60
@@ -179,7 +182,53 @@ func (m *ToolProgressBarModel) View(width int) string {
 	builder.WriteString(" ")
 	builder.WriteString(dimStyle.Render(elapsedStr))
 
+	// Multi-line progress history — only when there's >1 line of output.
+	// Renders as a tiny indented block below the main progress line so the
+	// user sees recent activity without losing the compact single-line
+	// style for simple tools.
+	if len(recent) > 1 {
+		const maxRunesPerLine = 70
+		for _, line := range recent {
+			runes := []rune(line)
+			if len(runes) > maxRunesPerLine {
+				line = string(runes[:maxRunesPerLine-1]) + "…"
+			}
+			builder.WriteString("\n")
+			builder.WriteString(dimStyle.Render("    " + line))
+		}
+	}
+
 	return builder.String()
+}
+
+// maxProgressHistoryLines is how many recent non-empty lines of tool output
+// the progress bar shows as a history block. Small enough to avoid pushing
+// the input off-screen on short terminals; big enough to give context.
+const maxProgressHistoryLines = 3
+
+// lastNNonEmptyLines returns up to n trailing non-empty lines from s,
+// oldest→newest. Empty input yields an empty slice. Used by the tool
+// progress bar to render recent output as a short history block.
+func lastNNonEmptyLines(s string, n int) []string {
+	if s == "" || n <= 0 {
+		return nil
+	}
+	// Split on any line terminator.
+	rawLines := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, n)
+	for i := len(rawLines) - 1; i >= 0 && len(out) < n; i-- {
+		trimmed := strings.TrimSpace(rawLines[i])
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	// Reverse so output is oldest→newest (reading order).
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 // lastNonEmptyLine returns the last non-empty line from s, trimmed.

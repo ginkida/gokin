@@ -721,10 +721,15 @@ func RefactorToolDeclaration() *genai.FunctionDeclaration {
 func ToolsListToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "tools_list",
-		Description: "Returns a list of all available tools in the system with their descriptions.",
+		Description: "Returns a list of all available tools in the system with their descriptions. Optional 'server' argument filters to MCP-provided tools from a specific server.",
 		Parameters: &genai.Schema{
-			Type:       genai.TypeObject,
-			Properties: map[string]*genai.Schema{},
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"server": {
+					Type:        genai.TypeString,
+					Description: "Optional: filter to MCP-provided tools from this server name.",
+				},
+			},
 		},
 	}
 }

@@ -80,7 +80,10 @@ func NewDiffPreviewModel(styles *Styles) DiffPreviewModel {
 	}
 }
 
-// SetSize sets the size of the diff preview.
+// SetSize sets the size of the diff preview. Also triggers a re-render if
+// content is already loaded — a resize that crosses minSideBySideWidth must
+// flip between split and unified layouts (Sprint UI polish: auto-fallback
+// on narrow terminals relies on this re-render).
 func (m *DiffPreviewModel) SetSize(width, height int) {
 	if width < 10 {
 		width = 80
@@ -92,6 +95,13 @@ func (m *DiffPreviewModel) SetSize(width, height int) {
 	m.height = height
 	m.viewport.Width = width - 4
 	m.viewport.Height = height - 10 // Reserve space for header and footer
+
+	// Re-render only when content has already been loaded. Before SetContent
+	// there's nothing to lay out, and refreshDiffView would just produce
+	// empty-diff output we'd immediately overwrite.
+	if m.oldContent != "" || m.newContent != "" {
+		m.refreshDiffView()
+	}
 }
 
 // SetContent sets the diff content to display.
@@ -106,11 +116,17 @@ func (m *DiffPreviewModel) SetContent(filePath, oldContent, newContent, toolName
 	m.refreshDiffView()
 }
 
+// minSideBySideWidth is the viewport width below which side-by-side mode
+// becomes unreadable (each column gets squished to the 20-char floor and
+// truncation eats context). Falls back to unified diff automatically —
+// users on narrow terminals (SSH, tmux splits) still see usable output.
+const minSideBySideWidth = 80
+
 // refreshDiffView regenerates and re-renders the diff with current settings.
 func (m *DiffPreviewModel) refreshDiffView() {
 	m.diff = m.generateDiff(m.oldContent, m.newContent)
 	var content string
-	if m.sideBySide {
+	if m.sideBySide && m.viewport.Width >= minSideBySideWidth {
 		content = m.renderSideBySide()
 		m.changeOffsets = m.detectChangeOffsets(content)
 	} else {
@@ -120,6 +136,14 @@ func (m *DiffPreviewModel) refreshDiffView() {
 	m.viewport.SetContent(content)
 	m.currentChange = -1
 	m.viewport.GotoTop()
+}
+
+// effectiveSideBySide reports whether the current viewport is actually
+// showing split view — respects both the user toggle AND the narrow-
+// terminal auto-fallback. Used by the status footer so its "view: split"
+// hint doesn't lie when we've downgraded.
+func (m DiffPreviewModel) effectiveSideBySide() bool {
+	return m.sideBySide && m.viewport.Width >= minSideBySideWidth
 }
 
 // SetDecisionCallback sets the callback for when user makes a decision.
@@ -599,9 +623,13 @@ func (m DiffPreviewModel) View() string {
 		wsLabel = "on"
 	}
 	settings := settingsStyle.Render(fmt.Sprintf("  context: %d | ignore-ws: %s", m.contextLines, wsLabel))
-	viewMode := "split"
-	if !m.sideBySide {
-		viewMode = "unified"
+	viewMode := "unified"
+	if m.effectiveSideBySide() {
+		viewMode = "split"
+	} else if m.sideBySide {
+		// User wants split but the viewport is too narrow — make that
+		// visible in the status line so toggling feels deterministic.
+		viewMode = "split→unified (narrow)"
 	}
 	settings += settingsStyle.Render(" | view: " + viewMode)
 	builder.WriteString(markerStyle.Render("     ") + stats + settings)
@@ -990,24 +1018,41 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 			}
 			return m, cmd
 
+		// Per-file decisions (Sprint UI polish): y/n act on the CURRENT
+		// file and advance; A/R (shift) still bulk-apply/reject all
+		// remaining. Previously every key was an all-or-nothing shortcut
+		// which forced mixed-outcome workflows into multiple review rounds.
 		case "y":
-			m.setAllDecisions(DiffApply)
-			return m, m.finish()
+			m.decisions[m.currentIndex] = DiffApply
+			if m.allResolved() {
+				return m, m.finish()
+			}
+			m.moveToNextPending()
+			return m, nil
 
 		case "n":
-			m.setAllDecisions(DiffReject)
+			m.decisions[m.currentIndex] = DiffReject
+			if m.allResolved() {
+				return m, m.finish()
+			}
+			m.moveToNextPending()
+			return m, nil
+
+		case "Y", "A":
+			// Bulk apply: every file that's still pending becomes Apply.
+			// Already-decided files keep their explicit decision.
+			m.applyPending(DiffApply)
 			return m, m.finish()
 
-		case "Y":
-			m.setAllDecisions(DiffApply)
-			return m, m.finish()
-
-		case "N":
-			m.setAllDecisions(DiffReject)
+		case "N", "R":
+			m.applyPending(DiffReject)
 			return m, m.finish()
 
 		case "enter":
-			m.setAllDecisions(DiffApply)
+			// Finish with current decisions — anything still pending is
+			// treated as Reject (safer default: don't apply changes the
+			// user hasn't explicitly approved).
+			m.applyPending(DiffReject)
 			return m, m.finish()
 
 		case "esc":
@@ -1057,6 +1102,29 @@ func (m *MultiDiffPreviewModel) setAllDecisions(decision DiffDecision) {
 	for i := range m.files {
 		m.decisions[i] = decision
 	}
+}
+
+// applyPending sets `decision` on every file that's still DiffPending —
+// files already explicitly accepted/rejected keep their value. Used by the
+// bulk "A"/"R"/Enter commands after the user has been through per-file
+// review.
+func (m *MultiDiffPreviewModel) applyPending(decision DiffDecision) {
+	for i := range m.files {
+		if m.decisions[i] == DiffPending {
+			m.decisions[i] = decision
+		}
+	}
+}
+
+// allResolved reports whether every file has an explicit Apply/Reject.
+// When true the UI auto-finishes instead of sitting on an empty state.
+func (m *MultiDiffPreviewModel) allResolved() bool {
+	for i := range m.files {
+		if m.decisions[i] == DiffPending {
+			return false
+		}
+	}
+	return true
 }
 
 // moveToNextPending moves to the next file with pending decision.
@@ -1133,8 +1201,22 @@ func (m MultiDiffPreviewModel) View() string {
 
 	for i, file := range m.files {
 		fileName := filepath.Base(file.FilePath)
-		if len(fileName) > listWidth-8 {
-			fileName = fileName[:listWidth-11] + "..."
+		// Reserve extra chars for the decision marker (✓/✗/·) + selection
+		// caret so long filenames truncate predictably.
+		if len(fileName) > listWidth-10 {
+			fileName = fileName[:listWidth-13] + "..."
+		}
+
+		// Decision marker — lets users see which files they've already
+		// reviewed without switching off the current file.
+		var statusMark string
+		switch m.decisions[i] {
+		case DiffApply:
+			statusMark = lipgloss.NewStyle().Foreground(ColorSuccess).Render("✓")
+		case DiffReject:
+			statusMark = lipgloss.NewStyle().Foreground(ColorError).Render("✗")
+		default:
+			statusMark = lipgloss.NewStyle().Foreground(ColorDim).Render("·")
 		}
 
 		lineStyle := lipgloss.NewStyle()
@@ -1144,7 +1226,7 @@ func (m MultiDiffPreviewModel) View() string {
 			marker = ">"
 		}
 
-		listContent.WriteString(lineStyle.Render(fmt.Sprintf(" %s %s", marker, fileName)))
+		listContent.WriteString(lineStyle.Render(fmt.Sprintf(" %s %s %s", marker, statusMark, fileName)))
 		listContent.WriteString("\n")
 	}
 
@@ -1210,26 +1292,41 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 	hintStyle := lipgloss.NewStyle().
 		Foreground(ColorDim)
 
+	// Count resolved vs pending for the status line.
+	applied, rejected, pending := 0, 0, 0
+	for i := range m.files {
+		switch m.decisions[i] {
+		case DiffApply:
+			applied++
+		case DiffReject:
+			rejected++
+		default:
+			pending++
+		}
+	}
+
 	statusStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	status := fmt.Sprintf(
-		"Reviewing %d files as one apply-back batch | File %d/%d",
-		len(m.files),
+		"File %d/%d | %d✓ apply · %d✗ reject · %d· pending",
 		m.currentIndex+1,
 		len(m.files),
+		applied,
+		rejected,
+		pending,
 	)
 	builder.WriteString(statusStyle.Render(status))
 	builder.WriteString("\n\n")
 
-	builder.WriteString(applyStyle.Render("y Apply all"))
+	builder.WriteString(applyStyle.Render("y Apply file"))
 	builder.WriteString("  ")
-	builder.WriteString(rejectStyle.Render("n Reject all"))
+	builder.WriteString(rejectStyle.Render("n Reject file"))
 	builder.WriteString("  ")
-	builder.WriteString(allStyle.Render("Enter Apply all"))
+	builder.WriteString(allStyle.Render("A Apply remaining"))
 	builder.WriteString("  ")
-	builder.WriteString(allStyle.Render("Esc Reject all"))
+	builder.WriteString(allStyle.Render("R Reject remaining"))
 	builder.WriteString("\n\n")
 
-	builder.WriteString(hintStyle.Render("Tab: Switch focus | ↑/↓: Files | j/k: Scroll diff | y/Enter: Apply all | n/Esc: Reject all"))
+	builder.WriteString(hintStyle.Render("Tab: Switch focus | ↑/↓: Files | j/k: Scroll diff | y/n: Per-file | A/R: Bulk | Enter: Finish | Esc: Reject all"))
 }
 
 // GetDecisions returns the current decisions map.

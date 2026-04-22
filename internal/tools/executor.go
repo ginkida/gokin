@@ -1535,24 +1535,16 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Step 8: Execute with timeout. If we have enough observations for this
-	// tool, auto-tune the timeout to max(default, 5 × observed p95) so fast
-	// tools fail fast (grep stuck for 30s → catch it) while slow tools that
-	// historically take ~5min (bash build step) get the room they need.
-	toolTimeout := e.timeout
+	// tool, auto-tune the timeout via adaptiveToolTimeout so fast tools fail
+	// fast while slow tools get historically-observed room to breathe.
+	var observedP95 time.Duration
+	var haveStats bool
 	if e.toolStatsLookup != nil {
-		if p95, _, ok := e.toolStatsLookup(call.Name); ok && p95 > 0 {
-			adaptive := p95 * 5
-			if adaptive > toolTimeout {
-				toolTimeout = adaptive
-			}
-			// Cap at 2× base timeout to prevent runaway — a genuinely hung
-			// tool shouldn't be given unlimited slack.
-			maxTimeout := e.timeout * 2
-			if toolTimeout > maxTimeout {
-				toolTimeout = maxTimeout
-			}
-		}
+		p95, _, ok := e.toolStatsLookup(call.Name)
+		observedP95 = p95
+		haveStats = ok
 	}
+	toolTimeout := adaptiveToolTimeout(e.timeout, observedP95, haveStats)
 	execCtx, cancel := context.WithTimeout(ctx, toolTimeout)
 	defer cancel()
 
@@ -2277,4 +2269,27 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 	}
 	// Default: no distinguishing argument, tool name alone is the pattern
 	return ""
+}
+
+// adaptiveToolTimeout returns the effective timeout for a single tool call
+// given the executor's baseline and observed p95 latency.
+//
+// Semantics:
+//   - If no stats (ok=false) or non-positive p95: return base unchanged.
+//   - Otherwise take max(base, 5×p95) so fast tools still fail fast while
+//     historically-slow tools (e.g., a 5-minute build step) get room.
+//   - Cap the result at 2×base so a genuinely hung tool can't run unbounded
+//     even when its historical p95 was huge.
+func adaptiveToolTimeout(base, p95 time.Duration, ok bool) time.Duration {
+	if !ok || p95 <= 0 {
+		return base
+	}
+	timeout := base
+	if adaptive := p95 * 5; adaptive > timeout {
+		timeout = adaptive
+	}
+	if ceiling := base * 2; timeout > ceiling {
+		timeout = ceiling
+	}
+	return timeout
 }

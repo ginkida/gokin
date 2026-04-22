@@ -7,8 +7,10 @@ import (
 
 	"gokin/internal/agent"
 	"gokin/internal/chat"
+	"gokin/internal/client"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
+	"gokin/internal/mcp"
 	"gokin/internal/plan"
 	"gokin/internal/tools"
 	"gokin/internal/undo"
@@ -67,6 +69,13 @@ type AppInterface interface {
 	GetSessionGovernanceReport() string
 	GetMemoryReport() string
 	GetPerformanceStats() string
+
+	// MCP (Model Context Protocol) — used by /mcp commands to introspect
+	// and mutate server configuration at runtime. All three may be nil when
+	// MCP is disabled; callers must nil-check.
+	GetMCPManager() *mcp.Manager
+	GetToolRegistry() *tools.Registry
+	GetMainClient() client.Client
 }
 
 // Handler manages slash commands.
@@ -190,6 +199,9 @@ func NewHandler() *Handler {
 	// Register checkpoint and utility commands
 	h.Register(&CheckpointCommand{})
 	h.Register(&PwdCommand{})
+
+	// Register MCP (Model Context Protocol) command
+	h.Register(&MCPCommand{})
 
 	h.frozen = true
 	return h

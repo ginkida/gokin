@@ -15,6 +15,12 @@ import (
 // name is the server name, healthy is the new status.
 type HealthChangeCallback func(name string, healthy bool)
 
+// ToolsChangedCallback is called after a server's tool list is refreshed,
+// whether triggered manually via RefreshTools or by a server-initiated
+// notifications/tools/list_changed notification. Fires in its own
+// goroutine — Manager does not wait for it to return.
+type ToolsChangedCallback func(name string)
+
 // Manager manages multiple MCP server connections.
 type Manager struct {
 	servers map[string]*ServerConfig // Server configurations
@@ -30,6 +36,7 @@ type Manager struct {
 
 	// Status notifications
 	onHealthChange HealthChangeCallback
+	onToolsChanged ToolsChangedCallback
 }
 
 // ServerHealth tracks health status of an MCP server.
@@ -63,6 +70,46 @@ func (m *Manager) SetHealthChangeCallback(cb HealthChangeCallback) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onHealthChange = cb
+}
+
+// SetToolsChangedCallback sets a callback invoked after a server's tool list
+// is refreshed. Use it to re-register tools with the upstream registry and
+// push updated declarations to the LLM client.
+func (m *Manager) SetToolsChangedCallback(cb ToolsChangedCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onToolsChanged = cb
+}
+
+// wireClientNotifications attaches the manager's notification dispatcher to
+// a freshly-connected client. Safe to call without holding m.mu —
+// SetNotificationHandler acquires its own lock internally.
+func (m *Manager) wireClientNotifications(name string, client *Client) {
+	if client == nil {
+		return
+	}
+	client.SetNotificationHandler(func(method string, params any) {
+		m.handleNotification(name, method, params)
+	})
+}
+
+// handleNotification dispatches a server-initiated notification for the
+// given server. Currently handles only tools/list_changed — the MCP spec
+// lists other list_changed variants (resources/prompts) which we can add as
+// those subsystems grow user surface.
+func (m *Manager) handleNotification(serverName, method string, _ any) {
+	switch method {
+	case "notifications/tools/list_changed":
+		// Run with a fresh context — the server's receiveLoop is our caller
+		// via a goroutine, so ctx.Cancel on the original caller would not
+		// make sense. Cap at 15s to match defaultServerTimeout.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := m.RefreshTools(ctx, serverName); err != nil {
+			logging.Warn("MCP tools/list_changed refresh failed",
+				"server", serverName, "error", err)
+		}
+	}
 }
 
 // defaultServerTimeout is the per-server connection timeout.
@@ -158,6 +205,10 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 	// Collect results under write lock
 	var errs []error
+	var adopted []struct {
+		name   string
+		client *Client
+	}
 	m.mu.Lock()
 	for res := range results {
 		if res.err != nil {
@@ -167,12 +218,22 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 		m.clients[res.name] = res.client
 		m.tools = append(m.tools, res.tools...)
+		adopted = append(adopted, struct {
+			name   string
+			client *Client
+		}{res.name, res.client})
 
 		logging.Info("MCP server connected",
 			"name", res.name,
 			"tools", len(res.tools))
 	}
 	m.mu.Unlock()
+
+	// Install notification handlers outside the lock — SetNotificationHandler
+	// acquires client.mu which has its own ordering rules.
+	for _, a := range adopted {
+		m.wireClientNotifications(a.name, a.client)
+	}
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
@@ -182,7 +243,8 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 }
 
 // connectServer connects to a single server and registers its tools.
-// Must be called with m.mu held.
+// Must be called with m.mu held. Notification-handler wiring happens after
+// the caller releases the lock (see Connect).
 func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 	// Create client
 	client, err := NewClient(ctx, cfg)
@@ -222,19 +284,28 @@ func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
 // Connect connects to a specific server by name.
 func (m *Manager) Connect(ctx context.Context, name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	cfg, exists := m.servers[name]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("unknown server: %s", name)
 	}
 
 	// Check if already connected
 	if _, connected := m.clients[name]; connected {
+		m.mu.Unlock()
 		return nil
 	}
 
-	return m.connectServer(ctx, cfg)
+	if err := m.connectServer(ctx, cfg); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	client := m.clients[name]
+	m.mu.Unlock()
+
+	// Install notification handler outside the lock.
+	m.wireClientNotifications(name, client)
+	return nil
 }
 
 // Disconnect disconnects from a specific server.
@@ -485,28 +556,38 @@ func (m *Manager) GetServerStatus() []*ServerStatus {
 	return statuses
 }
 
-// RefreshTools refreshes the tool list from a specific server.
+// RefreshTools refreshes the tool list from a specific server. The manager
+// lock is released during the network call so parallel reads (GetTools,
+// GetServerStatus) are not blocked by a slow server.
 func (m *Manager) RefreshTools(ctx context.Context, name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	client, clientOk := m.clients[name]
+	cfg, cfgOk := m.servers[name]
+	m.mu.RUnlock()
 
-	client, exists := m.clients[name]
-	if !exists {
+	if !clientOk {
 		return fmt.Errorf("server not connected: %s", name)
 	}
-
-	cfg, exists := m.servers[name]
-	if !exists {
+	if !cfgOk {
 		return fmt.Errorf("server config not found: %s", name)
 	}
 
-	// Get updated tool list
+	// Network call outside the lock.
 	mcpTools, err := client.ListTools(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	// Remove old tools from this server
+	// Commit the new tool list + invoke callback under lock. Between the
+	// RUnlock above and this Lock, another thread may have called
+	// Disconnect(name) — closing our captured client. Re-verify that the
+	// client we listed against is still the one registered; otherwise we'd
+	// overwrite m.tools with wrappers pointing at a closed client.
+	m.mu.Lock()
+	if current, stillOk := m.clients[name]; !stillOk || current != client {
+		m.mu.Unlock()
+		return fmt.Errorf("server %s was disconnected or reconnected during refresh", name)
+	}
 	newTools := make([]tools.Tool, 0, len(m.tools))
 	for _, t := range m.tools {
 		if mcpTool, ok := t.(*MCPTool); ok {
@@ -517,14 +598,28 @@ func (m *Manager) RefreshTools(ctx context.Context, name string) error {
 			newTools = append(newTools, t)
 		}
 	}
-
-	// Add updated tools
 	for _, t := range mcpTools {
 		tool := NewMCPTool(client, name, cfg.ToolPrefix, t)
 		newTools = append(newTools, tool)
 	}
-
 	m.tools = newTools
+	cb := m.onToolsChanged
+	m.mu.Unlock()
+
+	if cb != nil {
+		// Run callback asynchronously so slow upstream work (e.g. SetTools
+		// pushing a new declaration to the LLM client) doesn't stall the
+		// receiveLoop that triggered this refresh.
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Warn("MCP onToolsChanged panic",
+						"server", name, "recover", r)
+				}
+			}()
+			cb(name)
+		}()
+	}
 
 	logging.Debug("MCP tools refreshed", "name", name, "tools", len(mcpTools))
 	return nil
@@ -707,6 +802,10 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 		c.health.ReconnectAttempts = 0
 		c.health.LastReconnectError = ""
 		m.mu.Unlock()
+
+		// Wire notification handler on the fresh client so tools/list_changed
+		// from the reconnected server still flows through our dispatcher.
+		m.wireClientNotifications(c.name, client)
 
 		logging.Info("MCP server auto-reconnected successfully", "name", c.name, "tools", len(mcpTools))
 	}

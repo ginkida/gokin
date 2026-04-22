@@ -378,6 +378,19 @@ type MCPServerConfig struct {
 	MaxRetries  int               `yaml:"max_retries,omitempty"` // Retry count
 	RetryDelay  time.Duration     `yaml:"retry_delay,omitempty"` // Between retries
 	ToolPrefix  string            `yaml:"tool_prefix,omitempty"` // Prefix for tool names
+
+	// PermissionLevel is the risk level applied to every tool exposed by this
+	// server: "low" (never asks), "medium" (asks in caution mode, default),
+	// "high" (always asks). Use "high" for untrusted 3rd-party servers so the
+	// user sees a prompt before any tool runs; "low" for servers you fully
+	// trust (e.g., an internal RAG service).
+	//
+	// Backwards compatibility: configs written before Sprint 11 (v0.69) have
+	// no `permission_level` field. They parse as empty string, and
+	// permission.ParseRiskLevel("") returns RiskMedium (same as the built-in
+	// default for unknown tools). This preserves existing behavior for old
+	// configs while letting users opt into tighter permissions per server.
+	PermissionLevel string `yaml:"permission_level,omitempty"`
 }
 
 // UpdateConfig holds self-update settings.

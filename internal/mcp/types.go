@@ -240,6 +240,11 @@ type ServerConfig struct {
 
 	// Tool settings
 	ToolPrefix string `yaml:"tool_prefix,omitempty" json:"toolPrefix,omitempty"` // Prefix for tool names
+
+	// PermissionLevel is the risk level applied to every tool exposed by this
+	// server: "low" / "medium" (default) / "high". Controls when the user is
+	// prompted. Untrusted 3rd-party servers should use "high".
+	PermissionLevel string `yaml:"permission_level,omitempty" json:"permissionLevel,omitempty"`
 }
 
 // MCP protocol version

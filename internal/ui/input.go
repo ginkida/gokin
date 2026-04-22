@@ -234,6 +234,10 @@ func defaultCommands() []CommandInfo {
 		{Name: "list-agent-types", Description: "List all registered agent types", Category: "Tools"},
 		{Name: "unregister-agent-type", Description: "Remove a custom agent type", Category: "Tools",
 			Args: []ArgInfo{{Name: "name", Required: true, Type: "string"}}, Usage: "/unregister-agent-type <name>"},
+		{Name: "mcp", Description: "Manage MCP (Model Context Protocol) servers", Category: "Tools",
+			Args: []ArgInfo{{Name: "subcommand", Required: false, Type: "option",
+				Options: []string{"list", "status", "add", "remove", "refresh", "help"}}},
+			Usage: "/mcp [list|status|add|remove|refresh|help]"},
 	}
 }
 

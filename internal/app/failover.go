@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -8,6 +9,13 @@ import (
 	"gokin/internal/config"
 	"gokin/internal/logging"
 )
+
+// newClientForFailover wraps client.NewClient so tests can substitute a
+// mock without calling real provider APIs. Assign a replacement in tests
+// and restore it in a deferred cleanup. Never reassign from production code.
+var newClientForFailover = func(ctx context.Context, cfg *config.Config, modelID string) (client.Client, error) {
+	return client.NewClient(ctx, cfg, modelID)
+}
 
 // activateEmergencyFailoverClient enables a provider fallback chain at runtime
 // and swaps the app client to it. Returns a human-readable failover summary.
@@ -26,7 +34,7 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	cfgCopy.Model.Provider = candidates[0]
 	cfgCopy.Model.FallbackProviders = append([]string(nil), candidates[1:]...)
 
-	newClient, err := client.NewClient(a.ctx, &cfgCopy, cfgCopy.Model.Name)
+	newClient, err := newClientForFailover(a.ctx, &cfgCopy, cfgCopy.Model.Name)
 	if err != nil {
 		return "", err
 	}

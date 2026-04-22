@@ -13,7 +13,11 @@ import (
 )
 
 var (
-	version  = "0.61.0"
+	// version is the dev-time fallback. Release builds inject the real value
+	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
+	// Bump this when merging a sprint worth of changes so `go build` without
+	// ldflags still shows something sensible in /version.
+	version  = "0.69.0"
 	cfgFile  string
 	model    string
 	runSetup bool

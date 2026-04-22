@@ -1,6 +1,10 @@
 package permission
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"sync"
+)
 
 // Level represents the permission level for a tool.
 type Level string
@@ -80,8 +84,57 @@ type Response struct {
 	Reason   string
 }
 
-// GetToolRiskLevel returns the risk level for a tool.
+// Per-tool risk level overrides — used by MCP servers to signal that their
+// tools should be treated with a specific level regardless of the default
+// heuristic (which knows nothing about 3rd-party MCP tools).
+var (
+	riskOverridesMu sync.RWMutex
+	riskOverrides   = make(map[string]RiskLevel)
+)
+
+// SetToolRiskOverride registers a risk override for a tool name. MCP servers
+// call this when registering their tools so per-server trust levels apply.
+// Passing an empty toolName is a no-op.
+func SetToolRiskOverride(toolName string, level RiskLevel) {
+	if toolName == "" {
+		return
+	}
+	riskOverridesMu.Lock()
+	defer riskOverridesMu.Unlock()
+	riskOverrides[toolName] = level
+}
+
+// ClearToolRiskOverride removes an override. Called when an MCP server is
+// disconnected so the tool no longer appears in the override table.
+func ClearToolRiskOverride(toolName string) {
+	riskOverridesMu.Lock()
+	defer riskOverridesMu.Unlock()
+	delete(riskOverrides, toolName)
+}
+
+// ParseRiskLevel converts a yaml-friendly string ("low"/"medium"/"high") to a
+// RiskLevel. Unknown values default to RiskMedium so a typo doesn't silently
+// upgrade a tool to high trust.
+func ParseRiskLevel(s string) RiskLevel {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "low":
+		return RiskLow
+	case "high":
+		return RiskHigh
+	default:
+		return RiskMedium
+	}
+}
+
+// GetToolRiskLevel returns the risk level for a tool. Overrides registered
+// via SetToolRiskOverride take precedence over the built-in heuristic.
 func GetToolRiskLevel(toolName string) RiskLevel {
+	riskOverridesMu.RLock()
+	if override, ok := riskOverrides[toolName]; ok {
+		riskOverridesMu.RUnlock()
+		return override
+	}
+	riskOverridesMu.RUnlock()
 	switch toolName {
 	case "read", "glob", "grep", "tree", "diff", "env", "list_dir",
 		"git_status", "git_log", "git_diff", "git_blame",

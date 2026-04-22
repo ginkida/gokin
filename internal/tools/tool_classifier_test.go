@@ -182,3 +182,31 @@ func TestShouldSerializeGroup_IgnoresInsufficientSamples(t *testing.T) {
 		t.Error("insufficient samples → should not downgrade on unreliable-looking stats")
 	}
 }
+
+func TestShouldSerializeGroup_AtExactThresholdDoesNotSerialize(t *testing.T) {
+	// Strict <: exactly parallelSerializationSuccessThreshold must NOT trigger.
+	lookup := func(string) (time.Duration, float64, bool) {
+		return 0, parallelSerializationSuccessThreshold, true
+	}
+	calls := []*genai.FunctionCall{{Name: "read"}, {Name: "grep"}}
+	if shouldSerializeGroup(calls, lookup) {
+		t.Error("exact threshold should not serialize (strict <)")
+	}
+}
+
+func TestShouldSerializeGroup_DedupesByToolName(t *testing.T) {
+	// Same tool repeated 3× should only invoke the stats lookup once per
+	// unique name — otherwise a hot inner loop pays for every call.
+	calls := 0
+	lookup := func(string) (time.Duration, float64, bool) {
+		calls++
+		return 0, 1.0, true
+	}
+	group := []*genai.FunctionCall{
+		{Name: "read"}, {Name: "read"}, {Name: "read"}, {Name: "grep"},
+	}
+	shouldSerializeGroup(group, lookup)
+	if calls != 2 {
+		t.Errorf("stats lookup fired %d times, want 2 (unique tool names)", calls)
+	}
+}

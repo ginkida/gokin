@@ -712,6 +712,86 @@ func (a *App) GetTreePlanner() *agent.TreePlanner {
 	return a.treePlanner
 }
 
+// GetMCPManager returns the MCP manager (may be nil when MCP is disabled).
+func (a *App) GetMCPManager() *mcp.Manager {
+	return a.mcpManager
+}
+
+// GetToolRegistry returns the tool registry — exposed so /mcp add/remove
+// can register and unregister MCP-provided tools at runtime.
+func (a *App) GetToolRegistry() *tools.Registry {
+	return a.registry
+}
+
+// GetMainClient returns the primary API client so commands can push fresh
+// tool declarations after the registry changes (e.g. MCP add/remove).
+func (a *App) GetMainClient() client.Client {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.client
+}
+
+// SyncMCPToolsForServer reconciles the tool registry against the current
+// state of the named MCP server in a.mcpManager. Called from the MCP
+// tools-changed callback when a server emits notifications/tools/list_changed
+// (or when tools are manually refreshed via /mcp refresh).
+//
+// Steps: unregister the registry entries that used to belong to this server
+// but are no longer in the manager's tool list; register any newly-arrived
+// tools; re-apply the per-server permission override; push the refreshed
+// declaration set to the main client so the LLM sees the change.
+func (a *App) SyncMCPToolsForServer(serverName string) {
+	if a == nil || a.mcpManager == nil || a.registry == nil {
+		return
+	}
+
+	// Snapshot the current live tool set from the manager.
+	live := make(map[string]*mcp.MCPTool)
+	for _, t := range a.mcpManager.GetTools() {
+		if mt, ok := t.(*mcp.MCPTool); ok && mt.GetServerName() == serverName {
+			live[mt.Name()] = mt
+		}
+	}
+
+	// Unregister registry entries belonging to this server that are no
+	// longer present in live.
+	for _, t := range a.registry.List() {
+		mt, ok := t.(*mcp.MCPTool)
+		if !ok || mt.GetServerName() != serverName {
+			continue
+		}
+		name := mt.Name()
+		if _, stillLive := live[name]; !stillLive {
+			a.registry.Unregister(name)
+			permission.ClearToolRiskOverride(name)
+		}
+	}
+
+	// Read the per-server permission level from the MCP manager instead of
+	// a.config. mcp.Manager.GetServerConfig is protected by its own mutex;
+	// a.config.MCP.Servers is a plain slice that /mcp add/remove may be
+	// mutating concurrently, which would race with iteration here.
+	var permLevel string
+	if cfg, ok := a.mcpManager.GetServerConfig(serverName); ok && cfg != nil {
+		permLevel = cfg.PermissionLevel
+	}
+	level := permission.ParseRiskLevel(permLevel)
+	for name, t := range live {
+		if err := a.registry.Register(t); err == nil {
+			permission.SetToolRiskOverride(name, level)
+			continue
+		}
+		// Already registered — still refresh the override in case server's
+		// trust level was changed in config.
+		permission.SetToolRiskOverride(name, level)
+	}
+
+	// Push fresh declarations to the main client.
+	if c := a.GetMainClient(); c != nil {
+		c.SetTools(a.registry.GeminiTools())
+	}
+}
+
 // GetRuntimeHealthReport returns runtime reliability and provider health diagnostics.
 func (a *App) GetRuntimeHealthReport() string {
 	var sb strings.Builder

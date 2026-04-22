@@ -113,6 +113,16 @@ type Builder struct {
 
 	// Cached app instance (created once, reused)
 	cachedApp *App
+
+	// MCP startup race coordination. The MCP manager is created early in
+	// initIntegrations and starts receiving tools/list_changed notifications
+	// as soon as clients connect — but the App that SyncMCPToolsForServer
+	// needs doesn't exist until assembleApp runs later in wireDependencies.
+	// Events arriving in that window are queued here and drained once the
+	// App is ready.
+	mcpDispatchMu          sync.Mutex
+	mcpDispatchApp         *App
+	mcpPendingToolsChanged []string
 }
 
 // NewBuilder creates a new Builder with the given config and work directory.
@@ -1229,24 +1239,31 @@ func (b *Builder) initIntegrations() error {
 	if b.cfg.MCP.Enabled && len(b.cfg.MCP.Servers) > 0 {
 		// Convert config to MCP server configs
 		mcpConfigs := make([]*mcp.ServerConfig, 0, len(b.cfg.MCP.Servers))
+		permLevels := make(map[string]string, len(b.cfg.MCP.Servers))
 		for _, s := range b.cfg.MCP.Servers {
 			mcpConfigs = append(mcpConfigs, &mcp.ServerConfig{
-				Name:        s.Name,
-				Transport:   s.Transport,
-				Command:     s.Command,
-				Args:        s.Args,
-				Env:         s.Env,
-				URL:         s.URL,
-				Headers:     s.Headers,
-				AutoConnect: s.AutoConnect,
-				Timeout:     s.Timeout,
-				MaxRetries:  s.MaxRetries,
-				RetryDelay:  s.RetryDelay,
-				ToolPrefix:  s.ToolPrefix,
+				Name:            s.Name,
+				Transport:       s.Transport,
+				Command:         s.Command,
+				Args:            s.Args,
+				Env:             s.Env,
+				URL:             s.URL,
+				Headers:         s.Headers,
+				AutoConnect:     s.AutoConnect,
+				Timeout:         s.Timeout,
+				MaxRetries:      s.MaxRetries,
+				RetryDelay:      s.RetryDelay,
+				ToolPrefix:      s.ToolPrefix,
+				PermissionLevel: s.PermissionLevel,
 			})
+			permLevels[s.Name] = s.PermissionLevel
 		}
 
 		b.mcpManager = mcp.NewManager(mcpConfigs)
+		// Install the tools-changed dispatcher BEFORE ConnectAll so that any
+		// notification arriving during initial connect handshakes is
+		// captured (queued if App not yet ready, delivered otherwise).
+		b.mcpManager.SetToolsChangedCallback(b.dispatchMCPToolsChanged)
 
 		// Count auto-connect servers so we can summarise connect results for the UI.
 		autoCount := 0
@@ -1276,11 +1293,19 @@ func (b *Builder) initIntegrations() error {
 			}
 		}
 
-		// Register MCP tools into the registry
+		// Register MCP tools into the registry and apply per-server risk
+		// overrides so the permission layer routes prompts according to each
+		// server's configured trust tier instead of the default RiskMedium.
 		for _, tool := range b.mcpManager.GetTools() {
 			if err := b.registry.Register(tool); err != nil {
 				logging.Warn("failed to register MCP tool",
 					"tool", tool.Name(), "error", err)
+				continue
+			}
+			if mt, ok := tool.(*mcp.MCPTool); ok {
+				if lvl, known := permLevels[mt.GetServerName()]; known {
+					permission.SetToolRiskOverride(tool.Name(), permission.ParseRiskLevel(lvl))
+				}
 			}
 		}
 
@@ -1353,9 +1378,14 @@ func (b *Builder) wireDependencies() error {
 	statusCb := &appStatusCallback{app: app}
 	attachStatusCallback(b.mainClient, statusCb)
 
-	// Notify UI on MCP health changes
+	// Notify UI on MCP health changes. Rate-limited per server so a flapping
+	// server can't flood the status area with cascading toasts.
 	if b.mcpManager != nil {
+		healthToasts := newHealthToastLimiter()
 		b.mcpManager.SetHealthChangeCallback(func(name string, healthy bool) {
+			if !healthToasts.ShouldEmit(name, time.Now()) {
+				return
+			}
 			if healthy {
 				app.safeSendToProgram(ui.StatusUpdateMsg{
 					Type:    ui.StatusStreamResume,
@@ -1368,6 +1398,19 @@ func (b *Builder) wireDependencies() error {
 				})
 			}
 		})
+
+		// Publish the App to the already-installed tools-changed dispatcher
+		// and drain any events that arrived during startup (between
+		// ConnectAll and App creation).
+		b.mcpDispatchMu.Lock()
+		b.mcpDispatchApp = app
+		pending := b.mcpPendingToolsChanged
+		b.mcpPendingToolsChanged = nil
+		b.mcpDispatchMu.Unlock()
+		for _, name := range pending {
+			// Registry-level reconciliation only; UI isn't up yet for toasts.
+			app.SyncMCPToolsForServer(name)
+		}
 	}
 
 	// Set up executor handler
@@ -1852,6 +1895,34 @@ func (b *Builder) wireDependencies() error {
 	}
 
 	return nil
+}
+
+// dispatchMCPToolsChanged is invoked by the MCP manager whenever a server's
+// tool list is refreshed (either via explicit /mcp refresh or a server-sent
+// tools/list_changed notification). It runs concurrently with the main
+// build path: during startup it may fire before the App is ready.
+//
+// If the App is ready, we reconcile the registry and emit a UI toast. If
+// not, we queue the server name; wireDependencies drains the queue once
+// assembleApp has run.
+func (b *Builder) dispatchMCPToolsChanged(name string) {
+	b.mcpDispatchMu.Lock()
+	app := b.mcpDispatchApp
+	if app == nil {
+		b.mcpPendingToolsChanged = append(b.mcpPendingToolsChanged, name)
+		b.mcpDispatchMu.Unlock()
+		return
+	}
+	b.mcpDispatchMu.Unlock()
+
+	// SyncMCPToolsForServer + UI notification outside the lock so a slow
+	// LLM client SetTools call can't stall concurrent dispatches from
+	// other servers.
+	app.SyncMCPToolsForServer(name)
+	app.safeSendToProgram(ui.StatusUpdateMsg{
+		Type:    ui.StatusStreamResume,
+		Message: fmt.Sprintf("MCP %q: tool list updated", name),
+	})
 }
 
 // assembleApp creates the final App instance from built components.

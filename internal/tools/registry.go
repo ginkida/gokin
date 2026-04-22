@@ -88,6 +88,19 @@ func (r *Registry) MustRegister(tool Tool) {
 	}
 }
 
+// Unregister removes a tool by name. Returns true if a tool was removed.
+// Used when MCP servers disconnect so their tools stop appearing in the
+// registry exposed to the model.
+func (r *Registry) Unregister(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.tools[name]; !exists {
+		return false
+	}
+	delete(r.tools, name)
+	return true
+}
+
 // GeminiTools returns the tools in Gemini format.
 func (r *Registry) GeminiTools() []*genai.Tool {
 	return []*genai.Tool{

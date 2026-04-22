@@ -8,6 +8,7 @@ import (
 
 	appcontext "gokin/internal/context"
 	"gokin/internal/format"
+	"gokin/internal/mcp"
 )
 
 // StatsCommand shows detailed session statistics.
@@ -116,6 +117,14 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 		sb.WriteString(perf)
 	}
 
+	// MCP section — only shown when at least one server is configured so we
+	// don't clutter /stats for users who never opted in.
+	if mgr := app.GetMCPManager(); mgr != nil {
+		if mcpSection := formatMCPStatsSection(mgr); mcpSection != "" {
+			sb.WriteString(mcpSection)
+		}
+	}
+
 	// Footer
 	sb.WriteString(strings.Repeat("─", 50))
 	sb.WriteString("\n")
@@ -124,7 +133,35 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	return sb.String(), nil
 }
 
-// formatNumber formats a number with thousands separators.
+// formatMCPStatsSection summarizes MCP server state for /stats. Returns an
+// empty string when no servers are configured so callers can skip the header.
+func formatMCPStatsSection(mgr *mcp.Manager) string {
+	statuses := mgr.GetServerStatus()
+	if len(statuses) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("🔌 MCP\n")
+	connected := 0
+	tools := 0
+	unhealthy := 0
+	for _, s := range statuses {
+		if s.Connected {
+			connected++
+			if !s.Healthy {
+				unhealthy++
+			}
+		}
+		tools += s.ToolCount
+	}
+	fmt.Fprintf(&sb, "  Servers:         %d total, %d connected\n", len(statuses), connected)
+	fmt.Fprintf(&sb, "  Tools exposed:   %d\n", tools)
+	if unhealthy > 0 {
+		fmt.Fprintf(&sb, "  Unhealthy:       %d (run /mcp status for detail)\n", unhealthy)
+	}
+	sb.WriteByte('\n')
+	return sb.String()
+}
 func formatNumber(n int64) string {
 	in := fmt.Sprintf("%d", n)
 	out := make([]byte, 0, len(in)+(len(in)/3))

@@ -40,7 +40,7 @@ jobs:
           go tool cover -func=coverage.out | tail -n 40
           total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%",""); print $3}')
           echo "::notice title=Coverage::total=${total}%"
-          awk -v t="$total" 'BEGIN { if (t+0 < 15.0) { print "ERROR: coverage " t "% below 15% floor"; exit 1 } }'
+          awk -v t="$total" 'BEGIN { if (t+0 < 17.0) { print "ERROR: coverage " t "% below 17% floor"; exit 1 } }'
 
       - name: Upload coverage
         uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6
