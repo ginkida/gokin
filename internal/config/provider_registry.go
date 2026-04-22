@@ -67,10 +67,15 @@ var Providers = []ProviderDef{
 		},
 	},
 	{
-		Name:          "kimi",
-		DisplayName:   "Kimi Coding Plan",
-		DefaultModel:  "kimi-for-coding",
-		EnvVars:       []string{"GOKIN_KIMI_KEY", "KIMI_API_KEY"},
+		Name:         "kimi",
+		DisplayName:  "Kimi Coding Plan",
+		DefaultModel: "kimi-for-coding",
+		// MOONSHOT_API_KEY retained as a fallback env var so users upgrading
+		// from pre-v0.69 (Moonshot Developer API era) don't suddenly find
+		// gokin unable to auto-discover their key. They'll still hit the
+		// Coding Plan endpoint by default — if that's wrong for them, they
+		// can set model.custom_base_url: https://api.moonshot.ai/anthropic.
+		EnvVars:       []string{"GOKIN_KIMI_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY"},
 		UsesLegacyKey: true,
 		GetKey:        func(api *APIConfig) string { return api.KimiKey },
 		SetKey:        func(api *APIConfig, key string) { api.KimiKey = key },

@@ -47,8 +47,16 @@ func Load() (*Config, error) {
 // migrateLegacyKimiModelName rewrites retired Kimi model IDs to the
 // Coding Plan canonical name. Called on every Load so both global and
 // project configs benefit; idempotent.
+//
+// Skipped when CustomBaseURL is set — users with an explicit Moonshot
+// Developer API endpoint may still use legacy model IDs there, and we
+// don't want to silently rewrite their model into one their endpoint
+// doesn't serve.
 func migrateLegacyKimiModelName(cfg *Config) {
 	if cfg == nil {
+		return
+	}
+	if strings.TrimSpace(cfg.Model.CustomBaseURL) != "" {
 		return
 	}
 	legacy := map[string]bool{

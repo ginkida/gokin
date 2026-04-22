@@ -1324,7 +1324,14 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 			// Captured here and attached to the Part emitted in the
 			// matching content_block_stop so multi-turn assistant messages
 			// can echo it back to satisfy provider requirements.
-			if deltaType == "signature_delta" {
+			//
+			// Guarded on currentBlockType == "thinking": malformed streams
+			// that emit signature_delta inside a text/tool_use block would
+			// otherwise leak a stale signature into the next thinking
+			// block (content_block_start doesn't reset the signature
+			// field, and content_block_stop for non-thinking blocks skips
+			// the reset path).
+			if deltaType == "signature_delta" && acc.currentBlockType == "thinking" {
 				if sig, ok := delta["signature"].(string); ok && sig != "" {
 					acc.currentThinkingSignature = sig
 					logging.Debug("SSE signature delta received", "sig_length", len(sig))
