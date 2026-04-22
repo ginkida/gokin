@@ -14,12 +14,12 @@ type ModelCommand struct{}
 func (c *ModelCommand) Name() string        { return "model" }
 func (c *ModelCommand) Description() string { return "Switch AI model" }
 func (c *ModelCommand) Usage() string {
-	return `/model           - Show current model and available models
-/model glm-5     - GLM-5 (default, 131K output)
-/model glm-5.1   - GLM-5.1 (newer, same limits)
-/model glm-4.7   - GLM-4.7 (thinking-enabled)
-/model kimi-k2.5 - Kimi K2.5 (256K context)
-/model MiniMax-M2.7 - MiniMax M2.7 (200K context)`
+	return `/model                  - Show current model and available models
+/model kimi-for-coding  - Kimi K2.6 (default, 262K context)
+/model glm-5            - GLM-5 (131K output)
+/model glm-5.1          - GLM-5.1 (newer, same limits)
+/model glm-4.7          - GLM-4.7 (thinking-enabled)
+/model MiniMax-M2.7     - MiniMax M2.7 (200K context)`
 }
 func (c *ModelCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{

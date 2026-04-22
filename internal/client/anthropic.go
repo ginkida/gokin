@@ -455,6 +455,18 @@ func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*gen
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("anthropic-beta", "token-counting-2024-11-01")
 
+	// Same gateway-specific auth swap as the main request path — keep in
+	// sync with sendRequest() below. Kimi Coding Plan is Bearer-only,
+	// MiniMax + Z.AI/GLM accept Bearer alongside x-api-key.
+	if strings.Contains(c.config.BaseURL, "api.z.ai") || strings.Contains(c.config.BaseURL, "bigmodel.cn") ||
+		strings.Contains(c.config.BaseURL, "minimax") {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if strings.Contains(c.config.BaseURL, "api.kimi.com") {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Del("x-api-key")
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("count_tokens request failed: %w", err)
@@ -862,6 +874,14 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	// MiniMax uses Bearer token authentication
 	if strings.Contains(c.config.BaseURL, "minimax") {
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+	}
+
+	// Kimi Coding Plan (api.kimi.com) expects Bearer-only. Drop the
+	// x-api-key header to avoid confusing gateways that reject requests
+	// with both header styles.
+	if strings.Contains(c.config.BaseURL, "api.kimi.com") {
+		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+		req.Header.Del("x-api-key")
 	}
 
 	// Perform request

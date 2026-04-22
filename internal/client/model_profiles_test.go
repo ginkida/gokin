@@ -14,7 +14,7 @@ func TestGetModelProfile_ExactMatch(t *testing.T) {
 		{"llama3.2", "llama", 128000, true},
 		{"gemini-3-flash", "gemini", 1000000, true},
 		{"glm-5", "glm", 128000, true},
-		{"kimi-k2.5", "kimi", 256000, true},
+		{"kimi-for-coding", "kimi", 262144, true},
 		{"minimax-m2.5", "minimax", 204800, true},
 		{"phi3", "phi", 4096, false},
 		{"llama2", "llama", 4096, false},
@@ -111,7 +111,7 @@ func TestGetModelProfile_Unknown(t *testing.T) {
 func TestGetModelProfile_IsCoding(t *testing.T) {
 	codingModels := []string{
 		"qwen2.5-coder", "codellama", "starcoder2",
-		"glm-5", "glm-4.7", "kimi-k2.5", "kimi-k2",
+		"glm-5", "glm-4.7", "kimi-for-coding", "kimi-k2.6",
 		"minimax-m2.7", "minimax-m2.5",
 	}
 	for _, m := range codingModels {

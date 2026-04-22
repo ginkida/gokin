@@ -18,7 +18,17 @@ const (
 	DefaultAnthropicBaseURL = "https://api.anthropic.com"
 	DefaultGLMBaseURL       = "https://api.z.ai/api/anthropic"
 	DefaultMiniMaxBaseURL   = "https://api.minimax.io/anthropic"
-	DefaultKimiBaseURL      = "https://api.moonshot.ai/anthropic"
+	// DefaultKimiBaseURL points at Kimi Coding Plan's Anthropic-compatible
+	// endpoint — the subscription tier required for kimi-k2.6 and coding-
+	// optimized inference. Keys for this endpoint are `sk-kimi-...` (distinct
+	// from the Moonshot Developer Platform keys). Users who explicitly want
+	// the Moonshot Developer API can override via `model.custom_base_url:
+	// https://api.moonshot.ai/anthropic` with their Moonshot key.
+	DefaultKimiBaseURL = "https://api.kimi.com/coding"
+	// DefaultMoonshotBaseURL is the alternative non-subscription endpoint
+	// (Developer Platform). Retained for reference and for users who opt in
+	// via custom_base_url.
+	DefaultMoonshotBaseURL = "https://api.moonshot.ai/anthropic"
 )
 
 // ModelInfo contains information about an available model.
@@ -130,25 +140,15 @@ var AvailableModels = []ModelInfo{
 		Provider:    "minimax",
 		BaseURL:     DefaultMiniMaxBaseURL,
 	},
-	// Kimi models (via Anthropic-compatible API)
+	// Kimi Coding Plan — exposes exactly one model, `kimi-for-coding`
+	// (internal name: Kimi K2.6). 262K context, reasoning+vision+video.
+	// No other model IDs are served by api.kimi.com/coding/v1/models;
+	// previous kimi-k2.5 / kimi-k2-thinking-turbo / kimi-k2-turbo-preview
+	// entries were dead (Moonshot Developer API only) and have been removed.
 	{
-		ID:          "kimi-k2.5",
-		Name:        "Kimi K2.5",
-		Description: "Latest multimodal model from Moonshot AI",
-		Provider:    "kimi",
-		BaseURL:     DefaultKimiBaseURL,
-	},
-	{
-		ID:          "kimi-k2-thinking-turbo",
-		Name:        "Kimi K2 Thinking Turbo",
-		Description: "Extended reasoning, fast output (60-100 tok/s)",
-		Provider:    "kimi",
-		BaseURL:     DefaultKimiBaseURL,
-	},
-	{
-		ID:          "kimi-k2-turbo-preview",
-		Name:        "Kimi K2 Turbo",
-		Description: "Fast coding model, 256K context",
+		ID:          "kimi-for-coding",
+		Name:        "Kimi K2.6 (Coding Plan)",
+		Description: "Flagship — 262K context, reasoning + vision + video, coding-tuned",
 		Provider:    "kimi",
 		BaseURL:     DefaultKimiBaseURL,
 	},

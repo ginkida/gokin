@@ -58,11 +58,13 @@ var knownModelProfiles = map[string]ModelProfile{
 	"glm-4":       {Family: "glm", ContextWindow: 128000, SupportsTools: true},
 	"glm":         {Family: "glm", ContextWindow: 128000, SupportsTools: true},
 
-	// Kimi / Moonshot family
-	"kimi-k2.5": {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},
-	"kimi-k2":   {Family: "kimi", ContextWindow: 256000, SupportsTools: true, IsCoding: true},
-	"kimi":      {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
-	"moonshot":  {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
+	// Kimi family — Coding Plan exposes only kimi-for-coding (Kimi K2.6).
+	// Older IDs are retained as profile aliases so legacy configs still
+	// match a sane profile before the config-migration rewrites them.
+	"kimi-for-coding": {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
+	"kimi-k2.6":       {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
+	"kimi":            {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
+	"moonshot":        {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
 
 	// Gemini family
 	"gemini-3.1-pro":   {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},

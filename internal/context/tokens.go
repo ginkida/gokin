@@ -86,9 +86,9 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  204800,
 		MaxOutputTokens: 16384,
 	},
-	// Kimi
+	// Kimi — Coding Plan, 262K window
 	"kimi": {
-		MaxInputTokens:  256000,
+		MaxInputTokens:  262144,
 		MaxOutputTokens: 32768,
 	},
 }
@@ -134,11 +134,9 @@ var DefaultPricing = map[string]ModelPricing{
 	"MiniMax-M2.5-highspeed": {InputCostPer1M: 1.10, OutputCostPer1M: 1.10},
 	"minimax":                {InputCostPer1M: 1.10, OutputCostPer1M: 1.10}, // fallback
 
-	// Kimi / Moonshot (prices in USD equivalent from CNY)
-	"kimi-k2.5":              {InputCostPer1M: 1.12, OutputCostPer1M: 4.48},
-	"kimi-k2-thinking-turbo": {InputCostPer1M: 1.40, OutputCostPer1M: 5.60},
-	"kimi-k2-turbo":          {InputCostPer1M: 0.56, OutputCostPer1M: 2.24},
-	"kimi":                   {InputCostPer1M: 1.00, OutputCostPer1M: 1.00}, // fallback
+	// Kimi Coding Plan — subscription tier, one model.
+	"kimi-for-coding": {InputCostPer1M: 1.12, OutputCostPer1M: 4.48},
+	"kimi":            {InputCostPer1M: 1.12, OutputCostPer1M: 4.48}, // fallback
 }
 
 // TokenLimits defines token limits for a model.

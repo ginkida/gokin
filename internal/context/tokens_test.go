@@ -14,7 +14,7 @@ func TestGetModelLimits_ExactMatch(t *testing.T) {
 		{"glm-4.7", 128000, 131072},
 		{"glm-4.5-air", 128000, 32768},
 		{"minimax", 204800, 16384},
-		{"kimi", 256000, 32768},
+		{"kimi", 262144, 32768},
 	}
 
 	for _, tt := range tests {
@@ -89,7 +89,7 @@ func TestGetPricing_KnownModels(t *testing.T) {
 	}{
 		{"glm-5.1", 4.00, 16.00},
 		{"glm-5", 1.00, 4.00},
-		{"kimi-k2.5", 1.12, 4.48},
+		{"kimi-for-coding", 1.12, 4.48},
 		{"MiniMax-M2.7", 1.40, 5.60},
 	}
 	for _, tt := range tests {

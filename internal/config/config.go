@@ -408,20 +408,24 @@ type UpdateConfig struct {
 	Timeout           time.Duration `yaml:"timeout"`            // HTTP request timeout (default: 30s)
 }
 
-// DefaultConfig returns the default configuration.
+// DefaultConfig returns the default configuration. Kimi Coding Plan is the
+// default provider — gokin's primary target is active coding, and the
+// Coding Plan endpoint (api.kimi.com/coding) serves kimi-for-coding (K2.6)
+// with a 262K context window. Users with GLM/MiniMax/Ollama credentials
+// can switch via /model or /provider at any time.
 func DefaultConfig() *Config {
 	return &Config{
 		API: APIConfig{
-			Backend: "glm",
+			Backend: "kimi",
 			Retry: RetryConfig{
 				MaxRetries: DefaultMaxRetries,
 				RetryDelay: DefaultRetryDelay,
 			},
 		},
 		Model: ModelConfig{
-			Name:            "glm-5", // Default - matches default backend "glm"
-			Temperature:     0.7,
-			MaxOutputTokens: 131072,
+			Name:            "kimi-for-coding", // Matches default backend "kimi"
+			Temperature:     0.6,
+			MaxOutputTokens: 32768,
 			EnableThinking:  false, // Disabled by default
 			ThinkingBudget:  0,     // 0 = disabled
 			MaxPoolSize:     5,     // Default pool size

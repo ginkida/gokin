@@ -35,7 +35,30 @@ func Load() (*Config, error) {
 	// Merge per-project config if it exists
 	loadProjectConfig(cfg)
 
+	// Migrate legacy Kimi model names (pre-v0.69 users had kimi-k2.5 /
+	// kimi-k2-thinking-turbo / kimi-k2-turbo-preview pointing at Moonshot
+	// Developer API). Coding Plan endpoint only serves kimi-for-coding;
+	// rewrite silently so existing YAML configs don't error out.
+	migrateLegacyKimiModelName(cfg)
+
 	return cfg, nil
+}
+
+// migrateLegacyKimiModelName rewrites retired Kimi model IDs to the
+// Coding Plan canonical name. Called on every Load so both global and
+// project configs benefit; idempotent.
+func migrateLegacyKimiModelName(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	legacy := map[string]bool{
+		"kimi-k2.5":              true,
+		"kimi-k2-thinking-turbo": true,
+		"kimi-k2-turbo-preview":  true,
+	}
+	if legacy[cfg.Model.Name] {
+		cfg.Model.Name = "kimi-for-coding"
+	}
 }
 
 // LoadWithProjectDir loads configuration with a specific project directory.

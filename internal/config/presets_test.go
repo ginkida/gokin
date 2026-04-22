@@ -11,12 +11,13 @@ func TestApplyPreset(t *testing.T) {
 		wantModel    string
 		wantProvider string
 	}{
-		{"coding", true, "glm-5", "glm"},
-		{"fast", true, "glm-5", "glm"},
-		{"balanced", true, "glm-5", "glm"},
+		{"coding", true, "kimi-for-coding", "kimi"},
+		{"fast", true, "kimi-for-coding", "kimi"},
+		{"balanced", true, "kimi-for-coding", "kimi"},
 		{"creative", true, "MiniMax-M2.7", "minimax"},
 		{"ollama", true, "llama3.2", "ollama"},
-		{"kimi", true, "kimi-k2.5", "kimi"},
+		{"kimi", true, "kimi-for-coding", "kimi"},
+		{"glm", true, "glm-5", "glm"},
 		{"minimax", true, "MiniMax-M2.7", "minimax"},
 		{"nonexistent", false, "", ""},
 	}
@@ -42,8 +43,9 @@ func TestApplyPreset(t *testing.T) {
 
 func TestApplyPresetTemperature(t *testing.T) {
 	cases := map[string]float32{
-		"coding":  0.7,
+		"coding":  0.6, // kimi-for-coding default
 		"kimi":    0.6,
+		"glm":     0.7,
 		"ollama":  0.7,
 		"minimax": 0.7,
 	}
@@ -58,9 +60,10 @@ func TestApplyPresetTemperature(t *testing.T) {
 
 func TestApplyPresetMaxTokens(t *testing.T) {
 	cases := map[string]int32{
-		"coding": 131072,
-		"fast":   131072,
+		"coding": 32768, // kimi-for-coding output cap
+		"fast":   32768,
 		"kimi":   32768,
+		"glm":    131072,
 		"ollama": 4096,
 	}
 	for preset, wantTokens := range cases {
@@ -89,6 +92,7 @@ func TestIsValidPreset(t *testing.T) {
 
 func TestListPresets(t *testing.T) {
 	presets := ListPresets()
+	// 8 presets: coding, fast, balanced, creative, glm, kimi, minimax, ollama
 	if len(presets) != 8 {
 		t.Errorf("len(ListPresets) = %d, want 8", len(presets))
 	}
@@ -132,6 +136,7 @@ func TestLooksLikeDefaultModelConfig(t *testing.T) {
 		{"empty name, default tokens", &ModelConfig{MaxOutputTokens: 131072}, true},
 		{"glm default name, default tokens", &ModelConfig{Name: "glm-5", MaxOutputTokens: 131072}, true},
 		{"glm default name, zero tokens", &ModelConfig{Name: "glm-5"}, true},
+		{"kimi-for-coding default, zero tokens", &ModelConfig{Name: "kimi-for-coding"}, true},
 		{"custom name blocks auto-apply", &ModelConfig{Name: "glm-4.5", MaxOutputTokens: 131072}, false},
 		{"custom tokens blocks auto-apply", &ModelConfig{Name: "glm-5", MaxOutputTokens: 16384}, false},
 	}

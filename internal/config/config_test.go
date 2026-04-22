@@ -187,14 +187,18 @@ func TestSetProviderKey(t *testing.T) {
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Model.Name != "glm-5" {
-		t.Errorf("Model.Name = %q, want glm-5", cfg.Model.Name)
+	// v0.69 switched default to kimi-for-coding (Kimi Coding Plan).
+	if cfg.Model.Name != "kimi-for-coding" {
+		t.Errorf("Model.Name = %q, want kimi-for-coding", cfg.Model.Name)
 	}
-	if cfg.Model.Temperature != 0.7 {
-		t.Errorf("Model.Temperature = %v, want 0.7", cfg.Model.Temperature)
+	if cfg.Model.Temperature != 0.6 {
+		t.Errorf("Model.Temperature = %v, want 0.6", cfg.Model.Temperature)
 	}
-	if cfg.Model.MaxOutputTokens != 131072 {
-		t.Errorf("Model.MaxOutputTokens = %v, want 131072", cfg.Model.MaxOutputTokens)
+	if cfg.Model.MaxOutputTokens != 32768 {
+		t.Errorf("Model.MaxOutputTokens = %v, want 32768", cfg.Model.MaxOutputTokens)
+	}
+	if cfg.API.Backend != "kimi" {
+		t.Errorf("API.Backend = %q, want kimi", cfg.API.Backend)
 	}
 	if cfg.Tools.Bash.Sandbox != true {
 		t.Error("Tools.Bash.Sandbox should be true by default")

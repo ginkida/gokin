@@ -8,25 +8,28 @@ type ModelPreset struct {
 	MaxOutputTokens int32
 }
 
-// ModelPresets contains predefined model configurations.
+// ModelPresets contains predefined model configurations. Kimi Coding Plan
+// is the default across coding/fast/balanced — gokin's primary target is
+// active coding sessions, and kimi-for-coding (K2.6) has the largest
+// context window (262K) of any subscription-tier model we ship against.
 var ModelPresets = map[string]ModelPreset{
 	"coding": {
-		Provider:        "glm",
-		Name:            "glm-5",
-		Temperature:     0.7,
-		MaxOutputTokens: 131072,
+		Provider:        "kimi",
+		Name:            "kimi-for-coding",
+		Temperature:     0.6,
+		MaxOutputTokens: 32768,
 	},
 	"fast": {
-		Provider:        "glm",
-		Name:            "glm-5",
-		Temperature:     0.7,
-		MaxOutputTokens: 131072,
+		Provider:        "kimi",
+		Name:            "kimi-for-coding",
+		Temperature:     0.6,
+		MaxOutputTokens: 32768,
 	},
 	"balanced": {
-		Provider:        "glm",
-		Name:            "glm-5",
-		Temperature:     0.7,
-		MaxOutputTokens: 131072,
+		Provider:        "kimi",
+		Name:            "kimi-for-coding",
+		Temperature:     0.6,
+		MaxOutputTokens: 32768,
 	},
 	"creative": {
 		Provider:        "minimax",
@@ -42,7 +45,7 @@ var ModelPresets = map[string]ModelPreset{
 	},
 	"kimi": {
 		Provider:        "kimi",
-		Name:            "kimi-k2.5",
+		Name:            "kimi-for-coding",
 		Temperature:     0.6,
 		MaxOutputTokens: 32768,
 	},
@@ -110,7 +113,7 @@ func looksLikeDefaultModelConfig(m *ModelConfig) bool {
 	if m == nil {
 		return false
 	}
-	defaultName := m.Name == "" || m.Name == "glm-5"
+	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "kimi-for-coding"
 	defaultMax := m.MaxOutputTokens == 0 || m.MaxOutputTokens == 131072
 	return defaultName && defaultMax
 }

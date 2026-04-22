@@ -139,7 +139,7 @@ func TestProviderDefaultModels(t *testing.T) {
 	expected := map[string]string{
 		"glm":     "glm-5.1",
 		"minimax": "MiniMax-M2.7",
-		"kimi":    "kimi-k2.5",
+		"kimi":    "kimi-for-coding",
 		"ollama":  "llama3.2",
 	}
 
