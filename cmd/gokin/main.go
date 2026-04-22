@@ -28,9 +28,11 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "gokin",
 		Short: "AI-powered CLI assistant for code",
-		Long: `Gokin is a CLI tool that uses Gemini API and GLM API to help you work with code.
-It provides an interactive chat interface with tools for reading, writing,
-and editing files, running commands, and more.`,
+		Long: `Gokin is a CLI tool for AI-assisted coding. Supports Kimi
+(default), GLM, MiniMax, and Ollama. It provides an interactive chat
+interface with tools for reading, writing, and editing files, running
+commands, and orchestrating multi-agent workflows — with zero proxies
+between you and the provider you choose.`,
 		RunE: runApp,
 	}
 
