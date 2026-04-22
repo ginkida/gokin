@@ -3974,7 +3974,14 @@ type toolCallResult struct {
 
 // executeToolWithReflection executes a tool with reflection and delegation on failure.
 func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.FunctionCall) toolCallResult {
+	toolStart := time.Now()
 	result := a.executeTool(ctx, call)
+	elapsed := time.Since(toolStart)
+
+	// Feed durable tool-outcome signals into ProjectLearning. Runs on both
+	// success and failure so success-rate EMA reflects reality. Debounced
+	// save at the ProjectLearning layer (2s timer) absorbs any I/O cost.
+	a.recordToolForLearning(call, result, elapsed)
 
 	// On success, feed into fix cache for fix detection
 	if result.Success && a.fixCache != nil {

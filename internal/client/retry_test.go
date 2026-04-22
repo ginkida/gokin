@@ -72,6 +72,22 @@ func TestAdaptiveStreamRetryPolicyUnhealthy(t *testing.T) {
 	}
 }
 
+func TestAdaptiveStreamRetryPolicyKimiDefaults(t *testing.T) {
+	policy := AdaptiveStreamRetryPolicy("kimi")
+	if policy.MaxRetries < 3 {
+		t.Errorf("kimi MaxRetries = %d, want >= 3", policy.MaxRetries)
+	}
+	if policy.MaxPartialRetries < 2 {
+		t.Errorf("kimi MaxPartialRetries = %d, want >= 2", policy.MaxPartialRetries)
+	}
+	if policy.BaseDelay < 3*time.Second {
+		t.Errorf("kimi BaseDelay = %v, want >= 3s", policy.BaseDelay)
+	}
+	if policy.MaxDelay < 45*time.Second {
+		t.Errorf("kimi MaxDelay = %v, want >= 45s", policy.MaxDelay)
+	}
+}
+
 func TestAdaptiveRetryConfigFailureStreak(t *testing.T) {
 	provider := "test-adaptive-streak"
 	// Make it slightly healthy first
@@ -134,7 +150,7 @@ func TestParseHeaderDuration(t *testing.T) {
 	resp := &http.Response{
 		Header: make(http.Header),
 	}
-	
+
 	// Test cases: Go duration, Bare seconds, Anthropic style
 	tests := []struct {
 		val  string
@@ -164,7 +180,7 @@ func TestExtractAnthropicRateLimits(t *testing.T) {
 	resp.Header.Set("anthropic-ratelimit-requests-remaining", "999")
 	resp.Header.Set("anthropic-ratelimit-requests-reset", "2026-04-07T20:00:00Z") // Note: my parser handles seconds/durations, checking if it ignores ISO
 	resp.Header.Set("anthropic-ratelimit-tokens-limit", "100000")
-	
+
 	rl := extractAnthropicRateLimits(resp)
 	if rl == nil {
 		t.Fatal("extractAnthropicRateLimits returned nil")

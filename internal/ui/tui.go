@@ -274,13 +274,16 @@ type activeToolCall struct {
 
 // CoordinatedTaskState tracks the state of a coordinated task for UI display.
 type CoordinatedTaskState struct {
-	ID        string
-	Message   string
-	Status    string // pending, running, completed, failed
-	Progress  float64
-	StartTime time.Time
-	Duration  time.Duration
-	Error     error
+	ID                  string
+	Message             string
+	PlanType            string
+	Status              string // pending, running, completed, failed
+	Progress            float64
+	StartTime           time.Time
+	Duration            time.Duration
+	Error               error
+	LastProgressBucket  int
+	LastProgressMessage string
 }
 
 // NewModel creates a new TUI model.
@@ -1920,6 +1923,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.lastActivityTime = time.Now()
 			m.agentToolCount = 0
 			m.agentRecentTools = nil
+			description := ""
+			if task, ok := m.backgroundTasks[msg.AgentID]; ok {
+				description = task.Description
+			}
+			m.output.AppendLine("")
+			m.output.AppendLine(m.renderAgentTimelineStart(msg.AgentType, description))
 		case "tool_start":
 			m.agentToolCount++
 			info := m.extractToolInfoFromArgs(msg.ToolName, msg.ToolArgs)
@@ -2162,47 +2171,25 @@ func (m *Model) extractToolInfoFromArgs(name string, args map[string]any) string
 func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, startTime time.Time) {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	contentStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 
 	// Build summary and duration
 	var summary string
-	var dur string
 	var duration time.Duration
-	if toolName != "" && !startTime.IsZero() {
-		duration = time.Since(startTime)
+	if toolName != "" {
 		summary = generateToolResultSummary(toolName, content, toolInfo)
-
-		// Format duration
-		if duration < time.Second {
-			dur = fmt.Sprintf("%dms", duration.Milliseconds())
-		} else if duration < time.Minute {
-			dur = fmt.Sprintf("%.1fs", duration.Seconds())
-		} else {
-			dur = fmt.Sprintf("%.1fm", duration.Minutes())
-		}
+	}
+	if !startTime.IsZero() {
+		duration = time.Since(startTime)
 	}
 
-	// Summary line: "    ✓ summary  duration"
+	name := toolName
+	if name == "" {
+		name = "tool"
+	}
+
 	{
-		checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
-		var summaryLine strings.Builder
-		summaryLine.WriteString("    ")
-		summaryLine.WriteString(checkStyle.Render(MessageIcons["success"]))
-		if summary != "" {
-			summaryLine.WriteString(" ")
-			summaryLine.WriteString(dimStyle.Render(summary))
-		}
-		if dur != "" {
-			summaryLine.WriteString("  ")
-			// Color duration by speed: fast=dim, slow=warning, very slow=rose
-			durColor := ColorDim
-			if duration > 30*time.Second {
-				durColor = ColorRose
-			} else if duration > 5*time.Second {
-				durColor = ColorWarning
-			}
-			summaryLine.WriteString(lipgloss.NewStyle().Foreground(durColor).Render(dur))
-		}
-		m.output.AppendLine(summaryLine.String())
+		m.output.AppendLine("    " + m.styles.FormatToolSuccessBlock(name, duration, summary))
 	}
 
 	if content == "" {
@@ -2212,24 +2199,37 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 	}
 
 	// Store for expand/collapse
+	expanded := false
+	needsTruncation := false
+	compactLongOutput := false
 	if m.toolOutput != nil {
 		m.lastToolOutputIndex = m.toolOutput.AddEntry(toolName, content)
+		expanded = m.toolOutput.IsExpanded(m.lastToolOutputIndex)
+		needsTruncation = m.toolOutput.NeedsTruncation(content)
+		compactLongOutput = m.toolOutput.CompactModeActive() && needsTruncation && !expanded
 	}
 
-	// When all outputs are collapsed via ToggleAll, show compact summary
-	if m.toolOutput != nil && !m.toolOutput.AllExpanded && m.toolOutput.NeedsTruncation(content) {
-		summaryText := m.toolOutput.GetSummary(m.lastToolOutputIndex)
+	if compactLongOutput {
+		summaryText := ""
+		if m.toolOutput != nil {
+			summaryText = m.toolOutput.GetSummary(m.lastToolOutputIndex)
+		}
 		if summaryText != "" {
 			m.output.AppendLine("    " + dimStyle.Render(summaryText))
-			m.output.AppendLine("")
-			return
 		}
+		m.output.AppendLine("    " + hintStyle.Render("Full output hidden - press e to expand, E to restore previews"))
+		m.output.AppendLine("")
+		return
 	}
 
-	// Content lines (truncated) with simple indent
-	displayContent := FormatToolOutput(content, 6, false)
+	if needsTruncation && !expanded {
+		m.output.AppendLine("    " + hintStyle.Render("Preview below - press e for full output"))
+	}
 
-	// Apply syntax highlighting for read tool AFTER truncation
+	// Content lines (preview or full) with simple indent.
+	displayContent := FormatToolOutput(content, 6, expanded)
+
+	// Apply syntax highlighting for read tool AFTER preview/full selection.
 	highlighted := false
 	if toolName == "read" && toolInfo != "" && m.highlighter != nil {
 		lang := m.highlighter.DetectLanguage(toolInfo)
@@ -2285,6 +2285,12 @@ func (m Model) View() string {
 
 	// Background panels (dimmed when modal is active)
 	var panelBuilder strings.Builder
+
+	// Live "Now" card — compact summary of what the agent is doing right now.
+	if card := m.renderLiveActivityCard(); card != "" {
+		panelBuilder.WriteString(card)
+		panelBuilder.WriteString("\n")
+	}
 
 	// Scratchpad panel
 	if m.scratchpad != "" {
@@ -2658,24 +2664,21 @@ func (m *Model) ShowHint(hintID, text string) {
 // handleTaskStarted handles the TaskStartedEvent message.
 func (m *Model) handleTaskStarted(msg TaskStartedEvent) {
 	taskState := &CoordinatedTaskState{
-		ID:        msg.TaskID,
-		Message:   msg.Message,
-		Status:    "running",
-		Progress:  0,
-		StartTime: time.Now(),
+		ID:                 msg.TaskID,
+		Message:            msg.Message,
+		PlanType:           msg.PlanType,
+		Status:             "running",
+		Progress:           0,
+		StartTime:          time.Now(),
+		LastProgressBucket: -1,
 	}
 
 	m.coordinatedTasks[msg.TaskID] = taskState
 	m.coordinatedTaskOrder = append(m.coordinatedTaskOrder, msg.TaskID)
 	m.activeCoordinatedTask = msg.TaskID
 
-	// Display task start in output
-	taskStartStyle := lipgloss.NewStyle().
-		Foreground(ColorAccent).
-		Bold(true)
-
 	m.output.AppendLine("")
-	m.output.AppendLine(taskStartStyle.Render(fmt.Sprintf("Subtask: %s", msg.Message)))
+	m.output.AppendLine(m.renderTaskTimelineStart(len(m.coordinatedTaskOrder), msg.PlanType, msg.Message))
 }
 
 // handleTaskCompleted handles the TaskCompletedEvent message.
@@ -2687,21 +2690,11 @@ func (m *Model) handleTaskCompleted(msg TaskCompletedEvent) {
 		if msg.Success {
 			taskState.Status = "completed"
 			taskState.Progress = 1.0
-
-			successStyle := lipgloss.NewStyle().
-				Foreground(ColorSuccess)
-			m.output.AppendLine(successStyle.Render(fmt.Sprintf("  Completed in %s", msg.Duration.Round(time.Millisecond))))
 		} else {
 			taskState.Status = "failed"
-
-			errorStyle := lipgloss.NewStyle().
-				Foreground(ColorError)
-			errMsg := "unknown error"
-			if msg.Error != nil {
-				errMsg = msg.Error.Error()
-			}
-			m.output.AppendLine(errorStyle.Render(fmt.Sprintf("  Error: %s", errMsg)))
 		}
+
+		m.output.AppendLine(m.renderTaskTimelineDone(msg.Success, msg.Duration.Round(time.Millisecond), msg.Error))
 	}
 
 	// Update active task
@@ -2715,13 +2708,14 @@ func (m *Model) handleTaskProgress(msg TaskProgressEvent) {
 	if taskState, ok := m.coordinatedTasks[msg.TaskID]; ok {
 		taskState.Progress = msg.Progress
 		taskState.Message = msg.Message
-
-		// Update progress display
-		progressStyle := lipgloss.NewStyle().
-			Foreground(ColorMuted)
-
-		progressBar := m.renderProgressBar(msg.Progress, 20)
-		m.output.AppendLine(progressStyle.Render(fmt.Sprintf("  %s %s", progressBar, msg.Message)))
+		progressBucket := timelineProgressBucket(msg.Progress)
+		progressMessage := normalizeTimelineText(msg.Message)
+		if progressBucket == taskState.LastProgressBucket && progressMessage == taskState.LastProgressMessage {
+			return
+		}
+		taskState.LastProgressBucket = progressBucket
+		taskState.LastProgressMessage = progressMessage
+		m.output.AppendLine(m.renderTaskTimelineProgress(msg.Progress, msg.Message))
 	}
 }
 

@@ -293,23 +293,49 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 func (m Model) renderEngineStatus() string {
 	engineStyle := lipgloss.NewStyle().Bold(true)
 
-	switch m.state {
-	case StateProcessing:
-		status := "THINKING"
-		if m.currentTool != "" {
-			status = "RUNNING " + strings.ToUpper(m.currentTool)
+	var status string
+	color := ColorMuted
+	icon := MessageIcons["active"]
+
+	switch {
+	case !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil):
+		status = "RATE LIMIT"
+		color = ColorWarning
+		icon = MessageIcons["warning"]
+	case m.retryAttempt > 0 && m.retryMax > 0:
+		status = fmt.Sprintf("RETRY %d/%d", m.retryAttempt, m.retryMax)
+		color = ColorWarning
+		icon = MessageIcons["warning"]
+	case m.state == StateQuestionPrompt || m.state == StatePermissionPrompt || m.state == StatePlanApproval:
+		status = "WAITING"
+		color = ColorWarning
+	case m.currentTool != "":
+		status = "RUN " + strings.ToUpper(m.currentTool)
+		if active := len(m.activeToolCalls); active > 1 {
+			status += fmt.Sprintf(" ×%d", active)
 		}
-		return engineStyle.Foreground(ColorSecondary).Render(MessageIcons["active"] + " " + status)
-
-	case StateStreaming:
-		return engineStyle.Foreground(ColorSuccess).Render(MessageIcons["pending"] + " TYPING")
-
-	case StateQuestionPrompt, StatePermissionPrompt, StatePlanApproval:
-		return engineStyle.Foreground(ColorWarning).Render(MessageIcons["active"] + " WAITING")
-
+		color = GetToolIconColor(m.currentTool)
+	case m.state == StateStreaming:
+		status = "WRITING"
+		if m.responseToolCount > 0 {
+			status += fmt.Sprintf(" · %d tools", m.responseToolCount)
+		}
+		color = ColorSuccess
+		icon = MessageIcons["pending"]
+	case m.planProgressMode && m.planProgress != nil && m.planProgress.TotalSteps > 0:
+		status = fmt.Sprintf("PLAN %d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+		color = ColorInfo
+	case m.state == StateProcessing:
+		status = "THINKING"
+		if strings.Contains(strings.ToLower(m.processingLabel), "agent") {
+			status = "AGENT LOOP"
+		}
+		color = ColorSecondary
 	default:
-		return engineStyle.Foreground(ColorMuted).Render(MessageIcons["active"] + " IDLE")
+		status = "IDLE"
 	}
+
+	return engineStyle.Foreground(color).Render(icon + " " + status)
 }
 
 func (m Model) hasActivePlanStatus() bool {

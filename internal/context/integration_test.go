@@ -100,6 +100,7 @@ func TestSmoke_GitignoreIntegration(t *testing.T) {
 
 	required := []string{
 		".gokin/.session-memory.md",
+		".gokin/project-memory.md",
 		".gokin/task-output/",
 		"GOKIN.local.md",
 	}
@@ -126,6 +127,8 @@ func TestSmoke_MultiLayerInstructions(t *testing.T) {
 
 	// Create local override
 	os.WriteFile(filepath.Join(dir, "GOKIN.local.md"), []byte("# Local Override\nDebug mode on."), 0644)
+	os.MkdirAll(filepath.Join(dir, ".gokin"), 0755)
+	os.WriteFile(filepath.Join(dir, ".gokin", "project-memory.md"), []byte("# Project Memory\nRemember the stable test command."), 0644)
 
 	pm := NewProjectMemory(dir)
 	if err := pm.Load(); err != nil {
@@ -138,6 +141,9 @@ func TestSmoke_MultiLayerInstructions(t *testing.T) {
 	}
 	if !strings.Contains(instr, "Local Override") {
 		t.Error("missing local layer")
+	}
+	if !strings.Contains(instr, "Project Memory") {
+		t.Error("missing agent-managed project memory layer")
 	}
 }
 

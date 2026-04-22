@@ -90,6 +90,17 @@ func memoryLayerPaths(workDir string) []struct {
 		})
 	}
 
+	// Agent-managed project memory layer (generated from memorize/project learning).
+	layers = append(layers, struct {
+		label string
+		paths []string
+	}{
+		label: "project-memory",
+		paths: []string{
+			filepath.Join(workDir, ".gokin", "project-memory.md"),
+		},
+	})
+
 	// Local layer (highest priority, git-ignored)
 	layers = append(layers, struct {
 		label string
@@ -272,6 +283,12 @@ func (m *ProjectMemory) StartWatching(ctx context.Context, debounceMs int) error
 		if _, err := os.Stat(path); err == nil {
 			watchPath = path
 			break
+		}
+	}
+	if watchPath == "" {
+		projectMemoryPath := filepath.Join(m.workDir, ".gokin", "project-memory.md")
+		if _, err := os.Stat(projectMemoryPath); err == nil {
+			watchPath = projectMemoryPath
 		}
 	}
 

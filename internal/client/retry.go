@@ -208,6 +208,26 @@ func AdaptiveStreamRetryPolicy(provider string) StreamRetryPolicy {
 		base.MaxDelay = 60 * time.Second
 	}
 
+	// Kimi's Coding Plan endpoint is prone to long silent reasoning/tool phases.
+	// Give healthy/new Kimi sessions one extra cold retry and one extra partial
+	// retry so transient stream stalls don't surface to the user immediately.
+	if strings.EqualFold(strings.TrimSpace(provider), "kimi") && h.Score >= 0 {
+		if base.MaxRetries < 3 {
+			base.MaxRetries = 3
+		}
+		if base.MaxPartialRetries < 2 {
+			base.MaxPartialRetries = 2
+		}
+		if h.Score < 5 {
+			if base.BaseDelay < 3*time.Second {
+				base.BaseDelay = 3 * time.Second
+			}
+			if base.MaxDelay < 45*time.Second {
+				base.MaxDelay = 45 * time.Second
+			}
+		}
+	}
+
 	return base
 }
 

@@ -32,6 +32,15 @@ type SubAgentState struct {
 	Progress    float64 // 0.0-1.0, -1 for indeterminate
 }
 
+// ActivityFeedSnapshot is a lightweight copy of the most relevant activity
+// data for rendering summary UI outside the panel itself.
+type ActivityFeedSnapshot struct {
+	Entries       []ActivityFeedEntry
+	RecentLog     []string
+	RunningTools  int
+	RunningAgents int
+}
+
 // ActivityFeedPanel displays real-time activity from tools and sub-agents.
 type ActivityFeedPanel struct {
 	visible       bool
@@ -49,7 +58,7 @@ type ActivityFeedPanel struct {
 // NewActivityFeedPanel creates a new activity feed panel.
 func NewActivityFeedPanel(styles *Styles) *ActivityFeedPanel {
 	return &ActivityFeedPanel{
-		visible:            false, // Hidden by default - toggle with 'a' key
+		visible:            false, // Hidden by default - surfaced automatically for complex activity or toggled with Ctrl+O
 		entries:            make([]ActivityFeedEntry, 0, maxActivityEntries),
 		recentLog:          make([]string, 0, maxRecentLog),
 		activeEntries:      make(map[string]int),
@@ -83,6 +92,12 @@ func (p *ActivityFeedPanel) AddEntry(entry ActivityFeedEntry) {
 
 	p.activeEntries[entry.ID] = len(p.entries)
 	p.entries = append(p.entries, entry)
+
+	// Auto-surface the panel only when activity becomes genuinely interesting:
+	// parallel tools or agent orchestration. Single short tool calls stay quiet.
+	if p.countRunningEntriesLocked() >= 2 || len(p.subAgentActivities) > 0 {
+		p.visible = true
+	}
 }
 
 // CompleteEntry marks an entry as completed.
@@ -119,6 +134,7 @@ func (p *ActivityFeedPanel) StartSubAgent(agentID, agentType, description string
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.visible = true
 	p.subAgentActivities[agentID] = &SubAgentState{
 		AgentID:     agentID,
 		AgentType:   agentType,
@@ -280,6 +296,54 @@ func (p *ActivityFeedPanel) HasActiveEntries() bool {
 	return len(p.subAgentActivities) > 0
 }
 
+// Snapshot returns a small copy of the most useful activity state for compact
+// summary components such as the live "Now" card.
+func (p *ActivityFeedPanel) Snapshot(maxEntries, maxLog int) ActivityFeedSnapshot {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if maxEntries < 0 {
+		maxEntries = 0
+	}
+	if maxLog < 0 {
+		maxLog = 0
+	}
+
+	var snap ActivityFeedSnapshot
+	for _, entry := range p.entries {
+		if entry.Status != ActivityRunning && entry.Status != ActivityPending {
+			continue
+		}
+		switch entry.Type {
+		case ActivityTypeTool:
+			snap.RunningTools++
+		case ActivityTypeAgent:
+			snap.RunningAgents++
+		}
+	}
+	if snap.RunningAgents == 0 && len(p.subAgentActivities) > 0 {
+		snap.RunningAgents = len(p.subAgentActivities)
+	}
+
+	if maxEntries > len(p.entries) {
+		maxEntries = len(p.entries)
+	}
+	if maxEntries > 0 {
+		start := len(p.entries) - maxEntries
+		snap.Entries = append([]ActivityFeedEntry(nil), p.entries[start:]...)
+	}
+
+	if maxLog > len(p.recentLog) {
+		maxLog = len(p.recentLog)
+	}
+	if maxLog > 0 {
+		start := len(p.recentLog) - maxLog
+		snap.RecentLog = append([]string(nil), p.recentLog[start:]...)
+	}
+
+	return snap
+}
+
 // View renders the activity feed panel.
 func (p *ActivityFeedPanel) View(width int) string {
 	p.mu.RLock()
@@ -319,7 +383,11 @@ func (p *ActivityFeedPanel) View(width int) string {
 	timeStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	// Header
-	builder.WriteString(headerStyle.Render("Activity"))
+	title := "Live Activity"
+	if summary := p.buildMetricsSummary(); summary != "" {
+		title += " · " + summary
+	}
+	builder.WriteString(headerStyle.Render(title))
 	builder.WriteString("\n")
 
 	// Spinner frames
@@ -637,6 +705,16 @@ func (p *ActivityFeedPanel) buildMetricsSummary() string {
 		return ""
 	}
 	return strings.Join(parts, " · ")
+}
+
+func (p *ActivityFeedPanel) countRunningEntriesLocked() int {
+	count := 0
+	for _, entry := range p.entries {
+		if entry.Status == ActivityRunning || entry.Status == ActivityPending {
+			count++
+		}
+	}
+	return count
 }
 
 // Clear removes all entries from the activity feed.

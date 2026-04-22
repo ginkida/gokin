@@ -236,6 +236,26 @@ To verify: Run 'go test ./internal/handler/...'."`,
 - Removed deprecated function (-8 lines)
 - Updated import paths"`,
 	},
+
+	"memorize": {
+		Description: "Stores durable project knowledge for future sessions and updates the project memory markdown file.",
+		WhenToUse: `Use when you discover information that will likely matter again:
+- canonical test/build commands
+- project conventions and architectural constraints
+- recurring pitfalls or gotchas
+- stable facts about subsystem behavior`,
+		HowToRespond: `After memorizing, ALWAYS explain:
+1. What knowledge was saved
+2. Why it matters for future work
+3. Whether it is a fact, preference, convention, or pattern`,
+		CommonMistakes: `DON'T:
+- memorize temporary debugging output
+- store one-off observations that only matter in this turn
+- write vague keys like "important" or "note"
+- use memorize for short-lived planning notes; use scratchpad for that`,
+		Examples: `GOOD: "Memorized convention 'test_command': use 'go test ./internal/...' for fast validation.
+This matters because the full suite is slower and unnecessary for most UI-only edits."`,
+	},
 }
 
 // GetToolGuide returns the usage guide for a specific tool.
@@ -247,14 +267,15 @@ func GetToolGuide(toolName string) (ToolUsageGuide, bool) {
 // GetToolResponseHint returns a brief hint about how to respond after using a tool.
 func GetToolResponseHint(toolName string) string {
 	hints := map[string]string{
-		"read":  "[HINT: Explain what this file contains, key sections, and how it answers the user's question]",
-		"grep":  "[HINT: Summarize matches, group by purpose, explain patterns found]",
-		"glob":  "[HINT: Categorize files found, highlight important ones, suggest which to read]",
-		"bash":  "[HINT: Summarize command output, explain results, highlight errors/warnings]",
-		"write": "[HINT: Confirm file created, explain contents, suggest verification steps]",
-		"edit":  "[HINT: Explain what changed, show before/after, suggest testing]",
-		"tree":  "[HINT: Explain directory structure, identify key directories]",
-		"diff":  "[HINT: Summarize changes, explain their significance]",
+		"read":     "[HINT: Explain what this file contains, key sections, and how it answers the user's question]",
+		"grep":     "[HINT: Summarize matches, group by purpose, explain patterns found]",
+		"glob":     "[HINT: Categorize files found, highlight important ones, suggest which to read]",
+		"bash":     "[HINT: Summarize command output, explain results, highlight errors/warnings]",
+		"write":    "[HINT: Confirm file created, explain contents, suggest verification steps]",
+		"edit":     "[HINT: Explain what changed, show before/after, suggest testing]",
+		"tree":     "[HINT: Explain directory structure, identify key directories]",
+		"diff":     "[HINT: Summarize changes, explain their significance]",
+		"memorize": "[HINT: Explain what knowledge was saved and why it will help future sessions]",
 	}
 	if hint, ok := hints[toolName]; ok {
 		return hint

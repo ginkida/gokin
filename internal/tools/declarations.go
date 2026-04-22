@@ -1134,7 +1134,7 @@ func CheckImpactToolDeclaration() *genai.FunctionDeclaration {
 func MemorizeToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "memorize",
-		Description: "Saves project-specific knowledge to persistent memory.",
+		Description: "Saves project-specific knowledge to persistent memory and updates .gokin/project-memory.md for future sessions.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{

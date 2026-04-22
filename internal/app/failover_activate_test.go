@@ -126,6 +126,12 @@ func TestActivateEmergencyFailover_SwapsClientAndReturnsSummary(t *testing.T) {
 	if app.config.Model.Provider != "glm" {
 		t.Errorf("config provider = %q, want glm", app.config.Model.Provider)
 	}
+	if app.config.API.ActiveProvider != "glm" {
+		t.Errorf("active provider = %q, want glm", app.config.API.ActiveProvider)
+	}
+	if app.config.API.Backend != "glm" {
+		t.Errorf("backend = %q, want glm", app.config.API.Backend)
+	}
 }
 
 func TestActivateEmergencyFailover_PropagatesSystemInstructionAndThinking(t *testing.T) {
@@ -255,4 +261,3 @@ func (c *closeTrackingMock) Close() error {
 	}
 	return c.MockClient.Close()
 }
-

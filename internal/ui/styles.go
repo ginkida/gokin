@@ -583,7 +583,7 @@ func (s *Styles) FormatToolSuccessBlock(name string, duration time.Duration, res
 	var result strings.Builder
 
 	result.WriteString(checkStyle.Render("✓ "))
-	result.WriteString(nameStyle.Render(name))
+	result.WriteString(nameStyle.Render(capitalizeToolName(name)))
 
 	if resultSummary != "" {
 		result.WriteString("  ")
@@ -605,7 +605,7 @@ func (s *Styles) FormatToolSuccessBlock(name string, duration time.Duration, res
 		durationColor = ColorWarning
 	}
 
-	if durationStr != "" {
+	if durationStr != "" && duration > 0 {
 		timingStyle := lipgloss.NewStyle().Foreground(durationColor)
 		result.WriteString("  ")
 		result.WriteString(timingStyle.Render(durationStr))

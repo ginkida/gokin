@@ -40,10 +40,11 @@ type ToolOutputEntry struct {
 
 // ToolOutputModel manages the display of tool output with expand/collapse functionality.
 type ToolOutputModel struct {
-	entries     []ToolOutputEntry
-	config      ToolOutputConfig
-	styles      *Styles
-	AllExpanded bool
+	entries      []ToolOutputEntry
+	config       ToolOutputConfig
+	styles       *Styles
+	AllExpanded  bool
+	AllCollapsed bool
 }
 
 // NewToolOutputModel creates a new tool output model.
@@ -65,7 +66,7 @@ func (m *ToolOutputModel) AddEntry(toolName, content string) int {
 	entry := ToolOutputEntry{
 		ToolName:    toolName,
 		FullContent: content,
-		Expanded:    false,
+		Expanded:    m.AllExpanded,
 		Index:       len(m.entries),
 	}
 	m.entries = append(m.entries, entry)
@@ -113,10 +114,21 @@ func (m *ToolOutputModel) ToggleLatest() bool {
 
 // ToggleAll toggles all entries between expanded and collapsed.
 func (m *ToolOutputModel) ToggleAll() {
-	m.AllExpanded = !m.AllExpanded
+	if m.AllExpanded {
+		m.AllExpanded = false
+		m.AllCollapsed = true
+	} else {
+		m.AllExpanded = true
+		m.AllCollapsed = false
+	}
 	for i := range m.entries {
 		m.entries[i].Expanded = m.AllExpanded
 	}
+}
+
+// CompactModeActive returns true when future long tool outputs should stay compact.
+func (m *ToolOutputModel) CompactModeActive() bool {
+	return m.AllCollapsed
 }
 
 // GetSummary returns a compact summary for the entry at the given index.

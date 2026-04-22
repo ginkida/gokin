@@ -36,7 +36,7 @@ func (t *MemorizeTool) Name() string {
 }
 
 func (t *MemorizeTool) Description() string {
-	return "Saves project-specific knowledge, facts, or preferences to persistent memory. This information will be available in future sessions to help the agent work more effectively."
+	return "Saves project-specific knowledge, facts, or preferences to persistent memory and updates .gokin/project-memory.md for future sessions."
 }
 
 func (t *MemorizeTool) Declaration() *genai.FunctionDeclaration {
@@ -110,5 +110,11 @@ func (t *MemorizeTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	}
 
 	EmitMemoryNotify(ctx, "memorized", fmt.Sprintf("%s: %s", infoType, key))
-	return NewSuccessResult(fmt.Sprintf("Successfully memorized %s: %s", infoType, key)), nil
+
+	msg := fmt.Sprintf("Successfully memorized %s: %s", infoType, key)
+	if markdownPath := t.learning.MarkdownPath(); markdownPath != "" {
+		msg += fmt.Sprintf(" (updated %s)", markdownPath)
+	}
+
+	return NewSuccessResult(msg), nil
 }

@@ -166,20 +166,33 @@ func (m *OutputModel) AppendTextStream(text string) {
 
 // Thinking display — quiet, elegant, stays out of the way.
 var thinkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Italic(true)
+var thinkingLabelStyle = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
 
 // AppendThinkingStream appends streaming thinking content.
-// Minimal style: dim italic text, no borders, just a soft label on first chunk.
+// Minimal style: dim italic text with a single soft label on first chunk.
 //
-//	💭 reasoning text flows naturally here
-//	   continuing the thought...
+//	◐ Thinking
+//	reasoning text flows naturally here
+//	continuing the thought...
 func (m *OutputModel) AppendThinkingStream(text string) {
 	m.state.mu.Lock()
 
 	if !m.state.thinkingActive {
 		m.state.thinkingActive = true
+		if m.state.content.Len() > 0 {
+			current := m.state.content.String()
+			if !strings.HasSuffix(current, "\n\n") {
+				if !strings.HasSuffix(current, "\n") {
+					m.state.content.WriteString("\n")
+				}
+				m.state.content.WriteString("\n")
+			}
+		}
+		m.state.content.WriteString("  ")
+		m.state.content.WriteString(thinkingLabelStyle.Render("◐ Thinking"))
+		m.state.content.WriteString("\n")
 	}
 
-	// Just dim italic text — nothing else
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		if line != "" {

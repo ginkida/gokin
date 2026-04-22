@@ -99,6 +99,9 @@ func TestToolProgressBar_MultiLineShowsHistoryBlock(t *testing.T) {
 	if !strings.Contains(out, "\n") {
 		t.Error("multi-line step should render across multiple lines")
 	}
+	if !strings.Contains(out, "Recent output") {
+		t.Errorf("history block should be labeled, got:\n%s", out)
+	}
 	// Expect the 3 most recent non-empty lines in the history block.
 	for _, needle := range []string{"typescript@5.3.3", "Resolving packages", "Building lockfile"} {
 		if !strings.Contains(out, needle) {
@@ -120,6 +123,23 @@ func TestToolProgressBar_NoStepProducesCompactLine(t *testing.T) {
 	out := bar.View(80)
 	if strings.Contains(out, "\n") {
 		t.Errorf("no step → no history block: %q", out)
+	}
+}
+
+func TestToolProgressBar_CancellableShowsEscHint(t *testing.T) {
+	bar := NewToolProgressBarModel(DefaultStyles())
+	bar.Show("bash")
+	bar.Update(ToolProgressMsg{
+		Name:        "bash",
+		Elapsed:     4 * time.Second,
+		Progress:    0.5,
+		CurrentStep: "Running migration",
+		Cancellable: true,
+	})
+
+	out := bar.View(100)
+	if !strings.Contains(out, "Esc cancel") {
+		t.Fatalf("expected cancel hint, got:\n%s", out)
 	}
 }
 

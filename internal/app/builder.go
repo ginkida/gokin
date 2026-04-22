@@ -46,7 +46,7 @@ type Builder struct {
 	// Optional components (nil means not configured)
 	configDir        string
 	configDirErr     error
-	mainClient     client.Client
+	mainClient       client.Client
 	registry         *tools.Registry
 	executor         *tools.Executor
 	readTracker      *tools.FileReadTracker
@@ -489,6 +489,9 @@ func (b *Builder) initSession() error {
 
 	b.promptBuilder = appcontext.NewPromptBuilder(b.workDir, b.projectInfo)
 	b.promptBuilder.SetProjectMemory(b.projectMemory)
+	b.projectMemory.OnReload(func() {
+		b.promptBuilder.Invalidate()
+	})
 	b.promptBuilder.SetPlanAutoDetect(b.cfg.Plan.AutoDetect)
 
 	// Initialize session memory for automatic context extraction
@@ -1586,6 +1589,14 @@ func (b *Builder) wireDependencies() error {
 			}
 		},
 		OnMemoryNotify: func(action, summary string) {
+			if b.projectMemory != nil {
+				if err := b.projectMemory.Reload(); err != nil {
+					logging.Debug("failed to reload project memory after memory update", "error", err)
+				}
+			}
+			if app.promptBuilder != nil {
+				app.promptBuilder.Invalidate()
+			}
 			if app.program != nil {
 				msg := "Memory " + action
 				if summary != "" {
@@ -1610,6 +1621,9 @@ func (b *Builder) wireDependencies() error {
 	// Wire session memory update notifications
 	if app.sessionMemory != nil {
 		app.sessionMemory.SetOnUpdate(func() {
+			if app.promptBuilder != nil {
+				app.promptBuilder.Invalidate()
+			}
 			app.safeSendToProgram(ui.LearningInsightMsg{Message: "Session memory updated"})
 		})
 	}
@@ -2319,4 +2333,3 @@ func (a *coordinatorToolAdapter) WaitWithTimeout(timeout time.Duration) (map[str
 func (a *coordinatorToolAdapter) GetStatus() any {
 	return a.coord.GetStatus()
 }
-

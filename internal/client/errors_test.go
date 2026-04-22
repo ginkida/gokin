@@ -55,9 +55,12 @@ func TestIsRetryableError(t *testing.T) {
 		{"context.DeadlineExceeded", context.DeadlineExceeded, true},
 		{"stream idle timeout", &ErrStreamIdleTimeout{Timeout: 30 * time.Second}, true},
 		{"API 429", &APIError{StatusCode: 429}, true},
+		{"API 500", &APIError{StatusCode: 500}, true},
 		{"API 503", &APIError{StatusCode: 503}, true},
 		{"API 502", &APIError{StatusCode: 502}, true},
 		{"API 504", &APIError{StatusCode: 504}, true},
+		{"HTTP 503", &HTTPError{StatusCode: 503}, true},
+		{"HTTP 529", &HTTPError{StatusCode: 529}, true},
 		{"API 400", &APIError{StatusCode: 400}, false},
 		{"API 401", &APIError{StatusCode: 401}, false},
 		{"rate limit string", errors.New("Rate Limit exceeded"), true},
@@ -81,12 +84,14 @@ func TestIsRetryableAPIError(t *testing.T) {
 		want bool
 	}{
 		{"429", &APIError{StatusCode: 429}, true},
+		{"500", &APIError{StatusCode: 500}, true},
 		{"502", &APIError{StatusCode: 502}, true},
 		{"503", &APIError{StatusCode: 503}, true},
 		{"504", &APIError{StatusCode: 504}, true},
+		{"HTTP 503", &HTTPError{StatusCode: 503}, true},
+		{"HTTP 529", &HTTPError{StatusCode: 529}, true},
 		{"400", &APIError{StatusCode: 400}, false},
 		{"401", &APIError{StatusCode: 401}, false},
-		{"500", &APIError{StatusCode: 500}, false},
 		{"MiniMax model_not_found 400", &HTTPError{StatusCode: 400, Message: "model_not_found error"}, true},
 		{"regular 400", &HTTPError{StatusCode: 400, Message: "bad request"}, false},
 	}

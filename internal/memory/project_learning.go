@@ -20,11 +20,12 @@ var (
 // ProjectLearning manages project-specific learned patterns and preferences.
 // Data is stored in .gokin/learning.yaml within the project directory.
 type ProjectLearning struct {
-	path     string
-	data     *ProjectData
-	mu       sync.RWMutex
-	dirty    bool
-	saveFunc func()
+	path         string
+	markdownPath string
+	data         *ProjectData
+	mu           sync.RWMutex
+	dirty        bool
+	saveFunc     func()
 
 	// Timer mutex for debounced save
 	timerMu sync.Mutex
@@ -76,9 +77,11 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 	}
 
 	path := filepath.Join(gokinDir, "learning.yaml")
+	markdownPath := filepath.Join(gokinDir, "project-memory.md")
 
 	pl := &ProjectLearning{
-		path: path,
+		path:         path,
+		markdownPath: markdownPath,
 		data: &ProjectData{
 			Preferences: make(map[string]string),
 		},
@@ -106,9 +109,7 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 				pl.mu.Unlock()
 				return
 			}
-			// Snapshot data under lock
-			pl.data.LastUpdated = time.Now()
-			data, err := yaml.Marshal(pl.data)
+			data, markdown, err := pl.snapshotLocked()
 			if err != nil {
 				pl.mu.Unlock()
 				return
@@ -119,6 +120,13 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 			// Write outside lock — disk I/O no longer blocks readers/writers.
 			if err := os.WriteFile(pl.path, data, 0644); err != nil {
 				logging.Warn("failed to save project learning", "path", pl.path, "error", err)
+				pl.mu.Lock()
+				pl.dirty = true
+				pl.mu.Unlock()
+				return
+			}
+			if err := os.WriteFile(pl.markdownPath, []byte(markdown), 0644); err != nil {
+				logging.Warn("failed to save project memory markdown", "path", pl.markdownPath, "error", err)
 				pl.mu.Lock()
 				pl.dirty = true
 				pl.mu.Unlock()
@@ -184,14 +192,26 @@ func (pl *ProjectLearning) load() error {
 
 // save writes data to the YAML file.
 func (pl *ProjectLearning) save() error {
-	pl.data.LastUpdated = time.Now()
-
-	data, err := yaml.Marshal(pl.data)
+	data, markdown, err := pl.snapshotLocked()
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(pl.path, data, 0644)
+	if err := os.WriteFile(pl.path, data, 0644); err != nil {
+		return err
+	}
+	return os.WriteFile(pl.markdownPath, []byte(markdown), 0644)
+}
+
+func (pl *ProjectLearning) snapshotLocked() ([]byte, string, error) {
+	pl.data.LastUpdated = time.Now()
+
+	data, err := yaml.Marshal(pl.data)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return data, pl.renderMarkdownLocked(), nil
 }
 
 // LearnCommand records a command execution with success/failure tracking.
@@ -438,10 +458,30 @@ func (pl *ProjectLearning) FormatForPrompt() string {
 	var sb strings.Builder
 	sb.WriteString("## Project Learning\n\n")
 
-	// Preferences
-	if len(pl.data.Preferences) > 0 {
+	preferences, facts, conventions := splitProjectPreferences(pl.data.Preferences)
+
+	if len(preferences) > 0 {
 		sb.WriteString("### Preferences\n")
-		for k, v := range pl.data.Preferences {
+		for _, k := range sortedPreferenceKeys(preferences) {
+			v := preferences[k]
+			sb.WriteString("- **" + k + "**: " + v + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(facts) > 0 {
+		sb.WriteString("### Facts\n")
+		for _, k := range sortedPreferenceKeys(facts) {
+			v := facts[k]
+			sb.WriteString("- **" + k + "**: " + v + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(conventions) > 0 {
+		sb.WriteString("### Conventions\n")
+		for _, k := range sortedPreferenceKeys(conventions) {
+			v := conventions[k]
 			sb.WriteString("- **" + k + "**: " + v + "\n")
 		}
 		sb.WriteString("\n")
@@ -471,6 +511,97 @@ func (pl *ProjectLearning) FormatForPrompt() string {
 				desc = cmd.Description
 			}
 			sb.WriteString("- `" + cmd.Command + "`: " + desc + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func splitProjectPreferences(preferences map[string]string) (map[string]string, map[string]string, map[string]string) {
+	plain := make(map[string]string)
+	facts := make(map[string]string)
+	conventions := make(map[string]string)
+
+	for key, value := range preferences {
+		switch {
+		case strings.HasPrefix(key, "fact:"):
+			facts[strings.TrimPrefix(key, "fact:")] = value
+		case strings.HasPrefix(key, "convention:"):
+			conventions[strings.TrimPrefix(key, "convention:")] = value
+		default:
+			plain[key] = value
+		}
+	}
+
+	return plain, facts, conventions
+}
+
+func sortedPreferenceKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (pl *ProjectLearning) renderMarkdownLocked() string {
+	preferences, facts, conventions := splitProjectPreferences(pl.data.Preferences)
+
+	var sb strings.Builder
+	sb.WriteString("# Project Memory\n\n")
+	sb.WriteString("_Agent-managed durable project knowledge for future sessions._\n\n")
+	if !pl.data.LastUpdated.IsZero() {
+		sb.WriteString("_Updated: " + pl.data.LastUpdated.Format(time.RFC3339) + "_\n\n")
+	}
+
+	if len(preferences) == 0 && len(facts) == 0 && len(conventions) == 0 &&
+		len(pl.data.Patterns) == 0 && len(pl.data.Commands) == 0 {
+		sb.WriteString("No project knowledge recorded yet.\n")
+		return sb.String()
+	}
+
+	writeMapSection := func(title string, values map[string]string) {
+		if len(values) == 0 {
+			return
+		}
+		sb.WriteString("## " + title + "\n")
+		for _, key := range sortedPreferenceKeys(values) {
+			sb.WriteString("- **" + key + "**: " + values[key] + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	writeMapSection("Preferences", preferences)
+	writeMapSection("Facts", facts)
+	writeMapSection("Conventions", conventions)
+
+	if len(pl.data.Patterns) > 0 {
+		patterns := append([]LearnedPattern(nil), pl.data.Patterns...)
+		sort.Slice(patterns, func(i, j int) bool {
+			if patterns[i].UsageCount != patterns[j].UsageCount {
+				return patterns[i].UsageCount > patterns[j].UsageCount
+			}
+			return patterns[i].LastUsed.After(patterns[j].LastUsed)
+		})
+
+		sb.WriteString("## Learned Patterns\n")
+		for _, pattern := range patterns {
+			sb.WriteString("- **" + pattern.Name + "**: " + pattern.Description + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	successfulCmds := pl.getSuccessfulCommandsInternal(0.8, 5)
+	if len(successfulCmds) > 0 {
+		sb.WriteString("## Reliable Commands\n")
+		for _, cmd := range successfulCmds {
+			description := cmd.Description
+			if description == "" {
+				description = cmd.Command
+			}
+			sb.WriteString("- `" + cmd.Command + "`: " + description + "\n")
 		}
 		sb.WriteString("\n")
 	}
@@ -525,6 +656,11 @@ func (pl *ProjectLearning) Flush() error {
 // Path returns the path to the learning file.
 func (pl *ProjectLearning) Path() string {
 	return pl.path
+}
+
+// MarkdownPath returns the path to the human-readable project memory markdown file.
+func (pl *ProjectLearning) MarkdownPath() string {
+	return pl.markdownPath
 }
 
 // Exists returns true if the learning file exists.

@@ -182,11 +182,18 @@ func (m *ToolProgressBarModel) View(width int) string {
 	builder.WriteString(" ")
 	builder.WriteString(dimStyle.Render(elapsedStr))
 
+	if m.cancellable {
+		builder.WriteString(" ")
+		builder.WriteString(dimStyle.Render("· Esc cancel"))
+	}
+
 	// Multi-line progress history — only when there's >1 line of output.
 	// Renders as a tiny indented block below the main progress line so the
 	// user sees recent activity without losing the compact single-line
 	// style for simple tools.
 	if len(recent) > 1 {
+		builder.WriteString("\n")
+		builder.WriteString(dimStyle.Render("    Recent output"))
 		const maxRunesPerLine = 70
 		for _, line := range recent {
 			runes := []rune(line)
