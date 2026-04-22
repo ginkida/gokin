@@ -280,7 +280,7 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 
 	// Search prompt (if filtering)
 	if m.searchQuery != "" {
-		content.WriteString(searchStyle.Render(fmt.Sprintf("🔍 Filter: %s", m.searchQuery)))
+		content.WriteString(searchStyle.Render(fmt.Sprintf("%s Filter: %s", MessageIcons["info"], m.searchQuery)))
 		content.WriteString("\n")
 		if len(categories) == 0 {
 			content.WriteString("\nNo matching shortcuts found.")

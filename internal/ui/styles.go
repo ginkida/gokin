@@ -57,6 +57,77 @@ var MessageIcons = map[string]string{
 	"skip":    "↷",
 }
 
+// ToastIcons provides icons for toast notifications by type.
+var ToastIcons = map[ToastType]string{
+	ToastInfo:    "ℹ",
+	ToastSuccess: "✓",
+	ToastWarning: "⚠",
+	ToastError:   "✗",
+}
+
+// ToastColors provides colors for toast notifications by type.
+var ToastColors = map[ToastType]lipgloss.Color{
+	ToastInfo:    ColorInfo,
+	ToastSuccess: ColorSuccess,
+	ToastWarning: ColorWarning,
+	ToastError:   ColorError,
+}
+
+// FilePeekIcons provides consistent icons for file peek actions.
+var FilePeekIcons = map[string]string{
+	"read":      "▸",
+	"reading":   "▸",
+	"write":     "✦",
+	"created":   "✦",
+	"edit":      "△",
+	"editing":   "△",
+	"modifying": "△",
+	"delete":    "✗",
+	"deleting":  "✗",
+	"default":   "▸",
+}
+
+// FilePeekColors provides colors for file peek actions.
+var FilePeekColors = map[string]lipgloss.Color{
+	"read":      ColorSecondary,
+	"reading":   ColorSecondary,
+	"write":     ColorSuccess,
+	"created":   ColorSuccess,
+	"edit":      ColorWarning,
+	"editing":   ColorWarning,
+	"modifying": ColorWarning,
+	"delete":    ColorError,
+	"deleting":  ColorError,
+}
+
+// StatusIcons provides icons for status indicators.
+var StatusIcons = map[string]string{
+	"active":   "●",
+	"pending":  "○",
+	"success":  "✓",
+	"error":    "✗",
+	"warning":  "⚠",
+	"info":     "ℹ",
+	"waiting":  "◐",
+	"thinking": "◐",
+	"typing":   "○",
+	"idle":     "●",
+}
+
+// StatusColors provides colors for status indicators.
+var StatusColors = map[string]lipgloss.Color{
+	"active":   ColorRunning,
+	"pending":  ColorMuted,
+	"success":  ColorSuccess,
+	"error":    ColorError,
+	"warning":  ColorWarning,
+	"info":     ColorInfo,
+	"waiting":  ColorWarning,
+	"thinking": ColorPrimary,
+	"typing":   ColorSuccess,
+	"idle":     ColorMuted,
+}
+
 // ToolIcons provides minimal Unicode glyphs for tool calls — no emoji, consistent rendering.
 var ToolIcons = map[string]string{
 	"read":         "▸",

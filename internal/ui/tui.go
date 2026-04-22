@@ -28,19 +28,19 @@ type Model struct {
 	spinner spinner.Model
 	styles  *Styles
 
-	state           State
-	width           int
-	height          int
-	currentTool     string
-	currentToolInfo string // Brief info about current tool operation (e.g., file path)
-	toolStartTime   time.Time
-	processingLabel string // Status label between tool calls: "Thinking", "Analyzing", "Running agent"
-	loopIteration   int    // Current executor loop iteration (0 = first/unknown)
-	loopToolsUsed   int    // Total tools used across loop iterations
-	agentToolCount  int      // Tools used by current sub-agent (for progress display)
+	state            State
+	width            int
+	height           int
+	currentTool      string
+	currentToolInfo  string // Brief info about current tool operation (e.g., file path)
+	toolStartTime    time.Time
+	processingLabel  string   // Status label between tool calls: "Thinking", "Analyzing", "Running agent"
+	loopIteration    int      // Current executor loop iteration (0 = first/unknown)
+	loopToolsUsed    int      // Total tools used across loop iterations
+	agentToolCount   int      // Tools used by current sub-agent (for progress display)
 	agentRecentTools []string // Last N tool names for inline activity display
-	todoItems       []string
-	workDir         string
+	todoItems        []string
+	workDir          string
 
 	// Streaming timeout protection
 	streamStartTime time.Time
@@ -1357,7 +1357,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamStartTime = time.Now() // Reset timeout on tool activity
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
-		m.streamIdleMsg = "" // Server responded — clear idle warning
+		m.streamIdleMsg = ""   // Server responded — clear idle warning
 		m.processingLabel = "" // Tool name takes over in status bar
 
 		// Close thinking block when tool call starts
@@ -2186,7 +2186,7 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 		checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 		var summaryLine strings.Builder
 		summaryLine.WriteString("    ")
-		summaryLine.WriteString(checkStyle.Render("✓"))
+		summaryLine.WriteString(checkStyle.Render(MessageIcons["success"]))
 		if summary != "" {
 			summaryLine.WriteString(" ")
 			summaryLine.WriteString(dimStyle.Render(summary))
@@ -2327,10 +2327,12 @@ func (m Model) View() string {
 		panelBuilder.WriteString("\n")
 	}
 
-	// File peek panel (transient overlay)
-	if m.filePeek != nil && m.filePeek.visible {
-		panelBuilder.WriteString(m.filePeek.View(m.width))
-		panelBuilder.WriteString("\n")
+	// File peek (one-line status indicator, auto-dismissed after a short TTL)
+	if m.filePeek != nil && m.filePeek.IsVisible() {
+		if line := m.filePeek.View(m.width); line != "" {
+			panelBuilder.WriteString(line)
+			panelBuilder.WriteString("\n")
+		}
 	}
 
 	// Write panels (dimmed if modal)
@@ -2358,14 +2360,15 @@ func (m Model) View() string {
 			spinner := spinnerStyle.Render(spinnerFrames[frameIdx])
 
 			toolNameStyle := lipgloss.NewStyle().Foreground(toolColor).Bold(true)
-			status := spinner + " " + toolNameStyle.Render(m.currentTool)
+			icon := GetToolIcon(m.currentTool)
+			status := spinner + " " + toolNameStyle.Render(icon+" "+m.currentTool)
 
 			// Batch awareness: when several tools run in parallel, prefix the
 			// longest-running (currentTool) with a count so the user sees the
 			// full workload instead of a single tool name flickering through.
 			if active := len(m.activeToolCalls); active > 1 {
 				batchStyle := lipgloss.NewStyle().Foreground(ColorDim)
-				status = spinner + " " + batchStyle.Render(fmt.Sprintf("[%d tools]", active)) + " " + toolNameStyle.Render(m.currentTool)
+				status = spinner + " " + batchStyle.Render(fmt.Sprintf("[%d tools]", active)) + " " + toolNameStyle.Render(icon+" "+m.currentTool)
 			}
 
 			if m.currentToolInfo != "" {
@@ -2437,7 +2440,7 @@ func (m Model) View() string {
 			// Show stream idle indicator when server is slow to respond
 			if m.streamIdleMsg != "" {
 				idleStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-				status += "  " + idleStyle.Render("· " + m.streamIdleMsg)
+				status += "  " + idleStyle.Render("· "+m.streamIdleMsg)
 			} else if m.slowWarningShown && m.currentTool != "" {
 				// Tool is running longer than expected — show brief hint
 				slowStyle := lipgloss.NewStyle().Foreground(ColorDim)

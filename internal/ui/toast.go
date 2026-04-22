@@ -219,19 +219,8 @@ func (m *ToastManager) View(width int) string {
 // renderToast renders a single toast as compact single line.
 // Format: ✓ Message — fades to dim in last 500ms.
 func (m *ToastManager) renderToast(toast Toast, width int) string {
-	var icon string
-	var iconColor lipgloss.Color
-
-	switch toast.Type {
-	case ToastSuccess:
-		icon, iconColor = "✓", ColorSuccess
-	case ToastError:
-		icon, iconColor = "✗", ColorError
-	case ToastWarning:
-		icon, iconColor = "⚠", ColorWarning
-	default: // ToastInfo
-		icon, iconColor = "ℹ", ColorInfo
-	}
+	icon := ToastIcons[toast.Type]
+	iconColor := ToastColors[toast.Type]
 
 	// Fade entire toast when nearing expiration
 	elapsed := time.Since(toast.CreatedAt)

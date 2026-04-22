@@ -31,8 +31,12 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 		return "", fmt.Errorf("no alternative providers available for automatic failover")
 	}
 
-	cfgCopy.Model.Provider = candidates[0]
-	cfgCopy.Model.FallbackProviders = append([]string(nil), candidates[1:]...)
+	orderedProviders := client.OrderProvidersByHealth(candidates)
+
+	cfgCopy.Model.Provider = orderedProviders[0]
+	cfgCopy.Model.FallbackProviders = append([]string(nil), orderedProviders[1:]...)
+	cfgCopy.API.ActiveProvider = orderedProviders[0]
+	cfgCopy.API.Backend = orderedProviders[0]
 
 	newClient, err := newClientForFailover(a.ctx, &cfgCopy, cfgCopy.Model.Name)
 	if err != nil {
@@ -47,6 +51,8 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	// Persist fallback chain in memory for subsequent requests in this session.
 	a.config.Model.Provider = cfgCopy.Model.Provider
 	a.config.Model.FallbackProviders = append([]string(nil), cfgCopy.Model.FallbackProviders...)
+	a.config.API.ActiveProvider = cfgCopy.API.ActiveProvider
+	a.config.API.Backend = cfgCopy.API.Backend
 
 	if a.executor != nil {
 		a.executor.SetClient(newClient)
@@ -74,7 +80,7 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 		go func() { _ = oldClient.Close() }()
 	}
 
-	summary := fmt.Sprintf("%s -> %s", candidates[0], strings.Join(candidates[1:], " -> "))
+	summary := fmt.Sprintf("%s -> %s", orderedProviders[0], strings.Join(orderedProviders[1:], " -> "))
 	logging.Warn("automatic provider failover activated",
 		"model", cfgCopy.Model.Name,
 		"chain", summary)

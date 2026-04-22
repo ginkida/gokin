@@ -37,6 +37,36 @@ func TestBuildSetupChoices_APIProviders(t *testing.T) {
 	}
 }
 
+// TestBuildSetupChoices_KimiFirst verifies Kimi is shown first in the wizard.
+// v0.69 made Kimi the default provider; the wizard's ordering must reflect
+// that — not the registry order (which is preserved for other callers).
+func TestBuildSetupChoices_KimiFirst(t *testing.T) {
+	choices := buildSetupChoices()
+	if len(choices) == 0 {
+		t.Fatal("no choices")
+	}
+	first := choices[0]
+	if first.Action != "api:kimi" {
+		t.Errorf("first choice action = %q, want %q", first.Action, "api:kimi")
+	}
+	if !strings.Contains(strings.ToLower(first.Title), "kimi") {
+		t.Errorf("first choice title = %q, want to contain 'Kimi'", first.Title)
+	}
+}
+
+// TestBuildSetupChoices_OllamaLast verifies Ollama is the last option — local
+// install is a niche path; cloud providers should come first.
+func TestBuildSetupChoices_OllamaLast(t *testing.T) {
+	choices := buildSetupChoices()
+	if len(choices) == 0 {
+		t.Fatal("no choices")
+	}
+	last := choices[len(choices)-1]
+	if last.Action != "ollama" {
+		t.Errorf("last choice action = %q, want %q", last.Action, "ollama")
+	}
+}
+
 // TestBuildSetupChoices_Ollama verifies Ollama local choice
 func TestBuildSetupChoices_Ollama(t *testing.T) {
 	choices := buildSetupChoices()

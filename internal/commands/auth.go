@@ -65,21 +65,45 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return fmt.Sprintf("%s does not require an API key.\n\nUse: /provider %s to switch.", p.DisplayName, p.Name), nil
 	}
 
-	// Check for API key
+	// Check for API key — users who typed just `/login <provider>` expect
+	// clear, actionable instructions, not a one-liner.
 	if len(args) < 2 {
-		msg := fmt.Sprintf("Usage: /login %s <api_key>\n", provider)
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "To set your %s API key:\n\n", p.DisplayName)
 		if p.SetupKeyURL != "" {
-			msg += fmt.Sprintf("\nGet your %s API key at: %s", p.DisplayName, p.SetupKeyURL)
+			fmt.Fprintf(&sb, "  1. Open %s and copy your key\n", p.SetupKeyURL)
+			fmt.Fprintf(&sb, "  2. Run:  /login %s <your-key>\n\n", p.Name)
+		} else {
+			fmt.Fprintf(&sb, "  Run:  /login %s <your-key>\n\n", p.Name)
 		}
+		fmt.Fprintf(&sb, "Keys are saved to %s.", config.GetConfigPath())
 		if p.HasOAuth {
-			msg += fmt.Sprintf("\n\nAlternatively, use /oauth-login %s to sign in via OAuth.", p.Name)
+			fmt.Fprintf(&sb, "\n\nAlternatively, use /oauth-login %s to sign in via OAuth.", p.Name)
 		}
-		return msg, nil
+		return sb.String(), nil
 	}
 
-	apiKey := args[1]
+	// Multi-word keys are always paste errors — real API keys never contain
+	// whitespace. If the user accidentally pasted two values, catch it here
+	// so we don't silently save half of a split key.
+	if len(args) > 2 {
+		return fmt.Sprintf("Key looks wrong: %d whitespace-separated parts detected.\n\n"+
+			"Real API keys don't contain spaces. Check what you pasted — "+
+			"did you include a comment or accidentally paste twice?\n\n"+
+			"If your key really does contain spaces, quote it: /login %s \"<key>\"",
+			len(args)-1, provider), nil
+	}
 
-	// Validate key format
+	// Users paste keys from browser dashboards that often carry a trailing
+	// newline, surrounding quotes, or stray whitespace. Strip those before
+	// validating length — otherwise a perfectly good key fails silently and
+	// the user gets 401 on first request.
+	apiKey := sanitizePastedKey(args[1])
+
+	// Common paste errors — surface them explicitly so users don't save junk.
+	if strings.HasPrefix(apiKey, "http://") || strings.HasPrefix(apiKey, "https://") {
+		return "That looks like a URL, not an API key. Open the URL in your browser to find the key, then paste just the key.", nil
+	}
 	if len(apiKey) < 10 {
 		return "Invalid API key format (too short).", nil
 	}
@@ -99,13 +123,14 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
-	return fmt.Sprintf(`%s API key saved!
+	return fmt.Sprintf(`✓ %s API key saved (%s)
 
-Active provider: %s
-Model: %s
+  Active provider: %s
+  Model:           %s
+  Config:          %s
 
-Use /provider to switch providers
-Use /model to switch models`, p.DisplayName, p.DisplayName, cfg.Model.Name), nil
+Try sending a message to verify it works, or use /provider to switch.`,
+		p.DisplayName, maskKey(apiKey), p.DisplayName, cfg.Model.Name, config.GetConfigPath()), nil
 }
 
 func (c *LoginCommand) showStatus(cfg *config.Config) string {
@@ -470,4 +495,22 @@ func padSpaces(n int) string {
 		return " "
 	}
 	return strings.Repeat(" ", n)
+}
+
+// sanitizePastedKey normalizes a key that a user pasted into the TUI. It
+// removes leading/trailing whitespace (incl. \n, \r, \t) and a matching pair
+// of wrapping single or double quotes — both common artifacts when copying
+// keys from a browser console or a shell export statement like
+// `export GOKIN_KIMI_KEY="sk-kimi-..."`.
+//
+// Conservative: only strips a matching pair of quotes, never partial ones.
+func sanitizePastedKey(raw string) string {
+	s := strings.TrimSpace(raw)
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			s = strings.TrimSpace(s[1 : len(s)-1])
+		}
+	}
+	return s
 }

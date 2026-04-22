@@ -44,7 +44,7 @@ func renderPlanProgress(planProgress *PlanProgressMsg, width int, mutedStyle lip
 		progressText += fmt.Sprintf(" [%s]", info)
 	}
 
-	return lipgloss.NewStyle().Foreground(ColorPlan).Render("⚡ ") + mutedStyle.Render(progressText)
+	return lipgloss.NewStyle().Foreground(ColorPlan).Render(MessageIcons["active"]+" ") + mutedStyle.Render(progressText)
 }
 
 func (m Model) renderPlanPauseBlock(msg PlanProgressMsg) string {

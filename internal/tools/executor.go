@@ -1332,6 +1332,12 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		return NewErrorResult(formatUnknownToolError(call.Name, e.registry.Names()))
 	}
 
+	// Guard against nil args — some model responses may omit the args field
+	// entirely, producing a nil map that panics on Validate.
+	if call.Args == nil {
+		call.Args = make(map[string]any)
+	}
+
 	if err := tool.Validate(call.Args); err != nil {
 		return NewErrorResult(fmt.Sprintf("validation error: %s", err))
 	}
@@ -2008,9 +2014,19 @@ streamLoop:
 
 		case <-ctx.Done():
 			// Drain chunks in background to unblock the producer goroutine.
-			// The producer defers complete() which closes Chunks, so this goroutine will exit.
+			// Cap the drain so a stuck producer can't leak a goroutine forever.
 			go func() {
-				for range stream.Chunks {
+				drainTimer := time.NewTimer(5 * time.Second)
+				defer drainTimer.Stop()
+				for {
+					select {
+					case _, ok := <-stream.Chunks:
+						if !ok {
+							return
+						}
+					case <-drainTimer.C:
+						return
+					}
 				}
 			}()
 			return NewErrorResult("streaming cancelled"), client.ContextErr(ctx)
@@ -2214,6 +2230,22 @@ func orderByDependencies(calls []*genai.FunctionCall) ([]*genai.FunctionCall, bo
 	return ordered, true
 }
 
+// readIntArg extracts a positional integer argument from a tool call, tolerating
+// both int and float64 (JSON unmarshal picks float64 by default). Missing or
+// unparseable values return 0. Used to fingerprint paged reads — "0" is a fine
+// sentinel for "no offset specified".
+func readIntArg(args map[string]any, key string) int {
+	switch v := args[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
 // stagnationFingerprint returns a short string that distinguishes different
 // invocations of the same tool. For example, writing 5 different files should
 // produce 5 different fingerprints, while writing the same file 5 times
@@ -2221,7 +2253,24 @@ func orderByDependencies(calls []*genai.FunctionCall) ([]*genai.FunctionCall, bo
 func stagnationFingerprint(toolName string, args map[string]any) string {
 	// Extract the key distinguishing argument per tool
 	switch toolName {
-	case "write", "edit", "read", "delete":
+	case "read":
+		// For read, a large file is legitimately paged in chunks — same
+		// file_path but different offset/limit means forward progress, not
+		// stagnation. Include the paging coordinates so the guard fires only
+		// when the model truly requests the same range over and over.
+		// Regression this fixes: reading ~3000-line tui.go in 2000-line
+		// chunks tripped the 5-repeat abort when offset just kept growing.
+		fp, ok := args["file_path"].(string)
+		if !ok || fp == "" {
+			// Missing required arg — match write/edit/delete fallback so
+			// five bad reads in a row still trigger the stagnation abort.
+			return ""
+		}
+		return fmt.Sprintf("%s@%d+%d",
+			filepath.Base(fp),
+			readIntArg(args, "offset"),
+			readIntArg(args, "limit"))
+	case "write", "edit", "delete":
 		if fp, ok := args["file_path"].(string); ok {
 			return filepath.Base(fp)
 		}

@@ -617,8 +617,7 @@ type toolCallAccumulator struct {
 // isRetryableError returns true if the error should trigger a retry.
 func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 	// HTTP status codes that are retryable (5xx server errors and 429 rate limit)
-	switch statusCode {
-	case 429, 500, 502, 503, 504:
+	if isRetryableHTTPStatusCode(statusCode) {
 		return true
 	}
 
@@ -1537,6 +1536,12 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 		if content.Role == genai.RoleUser {
 			messages = append(messages, c.buildUserMessage(content.Parts))
 		} else if content.Role == genai.RoleModel {
+			if !hasSerializableAssistantParts(content.Parts) {
+				logging.Warn("skipping assistant history item with no serializable parts",
+					"index", i,
+					"parts_count", len(content.Parts))
+				continue
+			}
 			messages = append(messages, c.buildAssistantMessage(content.Parts))
 		}
 	}
@@ -1652,6 +1657,12 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 		if content.Role == genai.RoleUser {
 			messages = append(messages, c.buildUserMessage(content.Parts))
 		} else if content.Role == genai.RoleModel {
+			if !hasSerializableAssistantParts(content.Parts) {
+				logging.Warn("skipping assistant history item with no serializable parts",
+					"index", i,
+					"parts_count", len(content.Parts))
+				continue
+			}
 			messages = append(messages, c.buildAssistantMessage(content.Parts))
 		}
 	}
@@ -1817,6 +1828,27 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 	}
 }
 
+func hasSerializableAssistantParts(parts []*genai.Part) bool {
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+		if part.FunctionCall != nil {
+			return true
+		}
+		if part.Text == "" {
+			continue
+		}
+		if !part.Thought {
+			return true
+		}
+		if len(part.ThoughtSignature) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // buildAssistantMessage builds an assistant message from parts.
 func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]interface{} {
 	content := make([]map[string]interface{}, 0)
@@ -1827,22 +1859,28 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 	// precede tool_use entries in multi-turn assistant messages. Without
 	// this, Kimi rejects the request with "reasoning_content is missing".
 	for _, part := range parts {
-		if !part.Thought || part.Text == "" {
+		if part == nil || !part.Thought || part.Text == "" {
+			continue
+		}
+		if len(part.ThoughtSignature) == 0 {
+			logging.Warn("dropping unsigned thinking part from assistant history",
+				"text_len", len(part.Text))
 			continue
 		}
 		block := map[string]interface{}{
 			"type":     "thinking",
 			"thinking": part.Text,
 		}
-		if len(part.ThoughtSignature) > 0 {
-			block["signature"] = string(part.ThoughtSignature)
-		}
+		block["signature"] = string(part.ThoughtSignature)
 		content = append(content, block)
 	}
 
 	// Second pass: text and tool_use, in original order. Thought parts
 	// are skipped (already emitted above); non-thought text lands here.
 	for _, part := range parts {
+		if part == nil {
+			continue
+		}
 		if part.Thought {
 			continue
 		}

@@ -215,17 +215,27 @@ func isLikelyHTTPTimeout(err error) bool {
 	return false
 }
 
+func isRetryableHTTPStatusCode(statusCode int) bool {
+	switch statusCode {
+	case 429, 500, 502, 503, 504, 529:
+		return true
+	}
+	return false
+}
+
 // IsRetryableAPIError returns true if the API error has a retryable status code.
 func IsRetryableAPIError(err error) bool {
 	var apiErr *APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.StatusCode {
-		case 429, 502, 503, 504:
-			return true
-		}
+	if errors.As(err, &apiErr) && isRetryableHTTPStatusCode(apiErr.StatusCode) {
+		return true
 	}
-	// Some providers (MiniMax) return transient 400 "model_not_found" that resolves on retry.
+
 	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && isRetryableHTTPStatusCode(httpErr.StatusCode) {
+		return true
+	}
+
+	// Some providers (MiniMax) return transient 400 "model_not_found" that resolves on retry.
 	if errors.As(err, &httpErr) && httpErr.StatusCode == 400 {
 		msg := strings.ToLower(httpErr.Message)
 		if strings.Contains(msg, "model_not_found") || strings.Contains(msg, "model not found") {

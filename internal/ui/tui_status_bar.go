@@ -230,7 +230,7 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 
 	if m.hasActivePlanStatus() {
 		planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
-		activeStep := fmt.Sprintf("📋 %d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
+		activeStep := fmt.Sprintf("%s %d/%d", MessageIcons["info"], m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
 		if m.planProgress.CurrentTitle != "" {
 			title := m.planProgress.CurrentTitle
 			if len(title) > 20 {
@@ -244,9 +244,9 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		reqBreaker := shortBreakerState(m.runtimeStatus.RequestBreaker)
 		stepBreaker := shortBreakerState(m.runtimeStatus.StepBreaker)
 		if reqBreaker == "open" || stepBreaker == "open" {
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("🔴 circuit open"))
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render(MessageIcons["error"]+" circuit open"))
 		} else if reqBreaker == "half" || stepBreaker == "half" {
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Render("🟡 recovering"))
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Render(MessageIcons["warning"]+" recovering"))
 		}
 	}
 
@@ -264,7 +264,7 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	// Plan mode indicator
 	if m.planningModeEnabled {
 		planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
-		parts = append(parts, planStyle.Render("📝 plan mode"))
+		parts = append(parts, planStyle.Render(MessageIcons["info"]+" plan mode"))
 	}
 
 	// Background tasks
@@ -299,16 +299,16 @@ func (m Model) renderEngineStatus() string {
 		if m.currentTool != "" {
 			status = "RUNNING " + strings.ToUpper(m.currentTool)
 		}
-		return engineStyle.Foreground(ColorSecondary).Render("● " + status)
+		return engineStyle.Foreground(ColorSecondary).Render(MessageIcons["active"] + " " + status)
 
 	case StateStreaming:
-		return engineStyle.Foreground(ColorSuccess).Render("○ TYPING")
+		return engineStyle.Foreground(ColorSuccess).Render(MessageIcons["pending"] + " TYPING")
 
 	case StateQuestionPrompt, StatePermissionPrompt, StatePlanApproval:
-		return engineStyle.Foreground(ColorWarning).Render("● WAITING")
+		return engineStyle.Foreground(ColorWarning).Render(MessageIcons["active"] + " WAITING")
 
 	default:
-		return engineStyle.Foreground(ColorMuted).Render("● IDLE")
+		return engineStyle.Foreground(ColorMuted).Render(MessageIcons["active"] + " IDLE")
 	}
 }
 

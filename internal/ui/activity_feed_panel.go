@@ -345,9 +345,9 @@ func (p *ActivityFeedPanel) View(width int) string {
 			spinner := spinnerFrames[p.frame%len(spinnerFrames)]
 			line.WriteString(toolStyle.Render(spinner))
 		case ActivityCompleted:
-			line.WriteString(successStyle.Render("✓"))
+			line.WriteString(successStyle.Render(MessageIcons["success"]))
 		case ActivityFailed:
-			line.WriteString(errorStyle.Render("✗"))
+			line.WriteString(errorStyle.Render(MessageIcons["error"]))
 		}
 		line.WriteString(" ")
 

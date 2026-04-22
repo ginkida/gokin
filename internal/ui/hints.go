@@ -89,7 +89,7 @@ func (h *HintSystem) RenderHint(hint string) string {
 		Foreground(ColorDim).
 		Italic(true)
 
-	return hintStyle.Render("Tip: " + hint)
+	return hintStyle.Render(MessageIcons["hint"] + " " + hint)
 }
 
 // ShouldShowHint checks if a hint should be shown based on frequency.

@@ -79,7 +79,7 @@ func (p *ContextObservatoryPanel) View(width int) string {
 	}
 
 	// Header
-	header := " 🌐 Context Observatory "
+	header := " " + MessageIcons["info"] + " Context Observatory "
 	headerLine := titleStyle.Render(header)
 
 	content.WriteString(borderStyle.Render("╭") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("╮"))
@@ -101,14 +101,14 @@ func (p *ContextObservatoryPanel) View(width int) string {
 
 	// 1. Token Budget Section
 	p.writeBoxLine(&content, borderStyle, "Budget & Usage", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-	
+
 	usagePercent := p.health.PercentUsed
 	barWidth := panelWidth - 30
 	filled := int((usagePercent / 100.0) * float64(barWidth))
 	if filled > barWidth {
 		filled = barWidth
 	}
-	
+
 	var barColor lipgloss.Color = ColorSuccess
 	if usagePercent > 90 {
 		barColor = ColorError
@@ -118,20 +118,20 @@ func (p *ContextObservatoryPanel) View(width int) string {
 
 	progressBar := lipgloss.NewStyle().Foreground(barColor).Render(strings.Repeat("█", filled)) +
 		dimStyle.Render(strings.Repeat("░", barWidth-filled))
-	
+
 	usageText := fmt.Sprintf("  %d / %d tokens (%.1f%%)", p.health.TotalTokens, p.health.MaxTokens, usagePercent)
-	p.writeBoxLine(&content, borderStyle, usageText + "  " + progressBar, titleStyle, panelWidth)
+	p.writeBoxLine(&content, borderStyle, usageText+"  "+progressBar, titleStyle, panelWidth)
 
 	content.WriteString(borderStyle.Render("│") + strings.Repeat(" ", panelWidth-1) + borderStyle.Render("│") + "\n")
 
 	// 2. Token Breakdown
 	p.writeBoxLine(&content, borderStyle, " Breakdown", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-	
+
 	breakdownWidth := (panelWidth - 8) / 3
 	sysText := fmt.Sprintf("System: %d", p.health.SystemTokens)
 	histText := fmt.Sprintf("History: %d", p.health.HistoryTokens)
 	toolText := fmt.Sprintf("Tools: %d", p.health.ToolTokens)
-	
+
 	breakdownLine := fmt.Sprintf("    %-*s %-*s %-s", breakdownWidth, sysText, breakdownWidth, histText, toolText)
 	p.writeBoxLine(&content, borderStyle, breakdownLine, dimStyle, panelWidth)
 
@@ -139,12 +139,12 @@ func (p *ContextObservatoryPanel) View(width int) string {
 
 	// 3. Active Inventory (Files)
 	p.writeBoxLine(&content, borderStyle, " Active File Inventory", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-	
+
 	if len(p.health.ActiveFiles) == 0 {
 		p.writeBoxLine(&content, borderStyle, "    (No files in active context)", mutedStyle, panelWidth)
 	} else {
 		for _, file := range p.health.ActiveFiles {
-			p.writeBoxLine(&content, borderStyle, "    📄 " + file, lipgloss.NewStyle().Foreground(ColorText), panelWidth)
+			p.writeBoxLine(&content, borderStyle, "    "+MessageIcons["hint"]+" "+file, lipgloss.NewStyle().Foreground(ColorText), panelWidth)
 		}
 	}
 
@@ -173,15 +173,15 @@ func (p *ContextObservatoryPanel) View(width int) string {
 
 	// 4. Maintenance & Health
 	p.writeBoxLine(&content, borderStyle, " Health Events", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-	
+
 	lastPruning := "None"
 	if !p.health.LastPruningTime.IsZero() {
 		lastPruning = fmt.Sprintf("%s ago", time.Since(p.health.LastPruningTime).Round(time.Second))
 	}
-	p.writeBoxLine(&content, borderStyle, "    Last Pruning: " + lastPruning, dimStyle, panelWidth)
-	
+	p.writeBoxLine(&content, borderStyle, "    Last Pruning: "+lastPruning, dimStyle, panelWidth)
+
 	if p.health.PruningAlert != "" {
-		p.writeBoxLine(&content, borderStyle, "    Status: " + p.health.PruningAlert, errorStyle.Bold(true), panelWidth)
+		p.writeBoxLine(&content, borderStyle, "    Status: "+p.health.PruningAlert, errorStyle.Bold(true), panelWidth)
 	} else {
 		p.writeBoxLine(&content, borderStyle, "    Status: Context Healthy", lipgloss.NewStyle().Foreground(ColorSuccess), panelWidth)
 	}
@@ -189,7 +189,7 @@ func (p *ContextObservatoryPanel) View(width int) string {
 	// Footer with instructions
 	content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤") + "\n")
 	p.writeBoxLine(&content, borderStyle, " [Esc/Ctrl+O] Close Observatory", mutedStyle, panelWidth)
-	
+
 	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", panelWidth-1) + "╯"))
 
 	return content.String()
@@ -216,7 +216,7 @@ func (p *ContextObservatoryPanel) renderGauge(percent float64, width int) string
 	}
 
 	filled := int((percent / 100.0) * float64(width))
-	
+
 	var color lipgloss.Color = ColorSuccess
 	if percent < 15 {
 		color = ColorError

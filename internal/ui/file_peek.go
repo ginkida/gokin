@@ -8,29 +8,38 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// FilePeekPanel displays a transient high-resolution snippet of a file.
+// FilePeekPanel shows a compact one-line indicator of what file the agent is
+// touching right now. It replaces a much larger bordered panel that rendered
+// up to 10 lines of file content — feedback from real use was that the big
+// panel drew too much attention and hid the answer the user was waiting for,
+// while also burying the file path the user actually wanted to see.
+//
+// Current design: single line, no border, filename front-and-centre, dim
+// metadata. Lives for ~1.5 seconds (matching success-toast duration) unless
+// replaced by a fresher peek first.
 type FilePeekPanel struct {
 	visible bool
 	peek    FilePeekMsg
 	styles  *Styles
-	frame   int
 	expires time.Time
 }
 
+// filePeekTTL is how long a peek stays on screen if no newer one arrives.
+// Kept short so a rapid read → edit → read sequence doesn't smear multiple
+// stale indicators on top of each other.
+const filePeekTTL = 1500 * time.Millisecond
+
 // NewFilePeekPanel creates a new file peek panel.
 func NewFilePeekPanel(styles *Styles) *FilePeekPanel {
-	return &FilePeekPanel{
-		visible: false,
-		styles:  styles,
-	}
+	return &FilePeekPanel{styles: styles}
 }
 
-// ShowPeek displays a new peek and sets its expiration.
+// ShowPeek installs a new peek and resets the TTL. Calling this while an
+// earlier peek is still on screen simply replaces it — no stacking.
 func (p *FilePeekPanel) ShowPeek(msg FilePeekMsg) {
 	p.peek = msg
 	p.visible = true
-	p.expires = time.Now().Add(5 * time.Second)
-	p.frame = 0
+	p.expires = time.Now().Add(filePeekTTL)
 }
 
 // Hide hides the panel.
@@ -38,86 +47,115 @@ func (p *FilePeekPanel) Hide() {
 	p.visible = false
 }
 
-// Tick updates the animation and checks for expiration.
+// Tick is called on the UI frame timer to evict expired peeks.
 func (p *FilePeekPanel) Tick() {
-	p.frame++
 	if p.visible && time.Now().After(p.expires) {
 		p.visible = false
 	}
 }
 
-// View renders the file peek panel.
+// IsVisible reports whether the panel should render this frame.
+func (p *FilePeekPanel) IsVisible() bool {
+	return p.visible && p.peek.FilePath != ""
+}
+
+// View renders the panel as a single dim status line. Returns "" when the
+// panel is hidden or has no data — callers don't need to nil-check.
 func (p *FilePeekPanel) View(width int) string {
-	if !p.visible || p.peek.FilePath == "" {
+	if !p.IsVisible() {
 		return ""
 	}
 
-	// Panel constraints
-	panelWidth := width - 10
-	if panelWidth < 40 {
-		panelWidth = 40
+	icon := actionIcon(p.peek.Action)
+	verb := actionVerb(p.peek.Action)
+	// Reserve ~20 cols for icon + verb + spacing. On a very narrow terminal
+	// (e.g. split pane in tmux), width-20 can go negative — shortenPath
+	// would panic on out-of-range slicing, so clamp first.
+	pathBudget := width - 20
+	if pathBudget < 10 {
+		pathBudget = 10
 	}
-	if panelWidth > 100 {
-		panelWidth = 100
+	path := shortenPath(p.peek.FilePath, pathBudget)
+	meta := formatPeekMeta(p.peek.Content)
+	color := actionColor(p.peek.Action)
+
+	primary := lipgloss.NewStyle().
+		Foreground(color).
+		Render(fmt.Sprintf("%s %s ", icon, verb))
+	pathStyled := lipgloss.NewStyle().
+		Foreground(ColorText).
+		Render(path)
+
+	line := primary + pathStyled
+	if meta != "" {
+		metaStyled := lipgloss.NewStyle().
+			Foreground(ColorDim).
+			Render("  " + meta)
+		line += metaStyled
 	}
+	return line
+}
 
-	// Styles
-	borderStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorSecondary).
-		Padding(0, 1)
+// actionIcon maps an action verb to an icon using the unified style system.
+// Unknown actions fall back to a generic document icon so we never render a blank.
+func actionIcon(action string) string {
+	normalized := strings.ToLower(action)
+	if icon, ok := FilePeekIcons[normalized]; ok {
+		return icon
+	}
+	return FilePeekIcons["default"]
+}
 
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorSecondary)
+// actionColor returns the semantic color for a file peek action.
+func actionColor(action string) lipgloss.Color {
+	normalized := strings.ToLower(action)
+	if color, ok := FilePeekColors[normalized]; ok {
+		return color
+	}
+	return ColorMuted
+}
 
-	actionStyle := lipgloss.NewStyle().
-		Italic(true).
-		Foreground(ColorDim)
-
-	contentStyle := lipgloss.NewStyle().
-		Foreground(ColorText)
-
-	var builder strings.Builder
-
-	// Header line
-	icon := "📄"
-	switch p.peek.Action {
-	case "reading":
-		icon = "🔍"
-	case "modifying":
-		icon = "📝"
+// actionVerb picks a concise display verb. The raw action strings in the code
+// are a mix of tenses ("read", "reading", "modifying", "created") — normalise
+// to present participles for a consistent status line.
+func actionVerb(action string) string {
+	switch action {
+	case "read", "reading":
+		return "Reading"
+	case "write":
+		return "Writing"
 	case "created":
-		icon = "✨"
+		return "Created"
+	case "edit", "editing":
+		return "Editing"
+	case "modifying":
+		return "Modifying"
+	case "Inserting", "inserting":
+		return "Inserting"
 	}
-
-	title := fmt.Sprintf("%s %s", icon, p.peek.FilePath)
-	if p.peek.Title != "" {
-		title = p.peek.Title
+	if action == "" {
+		return "Touching"
 	}
+	return strings.ToUpper(action[:1]) + action[1:]
+}
 
-	header := headerStyle.Render(title)
-	action := actionStyle.Render(" (" + p.peek.Action + ")")
-	
-	builder.WriteString(header)
-	builder.WriteString(action)
-	builder.WriteString("\n\n")
-
-	// Content with line numbers if needed (or just raw)
-	lines := strings.Split(p.peek.Content, "\n")
-	maxLines := 10
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorDim).Render("... (truncated)"))
+// formatPeekMeta summarises the snippet payload as "N lines · X.Y KB". Returns
+// "" when there's nothing to show so the View can skip the metadata chunk.
+func formatPeekMeta(content string) string {
+	if content == "" {
+		return ""
 	}
-
-	for _, line := range lines {
-		// Ensure line doesn't overflow panelWidth
-		if lipgloss.Width(line) > panelWidth-4 {
-			line = line[:panelWidth-7] + "..."
-		}
-		builder.WriteString(contentStyle.Render(line) + "\n")
+	lines := strings.Count(content, "\n")
+	if !strings.HasSuffix(content, "\n") {
+		lines++
 	}
-
-	return borderStyle.Width(panelWidth).Render(builder.String())
+	size := len(content)
+	switch {
+	case size >= 1024*1024:
+		return fmt.Sprintf("%d lines · %.1f MB", lines, float64(size)/(1024*1024))
+	case size >= 1024:
+		return fmt.Sprintf("%d lines · %.1f KB", lines, float64(size)/1024)
+	default:
+		return fmt.Sprintf("%d lines · %d B", lines, size)
+	}
 }

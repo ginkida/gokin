@@ -492,7 +492,7 @@ func (m GitStatusModel) View() string {
 		Foreground(ColorHighlight).
 		Padding(0, 1)
 
-	builder.WriteString(headerStyle.Render("📊 Git Status"))
+	builder.WriteString(headerStyle.Render(MessageIcons["info"] + " Git Status"))
 	builder.WriteString("\n\n")
 
 	// Branch info

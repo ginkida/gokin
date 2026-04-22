@@ -1176,7 +1176,7 @@ func (m MultiDiffPreviewModel) View() string {
 		Foreground(ColorHighlight).
 		Padding(0, 1)
 
-	builder.WriteString(headerStyle.Render(fmt.Sprintf("📝 Multi-File Diff Preview (%d files)", len(m.files))))
+	builder.WriteString(headerStyle.Render(fmt.Sprintf("Multi-File Diff Preview (%d files)", len(m.files))))
 	builder.WriteString("\n\n")
 
 	// Calculate widths

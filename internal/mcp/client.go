@@ -213,8 +213,11 @@ func (c *Client) reconnect() bool {
 	c.initialized = false
 	c.mu.Unlock()
 
-	// Close old transport (ignore errors)
-	_ = oldTransport.Close()
+	// Close old transport (ignore errors). Guard against nil in case the
+	// original transport was never successfully created.
+	if oldTransport != nil {
+		_ = oldTransport.Close()
+	}
 
 	// Re-initialize using direct transport I/O.
 	// We must NOT use Initialize() here because it calls request() which waits

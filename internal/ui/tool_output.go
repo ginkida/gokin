@@ -304,47 +304,47 @@ func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary interface
 	var icon string
 	switch toolName {
 	case "read":
-		icon = "📖"
+		icon = ToolIcons["read"]
 	case "write":
-		icon = "✏️ "
+		icon = ToolIcons["write"]
 	case "edit":
-		icon = "🔧"
+		icon = ToolIcons["edit"]
 	case "bash":
-		icon = "⚡"
+		icon = ToolIcons["bash"]
 	case "grep":
-		icon = "🎯"
+		icon = ToolIcons["grep"]
 	case "glob":
-		icon = "📂"
+		icon = ToolIcons["glob"]
 	case "diff", "git_diff":
-		icon = "📊"
+		icon = ToolIcons["diff"]
 	case "git_log", "git_blame":
-		icon = "📜"
+		icon = ToolIcons["git_log"]
 	case "git_status", "git_add", "git_commit", "git_branch", "git_pr":
-		icon = "🔀"
+		icon = ToolIcons["git_status"]
 	case "web_fetch", "web_search":
-		icon = "🌐"
+		icon = ToolIcons["web_fetch"]
 	case "batch":
-		icon = "📦"
+		icon = ToolIcons["batch"]
 	case "ask_agent", "coordinate":
-		icon = "🤖"
+		icon = MessageIcons["hint"]
 	case "task", "run_tests":
-		icon = "🧪"
+		icon = ToolIcons["test"]
 	case "delete":
-		icon = "🗑️ "
+		icon = MessageIcons["error"]
 	case "copy", "move":
-		icon = "📋"
+		icon = ToolIcons["default"]
 	case "mkdir":
-		icon = "📁"
+		icon = ToolIcons["list_dir"]
 	case "memory", "memorize", "history_search":
-		icon = "🧠"
+		icon = ToolIcons["memory"]
 	case "enter_plan_mode", "update_plan_progress", "get_plan_status", "exit_plan_mode":
-		icon = "📋"
+		icon = MessageIcons["info"]
 	case "ssh":
-		icon = "🔒"
+		icon = MessageIcons["warning"]
 	case "list_dir", "tree":
-		icon = "🗂️ "
+		icon = ToolIcons["tree"]
 	default:
-		icon = "🔧"
+		icon = ToolIcons["default"]
 	}
 
 	result.WriteString(iconStyle.Render(icon))

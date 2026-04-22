@@ -88,7 +88,7 @@ func (m ErrorDisplayModel) View() string {
 
 	// Main error line: ✗ Category: message
 	categoryTitle := m.getCategoryTitle()
-	sb.WriteString(errorStyle.Render("✗ "+categoryTitle+": ") + hintStyle.Render(m.error.OriginalError.Error()))
+	sb.WriteString(errorStyle.Render(MessageIcons["error"]+" "+categoryTitle+": ") + hintStyle.Render(m.error.OriginalError.Error()))
 	sb.WriteString("\n")
 
 	// First suggestion as indented hint

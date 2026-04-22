@@ -2,8 +2,8 @@ package tools
 
 import "testing"
 
-func TestStagnationFingerprint_DistinguishesFilesForWriteEditReadDelete(t *testing.T) {
-	for _, tool := range []string{"write", "edit", "read", "delete"} {
+func TestStagnationFingerprint_DistinguishesFilesForWriteEditDelete(t *testing.T) {
+	for _, tool := range []string{"write", "edit", "delete"} {
 		t.Run(tool, func(t *testing.T) {
 			a := stagnationFingerprint(tool, map[string]any{"file_path": "/tmp/a.go"})
 			b := stagnationFingerprint(tool, map[string]any{"file_path": "/tmp/b.go"})
@@ -14,6 +14,44 @@ func TestStagnationFingerprint_DistinguishesFilesForWriteEditReadDelete(t *testi
 				t.Errorf("%s: fingerprint = %q, want basename a.go", tool, a)
 			}
 		})
+	}
+}
+
+// TestStagnationFingerprint_ReadIncludesOffsetLimit pins the fix for the
+// false-positive that Kimi users hit: paging through a ~3000-line file in
+// 2000-line chunks produced the same fingerprint every time and tripped the
+// 5-repeat stagnation abort. The fix encodes offset+limit into the
+// fingerprint so forward progress through a file is visible.
+func TestStagnationFingerprint_ReadIncludesOffsetLimit(t *testing.T) {
+	// Paged reads of the same file must fingerprint differently.
+	p0 := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/tui.go", "offset": 0, "limit": 2000})
+	p1 := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/tui.go", "offset": 2000, "limit": 2000})
+	p2 := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/tui.go", "offset": 4000, "limit": 2000})
+	if p0 == p1 || p1 == p2 || p0 == p2 {
+		t.Errorf("paged reads collapsed to same fingerprint: %q %q %q", p0, p1, p2)
+	}
+
+	// JSON unmarshal typically produces float64 for integer fields — the
+	// fingerprint helper must accept that shape transparently.
+	pInt := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/x.go", "offset": 100, "limit": 50})
+	pFloat := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/x.go", "offset": 100.0, "limit": 50.0})
+	if pInt != pFloat {
+		t.Errorf("int vs float64 produced different fingerprints: %q vs %q", pInt, pFloat)
+	}
+
+	// Missing offset/limit still needs to fingerprint sensibly (two reads
+	// without paging *are* stagnation if the file_path is identical).
+	noPaging1 := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/a.go"})
+	noPaging2 := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/a.go"})
+	if noPaging1 != noPaging2 {
+		t.Errorf("identical bare reads must share a fingerprint, got %q vs %q", noPaging1, noPaging2)
+	}
+
+	// Different files must still be distinguishable regardless of paging.
+	a := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/a.go", "offset": 0})
+	b := stagnationFingerprint("read", map[string]any{"file_path": "/tmp/b.go", "offset": 0})
+	if a == b {
+		t.Errorf("different files produced same fingerprint: %q", a)
 	}
 }
 
@@ -92,9 +130,24 @@ func TestStagnationFingerprint_UnknownToolReturnsEmpty(t *testing.T) {
 }
 
 func TestStagnationFingerprint_MissingArgReturnsEmpty(t *testing.T) {
-	got := stagnationFingerprint("write", map[string]any{})
-	if got != "" {
-		t.Errorf("missing file_path should produce empty fingerprint, got %q", got)
+	// Write: no file_path → empty fingerprint.
+	if got := stagnationFingerprint("write", map[string]any{}); got != "" {
+		t.Errorf("write: missing file_path should produce empty fingerprint, got %q", got)
+	}
+	// Read: same contract. Without this, a nil-arg call would fingerprint
+	// as ".@0+0" (filepath.Base("") on Unix) and stagnate malformed calls
+	// against unrelated real reads.
+	if got := stagnationFingerprint("read", map[string]any{}); got != "" {
+		t.Errorf("read: missing file_path should produce empty fingerprint, got %q", got)
+	}
+	if got := stagnationFingerprint("read", map[string]any{"file_path": ""}); got != "" {
+		t.Errorf("read: empty file_path should produce empty fingerprint, got %q", got)
+	}
+	// Five malformed reads in a row must still trigger stagnation via the
+	// consecutive-identical-pattern path (they all produce "").
+	if got1, got2 := stagnationFingerprint("read", map[string]any{"offset": 0}),
+		stagnationFingerprint("read", map[string]any{"offset": 100}); got1 != got2 || got1 != "" {
+		t.Errorf("reads without file_path must share the empty fingerprint: got1=%q got2=%q", got1, got2)
 	}
 }
 

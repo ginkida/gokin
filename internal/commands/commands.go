@@ -138,6 +138,7 @@ func NewHandler() *Handler {
 	h.Register(&ModelCommand{})
 	h.Register(&PermissionsCommand{})
 	h.Register(&SandboxCommand{})
+	h.Register(&ThinkingCommand{})
 
 	// Register interactive commands
 	h.Register(&BrowseCommand{})

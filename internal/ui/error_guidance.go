@@ -372,17 +372,17 @@ func FormatErrorWithGuidance(styles *Styles, errMsg string) string {
 	var body strings.Builder
 
 	// Error message (first line inside the box)
-	body.WriteString(errorStyle.Render("✗ Error: ") + msgStyle.Render(truncateError(errMsg, 100)))
+	body.WriteString(errorStyle.Render(MessageIcons["error"]+" Error: ") + msgStyle.Render(truncateError(errMsg, 100)))
 
 	if guidance != nil {
 		// Title
 		body.WriteString("\n")
-		body.WriteString(markerStyle.Render("⎿ ") + titleStyle.Render(guidance.Title))
+		body.WriteString(markerStyle.Render(MessageIcons["hint"]+" ") + titleStyle.Render(guidance.Title))
 
 		// Suggestions
 		for _, suggestion := range guidance.Suggestions {
 			body.WriteString("\n")
-			body.WriteString(markerStyle.Render("  • ") + suggestionStyle.Render(suggestion))
+			body.WriteString(markerStyle.Render("  "+MessageIcons["info"]+" ") + suggestionStyle.Render(suggestion))
 		}
 
 		// Command hint

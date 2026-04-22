@@ -24,6 +24,41 @@ var (
 // on moderately complex tasks. Users can override via cfg.Model.ThinkingBudget.
 const defaultGLMThinkingBudget = 8192
 
+// defaultKimiThinkingBudget mirrors the GLM default for Kimi Coding Plan
+// (K2.6). The Coding Plan endpoint implements Anthropic's Extended Thinking
+// protocol, so the TUI gets dim-italic "thinking" content streamed via
+// thinking_delta events. 8192 tokens is enough for multi-step plans without
+// blowing through the subscription budget on short tasks.
+const defaultKimiThinkingBudget = 8192
+
+// thinkingBudgetMin / thinkingBudgetMax are the API-enforced bounds for
+// Anthropic-compat Extended Thinking. Requests outside this range 400 at
+// the provider with a cryptic error. We normalize to the default rather
+// than boundary-clamp: a user who hand-edited config.yaml to `100` almost
+// certainly typo'd, and clamping to 1024 would mask the slip.
+const (
+	thinkingBudgetMin int32 = 1024
+	thinkingBudgetMax int32 = 65536
+)
+
+// normalizeThinkingBudget repairs a configured budget for a provider call.
+// Used by GLM / Kimi factories so a user's hand-edited typo in config.yaml
+// doesn't produce a runtime 400 on the first message. 0 means "unset — use
+// the auto-default"; any other out-of-range value falls back to default.
+//
+// Mirrors commands/thinking.go clampThinkingBudget. Duplicated because the
+// client package mustn't depend on commands. Keep bounds + fallback policy
+// in sync if you change either.
+func normalizeThinkingBudget(budget int32, autoDefault int32) int32 {
+	if budget == 0 {
+		return autoDefault
+	}
+	if budget < thinkingBudgetMin || budget > thinkingBudgetMax {
+		return autoDefault
+	}
+	return budget
+}
+
 // GetPool returns the global client connection pool, creating it if necessary.
 func GetPool(cfg *config.Config) *ClientPool {
 	poolMu.Lock()
@@ -247,6 +282,10 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		enableThinking = true
 		thinkingBudget = defaultGLMThinkingBudget
 	}
+	// Repair out-of-range budgets (hand-edited config typos) when active.
+	if enableThinking {
+		thinkingBudget = normalizeThinkingBudget(thinkingBudget, defaultGLMThinkingBudget)
+	}
 
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
@@ -360,6 +399,22 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 	// Kimi may pause longer between chunks on complex tool chains.
 	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "kimi", 120*time.Second, 5*time.Minute)
 
+	// Kimi Coding Plan (K2.6) supports Extended Thinking. Enable by default
+	// if the user hasn't explicitly configured it — the dim-italic reasoning
+	// content is exactly the signal users want when they see the model pause
+	// between tool calls. Mirrors the GLM auto-enable path above.
+	enableThinking := cfg.Model.EnableThinking
+	thinkingBudget := cfg.Model.ThinkingBudget
+	if !enableThinking && thinkingBudget == 0 && supportsKimiThinking(modelID) {
+		enableThinking = true
+		thinkingBudget = defaultKimiThinkingBudget
+	}
+	// If thinking is active, repair an out-of-range budget (hand-edited
+	// config.yaml with a typo) so the first message doesn't 400 at Kimi.
+	if enableThinking {
+		thinkingBudget = normalizeThinkingBudget(thinkingBudget, defaultKimiThinkingBudget)
+	}
+
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
 		BaseURL:           baseURL,
@@ -367,8 +422,8 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 		MaxTokens:         cfg.Model.MaxOutputTokens,
 		Temperature:       cfg.Model.Temperature,
 		StreamEnabled:     true,
-		EnableThinking:    cfg.Model.EnableThinking,
-		ThinkingBudget:    cfg.Model.ThinkingBudget,
+		EnableThinking:    enableThinking,
+		ThinkingBudget:    thinkingBudget,
 		StreamIdleTimeout: streamIdleTimeout,
 		MaxRetries:        0, // Request retries are orchestrated at App layer.
 		RetryDelay:        cfg.API.Retry.RetryDelay,
@@ -377,6 +432,15 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	return NewAnthropicClient(anthropicConfig)
+}
+
+// supportsKimiThinking returns true for Kimi models that implement Extended
+// Thinking on the Coding Plan endpoint. K2.6 (kimi-for-coding) does; the
+// prefix match covers any future K2.x variant served at api.kimi.com/coding.
+func supportsKimiThinking(modelID string) bool {
+	m := strings.ToLower(modelID)
+	return strings.HasPrefix(m, "kimi-for-coding") ||
+		strings.HasPrefix(m, "kimi-k2")
 }
 
 // newOllamaClient creates an Ollama client for local LLM inference.

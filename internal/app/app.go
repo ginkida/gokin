@@ -158,8 +158,8 @@ type App struct {
 	sessionManager *chat.SessionManager
 
 	// New feature integrations
-	searchCache       *cache.SearchCache
-	rateLimiter       *ratelimit.Limiter
+	searchCache *cache.SearchCache
+	rateLimiter *ratelimit.Limiter
 	auditLogger *audit.Logger
 	fileWatcher *watcher.Watcher
 
@@ -222,6 +222,16 @@ type App struct {
 	lastError     string    // Last error message for context on retry
 	lastErrorTime time.Time // When the last error occurred
 
+	// Lock ordering (must be acquired in this order to prevent deadlock):
+	//   1. mu
+	//   2. processingMu
+	//   3. pendingMu
+	//   4. rateLimitRetryMu
+	//   5. stepHeartbeatMu (RWMutex, prefer RLock)
+	//   6. stepRollbackMu
+	//   7. sessionArchiveMu
+	//   8. diffPromptMu
+	// Never hold a later lock while acquiring an earlier one.
 	mu           sync.Mutex
 	diffPromptMu sync.Mutex
 	running      bool

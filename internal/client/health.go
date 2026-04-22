@@ -156,6 +156,12 @@ func reorderProvidersByHealth(providers []string) []string {
 	return out
 }
 
+// OrderProvidersByHealth returns a copy of providers ordered from healthiest
+// to least healthy according to the persisted runtime health tracker.
+func OrderProvidersByHealth(providers []string) []string {
+	return reorderProvidersByHealth(providers)
+}
+
 // GetProviderHealthReport returns a human-readable report for provider health.
 func GetProviderHealthReport() string {
 	healthMu.Lock()
