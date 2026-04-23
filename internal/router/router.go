@@ -816,8 +816,14 @@ func (r *Router) applyCapabilityAdjustments(analysis *TaskComplexity) {
 // Uses both Strategy and TaskType to minimize tool declarations per request,
 // reducing token overhead (~60 tokens per tool declaration).
 func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
-	// Base: core is always included (read, write, edit, bash, glob, grep, etc.)
-	sets := []tools.ToolSet{tools.ToolSetCore}
+	// Base: core + memory are always included. Memory (remember/recall/
+	// forget/list) is a fundamental capability — gating it per-strategy
+	// silently broke "запомни это" / "recall X" requests because Direct/
+	// SingleTool routes stripped the tool list, then the model honestly
+	// reported "I can't access persistent memory". 4 tool declarations
+	// ≈ 240 tokens per request (cached on repeat); worth it for
+	// deterministic agent continuity.
+	sets := []tools.ToolSet{tools.ToolSetCore, tools.ToolSetMemory}
 
 	switch analysis.Strategy {
 	case StrategyDirect:
@@ -884,23 +890,31 @@ func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
 }
 
 // filterToolSetsByCapability removes complex tool sets for weaker models
-// to reduce confusion from too many options.
+// to reduce confusion from too many options. Memory is always allowed
+// through — it's 4 simple verbs (remember/recall/forget/list), not a
+// complex toolchain, and stripping it breaks "запомни X" / "recall Y"
+// requests silently (model reports false "I can't access memory"
+// because the tool list it saw didn't include memory).
 func (r *Router) filterToolSetsByCapability(sets []tools.ToolSet) []tools.ToolSet {
 	if r.modelCapability == nil || r.modelCapability.Tier >= CapabilityStrong {
 		return sets
 	}
 
-	// For weak models: keep only Core, Git, FileOps
-	// For medium models: also keep Advanced but drop Web, Planning, Semantic, Memory, Agent
+	// For weak models: Core + Git + FileOps + Memory
+	// For medium models: also Advanced but drop Web, Planning, Semantic, Agent
+	// (Memory now kept for both tiers — see fn doc.)
 	var filtered []tools.ToolSet
 	for _, s := range sets {
 		switch {
 		case r.modelCapability.Tier == CapabilityWeak:
-			if s == tools.ToolSetCore || s == tools.ToolSetGit || s == tools.ToolSetFileOps {
+			if s == tools.ToolSetCore || s == tools.ToolSetGit ||
+				s == tools.ToolSetFileOps || s == tools.ToolSetMemory {
 				filtered = append(filtered, s)
 			}
 		case r.modelCapability.Tier == CapabilityMedium:
-			if s == tools.ToolSetCore || s == tools.ToolSetGit || s == tools.ToolSetFileOps || s == tools.ToolSetAdvanced {
+			if s == tools.ToolSetCore || s == tools.ToolSetGit ||
+				s == tools.ToolSetFileOps || s == tools.ToolSetAdvanced ||
+				s == tools.ToolSetMemory {
 				filtered = append(filtered, s)
 			}
 		default:

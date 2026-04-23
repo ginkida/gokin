@@ -146,28 +146,30 @@ func TestFilterToolSetsByCapability(t *testing.T) {
 		t.Errorf("strong tier: got %d sets, want %d", len(filtered), len(allSets))
 	}
 
-	// Medium: only Core, Git, FileOps, Advanced
+	// Medium: Core, Git, FileOps, Advanced + Memory (always-on for continuity)
 	r.modelCapability.Tier = CapabilityMedium
 	filtered = r.filterToolSetsByCapability(allSets)
 	for _, s := range filtered {
-		if s != tools.ToolSetCore && s != tools.ToolSetGit && s != tools.ToolSetFileOps && s != tools.ToolSetAdvanced {
+		if s != tools.ToolSetCore && s != tools.ToolSetGit && s != tools.ToolSetFileOps &&
+			s != tools.ToolSetAdvanced && s != tools.ToolSetMemory {
 			t.Errorf("medium tier: unexpected tool set %v", s)
 		}
 	}
-	if len(filtered) != 4 {
-		t.Errorf("medium tier: got %d sets, want 4", len(filtered))
+	if len(filtered) != 5 {
+		t.Errorf("medium tier: got %d sets, want 5", len(filtered))
 	}
 
-	// Weak: only Core, Git, FileOps
+	// Weak: Core, Git, FileOps + Memory
 	r.modelCapability.Tier = CapabilityWeak
 	filtered = r.filterToolSetsByCapability(allSets)
 	for _, s := range filtered {
-		if s != tools.ToolSetCore && s != tools.ToolSetGit && s != tools.ToolSetFileOps {
+		if s != tools.ToolSetCore && s != tools.ToolSetGit &&
+			s != tools.ToolSetFileOps && s != tools.ToolSetMemory {
 			t.Errorf("weak tier: unexpected tool set %v", s)
 		}
 	}
-	if len(filtered) != 3 {
-		t.Errorf("weak tier: got %d sets, want 3", len(filtered))
+	if len(filtered) != 4 {
+		t.Errorf("weak tier: got %d sets, want 4", len(filtered))
 	}
 
 	// Nil capability: all sets pass through
