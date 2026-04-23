@@ -17,9 +17,12 @@ func TestInferModelCapability(t *testing.T) {
 		{"kimi", "kimi-for-coding", CapabilityStrong}, // K2.6, Coding Plan endpoint
 		{"kimi", "kimi-k2.6", CapabilityStrong},
 		{"kimi", "kimi-k2.7", CapabilityStrong},
+		{"kimi", "kimi-k2.8", CapabilityStrong},
+		{"kimi", "kimi-k2.10-preview", CapabilityStrong},
 
 		// Medium tier
 		{"kimi", "kimi-k2.5", CapabilityMedium},
+		{"kimi", "kimi-k2-thinking", CapabilityMedium},
 		{"minimax", "MiniMax-M2.5", CapabilityMedium},
 		{"glm", "glm-4", CapabilityMedium},
 

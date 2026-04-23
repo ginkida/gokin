@@ -155,6 +155,7 @@ type App struct {
 	responseToolsUsed    []string
 	responseTouchedPaths []string
 	responseCommands     []string
+	responseEvidence     responseEvidenceLedger
 
 	// Session persistence
 	sessionManager *chat.SessionManager

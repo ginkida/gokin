@@ -125,6 +125,49 @@ func TestBuildDoneGateChecks_AddsRunTestsForMultipleTouchedModules(t *testing.T)
 	}
 }
 
+func TestDoneGateRunTestsTargets_GoTargetsTouchedPackageDirs(t *testing.T) {
+	dir := t.TempDir()
+	moduleDir := filepath.Join(dir, "service")
+	profile := doneGateProfile{
+		WorkDir:   dir,
+		GoModules: []string{moduleDir},
+		TouchedPaths: []string{
+			"service/internal/handler.go",
+			"service/internal/store.go",
+		},
+	}
+
+	targets := doneGateRunTestsTargets(profile)
+	if len(targets) != 1 {
+		t.Fatalf("targets = %v, want one targeted package", targets)
+	}
+	want := filepath.Join(moduleDir, "internal")
+	if targets[0].Path != want {
+		t.Fatalf("target path = %q, want %q", targets[0].Path, want)
+	}
+	if targets[0].Framework != "go" {
+		t.Fatalf("target framework = %q, want go", targets[0].Framework)
+	}
+}
+
+func TestDoneGateRunTestsTargets_GoModFallsBackToModuleRoot(t *testing.T) {
+	dir := t.TempDir()
+	moduleDir := filepath.Join(dir, "service")
+	profile := doneGateProfile{
+		WorkDir:      dir,
+		GoModules:    []string{moduleDir},
+		TouchedPaths: []string{"service/go.mod"},
+	}
+
+	targets := doneGateRunTestsTargets(profile)
+	if len(targets) != 1 {
+		t.Fatalf("targets = %v, want one module-root target", targets)
+	}
+	if targets[0].Path != moduleDir {
+		t.Fatalf("target path = %q, want %q", targets[0].Path, moduleDir)
+	}
+}
+
 func TestAppRecordResponseTouchedPaths_TracksSuccessfulMutationsOnly(t *testing.T) {
 	dir := t.TempDir()
 	app := &App{workDir: dir}

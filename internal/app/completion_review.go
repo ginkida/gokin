@@ -117,12 +117,21 @@ func completionResponseMentionsTouchedPaths(response string, touchedPaths []stri
 	return false
 }
 
-func buildCompletionReviewPrompt(userMessage, response string, touchedPaths, commands, gitChangedPaths, falselyClaimedPaths []string) string {
+func buildCompletionReviewPrompt(userMessage, response string, touchedPaths, commands, gitChangedPaths, falselyClaimedPaths []string, evidenceLedger ...string) string {
 	var sb strings.Builder
 	sb.WriteString("Final completion review before finishing this task.\n\n")
 	sb.WriteString("Original user request:\n")
 	sb.WriteString(strings.TrimSpace(userMessage))
 	sb.WriteString("\n\n")
+
+	if len(evidenceLedger) > 0 {
+		ledger := strings.TrimSpace(evidenceLedger[0])
+		if ledger != "" {
+			sb.WriteString("Runtime evidence ledger gathered this turn:\n")
+			sb.WriteString(ledger)
+			sb.WriteString("\n\n")
+		}
+	}
 
 	if len(touchedPaths) > 0 {
 		sb.WriteString("Files changed in this turn (per tool calls):\n- ")
@@ -279,7 +288,8 @@ func (a *App) runCompletionReviewIfNeeded(
 	gitChangedPaths := discoverDoneGateTouchedPaths(a.workDir)
 	falselyClaimed := detectFalselyClaimedPaths(*response, gitChangedPaths)
 
-	reviewPrompt := buildCompletionReviewPrompt(userMessage, *response, touchedPaths, commands, gitChangedPaths, falselyClaimed)
+	ledgerSummary := a.snapshotResponseEvidence().FormatForCompletionReview()
+	reviewPrompt := buildCompletionReviewPrompt(userMessage, *response, touchedPaths, commands, gitChangedPaths, falselyClaimed, ledgerSummary)
 	history := a.session.GetHistory()
 	newHistory, reviewResponse, err := a.executor.Execute(ctx, history, reviewPrompt)
 	in, out := a.executor.GetLastTokenUsage()

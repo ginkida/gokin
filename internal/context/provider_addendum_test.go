@@ -13,8 +13,10 @@ func TestProviderAddendum_KimiNonEmpty(t *testing.T) {
 	// Spot-check that the key guardrails surface somewhere in the text.
 	for _, needle := range []string{
 		"Plan:",
+		"evidence ledger",
 		"read-before-edit",
 		"delta-check",
+		"Verification discipline",
 		"Tool budget",
 	} {
 		if !strings.Contains(got, needle) {
@@ -55,6 +57,28 @@ func TestPromptBuilder_SetProviderInjectsAddendum(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "read-before-edit") {
 		t.Error("kimi addendum did not reach the built prompt")
+	}
+	if !strings.Contains(prompt, "Verification discipline") {
+		t.Error("kimi verification rules did not reach the built prompt")
+	}
+}
+
+func TestPromptBuilder_BasePromptIncludesCodeProjectProtocol(t *testing.T) {
+	pb := NewPromptBuilder("/tmp/fake", &ProjectInfo{
+		Type: ProjectTypeGo,
+		Name: "fake",
+	})
+	prompt := pb.Build()
+	for _, needle := range []string{
+		"Code Project Operating Protocol",
+		"do not stop at a proposal",
+		"Use repository evidence as the source of truth",
+		"run the narrowest reliable verification first",
+		"Preserve user work in the git tree",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Errorf("base prompt missing %q", needle)
+		}
 	}
 }
 

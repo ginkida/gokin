@@ -72,6 +72,7 @@ type doneGatePHPProject struct {
 }
 
 type doneGateProfile struct {
+	WorkDir           string
 	GoModules         []string
 	RustModules       []string
 	NodeProjects      []doneGateNodeProject
@@ -801,6 +802,7 @@ func detectDoneGateProfileWithTouchedPaths(workDir string, touchedOverride []str
 	phpDirs := prioritizeDirsByTouched(workDir, phpAll, touched, moduleLimit)
 
 	profile := doneGateProfile{
+		WorkDir:       workDir,
 		GoModules:     goDirs,
 		RustModules:   rustDirs,
 		CMakeProjects: cmakeDirs,
@@ -1392,25 +1394,123 @@ func doneGateRunTestsTargets(profile doneGateProfile) []doneGateTestTarget {
 	}
 
 	targets := make([]doneGateTestTarget, 0, maxTargets)
+	appendTarget := func(path string, framework string) {
+		if len(targets) >= maxTargets || strings.TrimSpace(path) == "" {
+			return
+		}
+		for _, existing := range targets {
+			if existing.Path == path && existing.Framework == framework {
+				return
+			}
+		}
+		targets = append(targets, doneGateTestTarget{
+			Path:      path,
+			Framework: framework,
+		})
+	}
 	appendTargets := func(paths []string, framework string) {
 		for _, dir := range paths {
 			if len(targets) >= maxTargets {
 				return
 			}
-			targets = append(targets, doneGateTestTarget{
-				Path:      dir,
-				Framework: framework,
-			})
+			appendTarget(dir, framework)
 		}
 	}
 
-	appendTargets(profile.GoModules, "go")
+	for _, target := range doneGateGoTestTargets(profile, maxTargets) {
+		appendTarget(target.Path, target.Framework)
+	}
 	appendTargets(profile.RustModules, "cargo")
 	if profile.PythonTestsLikely {
 		appendTargets(profile.PythonRoots, "pytest")
 	}
 
 	return targets
+}
+
+func doneGateGoTestTargets(profile doneGateProfile, maxTargets int) []doneGateTestTarget {
+	if maxTargets <= 0 || len(profile.GoModules) == 0 {
+		return nil
+	}
+	workDir := strings.TrimSpace(profile.WorkDir)
+	if workDir == "" {
+		return doneGateFrameworkTargets(profile.GoModules, "go", maxTargets)
+	}
+
+	var targets []doneGateTestTarget
+	add := func(path string) {
+		if len(targets) >= maxTargets || strings.TrimSpace(path) == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		for _, existing := range targets {
+			if existing.Path == path {
+				return
+			}
+		}
+		targets = append(targets, doneGateTestTarget{Path: path, Framework: "go"})
+	}
+
+	for _, touched := range profile.TouchedPaths {
+		if !doneGateTouchedPathSuggestsGoTest(touched) {
+			continue
+		}
+		absTouched := strings.TrimSpace(touched)
+		if absTouched == "" {
+			continue
+		}
+		if !filepath.IsAbs(absTouched) {
+			absTouched = filepath.Join(workDir, filepath.FromSlash(absTouched))
+		}
+		absTouched = filepath.Clean(absTouched)
+
+		for _, moduleDir := range profile.GoModules {
+			moduleDir = filepath.Clean(moduleDir)
+			if !pathWithinDir(moduleDir, absTouched) {
+				continue
+			}
+			targetDir := filepath.Dir(absTouched)
+			base := strings.ToLower(filepath.Base(absTouched))
+			if base == "go.mod" || base == "go.sum" {
+				targetDir = moduleDir
+			}
+			add(targetDir)
+			break
+		}
+	}
+
+	if len(targets) > 0 {
+		return targets
+	}
+	return doneGateFrameworkTargets(profile.GoModules, "go", maxTargets)
+}
+
+func doneGateFrameworkTargets(paths []string, framework string, maxTargets int) []doneGateTestTarget {
+	targets := make([]doneGateTestTarget, 0, maxTargets)
+	for _, path := range paths {
+		if len(targets) >= maxTargets {
+			break
+		}
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		targets = append(targets, doneGateTestTarget{Path: path, Framework: framework})
+	}
+	return targets
+}
+
+func doneGateTouchedPathSuggestsGoTest(path string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(path)))
+	return filepath.Ext(base) == ".go" || base == "go.mod" || base == "go.sum"
+}
+
+func pathWithinDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	rel = filepath.Clean(rel)
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func relPathOrDot(root, path string) string {

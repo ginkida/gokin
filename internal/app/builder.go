@@ -1553,6 +1553,7 @@ func (b *Builder) wireDependencies() error {
 
 			app.recordResponseTouchedPaths(name, args, result)
 			app.recordResponseCommand(name, args, result)
+			app.recordResponseEvidence(name, args, result)
 
 			if app.program != nil {
 				app.safeSendToProgram(ui.ToolResultMsg{Name: name, Content: result.Content})

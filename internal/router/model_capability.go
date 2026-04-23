@@ -1,6 +1,9 @@
 package router
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // CapabilityTier represents the general capability level of a model.
 type CapabilityTier int
@@ -54,15 +57,13 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 	case "kimi", "minimax":
 		cap.Tier = CapabilityMedium
 		// Kimi K2.6 (kimi-for-coding on the Coding Plan endpoint) and
-		// kimi-k2.6 variants are Strong-tier in practice: 262K context,
+		// newer K2.x variants are Strong-tier in practice: 262K context,
 		// comparable SWE-bench to Opus-class models, fine-grained tool
 		// use. Keeping them in Medium silently triggered decompose=-1
 		// + 1.2× thinking budget multiplier — both of which over-fire
 		// for the current Kimi generation. Older kimi-k2.5 stays Medium.
 		m := strings.ToLower(modelName)
-		if p == "kimi" && (strings.HasPrefix(m, "kimi-for-coding") ||
-			strings.HasPrefix(m, "kimi-k2.6") ||
-			strings.HasPrefix(m, "kimi-k2.7")) {
+		if p == "kimi" && isStrongKimiCodingModel(m) {
 			cap.Tier = CapabilityStrong
 		}
 	case "ollama":
@@ -87,4 +88,32 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 	}
 
 	return cap
+}
+
+func isStrongKimiCodingModel(modelName string) bool {
+	m := strings.ToLower(strings.TrimSpace(modelName))
+	if strings.HasPrefix(m, "kimi-for-coding") {
+		return true
+	}
+
+	const prefix = "kimi-k2."
+	if !strings.HasPrefix(m, prefix) {
+		return false
+	}
+	rest := m[len(prefix):]
+	end := 0
+	for end < len(rest) {
+		if rest[end] < '0' || rest[end] > '9' {
+			break
+		}
+		end++
+	}
+	if end == 0 {
+		return false
+	}
+	minor, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return false
+	}
+	return minor >= 6
 }

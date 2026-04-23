@@ -113,6 +113,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.responseToolsUsed = nil
 	a.responseTouchedPaths = nil
 	a.responseCommands = nil
+	a.responseEvidence = responseEvidenceLedger{}
 	a.streamedChars = 0           // Reset streaming accumulator
 	a.streamedEstimatedTokens = 0 // Reset streaming token estimate
 	a.messageCount++
@@ -2151,13 +2152,95 @@ func truncateTail(text string, max int) string {
 // trimToLastModelMessage trims history back to the last model message,
 // ensuring we don't persist orphaned tool results. minLen is the minimum
 // length to preserve (original history before this request).
+//
+// Beyond just truncating, this also strips orphan FunctionCall parts
+// from the KEPT model message — i.e. calls whose corresponding tool
+// results were not appended to history before the failure. Leaving them
+// in place causes every subsequent API call to fail with:
+//
+//	"an assistant message with 'tool_calls' must be followed by tool
+//	 messages responding to each 'tool_call_id'. The following
+//	 tool_call_ids did not have response messages: ..."
+//
+// The `client.sanitizeToolPairs` last-defense runs per-request but
+// cannot retroactively fix a corrupt session — once the orphan call is
+// persisted to `session.History`, every turn reproduces the 400 until
+// the user /clears. So we repair at the persistence boundary (here)
+// in addition to the per-request defense.
 func trimToLastModelMessage(history []*genai.Content, minLen int) []*genai.Content {
 	for i := len(history) - 1; i >= minLen; i-- {
 		if history[i] != nil && history[i].Role == genai.RoleModel {
-			return history[:i+1]
+			trimmed := history[:i+1]
+			return stripOrphanFunctionCalls(trimmed)
 		}
 	}
 	return history[:minLen]
+}
+
+// stripOrphanFunctionCalls returns a shallow-copy of `history` where
+// each model-role message has its FunctionCall parts filtered down to
+// only those whose IDs have a paired FunctionResponse somewhere later
+// in the slice. Parts with empty IDs are kept as-is — the client-side
+// sanitizer's fallbackToolID path handles them.
+//
+// Preserves ordering and message identity for anything it doesn't
+// change; allocates a new Content + Parts slice only for messages that
+// actually had orphan parts removed.
+func stripOrphanFunctionCalls(history []*genai.Content) []*genai.Content {
+	// First pass: collect all response IDs appearing anywhere in history.
+	responseIDs := make(map[string]bool)
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+				responseIDs[part.FunctionResponse.ID] = true
+			}
+		}
+	}
+
+	// Second pass: filter model messages, drop orphan calls.
+	out := make([]*genai.Content, 0, len(history))
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		if msg.Role != genai.RoleModel {
+			out = append(out, msg)
+			continue
+		}
+		// Scan first to see if anything needs filtering; if clean, reuse
+		// the original pointer to keep allocations flat.
+		needsFilter := false
+		for _, part := range msg.Parts {
+			if part != nil && part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				if !responseIDs[part.FunctionCall.ID] {
+					needsFilter = true
+					break
+				}
+			}
+		}
+		if !needsFilter {
+			out = append(out, msg)
+			continue
+		}
+		kept := make([]*genai.Part, 0, len(msg.Parts))
+		for _, part := range msg.Parts {
+			if part != nil && part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				if !responseIDs[part.FunctionCall.ID] {
+					continue // orphan
+				}
+			}
+			kept = append(kept, part)
+		}
+		// Drop the entire message if nothing remains (was all orphans).
+		if len(kept) == 0 {
+			continue
+		}
+		out = append(out, &genai.Content{Role: msg.Role, Parts: kept})
+	}
+	return out
 }
 
 func maxPlanExecutionRounds(totalSteps int) int {
