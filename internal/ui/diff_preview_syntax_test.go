@@ -128,3 +128,92 @@ func TestDiffPreviewModel_HighlightDiffFallsBackForUnknownExt(t *testing.T) {
 		t.Errorf("unknown-ext diff lost content: %q", stripAnsi(out))
 	}
 }
+
+// MultiDiffPreviewModel.highlightMultiDiff must apply per-file language
+// detection to context lines. Before v0.70.7 the multi-diff path used
+// only flat contextStyle even on .go files.
+func TestMultiDiffPreviewModel_HighlightUsesFileLanguage(t *testing.T) {
+	m := &MultiDiffPreviewModel{
+		files: []DiffFile{
+			{FilePath: "foo.go", Diff: ""},
+			{FilePath: "bar.txt", Diff: ""},
+		},
+		currentIndex: 0,
+	}
+	diff := strings.Join([]string{
+		"--- a/foo.go",
+		"+++ b/foo.go",
+		"@@ -1,1 +1,1 @@",
+		" package main",
+	}, "\n")
+	out := m.highlightMultiDiff(diff)
+
+	// Locate the rendered "package main" context line and assert it
+	// contains chroma escapes (not just the flat contextStyle color).
+	var contextSnippet string
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.Contains(stripAnsi(ln), "package main") {
+			contextSnippet = ln
+			break
+		}
+	}
+	if contextSnippet == "" {
+		t.Fatalf("context line not found in multi-diff output: %q", out)
+	}
+	if strings.Count(contextSnippet, "\x1b[") < 2 {
+		t.Errorf("multi-diff context line missing syntax highlighting; expected ≥2 ANSI escapes, got: %q", contextSnippet)
+	}
+}
+
+// MultiDiff: out-of-range currentIndex must not crash. Empty files
+// slice is a legit state during construction / reset.
+func TestMultiDiffPreviewModel_EmptyFilesNoCrash(t *testing.T) {
+	m := &MultiDiffPreviewModel{
+		files:        nil,
+		currentIndex: 0,
+	}
+	// Should not panic — just produce diff without language-aware highlighting.
+	diff := " plain context line\n"
+	out := m.highlightMultiDiff(diff)
+	if out == "" {
+		t.Error("empty-files path must still render the diff")
+	}
+}
+
+// Pin: +/- lines keep their original flat green/red styling. Layering
+// chroma on top would cause ANSI-on-ANSI background collisions. The
+// word-diff highlight carries enough signal for edited lines.
+func TestDiffPreviewModel_AddedAndRemovedLinesDontGetChroma(t *testing.T) {
+	m := &DiffPreviewModel{filePath: "foo.go"}
+	// Single-sided change (no pair) — deterministic output.
+	diff := strings.Join([]string{
+		"--- a/foo.go",
+		"+++ b/foo.go",
+		"@@ -0,0 +1,1 @@",
+		"+var added = 1",
+	}, "\n")
+	out := m.highlightDiff(diff)
+
+	// Locate the "+var added = 1" line.
+	var addedLine string
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.Contains(stripAnsi(ln), "var added = 1") {
+			addedLine = ln
+			break
+		}
+	}
+	if addedLine == "" {
+		t.Fatalf("added line not rendered: %q", out)
+	}
+	// Should have exactly ONE style applied (the flat addedStyle green
+	// + bold). If chroma ran, we'd see multiple escapes for keyword
+	// highlighting inside the line.
+	//
+	// addedStyle emits [fg][bold]text[reset] = 3 escape sequences.
+	// Any significantly higher count would indicate chroma ran.
+	escapeCount := strings.Count(addedLine, "\x1b[")
+	if escapeCount > 4 {
+		t.Errorf("added line has %d ANSI escapes — chroma should NOT run on +/- lines: %q",
+			escapeCount, addedLine)
+	}
+}
