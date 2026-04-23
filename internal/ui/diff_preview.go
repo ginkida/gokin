@@ -9,7 +9,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sergi/go-diff/diffmatchpatch"
+
+	"gokin/internal/highlight"
 )
+
+// diffSyntaxHighlighter is a package-level chroma-backed highlighter
+// shared across all DiffPreviewModel instances. Constructing one per
+// model would load lexer metadata on every approval prompt; shared
+// instance is safe because chroma lexers are stateless.
+var diffSyntaxHighlighter = highlight.New("monokai")
 
 // DiffDecision represents user's decision on a diff preview.
 type DiffDecision int
@@ -395,6 +403,14 @@ func (m *DiffPreviewModel) highlightDiff(diff string) string {
 		}
 	}
 
+	// Detect language from filename so chroma picks the right lexer
+	// for CONTEXT lines. Returns "" (auto-detect) for unknown extensions —
+	// chroma falls back to a generic lexer in that case. We leave +/-
+	// lines un-highlighted because ANSI-on-ANSI (chroma colors inside
+	// our green/red markers) collides visually; the word-diff highlight
+	// already carries enough signal for edited lines.
+	lang := diffSyntaxHighlighter.DetectLanguage(m.filePath)
+
 	for idx, line := range lines {
 		var styledLine string
 
@@ -422,7 +438,12 @@ func (m *DiffPreviewModel) highlightDiff(diff string) string {
 				styledLine = addedStyle.Render(line)
 			}
 		default:
-			styledLine = contextStyle.Render(line)
+			// Context line (space prefix or no prefix). Apply chroma
+			// syntax highlighting to the code content so the user sees
+			// surrounding keywords/strings/comments in their usual
+			// colors — matching Claude Code's diff feel. Falls back to
+			// gray contextStyle when chroma returns empty (unknown lang).
+			styledLine = renderContextLineSyntax(line, lang, contextStyle)
 		}
 
 		result.WriteString(styledLine)
@@ -430,6 +451,42 @@ func (m *DiffPreviewModel) highlightDiff(diff string) string {
 	}
 
 	return result.String()
+}
+
+// renderContextLineSyntax applies chroma syntax highlighting to the
+// code portion of a unified-diff context line. Strips a single leading
+// " " (the unified-diff context marker) before lexing, then re-prepends
+// it with the dim context color so the column alignment stays with
+// +/- lines.
+//
+// Safety:
+//   - Empty or whitespace-only content bypasses chroma (no tokens to
+//     lex, and chroma can return stray terminators that look like
+//     phantom styling).
+//   - If chroma emits an ANSI reset mid-line that matches our context
+//     style, the renderer already closes any leftover escape sequences.
+func renderContextLineSyntax(line, lang string, contextStyle lipgloss.Style) string {
+	if line == "" {
+		return ""
+	}
+	prefix := ""
+	code := line
+	if strings.HasPrefix(line, " ") {
+		prefix = " "
+		code = line[1:]
+	}
+	if strings.TrimSpace(code) == "" {
+		return contextStyle.Render(line)
+	}
+	highlighted := diffSyntaxHighlighter.Highlight(code, lang)
+	if strings.TrimSpace(highlighted) == "" {
+		// chroma returned empty / whitespace — fall back to unified
+		// gray styling so the line still renders distinctly.
+		return contextStyle.Render(line)
+	}
+	// Chroma output already ends with a reset; add the leading column
+	// marker in the context color so indentation lines up with +/-.
+	return contextStyle.Render(prefix) + strings.TrimRight(highlighted, "\n")
 }
 
 // highlightWordDiffs highlights the words in 'text' that differ from 'other'.
@@ -937,12 +994,21 @@ func (m *MultiDiffPreviewModel) generateDiff(index int) string {
 	return result.String()
 }
 
-// highlightMultiDiff applies syntax highlighting to the diff.
+// highlightMultiDiff applies syntax highlighting to the diff. Uses the
+// current file's path for language detection so context lines get
+// proper chroma syntax coloring (matching single-file DiffPreviewModel
+// behaviour from the main diff path).
 func (m *MultiDiffPreviewModel) highlightMultiDiff(diff string) string {
 	addedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Bold(true)
 	removedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Bold(true)
+	hunkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA"))
 	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#06B6D4")).Bold(true)
 	contextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
+
+	lang := ""
+	if m.currentIndex >= 0 && m.currentIndex < len(m.files) {
+		lang = diffSyntaxHighlighter.DetectLanguage(m.files[m.currentIndex].FilePath)
+	}
 
 	lines := strings.Split(diff, "\n")
 	var result strings.Builder
@@ -952,12 +1018,14 @@ func (m *MultiDiffPreviewModel) highlightMultiDiff(diff string) string {
 		switch {
 		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
 			styledLine = headerStyle.Render(line)
+		case strings.HasPrefix(line, "@@"):
+			styledLine = hunkStyle.Render(line)
 		case strings.HasPrefix(line, "+"):
 			styledLine = addedStyle.Render(line)
 		case strings.HasPrefix(line, "-"):
 			styledLine = removedStyle.Render(line)
 		default:
-			styledLine = contextStyle.Render(line)
+			styledLine = renderContextLineSyntax(line, lang, contextStyle)
 		}
 		result.WriteString(styledLine)
 		result.WriteString("\n")
