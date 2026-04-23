@@ -703,6 +703,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	var lastToolResult ToolResult   // Track the last tool result for context
 	var recentToolPatterns []string // Track tool name patterns per iteration for stagnation detection
 	var lastWorkingMemoryNote string
+	var lastKimiRecoveryNote string
 	// synthesisNudgeInjected ensures the per-turn consolidation reminder
 	// fires at most once. Without this guard the prompt would repeat every
 	// iteration past the threshold, training Kimi to output boilerplate
@@ -1007,6 +1008,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			if note := e.buildModelWorkingMemoryNotification(cl.GetModel(), resp.FunctionCalls, results); note != "" && note != lastWorkingMemoryNote {
 				lastWorkingMemoryNote = note
+				e.AddPendingNotification(note)
+			}
+
+			if note := buildKimiToolErrorRecoveryNotification(cl.GetModel(), results); note != "" && note != lastKimiRecoveryNote {
+				lastKimiRecoveryNote = note
 				e.AddPendingNotification(note)
 			}
 
@@ -2781,6 +2787,37 @@ func shouldInjectKimiWorkingMemory(model string, calls []*genai.FunctionCall, re
 		return true
 	}
 	return workingMemoryResponseSize(results[0]) >= 700
+}
+
+func buildKimiToolErrorRecoveryNotification(model string, results []*genai.FunctionResponse) string {
+	if client.GetModelProfile(model).Family != "kimi" {
+		return ""
+	}
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		success, _ := result.Response["success"].(bool)
+		if success {
+			continue
+		}
+		errMsg, _ := result.Response["error"].(string)
+		lower := strings.ToLower(strings.TrimSpace(errMsg))
+		if lower == "" {
+			continue
+		}
+		switch {
+		case strings.Contains(lower, "read-before-edit"):
+			return "[Kimi recovery] read-before-edit blocked the mutation. Next call must be read(file_path=...) for the exact file, then retry one edit using exact surrounding context. Do not issue another mutation first."
+		case strings.Contains(lower, "delta-check guard") || strings.Contains(lower, "delta-check failed"):
+			return "[Kimi recovery] delta-check failed after a mutation. Fix the reported build/typecheck/lint error before any unrelated edit, then rerun the same verification."
+		case strings.Contains(lower, "old_string not found") ||
+			(strings.Contains(lower, "ambiguous") && strings.Contains(lower, "old_string")) ||
+			strings.Contains(lower, "fuzzy match"):
+			return "[Kimi recovery] edit matching failed. Re-read the target region if needed, then retry with 3-5 exact surrounding lines in old_string or use line_start/line_end when the tool suggested it."
+		}
+	}
+	return ""
 }
 
 func isKimiExplorationTool(toolName string) bool {

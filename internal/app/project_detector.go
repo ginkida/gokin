@@ -2,9 +2,12 @@ package app
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -54,6 +57,10 @@ func (a *App) detectProjectContext() string {
 		parts = append([]string{"Detected project type: " + projectType}, parts...)
 	}
 
+	if projectMap := a.buildProjectMap(); projectMap != "" {
+		parts = append(parts, projectMap)
+	}
+
 	// Scan for documentation files and read first 500 chars of each
 	docFiles := []string{"README.md", "ARCHITECTURE.md", "CONTRIBUTING.md"}
 	for _, docFile := range docFiles {
@@ -67,6 +74,161 @@ func (a *App) detectProjectContext() string {
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+func (a *App) buildProjectMap() string {
+	if a == nil || strings.TrimSpace(a.workDir) == "" {
+		return ""
+	}
+
+	entrypoints := a.findProjectMapFiles(8, isProjectMapEntrypoint)
+	tests := a.findProjectMapFiles(8, isProjectMapTestFile)
+	configs := a.detectProjectMapConfigs()
+	scripts := a.detectProjectMapScripts()
+
+	var lines []string
+	if len(entrypoints) > 0 {
+		lines = append(lines, "Entrypoints: "+strings.Join(entrypoints, ", "))
+	}
+	if len(tests) > 0 {
+		lines = append(lines, "Tests: "+strings.Join(tests, ", "))
+	}
+	if len(configs) > 0 {
+		lines = append(lines, "Configs: "+strings.Join(configs, ", "))
+	}
+	if len(scripts) > 0 {
+		lines = append(lines, "Scripts: "+strings.Join(scripts, ", "))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Project map:\n")
+	for _, line := range lines {
+		sb.WriteString("- ")
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func (a *App) findProjectMapFiles(limit int, match func(string) bool) []string {
+	if limit <= 0 {
+		return nil
+	}
+	var matches []string
+	_ = filepath.WalkDir(a.workDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path == a.workDir {
+				return nil
+			}
+			if shouldSkipDoneGateDir(d.Name()) || pathDepth(a.workDir, path) > 4 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(a.workDir, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if rel == "." || strings.HasPrefix(rel, "..") {
+			return nil
+		}
+		if match(rel) {
+			matches = append(matches, rel)
+		}
+		return nil
+	})
+	sort.Strings(matches)
+	if len(matches) > limit {
+		matches = append(matches[:limit], fmt.Sprintf("(+%d more)", len(matches)-limit))
+	}
+	return matches
+}
+
+func isProjectMapEntrypoint(rel string) bool {
+	rel = filepath.ToSlash(strings.TrimSpace(rel))
+	base := strings.ToLower(filepath.Base(rel))
+	switch base {
+	case "main.go", "main.ts", "main.tsx", "main.js", "main.jsx",
+		"index.ts", "index.tsx", "index.js", "index.jsx",
+		"server.ts", "server.js", "app.ts", "app.js":
+		return true
+	}
+	return strings.HasPrefix(rel, "cmd/") && base == "main.go"
+}
+
+func isProjectMapTestFile(rel string) bool {
+	rel = filepath.ToSlash(strings.TrimSpace(rel))
+	base := strings.ToLower(filepath.Base(rel))
+	if strings.HasSuffix(base, "_test.go") ||
+		strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py") ||
+		strings.Contains(base, ".test.") ||
+		strings.Contains(base, ".spec.") {
+		return true
+	}
+	return strings.Contains(rel, "/tests/") || strings.Contains(rel, "/test/")
+}
+
+func (a *App) detectProjectMapConfigs() []string {
+	candidates := []string{
+		"go.mod", "go.work", "package.json", "pnpm-workspace.yaml", "tsconfig.json",
+		"pyproject.toml", "requirements.txt", "Cargo.toml", "Makefile", "justfile",
+		"Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+		".golangci.yml", ".golangci.yaml",
+	}
+	var found []string
+	for _, name := range candidates {
+		if fileExists(filepath.Join(a.workDir, name)) {
+			found = append(found, name)
+		}
+	}
+	sort.Strings(found)
+	return found
+}
+
+func (a *App) detectProjectMapScripts() []string {
+	packageJSONPath := filepath.Join(a.workDir, "package.json")
+	data, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		return nil
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(pkg.Scripts))
+	for name, command := range pkg.Scripts {
+		name = strings.TrimSpace(name)
+		command = strings.TrimSpace(command)
+		if name == "" || command == "" {
+			continue
+		}
+		names = append(names, name+"="+truncateProjectMapValue(command, 60))
+	}
+	sort.Strings(names)
+	if len(names) > 8 {
+		names = append(names[:8], fmt.Sprintf("(+%d more)", len(names)-8))
+	}
+	return names
+}
+
+func truncateProjectMapValue(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return value[:limit]
+	}
+	return value[:limit-3] + "..."
 }
 
 // extractGoModInfo reads go.mod and extracts module name and key dependencies.

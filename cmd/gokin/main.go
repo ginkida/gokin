@@ -17,7 +17,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version  = "0.70.4"
+	version  = "0.70.5"
 	cfgFile  string
 	model    string
 	runSetup bool
@@ -53,6 +53,7 @@ between you and the provider you choose.`,
 
 	// Update command
 	rootCmd.AddCommand(newUpdateCmd())
+	rootCmd.AddCommand(newEvalCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

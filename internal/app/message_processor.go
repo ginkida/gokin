@@ -401,7 +401,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		// saving it would create an orphaned tool_result that breaks subsequent API calls.
 		if len(newHistory) > len(history) {
 			if last := newHistory[len(newHistory)-1]; last != nil && last.Role == genai.RoleModel {
-				a.session.SetHistory(newHistory)
+				// Last message is a model turn — its tool_calls may be
+				// orphaned (execution failed before we appended results).
+				// Strip orphans so the next API call doesn't fail with
+				// "tool_call_ids did not have response messages" on every
+				// subsequent turn.
+				cleaned := stripOrphanFunctionCalls(newHistory)
+				a.session.SetHistory(cleaned)
 				if a.sessionManager != nil {
 					_ = a.sessionManager.SaveAfterMessage()
 				}
