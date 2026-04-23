@@ -235,17 +235,44 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 
 	// Stack-specific checks.
 	if bashTool, ok := a.registry.Get("bash"); ok {
-		for _, moduleDir := range profile.GoModules {
-			name := "go_vet@" + relPathOrDot(a.workDir, moduleDir)
-			command := "go vet ./..."
-			checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
-				bashTool,
-				name,
-				moduleDir,
-				command,
-			))
+		// Targeted `go vet`: if the turn touched Go files, run vet only
+		// in their packages. Otherwise fall back to whole-module `./...`.
+		// Scoping keeps feedback fast for small edits (1-3 packages
+		// instead of every package in a monorepo) without losing the
+		// broader-sweep safety net when we can't identify a target.
+		goVetTargets := doneGateGoVetTargets(profile, doneGateMaxRunTestTargets)
+		if len(goVetTargets) > 0 {
+			// targetDir is either `.` (module root) or a subdirectory
+			// relative to the module, so `go vet .` runs in that dir.
+			// Pass the dir as the bash cwd via newBashDoneGateCheckWithDir.
+			for _, tgt := range goVetTargets {
+				rel := relPathOrDot(a.workDir, tgt.Path)
+				name := "go_vet@" + rel
+				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+					bashTool,
+					name,
+					tgt.Path,
+					"go vet .",
+				))
+			}
+		} else {
+			for _, moduleDir := range profile.GoModules {
+				name := "go_vet@" + relPathOrDot(a.workDir, moduleDir)
+				command := "go vet ./..."
+				checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
+					bashTool,
+					name,
+					moduleDir,
+					command,
+				))
+			}
 		}
 		for _, moduleDir := range profile.RustModules {
+			// Skip untouched Rust crates — narrows the check to what
+			// the turn actually changed in multi-crate workspaces.
+			if !moduleHasTouchedFile(moduleDir, a.workDir, profile.TouchedPaths) {
+				continue
+			}
 			name := "cargo_check@" + relPathOrDot(a.workDir, moduleDir)
 			command := "cargo check --all-targets"
 			checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
@@ -309,6 +336,11 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 			))
 		}
 		for _, project := range profile.PHPProjects {
+			// Laravel / Symfony monorepos routinely have multiple
+			// composer projects; skip the ones untouched this turn.
+			if !moduleHasTouchedFile(project.Dir, a.workDir, profile.TouchedPaths) {
+				continue
+			}
 			rel := relPathOrDot(a.workDir, project.Dir)
 			if scriptName, _, ok := pickComposerScript(project.Scripts, "lint"); ok {
 				name := "php_lint@" + rel
@@ -347,6 +379,12 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 			}
 		}
 		for _, project := range profile.NodeProjects {
+			// Skip untouched Node workspaces — a yarn/pnpm monorepo
+			// with 10 packages shouldn't re-lint all of them when the
+			// turn touched only one.
+			if !moduleHasTouchedFile(project.Dir, a.workDir, profile.TouchedPaths) {
+				continue
+			}
 			if scriptName, _, ok := pickNodeScript(project.Scripts, "lint"); ok {
 				name := "node_lint@" + relPathOrDot(a.workDir, project.Dir)
 				command := nodeRunScriptCommand(project.Runner, scriptName)
@@ -393,6 +431,13 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 		}
 
 		for _, pythonRoot := range profile.PythonRoots {
+			// Skip Python roots with no touched files — compileall is
+			// cheap but not instant on large packages; narrowing keeps
+			// done-gate fast when the turn only modified one service
+			// in a multi-package repo.
+			if !moduleHasTouchedFile(pythonRoot, a.workDir, profile.TouchedPaths) {
+				continue
+			}
 			name := "python_compile@" + relPathOrDot(a.workDir, pythonRoot)
 			command := "python3 -m compileall -q ."
 			checks = appendUniqueDoneGateCheck(checks, seen, a.newBashDoneGateCheckWithDir(
@@ -1502,6 +1547,90 @@ func doneGateFrameworkTargets(paths []string, framework string, maxTargets int) 
 func doneGateTouchedPathSuggestsGoTest(path string) bool {
 	base := strings.ToLower(filepath.Base(strings.TrimSpace(path)))
 	return filepath.Ext(base) == ".go" || base == "go.mod" || base == "go.sum"
+}
+
+// moduleHasTouchedFile reports whether any path in touchedPaths lies
+// inside moduleDir. Used by buildDoneGateChecks to skip modules that
+// were untouched by this turn — avoids running `cargo check` /
+// `composer lint` / `npm test` for unrelated modules on a monorepo.
+//
+// If touchedPaths is empty, returns true (safety fallback — empty
+// touched list means "don't narrow"). Paths can be absolute or
+// relative to workDir; the helper handles both.
+func moduleHasTouchedFile(moduleDir, workDir string, touchedPaths []string) bool {
+	if len(touchedPaths) == 0 {
+		return true
+	}
+	moduleDir = filepath.Clean(moduleDir)
+	for _, touched := range touchedPaths {
+		abs := strings.TrimSpace(touched)
+		if abs == "" {
+			continue
+		}
+		if !filepath.IsAbs(abs) && workDir != "" {
+			abs = filepath.Join(workDir, filepath.FromSlash(abs))
+		}
+		abs = filepath.Clean(abs)
+		if pathWithinDir(moduleDir, abs) {
+			return true
+		}
+	}
+	return false
+}
+
+// doneGateGoVetTargets returns the directories that should receive
+// `go vet .` based on the files touched this turn. Mirrors
+// doneGateGoTestTargets — walks TouchedPaths, finds directory of each
+// *.go file, dedupes, caps at maxTargets. Falls back to empty list
+// (caller does module-wide vet) if nothing Go-like was touched.
+func doneGateGoVetTargets(profile doneGateProfile, maxTargets int) []doneGateTestTarget {
+	if maxTargets <= 0 || len(profile.GoModules) == 0 || len(profile.TouchedPaths) == 0 {
+		return nil
+	}
+	workDir := strings.TrimSpace(profile.WorkDir)
+	if workDir == "" {
+		return nil
+	}
+
+	var targets []doneGateTestTarget
+	seen := make(map[string]bool)
+	for _, touched := range profile.TouchedPaths {
+		if !doneGateTouchedPathSuggestsGoTest(touched) {
+			continue
+		}
+		abs := strings.TrimSpace(touched)
+		if abs == "" {
+			continue
+		}
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(workDir, filepath.FromSlash(abs))
+		}
+		abs = filepath.Clean(abs)
+
+		for _, moduleDir := range profile.GoModules {
+			moduleDir = filepath.Clean(moduleDir)
+			if !pathWithinDir(moduleDir, abs) {
+				continue
+			}
+			// `go vet .` runs for the package in the current directory.
+			// For go.mod / go.sum changes, vet the whole module.
+			targetDir := filepath.Dir(abs)
+			base := strings.ToLower(filepath.Base(abs))
+			if base == "go.mod" || base == "go.sum" {
+				targetDir = moduleDir
+			}
+			if seen[targetDir] {
+				break
+			}
+			seen[targetDir] = true
+			targets = append(targets, doneGateTestTarget{Path: targetDir, Framework: "go"})
+			if len(targets) >= maxTargets {
+				return targets
+			}
+			break
+		}
+	}
+	return targets
 }
 
 func pathWithinDir(dir, path string) bool {

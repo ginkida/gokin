@@ -85,10 +85,15 @@ func (a *App) buildProjectMap() string {
 	tests := a.findProjectMapFiles(8, isProjectMapTestFile)
 	configs := a.detectProjectMapConfigs()
 	scripts := a.detectProjectMapScripts()
+	packages := a.detectProjectMapPackages()
+	owners := a.detectProjectMapOwners()
 
 	var lines []string
 	if len(entrypoints) > 0 {
 		lines = append(lines, "Entrypoints: "+strings.Join(entrypoints, ", "))
+	}
+	if len(packages) > 0 {
+		lines = append(lines, "Packages: "+strings.Join(packages, ", "))
 	}
 	if len(tests) > 0 {
 		lines = append(lines, "Tests: "+strings.Join(tests, ", "))
@@ -98,6 +103,9 @@ func (a *App) buildProjectMap() string {
 	}
 	if len(scripts) > 0 {
 		lines = append(lines, "Scripts: "+strings.Join(scripts, ", "))
+	}
+	if owners != "" {
+		lines = append(lines, "Owners: "+owners)
 	}
 	if len(lines) == 0 {
 		return ""
@@ -338,6 +346,198 @@ func (a *App) readFirstLines(filePath string, n int) string {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// detectProjectMapPackages returns a short list of top-level packages /
+// workspaces / apps for the project. This is a "light package graph":
+// not a full dependency graph, just the set of discrete codebases the
+// agent should know about before exploring. Covers the user's 5 stacks:
+// Go (top-level dirs with go files or cmd/*), JS (package.json workspaces),
+// Python (top-level dirs with __init__.py or pyproject), Rust (members in
+// workspace Cargo.toml), PHP/Laravel (top-level dirs with composer.json).
+//
+// Returns at most projectMapPackagesLimit entries; the very first call
+// to buildProjectMap amortises the walk (done_gate already walks the
+// tree separately so this is additive but bounded).
+func (a *App) detectProjectMapPackages() []string {
+	if a == nil || strings.TrimSpace(a.workDir) == "" {
+		return nil
+	}
+	const projectMapPackagesLimit = 10
+
+	// Short-circuit to Go cmd/ subdirs when present — these are the
+	// most common "package entry points" in Go repos.
+	var found []string
+	seen := make(map[string]bool)
+
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || name == "." || seen[name] {
+			return
+		}
+		seen[name] = true
+		found = append(found, name)
+	}
+
+	// Go: cmd/* directories = binary entry points; internal/* or pkg/*
+	// top-level dirs if no cmd/.
+	cmdDir := filepath.Join(a.workDir, "cmd")
+	if entries, err := os.ReadDir(cmdDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				add("cmd/" + e.Name())
+			}
+		}
+	}
+
+	// JS workspaces: read package.json "workspaces" field if present.
+	if pkgData, err := os.ReadFile(filepath.Join(a.workDir, "package.json")); err == nil {
+		var pkg struct {
+			Workspaces []string          `json:"workspaces"`
+			WorkspaceM map[string]any    `json:"-"`
+		}
+		// Some repos put workspaces in an object {packages:[...]}; accept either form.
+		_ = json.Unmarshal(pkgData, &pkg)
+		if len(pkg.Workspaces) == 0 {
+			var alt struct {
+				Workspaces struct {
+					Packages []string `json:"packages"`
+				} `json:"workspaces"`
+			}
+			if err := json.Unmarshal(pkgData, &alt); err == nil {
+				pkg.Workspaces = alt.Workspaces.Packages
+			}
+		}
+		for _, w := range pkg.Workspaces {
+			add(w)
+		}
+	}
+
+	// Rust workspace: [workspace] members = ["crate-a", "crate-b"].
+	if cargoData, err := os.ReadFile(filepath.Join(a.workDir, "Cargo.toml")); err == nil {
+		for _, line := range strings.Split(string(cargoData), "\n") {
+			trimmed := strings.TrimSpace(line)
+			// Conservative: look for `"path-like"` entries on lines that
+			// follow a `members =` key. Full TOML parsing is overkill here.
+			if !strings.Contains(trimmed, "\"") {
+				continue
+			}
+			if !strings.Contains(line, "members") && !looksLikeCrateMember(trimmed) {
+				continue
+			}
+			for _, part := range extractQuotedStrings(trimmed) {
+				if !strings.ContainsAny(part, "*?[]") { // skip globs
+					add(part)
+				}
+			}
+		}
+	}
+
+	// Laravel/PHP: top-level directories that contain composer.json
+	// (apps/* pattern common in monorepos).
+	for _, sub := range []string{"apps", "packages", "services", "modules"} {
+		dir := filepath.Join(a.workDir, sub)
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				composerPath := filepath.Join(dir, e.Name(), "composer.json")
+				if fileExists(composerPath) {
+					add(sub + "/" + e.Name())
+				}
+			}
+		}
+	}
+
+	sort.Strings(found)
+	if len(found) > projectMapPackagesLimit {
+		return append(found[:projectMapPackagesLimit], fmt.Sprintf("(+%d more)", len(found)-projectMapPackagesLimit))
+	}
+	return found
+}
+
+// looksLikeCrateMember recognises an inline TOML array element like
+// `"crate-name",` that appears on its own line inside a members array.
+func looksLikeCrateMember(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "\"") && (strings.HasSuffix(trimmed, "\",") || strings.HasSuffix(trimmed, "\""))
+}
+
+// extractQuotedStrings returns all double-quoted substrings on the line.
+// Used by the tiny TOML slurper above.
+func extractQuotedStrings(line string) []string {
+	var out []string
+	for {
+		start := strings.Index(line, "\"")
+		if start < 0 {
+			return out
+		}
+		line = line[start+1:]
+		end := strings.Index(line, "\"")
+		if end < 0 {
+			return out
+		}
+		out = append(out, line[:end])
+		line = line[end+1:]
+	}
+}
+
+// detectProjectMapOwners returns a short summary of CODEOWNERS when
+// present. Returns "" if no CODEOWNERS file exists at any of the
+// conventional paths. Only lists the first handful of ownership rules
+// so the prompt stays compact — the agent knows code-ownership exists
+// and can read the file in full if it matters.
+func (a *App) detectProjectMapOwners() string {
+	if a == nil || strings.TrimSpace(a.workDir) == "" {
+		return ""
+	}
+	candidates := []string{
+		"CODEOWNERS",
+		".github/CODEOWNERS",
+		"docs/CODEOWNERS",
+		".gitlab/CODEOWNERS",
+	}
+	var path string
+	for _, c := range candidates {
+		p := filepath.Join(a.workDir, c)
+		if fileExists(p) {
+			path = p
+			break
+		}
+	}
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	const maxOwnerLines = 5
+	var entries []string
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// CODEOWNERS format: <pattern> <@owner1> <@owner2> ...
+		// Collapse to "pattern → owner[s]" for compactness.
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		entries = append(entries, fields[0])
+		if len(entries) >= maxOwnerLines {
+			break
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	rel, err := filepath.Rel(a.workDir, path)
+	if err != nil {
+		rel = path
+	}
+	return fmt.Sprintf("%s (%d pattern(s): %s)", rel, len(entries), strings.Join(entries, ", "))
 }
 
 // readFileHead reads the first maxChars characters from a file.
