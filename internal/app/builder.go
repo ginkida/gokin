@@ -1697,11 +1697,32 @@ func (b *Builder) wireDependencies() error {
 		},
 	})
 
-	// Wire pin_context persistence: set workDir and load from disk
+	// Wire pin_context: updater must be set BEFORE LoadPersistedPin —
+	// LoadPersistedPin short-circuits when updater is nil, which meant
+	// a previously-pinned .gokin/pinned_context.md was silently dropped
+	// on startup. And without the updater, Execute() returned "pinned
+	// context not supported by this agent" to the model — a silent
+	// capability failure Kimi would report as "I don't have pin".
 	if pinTool, ok := b.registry.Get("pin_context"); ok {
 		if pt, ok := pinTool.(*tools.PinContextTool); ok {
 			pt.SetWorkDir(b.workDir)
+			if app.promptBuilder != nil {
+				pt.SetUpdater(app.promptBuilder.SetPinnedContent)
+			}
 			pt.LoadPersistedPin()
+		}
+	}
+
+	// Wire history_search: same class of bug as pin_context. Tool ships
+	// in the ToolSetMemory declaration (now always-on for Kimi), but
+	// without this getter it returns "history search not supported by
+	// this agent" — a silent false negative the model reports as
+	// "I can't search history".
+	if histTool, ok := b.registry.Get("history_search"); ok {
+		if hs, ok := histTool.(*tools.HistorySearchTool); ok {
+			if app.session != nil {
+				hs.SetHistoryGetter(app.session.GetHistory)
+			}
 		}
 	}
 

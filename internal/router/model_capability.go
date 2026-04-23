@@ -53,6 +53,18 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 		}
 	case "kimi", "minimax":
 		cap.Tier = CapabilityMedium
+		// Kimi K2.6 (kimi-for-coding on the Coding Plan endpoint) and
+		// kimi-k2.6 variants are Strong-tier in practice: 262K context,
+		// comparable SWE-bench to Opus-class models, fine-grained tool
+		// use. Keeping them in Medium silently triggered decompose=-1
+		// + 1.2× thinking budget multiplier — both of which over-fire
+		// for the current Kimi generation. Older kimi-k2.5 stays Medium.
+		m := strings.ToLower(modelName)
+		if p == "kimi" && (strings.HasPrefix(m, "kimi-for-coding") ||
+			strings.HasPrefix(m, "kimi-k2.6") ||
+			strings.HasPrefix(m, "kimi-k2.7")) {
+			cap.Tier = CapabilityStrong
+		}
 	case "ollama":
 		cap.Tier = CapabilityWeak
 	default:

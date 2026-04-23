@@ -248,6 +248,7 @@ type PromptBuilder struct {
 	toolHints       string // Tool usage pattern hints
 	lastMessage     string // Last user message for conditional prompt injection
 	provider        string // Active provider family ("kimi", "glm", ...) for addenda
+	pinnedContent   string // User-pinned focus block, injected near the end of the prompt
 
 	// Prompt caching: avoids rebuilding when inputs haven't changed
 	cachedPrompt string
@@ -344,6 +345,18 @@ func (b *PromptBuilder) SetProvider(provider string) {
 	provider = strings.TrimSpace(strings.ToLower(provider))
 	if b.provider != provider {
 		b.provider = provider
+		b.promptDirty = true
+	}
+}
+
+// SetPinnedContent stores content that the `pin_context` tool pinned
+// for the rest of the session. Rendered in Build() as a dedicated
+// "Pinned Focus" block near the end — high attention weight for the
+// model. Empty string clears the pin. Setter is idempotent so the pin
+// tool can re-apply on reload without thrashing the prompt cache.
+func (b *PromptBuilder) SetPinnedContent(content string) {
+	if b.pinnedContent != content {
+		b.pinnedContent = content
 		b.promptDirty = true
 	}
 }
@@ -446,6 +459,18 @@ func (b *PromptBuilder) Build() string {
 
 	// Tool chain patterns removed from system prompt to avoid
 	// encouraging excessive exploration on simple tasks.
+
+	// User-pinned focus content — rendered before the provider addendum
+	// (which is always last). The pin represents the user's current
+	// "hot memory": priorities, constraints, working files. Kept above
+	// the addendum because provider rules are static scaffolding,
+	// pinned content is dynamic per-session state.
+	if strings.TrimSpace(b.pinnedContent) != "" {
+		builder.WriteString("\n\n## Pinned Focus\n")
+		builder.WriteString("The user pinned this information — honour it throughout the session until explicitly cleared:\n\n")
+		builder.WriteString(strings.TrimSpace(b.pinnedContent))
+		builder.WriteString("\n")
+	}
 
 	// Provider-specific behavioural addendum. Placed last so it has the
 	// closest position to the user message and therefore the highest

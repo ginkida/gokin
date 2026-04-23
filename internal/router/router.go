@@ -889,35 +889,46 @@ func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
 	return r.filterToolSetsByCapability(sets)
 }
 
-// filterToolSetsByCapability removes complex tool sets for weaker models
-// to reduce confusion from too many options. Memory is always allowed
-// through — it's 4 simple verbs (remember/recall/forget/list), not a
-// complex toolchain, and stripping it breaks "запомни X" / "recall Y"
-// requests silently (model reports false "I can't access memory"
-// because the tool list it saw didn't include memory).
+// filterToolSetsByCapability drops tool sets that historically confused
+// weaker models. The policy has been narrowed over time as specific
+// "stripped but actually useful" bugs surfaced — each exclusion needs
+// to justify itself against the alternative of a silent capability
+// failure ("I can't access X") the user sees.
+//
+// Current allowlist:
+//   - Weak: Core, Git, FileOps, Memory, Web, Planning
+//   - Medium: also Advanced (Kimi/GLM-4/MiniMax are capable enough)
+//   - Strong: no filtering
+//
+// Dropped for non-Strong tiers:
+//   - ToolSetAgent (ask_agent/coordinate/shared_memory/update_scratchpad/
+//     request_tool) — genuinely advanced orchestration primitives that
+//     do confuse lower tiers. Sub-agents get them via a separate path.
+//   - ToolSetSemantic — removed in v0.65.0 entirely; still safe to omit.
 func (r *Router) filterToolSetsByCapability(sets []tools.ToolSet) []tools.ToolSet {
 	if r.modelCapability == nil || r.modelCapability.Tier >= CapabilityStrong {
 		return sets
 	}
 
-	// For weak models: Core + Git + FileOps + Memory
-	// For medium models: also Advanced but drop Web, Planning, Semantic, Agent
-	// (Memory now kept for both tiers — see fn doc.)
+	weakAllow := map[tools.ToolSet]bool{
+		tools.ToolSetCore:     true,
+		tools.ToolSetGit:      true,
+		tools.ToolSetFileOps:  true,
+		tools.ToolSetMemory:   true,
+		tools.ToolSetWeb:      true,
+		tools.ToolSetPlanning: true,
+	}
+	mediumAllow := map[tools.ToolSet]bool{
+		tools.ToolSetAdvanced: true,
+	}
+
 	var filtered []tools.ToolSet
 	for _, s := range sets {
-		switch {
-		case r.modelCapability.Tier == CapabilityWeak:
-			if s == tools.ToolSetCore || s == tools.ToolSetGit ||
-				s == tools.ToolSetFileOps || s == tools.ToolSetMemory {
-				filtered = append(filtered, s)
-			}
-		case r.modelCapability.Tier == CapabilityMedium:
-			if s == tools.ToolSetCore || s == tools.ToolSetGit ||
-				s == tools.ToolSetFileOps || s == tools.ToolSetAdvanced ||
-				s == tools.ToolSetMemory {
-				filtered = append(filtered, s)
-			}
-		default:
+		if weakAllow[s] {
+			filtered = append(filtered, s)
+			continue
+		}
+		if r.modelCapability.Tier == CapabilityMedium && mediumAllow[s] {
 			filtered = append(filtered, s)
 		}
 	}

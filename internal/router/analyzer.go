@@ -55,6 +55,7 @@ type TaskAnalyzer struct {
 	refactoringPatterns []*regexp.Regexp
 	backgroundPatterns  []*regexp.Regexp
 	multiToolPatterns   []*regexp.Regexp
+	memoryPatterns      []*regexp.Regexp
 
 	// LLM-based decomposition (Phase 2)
 	llmClient client.Client
@@ -71,6 +72,7 @@ func NewTaskAnalyzer(decomposeThreshold, parallelThreshold int) *TaskAnalyzer {
 		refactoringPatterns: compilePatterns(refactoringRegexPatterns),
 		backgroundPatterns:  compilePatterns(backgroundRegexPatterns),
 		multiToolPatterns:   compilePatterns(multiToolRegexPatterns),
+		memoryPatterns:      compilePatterns(memoryRegexPatterns),
 		llmConfig:           DefaultLLMDecomposerConfig(),
 	}
 }
@@ -191,6 +193,14 @@ func (ta *TaskAnalyzer) determineTaskType(message string, score int) TaskType {
 	// Multi-tool tasks
 	if ta.matchesAny(lowerMessage, ta.multiToolPatterns) {
 		return TaskTypeMultiTool
+	}
+
+	// Memory operations — checked BEFORE question/score so a terse
+	// "запомни X" doesn't fall into StrategyDirect (which excludes
+	// tools). Routes to TaskTypeSingleTool → StrategyExecutor →
+	// memory tool executes.
+	if ta.matchesAny(lowerMessage, ta.memoryPatterns) {
+		return TaskTypeSingleTool
 	}
 
 	// Simple questions
@@ -352,6 +362,38 @@ var questionRegexPatterns = []string{
 	`show\s+me`,
 	`what'?s\s`,
 	`whats\s`,
+}
+
+// memoryRegexPatterns detect short-form memory operations ("remember X",
+// "запомни Y", "recall Z", "forget that") so they don't fall into
+// StrategyDirect (which ships no tools — historically these requests
+// produced a plain-text "OK, I'll remember" response without the memory
+// tool ever being called, silently losing the content).
+//
+// Russian stems drop `\b` because Go's RE2 treats Cyrillic characters
+// as non-\w, so `\bзапомн` never matches. The stem itself is distinctive
+// enough — Russian morphology puts it at word start in every inflection.
+var memoryRegexPatterns = []string{
+	// Explicit tool verbs (English)
+	`\bremember\b`,
+	`\brecall\b`,
+	`\bmemori[sz]e\b`,
+	`\bforget\b`,
+	// Russian stems (no word-boundary, see fn doc)
+	`запомн`,
+	`вспомн`,
+	`напомн`,
+	`забудь`,
+	`закреп`,
+	`запиш[иу].{0,10}памят`,
+	// Direct reference to the memory subsystem
+	`в памят`,
+	`из памят`,
+	`\bto\s+memory\b`,
+	`\bfrom\s+memory\b`,
+	// Pin requests (separate tool but similar class — short commands
+	// that currently misroute to Direct)
+	`\bpin\s+(this|that|it)\b`,
 }
 
 var explorationRegexPatterns = []string{

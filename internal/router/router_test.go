@@ -14,6 +14,9 @@ func TestInferModelCapability(t *testing.T) {
 	}{
 		// Strong tier
 		{"glm", "glm-5-plus", CapabilityStrong},
+		{"kimi", "kimi-for-coding", CapabilityStrong}, // K2.6, Coding Plan endpoint
+		{"kimi", "kimi-k2.6", CapabilityStrong},
+		{"kimi", "kimi-k2.7", CapabilityStrong},
 
 		// Medium tier
 		{"kimi", "kimi-k2.5", CapabilityMedium},
@@ -146,30 +149,40 @@ func TestFilterToolSetsByCapability(t *testing.T) {
 		t.Errorf("strong tier: got %d sets, want %d", len(filtered), len(allSets))
 	}
 
-	// Medium: Core, Git, FileOps, Advanced + Memory (always-on for continuity)
+	// Medium: Core, Git, FileOps, Advanced, Memory, Web, Planning.
+	// Agent set is the only stripped one (orchestration primitives).
 	r.modelCapability.Tier = CapabilityMedium
 	filtered = r.filterToolSetsByCapability(allSets)
+	allowed := map[tools.ToolSet]bool{
+		tools.ToolSetCore: true, tools.ToolSetGit: true,
+		tools.ToolSetFileOps: true, tools.ToolSetAdvanced: true,
+		tools.ToolSetMemory: true, tools.ToolSetWeb: true,
+		tools.ToolSetPlanning: true,
+	}
 	for _, s := range filtered {
-		if s != tools.ToolSetCore && s != tools.ToolSetGit && s != tools.ToolSetFileOps &&
-			s != tools.ToolSetAdvanced && s != tools.ToolSetMemory {
+		if !allowed[s] {
 			t.Errorf("medium tier: unexpected tool set %v", s)
 		}
 	}
-	if len(filtered) != 5 {
-		t.Errorf("medium tier: got %d sets, want 5", len(filtered))
+	if len(filtered) != 7 {
+		t.Errorf("medium tier: got %d sets, want 7", len(filtered))
 	}
 
-	// Weak: Core, Git, FileOps + Memory
+	// Weak: Core, Git, FileOps, Memory, Web, Planning (no Advanced).
 	r.modelCapability.Tier = CapabilityWeak
 	filtered = r.filterToolSetsByCapability(allSets)
+	weakAllowed := map[tools.ToolSet]bool{
+		tools.ToolSetCore: true, tools.ToolSetGit: true,
+		tools.ToolSetFileOps: true, tools.ToolSetMemory: true,
+		tools.ToolSetWeb: true, tools.ToolSetPlanning: true,
+	}
 	for _, s := range filtered {
-		if s != tools.ToolSetCore && s != tools.ToolSetGit &&
-			s != tools.ToolSetFileOps && s != tools.ToolSetMemory {
+		if !weakAllowed[s] {
 			t.Errorf("weak tier: unexpected tool set %v", s)
 		}
 	}
-	if len(filtered) != 4 {
-		t.Errorf("weak tier: got %d sets, want 4", len(filtered))
+	if len(filtered) != 6 {
+		t.Errorf("weak tier: got %d sets, want 6", len(filtered))
 	}
 
 	// Nil capability: all sets pass through

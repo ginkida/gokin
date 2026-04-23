@@ -139,7 +139,13 @@ var toolSetDefinitions = map[ToolSet][]string{
 	ToolSetCore: {
 		"read", "write", "edit", "bash", "glob", "grep",
 		"ask_user", "list_dir", "tree", "diff", "todo",
-		"tools_list", "request_tool",
+		"tools_list",
+		// request_tool moved to ToolSetAgent — it was shipping in the
+		// Core declaration list for main-agent Kimi requests, but the
+		// requester dependency is only wired in the sub-agent path.
+		// Result: Kimi saw it, tried it, got "tool requester not
+		// initialized" error, looked like a silent failure. Sub-agents
+		// that genuinely need it still get it via ToolSetAgent.
 	},
 	ToolSetGit: {
 		"git_status", "git_diff", "git_add", "git_commit",
@@ -152,6 +158,7 @@ var toolSetDefinitions = map[ToolSet][]string{
 	},
 	ToolSetAgent: {
 		"ask_agent", "coordinate", "shared_memory", "update_scratchpad",
+		"request_tool",
 	},
 	ToolSetWeb: {
 		"web_fetch", "web_search",
