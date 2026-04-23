@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -379,9 +378,11 @@ func (t *GrepTool) invertMatches(ctx context.Context, files []string, re *regexp
 		}
 	}
 
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].path < results[j].path
-	})
+	// Rank by relevance (match count + source-file bonuses) rather than
+	// alphabetical. Makes the top-of-list what the user most likely
+	// wanted — first-party source with many hits — instead of whatever
+	// sorts lexicographically first.
+	sortFileMatchesByRelevance(results)
 
 	return results
 }
@@ -435,10 +436,10 @@ searchLoop:
 
 	wg.Wait()
 
-	// Sort results by file path for consistent output
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].path < results[j].path
-	})
+	// Rank by relevance — see invertMatches for rationale. The parallel
+	// path is the hot one (99% of queries) so this is where the user
+	// actually sees the ranking.
+	sortFileMatchesByRelevance(results)
 
 	return results
 }

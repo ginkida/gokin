@@ -174,6 +174,19 @@ type ContextPredictorInterface interface {
 	LearnImports(filePath string)
 }
 
+// ProactiveContextProvider is an optional dependency that returns a block of
+// related-file previews to append to a successful Read result. Passing a
+// non-nil value is the opt-in: a nil provider leaves Read output unchanged.
+// The concrete implementation lives in internal/context to avoid an import
+// cycle (tools → context), but the interface is defined here for clarity.
+type ProactiveContextProvider interface {
+	// RelatedBlock returns pre-formatted markdown to append to the Read
+	// result, or "" when nothing's worth including. Receives the absolute
+	// path that was just read and a set of already-read files in the
+	// session (skip these to avoid duplication).
+	RelatedBlock(readPath string, alreadyRead map[string]bool) string
+}
+
 // ReadTool reads files and returns their contents with line numbers.
 type ReadTool struct {
 	notebookReader *readers.NotebookReader
@@ -182,6 +195,7 @@ type ReadTool struct {
 	workDir        string
 	pathValidator  *security.PathValidator
 	predictor      ContextPredictorInterface
+	proactive      ProactiveContextProvider
 	lastReadMu     sync.Mutex
 	lastReadFile   string // Track last file read for co-access learning
 }
@@ -205,6 +219,12 @@ func NewReadTool(workDir string) *ReadTool {
 func (t *ReadTool) SetWorkDir(workDir string) {
 	t.workDir = workDir
 	t.pathValidator = security.NewPathValidator([]string{workDir}, false)
+}
+
+// SetProactiveContext installs the optional related-files appender. Pass
+// nil to disable (e.g. in minimal test harnesses).
+func (t *ReadTool) SetProactiveContext(p ProactiveContextProvider) {
+	t.proactive = p
 }
 
 // SetAllowedDirs sets additional allowed directories for path validation.
@@ -295,7 +315,18 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	validPath, err := t.pathValidator.ValidateFile(filePath)
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
+		// Path-validation usually fires when a model fabricates an
+		// absolute path outside the workdir (classic Kimi hallucination
+		// mode). Suggest same-basename files under the workdir so it
+		// can recover with one corrected read instead of a flailing
+		// grep. Also surface the workdir so the model sees where its
+		// assumption broke.
+		errMsg := fmt.Sprintf("path validation failed: %s\n(working directory: %s)",
+			err, t.workDir)
+		if suggestions := suggestFilesInWorkDir(t.workDir, filepath.Base(filePath)); len(suggestions) > 0 {
+			errMsg += "\n\nFiles with matching basename in the workdir:\n" + strings.Join(suggestions, "\n")
+		}
+		return NewErrorResult(errMsg), nil
 	}
 	filePath = validPath
 
@@ -304,12 +335,24 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	if err != nil {
 		if os.IsNotExist(err) {
 			errMsg := fmt.Sprintf("file not found: %s", filePath)
+			// Same-directory neighbours first (covers typos in the
+			// filename), workdir-wide basename match second (covers
+			// wrong-directory cases the first pass misses).
 			if suggestions := suggestSimilarFiles(filePath); len(suggestions) > 0 {
 				errMsg += "\n\nDid you mean:\n" + strings.Join(suggestions, "\n")
+			} else if suggestions := suggestFilesInWorkDir(t.workDir, filepath.Base(filePath)); len(suggestions) > 0 {
+				errMsg += "\n\nFiles with matching basename in the workdir:\n" + strings.Join(suggestions, "\n")
 			}
 			return NewErrorResult(errMsg), nil
 		}
-		return NewErrorResult(fmt.Sprintf("error accessing file: %s", err)), nil
+		// Non-IsNotExist stat errors (permission denied, I/O errors).
+		// Still worth trying same-dir suggestions — a permission error
+		// on one file doesn't imply the dir is unreadable.
+		errMsg := fmt.Sprintf("error accessing file: %s", err)
+		if suggestions := suggestSimilarFiles(filePath); len(suggestions) > 0 {
+			errMsg += "\n\nNearby files:\n" + strings.Join(suggestions, "\n")
+		}
+		return NewErrorResult(errMsg), nil
 	}
 
 	if info.IsDir() {
@@ -326,9 +369,17 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	case ".ipynb":
 		return t.readNotebook(filePath)
 	default:
-		// Detect binary files by extension or null bytes in first 512 bytes
+		// Detect binary files by extension or null bytes in first 512
+		// bytes. Return as ERROR (not success) so the model treats this
+		// as a signal to do something else — previously Success=true
+		// with a "Binary file" message caused Kimi to believe it had
+		// successfully read the file and make confident claims based on
+		// the (nonexistent) contents.
 		if isBinaryFile(filePath) {
-			return NewSuccessResult(fmt.Sprintf("Binary file (%s, %d bytes). Cannot display as text.", ext, info.Size())), nil
+			return NewErrorResult(fmt.Sprintf(
+				"Binary file: %s (%s, %d bytes). This tool returns text only. If you need the content, run a command that emits text (e.g. `strings`, `hexdump -C | head`, a decoder). Do not claim to have read this file.",
+				filePath, ext, info.Size(),
+			)), nil
 		}
 
 		// Check if file is large
@@ -485,17 +536,30 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 	lineNum := 0
 	linesRead := 0
 	maxLineLen := 2000
+	// Tracks whether the scanner saw any further line past `limit`. Without
+	// this, a file that has exactly `limit` lines and a file with 10× that
+	// count produce indistinguishable output — the model cannot tell
+	// whether to keep paginating. The footer below uses this to emit a
+	// truthful "file has more" hint.
+	hasMoreAfterLimit := false
+	// Last line number observed by the scanner, even after the read loop
+	// exits early. Used below to surface the total-lines hint without
+	// re-opening the file.
+	lastScannedLine := 0
 
 	for scanner.Scan() {
 		lineNum++
+		lastScannedLine = lineNum
 
 		// Skip lines before offset
 		if lineNum < offset {
 			continue
 		}
 
-		// Stop if we've read enough lines
+		// Stop if we've read enough lines, but keep scanning once more so
+		// we can tell the caller whether truncation actually happened.
 		if linesRead >= limit {
+			hasMoreAfterLimit = true
 			break
 		}
 
@@ -513,6 +577,19 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 
 	if err := scanner.Err(); err != nil {
 		return NewErrorResult(fmt.Sprintf("error reading file: %s", err)), nil
+	}
+
+	// Truncation hint. Emitted only when we actually stopped early —
+	// partial-read indistinguishable from a complete read is a documented
+	// Kimi pitfall that leads to "I read the file, nothing else to do"
+	// followed by confident-but-wrong claims. Placed before the Related-
+	// files block so it sits close to the numbered content.
+	if hasMoreAfterLimit {
+		nextOffset := offset + linesRead
+		builder.WriteString(fmt.Sprintf(
+			"\n[Truncated: showed lines %d-%d (%d of at least %d). Use offset=%d to continue.]\n",
+			offset, offset+linesRead-1, linesRead, lastScannedLine, nextOffset,
+		))
 	}
 
 	content := builder.String()
@@ -537,7 +614,82 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 	// Emit FilePeek
 	EmitFilePeek(ctx, filePath, "Reading", content, "read")
 
+	// Proactive context: append sibling/test-paired file previews so the
+	// model gets package-level context without needing follow-up reads.
+	// No-op when provider is nil (not wired or disabled by config). We
+	// just pass a single-entry alreadyRead set with the current file —
+	// the provider's own filtering (seen map) prevents duplicating
+	// within one call. Session-level dedup could be added later via the
+	// package-level FileReadTracker if needed.
+	if t.proactive != nil {
+		alreadyRead := map[string]bool{filePath: true}
+		if block := t.proactive.RelatedBlock(filePath, alreadyRead); block != "" {
+			content += block
+		}
+	}
+
 	return NewSuccessResult(content), nil
+}
+
+// suggestFilesInWorkDir walks the workdir looking for files whose
+// basename matches `base` (case-insensitive, substring). Bounded to
+// avoid blowing up on large repos: visits at most suggestScanLimit
+// entries total and skips vendor/build/generated directories.
+// Returns up to 5 paths, formatted like suggestSimilarFiles output.
+//
+// Designed as the fallback when the exact path doesn't exist — the
+// common "wrong dir, right filename" model failure mode Kimi hits.
+func suggestFilesInWorkDir(workDir, base string) []string {
+	if workDir == "" || base == "" {
+		return nil
+	}
+	baseLower := strings.ToLower(base)
+	nameOnly := strings.TrimSuffix(baseLower, filepath.Ext(baseLower))
+	if len(nameOnly) < 2 {
+		// Too-short names (e.g. "x" for the query path "/tmp/x") match
+		// anything and drown the model in noise. Skip.
+		return nil
+	}
+
+	const suggestScanLimit = 5000
+	visited := 0
+	var suggestions []string
+
+	skipDirs := map[string]bool{
+		".git": true, "node_modules": true, "vendor": true,
+		"build": true, "dist": true, "target": true,
+		".venv": true, "venv": true, "__pycache__": true,
+	}
+
+	_ = filepath.WalkDir(workDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // swallow per-entry errors, keep walking
+		}
+		// SkipAll (not SkipDir) is load-bearing: from a file entry,
+		// SkipDir only skips remaining files in the PARENT directory —
+		// it does not abort the walk. On a 50k-file monorepo that
+		// means the "limit" is not actually enforced. SkipAll (Go
+		// 1.20+) terminates WalkDir cleanly.
+		if visited >= suggestScanLimit || len(suggestions) >= 5 {
+			return filepath.SkipAll
+		}
+		visited++
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		entryLower := strings.ToLower(d.Name())
+		entryNameOnly := strings.TrimSuffix(entryLower, filepath.Ext(entryLower))
+		if entryLower == baseLower ||
+			strings.Contains(entryLower, nameOnly) ||
+			strings.Contains(nameOnly, entryNameOnly) {
+			suggestions = append(suggestions, "  - "+path)
+		}
+		return nil
+	})
+	return suggestions
 }
 
 // suggestSimilarFiles returns up to 5 file paths similar to the given (non-existent) path.

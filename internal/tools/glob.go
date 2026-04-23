@@ -214,9 +214,20 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		}
 	}
 
-	// Sort by modification time (newest first)
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime > files[j].modTime
+	// Rank by relevance first (non-test/non-vendor/non-generated files
+	// outrank test/vendor hits even if the latter are newer). mtime
+	// stays as the tiebreaker so recently-touched files still float to
+	// the top within a tier.
+	sort.SliceStable(files, func(i, j int) bool {
+		si := fileRelevanceScore(files[i].path, 1)
+		sj := fileRelevanceScore(files[j].path, 1)
+		if si != sj {
+			return si > sj
+		}
+		if files[i].modTime != files[j].modTime {
+			return files[i].modTime > files[j].modTime
+		}
+		return files[i].path < files[j].path
 	})
 
 	// Limit results

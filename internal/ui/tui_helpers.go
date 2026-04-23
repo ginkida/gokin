@@ -80,12 +80,11 @@ func (m *Model) Welcome() {
 	infoStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	accentStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
 
-	// Build info line
-	dir := m.workDir
-	if dir == "" {
-		dir = "."
-	}
-	dir = shortenPath(dir, 30)
+	// Build info line. prettyPath handles home-dir collapse unconditionally,
+	// then shortenPath middle-truncates if the result is still long. Keeps
+	// the welcome banner and status bar visually in sync — both show
+	// `~/github/gokin` for paths that live under $HOME.
+	dir := shortenPath(prettyPath(m.workDir), 30)
 
 	modelName := m.currentModel
 	if modelName == "" {
@@ -297,6 +296,31 @@ func (m Model) getCommandHint(input string) string {
 	}
 
 	return ""
+}
+
+// prettyPath returns path with the user's home directory collapsed to "~".
+// Unconditional — unlike shortenPath this does *not* depend on length, so
+// it's safe for the status bar where we always want `~/github/gokin` over
+// the longer `/Users/ginkida/github/gokin`. Returns "." for empty input
+// so callers don't have to guard.
+func prettyPath(path string) string {
+	if path == "" {
+		return "."
+	}
+	home, _ := os.UserHomeDir()
+	if home == "" || !strings.HasPrefix(path, home) {
+		return path
+	}
+	// Must match either exactly (path == home) or have a separator after
+	// so /Users/ginkidaX isn't rewritten as ~X.
+	rest := path[len(home):]
+	if rest == "" {
+		return "~"
+	}
+	if rest[0] == '/' {
+		return "~" + rest
+	}
+	return path
 }
 
 // shortenPath shortens a path to fit within maxLen runes while preserving the filename.

@@ -929,17 +929,36 @@ func buildClaudeCodeArgs(name string, args map[string]any) string {
 		}
 	}
 
-	// Smart truncation: preserve filename for paths, truncate in middle
-	maxLen := 120 // Increased from 80 for better visibility
-	if len(result) > maxLen {
-		if isFilePath {
-			result = truncatePathSmart(result, maxLen)
+	// Smart truncation. File paths get an aggressive budget + ~/ prefix
+	// for home directory + middle-ellipsis (shortenPath), because the
+	// success line right below this one repeats the path — long absolute
+	// paths like /Users/alice/github/project/internal/ui/tui.go produced
+	// two ugly duplicated rows. 55 cols keeps the filename visible even
+	// in narrow terminals while fitting the exec header on one line.
+	const filePathMaxLen = 55
+	const generalArgMaxLen = 120
+	if isFilePath {
+		if stripped := stripWrappingQuotes(result); stripped != result {
+			// shortenPath expects a bare path, not a quoted one. Re-wrap.
+			result = "\"" + shortenPath(stripped, filePathMaxLen) + "\""
 		} else {
-			result = result[:maxLen-3] + "..."
+			result = shortenPath(result, filePathMaxLen)
 		}
+	} else if len(result) > generalArgMaxLen {
+		result = result[:generalArgMaxLen-3] + "..."
 	}
 
 	return result
+}
+
+// stripWrappingQuotes returns s without its single wrapping pair of double
+// quotes, or s unchanged. Used to unwrap formatArgValue's quoted strings
+// before path-aware truncation; callers re-wrap.
+func stripWrappingQuotes(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 // truncatePathSmart truncates a file path while preserving the filename.

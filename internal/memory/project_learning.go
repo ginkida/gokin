@@ -663,6 +663,19 @@ func (pl *ProjectLearning) MarkdownPath() string {
 	return pl.markdownPath
 }
 
+// HasContent reports whether ProjectLearning currently contains prompt-worthy
+// durable knowledge. This mirrors the sections rendered by FormatForPrompt.
+func (pl *ProjectLearning) HasContent() bool {
+	pl.mu.RLock()
+	defer pl.mu.RUnlock()
+
+	if len(pl.data.Preferences) > 0 || len(pl.data.Patterns) > 0 {
+		return true
+	}
+
+	return len(pl.getSuccessfulCommandsInternal(0.8, 1)) > 0
+}
+
 // Exists returns true if the learning file exists.
 func (pl *ProjectLearning) Exists() bool {
 	_, err := os.Stat(pl.path)

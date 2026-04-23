@@ -23,6 +23,15 @@ type EditTool struct {
 	diffEnabled   bool
 	workDir       string
 	pathValidator *security.PathValidator
+
+	// readTracker + requireReadBeforeEdit implement the "Read before Edit"
+	// safety invariant. When both are set, Execute refuses to edit a file
+	// that has no active read record in the session — a classic Kimi
+	// failure mode: grep shows 3 lines of context, model edits blindly.
+	// Disabled by default in tests / minimal harnesses; enabled via config
+	// in the real app.
+	readTracker            *FileReadTracker
+	requireReadBeforeEdit  bool
 }
 
 // NewEditTool creates a new EditTool instance.
@@ -61,6 +70,46 @@ func (t *EditTool) SetWorkDir(workDir string) {
 func (t *EditTool) SetAllowedDirs(dirs []string) {
 	allDirs := append([]string{t.workDir}, dirs...)
 	t.pathValidator = security.NewPathValidator(allDirs, false)
+}
+
+// SetReadTracker wires the session-wide file read tracker so Execute can
+// enforce the Read-before-Edit invariant.
+func (t *EditTool) SetReadTracker(tracker *FileReadTracker) {
+	t.readTracker = tracker
+}
+
+// SetRequireReadBeforeEdit toggles the enforcement. When false, edit goes
+// through even if the file wasn't read — matches the pre-invariant
+// behavior for users who explicitly opt out.
+func (t *EditTool) SetRequireReadBeforeEdit(require bool) {
+	t.requireReadBeforeEdit = require
+}
+
+// checkReadBeforeEdit returns a non-empty error message when the edit
+// must be blocked. Returns "" when the check passes, is disabled, or
+// can't run (missing deps, unresolvable path, nonexistent file).
+func (t *EditTool) checkReadBeforeEdit(filePath string) string {
+	if !t.requireReadBeforeEdit || t.readTracker == nil || t.pathValidator == nil {
+		return ""
+	}
+	validPath, err := t.pathValidator.ValidateFile(filePath)
+	if err != nil {
+		// Path-validation error gets a better message downstream in the
+		// real edit flow — don't shadow it with "read first".
+		return ""
+	}
+	if _, err := os.Stat(validPath); err != nil {
+		// File doesn't exist (or unreadable). Edit will fail with a more
+		// specific "file not found" below — preserve that diagnostic.
+		return ""
+	}
+	if t.readTracker.HasBeenRead(validPath) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"read-before-edit: call the read tool on %s first so you have the full surrounding context. Editing based on grep snippets regularly clobbers nearby code. After reading, retry the edit.",
+		filePath,
+	)
 }
 
 func (t *EditTool) Name() string {
@@ -213,6 +262,15 @@ func (t *EditTool) Validate(args map[string]any) error {
 func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	filePath, _ := GetString(args, "file_path")
 
+	// Read-before-Edit invariant. Must run before the sub-flow dispatch
+	// so it covers string/regex/line/insert/multi-edit uniformly. The
+	// helper is a no-op when the tracker isn't wired (test harnesses) or
+	// when the file doesn't exist (Edit on new file → clearer error
+	// downstream).
+	if msg := t.checkReadBeforeEdit(filePath); msg != "" {
+		return NewErrorResult(msg), nil
+	}
+
 	// Check for multi-edit mode
 	if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
 		return t.executeMultiEdit(ctx, filePath, edits)
@@ -295,25 +353,9 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		}
 
 		if count > 1 && !replaceAll {
-			// Find line numbers of matches for a more helpful error
-			lines := strings.Split(content, "\n")
-			var lineNums []string
-			pos := 0
-			for i, line := range lines {
-				lineEnd := pos + len(line)
-				for _, match := range matches {
-					if match[0] >= pos && match[0] < lineEnd {
-						lineNums = append(lineNums, fmt.Sprintf("%d", i+1))
-						break
-					}
-				}
-				pos = lineEnd + 1 // +1 for newline
-			}
-			lineInfo := ""
-			if len(lineNums) > 0 {
-				lineInfo = fmt.Sprintf(" (lines: %s)", strings.Join(lineNums, ", "))
-			}
-			return NewErrorResult(fmt.Sprintf("regex pattern matches %d times in %s%s. Set replace_all=true to replace all.", count, filePath, lineInfo)), nil
+			return NewErrorResult(
+				buildAmbiguousRegexEditError(filePath, content, matches, count),
+			), nil
 		}
 
 		// Perform regex replacement
@@ -383,19 +425,14 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		}
 
 		if count > 1 && !replaceAll {
-			// Find line numbers of occurrences for a more helpful error
-			lines := strings.Split(content, "\n")
-			var lineNums []string
-			for i, line := range lines {
-				if strings.Contains(line, oldStr) {
-					lineNums = append(lineNums, fmt.Sprintf("%d", i+1))
-				}
-			}
-			lineInfo := ""
-			if len(lineNums) > 0 {
-				lineInfo = fmt.Sprintf(" (lines: %s)", strings.Join(lineNums, ", "))
-			}
-			return NewErrorResult(fmt.Sprintf("old_string appears %d times in %s%s. Provide more surrounding context to make it unique, or set replace_all=true.", count, filePath, lineInfo)), nil
+			// Multi-match ambiguity. Kimi typically retries blindly here;
+			// give it enough structured info to pick precisely on the
+			// next attempt: line numbers + a few chars of surrounding
+			// context per match, plus an explicit reminder that line_start/
+			// line_end mode disambiguates without needing more context.
+			return NewErrorResult(
+				buildAmbiguousEditError(filePath, content, oldStr, count, false),
+			), nil
 		}
 
 		// Perform replacement
@@ -958,14 +995,14 @@ func tryFuzzyReplace(content, old, new string, replaceAll bool) (string, string,
 
 	for _, strategy := range fuzzyStrategies {
 		normalizedOld := strategy.normalize(old)
-		// If normalization doesn't change old, this strategy won't help
-		if normalizedOld == old {
-			continue
-		}
-
 		normalizedContent := strategy.normalize(content)
-		// If normalization doesn't change content either, skip
-		if normalizedContent == content {
+		// Skip only if the strategy is a no-op for BOTH sides — then
+		// there's nothing it can reconcile. Pre-fix: we skipped if old
+		// was unchanged, which wrongly bailed on the common case where
+		// `old` is clean (from the model) but `content` has dirty
+		// whitespace (from disk). That scenario is exactly what this
+		// fuzzy chain is supposed to handle.
+		if normalizedOld == old && normalizedContent == content {
 			continue
 		}
 
@@ -1029,4 +1066,161 @@ func tryFuzzyReplace(content, old, new string, replaceAll bool) (string, string,
 	}
 
 	return "", "", fmt.Errorf("no fuzzy strategy matched")
+}
+
+// ambiguousMatchContextLines is how many surrounding lines to show
+// around each ambiguous match. Three each side is enough to show the
+// enclosing function/block boundary without flooding the error.
+const ambiguousMatchContextLines = 2
+
+// buildAmbiguousEditError renders a structured error for string-mode
+// edits that matched multiple times. Includes per-match line number +
+// content snippet so the model can pick immediately using line_start/
+// line_end mode, without having to re-read the file.
+func buildAmbiguousEditError(filePath, content, oldStr string, count int, regex bool) string {
+	lines := strings.Split(content, "\n")
+	hits := findStringOccurrenceLines(lines, oldStr)
+	return formatAmbiguousEditMessage(filePath, lines, hits, count, regex)
+}
+
+// buildAmbiguousRegexEditError is the regex equivalent. Takes the
+// already-computed regex match byte-index pairs and maps them to line
+// numbers for context extraction.
+func buildAmbiguousRegexEditError(filePath, content string, matches [][]int, count int) string {
+	lines := strings.Split(content, "\n")
+	hits := lineNumbersForByteOffsets(content, matches)
+	return formatAmbiguousEditMessage(filePath, lines, hits, count, true)
+}
+
+// findStringOccurrenceLines returns 1-based line numbers where the
+// substring appears. A single "cross-line" old_string (contains "\n")
+// is reported by its first line; the caller can still use line_start
+// to address the match unambiguously.
+func findStringOccurrenceLines(lines []string, substr string) []int {
+	if strings.Contains(substr, "\n") {
+		// Multi-line substring — scan by reconstructing the original
+		// content and walking char-by-char. Cheap because content is
+		// already bounded by edit-tool limits.
+		content := strings.Join(lines, "\n")
+		var hits []int
+		offset := 0
+		for {
+			idx := strings.Index(content[offset:], substr)
+			if idx < 0 {
+				return hits
+			}
+			abs := offset + idx
+			// Count newlines before `abs` → that's the 0-based line; +1
+			// for humans.
+			hits = append(hits, strings.Count(content[:abs], "\n")+1)
+			offset = abs + len(substr)
+		}
+	}
+	var hits []int
+	for i, line := range lines {
+		if strings.Contains(line, substr) {
+			hits = append(hits, i+1)
+		}
+	}
+	return hits
+}
+
+// lineNumbersForByteOffsets converts regex match byte-offsets to
+// 1-based line numbers. Deduplicates consecutive matches that land on
+// the same line (regex can match multiple times per line — the model
+// only needs one anchor per line to disambiguate).
+func lineNumbersForByteOffsets(content string, matches [][]int) []int {
+	if len(matches) == 0 {
+		return nil
+	}
+	var hits []int
+	last := -1
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		line := strings.Count(content[:m[0]], "\n") + 1
+		if line != last {
+			hits = append(hits, line)
+			last = line
+		}
+	}
+	return hits
+}
+
+// formatAmbiguousEditMessage builds the final error string shared by
+// string-mode and regex-mode ambiguity paths. The model sees:
+//   - count and file path (problem summary)
+//   - per-match line number + 2 lines of surrounding context
+//   - two concrete next-action options (add more context OR switch to
+//     line_start/line_end mode with a specific line number)
+func formatAmbiguousEditMessage(filePath string, lines []string, hits []int, count int, regex bool) string {
+	kind := "old_string"
+	if regex {
+		kind = "regex pattern"
+	}
+	if len(hits) == 0 {
+		return fmt.Sprintf(
+			"%s matches %d times in %s. Provide more surrounding context to make the match unique, or set replace_all=true.",
+			kind, count, filePath,
+		)
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s matches %d times in %s — ambiguous. Matches at lines: ",
+		kind, count, filePath)
+	numStrs := make([]string, 0, len(hits))
+	for _, h := range hits {
+		numStrs = append(numStrs, fmt.Sprintf("%d", h))
+	}
+	sb.WriteString(strings.Join(numStrs, ", "))
+	sb.WriteString("\n\n")
+
+	// Cap the rendered-contexts at 5 to keep error size bounded on
+	// pathological cases where the pattern matches 50+ times.
+	renderLimit := len(hits)
+	if renderLimit > 5 {
+		renderLimit = 5
+	}
+	for i := 0; i < renderLimit; i++ {
+		ln := hits[i]
+		sb.WriteString(renderLineContext(lines, ln, ambiguousMatchContextLines))
+		sb.WriteString("\n")
+	}
+	if len(hits) > renderLimit {
+		fmt.Fprintf(&sb, "(showing first %d of %d matches)\n\n", renderLimit, len(hits))
+	}
+
+	sb.WriteString("Next action (pick one):\n")
+	sb.WriteString("  A) Re-issue edit with more surrounding context in old_string so it uniquely matches one site.\n")
+	fmt.Fprintf(&sb, "  B) Switch to line-range mode: {file_path, line_start: %d, line_end: ..., new_string: ...}.\n", hits[0])
+	sb.WriteString("  C) If every occurrence should change, set replace_all=true.\n")
+	return sb.String()
+}
+
+// renderLineContext extracts `before+1+after` lines around 1-based
+// `lineNum`, each prefixed with its line number and a marker ("→") on
+// the target line. Used by the ambiguity error to give the model
+// enough context to pick precisely.
+func renderLineContext(lines []string, lineNum, around int) string {
+	if lineNum < 1 || lineNum > len(lines) {
+		return ""
+	}
+	start := lineNum - around
+	if start < 1 {
+		start = 1
+	}
+	end := lineNum + around
+	if end > len(lines) {
+		end = len(lines)
+	}
+	var sb strings.Builder
+	for i := start; i <= end; i++ {
+		marker := "  "
+		if i == lineNum {
+			marker = "→ "
+		}
+		fmt.Fprintf(&sb, "%s%d: %s\n", marker, i, lines[i-1])
+	}
+	return sb.String()
 }

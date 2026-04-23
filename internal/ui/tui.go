@@ -2072,6 +2072,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			if m.toastManager != nil {
 				m.toastManager.ShowWarning(msg.Message)
 			}
+		case StatusWarning:
+			if m.toastManager != nil && msg.Message != "" {
+				if tag, _ := msg.Details["tag"].(string); tag != "" {
+					m.toastManager.ShowTagged(tag, ToastWarning, msg.Message, 4*time.Second)
+				} else {
+					m.toastManager.ShowWarning(msg.Message)
+				}
+			}
 		case StatusInfo:
 			if m.toastManager != nil && msg.Message != "" {
 				m.toastManager.Show(ToastInfo, "", msg.Message, 4*time.Second)
@@ -2165,12 +2173,28 @@ func (m *Model) extractToolInfoFromArgs(name string, args map[string]any) string
 	return ""
 }
 
+// collapsedByDefault reports whether a tool's successful output should
+// skip the inline head+tail preview and show only a summary line + expand
+// hint. For these tools the ✓ success line itself (with line count and
+// path) carries all the useful signal; the content payload is either
+// redundant (Read — the file is on disk, ask for it if you want) or
+// self-descriptive elsewhere.
+//
+// bash / grep / glob deliberately stay uncollapsed: their output IS the
+// user's primary signal and a head+tail preview is worth the rows.
+func collapsedByDefault(toolName string) bool {
+	switch toolName {
+	case "read":
+		return true
+	}
+	return false
+}
+
 // handleToolResultWithInfo handles tool result message with clean, minimal formatting.
 // It uses the provided tool name, info, and start time from the matched active call
 // rather than relying on m.currentTool/m.toolStartTime (which may have been overwritten
 // by later parallel tool calls).
 func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, startTime time.Time) {
-	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	contentStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 
@@ -2207,25 +2231,35 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 		m.lastToolOutputIndex = m.toolOutput.AddEntry(toolName, content)
 		expanded = m.toolOutput.IsExpanded(m.lastToolOutputIndex)
 		needsTruncation = m.toolOutput.NeedsTruncation(content)
-		compactLongOutput = m.toolOutput.CompactModeActive() && needsTruncation && !expanded
+		// Read results are collapsed by default — the "✓ Read 100 lines
+		// from X" success line above already tells you what happened;
+		// inlining 10 lines of random head+tail usually isn't signal,
+		// just noise. User can press `e` to expand. Other tools (bash /
+		// grep / glob) keep the head+tail preview because their output
+		// IS the primary signal.
+		//
+		// Global compact mode (user toggled via `E` / Ctrl+E) still
+		// forces the same behaviour for all tools.
+		compactLongOutput = needsTruncation && !expanded &&
+			(m.toolOutput.CompactModeActive() || collapsedByDefault(toolName))
 	}
 
 	if compactLongOutput {
-		summaryText := ""
-		if m.toolOutput != nil {
-			summaryText = m.toolOutput.GetSummary(m.lastToolOutputIndex)
-		}
-		if summaryText != "" {
-			m.output.AppendLine("    " + dimStyle.Render(summaryText))
-		}
-		m.output.AppendLine("    " + hintStyle.Render("Full output hidden - press e to expand, E to restore previews"))
+		// Single minimal hint — the ✓ Read success line above already
+		// carries the line count + path + duration, so we don't repeat
+		// the "[read: 100 lines]" GetSummary here. Keeps the output to
+		// TWO rows (✓ header + expand hint) per Read.
+		m.output.AppendLine("    " + hintStyle.Render("⎿ press e to expand"))
 		m.output.AppendLine("")
 		return
 	}
 
-	if needsTruncation && !expanded {
-		m.output.AppendLine("    " + hintStyle.Render("Preview below - press e for full output"))
-	}
+	// The "Preview below - press e for full output" hint that used to sit
+	// here is gone: the "... +N lines ..." marker inside the preview plus
+	// the status-bar's `e last output` hint already signal the same thing.
+	// Showing it as a separate line in front of *every* truncated read
+	// stole a row and visually separated the header ("✓ Read 100 lines
+	// from X") from the actual content — readers perceived it as noise.
 
 	// Content lines (preview or full) with simple indent.
 	displayContent := FormatToolOutput(content, 6, expanded)
@@ -3007,7 +3041,12 @@ func (m *Model) DebugState() UIDebugState {
 		PlanningMode:      m.planningModeEnabled,
 		PermissionsActive: m.permissionsEnabled,
 		SandboxEnabled:    m.sandboxEnabled,
-		TokenUsagePct:     func() float64 { if m.tokenUsage != nil { return m.tokenUsage.PercentUsed * 100 }; return 0 }(),
+		TokenUsagePct: func() float64 {
+			if m.tokenUsage != nil {
+				return m.tokenUsage.PercentUsed * 100
+			}
+			return 0
+		}(),
 		MCPHealthy:        m.mcpHealthy,
 		MCPTotal:          m.mcpTotal,
 		ConversationMode:  m.conversationMode,
@@ -3031,7 +3070,6 @@ func (m *Model) Cleanup() {
 		fmt.Print("\033]1337;SetBadgeFormat=\a")
 	}
 }
-
 
 // HidePlanProgress hides the plan progress panel.
 func (m *Model) HidePlanProgress() {

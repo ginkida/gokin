@@ -105,6 +105,17 @@ func (m Model) renderLiveActivityCard() string {
 	out.WriteString(barStyle.Render(firstGlyph) + " ")
 	out.WriteString(valueStyle.Render(truncateRunes(current, width-2)))
 
+	// Todo progress: when the agent is working through a plan (todo list),
+	// surface the currently-active step (or next pending) so users see
+	// "we're on step 3 of 7" instead of having to guess from tool calls.
+	// The line lives below the current-action row because it's a durable
+	// orientation signal, not a transient one.
+	if todo := m.liveActivityTodoLine(); todo != "" {
+		out.WriteByte('\n')
+		out.WriteString(barStyle.Render("▎") + " " +
+			valueStyle.Render(truncateRunes(todo, width-2)))
+	}
+
 	if !feedOpen {
 		// Recent: one line of the most recent completed activity, prefixed
 		// with "↳ " so it reads as a trailing consequence of the current
@@ -200,6 +211,77 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	}
 
 	return ""
+}
+
+// liveActivityTodoLine surfaces the agent's current plan position as a
+// single row in the live activity card — the user can see "which step"
+// without opening the full todo panel (Ctrl+T). Returns "" when no todos
+// exist or when none are actively or pending (all done).
+//
+// Priority picks, in order:
+//  1. An in-progress step marked `[/]` (the agent just started this).
+//  2. The next pending step marked `[ ]`.
+//
+// Format: "☐ Step 3/7: Refactor rate limit display" — position is the
+// 1-based index of the chosen step among *all* items, not only pending.
+// That way "Step 3/7" stays anchored to the plan even as earlier steps
+// complete.
+func (m Model) liveActivityTodoLine() string {
+	if len(m.todoItems) == 0 {
+		return ""
+	}
+
+	parseTodo := func(raw string) (marker, text string) {
+		s := strings.TrimSpace(raw)
+		if strings.HasPrefix(s, "- ") {
+			s = strings.TrimSpace(s[2:])
+		}
+		if len(s) >= 3 && s[0] == '[' && s[2] == ']' {
+			return string(s[1]), strings.TrimSpace(s[3:])
+		}
+		return "", s
+	}
+
+	total := len(m.todoItems)
+	pickIdx := -1
+	pickMarker := ""
+	pickText := ""
+
+	// First pass: in-progress. Second pass: next pending. Done items
+	// ([x]) and empty lines skipped.
+	for i, raw := range m.todoItems {
+		marker, text := parseTodo(raw)
+		if marker == "/" {
+			pickIdx = i
+			pickMarker = marker
+			pickText = text
+			break
+		}
+	}
+	if pickIdx < 0 {
+		for i, raw := range m.todoItems {
+			marker, text := parseTodo(raw)
+			if marker == " " && text != "" {
+				pickIdx = i
+				pickMarker = marker
+				pickText = text
+				break
+			}
+		}
+	}
+	if pickIdx < 0 {
+		return ""
+	}
+
+	glyph := "☐"
+	switch pickMarker {
+	case "/":
+		glyph = "◐" // partial / in-progress
+	case " ":
+		glyph = "☐" // empty box / pending
+	}
+
+	return fmt.Sprintf("%s Step %d/%d: %s", glyph, pickIdx+1, total, pickText)
 }
 
 // liveActivityRecentLine returns a single line of the most recent log entry,

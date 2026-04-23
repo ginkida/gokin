@@ -13,6 +13,7 @@ import (
 
 	"gokin/internal/client"
 	"gokin/internal/logging"
+	"gokin/internal/memory"
 
 	"google.golang.org/genai"
 )
@@ -54,6 +55,10 @@ type SessionMemoryManager struct {
 	// Callback fired after each successful extraction (for UI notifications)
 	onUpdate func()
 
+	// Durable project learning store (optional). When configured, high-signal
+	// findings from the session are promoted into project memory markdown.
+	projectLearning *memory.ProjectLearning
+
 	// Extracted content
 	content string
 
@@ -64,6 +69,14 @@ type SessionMemoryManager struct {
 func (s *SessionMemoryManager) SetOnUpdate(cb func()) {
 	s.mu.Lock()
 	s.onUpdate = cb
+	s.mu.Unlock()
+}
+
+// SetProjectLearning wires durable project learning promotion into the session
+// extraction pipeline.
+func (s *SessionMemoryManager) SetProjectLearning(pl *memory.ProjectLearning) {
+	s.mu.Lock()
+	s.projectLearning = pl
 	s.mu.Unlock()
 }
 
@@ -132,9 +145,6 @@ func (s *SessionMemoryManager) ExtractAsync(history []*genai.Content, currentTok
 // Extract extracts session memory from conversation history using heuristic analysis.
 // This does NOT make any LLM calls — it uses pattern matching on the history.
 func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if len(history) < 4 {
 		return // Too little history
 	}
@@ -195,28 +205,52 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 
 	heuristicContent := builder.String()
 
+	durableLearnings := extractDurableSessionLearnings(history)
+
+	s.mu.Lock()
 	s.extractionCount++
 	s.lastExtractionTokens = currentTokens
 	s.toolCallsSinceUpdate = 0
 	s.initialized = true
+	useLLM := s.summarizer != nil && s.extractionCount%3 == 0 && len(history) >= 10
+	onUpdate := s.onUpdate
+	projectLearning := s.projectLearning
 
 	// Every 3rd extraction, try LLM-based summarization for higher quality
-	if s.summarizer != nil && s.extractionCount%3 == 0 && len(history) >= 10 {
+	if useLLM {
+		s.mu.Unlock()
+		if projectLearning != nil {
+			s.flushPromotedSessionLearnings(projectLearning, durableLearnings)
+		}
 		go s.extractWithLLM(history, heuristicContent)
+		logging.Debug("session memory extracted",
+			"files", len(files),
+			"tools", len(toolCounts),
+			"errors", len(errors),
+			"tokens", currentTokens,
+			"promoted", len(durableLearnings))
+		return
 	} else {
 		s.content = heuristicContent
-		s.writeToDisk()
+	}
+	s.mu.Unlock()
+
+	s.writeToDisk()
+
+	if projectLearning != nil {
+		s.flushPromotedSessionLearnings(projectLearning, durableLearnings)
 	}
 
 	logging.Debug("session memory extracted",
 		"files", len(files),
 		"tools", len(toolCounts),
 		"errors", len(errors),
-		"tokens", currentTokens)
+		"tokens", currentTokens,
+		"promoted", len(durableLearnings))
 
 	// Notify UI about session memory update
-	if s.onUpdate != nil {
-		s.onUpdate()
+	if onUpdate != nil {
+		onUpdate()
 	}
 }
 
@@ -247,8 +281,12 @@ Be concise. Each section should be 1-5 bullet points maximum.`
 		logging.Debug("LLM session memory extraction failed, using heuristic", "error", err)
 		s.mu.Lock()
 		s.content = fallback
+		onUpdate := s.onUpdate
 		s.mu.Unlock()
 		s.writeToDisk()
+		if onUpdate != nil {
+			onUpdate()
+		}
 		return
 	}
 
@@ -258,8 +296,37 @@ Be concise. Each section should be 1-5 bullet points maximum.`
 	s.writeToDisk()
 	logging.Debug("LLM session memory extraction completed", "size", len(summary))
 
-	if s.onUpdate != nil {
-		s.onUpdate()
+	s.mu.RLock()
+	onUpdate := s.onUpdate
+	s.mu.RUnlock()
+
+	if onUpdate != nil {
+		onUpdate()
+	}
+}
+
+func (s *SessionMemoryManager) flushPromotedSessionLearnings(pl *memory.ProjectLearning, learnings []sessionDurableLearning) {
+	if pl == nil || len(learnings) == 0 {
+		return
+	}
+	promoted := 0
+	for _, learning := range learnings {
+		prefKey := learning.key
+		switch learning.kind {
+		case "fact", "convention":
+			prefKey = learning.kind + ":" + learning.key
+			if existing := pl.GetPreference(prefKey); existing == learning.value {
+				continue
+			}
+			pl.SetPreference(prefKey, learning.value)
+			promoted++
+		}
+	}
+	if promoted == 0 {
+		return
+	}
+	if err := pl.Flush(); err != nil {
+		logging.Debug("failed to flush promoted session learning", "error", err)
 	}
 }
 
@@ -317,6 +384,12 @@ func (s *SessionMemoryManager) writeToDisk() {
 type fileActivity struct {
 	Path   string
 	Action string // "read", "edited", "created", "searched"
+}
+
+type sessionDurableLearning struct {
+	kind  string
+	key   string
+	value string
 }
 
 var filePathPattern = regexp.MustCompile(`(?:^|[\s"'` + "`" + `])([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)`)
@@ -445,6 +518,228 @@ func extractErrors(history []*genai.Content) []string {
 		errors = errors[len(errors)-20:]
 	}
 	return errors
+}
+
+type sessionFunctionCall struct {
+	name string
+	args map[string]any
+}
+
+func extractDurableSessionLearnings(history []*genai.Content) []sessionDurableLearning {
+	pending := make(map[string][]sessionFunctionCall)
+	latest := make(map[string]sessionDurableLearning)
+
+	for _, msg := range history {
+		for _, part := range msg.Parts {
+			if part.FunctionCall != nil {
+				call := part.FunctionCall
+				pending[call.Name] = append(pending[call.Name], sessionFunctionCall{
+					name: call.Name,
+					args: call.Args,
+				})
+			}
+			if part.FunctionResponse == nil {
+				continue
+			}
+			resp := part.FunctionResponse.Response
+			if !isSuccessfulFunctionResponse(resp) {
+				continue
+			}
+
+			queue := pending[part.FunctionResponse.Name]
+			if len(queue) == 0 {
+				continue
+			}
+			call := queue[0]
+			pending[part.FunctionResponse.Name] = queue[1:]
+
+			for _, learning := range classifyDurableSessionLearnings(call, resp) {
+				latest[learning.kind+":"+learning.key] = learning
+			}
+		}
+	}
+
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	result := make([]sessionDurableLearning, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, latest[key])
+	}
+	return result
+}
+
+func isSuccessfulFunctionResponse(resp map[string]any) bool {
+	if resp == nil {
+		return false
+	}
+	if success, ok := resp["success"].(bool); ok {
+		return success
+	}
+	errMsg, _ := resp["error"].(string)
+	return strings.TrimSpace(errMsg) == ""
+}
+
+func classifyDurableSessionLearnings(call sessionFunctionCall, resp map[string]any) []sessionDurableLearning {
+	switch call.name {
+	case "bash":
+		cmd, _ := call.args["command"].(string)
+		return classifyCommandLearnings(normalizeDurableCommandForPromotion(cmd))
+	case "verify_code":
+		content, _ := resp["content"].(string)
+		return classifyCommandLearnings(extractVerifyCommand(content))
+	default:
+		return nil
+	}
+}
+
+func normalizeDurableCommandForPromotion(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	if strings.HasPrefix(cmd, "cd ") {
+		idx := strings.Index(cmd, " && ")
+		if idx < 0 {
+			return ""
+		}
+		cmd = strings.TrimSpace(cmd[idx+4:])
+		if cmd == "" {
+			return ""
+		}
+	}
+	if len(cmd) < 5 || len(cmd) > 500 {
+		return ""
+	}
+	return cmd
+}
+
+func extractVerifyCommand(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	const prefix = "Verification successful ("
+	start := strings.Index(content, prefix)
+	if start < 0 {
+		return ""
+	}
+	start += len(prefix)
+	end := strings.Index(content[start:], "):")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(content[start : start+end])
+}
+
+func classifyCommandLearnings(cmd string) []sessionDurableLearning {
+	if cmd == "" {
+		return nil
+	}
+
+	segments := splitPromotableCommandSegments(cmd)
+	latest := make(map[string]sessionDurableLearning)
+	for _, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+		lower := strings.ToLower(segment)
+		switch {
+		case isPromotableTestCommand(lower):
+			latest["fact:test_command"] = sessionDurableLearning{kind: "fact", key: "test_command", value: segment}
+		case isPromotableBuildCommand(lower):
+			latest["fact:build_command"] = sessionDurableLearning{kind: "fact", key: "build_command", value: segment}
+		case isPromotableLintCommand(lower):
+			latest["fact:lint_command"] = sessionDurableLearning{kind: "fact", key: "lint_command", value: segment}
+		case isPromotableFormatCommand(lower):
+			latest["convention:format_command"] = sessionDurableLearning{kind: "convention", key: "format_command", value: segment}
+		}
+	}
+
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	result := make([]sessionDurableLearning, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, latest[key])
+	}
+	return result
+}
+
+func splitPromotableCommandSegments(cmd string) []string {
+	fields := strings.FieldsFunc(cmd, func(r rune) bool {
+		return r == ';'
+	})
+	var segments []string
+	for _, field := range fields {
+		for _, part := range strings.Split(field, "&&") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				segments = append(segments, part)
+			}
+		}
+	}
+	return segments
+}
+
+func isPromotableTestCommand(lower string) bool {
+	testMarkers := []string{
+		"go test", "pytest", "python -m pytest", "python3 -m pytest",
+		"npm test", "npm run test", "pnpm test", "pnpm run test",
+		"yarn test", "cargo test", "bundle exec rspec", "jest", "vitest",
+	}
+	for _, marker := range testMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPromotableBuildCommand(lower string) bool {
+	buildMarkers := []string{
+		"go build", "npm run build", "pnpm build", "pnpm run build",
+		"yarn build", "cargo build", "make build",
+	}
+	for _, marker := range buildMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPromotableLintCommand(lower string) bool {
+	lintMarkers := []string{
+		"go vet", "golangci-lint", "npm run lint", "pnpm lint", "pnpm run lint",
+		"yarn lint", "cargo clippy", "ruff check", "eslint",
+	}
+	for _, marker := range lintMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPromotableFormatCommand(lower string) bool {
+	formatMarkers := []string{
+		"gofmt", "goimports", "prettier", "cargo fmt", "ruff format",
+		"black", "eslint --fix",
+	}
+	for _, marker := range formatMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractErrorLine(text, pattern string) string {

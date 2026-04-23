@@ -227,18 +227,27 @@ type PlanManagerProvider interface {
 	GetActiveContractContext() string
 }
 
+// ProjectLearningProvider exposes durable project learnings for prompt injection.
+type ProjectLearningProvider interface {
+	FormatForPrompt() string
+	HasContent() bool
+}
+
 // PromptBuilder builds dynamic system prompts.
 type PromptBuilder struct {
 	workDir         string
 	projectInfo     *ProjectInfo
 	projectMemory   *ProjectMemory
+	projectLearning ProjectLearningProvider
 	memoryStore     MemoryProvider
 	sessionMemory   *SessionMemoryManager
+	workingMemory   WorkingMemoryProvider
 	planAutoDetect  bool
 	planManager     PlanManagerProvider
 	detectedContext string // Auto-detected project context (frameworks, docs, etc.)
 	toolHints       string // Tool usage pattern hints
 	lastMessage     string // Last user message for conditional prompt injection
+	provider        string // Active provider family ("kimi", "glm", ...) for addenda
 
 	// Prompt caching: avoids rebuilding when inputs haven't changed
 	cachedPrompt string
@@ -265,6 +274,12 @@ func (b *PromptBuilder) SetProjectMemory(memory *ProjectMemory) {
 	b.promptDirty = true
 }
 
+// SetProjectLearning sets durable project learning for prompt injection.
+func (b *PromptBuilder) SetProjectLearning(learning ProjectLearningProvider) {
+	b.projectLearning = learning
+	b.promptDirty = true
+}
+
 // SetMemoryStore sets the memory store for persistent memory injection.
 func (b *PromptBuilder) SetMemoryStore(store MemoryProvider) {
 	b.memoryStore = store
@@ -274,6 +289,12 @@ func (b *PromptBuilder) SetMemoryStore(store MemoryProvider) {
 // SetSessionMemory sets the session memory manager for automatic context injection.
 func (b *PromptBuilder) SetSessionMemory(sm *SessionMemoryManager) {
 	b.sessionMemory = sm
+	b.promptDirty = true
+}
+
+// SetWorkingMemory sets the compact working memory manager for prompt injection.
+func (b *PromptBuilder) SetWorkingMemory(wm WorkingMemoryProvider) {
+	b.workingMemory = wm
 	b.promptDirty = true
 }
 
@@ -316,6 +337,17 @@ func (b *PromptBuilder) SetLastMessage(msg string) {
 	}
 }
 
+// SetProvider records the active provider family ("kimi", "glm", "minimax",
+// "ollama"). Used to inject a provider-specific addendum with behavioural
+// guidance in Build(). Empty string means no addendum.
+func (b *PromptBuilder) SetProvider(provider string) {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	if b.provider != provider {
+		b.provider = provider
+		b.promptDirty = true
+	}
+}
+
 // Build constructs the full system prompt. Returns cached version if inputs
 // haven't changed since the last call.
 func (b *PromptBuilder) Build() string {
@@ -341,6 +373,12 @@ func (b *PromptBuilder) Build() string {
 		builder.WriteString(b.projectMemory.GetInstructions())
 	}
 
+	// Add durable project learning (facts, conventions, reliable commands).
+	if b.projectLearning != nil && b.projectLearning.HasContent() {
+		builder.WriteString("\n\n")
+		builder.WriteString(strings.TrimSpace(b.projectLearning.FormatForPrompt()))
+	}
+
 	// Add persistent memories from memory store
 	if b.memoryStore != nil {
 		memoryContent := b.memoryStore.GetForContext(true) // Project-specific memories
@@ -355,6 +393,12 @@ func (b *PromptBuilder) Build() string {
 		if smContent := b.sessionMemory.GetContent(); smContent != "" {
 			builder.WriteString("\n\n")
 			builder.WriteString(smContent)
+		}
+	}
+	if b.workingMemory != nil {
+		if wmContent := b.workingMemory.GetContent(); wmContent != "" {
+			builder.WriteString("\n\n")
+			builder.WriteString(wmContent)
 		}
 	}
 
@@ -403,11 +447,57 @@ func (b *PromptBuilder) Build() string {
 	// Tool chain patterns removed from system prompt to avoid
 	// encouraging excessive exploration on simple tasks.
 
+	// Provider-specific behavioural addendum. Placed last so it has the
+	// closest position to the user message and therefore the highest
+	// model attention. Empty when no provider is set or the provider has
+	// no addendum defined.
+	if addendum := providerAddendum(b.provider); addendum != "" {
+		builder.WriteString("\n\n")
+		builder.WriteString(addendum)
+	}
+
 	result := applyPromptBudget(builder.String(), maxSystemPromptChars)
 	b.cachedPrompt = result
 	b.promptDirty = false
 	return result
 }
+
+// providerAddendum returns provider-specific behavioural guidance for the
+// system prompt. Empty for providers we haven't characterised. Keep each
+// block under ~1K chars — any longer and the prompt cache churns.
+//
+// Kimi-for-coding is Medium-tier and chronically over-explores, blind-
+// edits, and skips verification. The addendum encodes the guardrails
+// already enforced by code (read-before-edit invariant, tool budget,
+// delta-check) so the model sees them before it plans the turn, not
+// only as post-hoc error responses.
+func providerAddendum(provider string) string {
+	switch provider {
+	case "kimi":
+		return kimiOperatingRules
+	}
+	return ""
+}
+
+const kimiOperatingRules = `## Operating rules (Kimi-specific)
+
+Plan-then-act: before the first tool call of a turn, write a single-line plan. Format: "Plan: <3-7 word objective>". Skip for trivial one-tool turns (e.g. a single read).
+
+Read discipline:
+- You MUST Read a file before Edit. The edit tool blocks edits on unread files (read-before-edit invariant). Don't edit from grep snippets.
+- Do not Re-read a file already loaded this session unless you changed it. If unsure, consult Working Memory.
+- Prefer: grep → targeted Read (with offset/limit). Avoid: glob → bulk Read of whole directory.
+- Batch independent Reads in parallel in one turn. Never serialise Reads that don't depend on each other.
+
+Edit discipline:
+- In old_string, quote 3-5 lines of exact surrounding text to make the match unambiguous. Short 1-line old_string regularly produces wrong-location matches.
+- After each Edit, the next tool response may contain delta-check errors (go build / typecheck output). If it does, fix those errors BEFORE any further Edit. Do not stack new edits on a broken tree.
+- Mutations (Edit/Write/Delete) are sequential; never batch them in parallel.
+
+Answer discipline:
+- After 3+ tool calls in a turn, pause and write ~3 lines of "Established / Unknown / Next" before deciding to continue or finalise.
+- Keep the final answer concise: ≤4 short paragraphs. Cite changed files by path. Don't paste full diffs — the runtime appends an evidence footer automatically.
+- Tool budget is capped per turn. When you see "Tool budget guard" in a tool response, STOP calling tools and write the final answer from what you already know.`
 
 // buildProjectSection builds the project-specific section.
 func (b *PromptBuilder) buildProjectSection() string {
@@ -519,6 +609,11 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 		builder.WriteString("\n\n")
 	}
 
+	if b.projectLearning != nil && b.projectLearning.HasContent() {
+		builder.WriteString(strings.TrimSpace(b.projectLearning.FormatForPrompt()))
+		builder.WriteString("\n\n")
+	}
+
 	// Add persistent memories from memory store (critical for context retention)
 	if b.memoryStore != nil {
 		memoryContent := b.memoryStore.GetForContext(true)
@@ -533,6 +628,12 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 	if b.sessionMemory != nil {
 		if smContent := b.sessionMemory.GetContent(); smContent != "" {
 			builder.WriteString(smContent)
+			builder.WriteString("\n")
+		}
+	}
+	if b.workingMemory != nil {
+		if wmContent := b.workingMemory.GetContent(); wmContent != "" {
+			builder.WriteString(wmContent)
 			builder.WriteString("\n")
 		}
 	}
@@ -625,6 +726,12 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 		builder.WriteString("\n")
 	}
 
+	if b.projectLearning != nil && b.projectLearning.HasContent() {
+		builder.WriteString("\n")
+		builder.WriteString(strings.TrimSpace(b.projectLearning.FormatForPrompt()))
+		builder.WriteString("\n")
+	}
+
 	// Add persistent memories (project knowledge, decisions, etc.)
 	if b.memoryStore != nil {
 		memoryContent := b.memoryStore.GetForContext(true)
@@ -640,6 +747,12 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 		if smContent := b.sessionMemory.GetContent(); smContent != "" {
 			builder.WriteString("\n")
 			builder.WriteString(smContent)
+		}
+	}
+	if b.workingMemory != nil {
+		if wmContent := b.workingMemory.GetContent(); wmContent != "" {
+			builder.WriteString("\n")
+			builder.WriteString(wmContent)
 		}
 	}
 
@@ -717,7 +830,10 @@ func applyPromptBudget(prompt string, maxChars int) string {
 	trimmed = truncateHeadingSection(trimmed, "## Tool Usage Hints", 1000)
 	trimmed = truncateHeadingSection(trimmed, "## Detected Project Context", 1800)
 	trimmed = truncateHeadingSection(trimmed, "## Project Instructions", 2200)
+	trimmed = truncateHeadingSection(trimmed, "## Project Learning", 1800)
 	trimmed = truncateHeadingSection(trimmed, "## Memory", 2800)
+	trimmed = truncateHeadingSection(trimmed, "# Session Memory", 1800)
+	trimmed = truncateHeadingSection(trimmed, "# Working Memory", 1400)
 	trimmed = truncatePlanningProtocolSection(trimmed, 2600)
 	trimmed = strings.TrimSpace(trimmed)
 
@@ -845,6 +961,7 @@ func findNextHeading(prompt string, from int) int {
 	}
 
 	candidates := []string{
+		"\n# ",
 		"\n## ",
 		"\n=== ACTIVE CONTRACT ===",
 		"\n═══════════════════════════════════════════════════════════════════════",

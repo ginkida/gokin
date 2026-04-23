@@ -95,6 +95,28 @@ func (t *FileReadTracker) CheckAndRecord(filePath string, offset, limit, content
 	return false, nil, false
 }
 
+// HasBeenRead reports whether the given (absolute) file path has any
+// active read record in the session. Used by Edit to block blind edits:
+// a model that greps a file and then tries to Edit it without Read has
+// only seen short snippets and is likely to clobber surrounding context.
+//
+// After a write/edit, InvalidateFile drops records for the file, so this
+// will return false again — the model is expected to Re-read before
+// another Edit on the same file.
+func (t *FileReadTracker) HasBeenRead(filePath string) bool {
+	if filePath == "" {
+		return false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for _, rec := range t.records {
+		if rec.FilePath == filePath {
+			return true
+		}
+	}
+	return false
+}
+
 // InvalidateFile removes all records for the given file path.
 // Called after write/edit/delete operations on the file.
 func (t *FileReadTracker) InvalidateFile(filePath string) {

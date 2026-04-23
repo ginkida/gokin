@@ -15,9 +15,9 @@ func (c *ModelCommand) Name() string        { return "model" }
 func (c *ModelCommand) Description() string { return "Switch AI model" }
 func (c *ModelCommand) Usage() string {
 	return `/model                  - Show current model and available models
-/model kimi-for-coding  - Kimi K2.6 (default, 262K context)
-/model glm-5            - GLM-5 (131K output)
-/model glm-5.1          - GLM-5.1 (newer, same limits)
+/model kimi-for-coding  - Kimi K2.6 Coding Plan (default, 262K context)
+/model glm-5.1          - GLM-5.1 (newest, 131K output)
+/model glm-5            - GLM-5 (stable)
 /model glm-4.7          - GLM-4.7 (thinking-enabled)
 /model MiniMax-M2.7     - MiniMax M2.7 (200K context)`
 }
@@ -71,11 +71,16 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		sb.WriteString("\nUsage: /model <name>")
 		switch activeProvider {
 		case "glm":
-			sb.WriteString("\nExamples: /model glm-5  or  /model glm-5.1  or  /model glm-4.7")
+			sb.WriteString("\nExamples: /model glm-5.1  or  /model glm-5  or  /model glm-4.7")
 		case "minimax":
 			sb.WriteString("\nExamples: /model M2.7  or  /model M2.7-highspeed  or  /model M2.5")
 		case "kimi":
-			sb.WriteString("\nExamples: /model k2.5  or  /model k2-thinking-turbo")
+			// Kimi Coding Plan currently serves only kimi-for-coding (K2.6).
+			// Old k2.5 / k2-thinking-turbo examples pointed at the retired
+			// Moonshot Developer API and caused confusion — removed.
+			sb.WriteString("\nExample: /model kimi-for-coding  (only model on Coding Plan — K2.6, 262K context)")
+		case "ollama":
+			sb.WriteString("\nExample: /model llama3.2  or any model pulled locally via `ollama pull …`")
 		}
 		sb.WriteString("\n\nUse /provider to switch providers")
 

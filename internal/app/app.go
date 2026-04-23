@@ -151,8 +151,10 @@ type App struct {
 	totalOutputTokens int
 
 	// Response metadata tracking
-	responseStartTime time.Time
-	responseToolsUsed []string
+	responseStartTime    time.Time
+	responseToolsUsed    []string
+	responseTouchedPaths []string
+	responseCommands     []string
 
 	// Session persistence
 	sessionManager *chat.SessionManager
@@ -198,6 +200,7 @@ type App struct {
 
 	// Session Memory
 	sessionMemory *appcontext.SessionMemoryManager
+	workingMemory *appcontext.WorkingMemoryManager
 
 	// Persistent stores (for flush on shutdown)
 	memoryStore  *memory.Store
@@ -1470,6 +1473,31 @@ func (a *App) GetConfig() *config.Config {
 	return a.config
 }
 
+// shortActiveProviderName returns a display-friendly label for the active
+// provider, intended for inline status messages like toasts ("Kimi rate
+// limit — resumes in 30s"). We take the first word of the provider's
+// registered DisplayName rather than the raw key: "glm" alone reads as
+// lowercase unexpanded, and the full DisplayName ("GLM (BigModel /
+// Z.AI)") is too long for a status-bar toast. Falls back to the raw key
+// when no DisplayName is registered, and to "Provider" when no active
+// provider is set — the message still parses ("Provider rate limit …").
+func (a *App) shortActiveProviderName() string {
+	if a == nil || a.config == nil {
+		return "Provider"
+	}
+	name := a.config.API.GetActiveProvider()
+	if name == "" {
+		return "Provider"
+	}
+	if def := config.GetProvider(name); def != nil && def.DisplayName != "" {
+		if idx := strings.IndexAny(def.DisplayName, " ("); idx > 0 {
+			return def.DisplayName[:idx]
+		}
+		return def.DisplayName
+	}
+	return name
+}
+
 // GetTokenStats returns token usage statistics for the session.
 func (a *App) GetTokenStats() commands.TokenStats {
 	a.mu.Lock()
@@ -1874,33 +1902,35 @@ func toolContextSummary(name string, args map[string]any) string {
 // buildModelEnhancement returns model-specific prompt enhancements.
 func (a *App) buildModelEnhancement() string {
 	modelName := a.config.Model.Name
-	if strings.HasPrefix(modelName, "glm") {
-		return "\n\n**GLM Model Note:** After every tool call, you MUST respond with analysis of results. Never call tools and stop silently. Structure: What I Found → Key Points → Next Steps."
+	profile := client.GetModelProfile(modelName)
+	var enhancement string
+
+	if profile.Family == "glm" {
+		enhancement += "\n\n**GLM Model Note:** After every tool call, you MUST respond with analysis of results. Never call tools and stop silently. Structure: What I Found -> Key Points -> Next Steps."
 	}
 
-	if strings.Contains(modelName, "flash") {
-		return "\n\n**Flash Model Note:** Keep responses detailed with specific file:line references despite speed optimizations."
+	if profile.Family == "kimi" {
+		enhancement += "\n\n**Kimi Execution Policy:** Plan briefly before tools. Prefer grep -> targeted read over broad repeated exploration. Reuse tool results and do not repeat the same read/grep/glob without a new hypothesis. After 1-3 tool calls, synthesize what is established, what remains unknown, and the next best action."
+	}
+
+	if strings.Contains(strings.ToLower(modelName), "flash") {
+		enhancement += "\n\n**Flash Model Note:** Keep responses detailed with specific file:line references despite speed optimizations."
 	}
 
 	// Ollama models: per-model prompting + tool calling fallback
 	if a.config.API.Backend == "ollama" {
-		var enhancement string
-
 		// Add per-model prompt enhancement based on model profile
 		enhancement += client.ModelPromptEnhancement(modelName)
 
 		// Add tool calling fallback prompt for models without native tool support
-		profile := client.GetModelProfile(modelName)
 		if !profile.SupportsTools {
 			// Use only the filtered tool set (same as selectToolSets in builder)
 			decls := a.getActiveToolDeclarations()
 			enhancement += client.ToolCallFallbackPrompt(decls)
 		}
-
-		return enhancement
 	}
 
-	return ""
+	return enhancement
 }
 
 // refreshSystemInstruction rebuilds and reapplies the dynamic system instruction.

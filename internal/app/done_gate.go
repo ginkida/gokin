@@ -19,14 +19,15 @@ import (
 )
 
 const (
-	doneGateOutputLimit           = 1600
-	doneGateDefaultCheckTimeout   = 3 * time.Minute
-	doneGateValidateCheckTimeout  = 30 * time.Second // Fast checks (validate, lint) don't need 3 min
-	doneGateMaxScanDepth          = 4
-	doneGateMaxModulesPerStack    = 8
-	doneGateMonorepoModuleLimit   = 4
-	doneGateGitProbeTimeout       = 2 * time.Second
-	doneGateCommandProbeTimeout   = 2 * time.Second // Quick check if a command exists
+	doneGateOutputLimit          = 1600
+	doneGateDefaultCheckTimeout  = 3 * time.Minute
+	doneGateValidateCheckTimeout = 30 * time.Second // Fast checks (validate, lint) don't need 3 min
+	doneGateMaxScanDepth         = 4
+	doneGateMaxModulesPerStack   = 8
+	doneGateMonorepoModuleLimit  = 4
+	doneGateMaxRunTestTargets    = 2
+	doneGateGitProbeTimeout      = 2 * time.Second
+	doneGateCommandProbeTimeout  = 2 * time.Second // Quick check if a command exists
 )
 
 type doneGateCheck struct {
@@ -39,6 +40,11 @@ type doneGateResult struct {
 	Success bool
 	Content string
 	Error   string
+}
+
+type doneGateTestTarget struct {
+	Path      string
+	Framework string
 }
 
 type doneGatePolicy struct {
@@ -91,7 +97,7 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 		return true
 	}
 
-	profile := detectDoneGateProfile(a.workDir)
+	profile := detectDoneGateProfileWithTouchedPaths(a.workDir, a.snapshotResponseTouchedPaths())
 	checks := a.buildDoneGateChecks(userMessage, toolsUsed, profile, policy)
 	if len(checks) == 0 {
 		if policy.FailClosed {
@@ -142,6 +148,41 @@ func (a *App) snapshotResponseToolsUsed() []string {
 	snapshot := make([]string, len(a.responseToolsUsed))
 	copy(snapshot, a.responseToolsUsed)
 	return snapshot
+}
+
+func (a *App) snapshotResponseTouchedPaths() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	snapshot := make([]string, len(a.responseTouchedPaths))
+	copy(snapshot, a.responseTouchedPaths)
+	return snapshot
+}
+
+func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, result tools.ToolResult) {
+	if !result.Success || !isDoneGateMutationTool(toolName) {
+		return
+	}
+
+	paths := normalizeDoneGateTouchedPaths(a.workDir, extractDoneGateTouchedPaths(args))
+	if len(paths) == 0 {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	seen := make(map[string]bool, len(a.responseTouchedPaths))
+	for _, existing := range a.responseTouchedPaths {
+		seen[existing] = true
+	}
+	for _, path := range paths {
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		a.responseTouchedPaths = append(a.responseTouchedPaths, path)
+	}
+	sort.Strings(a.responseTouchedPaths)
 }
 
 func (a *App) doneGatePolicy() doneGatePolicy {
@@ -376,15 +417,22 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 		}
 	}
 
-	testArgs, canRunToolTests := doneGateRunTestsArgs(profile)
-	if canRunToolTests && shouldRunDoneGateToolTests(userMessage, toolsUsed, profile) {
+	testTargets := doneGateRunTestsTargets(profile)
+	if len(testTargets) > 0 && shouldRunDoneGateToolTests(userMessage, toolsUsed, profile) {
 		if testsTool, ok := a.registry.Get("run_tests"); ok {
-			checks = append(checks, doneGateCheck{
-				Name: "run_tests",
-				Run: func(ctx context.Context) (tools.ToolResult, error) {
-					return testsTool.Execute(ctx, copyDoneGateToolArgs(testArgs))
-				},
-			})
+			for _, target := range testTargets {
+				target := target
+				name := "run_tests@" + target.Framework + "@" + relPathOrDot(a.workDir, target.Path)
+				checks = appendUniqueDoneGateCheck(checks, seen, doneGateCheck{
+					Name: name,
+					Run: func(ctx context.Context) (tools.ToolResult, error) {
+						return testsTool.Execute(ctx, map[string]any{
+							"path":      target.Path,
+							"framework": target.Framework,
+						})
+					},
+				})
+			}
 		}
 	}
 
@@ -595,12 +643,22 @@ func shouldRunDoneGateToolTests(userMessage string, toolsUsed []string, profile 
 		return false
 	}
 
-	_, canRunToolTests := doneGateRunTestsArgs(profile)
+	if len(doneGateRunTestsTargets(profile)) == 0 {
+		return false
+	}
 
 	for _, name := range toolsUsed {
-		if name == "run_tests" && canRunToolTests {
+		if name == "run_tests" {
 			return true
 		}
+	}
+
+	if doneGateTouchedPathsRequireTests(profile.TouchedPaths) {
+		return true
+	}
+
+	if len(profile.TouchedPaths) > 0 {
+		return false
 	}
 
 	if len(profile.GoModules) > 0 || len(profile.RustModules) > 0 {
@@ -615,7 +673,90 @@ func shouldRunDoneGateToolTests(userMessage string, toolsUsed []string, profile 
 		"запусти тест", "прогони тест", "прогон тест", "падение тест",
 	}
 	for _, t := range triggers {
-		if strings.Contains(lower, t) && canRunToolTests {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDoneGateMutationTool(toolName string) bool {
+	switch toolName {
+	case "write", "edit", "move", "copy", "delete", "mkdir", "batch", "refactor":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractDoneGateTouchedPaths(args map[string]any) []string {
+	if len(args) == 0 {
+		return nil
+	}
+
+	var paths []string
+	for _, key := range []string{"file_path", "path", "source", "destination", "new_path"} {
+		if p, ok := args[key].(string); ok && strings.TrimSpace(p) != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+func normalizeDoneGateTouchedPaths(workDir string, paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, raw := range paths {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			continue
+		}
+		if filepath.IsAbs(p) {
+			rel, err := filepath.Rel(workDir, p)
+			if err != nil {
+				continue
+			}
+			p = rel
+		}
+		p = filepath.Clean(p)
+		if p == "." || strings.HasPrefix(p, "..") {
+			continue
+		}
+		p = filepath.ToSlash(p)
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func doneGateTouchedPathsRequireTests(paths []string) bool {
+	for _, raw := range paths {
+		p := strings.ToLower(filepath.ToSlash(strings.TrimSpace(raw)))
+		if p == "" {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(p))
+
+		if strings.Contains(p, "/tests/") || strings.Contains(p, "/test/") || strings.HasSuffix(base, "_test.go") {
+			return true
+		}
+
+		switch filepath.Ext(base) {
+		case ".go", ".rs", ".py", ".js", ".jsx", ".ts", ".tsx":
+			return true
+		}
+
+		switch base {
+		case "go.mod", "go.sum", "cargo.toml", "package.json", "pnpm-lock.yaml", "yarn.lock",
+			"requirements.txt", "pyproject.toml", "setup.py":
 			return true
 		}
 	}
@@ -623,8 +764,15 @@ func shouldRunDoneGateToolTests(userMessage string, toolsUsed []string, profile 
 }
 
 func detectDoneGateProfile(workDir string) doneGateProfile {
+	return detectDoneGateProfileWithTouchedPaths(workDir, nil)
+}
+
+func detectDoneGateProfileWithTouchedPaths(workDir string, touchedOverride []string) doneGateProfile {
 	markers := discoverDoneGateMarkers(workDir)
-	touched := discoverDoneGateTouchedPaths(workDir)
+	touched := normalizeDoneGateTouchedPaths(workDir, touchedOverride)
+	if len(touched) == 0 {
+		touched = discoverDoneGateTouchedPaths(workDir)
+	}
 
 	goAll := pruneNestedDirs(limitAndSortDirs(markers.GoModules, 0))
 	rustAll := pruneNestedDirs(limitAndSortDirs(markers.RustModules, 0))
@@ -1237,26 +1385,32 @@ func detectPythonTestsLikely(pythonRoots []string) bool {
 	return false
 }
 
-func doneGateRunTestsArgs(profile doneGateProfile) (map[string]any, bool) {
-	if len(profile.GoModules) > 0 {
-		return map[string]any{
-			"path":      profile.GoModules[0],
-			"framework": "go",
-		}, true
+func doneGateRunTestsTargets(profile doneGateProfile) []doneGateTestTarget {
+	maxTargets := 1
+	if profile.Monorepo {
+		maxTargets = doneGateMaxRunTestTargets
 	}
-	if len(profile.RustModules) > 0 {
-		return map[string]any{
-			"path":      profile.RustModules[0],
-			"framework": "cargo",
-		}, true
+
+	targets := make([]doneGateTestTarget, 0, maxTargets)
+	appendTargets := func(paths []string, framework string) {
+		for _, dir := range paths {
+			if len(targets) >= maxTargets {
+				return
+			}
+			targets = append(targets, doneGateTestTarget{
+				Path:      dir,
+				Framework: framework,
+			})
+		}
 	}
-	if len(profile.PythonRoots) > 0 && profile.PythonTestsLikely {
-		return map[string]any{
-			"path":      profile.PythonRoots[0],
-			"framework": "pytest",
-		}, true
+
+	appendTargets(profile.GoModules, "go")
+	appendTargets(profile.RustModules, "cargo")
+	if profile.PythonTestsLikely {
+		appendTargets(profile.PythonRoots, "pytest")
 	}
-	return nil, false
+
+	return targets
 }
 
 func relPathOrDot(root, path string) string {

@@ -1,8 +1,11 @@
 package context
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"gokin/internal/memory"
 
 	"google.golang.org/genai"
 )
@@ -255,6 +258,59 @@ func TestSessionMemory_Extract_BuildsErrorsSection(t *testing.T) {
 	}
 	if !strings.Contains(content, "error: invalid token") {
 		t.Error("expected error line in output")
+	}
+}
+
+func TestSessionMemory_Extract_PromotesDurableCommandsToProjectLearning(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewSessionMemoryManager(dir, DefaultSessionMemoryConfig())
+	learning, err := memory.NewProjectLearning(dir)
+	if err != nil {
+		t.Fatalf("NewProjectLearning() error = %v", err)
+	}
+	mgr.SetProjectLearning(learning)
+
+	history := []*genai.Content{
+		userMsg("Please format the UI package and verify it still builds and tests cleanly."),
+		modelMsg("I will run the relevant commands and keep the project memory up to date."),
+		funcCallMsg("bash", map[string]any{
+			"command": "cd /Users/ginkida/github/gokin && gofmt -w internal/ui && go test ./internal/ui -count=1",
+		}),
+		funcRespMsg("bash", map[string]any{"success": true, "content": "ok\tinternal/ui\t0.211s"}),
+		funcCallMsg("verify_code", map[string]any{"path": "."}),
+		funcRespMsg("verify_code", map[string]any{
+			"success": true,
+			"content": "Verification successful (go build ./...):\n",
+		}),
+	}
+
+	mgr.Extract(history, 5000)
+
+	if got := learning.GetPreference("convention:format_command"); got != "gofmt -w internal/ui" {
+		t.Fatalf("format command = %q, want %q", got, "gofmt -w internal/ui")
+	}
+	if got := learning.GetPreference("fact:test_command"); got != "go test ./internal/ui -count=1" {
+		t.Fatalf("test command = %q, want %q", got, "go test ./internal/ui -count=1")
+	}
+	if got := learning.GetPreference("fact:build_command"); got != "go build ./..." {
+		t.Fatalf("build command = %q, want %q", got, "go build ./...")
+	}
+
+	markdown, err := os.ReadFile(learning.MarkdownPath())
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", learning.MarkdownPath(), err)
+	}
+	content := string(markdown)
+	for _, needle := range []string{
+		"## Facts",
+		"## Conventions",
+		"go test ./internal/ui -count=1",
+		"gofmt -w internal/ui",
+		"go build ./...",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("project memory markdown missing %q:\n%s", needle, content)
+		}
 	}
 }
 

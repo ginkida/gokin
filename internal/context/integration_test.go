@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"gokin/internal/memory"
+
 	"google.golang.org/genai"
 )
 
@@ -100,6 +102,7 @@ func TestSmoke_GitignoreIntegration(t *testing.T) {
 
 	required := []string{
 		".gokin/.session-memory.md",
+		".gokin/.working-memory.md",
 		".gokin/project-memory.md",
 		".gokin/task-output/",
 		"GOKIN.local.md",
@@ -176,6 +179,74 @@ func TestSmoke_PromptBuilderSmartInjection(t *testing.T) {
 	if strings.Contains(questionPrompt, "Tool Usage Hints") {
 		t.Error("question prompt should not contain tool hints")
 	}
+}
+
+func TestSmoke_PromptBuilderIncludesProjectLearning(t *testing.T) {
+	dir := t.TempDir()
+	learning, err := memory.NewProjectLearning(dir)
+	if err != nil {
+		t.Fatalf("NewProjectLearning() error = %v", err)
+	}
+	learning.SetPreference("fact:test_command", "go test ./...")
+	learning.SetPreference("convention:format_command", "gofmt -w ./internal")
+	if err := learning.Flush(); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
+	pb := NewPromptBuilder(dir, &ProjectInfo{Type: ProjectTypeGo, Name: "gokin"})
+	pb.SetProjectLearning(learning)
+
+	assertLearningInPrompt := func(name, prompt string) {
+		t.Helper()
+		for _, needle := range []string{
+			"## Project Learning",
+			"### Facts",
+			"### Conventions",
+			"go test ./...",
+			"gofmt -w ./internal",
+		} {
+			if !strings.Contains(prompt, needle) {
+				t.Fatalf("%s missing %q:\n%s", name, needle, prompt)
+			}
+		}
+	}
+
+	assertLearningInPrompt("Build", pb.Build())
+	assertLearningInPrompt("BuildPlanExecutionPrompt", pb.BuildPlanExecutionPrompt("Execute", "Run the approved step.", nil))
+	assertLearningInPrompt("BuildSubAgentPrompt", pb.BuildSubAgentPrompt())
+}
+
+func TestSmoke_PromptBuilderIncludesWorkingMemory(t *testing.T) {
+	dir := t.TempDir()
+	wm := NewWorkingMemoryManager(dir)
+	if !wm.UpdateFromTurn(WorkingMemoryTurn{
+		Response:     "Updated the done gate verification flow.\nNext step: tighten verification heuristics for monorepo test selection.",
+		TouchedPaths: []string{"internal/app/done_gate.go"},
+	}) {
+		t.Fatal("UpdateFromTurn() = false, want true")
+	}
+
+	pb := NewPromptBuilder(dir, &ProjectInfo{Type: ProjectTypeGo, Name: "gokin"})
+	pb.SetWorkingMemory(wm)
+
+	assertWorkingMemoryInPrompt := func(name, prompt string) {
+		t.Helper()
+		for _, needle := range []string{
+			"# Working Memory",
+			"## Established",
+			"Updated the done gate verification flow.",
+			"## Next",
+			"tighten verification heuristics",
+		} {
+			if !strings.Contains(prompt, needle) {
+				t.Fatalf("%s missing %q:\n%s", name, needle, prompt)
+			}
+		}
+	}
+
+	assertWorkingMemoryInPrompt("Build", pb.Build())
+	assertWorkingMemoryInPrompt("BuildPlanExecutionPrompt", pb.BuildPlanExecutionPrompt("Execute", "Run the approved step.", nil))
+	assertWorkingMemoryInPrompt("BuildSubAgentPrompt", pb.BuildSubAgentPrompt())
 }
 
 // TestSmoke_SessionMemoryToolCallThreshold verifies tool call counting triggers extraction.

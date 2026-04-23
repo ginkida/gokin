@@ -214,7 +214,43 @@ func (m *ToolOutputModel) renderFull(content string, _ bool) string {
 	return result.String()
 }
 
+// renderHiddenLinesHint formats the "X lines hidden" indicator shown between
+// the head and tail preview of a truncated tool output.
+//
+// Earlier versions rendered a cryptic "... +95 lines ..." which looked like
+// a placeholder rather than an action-hinting UI element. The new shape:
+//
+//	        ▼ 95 more lines · press e to expand
+//
+// reads as a sentence, tells the user there's content below, and spells
+// out the interaction. Dim-coloured so it doesn't compete visually with
+// the actual code lines around it.
+func renderHiddenLinesHint(hidden int) string {
+	if hidden <= 0 {
+		return ""
+	}
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	word := "lines"
+	if hidden == 1 {
+		word = "line"
+	}
+	return dimStyle.Render(fmt.Sprintf("    ▼ %d more %s · press e to expand", hidden, word))
+}
+
 // renderTruncated renders truncated content with head and tail.
+//
+// Picks the head lines by skipping leading noise — for code files, the
+// first lines are `package X`, blank separators, and imports, none of
+// which tell you what's actually in the file. We skip past those until we
+// hit a line that likely carries signal (a top-level declaration, a log
+// message, a command prompt, …) and show from there. Tail lines get the
+// symmetric treatment: trailing blank lines and lone `}` from the closing
+// brace are skipped.
+//
+// Heuristic is intentionally cheap and language-agnostic: line-based
+// predicates (`isNoiseHead` / `isNoiseTail`). If nothing "interesting"
+// is found, we fall back to the original first-N-and-last-M behaviour so
+// the user always sees *something*.
 func (m *ToolOutputModel) renderTruncated(content string) string {
 	lines := strings.Split(content, "\n")
 	totalLines := len(lines)
@@ -230,45 +266,142 @@ func (m *ToolOutputModel) renderTruncated(content string) string {
 		tailCount = 1
 	}
 
+	headStart := firstSignalLine(lines)
+	// Don't skip so far that we'd overlap with the tail section — leave
+	// room for at least the configured number of head lines.
+	if headStart > totalLines-headCount {
+		headStart = 0
+	}
+
+	tailStop := lastSignalLine(lines)
+	// Similarly clamp on the tail side.
+	if tailStop < headStart+headCount {
+		tailStop = totalLines - 1
+	}
+
 	var result strings.Builder
 
 	// Head lines
-	for i := 0; i < headCount && i < totalLines; i++ {
+	headEnd := headStart + headCount
+	if headEnd > totalLines {
+		headEnd = totalLines
+	}
+	for i := headStart; i < headEnd; i++ {
 		line := lines[i]
 		if len(line) > 100 {
 			line = line[:97] + "..."
 		}
 		result.WriteString(line)
-		if i < headCount-1 || tailCount > 0 {
+		if i < headEnd-1 || tailCount > 0 {
 			result.WriteString("\n")
 		}
 	}
 
-	// Hidden lines indicator - clean and subtle
-	hiddenLines := totalLines - headCount - tailCount
+	// Hidden lines indicator — accounts for skipped prefix/suffix plus the
+	// gap between head and tail, so the "+N" count matches what's actually
+	// missing from view.
+	startTail := tailStop - tailCount + 1
+	if startTail < headEnd {
+		startTail = headEnd
+	}
+	if startTail > totalLines {
+		startTail = totalLines
+	}
+	hiddenLines := (startTail - headEnd) + headStart + (totalLines - 1 - tailStop)
 	if hiddenLines > 0 {
-		dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-		hint := dimStyle.Render(fmt.Sprintf("  ... +%d lines ...", hiddenLines))
-		result.WriteString("\n" + hint + "\n")
+		result.WriteString("\n" + renderHiddenLinesHint(hiddenLines) + "\n")
 	}
 
 	// Tail lines
-	startTail := totalLines - tailCount
-	if startTail < headCount {
-		startTail = headCount
-	}
-	for i := startTail; i < totalLines; i++ {
+	for i := startTail; i <= tailStop && i < totalLines; i++ {
 		line := lines[i]
 		if len(line) > 100 {
 			line = line[:97] + "..."
 		}
 		result.WriteString(line)
-		if i < totalLines-1 {
+		if i < totalLines-1 && i < tailStop {
 			result.WriteString("\n")
 		}
 	}
 
 	return result.String()
+}
+
+// firstSignalLine returns the index of the first line that carries real
+// content signal — skipping leading blanks, `package X`, and contiguous
+// `import`/`use`/`from` blocks. Returns 0 when there's nothing to skip
+// or the content doesn't look like code. The returned index is always a
+// valid index into `lines` (or 0 if the slice is empty).
+func firstSignalLine(lines []string) int {
+	i := 0
+	// Skip leading blanks.
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	// Skip a `package …` declaration (Go/Dart/Kotlin/Swift).
+	if i < len(lines) && strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), "package ") {
+		i++
+	}
+	// Skip blanks between package and imports.
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	// Skip an import block — either Go-style `import (` block or a run of
+	// `import …` / `use …` / `from … import …` single-line statements
+	// (covers Python, JS/TS, Rust, Java, C/C++ `#include`).
+	switch {
+	case i < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i]), "import ("):
+		// Multi-line Go-style import block: skip until closing ')'.
+		i++
+		for i < len(lines) {
+			s := strings.TrimSpace(lines[i])
+			i++
+			if s == ")" {
+				break
+			}
+		}
+	default:
+		for i < len(lines) {
+			s := strings.TrimLeft(lines[i], " \t")
+			if strings.HasPrefix(s, "import ") ||
+				strings.HasPrefix(s, "from ") ||
+				strings.HasPrefix(s, "use ") ||
+				strings.HasPrefix(s, "#include ") ||
+				strings.HasPrefix(s, "require ") ||
+				strings.TrimSpace(s) == "" {
+				i++
+				continue
+			}
+			break
+		}
+	}
+	// Skip blank lines after the (possibly multi-line) import block so
+	// the preview starts on the first real declaration, not the empty
+	// separator between imports and code.
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	// Don't overshoot the buffer.
+	if i >= len(lines) {
+		return 0
+	}
+	return i
+}
+
+// lastSignalLine returns the index of the last "interesting" line —
+// skipping trailing blanks and lone closing braces (`}`, `})`, `)`).
+// Falls back to the last index when nothing would remain.
+func lastSignalLine(lines []string) int {
+	i := len(lines) - 1
+	for i > 0 {
+		s := strings.TrimSpace(lines[i])
+		if s == "" || s == "}" || s == "})" || s == ")" || s == "});" || s == "};" {
+			i--
+			continue
+		}
+		break
+	}
+	return i
 }
 
 // ExecutionStatusRenderer renders tool execution status with enhanced user feedback
@@ -506,9 +639,7 @@ func FormatToolOutput(content string, maxLines int, expanded bool) string {
 	// Hidden indicator - clean and subtle
 	hiddenLines := len(lines) - headCount - tailCount
 	if hiddenLines > 0 {
-		dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-		hint := dimStyle.Render(fmt.Sprintf("... +%d lines ...", hiddenLines))
-		result.WriteString(hint)
+		result.WriteString(renderHiddenLinesHint(hiddenLines))
 		result.WriteString("\n")
 	}
 

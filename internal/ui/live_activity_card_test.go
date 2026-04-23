@@ -166,6 +166,89 @@ func TestCleanStreamSnippet(t *testing.T) {
 	}
 }
 
+// TestRenderLiveActivityCard_ShowsActiveTodoStep verifies the agent's
+// todo/plan progress surfaces in the live card — users asked "what step
+// is it on?" and previously had to open the separate todo panel (Ctrl+T).
+func TestRenderLiveActivityCard_ShowsActiveTodoStep(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	m.state = StateStreaming
+	m.currentResponseBuf.WriteString("working on something")
+	m.todoItems = []string{
+		"[x] Check existing code",
+		"[x] Draft new API",
+		"[/] Refactor rate limit display",
+		"[ ] Add tests",
+		"[ ] Update docs",
+	}
+
+	view := stripAnsi(m.renderLiveActivityCard())
+
+	// The in-progress step must be surfaced with a position indicator.
+	if !strings.Contains(view, "Step 3/5") {
+		t.Errorf("expected 'Step 3/5' position marker, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Refactor rate limit display") {
+		t.Errorf("expected in-progress step text, got:\n%s", view)
+	}
+}
+
+// TestRenderLiveActivityCard_TodoFallsBackToNextPending: when no step is
+// marked in-progress, show the next `[ ]` pending item so the user still
+// sees where the agent will go next.
+func TestRenderLiveActivityCard_TodoFallsBackToNextPending(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	m.state = StateStreaming
+	m.currentResponseBuf.WriteString("thinking")
+	m.todoItems = []string{
+		"[x] Done one",
+		"[x] Done two",
+		"[ ] Pending first",
+		"[ ] Pending second",
+	}
+
+	view := stripAnsi(m.renderLiveActivityCard())
+	if !strings.Contains(view, "Step 3/4") {
+		t.Errorf("expected next pending step (3/4), got:\n%s", view)
+	}
+	if !strings.Contains(view, "Pending first") {
+		t.Errorf("expected first pending step text, got:\n%s", view)
+	}
+}
+
+// TestRenderLiveActivityCard_TodoHiddenWhenAllDone: all steps complete →
+// no todo row. Otherwise users would see a permanent "✓ Step N/N: last
+// item" even after the plan is finished.
+func TestRenderLiveActivityCard_TodoHiddenWhenAllDone(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	m.state = StateStreaming
+	m.currentResponseBuf.WriteString("wrapping up")
+	m.todoItems = []string{
+		"[x] Done one",
+		"[x] Done two",
+	}
+	view := stripAnsi(m.renderLiveActivityCard())
+	if strings.Contains(view, "Step ") {
+		t.Errorf("all-done plan should not show a Step row:\n%s", view)
+	}
+}
+
+// TestRenderLiveActivityCard_TodoAbsentWhenNoItems: no todo list at all →
+// no todo row. Guards against rendering "Step 0/0" or similar nonsense.
+func TestRenderLiveActivityCard_TodoAbsentWhenNoItems(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	m.state = StateStreaming
+	m.currentResponseBuf.WriteString("no plan yet")
+	// todoItems intentionally empty
+	view := stripAnsi(m.renderLiveActivityCard())
+	if strings.Contains(view, "Step ") {
+		t.Errorf("no-todos state should not show a Step row:\n%s", view)
+	}
+}
+
 func TestActivityFeedPanel_AutoShowsForParallelActivity(t *testing.T) {
 	p := NewActivityFeedPanel(DefaultStyles())
 
@@ -189,6 +272,47 @@ func TestActivityFeedPanel_AutoShowsForParallelActivity(t *testing.T) {
 	})
 	if !p.IsVisible() {
 		t.Fatal("parallel activity should auto-show the feed")
+	}
+}
+
+// TestRenderEngineStatus_RateLimitShowsCountdown guards the user-complaint
+// fix: bare "⚠ RATE LIMIT" was uninformative. With a future wait-until,
+// the badge must include a human-readable countdown so the user sees
+// "when will it resume" without guessing.
+func TestRenderEngineStatus_RateLimitShowsCountdown(t *testing.T) {
+	m := NewModel()
+	m.rateLimitWaitUntil = time.Now().Add(42 * time.Second)
+
+	status := stripAnsi(m.renderEngineStatus())
+	if !strings.Contains(status, "RATE LIMIT") {
+		t.Errorf("status should still show RATE LIMIT, got %q", status)
+	}
+	// Countdown in seconds must be visible.
+	if !strings.Contains(status, "42s") {
+		t.Errorf("countdown missing in rate-limit status: %q", status)
+	}
+	// And prefixed with "resumes in" so users parse it as a duration, not
+	// a call-out number.
+	if !strings.Contains(status, "resumes in") {
+		t.Errorf("countdown needs a human prefix so '42s' reads as a wait: %q", status)
+	}
+}
+
+// TestRenderEngineStatus_RateLimitExpiredFallsBackToBareLabel: if the
+// wait-until is in the past (rate limit already expired), we shouldn't
+// render "-3s" as countdown. Status bar will transition away on next
+// tick; during the brief overlap we just show the bare label.
+func TestRenderEngineStatus_RateLimitExpiredFallsBackToBareLabel(t *testing.T) {
+	m := NewModel()
+	m.rateLimitWaitUntil = time.Now().Add(-3 * time.Second)
+
+	// Note: this case shouldn't happen in practice because the switch
+	// guard checks `time.Now().Before(m.rateLimitWaitUntil)` — past
+	// wait-until takes the "not rate limited" branch. This test
+	// documents that expectation via the absence of the label.
+	status := stripAnsi(m.renderEngineStatus())
+	if strings.Contains(status, "RATE LIMIT") {
+		t.Errorf("expired wait-until should not trigger RATE LIMIT status: %q", status)
 	}
 }
 

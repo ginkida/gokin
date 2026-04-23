@@ -9,6 +9,7 @@ import (
 // gokinGitignoreEntries are paths that should be git-ignored.
 var gokinGitignoreEntries = []string{
 	".gokin/.session-memory.md",
+	".gokin/.working-memory.md",
 	".gokin/project-memory.md",
 	".gokin/task-output/",
 	".gokin/checkpoints/",

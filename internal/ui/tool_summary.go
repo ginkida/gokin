@@ -62,7 +62,15 @@ func summarizeSubAgentTask(prompt, agentType string) string {
 // generateToolResultSummary creates compact summaries based on tool type and content.
 func generateToolResultSummary(toolName, content, detail string) string {
 	normalizedTool := strings.ToLower(strings.ReplaceAll(toolName, "-", "_"))
-	detail = summarizeToolDetail(detail, 56)
+	// For tools whose detail is a filesystem path, use the path-aware
+	// shortener (handles ~/, keeps filename visible). For command/pattern
+	// tools, generic head-tail truncation is fine.
+	switch normalizedTool {
+	case "read", "write", "edit", "delete", "glob", "grep":
+		detail = shortenPath(detail, 40)
+	default:
+		detail = summarizeToolDetail(detail, 56)
+	}
 	lineCount := displayLineCount(content)
 
 	switch normalizedTool {

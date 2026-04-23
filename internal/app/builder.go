@@ -85,6 +85,7 @@ type Builder struct {
 	// Phase 2: Learning infrastructure
 	sharedMemory    *agent.SharedMemory
 	memStore        *memory.Store
+	projectLearning *memory.ProjectLearning
 	exampleStore    *memory.ExampleStore
 	errorStore      *memory.ErrorStore
 	promptOptimizer *agent.PromptOptimizer
@@ -106,6 +107,7 @@ type Builder struct {
 
 	// Session Memory (automatic conversation summary)
 	sessionMemory *appcontext.SessionMemoryManager
+	workingMemory *appcontext.WorkingMemoryManager
 
 	// For error collection during build
 	buildErrors []error
@@ -402,9 +404,17 @@ func (b *Builder) initTools() error {
 	if threshold := b.cfg.Tools.SmartValidation.SelfReviewThreshold; threshold > 0 {
 		b.executor.SetSelfReviewThreshold(threshold)
 	}
+	// Per-turn Kimi tool budget — 0 disables, clamp-up happens in the setter.
+	b.executor.SetKimiToolBudget(b.cfg.Tools.KimiToolBudget)
 
 	compactor := appcontext.NewResultCompactor(b.cfg.Context.ToolResultMaxChars)
 	b.executor.SetCompactor(compactor)
+
+	// Deep compressor as a second-pass safety net: ResultCompactor trims
+	// the string Content; ResponseCompressor trims nested map/array Data
+	// that bypasses the Content path. Shares the same char budget so the
+	// two work in tandem rather than at cross-purposes.
+	b.executor.SetResponseCompressor(appcontext.NewResponseCompressor(b.cfg.Context.ToolResultMaxChars))
 
 	toolCache := tools.NewToolResultCache(tools.DefaultCacheConfig())
 	b.executor.SetToolCache(toolCache)
@@ -489,6 +499,12 @@ func (b *Builder) initSession() error {
 
 	b.promptBuilder = appcontext.NewPromptBuilder(b.workDir, b.projectInfo)
 	b.promptBuilder.SetProjectMemory(b.projectMemory)
+	if b.memStore != nil && b.cfg.Memory.AutoInject {
+		b.promptBuilder.SetMemoryStore(b.memStore)
+	}
+	if b.projectLearning != nil {
+		b.promptBuilder.SetProjectLearning(b.projectLearning)
+	}
 	b.projectMemory.OnReload(func() {
 		b.promptBuilder.Invalidate()
 	})
@@ -507,7 +523,19 @@ func (b *Builder) initSession() error {
 	b.sessionMemory = appcontext.NewSessionMemoryManager(b.workDir, smConfig)
 	b.sessionMemory.LoadFromDisk()
 	b.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(b.mainClient))
+	if b.projectLearning != nil {
+		b.sessionMemory.SetProjectLearning(b.projectLearning)
+	}
 	b.promptBuilder.SetSessionMemory(b.sessionMemory)
+
+	b.workingMemory = appcontext.NewWorkingMemoryManager(b.workDir)
+	b.workingMemory.LoadFromDisk()
+	b.promptBuilder.SetWorkingMemory(b.workingMemory)
+
+	// Provider-specific prompt addendum (Kimi operating rules, etc.).
+	// GetActiveProvider returns "" when nothing is configured yet —
+	// SetProvider handles empty string as a no-op.
+	b.promptBuilder.SetProvider(b.cfg.API.GetActiveProvider())
 
 	// Ensure .gokin working files are in .gitignore
 	appcontext.EnsureGokinGitignore(b.workDir)
@@ -896,11 +924,26 @@ func (b *Builder) initIntegrations() error {
 			if b.contextPredictor != nil {
 				rt.SetPredictor(b.contextPredictor)
 			}
+			// Wire proactive context provider (Claude-Code-style package
+			// sibling + paired test auto-read). Disabled if user opted
+			// out in config.
+			if pc := b.cfg.Tools.ProactiveContext; pc.Enabled {
+				rt.SetProactiveContext(appcontext.NewProactiveReader(
+					b.workDir, pc.MaxFiles, pc.MaxLinesPerFile,
+				))
+			}
 		}
 	}
 	if editTool, ok := b.registry.Get("edit"); ok {
 		if et, ok := editTool.(*tools.EditTool); ok {
 			et.SetWorkDir(b.workDir)
+			// Wire Read-before-Edit invariant. b.readTracker was created a
+			// few lines above (shared with ReadTool) so both tools see the
+			// same session record set.
+			if b.readTracker != nil {
+				et.SetReadTracker(b.readTracker)
+			}
+			et.SetRequireReadBeforeEdit(b.cfg.Tools.RequireReadBeforeEdit)
 		}
 	}
 
@@ -1060,9 +1103,6 @@ func (b *Builder) initIntegrations() error {
 					mt.SetStore(memoryStore)
 				}
 			}
-			if b.cfg.Memory.AutoInject {
-				b.promptBuilder.SetMemoryStore(memoryStore)
-			}
 			// Store on app for /memory command access
 			b.memStore = memoryStore
 		}
@@ -1085,6 +1125,7 @@ func (b *Builder) initIntegrations() error {
 		if err != nil {
 			logging.Debug("failed to create project learning", "error", err)
 		} else {
+			b.projectLearning = projectLearning
 			if memorizeTool, ok := b.registry.Get("memorize"); ok {
 				if mt, ok := memorizeTool.(*tools.MemorizeTool); ok {
 					mt.SetLearning(projectLearning)
@@ -1377,6 +1418,24 @@ func (b *Builder) initUI() error {
 func (b *Builder) wireDependencies() error {
 	app := b.assembleApp()
 
+	if app.promptBuilder != nil {
+		if b.memStore != nil && b.cfg.Memory.AutoInject {
+			app.promptBuilder.SetMemoryStore(b.memStore)
+		}
+		if b.projectLearning != nil {
+			app.promptBuilder.SetProjectLearning(b.projectLearning)
+		}
+		if b.workingMemory != nil {
+			app.promptBuilder.SetWorkingMemory(b.workingMemory)
+		}
+		// Re-assert provider selection in case assembleApp picked up a
+		// late-bound active provider (e.g., set via CLI flag, not yaml).
+		app.promptBuilder.SetProvider(b.cfg.API.GetActiveProvider())
+	}
+	if app.sessionMemory != nil && b.projectLearning != nil {
+		app.sessionMemory.SetProjectLearning(b.projectLearning)
+	}
+
 	// Set up status callback for clients
 	statusCb := &appStatusCallback{app: app}
 	attachStatusCallback(b.mainClient, statusCb)
@@ -1486,11 +1545,14 @@ func (b *Builder) wireDependencies() error {
 				}
 			}
 		},
-		OnToolEnd: func(name string, result tools.ToolResult) {
+		OnToolEnd: func(name string, args map[string]any, result tools.ToolResult) {
 			app.touchStepHeartbeat()
 			app.mu.Lock()
 			app.currentToolContext = ""
 			app.mu.Unlock()
+
+			app.recordResponseTouchedPaths(name, args, result)
+			app.recordResponseCommand(name, args, result)
 
 			if app.program != nil {
 				app.safeSendToProgram(ui.ToolResultMsg{Name: name, Content: result.Content})
@@ -1536,6 +1598,30 @@ func (b *Builder) wireDependencies() error {
 			if app.program != nil {
 				app.safeSendToProgram(ui.ErrorMsg(err))
 			}
+		},
+		OnWarning: func(warning string) {
+			app.touchStepHeartbeat()
+			if warning == "" || app.program == nil {
+				return
+			}
+
+			details := map[string]any{}
+			lower := strings.ToLower(warning)
+			switch {
+			case strings.Contains(lower, "loop guard"), strings.Contains(lower, "model may be looping"):
+				details["tag"] = "loop-guard"
+			case strings.Contains(lower, "tool budget"):
+				// Budget fires can repeat across iterations if Kimi keeps
+				// producing tool calls after the hint. Tagging collapses
+				// the N toasts into one that updates in place.
+				details["tag"] = "tool-budget"
+			}
+
+			app.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusWarning,
+				Message: warning,
+				Details: details,
+			})
 		},
 		OnInlineDiff: func(filePath, oldText, newText string) {
 			if app.program != nil {
@@ -1998,6 +2084,7 @@ func (b *Builder) assembleApp() *App {
 		mcpManager:        b.mcpManager,
 		mcpInitialSummary: b.mcpConnectSummary,
 		sessionMemory:     b.sessionMemory,
+		workingMemory:     b.workingMemory,
 		// Persistent stores for flush on shutdown
 		memoryStore:  b.memStore,
 		errorStore:   b.errorStore,

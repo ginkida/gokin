@@ -45,6 +45,18 @@ type ResultCompactor interface {
 	CompactForType(toolName string, result ToolResult) ToolResult
 }
 
+// ResponseCompressor compresses structured fields of a genai.FunctionResponse
+// that ResultCompactor can't reach. Applied after the per-tool Content-level
+// compaction but before the response lands in history. Intentionally an
+// interface (not a direct dep on internal/context) to avoid an import cycle.
+type ResponseCompressor interface {
+	CompressContent(part *genai.Part) *genai.Part
+}
+
+type resultSummaryProvider interface {
+	SummarizeForPrune(toolName, content string) string
+}
+
 // FallbackConfig holds configurable fallback text for when AI doesn't respond after tool use.
 type FallbackConfig struct {
 	ToolResponseText  string // Text shown when tools were used but no response
@@ -257,6 +269,22 @@ type Executor struct {
 
 	// Smart validation: persistent learning from validator warnings.
 	errorLearner ErrorLearner
+
+	// Kimi-specific per-turn tool budget. 0 disables the check; stagnation
+	// detection still runs. Set via SetKimiToolBudget from app/builder.
+	// Only enforced when the active model is in the "kimi" family — GLM/
+	// MiniMax/Ollama don't see this limit. Rationale: Kimi's tool-call
+	// enthusiasm routinely balloons to 50+ calls on a single task, and
+	// stagnation detection only catches identical repeats, not diverse
+	// over-exploration. A hard cap forces finalization before the context
+	// budget is eaten alive.
+	kimiToolBudget int
+
+	// Optional deep-compressor for structured function-response fields.
+	// ResultCompactor trims Content strings per-tool; this compresses
+	// anything else (Data maps, nested arrays) before the response joins
+	// history. nil = no-op.
+	responseCompressor ResponseCompressor
 }
 
 // ExecutionInfo holds information about an active tool execution
@@ -282,7 +310,7 @@ type ExecutionHandler struct {
 	OnToolStart func(name string, args map[string]any)
 
 	// OnToolEnd is called when a tool finishes execution.
-	OnToolEnd func(name string, result ToolResult)
+	OnToolEnd func(name string, args map[string]any, result ToolResult)
 
 	// OnToolProgress is called periodically during long-running tool execution.
 	// This helps keep the UI alive and prevents timeout during long operations.
@@ -442,6 +470,21 @@ func (e *Executor) SetSelfReviewThreshold(n int) {
 	}
 }
 
+// SetKimiToolBudget sets the per-turn tool call cap applied to Kimi-family
+// models. n <= 0 disables the cap entirely. Values below 10 are clamped
+// up because a Kimi turn that can only make 9 tool calls will under-deliver
+// on legitimate multi-step tasks.
+func (e *Executor) SetKimiToolBudget(n int) {
+	if n <= 0 {
+		e.kimiToolBudget = 0
+		return
+	}
+	if n < 10 {
+		n = 10
+	}
+	e.kimiToolBudget = n
+}
+
 // getClient returns the current client under read lock.
 func (e *Executor) getClient() client.Client {
 	e.clientMu.RLock()
@@ -523,6 +566,12 @@ func (e *Executor) SetHandler(handler *ExecutionHandler) {
 // SetCompactor sets the result compactor for tool output optimization.
 func (e *Executor) SetCompactor(compactor ResultCompactor) {
 	e.compactor = compactor
+}
+
+// SetResponseCompressor installs the optional deep compressor applied to
+// each function-response before it joins history. Nil = disabled.
+func (e *Executor) SetResponseCompressor(c ResponseCompressor) {
+	e.responseCompressor = c
 }
 
 // SetPermissions sets the permission manager for tool execution.
@@ -653,7 +702,18 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	var toolsUsed []string          // Track which tools were used for smart fallback
 	var lastToolResult ToolResult   // Track the last tool result for context
 	var recentToolPatterns []string // Track tool name patterns per iteration for stagnation detection
+	var lastWorkingMemoryNote string
+	// synthesisNudgeInjected ensures the per-turn consolidation reminder
+	// fires at most once. Without this guard the prompt would repeat every
+	// iteration past the threshold, training Kimi to output boilerplate
+	// synthesis blocks instead of actually thinking.
+	synthesisNudgeInjected := false
+	// intentNudgeInjected gates the "announce your plan before tools"
+	// reminder to the first iteration only. Firing it twice in a turn
+	// just adds noise — the model saw it already.
+	intentNudgeInjected := false
 	amnesiaWarned := map[string]bool{}
+	stagnationRecoveries := map[string]int{}
 	const (
 		stagnationLimit           = 5  // Consecutive identical tool patterns before aborting
 		stagnationWindowSize      = 15 // Rolling window for amnesia (non-consecutive) repeats
@@ -755,6 +815,19 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 		history = append(history, modelContent)
 
+		// Intent announcement nudge: if the very first assistant-turn of
+		// this request jumped straight into tool calls with no preceding
+		// prose, queue a reminder for the NEXT round asking for a
+		// one-line plan. Kimi-family only — Strong-tier models typically
+		// self-narrate and don't need this. Once per turn, gated by
+		// len(toolsUsed)==0 rather than i==0 so outer-loop retries on
+		// transient errors (which bump i without executing tools) don't
+		// miss the first real response.
+		if !intentNudgeInjected && shouldInjectIntentNudge(len(toolsUsed), cl.GetModel(), resp) {
+			intentNudgeInjected = true
+			e.AddPendingNotification(intentNudgeMessage)
+		}
+
 		// Handle chained function calls in an inner loop
 		for len(resp.FunctionCalls) > 0 {
 			// Check context cancellation between chained tool calls (Esc pressed)
@@ -778,8 +851,29 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			pattern := strings.Join(iterationTools, ",")
 			recentToolPatterns = append(recentToolPatterns, pattern)
 
+			var results []*genai.FunctionResponse
+
+			// Kimi-specific tool budget: cap total tool calls per turn to
+			// prevent runaway exploration. Unlike stagnation (which catches
+			// identical repeats), this catches diverse-but-wasteful fan-out.
+			// We count already-consumed calls in toolsUsed, not toolsUsed +
+			// current batch, so Kimi gets to finish a small final batch if
+			// it's right at the edge — the clamp is on the NEXT batch.
+			if e.shouldEnforceKimiToolBudget(cl.GetModel(), len(toolsUsed)-len(resp.FunctionCalls)) {
+				logging.Warn("kimi tool budget exceeded: forcing finalization",
+					"budget", e.kimiToolBudget,
+					"consumed", len(toolsUsed)-len(resp.FunctionCalls),
+					"model", cl.GetModel())
+				if e.handler != nil && e.handler.OnWarning != nil {
+					e.handler.OnWarning(fmt.Sprintf(
+						"Kimi tool budget (%d) reached — forcing final answer instead of running %d more tools",
+						e.kimiToolBudget, len(resp.FunctionCalls)))
+				}
+				results = e.buildKimiToolBudgetExhaustedResults(resp.FunctionCalls)
+			}
+
 			// Stagnation detection: if the same tool pattern repeats too many times, abort
-			if len(recentToolPatterns) >= stagnationLimit {
+			if results == nil && len(recentToolPatterns) >= stagnationLimit {
 				tail := recentToolPatterns[len(recentToolPatterns)-stagnationLimit:]
 				allSame := true
 				for _, p := range tail[1:] {
@@ -789,9 +883,31 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					}
 				}
 				if allSame {
-					logging.Warn("executor stagnation detected: same tool pattern repeated",
-						"pattern", pattern, "count", stagnationLimit)
-					return history, "", fmt.Errorf("executor stagnation: tool pattern %q repeated %d times consecutively", pattern, stagnationLimit)
+					recoveryAttempt := stagnationRecoveries[pattern]
+					if shouldAttemptStagnationRecovery(cl.GetModel(), resp.FunctionCalls, recoveryAttempt) {
+						recoveryAttempt++
+						stagnationRecoveries[pattern] = recoveryAttempt
+						logging.Warn("executor stagnation detected: sending recovery hint instead of aborting",
+							"pattern", pattern,
+							"count", stagnationLimit,
+							"model", cl.GetModel(),
+							"recovery_attempt", recoveryAttempt)
+						if e.handler != nil && e.handler.OnWarning != nil {
+							e.handler.OnWarning(buildStagnationWarningMessage(resp.FunctionCalls, stagnationLimit))
+						}
+						results = e.buildStagnationRecoveryResults(resp.FunctionCalls, stagnationLimit)
+					} else {
+						logging.Warn("executor stagnation detected: same tool pattern repeated",
+							"pattern", pattern,
+							"count", stagnationLimit,
+							"model", cl.GetModel(),
+							"recovery_attempts", recoveryAttempt)
+						errMsg := fmt.Sprintf("executor stagnation: tool pattern %q repeated %d times consecutively", pattern, stagnationLimit)
+						if recoveryAttempt > 0 {
+							errMsg += " after recovery hint"
+						}
+						return history, "", errors.New(errMsg)
+					}
 				}
 			}
 
@@ -818,9 +934,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				}
 			}
 
-			results, err := e.executeTools(ctx, resp.FunctionCalls)
-			if err != nil {
-				return history, "", fmt.Errorf("tool execution error: %w", err)
+			if results == nil {
+				results, err = e.executeTools(ctx, resp.FunctionCalls)
+				if err != nil {
+					return history, "", fmt.Errorf("tool execution error: %w", err)
+				}
 			}
 
 			// Track last result for smart fallback
@@ -837,8 +955,29 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// This ensures tool results are preserved even if the API call fails.
 			funcResultParts := make([]*genai.Part, len(results))
 			for j, result := range results {
-				funcResultParts[j] = genai.NewPartFromFunctionResponse(result.Name, result.Response)
-				funcResultParts[j].FunctionResponse.ID = result.ID
+				part := genai.NewPartFromFunctionResponse(result.Name, result.Response)
+				part.FunctionResponse.ID = result.ID
+				// Deep compression for structured response fields that
+				// ResultCompactor's string-based Content pass can't reach
+				// (nested Data maps, arrays). Safe when not wired: nil
+				// compressor leaves the part untouched.
+				if e.responseCompressor != nil {
+					compressed := e.responseCompressor.CompressContent(part)
+					// Defensive: an implementation that returns nil or
+					// drops the FunctionResponse would silently break the
+					// call/response pairing expected by the client. Fall
+					// back to the uncompressed part in those cases.
+					if compressed != nil && compressed.FunctionResponse != nil {
+						// Re-apply ID — CompressFunctionResponse clones
+						// the inner struct but preserves ID from input,
+						// so this is usually a no-op. Kept explicit so
+						// a future compressor that resets ID can't break
+						// the tool-call/result pairing.
+						compressed.FunctionResponse.ID = result.ID
+						part = compressed
+					}
+				}
+				funcResultParts[j] = part
 			}
 			funcResultContent := &genai.Content{
 				Role:  genai.RoleUser,
@@ -864,6 +1003,24 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					hint := fmt.Sprintf("[smart-validation] You modified %d files this turn: %s. Briefly verify version consistency and correctness across these files.", count, strings.Join(files, ", "))
 					e.AddPendingNotification(hint)
 				}
+			}
+
+			if note := e.buildModelWorkingMemoryNotification(cl.GetModel(), resp.FunctionCalls, results); note != "" && note != lastWorkingMemoryNote {
+				lastWorkingMemoryNote = note
+				e.AddPendingNotification(note)
+			}
+
+			// Synthesis nudge: when Kimi has issued >=3 tool calls in this
+			// turn without any intervening final text, inject a once-per-
+			// turn consolidation reminder. Piggy-backs on the existing
+			// notifications channel so it lands as a user-role "[System:
+			// ...]" message right before the next function-response round.
+			// Not emitted for non-Kimi models — Strong-tier models self-
+			// consolidate, and spamming GLM/Opus with pause reminders
+			// regresses their behaviour.
+			if !synthesisNudgeInjected && shouldInjectSynthesisNudge(cl.GetModel(), len(toolsUsed)) {
+				synthesisNudgeInjected = true
+				e.AddPendingNotification(buildSynthesisNudgeMessage(len(toolsUsed)))
 			}
 
 			// Inject pending background task completion notifications
@@ -1838,7 +1995,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 
 	// Step 13: Notify completion and send notifications
 	if e.handler != nil && e.handler.OnToolEnd != nil {
-		e.handler.OnToolEnd(call.Name, result)
+		e.handler.OnToolEnd(call.Name, call.Args, result)
 	}
 
 	if e.notificationMgr != nil {
@@ -2318,6 +2475,368 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 	}
 	// Default: no distinguishing argument, tool name alone is the pattern
 	return ""
+}
+
+func shouldAttemptStagnationRecovery(model string, calls []*genai.FunctionCall, attempts int) bool {
+	if attempts > 0 || len(calls) == 0 {
+		return false
+	}
+	if client.GetModelProfile(model).Family != "kimi" {
+		return false
+	}
+	for _, call := range calls {
+		if call == nil || !isKimiStagnationRecoveryTool(call.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+// shouldEnforceKimiToolBudget reports whether the per-turn tool budget cap
+// has been reached for the currently active Kimi-family model. Non-Kimi
+// models and a disabled budget (0) always return false. `consumed` is the
+// count of tool calls already executed in this turn before the current
+// batch — callers pass len(toolsUsed)-len(newCalls) so the cap applies to
+// the NEXT batch rather than trimming an in-flight one.
+func (e *Executor) shouldEnforceKimiToolBudget(model string, consumed int) bool {
+	if e == nil || e.kimiToolBudget <= 0 {
+		return false
+	}
+	if client.GetModelProfile(model).Family != "kimi" {
+		return false
+	}
+	return consumed >= e.kimiToolBudget
+}
+
+// buildKimiToolBudgetExhaustedResults synthesizes error-result FunctionResponses
+// for the current batch of calls, one per call, carrying an explicit
+// "budget reached — wrap up" hint. The IDs are preserved so the model's
+// next-turn expectation (each function-call must be paired with a response)
+// is satisfied, avoiding a malformed conversation history.
+func (e *Executor) buildKimiToolBudgetExhaustedResults(calls []*genai.FunctionCall) []*genai.FunctionResponse {
+	results := make([]*genai.FunctionResponse, len(calls))
+	msg := buildKimiToolBudgetMessage(e.kimiToolBudget)
+	for i, call := range calls {
+		toolName := "tool"
+		callID := ""
+		if call != nil {
+			toolName = call.Name
+			callID = call.ID
+		}
+		results[i] = &genai.FunctionResponse{
+			ID:       callID,
+			Name:     toolName,
+			Response: NewErrorResult(msg).ToMap(),
+		}
+	}
+	return results
+}
+
+func buildKimiToolBudgetMessage(budget int) string {
+	return fmt.Sprintf(
+		"Tool budget guard: this turn already issued %d tool calls — the configured per-turn Kimi cap. Stop calling tools and write the final answer now, citing what you've already found. Do not re-request the same tools.",
+		budget,
+	)
+}
+
+// synthesisNudgeThreshold is the tool-call count at which the nudge
+// fires. Three tools is the sweet spot: enough signal to consolidate
+// (Read + grep + another read, or two greps + a read), not so many
+// that the drift is already irreversible.
+const synthesisNudgeThreshold = 3
+
+// shouldInjectSynthesisNudge gates the per-turn synthesis reminder.
+// Only kimi-family models benefit — Strong-tier models self-consolidate
+// and a reminder regresses their behaviour. Threshold comparison uses >=
+// so the nudge lands immediately after the 3rd tool result, before the
+// model picks a 4th call.
+func shouldInjectSynthesisNudge(model string, totalToolsThisTurn int) bool {
+	if totalToolsThisTurn < synthesisNudgeThreshold {
+		return false
+	}
+	return client.GetModelProfile(model).Family == "kimi"
+}
+
+func buildSynthesisNudgeMessage(toolsCount int) string {
+	return fmt.Sprintf(
+		"Consolidation checkpoint: you've issued %d tool calls this turn without writing a final answer. Before any more tools, pause and write 2-3 concise lines: (1) Established — concrete facts you've verified, (2) Unknown — open questions the tools couldn't answer, (3) Next — the single next step. If Established already covers the user's request, STOP and write the final answer instead.",
+		toolsCount,
+	)
+}
+
+// intentNudgeMinPlanChars is the threshold for considering the
+// assistant's pre-tool text "enough of a plan". 30 chars is one short
+// sentence — low bar, but anything below it is almost certainly empty
+// or a filler "Ok." / "Sure.". Tuned low on purpose so well-behaved
+// models don't trip the nudge.
+const intentNudgeMinPlanChars = 30
+
+// intentNudgeMessage is the system reminder queued when the model skips
+// the plan phase. Wording mirrors the Kimi operating-rules addendum so
+// the model sees the same vocabulary in-prompt and in-runtime.
+const intentNudgeMessage = "Plan-then-act reminder: your last response jumped to tool calls without a one-line plan. Before your next set of tool calls, write a single line starting with 'Plan:' that states the concrete objective (3-7 words), so the user can tell what you're about to do. Skip the plan only for a single trivial read/grep with no follow-up."
+
+// shouldInjectIntentNudge decides whether to queue the announcement
+// reminder. Fires only when:
+//   - no tools have been executed yet in this turn (toolsExecuted == 0)
+//     — covers the "first real response" case even when outer-loop
+//     retries inflated the iteration counter
+//   - the model produced tool calls (otherwise there's nothing to plan)
+//   - the response text before the tool calls is under the threshold
+//     (≈ no plan written)
+//   - the model family is Kimi (Strong-tier models self-narrate)
+func shouldInjectIntentNudge(toolsExecuted int, model string, resp *client.Response) bool {
+	if toolsExecuted > 0 || resp == nil {
+		return false
+	}
+	if len(resp.FunctionCalls) == 0 {
+		return false
+	}
+	if client.GetModelProfile(model).Family != "kimi" {
+		return false
+	}
+	// Count both the visible text and the thinking trace — thinking
+	// counts as "plan visible to runtime" even when it doesn't show in
+	// UI, since the model itself processed it.
+	planLen := len(strings.TrimSpace(resp.Text)) + len(strings.TrimSpace(resp.Thinking))
+	return planLen < intentNudgeMinPlanChars
+}
+
+func (e *Executor) buildStagnationRecoveryResults(calls []*genai.FunctionCall, repeatCount int) []*genai.FunctionResponse {
+	results := make([]*genai.FunctionResponse, len(calls))
+	for i, call := range calls {
+		toolName := "tool"
+		callID := ""
+		args := map[string]any{}
+		if call != nil {
+			toolName = call.Name
+			callID = call.ID
+			if call.Args != nil {
+				args = call.Args
+			}
+		}
+
+		msg := buildStagnationRecoveryMessage(toolName, args, repeatCount)
+		result := NewErrorResult(msg)
+		if cached, ok := e.lookupCachedReadOnlyResult(toolName, args); ok && cached.Content != "" {
+			result = NewErrorResultWithContext(msg, cached.Content)
+		}
+
+		results[i] = &genai.FunctionResponse{
+			ID:       callID,
+			Name:     toolName,
+			Response: result.ToMap(),
+		}
+	}
+	return results
+}
+
+func (e *Executor) lookupCachedReadOnlyResult(toolName string, args map[string]any) (ToolResult, bool) {
+	if e.toolCache == nil || toolName == "" {
+		return ToolResult{}, false
+	}
+	return e.toolCache.Get(toolName, args)
+}
+
+func buildStagnationRecoveryMessage(toolName string, args map[string]any, repeatCount int) string {
+	return fmt.Sprintf(
+		"Loop guard: identical %s request repeated %d times. This exact tool call already ran and repeating it will not make progress. Do not call it again. Reuse the earlier result, choose a different file/range, or answer the user.",
+		describeStagnationTarget(toolName, args),
+		repeatCount,
+	)
+}
+
+func buildStagnationWarningMessage(calls []*genai.FunctionCall, repeatCount int) string {
+	if len(calls) == 0 || calls[0] == nil {
+		return fmt.Sprintf(
+			"Kimi loop guard: repeated the same exploration tool pattern %d times. Sent a recovery hint instead of rerunning it.",
+			repeatCount,
+		)
+	}
+	if len(calls) == 1 {
+		return fmt.Sprintf(
+			"Kimi loop guard: repeated %s %d times. Sent a recovery hint instead of rerunning it.",
+			describeStagnationTarget(calls[0].Name, calls[0].Args),
+			repeatCount,
+		)
+	}
+	return fmt.Sprintf(
+		"Kimi loop guard: repeated the same %s exploration pattern %d times. Sent a recovery hint instead of rerunning it.",
+		describeStagnationTarget(calls[0].Name, calls[0].Args),
+		repeatCount,
+	)
+}
+
+func isKimiStagnationRecoveryTool(toolName string) bool {
+	switch toolName {
+	case "read", "grep", "glob", "list_dir", "tree":
+		return true
+	default:
+		return false
+	}
+}
+
+func describeStagnationTarget(toolName string, args map[string]any) string {
+	switch toolName {
+	case "read":
+		filePath, _ := args["file_path"].(string)
+		target := "read"
+		if filePath != "" {
+			target += " " + filepath.Base(filePath)
+		}
+		offset := readIntArg(args, "offset")
+		limit := readIntArg(args, "limit")
+		if offset > 0 || limit > 0 {
+			target = fmt.Sprintf("%s (offset %d, limit %d)", target, offset, limit)
+		}
+		return target
+	case "grep":
+		pattern, _ := args["pattern"].(string)
+		target := "grep"
+		if pattern != "" {
+			target += fmt.Sprintf(" %q", pattern)
+		}
+		if path, ok := args["path"].(string); ok && path != "" {
+			target += " in " + path
+		} else if glob, ok := args["glob"].(string); ok && glob != "" {
+			target += " matching " + glob
+		}
+		return target
+	case "glob":
+		pattern, _ := args["pattern"].(string)
+		target := "glob"
+		if pattern != "" {
+			target += fmt.Sprintf(" %q", pattern)
+		}
+		if path, ok := args["path"].(string); ok && path != "" {
+			target += " in " + path
+		}
+		return target
+	case "list_dir", "tree":
+		path, _ := args["path"].(string)
+		if path == "" {
+			return toolName
+		}
+		return fmt.Sprintf("%s %s", toolName, path)
+	default:
+		if fp := stagnationFingerprint(toolName, args); fp != "" {
+			return fmt.Sprintf("%s (%s)", toolName, fp)
+		}
+		return toolName
+	}
+}
+
+func (e *Executor) buildModelWorkingMemoryNotification(model string, calls []*genai.FunctionCall, results []*genai.FunctionResponse) string {
+	if !shouldInjectKimiWorkingMemory(model, calls, results) {
+		return ""
+	}
+
+	limit := len(calls)
+	if len(results) < limit {
+		limit = len(results)
+	}
+	if limit == 0 {
+		return ""
+	}
+
+	items := make([]string, 0, limit)
+	for i := 0; i < limit && len(items) < 3; i++ {
+		call := calls[i]
+		result := results[i]
+		if call == nil || result == nil {
+			continue
+		}
+
+		target := describeStagnationTarget(call.Name, call.Args)
+		summary := e.summarizeWorkingMemoryResult(call.Name, result)
+		if target == "" || summary == "" {
+			continue
+		}
+		items = append(items, trimInlineText(fmt.Sprintf("%s -> %s", target, summary), 240))
+	}
+	if len(items) == 0 {
+		return ""
+	}
+
+	return "[Kimi working memory] Established: " +
+		strings.Join(items, "; ") +
+		". Before more tools: reuse these results, do not repeat the same read/grep/glob without a new hypothesis, prefer grep -> targeted read, and after 1-3 tool calls synthesize what is established and what remains unknown."
+}
+
+func shouldInjectKimiWorkingMemory(model string, calls []*genai.FunctionCall, results []*genai.FunctionResponse) bool {
+	if client.GetModelProfile(model).Family != "kimi" {
+		return false
+	}
+	if len(calls) == 0 || len(results) == 0 {
+		return false
+	}
+	if len(calls) > 1 {
+		return true
+	}
+	call := calls[0]
+	if call == nil {
+		return false
+	}
+	if isKimiExplorationTool(call.Name) {
+		return true
+	}
+	return workingMemoryResponseSize(results[0]) >= 700
+}
+
+func isKimiExplorationTool(toolName string) bool {
+	switch toolName {
+	case "read", "grep", "glob", "list_dir", "tree":
+		return true
+	default:
+		return false
+	}
+}
+
+func workingMemoryResponseSize(result *genai.FunctionResponse) int {
+	if result == nil {
+		return 0
+	}
+	content, _ := result.Response["content"].(string)
+	errMsg, _ := result.Response["error"].(string)
+	return len(content) + len(errMsg)
+}
+
+func (e *Executor) summarizeWorkingMemoryResult(toolName string, result *genai.FunctionResponse) string {
+	if result == nil {
+		return ""
+	}
+
+	errMsg, _ := result.Response["error"].(string)
+	if trimmedErr := strings.TrimSpace(errMsg); trimmedErr != "" {
+		return trimInlineText("error: "+trimmedErr, 180)
+	}
+
+	content, _ := result.Response["content"].(string)
+	if trimmedContent := strings.TrimSpace(content); trimmedContent != "" {
+		if summarizer, ok := e.compactor.(resultSummaryProvider); ok {
+			if summary := strings.TrimSpace(summarizer.SummarizeForPrune(toolName, trimmedContent)); summary != "" {
+				return trimInlineText(summary, 180)
+			}
+		}
+		return trimInlineText(trimmedContent, 180)
+	}
+
+	success, _ := result.Response["success"].(bool)
+	if success {
+		return "success"
+	}
+	return "no output"
+}
+
+func trimInlineText(text string, max int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if max <= 0 || len(text) <= max {
+		return text
+	}
+	if max == 1 {
+		return "…"
+	}
+	return text[:max-1] + "…"
 }
 
 // adaptiveToolTimeout returns the effective timeout for a single tool call

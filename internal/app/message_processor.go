@@ -111,6 +111,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.mu.Lock()
 	a.responseStartTime = time.Now()
 	a.responseToolsUsed = nil
+	a.responseTouchedPaths = nil
+	a.responseCommands = nil
 	a.streamedChars = 0           // Reset streaming accumulator
 	a.streamedEstimatedTokens = 0 // Reset streaming token estimate
 	a.messageCount++
@@ -177,7 +179,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// === IMPROVEMENT 1: Use Task Router for intelligent routing ===
 	// Auto-retry transient errors with adaptive stream retry policy.
 	retryPolicy := client.AdaptiveStreamRetryPolicy(a.config.API.GetActiveProvider())
-	failoverTriggered := false
 	originalMessage := message
 	retryMessage := originalMessage
 
@@ -187,6 +188,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	contextTruncated := false
 	requestRetryCount := 0
 	partialIdleRetryCount := 0
+	apiInputAccum := 0
+	apiOutputAccum := 0
+	cacheReadAccum := 0
 
 	for {
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
@@ -311,40 +315,20 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			requestRetryCount++
 		}
 
-		// After repeated transient failures, auto-enable provider failover chain.
-		// This avoids user-visible dead-ends when a provider/model is unstable.
+		// Automatic cross-provider failover used to live here — it would
+		// switch from e.g. kimi to glm after 2 retries or a tripped overload
+		// breaker. Removed intentionally: users reported surprise billing
+		// errors from providers they weren't actively using (e.g. "GLM
+		// insufficient balance" while on kimi). Sticking to the chosen
+		// provider makes failures attributable and predictable. If the
+		// user wants a fallback chain, they can opt in explicitly via
+		// `model.fallback_providers` in config.yaml — that path still
+		// builds a FallbackClient in client.NewClient and works normally.
 		//
-		// Two triggers:
-		//  1. Classic: >= 2 retries on the same provider.
-		//  2. Rate-based: overload breaker tripped (e.g. GLM 1305 ≥ 3 in 5 min).
-		//     The rate trigger fires earlier than the classic one, skipping the
-		//     2-retry wait when we already have evidence the provider is down.
-		totalRetries := requestRetryCount + partialIdleRetryCount
-		overloadTripped := false
-		if !failoverTriggered && isOverloadError(err) && a.policy != nil {
-			overloadTripped = a.policy.RecordOverload()
-		}
-		if !failoverTriggered && isRetryableError(err) && (totalRetries >= 2 || overloadTripped) {
-			if chain, failoverErr := a.activateEmergencyFailoverClient(); failoverErr == nil {
-				failoverTriggered = true
-				// Reset retry counters and circuit breakers — new provider gets clean slate
-				requestRetryCount = 0
-				partialIdleRetryCount = 0
-				retryPolicy = client.AdaptiveStreamRetryPolicy(a.config.API.GetActiveProvider())
-				if a.policy != nil {
-					a.policy.ResetBreakers()
-				}
-				reason := "retry limit"
-				if overloadTripped {
-					reason = "provider overloaded"
-				}
-				a.safeSendToProgram(ui.StatusUpdateMsg{
-					Type:    ui.StatusRetry,
-					Message: fmt.Sprintf("Provider failover (%s): %s", reason, chain),
-				})
-			} else {
-				logging.Debug("automatic failover not activated", "error", failoverErr)
-			}
+		// `overloadTripped` still gets recorded so /policy reports remain
+		// accurate, but we no longer act on it by switching providers.
+		if isOverloadError(err) && a.policy != nil {
+			_ = a.policy.RecordOverload()
 		}
 
 		// Save partial history before retry (preserves tool side effects)
@@ -361,19 +345,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 		// Show retry as a non-intrusive status toast instead of inline text.
 		// This keeps the output clean and focused on the model's actual response.
-		// After a failover, tag each attempt with the current provider so the
-		// user can see which backend is being tried rather than just silent retries.
-		providerTag := ""
-		if failoverTriggered {
-			providerTag = fmt.Sprintf(" via %s", a.config.API.GetActiveProvider())
-		}
 		var retryMsg string
 		if decision.Partial {
-			retryMsg = fmt.Sprintf("Stream stalled%s — retry %d/%d in %v", providerTag, partialIdleRetryCount, retryPolicy.MaxPartialRetries, backoff.Round(time.Second))
+			retryMsg = fmt.Sprintf("Stream stalled — retry %d/%d in %v", partialIdleRetryCount, retryPolicy.MaxPartialRetries, backoff.Round(time.Second))
 		} else if ft.Reason == string(client.FailureReasonStreamIdleTimeout) {
-			retryMsg = fmt.Sprintf("Stream stalled%s — retry %d/%d in %v", providerTag, requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second))
+			retryMsg = fmt.Sprintf("Stream stalled — retry %d/%d in %v", requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second))
 		} else {
-			retryMsg = fmt.Sprintf("Retry %d/%d%s in %v (%s)", requestRetryCount, retryPolicy.MaxRetries, providerTag, backoff.Round(time.Second), ft.Reason)
+			retryMsg = fmt.Sprintf("Retry %d/%d in %v (%s)", requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second), ft.Reason)
 		}
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusRetry,
@@ -382,7 +360,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				"attempt":     requestRetryCount,
 				"maxAttempts": retryPolicy.MaxRetries,
 				"provider":    a.config.API.GetActiveProvider(),
-				"failover":    failoverTriggered,
 			},
 		})
 
@@ -458,10 +435,17 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 					"attempt": attempt,
 					"delay":   delay.String(),
 				})
+				// Name the provider in the toast so the user can tell at a
+				// glance whether it's their active backend or something in
+				// the (opt-in) fallback chain that got throttled.
+				provider := a.shortActiveProviderName()
 				a.safeSendToProgram(ui.StatusUpdateMsg{
 					Type:    ui.StatusRateLimit,
-					Message: fmt.Sprintf("Rate limit — auto-retry in %v (%d/%d)", delay.Round(time.Second), attempt, maxAutoRateLimitRetries),
-					Details: map[string]any{"waitTime": delay},
+					Message: fmt.Sprintf("%s rate limit — auto-retry in %v (%d/%d)", provider, delay.Round(time.Second), attempt, maxAutoRateLimitRetries),
+					Details: map[string]any{
+						"waitTime": delay,
+						"provider": provider,
+					},
 				})
 				a.safeSendToProgram(ui.ResponseDoneMsg{})
 
@@ -491,6 +475,12 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		a.reliability.RecordSuccess()
 	}
 
+	apiInput, apiOutput := a.executor.GetLastTokenUsage()
+	_, cacheRead := a.executor.GetLastCacheMetrics()
+	apiInputAccum += apiInput
+	apiOutputAccum += apiOutput
+	cacheReadAccum += cacheRead
+
 	// Update session history
 	a.session.SetHistory(newHistory)
 	a.applyToolOutputHygiene()
@@ -509,10 +499,28 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 	}
 
+	if !a.runCompletionReviewIfNeeded(ctx, message, &response, &apiInputAccum, &apiOutputAccum, &cacheReadAccum) {
+		return
+	}
+
 	// Hard done-gate before response completion.
 	if !a.enforceDoneGate(ctx, message) {
 		return
 	}
+
+	// Evidence footer: deterministic audit-trail streamed after the model's
+	// prose answer for code-change turns. Runs AFTER done-gate so a failing
+	// verification never gets a "✓ Verified" claim under it. Skipped when
+	// the response already names every touched file + verification signal.
+	// Intentionally NOT mixed into `response` — working memory already
+	// derives its own "Files changed / Verification" lines from the raw
+	// touched-paths + commands snapshots, so folding the footer back in
+	// would produce redundant entries on the next turn.
+	if footer := a.buildEvidenceFooterIfEnabled(response); footer != "" {
+		a.safeSendToProgram(ui.StreamTextMsg(footer))
+	}
+
+	a.updateWorkingMemoryFromTurn(message, response)
 
 	// Sync tool checkpoints and save session after each message
 	a.syncToolCheckpoints()
@@ -536,15 +544,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		a.mu.Lock()
 		a.totalInputTokens = usage.InputTokens
 		// Use API usage metadata if available, otherwise estimate
-		apiInput, apiOutput := a.executor.GetLastTokenUsage()
-		if apiOutput > 0 {
-			a.totalOutputTokens += apiOutput
+		if apiOutputAccum > 0 {
+			a.totalOutputTokens += apiOutputAccum
 		} else if response != "" {
 			// Fallback: estimate output tokens from response length (approx 4 chars per token)
 			a.totalOutputTokens += len(response) / 4
 		}
-		if apiInput > 0 {
-			a.totalInputTokens = apiInput
+		if apiInputAccum > 0 {
+			a.totalInputTokens = apiInputAccum
 		}
 		a.mu.Unlock()
 	}
@@ -580,7 +587,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
 
 	// Send response metadata with cost estimation
-	_, cacheRead := a.executor.GetLastCacheMetrics()
 	var cost float64
 	if a.contextManager != nil {
 		if tc := a.contextManager.GetTokenCounter(); tc != nil {
@@ -591,7 +597,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		Model:                a.config.Model.Name,
 		InputTokens:          inputTokens,
 		OutputTokens:         outputTokens,
-		CacheReadInputTokens: cacheRead,
+		CacheReadInputTokens: cacheReadAccum,
 		Duration:             duration,
 		ToolsUsed:            toolsUsed,
 		Cost:                 cost,
@@ -870,6 +876,7 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 	// 7. Plan completion summary
 	planDuration := time.Since(planStart)
 	summary := a.formatPlanSummary(approvedPlan, planDuration)
+	a.updateWorkingMemoryFromTurn(approvedPlan.Request, summary)
 	a.safeSendToProgram(ui.StreamTextMsg(summary))
 
 	completedCount := approvedPlan.CompletedCount()
@@ -1546,6 +1553,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 	// Plan completion summary
 	planDuration := time.Since(planStart)
 	summary := a.formatPlanSummary(approvedPlan, planDuration)
+	a.updateWorkingMemoryFromTurn(approvedPlan.Request, summary)
 	a.safeSendToProgram(ui.StreamTextMsg(summary))
 
 	delegatedCompletedCount := approvedPlan.CompletedCount()

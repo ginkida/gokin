@@ -33,6 +33,49 @@ func TestRenderContextBarEmpty(t *testing.T) {
 	}
 }
 
+// TestRenderContextBarShowsProjectedOutput pins the live-streaming behaviour:
+// with outputTokens > 0, the bar gains a secondary "▓" band showing where
+// it will be once those tokens land as input on the next turn. Without
+// this, users see only the +N counter ticking up while the visual bar
+// stays frozen, defeating the purpose of a live indicator.
+func TestRenderContextBarShowsProjectedOutput(t *testing.T) {
+	// 25K/100K input (25%), +50K output streaming → total projected 75%.
+	// Bar width 8 cols: input = 2 filled cells, projection = 4 more.
+	out := stripAnsi(renderContextBar(0.25, 8, 25000, 100000, 50000))
+	if !strings.Contains(out, "█") {
+		t.Errorf("expected solid band for input tokens, got: %q", out)
+	}
+	if !strings.Contains(out, "▓") {
+		t.Errorf("expected projection band for output tokens, got: %q", out)
+	}
+	// Label should also surface the +output count.
+	if !strings.Contains(out, "+50.0K") {
+		t.Errorf("expected +output label, got: %q", out)
+	}
+}
+
+// TestRenderContextBarZeroOutputNoProjection: when nothing is streaming,
+// the bar must not render the ▓ band — otherwise it'd create a false
+// impression of "already at X%" when the model hasn't started.
+func TestRenderContextBarZeroOutputNoProjection(t *testing.T) {
+	out := stripAnsi(renderContextBar(0.5, 8, 50000, 100000, 0))
+	if strings.Contains(out, "▓") {
+		t.Errorf("projection band must be absent when outputTokens=0: %q", out)
+	}
+}
+
+// TestRenderContextBarProjectionClampedToBarWidth: if input + projected
+// would exceed the bar, the projection band fills the remainder — it
+// must not overflow into the empty-band slot or produce a negative count.
+func TestRenderContextBarProjectionClampedToBarWidth(t *testing.T) {
+	// 80K input + 100K output would exceed 100K max by 80%. Bar should
+	// fill fully without panic.
+	out := stripAnsi(renderContextBar(0.8, 8, 80000, 100000, 100000))
+	if strings.Count(out, "░") > 0 {
+		t.Errorf("projection clamp failed — empty slot rendered when saturated: %q", out)
+	}
+}
+
 func TestRenderContextBarHighUsage(t *testing.T) {
 	result := renderContextBar(0.96, 8, 96000, 100000, 0)
 	if !strings.Contains(result, "96.0K") {

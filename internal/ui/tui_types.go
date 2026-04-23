@@ -335,6 +335,7 @@ const (
 	StatusStreamResume
 	StatusRecoverableError
 	StatusCancelled
+	StatusWarning
 	StatusInfo
 	StatusThinkingIdle
 )

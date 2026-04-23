@@ -35,18 +35,23 @@ func (c *appStatusCallback) OnRetry(attempt, maxAttempts int, delay time.Duratio
 }
 
 // OnRateLimit is called when the client is waiting due to rate limiting.
+// The toast message names the provider so "waiting 30s" isn't ambiguous
+// when multiple providers are configured — users asked "which one
+// throttled me?" and previously had to infer from the status bar.
 func (c *appStatusCallback) OnRateLimit(waitTime time.Duration) {
 	if c.app == nil || c.app.program == nil {
 		return
 	}
 
-	msg := fmt.Sprintf("Rate limit, waiting %s...", waitTime.Round(time.Second))
+	provider := c.app.shortActiveProviderName()
+	msg := fmt.Sprintf("%s rate limit — resumes in %s", provider, waitTime.Round(time.Second))
 
 	c.app.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    ui.StatusRateLimit,
 		Message: msg,
 		Details: map[string]any{
 			"waitTime": waitTime,
+			"provider": provider,
 		},
 	})
 }

@@ -25,9 +25,20 @@ type Config struct {
 	MCP           MCPConfig           `yaml:"mcp"`
 	Update        UpdateConfig        `yaml:"update"`
 	SessionMemory SessionMemoryConfig `yaml:"session_memory"`
+	Completion    CompletionConfig    `yaml:"completion"`
 
 	// Runtime version information
 	Version string `yaml:"-"`
+}
+
+// CompletionConfig controls how the final response to the user is
+// shaped after tool execution and gate checks complete.
+type CompletionConfig struct {
+	// EvidenceFooter appends a deterministic `Changed: X · Verified: Y`
+	// block to the response when the turn touched files. Default: true.
+	// Turn off only when the extra line is noisy (e.g. embedded in a
+	// piped CLI workflow that parses raw model output).
+	EvidenceFooter bool `yaml:"evidence_footer"`
 }
 
 // APIConfig holds API-related settings.
@@ -169,13 +180,37 @@ type ModelConfig struct {
 
 // ToolsConfig holds tool-related settings.
 type ToolsConfig struct {
-	Timeout           time.Duration         `yaml:"timeout"`
-	ModelRoundTimeout time.Duration         `yaml:"model_round_timeout"` // Hard timeout for a single model round.
-	Bash              BashConfig            `yaml:"bash"`
-	DeltaCheck        DeltaCheckConfig      `yaml:"delta_check"`
-	SmartValidation   SmartValidationConfig `yaml:"smart_validation"`
-	AllowedDirs       []string              `yaml:"allowed_dirs"` // Additional allowed directories (besides workDir)
-	Formatters        map[string]string     `yaml:"formatters"`   // ext → command, e.g. {".py": "black"}
+	Timeout           time.Duration          `yaml:"timeout"`
+	ModelRoundTimeout time.Duration          `yaml:"model_round_timeout"` // Hard timeout for a single model round.
+	Bash              BashConfig             `yaml:"bash"`
+	DeltaCheck        DeltaCheckConfig       `yaml:"delta_check"`
+	SmartValidation   SmartValidationConfig  `yaml:"smart_validation"`
+	AllowedDirs       []string               `yaml:"allowed_dirs"`       // Additional allowed directories (besides workDir)
+	Formatters        map[string]string      `yaml:"formatters"`         // ext → command, e.g. {".py": "black"}
+	ProactiveContext  ProactiveContextConfig `yaml:"proactive_context"`  // Auto-append related files to Read results.
+
+	// KimiToolBudget caps the number of tool calls Kimi can issue per user
+	// turn before the executor synthesizes "budget reached" responses and
+	// forces the model to finalize. 0 disables the cap; values <10 are
+	// clamped up by the executor. Applies only to kimi-family models —
+	// GLM/MiniMax/Ollama are unaffected. Default: 40.
+	KimiToolBudget int `yaml:"kimi_tool_budget"`
+
+	// RequireReadBeforeEdit enforces the "model must Read before Edit"
+	// invariant at tool level. When true (default), Edit returns an error
+	// if the target file has no active read record — prevents blind edits
+	// based on grep/glob snippets. Disable for workflows that programma-
+	// tically edit without prior inspection.
+	RequireReadBeforeEdit bool `yaml:"require_read_before_edit"`
+}
+
+// ProactiveContextConfig controls auto-inclusion of sibling/test files
+// when the agent reads a source file. Mimics Claude Code's "already-knows-
+// the-neighbourhood" feel without requiring explicit tool calls per file.
+type ProactiveContextConfig struct {
+	Enabled         bool `yaml:"enabled"`           // Append related-files block to Read results (default: true)
+	MaxFiles        int  `yaml:"max_files"`         // How many sibling/related files to include (default: 3)
+	MaxLinesPerFile int  `yaml:"max_lines_per_file"` // Preview length per related file (default: 40)
 }
 
 // BashConfig holds bash tool settings.
@@ -447,6 +482,13 @@ func DefaultConfig() *Config {
 				Enabled:             true,
 				SelfReviewThreshold: 4,
 			},
+			ProactiveContext: ProactiveContextConfig{
+				Enabled:         true,
+				MaxFiles:        3,
+				MaxLinesPerFile: 40,
+			},
+			KimiToolBudget:        40,
+			RequireReadBeforeEdit: true,
 		},
 		UI: UIConfig{
 			StreamOutput:      true,
@@ -600,6 +642,9 @@ func DefaultConfig() *Config {
 			VerifyChecksum:    true,             // Always verify checksums
 			NotifyOnly:        false,            // Allow prompting for install
 			Timeout:           30 * time.Second, // HTTP request timeout
+		},
+		Completion: CompletionConfig{
+			EvidenceFooter: true,
 		},
 	}
 }
