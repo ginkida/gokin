@@ -334,12 +334,28 @@ func (a *App) Run() error {
 		state, info, err := a.sessionManager.LoadLast()
 		if err == nil && state != nil && len(state.History) > 0 {
 			age := time.Since(info.LastActive)
+			// Cross-provider guard: a session tagged with a different
+			// provider than the current active one will 400 on first
+			// request because wire-format details (thinking signatures,
+			// tool_use ID shapes, cache_control markers) don't round-
+			// trip across providers. Empty state.Provider = legacy
+			// session from before v0.71.4; treat as compatible.
+			currentProvider := a.config.API.GetActiveProvider()
+			providerMismatch := state.Provider != "" && currentProvider != "" && state.Provider != currentProvider
+
 			if age > autoResumeCutoff {
 				// Too old for surprise restore — surface a hint so the user
 				// can explicitly /resume it if they want.
 				a.tui.AddSystemMessage(fmt.Sprintf(
 					"Previous session available from %s (%d messages). Use /resume %s to load it.",
 					humanizeAge(age), len(state.History), info.ID))
+			} else if providerMismatch {
+				// Don't auto-load a session built for a different provider.
+				// Surface what we skipped and let the user explicitly
+				// /resume if they want to attempt the conversion.
+				a.tui.AddSystemMessage(fmt.Sprintf(
+					"Skipped auto-resume: previous session was on %s but you're now on %s (history formats are incompatible). Use /resume %s to try anyway, or /clear to stay fresh.",
+					state.Provider, currentProvider, info.ID))
 			} else if restoreErr := a.sessionManager.RestoreFromState(state); restoreErr != nil {
 				logging.Warn("failed to restore session", "error", restoreErr)
 			} else {
@@ -1734,6 +1750,14 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 
 	// 2. Update internal config
 	a.config = cfg
+
+	// Re-tag the session with the (possibly changed) active provider so
+	// the next SaveAfterMessage persists the right marker. Callers of
+	// ApplyConfig on provider switches ALSO call ClearConversation, so
+	// by the time a new turn is saved, history matches the tag.
+	if a.session != nil {
+		a.session.SetProvider(a.config.API.GetActiveProvider())
+	}
 
 	// 3. Re-initialize client
 	newClient, err := client.NewClient(a.ctx, a.config, a.config.Model.Name)

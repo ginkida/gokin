@@ -12,10 +12,17 @@ import (
 
 // SessionState represents the serializable state of a session.
 type SessionState struct {
-	ID                string                     `json:"id"`
-	StartTime         time.Time                  `json:"start_time"`
-	LastActive        time.Time                  `json:"last_active"`
-	WorkDir           string                     `json:"work_dir,omitempty"`
+	ID        string    `json:"id"`
+	StartTime time.Time `json:"start_time"`
+	LastActive time.Time `json:"last_active"`
+	WorkDir   string    `json:"work_dir,omitempty"`
+	// Provider tags the session with the provider identifier it was
+	// built against (kimi, deepseek, glm, minimax, ollama). Added in
+	// v0.71.4 — legacy sessions without this field are treated as
+	// compatible on first load and re-tagged on next save. See
+	// Session.Provider docstring for the cross-provider history
+	// incompatibility this guards against.
+	Provider          string                     `json:"provider,omitempty"`
 	History           []SerializedContent        `json:"history"`
 	TokenCounts       []int                      `json:"token_counts,omitempty"`
 	TotalTokens       int                        `json:"total_tokens"`

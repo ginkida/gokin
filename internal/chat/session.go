@@ -32,10 +32,18 @@ type ChangeHandler func(ChangeEvent)
 
 // Session represents a chat session.
 type Session struct {
-	ID                string
-	StartTime         time.Time
-	WorkDir           string
-	History           []*genai.Content
+	ID        string
+	StartTime time.Time
+	WorkDir   string
+	History   []*genai.Content
+	// Provider is the provider identifier the session was built against
+	// (e.g. "kimi", "deepseek", "glm"). Loaded from disk on resume and
+	// compared against the active provider — if they differ, the session
+	// is dropped because thinking-block signatures and tool_use ID
+	// formats don't round-trip across providers. Empty for legacy
+	// sessions saved before v0.71.4; those are treated as compatible
+	// on first load (one-time migration) and tagged on first save.
+	Provider          string
 	Branches          map[string]*Session // named branches (forks)
 	Checkpoints       map[string]int      // named checkpoints (name -> history index)
 	SystemInstruction string              // System prompt, passed via API parameter (not in history)
@@ -370,6 +378,25 @@ func (s *Session) SetWorkDir(dir string) {
 	s.WorkDir = dir
 }
 
+// SetProvider records the provider identifier the session was built
+// against. Used by the auto-resume path to detect cross-provider
+// contamination — replaying a Kimi session's history to DeepSeek, for
+// instance, 400s because the thinking-block signature formats differ.
+func (s *Session) SetProvider(provider string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Provider = provider
+}
+
+// GetProvider returns the provider the session was last tagged for.
+// Empty string means a legacy session saved before v0.71.4 — caller
+// should treat as compatible on the first load and tag on save.
+func (s *Session) GetProvider() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Provider
+}
+
 // GetState returns the current state of the session for serialization.
 func (s *Session) GetState() *SessionState {
 	s.mu.RLock()
@@ -385,6 +412,7 @@ func (s *Session) GetState() *SessionState {
 		StartTime:         s.StartTime,
 		LastActive:        time.Now(),
 		WorkDir:           s.WorkDir,
+		Provider:          s.Provider,
 		History:           history,
 		TokenCounts:       make([]int, len(s.tokenCounts)),
 		TotalTokens:       s.totalTokens,
@@ -442,6 +470,7 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.ID = state.ID
 	s.StartTime = state.StartTime
 	s.WorkDir = state.WorkDir
+	s.Provider = state.Provider
 	s.History = history
 	s.tokenCounts = make([]int, len(state.TokenCounts))
 	copy(s.tokenCounts, state.TokenCounts)

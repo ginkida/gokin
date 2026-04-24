@@ -485,6 +485,10 @@ func (b *Builder) isInGitRepo() bool {
 func (b *Builder) initSession() error {
 	b.session = chat.NewSession()
 	b.session.SetWorkDir(b.workDir)
+	// Tag the session with the active provider so the auto-resume path
+	// can refuse cross-provider loads. See Session.Provider docstring
+	// for the history-incompatibility problem this guards against.
+	b.session.SetProvider(b.cfg.API.GetActiveProvider())
 
 	b.projectInfo = appcontext.DetectProject(b.workDir)
 

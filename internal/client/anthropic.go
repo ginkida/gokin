@@ -1547,10 +1547,11 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 		if content.Role == genai.RoleUser {
 			messages = append(messages, c.buildUserMessage(content.Parts))
 		} else if content.Role == genai.RoleModel {
-			if !hasSerializableAssistantParts(content.Parts) {
-				logging.Warn("skipping assistant history item with no serializable parts",
+			if !c.canSerialiseAssistantForProvider(content.Parts) {
+				logging.Warn("skipping assistant history item (unserialisable for provider)",
 					"index", i,
-					"parts_count", len(content.Parts))
+					"parts_count", len(content.Parts),
+					"thinking_replay_required", c.requiresThinkingReplay())
 				continue
 			}
 			messages = append(messages, c.buildAssistantMessage(content.Parts))
@@ -1668,10 +1669,11 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 		if content.Role == genai.RoleUser {
 			messages = append(messages, c.buildUserMessage(content.Parts))
 		} else if content.Role == genai.RoleModel {
-			if !hasSerializableAssistantParts(content.Parts) {
-				logging.Warn("skipping assistant history item with no serializable parts",
+			if !c.canSerialiseAssistantForProvider(content.Parts) {
+				logging.Warn("skipping assistant history item (unserialisable for provider)",
 					"index", i,
-					"parts_count", len(content.Parts))
+					"parts_count", len(content.Parts),
+					"thinking_replay_required", c.requiresThinkingReplay())
 				continue
 			}
 			messages = append(messages, c.buildAssistantMessage(content.Parts))
@@ -1858,6 +1860,55 @@ func hasSerializableAssistantParts(parts []*genai.Part) bool {
 		}
 	}
 	return false
+}
+
+// requiresThinkingReplay reports whether the active provider rejects
+// requests that omit thinking blocks from prior assistant turns when
+// Extended Thinking is enabled. DeepSeek is strict: "The
+// content[].thinking in the thinking mode must be passed back to the
+// API." Anthropic native treats the same way. Kimi accepts missing
+// thinking blocks silently.
+//
+// Used by convertHistoryWithResultsAndSystem / convertHistoryToMessages
+// to refuse to serialise an assistant turn whose thinking parts are
+// unreplayable (no signature stored). Dropping the whole turn is
+// safer than silently stripping thinking and hitting the 400 on
+// every subsequent request.
+func (c *AnthropicClient) requiresThinkingReplay() bool {
+	if !c.config.EnableThinking {
+		return false
+	}
+	base := c.config.BaseURL
+	if base == DefaultAnthropicBaseURL || base == "" {
+		return true
+	}
+	return strings.Contains(base, "api.deepseek.com")
+}
+
+// canSerialiseAssistantForProvider tightens hasSerializableAssistantParts
+// when the provider demands thinking-block replay. If any part is a
+// thought without a signature, we can't round-trip it — drop the whole
+// assistant turn so the sanitiser then cascades the unpaired user
+// tool_result turns.
+func (c *AnthropicClient) canSerialiseAssistantForProvider(parts []*genai.Part) bool {
+	if !hasSerializableAssistantParts(parts) {
+		return false
+	}
+	if !c.requiresThinkingReplay() {
+		return true
+	}
+	// Provider needs thinking replay. Any unsigned thought → unserialisable.
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+		if part.Thought && len(part.ThoughtSignature) == 0 {
+			// Thought exists but has no signature — sending this turn
+			// without it would 400. Signal drop.
+			return false
+		}
+	}
+	return true
 }
 
 // buildAssistantMessage builds an assistant message from parts.
