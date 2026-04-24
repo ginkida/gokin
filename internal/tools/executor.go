@@ -952,39 +952,6 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				lastToolResult = ToolResult{Content: content, Success: success, Error: errMsg}
 			}
 
-			// Add function results to history BEFORE sending to model.
-			// This ensures tool results are preserved even if the API call fails.
-			funcResultParts := make([]*genai.Part, len(results))
-			for j, result := range results {
-				part := genai.NewPartFromFunctionResponse(result.Name, result.Response)
-				part.FunctionResponse.ID = result.ID
-				// Deep compression for structured response fields that
-				// ResultCompactor's string-based Content pass can't reach
-				// (nested Data maps, arrays). Safe when not wired: nil
-				// compressor leaves the part untouched.
-				if e.responseCompressor != nil {
-					compressed := e.responseCompressor.CompressContent(part)
-					// Defensive: an implementation that returns nil or
-					// drops the FunctionResponse would silently break the
-					// call/response pairing expected by the client. Fall
-					// back to the uncompressed part in those cases.
-					if compressed != nil && compressed.FunctionResponse != nil {
-						// Re-apply ID — CompressFunctionResponse clones
-						// the inner struct but preserves ID from input,
-						// so this is usually a no-op. Kept explicit so
-						// a future compressor that resets ID can't break
-						// the tool-call/result pairing.
-						compressed.FunctionResponse.ID = result.ID
-						part = compressed
-					}
-				}
-				funcResultParts[j] = part
-			}
-			funcResultContent := &genai.Content{
-				Role:  genai.RoleUser,
-				Parts: funcResultParts,
-			}
-
 			// Self-review injection: if many files were mutated this turn,
 			// add a notification nudging the model to verify consistency.
 			if e.selfReviewThreshold > 0 {
@@ -1017,10 +984,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			}
 
 			// Synthesis nudge: when Kimi has issued >=3 tool calls in this
-			// turn without any intervening final text, inject a once-per-
-			// turn consolidation reminder. Piggy-backs on the existing
-			// notifications channel so it lands as a user-role "[System:
-			// ...]" message right before the next function-response round.
+			// turn without any intervening final text, inject a once-per-turn
+			// consolidation reminder. It is appended to the current tool result
+			// instead of inserted as a separate user message; Anthropic-compatible
+			// APIs require tool_result blocks to immediately follow tool_use blocks.
 			// Not emitted for non-Kimi models — Strong-tier models self-
 			// consolidate, and spamming GLM/Opus with pause reminders
 			// regresses their behaviour.
@@ -1029,14 +996,42 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				e.AddPendingNotification(buildSynthesisNudgeMessage(len(toolsUsed)))
 			}
 
-			// Inject pending background task completion notifications
-			// before recording historyBeforeResults so they are visible to the model.
 			if notifications := e.drainPendingNotifications(); len(notifications) > 0 {
 				notifText := "[System: " + strings.Join(notifications, "; ") + "]"
-				history = append(history, &genai.Content{
-					Role:  genai.RoleUser,
-					Parts: []*genai.Part{genai.NewPartFromText(notifText)},
-				})
+				appendNotificationToFunctionResults(results, notifText)
+			}
+
+			// Add function results to history BEFORE sending to model.
+			// This ensures tool results are preserved even if the API call fails.
+			funcResultParts := make([]*genai.Part, len(results))
+			for j, result := range results {
+				part := genai.NewPartFromFunctionResponse(result.Name, result.Response)
+				part.FunctionResponse.ID = result.ID
+				// Deep compression for structured response fields that
+				// ResultCompactor's string-based Content pass can't reach
+				// (nested Data maps, arrays). Safe when not wired: nil
+				// compressor leaves the part untouched.
+				if e.responseCompressor != nil {
+					compressed := e.responseCompressor.CompressContent(part)
+					// Defensive: an implementation that returns nil or
+					// drops the FunctionResponse would silently break the
+					// call/response pairing expected by the client. Fall
+					// back to the uncompressed part in those cases.
+					if compressed != nil && compressed.FunctionResponse != nil {
+						// Re-apply ID — CompressFunctionResponse clones
+						// the inner struct but preserves ID from input,
+						// so this is usually a no-op. Kept explicit so
+						// a future compressor that resets ID can't break
+						// the tool-call/result pairing.
+						compressed.FunctionResponse.ID = result.ID
+						part = compressed
+					}
+				}
+				funcResultParts[j] = part
+			}
+			funcResultContent := &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: funcResultParts,
 			}
 
 			historyBeforeResults := len(history)
@@ -2552,15 +2547,26 @@ func buildKimiToolBudgetMessage(budget int) string {
 const synthesisNudgeThreshold = 3
 
 // shouldInjectSynthesisNudge gates the per-turn synthesis reminder.
-// Only kimi-family models benefit — Strong-tier models self-consolidate
-// and a reminder regresses their behaviour. Threshold comparison uses >=
-// so the nudge lands immediately after the 3rd tool result, before the
-// model picks a 4th call.
+// Only families where empirical drift-after-3-tool-calls was observed —
+// kimi and deepseek. GLM-5/Opus-class models self-consolidate and a
+// reminder regresses their behaviour; we don't nudge them. Threshold
+// comparison uses >= so the nudge lands immediately after the 3rd tool
+// result, before the model picks a 4th call.
 func shouldInjectSynthesisNudge(model string, totalToolsThisTurn int) bool {
 	if totalToolsThisTurn < synthesisNudgeThreshold {
 		return false
 	}
-	return client.GetModelProfile(model).Family == "kimi"
+	return isNudgeEligibleFamily(model)
+}
+
+// isNudgeEligibleFamily reports whether the given model belongs to a
+// family that benefits from gokin's explicit runtime nudges (synthesis
+// checkpoint, intent announcement, error-recovery hints). The list
+// grows as we characterise new providers: adding a model family here
+// must come with evidence of the specific drift the nudge prevents.
+func isNudgeEligibleFamily(model string) bool {
+	family := client.GetModelProfile(model).Family
+	return family == "kimi" || family == "deepseek"
 }
 
 func buildSynthesisNudgeMessage(toolsCount int) string {
@@ -2598,7 +2604,7 @@ func shouldInjectIntentNudge(toolsExecuted int, model string, resp *client.Respo
 	if len(resp.FunctionCalls) == 0 {
 		return false
 	}
-	if client.GetModelProfile(model).Family != "kimi" {
+	if !isNudgeEligibleFamily(model) {
 		return false
 	}
 	// Count both the visible text and the thinking trace — thinking
@@ -2770,7 +2776,10 @@ func (e *Executor) buildModelWorkingMemoryNotification(model string, calls []*ge
 }
 
 func shouldInjectKimiWorkingMemory(model string, calls []*genai.FunctionCall, results []*genai.FunctionResponse) bool {
-	if client.GetModelProfile(model).Family != "kimi" {
+	// Retained name for stability of log markers, but now eligibility
+	// extends to any nudge-eligible family — DeepSeek benefits from the
+	// same "don't re-explore, synthesise" reminder as Kimi.
+	if !isNudgeEligibleFamily(model) {
 		return false
 	}
 	if len(calls) == 0 || len(results) == 0 {
@@ -2790,7 +2799,11 @@ func shouldInjectKimiWorkingMemory(model string, calls []*genai.FunctionCall, re
 }
 
 func buildKimiToolErrorRecoveryNotification(model string, results []*genai.FunctionResponse) string {
-	if client.GetModelProfile(model).Family != "kimi" {
+	// Name retained for log marker stability; eligibility now includes
+	// deepseek so V4 users get the same concrete recovery steps Kimi
+	// users do when read-before-edit / delta-check / ambiguity errors
+	// fire. The message text is generic — not family-specific.
+	if !isNudgeEligibleFamily(model) {
 		return ""
 	}
 	for _, result := range results {
@@ -2818,6 +2831,43 @@ func buildKimiToolErrorRecoveryNotification(model string, results []*genai.Funct
 		}
 	}
 	return ""
+}
+
+func appendNotificationToFunctionResults(results []*genai.FunctionResponse, notification string) {
+	notification = strings.TrimSpace(notification)
+	if len(results) == 0 || notification == "" {
+		return
+	}
+
+	result := results[len(results)-1]
+	if result == nil {
+		return
+	}
+	if result.Response == nil {
+		result.Response = map[string]any{}
+	}
+
+	if errMsg, ok := result.Response["error"].(string); ok && strings.TrimSpace(errMsg) != "" {
+		result.Response["error"] = appendTextBlock(errMsg, notification)
+		return
+	}
+	if content, ok := result.Response["content"].(string); ok && strings.TrimSpace(content) != "" {
+		result.Response["content"] = appendTextBlock(notification, content)
+		return
+	}
+	result.Response["content"] = notification
+}
+
+func appendTextBlock(base, addition string) string {
+	base = strings.TrimRight(base, "\n")
+	addition = strings.TrimSpace(addition)
+	if base == "" {
+		return addition
+	}
+	if addition == "" {
+		return base
+	}
+	return base + "\n\n" + addition
 }
 
 func isKimiExplorationTool(toolName string) bool {

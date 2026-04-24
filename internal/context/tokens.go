@@ -91,12 +91,12 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  262144,
 		MaxOutputTokens: 32768,
 	},
-	// DeepSeek V4 — 128K input, up to 16K output. Legacy chat/reasoner
-	// get 64K; AnthropicClient inherits the fallback from DefaultLimits
-	// when the provider-level value is an overestimate for a specific
-	// model, so picking the larger of the two is safe.
+	// DeepSeek V4 — 1M input context, up to 16K output. Legacy
+	// deepseek-chat / deepseek-reasoner stay at 64K; picking the larger
+	// of the two here is safe because per-model ModelProfile entries
+	// carry the precise limit and AnthropicClient reads from there.
 	"deepseek": {
-		MaxInputTokens:  131072,
+		MaxInputTokens:  1000000,
 		MaxOutputTokens: 16384,
 	},
 }

@@ -358,8 +358,8 @@ func (b *PromptBuilder) SetLastMessage(msg string) {
 }
 
 // SetProvider records the active provider family ("kimi", "glm", "minimax",
-// "ollama"). Used to inject a provider-specific addendum with behavioural
-// guidance in Build(). Empty string means no addendum.
+// "deepseek", "ollama"). Used to inject a provider-specific addendum with
+// behavioural guidance in Build(). Empty string means no addendum.
 func (b *PromptBuilder) SetProvider(provider string) {
 	provider = strings.TrimSpace(strings.ToLower(provider))
 	if b.provider != provider {

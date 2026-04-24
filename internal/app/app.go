@@ -1914,6 +1914,14 @@ func (a *App) buildModelEnhancement() string {
 		enhancement += "\n\n**Kimi Execution Policy:** Plan briefly before tools. Prefer grep -> targeted read over broad repeated exploration. Reuse tool results and do not repeat the same read/grep/glob without a new hypothesis. After 1-3 tool calls, synthesize what is established, what remains unknown, and the next best action."
 	}
 
+	if profile.Family == "deepseek" {
+		// Same class of issues as Kimi: eagerness to re-read and
+		// skipping the verification step. DeepSeek V4's 1M context
+		// tempts over-exploration even more than Kimi's 262K, so the
+		// nudge is sharper.
+		enhancement += "\n\n**DeepSeek Execution Policy:** Plan briefly before tools. 1M context is not a license to re-read — remember what you already loaded. After code edits, run the narrowest verification (targeted go test / pytest / cargo check) and cite the result before finalising. After 3 tool calls: consolidate Established / Unknown / Next before continuing."
+	}
+
 	if strings.Contains(strings.ToLower(modelName), "flash") {
 		enhancement += "\n\n**Flash Model Note:** Keep responses detailed with specific file:line references despite speed optimizations."
 	}
