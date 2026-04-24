@@ -20,8 +20,8 @@ func (c *ModelCommand) Usage() string {
 /model glm-5            - GLM-5 (stable)
 /model glm-4.7          - GLM-4.7 (thinking-enabled)
 /model MiniMax-M2.7     - MiniMax M2.7 (200K context)
-/model deepseek-v4-pro  - DeepSeek V4 Pro (Strong-tier, 128K)
-/model deepseek-v4-flash - DeepSeek V4 Flash (fast & cheap)`
+/model deepseek-v4-pro  - DeepSeek V4 Pro (Strong-tier, 1M context)
+/model deepseek-v4-flash - DeepSeek V4 Flash (fast & cheap, 1M context)`
 }
 func (c *ModelCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
@@ -82,8 +82,8 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 			// Moonshot Developer API and caused confusion — removed.
 			sb.WriteString("\nExample: /model kimi-for-coding  (only model on Coding Plan — K2.6, 262K context)")
 		case "deepseek":
-			sb.WriteString("\nExamples: /model deepseek-v4-pro  (flagship, Strong-tier, 128K ctx)" +
-				"\n          /model deepseek-v4-flash  (fast/cheap V4)" +
+			sb.WriteString("\nExamples: /model deepseek-v4-pro  (flagship, Strong-tier, 1M ctx)" +
+				"\n          /model deepseek-v4-flash  (fast/cheap V4, 1M ctx)" +
 				"\n          /model deepseek-reasoner  (legacy, deprecates 2026-07-24)")
 		case "ollama":
 			sb.WriteString("\nExample: /model llama3.2  or any model pulled locally via `ollama pull …`")

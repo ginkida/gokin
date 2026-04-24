@@ -28,6 +28,7 @@ type fakeAppForMCP struct {
 	client   client.Client
 	saveErr  error
 	saveHits int
+	workDir  string // optional override for /init and other workdir-touching commands
 }
 
 func (f *fakeAppForMCP) GetMCPManager() *mcp.Manager    { return f.mgr }
@@ -40,7 +41,7 @@ func (f *fakeAppForMCP) GetSession() *chat.Session                        { retu
 func (f *fakeAppForMCP) GetHistoryManager() (*chat.HistoryManager, error) { return nil, nil }
 func (f *fakeAppForMCP) GetContextManager() *appcontext.ContextManager    { return nil }
 func (f *fakeAppForMCP) GetUndoManager() *undo.Manager                    { return nil }
-func (f *fakeAppForMCP) GetWorkDir() string                               { return "" }
+func (f *fakeAppForMCP) GetWorkDir() string                               { return f.workDir }
 func (f *fakeAppForMCP) ClearConversation()                               {}
 func (f *fakeAppForMCP) GetTodoTool() *tools.TodoTool                     { return nil }
 func (f *fakeAppForMCP) GetTokenStats() TokenStats                        { return TokenStats{} }

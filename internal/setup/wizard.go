@@ -154,11 +154,12 @@ func buildSetupChoices() []setupChoice {
 
 // detectEnvAPIKeys checks for API key environment variables and returns the first found.
 // Returns (envVarName, backend, apiKey) or empty strings if none found.
+//
+// Legacy GOKIN_API_KEY was routed to the Gemini backend in pre-v0.65 builds.
+// Gemini was removed in v0.65.0, so that code path is gone — a user with only
+// GOKIN_API_KEY set will fall through to the provider-picker menu, which is
+// the right outcome (we don't know which provider that key belongs to).
 func detectEnvAPIKeys() (string, string, string) {
-	// Check legacy key first
-	if key := os.Getenv("GOKIN_API_KEY"); key != "" {
-		return "GOKIN_API_KEY", "gemini", key
-	}
 	// Check provider-specific env vars via registry
 	for _, p := range config.Providers {
 		if p.KeyOptional {
@@ -373,6 +374,67 @@ func saveProviderConfig(backend, apiKey, modelName string) (string, error) {
 	return configPath, nil
 }
 
+// saveOllamaConfig persists an Ollama setup (local or cloud) while preserving
+// every other field already in config.yaml. Earlier wizard code used raw
+// os.WriteFile with a hand-built YAML literal, which silently wiped every
+// non-Ollama key (GLM/Kimi/MiniMax/DeepSeek keys, MCP servers, aliases, …)
+// the user had configured before running `gokin --setup` and picking Ollama.
+//
+// apiKey is optional — only the Cloud variant collects one, Local mode leaves
+// it empty. serverURL is optional — Local users can keep the default
+// localhost endpoint by submitting an empty value, Cloud users get the
+// fixed ollama.com URL.
+func saveOllamaConfig(apiKey, modelName, serverURL string) (string, error) {
+	if modelName == "" {
+		modelName = "llama3.2"
+	}
+
+	configPath, err := getConfigPath()
+	if err != nil {
+		return "", fmt.Errorf("failed to get config path: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
+		return "", fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	root, err := loadRawConfigOrEmpty(configPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read existing config: %w", err)
+	}
+
+	api := ensureMap(root, "api")
+	api["active_provider"] = "ollama"
+	api["backend"] = "ollama"
+	// Reset ollama-specific fields before applying the current mode. Without
+	// this, a user who ran Cloud setup (writing ollama_key + ollama_base_url=
+	// https://ollama.com) and later re-ran the wizard picking Local with the
+	// default endpoint would end up with stale cloud settings still in place
+	// — the client would keep hitting ollama.com. Other providers' keys and
+	// unrelated config sections are intentionally untouched.
+	delete(api, "ollama_key")
+	delete(api, "ollama_base_url")
+	if apiKey != "" {
+		api["ollama_key"] = apiKey
+	}
+	if serverURL != "" {
+		api["ollama_base_url"] = serverURL
+	}
+
+	model := ensureMap(root, "model")
+	model["provider"] = "ollama"
+	model["name"] = modelName
+
+	data, err := yaml.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal config: %w", err)
+	}
+	if err := writeFileAtomic(configPath, data, 0600); err != nil {
+		return "", fmt.Errorf("failed to save config: %w", err)
+	}
+	return configPath, nil
+}
+
 // loadRawConfigOrEmpty reads config.yaml as a generic YAML tree so we can
 // preserve unknown fields across a save. Missing file returns an empty map.
 func loadRawConfigOrEmpty(path string) (map[string]any, error) {
@@ -543,24 +605,9 @@ func setupOllamaLocal(reader *bufio.Reader) error {
 
 	serverURL = strings.TrimSpace(serverURL)
 
-	// Save to config
-	configPath, err := getConfigPath()
+	configPath, err := saveOllamaConfig("", modelName, serverURL)
 	if err != nil {
-		return fmt.Errorf("failed to get config path: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	content := "api:\n  backend: ollama\n"
-	if serverURL != "" {
-		content += fmt.Sprintf("  ollama_base_url: %s\n", serverURL)
-	}
-	content += fmt.Sprintf("model:\n  provider: ollama\n  name: %s\n", modelName)
-
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+		return err
 	}
 
 	fmt.Printf("\n%s✓ Ollama Local configured!%s\n", colorGreen, colorReset)
@@ -606,27 +653,9 @@ func setupOllamaCloud(reader *bufio.Reader) error {
 		modelName = "llama3.2"
 	}
 
-	// Save to config
-	configPath, err := getConfigPath()
+	configPath, err := saveOllamaConfig(apiKey, modelName, "https://ollama.com")
 	if err != nil {
-		return fmt.Errorf("failed to get config path: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	content := fmt.Sprintf(`api:
-  backend: ollama
-  ollama_base_url: "https://ollama.com"
-  ollama_key: %s
-model:
-  provider: ollama
-  name: %s
-`, apiKey, modelName)
-
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+		return err
 	}
 
 	fmt.Printf("\n%s✓ Ollama Cloud configured!%s\n", colorGreen, colorReset)
@@ -722,29 +751,24 @@ func spin(message string, done <-chan bool) {
 }
 
 // getConfigPath returns the path to the config file.
-// Mirrors the logic in config/loader.go: on macOS, uses ~/Library/Application Support/gokin
-// unless a config already exists at ~/.config/gokin.
+//
+// Delegates to config.GetConfigPath() — previously this function had its own
+// copy of the path-resolution logic with OPPOSITE macOS precedence (wizard
+// preferred ~/.config while loader preferred ~/Library/Application Support).
+// If a user ended up with BOTH files (e.g. manually migrated or re-installed),
+// the wizard would save to one location while the loader read from the other
+// — the user's newly-saved key would appear to be lost on next launch.
+// Going through the loader's canonical helper eliminates that divergence by
+// construction.
+//
+// The error return is preserved so callers don't need updating; we convert
+// an empty path (loader's "couldn't resolve home dir" signal) into an error.
 func getConfigPath() (string, error) {
-	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
-		return filepath.Join(xdgConfig, "gokin", "config.yaml"), nil
+	path := config.GetConfigPath()
+	if path == "" {
+		return "", fmt.Errorf("failed to resolve config path (HOME not set?)")
 	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	if runtime.GOOS == "darwin" {
-		appSupport := filepath.Join(home, "Library", "Application Support", "gokin", "config.yaml")
-		dotConfig := filepath.Join(home, ".config", "gokin", "config.yaml")
-		// Use .config if it already exists there
-		if _, err := os.Stat(dotConfig); err == nil {
-			return dotConfig, nil
-		}
-		return appSupport, nil
-	}
-
-	return filepath.Join(home, ".config", "gokin", "config.yaml"), nil
+	return path, nil
 }
 
 // detectInstalledOllamaModels returns a list of installed Ollama models.

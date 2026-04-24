@@ -499,16 +499,25 @@ func (c *InitCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	workDir := app.GetWorkDir()
 	gokinPath := filepath.Join(workDir, "GOKIN.md")
 
-	// Check if file already exists
-	if _, err := os.Stat(gokinPath); err == nil {
-		return "GOKIN.md already exists. Edit it manually or delete to reinitialize.", nil
-	}
-
-	// Detect project type for smarter template
+	// Atomic create-or-fail via O_EXCL. The older two-step Stat-then-Write
+	// had a TOCTOU gap where a concurrent process (or a follow-up /init
+	// double-click) could create GOKIN.md between the existence check and
+	// the write, causing silent overwrite of the just-created file.
 	template := c.detectTemplate(workDir)
-
-	if err := os.WriteFile(gokinPath, []byte(template), 0644); err != nil {
+	f, err := os.OpenFile(gokinPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		if os.IsExist(err) {
+			return "GOKIN.md already exists. Edit it manually or delete to reinitialize.", nil
+		}
 		return fmt.Sprintf("Failed to create GOKIN.md: %v", err), nil
+	}
+	if _, werr := f.WriteString(template); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(gokinPath)
+		return fmt.Sprintf("Failed to write GOKIN.md: %v", werr), nil
+	}
+	if cerr := f.Close(); cerr != nil {
+		return fmt.Sprintf("Failed to close GOKIN.md: %v", cerr), nil
 	}
 
 	return "Created GOKIN.md with project-specific template. Edit it to refine instructions.", nil

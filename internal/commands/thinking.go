@@ -180,6 +180,10 @@ func clampThinkingBudget(budget int32) int32 {
 // modelSupportsThinking duplicates the factory-level checks so the command
 // can give an accurate status without importing the client package (which
 // would create a circular dep: commands → client → commands).
+//
+// Mirrors: factory.go supportsKimiThinking / supportsGLMThinking /
+// supportsDeepSeekThinking. When adding a new thinking-capable model there,
+// update this table too.
 func modelSupportsThinking(modelID string) bool {
 	m := strings.ToLower(modelID)
 	switch {
@@ -189,6 +193,10 @@ func modelSupportsThinking(modelID string) bool {
 	case strings.HasPrefix(m, "glm-5"),
 		strings.HasPrefix(m, "glm-4.7"):
 		return true
+	case strings.HasPrefix(m, "deepseek-"):
+		// All DeepSeek family models EXCEPT deepseek-chat support thinking.
+		// Matches supportsDeepSeekThinking in client/factory.go.
+		return m != "deepseek-chat"
 	}
 	return false
 }

@@ -455,3 +455,125 @@ func TestProvider_ClearsHistoryOnSwitch(t *testing.T) {
 		t.Errorf("output should surface clear: %q", out)
 	}
 }
+
+// Regression: /logout of the currently-active provider, when another
+// provider is still configured, auto-switches to that provider. Before
+// this fix the auto-switch silently kept session history built for the
+// just-removed provider, which then 400'd on the next request to the
+// new provider with the same thinking-signature mismatch that /login
+// and /provider already handle.
+func TestLogout_ActiveProviderAutoSwitch_ClearsHistory(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-existing-ignore-me"
+	cfg.API.DeepSeekKey = "sk-deepseek-ready-ignore-me"
+	app := newAuthApp(cfg)
+	cmd := &LogoutCommand{}
+
+	out, err := cmd.Execute(context.Background(), []string{"kimi"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 1 {
+		t.Errorf("ClearConversation calls = %d, want 1 (autoswitch must clear cross-provider history)", app.clearCalls)
+	}
+	if !strings.Contains(out, "Auto-switched") {
+		t.Errorf("output should mention the autoswitch: %q", out)
+	}
+	if !strings.Contains(out, "session cleared") {
+		t.Errorf("output should surface the session clear so user understands why: %q", out)
+	}
+	if app.applied == nil || app.applied.API.ActiveProvider != "deepseek" {
+		t.Errorf("autoswitch target = %q, want deepseek", app.applied.API.ActiveProvider)
+	}
+}
+
+// Counter-case: logging out a NON-active provider just removes the key,
+// no autoswitch, no session clear (history is still valid for the
+// active provider).
+func TestLogout_NonActiveProvider_DoesNotClearHistory(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-stays"
+	cfg.API.DeepSeekKey = "sk-deepseek-goes-away"
+	app := newAuthApp(cfg)
+	cmd := &LogoutCommand{}
+
+	_, err := cmd.Execute(context.Background(), []string{"deepseek"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 0 {
+		t.Errorf("ClearConversation should NOT fire when logging out a non-active provider, got %d calls", app.clearCalls)
+	}
+	if app.applied == nil || app.applied.API.DeepSeekKey != "" {
+		t.Errorf("DeepSeek key should be cleared")
+	}
+	if app.applied.API.ActiveProvider != "kimi" {
+		t.Errorf("ActiveProvider should stay kimi, got %q", app.applied.API.ActiveProvider)
+	}
+}
+
+// /provider X where X is already the active provider: previously returned
+// a dead-end "Already using X" that confused users trying to recover from
+// a stuck session ("I did /provider kimi and nothing happened"). The new
+// message keeps the same no-op behavior but surfaces the escape hatches
+// (/clear to reset, /provider to inspect, /login to switch).
+func TestProvider_AlreadyOnProvider_SurfacesResetHint(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-existing"
+	cfg.Model.Name = "kimi-for-coding"
+	app := newAuthApp(cfg)
+	cmd := &ProviderCommand{}
+
+	out, err := cmd.Execute(context.Background(), []string{"kimi"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	// Must NOT apply config or clear conversation (user is staying put).
+	if app.applyCalls != 0 {
+		t.Errorf("same-provider case must not re-apply config: got %d calls", app.applyCalls)
+	}
+	if app.clearCalls != 0 {
+		t.Errorf("same-provider case must not auto-clear: got %d calls", app.clearCalls)
+	}
+
+	// Message must teach the user about /clear — the escape hatch most
+	// relevant to the "why didn't /provider do anything?" scenario.
+	if !strings.Contains(out, "Already using kimi") {
+		t.Errorf("output should still confirm no-op: %q", out)
+	}
+	if !strings.Contains(out, "/clear") {
+		t.Errorf("output should suggest /clear as a recovery path: %q", out)
+	}
+	if !strings.Contains(out, "kimi-for-coding") {
+		t.Errorf("output should show the current model so user knows what they're on: %q", out)
+	}
+}
+
+// Edge: logging out the only configured provider leaves no fallback to
+// switch to. The user gets an onboarding hint but no autoswitch and no
+// spurious history clear (the next /login will clear if provider differs).
+func TestLogout_OnlyProvider_NoAutoswitchNoClear(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-only"
+	app := newAuthApp(cfg)
+	cmd := &LogoutCommand{}
+
+	out, err := cmd.Execute(context.Background(), []string{"kimi"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 0 {
+		t.Errorf("ClearConversation should NOT fire when no autoswitch happens, got %d", app.clearCalls)
+	}
+	if strings.Contains(out, "Auto-switched") {
+		t.Errorf("should NOT auto-switch when no other providers exist: %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "no api keys") {
+		t.Errorf("should surface the no-keys onboarding hint: %q", out)
+	}
+}

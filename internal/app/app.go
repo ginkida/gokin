@@ -104,6 +104,14 @@ type App struct {
 	session  *chat.Session
 	tui      *ui.Model
 	program  *tea.Program
+	// programMu guards writes/reads of `program` independently of a.mu.
+	// Keeping these mutexes separate matters: safeSendToProgram takes
+	// programMu, but any caller may already hold a.mu (e.g. ApplyConfig
+	// does so for the whole function). Before this split, both reads went
+	// through a.mu and ApplyConfig self-deadlocked on the non-reentrant
+	// mutex — visible to users as `/provider deepseek` hanging with
+	// "Generating 11.8s" forever.
+	programMu sync.RWMutex
 
 	// Application context for cancellation
 	ctx    context.Context
@@ -483,8 +491,12 @@ func (a *App) Run() error {
 		a.agentRunner.ResumeErrorCheckpoints(a.ctx)
 	}
 
-	// Create and run the program
+	// Create and run the program. Publish the program reference under
+	// programMu (not a.mu) so safeSendToProgram can observe it from
+	// goroutines that may already hold a.mu (e.g., ApplyConfig).
+	a.programMu.Lock()
 	a.program = a.tui.GetProgram()
+	a.programMu.Unlock()
 
 	a.mu.Lock()
 	a.running = true
@@ -646,6 +658,22 @@ func (a *App) handleSubmit(message string) {
 		return
 	}
 
+	// Forgot-slash detection: if the message starts with a word that's
+	// a registered command AND the rest looks like args rather than a
+	// sentence, flag it. Users kept reporting "/provider kimi didn't
+	// switch, Generating started" when they actually typed `provider
+	// kimi` without the slash — it went to the LLM which then ran a
+	// 20s reasoning round producing an unhelpful response. We don't
+	// block the LLM call (their intent might genuinely be a message),
+	// but we surface a toast so they know which command they meant and
+	// can cancel + retype with the slash.
+	if hint := a.detectUnslashedCommand(message); hint != "" {
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: hint,
+		})
+	}
+
 	// Create cancelable context for this request
 	a.processingMu.Lock()
 	ctx, cancel := context.WithCancel(a.ctx)
@@ -661,6 +689,45 @@ func (a *App) handleSubmit(message string) {
 		}()
 		a.processMessageWithContext(ctx, message)
 	})
+}
+
+// detectUnslashedCommand returns a user-facing hint when the input looks
+// like a slash command the user typed without the leading slash (e.g.
+// `provider kimi` instead of `/provider kimi`). Returns "" when the input
+// is plain natural language and no warning should fire.
+//
+// Heuristic:
+//   - first word (lowercased) exactly matches a registered command name
+//   - total word count ≤ 4 (a sentence is almost always longer)
+//   - no sentence punctuation (. , ? ! : ;) anywhere — natural language
+//     prompts usually have at least one
+//
+// False-positive risk is very low: only messages that look exactly like
+// command invocations trigger. A user asking the model "provider ideas"
+// has 2 words and no punctuation, so it WOULD fire and hint /provider.
+// That's acceptable — the toast is advisory and the LLM call still runs,
+// so the user sees both the hint and the model's response.
+func (a *App) detectUnslashedCommand(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" || strings.HasPrefix(message, "/") {
+		return ""
+	}
+	words := strings.Fields(message)
+	if len(words) == 0 || len(words) > 4 {
+		return ""
+	}
+	// Any sentence punctuation disqualifies — natural-language tells.
+	if strings.ContainsAny(message, ".,?!:;") {
+		return ""
+	}
+	firstWord := strings.ToLower(words[0])
+	if a.commandHandler == nil {
+		return ""
+	}
+	if _, exists := a.commandHandler.GetCommand(firstWord); !exists {
+		return ""
+	}
+	return fmt.Sprintf("Looks like you meant /%s — this was sent to the model. Prefix with '/' to run as a command next time.", firstWord)
 }
 
 // executeCommand executes a slash command.
@@ -1295,11 +1362,20 @@ func humanizeAge(age time.Duration) string {
 }
 
 // safeSendToProgram safely sends a message to the Bubbletea program.
-// It copies the program reference under lock to prevent race conditions.
+//
+// Guards the `program` reference with a DEDICATED mutex (`programMu`), not
+// the primary `a.mu`. This distinction is load-bearing: callers such as
+// ApplyConfig, TogglePermissions, and CompactContextWithPlan legitimately
+// hold `a.mu` for the duration of their mutation, and a Go `sync.Mutex` is
+// non-reentrant — routing this function through `a.mu` would self-deadlock
+// those goroutines forever, visible to users as `/provider <other>` (and
+// every other config-mutating command) hanging with "Generating 11s" that
+// never resolves. `programMu` is independent, held briefly, and read-locked
+// (RLock) on the hot path so concurrent sends don't serialize.
 func (a *App) safeSendToProgram(msg tea.Msg) {
-	a.mu.Lock()
+	a.programMu.RLock()
 	program := a.program
-	a.mu.Unlock()
+	a.programMu.RUnlock()
 
 	if program == nil {
 		return
@@ -1448,13 +1524,19 @@ func (a *App) ClearConversation() {
 
 // CompactContextWithPlan clears the conversation and injects the plan summary.
 // This is called when a plan is approved to free up context space.
+//
+// Locking discipline: safeSendToProgram must never be called while a.mu is
+// held — it re-acquires a.mu internally and Go's Mutex is non-reentrant.
+// Same bug as the one ApplyConfig previously had. We emit the user toast
+// first (no lock needed for the outgoing message), then grab the lock for
+// the state mutation.
 func (a *App) CompactContextWithPlan(planSummary string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	// Notify user about context clear
+	// Notify user about context clear — BEFORE taking the lock.
 	a.safeSendToProgram(ui.StreamTextMsg(
 		"\n📋 Context cleared for plan execution. Previous conversation archived.\n"))
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	// Clear the session
 	a.session.Clear()
@@ -1738,9 +1820,18 @@ func (a *App) GetProjectInfo() *appcontext.ProjectInfo {
 }
 
 // ApplyConfig saves the given configuration and re-initializes affected components.
+//
+// Defensive locking discipline: we release `a.mu` BEFORE the trailing
+// safeSendToProgram call. The primary deadlock has been closed by routing
+// safeSendToProgram through a dedicated `programMu` (so it no longer
+// re-enters `a.mu`), but keeping the send outside the critical section
+// remains the safer pattern — future code added to safeSendToProgram that
+// takes a.mu again would otherwise silently reintroduce the hang. A test
+// (TestApplyConfig_NoSelfDeadlock) pins the no-deadlock behavior.
 func (a *App) ApplyConfig(cfg *config.Config) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	// NOTE: no defer Unlock() — we release before safeSendToProgram. Every
+	// early-return below unlocks explicitly.
 
 	// 1. Save to file if path is available
 	if err := cfg.Save(); err != nil {
@@ -1762,6 +1853,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// 3. Re-initialize client
 	newClient, err := client.NewClient(a.ctx, a.config, a.config.Model.Name)
 	if err != nil {
+		a.mu.Unlock()
 		return fmt.Errorf("failed to re-initialize client: %w", err)
 	}
 	attachStatusCallback(newClient, &appStatusCallback{app: a})
@@ -1840,13 +1932,15 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.tui.SetPlanningModeEnabled(a.planningModeEnabled)
 	}
 
-	// 8d. Send ConfigUpdateMsg to Bubbletea program to refresh UI
-	a.safeSendToProgram(ui.ConfigUpdateMsg{
+	// Snapshot the UI-relevant state while we still hold the lock — we need
+	// to release a.mu before calling safeSendToProgram (see function-level
+	// comment on the re-entrancy deadlock).
+	uiMsg := ui.ConfigUpdateMsg{
 		PermissionsEnabled:  a.config.Permission.Enabled,
 		SandboxEnabled:      a.config.Tools.Bash.Sandbox,
 		PlanningModeEnabled: a.planningModeEnabled,
 		ModelName:           a.config.Model.Name,
-	})
+	}
 
 	// 9. Update search cache
 	if a.config.Cache.Enabled && a.searchCache == nil {
@@ -1854,7 +1948,15 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		// Re-wire to tools (complex, but most tools check on use)
 	}
 
-	logging.Info("configuration applied successfully", "model", a.config.Model.Name)
+	modelName := a.config.Model.Name
+	a.mu.Unlock()
+
+	// 8d. Send ConfigUpdateMsg to Bubbletea program OUTSIDE the locked
+	// section — safeSendToProgram re-acquires a.mu internally, so calling
+	// it under the lock would self-deadlock on Go's non-reentrant Mutex.
+	a.safeSendToProgram(uiMsg)
+
+	logging.Info("configuration applied successfully", "model", modelName)
 	return nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -94,13 +95,30 @@ func (c *OpenCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		editor = "open -t"
 	}
 
-	// Execute the editor command
+	// Execute the editor command.
+	// IMPORTANT: NEVER invoke the editor through `sh -c`. Earlier code did
+	// `sh -c "<editor> <path>"` which was a shell-injection vector on two
+	// axes:
+	//   1. The path comes from user input (`/open <file>`) and could contain
+	//      metacharacters like `;`, `|`, backticks, `$()`. `/open foo;whoami`
+	//      would execute `whoami`.
+	//   2. The $EDITOR env var is user-controlled at shell level but could
+	//      be set maliciously via an inherited environment.
+	// exec.Command argv-style (no shell) treats each token as a literal
+	// argument — no interpretation. We still split EDITOR on whitespace
+	// because users legitimately set things like `EDITOR="code --wait"` or
+	// `open -t`, and that's a positional-arg convention that doesn't require
+	// shell metachar interpretation.
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/c", "start", "", absPath)
 	} else {
-		// Split editor command for unix-like systems
-		cmd = exec.Command("sh", "-c", fmt.Sprintf("%s %s", editor, absPath))
+		editorCmd, editorArgs, ok := parseEditorCommand(editor)
+		if !ok {
+			return "Error: $EDITOR is empty. Set EDITOR=<your-editor>.", nil
+		}
+		argv := append(append([]string(nil), editorArgs...), absPath)
+		cmd = exec.Command(editorCmd, argv...)
 	}
 
 	// Detach from parent process so the editor continues running
@@ -128,4 +146,26 @@ func (c *OpenCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	}
 
 	return fmt.Sprintf("Opening %s in %s...", filePath, editor), nil
+}
+
+// parseEditorCommand splits a user-supplied $EDITOR value into (executable,
+// extra-args) suitable for exec.Command — no shell is involved. Users
+// legitimately set values like "code --wait" or "open -t"; those split on
+// whitespace into positional tokens that exec.Command handles directly.
+//
+// Critically, tokens are treated as literal argv entries: `;`, `|`,
+// backticks, and `$()` have no special meaning. The old code ran
+// `sh -c "<editor> <path>"` which interpreted those as shell
+// metacharacters, enabling command injection via either a malicious $EDITOR
+// or a file path containing shell syntax.
+//
+// Returns ok=false only when the editor value is empty or whitespace-only —
+// callers should surface that to the user rather than exec'ing an empty
+// command.
+func parseEditorCommand(editor string) (string, []string, bool) {
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
+		return "", nil, false
+	}
+	return parts[0], parts[1:], true
 }

@@ -89,31 +89,31 @@ func TestBuildSetupChoices_Ollama(t *testing.T) {
 	}
 }
 
-// TestDetectEnvAPIKeys_Legacy verifies detection of legacy GOKIN_API_KEY
-func TestDetectEnvAPIKeys_Legacy(t *testing.T) {
-	// Save original env
-	original := os.Getenv("GOKIN_API_KEY")
-	defer func() {
-		if original != "" {
-			os.Setenv("GOKIN_API_KEY", original)
-		} else {
-			os.Unsetenv("GOKIN_API_KEY")
-		}
-	}()
-
-	// Set test value
-	os.Setenv("GOKIN_API_KEY", "test-key-123")
+// TestDetectEnvAPIKeys_LegacyGOKIN_APIKEY_Ignored verifies that the legacy
+// GOKIN_API_KEY env var is no longer picked up as a gemini key — gemini was
+// removed as a provider in v0.65 and the old code path dead-ended the wizard
+// with "unknown provider: gemini" at validation time. Now the wizard simply
+// ignores GOKIN_API_KEY (we don't know which provider it belongs to) and
+// falls through to the interactive picker.
+func TestDetectEnvAPIKeys_LegacyGOKIN_APIKEY_Ignored(t *testing.T) {
+	// Clear every provider env var, then set ONLY the legacy one.
+	allKeyVars := []string{
+		"GOKIN_API_KEY",
+		"GOKIN_GLM_KEY", "GLM_API_KEY",
+		"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY",
+		"GOKIN_MINIMAX_KEY", "MINIMAX_API_KEY",
+		"GOKIN_KIMI_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY",
+		"GOKIN_OLLAMA_KEY", "OLLAMA_API_KEY",
+	}
+	for _, k := range allKeyVars {
+		t.Setenv(k, "")
+	}
+	t.Setenv("GOKIN_API_KEY", "test-key-123")
 
 	envVar, backend, key := detectEnvAPIKeys()
 
-	if envVar != "GOKIN_API_KEY" {
-		t.Errorf("envVar = %q, want %q", envVar, "GOKIN_API_KEY")
-	}
-	if backend != "gemini" {
-		t.Errorf("backend = %q, want %q", backend, "gemini")
-	}
-	if key != "test-key-123" {
-		t.Errorf("key = %q, want %q", key, "test-key-123")
+	if envVar != "" || backend != "" || key != "" {
+		t.Errorf("GOKIN_API_KEY alone must not be auto-claimed by any provider — got envVar=%q backend=%q key=%q", envVar, backend, key)
 	}
 }
 

@@ -356,7 +356,14 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 				}
 			}
 
-			result.WriteString(fmt.Sprintf("\n✓ Auto-switched to %s\n", newProvider))
+			// Clear session history — the history was built against the
+			// just-removed provider's wire format (thinking signatures,
+			// tool_use IDs, cache_control shapes), and a different
+			// provider (e.g., DeepSeek strict) will 400 on replay.
+			// Same class of bug as /login and /provider handle.
+			app.ClearConversation()
+
+			result.WriteString(fmt.Sprintf("\n✓ Auto-switched to %s — session cleared (history format differs across providers)\n", newProvider))
 		}
 	}
 
@@ -434,7 +441,16 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 	}
 
 	if newProvider == currentProvider {
-		return fmt.Sprintf("Already using %s", newProvider), nil
+		// Dead-end "Already using X" surprised users who ran `/provider X`
+		// expecting it to recover from a stuck session (a common mental
+		// model: "switch TO X even though I'm on X, fresh start"). Surface
+		// the escape hatches they actually want — /clear to reset, /provider
+		// to inspect, /login <other> to change provider.
+		return fmt.Sprintf("Already using %s (%s).\n\n"+
+			"  /clear              — reset conversation (keeps config)\n"+
+			"  /provider           — show all providers\n"+
+			"  /login <other> <key> — switch to a different provider",
+			newProvider, cfg.Model.Name), nil
 	}
 
 	// Check if provider has credentials

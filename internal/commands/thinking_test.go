@@ -282,17 +282,27 @@ func TestThinking_UnknownOption_Rejects(t *testing.T) {
 // factory checks — see docstring on modelSupportsThinking.
 func TestModelSupportsThinking(t *testing.T) {
 	cases := map[string]bool{
-		"kimi-for-coding":  true,
-		"Kimi-for-Coding":  true,
-		"kimi-k2.6":        true,
-		"kimi-k2-thinking": true,
-		"glm-5.1":          true,
-		"glm-4.7":          true,
-		"GLM-5.1":          true,
-		"glm-4.5":          false, // below 4.7
-		"llama3.2":         false,
-		"minimax-m2.7":     false,
-		"":                 false,
+		"kimi-for-coding":   true,
+		"Kimi-for-Coding":   true,
+		"kimi-k2.6":         true,
+		"kimi-k2-thinking":  true,
+		"glm-5.1":           true,
+		"glm-4.7":           true,
+		"GLM-5.1":           true,
+		"glm-4.5":           false, // below 4.7
+		"llama3.2":          false,
+		"minimax-m2.7":      false,
+		"":                  false,
+		// DeepSeek family — added v0.71.5 to mirror supportsDeepSeekThinking
+		// in client/factory.go. Before this, /thinking status wrongly warned
+		// "model may not emit thinking content" for users on DeepSeek V4 Pro.
+		"deepseek-v4-pro":   true,
+		"deepseek-v4-flash": true,
+		"deepseek-reasoner": true,
+		"DEEPSEEK-V4-PRO":   true,
+		// deepseek-chat is the only DeepSeek model that does NOT support
+		// thinking — the chat endpoint doesn't emit reasoning blocks.
+		"deepseek-chat": false,
 	}
 	for model, want := range cases {
 		t.Run(model, func(t *testing.T) {
