@@ -304,15 +304,23 @@ func TestExecutorExecuteLoop_KimiInjectsWorkingMemoryAfterExploration(t *testing
 		t.Fatalf("function history count = %d, want 1", len(cl.functionHistory))
 	}
 
+	if len(cl.functionResults) != 1 || len(cl.functionResults[0]) != 1 {
+		t.Fatalf("function results = %+v, want one result batch", cl.functionResults)
+	}
+	resultContent, _ := cl.functionResults[0][0].Response["content"].(string)
+	if !strings.Contains(resultContent, "[Kimi working memory]") {
+		t.Fatalf("result content = %q, want Kimi working memory scaffold", resultContent)
+	}
+	if !strings.Contains(resultContent, `grep "loop guard" in internal/tools ->`) {
+		t.Fatalf("result content = %q, want summarized grep target", resultContent)
+	}
+	if !strings.Contains(resultContent, "reuse these results") {
+		t.Fatalf("result content = %q, want reuse guidance", resultContent)
+	}
+
 	historyText := strings.Join(cl.functionHistory[0], "\n")
-	if !strings.Contains(historyText, "[Kimi working memory]") {
-		t.Fatalf("history = %q, want Kimi working memory scaffold", historyText)
-	}
-	if !strings.Contains(historyText, `grep "loop guard" in internal/tools ->`) {
-		t.Fatalf("history = %q, want summarized grep target", historyText)
-	}
-	if !strings.Contains(historyText, "reuse these results") {
-		t.Fatalf("history = %q, want reuse guidance", historyText)
+	if strings.Contains(historyText, "[Kimi working memory]") {
+		t.Fatalf("history = %q, notification must not be inserted before tool results", historyText)
 	}
 }
 

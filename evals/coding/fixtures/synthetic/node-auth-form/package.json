@@ -1,0 +1,7 @@
+{
+  "name": "node-auth-form-eval",
+  "private": true,
+  "scripts": {
+    "test": "node test/auth-form.test.js"
+  }
+}

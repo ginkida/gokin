@@ -31,6 +31,17 @@ jobs:
       - name: Run tests
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
+      - name: Eval smoke dry-run
+        run: go run ./cmd/gokin eval run --dry-run --scenario go_bugfix_targeted_test --output /tmp/gokin-eval-dryrun.jsonl
+
+      - name: Eval smoke synthetic scenario
+        run: |
+          go run ./cmd/gokin eval run \
+            --scenario go_bugfix_targeted_test \
+            --workdir /tmp/gokin-eval-smoke \
+            --output /tmp/gokin-eval-smoke.jsonl \
+            --agent-command 'sh "$GITHUB_WORKSPACE/evals/coding/scripts/fix-go-validation.sh"'
+
       - name: Coverage summary
         # Print per-package coverage and total. Fails the job if total drops
         # below the baseline — set intentionally low so additive PRs can't

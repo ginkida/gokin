@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "name": "gokin-coding-agent-baseline",
+  "description": "Baseline scenarios for measuring code-project work: investigation, bounded edits, verification, and final evidence.",
+  "metrics": [
+    "task_completed",
+    "verification_passed",
+    "touched_files_scoped",
+    "no_false_file_claims",
+    "tool_calls_reasonable",
+    "final_answer_mentions_verification",
+    "journal_present",
+    "files_read_recorded",
+    "files_edited_recorded",
+    "verification_recorded"
+  ],
+  "scenarios": [
+    {
+      "id": "go_bugfix_targeted_test",
+      "category": "bugfix",
+      "difficulty": "small",
+      "prompt": "Fix the failing user email validation test. Keep the public API unchanged and run the narrowest relevant Go test.",
+      "fixture": "synthetic/go-validation",
+      "expected_behaviors": [
+        "inspect the failing test and validator implementation before editing",
+        "make a minimal implementation change",
+        "run a targeted go test for the changed package",
+        "summarize changed files and verification"
+      ],
+      "verification_commands": [
+        "go test ./internal/validation"
+      ],
+      "success_criteria": [
+        "validation accepts normal email addresses and rejects malformed ones",
+        "no unrelated files are modified",
+        "final answer cites the validator file and the targeted test command"
+      ],
+      "failure_signals": [
+        "edits without reading the validator file",
+        "runs only broad tests before a targeted package test",
+        "claims verification without a passing command"
+      ],
+      "max_tool_calls": 12
+    },
+    {
+      "id": "go_refactor_preserve_contract",
+      "category": "refactor",
+      "difficulty": "medium",
+      "prompt": "Refactor the retry policy helper to remove duplication while preserving behavior. Update tests if needed.",
+      "fixture": "synthetic/go-retry-policy",
+      "expected_behaviors": [
+        "read the helper, callers, and existing tests",
+        "preserve exported function signatures",
+        "avoid unrelated cleanup",
+        "run targeted tests for the retry package"
+      ],
+      "verification_commands": [
+        "go test ./internal/retry"
+      ],
+      "success_criteria": [
+        "existing retry behavior is unchanged",
+        "duplication is reduced in the requested helper",
+        "tests pass without broad repository churn"
+      ],
+      "failure_signals": [
+        "renames public APIs without request",
+        "changes retry thresholds unintentionally",
+        "does not inspect callers"
+      ],
+      "max_tool_calls": 18
+    },
+    {
+      "id": "node_test_repair",
+      "category": "test_repair",
+      "difficulty": "small",
+      "prompt": "The auth form test is failing after a label text change. Repair the test without weakening assertions.",
+      "fixture": "synthetic/node-auth-form",
+      "expected_behaviors": [
+        "inspect package scripts before running commands",
+        "read the failing test and component",
+        "update the test to match accessible UI behavior",
+        "run the relevant package test script"
+      ],
+      "verification_commands": [
+        "npm test -- auth-form"
+      ],
+      "success_criteria": [
+        "test remains behavior-focused",
+        "no snapshots are blindly regenerated",
+        "final answer names test file and verification command"
+      ],
+      "failure_signals": [
+        "deletes assertions",
+        "skips package.json script inspection",
+        "changes component behavior unnecessarily"
+      ],
+      "max_tool_calls": 14
+    },
+    {
+      "id": "multi_file_feature_with_contract",
+      "category": "feature",
+      "difficulty": "medium",
+      "prompt": "Add a request ID field to the audit event path. Thread it from HTTP middleware into the audit logger and cover it with tests.",
+      "fixture": "synthetic/go-audit-request-id",
+      "expected_behaviors": [
+        "map middleware, event model, logger, and tests before editing",
+        "update all contract points consistently",
+        "add or update focused tests",
+        "run targeted tests first"
+      ],
+      "verification_commands": [
+        "go test ./internal/audit ./internal/http"
+      ],
+      "success_criteria": [
+        "request ID is present in emitted audit events",
+        "existing audit fields are preserved",
+        "tests cover propagation from middleware to logger"
+      ],
+      "failure_signals": [
+        "updates only one side of the contract",
+        "introduces global mutable state",
+        "final answer claims files not changed"
+      ],
+      "max_tool_calls": 24
+    },
+    {
+      "id": "build_failure_dependency_scope",
+      "category": "failing_build",
+      "difficulty": "medium",
+      "prompt": "The build fails after moving a helper package. Fix imports and module references without changing runtime behavior.",
+      "fixture": "synthetic/go-import-move",
+      "expected_behaviors": [
+        "run or inspect the failing build output",
+        "locate moved package imports with search",
+        "update only affected import paths",
+        "run go test or go build for affected modules"
+      ],
+      "verification_commands": [
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "build succeeds",
+        "runtime code behavior is unchanged",
+        "no dead compatibility shims are added unless required"
+      ],
+      "failure_signals": [
+        "broad rewrites unrelated packages",
+        "edits generated/vendor files",
+        "stops after explaining the build error"
+      ],
+      "max_tool_calls": 20
+    }
+  ]
+}

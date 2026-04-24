@@ -89,3 +89,48 @@ func TestBuildAssistantMessage_EmitsSignedThinkingBeforeToolUse(t *testing.T) {
 		t.Fatalf("content[1].type = %q, want tool_use", got)
 	}
 }
+
+func TestConvertHistoryWithResults_OrdersToolResultBeforeNotificationText(t *testing.T) {
+	c := &AnthropicClient{}
+
+	history := []*genai.Content{
+		{
+			Role: genai.RoleModel,
+			Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{
+					ID:   "tool_1",
+					Name: "read",
+					Args: map[string]any{"file_path": "main.go"},
+				},
+			}},
+		},
+		{
+			Role:  genai.RoleUser,
+			Parts: []*genai.Part{genai.NewPartFromText("[System: reuse tool results]")},
+		},
+	}
+	results := []*genai.FunctionResponse{{
+		ID:       "tool_1",
+		Name:     "read",
+		Response: map[string]any{"content": "package main"},
+	}}
+
+	messages, _ := c.convertHistoryWithResultsAndSystem(history, results)
+	if len(messages) != 2 {
+		t.Fatalf("messages len = %d, want 2: %+v", len(messages), messages)
+	}
+	if role := stringFromMap(messages[1], "role"); role != "user" {
+		t.Fatalf("role = %q, want user", role)
+	}
+
+	content := extractContentArray(messages[1]["content"])
+	if len(content) != 2 {
+		t.Fatalf("content len = %d, want 2: %+v", len(content), content)
+	}
+	if got := stringFromMap(content[0], "type"); got != "tool_result" {
+		t.Fatalf("content[0].type = %q, want tool_result; content=%+v", got, content)
+	}
+	if got := stringFromMap(content[1], "type"); got != "text" {
+		t.Fatalf("content[1].type = %q, want text; content=%+v", got, content)
+	}
+}
