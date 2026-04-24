@@ -38,9 +38,14 @@ func (c *PlanCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	enabled := app.TogglePlanningMode()
 
 	if enabled {
-		return "Planning mode ON — complex tasks will be broken into steps with approval\n\nTip: Shift+Tab to toggle, /plan status to check", nil
+		return "Plan mode ON — read-only exploration.\n\n" +
+			"The agent can now only read/search/grep. When it has a plan, it will\n" +
+			"call enter_plan_mode and ask for your approval. On approve, plan mode\n" +
+			"exits automatically and it runs the plan with full tools.\n\n" +
+			"Tip: Shift+Tab to toggle, /plan status to check.", nil
 	}
-	return "Planning mode OFF — direct execution\n\nTip: Shift+Tab to toggle, /plan status to check", nil
+	return "Plan mode OFF — direct execution with full tools.\n\n" +
+		"Tip: Shift+Tab to re-enable.", nil
 }
 
 // GetMetadata returns command metadata for palette display.

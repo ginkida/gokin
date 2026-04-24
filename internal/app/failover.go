@@ -66,7 +66,7 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	if a.executor != nil {
 		a.executor.SetClient(newClient)
 		if a.registry != nil {
-			newClient.SetTools(a.registry.GeminiTools())
+			newClient.SetTools(a.toolsForCurrentMode())
 		}
 	}
 	if a.agentRunner != nil {

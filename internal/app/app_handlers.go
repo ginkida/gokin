@@ -190,6 +190,13 @@ func (a *App) handlePlanApprovalWithFeedback(decision ui.PlanApprovalDecision, f
 	switch decision {
 	case ui.PlanApproved:
 		planDecision = plan.ApprovalApproved
+		// Claude Code semantics: approving a plan hands control back to the
+		// agent for execution — which means lifting the read-only
+		// restriction. If we stayed in plan mode the model would still only
+		// see read tools and couldn't carry out the plan it just proposed.
+		// User can re-enter plan mode via Shift+Tab or /plan for the next
+		// task.
+		a.disablePlanModeAfterApproval()
 	case ui.PlanRejected:
 		planDecision = plan.ApprovalRejected
 		// Save the rejected plan for context

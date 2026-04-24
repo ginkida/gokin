@@ -319,6 +319,21 @@ func (a *App) Run() error {
 		logging.Debug("project context auto-detected", "length", len(a.detectedProjectContext))
 	}
 
+	// Sync plan-mode signal into prompt builder, tool schema, and TUI
+	// status bar. Built once here (not on every Toggle) because startup
+	// is the only place where the initial state needs to be pushed without
+	// a prior toggle event. Subsequent flips go through TogglePlanningMode
+	// which handles all three surfaces.
+	if a.promptBuilder != nil {
+		a.promptBuilder.SetPlanMode(a.planningModeEnabled)
+	}
+	if a.client != nil {
+		a.client.SetTools(a.toolsForCurrentMode())
+	}
+	if a.tui != nil {
+		a.tui.SetPlanningModeEnabled(a.planningModeEnabled)
+	}
+
 	// Run on_start hooks with proper context
 	if a.hooksManager != nil {
 		a.hooksManager.RunOnStart(a.ctx)
@@ -886,8 +901,35 @@ func (a *App) SyncMCPToolsForServer(serverName string) {
 
 	// Push fresh declarations to the main client.
 	if c := a.GetMainClient(); c != nil {
-		c.SetTools(a.registry.GeminiTools())
+		c.SetTools(a.toolsForCurrentMode())
 	}
+}
+
+// toolsForCurrentMode returns the tool schema that matches the active mode:
+// the read-only subset when plan mode is on, the full set otherwise. Must be
+// the single source of truth for every SetTools call that targets the main
+// client — otherwise a schema push from one callsite could undo plan-mode
+// filtering applied from another.
+//
+// Safe to call from any goroutine: holds no App lock itself, and the
+// registry operations it invokes take their own internal locks.
+func (a *App) toolsForCurrentMode() []*genai.Tool {
+	// IsPlanningModeEnabled takes a.mu briefly; fine here — callers are
+	// outside ApplyConfig's critical section (that's why this helper exists
+	// as a separate method rather than being inlined).
+	return a.planModeToolsLocked(a.IsPlanningModeEnabled())
+}
+
+// planModeToolsLocked is the lock-free variant of toolsForCurrentMode — it
+// takes the plan-mode flag as an argument instead of reading it. Required
+// for callers that already hold `a.mu` (e.g. TogglePlanningMode), because
+// IsPlanningModeEnabled takes the same mutex and would self-deadlock on
+// Go's non-reentrant sync.Mutex.
+func (a *App) planModeToolsLocked(planModeEnabled bool) []*genai.Tool {
+	if planModeEnabled {
+		return a.registry.PlanModeGeminiTools()
+	}
+	return a.registry.GeminiTools()
 }
 
 // GetRuntimeHealthReport returns runtime reliability and provider health diagnostics.
@@ -1677,6 +1719,29 @@ func (a *App) TogglePlanningMode() bool {
 		a.tui.SetPlanningModeEnabled(newEnabled)
 	}
 
+	// Re-push the tool schema with/without the plan-mode read-only filter
+	// so the LLM physically cannot see write/execute tools while in plan
+	// mode (and regains them the instant we flip back). Uses the same
+	// toolsForCurrentMode helper as ApplyConfig to stay consistent.
+	if a.client != nil {
+		a.client.SetTools(a.planModeToolsLocked(newEnabled))
+	}
+
+	// Rebuild the system prompt so the plan-mode banner is injected/removed.
+	// Without this, the tool schema would filter to read-only but the model
+	// would still see the general "you can write/edit/run commands" guidance
+	// and waste a round trying a blocked tool before reading the error.
+	if a.promptBuilder != nil {
+		a.promptBuilder.SetPlanMode(newEnabled)
+		systemPrompt := a.promptBuilder.Build()
+		if a.client != nil {
+			a.client.SetSystemInstruction(systemPrompt)
+		}
+		if a.session != nil {
+			a.session.SystemInstruction = systemPrompt
+		}
+	}
+
 	if newEnabled {
 		logging.Debug("planning mode enabled")
 	} else {
@@ -1704,6 +1769,67 @@ func (a *App) IsPlanningModeEnabled() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.planningModeEnabled
+}
+
+// disablePlanModeAfterApproval flips planning mode OFF and re-pushes the full
+// tool schema to the client. Called when the user approves a plan — Claude
+// Code's contract is that approval hands control back to the agent for
+// execution, which needs write/exec tools restored. Runs as its own
+// lock+release cycle so approving inside a command goroutine doesn't
+// interact with other lock holders.
+func (a *App) disablePlanModeAfterApproval() {
+	a.mu.Lock()
+	wasEnabled := a.planningModeEnabled
+	a.planningModeEnabled = false
+	if a.planManager != nil {
+		a.planManager.SetEnabled(false)
+	}
+	if a.agentRunner != nil {
+		a.agentRunner.SetPlanningModeEnabled(false)
+	}
+	if a.tui != nil {
+		a.tui.SetPlanningModeEnabled(false)
+	}
+	// Capture for UI update BEFORE dropping the lock so the snapshot is
+	// consistent.
+	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
+	sandboxEnabled := a.config.Tools.Bash.Sandbox
+	modelName := a.config.Model.Name
+	client := a.client
+	a.mu.Unlock()
+
+	if !wasEnabled {
+		return // idempotent — no need to notify UI or push tools
+	}
+
+	// Restore full tool schema so the post-approval execution round sees
+	// write/edit/bash/etc. again. Done outside the lock to avoid blocking
+	// other goroutines on the client's own mutex.
+	if client != nil {
+		client.SetTools(a.registry.GeminiTools())
+	}
+
+	// Drop the plan-mode banner from the system prompt — execution rounds
+	// should see the usual guidance. Complements the SetTools above so the
+	// model understands it's now free to write/edit/bash, not just
+	// discovering the tools are suddenly available.
+	if a.promptBuilder != nil {
+		a.promptBuilder.SetPlanMode(false)
+		systemPrompt := a.promptBuilder.Build()
+		if client != nil {
+			client.SetSystemInstruction(systemPrompt)
+		}
+		if a.session != nil {
+			a.session.SystemInstruction = systemPrompt
+		}
+	}
+
+	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		PermissionsEnabled:  permissionsEnabled,
+		SandboxEnabled:      sandboxEnabled,
+		PlanningModeEnabled: false,
+		ModelName:           modelName,
+	})
 }
 
 // TogglePlanningModeAsync toggles planning mode asynchronously.
@@ -1885,7 +2011,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	if a.executor != nil {
 		a.executor.SetClient(newClient)
 		if a.registry != nil {
-			newClient.SetTools(a.registry.GeminiTools())
+			newClient.SetTools(a.toolsForCurrentMode())
 		}
 	}
 

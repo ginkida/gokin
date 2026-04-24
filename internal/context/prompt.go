@@ -12,6 +12,26 @@ const (
 	maxSubAgentPromptChars     = 12000
 )
 
+// planModeBanner is the Claude Code-style "you are in plan mode" header.
+// Injected at the top of the system prompt when the user has planning mode
+// active (default on, toggled via Shift+Tab or /plan). Pairs with the
+// tool-schema filter that strips write/exec tools — the banner explains
+// the "why" so the model doesn't thrash against missing tool errors.
+const planModeBanner = `## PLAN MODE — READ-ONLY EXPLORATION
+
+You are currently in PLAN MODE. Your job is to EXPLORE the codebase and PROPOSE a plan for the user to approve. You CANNOT modify anything yet:
+- No file writes, edits, or deletions
+- No shell commands (bash, run_tests, git_add/commit/pr)
+- No sub-agent spawning or task delegation
+- Your available tools are filtered to read-only: read, glob, grep, list_dir, tree, diff, git_status/diff/log/blame, web_search, web_fetch, memory, ask_user.
+
+Workflow:
+1. Investigate the relevant files and context enough to understand the task.
+2. When you have a concrete plan, call the ` + "`enter_plan_mode`" + ` tool with a clear title, short description, and ordered steps (title + what each step will do, plus verify commands where useful).
+3. The user will approve, reject, or request modifications. On approval, plan mode auto-exits and you regain write/exec tools — then carry out the plan.
+
+Keep exploration narrow and targeted. Do NOT read dozens of unrelated files. Prefer grep + targeted read over broad directory scans. If the task is trivial, propose a one-step plan and move on. If critical info is missing, ask via ` + "`ask_user`" + ` rather than guessing.`
+
 // baseSystemPrompt is the foundation for all prompts.
 const baseSystemPrompt = `You are Gokin, an AI coding assistant. You help users work with code through tools for reading, writing, searching, and executing commands.
 
@@ -268,6 +288,7 @@ type PromptBuilder struct {
 	lastMessage     string // Last user message for conditional prompt injection
 	provider        string // Active provider family ("kimi", "glm", ...) for addenda
 	pinnedContent   string // User-pinned focus block, injected near the end of the prompt
+	planMode        bool   // Claude Code-style plan mode: read-only phase until plan approved
 
 	// Prompt caching: avoids rebuilding when inputs haven't changed
 	cachedPrompt string
@@ -380,6 +401,19 @@ func (b *PromptBuilder) SetPinnedContent(content string) {
 	}
 }
 
+// SetPlanMode toggles the Claude Code-style plan-mode system-prompt block.
+// When true, Build() prepends a high-priority instruction telling the model
+// it can only explore — no write/edit/bash until it presents a plan via
+// `enter_plan_mode` and the user approves. Complements the tool-schema
+// filter applied at the client level so the model both sees only read
+// tools AND understands why.
+func (b *PromptBuilder) SetPlanMode(enabled bool) {
+	if b.planMode != enabled {
+		b.planMode = enabled
+		b.promptDirty = true
+	}
+}
+
 // Build constructs the full system prompt. Returns cached version if inputs
 // haven't changed since the last call.
 func (b *PromptBuilder) Build() string {
@@ -388,6 +422,18 @@ func (b *PromptBuilder) Build() string {
 	}
 
 	var builder strings.Builder
+
+	// Plan-mode banner (Claude Code style) comes FIRST so the model sees
+	// the restriction before any tool list or general guidance. Without
+	// this, models have been observed to try write/edit/bash even with
+	// the restricted tool schema — they retry on the "tool not found"
+	// error instead of switching to exploration. The explicit banner
+	// reframes the task as "explore, then propose", which matches the
+	// enter_plan_mode handoff.
+	if b.planMode {
+		builder.WriteString(planModeBanner)
+		builder.WriteString("\n\n")
+	}
 
 	// Base prompt
 	builder.WriteString(baseSystemPrompt)
