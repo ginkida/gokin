@@ -97,6 +97,7 @@ func (t *TodoTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	// Parse todos
 	var newItems []TodoItem
+	inProgressCount := 0
 	for i, itemRaw := range todosRaw {
 		itemMap, ok := itemRaw.(map[string]any)
 		if !ok {
@@ -121,12 +122,27 @@ func (t *TodoTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		if status != "pending" && status != "in_progress" && status != "completed" {
 			return NewErrorResult(fmt.Sprintf("todo[%d]: invalid status '%s'", i, status)), nil
 		}
+		if status == "in_progress" {
+			inProgressCount++
+		}
 
 		newItems = append(newItems, TodoItem{
 			Content:    content,
 			Status:     status,
 			ActiveForm: activeForm,
 		})
+	}
+
+	// Claude Code contract: exactly ONE task is in_progress at a time.
+	// Multiple in_progress markers produce ambiguous UI (which task is
+	// the agent actually doing?) and let the agent pretend it's parallel-
+	// executing when it's running tool calls one at a time. Reject hard
+	// so the agent re-sends a cleaner list.
+	if inProgressCount > 1 {
+		return NewErrorResult(fmt.Sprintf(
+			"invalid todo list: %d items are marked in_progress, but exactly one task may be in_progress at a time (Claude Code convention). Mark the others as pending or completed.",
+			inProgressCount,
+		)), nil
 	}
 
 	// Update items

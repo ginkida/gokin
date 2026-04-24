@@ -177,25 +177,41 @@ To verify: Run 'go test ./internal/handler/...'."`,
 	},
 
 	"todo": {
-		Description: "Tracks tasks and progress for multi-step operations.",
-		WhenToUse: `Use when you need to:
-- Break down complex tasks
-- Track progress on multi-file changes
-- Remember what's been done
-- Show user the plan`,
-		HowToRespond: `When using todos:
-1. Create clear, specific task items
-2. Update status as you complete work
-3. Reference todo items in responses`,
+		Description: "Tracks tasks and progress for multi-step operations. Mirrors Claude Code's TodoWrite: the user sees a live checklist with icons (○ pending, ◐ in_progress, ●  completed) that updates as you call the tool.",
+		WhenToUse: `Create todos at the START of any multi-step task, BEFORE you begin executing. This is the Claude Code contract — the user wants to see the full plan up front, then watch steps check off as you go.
+
+Use for:
+- Tasks that require 3+ distinct steps
+- Changes that span multiple files
+- Any time the user asks for several items in one request
+- Long-running implementation where progress visibility matters
+
+Skip for: trivial one-shot tasks ("what does this function do?", "fix this typo"), pure Q&A, or when the whole task is a single tool call.`,
+		HowToRespond: `Workflow:
+1. **BEFORE execution**: call the tool once with the full list of todos (all status=pending). This gives the user the full plan up front.
+2. Immediately mark the first task in_progress and start working on it.
+3. **EXACTLY ONE task may be in_progress at a time.** Never mark multiple as in_progress simultaneously — the executor rejects that, and it confuses the user (which task is actually running?).
+4. When a task completes, mark it completed AND mark the next task in_progress in the same tool call.
+5. Every call replaces the whole list; re-send the full array with updated statuses, don't send deltas.
+6. When everything is done, the list should be all completed — that's the signal the task is finished.
+
+Field conventions:
+- content: imperative task description ("Add retry logic to HTTP client")
+- active_form: present-continuous version shown during execution ("Adding retry logic to HTTP client")
+- status: "pending" | "in_progress" | "completed"`,
 		CommonMistakes: `DON'T:
-- Create vague tasks like "fix stuff"
-- Forget to update task status
-- Create too many small tasks`,
-		Examples: `GOOD: "Here's the implementation plan:
-1. [ ] Update User model with email field
-2. [ ] Add validation in handler
-3. [ ] Update tests
-4. [ ] Update API documentation"`,
+- Write todos retrospectively after you've already done the work — the user missed the preview
+- Mark multiple tasks in_progress (rejected with an error; fix and resend)
+- Create vague tasks like "fix stuff" — be specific
+- Over-decompose one-shot tasks into a dozen trivial todos
+- Forget to flip status when a task completes — the UI will keep spinning`,
+		Examples: `GOOD (start of a multi-step refactor):
+  call todo with 4 pending items, then immediately call again marking item 1 in_progress.
+  After item 1 finishes: one tool call marking item 1 completed + item 2 in_progress.
+
+BAD:
+  Three items all marked in_progress at once → rejected.
+  Calling todo AFTER writing all the code → user got no live preview.`,
 	},
 
 	"tree": {
