@@ -29,6 +29,14 @@ const (
 	// (Developer Platform). Retained for reference and for users who opt in
 	// via custom_base_url.
 	DefaultMoonshotBaseURL = "https://api.moonshot.ai/anthropic"
+	// DefaultDeepSeekBaseURL points at DeepSeek's Anthropic-compatible
+	// endpoint. The root https://api.deepseek.com serves the OpenAI-compat
+	// API (chat/completions); `/anthropic` returns /v1/messages with the
+	// Claude wire format our AnthropicClient understands. DeepSeek V4
+	// (flash + pro) is served here alongside the legacy deepseek-chat
+	// and deepseek-reasoner endpoints — the latter two deprecate
+	// 2026-07-24 but remain callable until then.
+	DefaultDeepSeekBaseURL = "https://api.deepseek.com/anthropic"
 )
 
 // ModelInfo contains information about an available model.
@@ -151,6 +159,38 @@ var AvailableModels = []ModelInfo{
 		Description: "Flagship — 262K context, reasoning + vision + video, coding-tuned",
 		Provider:    "kimi",
 		BaseURL:     DefaultKimiBaseURL,
+	},
+	// DeepSeek — V4 generation. flash = latency/cost-optimised, pro =
+	// top-tier reasoning. deepseek-chat and deepseek-reasoner are kept
+	// for users on pre-deprecation plans (retire 2026-07-24) but are
+	// not the default.
+	{
+		ID:          "deepseek-v4-pro",
+		Name:        "DeepSeek V4 Pro",
+		Description: "Flagship reasoning — top SWE-bench, Anthropic-compat API",
+		Provider:    "deepseek",
+		BaseURL:     DefaultDeepSeekBaseURL,
+	},
+	{
+		ID:          "deepseek-v4-flash",
+		Name:        "DeepSeek V4 Flash",
+		Description: "Fast & cheap V4 variant — lower latency, same wire format",
+		Provider:    "deepseek",
+		BaseURL:     DefaultDeepSeekBaseURL,
+	},
+	{
+		ID:          "deepseek-chat",
+		Name:        "DeepSeek Chat",
+		Description: "Legacy chat model — deprecates 2026-07-24",
+		Provider:    "deepseek",
+		BaseURL:     DefaultDeepSeekBaseURL,
+	},
+	{
+		ID:          "deepseek-reasoner",
+		Name:        "DeepSeek Reasoner",
+		Description: "Legacy reasoning model — deprecates 2026-07-24",
+		Provider:    "deepseek",
+		BaseURL:     DefaultDeepSeekBaseURL,
 	},
 	// Ollama (local models - use exact name from 'ollama list')
 	{

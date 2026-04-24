@@ -47,15 +47,16 @@ type APIConfig struct {
 	APIKey string `yaml:"api_key,omitempty"`
 
 	// Separate keys for each provider
-	GLMKey     string `yaml:"glm_key,omitempty"`
-	MiniMaxKey string `yaml:"minimax_key,omitempty"`
-	KimiKey    string `yaml:"kimi_key,omitempty"`
-	OllamaKey  string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
+	GLMKey      string `yaml:"glm_key,omitempty"`
+	MiniMaxKey  string `yaml:"minimax_key,omitempty"`
+	KimiKey     string `yaml:"kimi_key,omitempty"`
+	DeepSeekKey string `yaml:"deepseek_key,omitempty"`
+	OllamaKey   string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
 
 	// Ollama server URL (default: http://localhost:11434)
 	OllamaBaseURL string `yaml:"ollama_base_url,omitempty"`
 
-	// Active provider: glm, minimax, kimi, ollama (default: glm)
+	// Active provider: glm, minimax, kimi, deepseek, ollama (default: glm)
 	ActiveProvider string `yaml:"active_provider"`
 
 	// Backend: legacy alias for ActiveProvider

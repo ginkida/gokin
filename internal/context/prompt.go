@@ -519,6 +519,8 @@ func providerAddendum(provider string) string {
 	switch provider {
 	case "kimi":
 		return kimiOperatingRules
+	case "deepseek":
+		return deepseekOperatingRules
 	}
 	return ""
 }
@@ -552,6 +554,41 @@ Verification discipline:
 
 Answer discipline:
 - After 3+ tool calls in a turn, pause and write ~3 lines of "Established / Unknown / Next" before deciding to continue or finalise.
+- Keep the final answer concise: ≤4 short paragraphs. Cite changed files by path and mention verification. Don't paste full diffs — the runtime appends an evidence footer automatically.
+- Tool budget is capped per turn. When you see "Tool budget guard" in a tool response, STOP calling tools and write the final answer from what you already know.`
+
+// deepseekOperatingRules mirrors the Kimi addendum for DeepSeek V4.
+// DeepSeek V4 reasoning is excellent on analytical tasks but shares two
+// Kimi-class behaviours worth guarding against:
+//   - Eagerness to re-read files it already loaded (wastes tool budget)
+//   - Skipping the verification step after a code edit (delta-check then
+//     resolves the gap in the NEXT turn — slows convergence)
+//
+// The rules are intentionally parallel to kimiOperatingRules so a user
+// switching providers sees consistent behaviour. Only the intro line
+// and thinking-budget note differ.
+const deepseekOperatingRules = `## Operating rules (DeepSeek-specific)
+
+Plan-then-act: before the first tool call of a turn, write a single-line plan. Format: "Plan: <3-7 word objective>". Skip for trivial one-tool turns (e.g. a single read).
+
+Read discipline:
+- You MUST Read a file before Edit. The edit tool blocks edits on unread files (read-before-edit invariant). Don't edit from grep snippets.
+- Do not Re-read a file already loaded this session unless it changed.
+- Batch independent Reads in parallel in one turn.
+
+Edit discipline:
+- In old_string, quote 3-5 lines of exact surrounding text for unique matching. Whitespace-tolerant fuzzy match handles minor indentation drift, but overlapping fuzzy candidates return a disambiguation error — use line_start/line_end mode when the error hints at it.
+- After each Edit, the next tool response may carry delta-check errors (go build / typecheck / lint). Fix those BEFORE any further Edit. Do not stack new edits on a broken tree.
+
+Verification discipline:
+- Before the final answer: if the turn touched code, run the narrowest reliable verification (targeted go test for the touched package, pytest for the touched module, etc.). Broaden only on failure.
+- Cite evidence in the final answer: which files changed, which verification commands succeeded. Don't claim "tests pass" unless a test command actually ran this turn.
+
+Reasoning discipline:
+- Extended thinking is enabled — use it to plan tool sequences, not to emit lengthy prose. Final answer should be short.
+- After 3+ tool calls: pause and write ~3 lines of "Established / Unknown / Next" before deciding to continue or finalise. If Established already covers the user's request, STOP and write the final answer.
+
+Answer discipline:
 - Keep the final answer concise: ≤4 short paragraphs. Cite changed files by path and mention verification. Don't paste full diffs — the runtime appends an evidence footer automatically.
 - Tool budget is capped per turn. When you see "Tool budget guard" in a tool response, STOP calling tools and write the final answer from what you already know.`
 

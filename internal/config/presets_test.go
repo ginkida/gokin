@@ -92,9 +92,9 @@ func TestIsValidPreset(t *testing.T) {
 
 func TestListPresets(t *testing.T) {
 	presets := ListPresets()
-	// 8 presets: coding, fast, balanced, creative, glm, kimi, minimax, ollama
-	if len(presets) != 8 {
-		t.Errorf("len(ListPresets) = %d, want 8", len(presets))
+	// 9 presets: coding, fast, balanced, creative, glm, kimi, minimax, deepseek, ollama
+	if len(presets) != 9 {
+		t.Errorf("len(ListPresets) = %d, want 9", len(presets))
 	}
 	for _, p := range presets {
 		if !IsValidPreset(p) {
@@ -104,8 +104,8 @@ func TestListPresets(t *testing.T) {
 }
 
 func TestPresetCount(t *testing.T) {
-	if len(ModelPresets) != 8 {
-		t.Errorf("len(ModelPresets) = %d, want 8", len(ModelPresets))
+	if len(ModelPresets) != 9 {
+		t.Errorf("len(ModelPresets) = %d, want 9", len(ModelPresets))
 	}
 }
 

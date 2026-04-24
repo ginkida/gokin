@@ -91,6 +91,14 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  262144,
 		MaxOutputTokens: 32768,
 	},
+	// DeepSeek V4 — 128K input, up to 16K output. Legacy chat/reasoner
+	// get 64K; AnthropicClient inherits the fallback from DefaultLimits
+	// when the provider-level value is an overestimate for a specific
+	// model, so picking the larger of the two is safe.
+	"deepseek": {
+		MaxInputTokens:  131072,
+		MaxOutputTokens: 16384,
+	},
 }
 
 // ModelPricing defines the cost per 1M tokens in USD.
@@ -137,6 +145,16 @@ var DefaultPricing = map[string]ModelPricing{
 	// Kimi Coding Plan — subscription tier, one model.
 	"kimi-for-coding": {InputCostPer1M: 1.12, OutputCostPer1M: 4.48},
 	"kimi":            {InputCostPer1M: 1.12, OutputCostPer1M: 4.48}, // fallback
+
+	// DeepSeek V4 — public pricing as of Apr 2026 (USD).
+	// V4 Flash: $0.27/$1.10 per 1M tokens (input/output)
+	// V4 Pro:   $0.55/$2.19 per 1M tokens
+	// Legacy chat/reasoner retained until 2026-07-24.
+	"deepseek-v4-flash": {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},
+	"deepseek-v4-pro":   {InputCostPer1M: 0.55, OutputCostPer1M: 2.19},
+	"deepseek-chat":     {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},
+	"deepseek-reasoner": {InputCostPer1M: 0.55, OutputCostPer1M: 2.19},
+	"deepseek":          {InputCostPer1M: 0.55, OutputCostPer1M: 2.19}, // fallback
 }
 
 // TokenLimits defines token limits for a model.

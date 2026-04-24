@@ -200,6 +200,8 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 		return newMiniMaxClient(cfg, modelID)
 	case "kimi":
 		return newKimiClient(cfg, modelID)
+	case "deepseek":
+		return newDeepSeekClient(cfg, modelID)
 	case "ollama":
 		return newOllamaClient(cfg, modelID)
 	default:
@@ -441,6 +443,97 @@ func supportsKimiThinking(modelID string) bool {
 	m := strings.ToLower(modelID)
 	return strings.HasPrefix(m, "kimi-for-coding") ||
 		strings.HasPrefix(m, "kimi-k2")
+}
+
+// defaultDeepSeekThinkingBudget mirrors the Kimi/GLM default — 8192 tokens
+// of reasoning is enough for tool-chain planning but keeps request cost
+// predictable. DeepSeek V4 supports Extended Thinking on the Anthropic-
+// compat endpoint with the same `thinking: {type: "enabled", budget_tokens: N}`
+// shape our AnthropicClient already emits.
+const defaultDeepSeekThinkingBudget = 8192
+
+// newDeepSeekClient creates a DeepSeek client using the Anthropic-compat
+// endpoint (/anthropic). DeepSeek V4 speaks the same wire format as Kimi
+// Coding Plan, so we reuse AnthropicClient verbatim — only the base URL,
+// provider label, and thinking-auto-enable logic differ.
+func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
+	p := config.GetProvider("deepseek")
+	if p == nil {
+		return nil, fmt.Errorf("provider registry missing entry for deepseek")
+	}
+	legacyKey := ""
+	if p.UsesLegacyKey {
+		legacyKey = cfg.API.APIKey
+	}
+	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
+
+	if !loadedKey.IsSet() {
+		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
+	}
+
+	logging.Debug("loaded API key",
+		"provider", p.Name,
+		"source", loadedKey.Source,
+		"model", modelID)
+
+	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
+		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
+	}
+
+	baseURL := cfg.Model.CustomBaseURL
+	if baseURL == "" {
+		baseURL = DefaultDeepSeekBaseURL
+	}
+
+	// DeepSeek V4 reasoning tool chains can pause 30-60s between chunks
+	// on deep analytical calls. Wider idle tolerance than GLM's default
+	// matches real-world behaviour.
+	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "deepseek", 120*time.Second, 5*time.Minute)
+
+	// Auto-enable Extended Thinking for V4 / reasoner. deepseek-chat is
+	// a plain chat model and shouldn't get a thinking budget — the API
+	// rejects thinking blocks on that route with 400.
+	enableThinking := cfg.Model.EnableThinking
+	thinkingBudget := cfg.Model.ThinkingBudget
+	if !enableThinking && thinkingBudget == 0 && supportsDeepSeekThinking(modelID) {
+		enableThinking = true
+		thinkingBudget = defaultDeepSeekThinkingBudget
+	}
+	if enableThinking {
+		thinkingBudget = normalizeThinkingBudget(thinkingBudget, defaultDeepSeekThinkingBudget)
+	}
+
+	anthropicConfig := AnthropicConfig{
+		APIKey:            loadedKey.Value,
+		BaseURL:           baseURL,
+		Model:             modelID,
+		MaxTokens:         cfg.Model.MaxOutputTokens,
+		Temperature:       cfg.Model.Temperature,
+		StreamEnabled:     true,
+		EnableThinking:    enableThinking,
+		ThinkingBudget:    thinkingBudget,
+		StreamIdleTimeout: streamIdleTimeout,
+		MaxRetries:        0, // Request retries are orchestrated at App layer.
+		RetryDelay:        cfg.API.Retry.RetryDelay,
+		HTTPTimeout:       httpTimeout,
+		Provider:          "deepseek",
+	}
+
+	return NewAnthropicClient(anthropicConfig)
+}
+
+// supportsDeepSeekThinking reports whether the model supports Extended
+// Thinking. V4 (pro + flash) and the legacy `deepseek-reasoner` do;
+// `deepseek-chat` does not — it's a pure chat model and the API rejects
+// thinking blocks on that route.
+func supportsDeepSeekThinking(modelID string) bool {
+	m := strings.ToLower(modelID)
+	if m == "deepseek-chat" {
+		return false
+	}
+	return strings.HasPrefix(m, "deepseek-v4") ||
+		strings.HasPrefix(m, "deepseek-reasoner") ||
+		m == "deepseek"
 }
 
 // newOllamaClient creates an Ollama client for local LLM inference.

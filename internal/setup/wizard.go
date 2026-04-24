@@ -37,7 +37,7 @@ const (
 %s╔══════════════════════════════════════════════════════════════════════════╗
 ║                                                                          ║
 ║                            %sWelcome to Gokin!%s                             ║
-║              AI assistant: GLM, MiniMax, Kimi & Ollama                   ║
+║         AI assistant: GLM, MiniMax, Kimi, DeepSeek & Ollama              ║
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝%s
 
@@ -68,7 +68,7 @@ func buildSetupChoices() []setupChoice {
 	// then the other cloud providers, then Ollama. Registry order stays untouched
 	// for programmatic callers; the wizard is UI-only.
 	ordered := make([]config.ProviderDef, 0, len(config.Providers))
-	priority := []string{"kimi", "glm", "minimax", "ollama"}
+	priority := []string{"kimi", "glm", "deepseek", "minimax", "ollama"}
 	seen := map[string]bool{}
 	for _, name := range priority {
 		if p := config.GetProvider(name); p != nil {
@@ -100,8 +100,9 @@ func buildSetupChoices() []setupChoice {
 				Action: "api:" + p.Name,
 				Title:  "DeepSeek (Cloud)",
 				Lines: []string{
-					"DeepSeek Chat & Reasoner models",
-					"Powerful coding assistant",
+					"DeepSeek V4 Pro/Flash — top SWE-bench reasoning",
+					"Anthropic-compatible at api.deepseek.com/anthropic",
+					"Extended thinking on V4 & reasoner variants",
 					"Get key at: " + p.SetupKeyURL,
 				},
 			})
@@ -307,6 +308,8 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 		fmt.Printf("  %sEndpoint:%s Z.ai Coding Plan\n", colorYellow, colorReset)
 	case "kimi":
 		fmt.Printf("  %sEndpoint:%s Kimi Coding Plan (api.kimi.com/coding)\n", colorYellow, colorReset)
+	case "deepseek":
+		fmt.Printf("  %sEndpoint:%s DeepSeek (api.deepseek.com/anthropic)\n", colorYellow, colorReset)
 	}
 
 	// Show next steps

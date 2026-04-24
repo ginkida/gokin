@@ -88,6 +88,26 @@ var Providers = []ProviderDef{
 		},
 	},
 	{
+		Name:         "deepseek",
+		DisplayName:  "DeepSeek",
+		DefaultModel: "deepseek-v4-pro",
+		// Anthropic-compatible endpoint at /anthropic — the OpenAI-compat
+		// endpoint (https://api.deepseek.com) is NOT what we hit; we route
+		// through AnthropicClient like GLM/Kimi/MiniMax for consistency,
+		// and that requires /anthropic.
+		EnvVars:       []string{"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY"},
+		UsesLegacyKey: true,
+		GetKey:        func(api *APIConfig) string { return api.DeepSeekKey },
+		SetKey:        func(api *APIConfig, key string) { api.DeepSeekKey = key },
+		ModelPrefixes: []string{"deepseek"},
+		SetupKeyURL:   "https://platform.deepseek.com/api_keys",
+		KeyValidation: KeyValidationDef{
+			URL:             "https://api.deepseek.com/anthropic/v1/models",
+			AuthMode:        "bearer",
+			SuccessStatuses: []int{200, 404},
+		},
+	},
+	{
 		Name:         "ollama",
 		DisplayName:  "Ollama (local)",
 		DefaultModel: "llama3.2",

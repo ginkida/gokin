@@ -79,6 +79,16 @@ var knownModelProfiles = map[string]ModelProfile{
 	"minimax-m2.5-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 	"minimax-m2.5":           {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 	"minimax":                {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
+
+	// DeepSeek family. V4 has 128K context windows; legacy chat/reasoner
+	// stay at 64K per the pre-deprecation docs. All support tool calling
+	// via the Anthropic-compat endpoint. Coding-tuned flag mirrors their
+	// benchmark positioning (SWE-bench lead).
+	"deepseek-v4-pro":   {Family: "deepseek", ContextWindow: 131072, SupportsTools: true, IsCoding: true},
+	"deepseek-v4-flash": {Family: "deepseek", ContextWindow: 131072, SupportsTools: true, IsCoding: true},
+	"deepseek-chat":     {Family: "deepseek", ContextWindow: 65536, SupportsTools: true},
+	"deepseek-reasoner": {Family: "deepseek", ContextWindow: 65536, SupportsTools: true, IsCoding: true},
+	"deepseek":          {Family: "deepseek", ContextWindow: 131072, SupportsTools: true, IsCoding: true},
 }
 
 // GetModelProfile returns the profile for a given model name.

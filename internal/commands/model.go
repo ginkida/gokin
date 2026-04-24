@@ -170,6 +170,11 @@ func extractShortName(modelID string) string {
 		return strings.TrimPrefix(modelID, "kimi-")
 	}
 
+	// DeepSeek models — strip the provider prefix so /model v4-pro works.
+	if strings.HasPrefix(modelID, "deepseek-") {
+		return strings.TrimPrefix(modelID, "deepseek-")
+	}
+
 	// Ollama and unknown — return full id
 	return modelID
 }

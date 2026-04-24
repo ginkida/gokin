@@ -5,8 +5,8 @@ import (
 )
 
 func TestGetProvider(t *testing.T) {
-	// All 4 providers must be findable
-	for _, name := range []string{"glm", "minimax", "kimi", "ollama"} {
+	// All 5 providers must be findable
+	for _, name := range []string{"glm", "minimax", "kimi", "deepseek", "ollama"} {
 		p := GetProvider(name)
 		if p == nil {
 			t.Errorf("GetProvider(%q) = nil, want non-nil", name)
@@ -24,15 +24,15 @@ func TestGetProvider(t *testing.T) {
 }
 
 func TestProviderCount(t *testing.T) {
-	if len(Providers) != 4 {
-		t.Errorf("len(Providers) = %d, want 4", len(Providers))
+	if len(Providers) != 5 {
+		t.Errorf("len(Providers) = %d, want 5", len(Providers))
 	}
 }
 
 func TestProviderNames(t *testing.T) {
 	names := ProviderNames()
-	if len(names) != 4 {
-		t.Errorf("len(ProviderNames) = %d, want 4", len(names))
+	if len(names) != 5 {
+		t.Errorf("len(ProviderNames) = %d, want 5", len(names))
 	}
 	if names[len(names)-1] != "ollama" {
 		t.Errorf("last provider = %q, want ollama", names[len(names)-1])
@@ -47,8 +47,9 @@ func TestKeyProviderNames(t *testing.T) {
 			t.Errorf("KeyProviderNames should not contain %q", name)
 		}
 	}
-	if len(names) != 3 {
-		t.Errorf("len(KeyProviderNames) = %d, want 3", len(names))
+	// 4 key-required providers: glm, minimax, kimi, deepseek.
+	if len(names) != 4 {
+		t.Errorf("len(KeyProviderNames) = %d, want 4", len(names))
 	}
 }
 
@@ -57,8 +58,8 @@ func TestAllProviderNames(t *testing.T) {
 	if names[len(names)-1] != "all" {
 		t.Errorf("AllProviderNames last = %q, want all", names[len(names)-1])
 	}
-	if len(names) != 5 { // 4 providers + "all"
-		t.Errorf("len(AllProviderNames) = %d, want 5", len(names))
+	if len(names) != 6 { // 5 providers + "all"
+		t.Errorf("len(AllProviderNames) = %d, want 6", len(names))
 	}
 }
 
@@ -75,6 +76,11 @@ func TestDetectProviderFromModel(t *testing.T) {
 		// Kimi
 		{"kimi-k2.5", "kimi"},
 		{"moonshot-v1", "kimi"}, // moonshot prefix -> kimi
+		// DeepSeek
+		{"deepseek-v4-pro", "deepseek"},
+		{"deepseek-v4-flash", "deepseek"},
+		{"deepseek-chat", "deepseek"},
+		{"deepseek-reasoner", "deepseek"},
 		// Ollama local models
 		{"llama3.2", "ollama"},
 		{"qwen2.5-coder", "ollama"},

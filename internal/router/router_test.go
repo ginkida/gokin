@@ -19,12 +19,16 @@ func TestInferModelCapability(t *testing.T) {
 		{"kimi", "kimi-k2.7", CapabilityStrong},
 		{"kimi", "kimi-k2.8", CapabilityStrong},
 		{"kimi", "kimi-k2.10-preview", CapabilityStrong},
+		{"deepseek", "deepseek-v4-pro", CapabilityStrong},
 
 		// Medium tier
 		{"kimi", "kimi-k2.5", CapabilityMedium},
 		{"kimi", "kimi-k2-thinking", CapabilityMedium},
 		{"minimax", "MiniMax-M2.5", CapabilityMedium},
 		{"glm", "glm-4", CapabilityMedium},
+		{"deepseek", "deepseek-v4-flash", CapabilityMedium},
+		{"deepseek", "deepseek-chat", CapabilityMedium},
+		{"deepseek", "deepseek-reasoner", CapabilityMedium},
 
 		// Weak tier
 		{"ollama", "llama3.2", CapabilityWeak},

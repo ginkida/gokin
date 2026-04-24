@@ -18,6 +18,7 @@ func (c *LoginCommand) Usage() string {
 /login glm <api_key>          - Set GLM API key
 /login minimax <api_key>      - Set MiniMax API key
 /login kimi <api_key>         - Set Kimi API key
+/login deepseek <api_key>     - Set DeepSeek API key
 `
 }
 func (c *LoginCommand) GetMetadata() CommandMetadata {
@@ -26,7 +27,7 @@ func (c *LoginCommand) GetMetadata() CommandMetadata {
 		Icon:     "key",
 		Priority: 0,
 		HasArgs:  true,
-		ArgHint:  "gemini|glm|deepseek|anthropic <key>",
+		ArgHint:  "glm|minimax|kimi|deepseek <key>",
 	}
 }
 

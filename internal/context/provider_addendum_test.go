@@ -37,10 +37,53 @@ func TestProviderAddendum_NormalizesCase(t *testing.T) {
 }
 
 func TestProviderAddendum_UnknownProvider(t *testing.T) {
+	// DeepSeek and Kimi both have addendums. The rest should still
+	// return empty until someone ships their own operating rules.
 	for _, name := range []string{"glm", "minimax", "ollama", "anthropic", "", "random"} {
 		if got := providerAddendum(name); got != "" {
 			t.Errorf("provider %q should have no addendum yet, got %d chars", name, len(got))
 		}
+	}
+}
+
+func TestProviderAddendum_DeepSeekNonEmpty(t *testing.T) {
+	got := providerAddendum("deepseek")
+	if got == "" {
+		t.Fatal("deepseek addendum should be non-empty")
+	}
+	// Spot-check the key guardrails — same structure as Kimi's, so
+	// the identifiers should overlap. Ensures a copy-paste refactor
+	// in kimiOperatingRules doesn't silently drift the deepseek rules.
+	for _, needle := range []string{
+		"Plan:",
+		"read-before-edit",
+		"delta-check",
+		"Verification discipline",
+		"Tool budget",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Errorf("deepseek addendum missing %q marker", needle)
+		}
+	}
+	// DeepSeek-specific language should differ from Kimi's intro.
+	if !strings.Contains(got, "DeepSeek-specific") {
+		t.Error("deepseek addendum should identify itself as DeepSeek-specific")
+	}
+}
+
+func TestPromptBuilder_SetProviderDeepSeekInjectsAddendum(t *testing.T) {
+	pb := NewPromptBuilder("/tmp/fake", &ProjectInfo{
+		Type: ProjectTypeGo,
+		Name: "fake",
+	})
+	pb.SetProvider("deepseek")
+	prompt := pb.Build()
+	if !strings.Contains(prompt, "DeepSeek-specific") {
+		t.Errorf("deepseek provider didn't inject addendum; prompt tail: %q",
+			prompt[maxInt(0, len(prompt)-400):])
+	}
+	if !strings.Contains(prompt, "read-before-edit") {
+		t.Error("deepseek addendum did not reach the built prompt")
 	}
 }
 

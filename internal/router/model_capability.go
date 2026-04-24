@@ -66,6 +66,18 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 		if p == "kimi" && isStrongKimiCodingModel(m) {
 			cap.Tier = CapabilityStrong
 		}
+	case "deepseek":
+		// DeepSeek V4 Pro is Strong-tier (top SWE-bench, ~Opus-class
+		// reasoning). V4 Flash and the legacy deepseek-chat/reasoner
+		// are Medium. Unknown deepseek variants default to Medium too —
+		// less aggressive decompose penalty than Weak keeps behaviour
+		// reasonable if DeepSeek ships a new model id we haven't
+		// classified yet.
+		cap.Tier = CapabilityMedium
+		m := strings.ToLower(modelName)
+		if isStrongDeepSeekModel(m) {
+			cap.Tier = CapabilityStrong
+		}
 	case "ollama":
 		cap.Tier = CapabilityWeak
 	default:
@@ -88,6 +100,15 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 	}
 
 	return cap
+}
+
+// isStrongDeepSeekModel returns true for DeepSeek models that warrant
+// Strong-tier treatment (no decompose penalty, baseline thinking
+// multiplier). Currently only V4 Pro qualifies — Flash and legacy
+// chat/reasoner stay Medium.
+func isStrongDeepSeekModel(modelName string) bool {
+	m := strings.ToLower(strings.TrimSpace(modelName))
+	return strings.HasPrefix(m, "deepseek-v4-pro")
 }
 
 func isStrongKimiCodingModel(modelName string) bool {
