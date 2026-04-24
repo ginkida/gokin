@@ -17,6 +17,7 @@ type fakeAppForAuth struct {
 	applyErr     error
 	applyCalls   int
 	applyLatency time.Duration
+	clearCalls   int
 }
 
 func (f *fakeAppForAuth) ApplyConfig(cfg *config.Config) error {
@@ -32,6 +33,11 @@ func (f *fakeAppForAuth) ApplyConfig(cfg *config.Config) error {
 	f.applied = &copyCfg
 	return nil
 }
+
+// ClearConversation override tracks whether the session was cleared —
+// used by provider-switch regression tests to ensure history
+// incompatibility between providers is handled automatically.
+func (f *fakeAppForAuth) ClearConversation() { f.clearCalls++ }
 
 func newAuthApp(cfg *config.Config) *fakeAppForAuth {
 	return &fakeAppForAuth{
@@ -363,3 +369,89 @@ func TestProvider_SwitchRequiresKey(t *testing.T) {
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
+
+// Regression: switching providers via /login must clear session
+// history. Mid-session swaps between Kimi and DeepSeek otherwise
+// produced "content[].thinking must be passed back" 400s because
+// the two providers disagree on how thinking signatures are stored
+// in assistant turns.
+func TestLogin_ClearsHistoryOnProviderSwitch(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-existing-key-ignore-me"
+	app := newAuthApp(cfg)
+	cmd := &LoginCommand{}
+
+	out, err := cmd.Execute(context.Background(),
+		[]string{"deepseek", "sk-deepseek-test-key-ignore-me-12345"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 1 {
+		t.Errorf("ClearConversation calls = %d, want 1", app.clearCalls)
+	}
+	if !strings.Contains(out, "Session cleared") {
+		t.Errorf("user-facing message should surface the clear, got: %q", out)
+	}
+}
+
+// Counter-case: logging into the SAME provider (e.g. re-entering
+// a fresh key) must NOT clear the session — users would lose work
+// for no reason.
+func TestLogin_DoesNotClearHistoryWhenProviderUnchanged(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "deepseek"
+	app := newAuthApp(cfg)
+	cmd := &LoginCommand{}
+
+	_, err := cmd.Execute(context.Background(),
+		[]string{"deepseek", "sk-deepseek-new-key-ignore-me-12345"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 0 {
+		t.Errorf("ClearConversation should NOT fire on same-provider re-login, got %d calls", app.clearCalls)
+	}
+}
+
+// Edge: when ActiveProvider is empty (first login), we shouldn't
+// clear anything — there's no history to invalidate and the message
+// would confuse a first-time user.
+func TestLogin_DoesNotClearOnFirstSetup(t *testing.T) {
+	cfg := &config.Config{} // ActiveProvider == ""
+	app := newAuthApp(cfg)
+	cmd := &LoginCommand{}
+
+	out, err := cmd.Execute(context.Background(),
+		[]string{"deepseek", "sk-deepseek-test-key-ignore-me-12345"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 0 {
+		t.Errorf("first setup should not clear, got %d calls", app.clearCalls)
+	}
+	if strings.Contains(out, "Session cleared") {
+		t.Errorf("first setup should not surface a clear-note: %q", out)
+	}
+}
+
+// /provider switch must also clear.
+func TestProvider_ClearsHistoryOnSwitch(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-existing"
+	cfg.API.DeepSeekKey = "sk-deepseek-ready-to-use"
+	app := newAuthApp(cfg)
+	cmd := &ProviderCommand{}
+
+	out, err := cmd.Execute(context.Background(), []string{"deepseek"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 1 {
+		t.Errorf("ClearConversation calls = %d, want 1", app.clearCalls)
+	}
+	if !strings.Contains(out, "session cleared") {
+		t.Errorf("output should surface clear: %q", out)
+	}
+}

@@ -109,6 +109,29 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return "Invalid API key format (too short).", nil
 	}
 
+	// Detect provider-switch BEFORE we overwrite cfg.API.ActiveProvider.
+	// When the active provider changes, the in-memory session history
+	// was built against the old provider's wire format (thinking-block
+	// signatures, tool-use ID formats, cache-control shapes). Sending
+	// that history to a new provider usually 400s — DeepSeek in
+	// particular rejects with "content[].thinking must be passed back"
+	// because it requires thinking blocks from prior assistant turns
+	// but Kimi/GLM stores them differently.
+	//
+	// Read the RAW field (not GetActiveProvider) so first-time setup
+	// (ActiveProvider=="" and Backend=="") doesn't masquerade as a
+	// switch from the "glm" default — there's no real history on a
+	// fresh install and a spurious clear would confuse the user.
+	//
+	// Clearing on switch is the same thing users would have had to do
+	// manually via /clear. We do it automatically and surface it in
+	// the success message so nothing happens silently.
+	prevProvider := strings.TrimSpace(cfg.API.ActiveProvider)
+	if prevProvider == "" {
+		prevProvider = strings.TrimSpace(cfg.API.Backend)
+	}
+	providerSwitched := prevProvider != "" && prevProvider != provider
+
 	// Set the key for the provider
 	cfg.API.SetProviderKey(provider, apiKey)
 
@@ -124,14 +147,20 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
+	switchNote := ""
+	if providerSwitched {
+		app.ClearConversation()
+		switchNote = fmt.Sprintf("\n  Session cleared: switched from %s (history format differs across providers).", prevProvider)
+	}
+
 	return fmt.Sprintf(`✓ %s API key saved (%s)
 
   Active provider: %s
   Model:           %s
-  Config:          %s
+  Config:          %s%s
 
 Try sending a message to verify it works, or use /provider to switch.`,
-		p.DisplayName, maskKey(apiKey), p.DisplayName, cfg.Model.Name, config.GetConfigPath()), nil
+		p.DisplayName, maskKey(apiKey), p.DisplayName, cfg.Model.Name, config.GetConfigPath(), switchNote), nil
 }
 
 func (c *LoginCommand) showStatus(cfg *config.Config) string {
@@ -430,7 +459,14 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
-	return fmt.Sprintf("✓ Switched to %s (%s)", newProvider, cfg.Model.Name), nil
+	// Clear session history on provider switch — the old provider's
+	// thinking signatures / tool_use ID formats / cache_control shapes
+	// don't round-trip cleanly through a different provider. DeepSeek in
+	// particular 400s on missing thinking blocks from prior Kimi turns.
+	// See LoginCommand.Execute for the same handling on key-set path.
+	app.ClearConversation()
+
+	return fmt.Sprintf("✓ Switched to %s (%s) — session cleared", newProvider, cfg.Model.Name), nil
 }
 
 // StatusCommand shows current configuration status.
