@@ -64,6 +64,37 @@ func (p *ClientPool) Get(provider, model string) (Client, bool) {
 	return c, ok
 }
 
+// Invalidate removes (and closes) the pooled client for the given provider
+// and model. No-op if absent.
+//
+// Required whenever the inputs that would change how a client is built
+// (API key, base URL, thinking budget, timeouts) mutate out from under us
+// — the pool keys by (provider, model) only, so a config change would
+// otherwise be silently ignored by subsequent Get calls. Concretely:
+// `/login kimi <new-key>` persists the new key to config but, without this
+// method, ApplyConfig's call to client.NewClient finds the old Kimi client
+// in the pool and returns it unchanged — requests then go out with the
+// stale key and 401. ApplyConfig calls this before NewClient to force a
+// fresh build.
+func (p *ClientPool) Invalidate(provider, model string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
+
+	key := poolKey(provider, model)
+	if c, ok := p.clients[key]; ok {
+		_ = c.Close()
+		delete(p.clients, key)
+		delete(p.lastUsed, key)
+		logging.Debug("pool entry invalidated",
+			"provider", provider,
+			"model", model)
+	}
+}
+
 // Put stores a client in the pool. If the pool is full, the oldest idle client
 // is evicted to make room.
 func (p *ClientPool) Put(provider, model string, client Client) {

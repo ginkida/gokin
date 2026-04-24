@@ -1850,6 +1850,20 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.session.SetProvider(a.config.API.GetActiveProvider())
 	}
 
+	// Force-evict any pooled client for the incoming (provider, model) pair
+	// BEFORE asking the factory for a fresh one. The pool keys on (provider,
+	// model) only, so a changed API key — the whole reason ApplyConfig was
+	// called from /login — would otherwise silently hit the cache and return
+	// the OLD client with the OLD key. That produced 401s even after a valid
+	// `/login kimi <new-key>`; a process restart "fixed" it because the pool
+	// started empty. Invalidate closes the stale entry and the next NewClient
+	// call is guaranteed to build from a.config.
+	provider := a.config.Model.Provider
+	if provider == "" {
+		provider = a.config.API.Backend
+	}
+	client.GetPool(a.config).Invalidate(provider, a.config.Model.Name)
+
 	// 3. Re-initialize client
 	newClient, err := client.NewClient(a.ctx, a.config, a.config.Model.Name)
 	if err != nil {
