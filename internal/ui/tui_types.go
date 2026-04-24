@@ -353,6 +353,14 @@ type PlanningModeToggledMsg struct {
 	Enabled bool
 }
 
+// SessionModeCycledMsg is sent after Shift+Tab cycles the canonical
+// session mode (Normal → Plan → YOLO → Normal). Mode is the lowercase
+// name of the NEW state ("normal", "plan", "yolo") so the TUI can emit
+// a toast + update the status bar without knowing the app-level enum.
+type SessionModeCycledMsg struct {
+	Mode string
+}
+
 // RuntimeStatusSnapshot is a compact runtime health snapshot for Status Bar 2.0.
 type RuntimeStatusSnapshot struct {
 	Mode               string

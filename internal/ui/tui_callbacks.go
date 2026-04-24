@@ -62,6 +62,16 @@ func (m *Model) SetPlanningModeToggleCallback(onToggle func()) {
 	m.onPlanningModeToggle = onToggle
 }
 
+// SetSessionModeCycleCallback wires the Shift+Tab session-mode cycle.
+// When set, Shift+Tab calls this instead of the plan-only toggle —
+// enabling the full Normal → Plan → YOLO → Normal cycle users expect
+// from Claude Code. Callback is async; result arrives via
+// SessionModeCycledMsg so the TUI updates status + emits a toast in
+// one round trip.
+func (m *Model) SetSessionModeCycleCallback(onCycle func()) {
+	m.onSessionModeCycle = onCycle
+}
+
 // SetPlanningModeEnabled sets the planning mode enabled state for display.
 func (m *Model) SetPlanningModeEnabled(enabled bool) {
 	m.planningModeEnabled = enabled

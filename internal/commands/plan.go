@@ -42,10 +42,13 @@ func (c *PlanCommand) Execute(ctx context.Context, args []string, app AppInterfa
 			"The agent can now only read/search/grep. When it has a plan, it will\n" +
 			"call enter_plan_mode and ask for your approval. On approve, plan mode\n" +
 			"exits automatically and it runs the plan with full tools.\n\n" +
-			"Tip: Shift+Tab to toggle, /plan status to check.", nil
+			"Tip: Shift+Tab cycles modes (Normal → Plan → YOLO → Normal).\n" +
+			"  · Plan: this mode — agent proposes plans, you approve before execution.\n" +
+			"  · YOLO: permissions + sandbox OFF, agent runs everything without asking.\n" +
+			"  · Normal: agent asks before write/edit/bash.", nil
 	}
 	return "Plan mode OFF — direct execution with full tools.\n\n" +
-		"Tip: Shift+Tab to re-enable.", nil
+		"Tip: Shift+Tab cycles modes (Normal → Plan → YOLO → Normal).", nil
 }
 
 // GetMetadata returns command metadata for palette display.

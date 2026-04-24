@@ -63,6 +63,18 @@ func DefaultShortcuts() []ShortcutCategory {
 			},
 		},
 		{
+			Name: "Session Mode (Claude Code-style cycle)",
+			Shortcuts: []Shortcut{
+				{Keys: []string{"Shift", "Tab"}, Description: "Cycle Normal → Plan → YOLO → Normal"},
+				// Annotated next three entries to describe what each stop
+				// of the cycle does. Not actual shortcuts themselves — they
+				// render as dim rows under the binding for discoverability.
+				{Keys: []string{"·"}, Description: "Normal: agent asks before write/edit/bash"},
+				{Keys: []string{"·"}, Description: "Plan: read-only exploration, proposes plan for approval"},
+				{Keys: []string{"·"}, Description: "YOLO: permissions OFF, sandbox OFF, auto-approve everything"},
+			},
+		},
+		{
 			Name: "Diff Preview",
 			Shortcuts: []Shortcut{
 				{Keys: []string{"y"}, Description: "Apply this diff"},

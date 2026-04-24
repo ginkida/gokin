@@ -1843,6 +1843,138 @@ func (a *App) disablePlanModeAfterApproval() {
 	})
 }
 
+// SessionMode is a high-level user-facing mode: the combined state of plan
+// mode, permissions, and bash sandbox in one value. Exposed as a 3-state
+// cycle on Shift+Tab so users don't have to juggle /plan, /permissions,
+// and /sandbox individually. Matches Claude Code's Shift+Tab cycle ergonomic.
+type SessionMode int
+
+const (
+	// SessionModeNormal — everything safe. Permissions on (agent asks
+	// before bash/write/edit), sandbox on (bash runs contained), plan
+	// mode off. This is the "I trust the user, they'll review each
+	// risky op" default.
+	SessionModeNormal SessionMode = iota
+
+	// SessionModePlan — Claude Code-style read-only exploration. Plan
+	// mode on; permissions/sandbox values don't really matter because
+	// the tool schema is filtered to read-only. Agent must propose a
+	// plan via enter_plan_mode and wait for approval before touching
+	// anything.
+	SessionModePlan
+
+	// SessionModeYOLO — "just do it". Permissions off (no prompts),
+	// sandbox off (bash runs unrestricted), plan mode off. For tight
+	// iteration cycles where the user is actively watching and doesn't
+	// want to click approve 50 times. Risky — flip back to Normal when
+	// walking away.
+	SessionModeYOLO
+)
+
+// String renders a mode for status bars, toasts, and debug logs.
+func (m SessionMode) String() string {
+	switch m {
+	case SessionModePlan:
+		return "plan"
+	case SessionModeYOLO:
+		return "yolo"
+	default:
+		return "normal"
+	}
+}
+
+// currentSessionMode derives the canonical mode enum from the three
+// independent flags. Priority: plan > yolo > normal — plan mode is the
+// strongest constraint (read-only schema) and takes precedence over
+// permission state when both are "off"-shaped. Caller must hold a.mu
+// (or accept a best-effort snapshot).
+func (a *App) currentSessionMode() SessionMode {
+	if a.planningModeEnabled {
+		return SessionModePlan
+	}
+	if a.permManager != nil && !a.permManager.IsEnabled() {
+		return SessionModeYOLO
+	}
+	return SessionModeNormal
+}
+
+// CycleSessionMode advances Normal → Plan → YOLO → Normal and applies
+// the associated state change. Designed for a single-keystroke shortcut
+// (Shift+Tab): user taps once to go into plan mode, twice for YOLO,
+// three times back to Normal. Slash commands (/plan, /permissions,
+// /sandbox) remain available for granular control.
+//
+// Returns the NEW mode after the cycle so callers can show a toast.
+func (a *App) CycleSessionMode() SessionMode {
+	a.mu.Lock()
+	current := a.currentSessionMode()
+	a.mu.Unlock()
+
+	next := SessionModeNormal
+	switch current {
+	case SessionModeNormal:
+		next = SessionModePlan
+	case SessionModePlan:
+		next = SessionModeYOLO
+	case SessionModeYOLO:
+		next = SessionModeNormal
+	}
+
+	a.applySessionMode(next)
+	return next
+}
+
+// applySessionMode normalizes the three flags (planningModeEnabled,
+// permissions.Enabled, sandbox) to the canonical combination for the
+// given target mode. Idempotent — calling with the already-current mode
+// is safe (each sub-toggle is a no-op when the value already matches).
+//
+// Implementation detail: rather than duplicating the locking dance from
+// TogglePlanningMode / TogglePermissions / ToggleSandbox, this method
+// delegates to those existing methods. They each already emit the right
+// UI updates (tool-schema push for plan, permission state for perms,
+// bash sandbox flag for sandbox) and handle the mu/session-prompt
+// invariants correctly. Trade-off: three potentially redundant lock
+// acquisitions per cycle, but a user pressing Shift+Tab doesn't notice
+// three microseconds.
+func (a *App) applySessionMode(mode SessionMode) {
+	// Read current state to compute minimal deltas.
+	a.mu.Lock()
+	wantPlan := mode == SessionModePlan
+	wantPerms := mode != SessionModeYOLO
+	wantSandbox := mode != SessionModeYOLO
+	havePlan := a.planningModeEnabled
+	havePerms := a.permManager == nil || a.permManager.IsEnabled()
+	haveSandbox := a.config.Tools.Bash.Sandbox
+	a.mu.Unlock()
+
+	// Order matters: flip plan mode FIRST so the tool schema is correct
+	// before any subsequent toggle emits ConfigUpdateMsg — prevents a
+	// brief window where the status bar says "normal" but tools are still
+	// filtered (or vice-versa).
+	if havePlan != wantPlan {
+		a.TogglePlanningMode()
+	}
+	if havePerms != wantPerms {
+		a.TogglePermissions()
+	}
+	if haveSandbox != wantSandbox {
+		a.ToggleSandbox()
+	}
+}
+
+// CycleSessionModeAsync runs CycleSessionMode in a background goroutine
+// so the Bubble Tea event loop isn't blocked on the (briefly) cascaded
+// toggles. Wired to Shift+Tab in the TUI. Sends a
+// SessionModeCycledMsg back to the UI with the new mode so the status
+// bar + toast can update.
+func (a *App) CycleSessionModeAsync() {
+	a.safeGo("cycle-session-mode", func() {
+		newMode := a.CycleSessionMode()
+		a.safeSendToProgram(ui.SessionModeCycledMsg{Mode: newMode.String()})
+	})
+}
+
 // TogglePlanningModeAsync toggles planning mode asynchronously.
 // This is safe to call from UI callbacks as it doesn't block the Bubble Tea event loop.
 func (a *App) TogglePlanningModeAsync() {

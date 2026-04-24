@@ -149,7 +149,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		desc string
 	}{
 		{"Ctrl+P", "Command palette"},
-		{"Shift+Tab", "Toggle planning mode"},
+		{"Shift+Tab", "Cycle mode: Normal → Plan → YOLO → Normal"},
 		{"Ctrl+G", "Toggle mouse mode"},
 		{"Ctrl+T", "Toggle task list"},
 		{"Ctrl+O", "Toggle activity feed"},

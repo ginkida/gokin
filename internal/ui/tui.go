@@ -164,6 +164,19 @@ type Model struct {
 	planningModeEnabled  bool
 	onPlanningModeToggle func() // Called to toggle planning mode (async, no return)
 
+	// Session-mode cycle (Normal → Plan → YOLO → Normal) bound to
+	// Shift+Tab. When set, OVERRIDES onPlanningModeToggle — the cycle
+	// handles plan mode too. Result arrives via SessionModeCycledMsg so
+	// the TUI can emit a toast + refresh the status bar. Left nil in
+	// tests that don't wire the App.
+	onSessionModeCycle func()
+
+	// sessionMode mirrors App.SessionMode so the status bar can render
+	// distinct states without querying App on every frame. Updated when
+	// SessionModeCycledMsg arrives. "normal" / "plan" / "yolo" — empty
+	// string means "unknown, fall back to planningModeEnabled flag".
+	sessionMode string
+
 	// Sandbox state
 	sandboxEnabled  bool
 	onSandboxToggle func() bool
@@ -1297,9 +1310,20 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case tea.KeyShiftTab:
-		// Toggle planning mode (like Claude Code) - async to avoid blocking UI
-		if m.state == StateInput && m.onPlanningModeToggle != nil {
-			m.onPlanningModeToggle() // Async toggle, feedback via PlanningModeToggledMsg
+		// Claude Code-style session-mode cycle: Normal → Plan → YOLO →
+		// Normal. One tap enters plan mode, two taps enables YOLO
+		// (permissions off + sandbox off), three taps returns to
+		// Normal. Falls back to the older plan-only toggle when the
+		// cycle callback isn't wired (older call sites / tests).
+		// Async so the Bubble Tea event loop doesn't block on the
+		// cascaded /plan + /permissions + /sandbox toggles inside.
+		if m.state == StateInput {
+			switch {
+			case m.onSessionModeCycle != nil:
+				m.onSessionModeCycle() // feedback via SessionModeCycledMsg
+			case m.onPlanningModeToggle != nil:
+				m.onPlanningModeToggle() // feedback via PlanningModeToggledMsg
+			}
 			return nil
 		}
 
@@ -1877,6 +1901,37 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.output.AppendLine(m.styles.Spinner.Render("Planning mode enabled — complex tasks will be broken into steps"))
 		} else {
 			m.output.AppendLine(m.styles.Dim.Render("Planning mode disabled — direct execution"))
+		}
+		m.output.AppendLine("")
+
+	// Session-mode cycle result (Shift+Tab). Emitted from
+	// App.CycleSessionModeAsync after the cascaded toggles complete.
+	// Renders a single toast describing the new mode so users get
+	// one-tap feedback instead of three scattered status lines.
+	case SessionModeCycledMsg:
+		m.sessionMode = msg.Mode
+		// Mirror the individual flags from the canonical mode so the
+		// status bar can render immediately without waiting for the
+		// three ConfigUpdateMsg that applySessionMode triggers.
+		switch msg.Mode {
+		case "plan":
+			m.planningModeEnabled = true
+			m.permissionsEnabled = true
+			m.sandboxEnabled = true
+			m.output.AppendLine(m.styles.Spinner.Render(
+				"✓ Plan mode — agent explores read-only, then proposes a plan for approval. Shift+Tab → YOLO."))
+		case "yolo":
+			m.planningModeEnabled = false
+			m.permissionsEnabled = false
+			m.sandboxEnabled = false
+			m.output.AppendLine(m.styles.Warning.Render(
+				"⚠ YOLO mode — permissions OFF, sandbox OFF. Agent runs every command without asking. Shift+Tab → Normal."))
+		default: // "normal"
+			m.planningModeEnabled = false
+			m.permissionsEnabled = true
+			m.sandboxEnabled = true
+			m.output.AppendLine(m.styles.Dim.Render(
+				"✓ Normal mode — agent asks before write/edit/bash. Shift+Tab → Plan."))
 		}
 		m.output.AppendLine("")
 

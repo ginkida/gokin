@@ -1778,6 +1778,10 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up planning mode toggle callback (async to avoid blocking UI)
 	b.tuiModel.SetPlanningModeToggleCallback(app.TogglePlanningModeAsync)
+	// Shift+Tab uses the session-mode cycle (Normal → Plan → YOLO → Normal)
+	// by default when this callback is set. The plan-only toggle above is
+	// kept as a fallback for contexts that only want binary plan toggle.
+	b.tuiModel.SetSessionModeCycleCallback(app.CycleSessionModeAsync)
 
 	// Set up command palette integration
 	hasAuth := config.AnyProviderHasKey(&b.cfg.API)
