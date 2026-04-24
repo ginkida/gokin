@@ -11,7 +11,7 @@
   <img src="https://minio.ginkida.dev/minion/github/gokin-cli-cut.gif" alt="Gokin Demo" width="800">
 </p>
 
-<h3 align="center">🤖 AI-powered coding assistant for your terminal<br>Kimi · GLM · MiniMax · Ollama — 100% open source</h3>
+<h3 align="center">🤖 AI-powered coding assistant for your terminal<br>Kimi · GLM · MiniMax · DeepSeek · Ollama — 100% open source</h3>
 
 <p align="center">
   <a href="#installation">Install</a> •
@@ -29,12 +29,12 @@
 
 Most AI coding tools are closed-source, route your code through third-party servers, and give you zero control over what gets sent to the model. Gokin was built with a different goal: **a fast, secure, zero-telemetry CLI where your code goes directly to the provider you chose — and nothing else leaves your machine.**
 
-Gokin focuses on a small, well-tested set of providers: **Kimi, GLM, MiniMax** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
+Gokin focuses on a small, well-tested set of providers: **Kimi, GLM, MiniMax, DeepSeek** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
 
 | Feature | Gokin | Claude Code | Cursor |
 |---------|-------|-------------|--------|
 | **Price** | Free → Pay-per-use | $20+/month | $20+/month |
-| **Providers** | 4 (Kimi, GLM, MiniMax, Ollama) | 1 (Claude) | Multi |
+| **Providers** | 5 (Kimi, GLM, MiniMax, DeepSeek, Ollama) | 1 (Claude) | Multi |
 | **Offline** | ✅ Ollama | ❌ | ❌ |
 | **54 Tools** | ✅ | ~30 | ~30 |
 | **Multi-agent** | ✅ 5 parallel | Basic | ❌ |
@@ -48,11 +48,12 @@ Gokin focuses on a small, well-tested set of providers: **Kimi, GLM, MiniMax** (
 | Stack | Cost | Best For |
 |-------|------|----------|
 | **Gokin + Kimi Coding Plan** ⭐ | Subscription | **Default** — Kimi K2.6, 262K context, thinking + tool use, coding-tuned |
+| **Gokin + DeepSeek V4** ⭐ | Pay-per-use | **Recommended as of v0.71** — 1M context, top SWE-bench reasoning, ~20× cheaper than Opus, prompt caching enabled |
 | **Gokin + GLM Coding Plan** ⭐ | ~$3/month | Budget-friendly daily coding, GLM-5/5.1 with thinking |
 | **Gokin + MiniMax** ⭐ | Pay-per-use | 200K context, strong on agentic coding |
 | **Gokin + Ollama** | 🆓 Free | Privacy, offline, no API costs |
 
-All three cloud providers are actively recommended — they're the daily-driver tier gokin is tested against every release.
+All four cloud providers are actively recommended — they're the daily-driver tier gokin is tested against every release.
 
 ---
 
@@ -91,6 +92,7 @@ export GOKIN_KIMI_KEY="sk-kimi-..."
 gokin
 
 # Prefer another provider? Any of these also works out of the box:
+# export GOKIN_DEEPSEEK_KEY="..." # DeepSeek V4 (recommended — 1M ctx + cheap)
 # export GOKIN_GLM_KEY="..."      # GLM Coding Plan
 # export GOKIN_MINIMAX_KEY="..."  # MiniMax
 # (Ollama needs no key — just run a local model)
@@ -159,13 +161,13 @@ Local:     ./GOKIN.local.md (git-ignored)
 - **Git worktree support** — parallel branch work with isolated sessions
 
 ### 💰 Cost Tracking
-- Per-model pricing for Kimi, GLM, MiniMax models (Ollama is free)
+- Per-model pricing for Kimi, DeepSeek, GLM, MiniMax models (Ollama is free)
 - Real-time cost in status bar (`$0.0243`)
 - Per-response cost in message footer
 - `/cost` and `/stats` commands with accurate model-specific pricing
 
 ### 🔄 Prompt Caching
-- Explicit `cache_control` breakpoints for Kimi, MiniMax, and GLM (all Anthropic-compat providers)
+- Explicit `cache_control` breakpoints for Kimi, MiniMax, and DeepSeek (GLM currently doesn't honour cache_control server-side, so we skip markers there)
 - System prompt, tools, and conversation prefix cached — up to 90% input cost savings
 - Cache break detection with efficiency tracking
 
@@ -249,6 +251,7 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 > [!IMPORTANT]
 > **Recommended providers** — daily-driver tier, tested every release:
 > - **Kimi Coding Plan** (Kimi K2.6) — **default as of v0.69**, 262K context, thinking + tools
+> - **DeepSeek V4** (Pro / Flash) — **added in v0.71, strongly recommended**, 1M context, top SWE-bench reasoning, ~20× cheaper than Opus, prompt caching (95% savings on repeat prefixes)
 > - **GLM Coding Plan** (GLM-5 / GLM-5.1) — budget option (~$3/month), thinking supported
 > - **MiniMax** (M2.7 / M2.5) — 200K context, strong on agentic coding
 >
@@ -257,16 +260,19 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 | Provider | Models | Endpoint | Notes |
 |----------|--------|----------|-------|
 | **Kimi** ⭐ | `kimi-for-coding` (K2.6) | `api.kimi.com/coding` | **Default.** Coding Plan subscription; 262K context, reasoning + vision + video, thinking mode |
+| **DeepSeek** ⭐ | `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-chat`, `deepseek-reasoner` | `api.deepseek.com/anthropic` | **Recommended.** V4 ships with 1M context, extended thinking, and Anthropic prompt caching (live-verified 95% savings). Strong-tier SWE-bench reasoning at ~$0.55/$2.19 per 1M tokens for Pro (Flash is $0.27/$1.10). |
 | **GLM** ⭐ | `glm-5.1`, `glm-5`, `glm-4.7` | `api.z.ai/api/anthropic` | Budget-friendly Coding Plan, thinking mode |
 | **MiniMax** ⭐ | `MiniMax-M2.7`, `M2.7-highspeed`, `M2.5`, `M2.5-highspeed` | `api.minimax.io/anthropic` | 200K context, strong on agentic coding |
 | **Ollama** | Any local model (`llama3.2`, `qwen2.5-coder`, ...) | `localhost:11434` | 100% offline, no network calls |
 
-All cloud providers use Anthropic-compatible APIs and share the same client (`internal/client/anthropic.go`) — fewer moving parts, consistent behavior. Kimi auth uses Bearer tokens; GLM and MiniMax accept both Bearer and `x-api-key`. Ollama uses its own native client.
+All cloud providers use Anthropic-compatible APIs and share the same client (`internal/client/anthropic.go`) — fewer moving parts, consistent behavior. Kimi auth uses Bearer tokens; GLM, MiniMax, and DeepSeek accept both Bearer and `x-api-key`. Ollama uses its own native client.
 
 Switch anytime:
 ```
 > /provider kimi
 > /model kimi-for-coding
+> /provider deepseek
+> /model deepseek-v4-pro
 > /provider glm
 > /model glm-5.1
 > /provider minimax
@@ -325,9 +331,13 @@ model:
   name: "kimi-for-coding"
 ```
 
-Prefer GLM or MiniMax? Just swap:
+Prefer DeepSeek, GLM, or MiniMax? Just swap:
 
 ```yaml
+# DeepSeek V4 (recommended — 1M context, prompt caching, cheap)
+api: { deepseek_key: "sk-...", active_provider: "deepseek" }
+model: { name: "deepseek-v4-pro" }
+
 # GLM
 api: { glm_key: "...", active_provider: "glm" }
 model: { name: "glm-5" }
@@ -342,10 +352,11 @@ model: { name: "MiniMax-M2.7" }
 ```yaml
 api:
   kimi_key: ""                    # Kimi Coding Plan key (sk-kimi-...)
+  deepseek_key: ""                # DeepSeek V4 key (sk-...)
   glm_key: ""
   minimax_key: ""
   ollama_key: ""                  # optional, only for remote Ollama with auth
-  active_provider: "kimi"         # kimi | glm | minimax | ollama
+  active_provider: "kimi"         # kimi | deepseek | glm | minimax | ollama
   ollama_base_url: "http://localhost:11434"
   retry:
     max_retries: 10
@@ -362,13 +373,16 @@ api:
       minimax:
         http_timeout: 5m
         stream_idle_timeout: 120s
+      deepseek:
+        http_timeout: 5m
+        stream_idle_timeout: 120s
 
 model:
   name: "kimi-for-coding"          # Kimi K2.6 (Coding Plan)
   temperature: 0.6
   max_output_tokens: 32768
   custom_base_url: ""              # override endpoint (e.g. Moonshot Dev API)
-  enable_thinking: false           # Extended thinking — supported on Kimi, GLM, MiniMax
+  enable_thinking: false           # Extended thinking — supported on Kimi, DeepSeek (V4 + reasoner), GLM, MiniMax
   thinking_budget: 0               # 0 = provider default (Kimi, GLM 4.7+/5.x)
   force_weak_optimizations: false  # opt Strong-tier models into weak-tier safeguards
 
