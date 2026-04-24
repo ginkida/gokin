@@ -167,9 +167,12 @@ func (p Platform) String() string {
 }
 
 // AssetPattern returns the expected asset name pattern for this platform.
+// Matches the canonical release asset naming ginkida/gokin uses:
+// `gokin-<os>-<arch>.tar.gz` (dash-separated). The alternative-pattern
+// list in checker.go keeps trying underscore and short-arch variants for
+// third-party/mirror releases that use different conventions.
 func (p Platform) AssetPattern() string {
-	// Common patterns: gokin_linux_amd64, gokin-linux-amd64, gokin_linux_amd64.tar.gz
-	return "gokin_" + p.OS + "_" + p.Arch
+	return "gokin-" + p.OS + "-" + p.Arch
 }
 
 // AppInterface defines the interface for notifying the application of update availability.

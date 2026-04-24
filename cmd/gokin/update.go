@@ -280,19 +280,23 @@ func CheckForUpdateOnStartup(cfg *config.Config, app update.AppInterface) {
 
 	// Notify user via TUI if available
 	if app != nil {
-		msg := fmt.Sprintf("📦 **Update available: %s → %s**\n\n"+
-			"• Type `/update` to check details\n"+
-			"• Type `/update install` to install now\n"+
-			"• Or exit and run: `gokin update install`",
-			info.CurrentVersion, info.NewVersion)
+		msg := fmt.Sprintf("📦 **gokin %s is available** (you're on %s)\n\n"+
+			"  /update install   — download + verify + swap binary\n"+
+			"  /update           — preview changes first\n"+
+			"  /restart          — apply after install (or just exit + relaunch)\n\n"+
+			"Auto-checks once per 24h. Disable with `update.auto_check: false` in config.",
+			info.NewVersion, info.CurrentVersion)
 
-		// Delay slightly to ensure UI is ready
+		// Delay slightly to ensure UI is ready. Fire-and-forget is OK
+		// here — if the app exits in under 2s the user never saw the
+		// TUI anyway, and the stderr fallback below runs on the next
+		// launch (cache says "update available" for 24h).
 		time.AfterFunc(2*time.Second, func() {
 			app.AddSystemMessage(msg)
 		})
 	} else {
 		// Fallback to stderr if not in TUI mode
-		fmt.Fprintf(os.Stderr, "\n📦 Update available: %s → %s\n", info.CurrentVersion, info.NewVersion)
+		fmt.Fprintf(os.Stderr, "\n📦 gokin %s is available (you're on %s)\n", info.NewVersion, info.CurrentVersion)
 		fmt.Fprintf(os.Stderr, "   Run 'gokin update install' to update.\n\n")
 	}
 }

@@ -58,7 +58,7 @@ func DefaultConfig() *Config {
 		AutoDownload:      false,
 		IncludePrerelease: false,
 		Channel:           ChannelStable,
-		GitHubRepo:        "user/gokin", // Should be updated to actual repo
+		GitHubRepo:        "ginkida/gokin", // Canonical upstream (mirrors config.Config default)
 		MaxBackups:        3,
 		VerifyChecksum:    true,
 		VerifySignature:   false,

@@ -145,7 +145,9 @@ func (c *UpdateCommand) installUpdate(ctx context.Context, updater *update.Updat
 	sb.WriteString("✓ **Update successful!**\n\n")
 	sb.WriteString(fmt.Sprintf("Previous version: `%s`\n", info.CurrentVersion))
 	sb.WriteString(fmt.Sprintf("New version:      `%s`\n", info.NewVersion))
-	sb.WriteString("\n⚠️ **Please restart gokin to use the new version.**")
+	sb.WriteString("\n**Apply the update:**\n")
+	sb.WriteString("  • Run `/restart` to re-exec gokin now (loses session; /save first if needed)\n")
+	sb.WriteString("  • Or exit and relaunch manually — the new binary is already in place")
 
 	return sb.String(), nil
 }
@@ -155,7 +157,7 @@ func (c *UpdateCommand) rollbackUpdate(updater *update.Updater, backupID string)
 		if err := updater.RollbackTo(backupID); err != nil {
 			return fmt.Sprintf("Rollback failed for backup `%s`: %v", backupID, err), nil
 		}
-		return "✓ Rollback completed.\n\nPlease restart gokin to use the restored version.", nil
+		return "✓ Rollback completed.\n\nApply: run `/restart` to re-exec, or exit and relaunch manually.", nil
 	}
 
 	if err := updater.Rollback(); err != nil {
@@ -165,7 +167,7 @@ func (c *UpdateCommand) rollbackUpdate(updater *update.Updater, backupID string)
 		return fmt.Sprintf("Rollback failed: %v", err), nil
 	}
 
-	return "✓ Rolled back to the most recent backup.\n\nPlease restart gokin to use the restored version.", nil
+	return "✓ Rolled back to the most recent backup.\n\nApply: run `/restart` to re-exec, or exit and relaunch manually.", nil
 }
 
 func (c *UpdateCommand) listBackups(updater *update.Updater) (string, error) {

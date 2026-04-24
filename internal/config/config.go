@@ -638,7 +638,7 @@ func DefaultConfig() *Config {
 			AutoDownload:      false,            // Require manual download
 			IncludePrerelease: false,            // Only stable releases
 			Channel:           "stable",         // Stable channel
-			GitHubRepo:        "user/gokin",     // Should be updated to actual repo
+			GitHubRepo:        "ginkida/gokin",  // Canonical upstream — assets `gokin-<os>-<arch>.tar.gz` are published on each release
 			MaxBackups:        3,                // Keep 3 backups
 			VerifyChecksum:    true,             // Always verify checksums
 			NotifyOnly:        false,            // Allow prompting for install
