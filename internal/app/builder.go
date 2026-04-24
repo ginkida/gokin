@@ -1440,6 +1440,14 @@ func (b *Builder) wireDependencies() error {
 		app.sessionMemory.SetProjectLearning(b.projectLearning)
 	}
 
+	// Plan-mode gate: executor consults this predicate before running any
+	// tool. Prevents a hallucinated write/bash call from bypassing the
+	// schema filter. Must be installed AFTER app is assembled so the
+	// callback closes over the final *App pointer.
+	if app.executor != nil {
+		app.executor.SetPlanModeCheck(app.IsPlanningModeEnabled)
+	}
+
 	// Set up status callback for clients
 	statusCb := &appStatusCallback{app: app}
 	attachStatusCallback(b.mainClient, statusCb)

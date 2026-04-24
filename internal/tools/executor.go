@@ -219,6 +219,14 @@ type Executor struct {
 	// internal/app so the tools package stays free of metrics dependencies.
 	phaseObserver func(tool string, d time.Duration, success bool)
 
+	// planModeCheck (optional) reports whether the agent is in Claude Code-style
+	// plan mode. When it returns true, doExecuteTool blocks every call whose
+	// tool name is not in the plan-mode allow-list — defense in depth against
+	// a model that hallucinates a tool call for a tool the filtered schema
+	// didn't expose (e.g., from pre-trained priors). Nil means "always full
+	// access". Wired from internal/app.
+	planModeCheck func() bool
+
 	// toolStatsLookup (optional) returns observed p95 and success rate for a
 	// tool, or ok=false if there aren't enough samples yet (threshold enforced
 	// on the caller side — typically 5 samples). Used by the executor to
@@ -408,6 +416,16 @@ func (e *Executor) drainPendingNotifications() []string {
 }
 
 // SetClient updates the underlying client.
+// SetPlanModeCheck wires the plan-mode predicate. The callback is consulted
+// on every tool dispatch and must be cheap — typically reads a boolean
+// guarded by App.mu. Pass nil to disable plan-mode gating (main agent in
+// normal mode, all sub-agents, tests).
+func (e *Executor) SetPlanModeCheck(check func() bool) {
+	e.clientMu.Lock()
+	defer e.clientMu.Unlock()
+	e.planModeCheck = check
+}
+
 func (e *Executor) SetClient(c client.Client) {
 	e.clientMu.Lock()
 	e.client = c
@@ -1488,6 +1506,19 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	tool, ok := e.registry.Get(call.Name)
 	if !ok {
 		return NewErrorResult(formatUnknownToolError(call.Name, e.registry.Names()))
+	}
+
+	// Plan-mode gate (defense in depth). The LLM should never emit a call for
+	// a non-read-only tool because the schema filter strips those — but models
+	// occasionally hallucinate calls based on pre-training, especially when
+	// the user's prompt names a write-style operation. Without this block, a
+	// hallucinated `write` or `bash` call would slip past the schema and
+	// actually execute. With it, the model gets a targeted error and re-plans.
+	if e.planModeCheck != nil && e.planModeCheck() && !IsReadOnlyForPlanMode(call.Name) {
+		return NewErrorResult(fmt.Sprintf(
+			"tool %q is not allowed in plan mode — only read-only tools (read, glob, grep, list_dir, tree, diff, git_status/diff/log/blame/branch, web_fetch, web_search, memory, ask_user, etc.) + enter_plan_mode/exit_plan_mode are available. Call enter_plan_mode with your proposed plan when ready to request user approval.",
+			call.Name,
+		))
 	}
 
 	// Guard against nil args — some model responses may omit the args field

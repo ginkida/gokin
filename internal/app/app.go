@@ -435,8 +435,19 @@ func (a *App) Run() error {
 		// Restored session: clean up legacy system prompt messages from history
 		a.stripLegacySystemMessages()
 
-		// Use saved system instruction or rebuild
-		if a.session.SystemInstruction != "" {
+		// If plan mode is active for this session, always rebuild the system
+		// instruction — the stored one might be from a previous run where
+		// plan mode was off (no banner) and the model would be confused why
+		// its write/edit tools are gone. Rebuilding guarantees the banner
+		// state matches the current plan-mode flag.
+		if a.planningModeEnabled {
+			systemPrompt := a.promptBuilder.Build()
+			systemPrompt += modelEnhancement
+			a.client.SetSystemInstruction(systemPrompt)
+			a.session.SystemInstruction = systemPrompt
+		} else if a.session.SystemInstruction != "" {
+			// Use saved system instruction — same prompt as when the
+			// session was saved, so tool expectations stay consistent.
 			a.client.SetSystemInstruction(a.session.SystemInstruction)
 		} else {
 			// Legacy session without SystemInstruction — rebuild
