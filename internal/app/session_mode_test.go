@@ -119,6 +119,46 @@ func TestApplySessionMode_Idempotent(t *testing.T) {
 	}
 }
 
+// TestCycleSessionMode_ReturnsActualNotIntended exposes the race-window
+// bug the second pass caught: CycleSessionMode previously returned the
+// "next in cycle" value it computed from the pre-apply snapshot, even
+// if the actual resulting state diverged (e.g. because permManager was
+// nil and couldn't be toggled off for YOLO). Now it re-reads after
+// apply and returns ground truth, so callers don't render a toast
+// that lies about what happened.
+func TestCycleSessionMode_ReturnsActualNotIntended(t *testing.T) {
+	// Setup: App with NO perm manager. YOLO would require perms-off,
+	// but TogglePermissions is a no-op without permManager, so attempting
+	// to enter YOLO leaves perms in its "virtual on" state. The return
+	// value must reflect what actually happened, not the intended YOLO.
+	cfg := &config.Config{}
+	cfg.Tools.Bash.Sandbox = true
+	app := &App{
+		config:              cfg,
+		planningModeEnabled: false, // start Normal
+		permManager:         nil,   // no permissions manager
+	}
+
+	// Tap 1: Normal → Plan. Plan doesn't need permManager, so this works.
+	if got := app.CycleSessionMode(); got != SessionModePlan {
+		t.Errorf("cycle 1: expected Plan, got %s", got.String())
+	}
+
+	// Tap 2: Plan → YOLO (intended). But without permManager, perms can't
+	// flip off → YOLO won't actually be entered. With the nil-perm-manager
+	// path, currentSessionMode treats "no perm manager" as "perms on",
+	// so we're stuck in Normal-shape (plan off + perms-effectively-on +
+	// sandbox off from cycle code? actually sandbox-off is the YOLO
+	// signal we can actually flip). Let's just assert: the RETURN value
+	// matches the ACTUAL post-apply state, whatever that is.
+	got := app.CycleSessionMode()
+	actual := app.currentSessionMode()
+	if got != actual {
+		t.Errorf("CycleSessionMode returned %s but actual state is %s — return must be ground truth",
+			got.String(), actual.String())
+	}
+}
+
 // TestApplySessionMode_DirectTransitions verifies any-to-any jumps work,
 // not just the cycle order. Useful for /permissions-style commands that
 // might set state directly without going through the cycle.

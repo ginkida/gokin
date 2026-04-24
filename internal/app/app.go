@@ -1904,7 +1904,12 @@ func (a *App) currentSessionMode() SessionMode {
 // three times back to Normal. Slash commands (/plan, /permissions,
 // /sandbox) remain available for granular control.
 //
-// Returns the NEW mode after the cycle so callers can show a toast.
+// Returns the **actual** mode observed after the cascaded toggles
+// complete, not merely the intended target — if a concurrent slash
+// command ran between the read and the apply, the actual end state
+// might differ from the naive "next in cycle". Callers (in particular
+// CycleSessionModeAsync) need the real state so the toast + status
+// bar don't lie.
 func (a *App) CycleSessionMode() SessionMode {
 	a.mu.Lock()
 	current := a.currentSessionMode()
@@ -1921,7 +1926,15 @@ func (a *App) CycleSessionMode() SessionMode {
 	}
 
 	a.applySessionMode(next)
-	return next
+
+	// Re-read after apply — flags may not exactly match `next` under
+	// concurrent state change (e.g. a /permissions off fired during
+	// the cascade). Return the ground truth so the caller reports
+	// what actually happened.
+	a.mu.Lock()
+	actual := a.currentSessionMode()
+	a.mu.Unlock()
+	return actual
 }
 
 // applySessionMode normalizes the three flags (planningModeEnabled,
