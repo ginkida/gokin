@@ -17,7 +17,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version  = "0.71.1"
+	version  = "0.71.2"
 	cfgFile  string
 	model    string
 	runSetup bool
@@ -29,10 +29,11 @@ func main() {
 		Use:   "gokin",
 		Short: "AI-powered CLI assistant for code",
 		Long: `Gokin is a CLI tool for AI-assisted coding. Supports Kimi
-(default), GLM, MiniMax, and Ollama. It provides an interactive chat
-interface with tools for reading, writing, and editing files, running
-commands, and orchestrating multi-agent workflows — with zero proxies
-between you and the provider you choose.`,
+(default), GLM, MiniMax, DeepSeek, and Ollama. It provides an
+interactive chat interface with tools for reading, writing, and
+editing files, running commands, and orchestrating multi-agent
+workflows — with zero proxies between you and the provider you
+choose.`,
 		RunE: runApp,
 	}
 

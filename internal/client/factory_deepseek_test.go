@@ -130,3 +130,42 @@ func TestNewDeepSeekClient_MissingKey(t *testing.T) {
 		t.Fatal("expected error for missing DeepSeek key")
 	}
 }
+
+// TestAnthropicClient_SupportsPromptCachingForDeepSeek pins that the
+// caching gate recognises the DeepSeek base URL. Live testing (Apr
+// 2026) confirmed DeepSeek V4 honours cache_control markers and
+// reports cache_read_input_tokens on repeat prefixes — a 1.2K-token
+// system prompt saw 95% input-token reduction on the second call.
+// If this test starts failing, someone dropped the DeepSeek clause
+// from supportsPromptCaching and users are now paying full price
+// per turn.
+func TestAnthropicClient_SupportsPromptCachingForDeepSeek(t *testing.T) {
+	cases := []struct {
+		baseURL string
+		want    bool
+	}{
+		// DeepSeek endpoints — must all pass the gate.
+		{"https://api.deepseek.com/anthropic", true},
+		{"https://api.deepseek.com/anthropic/v1/messages", true},
+		// Other Anthropic-compat endpoints we already support.
+		{"https://api.kimi.com/coding", true},
+		{"https://api.moonshot.ai/anthropic", true},
+		{"https://api.minimax.io/anthropic", true},
+		// Native Anthropic.
+		{DefaultAnthropicBaseURL, true},
+		{"", true}, // empty BaseURL defaults to Anthropic
+		// GLM is known not to honour cache_control — still gated off.
+		{"https://api.z.ai/api/anthropic", false},
+		// Unknown provider — conservative off.
+		{"https://random.example.com/api", false},
+	}
+	for _, c := range cases {
+		t.Run(c.baseURL, func(t *testing.T) {
+			ac := &AnthropicClient{config: AnthropicConfig{BaseURL: c.baseURL}}
+			if got := ac.supportsPromptCaching(); got != c.want {
+				t.Errorf("supportsPromptCaching(BaseURL=%q) = %v, want %v",
+					c.baseURL, got, c.want)
+			}
+		})
+	}
+}
