@@ -74,16 +74,20 @@ func setTerminalTitle(title string) {
 }
 
 // Welcome displays a minimalist welcome message using lipgloss borders.
+//
+// What lands here matters disproportionately: it's the first thing the
+// user reads after typing `gokin`. We surface three things on this
+// screen and nothing else: WHO they're talking to (model + path),
+// WHAT mode they're in (so they're not surprised by plan-mode
+// approval prompts), and HOW to do common things (Ctrl+P / Shift+Tab /
+// slash). Quick-start suggestions sit just outside the box so users
+// who already know the app can skim past them.
 func (m *Model) Welcome() {
 	titleStyle := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	infoStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	accentStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
 
-	// Build info line. prettyPath handles home-dir collapse unconditionally,
-	// then shortenPath middle-truncates if the result is still long. Keeps
-	// the welcome banner and status bar visually in sync — both show
-	// `~/github/gokin` for paths that live under $HOME.
 	dir := shortenPath(prettyPath(m.workDir), 30)
 
 	modelName := m.currentModel
@@ -91,20 +95,25 @@ func (m *Model) Welcome() {
 		modelName = "no model"
 	}
 
-	// Set terminal window title
 	setTerminalTitle(fmt.Sprintf("Gokin · %s · %s", modelName, dir))
 
-	// Build welcome content
+	// Mode badge — the most important state signal on the welcome
+	// banner. A user dropped into plan mode by default needs to see
+	// "✦ plan mode" prominently or they'll be surprised when their
+	// first request triggers an approval flow. Each mode gets a
+	// distinct color hue (info-blue / warn-amber / dim-default) that
+	// matches the status bar so the two surfaces feel consistent.
+	modeBadge := m.welcomeModeBadge()
+
 	line1 := titleStyle.Render("GOKIN")
 	line2 := infoStyle.Render(dir) + dimStyle.Render(" · ") + accentStyle.Render(modelName)
-	line3 := ""
+	line3 := modeBadge
 	line4 := dimStyle.Render("Ctrl+P") + infoStyle.Render(" commands") +
-		dimStyle.Render("  ·  Shift+Tab") + infoStyle.Render(" plan mode") +
+		dimStyle.Render("  ·  Shift+Tab") + infoStyle.Render(" cycle mode") +
 		dimStyle.Render("  ·  /") + infoStyle.Render(" explore")
 
 	content := line1 + "\n" + line2 + "\n" + line3 + "\n" + line4
 
-	// Wrap in lipgloss rounded border
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorBorder).
@@ -114,7 +123,9 @@ func (m *Model) Welcome() {
 	m.output.AppendLine(boxStyle.Render(content))
 	m.output.AppendLine("")
 
-	// Quick start suggestions
+	// Quick-start hints stay outside the box — visual hierarchy puts
+	// the box first (state), suggestions second (actions). User
+	// instinctively reads top-to-bottom.
 	suggestionStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	promptStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
 	suggestions := suggestionStyle.Render("  Quick start: ") +
@@ -124,6 +135,31 @@ func (m *Model) Welcome() {
 		suggestionStyle.Render("  ·  ") +
 		promptStyle.Render("/help")
 	m.output.AppendLine(suggestions)
+}
+
+// welcomeModeBadge renders the current session-mode indicator for the
+// welcome banner. Lives separately from the status-bar version because
+// the banner has more vertical real-estate and benefits from a short
+// human-readable description right next to the badge — first-time users
+// shouldn't have to learn what "plan mode" means by hitting it
+// experimentally.
+func (m *Model) welcomeModeBadge() string {
+	planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
+	yoloStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+	normalStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+	switch {
+	case m.planningModeEnabled:
+		return planStyle.Render("✦ plan mode") + " " +
+			hintStyle.Render("(read-only · proposes plan before acting)")
+	case !m.permissionsEnabled || !m.sandboxEnabled:
+		return yoloStyle.Render("⚠ YOLO mode") + " " +
+			hintStyle.Render("(no prompts · agent runs everything)")
+	default:
+		return normalStyle.Render("● normal mode") + " " +
+			hintStyle.Render("(asks before write/edit/bash)")
+	}
 }
 
 // AddSystemMessage adds a system message to the output.
