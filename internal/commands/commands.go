@@ -190,6 +190,7 @@ func NewHandler() *Handler {
 	h.Register(&UpdateCommand{})
 	h.Register(&RestartCommand{})
 	h.Register(&WhatsNewCommand{})
+	h.Register(&ChangelogCommand{})
 
 	// Register debug command (hidden)
 	h.Register(&DebugDumpCommand{})
