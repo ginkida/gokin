@@ -98,15 +98,15 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Pattern:     regexp.MustCompile(`(?i)(connection refused|no such host|network unreachable|dial tcp)`),
 		Title:       "Connection Failed",
 		Suggestions: []string{"Check your internet connection", "Verify API endpoint in config", "Check if firewall is blocking the connection"},
-		Command:     "/config show api",
+		Command:     "/status",
 	},
 	{
 		// \b401\b prevents "401ms" (latency text) from matching. Aligns
 		// with the `\b500\b` rule enforced in the 5xx pattern below.
 		Pattern:     regexp.MustCompile(`(?i)(unauthorized|\b401\b|invalid.*key|api.*key.*invalid)`),
 		Title:       "Authentication Failed",
-		Suggestions: []string{"Check your API key is correct", "Regenerate your key at provider's dashboard", "Run /setup to reconfigure, or /login <provider> <key>"},
-		Command:     "/auth",
+		Suggestions: []string{"Check your API key is correct", "Regenerate your key at the provider's dashboard", "Run `/login <provider> <key>` to set a new key, or `gokin --setup` to re-run the onboarding wizard"},
+		Command:     "/login",
 	},
 	{
 		Pattern:     regexp.MustCompile(`(?i)(forbidden|403|permission denied)`),
@@ -130,7 +130,7 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Pattern:     regexp.MustCompile(`(?i)(invalid.*model|unknown.*model)`),
 		Title:       "Model Not Found",
 		Suggestions: []string{"Check the model name is correct", "List available models with /model", "The model may have been deprecated"},
-		Command:     "/model list",
+		Command:     "/model",
 	},
 	{
 		Pattern:     regexp.MustCompile(`(?i)(context.*too.*long|token.*limit|max.*tokens)`),
@@ -319,8 +319,8 @@ var errorGuidancePatterns = []ErrorGuidance{
 	{
 		Pattern:     regexp.MustCompile(`(?i)(invalid api key|authentication failed|unauthorized|\b401\b|\b403\b.*forbidden|api key.*invalid|authentication_error)`),
 		Title:       "Authentication Failed",
-		Suggestions: []string{"Your API key is missing, invalid, or expired", "Run /auth to re-authenticate, or check your config file", "Verify the key at the provider's dashboard"},
-		Command:     "/auth",
+		Suggestions: []string{"Your API key is missing, invalid, or expired", "Run `/login <provider> <key>` with a fresh key, or check your config file", "Verify the key at the provider's dashboard"},
+		Command:     "/login",
 	},
 	// Quota / billing
 	{
