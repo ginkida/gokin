@@ -143,12 +143,22 @@ func (qm *QueueManager) SetEnabled(enabled bool) {
 // Returns the task ID and an error if the queue is full.
 func (qm *QueueManager) Enqueue(ctx context.Context, message string, priority Priority, execute func(context.Context) error, onComplete func(error)) (string, error) {
 	if !qm.Enabled() {
-		// Queue disabled - execute immediately using provided context
+		// Queue disabled - execute immediately using provided context.
+		// Recovery is critical: if execute panics and onComplete is
+		// never called, the caller awaiting completion (e.g. a
+		// /resume-plan flow) hangs forever. Synthesize a panic-as-error
+		// so onComplete always fires.
 		go func(ctx context.Context) {
-			err := execute(ctx)
-			if onComplete != nil {
-				onComplete(err)
-			}
+			var err error
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("queued task panicked: %v", r)
+				}
+				if onComplete != nil {
+					onComplete(err)
+				}
+			}()
+			err = execute(ctx)
 		}(ctx)
 		return "direct", nil
 	}

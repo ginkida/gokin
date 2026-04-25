@@ -86,7 +86,7 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	a.mu.Unlock()
 
 	if oldClient != nil {
-		go func() { _ = oldClient.Close() }()
+		a.safeGo("close-old-client-after-failover", func() { _ = oldClient.Close() })
 	}
 
 	summary := fmt.Sprintf("%s -> %s", orderedProviders[0], strings.Join(orderedProviders[1:], " -> "))

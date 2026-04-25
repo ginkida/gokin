@@ -456,16 +456,17 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				})
 				a.safeSendToProgram(ui.ResponseDoneMsg{})
 
-				go func(msg string, wait time.Duration) {
-					timer := time.NewTimer(wait)
+				retryMsg, retryWait := message, delay
+				a.safeGo("rate-limit-auto-retry", func() {
+					timer := time.NewTimer(retryWait)
 					defer timer.Stop()
 					select {
 					case <-timer.C:
-						a.handleSubmit(msg)
+						a.handleSubmit(retryMsg)
 					case <-a.ctx.Done():
 						return
 					}
-				}(message, delay)
+				})
 				return
 			}
 		}
@@ -1535,15 +1536,16 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			var wg sync.WaitGroup
 			for _, step := range readySteps {
 				wg.Add(1)
-				go func(s *plan.Step) {
+				s := step
+				a.safeGo("plan-delegated-step", func() {
 					defer wg.Done()
 					a.executeDelegatedStep(ctx, s, approvedPlan, totalSteps, sharedMem, contextSnapshot)
-				}(step)
+				})
 			}
-			go func() {
+			a.safeGo("plan-step-wait-barrier", func() {
 				wg.Wait()
 				close(done)
-			}()
+			})
 			select {
 			case <-done:
 			case <-ctx.Done():

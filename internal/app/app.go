@@ -2187,11 +2187,11 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	oldClient := a.client
 	a.client = newClient
 	if oldClient != nil {
-		go func() {
+		a.safeGo("close-old-client-after-apply-config", func() {
 			if err := oldClient.Close(); err != nil {
 				logging.Warn("failed to close old client", "error", err)
 			}
-		}()
+		})
 	}
 
 	// 4. Update executor's client and sync tools

@@ -412,6 +412,24 @@ func (dm *DependencyManager) ExecuteDependencies(ctx context.Context, maxParalle
 				semaphore <- struct{}{}
 				defer func() { <-semaphore }()
 
+				// Recover from a panic in task.Execute so one bad task
+				// doesn't crash the whole process. Marks the task failed
+				// and records the panic as an error so callers waiting
+				// on this level don't see "running forever".
+				var execErr error
+				defer func() {
+					if r := recover(); r != nil {
+						execErr = fmt.Errorf("task %s panicked: %v", id, r)
+						logging.Error("task panic recovered",
+							"id", id,
+							"panic", r)
+						dm.deps.MarkTaskStatus(id, TaskStatusFailed, execErr)
+						errorsMu.Lock()
+						errors = append(errors, execErr)
+						errorsMu.Unlock()
+					}
+				}()
+
 				task, exists := dm.deps.GetTask(id)
 				if !exists {
 					logging.Error("task not found", "id", id)
