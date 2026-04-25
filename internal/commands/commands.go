@@ -126,6 +126,7 @@ func NewHandler() *Handler {
 	// Register git commands
 	h.Register(&CommitCommand{})
 	h.Register(&PRCommand{})
+	h.Register(&DiffCommand{})
 
 	// Register utility commands
 	h.Register(&InitCommand{})
