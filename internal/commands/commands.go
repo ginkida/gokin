@@ -127,6 +127,7 @@ func NewHandler() *Handler {
 	h.Register(&CommitCommand{})
 	h.Register(&PRCommand{})
 	h.Register(&DiffCommand{})
+	h.Register(&LogCommand{})
 
 	// Register utility commands
 	h.Register(&InitCommand{})
