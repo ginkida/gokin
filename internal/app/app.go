@@ -482,6 +482,37 @@ func (a *App) Run() error {
 			logging.Warn("failed to persist onboarding welcome state", "error", err)
 		}
 	}
+
+	// Post-upgrade banner: when LastSeenVersion differs from the
+	// current build, show a one-line "what version you're now on"
+	// notice and point the user at /whats-new for the release notes.
+	// First-install (LastSeenVersion=="") is silent — the welcome
+	// banner already handles introductions; doubling up would feel
+	// noisy. We persist the new value regardless so the same banner
+	// doesn't fire twice for a single upgrade.
+	currentVersion := strings.TrimSpace(a.config.Version)
+	if currentVersion != "" && a.config.UI.LastSeenVersion != currentVersion {
+		if a.config.UI.LastSeenVersion != "" {
+			direction := "↑ Upgraded"
+			// Best-effort downgrade detection — semver-aware compare
+			// would be cleaner but `strings.Compare` is good enough
+			// for the user-facing copy: a downgrade from v0.74.1 to
+			// v0.74.0 reads as "Downgraded" because string-order
+			// matches semver order for the gokin "MAJOR.MINOR.PATCH"
+			// range we ship.
+			if a.config.UI.LastSeenVersion > currentVersion {
+				direction = "↓ Downgraded"
+			}
+			a.tui.AddSystemMessage(fmt.Sprintf(
+				"%s from %s to %s — run /whats-new to see release notes",
+				direction, a.config.UI.LastSeenVersion, currentVersion))
+		}
+		a.config.UI.LastSeenVersion = currentVersion
+		if err := a.config.Save(); err != nil {
+			logging.Warn("failed to persist last-seen version", "error", err)
+		}
+	}
+
 	a.journalEvent("app_started", map[string]any{
 		"workdir": a.workDir,
 	})

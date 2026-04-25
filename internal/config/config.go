@@ -246,6 +246,13 @@ type UIConfig struct {
 	CompactMode         bool   `yaml:"compact_mode"`
 	Bell                bool   `yaml:"bell"`                 // Terminal bell on prompts (default: true)
 	NativeNotifications bool   `yaml:"native_notifications"` // macOS Notification Center (default: false)
+
+	// LastSeenVersion is the gokin build the user launched most recently.
+	// On startup, App.Run compares it to the current build's version
+	// (config.Version, set via ldflags); when they differ the TUI shows
+	// a one-line "↑ Upgraded from X to Y — /whats-new for details" banner
+	// and writes the current version back. Empty for fresh installs.
+	LastSeenVersion string `yaml:"last_seen_version,omitempty"`
 }
 
 // ContextConfig holds context management settings.
