@@ -73,8 +73,20 @@ func TestHandlerListCommands(t *testing.T) {
 		t.Errorf("ListCommands() returned %d commands, expected at least 30", len(cmds))
 	}
 
-	// Verify essential commands exist
-	essential := []string{"help", "clear", "doctor", "config", "model", "plan", "stats"}
+	// Verify essential commands exist. This list is the safety net
+	// against accidental Register() drops during refactors — every
+	// name here should round-trip through NewHandler. When you add a
+	// new slash command that ships in a release, add it here too.
+	essential := []string{
+		// core session
+		"help", "clear", "doctor", "config", "model", "plan", "stats",
+		// auth + setup
+		"login", "logout", "provider", "status",
+		// git inspect / action set (Sprint 9 → v0.77.x)
+		"commit", "pr", "diff", "log", "branches", "grep",
+		// update / release feedback loop (v0.74.x → v0.76.x)
+		"update", "restart", "whats-new", "changelog",
+	}
 	cmdNames := make(map[string]bool)
 	for _, c := range cmds {
 		cmdNames[c.Name()] = true
@@ -82,6 +94,39 @@ func TestHandlerListCommands(t *testing.T) {
 	for _, name := range essential {
 		if !cmdNames[name] {
 			t.Errorf("essential command %q not found in ListCommands()", name)
+		}
+	}
+}
+
+// TestHelpCategoriesAreRegistered guards against the silent-drop bug
+// where a command name appears in the /help category list but has no
+// matching Register() call — that combo renders an empty category
+// without warning. Cross-references the hard-coded category list in
+// HelpCommand.Execute against the real handler.
+func TestHelpCategoriesAreRegistered(t *testing.T) {
+	h := NewHandler()
+	registered := make(map[string]bool)
+	for _, c := range h.ListCommands() {
+		registered[c.Name()] = true
+	}
+
+	// Mirror of the categories defined in builtin.go HelpCommand.Execute.
+	// Keep in sync — this is the whole point of the test.
+	helpCategories := map[string][]string{
+		"Getting Started": {"help", "quickstart"},
+		"Session":         {"model", "clear", "compact", "save", "resume", "sessions", "stats", "instructions"},
+		"Auth & Setup":    {"login", "logout", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"},
+		"Git":             {"init", "commit", "pr", "diff", "log", "branches", "grep"},
+		"Planning":        {"plan", "resume-plan", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "memory-governance", "tree-stats"},
+		"Tools": {"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
+			"register-agent-type", "list-agent-types", "unregister-agent-type"},
+	}
+
+	for cat, names := range helpCategories {
+		for _, name := range names {
+			if !registered[name] {
+				t.Errorf("/help category %q lists %q but it is not registered in NewHandler", cat, name)
+			}
 		}
 	}
 }
