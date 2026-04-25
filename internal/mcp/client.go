@@ -27,6 +27,17 @@ type Client struct {
 	initialized bool
 	mu          sync.RWMutex
 
+	// initMu serializes Initialize() calls so we send exactly one
+	// initialize request per client. It must be SEPARATE from c.mu:
+	// Initialize() does a full network round-trip via request() and
+	// must not hold c.mu during that round-trip — handleMessage's
+	// notification path takes c.mu.RLock() to read notificationHandler,
+	// and a server-initiated notification arriving before the
+	// InitializeResult would deadlock receiveLoop on RLock while
+	// Initialize was holding the write lock waiting for that exact
+	// response.
+	initMu sync.Mutex
+
 	// Request tracking
 	nextID    int64
 	pending   map[int64]chan *JSONRPCMessage
@@ -428,11 +439,21 @@ func (c *Client) notify(method string, params any) error {
 }
 
 // Initialize initializes the connection with the MCP server.
+//
+// Locking discipline: takes c.initMu to serialize concurrent Initialize
+// calls, but does NOT hold c.mu across the network round-trip. Holding
+// c.mu (write) here would deadlock receiveLoop's notification path
+// (handleMessage → c.mu.RLock to read notificationHandler) any time a
+// server emits a notification before the InitializeResult — see the
+// regression test in client_init_deadlock_test.go.
 func (c *Client) Initialize(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.initMu.Lock()
+	defer c.initMu.Unlock()
 
-	if c.initialized {
+	c.mu.RLock()
+	already := c.initialized
+	c.mu.RUnlock()
+	if already {
 		return nil
 	}
 
@@ -462,19 +483,24 @@ func (c *Client) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to parse initialize result: %w", err)
 	}
 
-	c.serverInfo = result.ServerInfo
-
-	// Send initialized notification
+	// Send initialized notification before publishing state — if the
+	// server rejects it we don't want IsInitialized() to start returning
+	// true.
 	if err := c.notify(MethodInitialized, nil); err != nil {
 		return fmt.Errorf("failed to send initialized notification: %w", err)
 	}
 
+	// Publish state under c.mu briefly. By this point all network I/O
+	// is done so receiveLoop won't be blocked behind us.
+	c.mu.Lock()
+	c.serverInfo = result.ServerInfo
 	c.initialized = true
+	c.mu.Unlock()
 
 	logging.Info("MCP server initialized",
 		"name", c.serverName,
-		"server", c.serverInfo.Name,
-		"version", c.serverInfo.Version)
+		"server", result.ServerInfo.Name,
+		"version", result.ServerInfo.Version)
 
 	return nil
 }
