@@ -129,6 +129,7 @@ func NewHandler() *Handler {
 	h.Register(&DiffCommand{})
 	h.Register(&LogCommand{})
 	h.Register(&BranchesCommand{})
+	h.Register(&GrepCommand{})
 
 	// Register utility commands
 	h.Register(&InitCommand{})
@@ -281,12 +282,21 @@ func (h *Handler) Execute(ctx context.Context, name string, args []string, app A
 }
 
 // findClosestCommand finds the closest matching command name using edit distance.
+//
+// Tie-breaking: a first-character mismatch adds 1 to the distance. Typos
+// rarely affect the leading letter, so among same-distance candidates we
+// prefer the one that starts with the same character as the input. Also
+// makes the result deterministic (without this, the map-iteration order
+// decides ties — flaky across runs).
 func (h *Handler) findClosestCommand(input string) string {
 	bestMatch := ""
 	bestDist := 3 // Max edit distance threshold
 
 	for name := range h.commands {
 		dist := levenshtein(input, name)
+		if len(input) > 0 && len(name) > 0 && input[0] != name[0] {
+			dist++
+		}
 		if dist < bestDist {
 			bestDist = dist
 			bestMatch = name
