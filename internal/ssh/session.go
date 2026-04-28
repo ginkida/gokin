@@ -26,6 +26,7 @@ type SessionManager struct {
 	mu       sync.RWMutex
 	maxIdle  time.Duration // Auto-close idle sessions
 	stopCh   chan struct{} // Stop cleanup goroutine
+	stopOnce sync.Once     // Guard against double-close on Stop
 }
 
 // NewSessionManager creates a session manager.
@@ -36,8 +37,18 @@ func NewSessionManager() *SessionManager {
 		stopCh:   make(chan struct{}),
 	}
 
-	// Start cleanup goroutine
-	go sm.cleanupLoop()
+	// Start cleanup goroutine. The recover guard is important: a panic in
+	// CleanupIdle (e.g., from a buggy SSHClient.Close in a future change)
+	// would silently kill the loop and leave idle sessions accumulating
+	// for the rest of the process lifetime, with zero log signal.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("ssh cleanup loop panicked", "panic", r)
+			}
+		}()
+		sm.cleanupLoop()
+	}()
 
 	return sm
 }
@@ -177,8 +188,11 @@ func (m *SessionManager) cleanupLoop() {
 }
 
 // Stop stops the cleanup goroutine and closes all sessions.
+// Safe to call multiple times — close(stopCh) is guarded by sync.Once.
 func (m *SessionManager) Stop() {
-	close(m.stopCh)
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+	})
 	m.CloseAll()
 }
 

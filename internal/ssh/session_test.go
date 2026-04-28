@@ -99,3 +99,20 @@ func TestSessionInfoFields(t *testing.T) {
 		t.Error("Connected should be true")
 	}
 }
+
+// Stop must be safe to call multiple times. Pre-fix the second call did
+// close(m.stopCh) on an already-closed channel and panicked. App shutdown
+// could trigger this through a signal-handler race (signals.go:281 +
+// app.go:670 both call ssh tool Cleanup paths).
+func TestSessionManagerStopIdempotent(t *testing.T) {
+	sm := NewSessionManager()
+	sm.Stop()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("second Stop panicked: %v", r)
+		}
+	}()
+	sm.Stop()
+	sm.Stop() // third for good measure
+}
