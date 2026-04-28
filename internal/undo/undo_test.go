@@ -279,3 +279,115 @@ func TestManagerRestoreChanges(t *testing.T) {
 		t.Errorf("Count = %d, want 2", m.Count())
 	}
 }
+
+// Move undo must rename the file back to its original source path. Before this
+// fix, revertChange treated move like a normal modify and AtomicWrote OldContent
+// (which holds the source PATH) into the dest file — corrupting it with a path
+// string and leaving the source missing.
+func TestManagerUndoMoveRenamesBack(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "src.txt")
+	dest := filepath.Join(dir, "dst.txt")
+	original := []byte("original content")
+
+	if err := os.WriteFile(source, original, 0644); err != nil {
+		t.Fatalf("setup write: %v", err)
+	}
+	if err := os.Rename(source, dest); err != nil {
+		t.Fatalf("setup rename: %v", err)
+	}
+
+	m := NewManager()
+	m.Record(FileChange{
+		FilePath:   dest,
+		Tool:       "move",
+		OldContent: []byte(source),
+		WasNew:     false,
+	})
+
+	if _, err := m.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+
+	// Source must exist again with original content.
+	got, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("source not restored: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("source content = %q, want %q (regression: AtomicWrite would have written the path string)", got, original)
+	}
+
+	// Dest must no longer exist.
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Errorf("dest still exists after undo: %v", err)
+	}
+}
+
+// Move redo must rename the file forward again. Symmetric to undo.
+func TestManagerRedoMoveRenamesForward(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "src.txt")
+	dest := filepath.Join(dir, "dst.txt")
+	original := []byte("hello")
+
+	if err := os.WriteFile(source, original, 0644); err != nil {
+		t.Fatalf("setup write: %v", err)
+	}
+	if err := os.Rename(source, dest); err != nil {
+		t.Fatalf("setup rename: %v", err)
+	}
+
+	m := NewManager()
+	m.Record(FileChange{
+		FilePath:   dest,
+		Tool:       "move",
+		OldContent: []byte(source),
+		WasNew:     false,
+	})
+
+	if _, err := m.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if _, err := m.Redo(); err != nil {
+		t.Fatalf("Redo: %v", err)
+	}
+
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("dest not restored after redo: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("dest content = %q, want %q", got, original)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Errorf("source still exists after redo: %v", err)
+	}
+}
+
+// Defensive: revertMove without OldContent (e.g. a malformed/old persisted
+// change) must error out instead of os.Rename'ing to "" which would silently
+// destroy the dest file.
+func TestManagerUndoMoveMissingSourceErrors(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "dst.txt")
+	if err := os.WriteFile(dest, []byte("x"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	m := NewManager()
+	m.Record(FileChange{
+		FilePath: dest,
+		Tool:     "move",
+		// OldContent intentionally empty
+		WasNew: false,
+	})
+
+	if _, err := m.Undo(); err == nil {
+		t.Fatal("expected error for move undo without source path")
+	}
+	// Dest must remain untouched after the failed undo.
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("dest disappeared after failed undo: %v", err)
+	}
+}

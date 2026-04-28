@@ -289,6 +289,12 @@ func (m *Manager) SetRedoStack(stack []FileChange) {
 
 // revertChange reverts a file change to its previous state.
 func (m *Manager) revertChange(change *FileChange) error {
+	// Move is special: undo means rename back to original source path,
+	// not write OldContent (which holds the source path, not file bytes).
+	if change.Tool == "move" {
+		return revertMove(change)
+	}
+
 	if change.WasNew {
 		// File was created - delete it
 		if err := os.Remove(change.FilePath); err != nil && !os.IsNotExist(err) {
@@ -308,10 +314,40 @@ func (m *Manager) revertChange(change *FileChange) error {
 
 // applyChange applies a file change (for redo).
 func (m *Manager) applyChange(change *FileChange) error {
+	if change.Tool == "move" {
+		return applyMove(change)
+	}
+
 	dir := filepath.Dir(change.FilePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
 	return fileutil.AtomicWrite(change.FilePath, change.NewContent, 0644)
+}
+
+// revertMove reverses a move by renaming change.FilePath (current dest)
+// back to the original source path stored in change.OldContent.
+func revertMove(change *FileChange) error {
+	originalSource := string(change.OldContent)
+	if originalSource == "" {
+		return fmt.Errorf("move undo: missing original source path")
+	}
+	if err := os.MkdirAll(filepath.Dir(originalSource), 0755); err != nil {
+		return err
+	}
+	return os.Rename(change.FilePath, originalSource)
+}
+
+// applyMove re-applies a move by renaming the original source path back to
+// change.FilePath (the recorded destination).
+func applyMove(change *FileChange) error {
+	originalSource := string(change.OldContent)
+	if originalSource == "" {
+		return fmt.Errorf("move redo: missing original source path")
+	}
+	if err := os.MkdirAll(filepath.Dir(change.FilePath), 0755); err != nil {
+		return err
+	}
+	return os.Rename(originalSource, change.FilePath)
 }

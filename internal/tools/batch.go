@@ -11,6 +11,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"google.golang.org/genai"
 
+	"gokin/internal/logging"
 	"gokin/internal/undo"
 )
 
@@ -400,10 +401,17 @@ func (t *BatchTool) executeDelete(ctx context.Context, files []string, dryRun, p
 		default:
 		}
 
-		// Read content for undo before deletion
+		// Read content for undo before deletion. Read errors degrade silently
+		// (undo just isn't recorded for this file) so a single unreadable file
+		// can't abort a batch — but log so the user has a clue why /undo "skips".
 		var oldContent []byte
 		if !dryRun && t.undoManager != nil {
-			oldContent, _ = os.ReadFile(path)
+			var readErr error
+			oldContent, readErr = os.ReadFile(path)
+			if readErr != nil {
+				logging.Warn("batch_delete: undo unavailable, pre-delete read failed",
+					"path", path, "error", readErr)
+			}
 		}
 
 		if dryRun {

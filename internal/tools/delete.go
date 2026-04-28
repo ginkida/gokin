@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"gokin/internal/logging"
 	"gokin/internal/security"
 	"gokin/internal/undo"
 )
@@ -126,10 +127,17 @@ func (t *DeleteTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 		}
 	}
 
-	// Save content for undo (only for files)
+	// Save content for undo (only for files). If read fails (permissions, I/O),
+	// we degrade gracefully: undo simply won't be recorded for this file. Log so
+	// the user has a clue if /undo later seems to "skip" the deletion.
 	var oldContent []byte
 	if !info.IsDir() {
-		oldContent, _ = os.ReadFile(path)
+		var readErr error
+		oldContent, readErr = os.ReadFile(path)
+		if readErr != nil {
+			logging.Warn("delete: undo unavailable, pre-delete read failed",
+				"path", path, "error", readErr)
+		}
 	}
 
 	// Perform deletion

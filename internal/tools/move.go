@@ -126,27 +126,19 @@ func (t *MoveTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewErrorResult(fmt.Sprintf("failed to create destination directory: %s", err)), nil
 	}
 
-	// For undo, we need to save file content before moving
-	var oldContent []byte
-	if !srcInfo.IsDir() {
-		oldContent, _ = os.ReadFile(source)
-	}
-
 	// Perform the move
 	if err := os.Rename(source, dest); err != nil {
 		return NewErrorResult(fmt.Sprintf("move failed: %s", err)), nil
 	}
 
-	// Record for undo
-	// We record a special "move" operation that stores both paths
+	// Record for undo. Move is rename-only — undo just renames back, so we only
+	// need the original source path. The undo manager has Tool=="move"-aware
+	// dispatch in revertChange/applyChange (manager.go).
 	if t.undoManager != nil && !srcInfo.IsDir() {
-		// For files, we can record content for restoration
-		// Store the original path in the change for undo (move back)
 		change := &undo.FileChange{
 			FilePath:   dest,
 			Tool:       "move",
-			OldContent: []byte(source), // Store original path in OldContent
-			NewContent: oldContent,     // Store file content in NewContent
+			OldContent: []byte(source),
 			WasNew:     false,
 		}
 		t.undoManager.Record(*change)
