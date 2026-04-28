@@ -87,9 +87,18 @@ func (sm *SessionManager) Start(ctx context.Context) {
 		for {
 			select {
 			case <-sm.asyncSaveCh:
-				// Debounce: wait briefly to coalesce rapid saves
-				time.Sleep(100 * time.Millisecond)
-				// Drain any extra signals that arrived during sleep
+				// Debounce: wait briefly to coalesce rapid saves. Use Timer+select
+				// (not time.Sleep) so a shutdown during the debounce window cancels
+				// immediately instead of waiting out the 100ms then doing one more
+				// save after Stop() already finished its own final-save call.
+				timer := time.NewTimer(100 * time.Millisecond)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				}
+				// Drain any extra signals that arrived during the debounce window.
 				select {
 				case <-sm.asyncSaveCh:
 				default:
