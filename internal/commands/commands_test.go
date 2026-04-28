@@ -82,8 +82,8 @@ func TestHandlerListCommands(t *testing.T) {
 		"help", "clear", "doctor", "config", "model", "plan", "stats",
 		// auth + setup
 		"login", "logout", "provider", "status",
-		// git inspect / action set (Sprint 9 → v0.77.x)
-		"commit", "pr", "diff", "log", "branches", "grep",
+		// git inspect / action set (Sprint 9 → v0.77.x → v0.78.12 /blame)
+		"commit", "pr", "diff", "log", "branches", "grep", "blame",
 		// update / release feedback loop (v0.74.x → v0.76.x)
 		"update", "restart", "whats-new", "changelog",
 	}
@@ -116,7 +116,7 @@ func TestHelpCategoriesAreRegistered(t *testing.T) {
 		"Getting Started": {"help", "quickstart"},
 		"Session":         {"model", "clear", "compact", "save", "resume", "sessions", "stats", "instructions"},
 		"Auth & Setup":    {"login", "logout", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"},
-		"Git":             {"init", "commit", "pr", "diff", "log", "branches", "grep"},
+		"Git":             {"init", "commit", "pr", "diff", "log", "branches", "grep", "blame"},
 		"Planning":        {"plan", "resume-plan", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "memory-governance", "tree-stats"},
 		"Tools": {"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"},

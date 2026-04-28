@@ -189,6 +189,24 @@ func defaultCommands() []CommandInfo {
 		{Name: "commit", Description: "Create a git commit with AI-generated message", Category: "Git",
 			Args: []ArgInfo{{Name: "message", Required: false, Type: "string"}}, Usage: "/commit [message]"},
 		{Name: "pr", Description: "Create a pull request", Category: "Git"},
+		// v0.77.x git-inspect family + v0.78.12 /blame. These were registered
+		// in commands.go but missing from autocomplete — added here so the
+		// suggestion list matches the actual available commands.
+		{Name: "diff", Description: "Show pending changes (working tree / staged)", Category: "Git",
+			Args:  []ArgInfo{{Name: "scope", Required: false, Type: "string"}},
+			Usage: "/diff [--staged|--stat|<file>]"},
+		{Name: "log", Description: "Show recent git commits", Category: "Git",
+			Args:  []ArgInfo{{Name: "count_or_file", Required: false, Type: "string"}},
+			Usage: "/log [count] [file]"},
+		{Name: "branches", Description: "List local branches with current marker", Category: "Git",
+			Args:  []ArgInfo{{Name: "scope", Required: false, Type: "option", Options: []string{"--all"}}},
+			Usage: "/branches [--all]"},
+		{Name: "grep", Description: "Search the working tree for a pattern", Category: "Git",
+			Args:  []ArgInfo{{Name: "pattern", Required: true, Type: "string"}, {Name: "path", Required: false, Type: "path"}},
+			Usage: "/grep <pattern> [path]"},
+		{Name: "blame", Description: "Show line-by-line git blame for a file", Category: "Git",
+			Args:  []ArgInfo{{Name: "file", Required: true, Type: "path"}, {Name: "range", Required: false, Type: "string"}},
+			Usage: "/blame <file> [N|N-M|N M]"},
 
 		// Planning
 		{Name: "plan", Description: "Toggle planning mode", Category: "Planning",
