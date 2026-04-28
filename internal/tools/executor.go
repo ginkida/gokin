@@ -109,6 +109,15 @@ var SmartFallbackConfig = map[string]struct {
 	},
 }
 
+// formatToolPanic returns a user-facing message for a recovered tool panic.
+// The "panic:" prefix is preserved so error-classifier matchers in
+// context/compactor.go and context/tool_summarizer.go still recognise the
+// result as an error during compaction. The hint about the log file gives
+// the user a path to a full stack trace without bloating the model context.
+func formatToolPanic(toolName string, r any) string {
+	return fmt.Sprintf("panic: tool %q crashed: %v (likely a bug; full stack trace in gokin log)", toolName, r)
+}
+
 // GetSmartFallback returns an appropriate fallback message based on tool and result.
 func GetSmartFallback(toolName string, result ToolResult, toolsUsed []string) string {
 	// Get tool-specific config
@@ -1388,7 +1397,10 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 							length := runtime.Stack(stack, false)
 							logging.Error("tool execution panic", "tool", fc.Name, "panic", r, "stack", string(stack[:length]))
 							mu.Lock()
-							results[i] = &genai.FunctionResponse{ID: fc.ID, Name: fc.Name, Response: NewErrorResult(fmt.Sprintf("panic: %v", r)).ToMap()}
+							results[i] = &genai.FunctionResponse{
+								ID: fc.ID, Name: fc.Name,
+								Response: NewErrorResult(formatToolPanic(fc.Name, r)).ToMap(),
+							}
 							mu.Unlock()
 						}
 					}()
@@ -1420,10 +1432,12 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							logging.Error("panic in sequential tool execution", "tool", call.Name, "panic", r)
+							stack := make([]byte, 4096)
+							length := runtime.Stack(stack, false)
+							logging.Error("panic in sequential tool execution", "tool", call.Name, "panic", r, "stack", string(stack[:length]))
 							results[idx] = &genai.FunctionResponse{
 								ID: call.ID, Name: call.Name,
-								Response: NewErrorResult(fmt.Sprintf("tool panicked: %v", r)).ToMap(),
+								Response: NewErrorResult(formatToolPanic(call.Name, r)).ToMap(),
 							}
 						}
 					}()
