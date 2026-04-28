@@ -95,7 +95,11 @@ func (sm *SessionManager) Start(ctx context.Context) {
 				default:
 				}
 				if err := sm.Save(); err != nil {
-					logging.Debug("async save failed", "error", err)
+					// Same failure mode as periodicSave (sm.Save call) — log at the
+					// same level so default-Warn users actually see "your session
+					// state isn't persisting". Pre-fix this path was Debug, hidden
+					// at the default log level.
+					logging.Warn("async session save failed", "error", err)
 				}
 			case <-ctx.Done():
 				return

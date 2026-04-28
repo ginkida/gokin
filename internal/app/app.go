@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -463,11 +464,22 @@ func (a *App) Run() error {
 		a.sessionManager.Start(a.ctx)
 	}
 
-	// Save session on panic before re-panicking
+	// Save session on panic before re-panicking. Without the logging here a
+	// fatal panic would leave the user with: 1) no clue what crashed (just
+	// the runtime's panic dump on stderr), and 2) potentially no session
+	// either (if Save itself failed silently). We log both before re-raising
+	// so the same crash is also captured in the gokin log file.
 	defer func() {
 		if r := recover(); r != nil {
+			stack := make([]byte, 8192)
+			length := runtime.Stack(stack, false)
+			logging.Error("app run panic — attempting session save before crashing",
+				"panic", r, "stack", string(stack[:length]))
 			if a.sessionManager != nil {
-				_ = a.sessionManager.Save()
+				if saveErr := a.sessionManager.Save(); saveErr != nil {
+					logging.Error("session save failed during panic recovery — unsaved work may be lost",
+						"error", saveErr, "panic", r)
+				}
 			}
 			panic(r)
 		}
