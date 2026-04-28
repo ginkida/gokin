@@ -137,6 +137,46 @@ func TestGetErrorGuidance_StatusCodeWordBoundary(t *testing.T) {
 	}
 }
 
+// TestGetErrorGuidance_StatusCodeWordBoundary_Wider — v0.78.16 widened the
+// \b401\b convention to 429 / 403 / 400 too. Pre-fix "429ms" / "sent 1429
+// requests" / "403ms latency" / "5403 retries" all falsely matched.
+func TestGetErrorGuidance_StatusCodeWordBoundary_Wider(t *testing.T) {
+	cases := []struct {
+		input string
+		// titlePrefix is the title we must NOT see (because the bare digits
+		// shouldn't trigger that pattern).
+		mustNot string
+	}{
+		{`took 429ms to respond`, "Rate Limit"},
+		{`processed 1429 requests`, "Rate Limit"},
+		{`network 403ms p99`, "Access Denied"},
+		{`5403 retries logged`, "Access Denied"},
+		{`scanned 400 directories`, "Provider API"}, // 400.*model.*not.*found
+	}
+	for _, tc := range cases {
+		g := GetErrorGuidance(tc.input)
+		if g != nil && strings.Contains(g.Title, tc.mustNot) {
+			t.Errorf("%q falsely matched %q (expected no status-code match)", tc.input, g.Title)
+		}
+	}
+
+	// Sanity: the legitimate codes still match.
+	legit := []struct {
+		input string
+		want  string
+	}{
+		{`got 429 too many requests`, "Rate Limit"},
+		{`HTTP 403 forbidden`, "Access Denied"},
+		{`401 unauthorized`, "Authentication"},
+	}
+	for _, tc := range legit {
+		g := GetErrorGuidance(tc.input)
+		if g == nil || !strings.Contains(g.Title, tc.want) {
+			t.Errorf("%q should match %q, got %+v", tc.input, tc.want, g)
+		}
+	}
+}
+
 // v0.78.11 patterns — common errors that previously fell through with no hint.
 
 func TestGetErrorGuidance_TLSCertError(t *testing.T) {

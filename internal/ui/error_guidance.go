@@ -131,7 +131,11 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Command:     "",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(rate limit|429|too many requests)`),
+		// \b429\b — same convention as \b401\b/\b500\b: bare "429" matched
+		// "429ms latency" and "sent 1429 requests" too, both common in
+		// streaming logs. Keep the rate-limit phrases unbounded since they
+		// don't have the false-positive risk.
+		Pattern:     regexp.MustCompile(`(?i)(rate limit|\b429\b|too many requests)`),
 		Title:       "Rate Limit Reached",
 		Suggestions: []string{"Wait a moment before trying again", "Reduce request frequency", "Consider upgrading your API plan"},
 		Command:     "",
@@ -151,7 +155,9 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Command:     "/login",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(forbidden|403|permission denied)`),
+		// \b403\b — bare "403" matched "403ms" / "5403 retries". Same
+		// rationale as \b401\b above.
+		Pattern:     regexp.MustCompile(`(?i)(forbidden|\b403\b|permission denied)`),
 		Title:       "Access Denied",
 		Suggestions: []string{"Check API key permissions", "Verify you have access to this model", "Contact API provider for access"},
 		Command:     "",
@@ -163,7 +169,7 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Command:     "",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)400.*model.*not.*found`),
+		Pattern:     regexp.MustCompile(`(?i)\b400\b.*model.*not.*found`),
 		Title:       "Provider API Temporarily Unavailable",
 		Suggestions: []string{"The provider returned a transient error — try sending your message again", "If persistent, switch provider with /provider or check /health"},
 		Command:     "/health",
