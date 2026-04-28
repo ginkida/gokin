@@ -54,6 +54,45 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Suggestions: []string{"The MCP server isn't reachable right now", "Run /mcp status to see which servers are healthy", "Try /mcp refresh NAME, or /mcp remove + /mcp add to rebuild the connection"},
 		Command:     "/mcp status",
 	},
+	// ─── Specific network/auth patterns (must come before the generic
+	// "Connection Failed" / "Access Denied" patterns below) ───
+	//
+	// TLS / certificate errors — common with corporate proxies that intercept
+	// HTTPS using a private CA, or with stale system trust stores.
+	{
+		Pattern:     regexp.MustCompile(`(?i)(x509:.*(certificate|signed by unknown|expired|not.*valid|not.trusted)|tls:.*(handshake|bad certificate)|certificate verify failed|self.signed certificate)`),
+		Title:       "TLS / Certificate Error",
+		Suggestions: []string{"The provider's TLS certificate isn't trusted by your system", "If behind a corporate proxy: ask IT for the proxy CA bundle and add it to your system trust store", "On macOS check Keychain; on Linux check /etc/ssl/certs/ca-certificates.crt"},
+		Command:     "",
+	},
+	// Git index/ref locks — typical after a SIGKILL or crash interrupted a git
+	// operation. The cure is just to remove the lock file.
+	{
+		Pattern:     regexp.MustCompile(`(?i)(unable to create|could not lock|fatal:.*).*\.git/(index|HEAD|.*ref)\.lock`),
+		Title:       "Git Lock File Stuck",
+		Suggestions: []string{"A previous git command was killed mid-operation and left a stale lock", "Check no other git is running (ps aux | grep git), then remove the lock file shown in the error", "Common ones: rm .git/index.lock or rm .git/refs/heads/*.lock"},
+		Command:     "",
+	},
+	// DNS / hostname resolution — distinct from the generic "network error" so
+	// the user knows it's their resolver, not the remote service. Comes
+	// BEFORE the "Connection Failed" pattern (which also matches "no such
+	// host") so users get the more actionable hint.
+	{
+		Pattern:     regexp.MustCompile(`(?i)(no such host|name resolution|dns lookup failed|getaddrinfo|EAI_NONAME|ENOTFOUND)`),
+		Title:       "DNS Resolution Failed",
+		Suggestions: []string{"The hostname couldn't be resolved", "Check your network connection and DNS (try `ping 1.1.1.1` then `ping example.com`)", "If on a VPN, the DNS may need to route through it — verify VPN is up"},
+		Command:     "",
+	},
+	// SSH-specific connection errors. Comes before the generic
+	// "Connection Failed" / "Access Denied" patterns since "Permission
+	// denied (publickey)" and ":22: connection refused" both match
+	// generic ones with less actionable hints.
+	{
+		Pattern:     regexp.MustCompile(`(?i)(ssh:.*(handshake|authentication)|denied.*\(publickey\)|publickey.*(denied|rejected)|host key.*(verification|mismatch|unknown)|:22.*connection refused|connection refused.*:22)`),
+		Title:       "SSH Connection Failed",
+		Suggestions: []string{"Verify host/port/user are correct in your SSH config", "If publickey denied: confirm your key is added to the remote ~/.ssh/authorized_keys (and ssh-add for the local agent)", "If host key mismatch: the remote was reinstalled — remove the stale entry from ~/.ssh/known_hosts"},
+		Command:     "",
+	},
 	// ─── Generic patterns ───
 	{
 		Pattern: regexp.MustCompile(`model_round_timeout`),

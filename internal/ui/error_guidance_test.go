@@ -136,3 +136,78 @@ func TestGetErrorGuidance_StatusCodeWordBoundary(t *testing.T) {
 		t.Errorf("401ms falsely triggered auth pattern: %+v", g)
 	}
 }
+
+// v0.78.11 patterns — common errors that previously fell through with no hint.
+
+func TestGetErrorGuidance_TLSCertError(t *testing.T) {
+	cases := []string{
+		`Get "https://api.example.com": x509: certificate signed by unknown authority`,
+		`tls: handshake failure`,
+		`x509: certificate has expired`,
+		`server.local: certificate verify failed: self-signed certificate in chain`,
+	}
+	for _, msg := range cases {
+		g := GetErrorGuidance(msg)
+		if g == nil || g.Title != "TLS / Certificate Error" {
+			t.Errorf("%q → %+v, want TLS / Certificate Error", msg, g)
+		}
+	}
+}
+
+func TestGetErrorGuidance_GitLock(t *testing.T) {
+	cases := []string{
+		`fatal: Unable to create '/Users/x/repo/.git/index.lock': File exists.`,
+		`error: could not lock config file: .git/HEAD.lock: File exists`,
+	}
+	for _, msg := range cases {
+		g := GetErrorGuidance(msg)
+		if g == nil || g.Title != "Git Lock File Stuck" {
+			t.Errorf("%q → %+v, want Git Lock File Stuck", msg, g)
+		}
+	}
+}
+
+func TestGetErrorGuidance_DNSResolution(t *testing.T) {
+	cases := []string{
+		`dial tcp: lookup api.openai.com: no such host`,
+		`getaddrinfo ENOTFOUND github.com`,
+		`Name resolution failure: EAI_NONAME`,
+	}
+	for _, msg := range cases {
+		g := GetErrorGuidance(msg)
+		if g == nil || g.Title != "DNS Resolution Failed" {
+			t.Errorf("%q → %+v, want DNS Resolution Failed", msg, g)
+		}
+	}
+}
+
+func TestGetErrorGuidance_SSHConnection(t *testing.T) {
+	cases := []string{
+		`ssh: handshake failed: read tcp: connection reset by peer`,
+		`Permission denied (publickey).`,
+		`Host key verification failed.`,
+		`dial tcp 1.2.3.4:22: connection refused`,
+	}
+	for _, msg := range cases {
+		g := GetErrorGuidance(msg)
+		if g == nil || g.Title != "SSH Connection Failed" {
+			t.Errorf("%q → %+v, want SSH Connection Failed", msg, g)
+		}
+	}
+}
+
+// Make sure none of the new patterns false-trigger on unrelated text.
+func TestGetErrorGuidance_NewPatterns_NoFalsePositives(t *testing.T) {
+	cases := []string{
+		`successfully resolved 12 dependencies`,                         // not DNS
+		`certificate of completion uploaded`,                            // not TLS
+		`docker compose started`,                                        // generic
+		`new branch tracking origin/main`,                               // not lock
+	}
+	for _, msg := range cases {
+		g := GetErrorGuidance(msg)
+		if g != nil {
+			t.Errorf("%q falsely matched %q", msg, g.Title)
+		}
+	}
+}
