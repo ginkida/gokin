@@ -189,10 +189,10 @@ func TestBlame_BadRange(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"f.txt", "5-2"}, "Invalid range"},     // M < N
-		{[]string{"f.txt", "abc"}, "Invalid line"},       // non-numeric
-		{[]string{"f.txt", "0"}, "Invalid line"},         // zero rejected
-		{[]string{"f.txt", "-3"}, "Invalid"},             // negative
+		{[]string{"f.txt", "5-2"}, "Invalid range"}, // M < N
+		{[]string{"f.txt", "abc"}, "Invalid line"},  // non-numeric
+		{[]string{"f.txt", "0"}, "Invalid line"},    // zero rejected
+		{[]string{"f.txt", "-3"}, "Invalid"},        // negative
 	}
 	for _, tc := range cases {
 		out, err := (&BlameCommand{}).Execute(context.Background(), tc.args, app)

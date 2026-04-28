@@ -28,8 +28,8 @@ func TestEveryRegisteredCommandIsInAutocomplete(t *testing.T) {
 		// Internal/debug commands: surfaced through other means (key chord,
 		// dev-only flow). Suggesting them in autocomplete would expose
 		// internals to end users.
-		"debug-dump": "developer-only diagnostic; not for end-user autocomplete",
-		"insights":   "internal coordinator output; surfaced via /stats integration",
+		"debug-dump":  "developer-only diagnostic; not for end-user autocomplete",
+		"insights":    "internal coordinator output; surfaced via /stats integration",
 		"checkpoints": "managed by /checkpoint key chord, not typed",
 		// Legacy / soft-deprecated: kept registered for backwards-compat
 		// but discouraged in new autocomplete UX.
@@ -94,9 +94,9 @@ func TestNoStaleAutocompleteEntries(t *testing.T) {
 	// is shown but actually surfaces a different system). Those are
 	// listed here with a justification.
 	allowedStale := map[string]string{
-		"instructions": "surfaced via app handler, not registered as a Command",
-		"reasoning":    "shorthand for /model reasoning — handled inline",
-		"quickstart":   "shown via /help mode, not a standalone Command",
+		"instructions":          "surfaced via app handler, not registered as a Command",
+		"reasoning":             "shorthand for /model reasoning — handled inline",
+		"quickstart":            "shown via /help mode, not a standalone Command",
 		"register-agent-type":   "agent registry sub-command, separate handler",
 		"unregister-agent-type": "agent registry sub-command, separate handler",
 		"list-agent-types":      "agent registry sub-command, separate handler",

@@ -199,10 +199,10 @@ func TestGetErrorGuidance_SSHConnection(t *testing.T) {
 // Make sure none of the new patterns false-trigger on unrelated text.
 func TestGetErrorGuidance_NewPatterns_NoFalsePositives(t *testing.T) {
 	cases := []string{
-		`successfully resolved 12 dependencies`,                         // not DNS
-		`certificate of completion uploaded`,                            // not TLS
-		`docker compose started`,                                        // generic
-		`new branch tracking origin/main`,                               // not lock
+		`successfully resolved 12 dependencies`, // not DNS
+		`certificate of completion uploaded`,    // not TLS
+		`docker compose started`,                // generic
+		`new branch tracking origin/main`,       // not lock
 	}
 	for _, msg := range cases {
 		g := GetErrorGuidance(msg)
