@@ -45,7 +45,7 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	// Get git status
-	status, err := runGitCommand(workDir, "status", "--porcelain")
+	status, err := runGitCommandCtx(ctx, workDir, "status", "--porcelain")
 	if err != nil {
 		return fmt.Sprintf("Failed to get git status: %v", err), nil
 	}
@@ -59,14 +59,14 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 	result.WriteString("Changes to commit:\n")
 
 	// Get staged changes
-	staged, _ := runGitCommand(workDir, "diff", "--cached", "--stat")
+	staged, _ := runGitCommandCtx(ctx, workDir, "diff", "--cached", "--stat")
 	if staged != "" {
 		result.WriteString("\nStaged:\n")
 		result.WriteString(staged)
 	}
 
 	// Get unstaged changes
-	unstaged, _ := runGitCommand(workDir, "diff", "--stat")
+	unstaged, _ := runGitCommandCtx(ctx, workDir, "diff", "--stat")
 	if unstaged != "" {
 		result.WriteString("\nUnstaged:\n")
 		result.WriteString(unstaged)
@@ -83,13 +83,13 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 
 	// Auto-generate commit message if not provided
 	if message == "" {
-		generated := autoGenerateCommitMessage(workDir)
+		generated := autoGenerateCommitMessage(ctx, workDir)
 		if generated != "" {
 			message = generated
 			fmt.Fprintf(&result, "\nAuto-generated message: %s\n", message)
 		} else {
 			// Fallback if auto-generation fails
-			log, _ := runGitCommand(workDir, "log", "-3", "--oneline")
+			log, _ := runGitCommandCtx(ctx, workDir, "log", "-3", "--oneline")
 			if log != "" {
 				result.WriteString("\nRecent commits (for style reference):\n")
 				result.WriteString(log)
@@ -100,7 +100,7 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	// Stage only tracked (modified/deleted) files — safe default
-	_, err = runGitCommand(workDir, "add", "-u")
+	_, err = runGitCommandCtx(ctx, workDir, "add", "-u")
 	if err != nil {
 		return fmt.Sprintf("Failed to stage changes: %v", err), nil
 	}
@@ -114,17 +114,17 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	// Create commit
-	_, err = runGitCommand(workDir, "commit", "-m", message)
+	_, err = runGitCommandCtx(ctx, workDir, "commit", "-m", message)
 	if err != nil {
 		return fmt.Sprintf("Failed to create commit: %v", err), nil
 	}
 
 	// Get the commit hash
-	hash, _ := runGitCommand(workDir, "rev-parse", "--short", "HEAD")
+	hash, _ := runGitCommandCtx(ctx, workDir, "rev-parse", "--short", "HEAD")
 	hash = strings.TrimSpace(hash)
 
 	// Count files changed
-	commitStat, _ := runGitCommand(workDir, "diff", "--stat", "HEAD~1..HEAD")
+	commitStat, _ := runGitCommandCtx(ctx, workDir, "diff", "--stat", "HEAD~1..HEAD")
 	fileCount := strings.Count(commitStat, "|")
 
 	msg := fmt.Sprintf("✓ Committed %s: %s", hash, message)
@@ -185,7 +185,7 @@ func (c *PRCommand) Execute(ctx context.Context, args []string, app AppInterface
 	}
 
 	// Get current branch
-	currentBranch, err := runGitCommand(workDir, "rev-parse", "--abbrev-ref", "HEAD")
+	currentBranch, err := runGitCommandCtx(ctx, workDir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return fmt.Sprintf("Failed to get current branch: %v", err), nil
 	}
@@ -198,11 +198,11 @@ func (c *PRCommand) Execute(ctx context.Context, args []string, app AppInterface
 
 	// Determine base branch
 	if base == "" {
-		base = detectBaseBranch(workDir)
+		base = detectBaseBranch(ctx, workDir)
 	}
 
 	// Get commits for this branch
-	commits, _ := runGitCommand(workDir, "log", fmt.Sprintf("%s..HEAD", base), "--oneline")
+	commits, _ := runGitCommandCtx(ctx, workDir, "log", fmt.Sprintf("%s..HEAD", base), "--oneline")
 	if strings.TrimSpace(commits) == "" {
 		return fmt.Sprintf("No commits to create PR. Branch is up to date with %s.", base), nil
 	}
@@ -214,7 +214,7 @@ func (c *PRCommand) Execute(ctx context.Context, args []string, app AppInterface
 	result.WriteString("\n")
 
 	// Check if there are unpushed commits
-	unpushed, _ := runGitCommand(workDir, "log", "@{upstream}..HEAD", "--oneline")
+	unpushed, _ := runGitCommandCtx(ctx, workDir, "log", "@{upstream}..HEAD", "--oneline")
 	if strings.TrimSpace(unpushed) != "" {
 		result.WriteString("\nNote: You have unpushed commits. Push them first with: git push -u origin " + currentBranch)
 		return result.String(), nil
@@ -236,8 +236,9 @@ func (c *PRCommand) Execute(ctx context.Context, args []string, app AppInterface
 	body := fmt.Sprintf("## Summary\n\nThis PR includes the following changes:\n\n%s", formatCommitsAsMarkdown(commits))
 	ghArgs = append(ghArgs, "--body", body)
 
-	// Create PR
-	output, err := runCommand(workDir, "gh", ghArgs...)
+	// Create PR — gh hits the GitHub API and can sit for 5–10s on flaky
+	// networks; ctx-aware so Esc actually kills the call.
+	output, err := runCommandCtx(ctx, workDir, "gh", ghArgs...)
 	if err != nil {
 		return fmt.Sprintf("Failed to create PR: %v\n%s", err, output), nil
 	}
@@ -302,15 +303,15 @@ func getUntrackedFiles(status string) []string {
 	return files
 }
 
-func detectBaseBranch(dir string) string {
+func detectBaseBranch(ctx context.Context, dir string) string {
 	// Check if main exists
-	_, err := runGitCommand(dir, "rev-parse", "--verify", "main")
+	_, err := runGitCommandCtx(ctx, dir, "rev-parse", "--verify", "main")
 	if err == nil {
 		return "main"
 	}
 
 	// Fall back to master
-	_, err = runGitCommand(dir, "rev-parse", "--verify", "master")
+	_, err = runGitCommandCtx(ctx, dir, "rev-parse", "--verify", "master")
 	if err == nil {
 		return "master"
 	}
@@ -321,15 +322,15 @@ func detectBaseBranch(dir string) string {
 
 // autoGenerateCommitMessage analyzes staged changes and generates a conventional
 // commit message (e.g., "feat(ui): add multi-line input support").
-func autoGenerateCommitMessage(workDir string) string {
+func autoGenerateCommitMessage(ctx context.Context, workDir string) string {
 	// Get staged diff stats
-	stat, err := runGitCommand(workDir, "diff", "--cached", "--stat")
+	stat, err := runGitCommandCtx(ctx, workDir, "diff", "--cached", "--stat")
 	if err != nil || strings.TrimSpace(stat) == "" {
 		return ""
 	}
 
 	// Get detailed diff (limited for analysis)
-	diff, _ := runGitCommand(workDir, "diff", "--cached")
+	diff, _ := runGitCommandCtx(ctx, workDir, "diff", "--cached")
 	if len(diff) > 4000 {
 		diff = diff[:4000]
 	}
