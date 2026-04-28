@@ -128,7 +128,7 @@ func NewInputModel(styles *Styles, workDir string) InputModel {
 		history:            make([]string, 0, maxHistorySize),
 		historyIndex:       -1,
 		savedInput:         "",
-		commands:           defaultCommands(),
+		commands:           DefaultCommands(),
 		suggestions:        nil,
 		suggestionType:     SuggestionCommand,
 		fileSuggestions:    nil,
@@ -140,8 +140,11 @@ func NewInputModel(styles *Styles, workDir string) InputModel {
 	}
 }
 
-// defaultCommands returns the default list of slash commands.
-func defaultCommands() []CommandInfo {
+// DefaultCommands returns the default list of slash commands shown in
+// autocomplete suggestions. Exported so cross-package guard tests in
+// internal/commands can verify every registered command appears here
+// (see TestEveryRegisteredCommandIsInAutocomplete).
+func DefaultCommands() []CommandInfo {
 	return []CommandInfo{
 		// Getting Started
 		{Name: "help", Description: "Show help for commands", Category: "Getting Started",
@@ -165,6 +168,14 @@ func defaultCommands() []CommandInfo {
 		{Name: "sessions", Description: "List saved sessions", Category: "Session"},
 		{Name: "stats", Description: "Show session statistics", Category: "Session"},
 		{Name: "memory", Description: "Show stored memories", Category: "Session"},
+		// /undo and /redo are fundamental enough to be in Session autocomplete.
+		// Were missing pre-v0.78.14 — caught by TestEveryRegisteredCommandIsInAutocomplete.
+		{Name: "undo", Description: "Undo the last file change", Category: "Session",
+			Args:  []ArgInfo{{Name: "n_or_list", Required: false, Type: "string"}},
+			Usage: "/undo [N|list]"},
+		{Name: "redo", Description: "Re-apply the last undone change", Category: "Session",
+			Args:  []ArgInfo{{Name: "n", Required: false, Type: "number"}},
+			Usage: "/redo [N]"},
 		{Name: "instructions", Description: "Show project instructions", Category: "Session"},
 
 		// Auth & Setup
@@ -183,6 +194,12 @@ func defaultCommands() []CommandInfo {
 		{Name: "update", Description: "Check/install updates and rollback", Category: "Auth",
 			Args:  []ArgInfo{{Name: "action", Required: false, Type: "option", Options: []string{"install", "backups", "rollback"}}},
 			Usage: "/update [install|backups|rollback [backup-id]]"},
+		// v0.74–v0.76 release feedback set. These were registered in
+		// commands.go but missing from autocomplete — surfaced by
+		// TestEveryRegisteredCommandIsInAutocomplete in v0.78.14.
+		{Name: "restart", Description: "Re-exec into the latest installed binary", Category: "Auth"},
+		{Name: "whats-new", Description: "Show release notes for the current version", Category: "Auth"},
+		{Name: "changelog", Description: "Show compact list of recent releases", Category: "Auth"},
 
 		// Git
 		{Name: "init", Description: "Initialize GOKIN.md for this project", Category: "Git"},
