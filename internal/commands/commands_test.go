@@ -131,6 +131,34 @@ func TestHelpCategoriesAreRegistered(t *testing.T) {
 	}
 }
 
+// TestHelpExamplesAndRelatedExist guards against silent drift in the
+// /help maps. Every command shown to users via the v0.77.x git-inspect
+// set + the v0.74–v0.76 release-feedback set should have BOTH an
+// example and a "see also" — otherwise `/help <cmd>` looks half-empty
+// and users stop trusting the help text.
+//
+// If you add a new command in those families, add it to both maps in
+// builtin.go and to this test. If you intentionally don't have one
+// (e.g. a trivial command with no useful example), drop it from this
+// list and document why above.
+func TestHelpExamplesAndRelatedExist(t *testing.T) {
+	mustHaveBoth := []string{
+		// git-inspect (v0.77.x → v0.78.12)
+		"diff", "log", "branches", "grep", "blame",
+		// release feedback (v0.74–v0.76)
+		"whats-new", "changelog", "restart",
+	}
+
+	for _, name := range mustHaveBoth {
+		if got := getCommandExample(name); got == "" {
+			t.Errorf("getCommandExample(%q) is empty — every git-inspect / release command should have an example", name)
+		}
+		if got := getRelatedCommands(name); got == "" {
+			t.Errorf("getRelatedCommands(%q) is empty — every git-inspect / release command should have see-also", name)
+		}
+	}
+}
+
 func TestHandlerRegisterPanicAfterFreeze(t *testing.T) {
 	h := NewHandler() // frozen after construction
 
