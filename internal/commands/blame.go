@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -81,17 +80,12 @@ func (c *BlameCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	out, err := runGitCommandCtx(ctx, workDir, gitArgs...)
 	if err != nil {
-		// `git blame` exits nonzero on bad path / unreadable file. Surface
-		// stderr (which the helper returns as the body on error) — it's
-		// usually self-explanatory ("fatal: no such path …").
+		// `git blame` exits nonzero on bad path / unreadable file.
+		// runGitCommandCtx returns stderr as `out` on error — surface it
+		// since the message ("fatal: no such path …") is self-explanatory.
 		stderr := strings.TrimSpace(out)
 		if stderr == "" {
 			stderr = err.Error()
-		}
-		// Also handle the case where the helper's output is wrapped as a
-		// generic exec error.
-		if _, ok := err.(*exec.ExitError); ok && stderr != "" {
-			return fmt.Sprintf("git blame failed: %s", stderr), nil
 		}
 		return fmt.Sprintf("git blame failed: %s", stderr), nil
 	}

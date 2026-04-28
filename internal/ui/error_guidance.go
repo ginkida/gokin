@@ -66,9 +66,12 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Command:     "",
 	},
 	// Git index/ref locks — typical after a SIGKILL or crash interrupted a git
-	// operation. The cure is just to remove the lock file.
+	// operation. The cure is just to remove the lock file. Pattern matches
+	// any *.lock under .git/ so it catches refs/heads/<branch>.lock too,
+	// not just index.lock and HEAD.lock (an earlier draft had alternation
+	// over (index|HEAD|.*ref) which silently missed branch ref locks).
 	{
-		Pattern:     regexp.MustCompile(`(?i)(unable to create|could not lock|fatal:.*).*\.git/(index|HEAD|.*ref)\.lock`),
+		Pattern:     regexp.MustCompile(`(?i)(unable to create|could not lock|fatal:.*).*\.git/[^'"\s]*\.lock`),
 		Title:       "Git Lock File Stuck",
 		Suggestions: []string{"A previous git command was killed mid-operation and left a stale lock", "Check no other git is running (ps aux | grep git), then remove the lock file shown in the error", "Common ones: rm .git/index.lock or rm .git/refs/heads/*.lock"},
 		Command:     "",

@@ -158,6 +158,11 @@ func TestGetErrorGuidance_GitLock(t *testing.T) {
 	cases := []string{
 		`fatal: Unable to create '/Users/x/repo/.git/index.lock': File exists.`,
 		`error: could not lock config file: .git/HEAD.lock: File exists`,
+		// Regression — the v0.78.11 first draft used `.git/(index|HEAD|.*ref)\.lock`
+		// which silently failed on branch ref locks like `refs/heads/main.lock`
+		// even though the suggestion text mentions exactly that case.
+		`fatal: Unable to create '/path/.git/refs/heads/main.lock': File exists.`,
+		`could not lock ref '.git/refs/heads/feature/foo.lock'`,
 	}
 	for _, msg := range cases {
 		g := GetErrorGuidance(msg)
