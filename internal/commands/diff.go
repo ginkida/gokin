@@ -91,7 +91,7 @@ func (c *DiffCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		gitArgs = append(gitArgs, "--", filePath)
 	}
 
-	out, err := runGitCommand(workDir, gitArgs...)
+	out, err := runGitCommandCtx(ctx, workDir, gitArgs...)
 	if err != nil {
 		return fmt.Sprintf("Failed to get diff: %v", err), nil
 	}
@@ -119,7 +119,7 @@ func (c *DiffCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		if filePath != "" {
 			statArgs = append(statArgs, "--", filePath)
 		}
-		stat, _ := runGitCommand(workDir, statArgs...)
+		stat, _ := runGitCommandCtx(ctx, workDir, statArgs...)
 		stat = strings.TrimRight(stat, "\n")
 		if stat != "" {
 			header = stat + "\n\n"

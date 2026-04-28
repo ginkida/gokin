@@ -70,7 +70,7 @@ func (c *BranchesCommand) Execute(ctx context.Context, args []string, app AppInt
 	}
 	gitArgs = append(gitArgs, strings.Fields(refScope)...)
 
-	out, err := runGitCommand(workDir, gitArgs...)
+	out, err := runGitCommandCtx(ctx, workDir, gitArgs...)
 	if err != nil {
 		return fmt.Sprintf("Failed to list branches: %v", err), nil
 	}
@@ -82,7 +82,7 @@ func (c *BranchesCommand) Execute(ctx context.Context, args []string, app AppInt
 	// Find current branch — `git for-each-ref` doesn't mark it, we
 	// need a separate cheap call. Detached HEAD returns empty, which
 	// we render as "(detached)" for clarity.
-	current, _ := runGitCommand(workDir, "rev-parse", "--abbrev-ref", "HEAD")
+	current, _ := runGitCommandCtx(ctx, workDir, "rev-parse", "--abbrev-ref", "HEAD")
 	current = strings.TrimSpace(current)
 	if current == "HEAD" {
 		current = "" // detached

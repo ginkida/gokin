@@ -117,7 +117,7 @@ func (c *GrepCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	gitArgs = append(gitArgs, "--", pattern)
 	gitArgs = append(gitArgs, paths...)
 
-	cmd := exec.Command("git", gitArgs...)
+	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Dir = workDir
 	out, err := cmd.Output()
 	if err != nil {

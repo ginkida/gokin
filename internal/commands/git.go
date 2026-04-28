@@ -261,8 +261,21 @@ func runGitCommand(dir string, args ...string) (string, error) {
 	return runCommand(dir, "git", args...)
 }
 
+// runGitCommandCtx is the cancellable form. Pass the request context so the
+// user pressing Esc actually kills the underlying git process — important on
+// huge repos / locked refs where git can sit for tens of seconds.
+func runGitCommandCtx(ctx context.Context, dir string, args ...string) (string, error) {
+	return runCommandCtx(ctx, dir, "git", args...)
+}
+
 func runCommand(dir, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	return runCommandCtx(context.Background(), dir, name, args...)
+}
+
+// runCommandCtx runs name+args in dir with cancellation tied to ctx. Cancelling
+// ctx terminates the process via os.Kill (exec.CommandContext default).
+func runCommandCtx(ctx context.Context, dir, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 
 	var stdout, stderr bytes.Buffer

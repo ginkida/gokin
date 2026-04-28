@@ -84,7 +84,7 @@ func (c *LogCommand) Execute(ctx context.Context, args []string, app AppInterfac
 		gitArgs = append(gitArgs, "--", filePath)
 	}
 
-	out, err := runGitCommand(workDir, gitArgs...)
+	out, err := runGitCommandCtx(ctx, workDir, gitArgs...)
 	if err != nil {
 		return fmt.Sprintf("Failed to read git log: %v", err), nil
 	}
