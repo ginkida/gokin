@@ -117,6 +117,11 @@ func (es *ErrorStore) scheduleSave() {
 	}
 
 	es.saveTimer = time.AfterFunc(2*time.Second, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("error store save timer panicked", "panic", r)
+			}
+		}()
 		es.mu.Lock()
 		if !es.dirty {
 			es.mu.Unlock()

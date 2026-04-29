@@ -7,6 +7,7 @@ import (
 
 	"gokin/internal/app"
 	"gokin/internal/config"
+	"gokin/internal/logging"
 	"gokin/internal/setup"
 
 	"github.com/spf13/cobra"
@@ -17,7 +18,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version  = "0.78.16"
+	version  = "0.78.17"
 	cfgFile  string
 	model    string
 	runSetup bool
@@ -129,8 +130,19 @@ func runApp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Check for updates on startup (non-blocking notification)
-	go CheckForUpdateOnStartup(cfg, application)
+	// Check for updates on startup (non-blocking notification). Wrapped in
+	// defer-recover so a panic inside the update path (network library bug,
+	// nil-deref in update.NewUpdater, etc.) doesn't crash gokin before the
+	// TUI even starts. v0.78.1 wrapped the equivalent app/ goroutines —
+	// this is the cmd/ counterpart.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("update-check goroutine panicked", "panic", r)
+			}
+		}()
+		CheckForUpdateOnStartup(cfg, application)
+	}()
 
 	fmt.Println("\nStarting Gokin...")
 	return application.Run()

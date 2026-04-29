@@ -291,7 +291,15 @@ func CheckForUpdateOnStartup(cfg *config.Config, app update.AppInterface) {
 		// here — if the app exits in under 2s the user never saw the
 		// TUI anyway, and the stderr fallback below runs on the next
 		// launch (cache says "update available" for 24h).
+		// Defer-recover guards against a panic in app.AddSystemMessage
+		// during a shutdown race (the timer's callback runs on a
+		// separate goroutine and outlives this function's stack).
 		time.AfterFunc(2*time.Second, func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Debug("update-notice timer callback recovered from panic", "panic", r)
+				}
+			}()
 			app.AddSystemMessage(msg)
 		})
 	} else {

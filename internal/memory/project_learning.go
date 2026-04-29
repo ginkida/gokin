@@ -104,6 +104,11 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 			pl.timer.Stop()
 		}
 		pl.timer = time.AfterFunc(2*time.Second, func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("project learning save timer panicked", "panic", r)
+				}
+			}()
 			pl.mu.Lock()
 			if !pl.dirty {
 				pl.mu.Unlock()

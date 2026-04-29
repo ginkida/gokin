@@ -1228,8 +1228,15 @@ func (s *Store) scheduleSave() {
 		s.saveTimer.Stop()
 	}
 
-	// Schedule new save after 2 seconds
+	// Schedule new save after 2 seconds. Defer-recover guards against a
+	// panic in JSON marshal / file write — the timer fires on its own
+	// goroutine, so an unrecovered panic would crash the whole process.
 	s.saveTimer = time.AfterFunc(2*time.Second, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("memory store save timer panicked", "panic", r)
+			}
+		}()
 		s.mu.Lock()
 		if !s.dirty {
 			s.mu.Unlock()

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/logging"
 	"gokin/internal/security"
 )
 
@@ -340,6 +341,11 @@ func (l *Logger) scheduleSave() {
 	}
 
 	l.saveTimer = time.AfterFunc(2*time.Second, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("audit log save timer panicked", "panic", r)
+			}
+		}()
 		l.mu.Lock()
 		if !l.dirty {
 			l.mu.Unlock()
