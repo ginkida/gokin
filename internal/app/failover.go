@@ -111,7 +111,9 @@ func detectPrimaryProvider(cfg *config.Config) string {
 	if cfg.Model.Name != "" {
 		return config.DetectProviderFromModel(cfg.Model.Name)
 	}
-	return "gemini"
+	// Pre-v0.78.30 this returned "gemini" — a removed provider. Now uses
+	// the current default that GetActiveProvider falls back to.
+	return "glm"
 }
 
 func buildFailoverCandidates(cfg *config.Config, primary string) []string {

@@ -66,12 +66,10 @@ var knownModelProfiles = map[string]ModelProfile{
 	"kimi":            {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
 	"moonshot":        {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
 
-	// Gemini family
-	"gemini-3.1-pro":   {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
-	"gemini-3-flash":   {Family: "gemini", ContextWindow: 1000000, SupportsTools: true},
-	"gemini-3-pro":     {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
-	"gemini-2.5-flash": {Family: "gemini", ContextWindow: 1000000, SupportsTools: true},
-	"gemini-2.5-pro":   {Family: "gemini", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
+	// Gemini family removed in v0.65 (provider gone). Five entries
+	// deleted in v0.78.30 — they were dead since the factory has no
+	// "gemini" case, so no client call ever returned a model with these
+	// IDs and InferModelProfile lookup was unreachable.
 
 	// MiniMax family
 	"minimax-m2.7-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},

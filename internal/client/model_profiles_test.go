@@ -12,7 +12,7 @@ func TestGetModelProfile_ExactMatch(t *testing.T) {
 		wantTools  bool
 	}{
 		{"llama3.2", "llama", 128000, true},
-		{"gemini-3-flash", "gemini", 1000000, true},
+		// gemini removed in v0.65; profile gone in v0.78.30
 		{"glm-5", "glm", 128000, true},
 		{"kimi-for-coding", "kimi", 262144, true},
 		{"minimax-m2.5", "minimax", 204800, true},

@@ -20,31 +20,9 @@ import (
 // DefaultModelLimits provides default token limits for known models.
 // Keys are used both for exact match and as substrings for fuzzy matching.
 var DefaultModelLimits = map[string]TokenLimits{
-	// Gemini
-	"gemini-2.0-flash": {
-		MaxInputTokens:  1048576, // 1M tokens
-		MaxOutputTokens: 8192,
-	},
-	"gemini-2.5-flash": {
-		MaxInputTokens:  1048576,
-		MaxOutputTokens: 8192,
-	},
-	"gemini-2.5-pro": {
-		MaxInputTokens:  1048576,
-		MaxOutputTokens: 8192,
-	},
-	"gemini-3.1-pro": {
-		MaxInputTokens:  1048576,
-		MaxOutputTokens: 65536,
-	},
-	"gemini-3-flash": {
-		MaxInputTokens:  1048576,
-		MaxOutputTokens: 65536,
-	},
-	"gemini-3-pro": {
-		MaxInputTokens:  1048576,
-		MaxOutputTokens: 65536,
-	},
+	// Gemini family removed in v0.65 (provider gone) — six dead entries
+	// removed in v0.78.30. Substring fuzzy match in lookupLimits never
+	// matched anything since no Gemini model name reaches this code.
 	// GLM — explicit entries avoid relying on substring-fuzzy fallback
 	// (which would either miss 4.x variants entirely or return the generic
 	// 128K/8K default from getModelLimits). Values assume Z.AI's current
@@ -109,21 +87,9 @@ type ModelPricing struct {
 
 // DefaultPricing provides cost estimation for known models.
 var DefaultPricing = map[string]ModelPricing{
-	"gemini-1.5-flash": {InputCostPer1M: 0.075, OutputCostPer1M: 0.30},
-	"gemini-1.5-pro":   {InputCostPer1M: 3.50, OutputCostPer1M: 10.50},
-	"gemini-2.0-flash": {InputCostPer1M: 0.10, OutputCostPer1M: 0.40},
-	"gemini-flash":     {InputCostPer1M: 0.10, OutputCostPer1M: 0.40},
-	"gemini-pro":       {InputCostPer1M: 3.50, OutputCostPer1M: 10.50},
-	"gemini-3.1-pro":   {InputCostPer1M: 2.00, OutputCostPer1M: 12.00},
-	"gemini-3-flash":   {InputCostPer1M: 0.50, OutputCostPer1M: 3.00},
-	"gemini-3-pro":     {InputCostPer1M: 2.00, OutputCostPer1M: 12.00},
-	"gemini-2.5-flash": {InputCostPer1M: 0.15, OutputCostPer1M: 0.60},
-	"gemini-2.5-pro":   {InputCostPer1M: 1.25, OutputCostPer1M: 10.00},
-
-	// Anthropic
-
-
-	// DeepSeek
+	// Gemini family removed in v0.65 — ten dead pricing entries deleted
+	// in v0.78.30. CalculateCost would never look these up since model
+	// names don't reach this map for removed providers.
 
 	// GLM (prices in USD equivalent from CNY)
 	"glm-5.1":     {InputCostPer1M: 4.00, OutputCostPer1M: 16.00},
@@ -359,8 +325,13 @@ func getPricing(model string) ModelPricing {
 			return pricing
 		}
 	}
-	// Default to Flash-like pricing for unknown models
-	return DefaultPricing["gemini-1.5-flash"]
+	// Default to flash-tier pricing for unknown models. Pre-v0.78.30
+	// this returned the deleted "gemini-1.5-flash" entry — zero
+	// pricing — which silently understated cost.
+	if p, ok := DefaultPricing["deepseek-v4-flash"]; ok {
+		return p
+	}
+	return ModelPricing{}
 }
 
 // FormatCost returns a human-readable string for USD cost.
