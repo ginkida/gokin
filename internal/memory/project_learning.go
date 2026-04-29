@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 	"gopkg.in/yaml.v3"
 )
@@ -123,14 +124,14 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 			pl.mu.Unlock()
 
 			// Write outside lock — disk I/O no longer blocks readers/writers.
-			if err := os.WriteFile(pl.path, data, 0644); err != nil {
+			if err := fileutil.AtomicWrite(pl.path, data, 0644); err != nil {
 				logging.Warn("failed to save project learning", "path", pl.path, "error", err)
 				pl.mu.Lock()
 				pl.dirty = true
 				pl.mu.Unlock()
 				return
 			}
-			if err := os.WriteFile(pl.markdownPath, []byte(markdown), 0644); err != nil {
+			if err := fileutil.AtomicWrite(pl.markdownPath, []byte(markdown), 0644); err != nil {
 				logging.Warn("failed to save project memory markdown", "path", pl.markdownPath, "error", err)
 				pl.mu.Lock()
 				pl.dirty = true
@@ -202,10 +203,10 @@ func (pl *ProjectLearning) save() error {
 		return err
 	}
 
-	if err := os.WriteFile(pl.path, data, 0644); err != nil {
+	if err := fileutil.AtomicWrite(pl.path, data, 0644); err != nil {
 		return err
 	}
-	return os.WriteFile(pl.markdownPath, []byte(markdown), 0644)
+	return fileutil.AtomicWrite(pl.markdownPath, []byte(markdown), 0644)
 }
 
 func (pl *ProjectLearning) snapshotLocked() ([]byte, string, error) {

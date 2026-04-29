@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 	"gokin/internal/security"
 )
@@ -327,7 +328,7 @@ func (l *Logger) save() error {
 	}
 
 	filePath := l.getFilePath()
-	return os.WriteFile(filePath, data, 0600)
+	return fileutil.AtomicWrite(filePath, data, 0600)
 }
 
 // scheduleSave schedules a debounced save operation.

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -104,7 +105,7 @@ func (es *ErrorStore) save() error {
 		return err
 	}
 
-	return os.WriteFile(es.storagePath(), data, 0644)
+	return fileutil.AtomicWrite(es.storagePath(), data, 0644)
 }
 
 // scheduleSave schedules a debounced save operation.
@@ -140,7 +141,7 @@ func (es *ErrorStore) scheduleSave() {
 		if err != nil {
 			return
 		}
-		if err := os.WriteFile(es.storagePath(), data, 0644); err != nil {
+		if err := fileutil.AtomicWrite(es.storagePath(), data, 0644); err != nil {
 			logging.Warn("failed to save error store", "path", es.storagePath(), "error", err)
 			es.mu.Lock()
 			es.dirty = true

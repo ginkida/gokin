@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -1166,7 +1167,7 @@ func (s *Store) saveFile(path string, entries []*Entry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return fileutil.AtomicWrite(path, data, 0644)
 }
 
 // pruneOldest removes the oldest entries to stay within limit.

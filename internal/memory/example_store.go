@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -105,7 +106,7 @@ func (es *ExampleStore) save() error {
 		return err
 	}
 
-	return os.WriteFile(es.storagePath(), data, 0644)
+	return fileutil.AtomicWrite(es.storagePath(), data, 0644)
 }
 
 // Flush forces an immediate save to disk. Call on graceful shutdown.
@@ -202,7 +203,7 @@ func (es *ExampleStore) LearnFromSuccessWithTools(taskType, prompt, agentType, o
 			logging.Debug("failed to create example store dir", "error", mkErr)
 			return
 		}
-		if wErr := os.WriteFile(path, data, 0644); wErr != nil {
+		if wErr := fileutil.AtomicWrite(path, data, 0644); wErr != nil {
 			logging.Debug("failed to save example store", "error", wErr)
 		}
 	}()
@@ -481,7 +482,7 @@ func (es *ExampleStore) RecordFeedback(exampleID string, positive bool) {
 		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
 			return
 		}
-		if wErr := os.WriteFile(path, data, 0644); wErr != nil {
+		if wErr := fileutil.AtomicWrite(path, data, 0644); wErr != nil {
 			logging.Debug("failed to save example store", "error", wErr)
 		}
 	}()
