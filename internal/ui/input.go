@@ -631,6 +631,7 @@ type scoredCommand struct {
 //  2. Exact prefix match on command name.
 //  3. Substring match anywhere in the name (not just prefix).
 //  4. Character-by-character fuzzy with consecutive-char bonus.
+//
 // Recent usage bumps all of the above by a small additive, so frequently
 // used commands bubble up when multiple candidates tie.
 func (m *InputModel) updateSuggestions(input string) {

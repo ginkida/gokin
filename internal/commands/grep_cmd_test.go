@@ -39,8 +39,8 @@ func newGrepTestApp(t *testing.T) (*fakeAppForAuth, string) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	files := map[string]string{
-		"hello.txt":         "Hello world\nTODO: refactor\nmoretodo here\n",
-		"internal/main.go":  "package main\n\n// TODO: implement\nfunc main() {}\n",
+		"hello.txt":        "Hello world\nTODO: refactor\nmoretodo here\n",
+		"internal/main.go": "package main\n\n// TODO: implement\nfunc main() {}\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
