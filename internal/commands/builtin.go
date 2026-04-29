@@ -1118,6 +1118,24 @@ func getCommandExample(name string) string {
 		"whats-new": "  /whats-new           — release notes for the current version",
 		"changelog": "  /changelog           — compact list of recent releases",
 		"restart":   "  /restart             — re-exec into the latest installed binary (for self-update)",
+		// v0.78.26 — fill out examples for the rest of the user-facing
+		// complex commands. Trivial commands (/pwd /paste /ql /shortcuts
+		// /sessions /logout) just have their Usage line and skip examples;
+		// these benefit from concrete invocations.
+		"pr":          "  /pr                          — show pending PR info\n  /pr --title \"Fix bug\"        — create PR with title\n  /pr --draft --title \"WIP\"    — create draft PR\n  /pr --base main --title \"…\"  — target a specific base",
+		"mcp":         "  /mcp list             — show configured MCP servers\n  /mcp status           — connection health\n  /mcp add <name> <cmd> — register a server\n  /mcp remove <name>    — unregister\n  /mcp refresh <name>   — re-list tools",
+		"memory":      "  /memory               — show all stored memories\n  Project memories live in .gokin/MEMORY.md",
+		"sandbox":     "  /sandbox on           — gate bash on permission prompts\n  /sandbox off          — disable bash safety prompts (yolo)",
+		"permissions": "  /permissions on       — prompt before write/edit/bash\n  /permissions off      — auto-approve (yolo mode)",
+		"thinking":    "  /thinking on          — show provider's reasoning trace inline\n  /thinking off         — hide reasoning",
+		"open":        "  /open main.go         — open file in $EDITOR (or vi)\n  /open internal/app/app.go",
+		"resume-plan": "  /resume-plan          — restore the plan saved by the last /clear",
+		"recovery":    "  /recovery             — show the recovery snapshot from the last unclean shutdown",
+		"checkpoints": "  /checkpoints          — list session checkpoints (auto-saved every N messages)",
+		"config":      "  /config               — print active config + which file it came from",
+		"init":        "  /init                 — bootstrap GOKIN.md for this project",
+		"sessions":    "  /sessions             — list saved sessions (most recent first)",
+		"logout":      "  /logout               — clear API key for the current provider\n  /logout all           — clear all stored keys",
 	}
 	return examples[name]
 }
@@ -1166,6 +1184,21 @@ func getRelatedCommands(name string) string {
 		"whats-new": "/changelog, /update, /restart",
 		"changelog": "/whats-new, /update",
 		"restart":   "/update, /whats-new",
+		// v0.78.26 — fill out see-also for the rest of user-facing commands.
+		"mcp":         "/permissions, /tools_list, /stats",
+		"memory":      "/clear, /compact, /memory-governance",
+		"thinking":    "/model, /reasoning",
+		"logout":      "/login, /provider, /status",
+		"open":        "/grep, /blame, /diff, /browse",
+		"recovery":    "/journal, /resume-plan, /clear",
+		"journal":     "/recovery, /policy, /ledger",
+		"policy":      "/journal, /ledger, /sandbox",
+		"ledger":      "/journal, /policy, /plan-proof",
+		"plan-proof":  "/journal, /ledger, /policy",
+		"observability": "/stats, /journal, /policy",
+		"tree-stats":  "/plan, /stats, /resume-plan",
+		"memory-governance": "/memory, /compact, /clear",
+		"health":      "/stats, /policy, /observability",
 	}
 	return related[name]
 }
