@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gokin/internal/format"
+	"gokin/internal/logging"
 )
 
 // NotificationManager handles user notifications for tool execution
@@ -140,15 +141,34 @@ func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, d
 		return
 	}
 
-	// Call callback if set
+	// Call callback if set. Wrapped in defer-recover because the callback
+	// is external code (set by App.SetNotifyCallback) and a panic there
+	// would crash the whole process. Same pattern as Manager.monitorTask
+	// in v0.78.18.
 	if nm.onNotify != nil {
-		// Call in goroutine to avoid blocking
-		go nm.onNotify(notif)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("notification onNotify callback panicked", "panic", r)
+				}
+			}()
+			nm.onNotify(notif)
+		}()
 	}
 
-	// Native macOS notifications (opt-in via config)
+	// Native macOS notifications (opt-in via config). sendNativeNotification
+	// is internal but exec.Command + AppleScript could plausibly fail in
+	// surprising ways (security policy, malformed escaping) — wrap for
+	// uniformity.
 	if runtime.GOOS == "darwin" && nm.nativeNotifications {
-		go nm.sendNativeNotification(notif)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("native notification panicked", "panic", r)
+				}
+			}()
+			nm.sendNativeNotification(notif)
+		}()
 	}
 }
 
