@@ -100,6 +100,17 @@ func (d *Downloader) Download(ctx context.Context, url string, progress Progress
 		return "", fmt.Errorf("%w: incomplete download (%d/%d bytes)", ErrDownloadFailed, written, totalSize)
 	}
 
+	// Explicit close before returning success: a deferred-flush error on a
+	// near-full filesystem would otherwise silently produce a truncated
+	// binary that passes the rest of the install path (the deferred
+	// `tmpFile.Close()` swallows the error). Caught early here means a
+	// clean error message and a removed temp file instead of a corrupt
+	// installed binary.
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("%w: close: %w", ErrDownloadFailed, err)
+	}
+
 	return tmpFile.Name(), nil
 }
 
@@ -263,7 +274,15 @@ func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error
 					os.Remove(outPath)
 					return "", err
 				}
-				_ = outFile.Close()
+				// Close error matters here: on a full filesystem the kernel may
+				// defer the write failure until close. Ignoring it would
+				// silently produce a truncated binary that passes the rest of
+				// the install path (chmod doesn't validate content) and then
+				// fails at /restart with a confusing exec error.
+				if err := outFile.Close(); err != nil {
+					os.Remove(outPath)
+					return "", fmt.Errorf("close extracted binary: %w", err)
+				}
 				if err := os.Chmod(outPath, os.FileMode(header.Mode)); err != nil {
 					os.Remove(outPath)
 					return "", err
@@ -317,7 +336,13 @@ func (d *Downloader) extractZip(archivePath, binaryName string) (string, error) 
 					return "", err
 				}
 
-				_ = outFile.Close()
+				// See extractTarGz: a deferred-flush failure on close would
+				// produce a corrupt binary that silently installs.
+				if err := outFile.Close(); err != nil {
+					os.Remove(outPath)
+					_ = rc.Close()
+					return "", fmt.Errorf("close extracted binary: %w", err)
+				}
 				if err := os.Chmod(outPath, f.Mode()); err != nil {
 					os.Remove(outPath)
 					_ = rc.Close()
