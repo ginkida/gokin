@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -119,7 +120,15 @@ func (c *GrepCommand) Execute(ctx context.Context, args []string, app AppInterfa
 
 	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Dir = workDir
-	out, err := cmd.Output()
+	// Capture stderr separately so a real failure (bad revision, malformed
+	// pathspec, etc.) surfaces git's actual error text instead of a bare
+	// "exit status 128". Pre-v0.78.20 we used cmd.Output() which discards
+	// stderr, leaving the user with no clue what went wrong.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	out := stdout.Bytes()
 	if err != nil {
 		// `git grep` exits 1 when no matches found — that's not an
 		// error, just an empty result. Surface anything else.
@@ -129,6 +138,13 @@ func (c *GrepCommand) Execute(ctx context.Context, args []string, app AppInterfa
 				scope = strings.Join(paths, ", ")
 			}
 			return fmt.Sprintf("No matches for %q in %s.", pattern, scope), nil
+		}
+		// Surface git's stderr if available — much more informative than
+		// the bare exit code (e.g., "fatal: bad revision 'foo'" tells the
+		// user the pattern was misinterpreted as a ref).
+		stderrText := strings.TrimSpace(stderr.String())
+		if stderrText != "" {
+			return fmt.Sprintf("git grep failed: %s", stderrText), nil
 		}
 		return fmt.Sprintf("git grep failed: %v", err), nil
 	}

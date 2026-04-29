@@ -229,3 +229,33 @@ func TestGrep_InvalidContextValue(t *testing.T) {
 		t.Errorf("non-numeric -C should be rejected, got: %s", out)
 	}
 }
+
+// TestGrep_SurfacesStderrOnFailure — when git grep fails for a non-empty
+// reason (bad pathspec, malformed regex), v0.78.20 surfaces git's actual
+// stderr instead of a bare "exit status N". Pre-fix the user got no clue
+// what went wrong.
+func TestGrep_SurfacesStderrOnFailure(t *testing.T) {
+	app, _ := newGrepTestApp(t)
+
+	// Pass a path that doesn't exist — `git grep -- pattern non-existent-path`
+	// fails with "fatal: pathspec '<path>' did not match any file(s) known
+	// to git" on the stderr stream.
+	out, err := (&GrepCommand{}).Execute(context.Background(), []string{"TODO", "no-such-dir-zzz"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	// Must surface something git-flavored: "fatal" / "pathspec" / "did not
+	// match" — not just a bare exit code. Different git versions phrase
+	// this slightly differently, so accept any keyword.
+	hasSignal := false
+	for _, want := range []string{"fatal", "pathspec", "did not match", "no-such-dir-zzz"} {
+		if strings.Contains(out, want) {
+			hasSignal = true
+			break
+		}
+	}
+	if !hasSignal {
+		t.Errorf("error message should surface git's stderr; got bare: %s", out)
+	}
+}
