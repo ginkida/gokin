@@ -131,6 +131,7 @@ func NewHandler() *Handler {
 	h.Register(&BranchesCommand{})
 	h.Register(&GrepCommand{})
 	h.Register(&BlameCommand{})
+	h.Register(&ShowCommand{})
 
 	// Register utility commands
 	h.Register(&InitCommand{})

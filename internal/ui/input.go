@@ -224,6 +224,9 @@ func DefaultCommands() []CommandInfo {
 		{Name: "blame", Description: "Show line-by-line git blame for a file", Category: "Git",
 			Args:  []ArgInfo{{Name: "file", Required: true, Type: "path"}, {Name: "range", Required: false, Type: "string"}},
 			Usage: "/blame <file> [N|N-M|N M]"},
+		{Name: "show", Description: "Show a specific commit (metadata + diff)", Category: "Git",
+			Args:  []ArgInfo{{Name: "ref", Required: false, Type: "string"}, {Name: "file", Required: false, Type: "path"}},
+			Usage: "/show [ref] [file]"},
 
 		// Planning
 		{Name: "plan", Description: "Toggle planning mode", Category: "Planning",
