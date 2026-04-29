@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // GrepResult represents cached grep search results.
@@ -52,7 +54,17 @@ func NewSearchCache(capacity int, ttl time.Duration) *SearchCache {
 		cleanupDone: make(chan struct{}),
 	}
 	sc.enabled.Store(true)
-	go sc.backgroundCleanup(ttl)
+	// Long-lived cleanup worker — wrapped in defer-recover so a panic
+	// in c.Cleanup (e.g. from a future LRU change) doesn't silently kill
+	// cache hygiene for the rest of the process lifetime.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("search cache cleanup loop panicked", "panic", r)
+			}
+		}()
+		sc.backgroundCleanup(ttl)
+	}()
 	return sc
 }
 

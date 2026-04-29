@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // CompletionHandler is called when a task completes.
@@ -89,7 +91,16 @@ func (m *Manager) StartWithArgs(ctx context.Context, program string, args []stri
 }
 
 // monitorTask waits for task completion and calls the handler.
+// Defer-recover guards against a panicky onComplete callback — without it
+// any handler that nil-derefs (e.g. accessing a stale parent in tests or
+// during shutdown) would crash the whole process.
 func (m *Manager) monitorTask(task *Task, onComplete CompletionHandler) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error("task monitor goroutine panicked", "task_id", task.ID, "panic", r)
+		}
+	}()
+
 	<-task.Done()
 
 	if onComplete != nil {
