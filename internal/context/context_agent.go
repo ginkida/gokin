@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gokin/internal/chat"
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -177,7 +178,7 @@ func (a *ContextAgent) Checkpoint(ctx context.Context) {
 		return
 	}
 
-	if err := os.WriteFile(filename, data, 0644); err != nil {
+	if err := fileutil.AtomicWrite(filename, data, 0644); err != nil {
 		logging.Error("failed to write checkpoint", "error", err)
 		return
 	}

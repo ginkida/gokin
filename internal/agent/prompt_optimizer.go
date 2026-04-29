@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -119,7 +120,7 @@ func (po *PromptOptimizer) writeSnapshot(data []byte) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(po.storagePath(), data, 0644)
+	return fileutil.AtomicWrite(po.storagePath(), data, 0644)
 }
 
 // generateVariantID creates a unique ID for a variant.

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -105,7 +106,7 @@ func (so *StrategyOptimizer) writeSnapshot(data []byte) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(so.storagePath(), data, 0644)
+	return fileutil.AtomicWrite(so.storagePath(), data, 0644)
 }
 
 // RecordExecution records the outcome of a strategy execution.

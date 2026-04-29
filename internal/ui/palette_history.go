@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -228,5 +229,5 @@ func (ch *CommandHistory) save() error {
 		return err
 	}
 
-	return os.WriteFile(filePath, data, 0644)
+	return fileutil.AtomicWrite(filePath, data, 0644)
 }

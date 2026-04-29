@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -114,7 +115,7 @@ func (w *WorkingMemoryManager) writeToDisk() {
 	content := w.content
 	w.mu.RUnlock()
 
-	if err := os.WriteFile(w.filePath(), []byte(content), 0640); err != nil {
+	if err := fileutil.AtomicWrite(w.filePath(), []byte(content), 0640); err != nil {
 		logging.Debug("failed to write working memory", "error", err)
 	}
 }

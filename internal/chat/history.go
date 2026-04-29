@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gokin/internal/fileutil"
 )
 
 // HistoryEntry represents a saved history entry.
@@ -78,9 +80,11 @@ func (m *HistoryManager) Save(session *Session) error {
 		return err
 	}
 
-	// Write file (0600: only owner can read/write session data)
+	// Write file (0600: only owner can read/write session data).
+	// AtomicWrite (tmp + Sync + rename) so a SIGKILL mid-write doesn't
+	// leave a half-flushed JSON that fails to load on next start.
 	filename := filepath.Join(m.dataDir, session.ID+".json")
-	return os.WriteFile(filename, data, 0600)
+	return fileutil.AtomicWrite(filename, data, 0600)
 }
 
 // Load loads a session history from disk.
@@ -176,14 +180,12 @@ func (m *HistoryManager) SaveFull(session *Session) error {
 		return err
 	}
 
-	// Atomic write: write to temp file first, then rename
+	// Atomic write via fileutil.AtomicWrite (tmp + Sync + rename).
+	// Pre-fix this used WriteFile + Rename without Sync, so a power loss
+	// between WriteFile and Rename could leave the rename pointing at an
+	// unflushed empty file.
 	filename := filepath.Join(sessionsDir, session.ID+".json")
-	tmpFilename := filename + ".tmp"
-
-	if err := os.WriteFile(tmpFilename, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmpFilename, filename)
+	return fileutil.AtomicWrite(filename, data, 0600)
 }
 
 // LoadFull loads a complete session state.

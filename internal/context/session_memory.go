@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gokin/internal/client"
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 	"gokin/internal/memory"
 
@@ -373,7 +374,7 @@ func (s *SessionMemoryManager) writeToDisk() {
 		logging.Debug("failed to create .gokin dir for session memory", "error", err)
 		return
 	}
-	if err := os.WriteFile(s.filePath(), []byte(s.content), 0640); err != nil {
+	if err := fileutil.AtomicWrite(s.filePath(), []byte(s.content), 0640); err != nil {
 		logging.Debug("failed to write session memory", "error", err)
 	}
 }

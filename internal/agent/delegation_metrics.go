@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -123,7 +124,7 @@ func (dm *DelegationMetrics) writeSnapshot(data []byte) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(dm.storagePath(), data, 0644)
+	return fileutil.AtomicWrite(dm.storagePath(), data, 0644)
 }
 
 // RecordExecution records the outcome of a delegation.
