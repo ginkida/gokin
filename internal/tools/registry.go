@@ -285,6 +285,21 @@ func DefaultRegistry(workDir string) *Registry {
 	// Agent Scratchpad tool (Phase 7)
 	r.MustRegister(NewUpdateScratchpadTool(nil))
 
+	// v0.78.27 — these five tools were in DefaultLazyRegistry +
+	// declarations + ToolSet listings but missing from this eager
+	// registry. Production uses DefaultRegistry (see app/builder.go),
+	// so calling any of them returned "tool not found" mid-task even
+	// though the LLM had been shown their schemas. Caught by
+	// TestEagerVsLazyRegistryAlignment in registry_drift_test.go.
+	//
+	// The nil deps mirror the lazy-registry shape — they get wired
+	// later in app/builder.go via registry.Get(name).
+	r.MustRegister(NewVerifyCodeTool(workDir))
+	r.MustRegister(NewCheckImpactTool(workDir))
+	r.MustRegister(NewMemorizeTool(nil))
+	r.MustRegister(NewPinContextTool(nil))
+	r.MustRegister(NewHistorySearchTool(nil))
+
 	return r
 }
 
