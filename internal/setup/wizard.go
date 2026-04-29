@@ -491,12 +491,6 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// setupGeminiOAuthDeprecated is retained only as a stub so references in old
-// docs don't break; callers have already been removed from the wizard flow.
-func setupGeminiOAuthDeprecated() error {
-	return fmt.Errorf("Gemini OAuth was removed; use /login gemini with an API key if needed")
-}
-
 // openBrowserForOAuth opens a URL in the default browser
 func openBrowserForOAuth(url string) bool {
 	var cmd *exec.Cmd

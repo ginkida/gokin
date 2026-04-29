@@ -656,10 +656,12 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	issues := []string{}
 	solutions := []string{}
 
-	// Check API key via provider registry
-	backend := "gemini"
-	if cfg != nil && cfg.API.Backend != "" {
-		backend = cfg.API.Backend
+	// Check API key via provider registry. Use GetActiveProvider() so
+	// the fallback matches what the rest of the system sees as default
+	// (was hardcoded to "gemini" — a removed provider — pre-v0.78.29).
+	backend := "glm"
+	if cfg != nil {
+		backend = cfg.API.GetActiveProvider()
 	}
 	fmt.Fprintf(&sb, "  Backend: %s%s%s\n", colorGreen, backend, colorReset)
 
@@ -1092,7 +1094,7 @@ func getDataDir() (string, error) {
 func getCommandExample(name string) string {
 	examples := map[string]string{
 		"commit":   "  /commit              — AI generates commit message from staged changes\n  /commit fix typo     — commit with custom message",
-		"model":    "  /model gemini-3-flash-preview    — switch to Gemini Flash\n  /model claude-sonnet-4-5         — switch to Claude",
+		"model":    "  /model glm-5.1               — switch to GLM 5.1 (Z.AI Coding Plan default)\n  /model deepseek-v4-pro       — switch to DeepSeek V4 Pro\n  /model kimi-for-coding       — switch to Kimi K2.6\n  /model MiniMax-M2.7          — switch to MiniMax",
 		"plan":     "  /plan                — toggle planning mode on/off\n  Then type a complex task and it will be broken into steps",
 		"resume":   "  /resume abc123       — restore session abc123\n  /resume abc123 --force — restore even from different project",
 		"save":     "  /save                — save current session for later /resume",
@@ -1100,13 +1102,13 @@ func getCommandExample(name string) string {
 		"clear":    "  /clear               — start fresh (saves active plan for /resume-plan)",
 		"theme":    "  /theme dark          — soft purple/cyan dark theme\n  /theme macos          — Apple-inspired theme\n  /theme light          — for light terminal backgrounds",
 		"doctor":   "  /doctor              — check API key, git, config, and project setup",
-		"login":    "  /login gemini AIza...     — set Gemini API key\n  /login anthropic sk-...    — set Anthropic API key",
+		"login":    "  /login glm <key>          — set Z.AI / GLM key\n  /login deepseek <key>     — set DeepSeek key\n  /login kimi <key>         — set Kimi Coding Plan key\n  /login minimax <key>      — set MiniMax key",
 		"undo":     "  /undo                — revert the last file change made by the AI",
 		"redo":     "  /redo                — re-apply the last undone change",
 		"stats":    "  /stats               — show tokens, cost, cache hit rate, project info",
 		"status":   "  /status              — show provider, model, API keys, workdir, version",
 		"update":   "  /update              — check for new versions\n  /update install        — download and install latest\n  /update rollback       — revert to previous version",
-		"provider": "  /provider gemini      — switch to Gemini\n  /provider anthropic    — switch to Anthropic",
+		"provider": "  /provider glm         — switch to GLM (Z.AI)\n  /provider deepseek    — switch to DeepSeek\n  /provider kimi        — switch to Kimi\n  /provider minimax     — switch to MiniMax\n  /provider ollama      — switch to local Ollama",
 		// v0.77.x git-inspect family + v0.78.12 /blame
 		"diff":     "  /diff                — show working-tree diff\n  /diff --staged       — show staged-only diff\n  /diff --stat         — summary instead of patch\n  /diff main.go        — diff one file",
 		"log":      "  /log                 — last 10 commits\n  /log 20              — last 20 commits\n  /log internal/app    — commits touching a path\n  /log 5 README.md     — last 5 touching README",

@@ -49,40 +49,12 @@ type ModelInfo struct {
 }
 
 // AvailableModels is the list of supported models across all providers.
+//
+// Gemini was removed in v0.65 — the provider isn't in config.Providers and
+// factory.go has no "gemini" case, so any Gemini ID listed here would show
+// up in /model output but fail to switch (autoDetectClient fallback can't
+// route it). Five legacy entries were removed in v0.78.29.
 var AvailableModels = []ModelInfo{
-	// Gemini 3.1 models (API key)
-	{
-		ID:          "gemini-3.1-pro-preview",
-		Name:        "Gemini 3.1 Pro",
-		Description: "Top reasoning: ARC-AGI-2 77%, 1M context",
-		Provider:    "gemini",
-	},
-	// Gemini 3 models (API key)
-	{
-		ID:          "gemini-3-flash-preview",
-		Name:        "Gemini 3 Flash",
-		Description: "Fast & cheap: $0.50/$3 per 1M tokens",
-		Provider:    "gemini",
-	},
-	{
-		ID:          "gemini-3-pro-preview",
-		Name:        "Gemini 3 Pro",
-		Description: "Advanced reasoning: $2/$12 per 1M tokens",
-		Provider:    "gemini",
-	},
-	// Gemini models (OAuth / Code Assist API)
-	{
-		ID:          "gemini-2.5-flash",
-		Name:        "Gemini 2.5 Flash",
-		Description: "Fast model (Code Assist, retiring Mar 2026)",
-		Provider:    "gemini",
-	},
-	{
-		ID:          "gemini-2.5-pro",
-		Name:        "Gemini 2.5 Pro",
-		Description: "Advanced model (Code Assist, retiring Mar 2026)",
-		Provider:    "gemini",
-	},
 	// GLM models (via Anthropic-compatible API on Z.AI)
 	{
 		ID:          "glm-5.1",
