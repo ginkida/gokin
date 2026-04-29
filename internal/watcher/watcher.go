@@ -162,8 +162,18 @@ func (w *Watcher) addDirectories() error {
 }
 
 // processEvents processes raw fsnotify events.
+//
+// Defer-recover guards against a panic in handleEvent (e.g., from a
+// future addDirectories race or a fsnotify quirk) silently killing
+// the event loop — without recovery the watcher would stop reporting
+// changes for the rest of the process lifetime with zero log signal.
 func (w *Watcher) processEvents() {
 	defer w.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error("watcher processEvents loop panicked", "panic", r)
+		}
+	}()
 	for {
 		select {
 		case <-w.done:
@@ -234,8 +244,19 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 }
 
 // processDebounce processes debounced events.
+//
+// Defer-recover important here: flushPending invokes the user-supplied
+// onFileChange handler, which is external code that can plausibly nil-deref.
+// Without recovery a buggy handler kills the debouncer goroutine and
+// pending events accumulate (capped at 5000 by the producer side) but
+// never get delivered.
 func (w *Watcher) processDebounce() {
 	defer w.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error("watcher processDebounce loop panicked", "panic", r)
+		}
+	}()
 	ticker := time.NewTicker(time.Duration(w.debounceMs/2) * time.Millisecond)
 	defer ticker.Stop()
 

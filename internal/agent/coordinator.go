@@ -189,7 +189,17 @@ func (c *Coordinator) Stop() {
 
 // processLoop is the main coordination loop.
 // Uses event-driven approach with fallback ticker to reduce CPU usage.
+//
+// Defer-recover guards against a panic in processReadyTasks /
+// handleAgentCompletion / checkCompletedAgents — central agent
+// orchestration sits inside this loop and a silent crash would stall
+// every running agent for the rest of the process lifetime.
 func (c *Coordinator) processLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error("coordinator processLoop panicked — agent orchestration stopped", "panic", r)
+		}
+	}()
 	// Fallback ticker for periodic checks (5s safety net — primary notification is event-driven)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
