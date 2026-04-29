@@ -121,6 +121,43 @@ func TestEveryRegisteredToolHasDeclaration(t *testing.T) {
 	}
 }
 
+// TestEveryToolSetMemberIsRegistered — toolSetDefinitions is the source
+// of truth for which tools each model tier sees in its function-calling
+// schema. A name listed in a ToolSet but missing from DefaultRegistry
+// silently drops out of FilteredDeclarations — same silent-capability
+// failure mode as v0.78.27, just one layer up. Catches the case where
+// someone adds a tool to a ToolSet but forgets the eager registration.
+func TestEveryToolSetMemberIsRegistered(t *testing.T) {
+	r := DefaultRegistry(t.TempDir())
+	registered := map[string]bool{}
+	for _, tool := range r.List() {
+		registered[tool.Name()] = true
+	}
+
+	type miss struct {
+		set  ToolSet
+		name string
+	}
+	var missing []miss
+	for set, names := range toolSetDefinitions {
+		for _, name := range names {
+			if !registered[name] {
+				missing = append(missing, miss{set, name})
+			}
+		}
+	}
+
+	if len(missing) > 0 {
+		var lines []string
+		for _, m := range missing {
+			lines = append(lines, string(m.set)+" → "+m.name)
+		}
+		sort.Strings(lines)
+		t.Errorf("toolSetDefinitions list tools that aren't registered (silent capability failure — LLM sees schema but tool returns 'not found'):\n  %s",
+			strings.Join(lines, "\n  "))
+	}
+}
+
 // TestNoDeadDeclarations — a declaration without a tool registration is
 // dead weight — the LLM gets a schema for a function it can't call,
 // resulting in "tool not found" errors mid-task. Catches cleanup drift

@@ -68,6 +68,38 @@ func TestEveryRegisteredCommandIsInAutocomplete(t *testing.T) {
 	}
 }
 
+// TestEveryDefaultAliasResolves — every alias in defaultAliases must
+// point to a real registered command. A typo or stale entry would
+// silently no-op (h.Parse drops unknown alias targets), but the user
+// expectation is that `/p` works as `/plan`. Catches drift like
+// renaming /plan to /planning without updating the alias.
+func TestEveryDefaultAliasResolves(t *testing.T) {
+	h := NewHandler()
+	registered := map[string]bool{}
+	for _, c := range h.ListCommands() {
+		registered[c.Name()] = true
+	}
+
+	var broken []string
+	for alias, target := range defaultAliases {
+		if alias == target {
+			// Self-alias is allowed — it's a no-op since direct lookup wins
+			// in h.Parse. Document the rule, don't fail on it.
+			continue
+		}
+		if !registered[target] {
+			broken = append(broken, alias+" → "+target+" (target not registered)")
+		}
+	}
+
+	if len(broken) > 0 {
+		sort.Strings(broken)
+		t.Errorf("defaultAliases entries point to commands that aren't registered:\n  %s\n\n"+
+			"Fix: update the target name to match the renamed command, or remove the alias.",
+			strings.Join(broken, "\n  "))
+	}
+}
+
 // TestNoStaleAutocompleteEntries — the reverse direction: every name in
 // DefaultCommands should resolve to a real registered command (or its
 // alias). Catches the case where a command was deleted but its
