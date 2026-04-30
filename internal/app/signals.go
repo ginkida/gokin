@@ -224,6 +224,11 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		}
 	}
 
+	// 6b. Stop search cache cleanup goroutine
+	if a.searchCache != nil {
+		a.searchCache.StopCleanup()
+	}
+
 	// 7b. Save active plan for later resume
 	if a.planManager != nil {
 		plan := a.planManager.GetCurrentPlan()
