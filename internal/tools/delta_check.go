@@ -693,10 +693,11 @@ func trimDeltaOutput(content string, maxChars int) string {
 	if content == "" {
 		return ""
 	}
-	if maxChars <= 0 || len(content) <= maxChars {
+	runes := []rune(content)
+	if maxChars <= 0 || len(runes) <= maxChars {
 		return content
 	}
-	return content[:maxChars] + "\n... (truncated)"
+	return string(runes[:maxChars]) + "\n... (truncated)"
 }
 
 func deltaSkipSuffix(skipped int) string {

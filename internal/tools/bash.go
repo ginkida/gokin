@@ -890,10 +890,10 @@ func (t *BashTool) buildResult(stdoutStr, stderrStr string) ToolResult {
 	const maxLen = 30000
 	const headSize = 10000
 	const tailSize = 20000
-	if len(result) > maxLen {
-		head := result[:headSize]
-		tail := result[len(result)-tailSize:]
-		omitted := result[headSize : len(result)-tailSize]
+	if runes := []rune(result); len(runes) > maxLen {
+		head := string(runes[:headSize])
+		tail := string(runes[len(runes)-tailSize:])
+		omitted := string(runes[headSize : len(runes)-tailSize])
 		omittedLines := strings.Count(omitted, "\n")
 		result = head +
 			fmt.Sprintf("\n\n... [%d lines, %d chars truncated — showing first %d and last %d chars] ...\n\n", omittedLines, len(omitted), headSize, tailSize) +

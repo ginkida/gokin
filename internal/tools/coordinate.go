@@ -300,8 +300,8 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 		if result.Output != "" {
 			// Truncate long outputs
 			output := result.Output
-			if len(output) > 500 {
-				output = output[:500] + "...[truncated]"
+			if runes := []rune(output); len(runes) > 500 {
+				output = string(runes[:500]) + "...[truncated]"
 			}
 			sb.WriteString(fmt.Sprintf("Output:\n```\n%s\n```\n", output))
 		}

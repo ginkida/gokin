@@ -167,8 +167,8 @@ func (e *ContextEnricher) enrichTestFile(testPath string) string {
 	}
 
 	result := "[context] Tested file signatures: " + strings.Join(sigs, ", ")
-	if len(result) > 500 {
-		result = result[:497] + "..."
+	if runes := []rune(result); len(runes) > 500 {
+		result = string(runes[:497]) + "..."
 	}
 	return result
 }
