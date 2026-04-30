@@ -148,10 +148,11 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		}
 	}
 
-	// Truncate if too long
+	// Truncate if too long. Use rune-aware slicing so a multibyte UTF-8
+	// character is never split at the cut point (would produce invalid UTF-8).
 	const maxLen = 50000
-	if len(content) > maxLen {
-		content = content[:maxLen] + "\n\n... (page content truncated at 50,000 chars)"
+	if runes := []rune(content); len(runes) > maxLen {
+		content = string(runes[:maxLen]) + "\n\n... (page content truncated at 50,000 chars)"
 	}
 
 	return NewSuccessResultWithData(content, map[string]any{

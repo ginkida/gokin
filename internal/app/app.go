@@ -1603,8 +1603,8 @@ func (a *App) ClearConversation() {
 	a.client.SetSystemInstruction(systemPrompt)
 	a.session.SystemInstruction = systemPrompt
 
-	// Clear per-session telemetry so /stats after /clear reflects the new
-	// conversation instead of accumulating across unrelated tasks. Also
+	// Clear per-session telemetry so /stats and /cost after /clear reflect the
+	// new conversation instead of accumulating across unrelated tasks. Also
 	// zeros the adaptive-budget depth counters, because old turn/tool
 	// totals shouldn't inflate budget decisions for a fresh task.
 	if a.phaseMetrics != nil {
@@ -1616,6 +1616,11 @@ func (a *App) ClearConversation() {
 	if a.taskRouter != nil {
 		a.taskRouter.ResetDepth()
 	}
+	// totalOutputTokens accumulates via +=; totalInputTokens is periodically
+	// re-assigned but its last pre-clear value would persist until the next
+	// exchange. Both must be zeroed so /cost shows only the fresh session.
+	a.totalInputTokens = 0
+	a.totalOutputTokens = 0
 }
 
 // CompactContextWithPlan clears the conversation and injects the plan summary.
