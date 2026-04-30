@@ -170,10 +170,11 @@ func (c *Context) ExpandCommand(command string) string {
 		result = strings.ReplaceAll(result, "${"+key+"}", shellEscape(val))
 	}
 
-	// Environment variables (fallback)
+	// Environment variables (fallback). Values are shell-escaped to prevent
+	// injection: a malicious env var like "; rm -rf /" must not be executed.
 	result = os.Expand(result, func(key string) string {
 		if val, ok := os.LookupEnv(key); ok {
-			return val
+			return shellEscape(val)
 		}
 		return ""
 	})

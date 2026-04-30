@@ -408,6 +408,20 @@ func (c *Config) Save() error {
 	return nil
 }
 
+// expandTilde replaces a leading "~" with the user's home directory.
+// filepath.Abs does NOT expand tildes, so paths like "~/projects" would
+// resolve relative to cwd instead of HOME without this pre-pass.
+func expandTilde(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~"+string(filepath.Separator)) {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(homeDir, path[1:])
+	}
+	return path
+}
+
 // IsWorkDirAllowed checks if a working directory is in the allowed list.
 func (c *Config) IsWorkDirAllowed(workDir string) bool {
 	// Clean and resolve the path
@@ -418,7 +432,7 @@ func (c *Config) IsWorkDirAllowed(workDir string) bool {
 	absWorkDir = filepath.Clean(absWorkDir)
 
 	for _, dir := range c.Tools.AllowedDirs {
-		absDir, err := filepath.Abs(dir)
+		absDir, err := filepath.Abs(expandTilde(dir))
 		if err != nil {
 			continue
 		}
@@ -434,7 +448,7 @@ func (c *Config) IsWorkDirAllowed(workDir string) bool {
 
 // AddAllowedDir adds a directory to the allowed list if not already present.
 func (c *Config) AddAllowedDir(dir string) bool {
-	absDir, err := filepath.Abs(dir)
+	absDir, err := filepath.Abs(expandTilde(dir))
 	if err != nil {
 		return false
 	}
@@ -442,7 +456,7 @@ func (c *Config) AddAllowedDir(dir string) bool {
 
 	// Check if already in list
 	for _, existing := range c.Tools.AllowedDirs {
-		absExisting, err := filepath.Abs(existing)
+		absExisting, err := filepath.Abs(expandTilde(existing))
 		if err != nil {
 			continue
 		}
