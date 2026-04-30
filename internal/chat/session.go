@@ -472,8 +472,15 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.WorkDir = state.WorkDir
 	s.Provider = state.Provider
 	s.History = history
-	s.tokenCounts = make([]int, len(state.TokenCounts))
-	copy(s.tokenCounts, state.TokenCounts)
+	// Align tokenCounts with history length. Legacy sessions serialised with
+	// an empty TokenCounts slice (saved before v0.78.32) would violate
+	// len(tokenCounts)==len(History); pad with zeros in that case.
+	s.tokenCounts = make([]int, len(history))
+	for i, c := range state.TokenCounts {
+		if i < len(history) {
+			s.tokenCounts[i] = c
+		}
+	}
 	s.totalTokens = state.TotalTokens
 	s.version = state.Version
 	s.scratchpad = state.Scratchpad

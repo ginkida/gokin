@@ -202,6 +202,31 @@ func TestSetHistoryTokenCountsInvariant(t *testing.T) {
 	})
 }
 
+// TestRestoreFromState_LegacyEmptyTokenCounts guards the CLAUDE.md invariant
+// for the restore path. Sessions saved before v0.78.32 had TokenCounts=nil
+// (omitempty + empty slice), so RestoreFromState must pad with zeros rather
+// than blindly copying the (shorter) saved slice.
+func TestRestoreFromState_LegacyEmptyTokenCounts(t *testing.T) {
+	s := NewSession()
+	s.AddUserMessage("hello")
+	s.AddUserMessage("world")
+
+	state := s.GetState()
+	// Simulate a pre-v0.78.32 save: zero out TokenCounts like the old code did.
+	state.TokenCounts = nil
+
+	s2 := NewSession()
+	if err := s2.RestoreFromState(state); err != nil {
+		t.Fatalf("RestoreFromState: %v", err)
+	}
+
+	hist := s2.GetHistory()
+	counts := s2.GetTokenCounts()
+	if len(hist) != len(counts) {
+		t.Errorf("after legacy restore: len(history)=%d, len(tokenCounts)=%d — invariant violated", len(hist), len(counts))
+	}
+}
+
 func TestSessionTokens(t *testing.T) {
 	s := NewSession()
 
