@@ -11,7 +11,7 @@ import (
 
 // lintPlanBeforeApproval blocks approval when plan contracts are incomplete or unsafe.
 // It runs fail-fast checks before the user sees the approval prompt.
-func (a *App) lintPlanBeforeApproval(_ context.Context, p *plan.Plan) error {
+func (a *App) lintPlanBeforeApproval(ctx context.Context, p *plan.Plan) error {
 	if p == nil {
 		return fmt.Errorf("plan is nil")
 	}
@@ -45,7 +45,7 @@ func (a *App) lintPlanBeforeApproval(_ context.Context, p *plan.Plan) error {
 		step.EnsureContractDefaults()
 		verifyCommands = normalizeVerifyCommands(step.VerifyCommands)
 		for _, cmd := range verifyCommands {
-			if safe, reason := a.validateVerifyCommandSafety(cmd, profile); !safe {
+			if safe, reason := a.validateVerifyCommandSafety(ctx, cmd, profile); !safe {
 				issues = append(issues, fmt.Sprintf("step %d (%s): unsafe verify command %q (%s)", step.ID, title, cmd, reason))
 			}
 		}

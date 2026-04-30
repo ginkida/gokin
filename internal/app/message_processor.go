@@ -2450,7 +2450,7 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 
 	lines := make([]string, 0, len(required))
 	for i, cmd := range required {
-		if safe, safetyReason := a.validateVerifyCommandSafety(cmd, projectProfile); !safe {
+		if safe, safetyReason := a.validateVerifyCommandSafety(verifyCtx, cmd, projectProfile); !safe {
 			return "", "", false, fmt.Sprintf("unsafe verify command blocked: %s (%s)", cmd, safetyReason)
 		}
 
@@ -2759,7 +2759,7 @@ func outputContainsVerificationSignals(output string) bool {
 	return false
 }
 
-func (a *App) validateVerifyCommandSafety(command string, projectProfile doneGateProfile) (bool, string) {
+func (a *App) validateVerifyCommandSafety(ctx context.Context, command string, projectProfile doneGateProfile) (bool, string) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return false, "empty command"
@@ -2810,7 +2810,7 @@ func (a *App) validateVerifyCommandSafety(command string, projectProfile doneGat
 	}
 
 	validator := tools.NewDefaultSafetyValidator()
-	check, err := validator.ValidateSafety(context.Background(), "bash", map[string]any{"command": command})
+	check, err := validator.ValidateSafety(ctx, "bash", map[string]any{"command": command})
 	if err != nil {
 		return false, err.Error()
 	}
