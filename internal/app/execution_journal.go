@@ -77,7 +77,9 @@ func (j *ExecutionJournal) Append(event string, details map[string]any) {
 	if err != nil {
 		return
 	}
-	_, _ = f.Write(append(b, '\n'))
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		logging.Warn("failed to write journal entry", "path", j.journalPath, "event", event, "error", err)
+	}
 }
 
 func (j *ExecutionJournal) SaveRecovery(snapshot RecoverySnapshot) {

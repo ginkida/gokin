@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // SafeEnvVars is the whitelist of environment variables passed to task commands.
@@ -134,7 +136,13 @@ func (b *safeBuffer) Write(p []byte) (int, error) {
 
 	// Always write to file if available
 	if b.file != nil {
-		b.file.Write(p)
+		if _, err := b.file.Write(p); err != nil {
+			// Disable file-backed output on first failure so we don't
+			// keep attempting broken writes on every subsequent chunk.
+			logging.Warn("task output file write failed; disabling file output", "path", b.filePath, "error", err)
+			b.file.Close()
+			b.file = nil
+		}
 	}
 
 	b.totalBytes += int64(len(p))
