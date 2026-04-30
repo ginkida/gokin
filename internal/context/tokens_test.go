@@ -120,3 +120,39 @@ func TestDefaultPricingCount(t *testing.T) {
 		t.Errorf("DefaultPricing has %d entries, want >= 8", len(DefaultPricing))
 	}
 }
+
+// TestGetPricingFunction guards against two historical bugs:
+//  1. Short-key wins: map iteration order caused "deepseek" (fallback) to
+//     match before "deepseek-v4-pro", returning wrong price. Fix: longest
+//     matching key wins.
+//  2. Case mismatch: keys like "MiniMax-M2.7" were compared without
+//     lowercasing, so the specific entry was never reached and the generic
+//     "minimax" fallback was returned instead. Fix: case-insensitive compare.
+func TestGetPricingFunction(t *testing.T) {
+	cases := []struct {
+		model      string
+		wantInput  float64
+		wantOutput float64
+		desc       string
+	}{
+		// Specific DeepSeek models must not match the shorter "deepseek" fallback.
+		{"deepseek-v4-pro", 0.55, 2.19, "deepseek-v4-pro beats deepseek fallback"},
+		{"deepseek-v4-flash", 0.27, 1.10, "deepseek-v4-flash beats deepseek fallback"},
+		// MiniMax mixed-case key must match case-insensitively.
+		{"MiniMax-M2.7", 1.40, 5.60, "MiniMax-M2.7 case-insensitive match"},
+		// "glm-5.1" must not match "glm-5" (a shorter substring).
+		{"glm-5.1", 4.00, 16.00, "glm-5.1 beats shorter glm-5 key"},
+		// Generic fallback should match for unknown model.
+		{"unknown-model-xyz", 0.27, 1.10, "unknown model gets flash-tier fallback"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			p := getPricing(tc.model)
+			if p.InputCostPer1M != tc.wantInput || p.OutputCostPer1M != tc.wantOutput {
+				t.Errorf("getPricing(%q) = {%.2f, %.2f}, want {%.2f, %.2f}",
+					tc.model, p.InputCostPer1M, p.OutputCostPer1M,
+					tc.wantInput, tc.wantOutput)
+			}
+		})
+	}
+}

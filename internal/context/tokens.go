@@ -318,13 +318,35 @@ func (t *TokenCounter) CalculateCost(inputTokens, outputTokens int) float64 {
 }
 
 // getPricing returns pricing for a model, with fallback defaults.
+// Exact match wins; then longest-key substring match (so "deepseek-v4-pro"
+// beats the "deepseek" fallback). All comparisons are case-insensitive so
+// "MiniMax-M2.7" keys match the lowercased model name from the API.
 func getPricing(model string) ModelPricing {
 	modelLower := strings.ToLower(model)
+
+	// Exact match (case-insensitive).
 	for key, pricing := range DefaultPricing {
-		if strings.Contains(modelLower, key) {
+		if strings.EqualFold(key, modelLower) {
 			return pricing
 		}
 	}
+
+	// Longest-key substring match — prevents short fallback keys (e.g.
+	// "deepseek", "glm-5") from winning over more specific ones
+	// ("deepseek-v4-pro", "glm-5.1") due to random map iteration order.
+	var bestKey string
+	var bestPricing ModelPricing
+	for key, pricing := range DefaultPricing {
+		keyLower := strings.ToLower(key)
+		if strings.Contains(modelLower, keyLower) && len(key) > len(bestKey) {
+			bestKey = key
+			bestPricing = pricing
+		}
+	}
+	if bestKey != "" {
+		return bestPricing
+	}
+
 	// Default to flash-tier pricing for unknown models. Pre-v0.78.30
 	// this returned the deleted "gemini-1.5-flash" entry — zero
 	// pricing — which silently understated cost.
