@@ -164,6 +164,44 @@ func TestSessionSetHistoryTrimming(t *testing.T) {
 	}
 }
 
+// TestSetHistoryTokenCountsInvariant guards the CLAUDE.md invariant:
+// len(tokenCounts) == len(History) after every SetHistory/SetHistoryIfVersion call.
+// Previously both methods used make([]int, 0) regardless of history length.
+func TestSetHistoryTokenCountsInvariant(t *testing.T) {
+	t.Run("SetHistory", func(t *testing.T) {
+		s := NewSession()
+		history := make([]*genai.Content, 5)
+		for i := range history {
+			history[i] = genai.NewContentFromText("msg", genai.RoleUser)
+		}
+		s.SetHistory(history)
+
+		hist := s.GetHistory()
+		counts := s.GetTokenCounts()
+		if len(hist) != len(counts) {
+			t.Errorf("SetHistory: len(history)=%d, len(tokenCounts)=%d — invariant violated", len(hist), len(counts))
+		}
+	})
+
+	t.Run("SetHistoryIfVersion", func(t *testing.T) {
+		s := NewSession()
+		s.AddUserMessage("seed")
+		v := s.GetVersion()
+
+		history := make([]*genai.Content, 3)
+		for i := range history {
+			history[i] = genai.NewContentFromText("msg", genai.RoleUser)
+		}
+		s.SetHistoryIfVersion(history, v)
+
+		hist := s.GetHistory()
+		counts := s.GetTokenCounts()
+		if len(hist) != len(counts) {
+			t.Errorf("SetHistoryIfVersion: len(history)=%d, len(tokenCounts)=%d — invariant violated", len(hist), len(counts))
+		}
+	})
+}
+
 func TestSessionTokens(t *testing.T) {
 	s := NewSession()
 

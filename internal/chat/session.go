@@ -164,7 +164,7 @@ func (s *Session) SetHistory(history []*genai.Content) {
 	}
 
 	s.History = history
-	s.tokenCounts = make([]int, 0)
+	s.tokenCounts = make([]int, len(history)) // keep len(tokenCounts)==len(History)
 	s.totalTokens = 0
 	s.version++
 	s.notifyChange(oldCount)
@@ -191,7 +191,7 @@ func (s *Session) SetHistoryIfVersion(history []*genai.Content, expectedVersion 
 	}
 
 	s.History = history
-	s.tokenCounts = make([]int, 0)
+	s.tokenCounts = make([]int, len(history)) // keep len(tokenCounts)==len(History)
 	s.totalTokens = 0
 	s.version++
 	s.notifyChange(oldCount)
