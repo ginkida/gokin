@@ -4037,12 +4037,15 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 			attempt := a.autoFixAttempts[key]
 			a.autoFixAttemptsMu.Unlock()
 
-			if a.onToolActivity != nil {
-				a.stateMu.RLock()
-				agentID := a.ID
-				a.stateMu.RUnlock()
+			// Snapshot both agentID and callback under stateMu to avoid races
+			// with SetOnToolActivity (matches pattern at executeToolCall below).
+			a.stateMu.RLock()
+			onToolActivity := a.onToolActivity
+			agentID := a.ID
+			a.stateMu.RUnlock()
+			if onToolActivity != nil {
 				args := map[string]any{"reason": reflection.Category}
-				a.onToolActivity(agentID, call.Name, args, "tool_recovery")
+				onToolActivity(agentID, call.Name, args, "tool_recovery")
 			}
 
 			fixResult, handled := a.recoveryExecutor.AttemptAutoFix(ctx, a, call, reflection, attempt)
