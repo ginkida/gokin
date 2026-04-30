@@ -46,7 +46,7 @@ func (h *Handler) LoadAliasesFromFile(path string) error {
 	}
 	for alias, target := range raw {
 		alias = strings.TrimSpace(alias)
-		target = strings.TrimSpace(target)
+		target = strings.TrimSpace(strings.TrimPrefix(target, "/"))
 		if alias == "" || target == "" {
 			continue
 		}

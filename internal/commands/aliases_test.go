@@ -57,6 +57,30 @@ func TestLoadAliasesFromFile_OverridesDefault(t *testing.T) {
 	}
 }
 
+// TestLoadAliasesFromFile_StripsLeadingSlashFromTarget verifies that a user
+// writing "p: /plan" gets the same result as "p: plan". Commands are stored
+// without the leading slash, so targets with it would silently never resolve.
+func TestLoadAliasesFromFile_StripsLeadingSlashFromTarget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aliases.yaml")
+	if err := os.WriteFile(path, []byte("p: /plan\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler()
+	if err := h.LoadAliasesFromFile(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// ResolveAlias should return "plan" (without slash).
+	if got := h.ResolveAlias("p"); got != "plan" {
+		t.Errorf("p → %q, want plan (leading / must be stripped)", got)
+	}
+	// Parse should also resolve correctly.
+	if name, _, ok := h.Parse("/p"); !ok || name != "plan" {
+		t.Errorf("Parse(/p) = %q, %v; want plan, true", name, ok)
+	}
+}
+
 func TestLoadAliasesFromFile_RejectsMalformed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "aliases.yaml")
