@@ -154,8 +154,8 @@ func (t *CoordinateTool) Validate(args map[string]any) error {
 
 	// Validate dependencies exist
 	for _, taskAny := range tasks {
-		task := taskAny.(map[string]any)
-		id := task["id"].(string)
+		task, _ := taskAny.(map[string]any) // already checked in loop above
+		id, _ := task["id"].(string)
 		if deps, ok := task["depends_on"].([]any); ok {
 			for _, depAny := range deps {
 				dep, _ := depAny.(string)
@@ -212,10 +212,10 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 
 	// Add tasks to coordinator
 	for _, taskAny := range tasksAny {
-		task := taskAny.(map[string]any)
-		userID := task["id"].(string)
-		prompt := task["prompt"].(string)
-		agentType := task["agent_type"].(string)
+		task, _ := taskAny.(map[string]any)
+		userID, _ := task["id"].(string)
+		prompt, _ := task["prompt"].(string)
+		agentType, _ := task["agent_type"].(string)
 
 		priority := 5
 		if p, ok := task["priority"].(float64); ok {
@@ -226,7 +226,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 		var deps []string
 		if depsAny, ok := task["depends_on"].([]any); ok {
 			for _, depAny := range depsAny {
-				depUserID := depAny.(string)
+				depUserID, _ := depAny.(string)
 				if internalID, exists := taskIDMap[depUserID]; exists {
 					deps = append(deps, internalID)
 				}

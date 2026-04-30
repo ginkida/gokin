@@ -118,9 +118,10 @@ func (e *TypedToolEntry[T]) Configure(cfg func(T)) {
 	})
 }
 
-// Get returns the typed tool instance.
+// Get returns the typed tool instance, or the zero value if the factory failed.
 func (e *TypedToolEntry[T]) Get() T {
-	return e.ToolEntry.Get().(T)
+	t, _ := e.ToolEntry.Get().(T)
+	return t
 }
 
 // ToolEntryMap is a map of tool names to their entries.
