@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"gokin/internal/config"
 	"gokin/internal/plan"
 )
 
@@ -49,6 +50,29 @@ func TestValidateVerifyCommandSafety_UnsafeCommands(t *testing.T) {
 		if ok {
 			t.Errorf("validateVerifyCommandSafety(%q) = allowed, want blocked (%s)", tc.cmd, tc.reason)
 		}
+	}
+}
+
+// TestValidateVerifyCommandSafety_AllowListOverridesIntentCheck verifies that
+// a command explicitly listed in AllowContains is accepted even when
+// RequireVerificationIntent=true and the command doesn't match the generic
+// "looks like verification" heuristic. The allowlist is authoritative — it
+// should not be double-blocked by the broader intent pattern matching.
+func TestValidateVerifyCommandSafety_AllowListOverridesIntentCheck(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Plan.VerifyPolicy.Enabled = true
+	cfg.Plan.VerifyPolicy.RequireVerificationIntent = true
+	cfg.Plan.VerifyPolicy.AllowContains = []string{"deploy-check"}
+
+	a := &App{config: cfg}
+	profile := doneGateProfile{}
+	ctx := context.Background()
+
+	// This command would normally fail the intent check (no "test/build/check/…"
+	// signal) but it's explicitly in AllowContains.
+	cmd := "./scripts/deploy-check.sh"
+	if ok, reason := a.validateVerifyCommandSafety(ctx, cmd, profile); !ok {
+		t.Errorf("validateVerifyCommandSafety(%q) blocked (%s); allowlisted commands must bypass the intent heuristic", cmd, reason)
 	}
 }
 

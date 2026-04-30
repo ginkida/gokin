@@ -2793,7 +2793,11 @@ func (a *App) validateVerifyCommandSafety(ctx context.Context, command string, p
 	if commandContainsAny(lower, denyContains) {
 		return false, "contains disallowed mutating operation"
 	}
-	if len(allowContains) > 0 && !commandContainsAny(lower, allowContains) {
+	// Track whether the command passed an explicit allowlist so the intent
+	// check below can be skipped — the user's allowlist is more authoritative
+	// than the generic "looks like verification" heuristic.
+	passedExplicitAllowList := len(allowContains) > 0 && commandContainsAny(lower, allowContains)
+	if len(allowContains) > 0 && !passedExplicitAllowList {
 		return false, "command does not match allowlist markers for active verify policy"
 	}
 
@@ -2825,7 +2829,10 @@ func (a *App) validateVerifyCommandSafety(ctx context.Context, command string, p
 		}
 	}
 
-	if requireIntent && !looksLikeVerificationCommand(lower) {
+	// Skip the generic intent heuristic when the command passed an explicit
+	// user-defined allowlist — the allowlist is a stronger signal than pattern
+	// matching, and double-blocking an explicitly allowed command is confusing.
+	if requireIntent && !passedExplicitAllowList && !looksLikeVerificationCommand(lower) {
 		return false, "command does not match verification intent"
 	}
 
