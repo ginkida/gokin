@@ -199,6 +199,27 @@ func CreateDefaultHTTPClient() (*http.Client, error) {
 	return CreateSecureHTTPClient(cfg, 30*time.Second)
 }
 
+// WithSSRFRedirectProtection wraps an http.Client so every redirect target is
+// re-validated for SSRF before being followed. Without this, an attacker can
+// serve a 302 redirect to an internal IP from a publicly-reachable domain that
+// passed the initial URL check.
+//
+// The returned client has the same Transport and Timeout as the original.
+func WithSSRFRedirectProtection(c *http.Client) *http.Client {
+	patched := *c // shallow copy — preserves Transport, Timeout, Jar
+	patched.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		result := ValidateURLForSSRF(req.URL.String())
+		if !result.Valid {
+			return fmt.Errorf("SSRF protection blocked redirect to %s: %s", req.URL.Host, result.Reason)
+		}
+		return nil
+	}
+	return &patched
+}
+
 // ValidateTLSConfig checks if a TLS configuration is secure
 func ValidateTLSConfig(cfg *tls.Config) []string {
 	warnings := []string{}

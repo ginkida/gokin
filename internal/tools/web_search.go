@@ -37,7 +37,8 @@ type WebSearchTool struct {
 
 // NewWebSearchTool creates a new web search tool.
 func NewWebSearchTool() *WebSearchTool {
-	// Create secure HTTP client with TLS 1.2+ enforcement
+	// Create secure HTTP client with TLS 1.2+ enforcement and SSRF redirect
+	// protection so search provider 302 responses can't bypass the URL check.
 	secureClient, err := security.CreateDefaultHTTPClient()
 	if err != nil {
 		secureClient = &http.Client{Timeout: 30 * time.Second}
@@ -45,7 +46,7 @@ func NewWebSearchTool() *WebSearchTool {
 	}
 
 	return &WebSearchTool{
-		client:     secureClient,
+		client:     security.WithSSRFRedirectProtection(secureClient),
 		provider:   SearchProviderSerpAPI,
 		maxResults: 10,
 	}

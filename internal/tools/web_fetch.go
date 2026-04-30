@@ -25,7 +25,8 @@ type WebFetchTool struct {
 
 // NewWebFetchTool creates a new web fetch tool.
 func NewWebFetchTool() *WebFetchTool {
-	// Create secure HTTP client with TLS 1.2+ enforcement
+	// Create secure HTTP client with TLS 1.2+ enforcement and SSRF redirect
+	// protection so a 302 to a private IP can't bypass the initial URL check.
 	secureClient, err := security.CreateDefaultHTTPClient()
 	if err != nil {
 		secureClient = &http.Client{Timeout: 30 * time.Second}
@@ -33,7 +34,7 @@ func NewWebFetchTool() *WebFetchTool {
 	}
 
 	return &WebFetchTool{
-		client:  secureClient,
+		client:  security.WithSSRFRedirectProtection(secureClient),
 		maxSize: 1024 * 1024, // 1MB max
 	}
 }
