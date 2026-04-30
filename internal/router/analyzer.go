@@ -236,9 +236,9 @@ func (ta *TaskAnalyzer) determineStrategy(taskType TaskType, score int) Executio
 
 	case TaskTypeExploration:
 		if score <= 5 {
-			return StrategySubAgent // Single explore agent
+			return StrategyExecutor // Simple exploration — direct tool use
 		}
-		return StrategySubAgent // Complex exploration - coordinator
+		return StrategySubAgent // Complex exploration — dedicated sub-agent
 
 	case TaskTypeRefactoring:
 		if score <= 5 {

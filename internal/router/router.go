@@ -287,17 +287,9 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 	}
 }
 
-// executeDirect gets a direct AI response without tool usage
+// executeDirect gets a direct AI response without tool usage.
+// executor.Execute already prepends the user message, so we must NOT add it here.
 func (r *Router) executeDirect(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
-	// Add user message to history
-	userContent := genai.NewContentFromText(message, genai.RoleUser)
-	history = append(history, userContent)
-
-	// For direct responses, we can use a simplified approach:
-	// Temporarily disable tools to force direct response
-	// Or use a system prompt that discourages tool usage
-
-	// For now, fall back to executor (it will handle this correctly)
 	return r.executor.Execute(ctx, history, message)
 }
 
