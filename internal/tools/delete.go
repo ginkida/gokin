@@ -158,8 +158,9 @@ func (t *DeleteTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 		return NewErrorResult(fmt.Sprintf("delete failed: %s", err)), nil
 	}
 
-	// Record for undo (only for files, not directories)
-	if t.undoManager != nil && !info.IsDir() && len(oldContent) > 0 {
+	// Record for undo (only for files, not directories, and only when we
+	// successfully read the content — nil means the pre-read failed).
+	if t.undoManager != nil && !info.IsDir() && oldContent != nil {
 		// For undo, we store the deleted content so it can be restored
 		change := undo.NewFileChange(path, "delete", oldContent, nil, false)
 		t.undoManager.Record(*change)
