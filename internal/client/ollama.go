@@ -263,8 +263,8 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 						reason = "Ollama not running"
 					} else if strings.Contains(reason, "timeout") {
 						reason = "timeout"
-					} else if len(reason) > 50 {
-						reason = reason[:47] + "..."
+					} else if runes := []rune(reason); len(runes) > 50 {
+						reason = string(runes[:47]) + "..."
 					}
 				}
 				cb.OnRetry(attempt, c.config.MaxRetries, delay, reason)
