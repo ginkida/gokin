@@ -3370,14 +3370,26 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 // forceCompactHistory aggressively compacts history when MaxHistorySize is exceeded.
 // Uses importance scoring to preserve the most valuable messages from the middle.
 func (a *Agent) forceCompactHistory(ctx context.Context) error {
-	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
+	// Read length under RLock so we can notify the UI before taking the write
+	// lock. safeOnText acquires stateMu.RLock internally — calling it while
+	// holding a write lock on the same RWMutex would deadlock.
+	a.stateMu.RLock()
+	histLen := len(a.history)
+	a.stateMu.RUnlock()
 
-	if len(a.history) <= 10 {
+	if histLen <= 10 {
 		return nil // Not enough to compact
 	}
 
-	a.safeOnText(fmt.Sprintf("\n[Force-compacting history (%d messages)...]\n", len(a.history)))
+	a.safeOnText(fmt.Sprintf("\n[Force-compacting history (%d messages)...]\n", histLen))
+
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
+	// Re-check after acquiring the write lock in case concurrent compaction ran.
+	if len(a.history) <= 10 {
+		return nil
+	}
 
 	keepStart := 3 // system prompt + greeting + original task prompt
 	keepEnd := 6
