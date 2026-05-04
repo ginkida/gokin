@@ -31,6 +31,7 @@ type ContextAgent struct {
 
 	mu       sync.Mutex
 	stopChan chan struct{}
+	stopOnce sync.Once
 }
 
 // NewContextAgent creates a new context health agent.
@@ -69,9 +70,9 @@ func (a *ContextAgent) Start(ctx context.Context) {
 	}
 }
 
-// Stop stops the agent.
+// Stop stops the agent. Safe to call more than once.
 func (a *ContextAgent) Stop() {
-	close(a.stopChan)
+	a.stopOnce.Do(func() { close(a.stopChan) })
 }
 
 // CheckAndCompact checks token usage and triggers compaction if threshold exceeded.
