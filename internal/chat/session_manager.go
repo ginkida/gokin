@@ -21,6 +21,7 @@ type SessionManager struct {
 	lastSaveTime   time.Time
 	saveTimer      *time.Timer
 	stopChan       chan struct{}
+	stopOnce       sync.Once
 	asyncSaveCh    chan struct{} // Buffered channel for async save dedup
 }
 
@@ -141,13 +142,8 @@ func (sm *SessionManager) Stop() {
 	}
 	sm.mu.Unlock()
 
-	// Close stop channel to signal any listeners
-	select {
-	case <-sm.stopChan:
-		// Already closed
-	default:
-		close(sm.stopChan)
-	}
+	// Close stop channel to signal any listeners (Once guards against concurrent Stop calls)
+	sm.stopOnce.Do(func() { close(sm.stopChan) })
 
 	// Final save on shutdown
 	if err := sm.Save(); err != nil {
