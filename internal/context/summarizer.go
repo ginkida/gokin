@@ -320,7 +320,8 @@ func (s *Summarizer) formatMessages(messages []*genai.Content) string {
 							tail := strings.Join(lines[len(lines)-20:], "\n")
 							content = fmt.Sprintf("%s\n\n... [%d lines skipped] ...\n\n%s", head, len(lines)-40, tail)
 						} else {
-							content = content[:1000] + "..."
+							runes := []rune(content)
+							content = string(runes[:1000]) + "..."
 						}
 					}
 					respContent = content

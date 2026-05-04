@@ -3520,8 +3520,8 @@ func (a *App) extractContextSnapshot() string {
 				}
 
 				// Truncate long messages for string output
-				if len(text) > 500 {
-					text = text[:500] + "..."
+				if runes := []rune(text); len(runes) > 500 {
+					text = string(runes[:500]) + "..."
 				}
 				fmt.Fprintf(&sb, "**%s**: %s\n\n", role, text)
 				messageCount++

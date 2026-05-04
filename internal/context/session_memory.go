@@ -405,8 +405,8 @@ func extractCurrentTask(history []*genai.Content) string {
 		for _, part := range msg.Parts {
 			if part.Text != "" && len(part.Text) > 20 {
 				text := part.Text
-				if len(text) > 200 {
-					text = text[:200] + "..."
+				if runes := []rune(text); len(runes) > 200 {
+					text = string(runes[:200]) + "..."
 				}
 				return text
 			}

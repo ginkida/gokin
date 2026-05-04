@@ -155,8 +155,8 @@ func (es *ExampleStore) LearnFromSuccessWithTools(taskType, prompt, agentType, o
 
 	// Truncate output for storage
 	truncatedOutput := output
-	if len(truncatedOutput) > 2000 {
-		truncatedOutput = truncatedOutput[:2000] + "...[truncated]"
+	if runes := []rune(truncatedOutput); len(runes) > 2000 {
+		truncatedOutput = string(runes[:2000]) + "...[truncated]"
 	}
 
 	example := &TaskExample{

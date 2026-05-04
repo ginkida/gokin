@@ -1862,8 +1862,8 @@ func (b *Builder) wireDependencies() error {
 			switch result.Status {
 			case agent.AgentStatusCompleted:
 				output := result.Output
-				if len(output) > 500 {
-					output = output[:500] + "..."
+				if runes := []rune(output); len(runes) > 500 {
+					output = string(runes[:500]) + "..."
 				}
 				msg = fmt.Sprintf("Background agent %s (%s) completed in %s. Output: %s",
 					id, result.Type, result.Duration.Round(time.Millisecond), output)
@@ -1937,15 +1937,15 @@ func (b *Builder) wireDependencies() error {
 		var msg string
 		if info.Status == "completed" {
 			output := info.Output
-			if len(output) > 500 {
-				output = output[:500] + "..."
+			if runes := []rune(output); len(runes) > 500 {
+				output = string(runes[:500]) + "..."
 			}
 			msg = fmt.Sprintf("Background shell task %s completed (exit %d). Output: %s",
 				info.ID, info.ExitCode, output)
 		} else if info.Status == "failed" {
 			output := info.Output
-			if len(output) > 500 {
-				output = output[:500] + "..."
+			if runes := []rune(output); len(runes) > 500 {
+				output = string(runes[:500]) + "..."
 			}
 			msg = fmt.Sprintf("Background shell task %s failed (exit %d). Output: %s",
 				info.ID, info.ExitCode, output)

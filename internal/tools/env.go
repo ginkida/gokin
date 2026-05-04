@@ -105,8 +105,8 @@ func (t *EnvTool) Execute(ctx context.Context, args map[string]any) (ToolResult,
 		}
 
 		// Truncate very long values
-		if len(varValue) > 100 {
-			varValue = varValue[:100] + "..."
+		if runes := []rune(varValue); len(runes) > 100 {
+			varValue = string(runes[:100]) + "..."
 		}
 
 		builder.WriteString(fmt.Sprintf("%s=%s\n", varName, varValue))

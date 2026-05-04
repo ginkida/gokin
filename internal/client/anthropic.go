@@ -841,8 +841,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 	// Log request body for debugging (truncated for large messages)
 	reqStr := string(jsonData)
-	if len(reqStr) > 2000 {
-		logging.Debug("API request body (truncated)", "body", reqStr[:2000]+"...")
+	if runes := []rune(reqStr); len(runes) > 2000 {
+		logging.Debug("API request body (truncated)", "body", string(runes[:2000])+"...")
 	} else {
 		logging.Debug("API request body", "body", reqStr)
 	}
@@ -1165,8 +1165,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					var event map[string]interface{}
 					if err := json.Unmarshal([]byte(data), &event); err != nil {
 						preview := data
-						if len(preview) > 100 {
-							preview = preview[:100] + "..."
+						if runes := []rune(preview); len(runes) > 100 {
+							preview = string(runes[:100]) + "..."
 						}
 						logging.Warn("failed to parse SSE event", "error", err, "data", preview)
 						// Notify UI about recoverable parse error

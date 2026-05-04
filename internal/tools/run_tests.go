@@ -344,11 +344,11 @@ func parseGenericTestResults(output string, execErr error, duration time.Duratio
 	}
 
 	// Truncate long output
-	if len(output) > 5000 {
+	if runes := []rune(output); len(runes) > 5000 {
 		// Show first 2000 and last 2000 chars
-		result.WriteString(output[:2000])
+		result.WriteString(string(runes[:2000]))
 		result.WriteString("\n\n... (output truncated) ...\n\n")
-		result.WriteString(output[len(output)-2000:])
+		result.WriteString(string(runes[len(runes)-2000:]))
 	} else {
 		result.WriteString(output)
 	}

@@ -2509,8 +2509,8 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 		}
 	case "web_fetch":
 		if u, ok := args["url"].(string); ok {
-			if len(u) > 50 {
-				u = u[:50]
+			if runes := []rune(u); len(runes) > 50 {
+				u = string(runes[:50])
 			}
 			return u
 		}

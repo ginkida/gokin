@@ -185,8 +185,8 @@ func (m *ContextManager) syncTaskContext() {
 	if tc.Title == "" && tc.Description == "" {
 		// Fallback: use the raw contract text as description
 		tc.Description = contract
-		if len(tc.Description) > 500 {
-			tc.Description = tc.Description[:500] + "..."
+		if runes := []rune(tc.Description); len(runes) > 500 {
+			tc.Description = string(runes[:500]) + "..."
 		}
 	}
 

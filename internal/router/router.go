@@ -488,8 +488,8 @@ func (r *Router) executeCoordinated(ctx context.Context, decomposition *Decompos
 		if result.Success {
 			successCount++
 			output := result.Output
-			if len(output) > 1000 {
-				output = output[:1000] + "...[truncated]"
+			if runes := []rune(output); len(runes) > 1000 {
+				output = string(runes[:1000]) + "...[truncated]"
 			}
 			allOutputs.WriteString("**Status:** Completed\n\n")
 			fmt.Fprintf(&allOutputs, "**Result:**\n%s\n\n", output)

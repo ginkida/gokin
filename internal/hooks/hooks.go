@@ -159,8 +159,8 @@ func (c *Context) ExpandCommand(command string) string {
 	}
 	if content, ok := c.ToolArgs["content"].(string); ok {
 		// Truncate content if too long
-		if len(content) > 100 {
-			content = content[:100] + "..."
+		if runes := []rune(content); len(runes) > 100 {
+			content = string(runes[:100]) + "..."
 		}
 		result = strings.ReplaceAll(result, "${CONTENT}", shellEscape(content))
 	}

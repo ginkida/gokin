@@ -195,8 +195,8 @@ func HashMessages(messages []*genai.Content) string {
 			if part.Text != "" {
 				// For text, hash first 500 chars to avoid huge computations
 				text := part.Text
-				if len(text) > 500 {
-					text = text[:500]
+				if runes := []rune(text); len(runes) > 500 {
+					text = string(runes[:500])
 				}
 				h.Write([]byte(text))
 			}
@@ -211,8 +211,8 @@ func HashMessages(messages []*genai.Content) string {
 				h.Write([]byte(part.FunctionResponse.Name))
 				// For responses, just hash presence and first 200 chars
 				if content, ok := part.FunctionResponse.Response["content"].(string); ok {
-					if len(content) > 200 {
-						content = content[:200]
+					if runes := []rune(content); len(runes) > 200 {
+						content = string(runes[:200])
 					}
 					h.Write([]byte(content))
 				}

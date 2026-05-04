@@ -732,8 +732,8 @@ func (m *Manager) GetPreviousStepsSummary(currentStepID int, maxLen int) string 
 			sb.WriteString("\n")
 		} else if step.Status == StatusFailed {
 			errDetail := step.Error
-			if len(errDetail) > 200 {
-				errDetail = errDetail[:200] + "..."
+			if runes := []rune(errDetail); len(runes) > 200 {
+				errDetail = string(runes[:200]) + "..."
 			}
 			if errDetail != "" {
 				fmt.Fprintf(&sb, "Step %d (%s): FAILED - %s\n", step.ID, step.Title, errDetail)

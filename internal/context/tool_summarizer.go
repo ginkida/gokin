@@ -398,8 +398,8 @@ func defaultSummary(toolName, content string) string {
 		firstLine = content[:idx]
 	}
 	firstLine = strings.TrimSpace(firstLine)
-	if len(firstLine) > 100 {
-		firstLine = firstLine[:100]
+	if runes := []rune(firstLine); len(runes) > 100 {
+		firstLine = string(runes[:100])
 	}
 	return firstLine
 }

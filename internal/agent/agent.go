@@ -3689,8 +3689,8 @@ func (a *Agent) injectContinuationHint() {
 	if a.originalPrompt != "" {
 		// Truncate long prompts to avoid bloating the hint
 		taskReminder := a.originalPrompt
-		if len(taskReminder) > 500 {
-			taskReminder = taskReminder[:500] + "..."
+		if runes := []rune(taskReminder); len(runes) > 500 {
+			taskReminder = string(runes[:500]) + "..."
 		}
 		hint += "\nYour original task: " + taskReminder
 	}

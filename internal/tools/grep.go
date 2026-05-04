@@ -365,8 +365,8 @@ func (t *GrepTool) invertMatches(ctx context.Context, files []string, re *regexp
 			lineNum++
 			line := scanner.Text()
 			if !re.MatchString(line) {
-				if len(line) > 500 {
-					line = line[:500] + "..."
+				if runes := []rune(line); len(runes) > 500 {
+					line = string(runes[:500]) + "..."
 				}
 				matches = append(matches, grepMatch{lineNum: lineNum, line: line})
 			}
@@ -542,8 +542,8 @@ func (t *GrepTool) searchFile(filePath string, re *regexp.Regexp, contextLines i
 
 				contextLine := allLines[i]
 				// Truncate long lines
-				if len(contextLine) > 500 {
-					contextLine = contextLine[:500] + "..."
+				if runes := []rune(contextLine); len(runes) > 500 {
+					contextLine = string(runes[:500]) + "..."
 				}
 				matches = append(matches, grepMatch{
 					lineNum: i + 1, // 1-indexed

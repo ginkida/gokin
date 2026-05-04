@@ -367,8 +367,8 @@ func hashMessage(msg *genai.Content) string {
 	for _, part := range msg.Parts {
 		if part.Text != "" {
 			text := part.Text
-			if len(text) > 500 {
-				text = text[:500]
+			if runes := []rune(text); len(runes) > 500 {
+				text = string(runes[:500])
 			}
 			h.Write([]byte(text))
 		}
@@ -508,8 +508,8 @@ func (s *MessageScorer) ScoreMessagesWithContext(ctx context.Context, messages [
 		for _, part := range msg.Parts {
 			if part.Text != "" {
 				text := part.Text
-				if len(text) > 200 {
-					text = text[:200] + "..."
+				if runes := []rune(text); len(runes) > 200 {
+					text = string(runes[:200]) + "..."
 				}
 				fmt.Fprintf(&builder, "[%d] %s: %s\n", i, role, text)
 			}
@@ -519,8 +519,8 @@ func (s *MessageScorer) ScoreMessagesWithContext(ctx context.Context, messages [
 			if part.FunctionResponse != nil {
 				content := "[result]"
 				if respContent, ok := part.FunctionResponse.Response["content"].(string); ok {
-					if len(respContent) > 100 {
-						content = respContent[:100] + "..."
+					if runes := []rune(respContent); len(runes) > 100 {
+						content = string(runes[:100]) + "..."
 					} else {
 						content = respContent
 					}
