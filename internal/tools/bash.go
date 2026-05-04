@@ -913,8 +913,9 @@ func (t *BashTool) executeSandboxed(ctx context.Context, command string) (ToolRe
 	sandboxConfig := security.DefaultSandboxConfig()
 	sandboxConfig.Enabled = true
 
-	// Create sandboxed command
-	sandboxed, err := security.NewSandboxedCommand(ctx, t.workDir, command, sandboxConfig)
+	// Create sandboxed command — use sessionWorkDir so that cd changes made in
+	// earlier sandboxed commands are respected, matching non-sandboxed behaviour.
+	sandboxed, err := security.NewSandboxedCommand(ctx, t.sessionWorkDir(), command, sandboxConfig)
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("sandbox setup failed: %s", err)), nil
 	}
