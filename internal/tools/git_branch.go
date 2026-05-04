@@ -174,6 +174,10 @@ func (t *GitBranchTool) deleteBranch(ctx context.Context, args map[string]any) (
 	name, _ := GetString(args, "name")
 	force := GetBoolDefault(args, "force", false)
 
+	if !isValidGitRef(name) {
+		return NewErrorResult("invalid branch name: must not start with '-'"), nil
+	}
+
 	flag := "-d"
 	if force {
 		flag = "-D"
@@ -197,6 +201,10 @@ func (t *GitBranchTool) switchBranch(ctx context.Context, args map[string]any) (
 	name, _ := GetString(args, "name")
 	force := GetBoolDefault(args, "force", false)
 
+	if !isValidGitRef(name) {
+		return NewErrorResult("invalid branch name: must not start with '-'"), nil
+	}
+
 	cmdArgs := []string{"checkout", name}
 	if force {
 		cmdArgs = []string{"checkout", "-f", name}
@@ -218,6 +226,10 @@ func (t *GitBranchTool) switchBranch(ctx context.Context, args map[string]any) (
 
 func (t *GitBranchTool) mergeBranch(ctx context.Context, args map[string]any) (ToolResult, error) {
 	name, _ := GetString(args, "name")
+
+	if !isValidGitRef(name) {
+		return NewErrorResult("invalid branch name: must not start with '-'"), nil
+	}
 
 	cmd := exec.CommandContext(ctx, "git", "merge", name)
 	cmd.Dir = t.workDir
