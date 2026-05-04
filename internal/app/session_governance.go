@@ -111,8 +111,8 @@ func summarizeArchivedMessages(contents []*genai.Content) string {
 		if text == "" {
 			continue
 		}
-		if len(text) > 80 {
-			text = text[:77] + "..."
+		if runes := []rune(text); len(runes) > 80 {
+			text = string(runes[:77]) + "..."
 		}
 		parts = append(parts, text)
 		if len(parts) >= 3 {

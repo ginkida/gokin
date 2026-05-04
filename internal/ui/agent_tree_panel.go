@@ -250,8 +250,8 @@ func (p *AgentTreePanel) View(width int) string {
 				maxThoughtLen = 20
 			}
 			thought := node.Thought
-			if len(thought) > maxThoughtLen {
-				thought = thought[:maxThoughtLen-3] + "..."
+			if runes := []rune(thought); len(runes) > maxThoughtLen {
+				thought = string(runes[:maxThoughtLen-3]) + "..."
 			}
 
 			thoughtLine.WriteString(thoughtStyle.Render("💭 " + thought))
@@ -276,8 +276,10 @@ func (p *AgentTreePanel) View(width int) string {
 
 			reflection := node.Reflection
 			maxReflLen := width - lipgloss.Width(reflLine.String()) - 20
-			if len(reflection) > maxReflLen && maxReflLen > 20 {
-				reflection = reflection[:maxReflLen-3] + "..."
+			if maxReflLen > 20 {
+				if runes := []rune(reflection); len(runes) > maxReflLen {
+					reflection = string(runes[:maxReflLen-3]) + "..."
+				}
 			}
 
 			reflLine.WriteString(reflBadgeStyle.Render("RECOVERY"))

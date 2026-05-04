@@ -1426,8 +1426,8 @@ func (tp *TreePlanner) parsePlanResponseValidated(response string, originalPromp
 		}
 
 		// Validation: truncate long prompts
-		if len(stepPrompt) > maxPromptLength {
-			stepPrompt = stepPrompt[:maxPromptLength] + "..."
+		if runes := []rune(stepPrompt); len(runes) > maxPromptLength {
+			stepPrompt = string(runes[:maxPromptLength]) + "..."
 			logging.Debug("truncated long prompt", "original_len", len(parts[1]))
 		}
 

@@ -445,10 +445,11 @@ func (es *ExampleStore) GetExamplesForContext(taskType, prompt string, limit int
 
 // truncateString truncates a string to max length.
 func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }
 
 // RecordFeedback updates the success score based on user feedback.

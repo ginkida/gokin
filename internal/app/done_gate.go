@@ -1704,10 +1704,11 @@ func buildDoneGateFixPrompt(userMessage string, failed []doneGateResult, attempt
 
 func truncateDoneGateText(s string) string {
 	s = strings.TrimSpace(s)
-	if len(s) <= doneGateOutputLimit {
+	runes := []rune(s)
+	if len(runes) <= doneGateOutputLimit {
 		return s
 	}
-	return s[:doneGateOutputLimit] + "..."
+	return string(runes[:doneGateOutputLimit]) + "..."
 }
 
 func compactDoneGateFailureDetail(r doneGateResult) string {
@@ -1723,8 +1724,8 @@ func compactDoneGateFailureDetail(r doneGateResult) string {
 	if raw == "" {
 		return ""
 	}
-	if len(raw) > 280 {
-		return raw[:280] + "..."
+	if runes := []rune(raw); len(runes) > 280 {
+		return string(runes[:280]) + "..."
 	}
 	return raw
 }

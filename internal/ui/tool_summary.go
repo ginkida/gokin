@@ -178,14 +178,15 @@ func summarizeToolDetail(detail string, maxLen int) string {
 	if detail == "" {
 		return ""
 	}
-	if len(detail) <= maxLen {
+	runes := []rune(detail)
+	if len(runes) <= maxLen {
 		return detail
 	}
 
 	headLen := (maxLen - 3) / 2
 	tailLen := maxLen - 3 - headLen
 	if headLen < 1 || tailLen < 1 {
-		return detail[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return detail[:headLen] + "..." + detail[len(detail)-tailLen:]
+	return string(runes[:headLen]) + "..." + string(runes[len(runes)-tailLen:])
 }

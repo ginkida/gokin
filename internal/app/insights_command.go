@@ -53,8 +53,8 @@ func (a *App) HandleInsightsCommand() string {
 				}
 
 				name := m.StrategyName
-				if len(name) > 20 {
-					name = name[:17] + "..."
+				if runes := []rune(name); len(runes) > 20 {
+					name = string(runes[:17]) + "..."
 				}
 
 				lastUsed := "never"

@@ -283,8 +283,8 @@ func (s *SessionState) GenerateSummary() string {
 					break
 				}
 			}
-			if len(text) > 100 {
-				return text[:97] + "..."
+			if runes := []rune(text); len(runes) > 100 {
+				return string(runes[:97]) + "..."
 			}
 			return text
 		}

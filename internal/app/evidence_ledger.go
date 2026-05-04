@@ -134,13 +134,14 @@ func cleanEvidencePath(path string) string {
 
 func truncateEvidenceValue(value string, limit int) string {
 	value = strings.TrimSpace(value)
-	if limit <= 0 || len(value) <= limit {
+	runes := []rune(value)
+	if limit <= 0 || len(runes) <= limit {
 		return value
 	}
 	if limit <= 3 {
-		return value[:limit]
+		return string(runes[:limit])
 	}
-	return value[:limit-3] + "..."
+	return string(runes[:limit-3]) + "..."
 }
 
 func appendUniqueLimited(items []string, value string, limit int) []string {

@@ -2587,8 +2587,8 @@ func (a *App) sendAgentTreeUpdate() {
 			Depth:       depthMap[t.ID],
 		}
 
-		if len(node.Description) > 60 {
-			node.Description = node.Description[:57] + "..."
+		if runes := []rune(node.Description); len(runes) > 60 {
+			node.Description = string(runes[:57]) + "..."
 		}
 
 		if t.Result != nil {

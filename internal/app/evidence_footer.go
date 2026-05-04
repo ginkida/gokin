@@ -146,8 +146,8 @@ func formatEvidenceCommands(commands []string, limit int) string {
 	short := make([]string, 0, len(display))
 	for _, c := range display {
 		c = strings.TrimSpace(c)
-		if len(c) > 50 {
-			c = c[:47] + "..."
+		if runes := []rune(c); len(runes) > 50 {
+			c = string(runes[:47]) + "..."
 		}
 		short = append(short, c)
 	}

@@ -118,8 +118,8 @@ func (s *Summarizer) formatTaskContext() string {
 	}
 	if tc.Description != "" {
 		desc := tc.Description
-		if len(desc) > 300 {
-			desc = desc[:300] + "..."
+		if runes := []rune(desc); len(runes) > 300 {
+			desc = string(runes[:300]) + "..."
 		}
 		parts = append(parts, "Goal: "+desc)
 	}

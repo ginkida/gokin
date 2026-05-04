@@ -318,10 +318,11 @@ func findActiveContractStep(steps []*Step, currentStepID int) *Step {
 
 func compactContractText(s string, maxLen int) string {
 	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
-	if maxLen <= 0 || len(s) <= maxLen {
+	runes := []rune(s)
+	if maxLen <= 0 || len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }
 
 // CreatePlan creates a new plan and sets it as current.
@@ -722,8 +723,8 @@ func (m *Manager) GetPreviousStepsSummary(currentStepID int, maxLen int) string 
 		if step.Status == StatusCompleted {
 			fmt.Fprintf(&sb, "Step %d (%s): ", step.ID, step.Title)
 			output := step.Output
-			if len(output) > maxLen {
-				output = output[:maxLen] + "..."
+			if runes := []rune(output); len(runes) > maxLen {
+				output = string(runes[:maxLen]) + "..."
 			}
 			if output == "" {
 				output = "completed"

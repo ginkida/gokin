@@ -1711,8 +1711,8 @@ func (b *Builder) wireDependencies() error {
 			if app.program != nil {
 				msg := "Memory " + action
 				if summary != "" {
-					if len(summary) > 50 {
-						summary = summary[:47] + "..."
+					if runes := []rune(summary); len(runes) > 50 {
+						summary = string(runes[:47]) + "..."
 					}
 					msg += ": " + summary
 				}
@@ -1828,8 +1828,8 @@ func (b *Builder) wireDependencies() error {
 		if app.program != nil {
 			// Truncate description if too long
 			desc := description
-			if len(desc) > 50 {
-				desc = desc[:47] + "..."
+			if runes := []rune(desc); len(runes) > 50 {
+				desc = string(runes[:47]) + "..."
 			}
 			app.safeSendToProgram(ui.BackgroundTaskMsg{
 				ID:          id,

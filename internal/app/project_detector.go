@@ -230,13 +230,14 @@ func (a *App) detectProjectMapScripts() []string {
 
 func truncateProjectMapValue(value string, limit int) string {
 	value = strings.TrimSpace(value)
-	if limit <= 0 || len(value) <= limit {
+	runes := []rune(value)
+	if limit <= 0 || len(runes) <= limit {
 		return value
 	}
 	if limit <= 3 {
-		return value[:limit]
+		return string(runes[:limit])
 	}
-	return value[:limit-3] + "..."
+	return string(runes[:limit-3]) + "..."
 }
 
 // extractGoModInfo reads go.mod and extracts module name and key dependencies.

@@ -1205,8 +1205,8 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	}
 
 	output := response
-	if len(output) > planStepOutputMaxChars {
-		output = output[:planStepOutputMaxChars] + "..."
+	if runes := []rune(output); len(runes) > planStepOutputMaxChars {
+		output = string(runes[:planStepOutputMaxChars]) + "..."
 	}
 
 	// Record token usage for this step
@@ -1223,8 +1223,8 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 			output += "\n\n"
 		}
 		output += verificationOutput
-		if len(output) > planStepOutputMaxChars {
-			output = output[:planStepOutputMaxChars] + "..."
+		if runes := []rune(output); len(runes) > planStepOutputMaxChars {
+			output = string(runes[:planStepOutputMaxChars]) + "..."
 		}
 	}
 	if verificationSummary != "" {
@@ -1892,8 +1892,8 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	}
 
 	output := result.Output
-	if len(output) > planStepOutputMaxChars {
-		output = output[:planStepOutputMaxChars] + "..."
+	if runes := []rune(output); len(runes) > planStepOutputMaxChars {
+		output = string(runes[:planStepOutputMaxChars]) + "..."
 	}
 
 	// Record token usage for this step (estimate from output length for delegated steps)
@@ -1909,8 +1909,8 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 			output += "\n\n"
 		}
 		output += verificationOutput
-		if len(output) > planStepOutputMaxChars {
-			output = output[:planStepOutputMaxChars] + "..."
+		if runes := []rune(output); len(runes) > planStepOutputMaxChars {
+			output = string(runes[:planStepOutputMaxChars]) + "..."
 		}
 	}
 	if verificationSummary != "" {
@@ -2335,8 +2335,8 @@ func (a *App) formatPlanSummary(p *plan.Plan, duration time.Duration) string {
 		case plan.StatusFailed:
 			failed++
 			errMsg := step.Error
-			if len(errMsg) > 80 {
-				errMsg = errMsg[:80] + "..."
+			if runes := []rune(errMsg); len(runes) > 80 {
+				errMsg = string(runes[:80]) + "..."
 			}
 			fmt.Fprintf(&sb, "  ✗ Step %d: %s — %s\n", step.ID, step.Title, errMsg)
 		case plan.StatusSkipped:
@@ -2494,8 +2494,8 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 		}
 
 		detail := strings.TrimSpace(result.Content)
-		if len(detail) > 240 {
-			detail = detail[:240] + "..."
+		if runes := []rune(detail); len(runes) > 240 {
+			detail = string(runes[:240]) + "..."
 		}
 		if !result.Success {
 			failure := strings.TrimSpace(result.Error)
@@ -2557,8 +2557,8 @@ func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output 
 	hasOutput := false
 	if output != "" {
 		compact := output
-		if len(compact) > 260 {
-			compact = compact[:260] + "..."
+		if runes := []rune(compact); len(runes) > 260 {
+			compact = string(runes[:260]) + "..."
 		}
 		evidence = append(evidence, "output="+compact)
 		hasOutput = true
