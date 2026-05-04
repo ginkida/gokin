@@ -38,8 +38,8 @@ func renderPlanProgress(planProgress *PlanProgressMsg, width int, mutedStyle lip
 	// Show sub-agent progress if available
 	if planProgress.SubStepInfo != "" && width >= 120 {
 		info := planProgress.SubStepInfo
-		if len(info) > 30 {
-			info = info[:27] + "..."
+		if runes := []rune(info); len(runes) > 30 {
+			info = string(runes[:27]) + "..."
 		}
 		progressText += fmt.Sprintf(" [%s]", info)
 	}

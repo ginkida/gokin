@@ -1428,8 +1428,11 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 					continue
 				default:
 				}
+				// Use a tool-local context (same pattern as the parallel path) so
+				// the shared ctx variable is never mutated across iterations.
+				toolCtx := ctx
 				if e.handler != nil && e.handler.OnFilePeek != nil {
-					ctx = ContextWithFilePeekCallback(ctx, e.handler.OnFilePeek)
+					toolCtx = ContextWithFilePeekCallback(toolCtx, e.handler.OnFilePeek)
 				}
 				// Recover from panics in sequential execution (parallel path already has this)
 				func() {
@@ -1444,7 +1447,7 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 							}
 						}
 					}()
-					result := e.executeTool(ctx, call)
+					result := e.executeTool(toolCtx, call)
 					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}
 				}()
 			}
@@ -2488,9 +2491,9 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			if idx := strings.Index(cmd, " && "); idx >= 0 && strings.HasPrefix(strings.TrimSpace(cmd), "cd ") {
 				cmd = cmd[idx+4:]
 			}
-			// Use first 60 chars of the actual command
-			if len(cmd) > 60 {
-				cmd = cmd[:60]
+			// Use first 60 runes of the actual command
+			if runes := []rune(cmd); len(runes) > 60 {
+				cmd = string(runes[:60])
 			}
 			return cmd
 		}
@@ -2503,8 +2506,10 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			return p
 		}
 	case "copy", "move":
-		if src, ok := args["source"].(string); ok {
-			return filepath.Base(src)
+		src, _ := args["source"].(string)
+		dst, _ := args["destination"].(string)
+		if src != "" {
+			return filepath.Base(src) + "->" + filepath.Base(dst)
 		}
 	case "git_add":
 		if p, ok := args["path"].(string); ok {

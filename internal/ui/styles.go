@@ -747,14 +747,7 @@ func formatArgValueWithLimit(val any, maxLen int) string {
 
 // joinStrings joins strings with a separator.
 func joinStrings(parts []string, sep string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	result := parts[0]
-	for i := 1; i < len(parts); i++ {
-		result += sep + parts[i]
-	}
-	return result
+	return strings.Join(parts, sep)
 }
 
 // FormatError formats an error message with proper styling.
@@ -788,20 +781,20 @@ func wrapErrorText(text string, width int) string {
 		return text
 	}
 
-	var result string
+	var result strings.Builder
 	var line string
 
 	words := splitWords(text)
 	for _, word := range words {
 		// Handle newlines in the word
 		if word == "\n" {
-			result += line + "\n"
+			result.WriteString(line + "\n")
 			line = ""
 			continue
 		}
 
 		if len(line)+len(word)+1 > width && line != "" {
-			result += line + "\n"
+			result.WriteString(line + "\n")
 			line = word
 		} else if line == "" {
 			line = word
@@ -810,9 +803,9 @@ func wrapErrorText(text string, width int) string {
 		}
 	}
 	if line != "" {
-		result += line
+		result.WriteString(line)
 	}
-	return result
+	return result.String()
 }
 
 // splitWords splits text into words, preserving newlines as separate tokens.
@@ -852,8 +845,8 @@ func extractToolDetails(args map[string]any) string {
 	for _, key := range []string{"file_path", "path", "command", "pattern", "query", "url"} {
 		if val, ok := args[key].(string); ok && val != "" {
 			// Truncate if too long
-			if len(val) > 60 {
-				return val[:57] + "..."
+			if runes := []rune(val); len(runes) > 60 {
+				return string(runes[:57]) + "..."
 			}
 			return val
 		}
@@ -1096,8 +1089,8 @@ func (s *Styles) FormatPlanStepResult(stepID int, success bool, summary string) 
 		result := checkStyle.Render(fmt.Sprintf("  Step %d done", stepID))
 		if summary != "" {
 			// Truncate summary for display
-			if len(summary) > 120 {
-				summary = summary[:117] + "..."
+			if runes := []rune(summary); len(runes) > 120 {
+				summary = string(runes[:117]) + "..."
 			}
 			result += " " + summaryStyle.Render(summary)
 		}

@@ -101,9 +101,25 @@ func TestStagnationFingerprint_CopyMoveUseSource(t *testing.T) {
 			"source":      "/path/to/file.txt",
 			"destination": "/other/file.txt",
 		})
-		if got != "file.txt" {
-			t.Errorf("%s fingerprint = %q, want basename file.txt", tool, got)
+		// Fingerprint must include both source and destination so that copying
+		// the same file to different destinations is not mistaken for stagnation.
+		if got != "file.txt->file.txt" {
+			t.Errorf("%s fingerprint = %q, want file.txt->file.txt", tool, got)
 		}
+	}
+}
+
+func TestStagnationFingerprint_CopyMoveDifferentDest(t *testing.T) {
+	fp1 := stagnationFingerprint("copy", map[string]any{
+		"source":      "/src/file.txt",
+		"destination": "/dst1/file.txt",
+	})
+	fp2 := stagnationFingerprint("copy", map[string]any{
+		"source":      "/src/file.txt",
+		"destination": "/dst2/other.txt",
+	})
+	if fp1 == fp2 {
+		t.Errorf("copy to different destinations must not share a fingerprint, got %q for both", fp1)
 	}
 }
 

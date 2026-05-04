@@ -2184,8 +2184,8 @@ func (m *Model) extractToolInfoFromArgs(name string, args map[string]any) string
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
 			preview := cmd
-			if len(preview) > 60 {
-				preview = preview[:57] + "..."
+			if runes := []rune(preview); len(runes) > 60 {
+				preview = string(runes[:57]) + "..."
 			}
 			preview = strings.ReplaceAll(preview, "\n", " ")
 			return "$ " + preview
@@ -2193,8 +2193,8 @@ func (m *Model) extractToolInfoFromArgs(name string, args map[string]any) string
 	case "grep":
 		if pattern, ok := args["pattern"].(string); ok {
 			info := pattern
-			if len(info) > 30 {
-				info = info[:27] + "..."
+			if runes := []rune(info); len(runes) > 30 {
+				info = string(runes[:27]) + "..."
 			}
 			if path, ok := args["path"].(string); ok {
 				info += " in " + shortenPath(path, 40)
@@ -2544,8 +2544,8 @@ func (m Model) View() string {
 					start = len(m.agentRecentTools) - 3
 				}
 				trail := strings.Join(m.agentRecentTools[start:], " → ")
-				if len(trail) > 60 {
-					trail = trail[:57] + "..."
+				if runes := []rune(trail); len(runes) > 60 {
+					trail = string(runes[:57]) + "..."
 				}
 				status += "\n  " + recentStyle.Render(trail)
 			}

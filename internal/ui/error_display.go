@@ -141,16 +141,16 @@ func (m ErrorDisplayModel) ViewCompact() string {
 	msgStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
 	errMsg := m.error.OriginalError.Error()
-	if len(errMsg) > 60 {
-		errMsg = errMsg[:57] + "..."
+	if runes := []rune(errMsg); len(runes) > 60 {
+		errMsg = string(runes[:57]) + "..."
 	}
 
 	result := errorStyle.Render("✗ ") + msgStyle.Render(errMsg)
 
 	if len(m.error.Suggestions) > 0 {
 		hint := m.error.Suggestions[0]
-		if len(hint) > 40 {
-			hint = hint[:37] + "..."
+		if runes := []rune(hint); len(runes) > 40 {
+			hint = string(runes[:37]) + "..."
 		}
 		result += " " + msgStyle.Render("→ "+hint)
 	}
