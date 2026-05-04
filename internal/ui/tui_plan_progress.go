@@ -29,8 +29,8 @@ func renderPlanProgress(planProgress *PlanProgressMsg, width int, mutedStyle lip
 	// Show current step title if space permits
 	if width >= 100 && planProgress.CurrentTitle != "" {
 		title := planProgress.CurrentTitle
-		if len(title) > 20 {
-			title = title[:17] + "..."
+		if runes := []rune(title); len(runes) > 20 {
+			title = string(runes[:17]) + "..."
 		}
 		progressText += fmt.Sprintf(" • %s", title)
 	}

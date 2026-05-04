@@ -160,9 +160,13 @@ func (c *ResultCompactor) compactWithErrorPreservation(result tools.ToolResult) 
 		if len(normalContent) > remainingChars {
 			// Truncate normal content
 			builder.WriteString("=== Output (truncated) ===\n")
-			truncated := normalContent[:remainingChars-100]
-			builder.WriteString(truncated)
-			builder.WriteString(fmt.Sprintf("\n...[%d chars omitted]", len(normalContent)-remainingChars+100))
+			runes := []rune(normalContent)
+			keepRunes := remainingChars - 100
+			if keepRunes > len(runes) {
+				keepRunes = len(runes)
+			}
+			builder.WriteString(string(runes[:keepRunes]))
+			builder.WriteString(fmt.Sprintf("\n...[%d chars omitted]", len(runes)-keepRunes))
 		} else {
 			builder.WriteString("=== Output ===\n")
 			builder.WriteString(normalContent)

@@ -273,9 +273,9 @@ func (t *GitPRTool) generatePRDescription(ctx context.Context, base string) (str
 		}
 	}
 
-	// Truncate title
-	if len(title) > 70 {
-		title = title[:67] + "..."
+	// Truncate title (rune-safe for non-ASCII branch/PR titles)
+	if runes := []rune(title); len(runes) > 70 {
+		title = string(runes[:67]) + "..."
 	}
 
 	// Generate body
