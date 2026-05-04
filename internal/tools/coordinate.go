@@ -266,7 +266,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 			userID = internalID
 		}
 
-		sb.WriteString(fmt.Sprintf("### Task: %s\n", userID))
+		fmt.Fprintf(&sb, "### Task: %s\n", userID)
 
 		if resultAny == nil {
 			sb.WriteString("Status: No result\n\n")
@@ -293,7 +293,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 			sb.WriteString("Status: **Completed**\n")
 			succeeded++
 		} else {
-			sb.WriteString(fmt.Sprintf("Status: **Failed** - %s\n", result.Error))
+			fmt.Fprintf(&sb, "Status: **Failed** - %s\n", result.Error)
 			failed++
 		}
 
@@ -303,13 +303,13 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 			if runes := []rune(output); len(runes) > 500 {
 				output = string(runes[:500]) + "...[truncated]"
 			}
-			sb.WriteString(fmt.Sprintf("Output:\n```\n%s\n```\n", output))
+			fmt.Fprintf(&sb, "Output:\n```\n%s\n```\n", output)
 		}
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("---\n**Summary:** %d succeeded, %d failed out of %d tasks\n",
-		succeeded, failed, len(tasksAny)))
+	fmt.Fprintf(&sb, "---\n**Summary:** %d succeeded, %d failed out of %d tasks\n",
+		succeeded, failed, len(tasksAny))
 
 	return NewSuccessResult(sb.String()), nil
 }
@@ -321,11 +321,11 @@ func (t *CoordinateTool) executeSimple(ctx context.Context, tasksAny []any) (Too
 	sb.WriteString("Coordinator not available. Tasks to execute:\n\n")
 
 	for i, taskAny := range tasksAny {
-		task := taskAny.(map[string]any)
-		sb.WriteString(fmt.Sprintf("%d. **%s** (%s)\n", i+1, task["id"], task["agent_type"]))
-		sb.WriteString(fmt.Sprintf("   Prompt: %s\n", task["prompt"]))
+		task, _ := taskAny.(map[string]any)
+		fmt.Fprintf(&sb, "%d. **%s** (%s)\n", i+1, task["id"], task["agent_type"])
+		fmt.Fprintf(&sb, "   Prompt: %s\n", task["prompt"])
 		if deps, ok := task["depends_on"].([]any); ok && len(deps) > 0 {
-			sb.WriteString(fmt.Sprintf("   Depends on: %v\n", deps))
+			fmt.Fprintf(&sb, "   Depends on: %v\n", deps)
 		}
 		sb.WriteString("\n")
 	}
