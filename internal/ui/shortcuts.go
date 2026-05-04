@@ -392,8 +392,8 @@ func (h *ContextualHelp) View(width int) string {
 
 	// Truncate if too long
 	maxWidth := width - 4
-	if len(hintText) > maxWidth {
-		hintText = hintText[:maxWidth-3] + "..."
+	if runes := []rune(hintText); len(runes) > maxWidth {
+		hintText = string(runes[:maxWidth-3]) + "..."
 	}
 
 	return helpStyle.Render(hintText)

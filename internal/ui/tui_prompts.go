@@ -45,8 +45,8 @@ func (m Model) renderPermissionPrompt() string {
 		detail := ""
 		for _, key := range []string{"command", "file_path", "path", "pattern", "url"} {
 			if val, ok := m.permRequest.Args[key].(string); ok && val != "" {
-				if len(val) > 72 {
-					val = val[:69] + "..."
+				if runes := []rune(val); len(runes) > 72 {
+					val = string(runes[:69]) + "..."
 				}
 				detail = val
 				break
@@ -61,8 +61,8 @@ func (m Model) renderPermissionPrompt() string {
 	// Reason (compact)
 	if m.permRequest.Reason != "" {
 		reason := m.permRequest.Reason
-		if len(reason) > 60 {
-			reason = reason[:57] + "..."
+		if runes := []rune(reason); len(runes) > 60 {
+			reason = string(runes[:57]) + "..."
 		}
 		builder.WriteString(markerStyle.Render("     ") + labelStyle.Render(reason))
 		builder.WriteString("\n")

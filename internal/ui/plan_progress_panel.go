@@ -252,8 +252,8 @@ func (p *PlanProgressPanel) SetCurrentTool(toolName, toolInfo string) {
 	// Add to activity log
 	msg := toolName
 	if toolInfo != "" {
-		if len(toolInfo) > 40 {
-			toolInfo = toolInfo[:37] + "..."
+		if runes := []rune(toolInfo); len(runes) > 40 {
+			toolInfo = string(runes[:37]) + "..."
 		}
 		msg += ": " + toolInfo
 	}
@@ -349,8 +349,8 @@ func (p *PlanProgressPanel) View(width int) string {
 
 	// Header line
 	header := fmt.Sprintf(" Plan: %s ", p.planTitle)
-	if len(header) > panelWidth-30 {
-		header = header[:panelWidth-33] + "... "
+	if runes := []rune(header); len(runes) > panelWidth-30 {
+		header = string(runes[:panelWidth-33]) + "... "
 	}
 
 	progressInfo := fmt.Sprintf(" %d/%d ", p.CompletedCount(), len(p.steps))
@@ -423,8 +423,10 @@ func (p *PlanProgressPanel) View(width int) string {
 		if p.currentInfo != "" {
 			info := p.currentInfo
 			maxInfoLen := panelWidth - lipgloss.Width(toolLine) - 6
-			if maxInfoLen > 0 && len(info) > maxInfoLen {
-				info = info[:maxInfoLen-3] + "..."
+			if maxInfoLen > 0 {
+				if runes := []rune(info); len(runes) > maxInfoLen {
+					info = string(runes[:maxInfoLen-3]) + "..."
+				}
 			}
 			if maxInfoLen > 0 {
 				toolLine += " " + infoStyle.Render(info)
@@ -519,8 +521,8 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	if maxTitleWidth < 10 {
 		maxTitleWidth = 10
 	}
-	if len(title) > maxTitleWidth {
-		title = title[:maxTitleWidth-3] + "..."
+	if runes := []rune(title); len(runes) > maxTitleWidth {
+		title = string(runes[:maxTitleWidth-3]) + "..."
 	}
 
 	result := iconStyle.Render(icon) + " " + titleStyle.Render(title) + durationStr
@@ -548,8 +550,8 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	}
 	if step.Status == PlanStepPaused && step.Error != "" {
 		summary := step.Error
-		if len(summary) > maxWidth-6 {
-			summary = summary[:maxWidth-9] + "..."
+		if runes := []rune(summary); len(runes) > maxWidth-6 {
+			summary = string(runes[:maxWidth-9]) + "..."
 		}
 		descStyle := lipgloss.NewStyle().Foreground(ColorWarning).Italic(true)
 		result += "\n    " + descStyle.Render(summary)
@@ -619,8 +621,8 @@ func (p *PlanProgressPanel) ViewCompact() string {
 	for _, step := range p.steps {
 		if step.Status == PlanStepInProgress {
 			currentTitle = step.Title
-			if len(currentTitle) > 15 {
-				currentTitle = currentTitle[:12] + "..."
+			if runes := []rune(currentTitle); len(runes) > 15 {
+				currentTitle = string(runes[:12]) + "..."
 			}
 			break
 		}

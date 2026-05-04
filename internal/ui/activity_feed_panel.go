@@ -604,8 +604,8 @@ func formatToolActivity(toolName string, args map[string]any) string {
 	case "grep":
 		if pattern, ok := args["pattern"].(string); ok {
 			p := pattern
-			if len(p) > 30 {
-				p = p[:27] + "..."
+			if runes := []rune(p); len(runes) > 30 {
+				p = string(runes[:27]) + "..."
 			}
 			return fmt.Sprintf("Searching '%s'", p)
 		}
@@ -616,8 +616,8 @@ func formatToolActivity(toolName string, args map[string]any) string {
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
 			c := cmd
-			if len(c) > 40 {
-				c = c[:37] + "..."
+			if runes := []rune(c); len(runes) > 40 {
+				c = string(runes[:37]) + "..."
 			}
 			c = strings.ReplaceAll(c, "\n", " ")
 			return fmt.Sprintf("Running: %s", c)
@@ -625,8 +625,8 @@ func formatToolActivity(toolName string, args map[string]any) string {
 	case "web_fetch":
 		if url, ok := args["url"].(string); ok {
 			u := url
-			if len(u) > 40 {
-				u = u[:37] + "..."
+			if runes := []rune(u); len(runes) > 40 {
+				u = string(runes[:37]) + "..."
 			}
 			return fmt.Sprintf("Fetching %s", u)
 		}
@@ -645,8 +645,8 @@ func formatToolActivity(toolName string, args map[string]any) string {
 		}
 		if prompt, ok := args["prompt"].(string); ok {
 			p := prompt
-			if len(p) > 40 {
-				p = p[:37] + "..."
+			if runes := []rune(p); len(runes) > 40 {
+				p = string(runes[:37]) + "..."
 			}
 			return p
 		}
@@ -681,8 +681,8 @@ func GenerateResultSummary(toolName, result string) string {
 		}
 		if lines == 1 {
 			r := strings.TrimSpace(result)
-			if len(r) > 30 {
-				r = r[:27] + "..."
+			if runes := []rune(r); len(runes) > 30 {
+				r = string(runes[:27]) + "..."
 			}
 			return r
 		}

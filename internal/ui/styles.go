@@ -729,8 +729,8 @@ func formatArgValue(val any) string {
 func formatArgValueWithLimit(val any, maxLen int) string {
 	switch v := val.(type) {
 	case string:
-		if len(v) > maxLen {
-			return "\"" + v[:maxLen-3] + "...\""
+		if runes := []rune(v); len(runes) > maxLen {
+			return "\"" + string(runes[:maxLen-3]) + "...\""
 		}
 		return "\"" + v + "\""
 	case float64:

@@ -594,8 +594,8 @@ func (p *CommandPalette) View(width, height int) string {
 
 			// Shortcut (left aligned, fixed width)
 			shortcut := cmd.Shortcut
-			if len(shortcut) > 15 {
-				shortcut = shortcut[:15]
+			if runes := []rune(shortcut); len(runes) > 15 {
+				shortcut = string(runes[:15])
 			}
 			if cmd.Enabled {
 				line.WriteString(shortcutStyle.Render(padRight(shortcut, 15)))

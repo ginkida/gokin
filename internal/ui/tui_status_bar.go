@@ -98,8 +98,8 @@ func (m Model) compactStatusSegments() []string {
 	if provider == "" {
 		provider = "ready"
 	}
-	if len(provider) > 12 {
-		provider = provider[:12]
+	if runes := []rune(provider); len(runes) > 12 {
+		provider = string(runes[:12])
 	}
 	parts = append(parts, provider)
 
@@ -133,8 +133,8 @@ func (m Model) minimalStatusSegments() []string {
 	if provider == "" {
 		provider = "ready"
 	}
-	if len(provider) > 10 {
-		provider = provider[:10]
+	if runes := []rune(provider); len(runes) > 10 {
+		provider = string(runes[:10])
 	}
 	parts = append(parts, provider)
 
@@ -257,8 +257,8 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		activeStep := fmt.Sprintf("%s %d/%d", MessageIcons["info"], m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
 		if m.planProgress.CurrentTitle != "" {
 			title := m.planProgress.CurrentTitle
-			if len(title) > 20 {
-				title = title[:17] + "..."
+			if runes := []rune(title); len(runes) > 20 {
+				title = string(runes[:17]) + "..."
 			}
 			activeStep += " " + title
 		}
@@ -592,8 +592,8 @@ func (m Model) formatBackgroundTaskStatus(bgCount int) string {
 		}
 	}
 	if bestAction != "" {
-		if len(bestAction) > 25 {
-			bestAction = bestAction[:22] + "..."
+		if runes := []rune(bestAction); len(runes) > 25 {
+			bestAction = string(runes[:22]) + "..."
 		}
 		return bestAction
 	}

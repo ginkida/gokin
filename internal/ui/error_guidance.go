@@ -469,8 +469,8 @@ func GetCompactHint(errMsg string) string {
 	}
 	// Return first suggestion, shortened if needed
 	hint := guidance.Suggestions[0]
-	if len(hint) > 40 {
-		hint = hint[:37] + "..."
+	if runes := []rune(hint); len(runes) > 40 {
+		hint = string(runes[:37]) + "..."
 	}
 	return hint
 }
