@@ -300,7 +300,7 @@ func DetectScope(files []string) string {
 			// Use the most specific package dir
 			pkg := parts[len(parts)-2]
 			if pkg == "internal" && len(parts) >= 3 {
-				pkg = parts[len(parts)-2]
+				pkg = parts[len(parts)-3]
 			}
 			packages[pkg]++
 		}

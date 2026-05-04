@@ -329,10 +329,11 @@ func autoGenerateCommitMessage(ctx context.Context, workDir string) string {
 		return ""
 	}
 
-	// Get detailed diff (limited for analysis)
+	// Get detailed diff (limited for analysis); error is intentionally ignored —
+	// the auto-generated message still uses stat output even without the full diff.
 	diff, _ := runGitCommandCtx(ctx, workDir, "diff", "--cached")
-	if len(diff) > 4000 {
-		diff = diff[:4000]
+	if runes := []rune(diff); len(runes) > 4000 {
+		diff = string(runes[:4000])
 	}
 
 	// Parse file list and change counts from stat

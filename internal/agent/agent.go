@@ -757,10 +757,15 @@ func (a *Agent) SetPinnedContext(content string) {
 	if workDir != "" {
 		pinnedPath := filepath.Join(workDir, ".gokin", "pinned_context.md")
 		if content == "" {
-			os.Remove(pinnedPath)
+			os.Remove(pinnedPath) // best-effort; file may not exist
 		} else {
-			os.MkdirAll(filepath.Dir(pinnedPath), 0750)
-			os.WriteFile(pinnedPath, []byte(content), 0644)
+			if err := os.MkdirAll(filepath.Dir(pinnedPath), 0750); err != nil {
+				logging.Warn("failed to create pinned context directory", "path", pinnedPath, "error", err)
+				return
+			}
+			if err := os.WriteFile(pinnedPath, []byte(content), 0644); err != nil {
+				logging.Warn("failed to persist pinned context", "path", pinnedPath, "error", err)
+			}
 		}
 	}
 }
