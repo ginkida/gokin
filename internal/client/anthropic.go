@@ -972,6 +972,13 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		}
 	}()
 
+	// Snapshot config fields that SetThinkingBudget can mutate under c.mu.
+	// Reading them in the goroutine below without the lock is a data race.
+	c.mu.RLock()
+	enableThinkingSnap := c.config.EnableThinking
+	providerSnap := c.config.Provider
+	c.mu.RUnlock()
+
 	// Process stream in goroutine
 	go func() {
 		defer close(chunks)
@@ -1049,8 +1056,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					}
 					if statusCb != nil {
 						// Distinguish thinking phase from generic idle
-						if !contentReceived && c.config.EnableThinking {
-							statusCb.OnThinkingIdle(lastWarningAt, c.config.Provider)
+						if !contentReceived && enableThinkingSnap {
+							statusCb.OnThinkingIdle(lastWarningAt, providerSnap)
 						} else {
 							statusCb.OnStreamIdle(lastWarningAt)
 						}
@@ -1064,10 +1071,10 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					// If thinking is enabled and no content received yet, the model
 					// is likely in a silent reasoning phase. Extend the timeout once
 					// to avoid killing the request prematurely.
-					if !contentReceived && !initialTimeoutExtended && c.config.EnableThinking {
+					if !contentReceived && !initialTimeoutExtended && enableThinkingSnap {
 						initialTimeoutExtended = true
 						logging.Info("extending idle timeout for thinking model — no content yet",
-							"provider", c.config.Provider, "original_timeout", streamIdleTimeout)
+							"provider", providerSnap, "original_timeout", streamIdleTimeout)
 						idleTimer.Reset(streamIdleTimeout)
 						if statusCb != nil {
 							statusCb.OnThinkingIdle(streamIdleTimeout, c.config.Provider)
@@ -2168,10 +2175,14 @@ func orderToolResultsFirst(content []map[string]interface{}) []map[string]interf
 	return append(toolResults, other...)
 }
 
-// truncateString truncates a string to maxLen characters with ellipsis.
+// truncateString truncates a string to maxLen runes with ellipsis.
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen]) + "..."
 }
