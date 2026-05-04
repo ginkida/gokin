@@ -303,8 +303,8 @@ func FormatCachedFix(fix *FixRecord) string {
 			var argParts []string
 			for k, v := range call.Args {
 				s := fmt.Sprintf("%v", v)
-				if len(s) > 60 {
-					s = s[:60] + "..."
+				if runes := []rune(s); len(runes) > 60 {
+					s = string(runes[:60]) + "..."
 				}
 				argParts = append(argParts, fmt.Sprintf("%s=%s", k, s))
 			}
@@ -417,10 +417,11 @@ func cloneArgs(args map[string]any) map[string]any {
 
 // truncateStr shortens a string to maxLen characters, appending "..." if truncated.
 func truncateStr(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }
 
 // stopWords contains common English words that don't contribute to error signature matching.

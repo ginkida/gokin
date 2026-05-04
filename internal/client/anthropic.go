@@ -770,8 +770,8 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 						reason = "connection error"
 					} else if strings.Contains(reason, "timeout") || strings.Contains(reason, "deadline exceeded") {
 						reason = "timeout"
-					} else if len(reason) > 50 {
-						reason = reason[:47] + "..."
+					} else if runes := []rune(reason); len(runes) > 50 {
+						reason = string(runes[:47]) + "..."
 					}
 				}
 				cb.OnRetry(attempt, c.config.MaxRetries, delay, reason)

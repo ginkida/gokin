@@ -342,8 +342,8 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 				continue
 			}
 			summary := info.Summary
-			if len(summary) > 60 {
-				summary = summary[:57] + "..."
+			if runes := []rune(summary); len(runes) > 60 {
+				summary = string(runes[:57]) + "..."
 			}
 			if summary == "" {
 				summary = "(no summary)"
@@ -392,8 +392,8 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 	msg := fmt.Sprintf("Session '%s' restored. %d messages loaded.", sessionID, len(state.History))
 	if state.Summary != "" {
 		summary := state.Summary
-		if len(summary) > 100 {
-			summary = summary[:97] + "..."
+		if runes := []rune(summary); len(runes) > 100 {
+			summary = string(runes[:97]) + "..."
 		}
 		msg += fmt.Sprintf("\nLast topic: %s", summary)
 	}
@@ -450,8 +450,8 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 		}
 
 		summary := info.Summary
-		if len(summary) > 80 {
-			summary = summary[:77] + "..."
+		if runes := []rune(summary); len(runes) > 80 {
+			summary = string(runes[:77]) + "..."
 		}
 		if summary == "" {
 			summary = "(no summary)"
