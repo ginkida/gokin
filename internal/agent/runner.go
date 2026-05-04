@@ -113,6 +113,10 @@ type Runner struct {
 	// in the session. Wired in from app/builder to the tools.FileReadTracker.
 	recentFilesProvider func(limit int) []string
 
+	// Provider used by spawned agents to fetch files modified in this session.
+	// Wired from app/builder to the tools.FileWriteTracker.
+	modifiedFilesProvider func(limit int) []string
+
 	// Workspace isolation for supported sub-agents
 	workspaceIsolationEnabled bool
 	workspaceReviewHandler    func(context.Context, []WorkspaceChangePreview) (bool, error)
@@ -362,6 +366,14 @@ func (r *Runner) SetWeakModelMode(enabled bool) {
 func (r *Runner) SetRecentFilesProvider(fn func(limit int) []string) {
 	r.mu.Lock()
 	r.recentFilesProvider = fn
+	r.mu.Unlock()
+}
+
+// SetModifiedFilesProvider wires a callback that returns file paths written or
+// edited in this session. Injected into spawned agents' continuation hints.
+func (r *Runner) SetModifiedFilesProvider(fn func(limit int) []string) {
+	r.mu.Lock()
+	r.modifiedFilesProvider = fn
 	r.mu.Unlock()
 }
 
@@ -635,6 +647,7 @@ func (r *Runner) newConfiguredAgent(
 	weakMode := r.weakModelMode
 	onRL := r.onRateLimit
 	recentFiles := r.recentFilesProvider
+	modifiedFiles := r.modifiedFilesProvider
 	r.mu.RUnlock()
 
 	if weakMode {
@@ -645,6 +658,9 @@ func (r *Runner) newConfiguredAgent(
 	}
 	if recentFiles != nil {
 		agent.SetRecentFilesProvider(recentFiles)
+	}
+	if modifiedFiles != nil {
+		agent.SetModifiedFilesProvider(modifiedFiles)
 	}
 
 	if deps.onInput != nil {

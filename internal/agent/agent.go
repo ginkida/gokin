@@ -97,6 +97,12 @@ type Agent struct {
 	// in compacted form. Nil-safe — no hint is added when unset.
 	recentFilesProvider func(limit int) []string
 
+	// modifiedFilesProvider returns up to N file paths written/edited in this
+	// session. Post-compaction, surfaces these so the model knows what it has
+	// already changed and doesn't redundantly overwrite or forget edits made
+	// before the summary. Nil-safe.
+	modifiedFilesProvider func(limit int) []string
+
 	// Pre-emptive compaction state: EMA of tokens added per turn. Lets
 	// checkAndSummarize compact when "current % + 3 × EMA" crosses threshold,
 	// catching imminent overflow before we're mid-stream. lastTokenCount ≤ 0
@@ -736,6 +742,15 @@ func (a *Agent) SetWeakModelMode(enabled bool) {
 func (a *Agent) SetRecentFilesProvider(fn func(limit int) []string) {
 	a.stateMu.Lock()
 	a.recentFilesProvider = fn
+	a.stateMu.Unlock()
+}
+
+// SetModifiedFilesProvider wires a callback that returns up to `limit` recently
+// modified file paths. Used by injectContinuationHint so the model knows which
+// files it has already written/edited after a compaction.
+func (a *Agent) SetModifiedFilesProvider(fn func(limit int) []string) {
+	a.stateMu.Lock()
+	a.modifiedFilesProvider = fn
 	a.stateMu.Unlock()
 }
 
@@ -3727,6 +3742,14 @@ func (a *Agent) injectContinuationHint() {
 	if a.recentFilesProvider != nil {
 		if files := a.recentFilesProvider(15); len(files) > 0 {
 			hint += "\n\nAlready-read files in this session (content was compacted; re-read only if you need specific details):"
+			for _, f := range files {
+				hint += "\n- " + f
+			}
+		}
+	}
+	if a.modifiedFilesProvider != nil {
+		if files := a.modifiedFilesProvider(10); len(files) > 0 {
+			hint += "\n\nFiles you already modified in this task (do not overwrite unless the user asked for a change):"
 			for _, f := range files {
 				hint += "\n- " + f
 			}

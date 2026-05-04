@@ -224,6 +224,10 @@ type Executor struct {
 	// File read deduplication tracker
 	readTracker *FileReadTracker
 
+	// File write tracker — records paths modified by write/edit/refactor so
+	// injectContinuationHint can remind the model after compaction.
+	writeTracker *FileWriteTracker
+
 	// phaseObserver (optional) receives per-tool timing and outcome. Wired from
 	// internal/app so the tools package stays free of metrics dependencies.
 	phaseObserver func(tool string, d time.Duration, success bool)
@@ -639,6 +643,13 @@ func (e *Executor) SetSearchCache(c *cache.SearchCache) {
 // SetReadTracker sets the file read deduplication tracker.
 func (e *Executor) SetReadTracker(tracker *FileReadTracker) {
 	e.readTracker = tracker
+}
+
+// SetWriteTracker sets the file write tracker. When set, successful write/edit/
+// refactor/copy/move calls record the modified path so the agent can surface
+// them in post-compaction continuation hints.
+func (e *Executor) SetWriteTracker(tracker *FileWriteTracker) {
+	e.writeTracker = tracker
 }
 
 // GetReadTracker returns the executor's read tracker, or nil if none is
@@ -1980,6 +1991,15 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
+	// Record successfully modified files in the write tracker.
+	if result.Success && e.writeTracker != nil && isFileModifyingTool(call.Name) {
+		for _, key := range []string{"file_path", "path", "destination", "new_path"} {
+			if p, ok := call.Args[key].(string); ok && p != "" {
+				e.writeTracker.Record(p)
+			}
+		}
+	}
+
 	// Step 12.9: Post-edit delta-check on changed modules (format/lint/build; no tests).
 	if result.Success && shouldRunDeltaCheckCall(call) {
 		if delta := e.runDeltaCheckAfterMutation(ctx, call); delta != nil {
@@ -2322,6 +2342,24 @@ func extractFilePaths(call *genai.FunctionCall) []string {
 // isWriteOperation returns true if the tool modifies files/state.
 func isWriteOperation(toolName string) bool {
 	return writeTools[toolName]
+}
+
+// fileModifyingTools is the subset of writeTools that produce a specific
+// file path we can surface in post-compaction hints (excludes bash/git_commit
+// whose "written path" is opaque or irrelevant as a hint).
+var fileModifyingTools = map[string]bool{
+	"write":       true,
+	"edit":        true,
+	"atomicwrite": true,
+	"copy":        true,
+	"move":        true,
+	"refactor":    true,
+}
+
+// isFileModifyingTool returns true if the tool produces a named file path
+// worth recording in the write tracker.
+func isFileModifyingTool(toolName string) bool {
+	return fileModifyingTools[toolName]
 }
 
 // getEmptyResultHint returns a diagnostic hint when a tool returns empty results.

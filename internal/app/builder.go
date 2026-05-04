@@ -50,6 +50,7 @@ type Builder struct {
 	registry         *tools.Registry
 	executor         *tools.Executor
 	readTracker      *tools.FileReadTracker
+	writeTracker     *tools.FileWriteTracker
 	session          *chat.Session
 	tuiModel         *ui.Model
 	projectInfo      *appcontext.ProjectInfo
@@ -428,6 +429,10 @@ func (b *Builder) initTools() error {
 	b.executor.SetReadTracker(readTracker)
 	b.readTracker = readTracker
 
+	writeTracker := tools.NewFileWriteTracker()
+	b.executor.SetWriteTracker(writeTracker)
+	b.writeTracker = writeTracker
+
 	// Enable native macOS notifications if configured
 	if b.cfg.UI.NativeNotifications {
 		b.executor.GetNotificationManager().EnableNativeNotifications(true)
@@ -713,6 +718,12 @@ func (b *Builder) initManagers() error {
 		tracker := b.readTracker
 		b.agentRunner.SetRecentFilesProvider(func(limit int) []string {
 			return tracker.RecentlyReadFiles(limit)
+		})
+	}
+	if b.writeTracker != nil {
+		tracker := b.writeTracker
+		b.agentRunner.SetModifiedFilesProvider(func(limit int) []string {
+			return tracker.RecentlyModifiedFiles(limit)
 		})
 	}
 
