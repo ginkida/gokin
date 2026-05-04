@@ -201,14 +201,19 @@ func (o *TaskOrchestrator) executeTask(ctx context.Context, t *OrchestratorTask)
 			o.schedule() // Check for new ready tasks
 		}()
 
+		// Snapshot callback under lock to avoid a race with SetOnStatusChange.
+		o.mu.Lock()
+		onStatusChange := o.onStatusChange
+		o.mu.Unlock()
+
 		now := time.Now()
 		t.mu.Lock()
 		t.Status = OrchStatusRunning
 		t.StartedAt = &now
 		t.mu.Unlock()
 
-		if o.onStatusChange != nil {
-			o.onStatusChange(t.ID, OrchStatusRunning)
+		if onStatusChange != nil {
+			onStatusChange(t.ID, OrchStatusRunning)
 		}
 
 		// Execute with timeout
@@ -229,12 +234,12 @@ func (o *TaskOrchestrator) executeTask(ctx context.Context, t *OrchestratorTask)
 		}
 		t.mu.Unlock()
 
-		if o.onStatusChange != nil {
+		if onStatusChange != nil {
 			status := OrchStatusCompleted
 			if err != nil {
 				status = OrchStatusFailed
 			}
-			o.onStatusChange(t.ID, status)
+			onStatusChange(t.ID, status)
 		}
 
 		if t.OnComplete != nil {
