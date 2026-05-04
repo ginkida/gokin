@@ -403,7 +403,14 @@ func (c *Client) request(ctx context.Context, method string, params any) (*JSONR
 		Params: params,
 	}
 
-	if err := c.transport.Send(msg); err != nil {
+	// Snapshot transport under the read lock so reconnect() cannot replace
+	// the pointer between our read and the Send call (data race with c.mu.Lock
+	// in reconnect() line that swaps c.transport).
+	c.mu.RLock()
+	transport := c.transport
+	c.mu.RUnlock()
+
+	if err := transport.Send(msg); err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
