@@ -1404,11 +1404,14 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 							mu.Unlock()
 						}
 					}()
+					// Use a goroutine-local context to avoid racing on the
+					// shared ctx variable when multiple tools run in parallel.
+					toolCtx := ctx
 					if e.handler != nil && e.handler.OnFilePeek != nil {
-						ctx = ContextWithFilePeekCallback(ctx, e.handler.OnFilePeek)
+						toolCtx = ContextWithFilePeekCallback(toolCtx, e.handler.OnFilePeek)
 					}
 
-					result := e.executeTool(ctx, fc)
+					result := e.executeTool(toolCtx, fc)
 					mu.Lock()
 					results[i] = &genai.FunctionResponse{ID: fc.ID, Name: fc.Name, Response: result.ToMap()}
 					mu.Unlock()
