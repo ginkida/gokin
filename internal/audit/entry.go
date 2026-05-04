@@ -126,5 +126,9 @@ func TruncateResult(result string, maxLen int) string {
 	if len(result) <= maxLen {
 		return result
 	}
-	return result[:maxLen] + "...[truncated]"
+	runes := []rune(result)
+	if len(runes) <= maxLen {
+		return result
+	}
+	return string(runes[:maxLen]) + "...[truncated]"
 }

@@ -724,8 +724,8 @@ func (s *Store) GetReport() string {
 			age := time.Since(e.Timestamp)
 			ageStr := formatAge(age)
 			content := e.Content
-			if len(content) > 80 {
-				content = content[:77] + "..."
+			if runes := []rune(content); len(runes) > 80 {
+				content = string(runes[:77]) + "..."
 			}
 			if e.Key != "" {
 				fmt.Fprintf(&sb, "- **%s**: %s (%s)\n", e.Key, content, ageStr)
@@ -882,8 +882,8 @@ func (s *Store) GetForContext(projectOnly bool) string {
 			fmt.Fprintf(&builder, "### %s\n", tc.label)
 			for _, entry := range items {
 				content := strings.TrimSpace(entry.Content)
-				if len(content) > 220 {
-					content = content[:220] + "..."
+				if runes := []rune(content); len(runes) > 220 {
+					content = string(runes[:220]) + "..."
 				}
 				if entry.Key != "" {
 					fmt.Fprintf(&builder, "- **%s**: %s\n", entry.Key, content)

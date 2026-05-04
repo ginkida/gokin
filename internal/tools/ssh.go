@@ -278,8 +278,11 @@ func (t *SSHTool) executeCommand(ctx context.Context, args map[string]any) (Tool
 	// Truncate long output
 	const maxLen = 30000
 	if len(output) > maxLen {
-		totalLen := len(output)
-		output = output[:maxLen] + fmt.Sprintf("\n... (output truncated: showing %d of %d characters)", maxLen, totalLen)
+		runes := []rune(output)
+		totalLen := len(runes)
+		if totalLen > maxLen {
+			output = string(runes[:maxLen]) + fmt.Sprintf("\n... (output truncated: showing %d of %d characters)", maxLen, totalLen)
+		}
 	}
 
 	if output == "" {

@@ -169,8 +169,8 @@ func buildReason(toolName string, args map[string]any) string {
 
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
-			if len(cmd) > 150 {
-				cmd = cmd[:147] + "..."
+			if runes := []rune(cmd); len(runes) > 150 {
+				cmd = string(runes[:147]) + "..."
 			}
 			return fmt.Sprintf("Execute command: %s", cmd)
 		}
