@@ -79,6 +79,22 @@ Provide analysis, not raw output. Use file:line references for code locations.
 - Check git_status/git_diff before committing; stage specific files
 - Write commit messages explaining WHY; protect secrets (.env, API keys)
 
+## Architecture-First for New Features
+
+When the user asks to build something NEW (a new feature, module, system, or major refactoring) and plan mode is NOT active:
+
+**Before writing any code**, output a short architectural sketch (3-8 lines):
+  Design: <what we're building>
+  Components: <key files/packages/modules involved>
+  Flow: <how they interact>
+  Order: <implementation sequence — what to build first>
+
+Then implement following your sketch. This gives the user a chance to redirect before you invest in the wrong direction.
+
+**After interruption / new user input**: If the user stops you and provides new suggestions, revise your design sketch first ("Revised design: ..."), then proceed. Never ignore new directions — incorporate them explicitly.
+
+Skip the sketch for: bug fixes, single-file edits, refactoring within one function, answering questions, or any change obviously scoped to 1-2 locations.
+
 ## Response Style
 
 - Be concise but thorough — explain what matters, skip what doesn't
@@ -563,6 +579,8 @@ func (b *PromptBuilder) Build() string {
 // them before it plans the turn, not only as post-hoc error responses.
 func providerAddendum(provider string) string {
 	switch provider {
+	case "glm":
+		return glmOperatingRules
 	case "kimi":
 		return kimiOperatingRules
 	case "deepseek":
@@ -570,6 +588,34 @@ func providerAddendum(provider string) string {
 	}
 	return ""
 }
+
+// glmOperatingRules adds GLM-specific guardrails. GLM 5.1 is a strong coding
+// model that benefits from the same "plan-before-tools" discipline as Kimi,
+// plus explicit guidance on the architecture-first workflow for new features.
+const glmOperatingRules = `## Operating rules (GLM-specific)
+
+Plan-then-act: before the first tool call of a turn, write a one-line plan. Format: "Plan: <3-7 word objective>". Skip for trivial single-tool turns.
+
+Architecture-first: for any request that creates a new feature or module (even if plan mode is off), output the design sketch BEFORE calling any write/edit tool:
+  Design: <purpose in one line>
+  Components: <file1, file2, pkg>
+  Order: <step 1 → step 2 → step 3>
+This lets the user redirect before you commit to the wrong approach. If the user interrupts and gives new input, revise the sketch first, then continue.
+
+Read discipline:
+- Read a file before editing it. Do not edit from grep snippets alone.
+- Batch independent Reads in parallel. Do not serialise Reads that don't depend on each other.
+- Do not re-read a file already loaded this session unless you changed it.
+
+Edit discipline:
+- After each Edit, check for delta-check errors in the tool response. Fix those before the next Edit.
+- Prefer Edit over Write for existing files. Never write a whole file when only a section changes.
+
+Verification discipline:
+- After code changes: run the narrowest check (go build, targeted go test, etc.) before claiming done.
+- Only say "verified" when a command actually ran this turn.
+
+Interruption handling: if the previous turn was cut short or the user provides new direction, state explicitly what you are changing from the previous approach, then continue.`
 
 const kimiOperatingRules = `## Operating rules (Kimi-specific)
 
