@@ -403,6 +403,8 @@ func (c *Config) Save() error {
 		if err := os.WriteFile(configPath, data, 0600); err != nil {
 			return fmt.Errorf("failed to write config file: %w", err)
 		}
+		// Clean up the .tmp file that rename couldn't move.
+		os.Remove(tmpPath)
 	}
 
 	return nil
