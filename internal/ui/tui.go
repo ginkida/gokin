@@ -823,6 +823,16 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.planFeedbackInput.SetPlaceholder("Enter your feedback for plan modifications...")
 			return m.planFeedbackInput.Focus()
 		}
+		// Initialize the plan progress panel when the plan is approved via Enter
+		// (the "y" quick-approve path already does this; keep them in sync).
+		if decision == PlanApproved && m.planRequest != nil && m.planProgressPanel != nil {
+			m.planProgressPanel.StartPlan(
+				"",
+				m.planRequest.Title,
+				m.planRequest.Description,
+				m.planRequest.Steps,
+			)
+		}
 		m.planRequest = nil
 		m.planSelectedOption = 0
 		m.state = StateProcessing

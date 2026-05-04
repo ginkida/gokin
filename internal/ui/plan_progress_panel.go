@@ -465,18 +465,20 @@ func (p *PlanProgressPanel) writeBoxLines(content *strings.Builder, borderStyle 
 }
 
 // renderStep renders a single step with tree-style status icon.
-// Uses symbols: "✓" (completed), "→" (in progress), "○" (pending), "✗" (failed), "⊘" (skipped).
+// Uses animated spinner for in-progress, "✓" completed, "○" pending, "✗" failed, "⊘" skipped.
 func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string {
-	// Status icon matching the plan tree view conventions
 	var icon string
 	var iconStyle lipgloss.Style
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
 	switch step.Status {
 	case PlanStepPending:
 		icon = "○"
 		iconStyle = lipgloss.NewStyle().Foreground(ColorDim)
 	case PlanStepInProgress:
-		icon = "→"
+		// Animated braille spinner so it's obvious the step is actively running
+		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		icon = spinners[p.frame%len(spinners)]
 		iconStyle = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	case PlanStepPaused:
 		icon = "⏸"
@@ -492,7 +494,6 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 		iconStyle = lipgloss.NewStyle().Foreground(ColorMuted)
 	}
 
-	// Step title
 	titleStyle := lipgloss.NewStyle().Foreground(ColorText)
 	if step.Status == PlanStepInProgress {
 		titleStyle = titleStyle.Bold(true)
@@ -503,17 +504,22 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	title := fmt.Sprintf("Step %d: %s", step.ID, step.Title)
 	maxTitleWidth := maxWidth - 5 // icon + space + padding
 
-	// Add duration for completed/failed steps
 	durationStr := ""
-	if step.Status == PlanStepCompleted || step.Status == PlanStepFailed {
+	switch step.Status {
+	case PlanStepCompleted, PlanStepFailed:
 		if !step.CompletedAt.IsZero() && !step.StartedAt.IsZero() {
 			duration := step.CompletedAt.Sub(step.StartedAt)
 			if step.FilesModified > 0 {
-				durationStr = " " + lipgloss.NewStyle().Foreground(ColorDim).Render(
-					fmt.Sprintf("(%s · %d files)", formatElapsed(duration), step.FilesModified))
+				durationStr = " " + dimStyle.Render(fmt.Sprintf("(%s · %d files)", formatElapsed(duration), step.FilesModified))
 			} else {
-				durationStr = " " + lipgloss.NewStyle().Foreground(ColorDim).Render("("+formatElapsed(duration)+")")
+				durationStr = " " + dimStyle.Render("("+formatElapsed(duration)+")")
 			}
+			maxTitleWidth -= lipgloss.Width(durationStr)
+		}
+	case PlanStepInProgress:
+		// Show live elapsed time so users know how long the current step has been running
+		if !step.StartedAt.IsZero() {
+			durationStr = " " + dimStyle.Render("["+formatElapsed(time.Since(step.StartedAt))+"]")
 			maxTitleWidth -= lipgloss.Width(durationStr)
 		}
 	}
@@ -527,14 +533,30 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 
 	result := iconStyle.Render(icon) + " " + titleStyle.Render(title) + durationStr
 
-	// Show description for in-progress steps
-	if step.Status == PlanStepInProgress && step.Description != "" {
-		desc := step.Description
-		if runes := []rune(desc); len(runes) > maxWidth-6 {
-			desc = string(runes[:maxWidth-9]) + "..."
+	// For the active step: prioritise the currently-executing tool over the
+	// static description — it's more actionable ("what is the agent doing RIGHT NOW").
+	if step.Status == PlanStepInProgress {
+		if p.currentStepID == step.ID && p.currentTool != "" {
+			toolLine := p.currentTool
+			if p.currentInfo != "" {
+				info := p.currentInfo
+				maxInfo := maxWidth - len(toolLine) - 9 // "    └─ " + ": " prefix
+				if maxInfo < 10 {
+					maxInfo = 10
+				}
+				if runes := []rune(info); len(runes) > maxInfo {
+					info = string(runes[:maxInfo-3]) + "..."
+				}
+				toolLine += ": " + info
+			}
+			result += "\n    " + dimStyle.Render("└─ "+toolLine)
+		} else if step.Description != "" {
+			desc := step.Description
+			if runes := []rune(desc); len(runes) > maxWidth-6 {
+				desc = string(runes[:maxWidth-9]) + "..."
+			}
+			result += "\n    " + dimStyle.Italic(true).Render(desc)
 		}
-		descStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-		result += "\n    " + descStyle.Render(desc)
 	}
 
 	// Show first line of output for completed steps
@@ -544,17 +566,24 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 			summary = string(runes[:maxWidth-9]) + "..."
 		}
 		if summary != "" {
-			descStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-			result += "\n    " + descStyle.Render(summary)
+			result += "\n    " + dimStyle.Italic(true).Render(summary)
 		}
 	}
+
 	if step.Status == PlanStepPaused && step.Error != "" {
 		summary := step.Error
 		if runes := []rune(summary); len(runes) > maxWidth-6 {
 			summary = string(runes[:maxWidth-9]) + "..."
 		}
-		descStyle := lipgloss.NewStyle().Foreground(ColorWarning).Italic(true)
-		result += "\n    " + descStyle.Render(summary)
+		result += "\n    " + lipgloss.NewStyle().Foreground(ColorWarning).Italic(true).Render(summary)
+	}
+
+	if step.Status == PlanStepFailed && step.Error != "" {
+		errLine := step.Error
+		if runes := []rune(errLine); len(runes) > maxWidth-6 {
+			errLine = string(runes[:maxWidth-9]) + "..."
+		}
+		result += "\n    " + lipgloss.NewStyle().Foreground(ColorError).Render("✗ "+errLine)
 	}
 
 	return result
