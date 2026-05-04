@@ -161,8 +161,8 @@ func buildCompletionReviewPrompt(userMessage, response string, touchedPaths, com
 
 	trimmedResponse := strings.TrimSpace(response)
 	if trimmedResponse != "" {
-		if len(trimmedResponse) > completionReviewDraftLimit {
-			trimmedResponse = trimmedResponse[:completionReviewDraftLimit] + "..."
+		if runes := []rune(trimmedResponse); len(runes) > completionReviewDraftLimit {
+			trimmedResponse = string(runes[:completionReviewDraftLimit]) + "..."
 		}
 		sb.WriteString("Current draft response already given to the user:\n")
 		sb.WriteString(trimmedResponse)
