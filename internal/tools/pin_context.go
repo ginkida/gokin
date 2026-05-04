@@ -126,6 +126,11 @@ func (t *PinContextTool) persistPin(content string) {
 		return
 	}
 	dir := filepath.Dir(path)
-	os.MkdirAll(dir, 0750)
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		logging.Warn("failed to create pinned context directory", "path", dir, "error", err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		logging.Warn("failed to persist pinned context", "path", path, "error", err)
+	}
 }
