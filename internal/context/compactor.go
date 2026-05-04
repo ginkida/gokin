@@ -57,8 +57,9 @@ func (c *ResultCompactor) Compact(result tools.ToolResult) tools.ToolResult {
 	// Error results get a higher limit but are still bounded
 	if !result.Success {
 		if len(result.Content) > maxErrorChars {
-			truncated := result.Content[:maxErrorChars]
-			truncated += fmt.Sprintf("\n...[error truncated, showing %d of %d chars]", maxErrorChars, len(result.Content))
+			runes := []rune(result.Content)
+			truncated := string(runes[:min(maxErrorChars, len(runes))])
+			truncated += fmt.Sprintf("\n...[error truncated, showing %d of %d chars]", maxErrorChars, len(runes))
 			return tools.ToolResult{
 				Content: truncated,
 				Data:    result.Data,
@@ -90,8 +91,9 @@ func (c *ResultCompactor) Compact(result tools.ToolResult) tools.ToolResult {
 	}
 
 	// Fall back to simple truncation
-	truncated := result.Content[:c.maxChars]
-	truncated += fmt.Sprintf("\n...[truncated, showing %d of %d chars]", c.maxChars, len(result.Content))
+	runes := []rune(result.Content)
+	truncated := string(runes[:min(c.maxChars, len(runes))])
+	truncated += fmt.Sprintf("\n...[truncated, showing %d of %d chars]", c.maxChars, len(runes))
 
 	return tools.ToolResult{
 		Content: truncated,
@@ -226,7 +228,8 @@ func (c *ResultCompactor) smartTruncateContent(content string) string {
 	// If not many lines, just do char truncation
 	if len(lines) <= c.headLines+c.tailLines+1 {
 		if len(content) > c.maxChars {
-			return content[:c.maxChars] + "\n...[truncated]"
+			runes := []rune(content)
+			return string(runes[:min(c.maxChars, len(runes))]) + "\n...[truncated]"
 		}
 		return content
 	}
@@ -246,7 +249,8 @@ func (c *ResultCompactor) smartTruncateContent(content string) string {
 
 	// If still too long, apply char limit
 	if len(result) > c.maxChars {
-		result = result[:c.maxChars] + "\n...[truncated]"
+		runes := []rune(result)
+		result = string(runes[:min(c.maxChars, len(runes))]) + "\n...[truncated]"
 	}
 
 	return result

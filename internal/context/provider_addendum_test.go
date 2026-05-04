@@ -36,10 +36,28 @@ func TestProviderAddendum_NormalizesCase(t *testing.T) {
 	}
 }
 
+func TestProviderAddendum_GLMNonEmpty(t *testing.T) {
+	got := providerAddendum("glm")
+	if got == "" {
+		t.Fatal("glm addendum should be non-empty")
+	}
+	for _, needle := range []string{
+		"Plan:",
+		"Architecture-first",
+		"Read discipline",
+		"Edit discipline",
+		"Verification discipline",
+		"Interruption handling",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Errorf("glm addendum missing %q marker", needle)
+		}
+	}
+}
+
 func TestProviderAddendum_UnknownProvider(t *testing.T) {
-	// DeepSeek and Kimi both have addendums. The rest should still
-	// return empty until someone ships their own operating rules.
-	for _, name := range []string{"glm", "minimax", "ollama", "anthropic", "", "random"} {
+	// minimax, ollama, and unknown providers have no addendum.
+	for _, name := range []string{"minimax", "ollama", "anthropic", "", "random"} {
 		if got := providerAddendum(name); got != "" {
 			t.Errorf("provider %q should have no addendum yet, got %d chars", name, len(got))
 		}

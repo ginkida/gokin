@@ -139,9 +139,14 @@ func (sr *SmartRouter) RouteWithContext(ctx context.Context, message string) *Ro
 				}
 			}
 
+			runes := []rune(message)
+			msgPreview := message
+			if len(runes) > 50 {
+				msgPreview = string(runes[:50])
+			}
 			logging.Debug("found similar examples for routing",
 				"count", len(examples),
-				"message", message[:min(50, len(message))])
+				"message", msgPreview)
 		}
 	}
 
