@@ -2962,13 +2962,14 @@ func (e *Executor) summarizeWorkingMemoryResult(toolName string, result *genai.F
 
 func trimInlineText(text string, max int) string {
 	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
-	if max <= 0 || len(text) <= max {
+	runes := []rune(text)
+	if max <= 0 || len(runes) <= max {
 		return text
 	}
 	if max == 1 {
 		return "…"
 	}
-	return text[:max-1] + "…"
+	return string(runes[:max-1]) + "…"
 }
 
 // adaptiveToolTimeout returns the effective timeout for a single tool call

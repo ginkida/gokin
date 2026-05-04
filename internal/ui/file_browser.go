@@ -347,8 +347,8 @@ func (m *FileBrowserModel) formatEntryLine(index int, entry FileEntry) string {
 
 	// Format line
 	name := entry.Name
-	if len(name) > 30 {
-		name = name[:27] + "..."
+	if runes := []rune(name); len(runes) > 30 {
+		name = string(runes[:27]) + "..."
 	}
 
 	var line string

@@ -172,8 +172,8 @@ func (t *GitCommitTool) generateCommitMessage(ctx context.Context, includeUnstag
 	}
 
 	diffStr := string(detailOutput)
-	if len(diffStr) > 4000 {
-		diffStr = diffStr[:4000] + "\n... (truncated)"
+	if runes := []rune(diffStr); len(runes) > 4000 {
+		diffStr = string(runes[:4000]) + "\n... (truncated)"
 	}
 
 	// Analyze the changes

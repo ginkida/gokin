@@ -454,10 +454,10 @@ func truncateError(msg string, maxLen int) string {
 	msg = strings.ReplaceAll(msg, "\n", " ")
 	msg = strings.TrimSpace(msg)
 
-	if len(msg) <= maxLen {
-		return msg
+	if runes := []rune(msg); len(runes) > maxLen {
+		return string(runes[:maxLen-3]) + "..."
 	}
-	return msg[:maxLen-3] + "..."
+	return msg
 }
 
 // GetCompactHint returns a short actionable hint for an error.

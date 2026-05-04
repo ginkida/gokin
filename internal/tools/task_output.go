@@ -416,8 +416,8 @@ func (t *TaskOutputTool) listTasks() (ToolResult, error) {
 
 			// Truncate command if too long
 			cmd := info.Command
-			if len(cmd) > 50 {
-				cmd = cmd[:47] + "..."
+			if runes := []rune(cmd); len(runes) > 50 {
+				cmd = string(runes[:47]) + "..."
 			}
 
 			builder.WriteString(fmt.Sprintf("  [%s] %s - %s (%s)\n", status, info.ID, cmd, info.Duration))

@@ -134,8 +134,8 @@ func summarizeBashOutput(content string) string {
 		if strings.Contains(lower, "error:") || strings.Contains(lower, "undefined:") ||
 			strings.Contains(lower, "cannot use") || strings.Contains(lower, "panic:") {
 			trimmed := strings.TrimSpace(line)
-			if len(trimmed) > 80 {
-				trimmed = trimmed[:80]
+			if runes := []rune(trimmed); len(runes) > 80 {
+				trimmed = string(runes[:80])
 			}
 			errors = append(errors, trimmed)
 		}

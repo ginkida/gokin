@@ -427,10 +427,11 @@ func (m SearchResultsModel) GetSelectedResult() (SearchResult, bool) {
 	return m.results[m.selectedIndex], true
 }
 
-// truncate truncates a string to max length.
+// truncate truncates a string to max length (rune-safe).
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }

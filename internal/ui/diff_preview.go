@@ -1271,8 +1271,8 @@ func (m MultiDiffPreviewModel) View() string {
 		fileName := filepath.Base(file.FilePath)
 		// Reserve extra chars for the decision marker (✓/✗/·) + selection
 		// caret so long filenames truncate predictably.
-		if len(fileName) > listWidth-10 {
-			fileName = fileName[:listWidth-13] + "..."
+		if fileRunes := []rune(fileName); len(fileRunes) > listWidth-10 {
+			fileName = string(fileRunes[:listWidth-13]) + "..."
 		}
 
 		// Decision marker — lets users see which files they've already

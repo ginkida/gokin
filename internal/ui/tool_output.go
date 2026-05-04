@@ -288,8 +288,8 @@ func (m *ToolOutputModel) renderTruncated(content string) string {
 	}
 	for i := headStart; i < headEnd; i++ {
 		line := lines[i]
-		if len(line) > 100 {
-			line = line[:97] + "..."
+		if runes := []rune(line); len(runes) > 100 {
+			line = string(runes[:97]) + "..."
 		}
 		result.WriteString(line)
 		if i < headEnd-1 || tailCount > 0 {
@@ -315,8 +315,8 @@ func (m *ToolOutputModel) renderTruncated(content string) string {
 	// Tail lines
 	for i := startTail; i <= tailStop && i < totalLines; i++ {
 		line := lines[i]
-		if len(line) > 100 {
-			line = line[:97] + "..."
+		if runes := []rune(line); len(runes) > 100 {
+			line = string(runes[:97]) + "..."
 		}
 		result.WriteString(line)
 		if i < totalLines-1 && i < tailStop {

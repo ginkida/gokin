@@ -944,8 +944,8 @@ func buildClaudeCodeArgs(name string, args map[string]any) string {
 		} else {
 			result = shortenPath(result, filePathMaxLen)
 		}
-	} else if len(result) > generalArgMaxLen {
-		result = result[:generalArgMaxLen-3] + "..."
+	} else if runes := []rune(result); len(runes) > generalArgMaxLen {
+		result = string(runes[:generalArgMaxLen-3]) + "..."
 	}
 
 	return result
@@ -982,8 +982,8 @@ func truncatePathSmart(path string, maxLen int) string {
 	if lastSlash == -1 {
 		// No slash, just truncate normally
 		result := path
-		if len(result) > maxLen-3 {
-			result = result[:maxLen-3] + "..."
+		if runes := []rune(result); len(runes) > maxLen-3 {
+			result = string(runes[:maxLen-3]) + "..."
 		}
 		if hasQuotes {
 			return "\"" + result + "\""

@@ -97,8 +97,8 @@ func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolR
 		}
 		for _, decl := range t.lister.Declarations() {
 			desc := decl.Description
-			if len(desc) > 100 {
-				desc = desc[:97] + "..."
+			if runes := []rune(desc); len(runes) > 100 {
+				desc = string(runes[:97]) + "..."
 			}
 			fmt.Fprintf(&output, "- **%s**: %s\n", decl.Name, desc)
 			matched++
