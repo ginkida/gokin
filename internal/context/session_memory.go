@@ -756,8 +756,8 @@ func extractErrorLine(text, pattern string) string {
 		end = len(text) - start
 	}
 	line := strings.TrimSpace(text[start : start+end])
-	if len(line) > 150 {
-		line = line[:150] + "..."
+	if runes := []rune(line); len(runes) > 150 {
+		line = string(runes[:150]) + "..."
 	}
 	return line
 }

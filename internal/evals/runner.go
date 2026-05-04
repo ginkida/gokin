@@ -904,10 +904,11 @@ func writeJSONL(w io.Writer, result Result) error {
 
 func trimPreview(s string, limit int) string {
 	s = strings.TrimSpace(s)
-	if limit <= 0 || len(s) <= limit {
+	runes := []rune(s)
+	if limit <= 0 || len(runes) <= limit {
 		return s
 	}
-	return s[:limit] + fmt.Sprintf("\n...(%d chars truncated)", len(s)-limit)
+	return string(runes[:limit]) + fmt.Sprintf("\n...(%d chars truncated)", len(runes)-limit)
 }
 
 func shellQuote(s string) string {

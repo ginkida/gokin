@@ -454,10 +454,11 @@ func (t *MemoryTool) feedback(args map[string]any) (ToolResult, error) {
 	return NewSuccessResult(fmt.Sprintf("Recorded memory feedback (%s): %s", outcome, targetID)), nil
 }
 
-// truncate truncates a string to the specified length.
+// truncate truncates a string to the specified length (rune-safe).
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }
