@@ -679,6 +679,21 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 		wg.Add(1)
 		go func(idx int, t AgentTask) {
 			defer wg.Done()
+			defer func() {
+				if p := recover(); p != nil {
+					logging.Error("panic in SpawnMultiple worker", "idx", idx, "type", t.Type, "panic", p)
+					mu.Lock()
+					if results[idx] == nil {
+						results[idx] = &AgentResult{
+							Type:      AgentType(t.Type),
+							Status:    AgentStatusFailed,
+							Error:     fmt.Sprintf("internal panic: %v", p),
+							Completed: true,
+						}
+					}
+					mu.Unlock()
+				}
+			}()
 
 			deps := r.snapshotAgentDeps()
 			agent := r.newConfiguredAgent(ctx, deps, string(t.Type), t.MaxTurns, t.Model, deps.permissions)

@@ -184,6 +184,11 @@ func (dm *DelegationMetrics) RecordExecution(fromAgent, toAgent, contextType str
 		return
 	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("panic in delegation metrics save goroutine", "panic", r)
+			}
+		}()
 		if err := dm.writeSnapshot(snapshot); err != nil {
 			logging.Debug("failed to save delegation metrics", "error", err)
 		}
@@ -210,7 +215,7 @@ func (dm *DelegationMetrics) evictOldest(maxSize int) {
 	})
 
 	toRemove := len(dm.PathMetrics) - maxSize
-	for i := 0; i < toRemove; i++ {
+	for i := range toRemove {
 		key := entries[i].key
 		delete(dm.PathMetrics, key)
 		delete(dm.RuleWeights, key)

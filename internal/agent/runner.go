@@ -750,6 +750,11 @@ func (r *Runner) recordAgentExecutionLearning(
 	if success && deps.exampleStore != nil {
 		output := result.Output
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Warn("panic in runner LearnFromSuccess goroutine", "panic", r)
+				}
+			}()
 			if err := deps.exampleStore.LearnFromSuccess(
 				agentType,
 				prompt,
@@ -888,7 +893,7 @@ func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error
 	}
 
 	if result.Metadata == nil {
-		result.Metadata = make(map[string]interface{})
+		result.Metadata = make(map[string]any)
 	}
 	result.Metadata["isolated_workspace"] = true
 	result.Metadata["isolated_workspace_strategy"] = agent.isolatedWorkspace.Strategy
@@ -1009,7 +1014,7 @@ func (r *Runner) cleanupOldResults() {
 		// Remove oldest completed agents (keep MaxCompletedAgents/2)
 		removeCount := len(completed) - MaxCompletedAgents/2
 		if removeCount > 0 {
-			for i := 0; i < removeCount; i++ {
+			for i := range removeCount {
 				delete(r.agents, completed[i].id)
 			}
 			logging.Debug("cleaned up old agents", "removed", removeCount)
@@ -1038,7 +1043,7 @@ func (r *Runner) cleanupOldResults() {
 		})
 		removeCount := len(completed) - MaxAgentResults/2
 		if removeCount > 0 {
-			for i := 0; i < removeCount; i++ {
+			for i := range removeCount {
 				delete(r.results, completed[i].id)
 			}
 			logging.Debug("cleaned up old results", "removed", removeCount)

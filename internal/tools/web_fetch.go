@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -262,7 +263,7 @@ func (t *WebFetchTool) htmlToMarkdown(htmlContent string, selector string) (stri
 				// Add link
 				for _, attr := range n.Attr {
 					if attr.Key == "href" && attr.Val != "" && !strings.HasPrefix(attr.Val, "#") && !strings.HasPrefix(attr.Val, "javascript:") {
-						content.WriteString(fmt.Sprintf(" (%s)", attr.Val))
+						fmt.Fprintf(&content, " (%s)", attr.Val)
 						break
 					}
 				}
@@ -321,13 +322,8 @@ func (t *WebFetchTool) matchesSelector(n *html.Node, selector string) bool {
 	if strings.HasPrefix(selector, ".") {
 		className := selector[1:]
 		for _, attr := range n.Attr {
-			if attr.Key == "class" {
-				classes := strings.Fields(attr.Val)
-				for _, c := range classes {
-					if c == className {
-						return true
-					}
-				}
+			if attr.Key == "class" && slices.Contains(strings.Fields(attr.Val), className) {
+				return true
 			}
 		}
 		return false
@@ -357,6 +353,12 @@ func (t *WebFetchTool) ExecuteStreaming(ctx context.Context, args map[string]any
 
 	go func() {
 		defer complete()
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in web_fetch streaming goroutine", "panic", r)
+				errChan <- fmt.Errorf("internal panic: %v", r)
+			}
+		}()
 
 		toolResult, err := t.Execute(ctx, args)
 		if err != nil {
@@ -373,10 +375,7 @@ func (t *WebFetchTool) ExecuteStreaming(ctx context.Context, args map[string]any
 		content := toolResult.Content
 		const chunkSize = 2048
 		for i := 0; i < len(content); i += chunkSize {
-			end := i + chunkSize
-			if end > len(content) {
-				end = len(content)
-			}
+			end := min(i+chunkSize, len(content))
 			select {
 			case <-ctx.Done():
 				return

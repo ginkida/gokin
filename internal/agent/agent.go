@@ -1219,7 +1219,7 @@ func (a *Agent) collectTreeMetrics(result *AgentResult) {
 		return
 	}
 	if result.Metadata == nil {
-		result.Metadata = make(map[string]interface{})
+		result.Metadata = make(map[string]any)
 	}
 
 	tree.mu.RLock()
@@ -1372,7 +1372,7 @@ func (a *Agent) buildSystemPrompt() string {
 	if projectContext != "" {
 		if lightweight {
 			// Extract just the working directory line from project context
-			for _, line := range strings.Split(projectContext, "\n") {
+			for line := range strings.SplitSeq(projectContext, "\n") {
 				if strings.HasPrefix(line, "Working directory:") || strings.HasPrefix(line, "Project:") {
 					sb.WriteString(line)
 					sb.WriteString("\n")
@@ -2420,6 +2420,11 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					wg.Add(1)
 					go func(action *PlannedAction) {
 						defer wg.Done()
+						defer func() {
+							if r := recover(); r != nil {
+								logging.Error("panic in parallel plan execution", "action", action.Type, "panic", r)
+							}
+						}()
 
 						a.safeOnText(fmt.Sprintf("\n[Executing planned step: %s %s]\n",
 							action.Type, action.AgentType))
@@ -3459,7 +3464,7 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 
 	// Take top keepMiddle, then sort by original index to preserve order
 	topN := scores[:keepMiddle]
-	for i := 0; i < len(topN); i++ {
+	for i := range topN {
 		for j := i + 1; j < len(topN); j++ {
 			if topN[i].idx > topN[j].idx {
 				topN[i], topN[j] = topN[j], topN[i]
@@ -3619,10 +3624,7 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 
-	minMsgs := a.summarizeMinMsgs
-	if minMsgs < 4 {
-		minMsgs = 4
-	}
+	minMsgs := max(a.summarizeMinMsgs, 4)
 	if len(a.history) <= minMsgs {
 		return 0
 	}
@@ -4245,7 +4247,7 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools
 	maxRetries := 3
 	var lastErr error
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		result, err := tool.Execute(ctx, call.Args)
 		if err == nil {
 			return result
@@ -4530,7 +4532,7 @@ func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, star
 	a.history = append(a.history, promptContent)
 	a.stateMu.Unlock()
 
-	for round := 0; round < maxDirectRounds; round++ {
+	for range maxDirectRounds {
 		select {
 		case <-ctx.Done():
 			return &AgentResult{

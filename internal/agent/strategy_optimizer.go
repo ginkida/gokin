@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,9 +38,7 @@ func (sm *StrategyMetrics) clone() *StrategyMetrics {
 	c := *sm
 	if sm.TaskTypes != nil {
 		c.TaskTypes = make(map[string]int, len(sm.TaskTypes))
-		for k, v := range sm.TaskTypes {
-			c.TaskTypes[k] = v
-		}
+		maps.Copy(c.TaskTypes, sm.TaskTypes)
 	}
 	return &c
 }
@@ -142,6 +141,11 @@ func (so *StrategyOptimizer) RecordExecution(strategyName string, taskType strin
 		return
 	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("panic in strategy optimizer save goroutine", "panic", r)
+			}
+		}()
 		if err := so.writeSnapshot(snapshot); err != nil {
 			logging.Debug("failed to save strategy metrics", "error", err)
 		}

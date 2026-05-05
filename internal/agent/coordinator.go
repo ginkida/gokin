@@ -285,6 +285,11 @@ func (c *Coordinator) startTask(task *CoordinatedTask) {
 
 	// Monitor completion and notify coordinator immediately via agentDoneCh
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("panic in coordinator agent monitor goroutine", "agent", agentID, "panic", r)
+			}
+		}()
 		if _, err := c.runner.WaitWithContext(c.ctx, agentID); err == nil || c.ctx.Err() == nil {
 			select {
 			case c.agentDoneCh <- agentID:
