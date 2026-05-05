@@ -576,10 +576,10 @@ func (a *App) Run() error {
 
 	// Start background processes
 	if a.orchestrator != nil {
-		go a.orchestrator.Start(a.ctx)
+		a.safeGo("orchestrator", func() { a.orchestrator.Start(a.ctx) })
 	}
 	if a.contextAgent != nil {
-		go a.contextAgent.Start(a.ctx)
+		a.safeGo("context-agent", func() { a.contextAgent.Start(a.ctx) })
 	}
 
 	// Set app reference in TUI for data providers
