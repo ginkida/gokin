@@ -250,6 +250,11 @@ func (m *Manager) executeHook(ctx context.Context, hook *Hook, hctx *Context, ti
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				close(cmdDone) // unblock the select so we don't hang
+			}
+		}()
 		waitErr := cmd.Wait()
 		cmdErrMu.Lock()
 		cmdErr = waitErr
