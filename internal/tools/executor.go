@@ -1995,13 +1995,13 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				}
 			}
 		}
-		// Invalidate read tracker on write operations
+		// Invalidate read tracker on write operations (all path-like arg keys,
+		// including source/destination for copy/move).
 		if isWriteOperation(call.Name) {
-			if path, ok := call.Args["path"].(string); ok {
-				e.readTracker.InvalidateFile(path)
-			}
-			if path, ok := call.Args["file_path"].(string); ok {
-				e.readTracker.InvalidateFile(path)
+			for _, key := range []string{"file_path", "path", "source", "destination", "new_path"} {
+				if p, ok := call.Args[key].(string); ok && p != "" {
+					e.readTracker.InvalidateFile(p)
+				}
 			}
 		}
 	}
