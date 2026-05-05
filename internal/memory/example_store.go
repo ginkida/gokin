@@ -370,7 +370,7 @@ func (es *ExampleStore) GetSimilarExamples(prompt string, limit int) []TaskExamp
 	}
 
 	results := make([]TaskExampleSummary, limit)
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		ex := scoredExamples[i].example
 		results[i] = TaskExampleSummary{
 			ID:          ex.ID,

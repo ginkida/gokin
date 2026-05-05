@@ -216,7 +216,7 @@ func (a *ContextAgent) rotateCheckpoints(dir string, max int) {
 	})
 
 	toDelete := len(checkpoints) - max
-	for i := 0; i < toDelete; i++ {
+	for i := range toDelete {
 		os.Remove(filepath.Join(dir, checkpoints[i].Name()))
 	}
 }

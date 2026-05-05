@@ -170,7 +170,7 @@ func normalizeMemoryText(s string) string {
 
 func tokenSetFromText(s string) map[string]struct{} {
 	set := make(map[string]struct{})
-	for _, w := range strings.Fields(normalizeMemoryText(s)) {
+	for w := range strings.FieldsSeq(normalizeMemoryText(s)) {
 		if len(w) < 3 {
 			continue
 		}
@@ -1193,7 +1193,7 @@ func (s *Store) pruneOldest() {
 
 	// Remove oldest entries from the appropriate store
 	toRemove := totalCount - s.maxEntries
-	for i := 0; i < toRemove; i++ {
+	for i := range toRemove {
 		entry := all[i]
 		delete(s.entries, entry.ID)
 		delete(s.globalEntries, entry.ID)

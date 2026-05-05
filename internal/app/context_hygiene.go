@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"google.golang.org/genai"
@@ -39,7 +40,7 @@ func (a *App) applyToolOutputHygiene() {
 	changed := false
 	compactedParts := 0
 
-	for i := 0; i < cutoff; i++ {
+	for i := range cutoff {
 		content := history[i]
 		if content == nil || len(content.Parts) == 0 {
 			continue
@@ -73,9 +74,7 @@ func (a *App) applyToolOutputHygiene() {
 
 			placeholder := fmt.Sprintf("[Output of '%s' (%d lines) summarized by AI]", toolName, lines)
 			newResp := make(map[string]any, len(part.FunctionResponse.Response)+4)
-			for k, v := range part.FunctionResponse.Response {
-				newResp[k] = v
-			}
+			maps.Copy(newResp, part.FunctionResponse.Response)
 			newResp["content"] = placeholder
 			newResp["content_compacted"] = true
 			newResp["original_lines"] = lines

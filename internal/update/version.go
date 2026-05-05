@@ -132,12 +132,9 @@ func comparePrerelease(a, b string) int {
 	partsA := strings.Split(a, ".")
 	partsB := strings.Split(b, ".")
 
-	maxLen := len(partsA)
-	if len(partsB) > maxLen {
-		maxLen = len(partsB)
-	}
+	maxLen := max(len(partsA), len(partsB))
 
-	for i := 0; i < maxLen; i++ {
+	for i := range maxLen {
 		var partA, partB string
 		if i < len(partsA) {
 			partA = partsA[i]

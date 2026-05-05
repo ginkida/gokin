@@ -264,12 +264,9 @@ func itoa(n int) string {
 }
 
 func commonPrefix(a, b string) string {
-	minLen := len(a)
-	if len(b) < minLen {
-		minLen = len(b)
-	}
+	minLen := min(len(a), len(b))
 
-	for i := 0; i < minLen; i++ {
+	for i := range minLen {
 		if a[i] != b[i] {
 			return a[:i]
 		}
@@ -283,12 +280,9 @@ func commonSuffix(a, b string) string {
 		return ""
 	}
 
-	minLen := len(a)
-	if len(b) < minLen {
-		minLen = len(b)
-	}
+	minLen := min(len(a), len(b))
 
-	for i := 0; i < minLen; i++ {
+	for i := range minLen {
 		if a[len(a)-1-i] != b[len(b)-1-i] {
 			if i == 0 {
 				return ""

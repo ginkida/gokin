@@ -93,11 +93,8 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 		if len(matches) > 0 {
 			fmt.Fprintf(&report, "## %s (%d)\n", cat, len(matches))
 			// Limit display to 10 per category
-			limit := 10
-			if len(matches) < limit {
-				limit = len(matches)
-			}
-			for i := 0; i < limit; i++ {
+			limit := min(10, len(matches))
+			for i := range limit {
 				// Clean path for readability
 				cleanLine := strings.TrimPrefix(matches[i], t.workDir)
 				fmt.Fprintf(&report, "- %s\n", cleanLine)

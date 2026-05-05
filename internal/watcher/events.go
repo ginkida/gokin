@@ -63,7 +63,7 @@ func (b *EventBuffer) Recent(n int) []Event {
 	}
 
 	result := make([]Event, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		idx := (b.head - n + i + b.size) % b.size
 		result[i] = b.events[idx]
 	}
