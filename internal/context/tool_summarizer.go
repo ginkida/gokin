@@ -47,10 +47,7 @@ func summarizeReadOutput(content string) string {
 
 	// Detect package name from first lines (cat -n format: "   1\tpackage foo")
 	var pkgName string
-	limit := 10
-	if limit > lineCount {
-		limit = lineCount
-	}
+	limit := min(10, lineCount)
 	for _, line := range lines[:limit] {
 		trimmed := stripLineNumber(line)
 		if strings.HasPrefix(trimmed, "package ") {
@@ -113,10 +110,8 @@ func summarizeBashOutput(content string) string {
 	exitStatus := ""
 	for i := len(lines) - 1; i >= 0 && i >= len(lines)-5; i-- {
 		line := strings.TrimSpace(lines[i])
-		if strings.Contains(line, "exit status") {
-			// Extract the number
-			idx := strings.Index(line, "exit status")
-			rest := strings.TrimSpace(line[idx+len("exit status"):])
+		if _, rest, ok := strings.Cut(line, "exit status"); ok {
+			rest = strings.TrimSpace(rest)
 			if rest != "" {
 				exitStatus = strings.Fields(rest)[0]
 			}
@@ -276,8 +271,7 @@ func summarizeGitDiffOutput(content string) string {
 	var added, removed int
 
 	for _, line := range lines {
-		if strings.HasPrefix(line, "+++ b/") {
-			file := strings.TrimPrefix(line, "+++ b/")
+		if file, ok := strings.CutPrefix(line, "+++ b/"); ok {
 			files = append(files, filepath.Base(file))
 		} else if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
 			added++
@@ -392,11 +386,8 @@ func summarizeTreeOutput(content string) string {
 }
 
 // defaultSummary provides a generic summary with the first line of content.
-func defaultSummary(toolName, content string) string {
-	firstLine := content
-	if idx := strings.IndexByte(content, '\n'); idx >= 0 {
-		firstLine = content[:idx]
-	}
+func defaultSummary(_ string, content string) string {
+	firstLine, _, _ := strings.Cut(content, "\n")
 	firstLine = strings.TrimSpace(firstLine)
 	if runes := []rune(firstLine); len(runes) > 100 {
 		firstLine = string(runes[:100])
@@ -410,11 +401,8 @@ func defaultSummary(toolName, content string) string {
 func stripLineNumber(line string) string {
 	// cat -n format: spaces + digits + tab + content
 	trimmed := strings.TrimLeft(line, " ")
-	if idx := strings.IndexByte(trimmed, '\t'); idx >= 0 {
-		prefix := trimmed[:idx]
-		if isAllDigits(prefix) {
-			return trimmed[idx+1:]
-		}
+	if prefix, after, ok := strings.Cut(trimmed, "\t"); ok && isAllDigits(prefix) {
+		return after
 	}
 	return line
 }
