@@ -180,11 +180,12 @@ func normalizeChangelogTag(v string) string {
 // typical 100-col TUIs. Cuts at a word boundary when possible so we
 // don't slice mid-word.
 func truncateChangelogTitle(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	cut := s[:max]
-	if idx := strings.LastIndexByte(cut, ' '); idx > max-15 {
+	cut := string(runes[:max])
+	if idx := strings.LastIndexByte(cut, ' '); idx > len(cut)-15 {
 		cut = cut[:idx]
 	}
 	return cut + "…"
