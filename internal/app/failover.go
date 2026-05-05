@@ -105,14 +105,17 @@ func detectPrimaryProvider(cfg *config.Config) string {
 	if cfg.Model.Provider != "" {
 		return cfg.Model.Provider
 	}
-	if cfg.API.GetActiveProvider() != "" {
-		return cfg.API.GetActiveProvider()
+	// Read raw fields so an unset provider doesn't swallow the model-name
+	// detection fallback — GetActiveProvider() always returns "glm" by default.
+	if cfg.API.ActiveProvider != "" {
+		return cfg.API.ActiveProvider
+	}
+	if cfg.API.Backend != "" {
+		return cfg.API.Backend
 	}
 	if cfg.Model.Name != "" {
 		return config.DetectProviderFromModel(cfg.Model.Name)
 	}
-	// Pre-v0.78.30 this returned "gemini" — a removed provider. Now uses
-	// the current default that GetActiveProvider falls back to.
 	return "glm"
 }
 
