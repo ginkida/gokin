@@ -105,7 +105,7 @@ type AgentResult struct {
 	Error     string                 `json:"error,omitempty"`
 	Duration  time.Duration          `json:"duration"`
 	Completed bool                   `json:"completed"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"` // Additional context (e.g., learned_entry_id for feedback loop)
+	Metadata  map[string]any `json:"metadata,omitempty"` // Additional context (e.g., learned_entry_id for feedback loop)
 
 	// OutputFile is the path to the file-backed output stream.
 	// When set, full output is read from this file instead of the Output field.

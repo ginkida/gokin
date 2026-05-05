@@ -219,7 +219,7 @@ type Client interface {
 	SetTools(tools []*genai.Tool)
 
 	// SetRateLimiter sets the rate limiter for API calls.
-	SetRateLimiter(limiter interface{})
+	SetRateLimiter(limiter any)
 
 	// CountTokens counts tokens for the given contents.
 	CountTokens(ctx context.Context, contents []*genai.Content) (*genai.CountTokensResponse, error)

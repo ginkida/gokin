@@ -168,7 +168,7 @@ func (c *ResultCompactor) compactWithErrorPreservation(result tools.ToolResult) 
 				keepRunes = len(runes)
 			}
 			builder.WriteString(string(runes[:keepRunes]))
-			builder.WriteString(fmt.Sprintf("\n...[%d chars omitted]", len(runes)-keepRunes))
+			fmt.Fprintf(&builder, "\n...[%d chars omitted]", len(runes)-keepRunes)
 		} else {
 			builder.WriteString("=== Output ===\n")
 			builder.WriteString(normalContent)
@@ -242,7 +242,7 @@ func (c *ResultCompactor) smartTruncateContent(content string) string {
 	// Build truncated content
 	var builder strings.Builder
 	builder.WriteString(strings.Join(headLines, "\n"))
-	builder.WriteString(fmt.Sprintf("\n\n...[%d lines omitted]...\n\n", omittedCount))
+	fmt.Fprintf(&builder, "\n\n...[%d lines omitted]...\n\n", omittedCount)
 	builder.WriteString(strings.Join(tailLines, "\n"))
 
 	result := builder.String()
@@ -305,14 +305,14 @@ func (c *ResultCompactor) compactFileContent(result tools.ToolResult) tools.Tool
 	if len(signatures) > 0 {
 		omittedSigs := filterOmittedSignatures(signatures, lines, headCount, len(lines)-tailCount)
 		if len(omittedSigs) > 0 {
-			builder.WriteString(fmt.Sprintf("\n\n...[%d lines omitted, key signatures preserved:]...\n", omittedCount))
+			fmt.Fprintf(&builder, "\n\n...[%d lines omitted, key signatures preserved:]...\n", omittedCount)
 			builder.WriteString(strings.Join(omittedSigs, "\n"))
 			builder.WriteString("\n\n")
 		} else {
-			builder.WriteString(fmt.Sprintf("\n\n...[%d lines omitted]...\n\n", omittedCount))
+			fmt.Fprintf(&builder, "\n\n...[%d lines omitted]...\n\n", omittedCount)
 		}
 	} else {
-		builder.WriteString(fmt.Sprintf("\n\n...[%d lines omitted]...\n\n", omittedCount))
+		fmt.Fprintf(&builder, "\n\n...[%d lines omitted]...\n\n", omittedCount)
 	}
 
 	builder.WriteString(strings.Join(lines[len(lines)-tailCount:], "\n"))
@@ -343,7 +343,7 @@ func (c *ResultCompactor) compactCommandOutput(result tools.ToolResult) tools.To
 
 	var builder strings.Builder
 	builder.WriteString(strings.Join(lines[:headCount], "\n"))
-	builder.WriteString(fmt.Sprintf("\n\n...[%d lines omitted]...\n\n", omittedCount))
+	fmt.Fprintf(&builder, "\n\n...[%d lines omitted]...\n\n", omittedCount)
 	builder.WriteString(strings.Join(lines[len(lines)-tailCount:], "\n"))
 
 	return tools.ToolResult{
@@ -384,7 +384,7 @@ func (c *ResultCompactor) compactSearchResults(result tools.ToolResult) tools.To
 		builder.WriteString(strings.Join(errorMatches[:limit], "\n"))
 		maxResults -= limit
 		if len(errorMatches) > limit {
-			builder.WriteString(fmt.Sprintf("\n... [%d more error matches]\n", len(errorMatches)-limit))
+			fmt.Fprintf(&builder, "\n... [%d more error matches]\n", len(errorMatches)-limit)
 		}
 		builder.WriteString("\n\n=== Other matches ===\n")
 	}
@@ -398,7 +398,7 @@ func (c *ResultCompactor) compactSearchResults(result tools.ToolResult) tools.To
 		builder.WriteString(strings.Join(normalMatches[:limit], "\n"))
 		remaining := len(normalMatches) - limit
 		if remaining > 0 {
-			builder.WriteString(fmt.Sprintf("\n\n...[%d more matches not shown, total: %d]", remaining, len(lines)))
+			fmt.Fprintf(&builder, "\n\n...[%d more matches not shown, total: %d]", remaining, len(lines))
 		}
 	}
 
@@ -422,7 +422,7 @@ func (c *ResultCompactor) compactFileList(result tools.ToolResult) tools.ToolRes
 
 	var builder strings.Builder
 	builder.WriteString(strings.Join(lines[:sampleSize], "\n"))
-	builder.WriteString(fmt.Sprintf("\n\n...[%d more files not shown, total: %d files]", omittedCount, len(lines)))
+	fmt.Fprintf(&builder, "\n\n...[%d more files not shown, total: %d files]", omittedCount, len(lines))
 
 	return tools.ToolResult{
 		Content: builder.String(),
@@ -444,7 +444,7 @@ func (c *ResultCompactor) compactTreeOutput(result tools.ToolResult) tools.ToolR
 
 	var builder strings.Builder
 	builder.WriteString(strings.Join(lines[:maxLines], "\n"))
-	builder.WriteString(fmt.Sprintf("\n\n...[%d more items not shown]", omittedCount))
+	fmt.Fprintf(&builder, "\n\n...[%d more items not shown]", omittedCount)
 
 	return tools.ToolResult{
 		Content: builder.String(),

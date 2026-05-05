@@ -66,7 +66,7 @@ func (r *NotebookReader) Read(filePath string) (string, error) {
 func (r *NotebookReader) formatNotebook(nb *NotebookFile) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("# Jupyter Notebook (nbformat %d)\n\n", nb.NBFormat))
+	fmt.Fprintf(&sb, "# Jupyter Notebook (nbformat %d)\n\n", nb.NBFormat)
 
 	for i, cell := range nb.Cells {
 		cellNum := i + 1
@@ -74,9 +74,9 @@ func (r *NotebookReader) formatNotebook(nb *NotebookFile) string {
 
 		switch cell.CellType {
 		case "code":
-			sb.WriteString(fmt.Sprintf("## Cell %d [code]", cellNum))
+			fmt.Fprintf(&sb, "## Cell %d [code]", cellNum)
 			if cell.ExecutionCount != nil {
-				sb.WriteString(fmt.Sprintf(" In[%d]", *cell.ExecutionCount))
+				fmt.Fprintf(&sb, " In[%d]", *cell.ExecutionCount)
 			}
 			sb.WriteString("\n```python\n")
 			sb.WriteString(source)
@@ -94,14 +94,14 @@ func (r *NotebookReader) formatNotebook(nb *NotebookFile) string {
 			}
 
 		case "markdown":
-			sb.WriteString(fmt.Sprintf("## Cell %d [markdown]\n", cellNum))
+			fmt.Fprintf(&sb, "## Cell %d [markdown]\n", cellNum)
 			sb.WriteString(source)
 			if !strings.HasSuffix(source, "\n") {
 				sb.WriteString("\n")
 			}
 
 		case "raw":
-			sb.WriteString(fmt.Sprintf("## Cell %d [raw]\n", cellNum))
+			fmt.Fprintf(&sb, "## Cell %d [raw]\n", cellNum)
 			sb.WriteString("```\n")
 			sb.WriteString(source)
 			if !strings.HasSuffix(source, "\n") {
@@ -110,7 +110,7 @@ func (r *NotebookReader) formatNotebook(nb *NotebookFile) string {
 			sb.WriteString("```\n")
 
 		default:
-			sb.WriteString(fmt.Sprintf("## Cell %d [%s]\n", cellNum, cell.CellType))
+			fmt.Fprintf(&sb, "## Cell %d [%s]\n", cellNum, cell.CellType)
 			sb.WriteString(source)
 		}
 
@@ -173,7 +173,7 @@ func (r *NotebookReader) formatOutput(output Output) string {
 		}
 
 	case "error":
-		sb.WriteString(fmt.Sprintf("**Error:** %s: %s\n", output.EName, output.EValue))
+		fmt.Fprintf(&sb, "**Error:** %s: %s\n", output.EName, output.EValue)
 	}
 
 	return sb.String()

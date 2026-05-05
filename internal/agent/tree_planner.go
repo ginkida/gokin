@@ -1163,7 +1163,7 @@ func contains(s, substr string) bool {
 
 	for i := 0; i <= len(sLower)-len(subLower); i++ {
 		match := true
-		for j := 0; j < len(subLower); j++ {
+		for j := range len(subLower) {
 			if toLower(sLower[i+j]) != toLower(subLower[j]) {
 				match = false
 				break
@@ -1553,20 +1553,20 @@ func (tp *TreePlanner) GeneratePlanSummary(tree *PlanTree) string {
 		if node.Action == nil {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("%d. ", i+1))
+		fmt.Fprintf(&sb, "%d. ", i+1)
 		switch node.Action.Type {
 		case ActionToolCall:
-			sb.WriteString(fmt.Sprintf("[Tool: %s] %s", node.Action.ToolName, node.Action.Prompt))
+			fmt.Fprintf(&sb, "[Tool: %s] %s", node.Action.ToolName, node.Action.Prompt)
 		case ActionDelegate:
-			sb.WriteString(fmt.Sprintf("[Agent: %s] %s", node.Action.AgentType, node.Action.Prompt))
+			fmt.Fprintf(&sb, "[Agent: %s] %s", node.Action.AgentType, node.Action.Prompt)
 		case ActionVerify:
-			sb.WriteString(fmt.Sprintf("[Verify] %s", node.Action.Prompt))
+			fmt.Fprintf(&sb, "[Verify] %s", node.Action.Prompt)
 		case ActionDecompose:
-			sb.WriteString(fmt.Sprintf("[Decompose] %s", node.Action.Prompt))
+			fmt.Fprintf(&sb, "[Decompose] %s", node.Action.Prompt)
 		default:
 			sb.WriteString(node.Action.Prompt)
 		}
-		sb.WriteString(fmt.Sprintf(" (confidence: %.0f%%)", node.Score*100))
+		fmt.Fprintf(&sb, " (confidence: %.0f%%)", node.Score*100)
 		sb.WriteString("\n")
 	}
 
@@ -1651,6 +1651,11 @@ func (tp *TreePlanner) GenerateVisualTree(tree *PlanTree) string {
 // stringBuilder is a simple string builder for plan summaries.
 type stringBuilder struct {
 	data []byte
+}
+
+func (sb *stringBuilder) Write(p []byte) (int, error) {
+	sb.data = append(sb.data, p...)
+	return len(p), nil
 }
 
 func (sb *stringBuilder) WriteString(s string) {

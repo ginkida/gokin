@@ -430,7 +430,7 @@ func (t *ReadTool) readLargeFile(ctx context.Context, filePath string, args map[
 		if runes := []rune(line); len(runes) > maxLineLen {
 			line = string(runes[:maxLineLen]) + "..."
 		}
-		builder.WriteString(fmt.Sprintf("%6d\t%s\n", lineNum, line))
+		fmt.Fprintf(&builder, "%6d\t%s\n", lineNum, line)
 	}
 
 	content := builder.String()
@@ -571,7 +571,7 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 		}
 
 		// Format with line number (cat -n style)
-		builder.WriteString(fmt.Sprintf("%6d\t%s\n", lineNum, line))
+		fmt.Fprintf(&builder, "%6d\t%s\n", lineNum, line)
 		linesRead++
 	}
 

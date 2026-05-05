@@ -215,7 +215,7 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 
 // readWithTimeout reads from a pipe with a timeout.
 // It reads all available data from the pipe until EOF or timeout.
-func readWithTimeout(pipe interface{}, timeout time.Duration) ([]byte, error) {
+func readWithTimeout(pipe any, timeout time.Duration) ([]byte, error) {
 	reader, ok := pipe.(io.Reader)
 	if !ok {
 		return nil, fmt.Errorf("pipe is not an io.Reader")

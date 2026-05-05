@@ -131,7 +131,7 @@ func renderWorkingMemory(turn WorkingMemoryTurn) string {
 
 	var builder strings.Builder
 	builder.WriteString("# Working Memory\n")
-	builder.WriteString(fmt.Sprintf("_Updated: %s_\n\n", time.Now().Format("15:04")))
+	fmt.Fprintf(&builder, "_Updated: %s_\n\n", time.Now().Format("15:04"))
 
 	appendWorkingMemorySection(&builder, "Established", established)
 	appendWorkingMemorySection(&builder, "Unknown", unknown)

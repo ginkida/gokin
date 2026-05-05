@@ -65,7 +65,7 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 	lines := strings.Split(string(output), "\n")
 
 	var report strings.Builder
-	report.WriteString(fmt.Sprintf("# Impact Report for symbol: %s\n\n", symbol))
+	fmt.Fprintf(&report, "# Impact Report for symbol: %s\n\n", symbol)
 
 	categories := map[string][]string{
 		"Definitions": {},
@@ -91,7 +91,7 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 
 	for cat, matches := range categories {
 		if len(matches) > 0 {
-			report.WriteString(fmt.Sprintf("## %s (%d)\n", cat, len(matches)))
+			fmt.Fprintf(&report, "## %s (%d)\n", cat, len(matches))
 			// Limit display to 10 per category
 			limit := 10
 			if len(matches) < limit {
@@ -100,10 +100,10 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 			for i := 0; i < limit; i++ {
 				// Clean path for readability
 				cleanLine := strings.TrimPrefix(matches[i], t.workDir)
-				report.WriteString(fmt.Sprintf("- %s\n", cleanLine))
+				fmt.Fprintf(&report, "- %s\n", cleanLine)
 			}
 			if len(matches) > limit {
-				report.WriteString(fmt.Sprintf("- ... and %d more\n", len(matches)-limit))
+				fmt.Fprintf(&report, "- ... and %d more\n", len(matches)-limit)
 			}
 			report.WriteString("\n")
 		}

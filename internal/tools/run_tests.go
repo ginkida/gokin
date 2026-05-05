@@ -289,20 +289,20 @@ func parseGoTestResults(output string, execErr error, duration time.Duration) st
 
 	// Status header
 	if failed > 0 {
-		result.WriteString(fmt.Sprintf("FAIL - %d/%d tests failed", failed, total))
+		fmt.Fprintf(&result, "FAIL - %d/%d tests failed", failed, total)
 	} else {
-		result.WriteString(fmt.Sprintf("PASS - %d tests passed", passed))
+		fmt.Fprintf(&result, "PASS - %d tests passed", passed)
 	}
 	if skipped > 0 {
-		result.WriteString(fmt.Sprintf(", %d skipped", skipped))
+		fmt.Fprintf(&result, ", %d skipped", skipped)
 	}
-	result.WriteString(fmt.Sprintf(" (%.1fs)\n", duration.Seconds()))
+	fmt.Fprintf(&result, " (%.1fs)\n", duration.Seconds())
 
 	// Failed test details
 	if len(failures) > 0 {
 		result.WriteString("\nFailed tests:\n")
 		for _, f := range failures {
-			result.WriteString(fmt.Sprintf("  ✗ %s\n", f))
+			fmt.Fprintf(&result, "  ✗ %s\n", f)
 			if lines, ok := failOutput[f]; ok {
 				// Show relevant output (last 10 lines)
 				start := 0
@@ -312,7 +312,7 @@ func parseGoTestResults(output string, execErr error, duration time.Duration) st
 				for _, l := range lines[start:] {
 					l = strings.TrimSpace(l)
 					if l != "" && !strings.HasPrefix(l, "=== RUN") && !strings.HasPrefix(l, "--- FAIL") {
-						result.WriteString(fmt.Sprintf("    %s\n", l))
+						fmt.Fprintf(&result, "    %s\n", l)
 					}
 				}
 			}
@@ -327,7 +327,7 @@ func parseGoTestResults(output string, execErr error, duration time.Duration) st
 		}
 	}
 	if len(failedPkgs) > 0 {
-		result.WriteString(fmt.Sprintf("\nFailed packages: %s\n", strings.Join(failedPkgs, ", ")))
+		fmt.Fprintf(&result, "\nFailed packages: %s\n", strings.Join(failedPkgs, ", "))
 	}
 
 	return result.String()
@@ -338,9 +338,9 @@ func parseGenericTestResults(output string, execErr error, duration time.Duratio
 	var result strings.Builder
 
 	if execErr != nil {
-		result.WriteString(fmt.Sprintf("FAIL (%.1fs)\n\n", duration.Seconds()))
+		fmt.Fprintf(&result, "FAIL (%.1fs)\n\n", duration.Seconds())
 	} else {
-		result.WriteString(fmt.Sprintf("PASS (%.1fs)\n\n", duration.Seconds()))
+		fmt.Fprintf(&result, "PASS (%.1fs)\n\n", duration.Seconds())
 	}
 
 	// Truncate long output

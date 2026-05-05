@@ -48,7 +48,7 @@ type DependencyTask struct {
 	Dependencies []string
 	Status       TaskStatus
 	Error        error
-	Result       interface{}
+	Result       any
 	CreatedAt    time.Time
 	StartedAt    *time.Time
 	CompletedAt  *time.Time

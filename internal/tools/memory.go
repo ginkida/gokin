@@ -293,7 +293,7 @@ func (t *MemoryTool) recall(args map[string]any) (ToolResult, error) {
 	}
 
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("Found %d memories:\n\n", len(results)))
+	fmt.Fprintf(&builder, "Found %d memories:\n\n", len(results))
 
 	types := []struct {
 		t     memory.MemoryType
@@ -307,12 +307,12 @@ func (t *MemoryTool) recall(args map[string]any) (ToolResult, error) {
 	resultData := make([]map[string]any, 0, len(results))
 	for _, tc := range types {
 		if items, ok := byType[tc.t]; ok && len(items) > 0 {
-			builder.WriteString(fmt.Sprintf("[%s Memories]\n", tc.label))
+			fmt.Fprintf(&builder, "[%s Memories]\n", tc.label)
 			for _, entry := range items {
 				if entry.Key != "" {
-					builder.WriteString(fmt.Sprintf("- [%s] %s\n", entry.Key, entry.Content))
+					fmt.Fprintf(&builder, "- [%s] %s\n", entry.Key, entry.Content)
 				} else {
-					builder.WriteString(fmt.Sprintf("- %s\n", entry.Content))
+					fmt.Fprintf(&builder, "- %s\n", entry.Content)
 				}
 				resultData = append(resultData, map[string]any{
 					"id":           entry.ID,
@@ -384,7 +384,7 @@ func (t *MemoryTool) list(args map[string]any) (ToolResult, error) {
 	}
 
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("Stored memories (%d total):\n\n", len(entries)))
+	fmt.Fprintf(&builder, "Stored memories (%d total):\n\n", len(entries))
 
 	types := []struct {
 		t     memory.MemoryType
@@ -398,12 +398,12 @@ func (t *MemoryTool) list(args map[string]any) (ToolResult, error) {
 	resultData := make([]map[string]any, 0, len(entries))
 	for _, tc := range types {
 		if items, ok := byType[tc.t]; ok && len(items) > 0 {
-			builder.WriteString(fmt.Sprintf("[%s Memories]\n", tc.label))
+			fmt.Fprintf(&builder, "[%s Memories]\n", tc.label)
 			for _, entry := range items {
 				if entry.Key != "" {
-					builder.WriteString(fmt.Sprintf("- [%s] %s (id: %s)\n", entry.Key, truncate(entry.Content, 60), entry.ID))
+					fmt.Fprintf(&builder, "- [%s] %s (id: %s)\n", entry.Key, truncate(entry.Content, 60), entry.ID)
 				} else {
-					builder.WriteString(fmt.Sprintf("- %s (id: %s)\n", truncate(entry.Content, 60), entry.ID))
+					fmt.Fprintf(&builder, "- %s (id: %s)\n", truncate(entry.Content, 60), entry.ID)
 				}
 				resultData = append(resultData, map[string]any{
 					"id":           entry.ID,

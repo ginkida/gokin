@@ -208,7 +208,7 @@ func (fc *FallbackClient) SetTools(tools []*genai.Tool) {
 }
 
 // SetRateLimiter sets the rate limiter on ALL clients in the fallback chain.
-func (fc *FallbackClient) SetRateLimiter(limiter interface{}) {
+func (fc *FallbackClient) SetRateLimiter(limiter any) {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 	for _, c := range fc.clients {

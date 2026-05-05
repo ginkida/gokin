@@ -250,16 +250,16 @@ func (t *TaskOutputTool) waitForShellTask(ctx context.Context, taskID string, ti
 // formatShellTaskResult formats a shell task result
 func (t *TaskOutputTool) formatShellTaskResult(info tasks.Info) ToolResult {
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("Task: %s\n", info.ID))
-	builder.WriteString(fmt.Sprintf("Status: %s\n", info.Status))
-	builder.WriteString(fmt.Sprintf("Command: %s\n", info.Command))
-	builder.WriteString(fmt.Sprintf("Duration: %s\n", info.Duration))
+	fmt.Fprintf(&builder, "Task: %s\n", info.ID)
+	fmt.Fprintf(&builder, "Status: %s\n", info.Status)
+	fmt.Fprintf(&builder, "Command: %s\n", info.Command)
+	fmt.Fprintf(&builder, "Duration: %s\n", info.Duration)
 
 	if info.Error != "" {
-		builder.WriteString(fmt.Sprintf("Error: %s\n", info.Error))
+		fmt.Fprintf(&builder, "Error: %s\n", info.Error)
 	}
 	if info.ExitCode != 0 {
-		builder.WriteString(fmt.Sprintf("Exit Code: %d\n", info.ExitCode))
+		fmt.Fprintf(&builder, "Exit Code: %d\n", info.ExitCode)
 	}
 
 	if info.Output != "" {
@@ -317,9 +317,9 @@ func (t *TaskOutputTool) readAgentOutputFromFile(result AgentResult, offset int6
 	nextOffset := offset + int64(n)
 
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("Agent: %s (incremental read)\n", result.AgentID))
-	builder.WriteString(fmt.Sprintf("Status: %s\n", result.Status))
-	builder.WriteString(fmt.Sprintf("Bytes: %d-%d of %d\n", offset, nextOffset, stat.Size()))
+	fmt.Fprintf(&builder, "Agent: %s (incremental read)\n", result.AgentID)
+	fmt.Fprintf(&builder, "Status: %s\n", result.Status)
+	fmt.Fprintf(&builder, "Bytes: %d-%d of %d\n", offset, nextOffset, stat.Size())
 	builder.WriteString("\nNew output:\n")
 	builder.WriteString(newOutput)
 
@@ -337,13 +337,13 @@ func (t *TaskOutputTool) readAgentOutputFromFile(result AgentResult, offset int6
 // formatAgentResult formats an agent result
 func (t *TaskOutputTool) formatAgentResult(result AgentResult) ToolResult {
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("Agent: %s\n", result.AgentID))
-	builder.WriteString(fmt.Sprintf("Type: %s\n", result.Type))
-	builder.WriteString(fmt.Sprintf("Status: %s\n", result.Status))
-	builder.WriteString(fmt.Sprintf("Duration: %s\n", result.Duration))
+	fmt.Fprintf(&builder, "Agent: %s\n", result.AgentID)
+	fmt.Fprintf(&builder, "Type: %s\n", result.Type)
+	fmt.Fprintf(&builder, "Status: %s\n", result.Status)
+	fmt.Fprintf(&builder, "Duration: %s\n", result.Duration)
 
 	if result.Error != "" {
-		builder.WriteString(fmt.Sprintf("Error: %s\n", result.Error))
+		fmt.Fprintf(&builder, "Error: %s\n", result.Error)
 	}
 
 	if result.Output != "" {
@@ -403,7 +403,7 @@ func (t *TaskOutputTool) listTasks() (ToolResult, error) {
 		return NewSuccessResult("No background tasks"), nil
 	}
 
-	builder.WriteString(fmt.Sprintf("Background Tasks (%d total):\n\n", totalCount))
+	fmt.Fprintf(&builder, "Background Tasks (%d total):\n\n", totalCount)
 
 	// Shell tasks
 	if len(shellTasks) > 0 {
@@ -420,7 +420,7 @@ func (t *TaskOutputTool) listTasks() (ToolResult, error) {
 				cmd = string(runes[:47]) + "..."
 			}
 
-			builder.WriteString(fmt.Sprintf("  [%s] %s - %s (%s)\n", status, info.ID, cmd, info.Duration))
+			fmt.Fprintf(&builder, "  [%s] %s - %s (%s)\n", status, info.ID, cmd, info.Duration)
 		}
 		builder.WriteString("\n")
 	}
@@ -434,7 +434,7 @@ func (t *TaskOutputTool) listTasks() (ToolResult, error) {
 				status = "done"
 			}
 
-			builder.WriteString(fmt.Sprintf("  [%s] %s - %s (%s)\n", status, result.AgentID, result.Type, result.Duration.Round(time.Millisecond)))
+			fmt.Fprintf(&builder, "  [%s] %s - %s (%s)\n", status, result.AgentID, result.Type, result.Duration.Round(time.Millisecond))
 		}
 	}
 

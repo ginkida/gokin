@@ -57,8 +57,8 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// No args - show current model and available models for this provider
 	if len(args) == 0 {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Provider: %s\n", activeProvider))
-		sb.WriteString(fmt.Sprintf("Model:    %s\n\n", currentModel))
+		fmt.Fprintf(&sb, "Provider: %s\n", activeProvider)
+		fmt.Fprintf(&sb, "Model:    %s\n\n", currentModel)
 		sb.WriteString("Available models:\n")
 
 		for _, m := range providerModels {
@@ -67,7 +67,7 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 				marker = "> "
 			}
 			shortName := extractShortName(m.ID)
-			sb.WriteString(fmt.Sprintf("%s%-8s %s\n", marker, shortName, m.Description))
+			fmt.Fprintf(&sb, "%s%-8s %s\n", marker, shortName, m.Description)
 		}
 
 		sb.WriteString("\nUsage: /model <name>")
@@ -152,7 +152,7 @@ func (c *ModelCommand) formatProviderModels(models []client.ModelInfo) string {
 	sb.WriteString("Available models:\n")
 	for _, m := range models {
 		shortName := extractShortName(m.ID)
-		sb.WriteString(fmt.Sprintf("  %-8s %s\n", shortName, m.Description))
+		fmt.Fprintf(&sb, "  %-8s %s\n", shortName, m.Description)
 	}
 	return sb.String()
 }

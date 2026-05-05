@@ -183,7 +183,7 @@ func (m Model) renderQuestionPrompt() string {
 		if opt == m.questionRequest.Default {
 			label += " " + m.styles.ModalDefault.Render("(default)")
 		}
-		builder.WriteString(fmt.Sprintf("%s%s\n", prefix, style.Render(label)))
+		fmt.Fprintf(&builder, "%s%s\n", prefix, style.Render(label))
 	}
 
 	// "Other" option
@@ -194,7 +194,7 @@ func (m Model) renderQuestionPrompt() string {
 		prefix = "> "
 		style = m.styles.ModalSelected
 	}
-	builder.WriteString(fmt.Sprintf("%s%s\n", prefix, style.Render("Other (custom answer)")))
+	fmt.Fprintf(&builder, "%s%s\n", prefix, style.Render("Other (custom answer)"))
 
 	builder.WriteString("\n")
 	builder.WriteString(m.styles.StatusBar.Render("Use arrows to select, Enter to confirm, or Ctrl+P for more"))
@@ -448,7 +448,7 @@ func (m Model) renderModelSelector() string {
 	builder.WriteString("\n\n")
 
 	// Current model info
-	builder.WriteString(fmt.Sprintf("  Current: %s\n\n", m.styles.Spinner.Render(m.currentModel)))
+	fmt.Fprintf(&builder, "  Current: %s\n\n", m.styles.Spinner.Render(m.currentModel))
 
 	// Model options - using modal styles
 	for i, model := range m.availableModels {
@@ -464,8 +464,8 @@ func (m Model) renderModelSelector() string {
 		if model.ID == m.currentModel {
 			label += " " + m.styles.ModalDefault.Render("(current)")
 		}
-		builder.WriteString(fmt.Sprintf("%s%s\n", prefix, style.Render(label)))
-		builder.WriteString(fmt.Sprintf("     %s\n", m.styles.ModalMuted.Render(model.Description)))
+		fmt.Fprintf(&builder, "%s%s\n", prefix, style.Render(label))
+		fmt.Fprintf(&builder, "     %s\n", m.styles.ModalMuted.Render(model.Description))
 	}
 
 	builder.WriteString("\n")
@@ -507,53 +507,53 @@ func (m Model) renderShortcutsOverlay() string {
 	// Input
 	builder.WriteString(categoryStyle.Render("Input"))
 	builder.WriteString("\n")
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Enter"), descStyle.Render("Send message")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("?"), descStyle.Render("Show this help")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/"), descStyle.Render("Browse command history")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Tab"), descStyle.Render("Autocomplete commands & files")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Ctrl+U"), descStyle.Render("Clear input line")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Ctrl+R"), descStyle.Render("Search history (reverse)")))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Enter"), descStyle.Render("Send message"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("?"), descStyle.Render("Show this help"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/"), descStyle.Render("Browse command history"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Tab"), descStyle.Render("Autocomplete commands & files"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+U"), descStyle.Render("Clear input line"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+R"), descStyle.Render("Search history (reverse)"))
 
 	// Navigation
 	builder.WriteString(categoryStyle.Render("Navigation"))
 	builder.WriteString("\n")
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("PgUp/PgDn"), descStyle.Render("Scroll history")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Ctrl+L"), descStyle.Render("Clear / Redraw")))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("PgUp/PgDn"), descStyle.Render("Scroll history"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+L"), descStyle.Render("Clear / Redraw"))
 
 	// Code Blocks
 	builder.WriteString(categoryStyle.Render("Code Blocks"))
 	builder.WriteString("\n")
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("[ / ]"), descStyle.Render("Previous/Next block")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Tab"), descStyle.Render("Apply code block")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("c"), descStyle.Render("Copy selected block")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("y"), descStyle.Render("Copy last AI response")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Shift+Y"), descStyle.Render("Copy chat history")))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("[ / ]"), descStyle.Render("Previous/Next block"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Tab"), descStyle.Render("Apply code block"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("c"), descStyle.Render("Copy selected block"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("y"), descStyle.Render("Copy last AI response"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Shift+Y"), descStyle.Render("Copy chat history"))
 
 	// Command Center
 	builder.WriteString(categoryStyle.Render("Command Center"))
 	builder.WriteString("\n")
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Ctrl+P"), descStyle.Render("Command Palette (All Actions)")))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+P"), descStyle.Render("Command Palette (All Actions)"))
 
 	// Slash Commands
 	builder.WriteString(categoryStyle.Render("Slash Commands"))
 	builder.WriteString("\n")
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/help"), descStyle.Render("Show all available commands")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/clear"), descStyle.Render("Clear conversation history")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/save"), descStyle.Render("Save current session")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/sessions"), descStyle.Render("List saved sessions")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/model"), descStyle.Render("Switch AI model")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/cost"), descStyle.Render("Show token usage & costs")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/browse"), descStyle.Render("Browse project files")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/git-status"), descStyle.Render("Show git status")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/commit"), descStyle.Render("Create git commit")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/checkpoint"), descStyle.Render("Create checkpoint")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("/doctor"), descStyle.Render("Diagnose issues")))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/help"), descStyle.Render("Show all available commands"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/clear"), descStyle.Render("Clear conversation history"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/save"), descStyle.Render("Save current session"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/sessions"), descStyle.Render("List saved sessions"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/model"), descStyle.Render("Switch AI model"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/cost"), descStyle.Render("Show token usage & costs"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/browse"), descStyle.Render("Browse project files"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/git-status"), descStyle.Render("Show git status"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/commit"), descStyle.Render("Create git commit"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/checkpoint"), descStyle.Render("Create checkpoint"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("/doctor"), descStyle.Render("Diagnose issues"))
 
 	// Session
 	builder.WriteString(categoryStyle.Render("Session"))
 	builder.WriteString("\n")
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Ctrl+C"), descStyle.Render("Quit (graceful shutdown)")))
-	builder.WriteString(fmt.Sprintf("  %s%s\n", keyStyle.Render("Ctrl+D"), descStyle.Render("Quit (alternative)")))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+C"), descStyle.Render("Quit (graceful shutdown)"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+D"), descStyle.Render("Quit (alternative)"))
 
 	builder.WriteString("\n")
 	builder.WriteString(m.styles.StatusBar.Render("Press any key to close"))

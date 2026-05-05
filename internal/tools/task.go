@@ -208,16 +208,16 @@ func (t *TaskTool) executeForeground(ctx context.Context, agentType, prompt, des
 
 	// Header
 	if description != "" {
-		output.WriteString(fmt.Sprintf("## Task: %s\n\n", description))
+		fmt.Fprintf(&output, "## Task: %s\n\n", description)
 	}
-	output.WriteString(fmt.Sprintf("Agent ID: %s\n", result.AgentID))
-	output.WriteString(fmt.Sprintf("Type: %s\n", result.Type))
-	output.WriteString(fmt.Sprintf("Status: %s\n", result.Status))
-	output.WriteString(fmt.Sprintf("Duration: %s\n\n", result.Duration.Round(time.Millisecond)))
+	fmt.Fprintf(&output, "Agent ID: %s\n", result.AgentID)
+	fmt.Fprintf(&output, "Type: %s\n", result.Type)
+	fmt.Fprintf(&output, "Status: %s\n", result.Status)
+	fmt.Fprintf(&output, "Duration: %s\n\n", result.Duration.Round(time.Millisecond))
 
 	// Result
 	if result.Error != "" {
-		output.WriteString(fmt.Sprintf("**Error:** %s\n\n", result.Error))
+		fmt.Fprintf(&output, "**Error:** %s\n\n", result.Error)
 	}
 
 	if result.Output != "" {
@@ -258,10 +258,10 @@ func (t *TaskTool) executeBackground(ctx context.Context, agentType, prompt, des
 
 	var output strings.Builder
 	output.WriteString("Agent spawned in background.\n\n")
-	output.WriteString(fmt.Sprintf("Agent ID: %s\n", agentID))
-	output.WriteString(fmt.Sprintf("Type: %s\n", agentType))
+	fmt.Fprintf(&output, "Agent ID: %s\n", agentID)
+	fmt.Fprintf(&output, "Type: %s\n", agentType)
 	if description != "" {
-		output.WriteString(fmt.Sprintf("Task: %s\n", description))
+		fmt.Fprintf(&output, "Task: %s\n", description)
 	}
 	if onText != nil {
 		output.WriteString("Streaming: enabled\n")
@@ -292,16 +292,16 @@ func (t *TaskTool) executeResumeForeground(ctx context.Context, agentID, prompt,
 	// Header
 	output.WriteString("## Agent Resumed\n\n")
 	if description != "" {
-		output.WriteString(fmt.Sprintf("Task: %s\n", description))
+		fmt.Fprintf(&output, "Task: %s\n", description)
 	}
-	output.WriteString(fmt.Sprintf("Agent ID: %s\n", result.AgentID))
-	output.WriteString(fmt.Sprintf("Type: %s\n", result.Type))
-	output.WriteString(fmt.Sprintf("Status: %s\n", result.Status))
-	output.WriteString(fmt.Sprintf("Duration: %s\n\n", result.Duration.Round(time.Millisecond)))
+	fmt.Fprintf(&output, "Agent ID: %s\n", result.AgentID)
+	fmt.Fprintf(&output, "Type: %s\n", result.Type)
+	fmt.Fprintf(&output, "Status: %s\n", result.Status)
+	fmt.Fprintf(&output, "Duration: %s\n\n", result.Duration.Round(time.Millisecond))
 
 	// Result
 	if result.Error != "" {
-		output.WriteString(fmt.Sprintf("**Error:** %s\n\n", result.Error))
+		fmt.Fprintf(&output, "**Error:** %s\n\n", result.Error)
 	}
 
 	if result.Output != "" {
@@ -326,9 +326,9 @@ func (t *TaskTool) executeResumeBackground(ctx context.Context, agentID, prompt,
 
 	var output strings.Builder
 	output.WriteString("Agent resumed in background.\n\n")
-	output.WriteString(fmt.Sprintf("Agent ID: %s\n", resumedID))
+	fmt.Fprintf(&output, "Agent ID: %s\n", resumedID)
 	if description != "" {
-		output.WriteString(fmt.Sprintf("Task: %s\n", description))
+		fmt.Fprintf(&output, "Task: %s\n", description)
 	}
 	output.WriteString("\nUse task_output with this agent_id to check status and results.")
 

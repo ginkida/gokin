@@ -497,11 +497,11 @@ func (b *PromptBuilder) Build() string {
 	}
 
 	// Add working directory
-	builder.WriteString(fmt.Sprintf("\n\nThe user's working directory is: %s", b.workDir))
+	fmt.Fprintf(&builder, "\n\nThe user's working directory is: %s", b.workDir)
 
 	// Add project context if available
 	if b.projectInfo != nil && b.projectInfo.Name != "" {
-		builder.WriteString(fmt.Sprintf("\nProject name: %s", b.projectInfo.Name))
+		fmt.Fprintf(&builder, "\nProject name: %s", b.projectInfo.Name)
 	}
 
 	// Smart context injection: skip heavy sections for simple questions.
@@ -712,15 +712,15 @@ func (b *PromptBuilder) buildProjectSection() string {
 
 	// Add detected details
 	if len(b.projectInfo.Dependencies) > 0 {
-		builder.WriteString(fmt.Sprintf("\n\nKey dependencies: %s", strings.Join(b.projectInfo.Dependencies, ", ")))
+		fmt.Fprintf(&builder, "\n\nKey dependencies: %s", strings.Join(b.projectInfo.Dependencies, ", "))
 	}
 
 	if b.projectInfo.TestFramework != "" {
-		builder.WriteString(fmt.Sprintf("\nTest command: %s", b.projectInfo.TestFramework))
+		fmt.Fprintf(&builder, "\nTest command: %s", b.projectInfo.TestFramework)
 	}
 
 	if b.projectInfo.BuildTool != "" {
-		builder.WriteString(fmt.Sprintf("\nBuild tool: %s", b.projectInfo.BuildTool))
+		fmt.Fprintf(&builder, "\nBuild tool: %s", b.projectInfo.BuildTool)
 	}
 
 	// Append Docker context if detected
@@ -728,7 +728,7 @@ func (b *PromptBuilder) buildProjectSection() string {
 		builder.WriteString("\n")
 		builder.WriteString(dockerGuidelines)
 		if b.projectInfo.DockerBaseImage != "" {
-			builder.WriteString(fmt.Sprintf("\nBase image: %s", b.projectInfo.DockerBaseImage))
+			fmt.Fprintf(&builder, "\nBase image: %s", b.projectInfo.DockerBaseImage)
 		}
 	}
 
@@ -739,7 +739,7 @@ func (b *PromptBuilder) buildProjectSection() string {
 			services = "(check compose file)"
 		}
 		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf(dockerComposeGuidelines, cf, cf, cf, cf, cf, cf, services, cf))
+		fmt.Fprintf(&builder, dockerComposeGuidelines, cf, cf, cf, cf, cf, cf, services, cf)
 	}
 
 	return builder.String()
@@ -836,15 +836,15 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 	builder.WriteString("═══════════════════════════════════════════════════════════════════════\n")
 	builder.WriteString("                         APPROVED PLAN\n")
 	builder.WriteString("═══════════════════════════════════════════════════════════════════════\n\n")
-	builder.WriteString(fmt.Sprintf("## %s\n", title))
+	fmt.Fprintf(&builder, "## %s\n", title)
 	if description != "" {
-		builder.WriteString(fmt.Sprintf("%s\n", description))
+		fmt.Fprintf(&builder, "%s\n", description)
 	}
 	builder.WriteString("\n### Steps:\n")
 	for _, step := range steps {
-		builder.WriteString(fmt.Sprintf("%d. **%s**\n", step.ID, step.Title))
+		fmt.Fprintf(&builder, "%d. **%s**\n", step.ID, step.Title)
 		if step.Description != "" {
-			builder.WriteString(fmt.Sprintf("   %s\n", step.Description))
+			fmt.Fprintf(&builder, "   %s\n", step.Description)
 		}
 	}
 
@@ -861,7 +861,7 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 	builder.WriteString("7. Report any issues or deviations from the plan\n")
 
 	// Working directory
-	builder.WriteString(fmt.Sprintf("\nWorking directory: %s\n", b.workDir))
+	fmt.Fprintf(&builder, "\nWorking directory: %s\n", b.workDir)
 
 	return applyPromptBudget(builder.String(), maxPlanExecutionPromptChar)
 }
@@ -951,11 +951,11 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 	}
 
 	// Working directory
-	builder.WriteString(fmt.Sprintf("\nWorking directory: %s\n", b.workDir))
+	fmt.Fprintf(&builder, "\nWorking directory: %s\n", b.workDir)
 
 	// Project name
 	if b.projectInfo != nil && b.projectInfo.Name != "" {
-		builder.WriteString(fmt.Sprintf("Project: %s\n", b.projectInfo.Name))
+		fmt.Fprintf(&builder, "Project: %s\n", b.projectInfo.Name)
 	}
 
 	return applyPromptBudget(builder.String(), maxSubAgentPromptChars)

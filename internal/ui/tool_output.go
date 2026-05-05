@@ -439,7 +439,7 @@ func (r *ExecutionStatusRenderer) RenderValidation(toolName string, warnings []s
 }
 
 // RenderStart renders the start of tool execution with user-friendly summary
-func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary interface{}) string {
+func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary any) string {
 	var result strings.Builder
 
 	// Tool name with icon
@@ -575,7 +575,7 @@ func (r *ExecutionStatusRenderer) RenderDenied(toolName, reason string) string {
 }
 
 // RenderApproved renders permission approved status
-func (r *ExecutionStatusRenderer) RenderApproved(toolName string, summary interface{}) string {
+func (r *ExecutionStatusRenderer) RenderApproved(toolName string, summary any) string {
 	approveStyle := lipgloss.NewStyle().
 		Foreground(ColorSuccess).
 		Bold(true)

@@ -307,9 +307,9 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 	if target == "all" {
 		result.WriteString("✓ All credentials removed.\n")
 	} else if targetP != nil && targetP.HasOAuth {
-		result.WriteString(fmt.Sprintf("✓ %s credentials removed.\n", displayTarget))
+		fmt.Fprintf(&result, "✓ %s credentials removed.\n", displayTarget)
 	} else {
-		result.WriteString(fmt.Sprintf("✓ %s API key removed.\n", displayTarget))
+		fmt.Fprintf(&result, "✓ %s API key removed.\n", displayTarget)
 	}
 	if applyFailed {
 		result.WriteString("⚠ Client could not be re-initialized (no valid credentials remain).\n")
@@ -322,9 +322,9 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		result.WriteString("Choose AI provider:\n")
 		for _, lp := range config.Providers {
 			if lp.KeyOptional {
-				result.WriteString(fmt.Sprintf("  /login %s%s- %s\n", lp.Name, padSpaces(12-len(lp.Name)), lp.DisplayName))
+				fmt.Fprintf(&result, "  /login %s%s- %s\n", lp.Name, padSpaces(12-len(lp.Name)), lp.DisplayName)
 			} else {
-				result.WriteString(fmt.Sprintf("  /login %s <key>%s- %s\n", lp.Name, padSpaces(6-len(lp.Name)), lp.DisplayName))
+				fmt.Fprintf(&result, "  /login %s <key>%s- %s\n", lp.Name, padSpaces(6-len(lp.Name)), lp.DisplayName)
 			}
 		}
 	} else if target == currentProvider || target == "all" {
@@ -337,7 +337,7 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 			if i == 0 {
 				marker = "→ "
 			}
-			result.WriteString(fmt.Sprintf("%s/provider %s\n", marker, provider))
+			fmt.Fprintf(&result, "%s/provider %s\n", marker, provider)
 		}
 
 		// Auto-switch to first available
@@ -363,7 +363,7 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 			// Same class of bug as /login and /provider handle.
 			app.ClearConversation()
 
-			result.WriteString(fmt.Sprintf("\n✓ Auto-switched to %s — session cleared (history format differs across providers)\n", newProvider))
+			fmt.Fprintf(&result, "\n✓ Auto-switched to %s — session cleared (history format differs across providers)\n", newProvider)
 		}
 	}
 

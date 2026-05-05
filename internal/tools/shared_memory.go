@@ -183,12 +183,12 @@ func (t *SharedMemoryTool) executeRead(args map[string]any) (ToolResult, error) 
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Shared Memory Entry: %s\n\n", key))
-	sb.WriteString(fmt.Sprintf("**Type:** %s\n", entry.Type))
-	sb.WriteString(fmt.Sprintf("**Source:** %s\n", entry.Source))
-	sb.WriteString(fmt.Sprintf("**Version:** %d\n", entry.Version))
-	sb.WriteString(fmt.Sprintf("**Timestamp:** %s\n\n", entry.Timestamp.Format(time.RFC3339)))
-	sb.WriteString(fmt.Sprintf("**Value:**\n%v\n", entry.Value))
+	fmt.Fprintf(&sb, "## Shared Memory Entry: %s\n\n", key)
+	fmt.Fprintf(&sb, "**Type:** %s\n", entry.Type)
+	fmt.Fprintf(&sb, "**Source:** %s\n", entry.Source)
+	fmt.Fprintf(&sb, "**Version:** %d\n", entry.Version)
+	fmt.Fprintf(&sb, "**Timestamp:** %s\n\n", entry.Timestamp.Format(time.RFC3339))
+	fmt.Fprintf(&sb, "**Value:**\n%v\n", entry.Value)
 
 	return NewSuccessResultWithData(sb.String(), map[string]any{
 		"key":       entry.Key,
@@ -221,11 +221,11 @@ func (t *SharedMemoryTool) executeWrite(args map[string]any) (ToolResult, error)
 
 	var sb strings.Builder
 	sb.WriteString("## Entry Written to Shared Memory\n\n")
-	sb.WriteString(fmt.Sprintf("**Key:** %s\n", key))
-	sb.WriteString(fmt.Sprintf("**Type:** %s\n", entryType))
-	sb.WriteString(fmt.Sprintf("**Value:** %s\n", value))
+	fmt.Fprintf(&sb, "**Key:** %s\n", key)
+	fmt.Fprintf(&sb, "**Type:** %s\n", entryType)
+	fmt.Fprintf(&sb, "**Value:** %s\n", value)
 	if ttlMinutes > 0 {
-		sb.WriteString(fmt.Sprintf("**TTL:** %d minutes\n", ttlMinutes))
+		fmt.Fprintf(&sb, "**TTL:** %d minutes\n", ttlMinutes)
 	}
 
 	return NewSuccessResult(sb.String()), nil
@@ -252,17 +252,17 @@ func (t *SharedMemoryTool) executeList(args map[string]any) (ToolResult, error) 
 	var sb strings.Builder
 	sb.WriteString("## Shared Memory Entries\n\n")
 	if filterType != "" {
-		sb.WriteString(fmt.Sprintf("*Filtered by type: %s*\n\n", filterType))
+		fmt.Fprintf(&sb, "*Filtered by type: %s*\n\n", filterType)
 	}
 
 	for _, entry := range entries {
-		sb.WriteString(fmt.Sprintf("### %s\n", entry.Key))
-		sb.WriteString(fmt.Sprintf("- **Type:** %s\n", entry.Type))
-		sb.WriteString(fmt.Sprintf("- **Source:** %s\n", entry.Source))
-		sb.WriteString(fmt.Sprintf("- **Value:** %v\n\n", entry.Value))
+		fmt.Fprintf(&sb, "### %s\n", entry.Key)
+		fmt.Fprintf(&sb, "- **Type:** %s\n", entry.Type)
+		fmt.Fprintf(&sb, "- **Source:** %s\n", entry.Source)
+		fmt.Fprintf(&sb, "- **Value:** %v\n\n", entry.Value)
 	}
 
-	sb.WriteString(fmt.Sprintf("---\n**Total entries:** %d\n", len(entries)))
+	fmt.Fprintf(&sb, "---\n**Total entries:** %d\n", len(entries))
 
 	// Prepare structured data
 	entriesData := make([]map[string]any, len(entries))

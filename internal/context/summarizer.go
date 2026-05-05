@@ -305,11 +305,11 @@ func (s *Summarizer) formatMessages(messages []*genai.Content) string {
 						}
 					}
 				}
-				builder.WriteString(fmt.Sprintf("%s: %s\n\n", role, text))
+				fmt.Fprintf(&builder, "%s: %s\n\n", role, text)
 			}
 			if part.FunctionCall != nil {
 				args, _ := json.Marshal(part.FunctionCall.Args)
-				builder.WriteString(fmt.Sprintf("%s: [Called tool: %s with args: %s]\n\n", role, part.FunctionCall.Name, string(args)))
+				fmt.Fprintf(&builder, "%s: [Called tool: %s with args: %s]\n\n", role, part.FunctionCall.Name, string(args))
 			}
 			if part.FunctionResponse != nil {
 				respContent := "[Tool response]"
@@ -330,7 +330,7 @@ func (s *Summarizer) formatMessages(messages []*genai.Content) string {
 				} else if err, ok := part.FunctionResponse.Response["error"].(string); ok && err != "" {
 					respContent = "Error: " + err
 				}
-				builder.WriteString(fmt.Sprintf("Tool (%s) Result: %s\n\n", part.FunctionResponse.Name, respContent))
+				fmt.Fprintf(&builder, "Tool (%s) Result: %s\n\n", part.FunctionResponse.Name, respContent)
 			}
 		}
 	}

@@ -152,7 +152,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 
 	var builder strings.Builder
 	builder.WriteString("# Session Memory\n")
-	builder.WriteString(fmt.Sprintf("_Updated: %s_\n\n", time.Now().Format("15:04")))
+	fmt.Fprintf(&builder, "_Updated: %s_\n\n", time.Now().Format("15:04"))
 
 	// Extract current task from the last few user messages
 	if task := extractCurrentTask(history); task != "" {
@@ -166,7 +166,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 	if len(files) > 0 {
 		builder.WriteString("## Files and Functions\n")
 		for _, f := range files {
-			builder.WriteString(fmt.Sprintf("- %s (%s)\n", f.Path, f.Action))
+			fmt.Fprintf(&builder, "- %s (%s)\n", f.Path, f.Action)
 		}
 		builder.WriteString("\n")
 	}
@@ -199,7 +199,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 	if len(errors) > 0 {
 		builder.WriteString("## Errors & Corrections\n")
 		for _, e := range errors {
-			builder.WriteString(fmt.Sprintf("- %s\n", e))
+			fmt.Fprintf(&builder, "- %s\n", e)
 		}
 		builder.WriteString("\n")
 	}

@@ -103,12 +103,12 @@ func (c *UpdateCommand) checkForUpdate(ctx context.Context, updater *update.Upda
 
 	var sb strings.Builder
 	sb.WriteString("📦 **Update available!**\n\n")
-	sb.WriteString(fmt.Sprintf("Current version: `%s`\n", info.CurrentVersion))
-	sb.WriteString(fmt.Sprintf("New version:     `%s`\n", info.NewVersion))
-	sb.WriteString(fmt.Sprintf("Published:       %s\n", info.PublishedAt.Format("2006-01-02")))
+	fmt.Fprintf(&sb, "Current version: `%s`\n", info.CurrentVersion)
+	fmt.Fprintf(&sb, "New version:     `%s`\n", info.NewVersion)
+	fmt.Fprintf(&sb, "Published:       %s\n", info.PublishedAt.Format("2006-01-02"))
 
 	if info.ReleaseURL != "" {
-		sb.WriteString(fmt.Sprintf("\n[View release notes](%s)\n", info.ReleaseURL))
+		fmt.Fprintf(&sb, "\n[View release notes](%s)\n", info.ReleaseURL)
 	}
 
 	sb.WriteString("\n**To update:**\n")
@@ -143,8 +143,8 @@ func (c *UpdateCommand) installUpdate(ctx context.Context, updater *update.Updat
 	}
 
 	sb.WriteString("✓ **Update successful!**\n\n")
-	sb.WriteString(fmt.Sprintf("Previous version: `%s`\n", info.CurrentVersion))
-	sb.WriteString(fmt.Sprintf("New version:      `%s`\n", info.NewVersion))
+	fmt.Fprintf(&sb, "Previous version: `%s`\n", info.CurrentVersion)
+	fmt.Fprintf(&sb, "New version:      `%s`\n", info.NewVersion)
 	sb.WriteString("\n**Apply the update:**\n")
 	sb.WriteString("  • Run `/restart` to re-exec gokin now (loses session; /save first if needed)\n")
 	sb.WriteString("  • Or exit and relaunch manually — the new binary is already in place")
@@ -182,9 +182,9 @@ func (c *UpdateCommand) listBackups(updater *update.Updater) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("Available backups:\n\n")
 	for _, b := range backups {
-		sb.WriteString(fmt.Sprintf("ID: `%s`\n", b.ID))
-		sb.WriteString(fmt.Sprintf("Version: `%s`\n", b.Version))
-		sb.WriteString(fmt.Sprintf("Created: %s\n\n", b.CreatedAt.Format("2006-01-02 15:04:05")))
+		fmt.Fprintf(&sb, "ID: `%s`\n", b.ID)
+		fmt.Fprintf(&sb, "Version: `%s`\n", b.Version)
+		fmt.Fprintf(&sb, "Created: %s\n\n", b.CreatedAt.Format("2006-01-02 15:04:05"))
 	}
 	sb.WriteString("Use `/update rollback <backup-id>` to restore a specific backup.")
 	return sb.String(), nil

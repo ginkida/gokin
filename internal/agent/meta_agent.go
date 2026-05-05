@@ -355,7 +355,7 @@ func (ma *MetaAgent) GetAgentStatus(agentID string) (*AgentMonitor, bool) {
 }
 
 // GetStats returns meta agent statistics.
-func (ma *MetaAgent) GetStats() map[string]interface{} {
+func (ma *MetaAgent) GetStats() map[string]any {
 	ma.mu.RLock()
 	defer ma.mu.RUnlock()
 
@@ -366,7 +366,7 @@ func (ma *MetaAgent) GetStats() map[string]interface{} {
 		}
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"active_agents":       len(ma.activeAgents),
 		"total_interventions": totalInterventions,
 		"check_interval":      ma.config.CheckInterval.String(),
