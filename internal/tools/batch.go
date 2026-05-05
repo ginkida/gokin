@@ -424,8 +424,8 @@ func (t *BatchTool) executeDelete(ctx context.Context, files []string, dryRun, p
 		} else {
 			result.Succeeded = append(result.Succeeded, path)
 
-			// Record for undo
-			if t.undoManager != nil && len(oldContent) > 0 {
+			// Record for undo (nil means pre-read failed; []byte{} is a valid empty file).
+			if t.undoManager != nil && oldContent != nil {
 				change := undo.NewFileChange(path, "batch_delete", oldContent, nil, false)
 				t.undoManager.Record(*change)
 			}
