@@ -29,7 +29,7 @@ func (a *App) detectPatterns() []string {
 	// Count subsequences of length 2-4
 	counts := make(map[string]int)
 	for seqLen := 2; seqLen <= 4; seqLen++ {
-		for i := 0; i <= len(recent)-seqLen; i++ {
+		for i := range len(recent) - seqLen + 1 {
 			key := strings.Join(recent[i:i+seqLen], "->")
 			counts[key]++
 		}

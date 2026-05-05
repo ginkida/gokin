@@ -267,8 +267,8 @@ func (a *App) extractGoModInfo(goModPath string) string {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "module ") {
-			moduleName = strings.TrimPrefix(line, "module ")
+		if after, ok := strings.CutPrefix(line, "module "); ok {
+			moduleName = after
 		}
 		// Check for known framework dependencies in require blocks
 		for prefix, name := range knownFrameworks {
@@ -298,15 +298,12 @@ func (a *App) extractPackageJSONInfo(packageJSONPath string) string {
 	var info []string
 
 	// Extract "name"
-	if idx := strings.Index(content, `"name"`); idx >= 0 {
-		rest := content[idx:]
-		if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
-			rest = rest[colonIdx+1:]
-			rest = strings.TrimSpace(rest)
+	if _, afterName, ok := strings.Cut(content, `"name"`); ok {
+		if _, afterColon, ok := strings.Cut(afterName, ":"); ok {
+			rest := strings.TrimSpace(afterColon)
 			if len(rest) > 0 && rest[0] == '"' {
-				endQuote := strings.Index(rest[1:], `"`)
-				if endQuote >= 0 {
-					info = append(info, "Package: "+rest[1:endQuote+1])
+				if name, _, ok := strings.Cut(rest[1:], `"`); ok {
+					info = append(info, "Package: "+name)
 				}
 			}
 		}
@@ -469,17 +466,16 @@ func looksLikeCrateMember(trimmed string) bool {
 func extractQuotedStrings(line string) []string {
 	var out []string
 	for {
-		start := strings.Index(line, "\"")
-		if start < 0 {
+		_, rest, ok := strings.Cut(line, `"`)
+		if !ok {
 			return out
 		}
-		line = line[start+1:]
-		end := strings.Index(line, "\"")
-		if end < 0 {
+		val, after, ok := strings.Cut(rest, `"`)
+		if !ok {
 			return out
 		}
-		out = append(out, line[:end])
-		line = line[end+1:]
+		out = append(out, val)
+		line = after
 	}
 }
 
