@@ -83,13 +83,13 @@ func (rc *ResponseCompressor) compressString(key string, s string) string {
 	}
 
 	// Truncate with ellipsis
-	truncated := s[:rc.maxChars]
+	truncated := runesTruncate(s, rc.maxChars)
 	// Try to truncate at a reasonable break point
 	lastNewline := strings.LastIndex(truncated, "\n")
 	lastPeriod := strings.LastIndex(truncated, ".")
 	bestBreak := max(lastNewline, lastPeriod)
 
-	if bestBreak > rc.maxChars/2 {
+	if bestBreak > len(truncated)/2 {
 		truncated = truncated[:bestBreak]
 	}
 
@@ -214,16 +214,25 @@ func SmartTruncate(text string, maxChars int) string {
 	}
 
 	// Default: truncate with smart break point
-	truncated := text[:maxChars]
+	truncated := runesTruncate(text, maxChars)
 	lastNewline := strings.LastIndex(truncated, "\n")
 	lastPeriod := strings.LastIndex(truncated, ".")
 	bestBreak := max(lastNewline, lastPeriod)
 
-	if bestBreak > maxChars/2 {
+	if bestBreak > len(truncated)/2 {
 		truncated = truncated[:bestBreak]
 	}
 
 	return truncated + "... [truncated]"
+}
+
+// runesTruncate returns the first n runes of s, safe for any UTF-8 input.
+func runesTruncate(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n])
 }
 
 // truncateStructured truncates structured data (JSON/YAML) more carefully.
@@ -241,9 +250,7 @@ func truncateStructured(text string, maxChars int) string {
 		}
 	}
 
-	// Truncate at a balanced bracket point if possible
-	truncated := text[:maxChars]
-	return truncated + "... [truncated]"
+	return runesTruncate(text, maxChars) + "... [truncated]"
 }
 
 // truncateCodeBlock truncates code while preserving the language marker.
@@ -251,20 +258,20 @@ func truncateCodeBlock(text string, maxChars int) string {
 	// Find the first code block
 	startIdx := strings.Index(text, "```")
 	if startIdx == -1 {
-		return text[:maxChars] + "... [truncated]"
+		return runesTruncate(text, maxChars) + "... [truncated]"
 	}
 
 	// Keep the language marker and some code
 	endIdx := strings.Index(text[startIdx+3:], "```")
 	if endIdx == -1 {
 		// Unclosed code block, truncate in the middle
-		return text[:maxChars] + "... [truncated]"
+		return runesTruncate(text, maxChars) + "... [truncated]"
 	}
 
 	// Keep first part of code block
 	codeBlock := text[:startIdx+3+endIdx]
-	if len(codeBlock) > maxChars {
-		return text[:maxChars] + "... [truncated]"
+	if len([]rune(codeBlock)) > maxChars {
+		return runesTruncate(text, maxChars) + "... [truncated]"
 	}
 
 	return codeBlock + "\n... [truncated]"
