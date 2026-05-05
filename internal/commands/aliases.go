@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 
@@ -12,9 +13,7 @@ import (
 // isn't mutated when a caller overlays config.
 func cloneAliases(src map[string]string) map[string]string {
 	out := make(map[string]string, len(src))
-	for k, v := range src {
-		out[k] = v
-	}
+	maps.Copy(out, src)
 	return out
 }
 

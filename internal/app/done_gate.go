@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -467,7 +469,6 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 	if len(testTargets) > 0 && shouldRunDoneGateToolTests(userMessage, toolsUsed, profile) {
 		if testsTool, ok := a.registry.Get("run_tests"); ok {
 			for _, target := range testTargets {
-				target := target
 				name := "run_tests@" + target.Framework + "@" + relPathOrDot(a.workDir, target.Path)
 				checks = appendUniqueDoneGateCheck(checks, seen, doneGateCheck{
 					Name: name,
@@ -498,9 +499,7 @@ func appendUniqueDoneGateCheck(checks []doneGateCheck, seen map[string]bool, che
 
 func copyDoneGateToolArgs(args map[string]any) map[string]any {
 	out := make(map[string]any, len(args))
-	for k, v := range args {
-		out[k] = v
-	}
+	maps.Copy(out, args)
 	return out
 }
 
@@ -693,10 +692,8 @@ func shouldRunDoneGateToolTests(userMessage string, toolsUsed []string, profile 
 		return false
 	}
 
-	for _, name := range toolsUsed {
-		if name == "run_tests" {
-			return true
-		}
+	if slices.Contains(toolsUsed, "run_tests") {
+		return true
 	}
 
 	if doneGateTouchedPathsRequireTests(profile.TouchedPaths) {

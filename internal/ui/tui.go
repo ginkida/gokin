@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"runtime"
 	"strings"
@@ -1054,22 +1055,13 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if m.state == StateInput || m.state == StateStreaming || m.state == StateProcessing {
 		switch msg.String() {
 		case "ctrl+b": // Scroll up
-			newOffset := m.output.viewport.YOffset - 3
-			if newOffset < 0 {
-				newOffset = 0
-			}
+			newOffset := max(m.output.viewport.YOffset-3, 0)
 			m.output.viewport.SetYOffset(newOffset)
 			m.output.SetFrozen(true)
 			return nil
 		case "ctrl+f": // Scroll down
-			newOffset := m.output.viewport.YOffset + 3
-			maxOffset := m.output.viewport.TotalLineCount() - m.output.viewport.Height
-			if maxOffset < 0 {
-				maxOffset = 0
-			}
-			if newOffset > maxOffset {
-				newOffset = maxOffset
-			}
+			maxOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
+			newOffset := min(m.output.viewport.YOffset+3, maxOffset)
 			m.output.viewport.SetYOffset(newOffset)
 			// Unfreeze if at bottom
 			total := m.output.viewport.TotalLineCount()
@@ -1101,10 +1093,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// Ctrl+U: context-aware — clear input when has text, scroll half-page up when empty
 	if msg.Type == tea.KeyCtrlU && m.state == StateInput {
 		if m.input.textarea.Value() == "" {
-			newOffset := m.output.viewport.YOffset - m.output.viewport.Height/2
-			if newOffset < 0 {
-				newOffset = 0
-			}
+			newOffset := max(m.output.viewport.YOffset-m.output.viewport.Height/2, 0)
 			m.output.viewport.SetYOffset(newOffset)
 			m.output.SetFrozen(true)
 			return nil
@@ -1116,17 +1105,9 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if msg.String() == "ctrl+shift+c" && m.state == StateInput {
 		m.CompactMode = !m.CompactMode
 		if m.CompactMode {
-			h := m.height / 3
-			if h < 3 {
-				h = 3
-			}
-			m.output.SetSize(m.width, h)
+			m.output.SetSize(m.width, max(m.height/3, 3))
 		} else {
-			h := m.height - 5
-			if h < 3 {
-				h = 3
-			}
-			m.output.SetSize(m.width, h)
+			m.output.SetSize(m.width, max(m.height-5, 3))
 		}
 		return nil
 	}
@@ -2339,8 +2320,7 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 		}
 	}
 
-	lines := strings.Split(displayContent, "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(displayContent, "\n") {
 		if line != "" {
 			if highlighted {
 				// Already has ANSI color codes — don't wrap in contentStyle
@@ -2874,10 +2854,7 @@ func (m *Model) renderInlineDiff(msg InlineDiffMsg) {
 }
 
 func (m *Model) renderProgressBar(progress float64, width int) string {
-	filled := int(progress * float64(width))
-	if filled > width {
-		filled = width
-	}
+	filled := min(int(progress*float64(width)), width)
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 	return fmt.Sprintf("[%s] %.0f%%", bar, progress*100)
@@ -2961,9 +2938,7 @@ func (m *Model) GetBackgroundTaskCount() int {
 // GetBackgroundTasks returns a snapshot of all background tasks.
 func (m *Model) GetBackgroundTasks() map[string]*BackgroundTaskState {
 	result := make(map[string]*BackgroundTaskState, len(m.backgroundTasks))
-	for k, v := range m.backgroundTasks {
-		result[k] = v
-	}
+	maps.Copy(result, m.backgroundTasks)
 	return result
 }
 

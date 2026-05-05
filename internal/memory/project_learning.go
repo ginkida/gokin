@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -381,9 +382,7 @@ func (pl *ProjectLearning) GetPreferences() map[string]string {
 	defer pl.mu.RUnlock()
 
 	result := make(map[string]string, len(pl.data.Preferences))
-	for k, v := range pl.data.Preferences {
-		result[k] = v
-	}
+	maps.Copy(result, pl.data.Preferences)
 	return result
 }
 

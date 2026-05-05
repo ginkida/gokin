@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -698,9 +699,7 @@ func (b *Builder) initManagers() error {
 
 	// Auto-formatter
 	formatters := tools.DefaultFormatters()
-	for ext, cmd := range b.cfg.Tools.Formatters {
-		formatters[ext] = cmd // User overrides
-	}
+	maps.Copy(formatters, b.cfg.Tools.Formatters)
 	b.executor.SetFormatter(tools.NewFormatter(formatters, 5*time.Second))
 
 	// Task manager
@@ -1890,10 +1889,7 @@ func (b *Builder) wireDependencies() error {
 
 	b.agentRunner.SetOnAgentProgress(func(id string, progress *agent.AgentProgress) {
 		if app.program != nil {
-			total := progress.TotalSteps
-			if total < 1 {
-				total = 1
-			}
+			total := max(progress.TotalSteps, 1)
 			app.safeSendToProgram(ui.BackgroundTaskProgressMsg{
 				ID:            id,
 				Progress:      float64(progress.CurrentStep) / float64(total),
@@ -2208,11 +2204,12 @@ func (b *Builder) finalizeError() error {
 	if len(b.buildErrors) == 0 {
 		return nil
 	}
-	msg := fmt.Sprintf("app build failed with %d error(s)", len(b.buildErrors))
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "app build failed with %d error(s)", len(b.buildErrors))
 	for i, err := range b.buildErrors {
-		msg += fmt.Sprintf("\n  %d. %s", i+1, err.Error())
+		fmt.Fprintf(&sb, "\n  %d. %s", i+1, err.Error())
 	}
-	return fmt.Errorf("%s", msg)
+	return fmt.Errorf("%s", sb.String())
 }
 
 // ========== UIBroadcaster Adapter (Phase 5) ==========
