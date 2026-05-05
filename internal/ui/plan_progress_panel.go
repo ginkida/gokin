@@ -612,7 +612,7 @@ func (p *PlanProgressPanel) renderProgressBar(filled, width int, progress float6
 
 // firstLine returns the first non-empty line from text.
 func firstLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			return line

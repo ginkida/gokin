@@ -416,7 +416,7 @@ func (a *App) detectProjectMapPackages() []string {
 
 	// Rust workspace: [workspace] members = ["crate-a", "crate-b"].
 	if cargoData, err := os.ReadFile(filepath.Join(a.workDir, "Cargo.toml")); err == nil {
-		for _, line := range strings.Split(string(cargoData), "\n") {
+		for line := range strings.SplitSeq(string(cargoData), "\n") {
 			trimmed := strings.TrimSpace(line)
 			// Conservative: look for `"path-like"` entries on lines that
 			// follow a `members =` key. Full TOML parsing is overkill here.
@@ -515,7 +515,7 @@ func (a *App) detectProjectMapOwners() string {
 	}
 	const maxOwnerLines = 5
 	var entries []string
-	for _, raw := range strings.Split(string(data), "\n") {
+	for raw := range strings.SplitSeq(string(data), "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

@@ -282,7 +282,7 @@ func extractDockerBaseImage(dockerfilePath string) string {
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(strings.ToUpper(line), "FROM ") {
 			parts := strings.Fields(line)

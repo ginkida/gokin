@@ -339,7 +339,7 @@ func autoGenerateCommitMessage(ctx context.Context, workDir string) string {
 	// Parse file list and change counts from stat
 	var files []string
 	var totalAdded, totalRemoved int
-	for _, line := range strings.Split(stat, "\n") {
+	for line := range strings.SplitSeq(stat, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

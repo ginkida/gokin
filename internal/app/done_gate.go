@@ -1091,7 +1091,7 @@ func discoverDoneGateTouchedPaths(workDir string) []string {
 		if err != nil || strings.TrimSpace(out) == "" {
 			continue
 		}
-		for _, line := range strings.Split(out, "\n") {
+		for line := range strings.SplitSeq(out, "\n") {
 			p := strings.TrimSpace(line)
 			if p == "" {
 				continue

@@ -680,7 +680,7 @@ func splitPromotableCommandSegments(cmd string) []string {
 	})
 	var segments []string
 	for _, field := range fields {
-		for _, part := range strings.Split(field, "&&") {
+		for part := range strings.SplitSeq(field, "&&") {
 			part = strings.TrimSpace(part)
 			if part != "" {
 				segments = append(segments, part)

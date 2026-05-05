@@ -382,7 +382,7 @@ func deltaGitStatusPaths(ctx context.Context, workDir string) (map[string]struct
 	}
 
 	text := strings.TrimSpace(string(out))
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

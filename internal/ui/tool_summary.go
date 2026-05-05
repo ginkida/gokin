@@ -25,7 +25,7 @@ func summarizeSubAgentTask(prompt, agentType string) string {
 	// First meaningful line. Prompts often open with "You are a …" system
 	// preamble — cheap heuristic: skip that framing and go for the task.
 	var first string
-	for _, line := range strings.Split(prompt, "\n") {
+	for line := range strings.SplitSeq(prompt, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

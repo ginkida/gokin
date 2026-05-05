@@ -141,7 +141,7 @@ func (p *GitContextProvider) getRecentCommits(ctx context.Context, n int) []Comm
 	}
 
 	var commits []CommitInfo
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
 		if line == "" {
 			continue
 		}
@@ -178,7 +178,7 @@ func (p *GitContextProvider) parseStatus(ctx context.Context, gc *GitContext) {
 		return
 	}
 
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if len(line) < 3 {
 			continue
 		}

@@ -132,7 +132,7 @@ func formatChangelog(releases []releaseNotes, repo, currentVersion string) strin
 		title := strings.TrimSpace(r.Name)
 		if title == "" {
 			// Fall back to first non-empty body line.
-			for _, line := range strings.Split(r.Body, "\n") {
+			for line := range strings.SplitSeq(r.Body, "\n") {
 				if strings.TrimSpace(line) != "" {
 					title = strings.TrimSpace(line)
 					break

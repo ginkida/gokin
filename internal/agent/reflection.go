@@ -695,7 +695,7 @@ func defaultErrorPatterns() []ErrorPattern {
 // firstGlobPath extracts the first real file path from glob output,
 // skipping status lines like "(no matches)" or "(showing N of M+)".
 func firstGlobPath(output string) string {
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "(") {
 			continue

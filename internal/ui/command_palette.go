@@ -707,7 +707,7 @@ func (p *CommandPalette) renderPreview(width int) string {
 		usage = cmd.Shortcut
 	}
 	// Split multi-line usage
-	for _, line := range strings.Split(usage, "\n") {
+	for line := range strings.SplitSeq(usage, "\n") {
 		content.WriteString("  " + line + "\n")
 	}
 

@@ -636,7 +636,7 @@ func (b *Builder) initManagers() error {
 
 		// Parse "STEP: title | description" lines
 		var steps []*plan.Step
-		for _, line := range strings.Split(result.Output, "\n") {
+		for line := range strings.SplitSeq(result.Output, "\n") {
 			line = strings.TrimSpace(line)
 			if !strings.HasPrefix(line, "STEP:") {
 				continue

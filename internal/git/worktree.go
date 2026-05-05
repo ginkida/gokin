@@ -65,7 +65,7 @@ func ListWorktrees(workDir string) []WorktreeInfo {
 	var trees []WorktreeInfo
 	var current WorktreeInfo
 
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			if current.Path != "" {
