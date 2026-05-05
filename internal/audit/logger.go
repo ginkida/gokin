@@ -157,7 +157,7 @@ func (l *Logger) GetRecent(n int) []*Entry {
 
 	// Return entries in reverse order (newest first)
 	results := make([]*Entry, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		results[i] = l.entries[len(l.entries)-1-i]
 	}
 

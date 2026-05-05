@@ -77,7 +77,7 @@ func (c *UndoCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	}
 
 	var reverted []string
-	for i := 0; i < steps; i++ {
+	for range steps {
 		change, err := mgr.Undo()
 		if err != nil {
 			if len(reverted) == 0 {
@@ -138,7 +138,7 @@ func (c *RedoCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	}
 
 	var applied []string
-	for i := 0; i < steps; i++ {
+	for range steps {
 		change, err := mgr.Redo()
 		if err != nil {
 			if len(applied) == 0 {

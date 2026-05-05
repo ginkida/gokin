@@ -126,7 +126,7 @@ func (t *Tracker) ListRecent(n int) []FileChange {
 	}
 
 	result := make([]FileChange, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		result[i] = t.changes[len(t.changes)-1-i]
 	}
 	return result
