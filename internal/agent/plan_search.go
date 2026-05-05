@@ -3,6 +3,7 @@ package agent
 import (
 	"math"
 	"math/rand"
+	"slices"
 	"sort"
 )
 
@@ -126,12 +127,7 @@ func (tp *TreePlanner) findHighestScoringPath(root *PlanNode) []*PlanNode {
 				parent = n
 				return true
 			}
-			for _, child := range n.Children {
-				if findParent(child) {
-					return true
-				}
-			}
-			return false
+			return slices.ContainsFunc(n.Children, findParent)
 		}
 		findParent(root)
 		current = parent
@@ -364,7 +360,7 @@ func (tp *TreePlanner) RunMCTS(tree *PlanTree) []*PlanNode {
 		return nil
 	}
 
-	for i := 0; i < tp.config.MCTSIterations; i++ {
+	for range tp.config.MCTSIterations {
 		// Selection
 		selected := tp.mctsSelect(tree.Root)
 

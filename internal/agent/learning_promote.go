@@ -63,11 +63,11 @@ func normalizeCommandForLearning(cmd string) string {
 	// — it's just navigation, and the next thing the model does will be
 	// recorded separately.
 	if strings.HasPrefix(cmd, "cd ") {
-		idx := strings.Index(cmd, " && ")
-		if idx < 0 {
+		_, after, ok := strings.Cut(cmd, " && ")
+		if !ok {
 			return ""
 		}
-		cmd = strings.TrimSpace(cmd[idx+4:])
+		cmd = strings.TrimSpace(after)
 		if cmd == "" {
 			return ""
 		}

@@ -217,7 +217,7 @@ func (po *PromptOptimizer) evictOldest(maxSize int) {
 	})
 
 	toRemove := len(po.variants) - maxSize
-	for i := 0; i < toRemove; i++ {
+	for i := range toRemove {
 		victim := entries[i]
 		v := po.variants[victim.id]
 		if v != nil {
