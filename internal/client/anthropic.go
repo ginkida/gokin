@@ -161,7 +161,7 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 	tools := c.tools
 	c.mu.RUnlock()
 
-	var messages []map[string]interface{}
+	var messages []map[string]any
 	var systemPrompt string
 	if sysInstruction != "" {
 		// Use explicit system instruction — skip heuristic extraction from history
@@ -173,7 +173,7 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 	}
 
 	// Build request
-	requestBody := map[string]interface{}{
+	requestBody := map[string]any{
 		"model":      model,
 		"max_tokens": maxTokens,
 		"messages":   messages,
@@ -187,7 +187,7 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 
 	// Extended Thinking support
 	if enableThinking && thinkingBudget > 0 {
-		requestBody["thinking"] = map[string]interface{}{
+		requestBody["thinking"] = map[string]any{
 			"type":          "enabled",
 			"budget_tokens": thinkingBudget,
 		}
@@ -222,7 +222,7 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 	tools := c.tools
 	c.mu.RUnlock()
 
-	var messages []map[string]interface{}
+	var messages []map[string]any
 	var systemPrompt string
 	if sysInstruction != "" {
 		systemPrompt = sysInstruction
@@ -231,7 +231,7 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 		messages, systemPrompt = c.convertHistoryWithResultsAndSystem(history, results)
 	}
 
-	requestBody := map[string]interface{}{
+	requestBody := map[string]any{
 		"model":      model,
 		"max_tokens": maxTokens,
 		"messages":   messages,
@@ -245,7 +245,7 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 
 	// Extended Thinking support
 	if enableThinking && thinkingBudget > 0 {
-		requestBody["thinking"] = map[string]interface{}{
+		requestBody["thinking"] = map[string]any{
 			"type":          "enabled",
 			"budget_tokens": thinkingBudget,
 		}
@@ -302,13 +302,13 @@ func (c *AnthropicClient) supportsPromptCaching() bool {
 // for providers that support Anthropic prompt caching.
 // System instruction is converted to array-of-blocks format with cache_control,
 // and the last tool gets a cache_control marker.
-func (c *AnthropicClient) applyCacheControl(requestBody map[string]interface{}) {
+func (c *AnthropicClient) applyCacheControl(requestBody map[string]any) {
 	if !c.supportsPromptCaching() {
 		return
 	}
 	// System: string → array-of-blocks with cache_control
 	if sys, ok := requestBody["system"].(string); ok && sys != "" {
-		requestBody["system"] = []map[string]interface{}{
+		requestBody["system"] = []map[string]any{
 			{
 				"type":          "text",
 				"text":          sys,
@@ -318,7 +318,7 @@ func (c *AnthropicClient) applyCacheControl(requestBody map[string]interface{}) 
 	}
 	// Tools: cache_control on the last tool
 	if toolsRaw, ok := requestBody["tools"]; ok {
-		if tools, ok := toolsRaw.([]map[string]interface{}); ok && len(tools) > 0 {
+		if tools, ok := toolsRaw.([]map[string]any); ok && len(tools) > 0 {
 			tools[len(tools)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
 		}
 	}
@@ -327,14 +327,14 @@ func (c *AnthropicClient) applyCacheControl(requestBody map[string]interface{}) 
 	// This allows the API to cache all messages up to the penultimate user turn,
 	// so only the latest exchange (user message + model response) is uncached.
 	if msgsRaw, ok := requestBody["messages"]; ok {
-		// Handle both []map[string]interface{} (pre-marshal) and []interface{} (post-unmarshal)
-		var msgs []map[string]interface{}
+		// Handle both []map[string]any (pre-marshal) and []any (post-unmarshal)
+		var msgs []map[string]any
 		switch typed := msgsRaw.(type) {
-		case []map[string]interface{}:
+		case []map[string]any:
 			msgs = typed
-		case []interface{}:
+		case []any:
 			for _, item := range typed {
-				if m, ok := item.(map[string]interface{}); ok {
+				if m, ok := item.(map[string]any); ok {
 					msgs = append(msgs, m)
 				}
 			}
@@ -343,13 +343,13 @@ func (c *AnthropicClient) applyCacheControl(requestBody map[string]interface{}) 
 			for i := len(msgs) - 3; i >= 0; i-- {
 				if role, _ := msgs[i]["role"].(string); role == "user" {
 					switch contentTyped := msgs[i]["content"].(type) {
-					case []map[string]interface{}:
+					case []map[string]any:
 						if len(contentTyped) > 0 {
 							contentTyped[len(contentTyped)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
 						}
-					case []interface{}:
+					case []any:
 						if len(contentTyped) > 0 {
-							if block, ok := contentTyped[len(contentTyped)-1].(map[string]interface{}); ok {
+							if block, ok := contentTyped[len(contentTyped)-1].(map[string]any); ok {
 								block["cache_control"] = map[string]string{"type": "ephemeral"}
 							}
 						}
@@ -377,7 +377,7 @@ func (c *AnthropicClient) SetTools(tools []*genai.Tool) {
 }
 
 // SetRateLimiter sets the rate limiter for API calls.
-func (c *AnthropicClient) SetRateLimiter(limiter interface{}) {
+func (c *AnthropicClient) SetRateLimiter(limiter any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if rl, ok := limiter.(RateLimiter); ok {
@@ -425,7 +425,7 @@ func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*gen
 	// Remove empty trailing message if convertHistoryToMessages appended one
 	if len(messages) > 0 {
 		last := messages[len(messages)-1]
-		if content, ok := last["content"].([]map[string]interface{}); ok && len(content) == 1 {
+		if content, ok := last["content"].([]map[string]any); ok && len(content) == 1 {
 			if text, ok := content[0]["text"].(string); ok && text == "" {
 				messages = messages[:len(messages)-1]
 			}
@@ -441,7 +441,7 @@ func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*gen
 		return &genai.CountTokensResponse{TotalTokens: 0}, nil
 	}
 
-	requestBody := map[string]interface{}{
+	requestBody := map[string]any{
 		"model":    model,
 		"messages": messages,
 	}
@@ -717,7 +717,7 @@ func calculateBackoffWithJitter(baseDelay time.Duration, attempt int, maxDelay t
 }
 
 // streamRequest performs a streaming request to the Anthropic API with retry logic.
-func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[string]interface{}) (*StreamingResponse, error) {
+func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[string]any) (*StreamingResponse, error) {
 	var lastErr error
 	var lastStatusCode int
 	maxDelay := 30 * time.Second // Cap maximum delay at 30 seconds
@@ -832,7 +832,7 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 // Per-attempt timeouts are enforced at the Transport level (DialContext,
 // TLSHandshakeTimeout, ResponseHeaderTimeout). The ctx governs the overall
 // lifetime of the request and SSE stream.
-func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[string]interface{}) (*StreamingResponse, error) {
+func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[string]any) (*StreamingResponse, error) {
 	// Marshal request body
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
@@ -982,6 +982,15 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	// Process stream in goroutine
 	go func() {
 		defer close(chunks)
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in anthropic streaming goroutine", "panic", r)
+				select {
+				case chunks <- ResponseChunk{Error: fmt.Errorf("internal panic: %v", r), Done: true}:
+				default:
+				}
+			}
+		}()
 		defer close(done)
 		defer closeBody.Do(closeBodyFn)
 
@@ -1006,6 +1015,11 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		// Exits when: scanner ends, context cancelled, or stopScan closed (scanLoop exited).
 		go func() {
 			defer close(scanCh)
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("panic in scanner goroutine", "panic", r)
+				}
+			}()
 			for {
 				ok := scanner.Scan()
 				select {
@@ -1169,7 +1183,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					}
 
 					// Parse JSON
-					var event map[string]interface{}
+					var event map[string]any
 					if err := json.Unmarshal([]byte(data), &event); err != nil {
 						preview := data
 						if runes := []rune(preview); len(runes) > 100 {
@@ -1184,7 +1198,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					}
 
 					// Handle Z.AI/GLM error format
-					if errObj, ok := event["error"].(map[string]interface{}); ok {
+					if errObj, ok := event["error"].(map[string]any); ok {
 						errCode := stringFromMap(errObj, "code")
 						errMsg := stringFromMap(errObj, "message")
 						retryable, keyword, description := classifyGLMErrorCode(errCode, errMsg)
@@ -1245,7 +1259,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 }
 
 // processStreamEvent converts an Anthropic stream event to a ResponseChunk.
-func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *toolCallAccumulator) ResponseChunk {
+func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCallAccumulator) ResponseChunk {
 	chunk := ResponseChunk{}
 
 	eventType, ok := event["type"].(string)
@@ -1260,7 +1274,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 	switch eventType {
 	case "content_block_start":
 		// Check if this is a tool_use, thinking, or text content block
-		if contentBlock, ok := event["content_block"].(map[string]interface{}); ok {
+		if contentBlock, ok := event["content_block"].(map[string]any); ok {
 			blockType := stringFromMap(contentBlock, "type")
 			logging.Debug("content_block_start", "type", blockType)
 
@@ -1290,7 +1304,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 
 	case "error":
 		// Handle API error events
-		if errData, ok := event["error"].(map[string]interface{}); ok {
+		if errData, ok := event["error"].(map[string]any); ok {
 			errType := stringFromMap(errData, "type")
 			errMsg := stringFromMap(errData, "message")
 			logging.Error("API error event", "type", errType, "message", errMsg)
@@ -1300,7 +1314,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 
 	case "content_block_delta":
 		logging.Debug("SSE content_block_delta event", "event", event)
-		if delta, ok := event["delta"].(map[string]interface{}); ok {
+		if delta, ok := event["delta"].(map[string]any); ok {
 			deltaType := stringFromMap(delta, "type")
 			logging.Debug("SSE delta content", "delta", delta, "type", deltaType)
 
@@ -1391,20 +1405,20 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 		// If we were accumulating a tool call, finalize it
 		if acc.currentToolID != "" && acc.currentToolName != "" {
 			inputJSON := acc.currentToolInput.String()
-			var args map[string]interface{}
+			var args map[string]any
 			if inputJSON != "" {
 				if err := json.Unmarshal([]byte(inputJSON), &args); err != nil {
 					logging.Error("tool args JSON unmarshal failed",
 						"error", err,
 						"tool", acc.currentToolName,
 						"json", inputJSON)
-					args = make(map[string]interface{})
+					args = make(map[string]any)
 				}
 			} else {
 				logging.Warn("tool call received with empty input JSON",
 					"tool", acc.currentToolName,
 					"tool_id", acc.currentToolID)
-				args = make(map[string]interface{})
+				args = make(map[string]any)
 			}
 
 			functionCall := &genai.FunctionCall{
@@ -1424,8 +1438,8 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 		acc.currentBlockType = ""
 
 	case "message_start":
-		if msg, ok := event["message"].(map[string]interface{}); ok {
-			if usage, ok := msg["usage"].(map[string]interface{}); ok {
+		if msg, ok := event["message"].(map[string]any); ok {
+			if usage, ok := msg["usage"].(map[string]any); ok {
 				if v, ok := usage["input_tokens"].(float64); ok && v > 0 {
 					chunk.InputTokens = int(v)
 				}
@@ -1440,7 +1454,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 
 	case "message_delta":
 		// Message metadata (usage, stop_reason, etc.)
-		if delta, ok := event["delta"].(map[string]interface{}); ok {
+		if delta, ok := event["delta"].(map[string]any); ok {
 			if stopReason, ok := delta["stop_reason"].(string); ok {
 				chunk.Done = true
 				switch stopReason {
@@ -1459,7 +1473,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 			}
 		}
 		// Parse usage from message_delta (output tokens)
-		if usage, ok := event["usage"].(map[string]interface{}); ok {
+		if usage, ok := event["usage"].(map[string]any); ok {
 			if v, ok := usage["output_tokens"].(float64); ok && v > 0 {
 				chunk.OutputTokens = int(v)
 			}
@@ -1481,8 +1495,8 @@ func (c *AnthropicClient) processStreamEvent(event map[string]interface{}, acc *
 // convertHistoryToMessagesWithSystem converts Gemini history to Anthropic messages format,
 // extracting the system prompt from the first user message if it looks like a system prompt.
 // Returns (messages, systemPrompt).
-func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Content, newMessage string) ([]map[string]interface{}, string) {
-	messages := make([]map[string]interface{}, 0)
+func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Content, newMessage string) ([]map[string]any, string) {
+	messages := make([]map[string]any, 0)
 	var systemPrompt string
 	skipFirst := 0
 
@@ -1570,9 +1584,9 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 	if newMessage == "" {
 		newMessage = "Continue."
 	}
-	messages = append(messages, map[string]interface{}{
+	messages = append(messages, map[string]any{
 		"role": "user",
-		"content": []map[string]interface{}{
+		"content": []map[string]any{
 			{"type": "text", "text": newMessage},
 		},
 	})
@@ -1592,15 +1606,15 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 }
 
 // convertHistoryToMessages converts Gemini history to Anthropic messages format.
-func (c *AnthropicClient) convertHistoryToMessages(history []*genai.Content, newMessage string) []map[string]interface{} {
+func (c *AnthropicClient) convertHistoryToMessages(history []*genai.Content, newMessage string) []map[string]any {
 	messages, _ := c.convertHistoryToMessagesWithSystem(history, newMessage)
 	return messages
 }
 
 // convertHistoryWithResultsAndSystem converts history with function results to messages,
 // extracting the system prompt. Returns (messages, systemPrompt).
-func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Content, results []*genai.FunctionResponse) ([]map[string]interface{}, string) {
-	messages := make([]map[string]interface{}, 0)
+func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Content, results []*genai.FunctionResponse) ([]map[string]any, string) {
+	messages := make([]map[string]any, 0)
 	var systemPrompt string
 	skipFirst := 0
 
@@ -1688,7 +1702,7 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 	}
 
 	// Add function result as user message
-	resultContents := make([]map[string]interface{}, 0)
+	resultContents := make([]map[string]any, 0)
 	for idx, result := range results {
 		toolUseID := result.ID
 		if toolUseID == "" {
@@ -1718,7 +1732,7 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 			contentStr = "Operation completed"
 		}
 
-		resultContents = append(resultContents, map[string]interface{}{
+		resultContents = append(resultContents, map[string]any{
 			"type":        "tool_result",
 			"tool_use_id": toolUseID,
 			"id":          toolUseID, // Z.AI compatibility
@@ -1726,7 +1740,7 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 		})
 	}
 
-	messages = append(messages, map[string]interface{}{
+	messages = append(messages, map[string]any{
 		"role":    "user",
 		"content": resultContents,
 	})
@@ -1738,7 +1752,7 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 }
 
 // convertHistoryWithResults converts history with function results to messages.
-func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, results []*genai.FunctionResponse) []map[string]interface{} {
+func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, results []*genai.FunctionResponse) []map[string]any {
 	messages, _ := c.convertHistoryWithResultsAndSystem(history, results)
 	return messages
 }
@@ -1747,8 +1761,8 @@ func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, re
 // Parts arrive in order: [FunctionResponse, InlineData, FunctionResponse, InlineData, ...]
 // InlineData (images) follow their associated FunctionResponse and must be merged
 // into the preceding tool_result for Anthropic's multimodal tool_result format.
-func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]interface{} {
-	content := make([]map[string]interface{}, 0)
+func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]any {
+	content := make([]map[string]any, 0)
 
 	// Index of the last tool_result in content, for attaching trailing InlineData
 	lastToolResultIdx := -1
@@ -1756,7 +1770,7 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 
 	for _, part := range parts {
 		if part.Text != "" {
-			content = append(content, map[string]interface{}{
+			content = append(content, map[string]any{
 				"type": "text",
 				"text": part.Text,
 			})
@@ -1765,9 +1779,9 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 		// These follow their FunctionResponse in the parts list, so we
 		// retroactively enrich the last emitted tool_result.
 		if part.InlineData != nil {
-			imageBlock := map[string]interface{}{
+			imageBlock := map[string]any{
 				"type": "image",
-				"source": map[string]interface{}{
+				"source": map[string]any{
 					"type":       "base64",
 					"media_type": part.InlineData.MIMEType,
 					"data":       base64.StdEncoding.EncodeToString(part.InlineData.Data),
@@ -1779,11 +1793,11 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 				// Upgrade plain string content to array format if needed
 				switch existing := tr["content"].(type) {
 				case string:
-					tr["content"] = []map[string]interface{}{
+					tr["content"] = []map[string]any{
 						{"type": "text", "text": existing},
 						imageBlock,
 					}
-				case []map[string]interface{}:
+				case []map[string]any:
 					tr["content"] = append(existing, imageBlock)
 				}
 			} else {
@@ -1822,7 +1836,7 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 			}
 
 			logging.Debug("buildUserMessage tool_result", "tool_use_id", toolUseID, "name", part.FunctionResponse.Name)
-			content = append(content, map[string]interface{}{
+			content = append(content, map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": toolUseID,
 				"id":          toolUseID,
@@ -1836,13 +1850,13 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]inter
 	// Anthropic API requires non-empty content array
 	if len(content) == 0 {
 		logging.Warn("buildUserMessage: empty content, adding placeholder", "parts_count", len(parts))
-		content = append(content, map[string]interface{}{
+		content = append(content, map[string]any{
 			"type": "text",
 			"text": "Continue.",
 		})
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"role":    "user",
 		"content": content,
 	}
@@ -1919,8 +1933,8 @@ func (c *AnthropicClient) canSerialiseAssistantForProvider(parts []*genai.Part) 
 }
 
 // buildAssistantMessage builds an assistant message from parts.
-func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]interface{} {
-	content := make([]map[string]interface{}, 0)
+func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]any {
+	content := make([]map[string]any, 0)
 	toolUseOrdinal := 0
 
 	// First pass: thinking blocks. Anthropic Extended Thinking and Kimi
@@ -1936,7 +1950,7 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 				"text_len", len(part.Text))
 			continue
 		}
-		block := map[string]interface{}{
+		block := map[string]any{
 			"type":     "thinking",
 			"thinking": part.Text,
 		}
@@ -1954,7 +1968,7 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 			continue
 		}
 		if part.Text != "" {
-			content = append(content, map[string]interface{}{
+			content = append(content, map[string]any{
 				"type": "text",
 				"text": part.Text,
 			})
@@ -1971,7 +1985,7 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 					"fallback_tool_use_id", toolID)
 			}
 			logging.Debug("buildAssistantMessage tool_use", "id", toolID, "name", part.FunctionCall.Name)
-			content = append(content, map[string]interface{}{
+			content = append(content, map[string]any{
 				"type":  "tool_use",
 				"id":    toolID,
 				"name":  part.FunctionCall.Name,
@@ -1984,13 +1998,13 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 	// Anthropic/DeepSeek API requires non-empty content array for assistant messages
 	if len(content) == 0 {
 		logging.Warn("buildAssistantMessage: empty content, adding placeholder", "parts_count", len(parts))
-		content = append(content, map[string]interface{}{
+		content = append(content, map[string]any{
 			"type": "text",
 			"text": "I'll help you with that.",
 		})
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"role":    "assistant",
 		"content": content,
 	}
@@ -1998,12 +2012,12 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 
 // convertSchemaToJSON converts a genai.Schema to Anthropic-compatible JSON Schema format.
 // genai uses uppercase types ("STRING", "OBJECT") but Anthropic expects lowercase ("string", "object").
-func convertSchemaToJSON(schema *genai.Schema) map[string]interface{} {
+func convertSchemaToJSON(schema *genai.Schema) map[string]any {
 	if schema == nil {
 		return nil
 	}
 
-	result := make(map[string]interface{})
+	result := make(map[string]any)
 
 	// Convert type to lowercase (genai uses "STRING", Anthropic expects "string")
 	if schema.Type != "" {
@@ -2020,7 +2034,7 @@ func convertSchemaToJSON(schema *genai.Schema) map[string]interface{} {
 
 	// Convert nested properties recursively
 	if len(schema.Properties) > 0 {
-		props := make(map[string]interface{})
+		props := make(map[string]any)
 		for name, propSchema := range schema.Properties {
 			props[name] = convertSchemaToJSON(propSchema)
 		}
@@ -2040,15 +2054,15 @@ func convertSchemaToJSON(schema *genai.Schema) map[string]interface{} {
 }
 
 // convertToolsToAnthropicFrom converts the given Gemini tools to Anthropic format.
-func (c *AnthropicClient) convertToolsToAnthropicFrom(genaiTools []*genai.Tool) []map[string]interface{} {
-	tools := make([]map[string]interface{}, 0)
+func (c *AnthropicClient) convertToolsToAnthropicFrom(genaiTools []*genai.Tool) []map[string]any {
+	tools := make([]map[string]any, 0)
 
 	for _, tool := range genaiTools {
 		for _, decl := range tool.FunctionDeclarations {
 			// Convert parameters schema properly using recursive conversion
 			inputSchema := convertSchemaToJSON(decl.Parameters)
 
-			anthropicTool := map[string]interface{}{
+			anthropicTool := map[string]any{
 				"name":         decl.Name,
 				"description":  decl.Description,
 				"input_schema": inputSchema,
@@ -2061,7 +2075,7 @@ func (c *AnthropicClient) convertToolsToAnthropicFrom(genaiTools []*genai.Tool) 
 }
 
 // stringFromMap safely extracts a string value from a map.
-func stringFromMap(m map[string]interface{}, key string) string {
+func stringFromMap(m map[string]any, key string) string {
 	if v, ok := m[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
@@ -2106,12 +2120,12 @@ func fallbackToolID(name string, ordinal int) string {
 // mergeConsecutiveMessages ensures strict user/assistant role alternation
 // required by Anthropic-compatible APIs (Anthropic, MiniMax, DeepSeek, etc.).
 // Consecutive messages with the same role are merged by combining their content arrays.
-func mergeConsecutiveMessages(messages []map[string]interface{}) []map[string]interface{} {
+func mergeConsecutiveMessages(messages []map[string]any) []map[string]any {
 	if len(messages) <= 1 {
 		return messages
 	}
 
-	merged := make([]map[string]interface{}, 0, len(messages))
+	merged := make([]map[string]any, 0, len(messages))
 	merged = append(merged, messages[0])
 
 	for i := 1; i < len(messages); i++ {
@@ -2144,24 +2158,24 @@ func mergeConsecutiveMessages(messages []map[string]interface{}) []map[string]in
 	return merged
 }
 
-// extractContentArray normalizes message content to []map[string]interface{}.
-func extractContentArray(v interface{}) []map[string]interface{} {
+// extractContentArray normalizes message content to []map[string]any.
+func extractContentArray(v any) []map[string]any {
 	switch c := v.(type) {
-	case []map[string]interface{}:
+	case []map[string]any:
 		return c
 	case string:
-		return []map[string]interface{}{{"type": "text", "text": c}}
+		return []map[string]any{{"type": "text", "text": c}}
 	default:
 		return nil
 	}
 }
 
-func orderToolResultsFirst(content []map[string]interface{}) []map[string]interface{} {
+func orderToolResultsFirst(content []map[string]any) []map[string]any {
 	if len(content) <= 1 {
 		return content
 	}
-	toolResults := make([]map[string]interface{}, 0)
-	other := make([]map[string]interface{}, 0, len(content))
+	toolResults := make([]map[string]any, 0)
+	other := make([]map[string]any, 0, len(content))
 	for _, block := range content {
 		if stringFromMap(block, "type") == "tool_result" {
 			toolResults = append(toolResults, block)

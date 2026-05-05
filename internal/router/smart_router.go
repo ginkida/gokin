@@ -212,6 +212,11 @@ func (sr *SmartRouter) Execute(ctx context.Context, history []*genai.Content, me
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
+				defer func() {
+					if r := recover(); r != nil {
+						logging.Warn("panic in LearnFromSuccess goroutine", "panic", r)
+					}
+				}()
 				if err := execExampleStore.LearnFromSuccess(taskType, message, agentType, output, duration, 0); err != nil {
 					logging.Debug("failed to learn from success", "error", err)
 				}

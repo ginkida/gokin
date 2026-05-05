@@ -317,6 +317,15 @@ func (c *OllamaClient) doStreamChat(ctx context.Context, req *api.ChatRequest) (
 
 	go func() {
 		defer close(chunks)
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in ollama streaming goroutine", "panic", r)
+				select {
+				case chunks <- ResponseChunk{Error: fmt.Errorf("internal panic: %v", r), Done: true}:
+				default:
+				}
+			}
+		}()
 		defer close(done)
 
 		var inputTokens, outputTokens int

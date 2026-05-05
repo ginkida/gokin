@@ -780,7 +780,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	retryPolicy.MaxRetries = 0
 	retryPolicy.MaxPartialRetries = 0
 
-	for i := 0; i < maxIterations; i++ {
+	for i := range maxIterations {
 		// Check context cancellation between iterations
 		select {
 		case <-ctx.Done():
@@ -2254,6 +2254,14 @@ streamLoop:
 			for chunk := range stream.Chunks {
 				content.WriteString(chunk)
 			}
+			// Check for any error sent before complete() closed the channels.
+			select {
+			case streamErr := <-stream.Error:
+				if streamErr != nil {
+					return NewErrorResult(streamErr.Error()), nil
+				}
+			default:
+			}
 			break streamLoop
 
 		case <-ctx.Done():
@@ -2849,10 +2857,7 @@ func (e *Executor) buildModelWorkingMemoryNotification(model string, calls []*ge
 		return ""
 	}
 
-	limit := len(calls)
-	if len(results) < limit {
-		limit = len(results)
-	}
+	limit := min(len(calls), len(results))
 	if limit == 0 {
 		return ""
 	}
