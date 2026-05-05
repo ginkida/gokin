@@ -68,6 +68,20 @@ func (r *Runner) WaitAll(agentIDs []string) ([]*AgentResult, error) {
 		wg.Add(1)
 		go func(idx int, agentID string) {
 			defer wg.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					mu.Lock()
+					if results[idx] == nil {
+						results[idx] = &AgentResult{
+							AgentID:   agentID,
+							Status:    AgentStatusFailed,
+							Error:     fmt.Sprintf("internal panic: %v", rec),
+							Completed: true,
+						}
+					}
+					mu.Unlock()
+				}
+			}()
 
 			result, err := r.Wait(agentID)
 

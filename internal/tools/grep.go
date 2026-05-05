@@ -650,6 +650,12 @@ func (t *GrepTool) ExecuteStreaming(ctx context.Context, args map[string]any) (*
 
 	go func() {
 		defer complete()
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in streaming grep goroutine", "panic", r)
+				errChan <- fmt.Errorf("internal panic: %v", r)
+			}
+		}()
 
 		const maxMatches = 500
 		matchCount := 0

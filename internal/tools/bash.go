@@ -808,6 +808,12 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in bash cmd.Wait (timeout path)", "panic", r)
+				close(cmdDone)
+			}
+		}()
 		waitErr := cmd.Wait()
 		cmdErrMu.Lock()
 		cmdErr = waitErr
