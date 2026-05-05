@@ -17,6 +17,7 @@ import (
 
 	"gokin/internal/cache"
 	"gokin/internal/git"
+	"gokin/internal/logging"
 	"gokin/internal/security"
 )
 
@@ -270,7 +271,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 			}
 			count := len(fm.matches)
 			if count > 0 {
-				results.WriteString(fmt.Sprintf("%s: %d\n", relPath, count))
+				fmt.Fprintf(&results, "%s: %d\n", relPath, count)
 				totalCount += count
 				fileCount++
 			}
@@ -308,7 +309,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 			if matchCount >= maxMatches {
 				break
 			}
-			results.WriteString(fmt.Sprintf("%s:%d: %s\n", relPath, match.lineNum, match.line))
+			fmt.Fprintf(&results, "%s:%d: %s\n", relPath, match.lineNum, match.line)
 			cacheMatches = append(cacheMatches, cache.GrepMatch{
 				FilePath: fm.path,
 				LineNum:  match.lineNum,
@@ -413,6 +414,11 @@ searchLoop:
 		go func(f string) {
 			defer wg.Done()
 			defer func() { <-semaphore }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logging.Error("grep goroutine panic", "file", f, "panic", rec)
+				}
+			}()
 
 			matches := t.searchFile(f, re, contextLines)
 
@@ -522,10 +528,7 @@ func (t *GrepTool) searchFile(filePath string, re *regexp.Regexp, contextLines i
 	for lineNum, line := range allLines {
 		if re.MatchString(line) {
 			// Add context lines before
-			start := lineNum - contextLines
-			if start < 0 {
-				start = 0
-			}
+			start := max(lineNum-contextLines, 0)
 
 			// Add context lines after
 			end := lineNum + contextLines
@@ -591,7 +594,7 @@ func isBinaryFile(path string) bool {
 	if err != nil && err != io.EOF {
 		return false
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if buf[i] == 0 {
 			return true
 		}

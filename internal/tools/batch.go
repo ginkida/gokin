@@ -127,7 +127,7 @@ func (t *BatchTool) Validate(args map[string]any) error {
 
 	// Check for pattern or files
 	pattern, hasPattern := GetString(args, "pattern")
-	files, _ := args["files"].([]interface{})
+	files, _ := args["files"].([]any)
 	hasFiles := len(files) > 0
 
 	if !hasPattern && !hasFiles {
@@ -182,7 +182,7 @@ func (t *BatchTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	}
 
 	// Add explicit files
-	if fileList, ok := args["files"].([]interface{}); ok {
+	if fileList, ok := args["files"].([]any); ok {
 		for _, f := range fileList {
 			if path, ok := f.(string); ok {
 				files = append(files, path)
@@ -476,6 +476,14 @@ func (t *BatchTool) executeParallel(ctx context.Context, files []string, operati
 		go func(p string) {
 			defer wg.Done()
 			defer func() { <-semaphore }() // Release
+			defer func() {
+				if rec := recover(); rec != nil {
+					logging.Error("batch operation panic", "path", p, "panic", rec)
+					mu.Lock()
+					result.Failed[p] = fmt.Sprintf("internal panic: %v", rec)
+					mu.Unlock()
+				}
+			}()
 
 			// Check if context is already cancelled or should stop
 			mu.Lock()
@@ -544,30 +552,30 @@ func (t *BatchTool) formatResult(op string, result BatchResult, dryRun bool) Too
 		prefix = "[DRY RUN] "
 	}
 
-	sb.WriteString(fmt.Sprintf("%sBatch %s: %s\n\n", prefix, op, result.Description))
+	fmt.Fprintf(&sb, "%sBatch %s: %s\n\n", prefix, op, result.Description)
 
 	// Summary
-	sb.WriteString(fmt.Sprintf("Total: %d files\n", result.TotalFiles))
-	sb.WriteString(fmt.Sprintf("Succeeded: %d\n", len(result.Succeeded)))
+	fmt.Fprintf(&sb, "Total: %d files\n", result.TotalFiles)
+	fmt.Fprintf(&sb, "Succeeded: %d\n", len(result.Succeeded))
 	if len(result.Skipped) > 0 {
-		sb.WriteString(fmt.Sprintf("Skipped: %d\n", len(result.Skipped)))
+		fmt.Fprintf(&sb, "Skipped: %d\n", len(result.Skipped))
 	}
 	if len(result.Failed) > 0 {
-		sb.WriteString(fmt.Sprintf("Failed: %d\n", len(result.Failed)))
+		fmt.Fprintf(&sb, "Failed: %d\n", len(result.Failed))
 	}
 
 	// Details for small result sets
 	if len(result.Succeeded) > 0 && len(result.Succeeded) <= 10 {
 		sb.WriteString("\nSucceeded:\n")
 		for _, path := range result.Succeeded {
-			sb.WriteString(fmt.Sprintf("  ✓ %s\n", filepath.Base(path)))
+			fmt.Fprintf(&sb, "  ✓ %s\n", filepath.Base(path))
 		}
 	}
 
 	if len(result.Failed) > 0 {
 		sb.WriteString("\nFailed:\n")
 		for path, err := range result.Failed {
-			sb.WriteString(fmt.Sprintf("  ✗ %s: %s\n", filepath.Base(path), err))
+			fmt.Fprintf(&sb, "  ✗ %s: %s\n", filepath.Base(path), err)
 		}
 	}
 
