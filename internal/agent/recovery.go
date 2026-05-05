@@ -208,8 +208,8 @@ func recoveryStateKey(call *genai.FunctionCall, category string) string {
 			args = strings.Join(strings.Fields(strings.ToLower(string(encoded))), " ")
 		}
 	}
-	if len(args) > 180 {
-		args = args[:180]
+	if runes := []rune(args); len(runes) > 180 {
+		args = string(runes[:180])
 	}
 	return call.Name + "|" + category + "|" + args
 }

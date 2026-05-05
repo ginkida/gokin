@@ -2997,8 +2997,8 @@ func normalizeProgressFingerprint(text string) string {
 		return ""
 	}
 	text = strings.Join(strings.Fields(text), " ")
-	if len(text) > 240 {
-		text = text[:240]
+	if runes := []rune(text); len(runes) > 240 {
+		text = string(runes[:240])
 	}
 	return text
 }
