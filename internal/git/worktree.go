@@ -75,12 +75,11 @@ func ListWorktrees(workDir string) []WorktreeInfo {
 			continue
 		}
 
-		if strings.HasPrefix(line, "worktree ") {
-			current.Path = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "HEAD ") {
-			current.Head = strings.TrimPrefix(line, "HEAD ")
-		} else if strings.HasPrefix(line, "branch ") {
-			ref := strings.TrimPrefix(line, "branch ")
+		if after, ok := strings.CutPrefix(line, "worktree "); ok {
+			current.Path = after
+		} else if after, ok := strings.CutPrefix(line, "HEAD "); ok {
+			current.Head = after
+		} else if ref, ok := strings.CutPrefix(line, "branch "); ok {
 			// Strip refs/heads/ prefix
 			current.Branch = strings.TrimPrefix(ref, "refs/heads/")
 		} else if line == "bare" {

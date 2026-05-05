@@ -945,10 +945,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	// Stream idle timeout (configurable, default 30s between chunks)
 	streamIdleTimeout := c.config.StreamIdleTimeout
 	// Stream idle warning - half of idle timeout, capped at 30s for faster feedback
-	streamIdleWarning := streamIdleTimeout / 2
-	if streamIdleWarning > 30*time.Second {
-		streamIdleWarning = 30 * time.Second
-	}
+	streamIdleWarning := min(streamIdleTimeout/2, 30*time.Second)
 
 	// Capture status callback for goroutine
 	c.mu.RLock()
@@ -1147,13 +1144,12 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					}
 
 					// SSE format: "data: {...}" or "data:{...}" (handle both)
-					var data string
-					if strings.HasPrefix(line, "data: ") {
-						data = strings.TrimPrefix(line, "data: ")
-					} else if strings.HasPrefix(line, "data:") {
-						data = strings.TrimPrefix(line, "data:")
-					} else {
-						continue waitLoop // Empty line or event: line
+					data, ok1 := strings.CutPrefix(line, "data: ")
+					if !ok1 {
+						var ok2 bool
+						if data, ok2 = strings.CutPrefix(line, "data:"); !ok2 {
+							continue waitLoop // Empty line or event: line
+						}
 					}
 
 					eventCount++

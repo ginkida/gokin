@@ -248,10 +248,10 @@ func parseBlameOutput(output string) []BlameInfo {
 			}
 			current = BlameInfo{Hash: line[:8]} // Short hash
 			fmt.Sscanf(line[41:], "%d", &current.Line)
-		} else if strings.HasPrefix(line, "author ") {
-			current.Author = strings.TrimPrefix(line, "author ")
-		} else if strings.HasPrefix(line, "\t") {
-			current.Text = strings.TrimPrefix(line, "\t")
+		} else if after, ok := strings.CutPrefix(line, "author "); ok {
+			current.Author = after
+		} else if after, ok := strings.CutPrefix(line, "\t"); ok {
+			current.Text = after
 		}
 	}
 

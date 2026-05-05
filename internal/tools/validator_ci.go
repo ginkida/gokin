@@ -219,8 +219,8 @@ func readGoModVersion(workDir string) string {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "go ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "go "))
+		if after, ok := strings.CutPrefix(line, "go "); ok {
+			return strings.TrimSpace(after)
 		}
 	}
 	return ""

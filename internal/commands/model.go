@@ -165,20 +165,21 @@ func extractShortName(modelID string) string {
 	}
 
 	// MiniMax models
-	if strings.HasPrefix(modelID, "MiniMax-") || strings.HasPrefix(modelID, "minimax-") {
-		short := strings.TrimPrefix(modelID, "MiniMax-")
-		short = strings.TrimPrefix(short, "minimax-")
-		return short
+	if after, ok := strings.CutPrefix(modelID, "MiniMax-"); ok {
+		return after
+	}
+	if after, ok := strings.CutPrefix(modelID, "minimax-"); ok {
+		return after
 	}
 
 	// Kimi models
-	if strings.HasPrefix(modelID, "kimi-") {
-		return strings.TrimPrefix(modelID, "kimi-")
+	if after, ok := strings.CutPrefix(modelID, "kimi-"); ok {
+		return after
 	}
 
 	// DeepSeek models — strip the provider prefix so /model v4-pro works.
-	if strings.HasPrefix(modelID, "deepseek-") {
-		return strings.TrimPrefix(modelID, "deepseek-")
+	if after, ok := strings.CutPrefix(modelID, "deepseek-"); ok {
+		return after
 	}
 
 	// Ollama and unknown — return full id

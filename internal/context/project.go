@@ -119,11 +119,10 @@ func (p *ProjectInfo) extractGoDetails(workDir string) {
 		return
 	}
 
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "module ") {
-			p.Name = strings.TrimPrefix(line, "module ")
+		if after, ok := strings.CutPrefix(line, "module "); ok {
+			p.Name = after
 			break
 		}
 	}
@@ -237,8 +236,7 @@ func (p *ProjectInfo) extractPythonDetails(workDir string) {
 		return
 	}
 
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "name") {
 			parts := strings.SplitN(line, "=", 2)
@@ -309,9 +307,7 @@ func extractComposeServices(composePath string) []string {
 	var services []string
 	inServices := false
 	serviceIndent := -1 // indent level of service names (detected from first service)
-	lines := strings.Split(string(data), "\n")
-
-	for _, line := range lines {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
 
 		// Skip empty lines and comments

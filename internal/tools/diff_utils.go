@@ -52,8 +52,7 @@ func normalizeWhitespace(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	inWS := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	for _, c := range s {
 		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
 			inWS = true
 			continue
@@ -62,7 +61,7 @@ func normalizeWhitespace(s string) string {
 			b.WriteByte(' ')
 		}
 		inWS = false
-		b.WriteByte(c)
+		b.WriteRune(c)
 	}
 	return b.String()
 }
