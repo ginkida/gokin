@@ -162,7 +162,7 @@ func (m *ContextManager) syncTaskContext() {
 
 	// Parse the contract text into structured TaskContext
 	tc := &TaskContext{}
-	for _, line := range strings.Split(contract, "\n") {
+	for line := range strings.SplitSeq(contract, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "**Plan:**"):
@@ -688,10 +688,7 @@ func (m *ContextManager) trackKeyFiles(event chat.ChangeEvent) {
 	defer m.mu.Unlock()
 
 	// Scan newly added messages (from OldCount to NewCount)
-	start := event.OldCount
-	if start < 0 {
-		start = 0
-	}
+	start := max(event.OldCount, 0)
 	if start >= len(history) {
 		return
 	}
@@ -749,10 +746,7 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	history := m.session.GetHistory()
 
 	// Preserve last 50 messages in full fidelity
-	preserveCount := 50
-	if preserveCount > len(history) {
-		preserveCount = len(history)
-	}
+	preserveCount := min(50, len(history))
 
 	if len(history) <= preserveCount {
 		return nil // Nothing old enough to compact
@@ -825,17 +819,22 @@ func (m *ContextManager) EmergencyTruncate() int {
 	// Scan from newest to oldest, accumulating until we hit target
 	tailTokens := 0
 	cutoff := len(tail)
+	truncationNeeded := false
 	for i := len(tail) - 1; i >= 0; i-- {
 		msgTokens := EstimateContentsTokens([]*genai.Content{tail[i]})
 		if tailTokens+msgTokens > targetTokens {
 			cutoff = i + 1
+			truncationNeeded = true
 			break
 		}
 		tailTokens += msgTokens
 	}
 
-	// If loop completed without breaking, all messages fit — nothing to truncate
-	if cutoff >= len(tail) {
+	// If no message exceeded the budget, all messages fit — nothing to truncate.
+	// Note: cutoff == len(tail) after the loop can mean EITHER "all fit" OR
+	// "the newest single message is already over budget" — use the explicit flag
+	// to distinguish them and avoid skipping a needed truncation.
+	if !truncationNeeded {
 		return 0
 	}
 
