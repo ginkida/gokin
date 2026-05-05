@@ -172,8 +172,7 @@ func (s *MessageScorer) scoreTextPart(score *MessageScore, text string) {
 		strings.Contains(text, ".yaml") ||
 		strings.Contains(text, ".json") {
 		// Extract potential file paths
-		words := strings.Fields(text)
-		for _, word := range words {
+		for word := range strings.FieldsSeq(text) {
 			if strings.Contains(word, "/") &&
 				(strings.HasSuffix(word, ".go") ||
 					strings.HasSuffix(word, ".md") ||
@@ -330,14 +329,16 @@ func (s *MessageScorer) CalculateTokenBudget(
 		totalScore += float64(score.Priority) + score.Score
 	}
 
-	// Allocate budget proportionally
+	// Allocate budget proportionally; guard against all-zero scores (equal split).
 	budgets := make([]int, len(scores))
 	for i, score := range scores {
-		weight := (float64(score.Priority) + score.Score) / totalScore
-		budgets[i] = int(float64(totalBudget) * weight)
-		if budgets[i] < 100 { // Minimum allocation
-			budgets[i] = 100
+		var weight float64
+		if totalScore > 0 {
+			weight = (float64(score.Priority) + score.Score) / totalScore
+		} else {
+			weight = 1.0 / float64(len(scores))
 		}
+		budgets[i] = max(int(float64(totalBudget)*weight), 100)
 	}
 
 	return budgets
