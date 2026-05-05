@@ -168,11 +168,9 @@ func summarizeBashOutput(content string) string {
 
 // summarizeGrepOutput parses grep output (path:line:content format) for file stats.
 func summarizeGrepOutput(content string) string {
-	lines := strings.Split(content, "\n")
-
 	fileSet := make(map[string]int)
 	matchCount := 0
-	for _, line := range lines {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -220,11 +218,9 @@ func summarizeGrepOutput(content string) string {
 
 // summarizeGlobOutput counts files and groups by directory.
 func summarizeGlobOutput(content string) string {
-	lines := strings.Split(content, "\n")
-
 	dirCounts := make(map[string]int)
 	fileCount := 0
-	for _, line := range lines {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -265,12 +261,10 @@ func summarizeGlobOutput(content string) string {
 
 // summarizeGitDiffOutput extracts file count and +/- stats.
 func summarizeGitDiffOutput(content string) string {
-	lines := strings.Split(content, "\n")
-
 	var files []string
 	var added, removed int
 
-	for _, line := range lines {
+	for line := range strings.SplitSeq(content, "\n") {
 		if file, ok := strings.CutPrefix(line, "+++ b/"); ok {
 			files = append(files, filepath.Base(file))
 		} else if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
@@ -297,7 +291,6 @@ func summarizeGitDiffOutput(content string) string {
 // summarizeGitLogOutput extracts commit count and latest message.
 func summarizeGitLogOutput(content string) string {
 	lines := strings.Split(content, "\n")
-
 	commitCount := 0
 	latestMsg := ""
 	for _, line := range lines {
@@ -350,11 +343,9 @@ func summarizeGitLogOutput(content string) string {
 
 // summarizeTreeOutput counts entries and extracts top-level directories.
 func summarizeTreeOutput(content string) string {
-	lines := strings.Split(content, "\n")
-
 	entryCount := 0
 	var topDirs []string
-	for _, line := range lines {
+	for line := range strings.SplitSeq(content, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
