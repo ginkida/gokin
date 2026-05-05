@@ -54,7 +54,7 @@ func (rc *ResponseCompressor) compressValue(key string, value any) any {
 
 	switch v := value.(type) {
 	case string:
-		return rc.compressString(key, v)
+		return rc.compressString(v)
 	case map[string]any:
 		return rc.compressMap(v)
 	case []any:
@@ -65,7 +65,7 @@ func (rc *ResponseCompressor) compressValue(key string, value any) any {
 }
 
 // compressString compresses a string value.
-func (rc *ResponseCompressor) compressString(key string, s string) string {
+func (rc *ResponseCompressor) compressString(s string) string {
 	// If under limit, keep as-is
 	if len(s) <= rc.maxChars {
 		return s

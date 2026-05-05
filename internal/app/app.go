@@ -837,8 +837,7 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 			a.tui.RecordRecentCommand(name)
 		}
 		// Handle special command markers
-		if strings.HasPrefix(result, "__browse:") {
-			browsePath := strings.TrimPrefix(result, "__browse:")
+		if browsePath, ok := strings.CutPrefix(result, "__browse:"); ok {
 			a.safeSendToProgram(ui.FileBrowserRequestMsg{StartPath: browsePath})
 		} else {
 			// Display command result as assistant message
@@ -1170,8 +1169,8 @@ func (a *App) GetPlanProofReport(stepID int) string {
 		if evidence == "" {
 			continue
 		}
-		if strings.HasPrefix(evidence, "proof_json=") {
-			raw := strings.TrimSpace(strings.TrimPrefix(evidence, "proof_json="))
+		if raw, ok := strings.CutPrefix(evidence, "proof_json="); ok {
+			raw = strings.TrimSpace(raw)
 			if pretty := prettyProofJSON(raw); pretty != "" {
 				sb.WriteString("- proof_json:\n")
 				sb.WriteString(pretty)
@@ -1866,9 +1865,11 @@ func (a *App) disablePlanModeAfterApproval() {
 
 	// Restore full tool schema so the post-approval execution round sees
 	// write/edit/bash/etc. again. Done outside the lock to avoid blocking
-	// other goroutines on the client's own mutex.
+	// other goroutines on the client's own mutex. planningModeEnabled was
+	// already set to false under lock above, so toolsForCurrentMode returns
+	// the full set — consistent with every other SetTools call site.
 	if client != nil {
-		client.SetTools(a.registry.GeminiTools())
+		client.SetTools(a.toolsForCurrentMode())
 	}
 
 	// Drop the plan-mode banner from the system prompt — execution rounds
