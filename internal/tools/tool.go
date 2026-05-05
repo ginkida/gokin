@@ -302,6 +302,14 @@ func CollectStreamingResult(sr *StreamingToolResult) (string, error) {
 			for chunk := range sr.Chunks {
 				content += chunk
 			}
+			// Check for any error that was sent before complete() closed the channels.
+			select {
+			case err := <-sr.Error:
+				if err != nil {
+					return content, err
+				}
+			default:
+			}
 			return content, nil
 		}
 	}
