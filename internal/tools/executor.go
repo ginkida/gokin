@@ -660,6 +660,21 @@ func (e *Executor) GetReadTracker() *FileReadTracker {
 	return e.readTracker
 }
 
+// ResetSession resets all per-conversation accumulator state so that /clear
+// starts fresh. Circuit breakers and tool caches are intentionally preserved
+// (connection failures and cache hits persist across /clear).
+func (e *Executor) ResetSession() {
+	if e.readTracker != nil {
+		e.readTracker.Reset()
+	}
+	if e.writeTracker != nil {
+		e.writeTracker.Reset()
+	}
+	e.deltaBaselineCaptured = false
+	e.deltaCheckLastResult = nil
+	e.deltaCheckBlocked = false
+}
+
 // SetPhaseObserver wires a callback that's invoked after each tool execution
 // with the tool name and its wall-clock duration. The app-layer metrics
 // collector uses this to build p50/p95 charts per tool without making

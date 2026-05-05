@@ -1616,6 +1616,9 @@ func (a *App) ClearConversation() {
 	if a.taskRouter != nil {
 		a.taskRouter.ResetDepth()
 	}
+	if a.executor != nil {
+		a.executor.ResetSession()
+	}
 	// totalOutputTokens accumulates via +=; totalInputTokens is periodically
 	// re-assigned but its last pre-clear value would persist until the next
 	// exchange. Both must be zeroed so /cost shows only the fresh session.

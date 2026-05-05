@@ -330,7 +330,11 @@ func compactWorkingMemoryLine(line string, maxChars int) string {
 	if len(line) <= maxChars {
 		return line
 	}
-	return strings.TrimSpace(line[:maxChars]) + "..."
+	runes := []rune(line)
+	if len(runes) > maxChars {
+		line = string(runes[:maxChars])
+	}
+	return strings.TrimSpace(line) + "..."
 }
 
 func uniqueWorkingMemoryItems(items []string) []string {
