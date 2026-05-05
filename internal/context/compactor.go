@@ -129,13 +129,12 @@ func (c *ResultCompactor) containsErrorIndicators(content string) bool {
 // compactWithErrorPreservation compacts content while preserving error information.
 func (c *ResultCompactor) compactWithErrorPreservation(result tools.ToolResult) tools.ToolResult {
 	content := result.Content
-	lines := strings.Split(content, "\n")
 
 	// Identify error-related lines
 	var errorLines []string
 	var normalLines []string
 
-	for _, line := range lines {
+	for line := range strings.SplitSeq(content, "\n") {
 		if c.isErrorLine(line) {
 			errorLines = append(errorLines, line)
 		} else {
@@ -163,10 +162,7 @@ func (c *ResultCompactor) compactWithErrorPreservation(result tools.ToolResult) 
 			// Truncate normal content
 			builder.WriteString("=== Output (truncated) ===\n")
 			runes := []rune(normalContent)
-			keepRunes := remainingChars - 100
-			if keepRunes > len(runes) {
-				keepRunes = len(runes)
-			}
+			keepRunes := min(remainingChars-100, len(runes))
 			builder.WriteString(string(runes[:keepRunes]))
 			fmt.Fprintf(&builder, "\n...[%d chars omitted]", len(runes)-keepRunes)
 		} else {
@@ -377,10 +373,7 @@ func (c *ResultCompactor) compactSearchResults(result tools.ToolResult) tools.To
 	// Error matches always come first
 	if len(errorMatches) > 0 {
 		builder.WriteString("=== Error-related matches ===\n")
-		limit := maxResults / 2
-		if limit > len(errorMatches) {
-			limit = len(errorMatches)
-		}
+		limit := min(maxResults/2, len(errorMatches))
 		builder.WriteString(strings.Join(errorMatches[:limit], "\n"))
 		maxResults -= limit
 		if len(errorMatches) > limit {
@@ -391,10 +384,7 @@ func (c *ResultCompactor) compactSearchResults(result tools.ToolResult) tools.To
 
 	// Fill remaining with normal matches
 	if maxResults > 0 && len(normalMatches) > 0 {
-		limit := maxResults
-		if limit > len(normalMatches) {
-			limit = len(normalMatches)
-		}
+		limit := min(maxResults, len(normalMatches))
 		builder.WriteString(strings.Join(normalMatches[:limit], "\n"))
 		remaining := len(normalMatches) - limit
 		if remaining > 0 {
