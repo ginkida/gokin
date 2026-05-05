@@ -300,7 +300,9 @@ func (s *Summarizer) formatMessages(messages []*genai.Content) string {
 						tail := strings.Join(lines[len(lines)-40:], "\n")
 						text = fmt.Sprintf("%s\n\n... [%d lines skipped] ...\n\n%s", head, len(lines)-80, tail)
 					} else {
-						text = text[:4000] + "... [truncated]"
+						if textRunes := []rune(text); len(textRunes) > 4000 {
+							text = string(textRunes[:4000]) + "... [truncated]"
+						}
 					}
 				}
 				builder.WriteString(fmt.Sprintf("%s: %s\n\n", role, text))
