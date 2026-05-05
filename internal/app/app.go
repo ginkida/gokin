@@ -2354,15 +2354,15 @@ func toolContextSummary(name string, args map[string]any) string {
 		}
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
-			if len(cmd) > 30 {
-				cmd = cmd[:30] + "…"
+			if runes := []rune(cmd); len(runes) > 30 {
+				cmd = string(runes[:30]) + "…"
 			}
 			return cmd
 		}
 	case "grep":
 		if p, ok := args["pattern"].(string); ok {
-			if len(p) > 20 {
-				p = p[:20] + "…"
+			if runes := []rune(p); len(runes) > 20 {
+				p = string(runes[:20]) + "…"
 			}
 			return p
 		}

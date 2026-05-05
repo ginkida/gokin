@@ -345,8 +345,8 @@ func summarizeGitLogOutput(content string) string {
 	var parts []string
 	parts = append(parts, fmt.Sprintf("%d commits", commitCount))
 	if latestMsg != "" {
-		if len(latestMsg) > 60 {
-			latestMsg = latestMsg[:60]
+		if runes := []rune(latestMsg); len(runes) > 60 {
+			latestMsg = string(runes[:60])
 		}
 		parts = append(parts, fmt.Sprintf("latest: %q", latestMsg))
 	}

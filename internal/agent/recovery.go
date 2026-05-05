@@ -228,8 +228,8 @@ func (r *RecoveryExecutor) updateErrorRepeat(key, category, errorMsg string) int
 
 	fingerprint := strings.TrimSpace(strings.ToLower(errorMsg))
 	fingerprint = strings.Join(strings.Fields(fingerprint), " ")
-	if len(fingerprint) > 240 {
-		fingerprint = fingerprint[:240]
+	if runes := []rune(fingerprint); len(runes) > 240 {
+		fingerprint = string(runes[:240])
 	}
 	if fingerprint == "" {
 		return state.RepeatedErrors
