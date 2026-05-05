@@ -103,7 +103,7 @@ func (c *LogCommand) Execute(ctx context.Context, args []string, app AppInterfac
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Commits (%s):\n\n", scope))
+	fmt.Fprintf(&sb, "Commits (%s):\n\n", scope)
 	for line := range strings.SplitSeq(out, "\n") {
 		sb.WriteString("  ")
 		sb.WriteString(line)

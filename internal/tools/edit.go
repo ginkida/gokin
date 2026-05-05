@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -318,14 +319,8 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 
 	// Detect binary files by checking for null bytes in the first 512 bytes
-	checkLen := len(data)
-	if checkLen > 512 {
-		checkLen = 512
-	}
-	for _, b := range data[:checkLen] {
-		if b == 0 {
-			return NewErrorResult(fmt.Sprintf("cannot edit binary file: %s", filePath)), nil
-		}
+	if slices.Contains(data[:min(len(data), 512)], byte(0)) {
+		return NewErrorResult(fmt.Sprintf("cannot edit binary file: %s", filePath)), nil
 	}
 
 	content := string(data)
@@ -695,14 +690,8 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 	}
 
 	// Detect binary files
-	checkLen := len(data)
-	if checkLen > 512 {
-		checkLen = 512
-	}
-	for _, b := range data[:checkLen] {
-		if b == 0 {
-			return NewErrorResult(fmt.Sprintf("cannot edit binary file: %s", filePath)), nil
-		}
+	if slices.Contains(data[:min(len(data), 512)], byte(0)) {
+		return NewErrorResult(fmt.Sprintf("cannot edit binary file: %s", filePath)), nil
 	}
 
 	content := string(data)
@@ -761,7 +750,7 @@ func extractFileContext(content string, maxChars int) string {
 	for i, line := range lines {
 		s := fmt.Sprintf("%6d\t%s\n", i+1, line)
 		if b.Len()+len(s) > maxChars {
-			b.WriteString(fmt.Sprintf("... (showing %d of %d lines)", i, len(lines)))
+			fmt.Fprintf(&b, "... (showing %d of %d lines)", i, len(lines))
 			break
 		}
 		b.WriteString(s)
@@ -797,15 +786,14 @@ func findFuzzyMatch(content, oldStr string) (string, int) {
 	}
 
 	// Find position in normalized content
-	normIdx := strings.Index(normalizedContent, normalizedOld)
-	if normIdx < 0 {
+	normPrefix, _, found := strings.Cut(normalizedContent, normalizedOld)
+	if !found {
 		return "", 0
 	}
 
 	// Map normalized position back to original content.
 	// The line number of the match start in normalized content
 	// equals the line number in original content.
-	normPrefix := normalizedContent[:normIdx]
 	startLine := strings.Count(normPrefix, "\n")
 
 	// Count how many lines the old_string spans
@@ -886,11 +874,7 @@ func lineSimilarity(a, b string) float64 {
 		return 0.0
 	}
 	lcs := lcsLength(a, b)
-	maxLen := len(a)
-	if len(b) > maxLen {
-		maxLen = len(b)
-	}
-	return float64(lcs) / float64(maxLen)
+	return float64(lcs) / float64(max(len(a), len(b)))
 }
 
 // blockSimilarity returns the average line similarity between two same-length blocks.
@@ -1026,7 +1010,7 @@ func tryFuzzyReplace(content, old, new string, replaceAll bool) (string, string,
 		var matchStarts []int
 		for i := 0; i <= len(normalizedLines)-oldLineCount; i++ {
 			match := true
-			for j := 0; j < oldLineCount; j++ {
+			for j := range oldLineCount {
 				if normalizedLines[i+j] != normalizedOldLines[j] {
 					match = false
 					break
@@ -1178,11 +1162,8 @@ func formatAmbiguousEditMessage(filePath string, lines []string, hits []int, cou
 
 	// Cap the rendered-contexts at 5 to keep error size bounded on
 	// pathological cases where the pattern matches 50+ times.
-	renderLimit := len(hits)
-	if renderLimit > 5 {
-		renderLimit = 5
-	}
-	for i := 0; i < renderLimit; i++ {
+	renderLimit := min(len(hits), 5)
+	for i := range renderLimit {
 		ln := hits[i]
 		sb.WriteString(renderLineContext(lines, ln, ambiguousMatchContextLines))
 		sb.WriteString("\n")
@@ -1206,14 +1187,8 @@ func renderLineContext(lines []string, lineNum, around int) string {
 	if lineNum < 1 || lineNum > len(lines) {
 		return ""
 	}
-	start := lineNum - around
-	if start < 1 {
-		start = 1
-	}
-	end := lineNum + around
-	if end > len(lines) {
-		end = len(lines)
-	}
+	start := max(lineNum-around, 1)
+	end := min(lineNum+around, len(lines))
 	var sb strings.Builder
 	for i := start; i <= end; i++ {
 		marker := "  "

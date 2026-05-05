@@ -122,7 +122,7 @@ func (t *GitBranchTool) listBranches(ctx context.Context, args map[string]any) (
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	var result strings.Builder
-	result.WriteString(fmt.Sprintf("Branches (%d), current: %s\n\n", len(lines), current))
+	fmt.Fprintf(&result, "Branches (%d), current: %s\n\n", len(lines), current)
 
 	for _, line := range lines {
 		parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
@@ -137,7 +137,7 @@ func (t *GitBranchTool) listBranches(ctx context.Context, args map[string]any) (
 			if name == current {
 				marker = "* "
 			}
-			result.WriteString(fmt.Sprintf("%s%s %s %s\n", marker, name, hash, subject))
+			fmt.Fprintf(&result, "%s%s %s %s\n", marker, name, hash, subject)
 		}
 	}
 

@@ -255,7 +255,7 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	var builder strings.Builder
 	if totalFound > maxResults {
-		builder.WriteString(fmt.Sprintf("(showing %d of %d+)\n", maxResults, totalFound))
+		fmt.Fprintf(&builder, "(showing %d of %d+)\n", maxResults, totalFound)
 	}
 	for _, f := range files {
 		// Make path relative if possible

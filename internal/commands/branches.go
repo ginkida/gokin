@@ -98,7 +98,7 @@ func (c *BranchesCommand) Execute(ctx context.Context, args []string, app AppInt
 	if includeRemotes {
 		scope = "local + remotes"
 	}
-	sb.WriteString(fmt.Sprintf("Branches (%s):\n\n", scope))
+	fmt.Fprintf(&sb, "Branches (%s):\n\n", scope)
 
 	for _, line := range lines {
 		parts := strings.SplitN(line, "\t", 4)
@@ -129,14 +129,14 @@ func (c *BranchesCommand) Execute(ctx context.Context, args []string, app AppInt
 	}
 
 	if total := strings.Count(out, "\n") + 1; total > branchesCap {
-		sb.WriteString(fmt.Sprintf("\n_Showing newest %d of %d. Run `git branch%s` for the full list._\n",
+		fmt.Fprintf(&sb, "\n_Showing newest %d of %d. Run `git branch%s` for the full list._\n",
 			branchesCap, total,
 			func() string {
 				if includeRemotes {
 					return " --all"
 				}
 				return ""
-			}()))
+			}())
 	}
 
 	return sb.String(), nil

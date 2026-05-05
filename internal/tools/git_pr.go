@@ -291,7 +291,7 @@ func (t *GitPRTool) generatePRDescription(ctx context.Context, base string) (str
 	for _, commit := range commits {
 		parts := strings.SplitN(commit, " ", 2)
 		if len(parts) >= 2 {
-			body.WriteString(fmt.Sprintf("- %s\n", parts[1]))
+			fmt.Fprintf(&body, "- %s\n", parts[1])
 		}
 	}
 
@@ -315,8 +315,8 @@ func (t *GitPRTool) detectDefaultBranch(ctx context.Context) string {
 	if err == nil {
 		branch := strings.TrimSpace(string(output))
 		// Strip "origin/" prefix
-		if idx := strings.Index(branch, "/"); idx >= 0 {
-			return branch[idx+1:]
+		if _, after, ok := strings.Cut(branch, "/"); ok {
+			return after
 		}
 		return branch
 	}

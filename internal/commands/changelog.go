@@ -121,7 +121,7 @@ func formatChangelog(releases []releaseNotes, repo, currentVersion string) strin
 	currentTag := normalizeChangelogTag(currentVersion)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("# Recent releases · %s\n\n", repo))
+	fmt.Fprintf(&sb, "# Recent releases · %s\n\n", repo)
 
 	for _, r := range releases {
 		date := ""
@@ -148,9 +148,9 @@ func formatChangelog(releases []releaseNotes, repo, currentVersion string) strin
 			marker = "  ← you"
 		}
 
-		sb.WriteString(fmt.Sprintf("- **%s**", r.TagName))
+		fmt.Fprintf(&sb, "- **%s**", r.TagName)
 		if date != "" {
-			sb.WriteString(fmt.Sprintf(" · %s", date))
+			fmt.Fprintf(&sb, " · %s", date)
 		}
 		sb.WriteString(marker)
 		sb.WriteString("\n  ")

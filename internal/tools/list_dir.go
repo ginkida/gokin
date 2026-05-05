@@ -119,7 +119,7 @@ func (t *ListDirTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 	}
 
 	if truncated {
-		builder.WriteString(fmt.Sprintf("\n... (output truncated: showing %d entries)", maxListDirEntries))
+		fmt.Fprintf(&builder, "\n... (output truncated: showing %d entries)", maxListDirEntries)
 	}
 
 	return NewSuccessResult(builder.String()), nil

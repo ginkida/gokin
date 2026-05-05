@@ -109,7 +109,7 @@ func (t *EnvTool) Execute(ctx context.Context, args map[string]any) (ToolResult,
 			varValue = string(runes[:100]) + "..."
 		}
 
-		builder.WriteString(fmt.Sprintf("%s=%s\n", varName, varValue))
+		fmt.Fprintf(&builder, "%s=%s\n", varName, varValue)
 		count++
 	}
 

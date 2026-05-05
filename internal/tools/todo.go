@@ -200,8 +200,8 @@ func (t *TodoTool) generateSummary() string {
 	}
 
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("Todo list updated: %d pending, %d in progress, %d completed\n\n",
-		pending, inProgress, completed))
+	fmt.Fprintf(&builder, "Todo list updated: %d pending, %d in progress, %d completed\n\n",
+		pending, inProgress, completed)
 
 	for i, item := range t.items {
 		var icon string
@@ -213,7 +213,7 @@ func (t *TodoTool) generateSummary() string {
 		case "completed":
 			icon = "[✓]"
 		}
-		builder.WriteString(fmt.Sprintf("%d. %s %s\n", i+1, icon, item.Content))
+		fmt.Fprintf(&builder, "%d. %s %s\n", i+1, icon, item.Content)
 	}
 
 	return builder.String()

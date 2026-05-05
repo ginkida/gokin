@@ -60,7 +60,7 @@ func (c *InstructionsCommand) Execute(ctx context.Context, args []string, app Ap
 		output.WriteString("# No Project Instructions Found\n\n")
 		output.WriteString("Searched for:\n")
 		for _, filename := range appcontext.InstructionFileNames() {
-			output.WriteString(fmt.Sprintf("  - %s\n", filename))
+			fmt.Fprintf(&output, "  - %s\n", filename)
 		}
 		output.WriteString("\n")
 		output.WriteString("Create one of these files to provide project-specific context.")
@@ -70,7 +70,7 @@ func (c *InstructionsCommand) Execute(ctx context.Context, args []string, app Ap
 	// Show source info if requested
 	if showSource {
 		source := projectMemory.GetSourcePath()
-		output.WriteString(fmt.Sprintf("# Source: %s\n\n", source))
+		fmt.Fprintf(&output, "# Source: %s\n\n", source)
 	}
 
 	output.WriteString("# Project Instructions\n\n")

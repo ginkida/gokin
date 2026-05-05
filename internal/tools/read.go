@@ -586,10 +586,10 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 	// files block so it sits close to the numbered content.
 	if hasMoreAfterLimit {
 		nextOffset := offset + linesRead
-		builder.WriteString(fmt.Sprintf(
+		fmt.Fprintf(&builder,
 			"\n[Truncated: showed lines %d-%d (%d of at least %d). Use offset=%d to continue.]\n",
 			offset, offset+linesRead-1, linesRead, lastScannedLine, nextOffset,
-		))
+		)
 	}
 
 	content := builder.String()

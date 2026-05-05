@@ -158,7 +158,7 @@ func (t *TreeTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewErrorResult(fmt.Sprintf("error building tree: %s", err)), nil
 	}
 
-	builder.WriteString(fmt.Sprintf("\n%d directories, %d files", stats.dirs, stats.files))
+	fmt.Fprintf(&builder, "\n%d directories, %d files", stats.dirs, stats.files)
 
 	return NewSuccessResult(builder.String()), nil
 }

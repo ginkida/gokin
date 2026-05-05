@@ -69,9 +69,9 @@ func FormatWarnings(warnings []ValidationWarning) string {
 			prefix = "INFO"
 		}
 		if w.Line > 0 {
-			sb.WriteString(fmt.Sprintf("  %s [%s] %s:%d — %s\n", prefix, w.Validator, w.File, w.Line, w.Message))
+			fmt.Fprintf(&sb, "  %s [%s] %s:%d — %s\n", prefix, w.Validator, w.File, w.Line, w.Message)
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s [%s] %s — %s\n", prefix, w.Validator, w.File, w.Message))
+			fmt.Fprintf(&sb, "  %s [%s] %s — %s\n", prefix, w.Validator, w.File, w.Message)
 		}
 	}
 	sb.WriteString("Please fix the issues above.")

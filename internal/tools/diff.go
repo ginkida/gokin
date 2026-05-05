@@ -114,8 +114,8 @@ func unifiedDiff(label1, label2, text1, text2 string, contextLines int) string {
 	// Simple line-by-line diff
 	// For a production implementation, you might want to use a proper diff algorithm
 	var result strings.Builder
-	result.WriteString(fmt.Sprintf("--- %s\n", label1))
-	result.WriteString(fmt.Sprintf("+++ %s\n", label2))
+	fmt.Fprintf(&result, "--- %s\n", label1)
+	fmt.Fprintf(&result, "+++ %s\n", label2)
 
 	// Find differences using longest common subsequence approach
 	hunks := computeDiffHunks(lines1, lines2, contextLines)

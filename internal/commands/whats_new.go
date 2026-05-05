@@ -140,7 +140,7 @@ func formatReleaseNotes(n *releaseNotes, repo, tag string) string {
 	if title == "" {
 		title = n.TagName
 	}
-	sb.WriteString(fmt.Sprintf("# %s\n\n", title))
+	fmt.Fprintf(&sb, "# %s\n\n", title)
 
 	if n.PublishedAt != "" {
 		// Format YYYY-MM-DD from the ISO-8601 the API returns.
@@ -148,7 +148,7 @@ func formatReleaseNotes(n *releaseNotes, repo, tag string) string {
 		if t, err := time.Parse(time.RFC3339, n.PublishedAt); err == nil {
 			date = t.Format("2006-01-02")
 		}
-		sb.WriteString(fmt.Sprintf("Published %s · https://github.com/%s/releases/tag/%s\n\n", date, repo, tag))
+		fmt.Fprintf(&sb, "Published %s · https://github.com/%s/releases/tag/%s\n\n", date, repo, tag)
 	}
 
 	body := strings.TrimSpace(n.Body)

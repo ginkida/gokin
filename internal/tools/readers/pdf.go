@@ -99,7 +99,7 @@ func (r *PDFReader) extractStreams(data []byte) string {
 				if result.Len() > 0 {
 					result.WriteString("\n")
 				}
-				result.WriteString(fmt.Sprintf("## Page %d\n\n", pageNum))
+				fmt.Fprintf(&result, "## Page %d\n\n", pageNum)
 				result.WriteString(text)
 				result.WriteString("\n")
 				pageNum++
@@ -240,8 +240,9 @@ func (r *PDFReader) decodeString(s string) string {
 			default:
 				// Octal escape
 				if next >= '0' && next <= '7' {
-					octal := string(next)
-					for i := 0; i < 2; i++ {
+					var octal strings.Builder
+					octal.WriteRune(next)
+					for range 2 {
 						n, _, err := reader.ReadRune()
 						if err != nil || n < '0' || n > '7' {
 							if err == nil {
@@ -249,9 +250,9 @@ func (r *PDFReader) decodeString(s string) string {
 							}
 							break
 						}
-						octal += string(n)
+						octal.WriteRune(n)
 					}
-					if val, err := strconv.ParseInt(octal, 8, 32); err == nil {
+					if val, err := strconv.ParseInt(octal.String(), 8, 32); err == nil {
 						result.WriteRune(rune(val))
 					}
 				} else {
