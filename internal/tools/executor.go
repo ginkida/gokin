@@ -1748,13 +1748,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Step 7: Create execution context
-	execInfo := &ExecutionInfo{
-		StartTime:      time.Now(),
-		ToolName:       call.Name,
-		Args:           call.Args,
-		Summary:        summary,
-		PreFlightCheck: preFlight,
-	}
+	execInfo := &ExecutionInfo{}
 	if summary != nil {
 		execInfo.SafetyLevel = summary.RiskLevel
 	}
@@ -2549,8 +2543,8 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			// Strip leading "cd /path && " prefix — models often prepend this,
 			// making all commands look identical in the first 40 chars.
 			// Use first occurrence of " && " to split cd from actual command.
-			if idx := strings.Index(cmd, " && "); idx >= 0 && strings.HasPrefix(strings.TrimSpace(cmd), "cd ") {
-				cmd = cmd[idx+4:]
+			if _, after, ok := strings.Cut(cmd, " && "); ok && strings.HasPrefix(strings.TrimSpace(cmd), "cd ") {
+				cmd = after
 			}
 			// Use first 60 runes of the actual command
 			if runes := []rune(cmd); len(runes) > 60 {

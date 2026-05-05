@@ -603,11 +603,11 @@ func normalizeDurableCommandForPromotion(cmd string) string {
 		return ""
 	}
 	if strings.HasPrefix(cmd, "cd ") {
-		idx := strings.Index(cmd, " && ")
-		if idx < 0 {
+		_, after, ok := strings.Cut(cmd, " && ")
+		if !ok {
 			return ""
 		}
-		cmd = strings.TrimSpace(cmd[idx+4:])
+		cmd = strings.TrimSpace(after)
 		if cmd == "" {
 			return ""
 		}
@@ -624,16 +624,15 @@ func extractVerifyCommand(content string) string {
 		return ""
 	}
 	const prefix = "Verification successful ("
-	start := strings.Index(content, prefix)
-	if start < 0 {
+	_, afterPrefix, ok := strings.Cut(content, prefix)
+	if !ok {
 		return ""
 	}
-	start += len(prefix)
-	end := strings.Index(content[start:], "):")
-	if end < 0 {
+	text, _, ok := strings.Cut(afterPrefix, "):")
+	if !ok {
 		return ""
 	}
-	return strings.TrimSpace(content[start : start+end])
+	return strings.TrimSpace(text)
 }
 
 func classifyCommandLearnings(cmd string) []sessionDurableLearning {
