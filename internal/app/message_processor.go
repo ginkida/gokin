@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1080,7 +1081,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	var err error
 	errCat := plan.ErrorUnknown
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		history, histVersion := a.session.GetHistoryWithVersion()
 		var newHistory []*genai.Content
 		execFn := func() error {
@@ -1760,7 +1761,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	const maxRetries = 3
 	backoffDurations := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		execFn := func() error {
 			_, result, err = a.agentRunner.SpawnWithContext(
 				stepCtx, "general", stepPrompt, 30, "", projectCtx, onText, true,
@@ -2898,10 +2899,8 @@ func stepLikelyMutatesFiles(step *plan.Step, entry *plan.RunLedgerEntry) bool {
 		return false
 	}
 
-	for _, toolName := range entry.Tools {
-		if isMutatingToolName(toolName) {
-			return true
-		}
+	if slices.ContainsFunc(entry.Tools, isMutatingToolName) {
+		return true
 	}
 
 	requiredVerify := normalizeVerifyCommands(nil)
@@ -3554,8 +3553,7 @@ func (a *App) extractContextSnapshot() string {
 
 // extractSnapshotFromText extracts structured information from assistant text.
 func (a *App) extractSnapshotFromText(snapshot *agent.ContextSnapshot, text string) {
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
 		lower := strings.ToLower(line)
 
@@ -3590,8 +3588,7 @@ func (a *App) extractSnapshotFromText(snapshot *agent.ContextSnapshot, text stri
 
 // extractRequirementsFromText extracts requirements from user text.
 func (a *App) extractRequirementsFromText(snapshot *agent.ContextSnapshot, text string) {
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
 		lower := strings.ToLower(line)
 
