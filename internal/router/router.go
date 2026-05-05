@@ -450,7 +450,19 @@ func (r *Router) executeCoordinated(ctx context.Context, decomposition *Decompos
 
 				go func(subtask Subtask) {
 					defer wg.Done()
-					defer func() { <-semaphore }() // Release semaphore
+					defer func() { <-semaphore }()
+					defer func() {
+						if rec := recover(); rec != nil {
+							logging.Error("subtask goroutine panic", "id", subtask.ID, "panic", rec)
+							resultsMu.Lock()
+							subtaskResults[subtask.ID] = &SubtaskResult{
+								ID:    subtask.ID,
+								Error: fmt.Sprintf("internal panic: %v", rec),
+							}
+							completed[subtask.ID] = true
+							resultsMu.Unlock()
+						}
+					}()
 
 					result := r.executeSubtask(ctx, subtask)
 
@@ -791,10 +803,7 @@ func (r *Router) applyCapabilityAdjustments(analysis *TaskComplexity) {
 		return
 	}
 
-	effectiveThreshold := r.decomposeThreshold + r.modelCapability.DecomposeAdjust
-	if effectiveThreshold < 2 {
-		effectiveThreshold = 2
-	}
+	effectiveThreshold := max(r.decomposeThreshold+r.modelCapability.DecomposeAdjust, 2)
 
 	// If task exceeds adjusted threshold but not original, force sub-agent strategy
 	if analysis.Score >= effectiveThreshold && analysis.Score < r.decomposeThreshold {
