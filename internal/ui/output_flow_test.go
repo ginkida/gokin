@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -136,5 +137,202 @@ func TestHandleToolResultWithInfo_UsesExplicitCompactMode(t *testing.T) {
 	// Must NOT inline the content.
 	if strings.Contains(rendered, "line 1") {
 		t.Fatalf("compact mode should not inline content:\n%s", rendered)
+	}
+}
+
+func TestHandleToolResultWithStatus_FailedUsesErrorBlock(t *testing.T) {
+	m := NewModel()
+
+	m.handleToolResultWithStatus("stderr line\nmore detail", "bash", "go test ./...", time.Now().Add(-500*time.Millisecond), true, "exit status 1")
+	rendered := stripAnsi(m.output.state.content.String())
+
+	if !strings.Contains(rendered, "✗ bash") {
+		t.Fatalf("failed tool should render error block:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "exit status 1") {
+		t.Fatalf("failed tool should include error detail:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "✓ Bash") {
+		t.Fatalf("failed tool must not render success block:\n%s", rendered)
+	}
+}
+
+func TestToolResultMsg_FailedMarksActivityFeedEntryFailed(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+
+	updated, _ := m.Update(ToolCallMsg{
+		Name: "bash",
+		Args: map[string]any{"command": "go test ./..."},
+	})
+	mm := updated.(Model)
+	updated, _ = mm.Update(ToolResultMsg{
+		Name:   "bash",
+		Failed: true,
+		Error:  "exit status 1",
+	})
+	mm = updated.(Model)
+
+	if len(mm.activityFeed.entries) != 1 {
+		t.Fatalf("activity entries = %d, want 1", len(mm.activityFeed.entries))
+	}
+	entry := mm.activityFeed.entries[0]
+	if entry.Status != ActivityFailed {
+		t.Fatalf("activity status = %v, want ActivityFailed", entry.Status)
+	}
+	if !strings.Contains(entry.ResultSummary, "exit status 1") {
+		t.Fatalf("activity summary = %q, want error detail", entry.ResultSummary)
+	}
+	if mm.responseToolFailures != 1 {
+		t.Fatalf("responseToolFailures = %d, want 1", mm.responseToolFailures)
+	}
+}
+
+func TestToolResultMsg_MatchesParallelSameNameToolByArgs(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+
+	updated, _ := m.Update(ToolCallMsg{
+		Name: "read",
+		Args: map[string]any{"file_path": "internal/ui/first.go"},
+	})
+	mm := updated.(Model)
+	updated, _ = mm.Update(ToolCallMsg{
+		Name: "read",
+		Args: map[string]any{"file_path": "internal/ui/second.go"},
+	})
+	mm = updated.(Model)
+	updated, _ = mm.Update(ToolResultMsg{
+		Name:    "read",
+		Args:    map[string]any{"file_path": "internal/ui/second.go"},
+		Content: "package ui\n",
+	})
+	mm = updated.(Model)
+
+	if len(mm.activeToolCalls) != 1 {
+		t.Fatalf("active tool calls = %d, want 1", len(mm.activeToolCalls))
+	}
+	if got := mm.activeToolCalls[0].info; !strings.Contains(got, "first.go") {
+		t.Fatalf("remaining active tool info = %q, want first read still running", got)
+	}
+	if len(mm.activityFeed.entries) != 2 {
+		t.Fatalf("activity entries = %d, want 2", len(mm.activityFeed.entries))
+	}
+	if mm.activityFeed.entries[0].Status != ActivityRunning {
+		t.Fatalf("first read status = %v, want running", mm.activityFeed.entries[0].Status)
+	}
+	if mm.activityFeed.entries[1].Status != ActivityCompleted {
+		t.Fatalf("second read status = %v, want completed", mm.activityFeed.entries[1].Status)
+	}
+
+	rendered := stripAnsi(mm.output.state.content.String())
+	if !strings.Contains(rendered, "second.go") {
+		t.Fatalf("completed result should use second read info:\n%s", rendered)
+	}
+}
+
+func TestResponseMetadataAfterDoneKeepsToolTimingBreakdown(t *testing.T) {
+	m := NewModel()
+	m.responseToolDuration = 1500 * time.Millisecond
+	m.responseToolCount = 2
+	m.responseToolFailures = 1
+
+	updated, _ := m.Update(ResponseDoneMsg{})
+	mm := updated.(Model)
+	if mm.responseToolCount != 2 {
+		t.Fatalf("ResponseDone reset tool count before metadata, got %d", mm.responseToolCount)
+	}
+
+	updated, _ = mm.Update(ResponseMetadataMsg{Duration: 3 * time.Second})
+	mm = updated.(Model)
+	rendered := stripAnsi(mm.output.state.content.String())
+
+	if !strings.Contains(rendered, "thinking 1.5s") || !strings.Contains(rendered, "tools 1.5s (2 tools · 1 failed)") {
+		t.Fatalf("metadata footer missing timing breakdown:\n%s", rendered)
+	}
+	if mm.responseToolCount != 0 || mm.responseToolDuration != 0 || mm.responseToolFailures != 0 {
+		t.Fatalf("metadata should reset tool timing, count=%d failures=%d duration=%v", mm.responseToolCount, mm.responseToolFailures, mm.responseToolDuration)
+	}
+}
+
+func TestResponseMetadataShowsFailedToolCount(t *testing.T) {
+	m := NewModel()
+	m.responseToolDuration = 2 * time.Second
+	m.responseToolCount = 3
+	m.responseToolFailures = 1
+
+	footer := stripAnsi(m.renderResponseMetadata(ResponseMetadataMsg{Duration: 5 * time.Second}))
+	if !strings.Contains(footer, "tools 2.0s (3 tools · 1 failed)") {
+		t.Fatalf("metadata footer missing failed tool count:\n%s", footer)
+	}
+}
+
+func TestFormatToolRunSummary(t *testing.T) {
+	cases := []struct {
+		count       int
+		failures    int
+		includeUsed bool
+		want        string
+	}{
+		{count: 0, want: ""},
+		{count: 1, want: "1 tool"},
+		{count: 2, includeUsed: true, want: "2 tools used"},
+		{count: 3, failures: 1, want: "3 tools · 1 failed"},
+		{count: 3, failures: 1, includeUsed: true, want: "3 tools used · 1 failed"},
+	}
+
+	for _, c := range cases {
+		if got := formatToolRunSummary(c.count, c.failures, c.includeUsed); got != c.want {
+			t.Fatalf("formatToolRunSummary(%d,%d,%v) = %q, want %q", c.count, c.failures, c.includeUsed, got, c.want)
+		}
+	}
+}
+
+func TestErrorSettlesActiveToolCalls(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+
+	updated, _ := m.Update(ToolCallMsg{
+		Name: "bash",
+		Args: map[string]any{"command": "go test ./..."},
+	})
+	mm := updated.(Model)
+	updated, _ = mm.Update(ErrorMsg(errors.New("request failed")))
+	mm = updated.(Model)
+
+	if len(mm.activeToolCalls) != 0 {
+		t.Fatalf("active tool calls not cleared: %d", len(mm.activeToolCalls))
+	}
+	if mm.activityFeed.HasActiveEntries() {
+		t.Fatal("activity feed still has active entries after error")
+	}
+	if len(mm.activityFeed.entries) != 1 || mm.activityFeed.entries[0].Status != ActivityFailed {
+		t.Fatalf("activity entry not marked failed: %+v", mm.activityFeed.entries)
+	}
+	if !strings.Contains(mm.activityFeed.entries[0].ResultSummary, "request failed") {
+		t.Fatalf("activity summary = %q, want request error", mm.activityFeed.entries[0].ResultSummary)
+	}
+}
+
+func TestResponseDoneSettlesDanglingToolCalls(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+
+	updated, _ := m.Update(ToolCallMsg{
+		Name: "read",
+		Args: map[string]any{"file_path": "internal/ui/tui.go"},
+	})
+	mm := updated.(Model)
+	updated, _ = mm.Update(ResponseDoneMsg{})
+	mm = updated.(Model)
+
+	if len(mm.activeToolCalls) != 0 {
+		t.Fatalf("active tool calls not cleared: %d", len(mm.activeToolCalls))
+	}
+	if mm.activityFeed.HasActiveEntries() {
+		t.Fatal("activity feed still has active entries after ResponseDone")
+	}
+	if len(mm.activityFeed.entries) != 1 || mm.activityFeed.entries[0].Status != ActivityFailed {
+		t.Fatalf("dangling tool should be marked failed, entries=%+v", mm.activityFeed.entries)
 	}
 }

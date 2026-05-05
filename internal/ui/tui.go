@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -237,6 +238,7 @@ type Model struct {
 	// Response timing breakdown
 	responseToolDuration time.Duration // Total time spent in tool calls during current response
 	responseToolCount    int           // Number of tool calls in current response
+	responseToolFailures int           // Failed tool calls during current response
 
 	// Request latency tracking
 	lastRequestLatency time.Duration
@@ -279,8 +281,9 @@ type BackgroundTaskState struct {
 
 // activeToolCall tracks a single in-flight tool call for parallel execution.
 type activeToolCall struct {
-	activityID string    // ID in activity feed
-	name       string    // tool name
+	activityID string // ID in activity feed
+	name       string // tool name
+	args       map[string]any
 	info       string    // tool info (e.g., file path)
 	startTime  time.Time // when the tool call started
 }
@@ -447,7 +450,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.slowWarningShown = false
 			m.currentTool = ""
 			m.currentToolInfo = ""
-			m.activeToolCalls = nil
+			m.settleActiveToolCalls(false, "timed out")
 			m.responseHeaderShown = false
 			m.output.FlushStream() // Flush any remaining streamed content
 			m.output.AppendLine("")
@@ -919,6 +922,7 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 				m.streamStartTime = time.Now()
 				m.responseToolDuration = 0 // Reset tool timing for new response
 				m.responseToolCount = 0
+				m.responseToolFailures = 0
 				m.output.AppendLine(m.styles.FormatUserMessage(cmd.Shortcut))
 				m.output.AppendLine("")
 				if m.onSubmit != nil {
@@ -1195,7 +1199,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.state = StateInput
 			m.currentTool = ""
 			m.currentToolInfo = ""
-			m.activeToolCalls = nil
+			m.settleActiveToolCalls(false, "cancelled")
 			m.output.AppendLine("")
 			m.output.AppendLine(m.styles.Warning.Render(" Operation cancelled"))
 			m.output.AppendLine("")
@@ -1235,7 +1239,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.currentToolInfo = ""
 			m.processingLabel = ""
 			m.streamIdleMsg = "" // Clear any "X is thinking" / "waiting for response" hint
-			m.activeToolCalls = nil
+			m.settleActiveToolCalls(false, "cancelled")
 			m.streamStartTime = time.Time{} // Reset timeout tracking
 			m.slowWarningShown = false
 			// Hide tool progress bar if visible
@@ -1276,6 +1280,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.responseHeaderShown = false   // Reset for new response
 				m.responseToolDuration = 0      // Reset tool timing for new response
 				m.responseToolCount = 0
+				m.responseToolFailures = 0
 				m.output.AppendLine(m.styles.FormatUserMessage(value))
 				m.output.AppendLine("")
 
@@ -1403,6 +1408,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.activeToolCalls = append(m.activeToolCalls, activeToolCall{
 			activityID: toolID,
 			name:       msg.Name,
+			args:       maps.Clone(msg.Args),
 			info:       toolInfo,
 			startTime:  time.Now(),
 		})
@@ -1426,14 +1432,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
 
-		// Find the first matching active tool call by name
-		matchIdx := -1
-		for i, tc := range m.activeToolCalls {
-			if tc.name == msg.Name {
-				matchIdx = i
-				break
-			}
-		}
+		matchIdx := m.findActiveToolCall(msg.Name, msg.Args)
 
 		if matchIdx >= 0 {
 			matched := m.activeToolCalls[matchIdx]
@@ -1442,16 +1441,22 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			if !matched.startTime.IsZero() {
 				m.responseToolDuration += time.Since(matched.startTime)
 				m.responseToolCount++
+				if msg.Failed {
+					m.responseToolFailures++
+				}
 			}
 
 			// Complete entry in activity feed with result summary
 			if m.activityFeed != nil {
 				summary := GenerateResultSummary(matched.name, msg.Content)
-				m.activityFeed.CompleteEntry(matched.activityID, true, summary)
+				if msg.Failed && strings.TrimSpace(msg.Error) != "" {
+					summary = strings.TrimSpace(msg.Error)
+				}
+				m.activityFeed.CompleteEntry(matched.activityID, !msg.Failed, summary)
 			}
 
 			// Handle tool result using matched tool's info and timing
-			m.handleToolResultWithInfo(msg.Content, matched.name, matched.info, matched.startTime)
+			m.handleToolResultWithStatus(msg.Content, matched.name, matched.info, matched.startTime, msg.Failed, msg.Error)
 
 			// Remove matched entry from slice
 			m.activeToolCalls = append(m.activeToolCalls[:matchIdx], m.activeToolCalls[matchIdx+1:]...)
@@ -1471,7 +1476,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			}
 		} else {
 			// Fallback: no matching active call (shouldn't happen, but be safe)
-			m.handleToolResultWithInfo(msg.Content, msg.Name, "", time.Time{})
+			m.handleToolResultWithStatus(msg.Content, msg.Name, "", time.Time{}, msg.Failed, msg.Error)
 			m.currentTool = ""
 			m.currentToolInfo = ""
 			if m.processingLabel == "" {
@@ -1522,15 +1527,13 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamIdleMsg = "" // Clear idle warning
 		m.loopIteration = 0
 		m.loopToolsUsed = 0
-		m.activeToolCalls = nil
+		m.settleActiveToolCalls(false, "ended without result")
 		m.streamStartTime = time.Time{}  // Reset timeout tracking
 		m.lastActivityTime = time.Time{} // Reset activity tracking
 		m.slowWarningShown = false       // Reset slow warning
 		m.responseHeaderShown = false    // Reset for next response
 		m.lastErrorMsg = ""              // Reset error dedup
 		m.lastErrorCount = 0
-		m.responseToolDuration = 0 // Reset tool timing
-		m.responseToolCount = 0
 		if m.currentResponseBuf.Len() > 0 {
 			m.lastResponseText = m.currentResponseBuf.String()
 			m.currentResponseBuf.Reset()
@@ -1556,8 +1559,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 		m.output.AppendLine(footer)
 		m.output.AppendLine("")
+		m.responseToolDuration = 0
+		m.responseToolCount = 0
+		m.responseToolFailures = 0
 
 	case ErrorMsg:
+		errStr := msg.Error()
 		m.state = StateInput
 		m.currentTool = ""
 		m.currentToolInfo = ""
@@ -1565,17 +1572,17 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamIdleMsg = "" // Clear idle warning
 		m.loopIteration = 0
 		m.loopToolsUsed = 0
-		m.activeToolCalls = nil
+		m.settleActiveToolCalls(false, errStr)
 		m.streamStartTime = time.Time{}  // Reset timeout tracking
 		m.lastActivityTime = time.Time{} // Reset activity tracking
 		m.slowWarningShown = false       // Reset slow warning
 		m.responseHeaderShown = false    // Reset for next response
 		m.responseToolDuration = 0       // Reset tool timing
 		m.responseToolCount = 0
+		m.responseToolFailures = 0
 		m.currentResponseBuf.Reset() // Discard partial response on error
 		m.output.FlushStream()       // Flush any remaining streamed content
 
-		errStr := msg.Error()
 		if errStr == m.lastErrorMsg {
 			m.lastErrorCount++
 			dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
@@ -2115,6 +2122,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			// Cancellation: clear any in-flight idle/thinking hints so the user
 			// sees a clean state while the operation winds down.
 			m.streamIdleMsg = ""
+			m.currentTool = ""
+			m.currentToolInfo = ""
+			m.settleActiveToolCalls(false, msg.Message)
 			if m.toastManager != nil {
 				m.toastManager.ShowWarning(msg.Message)
 			}
@@ -2127,7 +2137,16 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				}
 			}
 		case StatusInfo:
-			if m.toastManager != nil && msg.Message != "" {
+			if label, _ := msg.Details["phaseLabel"].(string); strings.TrimSpace(label) != "" {
+				m.processingLabel = strings.TrimSpace(label)
+				m.state = StateProcessing
+				m.streamStartTime = time.Now()
+				m.lastActivityTime = time.Now()
+				m.slowWarningShown = false
+				m.streamIdleMsg = ""
+			}
+			silent, _ := msg.Details["silent"].(bool)
+			if !silent && m.toastManager != nil && msg.Message != "" {
 				m.toastManager.Show(ToastInfo, "", msg.Message, 4*time.Second)
 			}
 		case StatusThinkingIdle:
@@ -2171,6 +2190,52 @@ func (m *Model) extractToolInfoFromArgs(name string, args map[string]any) string
 	case "edit":
 		if path, ok := args["file_path"].(string); ok {
 			return shortenPath(path, pathLimit)
+		}
+	case "copy", "move":
+		return formatPathPair(toolStringArg(args, "source"), toolStringArg(args, "destination"), pathLimit)
+	case "delete", "mkdir":
+		if path := toolStringArg(args, "path"); path != "" {
+			return shortenPath(path, pathLimit)
+		}
+	case "run_tests":
+		return formatRunTestsTarget(args, pathLimitShort)
+	case "verify_code":
+		path := toolStringArg(args, "path")
+		if path == "" {
+			path = "."
+		}
+		return shortenPath(path, pathLimit)
+	case "git_status":
+		path := toolStringArg(args, "path")
+		if path == "" {
+			path = "."
+		}
+		info := shortenPath(path, pathLimitShort)
+		if toolBoolArg(args, "short") {
+			info += " --short"
+		}
+		return info
+	case "git_diff":
+		return formatGitDiffTarget(args, pathLimitShort)
+	case "git_add":
+		return formatGitAddTarget(args, pathLimitShort)
+	case "git_branch":
+		info := strings.TrimSpace(toolStringArg(args, "action") + " " + toolStringArg(args, "name"))
+		if info != "" {
+			return info
+		}
+	case "git_log":
+		if file := toolStringArg(args, "file"); file != "" {
+			return shortenPath(file, pathLimitShort)
+		}
+		if grep := toolStringArg(args, "grep"); grep != "" {
+			return "grep=" + compactInline(grep, 36)
+		}
+		if author := toolStringArg(args, "author"); author != "" {
+			return "author=" + compactInline(author, 36)
+		}
+		if count := toolIntArg(args, "count"); count > 0 {
+			return fmt.Sprintf("%d commits", count)
 		}
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
@@ -2241,6 +2306,10 @@ func collapsedByDefault(toolName string) bool {
 // rather than relying on m.currentTool/m.toolStartTime (which may have been overwritten
 // by later parallel tool calls).
 func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, startTime time.Time) {
+	m.handleToolResultWithStatus(content, toolName, toolInfo, startTime, false, "")
+}
+
+func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, startTime time.Time, failed bool, errText string) {
 	contentStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 
@@ -2259,7 +2328,16 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 		name = "tool"
 	}
 
-	{
+	if failed {
+		detail := strings.TrimSpace(errText)
+		if detail == "" {
+			detail = firstNonEmptyLine(content)
+		}
+		if detail == "" {
+			detail = "tool failed"
+		}
+		m.output.AppendLine("    " + m.styles.FormatToolError(name, fmt.Errorf("%s", detail)))
+	} else {
 		m.output.AppendLine("    " + m.styles.FormatToolSuccessBlock(name, duration, summary))
 	}
 
@@ -2331,6 +2409,52 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 		}
 	}
 	m.output.AppendLine("")
+}
+
+func firstNonEmptyLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+func (m *Model) settleActiveToolCalls(success bool, summary string) {
+	if len(m.activeToolCalls) == 0 {
+		return
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		if success {
+			summary = "completed"
+		} else {
+			summary = "stopped before result"
+		}
+	}
+	if m.activityFeed != nil {
+		for _, tc := range m.activeToolCalls {
+			m.activityFeed.CompleteEntry(tc.activityID, success, summary)
+		}
+	}
+	m.activeToolCalls = nil
+}
+
+func (m *Model) findActiveToolCall(name string, args map[string]any) int {
+	if len(args) > 0 {
+		for i, tc := range m.activeToolCalls {
+			if tc.name == name && reflect.DeepEqual(tc.args, args) {
+				return i
+			}
+		}
+	}
+	for i, tc := range m.activeToolCalls {
+		if tc.name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // View renders the TUI.

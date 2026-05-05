@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,5 +44,35 @@ func TestStatusWarning_UsesTaggedWarningToast(t *testing.T) {
 	}
 	if got := m.toastManager.toasts[0].Duration; got != 4*time.Second {
 		t.Fatalf("warning duration = %v, want 4s", got)
+	}
+}
+
+func TestStatusInfoPhaseLabelUpdatesLiveActivityWithoutToast(t *testing.T) {
+	model := NewModel()
+	model.width = 100
+
+	updated, _ := model.Update(StatusUpdateMsg{
+		Type:    StatusInfo,
+		Message: "Quality gate 1/2: go_vet@.",
+		Details: map[string]any{
+			"phaseLabel": "Quality gate 1/2: go vet .",
+			"silent":     true,
+		},
+	})
+	m := updated.(Model)
+
+	if m.state != StateProcessing {
+		t.Fatalf("state = %v, want StateProcessing", m.state)
+	}
+	if got := m.processingLabel; got != "Quality gate 1/2: go vet ." {
+		t.Fatalf("processingLabel = %q", got)
+	}
+	if got := m.toastManager.Count(); got != 0 {
+		t.Fatalf("silent phase update should not create toast, count = %d", got)
+	}
+
+	view := stripAnsi(m.renderLiveActivityCard())
+	if !strings.Contains(view, "Quality gate 1/2: go vet .") {
+		t.Fatalf("live activity missing phase label:\n%s", view)
 	}
 }

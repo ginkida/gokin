@@ -40,6 +40,22 @@ func (a *App) recordResponseCommand(toolName string, args map[string]any, result
 	a.responseCommands = append(a.responseCommands, command)
 }
 
+func (a *App) recordResponseVerificationEvidence(evidence string) {
+	evidence = strings.TrimSpace(evidence)
+	if evidence == "" || !commandsContainVerificationSignals([]string{evidence}) {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, existing := range a.responseCommands {
+		if existing == evidence {
+			return
+		}
+	}
+	a.responseCommands = append(a.responseCommands, evidence)
+}
+
 func shouldRunCompletionReview(userMessage, response string, toolsUsed, touchedPaths, commands []string) bool {
 	if len(touchedPaths) == 0 {
 		return false
@@ -278,6 +294,9 @@ func (a *App) runCompletionReviewIfNeeded(
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusInfo,
 			Message: "Final self-review: checking diff and verification before completion",
+			Details: map[string]any{
+				"phaseLabel": "Final self-review: checking diff and verification",
+			},
 		})
 	}
 

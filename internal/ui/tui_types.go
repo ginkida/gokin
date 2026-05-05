@@ -86,7 +86,10 @@ type (
 	}
 	ToolResultMsg struct {
 		Name    string
+		Args    map[string]any
 		Content string
+		Failed  bool
+		Error   string
 	}
 	// ToolProgressMsg is sent periodically during long-running tool execution.
 	ToolProgressMsg struct {

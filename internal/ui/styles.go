@@ -150,9 +150,15 @@ var ToolIcons = map[string]string{
 	"git_diff":     "⎇",
 	"git_blame":    "⎇",
 	"git_add":      "⎇",
+	"git_branch":   "⎇",
 	"git_commit":   "⎇",
+	"git_pr":       "⎇",
 	"git_status":   "⎇",
 	"commit":       "⎇",
+	"copy":         "✦",
+	"delete":       "×",
+	"mkdir":        "✦",
+	"move":         "△",
 	"redo":         "↪",
 	"memory":       "◈",
 	"memorize":     "◈",
@@ -182,26 +188,37 @@ func GetToolIconColor(toolName string) lipgloss.Color {
 
 	// Tool-specific semantic colors
 	colors := map[string]lipgloss.Color{
-		"read":       ColorPrimary,   // Purple - file operations
-		"write":      ColorSuccess,   // Green - creation
-		"edit":       ColorWarning,   // Amber - modification
-		"bash":       ColorRunning,   // Blue - execution
-		"glob":       ColorSecondary, // Cyan - search
-		"grep":       ColorInfo,      // Teal - pattern search
-		"todo":       ColorAccent,    // Pink - tasks
-		"diff":       ColorPrimary,   // Purple - comparison
-		"tree":       ColorSuccess,   // Green - structure
-		"web_fetch":  ColorGradient2, // Indigo - network
-		"web_search": ColorGradient2, // Indigo - network
-		"git_log":    ColorWarning,   // Amber - history
-		"git_diff":   ColorPrimary,   // Purple - changes
-		"git_blame":  ColorSecondary, // Cyan - attribution
-		"commit":     ColorSuccess,   // Green - save
-		"memory":     ColorGradient1, // Purple - storage
-		"refactor":   ColorWarning,   // Amber - transformation
-		"batch":      ColorAccent,    // Pink - bulk
-		"test":       ColorRunning,   // Blue - testing
-		"build":      ColorWarning,   // Amber - compilation
+		"read":        ColorPrimary,   // Purple - file operations
+		"write":       ColorSuccess,   // Green - creation
+		"edit":        ColorWarning,   // Amber - modification
+		"bash":        ColorRunning,   // Blue - execution
+		"glob":        ColorSecondary, // Cyan - search
+		"grep":        ColorInfo,      // Teal - pattern search
+		"todo":        ColorAccent,    // Pink - tasks
+		"diff":        ColorPrimary,   // Purple - comparison
+		"tree":        ColorSuccess,   // Green - structure
+		"web_fetch":   ColorGradient2, // Indigo - network
+		"web_search":  ColorGradient2, // Indigo - network
+		"git_log":     ColorWarning,   // Amber - history
+		"git_diff":    ColorPrimary,   // Purple - changes
+		"git_blame":   ColorSecondary, // Cyan - attribution
+		"git_add":     ColorSuccess,   // Green - staging
+		"git_branch":  ColorWarning,   // Amber - branch operations
+		"git_commit":  ColorSuccess,   // Green - save
+		"git_status":  ColorInfo,      // Teal - repository state
+		"git_pr":      ColorGradient2, // Indigo - remote collaboration
+		"commit":      ColorSuccess,   // Green - save
+		"copy":        ColorSuccess,   // Green - creation
+		"delete":      ColorError,     // Red - removal
+		"mkdir":       ColorSuccess,   // Green - creation
+		"move":        ColorWarning,   // Amber - relocation
+		"memory":      ColorGradient1, // Purple - storage
+		"refactor":    ColorWarning,   // Amber - transformation
+		"batch":       ColorAccent,    // Pink - bulk
+		"run_tests":   ColorRunning,   // Blue - testing
+		"verify_code": ColorInfo,      // Teal - verification
+		"test":        ColorRunning,   // Blue - testing
+		"build":       ColorWarning,   // Amber - compilation
 	}
 
 	if color, ok := colors[normalized]; ok {
@@ -890,6 +907,48 @@ func buildClaudeCodeArgs(name string, args map[string]any) string {
 			result = formatArgValue(path)
 			isFilePath = true
 		}
+	case "copy", "move":
+		result = formatPathPair(toolStringArg(args, "source"), toolStringArg(args, "destination"), 70)
+	case "delete", "mkdir":
+		if path := toolStringArg(args, "path"); path != "" {
+			result = path
+			isFilePath = true
+		}
+	case "run_tests":
+		result = formatRunTestsTarget(args, 45)
+	case "verify_code":
+		path := toolStringArg(args, "path")
+		if path == "" {
+			path = "."
+		}
+		result = shortenPath(path, 55)
+	case "git_status":
+		path := toolStringArg(args, "path")
+		if path != "" {
+			result = shortenPath(path, 45)
+		}
+		if toolBoolArg(args, "short") {
+			if result != "" {
+				result += " "
+			}
+			result += "--short"
+		}
+	case "git_diff":
+		result = formatGitDiffTarget(args, 55)
+	case "git_add":
+		result = formatGitAddTarget(args, 55)
+	case "git_branch":
+		result = strings.TrimSpace(toolStringArg(args, "action") + " " + toolStringArg(args, "name"))
+	case "git_log":
+		if file := toolStringArg(args, "file"); file != "" {
+			result = shortenPath(file, 45)
+		} else if grep := toolStringArg(args, "grep"); grep != "" {
+			result = "grep=" + compactInline(grep, 36)
+		} else if author := toolStringArg(args, "author"); author != "" {
+			result = "author=" + compactInline(author, 36)
+		} else if count := toolIntArg(args, "count"); count > 0 {
+			result = fmt.Sprintf("%d commits", count)
+		}
 	case "grep":
 		if pattern, ok := args["pattern"]; ok {
 			result = "pattern=" + formatArgValue(pattern)
@@ -911,10 +970,10 @@ func buildClaudeCodeArgs(name string, args map[string]any) string {
 		}
 	default:
 		// Use first priority arg
-		for _, key := range []string{"file_path", "path", "command", "pattern", "query", "url"} {
+		for _, key := range []string{"file_path", "path", "directory_path", "source", "destination", "command", "pattern", "query", "url", "action", "operation", "name"} {
 			if val, ok := args[key]; ok {
 				result = key + "=" + formatArgValue(val)
-				if key == "file_path" || key == "path" {
+				if key == "file_path" || key == "path" || key == "directory_path" || key == "source" || key == "destination" {
 					isFilePath = true
 				}
 				break

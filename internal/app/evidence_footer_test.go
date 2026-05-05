@@ -53,7 +53,7 @@ func TestBuildResponseEvidenceFooter_VerifyToolFallback(t *testing.T) {
 		[]string{"run_tests"},
 		nil,
 	)
-	if !strings.Contains(got, "✓ Verified: run_tests") {
+	if !strings.Contains(got, "✓ Verified: run tests") {
 		t.Errorf("expected run_tests fallback: %q", got)
 	}
 }
@@ -137,8 +137,21 @@ func TestPickVerificationCommands_FiltersNonVerification(t *testing.T) {
 
 func TestPickVerificationCommands_FallsBackToTools(t *testing.T) {
 	got := pickVerificationCommands(nil, []string{"read", "verify_code"})
-	if len(got) != 1 || got[0] != "verify_code" {
+	if len(got) != 1 || got[0] != "verify code" {
 		t.Errorf("expected verify_code fallback, got %v", got)
+	}
+}
+
+func TestFormatEvidenceCommand_HumanizesToolNames(t *testing.T) {
+	cases := map[string]string{
+		"verify_code":   "verify code",
+		"run_tests":     "run tests",
+		"go test ./...": "go test ./...",
+	}
+	for in, want := range cases {
+		if got := formatEvidenceCommand(in); got != want {
+			t.Fatalf("formatEvidenceCommand(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

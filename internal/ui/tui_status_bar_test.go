@@ -129,6 +129,41 @@ func TestFormatTokensHelper(t *testing.T) {
 	}
 }
 
+func TestProcessingStatusLabelIsPhaseAware(t *testing.T) {
+	cases := []struct {
+		label string
+		want  string
+	}{
+		{"Quality gate 2/5: go vet internal/app", "VERIFY"},
+		{"Final self-review: checking diff and verification", "REVIEW"},
+		{"Auto-fix 1/2: resolving 1 failed quality check", "AUTOFIX"},
+		{"Agent: explore", "AGENT LOOP"},
+		{"", ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.want, func(t *testing.T) {
+			if got := processingStatusLabel(c.label); got != c.want {
+				t.Fatalf("processingStatusLabel(%q) = %q, want %q", c.label, got, c.want)
+			}
+		})
+	}
+}
+
+func TestRenderEngineStatusShowsVerifyPhase(t *testing.T) {
+	m := NewModel()
+	m.state = StateProcessing
+	m.processingLabel = "Quality gate 1/3: go vet internal/app"
+
+	got := stripAnsi(m.renderEngineStatus())
+	if !strings.Contains(got, "VERIFY") {
+		t.Fatalf("engine status = %q, want VERIFY", got)
+	}
+	if strings.Contains(got, "THINKING") {
+		t.Fatalf("engine status should not show generic THINKING during quality gate: %q", got)
+	}
+}
+
 // stripAnsi removes ANSI escape sequences for testing.
 func stripAnsi(s string) string {
 	var result strings.Builder

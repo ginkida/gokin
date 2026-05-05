@@ -94,7 +94,7 @@ func pickVerificationCommands(commands, toolsUsed []string) []string {
 	for _, tn := range toolsUsed {
 		switch tn {
 		case "verify_code", "run_tests":
-			return []string{tn}
+			return []string{formatEvidenceCommand(tn)}
 		}
 	}
 	return nil
@@ -145,7 +145,7 @@ func formatEvidenceCommands(commands []string, limit int) string {
 	}
 	short := make([]string, 0, len(display))
 	for _, c := range display {
-		c = strings.TrimSpace(c)
+		c = formatEvidenceCommand(c)
 		if runes := []rune(c); len(runes) > 50 {
 			c = string(runes[:47]) + "..."
 		}
@@ -156,6 +156,18 @@ func formatEvidenceCommands(commands []string, limit int) string {
 		result += fmt.Sprintf(" (+%d more)", more)
 	}
 	return result
+}
+
+func formatEvidenceCommand(command string) string {
+	command = strings.TrimSpace(command)
+	switch command {
+	case "verify_code":
+		return "verify code"
+	case "run_tests":
+		return "run tests"
+	default:
+		return command
+	}
 }
 
 // responseAlreadyDescribesEvidence returns true when the response text
@@ -188,7 +200,7 @@ func responseAlreadyDescribesEvidence(response string, files, verifyItems []stri
 }
 
 // responseMentionsVerificationCommand handles cases where the response
-// quotes the literal command (``go test ./internal/app``) but not the
+// quotes the literal command (`go test ./internal/app`) but not the
 // generic positive signal ("tests pass"). We check for the first
 // verb-like token of each command — "go" alone would over-match so we
 // look for "go test", "pytest", etc.

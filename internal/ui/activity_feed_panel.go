@@ -601,6 +601,57 @@ func formatToolActivity(toolName string, args map[string]any) string {
 		if path, ok := args["file_path"].(string); ok {
 			return fmt.Sprintf("Editing %s", shortenPath(path, 40))
 		}
+	case "copy":
+		return "Copying " + formatPathPair(toolStringArg(args, "source"), toolStringArg(args, "destination"), 52)
+	case "move":
+		return "Moving " + formatPathPair(toolStringArg(args, "source"), toolStringArg(args, "destination"), 52)
+	case "delete":
+		if path := toolStringArg(args, "path"); path != "" {
+			return fmt.Sprintf("Deleting %s", shortenPath(path, 40))
+		}
+	case "mkdir":
+		if path := toolStringArg(args, "path"); path != "" {
+			return fmt.Sprintf("Creating %s", shortenPath(path, 40))
+		}
+	case "run_tests":
+		return "Testing " + formatRunTestsTarget(args, 36)
+	case "verify_code":
+		path := toolStringArg(args, "path")
+		if path == "" {
+			path = "."
+		}
+		return fmt.Sprintf("Verifying %s", shortenPath(path, 40))
+	case "git_status":
+		path := toolStringArg(args, "path")
+		if path == "" {
+			path = "."
+		}
+		action := "Checking git status"
+		if toolBoolArg(args, "short") {
+			action += " --short"
+		}
+		return action + " in " + shortenPath(path, 34)
+	case "git_diff":
+		return "Inspecting diff " + formatGitDiffTarget(args, 40)
+	case "git_add":
+		if target := formatGitAddTarget(args, 40); target != "" {
+			return "Staging " + target
+		}
+		return "Staging changes"
+	case "git_branch":
+		info := strings.TrimSpace(toolStringArg(args, "action") + " " + toolStringArg(args, "name"))
+		if info != "" {
+			return "Branch " + info
+		}
+		return "Branch operation"
+	case "git_log":
+		if file := toolStringArg(args, "file"); file != "" {
+			return "Reading history for " + shortenPath(file, 36)
+		}
+		if grep := toolStringArg(args, "grep"); grep != "" {
+			return "Searching history " + compactInline(grep, 36)
+		}
+		return "Reading git history"
 	case "grep":
 		if pattern, ok := args["pattern"].(string); ok {
 			p := pattern

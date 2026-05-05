@@ -39,9 +39,9 @@ func TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup(t *testing.T
 
 	// Card must NOT repeat status-bar content.
 	for _, dup := range []string{
-		"RUNNING",    // state word — status bar shows ○ RUNNING
-		"WRITING",    //   ditto
-		"Esc cancel", // status bar shows "esc Interrupt"
+		"RUNNING",         // state word — status bar shows ○ RUNNING
+		"WRITING",         //   ditto
+		"Esc cancel",      // status bar shows "esc Interrupt"
 		"kimi-for-coding", // model name — status bar shows it
 	} {
 		if strings.Contains(view, dup) {
@@ -71,6 +71,23 @@ func TestRenderLiveActivityCard_ShowsLiveActivityHintForHiddenFeed(t *testing.T)
 	// Compact form surfaces parallel work in the Next row.
 	if !strings.Contains(view, "in flight") && !strings.Contains(view, "parallel") {
 		t.Fatalf("expected parallel tool signal (in flight / parallel), got:\n%s", view)
+	}
+}
+
+func TestRenderLiveActivityCard_HumanizesProjectToolNames(t *testing.T) {
+	m := NewModel()
+	m.width = 110
+	m.state = StateProcessing
+	m.currentTool = "run_tests"
+	m.currentToolInfo = "go internal/ui filter=TestToolArgs"
+	m.toolStartTime = time.Now().Add(-2 * time.Second)
+
+	view := stripAnsi(m.renderLiveActivityCard())
+	if !strings.Contains(view, "Run Tests") {
+		t.Fatalf("live activity should humanize run_tests:\n%s", view)
+	}
+	if strings.Contains(view, "RunTests") || strings.Contains(view, "run_tests") {
+		t.Fatalf("live activity leaked raw tool name:\n%s", view)
 	}
 }
 
@@ -132,6 +149,28 @@ func TestRenderLiveActivityCard_PureBulletSnippetFallsBackToGeneric(t *testing.T
 	}
 }
 
+func TestLiveActivityCurrentLine_ShowsFailedToolCountWhileWriting(t *testing.T) {
+	m := NewModel()
+	m.state = StateStreaming
+	m.responseToolCount = 3
+	m.responseToolFailures = 1
+
+	line := m.liveActivityCurrentLine(ActivityFeedSnapshot{})
+	if !strings.Contains(line, "3 tools used") || !strings.Contains(line, "1 failed") {
+		t.Fatalf("current line missing failed tool summary: %q", line)
+	}
+}
+
+func TestLiveActivityAccentWarnsWhenResponseHadToolFailures(t *testing.T) {
+	m := NewModel()
+	m.state = StateStreaming
+	m.responseToolFailures = 1
+
+	if got := m.liveActivityAccentColor(); got != ColorWarning {
+		t.Fatalf("accent color = %s, want warning", got)
+	}
+}
+
 // TestCleanStreamSnippet pins the snippet-cleanup that prevents visual
 // collisions like "Writing: - `tui.go`" where the model-emitted snippet
 // starts with its own markdown bullet. Stripping one leading list marker
@@ -147,7 +186,7 @@ func TestCleanStreamSnippet(t *testing.T) {
 		{"12. numbered", "numbered"},
 		{"   - padded bullet", "padded bullet"},
 		{"plain text", "plain text"},
-		{"`code`", "`code`"},       // no leading bullet to strip
+		{"`code`", "`code`"},               // no leading bullet to strip
 		{"-not a bullet", "-not a bullet"}, // no space after dash
 		{"", ""},
 		// Bare bullet markers (content hasn't arrived yet) — drop entirely
@@ -327,17 +366,32 @@ func TestRenderEngineStatus_UsesRichRuntimeStates(t *testing.T) {
 		t.Fatalf("expected running status with parallel count, got %q", status)
 	}
 
+	m.currentTool = "run_tests"
+	m.activeToolCalls = []activeToolCall{{name: "run_tests"}}
+	status = stripAnsi(m.renderEngineStatus())
+	if !strings.Contains(status, "RUN TESTS") {
+		t.Fatalf("expected humanized run_tests status, got %q", status)
+	}
+	if strings.Contains(status, "RUN_TESTS") {
+		t.Fatalf("status leaked raw tool name: %q", status)
+	}
+
 	m.currentTool = ""
 	m.activeToolCalls = nil
 	m.state = StateStreaming
 	m.responseToolCount = 3
+	m.responseToolFailures = 1
 	status = stripAnsi(m.renderEngineStatus())
-	if !strings.Contains(status, "WRITING · 3 tools") {
+	if !strings.Contains(status, "WRITING · 3 tools · 1 failed") {
 		t.Fatalf("expected streaming status with tool count, got %q", status)
+	}
+	if !strings.Contains(status, MessageIcons["warning"]) {
+		t.Fatalf("expected warning icon when streaming with failed tools, got %q", status)
 	}
 
 	m.state = StateProcessing
 	m.responseToolCount = 0
+	m.responseToolFailures = 0
 	m.retryAttempt = 1
 	m.retryMax = 3
 	status = stripAnsi(m.renderEngineStatus())

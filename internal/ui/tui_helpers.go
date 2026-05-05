@@ -413,10 +413,15 @@ func extractToolInfo(args map[string]any) string {
 		"file_path",
 		"path",
 		"directory_path",
+		"source",
+		"destination",
 		"command",
 		"pattern",
 		"query",
 		"url",
+		"action",
+		"operation",
+		"name",
 	}
 
 	for _, key := range priorityKeys {
@@ -483,7 +488,9 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 		// Show breakdown when tools were used
 		if m.responseToolCount > 0 && toolDur > 0 {
 			parts = append(parts, fmt.Sprintf("thinking %s", formatCompactDuration(thinkingDur)))
-			parts = append(parts, fmt.Sprintf("tools %s (%d)", formatCompactDuration(toolDur), m.responseToolCount))
+			toolLabel := fmt.Sprintf("tools %s (%s)", formatCompactDuration(toolDur),
+				formatToolRunSummary(m.responseToolCount, m.responseToolFailures, false))
+			parts = append(parts, toolLabel)
 		} else {
 			parts = append(parts, formatCompactDuration(meta.Duration))
 		}
@@ -513,6 +520,24 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 	rightDash := strings.Repeat("─", dashLen)
 
 	return dimStyle.Render(leftDash+" ") + dimStyle.Render(content) + dimStyle.Render(" "+rightDash)
+}
+
+func formatToolRunSummary(count, failures int, includeUsed bool) string {
+	if count <= 0 {
+		return ""
+	}
+	word := "tools"
+	if count == 1 {
+		word = "tool"
+	}
+	summary := fmt.Sprintf("%d %s", count, word)
+	if includeUsed {
+		summary += " used"
+	}
+	if failures > 0 {
+		summary += fmt.Sprintf(" · %d failed", failures)
+	}
+	return summary
 }
 
 // formatCompactDuration formats a duration compactly: "242ms", "1.2s", "2.1m".

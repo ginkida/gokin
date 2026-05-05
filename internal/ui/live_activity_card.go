@@ -20,9 +20,9 @@ import (
 //
 // Current shape (big Live Activity panel closed):
 //
-//   ▎ Writing: - `tui.go` — Model struct fields
-//   ▎ ↳ Editing tui_status_bar.go → applied (63ms)
-//   ▎ → Plan step 3/8
+//	▎ Writing: - `tui.go` — Model struct fields
+//	▎ ↳ Editing tui_status_bar.go → applied (63ms)
+//	▎ → Plan step 3/8
 //
 // The colored left-edge bar (▎) IS the state indicator — its hue matches
 // the status bar's state chip, so state reads from colour, not repeated
@@ -148,6 +148,8 @@ func (m Model) liveActivityAccentColor() lipgloss.Color {
 		return ColorInfo
 	case m.currentTool != "":
 		return GetToolIconColor(m.currentTool)
+	case m.responseToolFailures > 0:
+		return ColorWarning
 	case m.state == StateStreaming:
 		return ColorSuccess
 	default:
@@ -157,7 +159,7 @@ func (m Model) liveActivityAccentColor() lipgloss.Color {
 
 func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	if m.currentTool != "" {
-		title := capitalizeToolName(m.currentTool)
+		title := displayToolName(m.currentTool)
 		if active := len(m.activeToolCalls); active > 1 {
 			title = fmt.Sprintf("%s · %d in flight", title, active)
 		}
@@ -184,7 +186,7 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 		case cleaned != "":
 			return "Writing: " + cleaned
 		case m.responseToolCount > 0:
-			return fmt.Sprintf("Writing response · %d tools used", m.responseToolCount)
+			return "Writing response · " + formatToolRunSummary(m.responseToolCount, m.responseToolFailures, true)
 		default:
 			return "Writing response"
 		}

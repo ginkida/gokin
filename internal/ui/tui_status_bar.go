@@ -347,7 +347,7 @@ func (m Model) renderEngineStatus() string {
 		status = "WAITING"
 		color = ColorWarning
 	case m.currentTool != "":
-		status = "RUN " + strings.ToUpper(m.currentTool)
+		status = "RUN " + statusToolLabel(m.currentTool)
 		if active := len(m.activeToolCalls); active > 1 {
 			status += fmt.Sprintf(" ×%d", active)
 		}
@@ -355,17 +355,22 @@ func (m Model) renderEngineStatus() string {
 	case m.state == StateStreaming:
 		status = "WRITING"
 		if m.responseToolCount > 0 {
-			status += fmt.Sprintf(" · %d tools", m.responseToolCount)
+			status += " · " + formatToolRunSummary(m.responseToolCount, m.responseToolFailures, false)
 		}
-		color = ColorSuccess
-		icon = MessageIcons["pending"]
+		if m.responseToolFailures > 0 {
+			color = ColorWarning
+			icon = MessageIcons["warning"]
+		} else {
+			color = ColorSuccess
+			icon = MessageIcons["pending"]
+		}
 	case m.planProgressMode && m.planProgress != nil && m.planProgress.TotalSteps > 0:
 		status = fmt.Sprintf("PLAN %d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
 		color = ColorInfo
 	case m.state == StateProcessing:
-		status = "THINKING"
-		if strings.Contains(strings.ToLower(m.processingLabel), "agent") {
-			status = "AGENT LOOP"
+		status = processingStatusLabel(m.processingLabel)
+		if status == "" {
+			status = "THINKING"
 		}
 		color = ColorSecondary
 	default:
@@ -373,6 +378,24 @@ func (m Model) renderEngineStatus() string {
 	}
 
 	return engineStyle.Foreground(color).Render(icon + " " + status)
+}
+
+func processingStatusLabel(label string) string {
+	lower := strings.ToLower(strings.TrimSpace(label))
+	switch {
+	case lower == "":
+		return ""
+	case strings.Contains(lower, "quality gate"):
+		return "VERIFY"
+	case strings.Contains(lower, "self-review") || strings.Contains(lower, "review"):
+		return "REVIEW"
+	case strings.Contains(lower, "auto-fix") || strings.Contains(lower, "autofix"):
+		return "AUTOFIX"
+	case strings.Contains(lower, "agent"):
+		return "AGENT LOOP"
+	default:
+		return "THINKING"
+	}
 }
 
 func (m Model) hasActivePlanStatus() bool {

@@ -1578,7 +1578,13 @@ func (b *Builder) wireDependencies() error {
 			app.recordResponseEvidence(name, args, result)
 
 			if app.program != nil {
-				app.safeSendToProgram(ui.ToolResultMsg{Name: name, Content: result.Content})
+				app.safeSendToProgram(ui.ToolResultMsg{
+					Name:    name,
+					Args:    args,
+					Content: result.Content,
+					Failed:  !result.Success,
+					Error:   result.Error,
+				})
 			}
 			app.journalEvent("tool_end", map[string]any{
 				"tool":    name,

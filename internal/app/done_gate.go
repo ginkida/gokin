@@ -33,15 +33,17 @@ const (
 )
 
 type doneGateCheck struct {
-	Name string
-	Run  func(context.Context) (tools.ToolResult, error)
+	Name     string
+	Evidence string
+	Run      func(context.Context) (tools.ToolResult, error)
 }
 
 type doneGateResult struct {
-	Name    string
-	Success bool
-	Content string
-	Error   string
+	Name        string
+	DisplayName string
+	Success     bool
+	Content     string
+	Error       string
 }
 
 type doneGateTestTarget struct {
@@ -110,6 +112,7 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 	}
 
 	var results []doneGateResult
+	var autoFixErr error
 	for attempt := 0; attempt <= policy.AutoFixAttempts; attempt++ {
 		results = a.runDoneGateChecks(ctx, checks, policy.CheckTimeout)
 		a.reportDoneGateResults(results, attempt)
@@ -128,11 +131,19 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 
 		if err := a.runDoneGateAutoFix(ctx, userMessage, results, attempt+1, policy.AutoFixAttempts); err != nil {
 			logging.Warn("done-gate auto-fix failed", "attempt", attempt+1, "error", err)
+			autoFixErr = err
 			break
 		}
 	}
 
-	return a.blockDoneGate("done-gate blocked finalization: required checks are still failing after auto-fix budget")
+	reason := "done-gate blocked finalization: required checks are still failing after auto-fix budget"
+	if autoFixErr != nil {
+		reason = "done-gate blocked finalization: auto-fix failed before checks passed"
+	}
+	if failed := formatFailedDoneGateSummary(results, 3); failed != "" {
+		reason += "\nFailed checks: " + failed
+	}
+	return a.blockDoneGate(reason)
 }
 
 func (a *App) blockDoneGate(reason string) bool {
@@ -227,7 +238,8 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 
 	if verifyTool, ok := a.registry.Get("verify_code"); ok {
 		checks = append(checks, doneGateCheck{
-			Name: "verify_code",
+			Name:     "verify_code",
+			Evidence: doneGateCheckEvidence("verify_code", ""),
 			Run: func(ctx context.Context) (tools.ToolResult, error) {
 				return verifyTool.Execute(ctx, map[string]any{"path": a.workDir})
 			},
@@ -471,7 +483,8 @@ func (a *App) buildDoneGateChecks(userMessage string, toolsUsed []string, profil
 			for _, target := range testTargets {
 				name := "run_tests@" + target.Framework + "@" + relPathOrDot(a.workDir, target.Path)
 				checks = appendUniqueDoneGateCheck(checks, seen, doneGateCheck{
-					Name: name,
+					Name:     name,
+					Evidence: doneGateCheckEvidence(name, ""),
 					Run: func(ctx context.Context) (tools.ToolResult, error) {
 						return testsTool.Execute(ctx, map[string]any{
 							"path":      target.Path,
@@ -505,7 +518,8 @@ func copyDoneGateToolArgs(args map[string]any) map[string]any {
 
 func (a *App) newBashDoneGateCheck(bashTool tools.Tool, name, command string) doneGateCheck {
 	return doneGateCheck{
-		Name: name,
+		Name:     name,
+		Evidence: doneGateCheckEvidence(name, command),
 		Run: func(ctx context.Context) (tools.ToolResult, error) {
 			return bashTool.Execute(ctx, map[string]any{
 				"command":     command,
@@ -535,7 +549,8 @@ func (a *App) newBashDoneGateCheckWithTimeout(bashTool tools.Tool, name, dir, co
 		wrapped = "cd " + shellQuote(dir) + " && " + command
 	}
 	return doneGateCheck{
-		Name: name,
+		Name:     name,
+		Evidence: doneGateCheckEvidence(name, wrapped),
 		Run: func(ctx context.Context) (tools.ToolResult, error) {
 			checkCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
@@ -549,7 +564,8 @@ func (a *App) newBashDoneGateCheckWithTimeout(bashTool tools.Tool, name, dir, co
 
 func (a *App) runDoneGateChecks(ctx context.Context, checks []doneGateCheck, checkTimeout time.Duration) []doneGateResult {
 	results := make([]doneGateResult, 0, len(checks))
-	for _, check := range checks {
+	for i, check := range checks {
+		a.reportDoneGateProgress(i+1, len(checks), doneGateCheckDisplayName(check))
 		checkCtx := ctx
 		cancel := func() {}
 		if checkTimeout > 0 {
@@ -564,9 +580,10 @@ func (a *App) runDoneGateChecks(ctx context.Context, checks []doneGateCheck, che
 				errMsg = fmt.Sprintf("check timed out after %v", checkTimeout)
 			}
 			results = append(results, doneGateResult{
-				Name:    check.Name,
-				Success: false,
-				Error:   errMsg,
+				Name:        check.Name,
+				DisplayName: doneGateCheckDisplayName(check),
+				Success:     false,
+				Error:       errMsg,
 			})
 			continue
 		}
@@ -574,29 +591,50 @@ func (a *App) runDoneGateChecks(ctx context.Context, checks []doneGateCheck, che
 		errContent := strings.TrimSpace(result.Error)
 		if timedOut {
 			results = append(results, doneGateResult{
-				Name:    check.Name,
-				Success: false,
-				Content: content,
-				Error:   fmt.Sprintf("check timed out after %v", checkTimeout),
+				Name:        check.Name,
+				DisplayName: doneGateCheckDisplayName(check),
+				Success:     false,
+				Content:     content,
+				Error:       fmt.Sprintf("check timed out after %v", checkTimeout),
 			})
 			continue
 		}
 		results = append(results, doneGateResult{
-			Name:    check.Name,
-			Success: result.Success,
-			Content: content,
-			Error:   errContent,
+			Name:        check.Name,
+			DisplayName: doneGateCheckDisplayName(check),
+			Success:     result.Success,
+			Content:     content,
+			Error:       errContent,
 		})
+		if result.Success {
+			a.recordResponseVerificationEvidence(check.Evidence)
+		}
 	}
 	return results
 }
 
+func (a *App) reportDoneGateProgress(current, total int, name string) {
+	if a == nil || total <= 0 {
+		return
+	}
+	label := fmt.Sprintf("Quality gate %d/%d: %s", current, total, name)
+	a.safeSendToProgram(ui.StatusUpdateMsg{
+		Type:    ui.StatusInfo,
+		Message: label,
+		Details: map[string]any{
+			"phaseLabel": label,
+			"silent":     true,
+		},
+	})
+}
+
 func (a *App) reportDoneGateResults(results []doneGateResult, attempt int) {
 	var sb strings.Builder
+	passed, failed := countDoneGateResults(results)
 	if attempt == 0 {
-		sb.WriteString("\nDone-gate checks:\n")
+		fmt.Fprintf(&sb, "\nQuality gate: %s\n", formatDoneGateResultSummary(passed, failed))
 	} else {
-		fmt.Fprintf(&sb, "\nDone-gate recheck after auto-fix #%d:\n", attempt)
+		fmt.Fprintf(&sb, "\nQuality gate recheck after auto-fix #%d: %s\n", attempt, formatDoneGateResultSummary(passed, failed))
 	}
 
 	for _, r := range results {
@@ -604,7 +642,7 @@ func (a *App) reportDoneGateResults(results []doneGateResult, attempt int) {
 		if !r.Success {
 			status = "FAIL"
 		}
-		fmt.Fprintf(&sb, "- %s: %s\n", r.Name, status)
+		fmt.Fprintf(&sb, "- %s: %s\n", doneGateResultDisplayName(r), status)
 		if !r.Success {
 			if detail := compactDoneGateFailureDetail(r); detail != "" {
 				sb.WriteString("  -> ")
@@ -615,6 +653,58 @@ func (a *App) reportDoneGateResults(results []doneGateResult, attempt int) {
 	}
 
 	a.safeSendToProgram(ui.StreamTextMsg(sb.String()))
+}
+
+func countDoneGateResults(results []doneGateResult) (passed, failed int) {
+	for _, r := range results {
+		if r.Success {
+			passed++
+		} else {
+			failed++
+		}
+	}
+	return passed, failed
+}
+
+func formatDoneGateResultSummary(passed, failed int) string {
+	switch {
+	case failed == 0:
+		return fmt.Sprintf("%d passed", passed)
+	case passed == 0:
+		return fmt.Sprintf("%d failed", failed)
+	default:
+		return fmt.Sprintf("%d passed, %d failed", passed, failed)
+	}
+}
+
+func formatFailedDoneGateSummary(results []doneGateResult, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	var items []string
+	remaining := 0
+	for _, r := range results {
+		if r.Success {
+			continue
+		}
+		if len(items) >= limit {
+			remaining++
+			continue
+		}
+		name := doneGateResultDisplayName(r)
+		if detail := compactDoneGateFailureDetail(r); detail != "" {
+			items = append(items, fmt.Sprintf("%s (%s)", name, detail))
+		} else {
+			items = append(items, name)
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	if remaining > 0 {
+		items = append(items, fmt.Sprintf("+%d more", remaining))
+	}
+	return strings.Join(items, "; ")
 }
 
 func (a *App) runDoneGateAutoFix(ctx context.Context, userMessage string, results []doneGateResult, attempt, max int) error {
@@ -630,6 +720,15 @@ func (a *App) runDoneGateAutoFix(ctx context.Context, userMessage string, result
 
 	a.safeSendToProgram(ui.StreamTextMsg(
 		fmt.Sprintf("\n🔧 Auto-fix attempt %d/%d — resolving %d incomplete check(s)...\n", attempt, max, len(failed))))
+	label := fmt.Sprintf("Auto-fix %d/%d: resolving %d failed quality check(s)", attempt, max, len(failed))
+	a.safeSendToProgram(ui.StatusUpdateMsg{
+		Type:    ui.StatusInfo,
+		Message: label,
+		Details: map[string]any{
+			"phaseLabel": label,
+			"silent":     true,
+		},
+	})
 
 	fixPrompt := buildDoneGateFixPrompt(userMessage, failed, attempt, max)
 	history := a.session.GetHistory()
@@ -1655,6 +1754,94 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+func doneGateCheckEvidence(name, command string) string {
+	name = strings.TrimSpace(name)
+	command = strings.TrimSpace(command)
+
+	if name == "verify_code" {
+		return "verify code"
+	}
+	if name == "git_diff_check" {
+		return "git diff --check"
+	}
+	if name == "git_unmerged_paths" {
+		return "git unmerged paths check"
+	}
+	if strings.HasPrefix(name, "run_tests@") {
+		parts := strings.Split(name, "@")
+		if len(parts) >= 3 {
+			return strings.TrimSpace("run tests " + parts[1] + " " + parts[2])
+		}
+		return "run tests"
+	}
+
+	prefixes := []struct {
+		prefix string
+		label  string
+	}{
+		{"go_vet@", "go vet"},
+		{"cargo_check@", "cargo check"},
+		{"java_verify@", "java verify"},
+		{"cmake_configure@", "cmake build"},
+		{"bazel_nobuild@", "bazel build --nobuild"},
+		{"make_dry_run@", "make dry-run"},
+		{"php_lint@", "composer lint"},
+		{"php_static@", "composer static"},
+		{"composer_validate@", "composer validate"},
+		{"node_lint@", "node lint"},
+		{"node_typecheck@", "node typecheck"},
+		{"node_test@", "node test"},
+		{"node_build@", "node build"},
+		{"python_compile@", "python compile"},
+	}
+	for _, p := range prefixes {
+		if rel, ok := strings.CutPrefix(name, p.prefix); ok {
+			rel = strings.TrimSpace(rel)
+			if rel == "" || rel == "." {
+				return p.label
+			}
+			return p.label + " " + rel
+		}
+	}
+
+	return summarizeDoneGateCommand(command)
+}
+
+func doneGateCheckDisplayName(check doneGateCheck) string {
+	label := strings.TrimSpace(check.Evidence)
+	if label == "" {
+		label = strings.TrimSpace(check.Name)
+	}
+	if label == "" {
+		return "verification"
+	}
+	label = strings.ReplaceAll(label, "_", " ")
+	return label
+}
+
+func doneGateResultDisplayName(result doneGateResult) string {
+	label := strings.TrimSpace(result.DisplayName)
+	if label == "" {
+		label = strings.TrimSpace(result.Name)
+	}
+	if label == "" {
+		return "verification"
+	}
+	return strings.ReplaceAll(label, "_", " ")
+}
+
+func summarizeDoneGateCommand(command string) string {
+	command = strings.Join(strings.Fields(strings.TrimSpace(command)), " ")
+	if command == "" {
+		return ""
+	}
+	runes := []rune(command)
+	if len(runes) <= 90 {
+		return command
+	}
+	return string(runes[:87]) + "..."
+}
+
 func looksLikeCodingTask(msg string) bool {
 	lower := strings.ToLower(strings.TrimSpace(msg))
 	if lower == "" {
@@ -1680,7 +1867,7 @@ func buildDoneGateFixPrompt(userMessage string, failed []doneGateResult, attempt
 	sb.WriteString(userMessage)
 	sb.WriteString("\n\nFailed checks:\n")
 	for _, r := range failed {
-		fmt.Fprintf(&sb, "- %s failed.\n", r.Name)
+		fmt.Fprintf(&sb, "- %s failed.\n", doneGateResultDisplayName(r))
 		if r.Error != "" {
 			sb.WriteString("  Error: ")
 			sb.WriteString(truncateDoneGateText(r.Error))
