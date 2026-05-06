@@ -25,11 +25,13 @@ func (c *UpdateCommand) Usage() string {
 
 func (c *UpdateCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthSetup,
-		Icon:     "download",
-		Priority: 5,
-		HasArgs:  true,
-		ArgHint:  "[install|backups|rollback]",
+		Category:         CategoryAuthSetup,
+		Icon:             "download",
+		Priority:         5,
+		HasArgs:          true,
+		ArgHint:          "[install|backups|rollback]",
+		LongRunning:      true,
+		LongRunningLabel: "Checking for updates — fetching release info from GitHub...",
 	}
 }
 

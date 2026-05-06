@@ -127,6 +127,7 @@ func TestLongRunningCommands(t *testing.T) {
 	wantLongRunning := map[string]string{
 		"compact": "Compacting context",
 		"pr":      "Creating PR",
+		"update":  "Checking for updates",
 	}
 
 	for name, expectedLabelPrefix := range wantLongRunning {
