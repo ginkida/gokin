@@ -677,9 +677,24 @@ func (e *Executor) ResetSession() {
 	if e.writeTracker != nil {
 		e.writeTracker.Reset()
 	}
+
+	e.deltaCheckMu.Lock()
 	e.deltaBaselineCaptured = false
 	e.deltaCheckLastResult = nil
 	e.deltaCheckBlocked = false
+	// Drain block-reason and last-hash too. Both were technically harmless
+	// (block-reason only displayed when blocked=true; last-hash only consulted
+	// when LastResult != nil), but leaving them set kept stale text alive for
+	// debug logs and could surface in future code paths that don't pre-check.
+	e.deltaCheckBlockReason = ""
+	e.deltaCheckLastHash = ""
+	// Pending-paths was a real leak: paths recorded as "modified since last
+	// successful delta check" survived /clear, so the first write in a new
+	// conversation could fire a delta check based on prior-conversation
+	// state. Drain it (and the baseline set) defensively.
+	e.deltaPendingPaths = make(map[string]struct{})
+	e.deltaBaselinePaths = make(map[string]struct{})
+	e.deltaCheckMu.Unlock()
 }
 
 // SetPhaseObserver wires a callback that's invoked after each tool execution
