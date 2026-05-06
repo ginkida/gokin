@@ -34,7 +34,7 @@ func TestWriteTool_Declaration(t *testing.T) {
 	decl := tool.Declaration()
 
 	if decl == nil {
-		t.Error("Declaration() is nil")
+		t.Fatal("Declaration() is nil")
 	}
 	if decl.Name != "write" {
 		t.Errorf("Declaration().Name = %v, want %v", decl.Name, "write")
@@ -124,13 +124,6 @@ func TestWriteTool_SetAllowedDirs(t *testing.T) {
 	if tool.pathValidator == nil {
 		t.Error("pathValidator is nil after SetAllowedDirs")
 	}
-}
-
-// mockUndoManager implements undo.Manager interface for testing
-type mockUndoManager struct{}
-
-func (m *mockUndoManager) Record(filePath string, before, after []byte) error {
-	return nil
 }
 
 // mockDiffHandler implements DiffHandler for testing

@@ -71,7 +71,7 @@ func TestSessionGetHistoryCopy(t *testing.T) {
 
 	history := s.GetHistory()
 	// Modifying the copy should not affect the session
-	history = append(history, genai.NewContentFromText("extra", genai.RoleUser))
+	_ = append(history, genai.NewContentFromText("extra", genai.RoleUser))
 
 	if s.MessageCount() != 1 {
 		t.Error("modifying GetHistory copy should not affect session")

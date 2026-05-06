@@ -793,8 +793,6 @@ func (m *InputModel) updateFileSuggestions(input string) {
 
 	// Fallback: search in current dir if not absolute
 	if len(matches) == 0 && !filepath.IsAbs(lastWord) {
-		pattern = filepath.Join(m.workDir, "**", lastWord+"*")
-		// Limit search for performance
 		matches = m.searchFilesFuzzy(lastWord)
 	}
 

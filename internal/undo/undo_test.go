@@ -83,7 +83,7 @@ func TestManagerUndoRedo(t *testing.T) {
 	}
 
 	// Redo
-	change, err = m.Redo()
+	_, err = m.Redo()
 	if err != nil {
 		t.Fatalf("Redo: %v", err)
 	}

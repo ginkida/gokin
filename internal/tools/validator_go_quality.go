@@ -29,9 +29,6 @@ var (
 
 	// fmt.Errorf with %s/%v for error wrapping instead of %w
 	errfNoWrapRe = regexp.MustCompile(`fmt\.Errorf\([^)]*(%s|%v)\s*"\s*,\s*\w*[Ee]rr\b`)
-
-	// Naked goroutine without context/done channel (heuristic)
-	nakedGoroutineRe = regexp.MustCompile(`go\s+func\s*\(`)
 )
 
 func (v *GoQualityValidator) Validate(_ context.Context, filePath string, content []byte, _ string) []ValidationWarning {

@@ -2002,11 +2002,6 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	a.enforceSessionMemoryGovernance("plan_step_completed")
 }
 
-// isRetryableError checks if an error is retryable (network, timeout, rate limit).
-func isRetryableError(err error) bool {
-	return client.IsRetryableError(err)
-}
-
 // isOverloadError detects provider-side overload signals that should feed the
 // rate-window breaker: z.ai GLM 1305, "overloaded" / "too many requests"
 // substrings, HTTP 529 "Site is overloaded". Bounded to these patterns so

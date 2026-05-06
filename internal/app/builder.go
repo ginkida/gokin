@@ -295,7 +295,7 @@ func (b *Builder) validateOllamaModel() error {
 			if baseURL == "" {
 				baseURL = config.DefaultOllamaBaseURL
 			}
-			return fmt.Errorf("Ollama server not running at %s", baseURL)
+			return fmt.Errorf("ollama server not running at %s", baseURL)
 		}
 		logging.Debug("ollama healthcheck failed, skipping model validation", "error", err)
 		return nil

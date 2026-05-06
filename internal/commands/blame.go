@@ -128,7 +128,7 @@ func parseBlameRange(rest []string) (start, end int, err error) {
 		s, sErr := strconv.Atoi(parts[0])
 		e, eErr := strconv.Atoi(parts[1])
 		if sErr != nil || eErr != nil || s < 1 || e < s {
-			return 0, 0, fmt.Errorf("Invalid range %q — use N-M with positive integers, M >= N.", rest[0])
+			return 0, 0, fmt.Errorf("invalid range %q — use N-M with positive integers, M >= N", rest[0])
 		}
 		return s, e, nil
 	}
@@ -137,7 +137,7 @@ func parseBlameRange(rest []string) (start, end int, err error) {
 	if len(rest) == 1 {
 		n, nErr := strconv.Atoi(rest[0])
 		if nErr != nil || n < 1 {
-			return 0, 0, fmt.Errorf("Invalid line number %q — pass a positive integer.", rest[0])
+			return 0, 0, fmt.Errorf("invalid line number %q — pass a positive integer", rest[0])
 		}
 		return n, n, nil
 	}
@@ -147,12 +147,12 @@ func parseBlameRange(rest []string) (start, end int, err error) {
 		s, sErr := strconv.Atoi(rest[0])
 		e, eErr := strconv.Atoi(rest[1])
 		if sErr != nil || eErr != nil || s < 1 || e < s {
-			return 0, 0, fmt.Errorf("Invalid range %q %q — use positive integers, second >= first.", rest[0], rest[1])
+			return 0, 0, fmt.Errorf("invalid range %q %q — use positive integers, second >= first", rest[0], rest[1])
 		}
 		return s, e, nil
 	}
 
-	return 0, 0, fmt.Errorf("Too many arguments. Use /blame <file> [N|N-M|N M].")
+	return 0, 0, fmt.Errorf("too many arguments; use /blame <file> [N|N-M|N M]")
 }
 
 // truncateBlameOutput caps the line count so a 5000-line blame doesn't

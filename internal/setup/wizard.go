@@ -7,9 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -489,32 +487,6 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return os.WriteFile(path, data, perm)
 	}
 	return nil
-}
-
-// openBrowserForOAuth opens a URL in the default browser
-func openBrowserForOAuth(url string) bool {
-	var cmd *exec.Cmd
-
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		if _, err := exec.LookPath("xdg-open"); err == nil {
-			cmd = exec.Command("xdg-open", url)
-		} else if _, err := exec.LookPath("google-chrome"); err == nil {
-			cmd = exec.Command("google-chrome", url)
-		} else if _, err := exec.LookPath("firefox"); err == nil {
-			cmd = exec.Command("firefox", url)
-		} else {
-			return false
-		}
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
-	default:
-		return false
-	}
-
-	return cmd.Start() == nil
 }
 
 func setupOllama(reader *bufio.Reader) error {

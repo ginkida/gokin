@@ -696,15 +696,6 @@ func (p *MarkdownStreamParser) renderTable(rows []string) string {
 	return result.String()
 }
 
-// ansiRegex matches ANSI escape codes for stripping in visible width calculation.
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-
-// visibleWidth calculates the visible width of a string (ignoring ANSI codes).
-func visibleWidth(s string) int {
-	clean := ansiRegex.ReplaceAllString(s, "")
-	return len(clean)
-}
-
 // applyBaseStyle ensures that plain text between styled spans has an explicit foreground color.
 // Inner styled spans emit \x1b[0m (full reset) which strips the outer foreground.
 // This function re-applies the base style's ANSI sequence after every reset.

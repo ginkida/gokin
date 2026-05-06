@@ -68,9 +68,8 @@ type GitStatusModel struct {
 	selectedIndices map[int]bool // For multi-select
 	viewport        viewport.Model
 	diffViewport    viewport.Model
-	showDiff        bool
-	currentDiff     string
-	branch          string
+	showDiff bool
+	branch   string
 	upstream        string
 	aheadBehind     string
 	styles          *Styles
@@ -270,46 +269,6 @@ func (m *GitStatusModel) formatEntryLine(index int) string {
 		return selectedStyle.Render(line)
 	}
 	return normalStyle.Render(line)
-}
-
-// setDiff sets the diff content for preview.
-func (m *GitStatusModel) setDiff(diff string) {
-	m.currentDiff = diff
-	m.diffViewport.SetContent(m.highlightDiff(diff))
-}
-
-// highlightDiff applies syntax highlighting to diff.
-func (m *GitStatusModel) highlightDiff(diff string) string {
-	addedStyle := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
-	removedStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
-	headerStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
-	hunkStyle := lipgloss.NewStyle().Foreground(ColorHighlight)
-	contextStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-
-	lines := strings.Split(diff, "\n")
-	var result strings.Builder
-
-	for _, line := range lines {
-		var styledLine string
-
-		switch {
-		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
-			styledLine = headerStyle.Render(line)
-		case strings.HasPrefix(line, "@@"):
-			styledLine = hunkStyle.Render(line)
-		case strings.HasPrefix(line, "+"):
-			styledLine = addedStyle.Render(line)
-		case strings.HasPrefix(line, "-"):
-			styledLine = removedStyle.Render(line)
-		default:
-			styledLine = contextStyle.Render(line)
-		}
-
-		result.WriteString(styledLine)
-		result.WriteString("\n")
-	}
-
-	return result.String()
 }
 
 // Init initializes the git status model.

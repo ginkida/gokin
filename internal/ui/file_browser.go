@@ -373,60 +373,6 @@ func (m *FileBrowserModel) formatEntryLine(index int, entry FileEntry) string {
 	return normalStyle.Render(line)
 }
 
-// getFileIcon returns a simple Unicode glyph for a file type.
-func (m *FileBrowserModel) getFileIcon(name string) string {
-	ext := strings.ToLower(filepath.Ext(name))
-
-	iconMap := map[string]string{
-		".go":    "◆",
-		".py":    "◇",
-		".js":    "△",
-		".ts":    "△",
-		".tsx":   "△",
-		".jsx":   "△",
-		".rs":    "▪",
-		".rb":    "◇",
-		".java":  "◇",
-		".c":     "▪",
-		".cpp":   "▪",
-		".h":     "▪",
-		".cs":    "◇",
-		".php":   "◇",
-		".swift": "◇",
-		".kt":    "◇",
-		".md":    "·",
-		".json":  "·",
-		".yaml":  "·",
-		".yml":   "·",
-		".toml":  "·",
-		".html":  "△",
-		".css":   "△",
-		".scss":  "△",
-		".sql":   "·",
-		".sh":    "$",
-		".bash":  "$",
-		".zsh":   "$",
-		".txt":   "·",
-		".log":   "·",
-		".pdf":   "·",
-		".png":   "·",
-		".jpg":   "·",
-		".jpeg":  "·",
-		".gif":   "·",
-		".svg":   "·",
-		".zip":   "·",
-		".tar":   "·",
-		".gz":    "·",
-		".lock":  "·",
-	}
-
-	if icon, ok := iconMap[ext]; ok {
-		return icon
-	}
-
-	return "·"
-}
-
 // formatSize formats a file size for display.
 func (m *FileBrowserModel) formatSize(size int64) string {
 	const (

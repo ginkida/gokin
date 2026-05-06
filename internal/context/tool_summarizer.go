@@ -356,7 +356,7 @@ func summarizeTreeOutput(content string) string {
 		if len(trimmed) == len(line) || len(line)-len(trimmed) <= 0 {
 			// No leading spaces — could be the root or a top-level entry
 			// Check for tree connectors: ├── └── │
-			cleaned := strings.TrimLeft(line, "├└│── ")
+			cleaned := strings.TrimLeft(line, "├└│─ ")
 			if cleaned != "" && strings.HasSuffix(cleaned, "/") {
 				topDirs = append(topDirs, strings.TrimSuffix(cleaned, "/"))
 			}

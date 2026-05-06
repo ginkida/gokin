@@ -413,9 +413,6 @@ func (p *CommandPalette) View(width, height int) string {
 	if width == 0 {
 		width = p.width
 	}
-	if height == 0 {
-		height = p.height
-	}
 
 	// Palette dimensions
 	paletteWidth := min(70, width-6)

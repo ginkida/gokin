@@ -265,32 +265,6 @@ func (m *AgentMessenger) handleDelegation(msg Message) {
 	}
 }
 
-// getLatestResultForType finds the most recent result for an agent type.
-func (m *AgentMessenger) getLatestResultForType(agentType string) (*AgentResult, bool) {
-	at := ParseAgentType(agentType)
-
-	m.runner.mu.RLock()
-	defer m.runner.mu.RUnlock()
-
-	var latest *AgentResult
-	var latestEnd time.Time
-	for id, result := range m.runner.results {
-		if result.Type == at && result.Completed {
-			if agent, ok := m.runner.agents[id]; ok {
-				endTime := agent.GetEndTime()
-				if latest == nil || endTime.After(latestEnd) {
-					latest = result
-					latestEnd = endTime
-				}
-			} else if latest == nil {
-				latest = result
-			}
-		}
-	}
-
-	return latest, latest != nil
-}
-
 // Broadcast sends a message to all agents of a given type.
 func (m *AgentMessenger) Broadcast(msgType string, targetType string, content string) error {
 	at := ParseAgentType(targetType)

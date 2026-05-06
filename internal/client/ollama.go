@@ -793,12 +793,6 @@ func (c *OllamaClient) convertHistoryWithResults(history []*genai.Content, resul
 	return messages
 }
 
-// convertToolsToOllama converts genai.Tool to Ollama api.Tool format.
-// Caller must hold c.mu.RLock or pass tools via convertToolsToOllamaFrom.
-func (c *OllamaClient) convertToolsToOllama() []api.Tool {
-	return c.convertToolsToOllamaFrom(c.tools)
-}
-
 // convertToolsToOllamaFrom converts the given genai tools to Ollama api.Tool format.
 func (c *OllamaClient) convertToolsToOllamaFrom(genaiTools []*genai.Tool) []api.Tool {
 	tools := make([]api.Tool, 0)
@@ -943,52 +937,25 @@ func (c *OllamaClient) wrapOllamaError(err error) error {
 
 	// Connection refused - Ollama not running
 	if strings.Contains(errStr, "connection refused") {
-		return fmt.Errorf(`Ollama server is not running.
-
-To fix this:
-  1. Start Ollama: ollama serve
-  2. Or check if it's running: ollama list
-
-Original error: %w`, err)
+		return fmt.Errorf("ollama server is not running (connection refused)\n\nTo fix this:\n  1. Start Ollama: ollama serve\n  2. Or check if it's running: ollama list\n\nOriginal error: %w", err)
 	}
 
 	// Timeout
 	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded") {
-		return fmt.Errorf(`Ollama request timed out.
-
-Possible causes:
-  • Model is loading into memory (first request is slow)
-  • Model is too large for available RAM/VRAM
-  • Server is overloaded
-
-Try again or use a smaller model.
-
-Original error: %w`, err)
+		return fmt.Errorf("ollama request timed out\n\nPossible causes:\n  • Model is loading into memory (first request is slow)\n  • Model is too large for available RAM/VRAM\n  • Server is overloaded\n\nTry again or use a smaller model.\n\nOriginal error: %w", err)
 	}
 
 	// Check for model not found via status error
 	var statusErr *api.StatusError
 	if errors.As(err, &statusErr) {
 		if statusErr.StatusCode == 404 {
-			return fmt.Errorf(`Model '%s' is not installed.
-
-To fix this:
-  1. Pull the model: ollama pull %s
-  2. Or list available models: ollama list
-
-Original error: %w`, c.config.Model, c.config.Model, err)
+			return fmt.Errorf("model %q is not installed\n\nTo fix this:\n  1. Pull the model: ollama pull %s\n  2. Or list available models: ollama list\n\nOriginal error: %w", c.config.Model, c.config.Model, err)
 		}
 	}
 
 	// Generic model not found
 	if strings.Contains(errStr, "model") && strings.Contains(errStr, "not found") {
-		return fmt.Errorf(`Model '%s' is not installed.
-
-To fix this:
-  1. Pull the model: ollama pull %s
-  2. Or list available models: ollama list
-
-Original error: %w`, c.config.Model, c.config.Model, err)
+		return fmt.Errorf("model %q is not installed\n\nTo fix this:\n  1. Pull the model: ollama pull %s\n  2. Or list available models: ollama list\n\nOriginal error: %w", c.config.Model, c.config.Model, err)
 	}
 
 	return err

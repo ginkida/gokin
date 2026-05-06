@@ -250,7 +250,7 @@ func (t *WebSearchTool) searchSerpAPI(ctx context.Context, query string, numResu
 // We minimize exposure by not logging the full URL and using HTTPS.
 func (t *WebSearchTool) searchGoogle(ctx context.Context, query string, numResults int) ([]SearchResult, error) {
 	if t.googleCX == "" {
-		return nil, fmt.Errorf("Google Custom Search Engine ID (cx) not configured")
+		return nil, fmt.Errorf("google custom search: cx not configured")
 	}
 
 	baseURL := "https://www.googleapis.com/customsearch/v1"

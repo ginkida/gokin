@@ -494,7 +494,7 @@ func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary any) stri
 
 	result.WriteString(iconStyle.Render(icon))
 	result.WriteString(" ")
-	result.WriteString(nameStyle.Render(fmt.Sprintf("%s", toolName)))
+	result.WriteString(nameStyle.Render(toolName))
 
 	// Add summary if available
 	if s, ok := summary.(string); ok && s != "" {

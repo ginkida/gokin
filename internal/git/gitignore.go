@@ -263,11 +263,7 @@ func (g *GitIgnore) matchPattern(p pattern, relPath string, isDir bool) bool {
 
 	// Try matching just the filename
 	baseName := filepath.Base(relPath)
-	if g.globMatch(patternPath, baseName) {
-		return true
-	}
-
-	return false
+	return g.globMatch(patternPath, baseName)
 }
 
 // globMatch performs glob matching with doublestar.

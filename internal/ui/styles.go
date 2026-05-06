@@ -742,26 +742,6 @@ func formatArgValue(val any) string {
 	}
 }
 
-// formatArgValueWithLimit formats a value with a maximum length.
-func formatArgValueWithLimit(val any, maxLen int) string {
-	switch v := val.(type) {
-	case string:
-		if runes := []rune(v); len(runes) > maxLen {
-			return "\"" + string(runes[:maxLen-3]) + "...\""
-		}
-		return "\"" + v + "\""
-	case float64:
-		return fmt.Sprintf("%.0f", v)
-	case bool:
-		if v {
-			return "true"
-		}
-		return "false"
-	default:
-		return ""
-	}
-}
-
 // joinStrings joins strings with a separator.
 func joinStrings(parts []string, sep string) string {
 	return strings.Join(parts, sep)
@@ -790,86 +770,6 @@ func (s *Styles) FormatErrorWithSuggestion(err, suggestion, code string) string 
 		result.WriteString("\n" + markerStyle.Render("     ") + codeStyle.Render("("+code+")"))
 	}
 	return result.String()
-}
-
-// wrapErrorText wraps error text at word boundaries.
-func wrapErrorText(text string, width int) string {
-	if width <= 0 || len(text) <= width {
-		return text
-	}
-
-	var result strings.Builder
-	var line string
-
-	words := splitWords(text)
-	for _, word := range words {
-		// Handle newlines in the word
-		if word == "\n" {
-			result.WriteString(line + "\n")
-			line = ""
-			continue
-		}
-
-		if len(line)+len(word)+1 > width && line != "" {
-			result.WriteString(line + "\n")
-			line = word
-		} else if line == "" {
-			line = word
-		} else {
-			line += " " + word
-		}
-	}
-	if line != "" {
-		result.WriteString(line)
-	}
-	return result.String()
-}
-
-// splitWords splits text into words, preserving newlines as separate tokens.
-func splitWords(text string) []string {
-	var words []string
-	var current string
-
-	for _, ch := range text {
-		if ch == '\n' {
-			if current != "" {
-				words = append(words, current)
-				current = ""
-			}
-			words = append(words, "\n")
-		} else if ch == ' ' || ch == '\t' {
-			if current != "" {
-				words = append(words, current)
-				current = ""
-			}
-		} else {
-			current += string(ch)
-		}
-	}
-	if current != "" {
-		words = append(words, current)
-	}
-	return words
-}
-
-// extractToolDetails extracts detailed information from tool args.
-func extractToolDetails(args map[string]any) string {
-	if len(args) == 0 {
-		return ""
-	}
-
-	// Extract the most relevant detail based on arg types
-	for _, key := range []string{"file_path", "path", "command", "pattern", "query", "url"} {
-		if val, ok := args[key].(string); ok && val != "" {
-			// Truncate if too long
-			if runes := []rune(val); len(runes) > 60 {
-				return string(runes[:57]) + "..."
-			}
-			return val
-		}
-	}
-
-	return ""
 }
 
 // capitalizeToolName converts snake_case tool names to PascalCase.
@@ -1011,65 +911,6 @@ func stripWrappingQuotes(s string) string {
 		return s[1 : len(s)-1]
 	}
 	return s
-}
-
-// truncatePathSmart truncates a file path while preserving the filename.
-// For '"/home/user/projects/very/long/path/to/file.go"' with maxLen=50:
-// Returns '"…/path/to/file.go"' preserving quotes and showing the filename
-func truncatePathSmart(path string, maxLen int) string {
-	if len(path) <= maxLen {
-		return path
-	}
-
-	// Handle quoted paths
-	hasQuotes := strings.HasPrefix(path, "\"") && strings.HasSuffix(path, "\"")
-	if hasQuotes {
-		// Remove quotes for processing, will add back at the end
-		path = path[1 : len(path)-1]
-		maxLen -= 2 // Account for quotes
-	}
-
-	// Find the last path separator to get the filename
-	lastSlash := strings.LastIndex(path, "/")
-	if lastSlash == -1 {
-		// No slash, just truncate normally
-		result := path
-		if runes := []rune(result); len(runes) > maxLen-3 {
-			result = string(runes[:maxLen-3]) + "..."
-		}
-		if hasQuotes {
-			return "\"" + result + "\""
-		}
-		return result
-	}
-
-	filename := path[lastSlash:] // includes the leading /
-	dirPart := path[:lastSlash]
-
-	var result string
-
-	// If filename alone is too long, show as much as possible
-	if len(filename) >= maxLen-3 {
-		result = "..." + filename[len(filename)-(maxLen-3):]
-	} else {
-		// Calculate how much of the directory we can show
-		availableForDir := maxLen - len(filename) - 3 // -3 for "..."
-
-		if availableForDir <= 0 {
-			result = "..." + filename
-		} else if availableForDir >= 10 {
-			// Show start of path + ... + filename
-			result = dirPart[:availableForDir] + "..." + filename
-		} else {
-			// Just show ... + filename
-			result = "..." + filename
-		}
-	}
-
-	if hasQuotes {
-		return "\"" + result + "\""
-	}
-	return result
 }
 
 // RenderToolSeparator renders a visual separator between tool executions.

@@ -369,25 +369,3 @@ func extractOpenAIRateLimits(resp *http.Response) *RateLimitMetadata {
 	return metadata
 }
 
-// extractGeminiRateLimits extracts Gemini rate limit headers from response.
-func extractGeminiRateLimits(resp *http.Response) *RateLimitMetadata {
-	if resp == nil {
-		return nil
-	}
-
-	metadata := &RateLimitMetadata{
-		RequestsLimit:     ParseHeaderInt64(resp, "x-ratelimit-limit-requests"),
-		RequestsRemaining: ParseHeaderInt64(resp, "x-ratelimit-remaining-requests"),
-		RequestsReset:     ParseHeaderDuration(resp, "x-ratelimit-reset-requests"),
-		TokensLimit:       ParseHeaderInt64(resp, "x-ratelimit-limit-tokens"),
-		TokensRemaining:   ParseHeaderInt64(resp, "x-ratelimit-remaining-tokens"),
-		TokensReset:       ParseHeaderDuration(resp, "x-ratelimit-reset-tokens"),
-	}
-
-	// If no headers were found (all 0), return nil
-	if metadata.RequestsLimit == 0 && metadata.TokensLimit == 0 {
-		return nil
-	}
-
-	return metadata
-}

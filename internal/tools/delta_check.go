@@ -716,10 +716,7 @@ func isLikelyNoopScript(script string) bool {
 	case "true", ":", "exit 0":
 		return true
 	}
-	if strings.Contains(script, "no test specified") {
-		return true
-	}
-	return false
+	return strings.Contains(script, "no test specified")
 }
 
 func isDeltaCheckCommandMissing(err error) bool {

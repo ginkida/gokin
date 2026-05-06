@@ -238,15 +238,3 @@ func lastNNonEmptyLines(s string, n int) []string {
 	return out
 }
 
-// lastNonEmptyLine returns the last non-empty line from s, trimmed.
-// Used to surface the most recent progress output from multiline tool stdout.
-func lastNonEmptyLine(s string) string {
-	s = strings.TrimRight(s, "\n\r \t")
-	if s == "" {
-		return ""
-	}
-	if idx := strings.LastIndexAny(s, "\n\r"); idx >= 0 {
-		return strings.TrimSpace(s[idx+1:])
-	}
-	return strings.TrimSpace(s)
-}

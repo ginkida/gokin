@@ -158,26 +158,6 @@ func (m ErrorDisplayModel) ViewCompact() string {
 	return result
 }
 
-func (m ErrorDisplayModel) getCategoryIcon() string {
-	icons := map[ErrorCategory]string{
-		ErrorCategoryNetwork:    "NET",
-		ErrorCategoryPermission: "PERM",
-		ErrorCategorySyntax:     "SYN",
-		ErrorCategoryFile:       "FILE",
-		ErrorCategoryTimeout:    "TIME",
-		ErrorCategoryAuth:       "AUTH",
-		ErrorCategoryConfig:     "CFG",
-		ErrorCategoryRateLimit:  "RATE",
-		ErrorCategoryAPI:        "API",
-		ErrorCategoryGit:        "GIT",
-		ErrorCategoryUnknown:    "ERR",
-	}
-	if icon, ok := icons[m.error.Category]; ok {
-		return icon
-	}
-	return "ERR"
-}
-
 func (m ErrorDisplayModel) getCategoryTitle() string {
 	titles := map[ErrorCategory]string{
 		ErrorCategoryNetwork:    "Network Error",
@@ -196,34 +176,6 @@ func (m ErrorDisplayModel) getCategoryTitle() string {
 		return title
 	}
 	return "Error"
-}
-
-func (m ErrorDisplayModel) renderRetryInfo() string {
-	ri := m.error.RetryInfo
-	retryStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-
-	var sb strings.Builder
-
-	if ri.CanRetry {
-		progress := fmt.Sprintf("Attempt %d/%d", ri.AttemptNumber, ri.MaxAttempts)
-		sb.WriteString(retryStyle.Render(progress))
-
-		if ri.NextRetryIn > 0 {
-			sb.WriteString(dimStyle.Render(fmt.Sprintf(" • Next retry in %s", ri.NextRetryIn.Round(time.Second))))
-		}
-
-		if ri.RetryReason != "" {
-			sb.WriteString("\n" + dimStyle.Render("Reason: "+ri.RetryReason))
-		}
-	} else {
-		sb.WriteString(retryStyle.Render(fmt.Sprintf("All %d attempts failed", ri.MaxAttempts)))
-		if ri.RetryReason != "" {
-			sb.WriteString(dimStyle.Render(" - " + ri.RetryReason))
-		}
-	}
-
-	return sb.String()
 }
 
 // ClassifyError analyzes an error and returns an EnhancedError with context.

@@ -102,7 +102,6 @@ type Model struct {
 	planFeedbackInput  InputModel // Input model for feedback
 
 	// Model selector state
-	modelSelectorOpen  bool
 	modelSelectedIndex int
 	availableModels    []ModelInfo
 	currentModel       string
@@ -222,8 +221,7 @@ type Model struct {
 	CompactMode bool
 
 	// Status line contextual information
-	injectedContextCount int
-	conversationMode     string // exploring/implementing/debugging
+	conversationMode string // exploring/implementing/debugging
 	mcpHealthy           int
 	mcpTotal             int
 	runtimeStatus        RuntimeStatusSnapshot
@@ -2975,13 +2973,6 @@ func (m *Model) renderInlineDiff(msg InlineDiffMsg) {
 			m.output.AppendLine("    " + addedStyle.Render("+ "+line))
 		}
 	}
-}
-
-func (m *Model) renderProgressBar(progress float64, width int) string {
-	filled := min(int(progress*float64(width)), width)
-
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-	return fmt.Sprintf("[%s] %.0f%%", bar, progress*100)
 }
 
 // GetCoordinatedTasksSummary returns a summary of coordinated tasks for status display.

@@ -395,9 +395,6 @@ func (c *PreFlightCheck) validateEditPath(path string, args map[string]any) {
 		return
 	}
 
-	// Normalize to prevent traversal bypasses (e.g. "/../etc/passwd")
-	path = filepath.Clean(path)
-
 	// Line-based mode — no old_string needed
 	if lineStart, ok := GetInt(args, "line_start"); ok && lineStart > 0 {
 		return
@@ -459,7 +456,7 @@ func (v *DefaultSafetyValidator) GetSummary(toolName string, args map[string]any
 
 	summary := &ExecutionSummary{
 		ToolName:         toolName,
-		DisplayName:      strings.Title(strings.ReplaceAll(toolName, "_", " ")),
+		DisplayName:      toolDisplayName(toolName),
 		ExpectedTime:     meta.MaxExecTime,
 		RiskLevel:        meta.SafetyLevel,
 		RequiresApproval: meta.RequiresConfirmation,
@@ -533,4 +530,16 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen-3]) + "..."
+}
+
+// toolDisplayName converts a snake_case tool name to a title-cased display name.
+// Only handles ASCII — all internal tool names are ASCII.
+func toolDisplayName(toolName string) string {
+	words := strings.Fields(strings.ReplaceAll(toolName, "_", " "))
+	for i, w := range words {
+		if w != "" {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
 }

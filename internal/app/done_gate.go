@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -508,12 +507,6 @@ func appendUniqueDoneGateCheck(checks []doneGateCheck, seen map[string]bool, che
 	}
 	seen[check.Name] = true
 	return append(checks, check)
-}
-
-func copyDoneGateToolArgs(args map[string]any) map[string]any {
-	out := make(map[string]any, len(args))
-	maps.Copy(out, args)
-	return out
 }
 
 func (a *App) newBashDoneGateCheck(bashTool tools.Tool, name, command string) doneGateCheck {

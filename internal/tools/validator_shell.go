@@ -19,10 +19,9 @@ func (v *ShellValidator) Matches(filePath string) bool {
 
 var (
 	shebangRe    = regexp.MustCompile(`^#!\s*/`)
-	setErrExitRe = regexp.MustCompile(`set\s+-[a-z]*e`)        // set -e, set -euo pipefail, etc.
-	setStrictRe  = regexp.MustCompile(`set\s+-euo\s+pipefail`) // strictest form
-	rmRfRe       = regexp.MustCompile(`rm\s+-rf?\s+\$\{?\w`)   // rm -rf $VAR (unquoted)
-	cdUnquotedRe = regexp.MustCompile(`cd\s+\$\{?\w+\}?\s*$`)  // cd $VAR (unquoted)
+	setErrExitRe = regexp.MustCompile(`set\s+-[a-z]*e`)       // set -e, set -euo pipefail, etc.
+	rmRfRe       = regexp.MustCompile(`rm\s+-rf?\s+\$\{?\w`)  // rm -rf $VAR (unquoted)
+	cdUnquotedRe = regexp.MustCompile(`cd\s+\$\{?\w+\}?\s*$`) // cd $VAR (unquoted)
 )
 
 func (v *ShellValidator) Validate(_ context.Context, filePath string, content []byte, _ string) []ValidationWarning {

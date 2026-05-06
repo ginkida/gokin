@@ -184,7 +184,7 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 	title, _ := GetString(args, "title")
 	description, _ := GetString(args, "description")
 	request, _ := GetString(args, "request")
-	stepsRaw, _ := args["steps"]
+	stepsRaw := args["steps"]
 
 	// Create the plan
 	p := t.manager.CreatePlan(title, description, request)

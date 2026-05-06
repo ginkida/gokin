@@ -574,13 +574,7 @@ func (ta *TaskAnalyzer) decomposeWithLLM(ctx context.Context, message string) (*
 	}
 
 	for _, llmSt := range llmResponse.Subtasks {
-		subtask := Subtask{
-			ID:           llmSt.ID,
-			Prompt:       llmSt.Prompt,
-			AgentType:    llmSt.AgentType,
-			Priority:     llmSt.Priority,
-			Dependencies: llmSt.Dependencies,
-		}
+		subtask := Subtask(llmSt)
 
 		// Validate agent type
 		validTypes := map[string]bool{"explore": true, "bash": true, "general": true, "plan": true}

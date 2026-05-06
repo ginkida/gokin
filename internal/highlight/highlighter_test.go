@@ -31,9 +31,8 @@ func TestHighlight(t *testing.T) {
 		t.Error("unknown language should still return text")
 	}
 
-	// Empty code
-	result = h.Highlight("", "go")
-	// Should not panic
+	// Empty code — should not panic
+	_ = h.Highlight("", "go")
 }
 
 func TestHighlightWithLineNumbers(t *testing.T) {

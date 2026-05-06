@@ -799,11 +799,6 @@ func (a *App) detectUnslashedCommand(message string) string {
 	return fmt.Sprintf("Looks like you meant /%s — this was sent to the model. Prefix with '/' to run as a command next time.", firstWord)
 }
 
-// executeCommand executes a slash command.
-func (a *App) executeCommand(name string, args []string) {
-	a.executeCommandCtx(a.ctx, name, args)
-}
-
 func (a *App) executeCommandCtx(ctx context.Context, name string, args []string) {
 	defer func() {
 		a.mu.Lock()
@@ -859,11 +854,6 @@ func (a *App) handleQuit() {
 	ctx, cancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
 	defer cancel()
 	a.gracefulShutdown(ctx)
-}
-
-// processMessage processes a user message asynchronously (uses app context).
-func (a *App) processMessage(message string) {
-	a.processMessageWithContext(a.ctx, message)
 }
 
 // processMessageWithContext and related methods are in message_processor.go

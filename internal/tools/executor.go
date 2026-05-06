@@ -195,7 +195,6 @@ type Executor struct {
 	// Enhanced safety features
 	safetyValidator  SafetyValidator
 	preFlightChecks  bool                     // Enable pre-flight safety checks
-	userNotified     bool                     // Track if user was notified about tool execution
 	notificationMgr  *NotificationManager     // User notifications
 	redactor         *security.SecretRedactor // Redact secrets from output
 	unrestrictedMode bool                     // Full freedom when both sandbox and permissions are off
@@ -2415,83 +2414,6 @@ func getErrorSuggestion(errMsg string) string {
 		}
 	}
 	return ""
-}
-
-// getToolFilePath extracts the primary file path from tool arguments.
-func getToolFilePath(call *genai.FunctionCall) string {
-	if call.Args == nil {
-		return ""
-	}
-	if path, ok := call.Args["path"].(string); ok {
-		return path
-	}
-	if path, ok := call.Args["file_path"].(string); ok {
-		return path
-	}
-	return ""
-}
-
-// orderByDependencies reorders tool calls so that writes happen before reads on the same file.
-// Returns the ordered calls and a flag indicating if reordering was needed.
-func orderByDependencies(calls []*genai.FunctionCall) ([]*genai.FunctionCall, bool) {
-	if len(calls) <= 1 {
-		return calls, false
-	}
-
-	// Build file->writer and file->reader maps
-	writers := make(map[string]int)   // file -> index of write call
-	readers := make(map[string][]int) // file -> indices of read calls
-
-	for i, call := range calls {
-		path := getToolFilePath(call)
-		if path == "" {
-			continue
-		}
-		if isWriteOperation(call.Name) {
-			writers[path] = i
-		} else {
-			readers[path] = append(readers[path], i)
-		}
-	}
-
-	// Check if any reader depends on a writer
-	hasConflict := false
-	blockedBy := make(map[int]int) // reader_index -> writer_index it depends on
-
-	for file, writerIdx := range writers {
-		if readerIndices, ok := readers[file]; ok {
-			for _, readerIdx := range readerIndices {
-				blockedBy[readerIdx] = writerIdx
-				hasConflict = true
-			}
-		}
-	}
-
-	if !hasConflict {
-		return calls, false
-	}
-
-	// Simple topological sort: writers first, then readers
-	ordered := make([]*genai.FunctionCall, 0, len(calls))
-	added := make(map[int]bool)
-
-	// First pass: add all writers and non-conflicting calls
-	for i, call := range calls {
-		if _, isBlocked := blockedBy[i]; !isBlocked {
-			ordered = append(ordered, call)
-			added[i] = true
-		}
-	}
-
-	// Second pass: add blocked readers
-	for i, call := range calls {
-		if !added[i] {
-			ordered = append(ordered, call)
-		}
-		_ = call // suppress unused warning
-	}
-
-	return ordered, true
 }
 
 // readIntArg extracts a positional integer argument from a tool call, tolerating

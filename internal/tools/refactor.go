@@ -441,7 +441,6 @@ func (t *RefactorTool) executeInline(_ context.Context, args map[string]any) (To
 
 	// Step 1: Find the function definition
 	var funcBody string
-	var funcParams []*ast.Field
 	var funcFound bool
 
 	ast.Inspect(node, func(n ast.Node) bool {
@@ -449,14 +448,10 @@ func (t *RefactorTool) executeInline(_ context.Context, args map[string]any) (To
 		if !ok || fn.Name.Name != targetName {
 			return true
 		}
-		// Extract function body (without braces)
 		bodyStart := fset.Position(fn.Body.Lbrace).Offset + 1
 		bodyEnd := fset.Position(fn.Body.Rbrace).Offset
 		if bodyStart < bodyEnd {
 			funcBody = strings.TrimSpace(string(content[bodyStart:bodyEnd]))
-		}
-		if fn.Type.Params != nil {
-			funcParams = fn.Type.Params.List
 		}
 		funcFound = true
 		return false
@@ -497,14 +492,7 @@ func (t *RefactorTool) executeInline(_ context.Context, args map[string]any) (To
 	}
 
 	// Step 3: Build inlined body with parameter substitution
-	inlineBody := funcBody
-	if len(funcParams) > 0 {
-		// For simple cases: replace parameter names with call arguments
-		// This is a basic implementation; complex cases may need manual review
-		inlineBody = "/* inlined from " + targetName + " */\n" + funcBody
-	} else {
-		inlineBody = "/* inlined from " + targetName + " */\n" + funcBody
-	}
+	inlineBody := "/* inlined from " + targetName + " */\n" + funcBody
 
 	// Wrap in block to avoid variable scope issues
 	replacement := "{\n" + inlineBody + "\n}"

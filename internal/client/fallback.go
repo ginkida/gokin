@@ -49,20 +49,6 @@ func (fc *FallbackClient) getCurrent() int {
 	return fc.current
 }
 
-// advance moves to the next client in the chain. Returns false if no more clients.
-func (fc *FallbackClient) advance() bool {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	if fc.current+1 < len(fc.clients) {
-		fc.current++
-		logging.Warn("falling back to next client",
-			"index", fc.current,
-			"model", fc.clients[fc.current].GetModel())
-		return true
-	}
-	return false
-}
-
 // resetCurrent resets back to the first client.
 func (fc *FallbackClient) resetCurrent() {
 	fc.mu.Lock()

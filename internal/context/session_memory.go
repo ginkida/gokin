@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -312,10 +311,9 @@ func (s *SessionMemoryManager) flushPromotedSessionLearnings(pl *memory.ProjectL
 	}
 	promoted := 0
 	for _, learning := range learnings {
-		prefKey := learning.key
 		switch learning.kind {
 		case "fact", "convention":
-			prefKey = learning.kind + ":" + learning.key
+			prefKey := learning.kind + ":" + learning.key
 			if existing := pl.GetPreference(prefKey); existing == learning.value {
 				continue
 			}
@@ -392,8 +390,6 @@ type sessionDurableLearning struct {
 	key   string
 	value string
 }
-
-var filePathPattern = regexp.MustCompile(`(?:^|[\s"'` + "`" + `])([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)`)
 
 func extractCurrentTask(history []*genai.Content) string {
 	// Find the last substantive user message (skip short "ok", "yes" etc.)

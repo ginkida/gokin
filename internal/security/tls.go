@@ -119,9 +119,6 @@ func CreateTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 		tls.TLS_CHACHA20_POLY1305_SHA256, // TLS 1.3
 	}
 
-	// Prefer server cipher suites
-	tlsCfg.PreferServerCipherSuites = true
-
 	return tlsCfg, nil
 }
 

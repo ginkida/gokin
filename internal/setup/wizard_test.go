@@ -353,7 +353,7 @@ func TestGetProvider(t *testing.T) {
 	// Test with known provider
 	provider := config.GetProvider("glm")
 	if provider == nil {
-		t.Error("expected to find glm provider")
+		t.Fatal("expected to find glm provider")
 	}
 	if provider.Name != "glm" {
 		t.Errorf("provider.Name = %q, want %q", provider.Name, "glm")

@@ -308,31 +308,6 @@ func (sm *SessionManager) ClearCurrentSession() error {
 	return nil
 }
 
-// getCurrentSessionPath returns the path to the current session file.
-func (sm *SessionManager) getCurrentSessionPath() string {
-	sessionsDir, err := getSessionsDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(sessionsDir, sm.session.ID+".json")
-}
-
-// hasRecentSession checks if there's a recent session file.
-func (sm *SessionManager) hasRecentSession() bool {
-	path := sm.getCurrentSessionPath()
-	if path == "" {
-		return false
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-
-	// Consider session recent if modified within last hour
-	return time.Since(info.ModTime()) < time.Hour
-}
-
 // CleanupOldSessions removes old sessions based on age and count limits.
 // This runs in the background and does not block the main application.
 func (sm *SessionManager) CleanupOldSessions() error {

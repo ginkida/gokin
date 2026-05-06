@@ -355,11 +355,8 @@ func flattenPathArg(value any) []string {
 	case string:
 		return []string{v}
 	case []string:
-		out := make([]string, 0, len(v))
-		for _, s := range v {
-			out = append(out, s)
-		}
-		return out
+		return append([]string(nil), v...)
+
 	case []any:
 		out := make([]string, 0, len(v))
 		for _, item := range v {

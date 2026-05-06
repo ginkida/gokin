@@ -7,45 +7,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// renderPlanProgress renders plan progress information for status bar.
-func renderPlanProgress(planProgress *PlanProgressMsg, width int, mutedStyle lipgloss.Style) string {
-	if planProgress == nil {
-		return ""
-	}
-
-	progressIcon := "→"
-	if planProgress.Status == "completed" {
-		progressIcon = "✓"
-	} else if planProgress.Status == "failed" {
-		progressIcon = "✗"
-	}
-
-	progressText := fmt.Sprintf("%s %d/%d (%.0f%%)",
-		progressIcon,
-		planProgress.Completed,
-		planProgress.TotalSteps,
-		planProgress.Progress*100)
-
-	// Show current step title if space permits
-	if width >= 100 && planProgress.CurrentTitle != "" {
-		title := planProgress.CurrentTitle
-		if runes := []rune(title); len(runes) > 20 {
-			title = string(runes[:17]) + "..."
-		}
-		progressText += fmt.Sprintf(" • %s", title)
-	}
-
-	// Show sub-agent progress if available
-	if planProgress.SubStepInfo != "" && width >= 120 {
-		info := planProgress.SubStepInfo
-		if runes := []rune(info); len(runes) > 30 {
-			info = string(runes[:27]) + "..."
-		}
-		progressText += fmt.Sprintf(" [%s]", info)
-	}
-
-	return lipgloss.NewStyle().Foreground(ColorPlan).Render(MessageIcons["active"]+" ") + mutedStyle.Render(progressText)
-}
 
 func (m Model) renderPlanPauseBlock(msg PlanProgressMsg) string {
 	border := lipgloss.NewStyle().

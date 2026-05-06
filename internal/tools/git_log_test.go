@@ -33,7 +33,7 @@ func TestGitLogTool_Declaration(t *testing.T) {
 	decl := tool.Declaration()
 
 	if decl == nil {
-		t.Error("Declaration() is nil")
+		t.Fatal("Declaration() is nil")
 	}
 	if decl.Name != "git_log" {
 		t.Errorf("Declaration().Name = %v, want %v", decl.Name, "git_log")
