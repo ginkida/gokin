@@ -172,6 +172,86 @@ func TestImageReader_ReadMissing(t *testing.T) {
 	}
 }
 
+func TestImageReader_ReadBase64(t *testing.T) {
+	reader := NewImageReader()
+
+	// Minimal valid PNG bytes
+	png := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+		0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
+		0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00,
+		0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC, 0x33,
+		0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+	}
+
+	dir := t.TempDir()
+	path := dir + "/test.png"
+	if err := os.WriteFile(path, png, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, mimeType, err := reader.ReadBase64(path)
+	if err != nil {
+		t.Fatalf("ReadBase64() error: %v", err)
+	}
+	if encoded == "" {
+		t.Error("encoded should not be empty")
+	}
+	if mimeType != "image/png" {
+		t.Errorf("mimeType = %q, want image/png", mimeType)
+	}
+
+	// Error case
+	_, _, err = reader.ReadBase64("/nonexistent/path.jpg")
+	if err == nil {
+		t.Error("ReadBase64 on missing file should error")
+	}
+}
+
+func TestImageReader_GetMimeType(t *testing.T) {
+	reader := NewImageReader()
+	cases := []struct {
+		path string
+		want string
+	}{
+		{"file.png", "image/png"},
+		{"file.jpg", "image/jpeg"},
+		{"file.jpeg", "image/jpeg"},
+		{"file.gif", "image/gif"},
+		{"file.webp", "image/webp"},
+		{"file.svg", "image/svg+xml"},
+		{"file.bmp", "image/bmp"},
+		{"file.ico", "image/x-icon"},
+		{"file.tiff", "image/tiff"},
+		{"file.tif", "image/tiff"},
+		{"file.unknown", "application/octet-stream"},
+		{"FILE.PNG", "image/png"}, // case-insensitive
+	}
+	for _, tc := range cases {
+		if got := reader.getMimeType(tc.path); got != tc.want {
+			t.Errorf("getMimeType(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestIsSupportedImage(t *testing.T) {
+	supported := []string{"a.png", "b.jpg", "c.jpeg", "d.gif", "e.webp", "f.svg", "g.bmp", "h.ico", "i.tiff", "j.tif"}
+	for _, path := range supported {
+		if !IsSupportedImage(path) {
+			t.Errorf("IsSupportedImage(%q) should be true", path)
+		}
+	}
+	unsupported := []string{"a.go", "b.txt", "c.pdf", "d.mp4", ""}
+	for _, path := range unsupported {
+		if IsSupportedImage(path) {
+			t.Errorf("IsSupportedImage(%q) should be false", path)
+		}
+	}
+}
+
 func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
 }
