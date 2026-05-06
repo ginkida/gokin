@@ -270,6 +270,14 @@ type Executor struct {
 	deltaBaselineCaptured bool
 	deltaBaselinePaths    map[string]struct{}
 	deltaPendingPaths     map[string]struct{}
+	// deltaCheckGracedCalls counts how many mutating calls have been allowed
+	// through the barrier WHILE blocked, since the last failure. Without this,
+	// the very first failed delta-check (e.g. "cannot find package
+	// internal/storage" because storage.go hasn't been written yet) would
+	// freeze every subsequent write — including the writes that would actually
+	// fix the build. The grace window lets the model finish a multi-file
+	// workflow before the barrier kicks in.
+	deltaCheckGracedCalls int
 
 	// Retry-time side effect deduplication (write/bash tools).
 	sideEffectDedupEnabled bool
@@ -694,6 +702,9 @@ func (e *Executor) ResetSession() {
 	// state. Drain it (and the baseline set) defensively.
 	e.deltaPendingPaths = make(map[string]struct{})
 	e.deltaBaselinePaths = make(map[string]struct{})
+	// Grace counter belongs to the prior conversation's failure state — drain
+	// it so a fresh /clear gives the model a clean grace window.
+	e.deltaCheckGracedCalls = 0
 	e.deltaCheckMu.Unlock()
 }
 

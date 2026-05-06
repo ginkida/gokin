@@ -23,6 +23,19 @@ const (
 	deltaCheckDefaultTimeout   = 90 * time.Second
 	deltaCheckDefaultMaxModule = 8
 	deltaCheckOutputMaxChars   = 1200
+
+	// deltaCheckBarrierGraceLimit is the number of mutating calls allowed
+	// through the barrier after a failed delta-check before the block kicks
+	// in for real. Without grace, multi-file workflows deadlock: the first
+	// `write` of a new package whose imports point at sibling files that
+	// haven't been created yet trips the build, blocks the second write, and
+	// the model can't finish the work that would actually fix the build.
+	//
+	// 3 calls is enough for a typical "create new package" pattern (storage
+	// + proxy + main wiring) without giving an unproductive model unlimited
+	// rope. Re-tunable via config if it turns out to be too tight or too
+	// loose in practice.
+	deltaCheckBarrierGraceLimit = 3
 )
 
 var deltaCheckToolSet = map[string]bool{
@@ -133,6 +146,24 @@ func (e *Executor) enforceDeltaCheckBarrier(ctx context.Context, call *genai.Fun
 	if result.Passed || !result.Ran {
 		return "", false
 	}
+
+	// Grace window: allow a limited number of mutating calls through after a
+	// failed delta-check, so multi-file workflows (e.g. creating a new
+	// package whose first file imports a sibling that doesn't exist yet) can
+	// finish. The barrier only kicks in once grace is exhausted. See the
+	// constant docstring for the rationale.
+	e.deltaCheckMu.Lock()
+	graced := e.deltaCheckGracedCalls
+	if graced < deltaCheckBarrierGraceLimit {
+		e.deltaCheckGracedCalls++
+		e.deltaCheckMu.Unlock()
+		logging.Debug("delta-check failed but within grace window — allowing call",
+			"tool", call.Name,
+			"graced", graced+1,
+			"limit", deltaCheckBarrierGraceLimit)
+		return "", false
+	}
+	e.deltaCheckMu.Unlock()
 
 	reason := strings.TrimSpace(blockReason)
 	if reason == "" {
@@ -310,15 +341,28 @@ func (e *Executor) commitDeltaCheckResult(result deltaCheckResult, warnOnly bool
 	if result.Passed || !result.Ran || warnOnly {
 		e.deltaCheckBlocked = false
 		e.deltaCheckBlockReason = ""
-		// Successful/skip verification drains pending set.
+		// Successful/skip verification drains pending set + grace counter.
+		// Next failure starts with a fresh grace window.
 		e.deltaPendingPaths = make(map[string]struct{})
+		e.deltaCheckGracedCalls = 0
 		return
 	}
 
+	wasBlocked := e.deltaCheckBlocked
 	e.deltaCheckBlocked = true
 	e.deltaCheckBlockReason = strings.TrimSpace(result.Summary)
 	if detail := strings.TrimSpace(result.Details); detail != "" {
 		e.deltaCheckBlockReason += "\n" + trimDeltaOutput(detail, 900)
+	}
+	// Reset the grace counter on the FIRST failure of a cycle. If we were
+	// already blocked and remain blocked, leave the counter alone so the
+	// barrier still kicks in after the configured limit. Otherwise a model
+	// stuck in a loop could rotate between "barrier blocks", "delta re-runs
+	// from runDeltaCheckAfterMutation, still failing", "barrier resets
+	// counter", "barrier blocks again" — exactly the deadlock we wanted to
+	// prevent in the first place.
+	if !wasBlocked {
+		e.deltaCheckGracedCalls = 0
 	}
 }
 

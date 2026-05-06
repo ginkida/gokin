@@ -26,6 +26,7 @@ func TestExecutor_ResetSession_DrainsDeltaCheckState(t *testing.T) {
 			"prev/edit2.go": {},
 		},
 		deltaCheckLastResult: &deltaCheckResult{Ran: true, Passed: false},
+		deltaCheckGracedCalls: 2,
 	}
 
 	e.ResetSession()
@@ -50,6 +51,9 @@ func TestExecutor_ResetSession_DrainsDeltaCheckState(t *testing.T) {
 	}
 	if len(e.deltaBaselinePaths) != 0 {
 		t.Errorf("deltaBaselinePaths should be empty, got %d entries", len(e.deltaBaselinePaths))
+	}
+	if e.deltaCheckGracedCalls != 0 {
+		t.Errorf("deltaCheckGracedCalls should be 0 after reset, got %d", e.deltaCheckGracedCalls)
 	}
 }
 
