@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -284,7 +285,18 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	// 14. Stop and save session history via session manager (preferred) or fallback
 	if a.sessionManager != nil {
 		a.sessionManager.Stop()
-		_ = a.sessionManager.Save()
+		// Final session save during graceful shutdown. The prior version
+		// discarded the error (`_ = ...`), so a save failure here meant
+		// the user lost their conversation history without any signal —
+		// e.g. disk full, permission revoked, sandboxed write blocked.
+		// Surface to the log at Error level so post-mortem can see it,
+		// and emit a stderr line as a last-ditch user notification (the
+		// TUI is already torn down by this point in shutdown).
+		if err := a.sessionManager.Save(); err != nil {
+			logging.Error("final session save failed during shutdown — recent conversation may be lost",
+				"error", err)
+			fmt.Fprintf(os.Stderr, "WARNING: failed to save session at shutdown: %v\n", err)
+		}
 	} else {
 		a.saveSessionHistory()
 	}
