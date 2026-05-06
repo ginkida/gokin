@@ -89,26 +89,30 @@ func (p *ActivityFeedPanel) AddEntry(entry ActivityFeedEntry) {
 		return
 	}
 
-	// Add new entry
-	if len(p.entries) >= maxActivityEntries {
-		// Remove oldest entry
-		oldID := p.entries[0].ID
-		delete(p.activeEntries, oldID)
-		p.entries = p.entries[1:]
-		// Update indices
-		for id, idx := range p.activeEntries {
-			p.activeEntries[id] = idx - 1
-		}
-	}
-
-	p.activeEntries[entry.ID] = len(p.entries)
-	p.entries = append(p.entries, entry)
+	p.appendEntryLocked(entry)
 
 	// Auto-surface the panel only when activity becomes genuinely interesting:
 	// parallel tools or agent orchestration. Single short tool calls stay quiet.
 	if p.countRunningEntriesLocked() >= 2 || len(p.subAgentActivities) > 0 {
 		p.visible = true
 	}
+}
+
+// appendEntryLocked appends entry to p.entries, evicting the oldest entry
+// (and shifting all activeEntries indices) when the buffer is full. The new
+// entry's ID becomes the latest in activeEntries — replacing any prior entry
+// that happened to share its ID. Caller must hold p.mu.
+func (p *ActivityFeedPanel) appendEntryLocked(entry ActivityFeedEntry) {
+	if len(p.entries) >= maxActivityEntries {
+		oldID := p.entries[0].ID
+		delete(p.activeEntries, oldID)
+		p.entries = p.entries[1:]
+		for id, idx := range p.activeEntries {
+			p.activeEntries[id] = idx - 1
+		}
+	}
+	p.activeEntries[entry.ID] = len(p.entries)
+	p.entries = append(p.entries, entry)
 }
 
 // CompleteEntry marks an entry as completed.
@@ -167,17 +171,7 @@ func (p *ActivityFeedPanel) StartSubAgent(agentID, agentType, description string
 		AgentID:     agentID,
 	}
 
-	if len(p.entries) >= maxActivityEntries {
-		oldID := p.entries[0].ID
-		delete(p.activeEntries, oldID)
-		p.entries = p.entries[1:]
-		for id, idx := range p.activeEntries {
-			p.activeEntries[id] = idx - 1
-		}
-	}
-
-	p.activeEntries[entry.ID] = len(p.entries)
-	p.entries = append(p.entries, entry)
+	p.appendEntryLocked(entry)
 }
 
 // UpdateSubAgentTool updates the current tool for a sub-agent.

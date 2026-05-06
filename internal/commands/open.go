@@ -138,11 +138,8 @@ func (c *OpenCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		trackPID(cmd.Process.Pid)
 
 		// Release the process so it can be reaped by init when we exit.
-		// This prevents zombie processes.
-		if err := cmd.Process.Release(); err != nil {
-			// Non-fatal: editor still opened, just might leave a zombie
-			_ = err
-		}
+		// Non-fatal: editor still opened, just might leave a zombie.
+		_ = cmd.Process.Release()
 	}
 
 	return fmt.Sprintf("Opening %s in %s...", filePath, editor), nil

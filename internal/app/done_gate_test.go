@@ -371,3 +371,76 @@ func TestBuildDoneGateFixPrompt_UsesDisplayNames(t *testing.T) {
 		t.Fatalf("fix prompt leaked raw check name:\n%s", prompt)
 	}
 }
+
+func TestCountDoneGateResults(t *testing.T) {
+	cases := []struct {
+		name           string
+		results        []doneGateResult
+		wantPassed     int
+		wantFailed     int
+	}{
+		{
+			name:       "empty",
+			results:    nil,
+			wantPassed: 0,
+			wantFailed: 0,
+		},
+		{
+			name: "all pass",
+			results: []doneGateResult{
+				{Name: "a", Success: true},
+				{Name: "b", Success: true},
+				{Name: "c", Success: true},
+			},
+			wantPassed: 3,
+			wantFailed: 0,
+		},
+		{
+			name: "all fail",
+			results: []doneGateResult{
+				{Name: "a", Success: false},
+				{Name: "b", Success: false},
+			},
+			wantPassed: 0,
+			wantFailed: 2,
+		},
+		{
+			name: "mixed",
+			results: []doneGateResult{
+				{Name: "a", Success: true},
+				{Name: "b", Success: false},
+				{Name: "c", Success: true},
+			},
+			wantPassed: 2,
+			wantFailed: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			passed, failed := countDoneGateResults(tc.results)
+			if passed != tc.wantPassed || failed != tc.wantFailed {
+				t.Errorf("countDoneGateResults: got (%d, %d), want (%d, %d)",
+					passed, failed, tc.wantPassed, tc.wantFailed)
+			}
+		})
+	}
+}
+
+func TestFormatDoneGateResultSummary(t *testing.T) {
+	cases := []struct {
+		passed, failed int
+		want           string
+	}{
+		{3, 0, "3 passed"},
+		{0, 2, "2 failed"},
+		{2, 1, "2 passed, 1 failed"},
+		{0, 0, "0 passed"}, // edge: no results — falls into "failed == 0" branch
+	}
+	for _, tc := range cases {
+		got := formatDoneGateResultSummary(tc.passed, tc.failed)
+		if got != tc.want {
+			t.Errorf("formatDoneGateResultSummary(%d, %d) = %q, want %q",
+				tc.passed, tc.failed, got, tc.want)
+		}
+	}
+}
