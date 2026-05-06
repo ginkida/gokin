@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -3938,14 +3939,16 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 			defer wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
+					stack := make([]byte, 4096)
+					length := runtime.Stack(stack, false)
 					logging.Error("panic in parallel tool execution",
-						"tool", fc.Name, "panic", fmt.Sprintf("%v", r))
+						"tool", fc.Name, "panic", r, "stack", string(stack[:length]))
 					mu.Lock()
 					results[indexMap[fc]] = toolCallResult{
 						Response: &genai.FunctionResponse{
 							ID:       fc.ID,
 							Name:     fc.Name,
-							Response: tools.NewErrorResult(fmt.Sprintf("tool execution panic: %v", r)).ToMap(),
+							Response: tools.NewErrorResult(tools.FormatToolPanic(fc.Name, r)).ToMap(),
 						},
 					}
 					mu.Unlock()

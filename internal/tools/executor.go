@@ -109,13 +109,21 @@ var SmartFallbackConfig = map[string]struct {
 	},
 }
 
-// formatToolPanic returns a user-facing message for a recovered tool panic.
+// FormatToolPanic returns a user-facing message for a recovered tool panic.
 // The "panic:" prefix is preserved so error-classifier matchers in
 // context/compactor.go and context/tool_summarizer.go still recognise the
 // result as an error during compaction. The hint about the log file gives
 // the user a path to a full stack trace without bloating the model context.
-func formatToolPanic(toolName string, r any) string {
+//
+// Exported so packages outside `tools` (notably agent.go's parallel tool
+// execution panic handler) can produce identical user-facing strings.
+func FormatToolPanic(toolName string, r any) string {
 	return fmt.Sprintf("panic: tool %q crashed: %v (likely a bug; full stack trace in gokin log)", toolName, r)
+}
+
+// formatToolPanic is the package-local alias kept for legacy callers.
+func formatToolPanic(toolName string, r any) string {
+	return FormatToolPanic(toolName, r)
 }
 
 // GetSmartFallback returns an appropriate fallback message based on tool and result.
