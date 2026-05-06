@@ -64,6 +64,16 @@ type CommandMetadata struct {
 	ArgHint     string // Short hint for arguments (e.g., "[name]", "-m msg")
 	Hidden      bool   // Hide from palette (internal commands)
 	Advanced    bool   // Hidden from default palette view, visible when searching
+	// LongRunning means the command makes an LLM API call or similarly slow
+	// IO. The TUI shows a "Working..." status before Execute returns so the
+	// user knows the command is in flight, not silently dropped. Without
+	// this hint /compact (which triggers a summarization API call) looked
+	// indistinguishable from "the message went to the model".
+	LongRunning bool
+	// LongRunningLabel is the status text to show while the command is in
+	// flight. Defaults to "Working..." when LongRunning is true and label
+	// is empty.
+	LongRunningLabel string
 }
 
 // DefaultMetadata returns a default metadata for commands without custom metadata.

@@ -3,6 +3,7 @@ package context
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,7 +133,15 @@ func (a *ContextAgent) CheckAndCompact(ctx context.Context) {
 
 func (a *ContextAgent) runCompaction(ctx context.Context) {
 	if err := a.manager.OptimizeContext(ctx); err != nil {
-		logging.Error("auto-compaction failed", "error", err)
+		// "Nothing to do" sentinels are not errors at this layer — auto-
+		// compaction triggers on token count, and reaching a no-op state
+		// (history too short / all pinned) is a normal outcome. Demote
+		// to Debug so we don't pollute the error log.
+		if errors.Is(err, ErrHistoryTooShort) || errors.Is(err, ErrNothingToSummarize) {
+			logging.Debug("auto-compaction skipped — nothing to summarize", "reason", err)
+		} else {
+			logging.Error("auto-compaction failed", "error", err)
+		}
 	} else {
 		logging.Info("auto-compaction successful")
 		// Reset growth tracking after compaction (token count changed dramatically)

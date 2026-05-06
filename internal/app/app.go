@@ -814,6 +814,31 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		"command": name,
 		"args":    args,
 	})
+
+	// Surface a status hint for commands that make an LLM API call or
+	// similarly slow IO. Without this, /compact (which triggers a summary
+	// generation roundtrip) looked indistinguishable from "the message went
+	// to the model and the model is thinking" — the user couldn't tell if
+	// their command had actually started or was lost.
+	if cmd, ok := a.commandHandler.GetCommand(name); ok {
+		// GetMetadata is on every concrete command type but not in the
+		// Command interface (commands without metadata still exist). Use
+		// the optional-method pattern so we don't have to touch every
+		// command's Command implementation just to add this hint.
+		if metaProvider, hasMeta := cmd.(interface{ GetMetadata() commands.CommandMetadata }); hasMeta {
+			if meta := metaProvider.GetMetadata(); meta.LongRunning {
+				label := meta.LongRunningLabel
+				if label == "" {
+					label = fmt.Sprintf("Running /%s — this may take a moment...", name)
+				}
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusInfo,
+					Message: label,
+				})
+			}
+		}
+	}
+
 	result, err := a.commandHandler.Execute(ctx, name, args, a)
 
 	if err != nil {

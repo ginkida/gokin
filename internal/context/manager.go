@@ -2,6 +2,7 @@ package context
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,6 +15,23 @@ import (
 	"gokin/internal/logging"
 
 	"google.golang.org/genai"
+)
+
+// Sentinel errors returned by ForceSummarize / OptimizeContext to let the
+// caller distinguish "nothing to do" from a real failure. CompactCommand
+// uses these to render specific user-facing messages (the prior behavior
+// was a silent success that looked like the command did nothing).
+var (
+	// ErrSummarizerUnavailable: ContextManager has no summarizer wired (e.g.
+	// summarization disabled in config, or provider didn't expose one).
+	ErrSummarizerUnavailable = errors.New("summarizer not configured")
+	// ErrHistoryTooShort: history has fewer messages than the strategy's
+	// MinMessagesForSummary threshold. /compact is a no-op in this case —
+	// summarizing a short history would lose more than it saves.
+	ErrHistoryTooShort = errors.New("history too short to summarize")
+	// ErrNothingToSummarize: the summary strategy produced an empty plan
+	// (e.g., all messages are pinned or already-summarized markers).
+	ErrNothingToSummarize = errors.New("no summarizable messages found")
 )
 
 // tokenSnapshot records token usage at a point in time for trend prediction.
@@ -452,8 +470,10 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 
 	history := m.session.GetHistory()
 	if len(history) <= m.summaryStrategy.MinMessagesForSummary {
-		// Not enough messages to summarize
-		return nil
+		// Not enough messages to summarize. Surface this so /compact can
+		// tell the user "you only have N messages, threshold is M" instead
+		// of silently succeeding with zero tokens freed.
+		return ErrHistoryTooShort
 	}
 
 	// Sync task context for task-aware summarization
@@ -463,8 +483,9 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 	plan := CreateSummaryPlan(history, m.summaryStrategy, m.messageScorer)
 
 	if len(plan.ToSummarize) == 0 {
-		// Nothing to summarize
-		return nil
+		// All messages are pinned or already-summarized. Surface so the
+		// caller can explain the no-op rather than reporting bogus success.
+		return ErrNothingToSummarize
 	}
 
 	// Check cache first
@@ -672,7 +693,7 @@ func (m *ContextManager) predictTokensAfterRequest() int {
 // ForceSummarize forces context summarization regardless of token count.
 func (m *ContextManager) ForceSummarize(ctx context.Context) error {
 	if m.summarizer == nil {
-		return nil
+		return ErrSummarizerUnavailable
 	}
 	return m.OptimizeContext(ctx)
 }

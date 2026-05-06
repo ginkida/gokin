@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -221,9 +222,11 @@ func (c *CompactCommand) Description() string { return "Force context compaction
 func (c *CompactCommand) Usage() string       { return "/compact" }
 func (c *CompactCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategorySession,
-		Icon:     "compress",
-		Priority: 20,
+		Category:         CategorySession,
+		Icon:             "compress",
+		Priority:         20,
+		LongRunning:      true,
+		LongRunningLabel: "Compacting context — this calls the model to summarize history...",
 	}
 }
 
@@ -241,20 +244,51 @@ func (c *CompactCommand) Execute(ctx context.Context, args []string, app AppInte
 	}
 
 	err := cm.ForceSummarize(ctx)
-	if err != nil {
-		return fmt.Sprintf("Compaction failed: %v", err), nil
-	}
-
-	// Show before/after comparison
 	usageAfter := cm.GetTokenUsage()
-	if usageAfter != nil && tokensBefore > 0 {
-		saved := tokensBefore - usageAfter.InputTokens
-		pct := int(usageAfter.PercentUsed * 100)
-		return fmt.Sprintf("Context compacted: %dk → %dk tokens (freed %dk, now %d%% full)",
-			tokensBefore/1000, usageAfter.InputTokens/1000, saved/1000, pct), nil
+	tokensAfter := 0
+	pctAfter := 0.0
+	if usageAfter != nil {
+		tokensAfter = usageAfter.InputTokens
+		pctAfter = usageAfter.PercentUsed
+	}
+	return formatCompactionResult(err, tokensBefore, tokensAfter, pctAfter), nil
+}
+
+// formatCompactionResult renders the user-facing string for /compact, with
+// distinct messages for each sentinel error and an honest accounting of
+// the no-op cases that earlier versions reported as silent success.
+func formatCompactionResult(err error, tokensBefore, tokensAfter int, pctAfter float64) string {
+	if err != nil {
+		switch {
+		case errors.Is(err, appcontext.ErrSummarizerUnavailable):
+			return "No-op: summarizer is not configured for this provider. /compact has no effect — context will only shrink via /clear."
+		case errors.Is(err, appcontext.ErrHistoryTooShort):
+			return "No-op: conversation is too short to compact. Add more messages and try again, or use /clear to start fresh."
+		case errors.Is(err, appcontext.ErrNothingToSummarize):
+			return "No-op: every message is pinned or already summarized — nothing left to compact."
+		default:
+			return fmt.Sprintf("Compaction failed: %v", err)
+		}
 	}
 
-	return "Context compacted successfully.", nil
+	if tokensBefore <= 0 {
+		// Token counter wasn't populated yet (fresh session). The summarizer
+		// ran without error, but we have nothing to compare against.
+		return "Context compacted successfully."
+	}
+
+	saved := tokensBefore - tokensAfter
+	if saved <= 0 {
+		// Summarizer ran but produced a result no smaller than the
+		// original — rare (model emitted a verbose summary), but worth
+		// reporting honestly instead of claiming "compacted".
+		return fmt.Sprintf("Compaction ran but freed no tokens (was %dk, now %dk). Try /clear if context still feels heavy.",
+			tokensBefore/1000, tokensAfter/1000)
+	}
+
+	pct := int(pctAfter * 100)
+	return fmt.Sprintf("Context compacted: %dk → %dk tokens (freed %dk, now %d%% full)",
+		tokensBefore/1000, tokensAfter/1000, saved/1000, pct)
 }
 
 // SaveCommand saves the current session.
