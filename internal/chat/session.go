@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/logging"
 	"gokin/internal/security"
 
 	"google.golang.org/genai"
@@ -92,10 +93,19 @@ func (s *Session) notifyChange(oldCount int) {
 		return
 	}
 
-	// Protect against panics in the handler
+	// Protect against panics in the handler — without recover, a misbehaving
+	// onChange callback would crash the whole process, since notifyChange is
+	// called from many session-mutation paths. Log the panic so it's visible
+	// in the gokin log instead of being silently swallowed (the prior version
+	// had a recover() with an empty body and a "Log panic but don't crash"
+	// TODO that never got filled in).
 	defer func() {
 		if r := recover(); r != nil {
-			// Log panic but don't crash
+			logging.Error("panic in session onChange handler",
+				"panic", fmt.Sprintf("%v", r),
+				"old_count", event.OldCount,
+				"new_count", event.NewCount,
+				"version", event.Version)
 		}
 	}()
 
