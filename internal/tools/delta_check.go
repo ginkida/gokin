@@ -165,6 +165,13 @@ func (e *Executor) enforceDeltaCheckBarrier(ctx context.Context, call *genai.Fun
 	}
 	e.deltaCheckMu.Unlock()
 
+	// Grace exhausted — log at Info level so field reports of "model got
+	// stuck" can be confirmed via grep without enabling debug logging.
+	logging.Info("delta-check barrier engaged — grace exhausted",
+		"tool", call.Name,
+		"limit", deltaCheckBarrierGraceLimit,
+		"summary", strings.TrimSpace(result.Summary))
+
 	reason := strings.TrimSpace(blockReason)
 	if reason == "" {
 		reason = strings.TrimSpace(result.Summary)

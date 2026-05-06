@@ -119,3 +119,54 @@ func TestDeltaCheck_CommitResult_ResetsGraceOnFreshFailure(t *testing.T) {
 		t.Errorf("fresh failure cycle must reset grace counter to 0, got %d", e.deltaCheckGracedCalls)
 	}
 }
+
+// TestDeltaCheck_CommitResult_WarnOnlyTreatedAsPass pins that warnOnly mode
+// (where delta-check failures only warn, never block) drains the grace
+// counter even on failure. Otherwise toggling warnOnly while blocked could
+// strand the counter at a non-zero value, polluting subsequent hard-block
+// cycles.
+func TestDeltaCheck_CommitResult_WarnOnlyTreatedAsPass(t *testing.T) {
+	e := &Executor{
+		deltaCheckBlocked:     true,
+		deltaCheckBlockReason: "old failure",
+		deltaCheckGracedCalls: 2,
+	}
+
+	e.commitDeltaCheckResult(deltaCheckResult{
+		Ran:     true,
+		Passed:  false,
+		Summary: "still failing but warn-only",
+	}, true /* warnOnly */)
+
+	if e.deltaCheckBlocked {
+		t.Error("warnOnly mode must not leave blocked=true even on failure")
+	}
+	if e.deltaCheckGracedCalls != 0 {
+		t.Errorf("warnOnly mode must drain grace counter, got %d", e.deltaCheckGracedCalls)
+	}
+}
+
+// TestDeltaCheck_CommitResult_SkippedDrainsState: when delta-check ran but
+// produced no commands (Ran=false implicitly via the early-return path
+// inside runDeltaCheck), commitDeltaCheckResult is called with Ran=false
+// and Passed=true. The grace counter and block flag must both clear so a
+// subsequent legitimate failure starts with a fresh window.
+func TestDeltaCheck_CommitResult_SkippedDrainsState(t *testing.T) {
+	e := &Executor{
+		deltaCheckBlocked:     true,
+		deltaCheckBlockReason: "previous failure",
+		deltaCheckGracedCalls: 2,
+	}
+
+	e.commitDeltaCheckResult(deltaCheckResult{
+		Ran:    false, // skipped: no changed paths or no supported modules
+		Passed: true,
+	}, false)
+
+	if e.deltaCheckBlocked {
+		t.Error("blocked flag should clear on skip")
+	}
+	if e.deltaCheckGracedCalls != 0 {
+		t.Errorf("grace counter should clear on skip, got %d", e.deltaCheckGracedCalls)
+	}
+}
