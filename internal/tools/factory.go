@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"fmt"
 	"sync"
 
 	"gokin/internal/logging"
@@ -39,7 +38,9 @@ func (e *ToolEntry) Get() Tool {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					logging.Error("tool factory panicked", "panic", fmt.Sprintf("%v", r))
+					logging.Error("tool factory panicked",
+						"panic", r,
+						"stack", logging.PanicStack())
 				}
 			}()
 			instance = e.factory()

@@ -149,7 +149,9 @@ func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, d
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					logging.Error("notification onNotify callback panicked", "panic", r)
+					logging.Error("notification onNotify callback panicked",
+						"panic", r,
+						"stack", logging.PanicStack())
 				}
 			}()
 			nm.onNotify(notif)
@@ -164,7 +166,9 @@ func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, d
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					logging.Error("native notification panicked", "panic", r)
+					logging.Error("native notification panicked",
+						"panic", r,
+						"stack", logging.PanicStack())
 				}
 			}()
 			nm.sendNativeNotification(notif)

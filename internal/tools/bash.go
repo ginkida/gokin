@@ -650,7 +650,9 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					logging.Error("panic in bash stdout reader", "error", r)
+					logging.Error("panic in bash stdout reader",
+						"error", r,
+						"stack", logging.PanicStack())
 				}
 			}()
 			defer readerWg.Done()
@@ -680,7 +682,9 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					logging.Error("panic in bash stderr reader", "error", r)
+					logging.Error("panic in bash stderr reader",
+						"error", r,
+						"stack", logging.PanicStack())
 				}
 			}()
 			defer readerWg.Done()
@@ -704,7 +708,9 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					logging.Error("panic in bash streaming flush", "error", r)
+					logging.Error("panic in bash streaming flush",
+						"error", r,
+						"stack", logging.PanicStack())
 				}
 			}()
 			defer close(streamDone)
@@ -735,7 +741,9 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 			defer close(cmdDone) // Guarantees close on any exit path (including panic)
 			defer func() {
 				if r := recover(); r != nil {
-					logging.Error("panic in bash cmd.Wait", "error", r)
+					logging.Error("panic in bash cmd.Wait",
+						"error", r,
+						"stack", logging.PanicStack())
 				}
 			}()
 			cmdErr = cmd.Wait()
@@ -810,7 +818,9 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				logging.Error("panic in bash cmd.Wait (timeout path)", "panic", r)
+				logging.Error("panic in bash cmd.Wait (timeout path)",
+					"panic", r,
+					"stack", logging.PanicStack())
 				close(cmdDone)
 			}
 		}()

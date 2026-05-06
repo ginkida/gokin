@@ -355,7 +355,9 @@ func (t *WebFetchTool) ExecuteStreaming(ctx context.Context, args map[string]any
 		defer complete()
 		defer func() {
 			if r := recover(); r != nil {
-				logging.Error("panic in web_fetch streaming goroutine", "panic", r)
+				logging.Error("panic in web_fetch streaming goroutine",
+					"panic", r,
+					"stack", logging.PanicStack())
 				errChan <- fmt.Errorf("internal panic: %v", r)
 			}
 		}()

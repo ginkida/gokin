@@ -478,7 +478,10 @@ func (t *BatchTool) executeParallel(ctx context.Context, files []string, operati
 			defer func() { <-semaphore }() // Release
 			defer func() {
 				if rec := recover(); rec != nil {
-					logging.Error("batch operation panic", "path", p, "panic", rec)
+					logging.Error("batch operation panic",
+						"path", p,
+						"panic", rec,
+						"stack", logging.PanicStack())
 					mu.Lock()
 					result.Failed[p] = fmt.Sprintf("internal panic: %v", rec)
 					mu.Unlock()
