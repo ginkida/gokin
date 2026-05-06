@@ -1414,12 +1414,19 @@ func (a *App) GetContextManager() *appcontext.ContextManager {
 // safeGo runs fn in a new goroutine with panic recovery. A panic in a
 // background goroutine would otherwise crash the whole process — use
 // this wrapper for any long-lived or periodic worker goroutine.
+//
+// Captures a stack snapshot via logging.PanicStack so post-mortem debugging
+// doesn't require reproducing the panic. Without the stack, a periodic-
+// cleanup or watchdog crash showed up in logs as just "panic: nil map"
+// with no indication which line of which file actually faulted.
 func (a *App) safeGo(name string, fn func()) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logging.Error("background goroutine recovered from panic",
-					"name", name, "panic", r)
+					"name", name,
+					"panic", r,
+					"stack", logging.PanicStack())
 			}
 		}()
 		fn()

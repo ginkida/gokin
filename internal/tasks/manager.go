@@ -97,7 +97,10 @@ func (m *Manager) StartWithArgs(ctx context.Context, program string, args []stri
 func (m *Manager) monitorTask(task *Task, onComplete CompletionHandler) {
 	defer func() {
 		if r := recover(); r != nil {
-			logging.Error("task monitor goroutine panicked", "task_id", task.ID, "panic", r)
+			logging.Error("task monitor goroutine panicked",
+				"task_id", task.ID,
+				"panic", r,
+				"stack", logging.PanicStack())
 		}
 	}()
 

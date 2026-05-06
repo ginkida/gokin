@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -189,6 +190,31 @@ func Logger() *slog.Logger {
 	mu.RLock()
 	defer mu.RUnlock()
 	return logger
+}
+
+// PanicStack captures up to 4096 bytes of the current goroutine's stack
+// trace as a string. Intended for use immediately after `recover()` so that
+// post-mortem debugging doesn't require reproducing the panic — the stack
+// snapshot points at the exact line that faulted.
+//
+// Idiomatic usage:
+//
+//	defer func() {
+//	    if r := recover(); r != nil {
+//	        logging.Error("panic in foo",
+//	            "panic", r,
+//	            "stack", logging.PanicStack())
+//	    }
+//	}()
+//
+// 4096 bytes is enough to capture ~30-50 stack frames in typical Go code,
+// which covers any realistic panic path. We don't grow the buffer because
+// that would require a second runtime.Stack call that itself could allocate
+// during a panic recovery.
+func PanicStack() string {
+	buf := make([]byte, 4096)
+	n := runtime.Stack(buf, false)
+	return string(buf[:n])
 }
 
 // ParseLevel parses a level string to Level.

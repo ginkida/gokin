@@ -169,3 +169,41 @@ func TestSetLevel(t *testing.T) {
 	// Should not panic
 	SetLevel(LevelWarn)
 }
+
+// TestPanicStack verifies the panic-recovery helper produces a usable stack
+// trace string. Used after recover() across the codebase to log a stack
+// snapshot alongside the recovered value.
+func TestPanicStack(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := PanicStack()
+			if stack == "" {
+				t.Error("PanicStack() returned empty string")
+			}
+			// Standard runtime.Stack output format: starts with goroutine
+			// header line like "goroutine N [running]:"
+			if !strings.HasPrefix(stack, "goroutine") {
+				t.Errorf("PanicStack() should start with 'goroutine', got %q", stack[:min(40, len(stack))])
+			}
+			// Should reference this test function so callers can locate
+			// the panic site.
+			if !strings.Contains(stack, "TestPanicStack") {
+				t.Errorf("PanicStack() should reference TestPanicStack frame, got:\n%s", stack)
+			}
+		}
+	}()
+	panic("test panic for stack capture")
+}
+
+// TestPanicStack_NoPanic ensures PanicStack works outside a recover() context
+// too — useful for sentinel logging when the caller wants a current-stack
+// snapshot without panicking.
+func TestPanicStack_NoPanic(t *testing.T) {
+	stack := PanicStack()
+	if stack == "" {
+		t.Error("PanicStack() returned empty string")
+	}
+	if !strings.Contains(stack, "TestPanicStack_NoPanic") {
+		t.Errorf("PanicStack() should reference TestPanicStack_NoPanic frame, got:\n%s", stack)
+	}
+}
