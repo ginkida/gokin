@@ -142,12 +142,14 @@ func (c *PRCommand) Description() string { return "Create a pull request" }
 func (c *PRCommand) Usage() string       { return "/pr [--title title] [--draft] [--base branch]" }
 func (c *PRCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category:    CategoryGit,
-		Icon:        "pr",
-		Priority:    20,
-		RequiresGit: true,
-		HasArgs:     true,
-		ArgHint:     "--title \"...\"",
+		Category:         CategoryGit,
+		Icon:             "pr",
+		Priority:         20,
+		RequiresGit:      true,
+		HasArgs:          true,
+		ArgHint:          "--title \"...\"",
+		LongRunning:      true,
+		LongRunningLabel: "Creating PR — gh API call (push if needed, then open PR)...",
 	}
 }
 

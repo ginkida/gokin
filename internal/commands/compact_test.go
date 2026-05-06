@@ -118,3 +118,36 @@ func TestFormatCompactionResult_RealFailureIsNotANoOp(t *testing.T) {
 		t.Errorf("real error should not be framed as no-op, got %q", got)
 	}
 }
+
+// TestLongRunningCommands pins which commands set LongRunning=true. If you
+// remove a command from this list, justify it: the LongRunning hint is
+// what makes the TUI distinguish "command in flight" from "model thinking
+// about a regular message", which was the original bug for /compact.
+func TestLongRunningCommands(t *testing.T) {
+	wantLongRunning := map[string]string{
+		"compact": "Compacting context",
+		"pr":      "Creating PR",
+	}
+
+	for name, expectedLabelPrefix := range wantLongRunning {
+		t.Run(name, func(t *testing.T) {
+			h := NewHandler()
+			cmd, ok := h.GetCommand(name)
+			if !ok {
+				t.Fatalf("command /%s not registered", name)
+			}
+			provider, ok := cmd.(MetadataProvider)
+			if !ok {
+				t.Fatalf("command /%s does not implement MetadataProvider", name)
+			}
+			meta := provider.GetMetadata()
+			if !meta.LongRunning {
+				t.Errorf("command /%s should be marked LongRunning=true (regression: was a slow op without progress hint)", name)
+			}
+			if !strings.HasPrefix(meta.LongRunningLabel, expectedLabelPrefix) {
+				t.Errorf("command /%s LongRunningLabel = %q, expected prefix %q",
+					name, meta.LongRunningLabel, expectedLabelPrefix)
+			}
+		})
+	}
+}

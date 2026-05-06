@@ -468,8 +468,15 @@ func (m *ContextManager) backgroundOptimize(ctx context.Context) {
 func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 	startTime := time.Now()
 
+	// Snapshot strategy under read-lock — SetSummaryStrategy is concurrent
+	// write under m.mu.Lock(), so direct field reads here would race
+	// (caught by `go test -race` if a strategy swap lands mid-compact).
+	m.mu.RLock()
+	strategy := m.summaryStrategy
+	m.mu.RUnlock()
+
 	history := m.session.GetHistory()
-	if len(history) <= m.summaryStrategy.MinMessagesForSummary {
+	if len(history) <= strategy.MinMessagesForSummary {
 		// Not enough messages to summarize. Surface this so /compact can
 		// tell the user "you only have N messages, threshold is M" instead
 		// of silently succeeding with zero tokens freed.
@@ -480,7 +487,7 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 	m.syncTaskContext()
 
 	// Create summary plan using strategy
-	plan := CreateSummaryPlan(history, m.summaryStrategy, m.messageScorer)
+	plan := CreateSummaryPlan(history, strategy, m.messageScorer)
 
 	if len(plan.ToSummarize) == 0 {
 		// All messages are pinned or already-summarized. Surface so the
@@ -764,6 +771,11 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	// Sync task context for task-aware summarization
 	m.syncTaskContext()
 
+	// Snapshot strategy under read-lock — see OptimizeContext for rationale.
+	m.mu.RLock()
+	strategy := m.summaryStrategy
+	m.mu.RUnlock()
+
 	history := m.session.GetHistory()
 
 	// Preserve last 50 messages in full fidelity
@@ -779,7 +791,7 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	oldMessages := history[:splitPoint]
 	recentMessages := history[splitPoint:]
 
-	if len(oldMessages) < m.summaryStrategy.MinMessagesForSummary {
+	if len(oldMessages) < strategy.MinMessagesForSummary {
 		return nil
 	}
 

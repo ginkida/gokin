@@ -821,11 +821,10 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 	// to the model and the model is thinking" — the user couldn't tell if
 	// their command had actually started or was lost.
 	if cmd, ok := a.commandHandler.GetCommand(name); ok {
-		// GetMetadata is on every concrete command type but not in the
-		// Command interface (commands without metadata still exist). Use
-		// the optional-method pattern so we don't have to touch every
-		// command's Command implementation just to add this hint.
-		if metaProvider, hasMeta := cmd.(interface{ GetMetadata() commands.CommandMetadata }); hasMeta {
+		// MetadataProvider (optional interface in commands/metadata.go) lets
+		// us extract metadata without touching every concrete command's
+		// Command interface implementation.
+		if metaProvider, hasMeta := cmd.(commands.MetadataProvider); hasMeta {
 			if meta := metaProvider.GetMetadata(); meta.LongRunning {
 				label := meta.LongRunningLabel
 				if label == "" {
