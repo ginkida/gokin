@@ -3,8 +3,12 @@ package tools
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"gokin/internal/config"
 )
 
 // ============================================================
@@ -565,5 +569,56 @@ func TestToolExecute_WithTimeout(t *testing.T) {
 	_, err := tool.Execute(ctx, map[string]any{})
 	if err != nil {
 		t.Errorf("Execute() unexpected error with timeout: %v", err)
+	}
+}
+
+// ── truncateToolResultContent ────────────────────────────────────────────────
+
+// TestTruncateToolResultContent_PassThrough — content under the limit is
+// returned verbatim with no truncation suffix.
+func TestTruncateToolResultContent_PassThrough(t *testing.T) {
+	content := "short content"
+	got := truncateToolResultContent(content, "")
+	if got != content {
+		t.Errorf("short content was modified: %q", got)
+	}
+}
+
+// TestTruncateToolResultContent_AppendsSuffix — content over the limit gets
+// truncated and a notice appended; the visible character count must match.
+func TestTruncateToolResultContent_AppendsSuffix(t *testing.T) {
+	content := strings.Repeat("a", config.DefaultToolResultMaxChars+100)
+	got := truncateToolResultContent(content, "(grep)")
+	if !strings.Contains(got, "OUTPUT TRUNCATED") {
+		t.Error("missing truncation notice")
+	}
+	if !strings.Contains(got, "(grep)") {
+		t.Error("hint not propagated")
+	}
+}
+
+// TestTruncateToolResultContent_MultibyteSafe — regression for v0.79.3:
+// truncating CJK / Cyrillic / emoji content used to byte-slice mid-codepoint,
+// producing invalid UTF-8 in the API payload and triggering replacement chars
+// downstream. Now rune-aware.
+func TestTruncateToolResultContent_MultibyteSafe(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"cyrillic", strings.Repeat("я", config.DefaultToolResultMaxChars+50)},
+		{"cjk", strings.Repeat("世界", config.DefaultToolResultMaxChars+50)},
+		{"emoji", strings.Repeat("🚀", config.DefaultToolResultMaxChars+50)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateToolResultContent(tc.in, "")
+			if !utf8.ValidString(got) {
+				t.Fatalf("invalid UTF-8 in truncated %s output", tc.name)
+			}
+			if strings.Contains(got, string(utf8.RuneError)) {
+				t.Fatalf("replacement char in truncated %s output", tc.name)
+			}
+		})
 	}
 }

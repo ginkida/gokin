@@ -3,6 +3,7 @@ package app
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"gokin/internal/plan"
 
@@ -151,6 +152,28 @@ func TestTruncateTail_Boundaries(t *testing.T) {
 				t.Errorf("got %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestTruncateTail_MultibyteSafe is a regression for v0.79.3: truncateTail
+// used to byte-slice the tail, producing invalid UTF-8 when the recovery hint
+// covered a Cyrillic / CJK / emoji response. The hint then went into the
+// next prompt verbatim, where some providers rejected it as invalid input.
+func TestTruncateTail_MultibyteSafe(t *testing.T) {
+	cases := []string{
+		strings.Repeat("я", 300),                  // Cyrillic
+		strings.Repeat("世界", 200),                 // CJK
+		strings.Repeat("🚀", 100),                  // emoji (4 bytes each)
+		"english " + strings.Repeat("привет ", 50), // mixed
+	}
+	for i, in := range cases {
+		got := truncateTail(in, 100)
+		if !utf8.ValidString(got) {
+			t.Errorf("case %d: produced invalid UTF-8 (bytes: % x)", i, []byte(got))
+		}
+		if strings.Contains(got, string(utf8.RuneError)) {
+			t.Errorf("case %d: contains replacement char: %q", i, got)
+		}
 	}
 }
 

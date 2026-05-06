@@ -113,15 +113,7 @@ func (r ToolResult) ToMap() map[string]any {
 	if r.Success {
 		result["success"] = true
 		if r.Content != "" {
-			content := r.Content
-			maxChars := config.DefaultToolResultMaxChars
-			if len(content) > maxChars {
-				omitted := 100 - (maxChars * 100 / len(r.Content))
-				content = content[:maxChars] + fmt.Sprintf(
-					"\n\n⚠ OUTPUT TRUNCATED: showing %d of %d characters (%d%% omitted). Important data may be missing. Use more specific queries (grep with pattern, head/tail) to see full content.",
-					maxChars, len(r.Content), omitted)
-			}
-			result["content"] = content
+			result["content"] = truncateToolResultContent(r.Content, "(grep with pattern, head/tail)")
 		}
 		if r.Data != nil {
 			result["data"] = r.Data
@@ -130,19 +122,33 @@ func (r ToolResult) ToMap() map[string]any {
 		result["success"] = false
 		result["error"] = r.Error
 		if r.Content != "" {
-			content := r.Content
-			maxChars := config.DefaultToolResultMaxChars
-			if len(content) > maxChars {
-				omitted := 100 - (maxChars * 100 / len(r.Content))
-				content = content[:maxChars] + fmt.Sprintf(
-					"\n\n⚠ OUTPUT TRUNCATED: showing %d of %d characters (%d%% omitted). Important data may be missing. Use more specific queries to see full content.",
-					maxChars, len(r.Content), omitted)
-			}
-			result["content"] = content
+			result["content"] = truncateToolResultContent(r.Content, "")
 		}
 	}
 
 	return result
+}
+
+// truncateToolResultContent caps content at DefaultToolResultMaxChars runes
+// (rune-aware so multibyte content can't be split mid-codepoint, which would
+// produce invalid UTF-8 in the API payload). hint is appended to the
+// truncation notice when non-empty (e.g. "(grep with pattern, head/tail)").
+func truncateToolResultContent(content, hint string) string {
+	maxChars := config.DefaultToolResultMaxChars
+	runes := []rune(content)
+	if len(runes) <= maxChars {
+		return content
+	}
+	omitted := 100 - (maxChars * 100 / len(runes))
+	suffix := fmt.Sprintf(
+		"\n\n⚠ OUTPUT TRUNCATED: showing %d of %d characters (%d%% omitted). Important data may be missing.",
+		maxChars, len(runes), omitted)
+	if hint != "" {
+		suffix += " Use more specific queries " + hint + " to see full content."
+	} else {
+		suffix += " Use more specific queries to see full content."
+	}
+	return string(runes[:maxChars]) + suffix
 }
 
 // ValidationError represents a tool argument validation error.

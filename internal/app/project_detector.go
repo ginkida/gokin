@@ -537,15 +537,18 @@ func (a *App) detectProjectMapOwners() string {
 	return fmt.Sprintf("%s (%d pattern(s): %s)", rel, len(entries), strings.Join(entries, ", "))
 }
 
-// readFileHead reads the first maxChars characters from a file.
+// readFileHead reads the first maxChars runes from a file. Rune-aware so a
+// multibyte char in a README or package.json description doesn't get split
+// at the truncation boundary.
 func readFileHead(path string, maxChars int) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
 	content := string(data)
-	if len(content) > maxChars {
-		content = content[:maxChars]
+	runes := []rune(content)
+	if len(runes) > maxChars {
+		return string(runes[:maxChars])
 	}
 	return content
 }

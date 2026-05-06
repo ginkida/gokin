@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // SafetyLevel represents the safety classification of a tool
@@ -510,18 +511,22 @@ func (v *DefaultSafetyValidator) GetMetadata(toolName string) (*ToolMetadata, bo
 }
 
 // Helper functions
+//
+// shortenPath truncates path to maxLen visible runes, preserving the filename.
+// Rune-aware so multibyte paths (Cyrillic, CJK) don't get sliced mid-codepoint.
 func shortenPath(path string, maxLen int) string {
-	if len(path) <= maxLen {
+	if utf8.RuneCountInString(path) <= maxLen {
 		return path
 	}
-	// Try to keep filename visible
 	parts := strings.Split(path, "/")
 	filename := parts[len(parts)-1]
-	availableLen := maxLen - len(filename) - 4 // 4 for "..."
+	filenameRunes := utf8.RuneCountInString(filename)
+	availableLen := maxLen - filenameRunes - 4 // 4 for "..."
 	if availableLen < 5 {
 		return "..." + filename
 	}
-	return path[:availableLen] + "..." + filename
+	pathRunes := []rune(path)
+	return string(pathRunes[:availableLen]) + "..." + filename
 }
 
 func truncateString(s string, maxLen int) string {

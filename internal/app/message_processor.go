@@ -2145,12 +2145,20 @@ func lastCompleteSentence(text string) string {
 	return ""
 }
 
+// truncateTail returns the last `max` runes of text, prefixed with "..." when
+// truncation occurs. Rune-aware so multibyte content (Cyrillic, CJK, emoji)
+// stays intact — byte slicing here would corrupt the recovery hint that
+// downstream prompts inject verbatim.
 func truncateTail(text string, max int) string {
 	text = strings.TrimSpace(text)
-	if max <= 0 || len(text) <= max {
+	if max <= 0 {
 		return text
 	}
-	return "..." + strings.TrimSpace(text[len(text)-max:])
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return "..." + strings.TrimSpace(string(runes[len(runes)-max:]))
 }
 
 // trimToLastModelMessage trims history back to the last model message,
