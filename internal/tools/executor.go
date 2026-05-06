@@ -2483,12 +2483,26 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			return cmd
 		}
 	case "grep":
+		// pattern alone isn't enough — same regex against different paths is
+		// legitimate exploration, not stagnation. Include path so e.g.
+		// grep("TODO", "internal/app") and grep("TODO", "internal/ui")
+		// don't trip the consecutive-repeat abort.
 		if p, ok := args["pattern"].(string); ok {
-			return p
+			path, _ := args["path"].(string)
+			if path == "" {
+				return p
+			}
+			return p + "@" + path
 		}
 	case "glob":
+		// Same reasoning as grep — searching the same pattern in different
+		// directories is forward progress, not a stuck loop.
 		if p, ok := args["pattern"].(string); ok {
-			return p
+			path, _ := args["path"].(string)
+			if path == "" {
+				return p
+			}
+			return p + "@" + path
 		}
 	case "copy", "move":
 		src, _ := args["source"].(string)
@@ -2511,6 +2525,18 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 		if q, ok := args["query"].(string); ok {
 			return q
 		}
+	case "run_tests", "verify_code":
+		// Iterating tests/verification: same path with a different filter is
+		// forward progress (e.g., narrowing from a full suite down to a
+		// failing test). Without including filter, 5 consecutive `run_tests`
+		// against the same package with progressively narrower filters tripped
+		// the stagnation abort right when the user wanted to drill in.
+		path, _ := args["path"].(string)
+		filter, _ := args["filter"].(string)
+		if path == "" && filter == "" {
+			return ""
+		}
+		return path + "|" + filter
 	}
 	// Default: no distinguishing argument, tool name alone is the pattern
 	return ""

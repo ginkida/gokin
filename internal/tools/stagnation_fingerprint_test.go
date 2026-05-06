@@ -95,6 +95,33 @@ func TestStagnationFingerprint_GrepAndGlobUsePattern(t *testing.T) {
 	}
 }
 
+// Regression test for v0.79.6: grep/glob fingerprints used to ignore the
+// `path` argument, so searching the same pattern in different directories
+// (legitimate exploration) tripped the 5-repeat stagnation abort. Both now
+// include the path when present.
+func TestStagnationFingerprint_GrepAndGlobIncludePath(t *testing.T) {
+	for _, tool := range []string{"grep", "glob"} {
+		t.Run(tool, func(t *testing.T) {
+			a := stagnationFingerprint(tool, map[string]any{"pattern": "TODO", "path": "internal/app"})
+			b := stagnationFingerprint(tool, map[string]any{"pattern": "TODO", "path": "internal/ui"})
+			if a == b {
+				t.Errorf("same pattern in different paths must not collide: %q", a)
+			}
+			// Bare pattern still works (no path arg).
+			bare := stagnationFingerprint(tool, map[string]any{"pattern": "TODO"})
+			if bare != "TODO" {
+				t.Errorf("bare pattern fingerprint = %q, want TODO", bare)
+			}
+			// Same pattern + same path still collide (real stagnation).
+			same1 := stagnationFingerprint(tool, map[string]any{"pattern": "TODO", "path": "internal/app"})
+			same2 := stagnationFingerprint(tool, map[string]any{"pattern": "TODO", "path": "internal/app"})
+			if same1 != same2 {
+				t.Errorf("identical args must share fingerprint: %q vs %q", same1, same2)
+			}
+		})
+	}
+}
+
 func TestStagnationFingerprint_CopyMoveUseSource(t *testing.T) {
 	for _, tool := range []string{"copy", "move"} {
 		got := stagnationFingerprint(tool, map[string]any{
@@ -164,6 +191,32 @@ func TestStagnationFingerprint_MissingArgReturnsEmpty(t *testing.T) {
 	if got1, got2 := stagnationFingerprint("read", map[string]any{"offset": 0}),
 		stagnationFingerprint("read", map[string]any{"offset": 100}); got1 != got2 || got1 != "" {
 		t.Errorf("reads without file_path must share the empty fingerprint: got1=%q got2=%q", got1, got2)
+	}
+}
+
+// Regression test for v0.79.6: run_tests / verify_code had no fingerprint,
+// so 5 consecutive iterations against the same package (each with a
+// progressively narrower filter — a normal debugging workflow) tripped the
+// stagnation abort. Now the fingerprint includes path+filter so narrowing
+// a filter is forward progress.
+func TestStagnationFingerprint_RunTestsIncludesFilter(t *testing.T) {
+	for _, tool := range []string{"run_tests", "verify_code"} {
+		t.Run(tool, func(t *testing.T) {
+			a := stagnationFingerprint(tool, map[string]any{"path": "internal/app", "filter": "TestFoo"})
+			b := stagnationFingerprint(tool, map[string]any{"path": "internal/app", "filter": "TestBar"})
+			if a == b {
+				t.Errorf("same path with different filter must not collide: %q", a)
+			}
+			c := stagnationFingerprint(tool, map[string]any{"path": "internal/app", "filter": "TestFoo"})
+			if a != c {
+				t.Errorf("identical args must share fingerprint: %q vs %q", a, c)
+			}
+			// Empty args fall through to "" — bare retries should still
+			// trigger stagnation.
+			if got := stagnationFingerprint(tool, map[string]any{}); got != "" {
+				t.Errorf("empty args should produce empty fingerprint, got %q", got)
+			}
+		})
 	}
 }
 
