@@ -304,14 +304,14 @@ type SaveCommand struct{}
 
 func (c *SaveCommand) Name() string        { return "save" }
 func (c *SaveCommand) Description() string { return "Save current session" }
-func (c *SaveCommand) Usage() string       { return "/save [name]" }
+func (c *SaveCommand) Usage() string       { return "/save [name] [--force]" }
 func (c *SaveCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategorySession,
 		Icon:     "save",
 		Priority: 30,
 		HasArgs:  true,
-		ArgHint:  "[name]",
+		ArgHint:  "[name] [--force]",
 	}
 }
 
@@ -326,10 +326,32 @@ func (c *SaveCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		return "No active session.", nil
 	}
 
-	// Use custom name if provided
+	// Parse args: /save [name] [--force]
+	// Force flag protects against accidental overwrite when user provides
+	// an explicit name. Without it, /save mywork silently clobbered an
+	// existing 'mywork' checkpoint — discovered when users came back to
+	// the saved session and found different content. Plain /save with no
+	// custom name is unaffected (uses the unique current session.ID).
+	customName := ""
+	force := false
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+		} else if customName == "" {
+			customName = a
+		}
+	}
+
 	originalID := session.ID
-	if len(args) > 0 {
-		session.ID = args[0]
+	if customName != "" {
+		// Check if a session with that name already exists
+		if !force {
+			if _, loadErr := hm.LoadFull(customName); loadErr == nil {
+				return fmt.Sprintf("Session '%s' already exists.\nUse /save %s --force to overwrite, or pick a different name.",
+					customName, customName), nil
+			}
+		}
+		session.ID = customName
 	}
 
 	err = hm.SaveFull(session)
@@ -1177,7 +1199,7 @@ func getCommandExample(name string) string {
 		"model":    "  /model glm-5.1               — switch to GLM 5.1 (Z.AI Coding Plan default)\n  /model deepseek-v4-pro       — switch to DeepSeek V4 Pro\n  /model kimi-for-coding       — switch to Kimi K2.6\n  /model MiniMax-M2.7          — switch to MiniMax",
 		"plan":     "  /plan                — toggle planning mode on/off\n  Then type a complex task and it will be broken into steps",
 		"resume":   "  /resume abc123       — restore session abc123\n  /resume abc123 --force — restore even from different project",
-		"save":     "  /save                — save current session for later /resume",
+		"save":     "  /save                — save current session for later /resume\n  /save mywork         — save with custom name (refuses to overwrite by default)\n  /save mywork --force — overwrite an existing 'mywork' checkpoint",
 		"compact":  "  /compact             — summarize old messages to free context space",
 		"clear":    "  /clear               — start fresh (saves active plan for /resume-plan)",
 		"theme":    "  /theme dark          — soft purple/cyan dark theme\n  /theme macos          — Apple-inspired theme\n  /theme light          — for light terminal backgrounds",
