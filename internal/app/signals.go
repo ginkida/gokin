@@ -236,7 +236,11 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		if plan != nil && !plan.IsComplete() {
 			logging.Debug("saving active plan for resume", "plan_id", plan.ID, "status", plan.Status)
 			if err := a.planManager.SaveCurrentPlan(); err != nil {
-				logging.Debug("failed to save active plan", "error", err)
+				// Class match for v0.80.8: silent persistence failure
+				// at shutdown means /resume-plan in the next session
+				// will see stale or missing data. Surface the loss.
+				logging.Error("failed to save active plan during shutdown — /resume-plan may not work next session",
+					"plan_id", plan.ID, "error", err)
 			}
 		}
 	}
@@ -254,7 +258,13 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	// 11. Save input history
 	if a.tui != nil {
 		if err := a.tui.SaveInputHistory(); err != nil {
-			logging.Debug("failed to save input history", "error", err)
+			// Input history is the up-arrow command palette. Failing to
+			// save means the user's recent commands won't be there next
+			// session — annoying but not catastrophic. Warn so chronic
+			// failures (perm flip, disk full) get noticed without
+			// burying the gokin log under each shutdown.
+			logging.Warn("failed to save input history during shutdown — recent commands won't appear next session",
+				"error", err)
 		}
 	}
 
@@ -267,12 +277,20 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	// 12b. Flush persistent memory stores
 	if a.errorStore != nil {
 		if err := a.errorStore.Flush(); err != nil {
-			logging.Debug("failed to flush error store", "error", err)
+			// errorStore is the agent's learned-error map; flush failure
+			// loses any new error patterns recorded this session. Warn
+			// so chronic flush failures surface in field logs.
+			logging.Warn("failed to flush error store during shutdown — learned error patterns from this session may be lost",
+				"error", err)
 		}
 	}
 	if a.exampleStore != nil {
 		if err := a.exampleStore.Flush(); err != nil {
-			logging.Debug("failed to flush example store", "error", err)
+			// Same class as errorStore — example store holds curated
+			// successful examples; chronic flush failure silently
+			// regresses agent quality.
+			logging.Warn("failed to flush example store during shutdown — learning from this session may be lost",
+				"error", err)
 		}
 	}
 

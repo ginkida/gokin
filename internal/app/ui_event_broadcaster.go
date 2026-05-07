@@ -65,7 +65,12 @@ func (b *UIEventBroadcaster) Stop() {
 	case <-done:
 		// All goroutines cleaned up
 	case <-time.After(2 * time.Second):
-		logging.Debug("broadcaster shutdown timeout — some goroutines may still be running")
+		// Bumped Debug→Warn: a stuck broadcaster goroutine at shutdown
+		// is symptomatic of a UI message that program.Send blocked on,
+		// or a hung downstream consumer. Visible in default logs so
+		// post-mortem can correlate with whatever happened around it.
+		logging.Warn("broadcaster shutdown timeout — some goroutines may still be running",
+			"timeout", "2s")
 	}
 }
 
@@ -102,8 +107,13 @@ func (b *UIEventBroadcaster) sendAsync(msg tea.Msg) {
 		defer b.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				// program.Send may panic if channel is closed during shutdown
-				logging.Debug("broadcaster send recovered from panic", "error", r)
+				// program.Send may panic if channel is closed during shutdown.
+				// Capture stack trace so the rare non-shutdown panic case
+				// (e.g. nil-deref inside Bubble Tea) is debuggable from logs
+				// instead of just "recovered from panic" with no signal.
+				logging.Debug("broadcaster send recovered from panic",
+					"error", r,
+					"stack", logging.PanicStack())
 			}
 		}()
 
