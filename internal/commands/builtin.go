@@ -423,7 +423,25 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 		return fmt.Sprintf("Failed to restore session: %v", err), nil
 	}
 
-	msg := fmt.Sprintf("Session '%s' restored. %d messages loaded.", sessionID, len(state.History))
+	// Compare on-disk count vs what actually loaded. RestoreFromState skips
+	// malformed entries (FunctionCall/FunctionResponse pair mismatches,
+	// nil parts, etc.) silently — without this check, a session that
+	// dropped 3 of 50 messages would still be reported as 50 loaded, and
+	// the next /save would overwrite the original on disk with the
+	// truncated state.
+	onDisk := len(state.History)
+	loaded := len(session.GetHistory())
+
+	var msg string
+	switch {
+	case onDisk == 0:
+		msg = fmt.Sprintf("Session '%s' restored, but the saved state had no messages.", sessionID)
+	case loaded < onDisk:
+		msg = fmt.Sprintf("Session '%s' restored: %d of %d messages loaded (%d skipped — malformed or pair-mismatched entries; see logs).",
+			sessionID, loaded, onDisk, onDisk-loaded)
+	default:
+		msg = fmt.Sprintf("Session '%s' restored. %d messages loaded.", sessionID, loaded)
+	}
 	if state.Summary != "" {
 		summary := state.Summary
 		if runes := []rune(summary); len(runes) > 100 {
@@ -541,7 +559,12 @@ func (c *InitCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	f, err := os.OpenFile(gokinPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		if os.IsExist(err) {
-			return "GOKIN.md already exists. Edit it manually or delete to reinitialize.", nil
+			// Match v0.80.5 /compact pattern: "No-op:" prefix so visually
+			// (and for users who skim) this is distinct from the
+			// "Created GOKIN.md..." success message below. Same toast
+			// styling but different first word — enough signal that
+			// nothing was written.
+			return "No-op: GOKIN.md already exists. Edit it manually or delete to reinitialize.", nil
 		}
 		return fmt.Sprintf("Failed to create GOKIN.md: %v", err), nil
 	}

@@ -128,6 +128,7 @@ func TestLongRunningCommands(t *testing.T) {
 		"compact": "Compacting context",
 		"pr":      "Creating PR",
 		"update":  "Checking for updates",
+		"mcp":     "Talking to MCP server",
 	}
 
 	for name, expectedLabelPrefix := range wantLongRunning {

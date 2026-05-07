@@ -312,6 +312,13 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 }
 
 // saveSessionHistory saves the current session to disk.
+//
+// Fallback path used when sessionManager is nil. Errors here are equally
+// fatal for persistence as the primary path in shutdown() — a Debug log
+// (the prior version) was invisible in normal operation, silently
+// dropping the same data v0.80.8 was meant to protect. Both failure
+// branches now log at Error level + emit a stderr warning so the user
+// sees what was lost.
 func (a *App) saveSessionHistory() {
 	if a.session == nil {
 		return
@@ -319,11 +326,15 @@ func (a *App) saveSessionHistory() {
 
 	historyMgr, err := a.GetHistoryManager()
 	if err != nil {
-		logging.Debug("failed to create history manager", "error", err)
+		logging.Error("failed to create history manager during shutdown — session not saved",
+			"error", err)
+		fmt.Fprintf(os.Stderr, "WARNING: failed to save session at shutdown: %v\n", err)
 		return
 	}
 
 	if err := historyMgr.Save(a.session); err != nil {
-		logging.Debug("failed to save session history", "error", err)
+		logging.Error("failed to save session history during shutdown — recent conversation may be lost",
+			"error", err)
+		fmt.Fprintf(os.Stderr, "WARNING: failed to save session at shutdown: %v\n", err)
 	}
 }

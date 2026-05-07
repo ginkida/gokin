@@ -190,6 +190,18 @@ func (po *PromptOptimizer) RecordExecution(basePrompt, variation string, success
 		return
 	}
 	go func() {
+		// recover() wrapper mirrors strategy_optimizer.go and
+		// delegation_metrics.go save goroutines. Without it, a panic in
+		// writeSnapshot (nil-deref on a corrupt snapshot, marshal panic
+		// on a cyclic graph) crashes the whole process — the same risk
+		// CLAUDE.md's safeGo pattern was meant to prevent.
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Warn("panic in prompt optimizer save goroutine",
+					"panic", r,
+					"stack", logging.PanicStack())
+			}
+		}()
 		if err := po.writeSnapshot(snapshot); err != nil {
 			logging.Debug("failed to save prompt optimizer", "error", err)
 		}

@@ -763,7 +763,15 @@ func (r *Runner) recordAgentExecutionLearning(
 				duration,
 				0,
 			); err != nil {
-				logging.Debug("failed to learn from success", "error", err)
+				// Bumped Debug→Warn so chronic learning persistence
+				// failures (disk full, sandboxed write blocked, perm
+				// revoked) are visible in the default log level. Without
+				// this, every learning event silently disappeared and
+				// the agent's quality degraded over the session with no
+				// signal anywhere.
+				logging.Warn("failed to persist learning from successful agent run",
+					"agent_type", agentType,
+					"error", err)
 			}
 		}()
 	}

@@ -46,6 +46,14 @@ func (c *MCPCommand) GetMetadata() CommandMetadata {
 		Priority: 65,
 		HasArgs:  true,
 		ArgHint:  "[list|status|add|remove|refresh|help]",
+		// `add` and `refresh` spawn a stdio subprocess + JSON-RPC handshake
+		// or hit a remote HTTP endpoint, routinely 2–10s on real servers.
+		// `list`/`status` are local and fast, but the toast clears on
+		// command completion so the cost is negligible. Better one extra
+		// flicker than the user retrying /mcp add and getting "server
+		// already exists" mid-handshake.
+		LongRunning:      true,
+		LongRunningLabel: "Talking to MCP server — stdio handshake or HTTP roundtrip in flight...",
 	}
 }
 

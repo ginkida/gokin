@@ -1,6 +1,10 @@
 package memory
 
-import "time"
+import (
+	"time"
+
+	"gokin/internal/logging"
+)
 
 // SeedDefaults populates the example store with curated high-quality examples
 // if the store is currently empty. Ensures fresh installations have useful
@@ -16,7 +20,13 @@ func SeedDefaults(es *ExampleStore) {
 	for _, seed := range curatedSeeds {
 		addSeed(es, seed)
 	}
-	_ = es.save()
+	if err := es.save(); err != nil {
+		// Was `_ = es.save()` — silent. If the seed save fails (disk
+		// full, perm denied), the agent loses curated examples for the
+		// entire session with no signal. Warn so post-mortem can see it.
+		logging.Warn("failed to persist seeded example store — agent will run without curated examples this session",
+			"error", err)
+	}
 }
 
 type seedExample struct {
