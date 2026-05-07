@@ -402,6 +402,13 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 
 	state, err := hm.LoadFull(sessionID)
 	if err != nil {
+		// Distinguish "not found" from real load failures (corrupt JSON,
+		// schema drift, IO error). Without this, the user sees the raw
+		// fs error path "open /Users/.../sessions/abc.json: no such file
+		// or directory" — confusing because it leaks the storage layout.
+		if os.IsNotExist(err) {
+			return fmt.Sprintf("Session '%s' not found. Run /resume (no args) to list available sessions, or /sessions for the full list.", sessionID), nil
+		}
 		return fmt.Sprintf("Failed to load session '%s': %v", sessionID, err), nil
 	}
 
