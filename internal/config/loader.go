@@ -269,12 +269,11 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	// Check OAuth first
-	if c.API.HasOAuthToken("gemini") {
-		return nil
-	}
-
-	// Check provider keys via registry
+	// Check provider keys via registry. (Pre-v0.65 also checked an
+	// OAuth-token-for-Gemini path here; that flow was removed and the
+	// HasOAuthToken stub now always returns false. Keeping the OAuth
+	// check made the code read like there was a parallel auth path
+	// that no longer exists.)
 	for _, p := range Providers {
 		if p.GetKey(&c.API) != "" {
 			return nil

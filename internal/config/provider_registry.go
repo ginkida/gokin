@@ -182,12 +182,16 @@ func DetectProviderFromModel(modelName string) string {
 	return "glm" // default
 }
 
-// AnyProviderHasKey returns true if any provider has a configured key or OAuth.
+// AnyProviderHasKey returns true if any provider has a configured key.
+//
+// (Pre-v0.65 also returned true for OAuth-Gemini paths; that flow was
+// removed and HasOAuthToken now stubs to false. Comment kept so future
+// readers don't re-add the check thinking it does something.)
 func AnyProviderHasKey(api *APIConfig) bool {
 	for _, p := range Providers {
 		if p.GetKey(api) != "" {
 			return true
 		}
 	}
-	return api.APIKey != "" || api.HasOAuthToken("gemini")
+	return api.APIKey != ""
 }
