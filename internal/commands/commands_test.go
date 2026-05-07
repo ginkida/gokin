@@ -113,12 +113,12 @@ func TestHelpCategoriesAreRegistered(t *testing.T) {
 	// Mirror of the categories defined in builtin.go HelpCommand.Execute.
 	// Keep in sync — this is the whole point of the test.
 	helpCategories := map[string][]string{
-		"Getting Started": {"help", "quickstart"},
-		"Session":         {"model", "clear", "compact", "save", "resume", "sessions", "stats", "instructions"},
-		"Auth & Setup":    {"login", "logout", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"},
+		"Getting Started": {"help", "quickstart", "shortcuts"},
+		"Session":         {"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "cost", "instructions", "memory", "undo", "redo"},
+		"Auth & Setup":    {"login", "logout", "keys", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"},
 		"Git":             {"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"},
-		"Planning":        {"plan", "resume-plan", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "memory-governance", "tree-stats"},
-		"Tools": {"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
+		"Planning":        {"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"},
+		"Tools": {"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "debug-dump",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"},
 	}
 
@@ -127,6 +127,35 @@ func TestHelpCategoriesAreRegistered(t *testing.T) {
 			if !registered[name] {
 				t.Errorf("/help category %q lists %q but it is not registered in NewHandler", cat, name)
 			}
+		}
+	}
+
+	// Reverse check: every registered command must appear in at least one
+	// category. Without this, new commands fall silently into the "Other"
+	// bucket of /help — easy to miss in code review, and users skimming
+	// /help wouldn't see them next to similar commands.
+	//
+	// v0.80.15 found 13 commands that had drifted into "Other" since the
+	// help structure was last refreshed (undo, redo, cost, mcp, memory,
+	// pwd, keys, shortcuts, thinking, checkpoints, insights, debug-dump).
+	categorized := make(map[string]bool)
+	for _, names := range helpCategories {
+		for _, name := range names {
+			categorized[name] = true
+		}
+	}
+	// Allowlist: commands that are intentionally hidden from /help (e.g.
+	// internal-only or aliases that would be redundant). Add here with a
+	// note explaining why.
+	hiddenFromHelp := map[string]bool{
+		// (none currently)
+	}
+	for name := range registered {
+		if hiddenFromHelp[name] {
+			continue
+		}
+		if !categorized[name] {
+			t.Errorf("/%s is registered but not in any help category — add to builtin.go HelpCommand.Execute and to this test, or to hiddenFromHelp with justification", name)
 		}
 	}
 }

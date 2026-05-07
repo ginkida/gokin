@@ -94,12 +94,12 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		name     string
 		commands []string
 	}{
-		{"Getting Started", []string{"help", "quickstart"}},
-		{"Session", []string{"model", "clear", "compact", "save", "resume", "sessions", "stats", "instructions"}},
-		{"Auth & Setup", []string{"login", "logout", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"}},
+		{"Getting Started", []string{"help", "quickstart", "shortcuts"}},
+		{"Session", []string{"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "cost", "instructions", "memory", "undo", "redo"}},
+		{"Auth & Setup", []string{"login", "logout", "keys", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"}},
 		{"Git", []string{"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"}},
-		{"Planning", []string{"plan", "resume-plan", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "memory-governance", "tree-stats"}},
-		{"Tools", []string{"browse", "open", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme",
+		{"Planning", []string{"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"}},
+		{"Tools", []string{"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "debug-dump",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"}},
 	}
 
