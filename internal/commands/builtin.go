@@ -533,6 +533,10 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 		return "No sessions for current project.\nUse /sessions --all to see sessions from all projects.", nil
 	}
 
+	// Hint how to resume — without this, /sessions output looked like a
+	// passive list. New users had to figure out from context that the
+	// IDs go to /resume.
+	sb.WriteString("\nResume: /resume <id>")
 	if !showAll {
 		sb.WriteString("\nUse /sessions --all to see sessions from all projects.")
 	}
