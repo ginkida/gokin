@@ -361,12 +361,8 @@ func FormatDuration(d time.Duration) string {
 }
 
 func joinStrings(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	result := strs[0]
-	for i := 1; i < len(strs); i++ {
-		result += sep + strs[i]
-	}
-	return result
+	// Was a hand-rolled `result += sep + strs[i]` loop — O(n²) for large
+	// slices and just a re-implementation of strings.Join. Use the
+	// stdlib version which uses a Builder internally.
+	return strings.Join(strs, sep)
 }

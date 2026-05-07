@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -278,12 +279,18 @@ type StreamingTool interface {
 
 // CollectStreamingResult collects all chunks from a streaming result.
 // Returns the complete content and any error that occurred.
+//
+// Note: uses strings.Builder for content accumulation. The previous
+// `content += chunk` form was O(n²) — for a 1k-chunk stream of 100 bytes
+// each, the realloc-and-copy storm dominated wall time. The actual
+// streaming path in executor.executeStreamingTool already uses Builder;
+// this is the public helper kept consistent.
 func CollectStreamingResult(sr *StreamingToolResult) (string, error) {
 	if sr == nil {
 		return "", nil
 	}
 
-	var content string
+	var content strings.Builder
 	for {
 		select {
 		case chunk, ok := <-sr.Chunks:
@@ -292,31 +299,31 @@ func CollectStreamingResult(sr *StreamingToolResult) (string, error) {
 				select {
 				case err := <-sr.Error:
 					if err != nil {
-						return content, err
+						return content.String(), err
 					}
 				default:
 				}
-				return content, nil
+				return content.String(), nil
 			}
-			content += chunk
+			content.WriteString(chunk)
 		case err := <-sr.Error:
 			if err != nil {
-				return content, err
+				return content.String(), err
 			}
 		case <-sr.Done:
 			// Drain remaining chunks
 			for chunk := range sr.Chunks {
-				content += chunk
+				content.WriteString(chunk)
 			}
 			// Check for any error that was sent before complete() closed the channels.
 			select {
 			case err := <-sr.Error:
 				if err != nil {
-					return content, err
+					return content.String(), err
 				}
 			default:
 			}
-			return content, nil
+			return content.String(), nil
 		}
 	}
 }
