@@ -327,6 +327,13 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		// Ensure cleanup happens even on panic
 		defer func() {
 			if p := recover(); p != nil {
+				// Was log-silent: panic was captured into result.Error
+				// only. Without a log entry, post-mortem couldn't see
+				// which agent type / spawn site faulted. Warn + stack.
+				logging.Warn("spawned agent panicked",
+					"agent_id", agentID,
+					"panic", p,
+					"stack", logging.PanicStack())
 				r.mu.Lock()
 				if result, ok := r.results[agentID]; ok {
 					result.Error = fmt.Sprintf("agent panic: %v", p)
@@ -535,6 +542,13 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		// Ensure cleanup happens even on panic
 		defer func() {
 			if p := recover(); p != nil {
+				// Was log-silent: panic was captured into result.Error
+				// only. Without a log entry, post-mortem couldn't see
+				// which agent type / spawn site faulted. Warn + stack.
+				logging.Warn("spawned agent panicked",
+					"agent_id", agentID,
+					"panic", p,
+					"stack", logging.PanicStack())
 				r.mu.Lock()
 				if result, ok := r.results[agentID]; ok {
 					result.Error = fmt.Sprintf("agent panic: %v", p)
@@ -681,7 +695,11 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			defer wg.Done()
 			defer func() {
 				if p := recover(); p != nil {
-					logging.Error("panic in SpawnMultiple worker", "idx", idx, "type", t.Type, "panic", p)
+					logging.Error("panic in SpawnMultiple worker",
+						"idx", idx,
+						"type", t.Type,
+						"panic", p,
+						"stack", logging.PanicStack())
 					mu.Lock()
 					if results[idx] == nil {
 						results[idx] = &AgentResult{

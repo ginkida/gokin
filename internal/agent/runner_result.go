@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // Wait waits for an agent to complete and returns its result.
@@ -70,6 +72,14 @@ func (r *Runner) WaitAll(agentIDs []string) ([]*AgentResult, error) {
 			defer wg.Done()
 			defer func() {
 				if rec := recover(); rec != nil {
+					// Was log-silent: panic captured into result.Error
+					// only. Without log entry, there was no signal which
+					// agent's Wait faulted. Match the rest of the agent/
+					// panic-recovery sites — Warn + stack.
+					logging.Warn("panic in WaitAll worker",
+						"agent_id", agentID,
+						"panic", rec,
+						"stack", logging.PanicStack())
 					mu.Lock()
 					if results[idx] == nil {
 						results[idx] = &AgentResult{

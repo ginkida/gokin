@@ -282,7 +282,14 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 		}
 
 		if err := agent.RestoreFromCheckpoint(cp); err != nil {
-			logging.Debug("failed to restore from checkpoint", "checkpoint_id", cp.CheckpointID, "error", err)
+			// Bumped Debug→Warn: a checkpoint that fails to restore is
+			// silently skipped (continue), so users with N broken
+			// checkpoints saw nothing resume and had no signal why.
+			// Visible at default log level so post-mortem can correlate
+			// with whatever made the checkpoint unloadable (schema drift,
+			// truncated file, etc.).
+			logging.Warn("failed to restore from checkpoint — skipping",
+				"checkpoint_id", cp.CheckpointID, "error", err)
 			continue
 		}
 
@@ -300,7 +307,15 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 		go func(a *Agent, runDeps runnerAgentDeps, restoredType string, continuationPrompt string) {
 			defer func() {
 				if p := recover(); p != nil {
-					logging.Debug("auto-resumed agent panicked", "agent_id", a.ID, "panic", fmt.Sprintf("%v", p))
+					// Bumped Debug→Warn + stack capture: an agent panic
+					// during auto-resume is captured into result.Error,
+					// but Debug-level meant nobody saw it in field logs.
+					// Stack trace makes the rare non-trivial panic
+					// (vs. nil-deref on stale checkpoint) debuggable.
+					logging.Warn("auto-resumed agent panicked",
+						"agent_id", a.ID,
+						"panic", p,
+						"stack", logging.PanicStack())
 					r.mu.Lock()
 					if result, ok := r.results[a.ID]; ok {
 						result.Error = fmt.Sprintf("agent panic on resume: %v", p)
@@ -451,7 +466,12 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 	go func(a *Agent, runDeps runnerAgentDeps) {
 		defer func() {
 			if p := recover(); p != nil {
-				logging.Debug("resumed agent panicked", "agent_id", a.ID, "panic", fmt.Sprintf("%v", p))
+				// Same fix as auto-resume above: Debug→Warn + stack so
+				// resumed-agent panics surface in field logs.
+				logging.Warn("resumed agent panicked",
+					"agent_id", a.ID,
+					"panic", p,
+					"stack", logging.PanicStack())
 				r.mu.Lock()
 				if result, ok := r.results[a.ID]; ok {
 					result.Error = fmt.Sprintf("agent panic on resume: %v", p)
