@@ -81,6 +81,18 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 	}
 
+	// Edge case: only untracked files (no staged, no unstaged-tracked).
+	// The flow below would call `git add -u` which stages nothing for
+	// untracked files, then `git commit` would fail with the cryptic
+	// "nothing to commit, working tree clean" error. Catch it early
+	// with an actionable message.
+	if staged == "" && unstaged == "" && len(untracked) > 0 {
+		result.WriteString("\n")
+		result.WriteString("Only untracked files — /commit auto-stages tracked changes only (`git add -u`).\n")
+		result.WriteString("To include these, run `git add <file>` first, or `git add -A` to add everything.")
+		return result.String(), nil
+	}
+
 	// Auto-generate commit message if not provided
 	if message == "" {
 		generated := autoGenerateCommitMessage(ctx, workDir)
