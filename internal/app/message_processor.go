@@ -102,8 +102,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		if pending != "" {
 			// Notify user that we're processing pending message
 			a.safeSendToProgram(ui.StreamTextMsg("\n📤 Processing queued message...\n"))
-			// Recursively handle the pending message
-			go a.handleSubmit(pending)
+			// Recursively handle the pending message.
+			// Was raw `go` — a panic inside handleSubmit (e.g. nil-deref
+			// from a torn-down Tool, or a panic in safeSendToProgram during
+			// shutdown race) crashed the whole CLI silently. Per CLAUDE.md
+			// reliability invariants, every long-lived background goroutine
+			// must use safeGo.
+			a.safeGo("pending-message-dispatch", func() { a.handleSubmit(pending) })
 		}
 		a.saveRecoverySnapshot("")
 	}()
@@ -249,6 +254,22 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				// If context is >50% of limit, try compaction + retry
 				if limits.MaxInputTokens > 0 && tokens > limits.MaxInputTokens/2 {
 					contextTruncated = true
+					// Persist any partial history from the just-finished
+					// (empty-response) attempt before we EmergencyTruncate
+					// the session. Otherwise tool side-effects that ran
+					// during the round (writes, edits, etc.) are recorded
+					// only on disk, but the session history loses the
+					// matching FunctionCall/FunctionResponse pairs — the
+					// next attempt's model has no record those tools ran
+					// and may re-execute them.
+					if len(newHistory) > len(history) {
+						cleaned := stripOrphanFunctionCalls(newHistory)
+						a.session.SetHistory(cleaned)
+						a.syncToolCheckpoints()
+						if a.sessionManager != nil {
+							_ = a.sessionManager.SaveAfterMessage()
+						}
+					}
 					removed := a.contextManager.EmergencyTruncate()
 					if removed > 0 {
 						a.safeSendToProgram(ui.StatusUpdateMsg{
@@ -333,9 +354,27 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			_ = a.policy.RecordOverload()
 		}
 
-		// Save partial history before retry (preserves tool side effects)
+		// Accumulate tokens spent on this failed attempt before we move on.
+		// Without this, /cost reports only the final-attempt tokens and
+		// silently undercounts retry churn — for heavy GLM 1305 retries
+		// the undercount can be 3-5×.
+		failInput, failOutput := a.executor.GetLastTokenUsage()
+		_, failCacheRead := a.executor.GetLastCacheMetrics()
+		apiInputAccum += failInput
+		apiOutputAccum += failOutput
+		cacheReadAccum += failCacheRead
+
+		// Save partial history before retry (preserves tool side effects).
+		// Strip orphan tool_calls — if the model emitted FunctionCalls but
+		// the executor never produced matching FunctionResponses (e.g. the
+		// retry was triggered mid-execution), persisting the orphans
+		// permanently breaks the session: every subsequent API call returns
+		// 400 "tool_call_ids did not have response messages" and the user
+		// has to /clear. The terminal-error path at line 403+ already does
+		// this via stripOrphanFunctionCalls; the retry path was missing it.
 		if len(newHistory) > len(history) {
-			a.session.SetHistory(newHistory)
+			cleaned := stripOrphanFunctionCalls(newHistory)
+			a.session.SetHistory(cleaned)
 			a.syncToolCheckpoints()
 			if a.sessionManager != nil {
 				_ = a.sessionManager.SaveAfterMessage()
@@ -1550,7 +1589,18 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			select {
 			case <-done:
 			case <-ctx.Done():
-				<-done
+				// Drain step goroutines after cancel, but cap the wait
+				// at 30s. If a step ignores ctx (stuck syscall, blocked
+				// network call), the previous version of this code waited
+				// forever — TUI froze with no way out except kill -9.
+				// Steps that overrun their stepCtx timeout will exit on
+				// their own; the leak window is bounded.
+				select {
+				case <-done:
+				case <-time.After(30 * time.Second):
+					logging.Warn("plan-step barrier drain timed out — leaking step goroutine, returning control to user",
+						"plan_id", approvedPlan.ID)
+				}
 			}
 		}
 	}
