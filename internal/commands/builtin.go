@@ -1121,12 +1121,14 @@ type ClearTodosCommand struct{}
 
 func (c *ClearTodosCommand) Name() string        { return "clear-todos" }
 func (c *ClearTodosCommand) Description() string { return "Clear all todo items" }
-func (c *ClearTodosCommand) Usage() string       { return "/clear-todos" }
+func (c *ClearTodosCommand) Usage() string       { return "/clear-todos [--force]" }
 func (c *ClearTodosCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategoryTools,
 		Icon:     "clear",
 		Priority: 10,
+		HasArgs:  true,
+		ArgHint:  "[--force]",
 	}
 }
 
@@ -1135,8 +1137,58 @@ func (c *ClearTodosCommand) Execute(ctx context.Context, args []string, app AppI
 	if todoTool == nil {
 		return "Todo tool not available.", nil
 	}
+
+	// Show count and require --force when there are non-trivial number of
+	// items. Same protection family as v0.80.22 /save and v0.80.23 /logout
+	// all — destructive ops on user state get an explicit confirmation.
+	// Empty list / 0 items: just clear (no-op message).
+	items := todoTool.GetItems()
+	force := false
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+		}
+	}
+
+	if len(items) == 0 {
+		return "Todo list is already empty.", nil
+	}
+
+	if !force {
+		// Count by status so the user sees what work would disappear
+		// (in-progress + pending = unfinished work; completed = done).
+		var inProgress, pending, completed int
+		for _, item := range items {
+			switch item.Status {
+			case "in_progress":
+				inProgress++
+			case "completed":
+				completed++
+			default:
+				pending++
+			}
+		}
+		var detail strings.Builder
+		fmt.Fprintf(&detail, "Todo list has %d item(s)", len(items))
+		var parts []string
+		if inProgress > 0 {
+			parts = append(parts, fmt.Sprintf("%d in progress", inProgress))
+		}
+		if pending > 0 {
+			parts = append(parts, fmt.Sprintf("%d pending", pending))
+		}
+		if completed > 0 {
+			parts = append(parts, fmt.Sprintf("%d completed", completed))
+		}
+		if len(parts) > 0 {
+			fmt.Fprintf(&detail, " (%s)", strings.Join(parts, ", "))
+		}
+		detail.WriteString(".\n\nUse /clear-todos --force to confirm.")
+		return detail.String(), nil
+	}
+
 	todoTool.ClearItems()
-	return "Todo list cleared.", nil
+	return fmt.Sprintf("Todo list cleared (%d items removed).", len(items)), nil
 }
 
 // BrowseCommand opens an interactive file browser.
