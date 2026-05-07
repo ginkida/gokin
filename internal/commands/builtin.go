@@ -49,6 +49,14 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		// Show help for specific command
 		cmd, exists := c.handler.GetCommand(args[0])
 		if !exists {
+			// Match the typo-correction UX of regular Execute (commands.go:277).
+			// Without this, /help typo just said "Unknown command" without
+			// pointing to the likely intended command — inconsistent with
+			// how unknown commands are handled at the runtime path.
+			if closest := c.handler.findClosestCommand(args[0]); closest != "" {
+				return fmt.Sprintf("%sUnknown command: /%s%s. Did you mean %s/%s%s?\nUse /help to see all commands.",
+					colorRed, args[0], colorReset, colorGreen, closest, colorReset), nil
+			}
 			return fmt.Sprintf("%sUnknown command: /%s%s\nUse /help to see all commands.", colorRed, args[0], colorReset), nil
 		}
 		result := fmt.Sprintf("%s/%s%s — %s\n\n%sUsage:%s %s",

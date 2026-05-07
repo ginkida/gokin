@@ -1,6 +1,10 @@
 package commands
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 func TestHandlerParse(t *testing.T) {
 	h := NewHandler()
@@ -185,6 +189,31 @@ func TestHelpExamplesAndRelatedExist(t *testing.T) {
 		if got := getRelatedCommands(name); got == "" {
 			t.Errorf("getRelatedCommands(%q) is empty — every git-inspect / release command should have see-also", name)
 		}
+	}
+}
+
+// TestHelpUnknownCommandSuggests pins the typo-correction path added
+// in v0.80.21. /help foo (typo) should suggest the closest registered
+// command, matching the typo-correction Execute() does at runtime.
+// Without this test, the inconsistency between /help typo and /typo
+// could regress silently.
+func TestHelpUnknownCommandSuggests(t *testing.T) {
+	h := NewHandler()
+	helpCmd, ok := h.GetCommand("help")
+	if !ok {
+		t.Fatal("help command not registered")
+	}
+
+	// "clr" → /clear (edit distance 2)
+	out, err := helpCmd.Execute(context.Background(), []string{"clr"}, nil)
+	if err != nil {
+		t.Fatalf("/help clr returned error: %v", err)
+	}
+	if !strings.Contains(out, "Did you mean") {
+		t.Errorf("/help clr should suggest a closest match, got:\n%s", out)
+	}
+	if !strings.Contains(out, "/clear") {
+		t.Errorf("/help clr should suggest /clear specifically, got:\n%s", out)
 	}
 }
 
