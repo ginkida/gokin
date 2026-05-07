@@ -216,7 +216,14 @@ func loadFromEnv(cfg *Config) {
 	}
 
 	// Legacy API key from environment (check multiple sources)
-	// Priority: GOKIN_API_KEY > GOKIN_GLM_KEY > GLM_API_KEY > GEMINI_API_KEY
+	// Priority: GOKIN_API_KEY > GOKIN_GLM_KEY > GLM_API_KEY
+	//
+	// Pre-v0.80.18 also pulled in GEMINI_API_KEY as a final fallback —
+	// leftover from v0.65 when Gemini was removed. The Gemini key would
+	// silently land in cfg.API.APIKey, then fail auth at runtime with
+	// a cryptic "401" because no current provider accepts Gemini-format
+	// keys. Better to fall through to "no key configured" so the user
+	// gets a clear /doctor signal and runs /login with the right key.
 	if apiKey := os.Getenv("GOKIN_API_KEY"); apiKey != "" {
 		cfg.API.APIKey = apiKey
 	} else if apiKey := os.Getenv("GOKIN_GLM_KEY"); apiKey != "" {
@@ -231,8 +238,6 @@ func loadFromEnv(cfg *Config) {
 		if cfg.API.Backend == "" {
 			cfg.API.Backend = "glm"
 		}
-	} else if apiKey := os.Getenv("GEMINI_API_KEY"); apiKey != "" {
-		cfg.API.APIKey = apiKey
 	}
 
 	if model := os.Getenv("GOKIN_MODEL"); model != "" {

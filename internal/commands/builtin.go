@@ -745,7 +745,11 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	} else {
 		fmt.Fprintf(&sb, "  Status: %s✗ API key not configured%s\n", colorRed, colorReset)
 		issues = append(issues, "API key not found")
-		envHint := "GEMINI_API_KEY"
+		// Default fallback was "GEMINI_API_KEY" — leftover from v0.65 when
+		// Gemini was removed but this hint wasn't updated. Now defaults to
+		// the GLM env var, which is the project's recommended primary
+		// provider (per README and v0.71.0 model recommendations).
+		envHint := "GOKIN_GLM_KEY"
 		if p := config.GetProvider(backend); p != nil && len(p.EnvVars) > 0 {
 			envHint = p.EnvVars[0]
 		}

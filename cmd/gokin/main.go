@@ -18,7 +18,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version  = "0.80.17"
+	version  = "0.80.18"
 	cfgFile  string
 	model    string
 	runSetup bool

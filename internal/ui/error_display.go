@@ -347,7 +347,10 @@ func getAuthSuggestions() []string {
 	}
 
 	if !found {
-		envHint := "GEMINI_API_KEY"
+		// Default fallback was "GEMINI_API_KEY" — leftover from v0.65 when
+		// Gemini was removed. Now defaults to the first registered
+		// provider's primary env var (typically GOKIN_GLM_KEY).
+		envHint := "GOKIN_GLM_KEY"
 		if ps := config.Providers; len(ps) > 0 && len(ps[0].EnvVars) > 0 {
 			envHint = ps[0].EnvVars[0]
 		}
