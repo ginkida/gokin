@@ -22,9 +22,6 @@ func TestEveryRegisteredCommandIsInAutocomplete(t *testing.T) {
 	// MUST have a comment justifying the omission — silent drift is the
 	// whole bug class this test exists to prevent.
 	hiddenFromAutocomplete := map[string]string{
-		// Aliases / shorthand: the canonical command is in autocomplete,
-		// the alias resolves at parse time so showing both creates noise.
-		"cost": "alias for /stats — shown via /stats entry instead",
 		// Internal/debug commands: surfaced through other means (key chord,
 		// dev-only flow). Suggesting them in autocomplete would expose
 		// internals to end users.
@@ -34,6 +31,10 @@ func TestEveryRegisteredCommandIsInAutocomplete(t *testing.T) {
 		// Legacy / soft-deprecated: kept registered for backwards-compat
 		// but discouraged in new autocomplete UX.
 		"keys": "shortcuts shown via /shortcuts; /keys remains as legacy alias",
+		// (`cost` was here as "alias for /stats" but it's actually a
+		// distinct command — quick token+cost summary vs /stats's full
+		// report. Moved into autocomplete in v0.80.17 to match its
+		// presence in /help Session category.)
 	}
 
 	// Build the autocomplete name set.

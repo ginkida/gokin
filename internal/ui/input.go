@@ -170,6 +170,7 @@ func DefaultCommands() []CommandInfo {
 			Args: []ArgInfo{{Name: "session", Required: true, Type: "string"}}, Usage: "/resume <session>"},
 		{Name: "sessions", Description: "List saved sessions", Category: "Session"},
 		{Name: "stats", Description: "Show session statistics", Category: "Session"},
+		{Name: "cost", Description: "Show token usage and cost (compact)", Category: "Session"},
 		{Name: "memory", Description: "Show stored memories", Category: "Session"},
 		// /undo and /redo are fundamental enough to be in Session autocomplete.
 		// Were missing pre-v0.78.14 — caught by TestEveryRegisteredCommandIsInAutocomplete.
