@@ -230,7 +230,8 @@ func (c *LogoutCommand) Usage() string {
 	for _, p := range config.Providers {
 		fmt.Fprintf(&sb, "/logout %-10s - Remove %s credentials\n", p.Name, p.DisplayName)
 	}
-	sb.WriteString("/logout all        - Remove all credentials")
+	sb.WriteString("/logout all        - Preview what will be wiped (dry-run)\n")
+	sb.WriteString("/logout all --force - Remove all credentials (irreversible)")
 	return sb.String()
 }
 func (c *LogoutCommand) GetMetadata() CommandMetadata {
@@ -249,9 +250,17 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		return "Failed to get configuration.", nil
 	}
 
+	// Parse args: /logout [target] [--force]
 	target := ""
-	if len(args) > 0 {
-		target = strings.ToLower(args[0])
+	force := false
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+			continue
+		}
+		if target == "" {
+			target = strings.ToLower(a)
+		}
 	}
 
 	if target == "" {
@@ -262,6 +271,27 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 	currentProvider := cfg.API.GetActiveProvider()
 
 	if target == "all" {
+		// Destructive: nukes every saved provider key. Require --force
+		// after a preview so the user sees what's about to disappear.
+		// Single-provider /logout (e.g. /logout glm) doesn't require
+		// confirmation — the user named the specific target so they
+		// know what's being removed.
+		if !force {
+			var configured []string
+			for _, p := range config.Providers {
+				if p.GetKey(&cfg.API) != "" {
+					configured = append(configured, p.DisplayName)
+				}
+			}
+			if cfg.API.APIKey != "" && len(configured) == 0 {
+				configured = append(configured, "(legacy GOKIN_API_KEY)")
+			}
+			if len(configured) == 0 {
+				return "No credentials to remove.", nil
+			}
+			return fmt.Sprintf("/logout all will remove credentials for:\n  - %s\n\nRe-run with `/logout all --force` to confirm.",
+				strings.Join(configured, "\n  - ")), nil
+		}
 		for _, p := range config.Providers {
 			p.SetKey(&cfg.API, "")
 		}

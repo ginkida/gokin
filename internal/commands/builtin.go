@@ -1239,7 +1239,7 @@ func getCommandExample(name string) string {
 		"config":      "  /config               — print active config + which file it came from",
 		"init":        "  /init                 — bootstrap GOKIN.md for this project",
 		"sessions":    "  /sessions             — list saved sessions (most recent first)",
-		"logout":      "  /logout               — clear API key for the current provider\n  /logout all           — clear all stored keys",
+		"logout":      "  /logout               — clear API key for the current provider\n  /logout all           — preview what /logout all would wipe (dry-run)\n  /logout all --force   — actually clear all stored keys (irreversible)",
 	}
 	return examples[name]
 }
