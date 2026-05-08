@@ -172,6 +172,9 @@ func DefaultCommands() []CommandInfo {
 		{Name: "stats", Description: "Show session statistics", Category: "Session"},
 		{Name: "cost", Description: "Show token usage and cost (compact)", Category: "Session"},
 		{Name: "memory", Description: "Show stored memories", Category: "Session"},
+		{Name: "loop", Description: "Run a recurring task in the background", Category: "Session",
+			Args:  []ArgInfo{{Name: "interval_or_task", Required: false, Type: "string"}},
+			Usage: "/loop [<interval>] <task> | status|stop|... <id>"},
 		// /undo and /redo are fundamental enough to be in Session autocomplete.
 		// Were missing pre-v0.78.14 — caught by TestEveryRegisteredCommandIsInAutocomplete.
 		{Name: "undo", Description: "Undo the last file change", Category: "Session",

@@ -118,7 +118,7 @@ func TestHelpCategoriesAreRegistered(t *testing.T) {
 	// Keep in sync — this is the whole point of the test.
 	helpCategories := map[string][]string{
 		"Getting Started": {"help", "quickstart", "shortcuts"},
-		"Session":         {"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "cost", "instructions", "memory", "undo", "redo"},
+		"Session":         {"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "cost", "instructions", "memory", "loop", "undo", "redo"},
 		"Auth & Setup":    {"login", "logout", "keys", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"},
 		"Git":             {"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"},
 		"Planning":        {"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"},

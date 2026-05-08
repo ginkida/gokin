@@ -66,6 +66,7 @@ func (f *fakeAppForMCP) GetObservabilityReport() string                   { retu
 func (f *fakeAppForMCP) GetSessionGovernanceReport() string               { return "" }
 func (f *fakeAppForMCP) GetMemoryReport() string                          { return "" }
 func (f *fakeAppForMCP) GetPerformanceStats() string                      { return "" }
+func (f *fakeAppForMCP) GetLoopManager() LoopManager                      { return nil }
 
 func newFakeApp(t *testing.T, servers []*mcp.ServerConfig) *fakeAppForMCP {
 	t.Helper()

@@ -14,6 +14,7 @@ import (
 	"google.golang.org/genai"
 
 	"gokin/internal/agent"
+	"gokin/internal/loops"
 	"gokin/internal/audit"
 	"gokin/internal/cache"
 	"gokin/internal/chat"
@@ -203,6 +204,12 @@ type App struct {
 	// MCP (Model Context Protocol)
 	mcpManager        *mcp.Manager
 	mcpInitialSummary string // One-shot toast describing initial MCP connect results
+
+	// Loops (autonomous recurring task system, v0.81+).
+	// Initialized in builder.go after configDir is known. The actual
+	// background scheduler is started by App.Run; nil-safe everywhere
+	// in case the loop subsystem is disabled or not yet wired.
+	loopManager *loops.Manager
 
 	// Streaming token estimation
 	streamedChars           int // Accumulated chars during current streaming session
@@ -909,6 +916,19 @@ func (a *App) GetMainClient() client.Client {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.client
+}
+
+// GetLoopManager returns the loops manager for the /loop command. Nil
+// when the loop subsystem is not wired (e.g. early in App lifecycle, or
+// in unit-test builds that skip loops). The /loop command nil-checks
+// and returns a clear "unavailable" message.
+func (a *App) GetLoopManager() commands.LoopManager {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.loopManager == nil {
+		return nil
+	}
+	return a.loopManager
 }
 
 // SyncMCPToolsForServer reconciles the tool registry against the current

@@ -103,7 +103,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		commands []string
 	}{
 		{"Getting Started", []string{"help", "quickstart", "shortcuts"}},
-		{"Session", []string{"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "cost", "instructions", "memory", "undo", "redo"}},
+		{"Session", []string{"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "cost", "instructions", "memory", "loop", "undo", "redo"}},
 		{"Auth & Setup", []string{"login", "logout", "keys", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"}},
 		{"Git", []string{"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"}},
 		{"Planning", []string{"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"}},

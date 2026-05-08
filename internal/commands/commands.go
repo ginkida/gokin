@@ -76,6 +76,12 @@ type AppInterface interface {
 	GetMCPManager() *mcp.Manager
 	GetToolRegistry() *tools.Registry
 	GetMainClient() client.Client
+
+	// Loop manager (v0.81+) — autonomous recurring task system. May be
+	// nil if loops aren't wired (e.g. in unit tests of other commands).
+	// /loop subcommands check for nil and return a clear "unavailable"
+	// message rather than crashing.
+	GetLoopManager() LoopManager
 }
 
 // Handler manages slash commands.
@@ -123,6 +129,7 @@ func NewHandler() *Handler {
 	h.Register(&SaveCommand{})
 	h.Register(&ResumeCommand{})
 	h.Register(&SessionsCommand{})
+	h.Register(&LoopCommand{})
 	// Register git commands
 	h.Register(&CommitCommand{})
 	h.Register(&PRCommand{})

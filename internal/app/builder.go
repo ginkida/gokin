@@ -21,6 +21,7 @@ import (
 	"gokin/internal/git"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
+	"gokin/internal/loops"
 	"gokin/internal/mcp"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
@@ -100,6 +101,10 @@ type Builder struct {
 	mcpManager        *mcp.Manager
 	mcpConnectSummary string // Deferred UI summary of initial MCP connect results
 	contextAgent      *appcontext.ContextAgent
+
+	// Loops (autonomous recurring tasks, v0.81+). Initialized late in
+	// the build pipeline so the home-dir lookup happens once.
+	loopManager *loops.Manager
 
 	// Context Predictor (predictive file loading)
 	contextPredictor *appcontext.ContextPredictor
@@ -679,6 +684,14 @@ func (b *Builder) initManagers() error {
 				)
 			}
 		}
+
+		// Loops manager — autonomous recurring tasks (v0.81+).
+		// State files live in <configDir>/loops/*.json. Initialization
+		// loads any existing loops automatically; auto-resume happens
+		// when App.Run starts the background scheduler.
+		loopStorage := loops.NewFileStorage(filepath.Join(b.configDir, "loops"))
+		b.loopManager = loops.NewManager(loopStorage)
+		logging.Debug("loops manager initialized", "dir", filepath.Join(b.configDir, "loops"))
 	}
 
 	// Hooks manager
@@ -2134,6 +2147,10 @@ func (b *Builder) assembleApp() *App {
 		// MCP (Model Context Protocol)
 		mcpManager:        b.mcpManager,
 		mcpInitialSummary: b.mcpConnectSummary,
+		// Loops (autonomous recurring tasks). Wired here so the App
+		// has access from start; the background scheduler is started
+		// later by App.Run.
+		loopManager: b.loopManager,
 		sessionMemory:     b.sessionMemory,
 		workingMemory:     b.workingMemory,
 		// Persistent stores for flush on shutdown
