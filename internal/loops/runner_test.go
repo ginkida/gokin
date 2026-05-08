@@ -335,6 +335,60 @@ func TestBuildIterationPrompt_MaxIterations(t *testing.T) {
 	}
 }
 
+// TestParseDoneSignal: only the LAST non-empty line counts and only
+// if it's an exact match for the registered terminator. Pinned in
+// tests so a future "be more lenient" change can't accidentally
+// terminate loops on prose like "I'm done with that file" buried in
+// the middle of the response.
+func TestParseDoneSignal(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"done.", true},
+		{"DONE", true},
+		{"Loop done.", true},
+		{"loop_done", true},
+		{"Made progress.\n\ndone.", true},
+		{"Made progress.\ndone.\n\n", true}, // trailing newlines OK
+		{"", false},
+		{"Made progress.", false},
+		{"I'm done with that file.\nMore work to do.", false}, // not last line
+		{"done. but also more stuff", false},                  // not exact match
+		{"work in progress", false},
+	}
+	for _, tc := range cases {
+		got := parseDoneSignal(tc.in)
+		if got != tc.want {
+			t.Errorf("parseDoneSignal(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestRunner_SelfTerminatesOnDoneSignal: when the spawned agent ends
+// its iteration with "done.", the runner must call Stop on the loop
+// so it doesn't keep firing. This is the autonomous self-improvement
+// use case — agent decides when the task is genuinely complete.
+func TestRunner_SelfTerminatesOnDoneSignal(t *testing.T) {
+	mgr := NewManager(newMemStorage())
+	l, _ := mgr.Add("Fix all bugs", ModeSelfPaced, 0)
+
+	spawnFn := func(ctx context.Context, prompt string) (string, bool, error) {
+		return "Fixed everything.\n\ndone.", true, nil
+	}
+
+	r := NewRunner(mgr, spawnFn, func() bool { return true })
+	r.fireOne(t.Context(), l)
+
+	got, _ := mgr.Get(l.ID)
+	if got.Status != StatusStopped {
+		t.Errorf("after agent emitted 'done.', status = %s, want stopped", got.Status)
+	}
+	if got.IterationCount != 1 {
+		t.Errorf("expected 1 iteration recorded before self-terminate, got %d", got.IterationCount)
+	}
+}
+
 // TestBuildIterationPrompt_MarkdownPointer: when UpdateMemory is on
 // AND the loop has at least one iteration, the prompt must point the
 // agent at the persisted markdown so it can read full history beyond

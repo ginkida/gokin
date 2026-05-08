@@ -234,6 +234,12 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 		OK:        ok && err == nil,
 	}
 
+	// agentDone signals "the work this loop was for is complete" — the
+	// agent voluntarily ending iteration via "done." marker. Captured
+	// here, acted on AFTER the iteration is recorded so the markdown
+	// preserves the final summary.
+	agentDone := false
+
 	switch {
 	case err != nil:
 		it.Summary = "Iteration error: " + truncateErr(err.Error())
@@ -246,6 +252,7 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	default:
 		it.Summary = summarizeOutput(output, "iteration completed")
 		it.NextHint = parseNextHint(output)
+		agentDone = parseDoneSignal(output)
 	}
 
 	recordErr := r.mgr.RecordIteration(l.ID, it)
@@ -274,6 +281,21 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 
 	if doneHook != nil {
 		doneHook(l.ID, it)
+	}
+
+	// Agent self-termination: if the iteration ended with "done.", stop
+	// the loop so it doesn't keep firing. Done AFTER recording so the
+	// final summary is in history. Stop is a no-op if the loop is
+	// already terminal (paused/stopped/removed), so this can't fight
+	// the user.
+	if agentDone {
+		if err := r.mgr.Stop(l.ID); err != nil {
+			logging.Debug("loops: self-terminate Stop failed (likely already terminal)",
+				"loop_id", l.ID, "error", err)
+		} else {
+			logging.Info("loops: agent self-terminated via 'done' marker",
+				"loop_id", l.ID, "iterations", l.IterationCount+1)
+		}
 	}
 }
 
@@ -339,6 +361,12 @@ func BuildIterationPrompt(l *Loop) string {
 	if l.Mode == ModeSelfPaced {
 		sb.WriteString("\n\nIf there's nothing to do until a specific event, end with a line like 'next: 30m' or 'wait 1h' — the scheduler will respect it as the floor for the next iteration.")
 	}
+
+	// Self-termination signal — works for both modes so a long-running
+	// "fix all bugs" loop can stop itself when the agent decides the
+	// work is genuinely done, instead of running until MaxIterations
+	// or the user notices and types /loop stop.
+	sb.WriteString("\n\nIf the task this loop was created for is genuinely complete, end the response with a line containing only `done.` — the loop will stop and won't fire again.")
 
 	return sb.String()
 }
@@ -436,4 +464,34 @@ func parseNextHint(output string) string {
 		}
 	}
 	return ""
+}
+
+// parseDoneSignal returns true when the agent's output ends with an
+// explicit "I'm finished" marker. Lets self-improvement loops
+// terminate themselves when the agent decides the work is complete,
+// instead of running until MaxIterations or until the user notices
+// and types /loop stop.
+//
+// Conservative format: only the LAST non-empty line, exact match for
+// "done.", "DONE", "loop done.", or "loop_done". Avoids false
+// positives from prose like "Done with that file" or "I'm done
+// reviewing this section" — the agent must opt in deliberately by
+// ending its response with one of these specific markers, which the
+// iteration prompt teaches.
+func parseDoneSignal(output string) bool {
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		switch strings.ToLower(line) {
+		case "done.", "done", "loop done.", "loop_done", "loop: done":
+			return true
+		}
+		// Stop scanning at the first non-empty line — the marker must
+		// be the closing line, not buried earlier in the output.
+		return false
+	}
+	return false
 }

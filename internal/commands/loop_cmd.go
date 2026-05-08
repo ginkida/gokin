@@ -119,7 +119,11 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 		if err := mgr.Stop(args[1]); err != nil {
 			return fmt.Sprintf("Failed to stop %s: %v", args[1], err), nil
 		}
-		return fmt.Sprintf("Stopped loop %s.", args[1]), nil
+		// Honest about the in-flight iteration: stop only prevents
+		// future iterations from being scheduled. A running iteration
+		// completes naturally so it doesn't leave half-edited files
+		// or partial commits behind.
+		return fmt.Sprintf("Stopped loop %s. (Any in-flight iteration finishes before the loop pauses.)", args[1]), nil
 	case "pause":
 		if len(args) < 2 {
 			return "Usage: /loop pause <id>", nil
@@ -127,7 +131,7 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 		if err := mgr.Pause(args[1]); err != nil {
 			return fmt.Sprintf("Failed to pause %s: %v", args[1], err), nil
 		}
-		return fmt.Sprintf("Paused loop %s. Resume with /loop resume %s.", args[1], args[1]), nil
+		return fmt.Sprintf("Paused loop %s. (Any in-flight iteration finishes before the pause takes effect.) Resume with /loop resume %s.", args[1], args[1]), nil
 	case "resume":
 		if len(args) < 2 {
 			return "Usage: /loop resume <id>", nil
@@ -151,7 +155,13 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 		if err := mgr.Remove(args[1]); err != nil {
 			return fmt.Sprintf("Failed to remove %s: %v", args[1], err), nil
 		}
-		return fmt.Sprintf("Removed loop %s.", args[1]), nil
+		// Honest about the in-flight iteration: an agent already
+		// running mid-task can still commit changes to disk before it
+		// notices the loop is gone (RecordIteration will reject the
+		// final write, but file edits / git commits the agent already
+		// made stay). Removing the loop in the manager just cleans up
+		// state — it doesn't roll back side effects.
+		return fmt.Sprintf("Removed loop %s. (An in-flight iteration may still finish; its file edits / commits won't be rolled back.)", args[1]), nil
 	}
 
 	// Not a verb. Try to parse first arg as an interval (5m, 1h, 30s).
