@@ -221,7 +221,12 @@ func (l *Logger) Len() int {
 
 // Flush forces an immediate save if dirty and waits for all pending saves.
 // This should be called before shutdown to ensure no data is lost.
-func (l *Logger) Flush() {
+//
+// Returns the save error (if any) so callers can decide whether to
+// retry or surface to the user. Previously the error was silently
+// dropped — at shutdown that meant audit entries from the current
+// session could be lost without anyone knowing.
+func (l *Logger) Flush() error {
 	// Cancel any pending debounced save
 	l.saveMu.Lock()
 	if l.saveTimer != nil {
@@ -231,23 +236,34 @@ func (l *Logger) Flush() {
 	l.saveMu.Unlock()
 
 	// Force save if dirty
+	var saveErr error
 	l.mu.Lock()
 	if l.dirty {
 		l.dirty = false
 		l.mu.Unlock()
-		l.save()
+		saveErr = l.save()
+		if saveErr != nil {
+			// Re-mark dirty so caller can retry with another Flush
+			// or so a future mutation's scheduled save will pick it
+			// up.
+			l.mu.Lock()
+			l.dirty = true
+			l.mu.Unlock()
+		}
 	} else {
 		l.mu.Unlock()
 	}
 
 	l.wg.Wait()
+	return saveErr
 }
 
 // Close flushes pending saves and performs cleanup.
-// This should be called on application shutdown.
+// This should be called on application shutdown. Returns the save
+// error so shutdown code can decide whether to surface it (per the
+// v0.80.8 pattern of reporting final-save failures at shutdown).
 func (l *Logger) Close() error {
-	l.Flush()
-	return nil
+	return l.Flush()
 }
 
 // Stats returns audit statistics.
@@ -357,7 +373,19 @@ func (l *Logger) scheduleSave() {
 
 		l.wg.Add(1)
 		defer l.wg.Done()
-		l.save()
+		// Audit log is security-critical: silently dropping a save
+		// failure means the user could be relying on incomplete logs
+		// to investigate an incident. Surface the failure at Error
+		// level AND re-mark dirty so the next mutation's scheduled
+		// save retries (instead of staying clean-but-actually-stale
+		// indefinitely until the user notices entries are missing).
+		if err := l.save(); err != nil {
+			logging.Error("audit log save failed — entries from this batch may be lost on restart",
+				"error", err)
+			l.mu.Lock()
+			l.dirty = true
+			l.mu.Unlock()
+		}
 	})
 }
 

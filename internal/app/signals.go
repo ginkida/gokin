@@ -303,10 +303,19 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		}
 	}
 
-	// 13. Flush audit logger to ensure all entries are persisted
+	// 13. Flush audit logger to ensure all entries are persisted.
+	// Save errors used to be silently dropped — for an audit log used
+	// to investigate incidents, that meant entries could vanish at
+	// shutdown without anyone knowing. Now Flush returns the error;
+	// surface it the same way as session save (Error log + stderr
+	// since TUI is torn down by this point).
 	if a.auditLogger != nil {
 		logging.Debug("flushing audit logger")
-		a.auditLogger.Flush()
+		if err := a.auditLogger.Flush(); err != nil {
+			logging.Error("audit log flush failed during shutdown — recent entries may be lost",
+				"error", err)
+			fmt.Fprintf(os.Stderr, "WARNING: failed to flush audit log at shutdown: %v\n", err)
+		}
 	}
 
 	// 14. Stop and save session history via session manager (preferred) or fallback
