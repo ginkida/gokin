@@ -106,7 +106,12 @@ func (w *WorkingMemoryManager) filePath() string {
 
 func (w *WorkingMemoryManager) writeToDisk() {
 	dir := filepath.Join(w.workDir, ".gokin")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	// Owner-only (0700/0600): the working memory snapshot summarizes
+	// what the agent learned during the session — file paths, code
+	// fragments, partial results — same sensitivity class as the
+	// chat history (also 0600). Group-readable was the prior default
+	// but is overly permissive on shared/multi-user systems.
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		logging.Debug("failed to create .gokin dir for working memory", "error", err)
 		return
 	}
@@ -115,7 +120,7 @@ func (w *WorkingMemoryManager) writeToDisk() {
 	content := w.content
 	w.mu.RUnlock()
 
-	if err := fileutil.AtomicWrite(w.filePath(), []byte(content), 0640); err != nil {
+	if err := fileutil.AtomicWrite(w.filePath(), []byte(content), 0600); err != nil {
 		logging.Debug("failed to write working memory", "error", err)
 	}
 }

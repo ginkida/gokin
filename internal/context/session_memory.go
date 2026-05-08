@@ -368,11 +368,16 @@ func (s *SessionMemoryManager) filePath() string {
 
 func (s *SessionMemoryManager) writeToDisk() {
 	dir := filepath.Join(s.workDir, ".gokin")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	// Owner-only (0700/0600): session memory captures recent files,
+	// errors, and decisions during the active session — same
+	// sensitivity class as chat history (also 0600). Group-readable
+	// was the prior default but is overly permissive on shared
+	// systems.
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		logging.Debug("failed to create .gokin dir for session memory", "error", err)
 		return
 	}
-	if err := fileutil.AtomicWrite(s.filePath(), []byte(s.content), 0640); err != nil {
+	if err := fileutil.AtomicWrite(s.filePath(), []byte(s.content), 0600); err != nil {
 		logging.Debug("failed to write session memory", "error", err)
 	}
 }

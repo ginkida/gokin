@@ -176,6 +176,41 @@ func TestSessionMemory_Extract_SkipsShortHistory(t *testing.T) {
 	}
 }
 
+// TestSessionMemory_PersistsOwnerOnly: session memory captures
+// recent files, errors, and decisions during the active session.
+// Same sensitivity class as the chat history (also 0600). Pinned in
+// tests so a future "default 0644 is fine" change can't silently
+// regress.
+func TestSessionMemory_PersistsOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewSessionMemoryManager(dir, DefaultSessionMemoryConfig())
+
+	history := []*genai.Content{
+		userMsg("Please touch a file so we extract something"),
+		modelMsg("On it."),
+		funcCallMsg("read", map[string]any{"file_path": "/src/anything.go"}),
+		funcRespMsg("read", map[string]any{"content": "package anything", "success": true}),
+	}
+	mgr.Extract(history, 5000)
+
+	gokinDir := dir + "/.gokin"
+	dirInfo, err := os.Stat(gokinDir)
+	if err != nil {
+		t.Fatalf("stat .gokin: %v", err)
+	}
+	if dirMode := dirInfo.Mode().Perm(); dirMode != 0700 {
+		t.Errorf(".gokin dir mode = %o, want 0700 (owner-only)", dirMode)
+	}
+
+	fileInfo, err := os.Stat(gokinDir + "/.session-memory.md")
+	if err != nil {
+		t.Fatalf("stat session-memory file: %v", err)
+	}
+	if fileMode := fileInfo.Mode().Perm(); fileMode != 0600 {
+		t.Errorf("session-memory file mode = %o, want 0600 (owner-only)", fileMode)
+	}
+}
+
 func TestSessionMemory_Extract_BuildsCurrentStateSection(t *testing.T) {
 	mgr := NewSessionMemoryManager(t.TempDir(), DefaultSessionMemoryConfig())
 	history := []*genai.Content{

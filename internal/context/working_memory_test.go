@@ -46,6 +46,40 @@ func TestWorkingMemory_UpdateFromTurn_WritesStructuredMarkdown(t *testing.T) {
 	}
 }
 
+// TestWorkingMemory_PersistsOwnerOnly: working memory captures
+// session-scoped context that may include code fragments and file
+// paths from the user's project. Same sensitivity class as the chat
+// history (0600). Pinned in tests so a future "default 0644 is fine"
+// change can't silently regress.
+func TestWorkingMemory_PersistsOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewWorkingMemoryManager(dir)
+
+	if !mgr.UpdateFromTurn(WorkingMemoryTurn{
+		UserMessage: "anything",
+		Response:    "Did the work.\nVerification: go test ./...",
+	}) {
+		t.Fatal("UpdateFromTurn returned false; need at least one extracted line")
+	}
+
+	gokinDir := filepath.Join(dir, ".gokin")
+	dirInfo, err := os.Stat(gokinDir)
+	if err != nil {
+		t.Fatalf("stat .gokin: %v", err)
+	}
+	if dirMode := dirInfo.Mode().Perm(); dirMode != 0700 {
+		t.Errorf(".gokin dir mode = %o, want 0700 (owner-only)", dirMode)
+	}
+
+	fileInfo, err := os.Stat(filepath.Join(gokinDir, ".working-memory.md"))
+	if err != nil {
+		t.Fatalf("stat working-memory file: %v", err)
+	}
+	if fileMode := fileInfo.Mode().Perm(); fileMode != 0600 {
+		t.Errorf("working-memory file mode = %o, want 0600 (owner-only)", fileMode)
+	}
+}
+
 func TestWorkingMemory_LoadFromDisk_RestoresContent(t *testing.T) {
 	dir := t.TempDir()
 	mgr := NewWorkingMemoryManager(dir)
