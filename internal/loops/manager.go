@@ -220,12 +220,20 @@ func (m *Manager) Pause(id string) error {
 
 // Resume re-arms a paused loop. Recomputes NextRunAt from "now" so a
 // loop paused for hours doesn't fire immediately N times to "catch up".
+//
+// Clears AutoPaused and resets ConsecutiveFailures: by resuming, the
+// user is asserting that the underlying issue is fixed (or worth
+// retrying). A stale ConsecutiveFailures count would re-trip the
+// auto-pause circuit on the very first new failure, which would
+// surprise users who expected a fresh streak after manual resume.
 func (m *Manager) Resume(id string) error {
 	return m.transition(id, func(l *Loop) error {
 		if l.Status != StatusPaused {
 			return fmt.Errorf("loop %s: cannot resume from status %s", id, l.Status)
 		}
 		l.Status = StatusRunning
+		l.AutoPaused = false
+		l.ConsecutiveFailures = 0
 		now := time.Now()
 		if l.Mode == ModeInterval {
 			l.NextRunAt = now.Add(time.Duration(l.IntervalSeconds) * time.Second)

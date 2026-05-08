@@ -166,6 +166,48 @@ func TestLoop_AppendIteration_TrimsHistory(t *testing.T) {
 	}
 }
 
+// TestLoop_AppendIteration_AutoPausesOnConsecutiveFailures: a runaway
+// failing loop must auto-pause after ConsecutiveFailureLimit, with
+// AutoPaused=true so the UI can warn the user. Otherwise the loop
+// silently burns LLM credits forever (real cost, real concern). A
+// success in the middle resets the counter — only ConsecutiveFailureLimit
+// failures BACK-TO-BACK trip the breaker.
+func TestLoop_AppendIteration_AutoPausesOnConsecutiveFailures(t *testing.T) {
+	l := &Loop{
+		ID: "loop-breaker", Task: "t", Mode: ModeInterval,
+		IntervalSeconds: 60, Status: StatusRunning, CreatedAt: time.Now(),
+	}
+
+	// Below threshold: no auto-pause.
+	for i := range ConsecutiveFailureLimit - 1 {
+		l.AppendIteration(Iteration{N: i + 1, StartedAt: time.Now(), Duration: time.Second, OK: false})
+	}
+	if l.Status != StatusRunning {
+		t.Errorf("after %d failures, status = %s, want still running", ConsecutiveFailureLimit-1, l.Status)
+	}
+	if l.AutoPaused {
+		t.Errorf("AutoPaused = true before threshold; want false")
+	}
+
+	// One success resets the counter.
+	l.AppendIteration(Iteration{N: 99, StartedAt: time.Now(), Duration: time.Second, OK: true})
+	if l.ConsecutiveFailures != 0 {
+		t.Errorf("after success, ConsecutiveFailures = %d, want 0 (reset)", l.ConsecutiveFailures)
+	}
+
+	// Now fail enough times to trip the breaker — even though lifetime
+	// FailureCount is high, ConsecutiveFailures is what matters.
+	for i := range ConsecutiveFailureLimit {
+		l.AppendIteration(Iteration{N: 200 + i, StartedAt: time.Now(), Duration: time.Second, OK: false})
+	}
+	if l.Status != StatusPaused {
+		t.Errorf("after %d back-to-back failures, status = %s, want paused", ConsecutiveFailureLimit, l.Status)
+	}
+	if !l.AutoPaused {
+		t.Error("AutoPaused = false after auto-pause; should be true")
+	}
+}
+
 // TestLoop_AppendIteration_TracksSuccessFailure: lifetime
 // SuccessCount/FailureCount must be incremented based on it.OK so
 // the /loop list summary can distinguish a brand-new loop from one

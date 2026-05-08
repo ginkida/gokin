@@ -169,17 +169,36 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 		Message: fmt.Sprintf("Loop %s #%d: %s", loopID, it.N, it.Summary),
 	})
 
-	// Write per-loop markdown for human-readable persistent context.
-	// Re-read the loop from the manager so we capture the just-recorded
-	// iteration alongside the rest of the history (the `it` parameter
-	// is just the latest one; the markdown shows recent N iterations).
-	// Both sides are nil-safe — skip silently if the loop subsystem is
-	// disabled (e.g. unit-test builds without configDir/workDir).
-	if a.loopMemory != nil && a.loopManager != nil {
-		if loop, ok := a.loopManager.Get(loopID); ok && loop.UpdateMemory {
-			if err := a.loopMemory.WriteLoop(loop); err != nil {
-				logging.Warn("loops: failed to write iteration markdown",
-					"loop_id", loopID, "error", err)
+	// Re-read the loop from the manager so we capture post-iteration
+	// state (auto-pause flag, markdown content). The `it` parameter is
+	// just the latest result; the manager has the full picture.
+	if a.loopManager != nil {
+		if loop, ok := a.loopManager.Get(loopID); ok {
+			// Surface the auto-pause to the user via a high-visibility
+			// warning toast. AppendIteration sets AutoPaused=true when
+			// ConsecutiveFailures crosses the limit; without surfacing
+			// it here, the user wouldn't know why the loop suddenly
+			// stopped firing — they'd think gokin was broken.
+			if loop.AutoPaused && loop.Status == loops.StatusPaused {
+				logging.Warn("loops: auto-paused after consecutive failures",
+					"loop_id", loopID,
+					"consecutive_failures", loop.ConsecutiveFailures)
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type: ui.StatusRecoverableError,
+					Message: fmt.Sprintf(
+						"Loop %s auto-paused after %d failures in a row. Inspect with /loop status %s, then /loop resume %s when fixed.",
+						loopID, loop.ConsecutiveFailures, loopID, loopID),
+				})
+			}
+
+			// Write per-loop markdown for human-readable persistent
+			// context. Skip silently when memory writer is disabled
+			// (e.g. unit-test builds without workDir).
+			if a.loopMemory != nil && loop.UpdateMemory {
+				if err := a.loopMemory.WriteLoop(loop); err != nil {
+					logging.Warn("loops: failed to write iteration markdown",
+						"loop_id", loopID, "error", err)
+				}
 			}
 		}
 	}

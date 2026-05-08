@@ -307,6 +307,43 @@ func TestManager_PersistsAcrossNew(t *testing.T) {
 	}
 }
 
+// TestManager_Resume_ClearsAutoPause: when a loop is auto-paused by
+// the consecutive-failure breaker, /loop resume must reset both
+// AutoPaused and ConsecutiveFailures so the user gets a fresh
+// streak. Otherwise a single new failure would re-trip the breaker
+// immediately, defeating the manual recovery the user just initiated.
+func TestManager_Resume_ClearsAutoPause(t *testing.T) {
+	m := NewManager(newMemStorage())
+	l, _ := m.Add("task", ModeInterval, 600)
+
+	// Trip the breaker.
+	for range ConsecutiveFailureLimit {
+		_ = m.RecordIteration(l.ID, Iteration{StartedAt: time.Now(), Duration: time.Second, OK: false})
+	}
+
+	got, _ := m.Get(l.ID)
+	if got.Status != StatusPaused || !got.AutoPaused {
+		t.Fatalf("setup failed: status=%s autoPaused=%v; want paused/true",
+			got.Status, got.AutoPaused)
+	}
+
+	if err := m.Resume(l.ID); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	got, _ = m.Get(l.ID)
+	if got.Status != StatusRunning {
+		t.Errorf("after Resume, status = %s, want running", got.Status)
+	}
+	if got.AutoPaused {
+		t.Error("AutoPaused not cleared after Resume")
+	}
+	if got.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d after Resume, want 0 (fresh streak)",
+			got.ConsecutiveFailures)
+	}
+}
+
 // TestManager_RecordIteration_GoneAfterRemove: a long-running iteration
 // finishes and tries to RecordIteration after the user has /loop
 // removed the loop. RecordIteration must return ErrLoopGone (not a

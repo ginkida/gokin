@@ -234,9 +234,16 @@ func formatList(loopList []*loops.Loop) string {
 
 func formatLoopLine(l *loops.Loop) string {
 	statusMark := "●"
+	statusLabel := string(l.Status)
 	switch l.Status {
 	case loops.StatusPaused:
 		statusMark = "‖"
+		// Distinguish manual pause from breaker-triggered auto-pause
+		// — the latter is a warning the user must address before
+		// /loop resume.
+		if l.AutoPaused {
+			statusLabel = "auto-paused"
+		}
 	case loops.StatusStopped:
 		statusMark = "■"
 	case loops.StatusCompleted:
@@ -279,7 +286,7 @@ func formatLoopLine(l *loops.Loop) string {
 		}
 	}
 	return fmt.Sprintf("  %s %s  [%s]  %s%s%s\n      %s",
-		statusMark, l.ID, mode, l.Status, iterHint, nextHint, taskPrev)
+		statusMark, l.ID, mode, statusLabel, iterHint, nextHint, taskPrev)
 }
 
 func formatStatus(mgr LoopManager, id string) (string, error) {
@@ -289,7 +296,11 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Loop %s — %s\n", l.ID, l.Status))
+	statusLabel := string(l.Status)
+	if l.AutoPaused && l.Status == loops.StatusPaused {
+		statusLabel = "auto-paused (consecutive failures)"
+	}
+	sb.WriteString(fmt.Sprintf("Loop %s — %s\n", l.ID, statusLabel))
 	sb.WriteString(fmt.Sprintf("  Task: %s\n", l.Task))
 	if l.Mode == loops.ModeInterval {
 		sb.WriteString(fmt.Sprintf("  Mode: interval (every %s)\n",

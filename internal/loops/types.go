@@ -112,6 +112,20 @@ type Loop struct {
 	// re-populate correctly from the next iteration onward.
 	SuccessCount int `json:"success_count,omitempty"`
 	FailureCount int `json:"failure_count,omitempty"`
+
+	// ConsecutiveFailures resets to 0 on every successful iteration
+	// and increments otherwise. When it crosses
+	// ConsecutiveFailureLimit, the loop is auto-paused so a runaway
+	// failure cycle doesn't burn LLM credits indefinitely. The user
+	// gets a warning and can /loop resume after fixing the underlying
+	// issue.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+
+	// AutoPaused is true when the loop was paused by the
+	// ConsecutiveFailures cap rather than by an explicit /loop pause.
+	// Surfaced to the UI so the warning toast can mention WHY the
+	// pause happened. Cleared on Resume.
+	AutoPaused bool `json:"auto_paused,omitempty"`
 }
 
 // Iteration is the result of one execution of the loop's task.
@@ -136,18 +150,29 @@ const MaxHistorySize = 50
 // soon" — at minimum we wait this long.
 const DefaultMinDelaySeconds = 300 // 5 minutes
 
+// ConsecutiveFailureLimit caps the failures-in-a-row before auto-pause.
+// Picked to absorb transient flakes (network blips, temporary 503s)
+// without letting a genuinely broken loop run for hours: at the
+// default 5-min self-paced cadence, 5 failures cost ~25 minutes of
+// LLM time before the user is alerted; faster cadences burn through
+// it sooner. Users can /loop resume after fixing root cause.
+const ConsecutiveFailureLimit = 5
+
 // AppendIteration adds a result to the loop's history, dropping the
 // oldest entry if we'd exceed MaxHistorySize. Updates IterationCount
-// (lifetime), LastRunAt, SuccessCount/FailureCount, and (for interval
-// mode) the next run time.
+// (lifetime), LastRunAt, SuccessCount/FailureCount,
+// ConsecutiveFailures, and (for interval mode) the next run time. May
+// auto-pause the loop when ConsecutiveFailures crosses the limit.
 //
 // Caller is responsible for persisting the loop after calling this.
 func (l *Loop) AppendIteration(it Iteration) {
 	l.IterationCount++
 	if it.OK {
 		l.SuccessCount++
+		l.ConsecutiveFailures = 0
 	} else {
 		l.FailureCount++
+		l.ConsecutiveFailures++
 	}
 	l.Iterations = append(l.Iterations, it)
 	if len(l.Iterations) > MaxHistorySize {
@@ -181,6 +206,18 @@ func (l *Loop) AppendIteration(it Iteration) {
 	if l.MaxIterations > 0 && l.IterationCount >= l.MaxIterations {
 		l.Status = StatusCompleted
 		l.StoppedAt = l.LastRunAt
+		return
+	}
+
+	// Consecutive-failure circuit breaker. Auto-pause so the user sees
+	// the issue before the next iteration burns more credits. Skip if
+	// we just transitioned to Completed (max iterations reached); the
+	// terminal state already prevents further runs and overriding it
+	// to Paused would be wrong (a "completed" loop shouldn't suddenly
+	// become resumable just because the last few iterations failed).
+	if l.ConsecutiveFailures >= ConsecutiveFailureLimit && l.Status == StatusRunning {
+		l.Status = StatusPaused
+		l.AutoPaused = true
 	}
 }
 
