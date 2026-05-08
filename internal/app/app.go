@@ -210,6 +210,7 @@ type App struct {
 	// background scheduler is started by App.Run; nil-safe everywhere
 	// in case the loop subsystem is disabled or not yet wired.
 	loopManager *loops.Manager
+	loopRunner  *loops.Runner
 
 	// Streaming token estimation
 	streamedChars           int // Accumulated chars during current streaming session
@@ -587,6 +588,18 @@ func (a *App) Run() error {
 	}
 	if a.contextAgent != nil {
 		a.safeGo("context-agent", func() { a.contextAgent.Start(a.ctx) })
+	}
+
+	// Start the loops scheduler. The Runner.Start method spawns its
+	// own goroutine internally and exits cleanly on a.ctx.Done() —
+	// no extra safeGo wrap needed, but Runner.run() does its own
+	// recover + PanicStack logging per CLAUDE.md reliability invariants.
+	if a.loopManager != nil && a.loopRunner == nil && a.agentRunner != nil {
+		spawner := newLoopSpawner(a)
+		a.loopRunner = loops.NewRunner(a.loopManager, spawner, a.isLoopRunnerIdle)
+		a.loopRunner.SetIterationStartHook(a.onLoopIterationStart)
+		a.loopRunner.SetIterationDoneHook(a.onLoopIterationDone)
+		a.loopRunner.Start(a.ctx)
 	}
 
 	// Set app reference in TUI for data providers
