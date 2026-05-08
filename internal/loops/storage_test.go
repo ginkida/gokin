@@ -166,6 +166,48 @@ func TestLoop_AppendIteration_TrimsHistory(t *testing.T) {
 	}
 }
 
+// TestLoop_AppendIteration_TracksSuccessFailure: lifetime
+// SuccessCount/FailureCount must be incremented based on it.OK so
+// the /loop list summary can distinguish a brand-new loop from one
+// silently failing every cycle. The counts persist across the
+// MaxHistorySize trim — they're lifetime totals, not derived from
+// the visible Iterations slice.
+func TestLoop_AppendIteration_TracksSuccessFailure(t *testing.T) {
+	l := &Loop{
+		ID: "loop-counts", Task: "t", Mode: ModeInterval,
+		IntervalSeconds: 60, Status: StatusRunning, CreatedAt: time.Now(),
+	}
+
+	// 3 successes, 2 failures, in mixed order.
+	pattern := []bool{true, false, true, false, true}
+	for i, ok := range pattern {
+		l.AppendIteration(Iteration{N: i + 1, StartedAt: time.Now(), Duration: time.Second, OK: ok})
+	}
+
+	if l.SuccessCount != 3 {
+		t.Errorf("SuccessCount = %d, want 3", l.SuccessCount)
+	}
+	if l.FailureCount != 2 {
+		t.Errorf("FailureCount = %d, want 2", l.FailureCount)
+	}
+	if l.IterationCount != 5 {
+		t.Errorf("IterationCount = %d, want 5", l.IterationCount)
+	}
+
+	// Counts must survive the history trim — they're lifetime, not
+	// derived from the visible window.
+	for i := range MaxHistorySize + 10 {
+		l.AppendIteration(Iteration{N: 100 + i, StartedAt: time.Now(), Duration: time.Second, OK: false})
+	}
+	if l.SuccessCount != 3 {
+		t.Errorf("SuccessCount after trim = %d, want 3 (lifetime not affected by ring buffer)", l.SuccessCount)
+	}
+	wantFails := 2 + MaxHistorySize + 10
+	if l.FailureCount != wantFails {
+		t.Errorf("FailureCount after trim = %d, want %d", l.FailureCount, wantFails)
+	}
+}
+
 // TestLoop_AppendIteration_CompletesOnMaxIterations: hitting
 // MaxIterations marks the loop completed (terminal). Scheduler
 // uses IsActive to skip completed loops.

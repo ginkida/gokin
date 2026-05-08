@@ -252,12 +252,20 @@ func formatLoopLine(l *loops.Loop) string {
 	// progress?" without drilling into /loop status. Without this the
 	// user couldn't tell a brand-new loop apart from one that's
 	// silently failing every iteration — both showed "running".
+	//
+	// FailureCount is shown only when non-zero so the common-case
+	// listing stays compact (`5 iters` not `5 iters · 0✗`). When
+	// failures exist, surface them prominently so a 50-fail-in-a-row
+	// loop is impossible to miss at a glance.
 	iterHint := ""
 	if l.IterationCount > 0 || l.MaxIterations > 0 {
 		if l.MaxIterations > 0 {
 			iterHint = fmt.Sprintf(" — %d/%d iters", l.IterationCount, l.MaxIterations)
 		} else {
 			iterHint = fmt.Sprintf(" — %d iters", l.IterationCount)
+		}
+		if l.FailureCount > 0 {
+			iterHint += fmt.Sprintf(" · %d✗", l.FailureCount)
 		}
 	}
 
@@ -305,6 +313,12 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	sb.WriteString(fmt.Sprintf("  Iterations: %d", l.IterationCount))
 	if l.MaxIterations > 0 {
 		sb.WriteString(fmt.Sprintf(" / %d", l.MaxIterations))
+	}
+	// Success/failure breakdown when at least one iteration recorded.
+	// Hidden when there are no iterations to avoid the noise of "0✓ 0✗"
+	// on a brand-new loop.
+	if l.IterationCount > 0 {
+		sb.WriteString(fmt.Sprintf(" (%d✓ %d✗)", l.SuccessCount, l.FailureCount))
 	}
 	sb.WriteString("\n")
 

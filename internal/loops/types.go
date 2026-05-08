@@ -103,6 +103,15 @@ type Loop struct {
 
 	// IterationCount is the lifetime count, including dropped-off entries.
 	IterationCount int `json:"iteration_count"`
+
+	// SuccessCount and FailureCount are lifetime counters of completed
+	// iterations partitioned by outcome. Used by /loop list to
+	// distinguish a loop making real progress from one silently
+	// failing every cycle. Pre-existing loop state files written
+	// before these fields were added load with zeros — they'll
+	// re-populate correctly from the next iteration onward.
+	SuccessCount int `json:"success_count,omitempty"`
+	FailureCount int `json:"failure_count,omitempty"`
 }
 
 // Iteration is the result of one execution of the loop's task.
@@ -129,11 +138,17 @@ const DefaultMinDelaySeconds = 300 // 5 minutes
 
 // AppendIteration adds a result to the loop's history, dropping the
 // oldest entry if we'd exceed MaxHistorySize. Updates IterationCount
-// (lifetime), LastRunAt, and (for interval mode) the next run time.
+// (lifetime), LastRunAt, SuccessCount/FailureCount, and (for interval
+// mode) the next run time.
 //
 // Caller is responsible for persisting the loop after calling this.
 func (l *Loop) AppendIteration(it Iteration) {
 	l.IterationCount++
+	if it.OK {
+		l.SuccessCount++
+	} else {
+		l.FailureCount++
+	}
 	l.Iterations = append(l.Iterations, it)
 	if len(l.Iterations) > MaxHistorySize {
 		// Drop oldest. Realloc fresh slice so the GC can free the old

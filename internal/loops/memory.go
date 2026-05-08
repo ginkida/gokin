@@ -117,6 +117,9 @@ func RenderLoopMarkdown(l *Loop) string {
 	if l.MaxIterations > 0 {
 		fmt.Fprintf(&sb, " / %d", l.MaxIterations)
 	}
+	if l.IterationCount > 0 {
+		fmt.Fprintf(&sb, " (%d ✓ / %d ✗)", l.SuccessCount, l.FailureCount)
+	}
 	sb.WriteString("\n\n")
 
 	if len(l.Iterations) == 0 {

@@ -53,34 +53,56 @@ func newLoopSpawner(a *App) loops.Spawner {
 
 		const maxTurns = 15
 
-		agentID, err := runner.Spawn(ctx, "general", prompt, maxTurns, model)
-		if err != nil {
-			return "", false, fmt.Errorf("spawn loop iteration: %w", err)
+		agentID, spawnErr := runner.Spawn(ctx, "general", prompt, maxTurns, model)
+		if spawnErr != nil && agentID == "" {
+			// True Spawn-time failure (couldn't construct/register agent).
+			// No agentID means there's no result to retrieve — surface
+			// the error directly.
+			return "", false, fmt.Errorf("spawn loop iteration: %w", spawnErr)
 		}
 
-		// Wait for completion. The Runner's iteration timeout (default
-		// 10 min) bounds this — ctx is the iteration ctx, not the
-		// app-lifetime ctx, so a stuck iteration unblocks others.
-		result, err := runner.WaitWithContext(ctx, agentID)
-		if err != nil {
-			return "", false, fmt.Errorf("wait loop iteration: %w", err)
+		// Spawn is synchronous (blocks until agent.Run returns), so the
+		// result is already in the runner's results map by the time we
+		// get here — even if Spawn returned an error, the agent likely
+		// produced partial output that we want to capture in the
+		// iteration summary instead of throwing away.
+		//
+		// WaitWithContext's fast path hits immediately for a completed
+		// result; we keep it (rather than calling GetResult) so a not-
+		// yet-completed result waits cleanly for completion via the
+		// channel notification.
+		result, waitErr := runner.WaitWithContext(ctx, agentID)
+		if waitErr != nil && result == nil {
+			return "", false, fmt.Errorf("wait loop iteration: %w", waitErr)
 		}
 
 		ok := result != nil &&
 			result.Status == agent.AgentStatusCompleted &&
-			result.Error == ""
+			result.Error == "" &&
+			spawnErr == nil
 
 		output := ""
 		if result != nil {
 			output = strings.TrimSpace(result.Output)
 			if !ok && result.Error != "" {
-				// Surface the error in the output so the iteration
+				// Surface the agent's error in the output so the iteration
 				// summary captures something useful.
 				if output == "" {
 					output = "agent error: " + result.Error
 				} else {
 					output += "\n\n[agent error: " + result.Error + "]"
 				}
+			}
+		}
+		// If Spawn errored but we DID capture partial output, append the
+		// spawn-side error too — it's the proximate cause and the user
+		// will want to see it next to whatever the agent managed to say.
+		if spawnErr != nil {
+			suffix := "[spawn error: " + spawnErr.Error() + "]"
+			if output == "" {
+				output = suffix
+			} else {
+				output += "\n\n" + suffix
 			}
 		}
 
