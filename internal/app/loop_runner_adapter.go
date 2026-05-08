@@ -125,9 +125,13 @@ func (a *App) onLoopIterationStart(loopID string) {
 }
 
 // onLoopIterationDone fires after the iteration result is recorded.
-// Logs the outcome for post-mortem and posts a status update so the
-// user knows the loop made progress. Phase 3 will hook in here to
-// write the iteration summary into project MEMORY.md.
+// Logs the outcome for post-mortem, posts a status update, and (per
+// the loop's UpdateMemory setting) writes the latest snapshot to a
+// human-readable markdown file under <workDir>/.gokin/loops/<id>.md.
+//
+// The markdown write happens AFTER the manager's RecordIteration call
+// — the JSON state is the source of truth; the markdown is a
+// convenience for grep / browser navigation.
 func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 	statusType := ui.StatusInfo
 	if !it.OK {
@@ -142,4 +146,19 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 		Type:    statusType,
 		Message: fmt.Sprintf("Loop %s #%d: %s", loopID, it.N, it.Summary),
 	})
+
+	// Write per-loop markdown for human-readable persistent context.
+	// Re-read the loop from the manager so we capture the just-recorded
+	// iteration alongside the rest of the history (the `it` parameter
+	// is just the latest one; the markdown shows recent N iterations).
+	// Both sides are nil-safe — skip silently if the loop subsystem is
+	// disabled (e.g. unit-test builds without configDir/workDir).
+	if a.loopMemory != nil && a.loopManager != nil {
+		if loop, ok := a.loopManager.Get(loopID); ok && loop.UpdateMemory {
+			if err := a.loopMemory.WriteLoop(loop); err != nil {
+				logging.Warn("loops: failed to write iteration markdown",
+					"loop_id", loopID, "error", err)
+			}
+		}
+	}
 }

@@ -211,6 +211,7 @@ type App struct {
 	// in case the loop subsystem is disabled or not yet wired.
 	loopManager *loops.Manager
 	loopRunner  *loops.Runner
+	loopMemory  *loops.MemoryWriter // human-readable per-loop markdown
 
 	// Streaming token estimation
 	streamedChars           int // Accumulated chars during current streaming session
@@ -599,6 +600,16 @@ func (a *App) Run() error {
 		a.loopRunner = loops.NewRunner(a.loopManager, spawner, a.isLoopRunnerIdle)
 		a.loopRunner.SetIterationStartHook(a.onLoopIterationStart)
 		a.loopRunner.SetIterationDoneHook(a.onLoopIterationDone)
+		// Wire markdown cleanup on /loop remove so we don't leak
+		// orphaned .gokin/loops/<id>.md files.
+		if a.loopMemory != nil {
+			a.loopManager.SetOnRemove(func(id string) {
+				if err := a.loopMemory.DeleteLoop(id); err != nil {
+					logging.Warn("loops: failed to delete markdown on remove",
+						"loop_id", id, "error", err)
+				}
+			})
+		}
 		a.loopRunner.Start(a.ctx)
 	}
 

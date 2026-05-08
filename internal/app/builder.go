@@ -105,6 +105,7 @@ type Builder struct {
 	// Loops (autonomous recurring tasks, v0.81+). Initialized late in
 	// the build pipeline so the home-dir lookup happens once.
 	loopManager *loops.Manager
+	loopMemory  *loops.MemoryWriter
 
 	// Context Predictor (predictive file loading)
 	contextPredictor *appcontext.ContextPredictor
@@ -692,6 +693,15 @@ func (b *Builder) initManagers() error {
 		loopStorage := loops.NewFileStorage(filepath.Join(b.configDir, "loops"))
 		b.loopManager = loops.NewManager(loopStorage)
 		logging.Debug("loops manager initialized", "dir", filepath.Join(b.configDir, "loops"))
+
+		// Per-loop human-readable markdown lives in the project's
+		// .gokin/loops/ directory (separate from the global config dir
+		// — these are project-scoped artifacts the user can grep / git
+		// add / git ignore as desired).
+		if b.workDir != "" {
+			b.loopMemory = loops.NewMemoryWriter(b.workDir)
+			logging.Debug("loops memory writer initialized", "dir", filepath.Join(b.workDir, ".gokin", "loops"))
+		}
 	}
 
 	// Hooks manager
@@ -2151,6 +2161,7 @@ func (b *Builder) assembleApp() *App {
 		// has access from start; the background scheduler is started
 		// later by App.Run.
 		loopManager: b.loopManager,
+		loopMemory:  b.loopMemory,
 		sessionMemory:     b.sessionMemory,
 		workingMemory:     b.workingMemory,
 		// Persistent stores for flush on shutdown

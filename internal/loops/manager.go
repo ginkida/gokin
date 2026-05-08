@@ -24,6 +24,22 @@ type Manager struct {
 
 	mu    sync.RWMutex
 	loops map[string]*Loop
+
+	// onRemove fires after a successful Remove so external state (e.g.
+	// the markdown memory file) can be cleaned up too. Optional;
+	// nil-safe. Wired by the App constructor — keeps Manager unaware
+	// of UI/memory layers (clean dependency direction: Manager →
+	// Storage only).
+	onRemove func(loopID string)
+}
+
+// SetOnRemove installs a callback fired after each successful Remove.
+// Idempotent — second call replaces the prior callback. Safe to call
+// from any goroutine.
+func (m *Manager) SetOnRemove(fn func(loopID string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onRemove = fn
 }
 
 // NewManager constructs a Manager backed by the given Storage. Loads
@@ -219,17 +235,28 @@ func (m *Manager) FireNow(id string) error {
 // after Remove the loop is gone — no historical reference, no /loop
 // status. Use Stop for "I don't want this to fire anymore but keep the
 // record"; use Remove for "purge this entirely".
+//
+// Fires onRemove (if set) after the manager-side delete succeeds so
+// downstream stores (per-loop markdown, etc.) can clean up too.
+// Callback runs OUTSIDE m.mu to avoid lock-order issues with whatever
+// the callback touches.
 func (m *Manager) Remove(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, ok := m.loops[id]; !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("loop %s: not found", id)
 	}
 	if err := m.storage.Delete(id); err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	delete(m.loops, id)
+	cb := m.onRemove
+	m.mu.Unlock()
 	logging.Info("loops: removed", "id", id)
+	if cb != nil {
+		cb(id)
+	}
 	return nil
 }
 
