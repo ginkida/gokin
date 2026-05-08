@@ -281,8 +281,16 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 // agent for one iteration. Includes the task description and recent
 // summary context so the agent picks up where it left off.
 //
-// Exported so the runner package can test prompt shape and the future
-// Phase 3 memory writer can format consistently.
+// For substantial multi-iteration work (e.g. "fix bugs in this app"),
+// the inline 3-summary preview is too thin — the agent needs to know
+// what FILES prior iterations touched, what tests they ran, what
+// they decided. We point the agent at the persisted markdown so it
+// can `read .gokin/loops/<id>.md` for full history when needed.
+// Without this hint the agent re-derives prior work each iteration
+// and drifts in direction.
+//
+// Exported so the runner package can test prompt shape and the
+// memory writer can format consistently.
 func BuildIterationPrompt(l *Loop) string {
 	var sb strings.Builder
 	sb.WriteString("[Loop iteration ")
@@ -311,9 +319,27 @@ func BuildIterationPrompt(l *Loop) string {
 				it.StartedAt.Format("2006-01-02 15:04"),
 				it.Summary)
 		}
+		// Pointer to the full log — read tool can fetch it for the
+		// missing context (file paths, tool calls, full summaries) the
+		// inline preview lacks. UpdateMemory==false loops won't have
+		// this file, so only mention when actually persisted.
+		if l.UpdateMemory {
+			fmt.Fprintf(&sb, "\nFull iteration log (all %d, with files touched + outcomes): .gokin/loops/%s.md\n", l.IterationCount, l.ID)
+			sb.WriteString("Read it when you need to see what prior iterations actually did, not just their last sentence.\n")
+		}
 	}
 
 	sb.WriteString("\nProceed with the next step. Keep the response focused — your last sentence will be captured as the iteration summary.")
+
+	// For self-paced loops, hint at the cadence-control mechanism so the
+	// agent can request a longer wait when there's nothing to do.
+	// Without this, the runner just fires every DefaultMinDelaySeconds
+	// (5 min) regardless of whether progress is possible — wasting
+	// LLM credits on no-op iterations.
+	if l.Mode == ModeSelfPaced {
+		sb.WriteString("\n\nIf there's nothing to do until a specific event, end with a line like 'next: 30m' or 'wait 1h' — the scheduler will respect it as the floor for the next iteration.")
+	}
+
 	return sb.String()
 }
 

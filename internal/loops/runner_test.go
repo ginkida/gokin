@@ -335,6 +335,60 @@ func TestBuildIterationPrompt_MaxIterations(t *testing.T) {
 	}
 }
 
+// TestBuildIterationPrompt_MarkdownPointer: when UpdateMemory is on
+// AND the loop has at least one iteration, the prompt must point the
+// agent at the persisted markdown so it can read full history beyond
+// the inline 3-summary preview. Without this hint, multi-iteration
+// "improve X" loops drift in direction every iteration because each
+// sub-agent re-derives prior work from 200-rune summaries.
+func TestBuildIterationPrompt_MarkdownPointer(t *testing.T) {
+	l := &Loop{
+		ID:             "loop-md",
+		Task:           "Fix bugs",
+		IterationCount: 5,
+		UpdateMemory:   true,
+		Iterations: []Iteration{
+			{N: 5, Summary: "Last", StartedAt: time.Now()},
+		},
+	}
+	prompt := BuildIterationPrompt(l)
+	if !strings.Contains(prompt, ".gokin/loops/loop-md.md") {
+		t.Errorf("prompt missing markdown pointer: %q", prompt)
+	}
+
+	// Without UpdateMemory the file isn't written, so don't tell the
+	// agent to read it.
+	l.UpdateMemory = false
+	prompt = BuildIterationPrompt(l)
+	if strings.Contains(prompt, ".gokin/loops/") {
+		t.Errorf("prompt should not point at non-existent file when UpdateMemory=false: %q", prompt)
+	}
+}
+
+// TestBuildIterationPrompt_SelfPacedHintsCadence: self-paced loops
+// must teach the agent the "next: 30m" hint format so it can extend
+// the cadence when there's nothing to do. Without this, the runner
+// fires every 5 min (DefaultMinDelaySeconds) regardless of progress
+// possibility — wastes credits on no-op iterations.
+func TestBuildIterationPrompt_SelfPacedHintsCadence(t *testing.T) {
+	l := &Loop{
+		ID: "loop-sp", Task: "Watch CI", Mode: ModeSelfPaced,
+		IterationCount: 0,
+	}
+	prompt := BuildIterationPrompt(l)
+	if !strings.Contains(prompt, "next:") || !strings.Contains(prompt, "wait") {
+		t.Errorf("self-paced prompt missing cadence-control hint: %q", prompt)
+	}
+
+	// Interval-mode loops have a fixed cadence, so don't show the hint.
+	l.Mode = ModeInterval
+	l.IntervalSeconds = 600
+	prompt = BuildIterationPrompt(l)
+	if strings.Contains(prompt, "next:") {
+		t.Errorf("interval-mode prompt shouldn't include self-paced cadence hint: %q", prompt)
+	}
+}
+
 func TestSummarizeOutput(t *testing.T) {
 	cases := map[string]string{
 		"":                            "iteration completed",
