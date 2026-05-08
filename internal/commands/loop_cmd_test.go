@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"gokin/internal/loops"
 )
@@ -13,12 +14,13 @@ import (
 // parsed" vs "fell through to self-paced" without spinning up a real
 // Manager + Storage.
 type fakeLoopMgr struct {
-	loops      []*loops.Loop
-	addedTask  string
-	addedMode  loops.Mode
-	addedSecs  int64
-	addCalls   int
-	removed    string
+	loops       []*loops.Loop
+	addedTask   string
+	addedMode   loops.Mode
+	addedSecs   int64
+	addCalls    int
+	removed     string
+	getReturns  *loops.Loop // when non-nil, Get returns this regardless of ID
 }
 
 func (f *fakeLoopMgr) Add(task string, mode loops.Mode, intervalSeconds int64, opts ...loops.AddOption) (*loops.Loop, error) {
@@ -33,7 +35,12 @@ func (f *fakeLoopMgr) Add(task string, mode loops.Mode, intervalSeconds int64, o
 
 func (f *fakeLoopMgr) List() []*loops.Loop                         { return f.loops }
 func (f *fakeLoopMgr) Active() []*loops.Loop                       { return f.loops }
-func (f *fakeLoopMgr) Get(id string) (*loops.Loop, bool)           { return nil, false }
+func (f *fakeLoopMgr) Get(id string) (*loops.Loop, bool) {
+	if f.getReturns != nil {
+		return f.getReturns, true
+	}
+	return nil, false
+}
 func (f *fakeLoopMgr) Stop(id string) error                        { return nil }
 func (f *fakeLoopMgr) Pause(id string) error                       { return nil }
 func (f *fakeLoopMgr) Resume(id string) error                      { return nil }
@@ -114,6 +121,63 @@ func TestLoopCommand_AcceptsSingleUnitInterval(t *testing.T) {
 	}
 	if mgr.addedTask != "run tests" {
 		t.Errorf("task = %q, want %q", mgr.addedTask, "run tests")
+	}
+}
+
+// TestLoopCommand_OutputRendersFullMarkdown: /loop output <id>
+// renders the loop's full markdown including iteration summaries
+// (full text, not the 80-char truncation that /loop status uses for
+// inline display). Pinned in tests so a future "let's truncate
+// output too" change can't silently regress.
+func TestLoopCommand_OutputRendersFullMarkdown(t *testing.T) {
+	now := time.Now()
+	mgr := &fakeLoopMgr{
+		loops: []*loops.Loop{{
+			ID:           "loop-out",
+			Task:         "Refactor user service",
+			Mode:         loops.ModeSelfPaced,
+			Status:       loops.StatusRunning,
+			CreatedAt:    now,
+			UpdateMemory: true,
+			IterationCount: 1,
+			SuccessCount:   1,
+			Iterations: []loops.Iteration{
+				{N: 1, StartedAt: now, Duration: time.Second, Summary: "Identified the cause", OK: true},
+			},
+		}},
+	}
+	// Get returns the first loop regardless of ID.
+	mgr.getReturns = mgr.loops[0]
+
+	cmd := &LoopCommand{}
+	out, err := cmd.executeWithMgr(context.Background(), mgr, []string{"output", "loop-out"})
+	if err != nil {
+		t.Fatalf("executeWithMgr: %v", err)
+	}
+
+	for _, want := range []string{
+		"# Loop loop-out",
+		"Refactor user service",
+		"Identified the cause",
+		".gokin/loops/loop-out.md",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q. Got:\n%s", want, out)
+		}
+	}
+}
+
+// TestLoopCommand_OutputUnknownID: /loop output on a missing ID
+// returns a friendly "not found" message rather than crashing.
+func TestLoopCommand_OutputUnknownID(t *testing.T) {
+	mgr := &fakeLoopMgr{} // empty; Get always returns (nil, false)
+	cmd := &LoopCommand{}
+	out, err := cmd.executeWithMgr(context.Background(), mgr, []string{"output", "loop-missing"})
+	if err != nil {
+		t.Fatalf("executeWithMgr: %v", err)
+	}
+	if !strings.Contains(out, "not found") {
+		t.Errorf("expected 'not found' message, got: %s", out)
 	}
 }
 

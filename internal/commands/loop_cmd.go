@@ -50,7 +50,8 @@ func (c *LoopCommand) Usage() string {
 	return `/loop                       List active loops
 /loop <task>                Start self-paced loop
 /loop <interval> <task>     Start interval loop (e.g. /loop 5m sync repo)
-/loop status <id>           Show loop details
+/loop status <id>           Show loop summary + last 5 iterations
+/loop output <id>           Show full iteration log (markdown render)
 /loop stop <id>             Stop a loop (preserves history)
 /loop pause <id>            Pause (until /loop resume)
 /loop resume <id>           Re-arm paused loop
@@ -64,7 +65,7 @@ func (c *LoopCommand) GetMetadata() CommandMetadata {
 		Icon:     "loop",
 		Priority: 60,
 		HasArgs:  true,
-		ArgHint:  "[<interval>] <task> | status|stop|pause|resume|now|remove <id>",
+		ArgHint:  "[<interval>] <task> | status|output|stop|pause|resume|now|remove <id>",
 	}
 }
 
@@ -106,6 +107,11 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 			return "Usage: /loop status <id>", nil
 		}
 		return formatStatus(mgr, args[1])
+	case "output", "log", "logs":
+		if len(args) < 2 {
+			return "Usage: /loop output <id>", nil
+		}
+		return formatOutput(mgr, args[1])
 	case "stop":
 		if len(args) < 2 {
 			return "Usage: /loop stop <id>", nil
@@ -362,6 +368,30 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	}
 
 	return sb.String(), nil
+}
+
+// formatOutput renders the loop's full iteration log via the same
+// markdown renderer the per-loop file uses. The user could `cat
+// .gokin/loops/<id>.md` to get the same content from disk, but
+// re-rendering from in-memory state means the output is current to
+// the just-finished iteration even when UpdateMemory is disabled (no
+// file written) and avoids stale-file confusion when the disk write
+// is in flight.
+func formatOutput(mgr LoopManager, id string) (string, error) {
+	l, ok := mgr.Get(id)
+	if !ok {
+		return fmt.Sprintf("Loop %s not found. Run /loop to see available loops.", id), nil
+	}
+	rendered := loops.RenderLoopMarkdown(l)
+	// Footer hint so the user knows about the alternate access path
+	// — useful if they want to grep across multiple loops or feed the
+	// output into another tool.
+	if l.UpdateMemory {
+		rendered += "\n_Persisted at .gokin/loops/" + l.ID + ".md (auto-updated each iteration)._\n"
+	} else {
+		rendered += "\n_Memory updates disabled for this loop — this is in-memory only._\n"
+	}
+	return rendered, nil
 }
 
 // LoopManager is the subset of *loops.Manager used by this command.

@@ -186,7 +186,7 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 				a.safeSendToProgram(ui.StatusUpdateMsg{
 					Type: ui.StatusRecoverableError,
 					Message: fmt.Sprintf(
-						"Loop %s auto-paused after %d failures in a row. Inspect with /loop status %s, then /loop resume %s when fixed.",
+						"Loop %s auto-paused after %d failures in a row. /loop output %s for details, /loop resume %s when fixed.",
 						loopID, loop.ConsecutiveFailures, loopID, loopID),
 				})
 			}
