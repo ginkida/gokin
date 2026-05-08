@@ -195,6 +195,15 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		a.metaAgent.Stop()
 	}
 
+	// 3c. Stop the loops scheduler BEFORE cancelling agent goroutines
+	// (step 4b) so it doesn't fire one final iteration in the gap
+	// between ctx cancel and process exit. The Runner exits cleanly on
+	// stopChan; safe to call before Start (sync.Once-protected).
+	if a.loopRunner != nil {
+		logging.Debug("stopping loops scheduler")
+		a.loopRunner.Stop()
+	}
+
 	// 4. Cancel all running background tasks
 	if a.taskManager != nil {
 		logging.Debug("cancelling background tasks")

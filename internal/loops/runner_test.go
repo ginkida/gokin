@@ -341,6 +341,14 @@ func TestSummarizeOutput(t *testing.T) {
 		"Single line":                 "Single line",
 		"First.\n\nLast.":             "Last.",
 		"```\ncode\n```\n\nReal text.": "Real text.", // double newline separates code block from real text
+		// ATX header should be skipped — the substance is the next paragraph.
+		// Without the looksLikeMetadata header guard, the summary would be
+		// "## Summary" instead of the actual content.
+		"## Summary\n\nFinal substance text.": "Final substance text.",
+		// A paragraph that incidentally starts with `#` but contains content
+		// after a newline (commented shell example) is NOT a metadata header
+		// and must NOT be skipped.
+		"# real prose\nthat continues across lines.": "# real prose\nthat continues across lines.",
 	}
 	for input, want := range cases {
 		got := summarizeOutput(input, "iteration completed")

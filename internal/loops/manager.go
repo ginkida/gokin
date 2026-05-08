@@ -1,6 +1,7 @@
 package loops
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -8,6 +9,22 @@ import (
 
 	"gokin/internal/logging"
 )
+
+// ErrLoopGone signals that a loop the caller wanted to mutate has been
+// removed (or never existed). Returned by RecordIteration when the
+// loop disappears between the scheduler's snapshot and the post-spawn
+// record call. Distinct from "loop is paused/stopped" — those return
+// ErrLoopNotRunning so callers can react differently (e.g. skip
+// downstream callbacks entirely on Gone, log + skip-side-effects on
+// NotRunning).
+var ErrLoopGone = errors.New("loop: removed")
+
+// ErrLoopNotRunning signals that the loop exists but its status is
+// not Running — e.g. user paused/stopped it during a long iteration.
+// Returned by RecordIteration so the runner skips downstream side
+// effects (markdown writes, notifications) for state the user has
+// explicitly walked away from.
+var ErrLoopNotRunning = errors.New("loop: not running")
 
 // Manager is the concurrency-safe container for active loops. The TUI,
 // the /loop command, and the background scheduler all interact with
@@ -264,17 +281,40 @@ func (m *Manager) Remove(id string) error {
 // by the runner after executing one iteration. The mutate function on
 // Loop (AppendIteration) handles ring-buffer trimming, NextRunAt
 // computation, and max-iterations completion.
+//
+// Refuses to record if the loop has been paused/stopped/completed since
+// the iteration started — returns ErrLoopNotRunning. The caller should
+// skip downstream side effects (markdown writes, notifications) in that
+// case, since the user has explicitly walked away from this loop.
+//
+// Returns ErrLoopGone when the loop has been removed entirely. Callers
+// distinguish: NotRunning means "respect the new status, don't update
+// it"; Gone means "everything related to this loop should be skipped".
 func (m *Manager) RecordIteration(id string, it Iteration) error {
-	return m.transition(id, func(l *Loop) error {
-		l.AppendIteration(it)
-		return nil
-	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.loops[id]
+	if !ok {
+		return ErrLoopGone
+	}
+	if l.Status != StatusRunning {
+		return fmt.Errorf("%w (current status: %s)", ErrLoopNotRunning, l.Status)
+	}
+	l.AppendIteration(it)
+	return m.storage.Save(l)
 }
 
 // transition is the canonical mutate-and-save path. Holds the write
 // lock for the full Read-Modify-Save cycle so no concurrent caller can
 // see a half-mutated loop or save stale state. The mutate function
 // receives the live pointer (NOT a clone) — it's called under the lock.
+//
+// Snapshot-and-rollback: a pre-mutation deep copy is kept on the stack.
+// If Storage.Save fails, the in-memory loop is restored from the
+// snapshot so callers don't observe a divergent state ("disk says
+// status=running, memory says status=paused"). Without this rollback a
+// pause/resume failure would leave the user with a wrong-status loop in
+// memory until restart.
 func (m *Manager) transition(id string, mutate func(*Loop) error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -282,10 +322,15 @@ func (m *Manager) transition(id string, mutate func(*Loop) error) error {
 	if !ok {
 		return fmt.Errorf("loop %s: not found", id)
 	}
+	snapshot := cloneLoop(l)
 	if err := mutate(l); err != nil {
 		return err
 	}
-	return m.storage.Save(l)
+	if err := m.storage.Save(l); err != nil {
+		*l = *snapshot
+		return err
+	}
+	return nil
 }
 
 // cloneLoop is a defensive deep copy used by Get/List so callers can

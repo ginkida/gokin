@@ -2,6 +2,7 @@ package loops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -247,7 +248,26 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 		it.NextHint = parseNextHint(output)
 	}
 
-	if recordErr := r.mgr.RecordIteration(l.ID, it); recordErr != nil {
+	recordErr := r.mgr.RecordIteration(l.ID, it)
+	switch {
+	case errors.Is(recordErr, ErrLoopGone):
+		// User removed the loop while this iteration was running.
+		// No record to update, no downstream callbacks to fire — the
+		// loop and all its files are gone by design.
+		logging.Info("loops: iteration finished but loop was removed mid-run, skipping record",
+			"loop_id", l.ID, "iteration", it.N)
+		return
+	case errors.Is(recordErr, ErrLoopNotRunning):
+		// Loop was paused/stopped mid-iteration. Don't append — the user
+		// has explicitly walked away from this state. Skip the doneHook
+		// too: the markdown writer + status toast assume the iteration
+		// was a legitimate part of the active run.
+		logging.Info("loops: iteration finished but loop is no longer running, skipping record",
+			"loop_id", l.ID, "iteration", it.N, "error", recordErr)
+		return
+	case recordErr != nil:
+		// Real persistence failure — log loud, but still fire the done
+		// hook so the UI surfaces the result the user just witnessed.
 		logging.Warn("loops: failed to record iteration",
 			"loop_id", l.ID, "iteration", it.N, "error", recordErr)
 	}
@@ -323,13 +343,25 @@ func summarizeOutput(output, fallback string) string {
 
 // looksLikeMetadata heuristically rejects paragraphs that are clearly
 // not the substance of the iteration — code blocks, file listings,
-// status markers. Keeps the summary readable.
+// status markers, ATX-style markdown headers (`## Summary`). Keeps the
+// summary readable: a heading-only paragraph is the section label, not
+// the substance, and the substance lives in the next paragraph that
+// summarizeOutput will then prefer.
 func looksLikeMetadata(p string) bool {
 	if strings.HasPrefix(p, "```") {
 		return true
 	}
 	if strings.HasPrefix(p, "---") || strings.HasPrefix(p, "===") {
 		return true
+	}
+	if strings.HasPrefix(p, "#") {
+		// Reject only when the entire paragraph is a single heading line
+		// — not a paragraph that incidentally starts with `#` (e.g. a
+		// shell prompt example like `# this comment is the answer`). A
+		// real header has no embedded newlines.
+		if !strings.ContainsRune(p, '\n') {
+			return true
+		}
 	}
 	return false
 }

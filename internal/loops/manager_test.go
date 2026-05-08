@@ -1,6 +1,7 @@
 package loops
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,9 +10,10 @@ import (
 // memStorage is an in-memory Storage for tests — no disk IO, no
 // race-detector noise from filesystem timing.
 type memStorage struct {
-	loops map[string]*Loop
-	saves int
-	loadErr []error
+	loops    map[string]*Loop
+	saves    int
+	loadErr  []error
+	failSave error // when non-nil, Save returns this without persisting
 }
 
 func newMemStorage() *memStorage { return &memStorage{loops: make(map[string]*Loop)} }
@@ -26,6 +28,9 @@ func (m *memStorage) Load() ([]*Loop, []error) {
 }
 
 func (m *memStorage) Save(l *Loop) error {
+	if m.failSave != nil {
+		return m.failSave
+	}
 	c := *l
 	m.loops[l.ID] = &c
 	m.saves++
@@ -299,6 +304,83 @@ func TestManager_PersistsAcrossNew(t *testing.T) {
 	}
 	if got.Task != "Continue from before" {
 		t.Errorf("Task = %q, want %q", got.Task, "Continue from before")
+	}
+}
+
+// TestManager_RecordIteration_GoneAfterRemove: a long-running iteration
+// finishes and tries to RecordIteration after the user has /loop
+// removed the loop. RecordIteration must return ErrLoopGone (not a
+// generic "not found" error) so the runner can skip the doneHook
+// instead of writing an orphan markdown file for the just-deleted loop.
+func TestManager_RecordIteration_GoneAfterRemove(t *testing.T) {
+	m := NewManager(newMemStorage())
+	l, _ := m.Add("task", ModeInterval, 600)
+
+	if err := m.Remove(l.ID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	err := m.RecordIteration(l.ID, Iteration{N: 1, Summary: "done"})
+	if !errors.Is(err, ErrLoopGone) {
+		t.Errorf("RecordIteration after Remove: err = %v, want ErrLoopGone", err)
+	}
+}
+
+// TestManager_RecordIteration_NotRunning: a long-running iteration
+// finishes and tries to RecordIteration after the user has paused the
+// loop. RecordIteration must return ErrLoopNotRunning so the runner
+// skips downstream side effects but the loop record itself stays
+// intact (different from removed — the user wants to /loop resume
+// later).
+func TestManager_RecordIteration_NotRunning(t *testing.T) {
+	m := NewManager(newMemStorage())
+	l, _ := m.Add("task", ModeInterval, 600)
+
+	if err := m.Pause(l.ID); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+
+	err := m.RecordIteration(l.ID, Iteration{N: 1, Summary: "done"})
+	if !errors.Is(err, ErrLoopNotRunning) {
+		t.Errorf("RecordIteration on paused loop: err = %v, want ErrLoopNotRunning", err)
+	}
+
+	// The loop should still exist with the user's pause intact.
+	got, ok := m.Get(l.ID)
+	if !ok {
+		t.Fatal("loop disappeared after rejected RecordIteration")
+	}
+	if got.Status != StatusPaused {
+		t.Errorf("loop status = %s, want paused", got.Status)
+	}
+	if len(got.Iterations) != 0 {
+		t.Errorf("paused loop got %d iterations recorded, want 0", len(got.Iterations))
+	}
+}
+
+// TestManager_TransitionRollsBackOnSaveError: when Storage.Save fails
+// after a successful mutate, the in-memory loop must be reverted to
+// its pre-mutation state. Otherwise callers see "I paused the loop"
+// in memory but a restart would show the loop still running, because
+// the disk never got the new state. The rollback closes that
+// divergence.
+func TestManager_TransitionRollsBackOnSaveError(t *testing.T) {
+	stor := newMemStorage()
+	m := NewManager(stor)
+	l, _ := m.Add("task", ModeInterval, 600)
+
+	// Inject failure on the next Save.
+	stor.failSave = errors.New("disk full")
+
+	err := m.Pause(l.ID)
+	if err == nil {
+		t.Fatal("Pause: expected error, got nil")
+	}
+
+	got, _ := m.Get(l.ID)
+	if got.Status != StatusRunning {
+		t.Errorf("after failed save, in-memory status = %s, want still running (rollback)",
+			got.Status)
 	}
 }
 

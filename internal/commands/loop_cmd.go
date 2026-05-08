@@ -3,12 +3,27 @@ package commands
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"gokin/internal/loops"
 )
+
+// intervalShapeRe matches tokens that LOOK like an interval shorthand —
+// "5m", "1h30m", "90s", "2x" — even when parseLoopInterval can't accept
+// them. Used to distinguish "user typed garbage in the interval slot"
+// from "user typed a normal task starting with a number" (e.g. "5
+// failing tests need fixing").
+//
+// Anchored to start with a digit so words like "h30m" don't trip.
+// Trailing letter required so "5" alone or "test123" can't match —
+// those aren't interval-shaped, they're parts of a task description.
+// Middle is permissively alphanumeric so "1h30m" is recognized as
+// "they tried to write an interval and we should reject loudly", not
+// "this is the start of a self-paced task".
+var intervalShapeRe = regexp.MustCompile(`^[0-9][a-zA-Z0-9]*[a-zA-Z]$`)
 
 // LoopCommand exposes the /loop autonomous workflow system.
 //
@@ -58,7 +73,19 @@ func (c *LoopCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	if mgr == nil {
 		return "Loop system unavailable in this build.", nil
 	}
+	return c.executeWithMgr(ctx, mgr, args)
+}
 
+// executeWithMgr is the testable inner loop. Split out from Execute so
+// tests can drive it with a fake LoopManager without standing up an
+// AppInterface implementation. Production wiring still goes through
+// Execute → app.GetLoopManager().
+//
+// ctx is plumbed for future use (e.g. cancelling a /loop status that
+// reads many state files); none of today's subcommands actually block
+// on it, but keeping the signature ready means the inner code path
+// stays test-stable when we add cancellable subcommands later.
+func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []string) (string, error) {
 	// No args → list. Most common quick-check use case.
 	if len(args) == 0 {
 		return formatList(mgr.List()), nil
@@ -135,6 +162,16 @@ func (c *LoopCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		}
 		return fmt.Sprintf("Started loop %s — fires every %s.\n  Task: %s\n\nView: /loop status %s | Stop: /loop stop %s",
 			l.ID, args[0], previewTaskShort(task), l.ID, l.ID), nil
+	}
+
+	// Looks-like-interval but unparseable: reject explicitly so the user
+	// learns what's accepted instead of silently getting a self-paced
+	// loop with "1h30m" as part of the task description (real bug seen
+	// before this guard: `/loop 1h30m run tests` started a self-paced
+	// loop on task `1h30m run tests`, which the user didn't ask for and
+	// could double their LLM bill if it self-pacing aggressively).
+	if intervalShapeRe.MatchString(args[0]) {
+		return fmt.Sprintf("Interval %q not recognized. Use a single unit: 30s, 5m, 1h, or 2d.\n  Examples: /loop 30s ... | /loop 5m ... | /loop 1h ...", args[0]), nil
 	}
 
 	// Fallthrough: entire args are a task description, self-paced mode.
