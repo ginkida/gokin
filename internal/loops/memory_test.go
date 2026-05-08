@@ -90,6 +90,47 @@ func TestMemoryWriter_WriteAndDelete(t *testing.T) {
 	}
 }
 
+// TestMemoryWriter_PermissionsOwnerOnly: the markdown can contain
+// agent outputs, task descriptions, and fragments of files the agent
+// read — same sensitivity as the JSON storage which uses 0600 file /
+// 0700 dir. World-readable defaults would expose this on shared
+// machines without the user noticing. Pinned in tests to catch any
+// future change that loosens the default.
+func TestMemoryWriter_PermissionsOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	w := NewMemoryWriter(dir)
+
+	l := &Loop{
+		ID:        "loop-perm",
+		Task:      "anything",
+		Mode:      ModeSelfPaced,
+		Status:    StatusRunning,
+		CreatedAt: time.Now(),
+	}
+	if err := w.WriteLoop(l); err != nil {
+		t.Fatalf("WriteLoop: %v", err)
+	}
+
+	loopsDir := filepath.Join(dir, ".gokin", "loops")
+	dirInfo, err := os.Stat(loopsDir)
+	if err != nil {
+		t.Fatalf("stat loops dir: %v", err)
+	}
+	// Mask off any sticky/setuid bits — only the rwx bits matter for
+	// the privacy contract.
+	if dirMode := dirInfo.Mode().Perm(); dirMode != 0700 {
+		t.Errorf("loops dir mode = %o, want 0700 (owner-only)", dirMode)
+	}
+
+	fileInfo, err := os.Stat(filepath.Join(loopsDir, "loop-perm.md"))
+	if err != nil {
+		t.Fatalf("stat loop file: %v", err)
+	}
+	if fileMode := fileInfo.Mode().Perm(); fileMode != 0600 {
+		t.Errorf("loop file mode = %o, want 0600 (owner-only)", fileMode)
+	}
+}
+
 func TestMemoryWriter_WriteLoop_RegeneratesOnUpdate(t *testing.T) {
 	// User runs a loop for an hour — file should always reflect the
 	// latest snapshot, not append-only history.

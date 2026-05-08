@@ -51,17 +51,22 @@ func NewMemoryWriter(workDir string) *MemoryWriter {
 // non-fatal at the call site — the loop iteration result is already
 // safely persisted in the manager's JSON state file; the markdown is a
 // human-readable convenience, not the source of truth.
+//
+// File permissions match the JSON storage (0700 dir, 0600 file): the
+// markdown can contain agent outputs, task descriptions, and
+// fragments of files the agent read — same sensitivity class as the
+// underlying state, so don't make it world-readable.
 func (w *MemoryWriter) WriteLoop(l *Loop) error {
 	if w == nil || l == nil {
 		return nil
 	}
 	dir := filepath.Join(w.workDir, ".gokin", "loops")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("loops memory: create dir: %w", err)
 	}
 	path := filepath.Join(dir, l.ID+".md")
 	content := RenderLoopMarkdown(l)
-	return fileutil.AtomicWrite(path, []byte(content), 0644)
+	return fileutil.AtomicWrite(path, []byte(content), 0600)
 }
 
 // DeleteLoop removes the loop's markdown file. Called when a loop is

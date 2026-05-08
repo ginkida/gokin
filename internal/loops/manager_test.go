@@ -358,6 +358,41 @@ func TestManager_RecordIteration_NotRunning(t *testing.T) {
 	}
 }
 
+// TestManager_RecordIteration_RollsBackOnSaveError: same divergence
+// guard as transition(), specialized to the RecordIteration path.
+// Without rollback, AppendIteration's mutations to IterationCount,
+// LastRunAt, NextRunAt, and Iterations would survive in-memory while
+// the disk file remained at the pre-call state — next restart would
+// "lose" the iteration count, but in-session N keeps incrementing,
+// silently desynchronizing from disk truth.
+func TestManager_RecordIteration_RollsBackOnSaveError(t *testing.T) {
+	stor := newMemStorage()
+	m := NewManager(stor)
+	l, _ := m.Add("task", ModeInterval, 600)
+
+	// Sanity: clean state before the failed record.
+	got, _ := m.Get(l.ID)
+	if got.IterationCount != 0 {
+		t.Fatalf("baseline IterationCount = %d, want 0", got.IterationCount)
+	}
+
+	stor.failSave = errors.New("disk full")
+	err := m.RecordIteration(l.ID, Iteration{N: 1, Summary: "done"})
+	if err == nil {
+		t.Fatal("RecordIteration with failing Save: expected error, got nil")
+	}
+
+	got, _ = m.Get(l.ID)
+	if got.IterationCount != 0 {
+		t.Errorf("after failed record, IterationCount = %d, want 0 (rollback)",
+			got.IterationCount)
+	}
+	if len(got.Iterations) != 0 {
+		t.Errorf("after failed record, Iterations len = %d, want 0 (rollback)",
+			len(got.Iterations))
+	}
+}
+
 // TestManager_TransitionRollsBackOnSaveError: when Storage.Save fails
 // after a successful mutate, the in-memory loop must be reverted to
 // its pre-mutation state. Otherwise callers see "I paused the loop"

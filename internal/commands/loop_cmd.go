@@ -247,6 +247,20 @@ func formatLoopLine(l *loops.Loop) string {
 		mode = fmt.Sprintf("every %s", formatDurationShort(time.Duration(l.IntervalSeconds)*time.Second))
 	}
 	taskPrev := previewTaskShort(l.Task)
+
+	// Inline progress so the listing answers "is this loop making
+	// progress?" without drilling into /loop status. Without this the
+	// user couldn't tell a brand-new loop apart from one that's
+	// silently failing every iteration — both showed "running".
+	iterHint := ""
+	if l.IterationCount > 0 || l.MaxIterations > 0 {
+		if l.MaxIterations > 0 {
+			iterHint = fmt.Sprintf(" — %d/%d iters", l.IterationCount, l.MaxIterations)
+		} else {
+			iterHint = fmt.Sprintf(" — %d iters", l.IterationCount)
+		}
+	}
+
 	nextHint := ""
 	if l.IsActive() && !l.NextRunAt.IsZero() {
 		dur := time.Until(l.NextRunAt)
@@ -256,8 +270,8 @@ func formatLoopLine(l *loops.Loop) string {
 			nextHint = " — next " + formatDurationShort(dur)
 		}
 	}
-	return fmt.Sprintf("  %s %s  [%s]  %s%s\n      %s",
-		statusMark, l.ID, mode, l.Status, nextHint, taskPrev)
+	return fmt.Sprintf("  %s %s  [%s]  %s%s%s\n      %s",
+		statusMark, l.ID, mode, l.Status, iterHint, nextHint, taskPrev)
 }
 
 func formatStatus(mgr LoopManager, id string) (string, error) {

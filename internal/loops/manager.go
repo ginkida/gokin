@@ -290,6 +290,14 @@ func (m *Manager) Remove(id string) error {
 // Returns ErrLoopGone when the loop has been removed entirely. Callers
 // distinguish: NotRunning means "respect the new status, don't update
 // it"; Gone means "everything related to this loop should be skipped".
+//
+// Snapshot-and-rollback: AppendIteration mutates IterationCount,
+// LastRunAt, NextRunAt, and possibly Status (when MaxIterations is
+// hit). A failed Save would leave those visible in-memory but absent
+// from disk — divergent state until restart, plus a phantom iteration
+// in IterationCount that the next iteration's `N` would skip past.
+// Same fix as transition(): keep a pre-mutation snapshot, restore on
+// Save failure.
 func (m *Manager) RecordIteration(id string, it Iteration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -300,8 +308,13 @@ func (m *Manager) RecordIteration(id string, it Iteration) error {
 	if l.Status != StatusRunning {
 		return fmt.Errorf("%w (current status: %s)", ErrLoopNotRunning, l.Status)
 	}
+	snapshot := cloneLoop(l)
 	l.AppendIteration(it)
-	return m.storage.Save(l)
+	if err := m.storage.Save(l); err != nil {
+		*l = *snapshot
+		return err
+	}
+	return nil
 }
 
 // transition is the canonical mutate-and-save path. Holds the write
