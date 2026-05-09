@@ -26,8 +26,13 @@ import (
 //     decoupling display from the active session.
 //
 // agentType "general" is the catch-all type that does whatever the task
-// description says. maxTurns=15 caps a runaway loop iteration without
-// being so tight it cuts off legitimate multi-step work.
+// description says. maxTurns=25 caps a runaway iteration while leaving
+// enough room for substantive engineering work: a typical "fix bug X"
+// iteration does grep+glob (2) → read 3-5 files (3-5) → run tests (1)
+// → edit 1-3 files (3) → re-run tests (1) → commit (1) — that's ~12-15
+// turns minimum. The default sub-agent cap of 15 was leaving no
+// headroom for retries or multi-file fixes; 25 feels right (less than
+// 2x cost vs 15, but enough headroom for real work).
 //
 // Returns (output, ok, err):
 //   - output: agent's textual result, captured from result.Output.
@@ -51,7 +56,7 @@ func newLoopSpawner(a *App) loops.Spawner {
 			model = a.client.GetModel()
 		}
 
-		const maxTurns = 15
+		const maxTurns = 25
 
 		agentID, spawnErr := runner.Spawn(ctx, "general", prompt, maxTurns, model)
 		if spawnErr != nil && agentID == "" {
