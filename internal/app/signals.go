@@ -368,7 +368,12 @@ func (a *App) saveSessionHistory() {
 		return
 	}
 
-	if err := historyMgr.Save(a.session); err != nil {
+	// SaveFull (not the older Save) so we capture tool calls and
+	// responses too — Save() drops everything except role+text, which
+	// would leave the resumed session blind to the tool work the user
+	// just did. Pre-fix this path used Save() and silently degraded
+	// any session resumed from this fallback (sessionManager==nil).
+	if err := historyMgr.SaveFull(a.session); err != nil {
 		logging.Error("failed to save session history during shutdown — recent conversation may be lost",
 			"error", err)
 		fmt.Fprintf(os.Stderr, "WARNING: failed to save session at shutdown: %v\n", err)

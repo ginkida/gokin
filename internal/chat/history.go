@@ -49,6 +49,16 @@ func NewHistoryManager() (*HistoryManager, error) {
 }
 
 // Save saves a session history to disk.
+// Save persists a degraded view of the session — only role+text per
+// entry, no tool calls / responses. This file format predates the
+// fuller SessionState used by SaveFull/LoadFull and is kept for
+// backward-compatible reads of older session files.
+//
+// Deprecated: use SaveFull. Save loses tool interactions, so any
+// session resumed from a Save'd file will look like the model never
+// called any tools. Last in-tree user (the shutdown fallback in
+// app/signals.go saveSessionHistory) was switched to SaveFull in
+// the v0.80.26 line.
 func (m *HistoryManager) Save(session *Session) error {
 	history := session.GetHistory()
 
