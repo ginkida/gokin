@@ -611,6 +611,25 @@ func (a *App) Run() error {
 			})
 		}
 		a.loopRunner.Start(a.ctx)
+
+		// Surface restored active loops at startup. Without this hint,
+		// a user who set up a loop in a prior session, closed gokin,
+		// and reopened it has no idea that loops are about to start
+		// firing in the background — they could be surprised when an
+		// iteration triggers and the model "spontaneously" does work.
+		// Counts paused/auto-paused too so the user sees the full
+		// loop fleet they have on disk.
+		if active := a.loopManager.Active(); len(active) > 0 {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusInfo,
+				Message: fmt.Sprintf("Resumed %d active loop(s) — /loop to view, /loop pause <id> to halt.", len(active)),
+			})
+		} else if all := a.loopManager.List(); len(all) > 0 {
+			// All loops are non-running (paused/stopped/completed).
+			// Less urgent — debug log only, the user can /loop list to
+			// see them whenever.
+			logging.Debug("loops: restored from disk but none active", "total", len(all))
+		}
 	}
 
 	// Set app reference in TUI for data providers
