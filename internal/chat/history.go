@@ -57,8 +57,9 @@ func NewHistoryManager() (*HistoryManager, error) {
 // Deprecated: use SaveFull. Save loses tool interactions, so any
 // session resumed from a Save'd file will look like the model never
 // called any tools. Last in-tree user (the shutdown fallback in
-// app/signals.go saveSessionHistory) was switched to SaveFull in
-// the v0.80.26 line.
+// app/signals.go saveSessionHistory) was switched to SaveFull —
+// kept around only for backward-compatible reads of older session
+// files written by the legacy code path.
 func (m *HistoryManager) Save(session *Session) error {
 	history := session.GetHistory()
 
