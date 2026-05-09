@@ -335,6 +335,35 @@ func TestBuildIterationPrompt_MaxIterations(t *testing.T) {
 	}
 }
 
+// TestLooksLikeMetadata: the heuristic that summarizeOutput uses to
+// skip code blocks, separators, and ATX headers when picking the
+// "substance" paragraph. Pinned directly (not just transitively via
+// TestSummarizeOutput) so a future refactor of the helper can't
+// silently drop a case — e.g., reverting "single-line ATX header"
+// would break /loop output rendering for any agent that uses
+// markdown headers in its iteration summary.
+func TestLooksLikeMetadata(t *testing.T) {
+	cases := map[string]bool{
+		"":                                false, // empty paragraph isn't metadata
+		"Real prose.":                     false, // ordinary text
+		"# Real prose\nthat continues.":   false, // multi-line — '#' is incidental, not a header
+		"```":                             true,  // code fence opener
+		"```go\nfunc main() {}":           true,  // code block
+		"---":                             true,  // separator
+		"===":                             true,  // setext underline
+		"## Summary":                      true,  // ATX header (single line)
+		"# Single header":                 true,  // h1 ATX
+		"#### Deep header":                true,  // h4 ATX
+		"#hashtag-not-header":             true,  // looks header-ish, single line — accept the conservative skip
+	}
+	for input, want := range cases {
+		got := looksLikeMetadata(input)
+		if got != want {
+			t.Errorf("looksLikeMetadata(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
 // TestParseDoneSignal: only the LAST non-empty line counts and only
 // if it's an exact match for the registered terminator. Pinned in
 // tests so a future "be more lenient" change can't accidentally
