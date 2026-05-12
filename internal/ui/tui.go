@@ -2457,10 +2457,18 @@ const toolCardMinWidth = 60
 // content in a subtle rounded bordered card (echoes Gokin Classic scene
 // B); narrower terminals fall back to the legacy 4-space-indented form.
 func (m *Model) emitToolResultCard(titleLine, body string) {
-	inner := titleLine
-	if body != "" {
-		inner += "\n" + body
+	// Empty body: rendering rounded chrome around a single title line is
+	// pure visual weight with no payoff — the card border eats two rows
+	// (top + bottom) for nothing. Drop to a flat indented title, same
+	// visual weight as the dedup-stub path. Body-bearing cards still get
+	// the chrome since it groups multiple lines into one visual unit.
+	if body == "" {
+		m.output.AppendLine("    " + titleLine)
+		m.output.AppendLine("")
+		return
 	}
+
+	inner := titleLine + "\n" + body
 
 	if m.width < toolCardMinWidth {
 		// Legacy: flat indented lines, one AppendLine per row.
