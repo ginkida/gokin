@@ -2328,6 +2328,19 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 		name = "tool"
 	}
 
+	// Dedup-stub path: when the read tool's content has been replaced with
+	// the "[Unchanged since turn N · X chars · path]" marker, the file
+	// hasn't changed since a prior read on this turn. Render a single dim
+	// italic line — no success-block, no card. The model still sees the
+	// marker via the tool-result stream; the user gets a quiet "we already
+	// have this" note instead of a full row.
+	if !failed && toolName == "read" && strings.HasPrefix(strings.TrimSpace(content), "[Unchanged since turn ") {
+		stubStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+		m.output.AppendLine("    " + stubStyle.Render("⎿ "+strings.TrimSpace(content)))
+		m.output.AppendLine("")
+		return
+	}
+
 	if failed {
 		detail := strings.TrimSpace(errText)
 		if detail == "" {

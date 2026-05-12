@@ -1755,7 +1755,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 					isDup, origRec, _ := e.readTracker.CheckAndRecord(filePath, offset, limit, len(cached.Content))
 					if isDup && origRec != nil {
 						cached.Content = fmt.Sprintf(
-							"[File already read at turn %d, content unchanged (%d chars). Path: %s]",
+							"[Unchanged since turn %d · %d chars · %s]",
 							origRec.TurnIndex, origRec.ContentLen, filePath)
 						return cached
 					}
@@ -2017,7 +2017,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				isDup, origRec, _ := e.readTracker.CheckAndRecord(filePath, offset, limit, len(result.Content))
 				if isDup && origRec != nil {
 					result.Content = fmt.Sprintf(
-						"[File already read at turn %d, content unchanged (%d chars). Path: %s]",
+						"[Unchanged since turn %d · %d chars · %s]",
 						origRec.TurnIndex, origRec.ContentLen, filePath)
 				}
 			}
