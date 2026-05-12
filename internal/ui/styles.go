@@ -410,9 +410,15 @@ func DefaultStyles() *Styles {
 			Italic(true),
 
 		// Markdown styles
+		//
+		// InlineCode uses ColorBorder (not ColorSlate=surface) as the
+		// background — surface (#16191F) is only ~8/256 brighter than
+		// the chat background (#0E1116), too subtle to register as an
+		// "inline code" affordance on bright monitors. Border (#2A2C33)
+		// gives ~28/256 of contrast — readable in any lighting.
 		InlineCode: lipgloss.NewStyle().
 			Foreground(ColorLavender).
-			Background(ColorSlate).
+			Background(ColorBorder).
 			Padding(0, 1),
 
 		// Code block styles
