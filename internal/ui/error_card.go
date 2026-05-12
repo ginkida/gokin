@@ -116,19 +116,25 @@ func renderErrorBody(detail string, _ int) string {
 	return b.String()
 }
 
-// renderErrorActionHints returns the muted suggested-next-actions row
-// shown at the bottom of the error card. Mockup scene D shape — three
-// concrete suggestions the user can pick at a keystroke.
+// renderErrorActionHints returns the suggested-next-actions row shown at
+// the bottom of the error card. Mockup scene D shape — three concrete
+// suggestions the user can pick at a keystroke.
+//
+// Visual rhythm mirrors renderDiffActionHints: primary recovery (retry)
+// pops in ColorSuccess bold, abort (esc cancel) pops in ColorError bold,
+// alternatives sit in muted middle ground. Keeps both card surfaces on
+// the same design language so users don't context-switch between them.
 func renderErrorActionHints() string {
-	keyStyle := lipgloss.NewStyle().Foreground(ColorHighlight).Bold(true)
+	retryStyle := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
+	cancelStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
 	cmdStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
 	verbStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	sepStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
 	parts := []string{
-		keyStyle.Render("↵") + " " + verbStyle.Render("retry"),
+		retryStyle.Render("↵ retry"),
 		cmdStyle.Render("/undo") + " " + verbStyle.Render("revert last"),
-		keyStyle.Render("esc") + " " + verbStyle.Render("cancel"),
+		cancelStyle.Render("esc cancel"),
 	}
 	return strings.Join(parts, sepStyle.Render("  ·  "))
 }
