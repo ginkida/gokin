@@ -217,14 +217,15 @@ func (m *ToolOutputModel) renderFull(content string, _ bool) string {
 // renderHiddenLinesHint formats the "X lines hidden" indicator shown between
 // the head and tail preview of a truncated tool output.
 //
-// Earlier versions rendered a cryptic "... +95 lines ..." which looked like
-// a placeholder rather than an action-hinting UI element. The new shape:
+// Shape:
 //
-//	        ▼ 95 more lines · press e to expand
+//	        ⋯ 95 more lines
 //
-// reads as a sentence, tells the user there's content below, and spells
-// out the interaction. Dim-coloured so it doesn't compete visually with
-// the actual code lines around it.
+// reads as a quiet ellipsis with a count — tells the user there's content
+// in the middle without instructing them how to interact (the `e` shortcut
+// is documented in the shortcuts overlay and contextual status hints).
+// Dim-coloured so it doesn't compete visually with the actual code lines
+// around it.
 func renderHiddenLinesHint(hidden int) string {
 	if hidden <= 0 {
 		return ""
@@ -234,7 +235,7 @@ func renderHiddenLinesHint(hidden int) string {
 	if hidden == 1 {
 		word = "line"
 	}
-	return dimStyle.Render(fmt.Sprintf("    ▼ %d more %s · press e to expand", hidden, word))
+	return dimStyle.Render(fmt.Sprintf("    ⋯ %d more %s", hidden, word))
 }
 
 // renderTruncated renders truncated content with head and tail.

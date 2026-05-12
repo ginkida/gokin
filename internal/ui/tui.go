@@ -2312,7 +2312,6 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 
 func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, startTime time.Time, failed bool, errText string) {
 	contentStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 
 	// Build summary and duration
 	var summary string
@@ -2360,18 +2359,20 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 
 	// Body (expand-state aware) — built once, fed either into a bordered
 	// card or the legacy 4-space-indented flat form depending on width.
-	body := m.buildToolResultBody(toolName, toolInfo, content, hintStyle, contentStyle)
+	body := m.buildToolResultBody(toolName, toolInfo, content, contentStyle)
 
 	m.emitToolResultCard(titleLine, body)
 }
 
 // buildToolResultBody returns the rendered body of a tool result (preview
-// or full content, or the "press e to expand" hint when compacted), with
-// every line pre-styled so callers can emit the result verbatim. Returns
-// "" when there's nothing to show.
+// or full content), with every line pre-styled so callers can emit the
+// result verbatim. Returns "" when there's nothing to show — collapsed-
+// by-default tools (e.g. Read) deliberately render silently so the card
+// stays at one row; the `e` keyboard shortcut to expand is documented in
+// the shortcuts overlay and the contextual status-bar hint.
 func (m *Model) buildToolResultBody(
 	toolName, toolInfo, content string,
-	hintStyle, contentStyle lipgloss.Style,
+	contentStyle lipgloss.Style,
 ) string {
 	if content == "" {
 		return ""
@@ -2394,7 +2395,9 @@ func (m *Model) buildToolResultBody(
 	}
 
 	if compactLongOutput {
-		return hintStyle.Render("⎿ press e to expand")
+		// Silent collapse — title line carries the success signal; user
+		// already knows about `e` from the shortcuts overlay.
+		return ""
 	}
 
 	display := FormatToolOutput(content, 6, expanded)

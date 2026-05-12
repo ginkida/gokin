@@ -212,11 +212,10 @@ func TestRenderTruncated_HidesCodePreamble(t *testing.T) {
 		t.Errorf("preview should start at first signal line:\n%s", out)
 	}
 	// Must include the hidden-count marker. The exact glyph is optional
-	// (can drift across UI polish passes) but the *count* of hidden
-	// lines + the action hint ("press e to expand") are the load-bearing
-	// pieces the user relies on.
-	if !strings.Contains(out, "more") || !strings.Contains(out, "press e") {
-		t.Errorf("missing 'N more lines · press e' marker:\n%s", out)
+	// (can drift across UI polish passes) but the *count* of hidden lines
+	// is the load-bearing signal the user relies on.
+	if !strings.Contains(out, "more line") {
+		t.Errorf("missing 'N more lines' marker:\n%s", out)
 	}
 }
 
@@ -227,9 +226,9 @@ func TestRenderHiddenLinesHint_Pluralisation(t *testing.T) {
 		hidden int
 		want   string
 	}{
-		{1, "1 more line ·"}, // singular
-		{2, "2 more lines ·"},
-		{95, "95 more lines ·"},
+		{1, "1 more line"}, // singular
+		{2, "2 more lines"},
+		{95, "95 more lines"},
 	}
 	for _, c := range cases {
 		got := renderHiddenLinesHint(c.hidden)

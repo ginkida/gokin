@@ -26,9 +26,10 @@ func TestAppendThinkingStream_ShowsSingleThinkingHeader(t *testing.T) {
 // TestHandleToolResultWithInfo_ReadCollapsesByDefault pins the Claude-Code-
 // style collapse for Read: the ✓ success line (with path + line count +
 // duration) already carries the signal, so we skip the inline head+tail
-// preview entirely and show a single "⎿ press e to expand" hint. Users
-// who want to see the file content press `e`. The full content stays in
-// the tool-output entry store, so `e` can still reveal it.
+// preview entirely. The body is silent (no expand hint inline — the `e`
+// shortcut is documented in the shortcuts overlay and contextual hints).
+// Users who want to see the file content press `e`. The full content
+// stays in the tool-output entry store, so `e` can still reveal it.
 func TestHandleToolResultWithInfo_ReadCollapsesByDefault(t *testing.T) {
 	m := NewModel()
 	content := strings.Join([]string{
@@ -55,10 +56,6 @@ func TestHandleToolResultWithInfo_ReadCollapsesByDefault(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("Read success header missing %q:\n%s", want, rendered)
 		}
-	}
-	// Expand hint must be the compact form.
-	if !strings.Contains(rendered, "press e to expand") {
-		t.Fatalf("expected 'press e to expand' hint, got:\n%s", rendered)
 	}
 	// Inline content preview must NOT appear by default — Read is collapsed.
 	for _, shouldNotLeak := range []string{"func alpha", "func kappa", "package ui"} {
@@ -97,9 +94,10 @@ func TestHandleToolResultWithInfo_BashKeepsPreview(t *testing.T) {
 	if !strings.Contains(rendered, "line 1") {
 		t.Fatalf("bash preview should include first output line:\n%s", rendered)
 	}
-	// And the friendly more-lines marker with expand hint.
-	if !strings.Contains(rendered, "more") || !strings.Contains(rendered, "press e") {
-		t.Fatalf("bash preview should include 'N more · press e' marker:\n%s", rendered)
+	// And the quiet more-lines marker (no keyboard instruction — that's
+	// in the shortcuts overlay).
+	if !strings.Contains(rendered, "more line") {
+		t.Fatalf("bash preview should include 'N more lines' marker:\n%s", rendered)
 	}
 }
 
@@ -131,12 +129,13 @@ func TestHandleToolResultWithInfo_UsesExplicitCompactMode(t *testing.T) {
 	m.handleToolResultWithInfo(content, "bash", "go test ./internal/ui", time.Now().Add(-2*time.Second))
 
 	rendered := stripAnsi(m.output.state.content.String())
-	if !strings.Contains(rendered, "press e to expand") {
-		t.Fatalf("compact mode should show 'press e to expand':\n%s", rendered)
-	}
-	// Must NOT inline the content.
+	// Compact mode collapses silently — body is empty, no inline content.
 	if strings.Contains(rendered, "line 1") {
 		t.Fatalf("compact mode should not inline content:\n%s", rendered)
+	}
+	// Header must still land.
+	if !strings.Contains(rendered, "Bash") {
+		t.Fatalf("compact mode should still show ✓ tool header:\n%s", rendered)
 	}
 }
 
