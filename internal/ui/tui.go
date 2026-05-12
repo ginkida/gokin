@@ -2452,6 +2452,14 @@ func (m *Model) findActiveToolCall(name string, args map[string]any) int {
 func (m Model) View() string {
 	var builder strings.Builder
 
+	// Top-frame title bar (≥80 cols) — three dots + path + provider/model/$cost.
+	// Renders first so toasts and content stack underneath without shifting
+	// the frame line itself.
+	if title := m.renderTitlebar(); title != "" {
+		builder.WriteString(title)
+		builder.WriteString("\n")
+	}
+
 	// Toast notifications (top of screen) - single line, minimal
 	if m.toastManager != nil && m.toastManager.Count() > 0 {
 		toasts := m.toastManager.View(m.width)
