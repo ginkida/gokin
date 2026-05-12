@@ -411,7 +411,7 @@ func FormatErrorWithGuidance(styles *Styles, errMsg string) string {
 	guidance := GetErrorGuidance(errMsg)
 
 	errorStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
-	msgStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FECACA"))
+	msgStyle := lipgloss.NewStyle().Foreground(ColorText)
 	titleStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	suggestionStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	cmdStyle := lipgloss.NewStyle().Foreground(ColorSecondary)

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/ui"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -12,12 +14,12 @@ import (
 func (a *App) HandleInsightsCommand() string {
 	var builder strings.Builder
 
-	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true)
-	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#06B6D4")).Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#34D399"))
-	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24"))
-	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171"))
+	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorPrimary).Bold(true)
+	headerStyle := lipgloss.NewStyle().Foreground(ui.ColorSecondary).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorMuted)
+	valueStyle := lipgloss.NewStyle().Foreground(ui.ColorSuccess)
+	warnStyle := lipgloss.NewStyle().Foreground(ui.ColorWarning)
+	errorStyle := lipgloss.NewStyle().Foreground(ui.ColorError)
 
 	builder.WriteString(titleStyle.Render("🧠 Learning Insights Dashboard"))
 	builder.WriteString("\n\n")

@@ -165,7 +165,11 @@ func (m *OutputModel) AppendTextStream(text string) {
 }
 
 // Thinking display — quiet, elegant, stays out of the way.
-var thinkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Italic(true)
+//
+// Captures ColorMuted at package-init time — fine in the locked
+// single-theme world. If theme switching ever returns, turn this into a
+// helper function so the colour follows ApplyTheme.
+var thinkingStyle = lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
 var thinkingLabelStyle = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
 
 // AppendThinkingStream appends streaming thinking content.

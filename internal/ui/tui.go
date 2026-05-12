@@ -3016,8 +3016,8 @@ func (m *Model) renderInlineDiff(msg InlineDiffMsg) {
 	}
 
 	connStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	removedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
-	addedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+	removedStyle := lipgloss.NewStyle().Foreground(ColorError)
+	addedStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 
 	m.output.AppendLine(connStyle.Render("  ⎿  diff:"))
 	for _, line := range oldLines {

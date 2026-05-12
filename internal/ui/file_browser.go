@@ -305,7 +305,7 @@ func (m *FileBrowserModel) formatEntryLine(index int, entry FileEntry) string {
 	selectedStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorSecondary).
-		Background(lipgloss.Color("#1F2937"))
+		Background(ColorBorder)
 	normalStyle := lipgloss.NewStyle().
 		Foreground(ColorText)
 	dirStyle := lipgloss.NewStyle().

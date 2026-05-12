@@ -199,7 +199,7 @@ func (m *GitStatusModel) formatEntryLine(index int) string {
 	selectedStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorSecondary).
-		Background(lipgloss.Color("#1F2937"))
+		Background(ColorBorder)
 	normalStyle := lipgloss.NewStyle().
 		Foreground(ColorText)
 	pathStyle := lipgloss.NewStyle().
