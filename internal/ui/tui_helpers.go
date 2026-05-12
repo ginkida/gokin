@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -12,6 +13,20 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// ansiCSIPattern matches Control Sequence Introducer escapes — SGR (colour
+// resets, foregrounds, backgrounds) and friends. Used by isVisuallyBlank
+// to recognise lines that carry only formatting escapes and would render
+// as blank rows in the terminal.
+var ansiCSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// isVisuallyBlank reports whether a line renders as empty after the
+// terminal strips ANSI escapes. Lines like "\x1b[0m" — emitted by syntax
+// highlighters around source blank lines — pass `s == ""` but visually
+// occupy a blank row inside a card body; this catches them.
+func isVisuallyBlank(s string) bool {
+	return strings.TrimSpace(ansiCSIPattern.ReplaceAllString(s, "")) == ""
+}
 
 // getTextSelectionHint returns a platform/terminal-specific hint for text selection.
 func getTextSelectionHint() string {

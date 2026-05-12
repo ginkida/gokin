@@ -2426,11 +2426,13 @@ func (m *Model) buildToolResultBody(
 	}
 
 	// Re-style each non-empty line with contentStyle when not highlighted.
-	// Empty lines drop out so the card doesn't carry trailing blank rows.
+	// Empty AND visually-blank (ANSI-only) lines drop out so the card
+	// doesn't carry phantom blank rows from chroma's reset sequences
+	// around source blank lines.
 	var b strings.Builder
 	first := true
 	for line := range strings.SplitSeq(display, "\n") {
-		if line == "" {
+		if isVisuallyBlank(line) {
 			continue
 		}
 		if !first {
