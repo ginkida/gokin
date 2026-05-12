@@ -4,13 +4,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ThemeType represents different UI themes.
+// ThemeType represents a UI theme identifier.
+//
+// gokin ships with a single unified theme (Graphite + violet). The type and
+// the lone ThemeDark constant are retained so the /theme command and config
+// `ui.theme` field stay stable for users who already have settings on disk.
 type ThemeType string
 
 const (
-	ThemeDark  ThemeType = "dark"  // Default dark theme (soft purple/cyan)
-	ThemeMacOS ThemeType = "macos" // Apple-inspired theme
-	ThemeLight ThemeType = "light" // Light theme for light terminal backgrounds
+	ThemeDark ThemeType = "dark" // Graphite + violet (only theme shipped)
 )
 
 // ThemeColorScheme defines the color palette for a theme.
@@ -36,6 +38,10 @@ type ThemeColorScheme struct {
 }
 
 // predefinedThemes returns all available theme color schemes.
+//
+// As of the design refresh, gokin ships a single unified theme — the map
+// shape is kept so GetTheme / GetAvailableThemes / ApplyTheme signatures
+// stay stable for callers (the /theme command + tests).
 func predefinedThemes() map[ThemeType]ThemeColorScheme {
 	return map[ThemeType]ThemeColorScheme{
 		ThemeDark: {
@@ -55,39 +61,6 @@ func predefinedThemes() map[ThemeType]ThemeColorScheme {
 			Dim:        lipgloss.Color("#5A5852"), // Deeper Warm Gray
 			Running:    lipgloss.Color("#6B8AD4"), // Info Blue
 			Context:    lipgloss.Color("#807D75"), // = Muted
-		},
-		ThemeMacOS: {
-			Name:       "Apple (MacOS)",
-			Primary:    lipgloss.Color("#007AFF"), // SF Blue
-			Secondary:  lipgloss.Color("#5856D6"), // SF Purple
-			Success:    lipgloss.Color("#34C759"), // SF Green
-			Warning:    lipgloss.Color("#FF9500"), // SF Orange
-			Error:      lipgloss.Color("#FF3B30"), // SF Red
-			Muted:      lipgloss.Color("#8E8E93"), // SF Gray
-			Text:       lipgloss.Color("#FFFFFF"), // White
-			Background: lipgloss.Color("#1C1C1E"), // Dark Mode Gray
-			Border:     lipgloss.Color("#3A3A3C"), // Separator Gray
-			Highlight:  lipgloss.Color("#64D2FF"), // SF Sky
-			Accent:     lipgloss.Color("#FF2D55"), // SF Pink
-			Info:       lipgloss.Color("#00C7BE"), // SF Mint
-		},
-		ThemeLight: {
-			Name:       "Light",
-			Primary:    lipgloss.Color("#7C3AED"), // Purple 600
-			Secondary:  lipgloss.Color("#0891B2"), // Cyan 600
-			Success:    lipgloss.Color("#059669"), // Emerald 600
-			Warning:    lipgloss.Color("#D97706"), // Amber 600
-			Error:      lipgloss.Color("#DC2626"), // Red 600
-			Muted:      lipgloss.Color("#6B7280"), // Gray 500
-			Text:       lipgloss.Color("#1E293B"), // Slate 800
-			Background: lipgloss.Color("#F8FAFC"), // Slate 50
-			Border:     lipgloss.Color("#CBD5E1"), // Slate 300
-			Highlight:  lipgloss.Color("#7C3AED"), // Purple 600
-			Accent:     lipgloss.Color("#DB2777"), // Pink 600
-			Info:       lipgloss.Color("#0D9488"), // Teal 600
-			Dim:        lipgloss.Color("#9CA3AF"), // Gray 400
-			Running:    lipgloss.Color("#2563EB"), // Blue 600
-			Context:    lipgloss.Color("#475569"), // Slate 600
 		},
 	}
 }

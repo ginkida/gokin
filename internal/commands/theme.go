@@ -8,131 +8,55 @@ import (
 	"gokin/internal/ui"
 )
 
-// ThemeCommand switches the UI theme.
+// ThemeCommand reports the active UI theme.
+//
+// As of the design refresh, gokin ships a single unified theme (Graphite +
+// violet). The command no longer accepts a theme name argument — it exists
+// only as a discoverable way to see what's active and confirm the theme
+// system is healthy.
 type ThemeCommand struct{}
 
 func (c *ThemeCommand) Name() string        { return "theme" }
-func (c *ThemeCommand) Description() string { return "Change UI color theme" }
-func (c *ThemeCommand) Usage() string       { return "/theme [theme-name]" }
+func (c *ThemeCommand) Description() string { return "Show the active UI theme" }
+func (c *ThemeCommand) Usage() string       { return "/theme" }
 func (c *ThemeCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategoryTools,
 		Icon:     "theme",
 		Priority: 40,
-		HasArgs:  true,
-		ArgHint:  "[theme]",
+		HasArgs:  false,
 	}
 }
 
-func (c *ThemeCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
-	// Get theme setter interface
+func (c *ThemeCommand) Execute(_ context.Context, args []string, app AppInterface) (string, error) {
 	themeSetter, ok := app.(ThemeSetter)
-	if !ok {
-		return "Theme switching not available in this context.", nil
-	}
-
-	currentTheme := themeSetter.GetTheme()
-
-	// No args - show current theme and available themes
-	if len(args) == 0 {
-		var sb strings.Builder
-		sb.WriteString("  [Set a custom theme for Gokin]\n")
-		fmt.Fprintf(&sb, "Current theme: %s\n\n", currentTheme)
-
-		availableThemes := ui.GetAvailableThemes()
-		sb.WriteString("Available themes:\n")
-		for _, themeInfo := range availableThemes {
-			marker := "  "
-			if string(themeInfo.ID) == currentTheme {
-				marker = "> "
-			}
-			fmt.Fprintf(&sb, "%s%-12s  %s\n", marker, string(themeInfo.ID), getThemeDescription(themeInfo.ID))
-		}
-		sb.WriteString("\nUsage: /theme dark  or  /theme dracula")
-		sb.WriteString("\n       /theme cyber --save  (save to config)")
-		return sb.String(), nil
-	}
-
-	// Parse arguments
-	newTheme := strings.ToLower(args[0])
-	saveToConfig := false
-
-	// Check for --save flag
-	if len(args) > 1 && args[1] == "--save" {
-		saveToConfig = true
-	} else if len(args) > 1 && args[0] == "--save" {
-		// Handle: /theme --save cyber
-		if len(args) > 2 {
-			newTheme = strings.ToLower(args[2])
-		}
-		saveToConfig = true
-	}
-
-	// Check if theme is valid
-	availableThemes := ui.GetAvailableThemes()
-	var matchedTheme ui.ThemeType
-	found := false
-	for _, themeInfo := range availableThemes {
-		if strings.Contains(string(themeInfo.ID), newTheme) {
-			matchedTheme = themeInfo.ID
-			found = true
-			if string(themeInfo.ID) == newTheme {
-				// Exact match, stop searching
-				break
-			}
+	current := string(ui.ThemeDark)
+	if ok {
+		if t := themeSetter.GetTheme(); t != "" {
+			current = t
 		}
 	}
 
-	if !found {
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "Unknown theme: %s\n\n", newTheme)
-		sb.WriteString("Available themes:\n")
-		for _, themeInfo := range availableThemes {
-			fmt.Fprintf(&sb, "  %-12s  %s\n", string(themeInfo.ID), getThemeDescription(themeInfo.ID))
-		}
-		return sb.String(), nil
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Active theme: %s — %s", current, themeDescription(ui.ThemeType(current)))
+	if len(args) > 0 {
+		sb.WriteString("\n\ngokin now ships a single unified theme. Arguments are ignored.")
 	}
-
-	if string(matchedTheme) == currentTheme && !saveToConfig {
-		return fmt.Sprintf("Already using %s theme", currentTheme), nil
-	}
-
-	// Apply theme
-	themeSetter.SetTheme(matchedTheme)
-
-	var result strings.Builder
-	fmt.Fprintf(&result, "✓ Theme changed to %s", matchedTheme)
-
-	// Save to config if requested
-	if saveToConfig {
-		configSetter, ok := app.(ConfigSetter)
-		if ok {
-			if err := configSetter.SetConfigValue("ui.theme", string(matchedTheme)); err != nil {
-				fmt.Fprintf(&result, "\n⚠ Failed to save to config: %v", err)
-			} else {
-				result.WriteString("\n✓ Theme saved to config file")
-			}
-		} else {
-			result.WriteString("\n⚠ Config saving not available")
-		}
-	}
-
-	return result.String(), nil
+	return sb.String(), nil
 }
 
-// getThemeDescription returns a human-readable description for a theme.
-func getThemeDescription(theme ui.ThemeType) string {
-	descriptions := map[ui.ThemeType]string{
-		ui.ThemeDark: "Default soft purple-blue theme",
+// themeDescription returns a short human-readable description for a theme ID.
+func themeDescription(theme ui.ThemeType) string {
+	if theme == ui.ThemeDark {
+		return "Graphite + violet (warm graphite background, single violet accent)"
 	}
-
-	if desc, ok := descriptions[theme]; ok {
-		return desc
-	}
-	return "Custom theme"
+	return "(custom)"
 }
 
-// ThemeSetter defines the interface for changing themes.
+// ThemeSetter is the optional contract an App may implement so the /theme
+// command can read the currently-active theme. SetTheme is kept on the
+// interface for forward compatibility but is no longer invoked by the
+// command (single theme — nothing to switch to).
 type ThemeSetter interface {
 	GetTheme() string
 	SetTheme(theme ui.ThemeType)

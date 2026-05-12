@@ -302,17 +302,10 @@ type CoordinatedTaskState struct {
 
 // NewModel creates a new TUI model.
 func NewModel() *Model {
+	// gokin ships a single Graphite + violet theme — DefaultStyles already
+	// carries it via the bootstrap Color* vars in styles.go. No per-OS or
+	// background-detection branching here on purpose.
 	styles := DefaultStyles()
-
-	// Auto-detect terminal background and apply appropriate theme
-	if lipgloss.HasDarkBackground() {
-		if runtime.GOOS == "darwin" {
-			styles.ApplyTheme(ThemeMacOS)
-		}
-		// else: ThemeDark already default
-	} else {
-		styles.ApplyTheme(ThemeLight)
-	}
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
