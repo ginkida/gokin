@@ -1744,6 +1744,16 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case DiffPreviewRequestMsg:
+		// Emit a compact inline diff card into the chat stream as a
+		// persistent record of what's being proposed, then open the
+		// full-screen modal. The card stays in history after accept /
+		// reject; the modal is the actual decision surface.
+		if card := renderInlineDiffCard(m.width, msg); card != "" {
+			for line := range strings.SplitSeq(card, "\n") {
+				m.output.AppendLine("  " + line)
+			}
+			m.output.AppendLine("")
+		}
 		m.diffRequest = &msg
 		m.diffPreview.SetSize(m.width, m.height)
 		m.diffPreview.SetContent(msg.FilePath, msg.OldContent, msg.NewContent, msg.ToolName, msg.IsNewFile)
