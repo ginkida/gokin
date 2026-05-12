@@ -357,13 +357,13 @@ func isWhitespaceOnlyHunk(lines []diffLine) bool {
 
 // highlightDiff applies syntax highlighting to the diff with inline word-level highlighting.
 func (m *DiffPreviewModel) highlightDiff(diff string) string {
-	addedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Bold(true)
-	removedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Bold(true)
-	addedWordStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ECFDF5")).Background(lipgloss.Color("#059669")).Bold(true)
-	removedWordStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FEF2F2")).Background(lipgloss.Color("#DC2626")).Bold(true)
-	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#06B6D4")).Bold(true)
-	hunkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA"))
-	contextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
+	addedStyle := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
+	removedStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+	addedWordStyle := lipgloss.NewStyle().Foreground(ColorText).Background(ColorSuccess).Bold(true)
+	removedWordStyle := lipgloss.NewStyle().Foreground(ColorText).Background(ColorError).Bold(true)
+	headerStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+	hunkStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+	contextStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	lines := strings.Split(diff, "\n")
 	var result strings.Builder
@@ -720,13 +720,13 @@ func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 	// Styled buttons
 	applyStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#FFFFFF")).
+		Foreground(ColorText).
 		Background(ColorSuccess).
 		Padding(0, 2)
 
 	rejectStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#FFFFFF")).
+		Foreground(ColorText).
 		Background(ColorError).
 		Padding(0, 2)
 
@@ -999,11 +999,11 @@ func (m *MultiDiffPreviewModel) generateDiff(index int) string {
 // proper chroma syntax coloring (matching single-file DiffPreviewModel
 // behaviour from the main diff path).
 func (m *MultiDiffPreviewModel) highlightMultiDiff(diff string) string {
-	addedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Bold(true)
-	removedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Bold(true)
-	hunkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA"))
-	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#06B6D4")).Bold(true)
-	contextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
+	addedStyle := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
+	removedStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+	hunkStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+	headerStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+	contextStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	lang := ""
 	if m.currentIndex >= 0 && m.currentIndex < len(m.files) {
@@ -1290,7 +1290,7 @@ func (m MultiDiffPreviewModel) View() string {
 		lineStyle := lipgloss.NewStyle()
 		marker := " "
 		if i == m.currentIndex {
-			lineStyle = lineStyle.Background(lipgloss.Color("#374151")).Bold(true)
+			lineStyle = lineStyle.Background(ColorBorder).Bold(true)
 			marker = ">"
 		}
 
@@ -1341,13 +1341,13 @@ func (m MultiDiffPreviewModel) View() string {
 func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 	applyStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#FFFFFF")).
+		Foreground(ColorText).
 		Background(ColorSuccess).
 		Padding(0, 1)
 
 	rejectStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#FFFFFF")).
+		Foreground(ColorText).
 		Background(ColorError).
 		Padding(0, 1)
 
