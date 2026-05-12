@@ -2320,6 +2320,8 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 	}
 
 	if failed {
+		// Failed path keeps the legacy unwrapped emission for now; an
+		// inline error card with action pills lands in a follow-up phase.
 		detail := strings.TrimSpace(errText)
 		if detail == "" {
 			detail = firstNonEmptyLine(content)
@@ -2328,17 +2330,32 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 			detail = "tool failed"
 		}
 		m.output.AppendLine("    " + m.styles.FormatToolError(name, fmt.Errorf("%s", detail)))
-	} else {
-		m.output.AppendLine("    " + m.styles.FormatToolSuccessBlock(name, duration, summary))
-	}
-
-	if content == "" {
-		// No content to show
 		m.output.AppendLine("")
 		return
 	}
 
-	// Store for expand/collapse
+	titleLine := m.styles.FormatToolSuccessBlock(name, duration, summary)
+
+	// Body (expand-state aware) — built once, fed either into a bordered
+	// card or the legacy 4-space-indented flat form depending on width.
+	body := m.buildToolResultBody(toolName, toolInfo, content, hintStyle, contentStyle)
+
+	m.emitToolResultCard(titleLine, body)
+}
+
+// buildToolResultBody returns the rendered body of a tool result (preview
+// or full content, or the "press e to expand" hint when compacted), with
+// every line pre-styled so callers can emit the result verbatim. Returns
+// "" when there's nothing to show.
+func (m *Model) buildToolResultBody(
+	toolName, toolInfo, content string,
+	hintStyle, contentStyle lipgloss.Style,
+) string {
+	if content == "" {
+		return ""
+	}
+
+	// Store for expand/collapse and decide if we should collapse-by-default.
 	expanded := false
 	needsTruncation := false
 	compactLongOutput := false
@@ -2346,58 +2363,91 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 		m.lastToolOutputIndex = m.toolOutput.AddEntry(toolName, content)
 		expanded = m.toolOutput.IsExpanded(m.lastToolOutputIndex)
 		needsTruncation = m.toolOutput.NeedsTruncation(content)
-		// Read results are collapsed by default — the "✓ Read 100 lines
-		// from X" success line above already tells you what happened;
-		// inlining 10 lines of random head+tail usually isn't signal,
-		// just noise. User can press `e` to expand. Other tools (bash /
-		// grep / glob) keep the head+tail preview because their output
-		// IS the primary signal.
-		//
-		// Global compact mode (user toggled via `E` / Ctrl+E) still
-		// forces the same behaviour for all tools.
+		// Read results collapse by default — the success line already
+		// carries the line count + path + duration. Other tools keep the
+		// head+tail preview because their output IS the signal. Global
+		// compact mode (E / Ctrl+E) forces collapse for all.
 		compactLongOutput = needsTruncation && !expanded &&
 			(m.toolOutput.CompactModeActive() || collapsedByDefault(toolName))
 	}
 
 	if compactLongOutput {
-		// Single minimal hint — the ✓ Read success line above already
-		// carries the line count + path + duration, so we don't repeat
-		// the "[read: 100 lines]" GetSummary here. Keeps the output to
-		// TWO rows (✓ header + expand hint) per Read.
-		m.output.AppendLine("    " + hintStyle.Render("⎿ press e to expand"))
-		m.output.AppendLine("")
-		return
+		return hintStyle.Render("⎿ press e to expand")
 	}
 
-	// The "Preview below - press e for full output" hint that used to sit
-	// here is gone: the "... +N lines ..." marker inside the preview plus
-	// the status-bar's `e last output` hint already signal the same thing.
-	// Showing it as a separate line in front of *every* truncated read
-	// stole a row and visually separated the header ("✓ Read 100 lines
-	// from X") from the actual content — readers perceived it as noise.
-
-	// Content lines (preview or full) with simple indent.
-	displayContent := FormatToolOutput(content, 6, expanded)
+	display := FormatToolOutput(content, 6, expanded)
 
 	// Apply syntax highlighting for read tool AFTER preview/full selection.
 	highlighted := false
 	if toolName == "read" && toolInfo != "" && m.highlighter != nil {
 		lang := m.highlighter.DetectLanguage(toolInfo)
 		if lang != "" && lang != "text" {
-			displayContent = m.highlighter.Highlight(displayContent, lang)
+			display = m.highlighter.Highlight(display, lang)
 			highlighted = true
 		}
 	}
 
-	for line := range strings.SplitSeq(displayContent, "\n") {
-		if line != "" {
-			if highlighted {
-				// Already has ANSI color codes — don't wrap in contentStyle
-				m.output.AppendLine("    " + line)
-			} else {
-				m.output.AppendLine("    " + contentStyle.Render(line))
-			}
+	// Re-style each non-empty line with contentStyle when not highlighted.
+	// Empty lines drop out so the card doesn't carry trailing blank rows.
+	var b strings.Builder
+	first := true
+	for line := range strings.SplitSeq(display, "\n") {
+		if line == "" {
+			continue
 		}
+		if !first {
+			b.WriteString("\n")
+		}
+		first = false
+		if highlighted {
+			b.WriteString(line)
+		} else {
+			b.WriteString(contentStyle.Render(line))
+		}
+	}
+	return b.String()
+}
+
+// toolCardMinWidth is the lower bound below which tool results render as
+// flat indented lines (the legacy form). The rounded border eats two
+// horizontal cells for the vertical bars plus padding; narrower terminals
+// lose more in chrome than they gain in visual segmentation.
+const toolCardMinWidth = 60
+
+// emitToolResultCard writes the success line and body to the chat
+// viewport. On terminals at least toolCardMinWidth wide it wraps the
+// content in a subtle rounded bordered card (echoes Gokin Classic scene
+// B); narrower terminals fall back to the legacy 4-space-indented form.
+func (m *Model) emitToolResultCard(titleLine, body string) {
+	inner := titleLine
+	if body != "" {
+		inner += "\n" + body
+	}
+
+	if m.width < toolCardMinWidth {
+		// Legacy: flat indented lines, one AppendLine per row.
+		for line := range strings.SplitSeq(inner, "\n") {
+			m.output.AppendLine("    " + line)
+		}
+		m.output.AppendLine("")
+		return
+	}
+
+	// Card width: full terminal width minus the 2-cell left gutter so the
+	// card aligns with surrounding tool-status indentation. Width on the
+	// style sets the inner content width — the border adds 2 to that.
+	gutter := 2
+	cardWidth := max(m.width-gutter-2, 20)
+	cardStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorBorder).
+		Padding(0, 1).
+		Width(cardWidth)
+
+	rendered := cardStyle.Render(inner)
+	pad := strings.Repeat(" ", gutter)
+	for line := range strings.SplitSeq(rendered, "\n") {
+		m.output.AppendLine(pad + line)
 	}
 	m.output.AppendLine("")
 }
