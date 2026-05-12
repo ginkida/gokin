@@ -2330,16 +2330,28 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 	}
 
 	if failed {
-		// Failed path keeps the legacy unwrapped emission for now; an
-		// inline error card with action pills lands in a follow-up phase.
 		detail := strings.TrimSpace(errText)
 		if detail == "" {
-			detail = firstNonEmptyLine(content)
+			detail = strings.TrimSpace(content)
 		}
 		if detail == "" {
 			detail = "tool failed"
 		}
-		m.output.AppendLine("    " + m.styles.FormatToolError(name, fmt.Errorf("%s", detail)))
+		// Wide terminals get the mockup-scene-D error card. Narrow
+		// terminals fall back to the legacy single-line emission so
+		// the failure still shows without misaligned border art.
+		if card := renderToolErrorCard(m.width, name, duration, detail); card != "" {
+			for line := range strings.SplitSeq(card, "\n") {
+				m.output.AppendLine("  " + line)
+			}
+		} else {
+			// Legacy unwrapped single-line emission.
+			fallback := firstNonEmptyLine(detail)
+			if fallback == "" {
+				fallback = "tool failed"
+			}
+			m.output.AppendLine("    " + m.styles.FormatToolError(name, fmt.Errorf("%s", fallback)))
+		}
 		m.output.AppendLine("")
 		return
 	}
