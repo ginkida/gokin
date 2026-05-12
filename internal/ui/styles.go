@@ -472,7 +472,7 @@ func DefaultStyles() *Styles {
 
 		StatusSeparator: lipgloss.NewStyle().
 			Foreground(ColorBg).
-			Background(lipgloss.Color("#1E293B")), // Lighter slate for separator background
+			Background(ColorBorder),
 
 		StatusSectionName: lipgloss.NewStyle().
 			Foreground(ColorDim).
@@ -758,7 +758,7 @@ func (s *Styles) FormatError(err string) string {
 // FormatErrorWithSuggestion formats an error message with a suggestion - Claude Code style.
 func (s *Styles) FormatErrorWithSuggestion(err, suggestion, code string) string {
 	errorStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
-	msgStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FECACA"))
+	msgStyle := lipgloss.NewStyle().Foreground(ColorText)
 	suggestionStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 	codeStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
@@ -1001,7 +1001,7 @@ func (s *Styles) FormatPlanStepResult(stepID int, success bool, summary string) 
 	}
 
 	failStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
-	msgStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FECACA"))
+	msgStyle := lipgloss.NewStyle().Foreground(ColorText)
 	result := failStyle.Render(fmt.Sprintf("  Step %d failed", stepID))
 	if summary != "" {
 		result += " " + msgStyle.Render(summary)
