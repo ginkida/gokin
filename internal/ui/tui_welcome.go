@@ -25,7 +25,7 @@ var welcomeWordmark = [3]string{
 //	┌─┐ ┌─┐ ┬┌─ ┬ ┌┐┌
 //	│ ┬ │ │ ├┴┐ │ │││         ← violet wordmark
 //	└─┘ └─┘ ┴ ┴ ┴ ┘└┘
-//	v0.81.0                   ← dim version
+//	v0.81.1                   ← dim version (v-prefixed)
 //
 //	tips                      ← muted section header
 //	  type a question or paste a stack trace
@@ -60,6 +60,11 @@ func (m Model) renderWelcomePanel() string {
 		b.WriteString("\n")
 	}
 	if v := strings.TrimSpace(m.version); v != "" {
+		// Prefix "v" so the line reads as a tag (v0.81.1), not a bare
+		// number. Idempotent — already-"v"-prefixed strings pass through.
+		if !strings.HasPrefix(v, "v") && !strings.HasPrefix(v, "V") {
+			v = "v" + v
+		}
 		b.WriteString("  ")
 		b.WriteString(versionStyle.Render(v))
 		b.WriteString("\n")
