@@ -8,39 +8,42 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Colors for the UI theme - Muted Professional Palette
+// Colors for the UI theme — Graphite + Violet palette (locked).
+// These are the bootstrap defaults used before ApplyTheme runs and must
+// stay in sync with ThemeDark in themes.go (the only shipped theme).
 var (
-	ColorPrimary   = lipgloss.Color("#A78BFA") // Soft Purple (Lavender 400)
-	ColorSecondary = lipgloss.Color("#22D3EE") // Bright Cyan (Cyan 400)
-	ColorSuccess   = lipgloss.Color("#059669") // Emerald 600 (muted green)
-	ColorWarning   = lipgloss.Color("#D97706") // Amber 600 (muted amber)
-	ColorError     = lipgloss.Color("#DC2626") // Red 600 (muted red)
-	ColorMuted     = lipgloss.Color("#9CA3AF") // Neutral Gray (Gray 400)
-	ColorText      = lipgloss.Color("#F1F5F9") // Soft White (Slate 100)
-	ColorBg        = lipgloss.Color("#0F172A") // Deep Navy (Slate 900)
+	ColorPrimary   = lipgloss.Color("#9B7BFF") // Violet (mockup #7c4dff lifted)
+	ColorSecondary = lipgloss.Color("#5BA8C7") // Calm Cyan
+	ColorSuccess   = lipgloss.Color("#5AB97B") // Forest Green
+	ColorWarning   = lipgloss.Color("#D4A24A") // Deep Amber
+	ColorError     = lipgloss.Color("#D85A4A") // Coral
+	ColorMuted     = lipgloss.Color("#807D75") // Warm Gray
+	ColorText      = lipgloss.Color("#E8E4D8") // Warm Off-White
+	ColorBg        = lipgloss.Color("#0E1116") // Warm Graphite
 
 	// Extended semantic colors
-	ColorBorder    = lipgloss.Color("#1E293B") // Subtle Slate Border
-	ColorHighlight = lipgloss.Color("#E9D5FF") // Soft Purple (Purple 200)
-	ColorDim       = lipgloss.Color("#6B7280") // Gray 500 (slightly lighter)
-	ColorAccent    = lipgloss.Color("#F472B6") // Pink Accent (Pink 400)
-	ColorRunning   = lipgloss.Color("#60A5FA") // Sky Blue (Blue 400)
-	ColorInfo      = lipgloss.Color("#2DD4BF") // Teal Info (Teal 400)
+	ColorBorder    = lipgloss.Color("#2A2C33") // Subtle Border
+	ColorHighlight = lipgloss.Color("#C0AEFF") // Lavender
+	ColorDim       = lipgloss.Color("#5A5852") // Deeper Warm Gray
+	ColorAccent    = lipgloss.Color("#9B7BFF") // Unified with Primary (single violet)
+	ColorRunning   = lipgloss.Color("#6B8AD4") // Info Blue
+	ColorInfo      = lipgloss.Color("#6BAEB5") // Calm Teal
 
 	// Modal semantic colors
-	ColorContext  = lipgloss.Color("#CBD5E1") // Slate 300
+	ColorContext  = lipgloss.Color("#807D75") // = Muted (warm gray)
 	ColorQuestion = ColorSecondary            // Cyan
 	ColorPlan     = ColorInfo                 // Teal
 
-	// Gradient colors (used sparingly)
-	ColorGradient1 = lipgloss.Color("#A855F7") // Vibrant Purple (600)
-	ColorGradient2 = lipgloss.Color("#6366F1") // Vibrant Indigo (600)
-	ColorGradient3 = lipgloss.Color("#06B6D4") // Vibrant Cyan (600)
-	ColorGolden    = lipgloss.Color("#FBBF24") // Vibrant Amber (400)
-	ColorRose      = lipgloss.Color("#FB7185") // Rose 400
-	ColorMint      = lipgloss.Color("#34D399") // Emerald 400
-	ColorLavender  = lipgloss.Color("#C4B5FD") // Lavender 300
-	ColorSlate     = lipgloss.Color("#1E293B") // Slate 800
+	// Accent palette (used sparingly for gradients, banners, named glyphs).
+	// Re-pinned to harmonise with the locked graphite+violet base.
+	ColorGradient1 = lipgloss.Color("#9B7BFF") // Violet (= Primary)
+	ColorGradient2 = lipgloss.Color("#6B8AD4") // Indigo-ish (= Running)
+	ColorGradient3 = lipgloss.Color("#5BA8C7") // Cyan (= Secondary)
+	ColorGolden    = lipgloss.Color("#D4A24A") // Amber (= Warning)
+	ColorRose      = lipgloss.Color("#D85A4A") // Coral (= Error)
+	ColorMint      = lipgloss.Color("#5AB97B") // Forest (= Success)
+	ColorLavender  = lipgloss.Color("#C0AEFF") // Lavender (= Highlight)
+	ColorSlate     = lipgloss.Color("#16191F") // Surface (raised card)
 )
 
 // MessageIcons provides consistent icons for different message types
