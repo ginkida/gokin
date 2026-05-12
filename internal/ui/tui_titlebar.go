@@ -44,17 +44,17 @@ func (m Model) renderTitlebar() string {
 func (m Model) titlebarLeftSegment() string {
 	var b strings.Builder
 
-	// Three dots, one space apart. Colors chosen for semantic recognition
-	// rather than literal stop-light meaning — this is decoration, not a
-	// status indicator.
-	redDot := lipgloss.NewStyle().Foreground(ColorError).Render("●")
-	yelDot := lipgloss.NewStyle().Foreground(ColorWarning).Render("●")
-	grnDot := lipgloss.NewStyle().Foreground(ColorSuccess).Render("●")
-	b.WriteString(redDot)
+	// Three muted dots — pure chrome decoration that signals "this is a
+	// terminal application frame", nothing more. They don't act and they
+	// don't indicate status, so the bright red/yellow/green of an earlier
+	// pass was unjustified eye-pull. ColorMuted reads as present-but-quiet
+	// against the graphite background.
+	dot := lipgloss.NewStyle().Foreground(ColorMuted).Render("●")
+	b.WriteString(dot)
 	b.WriteString(" ")
-	b.WriteString(yelDot)
+	b.WriteString(dot)
 	b.WriteString(" ")
-	b.WriteString(grnDot)
+	b.WriteString(dot)
 
 	if path := statusBarProjectPath(m.workDir); path != "" {
 		// Two-space gutter between the dots and the path so the cluster
