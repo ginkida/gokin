@@ -73,7 +73,7 @@ func (m Model) renderStatusBarMinimal() string {
 // renderStatusBarCompact renders a compact status bar for narrow terminals (60-79 chars).
 // Shows all mandatory fields in short form.
 func (m Model) renderStatusBarCompact() string {
-	left := strings.Join(m.compactStatusSegments(), " · ")
+	left := joinStatusSegments(m.compactStatusSegments())
 	right := ""
 	if !m.output.IsAtBottom() {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
@@ -149,7 +149,7 @@ func (m Model) minimalStatusSegments() []string {
 // renderStatusBarMedium renders a medium status bar for standard terminals (80-119 chars).
 // Shows mandatory fields plus warnings.
 func (m Model) renderStatusBarMedium() string {
-	left := strings.Join(m.baseStatusSegments(true), " · ")
+	left := joinStatusSegments(m.baseStatusSegments(true))
 
 	// Right side: cost + scroll indicator
 	var rightParts []string
@@ -164,7 +164,7 @@ func (m Model) renderStatusBarMedium() string {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		rightParts = append(rightParts, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
 	}
-	right := strings.Join(rightParts, " · ")
+	right := joinStatusSegments(rightParts)
 
 	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
 	return left + strings.Repeat(" ", padding) + right
@@ -214,11 +214,35 @@ func (m Model) renderStatusBarFull() string {
 		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(ColorDim).Render(costStr))
 	}
 
-	left := strings.Join(leftParts, " · ")
-	right := strings.Join(rightParts, " · ")
+	left := joinStatusSegments(leftParts)
+	right := joinStatusSegments(rightParts)
 
 	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
 	return left + strings.Repeat(" ", padding) + right
+}
+
+// statusSeparator returns the muted "│" used to delimit status-bar segments.
+//
+// Style is computed on every call so the separator follows ApplyTheme — do
+// not cache as a package-level var.
+func statusSeparator() string {
+	return lipgloss.NewStyle().Foreground(ColorDim).Render(" │ ")
+}
+
+// joinStatusSegments joins non-empty segments with statusSeparator(). Empty
+// strings are skipped so an unset cell doesn't produce a "foo │  │ bar" gap.
+func joinStatusSegments(segments []string) string {
+	var nonEmpty []string
+	for _, s := range segments {
+		if s == "" {
+			continue
+		}
+		nonEmpty = append(nonEmpty, s)
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	return strings.Join(nonEmpty, statusSeparator())
 }
 
 func (m Model) baseStatusSegments(withContextBar bool) []string {
@@ -355,7 +379,7 @@ func (m Model) renderEngineStatus() string {
 	case m.state == StateStreaming:
 		status = "WRITING"
 		if m.responseToolCount > 0 {
-			status += " · " + formatToolRunSummary(m.responseToolCount, m.responseToolFailures, false)
+			status += statusSeparator() + formatToolRunSummary(m.responseToolCount, m.responseToolFailures, false)
 		}
 		if m.responseToolFailures > 0 {
 			color = ColorWarning
@@ -489,12 +513,15 @@ func formatAbsoluteTokens(tokens, maxTokens, outputTokens int) string {
 
 // contextUrgencyColor returns a color based on context usage percentage.
 // pct is a fraction in the range 0.0–1.0.
+//
+// Three-tier ramp (healthy → elevated → critical). The previous 4-tier ramp
+// had a hard-coded #F97316 "orange" between amber and red that didn't fit
+// the locked Graphite + violet palette; collapsing 80–95% into the amber
+// tier keeps the signal honest without introducing an off-palette colour.
 func contextUrgencyColor(pct float64) lipgloss.Color {
 	switch {
 	case pct > 0.95:
-		return ColorError // Red — critical
-	case pct > 0.80:
-		return lipgloss.Color("#F97316") // Orange 500 — high
+		return ColorError // Coral — critical
 	case pct > 0.60:
 		return ColorWarning // Amber — elevated
 	default:
@@ -568,7 +595,7 @@ func renderContextBar(pct float64, barWidth int, tokens int, maxTokens int, outp
 
 	filledStyle := lipgloss.NewStyle().Foreground(barColor)
 	projectedStyle := lipgloss.NewStyle().Foreground(projectedColor).Faint(true)
-	emptyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#374151"))
+	emptyStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	pctStyle := lipgloss.NewStyle().Foreground(barColor)
 
 	bar := filledStyle.Render(strings.Repeat("█", filled)) +
@@ -658,7 +685,7 @@ func (m Model) degradedModeLabel(withDetail bool) string {
 func (m Model) contextualShortcutHints() string {
 	keyStyle := lipgloss.NewStyle().Foreground(ColorMuted).Bold(true)
 	descStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	sep := descStyle.Render(" · ")
+	sep := statusSeparator()
 
 	var parts []string
 	add := func(key, desc string) {

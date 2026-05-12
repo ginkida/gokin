@@ -382,7 +382,7 @@ func TestRenderEngineStatus_UsesRichRuntimeStates(t *testing.T) {
 	m.responseToolCount = 3
 	m.responseToolFailures = 1
 	status = stripAnsi(m.renderEngineStatus())
-	if !strings.Contains(status, "WRITING · 3 tools · 1 failed") {
+	if !strings.Contains(status, "WRITING │ 3 tools · 1 failed") {
 		t.Fatalf("expected streaming status with tool count, got %q", status)
 	}
 	if !strings.Contains(status, MessageIcons["warning"]) {
