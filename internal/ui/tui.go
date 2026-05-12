@@ -2478,28 +2478,12 @@ func (m Model) View() string {
 	builder.WriteString(outputView)
 	builder.WriteString("\n")
 
-	// Welcome hint when output is empty and user is at input.
-	// Mentions the active session mode so a fresh user isn't surprised
-	// when their first message triggers a plan-mode approval flow
-	// instead of immediate execution. Modes are visually distinct in
-	// the status bar too — this hint just makes the connection
-	// explicit on the very first interaction.
+	// Welcome panel (mockup scene A) when output is empty and user is at
+	// input. Replaces the prior single-line dim hint with a structured
+	// idle screen: wordmark, version, tips, project info, mode hint.
 	if m.output.IsEmpty() && m.state == StateInput {
-		dimStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-		hint := getTextSelectionHint()
-		modeHint := ""
-		switch {
-		case m.planningModeEnabled:
-			modeHint = "Plan mode is on — agent will explore, then propose a plan for approval."
-		case !m.permissionsEnabled || !m.sandboxEnabled:
-			modeHint = "YOLO mode — agent runs everything without asking. Shift+Tab to step back."
-		}
-		base := "  Type a message to start. Press ? for shortcuts. " + hint
-		if modeHint != "" {
-			base += "\n  " + modeHint
-		}
-		builder.WriteString(dimStyle.Render(base))
-		builder.WriteString("\n\n")
+		builder.WriteString(m.renderWelcomePanel())
+		builder.WriteString("\n")
 	}
 
 	// Background panels (dimmed when modal is active)
