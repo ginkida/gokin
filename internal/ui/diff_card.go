@@ -57,6 +57,12 @@ func renderInlineDiffCard(width int, msg DiffPreviewRequestMsg) string {
 	pad := max(innerWidth-lipgloss.Width(titleLeft)-lipgloss.Width(pill), 1)
 	title := titleLeft + strings.Repeat(" ", pad) + pill
 
+	// Diff preview: a few representative changed lines so users can
+	// recognise the change without opening the full modal. Truncates per
+	// line; falls back to "no preview" (empty slice) when the diff is
+	// effectively whitespace-only after normalisation.
+	preview := extractDiffPreviewLines(msg.OldContent, msg.NewContent, 3, innerWidth-2)
+
 	// Action hint row: subtle pills for ↵ / d / esc.
 	hint := renderDiffActionHints()
 
@@ -66,8 +72,60 @@ func renderInlineDiffCard(width int, msg DiffPreviewRequestMsg) string {
 		Padding(0, 1).
 		Width(innerWidth)
 
-	body := title + "\n\n" + hint
+	var body string
+	if len(preview) > 0 {
+		body = title + "\n\n" + strings.Join(preview, "\n") + "\n\n" + hint
+	} else {
+		body = title + "\n\n" + hint
+	}
 	return cardStyle.Render(body)
+}
+
+// extractDiffPreviewLines walks the line-mode diff and returns up to
+// maxLines styled preview rows. Picks first deletions then first
+// additions — the most contextually relevant slice for a small card.
+// Each row is pre-styled with the "+ " / "- " prefix in Success / Error
+// and truncated to lineWidth so the card doesn't break the border.
+func extractDiffPreviewLines(oldContent, newContent string, maxLines, lineWidth int) []string {
+	dmp := diffmatchpatch.New()
+	a, b, lineArray := dmp.DiffLinesToChars(oldContent, newContent)
+	diffs := dmp.DiffMain(a, b, false)
+	diffs = dmp.DiffCharsToLines(diffs, lineArray)
+
+	addStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+	delStyle := lipgloss.NewStyle().Foreground(ColorError)
+
+	// Split the budget so we always show at least one of each side when
+	// available. With maxLines=3: dels gets 1, adds gets 2 (slight bias
+	// toward the after-state, which is what the user is approving).
+	delsBudget := max(maxLines/3, 1)
+	addsBudget := maxLines - delsBudget
+
+	collect := func(typ diffmatchpatch.Operation, budget int, prefix string, style lipgloss.Style) []string {
+		var out []string
+		for _, d := range diffs {
+			if d.Type != typ {
+				continue
+			}
+			for line := range strings.SplitSeq(strings.TrimSuffix(d.Text, "\n"), "\n") {
+				if len(out) >= budget {
+					return out
+				}
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				out = append(out, style.Render(prefix+truncateRunes(line, lineWidth-len(prefix))))
+			}
+		}
+		return out
+	}
+
+	dels := collect(diffmatchpatch.DiffDelete, delsBudget, "- ", delStyle)
+	adds := collect(diffmatchpatch.DiffInsert, addsBudget, "+ ", addStyle)
+
+	// Show deletions first (what's leaving), then additions (what's
+	// arriving). Reads as a tiny before/after.
+	return append(dels, adds...)
 }
 
 // countDiffLines returns the rough added / removed line counts between two
