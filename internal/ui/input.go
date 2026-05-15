@@ -121,6 +121,13 @@ func NewInputModel(styles *Styles, workDir string) InputModel {
 	ta.ShowLineNumbers = false
 	ta.SetHeight(1)
 
+	// Violet ›-prompt prefix per the Gokin Classic mockup — pulls the
+	// eye to where typing happens and gives the input area a typographic
+	// anchor that survives across themes via ColorPrimary.
+	ta.Prompt = "› "
+	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
+	ta.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(ColorMuted)
+
 	return InputModel{
 		textarea:           ta,
 		styles:             styles,
