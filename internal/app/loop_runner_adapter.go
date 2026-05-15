@@ -4,12 +4,71 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"gokin/internal/agent"
 	"gokin/internal/logging"
 	"gokin/internal/loops"
 	"gokin/internal/ui"
 )
+
+// describeLoopNext returns a short human-readable suffix for the iteration-
+// done toast that tells the user when the next iteration will run (or
+// that there won't be one). Examples:
+//   - "next in 5m"        — loop is running, next fire is in 5 minutes
+//   - "next now"          — loop is running and due immediately
+//   - "completed"         — loop hit MaxIterations on this iteration
+//   - "stopped"           — agent emitted `done.` or user stopped
+//   - "auto-paused"       — consecutive-failure breaker tripped
+//   - ""                  — paused (no auto-pause), or loop is gone
+//
+// Mirrors the language users see in /loop status so they can predict the
+// next iteration without typing a command.
+func describeLoopNext(loop *loops.Loop) string {
+	switch loop.Status {
+	case loops.StatusCompleted:
+		return "completed"
+	case loops.StatusStopped:
+		return "stopped"
+	case loops.StatusPaused:
+		if loop.AutoPaused {
+			return "auto-paused"
+		}
+		return ""
+	}
+
+	if loop.NextRunAt.IsZero() {
+		return ""
+	}
+	dur := time.Until(loop.NextRunAt)
+	if dur < 0 {
+		return "next now"
+	}
+	return "next in " + formatLoopDurationShort(dur)
+}
+
+// formatLoopDurationShort renders a time.Duration in the same compact form
+// used by /loop list and /loop status (e.g. "5m", "1h30m", "2d"). Mirrored
+// here so the iteration-done toast can show "next in <dur>" without
+// pulling commands/loop_cmd.go's helper across packages.
+func formatLoopDurationShort(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		h := int(d.Hours())
+		m := int(d.Minutes()) - h*60
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	days := int(d.Hours()) / 24
+	return fmt.Sprintf("%dd", days)
+}
 
 // newLoopSpawner returns a loops.Spawner that uses the App's existing
 // agent.Runner to execute each iteration in an isolated sub-agent.
@@ -169,9 +228,25 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 		"iteration", it.N,
 		"ok", it.OK,
 		"duration", it.Duration)
+
+	// Compute the "next fire" suffix from the post-iteration loop state.
+	// Re-read the manager to capture the freshly-set NextRunAt (the
+	// RecordIteration call that just preceded us recomputed it from the
+	// agent's optional `next:` hint).
+	nextSuffix := ""
+	if a.loopManager != nil {
+		if loop, ok := a.loopManager.Get(loopID); ok {
+			nextSuffix = describeLoopNext(loop)
+		}
+	}
+
+	msg := fmt.Sprintf("Loop %s #%d: %s", loopID, it.N, it.Summary)
+	if nextSuffix != "" {
+		msg += " — " + nextSuffix
+	}
 	a.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    statusType,
-		Message: fmt.Sprintf("Loop %s #%d: %s", loopID, it.N, it.Summary),
+		Message: msg,
 	})
 
 	// Re-read the loop from the manager so we capture post-iteration
