@@ -499,16 +499,19 @@ func DefaultStyles() *Styles {
 }
 
 func (s *Styles) FormatUserMessage(msg string) string {
-	promptStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+	// Violet › prefix matches the input prompt — same glyph signals
+	// "your turn" both in scrollback history and at the active input
+	// row. Body in warm off-white for readable contrast.
+	promptStyle := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
 	contentStyle := lipgloss.NewStyle().Foreground(ColorText)
 
 	lines := strings.Split(msg, "\n")
 	var result strings.Builder
 	for i, line := range lines {
 		if i == 0 {
-			result.WriteString(promptStyle.Render("❯ ") + contentStyle.Render(line))
+			result.WriteString(promptStyle.Render("› ") + contentStyle.Render(line))
 		} else {
-			result.WriteString("\n" + contentStyle.Render(line))
+			result.WriteString("\n  " + contentStyle.Render(line))
 		}
 	}
 	return s.UserCard.Render(result.String())
