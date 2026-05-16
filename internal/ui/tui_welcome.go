@@ -25,7 +25,7 @@ var welcomeWordmark = [3]string{
 //	┌─┐ ┌─┐ ┬┌─ ┬ ┌┐┌
 //	│ ┬ │ │ ├┴┐ │ │││         ← violet wordmark
 //	└─┘ └─┘ ┴ ┴ ┴ ┘└┘
-//	v0.82.2                   ← dim version (v-prefixed)
+//	v0.82.3                   ← dim version (v-prefixed)
 //
 //	tips                      ← muted section header
 //	  type a question or paste a stack trace

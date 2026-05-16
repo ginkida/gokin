@@ -1221,6 +1221,14 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 
 		// ESC interrupts processing/streaming and returns to input
 		if m.state == StateProcessing || m.state == StateStreaming {
+			// Capture elapsed BEFORE the reset clears streamStartTime —
+			// surfacing "stopped after Xs" turns a generic cancel into a
+			// useful signal ("how long was I waiting?").
+			elapsed := time.Duration(0)
+			if !m.streamStartTime.IsZero() {
+				elapsed = time.Since(m.streamStartTime)
+			}
+
 			// Cancel the current processing (API request)
 			if m.onCancel != nil {
 				m.onCancel()
@@ -1237,8 +1245,17 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			if m.toolProgressBar != nil {
 				m.toolProgressBar.Hide()
 			}
+
+			// Cancellation is a user choice, not a warning — render in
+			// ColorDim italic so the line records what happened without
+			// the visual alarm of ⚠ Warning styling.
+			stopStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+			stopMsg := "⎯ stopped"
+			if elapsed > 0 {
+				stopMsg += " after " + format.Duration(elapsed)
+			}
 			m.output.AppendLine("")
-			m.output.AppendLine(m.styles.Warning.Render(" Interrupted - request cancelled"))
+			m.output.AppendLine(stopStyle.Render(stopMsg))
 			m.output.AppendLine("")
 			if m.onInterrupt != nil {
 				m.onInterrupt()
