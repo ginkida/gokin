@@ -2778,9 +2778,17 @@ func (m Model) View() string {
 				idleStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 				status += "  " + idleStyle.Render("· "+m.streamIdleMsg)
 			} else if m.slowWarningShown && m.currentTool != "" {
-				// Tool is running longer than expected — show brief hint
+				// Tool is running longer than expected — show a brief hint
+				// with elapsed time so the user knows *how* long without
+				// having to track it themselves. Format-matches the tool-
+				// success duration grammar (e.g. "4s", "1.2m") so the two
+				// reads as one timekeeping system.
 				slowStyle := lipgloss.NewStyle().Foreground(ColorDim)
-				status += "  " + slowStyle.Render("· running")
+				hint := "· running"
+				if !m.toolStartTime.IsZero() {
+					hint = "· running " + format.Duration(time.Since(m.toolStartTime))
+				}
+				status += "  " + slowStyle.Render(hint)
 			}
 
 			// Plan step context
