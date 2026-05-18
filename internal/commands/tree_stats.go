@@ -33,7 +33,7 @@ func (c *TreeStatsCommand) Execute(ctx context.Context, args []string, app AppIn
 	var sb strings.Builder
 
 	// Header
-	sb.WriteString("🌳 Tree Planner Statistics\n")
+	sb.WriteString("Tree Planner Statistics\n")
 	sb.WriteString(strings.Repeat("─", 50))
 	sb.WriteString("\n\n")
 
@@ -51,14 +51,14 @@ func (c *TreeStatsCommand) Execute(ctx context.Context, args []string, app AppIn
 	sb.WriteString("  Toggle:          /plan\n\n")
 
 	// Configuration
-	sb.WriteString("📋 Configuration\n")
+	sb.WriteString("Configuration\n")
 	if alg, ok := stats["algorithm"]; ok {
 		fmt.Fprintf(&sb, "  Algorithm:       %v\n", alg)
 	}
 	sb.WriteString("\n")
 
 	// Active trees
-	sb.WriteString("📊 Statistics\n")
+	sb.WriteString("Statistics\n")
 	if trees, ok := stats["active_trees"]; ok {
 		fmt.Fprintf(&sb, "  Active Trees:    %v\n", trees)
 	}
@@ -73,7 +73,7 @@ func (c *TreeStatsCommand) Execute(ctx context.Context, args []string, app AppIn
 	// Visual Tree
 	activeTree := planner.GetActiveTree()
 	if activeTree != nil {
-		sb.WriteString("🌳 Current Plan Tree\n")
+		sb.WriteString("Current Plan Tree\n")
 		sb.WriteString(planner.GenerateVisualTree(activeTree))
 		sb.WriteString("\n")
 	}

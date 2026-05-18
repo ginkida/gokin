@@ -38,13 +38,13 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// Get project info
 	projectInfo := app.GetProjectInfo()
 
-	// Header
-	sb.WriteString("📊 Session Statistics\n")
+	// Header — clean rule, no emoji.
+	sb.WriteString("Session Statistics\n")
 	sb.WriteString(strings.Repeat("─", 50))
 	sb.WriteString("\n\n")
 
 	// Token Usage
-	sb.WriteString("💰 Token Usage\n")
+	sb.WriteString("Tokens\n")
 	fmt.Fprintf(&sb, "  Input Tokens:     %s\n", formatNumber(int64(tokenStats.InputTokens)))
 	fmt.Fprintf(&sb, "  Output Tokens:    %s\n", formatNumber(int64(tokenStats.OutputTokens)))
 	fmt.Fprintf(&sb, "  Total Tokens:     %s\n", formatNumber(int64(tokenStats.TotalTokens)))
@@ -61,13 +61,13 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	fmt.Fprintf(&sb, "  Est. Cost:       %s\n\n", appcontext.FormatCost(totalCost))
 
 	// Model Info
-	sb.WriteString("🤖 Model\n")
+	sb.WriteString("Model\n")
 	fmt.Fprintf(&sb, "  Name:            %s\n", cfg.Model.Name)
 	fmt.Fprintf(&sb, "  Temperature:     %.1f\n", cfg.Model.Temperature)
 	fmt.Fprintf(&sb, "  Max Tokens:      %s\n\n", formatNumber(int64(cfg.Model.MaxOutputTokens)))
 
 	// Context Info
-	sb.WriteString("📚 Context\n")
+	sb.WriteString("Context\n")
 	if contextManager == nil {
 		contextManager = app.GetContextManager()
 	}
@@ -86,14 +86,14 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	}
 
 	// Session Info
-	sb.WriteString("💬 Session\n")
+	sb.WriteString("Session\n")
 	if session := app.GetSession(); session != nil {
 		history := session.GetHistory()
 		fmt.Fprintf(&sb, "  Messages:        %d\n", len(history))
 	}
 
 	// Project Info
-	sb.WriteString("\n📁 Project\n")
+	sb.WriteString("\nProject\n")
 	if projectInfo != nil {
 		fmt.Fprintf(&sb, "  Name:            %s\n", projectInfo.Name)
 		fmt.Fprintf(&sb, "  Type:            %s\n", projectInfo.Type)
@@ -107,7 +107,7 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	if sessionStartTime != nil {
 		if startTime, ok := sessionStartTime.(time.Time); ok {
 			duration := time.Since(startTime)
-			sb.WriteString("⏱️  Duration\n")
+			sb.WriteString("Duration\n")
 			fmt.Fprintf(&sb, "  Session Length:  %s\n\n", format.Duration(duration))
 		}
 	}
@@ -128,7 +128,7 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// Footer
 	sb.WriteString(strings.Repeat("─", 50))
 	sb.WriteString("\n")
-	sb.WriteString("💡 Tip: Use /cost to see real-time token usage")
+	sb.WriteString("Tip: /cost shows real-time token usage")
 
 	return sb.String(), nil
 }
@@ -141,7 +141,7 @@ func formatMCPStatsSection(mgr *mcp.Manager) string {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("🔌 MCP\n")
+	sb.WriteString("MCP\n")
 	connected := 0
 	tools := 0
 	unhealthy := 0

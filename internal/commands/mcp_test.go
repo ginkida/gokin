@@ -456,7 +456,7 @@ func TestFormatMCPStatsSection_IncludesServerAndToolCounts(t *testing.T) {
 		{Name: "a"}, {Name: "b"},
 	})
 	got := formatMCPStatsSection(mgr)
-	if !strings.Contains(got, "🔌 MCP") {
+	if !strings.Contains(got, "MCP") {
 		t.Errorf("missing section header: %q", got)
 	}
 	if !strings.Contains(got, "2 total, 0 connected") {
