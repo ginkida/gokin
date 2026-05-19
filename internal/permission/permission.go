@@ -140,9 +140,16 @@ func GetToolRiskLevel(toolName string) RiskLevel {
 		"git_status", "git_log", "git_diff", "git_blame",
 		"history_search",
 		"web_search", "web_fetch", "todo",
-		"task_output", "task_stop",
-		"mcp_admin":
+		"task_output", "task_stop":
 		return RiskLow
+	case "mcp_admin":
+		// Read actions (list/status/help) are safe, but the same tool can
+		// also add/remove MCP servers (which spawns subprocesses + persists
+		// config). RiskMedium → asks in caution mode by default. The
+		// `mcp_admin{action:list}` calls the model makes for diagnostics
+		// will pay one prompt the first time per session in caution mode;
+		// in safe mode they go through silently.
+		return RiskMedium
 	case "write", "edit", "git_add", "copy", "move", "mkdir",
 		"atomicwrite", "task", "batch":
 		return RiskMedium

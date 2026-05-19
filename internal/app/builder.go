@@ -1431,14 +1431,16 @@ func (b *Builder) initMCP() error {
 	return nil
 }
 
-// wireMCPAdminTool injects MCP inspection callbacks into the mcp_admin tool
-// so the model can answer setup questions ("is MCP on?", "which servers?",
-// "why isn't my github MCP tool showing up?") without the user typing
-// /mcp list themselves. Read-only — write actions land in a follow-up.
+// wireMCPAdminTool injects MCP inspection + mutation callbacks into the
+// mcp_admin tool so the model can answer setup questions ("is MCP on?",
+// "which servers?", "why isn't my github MCP tool showing up?") AND act on
+// requests like "add a github MCP server" without the user typing /mcp
+// themselves.
 //
 // Safe when the tool isn't registered (lookup fails silently) or when MCP
 // is disabled (callbacks reference b.mcpManager which is nil — the tool's
-// `enabled` predicate gates that).
+// `enabled` predicate gates read paths; write paths short-circuit via the
+// MCPAddCore/MCPRemoveCore `mgr == nil` guard).
 func (b *Builder) wireMCPAdminTool() {
 	if b.registry == nil {
 		return
@@ -1460,6 +1462,20 @@ func (b *Builder) wireMCPAdminTool() {
 		},
 		func() bool {
 			return b.mcpManager != nil
+		},
+	)
+	admin.SetMutationCallbacks(
+		func(ctx context.Context, params tools.MCPAddParams) (string, error) {
+			return commands.MCPAddCore(ctx, b.mcpManager, b.cfg, b.registry, b.mainClient, commands.MCPAddParams{
+				Name:      params.Name,
+				Transport: params.Transport,
+				Command:   params.Command,
+				Args:      append([]string(nil), params.Args...),
+				URL:       params.URL,
+			})
+		},
+		func(name string) (string, error) {
+			return commands.MCPRemoveCore(b.mcpManager, b.cfg, b.registry, b.mainClient, name)
 		},
 	)
 	logging.Debug("mcp_admin tool wired")

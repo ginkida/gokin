@@ -7,25 +7,34 @@ import (
 	"google.golang.org/genai"
 )
 
-// MCPAdminTool gives the model read-only access to the MCP control plane so
-// it can answer questions like "is MCP set up?", "which servers do I have?"
-// or "show me what's wrong with the github MCP server" without forcing the
-// user to type `/mcp list` themselves.
-//
-// Write actions (add/remove) are intentionally NOT here yet — they require
-// persistence + tool-registry sync that the read-only path doesn't need.
-// They land in a follow-up once the inspection path proves out.
+// MCPAddParams is the structured input the tool passes to its add callback.
+// Mirror of commands.MCPAddParams but defined here so the tool package can
+// be the source of truth for its own wire format. Builder maps between the
+// two when wiring callbacks.
+type MCPAddParams struct {
+	Name      string   // Required.
+	Transport string   // "stdio" or "http".
+	Command   string   // stdio only.
+	Args      []string // stdio only.
+	URL       string   // http only.
+}
+
+// MCPAdminTool gives the model read/write access to the MCP control plane so
+// it can answer questions like "is MCP set up?" AND act on commands like
+// "add a github MCP server" without forcing the user to type /mcp themselves.
 //
 // Implementation note: the tool can't import `internal/mcp` because that
 // package already imports `internal/tools` (for the Tool interface) — going
-// the other way would cycle. So the actual renderers are injected as
-// callbacks by app/builder.go, which has both packages in scope. When MCP
+// the other way would cycle. So the actual renderers + mutators are injected
+// as callbacks by app/builder.go, which has both packages in scope. When MCP
 // is disabled or the callbacks are unset the tool returns a setup-hint
 // instead of erroring.
 type MCPAdminTool struct {
-	list     func() string
-	status   func(name string) string
-	enabled  func() bool
+	list    func() string
+	status  func(name string) string
+	add     func(ctx context.Context, params MCPAddParams) (string, error)
+	remove  func(name string) (string, error)
+	enabled func() bool
 }
 
 // NewMCPAdminTool constructs the tool with no callbacks attached. The builder
@@ -41,6 +50,17 @@ func (t *MCPAdminTool) SetCallbacks(listFn func() string, statusFn func(name str
 	t.list = listFn
 	t.status = statusFn
 	t.enabled = enabledFn
+}
+
+// SetMutationCallbacks wires the write callbacks for add/remove. Kept
+// separate from SetCallbacks so tests can exercise read-only behaviour
+// without supplying mutators.
+func (t *MCPAdminTool) SetMutationCallbacks(
+	addFn func(ctx context.Context, params MCPAddParams) (string, error),
+	removeFn func(name string) (string, error),
+) {
+	t.add = addFn
+	t.remove = removeFn
 }
 
 func (t *MCPAdminTool) Name() string {
@@ -60,7 +80,7 @@ func (t *MCPAdminTool) Declaration() *genai.FunctionDeclaration {
 func MCPAdminToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "mcp_admin",
-		Description: "Inspect MCP (Model Context Protocol) server state. Read-only.",
+		Description: "Inspect or modify MCP (Model Context Protocol) server configuration. Use this when the user asks about MCP setup or wants to add/remove MCP servers from chat.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -69,12 +89,32 @@ func MCPAdminToolDeclaration() *genai.FunctionDeclaration {
 					Description: "What to do. " +
 						"'list' (default) — short status line per server, plus how many tools are exposed to the model. " +
 						"'status' — detailed view; pass `server` to focus one. " +
-						"'help' — usage cheatsheet to share with the user when they want to add/remove MCP servers.",
-					Enum: []string{"list", "status", "help"},
+						"'help' — usage cheatsheet to share with the user. " +
+						"'add' — register a new MCP server; pass `server`, `transport`, plus `command`+`args` for stdio or `url` for http. " +
+						"'remove' — disconnect + drop a server by `server` name.",
+					Enum: []string{"list", "status", "help", "add", "remove"},
 				},
 				"server": {
 					Type:        genai.TypeString,
-					Description: "Server name. Only used with action=status; if omitted, status shows every server.",
+					Description: "Server name. Required for action=status (focus one server), action=add, action=remove. Omitted for list shows everything.",
+				},
+				"transport": {
+					Type:        genai.TypeString,
+					Description: "Transport kind for action=add. 'stdio' spawns a local subprocess (use with `command` + optional `args`); 'http' hits a remote URL (use with `url`).",
+					Enum:        []string{"stdio", "http"},
+				},
+				"command": {
+					Type:        genai.TypeString,
+					Description: "Subprocess to launch for stdio transport. Example: 'npx'.",
+				},
+				"args": {
+					Type:        genai.TypeArray,
+					Items:       &genai.Schema{Type: genai.TypeString},
+					Description: "Arguments passed to `command` for stdio transport. Example: ['-y', '@modelcontextprotocol/server-github'].",
+				},
+				"url": {
+					Type:        genai.TypeString,
+					Description: "Endpoint URL for http transport. Example: 'https://example.com/mcp'.",
 				},
 			},
 		},
@@ -86,8 +126,33 @@ func (t *MCPAdminTool) Validate(args map[string]any) error {
 	switch action {
 	case "list", "status", "help":
 		return nil
+	case "add":
+		if GetStringDefault(args, "server", "") == "" {
+			return fmt.Errorf("action=add requires `server` (server name)")
+		}
+		transport := GetStringDefault(args, "transport", "")
+		switch transport {
+		case "stdio":
+			if GetStringDefault(args, "command", "") == "" {
+				return fmt.Errorf("action=add transport=stdio requires `command`")
+			}
+		case "http":
+			if GetStringDefault(args, "url", "") == "" {
+				return fmt.Errorf("action=add transport=http requires `url`")
+			}
+		case "":
+			return fmt.Errorf("action=add requires `transport` (stdio or http)")
+		default:
+			return fmt.Errorf("action=add: unknown transport %q (use stdio or http)", transport)
+		}
+		return nil
+	case "remove":
+		if GetStringDefault(args, "server", "") == "" {
+			return fmt.Errorf("action=remove requires `server` (server name)")
+		}
+		return nil
 	default:
-		return fmt.Errorf("unknown action %q (use list, status, or help)", action)
+		return fmt.Errorf("unknown action %q (use list, status, help, add, or remove)", action)
 	}
 }
 
@@ -110,6 +175,39 @@ func (t *MCPAdminTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	case "status":
 		server := GetStringDefault(args, "server", "")
 		return NewSuccessResult(t.status(server)), nil
+	case "add":
+		if t.add == nil {
+			return NewErrorResult("mcp_admin add is not wired in this build"), nil
+		}
+		params := MCPAddParams{
+			Name:      GetStringDefault(args, "server", ""),
+			Transport: GetStringDefault(args, "transport", ""),
+			Command:   GetStringDefault(args, "command", ""),
+			URL:       GetStringDefault(args, "url", ""),
+		}
+		if raw, ok := args["args"].([]any); ok {
+			for _, a := range raw {
+				if s, ok := a.(string); ok {
+					params.Args = append(params.Args, s)
+				}
+			}
+		} else if raw, ok := args["args"].([]string); ok {
+			params.Args = append([]string(nil), raw...)
+		}
+		out, err := t.add(ctx, params)
+		if err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+		return NewSuccessResult(out), nil
+	case "remove":
+		if t.remove == nil {
+			return NewErrorResult("mcp_admin remove is not wired in this build"), nil
+		}
+		out, err := t.remove(GetStringDefault(args, "server", ""))
+		if err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+		return NewSuccessResult(out), nil
 	default:
 		return NewErrorResult(fmt.Sprintf("unknown action %q", action)), nil
 	}
@@ -151,10 +249,17 @@ func mcpAdminHelpText() string {
 
 2. Restart gokin so the manager initialises.
 
-3. Add a server from the chat with /mcp add:
-     /mcp add github stdio npx -y @modelcontextprotocol/server-github
-     /mcp add filesystem stdio npx -y @modelcontextprotocol/server-filesystem /allowed/dir
-     /mcp add my-api http https://example.com/mcp
+3. Add a server. Either path works:
+   a) From chat, call this tool: mcp_admin{action:add, server:"github",
+        transport:"stdio", command:"npx",
+        args:["-y", "@modelcontextprotocol/server-github"]}.
+      This runs end-to-end without the user typing anything — the new
+      server is connected, its tools are registered, and the change is
+      persisted to the config.
+   b) From chat as the user, slash-command style:
+      /mcp add github stdio npx -y @modelcontextprotocol/server-github
+      /mcp add filesystem stdio npx -y @modelcontextprotocol/server-filesystem /allowed/dir
+      /mcp add my-api http https://example.com/mcp
 
    Stdio servers spawn a local subprocess; http servers hit a remote URL.
    New servers default to permission_level=high so the user is prompted on
@@ -166,6 +271,9 @@ func mcpAdminHelpText() string {
      /mcp refresh NAME               re-fetch tool list
      /mcp remove NAME                disconnect + drop
 
+   The tool exposes the same: mcp_admin{action:list}, {action:status},
+   {action:remove, server:"github"}.
+
 5. As the model, prefer calling mcp_admin{action:list} first to see what is
-   already configured before suggesting /mcp add.`
+   already configured before suggesting an add.`
 }

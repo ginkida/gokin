@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"strings"
 
+	"gokin/internal/client"
 	"gokin/internal/config"
 	"gokin/internal/mcp"
 	"gokin/internal/permission"
+	"gokin/internal/tools"
 )
 
 // MCPCommand manages Model Context Protocol servers at runtime.
@@ -110,28 +112,57 @@ func mcpStatus(mgr *mcp.Manager, args []string) string {
 // Exposed for tests — stub the config-save path.
 var saveConfig = func(cfg *config.Config) error { return cfg.Save() }
 
-func mcpAdd(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []string) (string, error) {
-	if len(args) < 3 {
-		return "Usage: /mcp add NAME stdio CMD [ARG ...] | /mcp add NAME http URL", nil
-	}
-	name := args[0]
-	transport := strings.ToLower(args[1])
+// MCPAddParams is the structured input to MCPAddCore — same fields that
+// /mcp add parses from its positional args, in a form callable from the
+// model-facing mcp_admin tool too.
+type MCPAddParams struct {
+	Name      string   // Required. Unique identifier.
+	Transport string   // Required. "stdio" or "http".
+	Command   string   // stdio only. Subprocess to launch.
+	Args      []string // stdio only. Subprocess args.
+	URL       string   // http only. Server endpoint.
+}
 
-	if _, exists := mgr.GetServerConfig(name); exists {
-		return fmt.Sprintf("Server %q already exists. Remove it first with /mcp remove.", name), nil
+// MCPAddCore is the shared engine behind /mcp add and the model-facing
+// mcp_admin{action:add} tool. Both call sites get identical validation,
+// rollback-on-error, permission tier, and config persistence.
+//
+// On success returns a one-line "Added MCP server …" summary. On invalid
+// input returns a user-facing usage hint with nil error (so the caller
+// can surface it to the user as a normal message, not a stack trace).
+// On infrastructure failure (subprocess exec, network) returns the error
+// after rolling back the manager state.
+func MCPAddCore(
+	ctx context.Context,
+	mgr *mcp.Manager,
+	cfg *config.Config,
+	reg *tools.Registry,
+	mainClient client.Client,
+	p MCPAddParams,
+) (string, error) {
+	if mgr == nil {
+		return "MCP is not initialised. Enable it in config first.", nil
+	}
+	if p.Name == "" || p.Transport == "" {
+		return "Usage: name + transport (stdio|http) are required.", nil
+	}
+	transport := strings.ToLower(p.Transport)
+
+	if _, exists := mgr.GetServerConfig(p.Name); exists {
+		return fmt.Sprintf("Server %q already exists. Remove it first with /mcp remove.", p.Name), nil
 	}
 
 	// New 3rd-party servers default to "high" risk so the user always sees a
 	// prompt for an untrusted server's first call. Users can lower this in
 	// YAML after they've vetted the server.
 	serverCfg := &mcp.ServerConfig{
-		Name:            name,
+		Name:            p.Name,
 		Transport:       transport,
 		AutoConnect:     true,
 		PermissionLevel: "high",
 	}
 	yamlCfg := config.MCPServerConfig{
-		Name:            name,
+		Name:            p.Name,
 		Transport:       transport,
 		AutoConnect:     true,
 		PermissionLevel: "high",
@@ -139,17 +170,23 @@ func mcpAdd(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []stri
 
 	switch transport {
 	case "stdio":
-		serverCfg.Command = args[2]
-		yamlCfg.Command = args[2]
-		if len(args) > 3 {
-			serverCfg.Args = append([]string(nil), args[3:]...)
-			yamlCfg.Args = append([]string(nil), args[3:]...)
+		if p.Command == "" {
+			return "stdio transport requires `command`.", nil
+		}
+		serverCfg.Command = p.Command
+		yamlCfg.Command = p.Command
+		if len(p.Args) > 0 {
+			serverCfg.Args = append([]string(nil), p.Args...)
+			yamlCfg.Args = append([]string(nil), p.Args...)
 		}
 	case "http":
-		serverCfg.URL = args[2]
-		yamlCfg.URL = args[2]
+		if p.URL == "" {
+			return "http transport requires `url`.", nil
+		}
+		serverCfg.URL = p.URL
+		yamlCfg.URL = p.URL
 	default:
-		return fmt.Sprintf("Unknown transport %q. Use stdio or http.", transport), nil
+		return fmt.Sprintf("Unknown transport %q. Use stdio or http.", p.Transport), nil
 	}
 
 	if err := mgr.AddServer(serverCfg); err != nil {
@@ -158,39 +195,75 @@ func mcpAdd(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []stri
 
 	// Connect and register tools. If connection fails, roll back the config
 	// registration so the user isn't left with an invisible broken server.
-	if err := mgr.Connect(ctx, name); err != nil {
-		_ = mgr.RemoveServer(name)
+	if err := mgr.Connect(ctx, p.Name); err != nil {
+		_ = mgr.RemoveServer(p.Name)
 		return "", fmt.Errorf("connect: %w", err)
 	}
 
-	if err := registerMCPTools(app, mgr, name, serverCfg.PermissionLevel); err != nil {
+	if err := registerMCPToolsByRegistry(reg, mgr, p.Name, serverCfg.PermissionLevel); err != nil {
 		// Best-effort cleanup.
-		_ = mgr.Disconnect(name)
-		_ = mgr.RemoveServer(name)
+		_ = mgr.Disconnect(p.Name)
+		_ = mgr.RemoveServer(p.Name)
 		return "", fmt.Errorf("register tools: %w", err)
+	}
+	if mainClient != nil && reg != nil {
+		mainClient.SetTools(reg.GeminiTools())
 	}
 
 	// Persist to YAML so next startup reconnects automatically.
-	cfg := app.GetConfig()
-	cfg.MCP.Enabled = true
-	cfg.MCP.Servers = append(cfg.MCP.Servers, yamlCfg)
-	if err := saveConfig(cfg); err != nil {
-		// Runtime state is fine; surface the persistence failure.
-		return fmt.Sprintf("Server %q connected, but config save failed: %v", name, err), nil
+	if cfg != nil {
+		cfg.MCP.Enabled = true
+		cfg.MCP.Servers = append(cfg.MCP.Servers, yamlCfg)
+		if err := saveConfig(cfg); err != nil {
+			// Runtime state is fine; surface the persistence failure.
+			return fmt.Sprintf("Server %q connected, but config save failed: %v", p.Name, err), nil
+		}
 	}
 
-	toolCount := countToolsForServer(mgr, name)
-	return fmt.Sprintf("Added MCP server %q (%d tools).", name, toolCount), nil
+	toolCount := countToolsForServer(mgr, p.Name)
+	return fmt.Sprintf("Added MCP server %q (%d tools).", p.Name, toolCount), nil
+}
+
+func mcpAdd(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []string) (string, error) {
+	if len(args) < 3 {
+		return "Usage: /mcp add NAME stdio CMD [ARG ...] | /mcp add NAME http URL", nil
+	}
+	p := MCPAddParams{
+		Name:      args[0],
+		Transport: strings.ToLower(args[1]),
+	}
+	switch p.Transport {
+	case "stdio":
+		p.Command = args[2]
+		if len(args) > 3 {
+			p.Args = append([]string(nil), args[3:]...)
+		}
+	case "http":
+		p.URL = args[2]
+	default:
+		return fmt.Sprintf("Unknown transport %q. Use stdio or http.", args[1]), nil
+	}
+	return MCPAddCore(ctx, mgr, app.GetConfig(), app.GetToolRegistry(), app.GetMainClient(), p)
 }
 
 // ─── remove ────────────────────────────────────────────────────────────────
 
-func mcpRemove(mgr *mcp.Manager, app AppInterface, args []string) (string, error) {
-	if len(args) == 0 {
-		return "Usage: /mcp remove NAME", nil
+// MCPRemoveCore is the shared engine behind /mcp remove and the model-facing
+// mcp_admin{action:remove} tool. Disconnects the server, drops its tools
+// from the registry, and persists the removal.
+func MCPRemoveCore(
+	mgr *mcp.Manager,
+	cfg *config.Config,
+	reg *tools.Registry,
+	mainClient client.Client,
+	name string,
+) (string, error) {
+	if mgr == nil {
+		return "MCP is not initialised.", nil
 	}
-	name := args[0]
-
+	if name == "" {
+		return "Server name is required.", nil
+	}
 	if _, exists := mgr.GetServerConfig(name); !exists {
 		return fmt.Sprintf("No MCP server named %q.", name), nil
 	}
@@ -207,7 +280,6 @@ func mcpRemove(mgr *mcp.Manager, app AppInterface, args []string) (string, error
 	// between the command starting and Disconnect completing, so a snapshot
 	// from mgr.GetTools() taken earlier would be stale. The registry is
 	// authoritative for what the LLM currently sees.
-	reg := app.GetToolRegistry()
 	var unregistered int
 	if reg != nil {
 		for _, t := range reg.List() {
@@ -222,18 +294,26 @@ func mcpRemove(mgr *mcp.Manager, app AppInterface, args []string) (string, error
 			}
 		}
 	}
-	if c := app.GetMainClient(); c != nil && reg != nil {
-		c.SetTools(reg.GeminiTools())
+	if mainClient != nil && reg != nil {
+		mainClient.SetTools(reg.GeminiTools())
 	}
 
 	// Persist the removal.
-	cfg := app.GetConfig()
-	cfg.MCP.Servers = filterOutServer(cfg.MCP.Servers, name)
-	if err := saveConfig(cfg); err != nil {
-		return fmt.Sprintf("Removed MCP server %q at runtime, but config save failed: %v", name, err), nil
+	if cfg != nil {
+		cfg.MCP.Servers = filterOutServer(cfg.MCP.Servers, name)
+		if err := saveConfig(cfg); err != nil {
+			return fmt.Sprintf("Removed MCP server %q at runtime, but config save failed: %v", name, err), nil
+		}
 	}
 
 	return fmt.Sprintf("Removed MCP server %q (%d tools unregistered).", name, unregistered), nil
+}
+
+func mcpRemove(mgr *mcp.Manager, app AppInterface, args []string) (string, error) {
+	if len(args) == 0 {
+		return "Usage: /mcp remove NAME", nil
+	}
+	return MCPRemoveCore(mgr, app.GetConfig(), app.GetToolRegistry(), app.GetMainClient(), args[0])
 }
 
 // ─── refresh ───────────────────────────────────────────────────────────────
@@ -255,16 +335,23 @@ func mcpRefresh(ctx context.Context, mgr *mcp.Manager, args []string) (string, e
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
-// registerMCPTools pulls the manager's current tool list and registers only
-// tools belonging to the named server. Idempotent — Registry.Register would
-// return an error on duplicates, which we ignore so reruns are safe.
+// registerMCPTools is the App-side wrapper used by the /mcp add slash command.
+// It pulls the manager's current tool list and registers only tools belonging
+// to the named server. Idempotent — Registry.Register would return an error
+// on duplicates, which we ignore so reruns are safe.
 //
 // permLevel is the server's configured permission level ("low"/"medium"/
 // "high"). Each registered tool gets a matching risk override so the
 // permission layer treats it according to the server's trust tier instead
 // of the default RiskMedium fallback.
 func registerMCPTools(app AppInterface, mgr *mcp.Manager, serverName, permLevel string) error {
-	reg := app.GetToolRegistry()
+	return registerMCPToolsByRegistry(app.GetToolRegistry(), mgr, serverName, permLevel)
+}
+
+// registerMCPToolsByRegistry is the primitive form used by MCPAddCore so the
+// model-facing add path doesn't need an AppInterface. Behaviour is identical
+// to registerMCPTools.
+func registerMCPToolsByRegistry(reg *tools.Registry, mgr *mcp.Manager, serverName, permLevel string) error {
 	if reg == nil {
 		return fmt.Errorf("tool registry unavailable")
 	}
@@ -279,9 +366,6 @@ func registerMCPTools(app AppInterface, mgr *mcp.Manager, serverName, permLevel 
 			continue
 		}
 		permission.SetToolRiskOverride(t.Name(), level)
-	}
-	if c := app.GetMainClient(); c != nil {
-		c.SetTools(reg.GeminiTools())
 	}
 	return nil
 }

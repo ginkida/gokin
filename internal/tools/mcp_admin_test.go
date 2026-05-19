@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -131,7 +132,10 @@ func TestMCPAdminTool_DeclarationHasEnumOfActions(t *testing.T) {
 	if len(action.Enum) == 0 {
 		t.Fatal("`action` should have an enum of allowed values")
 	}
-	wantActions := map[string]bool{"list": false, "status": false, "help": false}
+	wantActions := map[string]bool{
+		"list": false, "status": false, "help": false,
+		"add": false, "remove": false,
+	}
 	for _, v := range action.Enum {
 		wantActions[v] = true
 	}
@@ -139,5 +143,153 @@ func TestMCPAdminTool_DeclarationHasEnumOfActions(t *testing.T) {
 		if !present {
 			t.Errorf("action %q missing from declaration enum", action)
 		}
+	}
+}
+
+func TestMCPAdminTool_ValidateAdd(t *testing.T) {
+	tool := NewMCPAdminTool()
+	cases := []struct {
+		name    string
+		args    map[string]any
+		wantErr bool
+	}{
+		{"stdio ok", map[string]any{"action": "add", "server": "x", "transport": "stdio", "command": "echo"}, false},
+		{"http ok", map[string]any{"action": "add", "server": "x", "transport": "http", "url": "https://e/mcp"}, false},
+		{"missing server", map[string]any{"action": "add", "transport": "stdio", "command": "echo"}, true},
+		{"missing transport", map[string]any{"action": "add", "server": "x", "command": "echo"}, true},
+		{"unknown transport", map[string]any{"action": "add", "server": "x", "transport": "udp", "command": "echo"}, true},
+		{"stdio missing command", map[string]any{"action": "add", "server": "x", "transport": "stdio"}, true},
+		{"http missing url", map[string]any{"action": "add", "server": "x", "transport": "http"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tool.Validate(tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestMCPAdminTool_ValidateRemove(t *testing.T) {
+	tool := NewMCPAdminTool()
+	if err := tool.Validate(map[string]any{"action": "remove"}); err == nil {
+		t.Fatal("remove without server should fail validation")
+	}
+	if err := tool.Validate(map[string]any{"action": "remove", "server": "x"}); err != nil {
+		t.Fatalf("remove with server should validate, got: %v", err)
+	}
+}
+
+func TestMCPAdminTool_AddRoutesToCallback(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "" },
+		func(string) string { return "" },
+		func() bool { return true },
+	)
+	var captured MCPAddParams
+	tool.SetMutationCallbacks(
+		func(_ context.Context, p MCPAddParams) (string, error) {
+			captured = p
+			return "Added " + p.Name, nil
+		},
+		nil,
+	)
+	res, err := tool.Execute(context.Background(), map[string]any{
+		"action":    "add",
+		"server":    "github",
+		"transport": "stdio",
+		"command":   "npx",
+		"args":      []any{"-y", "@modelcontextprotocol/server-github"},
+	})
+	if err != nil {
+		t.Fatalf("Execute returned err: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("Execute returned failure: %s", res.Error)
+	}
+	if captured.Name != "github" || captured.Transport != "stdio" || captured.Command != "npx" {
+		t.Fatalf("callback got wrong params: %+v", captured)
+	}
+	want := []string{"-y", "@modelcontextprotocol/server-github"}
+	if len(captured.Args) != len(want) || captured.Args[0] != want[0] || captured.Args[1] != want[1] {
+		t.Fatalf("captured.Args = %v, want %v", captured.Args, want)
+	}
+	if !strings.Contains(res.Content, "Added github") {
+		t.Fatalf("expected callback result in content, got %q", res.Content)
+	}
+}
+
+func TestMCPAdminTool_AddSurfacesCallbackError(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "" },
+		func(string) string { return "" },
+		func() bool { return true },
+	)
+	tool.SetMutationCallbacks(
+		func(_ context.Context, _ MCPAddParams) (string, error) {
+			return "", fmt.Errorf("connect: subprocess exited with code 1")
+		},
+		nil,
+	)
+	res, _ := tool.Execute(context.Background(), map[string]any{
+		"action":    "add",
+		"server":    "broken",
+		"transport": "stdio",
+		"command":   "/nonexistent",
+	})
+	if res.Success {
+		t.Fatal("expected failure when callback errors, got success")
+	}
+	if !strings.Contains(res.Error, "subprocess exited") {
+		t.Fatalf("error message lost: %q", res.Error)
+	}
+}
+
+func TestMCPAdminTool_RemoveRoutesToCallback(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "" },
+		func(string) string { return "" },
+		func() bool { return true },
+	)
+	var got string
+	tool.SetMutationCallbacks(
+		nil,
+		func(name string) (string, error) {
+			got = name
+			return "Removed " + name, nil
+		},
+	)
+	res, _ := tool.Execute(context.Background(), map[string]any{
+		"action": "remove",
+		"server": "github",
+	})
+	if got != "github" {
+		t.Fatalf("remove callback got %q, want github", got)
+	}
+	if !strings.Contains(res.Content, "Removed github") {
+		t.Fatalf("expected removal result, got %q", res.Content)
+	}
+}
+
+func TestMCPAdminTool_AddWithoutCallbackErrors(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "" },
+		func(string) string { return "" },
+		func() bool { return true },
+	)
+	// SetMutationCallbacks NOT called — add path should refuse.
+	res, _ := tool.Execute(context.Background(), map[string]any{
+		"action":    "add",
+		"server":    "x",
+		"transport": "stdio",
+		"command":   "echo",
+	})
+	if res.Success {
+		t.Fatal("add without wired callback should fail")
 	}
 }
