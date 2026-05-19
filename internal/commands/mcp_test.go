@@ -480,7 +480,7 @@ func TestFormatServerLine_Indicators(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			line := formatServerLine(&mcp.ServerStatus{
+			line := mcp.FormatServerLine(&mcp.ServerStatus{
 				Name: "s", Connected: tc.connected, Healthy: tc.healthy,
 			})
 			if !strings.Contains(line, tc.want) {

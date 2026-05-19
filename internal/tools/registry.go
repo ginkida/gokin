@@ -140,6 +140,11 @@ var toolSetDefinitions = map[ToolSet][]string{
 		"read", "write", "edit", "bash", "glob", "grep",
 		"ask_user", "list_dir", "tree", "diff", "todo",
 		"tools_list",
+		// mcp_admin is read-only inspection of the MCP control plane.
+		// Keeping it in Core means the model can always answer "is MCP
+		// set up?" / "which servers do I have?" — even in plan mode —
+		// without depending on an extra tool set being active.
+		"mcp_admin",
 		// request_tool moved to ToolSetAgent — it was shipping in the
 		// Core declaration list for main-agent Kimi requests, but the
 		// requester dependency is only wired in the sub-agent path.
@@ -299,6 +304,9 @@ func DefaultRegistry(workDir string) *Registry {
 	r.MustRegister(NewMemorizeTool(nil))
 	r.MustRegister(NewPinContextTool(nil))
 	r.MustRegister(NewHistorySearchTool(nil))
+
+	// MCP admin tool: callbacks wired later by builder.go after MCP init.
+	r.MustRegister(NewMCPAdminTool())
 
 	return r
 }
@@ -570,6 +578,9 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	// Custom improvements
 	r.RegisterFactory("pin_context", func() Tool { return NewPinContextTool(nil) }, declarations["pin_context"])
 	r.RegisterFactory("history_search", func() Tool { return NewHistorySearchTool(nil) }, declarations["history_search"])
+
+	// MCP admin — read-only inspection of the MCP control plane.
+	r.RegisterFactory("mcp_admin", func() Tool { return NewMCPAdminTool() }, declarations["mcp_admin"])
 
 	return r
 }

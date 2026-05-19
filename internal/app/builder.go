@@ -1418,11 +1418,51 @@ func (b *Builder) initMCP() error {
 		logging.Debug("MCP health check started", "interval", b.cfg.MCP.HealthCheckInterval)
 	}
 
+	// Wire the model-facing mcp_admin tool's inspection callbacks. We do this
+	// here (rather than in initIntegrations) so we have the live manager in
+	// scope. The tool is registered with nil callbacks at registry build, so
+	// no NPE if MCP is disabled — it falls back to the disabled-hint.
+	b.wireMCPAdminTool()
+
 	logging.Debug("MCP initialized",
 		"servers", len(b.cfg.MCP.Servers),
 		"tools", toolCount)
 
 	return nil
+}
+
+// wireMCPAdminTool injects MCP inspection callbacks into the mcp_admin tool
+// so the model can answer setup questions ("is MCP on?", "which servers?",
+// "why isn't my github MCP tool showing up?") without the user typing
+// /mcp list themselves. Read-only — write actions land in a follow-up.
+//
+// Safe when the tool isn't registered (lookup fails silently) or when MCP
+// is disabled (callbacks reference b.mcpManager which is nil — the tool's
+// `enabled` predicate gates that).
+func (b *Builder) wireMCPAdminTool() {
+	if b.registry == nil {
+		return
+	}
+	tool, ok := b.registry.Get("mcp_admin")
+	if !ok {
+		return
+	}
+	admin, ok := tool.(*tools.MCPAdminTool)
+	if !ok {
+		return
+	}
+	admin.SetCallbacks(
+		func() string {
+			return mcp.FormatList(b.mcpManager)
+		},
+		func(name string) string {
+			return mcp.FormatStatus(b.mcpManager, name)
+		},
+		func() bool {
+			return b.mcpManager != nil
+		},
+	)
+	logging.Debug("mcp_admin tool wired")
 }
 
 // initUI creates and configures the TUI model.

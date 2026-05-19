@@ -1212,6 +1212,7 @@ func GetAllDeclarations() map[string]*genai.FunctionDeclaration {
 		"run_tests":            RunTestsToolDeclaration(),
 		"git_branch":           GitBranchToolDeclaration(),
 		"git_pr":               GitPRToolDeclaration(),
+		"mcp_admin":            MCPAdminToolDeclaration(),
 	}
 }
 

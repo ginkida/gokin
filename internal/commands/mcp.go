@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"gokin/internal/config"
@@ -88,100 +87,22 @@ func (c *MCPCommand) Execute(ctx context.Context, args []string, app AppInterfac
 	}
 }
 
-// ─── list ──────────────────────────────────────────────────────────────────
+// ─── list / status ─────────────────────────────────────────────────────────
+//
+// The actual rendering lives in `mcp.FormatList` / `mcp.FormatStatus` so the
+// model-facing `mcp_admin` tool (internal/tools/mcp_admin.go) can produce the
+// same exact text without importing this package (which would cycle).
 
 func mcpList(mgr *mcp.Manager) string {
-	statuses := mgr.GetServerStatus()
-	if len(statuses) == 0 {
-		return "No MCP servers configured. Add one with `/mcp add NAME stdio CMD ...`."
-	}
-
-	// Stable order for predictable UI.
-	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Name < statuses[j].Name })
-
-	var sb strings.Builder
-	sb.WriteString("MCP servers:\n")
-	for _, s := range statuses {
-		sb.WriteString("  ")
-		sb.WriteString(formatServerLine(s))
-		sb.WriteByte('\n')
-	}
-
-	connected := 0
-	totalTools := 0
-	for _, s := range statuses {
-		if s.Connected {
-			connected++
-		}
-		totalTools += s.ToolCount
-	}
-	fmt.Fprintf(&sb, "\n%d/%d connected, %d tools exposed to the model.",
-		connected, len(statuses), totalTools)
-	return sb.String()
+	return mcp.FormatList(mgr)
 }
-
-// formatServerLine formats one server entry for /mcp list. Stable contract —
-// tests assert against this.
-func formatServerLine(s *mcp.ServerStatus) string {
-	indicator := "✗ offline"
-	switch {
-	case s.Connected && s.Healthy:
-		indicator = "✓ healthy"
-	case s.Connected && !s.Healthy:
-		indicator = "⚠ unhealthy"
-	}
-	return fmt.Sprintf("%-20s %s (%d tools)", s.Name, indicator, s.ToolCount)
-}
-
-// ─── status ────────────────────────────────────────────────────────────────
 
 func mcpStatus(mgr *mcp.Manager, args []string) string {
-	statuses := mgr.GetServerStatus()
+	name := ""
 	if len(args) > 0 {
-		name := args[0]
-		for _, s := range statuses {
-			if s.Name == name {
-				return formatServerDetail(s)
-			}
-		}
-		return fmt.Sprintf("No MCP server named %q. Run /mcp list.", name)
+		name = args[0]
 	}
-
-	if len(statuses) == 0 {
-		return "No MCP servers configured."
-	}
-	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Name < statuses[j].Name })
-
-	var sb strings.Builder
-	for i, s := range statuses {
-		if i > 0 {
-			sb.WriteByte('\n')
-		}
-		sb.WriteString(formatServerDetail(s))
-	}
-	return sb.String()
-}
-
-func formatServerDetail(s *mcp.ServerStatus) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Server: %s\n", s.Name)
-	fmt.Fprintf(&sb, "  Connected:  %v\n", s.Connected)
-	fmt.Fprintf(&sb, "  Healthy:    %v\n", s.Healthy)
-	if s.ServerInfo != nil && s.ServerInfo.Version != "" {
-		fmt.Fprintf(&sb, "  Version:    %s\n", s.ServerInfo.Version)
-	}
-	fmt.Fprintf(&sb, "  Tools (%d):", s.ToolCount)
-	if s.ToolCount == 0 {
-		sb.WriteString(" (none)\n")
-	} else {
-		sb.WriteByte('\n')
-		names := append([]string(nil), s.ToolNames...)
-		sort.Strings(names)
-		for _, n := range names {
-			fmt.Fprintf(&sb, "    - %s\n", n)
-		}
-	}
-	return sb.String()
+	return mcp.FormatStatus(mgr, name)
 }
 
 // ─── add ───────────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"gokin/internal/config"
+	"gokin/internal/tools"
 )
 
 // TestInitMCP_DisabledLeavesManagerNil pins the kill-switch: `mcp.enabled: false`
@@ -91,5 +92,46 @@ func TestInitMCP_EnabledWithServersCreatesManager(t *testing.T) {
 	// auto_connect=false → no connect attempt → summary stays empty.
 	if b.mcpConnectSummary != "" {
 		t.Fatalf("auto_connect=false should leave summary empty, got %q", b.mcpConnectSummary)
+	}
+}
+
+// TestInitMCP_WiresAdminTool pins the link between MCP init and the
+// model-facing inspection tool. Without this, the model's `mcp_admin{list}`
+// call would silently return the "MCP is disabled" hint even when MCP is
+// actually enabled — exactly the symptom the user reported about the loop
+// task that spawned this work.
+func TestInitMCP_WiresAdminTool(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.MCP.Enabled = true
+
+	b := &Builder{
+		cfg:      cfg,
+		ctx:      context.Background(),
+		registry: tools.DefaultRegistry(t.TempDir()),
+	}
+	if err := b.initMCP(); err != nil {
+		t.Fatalf("initMCP returned error: %v", err)
+	}
+
+	tool, ok := b.registry.Get("mcp_admin")
+	if !ok {
+		t.Fatal("mcp_admin tool not in registry")
+	}
+	admin, ok := tool.(*tools.MCPAdminTool)
+	if !ok {
+		t.Fatalf("registry returned wrong type for mcp_admin: %T", tool)
+	}
+
+	res, err := admin.Execute(context.Background(), map[string]any{"action": "list"})
+	if err != nil {
+		t.Fatalf("admin.Execute returned err: %v", err)
+	}
+	// After wiring, list output should come from mcp.FormatList(b.mcpManager)
+	// — with no servers that's the "No MCP servers configured" hint.
+	if !strings.Contains(res.Content, "No MCP servers configured") {
+		t.Fatalf("after wiring, list output should be from FormatList, got:\n%s", res.Content)
+	}
+	if strings.Contains(res.Content, "MCP is currently disabled") {
+		t.Fatal("callbacks were not wired — tool fell back to disabled-hint")
 	}
 }
