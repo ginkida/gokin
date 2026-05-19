@@ -39,7 +39,7 @@ var ModelPresets = map[string]ModelPreset{
 	},
 	"glm": {
 		Provider:        "glm",
-		Name:            "glm-5",
+		Name:            "glm-5.1",
 		Temperature:     0.7,
 		MaxOutputTokens: 131072,
 	},
@@ -112,14 +112,14 @@ func providerDefaultPreset(provider string) string {
 }
 
 // looksLikeDefaultModelConfig reports whether a ModelConfig still holds the
-// zero-preset defaults (glm-5 / 131072 output). Used to decide whether
+// zero-preset defaults (glm-5.1 / 131072 output). Used to decide whether
 // auto-applying a provider preset is safe: if the user customised Name or
 // MaxOutputTokens themselves, we leave their values alone.
 func looksLikeDefaultModelConfig(m *ModelConfig) bool {
 	if m == nil {
 		return false
 	}
-	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "kimi-for-coding"
+	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "glm-5.1" || m.Name == "kimi-for-coding"
 	defaultMax := m.MaxOutputTokens == 0 || m.MaxOutputTokens == 131072
 	return defaultName && defaultMax
 }

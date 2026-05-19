@@ -35,9 +35,9 @@ var knownModelProfiles = map[string]ModelProfile{
 	"phi3": {Family: "phi", ContextWindow: 4096, SupportsTools: false, IsSmall: true},
 
 	// Code-specialized
-	"codellama":      {Family: "codellama", ContextWindow: 16384, SupportsTools: false, IsCoding: true},
-	"starcoder2":     {Family: "starcoder", ContextWindow: 16384, SupportsTools: false, IsCoding: true},
-	"codegemma":      {Family: "gemma", ContextWindow: 8192, SupportsTools: false, IsCoding: true},
+	"codellama":  {Family: "codellama", ContextWindow: 16384, SupportsTools: false, IsCoding: true},
+	"starcoder2": {Family: "starcoder", ContextWindow: 16384, SupportsTools: false, IsCoding: true},
+	"codegemma":  {Family: "gemma", ContextWindow: 8192, SupportsTools: false, IsCoding: true},
 
 	// Gemma family
 	"gemma2": {Family: "gemma", ContextWindow: 8192, SupportsTools: false, IsSmall: true},
@@ -48,9 +48,9 @@ var knownModelProfiles = map[string]ModelProfile{
 	"command-r":      {Family: "command-r", ContextWindow: 128000, SupportsTools: true},
 
 	// GLM family
-	"glm-5.1":     {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
-	"glm-5":       {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
-	"glm-5-turbo": {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
+	"glm-5.1":     {Family: "glm", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
+	"glm-5":       {Family: "glm", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
+	"glm-5-turbo": {Family: "glm", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
 	"glm-4.7":     {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
 	"glm-4.6":     {Family: "glm", ContextWindow: 128000, SupportsTools: true, IsCoding: true},
 	"glm-4.5":     {Family: "glm", ContextWindow: 128000, SupportsTools: true},
@@ -78,15 +78,14 @@ var knownModelProfiles = map[string]ModelProfile{
 	"minimax-m2.5":           {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 	"minimax":                {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
 
-	// DeepSeek family. V4 Pro/Flash ship with a 1M-token context window
-	// (matches Gemini 2.5/3 scale); legacy chat/reasoner stay at 64K per
-	// pre-deprecation docs. All support tool calling via the Anthropic-
-	// compat endpoint. Coding-tuned flag mirrors their benchmark lead on
-	// SWE-bench Verified.
+	// DeepSeek family. V4 Pro/Flash ship with a 1M-token context window.
+	// Legacy chat/reasoner now route to V4 Flash until retirement on
+	// 2026-07-24. All support tool calling via the Anthropic-compatible
+	// endpoint.
 	"deepseek-v4-pro":   {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 	"deepseek-v4-flash": {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
-	"deepseek-chat":     {Family: "deepseek", ContextWindow: 65536, SupportsTools: true},
-	"deepseek-reasoner": {Family: "deepseek", ContextWindow: 65536, SupportsTools: true, IsCoding: true},
+	"deepseek-chat":     {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true},
+	"deepseek-reasoner": {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 	"deepseek":          {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 }
 

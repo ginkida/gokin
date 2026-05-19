@@ -260,7 +260,7 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 | Provider | Models | Endpoint | Notes |
 |----------|--------|----------|-------|
 | **Kimi** ⭐ | `kimi-for-coding` (K2.6) | `api.kimi.com/coding` | **Default.** Coding Plan subscription; 262K context, reasoning + vision + video, thinking mode |
-| **DeepSeek** ⭐ | `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-chat`, `deepseek-reasoner` | `api.deepseek.com/anthropic` | **Recommended.** V4 ships with 1M context, extended thinking, and Anthropic prompt caching (live-verified 95% savings). Strong-tier SWE-bench reasoning at ~$0.55/$2.19 per 1M tokens for Pro (Flash is $0.27/$1.10). |
+| **DeepSeek** ⭐ | `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-chat`, `deepseek-reasoner` | `api.deepseek.com/anthropic` | **Recommended.** V4 ships with 1M context, 384K output, extended thinking, and Anthropic prompt caching (live-verified 95% savings). Strong-tier SWE-bench reasoning at ~$0.435/$0.87 per 1M tokens for Pro (Flash is $0.14/$0.28). |
 | **GLM** ⭐ | `glm-5.1`, `glm-5`, `glm-4.7` | `api.z.ai/api/anthropic` | Budget-friendly Coding Plan, thinking mode |
 | **MiniMax** ⭐ | `MiniMax-M2.7`, `M2.7-highspeed`, `M2.5`, `M2.5-highspeed` | `api.minimax.io/anthropic` | 200K context, strong on agentic coding |
 | **Ollama** | Any local model (`llama3.2`, `qwen2.5-coder`, ...) | `localhost:11434` | 100% offline, no network calls |
@@ -340,7 +340,7 @@ model: { name: "deepseek-v4-pro" }
 
 # GLM
 api: { glm_key: "...", active_provider: "glm" }
-model: { name: "glm-5" }
+model: { name: "glm-5.1" }
 
 # MiniMax
 api: { minimax_key: "...", active_provider: "minimax" }

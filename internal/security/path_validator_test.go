@@ -58,6 +58,47 @@ func TestPathValidator_OutsideAllowed(t *testing.T) {
 	}
 }
 
+func TestPathValidator_RelativeAllowedDirRejectsOutsideAbsolutePath(t *testing.T) {
+	workspace := resolveDir(t.TempDir())
+	outside := resolveDir(t.TempDir())
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+
+	v := NewPathValidator([]string{"."}, true)
+	if _, err := v.Validate(outsideFile); err == nil {
+		t.Fatal("relative allowed dir should reject absolute path outside workspace")
+	}
+}
+
+func TestPathValidator_AllowedDirSymlinkIsResolved(t *testing.T) {
+	realDir := resolveDir(t.TempDir())
+	linkParent := t.TempDir()
+	linkDir := filepath.Join(linkParent, "workspace-link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	file := filepath.Join(realDir, "test.txt")
+	if err := os.WriteFile(file, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	v := NewPathValidator([]string{linkDir}, true)
+	if _, err := v.Validate(file); err != nil {
+		t.Fatalf("resolved allowed dir should allow file in symlink target: %v", err)
+	}
+}
+
 func TestPathValidator_NoRestrictions(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "test.txt")

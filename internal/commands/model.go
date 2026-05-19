@@ -95,13 +95,15 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	// Switch to specified model
 	newModel := args[0]
+	normalizedNewModel := strings.ToLower(newModel)
 
 	// Find matching model within current provider
 	var matchedModel string
 
 	// First pass: exact match on ID or short name
 	for _, m := range providerModels {
-		if m.ID == newModel || extractShortName(m.ID) == newModel {
+		if strings.ToLower(m.ID) == normalizedNewModel ||
+			strings.ToLower(extractShortName(m.ID)) == normalizedNewModel {
 			matchedModel = m.ID
 			break
 		}
@@ -110,7 +112,9 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// Second pass: partial/substring match (only if no exact match)
 	if matchedModel == "" {
 		for _, m := range providerModels {
-			if strings.Contains(m.ID, newModel) || strings.Contains(extractShortName(m.ID), newModel) {
+			modelID := strings.ToLower(m.ID)
+			shortName := strings.ToLower(extractShortName(m.ID))
+			if strings.Contains(modelID, normalizedNewModel) || strings.Contains(shortName, normalizedNewModel) {
 				if matchedModel != "" {
 					return fmt.Sprintf("Ambiguous model name '%s'. Please be more specific.", newModel), nil
 				}

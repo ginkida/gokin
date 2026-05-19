@@ -10,7 +10,7 @@ func TestGetModelLimits_ExactMatch(t *testing.T) {
 		wantIn  int
 		wantOut int
 	}{
-		{"glm-5", 128000, 131072},
+		{"glm-5", 200000, 131072},
 		{"glm-4.7", 128000, 131072},
 		{"glm-4.5-air", 128000, 32768},
 		{"minimax", 204800, 16384},
@@ -39,12 +39,12 @@ func TestGetModelLimits_FuzzyMatch(t *testing.T) {
 		// GLM variants — longest key must win deterministically. A name like
 		// "glm-4.5-preview" is a substring of both "glm-4.5" (131K out) and
 		// "glm-4" (32K out); the longer, more-specific key must be selected.
-		{"glm-5.1-preview", 128000, 131072},
-		{"glm-5-turbo-v2", 128000, 131072},
+		{"glm-5.1-preview", 200000, 131072},
+		{"glm-5-turbo-v2", 200000, 131072},
 		{"glm-4.5-preview", 128000, 131072}, // must not fall back to glm-4 (32K)
 		{"glm-4.6-beta", 128000, 131072},    // must not fall back to glm-4 (32K)
 		// Case insensitive
-		{"GLM-5.1-PREVIEW", 128000, 131072},
+		{"GLM-5.1-PREVIEW", 200000, 131072},
 	}
 
 	for _, tt := range tests {
@@ -76,8 +76,8 @@ func TestGetModelLimits_Unknown(t *testing.T) {
 func TestGetModelLimits_Exported(t *testing.T) {
 	// GetModelLimits (exported) wraps getModelLimits
 	lim := GetModelLimits("glm-5")
-	if lim.MaxInputTokens != 128000 {
-		t.Errorf("GetModelLimits MaxInputTokens = %d, want 128000", lim.MaxInputTokens)
+	if lim.MaxInputTokens != 200000 {
+		t.Errorf("GetModelLimits MaxInputTokens = %d, want 200000", lim.MaxInputTokens)
 	}
 }
 
@@ -89,8 +89,8 @@ func TestGetPricing_KnownModels(t *testing.T) {
 	}{
 		{"glm-5.1", 4.00, 16.00},
 		{"glm-5", 1.00, 4.00},
-		{"kimi-for-coding", 1.12, 4.48},
-		{"MiniMax-M2.7", 1.40, 5.60},
+		{"kimi-for-coding", 0.95, 4.00},
+		{"MiniMax-M2.7", 0.30, 1.20},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
@@ -136,14 +136,14 @@ func TestGetPricingFunction(t *testing.T) {
 		desc       string
 	}{
 		// Specific DeepSeek models must not match the shorter "deepseek" fallback.
-		{"deepseek-v4-pro", 0.55, 2.19, "deepseek-v4-pro beats deepseek fallback"},
-		{"deepseek-v4-flash", 0.27, 1.10, "deepseek-v4-flash beats deepseek fallback"},
+		{"deepseek-v4-pro", 0.435, 0.87, "deepseek-v4-pro beats deepseek fallback"},
+		{"deepseek-v4-flash", 0.14, 0.28, "deepseek-v4-flash beats deepseek fallback"},
 		// MiniMax mixed-case key must match case-insensitively.
-		{"MiniMax-M2.7", 1.40, 5.60, "MiniMax-M2.7 case-insensitive match"},
+		{"MiniMax-M2.7", 0.30, 1.20, "MiniMax-M2.7 case-insensitive match"},
 		// "glm-5.1" must not match "glm-5" (a shorter substring).
 		{"glm-5.1", 4.00, 16.00, "glm-5.1 beats shorter glm-5 key"},
 		// Generic fallback should match for unknown model.
-		{"unknown-model-xyz", 0.27, 1.10, "unknown model gets flash-tier fallback"},
+		{"unknown-model-xyz", 0.14, 0.28, "unknown model gets flash-tier fallback"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {

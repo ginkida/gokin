@@ -15,8 +15,8 @@ type fakeModelSetter struct {
 	model string
 }
 
-func (f *fakeModelSetter) GetModel() string          { return f.model }
-func (f *fakeModelSetter) SetModel(name string)      { f.model = name }
+func (f *fakeModelSetter) GetModel() string     { return f.model }
+func (f *fakeModelSetter) SetModel(name string) { f.model = name }
 
 type fakeAppForModel struct {
 	*fakeAppForMCP
@@ -88,6 +88,21 @@ func TestModelCommand_KimiRetiredAliasRejected(t *testing.T) {
 	// Active model must not have been mutated.
 	if app.setter.model != "kimi-for-coding" {
 		t.Errorf("model was switched despite unknown alias: got %q", app.setter.model)
+	}
+}
+
+func TestModelCommand_ModelMatchingIsCaseInsensitive(t *testing.T) {
+	app := newModelApp("minimax", "MiniMax-M2.5")
+	cmd := &ModelCommand{}
+	out, err := cmd.Execute(context.Background(), []string{"m2.7"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(out, "MiniMax-M2.7") {
+		t.Fatalf("expected switch output for MiniMax-M2.7, got:\n%s", out)
+	}
+	if app.setter.model != "MiniMax-M2.7" {
+		t.Fatalf("model = %q, want MiniMax-M2.7", app.setter.model)
 	}
 }
 

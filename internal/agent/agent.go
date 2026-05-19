@@ -1014,7 +1014,7 @@ func (a *Agent) IsPlanningMode() bool {
 func mapModelName(name string) string {
 	switch strings.ToLower(name) {
 	case "flash", "fast":
-		return "glm-5"
+		return "glm-5-turbo"
 	case "pro", "strong":
 		return "glm-5.1"
 	default:

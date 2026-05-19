@@ -19,7 +19,14 @@ func NewPathValidator(allowedDirs []string, allowSymlinks bool) *PathValidator {
 	// Normalize allowed directories
 	normalized := make([]string, len(allowedDirs))
 	for i, dir := range allowedDirs {
-		normalized[i] = filepath.Clean(dir)
+		cleanDir := filepath.Clean(dir)
+		if absDir, err := filepath.Abs(cleanDir); err == nil {
+			cleanDir = absDir
+		}
+		if resolvedDir, err := filepath.EvalSymlinks(cleanDir); err == nil {
+			cleanDir = resolvedDir
+		}
+		normalized[i] = cleanDir
 	}
 	return &PathValidator{
 		allowedDirs:   normalized,
@@ -146,9 +153,7 @@ func (v *PathValidator) isPathWithin(target, base string) bool {
 	// filepath.Rel returns an error when target and base are on different drives
 	rel, err := filepath.Rel(base, target)
 	if err != nil {
-		// Different drives or other path resolution issues
-		// Check if they share the same root
-		return filepath.VolumeName(target) == filepath.VolumeName(base)
+		return false
 	}
 
 	// If relative path starts with "..", target is outside base

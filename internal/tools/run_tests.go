@@ -81,6 +81,9 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		} else {
 			workDir = filepath.Join(t.workDir, testPath)
 		}
+		if info, err := os.Stat(workDir); err == nil && !info.IsDir() {
+			workDir = filepath.Dir(workDir)
+		}
 	}
 
 	// Auto-detect framework

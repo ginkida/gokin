@@ -26,17 +26,18 @@ var DefaultModelLimits = map[string]TokenLimits{
 	// GLM — explicit entries avoid relying on substring-fuzzy fallback
 	// (which would either miss 4.x variants entirely or return the generic
 	// 128K/8K default from getModelLimits). Values assume Z.AI's current
-	// context window of 128K; output caps differ per model family.
+	// GLM-5.x context window of 200K and 128K max output; older GLM
+	// output caps differ per model family.
 	"glm-5.1": {
-		MaxInputTokens:  128000,
+		MaxInputTokens:  200000,
 		MaxOutputTokens: 131072,
 	},
 	"glm-5-turbo": {
-		MaxInputTokens:  128000,
+		MaxInputTokens:  200000,
 		MaxOutputTokens: 131072,
 	},
 	"glm-5": {
-		MaxInputTokens:  128000,
+		MaxInputTokens:  200000,
 		MaxOutputTokens: 131072,
 	},
 	"glm-4.7": {
@@ -69,13 +70,12 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  262144,
 		MaxOutputTokens: 32768,
 	},
-	// DeepSeek V4 — 1M input context, up to 16K output. Legacy
-	// deepseek-chat / deepseek-reasoner stay at 64K; picking the larger
-	// of the two here is safe because per-model ModelProfile entries
-	// carry the precise limit and AnthropicClient reads from there.
+	// DeepSeek V4 — 1M input context, up to 384K output. Legacy
+	// deepseek-chat / deepseek-reasoner currently route to V4 Flash
+	// until their 2026-07-24 retirement.
 	"deepseek": {
 		MaxInputTokens:  1000000,
-		MaxOutputTokens: 16384,
+		MaxOutputTokens: 384000,
 	},
 }
 
@@ -101,26 +101,27 @@ var DefaultPricing = map[string]ModelPricing{
 	"glm-4.5-air": {InputCostPer1M: 0.14, OutputCostPer1M: 0.14},
 	"glm-4":       {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
 
-	// MiniMax (prices in USD equivalent from CNY: 1 CNY ≈ $0.14)
-	"MiniMax-M2.7":           {InputCostPer1M: 1.40, OutputCostPer1M: 5.60},
-	"MiniMax-M2.7-highspeed": {InputCostPer1M: 1.40, OutputCostPer1M: 5.60},
-	"MiniMax-M2.5":           {InputCostPer1M: 1.10, OutputCostPer1M: 1.10},
-	"MiniMax-M2.5-highspeed": {InputCostPer1M: 1.10, OutputCostPer1M: 1.10},
-	"minimax":                {InputCostPer1M: 1.10, OutputCostPer1M: 1.10}, // fallback
+	// MiniMax Pay-as-you-go pricing (USD / 1M tokens).
+	"MiniMax-M2.7":           {InputCostPer1M: 0.30, OutputCostPer1M: 1.20},
+	"MiniMax-M2.7-highspeed": {InputCostPer1M: 0.60, OutputCostPer1M: 2.40},
+	"MiniMax-M2.5":           {InputCostPer1M: 0.30, OutputCostPer1M: 1.20},
+	"MiniMax-M2.5-highspeed": {InputCostPer1M: 0.60, OutputCostPer1M: 2.40},
+	"minimax":                {InputCostPer1M: 0.30, OutputCostPer1M: 1.20}, // fallback
 
-	// Kimi Coding Plan — subscription tier, one model.
-	"kimi-for-coding": {InputCostPer1M: 1.12, OutputCostPer1M: 4.48},
-	"kimi":            {InputCostPer1M: 1.12, OutputCostPer1M: 4.48}, // fallback
+	// Kimi K2.6 public API pricing (USD / 1M tokens). Coding Plan users
+	// may be subscription-billed, but this keeps /cost close for paygo
+	// and custom Moonshot endpoint usage.
+	"kimi-for-coding": {InputCostPer1M: 0.95, OutputCostPer1M: 4.00},
+	"kimi-k2.6":       {InputCostPer1M: 0.95, OutputCostPer1M: 4.00},
+	"kimi":            {InputCostPer1M: 0.95, OutputCostPer1M: 4.00}, // fallback
 
-	// DeepSeek V4 — public pricing as of Apr 2026 (USD).
-	// V4 Flash: $0.27/$1.10 per 1M tokens (input/output)
-	// V4 Pro:   $0.55/$2.19 per 1M tokens
+	// DeepSeek V4 — public pricing as of May 2026 (USD / 1M tokens).
 	// Legacy chat/reasoner retained until 2026-07-24.
-	"deepseek-v4-flash": {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},
-	"deepseek-v4-pro":   {InputCostPer1M: 0.55, OutputCostPer1M: 2.19},
-	"deepseek-chat":     {InputCostPer1M: 0.27, OutputCostPer1M: 1.10},
-	"deepseek-reasoner": {InputCostPer1M: 0.55, OutputCostPer1M: 2.19},
-	"deepseek":          {InputCostPer1M: 0.55, OutputCostPer1M: 2.19}, // fallback
+	"deepseek-v4-flash": {InputCostPer1M: 0.14, OutputCostPer1M: 0.28},
+	"deepseek-v4-pro":   {InputCostPer1M: 0.435, OutputCostPer1M: 0.87},
+	"deepseek-chat":     {InputCostPer1M: 0.14, OutputCostPer1M: 0.28},
+	"deepseek-reasoner": {InputCostPer1M: 0.14, OutputCostPer1M: 0.28},
+	"deepseek":          {InputCostPer1M: 0.14, OutputCostPer1M: 0.28}, // fallback
 }
 
 // TokenLimits defines token limits for a model.

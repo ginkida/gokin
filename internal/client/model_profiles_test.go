@@ -13,13 +13,14 @@ func TestGetModelProfile_ExactMatch(t *testing.T) {
 	}{
 		{"llama3.2", "llama", 128000, true},
 		// gemini removed in v0.65; profile gone in v0.78.30
-		{"glm-5", "glm", 128000, true},
+		{"glm-5.1", "glm", 200000, true},
+		{"glm-5", "glm", 200000, true},
 		{"kimi-for-coding", "kimi", 262144, true},
 		{"minimax-m2.5", "minimax", 204800, true},
 		{"deepseek-v4-pro", "deepseek", 1000000, true},
 		{"deepseek-v4-flash", "deepseek", 1000000, true},
-		{"deepseek-chat", "deepseek", 65536, true},
-		{"deepseek-reasoner", "deepseek", 65536, true},
+		{"deepseek-chat", "deepseek", 1000000, true},
+		{"deepseek-reasoner", "deepseek", 1000000, true},
 		{"phi3", "phi", 4096, false},
 		{"llama2", "llama", 4096, false},
 	}

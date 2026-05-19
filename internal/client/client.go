@@ -41,11 +41,11 @@ const (
 
 // ModelInfo contains information about an available model.
 type ModelInfo struct {
-	ID          string // Model identifier (e.g., "gemini-2.5-flash", "glm-4.7")
+	ID          string // Model identifier (e.g., "glm-5.1", "deepseek-v4-pro")
 	Name        string // Human-readable name
 	Description string // Short description
-	Provider    string // Provider: "gemini" or "anthropic"
-	BaseURL     string // Custom base URL for Anthropic-compatible APIs (e.g., GLM-4.7)
+	Provider    string // Provider: "glm", "kimi", "minimax", "deepseek", or "ollama"
+	BaseURL     string // Custom base URL for Anthropic-compatible APIs
 }
 
 // AvailableModels is the list of supported models across all providers.
