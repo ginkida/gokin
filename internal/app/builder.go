@@ -1316,67 +1316,85 @@ func (b *Builder) initIntegrations() error {
 		}
 	}
 
-	// Initialize MCP (Model Context Protocol)
-	if b.cfg.MCP.Enabled && len(b.cfg.MCP.Servers) > 0 {
-		// Convert config to MCP server configs
-		mcpConfigs := make([]*mcp.ServerConfig, 0, len(b.cfg.MCP.Servers))
-		permLevels := make(map[string]string, len(b.cfg.MCP.Servers))
-		for _, s := range b.cfg.MCP.Servers {
-			mcpConfigs = append(mcpConfigs, &mcp.ServerConfig{
-				Name:            s.Name,
-				Transport:       s.Transport,
-				Command:         s.Command,
-				Args:            s.Args,
-				Env:             s.Env,
-				URL:             s.URL,
-				Headers:         s.Headers,
-				AutoConnect:     s.AutoConnect,
-				Timeout:         s.Timeout,
-				MaxRetries:      s.MaxRetries,
-				RetryDelay:      s.RetryDelay,
-				ToolPrefix:      s.ToolPrefix,
-				PermissionLevel: s.PermissionLevel,
-			})
-			permLevels[s.Name] = s.PermissionLevel
+	if err := b.initMCP(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// initMCP wires up the Model Context Protocol manager when `mcp.enabled: true`.
+//
+// The manager is created even with an empty `mcp.servers` list — otherwise
+// `/mcp add NAME stdio CMD ...` can never bootstrap a server, because the
+// command's nil-manager branch will (incorrectly) tell the user MCP is
+// disabled. Empty `ConnectAll` is a documented no-op (returns nil with no
+// servers), so this costs nothing in the "enabled but unused" path.
+//
+// When `mcp.enabled: false` (the default) this is a no-op and `b.mcpManager`
+// stays nil; `commands/mcp.go` checks for that and surfaces the disabled hint.
+func (b *Builder) initMCP() error {
+	if !b.cfg.MCP.Enabled {
+		return nil
+	}
+
+	mcpConfigs := make([]*mcp.ServerConfig, 0, len(b.cfg.MCP.Servers))
+	permLevels := make(map[string]string, len(b.cfg.MCP.Servers))
+	for _, s := range b.cfg.MCP.Servers {
+		mcpConfigs = append(mcpConfigs, &mcp.ServerConfig{
+			Name:            s.Name,
+			Transport:       s.Transport,
+			Command:         s.Command,
+			Args:            s.Args,
+			Env:             s.Env,
+			URL:             s.URL,
+			Headers:         s.Headers,
+			AutoConnect:     s.AutoConnect,
+			Timeout:         s.Timeout,
+			MaxRetries:      s.MaxRetries,
+			RetryDelay:      s.RetryDelay,
+			ToolPrefix:      s.ToolPrefix,
+			PermissionLevel: s.PermissionLevel,
+		})
+		permLevels[s.Name] = s.PermissionLevel
+	}
+
+	b.mcpManager = mcp.NewManager(mcpConfigs)
+	// Install the tools-changed dispatcher BEFORE ConnectAll so that any
+	// notification arriving during initial connect handshakes is captured
+	// (queued if App not yet ready, delivered otherwise).
+	b.mcpManager.SetToolsChangedCallback(b.dispatchMCPToolsChanged)
+
+	autoCount := 0
+	for _, cfg := range mcpConfigs {
+		if cfg.AutoConnect {
+			autoCount++
 		}
+	}
 
-		b.mcpManager = mcp.NewManager(mcpConfigs)
-		// Install the tools-changed dispatcher BEFORE ConnectAll so that any
-		// notification arriving during initial connect handshakes is
-		// captured (queued if App not yet ready, delivered otherwise).
-		b.mcpManager.SetToolsChangedCallback(b.dispatchMCPToolsChanged)
+	var connectErr error
+	if err := b.mcpManager.ConnectAll(b.ctx); err != nil {
+		connectErr = err
+		logging.Warn("some MCP servers failed to connect", "error", err)
+		// Continue - graceful degradation
+	}
 
-		// Count auto-connect servers so we can summarise connect results for the UI.
-		autoCount := 0
-		for _, cfg := range mcpConfigs {
-			if cfg.AutoConnect {
-				autoCount++
-			}
-		}
+	connected := len(b.mcpManager.GetConnectedServers())
+	toolCount := len(b.mcpManager.GetTools())
+	switch {
+	case autoCount == 0 && len(mcpConfigs) == 0:
+		b.mcpConnectSummary = "MCP enabled — no servers configured yet. Use `/mcp add NAME stdio CMD …`."
+	case autoCount > 0 && connectErr != nil:
+		b.mcpConnectSummary = fmt.Sprintf("MCP: %d/%d servers connected, %d tools — some servers failed",
+			connected, autoCount, toolCount)
+	case autoCount > 0 && connected > 0:
+		b.mcpConnectSummary = fmt.Sprintf("MCP: %d/%d servers connected, %d tools", connected, autoCount, toolCount)
+	}
 
-		// Connect to auto-connect servers
-		var connectErr error
-		if err := b.mcpManager.ConnectAll(b.ctx); err != nil {
-			connectErr = err
-			logging.Warn("some MCP servers failed to connect", "error", err)
-			// Continue - graceful degradation
-		}
-
-		// Build summary for deferred UI toast (UI is not running yet — we'd lose the message).
-		connected := len(b.mcpManager.GetConnectedServers())
-		toolCount := len(b.mcpManager.GetTools())
-		if autoCount > 0 {
-			if connectErr != nil {
-				b.mcpConnectSummary = fmt.Sprintf("MCP: %d/%d servers connected, %d tools — some servers failed",
-					connected, autoCount, toolCount)
-			} else if connected > 0 {
-				b.mcpConnectSummary = fmt.Sprintf("MCP: %d/%d servers connected, %d tools", connected, autoCount, toolCount)
-			}
-		}
-
-		// Register MCP tools into the registry and apply per-server risk
-		// overrides so the permission layer routes prompts according to each
-		// server's configured trust tier instead of the default RiskMedium.
+	// Register MCP tools into the registry and apply per-server risk
+	// overrides so the permission layer routes prompts according to each
+	// server's configured trust tier instead of the default RiskMedium.
+	if b.registry != nil {
 		for _, tool := range b.mcpManager.GetTools() {
 			if err := b.registry.Register(tool); err != nil {
 				logging.Warn("failed to register MCP tool",
@@ -1390,19 +1408,19 @@ func (b *Builder) initIntegrations() error {
 			}
 		}
 
-		// Refresh tools on client
-		b.mainClient.SetTools(b.registry.GeminiTools())
-
-		// Start health check for connected servers
-		if len(b.mcpManager.GetConnectedServers()) > 0 && b.cfg.MCP.HealthCheckInterval > 0 {
-			b.mcpManager.StartHealthCheck(b.ctx, b.cfg.MCP.HealthCheckInterval)
-			logging.Debug("MCP health check started", "interval", b.cfg.MCP.HealthCheckInterval)
+		if b.mainClient != nil {
+			b.mainClient.SetTools(b.registry.GeminiTools())
 		}
-
-		logging.Debug("MCP initialized",
-			"servers", len(b.cfg.MCP.Servers),
-			"tools", len(b.mcpManager.GetTools()))
 	}
+
+	if connected > 0 && b.cfg.MCP.HealthCheckInterval > 0 {
+		b.mcpManager.StartHealthCheck(b.ctx, b.cfg.MCP.HealthCheckInterval)
+		logging.Debug("MCP health check started", "interval", b.cfg.MCP.HealthCheckInterval)
+	}
+
+	logging.Debug("MCP initialized",
+		"servers", len(b.cfg.MCP.Servers),
+		"tools", toolCount)
 
 	return nil
 }

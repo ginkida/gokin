@@ -60,7 +60,11 @@ func (c *MCPCommand) GetMetadata() CommandMetadata {
 func (c *MCPCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	mgr := app.GetMCPManager()
 	if mgr == nil {
-		return "MCP is disabled. Set `mcp.enabled: true` in config to use this command.", nil
+		// Manager is nil only when `mcp.enabled: false` (or unset). When the
+		// flag is true the builder constructs an empty manager so `/mcp add`
+		// can bootstrap from scratch.
+		return "MCP is disabled. Set `mcp.enabled: true` in config (then restart) " +
+			"to use this command, or use the setup wizard.", nil
 	}
 
 	if len(args) == 0 {
