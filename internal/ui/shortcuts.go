@@ -58,6 +58,8 @@ func DefaultShortcuts() []ShortcutCategory {
 			Shortcuts: []Shortcut{
 				{Keys: []string{"Ctrl", "p"}, Description: "Command Palette (All Actions)"},
 				{Keys: []string{"Ctrl", "K"}, Description: "Open model selector"},
+				{Keys: []string{"Ctrl", "E"}, Description: "Expand / collapse last tool output"},
+				{Keys: []string{"E"}, Description: "Expand / collapse all tool outputs"},
 				{Keys: []string{"Ctrl", "H"}, Description: "Context Observatory (Technical Health)"},
 				{Keys: []string{"Ctrl", "G"}, Description: "Toggle select mode (freeze + native selection)"},
 				{Keys: []string{"Option", "C"}, Description: "Copy last AI response"},

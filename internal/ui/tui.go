@@ -1195,8 +1195,14 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Handle 'e' key for tool output expand/collapse (only when input is empty)
-	if msg.String() == "e" && m.state == StateInput && m.input.Value() == "" {
+	// Handle Ctrl+E / plain 'e' for tool output expand/collapse. Ctrl+E
+	// is the Claude Code-style primary binding — works even with text
+	// typed in the input (Ctrl combos don't fight the textarea's normal
+	// keys). Plain 'e' kept as a shortcut for users mid-flow with empty
+	// input. Both call the same toggle.
+	ctrlE := msg.Type == tea.KeyCtrlE && m.state == StateInput
+	plainE := msg.String() == "e" && m.state == StateInput && m.input.Value() == ""
+	if ctrlE || plainE {
 		if m.toolOutput != nil && m.lastToolOutputIndex >= 0 {
 			entry := m.toolOutput.GetEntry(m.lastToolOutputIndex)
 			if entry != nil {
@@ -2570,54 +2576,24 @@ func (m *Model) buildToolResultBody(
 	return b.String()
 }
 
-// toolCardMinWidth is the lower bound below which tool results render as
-// flat indented lines (the legacy form). The rounded border eats two
-// horizontal cells for the vertical bars plus padding; narrower terminals
-// lose more in chrome than they gain in visual segmentation.
-const toolCardMinWidth = 60
-
 // emitToolResultCard writes the success line and body to the chat
-// viewport. On terminals at least toolCardMinWidth wide it wraps the
-// content in a subtle rounded bordered card (echoes Gokin Classic scene
-// B); narrower terminals fall back to the legacy 4-space-indented form.
+// viewport as flat 4-space-indented lines — same weight as any other
+// agent output.
+//
+// The rounded-border version (Gokin Classic scene B) was removed: in
+// the codex-style flow (read/bash collapsed by default, just titles)
+// the border framed mostly empty space, and even when bodies showed
+// the chrome competed with the diff card (scene C) and error card
+// (scene D) for "modal" status. Tool success is the *quiet* surface —
+// it doesn't need the visual segmentation that diff approval or
+// failure cards do. Higher-stakes events still get borders; routine
+// success blends with the rest of the agent's output.
 func (m *Model) emitToolResultCard(titleLine, body string) {
-	// Empty body: rendering rounded chrome around a single title line is
-	// pure visual weight with no payoff — the card border eats two rows
-	// (top + bottom) for nothing. Drop to a flat indented title, same
-	// visual weight as the dedup-stub path. Body-bearing cards still get
-	// the chrome since it groups multiple lines into one visual unit.
-	if body == "" {
-		m.output.AppendLine("    " + titleLine)
-		m.output.AppendLine("")
-		return
-	}
-
-	inner := titleLine + "\n" + body
-
-	if m.width < toolCardMinWidth {
-		// Legacy: flat indented lines, one AppendLine per row.
-		for line := range strings.SplitSeq(inner, "\n") {
+	m.output.AppendLine("    " + titleLine)
+	if body != "" {
+		for line := range strings.SplitSeq(body, "\n") {
 			m.output.AppendLine("    " + line)
 		}
-		m.output.AppendLine("")
-		return
-	}
-
-	// Card width: full terminal width minus the 2-cell left gutter so the
-	// card aligns with surrounding tool-status indentation. Width on the
-	// style sets the inner content width — the border adds 2 to that.
-	gutter := 2
-	cardWidth := max(m.width-gutter-2, 20)
-	cardStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorBorder).
-		Padding(0, 1).
-		Width(cardWidth)
-
-	rendered := cardStyle.Render(inner)
-	pad := strings.Repeat(" ", gutter)
-	for line := range strings.SplitSeq(rendered, "\n") {
-		m.output.AppendLine(pad + line)
 	}
 	m.output.AppendLine("")
 }

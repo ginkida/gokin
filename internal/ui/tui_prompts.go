@@ -669,6 +669,7 @@ func (m Model) renderShortcutsOverlay() string {
 	builder.WriteString("\n")
 	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+P"), descStyle.Render("Command Palette (All Actions)"))
 	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+K"), descStyle.Render("Open model selector"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+E"), descStyle.Render("Expand / collapse last tool output"))
 	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Shift+Tab"), descStyle.Render("Cycle Normal / Plan / YOLO"))
 
 	// Slash Commands
