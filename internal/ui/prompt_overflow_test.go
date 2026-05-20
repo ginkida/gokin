@@ -85,3 +85,60 @@ func TestPermissionPrompt_ComfortableTerminalKeepsBorder(t *testing.T) {
 		t.Errorf("comfortable-terminal prompt should render a rounded border, got:\n%s", got)
 	}
 }
+
+// TestPermissionPromptRiskBadgeIsBoldTextNotPill pins the lightweight
+// risk indicator: bold colored text without a background fill. The v0.84
+// pass shipped a pill-style chip (Background + Foreground) that looked
+// like a UI-kit badge stamped on the prompt. Switching to bold-only
+// keeps the urgency signal (color) without the rectangle.
+//
+// Checking for absence of the ANSI background CSI (`\x1b[48`) is the
+// most direct way to verify "no background fill" — bold-only renders
+// use 1 (bold) and 3X (foreground) but never 4X (background).
+func TestPermissionPromptRiskBadgeIsBoldTextNotPill(t *testing.T) {
+	cases := []struct {
+		level string
+		label string
+	}{
+		{"high", "HIGH RISK"},
+		{"medium", "MEDIUM RISK"},
+		{"low", "LOW RISK"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.level, func(t *testing.T) {
+			m := Model{
+				width: 100,
+				permRequest: &PermissionRequestMsg{
+					ToolName:  "bash",
+					RiskLevel: tc.level,
+					Args:      map[string]any{"command": "ls"},
+				},
+			}
+			got := m.renderPermissionPrompt()
+			plain := stripAnsi(got)
+			if !strings.Contains(plain, tc.label) {
+				t.Fatalf("risk label %q missing from prompt:\n%s", tc.label, plain)
+			}
+			// Background CSI sequences for 8-color, 256-color, and truecolor.
+			// If any appear, the badge slipped back into pill rendering.
+			bgPatterns := []string{"\x1b[48;", "\x1b[4"} // 48; = explicit bg, 4X = 8-color bg
+			for _, pat := range bgPatterns {
+				if pat == "\x1b[4" {
+					// 4X range is 40-47 (standard) and 48 (extended);
+					// check just the standard 40-47 to avoid false positives
+					// on foreground codes.
+					for i := '0'; i <= '7'; i++ {
+						probe := pat + string(i)
+						if strings.Contains(got, probe+"m") {
+							t.Fatalf("risk badge for %s rendered with background CSI %q (pill-style), want bold text only", tc.level, probe)
+						}
+					}
+					continue
+				}
+				if strings.Contains(got, pat) {
+					t.Fatalf("risk badge for %s rendered with background CSI %q (pill-style), want bold text only", tc.level, pat)
+				}
+			}
+		})
+	}
+}

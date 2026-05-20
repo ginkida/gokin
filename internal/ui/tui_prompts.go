@@ -75,15 +75,19 @@ func (m Model) renderPermissionPrompt() string {
 	valueStyle := lipgloss.NewStyle().Foreground(ColorText)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	// Risk indicator badge
+	// Risk indicator: bold colored text, no background fill. The previous
+	// pass used Background(...) + Foreground(ColorBg) to render a pill
+	// shape, which looked like a UI-kit chip stamped onto the prompt and
+	// fought with the title color. Bold + the existing risk color (border
+	// already echoes it) gives the same urgency without the rectangle.
 	var riskBadge string
 	switch m.permRequest.RiskLevel {
 	case "high":
-		riskBadge = lipgloss.NewStyle().Background(ColorError).Foreground(ColorBg).Bold(true).Render(" HIGH RISK ")
+		riskBadge = lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("HIGH RISK")
 	case "medium":
-		riskBadge = lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorBg).Bold(true).Render(" MEDIUM RISK ")
+		riskBadge = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("MEDIUM RISK")
 	default:
-		riskBadge = lipgloss.NewStyle().Background(ColorSuccess).Foreground(ColorBg).Bold(true).Render(" LOW RISK ")
+		riskBadge = lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("LOW RISK")
 	}
 
 	var builder strings.Builder
