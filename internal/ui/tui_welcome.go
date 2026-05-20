@@ -17,20 +17,19 @@ var welcomeWordmark = [3]string{
 }
 
 // renderWelcomePanel returns the multi-line idle screen shown when the
-// output buffer is empty and the user is at input. Replaces the prior
-// one-line "Type a message…" hint.
+// output buffer is empty and the user is at input.
 //
 // Layout (Gokin Classic scene A):
 //
 //	┌─┐ ┌─┐ ┬┌─ ┬ ┌┐┌
-//	│ ┬ │ │ ├┴┐ │ │││         ← violet wordmark
+//	│ ┬ │ │ ├┴┐ │ │││         ← violet wordmark (single brand color)
 //	└─┘ └─┘ ┴ ┴ ┴ ┘└┘
-//	v0.83.0                   ← dim version (v-prefixed)
+//	v0.83.0                   ← dim version
 //
 //	tips                      ← muted section header
 //	  type a question or paste a stack trace
-//	  / for slash commands · @ to pin a file
-//	  ⌘K to switch model    · ? for shortcuts
+//	  / for slash commands  ·  @ to pin a file
+//	  ⌘K switches model     ·  ? for shortcuts
 //
 //	project                   ← muted section header (omitted if no data)
 //	  ~/code/payments-api
@@ -38,11 +37,10 @@ var welcomeWordmark = [3]string{
 //
 //	Plan mode is on — …       ← mode hint (only when active)
 //
-// Width-aware in the sense that long paths get middle-truncated; we don't
-// attempt to wrap or rewrap any of the static lines, so very narrow
-// terminals (< ~50 cols) will see the static text overflow rather than
-// crash or misalign. That's the right trade-off — narrower than 50 is
-// unsupported territory and the status bar still works.
+// A previous pass split each letter (g/o/k/i/n) into its own color hue —
+// that broke the brand mark into a "rainbow logo" feel and competed with
+// the chat content below. Mono-violet reads as a tag, which is what a
+// brand-mark on an idle screen should be.
 func (m Model) renderWelcomePanel() string {
 	var b strings.Builder
 
@@ -52,7 +50,11 @@ func (m Model) renderWelcomePanel() string {
 	tipStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	pathStyle := lipgloss.NewStyle().Foreground(ColorText)
 	branchStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
-	kbdStyle := lipgloss.NewStyle().Foreground(ColorHighlight)
+	// Key-cap look: bold accent on a muted bracket. No background pill —
+	// background-filled pills competed with the body type and looked
+	// like cells in a textbook table when stacked 4-deep in the tips
+	// block. Brackets carry the cap metaphor without the visual weight.
+	kbdStyle := lipgloss.NewStyle().Foreground(ColorHighlight).Bold(true)
 
 	// Wordmark + version.
 	for _, line := range welcomeWordmark {
@@ -60,8 +62,6 @@ func (m Model) renderWelcomePanel() string {
 		b.WriteString("\n")
 	}
 	if v := strings.TrimSpace(m.version); v != "" {
-		// Prefix "v" so the line reads as a tag (v0.81.1), not a bare
-		// number. Idempotent — already-"v"-prefixed strings pass through.
 		if !strings.HasPrefix(v, "v") && !strings.HasPrefix(v, "V") {
 			v = "v" + v
 		}
@@ -99,8 +99,7 @@ func (m Model) renderWelcomePanel() string {
 		b.WriteString(section)
 	}
 
-	// Mode hint carried over from the prior 1-line welcome — separate line
-	// so it doesn't blend into the tips block.
+	// Mode hint carried over from the prior 1-line welcome.
 	if hint := m.welcomeModeHint(); hint != "" {
 		b.WriteString("\n  ")
 		b.WriteString(hint)
@@ -145,7 +144,7 @@ func (m Model) welcomeProjectSection(
 
 // welcomeModeHint returns the same mode-hint string the prior 1-line
 // welcome rendered, styled for visibility. Returns "" when no mode is
-// active (default permissioned execution).
+// active.
 func (m Model) welcomeModeHint() string {
 	switch {
 	case m.planningModeEnabled:
