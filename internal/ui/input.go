@@ -948,6 +948,9 @@ func (m InputModel) renderSuggestions() string {
 	descStyle := lipgloss.NewStyle().
 		Foreground(ColorDim)
 
+	metaStyle := lipgloss.NewStyle().
+		Foreground(ColorMuted)
+
 	var lines []string
 	maxShow := 6
 
@@ -972,7 +975,13 @@ func (m InputModel) renderSuggestions() string {
 				prefix = "> "
 			}
 
-			line := prefix + style.Render("/"+cmd.Name) + " " + descStyle.Render(cmd.Description)
+			line := prefix + style.Render("/"+cmd.Name)
+			if cmd.Category != "" {
+				line += " " + metaStyle.Render("["+cmd.Category+"]")
+			}
+			if cmd.Description != "" {
+				line += " " + descStyle.Render(cmd.Description)
+			}
 			lines = append(lines, line)
 		}
 
@@ -982,6 +991,15 @@ func (m InputModel) renderSuggestions() string {
 				fmt.Sprintf("↑↓ %d", len(m.suggestions)),
 			)
 			lines = append(lines, indicator)
+		}
+
+		if m.suggestionIndex >= 0 && m.suggestionIndex < len(m.suggestions) {
+			selected := m.suggestions[m.suggestionIndex]
+			footer := "Tab complete"
+			if selected.Usage != "" {
+				footer += " • " + selected.Usage
+			}
+			lines = append(lines, descStyle.Render(footer))
 		}
 	} else {
 		// File suggestions
@@ -1015,6 +1033,7 @@ func (m InputModel) renderSuggestions() string {
 			)
 			lines = append(lines, indicator)
 		}
+		lines = append(lines, descStyle.Render("Tab insert path"))
 	}
 
 	return boxStyle.Render(strings.Join(lines, "\n"))

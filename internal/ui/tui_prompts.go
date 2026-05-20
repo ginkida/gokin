@@ -549,11 +549,21 @@ func (m Model) renderModelSelector() string {
 	// Header
 	builder.WriteString(titleStyle.Render("Select Model"))
 	builder.WriteString("  ")
-	builder.WriteString(subtitleStyle.Render("⌘K"))
+	builder.WriteString(subtitleStyle.Render("Ctrl+K"))
 	builder.WriteString("\n\n")
 
 	// Current model info
 	fmt.Fprintf(&builder, "  Current: %s\n\n", m.styles.Spinner.Render(m.currentModel))
+
+	if len(m.availableModels) == 0 {
+		emptyStyle := lipgloss.NewStyle().
+			Foreground(ColorMuted).
+			Italic(true).
+			Width(paletteWidth - 4)
+		builder.WriteString(emptyStyle.Render("  No model choices are loaded for this session. Use /model to inspect or set the active model."))
+		builder.WriteString("\n\n")
+		return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorPrimary)
+	}
 
 	// Model options - using modal styles
 	for i, model := range m.availableModels {
@@ -570,7 +580,7 @@ func (m Model) renderModelSelector() string {
 			label += " " + m.styles.ModalDefault.Render("(current)")
 		}
 		fmt.Fprintf(&builder, "%s%s\n", prefix, style.Render(label))
-		
+
 		// Muted description
 		descStyle := m.styles.ModalMuted.Width(paletteWidth - 8)
 		fmt.Fprintf(&builder, "     %s\n", descStyle.Render(model.Description))
@@ -591,6 +601,10 @@ func (m Model) renderModelSelector() string {
 
 // renderShortcutsOverlay renders the keyboard shortcuts overlay.
 func (m Model) renderShortcutsOverlay() string {
+	if m.shortcutsOverlay != nil && m.shortcutsOverlay.IsVisible() {
+		return m.shortcutsOverlay.View(m.width, m.height)
+	}
+
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorHighlight).
@@ -633,6 +647,8 @@ func (m Model) renderShortcutsOverlay() string {
 	builder.WriteString(categoryStyle.Render("Navigation"))
 	builder.WriteString("\n")
 	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("PgUp/PgDn"), descStyle.Render("Scroll history"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+U"), descStyle.Render("Half page up when input is empty"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+D"), descStyle.Render("Half page down when input is empty"))
 	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+L"), descStyle.Render("Clear / Redraw"))
 
 	// Code Blocks
@@ -648,6 +664,8 @@ func (m Model) renderShortcutsOverlay() string {
 	builder.WriteString(categoryStyle.Render("Command Center"))
 	builder.WriteString("\n")
 	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+P"), descStyle.Render("Command Palette (All Actions)"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+K"), descStyle.Render("Open model selector"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Shift+Tab"), descStyle.Render("Cycle Normal / Plan / YOLO"))
 
 	// Slash Commands
 	builder.WriteString(categoryStyle.Render("Slash Commands"))
@@ -667,8 +685,7 @@ func (m Model) renderShortcutsOverlay() string {
 	// Session
 	builder.WriteString(categoryStyle.Render("Session"))
 	builder.WriteString("\n")
-	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+C"), descStyle.Render("Quit (graceful shutdown)"))
-	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+D"), descStyle.Render("Quit (alternative)"))
+	fmt.Fprintf(&builder, "  %s%s\n", keyStyle.Render("Ctrl+C"), descStyle.Render("Cancel once, quit on second press"))
 
 	builder.WriteString("\n")
 	builder.WriteString(m.styles.StatusBar.Render("Press any key to close"))

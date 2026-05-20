@@ -21,14 +21,15 @@ func TestWelcomePanel_ContainsExpectedSections(t *testing.T) {
 	got := m.renderWelcomePanel()
 
 	wantSubstrings := []string{
-		"┌─┐",         // wordmark top edge (g+o+k uses these box-drawings)
-		"│ ┬",         // wordmark middle (g)
-		"└─┘",         // wordmark bottom (g+o)
-		"v0.83.0",     // version line
-		"tips",        // section header
+		"┌─┐",            // wordmark top edge (g+o+k uses these box-drawings)
+		"│ ┬",            // wordmark middle (g)
+		"└─┘",            // wordmark bottom (g+o)
+		"v0.83.0",        // version line
+		"tips",           // section header
 		"slash commands", // tip mentioning /
 		"to pin a file",  // tip mentioning @
-		"switches model", // tip mentioning ⌘K
+		"Ctrl+K",         // model selector shortcut
+		"switches model", // tip mentioning model selector
 		"for shortcuts",  // tip mentioning ?
 	}
 	for _, want := range wantSubstrings {

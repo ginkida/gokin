@@ -86,6 +86,7 @@ func (m Model) renderStatusBarCompact() string {
 
 func (m Model) compactStatusSegments() []string {
 	var parts []string
+	parts = append(parts, m.safetyModeSegments(false)...)
 	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
 		parts = append(parts, "mode:degraded")
 	}
@@ -122,6 +123,7 @@ func (m Model) compactStatusSegments() []string {
 
 func (m Model) minimalStatusSegments() []string {
 	var parts []string
+	parts = append(parts, m.safetyModeSegments(true)...)
 	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
 		parts = append(parts, "mode:degraded")
 	}
@@ -146,6 +148,21 @@ func (m Model) minimalStatusSegments() []string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("ctx:%.0f%%", pct*100)))
 	}
 
+	return parts
+}
+
+func (m Model) safetyModeSegments(minimal bool) []string {
+	var parts []string
+	if !m.permissionsEnabled {
+		parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("YOLO"))
+	}
+	if !m.sandboxEnabled {
+		label := "!SANDBOX"
+		if minimal {
+			label = "!SBX"
+		}
+		parts = append(parts, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render(label))
+	}
 	return parts
 }
 
@@ -741,6 +758,45 @@ func (m Model) contextualShortcutHints() string {
 	}
 
 	return strings.Join(parts, sep)
+}
+
+// renderInputIdleHints keeps the primary shortcuts visible after the welcome
+// panel has scrolled away. It intentionally stays one quiet line so repeated
+// chat work still feels like a tool, not an onboarding screen.
+func (m Model) renderInputIdleHints() string {
+	if m.input.Value() != "" || m.output.IsEmpty() {
+		return ""
+	}
+
+	keyStyle := lipgloss.NewStyle().Foreground(ColorMuted).Bold(true)
+	descStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
+	var parts []string
+	add := func(key, desc string) {
+		parts = append(parts, keyStyle.Render(key)+" "+descStyle.Render(desc))
+	}
+
+	add("Ctrl+P", "commands")
+	if len(m.availableModels) > 0 {
+		add("Ctrl+K", "model")
+	}
+	if m.width >= 70 {
+		add("Shift+Tab", m.sessionModeHintLabel())
+	}
+	add("?", "shortcuts")
+
+	return "  " + strings.Join(parts, statusSeparator())
+}
+
+func (m Model) sessionModeHintLabel() string {
+	switch {
+	case m.planningModeEnabled:
+		return "plan mode"
+	case !m.permissionsEnabled || !m.sandboxEnabled:
+		return "YOLO mode"
+	default:
+		return "cycle mode"
+	}
 }
 
 // shortenModelName returns a shortened model name.

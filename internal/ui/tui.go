@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -197,7 +198,8 @@ type Model struct {
 	activeCoordinatedTask string                           // Currently active task ID
 
 	// Command palette (Ctrl+P)
-	commandPalette *CommandPalette
+	commandPalette   *CommandPalette
+	shortcutsOverlay *ShortcutsOverlay
 
 	// Toast notifications
 	toastManager *ToastManager
@@ -221,11 +223,11 @@ type Model struct {
 	CompactMode bool
 
 	// Status line contextual information
-	conversationMode string // exploring/implementing/debugging
-	mcpHealthy           int
-	mcpTotal             int
-	runtimeStatus        RuntimeStatusSnapshot
-	lastRuntimeRefresh   time.Time
+	conversationMode   string // exploring/implementing/debugging
+	mcpHealthy         int
+	mcpTotal           int
+	runtimeStatus      RuntimeStatusSnapshot
+	lastRuntimeRefresh time.Time
 
 	// Plan pause/resume UX block
 	planPauseNotice *PlanProgressMsg
@@ -337,6 +339,7 @@ func NewModel() *Model {
 		coordinatedTasks:     make(map[string]*CoordinatedTaskState),
 		coordinatedTaskOrder: make([]string, 0),
 		commandPalette:       NewCommandPalette(styles),
+		shortcutsOverlay:     NewShortcutsOverlay(styles),
 		toastManager:         NewToastManager(styles),
 		planProgressPanel:    NewPlanProgressPanel(styles),
 		observatoryPanel:     NewContextObservatoryPanel(styles),
@@ -526,9 +529,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 
 	// Handle shortcuts overlay keys
 	if m.state == StateShortcutsOverlay {
-		// Any key closes the overlay
-		m.state = StateInput
-		return m.input.Focus()
+		return m.handleShortcutsOverlayKeys(msg)
 	}
 
 	// Handle command palette keys
@@ -922,9 +923,15 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 		case CommandTypeAction:
-			if cmd.Action != nil {
-				cmd.Action()
+			// CommandPalette.Execute already runs action callbacks. Preserve
+			// any state transition made by that action (for example Ctrl+K
+			// opening the model selector) instead of forcing the UI back to
+			// input and undoing the visible result.
+			if m.state == StateCommandPalette {
+				m.state = StateInput
+				return m.input.Focus()
 			}
+			return nil
 		}
 
 		m.state = StateInput
@@ -956,6 +963,53 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 	}
 }
 
+func (m *Model) handleShortcutsOverlayKeys(msg tea.KeyMsg) tea.Cmd {
+	if m.shortcutsOverlay == nil {
+		m.state = StateInput
+		return m.input.Focus()
+	}
+
+	switch msg.Type {
+	case tea.KeyEscape:
+		if m.shortcutsOverlay.GetSearch() != "" {
+			m.shortcutsOverlay.ClearSearch()
+			return nil
+		}
+		m.shortcutsOverlay.Hide()
+		m.state = StateInput
+		return m.input.Focus()
+	case tea.KeyUp:
+		m.shortcutsOverlay.ScrollUp()
+		return nil
+	case tea.KeyDown:
+		m.shortcutsOverlay.ScrollDown()
+		return nil
+	case tea.KeyBackspace:
+		query := m.shortcutsOverlay.GetSearch()
+		if query != "" {
+			_, size := utf8.DecodeLastRuneInString(query)
+			m.shortcutsOverlay.SetSearch(query[:len(query)-size])
+		}
+		return nil
+	default:
+		switch msg.String() {
+		case "k":
+			m.shortcutsOverlay.ScrollUp()
+		case "j":
+			m.shortcutsOverlay.ScrollDown()
+		case "q":
+			m.shortcutsOverlay.Hide()
+			m.state = StateInput
+			return m.input.Focus()
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.shortcutsOverlay.SetSearch(m.shortcutsOverlay.GetSearch() + string(msg.Runes))
+			}
+		}
+		return nil
+	}
+}
+
 // handleModelSelectorKeys handles keys in model selector state.
 func (m *Model) handleModelSelectorKeys(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
@@ -969,7 +1023,7 @@ func (m *Model) handleModelSelectorKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "enter", " ":
 		// Select model
-		if m.modelSelectedIndex < len(m.availableModels) {
+		if m.modelSelectedIndex >= 0 && m.modelSelectedIndex < len(m.availableModels) {
 			selected := m.availableModels[m.modelSelectedIndex]
 			if selected.ID != m.currentModel {
 				m.currentModel = selected.ID
@@ -988,7 +1042,7 @@ func (m *Model) handleModelSelectorKeys(msg tea.KeyMsg) tea.Cmd {
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		// Quick select by number
 		idx := int(msg.String()[0] - '1')
-		if idx < len(m.availableModels) {
+		if idx >= 0 && idx < len(m.availableModels) {
 			selected := m.availableModels[idx]
 			if selected.ID != m.currentModel {
 				m.currentModel = selected.ID
@@ -1006,6 +1060,14 @@ func (m *Model) handleModelSelectorKeys(msg tea.KeyMsg) tea.Cmd {
 
 // handleGlobalKeys handles global keyboard shortcuts.
 func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
+	// Ctrl+K opens the model selector. The welcome panel and model selector
+	// both advertise this binding, so keep the handler global for the input
+	// state instead of hiding model choice behind slash commands only.
+	if msg.String() == "ctrl+k" && m.state == StateInput {
+		m.openModelSelector()
+		return nil
+	}
+
 	// Handle Ctrl+P for command palette (only when in input state)
 	if msg.Type == tea.KeyCtrlP && m.state == StateInput {
 		m.commandPalette.Show()
@@ -1096,6 +1158,19 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		// Fall through to default handler (clears input)
 	}
 
+	// Ctrl+D mirrors Ctrl+U: scroll half-page down when the input is empty.
+	// The shortcuts overlay has advertised this binding for a while; wiring
+	// it here keeps navigation discoverable and predictable.
+	if msg.Type == tea.KeyCtrlD && m.state == StateInput && m.input.textarea.Value() == "" {
+		maxOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
+		newOffset := min(m.output.viewport.YOffset+m.output.viewport.Height/2, maxOffset)
+		m.output.viewport.SetYOffset(newOffset)
+		total := m.output.viewport.TotalLineCount()
+		bottom := m.output.viewport.YOffset + m.output.viewport.Height
+		m.output.SetFrozen(total-bottom > 2)
+		return nil
+	}
+
 	// Handle Ctrl+Shift+C for compact mode toggle (only when in input state)
 	if msg.String() == "ctrl+shift+c" && m.state == StateInput {
 		m.CompactMode = !m.CompactMode
@@ -1172,6 +1247,9 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 
 		// '?' opens keyboard shortcuts overlay
 		if msg.String() == "?" {
+			if m.shortcutsOverlay != nil {
+				m.shortcutsOverlay.Show()
+			}
 			m.state = StateShortcutsOverlay
 			return nil
 		}
@@ -1339,6 +1417,23 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	}
 
 	return nil
+}
+
+func (m *Model) openModelSelector() {
+	if len(m.availableModels) == 0 {
+		if m.toastManager != nil {
+			m.toastManager.ShowWarning("No model choices loaded")
+		}
+		return
+	}
+	m.state = StateModelSelector
+	m.modelSelectedIndex = 0
+	for i, model := range m.availableModels {
+		if model.ID == m.currentModel {
+			m.modelSelectedIndex = i
+			break
+		}
+	}
 }
 
 // handleMessageTypes handles various message types.
@@ -2922,6 +3017,10 @@ func (m Model) View() string {
 		if len(hiddenPanelHints) > 0 {
 			hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 			builder.WriteString("\n" + hintStyle.Render("  "+strings.Join(hiddenPanelHints, " • ")))
+		}
+		if idleHints := m.renderInputIdleHints(); idleHints != "" {
+			builder.WriteString("\n")
+			builder.WriteString(idleHints)
 		}
 	}
 

@@ -164,6 +164,66 @@ func TestRenderEngineStatusShowsVerifyPhase(t *testing.T) {
 	}
 }
 
+func TestCompactStatusBarShowsUnsafeModes(t *testing.T) {
+	m := NewModel()
+	m.width = 70
+	m.permissionsEnabled = false
+	m.sandboxEnabled = false
+	m.runtimeStatus.Provider = "deepseek"
+
+	got := stripAnsi(m.renderStatusBar())
+	if !strings.Contains(got, "YOLO") {
+		t.Fatalf("compact status should show permissions-off mode: %q", got)
+	}
+	if !strings.Contains(got, "!SANDBOX") {
+		t.Fatalf("compact status should show sandbox-off mode: %q", got)
+	}
+}
+
+func TestMinimalStatusBarShowsUnsafeModes(t *testing.T) {
+	m := NewModel()
+	m.width = 50
+	m.permissionsEnabled = false
+	m.sandboxEnabled = false
+	m.runtimeStatus.Provider = "deepseek"
+
+	got := stripAnsi(m.renderStatusBar())
+	if !strings.Contains(got, "YOLO") {
+		t.Fatalf("minimal status should show permissions-off mode: %q", got)
+	}
+	if !strings.Contains(got, "!SBX") {
+		t.Fatalf("minimal status should show sandbox-off mode: %q", got)
+	}
+}
+
+func TestRenderInputIdleHintsAfterConversationStarts(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+	m.availableModels = []ModelInfo{{ID: "fast", Name: "Fast"}}
+	m.output.AppendLine("assistant response")
+
+	got := stripAnsi(m.renderInputIdleHints())
+	for _, want := range []string{"Ctrl+P commands", "Ctrl+K model", "Shift+Tab cycle mode", "? shortcuts"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("idle hints missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestRenderInputIdleHintsHiddenOnWelcomeAndTyping(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+	if got := m.renderInputIdleHints(); got != "" {
+		t.Fatalf("welcome-empty output should not duplicate idle hints: %q", got)
+	}
+
+	m.output.AppendLine("assistant response")
+	m.input.textarea.SetValue("hello")
+	if got := m.renderInputIdleHints(); got != "" {
+		t.Fatalf("typing should hide idle hints: %q", got)
+	}
+}
+
 // stripAnsi removes ANSI escape sequences for testing.
 func stripAnsi(s string) string {
 	var result strings.Builder

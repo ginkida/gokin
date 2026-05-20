@@ -197,6 +197,18 @@ func (m *Model) RegisterPaletteActions() {
 
 	actions := []EnhancedPaletteCommand{
 		{
+			Name:        "Open Model Selector",
+			Description: "Switch the active AI model",
+			Shortcut:    "Ctrl+K",
+			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
+			Enabled:     true,
+			Priority:    149,
+			Type:        CommandTypeAction,
+			Action: func() {
+				m.openModelSelector()
+			},
+		},
+		{
 			Name:        "Toggle Task List",
 			Description: "Show or hide the task list panel",
 			Shortcut:    "Ctrl+T",

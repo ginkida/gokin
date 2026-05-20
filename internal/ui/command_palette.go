@@ -110,15 +110,15 @@ func (p *CommandPalette) SetActionCommands(actions []EnhancedPaletteCommand) {
 
 // RefreshCommands refreshes the command list from the provider.
 func (p *CommandPalette) RefreshCommands() {
-	if p.paletteProvider == nil {
-		return
-	}
-
-	paletteCmds := p.paletteProvider.GetPaletteCommandsForUI()
 	recentCmds := p.history.GetRecentCommands(5)
 	recentSet := make(map[string]bool)
 	for _, c := range recentCmds {
 		recentSet[c] = true
+	}
+
+	var paletteCmds []any
+	if p.paletteProvider != nil {
+		paletteCmds = p.paletteProvider.GetPaletteCommandsForUI()
 	}
 
 	p.commands = make([]EnhancedPaletteCommand, 0, len(paletteCmds)+len(p.actionCommands))
@@ -253,30 +253,68 @@ func (p *CommandPalette) filterCommands(query string) {
 	}
 
 	query = strings.ToLower(query)
-	var matches []EnhancedPaletteCommand
+	type scoredCommand struct {
+		cmd   EnhancedPaletteCommand
+		score int
+	}
+	var matches []scoredCommand
 
 	for _, cmd := range p.commands {
-		name := strings.ToLower(cmd.Name)
-		desc := strings.ToLower(cmd.Description)
-		shortcut := strings.ToLower(cmd.Shortcut)
-		category := strings.ToLower(cmd.Category.Name)
-
-		// Check for substring match
-		if strings.Contains(name, query) ||
-			strings.Contains(desc, query) ||
-			strings.Contains(shortcut, query) ||
-			strings.Contains(category, query) {
-			matches = append(matches, cmd)
-			continue
-		}
-
-		// Check for fuzzy match (all query chars in order)
-		if fuzzyMatch(name, query) {
-			matches = append(matches, cmd)
+		if score := paletteMatchScore(cmd, query); score > 0 {
+			matches = append(matches, scoredCommand{cmd: cmd, score: score})
 		}
 	}
 
-	p.filtered = matches
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		if matches[i].cmd.Priority != matches[j].cmd.Priority {
+			return matches[i].cmd.Priority < matches[j].cmd.Priority
+		}
+		return matches[i].cmd.Name < matches[j].cmd.Name
+	})
+
+	p.filtered = make([]EnhancedPaletteCommand, 0, len(matches))
+	for _, match := range matches {
+		p.filtered = append(p.filtered, match.cmd)
+	}
+}
+
+func paletteMatchScore(cmd EnhancedPaletteCommand, query string) int {
+	name := strings.ToLower(cmd.Name)
+	desc := strings.ToLower(cmd.Description)
+	shortcut := strings.ToLower(cmd.Shortcut)
+	shortcutName := strings.TrimPrefix(shortcut, "/")
+	category := strings.ToLower(cmd.Category.Name)
+
+	score := 0
+	switch {
+	case name == query || shortcutName == query:
+		score = 1000
+	case strings.HasPrefix(name, query) || strings.HasPrefix(shortcutName, query):
+		score = 850
+	case strings.Contains(name, query) || strings.Contains(shortcutName, query):
+		score = 650
+	case strings.HasPrefix(category, query):
+		score = 450
+	case strings.Contains(category, query):
+		score = 350
+	case strings.Contains(desc, query):
+		score = 250
+	case fuzzyMatch(name, query) || fuzzyMatch(shortcutName, query):
+		score = 100
+	default:
+		return 0
+	}
+
+	if cmd.IsRecent {
+		score += 25
+	}
+	if cmd.Type == CommandTypeAction {
+		score += 10
+	}
+	return score
 }
 
 // fuzzyMatch checks if all characters in query appear in str in order.
@@ -415,10 +453,8 @@ func (p *CommandPalette) View(width, height int) string {
 	}
 
 	// Palette dimensions
-	paletteWidth := min(70, width-6)
-	if paletteWidth < 45 {
-		paletteWidth = 45
-	}
+	paletteWidth := commandPaletteWidth(width)
+	paletteHeight := commandPaletteHeight(height, p.maxHeight)
 
 	// Styles
 	containerStyle := lipgloss.NewStyle().
@@ -525,11 +561,17 @@ func (p *CommandPalette) View(width, height int) string {
 	// Commands list
 	if len(p.filtered) == 0 {
 		content.WriteString("\n")
-		content.WriteString(descStyle.Render("  No matching commands"))
+		if strings.TrimSpace(p.query) != "" {
+			content.WriteString(descStyle.Render("  No matches for \"" + p.query + "\""))
+			content.WriteString("\n")
+			content.WriteString(descStyle.Render("  Try /help, /status, or Backspace"))
+		} else {
+			content.WriteString(descStyle.Render("  No commands available"))
+		}
 		content.WriteString("\n")
 	} else {
 		// Calculate visible range
-		visibleItems := p.maxHeight - 8
+		visibleItems := paletteHeight - 8
 		if visibleItems < 3 {
 			visibleItems = 3
 		}
@@ -667,6 +709,29 @@ func (p *CommandPalette) View(width, height int) string {
 	content.WriteString(footerStyle.Render(footerText))
 
 	return containerStyle.Render(content.String())
+}
+
+func commandPaletteWidth(width int) int {
+	switch {
+	case width <= 0:
+		return 70
+	case width <= 12:
+		return max(width, 1)
+	case width < 51:
+		return width - 2
+	default:
+		return max(45, min(70, width-6))
+	}
+}
+
+func commandPaletteHeight(height, maxHeight int) int {
+	if maxHeight <= 0 {
+		maxHeight = 20
+	}
+	if height <= 0 {
+		return maxHeight
+	}
+	return min(maxHeight, max(10, height-4))
 }
 
 // renderPreview renders the preview panel for the selected command.

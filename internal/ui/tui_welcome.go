@@ -29,7 +29,7 @@ var welcomeWordmark = [3]string{
 //	tips                      ← muted section header
 //	  type a question or paste a stack trace
 //	  / for slash commands  ·  @ to pin a file
-//	  ⌘K switches model     ·  ? for shortcuts
+//	  Ctrl+K switches model ·  ? for shortcuts
 //
 //	project                   ← muted section header (omitted if no data)
 //	  ~/code/payments-api
@@ -83,7 +83,7 @@ func (m Model) renderWelcomePanel() string {
 	b.WriteString(tipStyle.Render(" to pin a file"))
 	b.WriteString("\n")
 	b.WriteString(tipStyle.Render("    "))
-	b.WriteString(kbdStyle.Render("⌘K"))
+	b.WriteString(kbdStyle.Render("Ctrl+K"))
 	b.WriteString(tipStyle.Render(" switches model · "))
 	b.WriteString(kbdStyle.Render("?"))
 	b.WriteString(tipStyle.Render(" for shortcuts"))

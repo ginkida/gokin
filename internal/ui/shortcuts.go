@@ -57,6 +57,7 @@ func DefaultShortcuts() []ShortcutCategory {
 			Name: "Command Center",
 			Shortcuts: []Shortcut{
 				{Keys: []string{"Ctrl", "p"}, Description: "Command Palette (All Actions)"},
+				{Keys: []string{"Ctrl", "K"}, Description: "Open model selector"},
 				{Keys: []string{"Ctrl", "H"}, Description: "Context Observatory (Technical Health)"},
 				{Keys: []string{"Ctrl", "G"}, Description: "Toggle select mode (freeze + native selection)"},
 				{Keys: []string{"Option", "C"}, Description: "Copy last AI response"},
@@ -227,17 +228,9 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 	// Get categories to display (filtered or all)
 	categories := m.getFilteredCategories()
 
-	// Helper function
-	minInt := func(a, b int) int {
-		if a < b {
-			return a
-		}
-		return b
-	}
-
 	// Overlay dimensions
-	overlayWidth := minInt(80, width-4)
-	overlayHeight := minInt(25, height-4)
+	overlayWidth := shortcutsOverlayWidth(width)
+	overlayHeight := shortcutsOverlayHeight(height)
 
 	// Container style
 	containerStyle := lipgloss.NewStyle().
@@ -287,7 +280,7 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 	var content strings.Builder
 
 	// Title
-	content.WriteString(titleStyle.Render("⌨️  Keyboard Shortcuts"))
+	content.WriteString(titleStyle.Render("Keyboard Shortcuts"))
 	content.WriteString("\n")
 
 	// Search prompt (if filtering)
@@ -338,13 +331,39 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 	// Footer
 	content.WriteString("\n")
 	if m.searchQuery != "" {
-		content.WriteString(footerStyle.Render("Esc to clear filter • ↑/↓ to scroll"))
+		content.WriteString(footerStyle.Render("Esc clear filter • q close • ↑/↓ scroll"))
 	} else {
-		content.WriteString(footerStyle.Render("Type to filter • Esc to close • ↑/↓ to scroll"))
+		content.WriteString(footerStyle.Render("Type to filter • Esc/q close • ↑/↓ scroll"))
 	}
 
 	// Wrap in container
 	return containerStyle.Render(content.String())
+}
+
+func shortcutsOverlayWidth(width int) int {
+	switch {
+	case width <= 0:
+		return 80
+	case width <= 8:
+		return max(width, 1)
+	case width < 84:
+		return width - 4
+	default:
+		return 80
+	}
+}
+
+func shortcutsOverlayHeight(height int) int {
+	switch {
+	case height <= 0:
+		return 25
+	case height <= 8:
+		return max(height, 1)
+	case height < 29:
+		return height - 4
+	default:
+		return 25
+	}
 }
 
 // ContextualHelp provides contextual help based on current UI state.

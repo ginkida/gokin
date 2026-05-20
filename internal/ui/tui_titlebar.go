@@ -96,6 +96,9 @@ func (m Model) titlebarRightSegment() string {
 	sepStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
 	var parts []string
+	if mode := m.titlebarModeSegment(); mode != "" {
+		parts = append(parts, mode)
+	}
 	if provider != "" {
 		if runes := []rune(provider); len(runes) > 12 {
 			provider = string(runes[:12])
@@ -122,4 +125,15 @@ func (m Model) titlebarRightSegment() string {
 		return ""
 	}
 	return strings.Join(parts, sepStyle.Render(" · "))
+}
+
+func (m Model) titlebarModeSegment() string {
+	switch {
+	case m.planningModeEnabled:
+		return lipgloss.NewStyle().Foreground(ColorInfo).Bold(true).Render("plan")
+	case !m.permissionsEnabled || !m.sandboxEnabled:
+		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("YOLO")
+	default:
+		return ""
+	}
 }

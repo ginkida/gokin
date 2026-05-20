@@ -2,6 +2,7 @@ package ui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -79,5 +80,27 @@ func TestSetCommandAliases(t *testing.T) {
 	m.SetCommandAliases(nil)
 	if m.commandAliases != nil {
 		t.Errorf("nil input should clear aliases, got %v", m.commandAliases)
+	}
+}
+
+func TestRenderSuggestionsShowsSelectedCommandContext(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), "")
+	m.showSuggestions = true
+	m.suggestionType = SuggestionCommand
+	m.suggestionIndex = 0
+	m.suggestions = []CommandInfo{
+		{
+			Name:        "model",
+			Description: "Switch AI model",
+			Category:    "Session",
+			Usage:       "/model [name]",
+		},
+	}
+
+	got := stripAnsi(m.renderSuggestions())
+	for _, want := range []string{"/model", "[Session]", "Switch AI model", "Tab complete", "/model [name]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("suggestions missing %q:\n%s", want, got)
+		}
 	}
 }
