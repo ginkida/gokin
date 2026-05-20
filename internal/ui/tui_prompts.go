@@ -7,53 +7,113 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// promptPaletteWidth returns the inner content width for prompt cards and
+// whether the card should render with a rounded border + fixed width.
+// On narrow terminals (width < minBorderedPromptWidth) we skip the border
+// entirely and let the content flow at the terminal's natural width — a
+// 45-cell bordered container in a 40-cell terminal overflows and breaks
+// the layout horizontally, which is worse than a borderless prompt.
+func promptPaletteWidth(termWidth int) (width int, bordered bool) {
+	if termWidth < minBorderedPromptWidth {
+		// Fall back: no border, use whatever width we have (minimum 30 so
+		// truncation budgets stay sane).
+		w := termWidth - 4 // 2-space left padding + 2-space right margin
+		if w < 30 {
+			w = 30
+		}
+		return w, false
+	}
+	w := min(78, termWidth-6)
+	if w < minBorderedPromptWidth {
+		w = minBorderedPromptWidth
+	}
+	return w, true
+}
+
+// minBorderedPromptWidth is the threshold below which prompt cards drop
+// the rounded border and fixed Width(). Set to give the 45-wide content
+// + 2 border cells + 2 padding cells + a small right margin room to
+// breathe; below this the bordered look just collides with the edge.
+const minBorderedPromptWidth = 50
+
+// wrapPromptContainer wraps the rendered content in a rounded-border
+// container if `bordered` is true, otherwise returns content as-is. Used
+// by every prompt renderer to share the overflow-guard logic.
+func wrapPromptContainer(content string, width int, bordered bool, borderColor lipgloss.Color) string {
+	if !bordered {
+		return content
+	}
+	containerStyle := lipgloss.NewStyle().
+		Width(width).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(0, 1)
+	return containerStyle.Render(content)
+}
+
 // renderPermissionPrompt renders the permission prompt UI (clean, compact style).
 func (m Model) renderPermissionPrompt() string {
 	if m.permRequest == nil {
 		return ""
 	}
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
+	paletteWidth, bordered := promptPaletteWidth(m.width)
+
+	// Border color based on risk level
+	borderColor := ColorWarning
+	if m.permRequest.RiskLevel == "high" {
+		borderColor = ColorError
+	} else if m.permRequest.RiskLevel == "low" {
+		borderColor = ColorSuccess
+	}
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(borderColor)
+
 	labelStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	valueStyle := lipgloss.NewStyle().Foreground(ColorText)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	// Risk indicator — colored dot instead of text label
-	var riskDot string
+	// Risk indicator badge
+	var riskBadge string
 	switch m.permRequest.RiskLevel {
 	case "high":
-		riskDot = lipgloss.NewStyle().Foreground(ColorError).Render("●")
+		riskBadge = lipgloss.NewStyle().Background(ColorError).Foreground(ColorBg).Bold(true).Render(" HIGH RISK ")
 	case "medium":
-		riskDot = lipgloss.NewStyle().Foreground(ColorWarning).Render("●")
+		riskBadge = lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorBg).Bold(true).Render(" MEDIUM RISK ")
 	default:
-		riskDot = lipgloss.NewStyle().Foreground(ColorSuccess).Render("●")
+		riskBadge = lipgloss.NewStyle().Background(ColorSuccess).Foreground(ColorBg).Bold(true).Render(" LOW RISK ")
 	}
 
 	var builder strings.Builder
 
-	// Title line with colored dot
-	builder.WriteString(riskDot + " " + titleStyle.Render("Permission Required"))
-	builder.WriteString("\n")
+	// Title line with badge
+	builder.WriteString(titleStyle.Render("Permission Required"))
+	builder.WriteString("  ")
+	builder.WriteString(riskBadge)
+	builder.WriteString("\n\n")
 
 	// Tool info with operation context
 	opLabel := formatPermissionOperation(m.permRequest.ToolName, m.permRequest.Args)
-	builder.WriteString(markerStyle.Render("  ⎿  ") + labelStyle.Render("Tool: ") + valueStyle.Render(opLabel))
+	builder.WriteString(markerStyle.Render("  ▸ ") + labelStyle.Render("Tool: ") + valueStyle.Render(opLabel))
 	builder.WriteString("\n")
 
 	// Command/Details — show the key argument value
 	if len(m.permRequest.Args) > 0 {
 		detail := ""
+		detailBudget := max(paletteWidth-10, 30)
 		for _, key := range []string{"command", "file_path", "path", "pattern", "url"} {
 			if val, ok := m.permRequest.Args[key].(string); ok && val != "" {
-				if runes := []rune(val); len(runes) > 72 {
-					val = string(runes[:69]) + "..."
+				if runes := []rune(val); len(runes) > detailBudget {
+					val = string(runes[:detailBudget-3]) + "..."
 				}
 				detail = val
 				break
 			}
 		}
 		if detail != "" {
-			builder.WriteString(markerStyle.Render("     ") + valueStyle.Render(detail))
+			builder.WriteString(markerStyle.Render("    ") + valueStyle.Render(detail))
 			builder.WriteString("\n")
 		}
 	}
@@ -61,10 +121,11 @@ func (m Model) renderPermissionPrompt() string {
 	// Reason (compact)
 	if m.permRequest.Reason != "" {
 		reason := m.permRequest.Reason
-		if runes := []rune(reason); len(runes) > 60 {
-			reason = string(runes[:57]) + "..."
+		reasonBudget := max(paletteWidth-10, 30)
+		if runes := []rune(reason); len(runes) > reasonBudget {
+			reason = string(runes[:reasonBudget-3]) + "..."
 		}
-		builder.WriteString(markerStyle.Render("     ") + labelStyle.Render(reason))
+		builder.WriteString(markerStyle.Render("    ") + labelStyle.Render(reason))
 		builder.WriteString("\n")
 	}
 
@@ -95,7 +156,15 @@ func (m Model) renderPermissionPrompt() string {
 	builder.WriteString("  " + strings.Join(optParts, optionStyle.Render(" · ")) + optionStyle.Render(" · esc Cancel"))
 	builder.WriteString("\n")
 
-	return builder.String()
+	if !bordered {
+		return builder.String()
+	}
+	containerStyle := lipgloss.NewStyle().
+		Width(paletteWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(0, 1)
+	return containerStyle.Render(builder.String())
 }
 
 // formatPermissionOperation returns a descriptive label like "bash → Run command"
@@ -150,24 +219,41 @@ func (m Model) renderQuestionPrompt() string {
 
 	var builder strings.Builder
 
-	// Title - using modal styles
-	builder.WriteString(m.styles.ModalTitle.Render(" Question"))
+	paletteWidth, bordered := promptPaletteWidth(m.width)
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorSecondary)
+
+	// Header
+	builder.WriteString(titleStyle.Render("Question from Agent"))
 	builder.WriteString("\n\n")
 
-	// Question text
-	builder.WriteString("  " + m.questionRequest.Question)
+	// Question text (wrap nicely)
+	questionStyle := lipgloss.NewStyle().
+		Foreground(ColorText).
+		Width(paletteWidth - 4)
+	builder.WriteString(questionStyle.Render(m.questionRequest.Question))
 	builder.WriteString("\n\n")
 
 	// If custom input mode or no options, show input
 	if m.questionCustomInput || len(m.questionRequest.Options) == 0 {
 		builder.WriteString("  " + m.questionInputModel.View())
 		builder.WriteString("\n\n")
+
+		footerStyle := lipgloss.NewStyle().
+			Foreground(ColorDim).
+			Italic(true).
+			Align(lipgloss.Center).
+			Width(paletteWidth - 4)
+
 		if m.questionCustomInput {
-			builder.WriteString(m.styles.StatusBar.Render("Enter to submit, Esc to go back"))
+			builder.WriteString(footerStyle.Render("Enter to submit  ·  Esc Go Back"))
 		} else {
-			builder.WriteString(m.styles.StatusBar.Render("Type your answer and press Enter"))
+			builder.WriteString(footerStyle.Render("Type answer  ·  Enter Confirm"))
 		}
-		return builder.String()
+		builder.WriteString("\n")
+		return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorSecondary)
 	}
 
 	// Options - using modal styles
@@ -197,9 +283,16 @@ func (m Model) renderQuestionPrompt() string {
 	fmt.Fprintf(&builder, "%s%s\n", prefix, style.Render("Other (custom answer)"))
 
 	builder.WriteString("\n")
-	builder.WriteString(m.styles.StatusBar.Render("Use arrows to select, Enter to confirm, or Ctrl+P for more"))
 
-	return builder.String()
+	footerStyle := lipgloss.NewStyle().
+		Foreground(ColorDim).
+		Italic(true).
+		Align(lipgloss.Center).
+		Width(paletteWidth - 4)
+	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Enter Confirm  ·  Ctrl+P Commands"))
+	builder.WriteString("\n")
+
+	return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorSecondary)
 }
 
 // renderPlanApproval renders the plan approval UI.
@@ -443,8 +536,20 @@ func (m Model) renderPlanApproval() string {
 func (m Model) renderModelSelector() string {
 	var builder strings.Builder
 
-	// Title - using modal styles
-	builder.WriteString(m.styles.ModalTitle.Render(" Select Model"))
+	paletteWidth, bordered := promptPaletteWidth(m.width)
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary)
+
+	subtitleStyle := lipgloss.NewStyle().
+		Foreground(ColorDim).
+		Italic(true)
+
+	// Header
+	builder.WriteString(titleStyle.Render("Select Model"))
+	builder.WriteString("  ")
+	builder.WriteString(subtitleStyle.Render("⌘K"))
 	builder.WriteString("\n\n")
 
 	// Current model info
@@ -465,13 +570,23 @@ func (m Model) renderModelSelector() string {
 			label += " " + m.styles.ModalDefault.Render("(current)")
 		}
 		fmt.Fprintf(&builder, "%s%s\n", prefix, style.Render(label))
-		fmt.Fprintf(&builder, "     %s\n", m.styles.ModalMuted.Render(model.Description))
+		
+		// Muted description
+		descStyle := m.styles.ModalMuted.Width(paletteWidth - 8)
+		fmt.Fprintf(&builder, "     %s\n", descStyle.Render(model.Description))
 	}
 
 	builder.WriteString("\n")
-	builder.WriteString(m.styles.StatusBar.Render("/: Navigate | Enter: Select | Esc: Cancel | Ctrl+P: commands"))
 
-	return builder.String()
+	footerStyle := lipgloss.NewStyle().
+		Foreground(ColorDim).
+		Italic(true).
+		Align(lipgloss.Center).
+		Width(paletteWidth - 4)
+	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Enter Confirm  ·  Esc Close  ·  Ctrl+P Commands"))
+	builder.WriteString("\n")
+
+	return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorPrimary)
 }
 
 // renderShortcutsOverlay renders the keyboard shortcuts overlay.
