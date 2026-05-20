@@ -96,9 +96,10 @@ func (m Model) titlebarRightSegment() string {
 	sepStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
 	var parts []string
-	if mode := m.titlebarModeSegment(); mode != "" {
-		parts = append(parts, mode)
-	}
+	// Mode indicator lives in the status bar only — duplicating it here
+	// (two lines apart in the same view) just stacks the same YOLO/plan
+	// badge on top of the same YOLO/plan badge. Status bar is always
+	// visible; titlebar is chrome.
 	if provider != "" {
 		if runes := []rune(provider); len(runes) > 12 {
 			provider = string(runes[:12])
@@ -125,15 +126,4 @@ func (m Model) titlebarRightSegment() string {
 		return ""
 	}
 	return strings.Join(parts, sepStyle.Render(" · "))
-}
-
-func (m Model) titlebarModeSegment() string {
-	switch {
-	case m.planningModeEnabled:
-		return lipgloss.NewStyle().Foreground(ColorInfo).Bold(true).Render("plan")
-	case !m.permissionsEnabled || !m.sandboxEnabled:
-		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("YOLO")
-	default:
-		return ""
-	}
 }
