@@ -75,11 +75,19 @@ func generateToolResultSummary(toolName, content, detail string) string {
 
 	switch normalizedTool {
 	case "read":
-		if lineCount > 0 {
-			if detail != "" {
-				return fmt.Sprintf("%d lines from %s", lineCount, detail)
+		// Codex-style: path first ("what was read") with line count in
+		// parens as supporting context. Old format was "N lines from
+		// path" which led with the count — fine for technical density,
+		// noisier in an exploration phase where the agent reads 10
+		// files in a row and you just want a column of file paths.
+		if detail != "" {
+			if lineCount > 0 {
+				return fmt.Sprintf("%s (%s)", detail, pluralLines(lineCount))
 			}
-			return fmt.Sprintf("%d lines", lineCount)
+			return detail
+		}
+		if lineCount > 0 {
+			return pluralLines(lineCount)
 		}
 	case "glob":
 		if strings.Contains(content, "(no matches)") {
@@ -101,17 +109,20 @@ func generateToolResultSummary(toolName, content, detail string) string {
 		}
 		return "no matches"
 	case "bash", "test", "build":
-		if lineCount > 0 {
-			if detail != "" {
-				return fmt.Sprintf("%d lines from %s", lineCount, detail)
-			}
-			if lineCount == 1 {
-				return "1 line of output"
-			}
-			return fmt.Sprintf("%d lines of output", lineCount)
-		}
+		// Codex-style: command first ("what was run") with line count in
+		// parens. Body preview is collapsed by default (see
+		// collapsedByDefault in tui.go) so this title line carries all
+		// the visible signal — leading with the command makes a stack of
+		// 5 bash calls scan as a column of operations, not "200 lines
+		// from … 13 lines from … 4 lines from …".
 		if detail != "" {
-			return fmt.Sprintf("completed %s", detail)
+			if lineCount > 0 {
+				return fmt.Sprintf("%s (%s)", detail, pluralLines(lineCount))
+			}
+			return detail
+		}
+		if lineCount > 0 {
+			return pluralLines(lineCount) + " of output"
 		}
 		return "completed"
 	case "edit":
@@ -158,6 +169,17 @@ func generateToolResultSummary(toolName, content, detail string) string {
 	}
 
 	return detail
+}
+
+// pluralLines renders a line-count with grammatical agreement: "1 line"
+// vs "N lines". Used by the codex-style read/bash summaries so a single
+// stdout line of output doesn't read as "1 lines" — a small thing, but
+// the summary is the most-read part of the chat stream.
+func pluralLines(n int) string {
+	if n == 1 {
+		return "1 line"
+	}
+	return fmt.Sprintf("%d lines", n)
 }
 
 func displayLineCount(content string) int {

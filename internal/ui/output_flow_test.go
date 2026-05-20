@@ -76,10 +76,14 @@ func TestHandleToolResultWithInfo_ReadCollapsesByDefault(t *testing.T) {
 	}
 }
 
-// TestHandleToolResultWithInfo_BashKeepsPreview: non-Read tools (bash,
-// grep, glob) still get the head+tail inline preview — their output is
-// the primary signal, not the fact that they ran.
-func TestHandleToolResultWithInfo_BashKeepsPreview(t *testing.T) {
+// TestHandleToolResultWithInfo_BashCollapsesByDefault: bash now joins
+// Read in the collapse-by-default set so chat doesn't fill with head+tail
+// previews during exploration phases. The title carries the command +
+// line count; the user expands with `e` if they actually want the body.
+//
+// grep / glob deliberately stay uncollapsed because their output IS the
+// signal (matching lines, found paths). See collapsedByDefault in tui.go.
+func TestHandleToolResultWithInfo_BashCollapsesByDefault(t *testing.T) {
 	m := NewModel()
 	content := strings.Join([]string{
 		"line 1", "line 2", "line 3", "line 4", "line 5",
@@ -90,14 +94,19 @@ func TestHandleToolResultWithInfo_BashKeepsPreview(t *testing.T) {
 	m.handleToolResultWithInfo(content, "bash", "go test ./internal/ui", time.Now().Add(-2*time.Second))
 	rendered := stripAnsi(m.output.state.content.String())
 
-	// Bash preview should include at least the first output line.
-	if !strings.Contains(rendered, "line 1") {
-		t.Fatalf("bash preview should include first output line:\n%s", rendered)
+	// Body preview is suppressed — no raw lines from stdout.
+	if strings.Contains(rendered, "line 1") {
+		t.Fatalf("bash should collapse stdout by default (codex-style), got:\n%s", rendered)
 	}
-	// And the quiet more-lines marker (no keyboard instruction — that's
-	// in the shortcuts overlay).
-	if !strings.Contains(rendered, "more line") {
-		t.Fatalf("bash preview should include 'N more lines' marker:\n%s", rendered)
+	if strings.Contains(rendered, "more line") {
+		t.Fatalf("bash should not show 'N more lines' marker when collapsed:\n%s", rendered)
+	}
+	// Title still shows the command and the line count in parens.
+	if !strings.Contains(rendered, "go test") {
+		t.Fatalf("bash title should retain the command:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "12 lines") {
+		t.Fatalf("bash title should retain line count in parens:\n%s", rendered)
 	}
 }
 

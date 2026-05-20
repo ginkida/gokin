@@ -2408,16 +2408,17 @@ func (m *Model) extractToolInfoFromArgs(name string, args map[string]any) string
 
 // collapsedByDefault reports whether a tool's successful output should
 // skip the inline head+tail preview and show only a summary line + expand
-// hint. For these tools the ✓ success line itself (with line count and
-// path) carries all the useful signal; the content payload is either
-// redundant (Read — the file is on disk, ask for it if you want) or
-// self-descriptive elsewhere.
+// hint. For these tools the ✓ success line itself (with the operation
+// payload — path for read, command for bash) carries all the immediately
+// useful signal; the actual content body is either redundant (Read —
+// the file is on disk) or accessible via the `e` expand shortcut.
 //
-// bash / grep / glob deliberately stay uncollapsed: their output IS the
-// user's primary signal and a head+tail preview is worth the rows.
+// grep / glob deliberately stay uncollapsed: their output IS the user's
+// primary signal (matching lines, found paths) and a head+tail preview
+// is worth the rows.
 func collapsedByDefault(toolName string) bool {
 	switch toolName {
-	case "read":
+	case "read", "bash":
 		return true
 	}
 	return false
