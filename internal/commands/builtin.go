@@ -210,6 +210,7 @@ func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterf
 	}
 
 	app.ClearConversation()
+	app.RefreshTokenCount()
 	// Also clear todos
 	if todoTool := app.GetTodoTool(); todoTool != nil {
 		todoTool.ClearItems()
@@ -252,6 +253,7 @@ func (c *CompactCommand) Execute(ctx context.Context, args []string, app AppInte
 	}
 
 	err := cm.ForceSummarize(ctx)
+	app.RefreshTokenCount()
 	usageAfter := cm.GetTokenUsage()
 	tokensAfter := 0
 	pctAfter := 0.0

@@ -1449,6 +1449,11 @@ func (a *App) GetAgentTypeRegistry() *agent.AgentTypeRegistry {
 
 // AppInterface implementation for commands package
 
+// RefreshTokenCount recalculates token count and sends update to UI.
+func (a *App) RefreshTokenCount() {
+	a.refreshTokenCount()
+}
+
 // GetSession returns the current session.
 func (a *App) GetSession() *chat.Session {
 	return a.session
@@ -2387,6 +2392,9 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// section — safeSendToProgram re-acquires a.mu internally, so calling
 	// it under the lock would self-deadlock on Go's non-reentrant Mutex.
 	a.safeSendToProgram(uiMsg)
+
+	// Refresh token counts immediately for the newly loaded model limits
+	a.refreshTokenCount()
 
 	logging.Info("configuration applied successfully", "model", modelName)
 	return nil

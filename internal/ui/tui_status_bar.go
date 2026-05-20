@@ -103,13 +103,14 @@ func (m Model) compactStatusSegments() []string {
 	}
 	parts = append(parts, provider)
 
-	if pct := m.getContextPercent(); pct > 0 {
+	tokens, maxTokens := m.getTokenCounts()
+	if m.showTokens && maxTokens > 0 {
+		pct := m.getContextPercent()
 		color := contextUrgencyColor(pct)
 		hint := contextUrgencyHint(pct)
-		tokens, maxTokens := m.getTokenCounts()
 		label := formatAbsoluteTokens(tokens, maxTokens, m.getOutputTokens())
 		if label == "" {
-			label = fmt.Sprintf("ctx:%.0f%%", pct)
+			label = fmt.Sprintf("ctx:%.0f%%", pct*100)
 		}
 		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(label+hint))
 	} else {
@@ -138,9 +139,11 @@ func (m Model) minimalStatusSegments() []string {
 	}
 	parts = append(parts, provider)
 
-	if pct := m.getContextPercent(); pct > 0 {
+	_, maxTokens := m.getTokenCounts()
+	if m.showTokens && maxTokens > 0 {
+		pct := m.getContextPercent()
 		color := contextUrgencyColor(pct)
-		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("ctx:%.0f%%", pct)))
+		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("ctx:%.0f%%", pct*100)))
 	}
 
 	return parts
@@ -467,13 +470,19 @@ func shortBreakerState(state string) string {
 }
 
 func (m Model) formatTokenStatus(withContextBar bool) string {
-	pct := m.getContextPercent()
-	if pct <= 0 {
+	tokens, maxTokens := m.getTokenCounts()
+	if !m.showTokens || maxTokens <= 0 {
 		return ""
 	}
-	tokens, maxTokens := m.getTokenCounts()
+	pct := m.getContextPercent()
 	if withContextBar {
-		return renderContextBar(pct, 8, tokens, maxTokens, m.getOutputTokens())
+		barWidth := 8
+		if m.width >= 120 {
+			barWidth = 16
+		} else if m.width >= 80 {
+			barWidth = 12
+		}
+		return renderContextBar(pct, barWidth, tokens, maxTokens, m.getOutputTokens())
 	}
 	color := contextUrgencyColor(pct)
 	if label := formatAbsoluteTokens(tokens, maxTokens, m.getOutputTokens()); label != "" {
@@ -501,7 +510,7 @@ func (m Model) getOutputTokens() int {
 // formatAbsoluteTokens returns "45.0K/128.0K" if absolute counts are available,
 // optionally appending "+1.2K" for output tokens.
 func formatAbsoluteTokens(tokens, maxTokens, outputTokens int) string {
-	if tokens > 0 && maxTokens > 0 {
+	if tokens >= 0 && maxTokens > 0 {
 		label := fmt.Sprintf("%s/%s", formatTokens(tokens), formatTokens(maxTokens))
 		if outputTokens > 0 {
 			label += fmt.Sprintf(" +%s", formatTokens(outputTokens))
@@ -560,7 +569,7 @@ func maxBarDivisor(maxTokens int) int {
 // of the bar so users can see the projected context after this turn lands.
 // When absolute token counts are available, displays them alongside the bar.
 func renderContextBar(pct float64, barWidth int, tokens int, maxTokens int, outputTokens int) string {
-	if pct <= 0 {
+	if pct <= 0 && maxTokens <= 0 {
 		return ""
 	}
 

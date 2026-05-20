@@ -1350,6 +1350,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if m.observatoryPanel != nil {
 			m.observatoryPanel.UpdateHealth(msg)
 		}
+		// Sync the main tokenUsage so the status bar and progress bar show the active context
+		m.tokenUsage = &TokenUsageMsg{
+			Tokens:      msg.TotalTokens,
+			MaxTokens:   msg.MaxTokens,
+			PercentUsed: msg.PercentUsed,
+			NearLimit:   msg.PercentUsed >= 0.80,
+		}
+		m.baseTokenCount = msg.TotalTokens
 		return nil
 
 	case StreamThinkingMsg:
@@ -1612,13 +1620,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.loopToolsUsed = msg.ToolsUsed
 
 	case StreamTokenUpdateMsg:
-		if m.tokenUsage != nil {
-			// Track estimated output tokens separately from input context.
-			// Output tokens don't count toward the current context limit
-			// (they become input on the next turn).
-			m.tokenUsage.OutputTokens = msg.EstimatedOutputTokens
-			m.tokenUsage.IsEstimate = true
+		if m.tokenUsage == nil {
+			m.tokenUsage = &TokenUsageMsg{}
 		}
+		// Track estimated output tokens separately from input context.
+		// Output tokens don't count toward the current context limit
+		// (they become input on the next turn).
+		m.tokenUsage.OutputTokens = msg.EstimatedOutputTokens
+		m.tokenUsage.IsEstimate = true
 
 	case TokenUsageMsg:
 		wasNearLimit := m.tokenUsage != nil && m.tokenUsage.NearLimit

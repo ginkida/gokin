@@ -69,6 +69,7 @@ type AppInterface interface {
 	GetSessionGovernanceReport() string
 	GetMemoryReport() string
 	GetPerformanceStats() string
+	RefreshTokenCount()
 
 	// MCP (Model Context Protocol) — used by /mcp commands to introspect
 	// and mutate server configuration at runtime. All three may be nil when
