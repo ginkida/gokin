@@ -948,9 +948,6 @@ func (m InputModel) renderSuggestions() string {
 	descStyle := lipgloss.NewStyle().
 		Foreground(ColorDim)
 
-	metaStyle := lipgloss.NewStyle().
-		Foreground(ColorMuted)
-
 	var lines []string
 	maxShow := 6
 
@@ -976,9 +973,11 @@ func (m InputModel) renderSuggestions() string {
 			}
 
 			line := prefix + style.Render("/"+cmd.Name)
-			if cmd.Category != "" {
-				line += " " + metaStyle.Render("["+cmd.Category+"]")
-			}
+			// Category badge intentionally omitted — the description
+			// already conveys the command's intent, and a vertical
+			// column of `[Category]` brackets running down 6 lines of
+			// suggestions made the eye jump between the brackets and
+			// the prose. One signal per line.
 			if cmd.Description != "" {
 				line += " " + descStyle.Render(cmd.Description)
 			}

@@ -98,9 +98,30 @@ func TestRenderSuggestionsShowsSelectedCommandContext(t *testing.T) {
 	}
 
 	got := stripAnsi(m.renderSuggestions())
-	for _, want := range []string{"/model", "[Session]", "Switch AI model", "Tab complete", "/model [name]"} {
+	for _, want := range []string{"/model", "Switch AI model", "Tab complete", "/model [name]"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("suggestions missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestRenderSuggestionsOmitsCategoryBadge pins the deliberate omission:
+// the category was rendered as `[Session]` inline alongside the slash
+// command name + description. A vertical column of `[X]` brackets made
+// the eye jump between brackets and the prose; the description carries
+// the intent already. If a future change re-adds the category badge,
+// this test trips.
+func TestRenderSuggestionsOmitsCategoryBadge(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), "")
+	m.showSuggestions = true
+	m.suggestionType = SuggestionCommand
+	m.suggestionIndex = 0
+	m.suggestions = []CommandInfo{
+		{Name: "model", Description: "Switch AI model", Category: "Session"},
+	}
+
+	got := stripAnsi(m.renderSuggestions())
+	if strings.Contains(got, "[Session]") {
+		t.Fatalf("category badge should be omitted from slash suggestions: %q", got)
 	}
 }
