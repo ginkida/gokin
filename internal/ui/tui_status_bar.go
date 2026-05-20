@@ -760,45 +760,6 @@ func (m Model) contextualShortcutHints() string {
 	return strings.Join(parts, sep)
 }
 
-// renderInputIdleHints keeps the primary shortcuts visible after the welcome
-// panel has scrolled away. It intentionally stays one quiet line so repeated
-// chat work still feels like a tool, not an onboarding screen.
-func (m Model) renderInputIdleHints() string {
-	if m.input.Value() != "" || m.output.IsEmpty() {
-		return ""
-	}
-
-	keyStyle := lipgloss.NewStyle().Foreground(ColorMuted).Bold(true)
-	descStyle := lipgloss.NewStyle().Foreground(ColorDim)
-
-	var parts []string
-	add := func(key, desc string) {
-		parts = append(parts, keyStyle.Render(key)+" "+descStyle.Render(desc))
-	}
-
-	add("Ctrl+P", "commands")
-	if len(m.availableModels) > 0 {
-		add("Ctrl+K", "model")
-	}
-	if m.width >= 70 {
-		add("Shift+Tab", m.sessionModeHintLabel())
-	}
-	add("?", "shortcuts")
-
-	return "  " + strings.Join(parts, statusSeparator())
-}
-
-func (m Model) sessionModeHintLabel() string {
-	switch {
-	case m.planningModeEnabled:
-		return "plan mode"
-	case !m.permissionsEnabled || !m.sandboxEnabled:
-		return "YOLO mode"
-	default:
-		return "cycle mode"
-	}
-}
-
 // shortenModelName returns a shortened model name.
 func shortenModelName(name string) string {
 	name = strings.ReplaceAll(name, "gemini-", "")

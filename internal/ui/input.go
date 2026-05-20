@@ -115,7 +115,7 @@ type InputModel struct {
 // NewInputModel creates a new input model.
 func NewInputModel(styles *Styles, workDir string) InputModel {
 	ta := textarea.New()
-	ta.Placeholder = "Message or /command (Tab: complete, ?: shortcuts)"
+	ta.Placeholder = "Message or /command"
 	ta.Focus()
 	ta.CharLimit = 10000
 	ta.ShowLineNumbers = false
@@ -1258,7 +1258,7 @@ func (m *InputModel) updatePlaceholder() {
 	if m.activeTask != "" {
 		m.textarea.Placeholder = "Continue: " + m.activeTask
 	} else {
-		m.textarea.Placeholder = "Message or /command (Tab: complete)"
+		m.textarea.Placeholder = "Message or /command"
 	}
 }
 

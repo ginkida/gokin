@@ -289,7 +289,7 @@ func (m Model) renderQuestionPrompt() string {
 		Italic(true).
 		Align(lipgloss.Center).
 		Width(paletteWidth - 4)
-	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Enter Confirm  ·  Ctrl+P Commands"))
+	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Enter Confirm  ·  Esc Close"))
 	builder.WriteString("\n")
 
 	return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorSecondary)
@@ -593,7 +593,7 @@ func (m Model) renderModelSelector() string {
 		Italic(true).
 		Align(lipgloss.Center).
 		Width(paletteWidth - 4)
-	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Enter Confirm  ·  Esc Close  ·  Ctrl+P Commands"))
+	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Enter Confirm  ·  Esc Close"))
 	builder.WriteString("\n")
 
 	return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorPrimary)

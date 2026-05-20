@@ -3018,10 +3018,6 @@ func (m Model) View() string {
 			hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 			builder.WriteString("\n" + hintStyle.Render("  "+strings.Join(hiddenPanelHints, " • ")))
 		}
-		if idleHints := m.renderInputIdleHints(); idleHints != "" {
-			builder.WriteString("\n")
-			builder.WriteString(idleHints)
-		}
 	}
 
 	// Contextual shortcut hints (compact, state-aware)
