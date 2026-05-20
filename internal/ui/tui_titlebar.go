@@ -46,9 +46,11 @@ func (m Model) titlebarLeftSegment() string {
 
 	// Three muted dots — pure chrome decoration that signals "this is a
 	// terminal application frame", nothing more. They don't act and they
-	// don't indicate status, so the bright red/yellow/green of an earlier
-	// pass was unjustified eye-pull. ColorMuted reads as present-but-quiet
-	// against the graphite background.
+	// don't indicate status, so the bright red/yellow/green of a macOS-
+	// imitation pass was unjustified eye-pull: the dots aren't traffic
+	// lights here — clicking them does nothing, none of them maps to a
+	// real state. ColorMuted reads as present-but-quiet against the
+	// graphite background, which is what chrome should be.
 	dot := lipgloss.NewStyle().Foreground(ColorMuted).Render("●")
 	b.WriteString(dot)
 	b.WriteString(" ")
