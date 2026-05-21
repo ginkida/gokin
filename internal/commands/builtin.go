@@ -151,27 +151,37 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		}
 	}
 
-	// Keyboard Shortcuts
+	// Keyboard Shortcuts — must stay in sync with internal/ui/shortcuts.go
+	// (DefaultShortcuts) and the bindings handled in internal/ui/tui.go's
+	// handleGlobalKeys. The shortcuts overlay (`?`) is the authoritative
+	// list; this is a short subset for the most-used bindings.
 	fmt.Fprintf(&sb, "\n%s─── Keyboard Shortcuts ───%s\n\n", colorYellow, colorReset)
 	shortcuts := []struct {
 		key  string
 		desc string
 	}{
 		{"Ctrl+P", "Command palette"},
+		{"Ctrl+K", "Open model selector"},
+		{"Ctrl+E", "Expand / collapse last tool output"},
 		{"Shift+Tab", "Cycle mode: Normal → Plan → YOLO → Normal"},
-		{"Ctrl+G", "Toggle mouse mode"},
+		{"Ctrl+H", "Context Observatory (technical health)"},
 		{"Ctrl+T", "Toggle task list"},
 		{"Ctrl+O", "Toggle activity feed"},
+		{"Ctrl+U / Ctrl+D", "Scroll half page up / down (empty input)"},
+		{"Alt+C", "Copy last response"},
+		{"Ctrl+G", "Toggle select mode (freeze + native selection)"},
 		{"Ctrl+L", "Clear screen"},
 		{"Ctrl+R", "Search input history"},
-		{"Ctrl+C", "Exit"},
+		{"Ctrl+C", "Cancel once, quit on second press"},
 		{"Esc", "Cancel current operation"},
+		{"?", "Show all keyboard shortcuts (filterable)"},
 	}
 	for _, s := range shortcuts {
-		fmt.Fprintf(&sb, "  %s%-14s%s %s\n", colorGreen, s.key, colorReset, s.desc)
+		fmt.Fprintf(&sb, "  %s%-16s%s %s\n", colorGreen, s.key, colorReset, s.desc)
 	}
 
-	fmt.Fprintf(&sb, "\nTip: Use %sCtrl+P%s to access all commands quickly.\n", colorGreen, colorReset)
+	fmt.Fprintf(&sb, "\nTip: Use %sCtrl+P%s for the full command palette, or %s?%s for the filterable shortcuts overlay.\n",
+		colorGreen, colorReset, colorGreen, colorReset)
 
 	return sb.String(), nil
 }
