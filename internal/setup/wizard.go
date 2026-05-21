@@ -87,7 +87,7 @@ func buildSetupChoices() []setupChoice {
 				Action: "api:" + p.Name,
 				Title:  "GLM Coding Plan",
 				Lines: []string{
-					"GLM-4/GLM-5 models via Z.ai",
+					"GLM-5.x models via Z.ai (200K context)",
 					"Optimized for code tasks",
 					"Budget-friendly (~$3/month)",
 					"Get key at: " + p.SetupKeyURL,
@@ -104,16 +104,9 @@ func buildSetupChoices() []setupChoice {
 					"Get key at: " + p.SetupKeyURL,
 				},
 			})
-		case "anthropic":
-			choices = append(choices, setupChoice{
-				Action: "api:" + p.Name,
-				Title:  "Anthropic (Cloud)",
-				Lines: []string{
-					"Claude Sonnet & Haiku models",
-					"Extended thinking support",
-					"Get key at: " + p.SetupKeyURL,
-				},
-			})
+		// `case "anthropic"` removed in v0.84.7. Anthropic native was deleted
+		// from the provider registry in v0.65; the case here never fired
+		// because `ordered` only iterates over real registry entries.
 		case "minimax":
 			choices = append(choices, setupChoice{
 				Action: "api:" + p.Name,
