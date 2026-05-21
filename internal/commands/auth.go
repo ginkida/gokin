@@ -160,7 +160,7 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
   Config:          %s%s
 
 Try sending a message to verify it works, or use /provider to switch.`,
-		p.DisplayName, maskKey(apiKey), p.DisplayName, cfg.Model.Name, config.GetConfigPath(), switchNote), nil
+		p.DisplayName, maskKey(apiKey), p.DisplayName, cfg.Model.Name, prettyHomePath(config.GetConfigPath()), switchNote), nil
 }
 
 func (c *LoginCommand) showStatus(cfg *config.Config) string {
@@ -172,7 +172,8 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 
 	for _, p := range config.Providers {
 		if p.KeyOptional && !p.HasOAuth {
-			continue // Skip ollama in login status (but show OAuth-only providers like openai)
+			continue // Skip ollama (no key needed). OAuth-only branch is
+			// historical; no current provider uses OAuth since v0.65.
 		}
 		marker := "  "
 		if activeProvider == p.Name {
