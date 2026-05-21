@@ -179,7 +179,7 @@ func (c *CostCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		tc := cm.GetTokenCounter()
 		if tc != nil {
 			cost := tc.CalculateCost(stats.InputTokens, stats.OutputTokens)
-			costStr = fmt.Sprintf("\n  Est. Cost: %s", appcontext.FormatCost(cost))
+			costStr = fmt.Sprintf("\n  Cost:   %s", appcontext.FormatCost(cost))
 		}
 	}
 
@@ -195,12 +195,17 @@ func (c *CostCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		formatTokens(stats.TotalTokens), costStr, modelStr), nil
 }
 
+// formatTokens renders a token count with the same K/M shape the status
+// bar uses (internal/ui/tui_tokens.go formatTokens) — uppercase K so the
+// number reads as "kilo" in the engineering sense, not the lowercase
+// "kilo" of physics units. Keeps /cost output visually aligned with the
+// always-on status-bar token segment.
 func formatTokens(n int) string {
 	switch {
 	case n >= 1_000_000:
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 	case n >= 1_000:
-		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
 	default:
 		return fmt.Sprintf("%d", n)
 	}
