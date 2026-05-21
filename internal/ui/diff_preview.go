@@ -738,9 +738,14 @@ func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 	builder.WriteString(rejectStyle.Render("n Reject"))
 	builder.WriteString("\n\n")
 
-	builder.WriteString(hintStyle.Render("j/k: Scroll | g/G: Top/Bottom | [ ]: Prev/Next change | Ctrl+D/U: Half page | +/-: Context | I: Ignore whitespace"))
+	// Hint separator is `·` (middle dot) with double-space padding so it
+	// matches the rest of the app's hint surfaces (welcome panel tips,
+	// shortcuts overlay footer, prompt option lines). Previously these
+	// two lines used `|` with single spaces, which was visually heavier
+	// and inconsistent with everything else.
+	builder.WriteString(hintStyle.Render("j/k Scroll  ·  g/G Top/Bottom  ·  [ ] Prev/Next  ·  Ctrl+D/U Half page  ·  +/- Context  ·  I Ignore whitespace"))
 	builder.WriteString("\n")
-	builder.WriteString(hintStyle.Render("s: Toggle split/unified | A: Accept all diffs | R: Reject all diffs"))
+	builder.WriteString(hintStyle.Render("s Toggle split/unified  ·  A Accept all  ·  R Reject all"))
 }
 
 func (m DiffPreviewModel) renderSideBySide() string {
@@ -1394,7 +1399,7 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 	builder.WriteString(allStyle.Render("R Reject remaining"))
 	builder.WriteString("\n\n")
 
-	builder.WriteString(hintStyle.Render("Tab: Switch focus | ↑/↓: Files | j/k: Scroll diff | y/n: Per-file | A/R: Bulk | Enter: Finish | Esc: Reject all"))
+	builder.WriteString(hintStyle.Render("Tab Switch focus  ·  ↑/↓ Files  ·  j/k Scroll diff  ·  y/n Per-file  ·  A/R Bulk  ·  Enter Finish  ·  Esc Reject all"))
 }
 
 // GetDecisions returns the current decisions map.
