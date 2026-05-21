@@ -750,11 +750,12 @@ func (c *DoctorCommand) GetMetadata() CommandMetadata {
 
 func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, `
-%s╔═══════════════════════════════════════════════════════════════╗
-║                    🔍 System Diagnostics                    ║
-╚═══════════════════════════════════════════════════════════════╝%s
-`, colorCyan, colorReset)
+	// Header style matches /stats and /tree-stats (lowercase muted label,
+	// no banner, no emoji). The double-border `╔═╗ 🔍 ╚═╝` box was the
+	// last "Slack-tier informal" header in the app — v0.82.5 stripped
+	// every other header emoji and ASCII art for the same reason.
+	fmt.Fprintf(&sb, "\n%sSystem Diagnostics%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "%s──────────────────%s\n", colorCyan, colorReset)
 
 	if v := app.GetVersion(); v != "" {
 		fmt.Fprintf(&sb, "  Version: %s%s%s\n", colorGreen, v, colorReset)
@@ -807,7 +808,7 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	// Config file
 	configPath := config.GetConfigPath()
 	if _, err := os.Stat(configPath); err == nil {
-		fmt.Fprintf(&sb, "  %s✓%s Config: %s\n", colorGreen, colorReset, configPath)
+		fmt.Fprintf(&sb, "  %s✓%s Config: %s\n", colorGreen, colorReset, prettyHomePath(configPath))
 	} else {
 		fmt.Fprintf(&sb, "  %s○%s Config not found (using defaults)\n", colorYellow, colorReset)
 	}
@@ -854,7 +855,7 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	// Data directories
 	dataDir, _ := getDataDir()
 	fmt.Fprintf(&sb, "\n%s─── Directories ───%s\n", colorCyan, colorReset)
-	fmt.Fprintf(&sb, "  Data: %s\n", dataDir)
+	fmt.Fprintf(&sb, "  Data: %s\n", prettyHomePath(dataDir))
 
 	// Summary
 	fmt.Fprintf(&sb, "\n%s─── Summary ───%s\n", colorCyan, colorReset)
@@ -873,12 +874,38 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 	}
 
-	fmt.Fprintf(&sb, "\n%sCommands to fix issues:%s\n", colorCyan, colorReset)
-	fmt.Fprintf(&sb, "  %s/login%s    - Set up authentication\n", colorGreen, colorReset)
-	fmt.Fprintf(&sb, "  %s/test%s     - Test all settings\n", colorGreen, colorReset)
-	fmt.Fprintf(&sb, "  %s/init%s     - Create GOKIN.md template\n", colorGreen, colorReset)
+	// Surface the fix-issues palette only when issues exist. Pre-v0.84.7
+	// it always rendered, including on a clean-bill-of-health success
+	// path — reading as "we just told you everything's fine, here are
+	// commands to fix it anyway". Also dropped the stale `/test` ref
+	// (no such command in the registry); replaced with `/status` which
+	// is the actual command for "show me my settings".
+	if len(issues) > 0 {
+		fmt.Fprintf(&sb, "\n%sCommands to fix issues:%s\n", colorCyan, colorReset)
+		fmt.Fprintf(&sb, "  %s/login%s    Set up authentication\n", colorGreen, colorReset)
+		fmt.Fprintf(&sb, "  %s/status%s   Show current configuration\n", colorGreen, colorReset)
+		fmt.Fprintf(&sb, "  %s/init%s     Create GOKIN.md template\n", colorGreen, colorReset)
+	}
 
 	return sb.String(), nil
+}
+
+// prettyHomePath collapses the user's $HOME prefix in a path to "~".
+// Mirror of the same idea in internal/ui/tui_status_bar.go's prettyPath,
+// kept local to commands package to avoid a UI dependency. Returns the
+// input unchanged when $HOME isn't set or the path doesn't start with it.
+func prettyHomePath(p string) string {
+	if p == "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if strings.HasPrefix(p, home) {
+		return "~" + p[len(home):]
+	}
+	return p
 }
 
 // ShortcutsCommand displays keyboard shortcuts.

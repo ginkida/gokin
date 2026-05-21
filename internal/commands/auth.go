@@ -563,9 +563,10 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 		fmt.Fprintf(&sb, "  %s: %s\n", p.DisplayName, status)
 	}
 
-	// Working directory and version
-	fmt.Fprintf(&sb, "\nWorkDir: %s\n", app.GetWorkDir())
-	fmt.Fprintf(&sb, "Config:  %s\n", config.GetConfigPath())
+	// Working directory and version. Paths collapse $HOME to "~" so a
+	// nested project doesn't push the rest of the line off-screen.
+	fmt.Fprintf(&sb, "\nWorkDir: %s\n", prettyHomePath(app.GetWorkDir()))
+	fmt.Fprintf(&sb, "Config:  %s\n", prettyHomePath(config.GetConfigPath()))
 	if v := app.GetVersion(); v != "" {
 		fmt.Fprintf(&sb, "Version: %s\n", v)
 	}
