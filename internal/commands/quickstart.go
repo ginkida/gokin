@@ -9,15 +9,17 @@ import (
 type QuickstartCommand struct{}
 
 const (
+	// Header style matches /stats, /tree-stats, /doctor (post-v0.84.7):
+	// lowercase muted label, no banner, no double-border. The boxed
+	// ╔═╗ form was the second-to-last in the codebase after /doctor's
+	// strip; quickstart is the last surface still using it.
 	quickstartHeader = `
-%s╔═══════════════════════════════════════════════════════════════╗
-║                    Quick Start with Gokin                    ║
-╚═══════════════════════════════════════════════════════════════╝%s
+%sQuick Start with Gokin%s
 
 Gokin is an AI assistant that understands your project context
 and helps with coding using natural language.
 
-%s──── 5 Simple Examples to Get Started ───%s
+%s─── 5 simple examples to get started ───%s
 `
 
 	quickstartExamples = `
@@ -53,27 +55,27 @@ and helps with coding using natural language.
 `
 
 	quickstartTips = `
-%s──── Helpful Tips ───%s
+%s─── helpful tips ───%s
 
-  • %sBe specific%s           - The more detailed the request, the better the result
-  • %sUse context%s           - "In main.go find the main function"
-  • %sAsk for explanations%s  - "Explain how this code works"
-  • %sReview changes%s        - Use git diff to review changes
+  • %sBe specific%s           — the more detail, the better the result
+  • %sUse context%s           — "In main.go find the main function"
+  • %sAsk for explanations%s  — "Explain how this code works"
+  • %sReview changes%s        — use git diff to review changes
 
-%s──── Key Commands ───%s
+%s─── key commands ───%s
 
-  %s/help%s       - Help for all commands
-  %s/quickstart%s - Open this guide again
-  %s/doctor%s     - Check setup and diagnostics
-  %s/plan%s       - Toggle plan mode for complex tasks
-  %s/resume-plan%s- Continue paused plan execution
-  %s/model%s      - Switch AI model
-  %s/update%s     - Check/install updates
-  %s/clear%s      - Clear chat history
+  %s/help%s        Help for all commands
+  %s/quickstart%s  Open this guide again
+  %s/doctor%s      Check setup and diagnostics
+  %s/plan%s        Toggle plan mode for complex tasks
+  %s/resume-plan%s Continue paused plan execution
+  %s/model%s       Switch AI model
+  %s/update%s      Check or install updates
+  %s/clear%s       Clear chat history
 
-%s──── Ready to Start? ───%s
+%s─── ready to start? ───%s
 
-Just start asking questions! Gokin understands natural language.
+Just start asking questions — Gokin understands natural language.
 
 %sExample:%s "Analyze the project structure and suggest improvements"
 `
