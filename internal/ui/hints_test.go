@@ -9,23 +9,47 @@ import (
 func TestGeneralHintsMatchCurrentBindings(t *testing.T) {
 	h := NewHintSystem(DefaultStyles())
 
+	// Drain enough hints to cycle through all of generalHints. Each call
+	// has to reset lastHintTime so the 30s rate-limit doesn't gate the
+	// loop. After ~12 calls every general hint should have been emitted
+	// at least once.
 	var seen []string
-	for range 8 {
+	for range 12 {
 		h.lastHintTime = time.Now().Add(-time.Minute)
 		seen = append(seen, h.GetContextualHint(StateInput, "", 10*time.Minute))
 	}
 	joined := strings.Join(seen, "\n")
 
-	if strings.Contains(joined, "Option+C") {
-		t.Fatalf("hints should use terminal binding Alt+C, got:\n%s", joined)
+	// Stale wordings must not return.
+	staleStrings := []string{
+		"Option+C",            // terminal binding is Alt+C
+		"track background tasks", // Ctrl+T shows the task list, doesn't "track"
+		"step-by-step with planning mode", // older first-message hint
 	}
-	if strings.Contains(joined, "track background tasks") {
-		t.Fatalf("Ctrl+T hint should describe task list, got:\n%s", joined)
+	for _, stale := range staleStrings {
+		if strings.Contains(joined, stale) {
+			t.Errorf("hint corpus should not contain stale string %q:\n%s", stale, joined)
+		}
 	}
-	if !strings.Contains(joined, "Alt+C") {
-		t.Fatalf("copy hint missing Alt+C:\n%s", joined)
+
+	// Every binding the welcome panel + shortcuts overlay advertises
+	// should appear at least once in the hint rotation. If a future
+	// commit adds a binding to one surface but forgets the others, the
+	// hint corpus diverges from the rest of the UI.
+	wantBindings := []string{
+		"Alt+C",     // copy last response
+		"Ctrl+P",    // command palette
+		"Ctrl+K",    // model selector
+		"Ctrl+E",    // expand last tool output
+		"Ctrl+T",    // toggle task list
+		"Ctrl+O",    // agents in real time
+		"Shift+Tab", // cycle mode
+		"task list",
+		"shortcuts", // for the `?` hint
 	}
-	if !strings.Contains(joined, "task list") {
-		t.Fatalf("task-list hint missing:\n%s", joined)
+	for _, want := range wantBindings {
+		if !strings.Contains(joined, want) {
+			t.Errorf("hint corpus missing binding %q:\n%s", want, joined)
+		}
 	}
 }

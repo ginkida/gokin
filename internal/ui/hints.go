@@ -42,7 +42,7 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 	// Context-aware hints with benefit-focused wording
 	switch {
 	case sessionDuration < 2*time.Minute:
-		hint = "Shift+Tab — tackle complex tasks step-by-step with planning mode"
+		hint = "Shift+Tab — break complex tasks into reviewable plan steps"
 		hintID = "first_message"
 
 	case state == StateStreaming:
@@ -50,11 +50,16 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 		hintID = "cancel_streaming"
 
 	default:
-		// Rotate through general hints (benefit-focused)
+		// Rotate through general hints (benefit-focused). Bindings here
+		// must match the actual key handlers — see tests in hints_test.go
+		// and the shortcuts overlay (internal/ui/shortcuts.go) for the
+		// authoritative list.
 		generalHints := []string{
 			"? — show all keyboard shortcuts",
-			"Shift+Tab — break complex tasks into reviewable steps",
+			"Shift+Tab — break complex tasks into reviewable plan steps",
 			"Ctrl+P — quickly find any command",
+			"Ctrl+K — open the model selector",
+			"Ctrl+E — expand the last tool output",
 			"Alt+C — copy the last response to clipboard",
 			"Ctrl+T — show or hide the task list",
 			"Ctrl+O — see what agents are doing in real time",
