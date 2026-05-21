@@ -90,24 +90,33 @@ func generateToolResultSummary(toolName, content, detail string) string {
 			return pluralLines(lineCount)
 		}
 	case "glob":
-		if strings.Contains(content, "(no matches)") {
+		// Codex-style: pattern first, count in parens. Empty content or
+		// the "(no matches)" sentinel both render as the pattern with
+		// "(no matches)" suffix — the pattern is still the most useful
+		// thing for the user to see at a glance.
+		empty := lineCount == 0 || strings.Contains(content, "(no matches)")
+		if empty {
+			if detail != "" {
+				return fmt.Sprintf("%s (no matches)", detail)
+			}
 			return "no matches"
 		}
-		if lineCount > 0 {
-			if detail != "" {
-				return fmt.Sprintf("%d files in %s", lineCount, detail)
-			}
-			return fmt.Sprintf("%d files", lineCount)
+		if detail != "" {
+			return fmt.Sprintf("%s (%s)", detail, pluralCount(lineCount, "match", "matches"))
 		}
-		return "no matches"
+		return pluralCount(lineCount, "match", "matches")
 	case "grep", "file_search", "code_search":
-		if lineCount > 0 {
+		// Codex-style: pattern first, count in parens.
+		if lineCount == 0 {
 			if detail != "" {
-				return fmt.Sprintf("%d matches for %s", lineCount, detail)
+				return fmt.Sprintf("%s (no matches)", detail)
 			}
-			return fmt.Sprintf("%d matches", lineCount)
+			return "no matches"
 		}
-		return "no matches"
+		if detail != "" {
+			return fmt.Sprintf("%s (%s)", detail, pluralCount(lineCount, "match", "matches"))
+		}
+		return pluralCount(lineCount, "match", "matches")
 	case "bash", "test", "build":
 		// Codex-style: command first ("what was run") with line count in
 		// parens. Body preview is collapsed by default (see
@@ -126,44 +135,62 @@ func generateToolResultSummary(toolName, content, detail string) string {
 		}
 		return "completed"
 	case "edit":
+		// Codex-style: the path *is* the action. Earlier "updated PATH"
+		// was reading like a status report; in a column of edits the
+		// "updated" word is pure repetition.
 		if detail != "" {
-			return fmt.Sprintf("updated %s", detail)
+			return detail
 		}
 		return "updated"
 	case "write":
 		if detail != "" {
-			return fmt.Sprintf("wrote %s", detail)
+			return detail
 		}
 		return "written"
+	case "delete":
+		if detail != "" {
+			return detail
+		}
+		return "deleted"
 	case "tree", "list_dir", "list_files":
-		if strings.Contains(content, "(empty)") {
+		// Codex-style: dir first, item count in parens, "(empty)" suffix
+		// for empty dirs (same shape as glob's "(no matches)").
+		if strings.Contains(content, "(empty)") || lineCount == 0 {
+			if detail != "" {
+				return fmt.Sprintf("%s (empty)", detail)
+			}
 			return "empty"
 		}
-		if lineCount > 0 {
-			if detail != "" {
-				return fmt.Sprintf("%d items in %s", lineCount, detail)
-			}
-			return fmt.Sprintf("%d items", lineCount)
-		}
-	case "web_fetch":
 		if detail != "" {
-			return fmt.Sprintf("fetched %s", detail)
+			return fmt.Sprintf("%s (%s)", detail, pluralCount(lineCount, "item", "items"))
+		}
+		return pluralCount(lineCount, "item", "items")
+	case "web_fetch":
+		// Codex-style: the URL alone — "fetched" was status filler when
+		// the URL already tells you what happened. Empty detail keeps
+		// the legacy "fetched" so we don't render a blank string.
+		if detail != "" {
+			return detail
 		}
 		return "fetched"
 	case "web_search":
+		// Codex-style: query first, result count in parens. Result count
+		// derived from "http" occurrences in body (heuristic preserved
+		// from the previous implementation — search backends differ).
+		resultCount := 0
 		if len(content) > 0 {
-			resultCount := strings.Count(content, "http")
-			if resultCount > 0 {
-				if detail != "" {
-					return fmt.Sprintf("%d results for %s", resultCount, detail)
-				}
-				return fmt.Sprintf("%d results", resultCount)
+			resultCount = strings.Count(content, "http")
+		}
+		if resultCount > 0 {
+			if detail != "" {
+				return fmt.Sprintf("%s (%s)", detail, pluralCount(resultCount, "result", "results"))
 			}
+			return pluralCount(resultCount, "result", "results")
 		}
 		if detail != "" {
-			return fmt.Sprintf("done for %s", detail)
+			return fmt.Sprintf("%s (no results)", detail)
 		}
-		return "done"
+		return "no results"
 	case "ask_user", "ask_question":
 		return "answered"
 	}
@@ -171,15 +198,21 @@ func generateToolResultSummary(toolName, content, detail string) string {
 	return detail
 }
 
-// pluralLines renders a line-count with grammatical agreement: "1 line"
-// vs "N lines". Used by the codex-style read/bash summaries so a single
-// stdout line of output doesn't read as "1 lines" — a small thing, but
-// the summary is the most-read part of the chat stream.
-func pluralLines(n int) string {
+// pluralCount renders a count with grammatical agreement: "1 line" vs
+// "N lines", "1 match" vs "N matches", etc. Used by the codex-style
+// summaries so a single match doesn't read as "1 matches" — a small
+// thing, but the summary is the most-read part of the chat stream.
+func pluralCount(n int, singular, plural string) string {
 	if n == 1 {
-		return "1 line"
+		return "1 " + singular
 	}
-	return fmt.Sprintf("%d lines", n)
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
+// pluralLines is the line-count specialisation kept for callers that
+// already use the "line/lines" wording (read, bash output, etc.).
+func pluralLines(n int) string {
+	return pluralCount(n, "line", "lines")
 }
 
 func displayLineCount(content string) int {
