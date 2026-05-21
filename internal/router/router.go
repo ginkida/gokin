@@ -84,7 +84,7 @@ type RouterConfig struct {
 	DecomposeThreshold int              // Default: 4
 	ParallelThreshold  int              // Default: 7
 	CostAware          bool             // Enable cost-aware model selection
-	FastModel          string           // Model for simple tasks (e.g., "gemini-2.0-flash")
+	FastModel          string           // Model for simple tasks (e.g., "glm-5-turbo", "deepseek-v4-flash")
 	ModelCapability    *ModelCapability // Model capability for adaptive routing
 }
 

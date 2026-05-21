@@ -760,9 +760,12 @@ func (m Model) contextualShortcutHints() string {
 	return strings.Join(parts, sep)
 }
 
-// shortenModelName returns a shortened model name.
+// shortenModelName returns a shortened model name for status-bar display.
+// Drops the noisy "-preview" / "-latest" version suffixes. The
+// `"gemini-"` stripper that lived here pre-v0.65 was removed when the
+// Gemini provider was deleted — no current model ID carries that
+// prefix.
 func shortenModelName(name string) string {
-	name = strings.ReplaceAll(name, "gemini-", "")
 	name = strings.ReplaceAll(name, "-preview", "")
 	name = strings.ReplaceAll(name, "-latest", "")
 	return name

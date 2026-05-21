@@ -204,7 +204,7 @@ func GetModelLimits(model string) TokenLimits {
 
 // getModelLimits returns limits for a model, with fallback defaults.
 // Uses exact match first, then fuzzy matching by checking if the model
-// name contains a known base name (e.g. "gemini-2.5-flash-preview" matches "gemini-2.5-flash").
+// name contains a known base name (e.g. "glm-5.1-preview" matches "glm-5.1").
 // Fuzzy match prefers the LONGEST matching key — "glm-4.5-preview" must map
 // to "glm-4.5" (131K out), not the shorter "glm-4" (32K out). Go map iteration
 // is unordered, so we sort keys by length descending to make the result
