@@ -923,8 +923,12 @@ func (c *ShortcutsCommand) GetMetadata() CommandMetadata {
 
 func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "\n%s Keyboard Shortcuts%s  (also: press ? in empty input)\n\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "\n%sKeyboard Shortcuts%s  (also: press ? in empty input for the filterable overlay)\n\n", colorCyan, colorReset)
 
+	// Must stay in sync with internal/ui/shortcuts.go (DefaultShortcuts)
+	// and the binding handlers in internal/ui/tui.go. The shortcuts
+	// overlay (`?`) is authoritative; this is a flat text fallback for
+	// users who prefer slash-command output.
 	shortcuts := []struct {
 		keys, desc string
 	}{
@@ -932,19 +936,21 @@ func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppIn
 		{"Ctrl+J / Alt+Enter", "Insert newline"},
 		{"Tab", "Autocomplete command"},
 		{"Ctrl+P", "Command palette"},
+		{"Ctrl+K", "Open model selector"},
+		{"Ctrl+E / e", "Expand or collapse last tool output"},
+		{"E", "Expand or collapse all tool outputs"},
 		{"Ctrl+R", "Search input history"},
-		{"Ctrl+C", "Cancel operation / Quit"},
+		{"Ctrl+C", "Cancel once, quit on second press"},
 		{"Ctrl+L", "Clear screen"},
 		{"Ctrl+B / Ctrl+F", "Scroll up / down"},
-		{"Ctrl+U / Ctrl+D", "Scroll half page"},
-		{"Ctrl+G", "Select mode (freeze + native copy)"},
-		{"Ctrl+H", "Context observatory"},
-		{"Ctrl+T", "Background tasks"},
-		{"Ctrl+O", "Agent activity"},
-		{"Shift+Tab", "Toggle plan mode"},
-		{"Option+C", "Copy last response"},
-		{"e / E", "Expand/collapse tool output"},
-		{"?", "This shortcuts overlay"},
+		{"Ctrl+U / Ctrl+D", "Scroll half page (empty input)"},
+		{"Ctrl+G", "Toggle select mode (freeze + native selection)"},
+		{"Ctrl+H", "Context Observatory (technical health)"},
+		{"Ctrl+T", "Toggle task list"},
+		{"Ctrl+O", "Toggle activity feed"},
+		{"Shift+Tab", "Cycle mode: Normal → Plan → YOLO → Normal"},
+		{"Alt+C", "Copy last response"},
+		{"?", "Filterable shortcuts overlay"},
 	}
 
 	for _, s := range shortcuts {
