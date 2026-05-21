@@ -149,9 +149,9 @@ var errorGuidancePatterns = []ErrorGuidance{
 	{
 		// \b401\b prevents "401ms" (latency text) from matching. Aligns
 		// with the `\b500\b` rule enforced in the 5xx pattern below.
-		Pattern:     regexp.MustCompile(`(?i)(unauthorized|\b401\b|invalid.*key|api.*key.*invalid)`),
+		Pattern:     regexp.MustCompile(`(?i)(unauthorized|\b401\b|invalid.*key|api.*key.*invalid|authentication_error)`),
 		Title:       "Authentication Failed",
-		Suggestions: []string{"Check your API key is correct", "Regenerate your key at the provider's dashboard", "Run `/login <provider> <key>` to set a new key, or `gokin --setup` to re-run the onboarding wizard"},
+		Suggestions: []string{"Your API key is missing, invalid, or expired", "Run `/login <provider> <key>` with a fresh key, or check your config file", "Verify the key at the provider's dashboard"},
 		Command:     "/login",
 	},
 	{
@@ -159,13 +159,17 @@ var errorGuidancePatterns = []ErrorGuidance{
 		// rationale as \b401\b above.
 		Pattern:     regexp.MustCompile(`(?i)(forbidden|\b403\b|permission denied)`),
 		Title:       "Access Denied",
-		Suggestions: []string{"Check API key permissions", "Verify you have access to this model", "Contact API provider for access"},
+		Suggestions: []string{"Your API key doesn't have access to this model or endpoint", "Verify the model is available on your provider plan", "Check the provider dashboard for model access settings"},
 		Command:     "",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(quota|limit exceeded|resource exhausted)`),
-		Title:       "Quota Exceeded",
-		Suggestions: []string{"You've reached your usage limit", "Wait for quota reset or upgrade plan", "Use a more efficient model"},
+		// Covers both raw quota errors and HTTP 402 Payment Required, which
+		// some providers return for billing issues. The polished version
+		// previously sat at the bottom of the file as dead code (first-
+		// match wins); merged in here.
+		Pattern:     regexp.MustCompile(`(?i)(quota|limit exceeded|resource exhausted|insufficient.*credit|billing|payment.*required|\b402\b)`),
+		Title:       "Quota or Billing Issue",
+		Suggestions: []string{"Your account has hit a usage cap or billing issue", "Check your provider dashboard for billing status", "Switch to a different provider with /provider or /model"},
 		Command:     "",
 	},
 	{
@@ -175,16 +179,19 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Command:     "/health",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(invalid.*model|unknown.*model)`),
-		Title:       "Model Not Found",
-		Suggestions: []string{"Check the model name is correct", "List available models with /model", "The model may have been deprecated"},
+		// Covers vendor variations: "model not found", "unknown model",
+		// "model_not_found", "model does not exist". Polished message
+		// previously sat at the bottom of the file as dead code.
+		Pattern:     regexp.MustCompile(`(?i)(invalid.*model|unknown.*model|model.*not found|model.*does not exist|model_not_found)`),
+		Title:       "Model Not Available",
+		Suggestions: []string{"The selected model is unavailable or not supported for your account", "Run /model to pick a supported one", "Check the provider's model list"},
 		Command:     "/model",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(context.*too.*long|token.*limit|max.*tokens)`),
-		Title:       "Context Too Long",
-		Suggestions: []string{"Clear conversation history with /clear", "Use /compact to summarize context", "Break your request into smaller parts"},
-		Command:     "/clear",
+		Pattern:     regexp.MustCompile(`(?i)(context.*(length|window|limit|too long|exceed)|maximum context|prompt is too long|token.*limit|max.*tokens)`),
+		Title:       "Context Window Exceeded",
+		Suggestions: []string{"The conversation is too long for this model", "Run /clear to start fresh, or /compact to summarize older messages", "Switch to a model with a larger context window via /model"},
+		Command:     "/compact",
 	},
 	{
 		Pattern:     regexp.MustCompile(`(?i)(file.*not.*found|no such file|ENOENT)`),
@@ -355,41 +362,15 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Suggestions: []string{"Another process is using this port", "Find the process: lsof -i :<port>", "Use a different port or kill the blocking process"},
 		Command:     "",
 	},
-	// Context length / token overflow
-	{
-		Pattern:     regexp.MustCompile(`(?i)(context.*(length|window|limit|too long|exceed)|maximum context|prompt is too long|token.*limit)`),
-		Title:       "Context Window Exceeded",
-		Suggestions: []string{"The conversation is too long for this model", "Run /clear to start fresh, or /compact to summarize older messages", "Switch to a model with a larger context window via /model"},
-		Command:     "/compact",
-	},
-	// Authentication / API key — use word boundaries on status codes so we
-	// don't match "401ms latency" etc.
-	{
-		Pattern:     regexp.MustCompile(`(?i)(invalid api key|authentication failed|unauthorized|\b401\b|\b403\b.*forbidden|api key.*invalid|authentication_error)`),
-		Title:       "Authentication Failed",
-		Suggestions: []string{"Your API key is missing, invalid, or expired", "Run `/login <provider> <key>` with a fresh key, or check your config file", "Verify the key at the provider's dashboard"},
-		Command:     "/login",
-	},
-	// Quota / billing
-	{
-		Pattern:     regexp.MustCompile(`(?i)(quota.*exceed|insufficient.*credit|billing|payment.*required|\b402\b)`),
-		Title:       "Quota or Billing Issue",
-		Suggestions: []string{"Your account has hit a usage cap or billing issue", "Check your provider dashboard for billing status", "Try a different provider via /model"},
-		Command:     "",
-	},
-	// Server errors (5xx) — word boundaries so "500ms" doesn't trigger
+	// Server errors (5xx) — word boundaries so "500ms" doesn't trigger.
+	// The 4xx auth/quota/model patterns above already cover their specific
+	// status codes; this catches everything else in the 5xx range plus the
+	// vendor-specific "overloaded" / "temporarily unavailable" phrasings.
 	{
 		Pattern:     regexp.MustCompile(`(?i)(\b5\d\d\b.*(error|server|gateway|unavailable|timeout)|internal server error|bad gateway|service unavailable|gateway timeout|overloaded|temporarily unavailable)`),
 		Title:       "Provider Server Error",
-		Suggestions: []string{"The provider is experiencing issues — this is not your fault", "The retry logic already tried automatically", "Switch providers with /model, or try again in a few minutes"},
+		Suggestions: []string{"The provider is having issues — not your fault", "Retry logic already tried automatically", "Switch providers with /model, or try again in a few minutes"},
 		Command:     "",
-	},
-	// Model not found
-	{
-		Pattern:     regexp.MustCompile(`(?i)(model.*not found|unknown model|model.*does not exist|model_not_found)`),
-		Title:       "Model Not Available",
-		Suggestions: []string{"The selected model is unavailable or not supported for your account", "Run /model to pick a supported one", "Check the provider's supported model list"},
-		Command:     "/model",
 	},
 }
 
