@@ -47,17 +47,20 @@ type toolGroup struct {
 
 var defaultClassifier = &toolDependencyClassifier{
 	writeTools: map[string]bool{
-		"write":      true,
-		"edit":       true,
-		"bash":       true,
-		"delete":     true,
-		"move":       true,
-		"copy":       true,
-		"mkdir":      true,
-		"git_commit": true,
-		"git_add":    true,
-		"ssh":        true,
-		"run_tests":  true,
+		"write":       true,
+		"edit":        true,
+		"bash":        true,
+		"delete":      true,
+		"move":        true,
+		"copy":        true,
+		"mkdir":       true,
+		"git_commit":  true,
+		"git_add":     true,
+		"ssh":         true,
+		"run_tests":   true,
+		"batch":       true,
+		"refactor":    true,
+		"atomicwrite": true,
 	},
 }
 

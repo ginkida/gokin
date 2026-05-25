@@ -89,8 +89,12 @@ func (t *WriteTool) Validate(args map[string]any) error {
 		return NewValidationError("file_path", "is required")
 	}
 
-	if _, ok := GetString(args, "content"); !ok {
+	content, ok := GetString(args, "content")
+	if !ok {
 		return NewValidationError("content", "is required")
+	}
+	if content == "" && !GetBoolDefault(args, "append", false) {
+		return NewValidationError("content", "is empty — this would create a zero-byte file")
 	}
 
 	return nil

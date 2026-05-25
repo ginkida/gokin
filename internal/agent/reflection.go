@@ -33,6 +33,7 @@ type Reflector struct {
 	client                 client.Client      // For LLM-based semantic analysis
 	enableSemanticAnalysis bool               // Whether to use LLM for unmatched errors
 	predictor              PredictorInterface // For file predictions on file_not_found errors
+	semanticCache          map[string]*Reflection
 }
 
 // AutoFixAction describes a concrete recovery action that can be executed automatically.
@@ -77,6 +78,7 @@ func NewReflector() *Reflector {
 	return &Reflector{
 		patterns:               defaultErrorPatterns(),
 		enableSemanticAnalysis: true,
+		semanticCache:          make(map[string]*Reflection),
 	}
 }
 
@@ -217,9 +219,19 @@ type SemanticAnalysisResult struct {
 }
 
 // semanticAnalyze uses LLM to analyze errors that don't match known patterns.
+// Results are cached by tool+error fingerprint to avoid repeated API calls
+// for the same class of error within a session.
 func (r *Reflector) semanticAnalyze(ctx context.Context, toolName string, args map[string]any, errorMsg string) *Reflection {
 	if r.client == nil {
 		return nil
+	}
+
+	cacheKey := toolName + ":" + errorMsg
+	if len(cacheKey) > 200 {
+		cacheKey = cacheKey[:200]
+	}
+	if cached, ok := r.semanticCache[cacheKey]; ok {
+		return cached
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -296,6 +308,11 @@ Be concise and practical. Focus on actionable solutions.`
 	}
 
 	reflection.Intervention = sb.String()
+
+	// Cache so the same error class doesn't trigger another LLM call.
+	if r.semanticCache != nil {
+		r.semanticCache[cacheKey] = reflection
+	}
 
 	// Learn from this analysis for future reference
 	if r.errorStore != nil {

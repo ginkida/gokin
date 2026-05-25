@@ -11,7 +11,7 @@
   <img src="https://minio.ginkida.dev/minion/github/gokin-cli-cut.gif" alt="Gokin Demo" width="800">
 </p>
 
-<h3 align="center">🤖 AI-powered coding assistant for your terminal<br>Kimi · GLM · MiniMax · DeepSeek · Ollama — 100% open source</h3>
+<h3 align="center">AI-powered coding agent for your terminal<br>Kimi · GLM · MiniMax · DeepSeek · Ollama — 100% open source</h3>
 
 <p align="center">
   <a href="#installation">Install</a> •
@@ -25,41 +25,40 @@
 
 ---
 
-## ✨ Why Gokin? <a id="why-gokin"></a>
+## Why Gokin? <a id="why-gokin"></a>
 
-Most AI coding tools are closed-source, route your code through third-party servers, and give you zero control over what gets sent to the model. Gokin was built with a different goal: **a fast, secure, zero-telemetry CLI where your code goes directly to the provider you chose — and nothing else leaves your machine.**
+Most AI coding tools are closed-source, route your code through third-party servers, and give you zero control over what gets sent to the model. Gokin is different: **a fast, secure, zero-telemetry CLI where your code goes directly to the provider you chose — and nothing else leaves your machine.**
 
-Gokin focuses on a small, well-tested set of providers: **Kimi, GLM, MiniMax, DeepSeek** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets, credentials, and sensitive code are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
+Five providers, one interface: **Kimi, GLM, MiniMax, DeepSeek** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets and credentials are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
 
-| Feature | Gokin | Claude Code | Cursor |
-|---------|-------|-------------|--------|
+| | Gokin | Claude Code | Cursor |
+|---|-------|-------------|--------|
 | **Price** | Free → Pay-per-use | $20+/month | $20+/month |
 | **Providers** | 5 (Kimi, GLM, MiniMax, DeepSeek, Ollama) | 1 (Claude) | Multi |
-| **Offline** | ✅ Ollama | ❌ | ❌ |
-| **54 Tools** | ✅ | ~30 | ~30 |
-| **Multi-agent** | ✅ 5 parallel | Basic | ❌ |
-| **Direct API** | ✅ Zero proxies | ✅ | ❌ Routes through Cursor servers |
-| **Security** | ✅ TLS 1.2+, secret redaction (24 patterns), sandbox, 3-level permissions | Basic | Basic |
-| **Open Source** | ✅ | ❌ | ❌ |
-| **Self-hosting** | ✅ | ❌ | ❌ |
+| **Offline** | Ollama | — | — |
+| **Tools** | 59 built-in + MCP | ~30 | ~30 |
+| **Agents** | 5 parallel, shared memory | Basic | — |
+| **Direct API** | Zero proxies | Yes | Routes through Cursor servers |
+| **Security** | TLS 1.2+, secret redaction, sandbox, 3-level permissions | Basic | Basic |
+| **Open Source** | Yes | — | — |
 
 **Choose your stack:**
 
 | Stack | Cost | Best For |
 |-------|------|----------|
-| **Gokin + Kimi Coding Plan** ⭐ | Subscription | **Default** — Kimi K2.6, 262K context, thinking + tool use, coding-tuned |
-| **Gokin + DeepSeek V4** ⭐ | Pay-per-use | **Recommended as of v0.71** — 1M context, top SWE-bench reasoning, ~20× cheaper than Opus, prompt caching enabled |
-| **Gokin + GLM Coding Plan** ⭐ | ~$3/month | Budget-friendly daily coding, GLM-5/5.1 with thinking |
-| **Gokin + MiniMax** ⭐ | Pay-per-use | 200K context, strong on agentic coding |
-| **Gokin + Ollama** | 🆓 Free | Privacy, offline, no API costs |
+| **Gokin + DeepSeek V4** | Pay-per-use | **Recommended** — 1M context, top SWE-bench reasoning, prompt caching (95% savings) |
+| **Gokin + Kimi Coding Plan** | Subscription | Default — 262K context, thinking + tool use, coding-tuned |
+| **Gokin + GLM Coding Plan** | ~$3/month | Budget-friendly daily coding, GLM-5.1 with 200K context |
+| **Gokin + MiniMax** | Pay-per-use | 200K context, strong on agentic coding |
+| **Gokin + Ollama** | Free | Privacy, offline, no API costs |
 
-All four cloud providers are actively recommended — they're the daily-driver tier gokin is tested against every release.
+All cloud providers are daily-driver tier — tested against every release.
 
 ---
 
-## 🚀 Installation <a id="installation"></a>
+## Installation <a id="installation"></a>
 
-### One-liner (recommended)
+### One-liner
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ginkida/gokin/main/install.sh | sh
@@ -81,21 +80,21 @@ go build -o gokin ./cmd/gokin
 
 ---
 
-## ⚡ Quick Start <a id="quick-start"></a>
+## Quick Start <a id="quick-start"></a>
 
 ```bash
-# Launch with interactive setup (picks provider + key)
+# Interactive setup — picks provider + API key
 gokin --setup
 
-# Or set an API key and run — Kimi Coding Plan is the v0.69+ default
-export GOKIN_KIMI_KEY="sk-kimi-..."
+# Or set an API key and go
+export GOKIN_DEEPSEEK_KEY="sk-..."   # DeepSeek V4 (recommended)
 gokin
 
-# Prefer another provider? Any of these also works out of the box:
-# export GOKIN_DEEPSEEK_KEY="..." # DeepSeek V4 (recommended — 1M ctx + cheap)
-# export GOKIN_GLM_KEY="..."      # GLM Coding Plan
-# export GOKIN_MINIMAX_KEY="..."  # MiniMax
-# (Ollama needs no key — just run a local model)
+# Other providers work the same way:
+# export GOKIN_KIMI_KEY="sk-kimi-..."   # Kimi Coding Plan (default)
+# export GOKIN_GLM_KEY="..."            # GLM Coding Plan
+# export GOKIN_MINIMAX_KEY="..."        # MiniMax
+# Ollama needs no key — just run a local model
 ```
 
 **Then just talk naturally:**
@@ -110,14 +109,14 @@ gokin
 
 ---
 
-## 🎯 Key Features <a id="features"></a>
+## Key Features <a id="features"></a>
 
-### 🧠 Smart Code Understanding
-- **Multi-file Analysis** — Understand entire modules via grep + glob + read
-- **Session Memory** — Auto-summarizes your session (files, tools, errors, decisions). Survives context compaction. Optional LLM-based summarization every 3rd extraction.
-- **Context-aware agents** — Read-only tools run in parallel, write tools serialized
+### Code Understanding
+- **Multi-file analysis** — grep + glob + read across the whole codebase
+- **Session memory** — auto-summarizes files, tools, errors, decisions; survives compaction
+- **Context-aware execution** — read-only tools run in parallel, write tools serialized
 
-### 📝 Multi-Layer Project Instructions
+### Project Instructions
 ```
 Priority:  Low ──────────────────────────────── High
            Global → User → Project → Local
@@ -127,68 +126,60 @@ User:      ~/.gokin/GOKIN.md
 Project:   ./GOKIN.md, .gokin/rules/*.md
 Local:     ./GOKIN.local.md (git-ignored)
 ```
-- All layers merged automatically
-- `@include` directive: `@./path`, `@~/path`, `@/absolute/path`
-- File watching with auto-reload on changes
+All layers merged automatically. `@include` directive for composability. File watching with auto-reload.
 
-### ⚒️ 54 Built-in Tools
-- **Files**: read, write, edit, diff, batch, copy, move, delete
-- **Search**: glob, grep, tree
+### 59 Built-in Tools
+- **Files**: read, write, edit, diff, copy, move, delete, refactor, batch
+- **Search**: glob, grep, tree, history_search
 - **Git**: status, commit, diff, branch, log, blame, PR
-- **Run**: bash, run_tests, ssh, env
-- **Plan**: todo, task, enter_plan_mode, coordinate
-- **Memory**: memorize, shared_memory, pin_context
-- **MCP servers**: add your own via `/mcp add` (Model Context Protocol, stdio + http transports, per-server permissions)
-- **Parallel execution**: Read-only tools (read, grep, glob) run in parallel when model calls multiple
+- **Run**: bash, run_tests, ssh, env, kill_shell
+- **Plan**: todo, task, enter/exit plan_mode, coordinate, verify_code
+- **Memory**: memorize, shared_memory, pin_context, scratchpad
+- **MCP**: manage servers from chat via `mcp_admin` tool, or `/mcp add` command (stdio + http transports, per-server permissions)
+- **Parallel execution** — read-only tools run concurrently when the model calls multiple
 
-### 🤝 Multi-Agent System
+### Multi-Agent System
+- Up to 5 parallel agents with shared memory
+- Automatic task decomposition via coordinator
+- Provider failover — agents try fallback providers on failure
+- Git worktree support — isolated branch work
+- Real-time streaming output
+
+### Autonomous Loops
+```bash
+/loop check the deploy every 20m     # interval-based
+/loop fix bugs in this app            # self-paced (model decides when to continue)
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Explore  │────▶│   General   │────▶│    Bash    │
-│  (read)    │     │   (write)   │     │  (execute) │
-└─────────────┘     └─────────────┘     └─────────────┘
-       │                   │                   │
-       └───────────────────┴───────────────────┘
-                         │
-                  [Progress UI]
-```
-- Up to 5 parallel agents
-- Shared memory between agents
-- Automatic task decomposition
-- **API retry with exponential backoff** — agents survive transient API errors (rate limits, timeouts, 500s)
-- **Provider failover** — agents automatically try fallback providers when primary fails
-- **Real-time streaming** — agent output streamed to UI as it's generated
-- **Git worktree support** — parallel branch work with isolated sessions
+Background scheduler fires recurring tasks without blocking the foreground. Auto-pauses after 5 consecutive failures. Persists across sessions.
 
-### 💰 Cost Tracking
-- Per-model pricing for Kimi, DeepSeek, GLM, MiniMax models (Ollama is free)
-- Real-time cost in status bar (`$0.0243`)
-- Per-response cost in message footer
-- `/cost` and `/stats` commands with accurate model-specific pricing
+### Plan Mode
+Physical tool restriction — plan mode limits the model to read-only tools (read, grep, glob, diff, git status/log). Auto-exits when you approve the plan, restoring full tool access.
 
-### 🔄 Prompt Caching
-- Explicit `cache_control` breakpoints for Kimi, MiniMax, and DeepSeek (GLM currently doesn't honour cache_control server-side, so we skip markers there)
-- System prompt, tools, and conversation prefix cached — up to 90% input cost savings
-- Cache break detection with efficiency tracking
+### Cost Tracking
+- Per-model pricing for all cloud providers (Ollama is free)
+- Real-time cost in status bar
+- `/cost` and `/stats` commands
 
-### 🧠 Extended Thinking with Tools
-- Full multi-turn support for Kimi K2.6 / GLM / Anthropic-style reasoning
-- Thinking blocks (with `signature`) preserved across turns, including tool calls
-- Signature-aware history reconstruction — no "reasoning_content missing" errors
+### Prompt Caching
+- `cache_control` breakpoints for Kimi, MiniMax, and DeepSeek — up to 90% input cost savings
+- System prompt, tools, and conversation prefix cached
 
-### 🛡️ Safety & Permissions
+### Extended Thinking
+- Full multi-turn support for Kimi / GLM / DeepSeek reasoning models
+- Thinking blocks with `signature` preserved across turns, including tool calls
+
+### Safety & Permissions
 - **3-level permissions**: Low (auto), Medium (ask once), High (always ask)
 - **Sandbox mode** for bash commands
-- **Diff preview** before applying changes (single-file and multi-file)
-- **Undo/Redo** for all file operations
-- **Audit logging**
-- **Proactive context compaction** — predicts token growth and compacts before hitting model limits
+- **Inline diff preview** — 3-line preview cards before applying changes
+- **Undo/Redo** for all file operations (`/undo N` up to 20 steps)
+- **Proactive compaction** — predicts token growth and compacts before hitting limits
 
 ---
 
-## 🔒 Security & Privacy <a id="security"></a>
+## Security & Privacy <a id="security"></a>
 
-### Zero Proxies — Your Code Goes Nowhere Except the LLM
+### Zero Proxies
 
 ```
 ┌──────────┐          ┌──────────────────────┐
@@ -196,16 +187,14 @@ Local:     ./GOKIN.local.md (git-ignored)
 │  (local) │          │  (Kimi / Z.AI / ...) │
 │          │ ◀──TLS── │                      │
 └──────────┘          └──────────────────────┘
-
-No middle servers. No Vercel. No telemetry proxies.
-Your API key, your code, your conversation — direct.
+       No middle servers. No telemetry. Direct.
 ```
 
-Some CLI tools route requests through their own proxy servers (Vercel Edge, custom gateways) for telemetry, analytics, or API key management. **Gokin does none of this.** Every API call goes directly from your machine to the provider's endpoint. You can verify this — it's open source.
+Every API call goes directly from your machine to the provider's endpoint. No proxy servers, no analytics gateways. You can verify this — it's open source.
 
-### Secret Redaction in Terminal Output
+### Secret Redaction
 
-LLM tool calls can accidentally expose secrets found in your codebase. Gokin automatically redacts them **before** they reach the model or your terminal:
+LLM tool calls can accidentally expose secrets found in your codebase. Gokin automatically redacts them **before** they reach the model:
 
 | Category | Examples |
 |----------|----------|
@@ -214,262 +203,196 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 | Credentials | Database URIs (`postgres://user:pass@...`), Redis, MongoDB |
 | Crypto material | PEM private keys, SSH keys |
 
-24 regex patterns, applied to every tool result and audit log. Handles any data type — strings, maps, typed slices, structs. Custom patterns supported via API.
+24 regex patterns, applied to every tool result and audit log.
 
 ### Defense in Depth
 
 | Layer | What it does |
 |-------|-------------|
-| **TLS 1.2+ enforced** | No weak ciphers, certificate verification always on |
-| **Sandbox mode** | Bash runs in isolated namespace (Linux), safe env whitelist (~35 vars) — API keys never leak to subprocesses |
-| **Command validation** | 50+ blocked patterns: fork bombs, reverse shells, `rm -rf /`, credential theft, env injection |
-| **SSH validation** | Host allowlist, loopback blocked, username injection prevention |
-| **Path validation** | Symlink resolution, directory traversal blocked, TOCTOU prevention |
-| **SSRF protection** | Private IPs, loopback, link-local blocked; all DNS results checked |
+| **TLS 1.2+** | No weak ciphers, certificate verification always on |
+| **Sandbox** | Bash in isolated namespace, safe env whitelist (~35 vars) |
+| **Command validation** | 50+ blocked patterns: fork bombs, reverse shells, credential theft |
+| **SSH validation** | Host allowlist, loopback blocked, injection prevention |
+| **Path validation** | Symlink resolution, directory traversal blocked |
+| **SSRF protection** | Private IPs, loopback, link-local blocked |
 | **Audit trail** | Every tool call logged with sanitized args |
 
 ### Keys Stay Local
 
-- API keys loaded from env vars or local config (`~/.config/gokin/config.yaml`)
-- Keys are **masked** in all UI displays (`sk-12****cdef`)
-- Keys are **never** included in conversation history or tool results
-- Ollama mode: **zero network calls** — fully airgapped
-
-### 💾 Memory That Persists
-```
-> Remember we use PostgreSQL with pgx driver
-> What were our database conventions?
-```
-- Project-specific memories
-- Auto-inject relevant context
-- Stored locally (your data stays yours)
+- Loaded from env vars or `~/.config/gokin/config.yaml`
+- Masked in all UI displays (`sk-12****cdef`)
+- Never included in conversation history or tool results
+- Ollama mode: zero network calls — fully airgapped
 
 ---
 
-## ☁️ Providers <a id="providers"></a>
+## Providers <a id="providers"></a>
 
-> [!IMPORTANT]
-> **Recommended providers** — daily-driver tier, tested every release:
-> - **Kimi Coding Plan** (Kimi K2.6) — **default as of v0.69**, 262K context, thinking + tools
-> - **DeepSeek V4** (Pro / Flash) — **added in v0.71, strongly recommended**, 1M context, top SWE-bench reasoning, ~20× cheaper than Opus, prompt caching (95% savings on repeat prefixes)
-> - **GLM Coding Plan** (GLM-5 / GLM-5.1) — budget option (~$3/month), thinking supported
-> - **MiniMax** (M2.7 / M2.5) — 200K context, strong on agentic coding
->
-> Ollama is fully supported for offline / zero-cost workflows.
+| Provider | Models | Context | Cost ($/1M tokens) |
+|----------|--------|---------|---------------------|
+| **DeepSeek** | `deepseek-v4-pro`, `v4-flash`, `chat`, `reasoner` | 1M input, 384K output | Pro $0.44/$0.87, Flash $0.14/$0.28 |
+| **Kimi** | `kimi-for-coding` | 262K input, 32K output | $0.95/$4.00 |
+| **GLM** | `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.5` | 200K input, 131K output | 5.1: $4/$16, 5: $1/$4 |
+| **MiniMax** | `MiniMax-M2.7`, `M2.7-highspeed`, `M2.5`, `M2.5-highspeed` | 200K input, 16K output | M2.7: $0.30/$1.20 |
+| **Ollama** | Any local model | Varies | Free |
 
-| Provider | Models | Endpoint | Notes |
-|----------|--------|----------|-------|
-| **Kimi** ⭐ | `kimi-for-coding` (K2.6) | `api.kimi.com/coding` | **Default.** Coding Plan subscription; 262K context, reasoning + vision + video, thinking mode |
-| **DeepSeek** ⭐ | `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-chat`, `deepseek-reasoner` | `api.deepseek.com/anthropic` | **Recommended.** V4 ships with 1M context, 384K output, extended thinking, and Anthropic prompt caching (live-verified 95% savings). Strong-tier SWE-bench reasoning at ~$0.435/$0.87 per 1M tokens for Pro (Flash is $0.14/$0.28). |
-| **GLM** ⭐ | `glm-5.1`, `glm-5`, `glm-4.7` | `api.z.ai/api/anthropic` | Budget-friendly Coding Plan, thinking mode |
-| **MiniMax** ⭐ | `MiniMax-M2.7`, `M2.7-highspeed`, `M2.5`, `M2.5-highspeed` | `api.minimax.io/anthropic` | 200K context, strong on agentic coding |
-| **Ollama** | Any local model (`llama3.2`, `qwen2.5-coder`, ...) | `localhost:11434` | 100% offline, no network calls |
-
-All cloud providers use Anthropic-compatible APIs and share the same client (`internal/client/anthropic.go`) — fewer moving parts, consistent behavior. Kimi auth uses Bearer tokens; GLM, MiniMax, and DeepSeek accept both Bearer and `x-api-key`. Ollama uses its own native client.
+All cloud providers use Anthropic-compatible APIs and share the same client — fewer moving parts, consistent behavior. Prompt caching is supported on Kimi, MiniMax, and DeepSeek (live-verified 95% savings on repeat prefixes). Ollama uses its own native client and makes zero network calls.
 
 Switch anytime:
 ```
-> /provider kimi
-> /model kimi-for-coding
-> /provider deepseek
-> /model deepseek-v4-pro
-> /provider glm
-> /model glm-5.1
-> /provider minimax
-> /model MiniMax-M2.7
-> /provider ollama
-> /model llama3.2
+/provider deepseek    →  /model deepseek-v4-pro
+/provider kimi        →  /model kimi-for-coding
+/provider glm         →  /model glm-5.1
+/provider minimax     →  /model MiniMax-M2.7
+/provider ollama      →  /model llama3.2
 ```
-
-### Moonshot Developer API (legacy)
-
-Gokin's `kimi` provider points at Kimi Coding Plan (`api.kimi.com/coding`) by default — that's where `kimi-for-coding` lives. If you have a Moonshot Developer API key instead, set `model.custom_base_url: https://api.moonshot.ai/anthropic` in your config; gokin will route through the Developer endpoint using your key. Legacy model names (`kimi-k2.5`, `kimi-k2-thinking-turbo`, `kimi-k2-turbo-preview`) are silently migrated to `kimi-for-coding` on load — UNLESS `custom_base_url` is set, in which case gokin respects the name you picked.
 
 ---
 
-## ⌨️ Commands <a id="commands"></a>
+## Commands <a id="commands"></a>
+
+65 slash commands. Some highlights:
 
 | Command | Description |
 |---------|-------------|
 | `/login <provider> <key>` | Set API key |
-| `/provider <name>` | Switch provider |
-| `/model <name>` | Switch model |
-| `/mcp [list\|add\|status\|remove]` | Manage MCP servers (Model Context Protocol) |
-| `/plan` | Enter planning mode |
-| `/save` / `/load` | Session management |
-| `/commit [-m "msg"]` | Git commit |
-| `/pr --title "..."` | Create GitHub PR |
+| `/provider` / `/model` | Switch provider or model |
+| `/plan` | Enter read-only planning mode |
+| `/commit` / `/pr` | Git commit, create GitHub PR |
 | `/undo [N]` | Undo last N file changes (max 20) |
-| `/stats` | Session statistics incl. per-provider token/cost |
-| `/theme` | Switch UI theme |
-| `/help` | Show all commands (55+ available) |
+| `/loop <task> [interval]` | Autonomous background loop |
+| `/mcp [list\|add\|remove]` | Manage MCP servers |
+| `/stats` / `/cost` | Session statistics, token costs |
+| `/doctor` | Diagnostics check |
+| `/shortcuts` | Keyboard shortcuts reference |
+| `/help` | Show all 65 commands |
+
+**Aliases:** `p`=plan, `c`=commit, `m`=model, `s`=status, `u`=undo, `r`=redo, `h`=help, `q`=clear, `st`=stats, `pr`=pr
 
 ### Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
 | `Enter` | Send message |
-| `Ctrl+C` | Interrupt |
+| `Ctrl+C` | Interrupt / cancel |
+| `Ctrl+K` | Model selector |
+| `Ctrl+E` | Expand/collapse tool output |
 | `Ctrl+P` | Command palette |
-| `↑/↓` | History |
 | `Tab` | Autocomplete |
-| `?` | Show help |
+| `↑/↓` | History |
+| `y/n` | Accept/reject diff |
 
 ---
 
-## ⚙️ Configuration <a id="configuration"></a>
+## Configuration <a id="configuration"></a>
 
-**Location:** `~/.config/gokin/config.yaml`
+`~/.config/gokin/config.yaml`
 
-### Minimal (v0.69+ defaults — Kimi Coding Plan)
-
-```yaml
-api:
-  kimi_key: "sk-kimi-..."
-  active_provider: "kimi"
-model:
-  name: "kimi-for-coding"
-```
-
-Prefer DeepSeek, GLM, or MiniMax? Just swap:
+### Minimal
 
 ```yaml
-# DeepSeek V4 (recommended — 1M context, prompt caching, cheap)
+# DeepSeek (recommended)
 api: { deepseek_key: "sk-...", active_provider: "deepseek" }
 model: { name: "deepseek-v4-pro" }
 
-# GLM
+# Or Kimi (default)
+api: { kimi_key: "sk-kimi-...", active_provider: "kimi" }
+model: { name: "kimi-for-coding" }
+
+# Or GLM / MiniMax
 api: { glm_key: "...", active_provider: "glm" }
 model: { name: "glm-5.1" }
-
-# MiniMax
-api: { minimax_key: "...", active_provider: "minimax" }
-model: { name: "MiniMax-M2.7" }
 ```
 
 ### Full Reference
 
 ```yaml
 api:
-  kimi_key: ""                    # Kimi Coding Plan key (sk-kimi-...)
-  deepseek_key: ""                # DeepSeek V4 key (sk-...)
+  kimi_key: ""
+  deepseek_key: ""
   glm_key: ""
   minimax_key: ""
-  ollama_key: ""                  # optional, only for remote Ollama with auth
+  ollama_key: ""                  # optional, for remote Ollama with auth
   active_provider: "kimi"         # kimi | deepseek | glm | minimax | ollama
   ollama_base_url: "http://localhost:11434"
   retry:
     max_retries: 10
-    retry_delay: 1s
     http_timeout: 120s
     stream_idle_timeout: 30s
-    providers:
-      kimi:
-        http_timeout: 5m
-        stream_idle_timeout: 120s
-      glm:
-        http_timeout: 5m
-        stream_idle_timeout: 180s
-      minimax:
-        http_timeout: 5m
-        stream_idle_timeout: 120s
-      deepseek:
-        http_timeout: 5m
-        stream_idle_timeout: 120s
 
 model:
-  name: "kimi-for-coding"          # Kimi K2.6 (Coding Plan)
+  name: "kimi-for-coding"
   temperature: 0.6
   max_output_tokens: 32768
-  custom_base_url: ""              # override endpoint (e.g. Moonshot Dev API)
-  enable_thinking: false           # Extended thinking — supported on Kimi, DeepSeek (V4 + reasoner), GLM, MiniMax
-  thinking_budget: 0               # 0 = provider default (Kimi, GLM 4.7+/5.x)
-  force_weak_optimizations: false  # opt Strong-tier models into weak-tier safeguards
+  custom_base_url: ""             # override endpoint
+  enable_thinking: false          # supported on Kimi, DeepSeek, GLM, MiniMax
+  thinking_budget: 0              # 0 = provider default
 
 tools:
   timeout: 2m
   model_round_timeout: 5m
-  bash:
-    sandbox: true
-  allowed_dirs: []
+  bash: { sandbox: true }
 
 permission:
   enabled: true
-  default_policy: "ask"           # allow, ask, deny
+  default_policy: "ask"           # allow | ask | deny
 
 plan:
   enabled: true
   require_approval: true
 
-ui:
-  theme: "dark"                   # dark, macos, light
-  stream_output: true
-  markdown_rendering: true
+mcp:
+  enabled: false                  # enable MCP server support
+  servers: {}                     # server configs (stdio/http)
 ```
 
 ---
 
-## 🏗️ Architecture <a id="architecture"></a>
+## Architecture <a id="architecture"></a>
 
 ```
 gokin/
 ├── cmd/gokin/          # CLI entry point
 ├── internal/
-│   ├── app/            # Orchestrator & message loop
-│   ├── agent/          # Multi-agent system
-│   ├── client/         # AnthropicClient (compat: Kimi/GLM/MiniMax) + OllamaClient
-│   ├── tools/          # 54 built-in tools
-│   ├── mcp/            # MCP (Model Context Protocol) client + manager
-│   ├── ui/             # Bubble Tea TUI
+│   ├── app/            # Orchestrator (~2.7K LOC) & message loop (~3.7K LOC)
+│   ├── agent/          # Multi-agent system (~4.8K LOC)
+│   ├── client/         # AnthropicClient (Kimi/GLM/MiniMax/DeepSeek) + OllamaClient
+│   ├── tools/          # 59 built-in tools, 9 tool sets
+│   ├── mcp/            # MCP client + manager (stdio/http)
+│   ├── loops/          # Autonomous loop scheduler
+│   ├── ui/             # Bubble Tea TUI (46 source files, Graphite+Violet theme)
 │   ├── config/         # YAML config
 │   ├── permission/     # 3-level security + per-MCP-server isolation
 │   ├── memory/         # Persistent memory
-│   └── ...
+│   └── ...             # 36 packages total
 ```
 
-**~120K LOC • 100% Go • Production-ready**
+**610 Go files (376 source, 234 test) • 100% Go • 65 slash commands**
 
 ---
 
-## 🤝 Contributing <a id="contributing"></a>
-
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
-
-- Development setup
-- Code style guide
-- Pull request process
+## Contributing <a id="contributing"></a>
 
 ```bash
-# Dev setup
 git clone https://github.com/ginkida/gokin.git
 cd gokin
-go mod download
 go build -o gokin ./cmd/gokin
-
-# Test
-go test -race ./...
-
-# Format
-go fmt ./...
+go test -race ./...    # 36 packages, all must pass
 go vet ./...
 ```
 
----
-
-## 📝 License <a id="license"></a>
-
-[MIT](LICENSE) — Use freely, modify, distribute.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR process.
 
 ---
 
-## 🙏 Acknowledgments <a id="acknowledgments"></a>
+## License <a id="license"></a>
+
+[MIT](LICENSE)
+
+---
+
+## Acknowledgments <a id="acknowledgments"></a>
 
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) — TUI framework
 - [Lipgloss](https://github.com/charmbracelet/lipgloss) — Terminal styling
 - [Ollama](https://github.com/ollama/ollama) — Local LLM runtime
-
----
-
-<p align="center">
-  <sub>Made with ❤️ by developers, for developers</sub>
-</p>

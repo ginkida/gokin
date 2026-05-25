@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -66,11 +67,12 @@ type Agent struct {
 	progressCallback func(progress *AgentProgress)
 
 	// Mental loop detection tracking
-	callHistory     map[string]int  // Map of tool_name:arguments -> count
-	callHistoryMu   sync.Mutex      // Protects callHistory and loopEarlyWarned
-	loopIntervened  bool            // Flag to indicate if loop intervention occurred
-	loopThreshold   int             // Broad loop threshold (default: 8, quick: 4, thorough: 15)
-	loopEarlyWarned map[string]bool // Tracks keys that already got an early-warning message
+	callHistory      map[string]int  // Map of tool_name:arguments -> count
+	callHistoryMu    sync.Mutex      // Protects callHistory and loopEarlyWarned
+	loopIntervened   bool            // Flag to indicate if loop intervention occurred
+	loopCooldown     int             // Consecutive non-loop turns since last intervention
+	loopThreshold    int             // Broad loop threshold (default: 8, quick: 4, thorough: 15)
+	loopEarlyWarned  map[string]bool // Tracks keys that already got an early-warning message
 
 	// Context summarization settings (adjusted by thoroughness)
 	pruneProtectChars  int // Chars protected from pruning (default: 120000)
@@ -112,6 +114,10 @@ type Agent struct {
 	tokenGrowthEMA    float64
 	tokenGrowthSample int
 	preemptMu         sync.Mutex
+
+	// Cached precise token count to skip redundant API calls.
+	cachedPreciseCount    int
+	cachedPreciseHistLen  int
 
 	// Plan approval callback for context compaction
 	onPlanApproved func(planSummary string) // Called when plan is built, allows context clearing
@@ -2753,6 +2759,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					logging.Warn("mental loop detected (exact)", "tool", fc.Name, "count", exactCount)
 					a.callHistoryMu.Lock()
 					a.loopIntervened = true
+					a.loopCooldown = 0
 					a.callHistoryMu.Unlock()
 
 					a.safeOnText(fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, exactCount))
@@ -2779,6 +2786,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					logging.Warn("broad loop detected", "tool", fc.Name, "total_calls", broadCount)
 					a.callHistoryMu.Lock()
 					a.loopIntervened = true
+					a.loopCooldown = 0
 					a.callHistoryMu.Unlock()
 
 					a.safeOnText(fmt.Sprintf("\n[Broad loop: %s used %d times — try a different approach]\n", fc.Name, broadCount))
@@ -2802,11 +2810,18 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				}
 			}
 
-			// Reset intervention flag after a turn with no loop detected,
-			// so future loops can be caught again.
+			// Reset intervention flag after several consecutive non-loop turns.
+			// Requiring 3 clean turns prevents the model from oscillating
+			// between "loop detected → one different call → resume looping".
 			if !loopDetectedThisTurn {
 				a.callHistoryMu.Lock()
-				a.loopIntervened = false
+				if a.loopIntervened {
+					a.loopCooldown++
+					if a.loopCooldown >= 3 {
+						a.loopIntervened = false
+						a.loopCooldown = 0
+					}
+				}
 				a.callHistoryMu.Unlock()
 			} else {
 				// Loop was detected — skip real tool execution for this turn.
@@ -2826,8 +2841,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					Parts: dummyParts,
 				})
 				a.stateMu.Unlock()
-				// Loop-skipped turns count as no-progress so stagnation detection works.
-				noProgressTurns++
+				// Loop-skipped turns are NOT counted as no-progress: the loop
+				// detection system handles this pathology with its own
+				// intervention. Counting them here causes premature stagnation
+				// exits when the agent's own recovery mechanisms are working.
 				continue
 			}
 
@@ -2945,8 +2962,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		a.safeOnText(emptyMsg)
 	}
 
-	// Notify user if we hit the max turn limit
-	if i >= a.maxTurns {
+	if i >= effectiveMaxTurns {
 		a.safeOnText("\n[Reached maximum turn limit — stopping]\n")
 	}
 
@@ -2959,7 +2975,7 @@ func normalizeCallKey(name string, args map[string]any) string {
 	if len(args) == 0 {
 		return name + ":{}"
 	}
-	filtered := make(map[string]any, len(args))
+	keys := make([]string, 0, len(args))
 	for k, v := range args {
 		switch val := v.(type) {
 		case string:
@@ -2977,7 +2993,12 @@ func normalizeCallKey(name string, args map[string]any) string {
 		case nil:
 			continue
 		}
-		filtered[k] = v
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	filtered := make([][2]any, 0, len(keys))
+	for _, k := range keys {
+		filtered = append(filtered, [2]any{k, args[k]})
 	}
 	argsJSON, _ := json.Marshal(filtered)
 	return fmt.Sprintf("%s:%s", name, string(argsJSON))
@@ -3214,7 +3235,7 @@ func (a *Agent) updateTokenGrowthAndProjectOverflow(tokenCount, maxTokens int, t
 	}
 	a.tokenGrowthSample++
 
-	if a.tokenGrowthSample < 3 {
+	if a.tokenGrowthSample < 2 {
 		return false
 	}
 
@@ -3264,11 +3285,30 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		return nil // Clearly under threshold — skip API call
 	}
 
-	// Near threshold — use precise API counting
+	// Near threshold — use precise API counting, but skip if history hasn't
+	// grown much since the last precise count showed we're under threshold.
+	histLen := len(historySnapshot)
+	a.preemptMu.Lock()
+	cachedCount := a.cachedPreciseCount
+	cachedLen := a.cachedPreciseHistLen
+	a.preemptMu.Unlock()
+	if cachedCount > 0 && cachedLen > 0 && histLen-cachedLen < 4 {
+		cachedPercent := float64(cachedCount) / float64(limits.MaxInputTokens)
+		if cachedPercent < threshold*0.9 {
+			return nil // Recent precise count says we're safe
+		}
+	}
+
 	tokenCount, err := a.tokenCounter.CountContents(ctx, historySnapshot)
 	if err != nil {
 		return fmt.Errorf("failed to count tokens: %w", err)
 	}
+
+	// Cache the precise count for future checks.
+	a.preemptMu.Lock()
+	a.cachedPreciseCount = tokenCount
+	a.cachedPreciseHistLen = histLen
+	a.preemptMu.Unlock()
 
 	percentUsed := float64(tokenCount) / float64(limits.MaxInputTokens)
 
@@ -3393,33 +3433,90 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	return nil
 }
 
-// forceCompactHistory aggressively compacts history when MaxHistorySize is exceeded.
-// Uses importance scoring to preserve the most valuable messages from the middle.
+// forceCompactHistory compacts history when MaxHistorySize is exceeded.
+// Tries LLM summarization first (preserves context); falls back to
+// importance-based truncation if summarization fails.
 func (a *Agent) forceCompactHistory(ctx context.Context) error {
-	// Read length under RLock so we can notify the UI before taking the write
-	// lock. safeOnText acquires stateMu.RLock internally — calling it while
-	// holding a write lock on the same RWMutex would deadlock.
 	a.stateMu.RLock()
 	histLen := len(a.history)
 	a.stateMu.RUnlock()
 
 	if histLen <= 10 {
-		return nil // Not enough to compact
+		return nil
 	}
 
 	a.safeOnText(fmt.Sprintf("\n[Force-compacting history (%d messages)...]\n", histLen))
 
+	// Try LLM summarization first — much better context preservation.
+	if a.summarizer != nil {
+		if err := a.forceCompactViaSummary(ctx); err == nil {
+			return nil
+		}
+		logging.Warn("force-compact summarization failed, falling back to truncation", "agent_id", a.ID)
+	}
+
+	return a.forceCompactViaTruncation()
+}
+
+// forceCompactViaSummary uses the LLM summarizer to compress middle history.
+func (a *Agent) forceCompactViaSummary(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	a.stateMu.RLock()
+	if len(a.history) <= 10 {
+		a.stateMu.RUnlock()
+		return nil
+	}
+	preserveStart := 3
+	preserveEnd := 6
+	if len(a.history) <= preserveStart+preserveEnd+2 {
+		a.stateMu.RUnlock()
+		return nil
+	}
+	toSummarize := make([]*genai.Content, len(a.history)-preserveStart-preserveEnd)
+	copy(toSummarize, a.history[preserveStart:len(a.history)-preserveEnd])
+	oldLen := len(a.history)
+	a.stateMu.RUnlock()
+
+	summary, err := a.summarizer.Summarize(ctx, toSummarize)
+	if err != nil {
+		return err
+	}
+
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 
-	// Re-check after acquiring the write lock in case concurrent compaction ran.
+	if len(a.history) < oldLen {
+		return nil // concurrent compaction
+	}
+
+	newHistory := make([]*genai.Content, 0, preserveStart+1+preserveEnd)
+	newHistory = append(newHistory, a.history[:preserveStart]...)
+	newHistory = append(newHistory, summary)
+	newHistory = append(newHistory, a.history[len(a.history)-preserveEnd:]...)
+	newHistory = ensureToolPairConsistency(newHistory)
+	a.history = newHistory
+	a.injectContinuationHint()
+
+	logging.Info("history force-compacted (summarized)", "agent_id", a.ID,
+		"old_len", oldLen, "new_len", len(a.history))
+	return nil
+}
+
+// forceCompactViaTruncation is the fallback when summarization fails.
+// Uses importance scoring to preserve the most valuable messages from the middle.
+func (a *Agent) forceCompactViaTruncation() error {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
 	if len(a.history) <= 10 {
 		return nil
 	}
 
-	keepStart := 3 // system prompt + greeting + original task prompt
+	keepStart := 3
 	keepEnd := 6
-	keepMiddle := 4 // Top N by importance from middle section
+	keepMiddle := 4
 
 	if len(a.history) < keepStart+keepEnd+keepMiddle {
 		return nil
@@ -3427,14 +3524,12 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 
 	middle := a.history[keepStart : len(a.history)-keepEnd]
 
-	// Score each middle message using multi-signal relevance scoring
 	type scored struct {
 		idx   int
 		score float64
 		msg   *genai.Content
 	}
 
-	// Use RelevanceScorer for smart multi-signal scoring (recency, tool type, edit proximity, etc.)
 	var floatScores []float64
 	if a.relevanceScorer != nil {
 		floatScores = a.relevanceScorer.ScoreMessages(middle, a.fileTracker, keepStart)
@@ -3446,13 +3541,11 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 		if floatScores != nil {
 			s = floatScores[i]
 		} else {
-			// Fallback: primitive scoring if scorer not available
 			s = primitiveScore(msg)
 		}
 		scores[i] = scored{idx: i, score: s, msg: msg}
 	}
 
-	// Sort by score descending (simple selection — keepMiddle is small)
 	for i := 0; i < keepMiddle && i < len(scores); i++ {
 		best := i
 		for j := i + 1; j < len(scores); j++ {
@@ -3463,7 +3556,6 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 		scores[i], scores[best] = scores[best], scores[i]
 	}
 
-	// Take top keepMiddle, then sort by original index to preserve order
 	topN := scores[:keepMiddle]
 	for i := range topN {
 		for j := i + 1; j < len(topN); j++ {
@@ -3488,18 +3580,12 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 	}
 
 	newHistory = append(newHistory, a.history[len(a.history)-keepEnd:]...)
-
-	// Ensure tool pairs are consistent after importance-based compaction
 	newHistory = ensureToolPairConsistency(newHistory)
-
 	a.history = newHistory
-
-	// Inject continuation hint after compaction
 	a.injectContinuationHint()
 
-	logging.Info("history force-compacted (importance-based)", "agent_id", a.ID,
-		"old_len", len(middle)+keepStart+keepEnd, "new_len", len(a.history))
-
+	logging.Info("history force-compacted (truncation fallback)", "agent_id", a.ID,
+		"new_len", len(a.history))
 	return nil
 }
 
@@ -3701,9 +3787,16 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 		} else {
 			replacement = fmt.Sprintf("[%s output truncated, was %d chars]", c.name, len(c.content))
 		}
-		part := a.history[c.msgIdx].Parts[c.partIdx]
-		part.FunctionResponse.Response = map[string]any{
-			"content": replacement,
+		// Create a new Part instead of mutating in place — concurrent snapshot
+		// readers (checkAndSummarize, getModelResponse) hold references to the
+		// old Part and would see the data change underneath them.
+		oldPart := a.history[c.msgIdx].Parts[c.partIdx]
+		a.history[c.msgIdx].Parts[c.partIdx] = &genai.Part{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       oldPart.FunctionResponse.ID,
+				Name:     oldPart.FunctionResponse.Name,
+				Response: map[string]any{"content": replacement},
+			},
 		}
 		freed += len(c.content) - len(replacement)
 	}
@@ -3787,6 +3880,20 @@ func (a *Agent) collectStream(ctx context.Context, stream *client.StreamingRespo
 	})
 }
 
+// agentModelRoundTimeout caps a single model API call within the agent to
+// prevent zombie requests. Analogous to executor.withModelRoundTimeout.
+const agentModelRoundTimeout = 5 * time.Minute
+
+func (a *Agent) withModelRoundTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := agentModelRoundTimeout
+	if deadline, ok := parent.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			return context.WithTimeout(parent, remaining)
+		}
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
 // getModelResponse gets a response from the model.
 func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) {
 	// Read history under lock for thread safety
@@ -3826,22 +3933,22 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 			a.stateMu.RUnlock()
 
 			if hasInlineData {
-				// When multimodal parts (images) are present alongside function responses,
-				// include the full lastContent in history to preserve InlineData parts.
-				// SendFunctionResponse would only send FunctionResponse parts, losing images.
-				stream, err := a.client.SendMessageWithHistory(ctx, append(historyWithoutLast, lastContent), "Continue processing the tool results above.")
+				roundCtx, roundCancel := a.withModelRoundTimeout(ctx)
+				defer roundCancel()
+				stream, err := a.client.SendMessageWithHistory(roundCtx, append(historyWithoutLast, lastContent), "Continue processing the tool results above.")
 				if err != nil {
 					return nil, err
 				}
-				return a.collectStream(ctx, stream)
+				return a.collectStream(roundCtx, stream)
 			}
 
-			// Route through SendFunctionResponse for proper API formatting
-			stream, err := a.client.SendFunctionResponse(ctx, historyWithoutLast, funcResponses)
+			roundCtx, roundCancel := a.withModelRoundTimeout(ctx)
+			defer roundCancel()
+			stream, err := a.client.SendFunctionResponse(roundCtx, historyWithoutLast, funcResponses)
 			if err != nil {
 				return nil, err
 			}
-			return a.collectStream(ctx, stream)
+			return a.collectStream(roundCtx, stream)
 		}
 	}
 
@@ -3867,12 +3974,15 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 	copy(historyWithoutLast, a.history[:len(a.history)-1])
 	a.stateMu.RUnlock()
 
-	stream, err := a.client.SendMessageWithHistory(ctx, historyWithoutLast, message)
+	roundCtx, roundCancel := a.withModelRoundTimeout(ctx)
+	defer roundCancel()
+
+	stream, err := a.client.SendMessageWithHistory(roundCtx, historyWithoutLast, message)
 	if err != nil {
 		return nil, err
 	}
 
-	return a.collectStream(ctx, stream)
+	return a.collectStream(roundCtx, stream)
 }
 
 // executeTools executes the function calls with parallel execution for read-only tools.
@@ -4246,44 +4356,14 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools
 		}
 	}()
 
-	// === IMPROVEMENT 2: Retry mechanism with exponential backoff ===
-	maxRetries := 3
-	var lastErr error
-
-	for attempt := range maxRetries {
-		result, err := tool.Execute(ctx, call.Args)
-		if err == nil {
-			return result
-		}
-
-		lastErr = err
-
-		if !isRetryableError(err) || attempt == maxRetries-1 {
-			return tools.NewErrorResult(err.Error())
-		}
-
-		logging.Warn("tool execution failed, retrying",
-			"tool", call.Name,
-			"attempt", attempt+1,
-			"max_retries", maxRetries,
-			"error", err.Error())
-
-		backoffDuration := time.Duration(1<<uint(attempt)) * time.Second
-		backoffTimer := time.NewTimer(backoffDuration)
-		select {
-		case <-backoffTimer.C:
-		case <-ctx.Done():
-			backoffTimer.Stop()
-			return tools.NewErrorResult("cancelled during retry backoff")
-		}
+	// No tool-level retry: API retries are handled by the client layer
+	// (rate-limit retry, message processor retry, failover). Adding retries
+	// here compounds with those layers and wastes tokens.
+	result, err := tool.Execute(ctx, call.Args)
+	if err != nil {
+		return tools.NewErrorResult(err.Error())
 	}
-
-	return tools.NewErrorResult(fmt.Sprintf("failed after %d retries: %s", maxRetries, lastErr.Error()))
-}
-
-// isRetryableError determines if an error is worth retrying
-func isRetryableError(err error) bool {
-	return client.IsRetryableError(err)
+	return result
 }
 
 // buildResponseParts creates Parts from a response.

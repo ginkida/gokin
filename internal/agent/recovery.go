@@ -544,7 +544,7 @@ func (r *RecoveryExecutor) retryWithArgs(
 	if result.Success {
 		return result, true
 	}
-	return tools.ToolResult{}, false
+	return result, false
 }
 
 // runToolFirst runs a prerequisite tool, then retries the original if it succeeds.
@@ -588,9 +588,15 @@ func (r *RecoveryExecutor) runToolFirst(
 	// The model needs to see the file content to formulate a better edit.
 	// We mark Success=false so the model knows the original call failed,
 	// but provide the prerequisite output as context for a smarter retry.
+	// Truncate to avoid blowing up the context window with huge file reads.
+	enrichedOutput := fixResult.Content
+	const maxEnrichmentChars = 3000
+	if len(enrichedOutput) > maxEnrichmentChars {
+		enrichedOutput = enrichedOutput[:maxEnrichmentChars] + "\n...(truncated — read the file for full content)"
+	}
 	enrichedContent := fmt.Sprintf(
 		"**Auto-recovery:** The original `%s` call failed. Ran `%s` to gather context for retry.\n\n---\n%s",
-		originalCall.Name, fix.ToolName, fixResult.Content,
+		originalCall.Name, fix.ToolName, enrichedOutput,
 	)
 	return tools.ToolResult{
 		Content: enrichedContent,
@@ -661,5 +667,5 @@ func (r *RecoveryExecutor) modifyAndRetry(
 		return result, true
 	}
 
-	return tools.ToolResult{}, false
+	return result, false
 }

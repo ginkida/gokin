@@ -29,6 +29,7 @@ type ContextAgent struct {
 	prevTokens    int
 	prevCheckTime time.Time
 	growthRate    float64 // tokens per second (smoothed)
+	prevHistLen   int     // history length at last check — skip EMA on idle ticks
 
 	mu       sync.Mutex
 	stopChan chan struct{}
@@ -89,9 +90,13 @@ func (a *ContextAgent) CheckAndCompact(ctx context.Context) {
 
 	// Update growth rate estimate (exponential moving average).
 	// Protected by mu — CheckAndCompact is called from the background ticker goroutine.
+	// Skip EMA update when token count is unchanged (idle session) — feeding
+	// zero-delta samples decays the growth rate toward zero, so when work
+	// resumes the predictive trigger is blind to sudden bursts.
 	a.mu.Lock()
 	now := time.Now()
-	if a.prevTokens > 0 && !a.prevCheckTime.IsZero() {
+	idle := currentTokens == a.prevTokens && a.prevTokens > 0
+	if !idle && a.prevTokens > 0 && !a.prevCheckTime.IsZero() {
 		elapsed := now.Sub(a.prevCheckTime).Seconds()
 		if elapsed > 0 {
 			instantRate := float64(currentTokens-a.prevTokens) / elapsed
@@ -102,8 +107,10 @@ func (a *ContextAgent) CheckAndCompact(ctx context.Context) {
 			}
 		}
 	}
-	a.prevTokens = currentTokens
-	a.prevCheckTime = now
+	if !idle {
+		a.prevTokens = currentTokens
+		a.prevCheckTime = now
+	}
 	growthRate := a.growthRate
 	a.mu.Unlock()
 

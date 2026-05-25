@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gokin/internal/logging"
@@ -42,10 +43,11 @@ type Runner struct {
 	period  time.Duration
 	timeout time.Duration
 
-	mu       sync.Mutex
-	started  bool
-	stopChan chan struct{}
-	stopOnce sync.Once
+	mu               sync.Mutex
+	started          bool
+	stopChan         chan struct{}
+	stopOnce         sync.Once
+	iterationRunning atomic.Bool // true while fireOne is executing
 
 	// Hooks for tests / observability — fired on lifecycle events.
 	// Production wiring leaves them nil; nil-checked at call site.
@@ -186,7 +188,7 @@ func (r *Runner) run(ctx context.Context, period time.Duration) {
 //
 // Skips entirely if the IdleChecker says the app is busy.
 func (r *Runner) tick(ctx context.Context) {
-	if !r.isIdle() {
+	if r.iterationRunning.Load() || !r.isIdle() {
 		return
 	}
 
@@ -195,12 +197,19 @@ func (r *Runner) tick(ctx context.Context) {
 		if !l.IsDue(now) {
 			continue
 		}
-		// Re-check idle just before firing — the gap between
-		// initial check and now might have seen a user message arrive.
 		if !r.isIdle() {
 			return
 		}
-		r.fireOne(ctx, l)
+		r.iterationRunning.Store(true)
+		go func() {
+			defer func() {
+				if rv := recover(); rv != nil {
+					logging.Error("loops: panic in fireOne", "panic", rv)
+				}
+				r.iterationRunning.Store(false)
+			}()
+			r.fireOne(ctx, l)
+		}()
 		return
 	}
 }

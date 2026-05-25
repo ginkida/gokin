@@ -125,6 +125,7 @@ func (r *Runner) SpawnWithContext(
 	skipPermissions bool,
 	progressCallback ProgressCallback,
 ) (string, *AgentResult, error) {
+	r.cleanupOldResults()
 	deps := r.snapshotAgentDeps()
 
 	// Pass nil permissions for approved plan execution to avoid per-tool prompts
@@ -269,6 +270,7 @@ func (r *Runner) SpawnWithContext(
 // SpawnAsync creates and starts a new agent asynchronously.
 // agentType should be "explore", "bash", "general", "plan", "claude-code-guide", or "coordinator".
 func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string, maxTurns int, model string) string {
+	r.cleanupOldResults()
 	deps := r.snapshotAgentDeps()
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
 
@@ -683,6 +685,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 
 // SpawnMultiple creates and starts multiple agents in parallel.
 func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string, error) {
+	r.cleanupOldResults()
 	ids := make([]string, len(tasks))
 	results := make([]*AgentResult, len(tasks))
 	var wg sync.WaitGroup

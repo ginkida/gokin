@@ -1430,6 +1430,15 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 	}
 
 	for _, group := range groups {
+		if ctx.Err() != nil {
+			for _, call := range group.Calls {
+				idx := callToIdx[call]
+				if results[idx] == nil {
+					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: NewErrorResult("cancelled").ToMap()}
+				}
+			}
+			continue
+		}
 		if group.Parallel && len(group.Calls) > 1 {
 			// Execute read-only tools in parallel
 			var wg sync.WaitGroup
@@ -2490,10 +2499,21 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			filepath.Base(fp),
 			readIntArg(args, "offset"),
 			readIntArg(args, "limit"))
-	case "write", "edit", "delete":
+	case "write", "delete":
 		if fp, ok := args["file_path"].(string); ok {
 			return filepath.Base(fp)
 		}
+	case "edit":
+		fp, _ := args["file_path"].(string)
+		old, _ := args["old_string"].(string)
+		if fp == "" {
+			return ""
+		}
+		if old != "" {
+			h := sha256.Sum256([]byte(old))
+			return fmt.Sprintf("%s@%x", filepath.Base(fp), h[:4])
+		}
+		return filepath.Base(fp)
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
 			// Strip leading "cd /path && " prefix — models often prepend this,

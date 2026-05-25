@@ -501,6 +501,10 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 		return NewErrorResult(fmt.Sprintf("error reading file: %s", err)), nil
 	}
 
+	if slices.Contains(data[:min(len(data), 512)], byte(0)) {
+		return NewErrorResult(fmt.Sprintf("cannot edit binary file: %s", filePath)), nil
+	}
+
 	content := string(data)
 	oldContent := data
 	totalReplacements := 0
@@ -595,6 +599,10 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 			return NewErrorResult(fmt.Sprintf("file not found: %s", filePath)), nil
 		}
 		return NewErrorResult(fmt.Sprintf("error reading file: %s", err)), nil
+	}
+
+	if slices.Contains(data[:min(len(data), 512)], byte(0)) {
+		return NewErrorResult(fmt.Sprintf("cannot edit binary file: %s", filePath)), nil
 	}
 
 	content := string(data)

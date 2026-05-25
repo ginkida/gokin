@@ -53,7 +53,8 @@ func TestWriteTool_Validate(t *testing.T) {
 		{"missing file_path", map[string]any{"content": "hello"}, true},
 		{"missing content", map[string]any{"file_path": "/tmp/test.txt"}, true},
 		{"empty file_path", map[string]any{"file_path": "", "content": "hello"}, true},
-		{"empty content", map[string]any{"file_path": "/tmp/test.txt", "content": ""}, false}, // Empty content is allowed
+		{"empty content", map[string]any{"file_path": "/tmp/test.txt", "content": ""}, true},                                   // Empty content rejected (would create zero-byte file)
+		{"empty content append", map[string]any{"file_path": "/tmp/test.txt", "content": "", "append": true}, false},           // Empty content in append mode is fine (no-op)
 		{"nil args", nil, true},
 	}
 
@@ -270,32 +271,26 @@ func TestWriteTool_Execute_CreateParentDirs(t *testing.T) {
 }
 
 func TestWriteTool_Execute_EmptyContent(t *testing.T) {
-	tmpDir := resolvedTempDir(t)
-	tool := NewWriteTool(tmpDir)
+	tool := NewWriteTool("/tmp")
 
-	filePath := filepath.Join(tmpDir, "empty_file.txt")
-
-	ctx := context.Background()
-	result, err := tool.Execute(ctx, map[string]any{
-		"file_path": filePath,
+	// Empty content should be rejected at validation to prevent
+	// accidental zero-byte file creation.
+	err := tool.Validate(map[string]any{
+		"file_path": "/tmp/empty_file.txt",
 		"content":   "",
 	})
-
-	if err != nil {
-		t.Errorf("Execute() unexpected error: %v", err)
-	}
-	// Empty content should succeed (creates/overwrites with empty string)
-	if !result.Success {
-		t.Errorf("Execute() should succeed with empty content: %s", result.Error)
+	if err == nil {
+		t.Error("Validate() should reject empty content")
 	}
 
-	// Verify file is empty
-	content, err := os.ReadFile(filePath)
+	// Empty content in append mode is fine (no-op).
+	err = tool.Validate(map[string]any{
+		"file_path": "/tmp/empty_file.txt",
+		"content":   "",
+		"append":    true,
+	})
 	if err != nil {
-		t.Fatalf("Failed to read file: %v", err)
-	}
-	if len(content) != 0 {
-		t.Errorf("File content length = %v, want 0", len(content))
+		t.Errorf("Validate() should allow empty content in append mode: %v", err)
 	}
 }
 
