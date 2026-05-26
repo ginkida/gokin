@@ -170,6 +170,10 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	globPattern := GetStringDefault(args, "glob", "")
 	caseInsensitive := GetBoolDefault(args, "case_insensitive", false)
 	contextLines := GetIntDefault(args, "context_lines", 0)
+	const maxContextLines = 5
+	if contextLines > maxContextLines {
+		contextLines = maxContextLines
+	}
 	invertMatch := GetBoolDefault(args, "invert", false)
 	countOnly := GetBoolDefault(args, "count_only", false)
 

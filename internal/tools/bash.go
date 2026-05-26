@@ -784,6 +784,10 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 			exitErr, ok := cmdErr.(*exec.ExitError)
 			if ok {
 				cleanErr, _ := extractPWDFromOutput(rawOutput)
+				stderrStr := stderr.String()
+				if stderrStr != "" {
+					cleanErr = cleanErr + "\nSTDERR:\n" + stderrStr
+				}
 				return ToolResult{
 					Content: cleanErr,
 					Error:   fmt.Sprintf("command exited with code %d", exitErr.ExitCode()),
@@ -873,6 +877,10 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		exitErr, ok := finalErr.(*exec.ExitError)
 		if ok {
 			cleanErr, _ := extractPWDFromOutput(rawOutput)
+			stderrStr := stderr.String()
+			if stderrStr != "" {
+				cleanErr = cleanErr + "\nSTDERR:\n" + stderrStr
+			}
 			return ToolResult{
 				Content: cleanErr,
 				Error:   fmt.Sprintf("command exited with code %d", exitErr.ExitCode()),

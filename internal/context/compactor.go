@@ -193,11 +193,11 @@ func (c *ResultCompactor) isErrorLine(line string) bool {
 		}
 	}
 
-	// Stack trace indicators
+	// Stack trace indicators — require actual stack-trace context, not bare
+	// file:line references (which also appear in grep output).
 	stackIndicators := []string{
-		".go:", ".py:", ".js:", ".ts:", ".java:", // file:line patterns
-		"at line", "at file", "in function",
 		"goroutine ", "runtime.", "panic(",
+		"at line", "at file", "in function",
 	}
 	for _, indicator := range stackIndicators {
 		if strings.Contains(lowerLine, indicator) {
@@ -205,12 +205,17 @@ func (c *ResultCompactor) isErrorLine(line string) bool {
 		}
 	}
 
-	// Go-specific error patterns
+	// Go-specific error patterns: file.go:123: error/warning message
+	// Only match when the tail contains an error keyword — bare file:line
+	// references (grep output) should NOT be classified as errors.
 	if strings.Contains(line, ":") {
-		// file.go:123:45: error message
 		parts := strings.SplitN(line, ":", 4)
-		if len(parts) >= 3 && strings.HasSuffix(parts[0], ".go") {
-			return true
+		if len(parts) >= 4 && strings.HasSuffix(parts[0], ".go") {
+			tail := strings.ToLower(parts[3])
+			if strings.Contains(tail, "error") || strings.Contains(tail, "warning") ||
+				strings.Contains(tail, "undefined") || strings.Contains(tail, "cannot") {
+				return true
+			}
 		}
 	}
 

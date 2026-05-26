@@ -1477,6 +1477,16 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 
 	case "message_stop":
 		chunk.Done = true
+		// Flush any remaining buffered content from the think tag parser
+		// (partial tags or unclosed <think> blocks at end of stream).
+		if flushedThinking, flushedRegular := acc.thinkTagParser.Flush(); flushedThinking != "" || flushedRegular != "" {
+			if flushedThinking != "" {
+				chunk.Thinking += flushedThinking
+			}
+			if flushedRegular != "" {
+				chunk.Text += flushedRegular
+			}
+		}
 		// Include any accumulated tool calls only if not already emitted
 		// by message_delta (stop_reason: "tool_use"). Emitting them twice
 		// causes duplicate tool_use blocks which MiniMax rejects with 400.

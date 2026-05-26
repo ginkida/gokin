@@ -814,6 +814,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	retryPolicy.MaxPartialRetries = 0
 
 	for i := range maxIterations {
+		if e.readTracker != nil {
+			e.readTracker.IncrementTurn()
+		}
+
 		// Check context cancellation between iterations
 		select {
 		case <-ctx.Done():
