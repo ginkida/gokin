@@ -77,5 +77,9 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 		return NewSuccessResult("Nothing to report."), nil
 	}
 
+	if runes := []rune(result); len(runes) > 30000 {
+		result = string(runes[:30000]) + "\n\n... (status truncated, too many changes)"
+	}
+
 	return NewSuccessResult(result), nil
 }

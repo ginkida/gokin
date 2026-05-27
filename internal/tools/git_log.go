@@ -135,5 +135,9 @@ func (t *GitLogTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 		return NewSuccessResult("No commits found matching the criteria."), nil
 	}
 
+	if runes := []rune(result); len(runes) > 30000 {
+		result = string(runes[:30000]) + "\n\n... (log truncated — use count or after/before to narrow)"
+	}
+
 	return NewSuccessResult(result), nil
 }

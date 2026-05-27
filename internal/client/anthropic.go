@@ -519,15 +519,15 @@ func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model string
 				totalChars += utf8.RuneCountInString(part.Text)
 			}
 			if part.FunctionCall != nil {
-				totalChars += len(part.FunctionCall.Name) + 40
+				totalChars += utf8.RuneCountInString(part.FunctionCall.Name) + 40
 				if argsJSON, err := json.Marshal(part.FunctionCall.Args); err == nil {
-					totalChars += len(argsJSON)
+					totalChars += utf8.RuneCount(argsJSON)
 				}
 			}
 			if part.FunctionResponse != nil {
-				totalChars += len(part.FunctionResponse.Name) + 40
+				totalChars += utf8.RuneCountInString(part.FunctionResponse.Name) + 40
 				if respJSON, err := json.Marshal(part.FunctionResponse.Response); err == nil {
-					totalChars += len(respJSON)
+					totalChars += utf8.RuneCount(respJSON)
 				}
 			}
 		}

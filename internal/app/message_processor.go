@@ -590,11 +590,12 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		// Track cumulative token usage for /cost command
 		usage := a.contextManager.GetTokenUsage()
 		a.mu.Lock()
-		// Accumulate (not overwrite) input tokens so /cost is correct for multi-step plans.
+		// apiInputAccum is a per-call delta — accumulate with +=.
+		// usage.InputTokens is the total context window size — overwrite with =.
 		if apiInputAccum > 0 {
 			a.totalInputTokens += apiInputAccum
 		} else if usage.InputTokens > 0 {
-			a.totalInputTokens += usage.InputTokens
+			a.totalInputTokens = usage.InputTokens
 		}
 		if apiOutputAccum > 0 {
 			a.totalOutputTokens += apiOutputAccum

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"gokin/internal/client"
@@ -33,6 +34,7 @@ type Reflector struct {
 	client                 client.Client      // For LLM-based semantic analysis
 	enableSemanticAnalysis bool               // Whether to use LLM for unmatched errors
 	predictor              PredictorInterface // For file predictions on file_not_found errors
+	semanticCacheMu        sync.Mutex
 	semanticCache          map[string]*Reflection
 }
 
@@ -230,9 +232,12 @@ func (r *Reflector) semanticAnalyze(ctx context.Context, toolName string, args m
 	if len(cacheKey) > 200 {
 		cacheKey = cacheKey[:200]
 	}
+	r.semanticCacheMu.Lock()
 	if cached, ok := r.semanticCache[cacheKey]; ok {
+		r.semanticCacheMu.Unlock()
 		return cached
 	}
+	r.semanticCacheMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -309,10 +314,9 @@ Be concise and practical. Focus on actionable solutions.`
 
 	reflection.Intervention = sb.String()
 
-	// Cache so the same error class doesn't trigger another LLM call.
-	if r.semanticCache != nil {
-		r.semanticCache[cacheKey] = reflection
-	}
+	r.semanticCacheMu.Lock()
+	r.semanticCache[cacheKey] = reflection
+	r.semanticCacheMu.Unlock()
 
 	// Learn from this analysis for future reference
 	if r.errorStore != nil {

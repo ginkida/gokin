@@ -134,5 +134,9 @@ func (t *GitBlameTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		return NewSuccessResult("No blame information available."), nil
 	}
 
+	if runes := []rune(result); len(runes) > 30000 {
+		result = string(runes[:30000]) + "\n\n... (blame truncated — use line_start/line_end to narrow range)"
+	}
+
 	return NewSuccessResult(result), nil
 }

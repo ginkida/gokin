@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -126,6 +127,15 @@ func (t *CopyTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// Check if source and destination are the same
 	if source == dest {
 		return NewErrorResult("source and destination are the same"), nil
+	}
+
+	// Prevent copying a directory into a subdirectory of itself
+	if srcInfo.IsDir() {
+		absSrc, _ := filepath.Abs(source)
+		absDst, _ := filepath.Abs(dest)
+		if strings.HasPrefix(absDst, absSrc+string(filepath.Separator)) {
+			return NewErrorResult("cannot copy directory into itself"), nil
+		}
 	}
 
 	var copiedPaths []string

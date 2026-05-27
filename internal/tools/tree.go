@@ -82,6 +82,9 @@ func (t *TreeTool) Validate(args map[string]any) error {
 	if hasDepth && depth < 1 {
 		return NewValidationError("depth", "must be at least 1")
 	}
+	if hasDepth && depth > 10 {
+		return NewValidationError("depth", "must be at most 10")
+	}
 	return nil
 }
 

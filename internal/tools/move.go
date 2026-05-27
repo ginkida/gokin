@@ -102,6 +102,10 @@ func (t *MoveTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 	dest = validDest
 
+	if err := security.IsBlockedWritePath(dest); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+
 	// Check source exists
 	srcInfo, err := os.Stat(source)
 	if err != nil {

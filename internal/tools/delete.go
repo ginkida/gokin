@@ -97,6 +97,10 @@ func (t *DeleteTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	}
 	path = validPath
 
+	if err := security.IsBlockedWritePath(path); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+
 	// Check if path exists
 	info, err := os.Stat(path)
 	if err != nil {
