@@ -586,9 +586,13 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 	// files block so it sits close to the numbered content.
 	if hasMoreAfterLimit {
 		nextOffset := offset + linesRead
+		totalLines := lastScannedLine
+		if total, err := countLines(filePath); err == nil && total > totalLines {
+			totalLines = total
+		}
 		fmt.Fprintf(&builder,
-			"\n[Truncated: showed lines %d-%d (%d of at least %d). Use offset=%d to continue.]\n",
-			offset, offset+linesRead-1, linesRead, lastScannedLine, nextOffset,
+			"\n[Truncated: showed lines %d-%d (%d of %d total). Use offset=%d to continue.]\n",
+			offset, offset+linesRead-1, linesRead, totalLines, nextOffset,
 		)
 	}
 

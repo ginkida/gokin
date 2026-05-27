@@ -161,7 +161,11 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 
 	// Write file atomically to prevent data corruption on interruption
 	newContent := []byte(finalContent)
-	if err := AtomicWrite(filePath, newContent, 0644); err != nil {
+	perm := os.FileMode(0644)
+	if info, err := os.Stat(filePath); err == nil {
+		perm = info.Mode().Perm()
+	}
+	if err := AtomicWrite(filePath, newContent, perm); err != nil {
 		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 	}
 

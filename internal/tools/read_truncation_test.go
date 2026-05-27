@@ -41,8 +41,8 @@ func TestReadText_TruncationHintWhenLimitHits(t *testing.T) {
 	if !strings.Contains(result.Content, "offset=6") {
 		t.Errorf("hint should suggest offset=6 (next line after limit=5): %s", result.Content)
 	}
-	if !strings.Contains(result.Content, "of at least") {
-		t.Errorf("hint should note 'of at least N' to signal there's more: %s", result.Content)
+	if !strings.Contains(result.Content, "total)") {
+		t.Errorf("hint should show total line count: %s", result.Content)
 	}
 }
 

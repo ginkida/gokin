@@ -17,6 +17,13 @@ import (
 
 const editContextMaxChars = 5000
 
+func existingPerm(path string) os.FileMode {
+	if info, err := os.Stat(path); err == nil {
+		return info.Mode().Perm()
+	}
+	return 0644
+}
+
 // EditTool performs search/replace operations in files.
 type EditTool struct {
 	undoManager   *undo.Manager
@@ -389,7 +396,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 				// Write back atomically
 				newContentBytes := []byte(newContent)
-				if err := AtomicWrite(filePath, newContentBytes, 0644); err != nil {
+				if err := AtomicWrite(filePath, newContentBytes, existingPerm(filePath)); err != nil {
 					return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 				}
 				if t.undoManager != nil {
@@ -452,7 +459,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	// Write back atomically to prevent data corruption on interruption
 	newContentBytes := []byte(newContent)
-	if err := AtomicWrite(filePath, newContentBytes, 0644); err != nil {
+	if err := AtomicWrite(filePath, newContentBytes, existingPerm(filePath)); err != nil {
 		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 	}
 
@@ -535,11 +542,11 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 				continue
 			}
 
-			errMsg := fmt.Sprintf("edit[%d]: old_string not found in file after previous edits", i)
-			if actual, line := findFuzzyMatch(content, oldStr); actual != "" {
+			errMsg := fmt.Sprintf("edit[%d]: old_string not found in file (no edits were applied to disk — re-submit all edits together)", i)
+			if actual, line := findFuzzyMatch(string(oldContent), oldStr); actual != "" {
 				errMsg += fmt.Sprintf("\n\nFuzzy match at line %d. Actual text:\n```\n%s\n```", line, actual)
 			}
-			fileCtx := extractFileContext(content, editContextMaxChars)
+			fileCtx := extractFileContext(string(oldContent), editContextMaxChars)
 			return NewErrorResultWithContext(errMsg, fileCtx), nil
 		}
 
@@ -560,7 +567,7 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 
 	// Write atomically
 	newContentBytes := []byte(content)
-	if err := AtomicWrite(filePath, newContentBytes, 0644); err != nil {
+	if err := AtomicWrite(filePath, newContentBytes, existingPerm(filePath)); err != nil {
 		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 	}
 
@@ -654,7 +661,7 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 
 	// Write atomically
 	newContentBytes := []byte(newContent)
-	if err := AtomicWrite(filePath, newContentBytes, 0644); err != nil {
+	if err := AtomicWrite(filePath, newContentBytes, existingPerm(filePath)); err != nil {
 		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 	}
 
@@ -735,7 +742,7 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 
 	// Write atomically
 	newContentBytes := []byte(newContent)
-	if err := AtomicWrite(filePath, newContentBytes, 0644); err != nil {
+	if err := AtomicWrite(filePath, newContentBytes, existingPerm(filePath)); err != nil {
 		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 	}
 

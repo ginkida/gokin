@@ -91,6 +91,10 @@ func EditToolDeclaration() *genai.FunctionDeclaration {
 					Type:        genai.TypeInteger,
 					Description: "End line (1-indexed, inclusive). Used with line_start.",
 				},
+				"insert_after_line": {
+					Type:        genai.TypeInteger,
+					Description: "Line number after which to insert new_string (0 = beginning of file). No lines are deleted.",
+				},
 				"edits": {
 					Type:        genai.TypeArray,
 					Description: "Array of {old_string, new_string} pairs for multiple edits in one call.",
@@ -201,24 +205,35 @@ func GrepToolDeclaration() *genai.FunctionDeclaration {
 func TodoToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "todo",
-		Description: "Manages a todo list for tracking tasks during the session.",
+		Description: "Manages a task list. Use to track progress on multi-step tasks.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
-				"action": {
-					Type:        genai.TypeString,
-					Description: "Action to perform: add, remove, complete, list",
-				},
-				"item": {
-					Type:        genai.TypeString,
-					Description: "The todo item text (for add/remove)",
-				},
-				"id": {
-					Type:        genai.TypeInteger,
-					Description: "The todo item ID (for remove/complete)",
+				"todos": {
+					Type:        genai.TypeArray,
+					Description: "The complete updated list of todos",
+					Items: &genai.Schema{
+						Type: genai.TypeObject,
+						Properties: map[string]*genai.Schema{
+							"content": {
+								Type:        genai.TypeString,
+								Description: "The task description (imperative form)",
+							},
+							"status": {
+								Type:        genai.TypeString,
+								Description: "Task status: pending, in_progress, or completed",
+								Enum:        []string{"pending", "in_progress", "completed"},
+							},
+							"active_form": {
+								Type:        genai.TypeString,
+								Description: "The task in present continuous form (e.g., 'Running tests')",
+							},
+						},
+						Required: []string{"content", "status", "active_form"},
+					},
 				},
 			},
-			Required: []string{"action"},
+			Required: []string{"todos"},
 		},
 	}
 }

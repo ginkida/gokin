@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -62,6 +63,10 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 		path = t.workDir
 	}
 
+	const verifyTimeout = 3 * time.Minute
+	verifyCtx, cancel := context.WithTimeout(ctx, verifyTimeout)
+	defer cancel()
+
 	// 1. Detect project type and the best target directory for verification.
 	projectType, targetDir := t.detectProjectTarget(path)
 	if projectType == "" {
@@ -78,18 +83,18 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 	switch projectType {
 	case "go":
 		checkName = "go build ./..."
-		cmd = exec.CommandContext(ctx, "go", "build", "./...")
+		cmd = exec.CommandContext(verifyCtx, "go", "build", "./...")
 	case "rust":
 		checkName = "cargo check --all-targets"
-		cmd = exec.CommandContext(ctx, "cargo", "check", "--all-targets")
+		cmd = exec.CommandContext(verifyCtx, "cargo", "check", "--all-targets")
 	case "node":
-		checkName, cmd = t.nodeVerificationCommand(ctx, targetDir)
+		checkName, cmd = t.nodeVerificationCommand(verifyCtx, targetDir)
 		if cmd == nil {
 			return NewSuccessResult("Verification skipped: Node project has no build/lint/typecheck/check script in package.json"), nil
 		}
 	case "python":
 		checkName = "python3 -m compileall -q ."
-		cmd = exec.CommandContext(ctx, "python3", "-m", "compileall", "-q", ".")
+		cmd = exec.CommandContext(verifyCtx, "python3", "-m", "compileall", "-q", ".")
 	}
 
 	if cmd == nil {
