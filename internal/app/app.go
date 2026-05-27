@@ -1712,6 +1712,12 @@ func (a *App) ClearConversation() {
 	// exchange. Both must be zeroed so /cost shows only the fresh session.
 	a.totalInputTokens = 0
 	a.totalOutputTokens = 0
+
+	// Clear working memory so stale file/command context from the old
+	// conversation doesn't leak into the new system instruction.
+	if a.workingMemory != nil {
+		a.workingMemory.Clear()
+	}
 }
 
 // CompactContextWithPlan clears the conversation and injects the plan summary.

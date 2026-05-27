@@ -590,16 +590,16 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		// Track cumulative token usage for /cost command
 		usage := a.contextManager.GetTokenUsage()
 		a.mu.Lock()
-		a.totalInputTokens = usage.InputTokens
-		// Use API usage metadata if available, otherwise estimate
+		// Accumulate (not overwrite) input tokens so /cost is correct for multi-step plans.
+		if apiInputAccum > 0 {
+			a.totalInputTokens += apiInputAccum
+		} else if usage.InputTokens > 0 {
+			a.totalInputTokens += usage.InputTokens
+		}
 		if apiOutputAccum > 0 {
 			a.totalOutputTokens += apiOutputAccum
 		} else if response != "" {
-			// Fallback: estimate output tokens from response length (approx 4 chars per token)
 			a.totalOutputTokens += len(response) / 4
-		}
-		if apiInputAccum > 0 {
-			a.totalInputTokens = apiInputAccum
 		}
 		a.mu.Unlock()
 	}
@@ -1334,7 +1334,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		a.totalOutputTokens += len(response) / 4
 	}
 	if apiInput > 0 {
-		a.totalInputTokens = apiInput
+		a.totalInputTokens += apiInput
 	}
 	a.mu.Unlock()
 
@@ -2793,21 +2793,25 @@ func outputContainsVerificationSignals(output string) bool {
 		return false
 	}
 
-	negative := []string{" failed", " failure", " error", "panic", "traceback", "assertionerror"}
-	for _, marker := range negative {
-		if strings.Contains(" "+lower, marker) {
-			return false
-		}
-	}
-
+	// Check positive signals first — "all tests passed" is conclusive even if
+	// test names contain words like "error" or "failure" (e.g. test_error_handling).
 	positive := []string{
+		"all tests passed", "tests passed", "build succeeded",
 		"passed", "successful", "verified", "no issues", "no errors",
-		"build succeeded", "all tests passed", "lint passed", "check passed",
+		"lint passed", "check passed",
 		"успеш", "проверен", "проверка пройдена", "без ошибок",
 	}
 	for _, marker := range positive {
 		if strings.Contains(lower, marker) {
 			return true
+		}
+	}
+
+	// Only reject on negative signals when no positive signal was found.
+	negative := []string{" failed", " failure", "panic:", "traceback", "assertionerror"}
+	for _, marker := range negative {
+		if strings.Contains(" "+lower, marker) {
+			return false
 		}
 	}
 	return false

@@ -438,11 +438,15 @@ func (c *Client) request(ctx context.Context, method string, params any) (*JSONR
 
 // notify sends a notification (no response expected).
 func (c *Client) notify(method string, params any) error {
+	c.mu.RLock()
+	transport := c.transport
+	c.mu.RUnlock()
+
 	msg := &JSONRPCMessage{
 		Method: method,
 		Params: params,
 	}
-	return c.transport.Send(msg)
+	return transport.Send(msg)
 }
 
 // Initialize initializes the connection with the MCP server.
