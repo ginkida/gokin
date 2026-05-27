@@ -125,6 +125,14 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 
 // detectTestFramework auto-detects the test framework from project files.
 func detectTestFramework(dir string) string {
+	return detectTestFrameworkBounded(dir, 10)
+}
+
+func detectTestFrameworkBounded(dir string, depth int) string {
+	if depth <= 0 {
+		return ""
+	}
+
 	checks := []struct {
 		file      string
 		framework string
@@ -144,10 +152,9 @@ func detectTestFramework(dir string) string {
 		}
 	}
 
-	// Walk up to find project root
 	parent := filepath.Dir(dir)
 	if parent != dir {
-		return detectTestFramework(parent)
+		return detectTestFrameworkBounded(parent, depth-1)
 	}
 
 	return ""

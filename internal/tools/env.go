@@ -160,8 +160,9 @@ func isSensitiveVar(name string) bool {
 
 // maskValue masks a sensitive value, showing only first and last characters.
 func maskValue(value string) string {
-	if len(value) <= 4 {
+	runes := []rune(value)
+	if len(runes) <= 4 {
 		return "****"
 	}
-	return value[:2] + "****" + value[len(value)-2:]
+	return string(runes[:2]) + "****" + string(runes[len(runes)-2:])
 }

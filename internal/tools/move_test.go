@@ -131,8 +131,8 @@ func TestMoveTool_DirectoryMoveSkipsUndo(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	if mgr.CanUndo() {
-		t.Error("directory move should not record an undo entry")
+	if !mgr.CanUndo() {
+		t.Error("directory move should record an undo entry")
 	}
 	if _, err := os.Stat(filepath.Join(dstDir, "f.txt")); err != nil {
 		t.Errorf("dest dir missing after directory move: %v", err)

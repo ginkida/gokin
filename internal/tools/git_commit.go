@@ -111,12 +111,17 @@ func (t *GitCommitTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outStr := string(output)
-		// Check for common issues
 		if strings.Contains(outStr, "nothing to commit") {
 			return NewErrorResult("nothing to commit, working tree clean"), nil
 		}
 		if strings.Contains(outStr, "no changes added") {
 			return NewErrorResult("no changes added to commit (use git_add first or set all=true)"), nil
+		}
+		if strings.Contains(outStr, "unmerged files") || strings.Contains(outStr, "during a merge") {
+			return NewErrorResult("cannot commit: unmerged files exist. Resolve conflicts first, then git_add the resolved files."), nil
+		}
+		if strings.Contains(outStr, "rebase in progress") {
+			return NewErrorResult("cannot commit: a rebase is in progress. Use bash to run 'git rebase --continue' or 'git rebase --abort' first."), nil
 		}
 		return NewErrorResult(fmt.Sprintf("git commit failed: %s\n%s", err, outStr)), nil
 	}

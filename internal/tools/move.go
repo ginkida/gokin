@@ -134,7 +134,7 @@ func (t *MoveTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// Record for undo. Move is rename-only — undo just renames back, so we only
 	// need the original source path. The undo manager has Tool=="move"-aware
 	// dispatch in revertChange/applyChange (manager.go).
-	if t.undoManager != nil && !srcInfo.IsDir() {
+	if t.undoManager != nil {
 		change := &undo.FileChange{
 			FilePath:   dest,
 			Tool:       "move",

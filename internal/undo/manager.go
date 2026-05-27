@@ -232,16 +232,22 @@ func (m *Manager) CanRedo() bool {
 
 // List returns the list of undoable changes.
 func (m *Manager) List() []FileChange {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.tracker.List()
 }
 
 // ListRecent returns the N most recent changes.
 func (m *Manager) ListRecent(n int) []FileChange {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.tracker.ListRecent(n)
 }
 
 // Count returns the number of undoable changes.
 func (m *Manager) Count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.tracker.Count()
 }
 
