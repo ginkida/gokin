@@ -242,14 +242,17 @@ func (t *RefactorTool) renameInGoFile(filePath string, content []byte, oldName, 
 	for i := len(positions) - 1; i >= 0; i-- {
 		pos := positions[i]
 		position := fset.Position(pos)
-		offset := position.Offset - 1 // Convert to 0-indexed
+		offset := position.Offset // Already 0-indexed per token.Position spec
 
 		// Replace identifier
 		newContent = newContent[:offset] + newName + newContent[offset+len(oldName):]
 	}
 
-	// Write back (diff preview requires context, skip for now)
-	if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
+	perm := os.FileMode(0644)
+	if info, err := os.Stat(filePath); err == nil {
+		perm = info.Mode().Perm()
+	}
+	if err := os.WriteFile(filePath, []byte(newContent), perm); err != nil {
 		return 0, err
 	}
 

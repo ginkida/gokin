@@ -373,15 +373,17 @@ func (t *WebFetchTool) ExecuteStreaming(ctx context.Context, args map[string]any
 			return
 		}
 
-		// Stream content in 2KB chunks
+		// Stream content in ~2KB rune-safe chunks so multi-byte
+		// UTF-8 characters are never split at chunk boundaries.
 		content := toolResult.Content
-		const chunkSize = 2048
-		for i := 0; i < len(content); i += chunkSize {
-			end := min(i+chunkSize, len(content))
+		runes := []rune(content)
+		const chunkRunes = 2048
+		for i := 0; i < len(runes); i += chunkRunes {
+			end := min(i+chunkRunes, len(runes))
 			select {
 			case <-ctx.Done():
 				return
-			case chunks <- content[i:end]:
+			case chunks <- string(runes[i:end]):
 			}
 		}
 	}()

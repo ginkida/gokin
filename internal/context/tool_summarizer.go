@@ -33,6 +33,8 @@ func (c *ResultCompactor) SummarizeForPrune(toolName, content string) string {
 		summary = summarizeGitLogOutput(content)
 	case "tree":
 		summary = summarizeTreeOutput(content)
+	case "edit", "write", "delete", "move", "copy", "refactor":
+		summary = summarizeMutationOutput(content)
 	default:
 		summary = defaultSummary(toolName, content)
 	}
@@ -374,6 +376,29 @@ func summarizeTreeOutput(content string) string {
 	}
 
 	return strings.Join(parts, " | ")
+}
+
+// summarizeMutationOutput extracts key facts from edit/write/delete/move/copy results.
+func summarizeMutationOutput(content string) string {
+	lines := strings.SplitN(content, "\n", 5)
+	var kept []string
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" || l == "---" {
+			continue
+		}
+		if runes := []rune(l); len(runes) > 120 {
+			l = string(runes[:120])
+		}
+		kept = append(kept, l)
+		if len(kept) >= 3 {
+			break
+		}
+	}
+	if len(kept) == 0 {
+		return "completed"
+	}
+	return strings.Join(kept, " | ")
 }
 
 // defaultSummary provides a generic summary with the first line of content.

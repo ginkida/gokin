@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"gokin/internal/logging"
 	"gokin/internal/security"
@@ -509,13 +510,13 @@ func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*gen
 }
 
 // estimateTokens provides a character-based token estimation for non-Anthropic providers.
+// Uses rune count (not byte count) so non-ASCII text is measured correctly.
 func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model string) (*genai.CountTokensResponse, error) {
 	totalChars := 0
 	for _, content := range contents {
-		totalChars += 4 * 4 // role overhead (~4 tokens)
 		for _, part := range content.Parts {
 			if part.Text != "" {
-				totalChars += len(part.Text)
+				totalChars += utf8.RuneCountInString(part.Text)
 			}
 			if part.FunctionCall != nil {
 				totalChars += len(part.FunctionCall.Name) + 40
@@ -537,7 +538,7 @@ func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model string
 		multiplier = 3.5
 	}
 
-	estimatedTokens := int32(float64(totalChars) / multiplier)
+	estimatedTokens := int32(float64(totalChars)/multiplier) + int32(len(contents))*4
 	return &genai.CountTokensResponse{
 		TotalTokens: estimatedTokens,
 	}, nil

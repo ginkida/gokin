@@ -184,6 +184,16 @@ func (tp *TreePlanner) BuildTree(ctx context.Context, prompt string, goal *PlanG
 	tree.BestPath = tp.SelectBestPath(tree)
 
 	tp.mu.Lock()
+	// Evict old trees to prevent unbounded memory growth. Keep only
+	// the current + 1 previous tree (for reference/comparison).
+	const maxTrees = 2
+	if len(tp.trees) >= maxTrees {
+		for id := range tp.trees {
+			if id != tp.lastTreeID {
+				delete(tp.trees, id)
+			}
+		}
+	}
 	tp.trees[tree.ID] = tree
 	tp.lastTreeID = tree.ID
 	tp.mu.Unlock()
