@@ -430,7 +430,7 @@ func (m *ContextManager) notifyOptimizeStart(reason string) {
 
 // backgroundOptimize runs context optimization in a background goroutine.
 // Only one optimization runs at a time; concurrent calls are no-ops.
-func (m *ContextManager) backgroundOptimize(ctx context.Context) {
+func (m *ContextManager) backgroundOptimize(_ context.Context) {
 	// Atomic CAS prevents concurrent summarization without holding the mutex
 	if !m.summarizing.CompareAndSwap(false, true) {
 		return // Already running
@@ -450,8 +450,11 @@ func (m *ContextManager) backgroundOptimize(ctx context.Context) {
 			close(done)
 		}()
 
-		// Timeout prevents hang if LLM API is unresponsive during summarization.
-		sumCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		// Use the manager's lifecycle context, not the request context.
+		// The request context is cancelled when the API call returns, but
+		// background summarization may still be running — using the request
+		// ctx causes it to abort prematurely on fast responses.
+		sumCtx, cancel := context.WithTimeout(m.ctx, 60*time.Second)
 		defer cancel()
 
 		start := time.Now()

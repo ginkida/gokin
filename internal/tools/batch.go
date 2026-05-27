@@ -311,7 +311,11 @@ func (t *BatchTool) replaceInFile(path, search, replacement string, dryRun bool)
 	newContent := strings.ReplaceAll(content, search, replacement)
 	newData := []byte(newContent)
 
-	if err := AtomicWrite(path, newData, 0644); err != nil {
+	perm := os.FileMode(0644)
+	if info, stErr := os.Stat(path); stErr == nil {
+		perm = info.Mode().Perm()
+	}
+	if err := AtomicWrite(path, newData, perm); err != nil {
 		return err
 	}
 

@@ -1053,6 +1053,7 @@ func (r *Runner) cleanupOldResults() {
 		if removeCount > 0 {
 			for i := range removeCount {
 				delete(r.results, completed[i].id)
+				delete(r.agents, completed[i].id) // keep agents and results in sync
 			}
 			logging.Debug("cleaned up old results", "removed", removeCount)
 		}

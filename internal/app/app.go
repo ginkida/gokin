@@ -1718,6 +1718,10 @@ func (a *App) ClearConversation() {
 	if a.workingMemory != nil {
 		a.workingMemory.Clear()
 	}
+
+	// Drain stale rate-limit retry counters so exhausted keys from the
+	// old conversation don't accumulate indefinitely.
+	a.rateLimitRetryCount = make(map[string]int)
 }
 
 // CompactContextWithPlan clears the conversation and injects the plan summary.
