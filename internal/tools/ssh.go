@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -347,6 +349,9 @@ func (t *SSHTool) executeBackground(ctx context.Context, args map[string]any, co
 
 func (t *SSHTool) uploadFile(ctx context.Context, args map[string]any) (ToolResult, error) {
 	localPath, _ := GetString(args, "local_path")
+	if err := validateSSHLocalPath(localPath); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
 	remotePath, _ := GetString(args, "remote_path")
 	config := t.buildConfig(args)
 
@@ -369,6 +374,9 @@ func (t *SSHTool) uploadFile(ctx context.Context, args map[string]any) (ToolResu
 func (t *SSHTool) downloadFile(ctx context.Context, args map[string]any) (ToolResult, error) {
 	remotePath, _ := GetString(args, "remote_path")
 	localPath, _ := GetString(args, "local_path")
+	if err := validateSSHLocalPath(localPath); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
 	config := t.buildConfig(args)
 
 	// Get or create session
@@ -443,4 +451,28 @@ func (t *SSHTool) Cleanup() {
 	if t.sessionManager != nil {
 		t.sessionManager.Stop()
 	}
+}
+
+// validateSSHLocalPath blocks SSH file transfers involving sensitive paths.
+func validateSSHLocalPath(localPath string) error {
+	abs, err := filepath.Abs(localPath)
+	if err != nil {
+		return fmt.Errorf("invalid local path: %s", err)
+	}
+	blocked := []string{"/etc/", "/var/", "/usr/", "/sys/", "/proc/"}
+	for _, prefix := range blocked {
+		if strings.HasPrefix(abs, prefix) {
+			return fmt.Errorf("local path %s is in a restricted system directory", abs)
+		}
+	}
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		sensitive := []string{".ssh", ".gnupg", ".aws", ".config/gcloud"}
+		for _, dir := range sensitive {
+			if strings.HasPrefix(abs, filepath.Join(home, dir)) {
+				return fmt.Errorf("local path %s is in a sensitive directory", abs)
+			}
+		}
+	}
+	return nil
 }

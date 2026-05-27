@@ -197,9 +197,16 @@ func (nm *NotificationManager) sendNativeNotification(n Notification) {
 		title = fmt.Sprintf("Gokin: %s", n.ToolName)
 	}
 
-	// Escape message for AppleScript
-	msg := strings.ReplaceAll(n.Message, "\"", "\\\"")
-	msg = strings.ReplaceAll(msg, "'", "\\'")
+	// Sanitize both msg and title for AppleScript string interpolation.
+	sanitize := func(s string) string {
+		s = strings.ReplaceAll(s, "\\", "\\\\")
+		s = strings.ReplaceAll(s, "\"", "\\\"")
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, "\r", "")
+		return s
+	}
+	msg := sanitize(n.Message)
+	title = sanitize(title)
 
 	script := fmt.Sprintf("display notification \"%s\" with title \"%s\"", msg, title)
 	_ = exec.Command("osascript", "-e", script).Run()

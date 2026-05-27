@@ -81,6 +81,11 @@ func (t *GitPRTool) Validate(args map[string]any) error {
 		if pr == "" {
 			return NewValidationError("pr_number", "is required for "+action)
 		}
+		for _, c := range pr {
+			if c < '0' || c > '9' {
+				return NewValidationError("pr_number", "must be a numeric PR number")
+			}
+		}
 	case "list":
 		// no extra params
 	}

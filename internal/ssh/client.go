@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gokin/internal/logging"
@@ -52,18 +53,17 @@ func DefaultSSHConfig() *SSHConfig {
 
 // SSHClient manages SSH connections.
 type SSHClient struct {
-	config  *SSHConfig
-	conn    *ssh.Client
-	mu      sync.Mutex
-	lastUse time.Time
+	config      *SSHConfig
+	conn        *ssh.Client
+	mu          sync.Mutex
+	lastUseNano atomic.Int64 // Unix nano, accessed without mu
 }
 
 // NewSSHClient creates a new SSH client.
 func NewSSHClient(config *SSHConfig) *SSHClient {
-	return &SSHClient{
-		config:  config,
-		lastUse: time.Now(),
-	}
+	c := &SSHClient{config: config}
+	c.lastUseNano.Store(time.Now().UnixNano())
+	return c
 }
 
 // Connect establishes SSH connection.
@@ -75,7 +75,7 @@ func (c *SSHClient) Connect(ctx context.Context) error {
 		// Check if connection is still alive
 		_, _, err := c.conn.SendRequest("keepalive@openssh.com", true, nil)
 		if err == nil {
-			c.lastUse = time.Now()
+			c.lastUseNano.Store(time.Now().UnixNano())
 			return nil // Connection still good
 		}
 		// Connection dead, close and reconnect
@@ -110,7 +110,7 @@ func (c *SSHClient) Connect(ctx context.Context) error {
 	}
 
 	c.conn = ssh.NewClient(sshConn, chans, reqs)
-	c.lastUse = time.Now()
+	c.lastUseNano.Store(time.Now().UnixNano())
 
 	logging.Info("SSH connection established", "host", c.config.Host)
 	return nil
@@ -229,7 +229,7 @@ func (c *SSHClient) Execute(ctx context.Context, command string) (string, int, e
 		session.Signal(ssh.SIGKILL)
 		return "", -1, ctx.Err()
 	case err := <-done:
-		c.lastUse = time.Now()
+		c.lastUseNano.Store(time.Now().UnixNano())
 		output := stdout.String()
 		if stderr.Len() > 0 {
 			if output != "" {
@@ -299,7 +299,7 @@ func (c *SSHClient) Upload(ctx context.Context, localPath, remotePath string) er
 		logging.Warn("failed to set remote file permissions", "error", err)
 	}
 
-	c.lastUse = time.Now()
+	c.lastUseNano.Store(time.Now().UnixNano())
 	logging.Info("file uploaded", "local", localPath, "remote", remotePath)
 	return nil
 }
@@ -352,7 +352,7 @@ func (c *SSHClient) Download(ctx context.Context, remotePath, localPath string) 
 		logging.Warn("failed to set local file permissions", "error", err)
 	}
 
-	c.lastUse = time.Now()
+	c.lastUseNano.Store(time.Now().UnixNano())
 	logging.Info("file downloaded", "remote", remotePath, "local", localPath)
 	return nil
 }
@@ -386,9 +386,7 @@ func (c *SSHClient) IsConnected() bool {
 
 // LastUse returns the time of last activity.
 func (c *SSHClient) LastUse() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.lastUse
+	return time.Unix(0, c.lastUseNano.Load())
 }
 
 // SessionKey returns a unique key for this session.

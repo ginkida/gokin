@@ -93,20 +93,29 @@ func (t *HistorySearchTool) Execute(ctx context.Context, args map[string]any) (T
 			}
 
 			if text != "" && re.MatchString(text) {
-				// Find matches and extract context
-				locs := re.FindAllStringIndex(text, -1)
+				locs := re.FindAllStringIndex(text, 5)
+				runes := []rune(text)
 				for _, loc := range locs {
-					start := loc[0] - 50
+					// Convert byte offsets to rune offsets for safe slicing
+					runeStart := len([]rune(text[:loc[0]]))
+					runeEnd := len([]rune(text[:loc[1]]))
+					start := runeStart - 50
 					if start < 0 {
 						start = 0
 					}
-					end := loc[1] + 50
-					if end > len(text) {
-						end = len(text)
+					end := runeEnd + 50
+					if end > len(runes) {
+						end = len(runes)
 					}
-					excerpt := text[start:end]
+					excerpt := string(runes[start:end])
 					results = append(results, fmt.Sprintf("[Message %d, Role: %s] ...%s...", i, content.Role, excerpt))
+					if len(results) >= 20 {
+						break
+					}
 				}
+			}
+			if len(results) >= 20 {
+				break
 			}
 		}
 	}
