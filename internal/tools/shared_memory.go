@@ -204,7 +204,7 @@ func (t *SharedMemoryTool) executeWrite(args map[string]any) (ToolResult, error)
 	key, _ := GetString(args, "key")
 	value, _ := GetString(args, "value")
 	entryType, _ := GetString(args, "type")
-	ttlMinutes := GetIntDefault(args, "ttl_minutes", 0)
+	ttlMinutes := clampTTLMinutes(GetIntDefault(args, "ttl_minutes", 0))
 
 	ttl := time.Duration(ttlMinutes) * time.Minute
 

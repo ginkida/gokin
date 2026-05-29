@@ -75,6 +75,13 @@ func (t *DiffTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	file2, hasFile2 := GetString(args, "file2")
 	content, _ := GetString(args, "content")
 	contextLines := GetIntDefault(args, "context_lines", 3)
+	// Bound context_lines: negatives break hunk windowing (max(0, i-n) skips lines),
+	// and large values explode memory/time on big files. Clamp to a sane range.
+	if contextLines < 0 {
+		contextLines = 0
+	} else if contextLines > 100 {
+		contextLines = 100
+	}
 
 	// Read first file
 	content1, err := os.ReadFile(file1)

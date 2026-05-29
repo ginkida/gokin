@@ -248,11 +248,7 @@ func (t *RefactorTool) renameInGoFile(filePath string, content []byte, oldName, 
 		newContent = newContent[:offset] + newName + newContent[offset+len(oldName):]
 	}
 
-	perm := os.FileMode(0644)
-	if info, err := os.Stat(filePath); err == nil {
-		perm = info.Mode().Perm()
-	}
-	if err := os.WriteFile(filePath, []byte(newContent), perm); err != nil {
+	if err := AtomicWrite(filePath, []byte(newContent), existingPerm(filePath)); err != nil {
 		return 0, err
 	}
 
@@ -286,8 +282,8 @@ func (t *RefactorTool) renameInTextFile(filePath string, content []byte, oldName
 		newText = newText[:start] + newName + newText[end:]
 	}
 
-	// Write back
-	if err := os.WriteFile(filePath, []byte(newText), 0644); err != nil {
+	// Write back (preserve mode, atomic temp+rename)
+	if err := AtomicWrite(filePath, []byte(newText), existingPerm(filePath)); err != nil {
 		return 0, err
 	}
 
@@ -347,7 +343,7 @@ func (t *RefactorTool) executeExtract(_ context.Context, args map[string]any) (T
 	contentStr := newContent.String()
 
 	// Write back (diff preview requires context, skip for now)
-	if err := os.WriteFile(filePath, []byte(contentStr), 0644); err != nil {
+	if err := AtomicWrite(filePath, []byte(contentStr), existingPerm(filePath)); err != nil {
 		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 	}
 
@@ -509,8 +505,8 @@ func (t *RefactorTool) executeInline(_ context.Context, args map[string]any) (To
 		newContent = newContent[:cs.start] + replacement + newContent[cs.end:]
 	}
 
-	// Write back
-	if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
+	// Write back (preserve mode, atomic temp+rename)
+	if err := AtomicWrite(filePath, []byte(newContent), existingPerm(filePath)); err != nil {
 		return NewErrorResult(fmt.Sprintf("error writing file: %s", err)), nil
 	}
 
