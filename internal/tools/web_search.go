@@ -212,7 +212,7 @@ func (t *WebSearchTool) searchSerpAPI(ctx context.Context, query string, numResu
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10)) // cap error body; it only feeds the message
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -281,7 +281,7 @@ func (t *WebSearchTool) searchGoogle(ctx context.Context, query string, numResul
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10)) // cap error body; it only feeds the message
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 

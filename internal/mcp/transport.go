@@ -383,7 +383,7 @@ func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
 
 	// Check status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10)) // cap error body; it only feeds the message
 		return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
 	}
 

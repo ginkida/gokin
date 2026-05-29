@@ -493,7 +493,7 @@ func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*gen
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10)) // cap error body; it only feeds the message
 		return nil, fmt.Errorf("count_tokens returned %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -917,7 +917,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 	if resp.StatusCode != http.StatusOK {
 		retryAfter := ParseRetryAfter(resp)
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10)) // cap error body; it only feeds the message
 		if err != nil {
 			logging.Error("failed to read error response", "error", err)
 			body = []byte("(failed to read response body)")
