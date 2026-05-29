@@ -186,6 +186,14 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	if tm, ok := args["timeout_minutes"].(float64); ok {
 		timeoutMinutes = int(tm)
 	}
+	// Clamp to a sane range: a negative/zero value yields an instant (or past)
+	// deadline, and a huge one overflows time.Duration(n)*time.Minute to a
+	// negative wait. Bound to [1, 120] minutes.
+	if timeoutMinutes < 1 {
+		timeoutMinutes = 1
+	} else if timeoutMinutes > 120 {
+		timeoutMinutes = 120
+	}
 
 	// Create coordinator via factory
 	coordAny := t.coordinatorFactory()

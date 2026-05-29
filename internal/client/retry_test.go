@@ -206,3 +206,31 @@ func TestExtractOpenAIRateLimits(t *testing.T) {
 		t.Errorf("Unexpected values: %+v", rl)
 	}
 }
+
+// TestCappedRetryDelay pins the v0.85.15 fix: a server-supplied Retry-After is
+// honored above the computed backoff but never beyond maxRetryAfter, so a bad
+// provider sending an absurd value (e.g. a unix timestamp) can't park the
+// client for decades, bypassing the backoff cap.
+func TestCappedRetryDelay(t *testing.T) {
+	const maxRA = 2 * time.Minute
+	backoff := 5 * time.Second
+
+	cases := []struct {
+		name       string
+		retryAfter time.Duration
+		want       time.Duration
+	}{
+		{"absent (0) → backoff", 0, backoff},
+		{"negative → backoff", -10 * time.Second, backoff},
+		{"below backoff → backoff", 2 * time.Second, backoff},
+		{"above backoff, under cap → honored", 30 * time.Second, 30 * time.Second},
+		{"absurd (decades) → capped", 1735689600 * time.Second, maxRA},
+		{"exactly cap → cap", maxRA, maxRA},
+	}
+	for _, c := range cases {
+		if got := cappedRetryDelay(backoff, c.retryAfter, maxRA); got != c.want {
+			t.Errorf("%s: cappedRetryDelay(%v, %v, %v) = %v, want %v",
+				c.name, backoff, c.retryAfter, maxRA, got, c.want)
+		}
+	}
+}

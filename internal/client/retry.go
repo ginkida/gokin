@@ -245,6 +245,19 @@ func CalculateBackoff(baseDelay time.Duration, attempt int, maxDelay time.Durati
 	return delay + jitter
 }
 
+// cappedRetryDelay returns how long to wait before the next retry. It honors a
+// server-supplied Retry-After when it exceeds the computed backoff, but never
+// beyond maxRetryAfter — a buggy provider/proxy sending an absurd Retry-After
+// (e.g. a unix timestamp landing in the header → ~decades) must not park the
+// client far past its backoff policy. A non-positive retryAfter falls back to
+// the backoff.
+func cappedRetryDelay(backoff, retryAfter, maxRetryAfter time.Duration) time.Duration {
+	if retryAfter > backoff {
+		return min(retryAfter, maxRetryAfter)
+	}
+	return backoff
+}
+
 // ParseRetryAfter extracts Retry-After duration from an HTTP response.
 // Supports both seconds (integer) and HTTP-date formats.
 // Returns 0 if the header is absent or unparseable.
