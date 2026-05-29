@@ -11,8 +11,9 @@ func TestGetSimilarExamplesNonPositiveLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewExampleStore: %v", err)
 	}
-	// Seed at least one example so the path isn't short-circuited by emptiness.
-	_ = es.LearnFromSuccess("build", "compile the project", "general", "ok", 0, 0)
+	// No seeding: the limit<=0 guard returns before touching examples, and
+	// LearnFromSuccess spawns an async save goroutine that races t.TempDir
+	// cleanup. The guard is what we're testing, so an empty store is enough.
 
 	for _, limit := range []int{-5, -1, 0} {
 		func() {
