@@ -66,6 +66,9 @@ func compactInline(text string, maxLen int) string {
 	if len(runes) <= maxLen {
 		return text
 	}
+	if maxLen <= 3 {
+		return string(runes[:maxLen]) // no room for ellipsis; avoids maxLen-3 underflow panic
+	}
 	return string(runes[:maxLen-3]) + "..."
 }
 

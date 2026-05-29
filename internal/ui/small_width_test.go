@@ -29,3 +29,20 @@ func TestAgentTreePanelSmallWidthNoPanic(t *testing.T) {
 		}()
 	}
 }
+
+// TestCompactInlineSmallBudgetNoPanic pins the v0.85.14 fix: compactInline did
+// string(runes[:maxLen-3]) guarding only maxLen<=0, so maxLen in {1,2} drove a
+// negative slice bound → panic. It now floors like the other truncation helpers.
+func TestCompactInlineSmallBudgetNoPanic(t *testing.T) {
+	long := "this is a long string that exceeds any small budget"
+	for _, n := range []int{-1, 0, 1, 2, 3, 4} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("compactInline(long, %d) panicked: %v", n, r)
+				}
+			}()
+			_ = compactInline(long, n)
+		}()
+	}
+}

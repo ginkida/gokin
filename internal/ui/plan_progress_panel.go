@@ -424,9 +424,9 @@ func (p *PlanProgressPanel) View(width int) string {
 			info := p.currentInfo
 			maxInfoLen := panelWidth - lipgloss.Width(toolLine) - 6
 			if maxInfoLen > 0 {
-				if runes := []rune(info); len(runes) > maxInfoLen {
-					info = string(runes[:maxInfoLen-3]) + "..."
-				}
+				// truncateForWidth handles maxInfoLen in {1,2,3} without the
+				// maxInfoLen-3 underflow panic the manual slice had.
+				info = truncateForWidth(info, maxInfoLen)
 			}
 			if maxInfoLen > 0 {
 				toolLine += " " + infoStyle.Render(info)

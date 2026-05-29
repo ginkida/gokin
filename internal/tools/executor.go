@@ -1427,7 +1427,6 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 		}
 	}
 
-	resultIdx := 0                                 // tracks position in the flat results array
 	callToIdx := make(map[*genai.FunctionCall]int) // map call pointer to results index
 	for i, call := range calls {
 		callToIdx[call] = i
@@ -1524,7 +1523,6 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 				}()
 			}
 		}
-		resultIdx += len(group.Calls)
 	}
 
 	return results, nil

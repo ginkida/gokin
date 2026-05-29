@@ -411,11 +411,9 @@ func (h *ContextualHelp) View(width int) string {
 	// Join hints with separator
 	hintText := strings.Join(h.hints, " • ")
 
-	// Truncate if too long
-	maxWidth := width - 4
-	if runes := []rune(hintText); len(runes) > maxWidth {
-		hintText = string(runes[:maxWidth-3]) + "..."
-	}
+	// Truncate if too long (truncateForWidth floors at 0 / handles width<=3,
+	// so a narrow terminal can't drive maxWidth-3 negative → panic).
+	hintText = truncateForWidth(hintText, width-4)
 
 	return helpStyle.Render(hintText)
 }
