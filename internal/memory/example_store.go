@@ -319,6 +319,13 @@ func (es *ExampleStore) pruneOldExamples(taskType string, maxCount int) {
 
 // GetSimilarExamples finds examples similar to the given prompt.
 func (es *ExampleStore) GetSimilarExamples(prompt string, limit int) []TaskExampleSummary {
+	// Guard limit <= 0 (e.g. a negative ExampleLimit from config reaching the
+	// unguarded GetExamplesForContext path): make([]T, limit) panics on a
+	// negative size. NotificationManager.GetHistory guards this the same way.
+	if limit <= 0 {
+		return nil
+	}
+
 	es.mu.RLock()
 	defer es.mu.RUnlock()
 
