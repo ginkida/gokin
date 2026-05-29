@@ -299,6 +299,13 @@ func (t *TokenCounter) addToCache(key string, tokens int) {
 
 // GetUsage returns current token usage statistics.
 func (t *TokenCounter) GetUsage(tokenCount int) TokenUsage {
+	// Guard against a zero/unset limit: float division by zero yields +Inf,
+	// which would make PercentUsed/NearLimit report "near limit" for any
+	// token count. getModelLimits always returns a non-zero default, but a
+	// zero-value TokenCounter or a bad config must not corrupt the readout.
+	if t.limits.MaxInputTokens <= 0 {
+		return TokenUsage{InputTokens: tokenCount, MaxTokens: 0}
+	}
 	percentUsed := float64(tokenCount) / float64(t.limits.MaxInputTokens)
 
 	return TokenUsage{

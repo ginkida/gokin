@@ -97,6 +97,16 @@ func (s *MessageScorer) ScoreMessage(msg *genai.Content) MessageScore {
 		References: make([]string, 0),
 	}
 
+	// Nil-safe like relevance_scorer (which guards nil at every site): a nil
+	// entry in the history slice would otherwise panic on msg.Role below.
+	// Score it as droppable rather than crash the compaction pass.
+	if msg == nil {
+		score.Priority = PriorityLow
+		score.Score = 0
+		score.Reason = "nil message"
+		return score
+	}
+
 	// Check role
 	if msg.Role == genai.RoleUser {
 		// User messages are generally important
@@ -363,6 +373,9 @@ func (s *MessageScorer) SetSemanticTimeout(d time.Duration) {
 
 // hashMessage generates a SHA256 hash for a single message, used as cache key.
 func hashMessage(msg *genai.Content) string {
+	if msg == nil {
+		return "nil"
+	}
 	h := sha256.New()
 	h.Write([]byte(msg.Role))
 	for _, part := range msg.Parts {
@@ -502,6 +515,9 @@ func (s *MessageScorer) ScoreMessagesWithContext(ctx context.Context, messages [
 	// but only request scores for uncached indices
 	var builder strings.Builder
 	for i, msg := range messages {
+		if msg == nil {
+			continue
+		}
 		role := "User"
 		if msg.Role == genai.RoleModel {
 			role = "Assistant"
