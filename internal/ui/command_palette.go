@@ -611,7 +611,7 @@ func (p *CommandPalette) View(width, height int) string {
 					if lastCategory != "" || showingRecent {
 						// Separator line between categories
 						sepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
-						content.WriteString(sepStyle.Render("  " + strings.Repeat("─", paletteWidth-8)))
+						content.WriteString(sepStyle.Render("  " + strings.Repeat("─", max(0, paletteWidth-8))))
 						content.WriteString("\n")
 					}
 					icon := cmd.Category.Icon

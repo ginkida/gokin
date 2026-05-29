@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gokin/internal/testkit"
 )
 
 // TestRefactorRenamePreservesFileMode pins the v0.85.9 fix: the refactor tool's
@@ -13,7 +15,7 @@ import (
 // execute bit from 0755 source files (shell scripts, build wrappers). They now
 // route through AtomicWrite(existingPerm(path)) like edit/write.
 func TestRefactorRenamePreservesFileMode(t *testing.T) {
-	dir := t.TempDir()
+	dir := testkit.ResolvedTempDir(t)
 	file := filepath.Join(dir, "main.go")
 	src := "package main\n\nfunc oldName() int { return oldName() + 1 }\n"
 	if err := os.WriteFile(file, []byte(src), 0o755); err != nil {
@@ -21,6 +23,7 @@ func TestRefactorRenamePreservesFileMode(t *testing.T) {
 	}
 
 	tool := NewRefactorTool()
+	tool.SetWorkDir(dir)
 	res, err := tool.Execute(context.Background(), map[string]any{
 		"operation": "rename",
 		"file_path": file,
@@ -51,6 +54,42 @@ func TestRefactorRenamePreservesFileMode(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o755 {
 		t.Errorf("file mode = %o after refactor rename, want 0755 (execute bit stripped)", got)
 	}
+}
+
+// TestRefactorRejectsOutOfRootPath pins the v0.85.11 fix: refactor write
+// operations now run file_path through PathValidator like edit/write, so a
+// path escaping the workspace root is rejected instead of read+rewritten.
+func TestRefactorRejectsOutOfRootPath(t *testing.T) {
+	root := testkit.ResolvedTempDir(t)
+	outside := testkit.ResolvedTempDir(t) // a sibling root, not under `root`
+	victim := filepath.Join(outside, "secret.go")
+	original := "package main\n\nfunc oldName() {}\n"
+	if err := os.WriteFile(victim, []byte(original), 0o644); err != nil {
+		t.Fatalf("seed victim: %v", err)
+	}
+
+	tool := NewRefactorTool()
+	tool.SetWorkDir(root) // only `root` is an allowed write root
+
+	res, err := tool.Execute(context.Background(), map[string]any{
+		"operation": "rename",
+		"file_path": victim, // outside the allowed root
+		"old_name":  "oldName",
+		"new_name":  "newName",
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	// rename of a single out-of-root file should surface as a failed result
+	// (or at minimum leave the victim untouched).
+	out, readErr := os.ReadFile(victim)
+	if readErr != nil {
+		t.Fatalf("victim read-back: %v", readErr)
+	}
+	if string(out) != original {
+		t.Fatalf("out-of-root file was modified by refactor; path validation bypassed.\ngot:\n%s", out)
+	}
+	_ = res
 }
 
 func TestClampTTLMinutes(t *testing.T) {

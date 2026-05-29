@@ -293,7 +293,7 @@ func (p *AgentTreePanel) View(width int) string {
 	// Summary footer
 	summary := p.buildSummary()
 	if summary != "" {
-		builder.WriteString(dimStyle.Render(strings.Repeat("─", width-4)))
+		builder.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-4))))
 		builder.WriteString("\n")
 		builder.WriteString(dimStyle.Render("  " + summary))
 		builder.WriteString("\n")

@@ -520,7 +520,7 @@ func (p *ActivityFeedPanel) View(width int) string {
 
 	// Metrics summary line
 	if metricsLine := p.buildMetricsSummary(); metricsLine != "" {
-		builder.WriteString(dimStyle.Render(strings.Repeat("─", width-4)))
+		builder.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-4))))
 		builder.WriteString("\n")
 		builder.WriteString(dimStyle.Render("  " + metricsLine))
 		builder.WriteString("\n")
@@ -528,7 +528,7 @@ func (p *ActivityFeedPanel) View(width int) string {
 
 	// Separator if we have recent log
 	if len(p.recentLog) > 0 && len(p.entries) > 0 {
-		builder.WriteString(dimStyle.Render(strings.Repeat("─", width-4)))
+		builder.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-4))))
 		builder.WriteString("\n")
 	}
 

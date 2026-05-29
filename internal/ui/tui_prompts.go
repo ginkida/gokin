@@ -325,6 +325,12 @@ func (m Model) renderPlanApproval() string {
 	if panelWidth > 90 {
 		panelWidth = 90
 	}
+	// Floor at 1 so panelWidth-1 border/padding repeats never go negative.
+	// At m.width == 0 (pre-WindowSizeMsg startup) panelWidth would be 0 and
+	// strings.Repeat(..., -1) panics.
+	if panelWidth < 1 {
+		panelWidth = 1
+	}
 
 	// Header
 	stepCount := len(m.planRequest.Steps)

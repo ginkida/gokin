@@ -199,7 +199,33 @@ func (t *RefactorTool) executeRename(ctx context.Context, args map[string]any) (
 }
 
 // renameInFile performs AST-based renaming in a single file.
+// validateWritePath enforces the same path-safety contract as edit/write:
+// the path must resolve inside an allowed root (PathValidator) and must not
+// target a blocked location like .git/. Without this, refactor's file_path /
+// glob pattern came straight from the model with NO validation — a path such
+// as "../../etc/x" or ".git/hooks/pre-commit" would be read and rewritten.
+func (t *RefactorTool) validateWritePath(filePath string) (string, error) {
+	if t.pathValidator == nil {
+		return "", fmt.Errorf("security error: path validator not initialized")
+	}
+	validPath, err := t.pathValidator.ValidateFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("path validation failed: %s", err)
+	}
+	if err := security.IsBlockedWritePath(validPath); err != nil {
+		return "", err
+	}
+	return validPath, nil
+}
+
 func (t *RefactorTool) renameInFile(_ context.Context, filePath, oldName, newName string) (int, error) {
+	// Validate path before any I/O (covers single-file and glob-matched paths).
+	validPath, err := t.validateWritePath(filePath)
+	if err != nil {
+		return 0, err
+	}
+	filePath = validPath
+
 	// Read file
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -306,6 +332,12 @@ func (t *RefactorTool) executeExtract(_ context.Context, args map[string]any) (T
 	if filePath == "" || extractName == "" || startLine == 0 || endLine == 0 {
 		return NewErrorResult("file_path, extract_name, start_line, and end_line are required"), nil
 	}
+
+	validPath, err := t.validateWritePath(filePath)
+	if err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+	filePath = validPath
 
 	// Read file
 	content, err := os.ReadFile(filePath)
@@ -422,6 +454,12 @@ func (t *RefactorTool) executeInline(_ context.Context, args map[string]any) (To
 	if filePath == "" || targetName == "" {
 		return NewErrorResult("file_path and target_name are required for inline"), nil
 	}
+
+	validPath, err := t.validateWritePath(filePath)
+	if err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+	filePath = validPath
 
 	content, err := os.ReadFile(filePath)
 	if err != nil {
