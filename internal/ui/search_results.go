@@ -430,8 +430,11 @@ func (m SearchResultsModel) GetSelectedResult() (SearchResult, bool) {
 // truncate truncates a string to max length (rune-safe).
 func truncate(s string, maxLen int) string {
 	runes := []rune(s)
-	if len(runes) <= maxLen {
+	if maxLen <= 0 || len(runes) <= maxLen {
 		return s
+	}
+	if maxLen <= 3 {
+		return string(runes[:maxLen]) // no room for ellipsis; avoids maxLen-3 underflow panic
 	}
 	return string(runes[:maxLen-3]) + "..."
 }

@@ -435,7 +435,10 @@ func truncateError(msg string, maxLen int) string {
 	msg = strings.ReplaceAll(msg, "\n", " ")
 	msg = strings.TrimSpace(msg)
 
-	if runes := []rune(msg); len(runes) > maxLen {
+	if runes := []rune(msg); maxLen > 0 && len(runes) > maxLen {
+		if maxLen <= 3 {
+			return string(runes[:maxLen]) // no room for ellipsis; avoids maxLen-3 underflow panic
+		}
 		return string(runes[:maxLen-3]) + "..."
 	}
 	return msg

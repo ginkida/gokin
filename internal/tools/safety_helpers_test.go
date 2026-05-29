@@ -83,6 +83,21 @@ func TestTruncateString_RuneAware(t *testing.T) {
 	if got := truncateString("hi", 10); got != "hi" {
 		t.Errorf("short input changed: %q", got)
 	}
+
+	// v0.85.10: maxLen < 3 must not panic on the runes[:maxLen-3] underflow.
+	for _, maxLen := range []int{-1, 0, 1, 2, 3} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("truncateString(longstring, %d) panicked: %v", maxLen, r)
+				}
+			}()
+			got := truncateString("привет мир", maxLen)
+			if !utf8.ValidString(got) {
+				t.Errorf("maxLen=%d produced invalid UTF-8: %q", maxLen, got)
+			}
+		}()
+	}
 }
 
 func TestToolDisplayName(t *testing.T) {

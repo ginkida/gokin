@@ -64,9 +64,6 @@ func (a *App) notifyNewPattern(key string, sequence []string, count int) {
 	if a.knownPatterns == nil {
 		a.knownPatterns = make(map[string]bool)
 	}
-	if a.lastPatternNotify.IsZero() {
-		a.lastPatternNotify = time.Time{}
-	}
 
 	// Skip if already known
 	if a.knownPatterns[key] {
@@ -82,14 +79,14 @@ func (a *App) notifyNewPattern(key string, sequence []string, count int) {
 
 	a.knownPatterns[key] = true
 	a.lastPatternNotify = time.Now()
-	prog := a.program
 	a.mu.Unlock()
 
-	// Send toast notification
-	if prog != nil {
-		msg := fmt.Sprintf("🧠 Pattern: %s (seen %dx)", strings.Join(sequence, " → "), count)
-		prog.Send(ui.LearningInsightMsg{Message: msg})
-	}
+	// Send toast notification via safeSendToProgram — it re-reads a.program
+	// under a.mu and recovers from a closed-channel send during shutdown.
+	// detectPatterns runs on the message-processing goroutine, so a raw
+	// program.Send() here could panic if shutdown clears the program first.
+	msg := fmt.Sprintf("🧠 Pattern: %s (seen %dx)", strings.Join(sequence, " → "), count)
+	a.safeSendToProgram(ui.LearningInsightMsg{Message: msg})
 }
 
 // getToolHints generates hints based on detected tool usage patterns.
