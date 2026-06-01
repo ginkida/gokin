@@ -899,6 +899,46 @@ func (a *Agent) drainSteers() {
 	}
 }
 
+// agentMutatingTools are tools that change code on disk — their presence in a
+// run means the agent's output should be verified before it's accepted.
+var agentMutatingTools = map[string]bool{
+	"edit": true, "write": true, "refactor": true, "batch": true, "multiedit": true,
+	"delete": true, "move": true, "atomicwrite": true,
+}
+
+// agentVerificationTools run a check that could surface a broken build/test.
+// Any of them in the run means the agent at least had the chance to verify, so
+// we don't nudge (conservative — avoids nagging agents that did verify).
+var agentVerificationTools = map[string]bool{
+	"bash": true, "verify_code": true, "run_tests": true, "run_command": true,
+}
+
+// needsVerificationNudge reports whether the agent changed code this run but
+// never ran any verification command — the sub-agent analogue of "claimed done
+// without verifying" that the foreground done-gate catches.
+func (a *Agent) needsVerificationNudge() bool {
+	mutated, verified := false, false
+	for _, t := range a.GetToolsUsed() {
+		if agentMutatingTools[t] {
+			mutated = true
+		}
+		if agentVerificationTools[t] {
+			verified = true
+		}
+	}
+	return mutated && !verified
+}
+
+// appendVerificationNudge injects a one-time reminder to verify code changes
+// before finishing, using the agent's own tools (bash/verify_code).
+func (a *Agent) appendVerificationNudge() {
+	const nudge = "[guidance] Before you finish: you changed code but haven't run any build/test/lint this turn. Run the narrowest meaningful check now (e.g. the project's build or targeted tests), fix the first real failure, then complete. Do not claim the work is done or verified until a check has actually passed."
+	a.stateMu.Lock()
+	a.history = append(a.history, genai.NewContentFromText(nudge, genai.RoleUser))
+	a.stateMu.Unlock()
+	logging.Info("verify-before-done nudge injected into sub-agent", "agent_id", a.ID, "type", a.Type)
+}
+
 func (a *Agent) maybeAutoCheckpoint() {
 	if !a.autoCheckpoint || a.store == nil {
 		return
@@ -2389,6 +2429,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	noProgressTurns := 0
 	repeatedPlanRecoveries := 0 // Per-category budget: max 2
 	noProgressRecoveries := 0   // Per-category budget: max 2
+	verifyNudged := false       // verify-before-done nudge fires at most once
 	lastCallPlanFingerprint := ""
 	samePlanTurns := 0
 	lastTextFingerprint := ""
@@ -2988,6 +3029,16 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				}
 			}
 
+			continue
+		}
+
+		// Verify-before-done (sub-agent analogue of the foreground done-gate):
+		// if the agent changed code but never ran any verification command this
+		// run, nudge it once to build/test before finishing. Conservative — it
+		// won't nag an agent that ran any command, so false nudges are rare.
+		if !verifyNudged && a.needsVerificationNudge() {
+			verifyNudged = true
+			a.appendVerificationNudge()
 			continue
 		}
 
