@@ -426,7 +426,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		}()
 
 		startTime := time.Now()
-		result, err := agent.Run(agentCtx, prompt)
+		result, err := agent.Run(agentCtx, r.withFewShot(deps, agentType, prompt))
 		duration := time.Since(startTime)
 
 		// Ensure result is never nil
@@ -646,7 +646,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		}
 
 		startTime := time.Now()
-		result, err := agent.Run(agentCtx, prompt)
+		result, err := agent.Run(agentCtx, r.withFewShot(deps, agentType, prompt))
 		duration := time.Since(startTime)
 
 		// Ensure result is never nil
@@ -766,7 +766,7 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 				defer cancel()
 			}
 			startTime := time.Now()
-			result, err := agent.Run(runCtx, t.Prompt)
+			result, err := agent.Run(runCtx, r.withFewShot(deps, string(t.Type), t.Prompt))
 			duration := time.Since(startTime)
 
 			// Ensure result is never nil (matches SpawnAsync pattern)
