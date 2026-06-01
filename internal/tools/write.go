@@ -19,6 +19,12 @@ type WriteTool struct {
 	diffHandler   DiffHandler
 	diffEnabled   bool
 	pathValidator *security.PathValidator
+
+	// readTracker + requireReadBeforeOverwrite mirror EditTool's read-before-edit
+	// guard for the full-overwrite case: blindly overwriting an existing file the
+	// model only grepped (never read) silently destroys whatever it didn't see.
+	readTracker                *FileReadTracker
+	requireReadBeforeOverwrite bool
 }
 
 // NewWriteTool creates a new WriteTool instance.
@@ -42,6 +48,19 @@ func (t *WriteTool) SetDiffHandler(handler DiffHandler) {
 // SetDiffEnabled enables or disables diff preview.
 func (t *WriteTool) SetDiffEnabled(enabled bool) {
 	t.diffEnabled = enabled
+}
+
+// SetReadTracker wires the shared file-read tracker so write can enforce
+// read-before-overwrite (when enabled).
+func (t *WriteTool) SetReadTracker(tracker *FileReadTracker) {
+	t.readTracker = tracker
+}
+
+// SetRequireReadBeforeOverwrite toggles the read-before-overwrite guard. Only
+// affects full overwrites of EXISTING files — new files and append=true are
+// always allowed.
+func (t *WriteTool) SetRequireReadBeforeOverwrite(require bool) {
+	t.requireReadBeforeOverwrite = require
 }
 
 // SetAllowedDirs sets additional allowed directories for path validation.
@@ -130,6 +149,17 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	var oldContent []byte
 	_, existErr := os.Stat(filePath)
 	isNew := os.IsNotExist(existErr)
+
+	// Read-before-overwrite guard: a full overwrite of an existing file the model
+	// hasn't read this session blindly discards everything it didn't see. New
+	// files and append-mode are exempt (nothing is lost).
+	if !isNew && !appendMode && t.requireReadBeforeOverwrite && t.readTracker != nil &&
+		!t.readTracker.HasBeenRead(filePath) {
+		return NewErrorResult(fmt.Sprintf(
+			"read-before-overwrite: call the read tool on %s before overwriting it — a full write replaces the entire file and would discard anything you haven't seen. Read it first, then write (or use edit for a targeted change, or append=true to add without overwriting).",
+			filePath,
+		)), nil
+	}
 
 	if !isNew {
 		var err error

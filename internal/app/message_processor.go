@@ -529,8 +529,16 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	apiOutputAccum += apiOutput
 	cacheReadAccum += cacheRead
 
-	// Update session history
-	a.session.SetHistory(newHistory)
+	// Update session history. Defensive shrink-guard: a normal turn result must
+	// EXTEND the conversation. If a handler ever returns a shorter slice than we
+	// fed in (e.g. a minimal-history router path that wasn't extended), committing
+	// it verbatim would wipe prior turns — keep the existing history instead.
+	if len(newHistory) >= len(history) {
+		a.session.SetHistory(newHistory)
+	} else {
+		logging.Warn("dropping non-extending turn result to avoid history wipe",
+			"got", len(newHistory), "had", len(history))
+	}
 	a.applyToolOutputHygiene()
 
 	// Extract session memory if thresholds are met

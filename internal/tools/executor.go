@@ -813,7 +813,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	retryPolicy.MaxRetries = 0
 	retryPolicy.MaxPartialRetries = 0
 
-	for i := range maxIterations {
+	i := 0
+	for ; i < maxIterations; i++ {
 		if e.readTracker != nil {
 			e.readTracker.IncrementTurn()
 		}
@@ -1283,6 +1284,17 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				e.handler.OnText(finalText)
 			}
 		}
+	}
+
+	// If the loop ran to the iteration cap (rather than breaking out because the
+	// model finished), the work is almost certainly incomplete — the model was
+	// still calling tools when we cut it off. Mark it so partial output isn't
+	// silently handed back as a finished answer (and so the done-gate can react).
+	if i >= maxIterations {
+		logging.Warn("executor hit iteration cap with model still active",
+			"maxIterations", maxIterations, "toolsUsed", len(toolsUsed))
+		marker := "\n\n⚠ Reached the tool-iteration limit for this turn — this work may be INCOMPLETE. Re-run or ask me to continue to finish the remaining steps."
+		finalText += marker
 	}
 
 	return history, finalText, nil

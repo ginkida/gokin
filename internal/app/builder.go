@@ -984,6 +984,17 @@ func (b *Builder) initIntegrations() error {
 		}
 	}
 
+	// Wire the same read-before guard onto the write tool (full-overwrite case),
+	// sharing the read tracker with read/edit so a file read once counts for all.
+	if writeTool, ok := b.registry.Get("write"); ok {
+		if wt, ok := writeTool.(*tools.WriteTool); ok {
+			if b.readTracker != nil {
+				wt.SetReadTracker(b.readTracker)
+			}
+			wt.SetRequireReadBeforeOverwrite(b.cfg.Tools.RequireReadBeforeEdit)
+		}
+	}
+
 	// Set additional allowed directories from config
 	if len(b.cfg.Tools.AllowedDirs) > 0 {
 		if readTool, ok := b.registry.Get("read"); ok {

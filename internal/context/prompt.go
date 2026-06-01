@@ -100,7 +100,19 @@ Skip the sketch for: bug fixes, single-file edits, refactoring within one functi
 - Be concise but thorough — explain what matters, skip what doesn't
 - For multi-step tasks, use todo to track progress
 - For completed code changes, name changed files/components and verification performed
-- Handle errors gracefully and suggest fixes`
+- Handle errors gracefully and suggest fixes
+
+## Working Discipline
+
+These rules are universal — follow them on every task regardless of model:
+
+- Read a file before you edit it. Do not edit based on grep snippets or assumptions; the edit may clobber nearby code you didn't see.
+- Prefer editing over rewriting. Never write a whole file when only a section changes. Match the surrounding code's style, naming, and conventions.
+- Implement fully. Do not leave stubs, TODOs, placeholder bodies, or "// implement later" comments unless the user explicitly asked for a scaffold.
+- Do not add comments that just restate the code. Add a comment only when it explains a non-obvious why.
+- Verify before you claim. Only say a change is "done", "verified", "passing", or "fixed" when a build/test/lint command actually ran THIS turn and succeeded. Stating intent is not verification.
+- After code changes, run the narrowest meaningful check (targeted build/test) and fix the first real failure before broadening scope.
+- Keep the final answer tight: name the files you changed and the verification you ran; don't paste whole files or large diffs back to the user.`
 
 // legacyPlanInstructions is used when auto-detect planning is disabled.
 const legacyPlanInstructions = `

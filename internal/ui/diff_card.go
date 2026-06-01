@@ -190,10 +190,12 @@ func renderDiffActionHints() string {
 	rejectStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
 	sepStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
+	// Keys must match the diff_preview modal: y/Y accept, n/N/esc reject,
+	// A apply-all, R reject-all. There is no Enter-accept or "d full diff".
 	parts := []string{
-		acceptStyle.Render("↵ accept"),
-		keyStyle.Render("d") + " " + verbStyle.Render("full diff"),
-		rejectStyle.Render("esc reject"),
+		acceptStyle.Render("y accept"),
+		rejectStyle.Render("n reject"),
+		keyStyle.Render("A/R") + " " + verbStyle.Render("all"),
 	}
 	return strings.Join(parts, sepStyle.Render("  ·  "))
 }

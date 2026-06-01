@@ -245,6 +245,10 @@ func (r *Router) RouteWithContext(ctx context.Context, message string) *RoutingD
 
 // Execute routes the task to the appropriate handler and returns the result
 func (r *Router) Execute(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
+	// Preserve the user's original message for the history record — the routing
+	// scaffolding below augments `message` with analysis/thinking hints we don't
+	// want persisted.
+	originalMessage := message
 	decision := r.RouteWithContext(ctx, message)
 
 	// Apply thinking budget for this request
@@ -275,16 +279,39 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 		return r.executor.Execute(ctx, history, message)
 
 	case HandlerSubAgent:
-		// Spawn a sub-agent
-		return r.executeViaSubAgent(ctx, message, decision.SubAgentType, decision.Background)
+		// Spawn a sub-agent. The sub-agent path returns a MINIMAL history (just
+		// the synthesized response), so extend the prior conversation rather
+		// than letting the caller replace it.
+		h, resp, err := r.executeViaSubAgent(ctx, message, decision.SubAgentType, decision.Background)
+		return extendConversation(history, originalMessage, h, resp, err)
 
 	case HandlerCoordinated:
-		// Execute via coordinator with decomposed subtasks
-		return r.executeCoordinated(ctx, decision.Decomposition)
+		// Execute via coordinator with decomposed subtasks (also minimal history).
+		h, resp, err := r.executeCoordinated(ctx, decision.Decomposition)
+		return extendConversation(history, originalMessage, h, resp, err)
 
 	default:
 		return r.executor.Execute(ctx, history, message)
 	}
+}
+
+// extendConversation makes a minimal-history handler result (sub-agent /
+// coordinated, which return only the synthesized response) EXTEND the prior
+// conversation instead of replacing it. Without this, the caller's
+// SetHistory(newHistory) wipes every prior turn AND the user's message — the
+// next turn starts with amnesia. Direct/executor handlers already return a
+// full extended history, so they bypass this.
+func extendConversation(prior []*genai.Content, userMessage string, result []*genai.Content, response string, err error) ([]*genai.Content, string, error) {
+	if err != nil {
+		return result, response, err
+	}
+	extended := make([]*genai.Content, 0, len(prior)+1+len(result))
+	extended = append(extended, prior...)
+	if strings.TrimSpace(userMessage) != "" {
+		extended = append(extended, genai.NewContentFromText(userMessage, genai.RoleUser))
+	}
+	extended = append(extended, result...)
+	return extended, response, nil
 }
 
 // executeDirect gets a direct AI response without tool usage.
