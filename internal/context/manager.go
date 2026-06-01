@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -877,8 +878,17 @@ func (m *ContextManager) EmergencyTruncate() int {
 	// Adjust boundary so FunctionCall/FunctionResponse pairs are not split
 	cutoff = AdjustBoundaryForToolPairs(tail, cutoff)
 
-	newHistory := make([]*genai.Content, 0, len(preserved)+len(tail)-cutoff)
+	// Re-grounding: emergency truncation keeps only history[:2] + the recent
+	// tail, so the original task (~history[2]) and the working file-set get
+	// dropped — the model then drifts off-task. Splice a concise re-grounding
+	// note where the task used to sit so it survives the cut.
+	regrounding := m.buildRegroundingNote(history)
+
+	newHistory := make([]*genai.Content, 0, len(preserved)+1+len(tail)-cutoff)
 	newHistory = append(newHistory, preserved...)
+	if regrounding != nil {
+		newHistory = append(newHistory, regrounding)
+	}
 	newHistory = append(newHistory, tail[cutoff:]...)
 
 	m.session.SetHistory(newHistory)
@@ -906,6 +916,51 @@ func (m *ContextManager) EmergencyTruncate() int {
 	}
 
 	return removed
+}
+
+// buildRegroundingNote synthesizes a compact reminder of the original task and
+// the working file-set, injected after a hard truncation so the model keeps the
+// thread. Returns nil when no task message is found (nothing useful to say).
+func (m *ContextManager) buildRegroundingNote(history []*genai.Content) *genai.Content {
+	// Original task = the first non-empty user message in the conversation.
+	task := ""
+	for _, c := range history {
+		if c == nil || c.Role != genai.RoleUser {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p != nil && strings.TrimSpace(p.Text) != "" {
+				task = p.Text
+				break
+			}
+		}
+		if task != "" {
+			break
+		}
+	}
+	if task == "" {
+		return nil
+	}
+	if r := []rune(task); len(r) > 600 {
+		task = string(r[:600]) + "…"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[Context was truncated to fit the model's limit — re-grounding so you keep the thread.]\n\n")
+	sb.WriteString("Original task: ")
+	sb.WriteString(task)
+
+	if files := m.GetKeyFiles(); len(files) > 0 {
+		sort.Strings(files)
+		if len(files) > 12 {
+			files = files[:12]
+		}
+		sb.WriteString("\n\nKey files touched this session: ")
+		sb.WriteString(strings.Join(files, ", "))
+	}
+	sb.WriteString("\n\nContinue from where you left off. Re-read a file if you need its current contents.")
+
+	return genai.NewContentFromText(sb.String(), genai.RoleUser)
 }
 
 // Close cancels the lifecycle context, stopping any background goroutines.
