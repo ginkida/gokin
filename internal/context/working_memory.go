@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"gokin/internal/fileutil"
 	"gokin/internal/logging"
@@ -135,8 +134,10 @@ func renderWorkingMemory(turn WorkingMemoryTurn) string {
 	}
 
 	var builder strings.Builder
-	builder.WriteString("# Working Memory\n")
-	fmt.Fprintf(&builder, "_Updated: %s_\n\n", time.Now().Format("15:04"))
+	// No wall-clock timestamp here: this block is injected into the CACHED system
+	// prefix, and a per-minute "Updated: HH:MM" busted prompt caching every minute
+	// (re-billing the whole system+tools prefix) for no model benefit.
+	builder.WriteString("# Working Memory\n\n")
 
 	appendWorkingMemorySection(&builder, "Established", established)
 	appendWorkingMemorySection(&builder, "Unknown", unknown)

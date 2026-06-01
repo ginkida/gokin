@@ -150,8 +150,10 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 	}
 
 	var builder strings.Builder
-	builder.WriteString("# Session Memory\n")
-	fmt.Fprintf(&builder, "_Updated: %s_\n\n", time.Now().Format("15:04"))
+	// No wall-clock timestamp: this block is injected into the CACHED system
+	// prefix; a per-minute "Updated: HH:MM" busted prompt caching every minute
+	// for no model benefit (same reason working_memory dropped its timestamp).
+	builder.WriteString("# Session Memory\n\n")
 
 	// Extract current task from the last few user messages
 	if task := extractCurrentTask(history); task != "" {
