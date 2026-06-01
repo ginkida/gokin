@@ -839,8 +839,18 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 }
 
 // EmergencyTruncate performs hard truncation of history when token count exceeds the model limit.
-// Unlike summarization, this is synchronous and guaranteed to succeed.
-// Strategy: keep first 2 messages (system context) + last N messages that fit within 70% of limit.
+// Unlike summarization, this is synchronous and guaranteed to fit within budget.
+//
+// Strategy: keep first 2 messages (system context) + a recent tail (continuity)
+// + the highest-IMPORTANCE messages rescued from the older region that the
+// recent-tail cut would otherwise drop wholesale. Pre-v0.86.6 this was
+// recency-only — an old-but-critical tool result or error was discarded purely
+// for being old, even though the budget had room. Now a slice of the budget is
+// reserved to rescue scored middle messages (errors/edits/tool results rank
+// highest via MessageScorer), so the survivor set is "recent + important", not
+// just "recent". Mirrors the agent's forceCompactViaTruncation intent while
+// keeping the emergency path's budget guarantee (it fires precisely because we
+// blew the limit, so it must produce a result that fits).
 func (m *ContextManager) EmergencyTruncate() int {
 	history := m.session.GetHistory()
 	if len(history) <= 4 {
@@ -849,47 +859,64 @@ func (m *ContextManager) EmergencyTruncate() int {
 
 	targetTokens := int(float64(m.tokenCounter.limits.MaxInputTokens) * 0.7)
 
-	// Always preserve first 2 messages (system/greeting) and build from the end
+	// Nothing to do if the whole conversation already fits the budget. (Counts
+	// preserved too, since those messages are also kept against the budget.)
+	if EstimateContentsTokens(history) <= targetTokens {
+		return 0
+	}
+
+	// Always preserve first 2 messages (system/greeting) and build from the end.
 	preserved := history[:2]
 	tail := history[2:]
 
-	// Scan from newest to oldest, accumulating until we hit target
+	// Budget split: the recent tail gets the bulk (continuity matters most for
+	// resuming the task); reserve ~25% of the remaining budget to rescue the
+	// most important older messages that recency alone would drop.
+	budget := max(0, targetTokens-EstimateContentsTokens(preserved))
+	rescueBudget := budget / 4
+	recencyBudget := budget - rescueBudget
+
+	// Scan from newest to oldest within the recency budget, accumulating until
+	// the next message would overflow it.
 	tailTokens := 0
 	cutoff := len(tail)
-	truncationNeeded := false
 	for i := len(tail) - 1; i >= 0; i-- {
 		msgTokens := EstimateContentsTokens([]*genai.Content{tail[i]})
-		if tailTokens+msgTokens > targetTokens {
+		if tailTokens+msgTokens > recencyBudget {
 			cutoff = i + 1
-			truncationNeeded = true
 			break
 		}
 		tailTokens += msgTokens
 	}
 
-	// If no message exceeded the budget, all messages fit — nothing to truncate.
-	// Note: cutoff == len(tail) after the loop can mean EITHER "all fit" OR
-	// "the newest single message is already over budget" — use the explicit flag
-	// to distinguish them and avoid skipping a needed truncation.
-	if !truncationNeeded {
-		return 0
-	}
-
 	// Adjust boundary so FunctionCall/FunctionResponse pairs are not split
 	cutoff = AdjustBoundaryForToolPairs(tail, cutoff)
 
-	// Re-grounding: emergency truncation keeps only history[:2] + the recent
-	// tail, so the original task (~history[2]) and the working file-set get
-	// dropped — the model then drifts off-task. Splice a concise re-grounding
-	// note where the task used to sit so it survives the cut.
+	recencyTail := tail[cutoff:]
+	dropped := tail[:cutoff]
+
+	// Rescue the highest-importance messages from the dropped region within the
+	// reserved budget, returned in chronological order.
+	rescued := m.selectImportantWithinBudget(dropped, rescueBudget)
+
+	// Re-grounding: emergency truncation keeps only history[:2] + the rescued
+	// middle + the recent tail, so the original task (~history[2]) and the
+	// working file-set may get dropped — the model then drifts off-task. Splice
+	// a concise re-grounding note where the task used to sit so it survives.
 	regrounding := m.buildRegroundingNote(history)
 
-	newHistory := make([]*genai.Content, 0, len(preserved)+1+len(tail)-cutoff)
+	newHistory := make([]*genai.Content, 0, len(preserved)+1+len(rescued)+len(recencyTail))
 	newHistory = append(newHistory, preserved...)
 	if regrounding != nil {
 		newHistory = append(newHistory, regrounding)
 	}
-	newHistory = append(newHistory, tail[cutoff:]...)
+	newHistory = append(newHistory, rescued...)
+	newHistory = append(newHistory, recencyTail...)
+
+	// Rescued messages are non-contiguous picks, so a rescued FunctionResponse
+	// whose FunctionCall wasn't rescued (or vice versa) would be orphaned —
+	// strict providers 400 on that. Prune orphaned tool parts as a final pass.
+	newHistory = pruneOrphanedToolParts(newHistory)
 
 	m.session.SetHistory(newHistory)
 
@@ -961,6 +988,69 @@ func (m *ContextManager) buildRegroundingNote(history []*genai.Content) *genai.C
 	sb.WriteString("\n\nContinue from where you left off. Re-read a file if you need its current contents.")
 
 	return genai.NewContentFromText(sb.String(), genai.RoleUser)
+}
+
+// selectImportantWithinBudget ranks the given messages by importance
+// (MessageScorer: errors/system → Critical, edits → High, verbose reads → Low)
+// and greedily keeps the highest-scored ones whose token cost fits the budget,
+// returning them in chronological order so the spliced history stays ordered.
+// Used by EmergencyTruncate to rescue valuable older messages instead of
+// dropping the whole middle by age. Returns nil when there's no budget, no
+// scorer, or no messages.
+func (m *ContextManager) selectImportantWithinBudget(msgs []*genai.Content, budget int) []*genai.Content {
+	if budget <= 0 || len(msgs) == 0 || m.messageScorer == nil {
+		return nil
+	}
+
+	type scoredMsg struct {
+		idx    int
+		score  float64
+		tokens int
+		msg    *genai.Content
+	}
+
+	items := make([]scoredMsg, 0, len(msgs))
+	for i, msg := range msgs {
+		if msg == nil {
+			continue
+		}
+		s := m.messageScorer.ScoreMessage(msg)
+		items = append(items, scoredMsg{
+			idx:    i,
+			score:  float64(s.Priority) + s.Score,
+			tokens: EstimateContentsTokens([]*genai.Content{msg}),
+			msg:    msg,
+		})
+	}
+
+	// Highest score first; stable on original index for ties.
+	sort.SliceStable(items, func(a, b int) bool {
+		if items[a].score != items[b].score {
+			return items[a].score > items[b].score
+		}
+		return items[a].idx < items[b].idx
+	})
+
+	picked := make([]scoredMsg, 0, len(items))
+	used := 0
+	for _, it := range items {
+		if used+it.tokens > budget {
+			continue // try a smaller one — a single huge message shouldn't block the rest
+		}
+		used += it.tokens
+		picked = append(picked, it)
+	}
+
+	// Restore chronological order for splicing.
+	sort.SliceStable(picked, func(a, b int) bool {
+		return picked[a].idx < picked[b].idx
+	})
+
+	out := make([]*genai.Content, 0, len(picked))
+	for _, it := range picked {
+		out = append(out, it.msg)
+	}
+	return out
 }
 
 // Close cancels the lifecycle context, stopping any background goroutines.

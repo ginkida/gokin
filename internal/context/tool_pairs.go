@@ -101,6 +101,89 @@ func AdjustBoundaryForToolPairs(history []*genai.Content, boundary int) int {
 	return adjusted
 }
 
+// pruneOrphanedToolParts removes FunctionCall parts whose matching
+// FunctionResponse is absent (and vice versa) from a history slice. Unlike
+// AdjustBoundaryForToolPairs — which shifts a single contiguous split boundary —
+// this handles a history assembled from NON-contiguous picks (e.g. importance-
+// rescued middle messages in EmergencyTruncate), where a rescued response may
+// have left its call behind. Strict providers 400 on an orphaned tool part, so
+// this is the safety net after any non-contiguous reassembly. A message left
+// with zero parts after pruning is dropped. Returns the input unchanged (same
+// backing pointers) when there are no orphans.
+func pruneOrphanedToolParts(history []*genai.Content) []*genai.Content {
+	callIDs := make(map[string]bool)
+	responseIDs := make(map[string]bool)
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" {
+				callIDs[part.FunctionCall.ID] = true
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+				responseIDs[part.FunctionResponse.ID] = true
+			}
+		}
+	}
+
+	// Fast path: count orphans first to avoid reallocating when none exist.
+	orphans := 0
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" && !responseIDs[part.FunctionCall.ID] {
+				orphans++
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" && !callIDs[part.FunctionResponse.ID] {
+				orphans++
+			}
+		}
+	}
+	if orphans == 0 {
+		return history
+	}
+
+	result := make([]*genai.Content, 0, len(history))
+	for _, msg := range history {
+		if msg == nil {
+			continue
+		}
+		keptParts := make([]*genai.Part, 0, len(msg.Parts))
+		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" && !responseIDs[part.FunctionCall.ID] {
+				continue
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.ID != "" && !callIDs[part.FunctionResponse.ID] {
+				continue
+			}
+			keptParts = append(keptParts, part)
+		}
+		if len(keptParts) == 0 {
+			continue
+		}
+		if len(keptParts) == len(msg.Parts) {
+			result = append(result, msg) // no parts removed — reuse pointer
+		} else {
+			result = append(result, &genai.Content{Role: msg.Role, Parts: keptParts})
+		}
+	}
+
+	logging.Debug("pruneOrphanedToolParts removed orphaned tool parts", "count", orphans)
+	return result
+}
+
 // collectRightIDs collects FunctionCall IDs and FunctionResponse IDs from history[boundary:].
 func collectRightIDs(history []*genai.Content, boundary int) (callIDs, responseIDs map[string]bool) {
 	callIDs = make(map[string]bool)
