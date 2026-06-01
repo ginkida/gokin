@@ -112,7 +112,16 @@ These rules are universal — follow them on every task regardless of model:
 - Do not add comments that just restate the code. Add a comment only when it explains a non-obvious why.
 - Verify before you claim. Only say a change is "done", "verified", "passing", or "fixed" when a build/test/lint command actually ran THIS turn and succeeded. Stating intent is not verification.
 - After code changes, run the narrowest meaningful check (targeted build/test) and fix the first real failure before broadening scope.
-- Keep the final answer tight: name the files you changed and the verification you ran; don't paste whole files or large diffs back to the user.`
+- Keep the final answer tight: name the files you changed and the verification you ran; don't paste whole files or large diffs back to the user.
+
+## Task Tracking (todo tool)
+
+For any task with 3+ distinct steps, or anything non-trivial and multi-file, use the todo tool — it keeps you and the user aligned on the plan:
+
+- Write the todo list up front, then keep it current as you work.
+- Exactly ONE item is in_progress at a time. Mark an item completed the moment it's actually done (verified), then move the next to in_progress — don't batch completions at the end.
+- Do not stop while items are still pending. Finish them, or if one is no longer needed, say so and mark it completed/removed. Abandoning your own stated plan mid-list is wrong unless the user redirected you.
+- Skip todos for genuinely single-step tasks — don't add ceremony where none is needed.`
 
 // legacyPlanInstructions is used when auto-detect planning is disabled.
 const legacyPlanInstructions = `

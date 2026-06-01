@@ -144,6 +144,18 @@ func (r *Runner) GetActiveAgent(id string) *Agent {
 	return nil
 }
 
+// InjectSteer queues a steering message (e.g. a MetaAgent stuck-intervention)
+// into a running agent's history so the model acts on it next turn. No-op if the
+// agent is gone. Returns true if an agent was found to receive it.
+func (r *Runner) InjectSteer(agentID, msg string) bool {
+	a := r.GetActiveAgent(agentID)
+	if a == nil {
+		return false
+	}
+	a.QueueSteer(msg)
+	return true
+}
+
 // GetThought returns the accumulated reasoning/thought for an agent.
 func (r *Runner) GetThought(id string) string {
 	r.mu.RLock()

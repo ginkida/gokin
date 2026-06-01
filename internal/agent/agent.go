@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -161,6 +162,12 @@ type Agent struct {
 
 	// State protection for concurrent access to status, history, startTime, endTime
 	stateMu sync.RWMutex
+
+	// pendingSteers holds steering messages (e.g. MetaAgent stuck-interventions)
+	// queued from another goroutine, drained into history at the top of each loop
+	// iteration so the model actually SEES the nudge instead of it being a UI-only
+	// toast. Guarded by stateMu.
+	pendingSteers []string
 
 	// Explicit cancellation for background agents (set by Runner)
 	cancelFunc context.CancelFunc
@@ -860,6 +867,38 @@ func (a *Agent) Close() error {
 }
 
 // maybeAutoCheckpoint saves a checkpoint if auto-checkpoint is enabled and interval has passed.
+// QueueSteer enqueues a steering message (e.g. a MetaAgent stuck-intervention)
+// to be injected into the agent's history at the top of the next loop iteration.
+// Safe to call from another goroutine. Deduplicates an identical pending nudge.
+func (a *Agent) QueueSteer(msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	if slices.Contains(a.pendingSteers, msg) {
+		return
+	}
+	a.pendingSteers = append(a.pendingSteers, msg)
+}
+
+// drainSteers appends any queued steering messages to history as user turns.
+// Called at the top of each loop iteration under no external lock.
+func (a *Agent) drainSteers() {
+	a.stateMu.Lock()
+	steers := a.pendingSteers
+	a.pendingSteers = nil
+	for _, s := range steers {
+		a.history = append(a.history, genai.NewContentFromText(
+			"[guidance] "+s, genai.RoleUser))
+	}
+	a.stateMu.Unlock()
+	for _, s := range steers {
+		logging.Info("injected steering message into agent", "agent_id", a.ID, "msg", s)
+	}
+}
+
 func (a *Agent) maybeAutoCheckpoint() {
 	if !a.autoCheckpoint || a.store == nil {
 		return
@@ -2377,6 +2416,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			return a.history, output.String(), ctx.Err()
 		default:
 		}
+
+		// Inject any queued steering messages (MetaAgent stuck-interventions)
+		// before this turn so the model actually acts on the nudge.
+		a.drainSteers()
 
 		// Auto-checkpoint if enabled
 		a.maybeAutoCheckpoint()

@@ -54,8 +54,10 @@ type MetaAgent struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// Callbacks for external notifications
-	onIntervention func(agentID string, reason string, action string)
+	// Callbacks for external notifications. `message` is the model-facing
+	// steering text to inject into the stuck agent; reason/action are the
+	// user-facing summary for a toast.
+	onIntervention func(agentID, reason, action, message string)
 	onStuckAgent   func(agentID string, duration time.Duration)
 }
 
@@ -281,7 +283,7 @@ func (ma *MetaAgent) handleStuckAgent(agentID string, monitor *AgentMonitor) {
 
 	// Notify callback outside lock
 	if callback != nil {
-		callback(agentID, reason, action)
+		callback(agentID, reason, action, interventionMsg)
 	}
 
 	// Log-based intervention for now. If the agent remains stuck past MaxInterventions,
@@ -314,7 +316,7 @@ func (ma *MetaAgent) runOptimization() {
 }
 
 // SetInterventionCallback sets the callback for intervention notifications.
-func (ma *MetaAgent) SetInterventionCallback(callback func(agentID string, reason string, action string)) {
+func (ma *MetaAgent) SetInterventionCallback(callback func(agentID, reason, action, message string)) {
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
 	ma.onIntervention = callback

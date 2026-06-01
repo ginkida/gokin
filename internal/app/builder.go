@@ -2139,11 +2139,15 @@ func (b *Builder) wireDependencies() error {
 
 	// Wire MetaAgent intervention callback to TUI toast
 	if b.metaAgent != nil {
-		b.metaAgent.SetInterventionCallback(func(agentID string, reason string, action string) {
-			if app.program != nil {
-				msg := fmt.Sprintf("⚡ Meta-Agent: %s → %s", action, reason)
-				app.safeSendToProgram(ui.LearningInsightMsg{Message: msg})
+		b.metaAgent.SetInterventionCallback(func(agentID, reason, action, message string) {
+			// Inject the steering text into the stuck agent so the model
+			// actually acts on it — not just a UI toast (the old behavior threw
+			// the computed advice away).
+			if b.agentRunner != nil && message != "" {
+				b.agentRunner.InjectSteer(agentID, message)
 			}
+			msg := fmt.Sprintf("⚡ Meta-Agent: %s → %s", action, reason)
+			app.safeSendToProgram(ui.LearningInsightMsg{Message: msg})
 		})
 	}
 
