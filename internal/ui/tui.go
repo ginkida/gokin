@@ -2426,6 +2426,10 @@ func collapsedByDefault(toolName string) bool {
 	switch toolName {
 	case "read", "bash":
 		return true
+	case "todo":
+		// The live checklist widget (emitTodoUpdate) already shows current
+		// state; re-printing the full list inline on every todo call is noise.
+		return true
 	}
 	return false
 }

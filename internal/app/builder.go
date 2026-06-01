@@ -1685,6 +1685,12 @@ func (b *Builder) wireDependencies() error {
 			app.recordResponseCommand(name, args, result)
 			app.recordResponseEvidence(name, args, result)
 
+			// Live todo checklist: flip items the instant the todo tool runs,
+			// instead of only at end-of-turn finalization.
+			if name == "todo" && result.Success {
+				app.emitTodoUpdate()
+			}
+
 			if app.program != nil {
 				app.safeSendToProgram(ui.ToolResultMsg{
 					Name:    name,

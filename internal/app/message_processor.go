@@ -668,26 +668,36 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	}
 
 	// Update todos display
+	a.emitTodoUpdate()
+}
+
+// emitTodoUpdate renders the current todo list and pushes it to the UI checklist
+// widget. Called both at turn finalization and live (the instant the todo tool
+// runs, via OnToolEnd) so the user can watch items flip in real time.
+func (a *App) emitTodoUpdate() {
 	todoTool, ok := a.registry.Get("todo")
-	if ok {
-		if tt, ok := todoTool.(*tools.TodoTool); ok {
-			items := tt.GetItems()
-			var display []string
-			for _, item := range items {
-				var icon string
-				switch item.Status {
-				case "pending":
-					icon = "○"
-				case "in_progress":
-					icon = "◐"
-				case "completed":
-					icon = "●"
-				}
-				display = append(display, fmt.Sprintf("%s %s", icon, item.Content))
-			}
-			a.safeSendToProgram(ui.TodoUpdateMsg(display))
-		}
+	if !ok {
+		return
 	}
+	tt, ok := todoTool.(*tools.TodoTool)
+	if !ok {
+		return
+	}
+	items := tt.GetItems()
+	display := make([]string, 0, len(items))
+	for _, item := range items {
+		var icon string
+		switch item.Status {
+		case "in_progress":
+			icon = "◐"
+		case "completed":
+			icon = "●"
+		default:
+			icon = "○"
+		}
+		display = append(display, fmt.Sprintf("%s %s", icon, item.Content))
+	}
+	a.safeSendToProgram(ui.TodoUpdateMsg(display))
 }
 
 // executePlanWithClearContext dispatches plan execution to either delegated

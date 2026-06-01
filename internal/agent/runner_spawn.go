@@ -11,6 +11,27 @@ import (
 	"gokin/internal/tools"
 )
 
+// fewShotExampleLimit caps how many past successful runs are injected as
+// few-shot context into a spawn prompt.
+const fewShotExampleLimit = 2
+
+// withFewShot prepends the most relevant past SUCCESSFUL runs (matched by prompt
+// tags, sorted by relevance×success) to a spawn prompt so the agent learns from
+// what worked before. This closes the ExampleStore loop — it was write-only
+// (LearnFromSuccess persisted runs but nothing ever read them back). Returns the
+// prompt unchanged when there's no example store or no tag overlap (common case),
+// so it's a no-op except where it genuinely helps.
+func (r *Runner) withFewShot(deps runnerAgentDeps, agentType, prompt string) string {
+	if deps.exampleStore == nil {
+		return prompt
+	}
+	examples := deps.exampleStore.GetExamplesForContext(agentType, prompt, fewShotExampleLimit)
+	if examples == "" {
+		return prompt
+	}
+	return examples + "\n---\n\nNow handle this request:\n\n" + prompt
+}
+
 // Spawn creates and starts a new agent with the given task.
 // agentType should be "explore", "bash", "general", "plan", "claude-code-guide", or "coordinator".
 // Also supports dynamic types registered via AgentTypeRegistry.
@@ -59,7 +80,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 		defer cancel()
 	}
 	startTime := time.Now()
-	result, err := agent.Run(runCtx, prompt)
+	result, err := agent.Run(runCtx, r.withFewShot(deps, agentType, prompt))
 	duration := time.Since(startTime)
 
 	// Notify UI about agent completion
@@ -203,7 +224,7 @@ func (r *Runner) SpawnWithContext(
 	agent.SetCancelFunc(runCancel)
 
 	startTime := time.Now()
-	result, err := agent.Run(runCtx, prompt)
+	result, err := agent.Run(runCtx, r.withFewShot(deps, agentType, prompt))
 	duration := time.Since(startTime)
 
 	// Ensure result is never nil (matches SpawnAsync pattern)
