@@ -30,11 +30,13 @@ type MCPAddParams struct {
 // is disabled or the callbacks are unset the tool returns a setup-hint
 // instead of erroring.
 type MCPAdminTool struct {
-	list    func() string
-	status  func(name string) string
-	add     func(ctx context.Context, params MCPAddParams) (string, error)
-	remove  func(name string) (string, error)
-	enabled func() bool
+	list          func() string
+	status        func(name string) string
+	add           func(ctx context.Context, params MCPAddParams) (string, error)
+	remove        func(name string) (string, error)
+	enabled       func() bool
+	listResources func() string
+	readResource  func(ctx context.Context, uri string) (string, error)
 }
 
 // NewMCPAdminTool constructs the tool with no callbacks attached. The builder
@@ -61,6 +63,19 @@ func (t *MCPAdminTool) SetMutationCallbacks(
 ) {
 	t.add = addFn
 	t.remove = removeFn
+}
+
+// SetResourceCallbacks wires the MCP resources read-path: listResourcesFn
+// renders a catalog of resources exposed across all servers, readResourceFn
+// fetches one resource's contents by URI. Separate setter so a build without
+// resource support (or a test) can leave them nil — Execute then reports the
+// op as unwired rather than panicking.
+func (t *MCPAdminTool) SetResourceCallbacks(
+	listResourcesFn func() string,
+	readResourceFn func(ctx context.Context, uri string) (string, error),
+) {
+	t.listResources = listResourcesFn
+	t.readResource = readResourceFn
 }
 
 func (t *MCPAdminTool) Name() string {
@@ -91,12 +106,17 @@ func MCPAdminToolDeclaration() *genai.FunctionDeclaration {
 						"'status' — detailed view; pass `server` to focus one. " +
 						"'help' — usage cheatsheet to share with the user. " +
 						"'add' — register a new MCP server; pass `server`, `transport`, plus `command`+`args` for stdio or `url` for http. " +
-						"'remove' — disconnect + drop a server by `server` name.",
-					Enum: []string{"list", "status", "help", "add", "remove"},
+						"'remove' — disconnect + drop a server by `server` name. " +
+						"'resources' — list context resources exposed by MCP servers; pass `uri` to read one resource's contents.",
+					Enum: []string{"list", "status", "help", "add", "remove", "resources"},
 				},
 				"server": {
 					Type:        genai.TypeString,
 					Description: "Server name. Required for action=status (focus one server), action=add, action=remove. Omitted for list shows everything.",
+				},
+				"uri": {
+					Type:        genai.TypeString,
+					Description: "Resource URI for action=resources. Provide it to read that resource's contents; omit to list every available resource.",
 				},
 				"transport": {
 					Type:        genai.TypeString,
@@ -124,7 +144,7 @@ func MCPAdminToolDeclaration() *genai.FunctionDeclaration {
 func (t *MCPAdminTool) Validate(args map[string]any) error {
 	action := GetStringDefault(args, "action", "list")
 	switch action {
-	case "list", "status", "help":
+	case "list", "status", "help", "resources":
 		return nil
 	case "add":
 		if GetStringDefault(args, "server", "") == "" {
@@ -152,7 +172,7 @@ func (t *MCPAdminTool) Validate(args map[string]any) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown action %q (use list, status, help, add, or remove)", action)
+		return fmt.Errorf("unknown action %q (use list, status, help, add, remove, or resources)", action)
 	}
 }
 
@@ -208,6 +228,22 @@ func (t *MCPAdminTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 			return NewErrorResult(err.Error()), nil
 		}
 		return NewSuccessResult(out), nil
+	case "resources":
+		uri := GetStringDefault(args, "uri", "")
+		if uri != "" {
+			if t.readResource == nil {
+				return NewErrorResult("mcp_admin resource read is not wired in this build"), nil
+			}
+			out, err := t.readResource(ctx, uri)
+			if err != nil {
+				return NewErrorResult(err.Error()), nil
+			}
+			return NewSuccessResult(out), nil
+		}
+		if t.listResources == nil {
+			return NewErrorResult("mcp_admin resources is not wired in this build"), nil
+		}
+		return NewSuccessResult(t.listResources()), nil
 	default:
 		return NewErrorResult(fmt.Sprintf("unknown action %q", action)), nil
 	}

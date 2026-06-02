@@ -626,6 +626,34 @@ func (c *Client) ListResources(ctx context.Context) ([]*Resource, error) {
 	return result.Resources, nil
 }
 
+// ReadResource fetches the contents of a single resource by URI.
+func (c *Client) ReadResource(ctx context.Context, uri string) (*ReadResourceResult, error) {
+	c.mu.RLock()
+	if !c.initialized {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("client not initialized")
+	}
+	c.mu.RUnlock()
+
+	resp, err := c.request(ctx, MethodResourcesRead, ReadResourceParams{URI: uri})
+	if err != nil {
+		return nil, fmt.Errorf("resources/read failed: %w", err)
+	}
+
+	resultBytes, err := json.Marshal(resp.Result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal read-resource result: %w", err)
+	}
+
+	var result ReadResourceResult
+	if err := json.Unmarshal(resultBytes, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse read-resource result: %w", err)
+	}
+
+	logging.Debug("MCP resource read", "server", c.serverName, "uri", uri, "parts", len(result.Contents))
+	return &result, nil
+}
+
 // GetServerInfo returns information about the connected server.
 func (c *Client) GetServerInfo() *ServerInfo {
 	c.mu.RLock()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -349,6 +350,99 @@ func (m *Manager) GetTools() []tools.Tool {
 	result := make([]tools.Tool, len(m.tools))
 	copy(result, m.tools)
 	return result
+}
+
+// MCPResource pairs a resource with the server that exposes it.
+type MCPResource struct {
+	Server      string
+	URI         string
+	Name        string
+	Description string
+	MIMEType    string
+}
+
+// namedMCPClient snapshots a client + its server name so the network round-trip
+// happens outside the manager lock.
+type namedMCPClient struct {
+	name   string
+	client *Client
+}
+
+func (m *Manager) snapshotClients() []namedMCPClient {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]namedMCPClient, 0, len(m.clients))
+	for name, c := range m.clients {
+		out = append(out, namedMCPClient{name: name, client: c})
+	}
+	return out
+}
+
+// ListResources aggregates resources across all connected servers, tagging each
+// with its owning server. Network I/O runs OUTSIDE m.mu (clients are snapshotted
+// under the lock first), per the manager's "no network I/O under lock" invariant.
+func (m *Manager) ListResources(ctx context.Context) []MCPResource {
+	clients := m.snapshotClients()
+
+	var out []MCPResource
+	for _, nc := range clients {
+		resources, err := nc.client.ListResources(ctx)
+		if err != nil {
+			// A server may simply not implement resources — that's not an error
+			// worth surfacing, just skip it.
+			logging.Debug("MCP list-resources skipped", "server", nc.name, "error", err)
+			continue
+		}
+		for _, r := range resources {
+			if r == nil {
+				continue
+			}
+			out = append(out, MCPResource{
+				Server:      nc.name,
+				URI:         r.URI,
+				Name:        r.Name,
+				Description: r.Description,
+				MIMEType:    r.MIMEType,
+			})
+		}
+	}
+	return out
+}
+
+// ReadResource fetches a resource by URI from whichever connected server owns
+// it. MCP servers error on URIs they don't expose, so we try each connected
+// server and return the first success. Returns (text, owningServer, error).
+func (m *Manager) ReadResource(ctx context.Context, uri string) (string, string, error) {
+	clients := m.snapshotClients()
+	if len(clients) == 0 {
+		return "", "", fmt.Errorf("no connected MCP servers")
+	}
+
+	// Accumulate every server's failure so the final error explains WHY each
+	// one declined (timeout vs unknown-URI vs not-implemented) instead of
+	// masking all but the last.
+	var errs []string
+	for _, nc := range clients {
+		res, err := nc.client.ReadResource(ctx, uri)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", nc.name, err))
+			continue
+		}
+		var sb strings.Builder
+		for _, content := range res.Contents {
+			if content == nil {
+				continue
+			}
+			switch {
+			case content.Text != "":
+				sb.WriteString(content.Text)
+			case content.Blob != "":
+				fmt.Fprintf(&sb, "[binary resource %s, %d base64 bytes]", content.MIMEType, len(content.Blob))
+			}
+		}
+		return sb.String(), nc.name, nil
+	}
+	return "", "", fmt.Errorf("resource %q not served by any connected MCP server (%s)", uri, strings.Join(errs, "; "))
 }
 
 // GetClient returns the client for a specific server.

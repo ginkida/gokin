@@ -1,9 +1,11 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // FormatList renders the same text that `/mcp list` shows: one summary line
@@ -41,6 +43,56 @@ func FormatList(mgr *Manager) string {
 	}
 	fmt.Fprintf(&sb, "\n%d/%d connected, %d tools exposed to the model.",
 		connected, len(statuses), totalTools)
+	return sb.String()
+}
+
+// formatResourcesTimeout bounds the resources/list round-trip when rendering
+// the catalog — the mcp_admin list callback has no context to thread.
+const formatResourcesTimeout = 15 * time.Second
+
+// FormatResources renders the catalog of context resources exposed across all
+// connected MCP servers, grouped by server, mirroring FormatList/FormatStatus.
+// Self-bounds the listing call. Empty/no-resource input returns a stable hint.
+func FormatResources(mgr *Manager) string {
+	if mgr == nil {
+		return "MCP is not initialised."
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), formatResourcesTimeout)
+	defer cancel()
+
+	resources := mgr.ListResources(ctx)
+	if len(resources) == 0 {
+		return "No MCP resources available (no connected server exposes any, or none implement the resources capability)."
+	}
+	sort.Slice(resources, func(i, j int) bool {
+		if resources[i].Server != resources[j].Server {
+			return resources[i].Server < resources[j].Server
+		}
+		return resources[i].URI < resources[j].URI
+	})
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "MCP resources (%d):\n", len(resources))
+	currentServer := ""
+	for _, r := range resources {
+		if r.Server != currentServer {
+			currentServer = r.Server
+			fmt.Fprintf(&sb, "\n[%s]\n", r.Server)
+		}
+		sb.WriteString("  ")
+		sb.WriteString(r.URI)
+		if r.Name != "" {
+			fmt.Fprintf(&sb, " — %s", r.Name)
+		}
+		if r.MIMEType != "" {
+			fmt.Fprintf(&sb, " (%s)", r.MIMEType)
+		}
+		sb.WriteByte('\n')
+		if r.Description != "" {
+			fmt.Fprintf(&sb, "      %s\n", r.Description)
+		}
+	}
+	sb.WriteString("\nRead one with mcp_admin{action:resources, uri:\"<uri>\"}.")
 	return sb.String()
 }
 

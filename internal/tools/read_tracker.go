@@ -17,6 +17,11 @@ type FileReadRecord struct {
 	Offset     int
 	Limit      int
 	ContentLen int
+	// DupCount counts how many times this exact range was re-requested while
+	// the file stayed unchanged. 0 = first read, 1 = first re-read, etc. It is
+	// only ever mutated under t.mu; callers must read the snapshot returned by
+	// CheckAndRecord, NOT this field on the shared pointer (it would race).
+	DupCount int
 }
 
 // FileReadTracker deduplicates file reads by tracking what was read and when.
@@ -41,16 +46,47 @@ func makeKey(filePath string, offset, limit int) string {
 	return fmt.Sprintf("%s|%d|%d", filePath, offset, limit)
 }
 
+// dedupReadStub decides what a duplicate read of an unchanged range should
+// return. It implements a self-healing policy so the dedup optimisation can
+// never starve the model of content it genuinely needs (the failure mode that
+// used to dead-end in a re-read loop and a fatal stagnation abort):
+//
+//   - dupCount == 1 (first re-read): return a compact, actionable stub. This is
+//     the common, benign "model glanced back" case — keep the token savings but
+//     tell the model the content is still in context so it stops re-reading.
+//   - dupCount == 2 (second re-read): return ok=false so the caller keeps the
+//     FULL content. A model re-requesting the exact same range twice has lost
+//     track of it; re-sending once is far cheaper than the stagnation abort the
+//     loop would otherwise trigger.
+//   - dupCount >= 3 (third+ re-read): stub again. This is now a genuine loop,
+//     not amnesia — the executor's stagnation recovery (which re-attaches the
+//     cached content with a firm "stop looping" hint) is the right backstop, and
+//     re-injecting the full file on every iteration would just burn the budget.
+func dedupReadStub(origRec *FileReadRecord, filePath string, dupCount int) (string, bool) {
+	if origRec == nil {
+		return "", false
+	}
+	if dupCount == 2 {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"[Unchanged since turn %d · %d chars · %s] — already in context above; reuse it instead of re-reading. To see other code, change offset/limit or read another file; if you were about to edit, make the edit now.",
+		origRec.TurnIndex, origRec.ContentLen, filePath), true
+}
+
 // CheckAndRecord checks whether this read is a duplicate.
-// Returns (isDuplicate, originalRecord, fileChanged).
-// If the file was read before with identical ModTime+Size, isDuplicate is true.
+// Returns (isDuplicate, originalRecord, fileChanged, dupCount).
+// If the file was read before with identical ModTime+Size, isDuplicate is true
+// and dupCount is the number of times this exact range has now been re-requested
+// (1 on the first re-read, 2 on the second, …). dupCount is computed under the
+// lock so callers never read the racy DupCount field off the shared *origRec.
 // If the file exists but ModTime/Size changed since last read, fileChanged is true
-// and the old record is replaced.
-func (t *FileReadTracker) CheckAndRecord(filePath string, offset, limit, contentLen int) (bool, *FileReadRecord, bool) {
+// and the old record is replaced (dupCount resets to 0).
+func (t *FileReadTracker) CheckAndRecord(filePath string, offset, limit, contentLen int) (bool, *FileReadRecord, bool, int) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		// Can't stat — skip dedup, don't record
-		return false, nil, false
+		return false, nil, false, 0
 	}
 
 	modTime := info.ModTime()
@@ -75,10 +111,13 @@ func (t *FileReadTracker) CheckAndRecord(filePath string, offset, limit, content
 				Limit:      limit,
 				ContentLen: contentLen,
 			}
-			return false, existing, true
+			return false, existing, true, 0
 		}
-		// Same file, same content — duplicate
-		return true, existing, false
+		// Same file, same content — duplicate. Bump and snapshot the count
+		// under the lock; the returned int is race-free even though the
+		// pointer's field keeps mutating on later calls.
+		existing.DupCount++
+		return true, existing, false, existing.DupCount
 	}
 
 	t.writeSeq++
@@ -92,7 +131,7 @@ func (t *FileReadTracker) CheckAndRecord(filePath string, offset, limit, content
 		Limit:      limit,
 		ContentLen: contentLen,
 	}
-	return false, nil, false
+	return false, nil, false, 0
 }
 
 // HasBeenRead reports whether the given (absolute) file path has any

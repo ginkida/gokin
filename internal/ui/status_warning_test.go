@@ -11,7 +11,7 @@ func TestStatusWarning_UsesTaggedWarningToast(t *testing.T) {
 
 	updated, _ := model.Update(StatusUpdateMsg{
 		Type:    StatusWarning,
-		Message: "Kimi loop guard: repeated grep \"loop guard\" 5 times. Sent a recovery hint instead of rerunning it.",
+		Message: "Loop guard: repeated grep \"loop guard\" 5 times. Sent a recovery hint instead of rerunning it.",
 		Details: map[string]any{"tag": "loop-guard"},
 	})
 	m := updated.(Model)
@@ -31,7 +31,7 @@ func TestStatusWarning_UsesTaggedWarningToast(t *testing.T) {
 
 	updated, _ = m.Update(StatusUpdateMsg{
 		Type:    StatusWarning,
-		Message: "Kimi loop guard: repeated glob \"**/*.go\" in internal/tools 5 times. Sent a recovery hint instead of rerunning it.",
+		Message: "Loop guard: repeated glob \"**/*.go\" in internal/tools 5 times. Sent a recovery hint instead of rerunning it.",
 		Details: map[string]any{"tag": "loop-guard"},
 	})
 	m = updated.(Model)
@@ -39,7 +39,7 @@ func TestStatusWarning_UsesTaggedWarningToast(t *testing.T) {
 	if got := m.toastManager.Count(); got != 1 {
 		t.Fatalf("tagged warning should replace existing toast, count = %d, want 1", got)
 	}
-	if got := m.toastManager.toasts[0].Message; got != "Kimi loop guard: repeated glob \"**/*.go\" in internal/tools 5 times. Sent a recovery hint instead of rerunning it." {
+	if got := m.toastManager.toasts[0].Message; got != "Loop guard: repeated glob \"**/*.go\" in internal/tools 5 times. Sent a recovery hint instead of rerunning it." {
 		t.Fatalf("tagged warning toast not replaced, got %q", got)
 	}
 	if got := m.toastManager.toasts[0].Duration; got != 4*time.Second {

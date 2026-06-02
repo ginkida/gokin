@@ -55,6 +55,60 @@ func TestStagnationFingerprint_ReadIncludesOffsetLimit(t *testing.T) {
 	}
 }
 
+// Edits that target DIFFERENT parts of the same file must fingerprint
+// differently so legitimate multi-region editing isn't mistaken for a stuck
+// retry loop — while a genuinely-repeated identical edit still collapses to one
+// fingerprint and is still caught.
+func TestStagnationFingerprint_EditDistinguishesTargets(t *testing.T) {
+	// old_string mode: different old_strings differ, identical ones collapse.
+	o1 := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "old_string": "func a()"})
+	o2 := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "old_string": "func b()"})
+	o1b := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "old_string": "func a()"})
+	if o1 == o2 {
+		t.Errorf("different old_strings collapsed: %q", o1)
+	}
+	if o1 != o1b {
+		t.Errorf("identical old_string edits must share a fingerprint: %q vs %q", o1, o1b)
+	}
+
+	// line-range mode: different ranges differ, identical ranges collapse.
+	l1 := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "line_start": 10, "line_end": 15})
+	l2 := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "line_start": 50, "line_end": 55})
+	l1b := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "line_start": 10.0, "line_end": 15.0})
+	if l1 == l2 {
+		t.Errorf("different line ranges collapsed: %q", l1)
+	}
+	if l1 != l1b {
+		t.Errorf("int vs float line ranges must match: %q vs %q", l1, l1b)
+	}
+
+	// insert mode: different insert points differ; insert-at-0 is distinct from
+	// a bare edit (so it isn't swallowed by the basename fallback).
+	i0 := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "insert_after_line": 0})
+	i5 := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "insert_after_line": 5})
+	bare := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go"})
+	if i0 == i5 || i0 == bare {
+		t.Errorf("insert points not distinguished: i0=%q i5=%q bare=%q", i0, i5, bare)
+	}
+	if bare != "f.go" {
+		t.Errorf("bare edit fingerprint = %q, want basename f.go", bare)
+	}
+
+	// multi-edit mode: different edit batches to the same file differ.
+	m1 := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "edits": []any{map[string]any{"old_string": "a", "new_string": "b"}}})
+	m2 := stagnationFingerprint("edit", map[string]any{"file_path": "/x/f.go", "edits": []any{map[string]any{"old_string": "c", "new_string": "d"}}})
+	if m1 == m2 {
+		t.Errorf("different multi-edit batches collapsed: %q", m1)
+	}
+
+	// Different files always differ regardless of mode.
+	a := stagnationFingerprint("edit", map[string]any{"file_path": "/x/a.go", "line_start": 1, "line_end": 2})
+	b := stagnationFingerprint("edit", map[string]any{"file_path": "/x/b.go", "line_start": 1, "line_end": 2})
+	if a == b {
+		t.Errorf("different files collapsed: %q", a)
+	}
+}
+
 func TestStagnationFingerprint_BashStripsCdPrefix(t *testing.T) {
 	withCd := stagnationFingerprint("bash", map[string]any{"command": "cd /some/long/path && go test ./..."})
 	without := stagnationFingerprint("bash", map[string]any{"command": "go test ./..."})

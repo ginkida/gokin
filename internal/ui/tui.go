@@ -2467,8 +2467,15 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 	// marker via the tool-result stream; the user gets a quiet "we already
 	// have this" note instead of a full row.
 	if !failed && toolName == "read" && strings.HasPrefix(strings.TrimSpace(content), "[Unchanged since turn ") {
+		// Show only the concise "[Unchanged …]" marker, not the model-facing
+		// reuse guidance the stub appends after the closing bracket — the user
+		// just needs the quiet "we already have this" note.
+		marker := strings.TrimSpace(content)
+		if i := strings.IndexByte(marker, ']'); i >= 0 {
+			marker = marker[:i+1]
+		}
 		stubStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-		m.output.AppendLine("    " + stubStyle.Render("⎿ "+strings.TrimSpace(content)))
+		m.output.AppendLine("    " + stubStyle.Render("⎿ "+marker))
 		m.output.AppendLine("")
 		return
 	}

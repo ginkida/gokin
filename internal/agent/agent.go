@@ -81,6 +81,9 @@ type Agent struct {
 	summarizeMinMsgs   int // Minimum messages before summarization kicks in (default: 6)
 	pruneMinOutputSize int // Minimum tool output size to consider for pruning (default: 200)
 	maxHistorySize     int // Max messages before forced compaction (default: 200)
+	// Per-call bound for the summarize/token-count API calls made during
+	// pre-emptive compaction. Zero ⇒ agentCompactionAPITimeout. Overridable in tests.
+	compactionAPITimeout time.Duration
 
 	// Project context injection for sub-agents
 	projectContext string            // Injected project guidelines/instructions
@@ -1339,6 +1342,25 @@ func (a *Agent) clearCallHistory() {
 	a.callHistoryMu.Lock()
 	a.callHistory = make(map[string]int)
 	a.loopEarlyWarned = make(map[string]bool)
+	a.callHistoryMu.Unlock()
+}
+
+// resetLoopDetection clears ALL per-call loop-detection state, including the
+// intervention flag and cooldown. Called after compaction: summarization
+// replaces the middle of the history the model reasons over, so repetition
+// counts accumulated against the now-summarized calls no longer correspond to
+// anything the model can still see. Keeping them would falsely trip the loop
+// guard on a legitimate post-compaction re-read — the continuation hint even
+// tells the model it MAY re-read for specific details. Real loops are not
+// hidden: the executor's consecutive-stagnation guard still catches tight
+// within-turn loops, and a genuine post-compaction loop simply re-accumulates
+// from a clean slate that matches the model's own reset view of the context.
+func (a *Agent) resetLoopDetection() {
+	a.callHistoryMu.Lock()
+	a.callHistory = make(map[string]int)
+	a.loopEarlyWarned = make(map[string]bool)
+	a.loopIntervened = false
+	a.loopCooldown = 0
 	a.callHistoryMu.Unlock()
 }
 
@@ -3393,7 +3415,9 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		}
 	}
 
-	tokenCount, err := a.tokenCounter.CountContents(ctx, historySnapshot)
+	countCtx, countCancel := a.withCompactionTimeout(ctx)
+	tokenCount, err := a.tokenCounter.CountContents(countCtx, historySnapshot)
+	countCancel()
 	if err != nil {
 		return fmt.Errorf("failed to count tokens: %w", err)
 	}
@@ -3425,7 +3449,9 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		newSnapshot := make([]*genai.Content, len(a.history))
 		copy(newSnapshot, a.history)
 		a.stateMu.RUnlock()
-		newCount, countErr := a.tokenCounter.CountContents(ctx, newSnapshot)
+		pruneCtx, pruneCancel := a.withCompactionTimeout(ctx)
+		newCount, countErr := a.tokenCounter.CountContents(pruneCtx, newSnapshot)
+		pruneCancel()
 		if countErr == nil {
 			newPercent := float64(newCount) / float64(limits.MaxInputTokens)
 			if newPercent < threshold {
@@ -3465,7 +3491,9 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	historyToSummarize := historySnapshot[preserveStart : len(historySnapshot)-protectRecent]
 	recentFromSnapshot := historySnapshot[len(historySnapshot)-protectRecent:]
 
-	summary, err := a.summarizer.Summarize(ctx, historyToSummarize)
+	sumCtx, sumCancel := a.withCompactionTimeout(ctx)
+	summary, err := a.summarizer.Summarize(sumCtx, historyToSummarize)
+	sumCancel()
 	if err != nil {
 		return fmt.Errorf("summarization failed: %w", err)
 	}
@@ -3510,7 +3538,9 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	// understands why the model paused. Recount is best-effort (skipped on error).
 	duration := time.Since(compactStart).Round(100 * time.Millisecond)
 	if len(recountSnapshot) > 0 && a.tokenCounter != nil {
-		newCount, cntErr := a.tokenCounter.CountContents(ctx, recountSnapshot)
+		recountCtx, recountCancel := a.withCompactionTimeout(ctx)
+		newCount, cntErr := a.tokenCounter.CountContents(recountCtx, recountSnapshot)
+		recountCancel()
 		if cntErr == nil && tokensBefore > 0 && newCount >= 0 {
 			freedPct := 0
 			if newCount < tokensBefore {
@@ -3954,6 +3984,14 @@ func (a *Agent) injectContinuationHint() {
 	} else {
 		a.history = append(a.history, genai.NewContentFromText(hint, genai.RoleUser))
 	}
+
+	// Compaction handoff contract: the model now reasons over a summarized
+	// history, so stale per-call repetition counts must not survive into it.
+	// This is the single chokepoint for every compaction path (checkAndSummarize,
+	// forceCompactViaSummary, forceCompactViaTruncation all call this). Uses
+	// callHistoryMu only; the codebase never nests callHistoryMu→stateMu, so
+	// calling it here (under stateMu) cannot invert lock order.
+	a.resetLoopDetection()
 }
 
 // collectStream collects a streaming response while firing onText and onThinking
@@ -3980,6 +4018,28 @@ const agentModelRoundTimeout = 5 * time.Minute
 
 func (a *Agent) withModelRoundTimeout(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := agentModelRoundTimeout
+	if deadline, ok := parent.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			return context.WithTimeout(parent, remaining)
+		}
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+// agentCompactionAPITimeout bounds a single summarization or token-count API
+// call made during pre-emptive compaction (checkAndSummarize). Without it those
+// calls inherit the raw parent context, so a slow or hung provider endpoint
+// could stall a turn — or a /loop iteration / sub-agent — indefinitely.
+// forceCompactViaSummary already bounds its forced path at the same 60s; this
+// extends the documented "compaction never hangs" invariant to the pre-emptive
+// path, which is the one sub-agents and /loop iterations hit most.
+const agentCompactionAPITimeout = 60 * time.Second
+
+func (a *Agent) withCompactionTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := a.compactionAPITimeout
+	if timeout <= 0 {
+		timeout = agentCompactionAPITimeout
+	}
 	if deadline, ok := parent.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
 			return context.WithTimeout(parent, remaining)

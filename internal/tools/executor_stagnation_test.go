@@ -163,7 +163,10 @@ func TestExecutorExecuteLoop_KimiRepeatedReadUsesRecoveryHint(t *testing.T) {
 	}
 }
 
-func TestExecutorExecuteLoop_NonKimiRepeatedReadStillAborts(t *testing.T) {
+// Read-loop recovery is model-agnostic (v0.86.7): a non-Kimi model that re-reads
+// the same range gets the same loop-break hint Kimi already got, instead of the
+// turn-killing hard abort that used to fire for every other provider.
+func TestExecutorExecuteLoop_NonKimiRepeatedReadRecovers(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
 	if err := registry.Register(readTool); err != nil {
@@ -178,24 +181,78 @@ func TestExecutorExecuteLoop_NonKimiRepeatedReadStillAborts(t *testing.T) {
 			buildExecutorTestReadStream("r2"),
 			buildExecutorTestReadStream("r3"),
 			buildExecutorTestReadStream("r4"),
+			buildExecutorTestTextStream("Recovered after loop guard."),
 		},
 	}
 
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
 
+	_, finalText, err := exec.Execute(context.Background(), nil, "inspect project.go")
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want graceful recovery (no abort) for non-Kimi read loop", err)
+	}
+	if finalText != "Recovered after loop guard." {
+		t.Fatalf("finalText = %q, want %q", finalText, "Recovered after loop guard.")
+	}
+	if readTool.calls != 4 {
+		t.Fatalf("read tool calls = %d, want 4 before loop guard short-circuits the 5th repeat", readTool.calls)
+	}
+	if len(cl.functionResults) != 5 {
+		t.Fatalf("SendFunctionResponse calls = %d, want 5 (recovery hint on the 5th, not an abort)", len(cl.functionResults))
+	}
+
+	recoveryResults := cl.functionResults[len(cl.functionResults)-1]
+	if len(recoveryResults) != 1 {
+		t.Fatalf("recovery result count = %d, want 1", len(recoveryResults))
+	}
+	if success, _ := recoveryResults[0].Response["success"].(bool); success {
+		t.Fatalf("recovery result should be marked unsuccessful to break the loop: %+v", recoveryResults[0].Response)
+	}
+	errMsg, _ := recoveryResults[0].Response["error"].(string)
+	if !strings.Contains(errMsg, "Do not call it again") {
+		t.Fatalf("recovery error message = %q, want explicit loop-break guidance", errMsg)
+	}
+	if !strings.Contains(errMsg, "already have this file's content") {
+		t.Fatalf("recovery error message = %q, want read-specific reuse guidance", errMsg)
+	}
+}
+
+// The hard abort remains as a bounded backstop: a read loop that ignores every
+// recovery hint still aborts once the read-only recovery budget (3) is spent.
+func TestExecutorExecuteLoop_RepeatedReadAbortsAfterRecoveryBudget(t *testing.T) {
+	registry := NewRegistry()
+	readTool := &scriptedReadTool{}
+	if err := registry.Register(readTool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	// 8 identical reads: 4 execute, the 5th–7th each draw a recovery hint
+	// (budget = 3), and the 8th exhausts the budget and aborts.
+	responses := make([]*client.StreamingResponse, 0, 8)
+	for i := 0; i < 8; i++ {
+		responses = append(responses, buildExecutorTestReadStream(fmt.Sprintf("r%d", i)))
+	}
+	cl := &scriptedExecutorClient{model: "glm-4.7", responses: responses}
+
+	exec := NewExecutor(registry, cl, time.Second)
+	exec.preFlightChecks = false
+
 	_, _, err := exec.Execute(context.Background(), nil, "inspect project.go")
 	if err == nil {
-		t.Fatal("Execute() error = nil, want stagnation abort")
+		t.Fatal("Execute() error = nil, want stagnation abort after recovery budget exhausted")
 	}
 	if !strings.Contains(err.Error(), "executor stagnation") {
 		t.Fatalf("err = %v, want executor stagnation", err)
 	}
-	if readTool.calls != 4 {
-		t.Fatalf("read tool calls = %d, want 4 before abort on the 5th repeat", readTool.calls)
+	if !strings.Contains(err.Error(), "after recovery hint") {
+		t.Fatalf("err = %v, want it to note the recovery hints were already spent", err)
 	}
-	if len(cl.functionResults) != 4 {
-		t.Fatalf("SendFunctionResponse calls = %d, want 4 before stagnation abort", len(cl.functionResults))
+	if readTool.calls != 4 {
+		t.Fatalf("read tool calls = %d, want 4 (recovery hints never re-execute the tool)", readTool.calls)
+	}
+	if len(cl.functionResults) != 7 {
+		t.Fatalf("SendFunctionResponse calls = %d, want 7 (4 reads + 3 recovery hints) before abort", len(cl.functionResults))
 	}
 }
 

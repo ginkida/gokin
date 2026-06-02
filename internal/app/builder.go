@@ -1489,6 +1489,24 @@ func (b *Builder) wireMCPAdminTool() {
 			return commands.MCPRemoveCore(b.mcpManager, b.cfg, b.registry, b.mainClient, name)
 		},
 	)
+	admin.SetResourceCallbacks(
+		func() string {
+			return mcp.FormatResources(b.mcpManager)
+		},
+		func(ctx context.Context, uri string) (string, error) {
+			if b.mcpManager == nil {
+				return "", fmt.Errorf("MCP is not initialised")
+			}
+			text, server, err := b.mcpManager.ReadResource(ctx, uri)
+			if err != nil {
+				return "", err
+			}
+			if text == "" {
+				return fmt.Sprintf("[resource %s on %s returned no text content]", uri, server), nil
+			}
+			return fmt.Sprintf("Resource %s (from %s):\n\n%s", uri, server, text), nil
+		},
+	)
 	logging.Debug("mcp_admin tool wired")
 }
 

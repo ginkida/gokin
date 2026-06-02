@@ -86,6 +86,93 @@ func TestMCPAdminTool_StatusPassesServerName(t *testing.T) {
 	}
 }
 
+func TestMCPAdminTool_ResourcesListRoutesToCallback(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "LIST" },
+		func(string) string { return "STATUS" },
+		func() bool { return true },
+	)
+	tool.SetResourceCallbacks(
+		func() string { return "RESOURCE-CATALOG" },
+		func(context.Context, string) (string, error) { return "SHOULD-NOT-BE-CALLED", nil },
+	)
+	res, _ := tool.Execute(context.Background(), map[string]any{"action": "resources"})
+	if res.Content != "RESOURCE-CATALOG" {
+		t.Fatalf("resources (no uri) should list, got %q", res.Content)
+	}
+}
+
+func TestMCPAdminTool_ResourcesReadPassesURI(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "LIST" },
+		func(string) string { return "STATUS" },
+		func() bool { return true },
+	)
+	var gotURI string
+	tool.SetResourceCallbacks(
+		func() string { return "CATALOG" },
+		func(_ context.Context, uri string) (string, error) { gotURI = uri; return "CONTENT-OF-" + uri, nil },
+	)
+	res, _ := tool.Execute(context.Background(), map[string]any{
+		"action": "resources",
+		"uri":    "file:///readme.md",
+	})
+	if gotURI != "file:///readme.md" {
+		t.Fatalf("read callback got uri %q, want file:///readme.md", gotURI)
+	}
+	if res.Content != "CONTENT-OF-file:///readme.md" {
+		t.Fatalf("got %q", res.Content)
+	}
+}
+
+func TestMCPAdminTool_ResourcesUnwiredReportsCleanly(t *testing.T) {
+	tool := NewMCPAdminTool()
+	// MCP is ready (list/status wired) but resource callbacks were never set —
+	// must report "not wired", not panic on a nil callback.
+	tool.SetCallbacks(
+		func() string { return "LIST" },
+		func(string) string { return "STATUS" },
+		func() bool { return true },
+	)
+	listRes, _ := tool.Execute(context.Background(), map[string]any{"action": "resources"})
+	if listRes.Success || !strings.Contains(listRes.Error, "not wired") {
+		t.Fatalf("unwired resources list should error cleanly, got success=%v err=%q", listRes.Success, listRes.Error)
+	}
+	readRes, _ := tool.Execute(context.Background(), map[string]any{"action": "resources", "uri": "x://y"})
+	if readRes.Success || !strings.Contains(readRes.Error, "not wired") {
+		t.Fatalf("unwired resource read should error cleanly, got success=%v err=%q", readRes.Success, readRes.Error)
+	}
+}
+
+func TestMCPAdminTool_ValidateAcceptsResources(t *testing.T) {
+	tool := NewMCPAdminTool()
+	if err := tool.Validate(map[string]any{"action": "resources"}); err != nil {
+		t.Fatalf("resources (list) should validate, got %v", err)
+	}
+	if err := tool.Validate(map[string]any{"action": "resources", "uri": "file:///x"}); err != nil {
+		t.Fatalf("resources (read) should validate, got %v", err)
+	}
+}
+
+func TestMCPAdminTool_ResourceReadCallbackErrorSurfaces(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "LIST" },
+		func(string) string { return "STATUS" },
+		func() bool { return true },
+	)
+	tool.SetResourceCallbacks(
+		func() string { return "CATALOG" },
+		func(context.Context, string) (string, error) { return "", fmt.Errorf("server refused") },
+	)
+	res, _ := tool.Execute(context.Background(), map[string]any{"action": "resources", "uri": "x://y"})
+	if res.Success || !strings.Contains(res.Error, "server refused") {
+		t.Fatalf("read error should surface, got success=%v err=%q", res.Success, res.Error)
+	}
+}
+
 func TestMCPAdminTool_HelpWorksEvenWhenDisabled(t *testing.T) {
 	tool := NewMCPAdminTool()
 	// No callbacks → still disabled. But help must work, because the model

@@ -976,7 +976,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				}
 				if allSame {
 					recoveryAttempt := stagnationRecoveries[pattern]
-					if shouldAttemptStagnationRecovery(cl.GetModel(), resp.FunctionCalls, recoveryAttempt) {
+					if shouldAttemptStagnationRecovery(resp.FunctionCalls, recoveryAttempt) {
 						recoveryAttempt++
 						stagnationRecoveries[pattern] = recoveryAttempt
 						logging.Warn("executor stagnation detected: sending recovery hint instead of aborting",
@@ -1006,7 +1006,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// Amnesia detection: model may interleave other tools but keep coming back
 			// to the same pattern (classic "forgot I tried this" loop). Warn — don't
 			// abort — so the user can step in before consecutive stagnation kicks in.
-			if len(recentToolPatterns) >= stagnationWindowSize && !amnesiaWarned[pattern] {
+			// Suppress the amnesia warning once the stagnation recovery is
+			// already engaged for this pattern — the recovery hint covers it,
+			// and two near-identical "you're looping" toasts just add noise.
+			if len(recentToolPatterns) >= stagnationWindowSize && !amnesiaWarned[pattern] && stagnationRecoveries[pattern] == 0 {
 				windowStart := len(recentToolPatterns) - stagnationWindowSize
 				count := 0
 				for _, p := range recentToolPatterns[windowStart:] {
@@ -1766,20 +1769,17 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			// saving context window space on repeated reads.
 			if call.Name == "read" && e.readTracker != nil && cached.Success {
 				filePath, _ := call.Args["file_path"].(string)
-				offset := 1
-				limit := 2000
-				if v, ok := call.Args["offset"].(float64); ok {
-					offset = int(v)
-				}
-				if v, ok := call.Args["limit"].(float64); ok {
-					limit = int(v)
-				}
+				offset := GetIntDefault(call.Args, "offset", 1)
+				limit := GetIntDefault(call.Args, "limit", 2000)
 				if filePath != "" {
-					isDup, origRec, _ := e.readTracker.CheckAndRecord(filePath, offset, limit, len(cached.Content))
+					isDup, origRec, _, dupCount := e.readTracker.CheckAndRecord(filePath, offset, limit, len(cached.Content))
 					if isDup && origRec != nil {
-						cached.Content = fmt.Sprintf(
-							"[Unchanged since turn %d · %d chars · %s]",
-							origRec.TurnIndex, origRec.ContentLen, filePath)
+						if stub, ok := dedupReadStub(origRec, filePath, dupCount); ok {
+							cached.Content = stub
+						}
+						// dupCount == 2 (or other !ok cases): fall through with
+						// the full cached content so a model that lost track of
+						// the file gets it back instead of looping on a stub.
 						return cached
 					}
 				}
@@ -2028,20 +2028,16 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	if e.readTracker != nil {
 		if call.Name == "read" && result.Success {
 			filePath, _ := call.Args["file_path"].(string)
-			offset := 1
-			limit := 2000
-			if v, ok := call.Args["offset"].(float64); ok {
-				offset = int(v)
-			}
-			if v, ok := call.Args["limit"].(float64); ok {
-				limit = int(v)
-			}
+			offset := GetIntDefault(call.Args, "offset", 1)
+			limit := GetIntDefault(call.Args, "limit", 2000)
 			if filePath != "" {
-				isDup, origRec, _ := e.readTracker.CheckAndRecord(filePath, offset, limit, len(result.Content))
+				isDup, origRec, _, dupCount := e.readTracker.CheckAndRecord(filePath, offset, limit, len(result.Content))
 				if isDup && origRec != nil {
-					result.Content = fmt.Sprintf(
-						"[Unchanged since turn %d · %d chars · %s]",
-						origRec.TurnIndex, origRec.ContentLen, filePath)
+					if stub, ok := dedupReadStub(origRec, filePath, dupCount); ok {
+						result.Content = stub
+					}
+					// !ok (dupCount == 2): keep result.Content as the full
+					// freshly-read content to break an amnesia re-read loop.
 				}
 			}
 		}
@@ -2519,15 +2515,30 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 		}
 	case "edit":
 		fp, _ := args["file_path"].(string)
-		old, _ := args["old_string"].(string)
 		if fp == "" {
 			return ""
 		}
-		if old != "" {
+		base := filepath.Base(fp)
+		// Distinguish edits by what they target so DIFFERENT edits to the same
+		// file aren't mistaken for a stuck retry loop — mirrors read's
+		// offset+limit. Truly identical edits still collapse to one fingerprint
+		// (same args → same key), so a model retrying the same failing edit is
+		// still caught; only legitimate multi-region editing is let through.
+		if old, _ := args["old_string"].(string); old != "" {
 			h := sha256.Sum256([]byte(old))
-			return fmt.Sprintf("%s@%x", filepath.Base(fp), h[:4])
+			return fmt.Sprintf("%s@%x", base, h[:4])
 		}
-		return filepath.Base(fp)
+		if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
+			h := sha256.Sum256([]byte(fmt.Sprintf("%v", edits)))
+			return fmt.Sprintf("%s@edits:%x", base, h[:4])
+		}
+		if ls, le := readIntArg(args, "line_start"), readIntArg(args, "line_end"); ls > 0 || le > 0 {
+			return fmt.Sprintf("%s@L%d-%d", base, ls, le)
+		}
+		if ia, ok := GetInt(args, "insert_after_line"); ok {
+			return fmt.Sprintf("%s@ins%d", base, ia)
+		}
+		return base
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
 			// Strip leading "cd /path && " prefix — models often prepend this,
@@ -2602,19 +2613,51 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 	return ""
 }
 
-func shouldAttemptStagnationRecovery(model string, calls []*genai.FunctionCall, attempts int) bool {
-	if attempts > 0 || len(calls) == 0 {
+// maxStagnationRecoveryAttempts returns how many recovery hints a looping tool
+// earns before the executor falls back to the hard abort. The recovery itself
+// NEVER re-executes the tool — it returns a "stop looping" hint (plus the cached
+// content for read-only tools) — so handing out hints is always side-effect free.
+//   - read-only idempotent tools: 3. A re-read/re-search loop is benign and the
+//     model almost always course-corrects once it gets the content back. This is
+//     model-agnostic; it used to be Kimi-only, which silently hard-aborted every
+//     other provider's entire turn — the bug this fixes.
+//   - edit: 1, paired with a tailored "old_string isn't matching" hint. A model
+//     retrying the same failing edit needs to be told WHY, not killed.
+//   - everything else: 0 — repeating an identical mutating/opaque call is treated
+//     as a genuine fault and aborts as before (conservative for side effects).
+func maxStagnationRecoveryAttempts(toolName string) int {
+	switch toolName {
+	case "read", "grep", "glob", "list_dir", "tree":
+		return 3
+	case "edit":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// shouldAttemptStagnationRecovery reports whether the current looping batch
+// should get another recovery hint instead of aborting the turn. The per-batch
+// budget is the most restrictive maxStagnationRecoveryAttempts across all calls,
+// so a mixed batch containing any non-recoverable tool aborts immediately.
+func shouldAttemptStagnationRecovery(calls []*genai.FunctionCall, attempts int) bool {
+	if len(calls) == 0 {
 		return false
 	}
-	if client.GetModelProfile(model).Family != "kimi" {
-		return false
-	}
+	budget := -1
 	for _, call := range calls {
-		if call == nil || !isKimiStagnationRecoveryTool(call.Name) {
+		if call == nil {
 			return false
 		}
+		m := maxStagnationRecoveryAttempts(call.Name)
+		if m == 0 {
+			return false
+		}
+		if budget < 0 || m < budget {
+			budget = m
+		}
 	}
-	return true
+	return attempts < budget
 }
 
 // shouldEnforceKimiToolBudget reports whether the per-turn tool budget cap
@@ -2774,42 +2817,62 @@ func (e *Executor) lookupCachedReadOnlyResult(toolName string, args map[string]a
 	return e.toolCache.Get(toolName, args)
 }
 
+// buildStagnationRecoveryMessage builds the hint returned in place of the
+// looping tool call. It is tool-class aware so the model gets actionable advice
+// for the specific way it's stuck — not a one-size-fits-all "stop" — while every
+// branch keeps the literal "Do not call it again" phrase the loop-break path and
+// its tests rely on.
 func buildStagnationRecoveryMessage(toolName string, args map[string]any, repeatCount int) string {
-	return fmt.Sprintf(
-		"Loop guard: identical %s request repeated %d times. This exact tool call already ran and repeating it will not make progress. Do not call it again. Reuse the earlier result, choose a different file/range, or answer the user.",
-		describeStagnationTarget(toolName, args),
-		repeatCount,
-	)
+	target := describeStagnationTarget(toolName, args)
+	switch toolName {
+	case "read":
+		return fmt.Sprintf(
+			"Loop guard: identical %s repeated %d times. Do not call it again — you already have this file's content in the conversation above; reuse it. To see other code, change offset/limit or read a different file. If you were about to edit, make the edit now.",
+			target, repeatCount,
+		)
+	case "grep", "glob", "list_dir", "tree":
+		return fmt.Sprintf(
+			"Loop guard: identical %s repeated %d times. Do not call it again — the results are already above; reuse them. Re-running the same search will not help: try a different pattern or path, or proceed with what you found.",
+			target, repeatCount,
+		)
+	case "edit":
+		if old, _ := args["old_string"].(string); old != "" {
+			return fmt.Sprintf(
+				"Loop guard: the same %s was attempted %d times and keeps failing. Do not call it again unchanged — old_string matching is exact and whitespace-sensitive, so it is not matching the file. Read the current file to copy the exact text, then retry; or switch to line_start/line_end or regex mode.",
+				target, repeatCount,
+			)
+		}
+		return fmt.Sprintf(
+			"Loop guard: the same %s was attempted %d times and is not making progress. Do not call it again unchanged — re-read the current file to recheck the exact line numbers and content, then retry with corrected coordinates or take a different approach.",
+			target, repeatCount,
+		)
+	default:
+		return fmt.Sprintf(
+			"Loop guard: identical %s request repeated %d times. This exact tool call already ran and repeating it will not make progress. Do not call it again. Reuse the earlier result, choose a different target, or answer the user.",
+			target, repeatCount,
+		)
+	}
 }
 
 func buildStagnationWarningMessage(calls []*genai.FunctionCall, repeatCount int) string {
 	if len(calls) == 0 || calls[0] == nil {
 		return fmt.Sprintf(
-			"Kimi loop guard: repeated the same exploration tool pattern %d times. Sent a recovery hint instead of rerunning it.",
+			"Loop guard: repeated the same tool pattern %d times. Sent a recovery hint instead of rerunning it.",
 			repeatCount,
 		)
 	}
 	if len(calls) == 1 {
 		return fmt.Sprintf(
-			"Kimi loop guard: repeated %s %d times. Sent a recovery hint instead of rerunning it.",
+			"Loop guard: repeated %s %d times. Sent a recovery hint instead of rerunning it.",
 			describeStagnationTarget(calls[0].Name, calls[0].Args),
 			repeatCount,
 		)
 	}
 	return fmt.Sprintf(
-		"Kimi loop guard: repeated the same %s exploration pattern %d times. Sent a recovery hint instead of rerunning it.",
+		"Loop guard: repeated the same %s pattern %d times. Sent a recovery hint instead of rerunning it.",
 		describeStagnationTarget(calls[0].Name, calls[0].Args),
 		repeatCount,
 	)
-}
-
-func isKimiStagnationRecoveryTool(toolName string) bool {
-	switch toolName {
-	case "read", "grep", "glob", "list_dir", "tree":
-		return true
-	default:
-		return false
-	}
 }
 
 func describeStagnationTarget(toolName string, args map[string]any) string {
