@@ -2569,7 +2569,10 @@ func (m *Model) buildToolResultBody(
 		return ""
 	}
 
-	display := FormatToolOutput(content, 6, expanded)
+	// Short output (below the collapse threshold) renders in full — truncating a
+	// 9-line result to a 6-line preview with "⋯ N more" is just noise. The
+	// genuinely-long, non-collapsed case still gets the head+tail preview.
+	display := FormatToolOutput(content, 6, expanded || !needsTruncation)
 
 	// Apply syntax highlighting for read tool AFTER preview/full selection.
 	highlighted := false

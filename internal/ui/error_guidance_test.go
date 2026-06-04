@@ -256,3 +256,50 @@ func TestGetErrorGuidance_NewPatterns_NoFalsePositives(t *testing.T) {
 		}
 	}
 }
+
+// Regression: a failed done-gate (the agent's own build/vet/test gate) must NOT
+// be rendered as a content-policy violation. The old "(…|blocked|safety|…)"
+// pattern matched the bare word "blocked" in "done-gate blocked finalization",
+// showing a scary "flagged by content filters" card for a plain build failure.
+func TestGetErrorGuidance_DoneGateIsQualityNotContentPolicy(t *testing.T) {
+	for _, msg := range []string{
+		"done-gate blocked finalization: required checks are still failing after auto-fix budget",
+		"done-gate blocked finalization: auto-fix failed before checks passed",
+		"done-gate blocked finalization: no verification checks are available for this project/stack",
+	} {
+		g := GetErrorGuidance(msg)
+		if g == nil || g.Title != "Quality Checks Didn't Pass" {
+			t.Errorf("%q: got %v, want Quality Checks Didn't Pass", msg, g)
+		}
+	}
+}
+
+// Bare "blocked" / "safety" in non-policy contexts must NOT trip Content Policy.
+func TestGetErrorGuidance_BareBlockedIsNotContentPolicy(t *testing.T) {
+	for _, msg := range []string{
+		"port 8080 is blocked by another process",
+		"the build is blocked",
+		"connection blocked",
+	} {
+		if g := GetErrorGuidance(msg); g != nil && g.Title == "Content Policy" {
+			t.Errorf("%q should not be flagged as Content Policy", msg)
+		}
+	}
+}
+
+// Genuine content-policy / safety-filter rejections must still match.
+func TestGetErrorGuidance_RealContentPolicyStillMatches(t *testing.T) {
+	for _, msg := range []string{
+		"content policy violation",
+		"response blocked by the content filter",
+		"flagged by content filters",
+		"blocked due to safety policy",
+		"safety filter triggered",
+		"harmful content detected",
+	} {
+		g := GetErrorGuidance(msg)
+		if g == nil || g.Title != "Content Policy" {
+			t.Errorf("%q: got %v, want Content Policy", msg, g)
+		}
+	}
+}

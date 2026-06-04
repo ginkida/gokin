@@ -224,7 +224,22 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Command:     "",
 	},
 	{
-		Pattern:     regexp.MustCompile(`(?i)(content.*policy|safety|blocked|harmful)`),
+		// Internal "done-gate": the agent refused to finalize because its own
+		// verification checks (build/vet/tests) still fail. This is NOT a
+		// content-policy issue — it used to mis-match the broad "blocked"
+		// pattern below and render a scary "flagged by content filters" card.
+		// Sits before Content Policy and the Go patterns so it wins.
+		Pattern:     regexp.MustCompile(`(?i)(done[ _-]?gate|required checks are still failing|no verification checks are available)`),
+		Title:       "Quality Checks Didn't Pass",
+		Suggestions: []string{"The agent stopped before finalizing because build/vet/test checks still fail", "Review the failing checks above and fix the underlying errors", "Re-run once fixed, or adjust the done-gate in config if a check doesn't apply"},
+		Command:     "",
+	},
+	{
+		// Genuine content-policy / safety-filter rejections only. Must NOT match
+		// the bare word "blocked"/"safety"/"harmful" — a build that is "blocked",
+		// a "safety check", "harmful input sanitised", etc. are not policy hits.
+		// Require real content-policy context adjacent to the keyword.
+		Pattern:     regexp.MustCompile(`(?i)(content[ _-]?(policy|filter|moderation)|safety[ _-]?(filter|policy|system|setting)|flagged[^\n]{0,30}(content|safety|filter)|(content|response|completion|output|generation)[^\n]{0,20}blocked|blocked[^\n]{0,20}(content|safety|policy|filter|guideline)|harmful[ _-]?content)`),
 		Title:       "Content Policy",
 		Suggestions: []string{"Your request was flagged by content filters", "Rephrase your request", "Review content guidelines"},
 		Command:     "",
