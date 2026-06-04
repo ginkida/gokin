@@ -602,6 +602,12 @@ func (s *Styles) FormatToolSuccess(name string, duration time.Duration) string {
 	return successStyle.Render("✓ " + name)
 }
 
+// minDisplayedToolDuration is the floor below which a tool's timing is omitted
+// from its success line. Sub-100ms operations are effectively instant; a
+// trailing "9ms" on every read/grep is noise during exploration. Slow tools
+// (≥100ms) still show timing — that's the part worth noticing.
+const minDisplayedToolDuration = 100 * time.Millisecond
+
 // FormatToolSuccessBlock formats a successful tool result as a compact line.
 // Format: ✓ name  summary  duration
 func (s *Styles) FormatToolSuccessBlock(name string, duration time.Duration, resultSummary string) string {
@@ -634,7 +640,7 @@ func (s *Styles) FormatToolSuccessBlock(name string, duration time.Duration, res
 		durationColor = ColorWarning
 	}
 
-	if durationStr != "" && duration > 0 {
+	if durationStr != "" && duration >= minDisplayedToolDuration {
 		timingStyle := lipgloss.NewStyle().Foreground(durationColor)
 		result.WriteString("  ")
 		result.WriteString(timingStyle.Render(durationStr))

@@ -48,13 +48,15 @@ func renderToolErrorCard(width int, toolName string, duration time.Duration, det
 	// Body — split detail into lines, render up to 4 with mild styling.
 	body := renderErrorBody(detail, innerWidth)
 
-	hint := renderErrorActionHints()
-
 	parts := []string{title}
 	if body != "" {
 		parts = append(parts, "", body)
 	}
-	parts = append(parts, "", hint)
+	// Only append a hint row when there's a genuinely-actionable hint — a
+	// failed read/grep/bash has none, so the card stays just title + detail.
+	if hint := renderErrorActionHints(toolName); hint != "" {
+		parts = append(parts, "", hint)
+	}
 	inner := strings.Join(parts, "\n")
 
 	cardStyle := lipgloss.NewStyle().
@@ -124,17 +126,31 @@ func renderErrorBody(detail string, _ int) string {
 // pops in ColorSuccess bold, abort (esc cancel) pops in ColorError bold,
 // alternatives sit in muted middle ground. Keeps both card surfaces on
 // the same design language so users don't context-switch between them.
-func renderErrorActionHints() string {
-	retryStyle := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
-	cancelStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+// renderErrorActionHints returns the bottom hint row for the tool-error card,
+// or "" when there's no honest, tool-relevant action to offer.
+//
+// A failed tool is scrollback the agent recovers from on its own — there is NO
+// per-card "press Enter to retry" keystroke (no StateToolError), so we don't
+// pretend there is, and Esc is the always-available global interrupt rather
+// than a card action. The one genuinely useful, tool-specific recovery is
+// rolling back the last file mutation after a failed edit/write/etc., so that
+// is the only hint we surface, and only for tools the undo manager tracks.
+func renderErrorActionHints(toolName string) string {
+	if !toolIsUndoable(toolName) {
+		return ""
+	}
 	cmdStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
 	verbStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	sepStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	return cmdStyle.Render("/undo") + " " + verbStyle.Render("revert last change")
+}
 
-	parts := []string{
-		retryStyle.Render("↵ retry"),
-		cmdStyle.Render("/undo") + " " + verbStyle.Render("revert last"),
-		cancelStyle.Render("esc cancel"),
+// toolIsUndoable reports whether a failed tool left a file mutation the undo
+// manager can revert. Read-only / command tools (bash, read, grep, …) leave
+// nothing to undo.
+func toolIsUndoable(toolName string) bool {
+	switch strings.ToLower(strings.ReplaceAll(toolName, "-", "_")) {
+	case "edit", "write", "delete", "move", "copy", "refactor", "mkdir", "batch":
+		return true
 	}
-	return strings.Join(parts, sepStyle.Render("  ·  "))
+	return false
 }

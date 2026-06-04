@@ -783,16 +783,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		if cmdErr != nil {
 			exitErr, ok := cmdErr.(*exec.ExitError)
 			if ok {
-				cleanErr, _ := extractPWDFromOutput(rawOutput)
-				stderrStr := stderr.String()
-				if stderrStr != "" {
-					cleanErr = cleanErr + "\nSTDERR:\n" + stderrStr
-				}
-				return ToolResult{
-					Content: cleanErr,
-					Error:   fmt.Sprintf("command exited with code %d", exitErr.ExitCode()),
-					Success: false,
-				}, nil
+				return t.buildExitResult(command, cleanOutput, stderr.String(), exitErr.ExitCode()), nil
 			}
 			return NewErrorResult(fmt.Sprintf("command error: %s", cmdErr)), nil
 		}
@@ -876,21 +867,104 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 	if finalErr != nil {
 		exitErr, ok := finalErr.(*exec.ExitError)
 		if ok {
-			cleanErr, _ := extractPWDFromOutput(rawOutput)
-			stderrStr := stderr.String()
-			if stderrStr != "" {
-				cleanErr = cleanErr + "\nSTDERR:\n" + stderrStr
-			}
-			return ToolResult{
-				Content: cleanErr,
-				Error:   fmt.Sprintf("command exited with code %d", exitErr.ExitCode()),
-				Success: false,
-			}, nil
+			return t.buildExitResult(command, cleanOutput, stderr.String(), exitErr.ExitCode()), nil
 		}
 		return NewErrorResult(fmt.Sprintf("command failed: %s", finalErr)), nil
 	}
 
 	return t.buildResult(cleanOutput, stderr.String()), nil
+}
+
+// buildExitResult turns a non-zero command exit into a ToolResult. A benign
+// non-zero exit (grep/rg/ag finding no matches, diff finding differences —
+// exit 1 with no stderr) is NOT a failure: it returns a normal success result
+// so the UI shows a quiet collapsed line ("(no matches)") instead of a red
+// error card with retry/undo. Genuine failures keep the error result, with
+// stderr appended so compile/test diagnostics reach the model.
+func (t *BashTool) buildExitResult(command, stdout, stderr string, exitCode int) ToolResult {
+	if benignNonZeroExit(command, exitCode, stderr) {
+		res := t.buildResult(stdout, "")
+		if res.Content == "ok" {
+			// buildResult's empty-output fallback. For a search/compare that
+			// produced nothing, a class-aware label reads far better than "ok".
+			res.Content = benignEmptyLabel(command)
+		}
+		return res
+	}
+	content := stdout
+	if stderr != "" {
+		if content != "" {
+			content += "\n"
+		}
+		content += "STDERR:\n" + stderr
+	}
+	return ToolResult{
+		Content: content,
+		Error:   fmt.Sprintf("command exited with code %d", exitCode),
+		Success: false,
+	}
+}
+
+// benignNonZeroExit reports whether a non-zero exit is an expected, non-error
+// outcome rather than a real failure — chiefly grep/rg/ag finding no matches
+// (exit 1) and diff/cmp finding differences (exit 1). A real error from these
+// writes to stderr and/or exits >1, so we require exit==1 AND empty stderr.
+func benignNonZeroExit(command string, exitCode int, stderr string) bool {
+	if exitCode != 1 || strings.TrimSpace(stderr) != "" {
+		return false
+	}
+	prog, sub := exitDeterminingProgram(command)
+	if prog == "git" && sub == "grep" {
+		return true
+	}
+	switch prog {
+	case "grep", "egrep", "fgrep", "rg", "ag", "ack", "diff", "cmp":
+		return true
+	}
+	return false
+}
+
+// exitDeterminingProgram returns the (basename) program — and its first arg —
+// whose exit code the shell reports for `command`. It strips a leading
+// "cd <path> &&" prefix (models prepend this constantly) but deliberately does
+// NOT split on "|": a grep alternation regex (grep 'a|b' file) contains a pipe
+// and must not be mis-parsed. Pipelines that end in a different program simply
+// fall through to the normal error path — conservative and correct.
+func exitDeterminingProgram(command string) (prog, sub string) {
+	c := strings.TrimSpace(command)
+	for strings.HasPrefix(c, "cd ") {
+		idx := strings.Index(c, "&&")
+		if idx < 0 {
+			break
+		}
+		c = strings.TrimSpace(c[idx+2:])
+	}
+	// A pipeline's exit status is its LAST command's, so a no-match
+	// `ps aux | grep foo` exits 1 from grep. Split on a space-padded " | "
+	// to find that trailing command, but NOT on a bare "|": a grep alternation
+	// regex like 'a|b' (no surrounding spaces, usually quoted) must stay intact.
+	if idx := strings.LastIndex(c, " | "); idx >= 0 {
+		c = strings.TrimSpace(c[idx+3:])
+	}
+	fields := strings.Fields(c)
+	if len(fields) == 0 {
+		return "", ""
+	}
+	prog = filepath.Base(fields[0])
+	if len(fields) > 1 {
+		sub = fields[1]
+	}
+	return prog, sub
+}
+
+// benignEmptyLabel is the body shown for a benign non-zero exit that produced
+// no stdout — tool-class aware so a no-match search reads "(no matches)" while
+// a silent compare (cmp -s, diff with output suppressed) reads "(differs)".
+func benignEmptyLabel(command string) string {
+	if prog, _ := exitDeterminingProgram(command); prog == "diff" || prog == "cmp" {
+		return "(differs)"
+	}
+	return "(no matches)"
 }
 
 // buildResult constructs a ToolResult from stdout and stderr output.
@@ -967,11 +1041,7 @@ func (t *BashTool) executeSandboxed(ctx context.Context, command string) (ToolRe
 
 	// Check exit code
 	if result.ExitCode != 0 {
-		return ToolResult{
-			Content: output.String(),
-			Error:   fmt.Sprintf("command exited with code %d", result.ExitCode),
-			Success: false,
-		}, nil
+		return t.buildExitResult(command, string(result.Stdout), string(result.Stderr), result.ExitCode), nil
 	}
 
 	return NewSuccessResult(output.String()), nil

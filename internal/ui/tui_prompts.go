@@ -157,7 +157,7 @@ func (m Model) renderPermissionPrompt() string {
 		optParts = append(optParts, style.Render(opt.key+" "+opt.label))
 	}
 
-	builder.WriteString("  " + strings.Join(optParts, optionStyle.Render(" · ")) + optionStyle.Render(" · esc Cancel"))
+	builder.WriteString("  " + strings.Join(optParts, optionStyle.Render(" · ")) + optionStyle.Render(" · Esc Cancel"))
 	builder.WriteString("\n")
 
 	if !bordered {
@@ -293,7 +293,7 @@ func (m Model) renderQuestionPrompt() string {
 		Italic(true).
 		Align(lipgloss.Center).
 		Width(paletteWidth - 4)
-	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Enter Confirm  ·  Esc Close"))
+	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  1-9 Select  ·  Enter Confirm  ·  Esc Close"))
 	builder.WriteString("\n")
 
 	return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorSecondary)
@@ -494,7 +494,7 @@ func (m Model) renderPlanApproval() string {
 		// Footer
 		builder.WriteString(borderStyle.Render("╰" + strings.Repeat("─", panelWidth-1) + "╯"))
 		builder.WriteString("\n")
-		builder.WriteString(m.styles.StatusBar.Render("  Enter to submit • Esc to cancel"))
+		builder.WriteString(m.styles.StatusBar.Render("  Enter to submit  ·  Esc Cancel"))
 		return builder.String()
 	}
 
@@ -603,7 +603,7 @@ func (m Model) renderModelSelector() string {
 		Italic(true).
 		Align(lipgloss.Center).
 		Width(paletteWidth - 4)
-	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Enter Confirm  ·  Esc Close"))
+	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  1-9 Select  ·  Enter Confirm  ·  Esc Close"))
 	builder.WriteString("\n")
 
 	return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorPrimary)

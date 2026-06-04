@@ -28,9 +28,10 @@ func TestWelcomePanel_ContainsExpectedSections(t *testing.T) {
 		"tips",           // section header
 		"slash commands", // tip mentioning /
 		"to pin a file",  // tip mentioning @
-		"Ctrl+K",         // model selector shortcut
-		"switches model", // tip mentioning model selector
-		"for shortcuts",  // tip mentioning ?
+		"Ctrl+P",      // command palette shortcut (primary discovery)
+		"all actions", // tip mentioning the palette
+		"Ctrl+K",      // model selector shortcut
+		"shortcuts",   // tip mentioning ?
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(got, want) {

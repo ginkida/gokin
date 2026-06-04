@@ -1079,6 +1079,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if msg.Type == tea.KeyCtrlO && m.state == StateInput {
 		if m.activityFeed != nil {
 			m.activityFeed.Toggle()
+			m.toastManager.ShowInfo(toggleStateLabel("Activity feed", m.activityFeed.IsVisible()))
 		}
 		return nil
 	}
@@ -1087,6 +1088,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if msg.Type == tea.KeyCtrlA && m.state == StateInput {
 		if m.agentTreePanel != nil {
 			m.agentTreePanel.Toggle()
+			m.toastManager.ShowInfo(toggleStateLabel("Agent tree", m.agentTreePanel.IsVisible()))
 		}
 		return nil
 	}
@@ -1105,6 +1107,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// Handle Ctrl+T for todos toggle
 	if msg.Type == tea.KeyCtrlT && m.state == StateInput {
 		m.todosVisible = !m.todosVisible
+		m.toastManager.ShowInfo(toggleStateLabel("Todos", m.todosVisible))
 		return nil
 	}
 
@@ -1179,6 +1182,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		} else {
 			m.output.SetSize(m.width, max(m.height-5, 3))
 		}
+		m.toastManager.ShowInfo(toggleStateLabel("Compact mode", m.CompactMode))
 		return nil
 	}
 
@@ -1387,6 +1391,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		// Clear output screen
 		if m.state == StateInput {
 			m.output.Clear()
+			m.toastManager.ShowInfo("Output cleared")
 			return nil
 		}
 
@@ -1541,8 +1546,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			})
 		}
 
-		// Show tool call in output with enhanced block formatting
-		m.output.AppendLine(m.styles.FormatToolExecutingBlock(msg.Name, msg.Args))
+		// Show tool call in output with enhanced block formatting. Indent to
+		// match the result block (4 spaces) so execute→result is a clean column,
+		// not a jagged left margin.
+		m.output.AppendLine("    " + m.styles.FormatToolExecutingBlock(msg.Name, msg.Args))
 
 	case ToolResultMsg:
 		m.streamStartTime = time.Now() // Reset timeout on tool result
@@ -2422,6 +2429,16 @@ func (m *Model) extractToolInfoFromArgs(name string, args map[string]any) string
 // grep / glob deliberately stay uncollapsed: their output IS the user's
 // primary signal (matching lines, found paths) and a head+tail preview
 // is worth the rows.
+// toggleStateLabel builds a clear "X shown"/"X hidden" toast message so panel
+// toggles (Ctrl+O/A/T, compact mode) give the user visible confirmation instead
+// of silently doing nothing-looking.
+func toggleStateLabel(name string, on bool) string {
+	if on {
+		return name + " shown"
+	}
+	return name + " hidden"
+}
+
 func collapsedByDefault(toolName string) bool {
 	switch toolName {
 	case "read", "bash":

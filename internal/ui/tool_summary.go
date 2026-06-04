@@ -124,6 +124,15 @@ func generateToolResultSummary(toolName, content, detail string) string {
 		// the visible signal — leading with the command makes a stack of
 		// 5 bash calls scan as a column of operations, not "200 lines
 		// from … 13 lines from … 4 lines from …".
+		//
+		// A benign no-match search (grep/rg via bash, exit 1) carries the
+		// "(no matches)" sentinel — render it as such, not "1 line".
+		if strings.TrimSpace(content) == "(no matches)" {
+			if detail != "" {
+				return fmt.Sprintf("%s (no matches)", detail)
+			}
+			return "no matches"
+		}
 		if detail != "" {
 			if lineCount > 0 {
 				return fmt.Sprintf("%s (%s)", detail, pluralLines(lineCount))
