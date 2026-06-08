@@ -29,6 +29,24 @@ type SSHTool struct {
 	defaultTimeout time.Duration
 }
 
+// maxSSHTimeoutSeconds bounds a model-supplied SSH timeout. Without a cap a huge
+// value overflows time.Duration (int64 ns) to a NEGATIVE duration — making the
+// connection fail instantly instead of waiting — or hangs the op for days. Every
+// sibling tool (task_output, memory TTL) clamps its model-supplied duration;
+// SSH was the outlier. 1h is generous for large file transfers.
+const maxSSHTimeoutSeconds = 3600
+
+// clampSSHTimeoutSeconds bounds a model-supplied SSH timeout to [1, max].
+func clampSSHTimeoutSeconds(seconds int) int {
+	if seconds < 1 {
+		return 1
+	}
+	if seconds > maxSSHTimeoutSeconds {
+		return maxSSHTimeoutSeconds
+	}
+	return seconds
+}
+
 // NewSSHTool creates a new SSH tool.
 func NewSSHTool() *SSHTool {
 	return &SSHTool{
@@ -246,7 +264,7 @@ func (t *SSHTool) buildConfig(args map[string]any) *ssh.SSHConfig {
 		config.KeyPath = keyPath
 	}
 	if timeout, ok := GetInt(args, "timeout"); ok && timeout > 0 {
-		config.Timeout = time.Duration(timeout) * time.Second
+		config.Timeout = time.Duration(clampSSHTimeoutSeconds(timeout)) * time.Second
 	} else {
 		config.Timeout = t.defaultTimeout
 	}

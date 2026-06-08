@@ -589,8 +589,17 @@ func renderContextBar(pct float64, barWidth int, tokens int, maxTokens int, outp
 	if pct <= 0 && maxTokens <= 0 {
 		return ""
 	}
+	// Defensive: this renders every frame and its no-panic invariant otherwise
+	// lives entirely in the caller (barWidth ∈ {8,12,16}, pct ≥ 0). A negative
+	// barWidth or pct would drive a strings.Repeat count negative → panic.
+	if barWidth <= 0 {
+		return ""
+	}
 
 	filled := int(pct * float64(barWidth))
+	if filled < 0 {
+		filled = 0
+	}
 	if filled > barWidth {
 		filled = barWidth
 	}

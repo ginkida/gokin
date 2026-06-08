@@ -233,16 +233,39 @@ func AdaptiveStreamRetryPolicy(provider string) StreamRetryPolicy {
 
 // CalculateBackoff calculates exponential backoff with jitter.
 // This prevents thundering herd problem when many clients retry simultaneously.
+//
+// Robust to hostile inputs (it's exported — callers' bounds can't be assumed):
+//   - a negative attempt would wrap uint() to a huge shift count;
+//   - a large attempt would overflow 1<<attempt past int64 into a negative or
+//     zero delay that both slips past the maxDelay cap AND makes the jitter
+//     argument non-positive — and rand.Int63n panics on n <= 0.
+//
+// The exponent is clamped (well past the point the result saturates at
+// maxDelay), any non-positive delay falls back to maxDelay, and the jitter is
+// skipped when delay/4 rounds to zero — so this can neither panic nor return a
+// delay that bypasses the cap.
 func CalculateBackoff(baseDelay time.Duration, attempt int, maxDelay time.Duration) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	const maxShift = 20 // 2^20 × any sane baseDelay already dwarfs maxDelay
+	if attempt > maxShift {
+		attempt = maxShift
+	}
+
 	// Exponential backoff: baseDelay * 2^attempt
 	delay := baseDelay * time.Duration(1<<uint(attempt))
-	if delay > maxDelay {
+	if delay <= 0 || delay > maxDelay { // <= 0 catches overflow / zero baseDelay
 		delay = maxDelay
 	}
 
-	// Add jitter: random value between 0 and 25% of delay
-	jitter := time.Duration(rand.Int63n(int64(delay / 4)))
-	return delay + jitter
+	// Add jitter: random value between 0 and 25% of delay. rand.Int63n panics on
+	// n <= 0, so skip jitter when the quarter rounds to zero (sub-4ns or a
+	// degenerate maxDelay).
+	if quarter := int64(delay / 4); quarter > 0 {
+		delay += time.Duration(rand.Int63n(quarter))
+	}
+	return delay
 }
 
 // cappedRetryDelay returns how long to wait before the next retry. It honors a

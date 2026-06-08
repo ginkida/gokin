@@ -361,27 +361,41 @@ func IsContextTooLongError(err error) bool {
 	// Check typed HTTPError (Anthropic/GLM/DeepSeek)
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) && httpErr.StatusCode == 400 {
-		msg := strings.ToLower(httpErr.Message)
-		return strings.Contains(msg, "context") ||
-			strings.Contains(msg, "token") ||
-			strings.Contains(msg, "too long") ||
-			strings.Contains(msg, "too large") ||
-			strings.Contains(msg, "maximum")
+		return messageIndicatesContextOverflow(strings.ToLower(httpErr.Message))
 	}
 	// Check typed APIError (Gemini)
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == 400 {
-		msg := strings.ToLower(apiErr.Message)
-		return strings.Contains(msg, "context") ||
-			strings.Contains(msg, "token") ||
-			strings.Contains(msg, "too long") ||
-			strings.Contains(msg, "too large") ||
-			strings.Contains(msg, "maximum")
+		return messageIndicatesContextOverflow(strings.ToLower(apiErr.Message))
 	}
 	// String fallback for untyped errors
 	msg := strings.ToLower(err.Error())
 	return (strings.Contains(msg, "400") || strings.Contains(msg, "bad request")) &&
-		(strings.Contains(msg, "context") || strings.Contains(msg, "token limit") || strings.Contains(msg, "too long"))
+		messageIndicatesContextOverflow(msg)
+}
+
+// messageIndicatesContextOverflow reports whether a (lowercased) provider error
+// message describes a context-window / token-limit overflow — the kind that
+// EmergencyTruncate can actually recover from.
+//
+// Tightened from the old bare "token"/"maximum" substring match, which
+// mis-classified unrelated 400s — a "max_tokens must be <= N" parameter error,
+// "maximum number of tools exceeded", etc. — as context overflow and pointlessly
+// truncated conversation history (then re-failed on the same non-context error).
+// Real overflows reliably say "context", "too long"/"too large", or pair "token"
+// with a limit/exceed/maximum qualifier; a bare "maximum" or bare "token" does not.
+func messageIndicatesContextOverflow(msg string) bool {
+	if strings.Contains(msg, "context") ||
+		strings.Contains(msg, "too long") ||
+		strings.Contains(msg, "too large") {
+		return true
+	}
+	if strings.Contains(msg, "token") &&
+		(strings.Contains(msg, "limit") || strings.Contains(msg, "exceed") ||
+			strings.Contains(msg, "maximum") || strings.Contains(msg, "too many")) {
+		return true
+	}
+	return false
 }
 
 // ResetClientFallback resets the fallback position on a client if it supports failover.

@@ -12,7 +12,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0
-	github.com/ollama/ollama v0.17.1
+	github.com/ollama/ollama v0.20.3
 	github.com/pkg/sftp v1.13.10
 	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2

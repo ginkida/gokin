@@ -109,6 +109,37 @@ func TestGetPricing_KnownModels(t *testing.T) {
 	}
 }
 
+// getPricing()'s resolution logic — case-insensitive exact, longest-key fuzzy,
+// and the unknown→flash fallback — was previously untested (TestGetPricing_
+// KnownModels only checks raw map entries, never the function). The highspeed
+// variants are the load-bearing case: case-insensitive matching must let them
+// hit their specific entry rather than silently falling back to the cheaper
+// bare "minimax" price, which would understate /cost.
+func TestGetPricing_Resolution(t *testing.T) {
+	cases := []struct {
+		model      string
+		wantInput  float64
+		wantOutput float64
+	}{
+		{"MiniMax-M2.7-highspeed", 0.60, 2.40},   // specific, NOT the 0.30 "minimax" fallback
+		{"minimax-m2.7-highspeed", 0.60, 2.40},   // case-insensitive resolves the same
+		{"MiniMax-M2.7", 0.30, 1.20},             // base variant
+		{"deepseek-v4-pro-2026", 0.435, 0.87},    // suffix variant → longest key, not bare "deepseek"
+		{"GLM-5.1", 4.00, 16.00},                 // case-insensitive exact
+		{"glm-5-turbo", 0.70, 2.80},              // not the shorter "glm-5"
+		{"totally-unknown-model", 0.14, 0.28},    // flash default, NOT zero (silent under-report)
+	}
+	for _, c := range cases {
+		t.Run(c.model, func(t *testing.T) {
+			p := getPricing(c.model)
+			if p.InputCostPer1M != c.wantInput || p.OutputCostPer1M != c.wantOutput {
+				t.Errorf("getPricing(%q) = %v/%v, want %v/%v",
+					c.model, p.InputCostPer1M, p.OutputCostPer1M, c.wantInput, c.wantOutput)
+			}
+		})
+	}
+}
+
 func TestDefaultModelLimitsCount(t *testing.T) {
 	if len(DefaultModelLimits) < 8 {
 		t.Errorf("DefaultModelLimits has %d entries, want >= 8", len(DefaultModelLimits))

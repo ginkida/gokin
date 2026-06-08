@@ -1364,6 +1364,49 @@ func (a *Agent) resetLoopDetection() {
 	a.callHistoryMu.Unlock()
 }
 
+// broadLoopExplorationTools are local code/repo INSPECTION tools that have no
+// side effects and no external cost, and are legitimately called many times in a
+// single multi-file request (a routine "fix this bug" / "understand X" task reads
+// and greps and blames dozens of distinct files). They get a raised broad-loop
+// ceiling (see broadLoopThreshold).
+//
+// Deliberately NOT the full workspace-isolation read-only set: web_fetch /
+// web_search (network cost, rate limits), ask_user (UX), and the plan/memory
+// tools are read-only but are NOT free-to-repeat exploration, so they keep the
+// low base threshold where a runaway loop is caught early.
+var broadLoopExplorationTools = toolNameSet(
+	"read", "grep", "glob", "list_dir", "tree",
+	"diff", "git_status", "git_diff", "git_log", "git_blame",
+	"check_impact", "history_search",
+)
+
+// broadLoopThreshold returns the per-tool ceiling for the broad loop detector
+// (same tool called N times with ANY args within one request).
+//
+// Local inspection tools (broadLoopExplorationTools) get a much higher ceiling
+// (4× base) because counting their many legitimate calls against the low base
+// threshold (8) made the broad detector fire a false "STOP, you're stuck —
+// reconsider your whole approach" intervention and SKIP the 9th read on exactly
+// the complex tasks where the agent must not be derailed. Mutating/expensive
+// tools (write/edit/bash/delete/…) keep the base threshold — repeating one of
+// those many times is suspicious much sooner.
+//
+// Note on safety: the broad counter is the ONLY guard that scales with repeat
+// count for these tools. The exact-args loop (exactCount>3) catches only
+// *identical* re-reads (same normalized args) — a loop that perturbs args every
+// call (e.g. a drifting read offset, or rotating grep patterns) produces a
+// distinct normalizeCallKey each time and is NOT caught by exact-args, plan
+// repetition, or no-progress (a successful read of a genuinely-new range resets
+// noProgressTurns). That arg-perturbing escape is a pre-existing gap, independent
+// of this ceiling; raising the ceiling 9→33 widens but does not create it. A
+// distinct-file-count fingerprint for read/grep is the proper follow-up.
+func (a *Agent) broadLoopThreshold(toolName string) int {
+	if _, ok := broadLoopExplorationTools[toolName]; ok {
+		return a.loopThreshold * 4
+	}
+	return a.loopThreshold
+}
+
 // buildSystemPrompt creates the system prompt based on agent type.
 func (a *Agent) buildSystemPrompt() string {
 	// Snapshot mutable fields under stateMu to avoid races
@@ -2843,7 +2886,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				// Early warnings: one repetition before intervention kicks in. Fire
 				// each warning at most once per key so we don't spam the user.
 				earlyExactWarn := exactCount == 3 && !intervened && !a.loopEarlyWarned["exact:"+key]
-				earlyBroadWarn := broadCount == a.loopThreshold && !intervened && !a.loopEarlyWarned["broad:"+broadKey]
+				earlyBroadWarn := broadCount == a.broadLoopThreshold(fc.Name) && !intervened && !a.loopEarlyWarned["broad:"+broadKey]
 				if earlyExactWarn {
 					a.loopEarlyWarned["exact:"+key] = true
 				}
@@ -2886,8 +2929,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					continue
 				}
 
-				// Broad loop: same tool called > loopThreshold times (any args)
-				if broadCount > a.loopThreshold && !intervened {
+				// Broad loop: same tool called > broad threshold times (any args).
+				// Threshold is tool-class-aware — read-only exploration tools get a
+				// higher ceiling so reading many distinct files isn't a false loop.
+				if broadCount > a.broadLoopThreshold(fc.Name) && !intervened {
 					loopDetectedThisTurn = true
 					logging.Warn("broad loop detected", "tool", fc.Name, "total_calls", broadCount)
 					a.callHistoryMu.Lock()

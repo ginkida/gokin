@@ -141,6 +141,16 @@ func TestIsContextTooLongError(t *testing.T) {
 		{"HTTP 500", &HTTPError{StatusCode: 500, Message: "context"}, false},
 		{"API 400 context", &APIError{StatusCode: 400, Message: "maximum context length"}, true},
 		{"API 400 unrelated", &APIError{StatusCode: 400, Message: "invalid model"}, false},
+		// Over-match regressions: a genuine 400 mentioning bare "maximum"/"token"
+		// that is NOT a context overflow must NOT trigger EmergencyTruncate.
+		{"400 max_tokens param error", &HTTPError{StatusCode: 400, Message: "max_tokens: must be less than or equal to 128000"}, false},
+		{"400 too many tools", &HTTPError{StatusCode: 400, Message: "maximum number of tools (200) exceeded"}, false},
+		{"400 maximum images", &APIError{StatusCode: 400, Message: "maximum number of images allowed is 20"}, false},
+		// Real overflow phrasings still caught.
+		{"400 maximum tokens", &HTTPError{StatusCode: 400, Message: "maximum number of tokens exceeded"}, true},
+		{"400 too large", &HTTPError{StatusCode: 400, Message: "request too large"}, true},
+		{"untyped 400 context", fmt.Errorf("api error 400: context length exceeded"), true},
+		{"untyped 400 unrelated", fmt.Errorf("api error 400: invalid parameter foo"), false},
 	}
 
 	for _, tt := range tests {

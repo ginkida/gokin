@@ -223,7 +223,11 @@ func getModelLimits(model string) TokenLimits {
 	}
 	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
 	for _, key := range keys {
-		if strings.Contains(modelLower, key) {
+		// Lowercase the key too — defensive consistency with getPricing, whose
+		// sibling map (DefaultPricing) already has mixed-case keys. Today every
+		// DefaultModelLimits key is lowercase so this is a no-op, but a future
+		// mixed-case key would silently fall through to the default otherwise.
+		if strings.Contains(modelLower, strings.ToLower(key)) {
 			return DefaultModelLimits[key]
 		}
 	}

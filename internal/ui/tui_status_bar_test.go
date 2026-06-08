@@ -215,3 +215,22 @@ func stripAnsi(s string) string {
 	}
 	return result.String()
 }
+
+// renderContextBar runs every frame; degenerate inputs (negative pct, zero or
+// negative barWidth) must not drive a strings.Repeat count negative and panic.
+// Without the guards these cases panic; with them they render harmlessly.
+func TestRenderContextBar_DegenerateInputsNoPanic(t *testing.T) {
+	cases := []struct {
+		pct                              float64
+		barWidth, tokens, maxTokens, out int
+	}{
+		{-0.5, 8, 100, 1000, 0},     // negative pct → negative filled
+		{0.5, 0, 100, 1000, 0},      // zero barWidth → negative empty count
+		{0.5, -4, 100, 1000, 0},     // negative barWidth
+		{2.0, 8, 9999, 1000, 500},   // pct > 1 plus a projected band
+		{0.5, 8, 100, 1000, 999999}, // huge output token projection
+	}
+	for _, c := range cases {
+		_ = renderContextBar(c.pct, c.barWidth, c.tokens, c.maxTokens, c.out) // must not panic
+	}
+}

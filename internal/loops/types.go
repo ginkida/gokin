@@ -150,6 +150,14 @@ const MaxHistorySize = 50
 // soon" — at minimum we wait this long.
 const DefaultMinDelaySeconds = 300 // 5 minutes
 
+// MaxSelfPacedDelaySeconds caps a model-suggested self-pacing delay. Without it
+// an absurd "next:" hint (e.g. "next 99999h") parsed from the iteration output
+// would push NextRunAt years out and silently disable the loop — the
+// bounded-duration-from-model-input class (see CLAUDE.md, v0.85.15). 24h is
+// generous for any autonomous cadence; a user-configured MinDelaySeconds above
+// this still takes precedence.
+const MaxSelfPacedDelaySeconds = 24 * 60 * 60 // 24 hours
+
 // ConsecutiveFailureLimit caps the failures-in-a-row before auto-pause.
 // Picked to absorb transient flakes (network blips, temporary 503s)
 // without letting a genuinely broken loop run for hours: at the
@@ -195,8 +203,15 @@ func (l *Loop) AppendIteration(it Iteration) {
 		if delay <= 0 {
 			delay = DefaultMinDelaySeconds
 		}
-		// If the iteration suggested a longer delay via NextHint, honor it.
-		if hinted := parseNextHintSeconds(it.NextHint); hinted > delay {
+		// If the iteration suggested a longer delay via NextHint, honor it —
+		// but cap the model-supplied value so an absurd hint can't push the next
+		// run years out and silently kill the loop. A user-set floor above the
+		// cap still wins (capped hint can't drop below the floor).
+		hinted := parseNextHintSeconds(it.NextHint)
+		if hinted > MaxSelfPacedDelaySeconds {
+			hinted = MaxSelfPacedDelaySeconds
+		}
+		if hinted > delay {
 			delay = hinted
 		}
 		l.NextRunAt = l.LastRunAt.Add(time.Duration(delay) * time.Second)

@@ -951,6 +951,12 @@ func (m InputModel) renderSuggestions() string {
 	var lines []string
 	maxShow := 6
 
+	// Bound each suggestion line to the input width so a long description or
+	// path can't overflow a narrow terminal — the box has no fixed width, it
+	// grows to its widest line. textarea width ≈ terminal − 4; leave a small
+	// margin for the box border+padding. ≤0 ⇒ width unset, skip (let it wrap).
+	lineBudget := m.textarea.Width() - 2
+
 	if m.suggestionType == SuggestionCommand {
 		if len(m.suggestions) < maxShow {
 			maxShow = len(m.suggestions)
@@ -979,7 +985,17 @@ func (m InputModel) renderSuggestions() string {
 			// suggestions made the eye jump between the brackets and
 			// the prose. One signal per line.
 			if cmd.Description != "" {
-				line += " " + descStyle.Render(cmd.Description)
+				desc := cmd.Description
+				if lineBudget > 0 {
+					if b := lineBudget - lipgloss.Width(prefix+"/"+cmd.Name) - 1; b > 0 {
+						desc = truncateForWidth(desc, b)
+					} else {
+						desc = "" // no room for a description on this width
+					}
+				}
+				if desc != "" {
+					line += " " + descStyle.Render(desc)
+				}
 			}
 			lines = append(lines, line)
 		}
@@ -997,6 +1013,9 @@ func (m InputModel) renderSuggestions() string {
 			footer := "Tab complete"
 			if selected.Usage != "" {
 				footer += " • " + selected.Usage
+			}
+			if lineBudget > 0 {
+				footer = truncateForWidth(footer, lineBudget)
 			}
 			lines = append(lines, descStyle.Render(footer))
 		}
@@ -1022,6 +1041,13 @@ func (m InputModel) renderSuggestions() string {
 				prefix = "> "
 			}
 
+			// Path-aware shorten (keeps the filename) so deep paths don't
+			// overflow a narrow terminal.
+			if lineBudget > 0 {
+				if b := lineBudget - lipgloss.Width(prefix); b > 0 {
+					rel = shortenPath(rel, b)
+				}
+			}
 			line := prefix + style.Render(rel)
 			lines = append(lines, line)
 		}

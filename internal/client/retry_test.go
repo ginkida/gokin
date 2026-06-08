@@ -127,6 +127,44 @@ func TestCalculateBackoffMaxCap(t *testing.T) {
 	}
 }
 
+// CalculateBackoff is exported and must never panic or bypass the cap on hostile
+// inputs. Before hardening: a large attempt overflowed 1<<attempt to a
+// negative/zero delay → rand.Int63n(<=0) PANIC and the maxDelay cap was skipped;
+// a negative attempt wrapped uint() to a huge shift → 0 delay → same panic; a
+// zero baseDelay → 0 delay → same panic.
+func TestCalculateBackoffHostileInputsNoPanicNoCapBypass(t *testing.T) {
+	maxDelay := 30 * time.Second
+	upper := maxDelay + maxDelay/4 + time.Second // cap + 25% jitter, with slack
+
+	cases := []struct {
+		name      string
+		baseDelay time.Duration
+		attempt   int
+	}{
+		{"huge attempt overflows the shift", time.Second, 200},
+		{"attempt at int64 sign bit", time.Second, 63},
+		{"attempt past machine word", time.Second, 1000},
+		{"negative attempt wraps uint", time.Second, -5},
+		{"zero baseDelay", 0, 3},
+		{"negative baseDelay", -1 * time.Second, 3},
+		{"tiny baseDelay, low attempt", time.Nanosecond, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// The call itself must not panic (rand.Int63n on n<=0).
+			delay := CalculateBackoff(c.baseDelay, c.attempt, maxDelay)
+			// And it must never exceed the cap (+ jitter) — overflow must not
+			// produce a negative/garbage delay that slips past maxDelay.
+			if delay < 0 {
+				t.Errorf("negative delay %v — overflow not guarded", delay)
+			}
+			if delay > upper {
+				t.Errorf("delay %v exceeds cap+jitter %v — maxDelay bypassed", delay, upper)
+			}
+		})
+	}
+}
+
 func TestParseHeaderInt64(t *testing.T) {
 	resp := &http.Response{
 		Header: make(http.Header),
