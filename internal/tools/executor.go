@@ -799,6 +799,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// reminder to the first iteration only. Firing it twice in a turn
 	// just adds noise — the model saw it already.
 	intentNudgeInjected := false
+	// todoNudgeInjected gates the live-checklist reminder. It is a soft
+	// Claude-Code contract nudge for Kimi/DeepSeek-class models that start
+	// mutating across multiple tool calls without using todo.
+	todoNudgeInjected := false
 	amnesiaWarned := map[string]bool{}
 	stagnationRecoveries := map[string]int{}
 	const (
@@ -1075,6 +1079,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			if note := buildKimiToolErrorRecoveryNotification(cl.GetModel(), results); note != "" && note != lastKimiRecoveryNote {
 				lastKimiRecoveryNote = note
 				e.AddPendingNotification(note)
+			}
+
+			if !todoNudgeInjected && shouldInjectTodoNudge(cl.GetModel(), toolsUsed) {
+				todoNudgeInjected = true
+				e.AddPendingNotification(todoNudgeMessage)
 			}
 
 			// Synthesis nudge: when Kimi has issued >=3 tool calls in this
@@ -2779,6 +2788,30 @@ func shouldInjectIntentNudge(toolsExecuted int, model string, resp *client.Respo
 	// UI, since the model itself processed it.
 	planLen := len(strings.TrimSpace(resp.Text)) + len(strings.TrimSpace(resp.Thinking))
 	return planLen < intentNudgeMinPlanChars
+}
+
+const todoNudgeMinToolCalls = 2
+
+const todoNudgeMessage = "Todo reminder: this has become multi-step coding work. Before continuing, call todo with the remaining plan and keep exactly one item in_progress, so the user can see progress like Claude Code."
+
+func shouldInjectTodoNudge(model string, toolsUsed []string) bool {
+	if len(toolsUsed) < todoNudgeMinToolCalls {
+		return false
+	}
+	if !isNudgeEligibleFamily(model) {
+		return false
+	}
+
+	hasMutation := false
+	for _, toolName := range toolsUsed {
+		switch toolName {
+		case "todo":
+			return false
+		case "write", "edit", "move", "copy", "delete", "mkdir", "batch", "refactor":
+			hasMutation = true
+		}
+	}
+	return hasMutation
 }
 
 func (e *Executor) buildStagnationRecoveryResults(calls []*genai.FunctionCall, repeatCount int) []*genai.FunctionResponse {

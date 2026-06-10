@@ -168,18 +168,27 @@ func AllProviderNames() []string {
 // DetectProviderFromModel determines the provider from a model name
 // by matching against each provider's ModelPrefixes.
 func DetectProviderFromModel(modelName string) string {
-	if modelName == "" {
-		return "glm"
+	if provider := DetectKnownProviderFromModel(modelName); provider != "" {
+		return provider
 	}
-	lower := strings.ToLower(modelName)
+	return "glm" // default
+}
+
+// DetectKnownProviderFromModel returns the provider only when the model name
+// matches a registered provider prefix. Unknown/empty names return "".
+func DetectKnownProviderFromModel(modelName string) string {
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	if lower == "" {
+		return ""
+	}
 	for _, p := range Providers {
 		for _, prefix := range p.ModelPrefixes {
-			if strings.HasPrefix(lower, prefix) {
+			if strings.HasPrefix(lower, strings.ToLower(prefix)) {
 				return p.Name
 			}
 		}
 	}
-	return "glm" // default
+	return ""
 }
 
 // AnyProviderHasKey returns true if any provider has a configured key.

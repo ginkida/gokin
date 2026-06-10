@@ -27,3 +27,27 @@ func TestBuildModelEnhancement_KimiIncludesExecutionPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildModelEnhancement_DeepSeekIncludesClaudeCodeWorkflow(t *testing.T) {
+	app := &App{
+		config: &config.Config{
+			API:   config.APIConfig{Backend: "deepseek"},
+			Model: config.ModelConfig{Name: "deepseek-v4-pro"},
+		},
+	}
+
+	got := app.buildModelEnhancement()
+	for _, needle := range []string{
+		"DeepSeek Execution Policy",
+		"Claude-Code-style execution",
+		"live todo list",
+		"Prefer grep -> targeted read",
+		"run the narrowest verification",
+		"inspect git status or git diff",
+		"Established / Unknown / Next",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("buildModelEnhancement() missing %q:\n%s", needle, got)
+		}
+	}
+}

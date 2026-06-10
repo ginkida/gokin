@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"gokin/internal/donegate"
 	"gokin/internal/plan"
 )
 
@@ -21,7 +22,7 @@ func (a *App) lintPlanBeforeApproval(ctx context.Context, p *plan.Plan) error {
 		return fmt.Errorf("plan has no steps")
 	}
 
-	profile := detectDoneGateProfile(a.workDir)
+	profile := donegate.DetectProfile(a.workDir)
 	issues := make([]string, 0)
 
 	for _, step := range steps {

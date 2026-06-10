@@ -684,9 +684,20 @@ const deepseekOperatingRules = `## Operating rules (DeepSeek-specific)
 
 Plan-then-act: before the first tool call of a turn, write a single-line plan. Format: "Plan: <3-7 word objective>". Skip for trivial one-tool turns (e.g. a single read).
 
+Todo discipline:
+- For multi-step or multi-file coding work, call todo before editing so the user sees the live plan.
+- Keep exactly one todo item in_progress. Complete items as they are actually done and verified, not retroactively at the end.
+
+Project-map discipline:
+- For code changes, build a small evidence ledger before editing: target files, relevant symbols, caller/test touchpoints, and the expected behavior change.
+- Confirm signatures, data shapes, config keys, and error contracts from source before writing code. Do not infer APIs from names alone.
+- In large repositories, search for the exact symbol/path first, then read the few files that own the behavior. Avoid scanning the whole tree unless the search result is ambiguous.
+- If the repository has explicit instructions (GOKIN.md, CLAUDE.md, .gokin/rules, package scripts), treat them as higher-priority local law.
+
 Read discipline:
 - You MUST Read a file before Edit. The edit tool blocks edits on unread files (read-before-edit invariant). Don't edit from grep snippets.
 - Do not Re-read a file already loaded this session unless it changed.
+- Prefer: grep → targeted Read (with offset/limit). Avoid: glob → bulk Read of whole directory.
 - Batch independent Reads in parallel in one turn.
 
 Edit discipline:

@@ -18,12 +18,14 @@ func TestBuildResponseEvidenceFooter_FilesOnlyNoVerification(t *testing.T) {
 		[]string{"internal/app/foo.go"},
 		nil, nil,
 	)
-	// Expect: "📁 Changed: foo.go" and no "Verified" half.
 	if !strings.Contains(got, "📁 Changed: foo.go") {
 		t.Errorf("missing Changed block: %q", got)
 	}
 	if strings.Contains(got, "Verified") {
 		t.Errorf("should not show Verified half when no commands run: %q", got)
+	}
+	if !strings.Contains(got, "⚠ Not verified") {
+		t.Errorf("should explicitly show missing verification: %q", got)
 	}
 }
 
@@ -77,7 +79,7 @@ func TestBuildResponseEvidenceFooter_FileCap(t *testing.T) {
 
 func TestBuildResponseEvidenceFooter_DedupExactFilenames(t *testing.T) {
 	// Response already lists both files + mentions verification → skip.
-	// Use "passed" (past tense) to match outputContainsVerificationSignals
+	// Use "passed" (past tense) to match donegate.OutputContainsVerificationSignals
 	// — it deliberately requires past-tense to avoid false positives from
 	// forward-looking language like "pass this as an arg".
 	response := "Updated internal/app/foo.go and bar.go. All tests passed."
@@ -108,6 +110,42 @@ func TestBuildResponseEvidenceFooter_ResponseNamesFilesButNotVerification(t *tes
 	}
 	if !strings.Contains(got, "✓ Verified: npm run lint") {
 		t.Errorf("expected Verified with lint command: %q", got)
+	}
+}
+
+func TestBuildResponseEvidenceFooter_ResponseAlreadySaysNotVerified(t *testing.T) {
+	response := "Updated foo.go. Not verified; tests were not run."
+	got := buildResponseEvidenceFooter(
+		response,
+		[]string{"foo.go"},
+		[]string{"edit"},
+		nil,
+	)
+	if got != "" {
+		t.Errorf("expected skip when response already says not verified, got %q", got)
+	}
+}
+
+func TestBuildResponseEvidenceFooter_ResponseAlreadySaysNotVerifiedRussian(t *testing.T) {
+	// Russian disclaimer must suppress the footer the same way the English
+	// one does — the no-verification markers slice includes "не провер" and
+	// "тесты не". Without this case a refactor of those markers (or a switch
+	// to word-boundary matching) could silently break the RU branch and the
+	// English-only test above would still pass.
+	cases := []string{
+		"Обновил foo.go. Тесты не запускались.",
+		"Изменил foo.go, но не проверял — запусти тесты сам.",
+	}
+	for _, response := range cases {
+		got := buildResponseEvidenceFooter(
+			response,
+			[]string{"foo.go"},
+			[]string{"edit"},
+			nil,
+		)
+		if got != "" {
+			t.Errorf("expected skip for Russian no-verification disclaimer %q, got %q", response, got)
+		}
 	}
 }
 

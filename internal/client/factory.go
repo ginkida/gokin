@@ -107,10 +107,16 @@ func NewClient(ctx context.Context, cfg *config.Config, modelID string) (Client,
 		"modelID", modelID,
 		"preset", cfg.Model.Preset)
 
-	// Determine the primary provider
-	provider := cfg.Model.Provider
+	// Determine the primary provider. Model.Provider is authoritative when
+	// set, otherwise infer from the model name before falling back to the
+	// active API provider. This keeps the pool key aligned with auto-detected
+	// clients such as deepseek-v4-pro.
+	provider := strings.ToLower(strings.TrimSpace(cfg.Model.Provider))
+	if provider == "" || provider == "auto" {
+		provider = config.DetectKnownProviderFromModel(modelID)
+	}
 	if provider == "" {
-		provider = cfg.API.Backend
+		provider = strings.ToLower(strings.TrimSpace(cfg.API.GetActiveProvider()))
 	}
 
 	// If fallback providers are configured, build a FallbackClient

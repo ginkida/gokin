@@ -69,3 +69,15 @@ func TestShortActiveProviderName_UnknownProviderFallsBackToKey(t *testing.T) {
 		t.Errorf("unknown provider = %q, want raw key", got)
 	}
 }
+
+func TestShortActiveProviderName_UsesRuntimeProvider(t *testing.T) {
+	a := &App{
+		config: &config.Config{
+			API:   config.APIConfig{ActiveProvider: "glm"},
+			Model: config.ModelConfig{Provider: "deepseek", Name: "deepseek-v4-pro"},
+		},
+	}
+	if got := a.shortActiveProviderName(); got != "DeepSeek" {
+		t.Errorf("shortActiveProviderName() = %q, want %q", got, "DeepSeek")
+	}
+}

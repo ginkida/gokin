@@ -55,6 +55,33 @@ func TestSupportsDeepSeekThinking(t *testing.T) {
 	}
 }
 
+func TestNewClient_DetectsDeepSeekProviderFromModelName(t *testing.T) {
+	cfg := newDeepSeekTestConfig()
+	cfg.API.ActiveProvider = "glm"
+	cfg.Model.Provider = ""
+
+	pool := GetPool(cfg)
+	pool.FlushProvider("deepseek")
+	t.Cleanup(func() {
+		pool.FlushProvider("deepseek")
+	})
+
+	c, err := NewClient(t.Context(), cfg, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = c.Close()
+	})
+
+	if _, ok := pool.Get("deepseek", "deepseek-v4-pro"); !ok {
+		t.Fatal("NewClient should cache inferred DeepSeek client under provider key deepseek")
+	}
+	if _, ok := pool.Get("glm", "deepseek-v4-pro"); ok {
+		t.Fatal("NewClient should not cache DeepSeek model under stale active provider glm")
+	}
+}
+
 // TestNewDeepSeekClient_AutoEnablesThinking confirms that a user who
 // did not configure thinking still gets it on for V4 Pro. Parallels
 // TestNewKimiClient_AutoEnablesThinking.

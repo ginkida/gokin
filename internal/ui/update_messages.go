@@ -31,3 +31,9 @@ type TaskProgressEvent struct {
 	Progress float64
 	Message  string
 }
+
+// CoordinatedTaskCleanupMsg is sent by handleTaskCompleted after a delay to
+// auto-remove a completed/failed task from the display.
+type CoordinatedTaskCleanupMsg struct {
+	ID string
+}

@@ -54,6 +54,48 @@ func TestParseToolCallsFromText_Multiple(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsFromText_JSONArray(t *testing.T) {
+	text := "```json\n[{\"tool\":\"read\",\"args\":{\"path\":\"a.go\"}},{\"tool\":\"grep\",\"args\":{\"pattern\":\"TODO\"}}]\n```"
+	calls := ParseToolCallsFromText(text)
+	if len(calls) != 2 {
+		t.Fatalf("got %d calls, want 2", len(calls))
+	}
+	if calls[0].Name != "read" || calls[0].Args["path"] != "a.go" {
+		t.Fatalf("first call = %#v", calls[0])
+	}
+	if calls[1].Name != "grep" || calls[1].Args["pattern"] != "TODO" {
+		t.Fatalf("second call = %#v", calls[1])
+	}
+}
+
+func TestParseToolCallsFromText_AnthropicToolUse(t *testing.T) {
+	text := "```json\n{\"type\":\"tool_use\",\"name\":\"edit\",\"input\":{\"file_path\":\"main.go\",\"old_string\":\"a\",\"new_string\":\"b\"}}\n```"
+	calls := ParseToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	if calls[0].Name != "edit" {
+		t.Fatalf("Name = %q, want edit", calls[0].Name)
+	}
+	if calls[0].Args["file_path"] != "main.go" {
+		t.Fatalf("Args[file_path] = %v", calls[0].Args["file_path"])
+	}
+}
+
+func TestParseToolCallsFromText_OpenAIToolCalls(t *testing.T) {
+	text := `{"tool_calls":[{"type":"function","function":{"name":"bash","arguments":"{\"command\":\"go test ./...\"}"}}]}`
+	calls := ParseToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	if calls[0].Name != "bash" {
+		t.Fatalf("Name = %q, want bash", calls[0].Name)
+	}
+	if calls[0].Args["command"] != "go test ./..." {
+		t.Fatalf("Args[command] = %v", calls[0].Args["command"])
+	}
+}
+
 func TestParseToolCallsFromText_Empty(t *testing.T) {
 	if calls := ParseToolCallsFromText(""); calls != nil {
 		t.Errorf("empty text should return nil, got %v", calls)

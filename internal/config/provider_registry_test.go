@@ -103,6 +103,24 @@ func TestDetectProviderFromModel(t *testing.T) {
 	}
 }
 
+func TestDetectKnownProviderFromModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  string
+	}{
+		{"deepseek-v4-pro", "deepseek"},
+		{"kimi-k2.5", "kimi"},
+		{"some-unknown-model", ""},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		if got := DetectKnownProviderFromModel(tt.model); got != tt.want {
+			t.Errorf("DetectKnownProviderFromModel(%q) = %q, want %q", tt.model, got, tt.want)
+		}
+	}
+}
+
 func TestAnyProviderHasKey(t *testing.T) {
 	tests := []struct {
 		name string

@@ -500,7 +500,7 @@ func (b *Builder) initSession() error {
 	// Tag the session with the active provider so the auto-resume path
 	// can refuse cross-provider loads. See Session.Provider docstring
 	// for the history-incompatibility problem this guards against.
-	b.session.SetProvider(b.cfg.API.GetActiveProvider())
+	b.session.SetProvider(runtimeProviderForConfig(b.cfg))
 
 	b.projectInfo = appcontext.DetectProject(b.workDir)
 
@@ -548,10 +548,8 @@ func (b *Builder) initSession() error {
 	b.workingMemory.LoadFromDisk()
 	b.promptBuilder.SetWorkingMemory(b.workingMemory)
 
-	// Provider-specific prompt addendum (Kimi operating rules, etc.).
-	// GetActiveProvider returns "" when nothing is configured yet —
-	// SetProvider handles empty string as a no-op.
-	b.promptBuilder.SetProvider(b.cfg.API.GetActiveProvider())
+	// Provider-specific prompt addendum (Kimi/DeepSeek operating rules, etc.).
+	b.promptBuilder.SetProvider(runtimeProviderForConfig(b.cfg))
 
 	// Ensure .gokin working files are in .gitignore
 	appcontext.EnsureGokinGitignore(b.workDir)
@@ -736,6 +734,7 @@ func (b *Builder) initManagers() error {
 	b.agentRunner.SetPermissions(b.permManager)
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
 	b.agentRunner.SetWorkspaceIsolationEnabled(b.cfg.Plan.WorkspaceIsolation)
+	b.agentRunner.SetDoneGateConfig(b.cfg.DoneGate)
 	if b.readTracker != nil {
 		tracker := b.readTracker
 		b.agentRunner.SetRecentFilesProvider(func(limit int) []string {
@@ -901,7 +900,7 @@ func (b *Builder) initManagers() error {
 
 	// 4. Smart Router with adaptive selection + model capability
 	smartRouterCfg := router.DefaultSmartRouterConfig()
-	b.modelCapability = router.InferModelCapability(b.cfg.API.GetActiveProvider(), b.cfg.Model.Name)
+	b.modelCapability = router.InferModelCapability(runtimeProviderForConfig(b.cfg), b.cfg.Model.Name)
 	smartRouterCfg.ModelCapability = b.modelCapability
 	logging.Debug("model capability inferred", "provider", b.modelCapability.Provider, "tier", b.modelCapability.Tier.String())
 
@@ -1517,11 +1516,8 @@ func (b *Builder) initUI() error {
 
 	b.tuiModel.SetBellEnabled(b.cfg.UI.Bell)
 
-	// Filter models by current provider/backend
-	provider := b.cfg.Model.Provider
-	if provider == "" {
-		provider = b.cfg.API.Backend
-	}
+	// Filter models by the same provider that drives runtime behavior.
+	provider := runtimeProviderForConfig(b.cfg)
 	if provider == "" {
 		provider = "glm" // Default
 	}
@@ -1569,8 +1565,8 @@ func (b *Builder) wireDependencies() error {
 			app.promptBuilder.SetWorkingMemory(b.workingMemory)
 		}
 		// Re-assert provider selection in case assembleApp picked up a
-		// late-bound active provider (e.g., set via CLI flag, not yaml).
-		app.promptBuilder.SetProvider(b.cfg.API.GetActiveProvider())
+		// late-bound model/provider value (e.g., set via CLI flag, not yaml).
+		app.promptBuilder.SetProvider(runtimeProviderForConfig(b.cfg))
 	}
 	if app.sessionMemory != nil && b.projectLearning != nil {
 		app.sessionMemory.SetProjectLearning(b.projectLearning)
@@ -2273,10 +2269,10 @@ func (b *Builder) assembleApp() *App {
 		// Loops (autonomous recurring tasks). Wired here so the App
 		// has access from start; the background scheduler is started
 		// later by App.Run.
-		loopManager: b.loopManager,
-		loopMemory:  b.loopMemory,
-		sessionMemory:     b.sessionMemory,
-		workingMemory:     b.workingMemory,
+		loopManager:   b.loopManager,
+		loopMemory:    b.loopMemory,
+		sessionMemory: b.sessionMemory,
+		workingMemory: b.workingMemory,
 		// Persistent stores for flush on shutdown
 		memoryStore:  b.memStore,
 		errorStore:   b.errorStore,

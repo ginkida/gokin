@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"gokin/internal/donegate"
 	"gokin/internal/tools"
 )
 
@@ -34,7 +35,7 @@ func (a *App) recordResponseEvidence(toolName string, args map[string]any, resul
 
 	switch toolName {
 	case "read":
-		paths := normalizeDoneGateTouchedPaths(a.workDir, extractDoneGateTouchedPaths(args))
+		paths := donegate.NormalizeTouchedPaths(a.workDir, donegate.ExtractTouchedPaths(args))
 		for _, path := range paths {
 			a.responseEvidence.ReadPaths = appendUniqueLimited(a.responseEvidence.ReadPaths, path, responseEvidenceMaxEntries)
 		}

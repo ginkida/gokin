@@ -16,9 +16,24 @@ var textToolCallSeq atomic.Uint64
 
 // ToolCallFromText represents a tool call parsed from text output.
 type ToolCallFromText struct {
-	Tool string         `json:"tool"`
-	Name string         `json:"name"` // alias for "tool"
-	Args map[string]any `json:"args"`
+	Type       string         `json:"type"`
+	Tool       string         `json:"tool"`
+	Name       string         `json:"name"`       // alias for "tool"; Anthropic tool_use uses this
+	Args       map[string]any `json:"args"`       // native fallback shape
+	Input      map[string]any `json:"input"`      // Anthropic tool_use shape
+	Parameters map[string]any `json:"parameters"` // common LLM alias
+}
+
+type openAIToolCallFromText struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments any    `json:"arguments"`
+	} `json:"function"`
+}
+
+type toolCallsEnvelopeFromText struct {
+	ToolCalls []openAIToolCallFromText `json:"tool_calls"`
 }
 
 // ParseToolCallsFromText attempts to extract tool calls from model text output.
@@ -50,8 +65,8 @@ func ParseToolCallsFromText(text string) []*genai.FunctionCall {
 	return nil
 }
 
-// extractFromCodeBlocks extracts tool calls from ```json ... ``` blocks.
-var codeBlockPattern = regexp.MustCompile("(?s)```(?:json)?\\s*\\n?(\\{.*?\\})\\s*\\n?```")
+// extractFromCodeBlocks extracts tool calls from fenced JSON-ish blocks.
+var codeBlockPattern = regexp.MustCompile("(?s)```(?:json|tool|tool_code)?\\s*\\n?(.*?)\\s*\\n?```")
 
 func extractFromCodeBlocks(text string) []*genai.FunctionCall {
 	matches := codeBlockPattern.FindAllStringSubmatch(text, -1)
@@ -64,10 +79,7 @@ func extractFromCodeBlocks(text string) []*genai.FunctionCall {
 		if len(match) < 2 {
 			continue
 		}
-		fc := parseToolCallJSON(match[1])
-		if fc != nil {
-			calls = append(calls, fc)
-		}
+		calls = append(calls, parseToolCallsJSON(match[1])...)
 	}
 	return calls
 }
@@ -79,10 +91,7 @@ func extractFromBareJSON(text string) []*genai.FunctionCall {
 	// Find all JSON-like objects in the text
 	objects := findJSONObjects(text)
 	for _, obj := range objects {
-		fc := parseToolCallJSON(obj)
-		if fc != nil {
-			calls = append(calls, fc)
-		}
+		calls = append(calls, parseToolCallsJSON(obj)...)
 	}
 	return calls
 }
@@ -143,6 +152,71 @@ func findJSONObjects(text string) []string {
 	return objects
 }
 
+// parseToolCallsJSON parses a JSON object or array as one or more tool calls.
+func parseToolCallsJSON(jsonStr string) []*genai.FunctionCall {
+	jsonStr = strings.TrimSpace(jsonStr)
+	if jsonStr == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(jsonStr, "[") {
+		var rawItems []json.RawMessage
+		if err := json.Unmarshal([]byte(jsonStr), &rawItems); err != nil {
+			return nil
+		}
+		var calls []*genai.FunctionCall
+		for _, item := range rawItems {
+			calls = append(calls, parseToolCallsJSON(string(item))...)
+		}
+		return calls
+	}
+
+	if calls := parseOpenAIToolCallsJSON(jsonStr); len(calls) > 0 {
+		return calls
+	}
+
+	fc := parseToolCallJSON(jsonStr)
+	if fc == nil {
+		return nil
+	}
+	return []*genai.FunctionCall{fc}
+}
+
+func parseOpenAIToolCallsJSON(jsonStr string) []*genai.FunctionCall {
+	var env toolCallsEnvelopeFromText
+	if err := json.Unmarshal([]byte(jsonStr), &env); err != nil || len(env.ToolCalls) == 0 {
+		return nil
+	}
+
+	calls := make([]*genai.FunctionCall, 0, len(env.ToolCalls))
+	for _, tc := range env.ToolCalls {
+		toolName := strings.TrimSpace(tc.Function.Name)
+		if toolName == "" {
+			continue
+		}
+		args := parseOpenAIArguments(tc.Function.Arguments)
+		calls = append(calls, &genai.FunctionCall{
+			ID:   nextTextToolCallID(toolName),
+			Name: toolName,
+			Args: args,
+		})
+	}
+	return calls
+}
+
+func parseOpenAIArguments(raw any) map[string]any {
+	switch v := raw.(type) {
+	case string:
+		var args map[string]any
+		if err := json.Unmarshal([]byte(v), &args); err == nil && args != nil {
+			return args
+		}
+	case map[string]any:
+		return v
+	}
+	return map[string]any{}
+}
+
 // parseToolCallJSON parses a single JSON object as a tool call.
 func parseToolCallJSON(jsonStr string) *genai.FunctionCall {
 	jsonStr = strings.TrimSpace(jsonStr)
@@ -161,17 +235,23 @@ func parseToolCallJSON(jsonStr string) *genai.FunctionCall {
 		return nil
 	}
 
-	// Ensure args is not nil
-	if tc.Args == nil {
-		tc.Args = make(map[string]any)
+	args := tc.Args
+	if args == nil {
+		args = tc.Input
+	}
+	if args == nil {
+		args = tc.Parameters
+	}
+	if args == nil {
+		args = make(map[string]any)
 	}
 
-	logging.Debug("parsed tool call from text", "tool", toolName, "args_count", len(tc.Args))
+	logging.Debug("parsed tool call from text", "tool", toolName, "args_count", len(args))
 
 	return &genai.FunctionCall{
 		ID:   nextTextToolCallID(toolName),
 		Name: toolName,
-		Args: tc.Args,
+		Args: args,
 	}
 }
 
@@ -201,6 +281,7 @@ func ToolCallFallbackPrompt(toolDeclarations []*genai.FunctionDeclaration) strin
 	sb.WriteString("\n\n## Tool Calling Instructions\n\n")
 	sb.WriteString("You have access to tools. To call a tool, output a JSON object in a code block:\n\n")
 	sb.WriteString("```json\n{\"tool\": \"tool_name\", \"args\": {\"param1\": \"value1\"}}\n```\n\n")
+	sb.WriteString("The parser also accepts Anthropic-style `{\"type\":\"tool_use\",\"name\":\"tool_name\",\"input\":{...}}` if your model naturally emits that shape.\n\n")
 	sb.WriteString("IMPORTANT RULES:\n")
 	sb.WriteString("- Output ONLY the JSON block when calling a tool, no other text before or after\n")
 	sb.WriteString("- Wait for the tool result before continuing\n")

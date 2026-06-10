@@ -296,6 +296,7 @@ type CoordinatedTaskState struct {
 	Status              string // pending, running, completed, failed
 	Progress            float64
 	StartTime           time.Time
+	EndTime             time.Time // Set when task completes/fails; used for auto-cleanup
 	Duration            time.Duration
 	Error               error
 	LastProgressBucket  int
@@ -1107,6 +1108,10 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// Handle Ctrl+T for todos toggle
 	if msg.Type == tea.KeyCtrlT && m.state == StateInput {
 		m.todosVisible = !m.todosVisible
+		// When opening the panel, sweep completed tasks older than 5s
+		if m.todosVisible {
+			m.cleanupStaleCoordinatedTasks()
+		}
 		m.toastManager.ShowInfo(toggleStateLabel("Todos", m.todosVisible))
 		return nil
 	}
@@ -2068,19 +2073,25 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 		m.output.AppendLine("")
 
-	// Coordinated task events (Phase 2)
 	case TaskStartedEvent:
 		m.handleTaskStarted(msg)
 	case TaskCompletedEvent:
-		m.handleTaskCompleted(msg)
+		if cmd := m.handleTaskCompleted(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case TaskProgressEvent:
 		m.handleTaskProgress(msg)
 
-	// Background task tracking
+	case CoordinatedTaskCleanupMsg:
+		m.removeCoordinatedTask(msg.ID)
+
+	// Background task tracking (agent start/complete, sent from builder.go).
+	// handleBackgroundTask carries Status across the full lifecycle
+	// (running/completed/failed/cancelled) — do NOT narrow this to a
+	// start-only message, completion handling (bell, untrack, failure
+	// toast) lives here too.
 	case BackgroundTaskMsg:
 		cmds = append(cmds, m.handleBackgroundTask(msg))
-
-	// Background task progress updates
 	case BackgroundTaskProgressMsg:
 		if task, ok := m.backgroundTasks[msg.ID]; ok {
 			task.Progress = msg.Progress
@@ -3094,8 +3105,8 @@ func (m *Model) SetHintsEnabled(enabled bool) {
 	m.hintsEnabled = enabled
 }
 
-// ShowHint displays a contextual hint if hints are enabled and the hint
-// hasn't been shown too many times (max 3 times per hint).
+// ShowHint displays a contextual hint if hints are enabled and the hint hasn't
+// been shown too many times (max 3 times per hint).
 func (m *Model) ShowHint(hintID, text string) {
 	if !m.hintsEnabled {
 		return
@@ -3104,14 +3115,19 @@ func (m *Model) ShowHint(hintID, text string) {
 		return // Already shown 3 times, auto-dismiss
 	}
 	m.hintsShown[hintID]++
-	m.output.AppendLine(m.styles.FormatHint(text))
-	m.output.AppendLine("")
+	m.toastManager.ShowInfo(text)
 }
 
-// ========== Coordinated Task Handlers (Phase 2) ==========
+// RemoveHint removes a hint by ID.
+func (m *Model) RemoveHint(hintID string) {
+	// Hints are shown as toasts which auto-dismiss; this is a no-op.
+}
 
 // handleTaskStarted handles the TaskStartedEvent message.
 func (m *Model) handleTaskStarted(msg TaskStartedEvent) {
+	// Sweep stale completed tasks before adding a new one
+	m.cleanupStaleCoordinatedTasks()
+
 	taskState := &CoordinatedTaskState{
 		ID:                 msg.TaskID,
 		Message:            msg.Message,
@@ -3130,26 +3146,59 @@ func (m *Model) handleTaskStarted(msg TaskStartedEvent) {
 	m.output.AppendLine(m.renderTaskTimelineStart(len(m.coordinatedTaskOrder), msg.PlanType, msg.Message))
 }
 
-// handleTaskCompleted handles the TaskCompletedEvent message.
-func (m *Model) handleTaskCompleted(msg TaskCompletedEvent) {
-	if taskState, ok := m.coordinatedTasks[msg.TaskID]; ok {
-		taskState.Duration = msg.Duration
-		taskState.Error = msg.Error
-
-		if msg.Success {
-			taskState.Status = "completed"
-			taskState.Progress = 1.0
-		} else {
-			taskState.Status = "failed"
+// cleanupStaleCoordinatedTasks removes completed or failed coordinated tasks
+// whose EndTime is more than 5 seconds ago. This prevents the Ctrl+T task
+// panel from accumulating stale entries indefinitely.
+func (m *Model) cleanupStaleCoordinatedTasks() {
+	const cleanupDelay = 5 * time.Second
+	now := time.Now()
+	var cleaned int
+	for _, id := range m.coordinatedTaskOrder {
+		ts, ok := m.coordinatedTasks[id]
+		if !ok {
+			continue
 		}
+		if (ts.Status == "completed" || ts.Status == "failed") && now.Sub(ts.EndTime) > cleanupDelay {
+			delete(m.coordinatedTasks, id)
+			cleaned++
+		}
+	}
+	if cleaned > 0 {
+		newOrder := make([]string, 0, len(m.coordinatedTaskOrder)-cleaned)
+		for _, id := range m.coordinatedTaskOrder {
+			if _, ok := m.coordinatedTasks[id]; ok {
+				newOrder = append(newOrder, id)
+			}
+		}
+		m.coordinatedTaskOrder = newOrder
+	}
+}
+
+// handleTaskCompleted marks a coordinated task as completed or failed and
+// schedules its auto-removal after a short delay.
+func (m *Model) handleTaskCompleted(msg TaskCompletedEvent) tea.Cmd {
+	if ts, ok := m.coordinatedTasks[msg.TaskID]; ok {
+		ts.Duration = msg.Duration
+		ts.Error = msg.Error
+		ts.Progress = 1.0
+		if msg.Success {
+			ts.Status = "completed"
+		} else {
+			ts.Status = "failed"
+		}
+		ts.EndTime = time.Now()
 
 		m.output.AppendLine(m.renderTaskTimelineDone(msg.Success, msg.Duration.Round(time.Millisecond), msg.Error))
 	}
 
-	// Update active task
 	if m.activeCoordinatedTask == msg.TaskID {
 		m.activeCoordinatedTask = ""
 	}
+
+	// Schedule auto-removal after 5 seconds
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+		return CoordinatedTaskCleanupMsg{ID: msg.TaskID}
+	})
 }
 
 // handleTaskProgress handles the TaskProgressEvent message.
@@ -3225,6 +3274,23 @@ func (m *Model) ClearCoordinatedTasks() {
 	m.coordinatedTasks = make(map[string]*CoordinatedTaskState)
 	m.coordinatedTaskOrder = make([]string, 0)
 	m.activeCoordinatedTask = ""
+}
+
+// removeCoordinatedTask removes a single task from coordinatedTasks and
+// coordinatedTaskOrder. Used by CoordinatedTaskCleanupMsg handler to
+// auto-remove completed/failed tasks after a short delay.
+func (m *Model) removeCoordinatedTask(id string) {
+	delete(m.coordinatedTasks, id)
+	for i, tid := range m.coordinatedTaskOrder {
+		if tid == id {
+			m.coordinatedTaskOrder = append(m.coordinatedTaskOrder[:i], m.coordinatedTaskOrder[i+1:]...)
+			break
+		}
+	}
+	// Clear active if this was the active task
+	if m.activeCoordinatedTask == id {
+		m.activeCoordinatedTask = ""
+	}
 }
 
 // ========== Background Task Handlers ==========

@@ -142,6 +142,32 @@ func TestProcessIncludes_HomePath(t *testing.T) {
 	}
 }
 
+// TestProcessIncludes_TildeNoSlashStaysGuarded pins that a no-slash "@~foo"
+// include does NOT resolve to $HOME/foo (which would bypass the traversal
+// guard). Only "@~" and "@~/..." are home-rooted; "@~foo" falls through to the
+// guarded relative branch.
+func TestProcessIncludes_TildeNoSlashStaysGuarded(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+	tmpFile := filepath.Join(home, "gokin_test_noslash_tmp.md")
+	os.WriteFile(tmpFile, []byte("SHOULD-NOT-LEAK home content"), 0644)
+	defer os.Remove(tmpFile)
+
+	input := "@~gokin_test_noslash_tmp.md"
+	got := processIncludes(input, t.TempDir())
+
+	if strings.Contains(got, "SHOULD-NOT-LEAK") {
+		t.Errorf("@~foo (no slash) must NOT read $HOME/foo; leaked home content:\n%s", got)
+	}
+	// Falls through to the guarded relative branch; no such file under baseDir,
+	// so the original include line is preserved verbatim.
+	if !strings.Contains(got, "@~gokin_test_noslash_tmp.md") {
+		t.Errorf("unresolved no-slash tilde include should be preserved, got:\n%s", got)
+	}
+}
+
 func TestProcessIncludes_NonIncludeLinesPassThrough(t *testing.T) {
 	input := "plain line\n@[link](url)\nanother line"
 	got := processIncludes(input, "/tmp")

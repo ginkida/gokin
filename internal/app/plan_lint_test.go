@@ -5,12 +5,13 @@ import (
 	"testing"
 
 	"gokin/internal/config"
+	"gokin/internal/donegate"
 	"gokin/internal/plan"
 )
 
 func TestValidateVerifyCommandSafety_SafeCommands(t *testing.T) {
 	a := &App{}
-	profile := doneGateProfile{}
+	profile := donegate.Profile{}
 	ctx := context.Background()
 
 	safe := []string{
@@ -31,7 +32,7 @@ func TestValidateVerifyCommandSafety_SafeCommands(t *testing.T) {
 
 func TestValidateVerifyCommandSafety_UnsafeCommands(t *testing.T) {
 	a := &App{}
-	profile := doneGateProfile{}
+	profile := donegate.Profile{}
 	ctx := context.Background()
 
 	cases := []struct {
@@ -65,7 +66,7 @@ func TestValidateVerifyCommandSafety_AllowListOverridesIntentCheck(t *testing.T)
 	cfg.Plan.VerifyPolicy.AllowContains = []string{"deploy-check"}
 
 	a := &App{config: cfg}
-	profile := doneGateProfile{}
+	profile := donegate.Profile{}
 	ctx := context.Background()
 
 	// This command would normally fail the intent check (no "test/build/check/…"
@@ -81,7 +82,7 @@ func TestValidateVerifyCommandSafety_AllowListOverridesIntentCheck(t *testing.T)
 // I/O so a cancelled context still returns a result rather than hanging.
 func TestValidateVerifyCommandSafety_CancelledCtx(t *testing.T) {
 	a := &App{}
-	profile := doneGateProfile{}
+	profile := donegate.Profile{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 

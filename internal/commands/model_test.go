@@ -20,16 +20,27 @@ func (f *fakeModelSetter) SetModel(name string) { f.model = name }
 
 type fakeAppForModel struct {
 	*fakeAppForMCP
-	setter *fakeModelSetter
+	setter     *fakeModelSetter
+	applied    *config.Config
+	applyCalls int
+	clearCalls int
 }
 
 func (f *fakeAppForModel) GetModelSetter() ModelSetter { return f.setter }
+func (f *fakeAppForModel) ApplyConfig(cfg *config.Config) error {
+	f.applyCalls++
+	copyCfg := *cfg
+	f.applied = &copyCfg
+	return nil
+}
+func (f *fakeAppForModel) ClearConversation() { f.clearCalls++ }
 
 func newModelApp(active string, currentModel string) *fakeAppForModel {
 	return &fakeAppForModel{
 		fakeAppForMCP: &fakeAppForMCP{
 			cfg: &config.Config{
-				API: config.APIConfig{ActiveProvider: active},
+				API:   config.APIConfig{ActiveProvider: active},
+				Model: config.ModelConfig{Provider: active, Name: currentModel},
 			},
 		},
 		setter: &fakeModelSetter{model: currentModel},
@@ -103,6 +114,97 @@ func TestModelCommand_ModelMatchingIsCaseInsensitive(t *testing.T) {
 	}
 	if app.setter.model != "MiniMax-M2.7" {
 		t.Fatalf("model = %q, want MiniMax-M2.7", app.setter.model)
+	}
+	if app.clearCalls != 0 {
+		t.Fatalf("same-provider model switch cleared conversation")
+	}
+}
+
+func TestModelCommand_CrossProviderDeepSeekModelSwitch(t *testing.T) {
+	app := newModelApp("glm", "glm-5.1")
+	app.fakeAppForMCP.cfg.API.DeepSeekKey = "sk-deepseek-test-key-for-unit-test-12345"
+
+	cmd := &ModelCommand{}
+	out, err := cmd.Execute(context.Background(), []string{"deepseek-v4-pro"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(out, "deepseek-v4-pro") || !strings.Contains(out, "session cleared") {
+		t.Fatalf("expected DeepSeek switch output with session cleared, got:\n%s", out)
+	}
+	if app.setter.model != "deepseek-v4-pro" {
+		t.Fatalf("setter model = %q, want deepseek-v4-pro", app.setter.model)
+	}
+	if app.applied == nil {
+		t.Fatal("ApplyConfig was not called")
+	}
+	if app.applied.API.ActiveProvider != "deepseek" {
+		t.Fatalf("ActiveProvider = %q, want deepseek", app.applied.API.ActiveProvider)
+	}
+	if app.applied.Model.Provider != "deepseek" {
+		t.Fatalf("Model.Provider = %q, want deepseek", app.applied.Model.Provider)
+	}
+	if app.clearCalls != 1 {
+		t.Fatalf("ClearConversation calls = %d, want 1", app.clearCalls)
+	}
+}
+
+func TestModelCommand_CrossProviderRequiresCredentials(t *testing.T) {
+	app := newModelApp("glm", "glm-5.1")
+
+	cmd := &ModelCommand{}
+	out, err := cmd.Execute(context.Background(), []string{"deepseek-v4-pro"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(out, "/login deepseek") {
+		t.Fatalf("expected login guidance for unconfigured DeepSeek, got:\n%s", out)
+	}
+	if app.applyCalls != 0 {
+		t.Fatalf("ApplyConfig calls = %d, want 0", app.applyCalls)
+	}
+	if app.setter.model != "glm-5.1" {
+		t.Fatalf("model changed despite missing credentials: %q", app.setter.model)
+	}
+}
+
+// TestMatchModelInProvider covers the exact/substring/ambiguous matcher that
+// both same-provider and cross-provider switching are built on.
+func TestMatchModelInProvider(t *testing.T) {
+	models := []client.ModelInfo{
+		{ID: "acme-pro", Name: "Acme Pro"},
+		{ID: "acme-pro-max", Name: "Acme Pro Max"},
+		{ID: "acme-lite", Name: "Acme Lite"},
+	}
+
+	// Exact ID match wins even though it is a substring of acme-pro-max.
+	if got, amb := matchModelInProvider("acme-pro", models); got != "acme-pro" || amb {
+		t.Fatalf("exact match: got (%q,%v), want (acme-pro,false)", got, amb)
+	}
+	// Substring matching two models is ambiguous.
+	if got, amb := matchModelInProvider("pro", models); !amb || got != "" {
+		t.Fatalf("substring 'pro': got (%q,%v), want ('',true)", got, amb)
+	}
+	// Substring matching exactly one model resolves.
+	if got, amb := matchModelInProvider("lite", models); got != "acme-lite" || amb {
+		t.Fatalf("single substring: got (%q,%v), want (acme-lite,false)", got, amb)
+	}
+	// No match / empty query resolve to no result, no ambiguity.
+	if got, amb := matchModelInProvider("zzz", models); got != "" || amb {
+		t.Fatalf("no match: got (%q,%v)", got, amb)
+	}
+	if got, amb := matchModelInProvider("   ", models); got != "" || amb {
+		t.Fatalf("empty query: got (%q,%v)", got, amb)
+	}
+}
+
+// TestMatchModelAcrossProviders_NoMatch pins the cross-provider fallback's
+// no-match path: an unknown query returns empty with no ambiguity, so the
+// command falls through to "Unknown model" rather than switching.
+func TestMatchModelAcrossProviders_NoMatch(t *testing.T) {
+	p, m, amb := matchModelAcrossProviders("totally-unknown-model-xyz", "glm")
+	if p != "" || m != "" || amb {
+		t.Fatalf("got (%q,%q,%v), want empty with no ambiguity", p, m, amb)
 	}
 }
 

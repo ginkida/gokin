@@ -10,6 +10,7 @@ import (
 
 	"gokin/internal/client"
 	"gokin/internal/config"
+	"gokin/internal/donegate"
 	"gokin/internal/logging"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
@@ -124,6 +125,9 @@ type Runner struct {
 	// Rate limiting callback (adaptive)
 	onRateLimit func(rl *client.RateLimitMetadata)
 
+	// Done-gate policy inherited by newly spawned agents.
+	doneGatePolicy *donegate.Policy
+
 	mu sync.RWMutex
 }
 
@@ -195,6 +199,7 @@ type runnerAgentDeps struct {
 	exampleStore        ExampleStoreInterface
 	promptOptimizer     *PromptOptimizer
 	workspaceIsolation  bool
+	doneGatePolicy      *donegate.Policy
 }
 
 // SetPermissions sets the permission manager for agents.
@@ -492,6 +497,33 @@ func (r *Runner) SetWorkspaceIsolationEnabled(enabled bool) {
 	r.mu.Unlock()
 }
 
+// SetDoneGateConfig applies the foreground done-gate config to future
+// sub-agents. Existing agents keep their snapshot.
+func (r *Runner) SetDoneGateConfig(cfg config.DoneGateConfig) {
+	policy := donegate.Policy{
+		Enabled:         cfg.Enabled,
+		Mode:            "strict",
+		FailClosed:      false, // sub-agents report failures; they do not hard-block the run
+		CheckTimeout:    donegate.DefaultCheckTimeout,
+		AutoFixAttempts: cfg.AutoFixAttempts,
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Mode)) {
+	case "normal", "strict":
+		policy.Mode = strings.ToLower(strings.TrimSpace(cfg.Mode))
+	case "":
+		// Keep strict default.
+	default:
+		logging.Warn("invalid done-gate mode for agent runner; using strict", "mode", cfg.Mode)
+	}
+	if cfg.CheckTimeout > 0 {
+		policy.CheckTimeout = cfg.CheckTimeout
+	}
+
+	r.mu.Lock()
+	r.doneGatePolicy = &policy
+	r.mu.Unlock()
+}
+
 // SetWorkspaceReviewHandler sets the callback used to review isolated workspace
 // changes before apply-back into the primary workspace.
 func (r *Runner) SetWorkspaceReviewHandler(handler func(context.Context, []WorkspaceChangePreview) (bool, error)) {
@@ -573,6 +605,7 @@ func (r *Runner) snapshotAgentDeps() runnerAgentDeps {
 		exampleStore:        r.exampleStore,
 		promptOptimizer:     r.promptOptimizer,
 		workspaceIsolation:  r.workspaceIsolationEnabled,
+		doneGatePolicy:      r.doneGatePolicy,
 	}
 }
 
@@ -736,6 +769,9 @@ func (r *Runner) newConfiguredAgent(
 
 	if deps.onThinking != nil {
 		agent.SetOnThinking(deps.onThinking)
+	}
+	if deps.doneGatePolicy != nil {
+		agent.SetDoneGatePolicy(*deps.doneGatePolicy)
 	}
 
 	return agent
@@ -1071,6 +1107,7 @@ func (r *Runner) cleanupOldResults() {
 		}
 	}
 }
+
 // SetRateLimitCallback sets the rate limit callback for agents.
 func (r *Runner) SetRateLimitCallback(cb func(rl *client.RateLimitMetadata)) {
 	r.mu.Lock()

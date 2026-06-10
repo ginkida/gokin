@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"gokin/internal/donegate"
 )
 
 // buildEvidenceFooterIfEnabled is the App-level wrapper that snapshots
@@ -70,6 +72,8 @@ func buildResponseEvidenceFooter(response string, touchedPaths, toolsUsed, comma
 	if len(verifyItems) > 0 {
 		sb.WriteString(" · ✓ Verified: ")
 		sb.WriteString(formatEvidenceCommands(verifyItems, evidenceFooterMaxCommands))
+	} else {
+		sb.WriteString(" · ⚠ Not verified")
 	}
 	sb.WriteString("_")
 	return sb.String()
@@ -83,7 +87,7 @@ func pickVerificationCommands(commands, toolsUsed []string) []string {
 	out := make([]string, 0, 2)
 	for _, cmd := range commands {
 		cmd = strings.TrimSpace(cmd)
-		if cmd == "" || !commandsContainVerificationSignals([]string{cmd}) {
+		if cmd == "" || !donegate.CommandsContainVerificationSignals([]string{cmd}) {
 			continue
 		}
 		out = append(out, cmd)
@@ -194,9 +198,33 @@ func responseAlreadyDescribesEvidence(response string, files, verifyItems []stri
 		}
 	}
 	if len(verifyItems) == 0 {
-		return true
+		return responseMentionsNoVerification(response)
 	}
-	return outputContainsVerificationSignals(response) || responseMentionsVerificationCommand(response, verifyItems)
+	return donegate.OutputContainsVerificationSignals(response) || responseMentionsVerificationCommand(response, verifyItems)
+}
+
+func responseMentionsNoVerification(response string) bool {
+	lower := strings.ToLower(response)
+	markers := []string{
+		"not verified",
+		"unverified",
+		"did not run",
+		"didn't run",
+		"could not run",
+		"couldn't run",
+		"not run tests",
+		"not tested",
+		"tests not run",
+		"verification not run",
+		"не провер",
+		"тесты не",
+	}
+	for _, marker := range markers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // responseMentionsVerificationCommand handles cases where the response

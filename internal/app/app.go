@@ -14,7 +14,6 @@ import (
 	"google.golang.org/genai"
 
 	"gokin/internal/agent"
-	"gokin/internal/loops"
 	"gokin/internal/audit"
 	"gokin/internal/cache"
 	"gokin/internal/chat"
@@ -25,6 +24,7 @@ import (
 	"gokin/internal/git"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
+	"gokin/internal/loops"
 	"gokin/internal/mcp"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
@@ -373,7 +373,7 @@ func (a *App) Run() error {
 			// tool_use ID shapes, cache_control markers) don't round-
 			// trip across providers. Empty state.Provider = legacy
 			// session from before v0.71.4; treat as compatible.
-			currentProvider := a.config.API.GetActiveProvider()
+			currentProvider := runtimeProviderForConfig(a.config)
 			providerMismatch := state.Provider != "" && currentProvider != "" && state.Provider != currentProvider
 
 			if age > autoResumeCutoff {
@@ -1100,7 +1100,7 @@ func (a *App) GetUIRuntimeStatus() ui.RuntimeStatusSnapshot {
 	}
 
 	if a.config != nil {
-		out.Provider = a.config.API.GetActiveProvider()
+		out.Provider = runtimeProviderForConfig(a.config)
 	}
 	if a.reliability != nil {
 		s := a.reliability.Snapshot()
@@ -1786,7 +1786,7 @@ func (a *App) shortActiveProviderName() string {
 	if a == nil || a.config == nil {
 		return "Provider"
 	}
-	name := a.config.API.GetActiveProvider()
+	name := runtimeProviderForConfig(a.config)
 	if name == "" {
 		return "Provider"
 	}
@@ -2280,22 +2280,23 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// ApplyConfig on provider switches ALSO call ClearConversation, so
 	// by the time a new turn is saved, history matches the tag.
 	if a.session != nil {
-		a.session.SetProvider(a.config.API.GetActiveProvider())
+		a.session.SetProvider(runtimeProviderForConfig(a.config))
+	}
+	if a.promptBuilder != nil {
+		a.promptBuilder.SetProvider(runtimeProviderForConfig(a.config))
 	}
 
-	// Force-evict any pooled client for the incoming (provider, model) pair
-	// BEFORE asking the factory for a fresh one. The pool keys on (provider,
-	// model) only, so a changed API key — the whole reason ApplyConfig was
-	// called from /login — would otherwise silently hit the cache and return
-	// the OLD client with the OLD key. That produced 401s even after a valid
-	// `/login kimi <new-key>`; a process restart "fixed" it because the pool
-	// started empty. Invalidate closes the stale entry and the next NewClient
-	// call is guaranteed to build from a.config.
-	provider := a.config.Model.Provider
-	if provider == "" {
-		provider = a.config.API.Backend
-	}
-	client.GetPool(a.config).Invalidate(provider, a.config.Model.Name)
+	// Force-evict ALL pooled clients for the incoming provider BEFORE
+	// asking the factory for a fresh one. The pool keys on (provider,
+	// model) only, so a changed API key — the whole reason ApplyConfig
+	// was called from /login — would otherwise silently hit the cache
+	// and return the OLD client with the OLD key. Invalidate for just
+	// one (provider, model) pair is not enough: the new model name may
+	// differ from the old one, and fallback chains create multiple
+	// entries for the same provider. FlushProvider evicts every entry
+	// matching the provider so the next NewClient is guaranteed to
+	// build from a.config.
+	client.GetPool(a.config).FlushProvider(runtimeProviderForConfig(a.config))
 
 	// 3. Re-initialize client
 	newClient, err := client.NewClient(a.ctx, a.config, a.config.Model.Name)
@@ -2327,6 +2328,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.agentRunner.SetClient(newClient)
 		a.agentRunner.SetContextConfig(&a.config.Context)
 		a.agentRunner.SetWorkspaceIsolationEnabled(a.config.Plan.WorkspaceIsolation)
+		a.agentRunner.SetDoneGateConfig(a.config.DoneGate)
 		if a.config.DiffPreview.Enabled && a.config.Permission.Enabled {
 			a.agentRunner.SetWorkspaceReviewHandler(a.reviewWorkspaceChanges)
 		} else {
@@ -2495,7 +2497,7 @@ func (a *App) buildModelEnhancement() string {
 		// skipping the verification step. DeepSeek V4's 1M context
 		// tempts over-exploration even more than Kimi's 262K, so the
 		// nudge is sharper.
-		enhancement += "\n\n**DeepSeek Execution Policy:** Plan briefly before tools. 1M context is not a license to re-read — remember what you already loaded. After code edits, run the narrowest verification (targeted go test / pytest / cargo check) and cite the result before finalising. After 3 tool calls: consolidate Established / Unknown / Next before continuing."
+		enhancement += "\n\n**DeepSeek Execution Policy:** Match Claude-Code-style execution: for multi-step work, create a live todo list before editing and keep exactly one item in progress. Plan briefly before tools. 1M context is not a license to re-read — remember what you already loaded. Prefer grep -> targeted read, then edit. After code edits, run the narrowest verification (targeted go test / pytest / cargo check) and cite the result before finalising. Before the final answer, inspect git status or git diff when files changed, and do not claim changes you did not verify. After 3 tool calls: consolidate Established / Unknown / Next before continuing."
 	}
 
 	if strings.Contains(strings.ToLower(modelName), "flash") {

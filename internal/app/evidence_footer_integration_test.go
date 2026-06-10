@@ -56,4 +56,7 @@ func TestAppBuildEvidenceFooterIfEnabled_NilConfigTreatedAsEnabled(t *testing.T)
 	if got == "" {
 		t.Errorf("expected footer when config is nil (default-on), got empty")
 	}
+	if !strings.Contains(got, "Not verified") {
+		t.Errorf("expected missing verification to be explicit, got %q", got)
+	}
 }

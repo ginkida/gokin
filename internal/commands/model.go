@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"gokin/internal/client"
+	"gokin/internal/config"
 )
 
 // ModelCommand switches the current model.
@@ -50,12 +51,13 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	// Get models for current provider
 	providerModels := client.GetModelsForProvider(activeProvider)
-	if len(providerModels) == 0 {
-		return fmt.Sprintf("No models available for provider: %s", activeProvider), nil
-	}
 
 	// No args - show current model and available models for this provider
 	if len(args) == 0 {
+		if len(providerModels) == 0 {
+			return fmt.Sprintf("No models available for provider: %s", activeProvider), nil
+		}
+
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "Provider: %s\n", activeProvider)
 		fmt.Fprintf(&sb, "Model:    %s\n\n", currentModel)
@@ -95,31 +97,17 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	// Switch to specified model
 	newModel := args[0]
-	normalizedNewModel := strings.ToLower(newModel)
 
-	// Find matching model within current provider
-	var matchedModel string
-
-	// First pass: exact match on ID or short name
-	for _, m := range providerModels {
-		if strings.ToLower(m.ID) == normalizedNewModel ||
-			strings.ToLower(extractShortName(m.ID)) == normalizedNewModel {
-			matchedModel = m.ID
-			break
-		}
+	matchedProvider := activeProvider
+	matchedModel, ambiguous := matchModelInProvider(newModel, providerModels)
+	if ambiguous {
+		return fmt.Sprintf("Ambiguous model name '%s'. Please be more specific.", newModel), nil
 	}
-
-	// Second pass: partial/substring match (only if no exact match)
 	if matchedModel == "" {
-		for _, m := range providerModels {
-			modelID := strings.ToLower(m.ID)
-			shortName := strings.ToLower(extractShortName(m.ID))
-			if strings.Contains(modelID, normalizedNewModel) || strings.Contains(shortName, normalizedNewModel) {
-				if matchedModel != "" {
-					return fmt.Sprintf("Ambiguous model name '%s'. Please be more specific.", newModel), nil
-				}
-				matchedModel = m.ID
-			}
+		var crossProviderAmbiguous bool
+		matchedProvider, matchedModel, crossProviderAmbiguous = matchModelAcrossProviders(newModel, activeProvider)
+		if crossProviderAmbiguous {
+			return fmt.Sprintf("Ambiguous model name '%s'. Please be more specific.", newModel), nil
 		}
 	}
 
@@ -127,28 +115,108 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return fmt.Sprintf("Unknown model: %s\n\n%s", newModel, c.formatProviderModels(providerModels)), nil
 	}
 
-	if matchedModel == currentModel {
+	if matchedProvider == activeProvider && matchedModel == currentModel {
 		return fmt.Sprintf("Already using %s", currentModel), nil
+	}
+
+	if matchedProvider != activeProvider {
+		p := config.GetProvider(matchedProvider)
+		if p == nil {
+			return fmt.Sprintf("Unknown provider for model: %s", matchedProvider), nil
+		}
+		if p.KeyOptional && p.HasOAuth && !cfg.API.HasOAuthToken(matchedProvider) {
+			return fmt.Sprintf("%s requires OAuth login.\n\nUse: /oauth-login %s", p.DisplayName, matchedProvider), nil
+		}
+		if !p.KeyOptional && !cfg.API.HasProvider(matchedProvider) {
+			return fmt.Sprintf("%s is not configured.\n\nUse: /login %s <api_key>", p.DisplayName, matchedProvider), nil
+		}
 	}
 
 	// Update model in config and setter
 	setter.SetModel(matchedModel)
+	cfg.API.ActiveProvider = matchedProvider
+	cfg.Model.Provider = matchedProvider
 	cfg.Model.Name = matchedModel
+
+	if preset, ok := config.ModelPresets[matchedProvider]; ok {
+		cfg.Model.MaxOutputTokens = preset.MaxOutputTokens
+	}
 
 	if err := app.ApplyConfig(cfg); err != nil {
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
+	if matchedProvider != activeProvider {
+		app.ClearConversation()
+	}
+
 	// Find model info for nice output
 	var modelName string
-	for _, m := range providerModels {
+	for _, m := range client.GetModelsForProvider(matchedProvider) {
 		if m.ID == matchedModel {
 			modelName = m.Name
 			break
 		}
 	}
 
+	if matchedProvider != activeProvider {
+		return fmt.Sprintf("Switched to %s (%s) on %s — session cleared", modelName, matchedModel, matchedProvider), nil
+	}
 	return fmt.Sprintf("Switched to %s (%s)", modelName, matchedModel), nil
+}
+
+func matchModelInProvider(query string, models []client.ModelInfo) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	if normalized == "" {
+		return "", false
+	}
+
+	for _, m := range models {
+		if strings.ToLower(m.ID) == normalized ||
+			strings.ToLower(extractShortName(m.ID)) == normalized {
+			return m.ID, false
+		}
+	}
+
+	var matched string
+	for _, m := range models {
+		modelID := strings.ToLower(m.ID)
+		shortName := strings.ToLower(extractShortName(m.ID))
+		if strings.Contains(modelID, normalized) || strings.Contains(shortName, normalized) {
+			if matched != "" {
+				return "", true
+			}
+			matched = m.ID
+		}
+	}
+	return matched, false
+}
+
+func matchModelAcrossProviders(query, activeProvider string) (string, string, bool) {
+	type match struct {
+		provider string
+		model    string
+	}
+	var matches []match
+
+	for _, provider := range config.ProviderNames() {
+		if provider == activeProvider {
+			continue
+		}
+		if modelID, ambiguous := matchModelInProvider(query, client.GetModelsForProvider(provider)); ambiguous {
+			return "", "", true
+		} else if modelID != "" {
+			matches = append(matches, match{provider: provider, model: modelID})
+		}
+	}
+
+	if len(matches) == 0 {
+		return "", "", false
+	}
+	if len(matches) > 1 {
+		return "", "", true
+	}
+	return matches[0].provider, matches[0].model, false
 }
 
 func (c *ModelCommand) formatProviderModels(models []client.ModelInfo) string {

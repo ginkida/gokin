@@ -1,4 +1,4 @@
-package app
+package donegate
 
 import (
 	"strings"
@@ -43,7 +43,7 @@ func TestDetectFalselyClaimedPaths_FlagsMissingFromDiff(t *testing.T) {
 	response := "Updated internal/app/foo.go and internal/app/ghost.go."
 	gitChanged := []string{"internal/app/foo.go"} // ghost.go NOT in diff
 
-	got := detectFalselyClaimedPaths(response, gitChanged)
+	got := DetectFalselyClaimedPaths(response, gitChanged)
 	found := false
 	for _, g := range got {
 		if strings.Contains(g, "ghost.go") {
@@ -66,7 +66,7 @@ func TestDetectFalselyClaimedPaths_MatchesByBasename(t *testing.T) {
 	response := "Updated foo.go with the new handler."
 	gitChanged := []string{"internal/app/foo.go"}
 
-	got := detectFalselyClaimedPaths(response, gitChanged)
+	got := DetectFalselyClaimedPaths(response, gitChanged)
 	for _, g := range got {
 		if strings.Contains(g, "foo.go") {
 			t.Errorf("basename foo.go should match full path in diff, not flagged: %v", got)
@@ -75,16 +75,16 @@ func TestDetectFalselyClaimedPaths_MatchesByBasename(t *testing.T) {
 }
 
 func TestDetectFalselyClaimedPaths_EmptyInputsReturnNil(t *testing.T) {
-	if got := detectFalselyClaimedPaths("", []string{"a.go"}); got != nil {
+	if got := DetectFalselyClaimedPaths("", []string{"a.go"}); got != nil {
 		t.Errorf("empty response should yield nil, got: %v", got)
 	}
-	if got := detectFalselyClaimedPaths("touched a.go", nil); got != nil {
+	if got := DetectFalselyClaimedPaths("touched a.go", nil); got != nil {
 		t.Errorf("empty git list should yield nil, got: %v", got)
 	}
 }
 
 func TestBuildCompletionReviewPrompt_IncludesGitGroundTruth(t *testing.T) {
-	prompt := buildCompletionReviewPrompt(
+	prompt := BuildCompletionReviewPrompt(
 		"fix the bug",
 		"Updated foo.go.",
 		[]string{"foo.go"},                // tool-tracked
@@ -104,7 +104,7 @@ func TestBuildCompletionReviewPrompt_IncludesGitGroundTruth(t *testing.T) {
 }
 
 func TestBuildCompletionReviewPrompt_IncludesFalseClaimsSection(t *testing.T) {
-	prompt := buildCompletionReviewPrompt(
+	prompt := BuildCompletionReviewPrompt(
 		"fix the bug",
 		"Also updated ghost.go.",
 		nil,
@@ -123,7 +123,7 @@ func TestBuildCompletionReviewPrompt_IncludesFalseClaimsSection(t *testing.T) {
 func TestBuildCompletionReviewPrompt_SkipsEmptyOptionalSections(t *testing.T) {
 	// With nil/empty inputs for the new sections, the prompt must not
 	// emit empty headers.
-	prompt := buildCompletionReviewPrompt(
+	prompt := BuildCompletionReviewPrompt(
 		"fix it",
 		"",
 		nil,

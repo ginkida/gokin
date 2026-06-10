@@ -105,16 +105,19 @@ func detectPrimaryProvider(cfg *config.Config) string {
 	if cfg.Model.Provider != "" {
 		return cfg.Model.Provider
 	}
-	// Read raw fields so an unset provider doesn't swallow the model-name
-	// detection fallback — GetActiveProvider() always returns "glm" by default.
+	if cfg.Model.Name != "" {
+		if provider := config.DetectKnownProviderFromModel(cfg.Model.Name); provider != "" {
+			return provider
+		}
+	}
+	// Read raw fields only after model-name detection so a stale
+	// ActiveProvider does not override a known model family such as
+	// deepseek-v4-pro. GetActiveProvider() always returns "glm" by default.
 	if cfg.API.ActiveProvider != "" {
 		return cfg.API.ActiveProvider
 	}
 	if cfg.API.Backend != "" {
 		return cfg.API.Backend
-	}
-	if cfg.Model.Name != "" {
-		return config.DetectProviderFromModel(cfg.Model.Name)
 	}
 	return "glm"
 }

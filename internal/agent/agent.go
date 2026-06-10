@@ -18,6 +18,7 @@ import (
 	"gokin/internal/client"
 	"gokin/internal/config"
 	ctxmgr "gokin/internal/context"
+	"gokin/internal/donegate"
 	"gokin/internal/logging"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
@@ -68,12 +69,12 @@ type Agent struct {
 	progressCallback func(progress *AgentProgress)
 
 	// Mental loop detection tracking
-	callHistory      map[string]int  // Map of tool_name:arguments -> count
-	callHistoryMu    sync.Mutex      // Protects callHistory and loopEarlyWarned
-	loopIntervened   bool            // Flag to indicate if loop intervention occurred
-	loopCooldown     int             // Consecutive non-loop turns since last intervention
-	loopThreshold    int             // Broad loop threshold (default: 8, quick: 4, thorough: 15)
-	loopEarlyWarned  map[string]bool // Tracks keys that already got an early-warning message
+	callHistory     map[string]int  // Map of tool_name:arguments -> count
+	callHistoryMu   sync.Mutex      // Protects callHistory and loopEarlyWarned
+	loopIntervened  bool            // Flag to indicate if loop intervention occurred
+	loopCooldown    int             // Consecutive non-loop turns since last intervention
+	loopThreshold   int             // Broad loop threshold (default: 8, quick: 4, thorough: 15)
+	loopEarlyWarned map[string]bool // Tracks keys that already got an early-warning message
 
 	// Context summarization settings (adjusted by thoroughness)
 	pruneProtectChars  int // Chars protected from pruning (default: 120000)
@@ -120,8 +121,8 @@ type Agent struct {
 	preemptMu         sync.Mutex
 
 	// Cached precise token count to skip redundant API calls.
-	cachedPreciseCount    int
-	cachedPreciseHistLen  int
+	cachedPreciseCount   int
+	cachedPreciseHistLen int
 
 	// Plan approval callback for context compaction
 	onPlanApproved func(planSummary string) // Called when plan is built, allows context clearing
@@ -193,6 +194,15 @@ type Agent struct {
 	// Workspace isolation state
 	isolatedWorkspace     *isolatedWorkspace
 	allowedRequestedTools map[string]struct{}
+
+	// Done-gate integration.
+	doneGatePolicy *donegate.Policy
+	touchedSeen    map[string]bool
+	touchedPaths   []string
+	// mutationGen counts every successful mutation (incl. re-edits of an
+	// already-touched file), so the gate re-checks after a re-edit that the
+	// touched-path SET alone would miss. Guarded by toolsMu.
+	mutationGen int
 }
 
 // SetOnRateLimit sets the rate limit callback.
@@ -902,13 +912,6 @@ func (a *Agent) drainSteers() {
 	}
 }
 
-// agentMutatingTools are tools that change code on disk — their presence in a
-// run means the agent's output should be verified before it's accepted.
-var agentMutatingTools = map[string]bool{
-	"edit": true, "write": true, "refactor": true, "batch": true, "multiedit": true,
-	"delete": true, "move": true, "atomicwrite": true,
-}
-
 // agentVerificationTools run a check that could surface a broken build/test.
 // Any of them in the run means the agent at least had the chance to verify, so
 // we don't nudge (conservative — avoids nagging agents that did verify).
@@ -922,7 +925,9 @@ var agentVerificationTools = map[string]bool{
 func (a *Agent) needsVerificationNudge() bool {
 	mutated, verified := false, false
 	for _, t := range a.GetToolsUsed() {
-		if agentMutatingTools[t] {
+		// Use the canonical mutation-tool set so this never drifts from the
+		// done-gate's touched-path detection (donegate.IsMutationTool).
+		if donegate.IsMutationTool(t) {
 			mutated = true
 		}
 		if agentVerificationTools[t] {
@@ -2495,6 +2500,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	repeatedPlanRecoveries := 0 // Per-category budget: max 2
 	noProgressRecoveries := 0   // Per-category budget: max 2
 	verifyNudged := false       // verify-before-done nudge fires at most once
+	doneGateFixes := 0
+	doneGateCheckedAtGen := -1
+	claimCorrectionInjected := false
 	lastCallPlanFingerprint := ""
 	samePlanTurns := 0
 	lastTextFingerprint := ""
@@ -3106,6 +3114,19 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		if !verifyNudged && a.needsVerificationNudge() {
 			verifyNudged = true
 			a.appendVerificationNudge()
+			continue
+		}
+
+		gateOutcome := a.runDoneGateAtBreak(ctx, prompt, output, &doneGateFixes, &doneGateCheckedAtGen)
+		if gateOutcome == agentGateFixInjected {
+			continue
+		}
+		// On agentGateExhausted the failure marker is already appended; fall
+		// through to finish. Skipping the claim-correction branch here is what
+		// prevents a second loop iteration from re-running the gate and writing
+		// a DUPLICATE exhaustion marker.
+		if gateOutcome != agentGateExhausted && !claimCorrectionInjected && a.injectClaimCorrectionIfNeeded(resp.Text) {
+			claimCorrectionInjected = true
 			continue
 		}
 
@@ -4331,6 +4352,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	toolStart := time.Now()
 	result := a.executeTool(ctx, call)
 	elapsed := time.Since(toolStart)
+	a.recordToolExecution(call.Name, call.Args, result)
 
 	// Feed durable tool-outcome signals into ProjectLearning. Runs on both
 	// success and failure so success-rate EMA reflects reality. Debounced

@@ -1,4 +1,4 @@
-package app
+package donegate
 
 import (
 	"path/filepath"
@@ -47,7 +47,7 @@ func TestModuleHasTouchedFile_SiblingPrefixDoesntMatch(t *testing.T) {
 }
 
 func TestDoneGateGoVetTargets_FromTouchedGoFiles(t *testing.T) {
-	profile := doneGateProfile{
+	profile := Profile{
 		GoModules: []string{"/repo"},
 		WorkDir:   "/repo",
 		TouchedPaths: []string{
@@ -70,7 +70,7 @@ func TestDoneGateGoVetTargets_FromTouchedGoFiles(t *testing.T) {
 
 func TestDoneGateGoVetTargets_GoModTriggersWholeModule(t *testing.T) {
 	// go.mod edits should vet the whole module, not its directory.
-	profile := doneGateProfile{
+	profile := Profile{
 		GoModules:    []string{"/repo"},
 		WorkDir:      "/repo",
 		TouchedPaths: []string{"/repo/go.mod"},
@@ -82,7 +82,7 @@ func TestDoneGateGoVetTargets_GoModTriggersWholeModule(t *testing.T) {
 }
 
 func TestDoneGateGoVetTargets_CapEnforced(t *testing.T) {
-	profile := doneGateProfile{
+	profile := Profile{
 		GoModules: []string{"/repo"},
 		WorkDir:   "/repo",
 		TouchedPaths: []string{
@@ -99,7 +99,7 @@ func TestDoneGateGoVetTargets_CapEnforced(t *testing.T) {
 func TestDoneGateGoVetTargets_NoTouchedGoYieldsEmpty(t *testing.T) {
 	// If touched files don't include .go/go.mod/go.sum, we don't
 	// produce vet targets (caller falls back to module-wide vet).
-	profile := doneGateProfile{
+	profile := Profile{
 		GoModules:    []string{"/repo"},
 		WorkDir:      "/repo",
 		TouchedPaths: []string{"/repo/README.md", "/repo/config.yaml"},
@@ -110,7 +110,7 @@ func TestDoneGateGoVetTargets_NoTouchedGoYieldsEmpty(t *testing.T) {
 }
 
 func TestDoneGateGoVetTargets_NoModulesYieldsEmpty(t *testing.T) {
-	profile := doneGateProfile{
+	profile := Profile{
 		GoModules:    nil,
 		WorkDir:      "/repo",
 		TouchedPaths: []string{"/repo/foo.go"},

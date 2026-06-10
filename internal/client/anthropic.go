@@ -626,6 +626,37 @@ type toolCallAccumulator struct {
 	thinkTagParser ThinkTagParser
 }
 
+// appendToolInput accumulates an `input` value seen on content_block_start.
+// Some providers (DeepSeek-style) carry the FULL tool input inline on the
+// start event with no input_json_delta deltas to follow. The canonical
+// Anthropic protocol instead sends an EMPTY placeholder (input:{}) on start
+// and streams the real arguments via input_json_delta. Appending that "{}"
+// placeholder would concatenate with the deltas into "{}{...}" — invalid
+// JSON that fails to unmarshal at content_block_stop, leaving every streamed
+// tool call with empty args. So we drop empty placeholders here and let the
+// deltas carry the arguments; a non-empty inline input is still accumulated.
+func (acc *toolCallAccumulator) appendToolInput(input any) {
+	switch v := input.(type) {
+	case string:
+		if t := strings.TrimSpace(v); t == "" || t == "{}" {
+			return
+		}
+		acc.currentToolInput.WriteString(v)
+	case map[string]any:
+		if len(v) == 0 {
+			return
+		}
+		if b, err := json.Marshal(v); err == nil {
+			acc.currentToolInput.Write(b)
+		}
+	case json.RawMessage:
+		if t := strings.TrimSpace(string(v)); t == "" || t == "{}" {
+			return
+		}
+		acc.currentToolInput.Write(v)
+	}
+}
+
 // isRetryableError returns true if the error should trigger a retry.
 func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 	// HTTP status codes that are retryable (5xx server errors and 429 rate limit)
@@ -1298,6 +1329,9 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 					logging.Debug("generated tool_use ID (provider didn't return one)", "id", acc.currentToolID, "name", acc.currentToolName)
 				}
 				acc.currentToolInput.Reset()
+				if input, ok := contentBlock["input"]; ok {
+					acc.appendToolInput(input)
+				}
 			} else if blockType == "thinking" {
 				acc.thinkingBuilder.Reset()
 				logging.Debug("thinking block started")
@@ -1353,7 +1387,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 			}
 
 			// Handle tool input JSON delta
-			if deltaType == "input_json_delta" {
+			if deltaType == "input_json_delta" || (deltaType == "" && acc.currentBlockType == "tool_use") {
 				if partialJSON, ok := delta["partial_json"].(string); ok {
 					acc.currentToolInput.WriteString(partialJSON)
 				}

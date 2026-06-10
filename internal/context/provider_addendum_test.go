@@ -74,6 +74,11 @@ func TestProviderAddendum_DeepSeekNonEmpty(t *testing.T) {
 	// in kimiOperatingRules doesn't silently drift the deepseek rules.
 	for _, needle := range []string{
 		"Plan:",
+		"todo",
+		"in_progress",
+		"evidence ledger",
+		"grep",
+		"targeted Read",
 		"read-before-edit",
 		"delta-check",
 		"Verification discipline",
@@ -102,6 +107,9 @@ func TestPromptBuilder_SetProviderDeepSeekInjectsAddendum(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "read-before-edit") {
 		t.Error("deepseek addendum did not reach the built prompt")
+	}
+	if !strings.Contains(prompt, "in_progress") {
+		t.Error("deepseek todo discipline did not reach the built prompt")
 	}
 }
 

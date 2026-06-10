@@ -14,6 +14,7 @@ import (
 	"gokin/internal/agent"
 	"gokin/internal/client"
 	appcontext "gokin/internal/context"
+	"gokin/internal/donegate"
 	"gokin/internal/logging"
 	"gokin/internal/plan"
 	"gokin/internal/router"
@@ -185,7 +186,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	// === IMPROVEMENT 1: Use Task Router for intelligent routing ===
 	// Auto-retry transient errors with adaptive stream retry policy.
-	retryPolicy := client.AdaptiveStreamRetryPolicy(a.config.API.GetActiveProvider())
+	runtimeProvider := runtimeProviderForConfig(a.config)
+	retryPolicy := client.AdaptiveStreamRetryPolicy(runtimeProvider)
 	originalMessage := message
 	retryMessage := originalMessage
 
@@ -400,7 +402,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			Details: map[string]any{
 				"attempt":     requestRetryCount,
 				"maxAttempts": retryPolicy.MaxRetries,
-				"provider":    a.config.API.GetActiveProvider(),
+				"provider":    runtimeProvider,
 			},
 		})
 
@@ -2519,7 +2521,7 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 
 	verifyCtx, cancel := context.WithTimeout(ctx, planStepVerifyTimeout)
 	defer cancel()
-	projectProfile := detectDoneGateProfile(a.workDir)
+	projectProfile := donegate.DetectProfile(a.workDir)
 
 	lines := make([]string, 0, len(required))
 	for i, cmd := range required {
@@ -2622,7 +2624,7 @@ func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output 
 		if len(entry.Commands) > 0 {
 			evidence = append(evidence, "commands="+joinLimited(entry.Commands, 3))
 			hasCommands = true
-			verificationByCommand = commandsContainVerificationSignals(entry.Commands)
+			verificationByCommand = donegate.CommandsContainVerificationSignals(entry.Commands)
 		}
 	}
 
@@ -2657,7 +2659,7 @@ func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output 
 	requiredVerifyCommands := normalizeVerifyCommands(step.VerifyCommands)
 	verifyCommandsSatisfied := verifyCommandsCovered(requiredVerifyCommands, entry)
 	requiresVerificationProof := len(requiredVerifyCommands) > 0 || criteriaRequireVerificationSignals(step.SuccessCriteria, step.Description)
-	verificationByOutput := outputContainsVerificationSignals(output)
+	verificationByOutput := donegate.OutputContainsVerificationSignals(output)
 	hasVerificationProof := verificationByCommand || verificationByOutput || verifyCommandsSatisfied
 
 	evidenceClasses := 0
@@ -2790,53 +2792,7 @@ func criteriaRequireVerificationSignals(criteria []string, description string) b
 	return false
 }
 
-func commandsContainVerificationSignals(commands []string) bool {
-	keywords := []string{
-		" test", "go test", "pytest", "cargo test", "npm test", "pnpm test", "yarn test", "bun test",
-		"lint", "typecheck", "check", "verify", "validate", "vet", "build", "compile",
-	}
-	for _, cmd := range commands {
-		lower := " " + strings.ToLower(strings.TrimSpace(cmd))
-		for _, kw := range keywords {
-			if strings.Contains(lower, kw) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func outputContainsVerificationSignals(output string) bool {
-	lower := strings.ToLower(strings.TrimSpace(output))
-	if lower == "" {
-		return false
-	}
-
-	// Check positive signals first — "all tests passed" is conclusive even if
-	// test names contain words like "error" or "failure" (e.g. test_error_handling).
-	positive := []string{
-		"all tests passed", "tests passed", "build succeeded",
-		"passed", "successful", "verified", "no issues", "no errors",
-		"lint passed", "check passed",
-		"успеш", "проверен", "проверка пройдена", "без ошибок",
-	}
-	for _, marker := range positive {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-
-	// Only reject on negative signals when no positive signal was found.
-	negative := []string{" failed", " failure", "panic:", "traceback", "assertionerror"}
-	for _, marker := range negative {
-		if strings.Contains(" "+lower, marker) {
-			return false
-		}
-	}
-	return false
-}
-
-func (a *App) validateVerifyCommandSafety(ctx context.Context, command string, projectProfile doneGateProfile) (bool, string) {
+func (a *App) validateVerifyCommandSafety(ctx context.Context, command string, projectProfile donegate.Profile) (bool, string) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return false, "empty command"
@@ -3041,7 +2997,7 @@ func commandLooksMutating(command string) bool {
 	return commandContainsAny(lower, markers)
 }
 
-func (a *App) resolveVerifyPolicyProfiles(lowerCommand string, profile doneGateProfile) []string {
+func (a *App) resolveVerifyPolicyProfiles(lowerCommand string, profile donegate.Profile) []string {
 	keys := []string{"default"}
 	seen := map[string]bool{"default": true}
 	appendKey := func(key string) {
@@ -3084,7 +3040,7 @@ func (a *App) resolveVerifyPolicyProfiles(lowerCommand string, profile doneGateP
 	return keys
 }
 
-func (a *App) projectVerifyStacks(profile doneGateProfile) []string {
+func (a *App) projectVerifyStacks(profile donegate.Profile) []string {
 	stacks := make([]string, 0, 9)
 	if len(profile.GoModules) > 0 {
 		stacks = append(stacks, "go")

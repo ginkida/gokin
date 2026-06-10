@@ -182,8 +182,9 @@ func (m *ProjectMemory) Load() error {
 }
 
 // processIncludes resolves @include directives in instruction content.
-// Supports: @path, @./relative/path, @~/home/path, @/absolute/path
-// Relative includes are restricted to prevent directory traversal outside the project.
+// Supports: @path, @./relative/path, @~ (home dir), @~/home/path, @/absolute/path
+// Relative includes (including a no-slash @~foo) are restricted to prevent
+// directory traversal outside the project.
 func processIncludes(content string, baseDir string) string {
 	lines := strings.Split(content, "\n")
 	var result strings.Builder
@@ -195,9 +196,17 @@ func processIncludes(content string, baseDir string) string {
 			includePath = strings.TrimSpace(includePath)
 
 			wasRelative := false
-			if strings.HasPrefix(includePath, "~/") {
+			// Only bare "~" and "~/..." are home-rooted (and intentionally
+			// exempt from the traversal guard). A no-slash "~foo" is NOT
+			// home/foo here — it falls through to the guarded relative branch
+			// so it can't silently read $HOME/foo or escape via "~..".
+			if includePath == "~" || strings.HasPrefix(includePath, "~/") {
 				if home, err := os.UserHomeDir(); err == nil {
-					includePath = filepath.Join(home, includePath[2:])
+					if includePath == "~" {
+						includePath = home
+					} else {
+						includePath = filepath.Join(home, includePath[2:])
+					}
 				}
 			} else if strings.HasPrefix(includePath, "./") || !filepath.IsAbs(includePath) {
 				wasRelative = true

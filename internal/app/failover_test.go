@@ -28,6 +28,22 @@ func TestDetectPrimaryProvider_Priority(t *testing.T) {
 			want: "kimi",
 		},
 		{
+			name: "known model family wins over stale API.ActiveProvider",
+			cfg: &config.Config{
+				Model: config.ModelConfig{Name: "deepseek-v4-pro"},
+				API:   config.APIConfig{ActiveProvider: "glm"},
+			},
+			want: "deepseek",
+		},
+		{
+			name: "unknown model falls back to API.ActiveProvider",
+			cfg: &config.Config{
+				Model: config.ModelConfig{Name: "custom-coder"},
+				API:   config.APIConfig{ActiveProvider: "kimi"},
+			},
+			want: "kimi",
+		},
+		{
 			name: "empty Model.Provider and API.ActiveProvider falls back to Backend",
 			cfg: &config.Config{
 				API: config.APIConfig{Backend: "minimax"},

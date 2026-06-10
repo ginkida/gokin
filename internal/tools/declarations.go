@@ -205,13 +205,13 @@ func GrepToolDeclaration() *genai.FunctionDeclaration {
 func TodoToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "todo",
-		Description: "Manages a task list. Use to track progress on multi-step tasks.",
+		Description: "Manages a live task list for multi-step work. Call before editing on non-trivial tasks, keep the full list current, and keep exactly one item in_progress at a time.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
 				"todos": {
 					Type:        genai.TypeArray,
-					Description: "The complete updated list of todos",
+					Description: "The complete updated list of todos. Every call replaces the full list; do not send deltas. Exactly one item should be in_progress while work remains.",
 					Items: &genai.Schema{
 						Type: genai.TypeObject,
 						Properties: map[string]*genai.Schema{
@@ -221,7 +221,7 @@ func TodoToolDeclaration() *genai.FunctionDeclaration {
 							},
 							"status": {
 								Type:        genai.TypeString,
-								Description: "Task status: pending, in_progress, or completed",
+								Description: "Task status: pending, in_progress, or completed. Use exactly one in_progress item while work remains.",
 								Enum:        []string{"pending", "in_progress", "completed"},
 							},
 							"active_form": {
