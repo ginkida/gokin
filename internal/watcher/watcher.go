@@ -40,7 +40,11 @@ func NewWatcher(workDir string, ignorer *git.GitIgnore, cfg Config) (*Watcher, e
 	}
 
 	debounceMs := cfg.DebounceMs
-	if debounceMs <= 0 {
+	// Floor at 2, not 0: processDebounce builds the ticker from debounceMs/2,
+	// and integer division of 1 rounds to 0 → time.NewTicker(0) panics (the
+	// goroutine recovers but then dies, silently stopping file watching). A
+	// floor of 2 keeps debounceMs/2 >= 1ms while preserving default-on-unset.
+	if debounceMs < 2 {
 		debounceMs = 500
 	}
 

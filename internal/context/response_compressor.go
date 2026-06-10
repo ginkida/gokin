@@ -15,6 +15,9 @@ type ResponseCompressor struct {
 
 // NewResponseCompressor creates a new response compressor.
 func NewResponseCompressor(maxChars int) *ResponseCompressor {
+	if maxChars <= 0 {
+		maxChars = 10000 // default: a 0 from config (tool_result_max_chars: 0) would truncate every tool result to "... [truncated]"
+	}
 	return &ResponseCompressor{
 		maxChars: maxChars,
 		keepHeaders: []string{

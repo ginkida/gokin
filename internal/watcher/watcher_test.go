@@ -220,3 +220,20 @@ func TestNewWatcherCustomConfig(t *testing.T) {
 		t.Errorf("maxWatches = %d, want 50", w.maxWatches)
 	}
 }
+
+// TestNewWatcher_DebounceMsOneFlooredAvoidsTickerPanic pins the floor at 2:
+// processDebounce builds time.NewTicker(time.Duration(debounceMs/2)*ms), and
+// integer division of 1 → 0 → NewTicker(0) panics (goroutine dies, file
+// watching silently stops). A debounce_ms of 1 must floor to the default.
+func TestNewWatcher_DebounceMsOneFlooredAvoidsTickerPanic(t *testing.T) {
+	w, err := NewWatcher(t.TempDir(), nil, Config{Enabled: true, DebounceMs: 1})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if w.debounceMs != 500 {
+		t.Fatalf("debounceMs = %d, want 500 (a value of 1 must be floored, not kept)", w.debounceMs)
+	}
+	if w.debounceMs/2 < 1 {
+		t.Fatalf("debounceMs/2 = %d must stay >= 1 to avoid NewTicker(0) panic", w.debounceMs/2)
+	}
+}

@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -411,5 +413,48 @@ func TestBashTool_Execute_SyntaxError(t *testing.T) {
 	// Syntax error should result in failure
 	if result.Success {
 		t.Error("Execute() should fail for syntax error")
+	}
+}
+
+// TestStartCommandErrorResult_ClassifiesContextErrors pins that a cmd.Start()
+// failure caused by an expired/cancelled context is reported honestly, NOT as
+// "could not run command (check that the command exists)". A trivial command
+// (git stash list) failing in ~5ms with "context deadline exceeded" used to
+// surface that misleading message, sending users and the model chasing a
+// phantom bad-command problem.
+func TestStartCommandErrorResult_ClassifiesContextErrors(t *testing.T) {
+	bg := context.Background()
+
+	// Deadline exceeded — surfaced as a timeout, with a config hint, never the
+	// misleading "check that the command exists" suffix.
+	r := startCommandErrorResult(bg, context.DeadlineExceeded)
+	if !strings.Contains(r.Error, "timeout") {
+		t.Errorf("deadline error should mention timeout, got: %q", r.Error)
+	}
+	if strings.Contains(r.Error, "check that the command exists") {
+		t.Errorf("deadline error must not blame the command, got: %q", r.Error)
+	}
+
+	// Cancelled.
+	r = startCommandErrorResult(bg, context.Canceled)
+	if !strings.Contains(strings.ToLower(r.Error), "cancel") {
+		t.Errorf("cancel error should mention cancellation, got: %q", r.Error)
+	}
+	if strings.Contains(r.Error, "check that the command exists") {
+		t.Errorf("cancel error must not blame the command, got: %q", r.Error)
+	}
+
+	// An already-done context is detected even when err itself is generic.
+	cancelledCtx, cancel := context.WithCancel(bg)
+	cancel()
+	r = startCommandErrorResult(cancelledCtx, errors.New("signal: killed"))
+	if strings.Contains(r.Error, "check that the command exists") {
+		t.Errorf("done context must be classified as cancellation, got: %q", r.Error)
+	}
+
+	// A genuine exec failure (live context) keeps the actionable command hint.
+	r = startCommandErrorResult(bg, errors.New("exec: \"nope\": executable file not found in $PATH"))
+	if !strings.Contains(r.Error, "check that the command exists") {
+		t.Errorf("genuine exec failure should keep the command-exists hint, got: %q", r.Error)
 	}
 }

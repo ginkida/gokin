@@ -46,6 +46,13 @@ type SearchCache struct {
 
 // NewSearchCache creates a new search cache with the given capacity and TTL.
 func NewSearchCache(capacity int, ttl time.Duration) *SearchCache {
+	// A non-positive TTL (e.g. config `cache.ttl: 0s`, or any value < 2ns)
+	// makes backgroundCleanup's time.NewTicker(ttl/2) panic — recovered, but
+	// the cleanup goroutine dies permanently — and turns the LRU into a no-op
+	// (entries expire instantly). Clamp to the default.
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
 	sc := &SearchCache{
 		grepCache:   NewLRUCache[string, GrepResult](capacity, ttl),
 		globCache:   NewLRUCache[string, GlobResult](capacity, ttl),
@@ -70,7 +77,15 @@ func NewSearchCache(capacity int, ttl time.Duration) *SearchCache {
 
 // backgroundCleanup periodically removes expired entries.
 func (c *SearchCache) backgroundCleanup(ttl time.Duration) {
-	ticker := time.NewTicker(ttl / 2)
+	// Floor the interval: integer division of a sub-2ns ttl rounds to 0, and
+	// time.NewTicker(0) panics (recovered, but the cleanup goroutine then dies
+	// permanently). NewSearchCache already clamps ttl<=0; this guards the
+	// degenerate tiny-positive case independently.
+	interval := ttl / 2
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

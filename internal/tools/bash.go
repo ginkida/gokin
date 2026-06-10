@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -575,6 +576,25 @@ func (t *BashTool) updateSessionAfterCommandLegacy(command string) {
 	}
 }
 
+// startCommandErrorResult turns a cmd.Start() failure into an honest result.
+// When an already-expired or cancelled context is the real cause, the generic
+// "could not run command (check that the command exists and is executable)"
+// message is actively misleading — git/ls/etc. exist fine, the run simply never
+// got to start. That happens when the tool timeout elapsed/was misconfigured
+// (e.g. tools.timeout serialized as 0s) or the user cancelled (Esc). Classify
+// those explicitly so neither the user nor the model chases a phantom
+// "bad command" problem.
+func startCommandErrorResult(execCtx context.Context, err error) ToolResult {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(execCtx.Err(), context.DeadlineExceeded):
+		return NewErrorResult("command did not start: the tool timeout elapsed before execution began (the tool timeout may be misconfigured — check tools.timeout)")
+	case errors.Is(err, context.Canceled) || errors.Is(execCtx.Err(), context.Canceled):
+		return NewErrorResult("command did not start: cancelled before execution began")
+	default:
+		return NewErrorResult(fmt.Sprintf("could not run command: %s (check that the command exists and is executable)", err))
+	}
+}
+
 // executeForeground runs a command and waits for completion.
 func (t *BashTool) executeForeground(ctx context.Context, command string, stdinContent string) (ToolResult, error) {
 	// Create context with explicit timeout to prevent indefinite hangs
@@ -636,7 +656,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 
 		// Start command
 		if err := cmd.Start(); err != nil {
-			return NewErrorResult(fmt.Sprintf("could not run command: %s (check that the command exists and is executable)", err)), nil
+			return startCommandErrorResult(execCtx, err), nil
 		}
 
 		// Read stdout and stderr in goroutines
@@ -798,7 +818,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 	// Start command
 	err := cmd.Start()
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("could not run command: %s (check that the command exists and is executable)", err)), nil
+		return startCommandErrorResult(execCtx, err), nil
 	}
 
 	// Use WaitGroup to safely track command completion and avoid race condition

@@ -105,6 +105,16 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
+		// Honest classification: the 3-min budget elapsing (or a parent
+		// Esc-cancel) returns empty/truncated output — reporting that as a
+		// compile-style "Verification failed" would send the model chasing a
+		// phantom build error. Match evals/runner.go's direct ctx.Err() check.
+		if verifyCtx.Err() == context.DeadlineExceeded {
+			return NewErrorResult(fmt.Sprintf("Verification timed out after %v (%s) — code may still be fine; the check ran out of its time budget", verifyTimeout, checkName)), nil
+		}
+		if verifyCtx.Err() == context.Canceled {
+			return NewErrorResult(fmt.Sprintf("Verification cancelled before completion (%s)", checkName)), nil
+		}
 		return ToolResult{
 			Success: false,
 			Error:   fmt.Sprintf("Verification failed (%s):\n%s", checkName, string(output)),

@@ -38,6 +38,14 @@ const (
 	// Keep this generous for reasoning-heavy models; SSE idle timeout still protects
 	// against truly stalled streams.
 	defaultModelRoundTimeout = 5 * time.Minute
+
+	// defaultToolExecTimeout is the fallback per-tool execution timeout used
+	// when the executor is constructed with a non-positive timeout (e.g. a
+	// config whose tools.timeout was serialized as 0s). Without this guard a
+	// zero base produced context.WithTimeout(ctx, 0) — an already-expired
+	// context that made EVERY tool call fail instantly with "context deadline
+	// exceeded". Matches DefaultConfig().Tools.Timeout.
+	defaultToolExecTimeout = 2 * time.Minute
 )
 
 // ResultCompactor interface for compacting tool results.
@@ -399,6 +407,15 @@ func NewExecutorLazy(registry *LazyRegistry, c client.Client, timeout time.Durat
 
 // newExecutorInternal creates the executor with any ToolRegistry implementation.
 func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Duration) *Executor {
+	// A non-positive base timeout would make adaptiveToolTimeout return 0 and
+	// every tool run under an already-expired context. Clamp to a sane default
+	// so a misconfigured (or zero-serialized) tools.timeout can't brick all
+	// tool execution.
+	if timeout <= 0 {
+		logging.Warn("executor created with non-positive tool timeout; using default",
+			"given", timeout, "default", defaultToolExecTimeout)
+		timeout = defaultToolExecTimeout
+	}
 	return &Executor{
 		registry:               registry,
 		client:                 c,
@@ -3154,6 +3171,13 @@ func trimInlineText(text string, max int) string {
 //   - Cap the result at 2×base so a genuinely hung tool can't run unbounded
 //     even when its historical p95 was huge.
 func adaptiveToolTimeout(base, p95 time.Duration, ok bool) time.Duration {
+	// A non-positive base would make every result (and the base×2 cap) zero,
+	// yielding an already-expired context. Fall back to a sane default so the
+	// helper can never hand back a 0 timeout. The executor also clamps at
+	// construction; this guards any other caller.
+	if base <= 0 {
+		base = defaultToolExecTimeout
+	}
 	if !ok || p95 <= 0 {
 		return base
 	}

@@ -59,6 +59,15 @@ func NewSessionManager(session *Session, config SessionManagerConfig) (*SessionM
 		stopChan:       make(chan struct{}),
 	}
 
+	// A non-positive SaveInterval (e.g. an explicit `session.save_interval: 0`
+	// that survives config Load, or a previously-saved 0) would make the
+	// periodic-save time.AfterFunc/Reset fire immediately — a tight busy-loop
+	// that pegs a goroutine and thrashes the session file on disk. Clamp to the
+	// default; both Start (AfterFunc) and periodicSave (Reset) read this field.
+	if sm.config.SaveInterval <= 0 {
+		sm.config.SaveInterval = 2 * time.Minute
+	}
+
 	return sm, nil
 }
 

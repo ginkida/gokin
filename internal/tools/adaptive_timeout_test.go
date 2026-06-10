@@ -79,13 +79,17 @@ func TestAdaptiveToolTimeout_PastCapRollsBackToCap(t *testing.T) {
 	}
 }
 
-func TestAdaptiveToolTimeout_ZeroBaseIsIdempotent(t *testing.T) {
-	// Edge: zero baseline. Any p95 still passes through since base×2 = 0,
-	// cap would be 0. Result: 5×p95 (bounded by cap 0 which is ≤ anything).
-	// This is a degenerate config, but must not panic.
-	got := adaptiveToolTimeout(0, 1*time.Second, true)
-	// cap = 0, so timeout gets clamped back to 0.
-	if got != 0 {
-		t.Errorf("got %v, want 0 (degenerate base=0 clamps to cap=0)", got)
+func TestAdaptiveToolTimeout_NonPositiveBaseFallsBackToDefault(t *testing.T) {
+	// A non-positive base (e.g. a config with tools.timeout: 0s) must NEVER
+	// yield a 0 timeout — that produced an already-expired context that made
+	// every tool call fail instantly with "context deadline exceeded". The
+	// helper falls back to defaultToolExecTimeout instead.
+	for _, base := range []time.Duration{0, -5 * time.Second} {
+		if got := adaptiveToolTimeout(base, 1*time.Second, true); got != defaultToolExecTimeout {
+			t.Errorf("base=%v: got %v, want %v (safe default)", base, got, defaultToolExecTimeout)
+		}
+		if got := adaptiveToolTimeout(base, 0, false); got != defaultToolExecTimeout {
+			t.Errorf("base=%v no-stats: got %v, want %v (safe default)", base, got, defaultToolExecTimeout)
+		}
 	}
 }
