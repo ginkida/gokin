@@ -137,6 +137,10 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 	cfg.API.ActiveProvider = matchedProvider
 	cfg.Model.Provider = matchedProvider
 	cfg.Model.Name = matchedModel
+	// Clear any stale model.preset: an explicit model choice must win.
+	// Otherwise MigrateConfig/NormalizeConfig (run on every ApplyConfig via
+	// NewClient) re-apply the preset and silently revert this selection.
+	cfg.Model.Preset = ""
 
 	if preset, ok := config.ModelPresets[matchedProvider]; ok {
 		cfg.Model.MaxOutputTokens = preset.MaxOutputTokens

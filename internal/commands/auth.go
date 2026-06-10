@@ -147,6 +147,24 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
+	// Confirm the key actually persisted. ApplyConfig's internal Save swallows
+	// write errors ("continue anyway"), so without this re-save /login would
+	// report "✓ saved" even when the config dir is unwritable/ephemeral —
+	// exactly the "it doesn't remember my key, I have to re-enter it" symptom.
+	// Re-saving is idempotent; here we surface the error honestly with the path.
+	if err := cfg.Save(); err != nil {
+		return fmt.Sprintf(`⚠ %s key is active for THIS session, but it could NOT be saved to:
+  %s
+  Error: %v
+
+You'll be asked for it again next launch. Likely causes:
+  • the config directory isn't writable (check permissions / disk space)
+  • a fresh/ephemeral or read-only filesystem each run (container, sandbox)
+  • XDG_CONFIG_HOME set differently between runs
+Fix that path so it's writable and stable, then run /login again.`,
+			p.DisplayName, prettyHomePath(config.GetConfigPath()), err), nil
+	}
+
 	switchNote := ""
 	if providerSwitched {
 		app.ClearConversation()

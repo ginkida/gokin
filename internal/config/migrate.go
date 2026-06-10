@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"strings"
+
+	"gokin/internal/logging"
 )
 
 // MigrateConfig migrates old configuration format to new format.
@@ -32,7 +34,10 @@ func MigrateConfig(cfg *Config) {
 	}
 
 	if migrated {
-		fmt.Println("✓ Configuration migrated to new format")
+		// MUST NOT print to stdout: MigrateConfig runs inside client.NewClient
+		// on EVERY ApplyConfig (and at boot), and a raw write corrupts the
+		// Bubble Tea alt-screen TUI. Log it instead.
+		logging.Info("configuration migrated to new format")
 	}
 }
 

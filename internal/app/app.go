@@ -1828,6 +1828,13 @@ func (a *App) TogglePermissions() bool {
 	newEnabled := !currentEnabled
 	a.permManager.SetEnabled(newEnabled)
 
+	// Keep the persisted source of truth in sync. Without this the next
+	// ApplyConfig (step 8: permManager.SetEnabled(a.config.Permission.Enabled))
+	// would silently revert this toggle mid-session — e.g. toggling YOLO off
+	// then running /model would re-enable permission prompts. (ToggleSandbox
+	// already keeps a.config.Tools.Bash.Sandbox in sync for the same reason.)
+	a.config.Permission.Enabled = newEnabled
+
 	// Update TUI display
 	if a.tui != nil {
 		a.tui.SetPermissionsEnabled(newEnabled)
@@ -1843,10 +1850,21 @@ func (a *App) TogglePermissions() bool {
 	a.updateUnrestrictedModeLocked()
 
 	// Copy state for UI message before unlocking
+	cfg := a.config
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
 	planningModeEnabled := a.planningModeEnabled
 	modelName := a.config.Model.Name
 	a.mu.Unlock()
+
+	// Persist so the toggle survives restart (matches ToggleSandbox). Surface a
+	// write failure honestly instead of silently losing it.
+	if err := cfg.Save(); err != nil {
+		logging.Warn("failed to save permission setting", "error", err)
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: fmt.Sprintf("Permissions toggled for this session only — couldn't save to %s", config.GetConfigPath()),
+		})
+	}
 
 	a.safeSendToProgram(ui.ConfigUpdateMsg{
 		PermissionsEnabled:  newEnabled,
@@ -2266,10 +2284,15 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// NOTE: no defer Unlock() — we release before safeSendToProgram. Every
 	// early-return below unlocks explicitly.
 
-	// 1. Save to file if path is available
-	if err := cfg.Save(); err != nil {
-		logging.Warn("failed to save config to file", "error", err)
-		// Continue anyway as we want to apply it in-memory
+	// 1. Save to file if path is available. Capture (don't drop) the error:
+	// we still apply in-memory below so the change takes effect this session,
+	// but an honest warning toast is emitted after the lock is released so the
+	// user knows a config command "succeeded" without persisting (unwritable /
+	// ephemeral dir, XDG drift). Returning the error here would skip callers'
+	// post-apply logic (e.g. /login, /provider ClearConversation), so we don't.
+	saveErr := cfg.Save()
+	if saveErr != nil {
+		logging.Warn("failed to save config to file", "error", saveErr, "path", config.GetConfigPath())
 	}
 
 	// 2. Update internal config
@@ -2372,6 +2395,12 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		}
 	}
 
+	// 8b. Recompute unrestricted mode (sandbox off AND permissions off). The
+	// keyboard toggles do this, but the /permissions and /sandbox SLASH
+	// commands route through ApplyConfig — without this, full-freedom mode
+	// would silently not engage (executor/bash keep blocking) until restart.
+	a.updateUnrestrictedModeLocked()
+
 	// 8c. Update UI state (model name, etc.)
 	if a.tui != nil {
 		a.tui.SetCurrentModel(a.config.Model.Name)
@@ -2404,6 +2433,17 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// section — safeSendToProgram re-acquires a.mu internally, so calling
 	// it under the lock would self-deadlock on Go's non-reentrant Mutex.
 	a.safeSendToProgram(uiMsg)
+
+	// Honest persistence-failure surface: the config was applied for this
+	// session but not written to disk. Warn so the user knows the setting will
+	// revert next launch (covers /model, /provider, /thinking, /sandbox, the
+	// Ctrl+K selector — every ApplyConfig caller — in one place).
+	if saveErr != nil {
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: fmt.Sprintf("Setting applied for this session but NOT saved to %s — it will revert next launch", config.GetConfigPath()),
+		})
+	}
 
 	// Refresh token counts immediately for the newly loaded model limits
 	a.refreshTokenCount()

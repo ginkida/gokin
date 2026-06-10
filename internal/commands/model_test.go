@@ -250,3 +250,26 @@ func TestModelCommand_AllProviderHintsReferRealModels(t *testing.T) {
 		})
 	}
 }
+
+// TestModelCommand_ClearsStalePresetOnExplicitSelect pins that an explicit
+// /model choice clears any stale model.preset. Otherwise MigrateConfig/
+// NormalizeConfig (run on every ApplyConfig via NewClient) re-apply the preset
+// and silently revert the selection to the preset's model.
+func TestModelCommand_ClearsStalePresetOnExplicitSelect(t *testing.T) {
+	app := newModelApp("glm", "glm-5")
+	app.fakeAppForMCP.cfg.Model.Preset = "coding" // a stale preset would override the choice
+
+	cmd := &ModelCommand{}
+	if _, err := cmd.Execute(context.Background(), []string{"glm-5.1"}, app); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.applied == nil {
+		t.Fatal("ApplyConfig was not called")
+	}
+	if app.applied.Model.Preset != "" {
+		t.Fatalf("Preset = %q, want cleared (else MigrateConfig reverts the model)", app.applied.Model.Preset)
+	}
+	if app.applied.Model.Name != "glm-5.1" {
+		t.Fatalf("Name = %q, want glm-5.1", app.applied.Model.Name)
+	}
+}

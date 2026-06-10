@@ -257,6 +257,9 @@ func (a *App) handleModelSelect(modelID string) {
 	}
 	a.config.Model.Name = modelID
 	a.config.Model.Provider = config.DetectProvider(modelID)
+	// Clear any stale model.preset so the explicit selection isn't reverted by
+	// MigrateConfig/NormalizeConfig on the ApplyConfig below.
+	a.config.Model.Preset = ""
 
 	// Apply MaxOutputTokens from preset for new provider
 	if preset, ok := config.ModelPresets[a.config.Model.Provider]; ok {
