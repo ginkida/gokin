@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -17,6 +18,8 @@ func newEvalCmd() *cobra.Command {
 		Short: "Run coding-agent evals",
 	}
 	evalCmd.AddCommand(newEvalRunCmd())
+	evalCmd.AddCommand(newEvalReportCmd())
+	evalCmd.AddCommand(newEvalDiagnoseCmd())
 	return evalCmd
 }
 
@@ -107,4 +110,258 @@ func evalResultLabel(result evals.Result) string {
 		return result.ScenarioID
 	}
 	return fmt.Sprintf("%s [%s]", result.ScenarioID, strings.Join(parts, "/"))
+}
+
+func newEvalReportCmd() *cobra.Command {
+	var inputPath string
+	var baselinePath string
+	var jsonOut bool
+	var failUnder string
+	var maxRegression string
+	var requirePass bool
+	var metricThresholds []string
+
+	cmd := &cobra.Command{
+		Use:   "report",
+		Short: "Summarize eval JSONL results",
+		Long: `Summarize eval JSONL results written by gokin eval run.
+
+Use --baseline to compare the current run against a previous results file
+after changing prompts, tools, routing, or model/provider settings.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
+			results, err := evals.ReadResults(inputPath)
+			if err != nil {
+				return fmt.Errorf("read input results: %w", err)
+			}
+			report := evals.BuildReport(inputPath, results)
+
+			var comparison *evals.Comparison
+			if strings.TrimSpace(baselinePath) != "" {
+				baselineResults, err := evals.ReadResults(baselinePath)
+				if err != nil {
+					return fmt.Errorf("read baseline results: %w", err)
+				}
+				cmp := evals.CompareReports(evals.BuildReport(baselinePath, baselineResults), report)
+				comparison = &cmp
+			}
+			if strings.TrimSpace(maxRegression) != "" && comparison == nil {
+				return fmt.Errorf("--max-regression requires --baseline")
+			}
+
+			gateOpts, gateEnabled, err := evalGateOptions(failUnder, maxRegression, requirePass, metricThresholds)
+			if err != nil {
+				return err
+			}
+			var gate *evals.GateResult
+			if gateEnabled {
+				result := evals.EvaluateGate(report, comparison, gateOpts)
+				gate = &result
+			}
+
+			if jsonOut {
+				payload := struct {
+					Report     evals.Report      `json:"report"`
+					Comparison *evals.Comparison `json:"comparison,omitempty"`
+					Gate       *evals.GateResult `json:"gate,omitempty"`
+				}{Report: report, Comparison: comparison, Gate: gate}
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(payload); err != nil {
+					return err
+				}
+			} else {
+				printEvalReport(cmd, report, comparison, gate)
+			}
+
+			if gate != nil && !gate.Passed {
+				return fmt.Errorf("eval gate failed: %s", strings.Join(gate.Failures, "; "))
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&inputPath, "input", ".gokin/evals/results.jsonl", "JSONL results path")
+	cmd.Flags().StringVar(&baselinePath, "baseline", "", "optional baseline JSONL results path for comparison")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON")
+	cmd.Flags().StringVar(&failUnder, "fail-under", "", "fail if aggregate score is below this ratio or percent (example: 0.9 or 90%)")
+	cmd.Flags().StringVar(&maxRegression, "max-regression", "", "fail if score regresses by more than this ratio or percent-point value versus --baseline")
+	cmd.Flags().BoolVar(&requirePass, "require-pass", false, "fail if any scenario status is not passed or dry_run")
+	cmd.Flags().StringArrayVar(&metricThresholds, "fail-metric", nil, "fail if metric ratio is below threshold, as name=ratio; repeatable")
+	return cmd
+}
+
+func evalGateOptions(failUnder, maxRegression string, requirePass bool, metricThresholds []string) (evals.GateOptions, bool, error) {
+	opts := evals.GateOptions{
+		RequireAllPassed:    requirePass,
+		FailOnMissingMetric: true,
+	}
+	enabled := requirePass
+	var err error
+	if strings.TrimSpace(failUnder) != "" {
+		opts.MinScoreRatio, err = evals.ParseRatio(failUnder)
+		if err != nil {
+			return opts, false, fmt.Errorf("--fail-under: %w", err)
+		}
+		enabled = true
+	}
+	if strings.TrimSpace(maxRegression) != "" {
+		opts.MaxRegression, err = evals.ParseRatio(maxRegression)
+		if err != nil {
+			return opts, false, fmt.Errorf("--max-regression: %w", err)
+		}
+		enabled = true
+	}
+	opts.MetricMinRatios, err = evals.ParseMetricThresholds(metricThresholds)
+	if err != nil {
+		return opts, false, fmt.Errorf("--fail-metric: %w", err)
+	}
+	if len(opts.MetricMinRatios) > 0 {
+		enabled = true
+	}
+	return opts, enabled, nil
+}
+
+func printEvalReport(cmd *cobra.Command, report evals.Report, comparison *evals.Comparison, gate *evals.GateResult) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Results: %s\n", report.ResultsPath)
+	fmt.Fprintf(out, "Scenarios: %d · passed: %d · failed: %d · score: %d/%d (%.1f%%)\n",
+		report.Count, report.Passed, report.Failed, report.Score.Passed, report.Score.Total, report.Score.Ratio*100)
+
+	if len(report.Metrics) > 0 {
+		fmt.Fprintln(out, "\nMetrics:")
+		for _, metric := range report.Metrics {
+			fmt.Fprintf(out, "  %-36s %d/%d (%.1f%%)\n", metric.Name, metric.Passed, metric.Total, metric.Ratio*100)
+		}
+	}
+
+	var failing []evals.ScenarioSummary
+	for _, scenario := range report.Scenarios {
+		if scenario.Status != "passed" && scenario.Status != "dry_run" {
+			failing = append(failing, scenario)
+		}
+	}
+	if len(failing) > 0 {
+		fmt.Fprintln(out, "\nFailing scenarios:")
+		for _, scenario := range failing {
+			label := scenario.ID
+			if scenario.Variant != "" {
+				label += " [" + scenario.Variant + "]"
+			}
+			fmt.Fprintf(out, "  %s\t%s\t%d/%d", label, scenario.Status, scenario.Score.Passed, scenario.Score.Total)
+			if scenario.Error != "" {
+				fmt.Fprintf(out, "\t%s", scenario.Error)
+			}
+			fmt.Fprintln(out)
+		}
+	}
+
+	if comparison != nil {
+		fmt.Fprintf(out, "\nBaseline: %s\n", comparison.BaselinePath)
+		fmt.Fprintf(out, "Delta: passed %+d · score %+0.1fpp\n", comparison.PassedDelta, comparison.ScoreDelta*100)
+		if len(comparison.Metrics) > 0 {
+			fmt.Fprintln(out, "\nMetric deltas:")
+			for _, metric := range comparison.Metrics {
+				if metric.Delta == 0 {
+					continue
+				}
+				fmt.Fprintf(out, "  %-36s %+0.1fpp (%.1f%% -> %.1f%%)\n",
+					metric.Name, metric.Delta*100, metric.BaselineRatio*100, metric.CurrentRatio*100)
+			}
+		}
+	}
+
+	if gate != nil {
+		if gate.Passed {
+			fmt.Fprintln(out, "\nGate: passed")
+			return
+		}
+		fmt.Fprintln(out, "\nGate: failed")
+		for _, failure := range gate.Failures {
+			fmt.Fprintf(out, "  - %s\n", failure)
+		}
+	}
+}
+
+func newEvalDiagnoseCmd() *cobra.Command {
+	var inputPath string
+	var baselinePath string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:   "diagnose",
+		Short: "Recommend prompt/tool improvements from eval results",
+		Long: `Diagnose eval JSONL results and turn weak metrics into prioritized
+next actions for the prompt/tool improvement loop.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
+			results, err := evals.ReadResults(inputPath)
+			if err != nil {
+				return fmt.Errorf("read input results: %w", err)
+			}
+			report := evals.BuildReport(inputPath, results)
+
+			var comparison *evals.Comparison
+			if strings.TrimSpace(baselinePath) != "" {
+				baselineResults, err := evals.ReadResults(baselinePath)
+				if err != nil {
+					return fmt.Errorf("read baseline results: %w", err)
+				}
+				cmp := evals.CompareReports(evals.BuildReport(baselinePath, baselineResults), report)
+				comparison = &cmp
+			}
+
+			diagnosis := evals.DiagnoseReport(report, comparison)
+			if jsonOut {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(diagnosis)
+			}
+			printEvalDiagnosis(cmd, diagnosis)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&inputPath, "input", ".gokin/evals/results.jsonl", "JSONL results path")
+	cmd.Flags().StringVar(&baselinePath, "baseline", "", "optional baseline JSONL results path for regression diagnosis")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON")
+	return cmd
+}
+
+func printEvalDiagnosis(cmd *cobra.Command, diagnosis evals.Diagnosis) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Results: %s\n", diagnosis.ResultsPath)
+	fmt.Fprintf(out, "Score: %d/%d (%.1f%%)\n", diagnosis.Score.Passed, diagnosis.Score.Total, diagnosis.Score.Ratio*100)
+
+	if len(diagnosis.WeakMetrics) > 0 {
+		fmt.Fprintln(out, "\nWeak metrics:")
+		for _, metric := range diagnosis.WeakMetrics {
+			fmt.Fprintf(out, "  %-36s %d/%d (%.1f%%)\n", metric.Name, metric.Passed, metric.Total, metric.Ratio*100)
+		}
+	}
+
+	if len(diagnosis.Regressions) > 0 {
+		fmt.Fprintln(out, "\nRegressions:")
+		for _, metric := range diagnosis.Regressions {
+			fmt.Fprintf(out, "  %-36s %+0.1fpp (%.1f%% -> %.1f%%)\n",
+				metric.Name, metric.Delta*100, metric.BaselineRatio*100, metric.CurrentRatio*100)
+		}
+	}
+
+	if len(diagnosis.FailedScenarios) > 0 {
+		fmt.Fprintln(out, "\nFailed scenarios:")
+		for _, scenario := range diagnosis.FailedScenarios {
+			label := scenario.ID
+			if scenario.Variant != "" {
+				label += " [" + scenario.Variant + "]"
+			}
+			fmt.Fprintf(out, "  %s\t%s\t%d/%d\n", label, scenario.Status, scenario.Score.Passed, scenario.Score.Total)
+		}
+	}
+
+	fmt.Fprintln(out, "\nRecommended next actions:")
+	for _, rec := range diagnosis.Recommendations {
+		fmt.Fprintf(out, "  [%s] %s\n", rec.Area, rec.Reason)
+		fmt.Fprintf(out, "      %s\n", rec.Action)
+	}
 }

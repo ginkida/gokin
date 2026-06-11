@@ -295,6 +295,29 @@ func TestBashTool_Execute_ExitCode(t *testing.T) {
 	if result.Success {
 		t.Error("Execute() should return failure for exit 1")
 	}
+	if !strings.Contains(result.Content, "Actionable summary:") {
+		t.Fatalf("failure content missing actionable summary: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "exit code 1") {
+		t.Fatalf("failure content missing exit code: %q", result.Content)
+	}
+}
+
+func TestBashTool_Execute_TestFailureSuggestsFocusedRerun(t *testing.T) {
+	tool := NewBashTool("/tmp")
+
+	result, err := tool.Execute(context.Background(), map[string]any{
+		"command": "go test ./definitely-not-a-package",
+	})
+	if err != nil {
+		t.Fatalf("Execute() unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatal("Execute() should fail for invalid go test package")
+	}
+	if !strings.Contains(result.Content, "rerun this same validation command") {
+		t.Fatalf("failure content missing validation next step: %q", result.Content)
+	}
 }
 
 func TestBashTool_Execute_Pwd(t *testing.T) {

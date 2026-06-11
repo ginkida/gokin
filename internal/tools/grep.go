@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -268,6 +269,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		var results strings.Builder
 		totalCount := 0
 		fileCount := 0
+		perFile := map[string]int{}
 		for _, fm := range fileMatches {
 			relPath, _ := filepath.Rel(t.workDir, fm.path)
 			if relPath == "" {
@@ -278,12 +280,13 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 				fmt.Fprintf(&results, "%s: %d\n", relPath, count)
 				totalCount += count
 				fileCount++
+				perFile[relPath] = count
 			}
 		}
 		if totalCount == 0 {
 			return NewSuccessResult("No matches found."), nil
 		}
-		summary := fmt.Sprintf("Total: %d match(es) in %d file(s):\n\n", totalCount, fileCount)
+		summary := fmt.Sprintf("Total: %d match(es) in %d file(s):\n%s\n", totalCount, fileCount, actionableGrepSummary(perFile, true))
 		return NewSuccessResult(summary + results.String()), nil
 	}
 
@@ -292,6 +295,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	var cacheMatches []cache.GrepMatch
 	matchCount := 0
 	fileCount := 0
+	perFile := map[string]int{}
 
 	for _, fm := range fileMatches {
 		if matchCount >= maxMatches {
@@ -303,6 +307,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		if relPath == "" {
 			relPath = fm.path
 		}
+		beforeFileCount := matchCount
 
 		// Record access pattern for predictive loading
 		if t.predictor != nil {
@@ -320,6 +325,9 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 				Line:     match.line,
 			})
 			matchCount++
+		}
+		if delta := matchCount - beforeFileCount; delta > 0 {
+			perFile[relPath] = delta
 		}
 	}
 
@@ -343,7 +351,48 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	if matchCount >= maxMatches {
 		summary = fmt.Sprintf("%s %d+ match(es) in %d file(s) (capped at %d — refine pattern for complete results):\n\n", label, matchCount, fileCount, maxMatches)
 	}
-	return NewSuccessResult(summary + results.String()), nil
+	return NewSuccessResult(summary + actionableGrepSummary(perFile, false) + "\n" + results.String()), nil
+}
+
+func actionableGrepSummary(perFile map[string]int, countOnly bool) string {
+	if len(perFile) == 0 {
+		return ""
+	}
+	type fileCount struct {
+		path  string
+		count int
+	}
+	files := make([]fileCount, 0, len(perFile))
+	for path, count := range perFile {
+		files = append(files, fileCount{path: path, count: count})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].count != files[j].count {
+			return files[i].count > files[j].count
+		}
+		return files[i].path < files[j].path
+	})
+
+	limit := 3
+	if len(files) < limit {
+		limit = len(files)
+	}
+	var b strings.Builder
+	b.WriteString("Actionable summary:\n")
+	b.WriteString("- Most relevant files by match density: ")
+	for i := 0; i < limit; i++ {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%s (%d)", files[i].path, files[i].count)
+	}
+	b.WriteString("\n")
+	if countOnly {
+		b.WriteString("- Next: run grep without count_only or read the top file(s) before editing.\n\n")
+	} else {
+		b.WriteString("- Next: read the most relevant file(s) with targeted offsets before editing; do not edit from grep snippets alone.\n\n")
+	}
+	return b.String()
 }
 
 // invertMatches returns lines that do NOT match the regex for each file.

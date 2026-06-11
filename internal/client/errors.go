@@ -52,6 +52,26 @@ const (
 // ErrModelRoundTimeout is the sentinel for executor-enforced round timeout.
 var ErrModelRoundTimeout = errors.New("model round timeout")
 
+// ErrEmptyModelResponse is the sentinel for a successful provider response
+// that carried neither text nor tool calls.
+var ErrEmptyModelResponse = errors.New("empty model response")
+
+// EmptyModelResponseError carries context for empty successful model responses.
+type EmptyModelResponseError struct {
+	AfterToolResults bool
+}
+
+func (e *EmptyModelResponseError) Error() string {
+	if e.AfterToolResults {
+		return "model returned an empty response after tool results; work may be incomplete"
+	}
+	return "model returned an empty response"
+}
+
+func (e *EmptyModelResponseError) Unwrap() error {
+	return ErrEmptyModelResponse
+}
+
 // TimeoutError carries typed timeout telemetry details.
 type TimeoutError struct {
 	Reason   FailureReason
@@ -278,6 +298,9 @@ func IsRetryableError(err error) bool {
 	}
 	if errors.Is(err, ErrModelRoundTimeout) {
 		return false
+	}
+	if errors.Is(err, ErrEmptyModelResponse) {
+		return true
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true

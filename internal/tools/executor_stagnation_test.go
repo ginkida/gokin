@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -112,6 +113,37 @@ func (t *scriptedStaticTool) Validate(args map[string]any) error { return nil }
 func (t *scriptedStaticTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	t.calls++
 	return NewSuccessResult(t.content), nil
+}
+
+func TestExecutorExecuteLoop_EmptyResponseAfterToolResultsIsRetryableError(t *testing.T) {
+	registry := NewRegistry()
+	readTool := &scriptedReadTool{}
+	if err := registry.Register(readTool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	cl := &scriptedExecutorClient{
+		model: "kimi-for-coding",
+		responses: []*client.StreamingResponse{
+			buildExecutorTestReadStream("r0"),
+			buildExecutorTestEmptyStream(),
+		},
+	}
+	exec := NewExecutor(registry, cl, time.Second)
+
+	_, finalText, err := exec.Execute(context.Background(), nil, "inspect project.go")
+	if err == nil {
+		t.Fatal("Execute() error = nil, want retryable empty-response error")
+	}
+	if !errors.Is(err, client.ErrEmptyModelResponse) {
+		t.Fatalf("Execute() error = %v, want ErrEmptyModelResponse", err)
+	}
+	if strings.Contains(finalText, "[Auto]") || strings.Contains(finalText, "I've read the file") {
+		t.Fatalf("finalText used stale auto fallback: %q", finalText)
+	}
+	if !client.IsRetryableError(err) {
+		t.Fatalf("empty response after tools should be retryable: %v", err)
+	}
 }
 
 func TestExecutorExecuteLoop_KimiRepeatedReadUsesRecoveryHint(t *testing.T) {
@@ -500,6 +532,13 @@ func buildExecutorTestGlobStream(id string) *client.StreamingResponse {
 func buildExecutorTestTextStream(text string) *client.StreamingResponse {
 	return buildExecutorTestStream(client.ResponseChunk{
 		Text:         text,
+		Done:         true,
+		FinishReason: genai.FinishReasonStop,
+	})
+}
+
+func buildExecutorTestEmptyStream() *client.StreamingResponse {
+	return buildExecutorTestStream(client.ResponseChunk{
 		Done:         true,
 		FinishReason: genai.FinishReasonStop,
 	})

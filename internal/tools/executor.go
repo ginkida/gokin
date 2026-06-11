@@ -1172,6 +1172,29 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				resp, err = e.collectStreamWithHandler(roundCtx, stream)
 				roundCancel()
 				if err == nil {
+					if resp != nil && resp.Text == "" && len(resp.FunctionCalls) == 0 {
+						logging.Warn("model returned empty response after tool results",
+							"retry_count", streamRetries,
+							"max_retries", retryPolicy.MaxRetries,
+							"tools", len(results))
+						if streamRetries < retryPolicy.MaxRetries {
+							delay := client.CalculateBackoff(retryPolicy.BaseDelay, streamRetries, retryPolicy.MaxDelay)
+							streamRetries++
+							if e.handler != nil && e.handler.OnWarning != nil {
+								e.handler.OnWarning(fmt.Sprintf(
+									"Model returned an empty response after tool results, retrying (%d/%d) in %s...",
+									streamRetries,
+									retryPolicy.MaxRetries,
+									delay.Round(time.Second),
+								))
+							}
+							if err := waitForRetry(ctx, delay); err != nil {
+								return history, "", err
+							}
+							continue
+						}
+						return history, "", &client.EmptyModelResponseError{AfterToolResults: true}
+					}
 					streamRetries = 0
 					partialStreamRetries = 0
 					break

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"gokin/internal/app"
 	"gokin/internal/config"
@@ -18,11 +19,14 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version  = "0.88.0"
+	version  = "0.89.0"
 	cfgFile  string
 	model    string
+	provider string
 	runSetup bool
 	resume   bool
+	headless bool
+	prompt   string
 )
 
 func main() {
@@ -41,8 +45,11 @@ choose.`,
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/gokin/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&model, "model", "", "model to use (default depends on provider)")
+	rootCmd.PersistentFlags().StringVar(&provider, "provider", "", "provider to use for this run (glm, minimax, kimi, deepseek, ollama)")
 	rootCmd.PersistentFlags().BoolVar(&runSetup, "setup", false, "run the setup wizard")
 	rootCmd.PersistentFlags().BoolVar(&resume, "resume", false, "resume the last session")
+	rootCmd.PersistentFlags().BoolVar(&headless, "headless", false, "run one prompt without the interactive TUI")
+	rootCmd.PersistentFlags().StringVar(&prompt, "prompt", "", "prompt to run in headless mode")
 
 	// Version command
 	rootCmd.AddCommand(&cobra.Command{
@@ -63,6 +70,10 @@ choose.`,
 }
 
 func runApp(cmd *cobra.Command, args []string) error {
+	if headless && strings.TrimSpace(prompt) == "" {
+		return fmt.Errorf("--prompt is required when --headless is set")
+	}
+
 	// Run setup wizard if requested
 	if runSetup {
 		if err := setup.RunSetupWizard(); err != nil {
@@ -80,14 +91,16 @@ func runApp(cmd *cobra.Command, args []string) error {
 	// Set version from runtime
 	cfg.Version = version
 
-	// Override model if specified
-	if model != "" {
-		cfg.Model.Name = model
+	if err := applyRuntimeOverrides(cfg, provider, model); err != nil {
+		return err
 	}
 
 	// Validate configuration - if no API key, run setup wizard automatically
 	if err := cfg.Validate(); err != nil {
 		if errors.Is(err, config.ErrMissingAuth) {
+			if headless {
+				return err
+			}
 			// No API key configured - run setup wizard
 			if err := setup.RunSetupWizard(); err != nil {
 				return err
@@ -112,10 +125,21 @@ func runApp(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get working directory: %w", err)
 	}
 
+	// Headless runs cannot answer Builder.checkAllowedDirs' first-run prompt.
+	// Allow the current workspace in memory so evals and scripts never block
+	// waiting on stdin before the agent starts.
+	if headless && len(cfg.Tools.AllowedDirs) == 0 {
+		cfg.Tools.AllowedDirs = append(cfg.Tools.AllowedDirs, workDir)
+	}
+
 	// Create the application
 	application, err := app.New(cfg, workDir)
 	if err != nil {
 		return fmt.Errorf("failed to create application: %w", err)
+	}
+
+	if headless {
+		return application.RunHeadless(cmd.Context(), prompt)
 	}
 
 	// Attempt to resume session if requested
@@ -146,4 +170,39 @@ func runApp(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("\nStarting Gokin...")
 	return application.Run()
+}
+
+func applyRuntimeOverrides(cfg *config.Config, providerOverride, modelOverride string) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+
+	providerOverride = strings.ToLower(strings.TrimSpace(providerOverride))
+	modelOverride = strings.TrimSpace(modelOverride)
+
+	if providerOverride != "" {
+		p := config.GetProvider(providerOverride)
+		if p == nil {
+			return fmt.Errorf("unknown provider %q (supported: %s)", providerOverride, strings.Join(config.ProviderNames(), ", "))
+		}
+		cfg.API.ActiveProvider = providerOverride
+		cfg.API.Backend = providerOverride
+		cfg.Model.Provider = providerOverride
+		if modelOverride == "" && p.DefaultModel != "" {
+			cfg.Model.Name = p.DefaultModel
+		}
+	}
+
+	if modelOverride != "" {
+		cfg.Model.Name = modelOverride
+		if providerOverride == "" {
+			if detected := config.DetectKnownProviderFromModel(modelOverride); detected != "" {
+				cfg.Model.Provider = detected
+				cfg.API.ActiveProvider = detected
+				cfg.API.Backend = detected
+			}
+		}
+	}
+
+	return nil
 }

@@ -166,6 +166,10 @@ func TestPromptBuilder_BasePromptIncludesCodeProjectProtocol(t *testing.T) {
 		"Use repository evidence as the source of truth",
 		"run the narrowest reliable verification first",
 		"Preserve user work in the git tree",
+		"Measurable Quality Contract",
+		"Investigation quality",
+		"Verification quality",
+		"Final-answer quality",
 	} {
 		if !strings.Contains(prompt, needle) {
 			t.Errorf("base prompt missing %q", needle)

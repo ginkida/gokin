@@ -911,7 +911,10 @@ func (t *BashTool) buildExitResult(command, stdout, stderr string, exitCode int)
 		}
 		return res
 	}
-	content := stdout
+	content := bashFailureSummary(command, exitCode, stdout, stderr)
+	if stdout != "" {
+		content += "\n\n" + stdout
+	}
 	if stderr != "" {
 		if content != "" {
 			content += "\n"
@@ -923,6 +926,41 @@ func (t *BashTool) buildExitResult(command, stdout, stderr string, exitCode int)
 		Error:   fmt.Sprintf("command exited with code %d", exitCode),
 		Success: false,
 	}
+}
+
+func bashFailureSummary(command string, exitCode int, stdout, stderr string) string {
+	var b strings.Builder
+	b.WriteString("Actionable summary:\n")
+	fmt.Fprintf(&b, "- Command failed with exit code %d: %s\n", exitCode, command)
+	if strings.TrimSpace(stderr) != "" {
+		b.WriteString("- Primary diagnostics are in STDERR below.\n")
+	} else if strings.TrimSpace(stdout) != "" {
+		b.WriteString("- Primary diagnostics are in stdout below.\n")
+	} else {
+		b.WriteString("- The command produced no diagnostics; check the command, working directory, and required files.\n")
+	}
+	if commandLooksLikeValidation(command) {
+		b.WriteString("- Next: fix the reported issue, then rerun this same validation command or the narrowest failing subset.\n")
+	} else {
+		b.WriteString("- Next: inspect the diagnostic lines, fix the root cause, and rerun a focused verification command.\n")
+	}
+	return b.String()
+}
+
+func commandLooksLikeValidation(command string) bool {
+	lower := strings.ToLower(command)
+	patterns := []string{
+		"go test", "go build", "go vet", "pytest", "npm test", "npm run test",
+		"npm run lint", "pnpm test", "yarn test", "cargo test", "cargo check",
+		"make test", "make check", "mvn test", "gradle test", "ruff", "mypy",
+		"tsc", "eslint",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // benignNonZeroExit reports whether a non-zero exit is an expected, non-error

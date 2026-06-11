@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,6 +153,12 @@ func TestGrepTool_Execute_SimplePattern(t *testing.T) {
 	if !result.Success {
 		t.Errorf("Execute() result.Success = false: %s", result.Error)
 	}
+	if !strings.Contains(result.Content, "Actionable summary:") {
+		t.Fatalf("grep output missing actionable summary:\n%s", result.Content)
+	}
+	if !strings.Contains(result.Content, "read the most relevant file") {
+		t.Fatalf("grep output missing next-step read guidance:\n%s", result.Content)
+	}
 }
 
 func TestGrepTool_Execute_SpecificFile(t *testing.T) {
@@ -233,6 +240,38 @@ func TestGrepTool_Execute_NoMatches(t *testing.T) {
 	}
 	// No matches is still success with empty result
 	_ = result.Success
+}
+
+func TestGrepTool_Execute_CountOnlyIncludesActionableSummary(t *testing.T) {
+	tmpDir := resolvedTempDir(t)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("func a() {}\nfunc b() {}\n"), 0644); err != nil {
+		t.Fatalf("write a.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("func c() {}\n"), 0644); err != nil {
+		t.Fatalf("write b.go: %v", err)
+	}
+
+	tool := NewGrepTool(tmpDir)
+	result, err := tool.Execute(context.Background(), map[string]any{
+		"pattern":    "func",
+		"count_only": true,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() success = false: %s", result.Error)
+	}
+	for _, needle := range []string{
+		"Actionable summary:",
+		"a.go (2)",
+		"run grep without count_only or read the top file",
+	} {
+		if !strings.Contains(result.Content, needle) {
+			t.Fatalf("count_only output missing %q:\n%s", needle, result.Content)
+		}
+	}
 }
 
 func TestGrepTool_Execute_MultipleFiles(t *testing.T) {

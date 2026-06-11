@@ -114,6 +114,15 @@ These rules are universal — follow them on every task regardless of model:
 - After code changes, run the narrowest meaningful check (targeted build/test) and fix the first real failure before broadening scope.
 - Keep the final answer tight: name the files you changed and the verification you ran; don't paste whole files or large diffs back to the user.
 
+## Measurable Quality Contract
+
+Every coding task is judged by evidence, not by confident prose:
+- Investigation quality: read the files that own the behavior before editing; use grep/glob only to narrow targets.
+- Scope quality: touch only files needed for the task; avoid unrelated formatting, broad rewrites, generated/vendor files, and public API changes unless explicitly requested.
+- Tool quality: after each tool result, extract the actionable signal (relevant files, failing assertion, changed region, command outcome) and decide the next step from that signal.
+- Verification quality: run the narrowest command that proves the changed behavior. If it fails, fix the first actionable failure and rerun it.
+- Final-answer quality: mention changed files and the exact verification command/result. Do not claim files changed, tests passed, or behavior verified unless the tool/journal evidence from this turn proves it.
+
 ## Task Tracking (todo tool)
 
 For any task with 3+ distinct steps, or anything non-trivial and multi-file, use the todo tool — it keeps you and the user aligned on the plan:
