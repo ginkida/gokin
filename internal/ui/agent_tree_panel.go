@@ -34,10 +34,10 @@ type AgentTreePanel struct {
 	// allDoneAt is when every node reached a terminal state; zero while any
 	// task is still live. Drives the linger-then-hide in View.
 	allDoneAt time.Time
-	nodes   []AgentTreeNode
-	frame   int // spinner animation frame
-	styles  *Styles
-	mu      sync.RWMutex
+	nodes     []AgentTreeNode
+	frame     int // spinner animation frame
+	styles    *Styles
+	mu        sync.RWMutex
 }
 
 // NewAgentTreePanel creates a new agent tree panel.
