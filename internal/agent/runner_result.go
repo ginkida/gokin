@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -173,6 +174,70 @@ func (r *Runner) ListAgents() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// TaskSummary is a user-facing snapshot of one background agent, built for
+// the /tasks command. Output/Error come from the result ledger and may be
+// empty while the agent is still running.
+type TaskSummary struct {
+	ID        string
+	Type      string
+	Status    AgentStatus
+	Task      string
+	StartTime time.Time
+	Duration  time.Duration
+	Output    string
+	Error     string
+	Completed bool
+}
+
+// ListTaskSummaries returns a snapshot of every tracked agent (running and
+// completed, until Cleanup evicts them), sorted running-first then by start
+// time descending. Lock order r.mu → agent.stateMu matches Cleanup.
+func (r *Runner) ListTaskSummaries() []TaskSummary {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]TaskSummary, 0, len(r.agents))
+	for id, ag := range r.agents {
+		s := TaskSummary{
+			ID:        id,
+			Type:      string(ag.Type),
+			Status:    ag.GetStatus(),
+			Task:      ag.GetTaskPreview(80),
+			StartTime: ag.GetStartTime(),
+		}
+		switch {
+		case s.Status == AgentStatusRunning && !s.StartTime.IsZero():
+			s.Duration = time.Since(s.StartTime)
+		case !s.StartTime.IsZero():
+			if end := ag.GetEndTime(); !end.IsZero() {
+				s.Duration = end.Sub(s.StartTime)
+			}
+		}
+		if res, ok := r.results[id]; ok && res != nil {
+			s.Output = res.Output
+			s.Error = res.Error
+			s.Completed = res.Completed
+			if res.Duration > 0 {
+				s.Duration = res.Duration
+			}
+		}
+		out = append(out, s)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		iRunning := out[i].Status == AgentStatusRunning
+		jRunning := out[j].Status == AgentStatusRunning
+		if iRunning != jRunning {
+			return iRunning
+		}
+		if !out[i].StartTime.Equal(out[j].StartTime) {
+			return out[i].StartTime.After(out[j].StartTime)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
 }
 
 // ListRunning returns IDs of currently running agents.

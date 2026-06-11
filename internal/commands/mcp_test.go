@@ -67,6 +67,7 @@ func (f *fakeAppForMCP) GetSessionGovernanceReport() string               { retu
 func (f *fakeAppForMCP) GetMemoryReport() string                          { return "" }
 func (f *fakeAppForMCP) GetPerformanceStats() string                      { return "" }
 func (f *fakeAppForMCP) GetLoopManager() LoopManager                      { return nil }
+func (f *fakeAppForMCP) GetAgentTaskRunner() AgentTaskRunner              { return nil }
 func (f *fakeAppForMCP) RefreshTokenCount()                               {}
 
 func newFakeApp(t *testing.T, servers []*mcp.ServerConfig) *fakeAppForMCP {

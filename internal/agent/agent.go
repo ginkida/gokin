@@ -1427,10 +1427,11 @@ var broadLoopExplorationTools = toolNameSet(
 // (recordCoverageLocked + redundancyBudget): it counts REDUNDANT re-coverage of
 // already-seen ranges/scopes and trips well below this broad ceiling. NOTE:
 // normalizeCallKey still keeps distinct offsets distinct on purpose (do NOT
-// re-add a docstring claiming exact-args backstops perturbing loops). Residual,
-// documented gaps: a loop rotating over 3+ DISTINCT targets below the broad
-// ceiling, and the executor's within-turn stagnation guard (same offset/pattern
-// blind spot) — a tracked follow-up. The broad counter remains the hard backstop.
+// re-add a docstring claiming exact-args backstops perturbing loops). The
+// executor's within-turn stagnation guard had the same offset/pattern blind
+// spot until the executor-side mirror landed (tools/executor_coverage.go).
+// Residual, documented gap: a loop rotating over 3+ DISTINCT targets below
+// the broad ceiling. The broad counter remains the hard backstop.
 func (a *Agent) broadLoopThreshold(toolName string) int {
 	if _, ok := broadLoopExplorationTools[toolName]; ok {
 		return a.loopThreshold * 4
@@ -4842,6 +4843,34 @@ func (a *Agent) GetEndTime() time.Time {
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
 	return a.endTime
+}
+
+// GetStartTime returns the agent's start time (thread-safe).
+func (a *Agent) GetStartTime() time.Time {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.startTime
+}
+
+// GetTaskPreview returns the first line of the agent's original task prompt,
+// rune-safely truncated to maxRunes. Empty until Run has been called.
+func (a *Agent) GetTaskPreview(maxRunes int) string {
+	a.stateMu.RLock()
+	prompt := a.originalPrompt
+	a.stateMu.RUnlock()
+
+	prompt = strings.TrimSpace(prompt)
+	if idx := strings.IndexByte(prompt, '\n'); idx >= 0 {
+		prompt = strings.TrimSpace(prompt[:idx])
+	}
+	if maxRunes <= 0 {
+		return prompt
+	}
+	runes := []rune(prompt)
+	if len(runes) <= maxRunes {
+		return prompt
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 // Cancel cancels the agent's execution.

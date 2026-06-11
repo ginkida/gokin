@@ -985,6 +985,18 @@ func (a *App) GetLoopManager() commands.LoopManager {
 	return a.loopManager
 }
 
+// GetAgentTaskRunner returns the agent runner for the /tasks command. Nil
+// when the agent subsystem is not wired. The typed-nil guard matters: a nil
+// *agent.Runner stuffed into the interface would be non-nil to the caller.
+func (a *App) GetAgentTaskRunner() commands.AgentTaskRunner {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.agentRunner == nil {
+		return nil
+	}
+	return a.agentRunner
+}
+
 // SyncMCPToolsForServer reconciles the tool registry against the current
 // state of the named MCP server in a.mcpManager. Called from the MCP
 // tools-changed callback when a server emits notifications/tools/list_changed

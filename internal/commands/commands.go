@@ -83,6 +83,11 @@ type AppInterface interface {
 	// /loop subcommands check for nil and return a clear "unavailable"
 	// message rather than crashing.
 	GetLoopManager() LoopManager
+
+	// Agent task runner — used by /tasks to list background agents and
+	// inspect their results. May be nil when the agent subsystem isn't
+	// wired; the command nil-checks.
+	GetAgentTaskRunner() AgentTaskRunner
 }
 
 // Handler manages slash commands.
@@ -169,6 +174,7 @@ func NewHandler() *Handler {
 
 	// Register stats and memory commands
 	h.Register(&StatsCommand{})
+	h.Register(&TasksCommand{})
 	h.Register(&MemoryCommand{})
 
 	// Register theme command

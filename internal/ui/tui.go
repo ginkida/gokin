@@ -3354,13 +3354,19 @@ func (m *Model) handleBackgroundTask(msg BackgroundTaskMsg) tea.Cmd {
 		}
 		// Task finished - remove from tracking
 		if task, ok := m.backgroundTasks[msg.ID]; ok {
-			// Only show toast for failures
-			if m.toastManager != nil && msg.Status == "failed" {
+			if m.toastManager != nil {
 				desc := task.Description
 				if runes := []rune(desc); len(runes) > 30 {
 					desc = string(runes[:27]) + "..."
 				}
-				m.toastManager.ShowError(fmt.Sprintf("Task failed: %s", desc))
+				switch msg.Status {
+				case "failed":
+					m.toastManager.ShowError(fmt.Sprintf("Task failed: %s — /tasks for details", desc))
+				case "completed":
+					// Point at /tasks so a finished background agent's output
+					// is one command away, not lost to the scrollback.
+					m.toastManager.ShowSuccess(fmt.Sprintf("Task done: %s — /tasks for output", desc))
+				}
 			}
 			delete(m.backgroundTasks, msg.ID)
 		}

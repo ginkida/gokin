@@ -822,6 +822,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	todoNudgeInjected := false
 	amnesiaWarned := map[string]bool{}
 	stagnationRecoveries := map[string]int{}
+	coverage := newExecutorCoverageTracker(e.workDir)
 	const (
 		stagnationLimit           = 5  // Consecutive identical tool patterns before aborting
 		stagnationWindowSize      = 15 // Rolling window for amnesia (non-consecutive) repeats
@@ -1046,6 +1047,47 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						e.handler.OnWarning(fmt.Sprintf(
 							"Model may be looping: tool pattern repeated %d times in last %d iterations",
 							count, stagnationWindowSize))
+					}
+				}
+			}
+
+			// Re-coverage guard (within-turn): the exact-pattern stagnation
+			// check above only catches IDENTICAL batches — a loop that
+			// perturbs args every call (drifting read offset, rotating grep
+			// pattern) makes a fresh fingerprint each round and escapes it.
+			// Mirror of the agent-level distinct-target coverage guard
+			// (v0.87.0): per-target and progress-gated, so paging, distinct
+			// files, and read→edit cycles never trip it. Only observed for
+			// batches that will actually execute — a batch already replaced
+			// by the kimi budget or stagnation recovery must not leave ghost
+			// coverage.
+			if results == nil {
+				if offender := coverage.observeBatch(resp.FunctionCalls); offender != nil {
+					if coverage.trips < maxCoverageRecoveryAttempts {
+						coverage.trips++
+						logging.Warn("executor re-coverage loop detected: sending recovery hint instead of aborting",
+							"tool", offender.name,
+							"target", offender.target,
+							"redundant", offender.redundant,
+							"model", cl.GetModel(),
+							"trip", coverage.trips)
+						if e.handler != nil && e.handler.OnWarning != nil {
+							e.handler.OnWarning(fmt.Sprintf(
+								"Loop guard: %s re-covered %s %d times with shifting arguments — sent a recovery hint",
+								offender.name, offender.target, offender.redundant))
+						}
+						results = e.buildCoverageRecoveryResults(resp.FunctionCalls, offender)
+						coverage.resetWindow()
+					} else {
+						logging.Warn("executor re-coverage loop: recovery budget exhausted, aborting",
+							"tool", offender.name,
+							"target", offender.target,
+							"redundant", offender.redundant,
+							"model", cl.GetModel(),
+							"trips", coverage.trips)
+						return history, "", fmt.Errorf(
+							"executor re-coverage loop: %s re-covered %q %d times with shifting arguments after %d recovery hints",
+							offender.name, offender.target, offender.redundant, coverage.trips)
 					}
 				}
 			}
