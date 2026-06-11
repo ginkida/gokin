@@ -548,8 +548,11 @@ func (b *Builder) initSession() error {
 	b.workingMemory.LoadFromDisk()
 	b.promptBuilder.SetWorkingMemory(b.workingMemory)
 
-	// Provider-specific prompt addendum (Kimi/DeepSeek operating rules, etc.).
-	b.promptBuilder.SetProvider(runtimeProviderForConfig(b.cfg))
+	// Provider-specific prompt addendum (Kimi/DeepSeek operating rules, etc.)
+	// + prefix-caching capability (gates the question-only prompt trimming).
+	provider := runtimeProviderForConfig(b.cfg)
+	b.promptBuilder.SetProvider(provider)
+	b.promptBuilder.SetPrefixCachingEnabled(appcontext.ProviderSupportsPrefixCaching(provider))
 
 	// Ensure .gokin working files are in .gitignore
 	appcontext.EnsureGokinGitignore(b.workDir)
@@ -1584,7 +1587,9 @@ func (b *Builder) wireDependencies() error {
 		}
 		// Re-assert provider selection in case assembleApp picked up a
 		// late-bound model/provider value (e.g., set via CLI flag, not yaml).
-		app.promptBuilder.SetProvider(runtimeProviderForConfig(b.cfg))
+		lateProvider := runtimeProviderForConfig(b.cfg)
+		app.promptBuilder.SetProvider(lateProvider)
+		app.promptBuilder.SetPrefixCachingEnabled(appcontext.ProviderSupportsPrefixCaching(lateProvider))
 	}
 	if app.sessionMemory != nil && b.projectLearning != nil {
 		app.sessionMemory.SetProjectLearning(b.projectLearning)
@@ -1901,12 +1906,13 @@ func (b *Builder) wireDependencies() error {
 		}
 	}
 
-	// Wire session memory update notifications
+	// Wire session memory update notifications. Session memory travels as
+	// per-turn context (NOT the cached system prefix) — push the fresh
+	// snapshot to the client instead of invalidating the prompt builder,
+	// which would re-bill the whole prefix on caching providers.
 	if app.sessionMemory != nil {
 		app.sessionMemory.SetOnUpdate(func() {
-			if app.promptBuilder != nil {
-				app.promptBuilder.Invalidate()
-			}
+			app.pushTurnContext()
 			app.safeSendToProgram(ui.LearningInsightMsg{Message: "Session memory updated"})
 		})
 	}

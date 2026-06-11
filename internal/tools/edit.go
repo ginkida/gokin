@@ -38,8 +38,8 @@ type EditTool struct {
 	// failure mode: grep shows 3 lines of context, model edits blindly.
 	// Disabled by default in tests / minimal harnesses; enabled via config
 	// in the real app.
-	readTracker            *FileReadTracker
-	requireReadBeforeEdit  bool
+	readTracker           *FileReadTracker
+	requireReadBeforeEdit bool
 }
 
 // NewEditTool creates a new EditTool instance.
@@ -405,6 +405,11 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 				}
 
 				status := fmt.Sprintf("Edited (fuzzy: %s): %s", strategy, filePath)
+				if newStr != "" {
+					if idx := strings.Index(newContent, newStr); idx >= 0 {
+						status += editedRegionSnippet(newContent, 1+strings.Count(newContent[:idx], "\n"))
+					}
+				}
 				return NewSuccessResult(status), nil
 			}
 
@@ -475,6 +480,9 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	} else {
 		status = fmt.Sprintf("Replaced 1 occurrence in %s", filePath)
 	}
+	if idx := strings.Index(content, oldStr); idx >= 0 {
+		status += editedRegionSnippet(newContent, 1+strings.Count(content[:idx], "\n"))
+	}
 
 	// Emit FilePeek
 	EmitFilePeek(ctx, filePath, "Editing", newContent, "edit")
@@ -515,6 +523,7 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 	content := string(data)
 	oldContent := data
 	totalReplacements := 0
+	lastEditLine := 0 // line of the last applied edit, for the result snippet
 
 	// Apply each edit sequentially
 	for i, e := range edits {
@@ -550,6 +559,9 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 			return NewErrorResultWithContext(errMsg, fileCtx), nil
 		}
 
+		if idx := strings.Index(content, oldStr); idx >= 0 {
+			lastEditLine = 1 + strings.Count(content[:idx], "\n")
+		}
 		content = strings.Replace(content, oldStr, newStr, 1)
 		totalReplacements++
 	}
@@ -580,7 +592,11 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 	// Emit FilePeek
 	EmitFilePeek(ctx, filePath, "Editing", content, "edit")
 
-	return NewSuccessResult(fmt.Sprintf("Applied %d edit(s) to %s", totalReplacements, filePath)), nil
+	status := fmt.Sprintf("Applied %d edit(s) to %s", totalReplacements, filePath)
+	if lastEditLine > 0 {
+		status += editedRegionSnippet(content, lastEditLine)
+	}
+	return NewSuccessResult(status), nil
 }
 
 // executeLineEdit replaces a range of lines in a file.
@@ -675,7 +691,9 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 	EmitFilePeek(ctx, filePath, "Editing", newContent, "edit")
 
 	replacedCount := lineEnd - lineStart + 1
-	return NewSuccessResult(fmt.Sprintf("Replaced lines %d-%d (%d lines) in %s", lineStart, lineEnd, replacedCount, filePath)), nil
+	status := fmt.Sprintf("Replaced lines %d-%d (%d lines) in %s", lineStart, lineEnd, replacedCount, filePath)
+	status += editedRegionSnippet(newContent, lineStart)
+	return NewSuccessResult(status), nil
 }
 
 // executeInsertAfterLine inserts new text after the specified line without deleting anything.
@@ -755,7 +773,9 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 	// Emit FilePeek
 	EmitFilePeek(ctx, filePath, "Inserting", newContent, "edit")
 
-	return NewSuccessResult(fmt.Sprintf("Inserted %d lines after line %d in %s", len(newLines), afterLine, filePath)), nil
+	status := fmt.Sprintf("Inserted %d lines after line %d in %s", len(newLines), afterLine, filePath)
+	status += editedRegionSnippet(newContent, afterLine+1)
+	return NewSuccessResult(status), nil
 }
 
 // extractFileContext formats file content with line numbers for error context.
@@ -1213,4 +1233,35 @@ func renderLineContext(lines []string, lineNum, around int) string {
 		fmt.Fprintf(&sb, "%s%d: %s\n", marker, i, lines[i-1])
 	}
 	return sb.String()
+}
+
+// editedRegionSnippet renders the freshly-written region of the file with line
+// numbers, appended to every edit success result. Purpose: kill the
+// read→edit→re-read-to-verify cycle — the classic weak-model loop (the
+// v0.86.7 incident class). With the updated region in the result, a
+// verification read is provably unnecessary, and the model can confirm
+// correctness (or spot a mis-edit) without another tool call.
+func editedRegionSnippet(newContent string, line int) string {
+	const (
+		snippetContextLines = 4
+		snippetMaxLineRunes = 200
+	)
+	lines := strings.Split(newContent, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	line = min(max(line, 1), len(lines))
+	start := max(1, line-snippetContextLines)
+	end := min(len(lines), line+snippetContextLines)
+
+	var b strings.Builder
+	b.WriteString("\n\nUpdated region (already written to disk — no verification read needed):\n")
+	for i := start; i <= end; i++ {
+		text := lines[i-1]
+		if runes := []rune(text); len(runes) > snippetMaxLineRunes {
+			text = string(runes[:snippetMaxLineRunes]) + "…"
+		}
+		fmt.Fprintf(&b, "%5d\t%s\n", i, text)
+	}
+	return b.String()
 }

@@ -469,6 +469,10 @@ func (a *App) Run() error {
 		}
 	}
 
+	// Deliver any disk-restored working memory as per-turn context (it is
+	// NOT part of the system prompt — see roadmap #7 / pushTurnContext).
+	a.pushTurnContext()
+
 	// Start session manager for periodic saves
 	if a.sessionManager != nil {
 		a.sessionManager.Start(a.ctx)
@@ -1725,10 +1729,12 @@ func (a *App) ClearConversation() {
 	a.totalOutputTokens = 0
 
 	// Clear working memory so stale file/command context from the old
-	// conversation doesn't leak into the new system instruction.
+	// conversation doesn't leak into the new one — and push the now-empty
+	// snapshot so the client's per-turn context is cleared too.
 	if a.workingMemory != nil {
 		a.workingMemory.Clear()
 	}
+	a.pushTurnContext()
 
 	// Drain stale rate-limit retry counters so exhausted keys from the
 	// old conversation don't accumulate indefinitely.
@@ -2317,7 +2323,9 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.session.SetProvider(runtimeProviderForConfig(a.config))
 	}
 	if a.promptBuilder != nil {
-		a.promptBuilder.SetProvider(runtimeProviderForConfig(a.config))
+		switchedProvider := runtimeProviderForConfig(a.config)
+		a.promptBuilder.SetProvider(switchedProvider)
+		a.promptBuilder.SetPrefixCachingEnabled(appcontext.ProviderSupportsPrefixCaching(switchedProvider))
 	}
 
 	// Force-evict ALL pooled clients for the incoming provider BEFORE

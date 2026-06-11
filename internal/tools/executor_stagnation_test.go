@@ -54,6 +54,7 @@ func (c *scriptedExecutorClient) WithModel(modelName string) client.Client {
 }
 func (c *scriptedExecutorClient) GetRawClient() any                       { return nil }
 func (c *scriptedExecutorClient) SetSystemInstruction(instruction string) {}
+func (c *scriptedExecutorClient) SetTurnContext(turnContext string)       {}
 func (c *scriptedExecutorClient) SetThinkingBudget(budget int32)          {}
 func (c *scriptedExecutorClient) Close() error                            { return nil }
 

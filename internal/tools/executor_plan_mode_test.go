@@ -165,15 +165,16 @@ func (n *nilClient) SendMessageWithHistory(_ context.Context, _ []*genai.Content
 func (n *nilClient) SendFunctionResponse(_ context.Context, _ []*genai.Content, _ []*genai.FunctionResponse) (*client.StreamingResponse, error) {
 	return nil, nil
 }
-func (n *nilClient) SetTools(_ []*genai.Tool)                   {}
-func (n *nilClient) SetRateLimiter(_ any)                       {}
-func (n *nilClient) GetModel() string                           { return "" }
-func (n *nilClient) SetModel(_ string)                          {}
-func (n *nilClient) WithModel(_ string) client.Client           { return n }
-func (n *nilClient) GetRawClient() any                          { return nil }
-func (n *nilClient) SetSystemInstruction(_ string)              {}
-func (n *nilClient) SetThinkingBudget(_ int32)                  {}
-func (n *nilClient) Close() error                               { return nil }
+func (n *nilClient) SetTools(_ []*genai.Tool)         {}
+func (n *nilClient) SetRateLimiter(_ any)             {}
+func (n *nilClient) GetModel() string                 { return "" }
+func (n *nilClient) SetModel(_ string)                {}
+func (n *nilClient) WithModel(_ string) client.Client { return n }
+func (n *nilClient) GetRawClient() any                { return nil }
+func (n *nilClient) SetSystemInstruction(_ string)    {}
+func (n *nilClient) SetTurnContext(_ string)          {}
+func (n *nilClient) SetThinkingBudget(_ int32)        {}
+func (n *nilClient) Close() error                     { return nil }
 func (n *nilClient) CountTokens(_ context.Context, _ []*genai.Content) (*genai.CountTokensResponse, error) {
 	return &genai.CountTokensResponse{}, nil
 }

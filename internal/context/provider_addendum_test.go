@@ -56,10 +56,32 @@ func TestProviderAddendum_GLMNonEmpty(t *testing.T) {
 }
 
 func TestProviderAddendum_UnknownProvider(t *testing.T) {
-	// minimax, ollama, and unknown providers have no addendum.
-	for _, name := range []string{"minimax", "ollama", "anthropic", "", "random"} {
+	// ollama and unknown providers have no addendum (ollama gets per-model
+	// prompt enhancements via client/model_profiles.go instead).
+	for _, name := range []string{"ollama", "anthropic", "", "random"} {
 		if got := providerAddendum(name); got != "" {
 			t.Errorf("provider %q should have no addendum yet, got %d chars", name, len(got))
+		}
+	}
+}
+
+func TestProviderAddendum_MiniMaxNonEmpty(t *testing.T) {
+	// MiniMax was the only Medium-tier provider running on the bare base
+	// prompt — every other compat provider has operating rules.
+	got := providerAddendum("minimax")
+	if got == "" {
+		t.Fatal("minimax addendum should be non-empty")
+	}
+	for _, needle := range []string{
+		"MiniMax-specific",
+		"Plan:",
+		"Read discipline",
+		"never call read just to verify an edit",
+		"Edit discipline",
+		"Verification discipline",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Errorf("minimax addendum missing %q marker", needle)
 		}
 	}
 }

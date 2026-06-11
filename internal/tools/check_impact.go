@@ -3,7 +3,8 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os/exec"
+	"regexp"
+	"sort"
 	"strings"
 
 	"google.golang.org/genai"
@@ -12,12 +13,18 @@ import (
 // CheckImpactTool analyzes the impact of changing a symbol.
 type CheckImpactTool struct {
 	workDir string
+	// engine is the in-package pure-Go search engine (the grep tool's core).
+	// Shelling out to system grep made the tool dead on hosts without grep
+	// in PATH and flaky around unreadable directories (exit 2); the engine
+	// is dependency-free, gitignore-aware, and skips binaries.
+	engine *GrepTool
 }
 
 // NewCheckImpactTool creates a new CheckImpactTool instance.
 func NewCheckImpactTool(workDir string) *CheckImpactTool {
 	return &CheckImpactTool{
 		workDir: workDir,
+		engine:  NewGrepTool(workDir),
 	}
 }
 
@@ -58,45 +65,34 @@ func (t *CheckImpactTool) Validate(args map[string]any) error {
 func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	symbol, _ := GetString(args, "symbol")
 
-	// 1. Search for usages with grep. Output() keeps stdout (matches) separate
-	// from stderr (warnings) — CombinedOutput would mix permission-denied noise
-	// into the match list AND hide matches behind a non-zero exit.
-	cmd := exec.CommandContext(ctx, "grep", "-r", "--exclude-dir=.git", "-n", symbol, t.workDir)
-	output, err := cmd.Output()
-	var searchWarning string
+	// 1. Search for usages with the in-package pure-Go engine (literal
+	// substring match — QuoteMeta keeps parity with the old `grep -r symbol`
+	// semantics). Engine errors must reach the model rather than masquerade
+	// as "symbol is private or unused": this is a blast-radius tool, and a
+	// false "unused" invites deleting a symbol that actually has callers.
+	files, err := t.engine.getFiles(t.workDir, "")
 	if err != nil {
-		if ctx.Err() != nil {
-			return NewErrorResult(fmt.Sprintf("check_impact: search cancelled for %q: %v", symbol, ctx.Err())), nil
-		}
-		exitErr, _ := err.(*exec.ExitError)
-		stderr := ""
-		if exitErr != nil {
-			stderr = strings.TrimSpace(string(exitErr.Stderr))
-		}
-		switch {
-		case len(strings.TrimSpace(string(output))) > 0:
-			// grep found matches AND failed (exit 2: one unreadable dir or a
-			// dangling symlink under workDir). The matches are real — report
-			// them, but disclose that coverage may be partial. Erroring here
-			// made the tool permanently broken in any repo with one locked
-			// directory (review-confirmed on macOS).
-			searchWarning = stderr
-		case exitErr != nil && exitErr.ExitCode() == 1 && stderr == "":
-			// Benign "no matches" — fall through to the honest zero-usage report.
-		default:
-			// No matches and a real failure (grep missing, bad invocation):
-			// must reach the model rather than masquerade as "symbol is private
-			// or unused" — this is a blast-radius tool, and a false "unused"
-			// invites deleting a symbol that actually has callers.
-			detail := stderr
-			if detail == "" {
-				detail = err.Error()
-			}
-			return NewErrorResult(fmt.Sprintf("check_impact: grep failed for %q: %s", symbol, detail)), nil
+		return NewErrorResult(fmt.Sprintf("check_impact: search failed for %q: %v", symbol, err)), nil
+	}
+	re, err := regexp.Compile(regexp.QuoteMeta(symbol))
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("check_impact: bad symbol %q: %v", symbol, err)), nil
+	}
+	found := t.engine.searchParallel(ctx, files, re, 0, nil)
+	if ctx.Err() != nil {
+		// A cancelled search returns PARTIAL matches — reporting them as the
+		// blast radius would be a silent false "barely used".
+		return NewErrorResult(fmt.Sprintf("check_impact: search cancelled for %q: %v", symbol, ctx.Err())), nil
+	}
+	// Deterministic report order: searchParallel collects from goroutines.
+	sort.Slice(found, func(i, j int) bool { return found[i].path < found[j].path })
+
+	var lines []string
+	for _, fm := range found {
+		for _, m := range fm.matches {
+			lines = append(lines, fmt.Sprintf("%s:%d:%s", fm.path, m.lineNum, m.line))
 		}
 	}
-
-	lines := strings.Split(string(output), "\n")
 
 	var report strings.Builder
 	fmt.Fprintf(&report, "# Impact Report for symbol: %s\n\n", symbol)
@@ -142,10 +138,6 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 			}
 			report.WriteString("\n")
 		}
-	}
-
-	if searchWarning != "" {
-		fmt.Fprintf(&report, "⚠️ Search coverage may be partial — grep reported:\n%s\n\n", searchWarning)
 	}
 
 	if report.Len() < 100 { // Just the header

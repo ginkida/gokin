@@ -24,15 +24,21 @@ func TestShouldEnforceKimiToolBudget_DisabledWhenZero(t *testing.T) {
 	}
 }
 
-func TestShouldEnforceKimiToolBudget_OnlyKimiFamily(t *testing.T) {
+func TestShouldEnforceKimiToolBudget_BudgetedFamiliesOnly(t *testing.T) {
 	e := &Executor{kimiToolBudget: 10}
-	// glm-5.x is Strong tier, not kimi — budget must not apply.
-	if e.shouldEnforceKimiToolBudget("glm-5.1", 100) {
-		t.Errorf("budget applied to non-Kimi model")
+	// glm/deepseek/ollama are not budget-capped families.
+	for _, model := range []string{"glm-5.1", "deepseek-v4-pro", "llama3"} {
+		if e.shouldEnforceKimiToolBudget(model, 100) {
+			t.Errorf("budget applied to non-budgeted model %s", model)
+		}
 	}
-	// Minimax same story.
-	if e.shouldEnforceKimiToolBudget("MiniMax-M2.7", 100) {
-		t.Errorf("budget applied to MiniMax")
+	// MiniMax shares Kimi's runaway failure mode — the config comment always
+	// promised the cap for both; the check used to match only Kimi.
+	if !e.shouldEnforceKimiToolBudget("MiniMax-M2.7", 100) {
+		t.Errorf("budget must apply to MiniMax family")
+	}
+	if e.shouldEnforceKimiToolBudget("MiniMax-M2.7", 5) {
+		t.Errorf("MiniMax under budget must not fire")
 	}
 }
 
@@ -270,4 +276,3 @@ func buildKimiBudgetReadStream(id, filePath string) *client.StreamingResponse {
 		FinishReason: genai.FinishReasonStop,
 	})
 }
-

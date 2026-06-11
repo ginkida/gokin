@@ -71,11 +71,12 @@ func TestCheckImpactCancelledCtxIsHonestError(t *testing.T) {
 	}
 }
 
-// TestCheckImpactPartialFailureStillReports pins the exit-2-with-matches fix:
-// one unreadable directory under workDir makes grep exit 2 while still printing
-// every real match — the matches must become a report (with a coverage warning),
-// not an error, or the blast-radius tool is permanently broken in any repo with
-// a single locked directory (review-confirmed empirically on macOS).
+// TestCheckImpactPartialFailureStillReports pins the unreadable-directory
+// behavior: one locked directory under workDir must NOT break the tool — the
+// report over the readable files is still produced. (History: the original
+// system-grep implementation exited 2 here and an early guard turned that
+// into an error on EVERY call; the pure-Go engine skips unreadable entries
+// like the grep tool itself does.)
 func TestCheckImpactPartialFailureStillReports(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod 000 does not block reads")
@@ -102,12 +103,53 @@ func TestCheckImpactPartialFailureStillReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !res.Success {
-		t.Fatalf("matches + partial grep failure must still produce a report, got error: %s", res.Error)
+		t.Fatalf("a locked subdirectory must not break the report, got error: %s", res.Error)
 	}
 	if !strings.Contains(res.Content, "TargetSym") {
 		t.Fatalf("expected TargetSym usages in report, got: %s", res.Content)
 	}
-	if !strings.Contains(res.Content, "coverage may be partial") {
-		t.Fatalf("expected partial-coverage warning, got: %s", res.Content)
+}
+
+// TestCheckImpactNoSystemGrepNeeded pins the pure-Go engine migration: the
+// tool must work with an empty PATH (no grep binary reachable) — on Windows
+// or minimal containers the subprocess version was permanently broken.
+func TestCheckImpactNoSystemGrepNeeded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package p\n\nfunc Widget() {}\nvar _ = Widget\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+
+	tool := NewCheckImpactTool(dir)
+	res, err := tool.Execute(context.Background(), map[string]any{"symbol": "Widget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success || !strings.Contains(res.Content, "Widget") {
+		t.Fatalf("engine search must not depend on PATH, got success=%v content=%s err=%s", res.Success, res.Content, res.Error)
+	}
+}
+
+// TestCheckImpactDeterministicOrder — searchParallel collects from goroutines;
+// the report must sort by path so identical calls render identically.
+func TestCheckImpactDeterministicOrder(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{"z.go", "a.go", "m.go"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("package p\nvar _ = Sym\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tool := NewCheckImpactTool(dir)
+	first := ""
+	for i := range 5 {
+		res, err := tool.Execute(context.Background(), map[string]any{"symbol": "Sym"})
+		if err != nil || !res.Success {
+			t.Fatalf("run %d failed: %v %s", i, err, res.Error)
+		}
+		if first == "" {
+			first = res.Content
+		} else if res.Content != first {
+			t.Fatalf("run %d produced different report ordering", i)
+		}
 	}
 }

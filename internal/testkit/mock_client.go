@@ -27,6 +27,7 @@ type MockClient struct {
 	model       string
 	tools       []*genai.Tool
 	systemInstr string
+	turnContext string
 	thinkBudget int32
 	rawClient   any
 	rateLimiter any
@@ -310,6 +311,20 @@ func (m *MockClient) SetSystemInstruction(instruction string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.systemInstr = instruction
+}
+
+// SetTurnContext implements client.Client; inspect via TurnContext().
+func (m *MockClient) SetTurnContext(turnContext string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.turnContext = turnContext
+}
+
+// TurnContext returns the last value passed to SetTurnContext.
+func (m *MockClient) TurnContext() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.turnContext
 }
 
 // SetThinkingBudget implements client.Client.

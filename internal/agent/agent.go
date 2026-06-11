@@ -1775,6 +1775,8 @@ func (a *Agent) buildWeakModelGuidance() string {
 - Unknown tool names trigger a hint with the closest real name — use it, don't invent names
 - For parallel-safe reads (grep/read/glob): batch them in one turn
 - For writes (edit/write/bash): go one at a time and verify each result before the next
+- Edit results SHOW the updated region of the file — NEVER call read on a file just to verify an edit; the result already proves what's on disk. Verify by building/testing, not by re-reading
+- Content you already read is still in this conversation — re-read a file ONLY if a tool reported changing it
 `
 	if strings.HasPrefix(strings.ToLower(a.Model), "glm") {
 		base += `
@@ -3095,7 +3097,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				// Exact-match loop: same tool + same (normalized) args > 3 times
 				if exactCount > 3 && !intervened {
 					loopDetectedThisTurn = true
-					logging.Warn("mental loop detected (exact)", "tool", fc.Name, "count", exactCount)
+					logging.Warn("mental loop detected (exact)", "tool", fc.Name, "count", exactCount, "model", a.Model)
 					a.interveneOnLoop(
 						fmt.Sprintf("\n[Loop detected: %s called %d times with same args — intervening]\n", fc.Name, exactCount),
 						func() string { return a.buildLoopRecoveryIntervention(fc.Name, fc.Args, exactCount) },
@@ -3109,7 +3111,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				// higher ceiling so reading many distinct files isn't a false loop.
 				if broadCount > a.broadLoopThreshold(fc.Name) && !intervened {
 					loopDetectedThisTurn = true
-					logging.Warn("broad loop detected", "tool", fc.Name, "total_calls", broadCount)
+					logging.Warn("broad loop detected", "tool", fc.Name, "total_calls", broadCount, "model", a.Model)
 					a.interveneOnLoop(
 						fmt.Sprintf("\n[Broad loop: %s used %d times — try a different approach]\n", fc.Name, broadCount),
 						func() string {
@@ -3134,7 +3136,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				// branch + stagnation-recovery contract.
 				if trackCoverage && coverageRedundancy >= a.redundancyBudget(fc.Name) && !intervened {
 					loopDetectedThisTurn = true
-					logging.Warn("re-coverage loop detected", "tool", fc.Name, "redundant_revisits", coverageRedundancy)
+					logging.Warn("re-coverage loop detected", "tool", fc.Name, "redundant_revisits", coverageRedundancy, "model", a.Model)
 					var coverageAttempt int
 					a.interveneOnLoop(
 						fmt.Sprintf("\n[Re-coverage loop: %s keeps revisiting the same ground — narrowing approach]\n", fc.Name),

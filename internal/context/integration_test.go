@@ -244,7 +244,13 @@ func TestSmoke_PromptBuilderIncludesWorkingMemory(t *testing.T) {
 		}
 	}
 
-	assertWorkingMemoryInPrompt("Build", pb.Build())
+	// Roadmap #7: the MAIN prompt (cached prefix) must NOT carry working
+	// memory — it travels as per-turn context (client.SetTurnContext). The
+	// plan-execution and sub-agent prompts still inject it: they are
+	// point-in-time snapshots that never mutate mid-run, so it's free there.
+	if prompt := pb.Build(); strings.Contains(prompt, "# Working Memory") {
+		t.Fatalf("Build must NOT include working memory (cached prefix):\n%s", prompt)
+	}
 	assertWorkingMemoryInPrompt("BuildPlanExecutionPrompt", pb.BuildPlanExecutionPrompt("Execute", "Run the approved step.", nil))
 	assertWorkingMemoryInPrompt("BuildSubAgentPrompt", pb.BuildSubAgentPrompt())
 }

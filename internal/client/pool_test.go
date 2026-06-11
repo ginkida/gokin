@@ -17,6 +17,7 @@ type fakeClient struct {
 func (f *fakeClient) Close() error                  { f.closed = true; return nil }
 func (f *fakeClient) SetTools(_ []*genai.Tool)      {}
 func (f *fakeClient) SetSystemInstruction(_ string) {}
+func (f *fakeClient) SetTurnContext(_ string)       {}
 func (f *fakeClient) SetThinkingBudget(_ int32)     {}
 func (f *fakeClient) SetRateLimiter(_ interface{})  {}
 func (f *fakeClient) GetModel() string              { return f.id }

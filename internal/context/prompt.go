@@ -323,9 +323,12 @@ type PromptBuilder struct {
 	detectedContext string // Auto-detected project context (frameworks, docs, etc.)
 	toolHints       string // Tool usage pattern hints
 	lastMessage     string // Last user message for conditional prompt injection
-	provider        string // Active provider family ("kimi", "glm", ...) for addenda
-	pinnedContent   string // User-pinned focus block, injected near the end of the prompt
-	planMode        bool   // Claude Code-style plan mode: read-only phase until plan approved
+	// prefixCachingEnabled — the active provider honours prompt caching;
+	// disables question-only trimming so the prefix stays byte-stable.
+	prefixCachingEnabled bool
+	provider             string // Active provider family ("kimi", "glm", ...) for addenda
+	pinnedContent        string // User-pinned focus block, injected near the end of the prompt
+	planMode             bool   // Claude Code-style plan mode: read-only phase until plan approved
 
 	// Prompt caching: avoids rebuilding when inputs haven't changed
 	cachedPrompt string
@@ -407,10 +410,51 @@ func (b *PromptBuilder) SetToolHints(hints string) {
 }
 
 // SetLastMessage sets the last user message for conditional prompt injection.
-// Used to skip planning protocol for simple question-only messages.
+// Used to skip planning protocol for simple question-only messages — but ONLY
+// on non-caching providers: it dirties the prompt only when the derived
+// question/action classification actually flips (the message text itself
+// never reaches Build output), and not at all when prefix caching is enabled
+// (Build ignores the classification there — see SetPrefixCachingEnabled).
 func (b *PromptBuilder) SetLastMessage(msg string) {
-	if b.lastMessage != msg {
-		b.lastMessage = msg
+	if b.lastMessage == msg {
+		return
+	}
+	wasQuestion := b.isQuestionOnly()
+	b.lastMessage = msg
+	if b.prefixCachingEnabled {
+		return
+	}
+	if b.isQuestionOnly() != wasQuestion {
+		b.promptDirty = true
+	}
+}
+
+// providerSupportsPrefixCaching mirrors client/anthropic.go
+// supportsPromptCaching by provider family — keep the two in sync. GLM
+// treats cache_control as a silent no-op and Ollama has no prompt caching.
+var providerSupportsPrefixCaching = map[string]bool{
+	"anthropic": true,
+	"kimi":      true,
+	"deepseek":  true,
+	"minimax":   true,
+}
+
+// ProviderSupportsPrefixCaching reports whether the provider family honours
+// Anthropic-style prompt caching (callers: app builder wiring).
+func ProviderSupportsPrefixCaching(provider string) bool {
+	return providerSupportsPrefixCaching[provider]
+}
+
+// SetPrefixCachingEnabled records whether the active provider honours prompt
+// caching. When it does, the question-only prompt trimming is DISABLED:
+// flipping ~6.5K chars (planning protocol + detected context + tool hints)
+// in and out of the system block busts the cached prefix — re-billing the
+// whole system+tools block — which costs far more than the trim saves. A
+// byte-stable prefix wins. Without caching (GLM/Ollama), trimming still
+// saves real tokens on every question-only turn.
+func (b *PromptBuilder) SetPrefixCachingEnabled(enabled bool) {
+	if b.prefixCachingEnabled != enabled {
+		b.prefixCachingEnabled = enabled
 		b.promptDirty = true
 	}
 }
@@ -503,19 +547,19 @@ func (b *PromptBuilder) Build() string {
 		}
 	}
 
-	// Add session memory (auto-extracted conversation summary)
-	if b.sessionMemory != nil {
-		if smContent := b.sessionMemory.GetContent(); smContent != "" {
-			builder.WriteString("\n\n")
-			builder.WriteString(smContent)
-		}
-	}
-	if b.workingMemory != nil {
-		if wmContent := b.workingMemory.GetContent(); wmContent != "" {
-			builder.WriteString("\n\n")
-			builder.WriteString(wmContent)
-		}
-	}
+	// NOTE: session memory is deliberately NOT in this prompt either — it
+	// mutates every ~5K tokens and busted the cached prefix on each update.
+	// Like working memory below, it travels via client.SetTurnContext
+	// (combined in app.turnContextContent). Sub-agent/plan builders still
+	// inject it (point-in-time snapshots).
+	// NOTE: working memory is deliberately NOT in this prompt (roadmap #7).
+	// It mutates every turn, and this block is the CACHED system prefix —
+	// injecting it here re-billed the whole system+tools prefix per turn on
+	// caching providers. It is delivered via client.SetTurnContext instead
+	// (appended to the latest user message at request-build time). The
+	// sub-agent prompt builders below still inject it: a sub-agent's prompt
+	// is a point-in-time snapshot that never mutates mid-run, so it costs
+	// nothing there. Pinned by TestBuildExcludesWorkingMemory.
 
 	// Add working directory
 	fmt.Fprintf(&builder, "\n\nThe user's working directory is: %s", b.workDir)
@@ -525,10 +569,11 @@ func (b *PromptBuilder) Build() string {
 		fmt.Fprintf(&builder, "\nProject name: %s", b.projectInfo.Name)
 	}
 
-	// Smart context injection: skip heavy sections for simple questions.
-	// Questions only need base prompt + project instructions + memory.
-	// Action-oriented tasks get the full prompt with planning, tool hints, detected context.
-	questionOnly := b.isQuestionOnly()
+	// Smart context injection: skip heavy sections for simple questions —
+	// ONLY on non-caching providers. With prefix caching the trim is a net
+	// loss: each question↔action flip re-bills the whole cached prefix
+	// (see SetPrefixCachingEnabled).
+	questionOnly := !b.prefixCachingEnabled && b.isQuestionOnly()
 
 	// Inject auto-detected project context (skip for questions — saves ~2K chars)
 	if b.detectedContext != "" && !questionOnly {
@@ -606,6 +651,8 @@ func providerAddendum(provider string) string {
 		return kimiOperatingRules
 	case "deepseek":
 		return deepseekOperatingRules
+	case "minimax":
+		return minimaxOperatingRules
 	}
 	return ""
 }
@@ -627,6 +674,7 @@ Read discipline:
 - Read a file before editing it. Do not edit from grep snippets alone.
 - Batch independent Reads in parallel. Do not serialise Reads that don't depend on each other.
 - Do not re-read a file already loaded this session unless you changed it.
+- Edit results include the updated region — never Read a file just to verify an edit; verify by building/testing instead.
 
 Edit discipline:
 - After each Edit, check for delta-check errors in the tool response. Fix those before the next Edit.
@@ -651,6 +699,7 @@ Project-map discipline:
 Read discipline:
 - You MUST Read a file before Edit. The edit tool blocks edits on unread files (read-before-edit invariant). Don't edit from grep snippets.
 - Do not Re-read a file already loaded this session unless you changed it. If unsure, consult Working Memory.
+- Edit results include the updated region — never Read a file just to verify an edit; verify by building/testing instead.
 - Prefer: grep → targeted Read (with offset/limit). Avoid: glob → bulk Read of whole directory.
 - Batch independent Reads in parallel in one turn. Never serialise Reads that don't depend on each other.
 
@@ -697,6 +746,7 @@ Project-map discipline:
 Read discipline:
 - You MUST Read a file before Edit. The edit tool blocks edits on unread files (read-before-edit invariant). Don't edit from grep snippets.
 - Do not Re-read a file already loaded this session unless it changed.
+- Edit results include the updated region — never Read a file just to verify an edit; verify by building/testing instead.
 - Prefer: grep → targeted Read (with offset/limit). Avoid: glob → bulk Read of whole directory.
 - Batch independent Reads in parallel in one turn.
 
@@ -715,6 +765,34 @@ Reasoning discipline:
 Answer discipline:
 - Keep the final answer concise: ≤4 short paragraphs. Cite changed files by path and mention verification. Don't paste full diffs — the runtime appends an evidence footer automatically.
 - Tool budget is capped per turn. When you see "Tool budget guard" in a tool response, STOP calling tools and write the final answer from what you already know.`
+
+// minimaxOperatingRules — MiniMax-M2.7 was the only Medium-tier provider with
+// NO addendum (glm/kimi/deepseek all have one), so it ran on the bare base
+// prompt. Rules are a compact subset of the Kimi set: MiniMax's observed
+// failure modes are the same class (editing from grep snippets, verify-read
+// loops after edits, stacking edits on a broken tree), and a shorter addendum
+// fits its smaller effective attention better than the full Kimi text.
+const minimaxOperatingRules = `## Operating rules (MiniMax-specific)
+
+Plan-then-act: before the first tool call of a turn, write a single-line plan. Format: "Plan: <3-7 word objective>". Skip for trivial one-tool turns.
+
+Read discipline:
+- Read a file before editing it — never edit from grep snippets alone.
+- Do not re-read a file already loaded this session unless a tool reported changing it.
+- Edit results include the updated region of the file — never call read just to verify an edit. Verify by building/testing instead.
+- Batch independent reads (grep/read/glob) in parallel in one turn.
+
+Edit discipline:
+- In old_string, quote 3-5 lines of exact surrounding text so the match is unambiguous.
+- After each edit, check the tool response for build/typecheck errors and fix them BEFORE the next edit. Do not stack edits on a broken tree.
+- Mutations (edit/write/delete) are sequential — never batch them in parallel.
+
+Verification discipline:
+- After code changes, run the narrowest check (targeted build/test) before claiming done. Only say "verified" when a command actually ran this turn.
+
+Answer discipline:
+- Keep the final answer concise: ≤4 short paragraphs, cite changed files by path.
+- When a tool response says a budget or guard was hit, STOP calling tools and answer from what you already know.`
 
 // buildProjectSection builds the project-specific section.
 func (b *PromptBuilder) buildProjectSection() string {

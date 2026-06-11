@@ -2687,17 +2687,24 @@ func shouldAttemptStagnationRecovery(calls []*genai.FunctionCall, attempts int) 
 	return attempts < budget
 }
 
+// toolBudgetFamilies are the model families subject to the per-turn tool cap.
+// Kimi and MiniMax share the runaway failure mode the budget guards against
+// (the config comment always promised both; the check only matched Kimi —
+// fixed post-v0.87.0). The YAML key stays `kimi_tool_budget` for compat.
+var toolBudgetFamilies = map[string]bool{"kimi": true, "minimax": true}
+
 // shouldEnforceKimiToolBudget reports whether the per-turn tool budget cap
-// has been reached for the currently active Kimi-family model. Non-Kimi
-// models and a disabled budget (0) always return false. `consumed` is the
-// count of tool calls already executed in this turn before the current
-// batch — callers pass len(toolsUsed)-len(newCalls) so the cap applies to
-// the NEXT batch rather than trimming an in-flight one.
+// has been reached for the currently active budget-capped model family
+// (Kimi, MiniMax — see toolBudgetFamilies). Other models and a disabled
+// budget (0) always return false. `consumed` is the count of tool calls
+// already executed in this turn before the current batch — callers pass
+// len(toolsUsed)-len(newCalls) so the cap applies to the NEXT batch rather
+// than trimming an in-flight one.
 func (e *Executor) shouldEnforceKimiToolBudget(model string, consumed int) bool {
 	if e == nil || e.kimiToolBudget <= 0 {
 		return false
 	}
-	if client.GetModelProfile(model).Family != "kimi" {
+	if !toolBudgetFamilies[client.GetModelProfile(model).Family] {
 		return false
 	}
 	return consumed >= e.kimiToolBudget
@@ -2729,7 +2736,7 @@ func (e *Executor) buildKimiToolBudgetExhaustedResults(calls []*genai.FunctionCa
 
 func buildKimiToolBudgetMessage(budget int) string {
 	return fmt.Sprintf(
-		"Tool budget guard: this turn already issued %d tool calls — the configured per-turn Kimi cap. Stop calling tools and write the final answer now, citing what you've already found. Do not re-request the same tools.",
+		"Tool budget guard: this turn already issued %d tool calls — the configured per-turn cap for this model. Stop calling tools and write the final answer now, citing what you've already found. Do not re-request the same tools.",
 		budget,
 	)
 }
