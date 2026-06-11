@@ -24,7 +24,7 @@ func TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup(t *testing.T
 	m.lastToolOutputIndex = 0
 	m.activityFeed.recentLog = []string{"Reading internal/ui/tui.go -> 240 lines"}
 
-	view := stripAnsi(m.renderLiveActivityCard())
+	view := stripAnsi(m.renderLiveActivityCard(false))
 
 	// Card must surface the current action + a recent-log echo.
 	for _, want := range []string{
@@ -67,7 +67,7 @@ func TestRenderLiveActivityCard_ShowsLiveActivityHintForHiddenFeed(t *testing.T)
 	}
 	m.activityFeed.visible = false
 
-	view := stripAnsi(m.renderLiveActivityCard())
+	view := stripAnsi(m.renderLiveActivityCard(false))
 	// Compact form surfaces parallel work in the Next row.
 	if !strings.Contains(view, "in flight") && !strings.Contains(view, "parallel") {
 		t.Fatalf("expected parallel tool signal (in flight / parallel), got:\n%s", view)
@@ -82,7 +82,7 @@ func TestRenderLiveActivityCard_HumanizesProjectToolNames(t *testing.T) {
 	m.currentToolInfo = "go internal/ui filter=TestToolArgs"
 	m.toolStartTime = time.Now().Add(-2 * time.Second)
 
-	view := stripAnsi(m.renderLiveActivityCard())
+	view := stripAnsi(m.renderLiveActivityCard(false))
 	if !strings.Contains(view, "Run Tests") {
 		t.Fatalf("live activity should humanize run_tests:\n%s", view)
 	}
@@ -105,9 +105,12 @@ func TestRenderLiveActivityCard_CollapsesWhenFeedOpen(t *testing.T) {
 	m.runtimeStatus.Provider = "kimi"
 	m.lastToolOutputIndex = 0
 	m.activityFeed.recentLog = []string{"Reading internal/ui/tui.go -> 240 lines"}
-	m.activityFeed.visible = true // <-- the key toggle
+	m.activityFeed.visible = true
 
-	view := stripAnsi(m.renderLiveActivityCard())
+	// feedRendered=true is the key toggle: the card collapses when the feed
+	// panel is ACTUALLY drawn this frame (View computes this - IsVisible
+	// alone no longer implies rendered, the agent tree can suppress it).
+	view := stripAnsi(m.renderLiveActivityCard(true))
 
 	// Must still show the current action.
 	if !strings.Contains(view, "internal/ui/tui.go") {
@@ -221,7 +224,7 @@ func TestRenderLiveActivityCard_ShowsActiveTodoStep(t *testing.T) {
 		"[ ] Update docs",
 	}
 
-	view := stripAnsi(m.renderLiveActivityCard())
+	view := stripAnsi(m.renderLiveActivityCard(false))
 
 	// The in-progress step must be surfaced with a position indicator.
 	if !strings.Contains(view, "Step 3/5") {
@@ -247,7 +250,7 @@ func TestRenderLiveActivityCard_TodoFallsBackToNextPending(t *testing.T) {
 		"[ ] Pending second",
 	}
 
-	view := stripAnsi(m.renderLiveActivityCard())
+	view := stripAnsi(m.renderLiveActivityCard(false))
 	if !strings.Contains(view, "Step 3/4") {
 		t.Errorf("expected next pending step (3/4), got:\n%s", view)
 	}
@@ -268,7 +271,7 @@ func TestRenderLiveActivityCard_TodoHiddenWhenAllDone(t *testing.T) {
 		"[x] Done one",
 		"[x] Done two",
 	}
-	view := stripAnsi(m.renderLiveActivityCard())
+	view := stripAnsi(m.renderLiveActivityCard(false))
 	if strings.Contains(view, "Step ") {
 		t.Errorf("all-done plan should not show a Step row:\n%s", view)
 	}
@@ -282,7 +285,7 @@ func TestRenderLiveActivityCard_TodoAbsentWhenNoItems(t *testing.T) {
 	m.state = StateStreaming
 	m.currentResponseBuf.WriteString("no plan yet")
 	// todoItems intentionally empty
-	view := stripAnsi(m.renderLiveActivityCard())
+	view := stripAnsi(m.renderLiveActivityCard(false))
 	if strings.Contains(view, "Step ") {
 		t.Errorf("no-todos state should not show a Step row:\n%s", view)
 	}

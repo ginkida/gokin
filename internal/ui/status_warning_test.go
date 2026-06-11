@@ -71,7 +71,7 @@ func TestStatusInfoPhaseLabelUpdatesLiveActivityWithoutToast(t *testing.T) {
 		t.Fatalf("silent phase update should not create toast, count = %d", got)
 	}
 
-	view := stripAnsi(m.renderLiveActivityCard())
+	view := stripAnsi(m.renderLiveActivityCard(false))
 	if !strings.Contains(view, "Quality gate 1/2: go vet .") {
 		t.Fatalf("live activity missing phase label:\n%s", view)
 	}

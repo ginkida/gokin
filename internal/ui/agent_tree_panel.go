@@ -31,6 +31,9 @@ type AgentTreeNode struct {
 // AgentTreePanel displays a live tree of coordinated agent tasks.
 type AgentTreePanel struct {
 	visible bool
+	// allDoneAt is when every node reached a terminal state; zero while any
+	// task is still live. Drives the linger-then-hide in View.
+	allDoneAt time.Time
 	nodes   []AgentTreeNode
 	frame   int // spinner animation frame
 	styles  *Styles
@@ -46,6 +49,18 @@ func NewAgentTreePanel(styles *Styles) *AgentTreePanel {
 	}
 }
 
+// agentTreeLingerAfterDone is how long the panel stays on screen after every
+// task reaches a terminal state — long enough to read the final ✓/✗ column,
+// short enough that a finished task tree doesn't pin itself to the layout
+// for the rest of the session (the pre-fix behavior: auto-show on ≥2 tasks
+// with an auto-hide that was never implemented).
+const agentTreeLingerAfterDone = 5 * time.Second
+
+// agentTreeFullRender is the largest tree that still renders every node.
+// Above it the panel goes compact: terminal nodes collapse into the footer
+// summary, queued nodes render up to this budget.
+const agentTreeFullRender = 8
+
 // UpdateTree replaces the entire tree snapshot.
 func (p *AgentTreePanel) UpdateTree(nodes []AgentTreeNode) {
 	p.mu.Lock()
@@ -57,7 +72,8 @@ func (p *AgentTreePanel) UpdateTree(nodes []AgentTreeNode) {
 		p.visible = true
 	}
 
-	// Auto-hide when all tasks are terminal
+	// Auto-hide when all tasks are terminal: stamp the moment; View keeps
+	// rendering for the linger window, then collapses to nothing.
 	allDone := len(nodes) > 0
 	for _, n := range nodes {
 		if n.Status != "completed" && n.Status != "failed" && n.Status != "skipped" {
@@ -65,8 +81,12 @@ func (p *AgentTreePanel) UpdateTree(nodes []AgentTreeNode) {
 			break
 		}
 	}
-	if allDone && len(nodes) > 0 {
-		// Keep visible briefly so user can see final state — caller can hide later
+	if allDone {
+		if p.allDoneAt.IsZero() {
+			p.allDoneAt = time.Now()
+		}
+	} else {
+		p.allDoneAt = time.Time{}
 	}
 }
 
@@ -74,6 +94,11 @@ func (p *AgentTreePanel) UpdateTree(nodes []AgentTreeNode) {
 func (p *AgentTreePanel) Toggle() {
 	p.mu.Lock()
 	p.visible = !p.visible
+	if p.visible {
+		// Explicit user intent overrides the auto-hide: keep a finished tree
+		// on screen until the user toggles it off or a new tree arrives.
+		p.allDoneAt = time.Time{}
+	}
 	p.mu.Unlock()
 }
 
@@ -113,6 +138,11 @@ func (p *AgentTreePanel) View(width int) string {
 	if !p.visible || len(p.nodes) == 0 {
 		return ""
 	}
+	// Linger expired after all tasks finished — render nothing. The next
+	// UpdateTree with live tasks clears the stamp and the panel returns.
+	if !p.allDoneAt.IsZero() && time.Since(p.allDoneAt) > agentTreeLingerAfterDone {
+		return ""
+	}
 
 	var builder strings.Builder
 
@@ -142,8 +172,33 @@ func (p *AgentTreePanel) View(width int) string {
 	builder.WriteString(headerStyle.Render("⬡ Agent Orchestrator"))
 	builder.WriteString("\n")
 
+	// Long trees render in compact mode: terminal nodes (✓/⊘) collapse into
+	// the footer summary and queued nodes render up to a budget — 10
+	// parallel tasks otherwise pin a 12+ line box while they run. Running
+	// and failed nodes ALWAYS render; thought/reflection sublines are
+	// suppressed for non-running nodes in compact mode.
+	compact := len(p.nodes) > agentTreeFullRender
+	doneHidden := 0
+	queuedHidden := 0
+	rendered := 0
+
 	// Render tree nodes
 	for _, node := range p.nodes {
+		if compact {
+			switch node.Status {
+			case "completed", "skipped":
+				doneHidden++
+				continue
+			case "running", "failed":
+				// always rendered
+			default: // pending, ready, blocked
+				if rendered >= agentTreeFullRender {
+					queuedHidden++
+					continue
+				}
+			}
+		}
+		rendered++
 		var line strings.Builder
 
 		// Indentation with tree connectors
@@ -292,6 +347,11 @@ func (p *AgentTreePanel) View(width int) string {
 
 	// Summary footer
 	summary := p.buildSummary()
+	if hidden := doneHidden + queuedHidden; hidden > 0 {
+		// Make the compaction visible — without this a user counting rows
+		// would think tasks vanished. Totals live in the summary below.
+		summary += fmt.Sprintf(" · %d row(s) folded", hidden)
+	}
 	if summary != "" {
 		builder.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-4))))
 		builder.WriteString("\n")

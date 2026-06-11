@@ -17,6 +17,11 @@ const (
 	maxActivityEntries = 10
 	// Maximum recent log messages
 	maxRecentLog = 5
+
+	// maxRecentLogRendered caps how many recent-log lines the PANEL renders.
+	// The buffer itself stays at maxRecentLog — the live activity card's
+	// Snapshot consumers read from it independently.
+	maxRecentLogRendered = 3
 )
 
 // SubAgentState tracks the state of a sub-agent.
@@ -408,8 +413,25 @@ func (p *ActivityFeedPanel) View(width int) string {
 
 	timestampStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	// Render active entries (most recent first)
-	for i := len(p.entries) - 1; i >= 0 && i >= len(p.entries)-5; i-- {
+	// Pick entries to render, most recent first: every running entry (the
+	// actual signal), plus at most 2 recently-finished for context. The old
+	// blanket "last 5" often rendered 5 stale completed rows — height with
+	// no information. Hard cap stays 5.
+	renderIdx := make([]int, 0, 5)
+	finished := 0
+	for i := len(p.entries) - 1; i >= 0 && len(renderIdx) < 5; i-- {
+		switch p.entries[i].Status {
+		case ActivityRunning, ActivityPending:
+			renderIdx = append(renderIdx, i)
+		default:
+			if finished < 2 {
+				renderIdx = append(renderIdx, i)
+				finished++
+			}
+		}
+	}
+
+	for _, i := range renderIdx {
 		entry := p.entries[i]
 		var line strings.Builder
 
@@ -518,13 +540,9 @@ func (p *ActivityFeedPanel) View(width int) string {
 		builder.WriteString("\n")
 	}
 
-	// Metrics summary line
-	if metricsLine := p.buildMetricsSummary(); metricsLine != "" {
-		builder.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-4))))
-		builder.WriteString("\n")
-		builder.WriteString(dimStyle.Render("  " + metricsLine))
-		builder.WriteString("\n")
-	}
+	// NOTE: the metrics summary used to render AGAIN here as a separator +
+	// body line — pure duplication of the header's "Live Activity · summary"
+	// title (2 lines of height for zero new information). Removed.
 
 	// Separator if we have recent log
 	if len(p.recentLog) > 0 && len(p.entries) > 0 {
@@ -532,8 +550,11 @@ func (p *ActivityFeedPanel) View(width int) string {
 		builder.WriteString("\n")
 	}
 
-	// Recent log (last few messages)
-	for _, msg := range p.recentLog {
+	// Recent log: render only the last few messages. The buffer keeps
+	// maxRecentLog entries for the live-activity card's snapshot; the panel
+	// shows a render-capped tail so log history can't dominate the height.
+	logStart := max(0, len(p.recentLog)-maxRecentLogRendered)
+	for _, msg := range p.recentLog[logStart:] {
 		builder.WriteString(dimStyle.Render("  › " + msg))
 		builder.WriteString("\n")
 	}

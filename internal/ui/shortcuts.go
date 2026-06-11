@@ -66,6 +66,7 @@ func DefaultShortcuts() []ShortcutCategory {
 				{Keys: []string{"Ctrl", "O"}, Description: "Toggle activity feed panel"},
 				{Keys: []string{"Ctrl", "A"}, Description: "Toggle agent tree panel"},
 				{Keys: []string{"Ctrl", "T"}, Description: "Toggle todo list panel"},
+				{Keys: []string{"Ctrl", "X"}, Description: "Expand / collapse plan progress panel"},
 				{Keys: []string{"Ctrl", "Shift", "C"}, Description: "Toggle compact (small viewport) mode"},
 				{Keys: []string{"Ctrl", "L"}, Description: "Clear the output screen"},
 				{Keys: []string{"Option", "C"}, Description: "Copy last AI response"},

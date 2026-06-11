@@ -35,6 +35,11 @@ type outputState struct {
 	frozen         bool // When true, viewport won't auto-scroll to bottom
 	thinkingActive bool // True while streaming thinking content
 
+	// pendingCodeStartLine is the content line where the currently-streaming
+	// code block opened — the registry entry is recorded at BlockCodeEnd but
+	// must point at the block's start.
+	pendingCodeStartLine int
+
 	// Smooth scroll state: instead of jumping to bottom instantly,
 	// we scroll a few lines per frame toward the target.
 	scrollTarget int  // Target YOffset (usually total lines - viewport height)
@@ -145,23 +150,33 @@ func (m *OutputModel) AppendTextStream(text string) {
 	blocks := m.streamParser.Feed(text)
 
 	m.state.mu.Lock()
-	for _, block := range blocks {
-		if block.IsCode {
-			// Register code block for later actions
-			if m.state.codeBlocks != nil {
-				lineNum := strings.Count(m.state.content.String(), "\n")
-				m.state.codeBlocks.AddBlock(block.Language, block.Filename, block.Content, lineNum)
-			}
+	m.appendStreamBlocksLocked(blocks)
+	m.state.mu.Unlock()
+	m.updateViewport()
+}
 
-			// Render with syntax highlighting and border
-			rendered := m.streamParser.RenderCodeBlock(block, m.state.width)
-			m.state.content.WriteString(rendered)
-		} else {
+// appendStreamBlocksLocked writes parser blocks into the content buffer.
+// Code blocks arrive incrementally (start border → lines → end border) so
+// long code renders AS it streams instead of after the closing fence.
+// Caller holds m.state.mu.
+func (m *OutputModel) appendStreamBlocksLocked(blocks []RenderedBlock) {
+	for _, block := range blocks {
+		switch block.Kind {
+		case BlockCodeStart:
+			// Remember where the block began for the registry entry.
+			m.state.pendingCodeStartLine = strings.Count(m.state.content.String(), "\n")
+			m.state.content.WriteString(m.streamParser.RenderCodeFenceTop(block, m.state.width))
+		case BlockCodeLine:
+			m.state.content.WriteString(m.streamParser.RenderCodeLine(block))
+		case BlockCodeEnd:
+			m.state.content.WriteString(m.streamParser.RenderCodeFenceBottom(m.state.width))
+			if m.state.codeBlocks != nil && block.Content != "" {
+				m.state.codeBlocks.AddBlock(block.Language, block.Filename, block.Content, m.state.pendingCodeStartLine)
+			}
+		default:
 			m.state.content.WriteString(block.Content)
 		}
 	}
-	m.state.mu.Unlock()
-	m.updateViewport()
 }
 
 // Thinking display — quiet, elegant, stays out of the way.
@@ -230,18 +245,7 @@ func (m *OutputModel) FlushStream() {
 	blocks := m.streamParser.Flush()
 
 	m.state.mu.Lock()
-	for _, block := range blocks {
-		if block.IsCode {
-			if m.state.codeBlocks != nil {
-				lineNum := strings.Count(m.state.content.String(), "\n")
-				m.state.codeBlocks.AddBlock(block.Language, block.Filename, block.Content, lineNum)
-			}
-			rendered := m.streamParser.RenderCodeBlock(block, m.state.width)
-			m.state.content.WriteString(rendered)
-		} else {
-			m.state.content.WriteString(block.Content)
-		}
-	}
+	m.appendStreamBlocksLocked(blocks)
 	m.state.mu.Unlock()
 	// Force update on flush to ensure all content is visible
 	m.ForceUpdateViewport()

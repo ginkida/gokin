@@ -10,10 +10,26 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// RenderedBlockKind distinguishes streaming block types. Code blocks stream
+// INCREMENTALLY: a start marker (top border), one block per code line, and an
+// end marker (bottom border + full content for the code-block registry).
+// Pre-incremental behavior buffered the whole block until the closing fence —
+// a long code block meant seconds of frozen output while text streamed
+// invisibly into the buffer.
+type RenderedBlockKind int
+
+const (
+	BlockText RenderedBlockKind = iota
+	BlockCodeStart
+	BlockCodeLine
+	BlockCodeEnd
+)
+
 // RenderedBlock represents a rendered piece of content.
 type RenderedBlock struct {
-	Content  string
-	IsCode   bool
+	Kind     RenderedBlockKind
+	Content  string // text content / one code line / full code (BlockCodeEnd)
+	IsCode   bool   // legacy flag: true for BlockCodeEnd (carries the complete block)
 	Language string
 	Filename string
 }
@@ -107,13 +123,15 @@ func (p *MarkdownStreamParser) Feed(chunk string) []RenderedBlock {
 		if p.inCodeBlock {
 			// Check for code block end
 			if strings.TrimSpace(line) == "```" {
-				// Flush code block
 				codeContent := p.codeContent.String()
 				if len(codeContent) > 0 && codeContent[len(codeContent)-1] == '\n' {
 					codeContent = codeContent[:len(codeContent)-1] // Remove trailing newline
 				}
 
+				// End marker: renders as the bottom border; carries the FULL
+				// content so the consumer can register it for copy actions.
 				blocks = append(blocks, RenderedBlock{
+					Kind:     BlockCodeEnd,
 					Content:  codeContent,
 					IsCode:   true,
 					Language: p.codeLanguage,
@@ -127,6 +145,14 @@ func (p *MarkdownStreamParser) Feed(chunk string) []RenderedBlock {
 			} else {
 				p.codeContent.WriteString(line)
 				p.codeContent.WriteString("\n")
+				// Stream the line out immediately — highlighted at render
+				// time — instead of sitting invisible until the fence closes.
+				blocks = append(blocks, RenderedBlock{
+					Kind:     BlockCodeLine,
+					Content:  line,
+					Language: p.codeLanguage,
+					Filename: p.codeFilename,
+				})
 			}
 		} else {
 			// Check for code block start
@@ -142,6 +168,11 @@ func (p *MarkdownStreamParser) Feed(chunk string) []RenderedBlock {
 					p.codeFilename = matches[2]
 				}
 				p.codeContent.Reset()
+				blocks = append(blocks, RenderedBlock{
+					Kind:     BlockCodeStart,
+					Language: p.codeLanguage,
+					Filename: p.codeFilename,
+				})
 			} else if tableRowRegex.MatchString(line) {
 				// Accumulate table rows
 				p.inTable = true
@@ -182,17 +213,17 @@ func (p *MarkdownStreamParser) Flush() []RenderedBlock {
 		blocks = append(blocks, p.flushTable()...)
 	}
 
-	// If we're in a code block, flush it (incomplete but better than nothing)
+	// If we're in a code block, close it: the lines already streamed out
+	// incrementally — emit the end marker so the box gets its bottom border
+	// and the registry gets the (incomplete but real) content.
 	if p.inCodeBlock {
-		codeContent := p.codeContent.String()
-		if len(codeContent) > 0 {
-			blocks = append(blocks, RenderedBlock{
-				Content:  codeContent,
-				IsCode:   true,
-				Language: p.codeLanguage,
-				Filename: p.codeFilename,
-			})
-		}
+		blocks = append(blocks, RenderedBlock{
+			Kind:     BlockCodeEnd,
+			Content:  strings.TrimSuffix(p.codeContent.String(), "\n"),
+			IsCode:   true,
+			Language: p.codeLanguage,
+			Filename: p.codeFilename,
+		})
 		p.inCodeBlock = false
 		p.codeLanguage = ""
 		p.codeFilename = ""
@@ -223,91 +254,70 @@ func (p *MarkdownStreamParser) Reset() {
 	p.tableRows = nil
 }
 
-// RenderCodeBlock renders a code block with syntax highlighting and optional header.
-func (p *MarkdownStreamParser) RenderCodeBlock(block RenderedBlock, width int) string {
-	if !block.IsCode {
-		return block.Content
+// effectiveLanguage resolves the highlight language: explicit fence language
+// first, then detection from the fence filename.
+func (p *MarkdownStreamParser) effectiveLanguage(block RenderedBlock) string {
+	if block.Language != "" {
+		return block.Language
 	}
-
-	var result strings.Builder
-
-	// Detect language from filename if not specified
-	lang := block.Language
-	if lang == "" && block.Filename != "" {
-		lang = p.highlighter.DetectLanguage(block.Filename)
+	if block.Filename != "" {
+		return p.highlighter.DetectLanguage(block.Filename)
 	}
-
-	// Apply syntax highlighting
-	highlighted := block.Content
-	if lang != "" {
-		highlighted = p.highlighter.Highlight(block.Content, lang)
-	}
-
-	// Render the code block with border
-	result.WriteString(p.renderCodeBlockWithBorder(block.Filename, lang, highlighted, width))
-
-	return result.String()
+	return ""
 }
 
-// renderCodeBlockWithBorder renders a code block with clean thin borders.
-// Top: ─── go ─── (language label centered in thin line)
-// Bottom: ──────── (plain thin line)
-func (p *MarkdownStreamParser) renderCodeBlockWithBorder(filename, lang, content string, width int) string {
-	var result strings.Builder
-
+func codeFenceContentWidth(width int) int {
 	contentWidth := width - 4
 	if contentWidth < 40 {
 		contentWidth = 40
 	}
+	return contentWidth
+}
 
-	lines := strings.Split(content, "\n")
+// RenderCodeFenceTop renders the opening border: ─── label ───
+func (p *MarkdownStreamParser) RenderCodeFenceTop(block RenderedBlock, width int) string {
+	contentWidth := codeFenceContentWidth(width)
 
-	// Determine label for the header
+	lang := p.effectiveLanguage(block)
 	label := lang
-	if filename != "" {
-		label = filename
+	if block.Filename != "" {
+		label = block.Filename
 		if lang != "" {
-			label = filename + " · " + lang
+			label = block.Filename + " · " + lang
 		}
 	}
 
-	// Top border: ─── label ───
-	if label != "" {
-		labelLen := len(label) + 2 // spaces around label
-		sideLen := (contentWidth - labelLen) / 2
-		if sideLen < 3 {
-			sideLen = 3
-		}
-
-		leftDashLen := sideLen
-		rightDashLen := contentWidth - sideLen - labelLen
-
-		// Ensure non-negative lengths
-		if rightDashLen < 0 {
-			rightDashLen = 0
-		}
-
-		leftDash := strings.Repeat("─", leftDashLen)
-		rightDash := strings.Repeat("─", rightDashLen)
-
-		result.WriteString(p.styles.Dim.Render(leftDash+" ") + p.styles.CodeBlockHeader.Render(label) + p.styles.Dim.Render(" "+rightDash))
-	} else {
-		result.WriteString(p.styles.Dim.Render(strings.Repeat("─", contentWidth)))
-	}
-	result.WriteString("\n")
-
-	// Content — 2-space indent, no side borders, no line numbers
-	for _, line := range lines {
-		result.WriteString("  ")
-		result.WriteString(line)
-		result.WriteString("\n")
+	if label == "" {
+		return p.styles.Dim.Render(strings.Repeat("─", contentWidth)) + "\n"
 	}
 
-	// Bottom border: thin line
-	result.WriteString(p.styles.Dim.Render(strings.Repeat("─", contentWidth)))
-	result.WriteString("\n")
+	labelLen := len(label) + 2 // spaces around label
+	sideLen := (contentWidth - labelLen) / 2
+	if sideLen < 3 {
+		sideLen = 3
+	}
+	rightDashLen := max(contentWidth-sideLen-labelLen, 0)
 
-	return result.String()
+	return p.styles.Dim.Render(strings.Repeat("─", sideLen)+" ") +
+		p.styles.CodeBlockHeader.Render(label) +
+		p.styles.Dim.Render(" "+strings.Repeat("─", rightDashLen)) + "\n"
+}
+
+// RenderCodeLine renders one streamed code line: 2-space indent, per-line
+// syntax highlighting. Line-local highlighting can mis-color constructs that
+// span lines (block comments, raw strings) — an accepted trade for code that
+// appears AS it streams instead of after the closing fence.
+func (p *MarkdownStreamParser) RenderCodeLine(block RenderedBlock) string {
+	line := block.Content
+	if lang := p.effectiveLanguage(block); lang != "" && strings.TrimSpace(line) != "" {
+		line = strings.TrimSuffix(p.highlighter.Highlight(line, lang), "\n")
+	}
+	return "  " + line + "\n"
+}
+
+// RenderCodeFenceBottom renders the closing thin line.
+func (p *MarkdownStreamParser) RenderCodeFenceBottom(width int) string {
+	return p.styles.Dim.Render(strings.Repeat("─", codeFenceContentWidth(width))) + "\n"
 }
 
 // renderInlineCode detects backtick-wrapped `code` segments within a text line

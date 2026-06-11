@@ -216,6 +216,13 @@ func (m Model) renderTodos() string {
 	idx := int(time.Now().UnixNano()/100000000) % len(spinner)
 	spinChar := spinner[idx]
 
+	// Long lists collapse completed items into one summary row: a 15-step
+	// plan otherwise renders a 17-line box where most rows are ✓ history.
+	// Short lists (≤ todosPanelFullRender) keep the full picture.
+	collapseDone := len(m.todoItems) > todosPanelFullRender
+	doneCount := 0
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
 	for _, item := range m.todoItems {
 		text := strings.TrimSpace(item)
 		if strings.HasPrefix(text, "- ") {
@@ -230,6 +237,10 @@ func (m Model) renderTodos() string {
 			content := strings.TrimSpace(text[3:])
 			styledItem = m.styles.TodoActive.Render(spinChar + " " + content)
 		} else if strings.HasPrefix(text, "[x]") || strings.HasPrefix(text, "[X]") {
+			if collapseDone {
+				doneCount++
+				continue
+			}
 			content := strings.TrimSpace(text[3:])
 			styledItem = m.styles.TodoDone.Render("✓ " + content)
 		} else {
@@ -241,8 +252,18 @@ func (m Model) renderTodos() string {
 		builder.WriteString("\n")
 	}
 
+	if doneCount > 0 {
+		builder.WriteString(m.styles.TodoItem.Render(dimStyle.Render(fmt.Sprintf("✓ %d completed", doneCount))))
+		builder.WriteString("\n")
+	}
+
 	return boxStyle.Render(strings.TrimSuffix(builder.String(), "\n"))
 }
+
+// todosPanelFullRender is the largest todo list that still renders every
+// item, including completed ones. Above it, ✓ items collapse to one
+// "✓ N completed" row — the pending/active rows are the signal.
+const todosPanelFullRender = 8
 
 // renderScratchpad renders the agent scratchpad.
 func (m Model) renderScratchpad() string {
@@ -268,10 +289,25 @@ func (m Model) renderScratchpad() string {
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render(" Scratchpad"))
 	builder.WriteString("\n")
-	builder.WriteString(contentStyle.Render(m.scratchpad))
+
+	// Render only the TAIL of the scratchpad — it's append-style working
+	// notes, so the latest lines carry the signal. Unbounded render let a
+	// chatty agent grow the box to half the screen.
+	lines := strings.Split(strings.TrimRight(m.scratchpad, "\n"), "\n")
+	if hidden := len(lines) - scratchpadMaxRenderLines; hidden > 0 {
+		dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+		builder.WriteString(dimStyle.Render(fmt.Sprintf("… %d earlier line(s)", hidden)))
+		builder.WriteString("\n")
+		lines = lines[hidden:]
+	}
+	builder.WriteString(contentStyle.Render(strings.Join(lines, "\n")))
 
 	return boxStyle.Render(builder.String())
 }
+
+// scratchpadMaxRenderLines caps the scratchpad box height (content lines,
+// excluding the title and the "… earlier" marker).
+const scratchpadMaxRenderLines = 6
 
 // getCommandHint returns a hint for the current command input.
 func (m Model) getCommandHint(input string) string {

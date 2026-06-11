@@ -1113,6 +1113,18 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// Handle Ctrl+X for plan panel expand/collapse. Unlike the other panel
+	// toggles this works during Processing/Streaming too — the plan panel is
+	// on screen exactly while a plan executes, which is when the user wants
+	// to peek at the full step list. Ctrl (not bare printable) so it can't
+	// fight the type-ahead input.
+	if msg.Type == tea.KeyCtrlX && (m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
+		if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
+			m.planProgressPanel.Toggle()
+		}
+		return nil
+	}
+
 	// Handle Ctrl+T for todos toggle
 	if msg.Type == tea.KeyCtrlT && m.state == StateInput {
 		m.todosVisible = !m.todosVisible
@@ -2763,13 +2775,26 @@ func (m Model) View() string {
 	// Background panels (dimmed when modal is active)
 	var panelBuilder strings.Builder
 
+	// Resolve the agent tree FIRST: when it renders, the activity feed panel
+	// is suppressed for this frame — both auto-show on sub-agent activity
+	// and the tree is the richer surface for the same information. Stacking
+	// them showed every background agent twice. The live card needs to know
+	// whether the feed ACTUALLY renders (not just IsVisible) so its
+	// Recent/Next lines come back whenever the feed is suppressed.
+	agentTreeView := ""
+	if m.agentTreePanel != nil {
+		agentTreeView = m.agentTreePanel.View(m.width)
+	}
+	feedRendered := m.activityFeed != nil && m.activityFeed.IsVisible() &&
+		m.activityFeed.HasActiveEntries() && agentTreeView == ""
+
 	// Live "Now" card — compact summary of what the agent is doing right now.
 	// The card's content overlaps with the processing/tool spinner-status
 	// block rendered further below (same spinner, same label, same tool
 	// info), so we track whether the card actually drew anything and
 	// suppress the duplicate block in that case.
 	cardRendered := false
-	if card := m.renderLiveActivityCard(); card != "" {
+	if card := m.renderLiveActivityCard(feedRendered); card != "" {
 		panelBuilder.WriteString(card)
 		panelBuilder.WriteString("\n")
 		cardRendered = true
@@ -2792,15 +2817,18 @@ func (m Model) View() string {
 		panelBuilder.WriteString("\n")
 	}
 
-	// Activity feed panel
-	if m.activityFeed != nil && m.activityFeed.IsVisible() && m.activityFeed.HasActiveEntries() {
+	// Activity feed panel — suppressed while the agent tree renders (see the
+	// feedRendered computation above the live card).
+	if feedRendered {
 		panelBuilder.WriteString(m.activityFeed.View(m.width))
 		panelBuilder.WriteString("\n")
 	}
 
-	// Agent tree panel
-	if m.agentTreePanel != nil && m.agentTreePanel.IsVisible() && m.agentTreePanel.NodeCount() > 0 {
-		panelBuilder.WriteString(m.agentTreePanel.View(m.width))
+	// Agent tree panel. View itself decides emptiness (visibility, node
+	// count, AND the post-completion linger) — gate on its output so an
+	// expired linger doesn't leave a stray blank line in the panel stack.
+	if agentTreeView != "" {
+		panelBuilder.WriteString(agentTreeView)
 		panelBuilder.WriteString("\n")
 	}
 

@@ -52,7 +52,11 @@ func (m Model) shouldShowLiveActivityCard() bool {
 // animation is consistent across every re-render within the same tick.
 var spinnerFramesCard = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-func (m Model) renderLiveActivityCard() string {
+// renderLiveActivityCard renders the compact "now" card. feedRendered says
+// whether the big activity feed panel is ACTUALLY drawn this frame (not just
+// IsVisible — the panel is suppressed while the agent tree renders); when the
+// feed is on screen the card collapses to the current-action line.
+func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	if !m.shouldShowLiveActivityCard() {
 		return ""
 	}
@@ -72,9 +76,9 @@ func (m Model) renderLiveActivityCard() string {
 		snapshot = m.activityFeed.Snapshot(4, 2)
 	}
 
-	// When the big Live Activity panel (Ctrl+O) is open, collapse to just
-	// the current-action line — Recent/Next live in the panel below.
-	feedOpen := m.activityFeed != nil && m.activityFeed.IsVisible()
+	// When the big Live Activity panel is actually on screen, collapse to
+	// just the current-action line — Recent/Next live in the panel below.
+	feedOpen := feedRendered
 
 	// Line 1: the current action — no state badge, no meta. State comes
 	// from the accent color on the left bar; state word + provider + model

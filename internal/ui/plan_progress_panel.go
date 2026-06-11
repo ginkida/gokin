@@ -85,6 +85,13 @@ func NewPlanProgressPanel(styles *Styles) *PlanProgressPanel {
 	}
 }
 
+// planAutoCollapseSteps is the largest plan that still renders fully
+// expanded by default. Above this the panel starts collapsed (current step +
+// one summary row) — a 10-step plan otherwise pins a ~17-line box to the
+// screen for the whole execution, which was the #1 "panel eats my screen"
+// complaint. Ctrl+X expands on demand.
+const planAutoCollapseSteps = 4
+
 // StartPlan initializes a new plan execution.
 func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps []PlanStepInfo) {
 	p.visible = true
@@ -93,7 +100,7 @@ func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps [
 	p.planDesc = description
 	p.startedAt = time.Now()
 	p.currentStepID = 0
-	p.collapsed = false
+	p.collapsed = len(steps) > planAutoCollapseSteps
 	p.timeline = p.timeline[:0]
 
 	p.steps = make([]PlanStepState, len(steps))
@@ -387,16 +394,21 @@ func (p *PlanProgressPanel) View(width int) string {
 		}
 	} else {
 		// Collapsed: show only current step
+		shown := 0
 		for _, step := range p.steps {
 			if step.Status == PlanStepInProgress {
 				stepRendered := p.renderStep(step, panelWidth-4)
 				p.writeBoxLines(&content, borderStyle, stepRendered, panelWidth)
+				shown = 1
 				break
 			}
 		}
 
-		// Show compact summary
-		summaryLine := dimStyle.Render(fmt.Sprintf("  ... %d more steps (press Tab to expand)", len(p.steps)-1))
+		// Compact summary with an HONEST hidden-step count and the REAL
+		// expand key (the old text said "press Tab" — no Tab binding ever
+		// existed; Ctrl+X is wired in tui.go handleGlobalKeys).
+		hidden := len(p.steps) - shown
+		summaryLine := dimStyle.Render(fmt.Sprintf("  … %d more · ✓ %d done (Ctrl+X to expand)", hidden, p.CompletedCount()))
 		content.WriteString(borderStyle.Render("│"))
 		content.WriteString(summaryLine)
 		padding := panelWidth - 1 - lipgloss.Width(summaryLine)

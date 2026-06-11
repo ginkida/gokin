@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -309,5 +310,65 @@ func TestActivityFeedPanel_Snapshot(t *testing.T) {
 	}
 	if snap.RunningTools != 1 {
 		t.Errorf("RunningTools = %d, want 1", snap.RunningTools)
+	}
+}
+
+func feedEntry(id string, status ActivityStatus) ActivityFeedEntry {
+	return ActivityFeedEntry{
+		ID:          id,
+		Type:        ActivityTypeTool,
+		Name:        "read",
+		Description: "desc " + id,
+		Status:      status,
+		StartTime:   time.Now(),
+	}
+}
+
+func TestFeedView_RunningEntriesBeatStaleCompleted(t *testing.T) {
+	p := NewActivityFeedPanel(nil)
+	// One running entry buried under 6 completed ones: the old "last 5"
+	// window dropped the running row entirely.
+	p.AddEntry(feedEntry("run-1", ActivityRunning))
+	for i := range 6 {
+		p.AddEntry(feedEntry(fmt.Sprintf("done-%d", i), ActivityCompleted))
+	}
+	p.visible = true
+
+	view := p.View(100)
+	if !strings.Contains(view, "desc run-1") {
+		t.Fatalf("running entry must always render:\n%s", view)
+	}
+	completedShown := 0
+	for i := range 6 {
+		if strings.Contains(view, fmt.Sprintf("desc done-%d", i)) {
+			completedShown++
+		}
+	}
+	if completedShown > 2 {
+		t.Fatalf("completed rows shown = %d, want ≤2 (height with no signal)", completedShown)
+	}
+}
+
+func TestFeedView_NoDuplicateMetricsAndCappedLog(t *testing.T) {
+	p := NewActivityFeedPanel(nil)
+	p.AddEntry(feedEntry("a", ActivityRunning))
+	for i := range 5 {
+		p.addRecentLog(fmt.Sprintf("log line %d", i))
+	}
+	p.visible = true
+
+	view := p.View(100)
+	// Metrics summary must appear ONCE (in the title), not again as a body
+	// line — it used to render twice.
+	if got := strings.Count(view, "1 tools"); got > 1 {
+		t.Fatalf("metrics summary rendered %d times, want 1:\n%s", got, view)
+	}
+	for _, hidden := range []string{"log line 0", "log line 1"} {
+		if strings.Contains(view, hidden) {
+			t.Fatalf("log render must cap at the last %d lines, found %q:\n%s", maxRecentLogRendered, hidden, view)
+		}
+	}
+	if !strings.Contains(view, "log line 4") {
+		t.Fatalf("most recent log line missing:\n%s", view)
 	}
 }
