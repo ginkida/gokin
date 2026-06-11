@@ -145,6 +145,8 @@ var toolSetDefinitions = map[ToolSet][]string{
 		// set up?" / "which servers do I have?" — even in plan mode —
 		// without depending on an extra tool set being active.
 		"mcp_admin",
+		// Semantic discovery tools — fundamental for code understanding.
+		"go_to_definition", "find_references",
 		// request_tool moved to ToolSetAgent — it was shipping in the
 		// Core declaration list for main-agent Kimi requests, but the
 		// requester dependency is only wired in the sub-agent path.
@@ -155,6 +157,7 @@ var toolSetDefinitions = map[ToolSet][]string{
 	ToolSetGit: {
 		"git_status", "git_diff", "git_add", "git_commit",
 		"git_log", "git_blame", "git_branch", "git_pr",
+		"review_changes",
 	},
 	ToolSetPlanning: {
 		"enter_plan_mode", "update_plan_progress", "get_plan_status",
@@ -277,6 +280,13 @@ func DefaultRegistry(workDir string) *Registry {
 
 	// Test runner
 	r.MustRegister(NewRunTestsTool(workDir))
+
+	// Semantic discovery tools (gopls-backed)
+	r.MustRegister(NewGoToDefinitionTool(workDir))
+	r.MustRegister(NewFindReferencesTool(workDir))
+
+	// Review changes tool
+	r.MustRegister(NewReviewChangesTool(workDir))
 
 	// SSH tool
 	r.MustRegister(NewSSHTool())
@@ -565,6 +575,13 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 
 	// Test runner
 	r.RegisterFactory("run_tests", func() Tool { return NewRunTestsTool(workDir) }, declarations["run_tests"])
+
+	// Semantic discovery tools
+	r.RegisterFactory("go_to_definition", func() Tool { return NewGoToDefinitionTool(workDir) }, declarations["go_to_definition"])
+	r.RegisterFactory("find_references", func() Tool { return NewFindReferencesTool(workDir) }, declarations["find_references"])
+
+	// Review changes tool
+	r.RegisterFactory("review_changes", func() Tool { return NewReviewChangesTool(workDir) }, declarations["review_changes"])
 
 	// Other tools
 	r.RegisterFactory("ssh", func() Tool { return NewSSHTool() }, declarations["ssh"])

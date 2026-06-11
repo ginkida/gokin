@@ -64,6 +64,11 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 	}
 
 	const verifyTimeout = 3 * time.Minute
+	// Cap raw compiler/linter output so a failing build over a large module
+	// can't flood the model's context. The failure path puts output in the
+	// Error field, which (unlike Content) escapes ToMap/ResponseCompressor
+	// caps — so bound it at the source, like the sibling delta_check.
+	const verifyOutputMaxChars = 12000
 	verifyCtx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
 
@@ -115,10 +120,13 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 		if verifyCtx.Err() == context.Canceled {
 			return NewErrorResult(fmt.Sprintf("Verification cancelled before completion (%s)", checkName)), nil
 		}
+		// Head+tail trim: node/python toolchains print the fatal error LAST —
+		// a head-only trim would keep 12K of progress noise and cut the reason.
+		out := trimOutputKeepEnds(string(output), verifyOutputMaxChars)
 		return ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Verification failed (%s):\n%s", checkName, string(output)),
-			Content: string(output),
+			Error:   fmt.Sprintf("Verification failed (%s):\n%s", checkName, out),
+			Content: out,
 		}, nil
 	}
 
@@ -130,7 +138,7 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 		checkName = fmt.Sprintf("%s (dir: %s)", checkName, location)
 	}
 
-	return NewSuccessResult(fmt.Sprintf("Verification successful (%s):\n%s", checkName, string(output))), nil
+	return NewSuccessResult(fmt.Sprintf("Verification successful (%s):\n%s", checkName, trimDeltaOutput(string(output), verifyOutputMaxChars))), nil
 }
 
 func (t *VerifyCodeTool) detectProjectTarget(path string) (string, string) {

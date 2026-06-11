@@ -28,6 +28,7 @@ func TestGetToolRiskLevel(t *testing.T) {
 	lowTools := []string{
 		"read", "glob", "grep", "tree", "diff", "env", "list_dir",
 		"git_status", "git_log", "git_diff", "git_blame",
+		"review_changes", "go_to_definition", "find_references",
 		"history_search",
 		"web_search", "web_fetch", "todo",
 		"task_output", "task_stop",

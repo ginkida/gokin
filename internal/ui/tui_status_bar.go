@@ -87,6 +87,9 @@ func (m Model) renderStatusBarCompact() string {
 func (m Model) compactStatusSegments() []string {
 	var parts []string
 	parts = append(parts, m.safetyModeSegments(false)...)
+	if m.queuedPending > 0 {
+		parts = append(parts, fmt.Sprintf("📥%d", m.queuedPending))
+	}
 	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
 		parts = append(parts, "mode:degraded")
 	}
@@ -285,6 +288,9 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	}
 	if !m.sandboxEnabled {
 		parts = append(parts, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("!SANDBOX"))
+	}
+	if m.queuedPending > 0 {
+		parts = append(parts, providerStyle.Render(fmt.Sprintf("📥 %d queued", m.queuedPending)))
 	}
 
 	mode := "normal"

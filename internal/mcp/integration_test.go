@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,9 @@ type fakeMCPServer struct {
 
 	toolsMu sync.Mutex
 	tools   []*ToolInfo
+
+	promptsMu sync.Mutex
+	prompts   []*Prompt
 
 	initCount atomic.Int32
 	listCount atomic.Int32
@@ -119,6 +123,33 @@ func (s *fakeMCPServer) handle(req *JSONRPCMessage) {
 				},
 			},
 		})
+	case MethodPromptsList:
+		s.promptsMu.Lock()
+		promptsCopy := make([]*Prompt, len(s.prompts))
+		copy(promptsCopy, s.prompts)
+		s.promptsMu.Unlock()
+		s.transport.feed(&JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      float64ID(req.ID),
+			Result:  map[string]any{"prompts": promptsCopy},
+		})
+	case MethodPromptsGet:
+		// Echo the requested name back in the rendered body so tests can assert
+		// the round-trip. Params is `any`; JSON round-trip handles struct-or-map.
+		var p GetPromptParams
+		if raw, err := json.Marshal(req.Params); err == nil {
+			_ = json.Unmarshal(raw, &p)
+		}
+		s.transport.feed(&JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      float64ID(req.ID),
+			Result: map[string]any{
+				"description": "rendered " + p.Name,
+				"messages": []map[string]any{
+					{"role": "user", "content": map[string]any{"type": "text", "text": "PROMPT_BODY name=" + p.Name}},
+				},
+			},
+		})
 	}
 }
 
@@ -136,6 +167,13 @@ func (s *fakeMCPServer) SetTools(tools []*ToolInfo) {
 	s.toolsMu.Lock()
 	s.tools = tools
 	s.toolsMu.Unlock()
+}
+
+// SetPrompts swaps the server's advertised prompt templates. Thread-safe.
+func (s *fakeMCPServer) SetPrompts(prompts []*Prompt) {
+	s.promptsMu.Lock()
+	s.prompts = prompts
+	s.promptsMu.Unlock()
 }
 
 // SetHandleHook installs a per-request hook. Pass nil to remove.

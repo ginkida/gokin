@@ -58,9 +58,43 @@ func (t *CheckImpactTool) Validate(args map[string]any) error {
 func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	symbol, _ := GetString(args, "symbol")
 
-	// 1. Search for usages using ripgrep (if available) or grep
+	// 1. Search for usages with grep. Output() keeps stdout (matches) separate
+	// from stderr (warnings) — CombinedOutput would mix permission-denied noise
+	// into the match list AND hide matches behind a non-zero exit.
 	cmd := exec.CommandContext(ctx, "grep", "-r", "--exclude-dir=.git", "-n", symbol, t.workDir)
-	output, _ := cmd.CombinedOutput()
+	output, err := cmd.Output()
+	var searchWarning string
+	if err != nil {
+		if ctx.Err() != nil {
+			return NewErrorResult(fmt.Sprintf("check_impact: search cancelled for %q: %v", symbol, ctx.Err())), nil
+		}
+		exitErr, _ := err.(*exec.ExitError)
+		stderr := ""
+		if exitErr != nil {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		switch {
+		case len(strings.TrimSpace(string(output))) > 0:
+			// grep found matches AND failed (exit 2: one unreadable dir or a
+			// dangling symlink under workDir). The matches are real — report
+			// them, but disclose that coverage may be partial. Erroring here
+			// made the tool permanently broken in any repo with one locked
+			// directory (review-confirmed on macOS).
+			searchWarning = stderr
+		case exitErr != nil && exitErr.ExitCode() == 1 && stderr == "":
+			// Benign "no matches" — fall through to the honest zero-usage report.
+		default:
+			// No matches and a real failure (grep missing, bad invocation):
+			// must reach the model rather than masquerade as "symbol is private
+			// or unused" — this is a blast-radius tool, and a false "unused"
+			// invites deleting a symbol that actually has callers.
+			detail := stderr
+			if detail == "" {
+				detail = err.Error()
+			}
+			return NewErrorResult(fmt.Sprintf("check_impact: grep failed for %q: %s", symbol, detail)), nil
+		}
+	}
 
 	lines := strings.Split(string(output), "\n")
 
@@ -89,7 +123,11 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 		}
 	}
 
-	for cat, matches := range categories {
+	// Fixed section order — ranging the map directly made the report
+	// nondeterministic across runs (same fix class as run_tests' sorted
+	// failedPkgs).
+	for _, cat := range []string{"Definitions", "Imports", "Usages"} {
+		matches := categories[cat]
 		if len(matches) > 0 {
 			fmt.Fprintf(&report, "## %s (%d)\n", cat, len(matches))
 			// Limit display to 10 per category
@@ -104,6 +142,10 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 			}
 			report.WriteString("\n")
 		}
+	}
+
+	if searchWarning != "" {
+		fmt.Fprintf(&report, "⚠️ Search coverage may be partial — grep reported:\n%s\n\n", searchWarning)
 	}
 
 	if report.Len() < 100 { // Just the header

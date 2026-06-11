@@ -751,6 +751,27 @@ func trimDeltaOutput(content string, maxChars int) string {
 	return string(runes[:maxChars]) + "\n... (truncated)"
 }
 
+// trimOutputKeepEnds caps content at maxChars runes keeping the head AND the
+// tail (1/3 + 2/3). For build/lint output the head carries the invocation
+// context while many toolchains (node/webpack, python) print the fatal error
+// LAST — a head-only trim (trimDeltaOutput) hands the model maxChars of
+// progress noise with the actual failure cut off.
+func trimOutputKeepEnds(content string, maxChars int) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	runes := []rune(content)
+	if maxChars <= 0 || len(runes) <= maxChars {
+		return content
+	}
+	head := maxChars / 3
+	tail := maxChars - head
+	return string(runes[:head]) +
+		fmt.Sprintf("\n... (%d chars elided) ...\n", len(runes)-maxChars) +
+		string(runes[len(runes)-tail:])
+}
+
 func deltaSkipSuffix(skipped int) string {
 	if skipped <= 0 {
 		return ""

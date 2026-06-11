@@ -20,6 +20,10 @@ import (
 const (
 	// DefaultChunkSize is the default number of lines to read per chunk.
 	DefaultChunkSize = 1000
+	// DefaultReadLimit is the default line budget for a normal (non-chunked)
+	// read when the model omits `limit`. Anything modeling read coverage
+	// (agent readSpan) must use this, NOT DefaultChunkSize.
+	DefaultReadLimit = 2000
 	// LargeFileSizeMB is the threshold for considering a file "large".
 	LargeFileSizeMB = 10
 )
@@ -514,7 +518,7 @@ func (t *ReadTool) readNotebook(filePath string) (ToolResult, error) {
 // readText reads a regular text file with line numbers.
 func (t *ReadTool) readText(ctx context.Context, filePath string, args map[string]any) (ToolResult, error) {
 	offset := GetIntDefault(args, "offset", 1)
-	limit := GetIntDefault(args, "limit", 2000)
+	limit := GetIntDefault(args, "limit", DefaultReadLimit)
 
 	// Ensure offset is at least 1
 	if offset < 1 {

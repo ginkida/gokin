@@ -22,13 +22,17 @@ type JournalEntry struct {
 }
 
 type RecoverySnapshot struct {
-	Timestamp      time.Time `json:"ts"`
-	SessionID      string    `json:"session_id"`
-	Processing     bool      `json:"processing"`
-	PendingMessage string    `json:"pending_message,omitempty"`
-	HistoryLen     int       `json:"history_len"`
-	PlanID         string    `json:"plan_id,omitempty"`
-	CurrentStepID  int       `json:"current_step_id,omitempty"`
+	Timestamp  time.Time `json:"ts"`
+	SessionID  string    `json:"session_id"`
+	Processing bool      `json:"processing"`
+	// PendingMessage holds the head of the type-ahead queue (legacy field,
+	// kept so older tooling reading pending_message still works).
+	PendingMessage string `json:"pending_message,omitempty"`
+	// PendingMessages is the full type-ahead queue, oldest first.
+	PendingMessages []string `json:"pending_messages,omitempty"`
+	HistoryLen      int      `json:"history_len"`
+	PlanID          string   `json:"plan_id,omitempty"`
+	CurrentStepID   int      `json:"current_step_id,omitempty"`
 }
 
 type ExecutionJournal struct {
@@ -89,9 +93,16 @@ func (j *ExecutionJournal) SaveRecovery(snapshot RecoverySnapshot) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	// Redact secrets from pending message before writing to disk
-	if j.redactor != nil && snapshot.PendingMessage != "" {
-		snapshot.PendingMessage = j.redactor.Redact(snapshot.PendingMessage)
+	// Redact secrets from pending messages before writing to disk — BOTH the
+	// legacy head field and the full queue (a queued message is user input and
+	// can carry keys/tokens just like the head).
+	if j.redactor != nil {
+		if snapshot.PendingMessage != "" {
+			snapshot.PendingMessage = j.redactor.Redact(snapshot.PendingMessage)
+		}
+		for i, m := range snapshot.PendingMessages {
+			snapshot.PendingMessages[i] = j.redactor.Redact(m)
+		}
 	}
 
 	snapshot.Timestamp = time.Now()

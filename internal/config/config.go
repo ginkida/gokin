@@ -186,9 +186,9 @@ type ToolsConfig struct {
 	Bash              BashConfig             `yaml:"bash"`
 	DeltaCheck        DeltaCheckConfig       `yaml:"delta_check"`
 	SmartValidation   SmartValidationConfig  `yaml:"smart_validation"`
-	AllowedDirs       []string               `yaml:"allowed_dirs"`       // Additional allowed directories (besides workDir)
-	Formatters        map[string]string      `yaml:"formatters"`         // ext → command, e.g. {".py": "black"}
-	ProactiveContext  ProactiveContextConfig `yaml:"proactive_context"`  // Auto-append related files to Read results.
+	AllowedDirs       []string               `yaml:"allowed_dirs"`      // Additional allowed directories (besides workDir)
+	Formatters        map[string]string      `yaml:"formatters"`        // ext → command, e.g. {".py": "black"}
+	ProactiveContext  ProactiveContextConfig `yaml:"proactive_context"` // Auto-append related files to Read results.
 
 	// KimiToolBudget caps the number of tool calls Kimi can issue per user
 	// turn before the executor synthesizes "budget reached" responses and
@@ -209,8 +209,8 @@ type ToolsConfig struct {
 // when the agent reads a source file. Mimics Claude Code's "already-knows-
 // the-neighbourhood" feel without requiring explicit tool calls per file.
 type ProactiveContextConfig struct {
-	Enabled         bool `yaml:"enabled"`           // Append related-files block to Read results (default: true)
-	MaxFiles        int  `yaml:"max_files"`         // How many sibling/related files to include (default: 3)
+	Enabled         bool `yaml:"enabled"`            // Append related-files block to Read results (default: true)
+	MaxFiles        int  `yaml:"max_files"`          // How many sibling/related files to include (default: 3)
 	MaxLinesPerFile int  `yaml:"max_lines_per_file"` // Preview length per related file (default: 40)
 }
 
@@ -522,6 +522,8 @@ func DefaultConfig() *Config {
 				"read":                 "allow",
 				"glob":                 "allow",
 				"grep":                 "allow",
+				"go_to_definition":     "allow",
+				"find_references":      "allow",
 				"tree":                 "allow",
 				"diff":                 "allow",
 				"env":                  "allow",

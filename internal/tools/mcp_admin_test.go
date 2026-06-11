@@ -173,6 +173,100 @@ func TestMCPAdminTool_ResourceReadCallbackErrorSurfaces(t *testing.T) {
 	}
 }
 
+func TestMCPAdminTool_PromptsListRoutesToCallback(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "LIST" },
+		func(string) string { return "STATUS" },
+		func() bool { return true },
+	)
+	tool.SetPromptCallbacks(
+		func() string { return "PROMPT-CATALOG" },
+		func(context.Context, string, map[string]any) (string, error) { return "SHOULD-NOT-BE-CALLED", nil },
+	)
+	res, _ := tool.Execute(context.Background(), map[string]any{"action": "prompts"})
+	if res.Content != "PROMPT-CATALOG" {
+		t.Fatalf("prompts (no name) should list, got %q", res.Content)
+	}
+}
+
+func TestMCPAdminTool_PromptsGetPassesNameAndArgs(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "LIST" },
+		func(string) string { return "STATUS" },
+		func() bool { return true },
+	)
+	var gotName string
+	var gotArgs map[string]any
+	tool.SetPromptCallbacks(
+		func() string { return "CATALOG" },
+		func(_ context.Context, name string, args map[string]any) (string, error) {
+			gotName = name
+			gotArgs = args
+			return "RENDERED-" + name, nil
+		},
+	)
+	res, _ := tool.Execute(context.Background(), map[string]any{
+		"action":      "prompts",
+		"name":        "greet",
+		"prompt_args": map[string]any{"who": "world"},
+	})
+	if gotName != "greet" {
+		t.Fatalf("get callback got name %q, want greet", gotName)
+	}
+	if gotArgs["who"] != "world" {
+		t.Fatalf("get callback got args %v, want who=world", gotArgs)
+	}
+	if res.Content != "RENDERED-greet" {
+		t.Fatalf("got %q", res.Content)
+	}
+}
+
+func TestMCPAdminTool_PromptsUnwiredReportsCleanly(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "LIST" },
+		func(string) string { return "STATUS" },
+		func() bool { return true },
+	)
+	listRes, _ := tool.Execute(context.Background(), map[string]any{"action": "prompts"})
+	if listRes.Success || !strings.Contains(listRes.Error, "not wired") {
+		t.Fatalf("unwired prompts list should error cleanly, got success=%v err=%q", listRes.Success, listRes.Error)
+	}
+	getRes, _ := tool.Execute(context.Background(), map[string]any{"action": "prompts", "name": "x"})
+	if getRes.Success || !strings.Contains(getRes.Error, "not wired") {
+		t.Fatalf("unwired prompt get should error cleanly, got success=%v err=%q", getRes.Success, getRes.Error)
+	}
+}
+
+func TestMCPAdminTool_ValidateAcceptsPrompts(t *testing.T) {
+	tool := NewMCPAdminTool()
+	if err := tool.Validate(map[string]any{"action": "prompts"}); err != nil {
+		t.Fatalf("prompts (list) should validate, got %v", err)
+	}
+	if err := tool.Validate(map[string]any{"action": "prompts", "name": "greet"}); err != nil {
+		t.Fatalf("prompts (get) should validate, got %v", err)
+	}
+}
+
+func TestMCPAdminTool_PromptGetCallbackErrorSurfaces(t *testing.T) {
+	tool := NewMCPAdminTool()
+	tool.SetCallbacks(
+		func() string { return "LIST" },
+		func(string) string { return "STATUS" },
+		func() bool { return true },
+	)
+	tool.SetPromptCallbacks(
+		func() string { return "CATALOG" },
+		func(context.Context, string, map[string]any) (string, error) { return "", fmt.Errorf("server refused") },
+	)
+	res, _ := tool.Execute(context.Background(), map[string]any{"action": "prompts", "name": "x"})
+	if res.Success || !strings.Contains(res.Error, "server refused") {
+		t.Fatalf("get error should surface, got success=%v err=%q", res.Success, res.Error)
+	}
+}
+
 func TestMCPAdminTool_HelpWorksEvenWhenDisabled(t *testing.T) {
 	tool := NewMCPAdminTool()
 	// No callbacks → still disabled. But help must work, because the model

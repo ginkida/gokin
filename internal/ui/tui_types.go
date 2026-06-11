@@ -27,6 +27,16 @@ const (
 	StateFilePeek
 )
 
+// typeAheadActive reports whether the main input should receive keystrokes
+// and be rendered: normal input state, plus processing/streaming for
+// type-ahead composition (Enter then queues). Modals always win.
+func (m *Model) typeAheadActive() bool {
+	if m.isModalState() {
+		return false
+	}
+	return m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming
+}
+
 // isModalState returns true if the current state is a modal overlay
 // where the main input should not receive events.
 func (m *Model) isModalState() bool {
@@ -80,7 +90,10 @@ const (
 type (
 	StreamTextMsg     string
 	StreamThinkingMsg string
-	ToolCallMsg       struct {
+	// QueuedCountMsg carries the current type-ahead queue length (sent on
+	// every enqueue/dequeue) for the status-bar badge.
+	QueuedCountMsg int
+	ToolCallMsg    struct {
 		Name string
 		Args map[string]any
 	}

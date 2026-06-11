@@ -181,9 +181,9 @@ func newLoopSpawner(a *App) loops.Spawner {
 //
 // Reads:
 //   - a.processing: true while a foreground request is in flight.
-//   - a.pendingMessage: true while a message is queued behind another.
+//   - the type-ahead queue: non-empty while messages wait behind another.
 //
-// Both are short reads under a.mu; cheap to call from the scheduler's
+// Both are short mutex reads; cheap to call from the scheduler's
 // every-30s tick.
 func (a *App) isLoopRunnerIdle() bool {
 	a.mu.Lock()
@@ -192,10 +192,7 @@ func (a *App) isLoopRunnerIdle() bool {
 	if processing {
 		return false
 	}
-	a.pendingMu.Lock()
-	pending := a.pendingMessage != ""
-	a.pendingMu.Unlock()
-	return !pending
+	return a.pendingCount() == 0
 }
 
 // onLoopIterationStart fires before the spawn call. Surfaces a

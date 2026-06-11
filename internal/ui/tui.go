@@ -60,6 +60,10 @@ type Model struct {
 	lastSubmitTime time.Time
 	minSubmitDelay time.Duration // Minimum delay between submissions (default: 500ms)
 
+	// Type-ahead: number of messages queued behind the in-flight request
+	// (updated via QueuedCountMsg; shown as a status-bar badge).
+	queuedPending int
+
 	// Response header tracking
 	responseHeaderShown bool // True if assistant header was shown for current response
 
@@ -496,8 +500,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Update input only in StateInput — prevents key leak into input during modals/processing
-	if m.state == StateInput && !m.isModalState() {
+	// Update input in StateInput AND during processing/streaming (type-ahead:
+	// the user can compose the next message while the agent works; Enter
+	// queues it). Modals still take all keys. Safe key-conflict-wise: the only
+	// bindings active during processing are Esc/Ctrl+C/Ctrl+B/F/G — no bare
+	// printable keys (the 'e'/'?'-style bindings are StateInput-only).
+	if m.typeAheadActive() {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -1391,6 +1399,30 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 		}
+		// Type-ahead Enter: queue the composed message behind the in-flight
+		// request. State stays Processing/Streaming — the app dequeues FIFO
+		// when the current request completes. The message is rendered to the
+		// scrollback NOW (it won't re-render at dispatch time).
+		if (m.state == StateProcessing || m.state == StateStreaming) &&
+			!m.isModalState() && !m.input.ShowingSuggestions() {
+			value := m.input.Value()
+			if value != "" {
+				if time.Since(m.lastSubmitTime) < m.minSubmitDelay {
+					return nil
+				}
+				m.lastSubmitTime = time.Now()
+
+				m.input.AddToHistory(value)
+				m.input.Reset()
+				m.output.AppendLine(m.styles.FormatUserMessage(value))
+				m.output.AppendLine("")
+
+				if m.onSubmit != nil {
+					m.onSubmit(value)
+				}
+				return nil
+			}
+		}
 
 	case tea.KeyCtrlL:
 		// Clear output screen
@@ -1457,6 +1489,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case QueuedCountMsg:
+		m.queuedPending = int(msg)
+		return nil
+
 	case ContextHealthMsg:
 		if m.observatoryPanel != nil {
 			m.observatoryPanel.UpdateHealth(msg)
@@ -3008,10 +3044,12 @@ func (m Model) View() string {
 		builder.WriteString("\n")
 	}
 
-	// Input area
-	if m.state == StateInput {
+	// Input area — also rendered during processing/streaming so the user can
+	// SEE what they're type-ahead composing (keys already route there).
+	if m.typeAheadActive() {
 		builder.WriteString(m.input.View())
-
+	}
+	if m.state == StateInput {
 		// Command hints
 		inputText := m.input.Value()
 		if strings.HasPrefix(inputText, "/") && len(inputText) > 1 {

@@ -67,16 +67,17 @@ func NewToolResultCache(config CacheConfig) *ToolResultCache {
 // Read-only and git-query tools are cached.
 func (c *ToolResultCache) IsCacheable(toolName string) bool {
 	cacheableTools := map[string]bool{
-		"read":       true, // File content
-		"glob":       true, // File listings
-		"grep":       true, // Search results
-		"tree":       true, // Directory structure
-		"env":        true, // Environment variables
-		"list_dir":   true, // Directory contents
-		"git_log":    true, // Git history
-		"git_blame":  true, // Blame info
-		"git_status": true, // Git status (short TTL, invalidated by writes)
-		"git_diff":   true, // Git diff (short TTL, invalidated by writes)
+		"read":           true, // File content
+		"glob":           true, // File listings
+		"grep":           true, // Search results
+		"tree":           true, // Directory structure
+		"env":            true, // Environment variables
+		"list_dir":       true, // Directory contents
+		"git_log":        true, // Git history
+		"git_blame":      true, // Blame info
+		"git_status":     true, // Git status (short TTL, invalidated by writes)
+		"git_diff":       true, // Git diff (short TTL, invalidated by writes)
+		"review_changes": true, // Consolidated git diff (short TTL, invalidated by writes)
 	}
 
 	return cacheableTools[toolName]

@@ -14,15 +14,21 @@ func (a *App) journalEvent(event string, details map[string]any) {
 	a.journal.Append(event, details)
 }
 
-func (a *App) saveRecoverySnapshot(pendingMessage string) {
+func (a *App) saveRecoverySnapshot() {
 	if a == nil || a.journal == nil || a.session == nil {
 		return
 	}
 
+	pending := a.pendingSnapshot()
 	snap := RecoverySnapshot{
-		SessionID:      a.session.ID,
-		PendingMessage: pendingMessage,
-		HistoryLen:     a.session.MessageCount(),
+		SessionID:       a.session.ID,
+		PendingMessages: pending,
+		HistoryLen:      a.session.MessageCount(),
+	}
+	// Legacy single-message field: keep the head so older tooling reading
+	// pending_message still sees the next-up message.
+	if len(pending) > 0 {
+		snap.PendingMessage = pending[0]
 	}
 
 	a.mu.Lock()

@@ -96,6 +96,60 @@ func FormatResources(mgr *Manager) string {
 	return sb.String()
 }
 
+// FormatPrompts renders the catalog of prompt templates exposed across all
+// connected MCP servers, grouped by server, mirroring FormatResources.
+// Self-bounds the listing call. Empty/no-prompt input returns a stable hint.
+func FormatPrompts(mgr *Manager) string {
+	if mgr == nil {
+		return "MCP is not initialised."
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), formatResourcesTimeout)
+	defer cancel()
+
+	prompts := mgr.ListPrompts(ctx)
+	if len(prompts) == 0 {
+		return "No MCP prompts available (no connected server exposes any, or none implement the prompts capability)."
+	}
+	sort.Slice(prompts, func(i, j int) bool {
+		if prompts[i].Server != prompts[j].Server {
+			return prompts[i].Server < prompts[j].Server
+		}
+		return prompts[i].Name < prompts[j].Name
+	})
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "MCP prompts (%d):\n", len(prompts))
+	currentServer := ""
+	for _, p := range prompts {
+		if p.Server != currentServer {
+			currentServer = p.Server
+			fmt.Fprintf(&sb, "\n[%s]\n", p.Server)
+		}
+		sb.WriteString("  ")
+		sb.WriteString(p.Name)
+		if len(p.Arguments) > 0 {
+			args := make([]string, 0, len(p.Arguments))
+			for _, a := range p.Arguments {
+				if a == nil {
+					continue
+				}
+				if a.Required {
+					args = append(args, a.Name+"*")
+				} else {
+					args = append(args, a.Name)
+				}
+			}
+			fmt.Fprintf(&sb, "(%s)", strings.Join(args, ", "))
+		}
+		sb.WriteByte('\n')
+		if p.Description != "" {
+			fmt.Fprintf(&sb, "      %s\n", p.Description)
+		}
+	}
+	sb.WriteString("\nGet one with mcp_admin{action:prompts, name:\"<name>\"} (required args marked *).")
+	return sb.String()
+}
+
 // FormatStatus renders the same text that `/mcp status [name]` shows. With an
 // empty name it lists every server's detail; with a name it returns the
 // single matching server or a "no such server" hint.

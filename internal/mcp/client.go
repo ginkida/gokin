@@ -516,29 +516,39 @@ func (c *Client) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// ListTools retrieves the list of tools from the server.
-func (c *Client) ListTools(ctx context.Context) ([]*ToolInfo, error) {
+// callTyped runs the shared typed-RPC dance every post-initialize method needs:
+// initialized check, request, re-marshal of the untyped resp.Result, unmarshal
+// into out. Errors are labelled with the JSON-RPC method name ("tools/list
+// failed: …"). Initialize itself must NOT use this — it runs before
+// initialized=true and has bespoke capability handling.
+func (c *Client) callTyped(ctx context.Context, method string, params any, out any) error {
 	c.mu.RLock()
 	if !c.initialized {
 		c.mu.RUnlock()
-		return nil, fmt.Errorf("client not initialized")
+		return fmt.Errorf("client not initialized")
 	}
 	c.mu.RUnlock()
 
-	resp, err := c.request(ctx, MethodToolsList, nil)
+	resp, err := c.request(ctx, method, params)
 	if err != nil {
-		return nil, fmt.Errorf("tools/list failed: %w", err)
+		return fmt.Errorf("%s failed: %w", method, err)
 	}
 
-	// Parse result
 	resultBytes, err := json.Marshal(resp.Result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tools result: %w", err)
+		return fmt.Errorf("failed to marshal %s result: %w", method, err)
 	}
+	if err := json.Unmarshal(resultBytes, out); err != nil {
+		return fmt.Errorf("failed to parse %s result: %w", method, err)
+	}
+	return nil
+}
 
+// ListTools retrieves the list of tools from the server.
+func (c *Client) ListTools(ctx context.Context) ([]*ToolInfo, error) {
 	var result ListToolsResult
-	if err := json.Unmarshal(resultBytes, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse tools result: %w", err)
+	if err := c.callTyped(ctx, MethodToolsList, nil, &result); err != nil {
+		return nil, err
 	}
 
 	c.mu.Lock()
@@ -554,32 +564,14 @@ func (c *Client) ListTools(ctx context.Context) ([]*ToolInfo, error) {
 
 // CallTool calls a tool on the MCP server.
 func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (*CallToolResult, error) {
-	c.mu.RLock()
-	if !c.initialized {
-		c.mu.RUnlock()
-		return nil, fmt.Errorf("client not initialized")
-	}
-	c.mu.RUnlock()
-
 	params := &CallToolParams{
 		Name:      name,
 		Arguments: args,
 	}
 
-	resp, err := c.request(ctx, MethodToolsCall, params)
-	if err != nil {
-		return nil, fmt.Errorf("tools/call failed: %w", err)
-	}
-
-	// Parse result
-	resultBytes, err := json.Marshal(resp.Result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal call result: %w", err)
-	}
-
 	var result CallToolResult
-	if err := json.Unmarshal(resultBytes, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse call result: %w", err)
+	if err := c.callTyped(ctx, MethodToolsCall, params, &result); err != nil {
+		return nil, err
 	}
 
 	logging.Debug("MCP tool called",
@@ -592,27 +584,9 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 
 // ListResources retrieves the list of resources from the server.
 func (c *Client) ListResources(ctx context.Context) ([]*Resource, error) {
-	c.mu.RLock()
-	if !c.initialized {
-		c.mu.RUnlock()
-		return nil, fmt.Errorf("client not initialized")
-	}
-	c.mu.RUnlock()
-
-	resp, err := c.request(ctx, MethodResourcesList, nil)
-	if err != nil {
-		return nil, fmt.Errorf("resources/list failed: %w", err)
-	}
-
-	// Parse result
-	resultBytes, err := json.Marshal(resp.Result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal resources result: %w", err)
-	}
-
 	var result ListResourcesResult
-	if err := json.Unmarshal(resultBytes, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse resources result: %w", err)
+	if err := c.callTyped(ctx, MethodResourcesList, nil, &result); err != nil {
+		return nil, err
 	}
 
 	c.mu.Lock()
@@ -628,29 +602,37 @@ func (c *Client) ListResources(ctx context.Context) ([]*Resource, error) {
 
 // ReadResource fetches the contents of a single resource by URI.
 func (c *Client) ReadResource(ctx context.Context, uri string) (*ReadResourceResult, error) {
-	c.mu.RLock()
-	if !c.initialized {
-		c.mu.RUnlock()
-		return nil, fmt.Errorf("client not initialized")
-	}
-	c.mu.RUnlock()
-
-	resp, err := c.request(ctx, MethodResourcesRead, ReadResourceParams{URI: uri})
-	if err != nil {
-		return nil, fmt.Errorf("resources/read failed: %w", err)
-	}
-
-	resultBytes, err := json.Marshal(resp.Result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal read-resource result: %w", err)
-	}
-
 	var result ReadResourceResult
-	if err := json.Unmarshal(resultBytes, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse read-resource result: %w", err)
+	if err := c.callTyped(ctx, MethodResourcesRead, ReadResourceParams{URI: uri}, &result); err != nil {
+		return nil, err
 	}
 
 	logging.Debug("MCP resource read", "server", c.serverName, "uri", uri, "parts", len(result.Contents))
+	return &result, nil
+}
+
+// ListPrompts retrieves the list of prompt templates from the server. Mirrors
+// ListResources; no client-side cache (the resources cache field is write-only,
+// not worth duplicating).
+func (c *Client) ListPrompts(ctx context.Context) ([]*Prompt, error) {
+	var result ListPromptsResult
+	if err := c.callTyped(ctx, MethodPromptsList, nil, &result); err != nil {
+		return nil, err
+	}
+
+	logging.Debug("MCP prompts listed", "server", c.serverName, "count", len(result.Prompts))
+	return result.Prompts, nil
+}
+
+// GetPrompt fetches a single prompt template by name, rendered by the server
+// with the supplied arguments. Mirrors ReadResource.
+func (c *Client) GetPrompt(ctx context.Context, name string, arguments map[string]any) (*GetPromptResult, error) {
+	var result GetPromptResult
+	if err := c.callTyped(ctx, MethodPromptsGet, GetPromptParams{Name: name, Arguments: arguments}, &result); err != nil {
+		return nil, err
+	}
+
+	logging.Debug("MCP prompt fetched", "server", c.serverName, "name", name, "messages", len(result.Messages))
 	return &result, nil
 }
 

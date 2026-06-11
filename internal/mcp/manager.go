@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -370,11 +371,16 @@ type namedMCPClient struct {
 
 func (m *Manager) snapshotClients() []namedMCPClient {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	out := make([]namedMCPClient, 0, len(m.clients))
 	for name, c := range m.clients {
 		out = append(out, namedMCPClient{name: name, client: c})
 	}
+	m.mu.RUnlock()
+	// Deterministic order. Load-bearing for GetPrompt/ReadResource first-success
+	// resolution: prompt NAMES are not server-namespaced, so with two servers
+	// exposing the same name, map-iteration order would pick a different owner
+	// per call — prompt_args silently rendered against the wrong template.
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out
 }
 
@@ -382,29 +388,56 @@ func (m *Manager) snapshotClients() []namedMCPClient {
 // with its owning server. Network I/O runs OUTSIDE m.mu (clients are snapshotted
 // under the lock first), per the manager's "no network I/O under lock" invariant.
 func (m *Manager) ListResources(ctx context.Context) []MCPResource {
-	clients := m.snapshotClients()
-
-	var out []MCPResource
-	for _, nc := range clients {
-		resources, err := nc.client.ListResources(ctx)
-		if err != nil {
-			// A server may simply not implement resources — that's not an error
-			// worth surfacing, just skip it.
-			logging.Debug("MCP list-resources skipped", "server", nc.name, "error", err)
-			continue
-		}
-		for _, r := range resources {
-			if r == nil {
-				continue
+	return fanOutCatalog(m.snapshotClients(), "list-resources",
+		func(ctx context.Context, nc namedMCPClient) ([]MCPResource, error) {
+			resources, err := nc.client.ListResources(ctx)
+			if err != nil {
+				return nil, err
 			}
-			out = append(out, MCPResource{
-				Server:      nc.name,
-				URI:         r.URI,
-				Name:        r.Name,
-				Description: r.Description,
-				MIMEType:    r.MIMEType,
-			})
-		}
+			items := make([]MCPResource, 0, len(resources))
+			for _, r := range resources {
+				if r == nil {
+					continue
+				}
+				items = append(items, MCPResource{
+					Server:      nc.name,
+					URI:         r.URI,
+					Name:        r.Name,
+					Description: r.Description,
+					MIMEType:    r.MIMEType,
+				})
+			}
+			return items, nil
+		}, ctx)
+}
+
+// fanOutCatalog queries every connected server CONCURRENTLY and flattens the
+// per-server results in snapshot (sorted-server-name) order. Serial iteration
+// let one hung stdio server consume the caller's whole timeout budget, so every
+// server after it in the loop silently vanished from the catalog (review
+// finding) — fan-out makes total latency max(server), not sum(server). A
+// server erroring (e.g. capability not implemented) is skipped with a Debug
+// log, not surfaced.
+func fanOutCatalog[T any](clients []namedMCPClient, op string, query func(context.Context, namedMCPClient) ([]T, error), ctx context.Context) []T {
+	perServer := make([][]T, len(clients))
+	var wg sync.WaitGroup
+	for i, nc := range clients {
+		wg.Add(1)
+		go func(i int, nc namedMCPClient) {
+			defer wg.Done()
+			items, err := query(ctx, nc)
+			if err != nil {
+				logging.Debug("MCP "+op+" skipped", "server", nc.name, "error", err)
+				return
+			}
+			perServer[i] = items
+		}(i, nc)
+	}
+	wg.Wait()
+
+	var out []T
+	for _, items := range perServer {
+		out = append(out, items...)
 	}
 	return out
 }
@@ -443,6 +476,81 @@ func (m *Manager) ReadResource(ctx context.Context, uri string) (string, string,
 		return sb.String(), nc.name, nil
 	}
 	return "", "", fmt.Errorf("resource %q not served by any connected MCP server (%s)", uri, strings.Join(errs, "; "))
+}
+
+// MCPPrompt pairs a prompt template with the server that exposes it.
+type MCPPrompt struct {
+	Server      string
+	Name        string
+	Description string
+	Arguments   []*PromptArgument
+}
+
+// ListPrompts aggregates prompt templates across all connected servers, tagging
+// each with its owning server. Network I/O runs OUTSIDE m.mu (clients snapshotted
+// under the lock first), per the manager's "no network I/O under lock" invariant.
+func (m *Manager) ListPrompts(ctx context.Context) []MCPPrompt {
+	return fanOutCatalog(m.snapshotClients(), "list-prompts",
+		func(ctx context.Context, nc namedMCPClient) ([]MCPPrompt, error) {
+			prompts, err := nc.client.ListPrompts(ctx)
+			if err != nil {
+				// A server may simply not implement prompts — skip, don't surface.
+				return nil, err
+			}
+			items := make([]MCPPrompt, 0, len(prompts))
+			for _, p := range prompts {
+				if p == nil {
+					continue
+				}
+				items = append(items, MCPPrompt{
+					Server:      nc.name,
+					Name:        p.Name,
+					Description: p.Description,
+					Arguments:   p.Arguments,
+				})
+			}
+			return items, nil
+		}, ctx)
+}
+
+// GetPrompt fetches a prompt by name from whichever connected server owns it.
+// MCP servers error on prompt names they don't expose, so we try each connected
+// server and return the first success. Returns (renderedText, owningServer, error).
+func (m *Manager) GetPrompt(ctx context.Context, name string, arguments map[string]any) (string, string, error) {
+	clients := m.snapshotClients()
+	if len(clients) == 0 {
+		return "", "", fmt.Errorf("no connected MCP servers")
+	}
+
+	var errs []string
+	for _, nc := range clients {
+		res, err := nc.client.GetPrompt(ctx, name, arguments)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", nc.name, err))
+			continue
+		}
+		var sb strings.Builder
+		if res.Description != "" {
+			sb.WriteString(res.Description)
+			sb.WriteString("\n\n")
+		}
+		for _, msg := range res.Messages {
+			if msg == nil {
+				continue
+			}
+			role := msg.Role
+			if role == "" {
+				role = "user"
+			}
+			text := ""
+			if msg.Content != nil {
+				text = msg.Content.Text
+			}
+			fmt.Fprintf(&sb, "[%s]\n%s\n\n", role, text)
+		}
+		return strings.TrimSpace(sb.String()), nc.name, nil
+	}
+	return "", "", fmt.Errorf("prompt %q not served by any connected MCP server (%s)", name, strings.Join(errs, "; "))
 }
 
 // GetClient returns the client for a specific server.

@@ -1228,6 +1228,98 @@ func GetAllDeclarations() map[string]*genai.FunctionDeclaration {
 		"git_branch":           GitBranchToolDeclaration(),
 		"git_pr":               GitPRToolDeclaration(),
 		"mcp_admin":            MCPAdminToolDeclaration(),
+		"review_changes":       ReviewChangesToolDeclaration(),
+		"go_to_definition":     GoToDefinitionToolDeclaration(),
+		"find_references":      FindReferencesToolDeclaration(),
+	}
+}
+
+// ReviewChangesToolDeclaration returns the declaration for the review_changes tool.
+func ReviewChangesToolDeclaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        "review_changes",
+		Description: "Shows a consolidated view of all uncommitted working-tree changes, including newly-created (untracked) files. Use this after making edits to verify what changed before running tests or committing. Returns a compact summary: changed files list + diff per file (truncated to first 60 lines each).",
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"staged": {
+					Type:        genai.TypeBoolean,
+					Description: "Show staged changes only (--cached). Default: false (shows unstaged + new files).",
+				},
+				"name_only": {
+					Type:        genai.TypeBoolean,
+					Description: "Only list changed file names, skip the diff content. Useful for quick overview.",
+				},
+				"file": {
+					Type:        genai.TypeString,
+					Description: "Show changes for a specific file only.",
+				},
+			},
+		},
+	}
+}
+
+// GoToDefinitionToolDeclaration returns the declaration for the go_to_definition tool.
+func GoToDefinitionToolDeclaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        "go_to_definition",
+		Description: "Finds the definition of a symbol (function, type, variable) in the codebase. Returns file:line location. Use this instead of grep+read to quickly jump to where something is defined.",
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"file": {
+					Type:        genai.TypeString,
+					Description: "The source file containing the symbol reference.",
+				},
+				"symbol": {
+					Type:        genai.TypeString,
+					Description: "The symbol name to find the definition of (e.g. function name, type name).",
+				},
+				"line": {
+					Type:        genai.TypeInteger,
+					Description: "Line number (1-indexed) of the symbol reference. Enables precise gopls resolution; omit to fall back to an AST search by name.",
+				},
+				"column": {
+					Type:        genai.TypeInteger,
+					Description: "Column number (1-indexed) of the symbol reference. Improves accuracy.",
+				},
+			},
+			Required: []string{"file", "symbol"},
+		},
+	}
+}
+
+// FindReferencesToolDeclaration returns the declaration for the find_references tool.
+func FindReferencesToolDeclaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        "find_references",
+		Description: "Finds all references to a symbol (function, type, variable) across the codebase. Returns file:line locations. Much faster than grep for codebase-wide symbol search.",
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"file": {
+					Type:        genai.TypeString,
+					Description: "The source file containing the symbol.",
+				},
+				"symbol": {
+					Type:        genai.TypeString,
+					Description: "The symbol name to find references for.",
+				},
+				"line": {
+					Type:        genai.TypeInteger,
+					Description: "Line number (1-indexed) of the symbol. Enables precise gopls resolution; omit to fall back to a whole-word text search.",
+				},
+				"column": {
+					Type:        genai.TypeInteger,
+					Description: "Column number (1-indexed) of the symbol. Improves accuracy.",
+				},
+				"include_definition": {
+					Type:        genai.TypeBoolean,
+					Description: "Include the definition location in results. Default: true.",
+				},
+			},
+			Required: []string{"file", "symbol"},
+		},
 	}
 }
 

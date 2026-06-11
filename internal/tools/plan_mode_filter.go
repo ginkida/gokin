@@ -31,11 +31,16 @@ var planModeReadOnlyTools = map[string]bool{
 	"tools_list": true,
 
 	// Read-only git
-	"git_status": true,
-	"git_diff":   true,
-	"git_log":    true,
-	"git_blame":  true,
-	"git_branch": true,
+	"git_status":     true,
+	"git_diff":       true,
+	"git_log":        true,
+	"git_blame":      true,
+	"git_branch":     true,
+	"review_changes": true,
+
+	// Semantic discovery (read-only)
+	"go_to_definition": true,
+	"find_references":  true,
 
 	// User interaction / todos (surface, don't mutate disk)
 	"ask_user":        true,

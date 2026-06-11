@@ -1506,6 +1506,24 @@ func (b *Builder) wireMCPAdminTool() {
 			return fmt.Sprintf("Resource %s (from %s):\n\n%s", uri, server, text), nil
 		},
 	)
+	admin.SetPromptCallbacks(
+		func() string {
+			return mcp.FormatPrompts(b.mcpManager)
+		},
+		func(ctx context.Context, name string, arguments map[string]any) (string, error) {
+			if b.mcpManager == nil {
+				return "", fmt.Errorf("MCP is not initialised")
+			}
+			text, server, err := b.mcpManager.GetPrompt(ctx, name, arguments)
+			if err != nil {
+				return "", err
+			}
+			if text == "" {
+				return fmt.Sprintf("[prompt %s on %s returned no content]", name, server), nil
+			}
+			return fmt.Sprintf("Prompt %s (from %s):\n\n%s", name, server, text), nil
+		},
+	)
 	logging.Debug("mcp_admin tool wired")
 }
 
@@ -1675,7 +1693,7 @@ func (b *Builder) wireDependencies() error {
 				"tool": name,
 				"args": args,
 			})
-			app.saveRecoverySnapshot("")
+			app.saveRecoverySnapshot()
 
 			// Record side effects for active plan step (idempotency guard).
 			if app.planManager != nil && app.planManager.IsExecuting() {

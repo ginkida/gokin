@@ -37,6 +37,8 @@ type MCPAdminTool struct {
 	enabled       func() bool
 	listResources func() string
 	readResource  func(ctx context.Context, uri string) (string, error)
+	listPrompts   func() string
+	getPrompt     func(ctx context.Context, name string, arguments map[string]any) (string, error)
 }
 
 // NewMCPAdminTool constructs the tool with no callbacks attached. The builder
@@ -78,6 +80,19 @@ func (t *MCPAdminTool) SetResourceCallbacks(
 	t.readResource = readResourceFn
 }
 
+// SetPromptCallbacks wires the MCP prompts read-path: listPromptsFn renders a
+// catalog of prompt templates across all servers, getPromptFn fetches one
+// rendered prompt by name (with optional arguments). Separate setter so a build
+// without prompt support (or a test) can leave them nil — Execute then reports
+// the op as unwired rather than panicking.
+func (t *MCPAdminTool) SetPromptCallbacks(
+	listPromptsFn func() string,
+	getPromptFn func(ctx context.Context, name string, arguments map[string]any) (string, error),
+) {
+	t.listPrompts = listPromptsFn
+	t.getPrompt = getPromptFn
+}
+
 func (t *MCPAdminTool) Name() string {
 	return "mcp_admin"
 }
@@ -107,8 +122,9 @@ func MCPAdminToolDeclaration() *genai.FunctionDeclaration {
 						"'help' — usage cheatsheet to share with the user. " +
 						"'add' — register a new MCP server; pass `server`, `transport`, plus `command`+`args` for stdio or `url` for http. " +
 						"'remove' — disconnect + drop a server by `server` name. " +
-						"'resources' — list context resources exposed by MCP servers; pass `uri` to read one resource's contents.",
-					Enum: []string{"list", "status", "help", "add", "remove", "resources"},
+						"'resources' — list context resources exposed by MCP servers; pass `uri` to read one resource's contents. " +
+						"'prompts' — list prompt templates exposed by MCP servers; pass `name` to fetch one rendered prompt (with optional `prompt_args`).",
+					Enum: []string{"list", "status", "help", "add", "remove", "resources", "prompts"},
 				},
 				"server": {
 					Type:        genai.TypeString,
@@ -117,6 +133,14 @@ func MCPAdminToolDeclaration() *genai.FunctionDeclaration {
 				"uri": {
 					Type:        genai.TypeString,
 					Description: "Resource URI for action=resources. Provide it to read that resource's contents; omit to list every available resource.",
+				},
+				"name": {
+					Type:        genai.TypeString,
+					Description: "Prompt name for action=prompts. Provide it to fetch that prompt's rendered messages; omit to list every available prompt.",
+				},
+				"prompt_args": {
+					Type:        genai.TypeObject,
+					Description: "Optional arguments for action=prompts when fetching a named prompt (key/value pairs the prompt template declares).",
 				},
 				"transport": {
 					Type:        genai.TypeString,
@@ -144,7 +168,7 @@ func MCPAdminToolDeclaration() *genai.FunctionDeclaration {
 func (t *MCPAdminTool) Validate(args map[string]any) error {
 	action := GetStringDefault(args, "action", "list")
 	switch action {
-	case "list", "status", "help", "resources":
+	case "list", "status", "help", "resources", "prompts":
 		return nil
 	case "add":
 		if GetStringDefault(args, "server", "") == "" {
@@ -172,7 +196,7 @@ func (t *MCPAdminTool) Validate(args map[string]any) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown action %q (use list, status, help, add, remove, or resources)", action)
+		return fmt.Errorf("unknown action %q (use list, status, help, add, remove, resources, or prompts)", action)
 	}
 }
 
@@ -244,6 +268,26 @@ func (t *MCPAdminTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 			return NewErrorResult("mcp_admin resources is not wired in this build"), nil
 		}
 		return NewSuccessResult(t.listResources()), nil
+	case "prompts":
+		name := GetStringDefault(args, "name", "")
+		if name != "" {
+			if t.getPrompt == nil {
+				return NewErrorResult("mcp_admin prompt fetch is not wired in this build"), nil
+			}
+			var promptArgs map[string]any
+			if raw, ok := args["prompt_args"].(map[string]any); ok {
+				promptArgs = raw
+			}
+			out, err := t.getPrompt(ctx, name, promptArgs)
+			if err != nil {
+				return NewErrorResult(err.Error()), nil
+			}
+			return NewSuccessResult(out), nil
+		}
+		if t.listPrompts == nil {
+			return NewErrorResult("mcp_admin prompts is not wired in this build"), nil
+		}
+		return NewSuccessResult(t.listPrompts()), nil
 	default:
 		return NewErrorResult(fmt.Sprintf("unknown action %q", action)), nil
 	}
@@ -309,6 +353,11 @@ func mcpAdminHelpText() string {
 
    The tool exposes the same: mcp_admin{action:list}, {action:status},
    {action:remove, server:"github"}.
+
+   To inspect server-provided context: mcp_admin{action:resources} lists
+   context resources (read one with {action:resources, uri:"..."}), and
+   mcp_admin{action:prompts} lists prompt templates (fetch one rendered with
+   {action:prompts, name:"...", prompt_args:{...}}).
 
 5. As the model, prefer calling mcp_admin{action:list} first to see what is
    already configured before suggesting an add.`

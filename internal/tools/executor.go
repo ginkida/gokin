@@ -2033,6 +2033,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			// Git state changes when files are modified
 			e.toolCache.InvalidateByTool("git_status")
 			e.toolCache.InvalidateByTool("git_diff")
+			e.toolCache.InvalidateByTool("review_changes")
 			// tree/list_dir may be stale after file create/delete
 			if call.Name == "write" || call.Name == "delete" || call.Name == "mkdir" ||
 				call.Name == "copy" || call.Name == "move" {

@@ -121,7 +121,12 @@ func (r ToolResult) ToMap() map[string]any {
 		}
 	} else {
 		result["success"] = false
-		result["error"] = r.Error
+		// Error is capped at the same chokepoint as Content: any tool that puts
+		// subprocess output into Error (bash stderr, build/lint output) would
+		// otherwise flood the model context — the field used to escape every
+		// compressor cap (review finding; per-tool caps like verify_code's are
+		// a tighter first line, this is the backstop for ALL tools).
+		result["error"] = truncateToolResultContent(r.Error, "")
 		if r.Content != "" {
 			result["content"] = truncateToolResultContent(r.Content, "")
 		}

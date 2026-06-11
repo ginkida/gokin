@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -233,6 +235,13 @@ type goTestEvent struct {
 	Elapsed float64 `json:"Elapsed"`
 }
 
+// assertionLineRe matches the Go testing assertion format at the start of a
+// (trimmed) output line: "file.go:line:". Anchoring at the start + requiring the
+// trailing colon excludes stack-frame tokens ("foo.go:42 +0x1d"), mid-line
+// logged references ("failed at server.go:42"), and panic messages — so the
+// "Failure locations" summary points at real assertion sites, not noise.
+var assertionLineRe = regexp.MustCompile(`^\S+\.go:\d+:`)
+
 // parseTestResults parses test output and generates a structured report.
 func parseTestResults(framework, output string, execErr error, duration time.Duration) string {
 	switch framework {
@@ -308,20 +317,81 @@ func parseGoTestResults(output string, execErr error, duration time.Duration) st
 	}
 	fmt.Fprintf(&result, " (%.1fs)\n", duration.Seconds())
 
+	// Failure location summary — extract assertion sites from all failures.
+	if len(failures) > 0 {
+		locationCounts := make(map[string]int) // "file.go:line" -> failure count
+		for _, f := range failures {
+			lines := failOutput[f]
+			for _, l := range lines {
+				if loc := assertionLineRe.FindString(strings.TrimSpace(l)); loc != "" {
+					locationCounts[strings.TrimSuffix(loc, ":")]++
+				}
+			}
+		}
+		if len(locationCounts) > 0 {
+			// Sort by descending count, then by location name
+			type locCount struct {
+				loc   string
+				count int
+			}
+			sortedLocs := make([]locCount, 0, len(locationCounts))
+			for loc, count := range locationCounts {
+				sortedLocs = append(sortedLocs, locCount{loc, count})
+			}
+			sort.Slice(sortedLocs, func(i, j int) bool {
+				if sortedLocs[i].count != sortedLocs[j].count {
+					return sortedLocs[i].count > sortedLocs[j].count
+				}
+				return sortedLocs[i].loc < sortedLocs[j].loc
+			})
+			result.WriteString("\nFailure locations:\n")
+			for _, lc := range sortedLocs {
+				fmt.Fprintf(&result, "  📍 %s (%d failure(s))\n", lc.loc, lc.count)
+			}
+		}
+	}
+
 	// Failed test details
 	if len(failures) > 0 {
 		result.WriteString("\nFailed tests:\n")
 		for _, f := range failures {
 			fmt.Fprintf(&result, "  ✗ %s\n", f)
 			if lines, ok := failOutput[f]; ok {
-				// Show relevant output (last 10 lines)
-				start := 0
-				if len(lines) > 10 {
-					start = len(lines) - 10
-				}
-				for _, l := range lines[start:] {
+				// Show the meaningful output lines in their original order,
+				// capped. Order matters: a panic's "panic:" message and the
+				// continuation lines of a multi-line assertion (e.g. testify's
+				// expected/actual) carry the actual failure reason but do NOT
+				// contain a file:line token — filtering to only file:line lines
+				// (the previous behaviour) dropped them. The "Failure locations"
+				// summary above already provides the file:line navigation.
+				meaningful := make([]string, 0, len(lines))
+				for _, l := range lines {
 					l = strings.TrimSpace(l)
-					if l != "" && !strings.HasPrefix(l, "=== RUN") && !strings.HasPrefix(l, "--- FAIL") {
+					if l == "" ||
+						strings.HasPrefix(l, "=== RUN") || strings.HasPrefix(l, "=== PAUSE") ||
+						strings.HasPrefix(l, "=== CONT") || strings.HasPrefix(l, "=== NAME") ||
+						strings.HasPrefix(l, "--- FAIL") || strings.HasPrefix(l, "--- PASS") ||
+						strings.HasPrefix(l, "--- SKIP") {
+						continue
+					}
+					meaningful = append(meaningful, l)
+				}
+				// Head+tail split: a panic's "panic:" message leads the output,
+				// while go-test assertions (got/want) are appended at the END —
+				// a head-only cap drops the failure reason for chatty tests and
+				// a tail-only cap drops the panic message under a long stack.
+				const maxDetailLines = 20
+				const detailHeadLines = 8
+				if len(meaningful) <= maxDetailLines {
+					for _, l := range meaningful {
+						fmt.Fprintf(&result, "    %s\n", l)
+					}
+				} else {
+					for _, l := range meaningful[:detailHeadLines] {
+						fmt.Fprintf(&result, "    %s\n", l)
+					}
+					fmt.Fprintf(&result, "    ... (%d middle lines elided)\n", len(meaningful)-maxDetailLines)
+					for _, l := range meaningful[len(meaningful)-(maxDetailLines-detailHeadLines):] {
 						fmt.Fprintf(&result, "    %s\n", l)
 					}
 				}
@@ -336,6 +406,7 @@ func parseGoTestResults(output string, execErr error, duration time.Duration) st
 			failedPkgs = append(failedPkgs, pkg)
 		}
 	}
+	sort.Strings(failedPkgs)
 	if len(failedPkgs) > 0 {
 		fmt.Fprintf(&result, "\nFailed packages: %s\n", strings.Join(failedPkgs, ", "))
 	}

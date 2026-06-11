@@ -287,9 +287,10 @@ type App struct {
 	// Session pre-load flag (set by ResumeLastSession before Run)
 	sessionPreloaded bool
 
-	// Pending message queue
-	pendingMessage string
-	pendingMu      sync.Mutex
+	// Type-ahead pending queue (FIFO, bounded) — see pending_queue.go for the
+	// accessors; never touch the slice directly.
+	pendingQueue []string
+	pendingMu    sync.Mutex
 
 	// Automatic retry tracking for rate-limit failures.
 	rateLimitRetryMu    sync.Mutex
@@ -729,21 +730,27 @@ func (a *App) handleSubmit(message string) {
 	if a.processing {
 		a.mu.Unlock()
 
-		// Save as pending message (replaces any previous pending)
-		a.pendingMu.Lock()
-		if a.pendingMessage != "" {
-			logging.Debug("pending message replaced — previous message dropped",
-				"dropped_len", len(a.pendingMessage))
-			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry, Message: "Previous queued message replaced by new input"})
+		// Type-ahead: queue FIFO behind the in-flight request. Overflow rejects
+		// the NEW message with explicit feedback — never silently drop input.
+		pos, ok := a.enqueuePending(message)
+		if !ok {
+			logging.Debug("pending queue full — message rejected", "len", len(message))
+			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry,
+				Message: fmt.Sprintf("Queue full (%d waiting) — message not queued", pos)})
+			return
 		}
-		a.pendingMessage = message
-		a.pendingMu.Unlock()
 		a.journalEvent("request_queued", map[string]any{
 			"message_preview": previewForJournal(message),
+			"queue_position":  pos,
 		})
-		a.saveRecoverySnapshot(message)
+		a.saveRecoverySnapshot()
 
-		a.safeSendToProgram(ui.StreamTextMsg("📥 Message queued - will process after current request completes\n"))
+		a.safeSendToProgram(ui.QueuedCountMsg(pos))
+		if pos == 1 {
+			a.safeSendToProgram(ui.StreamTextMsg("📥 Queued — will process after the current request\n"))
+		} else {
+			a.safeSendToProgram(ui.StreamTextMsg(fmt.Sprintf("📥 Queued (#%d in line)\n", pos)))
+		}
 		return
 	}
 	a.processing = true
@@ -757,7 +764,7 @@ func (a *App) handleSubmit(message string) {
 	a.journalEvent("request_accept", map[string]any{
 		"message_preview": previewForJournal(message),
 	})
-	a.saveRecoverySnapshot("")
+	a.saveRecoverySnapshot()
 
 	// Now safely start the goroutine
 	if isCmd {
@@ -854,7 +861,7 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		a.mu.Lock()
 		a.processing = false
 		a.mu.Unlock()
-		a.saveRecoverySnapshot("")
+		a.saveRecoverySnapshot()
 	}()
 
 	a.mu.Lock()
@@ -921,7 +928,7 @@ func (a *App) handleQuit() {
 	a.mu.Lock()
 	a.processing = false
 	a.mu.Unlock()
-	a.saveRecoverySnapshot("")
+	a.saveRecoverySnapshot()
 	a.journalEvent("app_quit", nil)
 
 	// Use graceful shutdown with timeout
@@ -1393,9 +1400,13 @@ func (a *App) GetRecoveryReport() string {
 	if snap == nil {
 		return "No recovery snapshot found."
 	}
+	pendingDesc := fmt.Sprintf("%q", snap.PendingMessage)
+	if n := len(snap.PendingMessages); n > 1 {
+		pendingDesc = fmt.Sprintf("%d queued, next: %q", n, snap.PendingMessages[0])
+	}
 	return fmt.Sprintf(
-		"Recovery snapshot:\n- updated: %s\n- session: %s\n- processing: %v\n- pending_message: %q\n- history_len: %d\n- plan_id: %s\n- current_step: %d",
-		snap.Timestamp.Format("2006-01-02 15:04:05"), snap.SessionID, snap.Processing, snap.PendingMessage, snap.HistoryLen, snap.PlanID, snap.CurrentStepID,
+		"Recovery snapshot:\n- updated: %s\n- session: %s\n- processing: %v\n- pending: %s\n- history_len: %d\n- plan_id: %s\n- current_step: %d",
+		snap.Timestamp.Format("2006-01-02 15:04:05"), snap.SessionID, snap.Processing, pendingDesc, snap.HistoryLen, snap.PlanID, snap.CurrentStepID,
 	)
 }
 

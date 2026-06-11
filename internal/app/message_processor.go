@@ -50,7 +50,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.journalEvent("request_started", map[string]any{
 		"message_preview": previewForJournal(message),
 	})
-	a.saveRecoverySnapshot("")
+	a.saveRecoverySnapshot()
 
 	// Group all file changes from this message for atomic undo.
 	if a.undoManager != nil {
@@ -94,14 +94,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			a.executor.SetSideEffectDedup(false)
 		}
 
-		// Check for pending message and process it
-		a.pendingMu.Lock()
-		pending := a.pendingMessage
-		a.pendingMessage = ""
-		a.pendingMu.Unlock()
-
-		if pending != "" {
-			// Notify user that we're processing pending message
+		// Dispatch the next type-ahead message, if any (FIFO).
+		if pending, remaining, ok := a.dequeuePending(); ok {
+			a.safeSendToProgram(ui.QueuedCountMsg(remaining))
 			a.safeSendToProgram(ui.StreamTextMsg("\n📤 Processing queued message...\n"))
 			// Recursively handle the pending message.
 			// Was raw `go` — a panic inside handleSubmit (e.g. nil-deref
@@ -111,7 +106,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			// must use safeGo.
 			a.safeGo("pending-message-dispatch", func() { a.handleSubmit(pending) })
 		}
-		a.saveRecoverySnapshot("")
+		a.saveRecoverySnapshot()
 	}()
 
 	// Track response start time and reset tools used
@@ -1105,7 +1100,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		"step":      step.Title,
 		"execution": "direct",
 	})
-	a.saveRecoverySnapshot("")
+	a.saveRecoverySnapshot()
 	a.startStepRollbackSnapshot(approvedPlan, step)
 
 	// Update plan progress in status bar
@@ -1767,7 +1762,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		"step":      step.Title,
 		"execution": "delegated",
 	})
-	a.saveRecoverySnapshot("")
+	a.saveRecoverySnapshot()
 	a.startStepRollbackSnapshot(approvedPlan, step)
 
 	// Update plan progress in status bar
