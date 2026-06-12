@@ -21,7 +21,7 @@ go run ./cmd/gokin eval run --dry-run --scenario go_bugfix_targeted_test
 Run the same manifest across providers:
 
 ```sh
-go run ./cmd/gokin eval run --provider kimi --provider glm --provider minimax --agent-command './evals/coding/scripts/run-gokin-headless.sh'
+go run ./cmd/gokin eval run --provider kimi --provider glm --provider minimax --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
 ```
 
 The headless script uses `gokin` from PATH by default; point `GOKIN_BIN` at a
@@ -29,13 +29,13 @@ freshly built binary when iterating locally:
 
 ```sh
 go build -o /tmp/gokin ./cmd/gokin
-GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run --provider kimi --agent-command './evals/coding/scripts/run-gokin-headless.sh'
+GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run --provider kimi --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
 ```
 
 Run a provider/model matrix:
 
 ```sh
-go run ./cmd/gokin eval run --provider kimi --model kimi-for-coding --agent-command './evals/coding/scripts/run-gokin-headless.sh'
+go run ./cmd/gokin eval run --provider kimi --model kimi-for-coding --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
 ```
 
 Summarize the last run:
@@ -103,12 +103,12 @@ go build -o /tmp/gokin ./cmd/gokin
 
 GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
   --provider deepseek \
-  --agent-command './evals/coding/scripts/run-gokin-headless.sh' \
+  --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
   --output evals/coding/baselines/deepseek.jsonl
 
 GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
   --provider kimi \
-  --agent-command './evals/coding/scripts/run-gokin-headless.sh' \
+  --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
   --output evals/coding/baselines/kimi.jsonl
 ```
 
