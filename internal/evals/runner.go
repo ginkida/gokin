@@ -550,10 +550,12 @@ type journalEvent struct {
 }
 
 func summarizeExecutionJournal(workspace, output string, changed []string) *JournalSummary {
-	falseClaims := falseFileClaims(output, changed)
 	journalPath := filepath.Join(workspace, ".gokin", "execution_journal.jsonl")
 	f, err := os.Open(journalPath)
 	if err != nil {
+		// No journal → no files-read evidence; claims are judged against
+		// changed files only.
+		falseClaims := falseFileClaims(output, changed, nil)
 		if os.IsNotExist(err) {
 			if len(falseClaims) == 0 {
 				return nil
@@ -569,8 +571,7 @@ func summarizeExecutionJournal(workspace, output string, changed []string) *Jour
 	defer f.Close()
 
 	summary := &JournalSummary{
-		Path:            ".gokin/execution_journal.jsonl",
-		FalseFileClaims: falseClaims,
+		Path: ".gokin/execution_journal.jsonl",
 	}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
@@ -596,6 +597,10 @@ func summarizeExecutionJournal(workspace, output string, changed []string) *Jour
 	sort.Strings(summary.FilesRead)
 	sort.Strings(summary.FilesEdited)
 	sort.Strings(summary.VerificationCommands)
+
+	// Computed AFTER the scan: files the agent actually READ are legitimate
+	// to cite in the final answer, so they need to be known first.
+	summary.FalseFileClaims = falseFileClaims(output, changed, summary.FilesRead)
 	sort.Strings(summary.FalseFileClaims)
 	return summary
 }
@@ -756,6 +761,19 @@ func commandLooksLikeVerification(command string) bool {
 			return true
 		}
 	}
+	// node's built-in runner and direct test-file invocations: the
+	// node-auth-form fixture's npm script is `node test/x.test.js`, and
+	// agents often run that file directly — both are real verification.
+	// Gated on a node invocation so `cat x.test.js` doesn't count.
+	if strings.HasPrefix(lower, "node ") || strings.Contains(lower, " node ") {
+		if strings.Contains(lower, "--test") || strings.Contains(lower, ".test.") || strings.Contains(lower, "_test.") {
+			return true
+		}
+	}
+	// python stdlib runner (python3 -m unittest …).
+	if strings.Contains(lower, "unittest") {
+		return true
+	}
 	return strings.Contains(lower, " verify") || strings.Contains(lower, " lint") ||
 		strings.Contains(lower, " typecheck") || strings.Contains(lower, " compile")
 }
@@ -772,7 +790,7 @@ func scoreScenario(scenario Scenario, result Result) map[string]bool {
 		"task_completed":                     result.Agent.Success,
 		"verification_passed":                verificationPassed,
 		"touched_files_scoped":               touchedFilesScoped(result.ChangedFiles),
-		"no_false_file_claims":               noFalseFileClaims(agentOutput, result.ChangedFiles),
+		"no_false_file_claims":               noFalseFileClaims(agentOutput, result.ChangedFiles, journalFilesRead(result.Journal)),
 		"tool_calls_reasonable":              toolCallsReasonable,
 		"final_answer_mentions_verification": mentionsVerification(agentOutput, scenario.VerificationCommands),
 		"journal_present":                    journalPresent,
@@ -828,18 +846,29 @@ func touchedFilesScoped(paths []string) bool {
 
 var pathTokenRE = regexp.MustCompile(`\b[A-Za-z0-9_\-./]+\.(?:go|py|ts|tsx|js|jsx|rs|java|kt|rb|swift|c|cc|cpp|h|hpp|yaml|yml|toml|json|md|mod|sum)\b`)
 
-func noFalseFileClaims(output string, changed []string) bool {
-	return len(falseFileClaims(output, changed)) == 0
+func journalFilesRead(j *JournalSummary) []string {
+	if j == nil {
+		return nil
+	}
+	return j.FilesRead
 }
 
-func falseFileClaims(output string, changed []string) []string {
+func noFalseFileClaims(output string, changed, read []string) bool {
+	return len(falseFileClaims(output, changed, read)) == 0
+}
+
+func falseFileClaims(output string, changed, read []string) []string {
 	output = strings.TrimSpace(output)
 	if output == "" {
 		return nil
 	}
 	var claims []string
-	allowed := make(map[string]bool, len(changed)*2)
-	for _, path := range changed {
+	allowed := make(map[string]bool, (len(changed)+len(read))*2)
+	// Mentioning a file you CHANGED or READ is honest evidence-citing — the
+	// investigation scenarios literally require naming callers, and a good
+	// final answer cites where the truth came from. A false claim is naming
+	// a path you neither touched nor opened: the hallucinated-path class.
+	for _, path := range append(append([]string{}, changed...), read...) {
 		path = filepath.ToSlash(strings.TrimSpace(path))
 		if path == "" {
 			continue

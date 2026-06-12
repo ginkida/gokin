@@ -36,6 +36,18 @@ func (a *App) RunHeadless(ctx context.Context, prompt string) error {
 	finishOutput := a.installHeadlessHandler()
 	a.prepareHeadlessRuntime()
 
+	// Bypass the task router: its sub-agent/orchestrator strategies stream
+	// output and tool activity through the TUI program (nil here) and the
+	// runner's own handlers — a routed headless run printed NOTHING to
+	// stdout and left the execution journal blind (zero tool events) while
+	// files changed underneath. Headless = ONE directly-executed agent,
+	// fully observable on stdout and in the journal. First caught by the
+	// deepseek eval baseline: 3 complex scenarios passed verification with
+	// an empty journal and empty output.
+	a.mu.Lock()
+	a.headlessDirect = true
+	a.mu.Unlock()
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

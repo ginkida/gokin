@@ -196,11 +196,17 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	apiOutputAccum := 0
 	cacheReadAccum := 0
 
+	a.mu.Lock()
+	headlessDirect := a.headlessDirect
+	a.mu.Unlock()
+
 	for {
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
 		currentMessage := retryMessage
 		execFn := func() error {
-			if a.taskRouter != nil {
+			// Headless runs execute directly: routed strategies stream
+			// through the nil TUI program and skip the journal (headless.go).
+			if a.taskRouter != nil && !headlessDirect {
 				// Route the task intelligently
 				newHistory, response, err = a.taskRouter.Execute(ctx, history, currentMessage)
 

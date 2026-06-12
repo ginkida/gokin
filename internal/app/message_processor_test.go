@@ -169,6 +169,9 @@ func TestRunHeadless_ProcessesOnePromptWithoutTUI(t *testing.T) {
 	if !strings.HasSuffix(stdout, "\n") {
 		t.Fatalf("headless stdout must end with a newline for shell capture: %q", stdout)
 	}
+	if !a.headlessDirect {
+		t.Fatal("RunHeadless must set headlessDirect — routed strategies bypass stdout and the journal")
+	}
 
 	if err := a.lastError; err != "" {
 		t.Fatalf("RunHeadless() error = %v", err)

@@ -213,6 +213,13 @@ type App struct {
 	loopRunner  *loops.Runner
 	loopMemory  *loops.MemoryWriter // human-readable per-loop markdown
 
+	// headlessDirect forces processMessageWithContext to execute through the
+	// plain executor instead of the task router. Set by RunHeadless: routed
+	// sub-agent/orchestrator strategies stream through the (nil) TUI program
+	// and bypass the headless stdout handler AND the execution journal —
+	// see headless.go for the incident write-up. Guarded by a.mu.
+	headlessDirect bool
+
 	// Streaming token estimation
 	streamedChars           int // Accumulated chars during current streaming session
 	streamedEstimatedTokens int // Accumulated estimated tokens during current streaming session

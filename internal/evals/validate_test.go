@@ -90,3 +90,39 @@ func TestManifestValidate_RejectsBadDeliveredState(t *testing.T) {
 		t.Fatal("Validate() must reject delivered_state other than red/green")
 	}
 }
+
+func TestCommandLooksLikeVerification_NodeAndPython(t *testing.T) {
+	cases := map[string]bool{
+		"node --test test/backoff.test.js": true,
+		"node test/auth-form.test.js":      true,
+		"cd /tmp/ws && node --test":        true,
+		"python3 -m unittest discover -s tests -t .": true,
+		"cat test/auth-form.test.js":                 false,
+		"node server.js":                             false,
+		"echo done":                                  false,
+		"go test ./internal/x":                       true,
+	}
+	for cmd, want := range cases {
+		if got := commandLooksLikeVerification(cmd); got != want {
+			t.Errorf("commandLooksLikeVerification(%q) = %v, want %v", cmd, got, want)
+		}
+	}
+}
+
+func TestFalseFileClaims_ReadFilesAreLegitimateCitations(t *testing.T) {
+	output := "Fixed the bug in internal/config/duration.go after checking internal/app/version.go; see also internal/ghost/fake.go"
+	changed := []string{"internal/config/duration.go"}
+	read := []string{"internal/app/version.go"}
+
+	claims := falseFileClaims(output, changed, read)
+	if len(claims) != 1 || claims[0] != "internal/ghost/fake.go" {
+		t.Fatalf("claims = %v, want only the hallucinated path (changed and read files are honest citations)", claims)
+	}
+
+	if noFalseFileClaims(output, changed, read) {
+		t.Fatal("hallucinated path must still flag the metric")
+	}
+	if !noFalseFileClaims("Edited internal/config/duration.go, verified against internal/app/version.go", changed, read) {
+		t.Fatal("citing only changed+read files must pass")
+	}
+}
