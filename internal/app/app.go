@@ -937,6 +937,11 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		// Handle special command markers
 		if browsePath, ok := strings.CutPrefix(result, "__browse:"); ok {
 			a.safeSendToProgram(ui.FileBrowserRequestMsg{StartPath: browsePath})
+		} else if prompt, ok := strings.CutPrefix(result, commands.PromptMarker); ok {
+			// File-based command: the expansion is a MODEL PROMPT, not
+			// display text. Re-enter through handleSubmit (it decides
+			// queue-vs-process) once this command's processing flag clears.
+			a.safeGo("file-command-dispatch", func() { a.handleSubmit(prompt) })
 		} else {
 			// Display command result as assistant message
 			a.safeSendToProgram(ui.StreamTextMsg(result))

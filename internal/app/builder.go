@@ -62,6 +62,7 @@ type Builder struct {
 	permManager      *permission.Manager
 	planManager      *plan.Manager
 	hooksManager     *hooks.Manager
+	fileCommands     []*commands.FileCommand
 	taskManager      *tasks.Manager
 	undoManager      *undo.Manager
 	agentRunner      *agent.Runner
@@ -783,6 +784,20 @@ func (b *Builder) initManagers() error {
 			logging.Warn("failed to load command aliases", "path", aliasPath, "error", err)
 		}
 	}
+
+	// File-based slash commands: <workDir>/.gokin/commands/*.md (project,
+	// wins conflicts) + <configDir>/commands/*.md (global). Builtins always
+	// win; broken files warn instead of failing boot.
+	globalCmdDir := ""
+	if b.configDir != "" {
+		globalCmdDir = filepath.Join(b.configDir, "commands")
+	}
+	fileCommands, fileCmdWarnings := b.commandHandler.LoadFileCommands(
+		filepath.Join(b.workDir, ".gokin", "commands"), globalCmdDir)
+	for _, w := range fileCmdWarnings {
+		logging.Warn("file command", "warning", w)
+	}
+	b.fileCommands = fileCommands
 
 	// Initialize task router
 	routerCfg := &router.RouterConfig{
@@ -1707,6 +1722,19 @@ func (b *Builder) wireDependencies() error {
 	b.tuiModel.SetWorkDir(b.workDir)
 	if b.commandHandler != nil {
 		b.tuiModel.SetCommandAliases(b.commandHandler.Aliases())
+	}
+	// Surface file-based commands in autocomplete with their source.
+	if len(b.fileCommands) > 0 {
+		infos := make([]ui.CommandInfo, 0, len(b.fileCommands))
+		for _, fc := range b.fileCommands {
+			infos = append(infos, ui.CommandInfo{
+				Name:        fc.Name(),
+				Description: fc.Description(),
+				Category:    "Custom",
+				Usage:       fc.Usage(),
+			})
+		}
+		b.tuiModel.AddCommands(infos)
 	}
 	b.tuiModel.SetPermissionCallback(app.handlePermissionDecision)
 	b.tuiModel.SetQuestionCallback(app.handleQuestionAnswer)

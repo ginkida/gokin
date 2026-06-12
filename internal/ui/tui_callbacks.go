@@ -140,6 +140,15 @@ func (m *Model) SetCommandAliases(aliases map[string]string) {
 	m.input.SetCommandAliases(aliases)
 }
 
+// AddCommands appends commands to the input autocomplete list — used for
+// file-based custom commands loaded at boot (deduped by name inside
+// AddCommand, so a re-wire can't double entries).
+func (m *Model) AddCommands(infos []CommandInfo) {
+	for _, info := range infos {
+		m.input.AddCommand(info)
+	}
+}
+
 // RecordRecentCommand marks the given command as most-recently-used in the
 // input model. Called after successful command dispatch.
 func (m *Model) RecordRecentCommand(name string) {

@@ -96,9 +96,12 @@ type AppInterface interface {
 }
 
 // Handler manages slash commands.
-// The commands map is populated exclusively during NewHandler() and becomes
-// immutable once the constructor returns (frozen == true). This makes Handler
-// safe for concurrent use without a mutex on the commands map.
+// The commands map is populated during NewHandler() plus the boot-phase
+// loaders (LoadFileCommands, like LoadAliasesFromFile for aliases) and is
+// immutable once startup completes — the builder finishes all loading before
+// the handler is shared across goroutines. This makes Handler safe for
+// concurrent use without a mutex on the commands map. Register() panics
+// post-freeze; the file-command loader is the sanctioned boot-time path.
 type Handler struct {
 	commands map[string]Command
 	frozen   bool
