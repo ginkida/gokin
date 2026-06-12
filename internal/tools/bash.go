@@ -904,7 +904,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 func (t *BashTool) buildExitResult(command, stdout, stderr string, exitCode int) ToolResult {
 	if benignNonZeroExit(command, exitCode, stderr) {
 		res := t.buildResult(stdout, "")
-		if res.Content == "ok" {
+		if res.Content == "ok" || res.Content == "Command completed successfully (no output)." {
 			// buildResult's empty-output fallback. For a search/compare that
 			// produced nothing, a class-aware label reads far better than "ok".
 			res.Content = benignEmptyLabel(command)
@@ -1057,7 +1057,7 @@ func (t *BashTool) buildResult(stdoutStr, stderrStr string) ToolResult {
 	}
 
 	if result == "" {
-		result = "ok" // Success with no output (git add, mkdir, mv, etc.)
+		result = "Command completed successfully (no output)."
 	}
 
 	return NewSuccessResult(result)

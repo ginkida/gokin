@@ -160,13 +160,19 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 			if len(cached.Files) == 0 {
 				return NewSuccessResult("(no matches)"), nil
 			}
-			var builder strings.Builder
-			for _, f := range cached.Files {
+			relPaths := make([]string, len(cached.Files))
+			for i, f := range cached.Files {
 				relPath, err := filepath.Rel(t.workDir, f)
 				if err != nil {
 					relPath = f
 				}
-				builder.WriteString(relPath)
+				relPaths[i] = relPath
+			}
+			var builder strings.Builder
+			fmt.Fprintf(&builder, "Found %d file(s) matching '%s' (cached):\n", len(cached.Files), pattern)
+			builder.WriteString(actionableGlobSummary(relPaths))
+			for _, p := range relPaths {
+				builder.WriteString(p)
 				builder.WriteString("\n")
 			}
 			return NewSuccessResult(builder.String()), nil
@@ -253,18 +259,14 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewSuccessResult("(no matches)"), nil
 	}
 
-	var builder strings.Builder
-	if totalFound > maxResults {
-		fmt.Fprintf(&builder, "(showing %d of %d+)\n", maxResults, totalFound)
-	}
-	for _, f := range files {
-		// Make path relative if possible
+	// Collect relative paths for summary
+	relPaths := make([]string, len(files))
+	for i, f := range files {
 		relPath, err := filepath.Rel(t.workDir, f.path)
 		if err != nil {
 			relPath = f.path
 		}
-		builder.WriteString(relPath)
-		builder.WriteString("\n")
+		relPaths[i] = relPath
 
 		// Record access pattern for predictive loading
 		if t.predictor != nil {
@@ -272,5 +274,159 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		}
 	}
 
+	var builder strings.Builder
+
+	// Summary header
+	displayCount := len(files)
+	capped := totalFound > maxResults
+	if capped {
+		fmt.Fprintf(&builder, "Found %d+ files matching '%s' (showing %d):\n", totalFound, pattern, maxResults)
+	} else {
+		fmt.Fprintf(&builder, "Found %d file(s) matching '%s':\n", displayCount, pattern)
+	}
+
+	// Actionable summary: group by category
+	builder.WriteString(actionableGlobSummary(relPaths))
+
+	// File list
+	for _, p := range relPaths {
+		builder.WriteString(p)
+		builder.WriteString("\n")
+	}
+
 	return NewSuccessResult(builder.String()), nil
+}
+
+// actionableGlobSummary groups files by category and provides a "Next:" hint.
+// Mirrors the actionableGrepSummary pattern — turns a raw file listing into
+// something the model can act on without re-parsing the whole list.
+func actionableGlobSummary(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+
+	// Group by category
+	var (
+		source []string
+		tests  []string
+		config []string
+		docs   []string
+		other  []string
+	)
+	for _, p := range paths {
+		switch {
+		case isTestPath(p):
+			tests = append(tests, p)
+		case isConfigPath(p):
+			config = append(config, p)
+		case isDocPath(p):
+			docs = append(docs, p)
+		case isVendorPath(p) || isGeneratedPath(p):
+			other = append(other, p)
+		default:
+			source = append(source, p)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("Actionable summary:\n")
+
+	// Per-category counts with top items
+	printCategory(&b, "- Source files", source, 3)
+	printCategory(&b, "- Test files", tests, 2)
+	printCategory(&b, "- Config files", config, 2)
+	printCategory(&b, "- Docs", docs, 2)
+	printCategory(&b, "- Other (vendor/generated)", other, 0)
+
+	// Next hint
+	b.WriteString("- Next: ")
+	switch {
+	case len(source) > 0:
+		b.WriteString("read the most relevant source file(s) to understand the code before editing.\n")
+	case len(tests) > 0:
+		b.WriteString("read a test file to understand expected behaviour, then find the corresponding source.\n")
+	case len(config) > 0:
+		b.WriteString("read a config file to understand the project setup.\n")
+	default:
+		b.WriteString("read a file to understand its contents before editing.\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func printCategory(b *strings.Builder, label string, files []string, showTop int) {
+	if len(files) == 0 {
+		return
+	}
+	if showTop == 0 {
+		fmt.Fprintf(b, "%s: %d file(s)\n", label, len(files))
+		return
+	}
+	if len(files) <= showTop {
+		fmt.Fprintf(b, "%s: %d — %s\n", label, len(files), strings.Join(files, ", "))
+	} else {
+		fmt.Fprintf(b, "%s: %d — %s, ...\n", label, len(files), strings.Join(files[:showTop], ", "))
+	}
+}
+
+// isConfigPath flags configuration files.
+func isConfigPath(path string) bool {
+	lower := strings.ToLower(path)
+	base := lower
+	if idx := strings.LastIndex(base, "/"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	// Common config file names
+	configNames := []string{
+		"dockerfile", "docker-compose.yml", "docker-compose.yaml",
+		"makefile", "gnumakefile",
+		".env", ".env.example", ".envrc",
+		"package.json", "tsconfig.json", "jsconfig.json",
+		"pyproject.toml", "setup.cfg", "setup.py",
+		"go.mod", "go.sum",
+		"cargo.toml", "cargo.lock",
+		"cmakelists.txt",
+	}
+	for _, name := range configNames {
+		if base == name {
+			return true
+		}
+	}
+	// Config extensions
+	configExts := []string{".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".json", ".xml"}
+	for _, ext := range configExts {
+		if strings.HasSuffix(base, ext) {
+			// But exclude test fixtures and data files that happen to have these extensions
+			if strings.Contains(lower, "/testdata/") || strings.Contains(lower, "/fixtures/") {
+				return false
+			}
+			return true
+		}
+	}
+	// Config directories
+	return strings.Contains(lower, "/.github/") || strings.Contains(lower, "/.gokin/")
+}
+
+// isDocPath flags documentation files.
+func isDocPath(path string) bool {
+	lower := strings.ToLower(path)
+	base := lower
+	if idx := strings.LastIndex(base, "/"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	docExts := []string{".md", ".mdx", ".rst", ".txt", ".adoc", ".asciidoc"}
+	for _, ext := range docExts {
+		if strings.HasSuffix(base, ext) {
+			return true
+		}
+	}
+	// Doc directory patterns
+	docDirs := []string{"/docs/", "/doc/", "/documentation/", "/readme"}
+	for _, d := range docDirs {
+		if strings.Contains(lower, d) {
+			return true
+		}
+	}
+	return strings.HasPrefix(base, "readme") || strings.HasPrefix(base, "changelog") ||
+		strings.HasPrefix(base, "contributing") || strings.HasPrefix(base, "license")
 }

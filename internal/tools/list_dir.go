@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"google.golang.org/genai"
@@ -108,13 +109,54 @@ func (t *ListDirTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 		entries = entries[:maxListDirEntries]
 	}
 
-	var builder strings.Builder
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() {
-			name += "/"
+	// Sort: dirs first, then files, alpha within each group
+	sort.SliceStable(entries, func(i, j int) bool {
+		iDir, jDir := entries[i].IsDir(), entries[j].IsDir()
+		if iDir != jDir {
+			return iDir // dirs before files
 		}
-		builder.WriteString(name)
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	// Count dirs vs files
+	var dirs, files []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirs = append(dirs, entry.Name()+"/")
+		} else {
+			files = append(files, entry.Name())
+		}
+	}
+
+	// Relative path for display
+	displayPath := dirPath
+	if filepath.IsAbs(dirPath) {
+		if rel, err := filepath.Rel(t.baseDir, dirPath); err == nil && rel != "" {
+			displayPath = rel
+		}
+	}
+
+	var builder strings.Builder
+
+	// Summary header
+	if truncated {
+		fmt.Fprintf(&builder, "%s: %d+ entries (showing %d — %d dirs, %d files):\n",
+			displayPath, len(entries)+10 /* rough lower bound */, maxListDirEntries, len(dirs), len(files))
+	} else {
+		fmt.Fprintf(&builder, "%s: %d entries (%d dirs, %d files):\n",
+			displayPath, len(dirs)+len(files), len(dirs), len(files))
+	}
+
+	// Actionable summary
+	builder.WriteString(actionableListDirSummary(dirs, files, displayPath))
+
+	// Directory listing (dirs first)
+	for _, d := range dirs {
+		builder.WriteString(d)
+		builder.WriteByte('\n')
+	}
+	for _, f := range files {
+		builder.WriteString(f)
 		builder.WriteByte('\n')
 	}
 
@@ -123,4 +165,59 @@ func (t *ListDirTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 	}
 
 	return NewSuccessResult(builder.String()), nil
+}
+
+// actionableListDirSummary provides a structured summary of a directory listing.
+// Mirrors the actionableGrepSummary/actionableGlobSummary pattern.
+func actionableListDirSummary(dirs, files []string, displayPath string) string {
+	if len(dirs) == 0 && len(files) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("Actionable summary:\n")
+
+	// Top subdirectories
+	if len(dirs) > 0 {
+		top := dirs
+		if len(top) > 5 {
+			top = top[:5]
+		}
+		fmt.Fprintf(&b, "- %d subdir(s): %s\n", len(dirs), strings.Join(top, ", "))
+	}
+
+	// Key files (non-dotfiles first, then dotfiles)
+	if len(files) > 0 {
+		var keyFiles []string
+		for _, f := range files {
+			if !strings.HasPrefix(f, ".") {
+				keyFiles = append(keyFiles, f)
+			}
+		}
+		if len(keyFiles) == 0 {
+			keyFiles = files // all dotfiles — show them
+		}
+		top := keyFiles
+		if len(top) > 5 {
+			top = top[:5]
+		}
+		fmt.Fprintf(&b, "- %d file(s): %s", len(files), strings.Join(top, ", "))
+		if len(top) < len(files) {
+			b.WriteString(", ...")
+		}
+		b.WriteString("\n")
+	}
+
+	// Next hint
+	b.WriteString("- Next: ")
+	switch {
+	case len(dirs) > 0 && displayPath == ".":
+		b.WriteString("cd into a subdirectory or read a key file (e.g. README.md, go.mod, package.json) to understand the project.\n")
+	case len(dirs) > 0:
+		b.WriteString("list a subdirectory or read a key file to understand this component.\n")
+	default:
+		b.WriteString("read the most relevant file to understand its contents before editing.\n")
+	}
+	b.WriteString("\n")
+	return b.String()
 }
