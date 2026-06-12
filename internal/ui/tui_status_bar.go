@@ -74,14 +74,13 @@ func (m Model) renderStatusBarMinimal() string {
 // Shows all mandatory fields in short form.
 func (m Model) renderStatusBarCompact() string {
 	left := joinStatusSegments(m.compactStatusSegments())
-	right := ""
+	var requiredRight []string
 	if !m.output.IsAtBottom() {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
-		right = scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent()))
+		requiredRight = append(requiredRight, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
 	}
 
-	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
-	return left + strings.Repeat(" ", padding) + right
+	return renderFittedStatusLine(m.width, left, m.statusBarHintSegments(true), requiredRight)
 }
 
 func (m Model) compactStatusSegments() []string {
@@ -174,23 +173,15 @@ func (m Model) safetyModeSegments(minimal bool) []string {
 func (m Model) renderStatusBarMedium() string {
 	left := joinStatusSegments(m.baseStatusSegments(true))
 
-	// Right side: cost + scroll indicator
-	var rightParts []string
-	if m.sessionCost > 0 {
-		costStr := fmt.Sprintf("$%.2f", m.sessionCost)
-		if m.sessionCost < 0.01 {
-			costStr = fmt.Sprintf("$%.4f", m.sessionCost)
-		}
-		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(ColorDim).Render(costStr))
-	}
+	// Right side: scroll indicator and urgent runtime health. Session cost is
+	// deliberately kept out of chrome to avoid low-value visual noise.
+	var requiredRight []string
 	if !m.output.IsAtBottom() {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
-		rightParts = append(rightParts, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
+		requiredRight = append(requiredRight, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
 	}
-	right := joinStatusSegments(rightParts)
 
-	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
-	return left + strings.Repeat(" ", padding) + right
+	return renderFittedStatusLine(m.width, left, m.statusBarHintSegments(false), requiredRight)
 }
 
 // renderStatusBarFull renders the full status bar for wide terminals (>= 120 chars).
@@ -201,22 +192,22 @@ func (m Model) renderStatusBarFull() string {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(ColorDim).Render(shortenModelName(m.currentModel)))
 	}
 
-	var rightParts []string
+	var requiredRight []string
 
 	// Retry indicator (important — shows active retries)
 	if m.retryAttempt > 0 && m.retryMax > 0 {
 		retryStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-		rightParts = append(rightParts, retryStyle.Render(fmt.Sprintf("↻ %d/%d", m.retryAttempt, m.retryMax)))
+		requiredRight = append(requiredRight, retryStyle.Render(fmt.Sprintf("↻ %d/%d", m.retryAttempt, m.retryMax)))
 	} else if !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil) {
 		wait := time.Until(m.rateLimitWaitUntil).Round(time.Second)
 		waitStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-		rightParts = append(rightParts, waitStyle.Render(fmt.Sprintf("⏳ Rate Limit %s", wait)))
+		requiredRight = append(requiredRight, waitStyle.Render(fmt.Sprintf("⏳ Rate Limit %s", wait)))
 	}
 
 	// Scroll indicator
 	if !m.output.IsAtBottom() {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
-		rightParts = append(rightParts, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
+		requiredRight = append(requiredRight, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
 	}
 
 	// MCP health (only when unhealthy)
@@ -225,23 +216,11 @@ func (m Model) renderStatusBarFull() string {
 		if m.mcpHealthy == 0 {
 			mcpColor = ColorError
 		}
-		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(mcpColor).Render(fmt.Sprintf("MCP %d/%d", m.mcpHealthy, m.mcpTotal)))
-	}
-
-	// Session cost in status bar
-	if m.sessionCost > 0 {
-		costStr := fmt.Sprintf("$%.2f", m.sessionCost)
-		if m.sessionCost < 0.01 {
-			costStr = fmt.Sprintf("$%.4f", m.sessionCost)
-		}
-		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(ColorDim).Render(costStr))
+		requiredRight = append(requiredRight, lipgloss.NewStyle().Foreground(mcpColor).Render(fmt.Sprintf("MCP %d/%d", m.mcpHealthy, m.mcpTotal)))
 	}
 
 	left := joinStatusSegments(leftParts)
-	right := joinStatusSegments(rightParts)
-
-	padding := safePadding(m.width, lipgloss.Width(left), lipgloss.Width(right))
-	return left + strings.Repeat(" ", padding) + right
+	return renderFittedStatusLine(m.width, left, m.statusBarHintSegments(false), requiredRight)
 }
 
 // statusSeparator returns the muted "│" used to delimit status-bar segments.
@@ -266,6 +245,68 @@ func joinStatusSegments(segments []string) string {
 		return ""
 	}
 	return strings.Join(nonEmpty, statusSeparator())
+}
+
+func renderFittedStatusLine(width int, left string, optionalRight, requiredRight []string) string {
+	optional := append([]string(nil), optionalRight...)
+	for {
+		rightParts := append([]string(nil), optional...)
+		rightParts = append(rightParts, requiredRight...)
+		right := joinStatusSegments(rightParts)
+		if width <= 0 || right == "" || lipgloss.Width(left)+lipgloss.Width(right)+1 <= width || len(optional) == 0 {
+			padding := safePadding(width, lipgloss.Width(left), lipgloss.Width(right))
+			return left + strings.Repeat(" ", padding) + right
+		}
+		optional = optional[:len(optional)-1]
+	}
+}
+
+type shortcutHint struct {
+	key  string
+	desc string
+}
+
+func (m Model) statusBarHintSegments(compact bool) []string {
+	style := lipgloss.NewStyle().Foreground(ColorDim)
+	var parts []string
+
+	if m.state == StateInput {
+		if len(m.todoItems) > 0 && !m.todosVisible {
+			if compact {
+				parts = append(parts, style.Render(fmt.Sprintf("C-t tasks %d", len(m.todoItems))))
+			} else {
+				parts = append(parts, style.Render(fmt.Sprintf("Ctrl+T tasks %d", len(m.todoItems))))
+			}
+		}
+		if m.activityFeed != nil && !m.activityFeed.IsVisible() && m.activityFeed.HasActiveEntries() {
+			if compact {
+				parts = append(parts, style.Render("C-o activity"))
+			} else {
+				parts = append(parts, style.Render("Ctrl+O activity"))
+			}
+		}
+	}
+
+	for _, hint := range m.contextualShortcutHintPairs() {
+		key := hint.key
+		if compact {
+			key = compactKeyLabel(key)
+		}
+		parts = append(parts, style.Render(key+" "+hint.desc))
+	}
+
+	return parts
+}
+
+func compactKeyLabel(key string) string {
+	switch key {
+	case "Ctrl+T":
+		return "C-t"
+	case "Ctrl+O":
+		return "C-o"
+	default:
+		return key
+	}
 }
 
 func (m Model) baseStatusSegments(withContextBar bool) []string {
@@ -722,57 +763,25 @@ func (m Model) degradedModeLabel(withDetail bool) string {
 	return "mode:" + reason
 }
 
-// contextualShortcutHints returns a compact line of shortcuts relevant to current state.
-func (m Model) contextualShortcutHints() string {
-	keyStyle := lipgloss.NewStyle().Foreground(ColorMuted).Bold(true)
-	descStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	sep := statusSeparator()
-
-	var parts []string
-	add := func(key, desc string) {
-		parts = append(parts, keyStyle.Render(key)+" "+descStyle.Render(desc))
-	}
-
+func (m Model) contextualShortcutHintPairs() []shortcutHint {
 	switch m.state {
 	case StatePermissionPrompt:
-		add("y", "Allow")
-		add("a", "Always")
-		add("n", "Deny")
-		add("esc", "Cancel")
+		return []shortcutHint{{"y", "Allow"}, {"a", "Always"}, {"n", "Deny"}, {"esc", "Cancel"}}
 	case StatePlanApproval:
-		add("y", "Approve")
-		add("n", "Reject")
-		add("m", "Modify")
-		add("↑↓", "Navigate")
+		return []shortcutHint{{"y", "Approve"}, {"n", "Reject"}, {"m", "Modify"}, {"↑↓", "Navigate"}}
 	case StateDiffPreview:
-		add("Enter", "Accept")
-		add("e", "Edit")
-		add("n", "Reject")
-		add("q", "Close")
+		return []shortcutHint{{"Enter", "Accept"}, {"e", "Edit"}, {"n", "Reject"}, {"q", "Close"}}
 	case StateMultiDiffPreview:
-		add("y", "Apply all")
-		add("n", "Reject all")
-		add("Tab", "Switch pane")
-		add("↑↓", "Browse")
+		return []shortcutHint{{"y", "Apply all"}, {"n", "Reject all"}, {"Tab", "Switch pane"}, {"↑↓", "Browse"}}
 	case StateQuestionPrompt:
-		add("↑↓", "Navigate")
-		add("Enter", "Confirm")
-		add("esc", "Cancel")
+		return []shortcutHint{{"↑↓", "Navigate"}, {"Enter", "Confirm"}, {"esc", "Cancel"}}
 	case StateModelSelector:
-		add("↑↓", "Navigate")
-		add("Enter", "Select")
-		add("esc", "Cancel")
+		return []shortcutHint{{"↑↓", "Navigate"}, {"Enter", "Select"}, {"esc", "Cancel"}}
 	case StateProcessing, StateStreaming:
-		add("esc", "Interrupt")
+		return []shortcutHint{{"Esc", "interrupt"}}
 	default:
-		return ""
+		return nil
 	}
-
-	if len(parts) == 0 {
-		return ""
-	}
-
-	return strings.Join(parts, sep)
 }
 
 // shortenModelName returns a shortened model name for status-bar display.

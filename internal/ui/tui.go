@@ -86,9 +86,10 @@ type Model struct {
 	planProgress     *PlanProgressMsg
 	planProgressMode bool // True when plan is actively executing
 
-	// Session timing and cost
+	// Session timing. Session COST deliberately has no Model field: chrome
+	// (titlebar/status bar) stopped displaying it — per-response cost stays
+	// in the metadata footer and /cost owns the cumulative view.
 	sessionStart time.Time
-	sessionCost  float64 // Cumulative USD cost this session
 
 	// Permission prompt state
 	permRequest        *PermissionRequestMsg
@@ -1724,10 +1725,6 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if msg.Duration > 0 {
 			m.lastRequestLatency = msg.Duration
 		}
-		// Accumulate session cost
-		if msg.Cost > 0 {
-			m.sessionCost += msg.Cost
-		}
 		// Render response metadata footer (or minimal separator if no data)
 		footer := m.renderResponseMetadata(msg)
 		if footer == "" {
@@ -2738,14 +2735,6 @@ func (m *Model) findActiveToolCall(name string, args map[string]any) int {
 func (m Model) View() string {
 	var builder strings.Builder
 
-	// Top-frame title bar (≥80 cols) — three dots + path + provider/model/$cost.
-	// Renders first so toasts and content stack underneath without shifting
-	// the frame line itself.
-	if title := m.renderTitlebar(); title != "" {
-		builder.WriteString(title)
-		builder.WriteString("\n")
-	}
-
 	// Toast notifications (top of screen) - single line, minimal
 	if m.toastManager != nil && m.toastManager.Count() > 0 {
 		toasts := m.toastManager.View(m.width)
@@ -3072,9 +3061,10 @@ func (m Model) View() string {
 		builder.WriteString("\n")
 	}
 
-	// Input area — also rendered during processing/streaming so the user can
-	// SEE what they're type-ahead composing (keys already route there).
-	if m.typeAheadActive() {
+	// Input area. During processing/streaming it appears only after the user
+	// starts composing type-ahead, so an idle busy state gives one more row to
+	// output.
+	if m.shouldRenderInputArea() {
 		builder.WriteString(m.input.View())
 	}
 	if m.state == StateInput {
@@ -3091,24 +3081,6 @@ func (m Model) View() string {
 			}
 		}
 
-		// Hints for hidden panels with content
-		var hiddenPanelHints []string
-		if len(m.todoItems) > 0 && !m.todosVisible {
-			hiddenPanelHints = append(hiddenPanelHints, fmt.Sprintf("Ctrl+T — tasks (%d)", len(m.todoItems)))
-		}
-		if m.activityFeed != nil && !m.activityFeed.IsVisible() && m.activityFeed.HasActiveEntries() {
-			hiddenPanelHints = append(hiddenPanelHints, "Ctrl+O — activity")
-		}
-		if len(hiddenPanelHints) > 0 {
-			hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-			builder.WriteString("\n" + hintStyle.Render("  "+strings.Join(hiddenPanelHints, " • ")))
-		}
-	}
-
-	// Contextual shortcut hints (compact, state-aware)
-	if hints := m.contextualShortcutHints(); hints != "" {
-		builder.WriteString("\n")
-		builder.WriteString(hints)
 	}
 
 	// Enhanced status bar
@@ -3126,6 +3098,19 @@ func (m Model) View() string {
 	}
 
 	return m.styles.App.Render(builder.String())
+}
+
+func (m Model) shouldRenderInputArea() bool {
+	if m.state == StateInput {
+		return true
+	}
+	if m.state != StateProcessing && m.state != StateStreaming {
+		return false
+	}
+	return m.input.Value() != "" ||
+		m.input.historySearchMode ||
+		m.input.showSuggestions ||
+		m.input.showArgHints
 }
 
 // applyResize applies a buffered WindowSizeMsg to all components.

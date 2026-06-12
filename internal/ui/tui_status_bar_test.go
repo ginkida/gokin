@@ -3,6 +3,9 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestRenderContextBarAbsoluteTokens(t *testing.T) {
@@ -195,6 +198,70 @@ func TestMinimalStatusBarShowsUnsafeModes(t *testing.T) {
 		t.Fatalf("minimal status should show sandbox-off mode: %q", got)
 	}
 }
+
+func TestStatusBarCarriesHiddenPanelHints(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	m.state = StateInput
+	m.runtimeStatus.Provider = "deepseek"
+	m.todoItems = []string{"- [ ] one", "- [ ] two", "- [ ] three"}
+	m.todosVisible = false
+	m.activityFeed.AddEntry(ActivityFeedEntry{
+		ID:          "tool-1",
+		Type:        ActivityTypeTool,
+		Name:        "bash",
+		Description: "running tests",
+		Status:      ActivityRunning,
+		StartTime:   time.Now(),
+	})
+
+	got := stripAnsi(m.renderStatusBar())
+	if !strings.Contains(got, "Ctrl+T tasks 3") {
+		t.Fatalf("status bar should include compact task hint, got: %q", got)
+	}
+	if !strings.Contains(got, "Ctrl+O activity") {
+		t.Fatalf("status bar should include compact activity hint, got: %q", got)
+	}
+}
+
+func TestStatusBarCarriesInterruptHint(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+	m.state = StateStreaming
+	m.runtimeStatus.Provider = "deepseek"
+
+	got := stripAnsi(m.renderStatusBar())
+	if !strings.Contains(got, "Esc interrupt") {
+		t.Fatalf("status bar should include interrupt hint, got: %q", got)
+	}
+}
+
+func TestStatusBarDropsHintsBeforeOverflow(t *testing.T) {
+	m := NewModel()
+	m.width = 60
+	m.state = StateInput
+	m.runtimeStatus.Provider = "deepseek"
+	m.workDir = "/Users/example/projects/a/very/long/repository/path"
+	m.todoItems = []string{"- [ ] one", "- [ ] two", "- [ ] three"}
+	m.activityFeed.AddEntry(ActivityFeedEntry{
+		ID:          "tool-1",
+		Type:        ActivityTypeTool,
+		Name:        "bash",
+		Description: "running tests",
+		Status:      ActivityRunning,
+		StartTime:   time.Now(),
+	})
+
+	got := stripAnsi(m.renderStatusBar())
+	if width := lipgloss.Width(got); width > m.width {
+		t.Fatalf("status bar width = %d, want <= %d: %q", width, m.width, got)
+	}
+}
+
+// NOTE: the old TestStatusBarOmitsSessionCost is gone WITH the sessionCost
+// Model field — session cost has no UI data path anymore (per-response cost
+// lives in the metadata footer, cumulative in /cost), so the regression it
+// guarded is structurally impossible.
 
 // stripAnsi removes ANSI escape sequences for testing.
 func stripAnsi(s string) string {
