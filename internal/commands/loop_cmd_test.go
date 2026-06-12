@@ -14,13 +14,13 @@ import (
 // parsed" vs "fell through to self-paced" without spinning up a real
 // Manager + Storage.
 type fakeLoopMgr struct {
-	loops       []*loops.Loop
-	addedTask   string
-	addedMode   loops.Mode
-	addedSecs   int64
-	addCalls    int
-	removed     string
-	getReturns  *loops.Loop // when non-nil, Get returns this regardless of ID
+	loops      []*loops.Loop
+	addedTask  string
+	addedMode  loops.Mode
+	addedSecs  int64
+	addCalls   int
+	removed    string
+	getReturns *loops.Loop // when non-nil, Get returns this regardless of ID
 }
 
 func (f *fakeLoopMgr) Add(task string, mode loops.Mode, intervalSeconds int64, opts ...loops.AddOption) (*loops.Loop, error) {
@@ -33,19 +33,19 @@ func (f *fakeLoopMgr) Add(task string, mode loops.Mode, intervalSeconds int64, o
 	return l, nil
 }
 
-func (f *fakeLoopMgr) List() []*loops.Loop                         { return f.loops }
-func (f *fakeLoopMgr) Active() []*loops.Loop                       { return f.loops }
+func (f *fakeLoopMgr) List() []*loops.Loop   { return f.loops }
+func (f *fakeLoopMgr) Active() []*loops.Loop { return f.loops }
 func (f *fakeLoopMgr) Get(id string) (*loops.Loop, bool) {
 	if f.getReturns != nil {
 		return f.getReturns, true
 	}
 	return nil, false
 }
-func (f *fakeLoopMgr) Stop(id string) error                        { return nil }
-func (f *fakeLoopMgr) Pause(id string) error                       { return nil }
-func (f *fakeLoopMgr) Resume(id string) error                      { return nil }
-func (f *fakeLoopMgr) FireNow(id string) error                     { return nil }
-func (f *fakeLoopMgr) Remove(id string) error                      { f.removed = id; return nil }
+func (f *fakeLoopMgr) Stop(id string) error    { return nil }
+func (f *fakeLoopMgr) Pause(id string) error   { return nil }
+func (f *fakeLoopMgr) Resume(id string) error  { return nil }
+func (f *fakeLoopMgr) FireNow(id string) error { return nil }
+func (f *fakeLoopMgr) Remove(id string) error  { f.removed = id; return nil }
 
 // TestParseLoopInterval covers the accept and reject paths of the
 // shorthand parser. Pinned in tests so future "be more lenient"
@@ -54,21 +54,21 @@ func (f *fakeLoopMgr) Remove(id string) error                      { f.removed =
 // loop with task "1h30m foo").
 func TestParseLoopInterval(t *testing.T) {
 	cases := []struct {
-		in    string
-		ok    bool
-		secs  int64
+		in   string
+		ok   bool
+		secs int64
 	}{
 		{"30s", true, 30},
 		{"5m", true, 300},
 		{"1h", true, 3600},
 		{"2d", true, 172800},
-		{"1h30m", false, 0},  // multi-unit not accepted
-		{"5", false, 0},       // missing unit
-		{"5x", false, 0},      // unknown unit
-		{"-5m", false, 0},     // negative
-		{"0m", false, 0},      // zero rejected
-		{"", false, 0},        // empty
-		{"foo", false, 0},     // not a shape at all
+		{"1h30m", false, 0}, // multi-unit not accepted
+		{"5", false, 0},     // missing unit
+		{"5x", false, 0},    // unknown unit
+		{"-5m", false, 0},   // negative
+		{"0m", false, 0},    // zero rejected
+		{"", false, 0},      // empty
+		{"foo", false, 0},   // not a shape at all
 	}
 	for _, tc := range cases {
 		secs, ok := parseLoopInterval(tc.in)
@@ -133,12 +133,12 @@ func TestLoopCommand_OutputRendersFullMarkdown(t *testing.T) {
 	now := time.Now()
 	mgr := &fakeLoopMgr{
 		loops: []*loops.Loop{{
-			ID:           "loop-out",
-			Task:         "Refactor user service",
-			Mode:         loops.ModeSelfPaced,
-			Status:       loops.StatusRunning,
-			CreatedAt:    now,
-			UpdateMemory: true,
+			ID:             "loop-out",
+			Task:           "Refactor user service",
+			Mode:           loops.ModeSelfPaced,
+			Status:         loops.StatusRunning,
+			CreatedAt:      now,
+			UpdateMemory:   true,
 			IterationCount: 1,
 			SuccessCount:   1,
 			Iterations: []loops.Iteration{

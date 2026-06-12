@@ -26,7 +26,7 @@ func TestDiffPreviewHints_UseConsistentSeparator(t *testing.T) {
 	// Legacy patterns from the pre-polish footers. If any of these
 	// substrings reappear in a hint literal, we've regressed.
 	legacy := []string{
-		"j/k: Scroll | g/G",                  // single-line hint
+		"j/k: Scroll | g/G",                   // single-line hint
 		"s: Toggle split/unified | A: Accept", // single-line hint #2
 		"Tab: Switch focus | ↑/↓",             // multi-file hint
 	}

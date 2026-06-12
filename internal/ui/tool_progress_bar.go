@@ -237,4 +237,3 @@ func lastNNonEmptyLines(s string, n int) []string {
 	}
 	return out
 }
-

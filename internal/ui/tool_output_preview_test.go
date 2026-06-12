@@ -131,7 +131,7 @@ func TestLastSignalLine_SkipsClosingBraces(t *testing.T) {
 			want: 1,
 		},
 		{
-			name: "all_braces_returns_zero",
+			name:  "all_braces_returns_zero",
 			lines: []string{"}", "}", ""},
 			want:  0, // guard: don't slide past index 0
 		},
@@ -185,21 +185,21 @@ func TestRenderTruncated_HidesCodePreamble(t *testing.T) {
 	})
 
 	content := strings.Join([]string{
-		"package ui",       // index 0 — skipped
-		"",                 // 1 — skipped
-		"import (",         // 2 — skipped
-		`  "fmt"`,          // 3 — skipped
-		")",                // 4 — skipped
-		"",                 // 5 — skipped
-		"func First() {}",  // 6 — first signal
-		"func Second() {}", // 7
-		"func Third() {}",  // 8
-		"func Fourth() {}", // 9
-		"func Fifth() {}",  // 10
-		"func Sixth() {}",  // 11
+		"package ui",        // index 0 — skipped
+		"",                  // 1 — skipped
+		"import (",          // 2 — skipped
+		`  "fmt"`,           // 3 — skipped
+		")",                 // 4 — skipped
+		"",                  // 5 — skipped
+		"func First() {}",   // 6 — first signal
+		"func Second() {}",  // 7
+		"func Third() {}",   // 8
+		"func Fourth() {}",  // 9
+		"func Fifth() {}",   // 10
+		"func Sixth() {}",   // 11
 		"func Seventh() {}", // 12
-		"func Eighth() {}", // 13
-		"}",                // 14 — skipped as trailing
+		"func Eighth() {}",  // 13
+		"}",                 // 14 — skipped as trailing
 	}, "\n")
 
 	out := m.renderTruncated(content)

@@ -18,14 +18,14 @@ func TestExecutor_ResetSession_DrainsDeltaCheckState(t *testing.T) {
 		deltaCheckLastHash:    "stale-hash-from-previous-convo",
 		deltaBaselineCaptured: true,
 		deltaBaselinePaths: map[string]struct{}{
-			"old/file.go":     {},
-			"old/another.go":  {},
+			"old/file.go":    {},
+			"old/another.go": {},
 		},
 		deltaPendingPaths: map[string]struct{}{
 			"prev/edit1.go": {},
 			"prev/edit2.go": {},
 		},
-		deltaCheckLastResult: &deltaCheckResult{Ran: true, Passed: false},
+		deltaCheckLastResult:  &deltaCheckResult{Ran: true, Passed: false},
 		deltaCheckGracedCalls: 2,
 	}
 

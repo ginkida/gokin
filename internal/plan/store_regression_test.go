@@ -17,10 +17,10 @@ func TestRegression_ListResumable_EmptyWorkDir(t *testing.T) {
 	}
 
 	plan := &Plan{
-		ID:      "test-plan-1",
-		Title:   "Test Plan",
-		WorkDir: "/some/project",
-		Status:  StatusPaused,
+		ID:        "test-plan-1",
+		Title:     "Test Plan",
+		WorkDir:   "/some/project",
+		Status:    StatusPaused,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -49,10 +49,10 @@ func TestRegression_ListResumable_StrictMatch(t *testing.T) {
 
 	for _, wd := range []string{"/project/a", "/project/b"} {
 		plan := &Plan{
-			ID:      "plan-" + wd[len(wd)-1:],
-			Title:   "Plan " + wd,
-			WorkDir: wd,
-			Status:  StatusPaused,
+			ID:        "plan-" + wd[len(wd)-1:],
+			Title:     "Plan " + wd,
+			WorkDir:   wd,
+			Status:    StatusPaused,
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}
@@ -78,10 +78,10 @@ func TestRegression_ListResumable_SkipEmptyWorkDirPlans(t *testing.T) {
 	}
 
 	plan := &Plan{
-		ID:      "plan-no-workdir",
-		Title:   "No WorkDir",
-		WorkDir: "",
-		Status:  StatusPaused,
+		ID:        "plan-no-workdir",
+		Title:     "No WorkDir",
+		WorkDir:   "",
+		Status:    StatusPaused,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}

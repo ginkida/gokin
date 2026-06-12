@@ -51,14 +51,14 @@ func TestChangelog_HappyPath(t *testing.T) {
 	}
 
 	must := []string{
-		"v0.76.0",                  // newest tag
-		"2026-04-25",               // newest date (formatted)
+		"v0.76.0",                   // newest tag
+		"2026-04-25",                // newest date (formatted)
 		"/whats-new + post-upgrade", // newest title
-		"v0.75.0",                  // running version
-		"← you",                    // running-version marker
-		"v0.74.1",                  // empty-name fallback
+		"v0.75.0",                   // running version
+		"← you",                     // running-version marker
+		"v0.74.1",                   // empty-name fallback
 		"First-line title fallback", // body's first line as title
-		"/whats-new <tag>",         // pointer to detail command
+		"/whats-new <tag>",          // pointer to detail command
 	}
 	for _, s := range must {
 		if !strings.Contains(out, s) {

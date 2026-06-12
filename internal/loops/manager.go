@@ -95,14 +95,14 @@ func NewManager(storage Storage) *Manager {
 func (m *Manager) Add(task string, mode Mode, intervalSeconds int64, opts ...AddOption) (*Loop, error) {
 	now := time.Now()
 	l := &Loop{
-		ID:               NewID(),
-		Task:             strings.TrimSpace(task),
-		Mode:             mode,
-		IntervalSeconds:  intervalSeconds,
-		MinDelaySeconds:  DefaultMinDelaySeconds,
-		Status:           StatusRunning,
-		CreatedAt:        now,
-		UpdateMemory:     true, // default per user-confirmed design
+		ID:              NewID(),
+		Task:            strings.TrimSpace(task),
+		Mode:            mode,
+		IntervalSeconds: intervalSeconds,
+		MinDelaySeconds: DefaultMinDelaySeconds,
+		Status:          StatusRunning,
+		CreatedAt:       now,
+		UpdateMemory:    true, // default per user-confirmed design
 	}
 	for _, opt := range opts {
 		opt(l)

@@ -404,4 +404,3 @@ func extractOpenAIRateLimits(resp *http.Response) *RateLimitMetadata {
 
 	return metadata
 }
-

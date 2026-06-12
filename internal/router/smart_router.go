@@ -290,4 +290,3 @@ type StrategyStats struct {
 func totalCount(m *agent.StrategyMetrics) int {
 	return m.SuccessCount + m.FailureCount
 }
-

@@ -18,8 +18,8 @@ func (v *DockerfileValidator) Matches(filePath string) bool {
 }
 
 var (
-	fromLatestRe  = regexp.MustCompile(`(?i)^FROM\s+\S+:latest\b`)
-	fromWithTagRe = regexp.MustCompile(`(?i)^FROM\s+\S+:\S+`)
+	fromLatestRe   = regexp.MustCompile(`(?i)^FROM\s+\S+:latest\b`)
+	fromWithTagRe  = regexp.MustCompile(`(?i)^FROM\s+\S+:\S+`)
 	fromAsRe       = regexp.MustCompile(`(?i)\bAS\s+\w+`)
 	addInsteadCopy = regexp.MustCompile(`(?i)^ADD\s+[^h]`) // ADD for non-URL (should be COPY)
 )

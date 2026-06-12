@@ -81,20 +81,20 @@ type Loop struct {
 	Task string `json:"task"`
 
 	// Mode + IntervalSeconds determine when iterations fire.
-	Mode             Mode  `json:"mode"`
-	IntervalSeconds  int64 `json:"interval_seconds,omitempty"`
-	MinDelaySeconds  int64 `json:"min_delay_seconds,omitempty"` // self-paced floor; default 300
-	MaxIterations    int   `json:"max_iterations,omitempty"`     // 0 = unlimited
-	UpdateMemory     bool  `json:"update_memory"`                // auto-write summaries to MEMORY.md
+	Mode            Mode  `json:"mode"`
+	IntervalSeconds int64 `json:"interval_seconds,omitempty"`
+	MinDelaySeconds int64 `json:"min_delay_seconds,omitempty"` // self-paced floor; default 300
+	MaxIterations   int   `json:"max_iterations,omitempty"`    // 0 = unlimited
+	UpdateMemory    bool  `json:"update_memory"`               // auto-write summaries to MEMORY.md
 
 	// Status drives the scheduler. See Status constants for semantics.
 	Status Status `json:"status"`
 
 	// Timestamps for ordering and scheduler decisions.
-	CreatedAt   time.Time `json:"created_at"`
-	LastRunAt   time.Time `json:"last_run_at,omitempty"`
-	NextRunAt   time.Time `json:"next_run_at,omitempty"`
-	StoppedAt   time.Time `json:"stopped_at,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	LastRunAt time.Time `json:"last_run_at,omitempty"`
+	NextRunAt time.Time `json:"next_run_at,omitempty"`
+	StoppedAt time.Time `json:"stopped_at,omitempty"`
 
 	// Iterations is the append-only log of what each iteration did.
 	// Capped at MaxHistorySize entries — older entries drop off the
@@ -130,14 +130,14 @@ type Loop struct {
 
 // Iteration is the result of one execution of the loop's task.
 type Iteration struct {
-	N           int           `json:"n"`              // 1-based iteration number
-	StartedAt   time.Time     `json:"started_at"`
-	Duration    time.Duration `json:"duration"`        // wall-clock for this iteration
-	Summary     string        `json:"summary"`         // 1-3 sentence summary of what happened
-	OK          bool          `json:"ok"`              // false = iteration errored or model returned nothing useful
-	TokensIn    int           `json:"tokens_in,omitempty"`
-	TokensOut   int           `json:"tokens_out,omitempty"`
-	NextHint    string        `json:"next_hint,omitempty"` // e.g. "wait 1h" — self-paced runner respects
+	N         int           `json:"n"` // 1-based iteration number
+	StartedAt time.Time     `json:"started_at"`
+	Duration  time.Duration `json:"duration"` // wall-clock for this iteration
+	Summary   string        `json:"summary"`  // 1-3 sentence summary of what happened
+	OK        bool          `json:"ok"`       // false = iteration errored or model returned nothing useful
+	TokensIn  int           `json:"tokens_in,omitempty"`
+	TokensOut int           `json:"tokens_out,omitempty"`
+	NextHint  string        `json:"next_hint,omitempty"` // e.g. "wait 1h" — self-paced runner respects
 }
 
 // MaxHistorySize caps the per-loop iterations slice. Set well above the

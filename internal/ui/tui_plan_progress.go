@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-
 func (m Model) renderPlanPauseBlock(msg PlanProgressMsg) string {
 	border := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

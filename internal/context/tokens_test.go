@@ -121,13 +121,13 @@ func TestGetPricing_Resolution(t *testing.T) {
 		wantInput  float64
 		wantOutput float64
 	}{
-		{"MiniMax-M2.7-highspeed", 0.60, 2.40},   // specific, NOT the 0.30 "minimax" fallback
-		{"minimax-m2.7-highspeed", 0.60, 2.40},   // case-insensitive resolves the same
-		{"MiniMax-M2.7", 0.30, 1.20},             // base variant
-		{"deepseek-v4-pro-2026", 0.435, 0.87},    // suffix variant → longest key, not bare "deepseek"
-		{"GLM-5.1", 4.00, 16.00},                 // case-insensitive exact
-		{"glm-5-turbo", 0.70, 2.80},              // not the shorter "glm-5"
-		{"totally-unknown-model", 0.14, 0.28},    // flash default, NOT zero (silent under-report)
+		{"MiniMax-M2.7-highspeed", 0.60, 2.40}, // specific, NOT the 0.30 "minimax" fallback
+		{"minimax-m2.7-highspeed", 0.60, 2.40}, // case-insensitive resolves the same
+		{"MiniMax-M2.7", 0.30, 1.20},           // base variant
+		{"deepseek-v4-pro-2026", 0.435, 0.87},  // suffix variant → longest key, not bare "deepseek"
+		{"GLM-5.1", 4.00, 16.00},               // case-insensitive exact
+		{"glm-5-turbo", 0.70, 2.80},            // not the shorter "glm-5"
+		{"totally-unknown-model", 0.14, 0.28},  // flash default, NOT zero (silent under-report)
 	}
 	for _, c := range cases {
 		t.Run(c.model, func(t *testing.T) {

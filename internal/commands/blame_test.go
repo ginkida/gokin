@@ -189,7 +189,7 @@ func TestBlame_BadRange(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"f.txt", "5-2"}, "invalid range"},  // M < N
+		{[]string{"f.txt", "5-2"}, "invalid range"}, // M < N
 		{[]string{"f.txt", "abc"}, "invalid line"},  // non-numeric
 		{[]string{"f.txt", "0"}, "invalid line"},    // zero rejected
 		{[]string{"f.txt", "-3"}, "invalid"},        // negative

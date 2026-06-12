@@ -344,17 +344,17 @@ func TestBuildIterationPrompt_MaxIterations(t *testing.T) {
 // markdown headers in its iteration summary.
 func TestLooksLikeMetadata(t *testing.T) {
 	cases := map[string]bool{
-		"":                                false, // empty paragraph isn't metadata
-		"Real prose.":                     false, // ordinary text
-		"# Real prose\nthat continues.":   false, // multi-line — '#' is incidental, not a header
-		"```":                             true,  // code fence opener
-		"```go\nfunc main() {}":           true,  // code block
-		"---":                             true,  // separator
-		"===":                             true,  // setext underline
-		"## Summary":                      true,  // ATX header (single line)
-		"# Single header":                 true,  // h1 ATX
-		"#### Deep header":                true,  // h4 ATX
-		"#hashtag-not-header":             true,  // looks header-ish, single line — accept the conservative skip
+		"":                              false, // empty paragraph isn't metadata
+		"Real prose.":                   false, // ordinary text
+		"# Real prose\nthat continues.": false, // multi-line — '#' is incidental, not a header
+		"```":                           true,  // code fence opener
+		"```go\nfunc main() {}":         true,  // code block
+		"---":                           true,  // separator
+		"===":                           true,  // setext underline
+		"## Summary":                    true,  // ATX header (single line)
+		"# Single header":               true,  // h1 ATX
+		"#### Deep header":              true,  // h4 ATX
+		"#hashtag-not-header":           true,  // looks header-ish, single line — accept the conservative skip
 	}
 	for input, want := range cases {
 		got := looksLikeMetadata(input)
@@ -474,9 +474,9 @@ func TestBuildIterationPrompt_SelfPacedHintsCadence(t *testing.T) {
 
 func TestSummarizeOutput(t *testing.T) {
 	cases := map[string]string{
-		"":                            "iteration completed",
-		"Single line":                 "Single line",
-		"First.\n\nLast.":             "Last.",
+		"":                             "iteration completed",
+		"Single line":                  "Single line",
+		"First.\n\nLast.":              "Last.",
 		"```\ncode\n```\n\nReal text.": "Real text.", // double newline separates code block from real text
 		// ATX header should be skipped — the substance is the next paragraph.
 		// Without the looksLikeMetadata header guard, the summary would be

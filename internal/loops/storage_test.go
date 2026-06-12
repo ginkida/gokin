@@ -130,8 +130,8 @@ func TestFileStorage_RefuseInvalid(t *testing.T) {
 // fail to parse, not silently load.
 func TestUnmarshal_RejectsInvalid(t *testing.T) {
 	cases := map[string]string{
-		"empty task":  `{"id":"loop-x","task":"","mode":"interval","interval_seconds":60,"status":"running"}`,
-		"unknown mode": `{"id":"loop-x","task":"t","mode":"weird","status":"running"}`,
+		"empty task":     `{"id":"loop-x","task":"","mode":"interval","interval_seconds":60,"status":"running"}`,
+		"unknown mode":   `{"id":"loop-x","task":"t","mode":"weird","status":"running"}`,
 		"unknown status": `{"id":"loop-x","task":"t","mode":"interval","interval_seconds":60,"status":"weird"}`,
 	}
 	for name, raw := range cases {

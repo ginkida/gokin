@@ -68,8 +68,8 @@ type GitStatusModel struct {
 	selectedIndices map[int]bool // For multi-select
 	viewport        viewport.Model
 	diffViewport    viewport.Model
-	showDiff bool
-	branch   string
+	showDiff        bool
+	branch          string
 	upstream        string
 	aheadBehind     string
 	styles          *Styles

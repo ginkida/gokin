@@ -207,11 +207,11 @@ func TestDetectProjectMapOwners_OnlyComments(t *testing.T) {
 
 func TestExtractQuotedStrings_HandlesMultipleAndEmpty(t *testing.T) {
 	cases := map[string][]string{
-		`"foo", "bar"`:    {"foo", "bar"},
-		`no quotes here`:  nil,
-		`"only-one"`:      {"only-one"},
-		`"a" "b" "c"`:     {"a", "b", "c"},
-		`"unterminated`:   nil, // missing closing quote → treated as no strings
+		`"foo", "bar"`:   {"foo", "bar"},
+		`no quotes here`: nil,
+		`"only-one"`:     {"only-one"},
+		`"a" "b" "c"`:    {"a", "b", "c"},
+		`"unterminated`:  nil, // missing closing quote → treated as no strings
 	}
 	for input, want := range cases {
 		got := extractQuotedStrings(input)
@@ -230,12 +230,12 @@ func TestExtractQuotedStrings_HandlesMultipleAndEmpty(t *testing.T) {
 
 func TestLooksLikeCrateMember_Patterns(t *testing.T) {
 	cases := map[string]bool{
-		`"crate-a",`:       true,
-		`"solo"`:           true,
-		`members = [`:      false,
-		`]`:                false,
-		`# comment`:        false,
-		`foo = "bar"`:      false, // starts with foo, not quote
+		`"crate-a",`:  true,
+		`"solo"`:      true,
+		`members = [`: false,
+		`]`:           false,
+		`# comment`:   false,
+		`foo = "bar"`: false, // starts with foo, not quote
 	}
 	for input, want := range cases {
 		if got := looksLikeCrateMember(input); got != want {

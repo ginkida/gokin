@@ -31,8 +31,8 @@ func TestForceCompactViaTruncation_PreservesTaskAndStructure(t *testing.T) {
 	a := &Agent{ID: "t", originalPrompt: "fix the bug"}
 
 	hist := []*genai.Content{
-		genai.NewContentFromText("SYSTEM PROMPT", genai.RoleUser),    // [0]
-		genai.NewContentFromText("GREETING", genai.RoleModel),        // [1]
+		genai.NewContentFromText("SYSTEM PROMPT", genai.RoleUser),     // [0]
+		genai.NewContentFromText("GREETING", genai.RoleModel),         // [1]
 		genai.NewContentFromText("TASK: fix the bug", genai.RoleUser), // [2] — must survive at index 2
 	}
 	// 10 middle messages: 4 high-score (contain "error"), 6 plain (score 0).

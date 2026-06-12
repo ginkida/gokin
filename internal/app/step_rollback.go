@@ -110,8 +110,8 @@ func (a *App) rollbackStepSnapshot(_ context.Context, approvedPlan *plan.Plan, s
 	defer func() {
 		if snapshot.BackupDir != "" {
 			if err := os.RemoveAll(snapshot.BackupDir); err != nil {
-			logging.Debug("failed to remove backup dir", "path", snapshot.BackupDir, "error", err)
-		}
+				logging.Debug("failed to remove backup dir", "path", snapshot.BackupDir, "error", err)
+			}
 		}
 	}()
 

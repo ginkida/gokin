@@ -25,18 +25,18 @@ func TestShortcutsCommand_ListIsCurrent(t *testing.T) {
 	}
 
 	mustContain := []string{
-		"Ctrl+P",    // Command palette
-		"Ctrl+K",    // Model selector — added v0.84.0
-		"Ctrl+E",    // Expand tool output — added v0.84.3
-		"Ctrl+H",    // Context Observatory
-		"Ctrl+T",    // Task list
-		"Ctrl+O",    // Activity feed
-		"Ctrl+U",    // Half page up
-		"Ctrl+D",    // Half page down
-		"Alt+C",     // Copy last response (terminal binding name)
-		"Shift+Tab", // Cycle mode
-		"?",         // Filterable overlay
-		"task list", // Ctrl+T description (no longer "Background tasks")
+		"Ctrl+P",     // Command palette
+		"Ctrl+K",     // Model selector — added v0.84.0
+		"Ctrl+E",     // Expand tool output — added v0.84.3
+		"Ctrl+H",     // Context Observatory
+		"Ctrl+T",     // Task list
+		"Ctrl+O",     // Activity feed
+		"Ctrl+U",     // Half page up
+		"Ctrl+D",     // Half page down
+		"Alt+C",      // Copy last response (terminal binding name)
+		"Shift+Tab",  // Cycle mode
+		"?",          // Filterable overlay
+		"task list",  // Ctrl+T description (no longer "Background tasks")
 		"Cycle mode", // Shift+Tab description (no longer "Toggle plan mode")
 	}
 	for _, key := range mustContain {

@@ -15,8 +15,8 @@ import (
 // borderless flat prompt would deliver.
 func TestPromptPaletteWidth_NarrowTerminalFallsBackToFlat(t *testing.T) {
 	cases := []struct {
-		name        string
-		termWidth   int
+		name         string
+		termWidth    int
 		wantBordered bool
 		wantWidthMin int // lower bound on returned content width
 	}{

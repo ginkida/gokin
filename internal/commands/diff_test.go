@@ -82,9 +82,9 @@ func TestDiff_ShowsUnstagedChanges(t *testing.T) {
 	}
 
 	want := []string{
-		"Diff (working tree)",   // scope label
-		"hello.txt",             // stat header file
-		"+changed line",         // body content
+		"Diff (working tree)", // scope label
+		"hello.txt",           // stat header file
+		"+changed line",       // body content
 	}
 	for _, s := range want {
 		if !strings.Contains(out, s) {

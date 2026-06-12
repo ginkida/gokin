@@ -22,8 +22,10 @@ import (
 // releases without restarting on a different binary.
 type WhatsNewCommand struct{}
 
-func (c *WhatsNewCommand) Name() string        { return "whats-new" }
-func (c *WhatsNewCommand) Description() string { return "Show release notes for the current (or specified) version" }
+func (c *WhatsNewCommand) Name() string { return "whats-new" }
+func (c *WhatsNewCommand) Description() string {
+	return "Show release notes for the current (or specified) version"
+}
 func (c *WhatsNewCommand) Usage() string {
 	return `/whats-new           - Show notes for the running version
 /whats-new v0.74.0   - Show notes for a specific tag`

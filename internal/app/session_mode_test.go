@@ -166,9 +166,9 @@ func TestApplySessionMode_DirectTransitions(t *testing.T) {
 	transitions := []struct {
 		from, to SessionMode
 	}{
-		{SessionModeNormal, SessionModeYOLO},   // skip Plan
-		{SessionModeYOLO, SessionModePlan},     // reverse + step
-		{SessionModePlan, SessionModeNormal},   // exit plan back to Normal
+		{SessionModeNormal, SessionModeYOLO}, // skip Plan
+		{SessionModeYOLO, SessionModePlan},   // reverse + step
+		{SessionModePlan, SessionModeNormal}, // exit plan back to Normal
 	}
 	for _, tc := range transitions {
 		t.Run(tc.from.String()+"_to_"+tc.to.String(), func(t *testing.T) {

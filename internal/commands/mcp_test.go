@@ -31,7 +31,7 @@ type fakeAppForMCP struct {
 	workDir  string // optional override for /init and other workdir-touching commands
 }
 
-func (f *fakeAppForMCP) GetMCPManager() *mcp.Manager    { return f.mgr }
+func (f *fakeAppForMCP) GetMCPManager() *mcp.Manager      { return f.mgr }
 func (f *fakeAppForMCP) GetToolRegistry() *tools.Registry { return f.registry }
 func (f *fakeAppForMCP) GetMainClient() client.Client     { return f.client }
 func (f *fakeAppForMCP) GetConfig() *config.Config        { return f.cfg }

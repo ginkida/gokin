@@ -28,8 +28,8 @@ type execCoverSpan struct{ start, end int }
 // execTargetCoverage records what ground has been covered for one canonical
 // target within the current turn.
 type execTargetCoverage struct {
-	redundant int            // consecutive no-progress re-coverages of THIS target
-	lastGen   int            // tracker gen as of this target's previous visit
+	redundant int             // consecutive no-progress re-coverages of THIS target
+	lastGen   int             // tracker gen as of this target's previous visit
 	spans     []execCoverSpan // read only: recent covered ranges (ring, cap execCoverageSpanRing)
 }
 

@@ -218,15 +218,15 @@ func TestProactiveReader_PreviewLineCap(t *testing.T) {
 
 func TestIsSourceExtension(t *testing.T) {
 	cases := map[string]bool{
-		".go":    true,
-		".py":    true,
-		".ts":    true,
-		".rs":    true,
-		".md":    false,
-		".json":  false,
-		".yaml":  false,
-		".":      false,
-		".GO":    true, // case-insensitive
+		".go":   true,
+		".py":   true,
+		".ts":   true,
+		".rs":   true,
+		".md":   false,
+		".json": false,
+		".yaml": false,
+		".":     false,
+		".GO":   true, // case-insensitive
 	}
 	for ext, want := range cases {
 		if got := isSourceExtension(ext); got != want {

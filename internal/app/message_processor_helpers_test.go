@@ -111,16 +111,16 @@ func TestLastModelToolContext_WalksBackUntilModelWithTools(t *testing.T) {
 
 func TestLastCompleteSentence(t *testing.T) {
 	cases := map[string]string{
-		"":                             "",
-		"   ":                          "",
-		"no terminator":                "",
-		"one.":                         "one.",
-		"two sentences. Second one":    "two sentences.",
-		"trailing. ":                   "trailing.",
-		"with newline\nno term":        "with newline",
-		"question? yes":                "question?",
-		"exclaim! yes":                 "exclaim!",
-		"multiple. sentences! here?":   "multiple. sentences! here?",
+		"":                           "",
+		"   ":                        "",
+		"no terminator":              "",
+		"one.":                       "one.",
+		"two sentences. Second one":  "two sentences.",
+		"trailing. ":                 "trailing.",
+		"with newline\nno term":      "with newline",
+		"question? yes":              "question?",
+		"exclaim! yes":               "exclaim!",
+		"multiple. sentences! here?": "multiple. sentences! here?",
 	}
 	for input, want := range cases {
 		if got := lastCompleteSentence(input); got != want {
@@ -161,9 +161,9 @@ func TestTruncateTail_Boundaries(t *testing.T) {
 // next prompt verbatim, where some providers rejected it as invalid input.
 func TestTruncateTail_MultibyteSafe(t *testing.T) {
 	cases := []string{
-		strings.Repeat("я", 300),                  // Cyrillic
-		strings.Repeat("世界", 200),                 // CJK
-		strings.Repeat("🚀", 100),                  // emoji (4 bytes each)
+		strings.Repeat("я", 300),                   // Cyrillic
+		strings.Repeat("世界", 200),                  // CJK
+		strings.Repeat("🚀", 100),                   // emoji (4 bytes each)
 		"english " + strings.Repeat("привет ", 50), // mixed
 	}
 	for i, in := range cases {

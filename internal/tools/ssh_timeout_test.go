@@ -9,7 +9,7 @@ func TestClampSSHTimeoutSeconds(t *testing.T) {
 	cases := []struct {
 		in, want int
 	}{
-		{30, 30},                                  // normal
+		{30, 30}, // normal
 		{maxSSHTimeoutSeconds, maxSSHTimeoutSeconds},
 		{maxSSHTimeoutSeconds + 1, maxSSHTimeoutSeconds}, // over the cap
 		{999999999, maxSSHTimeoutSeconds},                // absurd (would overflow if multiplied raw)

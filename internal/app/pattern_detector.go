@@ -125,4 +125,3 @@ func (a *App) recordToolUsage(name string) {
 		a.recentTools = a.recentTools[len(a.recentTools)-20:]
 	}
 }
-

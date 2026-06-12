@@ -219,7 +219,7 @@ func (m *ToolOutputModel) renderFull(content string, _ bool) string {
 //
 // Shape:
 //
-//	        ⋯ 95 more lines
+//	⋯ 95 more lines
 //
 // reads as a quiet ellipsis with a count — tells the user there's content
 // in the middle without instructing them how to interact (the `e` shortcut

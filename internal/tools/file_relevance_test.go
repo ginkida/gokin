@@ -52,18 +52,18 @@ func TestFileRelevanceScore_MatchCountDominatesAtSameTier(t *testing.T) {
 
 func TestIsTestPath_Conventions(t *testing.T) {
 	cases := map[string]bool{
-		"foo_test.go":                            true,
-		"foo.go":                                 false,
-		"foo.test.ts":                            true,
-		"foo.spec.js":                            true,
-		"test_foo.py":                            true,
-		"foo_test.py":                            true,
-		"internal/__tests__/bar.ts":              true,
-		"internal/tests/foo.rs":                  true,
-		"internal/testdata/foo.json":             true,
-		"internal/fixtures/sample.yaml":          true,
-		"internal/app/foo.go":                    false,
-		"internal/app/tester.go":                 false, // word "tester" not isolated segment
+		"foo_test.go":                   true,
+		"foo.go":                        false,
+		"foo.test.ts":                   true,
+		"foo.spec.js":                   true,
+		"test_foo.py":                   true,
+		"foo_test.py":                   true,
+		"internal/__tests__/bar.ts":     true,
+		"internal/tests/foo.rs":         true,
+		"internal/testdata/foo.json":    true,
+		"internal/fixtures/sample.yaml": true,
+		"internal/app/foo.go":           false,
+		"internal/app/tester.go":        false, // word "tester" not isolated segment
 	}
 	for path, want := range cases {
 		if got := isTestPath(path); got != want {
@@ -74,12 +74,12 @@ func TestIsTestPath_Conventions(t *testing.T) {
 
 func TestIsVendorPath_RelativeAndNested(t *testing.T) {
 	cases := map[string]bool{
-		"vendor/foo.go":                true,
-		"node_modules/x/bar.js":        true,
-		"internal/app/foo.go":          false,
-		"src/main.ts":                  false,
-		"pkg/vendor/foo.go":            true, // nested vendor dir
-		"my-vendorlib/foo.go":          false, // substring, not segment
+		"vendor/foo.go":         true,
+		"node_modules/x/bar.js": true,
+		"internal/app/foo.go":   false,
+		"src/main.ts":           false,
+		"pkg/vendor/foo.go":     true,  // nested vendor dir
+		"my-vendorlib/foo.go":   false, // substring, not segment
 	}
 	for path, want := range cases {
 		if got := isVendorPath(path); got != want {

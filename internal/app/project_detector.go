@@ -391,8 +391,8 @@ func (a *App) detectProjectMapPackages() []string {
 	// JS workspaces: read package.json "workspaces" field if present.
 	if pkgData, err := os.ReadFile(filepath.Join(a.workDir, "package.json")); err == nil {
 		var pkg struct {
-			Workspaces []string          `json:"workspaces"`
-			WorkspaceM map[string]any    `json:"-"`
+			Workspaces []string       `json:"workspaces"`
+			WorkspaceM map[string]any `json:"-"`
 		}
 		// Some repos put workspaces in an object {packages:[...]}; accept either form.
 		_ = json.Unmarshal(pkgData, &pkg)

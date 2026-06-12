@@ -66,12 +66,12 @@ func (m *PhaseMetrics) Record(phase Phase, d time.Duration) {
 
 // PhaseSnapshot is the aggregated view of one phase's samples.
 type PhaseSnapshot struct {
-	Phase  Phase
-	Count  int
-	P50    time.Duration
-	P95    time.Duration
-	Max    time.Duration
-	Total  time.Duration
+	Phase Phase
+	Count int
+	P50   time.Duration
+	P95   time.Duration
+	Max   time.Duration
+	Total time.Duration
 }
 
 // Snapshot returns a deterministic list of phase snapshots sorted by phase

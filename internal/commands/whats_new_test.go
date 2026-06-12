@@ -51,7 +51,7 @@ func TestWhatsNew_FormatsReleaseFromAPI(t *testing.T) {
 	}
 
 	must := []string{
-		"v0.74.0 — self-update actually works", // title
+		"v0.74.0 — self-update actually works",  // title
 		"Published 2026-04-24",                  // formatted date
 		"github.com/ginkida/gokin/releases/tag", // back-link
 		"Headline fix",                          // body

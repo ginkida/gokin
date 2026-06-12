@@ -39,7 +39,7 @@ func TestSummarizeSubAgentTask(t *testing.T) {
 			prompt: "You are a code search assistant.\n" +
 				"Find all callers of renderContextBar",
 			agentType: "explore",
-			want: "explore · Find all callers of renderContextBar",
+			want:      "explore · Find all callers of renderContextBar",
 		},
 		{
 			name:      "truncates_very_long_prompt",

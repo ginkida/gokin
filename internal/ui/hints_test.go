@@ -22,8 +22,8 @@ func TestGeneralHintsMatchCurrentBindings(t *testing.T) {
 
 	// Stale wordings must not return.
 	staleStrings := []string{
-		"Option+C",            // terminal binding is Alt+C
-		"track background tasks", // Ctrl+T shows the task list, doesn't "track"
+		"Option+C",                        // terminal binding is Alt+C
+		"track background tasks",          // Ctrl+T shows the task list, doesn't "track"
 		"step-by-step with planning mode", // older first-message hint
 	}
 	for _, stale := range staleStrings {

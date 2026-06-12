@@ -59,9 +59,9 @@ func TestPruneOrphanedToolParts(t *testing.T) {
 	history := []*genai.Content{
 		genai.NewContentFromText("hello", genai.RoleUser),
 		{Role: genai.RoleModel, Parts: []*genai.Part{callPart}},
-		{Role: genai.RoleUser, Parts: []*genai.Part{respPart}},     // pair with c1 — survives
-		{Role: genai.RoleUser, Parts: []*genai.Part{orphanResp}},   // no matching call — dropped
-		{Role: genai.RoleModel, Parts: []*genai.Part{orphanCall}},  // no matching response — dropped
+		{Role: genai.RoleUser, Parts: []*genai.Part{respPart}},    // pair with c1 — survives
+		{Role: genai.RoleUser, Parts: []*genai.Part{orphanResp}},  // no matching call — dropped
+		{Role: genai.RoleModel, Parts: []*genai.Part{orphanCall}}, // no matching response — dropped
 	}
 
 	out := pruneOrphanedToolParts(history)
@@ -107,8 +107,8 @@ func TestEmergencyTruncateRescuesImportant(t *testing.T) {
 	target := int(float64(maxInput) * 0.7)
 
 	history := []*genai.Content{
-		genai.NewContentFromText("you are gokin, a coding assistant", genai.RoleModel),       // [0] preserved
-		genai.NewContentFromText("Implement the JSON parser and add tests", genai.RoleUser),  // [1] preserved (task)
+		genai.NewContentFromText("you are gokin, a coding assistant", genai.RoleModel),           // [0] preserved
+		genai.NewContentFromText("Implement the JSON parser and add tests", genai.RoleUser),      // [1] preserved (task)
 		genai.NewContentFromText("error: the parser panicked on nested arrays", genai.RoleModel), // [2] OLD critical, small
 		// [3] OLD, large, low-value — too big for the rescue budget AND low-scored → dropped.
 		genai.NewContentFromText("DROPME "+strings.Repeat("i scrolled through the plain directory file names ", 60), genai.RoleUser),

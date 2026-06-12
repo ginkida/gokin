@@ -32,9 +32,9 @@ func TestNormalizeCommandForLearning(t *testing.T) {
 		// cd-prefix stripping — mirrors stagnation_fingerprint.
 		{"strips_cd_prefix", "cd /Users/me/project && go test", "go test"},
 		{"strips_relative_cd", "cd internal/app && go build", "go build"},
-		{"pure_cd_dropped", "cd /some/path", ""},   // navigation only
-		{"cd_with_empty_rest", "cd /x && ", ""},     // TrimSpace → empty
-		{"cd_then_short", "cd /x && ls", ""},        // stripped becomes <5 chars
+		{"pure_cd_dropped", "cd /some/path", ""}, // navigation only
+		{"cd_with_empty_rest", "cd /x && ", ""},  // TrimSpace → empty
+		{"cd_then_short", "cd /x && ls", ""},     // stripped becomes <5 chars
 
 		// Junk rejection.
 		{"empty", "", ""},

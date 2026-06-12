@@ -15,13 +15,13 @@ import (
 //
 // The deadlock chain when the server sent a notification before the
 // InitializeResult:
-//   1. Initialize holds c.mu.Lock(), waits on respCh inside request().
-//   2. receiveLoop reads the notification, enters handleMessage.
-//   3. handleMessage tries c.mu.RLock() — blocked behind Initialize's
-//      Lock.
-//   4. receiveLoop is the sole reader; it can't process the next
-//      message, which is the InitializeResult Initialize is waiting
-//      for. Initialize times out at 30s.
+//  1. Initialize holds c.mu.Lock(), waits on respCh inside request().
+//  2. receiveLoop reads the notification, enters handleMessage.
+//  3. handleMessage tries c.mu.RLock() — blocked behind Initialize's
+//     Lock.
+//  4. receiveLoop is the sole reader; it can't process the next
+//     message, which is the InitializeResult Initialize is waiting
+//     for. Initialize times out at 30s.
 //
 // The MCP spec doesn't forbid server-initiated notifications during
 // init. Real servers that emit logs/messages or capability-change

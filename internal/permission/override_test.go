@@ -51,13 +51,13 @@ func TestClearToolRiskOverride_UnknownNameNoOp(t *testing.T) {
 
 func TestParseRiskLevel_KnownValues(t *testing.T) {
 	cases := map[string]RiskLevel{
-		"low":     RiskLow,
-		"LOW":     RiskLow,
-		"  Low ":  RiskLow,
-		"medium":  RiskMedium,
-		"high":    RiskHigh,
-		"HIGH":    RiskHigh,
-		"":        RiskMedium, // default
+		"low":      RiskLow,
+		"LOW":      RiskLow,
+		"  Low ":   RiskLow,
+		"medium":   RiskMedium,
+		"high":     RiskHigh,
+		"HIGH":     RiskHigh,
+		"":         RiskMedium, // default
 		"nonsense": RiskMedium, // unknown → default (safe)
 	}
 	for input, want := range cases {

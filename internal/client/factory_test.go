@@ -119,9 +119,9 @@ func TestNewKimiClient_DoesNotEnableForUnsupportedModel(t *testing.T) {
 // the auto-default in that case.
 func TestNewKimiClient_RepairsOutOfRangeBudget(t *testing.T) {
 	cases := []struct {
-		name    string
+		name     string
 		existing int32
-		want    int32
+		want     int32
 	}{
 		{"way_below_min", 100, defaultKimiThinkingBudget},
 		{"at_min_ok", 1024, 1024},

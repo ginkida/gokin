@@ -53,8 +53,8 @@ func TestWriteTool_Validate(t *testing.T) {
 		{"missing file_path", map[string]any{"content": "hello"}, true},
 		{"missing content", map[string]any{"file_path": "/tmp/test.txt"}, true},
 		{"empty file_path", map[string]any{"file_path": "", "content": "hello"}, true},
-		{"empty content", map[string]any{"file_path": "/tmp/test.txt", "content": ""}, true},                                   // Empty content rejected (would create zero-byte file)
-		{"empty content append", map[string]any{"file_path": "/tmp/test.txt", "content": "", "append": true}, false},           // Empty content in append mode is fine (no-op)
+		{"empty content", map[string]any{"file_path": "/tmp/test.txt", "content": ""}, true},                         // Empty content rejected (would create zero-byte file)
+		{"empty content append", map[string]any{"file_path": "/tmp/test.txt", "content": "", "append": true}, false}, // Empty content in append mode is fine (no-op)
 		{"nil args", nil, true},
 	}
 

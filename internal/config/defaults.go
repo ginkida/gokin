@@ -50,9 +50,9 @@ const (
 	// ceiling which is already the longest intentional budget, and any
 	// agent that legitimately needs more should set its own via type
 	// metadata (AgentTypeGeneral etc.).
-	DefaultAgentTimeout = 10 * time.Minute
-	DefaultDecomposeThreshold  = 5
-	DefaultParallelThreshold   = 8
+	DefaultAgentTimeout       = 10 * time.Minute
+	DefaultDecomposeThreshold = 5
+	DefaultParallelThreshold  = 8
 
 	// Context management
 	DefaultContextWarningThreshold   = 0.8

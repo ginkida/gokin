@@ -119,8 +119,8 @@ var noisePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^Status: (Downloaded|Image is up to date)`),
 
 	// General progress indicators
-	regexp.MustCompile(`^\s*\[[-=>#\s]+\]\s*\d+%`),              // [=====>    ] 50%
-	regexp.MustCompile(`^\s*\d+%\s*\|[█▓▒░\s]*\|`),             // 50% |████    |
+	regexp.MustCompile(`^\s*\[[-=>#\s]+\]\s*\d+%`),                            // [=====>    ] 50%
+	regexp.MustCompile(`^\s*\d+%\s*\|[█▓▒░\s]*\|`),                            // 50% |████    |
 	regexp.MustCompile(`^\s*\(\d+/\d+\)\s+(Downloading|Fetching|Installing)`), // (3/10) Downloading
 
 	// Bundle/gem install noise
