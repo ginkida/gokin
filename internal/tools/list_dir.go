@@ -103,6 +103,9 @@ func (t *ListDirTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 		return NewSuccessResult("(empty)"), nil
 	}
 
+	// Capture the TRUE total before truncating — the header must report an
+	// honest count, never an invented lower bound.
+	totalEntries := len(entries)
 	truncated := false
 	if len(entries) > maxListDirEntries {
 		truncated = true
@@ -140,8 +143,8 @@ func (t *ListDirTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 
 	// Summary header
 	if truncated {
-		fmt.Fprintf(&builder, "%s: %d+ entries (showing %d — %d dirs, %d files):\n",
-			displayPath, len(entries)+10 /* rough lower bound */, maxListDirEntries, len(dirs), len(files))
+		fmt.Fprintf(&builder, "%s: %d entries (showing first %d — %d dirs, %d files):\n",
+			displayPath, totalEntries, maxListDirEntries, len(dirs), len(files))
 	} else {
 		fmt.Fprintf(&builder, "%s: %d entries (%d dirs, %d files):\n",
 			displayPath, len(dirs)+len(files), len(dirs), len(files))

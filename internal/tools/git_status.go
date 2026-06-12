@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -65,7 +66,15 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 
 	output, err := cmd.Output()
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("git status failed: %s", err)), nil
+		// Error context must reach the model: cmd.Output() carries git's
+		// stderr on the ExitError, not in the returned bytes — without this
+		// a "not a git repository" or lock error degrades to "exit status 128".
+		detail := ""
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			detail = "\n" + strings.TrimSpace(string(exitErr.Stderr))
+		}
+		return NewErrorResult(fmt.Sprintf("git status failed: %s%s", err, detail)), nil
 	}
 
 	rawStatus := strings.TrimSpace(string(output))

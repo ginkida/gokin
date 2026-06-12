@@ -202,7 +202,7 @@ func actionableGitDiffSummary(raw string) string {
 
 	if total == 0 {
 		b.WriteString("- No file-level changes detected.\n")
-		b.WriteString("- Next: review the raw diff output above.\n")
+		b.WriteString("- Next: review the raw diff output below.\n")
 		return b.String()
 	}
 
