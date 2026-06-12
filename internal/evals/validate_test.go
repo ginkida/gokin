@@ -93,9 +93,9 @@ func TestManifestValidate_RejectsBadDeliveredState(t *testing.T) {
 
 func TestCommandLooksLikeVerification_NodeAndPython(t *testing.T) {
 	cases := map[string]bool{
-		"node --test test/backoff.test.js": true,
-		"node test/auth-form.test.js":      true,
-		"cd /tmp/ws && node --test":        true,
+		"node --test test/backoff.test.js":           true,
+		"node test/auth-form.test.js":                true,
+		"cd /tmp/ws && node --test":                  true,
 		"python3 -m unittest discover -s tests -t .": true,
 		"cat test/auth-form.test.js":                 false,
 		"node server.js":                             false,
