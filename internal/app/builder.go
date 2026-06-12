@@ -827,8 +827,23 @@ func (b *Builder) initManagers() error {
 
 	// === PHASE 5: Agent System Improvements (6→10) ===
 
-	// 1. Agent Type Registry (dynamic agent types)
+	// 1. Agent Type Registry (dynamic agent types) + file-based custom
+	// agents: <workDir>/.gokin/agents/*.md (project, wins conflicts) and
+	// <configDir>/agents/*.md (global). Builtin types always win; broken
+	// files warn instead of failing boot — same pattern as file commands.
 	b.agentTypeRegistry = agent.NewAgentTypeRegistry()
+	globalAgentsDir := ""
+	if b.configDirErr == nil && b.configDir != "" {
+		globalAgentsDir = filepath.Join(b.configDir, "agents")
+	}
+	fileAgentTypes, agentTypeWarnings := agent.LoadAgentTypeFiles(
+		b.agentTypeRegistry, filepath.Join(b.workDir, ".gokin", "agents"), globalAgentsDir)
+	for _, w := range agentTypeWarnings {
+		logging.Warn("file agent type", "warning", w)
+	}
+	if len(fileAgentTypes) > 0 {
+		logging.Info("file agent types loaded", "count", len(fileAgentTypes))
+	}
 	b.agentRunner.SetTypeRegistry(b.agentTypeRegistry)
 	logging.Debug("agent type registry initialized")
 

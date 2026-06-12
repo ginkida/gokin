@@ -148,7 +148,11 @@ func (c *ListAgentTypesCommand) Execute(ctx context.Context, args []string, app 
 	if len(dynamicTypes) > 0 {
 		sb.WriteString("\n**Custom Agent Types:**\n\n")
 		for _, dt := range dynamicTypes {
-			fmt.Fprintf(&sb, "• **%s** — %s\n", dt.Name, dt.Description)
+			source := dt.Source
+			if source == "" {
+				source = "runtime"
+			}
+			fmt.Fprintf(&sb, "• **%s** [%s] — %s\n", dt.Name, source, dt.Description)
 			if len(dt.AllowedTools) > 0 {
 				fmt.Fprintf(&sb, "  Tools: %s\n", strings.Join(dt.AllowedTools, ", "))
 			}

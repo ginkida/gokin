@@ -12,6 +12,11 @@ type DynamicAgentType struct {
 	AllowedTools []string `json:"allowed_tools"`
 	SystemPrompt string   `json:"system_prompt"`
 	Priority     int      `json:"priority"` // Higher = evaluated first
+
+	// Source records where the type was defined: "runtime"
+	// (/register-agent-type), "project" (<workDir>/.gokin/agents/*.md) or
+	// "global" (<configDir>/agents/*.md). Surfaced by /list-agent-types.
+	Source string `json:"source,omitempty"`
 }
 
 // AgentTypeRegistry manages both built-in and dynamic agent types.
@@ -50,8 +55,24 @@ func (r *AgentTypeRegistry) RegisterDynamic(name, description string, tools []st
 		Description:  description,
 		AllowedTools: tools,
 		SystemPrompt: prompt,
+		Source:       "runtime",
 	}
 
+	return nil
+}
+
+// RegisterDynamicType registers a fully-specified dynamic type (file-based
+// loading path — carries Source/Priority). Built-in names still win.
+func (r *AgentTypeRegistry) RegisterDynamicType(dt *DynamicAgentType) error {
+	if dt == nil || dt.Name == "" {
+		return fmt.Errorf("agent type requires a name")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.builtin[AgentType(dt.Name)] {
+		return fmt.Errorf("cannot override built-in agent type: %s", dt.Name)
+	}
+	r.dynamic[dt.Name] = dt
 	return nil
 }
 
