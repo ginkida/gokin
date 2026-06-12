@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
-	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 )
@@ -33,17 +33,25 @@ func (a *App) RunHeadless(ctx context.Context, prompt string) error {
 		return fmt.Errorf("executor not initialized")
 	}
 
-	finishOutput := a.installHeadlessHandler()
+	// Swap the presenter: the execution handler (built once by the builder
+	// with ALL the shared bookkeeping — journal, heartbeat, response
+	// metadata) stays in place; only WHERE output goes changes. This
+	// replaced installHeadlessHandler, a hand-maintained ~80% copy of the
+	// builder's handler that silently drifted (no plan-step effects, no
+	// token-estimate fires).
+	sp := newStdoutPresenter()
+	a.setPresenter(sp)
+	finishOutput := sp.Finish
 	a.prepareHeadlessRuntime()
 
-	// Bypass the task router: its sub-agent/orchestrator strategies stream
-	// output and tool activity through the TUI program (nil here) and the
-	// runner's own handlers — a routed headless run printed NOTHING to
-	// stdout and left the execution journal blind (zero tool events) while
-	// files changed underneath. Headless = ONE directly-executed agent,
-	// fully observable on stdout and in the journal. First caught by the
-	// deepseek eval baseline: 3 complex scenarios passed verification with
-	// an empty journal and empty output.
+	// Prefer direct execution over the task router: one agent, deterministic
+	// behavior — the right default for evals and scripts. NOTE: since the
+	// output-channel unification this is a POLICY choice, not a correctness
+	// crutch — routed runs now deliver their final response through the
+	// presenter (deliverUnstreamedResponse) and journal sub-agent tool
+	// events (handleSubAgentActivity). The original incident (deepseek
+	// baseline: routed headless printed nothing, journal blind) cannot
+	// recur even with routing enabled.
 	a.mu.Lock()
 	a.headlessDirect = true
 	a.mu.Unlock()
@@ -106,96 +114,54 @@ func (a *App) prepareHeadlessRuntime() {
 	a.session.SetProvider(runtimeProviderForConfig(a.config))
 }
 
-// installHeadlessHandler wires a stdout-streaming execution handler and
-// returns a finalizer that terminates the streamed answer with a newline so
-// shell capture and JSONL post-processing never glue the model output onto
-// the next line. The trailing-newline state is guarded by a.mu, same as the
-// streamed-token counters.
-func (a *App) installHeadlessHandler() func() {
-	sawText := false
-	endedWithNewline := false
+// stdoutPresenter streams the model's answer to stdout for headless runs.
+// Tool/UI events are no-ops: the journal (shared bookkeeping) records tool
+// activity, and there is no screen to paint. Thinking is deliberately NOT
+// printed — stdout must stay the model answer.
+type stdoutPresenter struct {
+	mu               sync.Mutex
+	sawText          bool
+	endedWithNewline bool
+}
 
-	a.executor.SetHandler(&tools.ExecutionHandler{
-		OnText: func(text string) {
-			a.touchStepHeartbeat()
-			_, _ = fmt.Fprint(os.Stdout, text)
+func newStdoutPresenter() *stdoutPresenter {
+	return &stdoutPresenter{}
+}
 
-			a.mu.Lock()
-			a.streamedChars += len(text)
-			a.streamedEstimatedTokens += appcontext.EstimateTokens(text)
-			if text != "" {
-				sawText = true
-				endedWithNewline = strings.HasSuffix(text, "\n")
-			}
-			a.mu.Unlock()
-		},
-		OnThinking: func(text string) {
-			a.touchStepHeartbeat()
-		},
-		OnToolStart: func(name string, args map[string]any) {
-			a.touchStepHeartbeat()
-			a.mu.Lock()
-			a.responseToolsUsed = append(a.responseToolsUsed, name)
-			a.currentToolContext = toolContextSummary(name, args)
-			a.mu.Unlock()
-			a.recordToolUsage(name)
-			if a.sessionMemory != nil {
-				a.sessionMemory.RecordToolCall()
-			}
-			a.journalEvent("tool_start", map[string]any{
-				"tool": name,
-				"args": args,
-			})
-			a.saveRecoverySnapshot()
-		},
-		OnToolEnd: func(name string, args map[string]any, result tools.ToolResult) {
-			a.touchStepHeartbeat()
-			a.mu.Lock()
-			a.currentToolContext = ""
-			a.mu.Unlock()
-			a.recordResponseTouchedPaths(name, args, result)
-			a.recordResponseCommand(name, args, result)
-			a.recordResponseEvidence(name, args, result)
-			if name == "todo" && result.Success {
-				a.emitTodoUpdate()
-			}
-			a.journalEvent("tool_end", map[string]any{
-				"tool":    name,
-				"success": result.Success,
-			})
-		},
-		OnToolProgress: func(name string, elapsed time.Duration) {
-			a.touchStepHeartbeat()
-		},
-		OnToolDetailedProgress: func(name string, progress float64, currentStep string) {
-			a.touchStepHeartbeat()
-			if currentStep != "" {
-				a.mu.Lock()
-				a.currentToolContext = currentStep
-				a.mu.Unlock()
-			}
-		},
-		OnError: func(err error) {
-			if err != nil {
-				a.journalEvent("tool_error", map[string]any{"error": err.Error()})
-			}
-		},
-		OnWarning: func(warning string) {
-			a.touchStepHeartbeat()
-		},
-		OnInlineDiff: func(filePath, oldText, newText string) {},
-		OnLoopIteration: func(iteration int, toolsUsed int) {
-			a.touchStepHeartbeat()
-		},
-		OnTokenUpdate: func(inputTokens, outputTokens int) {},
-	})
-
-	return func() {
-		a.mu.Lock()
-		needNewline := sawText && !endedWithNewline
-		a.mu.Unlock()
-		if needNewline {
-			_, _ = fmt.Fprintln(os.Stdout)
-		}
+func (p *stdoutPresenter) StreamText(text string) {
+	_, _ = fmt.Fprint(os.Stdout, text)
+	if text != "" {
+		p.mu.Lock()
+		p.sawText = true
+		p.endedWithNewline = strings.HasSuffix(text, "\n")
+		p.mu.Unlock()
 	}
+}
+
+// Finish terminates the streamed answer with a newline when it lacks one —
+// shell capture must never glue output onto the next line.
+func (p *stdoutPresenter) Finish() {
+	p.mu.Lock()
+	needNewline := p.sawText && !p.endedWithNewline
+	p.mu.Unlock()
+	if needNewline {
+		_, _ = fmt.Fprintln(os.Stdout)
+	}
+}
+
+func (p *stdoutPresenter) StreamThinking(string)                            {}
+func (p *stdoutPresenter) StreamTokenEstimate(int)                          {}
+func (p *stdoutPresenter) ToolStart(string, map[string]any)                 {}
+func (p *stdoutPresenter) ToolEnd(string, map[string]any, tools.ToolResult) {}
+func (p *stdoutPresenter) ToolProgress(string, time.Duration, string)       {}
+func (p *stdoutPresenter) ToolDetailedProgress(string, float64, string)     {}
+func (p *stdoutPresenter) ToolError(error)                                  {}
+func (p *stdoutPresenter) Warning(string)                                   {}
+func (p *stdoutPresenter) InlineDiff(string, string, string)                {}
+func (p *stdoutPresenter) LoopIteration(int, int)                           {}
+func (p *stdoutPresenter) TokenUsage(int, int, float64)                     {}
+func (p *stdoutPresenter) FilePeek(string, string, string, string)          {}
+func (p *stdoutPresenter) MemoryNotify(string)                              {}
+
+func (p *stdoutPresenter) SubAgentActivity(string, string, string, string, map[string]any, string) {
 }

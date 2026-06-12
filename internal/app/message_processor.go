@@ -616,9 +616,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		a.mu.Unlock()
 	}
 
-	// Note: response text is already streamed via OnText callback in executor handler
-	// Don't send it again here to avoid duplicate output
-	_ = response // Used for token counting above
+	// Direct-executor turns stream their text live through the presenter
+	// (OnText). Minimal-history router strategies (sub-agent, coordinated)
+	// do NOT — they hand the final response back as a plain string, which
+	// used to be silently dropped: headless printed NOTHING and the TUI
+	// never displayed the routed answer. Deliver it through the presenter
+	// exactly when no streaming happened this turn (streamedChars==0 ⟺
+	// nothing reached the user yet), so direct turns can't double-print.
+	a.deliverUnstreamedResponse(response)
 
 	// Signal completion - copy metadata under lock
 	a.mu.Lock()

@@ -213,12 +213,17 @@ type App struct {
 	loopRunner  *loops.Runner
 	loopMemory  *loops.MemoryWriter // human-readable per-loop markdown
 
-	// headlessDirect forces processMessageWithContext to execute through the
-	// plain executor instead of the task router. Set by RunHeadless: routed
-	// sub-agent/orchestrator strategies stream through the (nil) TUI program
-	// and bypass the headless stdout handler AND the execution journal —
-	// see headless.go for the incident write-up. Guarded by a.mu.
+	// headlessDirect makes processMessageWithContext execute through the
+	// plain executor instead of the task router — a determinism POLICY for
+	// headless/eval runs (post-unification, routed output and journaling
+	// work too; see headless.go). Guarded by a.mu.
 	headlessDirect bool
+
+	// presenter is WHERE agent output goes (agent_events.go). The builder
+	// installs the TUI presenter; RunHeadless swaps in the stdout presenter.
+	// The execution handler is built ONCE and resolves this per event.
+	// Guarded by a.mu.
+	presenter agentPresenter
 
 	// Streaming token estimation
 	streamedChars           int // Accumulated chars during current streaming session

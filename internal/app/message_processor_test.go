@@ -159,6 +159,10 @@ func TestRunHeadless_ProcessesOnePromptWithoutTUI(t *testing.T) {
 		rateLimitRetryCount: make(map[string]int),
 	}
 
+	// Hand-built App: install the unified execution handler the builder
+	// would normally wire (RunHeadless only swaps the presenter).
+	exec.SetHandler(a.buildExecutionHandler(nil))
+
 	stdout := captureStdout(t, func() error {
 		return a.RunHeadless(context.Background(), "answer once")
 	})
