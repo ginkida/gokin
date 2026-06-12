@@ -225,6 +225,12 @@ type App struct {
 	// Guarded by a.mu.
 	presenter agentPresenter
 
+	// stopHookActive marks the next turn as a Stop-hook-driven continuation:
+	// stop hooks are skipped at that turn's end so a hook that always fails
+	// cannot loop the agent forever (one continuation per user turn).
+	// Guarded by a.mu.
+	stopHookActive bool
+
 	// Streaming token estimation
 	streamedChars           int // Accumulated chars during current streaming session
 	streamedEstimatedTokens int // Accumulated estimated tokens during current streaming session
@@ -1007,6 +1013,14 @@ func (a *App) GetAgentTaskRunner() commands.AgentTaskRunner {
 		return nil
 	}
 	return a.agentRunner
+}
+
+// GetHooksManager returns the hooks manager for the /hooks command. Nil
+// when hooks aren't wired.
+func (a *App) GetHooksManager() *hooks.Manager {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hooksManager
 }
 
 // SyncMCPToolsForServer reconciles the tool registry against the current

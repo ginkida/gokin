@@ -10,6 +10,7 @@ import (
 	"gokin/internal/client"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
+	"gokin/internal/hooks"
 	"gokin/internal/mcp"
 	"gokin/internal/plan"
 	"gokin/internal/tools"
@@ -88,6 +89,10 @@ type AppInterface interface {
 	// inspect their results. May be nil when the agent subsystem isn't
 	// wired; the command nil-checks.
 	GetAgentTaskRunner() AgentTaskRunner
+
+	// Hooks manager — used by /hooks to list configured hooks. May be nil;
+	// the command nil-checks.
+	GetHooksManager() *hooks.Manager
 }
 
 // Handler manages slash commands.
@@ -175,6 +180,7 @@ func NewHandler() *Handler {
 	// Register stats and memory commands
 	h.Register(&StatsCommand{})
 	h.Register(&TasksCommand{})
+	h.Register(&HooksCommand{})
 	h.Register(&MemoryCommand{})
 
 	// Register theme command

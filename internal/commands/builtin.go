@@ -107,7 +107,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"Auth & Setup", []string{"login", "logout", "keys", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"}},
 		{"Git", []string{"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"}},
 		{"Planning", []string{"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"}},
-		{"Tools", []string{"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "debug-dump",
+		{"Tools", []string{"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "hooks", "debug-dump",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"}},
 	}
 

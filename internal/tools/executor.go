@@ -1678,6 +1678,9 @@ func isExecutionFailure(errMsg string) bool {
 	for _, prefix := range []string{
 		"validation error:", "Permission denied:", "permission error:",
 		"Safety check failed:", "unknown tool:",
+		// A user-configured hook refusing a call is policy, not a tool
+		// malfunction — must not trip the circuit breaker.
+		"hook blocked:",
 	} {
 		if strings.HasPrefix(errMsg, prefix) {
 			return false
@@ -1889,9 +1892,27 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
-	// Step 6: Run pre-tool hooks
+	// Step 6: Run pre-tool hooks. A FailOnError hook that exits non-zero
+	// BLOCKS the call — the tool does not run and the hook's output reaches
+	// the model as the reason (error-context rule). Pre-enforcement the
+	// results were silently discarded, making fail_on_error a documented
+	// no-op.
 	if e.hooks != nil {
-		e.hooks.RunPreTool(ctx, call.Name, call.Args)
+		preResults := e.hooks.RunPreTool(ctx, call.Name, call.Args)
+		if blocked, ok := hooks.Blocked(preResults); ok {
+			name := blocked.Hook.Name
+			if name == "" {
+				name = blocked.Hook.Command
+			}
+			reason := strings.TrimSpace(blocked.Output)
+			if reason == "" && blocked.Error != nil {
+				reason = blocked.Error.Error()
+			}
+			logging.Info("tool call blocked by pre-tool hook",
+				"tool", call.Name, "hook", name)
+			return NewErrorResult(fmt.Sprintf(
+				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
+		}
 	}
 
 	// Step 7: Create execution context

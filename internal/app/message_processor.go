@@ -625,6 +625,10 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// nothing reached the user yet), so direct turns can't double-print.
 	a.deliverUnstreamedResponse(response)
 
+	// End-of-turn hooks: a FailOnError stop hook can request ONE bounded
+	// continuation (see runStopHooks).
+	a.runStopHooks(ctx, response)
+
 	// Signal completion - copy metadata under lock
 	a.mu.Lock()
 	duration := time.Since(a.responseStartTime)

@@ -19,6 +19,10 @@ const (
 	OnStart Type = "on_start"
 	// OnExit runs when the application exits.
 	OnExit Type = "on_exit"
+	// Stop runs at the end of an agent turn. A FailOnError stop hook that
+	// exits non-zero asks the agent to CONTINUE the turn, with the hook's
+	// output as the reason (bounded to one continuation per user turn).
+	Stop Type = "stop"
 )
 
 // Condition represents when a hook should run relative to previous results.
@@ -43,6 +47,11 @@ type Hook struct {
 	Condition   Condition `yaml:"condition"`     // Condition for running (always, if_previous_success, if_previous_failure)
 	FailOnError bool      `yaml:"fail_on_error"` // When true and hook fails, cancel tool execution
 	DependsOn   string    `yaml:"depends_on"`    // Name of another hook that must complete first
+
+	// Source records where the hook was configured ("config" = main
+	// config.yaml hooks section, "project" = <workDir>/.gokin/hooks.yaml).
+	// Surfaced by /hooks list. Not part of the YAML contract.
+	Source string `yaml:"-"`
 }
 
 // ShouldRun checks whether the hook should run given the context and completed hooks.
@@ -210,4 +219,15 @@ func (h *Hook) Matches(hookType Type, toolName string) bool {
 		return true
 	}
 	return h.ToolName == toolName
+}
+
+// knownTypes gates LoadFile validation — a typo'd hook type would otherwise
+// silently never fire.
+var knownTypes = map[Type]bool{
+	PreTool:  true,
+	PostTool: true,
+	OnError:  true,
+	OnStart:  true,
+	OnExit:   true,
+	Stop:     true,
 }

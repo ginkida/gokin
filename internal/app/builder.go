@@ -705,7 +705,8 @@ func (b *Builder) initManagers() error {
 		}
 	}
 
-	// Hooks manager
+	// Hooks manager: hooks from the main config first, then project-level
+	// <workDir>/.gokin/hooks.yaml (same schema; runs after config hooks).
 	b.hooksManager = hooks.NewManager(b.cfg.Hooks.Enabled, b.workDir)
 	for _, hookCfg := range b.cfg.Hooks.Hooks {
 		b.hooksManager.AddHook(&hooks.Hook{
@@ -717,7 +718,18 @@ func (b *Builder) initManagers() error {
 			Condition:   hooks.Condition(hookCfg.Condition),
 			FailOnError: hookCfg.FailOnError,
 			DependsOn:   hookCfg.DependsOn,
+			Source:      "config",
 		})
+	}
+	if projectHooks, err := hooks.LoadFile(filepath.Join(b.workDir, ".gokin", "hooks.yaml")); err != nil {
+		// Boot must survive a typo'd project file, but the user has to SEE
+		// the problem — same warn-and-continue convention as aliases.
+		logging.Warn("project hooks not loaded", "error", err)
+	} else {
+		for _, h := range projectHooks {
+			h.Source = "project"
+			b.hooksManager.AddHook(h)
+		}
 	}
 	b.executor.SetHooks(b.hooksManager)
 

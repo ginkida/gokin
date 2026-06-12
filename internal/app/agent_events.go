@@ -1,10 +1,13 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	appcontext "gokin/internal/context"
+	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
@@ -440,4 +443,84 @@ func (p *tuiPresenter) SubAgentActivity(agentID, agentType, prompt, toolName str
 			Status:    status,
 		})
 	}
+}
+
+// runStopHooks fires end-of-turn hooks (hooks.Stop). A FailOnError stop hook
+// that exits non-zero asks the agent to CONTINUE: its output is enqueued as
+// the next message (type-ahead pending queue). Bounded: at most ONE
+// hook-driven continuation per user-initiated turn — stopHookActive marks
+// the continuation turn, and stop hooks are skipped at ITS end, so a hook
+// that always fails cannot loop the agent forever. Headless runs only
+// journal the outcome (one-shot semantics — there is no next turn).
+func (a *App) runStopHooks(ctx context.Context, response string) {
+	if a.hooksManager == nil {
+		return
+	}
+
+	a.mu.Lock()
+	wasContinuation := a.stopHookActive
+	a.stopHookActive = false
+	headless := a.headlessDirect
+	a.mu.Unlock()
+
+	if wasContinuation {
+		// This turn IS the hook-driven continuation — don't re-gate it.
+		return
+	}
+
+	results := a.hooksManager.RunStop(ctx, response)
+	for _, r := range results {
+		if r.Error != nil {
+			a.journalEvent("stop_hook", map[string]any{
+				"hook":  r.Hook.Name,
+				"error": r.Error.Error(),
+			})
+		}
+	}
+
+	blocked, ok := hooks.Blocked(results)
+	if !ok {
+		return
+	}
+	name := blocked.Hook.Name
+	if name == "" {
+		name = blocked.Hook.Command
+	}
+	reason := strings.TrimSpace(blocked.Output)
+	if reason == "" && blocked.Error != nil {
+		reason = blocked.Error.Error()
+	}
+
+	if headless {
+		// One-shot mode: surface the verdict, no continuation turn exists.
+		a.currentPresenter().Warning(fmt.Sprintf("Stop hook %q failed: %s", name, reason))
+		return
+	}
+
+	followUp := fmt.Sprintf("[Stop hook %q asks you to continue] %s", name, reason)
+	a.mu.Lock()
+	a.stopHookActive = true
+	a.mu.Unlock()
+	if _, ok := a.enqueuePending(followUp); !ok {
+		// Queue full — drop the continuation rather than displace user input.
+		a.mu.Lock()
+		a.stopHookActive = false
+		a.mu.Unlock()
+		a.currentPresenter().Warning(fmt.Sprintf("Stop hook %q wanted a continuation but the queue is full", name))
+		return
+	}
+	a.currentPresenter().Warning(fmt.Sprintf("Stop hook %q: continuing — %s", name, truncateRunesApp(reason, 120)))
+}
+
+// truncateRunesApp rune-safely truncates s to max runes for toast display.
+func truncateRunesApp(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	runes := []rune(s)
+	if max <= 0 || len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
 }

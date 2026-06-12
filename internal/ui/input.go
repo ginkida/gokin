@@ -273,6 +273,7 @@ func DefaultCommands() []CommandInfo {
 		{Name: "clear-todos", Description: "Clear all todo items", Category: "Tools"},
 		{Name: "ql", Description: "Quick look at a file", Category: "Tools",
 			Args: []ArgInfo{{Name: "path", Required: true, Type: "path"}}, Usage: "/ql <path>"},
+		{Name: "hooks", Description: "List configured agent hooks and their sources", Category: "Tools"},
 		{Name: "permissions", Description: "Toggle permission prompts", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
 			Usage: "/permissions [on|off]"},

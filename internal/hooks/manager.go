@@ -328,3 +328,24 @@ func (m *Manager) HasHooksFor(hookType Type, toolName string) bool {
 	}
 	return false
 }
+
+// Blocked returns the first result whose hook demanded cancellation
+// (FailOnError) and failed. Callers enforce the actual blocking: the
+// executor refuses the tool call and returns the hook's output to the
+// model as the reason.
+func Blocked(results []Result) (Result, bool) {
+	for _, r := range results {
+		if r.Hook != nil && r.Hook.FailOnError && r.Error != nil {
+			return r, true
+		}
+	}
+	return Result{}, false
+}
+
+// RunStop runs end-of-turn hooks. The final response is exposed to hook
+// commands as ${RESULT}.
+func (m *Manager) RunStop(ctx context.Context, finalResponse string) []Result {
+	hctx := &Context{WorkDir: m.workDir, Extra: make(map[string]string)}
+	hctx.SetResult(finalResponse)
+	return m.Run(ctx, Stop, hctx)
+}

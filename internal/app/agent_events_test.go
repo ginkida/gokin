@@ -1,11 +1,14 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gokin/internal/hooks"
 )
 
 // TestHandleSubAgentActivity_JournalsToolEvents pins the unification gain:
@@ -112,5 +115,74 @@ func TestDeliverUnstreamedResponse_StreamedTurnDoesNotDoublePrint(t *testing.T) 
 	a.deliverUnstreamedResponse("   ")
 	if len(cp.texts) != 0 {
 		t.Fatalf("whitespace response must not deliver, texts = %v", cp.texts)
+	}
+}
+
+func TestRunStopHooks_BlockedEnqueuesOneBoundedContinuation(t *testing.T) {
+	cp := &capturePresenter{}
+	mgr := hooks.NewManager(true, t.TempDir())
+	mgr.AddHook(&hooks.Hook{
+		Name:        "done-gate",
+		Type:        hooks.Stop,
+		Command:     "echo 'tests were not run' >&2; exit 1",
+		Enabled:     true,
+		FailOnError: true,
+	})
+
+	a := &App{hooksManager: mgr}
+	a.setPresenter(cp)
+
+	a.runStopHooks(context.Background(), "final answer")
+
+	pending, _, ok := a.dequeuePending()
+	if !ok {
+		t.Fatal("blocked stop hook must enqueue a continuation")
+	}
+	for _, needle := range []string{"done-gate", "continue", "tests were not run"} {
+		if !strings.Contains(pending, needle) {
+			t.Fatalf("continuation missing %q: %q", needle, pending)
+		}
+	}
+
+	// The continuation turn must NOT re-fire stop hooks (bounded to one).
+	a.runStopHooks(context.Background(), "second answer")
+	if _, _, ok := a.dequeuePending(); ok {
+		t.Fatal("stop hooks must be skipped on the hook-driven continuation turn")
+	}
+
+	// A fresh user turn after that re-arms the gate.
+	a.runStopHooks(context.Background(), "third answer")
+	if _, _, ok := a.dequeuePending(); !ok {
+		t.Fatal("a fresh user turn must re-arm stop hooks")
+	}
+}
+
+func TestRunStopHooks_PassingHookDoesNothing(t *testing.T) {
+	cp := &capturePresenter{}
+	mgr := hooks.NewManager(true, t.TempDir())
+	mgr.AddHook(&hooks.Hook{
+		Name: "ok-gate", Type: hooks.Stop, Command: "exit 0", Enabled: true, FailOnError: true,
+	})
+
+	a := &App{hooksManager: mgr}
+	a.setPresenter(cp)
+	a.runStopHooks(context.Background(), "answer")
+	if _, _, ok := a.dequeuePending(); ok {
+		t.Fatal("passing stop hook must not enqueue anything")
+	}
+}
+
+func TestRunStopHooks_HeadlessOnlyWarns(t *testing.T) {
+	cp := &capturePresenter{}
+	mgr := hooks.NewManager(true, t.TempDir())
+	mgr.AddHook(&hooks.Hook{
+		Name: "gate", Type: hooks.Stop, Command: "exit 1", Enabled: true, FailOnError: true,
+	})
+
+	a := &App{hooksManager: mgr, headlessDirect: true}
+	a.setPresenter(cp)
+	a.runStopHooks(context.Background(), "answer")
+	if _, _, ok := a.dequeuePending(); ok {
+		t.Fatal("headless one-shot must not enqueue a continuation")
 	}
 }

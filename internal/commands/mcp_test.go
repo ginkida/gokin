@@ -10,6 +10,7 @@ import (
 	"gokin/internal/client"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
+	"gokin/internal/hooks"
 	"gokin/internal/mcp"
 	"gokin/internal/permission"
 	"gokin/internal/plan"
@@ -68,6 +69,7 @@ func (f *fakeAppForMCP) GetMemoryReport() string                          { retu
 func (f *fakeAppForMCP) GetPerformanceStats() string                      { return "" }
 func (f *fakeAppForMCP) GetLoopManager() LoopManager                      { return nil }
 func (f *fakeAppForMCP) GetAgentTaskRunner() AgentTaskRunner              { return nil }
+func (f *fakeAppForMCP) GetHooksManager() *hooks.Manager                  { return nil }
 func (f *fakeAppForMCP) RefreshTokenCount()                               {}
 
 func newFakeApp(t *testing.T, servers []*mcp.ServerConfig) *fakeAppForMCP {
