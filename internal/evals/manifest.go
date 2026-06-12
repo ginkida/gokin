@@ -27,6 +27,14 @@ type Scenario struct {
 	SuccessCriteria      []string `json:"success_criteria"`
 	FailureSignals       []string `json:"failure_signals"`
 	MaxToolCalls         int      `json:"max_tool_calls"`
+
+	// DeliveredState declares whether the fixture's verification commands
+	// pass in the delivered (pre-agent) state: "red" (default — the fixture
+	// ships broken and the agent must make verification pass) or "green"
+	// (trap scenarios where the correct agent action is to LEAVE things
+	// working and a careless action breaks verification). `eval validate`
+	// enforces this contract so fixtures can't silently rot.
+	DeliveredState string `json:"delivered_state,omitempty"`
 }
 
 // LoadManifest reads and validates a coding eval manifest.
@@ -91,6 +99,20 @@ func (m *Manifest) Validate() error {
 		if scenario.MaxToolCalls <= 0 {
 			return fmt.Errorf("scenario %q max_tool_calls must be positive", scenario.ID)
 		}
+		switch scenario.DeliveredState {
+		case "", "red", "green":
+		default:
+			return fmt.Errorf("scenario %q delivered_state must be \"red\" or \"green\", got %q", scenario.ID, scenario.DeliveredState)
+		}
 	}
 	return nil
+}
+
+// EffectiveDeliveredState resolves the default: fixtures ship red unless
+// declared otherwise.
+func (s Scenario) EffectiveDeliveredState() string {
+	if s.DeliveredState == "green" {
+		return "green"
+	}
+	return "red"
 }

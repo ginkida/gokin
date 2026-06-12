@@ -73,3 +73,68 @@ go run ./cmd/gokin eval report \
 ```
 
 The runner writes JSONL results and scores agent evidence from `.gokin/execution_journal.jsonl`, including tool calls, files read, files edited, verification commands, and false file claims.
+
+## Fixture contracts
+
+Every scenario declares (implicitly or via `delivered_state`) what its
+verification commands do in the delivered, pre-agent state:
+
+- `red` (default) — verification FAILS as delivered; the agent's job is to
+  make it pass. A red fixture that already passes measures nothing.
+- `green` — trap scenarios (e.g. `go_investigation_used_symbol`,
+  `go_refactor_preserve_contract`): verification PASSES as delivered; the
+  agent's job is to act without breaking it.
+
+CI enforces this on every push:
+
+```sh
+go run ./cmd/gokin eval validate
+```
+
+Run it locally after adding or editing any fixture.
+
+## Baseline runbook
+
+Snapshot a baseline per provider (uses your configured API keys — this
+spends real tokens; the full set is ~23 agent runs per provider):
+
+```sh
+go build -o /tmp/gokin ./cmd/gokin
+
+GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
+  --provider deepseek \
+  --agent-command './evals/coding/scripts/run-gokin-headless.sh' \
+  --output evals/coding/baselines/deepseek.jsonl
+
+GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
+  --provider kimi \
+  --agent-command './evals/coding/scripts/run-gokin-headless.sh' \
+  --output evals/coding/baselines/kimi.jsonl
+```
+
+Commit `evals/coding/baselines/*.jsonl`. After any prompt/tool/routing
+change, re-run for the affected provider into `.gokin/evals/results.jsonl`
+and compare:
+
+```sh
+go run ./cmd/gokin eval report \
+  --input .gokin/evals/results.jsonl \
+  --baseline evals/coding/baselines/deepseek.jsonl \
+  --max-regression 2%
+go run ./cmd/gokin eval diagnose \
+  --input .gokin/evals/results.jsonl \
+  --baseline evals/coding/baselines/deepseek.jsonl
+```
+
+## Nightly improvement loop
+
+Inside gokin, let the loop iterate while you sleep (self-paced):
+
+```text
+/loop run the coding evals for deepseek, diagnose the weakest metric, make
+the smallest prompt or tool-output change that addresses it, re-run the
+affected scenarios, and report the delta against evals/coding/baselines/deepseek.jsonl
+```
+
+Each iteration should land at most ONE change so the delta stays
+attributable.

@@ -20,7 +20,58 @@ func newEvalCmd() *cobra.Command {
 	evalCmd.AddCommand(newEvalRunCmd())
 	evalCmd.AddCommand(newEvalReportCmd())
 	evalCmd.AddCommand(newEvalDiagnoseCmd())
+	evalCmd.AddCommand(newEvalValidateCmd())
 	return evalCmd
+}
+
+func newEvalValidateCmd() *cobra.Command {
+	var manifestPath string
+	var fixturesRoot string
+	var scenarioIDs []string
+	var timeout time.Duration
+
+	cmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Verify every fixture honors its delivered-state contract",
+		Long: `Verify the fixture contract for every scenario WITHOUT running any agent:
+"red" fixtures (the default) must FAIL their verification commands as
+delivered — the agent's job is to make them pass; "green" trap fixtures
+must PASS — the agent's job is to not break them. A red fixture that
+already passes measures nothing; this command catches that rot in CI.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
+			checks, err := evals.ValidateFixtures(cmd.Context(), evals.ValidateOptions{
+				ManifestPath: manifestPath,
+				FixturesRoot: fixturesRoot,
+				ScenarioIDs:  scenarioIDs,
+				Timeout:      timeout,
+			})
+			if err != nil {
+				return err
+			}
+
+			failed := 0
+			for _, check := range checks {
+				status := "ok"
+				if !check.OK {
+					status = "BROKEN"
+					failed++
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\texpect=%s\t%s\n", check.ScenarioID, status, check.Expect, check.Detail)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "\n%d/%d fixture contracts hold\n", len(checks)-failed, len(checks))
+			if failed > 0 {
+				return fmt.Errorf("eval validate failed: %d fixture contract(s) broken", failed)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&manifestPath, "manifest", "evals/coding/manifest.json", "eval manifest path")
+	cmd.Flags().StringVar(&fixturesRoot, "fixtures", "evals/coding/fixtures", "fixture root directory")
+	cmd.Flags().StringArrayVar(&scenarioIDs, "scenario", nil, "scenario id to validate; repeatable")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "timeout per verification command")
+	return cmd
 }
 
 func newEvalRunCmd() *cobra.Command {

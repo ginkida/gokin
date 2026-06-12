@@ -42,6 +42,12 @@ jobs:
             --output /tmp/gokin-eval-smoke.jsonl \
             --agent-command 'sh "$GITHUB_WORKSPACE/evals/coding/scripts/fix-go-validation.sh"'
 
+      - name: Eval fixture contracts
+        # Every "red" fixture must FAIL its verification as delivered and
+        # every "green" trap must PASS — a red fixture that already passes
+        # scores any agent as successful and measures nothing.
+        run: go run ./cmd/gokin eval validate
+
       - name: Coverage summary
         # Print per-package coverage and total. Fails the job if total drops
         # below the baseline — set intentionally low so additive PRs can't

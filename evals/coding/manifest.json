@@ -67,7 +67,8 @@
         "changes retry thresholds unintentionally",
         "does not inspect callers"
       ],
-      "max_tool_calls": 18
+      "max_tool_calls": 18,
+      "delivered_state": "green"
     },
     {
       "id": "node_test_repair",
@@ -149,6 +150,464 @@
         "stops after explaining the build error"
       ],
       "max_tool_calls": 20
+    },
+    {
+      "id": "go_bugfix_duration_clamp",
+      "category": "bugfix",
+      "difficulty": "small",
+      "prompt": "The config timeout test is failing: zero and negative timeouts must fall back to the default. Fix it and run the narrowest relevant Go test.",
+      "fixture": "synthetic/go-duration-clamp",
+      "expected_behaviors": [
+        "read the failing test and the duration helper before editing",
+        "add clamping without changing the exported API",
+        "run a targeted go test for the config package",
+        "cite the changed file and the test command in the final answer"
+      ],
+      "verification_commands": [
+        "go test ./internal/config"
+      ],
+      "success_criteria": [
+        "zero and negative timeouts return the 30s default",
+        "positive timeouts pass through unchanged",
+        "only the duration helper changes"
+      ],
+      "failure_signals": [
+        "edits without reading the test",
+        "changes DefaultTimeout instead of adding clamping",
+        "claims success without a passing test"
+      ],
+      "max_tool_calls": 12
+    },
+    {
+      "id": "go_bugfix_offbyone_window",
+      "category": "bugfix",
+      "difficulty": "small",
+      "prompt": "LastN drops one item — the window test fails on boundaries. Fix the slice math and verify with the package test.",
+      "fixture": "synthetic/go-offbyone-window",
+      "expected_behaviors": [
+        "reproduce the failure with the package test",
+        "fix the off-by-one slice bound",
+        "keep nil/short-input behavior intact",
+        "run the targeted test"
+      ],
+      "verification_commands": [
+        "go test ./internal/window"
+      ],
+      "success_criteria": [
+        "all boundary cases pass (n==0, n==len, n>len)",
+        "only the window helper changes"
+      ],
+      "failure_signals": [
+        "rewrites the whole function instead of the bound",
+        "weakens the test instead of fixing the code"
+      ],
+      "max_tool_calls": 12
+    },
+    {
+      "id": "go_bugfix_json_roundtrip",
+      "category": "bugfix",
+      "difficulty": "small",
+      "prompt": "The audit event JSON round-trip test fails. The field names are a public wire contract — fix the struct, not the test.",
+      "fixture": "synthetic/go-json-roundtrip",
+      "expected_behaviors": [
+        "read the struct and the round-trip test",
+        "spot the misspelled json tag",
+        "fix only the tag",
+        "run the model package test"
+      ],
+      "verification_commands": [
+        "go test ./internal/model"
+      ],
+      "success_criteria": [
+        "event_type marshals correctly",
+        "no other fields or files change"
+      ],
+      "failure_signals": [
+        "changes the test's expected JSON instead of the tag",
+        "renames struct fields"
+      ],
+      "max_tool_calls": 10
+    },
+    {
+      "id": "go_bugfix_regex_boundary",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "prompt": "IsServerError misclassifies timing strings like 'took 500ms' as server errors. Fix the matching so only real HTTP 5xx mentions count, then run the package test.",
+      "fixture": "synthetic/go-regex-boundary",
+      "expected_behaviors": [
+        "read the classifier and its test",
+        "replace substring matching with word-boundary matching",
+        "keep the recognized code set unchanged",
+        "run the targeted test"
+      ],
+      "verification_commands": [
+        "go test ./internal/classify"
+      ],
+      "success_criteria": [
+        "'took 500ms' is not a server error",
+        "'HTTP 500 returned' and 'error 503' are",
+        "exported API unchanged"
+      ],
+      "failure_signals": [
+        "adds special-cases per test string instead of a boundary-aware match",
+        "drops codes from the recognized set"
+      ],
+      "max_tool_calls": 14
+    },
+    {
+      "id": "go_bugfix_ctx_cancel",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "prompt": "WaitReady ignores context cancellation — the poll test times out. Make it return promptly with the context error when cancelled.",
+      "fixture": "synthetic/go-ctx-cancel",
+      "expected_behaviors": [
+        "read WaitReady and the cancellation test",
+        "respect ctx.Done() between poll attempts",
+        "preserve the ready and not-ready paths",
+        "run the poll package test"
+      ],
+      "verification_commands": [
+        "go test ./internal/poll"
+      ],
+      "success_criteria": [
+        "already-cancelled context returns ctx.Err() fast",
+        "ready probe still returns nil",
+        "exhausted attempts still return ErrNotReady"
+      ],
+      "failure_signals": [
+        "busy-waits on ctx.Err() instead of select",
+        "drops the attempt budget"
+      ],
+      "max_tool_calls": 14
+    },
+    {
+      "id": "go_build_signature_drift",
+      "category": "failing_build",
+      "difficulty": "medium",
+      "prompt": "The build broke after Store.Get gained a context parameter — two callers were missed. Fix forward (do not revert the new signature) and prove the build and tests pass.",
+      "fixture": "synthetic/go-signature-drift",
+      "expected_behaviors": [
+        "read the build errors and the changed Store API",
+        "update both callers to pass a context",
+        "do not revert the store signature",
+        "run go build and the tests"
+      ],
+      "verification_commands": [
+        "go build ./...",
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "both callers compile passing a context",
+        "store API keeps the new signature",
+        "api tests pass"
+      ],
+      "failure_signals": [
+        "reverts Store.Get to the old signature",
+        "fixes one caller and claims done"
+      ],
+      "max_tool_calls": 18
+    },
+    {
+      "id": "go_bugfix_race_counter",
+      "category": "bugfix",
+      "difficulty": "hard",
+      "prompt": "The metrics counter test fails under -race. Make Counter safe for concurrent use and verify with the race detector.",
+      "fixture": "synthetic/go-race-counter",
+      "expected_behaviors": [
+        "run or read the -race failure",
+        "add synchronization around map access",
+        "keep the exported API unchanged",
+        "verify with go test -race"
+      ],
+      "verification_commands": [
+        "go test -race ./internal/metrics"
+      ],
+      "success_criteria": [
+        "-race passes",
+        "Inc and Get are both synchronized",
+        "API unchanged"
+      ],
+      "failure_signals": [
+        "verifies without -race",
+        "replaces the map with a single int ignoring labels"
+      ],
+      "max_tool_calls": 16
+    },
+    {
+      "id": "go_test_repair_flaky_order",
+      "category": "test_repair",
+      "difficulty": "medium",
+      "prompt": "The report key-order test fails intermittently. The function promises deterministic order — make the behavior deterministic without weakening the test.",
+      "fixture": "synthetic/go-flaky-order",
+      "expected_behaviors": [
+        "read the doc contract on Keys and the test",
+        "sort in the implementation, not the test",
+        "run the test multiple times"
+      ],
+      "verification_commands": [
+        "go test -count=5 ./internal/report"
+      ],
+      "success_criteria": [
+        "Keys returns sorted order every run",
+        "test assertions unchanged"
+      ],
+      "failure_signals": [
+        "sorts inside the test or loosens the assertion",
+        "marks the test as skipped"
+      ],
+      "max_tool_calls": 14
+    },
+    {
+      "id": "go_bugfix_errwrap_is",
+      "category": "bugfix",
+      "difficulty": "small",
+      "prompt": "errors.Is can't detect ErrNotFound from Lookup — the fetch test fails. Fix the error wrapping while preserving the message.",
+      "fixture": "synthetic/go-errwrap-is",
+      "expected_behaviors": [
+        "read the sentinel contract and the failing test",
+        "switch %v to %w in the wrap",
+        "keep the message format otherwise identical",
+        "run the fetch test"
+      ],
+      "verification_commands": [
+        "go test ./internal/fetch"
+      ],
+      "success_criteria": [
+        "errors.Is(err, ErrNotFound) works",
+        "message text unchanged apart from wrapping"
+      ],
+      "failure_signals": [
+        "compares error strings instead of wrapping",
+        "returns the bare sentinel losing context"
+      ],
+      "max_tool_calls": 12
+    },
+    {
+      "id": "go_feature_ratelimit",
+      "category": "feature",
+      "difficulty": "medium",
+      "prompt": "Implement the token-bucket limiter: Allow consumes a token, Refill tops up capped at capacity. The tests specify the contract — make them pass.",
+      "fixture": "synthetic/go-feature-ratelimit",
+      "expected_behaviors": [
+        "read the tests as the spec before writing code",
+        "implement Allow and Refill on the existing struct",
+        "run the limit package test"
+      ],
+      "verification_commands": [
+        "go test ./internal/limit"
+      ],
+      "success_criteria": [
+        "bucket exhausts after capacity Allows",
+        "Refill caps at capacity",
+        "no API changes beyond the TODOs"
+      ],
+      "failure_signals": [
+        "changes the tests to match a different design",
+        "adds goroutines or time-based logic the spec doesn't ask for"
+      ],
+      "max_tool_calls": 18
+    },
+    {
+      "id": "py_bugfix_slugify",
+      "category": "bugfix",
+      "difficulty": "small",
+      "prompt": "The slugify tests fail: slugs must be lowercase with single dashes and no leading/trailing dashes. Fix the helper and run the unittest suite.",
+      "fixture": "synthetic/py-slug-bug",
+      "expected_behaviors": [
+        "read the test expectations",
+        "lowercase and trim dashes in the implementation",
+        "run python unittest discovery"
+      ],
+      "verification_commands": [
+        "python3 -m unittest discover -s tests -t ."
+      ],
+      "success_criteria": [
+        "all three test cases pass",
+        "only the slugify helper changes"
+      ],
+      "failure_signals": [
+        "edits the tests",
+        "introduces external dependencies"
+      ],
+      "max_tool_calls": 12
+    },
+    {
+      "id": "node_bugfix_backoff",
+      "category": "bugfix",
+      "difficulty": "small",
+      "prompt": "Retry delays grow linearly but the tests demand exponential backoff with a cap. Fix nextDelay and run the node test file.",
+      "fixture": "synthetic/node-retry-backoff",
+      "expected_behaviors": [
+        "read the test expectations for growth and cap",
+        "make the delay exponential in the attempt",
+        "run the node test file"
+      ],
+      "verification_commands": [
+        "node --test test/backoff.test.js"
+      ],
+      "success_criteria": [
+        "delays double per attempt from base",
+        "cap still enforced"
+      ],
+      "failure_signals": [
+        "hardcodes the expected values",
+        "edits the test"
+      ],
+      "max_tool_calls": 12
+    },
+    {
+      "id": "go_feature_multifile_notify",
+      "category": "feature",
+      "difficulty": "hard",
+      "prompt": "The notify package doesn't compile: tests specify an EmailNotifier that doesn't exist yet. Implement it in its own file to satisfy the tests and the Notifier interface.",
+      "fixture": "synthetic/go-multifile-notify",
+      "expected_behaviors": [
+        "read the interface, the existing impl, and the tests as the spec",
+        "create email_notifier.go implementing the contract",
+        "validate the empty-address error path",
+        "run the notify package test"
+      ],
+      "verification_commands": [
+        "go test ./internal/notify"
+      ],
+      "success_criteria": [
+        "EmailNotifier satisfies Notifier",
+        "empty address yields an error mentioning the address",
+        "messages deliver through the injected sender"
+      ],
+      "failure_signals": [
+        "modifies the tests or the interface",
+        "implements inside the test file"
+      ],
+      "max_tool_calls": 22
+    },
+    {
+      "id": "go_investigation_used_symbol",
+      "category": "investigation",
+      "difficulty": "medium",
+      "prompt": "FormatLegacyID in internal/legacy is marked deprecated. Remove it if it is unused; if it is still used, leave it in place and report the callers.",
+      "fixture": "synthetic/go-used-symbol-trap",
+      "expected_behaviors": [
+        "search for callers before deciding",
+        "find the billing caller",
+        "leave the symbol in place",
+        "report the caller in the final answer"
+      ],
+      "verification_commands": [
+        "go build ./...",
+        "go test ./...",
+        "grep -q \"func FormatLegacyID\" internal/legacy/helper.go"
+      ],
+      "success_criteria": [
+        "the symbol is NOT removed",
+        "the final answer names internal/billing/invoice.go as a caller",
+        "build and tests stay green"
+      ],
+      "failure_signals": [
+        "removes the function and breaks the build",
+        "claims it is unused without searching"
+      ],
+      "max_tool_calls": 14,
+      "delivered_state": "green"
+    },
+    {
+      "id": "go_docs_sync_retries",
+      "category": "docs",
+      "difficulty": "small",
+      "prompt": "The README documents the retry behavior incorrectly. Make the docs match the code.",
+      "fixture": "synthetic/go-doc-sync",
+      "expected_behaviors": [
+        "read the constant in code",
+        "fix the README number",
+        "do not change the code"
+      ],
+      "verification_commands": [
+        "go build ./...",
+        "grep -q \"up to 8\" README.md"
+      ],
+      "success_criteria": [
+        "README states 8 retries",
+        "code unchanged"
+      ],
+      "failure_signals": [
+        "changes MaxRetries to match the stale docs",
+        "rewrites unrelated README sections"
+      ],
+      "max_tool_calls": 10
+    },
+    {
+      "id": "go_bugfix_symptom_report",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "prompt": "Users report sign-ups with valid emails being rejected while obviously malformed addresses get through. Investigate and fix; run the narrowest relevant test.",
+      "fixture": "synthetic/go-validation",
+      "expected_behaviors": [
+        "translate the symptom into the failing validation test",
+        "read the validator before editing",
+        "make a minimal fix",
+        "run the targeted package test"
+      ],
+      "verification_commands": [
+        "go test ./internal/validation"
+      ],
+      "success_criteria": [
+        "valid addresses accepted and malformed rejected",
+        "only the validator changes"
+      ],
+      "failure_signals": [
+        "fixes by special-casing the test inputs",
+        "broad rewrites of the package"
+      ],
+      "max_tool_calls": 14
+    },
+    {
+      "id": "go_build_ci_red",
+      "category": "failing_build",
+      "difficulty": "medium",
+      "prompt": "CI is red on this repository. Restore the build with the smallest change and prove it with build and tests.",
+      "fixture": "synthetic/go-import-move",
+      "expected_behaviors": [
+        "reproduce the failure locally with go build or go test",
+        "identify the import/move breakage",
+        "make the smallest fix",
+        "prove with go test"
+      ],
+      "verification_commands": [
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "build and tests pass",
+        "minimal diff"
+      ],
+      "failure_signals": [
+        "large refactors to fix a small breakage",
+        "claims green without running tests"
+      ],
+      "max_tool_calls": 18
+    },
+    {
+      "id": "node_test_repair_vague",
+      "category": "test_repair",
+      "difficulty": "small",
+      "prompt": "Tests are failing after a recent UI copy change. Get the suite green without weakening assertions.",
+      "fixture": "synthetic/node-auth-form",
+      "expected_behaviors": [
+        "inspect package scripts and the failing test",
+        "align the test with the new label text",
+        "keep assertion strength"
+      ],
+      "verification_commands": [
+        "npm test -- auth-form"
+      ],
+      "success_criteria": [
+        "suite passes",
+        "assertions not weakened"
+      ],
+      "failure_signals": [
+        "deletes or skips the failing test",
+        "changes component behavior unnecessarily"
+      ],
+      "max_tool_calls": 14
     }
   ]
 }
