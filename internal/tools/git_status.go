@@ -59,8 +59,11 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	path := GetStringDefault(args, "path", t.workDir)
 	short := GetBoolDefault(args, "short", false)
 
-	// Always use short format for parsing, then build summary
-	cmdArgs := []string{"status", "--porcelain"}
+	// ONE porcelain invocation with branch info covers everything: the
+	// structured summary below names every file, so the old second
+	// `git status` subprocess (full human output appended after the
+	// summary) only duplicated content and doubled the cost per call.
+	cmdArgs := []string{"status", "--porcelain", "-b"}
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = path
 
@@ -78,8 +81,26 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	}
 
 	rawStatus := strings.TrimSpace(string(output))
-	if rawStatus == "" {
-		return NewSuccessResult("Nothing to commit, working tree clean."), nil
+
+	// First "-b" line carries branch/ahead-behind context: "## main...origin/main [ahead 2]"
+	branch := ""
+	var fileLines []string
+	for _, line := range strings.Split(rawStatus, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			branch = strings.TrimSpace(strings.TrimPrefix(line, "## "))
+			continue
+		}
+		if line != "" {
+			fileLines = append(fileLines, line)
+		}
+	}
+
+	if len(fileLines) == 0 {
+		msg := "Nothing to commit, working tree clean."
+		if branch != "" {
+			msg += " On " + branch + "."
+		}
+		return NewSuccessResult(msg), nil
 	}
 
 	// Parse porcelain output
@@ -89,7 +110,7 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 		untracked []string
 		conflicts []string
 	)
-	for _, line := range strings.Split(rawStatus, "\n") {
+	for _, line := range fileLines {
 		if len(line) < 3 {
 			continue
 		}
@@ -122,7 +143,11 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 
 	// Summary header
 	total := len(staged) + len(unstaged) + len(untracked) + len(conflicts)
-	fmt.Fprintf(&builder, "Working tree status: %d change(s)", total)
+	if branch != "" {
+		fmt.Fprintf(&builder, "Working tree status on %s: %d change(s)", branch, total)
+	} else {
+		fmt.Fprintf(&builder, "Working tree status: %d change(s)", total)
+	}
 	parts := make([]string, 0, 4)
 	if len(staged) > 0 {
 		parts = append(parts, fmt.Sprintf("%d staged", len(staged)))
@@ -144,24 +169,14 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	// Actionable summary
 	builder.WriteString(actionableGitStatusSummary(staged, unstaged, untracked, conflicts))
 
-	// If short format requested or the user asked for raw, append the raw output
+	// short=true appends the raw porcelain lines for machine-style reading.
+	// The non-short path appends NOTHING extra: the structured summary above
+	// already names every file, and the old full-`git status` tail merely
+	// repeated it in prose (plus a second subprocess per call).
 	if short {
 		builder.WriteString("\nRaw:\n")
-		builder.WriteString(rawStatus)
+		builder.WriteString(strings.Join(fileLines, "\n"))
 		builder.WriteString("\n")
-	} else {
-		// Append full (non-short) status for completeness
-		fullCmd := exec.CommandContext(ctx, "git", "status")
-		fullCmd.Dir = path
-		if fullOut, fullErr := fullCmd.Output(); fullErr == nil {
-			fullResult := strings.TrimSpace(string(fullOut))
-			if runes := []rune(fullResult); len(runes) > 30000 {
-				fullResult = string(runes[:30000]) + "\n\n... (status truncated, too many changes)"
-			}
-			builder.WriteString("\n")
-			builder.WriteString(fullResult)
-			builder.WriteString("\n")
-		}
 	}
 
 	return NewSuccessResult(builder.String()), nil

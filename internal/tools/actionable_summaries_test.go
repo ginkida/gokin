@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -136,5 +137,47 @@ func TestListDirTool_SummaryAndSorting(t *testing.T) {
 	// Dirs render before files.
 	if strings.Index(result.Content, "zdir/") > strings.Index(result.Content, "main.go") {
 		t.Fatalf("dirs must list before files:\n%s", result.Content)
+	}
+}
+
+func TestGitStatusTool_SingleInvocationWithBranch(t *testing.T) {
+	dir := resolvedTempDir(t)
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-b", "main")
+	run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init")
+
+	tool := NewGitStatusTool(dir)
+
+	// Clean tree mentions the branch.
+	result, err := tool.Execute(context.Background(), map[string]any{"path": dir})
+	if err != nil || !result.Success {
+		t.Fatalf("Execute() = %v, %s", err, result.Error)
+	}
+	if !strings.Contains(result.Content, "working tree clean") || !strings.Contains(result.Content, "main") {
+		t.Fatalf("clean output must mention branch: %q", result.Content)
+	}
+
+	// Dirty tree: branch in header, every file in the summary, NO duplicated
+	// human-readable tail ("On branch" prose is the old second subprocess).
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err = tool.Execute(context.Background(), map[string]any{"path": dir})
+	if err != nil || !result.Success {
+		t.Fatalf("Execute() = %v, %s", err, result.Error)
+	}
+	for _, needle := range []string{"Working tree status on main", "1 untracked", "new.txt"} {
+		if !strings.Contains(result.Content, needle) {
+			t.Fatalf("dirty output missing %q:\n%s", needle, result.Content)
+		}
+	}
+	if strings.Contains(result.Content, "On branch") {
+		t.Fatalf("non-short output must not append the duplicated human status tail:\n%s", result.Content)
 	}
 }
