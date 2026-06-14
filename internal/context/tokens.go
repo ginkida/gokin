@@ -28,6 +28,10 @@ var DefaultModelLimits = map[string]TokenLimits{
 	// 128K/8K default from getModelLimits). Values assume Z.AI's current
 	// GLM-5.x context window of 200K and 128K max output; older GLM
 	// output caps differ per model family.
+	"glm-5.2": {
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 131072,
+	},
 	"glm-5.1": {
 		MaxInputTokens:  200000,
 		MaxOutputTokens: 131072,
@@ -92,6 +96,7 @@ var DefaultPricing = map[string]ModelPricing{
 	// names don't reach this map for removed providers.
 
 	// GLM (prices in USD equivalent from CNY)
+	"glm-5.2":     {InputCostPer1M: 4.00, OutputCostPer1M: 16.00},
 	"glm-5.1":     {InputCostPer1M: 4.00, OutputCostPer1M: 16.00},
 	"glm-5":       {InputCostPer1M: 1.00, OutputCostPer1M: 4.00},
 	"glm-5-turbo": {InputCostPer1M: 0.70, OutputCostPer1M: 2.80},

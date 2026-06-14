@@ -81,7 +81,7 @@ func NormalizeConfig(cfg *Config) error {
 	} else if matchProvider := providerDefaultPreset(cfg.Model.Provider); matchProvider != "" &&
 		looksLikeDefaultModelConfig(&cfg.Model) {
 		// Provider was set explicitly (e.g. "glm") but Name/MaxOutputTokens
-		// are still the zero-preset defaults (glm-5 / glm-5.1 /
+		// are still the zero-preset defaults (glm-5 / glm-5.1 / glm-5.2 /
 		// kimi-for-coding / 131072 — see looksLikeDefaultModelConfig in
 		// presets.go). The user almost certainly wanted the provider's
 		// preset — apply it so output isn't truncated just because they

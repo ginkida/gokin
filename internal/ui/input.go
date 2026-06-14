@@ -164,7 +164,7 @@ func DefaultCommands() []CommandInfo {
 			// Tab-complete options reflect the v0.65+ supported set —
 			// gemini/claude/gpt entries pre-v0.78.30 were stale references
 			// to providers removed during the v0.65 trim.
-			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
+			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
 			Usage: "/model [name]"},
 		{Name: "reasoning", Description: "Set reasoning effort", Category: "Session",
 			Args:  []ArgInfo{{Name: "level", Required: false, Type: "option", Options: []string{"none", "low", "medium", "high", "xhigh"}}},

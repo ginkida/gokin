@@ -18,8 +18,8 @@ func TestApplyRuntimeOverrides_ProviderSelectsRuntimeAndDefaultModel(t *testing.
 	if cfg.API.ActiveProvider != "glm" || cfg.API.Backend != "glm" || cfg.Model.Provider != "glm" {
 		t.Fatalf("provider not applied: api=%q backend=%q model.provider=%q", cfg.API.ActiveProvider, cfg.API.Backend, cfg.Model.Provider)
 	}
-	if cfg.Model.Name != "glm-5.1" {
-		t.Fatalf("model name = %q, want provider default glm-5.1", cfg.Model.Name)
+	if cfg.Model.Name != "glm-5.2" {
+		t.Fatalf("model name = %q, want provider default glm-5.2", cfg.Model.Name)
 	}
 }
 

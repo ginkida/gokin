@@ -101,16 +101,27 @@ spends real tokens; the full set is ~23 agent runs per provider):
 ```sh
 go build -o /tmp/gokin ./cmd/gokin
 
+# deepseek and glm are the primary day-to-day providers — keep both green.
 GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
   --provider deepseek \
   --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
   --output evals/coding/baselines/deepseek.jsonl
+
+# glm defaults to glm-5.2 (the whole glm-5.x line aliases to it on Z.AI);
+# pin --model so the baseline stays reproducible if the default later moves.
+GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
+  --provider glm --model glm-5.2 \
+  --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
+  --output evals/coding/baselines/glm.jsonl
 
 GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
   --provider kimi \
   --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
   --output evals/coding/baselines/kimi.jsonl
 ```
+
+Each provider needs its key in the environment for the run (the headless
+adapter inherits it): `GOKIN_DEEPSEEK_KEY`, `GOKIN_GLM_KEY`, `GOKIN_KIMI_KEY`.
 
 Commit `evals/coding/baselines/*.jsonl`. After any prompt/tool/routing
 change, re-run for the affected provider into `.gokin/evals/results.jsonl`
@@ -131,10 +142,12 @@ go run ./cmd/gokin eval diagnose \
 Inside gokin, let the loop iterate while you sleep (self-paced):
 
 ```text
-/loop run the coding evals for deepseek, diagnose the weakest metric, make
-the smallest prompt or tool-output change that addresses it, re-run the
-affected scenarios, and report the delta against evals/coding/baselines/deepseek.jsonl
+/loop run the coding evals for deepseek and glm, diagnose the weakest shared
+metric, make the smallest prompt or tool-output change that addresses it,
+re-run the affected scenarios for BOTH providers, and report the delta against
+evals/coding/baselines/deepseek.jsonl and evals/coding/baselines/glm.jsonl
 ```
 
-Each iteration should land at most ONE change so the delta stays
-attributable.
+deepseek and glm are the two providers to keep healthy — prefer changes that
+help both, and never regress one to lift the other. Each iteration should land
+at most ONE change so the delta stays attributable.

@@ -1293,7 +1293,7 @@ func getDataDir() (string, error) {
 func getCommandExample(name string) string {
 	examples := map[string]string{
 		"commit":   "  /commit              — AI generates commit message from staged changes\n  /commit fix typo     — commit with custom message",
-		"model":    "  /model glm-5.1               — switch to GLM 5.1 (Z.AI Coding Plan default)\n  /model deepseek-v4-pro       — switch to DeepSeek V4 Pro\n  /model kimi-for-coding       — switch to Kimi K2.6\n  /model MiniMax-M2.7          — switch to MiniMax",
+		"model":    "  /model glm-5.2               — switch to GLM 5.2 (Z.AI Coding Plan default)\n  /model deepseek-v4-pro       — switch to DeepSeek V4 Pro\n  /model kimi-for-coding       — switch to Kimi K2.6\n  /model MiniMax-M2.7          — switch to MiniMax",
 		"plan":     "  /plan                — toggle planning mode on/off\n  Then type a complex task and it will be broken into steps",
 		"resume":   "  /resume abc123       — restore session abc123\n  /resume abc123 --force — restore even from different project",
 		"save":     "  /save                — save current session for later /resume\n  /save mywork         — save with custom name (refuses to overwrite by default)\n  /save mywork --force — overwrite an existing 'mywork' checkpoint",

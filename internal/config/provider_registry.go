@@ -37,7 +37,7 @@ var Providers = []ProviderDef{
 	{
 		Name:          "glm",
 		DisplayName:   "GLM (BigModel / Z.AI)",
-		DefaultModel:  "glm-5.1",
+		DefaultModel:  "glm-5.2",
 		EnvVars:       []string{"GOKIN_GLM_KEY", "GLM_API_KEY"},
 		UsesLegacyKey: true,
 		GetKey:        func(api *APIConfig) string { return api.GLMKey },

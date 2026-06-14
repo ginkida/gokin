@@ -1125,7 +1125,7 @@ func mapModelName(name string) string {
 	case "flash", "fast":
 		return "glm-5-turbo"
 	case "pro", "strong":
-		return "glm-5.1"
+		return "glm-5.2"
 	default:
 		return name // Return as is if already a full model name
 	}

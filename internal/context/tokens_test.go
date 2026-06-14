@@ -39,6 +39,7 @@ func TestGetModelLimits_FuzzyMatch(t *testing.T) {
 		// GLM variants — longest key must win deterministically. A name like
 		// "glm-4.5-preview" is a substring of both "glm-4.5" (131K out) and
 		// "glm-4" (32K out); the longer, more-specific key must be selected.
+		{"glm-5.2-preview", 200000, 131072},
 		{"glm-5.1-preview", 200000, 131072},
 		{"glm-5-turbo-v2", 200000, 131072},
 		{"glm-4.5-preview", 128000, 131072}, // must not fall back to glm-4 (32K)
@@ -87,6 +88,7 @@ func TestGetPricing_KnownModels(t *testing.T) {
 		wantInput  float64
 		wantOutput float64
 	}{
+		{"glm-5.2", 4.00, 16.00},
 		{"glm-5.1", 4.00, 16.00},
 		{"glm-5", 1.00, 4.00},
 		{"kimi-for-coding", 0.95, 4.00},

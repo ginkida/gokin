@@ -17,7 +17,7 @@ func TestApplyPreset(t *testing.T) {
 		{"creative", true, "MiniMax-M2.7", "minimax"},
 		{"ollama", true, "llama3.2", "ollama"},
 		{"kimi", true, "kimi-for-coding", "kimi"},
-		{"glm", true, "glm-5.1", "glm"},
+		{"glm", true, "glm-5.2", "glm"},
 		{"minimax", true, "MiniMax-M2.7", "minimax"},
 		{"nonexistent", false, "", ""},
 	}
@@ -136,6 +136,7 @@ func TestLooksLikeDefaultModelConfig(t *testing.T) {
 		{"empty name, default tokens", &ModelConfig{MaxOutputTokens: 131072}, true},
 		{"glm default name, default tokens", &ModelConfig{Name: "glm-5", MaxOutputTokens: 131072}, true},
 		{"glm 5.1 default name, default tokens", &ModelConfig{Name: "glm-5.1", MaxOutputTokens: 131072}, true},
+		{"glm 5.2 default name, default tokens", &ModelConfig{Name: "glm-5.2", MaxOutputTokens: 131072}, true},
 		{"glm default name, zero tokens", &ModelConfig{Name: "glm-5"}, true},
 		{"kimi-for-coding default, zero tokens", &ModelConfig{Name: "kimi-for-coding"}, true},
 		{"custom name blocks auto-apply", &ModelConfig{Name: "glm-4.5", MaxOutputTokens: 131072}, false},

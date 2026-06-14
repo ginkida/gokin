@@ -57,9 +57,16 @@ type ModelInfo struct {
 var AvailableModels = []ModelInfo{
 	// GLM models (via Anthropic-compatible API on Z.AI)
 	{
+		ID:          "glm-5.2",
+		Name:        "GLM-5.2",
+		Description: "Most capable GLM model — Max tier (Coding Plan)",
+		Provider:    "glm",
+		BaseURL:     DefaultGLMBaseURL,
+	},
+	{
 		ID:          "glm-5.1",
 		Name:        "GLM-5.1",
-		Description: "Most capable GLM model — Max tier (Coding Plan)",
+		Description: "Previous flagship GLM model (Coding Plan)",
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},

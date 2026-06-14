@@ -666,8 +666,8 @@ func providerAddendum(provider string) string {
 	return ""
 }
 
-// glmOperatingRules adds GLM-specific guardrails. GLM 5.1 is a strong coding
-// model that benefits from the same "plan-before-tools" discipline as Kimi,
+// glmOperatingRules adds GLM-specific guardrails. GLM 5.2 (default) is a strong
+// coding model that benefits from the same "plan-before-tools" discipline as Kimi,
 // plus explicit guidance on the architecture-first workflow for new features.
 const glmOperatingRules = `## Operating rules (GLM-specific)
 
