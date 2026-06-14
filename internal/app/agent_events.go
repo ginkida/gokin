@@ -154,8 +154,10 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 				"success": result.Success,
 			})
 
-			// Refresh token count after each tool completes (context grew)
-			go a.refreshTokenCount()
+			// Refresh token count after each tool completes (context grew).
+			// safeGo, not raw go: refreshTokenCount makes a count_tokens API call
+			// with no internal recover — a panic on a raw goroutine crashes the CLI.
+			a.safeGo("refresh-token-count", a.refreshTokenCount)
 		},
 		OnToolProgress: func(name string, elapsed time.Duration) {
 			a.touchStepHeartbeat()

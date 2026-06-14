@@ -879,7 +879,34 @@ func (a *App) detectUnslashedCommand(message string) string {
 }
 
 func (a *App) executeCommandCtx(ctx context.Context, name string, args []string) {
+	responseDoneSent := false
 	defer func() {
+		// Recover from panics in command execution. Without this, a panic
+		// in a command (e.g. nil-deref in ApplyConfig during /login, or a
+		// malformed result from a file-based command) crashes the whole
+		// CLI. safeGo already wraps this goroutine in a recover, but that
+		// only logs — it does NOT send ResponseDoneMsg, so the UI would
+		// stay stuck in "Generating" forever. We handle both here: convert
+		// the panic into an ErrorMsg + ResponseDoneMsg so the user sees
+		// what happened and the UI returns to StateInput.
+		if r := recover(); r != nil {
+			logging.Error("command execution panicked",
+				"command", name,
+				"panic", r,
+				"stack", logging.PanicStack())
+			a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("internal error in /%s: %v", name, r)))
+		}
+		// GUARANTEE ResponseDoneMsg reaches the UI on every exit path.
+		// Previously this was a bare statement at the end of the function
+		// (line 950), so if commandHandler.Execute panicked OR returned
+		// via an early defer (context cancel mid-command), the UI stayed
+		// in StateProcessing → "Generating" forever — the exact
+		// "/login glm hangs" symptom. Moving it here ensures the UI
+		// always returns to StateInput, matching processMessageWithContext
+		// which already does this in its defer (message_processor.go:656).
+		if !responseDoneSent {
+			a.safeSendToProgram(ui.ResponseDoneMsg{})
+		}
 		a.mu.Lock()
 		a.processing = false
 		a.mu.Unlock()
@@ -947,6 +974,7 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 			a.safeSendToProgram(ui.StreamTextMsg(result))
 		}
 	}
+	responseDoneSent = true
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
 }
 

@@ -195,7 +195,7 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 	if enableThinking && thinkingBudget > 0 {
 		requestBody["thinking"] = map[string]any{
 			"type":          "enabled",
-			"budget_tokens": thinkingBudget,
+			"budget_tokens": clampThinkingBudgetBelowMax(thinkingBudget, maxTokens),
 		}
 		// Extended thinking requires temperature=1 (Anthropic requirement)
 		requestBody["temperature"] = 1.0
@@ -213,6 +213,18 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 
 	c.applyCacheControl(requestBody)
 	return c.streamRequest(ctx, requestBody)
+}
+
+// clampThinkingBudgetBelowMax keeps budget_tokens strictly below max_tokens —
+// Anthropic / strict-DeepSeek 400 when budget_tokens >= max_tokens. The router
+// can drive the thinking budget to its 16384 cap, which equals some providers'
+// 16384 output cap; this clamp keeps the request valid (1024 headroom). Compat
+// gateways are lenient today, but the native path / Tier-3 Opus require it.
+func clampThinkingBudgetBelowMax(budget, maxTokens int32) int32 {
+	if maxTokens > 1024 && budget >= maxTokens {
+		return maxTokens - 1024
+	}
+	return budget
 }
 
 // SendFunctionResponse sends function call results back to the model.
@@ -255,7 +267,7 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 	if enableThinking && thinkingBudget > 0 {
 		requestBody["thinking"] = map[string]any{
 			"type":          "enabled",
-			"budget_tokens": thinkingBudget,
+			"budget_tokens": clampThinkingBudgetBelowMax(thinkingBudget, maxTokens),
 		}
 		requestBody["temperature"] = 1.0
 	} else if temperature > 0 {

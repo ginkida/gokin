@@ -30,8 +30,13 @@ import (
 
 // Limits for parallel tool execution to prevent resource exhaustion.
 const (
-	// MaxFunctionCallsPerResponse limits the number of function calls processed per response.
-	MaxFunctionCallsPerResponse = 10
+	// MaxFunctionCallsPerResponse caps how many function calls are EXECUTED per
+	// response (a resource bound). Calls beyond the cap are NOT dropped — they
+	// are paired with an explicit "not executed" result so no tool_use block is
+	// left orphaned (see executeTools). 20 matches the parallel-read guidance in
+	// the system prompt; actual concurrency stays bounded by
+	// MaxConcurrentToolExecutions.
+	MaxFunctionCallsPerResponse = 20
 	// MaxConcurrentToolExecutions limits parallel goroutines for tool execution.
 	MaxConcurrentToolExecutions = 5
 	// defaultModelRoundTimeout caps a single model round to prevent zombie requests.
@@ -222,6 +227,9 @@ type Executor struct {
 	lastOutputTokens        int
 	lastCacheCreationTokens int
 	lastCacheReadTokens     int
+	// maxInputTokens is the active model's context window. Used as the in-loop
+	// prune trigger; 0 = unset (no pruning). Protected by tokenMu.
+	maxInputTokens int
 
 	// Prompt cache break detection
 	cacheTracker *client.CacheTracker
@@ -1163,6 +1171,27 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				appendNotificationToFunctionResults(results, notifText)
 			}
 
+			// In-loop context guard: when the previous round's input is nearing
+			// the model's window, pre-emptively prune older tool outputs in place
+			// so this turn doesn't overflow and 400 mid-work (which would force a
+			// wasteful full-turn EmergencyTruncate that also destroys the cache).
+			// Sub-agents already do this via checkAndSummarize; the foreground
+			// loop had no equivalent before v0.98.x.
+			// Read both fields under tokenMu (both are tokenMu-protected — a bare
+			// gate read would be a data race with SetMaxInputTokens).
+			e.tokenMu.Lock()
+			lastIn, maxIn := e.lastInputTokens, e.maxInputTokens
+			e.tokenMu.Unlock()
+			if maxIn > 0 && lastIn > 0 && float64(lastIn) > foregroundPruneTriggerRatio*float64(maxIn) {
+				if freed := pruneOldToolOutputs(history, foregroundPruneProtect, foregroundPruneMinOutput); freed > 0 {
+					logging.Info("in-loop prune: shrank old tool outputs to fit context",
+						"freed_chars", freed, "last_input_tokens", lastIn, "max_input_tokens", maxIn)
+					if e.handler != nil && e.handler.OnWarning != nil {
+						e.handler.OnWarning("Context filling up — pruned older tool outputs to keep going")
+					}
+				}
+			}
+
 			// Add function results to history BEFORE sending to model.
 			// This ensures tool results are preserved even if the API call fails.
 			funcResultParts := make([]*genai.Part, len(results))
@@ -1499,13 +1528,78 @@ func (e *Executor) collectStreamWithHandler(ctx context.Context, stream *client.
 	})
 }
 
+const (
+	// foregroundPruneTriggerRatio: prune in-loop tool outputs once the previous
+	// round's input tokens exceed this fraction of the model's context window.
+	// 0.75 leaves headroom before an actual context-overflow 400.
+	foregroundPruneTriggerRatio = 0.75
+	// foregroundPruneProtect: most-recent history messages never pruned (the
+	// model's active working set).
+	foregroundPruneProtect = 6
+	// foregroundPruneMinOutput: only tool outputs larger than this (runes) are
+	// prune candidates — small results aren't worth stubbing.
+	foregroundPruneMinOutput = 1000
+)
+
+// SetMaxInputTokens records the active model's context window so the executor
+// can pre-emptively prune old tool outputs mid-loop before a long turn overflows
+// it (which otherwise 400s and forces a wasteful full-turn truncation that also
+// destroys the prompt cache). 0 = unset (pruning disabled).
+func (e *Executor) SetMaxInputTokens(n int) {
+	e.tokenMu.Lock()
+	e.maxInputTokens = n
+	e.tokenMu.Unlock()
+}
+
+// pruneOldToolOutputs shrinks large, older FunctionResponse Content in the
+// in-loop history to reclaim context budget without failing the turn. It NEVER
+// removes a part — only replaces oversized content with a stub — so every
+// tool_use stays paired with its tool_result (Anthropic-compat providers 400 on
+// an orphaned tool_use). Protects the first 3 messages (system/greeting/task)
+// and the last `protect` messages (recent working set). Returns chars freed.
+func pruneOldToolOutputs(history []*genai.Content, protect, minOutputSize int) int {
+	start := 3
+	end := len(history) - protect
+	if end <= start {
+		return 0
+	}
+	freed := 0
+	for i := start; i < end; i++ {
+		msg := history[i]
+		if msg == nil {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part == nil || part.FunctionResponse == nil || part.FunctionResponse.Response == nil {
+				continue
+			}
+			content, ok := part.FunctionResponse.Response["content"].(string)
+			if !ok || len([]rune(content)) <= minOutputSize {
+				continue
+			}
+			stub := fmt.Sprintf("[older %s output pruned to fit context — re-read if needed]", part.FunctionResponse.Name)
+			part.FunctionResponse.Response["content"] = stub
+			freed += len([]rune(content)) - len([]rune(stub)) // rune units, matching the candidate threshold
+		}
+	}
+	return freed
+}
+
 // executeTools executes a list of function calls with enhanced safety checks.
 func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall) ([]*genai.FunctionResponse, error) {
-	// Limit number of function calls to prevent resource exhaustion
+	// Cap how many calls we EXECUTE per turn (resource bound), but never drop a
+	// call silently: the assistant history turn already records every emitted
+	// tool_use, so a dropped call leaves an unpaired tool_use block that the
+	// Anthropic-compat providers (all four) reject with a 400, failing the whole
+	// turn. Defer the overflow and pair each with an explicit "not executed"
+	// result below, so the model re-issues them next turn instead of assuming
+	// they ran.
+	var deferredCalls []*genai.FunctionCall
 	if len(calls) > MaxFunctionCallsPerResponse {
-		logging.Warn("truncating function calls",
+		logging.Warn("deferring excess function calls beyond per-turn cap",
 			"original_count", len(calls),
 			"max_allowed", MaxFunctionCallsPerResponse)
+		deferredCalls = calls[MaxFunctionCallsPerResponse:]
 		calls = calls[:MaxFunctionCallsPerResponse]
 	}
 
@@ -1629,6 +1723,20 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 				}()
 			}
 		}
+	}
+
+	// Pair every deferred (un-executed) call with an explicit result so the
+	// assistant's tool_use blocks are never left orphaned — otherwise the next
+	// round 400s on Anthropic-compat providers. The message tells the model the
+	// call was skipped (not run) so it re-issues it rather than assuming success.
+	for _, call := range deferredCalls {
+		results = append(results, &genai.FunctionResponse{
+			ID:   call.ID,
+			Name: call.Name,
+			Response: NewErrorResult(fmt.Sprintf(
+				"not executed: at most %d tool calls run per turn — re-request this call in your next turn",
+				MaxFunctionCallsPerResponse)).ToMap(),
+		})
 	}
 
 	return results, nil
@@ -1999,12 +2107,54 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}()
 	}
 
-	// Check if tool supports streaming for large outputs
+	// Check if tool supports streaming for large outputs.
+	//
+	// Run the actual execution in a goroutine and select on execCtx so a tool
+	// that IGNORES context cancellation (a blocking syscall, a non-context-aware
+	// network read, a deadlocked mutex, a misbehaving MCP tool) cannot hang the
+	// whole turn forever. The per-tool timeout only frees the loop if the tool
+	// honors ctx; this select frees it regardless. A truly-hung goroutine leaks,
+	// but the user always gets control back — matching the "never hangs" bar.
 	var err error
-	if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
-		result, err = e.executeStreamingTool(execCtx, streamingTool, call.Args)
-	} else {
-		result, err = tool.Execute(execCtx, call.Args)
+	type toolOutcome struct {
+		result ToolResult
+		err    error
+	}
+	toolDone := make(chan toolOutcome, 1) // buffered: a leaked goroutine can still send once, then exit
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// The enclosing executeTools recover can't catch a panic in THIS
+				// nested goroutine — handle it here and deliver as a result.
+				stack := make([]byte, 4096)
+				n := runtime.Stack(stack, false)
+				logging.Error("tool execution panic", "tool", call.Name, "panic", r, "stack", string(stack[:n]))
+				toolDone <- toolOutcome{result: NewErrorResult(formatToolPanic(call.Name, r))}
+			}
+		}()
+		var r ToolResult
+		var e2 error
+		if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
+			r, e2 = e.executeStreamingTool(execCtx, streamingTool, call.Args)
+		} else {
+			r, e2 = tool.Execute(execCtx, call.Args)
+		}
+		toolDone <- toolOutcome{result: r, err: e2}
+	}()
+	select {
+	case outcome := <-toolDone:
+		result, err = outcome.result, outcome.err
+	case <-execCtx.Done():
+		// Give a well-behaved tool a brief grace to deliver its own (more
+		// informative) result/error on cancel; otherwise return a timeout and
+		// let the misbehaving goroutine leak. err flows into the timeout/cancel
+		// handling below.
+		select {
+		case outcome := <-toolDone:
+			result, err = outcome.result, outcome.err
+		case <-time.After(50 * time.Millisecond):
+			err = execCtx.Err()
+		}
 	}
 	close(done)
 	duration := time.Since(start)

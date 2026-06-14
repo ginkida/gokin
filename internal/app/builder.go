@@ -385,6 +385,9 @@ func (b *Builder) initTools() error {
 	b.mainClient.SetTools(mainTools)
 
 	b.executor = tools.NewExecutor(b.registry, b.mainClient, b.cfg.Tools.Timeout)
+	// Give the executor the model's context window so it can pre-emptively prune
+	// old tool outputs mid-loop instead of overflowing and failing the turn.
+	b.executor.SetMaxInputTokens(appcontext.GetModelLimits(b.cfg.Model.Name).MaxInputTokens)
 	b.executor.SetWorkDir(b.workDir)
 	b.executor.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.executor.SetDeltaCheckConfig(
@@ -799,11 +802,19 @@ func (b *Builder) initManagers() error {
 	}
 	b.fileCommands = fileCommands
 
+	// Infer model capability once — BOTH the live task router and the smart
+	// router need it. Without it on the live Router, the weak-model thinking
+	// multiplier and capability-tier adaptations silently never fire (the
+	// nil-guard in router.selectThinkingBudget / decompose / self-review skips
+	// them), so weak models get LESS thinking than intended, not more.
+	b.modelCapability = router.InferModelCapability(runtimeProviderForConfig(b.cfg), b.cfg.Model.Name)
+
 	// Initialize task router
 	routerCfg := &router.RouterConfig{
 		Enabled:            true,
 		DecomposeThreshold: 4,
 		ParallelThreshold:  7,
+		ModelCapability:    b.modelCapability,
 	}
 	b.taskRouter = router.NewRouter(routerCfg, b.executor, b.agentRunner, b.mainClient, b.registry, b.isInGitRepo(), b.workDir)
 
@@ -943,9 +954,9 @@ func (b *Builder) initManagers() error {
 		logging.Debug("prompt optimizer initialized")
 	}
 
-	// 4. Smart Router with adaptive selection + model capability
+	// 4. Smart Router with adaptive selection + model capability.
+	// b.modelCapability was inferred once when the task router was built; reuse it.
 	smartRouterCfg := router.DefaultSmartRouterConfig()
-	b.modelCapability = router.InferModelCapability(runtimeProviderForConfig(b.cfg), b.cfg.Model.Name)
 	smartRouterCfg.ModelCapability = b.modelCapability
 	logging.Debug("model capability inferred", "provider", b.modelCapability.Provider, "tier", b.modelCapability.Tier.String())
 

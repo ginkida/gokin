@@ -770,7 +770,7 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 	case StatePlanApproval:
 		return []shortcutHint{{"y", "Approve"}, {"n", "Reject"}, {"m", "Modify"}, {"↑↓", "Navigate"}}
 	case StateDiffPreview:
-		return []shortcutHint{{"Enter", "Accept"}, {"e", "Edit"}, {"n", "Reject"}, {"q", "Close"}}
+		return []shortcutHint{{"y", "Apply"}, {"n", "Reject"}, {"A", "Apply all"}, {"R", "Reject all"}}
 	case StateMultiDiffPreview:
 		return []shortcutHint{{"y", "Apply all"}, {"n", "Reject all"}, {"Tab", "Switch pane"}, {"↑↓", "Browse"}}
 	case StateQuestionPrompt:

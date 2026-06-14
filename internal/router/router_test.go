@@ -250,8 +250,20 @@ func TestSelectThinkingBudget(t *testing.T) {
 	// Test thinking multiplier for weak model
 	r.modelCapability = &ModelCapability{Tier: CapabilityWeak, ThinkingMultiplier: 1.5}
 	budget := r.selectThinkingBudget(&TaskComplexity{Strategy: StrategySubAgent, Score: 8})
-	if budget != 6144 { // 4096 * 1.5
-		t.Errorf("weak model budget = %d, want 6144", budget)
+	if budget != 12288 { // 8192 (SubAgent floor) * 1.5 weak-model multiplier
+		t.Errorf("weak model budget = %d, want 12288", budget)
+	}
+}
+
+// TestNewRouterWiresModelCapability pins the v0.98.x fix: the LIVE router gets
+// ModelCapability from its config. Before, builder.go only set it on the unused
+// SmartRouter, so r.modelCapability was nil on the live router and the
+// weak-model thinking multiplier / capability adaptations never fired.
+func TestNewRouterWiresModelCapability(t *testing.T) {
+	capb := &ModelCapability{Tier: CapabilityWeak, ThinkingMultiplier: 1.5}
+	r := NewRouter(&RouterConfig{Enabled: true, ModelCapability: capb}, nil, nil, nil, nil, false, "")
+	if r.modelCapability != capb {
+		t.Fatal("NewRouter did not wire RouterConfig.ModelCapability into r.modelCapability")
 	}
 }
 

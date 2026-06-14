@@ -240,6 +240,21 @@ func NewHandler() *Handler {
 	return h
 }
 
+// NewHandlerWithCommands creates a frozen handler containing exactly the
+// given commands (plus default aliases). Intended for tests that need to
+// exercise a single command's Execute path without the full built-in set.
+func NewHandlerWithCommands(cmds ...Command) *Handler {
+	h := &Handler{
+		commands: make(map[string]Command),
+		aliases:  cloneAliases(defaultAliases),
+	}
+	for _, c := range cmds {
+		h.commands[c.Name()] = c
+	}
+	h.frozen = true
+	return h
+}
+
 // Register adds a command to the handler.
 // Must only be called during NewHandler construction; panics if called after.
 func (h *Handler) Register(cmd Command) {

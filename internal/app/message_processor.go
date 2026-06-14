@@ -87,6 +87,15 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	})
 
 	defer func() {
+		// A panic anywhere in the synchronous turn pipeline (agent/executor/
+		// tool/client) would otherwise leave the TUI stuck in StateProcessing
+		// forever — the enclosing safeGo recovers it but sends NO UI signal, and
+		// ErrorMsg/ResponseDoneMsg are the only messages that return the UI to
+		// the input prompt. Recover here and surface an actionable error.
+		if r := recover(); r != nil {
+			logging.Error("panic in message processing", "panic", r, "stack", logging.PanicStack())
+			a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("internal error: %v — your work was saved, please retry", r)))
+		}
 		a.mu.Lock()
 		a.processing = false
 		a.mu.Unlock()

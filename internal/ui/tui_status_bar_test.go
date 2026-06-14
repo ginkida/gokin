@@ -36,6 +36,30 @@ func TestRenderContextBarEmpty(t *testing.T) {
 	}
 }
 
+// TestDiffPreviewHintMatchesActualBindings pins the v0.98.x fix: the
+// StateDiffPreview status-bar hint advertised {Enter, e, q}, none of which the
+// single-file diff modal binds (diff_preview.go DiffPreviewModel.Update binds
+// y/Y, n/N/esc, A, R). Advertising non-existent keys during the trust-critical
+// edit-approval step is exactly the invented-binding class CLAUDE.md's shortcut
+// rule warns against.
+func TestDiffPreviewHintMatchesActualBindings(t *testing.T) {
+	m := Model{state: StateDiffPreview}
+	keys := map[string]bool{}
+	for _, h := range m.contextualShortcutHintPairs() {
+		keys[h.key] = true
+	}
+	for _, want := range []string{"y", "n", "A", "R"} { // real bindings
+		if !keys[want] {
+			t.Errorf("StateDiffPreview hint missing real binding %q; got %v", want, keys)
+		}
+	}
+	for _, bogus := range []string{"Enter", "e", "q"} { // not bound by the single-file modal
+		if keys[bogus] {
+			t.Errorf("StateDiffPreview hint advertises non-existent key %q", bogus)
+		}
+	}
+}
+
 // TestRenderContextBarShowsProjectedOutput pins the live-streaming behaviour:
 // with outputTokens > 0, the bar gains a secondary "▓" band showing where
 // it will be once those tokens land as input on the next turn. Without

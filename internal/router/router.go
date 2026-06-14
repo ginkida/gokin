@@ -721,21 +721,25 @@ func (r *Router) selectThinkingBudget(analysis *TaskComplexity) int32 {
 	var budget int32
 	switch analysis.Strategy {
 	case StrategyDirect:
+		// Pure conversational answer, no tools — thinking off.
 		budget = 0
 	case StrategySingleTool:
 		if analysis.Score <= 2 {
 			budget = 0
 		} else {
-			budget = 1024
+			budget = 2048
 		}
 	case StrategyExecutor:
+		// The common code-touching path. Reasoning models benefit most here, so
+		// floor it at the factory default (8192) rather than the old 1-2K, which
+		// throttled coding turns well below where the model performs best.
 		if analysis.Score >= 5 {
-			budget = 2048
+			budget = 8192
 		} else {
-			budget = 1024
+			budget = 4096
 		}
 	case StrategySubAgent:
-		budget = 4096
+		budget = 8192
 	}
 
 	if budget > 0 && r.modelCapability != nil {

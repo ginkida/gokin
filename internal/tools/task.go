@@ -193,6 +193,35 @@ func (t *TaskTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	return t.executeForeground(ctx, agentType, prompt, description, maxTurns, model)
 }
 
+// maxSubAgentReportChars bounds how much of a sub-agent's transcript is folded
+// back into the PARENT agent's context. An agent's conclusion is at the END of
+// its transcript (like Claude Code's tail), so we keep the tail and point to the
+// file-backed full output. Without this, a deep sub-agent (dozens of turns)
+// dumps its entire narration into the parent window — the opposite of the
+// "delegation is context-cheap" contract that makes sub-agents worth spawning.
+const maxSubAgentReportChars = 6000
+
+// writeSubAgentOutput appends a sub-agent's output to b, capped (rune-safe) to
+// the final maxSubAgentReportChars with a truncation marker + OutputFile pointer
+// when it overflows. The full transcript stays in OutputFile for task_output.
+func writeSubAgentOutput(b *strings.Builder, out, outputFile string) {
+	if out == "" {
+		return
+	}
+	b.WriteString("### Output:\n")
+	runes := []rune(out)
+	if len(runes) <= maxSubAgentReportChars {
+		b.WriteString(out)
+		return
+	}
+	fmt.Fprintf(b, "[sub-agent transcript truncated to the final %d chars — the conclusion is below", maxSubAgentReportChars)
+	if outputFile != "" {
+		fmt.Fprintf(b, "; full output in %s (read it or use task_output for the rest)", outputFile)
+	}
+	b.WriteString("]\n…\n")
+	b.WriteString(string(runes[len(runes)-maxSubAgentReportChars:]))
+}
+
 func (t *TaskTool) executeForeground(ctx context.Context, agentType, prompt, description string, maxTurns int, model string) (ToolResult, error) {
 	agentID, err := t.runner.Spawn(ctx, agentType, prompt, maxTurns, model)
 	if err != nil {
@@ -220,10 +249,7 @@ func (t *TaskTool) executeForeground(ctx context.Context, agentType, prompt, des
 		fmt.Fprintf(&output, "**Error:** %s\n\n", result.Error)
 	}
 
-	if result.Output != "" {
-		output.WriteString("### Output:\n")
-		output.WriteString(result.Output)
-	}
+	writeSubAgentOutput(&output, result.Output, result.OutputFile)
 
 	return NewSuccessResultWithData(output.String(), map[string]any{
 		"agent_id": result.AgentID,
@@ -304,10 +330,7 @@ func (t *TaskTool) executeResumeForeground(ctx context.Context, agentID, prompt,
 		fmt.Fprintf(&output, "**Error:** %s\n\n", result.Error)
 	}
 
-	if result.Output != "" {
-		output.WriteString("### Output:\n")
-		output.WriteString(result.Output)
-	}
+	writeSubAgentOutput(&output, result.Output, result.OutputFile)
 
 	return NewSuccessResultWithData(output.String(), map[string]any{
 		"agent_id": result.AgentID,

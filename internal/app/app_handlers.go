@@ -213,8 +213,10 @@ func (a *App) handlePlanApprovalWithFeedback(decision ui.PlanApprovalDecision, f
 		if feedback != "" {
 			a.planManager.SetFeedback(feedback)
 			feedbackMsg := fmt.Sprintf("Please modify the plan according to this feedback:\n\n%s", feedback)
-			// Process feedback as a new message
-			go a.handleSubmit(feedbackMsg)
+			// Process feedback as a new message. safeGo, not raw go: handleSubmit
+			// runs the full request pipeline — a panic there on a raw goroutine
+			// crashes the whole CLI (same class as the pending-queue dispatch fix).
+			a.safeGo("plan-feedback-dispatch", func() { a.handleSubmit(feedbackMsg) })
 		}
 	default:
 		planDecision = plan.ApprovalRejected
