@@ -806,6 +806,22 @@ func commandLooksLikeVerification(command string) bool {
 		strings.Contains(lower, " typecheck") || strings.Contains(lower, " compile")
 }
 
+// agentDeliveredAnswer reports whether the agent produced a real answer — not
+// just that the process exited 0. gokin returns exit 0 even when the model gave
+// nothing usable: stdout is then empty, the "[Auto]" smart-fallback, or the
+// "Model returned an empty response" placeholder. Scoring task_completed on the
+// exit code alone marked those non-answers as completed.
+func agentDeliveredAnswer(result Result) bool {
+	if !result.Agent.Success {
+		return false
+	}
+	out := strings.TrimSpace(result.Agent.OutputPreview)
+	if out == "" {
+		return false
+	}
+	return !strings.HasPrefix(out, "[Auto]") && !strings.Contains(out, "Model returned an empty response")
+}
+
 func scoreScenario(scenario Scenario, result Result) map[string]bool {
 	agentOutput := result.Agent.OutputPreview
 	verificationPassed := allCommandsSuccessful(result.Verification)
@@ -815,7 +831,7 @@ func scoreScenario(scenario Scenario, result Result) map[string]bool {
 	}
 	journalPresent := result.Journal != nil && result.Journal.Path != ""
 	metrics := map[string]bool{
-		"task_completed":                     result.Agent.Success,
+		"task_completed":                     agentDeliveredAnswer(result),
 		"verification_passed":                verificationPassed,
 		"touched_files_scoped":               touchedFilesScoped(result.ChangedFiles),
 		"no_false_file_claims":               noFalseFileClaims(agentOutput, result.ChangedFiles, journalFilesRead(result.Journal)),
@@ -990,11 +1006,22 @@ func falseFileClaims(output string, changed, read []string) []string {
 		if token == "" {
 			continue
 		}
-		if allowed[token] || allowed[filepath.Base(token)] {
+		// A "false file claim" is a hallucinated workspace-relative PATH. Bare
+		// words that merely end in a code extension are NOT file claims and must
+		// not be flagged:
+		//   - proper nouns / prose: "Node.js", "React.js", "app.py"  (no '/')
+		//   - URLs / host references: "pkg.go.dev/encoding/json"     (host '.')
+		// so only consider multi-segment paths whose first segment is not a host.
+		if !strings.Contains(token, "/") || strings.Contains(token, "://") {
 			continue
 		}
-		// Commands like go test ./... and package names can include .; don't fail on them.
-		if strings.HasPrefix(token, "./") || token == "go.mod" || token == "go.sum" || token == "package.json" {
+		if firstSeg := token[:strings.IndexByte(token, '/')]; firstSeg == "." || firstSeg == ".." || strings.Contains(firstSeg, ".") {
+			continue // "./...", "pkg.go.dev/...", etc. — a command shape or a URL, not a workspace path
+		}
+		// Allowed iff the FULL relative path was changed or read. Basename
+		// matching would let a wrong-directory hallucination of a real file's
+		// name pass (e.g. "wrong/dir/helper.go" when only "x/helper.go" was read).
+		if allowed[token] {
 			continue
 		}
 		appendUniqueString(&claims, token)
@@ -1018,9 +1045,23 @@ func mentionsVerification(output string, commands []string) bool {
 	if strings.TrimSpace(lower) == "" {
 		return false
 	}
-	if strings.Contains(lower, "verified") || strings.Contains(lower, "verification") ||
-		strings.Contains(lower, "test") || strings.Contains(lower, "build") {
-		return true
+	// Require a signal that verification was actually RUN or its result
+	// reported — not the bare words "test"/"build", which match prose like
+	// "the test was failing" or "I'll build a fix" with no verification done.
+	signals := []string{
+		"verified", "verification",
+		"go test", "go build", "go vet", "go run",
+		"npm test", "pnpm test", "yarn test", "node --test",
+		"pytest", "unittest", "cargo test", "cargo build", "make test",
+		"tests pass", "test passes", "tests passed", "test passed",
+		"tests fail", "test fails", "tests failed", "test failed",
+		"all tests", "suite pass", "build succeed", "build passes",
+		"build passed", "build fails", "build failed", "re-ran", "reran",
+	}
+	for _, s := range signals {
+		if strings.Contains(lower, s) {
+			return true
+		}
 	}
 	for _, command := range commands {
 		command = strings.ToLower(strings.TrimSpace(command))
@@ -1046,7 +1087,16 @@ func trimPreview(s string, limit int) string {
 	if limit <= 0 || len(runes) <= limit {
 		return s
 	}
-	return string(runes[:limit]) + fmt.Sprintf("\n...(%d chars truncated)", len(runes)-limit)
+	// Keep BOTH ends. An agent's conclusion — the final answer, the verification
+	// report, the files it names — is at the TAIL, so a head-only cut would
+	// false-negative answer_contains_required / mentions-verification on long
+	// answers. Weight the tail: 1/4 head + 3/4 tail (matches the head+tail
+	// convention used by run_tests/verify_code).
+	head := limit / 4
+	tail := limit - head
+	return string(runes[:head]) +
+		fmt.Sprintf("\n...(%d chars truncated)...\n", len(runes)-limit) +
+		string(runes[len(runes)-tail:])
 }
 
 func shellQuote(s string) string {
