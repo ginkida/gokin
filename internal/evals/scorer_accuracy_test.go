@@ -10,7 +10,10 @@ import (
 // ends in a code extension (Node.js) or a URL host (pkg.go.dev/...).
 func TestFalseFileClaims_IgnoresProseAndURLs(t *testing.T) {
 	changed := []string{"internal/config/duration.go"}
-	read := []string{"internal/billing/invoice.go"}
+	// Journal read paths are ABSOLUTE (the agent resolves them); changed paths
+	// and the answer cite them workspace-RELATIVE — the metric must match across
+	// that mismatch via trailing-segment matching.
+	read := []string{"/private/var/folders/xx/T/gokin-evals-123/scn/glm/internal/billing/invoice.go"}
 
 	clean := []string{
 		"I used Node.js with React.js and a bit of Vue.js for the UI.",

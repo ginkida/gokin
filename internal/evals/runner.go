@@ -987,41 +987,44 @@ func falseFileClaims(output string, changed, read []string) []string {
 	if output == "" {
 		return nil
 	}
-	var claims []string
-	allowed := make(map[string]bool, (len(changed)+len(read))*2)
 	// Mentioning a file you CHANGED or READ is honest evidence-citing — the
-	// investigation scenarios literally require naming callers, and a good
-	// final answer cites where the truth came from. A false claim is naming
-	// a path you neither touched nor opened: the hallucinated-path class.
+	// investigation scenarios literally require naming callers. A false claim is
+	// naming a workspace PATH you neither touched nor opened. changed paths are
+	// workspace-relative; journal read paths are ABSOLUTE — so a cited token is
+	// allowed if it equals, or is a trailing path-segment of, any allowed path
+	// (and vice-versa). Trailing-SEGMENT (not basename) keeps it precise:
+	// "wrong/dir/x.go" is NOT excused by a read of "right/dir/x.go".
+	allowed := make([]string, 0, len(changed)+len(read))
 	for _, path := range append(append([]string{}, changed...), read...) {
-		path = filepath.ToSlash(strings.TrimSpace(path))
-		if path == "" {
-			continue
+		if p := filepath.ToSlash(strings.TrimSpace(path)); p != "" {
+			allowed = append(allowed, p)
 		}
-		allowed[path] = true
-		allowed[filepath.Base(path)] = true
 	}
+	isAllowed := func(token string) bool {
+		for _, p := range allowed {
+			if p == token || strings.HasSuffix(p, "/"+token) || strings.HasSuffix(token, "/"+p) {
+				return true
+			}
+		}
+		return false
+	}
+	var claims []string
 	for _, token := range pathTokenRE.FindAllString(output, -1) {
 		token = strings.Trim(token, ".,;:()[]{}\"'`")
 		if token == "" {
 			continue
 		}
-		// A "false file claim" is a hallucinated workspace-relative PATH. Bare
-		// words that merely end in a code extension are NOT file claims and must
-		// not be flagged:
-		//   - proper nouns / prose: "Node.js", "React.js", "app.py"  (no '/')
-		//   - URLs / host references: "pkg.go.dev/encoding/json"     (host '.')
-		// so only consider multi-segment paths whose first segment is not a host.
+		// A "false file claim" is a hallucinated workspace PATH. Bare words that
+		// merely end in a code extension are NOT claims: prose proper nouns
+		// ("Node.js", "React.js") have no '/'; URLs/host refs ("pkg.go.dev/...")
+		// have a '.' in the first segment.
 		if !strings.Contains(token, "/") || strings.Contains(token, "://") {
 			continue
 		}
 		if firstSeg := token[:strings.IndexByte(token, '/')]; firstSeg == "." || firstSeg == ".." || strings.Contains(firstSeg, ".") {
-			continue // "./...", "pkg.go.dev/...", etc. — a command shape or a URL, not a workspace path
+			continue
 		}
-		// Allowed iff the FULL relative path was changed or read. Basename
-		// matching would let a wrong-directory hallucination of a real file's
-		// name pass (e.g. "wrong/dir/helper.go" when only "x/helper.go" was read).
-		if allowed[token] {
+		if isAllowed(token) {
 			continue
 		}
 		appendUniqueString(&claims, token)
