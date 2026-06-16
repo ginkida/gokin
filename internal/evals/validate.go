@@ -84,7 +84,7 @@ func validateScenarioFixture(ctx context.Context, manifest *Manifest, scenario S
 	allPassed := true
 	for _, command := range scenario.VerificationCommands {
 		expanded := expandCommandTemplate(command, manifest, scenario, workspace, matrixEntry{})
-		result := runShellCommand(ctx, workspace, expanded, opts.Timeout, evalEnv(manifest, scenario, workspace, matrixEntry{}))
+		result := runShellCommand(ctx, workspace, expanded, opts.Timeout, evalEnv(manifest, scenario, workspace, matrixEntry{}), false)
 		if !result.Success {
 			allPassed = false
 			failures = append(failures, fmt.Sprintf("%s (exit %d)", command, result.ExitCode))

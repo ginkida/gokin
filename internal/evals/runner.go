@@ -220,13 +220,13 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 	}
 
 	agentCommand := expandCommandTemplate(opts.AgentCommand, manifest, scenario, workspace, variant)
-	result.Agent = runShellCommand(ctx, workspace, agentCommand, opts.Timeout, evalEnv(manifest, scenario, workspace, variant))
+	result.Agent = runShellCommand(ctx, workspace, agentCommand, opts.Timeout, evalEnv(manifest, scenario, workspace, variant), true)
 
 	afterAgent, _ := snapshotFiles(workspace)
 	result.ChangedFiles = diffSnapshots(before, afterAgent)
 
 	for _, command := range scenario.VerificationCommands {
-		verification := runShellCommand(ctx, workspace, command, opts.Timeout, evalEnv(manifest, scenario, workspace, variant))
+		verification := runShellCommand(ctx, workspace, command, opts.Timeout, evalEnv(manifest, scenario, workspace, variant), false)
 		result.Verification = append(result.Verification, verification)
 	}
 
@@ -426,7 +426,13 @@ func shouldSkipCopyDir(name string) bool {
 	}
 }
 
-func runShellCommand(ctx context.Context, dir, command string, timeout time.Duration, env []string) CommandResult {
+// runShellCommand runs command in dir. When stdoutOnly is true the captured
+// OutputPreview is the command's STDOUT only — used for the agent so the scored
+// "answer" is the model's stdout and NOT stderr noise (gokin + the toolchain
+// write logs/warnings there, e.g. the config-perms WARN, which CombinedOutput
+// would otherwise let `falseFileClaims` flag as a hallucinated path on every
+// scenario). Verification commands use combined output so failures are visible.
+func runShellCommand(ctx context.Context, dir, command string, timeout time.Duration, env []string, stdoutOnly bool) CommandResult {
 	start := time.Now()
 	result := CommandResult{Command: command, ExitCode: -1}
 
@@ -440,7 +446,18 @@ func runShellCommand(ctx context.Context, dir, command string, timeout time.Dura
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
-	output, err := cmd.CombinedOutput()
+
+	var output []byte
+	var err error
+	var stderrTail string
+	if stdoutOnly {
+		output, err = cmd.Output() // stdout; ExitError carries Stderr on failure
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderrTail = strings.TrimSpace(string(exitErr.Stderr))
+		}
+	} else {
+		output, err = cmd.CombinedOutput()
+	}
 	result.DurationMillis = time.Since(start).Milliseconds()
 	result.OutputPreview = trimPreview(string(output), outputPreviewLimit)
 
@@ -452,6 +469,9 @@ func runShellCommand(ctx context.Context, dir, command string, timeout time.Dura
 			result.Error = fmt.Sprintf("command timed out after %v", timeout)
 		} else {
 			result.Error = err.Error()
+			if stderrTail != "" { // keep agent stderr for debugging without scoring it
+				result.Error += ": " + trimPreview(stderrTail, 500)
+			}
 		}
 		return result
 	}
