@@ -411,7 +411,15 @@ func copyFile(src, dst string, mode os.FileMode) error {
 
 func shouldSkipCopyDir(name string) bool {
 	switch strings.ToLower(name) {
-	case ".git", "node_modules", "vendor", "dist", "build", "target", ".gokin", ".pytest_cache", "__pycache__":
+	case ".git", "node_modules", "vendor", "dist", "build", "target", ".gokin", ".pytest_cache", "__pycache__",
+		// HOME-relative caches that leak INTO the workspace when an agent runs
+		// `go test`/`go build`/`npm test` with HOME (or TMPDIR) resolving to the
+		// workspace: macOS Library/Caches/go-build + Library/Application Support/
+		// go/telemetry; Linux .cache/go-build + .config/go/telemetry; Node's
+		// tmp/node-compile-cache (~400 files) + .npm. Skipping them keeps
+		// changed_files to real source edits — they otherwise add ~1000 junk
+		// entries per scenario and bloat the baseline JSONL.
+		"library", ".cache", ".config", ".npm", "node-compile-cache":
 		return true
 	default:
 		return false

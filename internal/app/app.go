@@ -1141,6 +1141,14 @@ func (a *App) planModeToolsLocked(planModeEnabled bool) []*genai.Tool {
 	if planModeEnabled {
 		return a.registry.PlanModeGeminiTools()
 	}
+	// plan.enabled is the master switch for interactive plan mode. When it's
+	// off, the plan-mode control tools must not appear in the schema at all —
+	// otherwise a model (notably in headless/eval, where there is no plan
+	// approval) can call enter_plan_mode and strand itself read-only, never
+	// editing. Default config keeps planning enabled, so this is a no-op there.
+	if a.config != nil && !a.config.Plan.Enabled {
+		return a.registry.GeminiToolsExcludingPlanMode()
+	}
 	return a.registry.GeminiTools()
 }
 

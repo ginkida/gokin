@@ -110,6 +110,36 @@ func (r *Registry) GeminiTools() []*genai.Tool {
 	}
 }
 
+// planModeControlToolNames are the interactive plan-mode tools. They are a
+// SUBSET of ToolSetPlanning (which also bundles the task* background-agent
+// tools), so they're listed explicitly — gating the whole set would wrongly
+// drop task/task_output/task_stop.
+var planModeControlToolNames = map[string]bool{
+	"enter_plan_mode":      true,
+	"exit_plan_mode":       true,
+	"update_plan_progress": true,
+	"get_plan_status":      true,
+	"undo_plan":            true,
+	"redo_plan":            true,
+}
+
+// GeminiToolsExcludingPlanMode returns the full tool envelope minus the
+// interactive plan-mode control tools. Used when plan.enabled is false so a
+// model can't call enter_plan_mode and strand itself in read-only mode — there
+// is no interactive plan approval in headless/eval runs (the model stops and
+// asks for "write access" that never comes).
+func (r *Registry) GeminiToolsExcludingPlanMode() []*genai.Tool {
+	all := r.Declarations()
+	kept := make([]*genai.FunctionDeclaration, 0, len(all))
+	for _, d := range all {
+		if d == nil || planModeControlToolNames[d.Name] {
+			continue
+		}
+		kept = append(kept, d)
+	}
+	return []*genai.Tool{{FunctionDeclarations: kept}}
+}
+
 // ToolSet defines a named group of tools.
 type ToolSet string
 

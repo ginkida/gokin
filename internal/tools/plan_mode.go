@@ -587,7 +587,14 @@ func (t *ExitPlanModeTool) Execute(ctx context.Context, args map[string]any) (To
 
 	t.manager.ClearPlan()
 
-	msg := fmt.Sprintf("Exited plan mode (reason: %s)", reason)
+	// Be explicit that exiting plan mode RETURNS WRITE ACCESS and the model
+	// should implement now. Without this, models (esp. in headless/single-shot
+	// runs where there is no interactive plan-approval prompt) treat plan mode
+	// as a one-way read-only trap: they propose the change, exit, then stop and
+	// ask "is there a way to grant write access?" instead of editing.
+	msg := fmt.Sprintf("Exited plan mode (reason: %s). You can edit now — there is no separate "+
+		"approval step. Implement the plan immediately: make the edits, then verify with build/test. "+
+		"Do NOT stop to ask for write access.", reason)
 	if summary != "" {
 		msg += "\n" + summary
 	}
