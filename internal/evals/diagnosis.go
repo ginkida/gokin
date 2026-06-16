@@ -158,6 +158,18 @@ func recommendationForMetric(metric MetricSummary) Recommendation {
 		return metricRecommendation(metric, "headless-runtime", 15,
 			"agent command did not complete consistently",
 			"Inspect provider/runtime errors, headless prompt handling, auth, workspace permissions, and empty-response retry behavior before tuning prompts.")
+	case "answer_contains_required":
+		return metricRecommendation(metric, "prompt", 20,
+			"final answers omit the required conclusion (e.g. naming the caller in an investigation)",
+			"Tighten final-answer instructions so investigation/trap tasks state the concrete finding the scenario requires, not a vague summary.")
+	case "required_files_changed":
+		return metricRecommendation(metric, "prompt", 20,
+			"agent left a file unchanged that the task required modifying (likely a no-op on a green scenario)",
+			"Strengthen task-completion guidance so the agent makes the requested change instead of declaring success when verification already passes.")
+	case "protected_files_unchanged":
+		return metricRecommendation(metric, "prompt", 15,
+			"agent modified a file the scenario required leaving alone (trap violation)",
+			"Strengthen investigate-before-act guidance: confirm a symbol is unused before removing it; do not change files outside the task's intent.")
 	default:
 		return metricRecommendation(metric, "eval-target", 80,
 			"custom metric is below threshold",

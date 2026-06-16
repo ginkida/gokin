@@ -2324,6 +2324,13 @@ func (a *App) updateUnrestrictedModeLocked() {
 	permissionOff := a.permManager == nil || !a.permManager.IsEnabled()
 	unrestrictedMode := sandboxOff && permissionOff
 
+	// Diff preview (the "Apply" confirmation on edit/write) must follow the
+	// live permission state, not just the config-file snapshot taken at build
+	// time. Without this, toggling YOLO (permissions off) at runtime leaves
+	// diffEnabled=true on the tools forever — the apply prompt keeps showing
+	// even though the user opted out of all confirmations.
+	diffEnabled := a.config.DiffPreview.Enabled && !permissionOff
+
 	// Update executor's unrestricted mode
 	a.executor.SetUnrestrictedMode(unrestrictedMode)
 
@@ -2332,6 +2339,17 @@ func (a *App) updateUnrestrictedModeLocked() {
 		if bashTool, ok := a.registry.Get("bash"); ok {
 			if bt, ok := bashTool.(*tools.BashTool); ok {
 				bt.SetUnrestrictedMode(unrestrictedMode)
+			}
+		}
+		// Sync diff preview on edit/write tools with live permission state.
+		if tool, ok := a.registry.Get("edit"); ok {
+			if et, ok := tool.(*tools.EditTool); ok {
+				et.SetDiffEnabled(diffEnabled)
+			}
+		}
+		if tool, ok := a.registry.Get("write"); ok {
+			if wt, ok := tool.(*tools.WriteTool); ok {
+				wt.SetDiffEnabled(diffEnabled)
 			}
 		}
 	}

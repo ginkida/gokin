@@ -22,6 +22,8 @@ func cloneAliases(src map[string]string) map[string]string {
 // error — users without the file keep the built-in shortcuts. Malformed
 // entries (empty key/value, key with whitespace) are skipped with a logged
 // warning so a bad config doesn't crash startup.
+// Panics if called after SealBootPhase — same boot-phase contract as
+// LoadFileCommands.
 //
 // Sample format:
 //
@@ -29,6 +31,9 @@ func cloneAliases(src map[string]string) map[string]string {
 //	c: commit
 //	deploy: bash
 func (h *Handler) LoadAliasesFromFile(path string) error {
+	if h.bootDone {
+		panic("commands: LoadAliasesFromFile called after boot phase sealed")
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

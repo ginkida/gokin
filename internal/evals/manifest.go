@@ -35,6 +35,34 @@ type Scenario struct {
 	// working and a careless action breaks verification). `eval validate`
 	// enforces this contract so fixtures can't silently rot.
 	DeliveredState string `json:"delivered_state,omitempty"`
+
+	// Machine-checked behavioral assertions, scored ONLY when declared (so
+	// scenarios that omit them keep their existing metric set and baselines).
+	// They close the "green/trap scenario rewards a no-op" hole: when
+	// verification passes in the delivered state, doing nothing scores well
+	// unless a positive assertion proves the agent actually did the work.
+	//
+	//   AnswerMustContain — substrings the final answer MUST include
+	//     (case-insensitive). Positive proof the agent reached the required
+	//     conclusion, e.g. naming a caller in an investigation scenario.
+	//   FileMustChange    — workspace-relative paths that MUST be modified.
+	//     Catches the no-op on refactor/feature scenarios (verification still
+	//     green because nothing was touched).
+	//   FileMustNotChange — workspace-relative paths that must NOT be
+	//     modified. Catches the trap where the correct action is to leave a
+	//     file alone (e.g. a deprecated-but-still-used symbol).
+	//
+	// Paths match exactly or as a trailing path segment, so a scenario may
+	// name "internal/x/y.go" or a deeper-rooted equivalent.
+	AnswerMustContain []string `json:"answer_must_contain,omitempty"`
+	FileMustChange    []string `json:"file_must_change,omitempty"`
+	FileMustNotChange []string `json:"file_must_not_change,omitempty"`
+}
+
+// HasBehavioralAssertion reports whether the scenario declares at least one
+// machine-checked behavioral assertion.
+func (s Scenario) HasBehavioralAssertion() bool {
+	return len(s.AnswerMustContain) > 0 || len(s.FileMustChange) > 0 || len(s.FileMustNotChange) > 0
 }
 
 // LoadManifest reads and validates a coding eval manifest.
@@ -103,6 +131,15 @@ func (m *Manifest) Validate() error {
 		case "", "red", "green":
 		default:
 			return fmt.Errorf("scenario %q delivered_state must be \"red\" or \"green\", got %q", scenario.ID, scenario.DeliveredState)
+		}
+		// A "green" (trap) scenario passes verification in the delivered
+		// state, so a no-op also passes — it MUST carry a positive assertion
+		// that the agent actually did the right thing, or it silently rewards
+		// doing nothing. Red scenarios are gated by verification flipping
+		// red->green, so the assertion is optional for them.
+		if scenario.EffectiveDeliveredState() == "green" && !scenario.HasBehavioralAssertion() {
+			return fmt.Errorf("scenario %q is delivered_state=green but declares no behavioral assertion "+
+				"(answer_must_contain / file_must_change / file_must_not_change) — a no-op would score as success", scenario.ID)
 		}
 	}
 	return nil

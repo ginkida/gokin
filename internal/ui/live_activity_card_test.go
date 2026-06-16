@@ -398,7 +398,7 @@ func TestRenderEngineStatus_UsesRichRuntimeStates(t *testing.T) {
 	m.retryAttempt = 1
 	m.retryMax = 3
 	status = stripAnsi(m.renderEngineStatus())
-	if !strings.Contains(status, "RETRY 1/3") {
+	if !strings.Contains(status, "retry 1/3") {
 		t.Fatalf("expected retry status, got %q", status)
 	}
 }

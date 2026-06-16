@@ -145,7 +145,11 @@ func parseFileCommand(path, source string) (*FileCommand, error) {
 // human-readable warnings (broken files, shadowed names). Missing
 // directories are fine. MUST be called once during startup, before the
 // handler is shared across goroutines — same contract as LoadAliasesFromFile.
+// Panics if called after SealBootPhase.
 func (h *Handler) LoadFileCommands(projectDir, globalDir string) (loaded []*FileCommand, warnings []string) {
+	if h.bootDone {
+		panic("commands: LoadFileCommands called after boot phase sealed")
+	}
 	seen := map[string]bool{}
 	for _, src := range []struct {
 		dir    string

@@ -89,12 +89,8 @@ func (m Model) compactStatusSegments() []string {
 	if m.queuedPending > 0 {
 		parts = append(parts, fmt.Sprintf("📥%d", m.queuedPending))
 	}
-	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
-		parts = append(parts, "mode:degraded")
-	}
-
-	if m.shouldShowBreaker() {
-		parts = append(parts, "breaker:"+shortBreakerState(m.runtimeStatus.RequestBreaker)+"/"+shortBreakerState(m.runtimeStatus.StepBreaker))
+	if h := m.compactHealth(); h != "" {
+		parts = append(parts, h)
 	}
 
 	provider := m.runtimeStatus.Provider
@@ -126,12 +122,8 @@ func (m Model) compactStatusSegments() []string {
 func (m Model) minimalStatusSegments() []string {
 	var parts []string
 	parts = append(parts, m.safetyModeSegments(true)...)
-	if strings.HasPrefix(strings.ToLower(m.runtimeStatus.Mode), "degraded") {
-		parts = append(parts, "mode:degraded")
-	}
-
-	if m.shouldShowBreaker() {
-		parts = append(parts, "breaker:"+shortBreakerState(m.runtimeStatus.RequestBreaker)+"/"+shortBreakerState(m.runtimeStatus.StepBreaker))
+	if h := m.compactHealth(); h != "" {
+		parts = append(parts, h)
 	}
 
 	provider := m.runtimeStatus.Provider
@@ -187,22 +179,14 @@ func (m Model) renderStatusBarMedium() string {
 // renderStatusBarFull renders the full status bar for wide terminals (>= 120 chars).
 // Shows full Status Bar 2.0 with all reliability and runtime details.
 func (m Model) renderStatusBarFull() string {
+	// Identity (model) now lives in baseStatusSegments via identitySegment —
+	// no separate dim model cell appended here (it duplicated the provider).
 	leftParts := m.baseStatusSegments(true)
-	if m.currentModel != "" {
-		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(ColorDim).Render(shortenModelName(m.currentModel)))
-	}
 
 	var requiredRight []string
 
-	// Retry indicator (important — shows active retries)
-	if m.retryAttempt > 0 && m.retryMax > 0 {
-		retryStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-		requiredRight = append(requiredRight, retryStyle.Render(fmt.Sprintf("↻ %d/%d", m.retryAttempt, m.retryMax)))
-	} else if !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil) {
-		wait := time.Until(m.rateLimitWaitUntil).Round(time.Second)
-		waitStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-		requiredRight = append(requiredRight, waitStyle.Render(fmt.Sprintf("⏳ Rate Limit %s", wait)))
-	}
+	// Retry / rate-limit are shown by the consolidated engine badge in
+	// baseStatusSegments — NOT duplicated here in requiredRight.
 
 	// Scroll indicator
 	if !m.output.IsAtBottom() {
@@ -311,7 +295,6 @@ func compactKeyLabel(key string) string {
 
 func (m Model) baseStatusSegments(withContextBar bool) []string {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	degradedStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	providerStyle := lipgloss.NewStyle().Foreground(ColorAccent)
 	heartbeatStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
@@ -324,24 +307,15 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	if dir := statusBarProjectPath(m.workDir); dir != "" {
 		parts = append(parts, dimStyle.Render(dir))
 	}
-	if !m.permissionsEnabled {
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("YOLO"))
-	}
-	if !m.sandboxEnabled {
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("!SANDBOX"))
+	if safety := m.safetyBadge(); safety != "" {
+		parts = append(parts, safety)
 	}
 	if m.queuedPending > 0 {
 		parts = append(parts, providerStyle.Render(fmt.Sprintf("📥 %d queued", m.queuedPending)))
 	}
 
-	mode := "normal"
-	if m.runtimeStatus.Mode != "" {
-		mode = m.runtimeStatus.Mode
-	}
-	if strings.HasPrefix(mode, "degraded") {
-		modeText := m.degradedModeLabel(withContextBar)
-		parts = append(parts, degradedStyle.Render(modeText))
-	}
+	// Degraded-mode label removed: the retry/cooldown it carried is now folded
+	// into the single engine badge (renderEngineStatus) below.
 
 	if m.hasActivePlanStatus() {
 		planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
@@ -355,21 +329,10 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		}
 		parts = append(parts, planStyle.Render(activeStep))
 	}
-	if m.shouldShowBreaker() {
-		reqBreaker := shortBreakerState(m.runtimeStatus.RequestBreaker)
-		stepBreaker := shortBreakerState(m.runtimeStatus.StepBreaker)
-		if reqBreaker == "open" || stepBreaker == "open" {
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render(MessageIcons["error"]+" circuit open"))
-		} else if reqBreaker == "half" || stepBreaker == "half" {
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Render(MessageIcons["warning"]+" recovering"))
-		}
-	}
+	// Breaker circuit-open / recovering cells removed — folded into the single
+	// engine badge below so the same recovery state isn't shown twice.
 
-	provider := m.runtimeStatus.Provider
-	if provider == "" {
-		provider = "unknown"
-	}
-	parts = append(parts, providerStyle.Render(provider))
+	parts = append(parts, m.identitySegment())
 
 	tokenText := m.formatTokenStatus(withContextBar)
 	if tokenText != "" {
@@ -387,7 +350,10 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		parts = append(parts, dimStyle.Render(m.formatBackgroundTaskStatus(bgCount)))
 	}
 
-	if m.shouldShowHeartbeat() {
+	// Heartbeat is suppressed during recovery: the engine badge already proves
+	// the session is alive, so a "heartbeat:0s" cell next to "↻ retry 3/3" is
+	// pure noise. It still shows for a healthy-but-slow long operation.
+	if m.shouldShowHeartbeat() && !m.isRecovering() {
 		hb := "heartbeat:waiting"
 		if m.runtimeStatus.HasHeartbeat {
 			hb = "heartbeat:" + m.runtimeStatus.HeartbeatAge.Round(time.Second).String()
@@ -395,13 +361,65 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		parts = append(parts, heartbeatStyle.Render(hb))
 	}
 
-	// Live Engine Status
+	// Live Engine Status — the SINGLE provider-health + activity badge.
 	engineStatus := m.renderEngineStatus()
 	if engineStatus != "" {
 		parts = append(parts, engineStatus)
 	}
 
 	return parts
+}
+
+// safetyBadge groups the "safety off" flags into ONE status cell so YOLO and
+// !SANDBOX don't each claim a │-separated segment — they're the same concern
+// (this session bypasses confirmations). Empty when both protections are on.
+func (m Model) safetyBadge() string {
+	var b []string
+	if !m.permissionsEnabled {
+		b = append(b, lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("YOLO"))
+	}
+	if !m.sandboxEnabled {
+		b = append(b, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("!SANDBOX"))
+	}
+	return strings.Join(b, " ")
+}
+
+// identitySegment shows WHICH model is answering. The model name already
+// implies the provider (glm-5.2 → glm), so a separate provider cell is pure
+// duplication; the provider is shown ONLY when the active backend diverges
+// from the model's family (a failover), rendered "provider→model".
+func (m Model) identitySegment() string {
+	style := lipgloss.NewStyle().Foreground(ColorAccent)
+	model := shortenModelName(strings.TrimSpace(m.currentModel))
+	provider := strings.TrimSpace(m.runtimeStatus.Provider)
+	if model == "" {
+		if provider == "" {
+			provider = "unknown"
+		}
+		return style.Render(provider)
+	}
+	if provider != "" && !strings.HasPrefix(strings.ToLower(model), strings.ToLower(provider)) {
+		return style.Render(provider + "→" + model)
+	}
+	return style.Render(model)
+}
+
+// compactHealth is the narrow-bar (minimal/compact) equivalent of the engine
+// badge: one short token for the current provider-recovery state, "" when
+// healthy. Replaces the old separate "mode:degraded" + "breaker:x/y" cells.
+func (m Model) compactHealth() string {
+	switch {
+	case !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil):
+		return "RL " + time.Until(m.rateLimitWaitUntil).Round(time.Second).String()
+	case m.retryAttempt > 0 && m.retryMax > 0:
+		return fmt.Sprintf("↻%d/%d", m.retryAttempt, m.retryMax)
+	case m.breakerOpen():
+		return "circuit"
+	case m.breakerHalfOpen():
+		return "recovering"
+	default:
+		return ""
+	}
 }
 
 // renderEngineStatus returns a compact status indicator for the AI engine.
@@ -431,9 +449,20 @@ func (m Model) renderEngineStatus() string {
 		color = ColorWarning
 		icon = MessageIcons["warning"]
 	case m.retryAttempt > 0 && m.retryMax > 0:
-		status = fmt.Sprintf("RETRY %d/%d", m.retryAttempt, m.retryMax)
+		// One consolidated retry badge — the degraded-mode cooldown is folded
+		// in here (it used to live in a separate mode:recovering(retry Xs)
+		// cell), so attempt count AND remaining cooldown show in ONE place
+		// instead of the old quartet of retry cells.
+		status = fmt.Sprintf("retry %d/%d", m.retryAttempt, m.retryMax)
+		if rem := m.runtimeStatus.DegradedRemaining; rem > 0 {
+			status += " · " + rem.Round(time.Second).String()
+		}
 		color = ColorWarning
-		icon = MessageIcons["warning"]
+		icon = "↻"
+	case m.breakerOpen():
+		status = "circuit open"
+		color = ColorError
+		icon = MessageIcons["error"]
 	case m.state == StateQuestionPrompt || m.state == StatePermissionPrompt || m.state == StatePlanApproval:
 		status = "WAITING"
 		color = ColorWarning
@@ -464,11 +493,46 @@ func (m Model) renderEngineStatus() string {
 			status = "THINKING"
 		}
 		color = ColorSecondary
+	case m.breakerHalfOpen():
+		// Half-open breaker with no active retry/work — surface it so an idle
+		// "recovering" provider isn't invisible. Lowest priority: any active
+		// work above takes precedence.
+		status = "recovering"
+		color = ColorWarning
+		icon = MessageIcons["warning"]
 	default:
-		status = "IDLE"
+		// Idle + healthy: no engine cell at all (keeps the resting bar clean).
+		return ""
 	}
 
 	return engineStyle.Foreground(color).Render(icon + " " + status)
+}
+
+// breakerOpen / breakerHalfOpen surface the request/step circuit-breaker state
+// for the consolidated engine badge. shortBreakerState normalizes the raw
+// runtime strings ("open"/"half_open"/"closed"/"").
+func (m Model) breakerOpen() bool {
+	return shortBreakerState(m.runtimeStatus.RequestBreaker) == "open" ||
+		shortBreakerState(m.runtimeStatus.StepBreaker) == "open"
+}
+
+func (m Model) breakerHalfOpen() bool {
+	return shortBreakerState(m.runtimeStatus.RequestBreaker) == "half" ||
+		shortBreakerState(m.runtimeStatus.StepBreaker) == "half"
+}
+
+// isRecovering is true whenever the engine badge is showing a provider-health
+// state (rate-limit / retry / breaker). Used to suppress the heartbeat cell —
+// during recovery the badge already proves the session is alive, so heartbeat
+// is pure noise.
+func (m Model) isRecovering() bool {
+	if m.retryAttempt > 0 && m.retryMax > 0 {
+		return true
+	}
+	if !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil) {
+		return true
+	}
+	return m.breakerOpen() || m.breakerHalfOpen()
 }
 
 func processingStatusLabel(label string) string {
@@ -502,15 +566,6 @@ func (m Model) hasActivePlanStatus() bool {
 	default:
 		return m.planProgress.Completed < m.planProgress.TotalSteps
 	}
-}
-
-func (m Model) shouldShowBreaker() bool {
-	req := strings.ToLower(m.runtimeStatus.RequestBreaker)
-	step := strings.ToLower(m.runtimeStatus.StepBreaker)
-	isClosedOrEmpty := func(s string) bool {
-		return s == "" || s == "closed" || s == "n/a"
-	}
-	return !isClosedOrEmpty(req) || !isClosedOrEmpty(step)
 }
 
 func (m Model) shouldShowHeartbeat() bool {
@@ -730,37 +785,6 @@ func (m Model) formatBackgroundTaskStatus(bgCount int) string {
 		return bestAction
 	}
 	return fmt.Sprintf("%d bg", bgCount)
-}
-
-// degradedModeLabel returns a specific label for degraded mode based on runtime state.
-func (m Model) degradedModeLabel(withDetail bool) string {
-	rs := m.runtimeStatus
-
-	// Determine the specific reason
-	reqOpen := strings.EqualFold(rs.RequestBreaker, "open")
-	stepOpen := strings.EqualFold(rs.StepBreaker, "open")
-	reqHalf := strings.EqualFold(rs.RequestBreaker, "half_open")
-
-	var reason string
-	switch {
-	case reqOpen && stepOpen:
-		reason = "breakers-open"
-	case reqOpen:
-		reason = "req-breaker-open"
-	case stepOpen:
-		reason = "step-breaker-open"
-	case reqHalf:
-		reason = "recovering"
-	case rs.ConsecutiveFailure > 0:
-		reason = fmt.Sprintf("failures:%d", rs.ConsecutiveFailure)
-	default:
-		reason = "degraded"
-	}
-
-	if withDetail && rs.DegradedRemaining > 0 {
-		return fmt.Sprintf("mode:%s(retry %s)", reason, rs.DegradedRemaining.Round(time.Second))
-	}
-	return "mode:" + reason
 }
 
 func (m Model) contextualShortcutHintPairs() []shortcutHint {

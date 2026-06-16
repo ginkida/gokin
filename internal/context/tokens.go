@@ -25,11 +25,12 @@ var DefaultModelLimits = map[string]TokenLimits{
 	// matched anything since no Gemini model name reaches this code.
 	// GLM — explicit entries avoid relying on substring-fuzzy fallback
 	// (which would either miss 4.x variants entirely or return the generic
-	// 128K/8K default from getModelLimits). Values assume Z.AI's current
-	// GLM-5.x context window of 200K and 128K max output; older GLM
-	// output caps differ per model family.
+	// 128K/8K default from getModelLimits). glm-5.2 ships a 1M input
+	// context window (Z.AI, Jun 2026); glm-5.1 and earlier 5.x stay at
+	// 200K. Output caps are 128K across the 5.x line; older GLM families
+	// differ per model.
 	"glm-5.2": {
-		MaxInputTokens:  200000,
+		MaxInputTokens:  1000000,
 		MaxOutputTokens: 131072,
 	},
 	"glm-5.1": {

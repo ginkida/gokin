@@ -68,7 +68,8 @@
         "does not inspect callers"
       ],
       "max_tool_calls": 18,
-      "delivered_state": "green"
+      "delivered_state": "green",
+      "file_must_change": ["internal/retry/policy.go"]
     },
     {
       "id": "node_test_repair",
@@ -508,7 +509,9 @@
         "claims it is unused without searching"
       ],
       "max_tool_calls": 14,
-      "delivered_state": "green"
+      "delivered_state": "green",
+      "file_must_not_change": ["internal/legacy/helper.go"],
+      "answer_must_contain": ["internal/billing/invoice.go"]
     },
     {
       "id": "go_docs_sync_retries",
@@ -608,6 +611,88 @@
         "changes component behavior unnecessarily"
       ],
       "max_tool_calls": 14
+    },
+    {
+      "id": "go_wrong_layer_paging",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "prompt": "Page() returns the wrong window — the first page skips the opening records instead of starting at item 0. Find the real cause, fix it in the right place, and run the narrowest relevant Go test.",
+      "fixture": "synthetic/go-paging-offset",
+      "expected_behaviors": [
+        "traces the page math from Page into the offset helper",
+        "fixes the 1-based-to-0-based conversion in offset.go",
+        "leaves the correct slice logic in paging.go alone",
+        "runs go test ./internal/paging"
+      ],
+      "verification_commands": [
+        "go test ./internal/paging"
+      ],
+      "success_criteria": [
+        "every Page test case passes",
+        "the fix is the off-by-one in offset, not a band-aid in Page"
+      ],
+      "failure_signals": [
+        "compensates in Page's slice bounds and leaves offset wrong",
+        "claims the slicing is the bug"
+      ],
+      "max_tool_calls": 14,
+      "delivered_state": "red",
+      "file_must_change": ["internal/paging/offset.go"]
+    },
+    {
+      "id": "go_refactor_order_contract",
+      "category": "refactor",
+      "difficulty": "medium",
+      "prompt": "Dedup in internal/dedup looks over-engineered with its map and manual loop. Simplify it if you safely can; otherwise explain why it must stay. Keep the tests green.",
+      "fixture": "synthetic/go-dedup-order",
+      "expected_behaviors": [
+        "recognizes the first-occurrence order contract enforced by the test",
+        "does not replace it with a sort-based dedup that reorders output",
+        "keeps go test ./internal/dedup green"
+      ],
+      "verification_commands": [
+        "go test ./internal/dedup"
+      ],
+      "success_criteria": [
+        "the order-preservation test still passes",
+        "the final answer explains the order contract"
+      ],
+      "failure_signals": [
+        "sorts the slice or otherwise reorders the output",
+        "removes the order guarantee while calling it a simplification"
+      ],
+      "max_tool_calls": 14,
+      "delivered_state": "green",
+      "answer_must_contain": ["order"]
+    },
+    {
+      "id": "go_cross_pkg_classify",
+      "category": "bugfix",
+      "difficulty": "hard",
+      "prompt": "Rate-limit errors are not being retried. The failing test is in internal/retry, but fix the root cause in the package that owns the decision and prove the whole module builds and tests pass.",
+      "fixture": "synthetic/go-classify-retry",
+      "expected_behaviors": [
+        "follows ShouldRetry into errs.Classify",
+        "adds the ErrRateLimited case to Classify in the errs package",
+        "does not special-case rate limits inside retry",
+        "runs go build ./... and go test ./..."
+      ],
+      "verification_commands": [
+        "go build ./...",
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "rate-limit errors classify as retryable",
+        "the fix lives in internal/errs/errs.go, not a band-aid in retry"
+      ],
+      "failure_signals": [
+        "special-cases ErrRateLimited inside retry.ShouldRetry",
+        "reverts or weakens the Classify contract"
+      ],
+      "max_tool_calls": 16,
+      "delivered_state": "red",
+      "file_must_change": ["internal/errs/errs.go"],
+      "answer_must_contain": ["Classify"]
     }
   ]
 }

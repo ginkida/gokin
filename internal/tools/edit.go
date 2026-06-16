@@ -68,6 +68,12 @@ func (t *EditTool) SetDiffEnabled(enabled bool) {
 	t.diffEnabled = enabled
 }
 
+// DiffEnabled reports whether diff preview is currently enabled. Lets callers
+// (and tests) observe the live state synced by updateUnrestrictedModeLocked.
+func (t *EditTool) DiffEnabled() bool {
+	return t.diffEnabled
+}
+
 // SetWorkDir sets the working directory and initializes path validator.
 func (t *EditTool) SetWorkDir(workDir string) {
 	t.workDir = workDir

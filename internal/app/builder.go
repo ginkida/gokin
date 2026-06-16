@@ -802,6 +802,11 @@ func (b *Builder) initManagers() error {
 	}
 	b.fileCommands = fileCommands
 
+	// Seal the boot phase — the handler is now immutable and will be shared
+	// across goroutines. Any later LoadFileCommands/LoadAliasesFromFile call
+	// will panic (catches accidental post-boot mutation).
+	b.commandHandler.SealBootPhase()
+
 	// Infer model capability once — BOTH the live task router and the smart
 	// router need it. Without it on the live Router, the weak-model thinking
 	// multiplier and capability-tier adaptations silently never fire (the

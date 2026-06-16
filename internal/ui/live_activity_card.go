@@ -306,12 +306,10 @@ func (m Model) liveActivityRecentLine(snapshot ActivityFeedSnapshot) string {
 // they can't infer from the header. Generic "watching for next tool call"
 // dropped — it was noise.
 func (m Model) liveActivityNextLine(snapshot ActivityFeedSnapshot) string {
-	switch {
-	case !m.rateLimitWaitUntil.IsZero() && time.Now().Before(m.rateLimitWaitUntil):
-		return fmt.Sprintf("Auto-retry in %s", format.Duration(time.Until(m.rateLimitWaitUntil)))
-	case m.retryAttempt > 0 && m.retryMax > 0:
-		return fmt.Sprintf("Provider recovery %d/%d", m.retryAttempt, m.retryMax)
-	case m.streamIdleMsg != "":
+	// Provider recovery / rate-limit lines moved OUT — the status bar's engine
+	// badge ("↻ retry N/M · cooldown" / "RATE LIMIT · resumes in …") is the
+	// single home for provider-health state, so it isn't duplicated on screen.
+	if m.streamIdleMsg != "" {
 		return m.streamIdleMsg
 	}
 

@@ -634,7 +634,7 @@ func DefaultConfig() *Config {
 			MaxWatches: 1000,  // Max 1000 watched paths
 		},
 		DiffPreview: DiffPreviewConfig{
-			Enabled: true, // Enabled by default - show diff preview before write/edit
+			Enabled: false, // Disabled by default — no approval prompt on write/edit
 		},
 		MCP: MCPConfig{
 			Enabled:             false, // Disabled by default

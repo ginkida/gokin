@@ -115,6 +115,25 @@ func TestLoadFileCommands_ConflictRules(t *testing.T) {
 	}
 }
 
+func TestLoadFileCommands_PanicsAfterBootSeal(t *testing.T) {
+	h := NewHandler()
+	h.SealBootPhase() // simulate builder finishing the boot phase
+	dir := filepath.Join(t.TempDir(), "commands")
+	writeCommandFile(t, dir, "x.md", "body")
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("LoadFileCommands must panic when called after SealBootPhase")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "LoadFileCommands called after boot phase sealed") {
+			t.Fatalf("unexpected panic value: %v", r)
+		}
+	}()
+	_, _ = h.LoadFileCommands(dir, "")
+}
+
 func TestParseFileCommand_Validation(t *testing.T) {
 	dir := t.TempDir()
 

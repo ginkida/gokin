@@ -798,7 +798,88 @@ func scoreScenario(scenario Scenario, result Result) map[string]bool {
 		"files_edited_recorded":              len(result.ChangedFiles) == 0 || (result.Journal != nil && len(result.Journal.FilesEdited) > 0),
 		"verification_recorded":              result.Journal != nil && len(result.Journal.VerificationCommands) > 0,
 	}
+	// Behavioral assertions are scored ONLY when the scenario declares them, so
+	// scenarios that omit them keep their exact metric set (and committed
+	// baselines). These are the positive signals that a no-op on a green/trap
+	// scenario can't fake — see Scenario field docs.
+	if len(scenario.AnswerMustContain) > 0 {
+		metrics["answer_contains_required"] = answerContainsAll(agentOutput, scenario.AnswerMustContain)
+	}
+	if len(scenario.FileMustChange) > 0 {
+		metrics["required_files_changed"] = allPathsPresent(result.ChangedFiles, scenario.FileMustChange)
+	}
+	if len(scenario.FileMustNotChange) > 0 {
+		metrics["protected_files_unchanged"] = noPathPresent(result.ChangedFiles, scenario.FileMustNotChange)
+	}
 	return metrics
+}
+
+// answerContainsAll reports whether the agent's final answer contains EVERY
+// required substring (case-insensitive). Positive proof the agent reached the
+// scenario's required conclusion, not just that verification happened to pass
+// (which a no-op on a green/trap scenario also satisfies).
+func answerContainsAll(output string, required []string) bool {
+	lower := strings.ToLower(output)
+	for _, want := range required {
+		want = strings.ToLower(strings.TrimSpace(want))
+		if want == "" {
+			continue
+		}
+		if !strings.Contains(lower, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// pathPresent reports whether a declared workspace-relative path matches any
+// changed-files entry — exact match or as a trailing path segment, so a
+// scenario may name "internal/x/y.go" or a deeper-rooted equivalent. Basename-
+// only matching is deliberately NOT used (too loose for protected-file checks).
+func pathPresent(changed []string, declared string) bool {
+	declared = filepath.ToSlash(strings.TrimSpace(declared))
+	if declared == "" {
+		return false
+	}
+	for _, c := range changed {
+		c = filepath.ToSlash(strings.TrimSpace(c))
+		if c == "" {
+			continue
+		}
+		if c == declared || strings.HasSuffix(c, "/"+declared) || strings.HasSuffix(declared, "/"+c) {
+			return true
+		}
+	}
+	return false
+}
+
+// allPathsPresent: every required path was modified. Catches the no-op trap on
+// refactor/feature scenarios where doing nothing leaves verification green.
+func allPathsPresent(changed, required []string) bool {
+	for _, r := range required {
+		if strings.TrimSpace(r) == "" {
+			continue
+		}
+		if !pathPresent(changed, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// noPathPresent: no protected path was modified. Catches the trap where the
+// correct action is to LEAVE a file alone (e.g. a deprecated-but-still-used
+// symbol must not be removed).
+func noPathPresent(changed, protected []string) bool {
+	for _, p := range protected {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		if pathPresent(changed, p) {
+			return false
+		}
+	}
+	return true
 }
 
 func summarizeScore(metrics map[string]bool) ScoreSummary {

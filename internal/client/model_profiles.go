@@ -48,7 +48,7 @@ var knownModelProfiles = map[string]ModelProfile{
 	"command-r":      {Family: "command-r", ContextWindow: 128000, SupportsTools: true},
 
 	// GLM family
-	"glm-5.2":     {Family: "glm", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
+	"glm-5.2":     {Family: "glm", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 	"glm-5.1":     {Family: "glm", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
 	"glm-5":       {Family: "glm", ContextWindow: 200000, SupportsTools: true, IsCoding: true},
 	"glm-5-turbo": {Family: "glm", ContextWindow: 200000, SupportsTools: true, IsCoding: true},

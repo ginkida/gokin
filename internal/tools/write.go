@@ -50,6 +50,12 @@ func (t *WriteTool) SetDiffEnabled(enabled bool) {
 	t.diffEnabled = enabled
 }
 
+// DiffEnabled reports whether diff preview is currently enabled. Lets callers
+// (and tests) observe the live state synced by updateUnrestrictedModeLocked.
+func (t *WriteTool) DiffEnabled() bool {
+	return t.diffEnabled
+}
+
 // SetReadTracker wires the shared file-read tracker so write can enforce
 // read-before-overwrite (when enabled).
 func (t *WriteTool) SetReadTracker(tracker *FileReadTracker) {

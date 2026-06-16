@@ -98,13 +98,22 @@ type AppInterface interface {
 // Handler manages slash commands.
 // The commands map is populated during NewHandler() plus the boot-phase
 // loaders (LoadFileCommands, like LoadAliasesFromFile for aliases) and is
-// immutable once startup completes — the builder finishes all loading before
-// the handler is shared across goroutines. This makes Handler safe for
-// concurrent use without a mutex on the commands map. Register() panics
-// post-freeze; the file-command loader is the sanctioned boot-time path.
+// immutable once startup completes — the builder seals the boot phase via
+// SealBootPhase after all loaders finish, before the handler is shared
+// across goroutines. This makes Handler safe for concurrent use without a
+// mutex on the commands map. Register() panics once NewHandler returns;
+// the boot-phase loaders panic after SealBootPhase.
 type Handler struct {
 	commands map[string]Command
 	frozen   bool
+	// bootDone is set by SealBootPhase, called by the builder after all
+	// boot-phase loaders (LoadFileCommands, LoadAliasesFromFile) finish.
+	// Distinct from frozen: frozen blocks Register (inside NewHandler),
+	// bootDone blocks the post-construction loaders. Two flags because
+	// the boot loaders run AFTER NewHandler returns but BEFORE the handler
+	// is shared — a single flag would either block the legitimate loaders
+	// or fail to catch late Register calls.
+	bootDone bool
 
 	// aliases maps short names to canonical command names. Populated once via
 	// LoadAliases during startup; treated as immutable afterwards. Resolved in
@@ -252,6 +261,7 @@ func NewHandlerWithCommands(cmds ...Command) *Handler {
 		h.commands[c.Name()] = c
 	}
 	h.frozen = true
+	h.bootDone = true
 	return h
 }
 
@@ -262,6 +272,14 @@ func (h *Handler) Register(cmd Command) {
 		panic("commands: Register called after NewHandler completed")
 	}
 	h.commands[cmd.Name()] = cmd
+}
+
+// SealBootPhase marks the boot phase as done. Called by the builder after all
+// boot-phase loaders (LoadFileCommands, LoadAliasesFromFile) have finished.
+// After this call the handler is considered immutable and shared across
+// goroutines; any further loader call panics.
+func (h *Handler) SealBootPhase() {
+	h.bootDone = true
 }
 
 // Parse checks if input is a slash command and extracts name and args.

@@ -132,7 +132,7 @@ func (t *MemoryTool) Validate(args map[string]any) error {
 
 func (t *MemoryTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	if t.store == nil {
-		return NewErrorResult("memory store not configured"), nil
+		return NewErrorResult("memory is unavailable — it's likely disabled in config. Set `memory.enabled: true` (and a non-zero `memory.max_entries`) in your config (~/.config/gokin/config.yaml) or via /config, then restart."), nil
 	}
 
 	action, _ := GetString(args, "action")

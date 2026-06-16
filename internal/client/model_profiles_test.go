@@ -13,7 +13,7 @@ func TestGetModelProfile_ExactMatch(t *testing.T) {
 	}{
 		{"llama3.2", "llama", 128000, true},
 		// gemini removed in v0.65; profile gone in v0.78.30
-		{"glm-5.2", "glm", 200000, true},
+		{"glm-5.2", "glm", 1000000, true}, // 1M context (Z.AI, Jun 2026)
 		{"glm-5.1", "glm", 200000, true},
 		{"glm-5", "glm", 200000, true},
 		{"kimi-for-coding", "kimi", 262144, true},

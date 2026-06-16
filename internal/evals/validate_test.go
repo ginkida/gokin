@@ -35,7 +35,7 @@ func writeValidateManifest(t *testing.T, dir string, scenarios []Scenario) strin
 }
 
 func validateScenario(id, fixture, state string) Scenario {
-	return Scenario{
+	s := Scenario{
 		ID: id, Category: "bugfix", Difficulty: "small", Prompt: "p",
 		Fixture:              "synthetic/" + fixture,
 		ExpectedBehaviors:    []string{"b"},
@@ -45,6 +45,12 @@ func validateScenario(id, fixture, state string) Scenario {
 		MaxToolCalls:         5,
 		DeliveredState:       state,
 	}
+	// Green (trap) scenarios must carry a behavioral assertion — Validate now
+	// enforces this so a no-op can't score as success.
+	if state == "green" {
+		s.AnswerMustContain = []string{"ok"}
+	}
+	return s
 }
 
 func TestValidateFixtures_ContractEnforcement(t *testing.T) {
