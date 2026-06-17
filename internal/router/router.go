@@ -36,8 +36,15 @@ type Router struct {
 	analyzer    *TaskAnalyzer
 	executor    *tools.Executor
 	agentRunner AgentRunner
-	client      client.Client
-	workDir     string
+	// client is swapped by SetClient when the provider/key/model changes
+	// (ApplyConfig on /login, /provider, /model). clientMu guards it because
+	// Execute reads it on the request goroutine while ApplyConfig writes it on
+	// the app goroutine — without the lock a /login mid-request races, and the
+	// stale pre-swap client would keep getting the per-request thinking budget
+	// and tools (so the new key silently went unused until restart).
+	clientMu sync.RWMutex
+	client   client.Client
+	workDir  string
 
 	// Tool filtering
 	registry  *tools.Registry // Tool registry for per-request filtering
@@ -243,6 +250,23 @@ func (r *Router) RouteWithContext(ctx context.Context, message string) *RoutingD
 	return decision
 }
 
+// SetClient swaps the client used for per-request configuration (thinking
+// budget, tools). Called from ApplyConfig when the provider, API key, or model
+// changes so a /login takes effect in-process without a restart. SmartRouter
+// embeds *Router, so it inherits this.
+func (r *Router) SetClient(c client.Client) {
+	r.clientMu.Lock()
+	r.client = c
+	r.clientMu.Unlock()
+}
+
+// getClient returns the current client under the read lock.
+func (r *Router) getClient() client.Client {
+	r.clientMu.RLock()
+	defer r.clientMu.RUnlock()
+	return r.client
+}
+
 // Execute routes the task to the appropriate handler and returns the result
 func (r *Router) Execute(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
 	// Preserve the user's original message for the history record — the routing
@@ -251,12 +275,14 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 	originalMessage := message
 	decision := r.RouteWithContext(ctx, message)
 
+	cl := r.getClient()
+
 	// Apply thinking budget for this request
-	r.client.SetThinkingBudget(decision.ThinkingBudget)
+	cl.SetThinkingBudget(decision.ThinkingBudget)
 
 	// Apply per-request tool filtering
 	if r.registry != nil && len(decision.SuggestedToolSets) > 0 {
-		r.client.SetTools(r.registry.FilteredGeminiTools(decision.SuggestedToolSets...))
+		cl.SetTools(r.registry.FilteredGeminiTools(decision.SuggestedToolSets...))
 	}
 
 	// Add tool usage hint based on task type

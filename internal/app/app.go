@@ -122,8 +122,11 @@ type App struct {
 	// Context management
 	projectInfo    *appcontext.ProjectInfo
 	contextManager *appcontext.ContextManager
-	promptBuilder  *appcontext.PromptBuilder
-	contextAgent   *appcontext.ContextAgent
+	// tokenRefreshTimeout bounds the count_tokens call in refreshTokenCount.
+	// Zero means the 15s default; tests override it to drive the timeout path.
+	tokenRefreshTimeout time.Duration
+	promptBuilder       *appcontext.PromptBuilder
+	contextAgent        *appcontext.ContextAgent
 
 	// Permission management
 	permManager      *permission.Manager
@@ -1773,7 +1776,18 @@ func (a *App) refreshTokenCount() {
 	if a.contextManager == nil {
 		return
 	}
-	if err := a.contextManager.UpdateTokenCount(a.ctx); err != nil {
+	// Bound the count_tokens round-trip. On a cache miss UpdateTokenCount hits
+	// the network, and a.ctx has no deadline — an unreachable/slow endpoint
+	// would otherwise stall this call up to the transport's 120s
+	// ResponseHeaderTimeout. UpdateTokenCount falls back to a local estimate on
+	// error, so a timeout degrades gracefully rather than failing.
+	timeout := a.tokenRefreshTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, timeout)
+	defer cancel()
+	if err := a.contextManager.UpdateTokenCount(ctx); err != nil {
 		logging.Debug("failed to refresh token count", "error", err)
 		return
 	}
@@ -2495,6 +2509,15 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.contextManager.SetClient(newClient)
 	}
 
+	// 6a. Update the task router's client. Without this, routed requests kept
+	// applying the per-request thinking budget / tools to the OLD pre-swap
+	// client object — so after /login the new key reached the executor but the
+	// router still poked a discarded client, a silent in-process staleness that
+	// only cleared on restart.
+	if a.taskRouter != nil {
+		a.taskRouter.SetClient(newClient)
+	}
+
 	// 7. Update rate limiter
 	if a.config.RateLimit.Enabled {
 		if a.rateLimiter == nil {
@@ -2575,8 +2598,15 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		})
 	}
 
-	// Refresh token counts immediately for the newly loaded model limits
-	a.refreshTokenCount()
+	// Refresh token counts for the new model limits OFF the command goroutine.
+	// refreshTokenCount makes a count_tokens HTTP call that is cache-MISSED by a
+	// provider switch's ClearConversation; running it synchronously here was the
+	// /login (and /provider, /model) hang: it stalled ApplyConfig →
+	// LoginCommand.Execute → executeCommandCtx, so the defer's ResponseDoneMsg
+	// never fired and the UI showed "Generating" until the call hit the 120s
+	// transport timeout. The config apply above is already complete and in
+	// effect; the token count is a UI nicety that must not gate it.
+	a.safeGo("apply-config-token-refresh", func() { a.refreshTokenCount() })
 
 	logging.Info("configuration applied successfully", "model", modelName)
 	return nil
