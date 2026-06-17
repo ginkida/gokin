@@ -170,10 +170,41 @@ func (s *Summarizer) doSummarize(ctx context.Context, messages []*genai.Content)
 	}
 
 	// Create summary content as a user message (context injection)
-	summaryText := fmt.Sprintf("[Previous conversation summary]\n%s\n[End of summary]", resp.Text)
+	summaryText := fmt.Sprintf("[Previous conversation summary]\n%s\n[End of summary]", s.ensureCriticalContext(resp.Text))
 	summary := genai.NewContentFromText(summaryText, genai.RoleUser)
 
 	return summary, nil
+}
+
+// ensureCriticalContext re-anchors task-critical facts the LLM summary may have
+// dropped. CreateSummaryPlan already keeps the task (KeepStart) and recent turns
+// (KeepEnd) verbatim, so those are safe — but the SUMMARIZED middle can lose the
+// files/task touched there if a (weak-provider) summary is lossy. When a
+// TaskContext is set (active plan), append any of its files/task the summary
+// omitted so they survive compaction regardless of LLM compliance. Cheap,
+// self-contained, and over-anchoring is harmless (it only re-states known facts).
+func (s *Summarizer) ensureCriticalContext(summary string) string {
+	tc := s.taskContext
+	if tc == nil {
+		return summary
+	}
+	var missing []string
+	if tc.Title != "" && !strings.Contains(strings.ToLower(summary), strings.ToLower(tc.Title)) {
+		missing = append(missing, "Task: "+tc.Title)
+	}
+	var droppedFiles []string
+	for _, p := range tc.ArtifactPaths {
+		if p != "" && !strings.Contains(summary, p) {
+			droppedFiles = append(droppedFiles, p)
+		}
+	}
+	if len(droppedFiles) > 0 {
+		missing = append(missing, "Active files (re-anchored): "+strings.Join(droppedFiles, ", "))
+	}
+	if len(missing) == 0 {
+		return summary
+	}
+	return summary + "\n\n[Preserved task context]\n- " + strings.Join(missing, "\n- ")
 }
 
 // summarizeHierarchical handles large conversations by splitting on semantic boundaries.
@@ -207,7 +238,7 @@ func (s *Summarizer) summarizeHierarchical(ctx context.Context, messages []*gena
 		return nil, err
 	}
 
-	summaryText := fmt.Sprintf("[Long-term conversation summary]\n%s\n[End of summary]", resp.Text)
+	summaryText := fmt.Sprintf("[Long-term conversation summary]\n%s\n[End of summary]", s.ensureCriticalContext(resp.Text))
 	return genai.NewContentFromText(summaryText, genai.RoleUser), nil
 }
 
