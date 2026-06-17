@@ -110,11 +110,12 @@ func (r *Registry) GeminiTools() []*genai.Tool {
 	}
 }
 
-// planModeControlToolNames are the interactive plan-mode tools. They are a
+// PlanModeControlToolNames are the interactive plan-mode tools. They are a
 // SUBSET of ToolSetPlanning (which also bundles the task* background-agent
 // tools), so they're listed explicitly — gating the whole set would wrongly
-// drop task/task_output/task_stop.
-var planModeControlToolNames = map[string]bool{
+// drop task/task_output/task_stop. Exported so the app can fold them into a
+// combined feature-gated exclusion set (plan-off + memory-off, …).
+var PlanModeControlToolNames = map[string]bool{
 	"enter_plan_mode":      true,
 	"exit_plan_mode":       true,
 	"update_plan_progress": true,
@@ -123,21 +124,28 @@ var planModeControlToolNames = map[string]bool{
 	"redo_plan":            true,
 }
 
-// GeminiToolsExcludingPlanMode returns the full tool envelope minus the
-// interactive plan-mode control tools. Used when plan.enabled is false so a
-// model can't call enter_plan_mode and strand itself in read-only mode — there
-// is no interactive plan approval in headless/eval runs (the model stops and
-// asks for "write access" that never comes).
-func (r *Registry) GeminiToolsExcludingPlanMode() []*genai.Tool {
+// GeminiToolsExcluding returns the full tool envelope minus the named tools.
+// Used to drop FEATURE-GATED tools the model must not call because the feature
+// is off in config — plan-mode control tools when plan.enabled is false, the
+// memory/memorize tools when memory.enabled is false. Offering a disabled tool
+// makes the model call it and hit a confusing "unavailable" error.
+func (r *Registry) GeminiToolsExcluding(exclude map[string]bool) []*genai.Tool {
 	all := r.Declarations()
 	kept := make([]*genai.FunctionDeclaration, 0, len(all))
 	for _, d := range all {
-		if d == nil || planModeControlToolNames[d.Name] {
+		if d == nil || exclude[d.Name] {
 			continue
 		}
 		kept = append(kept, d)
 	}
 	return []*genai.Tool{{FunctionDeclarations: kept}}
+}
+
+// GeminiToolsExcludingPlanMode drops the interactive plan-mode control tools
+// (the model can't enter_plan_mode and strand itself read-only with no
+// interactive plan approval, e.g. in headless/eval runs).
+func (r *Registry) GeminiToolsExcludingPlanMode() []*genai.Tool {
+	return r.GeminiToolsExcluding(PlanModeControlToolNames)
 }
 
 // ToolSet defines a named group of tools.

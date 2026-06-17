@@ -1141,15 +1141,29 @@ func (a *App) planModeToolsLocked(planModeEnabled bool) []*genai.Tool {
 	if planModeEnabled {
 		return a.registry.PlanModeGeminiTools()
 	}
-	// plan.enabled is the master switch for interactive plan mode. When it's
-	// off, the plan-mode control tools must not appear in the schema at all —
-	// otherwise a model (notably in headless/eval, where there is no plan
-	// approval) can call enter_plan_mode and strand itself read-only, never
-	// editing. Default config keeps planning enabled, so this is a no-op there.
-	if a.config != nil && !a.config.Plan.Enabled {
-		return a.registry.GeminiToolsExcludingPlanMode()
+	// Feature-gate the schema: a tool the model must NOT call because its
+	// feature is off in config is dropped, so the model can't call a disabled
+	// tool and hit a confusing "unavailable" error. plan.enabled off → the
+	// plan-mode control tools (a model could otherwise enter_plan_mode and
+	// strand itself read-only with no interactive approval); memory.enabled
+	// off → the memory/memorize tools (their store isn't wired, so they error).
+	// Default config enables both, so this is a no-op there.
+	exclude := map[string]bool{}
+	if a.config != nil {
+		if !a.config.Plan.Enabled {
+			for n := range tools.PlanModeControlToolNames {
+				exclude[n] = true
+			}
+		}
+		if !a.config.Memory.Enabled {
+			exclude["memory"] = true
+			exclude["memorize"] = true
+		}
 	}
-	return a.registry.GeminiTools()
+	if len(exclude) == 0 {
+		return a.registry.GeminiTools()
+	}
+	return a.registry.GeminiToolsExcluding(exclude)
 }
 
 // GetRuntimeHealthReport returns runtime reliability and provider health diagnostics.
