@@ -386,7 +386,31 @@ func (a *App) Run() error {
 	if a.sessionPreloaded {
 		sessionRestored = true
 	} else if a.sessionManager != nil {
-		state, info, err := a.sessionManager.LoadLast()
+		// Bound startup auto-resume: LoadLast reads + parses session metadata
+		// from disk; a pathological session dir (thousands of files / a hung
+		// network FS) must not stall cold start unboundedly. Cap it at 5s; on
+		// timeout skip auto-resume (the user can /resume). The buffered channel
+		// means the worker never blocks even after we move on, so it can't leak.
+		type loadLastResult struct {
+			state *chat.SessionState
+			info  *chat.SessionInfo
+			err   error
+		}
+		llCh := make(chan loadLastResult, 1)
+		a.safeGo("startup-loadlast", func() {
+			s, i, e := a.sessionManager.LoadLast()
+			llCh <- loadLastResult{s, i, e}
+		})
+		var state *chat.SessionState
+		var info *chat.SessionInfo
+		var err error
+		select {
+		case r := <-llCh:
+			state, info, err = r.state, r.info, r.err
+		case <-time.After(5 * time.Second):
+			logging.Warn("session auto-resume skipped: LoadLast exceeded 5s")
+			err = context.DeadlineExceeded
+		}
 		if err == nil && state != nil && len(state.History) > 0 {
 			age := time.Since(info.LastActive)
 			// Cross-provider guard: a session tagged with a different

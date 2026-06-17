@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"gokin/internal/fileutil"
@@ -221,6 +220,41 @@ func (m *HistoryManager) LoadFull(sessionID string) (*SessionState, error) {
 	return &state, nil
 }
 
+// sessionMeta mirrors ONLY the fields ListSessions needs, so a directory scan
+// doesn't deserialize every message of every session into the full
+// SerializedContent tree. History is decoded as raw array elements — we only
+// need its length (MessageCount), not its contents. This is the difference
+// between O(total messages across all sessions) struct allocation and a shallow
+// per-file parse; it kept startup auto-resume from scaling with conversation
+// size (the low-sev half of the v0.100.13 reliability audit).
+type sessionMeta struct {
+	ID         string            `json:"id"`
+	StartTime  time.Time         `json:"start_time"`
+	LastActive time.Time         `json:"last_active"`
+	WorkDir    string            `json:"work_dir"`
+	Summary    string            `json:"summary"`
+	History    []json.RawMessage `json:"history"`
+}
+
+func loadSessionMeta(path string) (SessionInfo, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	var meta sessionMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return SessionInfo{}, err
+	}
+	return SessionInfo{
+		ID:           meta.ID,
+		StartTime:    meta.StartTime,
+		LastActive:   meta.LastActive,
+		Summary:      meta.Summary,
+		MessageCount: len(meta.History),
+		WorkDir:      meta.WorkDir,
+	}, nil
+}
+
 // ListSessions returns information about all saved sessions.
 func (m *HistoryManager) ListSessions() ([]SessionInfo, error) {
 	sessionsDir, err := getSessionsDir()
@@ -244,20 +278,11 @@ func (m *HistoryManager) ListSessions() ([]SessionInfo, error) {
 			continue
 		}
 
-		sessionID := strings.TrimSuffix(entry.Name(), ".json")
-		state, err := m.LoadFull(sessionID)
+		info, err := loadSessionMeta(filepath.Join(sessionsDir, entry.Name()))
 		if err != nil {
 			continue // Skip invalid files
 		}
-
-		sessions = append(sessions, SessionInfo{
-			ID:           state.ID,
-			StartTime:    state.StartTime,
-			LastActive:   state.LastActive,
-			Summary:      state.Summary,
-			MessageCount: len(state.History),
-			WorkDir:      state.WorkDir,
-		})
+		sessions = append(sessions, info)
 	}
 
 	return sessions, nil
