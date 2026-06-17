@@ -167,6 +167,7 @@ func NewHandler() *Handler {
 	h.Register(&InitCommand{})
 	h.Register(&DoctorCommand{})
 	h.Register(&ConfigCommand{})
+	h.Register(&SetCommand{})
 	h.Register(&LoginCommand{})
 	h.Register(&LogoutCommand{})
 	h.Register(&ProviderCommand{})

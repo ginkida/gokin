@@ -104,7 +104,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	}{
 		{"Getting Started", []string{"help", "quickstart", "shortcuts"}},
 		{"Session", []string{"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "tasks", "cost", "instructions", "memory", "loop", "undo", "redo"}},
-		{"Auth & Setup", []string{"login", "logout", "keys", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"}},
+		{"Auth & Setup", []string{"login", "logout", "keys", "provider", "status", "doctor", "config", "set", "update", "restart", "whats-new", "changelog"}},
 		{"Git", []string{"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"}},
 		{"Planning", []string{"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"}},
 		{"Tools", []string{"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "hooks", "debug-dump",
@@ -1046,6 +1046,7 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 	// Config path
 	configPath := config.GetConfigPath()
 	fmt.Fprintf(&sb, "\n%sConfig file:%s %s\n", colorCyan, colorReset, configPath)
+	fmt.Fprintf(&sb, "%sChange a setting:%s /set (lists toggles) · /set <key> on|off\n", colorCyan, colorReset)
 
 	return sb.String(), nil
 }

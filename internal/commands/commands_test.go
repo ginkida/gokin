@@ -119,7 +119,7 @@ func TestHelpCategoriesAreRegistered(t *testing.T) {
 	helpCategories := map[string][]string{
 		"Getting Started": {"help", "quickstart", "shortcuts"},
 		"Session":         {"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "tasks", "cost", "instructions", "memory", "loop", "undo", "redo"},
-		"Auth & Setup":    {"login", "logout", "keys", "provider", "status", "doctor", "config", "update", "restart", "whats-new", "changelog"},
+		"Auth & Setup":    {"login", "logout", "keys", "provider", "status", "doctor", "config", "set", "update", "restart", "whats-new", "changelog"},
 		"Git":             {"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"},
 		"Planning":        {"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"},
 		"Tools": {"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "hooks", "debug-dump",
