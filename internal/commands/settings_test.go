@@ -54,6 +54,34 @@ func TestSetCommand_Toggle(t *testing.T) {
 	}
 }
 
+// TestSharedToggleTable pins that /set and the /settings modal share one source
+// of truth (SettableToggleStates + ApplySettingToggle over settableToggles).
+func TestSharedToggleTable(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Bash.Sandbox = false
+
+	states := SettableToggleStates(cfg)
+	if len(states) != len(settableToggles) {
+		t.Fatalf("SettableToggleStates len=%d, want %d", len(states), len(settableToggles))
+	}
+
+	if !ApplySettingToggle(cfg, "sandbox", true) {
+		t.Fatal("ApplySettingToggle(sandbox) should succeed for a known key")
+	}
+	if !cfg.Tools.Bash.Sandbox {
+		t.Error("sandbox should be on after ApplySettingToggle(sandbox, true)")
+	}
+	if ApplySettingToggle(cfg, "nope", true) {
+		t.Error("ApplySettingToggle(unknown) must return false")
+	}
+
+	// /settings opens via the marker, never as displayed text.
+	out, _ := (&SettingsCommand{}).Execute(context.Background(), nil, &fakeSetApp{cfg: cfg})
+	if out != SettingsMarker {
+		t.Errorf("/settings result = %q, want SettingsMarker", out)
+	}
+}
+
 func TestSetCommand_ListAndErrors(t *testing.T) {
 	app := &fakeSetApp{cfg: config.DefaultConfig()}
 	cmd := &SetCommand{}

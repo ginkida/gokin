@@ -113,6 +113,11 @@ type Model struct {
 	currentModel       string
 	onModelSelect      func(modelID string)
 
+	// Settings modal state (the /settings interactive screen)
+	settingsItems   []SettingItem
+	settingsCursor  int
+	onSettingToggle func(key string, on bool)
+
 	// Diff preview state
 	diffPreview         DiffPreviewModel
 	diffRequest         *DiffPreviewRequestMsg
@@ -535,6 +540,11 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 	// Handle model selector keys
 	if m.state == StateModelSelector {
 		return m.handleModelSelectorKeys(msg)
+	}
+
+	// Handle settings modal keys
+	if m.state == StateSettings {
+		return m.handleSettingsKeys(msg)
 	}
 
 	// Handle shortcuts overlay keys
@@ -2077,6 +2087,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			setTerminalTitle(fmt.Sprintf("Gokin · %s · %s", m.currentModel, shortenPath(m.workDir, 30)))
 		}
 
+	// Open the interactive settings modal (/settings)
+	case OpenSettingsMsg:
+		m.openSettings(msg.Items)
+
 	// Planning mode toggle result (async)
 	case PlanningModeToggledMsg:
 		m.planningModeEnabled = msg.Enabled
@@ -3013,6 +3027,12 @@ func (m Model) View() string {
 		builder.WriteString("\n")
 	}
 
+	// Settings modal
+	if m.state == StateSettings {
+		builder.WriteString(m.renderSettings())
+		builder.WriteString("\n")
+	}
+
 	// Shortcuts overlay
 	if m.state == StateShortcutsOverlay {
 		builder.WriteString(m.renderShortcutsOverlay())
@@ -3523,6 +3543,8 @@ func (m *Model) DebugState() UIDebugState {
 		stateName = "plan_approval"
 	case StateModelSelector:
 		stateName = "model_selector"
+	case StateSettings:
+		stateName = "settings"
 	case StateShortcutsOverlay:
 		stateName = "shortcuts_overlay"
 	case StateCommandPalette:

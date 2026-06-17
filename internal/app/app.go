@@ -967,6 +967,9 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		// Handle special command markers
 		if browsePath, ok := strings.CutPrefix(result, "__browse:"); ok {
 			a.safeSendToProgram(ui.FileBrowserRequestMsg{StartPath: browsePath})
+		} else if result == commands.SettingsMarker {
+			// /settings: open the interactive modal with a fresh toggle snapshot.
+			a.safeSendToProgram(ui.OpenSettingsMsg{Items: a.buildSettingItems()})
 		} else if prompt, ok := strings.CutPrefix(result, commands.PromptMarker); ok {
 			// File-based command: the expansion is a MODEL PROMPT, not
 			// display text. Re-enter through handleSubmit (it decides
@@ -2610,6 +2613,37 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 
 	logging.Info("configuration applied successfully", "model", modelName)
 	return nil
+}
+
+// buildSettingItems snapshots the curated settings toggles for the /settings
+// modal from the live config. The modal and /set share the same toggle table in
+// the commands package, so the two can never drift on what's configurable.
+func (a *App) buildSettingItems() []ui.SettingItem {
+	cfg := a.GetConfig()
+	if cfg == nil {
+		return nil
+	}
+	states := commands.SettableToggleStates(cfg)
+	items := make([]ui.SettingItem, 0, len(states))
+	for _, s := range states {
+		items = append(items, ui.SettingItem{Key: s.Key, Desc: s.Desc, On: s.On})
+	}
+	return items
+}
+
+// handleSettingToggle applies a single toggle flipped in the /settings modal,
+// live, via ApplyConfig. Invoked from the UI (Bubble Tea) goroutine, so the
+// ApplyConfig is run on a worker — it must never jank the render loop.
+func (a *App) handleSettingToggle(key string, on bool) {
+	cfg := a.GetConfig()
+	if cfg == nil || !commands.ApplySettingToggle(cfg, key, on) {
+		return
+	}
+	a.safeGo("settings-toggle-apply", func() {
+		if err := a.ApplyConfig(cfg); err != nil {
+			logging.Warn("failed to apply setting toggle", "key", key, "error", err)
+		}
+	})
 }
 
 // stripLegacySystemMessages removes old-style system prompt messages from session history.

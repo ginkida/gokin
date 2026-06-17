@@ -66,6 +66,60 @@ var settableToggles = []settingToggle{
 		func(c *config.Config, v bool) { c.DoneGate.Enabled = v }},
 }
 
+// ToggleState is a settable toggle's current value. Shared by /set and the
+// interactive /settings modal so there is ONE source of truth for what is
+// configurable — the modal renders these and reports flips back through
+// ApplySettingToggle.
+type ToggleState struct {
+	Key  string
+	Desc string
+	On   bool
+}
+
+// SettableToggleStates returns every curated toggle with its current value,
+// in display order.
+func SettableToggleStates(cfg *config.Config) []ToggleState {
+	states := make([]ToggleState, 0, len(settableToggles))
+	for _, t := range settableToggles {
+		states = append(states, ToggleState{Key: t.key, Desc: t.desc, On: t.get(cfg)})
+	}
+	return states
+}
+
+// ApplySettingToggle sets one toggle on cfg by key. Returns false if the key is
+// not a known toggle (caller should not then ApplyConfig).
+func ApplySettingToggle(cfg *config.Config, key string, on bool) bool {
+	t, ok := findToggle(key)
+	if !ok {
+		return false
+	}
+	t.set(cfg, on)
+	return true
+}
+
+// SettingsMarker is returned by /settings to tell the app to open the
+// interactive settings modal — the same result-prefix mechanism as PromptMarker.
+const SettingsMarker = "__settings:"
+
+// SettingsCommand opens the interactive settings screen (a visual layer over the
+// same toggles /set exposes).
+type SettingsCommand struct{}
+
+func (c *SettingsCommand) Name() string        { return "settings" }
+func (c *SettingsCommand) Description() string { return "Open the interactive settings screen" }
+func (c *SettingsCommand) Usage() string       { return "/settings" }
+func (c *SettingsCommand) GetMetadata() CommandMetadata {
+	return CommandMetadata{
+		Category: CategoryAuthSetup,
+		Icon:     "config",
+		Priority: 8,
+	}
+}
+
+func (c *SettingsCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	return SettingsMarker, nil
+}
+
 func findToggle(key string) (settingToggle, bool) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	for _, t := range settableToggles {
