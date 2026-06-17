@@ -64,6 +64,19 @@ var settableToggles = []settingToggle{
 	{"donegate", "Verify build/test before finishing a task",
 		func(c *config.Config) bool { return c.DoneGate.Enabled },
 		func(c *config.Config, v bool) { c.DoneGate.Enabled = v }},
+	{"thinking", "Extended reasoning before answering (more tokens)",
+		func(c *config.Config) bool { return c.Model.EnableThinking },
+		func(c *config.Config, v bool) {
+			// Mirror /thinking's budget bookkeeping so a toggle here behaves
+			// identically: clamp a usable budget on, seed a default on off so a
+			// {enable:false, budget:0} config doesn't auto-re-enable at startup.
+			c.Model.EnableThinking = v
+			if v {
+				c.Model.ThinkingBudget = clampThinkingBudget(c.Model.ThinkingBudget)
+			} else if c.Model.ThinkingBudget == 0 {
+				c.Model.ThinkingBudget = thinkingDefaultBudget
+			}
+		}},
 }
 
 // ToggleState is a settable toggle's current value. Shared by /set and the

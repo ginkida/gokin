@@ -115,9 +115,11 @@ type Model struct {
 	onModelSelect      func(modelID string)
 
 	// Settings modal state (the /settings interactive screen)
-	settingsItems   []SettingItem
-	settingsCursor  int
-	onSettingToggle func(key string, on bool)
+	settingsItems    []SettingItem
+	settingsCursor   int
+	settingsModel    string
+	settingsProvider string
+	onSettingToggle  func(key string, on bool)
 
 	// Masked API-key entry modal (/login <provider> with no key)
 	keyEntryInput       textinput.Model
@@ -2102,7 +2104,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	// Open the interactive settings modal (/settings)
 	case OpenSettingsMsg:
-		m.openSettings(msg.Items)
+		m.openSettings(msg)
 
 	// Open the masked API-key entry modal (/login <provider> with no key)
 	case OpenKeyEntryMsg:

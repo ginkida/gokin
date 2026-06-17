@@ -17,9 +17,12 @@ type SettingItem struct {
 	On   bool
 }
 
-// OpenSettingsMsg opens the interactive settings screen with the given toggles.
+// OpenSettingsMsg opens the interactive settings screen with the given toggles
+// plus the current model/provider for the header.
 type OpenSettingsMsg struct {
-	Items []SettingItem
+	Items    []SettingItem
+	Model    string
+	Provider string
 }
 
 // SetSettingToggleCallback wires the app handler invoked when the user flips a
@@ -29,10 +32,13 @@ func (m *Model) SetSettingToggleCallback(cb func(key string, on bool)) {
 	m.onSettingToggle = cb
 }
 
-// openSettings enters the settings modal with a fresh snapshot of toggles.
-func (m *Model) openSettings(items []SettingItem) {
-	m.settingsItems = items
+// openSettings enters the settings modal with a fresh snapshot of toggles + the
+// current model/provider for the header.
+func (m *Model) openSettings(msg OpenSettingsMsg) {
+	m.settingsItems = msg.Items
 	m.settingsCursor = 0
+	m.settingsModel = msg.Model
+	m.settingsProvider = msg.Provider
 	m.state = StateSettings
 }
 
@@ -56,6 +62,11 @@ func (m *Model) handleSettingsKeys(msg tea.KeyMsg) tea.Cmd {
 				m.onSettingToggle(item.Key, item.On)
 			}
 		}
+	case "m":
+		// Jump straight to the model selector (the toggles are all bool; model
+		// is a list, so it reuses the existing selector rather than a checkbox).
+		m.openModelSelector()
+		return nil
 	case "esc", "q":
 		m.state = StateInput
 		return m.input.Focus()
@@ -76,6 +87,13 @@ func (m Model) renderSettings() string {
 	b.WriteString("  ")
 	b.WriteString(subtitleStyle.Render("/settings"))
 	b.WriteString("\n\n")
+
+	// Model/provider header — shown here so the modal is the one place that
+	// surfaces the whole picture; model is changed with 'm', provider via /provider.
+	if m.settingsModel != "" || m.settingsProvider != "" {
+		hdr := lipgloss.NewStyle().Foreground(ColorMuted)
+		fmt.Fprintf(&b, "  %s\n\n", hdr.Render(fmt.Sprintf("Model: %s   ·   Provider: %s", m.settingsModel, m.settingsProvider)))
+	}
 
 	if len(m.settingsItems) == 0 {
 		emptyStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Width(paletteWidth - 4)
@@ -105,7 +123,7 @@ func (m Model) renderSettings() string {
 
 	b.WriteString("\n")
 	footerStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true).Align(lipgloss.Center).Width(paletteWidth - 4)
-	b.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Space/Enter Toggle  ·  Esc Close"))
+	b.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Space Toggle  ·  m Model  ·  /provider to switch  ·  Esc Close"))
 	b.WriteString("\n")
 
 	return wrapPromptContainer(b.String(), paletteWidth, bordered, ColorPrimary)

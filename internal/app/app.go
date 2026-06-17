@@ -968,8 +968,14 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		if browsePath, ok := strings.CutPrefix(result, "__browse:"); ok {
 			a.safeSendToProgram(ui.FileBrowserRequestMsg{StartPath: browsePath})
 		} else if result == commands.SettingsMarker {
-			// /settings: open the interactive modal with a fresh toggle snapshot.
-			a.safeSendToProgram(ui.OpenSettingsMsg{Items: a.buildSettingItems()})
+			// /settings: open the interactive modal with a fresh toggle snapshot
+			// + the current model/provider for the header.
+			settingsMsg := ui.OpenSettingsMsg{Items: a.buildSettingItems()}
+			if cfg := a.GetConfig(); cfg != nil {
+				settingsMsg.Model = cfg.Model.Name
+				settingsMsg.Provider = runtimeProviderForConfig(cfg)
+			}
+			a.safeSendToProgram(settingsMsg)
 		} else if provider, ok := strings.CutPrefix(result, commands.LoginKeyMarker); ok {
 			// /login <provider> with no key: open the masked key-entry modal so
 			// the key is captured securely instead of being typed as a message.

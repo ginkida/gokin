@@ -209,7 +209,7 @@ func DefaultCommands() []CommandInfo {
 		{Name: "config", Description: "Show current configuration", Category: "Auth"},
 		{Name: "set", Description: "View or change a setting (live)", Category: "Auth",
 			Args: []ArgInfo{{Name: "key", Required: false, Type: "option",
-				Options: []string{"permissions", "sandbox", "diff", "tokens", "autocompact", "memory", "plan", "donegate"}}}},
+				Options: []string{"permissions", "sandbox", "diff", "tokens", "autocompact", "memory", "plan", "donegate", "thinking"}}}},
 		{Name: "settings", Description: "Open the interactive settings screen", Category: "Auth"},
 		{Name: "update", Description: "Check/install updates and rollback", Category: "Auth",
 			Args:  []ArgInfo{{Name: "action", Required: false, Type: "option", Options: []string{"install", "backups", "rollback"}}},

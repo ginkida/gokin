@@ -75,6 +75,19 @@ func TestSharedToggleTable(t *testing.T) {
 		t.Error("ApplySettingToggle(unknown) must return false")
 	}
 
+	// thinking folded in as a boolean toggle (it's effectively on/off + budget).
+	if _, ok := findToggle("thinking"); !ok {
+		t.Error("thinking should be a settable toggle")
+	}
+	cfg.Model.EnableThinking = false
+	cfg.Model.ThinkingBudget = 0
+	if !ApplySettingToggle(cfg, "thinking", false) || cfg.Model.ThinkingBudget == 0 {
+		t.Error("thinking off should seed a non-zero budget so it doesn't auto-re-enable at startup")
+	}
+	if !ApplySettingToggle(cfg, "thinking", true) || !cfg.Model.EnableThinking {
+		t.Error("thinking on should enable + clamp a usable budget")
+	}
+
 	// /settings opens via the marker, never as displayed text.
 	out, _ := (&SettingsCommand{}).Execute(context.Background(), nil, &fakeSetApp{cfg: cfg})
 	if out != SettingsMarker {

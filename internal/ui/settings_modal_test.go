@@ -17,9 +17,13 @@ func TestSettingsModal_NavigateToggleClose(t *testing.T) {
 	var calls int
 	m.SetSettingToggleCallback(func(key string, on bool) { gotKey = key; gotOn = on; calls++ })
 
-	m.openSettings([]SettingItem{
-		{Key: "permissions", Desc: "a", On: true},
-		{Key: "sandbox", Desc: "b", On: false},
+	m.openSettings(OpenSettingsMsg{
+		Items: []SettingItem{
+			{Key: "permissions", Desc: "a", On: true},
+			{Key: "sandbox", Desc: "b", On: false},
+		},
+		Model:    "glm-5.2",
+		Provider: "glm",
 	})
 	if m.state != StateSettings {
 		t.Fatal("openSettings should enter StateSettings")
@@ -44,5 +48,22 @@ func TestSettingsModal_NavigateToggleClose(t *testing.T) {
 	m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyEscape})
 	if m.state != StateInput {
 		t.Errorf("esc should return to StateInput, got %v", m.state)
+	}
+}
+
+// TestSettingsModal_MOpensModelSelector: 'm' jumps to the model selector (model
+// is a list, not a checkbox, so it reuses the existing selector).
+func TestSettingsModal_MOpensModelSelector(t *testing.T) {
+	m := NewModel()
+	m.SetAvailableModels([]ModelInfo{{ID: "glm-5.2", Name: "GLM 5.2"}})
+	m.SetCurrentModel("glm-5.2")
+	m.openSettings(OpenSettingsMsg{
+		Items:    []SettingItem{{Key: "permissions", On: true}},
+		Model:    "glm-5.2",
+		Provider: "glm",
+	})
+	m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if m.state != StateModelSelector {
+		t.Errorf("'m' in settings should open the model selector, got %v", m.state)
 	}
 }
