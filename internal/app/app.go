@@ -1248,8 +1248,16 @@ func (a *App) GetUIRuntimeStatus() ui.RuntimeStatusSnapshot {
 		StepBreaker:    "n/a",
 	}
 
-	if a.config != nil {
-		out.Provider = runtimeProviderForConfig(a.config)
+	// a.config is swapped by ApplyConfig under a.mu, and this method runs on the
+	// Bubble Tea status goroutine (runtimeStatusCmd, ~1/sec) — a DISTINCT
+	// goroutine from the app one — so the read must be synchronized or it races
+	// the swap (the router.go clientMu precedent for the same ApplyConfig-reader
+	// class). Snapshot the pointer under the lock; cfg is immutable post-publish.
+	a.mu.Lock()
+	cfg := a.config
+	a.mu.Unlock()
+	if cfg != nil {
+		out.Provider = runtimeProviderForConfig(cfg)
 	}
 	if a.reliability != nil {
 		s := a.reliability.Snapshot()
@@ -1730,11 +1738,19 @@ func (a *App) safeSendToProgram(msg tea.Msg) {
 // sendTokenUsageUpdate sends a token usage update to the UI.
 // This can be called from any goroutine safely.
 func (a *App) sendTokenUsageUpdate() {
-	if a.contextManager == nil || !a.config.UI.ShowTokenUsage {
+	// a.config is swapped by ApplyConfig under a.mu; this is reachable
+	// cross-goroutine (a background /loop iteration's token-usage callback runs
+	// exactly when a /settings toggle's ApplyConfig worker can fire), so snapshot
+	// under the lock. Same ApplyConfig-reader race as GetUIRuntimeStatus.
+	a.mu.Lock()
+	cm := a.contextManager
+	show := a.config != nil && a.config.UI.ShowTokenUsage
+	a.mu.Unlock()
+	if cm == nil || !show {
 		return
 	}
 
-	usage := a.contextManager.GetTokenUsage()
+	usage := cm.GetTokenUsage()
 	if usage == nil {
 		return
 	}
