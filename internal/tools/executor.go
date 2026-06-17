@@ -810,6 +810,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	maxIterations := e.calculateMaxIterations(history)
 
 	var finalText string
+	// carriedText accumulates text across max_tokens auto-continuations so the
+	// final answer is the WHOLE response, not just the last continued chunk.
+	var carriedText string
+	truncationContinuations := 0
 	var toolsUsed []string          // Track which tools were used for smart fallback
 	var lastToolResult ToolResult   // Track the last tool result for context
 	var recentToolPatterns []string // Track tool name patterns per iteration for stagnation detection
@@ -835,6 +839,12 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		stagnationLimit           = 5  // Consecutive identical tool patterns before aborting
 		stagnationWindowSize      = 15 // Rolling window for amnesia (non-consecutive) repeats
 		stagnationWindowRepeatMin = 5  // Repeats within window to trigger a warning (not an abort)
+		// maxTruncationContinuations bounds how many times a max_tokens-truncated
+		// TEXT response is auto-continued before we give up and surface the
+		// warning. The model should emit large content via tools (write), not a
+		// giant text turn — so a few continuations covers the legitimate case
+		// (a long plan/explanation cut off) without risking a runaway.
+		maxTruncationContinuations = 3
 	)
 	streamRetries := 0
 	partialStreamRetries := 0
@@ -842,6 +852,29 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// Retries are orchestrated at App/message processor level to avoid retry multiplication.
 	retryPolicy.MaxRetries = 0
 	retryPolicy.MaxPartialRetries = 0
+	recordResponseAccounting := func(resp *client.Response) {
+		if resp == nil {
+			return
+		}
+		// Capture token usage metadata from API response.
+		// InputTokens: use latest value (last round includes full history context).
+		// OutputTokens: accumulate across rounds (each round generates new output).
+		e.tokenMu.Lock()
+		if resp.InputTokens > 0 {
+			e.lastInputTokens = resp.InputTokens
+		}
+		if resp.OutputTokens > 0 {
+			e.lastOutputTokens += resp.OutputTokens
+		}
+		e.lastCacheCreationTokens = resp.CacheCreationInputTokens
+		e.lastCacheReadTokens = resp.CacheReadInputTokens
+		e.tokenMu.Unlock()
+
+		// Track prompt cache usage for cache break detection.
+		if e.cacheTracker != nil && (resp.CacheCreationInputTokens > 0 || resp.CacheReadInputTokens > 0) {
+			e.cacheTracker.RecordUsage(resp.CacheCreationInputTokens, resp.CacheReadInputTokens)
+		}
+	}
 
 	i := 0
 	for ; i < maxIterations; i++ {
@@ -1345,30 +1378,40 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// No more function calls, we have the final response
 		finalText = resp.Text
 
-		// Warn user when response was truncated by token limit
+		recordResponseAccounting(resp)
+
+		// If the model hit max_tokens while emitting text, ask it to continue
+		// instead of surfacing a fake "done" turn. This is common when a model
+		// starts a plan/explanation and gets cut before it can call the next tool.
 		if resp.FinishReason == genai.FinishReasonMaxTokens {
+			carriedText += resp.Text
+			finalText = carriedText
+			if resp.Text != "" && truncationContinuations < maxTruncationContinuations {
+				truncationContinuations++
+				logging.Warn("response truncated by max_tokens limit, requesting continuation",
+					"output_tokens", resp.OutputTokens,
+					"continuation", truncationContinuations,
+					"max_continuations", maxTruncationContinuations)
+				if e.handler != nil && e.handler.OnWarning != nil {
+					e.handler.OnWarning(fmt.Sprintf(
+						"Response hit max_tokens; continuing automatically (%d/%d)...",
+						truncationContinuations,
+						maxTruncationContinuations,
+					))
+				}
+				history = append(history, genai.NewContentFromText(
+					"Continue exactly where the previous assistant message stopped. Do not repeat already-written text. If the next needed action is a tool call, call the tool now; otherwise finish the answer.",
+					genai.RoleUser,
+				))
+				continue
+			}
+
 			finalText += "\n\n⚠ Response truncated (max_tokens limit reached). Use /config to increase max_output_tokens."
 			logging.Warn("response truncated by max_tokens limit",
-				"output_tokens", resp.OutputTokens)
-		}
-
-		// Capture token usage metadata from API response.
-		// InputTokens: use latest value (last round includes full history context).
-		// OutputTokens: accumulate across rounds (each round generates new output).
-		e.tokenMu.Lock()
-		if resp.InputTokens > 0 {
-			e.lastInputTokens = resp.InputTokens
-		}
-		if resp.OutputTokens > 0 {
-			e.lastOutputTokens += resp.OutputTokens
-		}
-		e.lastCacheCreationTokens = resp.CacheCreationInputTokens
-		e.lastCacheReadTokens = resp.CacheReadInputTokens
-		e.tokenMu.Unlock()
-
-		// Track prompt cache usage for cache break detection
-		if e.cacheTracker != nil && (resp.CacheCreationInputTokens > 0 || resp.CacheReadInputTokens > 0) {
-			e.cacheTracker.RecordUsage(resp.CacheCreationInputTokens, resp.CacheReadInputTokens)
+				"output_tokens", resp.OutputTokens,
+				"continuations", truncationContinuations)
+		} else if carriedText != "" {
+			finalText = carriedText + resp.Text
 		}
 
 		// Detect empty response — model returned no text and no function calls.
