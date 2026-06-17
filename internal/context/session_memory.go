@@ -93,6 +93,24 @@ func (s *SessionMemoryManager) SetSummarizer(sum SessionSummarizer) {
 	s.summarizer = sum
 }
 
+// SetConfig updates the manager's runtime configuration live (enable/disable +
+// thresholds), so a /settings or /set toggle takes effect this session without a
+// restart. Zero thresholds on an enabled config are repaired from
+// DefaultSessionMemoryConfig — a freshly-enabled manager is never left broken
+// with a 0 init threshold (which would extract on the very first token). Safe to
+// call from any goroutine: s.config is guarded by s.mu like every other field.
+func (s *SessionMemoryManager) SetConfig(config SessionMemoryConfig) {
+	if config.Enabled && config.MinTokensToInit == 0 {
+		d := DefaultSessionMemoryConfig()
+		config.MinTokensToInit = d.MinTokensToInit
+		config.MinTokensBetweenUpdates = d.MinTokensBetweenUpdates
+		config.ToolCallsBetweenUpdates = d.ToolCallsBetweenUpdates
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.config = config
+}
+
 // NewSessionMemoryManager creates a new session memory manager.
 func NewSessionMemoryManager(workDir string, config SessionMemoryConfig) *SessionMemoryManager {
 	return &SessionMemoryManager{

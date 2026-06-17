@@ -537,8 +537,15 @@ func (b *Builder) initSession() error {
 		MinTokensBetweenUpdates: b.cfg.SessionMemory.MinTokensBetweenUpdates,
 		ToolCallsBetweenUpdates: b.cfg.SessionMemory.ToolCallsBetweenUpdates,
 	}
-	if smConfig.MinTokensToInit == 0 {
-		smConfig = appcontext.DefaultSessionMemoryConfig()
+	// Fill sane thresholds when enabled-but-unconfigured (thresholds 0), WITHOUT
+	// flipping Enabled — the old `MinTokensToInit==0 → full default` overrode an
+	// explicit `enabled:false`, so a user who turned session memory off in the
+	// YAML still got it. Respect the enable flag; only repair zero thresholds.
+	if smConfig.Enabled && smConfig.MinTokensToInit == 0 {
+		d := appcontext.DefaultSessionMemoryConfig()
+		smConfig.MinTokensToInit = d.MinTokensToInit
+		smConfig.MinTokensBetweenUpdates = d.MinTokensBetweenUpdates
+		smConfig.ToolCallsBetweenUpdates = d.ToolCallsBetweenUpdates
 	}
 	b.sessionMemory = appcontext.NewSessionMemoryManager(b.workDir, smConfig)
 	b.sessionMemory.LoadFromDisk()

@@ -68,6 +68,34 @@ func TestSessionMemory_ShouldExtract_NotEnabled(t *testing.T) {
 	}
 }
 
+// TestSessionMemory_SetConfig_LiveReconfig pins that a /settings or /set toggle
+// of session memory takes effect this session: enabling via SetConfig flips
+// ShouldExtract on, and zero thresholds on an enabled config are repaired so a
+// freshly-enabled manager isn't broken (it would extract on the first token).
+func TestSessionMemory_SetConfig_LiveReconfig(t *testing.T) {
+	cfg := DefaultSessionMemoryConfig()
+	cfg.Enabled = false
+	mgr := NewSessionMemoryManager(t.TempDir(), cfg)
+	if mgr.ShouldExtract(999999) {
+		t.Fatal("precondition: disabled manager must not extract")
+	}
+
+	// Enable live with zero thresholds (the "пороги 0" case) — must repair.
+	mgr.SetConfig(SessionMemoryConfig{Enabled: true})
+	if mgr.ShouldExtract(5000) {
+		t.Error("after enable, must still wait for the repaired MinTokensToInit (10000), not extract at 5000")
+	}
+	if !mgr.ShouldExtract(10000) {
+		t.Error("after enable, should extract once tokens reach the repaired threshold")
+	}
+
+	// Disable live — must stop extracting.
+	mgr.SetConfig(SessionMemoryConfig{Enabled: false})
+	if mgr.ShouldExtract(999999) {
+		t.Error("after live disable, must not extract")
+	}
+}
+
 func TestSessionMemory_ShouldExtract_FirstExtractionWaitsForMinTokens(t *testing.T) {
 	cfg := DefaultSessionMemoryConfig()
 	cfg.MinTokensToInit = 10000

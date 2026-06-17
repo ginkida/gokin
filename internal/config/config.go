@@ -628,6 +628,12 @@ func DefaultConfig() *Config {
 			Capacity: 100,             // 100 entries
 			TTL:      5 * time.Minute, // 5 minute TTL
 		},
+		SessionMemory: SessionMemoryConfig{
+			Enabled:                 true,  // Auto-summarize the session into memory by default
+			MinTokensToInit:         10000, // First extraction after ~10K tokens
+			MinTokensBetweenUpdates: 5000,  // Re-extract every ~5K new tokens
+			ToolCallsBetweenUpdates: 3,     // …or every 3 tool calls
+		},
 		Watcher: WatcherConfig{
 			Enabled:    false, // Disabled by default (can be enabled if needed)
 			DebounceMs: 500,   // 500ms debounce

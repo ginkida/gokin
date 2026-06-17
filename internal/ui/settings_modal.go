@@ -15,6 +15,9 @@ type SettingItem struct {
 	Key  string
 	Desc string
 	On   bool
+	// Live false means the flip persists but applies on next launch; the modal
+	// shows a "restart to apply" hint so it is never a silent no-op.
+	Live bool
 }
 
 // OpenSettingsMsg opens the interactive settings screen with the given toggles
@@ -114,11 +117,15 @@ func (m Model) renderSettings() string {
 		if item.On {
 			box = "[✓]"
 		}
-		label := fmt.Sprintf("%s %-12s %s", box, item.Key, onOffLabel(item.On))
+		label := fmt.Sprintf("%s %-14s %s", box, item.Key, onOffLabel(item.On))
 		fmt.Fprintf(&b, "%s%s\n", prefix, style.Render(label))
 
+		desc := item.Desc
+		if !item.Live {
+			desc += "  · restart to apply"
+		}
 		descStyle := m.styles.ModalMuted.Width(paletteWidth - 8)
-		fmt.Fprintf(&b, "      %s\n", descStyle.Render(item.Desc))
+		fmt.Fprintf(&b, "      %s\n", descStyle.Render(desc))
 	}
 
 	b.WriteString("\n")

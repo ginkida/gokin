@@ -35,36 +35,45 @@ func (c *SetCommand) GetMetadata() CommandMetadata {
 type settingToggle struct {
 	key  string
 	desc string
+	// live is true when ApplyConfig propagates the change in-process this
+	// session. A false toggle is still HONEST — it persists to the config and
+	// takes effect on the next launch — but it is boot-wired, so the UI and /set
+	// label it "restart to apply" instead of pretending it took hold now. This
+	// is the no-silent-no-op rule made explicit rather than excluding the toggle.
+	live bool
 	get  func(*config.Config) bool
 	set  func(*config.Config, bool)
 }
 
 var settableToggles = []settingToggle{
-	{"permissions", "Ask before risky tool actions",
+	{"permissions", "Ask before risky tool actions", true,
 		func(c *config.Config) bool { return c.Permission.Enabled },
 		func(c *config.Config, v bool) { c.Permission.Enabled = v }},
-	{"sandbox", "Run bash commands in a sandbox",
+	{"sandbox", "Run bash commands in a sandbox", true,
 		func(c *config.Config) bool { return c.Tools.Bash.Sandbox },
 		func(c *config.Config, v bool) { c.Tools.Bash.Sandbox = v }},
-	{"diff", "Show a diff approval card before edits",
+	{"diff", "Show a diff approval card before edits", true,
 		func(c *config.Config) bool { return c.DiffPreview.Enabled },
 		func(c *config.Config, v bool) { c.DiffPreview.Enabled = v }},
-	{"tokens", "Show token usage in the status bar",
+	{"tokens", "Show token usage in the status bar", true,
 		func(c *config.Config) bool { return c.UI.ShowTokenUsage },
 		func(c *config.Config, v bool) { c.UI.ShowTokenUsage = v }},
-	{"autocompact", "Auto-summarize history near the context limit",
+	{"autocompact", "Auto-summarize history near the context limit", true,
 		func(c *config.Config) bool { return c.Context.EnableAutoSummary },
 		func(c *config.Config, v bool) { c.Context.EnableAutoSummary = v }},
-	{"memory", "Enable the memory tool and recall",
+	{"memory", "Enable the memory tool and recall", true,
 		func(c *config.Config) bool { return c.Memory.Enabled },
 		func(c *config.Config, v bool) { c.Memory.Enabled = v }},
-	{"plan", "Enable plan-mode tools",
+	{"sessionmemory", "Auto-summarize the session into memory", true,
+		func(c *config.Config) bool { return c.SessionMemory.Enabled },
+		func(c *config.Config, v bool) { c.SessionMemory.Enabled = v }},
+	{"plan", "Enable plan-mode tools", true,
 		func(c *config.Config) bool { return c.Plan.Enabled },
 		func(c *config.Config, v bool) { c.Plan.Enabled = v }},
-	{"donegate", "Verify build/test before finishing a task",
+	{"donegate", "Verify build/test before finishing a task", true,
 		func(c *config.Config) bool { return c.DoneGate.Enabled },
 		func(c *config.Config, v bool) { c.DoneGate.Enabled = v }},
-	{"thinking", "Extended reasoning before answering (more tokens)",
+	{"thinking", "Extended reasoning before answering (more tokens)", true,
 		func(c *config.Config) bool { return c.Model.EnableThinking },
 		func(c *config.Config, v bool) {
 			// Mirror /thinking's budget bookkeeping so a toggle here behaves
@@ -77,6 +86,19 @@ var settableToggles = []settingToggle{
 				c.Model.ThinkingBudget = thinkingDefaultBudget
 			}
 		}},
+	// Boot-wired settings — honest live=false. They persist immediately and take
+	// effect next launch; the subsystem is created at startup (sessionManager /
+	// fileWatcher are nil when off, the grep search-cache is wired into the tools
+	// at boot), so flipping them mid-session can't safely spin them up.
+	{"session", "Save & resume conversations across restarts", false,
+		func(c *config.Config) bool { return c.Session.Enabled },
+		func(c *config.Config, v bool) { c.Session.Enabled = v }},
+	{"searchcache", "Cache grep/glob search results", false,
+		func(c *config.Config) bool { return c.Cache.Enabled },
+		func(c *config.Config, v bool) { c.Cache.Enabled = v }},
+	{"watcher", "Detect external file changes", false,
+		func(c *config.Config) bool { return c.Watcher.Enabled },
+		func(c *config.Config, v bool) { c.Watcher.Enabled = v }},
 }
 
 // ToggleState is a settable toggle's current value. Shared by /set and the
@@ -87,6 +109,10 @@ type ToggleState struct {
 	Key  string
 	Desc string
 	On   bool
+	// Live mirrors settingToggle.live: false means the flip persists but applies
+	// on next launch (the modal/`/set` show a "restart" hint so it's never a
+	// silent no-op).
+	Live bool
 }
 
 // SettableToggleStates returns every curated toggle with its current value,
@@ -94,7 +120,7 @@ type ToggleState struct {
 func SettableToggleStates(cfg *config.Config) []ToggleState {
 	states := make([]ToggleState, 0, len(settableToggles))
 	for _, t := range settableToggles {
-		states = append(states, ToggleState{Key: t.key, Desc: t.desc, On: t.get(cfg)})
+		states = append(states, ToggleState{Key: t.key, Desc: t.desc, On: t.get(cfg), Live: t.live})
 	}
 	return states
 }
@@ -192,15 +218,23 @@ func (c *SetCommand) Execute(ctx context.Context, args []string, app AppInterfac
 	if err := app.ApplyConfig(cfg); err != nil {
 		return fmt.Sprintf("Failed to apply: %v", err), nil
 	}
+	if !t.live {
+		return fmt.Sprintf("%s: %s — saved; restart gokin to apply", t.key, onOff(val)), nil
+	}
 	return fmt.Sprintf("%s: %s", t.key, onOff(val)), nil
 }
 
 func (c *SetCommand) list(cfg *config.Config) string {
 	var sb strings.Builder
-	sb.WriteString("Settings (use /set <key> on|off to change — applies live):\n\n")
+	sb.WriteString("Settings (use /set <key> on|off to change):\n\n")
 	for _, t := range settableToggles {
-		fmt.Fprintf(&sb, "  %-12s %-3s  %s\n", t.key, onOff(t.get(cfg)), t.desc)
+		note := ""
+		if !t.live {
+			note = "  · restart to apply"
+		}
+		fmt.Fprintf(&sb, "  %-14s %-3s  %s%s\n", t.key, onOff(t.get(cfg)), t.desc, note)
 	}
+	sb.WriteString("\nLive changes apply immediately; \"restart to apply\" ones persist and take effect next launch.")
 	sb.WriteString("\nModel/provider: /model, /provider, /login · Thinking: /thinking")
 	return sb.String()
 }

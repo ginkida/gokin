@@ -95,6 +95,57 @@ func TestSharedToggleTable(t *testing.T) {
 	}
 }
 
+// TestSettableToggles_NewInAppSettings pins that the settings that used to need
+// YAML editing are now in-app toggles, and that the live-vs-restart labeling is
+// honest: a boot-wired toggle (live=false) must say "restart to apply", a
+// live one must not.
+func TestSettableToggles_NewInAppSettings(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	// Every new key is now a known, configurable toggle.
+	for _, key := range []string{"session", "searchcache", "sessionmemory", "watcher"} {
+		if _, ok := findToggle(key); !ok {
+			t.Errorf("%q should be a settable toggle (configurable in-app, not just YAML)", key)
+		}
+	}
+
+	// Live flags reflect what ApplyConfig actually propagates this session:
+	// sessionmemory is wired live; session/searchcache/watcher are boot-wired.
+	wantLive := map[string]bool{
+		"sessionmemory": true,
+		"thinking":      true,
+		"permissions":   true,
+		"session":       false,
+		"searchcache":   false,
+		"watcher":       false,
+	}
+	live := map[string]bool{}
+	for _, s := range SettableToggleStates(cfg) {
+		live[s.Key] = s.Live
+	}
+	for key, want := range wantLive {
+		if live[key] != want {
+			t.Errorf("toggle %q Live=%v, want %v", key, live[key], want)
+		}
+	}
+
+	// /set of a restart-required toggle persists AND tells the user to restart.
+	app := &fakeSetApp{cfg: cfg}
+	out, _ := (&SetCommand{}).Execute(context.Background(), []string{"watcher", "on"}, app)
+	if !app.cfg.Watcher.Enabled {
+		t.Error("watcher should be enabled in config after /set watcher on")
+	}
+	if !strings.Contains(out, "restart") {
+		t.Errorf("restart-required toggle confirmation = %q, want a restart hint", out)
+	}
+
+	// A live toggle must NOT claim a restart is needed.
+	out, _ = (&SetCommand{}).Execute(context.Background(), []string{"sessionmemory", "on"}, app)
+	if strings.Contains(out, "restart") {
+		t.Errorf("live toggle confirmation = %q, must not mention restart", out)
+	}
+}
+
 func TestSetCommand_ListAndErrors(t *testing.T) {
 	app := &fakeSetApp{cfg: config.DefaultConfig()}
 	cmd := &SetCommand{}

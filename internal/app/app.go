@@ -2576,6 +2576,19 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.taskRouter.SetClient(newClient)
 	}
 
+	// 6b. Update session-memory config live. The manager is always instantiated
+	// (its Enabled flag lives inside its config, guarded by its own mutex), so a
+	// /settings or /set toggle of `sessionmemory` takes effect THIS session — no
+	// restart — which is what lets that toggle honestly advertise live=true.
+	if a.sessionMemory != nil {
+		a.sessionMemory.SetConfig(appcontext.SessionMemoryConfig{
+			Enabled:                 a.config.SessionMemory.Enabled,
+			MinTokensToInit:         a.config.SessionMemory.MinTokensToInit,
+			MinTokensBetweenUpdates: a.config.SessionMemory.MinTokensBetweenUpdates,
+			ToolCallsBetweenUpdates: a.config.SessionMemory.ToolCallsBetweenUpdates,
+		})
+	}
+
 	// 7. Update rate limiter
 	if a.config.RateLimit.Enabled {
 		if a.rateLimiter == nil {
@@ -2681,7 +2694,7 @@ func (a *App) buildSettingItems() []ui.SettingItem {
 	states := commands.SettableToggleStates(cfg)
 	items := make([]ui.SettingItem, 0, len(states))
 	for _, s := range states {
-		items = append(items, ui.SettingItem{Key: s.Key, Desc: s.Desc, On: s.On})
+		items = append(items, ui.SettingItem{Key: s.Key, Desc: s.Desc, On: s.On, Live: s.Live})
 	}
 	return items
 }
