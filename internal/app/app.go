@@ -970,6 +970,15 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		} else if result == commands.SettingsMarker {
 			// /settings: open the interactive modal with a fresh toggle snapshot.
 			a.safeSendToProgram(ui.OpenSettingsMsg{Items: a.buildSettingItems()})
+		} else if provider, ok := strings.CutPrefix(result, commands.LoginKeyMarker); ok {
+			// /login <provider> with no key: open the masked key-entry modal so
+			// the key is captured securely instead of being typed as a message.
+			msg := ui.OpenKeyEntryMsg{Provider: provider}
+			if p := config.GetProvider(provider); p != nil {
+				msg.DisplayName = p.DisplayName
+				msg.SetupURL = p.SetupKeyURL
+			}
+			a.safeSendToProgram(msg)
 		} else if prompt, ok := strings.CutPrefix(result, commands.PromptMarker); ok {
 			// File-based command: the expansion is a MODEL PROMPT, not
 			// display text. Re-enter through handleSubmit (it decides
@@ -2642,6 +2651,28 @@ func (a *App) handleSettingToggle(key string, on bool) {
 	a.safeGo("settings-toggle-apply", func() {
 		if err := a.ApplyConfig(cfg); err != nil {
 			logging.Warn("failed to apply setting toggle", "key", key, "error", err)
+		}
+	})
+}
+
+// handleKeyEntrySubmit applies a key entered in the masked /login modal by
+// re-invoking the login command with the captured key. The key never reaches
+// the model or plaintext scrollback — the command's result masks it. Runs on a
+// worker so the UI goroutine that triggered it isn't blocked by ApplyConfig.
+func (a *App) handleKeyEntrySubmit(provider, key string) {
+	a.safeGo("login-key-entry-apply", func() {
+		ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
+		defer cancel()
+		result, err := a.commandHandler.Execute(ctx, "login", []string{provider, key}, a)
+		if err != nil {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRecoverableError,
+				Message: fmt.Sprintf("Login failed: %v", err),
+			})
+			return
+		}
+		if strings.TrimSpace(result) != "" {
+			a.safeSendToProgram(ui.StreamTextMsg(result + "\n"))
 		}
 	})
 }

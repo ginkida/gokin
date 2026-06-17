@@ -9,6 +9,12 @@ import (
 )
 
 // LoginCommand sets the API key.
+// LoginKeyMarker is returned by /login when a provider is named but no key is
+// given — it tells the app to open the masked key-entry modal (same
+// result-prefix mechanism as PromptMarker / SettingsMarker). The provider name
+// follows the prefix.
+const LoginKeyMarker = "__loginkey:"
+
 type LoginCommand struct{}
 
 func (c *LoginCommand) Name() string        { return "login" }
@@ -66,22 +72,13 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return fmt.Sprintf("%s does not require an API key.\n\nUse: /provider %s to switch.", p.DisplayName, p.Name), nil
 	}
 
-	// Check for API key — users who typed just `/login <provider>` expect
-	// clear, actionable instructions, not a one-liner.
+	// No key on the line — open the masked key-entry modal (the app turns this
+	// marker into OpenKeyEntryMsg). The modal captures the key WITHOUT ever
+	// sending it to the model (the old behavior: a key pasted on the next line
+	// went through as a chat message). On submit the app re-invokes
+	// `/login <provider> <key>`, so all the validation/apply below is reused.
 	if len(args) < 2 {
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "To set your %s API key:\n\n", p.DisplayName)
-		if p.SetupKeyURL != "" {
-			fmt.Fprintf(&sb, "  1. Open %s and copy your key\n", p.SetupKeyURL)
-			fmt.Fprintf(&sb, "  2. Run:  /login %s <your-key>\n\n", p.Name)
-		} else {
-			fmt.Fprintf(&sb, "  Run:  /login %s <your-key>\n\n", p.Name)
-		}
-		fmt.Fprintf(&sb, "Keys are saved to %s.", config.GetConfigPath())
-		if p.HasOAuth {
-			fmt.Fprintf(&sb, "\n\nAlternatively, use /oauth-login %s to sign in via OAuth.", p.Name)
-		}
-		return sb.String(), nil
+		return LoginKeyMarker + provider, nil
 	}
 
 	// Multi-word keys are always paste errors — real API keys never contain

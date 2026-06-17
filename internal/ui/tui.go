@@ -12,6 +12,7 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -117,6 +118,13 @@ type Model struct {
 	settingsItems   []SettingItem
 	settingsCursor  int
 	onSettingToggle func(key string, on bool)
+
+	// Masked API-key entry modal (/login <provider> with no key)
+	keyEntryInput       textinput.Model
+	keyEntryProvider    string
+	keyEntryDisplayName string
+	keyEntrySetupURL    string
+	onKeyEntrySubmit    func(provider, key string)
 
 	// Diff preview state
 	diffPreview         DiffPreviewModel
@@ -545,6 +553,11 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 	// Handle settings modal keys
 	if m.state == StateSettings {
 		return m.handleSettingsKeys(msg)
+	}
+
+	// Handle masked API-key entry keys
+	if m.state == StateAPIKeyEntry {
+		return m.handleKeyEntryKeys(msg)
 	}
 
 	// Handle shortcuts overlay keys
@@ -2091,6 +2104,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	case OpenSettingsMsg:
 		m.openSettings(msg.Items)
 
+	// Open the masked API-key entry modal (/login <provider> with no key)
+	case OpenKeyEntryMsg:
+		cmds = append(cmds, m.openKeyEntry(msg))
+
 	// Planning mode toggle result (async)
 	case PlanningModeToggledMsg:
 		m.planningModeEnabled = msg.Enabled
@@ -3033,6 +3050,12 @@ func (m Model) View() string {
 		builder.WriteString("\n")
 	}
 
+	// Masked API-key entry modal
+	if m.state == StateAPIKeyEntry {
+		builder.WriteString(m.renderKeyEntry())
+		builder.WriteString("\n")
+	}
+
 	// Shortcuts overlay
 	if m.state == StateShortcutsOverlay {
 		builder.WriteString(m.renderShortcutsOverlay())
@@ -3545,6 +3568,8 @@ func (m *Model) DebugState() UIDebugState {
 		stateName = "model_selector"
 	case StateSettings:
 		stateName = "settings"
+	case StateAPIKeyEntry:
+		stateName = "api_key_entry"
 	case StateShortcutsOverlay:
 		stateName = "shortcuts_overlay"
 	case StateCommandPalette:

@@ -26,6 +26,7 @@ const (
 	StateContextObservatory
 	StateFilePeek
 	StateSettings
+	StateAPIKeyEntry
 )
 
 // typeAheadActive reports whether the main input should receive keystrokes
@@ -45,7 +46,8 @@ func (m *Model) isModalState() bool {
 	case StatePermissionPrompt, StateQuestionPrompt, StatePlanApproval,
 		StateModelSelector, StateShortcutsOverlay, StateCommandPalette,
 		StateDiffPreview, StateMultiDiffPreview, StateSearchResults, StateGitStatus,
-		StateFileBrowser, StateBatchProgress, StateContextObservatory, StateSettings:
+		StateFileBrowser, StateBatchProgress, StateContextObservatory, StateSettings,
+		StateAPIKeyEntry:
 		return true
 	}
 	return false

@@ -86,14 +86,11 @@ func TestLogin_ProviderWithoutKey_ShowsUsage(t *testing.T) {
 
 	select {
 	case out := <-done:
-		if !strings.Contains(strings.ToLower(out), "kimi") {
-			t.Errorf("output should mention kimi: %q", out)
-		}
-		if !strings.Contains(out, "/login kimi") {
-			t.Errorf("output should echo the usage format: %q", out)
-		}
-		if !strings.Contains(out, "kimi.com") {
-			t.Errorf("output should include the setup URL: %q", out)
+		// No key on the line now opens the masked key-entry modal (the app
+		// turns this marker into OpenKeyEntryMsg) instead of printing
+		// instructions — so a key pasted next never goes to the model.
+		if out != LoginKeyMarker+"kimi" {
+			t.Errorf("no-key /login should return the key-entry marker, got %q", out)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("/login kimi (no key) hung (>2s) — the regression the user hit")
@@ -325,12 +322,17 @@ func TestLogin_SuccessMessage_IncludesMaskedKey(t *testing.T) {
 	}
 }
 
-func TestLogin_NoKeyUsage_MentionsConfigPath(t *testing.T) {
+func TestLogin_NoKeyMarker_CarriesProvider(t *testing.T) {
 	app := newAuthApp(&config.Config{})
 	cmd := &LoginCommand{}
-	out, _ := cmd.Execute(context.Background(), []string{"kimi"}, app)
-	if !strings.Contains(out, "config.yaml") {
-		t.Errorf("usage should mention config file path: %q", out)
+	for _, provider := range []string{"kimi", "deepseek", "glm"} {
+		out, _ := cmd.Execute(context.Background(), []string{provider}, app)
+		if out != LoginKeyMarker+provider {
+			t.Errorf("/login %s (no key) = %q, want marker carrying %q", provider, out, provider)
+		}
+	}
+	if app.applyCalls != 0 {
+		t.Errorf("no-key /login must not apply config: %d calls", app.applyCalls)
 	}
 }
 

@@ -1772,6 +1772,7 @@ func (b *Builder) wireDependencies() error {
 	b.tuiModel.SetPlanApprovalCallback(app.handlePlanApproval)
 	b.tuiModel.SetModelSelectCallback(app.handleModelSelect)
 	b.tuiModel.SetSettingToggleCallback(app.handleSettingToggle)
+	b.tuiModel.SetKeyEntrySubmitCallback(app.handleKeyEntrySubmit)
 	b.tuiModel.SetDiffDecisionCallback(app.handleDiffDecision)
 	b.tuiModel.SetMultiDiffDecisionCallback(app.handleMultiDiffDecision)
 
