@@ -111,6 +111,18 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 
 	switch policy {
 	case LevelAllow:
+		// Action-semantics floor: even when bash is configured to allow, an
+		// irreversible / outward-facing / privilege-escalating command
+		// (force-push, git reset --hard, sudo, curl|sh, recursive delete) must
+		// be consciously confirmed. The name-based policy can't see this — it
+		// only knows "bash". A previously session-approved identical command
+		// already short-circuited via the cache above, so this never re-prompts
+		// a command the user just OK'd.
+		if toolName == "bash" {
+			if danger, _ := ClassifyBashArgs(args); danger == BashDangerElevated {
+				return m.askUser(ctx, toolName, args)
+			}
+		}
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 
 	case LevelDeny:

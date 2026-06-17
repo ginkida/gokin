@@ -178,10 +178,17 @@ func buildReason(toolName string, args map[string]any) string {
 
 	case "bash":
 		if cmd, ok := args["command"].(string); ok {
+			display := cmd
 			if runes := []rune(cmd); len(runes) > 150 {
-				cmd = string(runes[:147]) + "..."
+				display = string(runes[:147]) + "..."
 			}
-			return fmt.Sprintf("Execute command: %s", cmd)
+			// Surface ACTION-semantics danger (force-push, reset --hard, sudo,
+			// curl|sh, recursive delete) in the prompt so the user confirms with
+			// the irreversibility in front of them, not a bare command line.
+			if danger, reason := ClassifyBashCommand(cmd); danger == BashDangerElevated {
+				return fmt.Sprintf("⚠ %s\nExecute command: %s", reason, display)
+			}
+			return fmt.Sprintf("Execute command: %s", display)
 		}
 		return "Execute shell command"
 
