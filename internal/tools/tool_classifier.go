@@ -64,6 +64,16 @@ var defaultClassifier = &toolDependencyClassifier{
 	},
 }
 
+// IsWriteTool reports whether a tool modifies state and must run SEQUENTIALLY
+// (never in parallel with reads or other writes). This is the SINGLE source of
+// truth for write-vs-read classification: the sub-agent classifier
+// (internal/agent) delegates here so the two can't drift. They DID drift —
+// run_tests/batch/refactor/atomicwrite were missing from the agent copy, which
+// let sub-agents parallelize a refactor/batch against concurrent reads.
+func IsWriteTool(name string) bool {
+	return defaultClassifier.writeTools[name]
+}
+
 // classifyDependencies groups tool calls by read/write dependency.
 // Consecutive read-only tools get Parallel=true; write tools get their own group.
 func (c *toolDependencyClassifier) classifyDependencies(calls []*genai.FunctionCall) []toolGroup {

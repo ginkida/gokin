@@ -1,34 +1,26 @@
 package agent
 
-import "google.golang.org/genai"
+import (
+	"google.golang.org/genai"
+
+	"gokin/internal/tools"
+)
 
 // ToolDependencyClassifier determines which tools can run in parallel.
-type ToolDependencyClassifier struct {
-	// writeTools are tools that modify state and must run sequentially
-	writeTools map[string]bool
-}
+type ToolDependencyClassifier struct{}
 
-// NewToolDependencyClassifier creates a new classifier with default write tool list.
+// NewToolDependencyClassifier creates a new classifier.
 func NewToolDependencyClassifier() *ToolDependencyClassifier {
-	return &ToolDependencyClassifier{
-		writeTools: map[string]bool{
-			"write":      true,
-			"edit":       true,
-			"bash":       true,
-			"delete":     true,
-			"move":       true,
-			"copy":       true,
-			"mkdir":      true,
-			"git_commit": true,
-			"git_add":    true,
-			"ssh":        true,
-		},
-	}
+	return &ToolDependencyClassifier{}
 }
 
-// IsWriteTool returns true if the tool modifies state.
+// IsWriteTool returns true if the tool modifies state. Delegates to the SINGLE
+// shared write-tool set in internal/tools so the foreground (executor) and
+// sub-agent classifiers can never drift — they previously did, dropping
+// run_tests/batch/refactor/atomicwrite here and letting sub-agents run a
+// refactor/batch in parallel with reads.
 func (c *ToolDependencyClassifier) IsWriteTool(name string) bool {
-	return c.writeTools[name]
+	return tools.IsWriteTool(name)
 }
 
 // ToolGroup represents a group of tool calls that can be executed together.
