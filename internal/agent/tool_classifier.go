@@ -23,57 +23,13 @@ func (c *ToolDependencyClassifier) IsWriteTool(name string) bool {
 	return tools.IsWriteTool(name)
 }
 
-// ToolGroup represents a group of tool calls that can be executed together.
-type ToolGroup struct {
-	Calls    []*genai.FunctionCall
-	Parallel bool // If true, calls in this group can run in parallel
-}
-
-// ClassifyDependencies groups tool calls by dependency.
-// Returns groups that should be executed sequentially, where each group's
-// internal calls can be executed in parallel (if Parallel is true).
-func (c *ToolDependencyClassifier) ClassifyDependencies(calls []*genai.FunctionCall) []ToolGroup {
-	if len(calls) == 0 {
-		return nil
-	}
-
-	if len(calls) == 1 {
-		return []ToolGroup{{Calls: calls, Parallel: false}}
-	}
-
-	var groups []ToolGroup
-	var currentReadGroup []*genai.FunctionCall
-
-	for _, call := range calls {
-		if c.IsWriteTool(call.Name) {
-			// Flush any pending read-only tools as a parallel group
-			if len(currentReadGroup) > 0 {
-				groups = append(groups, ToolGroup{
-					Calls:    currentReadGroup,
-					Parallel: true,
-				})
-				currentReadGroup = nil
-			}
-			// Add write tool as its own sequential group
-			groups = append(groups, ToolGroup{
-				Calls:    []*genai.FunctionCall{call},
-				Parallel: false,
-			})
-		} else {
-			// Accumulate read-only tools
-			currentReadGroup = append(currentReadGroup, call)
-		}
-	}
-
-	// Flush remaining read-only group
-	if len(currentReadGroup) > 0 {
-		groups = append(groups, ToolGroup{
-			Calls:    currentReadGroup,
-			Parallel: len(currentReadGroup) > 1,
-		})
-	}
-
-	return groups
+// ClassifyDependencies delegates to the shared tools.ClassifyToolDependencies so
+// the sub-agent and the foreground executor share ONE grouping algorithm — a
+// write never lands in a parallel group with reads, and the two loops can't
+// drift (they did once, on the write-set). Returns groups to run sequentially,
+// each group's calls runnable in parallel when Parallel is true.
+func (c *ToolDependencyClassifier) ClassifyDependencies(calls []*genai.FunctionCall) []tools.ToolGroup {
+	return tools.ClassifyToolDependencies(calls)
 }
 
 // OptimizeForParallelism reorders calls to maximize parallel execution.

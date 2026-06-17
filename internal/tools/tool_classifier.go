@@ -39,10 +39,52 @@ type toolDependencyClassifier struct {
 	writeTools map[string]bool
 }
 
-// toolGroup represents a group of tool calls that can be executed together.
-type toolGroup struct {
+// ToolGroup is a batch of tool calls to execute together: when Parallel is true
+// the calls have no inter-dependencies and may run concurrently; otherwise they
+// run sequentially. Shared by BOTH agentic loops' classifiers (the foreground
+// executor and the sub-agent), so the read/write grouping algorithm — which is
+// correctness-critical (a write must never run in parallel with reads) — lives
+// in exactly one place. The write-SET (IsWriteTool) was already unified after it
+// drifted (v0.100.6); the grouping ALGORITHM is the same drift surface, now also
+// single-sourced (Tier-4).
+type ToolGroup struct {
 	Calls    []*genai.FunctionCall
 	Parallel bool
+}
+
+// ClassifyToolDependencies groups tool calls by read/write dependency. A run of
+// consecutive read-only tools becomes one group (Parallel when it holds more
+// than one call — the mid-run flush before a write marks a single read Parallel
+// too, matching the long-standing contract); every write tool (IsWriteTool) gets
+// its own sequential group, flushing any pending read group first so a write
+// never executes alongside reads. Empty or single input returns one
+// non-parallel group (callers only pass non-empty batches; this preserves the
+// executor's tested empty-input behavior).
+func ClassifyToolDependencies(calls []*genai.FunctionCall) []ToolGroup {
+	if len(calls) <= 1 {
+		return []ToolGroup{{Calls: calls, Parallel: false}}
+	}
+
+	var groups []ToolGroup
+	var readGroup []*genai.FunctionCall
+
+	for _, call := range calls {
+		if IsWriteTool(call.Name) {
+			if len(readGroup) > 0 {
+				groups = append(groups, ToolGroup{Calls: readGroup, Parallel: true})
+				readGroup = nil
+			}
+			groups = append(groups, ToolGroup{Calls: []*genai.FunctionCall{call}, Parallel: false})
+		} else {
+			readGroup = append(readGroup, call)
+		}
+	}
+
+	if len(readGroup) > 0 {
+		groups = append(groups, ToolGroup{Calls: readGroup, Parallel: len(readGroup) > 1})
+	}
+
+	return groups
 }
 
 var defaultClassifier = &toolDependencyClassifier{
@@ -74,31 +116,9 @@ func IsWriteTool(name string) bool {
 	return defaultClassifier.writeTools[name]
 }
 
-// classifyDependencies groups tool calls by read/write dependency.
-// Consecutive read-only tools get Parallel=true; write tools get their own group.
-func (c *toolDependencyClassifier) classifyDependencies(calls []*genai.FunctionCall) []toolGroup {
-	if len(calls) <= 1 {
-		return []toolGroup{{Calls: calls, Parallel: false}}
-	}
-
-	var groups []toolGroup
-	var readGroup []*genai.FunctionCall
-
-	for _, call := range calls {
-		if c.writeTools[call.Name] {
-			if len(readGroup) > 0 {
-				groups = append(groups, toolGroup{Calls: readGroup, Parallel: true})
-				readGroup = nil
-			}
-			groups = append(groups, toolGroup{Calls: []*genai.FunctionCall{call}, Parallel: false})
-		} else {
-			readGroup = append(readGroup, call)
-		}
-	}
-
-	if len(readGroup) > 0 {
-		groups = append(groups, toolGroup{Calls: readGroup, Parallel: len(readGroup) > 1})
-	}
-
-	return groups
+// classifyDependencies delegates to the shared ClassifyToolDependencies so the
+// executor and the sub-agent classifier share one grouping algorithm. Kept as a
+// method so defaultClassifier-based call sites (and tests) read unchanged.
+func (c *toolDependencyClassifier) classifyDependencies(calls []*genai.FunctionCall) []ToolGroup {
+	return ClassifyToolDependencies(calls)
 }

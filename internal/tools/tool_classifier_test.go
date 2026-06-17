@@ -13,7 +13,7 @@ func fc(name string) *genai.FunctionCall {
 }
 
 // names extracts the tool names from a group for readable assertion messages.
-func names(g toolGroup) []string {
+func names(g ToolGroup) []string {
 	out := make([]string, len(g.Calls))
 	for i, c := range g.Calls {
 		out[i] = c.Name
@@ -21,14 +21,14 @@ func names(g toolGroup) []string {
 	return out
 }
 
-func assertGroupCount(t *testing.T, groups []toolGroup, want int) {
+func assertGroupCount(t *testing.T, groups []ToolGroup, want int) {
 	t.Helper()
 	if len(groups) != want {
 		t.Fatalf("group count = %d, want %d", len(groups), want)
 	}
 }
 
-func assertGroup(t *testing.T, g toolGroup, wantNames []string, wantParallel bool) {
+func assertGroup(t *testing.T, g ToolGroup, wantNames []string, wantParallel bool) {
 	t.Helper()
 	got := names(g)
 	if len(got) != len(wantNames) {
