@@ -1201,9 +1201,12 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 						continue waitLoop
 					}
 					logging.Warn("stream idle timeout exceeded", "timeout", streamIdleTimeout, "partial", contentReceived)
-					chunks <- ResponseChunk{
+					select {
+					case chunks <- ResponseChunk{
 						Error: &ErrStreamIdleTimeout{Timeout: streamIdleTimeout, Partial: contentReceived},
 						Done:  true,
+					}:
+					case <-ctx.Done():
 					}
 					return
 
@@ -1238,7 +1241,11 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					if !result.ok {
 						if result.err != nil {
 							logging.Warn("SSE scanner error", "error", result.err)
-							chunks <- ResponseChunk{Error: result.err, Done: true}
+							select {
+							case chunks <- ResponseChunk{Error: result.err, Done: true}:
+							case <-ctx.Done():
+								return
+							}
 						}
 						break scanLoop
 					}
@@ -1272,9 +1279,12 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					if data == "[DONE]" {
 						// Send any accumulated tool calls before marking done
 						if len(accumulator.completedCalls) > 0 {
-							chunks <- ResponseChunk{
+							select {
+							case chunks <- ResponseChunk{
 								FunctionCalls: accumulator.completedCalls,
 								Done:          true,
+							}:
+							case <-ctx.Done():
 							}
 						} else {
 							select {
@@ -1316,9 +1326,12 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 						if statusCb != nil {
 							statusCb.OnError(errors.New(description), retryable)
 						}
-						chunks <- ResponseChunk{
+						select {
+						case chunks <- ResponseChunk{
 							Error: errors.New(errText),
 							Done:  true,
+						}:
+						case <-ctx.Done():
 						}
 						return
 					}
