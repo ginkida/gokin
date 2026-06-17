@@ -24,6 +24,11 @@ func (c *CommitCommand) GetMetadata() CommandMetadata {
 		RequiresGit: true,
 		HasArgs:     true,
 		ArgHint:     "-m \"msg\"",
+		// /commit runs 5+ sequential git subprocesses (status, diff, add,
+		// commit, diff-stat); on a large/locked repo that's a few seconds.
+		// Mirror /pr so the user sees a command-specific hint, not a bare spinner.
+		LongRunning:      true,
+		LongRunningLabel: "Creating git commit...",
 	}
 }
 

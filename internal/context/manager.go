@@ -468,8 +468,30 @@ func (m *ContextManager) backgroundOptimize(_ context.Context) {
 	}()
 }
 
+// compactionBudget bounds a summarization round-trip. Matches the background
+// path (manager.go) and the agent's withCompactionTimeout.
+const compactionBudget = 60 * time.Second
+
+// boundedCompactionCtx caps a summarization context at compactionBudget so a
+// slow/unreachable model endpoint can't stall a caller for minutes: SendMessage
+// is otherwise bounded only by the ~120s transport ResponseHeaderTimeout (the
+// shared HTTP client has no Client.Timeout, by design, to preserve SSE
+// streaming). Deadline-aware: a tighter parent deadline is preserved, never
+// extended (the background path already passes a 60s ctx). This closes the
+// /compact sibling of the v0.100.8 login-hang — ForceSummarize reached
+// OptimizeContext on the deadline-less command ctx.
+func boundedCompactionCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= compactionBudget {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, compactionBudget)
+}
+
 // OptimizeContext optimizes the context by summarizing old messages.
 func (m *ContextManager) OptimizeContext(ctx context.Context) error {
+	ctx, cancel := boundedCompactionCtx(ctx)
+	defer cancel()
+
 	startTime := time.Now()
 
 	// Snapshot strategy under read-lock — SetSummaryStrategy is concurrent
