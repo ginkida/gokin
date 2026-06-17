@@ -2680,6 +2680,12 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	samePlanTurns := 0
 	lastTextFingerprint := ""
 	seenFailureFingerprints := make(map[string]struct{})
+	// truncationContinuations bounds how many times a max_tokens-truncated TEXT
+	// response is auto-continued before giving up — mirrors the foreground
+	// executor fix so /loop and delegated agents resume mid-task instead of
+	// stopping when the model runs out of output room.
+	truncationContinuations := 0
+	const maxTruncationContinuations = 3
 
 	// API retry state — agents have no outer retry layer (unlike executor+message_processor),
 	// so we handle retries here to survive transient API errors (rate limits, timeouts, 500s).
@@ -2993,12 +2999,30 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			}
 		}
 
-		// Warn when response was truncated by token limit
-		if resp.FinishReason == genai.FinishReasonMaxTokens {
+		// Auto-continue a TEXT response cut off by the output-token limit
+		// instead of stopping mid-task (mirrors the foreground executor fix).
+		// The partial text is already in `output` + a.history (appended above),
+		// so just ask the model to continue and re-loop. Bounded by
+		// maxTruncationContinuations. A max_tokens response WITH function calls
+		// continues naturally through the tool path below, so it's untouched.
+		if resp.FinishReason == genai.FinishReasonMaxTokens && len(resp.FunctionCalls) == 0 {
+			if truncationContinuations < maxTruncationContinuations && resp.Text != "" {
+				truncationContinuations++
+				a.stateMu.Lock()
+				a.history = append(a.history, genai.NewContentFromText(
+					"Continue exactly where the previous assistant message stopped. Do not repeat already-written text. If the next needed action is a tool call, call the tool now; otherwise finish the answer.",
+					genai.RoleUser,
+				))
+				a.stateMu.Unlock()
+				logging.Info("agent response truncated by max_tokens — auto-continuing",
+					"agent_type", a.Type, "continuation", truncationContinuations,
+					"max_continuations", maxTruncationContinuations)
+				continue
+			}
 			truncMsg := "\n\n⚠ Response truncated (max_tokens limit reached)."
 			output.WriteString(truncMsg)
 			a.safeOnText(truncMsg)
-			logging.Warn("agent response truncated by max_tokens limit",
+			logging.Warn("agent response truncated by max_tokens limit (continuation budget exhausted)",
 				"agent_type", a.Type, "output_tokens", resp.OutputTokens)
 		}
 
