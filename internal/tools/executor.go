@@ -839,13 +839,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		stagnationLimit           = 5  // Consecutive identical tool patterns before aborting
 		stagnationWindowSize      = 15 // Rolling window for amnesia (non-consecutive) repeats
 		stagnationWindowRepeatMin = 5  // Repeats within window to trigger a warning (not an abort)
-		// maxTruncationContinuations bounds how many times a max_tokens-truncated
-		// TEXT response is auto-continued before we give up and surface the
-		// warning. The model should emit large content via tools (write), not a
-		// giant text turn — so a few continuations covers the legitimate case
-		// (a long plan/explanation cut off) without risking a runaway.
-		maxTruncationContinuations = 3
 	)
+	// max_tokens auto-continuation budget + prompt live in max_tokens.go, shared
+	// verbatim with the sub-agent loop (Tier-4 slice 2) so they cannot drift.
+	const maxTruncationContinuations = MaxTruncationContinuations
 	streamRetries := 0
 	partialStreamRetries := 0
 	retryPolicy := client.DefaultStreamRetryPolicy()
@@ -1400,7 +1397,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					))
 				}
 				history = append(history, genai.NewContentFromText(
-					"Continue exactly where the previous assistant message stopped. Do not repeat already-written text. If the next needed action is a tool call, call the tool now; otherwise finish the answer.",
+					TruncationContinuationPrompt,
 					genai.RoleUser,
 				))
 				continue

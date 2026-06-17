@@ -9,9 +9,9 @@ import (
 
 func newCoverageAgent(workDir string, threshold int) *Agent {
 	return &Agent{
-		workDir:        workDir,
-		loopThreshold:  threshold,
-		targetCoverage: make(map[string]*targetCoverage),
+		workDir:       workDir,
+		loopThreshold: threshold,
+		coverage:      tools.NewCoverageState(),
 	}
 }
 
@@ -287,12 +287,12 @@ func TestCoverage_LifecycleResets(t *testing.T) {
 			readArgs("a.go", 2, 1000),
 			readArgs("a.go", 3, 1000),
 		})
-		if got == 0 || len(a.targetCoverage) == 0 {
+		if got == 0 || a.coverage.NumTargets() == 0 {
 			t.Fatalf("%s: expected accumulated coverage before reset", reset.name)
 		}
 		reset.fn(a)
-		if len(a.targetCoverage) != 0 || a.coverageGen != 0 || a.coverageTrips != 0 {
-			t.Fatalf("%s: state not cleared (coverage=%d gen=%d trips=%d)", reset.name, len(a.targetCoverage), a.coverageGen, a.coverageTrips)
+		if a.coverage.NumTargets() != 0 || a.coverage.Gen() != 0 || a.coverageTrips != 0 {
+			t.Fatalf("%s: state not cleared (coverage=%d gen=%d trips=%d)", reset.name, a.coverage.NumTargets(), a.coverage.Gen(), a.coverageTrips)
 		}
 		// A fresh read after reset must not be redundant.
 		if got := driveCoverage(a, "read", []map[string]any{readArgs("a.go", 1, 1000)}); got != 0 {

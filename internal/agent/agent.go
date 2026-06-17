@@ -84,11 +84,10 @@ type Agent struct {
 	// redundant only when NOTHING else happened since the previous visit to that
 	// target (no new ground covered, no other tool called). Legitimate workflows
 	// — read→edit→verify, zoom-in re-reads, exploration greps interleaved with
-	// reading the results — all advance coverageGen and never accumulate.
-	// All guarded by callHistoryMu.
-	targetCoverage map[string]*targetCoverage // "tool\x00canonicalTarget" -> coverage state
-	coverageGen    int                        // bumped on any progress signal (new ground / non-read-grep call)
-	coverageTrips  int                        // re-coverage interventions fired this request (attempt counter)
+	// reading the results — all advance the coverage generation and never
+	// accumulate. All guarded by callHistoryMu.
+	coverage      *tools.CoverageState // shared coverage core (tools/coverage.go); caller holds callHistoryMu
+	coverageTrips int                  // re-coverage interventions fired this request (attempt counter)
 
 	// Context summarization settings (adjusted by thoroughness)
 	pruneProtectChars  int // Chars protected from pruning (default: 120000)
@@ -313,7 +312,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		maxHistorySize:     DefaultMaxHistorySize,
 		callHistory:        make(map[string]int),
 		loopEarlyWarned:    make(map[string]bool),
-		targetCoverage:     make(map[string]*targetCoverage),
+		coverage:           tools.NewCoverageState(),
 		ctxCfg:             ctxCfg,
 		recoveryExecutor:   NewRecoveryExecutor(2),
 		autoFixAttempts:    make(map[string]int),
@@ -449,7 +448,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		maxHistorySize:     DefaultMaxHistorySize,
 		callHistory:        make(map[string]int),
 		loopEarlyWarned:    make(map[string]bool),
-		targetCoverage:     make(map[string]*targetCoverage),
+		coverage:           tools.NewCoverageState(),
 		ctxCfg:             ctxCfg,
 		recoveryExecutor:   NewRecoveryExecutor(2),
 		autoFixAttempts:    make(map[string]int),
@@ -1363,8 +1362,7 @@ func (a *Agent) clearCallHistory() {
 	a.callHistoryMu.Lock()
 	a.callHistory = make(map[string]int)
 	a.loopEarlyWarned = make(map[string]bool)
-	a.targetCoverage = make(map[string]*targetCoverage)
-	a.coverageGen = 0
+	a.coverage = tools.NewCoverageState()
 	a.coverageTrips = 0
 	a.callHistoryMu.Unlock()
 }
@@ -1383,8 +1381,7 @@ func (a *Agent) resetLoopDetection() {
 	a.callHistoryMu.Lock()
 	a.callHistory = make(map[string]int)
 	a.loopEarlyWarned = make(map[string]bool)
-	a.targetCoverage = make(map[string]*targetCoverage)
-	a.coverageGen = 0
+	a.coverage = tools.NewCoverageState()
 	a.coverageTrips = 0
 	a.loopIntervened = false
 	a.loopCooldown = 0
@@ -1439,23 +1436,6 @@ func (a *Agent) broadLoopThreshold(toolName string) int {
 	return a.loopThreshold
 }
 
-// coverSpan is a half-open [start,end) range of a file a read covered.
-type coverSpan struct{ start, end int }
-
-// targetCoverage records what ground has been covered for one canonical target.
-type targetCoverage struct {
-	redundant int         // consecutive no-progress re-coverages of THIS target
-	lastGen   int         // Agent.coverageGen as of this target's previous visit
-	spans     []coverSpan // read only: recent covered ranges (ring, cap coverageSpanRing)
-}
-
-const (
-	// coverageSpanRing bounds the per-target span memory. A loop re-covering the
-	// same ground stays within a handful of spans; covering more than this many
-	// distinct sections of one file is genuine wide exploration, not a loop.
-	coverageSpanRing = 8
-)
-
 // coverageTarget canonicalizes a read/grep call to the GROUND it covers, dropping
 // the perturbable args (read offset/limit, grep pattern) so that re-covering the
 // same file/scope with different args maps to the same target. Returns ok=false
@@ -1483,81 +1463,18 @@ func (a *Agent) coverageTarget(name string, args map[string]any) (string, bool) 
 	return "", false
 }
 
-// readSpan derives the [start,end) line range a read call covers, mirroring the
-// read tool's defaults (offset default 1, limit default tools.DefaultReadLimit —
-// NOT DefaultChunkSize, which is only the >10MB chunked path's default; an
-// under-sized default here makes the guard blind to offset drift inside the
-// already-read tail of a default read).
-func readSpan(args map[string]any) coverSpan {
-	start := max(tools.GetIntDefault(args, "offset", 1), 0)
-	width := tools.GetIntDefault(args, "limit", tools.DefaultReadLimit)
-	if width <= 0 {
-		width = tools.DefaultReadLimit
-	}
-	return coverSpan{start: start, end: start + width}
-}
-
 // recordCoverageLocked updates coverage for a read/grep call and returns that
-// TARGET's consecutive no-progress redundancy count. A revisit counts as
-// redundant only when BOTH hold:
-//   - it re-covers ground already seen for that target (read: span overlaps a
-//     previously-covered range; grep: the scope was already searched), AND
-//   - coverageGen has not advanced since the previous visit to that target —
-//     i.e. nothing else happened in between (no new ground covered anywhere,
-//     no non-read/grep tool call, no mutation).
-//
-// First sight of a target — or new ground in a known file — is progress and
-// bumps coverageGen. Any progress between visits RESETS the target's counter,
-// so read→edit→verify, zoom-in-after-full-read, and exploration greps that
-// read their results never accumulate; only an uninterrupted rotation over the
-// same ground (the actual loop signature) climbs to the budget.
+// TARGET's consecutive no-progress redundancy count, delegating to the shared
+// coverage core (tools.CoverageState). It supplies the donegate-based canonical
+// target; the span/progress/redundancy bookkeeping lives in the core, shared
+// verbatim with the executor's within-turn guard (Tier-4 slice 1).
 // Caller holds a.callHistoryMu.
 func (a *Agent) recordCoverageLocked(name string, args map[string]any) int {
 	target, ok := a.coverageTarget(name, args)
 	if !ok {
 		return 0
 	}
-	ckey := name + "\x00" + target
-	tc := a.targetCoverage[ckey]
-	isNewTarget := tc == nil
-	if isNewTarget {
-		tc = &targetCoverage{}
-		a.targetCoverage[ckey] = tc
-	}
-
-	reCovers := false
-	progress := isNewTarget
-	switch name {
-	case "read":
-		span := readSpan(args)
-		for _, s := range tc.spans {
-			if span.start < s.end && s.start < span.end { // overlaps already-covered ground
-				reCovers = true
-				break
-			}
-		}
-		if !reCovers {
-			progress = true // new ground in a known file is progress too
-		}
-		tc.spans = append(tc.spans, span)
-		if len(tc.spans) > coverageSpanRing {
-			tc.spans = append([]coverSpan(nil), tc.spans[len(tc.spans)-coverageSpanRing:]...)
-		}
-	case "grep":
-		reCovers = !isNewTarget
-	}
-
-	if progress {
-		a.coverageGen++
-	}
-	switch {
-	case reCovers && tc.lastGen == a.coverageGen:
-		tc.redundant++ // re-covering with zero progress since the last visit
-	case reCovers:
-		tc.redundant = 0 // progress happened in between — a legitimate re-check
-	}
-	tc.lastGen = a.coverageGen
-	return tc.redundant
+	return a.coverage.RecordTarget(name, target, args)
 }
 
 // noteCoverageProgressLocked marks a progress signal for the coverage guard:
@@ -1565,7 +1482,7 @@ func (a *Agent) recordCoverageLocked(name string, args map[string]any) int {
 // not in a tight read/grep rotation, so it breaks every target's redundancy
 // chain. Caller holds a.callHistoryMu.
 func (a *Agent) noteCoverageProgressLocked() {
-	a.coverageGen++
+	a.coverage.NoteProgress()
 }
 
 // redundancyBudget is the consecutive no-progress re-coverage ceiling per tool,
@@ -2683,9 +2600,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	// truncationContinuations bounds how many times a max_tokens-truncated TEXT
 	// response is auto-continued before giving up — mirrors the foreground
 	// executor fix so /loop and delegated agents resume mid-task instead of
-	// stopping when the model runs out of output room.
+	// stopping when the model runs out of output room. The budget + continuation
+	// prompt are shared with the executor (tools/max_tokens.go, Tier-4 slice 2).
 	truncationContinuations := 0
-	const maxTruncationContinuations = 3
+	const maxTruncationContinuations = tools.MaxTruncationContinuations
 
 	// API retry state — agents have no outer retry layer (unlike executor+message_processor),
 	// so we handle retries here to survive transient API errors (rate limits, timeouts, 500s).
@@ -3010,7 +2928,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				truncationContinuations++
 				a.stateMu.Lock()
 				a.history = append(a.history, genai.NewContentFromText(
-					"Continue exactly where the previous assistant message stopped. Do not repeat already-written text. If the next needed action is a tool call, call the tool now; otherwise finish the answer.",
+					tools.TruncationContinuationPrompt,
 					genai.RoleUser,
 				))
 				a.stateMu.Unlock()
@@ -3171,8 +3089,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						func() {
 							// Fresh window after recovery: wipe coverage so ghost
 							// spans recorded for skipped/never-executed calls can't
-							// poison the post-intervention retry.
-							a.targetCoverage = make(map[string]*targetCoverage)
+							// poison the post-intervention retry. gen survives
+							// (ResetTargets) — matches the executor's resetWindow.
+							a.coverage.ResetTargets()
 							a.coverageTrips++
 							coverageAttempt = min(a.coverageTrips, 2)
 						},
