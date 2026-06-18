@@ -7,11 +7,11 @@ import (
 )
 
 // TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup pins the
-// dedupe contract: the compact card must NOT repeat provider/model, the
-// state word (WRITING/RUNNING/WORKING), or the "Esc cancel" hint — all
-// three are permanently visible in the bottom status bar. The card's one
-// unique job is showing what the agent is doing right now. State is
-// carried by the left-edge bar's colour, not by repeated text.
+// dedupe contract: the compact card shows ONLY what the agent is doing right
+// now. It must NOT repeat provider/model, the state word (WRITING/RUNNING), or
+// the "Esc cancel" hint (all permanent in the status bar), AND it must NOT echo
+// the most-recent COMPLETED tool — that finished tool is already a row in
+// scrollback right above the card, so repeating it was pure duplication.
 func TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup(t *testing.T) {
 	m := NewModel()
 	m.width = 110
@@ -26,26 +26,26 @@ func TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup(t *testing.T
 
 	view := stripAnsi(m.renderLiveActivityCard(false))
 
-	// Card must surface the current action + a recent-log echo.
+	// Card must surface the CURRENT action.
 	for _, want := range []string{
 		"Read",               // tool name, capitalized
 		"internal/ui/tui.go", // tool target
-		"240 lines",          // recent-log snippet
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("card missing %q:\n%s", want, view)
 		}
 	}
 
-	// Card must NOT repeat status-bar content.
+	// Card must NOT repeat status-bar content, NOR echo the completed tool.
 	for _, dup := range []string{
-		"RUNNING",         // state word — status bar shows ○ RUNNING
+		"RUNNING",         // state word — status bar shows it
 		"WRITING",         //   ditto
 		"Esc cancel",      // status bar shows "esc Interrupt"
 		"kimi-for-coding", // model name — status bar shows it
+		"240 lines",       // recent-completed echo — removed (already in scrollback)
 	} {
 		if strings.Contains(view, dup) {
-			t.Errorf("card duplicates status bar content %q:\n%s", dup, view)
+			t.Errorf("card duplicates content %q:\n%s", dup, view)
 		}
 	}
 }

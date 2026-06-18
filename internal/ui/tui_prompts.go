@@ -135,29 +135,26 @@ func (m Model) renderPermissionPrompt() string {
 
 	builder.WriteString("\n")
 
-	// Inline options — single line
-	optionStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary)
-
-	options := []struct {
-		key   string
-		label string
-	}{
-		{"y", "Allow"},
-		{"a", "Always"},
-		{"n", "Deny"},
-	}
-
-	var optParts []string
-	for i, opt := range options {
-		style := optionStyle
+	// Vertical numbered options — matches the question prompt + model selector
+	// (`1. … 2. …` with a `> ` selected marker) instead of a dense y/a/n letter
+	// row. ↑/↓ + Enter, or press the number; the y/a/n quick keys still work.
+	// Local styles (mirroring ModalNormal/ModalSelected) keep this renderer free
+	// of the m.styles pointer so bare-Model tests don't nil-panic.
+	normalOpt := lipgloss.NewStyle().Foreground(ColorMuted)
+	selectedOpt := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary)
+	for i, opt := range []string{"Allow", "Always allow", "Deny"} {
+		prefix := "  "
+		style := normalOpt
 		if i == m.permSelectedOption {
-			style = selectedStyle
+			prefix = "> "
+			style = selectedOpt
 		}
-		optParts = append(optParts, style.Render(opt.key+" "+opt.label))
+		fmt.Fprintf(&builder, "%s%s\n", prefix, style.Render(fmt.Sprintf("%d. %s", i+1, opt)))
 	}
 
-	builder.WriteString("  " + strings.Join(optParts, optionStyle.Render(" · ")) + optionStyle.Render(" · Esc Cancel"))
+	builder.WriteString("\n")
+	footerStyle := lipgloss.NewStyle().Foreground(ColorDim).Width(paletteWidth - 4)
+	builder.WriteString(footerStyle.Render("  ↑/↓ Navigate  ·  1-3 Select  ·  Enter Confirm  ·  Esc Cancel"))
 	builder.WriteString("\n")
 
 	if !bordered {

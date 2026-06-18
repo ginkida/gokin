@@ -4,7 +4,43 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
+
+// TestPermissionPromptNumberedOptions — the permission prompt uses the numbered
+// `> 1. … 2. … 3.` list its sibling prompts use, not a flat y/a/n letter row.
+func TestPermissionPromptNumberedOptions(t *testing.T) {
+	m := Model{
+		width:       100,
+		permRequest: &PermissionRequestMsg{ToolName: "bash", RiskLevel: "high", Args: map[string]any{"command": "ls"}},
+	}
+	got := stripAnsi(m.renderPermissionPrompt())
+	for _, want := range []string{"> 1. Allow", "2. Always allow", "3. Deny"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("permission prompt missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "y Allow") {
+		t.Errorf("permission prompt should not keep the dense y/a/n letter row:\n%s", got)
+	}
+}
+
+// TestPermissionNumberKeyDecides — pressing the displayed number applies that
+// decision (so the numbers aren't decorative); y/a/n still work via the same path.
+func TestPermissionNumberKeyDecides(t *testing.T) {
+	var got PermissionDecision
+	decided := false
+	m := NewModel()
+	m.SetPermissionCallback(func(d PermissionDecision) { got = d; decided = true })
+	m.permRequest = &PermissionRequestMsg{ToolName: "bash", RiskLevel: "high"}
+	m.state = StatePermissionPrompt
+
+	_ = m.handlePermissionPromptKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	if !decided || got != PermissionDeny {
+		t.Errorf("pressing 3 should Deny: decided=%v decision=%v", decided, got)
+	}
+}
 
 // TestMarkdownHeadingStripsHashMarkers — rendered headings drop the literal #/##
 // markup (it's markup, not content); bold+color carries the hierarchy.
@@ -19,7 +55,62 @@ func TestMarkdownHeadingStripsHashMarkers(t *testing.T) {
 	}
 }
 
-// TestToolExecutingBlockUsesSharedBullet — every tool uses the one ⏺ bullet
+// TestInlineCodeNoDoubleSpaceGap — inline `code` sits tight to its words; the
+// old Padding(0,1) inserted a literal double-space gap on each side.
+func TestInlineCodeNoDoubleSpaceGap(t *testing.T) {
+	p := NewMarkdownStreamParser(DefaultStyles())
+	out := stripAnsi(p.renderMarkdownLine("use the `foo()` function here"))
+	if strings.Contains(out, "  ") {
+		t.Errorf("inline code should sit tight (no double-space gap): %q", out)
+	}
+	if !strings.Contains(out, "foo()") {
+		t.Errorf("inline code text missing: %q", out)
+	}
+}
+
+// TestListBulletsAreOneCalmMarker — unordered lists use ONE dim bullet at every
+// depth (nesting by indent), not a cycle of 6 bold geometric glyphs.
+func TestListBulletsAreOneCalmMarker(t *testing.T) {
+	p := NewMarkdownStreamParser(DefaultStyles())
+	top, ok := p.renderListItem("- top")
+	if !ok {
+		t.Fatal("'- top' should parse as a list item")
+	}
+	nested, ok := p.renderListItem("  - nested")
+	if !ok {
+		t.Fatal("'  - nested' should parse as a list item")
+	}
+	top, nested = stripAnsi(top), stripAnsi(nested)
+	if !strings.Contains(top, "• top") {
+		t.Errorf("top-level should use the one bullet: %q", top)
+	}
+	if !strings.HasPrefix(nested, "  • ") {
+		t.Errorf("nested should be indent + same bullet: %q", nested)
+	}
+	for _, g := range []string{"●", "○", "■", "□", "◆", "◇"} {
+		if strings.Contains(top+nested, g) {
+			t.Errorf("list should not use the geometric confetti glyph %q", g)
+		}
+	}
+}
+
+// TestCodeFenceHasNoFullWidthRule — the code-block fence is a quiet dim label,
+// not the full-width `─` rules the project removed elsewhere.
+func TestCodeFenceHasNoFullWidthRule(t *testing.T) {
+	p := NewMarkdownStreamParser(DefaultStyles())
+	top := stripAnsi(p.RenderCodeFenceTop(RenderedBlock{Language: "go"}, 100))
+	if strings.Contains(top, "────") {
+		t.Errorf("code fence top should not draw a full-width rule: %q", top)
+	}
+	if !strings.Contains(top, "go") {
+		t.Errorf("code fence should still show the dim language label: %q", top)
+	}
+	if bot := p.RenderCodeFenceBottom(100); bot != "" {
+		t.Errorf("code fence bottom should emit nothing, got %q", bot)
+	}
+}
+
+// TestToolExecutingBlockUsesSharedBullet — every tool uses the one shared dim ▪ marker
 // (calm aligned column) rather than a per-tool glyph confetti.
 func TestToolExecutingBlockUsesSharedBullet(t *testing.T) {
 	s := DefaultStyles()
@@ -71,6 +162,44 @@ func TestLiveCardShowsElapsed(t *testing.T) {
 	line := stripAnsi(m.liveActivityCurrentLine(ActivityFeedSnapshot{}))
 	if !strings.Contains(line, " · ") {
 		t.Errorf("streaming card past 3s should show elapsed: %q", line)
+	}
+}
+
+// TestToolResultMergedLine_NoDuplication pins the user-driven redesign end to
+// end: a completed tool is ONE line "▪ Name(target) · outcome" — the tool name
+// and the path/command each appear exactly once (no separate call row + result
+// row that repeated them), and shell plumbing is stripped.
+func TestToolResultMergedLine_NoDuplication(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+	m.handleToolResultWithInfo(strings.Repeat("x\n", 175), "read",
+		"~/projects/glm/internal/shared/credentials.go", time.Now().Add(-50*time.Millisecond))
+	rendered := stripAnsi(m.output.state.content.String())
+
+	if !strings.Contains(rendered, "Read(credentials.go)") {
+		t.Errorf("want merged Read(credentials.go):\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "175 lines") {
+		t.Errorf("want outcome '175 lines':\n%s", rendered)
+	}
+	if n := strings.Count(rendered, "Read"); n != 1 {
+		t.Errorf("tool name should appear ONCE (no call+result repeat), got %d:\n%s", n, rendered)
+	}
+
+	// Bash: plumbing stripped, command + name not repeated.
+	m2 := NewModel()
+	m2.width = 100
+	m2.handleToolResultWithInfo("ok\n", "bash",
+		"go build ./... 2>&1 | head -40", time.Now().Add(-1900*time.Millisecond))
+	r2 := stripAnsi(m2.output.state.content.String())
+	if !strings.Contains(r2, "Bash(go build ./...)") {
+		t.Errorf("bash plumbing should strip to Bash(go build ./...):\n%s", r2)
+	}
+	if strings.Contains(r2, "2>&1") || strings.Contains(r2, "head -40") {
+		t.Errorf("shell plumbing should not be shown:\n%s", r2)
+	}
+	if n := strings.Count(r2, "Bash"); n != 1 {
+		t.Errorf("Bash should appear ONCE, got %d:\n%s", n, r2)
 	}
 }
 

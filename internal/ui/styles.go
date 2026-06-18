@@ -419,10 +419,13 @@ func DefaultStyles() *Styles {
 		// the chat background (#0E1116), too subtle to register as an
 		// "inline code" affordance on bright monitors. Border (#2A2C33)
 		// gives ~28/256 of contrast — readable in any lighting.
+		// No horizontal Padding — it inserted a literal space INSIDE the chip on
+		// each side, so `foo()` rendered with a double-space gap (` foo() `) that
+		// made code-dense prose look stuttery. The Lavender-on-Border contrast
+		// already marks the span; CC keeps inline code tight to its words.
 		InlineCode: lipgloss.NewStyle().
 			Foreground(ColorLavender).
-			Background(ColorBorder).
-			Padding(0, 1),
+			Background(ColorBorder),
 
 		// Code block styles
 		CodeBlockBorder: lipgloss.NewStyle().
@@ -560,16 +563,17 @@ func (s *Styles) FormatToolExecuting(name string, args map[string]any) string {
 	return exeStyle.Render(spinner[idx] + " " + name)
 }
 
-// toolBullet is the single shared marker for every tool call (CC idiom). One
-// calm aligned bullet beats a confetti of 30 per-tool glyphs; tools stay
-// distinguishable via the per-tool *name* color below.
-const toolBullet = "⏺"
+// toolBullet is the single shared marker for every tool line. It is a SMALL
+// SQUARE (U+25AA) — deliberately NOT the filled-record-circle U+23FA, which many
+// terminals render as a wide colored emoji. Rendered DIM so it marks the line
+// without shouting; tools stay distinguishable via the per-tool name color.
+const toolBullet = "▪"
 
-// FormatToolExecutingBlock formats a tool execution as a compact line.
-// Format: ⏺ Read /path/to/file.go  (one accent bullet, per-tool name color)
+// FormatToolExecutingBlock formats a tool call as a compact line.
+// Format: ▪ Read(file.go)  (dim marker, per-tool name color)
 func (s *Styles) FormatToolExecutingBlock(name string, args map[string]any) string {
-	// One shared accent bullet for every tool — quiet and aligned.
-	bulletStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+	// One shared dim marker for every tool — quiet and aligned.
+	bulletStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
 	// Tool name — per-tool color (so tools are still distinguishable) but not bold.
 	nameStyle := lipgloss.NewStyle().Foreground(GetToolIconColor(name))
@@ -614,45 +618,81 @@ func (s *Styles) FormatToolSuccess(name string, duration time.Duration) string {
 // (≥100ms) still show timing — that's the part worth noticing.
 const minDisplayedToolDuration = 100 * time.Millisecond
 
-// FormatToolSuccessBlock formats a successful tool result as a compact line.
-// Format: ✓ name  summary  duration
-func (s *Styles) FormatToolSuccessBlock(name string, duration time.Duration, resultSummary string) string {
-	checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
-	nameStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	summaryStyle := lipgloss.NewStyle().Foreground(ColorDim)
-
-	var result strings.Builder
-
-	result.WriteString(checkStyle.Render("✓ "))
-	result.WriteString(nameStyle.Render(capitalizeToolName(name)))
-
-	if resultSummary != "" {
-		result.WriteString("  ")
-		result.WriteString(summaryStyle.Render(resultSummary))
+// formatToolDurationLabel renders a tool's wall-clock as a short label + the
+// color it should use. Returns "" below minDisplayedToolDuration (sub-100ms ops
+// are effectively instant — a trailing "9ms" on every read is noise).
+func formatToolDurationLabel(duration time.Duration) (string, lipgloss.Color) {
+	if duration < minDisplayedToolDuration {
+		return "", ColorDim
 	}
-
-	durationStr := ""
-	durationColor := ColorDim
-	if duration < time.Second {
-		durationStr = fmt.Sprintf("%dms", duration.Milliseconds())
-	} else if duration < time.Minute {
+	switch {
+	case duration < time.Second:
+		return fmt.Sprintf("%dms", duration.Milliseconds()), ColorDim
+	case duration < time.Minute:
 		secs := duration.Seconds()
-		durationStr = fmt.Sprintf("%.1fs", secs)
+		color := ColorDim
 		if secs > 5 {
-			durationColor = ColorWarning
+			color = ColorWarning
 		}
-	} else {
-		durationStr = fmt.Sprintf("%.1fm", duration.Minutes())
-		durationColor = ColorWarning
+		return fmt.Sprintf("%.1fs", secs), color
+	default:
+		return fmt.Sprintf("%.1fm", duration.Minutes()), ColorWarning
 	}
+}
 
-	if durationStr != "" && duration >= minDisplayedToolDuration {
-		timingStyle := lipgloss.NewStyle().Foreground(durationColor)
-		result.WriteString("  ")
-		result.WriteString(timingStyle.Render(durationStr))
+// FormatToolLine renders a completed tool as ONE compact line:
+//
+//	▪ Read(credentials.go) · 175 lines · 340ms
+//
+// The marker is dim, the name keeps its per-tool color, the target sits in
+// parens, the outcome + duration are dim. Nothing is repeated — the call subject
+// and the result outcome share a single row (the older two-line ✓-block repeated
+// the tool name AND the full path/command on the result row).
+func (s *Styles) FormatToolLine(name, target, outcome string, duration time.Duration) string {
+	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	nameStyle := lipgloss.NewStyle().Foreground(GetToolIconColor(name))
+	targetStyle := lipgloss.NewStyle().Foreground(ColorText)
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
+	var b strings.Builder
+	b.WriteString(markerStyle.Render(toolBullet + " "))
+	b.WriteString(nameStyle.Render(capitalizeToolName(name)))
+	if target != "" {
+		b.WriteString(targetStyle.Render("(" + target + ")"))
 	}
+	if outcome != "" {
+		b.WriteString(dimStyle.Render(" · " + outcome))
+	}
+	if durStr, durColor := formatToolDurationLabel(duration); durStr != "" {
+		b.WriteString(dimStyle.Render(" · "))
+		b.WriteString(lipgloss.NewStyle().Foreground(durColor).Render(durStr))
+	}
+	return b.String()
+}
 
-	return result.String()
+// FormatToolFailureLine renders a FAILED tool as a flat one-liner matching the
+// success line's shape — `▪ ✗ Name(target) · duration` (red ✗). Pass and fail
+// now read as the same calm shape; the error detail nests under ⎿ below (the way
+// Claude Code shows `⎿ Error: …`), instead of the old rounded red alarm box.
+func (s *Styles) FormatToolFailureLine(name, target string, duration time.Duration) string {
+	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	errStyle := lipgloss.NewStyle().Foreground(ColorError)
+	nameStyle := lipgloss.NewStyle().Foreground(GetToolIconColor(name))
+	targetStyle := lipgloss.NewStyle().Foreground(ColorText)
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
+	var b strings.Builder
+	b.WriteString(markerStyle.Render(toolBullet + " "))
+	b.WriteString(errStyle.Render("✗ "))
+	b.WriteString(nameStyle.Render(capitalizeToolName(name)))
+	if target != "" {
+		b.WriteString(targetStyle.Render("(" + target + ")"))
+	}
+	if durStr, durColor := formatToolDurationLabel(duration); durStr != "" {
+		b.WriteString(dimStyle.Render(" · "))
+		b.WriteString(lipgloss.NewStyle().Foreground(durColor).Render(durStr))
+	}
+	return b.String()
 }
 
 // FormatToolError formats a failed tool result.

@@ -266,18 +266,13 @@ func (p *MarkdownStreamParser) effectiveLanguage(block RenderedBlock) string {
 	return ""
 }
 
-func codeFenceContentWidth(width int) int {
-	contentWidth := width - 4
-	if contentWidth < 40 {
-		contentWidth = 40
-	}
-	return contentWidth
-}
-
-// RenderCodeFenceTop renders the opening border: ─── label ───
+// RenderCodeFenceTop renders a quiet dim language/filename label above the
+// block — NO full-width rule. The 2-space indent of the code lines is the calm
+// signal that this is a code block (CC uses just an indent + a small dim label).
+// The two full-width `─` rules this used to draw were the same heavy weight the
+// project removed as the inter-turn ruler, framing every block twice with a
+// bold-violet label louder than the code itself.
 func (p *MarkdownStreamParser) RenderCodeFenceTop(block RenderedBlock, width int) string {
-	contentWidth := codeFenceContentWidth(width)
-
 	lang := p.effectiveLanguage(block)
 	label := lang
 	if block.Filename != "" {
@@ -286,21 +281,10 @@ func (p *MarkdownStreamParser) RenderCodeFenceTop(block RenderedBlock, width int
 			label = block.Filename + " · " + lang
 		}
 	}
-
 	if label == "" {
-		return p.styles.Dim.Render(strings.Repeat("─", contentWidth)) + "\n"
+		return ""
 	}
-
-	labelLen := len(label) + 2 // spaces around label
-	sideLen := (contentWidth - labelLen) / 2
-	if sideLen < 3 {
-		sideLen = 3
-	}
-	rightDashLen := max(contentWidth-sideLen-labelLen, 0)
-
-	return p.styles.Dim.Render(strings.Repeat("─", sideLen)+" ") +
-		p.styles.CodeBlockHeader.Render(label) +
-		p.styles.Dim.Render(" "+strings.Repeat("─", rightDashLen)) + "\n"
+	return p.styles.Dim.Render(label) + "\n"
 }
 
 // RenderCodeLine renders one streamed code line: 2-space indent, per-line
@@ -315,9 +299,10 @@ func (p *MarkdownStreamParser) RenderCodeLine(block RenderedBlock) string {
 	return "  " + line + "\n"
 }
 
-// RenderCodeFenceBottom renders the closing thin line.
+// RenderCodeFenceBottom emits nothing — the indent + the blank line after the
+// block already delimit it (CC has no bottom rule).
 func (p *MarkdownStreamParser) RenderCodeFenceBottom(width int) string {
-	return p.styles.Dim.Render(strings.Repeat("─", codeFenceContentWidth(width))) + "\n"
+	return ""
 }
 
 // renderInlineCode detects backtick-wrapped `code` segments within a text line
@@ -361,7 +346,10 @@ func (p *MarkdownStreamParser) renderInlineCode(line string) string {
 // proper indentation and bullet/number styling.
 // Returns the rendered string and true if the line is a list item, or ("", false) otherwise.
 func (p *MarkdownStreamParser) renderListItem(line string) (string, bool) {
-	bulletStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+	// One calm dim bullet at every depth — the indent conveys nesting, so the
+	// marker can recede. (The old code cycled 6 bold-cyan geometric glyphs by
+	// depth — the same "glyph confetti" already removed from tool lines.)
+	bulletStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	numberStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 
 	// Check for unordered list: "  - item" or "  * item"
@@ -370,14 +358,10 @@ func (p *MarkdownStreamParser) renderListItem(line string) (string, bool) {
 		content := matches[3]
 		depth := listDepth(indent)
 
-		// Build indentation: 2 spaces per depth level
+		// Build indentation: 2 spaces per depth level.
 		prefix := strings.Repeat("  ", depth)
 
-		// Use different bullet characters per depth level
-		bullets := []string{"●", "○", "■", "□", "◆", "◇"}
-		bullet := bullets[depth%len(bullets)]
-
-		rendered := prefix + bulletStyle.Render(bullet) + " " + p.renderInlineFormatting(content)
+		rendered := prefix + bulletStyle.Render("•") + " " + p.renderInlineFormatting(content)
 		return rendered, true
 	}
 

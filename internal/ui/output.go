@@ -185,7 +185,11 @@ func (m *OutputModel) appendStreamBlocksLocked(blocks []RenderedBlock) {
 // single-theme world. If theme switching ever returns, turn this into a
 // helper function so the colour follows ApplyTheme.
 var thinkingStyle = lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
-var thinkingLabelStyle = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
+
+// thinkingLabelStyle matches the body's dim-italic register — thinking is a
+// quiet aside, not a banner. The bold-violet label used to be the loudest line
+// in an otherwise calm reasoning block; the ◐ glyph alone marks it now.
+var thinkingLabelStyle = lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
 
 // AppendThinkingStream appends streaming thinking content.
 // Minimal style: dim italic text with a single soft label on first chunk.

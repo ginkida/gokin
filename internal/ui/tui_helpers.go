@@ -180,9 +180,10 @@ func (m *Model) welcomeModeBadge() string {
 // AddSystemMessage adds a system message to the output.
 func (m *Model) AddSystemMessage(msg string) {
 	iconStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	// Quiet dim notice (was bold saturated teal) — a transient "switched model"
+	// note should recede, not out-shout the model's prose.
 	textStyle := lipgloss.NewStyle().
-		Foreground(ColorInfo).
-		Bold(true).
+		Foreground(ColorMuted).
 		MarginBottom(1)
 	m.output.AppendLine(iconStyle.Render("  ▸ ") + textStyle.Render(msg))
 }
@@ -560,17 +561,11 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 		return ""
 	}
 
-	content := strings.Join(parts, "  ·  ")
-
-	// Framed footer with adaptive dash separators
-	dashLen := 3
-	if len(content) > 60 {
-		dashLen = 1
-	}
-	leftDash := strings.Repeat("─", dashLen)
-	rightDash := strings.Repeat("─", dashLen)
-
-	return dimStyle.Render(leftDash+" ") + dimStyle.Render(content) + dimStyle.Render(" "+rightDash)
+	// A quiet dim stats line — NO "─ … ─" framing. The dashes were the same
+	// inter-turn ruler the v0.100.37 work removed; they re-appeared here on every
+	// real turn (tokens are always present). The numbers stay (handy for cost),
+	// just without the chrome around them.
+	return dimStyle.Render(strings.Join(parts, "  ·  "))
 }
 
 func formatToolRunSummary(count, failures int, includeUsed bool) string {

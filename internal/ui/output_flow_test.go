@@ -154,14 +154,20 @@ func TestHandleToolResultWithStatus_FailedUsesErrorBlock(t *testing.T) {
 	m.handleToolResultWithStatus("stderr line\nmore detail", "bash", "go test ./...", time.Now().Add(-500*time.Millisecond), true, "exit status 1")
 	rendered := stripAnsi(m.output.state.content.String())
 
-	if !strings.Contains(rendered, "✗ bash") {
-		t.Fatalf("failed tool should render error block:\n%s", rendered)
+	if !strings.Contains(rendered, "✗ Bash") {
+		t.Fatalf("failed tool should render the flat ✗ failure line:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "exit status 1") {
 		t.Fatalf("failed tool should include error detail:\n%s", rendered)
 	}
 	if strings.Contains(rendered, "✓ Bash") {
-		t.Fatalf("failed tool must not render success block:\n%s", rendered)
+		t.Fatalf("failed tool must not render a success block:\n%s", rendered)
+	}
+	// No rounded box — failure is now flat like success.
+	for _, boxRune := range []string{"╭", "╮", "╰", "╯", "│"} {
+		if strings.Contains(rendered, boxRune) {
+			t.Errorf("failed tool should be flat (no box rune %q):\n%s", boxRune, rendered)
+		}
 	}
 }
 

@@ -121,18 +121,11 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	}
 
 	if !feedOpen {
-		// Recent: one line of the most recent completed activity, prefixed
-		// with "↳ " so it reads as a trailing consequence of the current
-		// action rather than a competing primary signal.
-		if recent := m.liveActivityRecentLine(snapshot); recent != "" {
-			out.WriteByte('\n')
-			out.WriteString(barStyle.Render("▎") + " " +
-				dimStyle.Render("↳ ") +
-				valueStyle.Render(truncateRunes(recent, width-4)))
-		}
-		// Next: only surface truly new signal (retries, rate limits,
-		// plan progression, parallel work). Generic status echoes are
-		// dropped inside liveActivityNextLine.
+		// No "recent completed" echo here — the finished tool is already a row
+		// in scrollback right above the card, so repeating it ("↳ Running: … ->
+		// completed") was pure duplication. Only surface genuinely NEW signal
+		// (retries, rate limits, plan progression, parallel work); generic status
+		// echoes are dropped inside liveActivityNextLine.
 		if next := m.liveActivityNextLine(snapshot); next != "" {
 			out.WriteByte('\n')
 			out.WriteString(barStyle.Render("▎") + " " +
@@ -301,18 +294,6 @@ func (m Model) liveActivityTodoLine() string {
 	}
 
 	return fmt.Sprintf("%s Step %d/%d: %s", glyph, pickIdx+1, total, pickText)
-}
-
-// liveActivityRecentLine returns a single line of the most recent log entry,
-// or "" when there's nothing worth echoing back. The previous version
-// fell through to a bag of fallbacks (response tool count, agent tool list
-// joined by arrows) that duplicated information already in the header, so
-// we only surface genuinely new signal now.
-func (m Model) liveActivityRecentLine(snapshot ActivityFeedSnapshot) string {
-	if len(snapshot.RecentLog) > 0 {
-		return snapshot.RecentLog[len(snapshot.RecentLog)-1]
-	}
-	return ""
 }
 
 // liveActivityNextLine is only rendered when it tells the user something

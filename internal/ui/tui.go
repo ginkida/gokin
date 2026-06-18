@@ -621,6 +621,32 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 }
 
 // handlePermissionPromptKeys handles keys in permission prompt state.
+// decidePermission applies a permission decision (from a number key, y/a/n, or
+// the highlighted option) — one shared path so the numbered list, the arrow+Enter
+// flow, and the quick keys can't drift. Deny returns to input + interrupts; allow
+// variants resume processing.
+func (m *Model) decidePermission(decision PermissionDecision) tea.Cmd {
+	m.permRequest = nil
+	m.permSelectedOption = 0
+	if decision == PermissionDeny || decision == PermissionDenySession {
+		m.state = StateInput
+		m.output.AppendLine(m.styles.Warning.Render(" Denied - operation cancelled"))
+		m.output.AppendLine("")
+		if m.onInterrupt != nil {
+			m.onInterrupt()
+		}
+		if m.onPermission != nil {
+			m.onPermission(decision)
+		}
+		return m.input.Focus()
+	}
+	m.state = StateProcessing
+	if m.onPermission != nil {
+		m.onPermission(decision)
+	}
+	return nil
+}
+
 func (m *Model) handlePermissionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "up", "k":
@@ -632,57 +658,19 @@ func (m *Model) handlePermissionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 			m.permSelectedOption++
 		}
 	case "enter", " ":
-		// User made a decision
-		decision := PermissionDecision(m.permSelectedOption)
-		m.permRequest = nil
-		m.permSelectedOption = 0
-		// Deny decisions return to input, allow continues processing
-		if decision == PermissionDeny || decision == PermissionDenySession {
-			m.state = StateInput
-			m.output.AppendLine(m.styles.Warning.Render(" Denied - operation cancelled"))
-			m.output.AppendLine("")
-			if m.onInterrupt != nil {
-				m.onInterrupt()
-			}
-			if m.onPermission != nil {
-				m.onPermission(decision)
-			}
-			return m.input.Focus()
-		}
-		m.state = StateProcessing
-		if m.onPermission != nil {
-			m.onPermission(decision)
-		}
+		return m.decidePermission(PermissionDecision(m.permSelectedOption))
+	case "1":
+		return m.decidePermission(PermissionAllow)
+	case "2":
+		return m.decidePermission(PermissionAllowSession)
+	case "3":
+		return m.decidePermission(PermissionDeny)
 	case "y":
-		// Quick allow
-		m.permRequest = nil
-		m.permSelectedOption = 0
-		m.state = StateProcessing
-		if m.onPermission != nil {
-			m.onPermission(PermissionAllow)
-		}
+		return m.decidePermission(PermissionAllow)
 	case "n", "esc":
-		// Quick deny / ESC cancels
-		m.permRequest = nil
-		m.permSelectedOption = 0
-		m.state = StateInput
-		m.output.AppendLine(m.styles.Warning.Render(" Denied - operation cancelled"))
-		m.output.AppendLine("")
-		if m.onInterrupt != nil {
-			m.onInterrupt()
-		}
-		if m.onPermission != nil {
-			m.onPermission(PermissionDeny)
-		}
-		return m.input.Focus()
+		return m.decidePermission(PermissionDeny)
 	case "a":
-		// Allow for session
-		m.permRequest = nil
-		m.permSelectedOption = 0
-		m.state = StateProcessing
-		if m.onPermission != nil {
-			m.onPermission(PermissionAllowSession)
-		}
+		return m.decidePermission(PermissionAllowSession)
 	case "?":
 		// Show tool details
 		if m.permRequest != nil {
@@ -1770,10 +1758,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			})
 		}
 
-		// Show tool call in output with enhanced block formatting. Indent to
-		// match the result block (4 spaces) so execute→result is a clean column,
-		// not a jagged left margin.
-		m.output.AppendLine("    " + m.styles.FormatToolExecutingBlock(msg.Name, msg.Args))
+		// No scrollback line on START — the live activity card shows the running
+		// tool (spinner + name + target + elapsed). The single merged line
+		// (▪ Name(target) · outcome) is emitted on COMPLETION instead, so a tool
+		// occupies ONE row, not a call row + a result row that repeat the name.
 
 	case ToolResultMsg:
 		m.streamStartTime = time.Now() // Reset timeout on tool result
@@ -2703,12 +2691,12 @@ func (m *Model) handleToolResultWithInfo(content, toolName, toolInfo string, sta
 func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, startTime time.Time, failed bool, errText string) {
 	contentStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
-	// Build summary and duration
-	var summary string
+	// Build the one-line subject (parenthesized target) + outcome + duration.
+	// The target/outcome are split so neither is repeated: the call subject sits
+	// in parens on the SAME row as its outcome.
+	target := conciseToolTarget(toolName, toolInfo)
+	outcome := toolOutcomeSummary(toolName, content)
 	var duration time.Duration
-	if toolName != "" {
-		summary = generateToolResultSummary(toolName, content, toolInfo)
-	}
 	if !startTime.IsZero() {
 		duration = time.Since(startTime)
 	}
@@ -2746,26 +2734,15 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 		if detail == "" {
 			detail = "tool failed"
 		}
-		// Wide terminals get the mockup-scene-D error card. Narrow
-		// terminals fall back to the legacy single-line emission so
-		// the failure still shows without misaligned border art.
-		if card := renderToolErrorCard(m.width, name, duration, detail); card != "" {
-			for line := range strings.SplitSeq(card, "\n") {
-				m.output.AppendLine("  " + line)
-			}
-		} else {
-			// Legacy unwrapped single-line emission.
-			fallback := firstNonEmptyLine(detail)
-			if fallback == "" {
-				fallback = "tool failed"
-			}
-			m.output.AppendLine("    " + m.styles.FormatToolError(name, fmt.Errorf("%s", fallback)))
-		}
-		m.output.AppendLine("")
+		// Flat failure line matching the success one-liner — `▪ ✗ Name(target)`
+		// with the error nested under the ⎿ corner — instead of a rounded red
+		// box. Pass and fail now share one calm shape.
+		titleLine := m.styles.FormatToolFailureLine(name, conciseToolTarget(toolName, toolInfo), duration)
+		m.emitToolResultCard(titleLine, failureBody(detail, toolName))
 		return
 	}
 
-	titleLine := m.styles.FormatToolSuccessBlock(name, duration, summary)
+	titleLine := m.styles.FormatToolLine(name, target, outcome, duration)
 
 	// Body (expand-state aware) — built once, fed either into a bordered
 	// card or the legacy 4-space-indented flat form depending on width.
@@ -2861,14 +2838,19 @@ func (m *Model) buildToolResultBody(
 // failure cards do. Higher-stakes events still get borders; routine
 // success blends with the rest of the agent's output.
 func (m *Model) emitToolResultCard(titleLine, body string) {
-	// Nest the result under its call with the ⎿ corner (CC idiom) — the same
-	// connector gokin already uses for the dedup stub / diff preview — so a tool
-	// batch reads as `⏺ call` → `⎿ result` pairs instead of 2N flat lines that
-	// repeat the tool name. Body lines align under the corner content.
-	m.output.AppendLine("    ⎿ " + titleLine)
+	// One merged line per tool: `▪ Name(target) · outcome`. Any expandable body
+	// (non-collapsed tools) nests beneath it under the ⎿ corner. Collapsed tools
+	// (read/bash/todo) have no body → just the single row.
+	m.output.AppendLine("  " + titleLine)
 	if body != "" {
+		first := true
 		for line := range strings.SplitSeq(body, "\n") {
-			m.output.AppendLine("      " + line)
+			if first {
+				m.output.AppendLine("    ⎿ " + line)
+				first = false
+			} else {
+				m.output.AppendLine("      " + line)
+			}
 		}
 	}
 	m.output.AppendLine("")

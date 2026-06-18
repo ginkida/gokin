@@ -2,8 +2,93 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
+
+// conciseToolTarget returns the short subject for the parenthesized part of a
+// tool line — "Read(credentials.go)", "Bash(go build ./...)". Deliberately
+// terse: the basename for file tools, the meaningful command for bash. The full
+// path/command is no longer repeated on a separate result row, so one clean
+// subject per line is enough.
+func conciseToolTarget(name, info string) string {
+	info = strings.TrimSpace(info)
+	if info == "" {
+		return ""
+	}
+	switch strings.ToLower(strings.ReplaceAll(name, "-", "_")) {
+	case "read", "write", "edit", "delete", "mkdir", "run_tests", "verify_code":
+		base := filepath.Base(info)
+		// Strip a trailing " (N lines)"-style annotation some info strings carry.
+		if i := strings.LastIndex(base, " ("); i > 0 {
+			base = base[:i]
+		}
+		return base
+	case "bash", "test", "build":
+		return compactInline(stripBashPlumbing(info), 48)
+	default:
+		return compactInline(info, 44)
+	}
+}
+
+// stripBashPlumbing trims the noisy shell scaffolding (a leading `cd … &&`, a
+// trailing `2>&1` / `| head` / `> /dev/null` capture) so the command's intent
+// shows on the one-line display. The model still ran the full command — this
+// only affects the label.
+func stripBashPlumbing(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if strings.HasPrefix(cmd, "cd ") {
+		if i := strings.Index(cmd, "&&"); i >= 0 {
+			cmd = strings.TrimSpace(cmd[i+2:])
+		}
+	}
+	cut := len(cmd)
+	for _, marker := range []string{" 2>&1", " | head", " | tail", " >/dev/null", " > /dev/null", " 2>/dev/null"} {
+		if i := strings.Index(cmd, marker); i >= 0 && i < cut {
+			cut = i
+		}
+	}
+	return strings.TrimSpace(cmd[:cut])
+}
+
+// toolOutcomeSummary returns the COUNT-ONLY outcome for a tool's merged line
+// ("175 lines", "4 matches", "updated") — never the path/command, which already
+// appears in the parenthesized target. Empty when there's nothing to add.
+func toolOutcomeSummary(name, content string) string {
+	switch strings.ToLower(strings.ReplaceAll(name, "-", "_")) {
+	case "read":
+		if n := displayLineCount(content); n > 0 {
+			return pluralLines(n)
+		}
+		return ""
+	case "bash", "test", "build", "run_tests", "verify_code":
+		if strings.TrimSpace(content) == "(no matches)" {
+			return "no matches"
+		}
+		if n := displayLineCount(content); n > 0 {
+			return pluralLines(n)
+		}
+		return "completed"
+	case "grep", "glob", "file_search", "code_search":
+		if n := displayLineCount(content); n > 0 {
+			return pluralCount(n, "match", "matches")
+		}
+		return "no matches"
+	case "edit":
+		return "updated"
+	case "write":
+		return "written"
+	case "delete":
+		return "deleted"
+	case "mkdir":
+		return "created"
+	case "move":
+		return "moved"
+	case "copy":
+		return "copied"
+	}
+	return ""
+}
 
 // summarizeSubAgentTask turns a sub-agent's dispatch prompt into a one-line
 // description for the activity feed. Prompts can be paragraphs long; the
