@@ -55,6 +55,42 @@ func TestMarkdownHeadingStripsHashMarkers(t *testing.T) {
 	}
 }
 
+// TestPlanApprovalRebuilt — the plan-approval prompt is now lipgloss-rendered
+// like its siblings: numbered options with a `> ` marker, no `(y)` decoration,
+// no `•` separators, and no background-fill selection highlight.
+func TestPlanApprovalRebuilt(t *testing.T) {
+	steps := []PlanStepInfo{
+		{ID: 1, Title: "Extract SessionStore", Description: "move the map + mutex out"},
+		{ID: 2, Title: "Wire DI", Description: "pass the store through the constructor"},
+	}
+	m := Model{
+		width:       80,
+		planRequest: &PlanApprovalRequestMsg{Title: "Refactor the auth layer", Description: "Splits the store from the client", Steps: steps},
+		styles:      DefaultStyles(),
+	}
+	raw := m.renderPlanApproval()
+	got := stripAnsi(raw)
+
+	for _, want := range []string{"Plan Approval", "Step 1: Extract SessionStore", "> 1. Approve", "2. Reject", "3. Request changes"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan approval missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "(y)") || strings.Contains(got, "•") {
+		t.Errorf("plan approval should drop the (y) decoration + • separators:\n%s", got)
+	}
+	if strings.Contains(raw, "\x1b[48") {
+		t.Errorf("selected option should not use a Background fill")
+	}
+
+	// Feedback sub-mode still renders the input + a back hint.
+	m.planFeedbackMode = true
+	m.planFeedbackInput = NewInputModel(m.styles, m.workDir)
+	if fb := stripAnsi(m.renderPlanApproval()); !strings.Contains(fb, "Enter your feedback") {
+		t.Errorf("feedback mode should show the feedback prompt:\n%s", fb)
+	}
+}
+
 // TestInlineCodeNoDoubleSpaceGap — inline `code` sits tight to its words; the
 // old Padding(0,1) inserted a literal double-space gap on each side.
 func TestInlineCodeNoDoubleSpaceGap(t *testing.T) {

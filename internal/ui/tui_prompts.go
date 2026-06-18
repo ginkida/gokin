@@ -298,241 +298,77 @@ func (m Model) renderPlanApproval() string {
 		return ""
 	}
 
-	var builder strings.Builder
+	paletteWidth, bordered := promptPaletteWidth(m.width)
 
-	// Styles
-	borderStyle := lipgloss.NewStyle().Foreground(ColorPlan)
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorPlan)
+	subtitleStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 	planTitleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorText)
 	descStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
 	stepNumStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	stepTitleStyle := lipgloss.NewStyle().Foreground(ColorText)
 	stepDescStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-	infoStyle := lipgloss.NewStyle().Foreground(ColorInfo)
+	labelStyle := lipgloss.NewStyle().Foreground(ColorInfo)
+	footerStyle := lipgloss.NewStyle().Foreground(ColorDim).Width(paletteWidth - 4)
 
-	// Calculate width
-	panelWidth := m.width - 4
-	if panelWidth < 40 {
-		panelWidth = m.width // Full width on very narrow terminals
+	var b strings.Builder
+
+	// Header: title + step count (the rounded container is added once at the end
+	// via wrapPromptContainer — no hand-drawn box / manual padding any more).
+	b.WriteString(titleStyle.Render("Plan Approval"))
+	b.WriteString("  ")
+	b.WriteString(subtitleStyle.Render(fmt.Sprintf("%d steps", len(m.planRequest.Steps))))
+	b.WriteString("\n\n")
+
+	// Plan title + description.
+	b.WriteString("  " + planTitleStyle.Render(m.planRequest.Title) + "\n")
+	if d := strings.TrimSpace(m.planRequest.Description); d != "" {
+		b.WriteString("  " + descStyle.Render(truncateForWidth(d, paletteWidth-4)) + "\n")
 	}
-	if panelWidth > 90 {
-		panelWidth = 90
-	}
-	// Floor at 1 so panelWidth-1 border/padding repeats never go negative.
-	// At m.width == 0 (pre-WindowSizeMsg startup) panelWidth would be 0 and
-	// strings.Repeat(..., -1) panics.
-	if panelWidth < 1 {
-		panelWidth = 1
-	}
+	b.WriteString("\n")
 
-	// Header
-	stepCount := len(m.planRequest.Steps)
-	headerInfo := fmt.Sprintf(" %d steps ", stepCount)
-	headerTitle := " Plan Approval "
-
-	// Calculate width using lipgloss.Width for styled text
-	styledTitleWidth := lipgloss.Width(titleStyle.Render(headerTitle))
-	styledInfoWidth := lipgloss.Width(infoStyle.Render(headerInfo))
-	headerDashCount := panelWidth - styledTitleWidth - styledInfoWidth - 4
-	if headerDashCount < 0 {
-		headerDashCount = 0
-	}
-
-	builder.WriteString(borderStyle.Render("╭─"))
-	builder.WriteString(titleStyle.Render(headerTitle))
-	builder.WriteString(borderStyle.Render(strings.Repeat("─", headerDashCount)))
-	builder.WriteString(infoStyle.Render(headerInfo))
-	builder.WriteString(borderStyle.Render("─╮"))
-	builder.WriteString("\n")
-
-	// Plan title
-	titleLine := "  " + planTitleStyle.Render(m.planRequest.Title)
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString(titleLine)
-	padding := panelWidth - 1 - lipgloss.Width(titleLine)
-	if padding > 0 {
-		builder.WriteString(strings.Repeat(" ", padding))
-	}
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString("\n")
-
-	// Description (if present)
-	if m.planRequest.Description != "" {
-		desc := m.planRequest.Description
-		if lipgloss.Width(desc) > panelWidth-6 {
-			// Truncate by visual width, not rune count (handles CJK/emoji correctly)
-			runes := []rune(desc)
-			for i := len(runes); i > 0; i-- {
-				candidate := string(runes[:i]) + "..."
-				if lipgloss.Width(candidate) <= panelWidth-6 {
-					desc = candidate
-					break
-				}
-			}
-		}
-		descLine := "  " + descStyle.Render(desc)
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString(descLine)
-		padding := panelWidth - 1 - lipgloss.Width(descLine)
-		if padding > 0 {
-			builder.WriteString(strings.Repeat(" ", padding))
-		}
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString("\n")
-	}
-
-	// Steps header
-	stepsHeader := "  Steps:"
-	stepsHeaderPadding := panelWidth - 1 - lipgloss.Width(infoStyle.Render(stepsHeader))
-	if stepsHeaderPadding < 0 {
-		stepsHeaderPadding = 0
-	}
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString(infoStyle.Render(stepsHeader))
-	builder.WriteString(strings.Repeat(" ", stepsHeaderPadding))
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString("\n")
-
-	// Steps tree view
+	// Steps.
+	b.WriteString("  " + labelStyle.Render("Steps:") + "\n")
 	for _, step := range m.planRequest.Steps {
-		// Step icon: all pending in approval view
-		stepIcon := "○"
-		stepLine := "  " + stepNumStyle.Render(stepIcon) + " " + stepTitleStyle.Render(fmt.Sprintf("Step %d: %s", step.ID, step.Title))
-
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString(stepLine)
-		padding := panelWidth - 1 - lipgloss.Width(stepLine)
-		if padding > 0 {
-			builder.WriteString(strings.Repeat(" ", padding))
-		}
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString("\n")
-
-		// Step description (truncated)
-		if step.Description != "" {
-			desc := step.Description
-			maxDescLen := panelWidth - 10
-			if lipgloss.Width(desc) > maxDescLen {
-				runes := []rune(desc)
-				for i := len(runes); i > 0; i-- {
-					candidate := string(runes[:i]) + "..."
-					if lipgloss.Width(candidate) <= maxDescLen {
-						desc = candidate
-						break
-					}
-				}
-			}
-			descLine := "     " + stepDescStyle.Render(desc)
-			builder.WriteString(borderStyle.Render("│"))
-			builder.WriteString(descLine)
-			padding := panelWidth - 1 - lipgloss.Width(descLine)
-			if padding > 0 {
-				builder.WriteString(strings.Repeat(" ", padding))
-			}
-			builder.WriteString(borderStyle.Render("│"))
-			builder.WriteString("\n")
+		b.WriteString("  " + stepNumStyle.Render("○") + " " +
+			stepTitleStyle.Render(fmt.Sprintf("Step %d: %s", step.ID, step.Title)) + "\n")
+		if sd := strings.TrimSpace(step.Description); sd != "" {
+			b.WriteString("     " + stepDescStyle.Render(truncateForWidth(sd, paletteWidth-7)) + "\n")
 		}
 	}
 
-	// Contract info (if present)
 	if m.planRequest.ContractName != "" {
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString(strings.Repeat(" ", panelWidth-1))
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString("\n")
-
-		contractLine := "  Contract: " + m.planRequest.ContractName
-		styledContractLine := lipgloss.NewStyle().Foreground(ColorAccent).Render(contractLine)
-		contractPadding := panelWidth - 1 - lipgloss.Width(styledContractLine)
-		if contractPadding < 0 {
-			contractPadding = 0
-		}
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString(styledContractLine)
-		builder.WriteString(strings.Repeat(" ", contractPadding))
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString("\n")
+		b.WriteString("\n  " + lipgloss.NewStyle().Foreground(ColorAccent).Render("Contract: "+m.planRequest.ContractName) + "\n")
 	}
 
-	// Empty line before options
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString(strings.Repeat(" ", panelWidth-1))
-	builder.WriteString(borderStyle.Render("│"))
-	builder.WriteString("\n")
+	b.WriteString("\n")
 
-	// If in feedback mode, show feedback input
+	// Feedback sub-mode: collect modification text inside the SAME container.
 	if m.planFeedbackMode {
-		feedbackLine := "  Enter your feedback:"
-		styledFeedbackLine := infoStyle.Bold(true).Render(feedbackLine)
-		feedbackPadding := panelWidth - 1 - lipgloss.Width(styledFeedbackLine)
-		if feedbackPadding < 0 {
-			feedbackPadding = 0
-		}
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString(styledFeedbackLine)
-		builder.WriteString(strings.Repeat(" ", feedbackPadding))
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString("\n")
-
-		inputLine := "  " + m.planFeedbackInput.View()
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString(inputLine)
-		padding := panelWidth - 1 - lipgloss.Width(inputLine)
-		if padding > 0 {
-			builder.WriteString(strings.Repeat(" ", padding))
-		}
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString("\n")
-
-		// Footer
-		builder.WriteString(borderStyle.Render("╰" + strings.Repeat("─", panelWidth-1) + "╯"))
-		builder.WriteString("\n")
-		builder.WriteString(m.styles.StatusBar.Render("  Enter to submit  ·  Esc Cancel"))
-		return builder.String()
+		b.WriteString("  " + labelStyle.Render("Enter your feedback:") + "\n")
+		b.WriteString("  " + m.planFeedbackInput.View() + "\n\n")
+		b.WriteString(footerStyle.Render("  Enter Submit  ·  Esc Back"))
+		return wrapPromptContainer(b.String(), paletteWidth, bordered, ColorPlan)
 	}
 
-	// Options section
-	options := []struct {
-		key  string
-		text string
-		icon string
-	}{
-		{"y", "Approve", "✓"},
-		{"n", "Reject", "✗"},
-		{"m", "Request changes", "✎"},
-	}
-
-	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorPlan).Background(ColorBorder)
-	normalStyle := lipgloss.NewStyle().Foreground(ColorText)
-	keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
-
-	for i, opt := range options {
-		prefix := "    "
-		style := normalStyle
-		icon := lipgloss.NewStyle().Foreground(ColorDim).Render(opt.icon)
+	// Numbered options — the same idiom as the question/permission prompts (no
+	// Background-fill highlight, no per-option ✓/✗/✎ icons). Quick keys y/n/m
+	// (and 1/2/3) still work via the handler.
+	normalOpt := lipgloss.NewStyle().Foreground(ColorMuted)
+	selectedOpt := lipgloss.NewStyle().Bold(true).Foreground(ColorPlan)
+	for i, opt := range []string{"Approve", "Reject", "Request changes"} {
+		prefix := "  "
+		style := normalOpt
 		if i == m.planSelectedOption {
-			prefix = "  > "
-			style = selectedStyle
-			icon = lipgloss.NewStyle().Foreground(ColorPlan).Bold(true).Render(opt.icon)
+			prefix = "> "
+			style = selectedOpt
 		}
-
-		optLine := prefix + icon + " " + style.Render(opt.text) + " " + keyStyle.Render("("+opt.key+")")
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString(optLine)
-		padding := panelWidth - 1 - lipgloss.Width(optLine)
-		if padding > 0 {
-			builder.WriteString(strings.Repeat(" ", padding))
-		}
-		builder.WriteString(borderStyle.Render("│"))
-		builder.WriteString("\n")
+		fmt.Fprintf(&b, "%s%s\n", prefix, style.Render(fmt.Sprintf("%d. %s", i+1, opt)))
 	}
 
-	// Footer
-	builder.WriteString(borderStyle.Render("╰" + strings.Repeat("─", panelWidth-1) + "╯"))
-	builder.WriteString("\n")
-	builder.WriteString(lipgloss.NewStyle().Foreground(ColorDim).Render("  ↑↓ Navigate • Enter Confirm • y/n/m Quick action"))
+	b.WriteString("\n")
+	b.WriteString(footerStyle.Render("  ↑/↓ Navigate  ·  1-3 Select  ·  Enter Confirm  ·  Esc Cancel"))
 
-	return builder.String()
+	return wrapPromptContainer(b.String(), paletteWidth, bordered, ColorPlan)
 }
 
 // renderModelSelector renders the model selector UI.

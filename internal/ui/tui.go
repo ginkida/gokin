@@ -860,8 +860,8 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		if m.onPlanApproval != nil {
 			m.onPlanApproval(decision)
 		}
-	case "y":
-		// Quick approve
+	case "y", "1":
+		// Quick approve (1 = the numbered "Approve" option)
 		// Initialize plan progress panel with the approved plan
 		if m.planRequest != nil && m.planProgressPanel != nil {
 			m.planProgressPanel.StartPlan(
@@ -880,8 +880,8 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		if m.onPlanApproval != nil {
 			m.onPlanApproval(PlanApproved)
 		}
-	case "n":
-		// Quick reject
+	case "n", "2":
+		// Quick reject (2 = the numbered "Reject" option)
 		m.planRequest = nil
 		m.planSelectedOption = 0
 		m.planFeedbackMode = false
@@ -890,8 +890,8 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		if m.onPlanApproval != nil {
 			m.onPlanApproval(PlanRejected)
 		}
-	case "m":
-		// Quick modify - enter feedback mode
+	case "m", "3":
+		// Quick modify (3 = the numbered "Request changes" option) — enter feedback mode
 		m.planFeedbackMode = true
 		m.planFeedbackInput = NewInputModel(m.styles, m.workDir)
 		m.planFeedbackInput.SetWidth(m.width - 4)
