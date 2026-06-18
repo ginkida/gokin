@@ -133,6 +133,11 @@ type (
 	}
 	ErrorMsg      error
 	TodoUpdateMsg []string
+	// ActivityLabelMsg sets the live "what the agent is doing now" status label
+	// (the in-progress todo's active form, e.g. "Implementing backup/restore").
+	// Empty clears it. Shown in the status bar, overriding the generic
+	// Thinking/Generating label; cleared at turn end.
+	ActivityLabelMsg string
 	// LoopIterationMsg carries executor loop iteration progress.
 	LoopIterationMsg struct {
 		Iteration int

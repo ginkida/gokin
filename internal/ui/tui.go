@@ -39,6 +39,7 @@ type Model struct {
 	currentToolInfo  string // Brief info about current tool operation (e.g., file path)
 	toolStartTime    time.Time
 	processingLabel  string   // Status label between tool calls: "Thinking", "Analyzing", "Running agent"
+	currentActivity  string   // Live "what the agent is doing now" from the in-progress todo (active form); overrides the generic Thinking/Generating label, cleared at turn end
 	loopIteration    int      // Current executor loop iteration (0 = first/unknown)
 	loopToolsUsed    int      // Total tools used across loop iterations
 	agentToolCount   int      // Tools used by current sub-agent (for progress display)
@@ -1727,7 +1728,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.currentTool = ""
 		m.currentToolInfo = ""
 		m.processingLabel = ""
-		m.streamIdleMsg = "" // Clear idle warning
+		m.currentActivity = "" // clear the live "doing X" label at turn end
+		m.streamIdleMsg = ""   // Clear idle warning
 		m.loopIteration = 0
 		m.loopToolsUsed = 0
 		m.settleActiveToolCalls(false, "ended without result")
@@ -1768,7 +1770,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.currentTool = ""
 		m.currentToolInfo = ""
 		m.processingLabel = ""
-		m.streamIdleMsg = "" // Clear idle warning
+		m.currentActivity = "" // clear the live "doing X" label at turn end
+		m.streamIdleMsg = ""   // Clear idle warning
 		m.loopIteration = 0
 		m.loopToolsUsed = 0
 		m.settleActiveToolCalls(false, errStr)
@@ -1797,6 +1800,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case TodoUpdateMsg:
 		m.todoItems = msg
+
+	case ActivityLabelMsg:
+		// Live "doing X" label from the in-progress todo. Unlike phaseLabel this
+		// does NOT force state/timers — only the View label selection reads it,
+		// and only while already processing.
+		m.currentActivity = string(msg)
 
 	case LoopIterationMsg:
 		m.loopIteration = msg.Iteration
@@ -2940,6 +2949,12 @@ func (m Model) View() string {
 			labelStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 			label := m.processingLabel
+			if label == "" && m.currentActivity != "" {
+				// The agent's own in-progress todo ("Implementing backup/restore")
+				// is far more informative than a generic "Generating" — show it so
+				// the user always sees WHAT the agent is working on.
+				label = m.currentActivity
+			}
 			if label == "" {
 				// Pick a phase-appropriate label based on elapsed time so the
 				// user sees something is happening even before the first chunk.

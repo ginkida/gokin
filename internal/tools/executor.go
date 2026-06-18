@@ -814,6 +814,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// final answer is the WHOLE response, not just the last continued chunk.
 	var carriedText string
 	truncationContinuations := 0
+	// Incomplete-work continuation (incomplete_work.go): when the model stops
+	// with no tool calls but its OWN todo list is unfinished, nudge it to keep
+	// going instead of ending the turn ("narrates 'continuing…' then stops").
+	// Progress-aware: incompleteWorkStuck resets whenever a tool ran since the
+	// last nudge, so steady multi-step work is never capped — only narration
+	// without action is.
+	incompleteWorkStuck := 0
+	toolsUsedAtLastIncompleteNudge := -1
 	var toolsUsed []string          // Track which tools were used for smart fallback
 	var lastToolResult ToolResult   // Track the last tool result for context
 	var recentToolPatterns []string // Track tool name patterns per iteration for stagnation detection
@@ -1420,6 +1428,40 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				"output_tokens", resp.OutputTokens,
 				"iteration", i)
 			break
+		}
+
+		// Incomplete-work continuation: the model produced a final answer with no
+		// tool calls, but its OWN todo list still has unfinished items — it
+		// announced the next step without taking it. Nudge it to act and keep
+		// going instead of ending the turn. (max_tokens has its own continuation
+		// above; skip here so we don't double-continue.) Progress-aware + bounded:
+		// a model that narrates without running a tool N times in a row stops; one
+		// that completes todos between nudges resets the counter and runs free.
+		if resp.FinishReason != genai.FinishReasonMaxTokens {
+			if n, summary := IncompleteTodoSummary(e.registry); n > 0 {
+				if len(toolsUsed) > toolsUsedAtLastIncompleteNudge {
+					incompleteWorkStuck = 0 // a tool ran since the last nudge → progress
+				}
+				if incompleteWorkStuck < MaxIncompleteWorkContinuations {
+					incompleteWorkStuck++
+					toolsUsedAtLastIncompleteNudge = len(toolsUsed)
+					// Carry the text produced so far so the next iteration's
+					// `finalText = carriedText + resp.Text` doesn't silently drop
+					// it. finalText already == (carriedText + this resp.Text), so
+					// this also folds in any earlier max_tokens-carried prefix.
+					carriedText = finalText
+					if e.handler != nil && e.handler.OnWarning != nil {
+						e.handler.OnWarning(fmt.Sprintf("Continuing — %d task(s) still to do…", n))
+					}
+					logging.Info("incomplete-work continuation: model stopped with unfinished todos",
+						"incomplete", n, "attempt", incompleteWorkStuck)
+					history = append(history, genai.NewContentFromText(
+						IncompleteWorkContinuationPrompt(n, summary), genai.RoleUser))
+					continue
+				}
+				logging.Info("incomplete-work continuation budget exhausted — model narrating without acting",
+					"incomplete", n)
+			}
 		}
 
 		break

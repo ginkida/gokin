@@ -719,6 +719,19 @@ func (a *App) emitTodoUpdate() {
 		display = append(display, fmt.Sprintf("%s %s", icon, item.Content))
 	}
 	a.safeSendToProgram(ui.TodoUpdateMsg(display))
+
+	// Live "doing X" status: surface the in-progress item's active form so the
+	// status bar always shows WHAT the agent is working on ("Implementing
+	// backup/restore"), not just a generic "Generating". Empty when nothing is
+	// in progress — the label falls back to the phase-aware default and is
+	// cleared at turn end.
+	activity := ""
+	if cur := tt.GetCurrentTask(); cur != nil {
+		if activity = cur.ActiveForm; activity == "" {
+			activity = cur.Content
+		}
+	}
+	a.safeSendToProgram(ui.ActivityLabelMsg(activity))
 }
 
 // executePlanWithClearContext dispatches plan execution to either delegated
