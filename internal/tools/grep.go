@@ -203,7 +203,11 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 			if len(cached.Matches) == 0 {
 				return NewSuccessResult("No matches found. (cached)"), nil
 			}
-			summary := fmt.Sprintf("Found %d match(es) in %d file(s) (cached):\n\n", len(cached.Matches), cached.FileCount)
+			cachedCount := cached.MatchCount
+			if cachedCount == 0 { // back-compat for entries cached before MatchCount existed
+				cachedCount = len(cached.Matches)
+			}
+			summary := fmt.Sprintf("Found %d match(es) in %d file(s) (cached):\n\n", cachedCount, cached.FileCount)
 			return NewSuccessResult(summary + content), nil
 		}
 	}
@@ -275,7 +279,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 			if relPath == "" {
 				relPath = fm.path
 			}
-			count := len(fm.matches)
+			count := countRealMatches(fm.matches)
 			if count > 0 {
 				fmt.Fprintf(&results, "%s: %d\n", relPath, count)
 				totalCount += count
@@ -324,7 +328,11 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 				LineNum:  match.lineNum,
 				Line:     match.line,
 			})
-			matchCount++
+			// Count only real matches — context lines are displayed but must not
+			// inflate the reported count / the maxMatches cap / per-file density.
+			if match.isMatch {
+				matchCount++
+			}
 		}
 		if delta := matchCount - beforeFileCount; delta > 0 {
 			perFile[relPath] = delta
@@ -334,8 +342,9 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// Cache the results
 	if t.cache != nil && cacheKey != "" {
 		t.cache.SetGrep(cacheKey, cache.GrepResult{
-			Matches:   cacheMatches,
-			FileCount: fileCount,
+			Matches:    cacheMatches,
+			MatchCount: matchCount, // real matches only (context excluded)
+			FileCount:  fileCount,
 		})
 	}
 
@@ -509,6 +518,7 @@ searchLoop:
 type grepMatch struct {
 	lineNum int
 	line    string
+	isMatch bool // true = an actual regex match; false = a surrounding context line
 }
 
 // fileMatch holds all matches for a single file.
@@ -578,41 +588,69 @@ func (t *GrepTool) searchFile(filePath string, re *regexp.Regexp, contextLines i
 		allLines = append(allLines, scanner.Text())
 	}
 
+	// Identify the ACTUAL matching lines up front. isMatch is then derived from
+	// this set (not from i==lineNum), so a context line that also matches the
+	// pattern is correctly counted as a match, and context lines never inflate
+	// the count.
+	isMatchLine := make([]bool, len(allLines))
+	anyMatch := false
+	for i, line := range allLines {
+		if re.MatchString(line) {
+			isMatchLine[i] = true
+			anyMatch = true
+		}
+	}
+	if !anyMatch {
+		return nil
+	}
+
 	var matches []grepMatch
 	matchedLines := make(map[int]bool) // Track which lines are already included
 
-	for lineNum, line := range allLines {
-		if re.MatchString(line) {
-			// Add context lines before
-			start := max(lineNum-contextLines, 0)
+	for lineNum := range allLines {
+		if !isMatchLine[lineNum] {
+			continue
+		}
+		start := max(lineNum-contextLines, 0)
+		end := lineNum + contextLines
+		if end >= len(allLines) {
+			end = len(allLines) - 1
+		}
 
-			// Add context lines after
-			end := lineNum + contextLines
-			if end >= len(allLines) {
-				end = len(allLines) - 1
+		// Add all lines in range (the match plus its context), once each.
+		for i := start; i <= end; i++ {
+			if matchedLines[i] {
+				continue // Skip already added lines
 			}
+			matchedLines[i] = true
 
-			// Add all lines in range (including match itself)
-			for i := start; i <= end; i++ {
-				if matchedLines[i] {
-					continue // Skip already added lines
-				}
-				matchedLines[i] = true
-
-				contextLine := allLines[i]
-				// Truncate long lines
-				if runes := []rune(contextLine); len(runes) > 500 {
-					contextLine = string(runes[:500]) + "..."
-				}
-				matches = append(matches, grepMatch{
-					lineNum: i + 1, // 1-indexed
-					line:    contextLine,
-				})
+			contextLine := allLines[i]
+			// Truncate long lines
+			if runes := []rune(contextLine); len(runes) > 500 {
+				contextLine = string(runes[:500]) + "..."
 			}
+			matches = append(matches, grepMatch{
+				lineNum: i + 1, // 1-indexed
+				line:    contextLine,
+				isMatch: isMatchLine[i],
+			})
 		}
 	}
 
 	return matches
+}
+
+// countRealMatches counts the entries that are actual regex matches (excluding
+// surrounding context lines), so reported match counts aren't inflated by
+// context_lines.
+func countRealMatches(matches []grepMatch) int {
+	n := 0
+	for _, m := range matches {
+		if m.isMatch {
+			n++
+		}
+	}
+	return n
 }
 
 // isBinaryFile checks if a file is likely binary based on extension or content.

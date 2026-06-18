@@ -15,9 +15,14 @@ import (
 
 // GrepResult represents cached grep search results.
 type GrepResult struct {
-	Matches   []GrepMatch
-	FileCount int
-	CachedAt  time.Time
+	Matches []GrepMatch
+	// MatchCount is the number of ACTUAL matches (excluding context lines, which
+	// are also stored in Matches for display). Reported instead of len(Matches)
+	// so context_lines doesn't inflate the cached count. Falls back to
+	// len(Matches) when zero (entries cached before this field existed).
+	MatchCount int
+	FileCount  int
+	CachedAt   time.Time
 }
 
 // GrepMatch represents a single grep match.

@@ -3019,6 +3019,16 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					}
 					a.stateMu.Unlock()
 					noProgressTurns = 0
+				} else {
+					// Recovery budget exhausted — the model keeps re-issuing the
+					// IDENTICAL tool plan. Without this, the loop kept setting the
+					// flag and skipping the batch every turn (the skip path doesn't
+					// bump noProgressTurns), burning the rest of effectiveMaxTurns on
+					// dead skip-and-retry rounds — each a real API call. Fail fast
+					// with the partial output + an honest error, mirroring the
+					// no-progress watchdog and the foreground executor's contract.
+					return a.history, output.String(), fmt.Errorf(
+						"execution stalled: repeated tool plan for %d turns (recovery budget exhausted)", samePlanTurns)
 				}
 			}
 
