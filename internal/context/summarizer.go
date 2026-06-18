@@ -145,6 +145,13 @@ func (s *Summarizer) Summarize(ctx context.Context, messages []*genai.Content) (
 	return s.doSummarize(ctx, messages)
 }
 
+// minSummaryLen is the floor (trimmed chars) below which an LLM summary is
+// treated as empty/degenerate and REJECTED, so the caller falls back to
+// truncation instead of replacing the conversation middle with nothing. A real
+// structured summary is hundreds of chars; a false positive on a terse one is
+// harmless (the truncation fallback preserves messages).
+const minSummaryLen = 24
+
 func (s *Summarizer) doSummarize(ctx context.Context, messages []*genai.Content) (*genai.Content, error) {
 	// Format messages for summarization
 	formatted := s.formatMessages(messages)
@@ -167,6 +174,15 @@ func (s *Summarizer) doSummarize(ctx context.Context, messages []*genai.Content)
 	resp, err := stream.Collect()
 	if err != nil {
 		return nil, fmt.Errorf("summarization response failed: %w", err)
+	}
+
+	// Refuse a blank/degenerate summary: it would REPLACE the summarized middle
+	// of the conversation with nothing — silent data loss. Returning an error
+	// makes the caller fall back to importance-based truncation (which keeps real
+	// messages); the task + recent turns are kept verbatim by CreateSummaryPlan
+	// regardless, so nothing critical is lost on the fallback.
+	if len(strings.TrimSpace(resp.Text)) < minSummaryLen {
+		return nil, fmt.Errorf("summarization produced empty/degenerate output (%d chars)", len(strings.TrimSpace(resp.Text)))
 	}
 
 	// Create summary content as a user message (context injection)
@@ -236,6 +252,11 @@ func (s *Summarizer) summarizeHierarchical(ctx context.Context, messages []*gena
 	resp, err := stream.Collect()
 	if err != nil {
 		return nil, err
+	}
+	// Same data-loss guard as doSummarize: never replace history with an empty
+	// summary; let the caller fall back to truncation.
+	if len(strings.TrimSpace(resp.Text)) < minSummaryLen {
+		return nil, fmt.Errorf("hierarchical summarization produced empty/degenerate output (%d chars)", len(strings.TrimSpace(resp.Text)))
 	}
 
 	summaryText := fmt.Sprintf("[Long-term conversation summary]\n%s\n[End of summary]", s.ensureCriticalContext(resp.Text))

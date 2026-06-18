@@ -12,6 +12,7 @@ import (
 	"google.golang.org/genai"
 
 	"gokin/internal/logging"
+	"gokin/internal/security"
 	"gokin/internal/undo"
 )
 
@@ -24,13 +25,41 @@ type BatchTool struct {
 	workDir          string
 	progressCallback BatchProgressCallback
 	failureThreshold float64 // Stop if failure rate exceeds this (0.0 to 1.0, 0 = disabled)
+	pathValidator    *security.PathValidator
 }
 
 // NewBatchTool creates a new BatchTool instance.
 func NewBatchTool(workDir string) *BatchTool {
 	return &BatchTool{
-		workDir: workDir,
+		workDir:       workDir,
+		pathValidator: security.NewPathValidator([]string{workDir}, false),
 	}
+}
+
+// SetAllowedDirs sets additional allowed directories for path validation,
+// mirroring edit/write/delete/refactor. Without this, batch would write/delete
+// arbitrary model-supplied paths outside the workspace and bypass .git
+// protection.
+func (t *BatchTool) SetAllowedDirs(dirs []string) {
+	allDirs := append([]string{t.workDir}, dirs...)
+	t.pathValidator = security.NewPathValidator(allDirs, false)
+}
+
+// validateWritePath enforces the workspace boundary + .git protection for every
+// model-supplied path the batch tool mutates (replace/rename/delete) — the same
+// chokepoint edit/write/delete/refactor use. Returns the validated path.
+func (t *BatchTool) validateWritePath(path string) (string, error) {
+	if t.pathValidator == nil {
+		return "", fmt.Errorf("security error: path validator not initialized")
+	}
+	valid, err := t.pathValidator.Validate(path)
+	if err != nil {
+		return "", fmt.Errorf("path validation failed: %s", err)
+	}
+	if err := security.IsBlockedWritePath(valid); err != nil {
+		return "", err
+	}
+	return valid, nil
 }
 
 // SetUndoManager sets the undo manager for tracking changes.
@@ -294,6 +323,12 @@ func (t *BatchTool) executeReplace(ctx context.Context, files []string, search, 
 
 // replaceInFile performs search/replace in a single file.
 func (t *BatchTool) replaceInFile(path, search, replacement string, dryRun bool) error {
+	validPath, err := t.validateWritePath(path)
+	if err != nil {
+		return err
+	}
+	path = validPath
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -350,6 +385,13 @@ func (t *BatchTool) executeRename(ctx context.Context, files []string, from, to 
 		default:
 		}
 
+		validPath, vErr := t.validateWritePath(path)
+		if vErr != nil {
+			result.Failed[path] = vErr.Error()
+			continue
+		}
+		path = validPath
+
 		dir := filepath.Dir(path)
 		base := filepath.Base(path)
 
@@ -365,6 +407,12 @@ func (t *BatchTool) executeRename(ctx context.Context, files []string, from, to 
 		newPath = filepath.Clean(newPath)
 		if filepath.Dir(newPath) != filepath.Clean(dir) {
 			result.Failed[path] = "path traversal detected: new path escapes original directory"
+			continue
+		}
+
+		// Validate the destination too (.git protection on the new name).
+		if _, vErr := t.validateWritePath(newPath); vErr != nil {
+			result.Failed[path] = vErr.Error()
 			continue
 		}
 
@@ -404,6 +452,13 @@ func (t *BatchTool) executeDelete(ctx context.Context, files []string, dryRun, p
 			continue
 		default:
 		}
+
+		validPath, vErr := t.validateWritePath(path)
+		if vErr != nil {
+			result.Failed[path] = vErr.Error()
+			continue
+		}
+		path = validPath
 
 		// Read content for undo before deletion. Read errors degrade silently
 		// (undo just isn't recorded for this file) so a single unreadable file

@@ -1122,6 +1122,11 @@ func (b *Builder) initIntegrations() error {
 				mt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
 			}
 		}
+		if batchTool, ok := b.registry.Get("batch"); ok {
+			if bt, ok := batchTool.(*tools.BatchTool); ok {
+				bt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
+			}
+		}
 	}
 
 	// Wire up undo manager
