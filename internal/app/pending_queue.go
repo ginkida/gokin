@@ -41,6 +41,18 @@ func (a *App) dequeuePending() (message string, remaining int, ok bool) {
 	return message, len(a.pendingQueue), true
 }
 
+// drainPending clears the entire type-ahead queue and returns how many messages
+// were discarded. Called on cancel (Esc/Ctrl+C): without it, the cancelled
+// request's dispatch defer would pop a queued message and start a NEW request
+// right after the user asked to stop.
+func (a *App) drainPending() int {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	n := len(a.pendingQueue)
+	a.pendingQueue = nil
+	return n
+}
+
 // pendingCount returns the number of queued type-ahead messages.
 func (a *App) pendingCount() int {
 	a.pendingMu.Lock()

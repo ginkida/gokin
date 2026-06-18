@@ -2879,10 +2879,18 @@ func (a *App) getActiveToolDeclarations() []*genai.FunctionDeclaration {
 // Called when user presses ESC during processing.
 func (a *App) CancelProcessing() {
 	a.processingMu.Lock()
-	defer a.processingMu.Unlock()
 	if a.processingCancel != nil {
 		a.processingCancel()
 		a.processingCancel = nil
+	}
+	a.processingMu.Unlock()
+
+	// Drain the type-ahead queue: the cancelled request's dispatch defer would
+	// otherwise pop a queued message and start a NEW request right after the user
+	// pressed Esc/Ctrl+C to stop. Done outside processingMu (drainPending takes
+	// pendingMu; safeSendToProgram takes a.mu) to avoid any lock ordering risk.
+	if cleared := a.drainPending(); cleared > 0 {
+		a.safeSendToProgram(ui.QueuedCountMsg(0))
 	}
 }
 

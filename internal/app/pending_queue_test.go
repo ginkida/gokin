@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+// TestDrainPendingClearsQueue + TestCancelProcessingDrainsQueue pin that
+// cancelling (Esc/Ctrl+C) discards queued type-ahead messages, so a stale queued
+// message doesn't start a NEW request right after the user stopped the run.
+func TestDrainPendingClearsQueue(t *testing.T) {
+	a := &App{}
+	for i := 0; i < 3; i++ {
+		a.enqueuePending(fmt.Sprintf("m%d", i))
+	}
+	if n := a.drainPending(); n != 3 {
+		t.Errorf("drainPending returned %d, want 3", n)
+	}
+	if got := a.pendingCount(); got != 0 {
+		t.Errorf("queue not empty after drain: %d", got)
+	}
+	if n := a.drainPending(); n != 0 {
+		t.Errorf("drain on empty returned %d, want 0", n)
+	}
+}
+
+func TestCancelProcessingDrainsQueue(t *testing.T) {
+	a := &App{}
+	a.enqueuePending("stale-1")
+	a.enqueuePending("stale-2")
+	a.CancelProcessing() // no in-flight request, but it must still drain the queue
+	if got := a.pendingCount(); got != 0 {
+		t.Errorf("CancelProcessing must drain the type-ahead queue, %d left", got)
+	}
+}
+
 // TestPendingQueueFIFO pins the type-ahead contract: messages queued while
 // processing come back in submission order (the old single-slot field REPLACED
 // the previous message — user input was silently dropped).
