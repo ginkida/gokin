@@ -119,6 +119,13 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 	case *ToolsListTool:
 		// Registry-aware cloning is handled by CloneRegistryForWorkDir.
 		return NewToolsListTool(nil)
+	case *TodoTool:
+		// Give each agent its OWN todo list. Sharing the foreground instance is a
+		// footgun: the todo tool REPLACES the full list on every call, so a
+		// sub-agent's todo update would clobber the foreground's task list — and
+		// it lets the agent loop's incomplete-work continuation read foreign
+		// todos. A fresh list keeps each agent's progress its own.
+		return NewTodoTool()
 	default:
 		return tool
 	}

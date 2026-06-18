@@ -1082,6 +1082,15 @@ func (a *Agent) GetToolsUsed() []string {
 	return result
 }
 
+// ToolsUsedCount returns how many tools have run this agent — a cheap, lock-safe
+// progress signal for the incomplete-work continuation (a rising count between
+// nudges means the model is acting, not just narrating).
+func (a *Agent) ToolsUsedCount() int {
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
+	return len(a.toolsUsed)
+}
+
 // SetPlanGoal sets the goal for the plan.
 func (a *Agent) SetPlanGoal(goal *PlanGoal) {
 	a.stateMu.Lock()
@@ -2618,6 +2627,12 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	// prompt are shared with the executor (tools/max_tokens.go, Tier-4 slice 2).
 	truncationContinuations := 0
 	const maxTruncationContinuations = tools.MaxTruncationContinuations
+	// Incomplete-work continuation (tools/incomplete_work.go, mirrors the
+	// executor): keep the sub-agent going when it stops with no tool calls but
+	// its OWN (per-agent isolated) todo list is unfinished. Progress-aware via
+	// the tool count, bounded by tools.MaxIncompleteWorkContinuations.
+	incompleteWorkStuck := 0
+	toolsUsedAtLastIncompleteNudge := -1
 
 	// API retry state — agents have no outer retry layer (unlike executor+message_processor),
 	// so we handle retries here to survive transient API errors (rate limits, timeouts, 500s).
@@ -3250,6 +3265,35 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			}
 
 			continue
+		}
+
+		// Incomplete-work continuation: the model stopped with no tool calls but
+		// its OWN todo list still has unfinished items — keep it going instead of
+		// finishing (the "narrates the next step then stops" failure). Checked
+		// BEFORE the verify-nudge/done-gate: if declared work remains, finish it
+		// before verifying intentionally-incomplete code. The agent's todo tool is
+		// now isolated per-agent (clone.go), so this reads THIS agent's list, not
+		// the foreground's. Bounded + progress-aware; skipped on max_tokens (its
+		// own continuation handles that above).
+		if resp.FinishReason != genai.FinishReasonMaxTokens {
+			if n, summary := tools.IncompleteTodoSummary(a.registry); n > 0 {
+				if a.ToolsUsedCount() > toolsUsedAtLastIncompleteNudge {
+					incompleteWorkStuck = 0 // a tool ran since the last nudge → progress
+				}
+				if incompleteWorkStuck < tools.MaxIncompleteWorkContinuations {
+					incompleteWorkStuck++
+					toolsUsedAtLastIncompleteNudge = a.ToolsUsedCount()
+					a.stateMu.Lock()
+					a.history = append(a.history, genai.NewContentFromText(
+						tools.IncompleteWorkContinuationPrompt(n, summary), genai.RoleUser))
+					a.stateMu.Unlock()
+					logging.Info("incomplete-work continuation (sub-agent): model stopped with unfinished todos",
+						"agent_type", a.Type, "incomplete", n, "attempt", incompleteWorkStuck)
+					continue
+				}
+				logging.Info("incomplete-work continuation budget exhausted (sub-agent)",
+					"agent_type", a.Type, "incomplete", n)
+			}
 		}
 
 		// Verify-before-done (sub-agent analogue of the foreground done-gate):
