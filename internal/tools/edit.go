@@ -995,21 +995,15 @@ var fuzzyStrategies = []fuzzyStrategy{
 			return strings.Join(lines, "\n")
 		},
 	},
-	{
-		name: "BlankLines",
-		normalize: func(s string) string {
-			lines := strings.Split(s, "\n")
-			wsRun := regexp.MustCompile(`[ \t]+`)
-			var result []string
-			for _, line := range lines {
-				normalized := strings.TrimSpace(wsRun.ReplaceAllString(line, " "))
-				if normalized != "" {
-					result = append(result, normalized)
-				}
-			}
-			return strings.Join(result, "\n")
-		},
-	},
+	// NOTE: every strategy here MUST be line-count-PRESERVING (one normalized
+	// line per original line). tryFuzzyReplace maps match positions found in the
+	// normalized lines back onto the ORIGINAL lines by the SAME index — which is
+	// only valid when the two have equal length. A "BlankLines" strategy that
+	// dropped blank lines used to live here; because it shortened the line list,
+	// its match indices pointed at the wrong original lines and silently
+	// corrupted the file (replaced/orphaned the wrong region) while reporting
+	// success. Do NOT add a strategy that changes line count — tryFuzzyReplace
+	// also guards against it, but the right place to prevent it is here.
 }
 
 // tryFuzzyReplace tries a chain of normalization strategies to find and replace old in content.
@@ -1043,6 +1037,13 @@ func tryFuzzyReplace(content, old, new string, replaceAll bool) (string, string,
 
 		// Map normalized positions back to original lines and replace.
 		normalizedLines := strings.Split(normalizedContent, "\n")
+		// Index-mapping safety: we slice the ORIGINAL contentLines with indices
+		// found in normalizedLines, which is only valid when normalization
+		// preserved line count. A strategy that changed it would replace the
+		// WRONG original lines and silently corrupt the file — skip it instead.
+		if len(normalizedLines) != len(contentLines) {
+			continue
+		}
 		normalizedOldLines := strings.Split(normalizedOld, "\n")
 		normalizedNewLines := strings.Split(new, "\n")
 		oldLineCount := len(normalizedOldLines)

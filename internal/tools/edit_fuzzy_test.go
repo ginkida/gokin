@@ -88,6 +88,46 @@ func TestTryFuzzyReplace_NoMatchReturnsError(t *testing.T) {
 	}
 }
 
+// TestTryFuzzyReplace_BlankLineMismatchErrorsNotCorrupts pins the fix for a
+// silent file-corruption bug: a blank-line-count mismatch (the model omitted an
+// internal blank line in old_string) used to "match" via the line-count-changing
+// BlankLines strategy, whose match indices pointed at the WRONG original lines —
+// gluing/orphaning code while reporting success. Every remaining strategy is
+// line-count-preserving, so this must now return a clean error (no contiguous
+// match), NEVER a mangled result that gets written to disk.
+func TestTryFuzzyReplace_BlankLineMismatchErrorsNotCorrupts(t *testing.T) {
+	// The file has a blank line inside the function body; old_string omits it.
+	content := "package main\n\nfunc Process() error {\n\tx := compute()\n\n\treturn save(x)\n}\n"
+	old := "func Process() error {\n\tx := compute()\n\treturn save(x)\n}"
+	newS := "func Process() error {\n\treturn save(compute())\n}"
+
+	got, strategy, err := tryFuzzyReplace(content, old, newS, false)
+	if err == nil {
+		t.Fatalf("blank-line mismatch must return a clean error, got a result via %q:\n%s", strategy, got)
+	}
+	if got != "" {
+		t.Errorf("error path must not return content (no partial corruption), got: %q", got)
+	}
+}
+
+// TestTryFuzzyReplace_LineCountPreservingStrategiesStayCorrect guards that the
+// surviving strategies never corrupt: a real whitespace-only mismatch still
+// produces a correct, intact replacement (no orphaned/duplicated lines).
+func TestTryFuzzyReplace_LineCountPreservingStrategiesStayCorrect(t *testing.T) {
+	// content has trailing whitespace the model's old_string lacks → fuzzy match.
+	content := "package main\n\nfunc foo() {  \n\treturn 1\n}\n"
+	old := "func foo() {\n\treturn 1\n}"
+	newS := "func foo() {\n\treturn 2\n}"
+
+	got, _, err := tryFuzzyReplace(content, old, newS, false)
+	if err != nil {
+		t.Fatalf("whitespace-only mismatch should still fuzzy-match: %v", err)
+	}
+	if !strings.Contains(got, "package main") || !strings.Contains(got, "return 2") || strings.Contains(got, "return 1") {
+		t.Fatalf("fuzzy replace corrupted/duplicated content:\n%s", got)
+	}
+}
+
 // End-to-end: Edit tool auto-invokes fuzzy matching when literal match
 // fails. The model should see a success, not an error, when only
 // whitespace differs.
