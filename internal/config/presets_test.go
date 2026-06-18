@@ -11,9 +11,9 @@ func TestApplyPreset(t *testing.T) {
 		wantModel    string
 		wantProvider string
 	}{
-		{"coding", true, "kimi-for-coding", "kimi"},
-		{"fast", true, "kimi-for-coding", "kimi"},
-		{"balanced", true, "kimi-for-coding", "kimi"},
+		{"coding", true, "glm-5.2", "glm"},
+		{"fast", true, "glm-5.2", "glm"},
+		{"balanced", true, "glm-5.2", "glm"},
 		{"creative", true, "MiniMax-M2.7", "minimax"},
 		{"ollama", true, "llama3.2", "ollama"},
 		{"kimi", true, "kimi-for-coding", "kimi"},
@@ -43,7 +43,7 @@ func TestApplyPreset(t *testing.T) {
 
 func TestApplyPresetTemperature(t *testing.T) {
 	cases := map[string]float32{
-		"coding":  0.6, // kimi-for-coding default
+		"coding":  0.6, // glm-5.2 coding default
 		"kimi":    0.6,
 		"glm":     0.7,
 		"ollama":  0.7,
@@ -60,8 +60,8 @@ func TestApplyPresetTemperature(t *testing.T) {
 
 func TestApplyPresetMaxTokens(t *testing.T) {
 	cases := map[string]int32{
-		"coding": 32768, // kimi-for-coding output cap
-		"fast":   32768,
+		"coding": 65536, // glm-5.2 default coding cap (headroom)
+		"fast":   65536,
 		"kimi":   32768,
 		"glm":    131072,
 		"ollama": 4096,

@@ -8,28 +8,28 @@ type ModelPreset struct {
 	MaxOutputTokens int32
 }
 
-// ModelPresets contains predefined model configurations. Kimi Coding Plan
-// is the default across coding/fast/balanced — gokin's primary target is
-// active coding sessions, and kimi-for-coding (K2.6) has the largest
-// context window (262K) of any subscription-tier model we ship against.
+// ModelPresets contains predefined model configurations. GLM (Z.AI) is the
+// default across coding/fast/balanced — gokin's primary target is active coding,
+// and glm-5.2 has a 1M context window, verified implicit prefix caching, and full
+// extended-thinking support.
 var ModelPresets = map[string]ModelPreset{
 	"coding": {
-		Provider:        "kimi",
-		Name:            "kimi-for-coding",
+		Provider:        "glm",
+		Name:            "glm-5.2",
 		Temperature:     0.6,
-		MaxOutputTokens: 32768,
+		MaxOutputTokens: 65536,
 	},
 	"fast": {
-		Provider:        "kimi",
-		Name:            "kimi-for-coding",
+		Provider:        "glm",
+		Name:            "glm-5.2",
 		Temperature:     0.6,
-		MaxOutputTokens: 32768,
+		MaxOutputTokens: 65536,
 	},
 	"balanced": {
-		Provider:        "kimi",
-		Name:            "kimi-for-coding",
+		Provider:        "glm",
+		Name:            "glm-5.2",
 		Temperature:     0.6,
-		MaxOutputTokens: 32768,
+		MaxOutputTokens: 65536,
 	},
 	"creative": {
 		Provider:        "minimax",

@@ -66,7 +66,7 @@ func buildSetupChoices() []setupChoice {
 	// then the other cloud providers, then Ollama. Registry order stays untouched
 	// for programmatic callers; the wizard is UI-only.
 	ordered := make([]config.ProviderDef, 0, len(config.Providers))
-	priority := []string{"kimi", "glm", "deepseek", "minimax", "ollama"}
+	priority := []string{"glm", "kimi", "deepseek", "minimax", "ollama"}
 	seen := map[string]bool{}
 	for _, name := range priority {
 		if p := config.GetProvider(name); p != nil {
@@ -85,10 +85,10 @@ func buildSetupChoices() []setupChoice {
 		case "glm":
 			choices = append(choices, setupChoice{
 				Action: "api:" + p.Name,
-				Title:  "GLM Coding Plan",
+				Title:  "GLM Coding Plan (recommended)",
 				Lines: []string{
-					"GLM-5.x models via Z.ai (200K context)",
-					"Optimized for code tasks",
+					"GLM-5.2 via Z.ai — 1M context, extended thinking",
+					"Implicit prompt caching (big token savings)",
 					"Budget-friendly (~$3/month)",
 					"Get key at: " + p.SetupKeyURL,
 				},
@@ -120,7 +120,7 @@ func buildSetupChoices() []setupChoice {
 		case "kimi":
 			choices = append(choices, setupChoice{
 				Action: "api:" + p.Name,
-				Title:  "Kimi Coding Plan (recommended)",
+				Title:  "Kimi Coding Plan",
 				Lines: []string{
 					"K2.6 model, 262K context, extended thinking",
 					"Anthropic-compatible via api.kimi.com/coding",

@@ -485,24 +485,26 @@ func ResolveThinkingMode(mode string) string {
 	}
 }
 
-// DefaultConfig returns the default configuration. Kimi Coding Plan is the
-// default provider — gokin's primary target is active coding, and the
-// Coding Plan endpoint (api.kimi.com/coding) serves kimi-for-coding (K2.6)
-// with a 262K context window. Users with GLM/MiniMax/Ollama credentials
-// can switch via /model or /provider at any time.
+// DefaultConfig returns the default configuration. GLM (Z.AI) is the default
+// provider — it's the project's primary target: glm-5.2 has a 1M context window,
+// verified implicit prefix caching (api.z.ai/api/anthropic, ~99% prefix
+// cache_read), and full extended-thinking support (enable/disable + preserved/
+// interleaved signed thinking blocks). The BaseURL is derived from the provider
+// at client construction (DefaultGLMBaseURL). Users with Kimi/DeepSeek/MiniMax/
+// Ollama credentials can switch via /model or /provider at any time.
 func DefaultConfig() *Config {
 	return &Config{
 		API: APIConfig{
-			Backend: "kimi",
+			Backend: "glm",
 			Retry: RetryConfig{
 				MaxRetries: DefaultMaxRetries,
 				RetryDelay: DefaultRetryDelay,
 			},
 		},
 		Model: ModelConfig{
-			Name:            "kimi-for-coding", // Matches default backend "kimi"
+			Name:            "glm-5.2", // Matches default backend "glm"
 			Temperature:     0.6,
-			MaxOutputTokens: 32768,
+			MaxOutputTokens: 65536,  // GLM headroom (profile max 131072) — avoids the max_tokens truncation a 32K cap caused
 			EnableThinking:  false,  // legacy static flag — overridden per-request by ThinkingMode/router
 			ThinkingBudget:  0,      // 0 = use the per-request/per-agent computed budget
 			ThinkingMode:    "auto", // think when hard, skip when easy — applied during work, not a manual toggle

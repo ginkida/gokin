@@ -37,20 +37,23 @@ func TestBuildSetupChoices_APIProviders(t *testing.T) {
 	}
 }
 
-// TestBuildSetupChoices_KimiFirst verifies Kimi is shown first in the wizard.
-// v0.69 made Kimi the default provider; the wizard's ordering must reflect
-// that — not the registry order (which is preserved for other callers).
-func TestBuildSetupChoices_KimiFirst(t *testing.T) {
+// TestBuildSetupChoices_GLMFirst verifies GLM is shown first in the wizard.
+// v0.100.31 made GLM (Z.AI) the default/primary provider; the wizard's ordering
+// must reflect that — not the registry order (which is preserved for other callers).
+func TestBuildSetupChoices_GLMFirst(t *testing.T) {
 	choices := buildSetupChoices()
 	if len(choices) == 0 {
 		t.Fatal("no choices")
 	}
 	first := choices[0]
-	if first.Action != "api:kimi" {
-		t.Errorf("first choice action = %q, want %q", first.Action, "api:kimi")
+	if first.Action != "api:glm" {
+		t.Errorf("first choice action = %q, want %q", first.Action, "api:glm")
 	}
-	if !strings.Contains(strings.ToLower(first.Title), "kimi") {
-		t.Errorf("first choice title = %q, want to contain 'Kimi'", first.Title)
+	if !strings.Contains(strings.ToLower(first.Title), "glm") {
+		t.Errorf("first choice title = %q, want to contain 'GLM'", first.Title)
+	}
+	if !strings.Contains(strings.ToLower(first.Title), "recommended") {
+		t.Errorf("GLM (the default) should be labeled recommended, got %q", first.Title)
 	}
 }
 
