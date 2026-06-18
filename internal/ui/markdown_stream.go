@@ -425,11 +425,12 @@ func (p *MarkdownStreamParser) renderMarkdownLine(line string) string {
 		default:
 			headingStyle = headingStyle.Foreground(ColorText)
 		}
-		prefix := strings.Repeat("#", level) + " "
-		// Allow inline code in headings, strip bold/strike markers, apply heading color
+		// Render the heading as styled (bold + per-level color) text WITHOUT the
+		// literal #/##/### markup — the hashes are markup, not content, and the
+		// bold+color already carries the hierarchy (CC renders headings this way).
 		cleanText := stripMarkdownMarkers(text)
 		styledText := p.renderInlineCode(cleanText)
-		return applyBaseStyle(prefix+styledText, headingStyle)
+		return applyBaseStyle(styledText, headingStyle)
 	}
 
 	// Blockquotes: > text

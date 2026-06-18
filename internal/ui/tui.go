@@ -121,6 +121,7 @@ type Model struct {
 	settingsModel    string
 	settingsProvider string
 	onSettingToggle  func(key string, on bool)
+	onOpenSettings   func() // Opens the /settings modal (Ctrl+S + palette action)
 
 	// Masked API-key entry modal (/login <provider> with no key)
 	keyEntryInput       textinput.Model
@@ -928,6 +929,11 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 
 // handleCommandPaletteKeys handles keys in command palette state.
 func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
+	// Inline argument entry takes over every key while active.
+	if m.commandPalette.InArgEntry() {
+		return m.handlePaletteArgKeys(msg)
+	}
+
 	switch msg.Type {
 	case tea.KeyEscape:
 		m.commandPalette.Hide()
@@ -935,6 +941,13 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 		return m.input.Focus()
 
 	case tea.KeyEnter:
+		// A slash command that needs a required argument drops into the inline
+		// arg-entry step instead of running bare (which would only print Usage).
+		if sel := m.commandPalette.GetSelected(); sel != nil && PaletteNeedsArg(*sel) {
+			m.commandPalette.BeginArgEntry(*sel)
+			return nil
+		}
+
 		cmd := m.commandPalette.Execute()
 		if cmd == nil {
 			m.state = StateInput
@@ -959,10 +972,14 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 		case CommandTypeAction:
-			// CommandPalette.Execute already runs action callbacks. Preserve
-			// any state transition made by that action (for example Ctrl+K
-			// opening the model selector) instead of forcing the UI back to
-			// input and undoing the visible result.
+			// ID-based actions are dispatched on the LIVE model here (closures
+			// captured at registration mutate a detached copy). Legacy actions
+			// with no ID already ran their closure inside Execute(); preserve any
+			// state they set (e.g. a model selector opening) rather than forcing
+			// the UI back to input.
+			if cmd.ActionID != "" {
+				return m.dispatchPaletteAction(cmd.ActionID)
+			}
 			if m.state == StateCommandPalette {
 				m.state = StateInput
 				return m.input.Focus()
@@ -996,6 +1013,129 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 			m.commandPalette.AppendQuery(string(msg.Runes))
 		}
 		return nil
+	}
+}
+
+// handlePaletteArgKeys drives the inline argument-entry step. Enter submits the
+// assembled "/name args" line, Esc returns to the command list, and the rest
+// types into the argument field.
+func (m *Model) handlePaletteArgKeys(msg tea.KeyMsg) tea.Cmd {
+	switch msg.Type {
+	case tea.KeyEnter:
+		full := m.commandPalette.SubmitArgEntry()
+		if strings.TrimSpace(full) == "" {
+			m.state = StateInput
+			return m.input.Focus()
+		}
+		m.state = StateProcessing
+		m.streamStartTime = time.Now()
+		m.responseToolDuration = 0
+		m.responseToolCount = 0
+		m.responseToolFailures = 0
+		m.output.AppendLine(m.styles.FormatUserMessage(full))
+		m.output.AppendLine("")
+		if m.onSubmit != nil {
+			m.onSubmit(full)
+		}
+		return nil
+	case tea.KeyEscape:
+		m.commandPalette.CancelArgEntry()
+		return nil
+	case tea.KeyBackspace:
+		m.commandPalette.BackspaceArg()
+		return nil
+	case tea.KeySpace:
+		m.commandPalette.AppendArg(" ")
+		return nil
+	case tea.KeyRunes:
+		m.commandPalette.AppendArg(string(msg.Runes))
+		return nil
+	}
+	return nil
+}
+
+// dispatchPaletteAction runs a palette action by id on the LIVE model. This is
+// the correct place for any effect that mutates a Model field — running it via
+// the registration-time closure would mutate a detached copy (Bubble Tea value
+// receiver). If the action does not open its own modal/state, the palette
+// returns to the input.
+func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
+	switch id {
+	case paletteActionModelSelector:
+		m.openModelSelector()
+	case paletteActionSettings:
+		if m.onOpenSettings != nil {
+			m.onOpenSettings()
+		}
+	case paletteActionShortcuts:
+		if m.shortcutsOverlay != nil {
+			m.shortcutsOverlay.Show()
+			m.state = StateShortcutsOverlay
+		}
+	case paletteActionTodos:
+		m.todosVisible = !m.todosVisible
+		if m.todosVisible {
+			m.cleanupStaleCoordinatedTasks()
+		}
+		if m.toastManager != nil {
+			m.toastManager.ShowInfo(toggleStateLabel("Todos", m.todosVisible))
+		}
+	case paletteActionActivityFeed:
+		if m.activityFeed != nil {
+			m.activityFeed.Toggle()
+			if m.toastManager != nil {
+				m.toastManager.ShowInfo(toggleStateLabel("Activity feed", m.activityFeed.IsVisible()))
+			}
+		}
+	case paletteActionAgentTree:
+		if m.agentTreePanel != nil {
+			m.agentTreePanel.Toggle()
+			if m.toastManager != nil {
+				m.toastManager.ShowInfo(toggleStateLabel("Agent tree", m.agentTreePanel.IsVisible()))
+			}
+		}
+	case paletteActionObservatory:
+		if m.observatoryPanel != nil {
+			m.observatoryPanel.Toggle()
+			if m.observatoryPanel.IsVisible() {
+				m.state = StateContextObservatory
+			}
+		}
+	case paletteActionPlanPanel:
+		if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
+			m.planProgressPanel.Toggle()
+		}
+	case paletteActionPlanningMode:
+		if m.onPlanningModeToggle != nil {
+			m.onPlanningModeToggle()
+		}
+	case paletteActionClearScreen:
+		m.output.Clear()
+	case paletteActionCompactMode:
+		m.toggleCompactMode()
+	}
+
+	// If the action transitioned to its own modal/state, keep it; otherwise
+	// fall back to the input so the palette doesn't strand the UI.
+	if m.state == StateCommandPalette {
+		m.state = StateInput
+		return m.input.Focus()
+	}
+	return nil
+}
+
+// toggleCompactMode flips compact mode and resizes the output viewport. Shared
+// by the Ctrl+Shift+C binding and the palette "Toggle Compact Mode" action so
+// the two can't drift.
+func (m *Model) toggleCompactMode() {
+	m.CompactMode = !m.CompactMode
+	if m.CompactMode {
+		m.output.SetSize(m.width, max(m.height/3, 3))
+	} else {
+		m.output.SetSize(m.width, max(m.height-5, 3))
+	}
+	if m.toastManager != nil {
+		m.toastManager.ShowInfo(toggleStateLabel("Compact mode", m.CompactMode))
 	}
 }
 
@@ -1108,6 +1248,16 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if msg.Type == tea.KeyCtrlP && m.state == StateInput {
 		m.commandPalette.Show()
 		m.state = StateCommandPalette
+		return nil
+	}
+
+	// Ctrl+S opens the interactive settings modal — the richest no-typing
+	// configure surface, so give it a direct key in addition to the palette
+	// "Open Settings" action and the /settings command.
+	if msg.Type == tea.KeyCtrlS && m.state == StateInput {
+		if m.onOpenSettings != nil {
+			m.onOpenSettings()
+		}
 		return nil
 	}
 
@@ -1228,13 +1378,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 
 	// Handle Ctrl+Shift+C for compact mode toggle (only when in input state)
 	if msg.String() == "ctrl+shift+c" && m.state == StateInput {
-		m.CompactMode = !m.CompactMode
-		if m.CompactMode {
-			m.output.SetSize(m.width, max(m.height/3, 3))
-		} else {
-			m.output.SetSize(m.width, max(m.height-5, 3))
-		}
-		m.toastManager.ShowInfo(toggleStateLabel("Compact mode", m.CompactMode))
+		m.toggleCompactMode()
 		return nil
 	}
 
@@ -1752,13 +1896,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if msg.Duration > 0 {
 			m.lastRequestLatency = msg.Duration
 		}
-		// Render response metadata footer (or minimal separator if no data)
-		footer := m.renderResponseMetadata(msg)
-		if footer == "" {
-			dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-			footer = dimStyle.Render("───")
+		// Render the response metadata footer. When there's nothing measurable,
+		// emit NO ruler — turns are separated by whitespace + the next user echo
+		// (CC idiom), so a bare "───" between every turn is chrome we don't want.
+		if footer := m.renderResponseMetadata(msg); footer != "" {
+			m.output.AppendLine(footer)
 		}
-		m.output.AppendLine(footer)
 		m.output.AppendLine("")
 		m.responseToolDuration = 0
 		m.responseToolCount = 0
@@ -2718,10 +2861,14 @@ func (m *Model) buildToolResultBody(
 // failure cards do. Higher-stakes events still get borders; routine
 // success blends with the rest of the agent's output.
 func (m *Model) emitToolResultCard(titleLine, body string) {
-	m.output.AppendLine("    " + titleLine)
+	// Nest the result under its call with the ⎿ corner (CC idiom) — the same
+	// connector gokin already uses for the dedup stub / diff preview — so a tool
+	// batch reads as `⏺ call` → `⎿ result` pairs instead of 2N flat lines that
+	// repeat the tool name. Body lines align under the corner content.
+	m.output.AppendLine("    ⎿ " + titleLine)
 	if body != "" {
 		for line := range strings.SplitSeq(body, "\n") {
-			m.output.AppendLine("    " + line)
+			m.output.AppendLine("      " + line)
 		}
 	}
 	m.output.AppendLine("")
@@ -3128,6 +3275,13 @@ func (m Model) View() string {
 		builder.WriteString(m.input.View())
 	}
 	if m.state == StateInput {
+		// Mode cue under the input (plan/YOLO only). Gated to active conversations
+		// so it doesn't duplicate the welcome panel's mode hint on the idle screen.
+		if !m.output.IsEmpty() {
+			if mode := m.inputModeLine(); mode != "" {
+				builder.WriteString("\n" + mode)
+			}
+		}
 		// Command hints
 		inputText := m.input.Value()
 		if strings.HasPrefix(inputText, "/") && len(inputText) > 1 {

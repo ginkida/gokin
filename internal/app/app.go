@@ -992,14 +992,9 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		if browsePath, ok := strings.CutPrefix(result, "__browse:"); ok {
 			a.safeSendToProgram(ui.FileBrowserRequestMsg{StartPath: browsePath})
 		} else if result == commands.SettingsMarker {
-			// /settings: open the interactive modal with a fresh toggle snapshot
-			// + the current model/provider for the header.
-			settingsMsg := ui.OpenSettingsMsg{Items: a.buildSettingItems()}
-			if cfg := a.GetConfig(); cfg != nil {
-				settingsMsg.Model = cfg.Model.Name
-				settingsMsg.Provider = runtimeProviderForConfig(cfg)
-			}
-			a.safeSendToProgram(settingsMsg)
+			// /settings: open the interactive modal (also reachable via Ctrl+S
+			// and the palette "Open Settings" action).
+			a.openSettingsModal()
 		} else if provider, ok := strings.CutPrefix(result, commands.LoginKeyMarker); ok {
 			// /login <provider> with no key: open the masked key-entry modal so
 			// the key is captured securely instead of being typed as a message.
@@ -2683,6 +2678,19 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 
 	logging.Info("configuration applied successfully", "model", modelName)
 	return nil
+}
+
+// openSettingsModal sends OpenSettingsMsg with a fresh toggle snapshot plus the
+// current model/provider for the header. Shared by the /settings command, the
+// Ctrl+S binding, and the palette "Open Settings" action so all three open the
+// exact same screen.
+func (a *App) openSettingsModal() {
+	settingsMsg := ui.OpenSettingsMsg{Items: a.buildSettingItems()}
+	if cfg := a.GetConfig(); cfg != nil {
+		settingsMsg.Model = cfg.Model.Name
+		settingsMsg.Provider = runtimeProviderForConfig(cfg)
+	}
+	a.safeSendToProgram(settingsMsg)
 }
 
 // buildSettingItems snapshots the curated settings toggles for the /settings

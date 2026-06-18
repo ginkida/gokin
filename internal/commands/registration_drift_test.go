@@ -128,7 +128,6 @@ func TestNoStaleAutocompleteEntries(t *testing.T) {
 	// listed here with a justification.
 	allowedStale := map[string]string{
 		"instructions":          "surfaced via app handler, not registered as a Command",
-		"reasoning":             "shorthand for /model reasoning — handled inline",
 		"quickstart":            "shown via /help mode, not a standalone Command",
 		"register-agent-type":   "agent registry sub-command, separate handler",
 		"unregister-agent-type": "agent registry sub-command, separate handler",

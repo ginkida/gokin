@@ -88,6 +88,41 @@ func TestAdaptiveStreamRetryPolicyKimiDefaults(t *testing.T) {
 	}
 }
 
+// TestAdaptiveStreamRetryPolicyGLMDefaults pins that GLM — the default provider,
+// which stalls mid-stream the same way kimi does ("stream idle after partial
+// response") — gets the same extra cold + partial retry budget.
+func TestAdaptiveStreamRetryPolicyGLMDefaults(t *testing.T) {
+	policy := AdaptiveStreamRetryPolicy("glm")
+	if policy.MaxRetries < 3 {
+		t.Errorf("glm MaxRetries = %d, want >= 3", policy.MaxRetries)
+	}
+	if policy.MaxPartialRetries < 2 {
+		t.Errorf("glm MaxPartialRetries = %d, want >= 2 (GLM stalls mid-stream like kimi)", policy.MaxPartialRetries)
+	}
+}
+
+// TestDecideStreamRetryPartialGLMGetsTwoRetries pins the end-to-end effect: a
+// GLM partial stream-idle (the user-reported "function response error
+// (stream_idle_timeout)") is retried TWICE before surfacing, not once.
+func TestDecideStreamRetryPartialGLMGetsTwoRetries(t *testing.T) {
+	policy := AdaptiveStreamRetryPolicy("glm")
+	partialErr := &ErrStreamIdleTimeout{Timeout: 180 * time.Second, Partial: true}
+	opts := StreamRetryOptions{AllowPartial: true}
+
+	for _, used := range []int{0, 1} {
+		d := DecideStreamRetry(policy, partialErr, 0, used, nil, opts)
+		if !d.ShouldRetry {
+			t.Errorf("GLM partial stall with %d partial retries used should still retry (budget %d)", used, policy.MaxPartialRetries)
+		}
+		if !d.Partial {
+			t.Errorf("a partial stream-idle decision should be marked Partial")
+		}
+	}
+	if d := DecideStreamRetry(policy, partialErr, 0, 2, nil, opts); d.ShouldRetry {
+		t.Errorf("GLM partial stall should stop after %d partial retries", policy.MaxPartialRetries)
+	}
+}
+
 func TestAdaptiveRetryConfigFailureStreak(t *testing.T) {
 	provider := "test-adaptive-streak"
 	// Make it slightly healthy first

@@ -161,6 +161,16 @@ func (m Model) liveActivityAccentColor() lipgloss.Color {
 	}
 }
 
+// withElapsed appends the elapsed wall-clock once past the "barely started"
+// threshold, so the working line answers "is it hung, or working?" the way CC's
+// `(12s)` does. Below 3s it returns s unchanged (no jittery early clock).
+func (m Model) withElapsed(s string) string {
+	if elapsed := time.Since(m.streamStartTime); elapsed >= 3*time.Second {
+		return s + " · " + format.Duration(elapsed)
+	}
+	return s
+}
+
 func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	if m.currentTool != "" {
 		title := displayToolName(m.currentTool)
@@ -188,24 +198,27 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 		}
 		switch {
 		case cleaned != "":
-			return "Writing: " + cleaned
+			return m.withElapsed("Writing: " + cleaned)
 		case m.responseToolCount > 0:
-			return "Writing response · " + formatToolRunSummary(m.responseToolCount, m.responseToolFailures, true)
+			return m.withElapsed("Writing response · " + formatToolRunSummary(m.responseToolCount, m.responseToolFailures, true))
 		default:
-			return "Writing response"
+			return m.withElapsed("Writing response")
 		}
 	}
 
 	if label := strings.TrimSpace(m.processingLabel); label != "" {
-		// Append elapsed wall-clock once we're past the "barely started"
-		// threshold. Users ask "has it really been thinking for a while?" —
-		// this answers it without waiting for a tool call to land. Matches
-		// the behaviour the old spinner-status block provided before the
-		// card took over rendering.
-		if elapsed := time.Since(m.streamStartTime); elapsed >= 3*time.Second {
-			label += " · " + format.Duration(elapsed)
-		}
-		return label
+		// Append elapsed wall-clock once past the "barely started" threshold —
+		// answers "has it really been thinking for a while?" without waiting for
+		// a tool call to land.
+		return m.withElapsed(label)
+	}
+
+	// The agent's specific activity ("Implementing backup/restore", set via
+	// ActivityLabelMsg) — surfaced HERE (the card is the active renderer during
+	// processing) instead of only in the now-suppressed inline spinner block, so
+	// the working line reads the real task rather than a generic "Thinking".
+	if act := strings.TrimSpace(m.currentActivity); act != "" {
+		return m.withElapsed(act)
 	}
 
 	if len(m.backgroundTasks) > 0 {

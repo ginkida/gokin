@@ -347,7 +347,10 @@ func DefaultStyles() *Styles {
 
 		Input: lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(ColorPrimary).
+			// Quiet neutral frame (not the loud violet brand accent) so the input
+			// box doesn't dominate every idle frame — the model's prose, and the
+			// violet › prompt, are the focus (CC keeps the input border subtle).
+			BorderForeground(ColorBorder).
 			Padding(0, 1),
 
 		Viewport: lipgloss.NewStyle().
@@ -557,22 +560,25 @@ func (s *Styles) FormatToolExecuting(name string, args map[string]any) string {
 	return exeStyle.Render(spinner[idx] + " " + name)
 }
 
-// FormatToolExecutingBlock formats a tool execution as a compact line.
-// Format: ▸ Read /path/to/file.go  (per-tool colored icon)
-func (s *Styles) FormatToolExecutingBlock(name string, args map[string]any) string {
-	// Per-tool colored icon (using existing ToolIcons + GetToolIconColor)
-	icon := GetToolIcon(name)
-	iconColor := GetToolIconColor(name)
-	iconStyle := lipgloss.NewStyle().Foreground(iconColor)
+// toolBullet is the single shared marker for every tool call (CC idiom). One
+// calm aligned bullet beats a confetti of 30 per-tool glyphs; tools stay
+// distinguishable via the per-tool *name* color below.
+const toolBullet = "⏺"
 
-	// Tool name — same color as icon but not bold
-	nameStyle := lipgloss.NewStyle().Foreground(iconColor)
+// FormatToolExecutingBlock formats a tool execution as a compact line.
+// Format: ⏺ Read /path/to/file.go  (one accent bullet, per-tool name color)
+func (s *Styles) FormatToolExecutingBlock(name string, args map[string]any) string {
+	// One shared accent bullet for every tool — quiet and aligned.
+	bulletStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+
+	// Tool name — per-tool color (so tools are still distinguishable) but not bold.
+	nameStyle := lipgloss.NewStyle().Foreground(GetToolIconColor(name))
 
 	// Args — soft white, not gray (more readable)
 	argsStyle := lipgloss.NewStyle().Foreground(ColorText)
 
 	var result strings.Builder
-	result.WriteString(iconStyle.Render(icon + " "))
+	result.WriteString(bulletStyle.Render(toolBullet + " "))
 	result.WriteString(nameStyle.Render(capitalizeToolName(name)))
 
 	argsStr := buildClaudeCodeArgs(name, args)

@@ -79,6 +79,9 @@ func (m Model) renderStatusBarCompact() string {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		requiredRight = append(requiredRight, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
 	}
+	if h := m.interruptHint(); h != "" {
+		requiredRight = append(requiredRight, h)
+	}
 
 	return renderFittedStatusLine(m.width, left, m.statusBarHintSegments(true), requiredRight)
 }
@@ -142,6 +145,11 @@ func (m Model) minimalStatusSegments() []string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("ctx:%.0f%%", pct*100)))
 	}
 
+	// Even on the tightest layout, keep a cue that Esc cancels a busy turn.
+	if m.state == StateProcessing || m.state == StateStreaming {
+		parts = append(parts, lipgloss.NewStyle().Foreground(ColorDim).Render("esc"))
+	}
+
 	return parts
 }
 
@@ -172,6 +180,9 @@ func (m Model) renderStatusBarMedium() string {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		requiredRight = append(requiredRight, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
 	}
+	if h := m.interruptHint(); h != "" {
+		requiredRight = append(requiredRight, h)
+	}
 
 	return renderFittedStatusLine(m.width, left, m.statusBarHintSegments(false), requiredRight)
 }
@@ -201,6 +212,10 @@ func (m Model) renderStatusBarFull() string {
 			mcpColor = ColorError
 		}
 		requiredRight = append(requiredRight, lipgloss.NewStyle().Foreground(mcpColor).Render(fmt.Sprintf("MCP %d/%d", m.mcpHealthy, m.mcpTotal)))
+	}
+
+	if h := m.interruptHint(); h != "" {
+		requiredRight = append(requiredRight, h)
 	}
 
 	left := joinStatusSegments(leftParts)
@@ -472,6 +487,10 @@ func (m Model) renderEngineStatus() string {
 			status += fmt.Sprintf(" ×%d", active)
 		}
 		color = GetToolIconColor(m.currentTool)
+		// No leading dot for active work — the live card already shows an animated
+		// spinner for the same state; a second static ●/○ on the next row is pure
+		// duplication.
+		icon = ""
 	case m.state == StateStreaming:
 		status = "WRITING"
 		if m.responseToolCount > 0 {
@@ -479,10 +498,10 @@ func (m Model) renderEngineStatus() string {
 		}
 		if m.responseToolFailures > 0 {
 			color = ColorWarning
-			icon = MessageIcons["warning"]
+			icon = MessageIcons["warning"] // keep the warning marker — a real signal
 		} else {
 			color = ColorSuccess
-			icon = MessageIcons["pending"]
+			icon = "" // card spinner already marks "busy"
 		}
 	case m.planProgressMode && m.planProgress != nil && m.planProgress.TotalSteps > 0:
 		status = fmt.Sprintf("PLAN %d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
@@ -493,6 +512,7 @@ func (m Model) renderEngineStatus() string {
 			status = "THINKING"
 		}
 		color = ColorSecondary
+		icon = "" // card spinner already marks "busy"
 	case m.breakerHalfOpen():
 		// Half-open breaker with no active retry/work — surface it so an idle
 		// "recovering" provider isn't invisible. Lowest priority: any active
@@ -505,6 +525,9 @@ func (m Model) renderEngineStatus() string {
 		return ""
 	}
 
+	if icon == "" {
+		return engineStyle.Foreground(color).Render(status)
+	}
 	return engineStyle.Foreground(color).Render(icon + " " + status)
 }
 
@@ -801,11 +824,24 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 		return []shortcutHint{{"↑↓", "Navigate"}, {"Enter", "Confirm"}, {"esc", "Cancel"}}
 	case StateModelSelector:
 		return []shortcutHint{{"↑↓", "Navigate"}, {"Enter", "Select"}, {"esc", "Cancel"}}
-	case StateProcessing, StateStreaming:
-		return []shortcutHint{{"Esc", "interrupt"}}
 	default:
+		// Esc-interrupt during Processing/Streaming is NOT a droppable hint here —
+		// it's a required, always-visible segment (see interruptHint), because
+		// cancellation is the one action the user must never lose under width
+		// pressure.
 		return nil
 	}
+}
+
+// interruptHint returns the always-visible "Esc interrupt" status segment during
+// a busy turn. Interrupt is the single always-available action while the agent
+// works, so it is appended to the REQUIRED (non-droppable) right side rather than
+// riding the optional hints that vanish when the bar is crowded. Empty otherwise.
+func (m Model) interruptHint() string {
+	if m.state == StateProcessing || m.state == StateStreaming {
+		return lipgloss.NewStyle().Foreground(ColorDim).Render("Esc interrupt")
+	}
+	return ""
 }
 
 // shortenModelName returns a shortened model name for status-bar display.

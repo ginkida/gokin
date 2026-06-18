@@ -1300,7 +1300,7 @@ func getCommandExample(name string) string {
 		"save":     "  /save                — save current session for later /resume\n  /save mywork         — save with custom name (refuses to overwrite by default)\n  /save mywork --force — overwrite an existing 'mywork' checkpoint",
 		"compact":  "  /compact             — summarize old messages to free context space",
 		"clear":    "  /clear               — start fresh (saves active plan for /resume-plan)",
-		"theme":    "  /theme dark          — soft purple/cyan dark theme\n  /theme macos          — Apple-inspired theme\n  /theme light          — for light terminal backgrounds",
+		"theme":    "  /theme               — show the active UI theme (gokin ships one unified Graphite + violet theme)",
 		"doctor":   "  /doctor              — check API key, git, config, and project setup",
 		"login":    "  /login glm <key>          — set Z.AI / GLM key\n  /login deepseek <key>     — set DeepSeek key\n  /login kimi <key>         — set Kimi Coding Plan key\n  /login minimax <key>      — set MiniMax key",
 		"undo":     "  /undo                — revert the last file change made by the AI",

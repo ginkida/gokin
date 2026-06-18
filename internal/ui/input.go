@@ -125,7 +125,9 @@ func NewInputModel(styles *Styles, workDir string) InputModel {
 	// eye to where typing happens and gives the input area a typographic
 	// anchor that survives across themes via ColorPrimary.
 	ta.Prompt = "› "
-	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
+	// Violet glyph as the typographic anchor, but un-bold — with the quiet input
+	// border the prompt no longer needs to shout to mark where typing happens.
+	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(ColorPrimary)
 	ta.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(ColorMuted)
 
 	return InputModel{
@@ -166,9 +168,6 @@ func DefaultCommands() []CommandInfo {
 			// to providers removed during the v0.65 trim.
 			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
 			Usage: "/model [name]"},
-		{Name: "reasoning", Description: "Set reasoning effort", Category: "Session",
-			Args:  []ArgInfo{{Name: "level", Required: false, Type: "option", Options: []string{"none", "low", "medium", "high", "xhigh"}}},
-			Usage: "/reasoning [none|low|medium|high|xhigh]"},
 		{Name: "clear", Description: "Clear conversation history", Category: "Session"},
 		{Name: "compact", Description: "Force context compaction", Category: "Session"},
 		{Name: "save", Description: "Save current session", Category: "Session",
@@ -284,12 +283,11 @@ func DefaultCommands() []CommandInfo {
 		{Name: "sandbox", Description: "Toggle bash sandbox mode", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
 			Usage: "/sandbox [on|off]"},
-		{Name: "thinking", Description: "Toggle extended thinking display", Category: "Tools",
-			Args:  []ArgInfo{{Name: "value", Required: false, Type: "option", Options: []string{"on", "off"}}},
-			Usage: "/thinking [on|off|<tokens>]"},
-		{Name: "theme", Description: "Change UI theme", Category: "Tools",
-			Args:  []ArgInfo{{Name: "name", Required: false, Type: "option", Options: []string{"dark", "macos", "light"}}},
-			Usage: "/theme [dark|macos|light]"},
+		{Name: "thinking", Description: "Reasoning: auto, on, off, or a token budget", Category: "Tools",
+			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"auto", "on", "off"}}},
+			Usage: "/thinking [auto|on|off|<budget>]"},
+		{Name: "theme", Description: "Show the active UI theme", Category: "Tools",
+			Usage: "/theme"},
 		{Name: "register-agent-type", Description: "Register a custom agent type", Category: "Tools",
 			Args:  []ArgInfo{{Name: "name", Required: true, Type: "string"}, {Name: "description", Required: true, Type: "string"}},
 			Usage: `/register-agent-type <name> "<desc>" [--tools ...]`},

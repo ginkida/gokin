@@ -58,6 +58,7 @@ func DefaultShortcuts() []ShortcutCategory {
 			Name: "Command Center",
 			Shortcuts: []Shortcut{
 				{Keys: []string{"Ctrl", "p"}, Description: "Command Palette (All Actions)"},
+				{Keys: []string{"Ctrl", "S"}, Description: "Open settings (toggles)"},
 				{Keys: []string{"Ctrl", "K"}, Description: "Open model selector"},
 				{Keys: []string{"Ctrl", "E"}, Description: "Expand / collapse last tool output"},
 				{Keys: []string{"E"}, Description: "Expand / collapse all tool outputs"},

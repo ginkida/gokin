@@ -4,6 +4,25 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// Palette action IDs. These are dispatched on the LIVE model in
+// dispatchPaletteAction (handleCommandPaletteKeys), NOT via the registration-
+// time Action closure — closures capture a detached Model copy in production
+// (Bubble Tea value-receiver semantics), so anything mutating a Model field
+// (state, panel-visible flags) must route through an ID instead.
+const (
+	paletteActionModelSelector = "model_selector"
+	paletteActionSettings      = "settings"
+	paletteActionShortcuts     = "shortcuts"
+	paletteActionTodos         = "todos"
+	paletteActionActivityFeed  = "activity_feed"
+	paletteActionAgentTree     = "agent_tree"
+	paletteActionObservatory   = "observatory"
+	paletteActionPlanPanel     = "plan_panel"
+	paletteActionPlanningMode  = "planning_mode"
+	paletteActionClearScreen   = "clear_screen"
+	paletteActionCompactMode   = "compact_mode"
+)
+
 // SetCallbacks sets the callback functions.
 func (m *Model) SetCallbacks(onSubmit func(string), onQuit func()) {
 	m.onSubmit = onSubmit
@@ -206,6 +225,16 @@ func (m *Model) RegisterPaletteActions() {
 
 	actions := []EnhancedPaletteCommand{
 		{
+			Name:        "Open Settings",
+			Description: "Toggle permissions, sandbox, thinking, diff and more",
+			Shortcut:    "Ctrl+S",
+			Category:    PaletteCategoryInfo{Name: "Auth & Setup", Icon: "lock", Priority: 2},
+			Enabled:     true,
+			Priority:    100,
+			Type:        CommandTypeAction,
+			ActionID:    paletteActionSettings,
+		},
+		{
 			Name:        "Open Model Selector",
 			Description: "Switch the active AI model",
 			Shortcut:    "Ctrl+K",
@@ -213,9 +242,17 @@ func (m *Model) RegisterPaletteActions() {
 			Enabled:     true,
 			Priority:    149,
 			Type:        CommandTypeAction,
-			Action: func() {
-				m.openModelSelector()
-			},
+			ActionID:    paletteActionModelSelector,
+		},
+		{
+			Name:        "Keyboard Shortcuts",
+			Description: "Show the keyboard shortcut cheat-sheet",
+			Shortcut:    "?",
+			Category:    PaletteCategoryInfo{Name: "Getting Started", Icon: "rocket", Priority: 0},
+			Enabled:     true,
+			Priority:    90,
+			Type:        CommandTypeAction,
+			ActionID:    paletteActionShortcuts,
 		},
 		{
 			Name:        "Toggle Task List",
@@ -225,9 +262,7 @@ func (m *Model) RegisterPaletteActions() {
 			Enabled:     true,
 			Priority:    150,
 			Type:        CommandTypeAction,
-			Action: func() {
-				m.todosVisible = !m.todosVisible
-			},
+			ActionID:    paletteActionTodos,
 		},
 		{
 			Name:        "Toggle Activity Feed",
@@ -237,11 +272,37 @@ func (m *Model) RegisterPaletteActions() {
 			Enabled:     true,
 			Priority:    151,
 			Type:        CommandTypeAction,
-			Action: func() {
-				if m.activityFeed != nil {
-					m.activityFeed.Toggle()
-				}
-			},
+			ActionID:    paletteActionActivityFeed,
+		},
+		{
+			Name:        "Toggle Agent Tree",
+			Description: "Show or hide the sub-agent tree panel",
+			Shortcut:    "Ctrl+A",
+			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
+			Enabled:     true,
+			Priority:    153,
+			Type:        CommandTypeAction,
+			ActionID:    paletteActionAgentTree,
+		},
+		{
+			Name:        "Context Observatory",
+			Description: "Open the context/usage dashboard",
+			Shortcut:    "Ctrl+H",
+			Category:    PaletteCategoryInfo{Name: "Tools", Icon: "gear", Priority: 5},
+			Enabled:     true,
+			Priority:    540,
+			Type:        CommandTypeAction,
+			ActionID:    paletteActionObservatory,
+		},
+		{
+			Name:        "Toggle Plan Panel",
+			Description: "Expand or collapse the plan progress panel",
+			Shortcut:    "Ctrl+X",
+			Category:    PaletteCategoryInfo{Name: "Planning", Icon: "tree", Priority: 4},
+			Enabled:     true,
+			Priority:    401,
+			Type:        CommandTypeAction,
+			ActionID:    paletteActionPlanPanel,
 		},
 		{
 			Name:        "Toggle Planning Mode",
@@ -251,11 +312,7 @@ func (m *Model) RegisterPaletteActions() {
 			Enabled:     true,
 			Priority:    400,
 			Type:        CommandTypeAction,
-			Action: func() {
-				if m.onPlanningModeToggle != nil {
-					m.onPlanningModeToggle()
-				}
-			},
+			ActionID:    paletteActionPlanningMode,
 		},
 		{
 			Name:        "Clear Screen",
@@ -265,9 +322,7 @@ func (m *Model) RegisterPaletteActions() {
 			Enabled:     true,
 			Priority:    152,
 			Type:        CommandTypeAction,
-			Action: func() {
-				m.output.Clear()
-			},
+			ActionID:    paletteActionClearScreen,
 		},
 		{
 			Name:        "Toggle Compact Mode",
@@ -277,13 +332,18 @@ func (m *Model) RegisterPaletteActions() {
 			Enabled:     true,
 			Priority:    551,
 			Type:        CommandTypeAction,
-			Action: func() {
-				m.CompactMode = !m.CompactMode
-			},
+			ActionID:    paletteActionCompactMode,
 		},
 	}
 
 	m.commandPalette.SetActionCommands(actions)
+}
+
+// SetOpenSettingsCallback wires the handler that opens the interactive settings
+// modal (the app builds a fresh toggle snapshot + sends OpenSettingsMsg). Used
+// by the Ctrl+S binding and the palette's "Open Settings" action.
+func (m *Model) SetOpenSettingsCallback(cb func()) {
+	m.onOpenSettings = cb
 }
 
 // RefreshPaletteCommands refreshes the command palette commands.

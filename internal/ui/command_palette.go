@@ -60,8 +60,14 @@ type EnhancedPaletteCommand struct {
 	Priority    int    // For sorting
 	IsRecent    bool   // In recently used
 	Type        CommandType
-	Action      func() // Direct action (for CommandTypeAction)
-	Advanced    bool   // Hidden from default view, visible when searching
+	Action      func() // Direct action (for CommandTypeAction) — LEGACY: closures
+	// captured at registration mutate a DETACHED Model copy in production (the
+	// Bubble Tea value-receiver trap), so they only work for shared-pointer /
+	// external-callback side effects. Prefer ActionID for anything that mutates
+	// Model fields (state, panel-visible bools): it is dispatched on the LIVE
+	// model in handleCommandPaletteKeys. Action is kept for tests + back-compat.
+	ActionID string // Stable id dispatched on the live model (see dispatchPaletteAction)
+	Advanced bool   // Hidden from default view, visible when searching
 }
 
 // CommandPalette provides quick access to commands via Ctrl+P.
@@ -81,6 +87,15 @@ type CommandPalette struct {
 	previewCmd      *EnhancedPaletteCommand
 	paletteProvider PaletteProvider
 	actionCommands  []EnhancedPaletteCommand
+
+	// Inline argument entry: when the user picks a slash command that needs an
+	// argument (ArgHint contains "<"), the palette switches into a one-line arg
+	// field instead of running the verb bare (which would only print a Usage
+	// error). This is what makes the palette no-typing for arg-taking commands
+	// too — you pick from the list, then fill just the value.
+	argEntry bool
+	argCmd   EnhancedPaletteCommand
+	argValue string
 }
 
 // NewCommandPalette creates a new command palette.
@@ -197,6 +212,64 @@ func (p *CommandPalette) Hide() {
 	p.scroll = 0
 	p.showPreview = false
 	p.previewCmd = nil
+	p.argEntry = false
+	p.argValue = ""
+	p.argCmd = EnhancedPaletteCommand{}
+}
+
+// PaletteNeedsArg reports whether picking this command should drop into the
+// inline arg-entry step rather than running it bare. True only for slash
+// commands whose ArgHint marks a REQUIRED argument ("<...>"); optional-arg
+// commands ("[...]") and parameterless ones still run on a single Enter, which
+// keeps the common no-typing path instant.
+func PaletteNeedsArg(cmd EnhancedPaletteCommand) bool {
+	return cmd.Type == CommandTypeSlash && cmd.Enabled && strings.Contains(cmd.ArgHint, "<")
+}
+
+// InArgEntry reports whether the palette is collecting an argument.
+func (p *CommandPalette) InArgEntry() bool { return p.argEntry }
+
+// BeginArgEntry switches the palette into the inline arg-entry step for cmd.
+func (p *CommandPalette) BeginArgEntry(cmd EnhancedPaletteCommand) {
+	p.argEntry = true
+	p.argCmd = cmd
+	p.argValue = ""
+	p.showPreview = false
+	p.previewCmd = nil
+}
+
+// CancelArgEntry returns from arg-entry back to the command list.
+func (p *CommandPalette) CancelArgEntry() {
+	p.argEntry = false
+	p.argValue = ""
+	p.argCmd = EnhancedPaletteCommand{}
+}
+
+// AppendArg appends text to the argument being entered.
+func (p *CommandPalette) AppendArg(s string) { p.argValue += s }
+
+// BackspaceArg removes the last rune from the argument being entered.
+func (p *CommandPalette) BackspaceArg() {
+	if len(p.argValue) > 0 {
+		_, size := utf8.DecodeLastRuneInString(p.argValue)
+		p.argValue = p.argValue[:len(p.argValue)-size]
+	}
+}
+
+// SubmitArgEntry records usage, hides the palette, and returns the full command
+// line ("/name args", or "/name" if no value was typed) for the caller to
+// submit. Hiding clears all arg-entry state.
+func (p *CommandPalette) SubmitArgEntry() string {
+	cmd := p.argCmd
+	value := strings.TrimSpace(p.argValue)
+	if cmd.Name != "" {
+		p.history.RecordUsage(cmd.Name)
+	}
+	p.Hide() // clears argEntry/argValue/argCmd
+	if value == "" {
+		return cmd.Shortcut
+	}
+	return cmd.Shortcut + " " + value
 }
 
 // Toggle toggles the visibility.
@@ -450,6 +523,10 @@ func (p *CommandPalette) View(width, height int) string {
 	// Use stored size or passed size
 	if width == 0 {
 		width = p.width
+	}
+
+	if p.argEntry {
+		return p.renderArgEntry(width)
 	}
 
 	// Palette dimensions
@@ -732,6 +809,71 @@ func commandPaletteHeight(height, maxHeight int) int {
 		return maxHeight
 	}
 	return min(maxHeight, max(10, height-4))
+}
+
+// renderArgEntry draws the inline argument-entry step: the chosen command, its
+// argument hint, and a focused one-line field. Picked from the palette list, so
+// the user fills only the value — no need to type the command name.
+func (p *CommandPalette) renderArgEntry(width int) string {
+	paletteWidth := commandPaletteWidth(width)
+
+	containerStyle := lipgloss.NewStyle().
+		Width(paletteWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorAccent).
+		Padding(0, 1)
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary)
+	cmdStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	descStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+	queryStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
+	placeholderStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+	inputBoxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorAccent).
+		Padding(0, 1).
+		Width(paletteWidth - 4)
+	footerStyle := lipgloss.NewStyle().
+		Foreground(ColorDim).
+		Italic(true).
+		Align(lipgloss.Center).
+		Width(paletteWidth - 4)
+
+	var content strings.Builder
+
+	content.WriteString(titleStyle.Render("Run "))
+	content.WriteString(cmdStyle.Render(p.argCmd.Shortcut))
+	content.WriteString("\n")
+	if p.argCmd.Description != "" {
+		content.WriteString(descStyle.Render(p.argCmd.Description))
+		content.WriteString("\n")
+	}
+	content.WriteString("\n")
+
+	// Argument field with the ArgHint shown as placeholder until the user types.
+	var inputContent string
+	if p.argValue == "" {
+		hint := p.argCmd.ArgHint
+		if hint == "" {
+			hint = "type an argument..."
+		}
+		inputContent = placeholderStyle.Render(hint)
+	} else {
+		inputContent = queryStyle.Render(p.argValue) + placeholderStyle.Render("_")
+	}
+	content.WriteString(inputBoxStyle.Render(inputContent))
+	content.WriteString("\n")
+
+	if p.argCmd.ArgHint != "" && p.argValue != "" {
+		content.WriteString(hintStyle.Render("  " + p.argCmd.ArgHint))
+		content.WriteString("\n")
+	}
+
+	content.WriteString("\n")
+	content.WriteString(footerStyle.Render("Enter Run  ·  Esc Back to list"))
+
+	return containerStyle.Render(content.String())
 }
 
 // renderPreview renders the preview panel for the selected command.

@@ -235,7 +235,10 @@ func renderHiddenLinesHint(hidden int) string {
 	if hidden == 1 {
 		word = "line"
 	}
-	return dimStyle.Render(fmt.Sprintf("    ⋯ %d more %s", hidden, word))
+	// The gap line is already printed; a quiet (ctrl+e) makes the expand
+	// affordance discoverable inline (CC shows "(ctrl+r to expand)") without a
+	// new row.
+	return dimStyle.Render(fmt.Sprintf("    ⋯ %d more %s (ctrl+e)", hidden, word))
 }
 
 // renderTruncated renders truncated content with head and tail.

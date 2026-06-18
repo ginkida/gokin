@@ -412,7 +412,22 @@ func (r *Router) executeViaSubAgent(ctx context.Context, message string, agentTy
 	}
 
 	if result.Error != "" {
-		return nil, "", fmt.Errorf("sub-agent failed: %s", result.Error)
+		// The sub-agent stopped before finishing — but it may have done real work
+		// first (the agent preserves it in result.Output). Surface that partial
+		// work plus an actionable reason and keep the turn alive, instead of
+		// discarding minutes of effort and ending with a bare error. This mirrors
+		// the task-tool and plan-execution paths, which never throw away a failed
+		// agent's output. Only a truly-empty failure propagates as an error.
+		if strings.TrimSpace(result.Output) != "" {
+			response := result.Output +
+				"\n\n⚠ The agent stopped before finishing: " + result.Error +
+				"\nThe work above is partial — review it, then ask me to continue from here."
+			history := []*genai.Content{
+				genai.NewContentFromText(response, genai.RoleModel),
+			}
+			return history, response, nil
+		}
+		return nil, "", fmt.Errorf("sub-agent stopped before finishing: %s", result.Error)
 	}
 
 	// Format output
@@ -581,7 +596,16 @@ func (r *Router) executeCoordinated(ctx context.Context, decomposition *Decompos
 			fmt.Fprintf(&allOutputs, "**Result:**\n%s\n\n", output)
 		} else {
 			failedCount++
-			fmt.Fprintf(&allOutputs, "**Status:** Error - %s\n\n", result.Error)
+			fmt.Fprintf(&allOutputs, "**Status:** Stopped before finishing — %s\n\n", result.Error)
+			// Surface whatever partial work the subtask produced so it isn't lost
+			// and the user (or a follow-up turn) can continue from it.
+			if strings.TrimSpace(result.Output) != "" {
+				output := result.Output
+				if runes := []rune(output); len(runes) > 1000 {
+					output = string(runes[:1000]) + "...[truncated]"
+				}
+				fmt.Fprintf(&allOutputs, "**Partial work so far (continue from here):**\n%s\n\n", output)
+			}
 		}
 	}
 
@@ -622,6 +646,12 @@ func (r *Router) executeSubtask(ctx context.Context, st Subtask) *SubtaskResult 
 
 	if agentResult.Error != "" {
 		result.Error = agentResult.Error
+		// Preserve partial work. A failed subtask often still produced real
+		// output (built code, analysis, a half-finished edit) before it stopped;
+		// the agent carefully keeps it in agentResult.Output. Dropping it here
+		// silently loses minutes of work and leaves the user with a bare error
+		// instead of something to continue from.
+		result.Output = agentResult.Output
 		result.Success = false
 		return result
 	}

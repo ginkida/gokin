@@ -247,14 +247,12 @@ func (m Model) renderQuestionPrompt() string {
 
 		footerStyle := lipgloss.NewStyle().
 			Foreground(ColorDim).
-			Italic(true).
-			Align(lipgloss.Center).
 			Width(paletteWidth - 4)
 
 		if m.questionCustomInput {
-			builder.WriteString(footerStyle.Render("Enter to submit  ·  Esc Go Back"))
+			builder.WriteString(footerStyle.Render("  Enter to submit  ·  Esc Go Back"))
 		} else {
-			builder.WriteString(footerStyle.Render("Type answer  ·  Enter Confirm"))
+			builder.WriteString(footerStyle.Render("  Type answer  ·  Enter Confirm"))
 		}
 		builder.WriteString("\n")
 		return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorSecondary)
@@ -290,10 +288,8 @@ func (m Model) renderQuestionPrompt() string {
 
 	footerStyle := lipgloss.NewStyle().
 		Foreground(ColorDim).
-		Italic(true).
-		Align(lipgloss.Center).
 		Width(paletteWidth - 4)
-	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  1-9 Select  ·  Enter Confirm  ·  Esc Close"))
+	builder.WriteString(footerStyle.Render("  ↑/↓ Navigate  ·  1-9 Select  ·  Enter Confirm  ·  Esc Close"))
 	builder.WriteString("\n")
 
 	return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorSecondary)
@@ -600,10 +596,8 @@ func (m Model) renderModelSelector() string {
 
 	footerStyle := lipgloss.NewStyle().
 		Foreground(ColorDim).
-		Italic(true).
-		Align(lipgloss.Center).
 		Width(paletteWidth - 4)
-	builder.WriteString(footerStyle.Render("↑/↓ Navigate  ·  1-9 Select  ·  Enter Confirm  ·  Esc Close"))
+	builder.WriteString(footerStyle.Render("  ↑/↓ Navigate  ·  1-9 Select  ·  Enter Confirm  ·  Esc Close"))
 	builder.WriteString("\n")
 
 	return wrapPromptContainer(builder.String(), paletteWidth, bordered, ColorPrimary)

@@ -85,6 +85,8 @@ func (m Model) renderWelcomePanel() string {
 	b.WriteString(tipStyle.Render("    "))
 	b.WriteString(kbdStyle.Render("Ctrl+P"))
 	b.WriteString(tipStyle.Render(" all actions · "))
+	b.WriteString(kbdStyle.Render("Ctrl+S"))
+	b.WriteString(tipStyle.Render(" settings · "))
 	b.WriteString(kbdStyle.Render("Ctrl+K"))
 	b.WriteString(tipStyle.Render(" model · "))
 	b.WriteString(kbdStyle.Render("?"))
@@ -144,19 +146,29 @@ func (m Model) welcomeProjectSection(
 	return b.String()
 }
 
-// welcomeModeHint returns the same mode-hint string the prior 1-line
-// welcome rendered, styled for visibility. Returns "" when no mode is
-// active.
+// welcomeModeHint renders the active mode on the recurring idle panel. Normal
+// mode stays clean (no badge — the common case shouldn't carry chrome); for
+// plan/YOLO it reuses the EXACT wording of the first-run box (welcomeModeBadge)
+// so the two welcome surfaces can't drift in glyph or prose.
 func (m Model) welcomeModeHint() string {
+	if m.permissionsEnabled && m.sandboxEnabled && !m.planningModeEnabled {
+		return ""
+	}
+	return m.welcomeModeBadge()
+}
+
+// inputModeLine surfaces the active session mode directly under the input box —
+// where CC anchors the "what does the next Enter do" cue (`⏵⏵ … shift+tab to
+// cycle`). Shown only for the special plan/YOLO modes (normal stays clean); the
+// caller gates it to active conversations so it doesn't duplicate the welcome
+// panel's mode hint on the empty screen.
+func (m Model) inputModeLine() string {
+	style := lipgloss.NewStyle().Foreground(ColorDim)
 	switch {
 	case m.planningModeEnabled:
-		return lipgloss.NewStyle().Foreground(ColorWarning).Render(
-			"Plan mode is on — agent will explore, then propose a plan for approval.",
-		)
+		return style.Render("  ⏵⏵ plan mode · shift+tab to cycle")
 	case !m.permissionsEnabled || !m.sandboxEnabled:
-		return lipgloss.NewStyle().Foreground(ColorError).Render(
-			"YOLO mode — agent runs everything without asking. Shift+Tab to step back.",
-		)
+		return style.Render("  ⏵⏵ YOLO — no prompts · shift+tab to cycle")
 	}
 	return ""
 }

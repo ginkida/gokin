@@ -783,6 +783,7 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 //   - 1210: too-many-requests            → retryable
 //   - 1211/1213: insufficient balance    → non-retryable (user must top up)
 //   - 1212: quota exceeded               → non-retryable
+//   - 1308: quota / balance exhausted    → non-retryable (actionable hint)
 //   - 1214/1215: auth failure            → non-retryable
 //   - 1301: concurrency limit            → retryable
 //   - 1302/1303: throughput limit        → retryable
@@ -802,6 +803,11 @@ func classifyGLMErrorCode(code, message string) (retryable bool, keyword, descri
 		return false, "", "GLM account balance insufficient — top up or switch provider"
 	case "1212":
 		return false, "", "GLM quota exceeded — check billing"
+	case "1308":
+		// Quota / insufficient balance (commonly seen when a Coding-Plan key hits
+		// its cap). Non-retryable; the only recovery is topping up or switching
+		// provider, so say that instead of leaking a raw code.
+		return false, "", "GLM quota/balance exhausted — top up your GLM plan or switch provider with /provider"
 	case "1214", "1215":
 		return false, "", "GLM authentication failed — check API key"
 	}
