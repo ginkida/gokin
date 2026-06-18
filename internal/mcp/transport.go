@@ -313,8 +313,11 @@ type HTTPTransport struct {
 
 	mu     sync.Mutex
 	closed bool
-	ctx    context.Context
-	cancel context.CancelFunc
+	// sessionID is the Mcp-Session-Id the server assigns on initialize (modern
+	// "Streamable HTTP" transport); echoed back on every subsequent request.
+	sessionID string
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 // NewHTTPTransport creates a new HTTP transport.
@@ -369,8 +372,18 @@ func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
+	// Streamable HTTP: advertise BOTH response shapes. Many modern MCP servers
+	// (e.g. Z.AI web_search_prime) 400 without the event-stream accept and reply
+	// as SSE. Set before custom headers so a config Header can still override.
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	for k, v := range t.headers {
 		req.Header.Set(k, v)
+	}
+	t.mu.Lock()
+	sid := t.sessionID
+	t.mu.Unlock()
+	if sid != "" {
+		req.Header.Set("Mcp-Session-Id", sid)
 	}
 
 	// Send request
@@ -381,31 +394,49 @@ func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Capture the session id the server assigns on initialize (Streamable HTTP);
+	// it must be echoed on every subsequent request.
+	if respSID := resp.Header.Get("Mcp-Session-Id"); respSID != "" {
+		t.mu.Lock()
+		t.sessionID = respSID
+		t.mu.Unlock()
+	}
+
 	// Check status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10)) // cap error body; it only feeds the message
 		return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse response (if any)
-	if resp.ContentLength > 0 || resp.ContentLength == -1 {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response body: %w", err)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		// Accepted with no body (e.g. a notification ack) — nothing to dispatch.
+		logging.Debug("MCP HTTP message sent", "method", msg.Method, "id", msg.ID)
+		return nil
+	}
+
+	// Streamable HTTP returns either a single JSON object (application/json) or
+	// an SSE stream (text/event-stream) whose `data:` lines each carry one
+	// JSON-RPC message. Handle both; dispatch every message (the response plus
+	// any interleaved notifications) to the receive channel.
+	var payloads [][]byte
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		payloads = extractSSEPayloads(body)
+	} else {
+		payloads = [][]byte{body}
+	}
+	for _, p := range payloads {
+		var response JSONRPCMessage
+		if err := json.Unmarshal(p, &response); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
 		}
-
-		if len(body) > 0 {
-			var response JSONRPCMessage
-			if err := json.Unmarshal(body, &response); err != nil {
-				return fmt.Errorf("failed to decode response: %w", err)
-			}
-
-			// Send response to receive channel
-			select {
-			case t.recvChan <- &response:
-			case <-t.ctx.Done():
-				return t.ctx.Err()
-			}
+		select {
+		case t.recvChan <- &response:
+		case <-t.ctx.Done():
+			return t.ctx.Err()
 		}
 	}
 
@@ -448,4 +479,31 @@ func (t *HTTPTransport) Close() error {
 
 	logging.Debug("MCP HTTP transport closed")
 	return nil
+}
+
+// extractSSEPayloads pulls the JSON-RPC payloads out of an SSE body. Events are
+// separated by blank lines; within an event the (possibly multiple) `data:`
+// lines are concatenated with newlines. Non-data fields (event:, id:, retry:,
+// comment lines) are ignored. Returns one entry per event that carried data.
+func extractSSEPayloads(body []byte) [][]byte {
+	var out [][]byte
+	var cur []string
+	flush := func() {
+		if len(cur) > 0 {
+			out = append(out, []byte(strings.Join(cur, "\n")))
+			cur = nil
+		}
+	}
+	for _, raw := range strings.Split(string(body), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if line == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			cur = append(cur, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	flush()
+	return out
 }

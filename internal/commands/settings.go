@@ -100,6 +100,9 @@ var settableToggles = []settingToggle{
 	{"watcher", "Detect external file changes", false,
 		func(c *config.Config) bool { return c.Watcher.Enabled },
 		func(c *config.Config, v bool) { c.Watcher.Enabled = v }},
+	{"glmsearch", "GLM Coding Plan web search (web_search_prime, uses your GLM key)", false,
+		func(c *config.Config) bool { return c.Web.GLMSearch },
+		func(c *config.Config, v bool) { c.Web.GLMSearch = v }},
 }
 
 // ToggleState is a settable toggle's current value. Shared by /set and the

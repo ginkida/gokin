@@ -104,7 +104,7 @@ func TestSettableToggles_NewInAppSettings(t *testing.T) {
 	cfg := config.DefaultConfig()
 
 	// Every new key is now a known, configurable toggle.
-	for _, key := range []string{"session", "searchcache", "sessionmemory", "watcher"} {
+	for _, key := range []string{"session", "searchcache", "sessionmemory", "watcher", "glmsearch"} {
 		if _, ok := findToggle(key); !ok {
 			t.Errorf("%q should be a settable toggle (configurable in-app, not just YAML)", key)
 		}
@@ -119,6 +119,7 @@ func TestSettableToggles_NewInAppSettings(t *testing.T) {
 		"session":       false,
 		"searchcache":   false,
 		"watcher":       false,
+		"glmsearch":     false, // boot-wired MCP server
 	}
 	live := map[string]bool{}
 	for _, s := range SettableToggleStates(cfg) {

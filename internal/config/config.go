@@ -350,6 +350,11 @@ type WebConfig struct {
 	SearchProvider string `yaml:"search_provider"` // Search provider: "serpapi", "google"
 	SearchAPIKey   string `yaml:"search_api_key"`  // API key for search provider
 	GoogleCX       string `yaml:"google_cx"`       // Google Custom Search Engine ID
+	// GLMSearch one-flag-enables the GLM Coding Plan web search: gokin auto-adds
+	// the first-party web_search_prime MCP server (api.z.ai/api/mcp/web_search_prime/mcp)
+	// wired to the stored GLM key — no manual MCP config, no duplicated key. Works
+	// even when mcp.enabled is false (the flag IS the opt-in). Boot-wired.
+	GLMSearch bool `yaml:"glm_search"`
 }
 
 // SessionConfig holds session persistence settings.

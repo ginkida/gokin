@@ -1408,6 +1408,22 @@ func (b *Builder) initIntegrations() error {
 	return nil
 }
 
+// glmWebSearchServer returns the MCP server config for the GLM Coding Plan web
+// search (verified live at this endpoint; tool: web_search_prime). First-party
+// to the user's own Z.AI account, so permission_level "low" (matches the
+// built-in read-only web_search). Enabled via web.glm_search; the GLM key is
+// reused (never re-entered) and injected as the Authorization header.
+func glmWebSearchServer(glmKey string) config.MCPServerConfig {
+	return config.MCPServerConfig{
+		Name:            "web-search-prime",
+		Transport:       "http",
+		URL:             "https://api.z.ai/api/mcp/web_search_prime/mcp",
+		Headers:         map[string]string{"Authorization": "Bearer " + glmKey},
+		AutoConnect:     true,
+		PermissionLevel: "low",
+	}
+}
+
 // initMCP wires up the Model Context Protocol manager when `mcp.enabled: true`.
 //
 // The manager is created even with an empty `mcp.servers` list — otherwise
@@ -1419,13 +1435,27 @@ func (b *Builder) initIntegrations() error {
 // When `mcp.enabled: false` (the default) this is a no-op and `b.mcpManager`
 // stays nil; `commands/mcp.go` checks for that and surfaces the disabled hint.
 func (b *Builder) initMCP() error {
-	if !b.cfg.MCP.Enabled {
+	servers := b.cfg.MCP.Servers
+	glmAdded := false
+	// web.glm_search: one-flag enable for the GLM Coding Plan web search MCP
+	// server, wired to the stored GLM key. The flag IS the opt-in, so it works
+	// even when mcp.enabled is false.
+	if b.cfg.Web.GLMSearch {
+		if key := strings.TrimSpace(b.cfg.API.GLMKey); key != "" {
+			servers = append(append([]config.MCPServerConfig(nil), servers...), glmWebSearchServer(key))
+			glmAdded = true
+		} else {
+			logging.Warn("web.glm_search is enabled but no GLM key is set — skipping the GLM web search MCP server")
+		}
+	}
+
+	if !b.cfg.MCP.Enabled && !glmAdded {
 		return nil
 	}
 
-	mcpConfigs := make([]*mcp.ServerConfig, 0, len(b.cfg.MCP.Servers))
-	permLevels := make(map[string]string, len(b.cfg.MCP.Servers))
-	for _, s := range b.cfg.MCP.Servers {
+	mcpConfigs := make([]*mcp.ServerConfig, 0, len(servers))
+	permLevels := make(map[string]string, len(servers))
+	for _, s := range servers {
 		mcpConfigs = append(mcpConfigs, &mcp.ServerConfig{
 			Name:            s.Name,
 			Transport:       s.Transport,
