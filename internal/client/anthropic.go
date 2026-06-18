@@ -353,8 +353,14 @@ func appendTurnContextBlock(messages []map[string]any, turnContext string) []map
 //     second call. Cache_creation tokens stay 0 because DeepSeek treats
 //     caching as implicit, but read credits land correctly so our
 //     token accounting works as intended.
-//   - GLM / BigModel: cache_control is a silent no-op; skipping keeps
-//     the request body smaller without losing savings.
+//   - GLM / BigModel: cache_control is a silent no-op, so we still skip it
+//     here (keeps the request body smaller). BUT GLM caches the prefix
+//     IMPLICITLY server-side — live-probed against api.z.ai/api/anthropic with
+//     no markers, a stable ~3K-token system prefix reported
+//     cache_read_input_tokens=1536 on every request. So GLM IS a prefix-caching
+//     provider (it's in context.providerSupportsPrefixCaching → the question-
+//     only prompt trim is disabled so its prefix stays byte-stable and the
+//     cache hits); it just doesn't need explicit cache_control.
 func (c *AnthropicClient) supportsPromptCaching() bool {
 	base := c.config.BaseURL
 	if base == DefaultAnthropicBaseURL || base == "" {

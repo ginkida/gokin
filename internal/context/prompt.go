@@ -438,14 +438,25 @@ func (b *PromptBuilder) SetLastMessage(msg string) {
 	}
 }
 
-// providerSupportsPrefixCaching mirrors client/anthropic.go
-// supportsPromptCaching by provider family — keep the two in sync. GLM
-// treats cache_control as a silent no-op and Ollama has no prompt caching.
+// providerSupportsPrefixCaching gates the question-only prompt trim: a true
+// value DISABLES the trim so the system+tools prefix stays byte-stable across
+// turns and the provider's prompt cache can hit.
+//
+// This is DELIBERATELY broader than client/anthropic.go supportsPromptCaching,
+// which answers a different question — "does the provider honour EXPLICIT
+// cache_control markers?". A provider can ignore cache_control yet still cache
+// the prefix IMPLICITLY (server-side, automatic). GLM is exactly that case:
+// live-probed against api.z.ai/api/anthropic with NO cache_control markers, a
+// stable ~3K-token system prefix reported cache_read_input_tokens=1536 on every
+// request. So GLM belongs here (keep its prefix stable) even though it stays
+// FALSE in supportsPromptCaching (sending it cache_control is a no-op). DeepSeek
+// is the same implicit-caching shape. Ollama has no prompt caching → excluded.
 var providerSupportsPrefixCaching = map[string]bool{
 	"anthropic": true,
 	"kimi":      true,
 	"deepseek":  true,
 	"minimax":   true,
+	"glm":       true, // implicit prefix caching (verified); trim would bust it
 }
 
 // ProviderSupportsPrefixCaching reports whether the provider family honours
@@ -459,7 +470,7 @@ func ProviderSupportsPrefixCaching(provider string) bool {
 // flipping ~6.5K chars (planning protocol + detected context + tool hints)
 // in and out of the system block busts the cached prefix — re-billing the
 // whole system+tools block — which costs far more than the trim saves. A
-// byte-stable prefix wins. Without caching (GLM/Ollama), trimming still
+// byte-stable prefix wins. Without caching (Ollama), trimming still
 // saves real tokens on every question-only turn.
 func (b *PromptBuilder) SetPrefixCachingEnabled(enabled bool) {
 	if b.prefixCachingEnabled != enabled {

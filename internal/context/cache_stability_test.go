@@ -124,12 +124,15 @@ func TestQuestionTrimGatedOnPrefixCaching(t *testing.T) {
 	}
 }
 
-// TestProviderSupportsPrefixCaching pins the family list (mirror of
-// client/anthropic.go supportsPromptCaching — keep in sync).
+// TestProviderSupportsPrefixCaching pins the prefix-caching family list. NOTE:
+// this is intentionally BROADER than client/anthropic.go supportsPromptCaching —
+// glm ignores explicit cache_control (false there) but caches the prefix
+// IMPLICITLY (verified live: cache_read_input_tokens on a stable prefix), so it
+// is true here to keep the question-trim from busting that cache.
 func TestProviderSupportsPrefixCaching(t *testing.T) {
 	for provider, want := range map[string]bool{
 		"kimi": true, "deepseek": true, "minimax": true, "anthropic": true,
-		"glm": false, "ollama": false, "": false,
+		"glm": true, "ollama": false, "": false,
 	} {
 		if got := ProviderSupportsPrefixCaching(provider); got != want {
 			t.Errorf("ProviderSupportsPrefixCaching(%q) = %v, want %v", provider, got, want)
