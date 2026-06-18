@@ -75,17 +75,18 @@ func TestSharedToggleTable(t *testing.T) {
 		t.Error("ApplySettingToggle(unknown) must return false")
 	}
 
-	// thinking folded in as a boolean toggle (it's effectively on/off + budget).
+	// thinking is a boolean toggle mapping to the two day-to-day modes:
+	// ON = force (mode "on"); OFF = auto (the router/runner decide by task).
 	if _, ok := findToggle("thinking"); !ok {
 		t.Error("thinking should be a settable toggle")
 	}
-	cfg.Model.EnableThinking = false
-	cfg.Model.ThinkingBudget = 0
-	if !ApplySettingToggle(cfg, "thinking", false) || cfg.Model.ThinkingBudget == 0 {
-		t.Error("thinking off should seed a non-zero budget so it doesn't auto-re-enable at startup")
+	if !ApplySettingToggle(cfg, "thinking", true) ||
+		config.ResolveThinkingMode(cfg.Model.ThinkingMode) != config.ThinkingModeOn || !cfg.Model.EnableThinking {
+		t.Error("thinking toggle ON should set mode=on + enable + a usable budget")
 	}
-	if !ApplySettingToggle(cfg, "thinking", true) || !cfg.Model.EnableThinking {
-		t.Error("thinking on should enable + clamp a usable budget")
+	if !ApplySettingToggle(cfg, "thinking", false) ||
+		config.ResolveThinkingMode(cfg.Model.ThinkingMode) != config.ThinkingModeAuto {
+		t.Error("thinking toggle OFF should set mode=auto (router decides), not force-off")
 	}
 
 	// /settings opens via the marker, never as displayed text.

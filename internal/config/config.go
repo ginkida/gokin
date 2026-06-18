@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Config represents the main application configuration.
 type Config struct {
@@ -164,6 +167,16 @@ type ModelConfig struct {
 	// Extended Thinking (Anthropic API feature)
 	EnableThinking bool  `yaml:"enable_thinking"` // Enable extended thinking mode
 	ThinkingBudget int32 `yaml:"thinking_budget"` // Max tokens for thinking (0 = disabled)
+	// ThinkingMode is the user's INTENT for reasoning, applied per-request by the
+	// router (and per-agent by the runner) — NOT a static client flag:
+	//   auto (default) — think when the task is hard, skip when it's easy
+	//                    (the router decides from task complexity; sub-agents
+	//                    decide from their type). This is the "applied during
+	//                    work, not in settings" behavior.
+	//   on            — force reasoning every turn (a floored budget).
+	//   off           — never reason.
+	// Empty resolves to "auto" (see ResolveThinkingMode).
+	ThinkingMode string `yaml:"thinking_mode"`
 
 	// Fallback providers to try when the primary provider fails
 	FallbackProviders []string `yaml:"fallback_providers"`
@@ -452,6 +465,26 @@ type UpdateConfig struct {
 	Timeout           time.Duration `yaml:"timeout"`            // HTTP request timeout (default: 30s)
 }
 
+// Thinking modes — the user's reasoning INTENT, resolved per-request/per-agent.
+const (
+	ThinkingModeAuto = "auto" // router/runner decide by task complexity / agent type
+	ThinkingModeOn   = "on"   // force reasoning every turn
+	ThinkingModeOff  = "off"  // never reason
+)
+
+// ResolveThinkingMode normalizes a configured mode, defaulting empty/unknown to
+// "auto" so an old config (no thinking_mode key) gets the adaptive behavior.
+func ResolveThinkingMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ThinkingModeOn:
+		return ThinkingModeOn
+	case ThinkingModeOff:
+		return ThinkingModeOff
+	default:
+		return ThinkingModeAuto
+	}
+}
+
 // DefaultConfig returns the default configuration. Kimi Coding Plan is the
 // default provider — gokin's primary target is active coding, and the
 // Coding Plan endpoint (api.kimi.com/coding) serves kimi-for-coding (K2.6)
@@ -470,9 +503,10 @@ func DefaultConfig() *Config {
 			Name:            "kimi-for-coding", // Matches default backend "kimi"
 			Temperature:     0.6,
 			MaxOutputTokens: 32768,
-			EnableThinking:  false, // Disabled by default
-			ThinkingBudget:  0,     // 0 = disabled
-			MaxPoolSize:     5,     // Default pool size
+			EnableThinking:  false,  // legacy static flag — overridden per-request by ThinkingMode/router
+			ThinkingBudget:  0,      // 0 = use the per-request/per-agent computed budget
+			ThinkingMode:    "auto", // think when hard, skip when easy — applied during work, not a manual toggle
+			MaxPoolSize:     5,      // Default pool size
 		},
 		Tools: ToolsConfig{
 			Timeout:           2 * time.Minute,

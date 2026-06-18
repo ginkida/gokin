@@ -110,6 +110,10 @@ type Runner struct {
 	// Weak model mode: extra guidance for weaker models
 	weakModelMode bool
 
+	// thinkingMode (config.ThinkingMode{Auto,On,Off}) — reasoning intent applied
+	// per spawned agent by SubAgentThinkingBudget. Empty resolves to auto.
+	thinkingMode string
+
 	// Provider used by spawned agents to fetch the list of files already read
 	// in the session. Wired in from app/builder to the tools.FileReadTracker.
 	recentFilesProvider func(limit int) []string
@@ -693,7 +697,16 @@ func (r *Runner) newConfiguredAgent(
 	onRL := r.onRateLimit
 	recentFiles := r.recentFilesProvider
 	modifiedFiles := r.modifiedFilesProvider
+	thinkingMode := r.thinkingMode
 	r.mu.RUnlock()
+
+	// Apply this agent's adaptive thinking budget by TYPE — its client is an
+	// isolated clone (NewAgent), so this never races the foreground/siblings.
+	// This is what makes thinking effective in /loop + delegated work, not just
+	// the foreground router path.
+	if agent.client != nil {
+		agent.client.SetThinkingBudget(SubAgentThinkingBudget(agent.Type, thinkingMode))
+	}
 
 	if weakMode {
 		agent.SetWeakModelMode(true)
@@ -1042,6 +1055,16 @@ func (r *Runner) GetClient() client.Client {
 func (r *Runner) SetClient(c client.Client) {
 	r.mu.Lock()
 	r.client = c
+	r.mu.Unlock()
+}
+
+// SetThinkingMode sets the reasoning intent (auto/on/off) applied to each spawned
+// sub-agent by TYPE (SubAgentThinkingBudget). Wired from the builder + ApplyConfig
+// so a /thinking or /set change reaches background agents too — this is what
+// closes the "sub-agents don't adapt thinking" gap. Guarded by r.mu like client.
+func (r *Runner) SetThinkingMode(mode string) {
+	r.mu.Lock()
+	r.thinkingMode = config.ResolveThinkingMode(mode)
 	r.mu.Unlock()
 }
 

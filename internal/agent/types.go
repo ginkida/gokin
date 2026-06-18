@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"gokin/internal/config"
 )
 
 // AgentType defines the type of agent and its capabilities.
@@ -31,6 +33,39 @@ const (
 	// Tools: documentation/search focused
 	AgentTypeGuide AgentType = "claude-code-guide"
 )
+
+// IsLightweight reports whether this agent type does mechanical search/command
+// work (explore/bash/guide) rather than open-ended reasoning. Lightweight agents
+// don't benefit from an extended-thinking budget — it just adds latency.
+func (t AgentType) IsLightweight() bool {
+	return t == AgentTypeExplore || t == AgentTypeBash || t == AgentTypeGuide
+}
+
+// SubAgentThinkingBudget returns the per-agent reasoning budget for the resolved
+// thinking mode. The sub-agent loop has no TaskComplexity score, so agent TYPE
+// is the complexity signal — mirroring the foreground router's adaptive choice:
+// lightweight types skip thinking on auto; general/plan and custom types reason.
+// off → never; on → reason even for lightweight types (a floor).
+func SubAgentThinkingBudget(agentType AgentType, mode string) int32 {
+	const (
+		heavyBudget int32 = 8192
+		onFloor     int32 = 4096
+	)
+	switch config.ResolveThinkingMode(mode) {
+	case config.ThinkingModeOff:
+		return 0
+	case config.ThinkingModeOn:
+		if agentType.IsLightweight() {
+			return onFloor
+		}
+		return heavyBudget
+	default: // auto
+		if agentType.IsLightweight() {
+			return 0
+		}
+		return heavyBudget
+	}
+}
 
 // AllowedTools returns the list of tools allowed for this agent type.
 func (t AgentType) AllowedTools() []string {

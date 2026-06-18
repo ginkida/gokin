@@ -16,7 +16,7 @@ func newThinkingApp(cfg *config.Config) *fakeAppForAuth {
 // thinking is disabled — should tell the user exactly how to turn it on.
 func TestThinking_StatusOff_SuggestsEnable(t *testing.T) {
 	app := newThinkingApp(&config.Config{
-		Model: config.ModelConfig{Name: "kimi-for-coding"},
+		Model: config.ModelConfig{Name: "kimi-for-coding", ThinkingMode: config.ThinkingModeOff},
 	})
 	cmd := &ThinkingCommand{}
 	out, err := cmd.Execute(context.Background(), nil, app)
@@ -31,12 +31,53 @@ func TestThinking_StatusOff_SuggestsEnable(t *testing.T) {
 	}
 }
 
+// TestThinking_StatusAuto_IsDefault verifies the no-args path with an unset mode
+// reports the adaptive default — the "applied during work, not a setting" copy.
+func TestThinking_StatusAuto_IsDefault(t *testing.T) {
+	app := newThinkingApp(&config.Config{Model: config.ModelConfig{Name: "glm-5.2"}})
+	out, err := (&ThinkingCommand{}).Execute(context.Background(), nil, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(out, "thinking: auto") {
+		t.Errorf("unset mode should report auto: %q", out)
+	}
+}
+
+// TestThinking_SetMode_AppliesAllThree verifies /thinking auto|on|off set the
+// master ThinkingMode (the field the router/runner read).
+func TestThinking_SetMode_AppliesAllThree(t *testing.T) {
+	app := newThinkingApp(&config.Config{Model: config.ModelConfig{Name: "glm-5.2"}})
+	cmd := &ThinkingCommand{}
+	for _, tc := range []struct{ arg, want string }{
+		{"on", config.ThinkingModeOn},
+		{"off", config.ThinkingModeOff},
+		{"auto", config.ThinkingModeAuto},
+	} {
+		if _, err := cmd.Execute(context.Background(), []string{tc.arg}, app); err != nil {
+			t.Fatalf("/thinking %s: %v", tc.arg, err)
+		}
+		if got := config.ResolveThinkingMode(app.GetConfig().Model.ThinkingMode); got != tc.want {
+			t.Errorf("/thinking %s → mode %q, want %q", tc.arg, got, tc.want)
+		}
+	}
+	// A numeric budget forces ON with that budget.
+	if _, err := cmd.Execute(context.Background(), []string{"16384"}, app); err != nil {
+		t.Fatalf("/thinking 16384: %v", err)
+	}
+	cfg := app.GetConfig()
+	if config.ResolveThinkingMode(cfg.Model.ThinkingMode) != config.ThinkingModeOn || cfg.Model.ThinkingBudget != 16384 {
+		t.Errorf("/thinking 16384 → mode=%q budget=%d, want on/16384", cfg.Model.ThinkingMode, cfg.Model.ThinkingBudget)
+	}
+}
+
 // TestThinking_StatusOn_ShowsBudget verifies the on-path surfaces the budget.
 // Users ask "is it actually firing?" — the budget value answers that.
 func TestThinking_StatusOn_ShowsBudget(t *testing.T) {
 	app := newThinkingApp(&config.Config{
 		Model: config.ModelConfig{
 			Name:           "kimi-for-coding",
+			ThinkingMode:   config.ThinkingModeOn,
 			EnableThinking: true,
 			ThinkingBudget: 4096,
 		},

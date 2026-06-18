@@ -84,8 +84,22 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	if tc := a.turnContextContent(); tc != "" {
 		newClient.SetTurnContext(tc)
 	}
-	if a.config.Model.ThinkingBudget > 0 {
-		newClient.SetThinkingBudget(int32(a.config.Model.ThinkingBudget))
+	// Carry thinking by MODE, not the stale static budget: off → 0; on → a
+	// floored budget; auto → leave it for the next routed request to set
+	// adaptively (only carry an explicit user-configured static budget).
+	switch config.ResolveThinkingMode(a.config.Model.ThinkingMode) {
+	case config.ThinkingModeOff:
+		newClient.SetThinkingBudget(0)
+	case config.ThinkingModeOn:
+		b := int32(a.config.Model.ThinkingBudget)
+		if b <= 0 {
+			b = 4096
+		}
+		newClient.SetThinkingBudget(b)
+	default:
+		if a.config.Model.ThinkingBudget > 0 {
+			newClient.SetThinkingBudget(int32(a.config.Model.ThinkingBudget))
+		}
 	}
 	a.mu.Unlock()
 

@@ -3,8 +3,35 @@ package router
 import (
 	"testing"
 
+	"gokin/internal/config"
 	"gokin/internal/tools"
 )
+
+// TestSelectThinkingBudget_Modes pins that ThinkingMode overrides the adaptive
+// default at the extremes: off → never reason; on → reason even on an easy task
+// the adaptive path skips; auto (default) → adaptive.
+func TestSelectThinkingBudget_Modes(t *testing.T) {
+	hard := &TaskComplexity{Strategy: StrategyExecutor, Score: 6}
+	easy := &TaskComplexity{Strategy: StrategyDirect, Score: 1}
+
+	off := &Router{thinkingMode: config.ThinkingModeOff}
+	if b := off.selectThinkingBudget(hard); b != 0 {
+		t.Errorf("off mode hard task = %d, want 0 (never reason)", b)
+	}
+
+	on := &Router{thinkingMode: config.ThinkingModeOn}
+	if b := on.selectThinkingBudget(easy); b < 4096 {
+		t.Errorf("on mode easy task = %d, want >= 4096 (floored on)", b)
+	}
+
+	auto := &Router{thinkingMode: config.ThinkingModeAuto}
+	if b := auto.selectThinkingBudget(easy); b != 0 {
+		t.Errorf("auto mode easy/Direct task = %d, want 0", b)
+	}
+	if b := auto.selectThinkingBudget(hard); b == 0 {
+		t.Error("auto mode hard task = 0, want > 0 (reason on hard tasks)")
+	}
+}
 
 func TestInferModelCapability(t *testing.T) {
 	tests := []struct {

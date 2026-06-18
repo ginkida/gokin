@@ -9,6 +9,7 @@ import (
 
 	"gokin/internal/agent"
 	"gokin/internal/client"
+	"gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 
@@ -44,7 +45,11 @@ type Router struct {
 	// and tools (so the new key silently went unused until restart).
 	clientMu sync.RWMutex
 	client   client.Client
-	workDir  string
+	// thinkingMode (config.ThinkingMode{Auto,On,Off}) is the user's reasoning
+	// intent; selectThinkingBudget honors it. Guarded by clientMu — same
+	// write-on-ApplyConfig / read-on-request shape as client.
+	thinkingMode string
+	workDir      string
 
 	// Tool filtering
 	registry  *tools.Registry // Tool registry for per-request filtering
@@ -265,6 +270,22 @@ func (r *Router) getClient() client.Client {
 	r.clientMu.RLock()
 	defer r.clientMu.RUnlock()
 	return r.client
+}
+
+// SetThinkingMode sets the reasoning intent (auto/on/off) honored by
+// selectThinkingBudget. Wired from the builder and ApplyConfig so a /thinking or
+// /set change takes effect in-process. SmartRouter inherits it via embedding.
+func (r *Router) SetThinkingMode(mode string) {
+	r.clientMu.Lock()
+	r.thinkingMode = config.ResolveThinkingMode(mode)
+	r.clientMu.Unlock()
+}
+
+// getThinkingMode returns the resolved mode (defaults to auto when unset).
+func (r *Router) getThinkingMode() string {
+	r.clientMu.RLock()
+	defer r.clientMu.RUnlock()
+	return config.ResolveThinkingMode(r.thinkingMode)
 }
 
 // Execute routes the task to the appropriate handler and returns the result
@@ -744,6 +765,13 @@ func (h HandlerType) String() string {
 //
 // Hard-capped at 16384 to stop runaway thinking on pathological inputs.
 func (r *Router) selectThinkingBudget(analysis *TaskComplexity) int32 {
+	// User intent overrides the adaptive default at the extremes: off → never
+	// reason; on → reason every turn (floored below). auto → the adaptive logic.
+	mode := r.getThinkingMode()
+	if mode == config.ThinkingModeOff {
+		return 0
+	}
+
 	var budget int32
 	switch analysis.Strategy {
 	case StrategyDirect:
@@ -776,6 +804,14 @@ func (r *Router) selectThinkingBudget(analysis *TaskComplexity) int32 {
 	}
 	if budget > 0 && r.pressureBoost() {
 		budget = int32(float64(budget) * 1.5)
+	}
+	// Force mode: reason every turn, even on a Direct/simple task the adaptive
+	// path would skip (budget 0). Floor it at a meaningful reasoning budget.
+	if mode == config.ThinkingModeOn {
+		const onFloor int32 = 4096
+		if budget < onFloor {
+			budget = onFloor
+		}
 	}
 	const maxBudget int32 = 16384
 	if budget > maxBudget {

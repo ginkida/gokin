@@ -26,9 +26,10 @@ func (c *ThinkingCommand) Name() string        { return "thinking" }
 func (c *ThinkingCommand) Description() string { return "Toggle extended thinking display" }
 func (c *ThinkingCommand) Usage() string {
 	return `/thinking           - Show status
-/thinking on        - Enable extended thinking
-/thinking off       - Disable extended thinking
-/thinking <tokens>  - Set budget (e.g. /thinking 16384)`
+/thinking auto      - Reason when the task is hard, skip when easy (default)
+/thinking on        - Force reasoning every turn
+/thinking off       - Never reason
+/thinking <tokens>  - Force on with an explicit budget (e.g. /thinking 16384)`
 }
 func (c *ThinkingCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
@@ -36,7 +37,35 @@ func (c *ThinkingCommand) GetMetadata() CommandMetadata {
 		Icon:     "brain",
 		Priority: 25,
 		HasArgs:  true,
-		ArgHint:  "on|off|<tokens>",
+		ArgHint:  "auto|on|off|<tokens>",
+	}
+}
+
+// applyThinkingMode sets the master ThinkingMode plus the legacy EnableThinking/
+// ThinkingBudget fields the factory + non-routed (headless) paths still read, so
+// the three stay consistent. budget==0 keeps the current/default budget.
+//
+//	auto — router/runner decide per task; clear the forced static flag.
+//	on   — force reasoning; ensure a usable budget.
+//	off  — never; seed a non-zero budget so the factory's "budget==0 ⇒ auto-on"
+//	       branch can't silently re-enable it.
+func applyThinkingMode(cfg *config.Config, mode string, budget int32) {
+	mode = config.ResolveThinkingMode(mode)
+	cfg.Model.ThinkingMode = mode
+	switch mode {
+	case config.ThinkingModeOn:
+		cfg.Model.EnableThinking = true
+		if budget > 0 {
+			cfg.Model.ThinkingBudget = budget
+		}
+		cfg.Model.ThinkingBudget = clampThinkingBudget(cfg.Model.ThinkingBudget)
+	case config.ThinkingModeOff:
+		cfg.Model.EnableThinking = false
+		if cfg.Model.ThinkingBudget == 0 {
+			cfg.Model.ThinkingBudget = thinkingDefaultBudget
+		}
+	default: // auto — the router/runner drive it per request
+		cfg.Model.EnableThinking = false
 	}
 }
 
@@ -71,43 +100,36 @@ func (c *ThinkingCommand) Execute(ctx context.Context, args []string, app AppInt
 
 	arg := strings.ToLower(strings.TrimSpace(args[0]))
 
-	// Toggles first — short and common.
+	// Mode words first — short and common.
 	switch arg {
+	case "auto":
+		applyThinkingMode(cfg, config.ThinkingModeAuto, 0)
+		if err := app.ApplyConfig(cfg); err != nil {
+			return fmt.Sprintf("Failed to save: %v", err), nil
+		}
+		return "✓ thinking: auto — reasons on hard tasks, skips easy ones (applied during work, not a manual setting)", nil
+
 	case "on", "true", "enable":
 		// "1" intentionally NOT a synonym — it would shadow the numeric-budget
 		// path ("/thinking 1" should hit the below-minimum rejection, not
 		// silently turn thinking on with a stale/default budget).
-		cfg.Model.EnableThinking = true
-		// Normalize an out-of-range budget silently: users who typo'd a
-		// value into config.yaml (e.g. `thinking_budget: 500`) should still
-		// get a working "/thinking on" instead of a cryptic 400 from the
-		// provider on their next message.
-		cfg.Model.ThinkingBudget = clampThinkingBudget(cfg.Model.ThinkingBudget)
+		applyThinkingMode(cfg, config.ThinkingModeOn, 0)
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed to save: %v", err), nil
 		}
-		return fmt.Sprintf("✓ thinking: on (budget %d tokens)", cfg.Model.ThinkingBudget), nil
+		return fmt.Sprintf("✓ thinking: on — forced every turn (budget %d tokens)", cfg.Model.ThinkingBudget), nil
 
 	case "off", "false", "disable":
 		// "0" intentionally NOT a synonym — see comment on "1" above.
-		cfg.Model.EnableThinking = false
-		// Ensure the saved budget is non-zero. Factory's auto-enable branch
-		// treats `budget == 0` as "never configured" and flips thinking on.
-		// Without this line, /thinking off on a fresh config would silently
-		// re-enable on next startup because we'd persist {enable:false,
-		// budget:0}. Seeding a default is the simplest way to mark the
-		// setting as "user-touched".
-		if cfg.Model.ThinkingBudget == 0 {
-			cfg.Model.ThinkingBudget = thinkingDefaultBudget
-		}
+		applyThinkingMode(cfg, config.ThinkingModeOff, 0)
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed to save: %v", err), nil
 		}
-		return "✓ thinking: off", nil
+		return "✓ thinking: off — never reasons", nil
 	}
 
-	// Numeric budget — setting a budget implies turning thinking on. That's
-	// the common case ("I want deeper reasoning for this refactor").
+	// Numeric budget — setting a budget implies forcing thinking on with that
+	// budget. The common case ("I want deeper reasoning for this refactor").
 	n, err := strconv.Atoi(arg)
 	if err != nil {
 		return fmt.Sprintf("Unknown option: %q\n\n%s", args[0], c.Usage()), nil
@@ -119,12 +141,11 @@ func (c *ThinkingCommand) Execute(ctx context.Context, args []string, app AppInt
 		return fmt.Sprintf("Budget too high: %d (maximum %d tokens — likely a typo)", n, thinkingMaxBudget), nil
 	}
 
-	cfg.Model.ThinkingBudget = int32(n)
-	cfg.Model.EnableThinking = true
+	applyThinkingMode(cfg, config.ThinkingModeOn, int32(n))
 	if err := app.ApplyConfig(cfg); err != nil {
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
-	return fmt.Sprintf("✓ thinking: on (budget %d tokens)", n), nil
+	return fmt.Sprintf("✓ thinking: on — forced every turn (budget %d tokens)", cfg.Model.ThinkingBudget), nil
 }
 
 // status renders the current thinking configuration along with a hint about
@@ -136,29 +157,42 @@ func (c *ThinkingCommand) status(cfg *config.Config) string {
 		model = "(not set)"
 	}
 
-	if !cfg.Model.EnableThinking {
-		return fmt.Sprintf(`thinking: off
-  model:  %s
-
-Use /thinking on to enable, or /thinking <tokens> to set a budget.`, model)
-	}
-
-	budget := cfg.Model.ThinkingBudget
-	budgetLine := fmt.Sprintf("%d tokens", budget)
-	if budget == 0 {
-		budgetLine = "(0 — will use provider default)"
-	}
-
+	mode := config.ResolveThinkingMode(cfg.Model.ThinkingMode)
 	supported := modelSupportsThinking(model)
 	note := "✓ model supports extended thinking"
 	if !supported {
 		note = "⚠ current model may not emit thinking content — switch via /model"
 	}
 
-	return fmt.Sprintf(`thinking: on
+	switch mode {
+	case config.ThinkingModeOff:
+		return fmt.Sprintf(`thinking: off — never reasons
+  model:  %s
+
+Use /thinking auto (reason on hard tasks only) or /thinking on (force every turn).`, model)
+
+	case config.ThinkingModeOn:
+		budget := cfg.Model.ThinkingBudget
+		budgetLine := fmt.Sprintf("%d tokens", budget)
+		if budget == 0 {
+			budgetLine = "(0 — will use provider default)"
+		}
+		return fmt.Sprintf(`thinking: on — forced every turn
   budget: %s
   model:  %s
-  %s`, budgetLine, model, note)
+  %s
+
+/thinking auto returns to adaptive (reason only when the task is hard).`, budgetLine, model, note)
+
+	default: // auto
+		return fmt.Sprintf(`thinking: auto — applied during work, not a manual setting
+  The router reasons on hard/code tasks (~4-8K tokens) and skips easy ones;
+  sub-agents (/loop, delegation) reason by type. No need to toggle it.
+  model:  %s
+  %s
+
+Override: /thinking on (force every turn) · /thinking off (never).`, model, note)
+	}
 }
 
 // clampThinkingBudget coerces any value to the valid [min, max] range. Used

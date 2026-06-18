@@ -282,10 +282,18 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		maxTurns = 15 // default — keep low to prevent excessive exploration
 	}
 
-	// Use a different model if specified
+	// Always run the sub-agent on its OWN client clone. Two reasons: (1) a model
+	// override needs a clone anyway; (2) even at the same model, an isolated
+	// client lets the runner set this agent's type-derived thinking budget
+	// without racing the foreground or sibling agents on a shared client.
+	// WithModel(GetModel()) is a same-model clone. Nil-guarded — some tests and
+	// the plan-handoff path construct an agent without a client.
 	agentClient := c
-	if model != "" {
+	if c != nil {
 		modelName := mapModelName(model)
+		if modelName == "" {
+			modelName = c.GetModel()
+		}
 		if modelName != "" {
 			agentClient = c.WithModel(modelName)
 		}
@@ -419,9 +427,15 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		maxTurns = 30
 	}
 
+	// Always run on an isolated client clone (same rationale as NewAgent) so the
+	// runner can set this agent's thinking budget without racing a shared client.
+	// Nil-guarded for the no-client construction paths.
 	agentClient := c
-	if model != "" {
+	if c != nil {
 		modelName := mapModelName(model)
+		if modelName == "" {
+			modelName = c.GetModel()
+		}
 		if modelName != "" {
 			agentClient = c.WithModel(modelName)
 		}

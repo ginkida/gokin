@@ -2554,6 +2554,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		a.agentRunner.SetContextConfig(&a.config.Context)
 		a.agentRunner.SetWorkspaceIsolationEnabled(a.config.Plan.WorkspaceIsolation)
 		a.agentRunner.SetDoneGateConfig(a.config.DoneGate)
+		a.agentRunner.SetThinkingMode(a.config.Model.ThinkingMode)
 		if a.config.DiffPreview.Enabled && a.config.Permission.Enabled {
 			a.agentRunner.SetWorkspaceReviewHandler(a.reviewWorkspaceChanges)
 		} else {
@@ -2574,6 +2575,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// only cleared on restart.
 	if a.taskRouter != nil {
 		a.taskRouter.SetClient(newClient)
+		a.taskRouter.SetThinkingMode(a.config.Model.ThinkingMode)
 	}
 
 	// 6b. Update session-memory config live. The manager is always instantiated

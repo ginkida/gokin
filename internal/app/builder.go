@@ -758,6 +758,7 @@ func (b *Builder) initManagers() error {
 	// Agent runner
 	b.agentRunner = agent.NewRunner(b.ctx, b.mainClient, b.registry, b.workDir)
 	b.agentRunner.SetPermissions(b.permManager)
+	b.agentRunner.SetThinkingMode(b.cfg.Model.ThinkingMode) // adaptive thinking for sub-agents
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
 	b.agentRunner.SetWorkspaceIsolationEnabled(b.cfg.Plan.WorkspaceIsolation)
 	b.agentRunner.SetDoneGateConfig(b.cfg.DoneGate)
@@ -829,6 +830,7 @@ func (b *Builder) initManagers() error {
 		ModelCapability:    b.modelCapability,
 	}
 	b.taskRouter = router.NewRouter(routerCfg, b.executor, b.agentRunner, b.mainClient, b.registry, b.isInGitRepo(), b.workDir)
+	b.taskRouter.SetThinkingMode(b.cfg.Model.ThinkingMode) // adaptive per-request thinking
 
 	// Wire plan manager to router for plan-aware routing
 	// When a plan is active, router avoids nested decomposition

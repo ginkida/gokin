@@ -73,17 +73,18 @@ var settableToggles = []settingToggle{
 	{"donegate", "Verify build/test before finishing a task", true,
 		func(c *config.Config) bool { return c.DoneGate.Enabled },
 		func(c *config.Config, v bool) { c.DoneGate.Enabled = v }},
-	{"thinking", "Extended reasoning before answering (more tokens)", true,
-		func(c *config.Config) bool { return c.Model.EnableThinking },
+	{"thinking", "Force reasoning every turn (off = auto: reason only on hard tasks)", true,
+		func(c *config.Config) bool {
+			return config.ResolveThinkingMode(c.Model.ThinkingMode) == config.ThinkingModeOn
+		},
 		func(c *config.Config, v bool) {
-			// Mirror /thinking's budget bookkeeping so a toggle here behaves
-			// identically: clamp a usable budget on, seed a default on off so a
-			// {enable:false, budget:0} config doesn't auto-re-enable at startup.
-			c.Model.EnableThinking = v
+			// A boolean toggle maps to the two modes that matter day-to-day:
+			// ON = force thinking; OFF = auto (the router/runner decide by task).
+			// Full "off" (never reason) is the rare case, via /thinking off.
 			if v {
-				c.Model.ThinkingBudget = clampThinkingBudget(c.Model.ThinkingBudget)
-			} else if c.Model.ThinkingBudget == 0 {
-				c.Model.ThinkingBudget = thinkingDefaultBudget
+				applyThinkingMode(c, config.ThinkingModeOn, 0)
+			} else {
+				applyThinkingMode(c, config.ThinkingModeAuto, 0)
 			}
 		}},
 	// Boot-wired settings — honest live=false. They persist immediately and take
