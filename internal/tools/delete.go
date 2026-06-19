@@ -167,11 +167,14 @@ func (t *DeleteTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	if t.undoManager != nil && !info.IsDir() && oldContent != nil {
 		// For undo, we store the deleted content so it can be restored
 		change := undo.NewFileChange(path, "delete", oldContent, nil, false)
+		change.Mode = info.Mode().Perm()
 		t.undoManager.Record(*change)
 	}
 
 	if info.IsDir() {
-		return NewSuccessResult(fmt.Sprintf("Deleted directory: %s", path)), nil
+		// Directory deletes are NOT undoable — contents are not snapshotted. Say so
+		// explicitly so the user doesn't trust /undo to bring the tree back.
+		return NewSuccessResult(fmt.Sprintf("Deleted directory: %s (not undoable — directory contents were not snapshotted)", path)), nil
 	}
 	return NewSuccessResult(fmt.Sprintf("Deleted file: %s", path)), nil
 }

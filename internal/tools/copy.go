@@ -129,6 +129,15 @@ func (t *CopyTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewErrorResult("source and destination are the same"), nil
 	}
 
+	// Refuse to clobber an existing destination (mirrors move.go). copy used to
+	// O_TRUNC over it and record the undo as a "new file" (WasNew=true), so /undo
+	// would then DELETE the destination — with the original content captured
+	// nowhere (OldContent=nil), it was unrecoverable. Safe default: never
+	// overwrite; the user can pick a new dest or delete first.
+	if _, statErr := os.Stat(dest); statErr == nil {
+		return NewErrorResult(fmt.Sprintf("destination already exists: %s (refusing to overwrite)", dest)), nil
+	}
+
 	// Prevent copying a directory into a subdirectory of itself
 	if srcInfo.IsDir() {
 		absSrc, _ := filepath.Abs(source)
@@ -164,6 +173,7 @@ func (t *CopyTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 			if err == nil && !info.IsDir() {
 				content, _ := os.ReadFile(p)
 				change := undo.NewFileChange(p, "copy", nil, content, true)
+				change.Mode = info.Mode().Perm()
 				t.undoManager.Record(*change)
 			}
 		}
@@ -212,6 +222,14 @@ func (t *CopyTool) copyFile(src, dst string) error {
 		// Close can fail when buffered data fails to flush (e.g. disk full
 		// after io.Copy returns). Surface that as the copy error.
 		err = closeErr
+	}
+	// OpenFile's mode arg is masked by umask, so explicitly restore the source's
+	// permission bits (chmod is NOT umask-masked) — copied scripts/binaries keep
+	// their exec/group/other bits (the mode-preservation invariant).
+	if err == nil {
+		if chmodErr := os.Chmod(dst, srcInfo.Mode().Perm()); chmodErr != nil {
+			err = chmodErr
+		}
 	}
 	return err
 }

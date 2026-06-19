@@ -281,6 +281,7 @@ func (t *RefactorTool) renameInGoFile(filePath string, content []byte, oldName, 
 	// Record for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "refactor_rename", content, []byte(newContent), false)
+		change.Mode = existingPerm(filePath)
 		t.undoManager.Record(*change)
 	}
 
@@ -316,6 +317,7 @@ func (t *RefactorTool) renameInTextFile(filePath string, content []byte, oldName
 	// Record for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "refactor_rename", content, []byte(newText), false)
+		change.Mode = existingPerm(filePath)
 		t.undoManager.Record(*change)
 	}
 
@@ -382,6 +384,7 @@ func (t *RefactorTool) executeExtract(_ context.Context, args map[string]any) (T
 	// Record for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "refactor_extract", content, []byte(contentStr), false)
+		change.Mode = existingPerm(filePath)
 		t.undoManager.Record(*change)
 	}
 
@@ -551,6 +554,7 @@ func (t *RefactorTool) executeInline(_ context.Context, args map[string]any) (To
 	// Record for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "refactor_inline", content, []byte(newContent), false)
+		change.Mode = existingPerm(filePath)
 		t.undoManager.Record(*change)
 	}
 

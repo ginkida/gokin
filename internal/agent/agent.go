@@ -2641,6 +2641,11 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	streamRetryPolicy.MaxPartialRetries = 2 // Allow partial stream retries
 	var streamRetries, partialStreamRetries int
 	var contextCompactAttempts int
+	// Empty-after-tools retry budget — a transient empty 200 right after a
+	// tool-results round is retried (side-effect-free) before the loop gives up.
+	// Kept SEPARATE from streamRetries (the API-error budget) so the two can't
+	// corrupt each other. Reset on any non-empty response.
+	emptyAfterToolsRetries := 0
 
 	var i int
 	// Use min(maxTurns, MaxTurnLimit) to prevent infinite loops
@@ -2944,6 +2949,37 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			if textFingerprint != "" {
 				lastTextFingerprint = textFingerprint
 			}
+		}
+
+		// Empty response (no text, no tool calls) right after a tool-results round
+		// is a transient empty 200 — retry the SAME results (side-effect-free, no
+		// tool re-execution) before giving up, mirroring the foreground executor's
+		// empty-after-tools branch. Bounded; on exhaustion we fall through to the
+		// normal break (the agent has NO outer retry layer — returning an error
+		// here would fail the whole sub-agent, the opposite of the goal). max_tokens
+		// is excluded (a truncation, handled by the block just below).
+		if resp.Text != "" || len(resp.FunctionCalls) > 0 {
+			emptyAfterToolsRetries = 0 // progress — reset the empty-retry budget
+		} else if emptyAfterToolsRetries < streamRetryPolicy.MaxRetries && shouldRetryEmptyAfterTools(a.history, resp) {
+			delay := client.CalculateBackoff(streamRetryPolicy.BaseDelay, emptyAfterToolsRetries, streamRetryPolicy.MaxDelay)
+			emptyAfterToolsRetries++
+			logging.Warn("agent empty response after tool results — retrying",
+				"agent_id", a.ID, "agent_type", a.Type, "model", a.Model,
+				"retry", emptyAfterToolsRetries, "max", streamRetryPolicy.MaxRetries)
+			a.safeOnText(fmt.Sprintf("\n[Model returned empty after tool results — retrying %d/%d in %s...]\n",
+				emptyAfterToolsRetries, streamRetryPolicy.MaxRetries, delay.Round(time.Second)))
+			// Pop the empty placeholder model turn so getModelResponse re-sees the
+			// tool-results turn and re-issues SendFunctionResponse (the true mirror
+			// of the executor's re-send) rather than a "Continue." text message.
+			a.popEmptyModelPlaceholder()
+			retryTimer := time.NewTimer(delay)
+			select {
+			case <-retryTimer.C:
+			case <-ctx.Done():
+				retryTimer.Stop()
+				return a.history, output.String(), ctx.Err()
+			}
+			continue
 		}
 
 		// Auto-continue a TEXT response cut off by the output-token limit
@@ -4840,6 +4876,61 @@ func (a *Agent) buildResponseParts(resp *client.Response) []*genai.Part {
 	}
 
 	return parts
+}
+
+// shouldRetryEmptyAfterTools reports whether resp is a transient empty response
+// (no text, no function calls, not a max_tokens truncation) that arrived right
+// after a tool-results round — the case worth a side-effect-free re-send.
+// "After a tool-results round" is derived from history: history[n-1] is the
+// just-appended empty " " placeholder, so the round was a function-response round
+// iff the entry BEFORE it (history[n-2]) carries tool results. Pure (no agent
+// state) so it's table-testable without the client/stream harness.
+func shouldRetryEmptyAfterTools(history []*genai.Content, resp *client.Response) bool {
+	if resp == nil || resp.Text != "" || len(resp.FunctionCalls) > 0 ||
+		resp.FinishReason == genai.FinishReasonMaxTokens {
+		return false
+	}
+	n := len(history)
+	return n >= 2 && contentHasFunctionResponse(history[n-2])
+}
+
+// contentHasFunctionResponse reports whether c is a tool-results turn (a user
+// content carrying at least one FunctionResponse part) — the same shape
+// getModelResponse keys SendFunctionResponse off of.
+func contentHasFunctionResponse(c *genai.Content) bool {
+	if c == nil || c.Role != genai.RoleUser {
+		return false
+	}
+	for _, p := range c.Parts {
+		if p != nil && p.FunctionResponse != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// popEmptyModelPlaceholder removes the trailing empty model placeholder that
+// buildResponseParts appends for an empty response (a lone " " text part), so the
+// next getModelResponse re-sees the tool-results turn and re-issues
+// SendFunctionResponse — a side-effect-free re-send. Returns false (leaving
+// history untouched) unless the last entry is EXACTLY that placeholder, so a real
+// model turn is never truncated. Mutates a.history under a.stateMu.
+func (a *Agent) popEmptyModelPlaceholder() bool {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	n := len(a.history)
+	if n == 0 {
+		return false
+	}
+	last := a.history[n-1]
+	if last == nil || last.Role != genai.RoleModel || len(last.Parts) != 1 {
+		return false
+	}
+	if p := last.Parts[0]; p == nil || p.FunctionCall != nil || p.Text != " " {
+		return false
+	}
+	a.history = a.history[:n-1]
+	return true
 }
 
 // GetStatus returns the current agent status.

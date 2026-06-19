@@ -357,6 +357,7 @@ func (t *BatchTool) replaceInFile(path, search, replacement string, dryRun bool)
 	// Record for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(path, "batch_replace", data, newData, false)
+		change.Mode = perm
 		t.undoManager.Record(*change)
 	}
 
@@ -426,9 +427,13 @@ func (t *BatchTool) executeRename(ctx context.Context, files []string, from, to 
 		} else {
 			result.Succeeded = append(result.Succeeded, fmt.Sprintf("%s -> %s", path, newPath))
 
-			// Record for undo (file rename)
+			// Record for undo. Tag as "move" so undo/redo use revertMove/applyMove
+			// (os.Rename back), NOT the generic AtomicWrite path — which would write
+			// the destination-path STRING as the source file's content and orphan
+			// the renamed file. Mirrors move.go's reversible encoding: FilePath = the
+			// current location (newPath), OldContent = the original source path.
 			if t.undoManager != nil {
-				change := undo.NewFileChange(path, "batch_rename", []byte(newPath), nil, false)
+				change := undo.NewFileChange(newPath, "move", []byte(path), nil, false)
 				t.undoManager.Record(*change)
 			}
 		}
@@ -464,12 +469,16 @@ func (t *BatchTool) executeDelete(ctx context.Context, files []string, dryRun, p
 		// (undo just isn't recorded for this file) so a single unreadable file
 		// can't abort a batch — but log so the user has a clue why /undo "skips".
 		var oldContent []byte
+		var oldMode os.FileMode
 		if !dryRun && t.undoManager != nil {
 			var readErr error
 			oldContent, readErr = os.ReadFile(path)
 			if readErr != nil {
 				logging.Warn("batch_delete: undo unavailable, pre-delete read failed",
 					"path", path, "error", readErr)
+			}
+			if info, stErr := os.Stat(path); stErr == nil {
+				oldMode = info.Mode().Perm()
 			}
 		}
 
@@ -486,6 +495,7 @@ func (t *BatchTool) executeDelete(ctx context.Context, files []string, dryRun, p
 			// Record for undo (nil means pre-read failed; []byte{} is a valid empty file).
 			if t.undoManager != nil && oldContent != nil {
 				change := undo.NewFileChange(path, "batch_delete", oldContent, nil, false)
+				change.Mode = oldMode
 				t.undoManager.Record(*change)
 			}
 		}

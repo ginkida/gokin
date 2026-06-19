@@ -3,19 +3,21 @@ package undo
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"os"
 	"time"
 )
 
 // FileChange represents a single file modification.
 type FileChange struct {
-	ID         string    `json:"id"`
-	FilePath   string    `json:"file_path"`
-	Tool       string    `json:"tool"` // "write" or "edit"
-	Timestamp  time.Time `json:"timestamp"`
-	OldContent []byte    `json:"old_content"` // nil for new files
-	NewContent []byte    `json:"new_content"`
-	WasNew     bool      `json:"was_new"`            // file was created (didn't exist before)
-	GroupID    string    `json:"group_id,omitempty"` // Groups related changes for atomic undo
+	ID         string      `json:"id"`
+	FilePath   string      `json:"file_path"`
+	Tool       string      `json:"tool"` // "write" or "edit"
+	Timestamp  time.Time   `json:"timestamp"`
+	OldContent []byte      `json:"old_content"` // nil for new files
+	NewContent []byte      `json:"new_content"`
+	WasNew     bool        `json:"was_new"`            // file was created (didn't exist before)
+	GroupID    string      `json:"group_id,omitempty"` // Groups related changes for atomic undo
+	Mode       os.FileMode `json:"mode,omitempty"`     // original file perm to restore on undo/redo (0 → 0644 fallback)
 }
 
 // NewFileChange creates a new FileChange with a generated ID.

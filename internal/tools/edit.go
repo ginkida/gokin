@@ -407,6 +407,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 				}
 				if t.undoManager != nil {
 					change := undo.NewFileChange(filePath, "edit", oldContent, newContentBytes, false)
+					change.Mode = existingPerm(filePath)
 					t.undoManager.Record(*change)
 				}
 
@@ -477,6 +478,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// Record change for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "edit", oldContent, newContentBytes, false)
+		change.Mode = existingPerm(filePath)
 		t.undoManager.Record(*change)
 	}
 
@@ -564,6 +566,15 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 			fileCtx := extractFileContext(string(oldContent), editContextMaxChars)
 			return NewErrorResultWithContext(errMsg, fileCtx), nil
 		}
+		if count > 1 {
+			// Match the single-edit path: a non-unique old_string is ambiguous, so
+			// reject it rather than silently editing the FIRST occurrence (the
+			// `strings.Replace(..., 1)` below) and leaving the others — a lost/
+			// misplaced edit the agent then builds on, believing it landed.
+			errMsg := fmt.Sprintf("edit[%d]: old_string is not unique (%d matches) — no edits were applied to disk; re-submit with more surrounding context so each old_string matches exactly once", i, count)
+			fileCtx := extractFileContext(string(oldContent), editContextMaxChars)
+			return NewErrorResultWithContext(errMsg, fileCtx), nil
+		}
 
 		if idx := strings.Index(content, oldStr); idx >= 0 {
 			lastEditLine = 1 + strings.Count(content[:idx], "\n")
@@ -592,6 +603,7 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 	// Record single undo for all edits
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "edit", oldContent, newContentBytes, false)
+		change.Mode = existingPerm(filePath)
 		t.undoManager.Record(*change)
 	}
 
@@ -690,6 +702,7 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 	// Record change for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "edit", data, newContentBytes, false)
+		change.Mode = existingPerm(filePath)
 		t.undoManager.Record(*change)
 	}
 
@@ -773,6 +786,7 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 	// Record change for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "edit", data, newContentBytes, false)
+		change.Mode = existingPerm(filePath)
 		t.undoManager.Record(*change)
 	}
 
@@ -1070,6 +1084,26 @@ func tryFuzzyReplace(content, old, new string, replaceAll bool) (string, string,
 			return "", strategy.name, fmt.Errorf(
 				"fuzzy match (%s) found %d occurrences — ambiguous",
 				strategy.name, len(matchStarts))
+		}
+
+		// Drop OVERLAPPING matches before the reverse-splice below. With
+		// whitespace-collapsing strategies a normalized old-span can self-overlap
+		// across consecutive lines, so matchStarts may contain indices closer than
+		// oldLineCount apart. The splice assumes the ranges [start, start+oldLineCount)
+		// are disjoint; without this filter a later splice shrinks resultLines and an
+		// earlier splice's `end` over-reaches the (now shorter) slice, silently
+		// DROPPING a source line. Greedy left-to-right keep mirrors
+		// strings.ReplaceAll's advance-past-match semantics.
+		if len(matchStarts) > 1 {
+			filtered := make([]int, 0, len(matchStarts))
+			lastEnd := -1
+			for _, s := range matchStarts {
+				if s >= lastEnd {
+					filtered = append(filtered, s)
+					lastEnd = s + oldLineCount
+				}
+			}
+			matchStarts = filtered
 		}
 
 		// Build result by replacing matched line ranges in the original content.

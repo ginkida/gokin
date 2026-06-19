@@ -208,6 +208,7 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	// Record change for undo
 	if t.undoManager != nil {
 		change := undo.NewFileChange(filePath, "write", oldContent, newContent, isNew)
+		change.Mode = perm
 		t.undoManager.Record(*change)
 	}
 

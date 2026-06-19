@@ -309,19 +309,43 @@ func (m *Manager) revertChange(change *FileChange) error {
 		return nil
 	}
 
-	// File was modified - restore old content atomically
+	// File was modified - restore old content atomically, preserving the
+	// original file mode (0644 fallback for legacy changes with no recorded Mode).
 	dir := filepath.Dir(change.FilePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	return fileutil.AtomicWrite(change.FilePath, change.OldContent, 0644)
+	return fileutil.AtomicWrite(change.FilePath, change.OldContent, permOrDefault(change.Mode))
+}
+
+// permOrDefault returns the change's recorded original file mode, falling back
+// to 0644 when unset (legacy persisted changes have no Mode). Without this,
+// undo/redo of a modified executable/script silently stripped 0755 → 0644.
+func permOrDefault(m os.FileMode) os.FileMode {
+	if m == 0 {
+		return 0644
+	}
+	return m
 }
 
 // applyChange applies a file change (for redo).
 func (m *Manager) applyChange(change *FileChange) error {
-	if change.Tool == "move" {
+	switch change.Tool {
+	case "move":
 		return applyMove(change)
+	case "mkdir":
+		// Redo a directory creation as a DIRECTORY — the generic AtomicWrite below
+		// would create a regular empty file at the path instead.
+		return os.MkdirAll(change.FilePath, 0755)
+	case "delete", "batch_delete":
+		// Redo a deletion by RE-REMOVING the path — the generic AtomicWrite would
+		// resurrect it as a 0-byte file. Both the single-delete and batch-delete
+		// tools land here (they record distinct Tool tags). IsNotExist is a no-op.
+		if err := os.Remove(change.FilePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
 
 	dir := filepath.Dir(change.FilePath)
@@ -329,7 +353,7 @@ func (m *Manager) applyChange(change *FileChange) error {
 		return err
 	}
 
-	return fileutil.AtomicWrite(change.FilePath, change.NewContent, 0644)
+	return fileutil.AtomicWrite(change.FilePath, change.NewContent, permOrDefault(change.Mode))
 }
 
 // revertMove reverses a move by renaming change.FilePath (current dest)
