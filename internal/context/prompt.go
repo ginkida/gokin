@@ -1088,6 +1088,12 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 		fmt.Fprintf(&builder, "Project: %s\n", b.projectInfo.Name)
 	}
 
+	// Directory-access awareness: a sub-agent inherits the parent's granted dirs
+	// in its tool registry (enforcement is correct) but cannot run /add-dir
+	// itself. If it needs a path outside the working directory and granted dirs,
+	// it must report back rather than retry a denied path.
+	builder.WriteString("\nDirectory access: you can work in the working directory and any directories the parent has granted. If you need a path outside them, stop and report that the parent must run /add-dir <path> — you cannot grant access yourself.\n")
+
 	return applyPromptBudget(builder.String(), maxSubAgentPromptChars)
 }
 

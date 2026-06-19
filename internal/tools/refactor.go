@@ -42,6 +42,14 @@ func (t *RefactorTool) SetWorkDir(workDir string) {
 	t.pathValidator = security.NewPathValidator([]string{workDir}, false)
 }
 
+// SetAllowedDirs expands the path validator to additional directories beyond
+// workDir (mirrors read.go). Requires SetWorkDir first; without it workDir is ""
+// and the validator would be unrestricted.
+func (t *RefactorTool) SetAllowedDirs(dirs []string) {
+	allDirs := append([]string{t.workDir}, dirs...)
+	t.pathValidator = security.NewPathValidator(allDirs, false)
+}
+
 // SetDiffHandler sets the diff handler for preview approval.
 func (t *RefactorTool) SetDiffHandler(handler DiffHandler) {
 	t.diffHandler = handler

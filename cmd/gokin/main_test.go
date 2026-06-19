@@ -93,3 +93,45 @@ func TestEvalGateOptions_RejectsInvalidMetricThreshold(t *testing.T) {
 		t.Fatalf("error = %v, want --fail-metric context", err)
 	}
 }
+
+func TestApplyAddDirFlags(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.AllowedDirs = nil
+
+	work := t.TempDir()
+
+	// A valid directory is appended in-memory.
+	if err := applyAddDirFlags(cfg, []string{work}); err != nil {
+		t.Fatalf("valid dir should be accepted: %v", err)
+	}
+	if len(cfg.Tools.AllowedDirs) != 1 {
+		t.Fatalf("expected 1 allowed dir, got %v", cfg.Tools.AllowedDirs)
+	}
+
+	// Duplicate is deduped (AddAllowedDir).
+	if err := applyAddDirFlags(cfg, []string{work}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Tools.AllowedDirs) != 1 {
+		t.Errorf("duplicate should be deduped, got %v", cfg.Tools.AllowedDirs)
+	}
+
+	// An ungrantable location is refused (and nothing is appended).
+	before := len(cfg.Tools.AllowedDirs)
+	if err := applyAddDirFlags(cfg, []string{"/etc"}); err == nil {
+		t.Error("/etc must be refused")
+	}
+	if len(cfg.Tools.AllowedDirs) != before {
+		t.Error("refused dir must not be appended")
+	}
+
+	// A non-existent path errors.
+	if err := applyAddDirFlags(cfg, []string{work + "/does-not-exist"}); err == nil {
+		t.Error("non-existent path should error")
+	}
+
+	// Empty entries are skipped without error.
+	if err := applyAddDirFlags(cfg, []string{"", "   "}); err != nil {
+		t.Errorf("empty entries should be skipped: %v", err)
+	}
+}

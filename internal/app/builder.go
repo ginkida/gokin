@@ -1064,68 +1064,19 @@ func (b *Builder) initIntegrations() error {
 		}
 	}
 
-	// Set additional allowed directories from config
+	// Set additional allowed directories from config. One shared helper drives
+	// every path-scoping tool (read/edit/write/.../refactor/semantic) — the
+	// single source of truth also used by runtime /add-dir grants and sub-agent
+	// clones. (Previously a 60-line per-tool copy that silently omitted refactor
+	// and the semantic tools.)
 	if len(b.cfg.Tools.AllowedDirs) > 0 {
-		if readTool, ok := b.registry.Get("read"); ok {
-			if rt, ok := readTool.(*tools.ReadTool); ok {
-				rt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if editTool, ok := b.registry.Get("edit"); ok {
-			if et, ok := editTool.(*tools.EditTool); ok {
-				et.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if writeTool, ok := b.registry.Get("write"); ok {
-			if wt, ok := writeTool.(*tools.WriteTool); ok {
-				wt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if listDirTool, ok := b.registry.Get("list_dir"); ok {
-			if lt, ok := listDirTool.(*tools.ListDirTool); ok {
-				lt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if globTool, ok := b.registry.Get("glob"); ok {
-			if gt, ok := globTool.(*tools.GlobTool); ok {
-				gt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if grepTool, ok := b.registry.Get("grep"); ok {
-			if gt, ok := grepTool.(*tools.GrepTool); ok {
-				gt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if treeTool, ok := b.registry.Get("tree"); ok {
-			if tt, ok := treeTool.(*tools.TreeTool); ok {
-				tt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		// Set allowed directories for file operation tools
-		if copyTool, ok := b.registry.Get("copy"); ok {
-			if ct, ok := copyTool.(*tools.CopyTool); ok {
-				ct.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if moveTool, ok := b.registry.Get("move"); ok {
-			if mt, ok := moveTool.(*tools.MoveTool); ok {
-				mt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if deleteTool, ok := b.registry.Get("delete"); ok {
-			if dt, ok := deleteTool.(*tools.DeleteTool); ok {
-				dt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if mkdirTool, ok := b.registry.Get("mkdir"); ok {
-			if mt, ok := mkdirTool.(*tools.MkdirTool); ok {
-				mt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
-		}
-		if batchTool, ok := b.registry.Get("batch"); ok {
-			if bt, ok := batchTool.(*tools.BatchTool); ok {
-				bt.SetAllowedDirs(b.cfg.Tools.AllowedDirs)
-			}
+		tools.SetAllowedDirsOnRegistry(b.registry, b.cfg.Tools.AllowedDirs)
+		// Seed the agent runner so ISOLATED sub-agents inherit persisted +
+		// --add-dir grants at boot (non-isolated agents share the foreground
+		// registry above; isolated clones re-apply runner.grantedDirs, which is
+		// otherwise empty until the first runtime /add-dir).
+		if b.agentRunner != nil {
+			b.agentRunner.SetGrantedDirs(b.cfg.Tools.AllowedDirs)
 		}
 	}
 
@@ -1677,6 +1628,11 @@ func (b *Builder) initUI() error {
 func (b *Builder) wireDependencies() error {
 	app := b.assembleApp()
 
+	// Seed the directory-access snapshot (config-persisted + any --add-dir dirs)
+	// before the boot turn-context push below, so the model's first turn already
+	// knows which directories it can reach.
+	app.applyGrantedDirsToTools()
+
 	if app.promptBuilder != nil {
 		if b.memStore != nil && b.cfg.Memory.AutoInject {
 			app.promptBuilder.SetMemoryStore(b.memStore)
@@ -2007,6 +1963,14 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up permission callback
 	b.permManager.SetPromptHandler(app.promptPermission)
+
+	// Wire the out-of-workspace access gate (Claude-Code-style ask-on-access):
+	// the executor pre-checks absolute paths against the workspace+granted dirs
+	// and prompts the user to grant access to anything outside.
+	if b.executor != nil {
+		b.executor.SetDirAccessChecker(app.isDirAccessAllowed)
+		b.executor.SetDirGrantHandler(app.dirGrantPrompt)
+	}
 
 	// Set up ask_user tool
 	if askUserTool, ok := b.registry.Get("ask_user"); ok {

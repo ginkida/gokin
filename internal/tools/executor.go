@@ -220,6 +220,15 @@ type Executor struct {
 	redactor         *security.SecretRedactor // Redact secrets from output
 	unrestrictedMode bool                     // Full freedom when both sandbox and permissions are off
 
+	// Out-of-workspace access gate (Claude-Code-style ask-on-access). Both nil
+	// in non-app harnesses -> gate disabled (the tool's own PathValidator still
+	// enforces default-deny). dirAccessChecker reports whether an absolute path
+	// is already inside the workspace or a granted dir; dirGrantHandler prompts
+	// the user and returns whether access is now allowed (granting propagates to
+	// the shared registry, rebuilding the live tool's validator).
+	dirAccessChecker func(path string) bool
+	dirGrantHandler  func(ctx context.Context, toolName, path string) (bool, error)
+
 	// Token usage from last response (from API usage metadata).
 	// Protected by tokenMu for concurrent read/write safety.
 	tokenMu                 sync.Mutex
@@ -653,6 +662,18 @@ func (e *Executor) SetPermissions(mgr *permission.Manager) {
 // SetHooks sets the hooks manager for tool execution.
 func (e *Executor) SetHooks(mgr *hooks.Manager) {
 	e.hooks = mgr
+}
+
+// SetDirAccessChecker wires the out-of-workspace access pre-filter (reports
+// whether an absolute path is already inside the workspace or a granted dir).
+func (e *Executor) SetDirAccessChecker(fn func(path string) bool) {
+	e.dirAccessChecker = fn
+}
+
+// SetDirGrantHandler wires the ask-on-access prompt (prompts the user to grant
+// access to an out-of-workspace path; returns whether access is now allowed).
+func (e *Executor) SetDirGrantHandler(fn func(ctx context.Context, toolName, path string) (bool, error)) {
+	e.dirGrantHandler = fn
 }
 
 // SetFormatter sets the auto-formatter for post-write/edit formatting.
@@ -2042,6 +2063,29 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				e.notificationMgr.NotifyDenied(call.Name, reason)
 			}
 			return NewErrorResult(fmt.Sprintf("Permission denied: %s", reason))
+		}
+	}
+
+	// Step 4.6: Out-of-workspace access gate (Claude-Code-style ask-on-access).
+	// For an ABSOLUTE path the call targets outside the workspace + granted dirs,
+	// prompt the user. On grant, the handler propagated the dir to the shared
+	// registry — the live tool's PathValidator is rebuilt — so execution proceeds.
+	// On deny, return an actionable error (reaches the model). Only relative paths
+	// (always workspace-relative) and in-scope paths skip silently. Disabled when
+	// the callbacks are nil (tests/non-app harnesses) — the tool's own validator
+	// still enforces default-deny.
+	if e.dirAccessChecker != nil && e.dirGrantHandler != nil {
+		for _, p := range extractFilePaths(call) {
+			if !filepath.IsAbs(p) || e.dirAccessChecker(p) {
+				continue
+			}
+			allowed, gErr := e.dirGrantHandler(ctx, call.Name, p)
+			if gErr != nil {
+				return NewErrorResult(fmt.Sprintf("directory access check failed for %s: %s", p, gErr))
+			}
+			if !allowed {
+				return NewErrorResult(fmt.Sprintf("Access to %s is outside the workspace and is NOT granted. This is a hard permission boundary — retrying or rewriting the path will not help. Ask the user to run: /add-dir %s  (add --persist to keep it across restarts). Until then, work within the workspace.", p, filepath.Dir(p)))
+			}
 		}
 	}
 

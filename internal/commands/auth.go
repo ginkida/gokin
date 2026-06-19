@@ -587,6 +587,14 @@ func (c *StatusCommand) Execute(ctx context.Context, args []string, app AppInter
 		fmt.Fprintf(&sb, "Version: %s\n", v)
 	}
 
+	// Granted directories beyond the workspace (session + persisted), if any.
+	if dirs := app.ListAllowedDirs(); len(dirs) > 0 {
+		sb.WriteString("\nGranted directories:\n")
+		for _, d := range dirs {
+			fmt.Fprintf(&sb, "  - %s\n", prettyHomePath(d))
+		}
+	}
+
 	return sb.String(), nil
 }
 

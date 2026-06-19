@@ -114,6 +114,13 @@ type Runner struct {
 	// per spawned agent by SubAgentThinkingBudget. Empty resolves to auto.
 	thinkingMode string
 
+	// grantedDirs are the user-approved directories outside workDir (the
+	// effective allowed-dir list: persisted config dirs ++ session /add-dir
+	// grants). Non-isolated agents share the foreground registry and inherit
+	// grants automatically; ISOLATED agents get a fresh registry clone, so the
+	// spawn path applies these to that clone. Guarded by r.mu.
+	grantedDirs []string
+
 	// Provider used by spawned agents to fetch the list of files already read
 	// in the session. Wired in from app/builder to the tools.FileReadTracker.
 	recentFilesProvider func(limit int) []string
@@ -656,6 +663,15 @@ func (r *Runner) newConfiguredAgent(
 		} else {
 			isolated = ws
 			agentBaseRegistry = tools.CloneRegistryForWorkDir(deps.baseRegistry, ws.Root)
+			// The clone starts workDir-scoped only; re-apply the user's granted
+			// dirs so an isolated agent can still reach approved external dirs
+			// (non-isolated agents inherit them via the shared foreground registry).
+			r.mu.RLock()
+			grants := append([]string(nil), r.grantedDirs...)
+			r.mu.RUnlock()
+			if len(grants) > 0 {
+				tools.SetAllowedDirsOnRegistry(agentBaseRegistry, grants)
+			}
 		}
 	}
 
@@ -1065,6 +1081,16 @@ func (r *Runner) SetClient(c client.Client) {
 func (r *Runner) SetThinkingMode(mode string) {
 	r.mu.Lock()
 	r.thinkingMode = config.ResolveThinkingMode(mode)
+	r.mu.Unlock()
+}
+
+// SetGrantedDirs updates the user-approved directory list inherited by future
+// ISOLATED sub-agent spawns (non-isolated agents share the foreground registry
+// and are already covered). Called by App.applyGrantedDirsToTools on every
+// /add-dir grant, revoke, and /clear. Idempotent.
+func (r *Runner) SetGrantedDirs(dirs []string) {
+	r.mu.Lock()
+	r.grantedDirs = append([]string(nil), dirs...)
 	r.mu.Unlock()
 }
 

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 
 	appcontext "gokin/internal/context"
@@ -38,6 +39,13 @@ func (a *App) turnContextContent() string {
 		return ""
 	}
 	var parts []string
+	// Directory-access awareness FIRST so the model always knows the capability
+	// exists and sees the live granted-dirs list. Dynamic (updates on
+	// grant/revoke/clear), and lives in turn context — it NEVER touches the
+	// byte-stable cached prefix (v0.88.0 rule).
+	if dirCtx := a.directoryAccessContext(); dirCtx != "" {
+		parts = append(parts, dirCtx)
+	}
 	if a.sessionMemory != nil {
 		if sm := a.sessionMemory.GetContent(); sm != "" {
 			parts = append(parts, sm)
@@ -49,6 +57,31 @@ func (a *App) turnContextContent() string {
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// directoryAccessContext tells the model which directories it can reach and how
+// to get more — so it uses the /add-dir capability instead of guessing or
+// silently failing on out-of-workspace paths. Always present (the model must
+// learn the capability before it ever hits a denial), compact, and dynamic (the
+// granted list updates as grants change).
+func (a *App) directoryAccessContext() string {
+	// Read the cached effective-dirs snapshot under grantedDirsMu ONLY. This must
+	// NOT take a.mu: turnContextContent is sometimes called from a caller that
+	// already holds a.mu, and re-acquiring it here would self-deadlock.
+	a.grantedDirsMu.Lock()
+	dirs := append([]string(nil), a.dirCtxSnapshot...)
+	a.grantedDirsMu.Unlock()
+
+	var b strings.Builder
+	b.WriteString("## Directory access\n")
+	if len(dirs) > 0 {
+		b.WriteString("Besides the working directory, you can read and work in these user-granted directories:\n")
+		for _, d := range dirs {
+			fmt.Fprintf(&b, "- %s\n", d)
+		}
+	}
+	b.WriteString("To work with a path OUTSIDE the working directory and any granted directories, ask the user to run /add-dir <path> — you cannot grant access yourself, and retrying a denied path will not help.")
+	return b.String()
 }
 
 // pushTurnContext delivers the current session+working memory snapshot to the

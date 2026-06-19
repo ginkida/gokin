@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gokin/internal/app"
 	"gokin/internal/config"
 	"gokin/internal/logging"
+	"gokin/internal/security"
 	"gokin/internal/setup"
 
 	"github.com/spf13/cobra"
@@ -27,6 +29,7 @@ var (
 	resume   bool
 	headless bool
 	prompt   string
+	addDirs  []string
 )
 
 func main() {
@@ -50,6 +53,7 @@ choose.`,
 	rootCmd.PersistentFlags().BoolVar(&resume, "resume", false, "resume the last session")
 	rootCmd.PersistentFlags().BoolVar(&headless, "headless", false, "run one prompt without the interactive TUI")
 	rootCmd.PersistentFlags().StringVar(&prompt, "prompt", "", "prompt to run in headless mode")
+	rootCmd.PersistentFlags().StringArrayVar(&addDirs, "add-dir", nil, "grant access to a directory outside the workspace (repeatable; in-memory for this run)")
 
 	// Version command
 	rootCmd.AddCommand(&cobra.Command{
@@ -132,6 +136,14 @@ func runApp(cmd *cobra.Command, args []string) error {
 		cfg.Tools.AllowedDirs = append(cfg.Tools.AllowedDirs, workDir)
 	}
 
+	// --add-dir grants (repeatable): resolve, refuse ungrantable locations, and
+	// append in-memory only (never persisted — like the headless workDir append).
+	// Works for interactive, headless, and eval launches; the builder propagates
+	// AllowedDirs to every path-scoping tool and seeds the agent runner at boot.
+	if err := applyAddDirFlags(cfg, addDirs); err != nil {
+		return err
+	}
+
 	// Create the application
 	application, err := app.New(cfg, workDir)
 	if err != nil {
@@ -170,6 +182,48 @@ func runApp(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("\nStarting Gokin...")
 	return application.Run()
+}
+
+// applyAddDirFlags resolves each --add-dir value, refuses ungrantable locations
+// (filesystem root, system dirs, .git, secret dirs), and appends it to
+// cfg.Tools.AllowedDirs IN MEMORY ONLY (never saved). The builder propagates
+// AllowedDirs to every path-scoping tool and seeds the agent runner at boot, so
+// these grants are live before the first prompt — interactive, headless, or eval.
+func applyAddDirFlags(cfg *config.Config, dirs []string) error {
+	for _, raw := range dirs {
+		d := strings.TrimSpace(raw)
+		if d == "" {
+			continue
+		}
+		if d == "~" || strings.HasPrefix(d, "~/") {
+			if home, err := os.UserHomeDir(); err == nil && home != "" {
+				if d == "~" {
+					d = home
+				} else {
+					d = filepath.Join(home, d[2:])
+				}
+			}
+		}
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			return fmt.Errorf("--add-dir %q: %w", raw, err)
+		}
+		info, statErr := os.Stat(abs)
+		if statErr != nil {
+			return fmt.Errorf("--add-dir %q: %v", raw, statErr)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("--add-dir %q: not a directory", raw)
+		}
+		if resolved, rErr := filepath.EvalSymlinks(abs); rErr == nil {
+			abs = resolved
+		}
+		if err := security.IsGrantableDir(abs); err != nil {
+			return fmt.Errorf("--add-dir %q: %v", raw, err)
+		}
+		cfg.AddAllowedDir(abs) // dedups; in-memory only (no Save)
+	}
+	return nil
 }
 
 func applyRuntimeOverrides(cfg *config.Config, providerOverride, modelOverride string) error {

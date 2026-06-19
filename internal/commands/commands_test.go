@@ -122,7 +122,7 @@ func TestHelpCategoriesAreRegistered(t *testing.T) {
 		"Auth & Setup":    {"login", "logout", "keys", "provider", "status", "doctor", "config", "set", "settings", "update", "restart", "whats-new", "changelog"},
 		"Git":             {"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"},
 		"Planning":        {"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"},
-		"Tools": {"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "hooks", "debug-dump",
+		"Tools": {"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"},
 	}
 

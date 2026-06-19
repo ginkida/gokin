@@ -277,6 +277,8 @@ func DefaultCommands() []CommandInfo {
 		{Name: "ql", Description: "Quick look at a file", Category: "Tools",
 			Args: []ArgInfo{{Name: "path", Required: true, Type: "path"}}, Usage: "/ql <path>"},
 		{Name: "hooks", Description: "List configured agent hooks and their sources", Category: "Tools"},
+		{Name: "add-dir", Description: "Grant the agent access to a directory outside the workspace", Category: "Tools"},
+		{Name: "remove-dir", Description: "Revoke a session directory grant added with /add-dir", Category: "Tools"},
 		{Name: "permissions", Description: "Toggle permission prompts", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
 			Usage: "/permissions [on|off]"},

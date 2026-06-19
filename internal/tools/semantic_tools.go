@@ -32,6 +32,13 @@ func NewGoToDefinitionTool(workDir string) *GoToDefinitionTool {
 	return t
 }
 
+// SetAllowedDirs expands the path validator to additional directories beyond
+// workDir (mirrors read.go), so a granted directory is navigable by this tool.
+func (t *GoToDefinitionTool) SetAllowedDirs(dirs []string) {
+	allDirs := append([]string{t.workDir}, dirs...)
+	t.pathValidator = security.NewPathValidator(allDirs, false)
+}
+
 func (t *GoToDefinitionTool) Name() string {
 	return "go_to_definition"
 }
@@ -242,6 +249,13 @@ func NewFindReferencesTool(workDir string) *FindReferencesTool {
 		t.pathValidator = security.NewPathValidator([]string{workDir}, false)
 	}
 	return t
+}
+
+// SetAllowedDirs expands the path validator to additional directories beyond
+// workDir (mirrors read.go), so a granted directory is navigable by this tool.
+func (t *FindReferencesTool) SetAllowedDirs(dirs []string) {
+	allDirs := append([]string{t.workDir}, dirs...)
+	t.pathValidator = security.NewPathValidator(allDirs, false)
 }
 
 func (t *FindReferencesTool) Name() string {

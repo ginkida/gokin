@@ -275,11 +275,26 @@ type App struct {
 	//   6. stepRollbackMu
 	//   7. sessionArchiveMu
 	//   8. diffPromptMu
+	//   9. grantedDirsMu (independent leaf — never held while acquiring a.mu;
+	//      applyGrantedDirsToTools snapshots under it, releases, THEN reads a.mu)
 	// Never hold a later lock while acquiring an earlier one.
 	mu           sync.Mutex
 	diffPromptMu sync.Mutex
-	running      bool
-	processing   bool // Guards against concurrent message processing
+
+	// Session-only directory grants (Claude-Code-style /add-dir + ask-on-access).
+	// NOT persisted unless the user passes --persist (then also in
+	// config.Tools.AllowedDirs). Reset on /clear. Guarded by grantedDirsMu.
+	grantedDirs   []string
+	grantedDirsMu sync.Mutex
+	// dirCtxSnapshot is the effective allowed-dir list (config + session grants)
+	// cached for the model's turn-context block. Read by directoryAccessContext
+	// under grantedDirsMu ONLY — never a.mu — so it can be assembled even when a
+	// caller of pushTurnContext already holds a.mu (turnContextContent must not
+	// re-acquire a.mu, or it self-deadlocks). Refreshed by applyGrantedDirsToTools.
+	dirCtxSnapshot []string
+
+	running    bool
+	processing bool // Guards against concurrent message processing
 
 	// Processing cancellation for ESC interrupt
 	processingCancel context.CancelFunc
@@ -1882,6 +1897,9 @@ func (a *App) ClearConversation() {
 	if a.executor != nil {
 		a.executor.ResetSession()
 	}
+	// Session directory grants are conversation-scoped — /clear revokes them and
+	// re-propagates (persisted config dirs are untouched).
+	a.resetGrantedDirs()
 	// totalOutputTokens accumulates via +=; totalInputTokens is periodically
 	// re-assigned but its last pre-clear value would persist until the next
 	// exchange. Both must be zeroed so /cost shows only the fresh session.

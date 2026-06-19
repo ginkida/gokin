@@ -46,6 +46,10 @@ type AppInterface interface {
 	GetUndoManager() *undo.Manager
 	GetWorkDir() string
 	ClearConversation()
+	// Directory access grants (Claude-Code-style /add-dir + ask-on-access).
+	GrantAllowedDir(path string, persist bool) (string, error)
+	RevokeGrantedDir(path string) (bool, error)
+	ListAllowedDirs() []string
 	GetTodoTool() *tools.TodoTool
 	GetConfig() *config.Config
 	GetTokenStats() TokenStats
@@ -195,6 +199,8 @@ func NewHandler() *Handler {
 	h.Register(&StatsCommand{})
 	h.Register(&TasksCommand{})
 	h.Register(&HooksCommand{})
+	h.Register(&AddDirCommand{})
+	h.Register(&RemoveDirCommand{})
 	h.Register(&MemoryCommand{})
 
 	// Register theme command
