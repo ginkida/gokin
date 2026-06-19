@@ -181,3 +181,103 @@ func TestSetCommand_ListAndErrors(t *testing.T) {
 		t.Errorf("invalid-value output = %q", out)
 	}
 }
+
+// TestSettableToggles_NameAndCategoryGrouping pins the single-source-of-truth
+// grouping: every toggle has a friendly Name + a valid Category, and the slice
+// is category-CONTIGUOUS (a category never appears, ends, then reappears) so
+// /set and the modal render identical groups.
+func TestSettableToggles_NameAndCategoryGrouping(t *testing.T) {
+	cfg := config.DefaultConfig()
+	states := SettableToggleStates(cfg)
+	if len(states) != len(settableToggles) {
+		t.Fatalf("states len=%d, want %d", len(states), len(settableToggles))
+	}
+	seen := map[string]bool{}
+	prevCat := ""
+	for i, s := range states {
+		if s.Name == "" {
+			t.Errorf("toggle %q has empty Name", s.Key)
+		}
+		if s.Category == "" {
+			t.Errorf("toggle %q has empty Category", s.Key)
+		}
+		if s.Category != prevCat {
+			if seen[s.Category] {
+				t.Errorf("category %q reappears at index %d — toggles must be category-contiguous", s.Category, i)
+			}
+			seen[s.Category] = true
+			prevCat = s.Category
+		}
+	}
+	// The five expected categories all appear.
+	for _, want := range []string{"Safety", "Context & Memory", "Workflow", "Files & Search", "Interface & Web"} {
+		if !seen[want] {
+			t.Errorf("expected category %q to be present", want)
+		}
+	}
+}
+
+// TestApplyPreset pins the preset bundles: each flips its declared LIVE toggles
+// to the right values, reports only actual changes, and rejects unknown names.
+func TestApplyPreset(t *testing.T) {
+	// safe = all guardrails on.
+	cfg := config.DefaultConfig()
+	cfg.Permission.Enabled = false
+	cfg.Tools.Bash.Sandbox = false
+	cfg.DiffPreview.Enabled = false
+	cfg.DoneGate.Enabled = false
+	changed, ok := ApplyPreset(cfg, "safe")
+	if !ok {
+		t.Fatal("safe should be a known preset")
+	}
+	if !cfg.Permission.Enabled || !cfg.Tools.Bash.Sandbox || !cfg.DiffPreview.Enabled || !cfg.DoneGate.Enabled {
+		t.Errorf("safe preset did not enable all guardrails: %+v", cfg.Permission)
+	}
+	if len(changed) != 4 {
+		t.Errorf("safe should report 4 changes, got %d: %v", len(changed), changed)
+	}
+
+	// fast = all those off.
+	changed, ok = ApplyPreset(cfg, "fast")
+	if !ok {
+		t.Fatal("fast should be known")
+	}
+	if cfg.Permission.Enabled || cfg.Tools.Bash.Sandbox || cfg.DiffPreview.Enabled || cfg.DoneGate.Enabled {
+		t.Error("fast preset did not disable guardrails")
+	}
+	if len(changed) != 4 {
+		t.Errorf("fast should report 4 changes after safe, got %d", len(changed))
+	}
+
+	// Re-applying the same preset reports zero changes (idempotent).
+	changed, _ = ApplyPreset(cfg, "fast")
+	if len(changed) != 0 {
+		t.Errorf("re-applying fast should be a no-op, got %v", changed)
+	}
+
+	// Unknown preset.
+	if _, ok := ApplyPreset(cfg, "nope"); ok {
+		t.Error("unknown preset should return ok=false")
+	}
+
+	// balanced = ask + verify, no sandbox/diff.
+	ApplyPreset(cfg, "balanced")
+	if !cfg.Permission.Enabled || !cfg.DoneGate.Enabled || cfg.Tools.Bash.Sandbox || cfg.DiffPreview.Enabled {
+		t.Errorf("balanced preset wrong: perm=%v done=%v sandbox=%v diff=%v",
+			cfg.Permission.Enabled, cfg.DoneGate.Enabled, cfg.Tools.Bash.Sandbox, cfg.DiffPreview.Enabled)
+	}
+
+	// Every preset touches only LIVE toggles (so the whole thing applies now).
+	for _, p := range settingPresets {
+		for key := range p.vals {
+			tg, found := findToggle(key)
+			if !found {
+				t.Errorf("preset %q references unknown toggle %q", p.name, key)
+				continue
+			}
+			if !tg.live {
+				t.Errorf("preset %q includes boot-wired toggle %q (must be live-only)", p.name, key)
+			}
+		}
+	}
+}

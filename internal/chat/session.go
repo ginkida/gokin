@@ -666,9 +666,14 @@ func (s *Session) RestoreCheckpoint(name string) bool {
 		s.totalTokens += count
 	}
 
-	// Remove any checkpoints that referenced indices beyond the new length
+	// Remove any checkpoints that referenced indices beyond the new length.
+	// Compare against newLen (the post-orphan-removal length), NOT the original
+	// checkpoint index idx: removeOrphanedToolParts above can shorten History to
+	// newLen < idx, so a checkpoint in (newLen, idx] — including the restore
+	// target itself — would otherwise survive pointing past len(History), making
+	// a later RestoreCheckpoint to it a silent no-op that still returns true.
 	for cpName, cpIdx := range s.Checkpoints {
-		if cpIdx > idx {
+		if cpIdx > newLen {
 			delete(s.Checkpoints, cpName)
 		}
 	}

@@ -551,3 +551,40 @@ func containsStr(s, sub string) bool {
 	}
 	return false
 }
+
+// TestRestoreCheckpointCleansStaleIndicesAfterOrphanRemoval pins the audit fix:
+// when removeOrphanedToolParts shortens History below the restore index, the
+// checkpoint-map cleanup must drop entries beyond the ACTUAL new length (newLen),
+// not the original index — otherwise a stale entry (incl. the restore target)
+// survives pointing past len(History) and a later restore silently no-ops.
+func TestRestoreCheckpointCleansStaleIndicesAfterOrphanRemoval(t *testing.T) {
+	s := NewSession()
+	user := func(text string) *genai.Content {
+		return &genai.Content{Role: string(genai.RoleUser), Parts: []*genai.Part{{Text: text}}}
+	}
+	// A trailing message whose only part is a FunctionResponse with no matching
+	// FunctionCall — removeOrphanedToolParts strips it after truncation.
+	orphan := &genai.Content{
+		Role:  string(genai.RoleUser),
+		Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "no-match", Name: "tool"}}},
+	}
+	s.SetHistory([]*genai.Content{user("a"), orphan, user("b")})
+	s.Checkpoints = map[string]int{"stale": 1, "target": 2, "later": 3}
+
+	if !s.RestoreCheckpoint("target") {
+		t.Fatal("restore should succeed")
+	}
+	// History[:2] = [user, orphan] -> orphan removed -> len 1.
+	if got := len(s.GetHistory()); got != 1 {
+		t.Fatalf("history len = %d, want 1 (trailing orphan FunctionResponse removed)", got)
+	}
+	if _, ok := s.Checkpoints["target"]; ok {
+		t.Error("'target' (index 2 > newLen 1) must be removed — else a later restore silently no-ops")
+	}
+	if _, ok := s.Checkpoints["later"]; ok {
+		t.Error("'later' (index 3 > newLen 1) must be removed")
+	}
+	if _, ok := s.Checkpoints["stale"]; !ok {
+		t.Error("'stale' (index 1 <= newLen 1) must survive")
+	}
+}

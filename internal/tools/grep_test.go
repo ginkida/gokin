@@ -367,3 +367,30 @@ func TestGrepTool_Execute_NonexistentFile(t *testing.T) {
 	// Should handle gracefully
 	_ = result.Success
 }
+
+// TestGrepTool_NegativeContextLinesStillMatches pins the audit fix: a negative
+// context_lines must be clamped to 0, not passed through — otherwise searchFile
+// computes start > end, the match-emitting loop never runs, and EVERY match is
+// silently dropped ("No matches found" false negative).
+func TestGrepTool_NegativeContextLinesStillMatches(t *testing.T) {
+	tmpDir := resolvedTempDir(t)
+	filePath := filepath.Join(tmpDir, "test.go")
+	if err := os.WriteFile(filePath, []byte("package main\n\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	tool := NewGrepTool(tmpDir)
+	result, err := tool.Execute(context.Background(), map[string]any{
+		"pattern":       "func",
+		"context_lines": -5,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+	if strings.Contains(result.Content, "No matches found") || !strings.Contains(result.Content, "func") {
+		t.Errorf("negative context_lines dropped the match; content:\n%s", result.Content)
+	}
+}

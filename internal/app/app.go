@@ -1900,6 +1900,14 @@ func (a *App) ClearConversation() {
 	// Session directory grants are conversation-scoped — /clear revokes them and
 	// re-propagates (persisted config dirs are untouched).
 	a.resetGrantedDirs()
+	// Permission session state is conversation-scoped too: clear auto-approved
+	// (allow-for-session) tools + the decision cache so a fresh conversation
+	// re-prompts for caution-level tools. Without this, an "allow for session"
+	// approval of write/edit/etc. silently persists across /clear into unrelated
+	// conversations (ClearSession otherwise had no production caller).
+	if a.permManager != nil {
+		a.permManager.ClearSession()
+	}
 	// totalOutputTokens accumulates via +=; totalInputTokens is periodically
 	// re-assigned but its last pre-clear value would persist until the next
 	// exchange. Both must be zeroed so /cost shows only the fresh session.
@@ -2722,7 +2730,7 @@ func (a *App) buildSettingItems() []ui.SettingItem {
 	states := commands.SettableToggleStates(cfg)
 	items := make([]ui.SettingItem, 0, len(states))
 	for _, s := range states {
-		items = append(items, ui.SettingItem{Key: s.Key, Desc: s.Desc, On: s.On, Live: s.Live})
+		items = append(items, ui.SettingItem{Key: s.Key, Name: s.Name, Desc: s.Desc, Category: s.Category, On: s.On, Live: s.Live})
 	}
 	return items
 }

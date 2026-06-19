@@ -175,6 +175,12 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	if contextLines > maxContextLines {
 		contextLines = maxContextLines
 	}
+	if contextLines < 0 {
+		// A negative value would make start > end in searchFile, so the
+		// match-emitting loop never runs and EVERY match is silently dropped
+		// ("No matches found" false negative on an investigation-critical tool).
+		contextLines = 0
+	}
 	invertMatch := GetBoolDefault(args, "invert", false)
 	countOnly := GetBoolDefault(args, "count_only", false)
 
@@ -708,6 +714,14 @@ func (t *GrepTool) ExecuteStreaming(ctx context.Context, args map[string]any) (*
 	globPattern := GetStringDefault(args, "glob", "")
 	caseInsensitive := GetBoolDefault(args, "case_insensitive", false)
 	contextLines := GetIntDefault(args, "context_lines", 0)
+	// Clamp to [0, 5] like the non-streaming path: a negative value makes
+	// start > end in searchFile and silently drops every match.
+	if contextLines > 5 {
+		contextLines = 5
+	}
+	if contextLines < 0 {
+		contextLines = 0
+	}
 
 	// Make path absolute
 	if !filepath.IsAbs(searchPath) {

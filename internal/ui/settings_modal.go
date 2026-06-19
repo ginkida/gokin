@@ -12,9 +12,11 @@ import (
 // commands.ToggleState (the app builds these from it) so the modal and /set
 // share one source of truth for what is configurable.
 type SettingItem struct {
-	Key  string
-	Desc string
-	On   bool
+	Key      string
+	Name     string // friendly display name (falls back to Key if empty)
+	Desc     string
+	Category string // group header; items are category-contiguous (one source of truth)
+	On       bool
 	// Live false means the flip persists but applies on next launch; the modal
 	// shows a "restart to apply" hint so it is never a silent no-op.
 	Live bool
@@ -105,32 +107,99 @@ func (m Model) renderSettings() string {
 		return wrapPromptContainer(b.String(), paletteWidth, bordered, ColorPrimary)
 	}
 
+	// Build the flat row list: a header row when the category changes, then ONE
+	// row per item. Headers are render-only — the cursor indexes items (0..N-1),
+	// so headers can never desync it.
+	type settingRow struct {
+		header  string
+		itemIdx int // -1 marks a header row
+	}
+	rows := make([]settingRow, 0, len(m.settingsItems)+6)
+	lastCat := ""
 	for i, item := range m.settingsItems {
+		if item.Category != "" && item.Category != lastCat {
+			rows = append(rows, settingRow{header: item.Category, itemIdx: -1})
+			lastCat = item.Category
+		}
+		rows = append(rows, settingRow{itemIdx: i})
+	}
+
+	// Height-aware window so the modal never clips on a short terminal: show at
+	// most `avail` rows, centered on the selected item. max(6, …) floors it for
+	// the pre-first-WindowSizeMsg case (m.height == 0).
+	avail := max(6, m.height-12)
+	selRow := 0
+	for ri, r := range rows {
+		if r.itemIdx == m.settingsCursor {
+			selRow = ri
+			break
+		}
+	}
+	start := 0
+	if len(rows) > avail {
+		start = selRow - avail/2
+		if start < 0 {
+			start = 0
+		}
+		if start > len(rows)-avail {
+			start = len(rows) - avail
+		}
+	}
+	end := min(start+avail, len(rows))
+
+	catStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorMuted)
+	restartStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	moreStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+
+	if start > 0 {
+		fmt.Fprintf(&b, "  %s\n", moreStyle.Render("↑ more"))
+	}
+	for ri := start; ri < end; ri++ {
+		r := rows[ri]
+		if r.itemIdx < 0 {
+			fmt.Fprintf(&b, "  %s\n", catStyle.Render(strings.ToUpper(r.header)))
+			continue
+		}
+		item := m.settingsItems[r.itemIdx]
 		prefix := "  "
 		style := m.styles.ModalNormal
-		if i == m.settingsCursor {
+		if r.itemIdx == m.settingsCursor {
 			prefix = "> "
 			style = m.styles.ModalSelected
 		}
-
 		box := "[ ]"
 		if item.On {
 			box = "[✓]"
 		}
-		label := fmt.Sprintf("%s %-14s %s", box, item.Key, onOffLabel(item.On))
-		fmt.Fprintf(&b, "%s%s\n", prefix, style.Render(label))
-
-		desc := item.Desc
-		if !item.Live {
-			desc += "  · restart to apply"
+		name := item.Name
+		if name == "" {
+			name = item.Key
 		}
-		descStyle := m.styles.ModalMuted.Width(paletteWidth - 8)
-		fmt.Fprintf(&b, "      %s\n", descStyle.Render(desc))
+		label := fmt.Sprintf("%s %-28s %s", box, truncateForWidth(name, 28), onOffLabel(item.On))
+		line := prefix + style.Render(label)
+		if !item.Live {
+			line += restartStyle.Render("  · restart")
+		}
+		fmt.Fprintf(&b, "%s\n", line)
+	}
+	if end < len(rows) {
+		fmt.Fprintf(&b, "  %s\n", moreStyle.Render("↓ more"))
+	}
+
+	// Description of the SELECTED item only — keeps the list compact (one line
+	// each) while still explaining what the cursor is on.
+	if m.settingsCursor >= 0 && m.settingsCursor < len(m.settingsItems) {
+		descStyle := m.styles.ModalMuted.Width(max(10, paletteWidth-4))
+		fmt.Fprintf(&b, "\n  %s\n", descStyle.Render(truncateForWidth(m.settingsItems[m.settingsCursor].Desc, max(10, paletteWidth-4))))
 	}
 
 	b.WriteString("\n")
 	footerStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true).Align(lipgloss.Center).Width(paletteWidth - 4)
 	b.WriteString(footerStyle.Render("↑/↓ Navigate  ·  Space Toggle  ·  m Model  ·  /provider to switch  ·  Esc Close"))
+	b.WriteString("\n")
+	// Quick presets are the one-tap "simpler" surface — a calm dim line so modal
+	// users discover them without leaving for /set.
+	b.WriteString(footerStyle.Render("Quick presets:  /set preset safe · balanced · fast"))
 	b.WriteString("\n")
 
 	return wrapPromptContainer(b.String(), paletteWidth, bordered, ColorPrimary)
