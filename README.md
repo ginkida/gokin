@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go" alt="Go Version"></p>
 
 <p align="center">
-  <img src="https://minio.ginkida.dev/minion/github/gokin-cli-cut.gif" alt="Gokin Demo" width="800">
+  <img src="https://minio.ginkida.dev/minion/github/gokin-demo.gif" alt="Gokin Demo" width="800">
 </p>
 
 <h3 align="center">AI-powered coding agent for your terminal<br>Kimi · GLM · MiniMax · DeepSeek · Ollama — 100% open source</h3>
