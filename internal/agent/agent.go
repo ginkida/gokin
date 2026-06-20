@@ -4349,17 +4349,32 @@ func (a *Agent) collectStream(ctx context.Context, stream *client.StreamingRespo
 }
 
 // agentModelRoundTimeout caps a single model API call within the agent to
-// prevent zombie requests. Analogous to executor.withModelRoundTimeout.
-const agentModelRoundTimeout = 5 * time.Minute
+// prevent zombie requests. Shared with the executor via the client package so
+// the two loops can't drift — was a too-tight 5m hard deadline that killed
+// healthy long thinking rounds (a glm/deepseek round can stream reasoning for
+// many minutes), surfacing as the "agent stopped at ~7m with 13m thinking"
+// failure. The activity-aware stream-idle timeout is the real stuck-guard.
+const agentModelRoundTimeout = client.DefaultModelRoundTimeout
 
+// withModelRoundTimeout mirrors the executor's helper EXACTLY: it wraps the round
+// with a TYPED, non-retryable model-round-timeout cause (so a genuine round
+// timeout fails cleanly instead of being misclassified as a retryable raw
+// context.DeadlineExceeded and pointlessly retried into the same cap), clamps to
+// the parent's remaining deadline when the parent is stricter, and uses
+// cancel-only when no time remains (never a zero-length WithTimeout).
 func (a *Agent) withModelRoundTimeout(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := agentModelRoundTimeout
 	if deadline, ok := parent.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return context.WithCancel(parent)
+		}
+		if remaining < timeout {
+			// Parent context is stricter; preserve its cause chain.
 			return context.WithTimeout(parent, remaining)
 		}
 	}
-	return context.WithTimeout(parent, timeout)
+	return context.WithTimeoutCause(parent, timeout, client.NewModelRoundTimeoutError(timeout))
 }
 
 // agentCompactionAPITimeout bounds a single summarization or token-count API

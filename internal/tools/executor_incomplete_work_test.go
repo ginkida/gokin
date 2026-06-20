@@ -149,3 +149,46 @@ func TestExecutorExecuteLoop_NoContinuationWhenTodosComplete(t *testing.T) {
 		t.Errorf("model calls = %d, want 1 (no continuation when complete)", cl.next)
 	}
 }
+
+// TestExecutorExecuteLoop_EmptyResponseOnIncompleteWorkReNudges pins the
+// premature-termination fix: an EMPTY model response (no text, no tool calls)
+// arriving while the model's todo list still has unfinished items must RE-NUDGE
+// (bounded), not break the turn on the first empty 200. Before the fix the
+// empty-response break fired BEFORE the incomplete-work gate, so the turn was
+// abandoned with todos unfinished and no retry (the executor-specific gap; the
+// empty-AFTER-tools path was already rescued).
+func TestExecutorExecuteLoop_EmptyResponseOnIncompleteWorkReNudges(t *testing.T) {
+	registry := NewRegistry()
+	td := NewTodoTool()
+	if err := registry.Register(td); err != nil {
+		t.Fatal(err)
+	}
+	td.RestoreItems([]TodoItem{
+		{Content: "finish the feature", Status: "in_progress", ActiveForm: "Finishing"},
+	})
+
+	// Every response is EMPTY (a documented weak/medium-model failure mode).
+	responses := make([]*client.StreamingResponse, 0, MaxIncompleteWorkContinuations+2)
+	for i := 0; i < MaxIncompleteWorkContinuations+2; i++ {
+		responses = append(responses, buildExecutorTestTextStream(""))
+	}
+	cl := &scriptedExecutorClient{model: "glm-5.1", responses: responses}
+
+	exec := NewExecutor(registry, cl, time.Second)
+	exec.preFlightChecks = false
+
+	history, _, err := exec.Execute(context.Background(), nil, "build it")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	historyText := strings.Join(flattenHistoryTexts(history), "\n")
+	nudges := strings.Count(historyText, "task list still has")
+	if nudges != MaxIncompleteWorkContinuations {
+		t.Errorf("empty-response continuation nudges = %d, want %d (pre-fix it was 0 — break on first empty)", nudges, MaxIncompleteWorkContinuations)
+	}
+	// Initial call + MaxIncompleteWorkContinuations re-asks, then bounded stop.
+	if cl.next != MaxIncompleteWorkContinuations+1 {
+		t.Errorf("model calls = %d, want %d (initial + %d re-asks)", cl.next, MaxIncompleteWorkContinuations+1, MaxIncompleteWorkContinuations)
+	}
+}

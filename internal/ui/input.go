@@ -53,7 +53,28 @@ type SuggestionType int
 const (
 	SuggestionCommand SuggestionType = iota
 	SuggestionFile
+	SuggestionAtFile // @path file reference (the buffer keeps the leading @)
 )
+
+// atFileWord returns the trailing @-reference word being typed (e.g. "@src/ma"),
+// for autocomplete. It is the LAST whitespace-delimited token when that token
+// starts with a single '@' and the value has no trailing space (the word is
+// still being typed). ok=false otherwise. Lets "look at @main" autocomplete the
+// @main token mid-sentence, not just a whole-value "@main".
+func atFileWord(value string) (string, bool) {
+	if value == "" || strings.HasSuffix(value, " ") {
+		return "", false
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return "", false
+	}
+	last := fields[len(fields)-1]
+	if strings.HasPrefix(last, "@") && strings.Count(last, "@") == 1 {
+		return last, true
+	}
+	return "", false
+}
 
 // InputModel represents the input component.
 type InputModel struct {
@@ -350,7 +371,7 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 						m.currentCommand = &selected
 					}
 					return m, nil
-				} else if m.suggestionType == SuggestionFile && len(m.fileSuggestions) > 0 {
+				} else if (m.suggestionType == SuggestionFile || m.suggestionType == SuggestionAtFile) && len(m.fileSuggestions) > 0 {
 					selected := m.fileSuggestions[m.suggestionIndex]
 					rel, _ := filepath.Rel(m.workDir, selected)
 					m.acceptFileSuggestion(rel)
@@ -360,7 +381,10 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 
 			// Try to trigger suggestions
 			value := m.textarea.Value()
-			if strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
+			if word, ok := atFileWord(value); ok {
+				m.suggestionType = SuggestionAtFile
+				m.updateAtFileSuggestions(word)
+			} else if strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
 				m.updateSuggestions(value)
 				if len(m.suggestions) == 1 {
 					// Auto-complete if only one match
@@ -397,7 +421,7 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 						m.currentCommand = &selected
 					}
 					return m, nil
-				} else if m.suggestionType == SuggestionFile && len(m.fileSuggestions) > 0 {
+				} else if (m.suggestionType == SuggestionFile || m.suggestionType == SuggestionAtFile) && len(m.fileSuggestions) > 0 {
 					selected := m.fileSuggestions[m.suggestionIndex]
 					rel, _ := filepath.Rel(m.workDir, selected)
 					m.acceptFileSuggestion(rel)
@@ -493,7 +517,12 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 
 		// Update suggestions based on input
 		value := m.textarea.Value()
-		if strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
+		if word, ok := atFileWord(value); ok {
+			m.suggestionType = SuggestionAtFile
+			m.updateAtFileSuggestions(word)
+			m.showArgHints = false
+			m.currentCommand = nil
+		} else if strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
 			m.suggestionType = SuggestionCommand
 			m.updateSuggestions(value)
 			// Clear arg hints when typing command
@@ -792,6 +821,37 @@ func (m InputModel) shouldSuggestFiles(input string) bool {
 }
 
 // updateFileSuggestions finds file matches for the current input.
+// updateAtFileSuggestions globs file matches for an @-reference word (e.g.
+// "@src/ma"), mirroring updateFileSuggestions but on the @-stripped prefix. The
+// matches are stored as absolute paths; acceptFileSuggestion re-adds the @.
+func (m *InputModel) updateAtFileSuggestions(word string) {
+	if m.workDir == "" {
+		m.showSuggestions = false
+		return
+	}
+	prefix := strings.TrimPrefix(word, "@")
+
+	matches, _ := filepath.Glob(filepath.Join(m.workDir, prefix+"*"))
+	if len(matches) == 0 && !filepath.IsAbs(prefix) {
+		matches = m.searchFilesFuzzy(prefix)
+	}
+
+	m.fileSuggestions = matches
+	m.suggestionIndex = 0
+	m.showSuggestions = len(m.fileSuggestions) > 0
+
+	if len(m.fileSuggestions) > 0 {
+		rel, err := filepath.Rel(m.workDir, m.fileSuggestions[0])
+		if err == nil && strings.HasPrefix(rel, prefix) && len(rel) > len(prefix) {
+			m.ghostText = rel[len(prefix):]
+		} else {
+			m.ghostText = ""
+		}
+	} else {
+		m.ghostText = ""
+	}
+}
+
 func (m *InputModel) updateFileSuggestions(input string) {
 	if m.workDir == "" {
 		m.showSuggestions = false
@@ -881,8 +941,11 @@ func (m InputModel) View() string {
 		result.WriteString("\n")
 	}
 
-	// Show autocomplete suggestions
-	if m.showSuggestions && len(m.suggestions) > 0 {
+	// Show autocomplete suggestions. Gate on EITHER slice: m.suggestions holds
+	// command matches, m.fileSuggestions holds file/@file matches — the old
+	// command-only gate left the file + @file dropdowns invisible (renderSuggestions
+	// already renders the file branch).
+	if m.showSuggestions && (len(m.suggestions) > 0 || len(m.fileSuggestions) > 0) {
 		suggestionBox := m.renderSuggestions()
 		result.WriteString(suggestionBox)
 		result.WriteString("\n")
@@ -1329,8 +1392,14 @@ func (m *InputModel) acceptFileSuggestion(path string) {
 		return
 	}
 
-	// Replace last word
-	words[len(words)-1] = path
+	// Replace last word. Preserve the leading @ for an @-reference (so the buffer
+	// holds "@relpath", which the app expands to file content on submit); a plain
+	// file suggestion (/open, /ql, …) keeps the bare path.
+	if strings.HasPrefix(words[len(words)-1], "@") {
+		words[len(words)-1] = "@" + path
+	} else {
+		words[len(words)-1] = path
+	}
 	m.textarea.SetValue(strings.Join(words, " ") + " ")
 	m.textarea.CursorEnd()
 	m.showSuggestions = false

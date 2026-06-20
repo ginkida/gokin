@@ -41,8 +41,9 @@ const (
 	MaxConcurrentToolExecutions = 5
 	// defaultModelRoundTimeout caps a single model round to prevent zombie requests.
 	// Keep this generous for reasoning-heavy models; SSE idle timeout still protects
-	// against truly stalled streams.
-	defaultModelRoundTimeout = 5 * time.Minute
+	// against truly stalled streams. Shared with the agent loop via the client
+	// package so the two can't drift (was a too-tight 5m that killed long thinking).
+	defaultModelRoundTimeout = client.DefaultModelRoundTimeout
 
 	// defaultToolExecTimeout is the fallback per-tool execution timeout used
 	// when the executor is constructed with a non-positive timeout (e.g. a
@@ -1440,24 +1441,19 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			finalText = carriedText + resp.Text
 		}
 
-		// Detect empty response — model returned no text and no function calls.
-		// Break immediately instead of looping, the fallback below will provide a message.
-		if finalText == "" {
-			logging.Warn("model returned empty response",
-				"finish_reason", string(resp.FinishReason),
-				"input_tokens", resp.InputTokens,
-				"output_tokens", resp.OutputTokens,
-				"iteration", i)
-			break
-		}
-
-		// Incomplete-work continuation: the model produced a final answer with no
-		// tool calls, but its OWN todo list still has unfinished items — it
-		// announced the next step without taking it. Nudge it to act and keep
-		// going instead of ending the turn. (max_tokens has its own continuation
-		// above; skip here so we don't double-continue.) Progress-aware + bounded:
-		// a model that narrates without running a tool N times in a row stops; one
-		// that completes todos between nudges resets the counter and runs free.
+		// Incomplete-work continuation: the model produced a final answer — or an
+		// EMPTY response — with no tool calls, but its OWN todo list still has
+		// unfinished items. It announced (or skipped) the next step without taking
+		// it. Nudge it to act and keep going instead of ending the turn.
+		//
+		// This is evaluated BEFORE the empty-response break below so an empty 200
+		// arriving right after a nudge RE-ASKS (bounded) instead of abandoning
+		// unfinished work — the executor-specific gap that the empty-AFTER-tools
+		// path already rescued but this top-level path (SendMessageWithHistory) did
+		// not. (max_tokens has its own continuation above; skip here so we don't
+		// double-continue.) Progress-aware + bounded: a model that narrates without
+		// running a tool N times in a row stops; one that completes todos between
+		// nudges resets the counter and runs free.
 		if resp.FinishReason != genai.FinishReasonMaxTokens {
 			if n, summary := IncompleteTodoSummary(e.registry); n > 0 {
 				if len(toolsUsed) > toolsUsedAtLastIncompleteNudge {
@@ -1469,13 +1465,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					// Carry the text produced so far so the next iteration's
 					// `finalText = carriedText + resp.Text` doesn't silently drop
 					// it. finalText already == (carriedText + this resp.Text), so
-					// this also folds in any earlier max_tokens-carried prefix.
+					// this also folds in any earlier max_tokens-carried prefix. An
+					// empty finalText here is harmless.
 					carriedText = finalText
 					if e.handler != nil && e.handler.OnWarning != nil {
 						e.handler.OnWarning(fmt.Sprintf("Continuing — %d task(s) still to do…", n))
 					}
 					logging.Info("incomplete-work continuation: model stopped with unfinished todos",
-						"incomplete", n, "attempt", incompleteWorkStuck)
+						"incomplete", n, "attempt", incompleteWorkStuck, "empty_response", finalText == "")
 					history = append(history, genai.NewContentFromText(
 						IncompleteWorkContinuationPrompt(n, summary), genai.RoleUser))
 					continue
@@ -1483,6 +1480,19 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				logging.Info("incomplete-work continuation budget exhausted — model narrating without acting",
 					"incomplete", n)
 			}
+		}
+
+		// Detect empty response — model returned no text and no function calls, and
+		// the incomplete-work gate above did NOT continue (no unfinished todos, or
+		// the continuation budget is exhausted). Break; the fallback below provides
+		// a message.
+		if finalText == "" {
+			logging.Warn("model returned empty response",
+				"finish_reason", string(resp.FinishReason),
+				"input_tokens", resp.InputTokens,
+				"output_tokens", resp.OutputTokens,
+				"iteration", i)
+			break
 		}
 
 		break

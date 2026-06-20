@@ -870,6 +870,12 @@ func (a *App) handleSubmit(message string) {
 	a.processingCancel = cancel
 	a.processingMu.Unlock()
 
+	// Expand @path references into inline file content for the AGENT only. The
+	// UI already echoed the raw @path text to scrollback (before onSubmit), so
+	// the display stays clean while the agent receives the referenced files.
+	// Best-effort: unchanged when there are no resolvable @refs.
+	agentMessage := a.expandAtReferences(message)
+
 	// Process message normally (coordinator is now integrated in agent system)
 	a.safeGo("message-processing", func() {
 		defer func() {
@@ -877,7 +883,7 @@ func (a *App) handleSubmit(message string) {
 			a.processingCancel = nil
 			a.processingMu.Unlock()
 		}()
-		a.processMessageWithContext(ctx, message)
+		a.processMessageWithContext(ctx, agentMessage)
 	})
 }
 

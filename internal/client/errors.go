@@ -52,6 +52,21 @@ const (
 // ErrModelRoundTimeout is the sentinel for executor-enforced round timeout.
 var ErrModelRoundTimeout = errors.New("model round timeout")
 
+// DefaultModelRoundTimeout is the HARD cap on a single model round (one
+// SendMessage + stream collection) in BOTH agentic loops (executor + agent).
+// It is a zombie backstop, NOT the primary stuck-guard — the activity-aware
+// stream-idle timeout (anthropic.go, reset on each chunk) catches a stalled
+// stream far sooner. So this is deliberately GENEROUS: a heavy-reasoning model
+// (glm/deepseek) can legitimately stream thinking tokens for many minutes in one
+// round, and a tight cap (the old 5m) killed those healthy rounds mid-thought —
+// the model-round-timeout fires as a typed, NON-retryable error, so the agent/
+// turn just failed (the "agent stopped at ~7m with 13m thinking" incident).
+// 14m comfortably exceeds a realistic single-round thinking budget; the round
+// helper still clamps to the parent's remaining deadline when the parent (e.g.
+// a sub-agent overall timeout) is stricter. Single source of truth shared by
+// tools.defaultModelRoundTimeout and agent.agentModelRoundTimeout (don't drift).
+const DefaultModelRoundTimeout = 14 * time.Minute
+
 // ErrEmptyModelResponse is the sentinel for a successful provider response
 // that carried neither text nor tool calls.
 var ErrEmptyModelResponse = errors.New("empty model response")
