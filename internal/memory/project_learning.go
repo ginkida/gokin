@@ -636,6 +636,15 @@ func (pl *ProjectLearning) getSuccessfulCommandsInternal(minRate float64, limit 
 
 // Flush cancels any pending debounced save and forces an immediate save.
 func (pl *ProjectLearning) Flush() error {
+	_, err := pl.FlushChanged()
+	return err
+}
+
+// FlushChanged is Flush but reports whether it ACTUALLY wrote: changed=true only
+// when there were pending changes and save() succeeded; changed=false on a no-op
+// flush (nothing dirty). memorize uses this so it never claims "(updated <path>)"
+// for a write that did not happen — the honesty defect behind the user incident.
+func (pl *ProjectLearning) FlushChanged() (changed bool, err error) {
 	// Cancel pending debounced save
 	pl.timerMu.Lock()
 	if pl.timer != nil {
@@ -648,14 +657,14 @@ func (pl *ProjectLearning) Flush() error {
 	defer pl.mu.Unlock()
 
 	if !pl.dirty {
-		return nil
+		return false, nil
 	}
 
-	err := pl.save()
-	if err == nil {
-		pl.dirty = false
+	if err := pl.save(); err != nil {
+		return false, err
 	}
-	return err
+	pl.dirty = false
+	return true, nil
 }
 
 // Path returns the path to the learning file.

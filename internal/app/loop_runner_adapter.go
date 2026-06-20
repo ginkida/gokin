@@ -110,9 +110,12 @@ func newLoopSpawner(a *App) loops.Spawner {
 		// Use the same model as the main client so the user gets
 		// consistent behavior between manual interactions and loop
 		// iterations. Empty model lets the runner pick the default.
+		// Read the client under clientMu (leaf lock) — this closure runs on the
+		// /loop scheduler's background goroutine and races the ApplyConfig/failover
+		// a.client swap; a bare read is a data race.
 		model := ""
-		if a.client != nil {
-			model = a.client.GetModel()
+		if cl := a.clientSnapshot(); cl != nil {
+			model = cl.GetModel()
 		}
 
 		const maxTurns = 25

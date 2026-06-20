@@ -182,28 +182,45 @@ func (t *RefactorTool) executeRename(ctx context.Context, args map[string]any) (
 		files = []string{filePath}
 	}
 
-	// Process each file
+	// Process each file. Track real FAILURES separately from per-file change
+	// summaries, so an all-failed rename is never reported as a benign "no
+	// occurrences" success (the dishonest-success class — the agent would
+	// conclude the symbol is absent / the work is done when nothing was written).
 	var results []string
+	var errored []string
+	var changedFiles int
 	var totalChanges int
 
 	for _, file := range files {
 		changes, err := t.renameInFile(ctx, file, oldName, newName)
 		if err != nil {
-			results = append(results, fmt.Sprintf("%s: ERROR - %s", file, err))
+			errored = append(errored, fmt.Sprintf("%s: %s", file, err))
 			continue
 		}
 		if changes > 0 {
 			results = append(results, fmt.Sprintf("%s: %d changes", file, changes))
+			changedFiles++
 			totalChanges += changes
 		}
 	}
 
 	if totalChanges == 0 {
+		// Nothing changed. If every target ERRORED (path rejected, missing file,
+		// unwritable), that is a failure — surface the reason, don't claim success.
+		if len(errored) > 0 {
+			return NewErrorResult(fmt.Sprintf("rename failed (no files changed):\n%s", strings.Join(errored, "\n"))), nil
+		}
 		return NewSuccessResult(fmt.Sprintf("No occurrences of '%s' found", oldName)), nil
 	}
 
-	return NewSuccessResult(fmt.Sprintf("Renamed '%s' to '%s' in %d file(s):\n%s",
-		oldName, newName, len(results), strings.Join(results, "\n"))), nil
+	// Some files changed: report the REAL changed-file count (not len(results)
+	// which would be inflated), and surface any partial failures explicitly.
+	msg := fmt.Sprintf("Renamed '%s' to '%s' in %d file(s):\n%s",
+		oldName, newName, changedFiles, strings.Join(results, "\n"))
+	if len(errored) > 0 {
+		msg += fmt.Sprintf("\n\n⚠ %d file(s) failed:\n%s", len(errored), strings.Join(errored, "\n"))
+	}
+	return NewSuccessResult(msg), nil
 }
 
 // renameInFile performs AST-based renaming in a single file.

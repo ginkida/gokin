@@ -116,6 +116,18 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		return cloned
 	case *MemorizeTool:
 		return NewMemorizeTool(t.GetLearning())
+	case *MemoryTool:
+		// Give each agent its OWN MemoryTool instance. The runner/agent re-wires
+		// SetLearning(pl) per-agent after construction, so a SHARED instance would
+		// race on that field under parallel (non-isolated) spawn AND let an
+		// isolated worktree agent clobber the foreground's learning pointer with
+		// its own worktree-scoped store. The kv-store (*memory.Store) is itself
+		// concurrency-safe, so sharing that pointer is fine. Same footgun the
+		// *TodoTool / *MemorizeTool cases already guard against.
+		cloned := NewMemoryTool()
+		cloned.SetStore(t.store)
+		cloned.SetLearning(t.learning)
+		return cloned
 	case *ToolsListTool:
 		// Registry-aware cloning is handled by CloneRegistryForWorkDir.
 		return NewToolsListTool(nil)

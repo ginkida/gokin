@@ -401,17 +401,39 @@ func (r *Router) executeViaSubAgent(ctx context.Context, message string, agentTy
 
 	// Spawn and wait for completion
 	agentID, err = r.agentRunner.Spawn(ctx, agentType, message, 30, "")
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to spawn sub-agent: %w", err)
+
+	// CRITICAL: Spawn is synchronous and stores the agent's PARTIAL result
+	// (result.Output + result.Error) into the runner BEFORE returning a non-nil
+	// err — agent.Run sets result.Error ONLY on its err!=nil path, so the real
+	// failure shape is `err != nil`, NOT `err == nil && result.Error != ""`.
+	// The old code returned on `if err != nil` here, BEFORE GetResult, so the
+	// preserve-block below was structurally dead and minutes of sub-agent work
+	// vanished (the "agent worked then suddenly stopped, nothing to continue
+	// from" field report). Only a never-started spawn (empty agentID) is a true
+	// failure with nothing to preserve. Mirrors loop_runner_adapter.
+	if agentID == "" {
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to spawn sub-agent: %w", err)
+		}
+		return nil, "", fmt.Errorf("sub-agent did not start")
 	}
 
-	// Get result
+	// Get result (present even on a post-Run failure).
 	result, ok := r.agentRunner.GetResult(agentID)
 	if !ok {
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to spawn sub-agent: %w", err)
+		}
 		return nil, "", fmt.Errorf("sub-agent %s did not return a result", agentID)
 	}
 
-	if result.Error != "" {
+	// The failure reason comes from the Spawn err OR the stored result.Error.
+	failureReason := result.Error
+	if failureReason == "" && err != nil {
+		failureReason = err.Error()
+	}
+
+	if failureReason != "" {
 		// The sub-agent stopped before finishing — but it may have done real work
 		// first (the agent preserves it in result.Output). Surface that partial
 		// work plus an actionable reason and keep the turn alive, instead of
@@ -420,14 +442,14 @@ func (r *Router) executeViaSubAgent(ctx context.Context, message string, agentTy
 		// agent's output. Only a truly-empty failure propagates as an error.
 		if strings.TrimSpace(result.Output) != "" {
 			response := result.Output +
-				"\n\n⚠ The agent stopped before finishing: " + result.Error +
+				"\n\n⚠ The agent stopped before finishing: " + failureReason +
 				"\nThe work above is partial — review it, then ask me to continue from here."
 			history := []*genai.Content{
 				genai.NewContentFromText(response, genai.RoleModel),
 			}
 			return history, response, nil
 		}
-		return nil, "", fmt.Errorf("sub-agent stopped before finishing: %s", result.Error)
+		return nil, "", fmt.Errorf("sub-agent stopped before finishing: %s", failureReason)
 	}
 
 	// Format output
@@ -629,8 +651,15 @@ func (r *Router) executeSubtask(ctx context.Context, st Subtask) *SubtaskResult 
 	}
 
 	agentID, err := r.agentRunner.Spawn(ctx, st.AgentType, st.Prompt, 20, "")
-	if err != nil {
-		result.Error = err.Error()
+	// Spawn stores the partial result before returning a non-nil err (the real
+	// failure shape), so when the agent actually started (agentID != "") fetch
+	// it and preserve its output — only a never-started spawn is a bare failure.
+	if agentID == "" {
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Error = "subtask agent did not start"
+		}
 		result.Success = false
 		return result
 	}
@@ -639,13 +668,22 @@ func (r *Router) executeSubtask(ctx context.Context, st Subtask) *SubtaskResult 
 
 	agentResult, ok := r.agentRunner.GetResult(agentID)
 	if !ok {
-		result.Error = "no result returned"
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Error = "no result returned"
+		}
 		result.Success = false
 		return result
 	}
 
-	if agentResult.Error != "" {
-		result.Error = agentResult.Error
+	failureReason := agentResult.Error
+	if failureReason == "" && err != nil {
+		failureReason = err.Error()
+	}
+
+	if failureReason != "" {
+		result.Error = failureReason
 		// Preserve partial work. A failed subtask often still produced real
 		// output (built code, analysis, a half-finished edit) before it stopped;
 		// the agent carefully keeps it in agentResult.Output. Dropping it here

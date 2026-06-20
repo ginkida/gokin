@@ -1205,6 +1205,14 @@ func (b *Builder) initIntegrations() error {
 					logging.Debug("memorize tool wired with project learning")
 				}
 			}
+			// Wire the same project-learning store into the `memory` tool so
+			// `memory list` surfaces knowledge saved via `memorize` (the two
+			// stores were previously blind to each other).
+			if memoryTool, ok := b.registry.Get("memory"); ok {
+				if mt, ok := memoryTool.(*tools.MemoryTool); ok {
+					mt.SetLearning(projectLearning)
+				}
+			}
 		}
 	}
 

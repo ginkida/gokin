@@ -36,7 +36,7 @@ func (t *MemorizeTool) Name() string {
 }
 
 func (t *MemorizeTool) Description() string {
-	return "Saves project-specific knowledge, facts, or preferences to persistent memory and updates .gokin/project-memory.md for future sessions."
+	return "Saves a durable project fact, preference, convention, or pattern to the project-learning store (.gokin/project-memory.md + learning.yaml), loaded into context every future session. Use this for knowledge about THIS repository (e.g. the test command, a naming convention). The result reports whether a write actually happened. For ad-hoc keyed notes with tags/TTL/recall, use the `memory` tool instead; both stores are shown by `memory` action=list."
 }
 
 func (t *MemorizeTool) Declaration() *genai.FunctionDeclaration {
@@ -104,17 +104,40 @@ func (t *MemorizeTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		return NewErrorResult(fmt.Sprintf("unknown information type: %s", infoType)), nil
 	}
 
-	// Flush immediately to ensure persistence
-	if err := t.learning.Flush(); err != nil {
+	// Flush immediately to ensure persistence. FlushChanged reports whether a
+	// write ACTUALLY happened, so the success message never claims "(updated …)"
+	// for a no-op flush — the honesty defect behind the field report.
+	changed, err := t.learning.FlushChanged()
+	if err != nil {
 		return NewErrorResult(fmt.Sprintf("failed to save memory: %s", err)), nil
 	}
 
 	EmitMemoryNotify(ctx, "memorized", fmt.Sprintf("%s: %s", infoType, key))
 
-	msg := fmt.Sprintf("Successfully memorized %s: %s", infoType, key)
-	if markdownPath := t.learning.MarkdownPath(); markdownPath != "" {
-		msg += fmt.Sprintf(" (updated %s)", markdownPath)
+	markdownPath := t.learning.MarkdownPath()
+	msg := fmt.Sprintf("Memorized %s: %s", infoType, key)
+	if changed {
+		if markdownPath != "" {
+			msg += fmt.Sprintf(" (updated %s — also shown in `memory list` and loaded next session)", markdownPath)
+		}
+	} else {
+		msg += " (already current — nothing to write)"
 	}
 
+	// Declare the files written so the executor invalidates the read-dedup cache
+	// (the agent can re-read to VERIFY) and records them for post-compaction
+	// hints — memorize writes via ProjectLearning, bypassing the write-tool path
+	// the executor normally watches. Only when a write actually happened.
+	if changed {
+		var written []string
+		for _, p := range []string{markdownPath, t.learning.Path()} {
+			if p != "" {
+				written = append(written, p)
+			}
+		}
+		if len(written) > 0 {
+			return NewSuccessResultWithData(msg, map[string]any{"written_paths": written}), nil
+		}
+	}
 	return NewSuccessResult(msg), nil
 }

@@ -46,6 +46,38 @@ func TestProjectLearningFlush_WritesProjectMemoryMarkdown(t *testing.T) {
 	}
 }
 
+func TestProjectLearningFlushChanged_ReportsHonestly(t *testing.T) {
+	dir := t.TempDir()
+	pl, err := NewProjectLearning(dir)
+	if err != nil {
+		t.Fatalf("NewProjectLearning() error = %v", err)
+	}
+
+	// A flush with nothing pending must report no write (the honesty contract
+	// memorize relies on so it never claims "(updated …)" for a no-op).
+	if changed, err := pl.FlushChanged(); err != nil || changed {
+		t.Fatalf("empty FlushChanged() = (%v, %v), want (false, nil)", changed, err)
+	}
+
+	// After a real mutation, the flush reports a write AND the file lands.
+	pl.SetPreference("test_command", "go test ./...")
+	changed, err := pl.FlushChanged()
+	if err != nil {
+		t.Fatalf("FlushChanged() error = %v", err)
+	}
+	if !changed {
+		t.Fatalf("FlushChanged() after a mutation must report changed=true")
+	}
+	if _, err := os.Stat(pl.MarkdownPath()); err != nil {
+		t.Fatalf("project-memory.md should exist after a changed flush: %v", err)
+	}
+
+	// A second flush with nothing new pending reports no write again.
+	if changed, err := pl.FlushChanged(); err != nil || changed {
+		t.Fatalf("second FlushChanged() = (%v, %v), want (false, nil)", changed, err)
+	}
+}
+
 func TestProjectLearningFormatForPrompt_GroupsTypedKnowledge(t *testing.T) {
 	dir := t.TempDir()
 

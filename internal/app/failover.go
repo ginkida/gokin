@@ -7,6 +7,7 @@ import (
 
 	"gokin/internal/client"
 	"gokin/internal/config"
+	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
 )
 
@@ -55,7 +56,7 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 
 	a.mu.Lock()
 	oldClient := a.client
-	a.client = newClient
+	a.setClientLocked(newClient) // a.mu held; also guards clientMu for background readers
 
 	// Persist fallback chain in memory for subsequent requests in this session.
 	a.config.Model.Provider = cfgCopy.Model.Provider
@@ -74,6 +75,12 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	}
 	if a.contextManager != nil {
 		a.contextManager.SetClient(newClient)
+	}
+	// Re-point the session-memory LLM summarizer too (it captured the failed
+	// provider's client at boot) so post-failover extractions use the new client
+	// instead of silently degrading to heuristic summaries.
+	if a.sessionMemory != nil {
+		a.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(newClient))
 	}
 
 	// Carry over system instruction, turn context (working memory), and

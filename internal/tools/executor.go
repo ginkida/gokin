@@ -2102,27 +2102,41 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Step 4.5: Check tool result cache for read-only tools
 	if e.toolCache != nil {
 		if cached, hit := e.toolCache.Get(call.Name, call.Args); hit {
-			logging.Debug("tool cache hit", "tool", call.Name)
-			// For read tool: replace cached content with stub if file unchanged,
-			// saving context window space on repeated reads.
+			serveCache := true
+			// For read tool: dedup unchanged repeats to a stub, but DETECT
+			// staleness — CheckAndRecord stats the file and its 3rd return
+			// (fileChanged) is true when the file mutated on disk since the
+			// cached read (an out-of-band bash / codegen / git-checkout write
+			// that carries no file_path arg, so the normal write-path
+			// invalidation never fired). Serving the cache then hands the model
+			// PRE-WRITE bytes with no error — it reasons/edits from stale content
+			// and clobbers the change. So on fileChanged we drop the cache entry
+			// AND the tracker record we just wrote (so the real re-read below
+			// serves FULL fresh content, not a dedup stub) and fall through.
 			if call.Name == "read" && e.readTracker != nil && cached.Success {
 				filePath, _ := call.Args["file_path"].(string)
 				offset := GetIntDefault(call.Args, "offset", 1)
 				limit := GetIntDefault(call.Args, "limit", 2000)
 				if filePath != "" {
-					isDup, origRec, _, dupCount := e.readTracker.CheckAndRecord(filePath, offset, limit, len(cached.Content))
-					if isDup && origRec != nil {
+					isDup, origRec, fileChanged, dupCount := e.readTracker.CheckAndRecord(filePath, offset, limit, len(cached.Content))
+					if fileChanged {
+						e.toolCache.InvalidateByFile(filePath)
+						e.readTracker.InvalidateFile(filePath)
+						serveCache = false
+					} else if isDup && origRec != nil {
 						if stub, ok := dedupReadStub(origRec, filePath, dupCount); ok {
 							cached.Content = stub
 						}
-						// dupCount == 2 (or other !ok cases): fall through with
-						// the full cached content so a model that lost track of
-						// the file gets it back instead of looping on a stub.
-						return cached
+						// dupCount == 2 (or other !ok cases): keep the full cached
+						// content so a model that lost track of the file gets it
+						// back instead of looping on a stub.
 					}
 				}
 			}
-			return cached
+			if serveCache {
+				logging.Debug("tool cache hit", "tool", call.Name)
+				return cached
+			}
 		}
 	}
 
@@ -2406,6 +2420,14 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			e.toolCache.InvalidateByTool("git_status")
 			e.toolCache.InvalidateByTool("git_diff")
 			e.toolCache.InvalidateByTool("review_changes")
+			// grep/glob can flip on ANY content/existence change, and a NO-MATCH
+			// query is cached against ZERO files — so per-file invalidation
+			// (InvalidateByFile) can never reach it. Drop grep+glob wholesale: a
+			// stale "No matches found" after the agent's own write is the
+			// investigation-critical false-negative (model concludes a just-written
+			// symbol/file does not exist → re-implements or abandons the task).
+			e.toolCache.InvalidateByTool("grep")
+			e.toolCache.InvalidateByTool("glob")
 			// tree/list_dir may be stale after file create/delete
 			if call.Name == "write" || call.Name == "delete" || call.Name == "mkdir" ||
 				call.Name == "copy" || call.Name == "move" {
@@ -2417,6 +2439,11 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			for _, p := range filePaths {
 				e.searchCache.InvalidateByPath(p)
 			}
+			// Same no-match blind spot as the toolCache: a grep/glob that matched
+			// nothing tracks zero files, so InvalidateByPath/InvalidateByDir can't
+			// reach it. Clear the dedicated search cache so grep.go/glob.go don't
+			// serve a stale "no matches" for content the agent just wrote.
+			e.searchCache.Clear()
 		}
 	} else if e.toolCache != nil && result.Success {
 		// Only cache read-only tool results
@@ -2456,6 +2483,35 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		for _, key := range []string{"file_path", "path", "destination", "new_path"} {
 			if p, ok := call.Args[key].(string); ok && p != "" {
 				e.writeTracker.Record(p)
+			}
+		}
+	}
+
+	// Tool-declared writes: a tool that mutates a file OUTSIDE the normal
+	// write-tool dispatch (e.g. `memorize` writing .gokin/project-memory.md via
+	// ProjectLearning, bypassing the executor's arg-based path extraction above)
+	// can declare the files it wrote in result.Data["written_paths"]. Invalidate
+	// the read-dedup for each (so the agent can re-read to VERIFY its own write —
+	// the "cannot re-read, returns [Unchanged]" bug) and record them for
+	// post-compaction hints. Generic + drift-proof (no per-tool name list) and
+	// defensive (a malformed Data value is a silent no-op, never a panic).
+	if result.Success {
+		for _, p := range writtenPathsFromResult(result) {
+			if e.readTracker != nil {
+				e.readTracker.InvalidateFile(p)
+			}
+			if e.writeTracker != nil {
+				e.writeTracker.Record(p)
+			}
+			// Also drop the RESULT caches for the path — otherwise a verify-read
+			// of an out-of-band write hits the TTL-only toolCache and serves
+			// PRE-WRITE content (the read-dedup invalidation above only frees the
+			// dedup stub, not the cached result). Mirrors Step 12.5.
+			if e.toolCache != nil {
+				e.toolCache.InvalidateByFile(p)
+			}
+			if e.searchCache != nil {
+				e.searchCache.InvalidateByPath(p)
 			}
 		}
 	}
@@ -2805,6 +2861,38 @@ func extractFilePaths(call *genai.FunctionCall) []string {
 		}
 	}
 	return paths
+}
+
+// writtenPathsFromResult extracts a tool's self-declared written paths from
+// result.Data["written_paths"]. A tool that mutates a file outside the normal
+// write-tool dispatch (memorize -> ProjectLearning) sets this so the executor
+// can invalidate the read-dedup + record the write. Defensive: any non-conforming
+// Data shape yields nil (no panic), so it is safe to call on every result.
+func writtenPathsFromResult(result ToolResult) []string {
+	m, ok := result.Data.(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := m["written_paths"]
+	if !ok {
+		return nil
+	}
+	var out []string
+	switch v := raw.(type) {
+	case []string:
+		for _, p := range v {
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if p, ok := item.(string); ok && p != "" {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 // isWriteOperation returns true if the tool modifies files/state.

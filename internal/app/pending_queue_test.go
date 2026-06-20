@@ -109,3 +109,16 @@ func TestPendingSnapshotIsACopy(t *testing.T) {
 		t.Fatalf("empty queue snapshot should be nil, got %v", got)
 	}
 }
+
+// TestCancelProcessingResetsStopHookActive pins finding #12: a dropped Stop-hook
+// continuation (its queued message drained on Esc, or its in-flight turn aborted)
+// must not leave stopHookActive=true — that would make the NEXT user turn be
+// treated as the continuation and silently skip its Stop hooks.
+func TestCancelProcessingResetsStopHookActive(t *testing.T) {
+	a := &App{}
+	a.stopHookActive = true
+	a.CancelProcessing()
+	if a.stopHookActive {
+		t.Error("CancelProcessing must reset stopHookActive so the next user turn's Stop hooks run")
+	}
+}

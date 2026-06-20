@@ -14,6 +14,11 @@ import (
 // MemoryTool provides persistent memory storage between sessions.
 type MemoryTool struct {
 	store *memory.Store
+	// learning is the project-learning store written by the `memorize` tool.
+	// It is a SEPARATE store from `store`; `list` surfaces it so a user who
+	// saved knowledge via memorize still sees it here (they used to be blind
+	// to each other — the "memory list is empty after memorize" field report).
+	learning *memory.ProjectLearning
 }
 
 // NewMemoryTool creates a new memory tool.
@@ -26,12 +31,18 @@ func (t *MemoryTool) SetStore(store *memory.Store) {
 	t.store = store
 }
 
+// SetLearning wires the project-learning store (written by `memorize`) so that
+// `memory list` can surface memorized facts/preferences/conventions too.
+func (t *MemoryTool) SetLearning(learning *memory.ProjectLearning) {
+	t.learning = learning
+}
+
 func (t *MemoryTool) Name() string {
 	return "memory"
 }
 
 func (t *MemoryTool) Description() string {
-	return "Persistent memory storage for remembering and recalling information across sessions"
+	return "Keyed memory store for remembering/recalling/forgetting/listing notes across sessions (supports keys, tags, TTL, and project/session scope). action=list also surfaces durable project knowledge saved via the `memorize` tool (a separate project-learning store), so this is the one place to see everything remembered."
 }
 
 func (t *MemoryTool) Declaration() *genai.FunctionDeclaration {
@@ -131,11 +142,16 @@ func (t *MemoryTool) Validate(args map[string]any) error {
 }
 
 func (t *MemoryTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
+	action, _ := GetString(args, "action")
+
 	if t.store == nil {
+		// `list` can still surface project-learning (written by `memorize`) even
+		// when the keyed kv-store is disabled — the two are independent.
+		if action == "list" && t.learning != nil && t.learning.HasContent() {
+			return t.list(args)
+		}
 		return NewErrorResult("memory is unavailable — it's likely disabled in config. Set `memory.enabled: true` (and a non-zero `memory.max_entries`) in your config (~/.config/gokin/config.yaml) or via /config, then restart."), nil
 	}
-
-	action, _ := GetString(args, "action")
 
 	switch action {
 	case "remember":
@@ -373,20 +389,36 @@ func (t *MemoryTool) list(args map[string]any) (ToolResult, error) {
 	includeArchived := GetBoolDefault(args, "include_archived", false)
 
 	var entries []*memory.Entry
-	if includeArchived {
-		entries = t.store.Search(memory.SearchQuery{
-			ProjectOnly:     projectOnly,
-			IncludeArchived: true,
-			Limit:           200,
-		})
-	} else {
-		entries = t.store.List(projectOnly)
+	if t.store != nil {
+		if includeArchived {
+			entries = t.store.Search(memory.SearchQuery{
+				ProjectOnly:     projectOnly,
+				IncludeArchived: true,
+				Limit:           200,
+			})
+		} else {
+			entries = t.store.List(projectOnly)
+		}
+	}
+
+	// Project-learning (written by `memorize`) is a separate store. Surface it
+	// here so a user who saved knowledge via memorize is never told "nothing
+	// stored" — the two stores used to be blind to each other.
+	learnedSection := ""
+	if t.learning != nil && t.learning.HasContent() {
+		learnedSection = t.learning.FormatForPrompt()
 	}
 
 	if len(entries) == 0 {
 		scope := "global"
 		if projectOnly {
 			scope = "project"
+		}
+		if learnedSection != "" {
+			return NewSuccessResultWithData(
+				fmt.Sprintf("No keyed memories stored (%s scope). Project knowledge saved via `memorize`:\n\n%s", scope, learnedSection),
+				map[string]any{"count": 0, "has_learning": true},
+			), nil
 		}
 		return NewSuccessResultWithData(
 			fmt.Sprintf("No memories stored (%s scope)", scope),
@@ -436,9 +468,16 @@ func (t *MemoryTool) list(args map[string]any) (ToolResult, error) {
 		}
 	}
 
+	if learnedSection != "" {
+		builder.WriteString("[Project Learning — saved via memorize]\n")
+		builder.WriteString(learnedSection)
+		builder.WriteString("\n")
+	}
+
 	return NewSuccessResultWithData(builder.String(), map[string]any{
-		"count":   len(entries),
-		"entries": resultData,
+		"count":        len(entries),
+		"entries":      resultData,
+		"has_learning": learnedSection != "",
 	}), nil
 }
 

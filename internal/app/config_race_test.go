@@ -48,3 +48,33 @@ func TestConfigReaders_NoRaceWithApplyConfigSwap(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestClientSnapshot_NoRaceWithClientSwap pins finding #4/#10: a.client is read
+// lock-free from background goroutines (pushTurnContext via session-memory
+// onUpdate, the /loop spawner) while ApplyConfig/failover swap it under a.mu. The
+// leaf-lock accessors (clientSnapshot reads under clientMu; setClientLocked
+// writes under clientMu with a.mu held) remove the race. Under `go test -race`
+// this fails loudly if a future edit drops clientMu.
+func TestClientSnapshot_NoRaceWithClientSwap(t *testing.T) {
+	a := &App{}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// Reader: a background goroutine (e.g. pushTurnContext / loop spawner).
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			_ = a.clientSnapshot()
+		}
+	}()
+	// Writer: ApplyConfig/failover swap a.client. They hold a.mu; mirror that.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			a.mu.Lock()
+			a.setClientLocked(nil)
+			a.mu.Unlock()
+		}
+	}()
+	wg.Wait()
+}

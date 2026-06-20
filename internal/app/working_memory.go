@@ -87,8 +87,18 @@ func (a *App) directoryAccessContext() string {
 // pushTurnContext delivers the current session+working memory snapshot to the
 // active client as ephemeral per-turn context. Safe to call with a nil client.
 func (a *App) pushTurnContext() {
-	if a == nil || a.client == nil {
+	if a == nil {
 		return
 	}
-	a.client.SetTurnContext(a.turnContextContent())
+	// Read the client under clientMu (the LEAF lock), NOT a.mu: some callers of
+	// pushTurnContext already hold a.mu and re-acquiring it self-deadlocks (the
+	// v0.100.42 invariant), but the client is swapped by ApplyConfig/failover on
+	// another goroutine, so a bare read races. Snapshot + release before building
+	// turnContextContent (which takes grantedDirsMu) so the two leaf locks are
+	// taken sequentially, never nested.
+	cl := a.clientSnapshot()
+	if cl == nil {
+		return
+	}
+	cl.SetTurnContext(a.turnContextContent())
 }

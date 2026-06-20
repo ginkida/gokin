@@ -466,7 +466,7 @@ func KillShellToolDeclaration() *genai.FunctionDeclaration {
 func MemoryToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "memory",
-		Description: "Persistent memory storage for remembering and recalling information across sessions",
+		Description: "Keyed memory store for remembering/recalling/forgetting/listing notes across sessions (supports keys, tags, TTL, and project/session scope). action=list also surfaces durable project knowledge saved via the `memorize` tool (a separate project-learning store), so this is the one place to see everything remembered.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -1149,7 +1149,7 @@ func CheckImpactToolDeclaration() *genai.FunctionDeclaration {
 func MemorizeToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "memorize",
-		Description: "Saves project-specific knowledge to persistent memory and updates .gokin/project-memory.md for future sessions.",
+		Description: "Saves a durable project fact, preference, convention, or pattern to the project-learning store (.gokin/project-memory.md + learning.yaml), loaded into context every future session. Use this for knowledge about THIS repository (e.g. the test command, a naming convention). The result reports whether a write actually happened. For ad-hoc keyed notes with tags/TTL/recall, use the `memory` tool instead; both stores are shown by `memory` action=list.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{

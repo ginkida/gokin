@@ -98,9 +98,18 @@ The user's working directory is: %s`
 
 // App is the main application orchestrator.
 type App struct {
-	config   *config.Config
-	workDir  string
-	client   client.Client
+	config  *config.Config
+	workDir string
+	client  client.Client
+	// clientMu is a LEAF lock guarding the `client` field ONLY, so a background
+	// goroutine (session-memory onUpdate -> pushTurnContext, the /loop spawner)
+	// can read the client without a.mu — which it must NOT take, because some
+	// pushTurnContext callers already hold a.mu (re-acquiring self-deadlocks, the
+	// v0.100.42 invariant). Lock order is a.mu -> clientMu: the two writers
+	// (ApplyConfig, failover) hold a.mu AND take clientMu around the swap; a.mu-
+	// guarded readers stay safe via a.mu, lock-free readers take clientMu via
+	// currentClientLocked. Never take a.mu while holding clientMu.
+	clientMu sync.RWMutex
 	registry *tools.Registry
 	executor *tools.Executor
 	session  *chat.Session
@@ -1084,6 +1093,26 @@ func (a *App) GetMainClient() client.Client {
 	return a.client
 }
 
+// clientSnapshot returns the current client under clientMu (the LEAF lock), safe
+// to call from a background goroutine that must NOT take a.mu — e.g.
+// pushTurnContext, which is sometimes invoked by a caller already holding a.mu.
+// Writers (ApplyConfig, failover) update a.client under a.mu AND clientMu, so
+// this never observes a torn interface value.
+func (a *App) clientSnapshot() client.Client {
+	a.clientMu.RLock()
+	defer a.clientMu.RUnlock()
+	return a.client
+}
+
+// setClientLocked swaps a.client. The caller MUST already hold a.mu; this adds
+// the clientMu write so background clientSnapshot readers can't observe a torn
+// value. Order a.mu -> clientMu is preserved.
+func (a *App) setClientLocked(c client.Client) {
+	a.clientMu.Lock()
+	a.client = c
+	a.clientMu.Unlock()
+}
+
 // GetLoopManager returns the loops manager for the /loop command. Nil
 // when the loop subsystem is not wired (e.g. early in App lifecycle, or
 // in unit-test builds that skip loops). The /loop command nil-checks
@@ -1931,6 +1960,19 @@ func (a *App) ClearConversation() {
 	// Drain stale rate-limit retry counters so exhausted keys from the
 	// old conversation don't accumulate indefinitely.
 	a.rateLimitRetryCount = make(map[string]int)
+
+	// Clear the carried-over error note. message_processor prepends "[Note:
+	// previous attempt failed with: <lastError>. The context from that attempt is
+	// preserved in history.]" when lastError is < 2 min old — but /clear just wiped
+	// the history, so that note would be false AND belong to an unrelated prior
+	// conversation. headless.go zeros it for a fresh run for the same reason.
+	a.lastError = ""
+	a.lastErrorTime = time.Time{}
+
+	// A dropped Stop-hook continuation must not leave the next user turn marked as
+	// a continuation (which would skip that turn's Stop hooks). /clear is a hard
+	// boundary — reset the marker.
+	a.stopHookActive = false
 }
 
 // CompactContextWithPlan clears the conversation and injects the plan summary.
@@ -2558,7 +2600,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	}
 	attachStatusCallback(newClient, &appStatusCallback{app: a})
 	oldClient := a.client
-	a.client = newClient
+	a.setClientLocked(newClient) // a.mu held; also guards clientMu for background readers
 	if oldClient != nil {
 		a.safeGo("close-old-client-after-apply-config", func() {
 			if err := oldClient.Close(); err != nil {
@@ -2616,6 +2658,16 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 			MinTokensBetweenUpdates: a.config.SessionMemory.MinTokensBetweenUpdates,
 			ToolCallsBetweenUpdates: a.config.SessionMemory.ToolCallsBetweenUpdates,
 		})
+		// Re-point the LLM summarizer at the (possibly new) client. ApplyConfig
+		// swaps a.client, but the session-memory summarizer captured the OLD
+		// client at boot — without this, after a /provider or /login the every-Nth
+		// LLM extraction keeps hitting the old provider/key (silent cross-provider
+		// 400, then a degrade to heuristic summaries for the rest of the session).
+		// The sibling ContextManager re-points its summarizer in SetClient; this
+		// closes the same gap for session memory. (a.mu is held here.)
+		if a.client != nil {
+			a.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(a.client))
+		}
 	}
 
 	// 7. Update rate limiter
@@ -2932,6 +2984,15 @@ func (a *App) CancelProcessing() {
 	if cleared := a.drainPending(); cleared > 0 {
 		a.safeSendToProgram(ui.QueuedCountMsg(0))
 	}
+
+	// A Stop-hook continuation may have been the thing we just cancelled (its
+	// queued message drained, or its in-flight turn aborted before reaching
+	// runStopHooks which clears the flag). Leaving stopHookActive=true would make
+	// the NEXT user turn be treated as the continuation and silently skip its Stop
+	// hooks. Reset under a.mu (the flag's guard) — never under pendingMu.
+	a.mu.Lock()
+	a.stopHookActive = false
+	a.mu.Unlock()
 }
 
 // agentRunnerAdapter wraps agent.Runner to implement tools.AgentRunner interface.

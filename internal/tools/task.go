@@ -222,15 +222,44 @@ func writeSubAgentOutput(b *strings.Builder, out, outputFile string) {
 	b.WriteString(string(runes[len(runes)-maxSubAgentReportChars:]))
 }
 
+// errOrUnknown renders an error string, or a placeholder when nil.
+func errOrUnknown(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return "unknown error"
+}
+
+// failureReason picks the failure reason from the stored result.Error, falling
+// back to the Spawn/Resume err — the agent sets result.Error only on its err!=nil
+// path, so both carry the same reason on a real failure; either may be the one
+// populated depending on where the failure originated.
+func failureReason(resultErr string, spawnErr error) string {
+	if resultErr != "" {
+		return resultErr
+	}
+	if spawnErr != nil {
+		return spawnErr.Error()
+	}
+	return ""
+}
+
 func (t *TaskTool) executeForeground(ctx context.Context, agentType, prompt, description string, maxTurns int, model string) (ToolResult, error) {
 	agentID, err := t.runner.Spawn(ctx, agentType, prompt, maxTurns, model)
-	if err != nil {
-		return NewErrorResult(fmt.Sprintf("Agent failed: %s", err)), nil
+	// Spawn is synchronous and stores the agent's PARTIAL result (output + reason)
+	// before returning a non-nil err — agent.Run sets result.Error only on the
+	// err!=nil path, so the real failure shape is err!=nil. The old early-return
+	// here ran BEFORE GetResult and discarded the sub-agent's built code / analysis
+	// / half-finished edits, handing the parent a bare "Agent failed" with nothing
+	// to continue from. Only a never-started spawn (empty agentID) is a true
+	// failure with nothing to preserve.
+	if agentID == "" {
+		return NewErrorResult(fmt.Sprintf("Agent failed to start: %s", errOrUnknown(err))), nil
 	}
 
 	result, ok := t.runner.GetResult(agentID)
 	if !ok {
-		return NewErrorResult("Failed to get agent result"), nil
+		return NewErrorResult(fmt.Sprintf("Agent failed: %s", errOrUnknown(err))), nil
 	}
 
 	var output strings.Builder
@@ -244,9 +273,9 @@ func (t *TaskTool) executeForeground(ctx context.Context, agentType, prompt, des
 	fmt.Fprintf(&output, "Status: %s\n", result.Status)
 	fmt.Fprintf(&output, "Duration: %s\n\n", result.Duration.Round(time.Millisecond))
 
-	// Result
-	if result.Error != "" {
-		fmt.Fprintf(&output, "**Error:** %s\n\n", result.Error)
+	// Result — surface the failure reason from result.Error OR the Spawn err.
+	if reason := failureReason(result.Error, err); reason != "" {
+		fmt.Fprintf(&output, "**Error:** %s\n\n", reason)
 	}
 
 	writeSubAgentOutput(&output, result.Output, result.OutputFile)
@@ -304,13 +333,16 @@ func (t *TaskTool) executeBackground(ctx context.Context, agentType, prompt, des
 
 func (t *TaskTool) executeResumeForeground(ctx context.Context, agentID, prompt, description string) (ToolResult, error) {
 	resumedID, err := t.runner.Resume(ctx, agentID, prompt)
-	if err != nil {
-		return NewErrorResult(fmt.Sprintf("Failed to resume agent: %s", err)), nil
+	// Resume stores the partial result before returning a non-nil err (same shape
+	// as Spawn); only a true load/restore failure returns an empty resumedID. When
+	// the agent actually resumed, surface its partial work instead of dropping it.
+	if resumedID == "" {
+		return NewErrorResult(fmt.Sprintf("Failed to resume agent: %s", errOrUnknown(err))), nil
 	}
 
 	result, ok := t.runner.GetResult(resumedID)
 	if !ok {
-		return NewErrorResult("Failed to get agent result"), nil
+		return NewErrorResult(fmt.Sprintf("Failed to resume agent: %s", errOrUnknown(err))), nil
 	}
 
 	var output strings.Builder
@@ -325,9 +357,9 @@ func (t *TaskTool) executeResumeForeground(ctx context.Context, agentID, prompt,
 	fmt.Fprintf(&output, "Status: %s\n", result.Status)
 	fmt.Fprintf(&output, "Duration: %s\n\n", result.Duration.Round(time.Millisecond))
 
-	// Result
-	if result.Error != "" {
-		fmt.Fprintf(&output, "**Error:** %s\n\n", result.Error)
+	// Result — surface the failure reason from result.Error OR the Resume err.
+	if reason := failureReason(result.Error, err); reason != "" {
+		fmt.Fprintf(&output, "**Error:** %s\n\n", reason)
 	}
 
 	writeSubAgentOutput(&output, result.Output, result.OutputFile)

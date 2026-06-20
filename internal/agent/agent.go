@@ -389,6 +389,12 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 				mtt.SetLearning(pl)
 			}
 		}
+		// Also wire the `memory` tool so `memory list` surfaces memorized facts.
+		if mt, ok := agent.registry.Get("memory"); ok {
+			if mtt, ok := mt.(interface{ SetLearning(*memory.ProjectLearning) }); ok {
+				mtt.SetLearning(pl)
+			}
+		}
 	}
 
 	// Initialize self-reflection capability with LLM client for semantic analysis
@@ -529,6 +535,12 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		agent.learning = pl
 		// Inject into memorize tool if it exists
 		if mt, ok := agent.registry.Get("memorize"); ok {
+			if mtt, ok := mt.(interface{ SetLearning(*memory.ProjectLearning) }); ok {
+				mtt.SetLearning(pl)
+			}
+		}
+		// Also wire the `memory` tool so `memory list` surfaces memorized facts.
+		if mt, ok := agent.registry.Get("memory"); ok {
 			if mtt, ok := mt.(interface{ SetLearning(*memory.ProjectLearning) }); ok {
 				mtt.SetLearning(pl)
 			}
