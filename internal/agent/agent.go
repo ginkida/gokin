@@ -180,6 +180,16 @@ type Agent struct {
 	// State protection for concurrent access to status, history, startTime, endTime
 	stateMu sync.RWMutex
 
+	// Per-run token usage, accumulated across model rounds in executeLoop and
+	// surfaced on AgentResult so callers (notably the /loop scheduler) can show
+	// what an unattended run cost. usageInputTokens is BILLED input (the API's
+	// InputTokens minus the cache-read portion, summed per round); usageOutput
+	// is generated tokens summed per round. Mutated only on the run goroutine
+	// (under stateMu, alongside the history append) and read after executeLoop
+	// returns on the same goroutine — guarded by stateMu for discipline.
+	usageInputTokens  int
+	usageOutputTokens int
+
 	// pendingSteers holds steering messages (e.g. MetaAgent stuck-interventions)
 	// queued from another goroutine, drained into history at the top of each loop
 	// iteration so the model actually SEES the nudge instead of it being a UI-only
@@ -1305,6 +1315,8 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		a.endTime = time.Now()
 		endTime := a.endTime
 		startTime := a.startTime
+		result.InputTokens = a.usageInputTokens
+		result.OutputTokens = a.usageOutputTokens
 		a.stateMu.Unlock()
 
 		// Clear callHistory to prevent memory leak
@@ -1329,6 +1341,8 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.endTime = time.Now()
 	endTime := a.endTime
 	startTime := a.startTime
+	result.InputTokens = a.usageInputTokens
+	result.OutputTokens = a.usageOutputTokens
 	a.stateMu.Unlock()
 
 	// Clear callHistory to prevent memory leak on long-running sessions
@@ -2972,6 +2986,15 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		}
 		a.stateMu.Lock()
 		a.history = append(a.history, modelContent)
+		// Accumulate this round's token usage for per-run cost reporting. Input
+		// is netted against cache reads so it reflects what was actually billed,
+		// not the full (mostly-cached) prompt re-sent each round.
+		if billedIn := resp.InputTokens - resp.CacheReadInputTokens; billedIn > 0 {
+			a.usageInputTokens += billedIn
+		}
+		if resp.OutputTokens > 0 {
+			a.usageOutputTokens += resp.OutputTokens
+		}
 		a.stateMu.Unlock()
 
 		turnMadeProgress := false

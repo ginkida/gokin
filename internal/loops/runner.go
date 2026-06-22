@@ -29,6 +29,11 @@ type SpawnResult struct {
 	// exponential loop-level backoff so a busy/unreachable provider is waited
 	// out instead of burning the loop. Meaningless when OK is true.
 	Transient bool
+	// TokensIn / TokensOut are this iteration's billed input / generated output
+	// tokens. Surfaced so the user can see what a background loop is spending
+	// (a runaway unattended loop can quietly burn a provider's quota).
+	TokensIn  int
+	TokensOut int
 }
 
 // Spawner is the function the Runner calls to actually execute one
@@ -250,6 +255,12 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	timeout := r.timeout
 	r.mu.Unlock()
 
+	// Parent context already canceled (app shutting down — the runner's ctx is
+	// the app root ctx) before we even start: don't fire a doomed iteration.
+	if ctx.Err() != nil {
+		return
+	}
+
 	if startHook != nil {
 		startHook(l.ID)
 	}
@@ -264,6 +275,21 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	output, ok := res.Output, res.OK
 	duration := time.Since(started)
 
+	// If the PARENT context was canceled DURING the iteration (app shutdown),
+	// this iteration was INTERRUPTED, not failed. Recording it would (a) pollute
+	// the consecutive-failure streak toward auto-pause and (b) persist a
+	// meaningless "context canceled" failure to disk that survives to the next
+	// startup. Skip — same discipline as the ErrLoopNotRunning skip below, and
+	// the same class as the end-of-turn-gate cancellation fixes: a cancellation
+	// is not a failure. NOTE: this checks the PARENT ctx, NOT iterationCtx — the
+	// iteration's OWN timeout cancels only iterationCtx (parent stays alive) and
+	// SHOULD still record as a normal (failed) iteration.
+	if ctx.Err() != nil {
+		logging.Info("loops: iteration interrupted by shutdown, skipping record",
+			"loop_id", l.ID, "iteration", l.IterationCount+1)
+		return
+	}
+
 	it := Iteration{
 		N:         l.IterationCount + 1,
 		StartedAt: started,
@@ -274,6 +300,8 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 		// transport error (err != nil) is a wiring/construction failure, not a
 		// provider hiccup, so it stays non-transient (counts as a task failure).
 		Transient: res.Transient && !ok && err == nil,
+		TokensIn:  res.TokensIn,
+		TokensOut: res.TokensOut,
 	}
 
 	// agentDone signals "the work this loop was for is complete" — the

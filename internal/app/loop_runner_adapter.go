@@ -198,7 +198,12 @@ func newLoopSpawner(a *App) loops.Spawner {
 			}
 		}
 
-		return loops.SpawnResult{Output: output, OK: ok, Transient: transient}, nil
+		out := loops.SpawnResult{Output: output, OK: ok, Transient: transient}
+		if result != nil {
+			out.TokensIn = result.InputTokens
+			out.TokensOut = result.OutputTokens
+		}
+		return out, nil
 	}
 }
 

@@ -27,6 +27,15 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 		return true
 	}
 
+	// Turn interrupted (Esc) or context otherwise canceled: the verification
+	// commands can't meaningfully run, and forcing them would surface a false
+	// "done-gate blocked" error that DISCARDS the work the agent already
+	// finished (same class as the completion-review cancellation bug). Skip the
+	// gate; the completed work is preserved and delivered.
+	if ctx.Err() != nil {
+		return true
+	}
+
 	toolsUsed := a.snapshotResponseToolsUsed()
 	if !donegate.ShouldEnforce(userMessage, toolsUsed) {
 		return true
@@ -45,6 +54,11 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 	var autoFixErr error
 	for attempt := 0; attempt <= policy.AutoFixAttempts; attempt++ {
 		results = donegate.RunChecks(ctx, checks, policy.CheckTimeout, a.reportDoneGateProgress, a.recordResponseVerificationEvidence)
+		// A check that "failed" only because the context was canceled mid-run is
+		// not a real verification failure — don't report it or block on it.
+		if ctx.Err() != nil {
+			return true
+		}
 		a.reportDoneGateResults(results, attempt)
 
 		if donegate.Passed(results) {
@@ -64,6 +78,13 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 			autoFixErr = err
 			break
 		}
+	}
+
+	// If the loop ended because the context was canceled (Esc / deadline during
+	// checks or auto-fix), don't block — the work is done and a cancellation is
+	// not a verification failure.
+	if ctx.Err() != nil {
+		return true
 	}
 
 	reason := "done-gate blocked finalization: required checks are still failing after auto-fix budget"

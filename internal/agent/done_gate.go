@@ -132,6 +132,13 @@ func (a *Agent) runDoneGateAtBreak(ctx context.Context, prompt string, output *s
 	if policy == nil || !policy.Enabled {
 		return agentGateSkipped
 	}
+	// Agent being interrupted/canceled: don't run verification checks or inject
+	// a fix turn on a dying context — the checks would fail spuriously and the
+	// fix turn is pointless (the next loop iteration returns on ctx.Done). Skip;
+	// partial work is preserved by the caller.
+	if ctx.Err() != nil {
+		return agentGateSkipped
+	}
 	touched := a.GetTouchedPaths()
 	if len(touched) == 0 {
 		return agentGateSkipped

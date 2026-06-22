@@ -18,6 +18,8 @@ type fakeSpawner struct {
 	output    string
 	ok        bool
 	transient bool
+	tokensIn  int
+	tokensOut int
 	err       error
 	delay     time.Duration
 	callback  func(prompt string) // optional per-call hook
@@ -27,7 +29,7 @@ func (f *fakeSpawner) spawn(ctx context.Context, prompt string) (SpawnResult, er
 	f.mu.Lock()
 	f.calls = append(f.calls, prompt)
 	cb := f.callback
-	res := SpawnResult{Output: f.output, OK: f.ok, Transient: f.transient}
+	res := SpawnResult{Output: f.output, OK: f.ok, Transient: f.transient, TokensIn: f.tokensIn, TokensOut: f.tokensOut}
 	err := f.err
 	delay := f.delay
 	f.mu.Unlock()

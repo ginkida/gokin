@@ -113,6 +113,16 @@ type Loop struct {
 	SuccessCount int `json:"success_count,omitempty"`
 	FailureCount int `json:"failure_count,omitempty"`
 
+	// TotalTokensIn / TotalTokensOut are LIFETIME billed-input / generated-output
+	// token totals across every iteration (not just the visible, trimmed
+	// Iterations slice). Surfaced by /loop status so a user who walked away from
+	// a background loop can see what it has spent — a runaway unattended loop
+	// can quietly burn a provider's quota. int64 so a multi-day loop can't
+	// overflow. Zero on pre-existing state files; repopulate from the next
+	// iteration onward.
+	TotalTokensIn  int64 `json:"total_tokens_in,omitempty"`
+	TotalTokensOut int64 `json:"total_tokens_out,omitempty"`
+
 	// ConsecutiveFailures resets to 0 on every successful iteration
 	// and increments on every TASK failure (not transient infra failures —
 	// see ConsecutiveTransientFailures). When it crosses
@@ -228,6 +238,14 @@ func transientBackoffSeconds(streak int) int64 {
 // Caller is responsible for persisting the loop after calling this.
 func (l *Loop) AppendIteration(it Iteration) {
 	l.IterationCount++
+	// Lifetime token accounting — accrue regardless of outcome (a failed
+	// iteration still spent tokens). Guard against negatives defensively.
+	if it.TokensIn > 0 {
+		l.TotalTokensIn += int64(it.TokensIn)
+	}
+	if it.TokensOut > 0 {
+		l.TotalTokensOut += int64(it.TokensOut)
+	}
 	switch {
 	case it.OK:
 		l.SuccessCount++

@@ -120,6 +120,9 @@ func RenderLoopMarkdown(l *Loop) string {
 	if l.IterationCount > 0 {
 		fmt.Fprintf(&sb, " (%d ✓ / %d ✗)", l.SuccessCount, l.FailureCount)
 	}
+	if l.TotalTokensIn > 0 || l.TotalTokensOut > 0 {
+		fmt.Fprintf(&sb, " · ~%s in / ~%s out", renderTokenCount(l.TotalTokensIn), renderTokenCount(l.TotalTokensOut))
+	}
 	sb.WriteString("\n\n")
 
 	if len(l.Iterations) == 0 {
@@ -135,11 +138,15 @@ func RenderLoopMarkdown(l *Loop) string {
 		if !it.OK {
 			marker = "✗"
 		}
-		fmt.Fprintf(&sb, "### #%d — %s (%s) %s\n",
+		fmt.Fprintf(&sb, "### #%d — %s (%s) %s",
 			it.N,
 			it.StartedAt.Format("2006-01-02 15:04:05 MST"),
 			renderDuration(it.Duration.Seconds()),
 			marker)
+		if it.TokensIn > 0 || it.TokensOut > 0 {
+			fmt.Fprintf(&sb, " · ~%s/%s tok", renderTokenCount(int64(it.TokensIn)), renderTokenCount(int64(it.TokensOut)))
+		}
+		sb.WriteString("\n")
 		summary := strings.TrimSpace(it.Summary)
 		if summary == "" {
 			summary = "_(no summary)_"
@@ -162,6 +169,20 @@ func renderMode(l *Loop) string {
 		return fmt.Sprintf("self-paced (min %s between iterations)", renderDuration(float64(l.MinDelaySeconds)))
 	}
 	return "self-paced"
+}
+
+// renderTokenCount renders a token total compactly (1234 → "1.2K",
+// 2_500_000 → "2.5M"). Mirrors commands.formatTokenCount; kept local so the
+// loops package stays free of a command-layer dependency.
+func renderTokenCount(n int64) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
 }
 
 // renderDuration formats a seconds count as a short human label like

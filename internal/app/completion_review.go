@@ -7,10 +7,11 @@ package app
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strings"
 
 	"gokin/internal/donegate"
+	"gokin/internal/logging"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
 )
@@ -78,6 +79,15 @@ func (a *App) runCompletionReviewIfNeeded(
 		return true
 	}
 
+	// If the turn was already interrupted (user Esc / deadline) before the
+	// review could start, skip it — the work is done; running a model call on a
+	// dead context can only fail. Returning true keeps the completed response
+	// and lets the turn finalize (deliver + save) instead of discarding it.
+	if ctx.Err() != nil {
+		logging.Debug("completion review skipped: context already canceled; keeping completed work")
+		return true
+	}
+
 	if a.program != nil {
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusInfo,
@@ -111,8 +121,20 @@ func (a *App) runCompletionReviewIfNeeded(
 		*cacheReadAccum += cacheRead
 	}
 	if err != nil {
-		a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("completion review failed: %w", err)))
-		return false
+		// The completion review is a BEST-EFFORT, optional self-improvement step
+		// — the HARD verification gate is enforceDoneGate, which runs next. Its
+		// failure must NEVER discard the turn's real work: returning false here
+		// makes the caller (message_processor) skip response delivery, session
+		// save, working-memory update, AND the done-gate, so a canceled/failed
+		// review would vanish minutes of completed work behind an error card
+		// (field report: "general ✗ 7.1m … completion review failed: context
+		// canceled"). Keep the response we already have and finalize the turn.
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			logging.Debug("completion review interrupted; keeping completed work", "error", err)
+		} else {
+			logging.Warn("completion review could not run; keeping un-reviewed response", "error", err)
+		}
+		return true
 	}
 
 	a.session.SetHistory(newHistory)

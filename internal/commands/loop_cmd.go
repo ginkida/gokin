@@ -351,6 +351,12 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	if l.IterationCount > 0 {
 		sb.WriteString(fmt.Sprintf(" (%d✓ %d✗)", l.SuccessCount, l.FailureCount))
 	}
+	// Lifetime token spend — so a user who walked away from a background loop
+	// can see what it cost (a runaway unattended loop quietly burns quota).
+	if l.TotalTokensIn > 0 || l.TotalTokensOut > 0 {
+		sb.WriteString(fmt.Sprintf("\n  Tokens: ~%s in / ~%s out",
+			formatTokenCount(l.TotalTokensIn), formatTokenCount(l.TotalTokensOut)))
+	}
 	// When the loop is actively waiting out a busy/unreachable provider,
 	// say so explicitly — otherwise a backed-off "Next run: in 16m" looks
 	// like the loop stalled rather than patiently retrying.
@@ -443,6 +449,20 @@ func previewTaskShort(s string) string {
 
 // formatDurationShort renders durations like "5m", "1h30m", "2d3h".
 // Cleaner than time.Duration.String() which produces "5m0s" / "1h0m0s".
+// formatTokenCount renders a token total compactly: 1234 → "1.2K",
+// 2_500_000 → "2.5M". Small counts stay exact. Used by /loop status to show
+// lifetime spend at a glance.
+func formatTokenCount(n int64) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+}
+
 func formatDurationShort(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))

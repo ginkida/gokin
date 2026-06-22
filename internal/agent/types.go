@@ -145,6 +145,12 @@ type AgentResult struct {
 	// OutputFile is the path to the file-backed output stream.
 	// When set, full output is read from this file instead of the Output field.
 	OutputFile string `json:"output_file,omitempty"`
+
+	// Per-run token usage (billed input netted against cache reads; generated
+	// output), summed across the agent's model rounds. Surfaced so background
+	// callers (the /loop scheduler) can report what an unattended run cost.
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
 }
 
 // AgentOutputWriter streams agent output to both an in-memory buffer (capped)
