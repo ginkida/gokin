@@ -314,7 +314,11 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	var sb strings.Builder
 	statusLabel := string(l.Status)
 	if l.AutoPaused && l.Status == loops.StatusPaused {
-		statusLabel = "auto-paused (consecutive failures)"
+		if l.ConsecutiveTransientFailures >= loops.TransientFailureLimit {
+			statusLabel = "auto-paused (provider unavailable)"
+		} else {
+			statusLabel = "auto-paused (consecutive failures)"
+		}
 	}
 	sb.WriteString(fmt.Sprintf("Loop %s — %s\n", l.ID, statusLabel))
 	sb.WriteString(fmt.Sprintf("  Task: %s\n", l.Task))
@@ -346,6 +350,13 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	// on a brand-new loop.
 	if l.IterationCount > 0 {
 		sb.WriteString(fmt.Sprintf(" (%d✓ %d✗)", l.SuccessCount, l.FailureCount))
+	}
+	// When the loop is actively waiting out a busy/unreachable provider,
+	// say so explicitly — otherwise a backed-off "Next run: in 16m" looks
+	// like the loop stalled rather than patiently retrying.
+	if l.IsActive() && l.ConsecutiveTransientFailures > 0 {
+		sb.WriteString(fmt.Sprintf("\n  Provider: temporarily unavailable — backing off (%d consecutive, will keep retrying)",
+			l.ConsecutiveTransientFailures))
 	}
 	sb.WriteString("\n")
 

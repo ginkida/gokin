@@ -13,21 +13,21 @@ import (
 // fakeSpawner records calls and returns canned responses. Lets tests
 // drive the Runner without spinning up a real LLM call.
 type fakeSpawner struct {
-	mu       sync.Mutex
-	calls    []string // captured prompts
-	output   string
-	ok       bool
-	err      error
-	delay    time.Duration
-	callback func(prompt string) // optional per-call hook
+	mu        sync.Mutex
+	calls     []string // captured prompts
+	output    string
+	ok        bool
+	transient bool
+	err       error
+	delay     time.Duration
+	callback  func(prompt string) // optional per-call hook
 }
 
-func (f *fakeSpawner) spawn(ctx context.Context, prompt string) (string, bool, error) {
+func (f *fakeSpawner) spawn(ctx context.Context, prompt string) (SpawnResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, prompt)
 	cb := f.callback
-	out := f.output
-	ok := f.ok
+	res := SpawnResult{Output: f.output, OK: f.ok, Transient: f.transient}
 	err := f.err
 	delay := f.delay
 	f.mu.Unlock()
@@ -39,10 +39,10 @@ func (f *fakeSpawner) spawn(ctx context.Context, prompt string) (string, bool, e
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return "", false, ctx.Err()
+			return SpawnResult{}, ctx.Err()
 		}
 	}
-	return out, ok, err
+	return res, err
 }
 
 func (f *fakeSpawner) callCount() int {
@@ -402,8 +402,8 @@ func TestRunner_SelfTerminatesOnDoneSignal(t *testing.T) {
 	mgr := NewManager(newMemStorage())
 	l, _ := mgr.Add("Fix all bugs", ModeSelfPaced, 0)
 
-	spawnFn := func(ctx context.Context, prompt string) (string, bool, error) {
-		return "Fixed everything.\n\ndone.", true, nil
+	spawnFn := func(ctx context.Context, prompt string) (SpawnResult, error) {
+		return SpawnResult{Output: "Fixed everything.\n\ndone.", OK: true}, nil
 	}
 
 	r := NewRunner(mgr, spawnFn, func() bool { return true })

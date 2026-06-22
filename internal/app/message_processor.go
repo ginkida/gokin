@@ -192,6 +192,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// Auto-retry transient errors with adaptive stream retry policy.
 	runtimeProvider := runtimeProviderForConfig(a.config)
 	retryPolicy := client.AdaptiveStreamRetryPolicy(runtimeProvider)
+	// Provider overloads (GLM 1305 et al) are transient and self-resolving, so
+	// they get a separate, far more patient retry budget than ordinary errors —
+	// the agent waits the server out instead of giving up after a few seconds.
+	overloadPolicy := client.DefaultOverloadRetryPolicy()
+	overloadLabel := strings.ToUpper(runtimeProvider)
+	if overloadLabel == "" {
+		overloadLabel = "Provider"
+	}
 	originalMessage := message
 	retryMessage := originalMessage
 
@@ -201,6 +209,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	contextTruncated := false
 	requestRetryCount := 0
 	partialIdleRetryCount := 0
+	overloadRetryCount := 0
+	var overloadElapsed time.Duration
 	apiInputAccum := 0
 	apiOutputAccum := 0
 	cacheReadAccum := 0
@@ -327,14 +337,27 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			continue
 		}
 
-		decision := client.DecideStreamRetry(
-			retryPolicy,
-			err,
-			requestRetryCount,
-			partialIdleRetryCount,
-			ctx,
-			client.StreamRetryOptions{AllowPartial: true},
-		)
+		// Overload errors (GLM 1305 et al) take the patient budget — wait the
+		// provider out rather than burning the small generic retry budget and
+		// stopping the agent. Everything else uses the normal fast-fail policy.
+		// Exclude a tripped request breaker: its "rate limited or down" message
+		// would substring-match the overload keywords, but it signals genuine
+		// repeated hard failures (or a provider that's down) — not a transient
+		// capacity spike — and must keep its own fast-fail handling.
+		overload := client.IsOverloadError(err) && !errors.Is(err, ErrRequestCircuitOpen)
+		var decision client.StreamRetryDecision
+		if overload {
+			decision = client.DecideOverloadRetry(overloadPolicy, err, overloadRetryCount, overloadElapsed, ctx)
+		} else {
+			decision = client.DecideStreamRetry(
+				retryPolicy,
+				err,
+				requestRetryCount,
+				partialIdleRetryCount,
+				ctx,
+				client.StreamRetryOptions{AllowPartial: true},
+			)
+		}
 		if !decision.ShouldRetry {
 			break
 		}
@@ -342,7 +365,19 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			a.executor.SetSideEffectDedup(true)
 		}
 
-		if decision.Partial {
+		if overload {
+			overloadRetryCount++
+			overloadElapsed += decision.Delay
+			retryMessage = originalMessage
+			// An overload isn't the hard repeated failure the request circuit
+			// breaker exists to catch — keep it from tripping on transient
+			// capacity errors so the next attempt actually runs. The capped
+			// backoff already spaces attempts out; the overload breaker (below)
+			// still records pressure for telemetry.
+			if a.policy != nil {
+				a.policy.ResetRequestBreaker()
+			}
+		} else if decision.Partial {
 			partialIdleRetryCount++
 			// Partial stream retries should continue from the last complete sentence.
 			retryMessage = buildContinuationRetryMessage(originalMessage, newHistory)
@@ -399,19 +434,25 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		// Show retry as a non-intrusive status toast instead of inline text.
 		// This keeps the output clean and focused on the model's actual response.
 		var retryMsg string
-		if decision.Partial {
+		if overload {
+			retryMsg = fmt.Sprintf("%s overloaded — waiting %v, retrying (attempt %d, will keep trying)", overloadLabel, backoff.Round(time.Second), overloadRetryCount)
+		} else if decision.Partial {
 			retryMsg = fmt.Sprintf("Stream stalled — retry %d/%d in %v", partialIdleRetryCount, retryPolicy.MaxPartialRetries, backoff.Round(time.Second))
 		} else if ft.Reason == string(client.FailureReasonStreamIdleTimeout) {
 			retryMsg = fmt.Sprintf("Stream stalled — retry %d/%d in %v", requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second))
 		} else {
 			retryMsg = fmt.Sprintf("Retry %d/%d in %v (%s)", requestRetryCount, retryPolicy.MaxRetries, backoff.Round(time.Second), ft.Reason)
 		}
+		attemptNum, maxAttempts := requestRetryCount, retryPolicy.MaxRetries
+		if overload {
+			attemptNum, maxAttempts = overloadRetryCount, overloadPolicy.MaxRetries
+		}
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusRetry,
 			Message: retryMsg,
 			Details: map[string]any{
-				"attempt":     requestRetryCount,
-				"maxAttempts": retryPolicy.MaxRetries,
+				"attempt":     attemptNum,
+				"maxAttempts": maxAttempts,
 				"provider":    runtimeProvider,
 			},
 		})

@@ -114,12 +114,25 @@ type Loop struct {
 	FailureCount int `json:"failure_count,omitempty"`
 
 	// ConsecutiveFailures resets to 0 on every successful iteration
-	// and increments otherwise. When it crosses
+	// and increments on every TASK failure (not transient infra failures —
+	// see ConsecutiveTransientFailures). When it crosses
 	// ConsecutiveFailureLimit, the loop is auto-paused so a runaway
 	// failure cycle doesn't burn LLM credits indefinitely. The user
 	// gets a warning and can /loop resume after fixing the underlying
 	// issue.
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+
+	// ConsecutiveTransientFailures counts iterations that failed for a
+	// TRANSIENT infrastructure reason (provider overload/rate-limit, network)
+	// rather than a genuine task failure. Tracked separately from
+	// ConsecutiveFailures so a busy/unreachable provider is WAITED OUT (the
+	// loop reschedules with exponential backoff) instead of tripping the
+	// task-failure auto-pause breaker — a provider hiccup must not look like
+	// "this loop is broken". Reset to 0 on any success or any non-transient
+	// (task) failure. A very long run of these (TransientFailureLimit) still
+	// auto-pauses as a backstop, so a permanently-dead provider doesn't leave
+	// a zombie loop poking forever.
+	ConsecutiveTransientFailures int `json:"consecutive_transient_failures,omitempty"`
 
 	// AutoPaused is true when the loop was paused by the
 	// ConsecutiveFailures cap rather than by an explicit /loop pause.
@@ -132,9 +145,10 @@ type Loop struct {
 type Iteration struct {
 	N         int           `json:"n"` // 1-based iteration number
 	StartedAt time.Time     `json:"started_at"`
-	Duration  time.Duration `json:"duration"` // wall-clock for this iteration
-	Summary   string        `json:"summary"`  // 1-3 sentence summary of what happened
-	OK        bool          `json:"ok"`       // false = iteration errored or model returned nothing useful
+	Duration  time.Duration `json:"duration"`            // wall-clock for this iteration
+	Summary   string        `json:"summary"`             // 1-3 sentence summary of what happened
+	OK        bool          `json:"ok"`                  // false = iteration errored or model returned nothing useful
+	Transient bool          `json:"transient,omitempty"` // true = failed for a transient infra reason (overload/rate-limit/network), not a task failure
 	TokensIn  int           `json:"tokens_in,omitempty"`
 	TokensOut int           `json:"tokens_out,omitempty"`
 	NextHint  string        `json:"next_hint,omitempty"` // e.g. "wait 1h" — self-paced runner respects
@@ -166,6 +180,45 @@ const MaxSelfPacedDelaySeconds = 24 * 60 * 60 // 24 hours
 // it sooner. Users can /loop resume after fixing root cause.
 const ConsecutiveFailureLimit = 5
 
+// TransientFailureLimit is the BACKSTOP for transient (infra) failures —
+// much higher than ConsecutiveFailureLimit because a provider being
+// overloaded/unreachable is not the loop's fault and should be waited out, not
+// quickly given up on. With the capped exponential backoff below, this many
+// consecutive transient failures spans roughly half a day of a provider being
+// down — at which point auto-pausing and alerting the user is the right call
+// (something is genuinely wrong) rather than poking a dead endpoint forever.
+const TransientFailureLimit = 30
+
+// transientBackoffBaseSeconds / transientBackoffCapSeconds bound the
+// loop-level exponential backoff applied after a transient failure: the next
+// iteration is pushed out base×2^(streak-1), capped. This throttles a fast
+// loop from hammering an overloaded provider while staying cheap (one
+// fast-failing probe per cap interval) and self-healing (the moment the
+// provider recovers, the next probe succeeds and the streak resets). Slow
+// loops are unaffected — their normal cadence already exceeds the backoff.
+const (
+	transientBackoffBaseSeconds = 60   // first transient failure → ~1m extra
+	transientBackoffCapSeconds  = 1800 // cap at 30m between retries
+)
+
+// transientBackoffSeconds returns the extra delay (from LastRunAt) to impose
+// before the next iteration after `streak` consecutive transient failures.
+// Exponential from the base, capped — robust to a hostile streak value.
+func transientBackoffSeconds(streak int) int64 {
+	if streak < 1 {
+		streak = 1
+	}
+	shift := streak - 1
+	if shift > 20 { // 60 << 20 already dwarfs the cap; avoid int overflow
+		shift = 20
+	}
+	delay := int64(transientBackoffBaseSeconds) << uint(shift)
+	if delay <= 0 || delay > transientBackoffCapSeconds {
+		delay = transientBackoffCapSeconds
+	}
+	return delay
+}
+
 // AppendIteration adds a result to the loop's history, dropping the
 // oldest entry if we'd exceed MaxHistorySize. Updates IterationCount
 // (lifetime), LastRunAt, SuccessCount/FailureCount,
@@ -175,12 +228,25 @@ const ConsecutiveFailureLimit = 5
 // Caller is responsible for persisting the loop after calling this.
 func (l *Loop) AppendIteration(it Iteration) {
 	l.IterationCount++
-	if it.OK {
+	switch {
+	case it.OK:
 		l.SuccessCount++
 		l.ConsecutiveFailures = 0
-	} else {
+		l.ConsecutiveTransientFailures = 0
+	case it.Transient:
+		// Transient infra failure (provider overload/rate-limit, network).
+		// It IS a failed iteration for stats, but it must NOT trip the
+		// task-failure breaker — and it must not reset a building task-failure
+		// streak either (a provider blip mid-streak is noise). The separate
+		// transient streak drives loop-level backoff + the high backstop.
+		l.FailureCount++
+		l.ConsecutiveTransientFailures++
+	default:
+		// Genuine task failure. A real attempt reached the model and produced
+		// a task-level result, so the transient streak is broken.
 		l.FailureCount++
 		l.ConsecutiveFailures++
+		l.ConsecutiveTransientFailures = 0
 	}
 	l.Iterations = append(l.Iterations, it)
 	if len(l.Iterations) > MaxHistorySize {
@@ -217,6 +283,20 @@ func (l *Loop) AppendIteration(it Iteration) {
 		l.NextRunAt = l.LastRunAt.Add(time.Duration(delay) * time.Second)
 	}
 
+	// Transient-failure loop-level backoff: push the next run out by capped
+	// exponential backoff so a busy/unreachable provider isn't hammered every
+	// cadence. Take the LATER of the normal schedule and the backoff, so slow
+	// loops (whose interval already exceeds the backoff) are unaffected while
+	// fast / self-paced loops get throttled. The request-level patient retry
+	// (agent/message_processor) rides out brief spikes WITHIN an iteration;
+	// this is the second tier for spikes that outlast a single iteration.
+	if it.Transient && l.ConsecutiveTransientFailures > 0 {
+		backoff := time.Duration(transientBackoffSeconds(l.ConsecutiveTransientFailures)) * time.Second
+		if backoffRun := l.LastRunAt.Add(backoff); backoffRun.After(l.NextRunAt) {
+			l.NextRunAt = backoffRun
+		}
+	}
+
 	// Cap on max iterations? Mark completed.
 	if l.MaxIterations > 0 && l.IterationCount >= l.MaxIterations {
 		l.Status = StatusCompleted
@@ -231,6 +311,16 @@ func (l *Loop) AppendIteration(it Iteration) {
 	// to Paused would be wrong (a "completed" loop shouldn't suddenly
 	// become resumable just because the last few iterations failed).
 	if l.ConsecutiveFailures >= ConsecutiveFailureLimit && l.Status == StatusRunning {
+		l.Status = StatusPaused
+		l.AutoPaused = true
+	}
+
+	// Transient-failure backstop: a provider that has been overloaded /
+	// unreachable for this many consecutive iterations (≈half a day with the
+	// capped backoff) is treated as genuinely down — auto-pause and alert
+	// rather than keep probing indefinitely. Far more lenient than the
+	// task-failure breaker so ordinary spikes never reach it.
+	if l.ConsecutiveTransientFailures >= TransientFailureLimit && l.Status == StatusRunning {
 		l.Status = StatusPaused
 		l.AutoPaused = true
 	}

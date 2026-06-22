@@ -12,16 +12,35 @@ import (
 	"gokin/internal/logging"
 )
 
+// SpawnResult is the structured outcome of executing one iteration's prompt.
+// Carried as a struct (rather than a bare tuple) so the classification the
+// adapter computes — notably Transient — travels cleanly to the runner without
+// internal/loops needing to import internal/client.
+type SpawnResult struct {
+	// Output is the agent's textual result (captured even on failure so the
+	// iteration summary preserves partial work — see CLAUDE.md loop invariant).
+	Output string
+	// OK is true when the iteration completed successfully.
+	OK bool
+	// Transient is true when a NON-OK result was caused by an infrastructure
+	// hiccup (provider overload, rate limit, network) rather than a genuine
+	// task failure. The scheduler treats transient failures leniently: they
+	// don't trip the task-failure auto-pause breaker, and they trigger
+	// exponential loop-level backoff so a busy/unreachable provider is waited
+	// out instead of burning the loop. Meaningless when OK is true.
+	Transient bool
+}
+
 // Spawner is the function the Runner calls to actually execute one
-// iteration's prompt. Returns the agent's textual output, ok=false when
-// the iteration "failed" in some agent-defined way (status != completed),
-// and a Go error for transport / cancellation failures.
+// iteration's prompt. Returns a SpawnResult (output + ok + transient
+// classification) and a Go error for transport / cancellation failures that
+// prevented the iteration from even producing a result.
 //
 // Decoupling via injection keeps internal/loops free of any direct
 // dependency on internal/agent — the wire-up happens in app/builder.go
 // where both packages are visible. Tests pass in a stub Spawner that
 // returns canned output without spinning up a real LLM call.
-type Spawner func(ctx context.Context, prompt string) (output string, ok bool, err error)
+type Spawner func(ctx context.Context, prompt string) (SpawnResult, error)
 
 // IdleChecker reports whether the app is currently free to start a new
 // iteration. Wired to the App's processing flag in production: while the
@@ -64,7 +83,15 @@ const DefaultPollPeriod = 30 * time.Second
 // before being considered stuck. Loops are typically short tasks
 // (read a file, run a check), but we don't want a hung iteration to
 // block all other loops from firing forever.
-const DefaultIterationTimeout = 10 * time.Minute
+//
+// Set ABOVE the request-level overload patience (client.DefaultOverloadRetryPolicy
+// MaxTotal, 10m): when a provider is overloaded the agent waits it out WITHIN
+// the iteration, and if that patience is exhausted we want the resulting
+// overload error (which classifies as transient → loop backoff) to surface
+// BEFORE this ctx deadline fires — a bare ctx timeout is ambiguous and would
+// be miscounted as a task failure. The 5m of headroom covers the failed API
+// round-trips between waits.
+const DefaultIterationTimeout = 15 * time.Minute
 
 // NewRunner constructs a Runner. The Spawner and IdleChecker are
 // required (nil panics at Start time so the wire-up bug is loud); period
@@ -233,7 +260,8 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	defer cancel()
 
 	started := time.Now()
-	output, ok, err := r.spawn(iterationCtx, prompt)
+	res, err := r.spawn(iterationCtx, prompt)
+	output, ok := res.Output, res.OK
 	duration := time.Since(started)
 
 	it := Iteration{
@@ -241,6 +269,11 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 		StartedAt: started,
 		Duration:  duration,
 		OK:        ok && err == nil,
+		// Transient classification only matters for a failed iteration; the
+		// adapter sets it from the underlying provider error. A spawn-time
+		// transport error (err != nil) is a wiring/construction failure, not a
+		// provider hiccup, so it stays non-transient (counts as a task failure).
+		Transient: res.Transient && !ok && err == nil,
 	}
 
 	// agentDone signals "the work this loop was for is complete" — the

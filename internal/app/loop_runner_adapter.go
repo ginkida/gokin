@@ -2,15 +2,35 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"gokin/internal/agent"
+	"gokin/internal/client"
 	"gokin/internal/logging"
 	"gokin/internal/loops"
 	"gokin/internal/ui"
 )
+
+// loopFailureIsTransient reports whether a failed loop iteration failed for a
+// transient INFRASTRUCTURE reason (provider overload/rate-limit, network) as
+// opposed to a genuine task failure. Classified here (in internal/app, which
+// can import internal/client) from the structured error strings BEFORE they're
+// concatenated into the iteration output — so the scheduler can wait the
+// provider out with backoff instead of tripping the task-failure auto-pause.
+// See client.IsTransientProviderError for why the set is deliberately tight
+// (excludes ambiguous timeouts that may be the agent's own task overrunning).
+func loopFailureIsTransient(result *agent.AgentResult, spawnErr, waitErr error) bool {
+	if client.IsTransientProviderError(spawnErr) || client.IsTransientProviderError(waitErr) {
+		return true
+	}
+	if result != nil && result.Error != "" {
+		return client.IsTransientProviderError(errors.New(result.Error))
+	}
+	return false
+}
 
 // describeLoopNext returns a short human-readable suffix for the iteration-
 // done toast that tells the user when the next iteration will run (or
@@ -101,10 +121,10 @@ func formatLoopDurationShort(d time.Duration) string {
 //     A failed agent run reports via ok=false, not err — the loop
 //     iteration still records what happened.
 func newLoopSpawner(a *App) loops.Spawner {
-	return func(ctx context.Context, prompt string) (string, bool, error) {
+	return func(ctx context.Context, prompt string) (loops.SpawnResult, error) {
 		runner := a.agentRunner
 		if runner == nil {
-			return "", false, fmt.Errorf("agent runner not initialized")
+			return loops.SpawnResult{}, fmt.Errorf("agent runner not initialized")
 		}
 
 		// Use the same model as the main client so the user gets
@@ -125,7 +145,7 @@ func newLoopSpawner(a *App) loops.Spawner {
 			// True Spawn-time failure (couldn't construct/register agent).
 			// No agentID means there's no result to retrieve — surface
 			// the error directly.
-			return "", false, fmt.Errorf("spawn loop iteration: %w", spawnErr)
+			return loops.SpawnResult{}, fmt.Errorf("spawn loop iteration: %w", spawnErr)
 		}
 
 		// Spawn is synchronous (blocks until agent.Run returns), so the
@@ -140,13 +160,18 @@ func newLoopSpawner(a *App) loops.Spawner {
 		// channel notification.
 		result, waitErr := runner.WaitWithContext(ctx, agentID)
 		if waitErr != nil && result == nil {
-			return "", false, fmt.Errorf("wait loop iteration: %w", waitErr)
+			return loops.SpawnResult{}, fmt.Errorf("wait loop iteration: %w", waitErr)
 		}
 
 		ok := result != nil &&
 			result.Status == agent.AgentStatusCompleted &&
 			result.Error == "" &&
 			spawnErr == nil
+
+		// Classify a non-OK result from the structured errors (before they get
+		// concatenated into output below) so the scheduler can wait out a
+		// transient provider problem instead of counting it as a task failure.
+		transient := !ok && loopFailureIsTransient(result, spawnErr, waitErr)
 
 		output := ""
 		if result != nil {
@@ -173,7 +198,7 @@ func newLoopSpawner(a *App) loops.Spawner {
 			}
 		}
 
-		return output, ok, nil
+		return loops.SpawnResult{Output: output, OK: ok, Transient: transient}, nil
 	}
 }
 
@@ -219,8 +244,12 @@ func (a *App) onLoopIterationStart(loopID string) {
 // — the JSON state is the source of truth; the markdown is a
 // convenience for grep / browser navigation.
 func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
+	// A transient (provider overloaded / network) failure is expected and
+	// self-healing — the loop backs off and retries — so keep it calm (Info),
+	// reserving the Warning severity for genuine task failures the user may
+	// need to act on.
 	statusType := ui.StatusInfo
-	if !it.OK {
+	if !it.OK && !it.Transient {
 		statusType = ui.StatusWarning
 	}
 	logging.Info("loops: iteration done",
@@ -260,14 +289,30 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 			// it here, the user wouldn't know why the loop suddenly
 			// stopped firing — they'd think gokin was broken.
 			if loop.AutoPaused && loop.Status == loops.StatusPaused {
-				logging.Warn("loops: auto-paused after consecutive failures",
-					"loop_id", loopID,
-					"consecutive_failures", loop.ConsecutiveFailures)
-				a.safeSendToProgram(ui.StatusUpdateMsg{
-					Type: ui.StatusRecoverableError,
-					Message: fmt.Sprintf(
+				// Two distinct causes: a genuine TASK-failure streak vs. a
+				// provider that's been unavailable for a very long run of
+				// TRANSIENT failures (the backstop). Report the right one —
+				// ConsecutiveFailures is 0 on a transient-backstop pause, so
+				// the old "after 0 failures" wording would confuse the user.
+				var msg string
+				if loop.ConsecutiveTransientFailures >= loops.TransientFailureLimit {
+					logging.Warn("loops: auto-paused — provider unavailable for an extended period",
+						"loop_id", loopID,
+						"consecutive_transient_failures", loop.ConsecutiveTransientFailures)
+					msg = fmt.Sprintf(
+						"Loop %s auto-paused — provider unavailable for a long time (%d retries). /loop resume %s when it's back.",
+						loopID, loop.ConsecutiveTransientFailures, loopID)
+				} else {
+					logging.Warn("loops: auto-paused after consecutive failures",
+						"loop_id", loopID,
+						"consecutive_failures", loop.ConsecutiveFailures)
+					msg = fmt.Sprintf(
 						"Loop %s auto-paused after %d failures in a row. /loop output %s for details, /loop resume %s when fixed.",
-						loopID, loop.ConsecutiveFailures, loopID, loopID),
+						loopID, loop.ConsecutiveFailures, loopID, loopID)
+				}
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusRecoverableError,
+					Message: msg,
 				})
 			}
 

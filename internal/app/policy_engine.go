@@ -90,6 +90,20 @@ func (p *PolicyEngine) ExecutePlanStep(ctx context.Context, fn func() error) err
 	return err
 }
 
+// ResetRequestBreaker resets ONLY the request-level circuit breaker to closed.
+// Called while patiently waiting out a transient provider overload: an overload
+// is a momentary capacity signal, not the kind of hard repeated failure the
+// request breaker exists to catch, so it must not accumulate toward tripping it
+// (5 overload retries would otherwise open it and turn subsequent attempts into
+// no-op "circuit open" errors). The dedicated overloadBreaker still tracks
+// overload pressure for telemetry; only the request breaker is cleared here.
+func (p *PolicyEngine) ResetRequestBreaker() {
+	if p == nil || p.requestBreaker == nil {
+		return
+	}
+	p.requestBreaker.Reset()
+}
+
 // ResetBreakers resets both circuit breakers to closed state.
 // Called after provider failover to give the new provider a clean slate.
 func (p *PolicyEngine) ResetBreakers() {

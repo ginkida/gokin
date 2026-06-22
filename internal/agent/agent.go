@@ -2652,6 +2652,13 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	streamRetryPolicy.MaxRetries = 3        // More generous than default (2) since agents do long work
 	streamRetryPolicy.MaxPartialRetries = 2 // Allow partial stream retries
 	var streamRetries, partialStreamRetries int
+	// Provider overloads (GLM 1305 et al) are transient — wait them out with a
+	// separate, patient budget instead of failing the sub-agent (which loses its
+	// work). Counters reset on any successful round, so each round gets fresh
+	// patience. The wait is ctx-cancellable and bounded by the policy's MaxTotal.
+	overloadRetryPolicy := client.DefaultOverloadRetryPolicy()
+	var overloadRetries int
+	var overloadElapsed time.Duration
 	var contextCompactAttempts int
 	// Empty-after-tools retry budget — a transient empty 200 right after a
 	// tool-results round is retried (side-effect-free) before the loop gives up.
@@ -2853,6 +2860,8 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				// Success — reset retry counters
 				streamRetries = 0
 				partialStreamRetries = 0
+				overloadRetries = 0
+				overloadElapsed = 0
 				break
 			}
 
@@ -2883,14 +2892,23 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				"partial_retry_count", partialStreamRetries,
 				"error", apiErr)
 
-			decision := client.DecideStreamRetry(
-				streamRetryPolicy,
-				apiErr,
-				streamRetries,
-				partialStreamRetries,
-				ctx,
-				client.StreamRetryOptions{AllowPartial: true},
-			)
+			// Overload errors (GLM 1305 et al) take the patient budget so a busy
+			// provider doesn't kill the sub-agent mid-task; everything else uses
+			// the normal fast-fail stream policy.
+			overload := client.IsOverloadError(apiErr)
+			var decision client.StreamRetryDecision
+			if overload {
+				decision = client.DecideOverloadRetry(overloadRetryPolicy, apiErr, overloadRetries, overloadElapsed, ctx)
+			} else {
+				decision = client.DecideStreamRetry(
+					streamRetryPolicy,
+					apiErr,
+					streamRetries,
+					partialStreamRetries,
+					ctx,
+					client.StreamRetryOptions{AllowPartial: true},
+				)
+			}
 
 			if !decision.ShouldRetry {
 				// If the client supports failover, reset its position so the NEXT
@@ -2911,16 +2929,24 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				return a.history, output.String(), fmt.Errorf("model response error: %w", apiErr)
 			}
 
-			if decision.Partial {
+			if overload {
+				overloadRetries++
+				overloadElapsed += decision.Delay
+			} else if decision.Partial {
 				partialStreamRetries++
 			} else {
 				streamRetries++
 			}
 
-			a.safeOnText(fmt.Sprintf("\n[API error (%s), retrying %d/%d in %s...]\n",
-				decision.Reason,
-				streamRetries, streamRetryPolicy.MaxRetries,
-				decision.Delay.Round(time.Second)))
+			if overload {
+				a.safeOnText(fmt.Sprintf("\n[Provider overloaded — waiting %s, retry %d (will keep trying)...]\n",
+					decision.Delay.Round(time.Second), overloadRetries))
+			} else {
+				a.safeOnText(fmt.Sprintf("\n[API error (%s), retrying %d/%d in %s...]\n",
+					decision.Reason,
+					streamRetries, streamRetryPolicy.MaxRetries,
+					decision.Delay.Round(time.Second)))
+			}
 
 			// Wait with context cancellation support
 			retryTimer := time.NewTimer(decision.Delay)
