@@ -140,6 +140,17 @@ func WithMaxIterations(n int) AddOption {
 	return func(l *Loop) { l.MaxIterations = n }
 }
 
+// WithMaxTotalTokens caps lifetime token spend (input+output). When reached the
+// loop auto-pauses. 0 = unlimited (the default). Guards a quota-limited
+// provider's cap from a runaway unattended loop.
+func WithMaxTotalTokens(n int64) AddOption {
+	return func(l *Loop) {
+		if n > 0 {
+			l.MaxTotalTokens = n
+		}
+	}
+}
+
 // WithMinDelay overrides the self-paced floor. Ignored for interval
 // mode (which uses IntervalSeconds directly).
 func WithMinDelay(seconds int64) AddOption {
@@ -233,6 +244,7 @@ func (m *Manager) Resume(id string) error {
 		}
 		l.Status = StatusRunning
 		l.AutoPaused = false
+		l.AutoPauseReason = ""
 		l.ConsecutiveFailures = 0
 		l.ConsecutiveTransientFailures = 0
 		now := time.Now()

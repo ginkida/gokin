@@ -674,6 +674,7 @@ func (a *App) Run() error {
 		a.loopRunner = loops.NewRunner(a.loopManager, spawner, a.isLoopRunnerIdle)
 		a.loopRunner.SetIterationStartHook(a.onLoopIterationStart)
 		a.loopRunner.SetIterationDoneHook(a.onLoopIterationDone)
+		a.loopRunner.SetIterationPersistFailedHook(a.onLoopIterationPersistFailed)
 		// Wire markdown cleanup on /loop remove so we don't leak
 		// orphaned .gokin/loops/<id>.md files.
 		if a.loopMemory != nil {

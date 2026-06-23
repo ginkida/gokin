@@ -85,6 +85,7 @@ type Loop struct {
 	IntervalSeconds int64 `json:"interval_seconds,omitempty"`
 	MinDelaySeconds int64 `json:"min_delay_seconds,omitempty"` // self-paced floor; default 300
 	MaxIterations   int   `json:"max_iterations,omitempty"`    // 0 = unlimited
+	MaxTotalTokens  int64 `json:"max_total_tokens,omitempty"`  // 0 = unlimited; auto-pause when TotalTokensIn+Out reaches it
 	UpdateMemory    bool  `json:"update_memory"`               // auto-write summaries to MEMORY.md
 
 	// Status drives the scheduler. See Status constants for semantics.
@@ -144,12 +145,28 @@ type Loop struct {
 	// a zombie loop poking forever.
 	ConsecutiveTransientFailures int `json:"consecutive_transient_failures,omitempty"`
 
-	// AutoPaused is true when the loop was paused by the
-	// ConsecutiveFailures cap rather than by an explicit /loop pause.
-	// Surfaced to the UI so the warning toast can mention WHY the
+	// AutoPaused is true when the loop was paused by a breaker (failures /
+	// provider-unavailable / token-budget) rather than by an explicit
+	// /loop pause. Surfaced to the UI so the warning toast can mention WHY the
 	// pause happened. Cleared on Resume.
 	AutoPaused bool `json:"auto_paused,omitempty"`
+
+	// AutoPauseReason records WHICH breaker actually fired (one of the
+	// AutoPause* constants). Set at the pause site so the UI reports the true
+	// cause instead of RECONSTRUCTING it from loop state — reconstruction is
+	// ambiguous when several conditions hold on the same iteration (e.g. a
+	// failing task that also crosses its token budget paused for FAILURES, but
+	// a spend-only check would mislabel it "budget"). Cleared on Resume. Empty
+	// on legacy state files / manual pause → the UI shows a generic label.
+	AutoPauseReason string `json:"auto_pause_reason,omitempty"`
 }
+
+// AutoPause* are the recorded reasons a loop was auto-paused (Loop.AutoPauseReason).
+const (
+	AutoPauseConsecutiveFailures = "consecutive_failures"
+	AutoPauseProviderUnavailable = "provider_unavailable"
+	AutoPauseTokenBudget         = "token_budget"
+)
 
 // Iteration is the result of one execution of the loop's task.
 type Iteration struct {
@@ -328,9 +345,14 @@ func (l *Loop) AppendIteration(it Iteration) {
 	// terminal state already prevents further runs and overriding it
 	// to Paused would be wrong (a "completed" loop shouldn't suddenly
 	// become resumable just because the last few iterations failed).
+	// Breaker PRECEDENCE is defined by check order here: each is gated on
+	// StatusRunning, so the FIRST to fire wins and records its reason; the rest
+	// see Status==Paused and skip. The UI reads AutoPauseReason (don't
+	// reconstruct from state — that mislabels overlapping conditions).
 	if l.ConsecutiveFailures >= ConsecutiveFailureLimit && l.Status == StatusRunning {
 		l.Status = StatusPaused
 		l.AutoPaused = true
+		l.AutoPauseReason = AutoPauseConsecutiveFailures
 	}
 
 	// Transient-failure backstop: a provider that has been overloaded /
@@ -341,7 +363,28 @@ func (l *Loop) AppendIteration(it Iteration) {
 	if l.ConsecutiveTransientFailures >= TransientFailureLimit && l.Status == StatusRunning {
 		l.Status = StatusPaused
 		l.AutoPaused = true
+		l.AutoPauseReason = AutoPauseProviderUnavailable
 	}
+
+	// Token-budget breaker: an unattended loop can quietly burn a quota-limited
+	// provider's cap (GLM Coding-Plan → error 1308). When the user set a budget
+	// and lifetime spend has reached it, auto-pause so spend can't run away
+	// unsupervised. Reuses the AutoPaused breaker pattern; gated on
+	// StatusRunning so the MaxIterations→Completed precedence (early return
+	// above) is preserved. Resume re-arms it (the cap still binds, so resuming
+	// over budget re-pauses next iteration — the user raises/clears the cap).
+	if l.MaxTotalTokens > 0 && (l.TotalTokensIn+l.TotalTokensOut) >= l.MaxTotalTokens && l.Status == StatusRunning {
+		l.Status = StatusPaused
+		l.AutoPaused = true
+		l.AutoPauseReason = AutoPauseTokenBudget
+	}
+}
+
+// OverTokenBudget reports whether a token budget is set and lifetime spend has
+// reached it. Used by the UI to attribute an auto-pause to the budget (vs a
+// failure streak) and to label /loop status.
+func (l *Loop) OverTokenBudget() bool {
+	return l.MaxTotalTokens > 0 && (l.TotalTokensIn+l.TotalTokensOut) >= l.MaxTotalTokens
 }
 
 // IsActive returns true if the loop is in a state where the scheduler

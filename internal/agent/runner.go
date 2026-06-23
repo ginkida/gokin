@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -1151,6 +1152,15 @@ func (r *Runner) cleanupOldResults() {
 		removeCount := len(completed) - MaxAgentResults/2
 		if removeCount > 0 {
 			for i := range removeCount {
+				// Remove the backing output file BEFORE dropping the map entry —
+				// once the entry is gone the path is unrecoverable and the file
+				// leaks forever. A long-running /loop spawns one agent per
+				// iteration, so without this a multi-day loop accumulates
+				// hundreds of orphaned .log files. Mirrors the Cleanup() path
+				// (runner_result.go); os.Remove is best-effort/idempotent.
+				if result, ok := r.results[completed[i].id]; ok && result.OutputFile != "" {
+					os.Remove(result.OutputFile)
+				}
 				delete(r.results, completed[i].id)
 				delete(r.agents, completed[i].id) // keep agents and results in sync
 			}

@@ -77,6 +77,12 @@ type Runner struct {
 	// Production wiring leaves them nil; nil-checked at call site.
 	onIterationStart func(loopID string)
 	onIterationDone  func(loopID string, it Iteration)
+	// onIterationPersistFailed fires when an iteration ran but its result could
+	// NOT be saved (RecordIteration returned a real persistence error, after the
+	// manager rolled the in-memory state back). The adapter surfaces an honest
+	// "ran but couldn't be saved" warning. Kept separate from onIterationDone so
+	// the loops package stays free of any ui dependency.
+	onIterationPersistFailed func(loopID string, n int, err error)
 }
 
 // DefaultPollPeriod is how often the runner checks for due loops.
@@ -130,6 +136,15 @@ func (r *Runner) SetIterationTimeout(t time.Duration) {
 	if !r.started {
 		r.timeout = t
 	}
+}
+
+// SetIterationPersistFailedHook installs a callback fired when an iteration
+// ran but its result couldn't be persisted (RecordIteration failed). Used by
+// the TUI to warn the user the work wasn't saved (disk full / permissions).
+func (r *Runner) SetIterationPersistFailedHook(fn func(loopID string, n int, err error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onIterationPersistFailed = fn
 }
 
 // SetIterationStartHook installs a callback fired just before each
@@ -252,6 +267,7 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	r.mu.Lock()
 	startHook := r.onIterationStart
 	doneHook := r.onIterationDone
+	persistFailedHook := r.onIterationPersistFailed
 	timeout := r.timeout
 	r.mu.Unlock()
 
@@ -343,10 +359,21 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 			"loop_id", l.ID, "iteration", it.N, "error", recordErr)
 		return
 	case recordErr != nil:
-		// Real persistence failure — log loud, but still fire the done
-		// hook so the UI surfaces the result the user just witnessed.
+		// Real persistence failure (disk full / EPERM / readonly fs). The
+		// manager already rolled the in-memory loop BACK to its pre-mutation
+		// snapshot (IterationCount, Iterations, token totals, failure streaks
+		// all reverted). Firing the success doneHook here would show a phantom
+		// "#N completed" toast for work that isn't on disk, write markdown from
+		// stale state, and — worse — act on the `done.` self-termination marker
+		// below against a missing iteration (Stop with the final iteration lost
+		// on restart). Surface an HONEST persist-failure warning and return
+		// BEFORE doneHook and the agentDone/Stop block.
 		logging.Warn("loops: failed to record iteration",
 			"loop_id", l.ID, "iteration", it.N, "error", recordErr)
+		if persistFailedHook != nil {
+			persistFailedHook(l.ID, it.N, recordErr)
+		}
+		return
 	}
 
 	if doneHook != nil {

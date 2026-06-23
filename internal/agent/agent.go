@@ -3440,8 +3440,18 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		a.safeOnText(emptyMsg)
 	}
 
+	// Genuine turn exhaustion: the loop fell out via its `for i < effectiveMaxTurns`
+	// condition WITHOUT ever hitting the "no more function calls, we're done"
+	// break (every normal completion breaks with i < effectiveMaxTurns). Returning
+	// nil here misclassified a cut-short runaway as SUCCESS — for a /loop iteration
+	// that meant ConsecutiveFailures reset every cutoff, so a task that can't fit in
+	// the turn budget "succeeds" forever, silently burning quota with no auto-pause.
+	// Surface it as an error: agent.Run preserves the partial output (result.Output)
+	// on the failure path, and the loop adapter then classifies it as a (non-
+	// transient) task failure so the auto-pause breaker can do its job.
 	if i >= effectiveMaxTurns {
 		a.safeOnText("\n[Reached maximum turn limit — stopping]\n")
+		return a.history, output.String(), fmt.Errorf("reached maximum turn limit (%d turns)", effectiveMaxTurns)
 	}
 
 	return a.history, output.String(), nil

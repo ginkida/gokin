@@ -23,13 +23,42 @@ import (
 // See client.IsTransientProviderError for why the set is deliberately tight
 // (excludes ambiguous timeouts that may be the agent's own task overrunning).
 func loopFailureIsTransient(result *agent.AgentResult, spawnErr, waitErr error) bool {
+	if isIterationTimeout(spawnErr) || isIterationTimeout(waitErr) {
+		return true
+	}
 	if client.IsTransientProviderError(spawnErr) || client.IsTransientProviderError(waitErr) {
 		return true
 	}
 	if result != nil && result.Error != "" {
-		return client.IsTransientProviderError(errors.New(result.Error))
+		err := errors.New(result.Error)
+		return isIterationTimeout(err) || client.IsTransientProviderError(err)
 	}
 	return false
+}
+
+// isIterationTimeout reports whether err is the iteration's OWN timeout
+// (iterationCtx deadline, DefaultIterationTimeout=15m) firing — as opposed to a
+// genuine task failure. The runner derives iterationCtx via context.WithTimeout,
+// so a DeadlineExceeded here means "this iteration ran too long", a CADENCE
+// problem, NOT a task failure: it must not trip the 5-failure auto-pause breaker.
+// Treated as transient so the loop-level exponential backoff (the right response
+// to a too-tight cadence / a slow-because-overloaded provider) kicks in, with the
+// far-more-lenient transient backstop still catching a permanently-stuck loop.
+//
+// Deliberately ADAPTER-LOCAL: client.IsTransientProviderError correctly EXCLUDES
+// bare "deadline exceeded" for the shared request/agent retry layers (where a
+// timeout could be the agent's own task overrunning, see CLAUDE.md). Only HERE
+// does a deadline provably mean the iteration ctx fired. NOTE: Fix #1's "reached
+// maximum turn limit" error is NOT a deadline, so it correctly stays a task
+// failure (a task that can't fit the turn budget IS a task problem).
+func isIterationTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "deadline exceeded")
 }
 
 // describeLoopNext returns a short human-readable suffix for the iteration-
@@ -88,6 +117,20 @@ func formatLoopDurationShort(d time.Duration) string {
 	}
 	days := int(d.Hours()) / 24
 	return fmt.Sprintf("%dd", days)
+}
+
+// renderLoopTokens renders a token count compactly (1234 -> "1.2K",
+// 2_500_000 -> "2.5M"). Mirrors loops.renderTokenCount / commands.formatTokenCount,
+// kept local so the app package needn't reach across for one formatter.
+func renderLoopTokens(n int64) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
 }
 
 // newLoopSpawner returns a loops.Spawner that uses the App's existing
@@ -240,6 +283,21 @@ func (a *App) onLoopIterationStart(loopID string) {
 	})
 }
 
+// onLoopIterationPersistFailed fires when an iteration ran but its result
+// couldn't be saved to disk (the manager rolled the in-memory state back).
+// Surfaces an honest, actionable warning instead of the misleading success
+// toast the old fall-through showed.
+func (a *App) onLoopIterationPersistFailed(loopID string, n int, err error) {
+	logging.Warn("loops: iteration ran but could not be persisted",
+		"loop_id", loopID, "iteration", n, "error", err)
+	a.safeSendToProgram(ui.StatusUpdateMsg{
+		Type: ui.StatusRecoverableError,
+		Message: fmt.Sprintf(
+			"Loop %s #%d ran but couldn't be saved to disk (%v) — check disk space / permissions; the iteration was not recorded.",
+			loopID, n, err),
+	})
+}
+
 // onLoopIterationDone fires after the iteration result is recorded.
 // Logs the outcome for post-mortem, posts a status update, and (per
 // the loop's UpdateMemory setting) writes the latest snapshot to a
@@ -299,15 +357,27 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 				// TRANSIENT failures (the backstop). Report the right one —
 				// ConsecutiveFailures is 0 on a transient-backstop pause, so
 				// the old "after 0 failures" wording would confuse the user.
+				// Report the TRUE trigger recorded at the pause site, not a
+				// reconstruction from state (which mislabels overlapping
+				// conditions — e.g. a failing task that also crossed its
+				// budget paused for FAILURES, not budget).
 				var msg string
-				if loop.ConsecutiveTransientFailures >= loops.TransientFailureLimit {
+				switch loop.AutoPauseReason {
+				case loops.AutoPauseTokenBudget:
+					spent := loop.TotalTokensIn + loop.TotalTokensOut
+					logging.Warn("loops: auto-paused — token budget reached",
+						"loop_id", loopID, "spent", spent, "budget", loop.MaxTotalTokens)
+					msg = fmt.Sprintf(
+						"Loop %s auto-paused — token budget reached (~%s spent / %s cap). Start a new loop with a higher --max-tokens, or /loop resume %s.",
+						loopID, renderLoopTokens(spent), renderLoopTokens(loop.MaxTotalTokens), loopID)
+				case loops.AutoPauseProviderUnavailable:
 					logging.Warn("loops: auto-paused — provider unavailable for an extended period",
 						"loop_id", loopID,
 						"consecutive_transient_failures", loop.ConsecutiveTransientFailures)
 					msg = fmt.Sprintf(
 						"Loop %s auto-paused — provider unavailable for a long time (%d retries). /loop resume %s when it's back.",
 						loopID, loop.ConsecutiveTransientFailures, loopID)
-				} else {
+				default:
 					logging.Warn("loops: auto-paused after consecutive failures",
 						"loop_id", loopID,
 						"consecutive_failures", loop.ConsecutiveFailures)

@@ -164,6 +164,20 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 		return fmt.Sprintf("Removed loop %s. (An in-flight iteration may still finish; its file edits / commits won't be rolled back.)", args[1]), nil
 	}
 
+	// Starting a loop. Extract optional flags (e.g. --max-tokens 200k) from
+	// anywhere in the args before interval/task parsing.
+	opts, args, flagErr := parseLoopStartFlags(args)
+	if flagErr != "" {
+		return flagErr, nil
+	}
+	if len(args) == 0 {
+		return "Usage: /loop <task>  |  /loop <interval> <task>   (optional: --max-tokens <N>, e.g. 200k / 2m)", nil
+	}
+	budgetHint := ""
+	if len(opts) > 0 {
+		budgetHint = "\n  Token budget set: the loop auto-pauses when lifetime spend reaches the cap."
+	}
+
 	// Not a verb. Try to parse first arg as an interval (5m, 1h, 30s).
 	// If it parses, the remaining args are the task. Otherwise everything
 	// is the task and we use self-paced mode.
@@ -172,12 +186,12 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 			return fmt.Sprintf("Interval %s given but no task. Usage: /loop %s <task>", args[0], args[0]), nil
 		}
 		task := strings.Join(args[1:], " ")
-		l, err := mgr.Add(task, loops.ModeInterval, seconds)
+		l, err := mgr.Add(task, loops.ModeInterval, seconds, opts...)
 		if err != nil {
 			return fmt.Sprintf("Failed to start loop: %v", err), nil
 		}
-		return fmt.Sprintf("Started loop %s — fires every %s.\n  Task: %s\n\nView: /loop status %s | Stop: /loop stop %s",
-			l.ID, args[0], previewTaskShort(task), l.ID, l.ID), nil
+		return fmt.Sprintf("Started loop %s — fires every %s.\n  Task: %s%s\n\nView: /loop status %s | Stop: /loop stop %s",
+			l.ID, args[0], previewTaskShort(task), budgetHint, l.ID, l.ID), nil
 	}
 
 	// Looks-like-interval but unparseable: reject explicitly so the user
@@ -192,12 +206,69 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 
 	// Fallthrough: entire args are a task description, self-paced mode.
 	task := strings.Join(args, " ")
-	l, err := mgr.Add(task, loops.ModeSelfPaced, 0)
+	l, err := mgr.Add(task, loops.ModeSelfPaced, 0, opts...)
 	if err != nil {
 		return fmt.Sprintf("Failed to start loop: %v", err), nil
 	}
-	return fmt.Sprintf("Started self-paced loop %s.\n  Task: %s\n\nView: /loop status %s | Stop: /loop stop %s",
-		l.ID, previewTaskShort(task), l.ID, l.ID), nil
+	return fmt.Sprintf("Started self-paced loop %s.\n  Task: %s%s\n\nView: /loop status %s | Stop: /loop stop %s",
+		l.ID, previewTaskShort(task), budgetHint, l.ID, l.ID), nil
+}
+
+// parseLoopStartFlags extracts loop-start flags (currently --max-tokens) from
+// anywhere in args, returning the AddOptions, the remaining (flag-stripped)
+// args, and a non-empty error message on a malformed flag.
+func parseLoopStartFlags(args []string) ([]loops.AddOption, []string, string) {
+	var opts []loops.AddOption
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		val := ""
+		switch {
+		case a == "--max-tokens":
+			if i+1 >= len(args) {
+				return nil, nil, "Usage: --max-tokens <N>  (e.g. 200k, 2m, 500000)"
+			}
+			val = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--max-tokens="):
+			val = strings.TrimPrefix(a, "--max-tokens=")
+		default:
+			rest = append(rest, a)
+			continue
+		}
+		n, ok := parseTokenBudget(val)
+		if !ok {
+			return nil, nil, fmt.Sprintf("Invalid --max-tokens value %q. Use e.g. 200k, 2m, or 500000.", val)
+		}
+		opts = append(opts, loops.WithMaxTotalTokens(n))
+	}
+	return opts, rest, ""
+}
+
+// parseTokenBudget parses a token-count string with an optional k/m suffix:
+// "500000", "200k", "2m", "1.5m". Returns (0,false) on anything non-positive
+// or unparseable.
+func parseTokenBudget(s string) (int64, bool) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return 0, false
+	}
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(s, "k"):
+		mult, s = 1000, s[:len(s)-1]
+	case strings.HasSuffix(s, "m"):
+		mult, s = 1_000_000, s[:len(s)-1]
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || f <= 0 {
+		return 0, false
+	}
+	n := int64(f * float64(mult))
+	if n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // parseLoopInterval recognizes the same shorthand as /schedule and /loop
@@ -314,10 +385,18 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	var sb strings.Builder
 	statusLabel := string(l.Status)
 	if l.AutoPaused && l.Status == loops.StatusPaused {
-		if l.ConsecutiveTransientFailures >= loops.TransientFailureLimit {
+		// Read the recorded trigger — don't reconstruct from state, which
+		// mislabels overlapping conditions (e.g. a failing task that also
+		// crossed its budget paused for FAILURES).
+		switch l.AutoPauseReason {
+		case loops.AutoPauseTokenBudget:
+			statusLabel = "auto-paused (token budget reached)"
+		case loops.AutoPauseProviderUnavailable:
 			statusLabel = "auto-paused (provider unavailable)"
-		} else {
+		case loops.AutoPauseConsecutiveFailures:
 			statusLabel = "auto-paused (consecutive failures)"
+		default:
+			statusLabel = "auto-paused"
 		}
 	}
 	sb.WriteString(fmt.Sprintf("Loop %s — %s\n", l.ID, statusLabel))
@@ -353,9 +432,13 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	}
 	// Lifetime token spend — so a user who walked away from a background loop
 	// can see what it cost (a runaway unattended loop quietly burns quota).
-	if l.TotalTokensIn > 0 || l.TotalTokensOut > 0 {
+	if l.TotalTokensIn > 0 || l.TotalTokensOut > 0 || l.MaxTotalTokens > 0 {
 		sb.WriteString(fmt.Sprintf("\n  Tokens: ~%s in / ~%s out",
 			formatTokenCount(l.TotalTokensIn), formatTokenCount(l.TotalTokensOut)))
+		if l.MaxTotalTokens > 0 {
+			sb.WriteString(fmt.Sprintf(" (%s / %s budget)",
+				formatTokenCount(l.TotalTokensIn+l.TotalTokensOut), formatTokenCount(l.MaxTotalTokens)))
+		}
 	}
 	// When the loop is actively waiting out a busy/unreachable provider,
 	// say so explicitly — otherwise a backed-off "Next run: in 16m" looks
