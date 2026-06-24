@@ -389,6 +389,22 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 					Type:    ui.StatusRecoverableError,
 					Message: msg,
 				})
+			} else if loop.Status == loops.StatusRunning &&
+				loop.ConsecutiveTransientFailures == loops.TransientFailureWarnThreshold {
+				// Mid-streak heads-up: the loop is still running and backing off,
+				// but the provider has been struggling for a while. Fire ONCE
+				// (== threshold) so the user can intervene early instead of only
+				// finding out at the far-off backstop. Calm Warning (self-healing)
+				// with an actionable hint.
+				logging.Warn("loops: provider struggling mid-streak",
+					"loop_id", loopID,
+					"consecutive_transient_failures", loop.ConsecutiveTransientFailures)
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type: ui.StatusWarning,
+					Message: fmt.Sprintf(
+						"Loop %s: provider unavailable for %d iterations and still retrying (auto-pauses at %d). Consider /provider or checking your connection.",
+						loopID, loop.ConsecutiveTransientFailures, loops.TransientFailureLimit),
+				})
 			}
 
 			// Write per-loop markdown for human-readable persistent

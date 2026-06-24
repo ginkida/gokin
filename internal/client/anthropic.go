@@ -1151,6 +1151,15 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 				}
 			}
 		}()
+		// Guarantee the scanner goroutine is released on EVERY exit of this
+		// consumer goroutine — not just the scanner-EOF path that falls through
+		// to the old explicit close below. The normal completion (`chunk.Done`
+		// return), GLM-error return, and idle-timeout return all leave ctx LIVE,
+		// so without this the scanner blocks forever on its unbuffered send
+		// (closeBody unblocks Scan() but the scanner then parks on the send until
+		// stopScan closes), leaking one goroutine + its 8MB-capable buffer per
+		// response. defer → single close site, no double-close.
+		defer close(stopScan)
 
 		eventCount := 0
 		contentReceived := false
@@ -1378,7 +1387,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 				}
 			}
 		}
-		close(stopScan) // Signal scanner goroutine to exit
+		// stopScan is closed by the `defer close(stopScan)` above, which covers
+		// this (scanner-EOF) exit AND every early return.
 	}()
 
 	return &StreamingResponse{

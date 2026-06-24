@@ -287,6 +287,10 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	defer cancel()
 
 	started := time.Now()
+	// Mark this loop as firing-now so /loop status/list can show "running"
+	// while the (minutes-long) iteration executes; cleared on return.
+	r.mgr.SetFiring(l.ID, started)
+	defer r.mgr.ClearFiring()
 	res, err := r.spawn(iterationCtx, prompt)
 	output, ok := res.Output, res.OK
 	duration := time.Since(started)

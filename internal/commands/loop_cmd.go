@@ -89,7 +89,8 @@ func (c *LoopCommand) Execute(ctx context.Context, args []string, app AppInterfa
 func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []string) (string, error) {
 	// No args → list. Most common quick-check use case.
 	if len(args) == 0 {
-		return formatList(mgr.List()), nil
+		fid, fsince, _ := mgr.FiringState()
+		return formatList(mgr.List(), fid, fsince), nil
 	}
 
 	// First arg is a subcommand verb, an interval, or the start of a
@@ -101,7 +102,8 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 
 	switch first {
 	case "list":
-		return formatList(mgr.List()), nil
+		fid, fsince, _ := mgr.FiringState()
+		return formatList(mgr.List(), fid, fsince), nil
 	case "status":
 		if len(args) < 2 {
 			return "Usage: /loop status <id>", nil
@@ -304,7 +306,7 @@ func parseLoopInterval(s string) (int64, bool) {
 // formatList builds a compact human-readable listing for /loop with no
 // args. Empty case shows a hint how to start one — same UX class as
 // v0.80.19 /sessions discoverability.
-func formatList(loopList []*loops.Loop) string {
+func formatList(loopList []*loops.Loop, firingID string, firingSince time.Time) string {
 	if len(loopList) == 0 {
 		return "No loops configured.\n\nStart one with:\n  /loop <task>           — self-paced (agent decides cadence)\n  /loop 30m <task>       — fires every 30 minutes"
 	}
@@ -312,14 +314,14 @@ func formatList(loopList []*loops.Loop) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%d loop(s):\n\n", len(loopList)))
 	for _, l := range loopList {
-		sb.WriteString(formatLoopLine(l))
+		sb.WriteString(formatLoopLine(l, firingID, firingSince))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\nDetails: /loop status <id> | Stop: /loop stop <id>")
 	return sb.String()
 }
 
-func formatLoopLine(l *loops.Loop) string {
+func formatLoopLine(l *loops.Loop, firingID string, firingSince time.Time) string {
 	statusMark := "●"
 	statusLabel := string(l.Status)
 	switch l.Status {
@@ -363,8 +365,13 @@ func formatLoopLine(l *loops.Loop) string {
 		}
 	}
 
+	// "Running now" (an iteration is actively executing) takes precedence over
+	// the "next in …" hint — otherwise a loop mid-iteration looks idle.
 	nextHint := ""
-	if l.IsActive() && !l.NextRunAt.IsZero() {
+	switch {
+	case firingID != "" && l.ID == firingID:
+		nextHint = " — running now (" + formatDurationShort(time.Since(firingSince)) + ")"
+	case l.IsActive() && !l.NextRunAt.IsZero():
 		dur := time.Until(l.NextRunAt)
 		if dur < 0 {
 			nextHint = " — due now"
@@ -411,7 +418,11 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 	if !l.LastRunAt.IsZero() {
 		sb.WriteString(fmt.Sprintf("  Last run: %s\n", l.LastRunAt.Format(time.RFC3339)))
 	}
-	if l.IsActive() && !l.NextRunAt.IsZero() {
+	// "Running now" (an iteration is actively executing) takes precedence over
+	// the "next run" line, which would otherwise make a busy loop look idle.
+	if fid, fsince, ok := mgr.FiringState(); ok && fid == l.ID {
+		sb.WriteString(fmt.Sprintf("  Running now: iteration started %s ago\n", formatDurationShort(time.Since(fsince))))
+	} else if l.IsActive() && !l.NextRunAt.IsZero() {
 		dur := time.Until(l.NextRunAt)
 		if dur < 0 {
 			sb.WriteString("  Next run: due now\n")
@@ -517,6 +528,9 @@ type LoopManager interface {
 	Resume(id string) error
 	FireNow(id string) error
 	Remove(id string) error
+	// FiringState reports the loop whose iteration is executing right now
+	// (id, start time, ok) so the listing can show "running" mid-iteration.
+	FiringState() (string, time.Time, bool)
 }
 
 // previewTaskShort caps a task description for inline display. Single-

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gokin/internal/client"
 )
 
 // Status represents the status of a plan or step.
@@ -1147,6 +1149,15 @@ func ClassifyError(err error, errMsg string) ErrorCategory {
 		}
 		var netErr net.Error
 		if errors.As(err, &netErr) {
+			return ErrorTransient
+		}
+		// An empty model response after tool results is a transient provider
+		// hiccup (weak/high-context models do it), not a step failure. The
+		// foreground + sub-agent loops already retry it; the plan-step path
+		// (a.executor.Execute, retryPolicy.MaxRetries=0) returns it un-retried,
+		// and without this it classified as Unknown → the step failed and the
+		// plan paused mid-work. Typed check survives message-string changes.
+		if errors.Is(err, client.ErrEmptyModelResponse) {
 			return ErrorTransient
 		}
 	}

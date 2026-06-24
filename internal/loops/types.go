@@ -216,6 +216,16 @@ const ConsecutiveFailureLimit = 5
 // (something is genuinely wrong) rather than poking a dead endpoint forever.
 const TransientFailureLimit = 30
 
+// TransientFailureWarnThreshold is a MID-STREAK heads-up: a loop quietly backing
+// off through provider trouble would otherwise stay silent until the far-away
+// TransientFailureLimit backstop (≈half a day). Crossing this many consecutive
+// transient failures means the provider has been struggling for a while, so the
+// UI emits ONE warning toast (fired exactly when the streak == this value) so
+// the user can intervene early (switch provider, check the network) instead of
+// discovering it hours later. Well below the backstop; only relevant once Fix
+// #2 made iteration timeouts transient (deadline-heavy loops build these faster).
+const TransientFailureWarnThreshold = 10
+
 // transientBackoffBaseSeconds / transientBackoffCapSeconds bound the
 // loop-level exponential backoff applied after a transient failure: the next
 // iteration is pushed out base×2^(streak-1), capped. This throttles a fast

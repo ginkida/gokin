@@ -48,6 +48,45 @@ type Manager struct {
 	// of UI/memory layers (clean dependency direction: Manager →
 	// Storage only).
 	onRemove func(loopID string)
+
+	// firing tracks the loop whose iteration is executing RIGHT NOW (the
+	// scheduler runs one at a time). Transient + never persisted — it answers
+	// "is my loop working now?" in /loop status/list, which otherwise show
+	// "next in 5m" even mid-iteration (LastRunAt is from the PRIOR iteration).
+	// A separate leaf mutex so the Runner's start/clear can't contend with the
+	// RMW m.mu paths (RecordIteration/transition).
+	firingMu    sync.Mutex
+	firingID    string
+	firingSince time.Time
+}
+
+// SetFiring marks loopID as the iteration currently executing (called by the
+// Runner at the top of fireOne). Transient, not persisted.
+func (m *Manager) SetFiring(loopID string, since time.Time) {
+	m.firingMu.Lock()
+	m.firingID = loopID
+	m.firingSince = since
+	m.firingMu.Unlock()
+}
+
+// ClearFiring clears the currently-firing marker (Runner defers this when the
+// iteration finishes).
+func (m *Manager) ClearFiring() {
+	m.firingMu.Lock()
+	m.firingID = ""
+	m.firingSince = time.Time{}
+	m.firingMu.Unlock()
+}
+
+// FiringState reports the loop whose iteration is executing now (id, when it
+// started, ok). ok=false when no iteration is currently running.
+func (m *Manager) FiringState() (string, time.Time, bool) {
+	m.firingMu.Lock()
+	defer m.firingMu.Unlock()
+	if m.firingID == "" {
+		return "", time.Time{}, false
+	}
+	return m.firingID, m.firingSince, true
 }
 
 // SetOnRemove installs a callback fired after each successful Remove.

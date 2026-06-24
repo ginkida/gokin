@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"gokin/internal/client"
 )
 
 // --- Status tests ---
@@ -913,6 +915,10 @@ func TestClassifyError(t *testing.T) {
 		{"unknown", nil, "something happened", ErrorUnknown},
 		{"nil error empty msg", nil, "", ErrorUnknown},
 		{"error with no match", errors.New("weird issue"), "", ErrorUnknown},
+		// Empty-after-tools is a transient provider hiccup (typed check via the
+		// unwrapped sentinel) — a plan step must retry it, not fail.
+		{"empty after tools (typed)", &client.EmptyModelResponseError{AfterToolResults: true}, "", ErrorTransient},
+		{"empty model response sentinel", client.ErrEmptyModelResponse, "", ErrorTransient},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

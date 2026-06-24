@@ -14,13 +14,15 @@ import (
 // parsed" vs "fell through to self-paced" without spinning up a real
 // Manager + Storage.
 type fakeLoopMgr struct {
-	loops      []*loops.Loop
-	addedTask  string
-	addedMode  loops.Mode
-	addedSecs  int64
-	addCalls   int
-	removed    string
-	getReturns *loops.Loop // when non-nil, Get returns this regardless of ID
+	loops       []*loops.Loop
+	addedTask   string
+	addedMode   loops.Mode
+	addedSecs   int64
+	addCalls    int
+	removed     string
+	getReturns  *loops.Loop // when non-nil, Get returns this regardless of ID
+	firingID    string      // when non-empty, FiringState reports this loop running
+	firingSince time.Time
 }
 
 func (f *fakeLoopMgr) Add(task string, mode loops.Mode, intervalSeconds int64, opts ...loops.AddOption) (*loops.Loop, error) {
@@ -46,6 +48,39 @@ func (f *fakeLoopMgr) Pause(id string) error   { return nil }
 func (f *fakeLoopMgr) Resume(id string) error  { return nil }
 func (f *fakeLoopMgr) FireNow(id string) error { return nil }
 func (f *fakeLoopMgr) Remove(id string) error  { f.removed = id; return nil }
+func (f *fakeLoopMgr) FiringState() (string, time.Time, bool) {
+	if f.firingID == "" {
+		return "", time.Time{}, false
+	}
+	return f.firingID, f.firingSince, true
+}
+
+// A firing loop shows "Running now" instead of "Next run" in /loop status.
+func TestFormatStatus_RunningNow(t *testing.T) {
+	mgr := &fakeLoopMgr{
+		getReturns:  &loops.Loop{ID: "loop-1", Task: "fix bugs", Mode: loops.ModeInterval, IntervalSeconds: 600, Status: loops.StatusRunning, NextRunAt: time.Now().Add(5 * time.Minute)},
+		firingID:    "loop-1",
+		firingSince: time.Now().Add(-2 * time.Minute),
+	}
+	out, _ := formatStatus(mgr, "loop-1")
+	if !strings.Contains(out, "Running now") {
+		t.Errorf("a firing loop's status should show 'Running now':\n%s", out)
+	}
+	if strings.Contains(out, "Next run:") {
+		t.Errorf("a firing loop must not also show 'Next run':\n%s", out)
+	}
+}
+
+// /loop list shows "running now" for the in-flight loop, "next" for others.
+func TestFormatLoopLine_RunningNow(t *testing.T) {
+	l := &loops.Loop{ID: "loop-1", Task: "x", Mode: loops.ModeSelfPaced, Status: loops.StatusRunning, NextRunAt: time.Now().Add(5 * time.Minute)}
+	if line := formatLoopLine(l, "loop-1", time.Now().Add(-time.Minute)); !strings.Contains(line, "running now") {
+		t.Errorf("firing loop line should show 'running now':\n%s", line)
+	}
+	if line := formatLoopLine(l, "other", time.Time{}); strings.Contains(line, "running now") {
+		t.Errorf("non-firing loop must not show 'running now':\n%s", line)
+	}
+}
 
 // TestParseLoopInterval covers the accept and reject paths of the
 // shorthand parser. Pinned in tests so future "be more lenient"

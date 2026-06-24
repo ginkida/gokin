@@ -501,6 +501,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				// subsequent turn.
 				cleaned := stripOrphanFunctionCalls(newHistory)
 				a.session.SetHistory(cleaned)
+				// Persist the tool-checkpoint journal alongside the saved
+				// partial history — the success path (after the loop) and BOTH
+				// retry-path saves do this; the terminal-error branches omitted
+				// it. Without it, tools that executed (side-effects on disk) lose
+				// their durable checkpoint when ResetSideEffectLedger clears the
+				// in-memory journal next request → the model can re-run them
+				// (duplicate writes / bash / git commits).
+				a.syncToolCheckpoints()
 				if a.sessionManager != nil {
 					_ = a.sessionManager.SaveAfterMessage()
 				}
@@ -509,6 +517,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				trimmed := trimToLastModelMessage(newHistory, len(history))
 				if len(trimmed) > len(history) {
 					a.session.SetHistory(trimmed)
+					a.syncToolCheckpoints() // see note above — symmetric with retry/success saves
 					if a.sessionManager != nil {
 						_ = a.sessionManager.SaveAfterMessage()
 					}

@@ -3928,6 +3928,16 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		newHistory = append(newHistory, recentFromSnapshot...)
 		newHistory = append(newHistory, newMessages...)
 
+		// Drop any FunctionResponse orphaned by the summary: a FunctionCall in the
+		// summarized middle whose paired FunctionResponse landed in
+		// recentFromSnapshot (a tool pair straddling the protectRecent boundary)
+		// would otherwise serialize as a response with no matching call → strict
+		// provider 400 "tool_call_ids did not have response messages" → the
+		// sub-agent dies mid-task. The two forced-compaction siblings already do
+		// this; the PRE-EMPTIVE path (the one sub-agents and /loop hit most) was
+		// missing it. Allocation-free when there are no orphans.
+		newHistory = ensureToolPairConsistency(newHistory)
+
 		a.history = newHistory
 
 		// Inject continuation hint after compaction
