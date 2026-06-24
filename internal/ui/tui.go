@@ -2443,6 +2443,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	// Status updates from client (retry, rate limit, stream idle)
 	case StatusUpdateMsg:
+		// Ring the bell for events a stepped-away user should HEAR (e.g. a
+		// background /loop reaching a terminal state). Gated on bellEnabled
+		// inside bellCmd; same audible signal background tasks use.
+		if msg.Bell {
+			cmds = append(cmds, m.bellCmd())
+		}
 		switch msg.Type {
 		case StatusRetry:
 			if attempt, ok := msg.Details["attempt"].(int); ok {

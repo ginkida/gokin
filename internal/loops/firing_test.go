@@ -6,6 +6,36 @@ import (
 	"time"
 )
 
+// Self-termination (agent `done.`) must Stop the loop BEFORE the doneHook runs,
+// so the hook observes the terminal state — that's what lets the adapter show
+// "stopped" (not "next in 5m") and ring the "loop finished" bell. The iteration
+// is still recorded (Stop is after RecordIteration).
+func TestFireOne_SelfTerminationStopsBeforeDoneHook(t *testing.T) {
+	mgr := NewManager(newMemStorage())
+	l, _ := mgr.Add("fix all bugs", ModeSelfPaced, 0)
+
+	var statusAtHook Status
+	spawner := &fakeSpawner{output: "All fixed.\n\ndone.", ok: true}
+	r := NewRunner(mgr, spawner.spawn, (&fakeIdle{}).check)
+	r.SetIterationDoneHook(func(id string, _ Iteration) {
+		if got, ok := mgr.Get(id); ok {
+			statusAtHook = got.Status
+		}
+	})
+	r.fireOne(context.Background(), l)
+
+	if statusAtHook != StatusStopped {
+		t.Errorf("doneHook must observe the Stopped state for a self-terminated loop, got %s", statusAtHook)
+	}
+	got, _ := mgr.Get(l.ID)
+	if got.Status != StatusStopped {
+		t.Errorf("loop should be Stopped after self-termination, got %s", got.Status)
+	}
+	if got.IterationCount != 1 {
+		t.Errorf("the final iteration must still be recorded, got count %d", got.IterationCount)
+	}
+}
+
 func TestManager_FiringState(t *testing.T) {
 	m := NewManager(newMemStorage())
 	if _, _, ok := m.FiringState(); ok {

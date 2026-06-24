@@ -1454,32 +1454,30 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// double-continue.) Progress-aware + bounded: a model that narrates without
 		// running a tool N times in a row stops; one that completes todos between
 		// nudges resets the counter and runs free.
-		if resp.FinishReason != genai.FinishReasonMaxTokens {
-			if n, summary := IncompleteTodoSummary(e.registry); n > 0 {
-				if len(toolsUsed) > toolsUsedAtLastIncompleteNudge {
-					incompleteWorkStuck = 0 // a tool ran since the last nudge → progress
-				}
-				if incompleteWorkStuck < MaxIncompleteWorkContinuations {
-					incompleteWorkStuck++
-					toolsUsedAtLastIncompleteNudge = len(toolsUsed)
-					// Carry the text produced so far so the next iteration's
-					// `finalText = carriedText + resp.Text` doesn't silently drop
-					// it. finalText already == (carriedText + this resp.Text), so
-					// this also folds in any earlier max_tokens-carried prefix. An
-					// empty finalText here is harmless.
-					carriedText = finalText
-					if e.handler != nil && e.handler.OnWarning != nil {
-						e.handler.OnWarning(fmt.Sprintf("Continuing — %d task(s) still to do…", n))
-					}
-					logging.Info("incomplete-work continuation: model stopped with unfinished todos",
-						"incomplete", n, "attempt", incompleteWorkStuck, "empty_response", finalText == "")
-					history = append(history, genai.NewContentFromText(
-						IncompleteWorkContinuationPrompt(n, summary), genai.RoleUser))
-					continue
-				}
-				logging.Info("incomplete-work continuation budget exhausted — model narrating without acting",
-					"incomplete", n)
+		incDec := DecideIncompleteWorkContinuation(e.registry,
+			resp.FinishReason == genai.FinishReasonMaxTokens, len(toolsUsed),
+			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck)
+		incompleteWorkStuck = incDec.Stuck
+		toolsUsedAtLastIncompleteNudge = incDec.LastNudge
+		if incDec.Continue {
+			// Carry the text produced so far so the next iteration's
+			// `finalText = carriedText + resp.Text` doesn't silently drop it.
+			// finalText already == (carriedText + this resp.Text), so this also
+			// folds in any earlier max_tokens-carried prefix. An empty finalText
+			// here is harmless.
+			carriedText = finalText
+			if e.handler != nil && e.handler.OnWarning != nil {
+				e.handler.OnWarning(fmt.Sprintf("Continuing — %d task(s) still to do…", incDec.Count))
 			}
+			logging.Info("incomplete-work continuation: model stopped with unfinished todos",
+				"incomplete", incDec.Count, "attempt", incompleteWorkStuck, "empty_response", finalText == "")
+			history = append(history, genai.NewContentFromText(
+				IncompleteWorkContinuationPrompt(incDec.Count, incDec.Summary), genai.RoleUser))
+			continue
+		}
+		if incDec.Exhausted {
+			logging.Info("incomplete-work continuation budget exhausted — model narrating without acting",
+				"incomplete", incDec.Count)
 		}
 
 		// Detect empty response — model returned no text and no function calls, and

@@ -380,15 +380,12 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 		return
 	}
 
-	if doneHook != nil {
-		doneHook(l.ID, it)
-	}
-
-	// Agent self-termination: if the iteration ended with "done.", stop
-	// the loop so it doesn't keep firing. Done AFTER recording so the
-	// final summary is in history. Stop is a no-op if the loop is
-	// already terminal (paused/stopped/removed), so this can't fight
-	// the user.
+	// Agent self-termination: if the iteration ended with "done.", stop the
+	// loop so it doesn't keep firing. Done AFTER RecordIteration (so the final
+	// summary is persisted) but BEFORE the doneHook, so the hook observes the
+	// now-Stopped state — its toast reads "stopped" (accurate) instead of
+	// "next in 5m", and it can ring the "loop finished" bell. Stop is a no-op
+	// if the loop is already terminal (completed/stopped/removed).
 	if agentDone {
 		if err := r.mgr.Stop(l.ID); err != nil {
 			logging.Debug("loops: self-terminate Stop failed (likely already terminal)",
@@ -397,6 +394,10 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 			logging.Info("loops: agent self-terminated via 'done' marker",
 				"loop_id", l.ID, "iterations", l.IterationCount+1)
 		}
+	}
+
+	if doneHook != nil {
+		doneHook(l.ID, it)
 	}
 }
 
@@ -452,7 +453,16 @@ func BuildIterationPrompt(l *Loop) string {
 		}
 	}
 
-	sb.WriteString("\nProceed with the next step. Keep the response focused — your last sentence will be captured as the iteration summary.")
+	// Coach the learn→persist→reload cycle: this project's conventions, build/
+	// test/lint commands, structure and prior learnings are injected into your
+	// system context (project guidelines + ProjectLearning), so lean on them
+	// instead of re-deriving what you already know — and write NEW durable facts
+	// back so future iterations start smarter. This is what makes a long-running
+	// loop accumulate project understanding over time instead of starting blind
+	// each iteration.
+	sb.WriteString("\nThe project's conventions, build/test/lint commands, structure, and what prior iterations learned are already in your context — use them; don't re-derive what you already know. If you discover a DURABLE fact (a build/test/lint command, a convention, where something lives, a gotcha), call the `memorize` tool to save it so every future iteration starts smarter.")
+
+	sb.WriteString("\n\nProceed with the next step. Keep the response focused — your last sentence will be captured as the iteration summary.")
 
 	// For self-paced loops, hint at the cadence-control mechanism so the
 	// agent can request a longer wait when there's nothing to do.

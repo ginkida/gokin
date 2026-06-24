@@ -693,6 +693,216 @@
       "delivered_state": "red",
       "file_must_change": ["internal/errs/errs.go"],
       "answer_must_contain": ["Classify"]
+    },
+    {
+      "id": "go_wrong_layer_normalize",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "prompt": "Negative order quantities are reaching storage instead of being clamped to 0, and Validate() even rejects them outright. Find why the clamp isn't happening and fix it in the right place so validation and insertion agree. Run the narrowest relevant Go test.",
+      "fixture": "synthetic/go-validate-normalize",
+      "expected_behaviors": [
+        "traces both Validate and PrepareForInsert into the shared normalize helper",
+        "fixes the missing clamp in normalize.go",
+        "does not band-aid the clamp into Validate alone",
+        "runs go test ./..."
+      ],
+      "verification_commands": [
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "negative quantities clamp to 0 on both the Validate and PrepareForInsert paths",
+        "the fix lives in normalize, not duplicated per caller"
+      ],
+      "failure_signals": [
+        "clamps inside Validate only and leaves PrepareForInsert returning a negative quantity",
+        "duplicates the clamp in each caller instead of fixing normalize"
+      ],
+      "max_tool_calls": 14,
+      "delivered_state": "red",
+      "file_must_change": ["internal/order/normalize.go"]
+    },
+    {
+      "id": "go_two_bugs_stats",
+      "category": "bugfix",
+      "difficulty": "hard",
+      "prompt": "Mean() is returning the wrong value — for the sample {2,4,6} it gives 3 instead of 4. Fix the statistics package and make the tests pass.",
+      "fixture": "synthetic/go-two-bugs-stats",
+      "expected_behaviors": [
+        "runs the package tests and notices BOTH the Mean and Median cases fail",
+        "fixes the off-by-one divisor in Mean",
+        "fixes the even-length case in Median (average the two middle values)",
+        "does not stop after fixing only the symptom named in the prompt"
+      ],
+      "verification_commands": [
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "all stats tests pass, including the Median even-length case the prompt did not name"
+      ],
+      "failure_signals": [
+        "fixes only Mean and leaves Median failing",
+        "reports done while go test still fails"
+      ],
+      "max_tool_calls": 16,
+      "delivered_state": "red"
+    },
+    {
+      "id": "go_iface_drift_contract",
+      "category": "bugfix",
+      "difficulty": "hard",
+      "prompt": "Writer.Save() lets an empty key through to storage. The Store contract says Put must reject an empty key with ErrEmptyKey. One of the Store implementations isn't honoring that contract. Fix the implementation that's violating it — don't patch the service layer — and prove the whole module builds and tests pass.",
+      "fixture": "synthetic/go-iface-drift",
+      "expected_behaviors": [
+        "follows Writer.Save into the Store implementation it is constructed with (cachestore)",
+        "adds the empty-key check to cachestore's Put, matching memstore",
+        "does not patch the service or test layer",
+        "runs go build ./... and go test ./..."
+      ],
+      "verification_commands": [
+        "go build ./...",
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "the empty-key check lives in the cachestore implementation",
+        "memstore is left alone (already correct)"
+      ],
+      "failure_signals": [
+        "patches Writer.Save instead of the implementation",
+        "adds the check to memstore (the wrong impl) or the test"
+      ],
+      "max_tool_calls": 16,
+      "delivered_state": "red",
+      "file_must_change": ["internal/cachestore/cachestore.go"],
+      "answer_must_contain": ["cachestore"]
+    },
+    {
+      "id": "go_preserve_render_guard",
+      "category": "refactor",
+      "difficulty": "medium",
+      "prompt": "The empty-input check at the top of Render() looks redundant — the loop below would produce nothing for an empty list anyway. Remove it if it's safe; otherwise explain why it must stay. Keep the tests green.",
+      "fixture": "synthetic/go-guard-contract",
+      "expected_behaviors": [
+        "recognizes that without the guard an empty list still emits the header line",
+        "leaves the guard in place",
+        "keeps go test ./... green",
+        "explains the empty-input contract in the final answer"
+      ],
+      "verification_commands": [
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "the empty-input test still passes",
+        "the answer explains why the guard is load-bearing (empty input must produce no header)"
+      ],
+      "failure_signals": [
+        "removes the guard and the empty-render test goes red",
+        "calls the removal a safe simplification"
+      ],
+      "max_tool_calls": 14,
+      "delivered_state": "green",
+      "answer_must_contain": ["empty"]
+    },
+    {
+      "id": "go_int_overflow_average",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "prompt": "Average() returns a wrong (sometimes negative) result for large int32 inputs, even though the formula looks right. Find the real cause and fix it. Run the package tests.",
+      "fixture": "synthetic/go-overflow-sum",
+      "expected_behaviors": [
+        "recognizes the int32 accumulator overflows for large sums",
+        "widens the running sum to int64",
+        "keeps the small-input case correct",
+        "runs go test ./..."
+      ],
+      "verification_commands": [
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "the large-value average is correct (no overflow)",
+        "the small-value case still passes"
+      ],
+      "failure_signals": [
+        "reorders or clamps without widening the accumulator",
+        "claims the division is the bug"
+      ],
+      "max_tool_calls": 12,
+      "delivered_state": "red"
+    },
+    {
+      "id": "py_mutable_default_tally",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "prompt": "tally() shares state across calls — a second, independent call still sees items from the first. Fix it so each call with no explicit dict starts empty, without clearing a dict the caller passes in. Run the tests.",
+      "fixture": "synthetic/py-mutable-default",
+      "expected_behaviors": [
+        "identifies the mutable default argument (counts={})",
+        "replaces it with a None sentinel",
+        "does not use counts.clear() (which would wipe a caller-supplied dict)",
+        "runs python3 -m unittest"
+      ],
+      "verification_commands": [
+        "python3 -m unittest discover -s tests"
+      ],
+      "success_criteria": [
+        "independent calls don't share state",
+        "a caller-supplied dict keeps its existing keys"
+      ],
+      "failure_signals": [
+        "uses counts.clear() and drops a caller's seeded keys",
+        "leaves the shared mutable default in place"
+      ],
+      "max_tool_calls": 12,
+      "delivered_state": "red"
+    },
+    {
+      "id": "node_promise_order",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "prompt": "fetchAll() returns its results in the order each async fetch happens to finish, not the order of the input ids. Fix it so the output always matches the input order. Run the test.",
+      "fixture": "synthetic/node-promise-order",
+      "expected_behaviors": [
+        "recognizes results are collected in completion order, not input order",
+        "preserves input order (index-keyed writes or Promise.all over the mapped fetches)",
+        "runs node --test test/order.test.js"
+      ],
+      "verification_commands": [
+        "node --test test/order.test.js"
+      ],
+      "success_criteria": [
+        "fetchAll preserves input order regardless of completion timing"
+      ],
+      "failure_signals": [
+        "sorts the output as a band-aid",
+        "leaves push-on-resolve ordering in place"
+      ],
+      "max_tool_calls": 12,
+      "delivered_state": "red"
+    },
+    {
+      "id": "go_enum_threading",
+      "category": "feature",
+      "difficulty": "hard",
+      "prompt": "A new StatusArchived value was added to the Status enum but it isn't wired up: String(), Parse(), and the transition table don't know about it. Thread it through consistently — Archived renders as \"archived\", parses from \"archived\", is reachable from Active and Closed, and is terminal (no outgoing transitions). Run the package tests.",
+      "fixture": "synthetic/go-enum-threading",
+      "expected_behaviors": [
+        "adds the StatusArchived case to String()",
+        "adds \"archived\" to Parse()",
+        "adds Archived as a target from Active and Closed and leaves it terminal",
+        "runs go test ./..."
+      ],
+      "verification_commands": [
+        "go test ./..."
+      ],
+      "success_criteria": [
+        "String/Parse round-trip works for Archived",
+        "Active and Closed can transition to Archived; Archived has no outgoing transition"
+      ],
+      "failure_signals": [
+        "updates only String() or only some files, leaving the suite red",
+        "makes Archived non-terminal"
+      ],
+      "max_tool_calls": 28,
+      "delivered_state": "red"
     }
   ]
 }

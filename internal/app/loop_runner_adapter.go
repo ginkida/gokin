@@ -156,13 +156,18 @@ func renderLoopTokens(n int64) string {
 // headroom for retries or multi-file fixes; 25 feels right (less than
 // 2x cost vs 15, but enough headroom for real work).
 //
-// Returns (output, ok, err):
-//   - output: agent's textual result, captured from result.Output.
+// Each iteration runs via SpawnWithContext (the same path plan execution uses)
+// so the loop agent receives the FULL durable project context — project
+// guidelines (build/test/lint commands), project instructions, ProjectLearning,
+// the memory store, session + working memory, and the active contract — instead
+// of starting blind and re-deriving conventions every iteration.
+//
+// Returns a SpawnResult (output + ok + transient classification):
+//   - output: agent's textual result, captured from result.Output (partial
+//     work preserved even on failure).
 //   - ok: true when result.Status == AgentStatusCompleted. False on
-//     failure / cancellation / max-turn cutoff.
-//   - err: non-nil only on Spawn-time error (transport, missing client).
-//     A failed agent run reports via ok=false, not err — the loop
-//     iteration still records what happened.
+//     failure / cancellation / max-turn cutoff (reported via ok=false, not err).
+//   - err: non-nil only when the agent runner isn't initialized.
 func newLoopSpawner(a *App) loops.Spawner {
 	return func(ctx context.Context, prompt string) (loops.SpawnResult, error) {
 		runner := a.agentRunner
@@ -183,28 +188,28 @@ func newLoopSpawner(a *App) loops.Spawner {
 
 		const maxTurns = 25
 
-		agentID, spawnErr := runner.Spawn(ctx, "general", prompt, maxTurns, model)
-		if spawnErr != nil && agentID == "" {
-			// True Spawn-time failure (couldn't construct/register agent).
-			// No agentID means there's no result to retrieve — surface
-			// the error directly.
-			return loops.SpawnResult{}, fmt.Errorf("spawn loop iteration: %w", spawnErr)
+		// Build the durable project context so a /loop iteration UNDERSTANDS the
+		// project like a foreground turn instead of re-deriving conventions every
+		// time. BuildSubAgentPrompt aggregates project guidelines (build/test/lint
+		// commands from detection), project instructions, ProjectLearning, the
+		// memory store, session + working memory, and the active contract — and
+		// SpawnWithContext injects it via SetProjectContext. This is the
+		// load-bearing half of the LEARN→PERSIST→RELOAD loop: memorize-written
+		// facts (and everything else aggregated here) flow into the NEXT
+		// iteration's system prompt. Built on the scheduler goroutine; the
+		// promptBuilder's memory-pointer fields are boot-set (not re-pointed by
+		// ApplyConfig) and internally locked, so this is race-safe, and
+		// applyPromptBudget caps the size.
+		projectCtx := ""
+		if a.promptBuilder != nil {
+			projectCtx = a.promptBuilder.BuildSubAgentPrompt()
 		}
 
-		// Spawn is synchronous (blocks until agent.Run returns), so the
-		// result is already in the runner's results map by the time we
-		// get here — even if Spawn returned an error, the agent likely
-		// produced partial output that we want to capture in the
-		// iteration summary instead of throwing away.
-		//
-		// WaitWithContext's fast path hits immediately for a completed
-		// result; we keep it (rather than calling GetResult) so a not-
-		// yet-completed result waits cleanly for completion via the
-		// channel notification.
-		result, waitErr := runner.WaitWithContext(ctx, agentID)
-		if waitErr != nil && result == nil {
-			return loops.SpawnResult{}, fmt.Errorf("wait loop iteration: %w", waitErr)
-		}
+		// SpawnWithContext runs the agent to completion synchronously and returns
+		// a NON-NIL result directly (no separate Wait). onText=nil — loop
+		// iterations don't stream to the TUI, only the summary matters.
+		// skipPermissions=false — loops honor the user's permission policy.
+		_, result, spawnErr := runner.SpawnWithContext(ctx, "general", prompt, maxTurns, model, projectCtx, nil, false, nil)
 
 		ok := result != nil &&
 			result.Status == agent.AgentStatusCompleted &&
@@ -214,7 +219,7 @@ func newLoopSpawner(a *App) loops.Spawner {
 		// Classify a non-OK result from the structured errors (before they get
 		// concatenated into output below) so the scheduler can wait out a
 		// transient provider problem instead of counting it as a task failure.
-		transient := !ok && loopFailureIsTransient(result, spawnErr, waitErr)
+		transient := !ok && loopFailureIsTransient(result, spawnErr, nil)
 
 		output := ""
 		if result != nil {
@@ -326,9 +331,15 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 	// RecordIteration call that just preceded us recomputed it from the
 	// agent's optional `next:` hint).
 	nextSuffix := ""
+	// Ring the bell when the loop FINISHED on this iteration (max-iterations
+	// completion or agent `done.` self-stop) — a "come back, it's done" signal
+	// for a user who stepped away. The auto-pause path below rings its own bell
+	// (it's a Paused state, not Completed/Stopped, so no double-ring).
+	bell := false
 	if a.loopManager != nil {
 		if loop, ok := a.loopManager.Get(loopID); ok {
 			nextSuffix = describeLoopNext(loop)
+			bell = loop.Status == loops.StatusCompleted || loop.Status == loops.StatusStopped
 		}
 	}
 
@@ -339,6 +350,7 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 	a.safeSendToProgram(ui.StatusUpdateMsg{
 		Type:    statusType,
 		Message: msg,
+		Bell:    bell,
 	})
 
 	// Re-read the loop from the manager so we capture post-iteration
@@ -388,6 +400,7 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 				a.safeSendToProgram(ui.StatusUpdateMsg{
 					Type:    ui.StatusRecoverableError,
 					Message: msg,
+					Bell:    true, // auto-pause needs attention — ring it
 				})
 			} else if loop.Status == loops.StatusRunning &&
 				loop.ConsecutiveTransientFailures == loops.TransientFailureWarnThreshold {

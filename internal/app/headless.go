@@ -77,6 +77,21 @@ func (a *App) RunHeadless(ctx context.Context, prompt string) error {
 	a.processMessageWithContext(runCtx, prompt)
 	finishOutput()
 
+	// Persist the turn SYNCHRONOUSLY so a subsequent `gokin --headless --resume`
+	// continues this conversation. The normal SaveAfterMessage path is async +
+	// debounced and may not flush before the headless process exits. Save() is a
+	// no-op when session persistence is disabled. A save error must NOT change
+	// the headless exit status (the model answer already streamed) — but it must
+	// also not be silent: logging is disabled in headless (stdout stays the model
+	// answer), so a Debug line here would be dropped (LevelError), hiding the
+	// fact that the next `--headless --resume` won't be able to continue. Surface
+	// it on STDERR, like the resume warning in main.go.
+	if a.sessionManager != nil {
+		if err := a.sessionManager.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to persist session: %v (next --headless --resume may not continue)\n", err)
+		}
+	}
+
 	a.mu.Lock()
 	lastErr := a.lastError
 	a.mu.Unlock()

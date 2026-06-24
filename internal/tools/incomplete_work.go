@@ -64,6 +64,62 @@ func IncompleteTodoSummary(registry ToolRegistry) (int, string) {
 	return count, summary
 }
 
+// IncompleteWorkDecision is the result of the shared todo-continuation gate
+// (DecideIncompleteWorkContinuation). It carries the decision plus the UPDATED
+// counter values the caller stores back — but NOT any side effect (history
+// append, warning toast, locking, carried text): those stay with the caller
+// because they differ between the foreground executor and the sub-agent loop.
+type IncompleteWorkDecision struct {
+	Continue  bool   // append IncompleteWorkContinuationPrompt and re-loop
+	Exhausted bool   // had unfinished todos but the continuation budget is spent (caller logs)
+	Count     int    // unfinished-item count (for the prompt + logging)
+	Summary   string // capped human summary of the unfinished items (for the prompt)
+	Stuck     int    // updated value to store into the caller's incompleteWorkStuck
+	LastNudge int    // updated value to store into the caller's toolsUsedAtLastIncompleteNudge
+}
+
+// DecideIncompleteWorkContinuation is the byte-behavior-identical decision core
+// shared by executor.executeLoop and agent.executeLoop (Tier-4 unification): the
+// model returned text with no tool calls — should the loop NUDGE it to keep going
+// because its OWN todo list is unfinished, or finish? It performs the
+// max_tokens-skip, unfinished-todo check, progress reset, budget check, and
+// counter math exactly as the two former inline copies did, and returns the
+// decision + updated counters. It touches NO history/locks/callbacks — the caller
+// owns those, so the two loops keep their distinct side effects.
+//
+//   - isMaxTokens: resp.FinishReason == MaxTokens (skip — that has its own
+//     continuation, so don't double-continue).
+//   - toolsRun: tools run so far this request (executor: len(toolsUsed);
+//     agent: a.ToolsUsedCount()). Read ONCE and reused for the progress compare
+//     AND the next LastNudge — observationally identical to the old double-read
+//     (no tool runs between) and free of its benign TOCTOU.
+func DecideIncompleteWorkContinuation(registry ToolRegistry, isMaxTokens bool, toolsRun, lastNudge, stuck int) IncompleteWorkDecision {
+	if isMaxTokens {
+		return IncompleteWorkDecision{Stuck: stuck, LastNudge: lastNudge}
+	}
+	n, summary := IncompleteTodoSummary(registry)
+	if n == 0 {
+		return IncompleteWorkDecision{Stuck: stuck, LastNudge: lastNudge}
+	}
+	// A tool ran since the last nudge → progress; reset the stuck counter so a
+	// model steadily completing todos is never capped.
+	if toolsRun > lastNudge {
+		stuck = 0
+	}
+	if stuck < MaxIncompleteWorkContinuations {
+		stuck++
+		return IncompleteWorkDecision{
+			Continue: true, Count: n, Summary: summary,
+			Stuck: stuck, LastNudge: toolsRun,
+		}
+	}
+	// Budget spent on a model narrating without acting — finish; counters stay.
+	return IncompleteWorkDecision{
+		Exhausted: true, Count: n, Summary: summary,
+		Stuck: stuck, LastNudge: lastNudge,
+	}
+}
+
 // IncompleteWorkContinuationPrompt is the firm user-role nudge appended to
 // history when the model stopped with unfinished todos. It insists the model
 // ACT (call the next tool) rather than describe — the failure mode is the model

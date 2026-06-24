@@ -21,7 +21,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version  = "0.100.49"
+	version  = "0.100.50"
 	cfgFile  string
 	model    string
 	provider string
@@ -151,6 +151,17 @@ func runApp(cmd *cobra.Command, args []string) error {
 	}
 
 	if headless {
+		// Honor --resume in headless too: load the prior session so a
+		// sequence of `gokin --headless --resume` calls continues ONE
+		// conversation (scriptable multi-turn sessions). Without this the
+		// flag was a silent no-op here — the `if headless { return }` short-
+		// circuited before the interactive resume block below. Warning goes to
+		// stderr so stdout stays the model answer.
+		if resume {
+			if err := application.ResumeLastSession(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to resume session: %v\n", err)
+			}
+		}
 		return application.RunHeadless(cmd.Context(), prompt)
 	}
 

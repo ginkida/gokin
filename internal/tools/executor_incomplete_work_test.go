@@ -45,6 +45,59 @@ func TestIncompleteTodoSummary(t *testing.T) {
 	}
 }
 
+// TestDecideIncompleteWorkContinuation pins the shared decision core extracted
+// from both agentic loops (Tier-4): max_tokens-skip, unfinished-todo gate,
+// progress reset, budget check, counter math — pure, no side effects.
+func TestDecideIncompleteWorkContinuation(t *testing.T) {
+	withTodo := func() ToolRegistry {
+		reg := NewRegistry()
+		td := NewTodoTool()
+		_ = reg.Register(td)
+		td.RestoreItems([]TodoItem{{Content: "x", Status: "pending"}})
+		return reg
+	}
+	const maxN = MaxIncompleteWorkContinuations
+
+	cases := []struct {
+		name                       string
+		reg                        ToolRegistry
+		isMaxTokens                bool
+		toolsRun, lastNudge, stuck int
+		wantCont, wantExh          bool
+		wantStuck, wantLastNudge   int
+	}{
+		{"max_tokens skips even with todos", withTodo(), true, 5, 0, 1, false, false, 1, 0},
+		{"no todos → no continue, counters untouched", NewRegistry(), false, 5, 0, 1, false, false, 1, 0},
+		{"todos, under budget, no progress → continue", withTodo(), false, 5, 5, 0, true, false, 1, 5},
+		{"todos, progress resets stuck → continue", withTodo(), false, 10, 5, 1, true, false, 1, 10},
+		{"todos, budget spent, no progress → exhausted (counters held)", withTodo(), false, 5, 5, maxN, false, true, maxN, 5},
+		{"todos, budget spent BUT progress → continue (reset wins)", withTodo(), false, 10, 5, maxN, true, false, 1, 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DecideIncompleteWorkContinuation(tc.reg, tc.isMaxTokens, tc.toolsRun, tc.lastNudge, tc.stuck)
+			if d.Continue != tc.wantCont || d.Exhausted != tc.wantExh {
+				t.Fatalf("got {Continue:%v Exhausted:%v}, want {Continue:%v Exhausted:%v}", d.Continue, d.Exhausted, tc.wantCont, tc.wantExh)
+			}
+			if d.Stuck != tc.wantStuck {
+				t.Errorf("Stuck = %d, want %d", d.Stuck, tc.wantStuck)
+			}
+			if d.LastNudge != tc.wantLastNudge {
+				t.Errorf("LastNudge = %d, want %d", d.LastNudge, tc.wantLastNudge)
+			}
+		})
+	}
+
+	// Purity: identical inputs → identical output, no registry mutation.
+	reg := withTodo()
+	if d1, d2 := DecideIncompleteWorkContinuation(reg, false, 5, 5, 0), DecideIncompleteWorkContinuation(reg, false, 5, 5, 0); d1 != d2 {
+		t.Errorf("helper not pure: %+v != %+v", d1, d2)
+	}
+	if n, _ := IncompleteTodoSummary(reg); n != 1 {
+		t.Errorf("helper mutated the todo list: count now %d, want 1", n)
+	}
+}
+
 // TestExecutorExecuteLoop_IncompleteWorkContinuesThenBounded: a model that stops
 // with text (no tool calls) while a todo is unfinished is nudged to keep going —
 // the "Продолжаю… then stops" failure — but bounded so a model that only narrates

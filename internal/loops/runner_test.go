@@ -327,6 +327,19 @@ func TestBuildIterationPrompt(t *testing.T) {
 	}
 }
 
+// The iteration prompt must coach the learn→persist→reload cycle: lean on the
+// injected project knowledge (don't re-derive) and write NEW durable facts via
+// memorize so future iterations start smarter. Without this the loop re-derives
+// conventions every iteration and rarely persists learnings.
+func TestBuildIterationPrompt_CoachesLearningReuseAndMemorize(t *testing.T) {
+	prompt := BuildIterationPrompt(&Loop{ID: "x", Task: "fix the parser", Mode: ModeSelfPaced, Status: StatusRunning})
+	for _, want := range []string{"memorize", "don't re-derive what you already know"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("iteration prompt should coach %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildIterationPrompt_MaxIterations(t *testing.T) {
 	l := &Loop{
 		ID: "loop-x", Task: "task", IterationCount: 4, MaxIterations: 5,

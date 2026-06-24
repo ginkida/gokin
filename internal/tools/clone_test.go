@@ -37,6 +37,34 @@ func TestCloneToolForWorkDir_MemoryToolIsIsolated(t *testing.T) {
 	wg.Wait()
 }
 
+// TestCloneToolForWorkDir_MemorizeToolIsIsolated pins the same isolation for the
+// MemorizeTool. This matters now that /loop routes each iteration through the
+// per-agent clone path (SpawnWithContext): a shared instance would race the
+// per-agent SetLearning under parallel spawns / let a worktree agent clobber the
+// foreground's learning pointer.
+func TestCloneToolForWorkDir_MemorizeToolIsIsolated(t *testing.T) {
+	orig := NewMemorizeTool(nil)
+
+	cloned := CloneToolForWorkDir(orig, "")
+	ct, ok := cloned.(*MemorizeTool)
+	if !ok {
+		t.Fatalf("clone is not a *MemorizeTool: %T", cloned)
+	}
+	if ct == orig {
+		t.Fatal("clone must be a distinct instance, not the shared foreground one")
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			CloneToolForWorkDir(orig, "").(*MemorizeTool).SetLearning(nil)
+		}()
+	}
+	wg.Wait()
+}
+
 // TestCloneToolForWorkDir_TodoToolIsIsolated pins that each agent gets its OWN
 // todo list: the clone is a distinct, empty instance and mutating it does not
 // clobber the parent's list (the foreground task list). This is both the

@@ -3382,25 +3382,23 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		// now isolated per-agent (clone.go), so this reads THIS agent's list, not
 		// the foreground's. Bounded + progress-aware; skipped on max_tokens (its
 		// own continuation handles that above).
-		if resp.FinishReason != genai.FinishReasonMaxTokens {
-			if n, summary := tools.IncompleteTodoSummary(a.registry); n > 0 {
-				if a.ToolsUsedCount() > toolsUsedAtLastIncompleteNudge {
-					incompleteWorkStuck = 0 // a tool ran since the last nudge → progress
-				}
-				if incompleteWorkStuck < tools.MaxIncompleteWorkContinuations {
-					incompleteWorkStuck++
-					toolsUsedAtLastIncompleteNudge = a.ToolsUsedCount()
-					a.stateMu.Lock()
-					a.history = append(a.history, genai.NewContentFromText(
-						tools.IncompleteWorkContinuationPrompt(n, summary), genai.RoleUser))
-					a.stateMu.Unlock()
-					logging.Info("incomplete-work continuation (sub-agent): model stopped with unfinished todos",
-						"agent_type", a.Type, "incomplete", n, "attempt", incompleteWorkStuck)
-					continue
-				}
-				logging.Info("incomplete-work continuation budget exhausted (sub-agent)",
-					"agent_type", a.Type, "incomplete", n)
-			}
+		incDec := tools.DecideIncompleteWorkContinuation(a.registry,
+			resp.FinishReason == genai.FinishReasonMaxTokens, a.ToolsUsedCount(),
+			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck)
+		incompleteWorkStuck = incDec.Stuck
+		toolsUsedAtLastIncompleteNudge = incDec.LastNudge
+		if incDec.Continue {
+			a.stateMu.Lock()
+			a.history = append(a.history, genai.NewContentFromText(
+				tools.IncompleteWorkContinuationPrompt(incDec.Count, incDec.Summary), genai.RoleUser))
+			a.stateMu.Unlock()
+			logging.Info("incomplete-work continuation (sub-agent): model stopped with unfinished todos",
+				"agent_type", a.Type, "incomplete", incDec.Count, "attempt", incompleteWorkStuck)
+			continue
+		}
+		if incDec.Exhausted {
+			logging.Info("incomplete-work continuation budget exhausted (sub-agent)",
+				"agent_type", a.Type, "incomplete", incDec.Count)
 		}
 
 		// Verify-before-done (sub-agent analogue of the foreground done-gate):

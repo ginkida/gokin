@@ -370,6 +370,10 @@ type StatusUpdateMsg struct {
 	Type    StatusType
 	Message string
 	Details map[string]any
+	// Bell rings the terminal bell alongside the toast (gated on bellEnabled).
+	// Used for events a user who stepped away should HEAR — e.g. a background
+	// /loop reaching a terminal state (auto-pause / completion / self-stop).
+	Bell bool
 }
 
 // PlanningModeToggledMsg is sent after async toggle completes.
