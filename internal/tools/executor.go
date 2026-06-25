@@ -230,6 +230,16 @@ type Executor struct {
 	dirAccessChecker func(path string) bool
 	dirGrantHandler  func(ctx context.Context, toolName, path string) (bool, error)
 
+	// Discuss-mode action gate (foreground interactive only). discussGate reports
+	// whether the CURRENT turn is an analysis/discussion the user has NOT yet
+	// confirmed for implementation — when true, the first code-MUTATING tool
+	// (IsImplementationTool) pauses for a one-time confirm via actionConfirmHandler
+	// instead of silently implementing. Both nil in non-app harnesses
+	// (tests/headless) -> gate disabled. Read on the turn goroutine (the executor
+	// runs synchronously inside the app turn), so no lock is needed.
+	discussGate          func() bool
+	actionConfirmHandler func(ctx context.Context, toolName, target string) (bool, error)
+
 	// Token usage from last response (from API usage metadata).
 	// Protected by tokenMu for concurrent read/write safety.
 	tokenMu                 sync.Mutex
@@ -675,6 +685,18 @@ func (e *Executor) SetDirAccessChecker(fn func(path string) bool) {
 // access to an out-of-workspace path; returns whether access is now allowed).
 func (e *Executor) SetDirGrantHandler(fn func(ctx context.Context, toolName, path string) (bool, error)) {
 	e.dirGrantHandler = fn
+}
+
+// SetDiscussGate wires the discuss-mode predicate (reports whether the current
+// foreground turn is an unconfirmed analysis/discussion — see the field doc).
+func (e *Executor) SetDiscussGate(fn func() bool) {
+	e.discussGate = fn
+}
+
+// SetActionConfirmHandler wires the ask-once confirm shown before the first
+// code-mutating tool in a discuss-mode turn (returns whether to implement now).
+func (e *Executor) SetActionConfirmHandler(fn func(ctx context.Context, toolName, target string) (bool, error)) {
+	e.actionConfirmHandler = fn
 }
 
 // SetFormatter sets the auto-formatter for post-write/edit formatting.
@@ -1454,9 +1476,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// double-continue.) Progress-aware + bounded: a model that narrates without
 		// running a tool N times in a row stops; one that completes todos between
 		// nudges resets the counter and runs free.
+		// actionMode is false ONLY in a foreground discuss-mode turn the user
+		// hasn't confirmed (discussGate true): then pending todos are intentional
+		// and the nudge is suppressed (don't shove the model into implementation
+		// the discuss-gate is holding back). Nil gate (tests/headless/autonomous)
+		// -> always action.
+		actionMode := e.discussGate == nil || !e.discussGate()
 		incDec := DecideIncompleteWorkContinuation(e.registry,
 			resp.FinishReason == genai.FinishReasonMaxTokens, len(toolsUsed),
-			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck)
+			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck, actionMode)
 		incompleteWorkStuck = incDec.Stuck
 		toolsUsedAtLastIncompleteNudge = incDec.LastNudge
 		if incDec.Continue {
@@ -2094,6 +2122,27 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			if !allowed {
 				return NewErrorResult(fmt.Sprintf("Access to %s is outside the workspace and is NOT granted. This is a hard permission boundary — retrying or rewriting the path will not help. Ask the user to run: /add-dir %s  (add --persist to keep it across restarts). Until then, work within the workspace.", p, filepath.Dir(p)))
 			}
+		}
+	}
+
+	// Step 4.7: Discuss-mode action gate (ask-once). When the turn is an
+	// analysis/discussion the user has not yet confirmed for implementation, the
+	// FIRST code-mutating tool pauses for a one-time confirm rather than silently
+	// implementing. Read/grep/bash-verify flow free (not IsImplementationTool).
+	// On confirm the app flips the turn to action (discussGate -> false) so the
+	// rest of the turn proceeds untouched; on deny an actionable result keeps the
+	// agent in analysis. Disabled when callbacks are nil (tests/headless).
+	if e.discussGate != nil && e.actionConfirmHandler != nil && IsImplementationTool(call.Name) && e.discussGate() {
+		target := call.Name
+		if paths := extractFilePaths(call); len(paths) > 0 {
+			target = paths[0]
+		}
+		allowed, cErr := e.actionConfirmHandler(ctx, call.Name, target)
+		if cErr != nil {
+			return NewErrorResult(fmt.Sprintf("action confirmation failed: %s", cErr))
+		}
+		if !allowed {
+			return NewErrorResult("Staying in analysis — I did NOT apply this change. We're discussing/analyzing, not implementing. When you want me to actually make changes, say so explicitly (e.g. \"implement it\" / \"сделай\") and I'll proceed. For now, keep analyzing and proposing.")
 		}
 	}
 

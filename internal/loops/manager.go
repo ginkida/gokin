@@ -286,6 +286,7 @@ func (m *Manager) Resume(id string) error {
 		l.AutoPauseReason = ""
 		l.ConsecutiveFailures = 0
 		l.ConsecutiveTransientFailures = 0
+		l.ConsecutiveNoProgress = 0
 		now := time.Now()
 		if l.Mode == ModeInterval {
 			l.NextRunAt = now.Add(time.Duration(l.IntervalSeconds) * time.Second)

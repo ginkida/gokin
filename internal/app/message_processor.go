@@ -52,6 +52,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	})
 	a.saveRecoverySnapshot()
 
+	// Discuss-mode (discuss_mode.go): classify this turn as analysis vs implement
+	// and push the stance into turn-context so the model is TOLD the stance and
+	// the executor's Step 4.7 gate / incomplete-work suppression engage. Foreground
+	// interactive only; headless/eval always acts. pushTurnContext refreshes the
+	// client's ephemeral turn-context (never the cached prefix) with the banner.
+	a.beginTurnIntent(message)
+	a.pushTurnContext()
+
 	// Group all file changes from this message for atomic undo.
 	if a.undoManager != nil {
 		groupID := fmt.Sprintf("msg-%d", time.Now().UnixNano())

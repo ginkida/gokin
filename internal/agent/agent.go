@@ -1113,6 +1113,21 @@ func (a *Agent) ToolsUsedCount() int {
 	return len(a.toolsUsed)
 }
 
+// MutatingToolCount returns how many code/repo-MUTATING tools (IsImplementationTool)
+// this agent ran — the /loop churn signal ("did this iteration change anything").
+// Derived from the existing toolsUsed list (no extra hot-loop tracking).
+func (a *Agent) MutatingToolCount() int {
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
+	n := 0
+	for _, name := range a.toolsUsed {
+		if tools.IsImplementationTool(name) {
+			n++
+		}
+	}
+	return n
+}
+
 // SetPlanGoal sets the goal for the plan.
 func (a *Agent) SetPlanGoal(goal *PlanGoal) {
 	a.stateMu.Lock()
@@ -1318,6 +1333,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		result.InputTokens = a.usageInputTokens
 		result.OutputTokens = a.usageOutputTokens
 		a.stateMu.Unlock()
+		result.MutatingToolCalls = a.MutatingToolCount()
 
 		// Clear callHistory to prevent memory leak
 		a.clearCallHistory()
@@ -1344,6 +1360,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	result.InputTokens = a.usageInputTokens
 	result.OutputTokens = a.usageOutputTokens
 	a.stateMu.Unlock()
+	result.MutatingToolCalls = a.MutatingToolCount()
 
 	// Clear callHistory to prevent memory leak on long-running sessions
 	a.clearCallHistory()
@@ -3382,9 +3399,12 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		// now isolated per-agent (clone.go), so this reads THIS agent's list, not
 		// the foreground's. Bounded + progress-aware; skipped on max_tokens (its
 		// own continuation handles that above).
+		// actionMode=true: sub-agents are autonomous (the discuss-mode gate is a
+		// foreground-interactive feature only — no human in this loop to discuss
+		// with), so the incomplete-work nudge always applies here.
 		incDec := tools.DecideIncompleteWorkContinuation(a.registry,
 			resp.FinishReason == genai.FinishReasonMaxTokens, a.ToolsUsedCount(),
-			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck)
+			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck, true)
 		incompleteWorkStuck = incDec.Stuck
 		toolsUsedAtLastIncompleteNudge = incDec.LastNudge
 		if incDec.Continue {

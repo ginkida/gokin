@@ -1978,6 +1978,11 @@ func (b *Builder) wireDependencies() error {
 	if b.executor != nil {
 		b.executor.SetDirAccessChecker(app.isDirAccessAllowed)
 		b.executor.SetDirGrantHandler(app.dirGrantPrompt)
+		// Discuss-mode action gate (foreground "don't implement during analysis").
+		// discussGate reports analysis-and-unconfirmed; actionConfirmPrompt asks
+		// once before the first mutation. Both no-op in headless (program == nil).
+		b.executor.SetDiscussGate(app.discussGate)
+		b.executor.SetActionConfirmHandler(app.actionConfirmPrompt)
 	}
 
 	// Set up ask_user tool

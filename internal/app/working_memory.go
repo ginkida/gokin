@@ -39,7 +39,13 @@ func (a *App) turnContextContent() string {
 		return ""
 	}
 	var parts []string
-	// Directory-access awareness FIRST so the model always knows the capability
+	// Discuss-mode stance FIRST when the user is analyzing (discussGate = analysis
+	// & not-yet-confirmed): tell the model to propose-not-implement. Reflects the
+	// live per-turn atomic flags; travels in turn-context, never the cached prefix.
+	if a.discussGate() {
+		parts = append(parts, discussStanceBanner)
+	}
+	// Directory-access awareness so the model always knows the capability
 	// exists and sees the live granted-dirs list. Dynamic (updates on
 	// grant/revoke/clear), and lives in turn context — it NEVER touches the
 	// byte-stable cached prefix (v0.88.0 rule).

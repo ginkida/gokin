@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -230,6 +231,19 @@ type App struct {
 	// headless/eval runs (post-unification, routed output and journaling
 	// work too; see headless.go). Guarded by a.mu.
 	headlessDirect bool
+
+	// Discuss-mode (discuss_mode.go): flags for the foreground "don't jump to
+	// implementation during analysis" gate. turnDiscuss is set at turn start
+	// (processMessageWithContext) from the intent classifier; discussConfirmed
+	// flips when the user OKs the first mutation via actionConfirmPrompt.
+	// discussGate() = turnDiscuss && !discussConfirmed drives both the executor
+	// Step 4.7 gate and the incomplete-work nudge suppression. atomic.Bool (not
+	// plain + a.mu): discussGate() is read by the executor deep in the turn
+	// pipeline where taking a.mu is unsafe, AND the banner in turnContextContent
+	// can be read off-turn (session-memory callback) — atomics give a race-free,
+	// lock-free, deadlock-free read on every path. See discuss_mode.go.
+	turnDiscuss      atomic.Bool
+	discussConfirmed atomic.Bool
 
 	// presenter is WHERE agent output goes (agent_events.go). The builder
 	// installs the TUI presenter; RunHeadless swaps in the stdout presenter.

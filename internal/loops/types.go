@@ -145,6 +145,17 @@ type Loop struct {
 	// a zombie loop poking forever.
 	ConsecutiveTransientFailures int `json:"consecutive_transient_failures,omitempty"`
 
+	// ConsecutiveNoProgress counts consecutive SUCCESSFUL (OK) iterations that
+	// made NO code/repo change (it.MadeChanges == false) on an ACTION task —
+	// "succeeding but spinning". Distinct from the failure breakers (those track
+	// OK==false); a no-op success would otherwise reset every streak and look
+	// healthy while burning quota forever on a finished task. Reset on a real
+	// change (MadeChanges). Accrued ONLY for action tasks — a monitor/watch loop
+	// (IsMonitorTask) is SUPPOSED to be no-change, so it never accrues this. At
+	// NoProgressWarnThreshold the agent is warned via the iteration prompt; at
+	// NoProgressLimit the loop auto-pauses (AutoPauseNoProgress). Cleared on Resume.
+	ConsecutiveNoProgress int `json:"consecutive_no_progress,omitempty"`
+
 	// AutoPaused is true when the loop was paused by a breaker (failures /
 	// provider-unavailable / token-budget) rather than by an explicit
 	// /loop pause. Surfaced to the UI so the warning toast can mention WHY the
@@ -166,19 +177,21 @@ const (
 	AutoPauseConsecutiveFailures = "consecutive_failures"
 	AutoPauseProviderUnavailable = "provider_unavailable"
 	AutoPauseTokenBudget         = "token_budget"
+	AutoPauseNoProgress          = "no_progress"
 )
 
 // Iteration is the result of one execution of the loop's task.
 type Iteration struct {
-	N         int           `json:"n"` // 1-based iteration number
-	StartedAt time.Time     `json:"started_at"`
-	Duration  time.Duration `json:"duration"`            // wall-clock for this iteration
-	Summary   string        `json:"summary"`             // 1-3 sentence summary of what happened
-	OK        bool          `json:"ok"`                  // false = iteration errored or model returned nothing useful
-	Transient bool          `json:"transient,omitempty"` // true = failed for a transient infra reason (overload/rate-limit/network), not a task failure
-	TokensIn  int           `json:"tokens_in,omitempty"`
-	TokensOut int           `json:"tokens_out,omitempty"`
-	NextHint  string        `json:"next_hint,omitempty"` // e.g. "wait 1h" — self-paced runner respects
+	N           int           `json:"n"` // 1-based iteration number
+	StartedAt   time.Time     `json:"started_at"`
+	Duration    time.Duration `json:"duration"`               // wall-clock for this iteration
+	Summary     string        `json:"summary"`                // 1-3 sentence summary of what happened
+	OK          bool          `json:"ok"`                     // false = iteration errored or model returned nothing useful
+	Transient   bool          `json:"transient,omitempty"`    // true = failed for a transient infra reason (overload/rate-limit/network), not a task failure
+	MadeChanges bool          `json:"made_changes,omitempty"` // true = ran ≥1 code/repo-mutating tool this iteration (the churn signal)
+	TokensIn    int           `json:"tokens_in,omitempty"`
+	TokensOut   int           `json:"tokens_out,omitempty"`
+	NextHint    string        `json:"next_hint,omitempty"` // e.g. "wait 1h" — self-paced runner respects
 }
 
 // MaxHistorySize caps the per-loop iterations slice. Set well above the
@@ -225,6 +238,68 @@ const TransientFailureLimit = 30
 // discovering it hours later. Well below the backstop; only relevant once Fix
 // #2 made iteration timeouts transient (deadline-heavy loops build these faster).
 const TransientFailureWarnThreshold = 10
+
+// NoProgressWarnThreshold / NoProgressLimit bound the churn breaker (ACTION
+// tasks only): after this many consecutive OK-but-no-change iterations the agent
+// is WARNED via its iteration prompt (decide: emit done., change approach, or
+// slow the cadence); at the limit the loop auto-pauses (AutoPauseNoProgress) so
+// a finished/stuck loop can't burn a quota-limited provider unsupervised. Warn
+// is low (catch it early); the pause limit is generous so a slow-but-real task
+// (occasional no-op iterations between real changes — those reset the streak)
+// is never wrongly paused. Monitor/watch loops (IsMonitorTask) are exempt — for
+// them no-change is the expected steady state, not churn.
+const NoProgressWarnThreshold = 3
+const NoProgressLimit = 10
+
+// IsMonitorTask reports whether a loop's task is a long-running MONITOR/WATCH
+// task (its steady state is "nothing changed") rather than an ACTION task that
+// is supposed to make changes. Used to (a) exempt monitor loops from the churn
+// breaker — for them no-change is correct, not spinning — and (b) tailor the
+// done-coaching ("done. not expected; pace with next:"). Heuristic, EN+RU, and
+// deliberately CONSERVATIVE toward action: a task is monitor only on a clear
+// monitor verb, or recurring-check phrasing ("check … every") with NO action
+// verb. When in doubt it's treated as ACTION, so the churn protection (the point
+// of the feature) is never silently lost; a misclassified monitor loop merely
+// gets warned/paused and the user resumes.
+func IsMonitorTask(task string) bool {
+	t := strings.ToLower(task)
+	// Tier 1 — unambiguous monitor verbs → monitor regardless of anything else.
+	for _, kw := range []string{
+		"monitor", "watch", "poll", "uptime", "heartbeat",
+		"keep an eye", "keep watching", "keep checking", "health check", "healthcheck",
+		"следи", "монитор", "наблюда", "отслеживай", "опрашивай",
+	} {
+		if strings.Contains(t, kw) {
+			return true
+		}
+	}
+	// Tier 2 — a clear build/change verb → ACTION (the churn-protected default).
+	// Checked BEFORE the weaker recurring-check signals so an action task that
+	// merely mentions checking ("сделай X и проверяй результат", "check the tests
+	// then fix") is NOT misread as monitor — the point of the feature must not be
+	// silently lost (the v0.100.51 review caught `проверяй` escaping this gate).
+	for _, kw := range []string{
+		"fix", "implement", "refactor", "build", "create", "add ", "write ",
+		"rename", "delete", "migrate", "cleanup", "реализ", "сделай", "почини",
+		"исправь", "добавь", "напиши", "рефактор",
+	} {
+		if strings.Contains(t, kw) {
+			return false
+		}
+	}
+	// Tier 3 — no action verb: weaker recurring-check phrasing counts as monitor.
+	// The Russian imperfective "проверяй" (keep checking) implies monitoring;
+	// note "проверь" (check once) does NOT contain "проверя", so this is the
+	// recurring form only. English bare "check" is too common in action tasks, so
+	// it counts only with "every" ("check the deploy every 20m").
+	if strings.Contains(t, "проверя") {
+		return true
+	}
+	if strings.Contains(t, "every") && strings.Contains(t, "check") {
+		return true
+	}
+	return false
+}
 
 // transientBackoffBaseSeconds / transientBackoffCapSeconds bound the
 // loop-level exponential backoff applied after a transient failure: the next
@@ -278,6 +353,16 @@ func (l *Loop) AppendIteration(it Iteration) {
 		l.SuccessCount++
 		l.ConsecutiveFailures = 0
 		l.ConsecutiveTransientFailures = 0
+		// Churn accounting (ACTION tasks only): a no-op success means the loop is
+		// spinning (task done, or stuck); a real change resets it. Monitor/watch
+		// tasks are exempt — no-change is their normal steady state.
+		if !IsMonitorTask(l.Task) {
+			if it.MadeChanges {
+				l.ConsecutiveNoProgress = 0
+			} else {
+				l.ConsecutiveNoProgress++
+			}
+		}
 	case it.Transient:
 		// Transient infra failure (provider overload/rate-limit, network).
 		// It IS a failed iteration for stats, but it must NOT trip the
@@ -387,6 +472,19 @@ func (l *Loop) AppendIteration(it Iteration) {
 		l.Status = StatusPaused
 		l.AutoPaused = true
 		l.AutoPauseReason = AutoPauseTokenBudget
+	}
+
+	// Churn (no-progress) breaker — ACTION tasks only (ConsecutiveNoProgress
+	// stays 0 for monitor tasks, so they never reach here). A run of OK-but-no-
+	// change iterations means the loop is spinning (finished or stuck); auto-pause
+	// so it can't burn a quota-limited provider unsupervised. The agent was warned
+	// earlier (NoProgressWarnThreshold, via the iteration prompt). Lowest
+	// precedence — gated on StatusRunning so the failure/transient/budget breakers
+	// above win when several conditions hold.
+	if l.ConsecutiveNoProgress >= NoProgressLimit && l.Status == StatusRunning {
+		l.Status = StatusPaused
+		l.AutoPaused = true
+		l.AutoPauseReason = AutoPauseNoProgress
 	}
 }
 

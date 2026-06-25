@@ -62,20 +62,26 @@ func TestDecideIncompleteWorkContinuation(t *testing.T) {
 		name                       string
 		reg                        ToolRegistry
 		isMaxTokens                bool
+		actionMode                 bool
 		toolsRun, lastNudge, stuck int
 		wantCont, wantExh          bool
 		wantStuck, wantLastNudge   int
 	}{
-		{"max_tokens skips even with todos", withTodo(), true, 5, 0, 1, false, false, 1, 0},
-		{"no todos → no continue, counters untouched", NewRegistry(), false, 5, 0, 1, false, false, 1, 0},
-		{"todos, under budget, no progress → continue", withTodo(), false, 5, 5, 0, true, false, 1, 5},
-		{"todos, progress resets stuck → continue", withTodo(), false, 10, 5, 1, true, false, 1, 10},
-		{"todos, budget spent, no progress → exhausted (counters held)", withTodo(), false, 5, 5, maxN, false, true, maxN, 5},
-		{"todos, budget spent BUT progress → continue (reset wins)", withTodo(), false, 10, 5, maxN, true, false, 1, 10},
+		{"max_tokens skips even with todos", withTodo(), true, true, 5, 0, 1, false, false, 1, 0},
+		{"no todos → no continue, counters untouched", NewRegistry(), false, true, 5, 0, 1, false, false, 1, 0},
+		{"todos, under budget, no progress → continue", withTodo(), false, true, 5, 5, 0, true, false, 1, 5},
+		{"todos, progress resets stuck → continue", withTodo(), false, true, 10, 5, 1, true, false, 1, 10},
+		{"todos, budget spent, no progress → exhausted (counters held)", withTodo(), false, true, 5, 5, maxN, false, true, maxN, 5},
+		{"todos, budget spent BUT progress → continue (reset wins)", withTodo(), false, true, 10, 5, maxN, true, false, 1, 10},
+		// Discuss-mode (actionMode=false): pending todos are intentional, so NO
+		// nudge — neither continue nor exhausted, counters held. This is the
+		// don't-start-unasked-work coupling that prevents the nudge from shoving
+		// the model into implementation during analysis.
+		{"discuss-mode: todos but not action → no nudge (counters held)", withTodo(), false, false, 5, 5, 0, false, false, 0, 5},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d := DecideIncompleteWorkContinuation(tc.reg, tc.isMaxTokens, tc.toolsRun, tc.lastNudge, tc.stuck)
+			d := DecideIncompleteWorkContinuation(tc.reg, tc.isMaxTokens, tc.toolsRun, tc.lastNudge, tc.stuck, tc.actionMode)
 			if d.Continue != tc.wantCont || d.Exhausted != tc.wantExh {
 				t.Fatalf("got {Continue:%v Exhausted:%v}, want {Continue:%v Exhausted:%v}", d.Continue, d.Exhausted, tc.wantCont, tc.wantExh)
 			}
@@ -90,7 +96,7 @@ func TestDecideIncompleteWorkContinuation(t *testing.T) {
 
 	// Purity: identical inputs → identical output, no registry mutation.
 	reg := withTodo()
-	if d1, d2 := DecideIncompleteWorkContinuation(reg, false, 5, 5, 0), DecideIncompleteWorkContinuation(reg, false, 5, 5, 0); d1 != d2 {
+	if d1, d2 := DecideIncompleteWorkContinuation(reg, false, 5, 5, 0, true), DecideIncompleteWorkContinuation(reg, false, 5, 5, 0, true); d1 != d2 {
 		t.Errorf("helper not pure: %+v != %+v", d1, d2)
 	}
 	if n, _ := IncompleteTodoSummary(reg); n != 1 {

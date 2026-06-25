@@ -151,6 +151,12 @@ type AgentResult struct {
 	// callers (the /loop scheduler) can report what an unattended run cost.
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
+
+	// MutatingToolCalls is how many code/repo-MUTATING tools (IsImplementationTool:
+	// write/edit/delete/refactor/git_commit/…) the agent ran this turn. Surfaced so
+	// the /loop scheduler can tell a "made changes" iteration from a no-op one
+	// (churn detection) without re-reading the journal or snapshotting the tree.
+	MutatingToolCalls int `json:"mutating_tool_calls,omitempty"`
 }
 
 // AgentOutputWriter streams agent output to both an in-memory buffer (capped)

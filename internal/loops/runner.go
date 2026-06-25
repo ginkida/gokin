@@ -34,6 +34,12 @@ type SpawnResult struct {
 	// (a runaway unattended loop can quietly burn a provider's quota).
 	TokensIn  int
 	TokensOut int
+	// MadeChanges is true when the iteration ran at least one code/repo-mutating
+	// tool — the churn signal. A run of OK-but-no-change iterations on an ACTION
+	// task means the loop is spinning (task likely done, or stuck); the scheduler
+	// warns the agent and eventually auto-pauses. Set by the adapter from
+	// AgentResult.MutatingToolCalls.
+	MadeChanges bool
 }
 
 // Spawner is the function the Runner calls to actually execute one
@@ -320,8 +326,12 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 		// transport error (err != nil) is a wiring/construction failure, not a
 		// provider hiccup, so it stays non-transient (counts as a task failure).
 		Transient: res.Transient && !ok && err == nil,
-		TokensIn:  res.TokensIn,
-		TokensOut: res.TokensOut,
+		// Churn signal — did this iteration actually change code/repo? Only read
+		// by AppendIteration on an OK iteration (action tasks), so it's harmless
+		// to carry on a failed one.
+		MadeChanges: res.MadeChanges,
+		TokensIn:    res.TokensIn,
+		TokensOut:   res.TokensOut,
 	}
 
 	// agentDone signals "the work this loop was for is complete" — the
@@ -416,6 +426,7 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 // Exported so the runner package can test prompt shape and the
 // memory writer can format consistently.
 func BuildIterationPrompt(l *Loop) string {
+	monitor := IsMonitorTask(l.Task)
 	var sb strings.Builder
 	sb.WriteString("[Loop iteration ")
 	fmt.Fprintf(&sb, "%d", l.IterationCount+1)
@@ -427,57 +438,85 @@ func BuildIterationPrompt(l *Loop) string {
 	sb.WriteString(l.Task)
 	sb.WriteString("\n")
 
-	// Include the last 3 iteration summaries so the agent has context
-	// without bloating the prompt. Avoids re-discovery of work already
-	// done in prior iterations.
+	// Loop self-awareness (B): surface the loop's own position so the agent can
+	// decide to stop / slow down / change approach instead of running blind. All
+	// read from existing Loop state — purely additive context, no new control flow.
+	var status []string
+	if l.MaxIterations > 0 {
+		switch rem := l.MaxIterations - l.IterationCount; {
+		case rem == 1:
+			status = append(status, "this is your LAST iteration")
+		case rem > 1:
+			status = append(status, fmt.Sprintf("%d iterations left", rem))
+		}
+	}
+	if l.IterationCount > 0 {
+		status = append(status, fmt.Sprintf("%d done so far (%d ok / %d failed)", l.IterationCount, l.SuccessCount, l.FailureCount))
+	}
+	if l.ConsecutiveFailures > 0 {
+		status = append(status, fmt.Sprintf("%d consecutive failures (auto-pause at %d)", l.ConsecutiveFailures, ConsecutiveFailureLimit))
+	}
+	if l.MaxTotalTokens > 0 {
+		pct := int(float64(l.TotalTokensIn+l.TotalTokensOut) / float64(l.MaxTotalTokens) * 100)
+		status = append(status, fmt.Sprintf("token budget %d%% used", pct))
+	}
+	if len(status) > 0 {
+		sb.WriteString("Loop status: " + strings.Join(status, "; ") + ".\n")
+	}
+
+	// Recent context (C1): wider window (3→6) + a per-iteration [no changes]
+	// marker so the agent sees the trajectory and whether it's actually moving,
+	// not just the last sentence.
 	if len(l.Iterations) > 0 {
 		sb.WriteString("\nRecent context (newest first):\n")
-		showCount := 3
+		showCount := 6
 		if showCount > len(l.Iterations) {
 			showCount = len(l.Iterations)
 		}
 		for i := len(l.Iterations) - 1; i >= len(l.Iterations)-showCount; i-- {
 			it := l.Iterations[i]
-			fmt.Fprintf(&sb, "  - #%d (%s): %s\n",
-				it.N,
-				it.StartedAt.Format("2006-01-02 15:04"),
-				it.Summary)
+			marker := ""
+			if it.OK && !it.MadeChanges && !monitor {
+				marker = " [no changes]"
+			}
+			fmt.Fprintf(&sb, "  - #%d (%s)%s: %s\n",
+				it.N, it.StartedAt.Format("2006-01-02 15:04"), marker, it.Summary)
 		}
-		// Pointer to the full log — read tool can fetch it for the
-		// missing context (file paths, tool calls, full summaries) the
-		// inline preview lacks. UpdateMemory==false loops won't have
-		// this file, so only mention when actually persisted.
+		// Pointer to the full log for the context the inline preview lacks.
+		// UpdateMemory==false loops won't have this file, so only mention it then.
 		if l.UpdateMemory {
 			fmt.Fprintf(&sb, "\nFull iteration log (all %d, with files touched + outcomes): .gokin/loops/%s.md\n", l.IterationCount, l.ID)
 			sb.WriteString("Read it when you need to see what prior iterations actually did, not just their last sentence.\n")
 		}
 	}
 
-	// Coach the learn→persist→reload cycle: this project's conventions, build/
-	// test/lint commands, structure and prior learnings are injected into your
-	// system context (project guidelines + ProjectLearning), so lean on them
-	// instead of re-deriving what you already know — and write NEW durable facts
-	// back so future iterations start smarter. This is what makes a long-running
-	// loop accumulate project understanding over time instead of starting blind
-	// each iteration.
+	// Churn warning (A): succeeding but not changing anything → likely done or
+	// stuck. Action tasks only (monitor loops are supposed to be no-change).
+	if !monitor && l.ConsecutiveNoProgress >= NoProgressWarnThreshold {
+		fmt.Fprintf(&sb, "\n⚠ Your last %d iterations made NO code changes. If the task is genuinely complete, end with `done.`. If you're stuck, CHANGE your approach — do not repeat what already didn't work. The loop auto-pauses after %d no-change iterations so it can't burn credits spinning.\n", l.ConsecutiveNoProgress, NoProgressLimit)
+	}
+
+	// Learn→persist→reload coaching: project guidelines + ProjectLearning are
+	// already in context; lean on them and memorize new durable facts.
 	sb.WriteString("\nThe project's conventions, build/test/lint commands, structure, and what prior iterations learned are already in your context — use them; don't re-derive what you already know. If you discover a DURABLE fact (a build/test/lint command, a convention, where something lives, a gotcha), call the `memorize` tool to save it so every future iteration starts smarter.")
+
+	// Scope discipline (D): keep an unattended loop from drifting into unrequested
+	// large changes on a vague task.
+	sb.WriteString("\n\nStay focused on THIS task. Do NOT expand into unrelated refactors, reorganizations, or 'improvements' the task didn't ask for — if you think a broader change is warranted, note it in your summary instead of doing it unprompted.")
 
 	sb.WriteString("\n\nProceed with the next step. Keep the response focused — your last sentence will be captured as the iteration summary.")
 
-	// For self-paced loops, hint at the cadence-control mechanism so the
-	// agent can request a longer wait when there's nothing to do.
-	// Without this, the runner just fires every DefaultMinDelaySeconds
-	// (5 min) regardless of whether progress is possible — wasting
-	// LLM credits on no-op iterations.
 	if l.Mode == ModeSelfPaced {
 		sb.WriteString("\n\nIf there's nothing to do until a specific event, end with a line like 'next: 30m' or 'wait 1h' — the scheduler will respect it as the floor for the next iteration.")
 	}
 
-	// Self-termination signal — works for both modes so a long-running
-	// "fix all bugs" loop can stop itself when the agent decides the
-	// work is genuinely done, instead of running until MaxIterations
-	// or the user notices and types /loop stop.
-	sb.WriteString("\n\nIf the task this loop was created for is genuinely complete, end the response with a line containing only `done.` — the loop will stop and won't fire again.")
+	// Done coaching (B), task-shape-aware. A monitor loop is supposed to keep
+	// running (no-change is normal); an action loop should stop when verified done.
+	if monitor {
+		sb.WriteString("\n\nThis is a MONITORING task — it's expected to keep running and many iterations may find nothing to do; that's normal, not failure. Only end with a line containing only `done.` if the thing you watch is permanently resolved and there's nothing left to monitor.")
+	} else {
+		sb.WriteString("\n\nIf the task this loop was created for is genuinely complete — verify it (build/tests pass, the change is actually done) — end the response with a line containing only `done.` and the loop will stop. Don't keep iterating on a finished task.")
+	}
 
 	return sb.String()
 }

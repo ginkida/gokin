@@ -93,8 +93,20 @@ type IncompleteWorkDecision struct {
 //     agent: a.ToolsUsedCount()). Read ONCE and reused for the progress compare
 //     AND the next LastNudge — observationally identical to the old double-read
 //     (no tool runs between) and free of its benign TOCTOU.
-func DecideIncompleteWorkContinuation(registry ToolRegistry, isMaxTokens bool, toolsRun, lastNudge, stuck int) IncompleteWorkDecision {
+//   - actionMode: false ONLY for an interactive foreground turn the user is
+//     DISCUSSING/analyzing (the discuss-mode gate, not yet confirmed). Then
+//     pending todos are INTENTIONAL — the user wants to discuss before
+//     implementing — so the nudge is SUPPRESSED (it would shove the model into
+//     the very implementation the discuss-mode gate is holding back). Autonomous
+//     paths (sub-agents, /loop) and the headless executor always pass true.
+func DecideIncompleteWorkContinuation(registry ToolRegistry, isMaxTokens bool, toolsRun, lastNudge, stuck int, actionMode bool) IncompleteWorkDecision {
 	if isMaxTokens {
+		return IncompleteWorkDecision{Stuck: stuck, LastNudge: lastNudge}
+	}
+	// Discussion turn: don't nudge "act now" — unfinished todos are expected
+	// (the user is analyzing, not asking to implement). Counters unchanged, same
+	// shape as the max_tokens short-circuit.
+	if !actionMode {
 		return IncompleteWorkDecision{Stuck: stuck, LastNudge: lastNudge}
 	}
 	n, summary := IncompleteTodoSummary(registry)

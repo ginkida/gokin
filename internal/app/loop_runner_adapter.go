@@ -250,6 +250,10 @@ func newLoopSpawner(a *App) loops.Spawner {
 		if result != nil {
 			out.TokensIn = result.InputTokens
 			out.TokensOut = result.OutputTokens
+			// Churn signal: did the iteration run any code/repo-mutating tool? A
+			// run of OK-but-no-change iterations on an action task is "spinning"
+			// (task done or stuck) — the scheduler warns then auto-pauses.
+			out.MadeChanges = result.MutatingToolCalls > 0
 		}
 		return out, nil
 	}
@@ -389,6 +393,12 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 					msg = fmt.Sprintf(
 						"Loop %s auto-paused — provider unavailable for a long time (%d retries). /loop resume %s when it's back.",
 						loopID, loop.ConsecutiveTransientFailures, loopID)
+				case loops.AutoPauseNoProgress:
+					logging.Warn("loops: auto-paused — no progress (succeeding without changes)",
+						"loop_id", loopID, "consecutive_no_progress", loop.ConsecutiveNoProgress)
+					msg = fmt.Sprintf(
+						"Loop %s auto-paused — %d iterations in a row made no changes (task likely complete, or stuck). /loop output %s to review, /loop resume %s if there's more to do.",
+						loopID, loop.ConsecutiveNoProgress, loopID, loopID)
 				default:
 					logging.Warn("loops: auto-paused after consecutive failures",
 						"loop_id", loopID,
