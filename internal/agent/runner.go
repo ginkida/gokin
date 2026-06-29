@@ -103,7 +103,9 @@ type Runner struct {
 	// The `prompt` argument is populated only on the "start" status — for
 	// tool-level events (tool_start, tool_end) and completion (complete,
 	// failed) it's empty because the UI already captured the task at start.
-	onSubAgentActivity func(agentID, agentType, prompt, toolName string, args map[string]any, status string)
+	// On a tool_end event, success + summary carry the tool's OUTCOME so the
+	// UI can render a meaningful one-line result; zero-valued otherwise.
+	onSubAgentActivity func(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string)
 
 	// Event-driven notification for result completion (replaces polling in WaitWithContext)
 	resultReady chan struct{}
@@ -546,7 +548,7 @@ func (r *Runner) SetWorkspaceReviewHandler(handler func(context.Context, []Works
 
 // SetOnSubAgentActivity sets the callback for sub-agent activity reporting.
 // See the comment on the callback field for the contract of the `prompt` arg.
-func (r *Runner) SetOnSubAgentActivity(fn func(agentID, agentType, prompt, toolName string, args map[string]any, status string)) {
+func (r *Runner) SetOnSubAgentActivity(fn func(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string)) {
 	r.mu.Lock()
 	r.onSubAgentActivity = fn
 	r.mu.Unlock()
@@ -877,7 +879,7 @@ func attachMetaAgentMonitoring(agent *Agent, meta *MetaAgent) {
 
 	meta.RegisterAgent(agent.ID, agent.Type)
 	agentID := agent.ID
-	agent.SetOnToolActivity(func(_ string, toolName string, _ map[string]any, status string) {
+	agent.SetOnToolActivity(func(_ string, toolName string, _ map[string]any, status string, _ bool, _ string) {
 		if status == "start" {
 			meta.UpdateActivity(agentID, toolName, agent.GetTurnCount())
 		}

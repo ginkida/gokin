@@ -1862,10 +1862,15 @@ func (b *Builder) wireDependencies() error {
 					status = "cancelled"
 				}
 			}
+			summary := ""
+			if result != nil {
+				summary = subAgentCompletionSummary(result.Output, result.Error, result.Status == agent.AgentStatusFailed, 56)
+			}
 			app.safeSendToProgram(ui.BackgroundTaskMsg{
-				ID:     id,
-				Type:   "agent",
-				Status: status,
+				ID:      id,
+				Type:    "agent",
+				Status:  status,
+				Summary: summary,
 			})
 		}
 

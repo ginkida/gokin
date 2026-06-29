@@ -230,6 +230,11 @@ type (
 		Type        string // "agent" or "shell"
 		Description string // Short description of the task
 		Status      string // "running", "completed", "failed", "cancelled"
+		// Summary is a one-line gist of the finished agent's result (the
+		// conclusion on success, the error on failure), shown in the completion
+		// toast so a background agent's output is visible at a glance without
+		// opening /tasks. Empty on "running".
+		Summary string
 
 		// Phase 2: Progress tracking fields
 		Progress      float64       // 0.0 to 1.0
@@ -266,6 +271,11 @@ type (
 		ToolArgs  map[string]any
 		Status    string        // "start", "tool_start", "tool_end", "complete", "failed"
 		Elapsed   time.Duration // Time elapsed since agent start
+		// Success and Summary are populated only on Status=="tool_end": the
+		// tool's outcome (✓/✗) and a short result line, so the merged
+		// sub-agent tool line shows meaningful output, not just a name.
+		Success bool
+		Summary string
 	}
 
 	// InlineDiffMsg carries a compact diff for display in the output stream.

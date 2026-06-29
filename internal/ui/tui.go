@@ -2336,9 +2336,17 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.lastActivityTime = time.Now()
 			m.agentToolCount = 0
 			m.agentRecentTools = nil
+			// Surface WHAT the agent was dispatched to do. Prefer the real task
+			// (msg.Task carries the dispatch prompt on start) so foreground
+			// sub-agents — which aren't tracked in backgroundTasks — no longer
+			// show a bare "Agent started" with no context. Fall back to the
+			// tracked background-task description when no prompt was captured.
 			description := ""
 			if task, ok := m.backgroundTasks[msg.AgentID]; ok {
 				description = task.Description
+			}
+			if strings.TrimSpace(msg.Task) != "" {
+				description = summarizeSubAgentTask(msg.Task, msg.AgentType)
 			}
 			m.output.AppendLine("")
 			m.output.AppendLine(m.renderAgentTimelineStart(msg.AgentType, description))
@@ -2365,8 +2373,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.currentToolInfo = info
 			m.toolStartTime = time.Now()
 			m.lastActivityTime = time.Now()
-			// Show tool call inline with agent type prefix
-			m.output.AppendLine(m.styles.FormatAgentToolCall(msg.AgentType, msg.ToolName, msg.ToolArgs))
+			// No scrollback row on tool START — the live activity card / status
+			// bar show the running tool. The merged line (with the OUTCOME) is
+			// emitted on tool_end, matching the foreground calm one-line style.
 		case "tool_recovery":
 			msgTxt := msg.ToolName
 			if msg.ToolArgs != nil {
@@ -2378,6 +2387,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.output.AppendLine(m.styles.Warning.Render(fmt.Sprintf("    ↻ Auto-Fixing: %s Error (%s)", msg.ToolName, msgTxt)))
 			m.lastActivityTime = time.Now()
 		case "tool_end":
+			// Emit the merged one-line tool result with its OUTCOME (✓/✗ +
+			// summary) — this is the "meaningful output" a sub-agent's tool was
+			// missing; previously tool_end rendered nothing in scrollback.
+			info := m.extractToolInfoFromArgs(msg.ToolName, msg.ToolArgs)
+			target := conciseToolTarget(msg.ToolName, info)
+			m.output.AppendLine(m.styles.FormatAgentToolLine(msg.AgentType, msg.ToolName, target, msg.Summary, msg.Success))
 			// Between tool calls, show "thinking" with tool count so user knows agent is alive
 			m.processingLabel = fmt.Sprintf("Agent: %s · thinking (%d tools used)", msg.AgentType, m.agentToolCount)
 			m.currentTool = ""
@@ -3574,13 +3589,20 @@ func (m *Model) handleBackgroundTask(msg BackgroundTaskMsg) tea.Cmd {
 				if runes := []rune(desc); len(runes) > 30 {
 					desc = string(runes[:27]) + "..."
 				}
+				// Include a one-line gist of the result (conclusion on success,
+				// error on failure) so a background agent's output is visible at
+				// a glance; /tasks still has the full output.
+				gist := ""
+				if msg.Summary != "" {
+					gist = " · " + msg.Summary
+				}
 				switch msg.Status {
 				case "failed":
-					m.toastManager.ShowError(fmt.Sprintf("Task failed: %s — /tasks for details", desc))
+					m.toastManager.ShowError(fmt.Sprintf("Task failed: %s%s — /tasks for details", desc, gist))
 				case "completed":
 					// Point at /tasks so a finished background agent's output
 					// is one command away, not lost to the scrollback.
-					m.toastManager.ShowSuccess(fmt.Sprintf("Task done: %s — /tasks for output", desc))
+					m.toastManager.ShowSuccess(fmt.Sprintf("Task done: %s%s — /tasks for output", desc, gist))
 				}
 			}
 			delete(m.backgroundTasks, msg.ID)

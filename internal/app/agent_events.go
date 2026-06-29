@@ -39,8 +39,9 @@ type agentPresenter interface {
 	MemoryNotify(message string)
 	// SubAgentActivity mirrors Runner.onSubAgentActivity: lifecycle
 	// (start/complete/failed) and tool events (tool_start/tool_end) of
-	// spawned sub-agents.
-	SubAgentActivity(agentID, agentType, prompt, toolName string, args map[string]any, status string)
+	// spawned sub-agents. On tool_end, success + summary carry the tool's
+	// outcome so the UI can render a meaningful result line.
+	SubAgentActivity(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string)
 }
 
 // currentPresenter returns the active presenter (never nil — defaults to the
@@ -401,11 +402,41 @@ func (a *App) deliverUnstreamedResponse(response string) {
 	a.currentPresenter().StreamText(response)
 }
 
+// subAgentCompletionSummary builds a one-line gist of a finished BACKGROUND
+// agent's result for the completion toast — the LAST meaningful line of its
+// output (the conclusion sits at the end), or the error on failure. A background
+// agent's output isn't shown inline (it goes to the file / /tasks), so this is
+// the only at-a-glance view of what it produced; foreground agents stream/deliver
+// their answer, so this is deliberately only wired into the background path.
+// Returns "" when there's nothing meaningful to show.
+func subAgentCompletionSummary(output, errMsg string, failed bool, maxRunes int) string {
+	text := output
+	if failed && strings.TrimSpace(errMsg) != "" {
+		text = errMsg
+	}
+	var last string
+	for line := range strings.SplitSeq(text, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			last = t
+		}
+	}
+	if last == "" || maxRunes <= 0 {
+		return ""
+	}
+	if runes := []rune(last); len(runes) > maxRunes {
+		if maxRunes == 1 {
+			return "…"
+		}
+		return string(runes[:maxRunes-1]) + "…"
+	}
+	return last
+}
+
 // handleSubAgentActivity is the unified sink for sub-agent events: journal
 // bookkeeping (tool events carry agent_id so eval scoring and post-mortems
 // see sub-agent work — pre-unification the journal was BLIND to it) plus the
 // active presenter. Wired to Runner.SetOnSubAgentActivity by the builder.
-func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string, args map[string]any, status string) {
+func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string) {
 	switch status {
 	case "tool_start":
 		a.journalEvent("tool_start", map[string]any{
@@ -417,6 +448,7 @@ func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string
 		a.journalEvent("tool_end", map[string]any{
 			"tool":     toolName,
 			"agent_id": agentID,
+			"success":  success,
 		})
 	case "start":
 		a.journalEvent("agent_start", map[string]any{
@@ -431,10 +463,10 @@ func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string
 		})
 	}
 
-	a.currentPresenter().SubAgentActivity(agentID, agentType, prompt, toolName, args, status)
+	a.currentPresenter().SubAgentActivity(agentID, agentType, prompt, toolName, args, status, success, summary)
 }
 
-func (p *tuiPresenter) SubAgentActivity(agentID, agentType, prompt, toolName string, args map[string]any, status string) {
+func (p *tuiPresenter) SubAgentActivity(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string) {
 	if p.app.program != nil {
 		p.app.safeSendToProgram(ui.SubAgentActivityMsg{
 			AgentID:   agentID,
@@ -443,6 +475,8 @@ func (p *tuiPresenter) SubAgentActivity(agentID, agentType, prompt, toolName str
 			ToolName:  toolName,
 			ToolArgs:  args,
 			Status:    status,
+			Success:   success,
+			Summary:   summary,
 		})
 	}
 }

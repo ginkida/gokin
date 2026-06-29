@@ -205,8 +205,11 @@ type Agent struct {
 	// Pinned Context (Custom Improvement)
 	PinnedContext string
 
-	// Tool activity callback for UI updates
-	onToolActivity func(agentID, toolName string, args map[string]any, status string)
+	// Tool activity callback for UI updates. On the "end" event, success +
+	// summary carry the tool's OUTCOME (✓/✗ and a short result line) so the UI
+	// can show meaningful sub-agent output instead of a bare tool name. These
+	// are zero-valued for non-"end" events.
+	onToolActivity func(agentID, toolName string, args map[string]any, status string, success bool, summary string)
 
 	// Checkpoint support
 	store              *AgentStore
@@ -893,7 +896,7 @@ func (a *Agent) GetPinnedContext() string {
 }
 
 // SetOnToolActivity sets the callback for tool activity reporting.
-func (a *Agent) SetOnToolActivity(fn func(agentID, toolName string, args map[string]any, status string)) {
+func (a *Agent) SetOnToolActivity(fn func(agentID, toolName string, args map[string]any, status string, success bool, summary string)) {
 	a.stateMu.Lock()
 	a.onToolActivity = fn
 	a.stateMu.Unlock()
@@ -4805,7 +4808,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 			a.stateMu.RUnlock()
 			if onToolActivity != nil {
 				args := map[string]any{"reason": reflection.Category}
-				onToolActivity(agentID, call.Name, args, "tool_recovery")
+				onToolActivity(agentID, call.Name, args, "tool_recovery", false, "")
 			}
 
 			fixResult, handled := a.recoveryExecutor.AttemptAutoFix(ctx, a, call, reflection, attempt)
@@ -4918,7 +4921,9 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 }
 
 // executeTool executes a single tool call with enhanced safety and retry logic.
-func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools.ToolResult {
+// Named return `out` so the deferred tool-activity "end" event can report the
+// real outcome (success + a short summary) — see subAgentToolOutcome.
+func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out tools.ToolResult) {
 	tool, ok := a.registry.Get(call.Name)
 	if !ok {
 		return tools.NewErrorResult(fmt.Sprintf("tool not available for this agent: %s", call.Name))
@@ -4951,13 +4956,16 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools
 
 	// Report tool start to UI
 	if onToolActivity != nil {
-		onToolActivity(a.ID, call.Name, call.Args, "start")
+		onToolActivity(a.ID, call.Name, call.Args, "start", false, "")
 	}
 
-	// Guarantee "end" event is sent regardless of outcome (panic, error, success)
+	// Guarantee "end" event is sent regardless of outcome (panic, error,
+	// success), carrying the tool's outcome so the UI can show meaningful
+	// sub-agent output (✓/✗ + a short result line) instead of a bare name.
 	defer func() {
 		if onToolActivity != nil {
-			onToolActivity(a.ID, call.Name, call.Args, "end")
+			success, summary := subAgentToolOutcome(out)
+			onToolActivity(a.ID, call.Name, call.Args, "end", success, summary)
 		}
 	}()
 
@@ -4966,9 +4974,11 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) tools
 	// here compounds with those layers and wastes tokens.
 	result, err := tool.Execute(ctx, call.Args)
 	if err != nil {
-		return tools.NewErrorResult(err.Error())
+		out = tools.NewErrorResult(err.Error())
+		return
 	}
-	return result
+	out = result
+	return
 }
 
 // buildResponseParts creates Parts from a response.

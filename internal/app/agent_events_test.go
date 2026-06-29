@@ -24,10 +24,10 @@ func TestHandleSubAgentActivity_JournalsToolEvents(t *testing.T) {
 
 	a := &App{journal: journal}
 
-	a.handleSubAgentActivity("agent-1", "explore", "map the auth flow", "", nil, "start")
-	a.handleSubAgentActivity("agent-1", "explore", "", "read", map[string]any{"file_path": "auth.go"}, "tool_start")
-	a.handleSubAgentActivity("agent-1", "explore", "", "read", nil, "tool_end")
-	a.handleSubAgentActivity("agent-1", "explore", "", "", nil, "complete")
+	a.handleSubAgentActivity("agent-1", "explore", "map the auth flow", "", nil, "start", false, "")
+	a.handleSubAgentActivity("agent-1", "explore", "", "read", map[string]any{"file_path": "auth.go"}, "tool_start", false, "")
+	a.handleSubAgentActivity("agent-1", "explore", "", "read", nil, "tool_end", true, "175 lines")
+	a.handleSubAgentActivity("agent-1", "explore", "", "", nil, "complete", false, "")
 
 	data, err := os.ReadFile(filepath.Join(workDir, ".gokin", "execution_journal.jsonl"))
 	if err != nil {
@@ -58,8 +58,38 @@ func TestHandleSubAgentActivity_JournalsToolEvents(t *testing.T) {
 	if kind(2) != "tool_end" || details(2)["agent_id"] != "agent-1" {
 		t.Fatalf("tool_end must carry agent_id: %v", events[2])
 	}
+	if details(2)["success"] != true {
+		t.Fatalf("tool_end must carry the tool outcome (success): %v", events[2])
+	}
 	if kind(3) != "agent_end" || details(3)["status"] != "complete" {
 		t.Fatalf("event 3 = %v", events[3])
+	}
+}
+
+func TestSubAgentCompletionSummary(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		errMsg string
+		failed bool
+		max    int
+		want   string
+	}{
+		{"last meaningful line is the conclusion", "step 1\nstep 2\nFound 3 issues in auth.go", "", false, 56, "Found 3 issues in auth.go"},
+		{"trailing blank lines ignored", "done\nresult here\n\n  \n", "", false, 56, "result here"},
+		{"failure uses error", "partial work", "connection refused", true, 56, "connection refused"},
+		{"failure empty error falls back to output", "partial conclusion", "", true, 56, "partial conclusion"},
+		{"empty output", "", "", false, 56, ""},
+		{"truncates long line", strings.Repeat("x", 100), "", false, 10, strings.Repeat("x", 9) + "…"},
+		{"non-positive max", "anything", "", false, 0, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := subAgentCompletionSummary(tt.output, tt.errMsg, tt.failed, tt.max)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -68,8 +98,8 @@ func TestHandleSubAgentActivity_JournalsToolEvents(t *testing.T) {
 func TestHandleSubAgentActivity_NilJournalAndProgramSafe(t *testing.T) {
 	a := &App{}
 	// Must not panic.
-	a.handleSubAgentActivity("x", "general", "task", "read", nil, "tool_start")
-	a.handleSubAgentActivity("x", "general", "", "", nil, "complete")
+	a.handleSubAgentActivity("x", "general", "task", "read", nil, "tool_start", false, "")
+	a.handleSubAgentActivity("x", "general", "", "", nil, "complete", false, "")
 }
 
 // capturePresenter records StreamText deliveries for assertions.

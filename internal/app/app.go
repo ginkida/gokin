@@ -3153,11 +3153,20 @@ func (a *App) sendAgentTreeUpdate() {
 			node.Duration = t.Result.Duration
 		}
 
-		// Include agent reasoning (thought) if running
+		// Include live agent state if running: reasoning (thought), the real
+		// start time (so elapsed renders correctly — the node's zero StartTime
+		// otherwise showed a bogus decades-long duration), and the running
+		// tool count (which drives the progress bar). Progress is set to -1
+		// (indeterminate) so the bar animates instead of sitting empty.
 		if t.Status == "running" && a.agentRunner != nil {
 			agentID := a.coordinator.GetTaskAgentID(t.ID)
 			if agentID != "" {
 				node.Thought = a.agentRunner.GetThought(agentID)
+				if ag := a.agentRunner.GetActiveAgent(agentID); ag != nil {
+					node.StartTime = ag.GetStartTime()
+					node.ToolsUsed = ag.ToolsUsedCount()
+					node.Progress = -1
+				}
 			}
 		}
 

@@ -704,17 +704,55 @@ func (s *Styles) FormatToolError(name string, err error) string {
 }
 
 // --- Agent Activity Formatting ---
-// Agent tool calls shown with dim type prefix:
-//   explore ▸ Read internal/app/app.go
-//   explore ▸ Grep "pattern" ./internal/
+// Completed sub-agent tool calls shown with a dim type prefix, one calm line
+// each carrying the OUTCOME (matches the foreground tool line):
+//   explore ▪ Read(app.go) · 175 lines · 1.2s
+//   general ▪ ✗ Bash(go build ./...) · exit code 1
 //   explore ✓ 5.2s
 // Flat format because background agents are async — their events
 // interleave with other output, making tree connectors unreliable.
 
-// FormatAgentToolCall renders an agent's tool call with type prefix.
-func (s *Styles) FormatAgentToolCall(agentType string, toolName string, args map[string]any) string {
+// FormatAgentToolLine renders a COMPLETED sub-agent tool call as one calm line
+// carrying its outcome — `  <type> ▪ Name(target) · outcome` (red ✗ + summary on
+// failure). Mirrors the foreground FormatToolLine shape (v0.100.37) with a dim
+// agent-type prefix, so sub-agent work reads the same as foreground work and
+// shows MEANINGFUL output instead of a bare tool name. The running tool is shown
+// live by the status bar / activity card, so there is no separate start row.
+//
+// No per-tool duration: a sub-agent runs read-only tools CONCURRENTLY
+// (executeToolsParallel), and the only per-agent timestamp available to the UI
+// (SubAgentState.LastToolTime) is clobbered by sibling start/end events, so a
+// duration computed here would be mis-attributed. Accurate timing would have to
+// be measured at the source (agent.executeTool) and threaded through — not worth
+// a 7-param callback for a polish label. The agent's TOTAL elapsed still shows
+// on completion (FormatAgentComplete).
+func (s *Styles) FormatAgentToolLine(agentType, name, target, summary string, success bool) string {
 	prefixStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	return prefixStyle.Render("  "+agentType+" ") + s.FormatToolExecutingBlock(toolName, args)
+	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	nameStyle := lipgloss.NewStyle().Foreground(GetToolIconColor(name))
+	targetStyle := lipgloss.NewStyle().Foreground(ColorText)
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	errStyle := lipgloss.NewStyle().Foreground(ColorError)
+
+	var b strings.Builder
+	b.WriteString(prefixStyle.Render("  " + agentType + " "))
+	b.WriteString(markerStyle.Render(toolBullet + " "))
+	if !success {
+		b.WriteString(errStyle.Render("✗ "))
+	}
+	b.WriteString(nameStyle.Render(capitalizeToolName(name)))
+	if target != "" {
+		b.WriteString(targetStyle.Render("(" + target + ")"))
+	}
+	if summary != "" {
+		b.WriteString(dimStyle.Render(" · "))
+		if success {
+			b.WriteString(dimStyle.Render(summary))
+		} else {
+			b.WriteString(errStyle.Render(summary))
+		}
+	}
+	return b.String()
 }
 
 // FormatAgentComplete renders agent completion.

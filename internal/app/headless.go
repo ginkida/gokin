@@ -178,5 +178,5 @@ func (p *stdoutPresenter) TokenUsage(int, int, float64)                     {}
 func (p *stdoutPresenter) FilePeek(string, string, string, string)          {}
 func (p *stdoutPresenter) MemoryNotify(string)                              {}
 
-func (p *stdoutPresenter) SubAgentActivity(string, string, string, string, map[string]any, string) {
+func (p *stdoutPresenter) SubAgentActivity(string, string, string, string, map[string]any, string, bool, string) {
 }
