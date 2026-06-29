@@ -2999,6 +2999,19 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		default:
 		}
 
+		// Text-based tool-call fallback for models WITHOUT native function-calling
+		// (Ollama models with !SupportsTools, prompted to emit {"tool":…,"args":…}
+		// JSON via ToolCallFallbackPrompt). The foreground executor already does
+		// this; the sub-agent loop MUST mirror it or such a model's tool calls stay
+		// inert text and never run — the "sub-agent loops, shows a tool, no
+		// meaningful output" failure. Runs BEFORE the response is recorded so
+		// history captures the tool call (not the JSON) and the empty-after-tools /
+		// max_tokens / function-call branches below see the parsed calls.
+		if n := client.ApplyTextToolCallFallback(a.client, resp); n > 0 {
+			logging.Info("agent fallback: parsed tool calls from text",
+				"agent_id", a.ID, "model", a.Model, "count", n)
+		}
+
 		// Add model response to history (protected by mutex)
 		modelContent := &genai.Content{
 			Role:  genai.RoleModel,

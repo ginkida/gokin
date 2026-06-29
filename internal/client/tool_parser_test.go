@@ -2,7 +2,63 @@ package client
 
 import (
 	"testing"
+
+	"google.golang.org/genai"
 )
+
+// fakeFallbackClient is a minimal stand-in for a client that does (or does not)
+// need the text-based tool-call fallback (real impl: OllamaClient).
+type fakeFallbackClient struct{ needs bool }
+
+func (f fakeFallbackClient) NeedsToolCallFallback() bool { return f.needs }
+
+func TestApplyTextToolCallFallback(t *testing.T) {
+	const blob = "Let me explore.\n```json\n{\"tool\": \"glob\", \"args\": {\"pattern\": \"**/*.py\"}}\n```"
+
+	// Client needs fallback + text carries a tool call → parsed + text stripped.
+	resp := &Response{Text: blob}
+	if n := ApplyTextToolCallFallback(fakeFallbackClient{needs: true}, resp); n != 1 {
+		t.Fatalf("parsed = %d, want 1", n)
+	}
+	if len(resp.FunctionCalls) != 1 || resp.FunctionCalls[0].Name != "glob" {
+		t.Fatalf("FunctionCalls = %+v, want one glob call", resp.FunctionCalls)
+	}
+	if resp.Text != "" {
+		t.Fatalf("text must be stripped after a tool call is parsed, got %q", resp.Text)
+	}
+
+	// Client exists but does NOT need fallback → no-op (text preserved).
+	noFb := &Response{Text: blob}
+	if n := ApplyTextToolCallFallback(fakeFallbackClient{needs: false}, noFb); n != 0 || len(noFb.FunctionCalls) != 0 || noFb.Text == "" {
+		t.Fatalf("non-fallback client must be a no-op: n=%d calls=%d text=%q", n, len(noFb.FunctionCalls), noFb.Text)
+	}
+
+	// Client without the capability at all → no-op.
+	plain := &Response{Text: blob}
+	if n := ApplyTextToolCallFallback(struct{}{}, plain); n != 0 || plain.Text == "" {
+		t.Fatalf("client lacking NeedsToolCallFallback must be a no-op: n=%d", n)
+	}
+
+	// Native function calls already present → never re-parse / never strip text.
+	native := &Response{Text: blob, FunctionCalls: []*genai.FunctionCall{{Name: "read"}}}
+	if n := ApplyTextToolCallFallback(fakeFallbackClient{needs: true}, native); n != 0 {
+		t.Fatalf("must not touch a response that already has native calls: n=%d", n)
+	}
+	if len(native.FunctionCalls) != 1 || native.FunctionCalls[0].Name != "read" || native.Text == "" {
+		t.Fatalf("existing native call + text must be preserved, got %+v text=%q", native.FunctionCalls, native.Text)
+	}
+
+	// Needs fallback but text has no tool call → no-op.
+	prose := &Response{Text: "just some thoughts, no tools here"}
+	if n := ApplyTextToolCallFallback(fakeFallbackClient{needs: true}, prose); n != 0 || prose.Text == "" {
+		t.Fatalf("prose without a tool call must be a no-op: n=%d", n)
+	}
+
+	// nil response → no panic, no-op.
+	if n := ApplyTextToolCallFallback(fakeFallbackClient{needs: true}, nil); n != 0 {
+		t.Fatalf("nil response must be a no-op: n=%d", n)
+	}
+}
 
 func TestParseToolCallsFromText_CodeBlock(t *testing.T) {
 	text := "Let me read the file.\n```json\n{\"tool\": \"read\", \"args\": {\"path\": \"/tmp/test.go\"}}\n```"

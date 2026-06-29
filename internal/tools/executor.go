@@ -1000,15 +1000,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		partialStreamRetries = 0 // reset on success
 
 		// Text-based tool call fallback for models without native function calling
-		if len(resp.FunctionCalls) == 0 && resp.Text != "" {
-			if fallbackClient, ok := cl.(interface{ NeedsToolCallFallback() bool }); ok && fallbackClient.NeedsToolCallFallback() {
-				if parsed := client.ParseToolCallsFromText(resp.Text); len(parsed) > 0 {
-					resp.FunctionCalls = parsed
-					// Strip the JSON from text since we're treating it as a tool call
-					resp.Text = ""
-					logging.Info("fallback: parsed tool calls from text", "count", len(parsed))
-				}
-			}
+		// (shared with the sub-agent loop via client.ApplyTextToolCallFallback).
+		if n := client.ApplyTextToolCallFallback(cl, resp); n > 0 {
+			logging.Info("fallback: parsed tool calls from text", "count", n)
 		}
 
 		// Add model response to history

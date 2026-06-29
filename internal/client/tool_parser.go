@@ -65,6 +65,46 @@ func ParseToolCallsFromText(text string) []*genai.FunctionCall {
 	return nil
 }
 
+// toolCallFallbackProvider is implemented by clients that emit/parse tool calls
+// as TEXT — i.e. models without native function-calling (OllamaClient for a
+// model whose profile has SupportsTools == false). Such models are prompted
+// (ToolCallFallbackPrompt) to write tool calls as {"tool":…,"args":…} JSON.
+type toolCallFallbackProvider interface {
+	NeedsToolCallFallback() bool
+}
+
+// ApplyTextToolCallFallback converts a model's TEXT-emitted tool call into a
+// real FunctionCall, in place, for clients that need the fallback. It is the
+// single shared implementation used by BOTH agentic loops — the foreground
+// executor and the sub-agent loop — so a weak/Ollama model that writes
+// {"tool":…,"args":…} JSON instead of making a native call behaves identically
+// in each. (Before this was extracted, only the foreground executor parsed the
+// text, so the SAME model run as a sub-agent left its tool calls as inert text
+// and never executed — "sub-agent loops, shows a tool, no meaningful output".)
+//
+// No-op (returns 0) unless: cl reports NeedsToolCallFallback(), the response has
+// NO native function calls, its text is non-empty, and that text contains at
+// least one parseable tool call. On success it sets resp.FunctionCalls and
+// CLEARS resp.Text (the JSON was a tool call, not prose). cl is `any` to match
+// the existing untyped assertion idiom — most clients don't implement the
+// capability and must pass through untouched.
+func ApplyTextToolCallFallback(cl any, resp *Response) int {
+	if resp == nil || len(resp.FunctionCalls) > 0 || resp.Text == "" {
+		return 0
+	}
+	fb, ok := cl.(toolCallFallbackProvider)
+	if !ok || !fb.NeedsToolCallFallback() {
+		return 0
+	}
+	parsed := ParseToolCallsFromText(resp.Text)
+	if len(parsed) == 0 {
+		return 0
+	}
+	resp.FunctionCalls = parsed
+	resp.Text = "" // strip the JSON — it's a tool call, not text to display
+	return len(parsed)
+}
+
 // extractFromCodeBlocks extracts tool calls from fenced JSON-ish blocks.
 var codeBlockPattern = regexp.MustCompile("(?s)```(?:json|tool|tool_code)?\\s*\\n?(.*?)\\s*\\n?```")
 
