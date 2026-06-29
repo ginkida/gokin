@@ -61,6 +61,7 @@ Implementation standard:
 - Targeted edit → edit (NOT write entire file)
 - New file → write
 - Run commands/builds/tests → bash (only when no dedicated tool exists)
+- Count/measure the codebase → glob/grep (gitignore-aware) or scope bash to source dirs. Raw "find ." / "wc -l" over the repo root also count build/vendor/gitignored dirs (./go/, node_modules, vendor, dist) and over-report by multiples — exclude them or use the dedicated tools.
 
 When multiple independent operations are needed, call tools in parallel.
 

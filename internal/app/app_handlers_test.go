@@ -5,8 +5,29 @@ import (
 	"testing"
 	"time"
 
+	"gokin/internal/config"
 	"gokin/internal/ui"
 )
+
+// TestPermPromptTimeout pins the config → wait-duration mapping: >0 → seconds,
+// 0 → default (covers old configs), <0 → 0 meaning "no timeout" (indefinite).
+func TestPermPromptTimeout(t *testing.T) {
+	withSecs := func(secs int) *App {
+		return &App{config: &config.Config{Permission: config.PermissionConfig{PromptTimeoutSeconds: secs}}}
+	}
+	if got := withSecs(0).permPromptTimeout(); got != DefaultPermissionTimeout {
+		t.Errorf("0 → %v, want default %v", got, DefaultPermissionTimeout)
+	}
+	if got := withSecs(600).permPromptTimeout(); got != 600*time.Second {
+		t.Errorf("600 → %v, want 10m", got)
+	}
+	if got := withSecs(-1).permPromptTimeout(); got != 0 {
+		t.Errorf("-1 → %v, want 0 (indefinite)", got)
+	}
+	if got := (&App{}).permPromptTimeout(); got != DefaultPermissionTimeout {
+		t.Errorf("nil config → %v, want default %v", got, DefaultPermissionTimeout)
+	}
+}
 
 func TestPromptDiffDecisionSerializesRequests(t *testing.T) {
 	app := &App{

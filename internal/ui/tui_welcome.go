@@ -156,19 +156,3 @@ func (m Model) welcomeModeHint() string {
 	}
 	return m.welcomeModeBadge()
 }
-
-// inputModeLine surfaces the active session mode directly under the input box —
-// where CC anchors the "what does the next Enter do" cue (`⏵⏵ … shift+tab to
-// cycle`). Shown only for the special plan/YOLO modes (normal stays clean); the
-// caller gates it to active conversations so it doesn't duplicate the welcome
-// panel's mode hint on the empty screen.
-func (m Model) inputModeLine() string {
-	style := lipgloss.NewStyle().Foreground(ColorDim)
-	switch {
-	case m.planningModeEnabled:
-		return style.Render("  ⏵⏵ plan mode · shift+tab to cycle")
-	case !m.permissionsEnabled || !m.sandboxEnabled:
-		return style.Render("  ⏵⏵ YOLO — no prompts · shift+tab to cycle")
-	}
-	return ""
-}

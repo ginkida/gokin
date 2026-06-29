@@ -3278,13 +3278,10 @@ func (m Model) View() string {
 		builder.WriteString(m.input.View())
 	}
 	if m.state == StateInput {
-		// Mode cue under the input (plan/YOLO only). Gated to active conversations
-		// so it doesn't duplicate the welcome panel's mode hint on the idle screen.
-		if !m.output.IsEmpty() {
-			if mode := m.inputModeLine(); mode != "" {
-				builder.WriteString("\n" + mode)
-			}
-		}
+		// (No under-input mode cue: the active mode already shows persistently in
+		// the bottom status bar — `YOLO`/`!SANDBOX` safetyBadge + `ℹ plan mode` —
+		// and a full description + "Shift+Tab → next" appears in scrollback the
+		// moment you switch. A separate whole-line cue here just duplicated both.)
 		// Command hints
 		inputText := m.input.Value()
 		if strings.HasPrefix(inputText, "/") && len(inputText) > 1 {

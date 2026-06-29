@@ -13,8 +13,32 @@ import (
 	"gokin/internal/ui"
 )
 
-// PermissionTimeout is the maximum time to wait for a permission response.
-const PermissionTimeout = 5 * time.Minute
+// DefaultPermissionTimeout is the fallback wait for a permission response when
+// config.Permission.PromptTimeoutSeconds is unset (0). The effective timeout is
+// resolved per-prompt by permPromptTimeout (configurable; <0 = no timeout).
+const DefaultPermissionTimeout = 5 * time.Minute
+
+// permPromptTimeout resolves the interactive permission-prompt wait from config:
+// >0 → that many seconds; 0 → DefaultPermissionTimeout (also covers configs
+// predating the field); <0 → 0 here, meaning "no timeout" (wait indefinitely
+// with periodic reminders). Snapshotted under a.mu — a.config is swapped by
+// ApplyConfig under the same lock.
+func (a *App) permPromptTimeout() time.Duration {
+	secs := 0
+	a.mu.Lock()
+	if a.config != nil {
+		secs = a.config.Permission.PromptTimeoutSeconds
+	}
+	a.mu.Unlock()
+	switch {
+	case secs < 0:
+		return 0 // indefinite
+	case secs == 0:
+		return DefaultPermissionTimeout
+	default:
+		return time.Duration(secs) * time.Second
+	}
+}
 
 // promptPermission is called by the permission manager to ask the user for permission.
 // It sends a request to the TUI and waits for a response with timeout.
@@ -37,8 +61,16 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 	warningTimer := time.NewTimer(warningDelay)
 	defer warningTimer.Stop()
 
-	permTimer := time.NewTimer(PermissionTimeout)
-	defer permTimer.Stop()
+	// Resolve the configurable timeout. A zero duration means "no timeout" —
+	// leave permTimerC nil so the select branch never fires and we wait
+	// indefinitely (the reminders keep nudging; Esc/ctx-cancel still aborts).
+	timeout := a.permPromptTimeout()
+	var permTimerC <-chan time.Time
+	if timeout > 0 {
+		permTimer := time.NewTimer(timeout)
+		defer permTimer.Stop()
+		permTimerC = permTimer.C
+	}
 
 	// Wait for response from TUI with timeout and periodic warnings
 	for {
@@ -55,9 +87,13 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 			})
 			// Reset timer for next reminder
 			warningTimer.Reset(repeatDelay)
-		case <-permTimer.C:
-			logging.Warn("permission prompt timed out", "tool", req.ToolName)
-			return permission.DecisionDeny, fmt.Errorf("permission prompt timed out after %v", PermissionTimeout)
+		case <-permTimerC:
+			// Graceful, AFK-aware message: distinguish "you stepped away" from a
+			// deliberate refusal so the agent can report/resume rather than read
+			// it as a hard failure. (Set permission.prompt_timeout_seconds: -1 to
+			// disable the timeout entirely.)
+			logging.Warn("permission prompt timed out", "tool", req.ToolName, "after", timeout)
+			return permission.DecisionDeny, fmt.Errorf("no response to the permission request for %s within %v — you may have stepped away. I did not run it; re-send the task or approve when you're back (or set permission.prompt_timeout_seconds: -1 to wait indefinitely)", req.ToolName, timeout)
 		}
 	}
 }

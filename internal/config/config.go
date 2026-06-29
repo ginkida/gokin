@@ -284,6 +284,12 @@ type PermissionConfig struct {
 	Enabled       bool              `yaml:"enabled"`        // Enable/disable permission system
 	DefaultPolicy string            `yaml:"default_policy"` // Default policy: "allow", "ask", "deny"
 	Rules         map[string]string `yaml:"rules"`          // Per-tool rules
+	// PromptTimeoutSeconds bounds how long an interactive permission prompt
+	// waits for a response. >0 = that many seconds; 0 = default (300 = 5m, also
+	// the value old configs without this field get); <0 = NO timeout (wait
+	// indefinitely with periodic reminders, until you answer or press Esc) —
+	// handy for "give a direction and walk away" without the request expiring.
+	PromptTimeoutSeconds int `yaml:"prompt_timeout_seconds"`
 }
 
 // PlanConfig holds plan mode settings.
@@ -558,8 +564,9 @@ func DefaultConfig() *Config {
 			EnableAutoSummary:  true,  // Enable auto-summarization
 		},
 		Permission: PermissionConfig{
-			Enabled:       true, // Enable permission system by default
-			DefaultPolicy: "ask",
+			Enabled:              true, // Enable permission system by default
+			DefaultPolicy:        "ask",
+			PromptTimeoutSeconds: 300, // 5m; set <0 to wait indefinitely
 			Rules: map[string]string{
 				"read":                 "allow",
 				"glob":                 "allow",
