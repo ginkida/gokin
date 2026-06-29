@@ -735,8 +735,14 @@ func ResponseMetadata(model string, inputTokens, outputTokens int, duration time
 	}
 }
 
-// lastStreamSnippet returns the last non-empty line from the current streaming buffer,
-// truncated to 40 runes, for use as a live preview in the frozen viewport indicator.
+// lastStreamSnippet returns the last non-empty line of the streaming buffer for
+// the live "Writing: …" preview, keeping its START — the action/intent the model
+// is expressing ("Я добавлю несуществующие тесты…"), which is what answers "what
+// is it doing now". It does NOT front-truncate (keep the tail): that cut the
+// leading verb mid-word ("…лю несуществующие тесты и исправлю типы"), so the line
+// read as gibberish. Length is budgeted to the card width so the readable start
+// AND the trailing "· <elapsed>" both survive the card's own width clip; trimmed
+// at a word boundary with a trailing "…". A short line is returned as-is.
 func (m Model) lastStreamSnippet() string {
 	buf := m.currentResponseBuf.String()
 	if buf == "" {
@@ -750,9 +756,17 @@ func (m Model) lastStreamSnippet() string {
 	if last == "" {
 		return ""
 	}
+	// Reserve ~20 cols for the "Writing: " prefix + " · <elapsed>" suffix so the
+	// card's truncateRunes(width-2) clip doesn't eat the elapsed. Floor so a
+	// tiny/zero width (before the first WindowSizeMsg) still shows something.
+	budget := max(m.width-20, 24)
 	runes := []rune(last)
-	if len(runes) > 40 {
-		return "…" + string(runes[len(runes)-40:])
+	if len(runes) <= budget {
+		return last
 	}
-	return last
+	cut := string(runes[:budget])
+	if sp := strings.LastIndex(cut, " "); sp > budget/2 {
+		cut = cut[:sp] // prefer a word boundary over a mid-word cut
+	}
+	return strings.TrimRight(cut, " ,.;:—-") + "…"
 }

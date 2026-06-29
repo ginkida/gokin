@@ -152,6 +152,41 @@ func TestRenderLiveActivityCard_PureBulletSnippetFallsBackToGeneric(t *testing.T
 	}
 }
 
+// TestLastStreamSnippet_KeepsStart pins the fix for the unreadable live line:
+// the snippet keeps the START of the streamed line (the action/intent), not a
+// front-truncated mid-word tail ("…лю несуществующие тесты"). Width-budgeted,
+// word-trimmed, trailing "…"; a short line is returned whole.
+func TestLastStreamSnippet_KeepsStart(t *testing.T) {
+	m := NewModel()
+	m.width = 80
+	m.currentResponseBuf.WriteString("Я добавлю несуществующие тесты и исправлю типы в этом модуле прямо сейчас и проверю сборку")
+
+	snip := m.lastStreamSnippet()
+	if strings.HasPrefix(snip, "…") {
+		t.Fatalf("must keep the START, not front-truncate: %q", snip)
+	}
+	if !strings.HasPrefix(snip, "Я добавлю несуществующие тесты") {
+		t.Fatalf("snippet should begin at the line's start: %q", snip)
+	}
+	if !strings.HasSuffix(snip, "…") {
+		t.Fatalf("a long line should end with a trailing ellipsis: %q", snip)
+	}
+
+	// The card renders it readably under "Writing:".
+	m.state = StateStreaming
+	if line := m.liveActivityCurrentLine(ActivityFeedSnapshot{}); !strings.Contains(line, "Writing: Я добавлю несуществующие") {
+		t.Fatalf("card line should read the start under Writing: %q", line)
+	}
+
+	// A short line is returned whole (no truncation, no ellipsis).
+	m2 := NewModel()
+	m2.width = 80
+	m2.currentResponseBuf.WriteString("краткая строка")
+	if got := m2.lastStreamSnippet(); got != "краткая строка" {
+		t.Fatalf("short line should be returned as-is: %q", got)
+	}
+}
+
 func TestLiveActivityCurrentLine_ShowsFailedToolCountWhileWriting(t *testing.T) {
 	m := NewModel()
 	m.state = StateStreaming
