@@ -45,6 +45,20 @@ func (a *App) beginTurnIntent(message string) {
 		a.discussConfirmed.Store(false)
 		return
 	}
+	// YOLO / permissions-off means "act without asking" — honor that for the
+	// discuss-mode gate too. A user who turned off permission prompts does NOT
+	// expect a one-time "confirm you want to implement" prompt on the first edit
+	// (the field report that motivated this). Disabling here (turnDiscuss=false)
+	// keeps it consistent end-to-end: the executor's Step 4.7 gate never fires AND
+	// the incomplete-work nudge stays active (both read discussGate()). The
+	// out-of-workspace gate (Step 4.6) is a separate SECURITY boundary and is
+	// deliberately NOT affected. Same "permissions off" signal as
+	// updateUnrestrictedModeLocked; permManager is boot-set, IsEnabled is locked.
+	if a.permManager == nil || !a.permManager.IsEnabled() {
+		a.turnDiscuss.Store(false)
+		a.discussConfirmed.Store(false)
+		return
+	}
 	mode := ""
 	if a.taskRouter != nil {
 		mode = a.taskRouter.GetConversationMode()
