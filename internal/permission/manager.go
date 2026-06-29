@@ -118,10 +118,8 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		// only knows "bash". A previously session-approved identical command
 		// already short-circuited via the cache above, so this never re-prompts
 		// a command the user just OK'd.
-		if toolName == "bash" {
-			if danger, _ := ClassifyBashArgs(args); danger == BashDangerElevated {
-				return m.askUser(ctx, toolName, args)
-			}
+		if isElevatedBash(toolName, args) {
+			return m.askUser(ctx, toolName, args)
 		}
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 
@@ -133,24 +131,62 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		}, nil
 
 	case LevelAsk:
-		// Auto-approve caution-level tools if previously approved this session.
-		// Use full Lock to prevent TOCTOU race where concurrent calls both see
-		// autoApproved=false and both prompt the user.
-		risk := GetToolRiskLevel(toolName)
-		if risk == RiskMedium {
-			m.mu.Lock()
-			autoApproved := m.autoApprovedTools[toolName]
-			if autoApproved {
-				m.mu.Unlock()
-				return &Response{Allowed: true, Decision: DecisionAllowSession}, nil
+		// Auto-approve a tool already trusted this session (the user approved it
+		// once → don't re-prompt for every subsequent call). Applies to ALL risk
+		// levels — previously RiskMedium-only, which left bash asking on EVERY
+		// distinct command (the main source of prompt fatigue). Full Lock to
+		// avoid a TOCTOU race where two concurrent calls both see autoApproved
+		// false and both prompt.
+		m.mu.Lock()
+		autoApproved := m.autoApprovedTools[toolName]
+		m.mu.Unlock()
+		if autoApproved {
+			// Session trust never blanket-runs the floor classes: an elevated
+			// bash command (rm -rf / sudo / force-push) or ANY ssh (outward-
+			// facing to any host) still re-confirms even when the tool is trusted.
+			if mustConfirmDespiteTrust(toolName, args) {
+				return m.askUser(ctx, toolName, args)
 			}
-			m.mu.Unlock()
+			return &Response{Allowed: true, Decision: DecisionAllowSession}, nil
 		}
 		return m.askUser(ctx, toolName, args)
 	}
 
 	// Default to asking
 	return m.askUser(ctx, toolName, args)
+}
+
+// isElevatedBash reports whether a call is a bash command that must be
+// consciously confirmed EVEN when bash is otherwise allowed or trusted for the
+// session — the action-semantics floor (force-push, git reset --hard, sudo,
+// curl|sh, recursive delete). The name-based policy + per-tool session trust
+// can't see this; only the command text can. Shared by the LevelAllow path and
+// the session-trust short-circuit so the floor can't drift between them.
+//
+// Best-effort by nature: it can't catch every obfuscation. It is NOT the only
+// defense — the truly catastrophic class (rm -rf /, fork bombs, mkfs, reverse
+// shells) is hard-blocked upstream regardless of permissions (bash.go
+// security.ValidateCommand + the executor pre-flight). This floor adds a
+// conscious-confirm step for the irreversible/privileged-but-not-catastrophic
+// class so per-tool session trust never blanket-runs it.
+func isElevatedBash(toolName string, args map[string]any) bool {
+	if toolName != "bash" {
+		return false
+	}
+	danger, _ := ClassifyBashArgs(args)
+	return danger == BashDangerElevated
+}
+
+// mustConfirmDespiteTrust reports whether a call must STILL prompt even when its
+// tool is trusted for the session. ssh is always outward-facing/irreversible to
+// ANY host, so it never gets blanket session-trust (per-command "Always allow"
+// via the cache is still honored — that's a conscious per-command choice). bash
+// is gated only when the command itself is elevated.
+func mustConfirmDespiteTrust(toolName string, args map[string]any) bool {
+	if toolName == "ssh" {
+		return true
+	}
+	return isElevatedBash(toolName, args)
 }
 
 // askUser prompts the user for permission.
@@ -183,22 +219,20 @@ func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]
 	// Handle the decision
 	switch decision {
 	case DecisionAllow:
-		// For caution-level tools, auto-approve future uses of same tool type
-		if GetToolRiskLevel(toolName) == RiskMedium {
-			m.mu.Lock()
-			m.autoApprovedTools[toolName] = true
-			m.mu.Unlock()
-		}
+		// Trust this tool for the rest of the session (ALL risk levels — extends
+		// the old RiskMedium-only behavior to bash et al, so one approval stops
+		// the per-command re-prompting). Dangerous bash is still gated in Check
+		// via isElevatedBash, so trust never auto-runs rm -rf / sudo / force-push.
+		m.mu.Lock()
+		m.autoApprovedTools[toolName] = true
+		m.mu.Unlock()
 		return &Response{Allowed: true, Decision: decision}, nil
 
 	case DecisionAllowSession:
 		m.rememberKey(key, decision)
-		// Also mark caution-level tools for auto-approve
-		if GetToolRiskLevel(toolName) == RiskMedium {
-			m.mu.Lock()
-			m.autoApprovedTools[toolName] = true
-			m.mu.Unlock()
-		}
+		m.mu.Lock()
+		m.autoApprovedTools[toolName] = true
+		m.mu.Unlock()
 		return &Response{Allowed: true, Decision: decision}, nil
 
 	case DecisionDeny:

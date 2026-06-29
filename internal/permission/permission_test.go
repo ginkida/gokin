@@ -305,7 +305,11 @@ func TestManagerAutoApprove(t *testing.T) {
 	}
 }
 
-func TestManagerAutoApproveNotForHigh(t *testing.T) {
+// TestManagerAutoApproveHighAfterAllow: a RiskHigh tool (bash) is trusted for
+// the session after ONE approval — it must not re-prompt on every distinct
+// command (the prompt-fatigue fix). Different commands are still covered by the
+// per-tool trust.
+func TestManagerAutoApproveHighAfterAllow(t *testing.T) {
 	callCount := 0
 	m := NewManager(nil, true)
 	m.SetPromptHandler(func(ctx context.Context, req *Request) (Decision, error) {
@@ -314,11 +318,57 @@ func TestManagerAutoApproveNotForHigh(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	// "bash" is RiskHigh, should NOT auto-approve
-	m.Check(ctx, "bash", map[string]any{"command": "ls"})
-	m.Check(ctx, "bash", map[string]any{"command": "ls"})
-	if callCount != 2 {
-		t.Errorf("RiskHigh should prompt every time, handler called %d times", callCount)
+	m.Check(ctx, "bash", map[string]any{"command": "ls"})       // prompts once
+	m.Check(ctx, "bash", map[string]any{"command": "go build"}) // DIFFERENT cmd → trusted
+	m.Check(ctx, "bash", map[string]any{"command": "go test"})  // still trusted
+	if callCount != 1 {
+		t.Errorf("bash should prompt once then be trusted for the session; handler called %d times", callCount)
+	}
+}
+
+// TestManagerElevatedBashAlwaysPrompts: even when bash is trusted for the
+// session, an irreversible/privilege-escalating command (sudo, force-push,
+// rm -rf, curl|sh) MUST still be consciously confirmed — the action-semantics
+// floor. Session trust never auto-runs these.
+func TestManagerElevatedBashAlwaysPrompts(t *testing.T) {
+	callCount := 0
+	m := NewManager(nil, true)
+	m.SetPromptHandler(func(ctx context.Context, req *Request) (Decision, error) {
+		callCount++
+		return DecisionAllow, nil
+	})
+
+	ctx := context.Background()
+	m.Check(ctx, "bash", map[string]any{"command": "ls"}) // trusts bash for the session
+	if callCount != 1 {
+		t.Fatalf("setup: first bash should prompt once, got %d", callCount)
+	}
+	// A dangerous command re-prompts every time despite the trust.
+	m.Check(ctx, "bash", map[string]any{"command": "sudo apt update"})
+	m.Check(ctx, "bash", map[string]any{"command": "sudo apt update"})
+	if callCount != 3 {
+		t.Errorf("elevated bash must re-confirm even when bash is trusted; handler called %d times, want 3", callCount)
+	}
+}
+
+// TestManagerSSHNeverBlanketTrusts: ssh is outward-facing to ANY host, so even
+// after one "allow" it must re-prompt on every call — per-tool session trust
+// never blanket-runs ssh (the action-semantics floor for ssh, mirroring the
+// elevated-bash floor).
+func TestManagerSSHNeverBlanketTrusts(t *testing.T) {
+	callCount := 0
+	m := NewManager(nil, true)
+	m.SetPromptHandler(func(ctx context.Context, req *Request) (Decision, error) {
+		callCount++
+		return DecisionAllow, nil
+	})
+
+	ctx := context.Background()
+	m.Check(ctx, "ssh", map[string]any{"host": "a", "command": "uptime"})
+	m.Check(ctx, "ssh", map[string]any{"host": "b", "command": "uptime"})
+	m.Check(ctx, "ssh", map[string]any{"host": "c", "command": "uptime"})
+	if callCount != 3 {
+		t.Errorf("ssh must prompt every time (no blanket session-trust); handler called %d times, want 3", callCount)
 	}
 }
 

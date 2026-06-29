@@ -41,9 +41,9 @@ func ClassifyBashCommand(cmd string) (BashDanger, string) {
 	}
 
 	switch {
-	case strings.Contains(n, "git push") && hasShortOrLongForceFlag(n):
+	case isGitPush(n) && hasShortOrLongForceFlag(n):
 		return BashDangerElevated, "force-pushes to a remote — rewrites published history, very hard to undo"
-	case strings.Contains(n, "git push"):
+	case isGitPush(n):
 		return BashDangerElevated, "pushes commits to a remote — an external, hard-to-revert side effect"
 	case strings.Contains(n, "git reset --hard"):
 		return BashDangerElevated, "git reset --hard discards uncommitted work — irreversible"
@@ -95,16 +95,86 @@ func pipesRemoteToShell(n string) bool {
 	return false
 }
 
-// usesSudo reports whether sudo runs as a command (start of the line or after a
-// shell separator) — avoids flagging "echo sudo" / "grep sudo file".
-func usesSudo(n string) bool {
-	if n == "sudo" || strings.HasPrefix(n, "sudo ") {
-		return true
-	}
-	for _, sep := range []string{"&& sudo ", "|| sudo ", "| sudo ", "; sudo "} {
-		if strings.Contains(n, sep) {
+// isGitPush reports whether n invokes `git push`, tolerating git's global
+// options between `git` and the subcommand (`git -C /repo push`, `git -c k=v
+// push`, `git --no-pager push`) which a literal "git push" substring misses.
+// It walks tokens after each `git`, skipping option flags (and the value of
+// `-C`/`-c`/`--git-dir`/`--work-tree`/`--namespace`), and checks the first
+// non-option token is `push` — so `git log --grep push` is NOT flagged.
+func isGitPush(n string) bool {
+	fields := strings.Fields(n)
+	for i, f := range fields {
+		if f != "git" {
+			continue
+		}
+		j := i + 1
+		for j < len(fields) {
+			t := fields[j]
+			switch {
+			case t == "-c" || t == "-C" || t == "--git-dir" || t == "--work-tree" || t == "--namespace":
+				j += 2 // option consumes its value
+			case strings.HasPrefix(t, "-"):
+				j++ // a valueless flag (e.g. --no-pager)
+			default:
+				goto check
+			}
+		}
+	check:
+		if j < len(fields) && fields[j] == "push" {
 			return true
 		}
 	}
 	return false
+}
+
+// usesSudo reports whether sudo runs as a command — at the start of a shell
+// segment (after stripping VAR=VAL env-prefixes) or carried inside a shell `-c`
+// wrapper. Avoids flagging "echo sudo" / "grep sudo file"; catches `sudo x`,
+// `a && sudo x`, `FOO=1 sudo x`, and `bash -c '... sudo ...'`. Over-approximates
+// the wrapper case (errs toward prompting), which is the safe direction.
+func usesSudo(n string) bool {
+	for _, seg := range splitOnShellSeparators(n) {
+		fields := strings.Fields(seg)
+		k := 0
+		for k < len(fields) && isEnvAssignment(fields[k]) {
+			k++
+		}
+		if k < len(fields) && fields[k] == "sudo" {
+			return true
+		}
+	}
+	if strings.Contains(n, "sudo") {
+		for _, w := range []string{"bash -c", "sh -c", "zsh -c", "dash -c", "bash -lc", "sh -lc"} {
+			if strings.Contains(n, w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splitOnShellSeparators splits an already-normalized command on top-level shell
+// separators (&& || | ;). Longer operators are listed first so `||`/`&&` win
+// over `|`.
+func splitOnShellSeparators(n string) []string {
+	repl := strings.NewReplacer("&&", "\x00", "||", "\x00", "|", "\x00", ";", "\x00")
+	return strings.Split(repl.Replace(n), "\x00")
+}
+
+// isEnvAssignment reports whether tok is a NAME=VALUE shell env-assignment
+// (so `FOO=1 sudo …` treats sudo as the command, not FOO).
+func isEnvAssignment(tok string) bool {
+	eq := strings.IndexByte(tok, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i, r := range tok[:eq] {
+		switch {
+		case r == '_' || (r >= 'a' && r <= 'z'):
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
