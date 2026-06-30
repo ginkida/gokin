@@ -67,6 +67,16 @@ func persistHealthLocked() {
 }
 
 func healthFilePath() (string, error) {
+	// Test/ops override: redirect provider-health persistence to an explicit
+	// path. Tests (client + app TestMain) point this at a throwaway file so the
+	// suite neither READS the developer's real (often degraded) glm/kimi scores
+	// — which made the GLM/Kimi retry-boost tests fail locally while CI stayed
+	// green — nor WRITES test scores back into the installed gokin's real
+	// ~/Library/Application Support/gokin/provider_health.json. Empty by default
+	// in normal runs.
+	if override := os.Getenv("GOKIN_PROVIDER_HEALTH_FILE"); override != "" {
+		return override, nil
+	}
 	configBase, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
