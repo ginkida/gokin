@@ -1551,7 +1551,12 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				}
 				m.lastSubmitTime = time.Now()
 
-				m.input.AddToHistory(value) // Save to history
+				// Expand collapsed-paste chips to their real content for the
+				// model BEFORE Reset (which clears the paste store). The echo
+				// stays collapsed (value); history keeps the expanded form so a
+				// recalled paste-message resubmits correctly.
+				expanded := m.input.ExpandedValue()
+				m.input.AddToHistory(expanded)
 				m.input.Reset()
 				m.state = StateProcessing
 				m.streamStartTime = time.Now()  // Start timeout tracking
@@ -1565,7 +1570,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.output.AppendLine("")
 
 				if m.onSubmit != nil {
-					m.onSubmit(value)
+					m.onSubmit(expanded)
 				}
 				return nil
 			}
@@ -1583,13 +1588,16 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				}
 				m.lastSubmitTime = time.Now()
 
-				m.input.AddToHistory(value)
+				// Expand collapsed-paste chips before Reset (clears the store);
+				// echo stays collapsed (value), history + model get expanded.
+				expanded := m.input.ExpandedValue()
+				m.input.AddToHistory(expanded)
 				m.input.Reset()
 				m.output.AppendLine(m.styles.FormatUserMessage(value))
 				m.output.AppendLine("")
 
 				if m.onSubmit != nil {
-					m.onSubmit(value)
+					m.onSubmit(expanded)
 				}
 				return nil
 			}

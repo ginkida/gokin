@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -131,6 +133,15 @@ type InputModel struct {
 
 	// Placeholder context
 	activeTask string
+
+	// Paste collapsing (Claude-Code-style): a large bracketed paste is replaced
+	// in the textarea with a compact "[Pasted text #N +M lines]" chip; the real
+	// content is stored here, keyed by N, and expanded back on submit
+	// (ExpandedValue). Keeps the input readable instead of dumping hundreds of
+	// lines. Cleared on Reset. The map is reference-shared across the by-value
+	// Model copies (intended — chips accumulate across keystrokes until Reset).
+	pastes   map[int]string
+	pasteSeq int
 }
 
 // NewInputModel creates a new input model.
@@ -336,6 +347,14 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 		// Handle history search mode
 		if m.historySearchMode {
 			return m.handleHistorySearch(msg)
+		}
+
+		// Collapse a LARGE bracketed paste into a compact "[Pasted text #N …]"
+		// chip so the input doesn't fill with hundreds of lines; the real
+		// content is restored on submit (ExpandedValue). Small pastes fall
+		// through to the normal textarea insert below.
+		if msg.Paste && isLargePaste(string(msg.Runes)) {
+			return m.collapsePaste(string(msg.Runes)), nil
 		}
 
 		switch msg.Type {
@@ -1139,12 +1158,97 @@ func (m InputModel) Value() string {
 	return strings.TrimSpace(m.textarea.Value())
 }
 
+// --- Paste collapsing (Claude-Code-style) ---
+
+const (
+	pasteCollapseMinLines = 4   // ≥ this many lines → collapse
+	pasteCollapseMinChars = 400 // …or a single line ≥ this many runes
+)
+
+// pastePlaceholderRe matches the chips collapsePaste produces, for ExpandedValue.
+var pastePlaceholderRe = regexp.MustCompile(`\[Pasted text #(\d+) \+\d+ (?:lines?|chars?)\]`)
+
+// isLargePaste reports whether a bracketed paste is big enough to collapse into
+// a chip rather than insert verbatim.
+func isLargePaste(text string) bool {
+	if strings.Count(text, "\n") >= pasteCollapseMinLines-1 {
+		return true
+	}
+	return len([]rune(text)) >= pasteCollapseMinChars
+}
+
+// pasteUnit returns the singular/plural unit word for a count.
+func pasteUnit(n int, singular string) string {
+	if n == 1 {
+		return singular
+	}
+	return singular + "s"
+}
+
+// pastePlaceholder is the compact chip shown in the input for a collapsed paste.
+// Round-tripped by pastePlaceholderRe / ExpandedValue.
+func pastePlaceholder(id int, text string) string {
+	if nl := strings.Count(text, "\n"); nl > 0 {
+		lines := nl + 1
+		return fmt.Sprintf("[Pasted text #%d +%d %s]", id, lines, pasteUnit(lines, "line"))
+	}
+	chars := len([]rune(text))
+	return fmt.Sprintf("[Pasted text #%d +%d %s]", id, chars, pasteUnit(chars, "char"))
+}
+
+// collapsePaste stores a large paste and inserts its compact chip at the cursor.
+func (m InputModel) collapsePaste(text string) InputModel {
+	if m.pastes == nil {
+		m.pastes = make(map[int]string)
+	}
+	m.pasteSeq++
+	id := m.pasteSeq
+	m.pastes[id] = text
+	m.textarea.InsertString(pastePlaceholder(id, text))
+	// The chip never begins a /command or @file, and we skip the normal
+	// post-insert suggestion refresh by returning early — so clear any open
+	// suggestion/ghost/arg-hint state here, else a dropdown that was showing
+	// when the paste landed stays stale (and the next Enter could accept it
+	// instead of submitting).
+	m.showSuggestions = false
+	m.suggestions = nil
+	m.fileSuggestions = nil
+	m.ghostText = ""
+	m.showArgHints = false
+	m.currentCommand = nil
+	return m
+}
+
+// ExpandedValue returns the input value with every paste chip replaced by its
+// stored content — the form sent to the model. Value() stays collapsed (used for
+// rendering, the scrollback echo, and history). A chip whose id has no stored
+// content (e.g. the user typed a lookalike) is left as-is.
+func (m InputModel) ExpandedValue() string {
+	v := m.Value()
+	if len(m.pastes) == 0 {
+		return v
+	}
+	return pastePlaceholderRe.ReplaceAllStringFunc(v, func(chip string) string {
+		sm := pastePlaceholderRe.FindStringSubmatch(chip)
+		if sm == nil {
+			return chip
+		}
+		id, _ := strconv.Atoi(sm[1])
+		if content, ok := m.pastes[id]; ok {
+			return content
+		}
+		return chip
+	})
+}
+
 // Reset clears the input and optionally saves to history.
 func (m *InputModel) Reset() {
 	m.textarea.Reset()
 	m.textarea.SetHeight(1) // Shrink back to single line after send
 	m.historyIndex = -1
 	m.savedInput = ""
+	m.pastes = nil // drop collapsed-paste content for the next compose
+	m.pasteSeq = 0
 }
 
 // InsertNewline adds a newline at the cursor position and grows the input height.
