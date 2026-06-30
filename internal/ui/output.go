@@ -465,14 +465,15 @@ func (m *OutputModel) doViewportUpdate() {
 			m.state.mu.Unlock()
 		}
 	} else {
-		// Smart unfreeze: if user is near the bottom (within 3 lines), auto-unfreeze
-		totalLines := m.viewport.TotalLineCount()
-		visibleBottom := m.viewport.YOffset + m.viewport.Height
-		if totalLines > 0 && totalLines-visibleBottom <= 3 {
-			m.state.frozen = false
-			m.state.scrollTarget = totalLines - m.viewport.Height
-			m.state.scrolling = true
-		}
+		// Frozen = the user scrolled up to read; leave the viewport exactly where
+		// it is (no auto-scroll) so they can read WHILE the agent streams.
+		// Following resumes when they scroll back to the bottom (the scroll
+		// handlers clear frozen at AtBottom) or send a new message.
+		//
+		// (Previously a heuristic auto-unfroze within 3 lines of the bottom — but
+		// a single mouse-wheel notch IS 3 lines, so one wheel-up got snapped right
+		// back down mid-read. Following users never reach this branch; they use
+		// the !frozen path above, so dropping the heuristic doesn't affect them.)
 		m.state.mu.Unlock()
 	}
 }
@@ -624,8 +625,14 @@ func (m OutputModel) IsFrozen() bool {
 
 // SetFrozen freezes or unfreezes the viewport auto-scroll.
 // When frozen, new content won't cause the viewport to jump to the bottom.
+// Freezing also cancels any in-flight smooth auto-scroll (TickSmoothScroll)
+// so a scroll-up the user just made isn't dragged back toward the bottom by an
+// animation that was already running when they froze.
 func (m *OutputModel) SetFrozen(frozen bool) {
 	m.state.mu.Lock()
 	m.state.frozen = frozen
+	if frozen {
+		m.state.scrolling = false
+	}
 	m.state.mu.Unlock()
 }

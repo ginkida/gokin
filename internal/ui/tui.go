@@ -509,6 +509,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.output, cmd = m.output.Update(msg)
 		cmds = append(cmds, cmd)
+		// A wheel scroll pauses stream auto-follow while the user reads up (so the
+		// next chunk doesn't snap them back), and resumes it once they're back at
+		// the bottom — lets them scroll freely WHILE the agent is writing.
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			m.output.SetFrozen(!m.output.IsAtBottom())
+		}
 
 	default:
 		// Handle message types
@@ -1566,6 +1572,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.responseToolDuration = 0      // Reset tool timing for new response
 				m.responseToolCount = 0
 				m.responseToolFailures = 0
+				m.output.SetFrozen(false) // new turn → follow the response from the bottom (clears any leftover scroll-up freeze)
 				m.output.AppendLine(m.styles.FormatUserMessage(value))
 				m.output.AppendLine("")
 
@@ -1640,6 +1647,9 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		// Forward page up/down to output viewport for scrolling
 		var cmd tea.Cmd
 		m.output, cmd = m.output.Update(msg)
+		// Pause/resume stream auto-follow by whether the user paged away from the
+		// bottom — lets them page through history while the agent is writing.
+		m.output.SetFrozen(!m.output.IsAtBottom())
 		return cmd
 	}
 
@@ -1660,6 +1670,19 @@ func (m *Model) openModelSelector() {
 			m.modelSelectedIndex = i
 			break
 		}
+	}
+}
+
+// markResponseStarted marks the first content of a new response. It also clears
+// any leftover scroll-up freeze so the response is followed from the bottom —
+// covers BOTH a direct submit and a type-ahead/dequeued submit (the latter
+// re-enters the app's handleSubmit, never the UI KeyEnter reset). It fires only
+// on the first chunk (responseHeaderShown false→true), so a mid-response
+// scroll-up stays frozen for the rest of that response.
+func (m *Model) markResponseStarted() {
+	if !m.responseHeaderShown {
+		m.responseHeaderShown = true
+		m.output.SetFrozen(false)
 	}
 }
 
@@ -1692,9 +1715,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.slowWarningShown = false
 		m.state = StateStreaming
 
-		if !m.responseHeaderShown {
-			m.responseHeaderShown = true
-		}
+		m.markResponseStarted()
 
 		m.output.AppendThinkingStream(string(msg))
 
@@ -1710,9 +1731,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.output.EndThinking()
 
 		// Mark response as started (no header in Claude Code style)
-		if !m.responseHeaderShown {
-			m.responseHeaderShown = true
-		}
+		m.markResponseStarted()
 
 		m.output.AppendTextStream(string(msg))
 		m.currentResponseBuf.WriteString(string(msg))
@@ -1728,9 +1747,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.output.EndThinking()
 
 		// Mark response as started (no header in Claude Code style)
-		if !m.responseHeaderShown {
-			m.responseHeaderShown = true
-		}
+		m.markResponseStarted()
 
 		// Generate tool info for status line display
 		toolInfo := m.extractToolInfoFromArgs(msg.Name, msg.Args)
