@@ -3,6 +3,7 @@ package tools
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFindClosestLines_SingleLine_ExactMatch(t *testing.T) {
@@ -97,6 +98,67 @@ func TestLcsLength(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("lcsLength(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+// TestFindClosestLines_LargeFileSkipsScan pins the resource-exhaustion fix:
+// above maxClosestLinesScanLines, findClosestLines must return a zero score
+// WITHOUT running the O(fileLines × oldLines × lineLen²) LCS scan
+// (blockSimilarity -> lineSimilarity -> lcsLength). A large but legitimate
+// file (vendored/generated/log) with a stale old_string used to burn real
+// single-core CPU with no ctx-cancellation anywhere in the chain and no
+// size cap of its own — bounded here by asserting the call completes fast
+// even at well beyond the cap, proving the scan itself never runs.
+func TestFindClosestLines_LargeFileSkipsScan(t *testing.T) {
+	lineCount := maxClosestLinesScanLines + 5000
+	lines := make([]string, lineCount)
+	for i := range lines {
+		lines[i] = strings.Repeat("x", 150) // realistic long-ish line
+	}
+	// Embed an EXACT match deep in the huge file. Without the cap the scan
+	// would find it at score 1.0 — so a zero-value result here is only
+	// possible if the guard skipped the scan entirely, not a coincidence of
+	// low similarity scores.
+	target := "func handleRequest(w http.ResponseWriter, r *http.Request) {"
+	matchLine := lineCount / 2
+	lines[matchLine] = target
+	content := strings.Join(lines, "\n")
+
+	start := time.Now()
+	best, line, score := findClosestLines(content, target)
+	elapsed := time.Since(start)
+
+	if score != 0 || best != "" || line != 0 {
+		t.Errorf("expected zero-value result above the scan cap despite an exact match at line %d — got best=%q line=%d score=%.2f (guard did not skip the scan)",
+			matchLine+1, best, line, score)
+	}
+	// The full scan on a file this size takes seconds of CPU (measured ~3-10s
+	// in the audit's own reproduction); the capped path is a couple of
+	// strings.Split calls, so a generous 1s bound reliably distinguishes
+	// "skipped" from "ran the full scan" without being a flaky tight bound.
+	if elapsed > time.Second {
+		t.Errorf("findClosestLines took %v above the scan cap — the size guard did not short-circuit the full scan", elapsed)
+	}
+}
+
+// A file just under the cap must still run the real scan (no false-negative
+// on the boundary — the cap must not silently disable the feature for
+// ordinary large-ish files).
+func TestFindClosestLines_UnderCapStillScans(t *testing.T) {
+	lineCount := maxClosestLinesScanLines - 1
+	lines := make([]string, lineCount)
+	for i := range lines {
+		lines[i] = "filler line of no particular interest"
+	}
+	lines[lineCount/2] = "func handleRequest(w http.ResponseWriter, r *http.Request) {"
+	content := strings.Join(lines, "\n")
+
+	best, line, score := findClosestLines(content, "func handleReqeust(w http.ResponseWriter, r *http.Request) {")
+	if score < 0.5 {
+		t.Errorf("expected a real match just under the cap, got score=%.2f best=%q", score, best)
+	}
+	if line != lineCount/2+1 {
+		t.Errorf("expected line %d, got %d", lineCount/2+1, line)
 	}
 }
 

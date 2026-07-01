@@ -2121,7 +2121,7 @@ func (b *Builder) assembleApp() *App {
 		promptBuilder:         b.promptBuilder,
 		contextAgent:          b.contextAgent,
 		permManager:           b.permManager,
-		permResponseChan:      make(chan permission.Decision, 2),
+		permPending:           make(map[string]chan permission.Decision),
 		questionResponseChan:  make(chan string, 1),
 		diffResponseChan:      make(chan ui.DiffDecision, 1),
 		multiDiffResponseChan: make(chan map[string]ui.DiffDecision, 1),
@@ -2486,15 +2486,18 @@ func (a *coordinatorToolAdapter) Start() {
 }
 
 func (a *coordinatorToolAdapter) WaitWithTimeout(timeout time.Duration) (map[string]any, error) {
+	// Coordinator.WaitWithTimeout returns a partial results snapshot ALONGSIDE
+	// a timeout/cancellation error now — whatever sub-tasks finished before
+	// the deadline. Convert and pass it through instead of discarding it on
+	// any non-nil err; CoordinateTool.Execute renders it with a note about
+	// which tasks didn't finish rather than losing completed work to a bare
+	// error.
 	results, err := a.coord.WaitWithTimeout(timeout)
-	if err != nil {
-		return nil, err
-	}
 	out := make(map[string]any, len(results))
 	for k, v := range results {
 		out[k] = v
 	}
-	return out, nil
+	return out, err
 }
 
 func (a *coordinatorToolAdapter) GetStatus() any {

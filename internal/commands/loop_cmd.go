@@ -50,6 +50,7 @@ func (c *LoopCommand) Usage() string {
 	return `/loop                       List active loops
 /loop <task>                Start self-paced loop
 /loop <interval> <task>     Start interval loop (e.g. /loop 5m sync repo)
+/loop [...] --max-tokens <N>  Cap lifetime spend (e.g. 200k, 2m); auto-pauses on reaching it
 /loop status <id>           Show loop summary + last 5 iterations
 /loop output <id>           Show full iteration log (markdown render)
 /loop stop <id>             Stop a loop (preserves history)
@@ -65,7 +66,7 @@ func (c *LoopCommand) GetMetadata() CommandMetadata {
 		Icon:     "loop",
 		Priority: 60,
 		HasArgs:  true,
-		ArgHint:  "[<interval>] <task> | status|output|stop|pause|resume|now|remove <id>",
+		ArgHint:  "[<interval>] <task> [--max-tokens <N>] | status|output|stop|pause|resume|now|remove <id>",
 	}
 }
 

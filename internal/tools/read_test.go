@@ -405,6 +405,52 @@ func TestChunkedReader_Close(t *testing.T) {
 	}
 }
 
+// clampChunkLimit must bound `limit` at BOTH ends. Only the lower bound
+// (limit<=0) was clamped before; a huge model-supplied limit passed straight
+// through as ChunkedReader's chunkSize, which preallocates/scans that many
+// lines in one NextChunk() call regardless of the file's actual size —
+// defeating the >10MB "large file" chunking safeguard this path exists for.
+func TestClampChunkLimit(t *testing.T) {
+	tests := []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{"zero falls back to default", 0, DefaultChunkSize},
+		{"negative falls back to default", -5, DefaultChunkSize},
+		{"within bounds passes through", 500, 500},
+		{"at the cap passes through", MaxChunkSize, MaxChunkSize},
+		{"oversized clamps to cap", 50_000_000, MaxChunkSize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clampChunkLimit(tt.limit); got != tt.want {
+				t.Errorf("clampChunkLimit(%d) = %d, want %d", tt.limit, got, tt.want)
+			}
+		})
+	}
+}
+
+// End-to-end: readLargeFile must not choke on an oversized model-supplied
+// limit (it should clamp and proceed normally, not panic/hang/OOM).
+func TestReadLargeFile_ClampsOversizedLimit(t *testing.T) {
+	content := "line 1\nline 2\nline 3\n"
+	filePath := createTestFile(t, content)
+
+	tool := NewReadTool(t.TempDir())
+	tool.SetAllowedDirs([]string{filepath.Dir(filePath)})
+
+	result, err := tool.readLargeFile(context.Background(), filePath, map[string]any{
+		"limit": float64(50_000_000),
+	})
+	if err != nil {
+		t.Fatalf("readLargeFile() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("readLargeFile() failed: %s", result.Error)
+	}
+}
+
 func TestNewChunkedReader_InvalidPath(t *testing.T) {
 	_, err := NewChunkedReader("/tmp/nonexistent_file_12345.txt", 10)
 	if err == nil {

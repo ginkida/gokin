@@ -160,8 +160,15 @@ type (
 		ProjectType string
 		ProjectName string
 	}
-	// PermissionRequestMsg requests user permission for a tool.
+	// PermissionRequestMsg requests user permission for a tool. ID correlates
+	// this specific request to its own response channel on the app side —
+	// load-bearing for concurrent requests (e.g. the coordinate tool's
+	// parallel sub-agents each hitting a LevelAsk tool): without a per-request
+	// ID, a decision meant for one prompt (including an auto-deny fired for a
+	// request that arrived while another modal was already showing) could
+	// resolve a DIFFERENT, unrelated request instead.
 	PermissionRequestMsg struct {
+		ID        string
 		ToolName  string
 		Args      map[string]any
 		RiskLevel string

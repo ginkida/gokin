@@ -30,15 +30,19 @@ func TestPermissionPromptNumberedOptions(t *testing.T) {
 // decision (so the numbers aren't decorative); y/a/n still work via the same path.
 func TestPermissionNumberKeyDecides(t *testing.T) {
 	var got PermissionDecision
+	var gotID string
 	decided := false
 	m := NewModel()
-	m.SetPermissionCallback(func(d PermissionDecision) { got = d; decided = true })
-	m.permRequest = &PermissionRequestMsg{ToolName: "bash", RiskLevel: "high"}
+	m.SetPermissionCallback(func(id string, d PermissionDecision) { gotID = id; got = d; decided = true })
+	m.permRequest = &PermissionRequestMsg{ID: "req-1", ToolName: "bash", RiskLevel: "high"}
 	m.state = StatePermissionPrompt
 
 	_ = m.handlePermissionPromptKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	if !decided || got != PermissionDeny {
 		t.Errorf("pressing 3 should Deny: decided=%v decision=%v", decided, got)
+	}
+	if gotID != "req-1" {
+		t.Errorf("callback should receive the displayed request's ID, got %q", gotID)
 	}
 }
 

@@ -1166,6 +1166,23 @@ func ClassifyError(err error, errMsg string) ErrorCategory {
 	if msg == "" && err != nil {
 		msg = err.Error()
 	}
+
+	// A provider capacity signal (GLM 1301/1302/1303/1305 "overloaded", rate
+	// limits) is transient and self-resolving. Route through the shared
+	// keyword-based detector (client/overload.go) rather than a local pattern
+	// list so this can't drift from what the foreground/sub-agent patient-retry
+	// loops already recognize. Without this, an overload during a plan step
+	// (executeDirectStep, or executeDelegatedStep once the sub-agent's own
+	// patience is exhausted) fell through to ErrorUnknown -> permanent
+	// FailStep instead of pausing for auto-retry.
+	overloadErr := err
+	if overloadErr == nil && msg != "" {
+		overloadErr = errors.New(msg)
+	}
+	if client.IsOverloadError(overloadErr) {
+		return ErrorTransient
+	}
+
 	lower := strings.ToLower(msg)
 
 	// Transient patterns

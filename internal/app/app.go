@@ -139,8 +139,18 @@ type App struct {
 	contextAgent        *appcontext.ContextAgent
 
 	// Permission management
-	permManager      *permission.Manager
-	permResponseChan chan permission.Decision
+	permManager *permission.Manager
+	// permPending correlates each in-flight promptPermission call to its OWN
+	// response channel, keyed by a unique request ID. A single shared channel
+	// used to let a concurrent second permission prompt's auto-deny (tui.go's
+	// "don't overwrite an active modal, auto-deny the new one" guard) resolve
+	// the WRONG — still-displayed, user-visible — request whenever two
+	// prompts were in flight at once (e.g. the coordinate tool's parallel
+	// sub-agents each hitting a LevelAsk tool). permPendingMu is a leaf lock —
+	// never held while acquiring a.mu.
+	permPendingMu sync.Mutex
+	permPending   map[string]chan permission.Decision
+	permReqSeq    atomic.Int64
 
 	// Question handling
 	questionResponseChan chan string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -250,14 +251,23 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 
 	// Wait for completion
 	timeout := time.Duration(timeoutMinutes) * time.Minute
-	results, err := coord.WaitWithTimeout(timeout)
-	if err != nil {
-		return NewErrorResult(fmt.Sprintf("coordination failed: %v", err)), nil
+	results, waitErr := coord.WaitWithTimeout(timeout)
+	if waitErr != nil && len(results) == 0 {
+		// Nothing finished before the deadline/cancellation — there's
+		// nothing to show, the bare error is the only useful information.
+		return NewErrorResult(fmt.Sprintf("coordination failed: %v", waitErr)), nil
 	}
 
-	// Build result summary
+	// Build result summary. A non-nil waitErr with a non-empty results map
+	// means SOME tasks finished before the timeout/cancellation hit — render
+	// them instead of discarding completed work, and note which tasks are
+	// still incomplete below.
 	var sb strings.Builder
-	sb.WriteString("## Coordination Complete\n\n")
+	if waitErr != nil {
+		fmt.Fprintf(&sb, "## Coordination Incomplete — %v\n\n", waitErr)
+	} else {
+		sb.WriteString("## Coordination Complete\n\n")
+	}
 
 	// Reverse map internal IDs to user IDs
 	reverseMap := make(map[string]string)
@@ -314,6 +324,33 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 			fmt.Fprintf(&sb, "Output:\n```\n%s\n```\n", output)
 		}
 		sb.WriteString("\n")
+	}
+
+	if waitErr != nil {
+		// Tasks with no entry in `results` never got a Result before the
+		// deadline/cancellation hit — still running (or never started), not
+		// failed. List them separately so the model doesn't retry work that
+		// may still be in flight, or conflate "didn't finish" with "failed".
+		var incomplete []string
+		for userID, internalID := range taskIDMap {
+			if _, ok := results[internalID]; !ok {
+				incomplete = append(incomplete, userID)
+			}
+		}
+		sort.Strings(incomplete)
+		if len(incomplete) > 0 {
+			fmt.Fprintf(&sb, "**Did not finish (still running when the timeout/cancellation hit):** %s\n\n",
+				strings.Join(incomplete, ", "))
+		}
+		fmt.Fprintf(&sb, "---\n**Summary:** %d succeeded, %d failed, %d did not finish out of %d tasks\n",
+			succeeded, failed, len(incomplete), len(tasksAny))
+		return NewSuccessResultWithData(sb.String(), map[string]any{
+			"succeeded":       succeeded,
+			"failed":          failed,
+			"did_not_finish":  len(incomplete),
+			"total":           len(tasksAny),
+			"coordination_ok": false,
+		}), nil
 	}
 
 	fmt.Fprintf(&sb, "---\n**Summary:** %d succeeded, %d failed out of %d tasks\n",

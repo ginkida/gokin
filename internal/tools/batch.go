@@ -652,6 +652,16 @@ func (t *BatchTool) formatResult(op string, result BatchResult, dryRun bool) Too
 	}
 
 	if len(result.Failed) > 0 {
+		if len(result.Succeeded) == 0 {
+			// Nothing succeeded — every file that wasn't skipped errored, so
+			// this is a total failure, not a partial success. The "success"
+			// class of tool must never report Success:true on an all-error
+			// path (the same honesty fix already applied to refactor's
+			// executeRename) — a model trusting the top-level success flag
+			// would believe a total-failure batch delete/rename/replace
+			// actually changed something.
+			return NewErrorResult(sb.String())
+		}
 		return NewSuccessResultWithData(sb.String(), map[string]any{
 			"succeeded": len(result.Succeeded),
 			"failed":    len(result.Failed),

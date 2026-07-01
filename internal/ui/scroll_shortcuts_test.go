@@ -106,6 +106,63 @@ func TestMouseWheelUpFreezesDuringStreaming(t *testing.T) {
 	}
 }
 
+// TestCtrlFDoesNotSnapBackNearBottom pins the fix for a regression the
+// v0.100.59 wheel/PgUp/PgDn fix introduced elsewhere: ctrl+f used a
+// `total-bottom<=2` PROXIMITY heuristic to decide when to unfreeze, instead
+// of the exact IsAtBottom() check. That heuristic could unfreeze while the
+// viewport was still 1-2 lines short of the true bottom (not at the bottom
+// per AtBottom()), so the next streamed chunk would then snap the viewport
+// the rest of the way with no further user input — the same class of bug
+// the wheel/PgUp/PgDn fix was built to eliminate, just left behind here.
+func TestCtrlFDoesNotSnapBackNearBottom(t *testing.T) {
+	m := NewModel()
+	m.state = StateStreaming
+	m.output.SetSize(80, 10)
+	for i := range 41 {
+		m.output.AppendLine(fmt.Sprintf("line %02d", i))
+	}
+	maxYOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
+	// Land 1 line short of the true bottom after the +3 step — within the
+	// old "<=2" proximity band that wrongly unfroze, but NOT AtBottom().
+	m.output.viewport.SetYOffset(maxYOffset - 1 - 3)
+	m.output.SetFrozen(true)
+
+	_ = m.handleGlobalKeys(tea.KeyMsg{Type: tea.KeyCtrlF})
+
+	if m.output.viewport.YOffset != maxYOffset-1 {
+		t.Fatalf("YOffset after ctrl+f = %d, want %d", m.output.viewport.YOffset, maxYOffset-1)
+	}
+	if m.output.IsAtBottom() {
+		t.Fatalf("test setup invalid: expected NOT at bottom after this step")
+	}
+	if !m.output.IsFrozen() {
+		t.Fatalf("ctrl+f one line short of the true bottom must stay frozen (no snap-back)")
+	}
+}
+
+// TestCtrlFUnfreezesAtTrueBottom: ctrl+f that actually reaches the bottom
+// still resumes auto-follow (the fix must not regress the true-bottom case).
+func TestCtrlFUnfreezesAtTrueBottom(t *testing.T) {
+	m := NewModel()
+	m.state = StateStreaming
+	m.output.SetSize(80, 10)
+	for i := range 40 {
+		m.output.AppendLine(fmt.Sprintf("line %02d", i))
+	}
+	maxYOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
+	m.output.viewport.SetYOffset(maxYOffset - 3) // ctrl+f's +3 step lands exactly at the bottom.
+	m.output.SetFrozen(true)
+
+	_ = m.handleGlobalKeys(tea.KeyMsg{Type: tea.KeyCtrlF})
+
+	if !m.output.IsAtBottom() {
+		t.Fatalf("test setup invalid: expected to reach the true bottom")
+	}
+	if m.output.IsFrozen() {
+		t.Fatalf("ctrl+f reaching the true bottom must unfreeze auto-follow")
+	}
+}
+
 // TestSubmitResetsFrozen: sending a new message clears a leftover scroll-up
 // freeze so the new response is followed from the bottom.
 func TestSubmitResetsFrozen(t *testing.T) {

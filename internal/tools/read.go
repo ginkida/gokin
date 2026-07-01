@@ -26,6 +26,14 @@ const (
 	DefaultReadLimit = 2000
 	// LargeFileSizeMB is the threshold for considering a file "large".
 	LargeFileSizeMB = 10
+	// MaxChunkSize upper-bounds a single readLargeFile call's chunk size. The
+	// >10MB "large file" path exists specifically to avoid loading a huge
+	// file at once; without this clamp a model-supplied `limit` (e.g. a
+	// "read the whole thing" mistake) is passed straight through as
+	// ChunkedReader's chunkSize, which preallocates and scans that many
+	// lines into memory in one NextChunk() call — proportional to the
+	// requested size, not the file's actual size, defeating the safeguard.
+	MaxChunkSize = 5 * DefaultChunkSize
 )
 
 // ChunkedReader provides efficient reading of large files in chunks.
@@ -395,16 +403,28 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 }
 
+// clampChunkLimit bounds a model-supplied chunk `limit` at both ends —
+// non-positive falls back to DefaultChunkSize, oversized is capped at
+// MaxChunkSize — mirroring the both-sided clamps already used for grep's
+// context_lines / tree's depth. Extracted as a pure function so the clamp
+// itself is unit-testable independent of ChunkedReader/file I/O.
+func clampChunkLimit(limit int) int {
+	if limit <= 0 {
+		return DefaultChunkSize
+	}
+	if limit > MaxChunkSize {
+		return MaxChunkSize
+	}
+	return limit
+}
+
 // readLargeFile reads a large file using chunked streaming.
 func (t *ReadTool) readLargeFile(ctx context.Context, filePath string, args map[string]any) (ToolResult, error) {
 	offset := GetIntDefault(args, "offset", 1)
-	limit := GetIntDefault(args, "limit", DefaultChunkSize)
+	limit := clampChunkLimit(GetIntDefault(args, "limit", DefaultChunkSize))
 
 	if offset < 1 {
 		offset = 1
-	}
-	if limit <= 0 {
-		limit = DefaultChunkSize
 	}
 
 	// Create chunked reader

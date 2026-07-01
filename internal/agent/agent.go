@@ -3351,6 +3351,13 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			// Add function response to history (with multimodal parts if present)
 			var funcParts []*genai.Part
 			for _, result := range results {
+				// Defense-in-depth: executeToolsParallel pre-populates every
+				// slot so this should never be nil, but the consumer must
+				// never assume it — the sibling executeDirectly (below)
+				// guards the identical pattern for the same reason.
+				if result.Response == nil {
+					continue
+				}
 				part := genai.NewPartFromFunctionResponse(result.Response.Name, result.Response.Response)
 				part.FunctionResponse.ID = result.Response.ID
 				funcParts = append(funcParts, part)
@@ -4637,12 +4644,26 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 	return results
 }
 
+// parallelToolCleanupGrace is how long executeToolsParallel waits for
+// straggler goroutines after ctx cancellation before giving up and freezing
+// `results`. A package var (not a const) so tests can shrink it to exercise
+// the abandon-and-freeze path without a real multi-second sleep.
+var parallelToolCleanupGrace = 5 * time.Second
+
 // executeToolsParallel executes multiple tools concurrently.
 func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.FunctionCall,
 	results []toolCallResult, indexMap map[*genai.FunctionCall]int) {
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	// abandoned is set once the cleanup grace below expires with goroutines
+	// still running. From that point every write to `results` is a no-op —
+	// the caller (executeLoop) has, by definition, already moved on to read
+	// `results` unsynchronized once this function returns, so a straggler
+	// goroutine writing into it afterward would be a genuine data race. Every
+	// write site below goes through safeWrite so none of them can slip past
+	// this guard once it's set.
+	abandoned := false
 	semaphore := make(chan struct{}, 5) // Max 5 concurrent executions
 
 	cancelledResult := func(fc *genai.FunctionCall) toolCallResult {
@@ -4655,12 +4676,29 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 		}
 	}
 
+	safeWrite := func(idx int, result toolCallResult) {
+		mu.Lock()
+		if !abandoned {
+			results[idx] = result
+		}
+		mu.Unlock()
+	}
+
+	// Pre-populate every slot with a placeholder BEFORE spawning goroutines.
+	// If the cleanup grace below expires while a goroutine is still deep
+	// inside a non-ctx-aware tool call, its slot must never be left at the
+	// zero-valued toolCallResult{} (nil Response) — the caller dereferences
+	// result.Response.Name unconditionally, so a zero-valued slot is a
+	// nil-pointer panic (this is what made the sibling executeDirectly's
+	// `if r.Response != nil` guard necessary in the first place).
+	for _, call := range calls {
+		results[indexMap[call]] = cancelledResult(call)
+	}
+
 	for _, call := range calls {
 		// Check context before spawning goroutine to avoid unnecessary work
 		if ctx.Err() != nil {
-			mu.Lock()
-			results[indexMap[call]] = cancelledResult(call)
-			mu.Unlock()
+			safeWrite(indexMap[call], cancelledResult(call))
 			continue
 		}
 
@@ -4673,23 +4711,19 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 					length := runtime.Stack(stack, false)
 					logging.Error("panic in parallel tool execution",
 						"tool", fc.Name, "panic", r, "stack", string(stack[:length]))
-					mu.Lock()
-					results[indexMap[fc]] = toolCallResult{
+					safeWrite(indexMap[fc], toolCallResult{
 						Response: &genai.FunctionResponse{
 							ID:       fc.ID,
 							Name:     fc.Name,
 							Response: tools.NewErrorResult(tools.FormatToolPanic(fc.Name, r)).ToMap(),
 						},
-					}
-					mu.Unlock()
+					})
 				}
 			}()
 
 			// Check context again before trying to acquire semaphore
 			if ctx.Err() != nil {
-				mu.Lock()
-				results[indexMap[fc]] = cancelledResult(fc)
-				mu.Unlock()
+				safeWrite(indexMap[fc], cancelledResult(fc))
 				return
 			}
 
@@ -4699,9 +4733,7 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 			case semaphore <- struct{}{}:
 				acquired = true
 			case <-ctx.Done():
-				mu.Lock()
-				results[indexMap[fc]] = cancelledResult(fc)
-				mu.Unlock()
+				safeWrite(indexMap[fc], cancelledResult(fc))
 				return
 			}
 
@@ -4711,9 +4743,7 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 
 			result := a.executeToolWithReflection(ctx, fc)
 
-			mu.Lock()
-			results[indexMap[fc]] = result
-			mu.Unlock()
+			safeWrite(indexMap[fc], result)
 		}(call)
 	}
 
@@ -4730,12 +4760,20 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 	case <-ctx.Done():
 		// Context cancelled, but goroutines should exit on their own
 		// Wait a bit more for cleanup
-		cleanupTimer := time.NewTimer(5 * time.Second)
+		cleanupTimer := time.NewTimer(parallelToolCleanupGrace)
 		select {
 		case <-done:
 			cleanupTimer.Stop()
 		case <-cleanupTimer.C:
 			logging.Warn("executeToolsParallel: some goroutines did not exit in time")
+			// Freeze `results` from this point — every pre-populated slot
+			// already holds a valid cancelledResult, and any straggler
+			// goroutine's eventual write is now a safeWrite no-op instead of
+			// an unsynchronized write into a slice the caller has moved on
+			// from.
+			mu.Lock()
+			abandoned = true
+			mu.Unlock()
 		}
 	}
 }

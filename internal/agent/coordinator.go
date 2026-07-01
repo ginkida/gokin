@@ -506,7 +506,17 @@ func (c *Coordinator) isAllComplete() bool {
 
 // notifyAllComplete calls the completion callback.
 func (c *Coordinator) notifyAllComplete() {
-	if c.onAllComplete == nil {
+	// c.onAllComplete is written under c.mu by Wait/WaitWithTimeout — reading
+	// it here without the lock (as this used to) is a genuine data race,
+	// caught by -race when the completion callback fires (from the
+	// coordinator's own scheduling flow) concurrently with a caller's
+	// Wait/WaitWithTimeout call installing it. Snapshot under the lock, then
+	// invoke the callback OUTSIDE any lock (same "callbacks never under
+	// lock" discipline as the MCP manager).
+	c.mu.RLock()
+	cb := c.onAllComplete
+	c.mu.RUnlock()
+	if cb == nil {
 		return
 	}
 
@@ -517,7 +527,7 @@ func (c *Coordinator) notifyAllComplete() {
 	}
 	c.mu.RUnlock()
 
-	c.onAllComplete(results)
+	cb(results)
 }
 
 // Wait blocks until all tasks are complete.
@@ -547,6 +557,23 @@ func (c *Coordinator) Wait() map[string]*AgentResult {
 	}
 }
 
+// partialResults snapshots whatever results are available right now — the
+// same c.tasks[taskID].Result data notifyAllComplete uses for the
+// all-complete case, but callable at any point (including a task still
+// in-flight, whose Result is simply not yet set and is omitted here).
+func (c *Coordinator) partialResults() map[string]*AgentResult {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	results := make(map[string]*AgentResult, len(c.completed))
+	for taskID, task := range c.tasks {
+		if task.Result != nil {
+			results[taskID] = task.Result
+		}
+	}
+	return results
+}
+
 // WaitWithTimeout waits for completion with a timeout.
 func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentResult, error) {
 	resultChan := make(chan map[string]*AgentResult, 1)
@@ -573,11 +600,16 @@ func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentR
 	case <-timer.C:
 		// Clean up: ensure callback won't block if called later
 		once.Do(func() {})
-		return nil, fmt.Errorf("coordination timed out after %v", timeout)
+		// Surface whatever tasks DID finish before the deadline instead of
+		// discarding them — checkCompletedAgents populates task.Result as
+		// each agent finishes, independent of whether all tasks are done, so
+		// a 4-of-5 partial completion is real data sitting in c.tasks right
+		// now, not just an all-or-nothing outcome.
+		return c.partialResults(), fmt.Errorf("coordination timed out after %v", timeout)
 	case <-c.ctx.Done():
 		// Clean up: ensure callback won't block if called later
 		once.Do(func() {})
-		return nil, c.ctx.Err()
+		return c.partialResults(), c.ctx.Err()
 	}
 }
 

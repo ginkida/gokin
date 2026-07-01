@@ -868,6 +868,19 @@ func findFuzzyMatch(content, oldStr string) (string, int) {
 	return actual, startLine + 1 // 1-indexed line number
 }
 
+// maxClosestLinesScanLines bounds findClosestLines' fuzzy-match scan to files
+// under this many lines. The scan (blockSimilarity -> lineSimilarity ->
+// lcsLength) is O(fileLines × oldLines × lineLen²) with no ctx-cancellation
+// anywhere in the chain and no file-size cap of its own (unlike read.go's
+// real 10MB "large file" threshold) — on a large but entirely legitimate
+// file (vendored/generated/log) a stale old_string burns real single-core
+// CPU in a goroutine the executor's timeout can only detach from, not kill,
+// and each retried edit attempt leaks another one. Above this bound, skip
+// straight to the generic "read the file first" hint instead of running the
+// full scan — the model still gets an actionable error, just without the
+// closest-match preview.
+const maxClosestLinesScanLines = 20000
+
 // findClosestLines finds the most similar contiguous block in content to oldStr.
 // Uses a simple line-level similarity score (longest common subsequence ratio).
 // Returns the best matching block, its 1-indexed line number, and similarity score (0-1).
@@ -877,6 +890,9 @@ func findClosestLines(content, oldStr string) (string, int, float64) {
 	oldLineCount := len(oldLines)
 
 	if oldLineCount == 0 || len(contentLines) == 0 {
+		return "", 0, 0
+	}
+	if len(contentLines) > maxClosestLinesScanLines {
 		return "", 0, 0
 	}
 

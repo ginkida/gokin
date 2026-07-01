@@ -1332,29 +1332,41 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 						continue waitLoop
 					}
 
-					// Handle Z.AI/GLM error format
+					// Handle Z.AI/GLM error format. GLM's undocumented shape carries
+					// a "code" field (e.g. "1305"); the standard Anthropic-compatible
+					// shape used by deepseek/kimi/minimax instead carries "type"
+					// (e.g. "overloaded_error") under event["type"]=="error", handled
+					// by the "case \"error\":" branch in processStreamEvent below,
+					// which preserves errType. Gate on errCode != "" so that path
+					// isn't hijacked for non-GLM providers — matching on the mere
+					// presence of an "error" key meant classifyGLMErrorCode's
+					// "unknown code" fallback silently dropped errType (e.g.
+					// "overloaded_error" -> "") for every AnthropicClient-backed
+					// provider, defeating IsOverloadError's keyword match on the
+					// resulting error text for deepseek/kimi/minimax.
 					if errObj, ok := event["error"].(map[string]any); ok {
-						errCode := stringFromMap(errObj, "code")
-						errMsg := stringFromMap(errObj, "message")
-						retryable, keyword, description := classifyGLMErrorCode(errCode, errMsg)
-						logging.Error("Z.AI API error", "code", errCode, "message", errMsg, "retryable", retryable)
-						// Embed keyword so isRetryableError picks the error up via substring match.
-						// Example: "GLM server overloaded — retrying (1305): <raw>".
-						errText := fmt.Sprintf("%s (%s)", description, errCode)
-						if keyword != "" {
-							errText = fmt.Sprintf("%s [%s] (%s): %s", description, keyword, errCode, errMsg)
+						if errCode := stringFromMap(errObj, "code"); errCode != "" {
+							errMsg := stringFromMap(errObj, "message")
+							retryable, keyword, description := classifyGLMErrorCode(errCode, errMsg)
+							logging.Error("Z.AI API error", "code", errCode, "message", errMsg, "retryable", retryable)
+							// Embed keyword so isRetryableError picks the error up via substring match.
+							// Example: "GLM server overloaded — retrying (1305): <raw>".
+							errText := fmt.Sprintf("%s (%s)", description, errCode)
+							if keyword != "" {
+								errText = fmt.Sprintf("%s [%s] (%s): %s", description, keyword, errCode, errMsg)
+							}
+							if statusCb != nil {
+								statusCb.OnError(errors.New(description), retryable)
+							}
+							select {
+							case chunks <- ResponseChunk{
+								Error: errors.New(errText),
+								Done:  true,
+							}:
+							case <-ctx.Done():
+							}
+							return
 						}
-						if statusCb != nil {
-							statusCb.OnError(errors.New(description), retryable)
-						}
-						select {
-						case chunks <- ResponseChunk{
-							Error: errors.New(errText),
-							Done:  true,
-						}:
-						case <-ctx.Done():
-						}
-						return
 					}
 
 					// Process event

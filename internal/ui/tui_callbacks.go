@@ -29,8 +29,9 @@ func (m *Model) SetCallbacks(onSubmit func(string), onQuit func()) {
 	m.onQuit = onQuit
 }
 
-// SetPermissionCallback sets the permission decision callback.
-func (m *Model) SetPermissionCallback(onPermission func(PermissionDecision)) {
+// SetPermissionCallback sets the permission decision callback. reqID
+// identifies which in-flight permission request the decision answers.
+func (m *Model) SetPermissionCallback(onPermission func(reqID string, decision PermissionDecision)) {
 	m.onPermission = onPermission
 }
 

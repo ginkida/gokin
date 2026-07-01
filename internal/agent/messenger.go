@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -121,6 +122,39 @@ func (m *AgentMessenger) ReceiveResponse(ctx context.Context, messageID string) 
 	}
 }
 
+// spawnResponse builds the ask_agent response text for a spawned sub-agent,
+// preferring any partial result.Output over a bare error string — mirrors
+// router.go's executeViaSubAgent partial-work preservation (v0.100.34/.45).
+// Spawn is synchronous and stores the agent's PARTIAL result (Output +
+// Error) into the runner BEFORE returning a non-nil err, so the real "never
+// started" failure shape is an EMPTY agentID, not err != nil. Branching on
+// spawnErr first (as this code used to) discarded real edits/output whenever
+// Spawn returned an error (timeout, max-turn-limit, round timeout, etc.).
+func spawnResponse(runner *Runner, agentID string, spawnErr error, errPrefix, noOutputMsg string) string {
+	if agentID != "" {
+		if result, ok := runner.GetResult(agentID); ok {
+			reason := result.Error
+			if reason == "" && spawnErr != nil {
+				reason = spawnErr.Error()
+			}
+			if strings.TrimSpace(result.Output) != "" {
+				if reason != "" {
+					return result.Output + fmt.Sprintf("\n\n⚠ The agent stopped before finishing: %s", reason)
+				}
+				return result.Output
+			}
+			if reason != "" {
+				return fmt.Sprintf("%s: %s", errPrefix, reason)
+			}
+			return noOutputMsg
+		}
+	}
+	if spawnErr != nil {
+		return fmt.Sprintf("%s: %v", errPrefix, spawnErr)
+	}
+	return noOutputMsg
+}
+
 // handleHelpRequest spawns a sub-agent to answer a help request.
 func (m *AgentMessenger) handleHelpRequest(msg Message) {
 	ctx, cancel := context.WithTimeout(m.ctx, 3*time.Minute)
@@ -143,18 +177,9 @@ func (m *AgentMessenger) handleHelpRequest(msg Message) {
 	// Spawn the helper agent
 	agentID, err := m.runner.Spawn(ctx, agentType, prompt, 15, "")
 
-	var response string
-	if err != nil {
-		response = fmt.Sprintf("Error from %s agent: %v", agentType, err)
-	} else {
-		// Get the result using exact agent ID (not by type which may return wrong result)
-		result, ok := m.runner.GetResult(agentID)
-		if ok && result.Output != "" {
-			response = result.Output
-		} else {
-			response = fmt.Sprintf("No response from %s agent", agentType)
-		}
-	}
+	response := spawnResponse(m.runner, agentID, err,
+		fmt.Sprintf("Error from %s agent", agentType),
+		fmt.Sprintf("No response from %s agent", agentType))
 
 	// Send response back (non-blocking to prevent goroutine leak)
 	m.mu.RLock()
@@ -234,20 +259,9 @@ func (m *AgentMessenger) handleDelegation(msg Message) {
 	spawnCtx := WithDelegationDepth(ctx, delegationDepth)
 	agentID, err := m.runner.Spawn(spawnCtx, agentType, msg.Content, maxTurns, model)
 
-	var response string
-	if err != nil {
-		response = fmt.Sprintf("Delegation failed: %v", err)
-	} else {
-		// Get the result
-		result, ok := m.runner.GetResult(agentID)
-		if ok && result.Output != "" {
-			response = result.Output
-		} else if ok && result.Error != "" {
-			response = fmt.Sprintf("Delegated agent failed: %s", result.Error)
-		} else {
-			response = "Delegated task completed (no output)"
-		}
-	}
+	response := spawnResponse(m.runner, agentID, err,
+		"Delegation failed",
+		"Delegated task completed (no output)")
 
 	// Send response back (non-blocking to prevent goroutine leak)
 	m.mu.RLock()

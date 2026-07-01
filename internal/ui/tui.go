@@ -170,7 +170,7 @@ type Model struct {
 	// Callbacks
 	onSubmit                   func(message string)
 	onQuit                     func()
-	onPermission               func(decision PermissionDecision)
+	onPermission               func(reqID string, decision PermissionDecision)
 	onQuestion                 func(answer string)
 	onPlanApproval             func(decision PlanApprovalDecision)
 	onPlanApprovalWithFeedback func(decision PlanApprovalDecision, feedback string) // Extended callback with feedback
@@ -632,6 +632,10 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 // flow, and the quick keys can't drift. Deny returns to input + interrupts; allow
 // variants resume processing.
 func (m *Model) decidePermission(decision PermissionDecision) tea.Cmd {
+	var reqID string
+	if m.permRequest != nil {
+		reqID = m.permRequest.ID
+	}
 	m.permRequest = nil
 	m.permSelectedOption = 0
 	if decision == PermissionDeny || decision == PermissionDenySession {
@@ -642,13 +646,13 @@ func (m *Model) decidePermission(decision PermissionDecision) tea.Cmd {
 			m.onInterrupt()
 		}
 		if m.onPermission != nil {
-			m.onPermission(decision)
+			m.onPermission(reqID, decision)
 		}
 		return m.input.Focus()
 	}
 	m.state = StateProcessing
 	if m.onPermission != nil {
-		m.onPermission(decision)
+		m.onPermission(reqID, decision)
 	}
 	return nil
 }
@@ -1319,12 +1323,14 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			maxOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
 			newOffset := min(m.output.viewport.YOffset+3, maxOffset)
 			m.output.viewport.SetYOffset(newOffset)
-			// Unfreeze if at bottom
-			total := m.output.viewport.TotalLineCount()
-			bottom := m.output.viewport.YOffset + m.output.viewport.Height
-			if total-bottom <= 2 {
-				m.output.SetFrozen(false)
-			}
+			// Use the exact IsAtBottom() check the mouse-wheel/PgUp/PgDn fix
+			// (v0.100.59) established — NOT a "within N lines" proximity
+			// heuristic. A proximity tolerance unfreezes auto-follow a line
+			// or two short of the true bottom; the very next streamed chunk
+			// then snaps the viewport the rest of the way with no further
+			// user input, reproducing the exact snap-back bug that fix
+			// removed from output.go, just via ctrl+f instead of the wheel.
+			m.output.SetFrozen(!m.output.IsAtBottom())
 			return nil
 		case "ctrl+g": // Toggle freeze scroll (for text selection)
 			frozen := !m.output.IsFrozen()
@@ -2005,10 +2011,13 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case PermissionRequestMsg:
 		// Guard: don't overwrite an active modal prompt (prevents lost responses).
-		// Auto-deny so the blocked caller doesn't hang until timeout.
+		// Auto-deny so the blocked caller doesn't hang until timeout. Deny
+		// THIS incoming request specifically (msg.ID) — NOT whatever request
+		// is currently displayed — so the still-showing prompt's own decision
+		// can never be misattributed to this one, or vice versa.
 		if m.isModalState() {
 			if m.onPermission != nil {
-				m.onPermission(PermissionDeny)
+				m.onPermission(msg.ID, PermissionDeny)
 			}
 		} else {
 			m.permRequest = &msg

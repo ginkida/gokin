@@ -40,6 +40,29 @@ func (a *App) permPromptTimeout() time.Duration {
 	}
 }
 
+// registerPermRequest allocates a unique ID and a dedicated response channel
+// for one in-flight promptPermission call, and returns a cleanup func that
+// unregisters it. Keying by ID (instead of the old single shared channel) is
+// what lets handlePermissionDecision correlate a UI decision — including the
+// auto-deny fired for a SECOND concurrent request while a modal is already
+// showing the first — to the exact request it answers, never a different
+// one racing on the same channel.
+func (a *App) registerPermRequest() (id string, ch chan permission.Decision, cleanup func()) {
+	id = fmt.Sprintf("perm-%d", a.permReqSeq.Add(1))
+	ch = make(chan permission.Decision, 1)
+
+	a.permPendingMu.Lock()
+	a.permPending[id] = ch
+	a.permPendingMu.Unlock()
+
+	cleanup = func() {
+		a.permPendingMu.Lock()
+		delete(a.permPending, id)
+		a.permPendingMu.Unlock()
+	}
+	return id, ch, cleanup
+}
+
 // promptPermission is called by the permission manager to ask the user for permission.
 // It sends a request to the TUI and waits for a response with timeout.
 func (a *App) promptPermission(ctx context.Context, req *permission.Request) (permission.Decision, error) {
@@ -47,8 +70,12 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 		return permission.DecisionAllow, nil
 	}
 
+	reqID, respCh, cleanup := a.registerPermRequest()
+	defer cleanup()
+
 	// Send permission request to TUI
 	a.safeSendToProgram(ui.PermissionRequestMsg{
+		ID:        reqID,
 		ToolName:  req.ToolName,
 		Args:      req.Args,
 		RiskLevel: req.RiskLevel.String(),
@@ -75,7 +102,7 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 	// Wait for response from TUI with timeout and periodic warnings
 	for {
 		select {
-		case decision := <-a.permResponseChan:
+		case decision := <-respCh:
 			return decision, nil
 		case <-ctx.Done():
 			return permission.DecisionDeny, ctx.Err()
@@ -98,8 +125,13 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 	}
 }
 
-// handlePermissionDecision is called by the TUI when the user makes a permission decision.
-func (a *App) handlePermissionDecision(decision ui.PermissionDecision) {
+// handlePermissionDecision is called by the TUI when the user makes a
+// permission decision — reqID identifies WHICH promptPermission call this
+// answers (the currently-displayed request for a normal user decision, or a
+// different, just-arrived request for the "auto-deny while a modal is
+// already showing" case). Routing by ID is what prevents a decision meant
+// for one concurrent permission prompt from resolving a different one.
+func (a *App) handlePermissionDecision(reqID string, decision ui.PermissionDecision) {
 	// Convert UI decision to permission.Decision
 	var permDecision permission.Decision
 	switch decision {
@@ -115,14 +147,24 @@ func (a *App) handlePermissionDecision(decision ui.PermissionDecision) {
 		permDecision = permission.DecisionDeny
 	}
 
+	a.permPendingMu.Lock()
+	ch, ok := a.permPending[reqID]
+	a.permPendingMu.Unlock()
+	if !ok {
+		// The request already timed out / its promptPermission call already
+		// returned (cleanup ran) — nothing waiting to deliver to.
+		logging.Warn("permission decision for unknown or expired request", "request_id", reqID)
+		return
+	}
+
 	// Send decision to the waiting promptPermission call with timeout
 	timer := time.NewTimer(30 * time.Second)
 	defer timer.Stop()
 
 	select {
-	case a.permResponseChan <- permDecision:
+	case ch <- permDecision:
 	case <-timer.C:
-		logging.Warn("permission response channel timeout - no listener")
+		logging.Warn("permission response channel timeout - no listener", "request_id", reqID)
 	}
 }
 
