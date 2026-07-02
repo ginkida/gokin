@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -586,6 +588,191 @@ func TestIntegration_RefreshTools_ClientReplacedDuringListTools(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("RefreshTools did not return after client swap")
+	}
+}
+
+// httpJSONRPCServer builds an httptest.Server speaking plain-JSON MCP over
+// HTTP. handlers maps a JSON-RPC method name to a responder; a method with
+// no handler gets an empty {} result. Used to drive Manager.Connect (which
+// dials via the real NewClient/HTTP transport, unlike the in-process
+// fakeTransport used elsewhere in this file for pre-connected clients).
+func httpJSONRPCServer(t *testing.T, handlers map[string]func(id any) map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var msg JSONRPCMessage
+		_ = json.NewDecoder(r.Body).Decode(&msg)
+		w.Header().Set("Content-Type", "application/json")
+		result := map[string]any{}
+		if h, ok := handlers[msg.Method]; ok {
+			result = h(msg.ID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0", "id": msg.ID, "result": result,
+		})
+	}))
+}
+
+func initializeResult() map[string]any {
+	return map[string]any{
+		"protocolVersion": ProtocolVersion,
+		"serverInfo":      map[string]any{"name": "fake", "version": "0.1.0"},
+	}
+}
+
+// TestIntegration_Connect_DoesNotHoldLockDuringHandshake pins the fix:
+// Manager.Connect must release m.mu for the whole NewClient+Initialize+
+// ListTools handshake, not hold it — otherwise every other manager
+// operation (GetTools, GetServerStatus, the periodic health-check loop,
+// Disconnect, a concurrent Connect/AddServer/RemoveServer) blocks for the
+// duration of one server's connect.
+func TestIntegration_Connect_DoesNotHoldLockDuringHandshake(t *testing.T) {
+	listToolsBlocker := make(chan struct{})
+	srv := httpJSONRPCServer(t, map[string]func(id any) map[string]any{
+		MethodInitialize: func(id any) map[string]any { return initializeResult() },
+		MethodToolsList: func(id any) map[string]any {
+			<-listToolsBlocker
+			return map[string]any{"tools": []any{}}
+		},
+	})
+	defer srv.Close()
+
+	cfg := &ServerConfig{Name: "fake", Transport: "http", URL: srv.URL, Timeout: 5 * time.Second}
+	m := NewManager([]*ServerConfig{cfg})
+
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- m.Connect(t.Context(), "fake") }()
+
+	// Give Connect time to reach the blocked ListTools call — it must have
+	// released the lock by now if the fix is in place.
+	time.Sleep(150 * time.Millisecond)
+
+	unblocked := make(chan struct{})
+	go func() {
+		m.GetTools() // any m.mu-taking read; must not block on Connect
+		close(unblocked)
+	}()
+	select {
+	case <-unblocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetTools() blocked while Connect was mid-handshake — m.mu is held across the network I/O")
+	}
+
+	close(listToolsBlocker)
+	select {
+	case err := <-connectErr:
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Connect never returned after ListTools unblocked")
+	}
+
+	if got := m.GetTools(); len(got) != 0 {
+		t.Errorf("unexpected tools after connect: %v", toolNames(got))
+	}
+}
+
+// TestIntegration_Connect_ServerRemovedDuringHandshake covers the race the
+// fix's commit-time re-check closes: if RemoveServer() runs while Connect
+// is mid-handshake (network I/O unlocked), Connect must NOT resurrect the
+// removed server by committing its freshly-dialed client anyway.
+func TestIntegration_Connect_ServerRemovedDuringHandshake(t *testing.T) {
+	listToolsBlocker := make(chan struct{})
+	srv := httpJSONRPCServer(t, map[string]func(id any) map[string]any{
+		MethodInitialize: func(id any) map[string]any { return initializeResult() },
+		MethodToolsList: func(id any) map[string]any {
+			<-listToolsBlocker
+			return map[string]any{"tools": []any{}}
+		},
+	})
+	defer srv.Close()
+
+	cfg := &ServerConfig{Name: "fake", Transport: "http", URL: srv.URL, Timeout: 5 * time.Second}
+	m := NewManager([]*ServerConfig{cfg})
+
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- m.Connect(t.Context(), "fake") }()
+
+	time.Sleep(150 * time.Millisecond)
+
+	if err := m.RemoveServer("fake"); err != nil {
+		t.Fatalf("RemoveServer: %v", err)
+	}
+
+	close(listToolsBlocker)
+
+	// Connect's error path calls client.Close() on the now-orphaned freshly
+	// dialed client, which can wait up to 5s for its receive loop to notice
+	// cancellation (see Client.Close) — generous timeout to accommodate that
+	// real, expected wait rather than mistake it for a hang.
+	select {
+	case err := <-connectErr:
+		if err == nil {
+			t.Fatal("Connect should have errored after the server was removed mid-handshake")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Connect never returned")
+	}
+
+	if _, ok := m.GetClient("fake"); ok {
+		t.Error("removed server's client was resurrected by the racing Connect")
+	}
+	if got := m.GetTools(); len(got) != 0 {
+		t.Errorf("removed server's tools leaked into the manager: %v", toolNames(got))
+	}
+}
+
+// TestIntegration_TryReconnectUnhealthy_ServerRemovedDuringReconnect pins
+// the fix: if RemoveServer() runs while tryReconnectUnhealthy's Phase 2
+// (network I/O, unlocked) is in flight for that server, Phase 3 must NOT
+// commit the freshly-reconnected client — otherwise a "removed" server's
+// tools become callable again, and its orphaned client is never closed by
+// any future Disconnect/RemoveServer (the user already tried and thinks
+// it's gone).
+func TestIntegration_TryReconnectUnhealthy_ServerRemovedDuringReconnect(t *testing.T) {
+	listToolsBlocker := make(chan struct{})
+	srv := httpJSONRPCServer(t, map[string]func(id any) map[string]any{
+		MethodInitialize: func(id any) map[string]any { return initializeResult() },
+		MethodToolsList: func(id any) map[string]any {
+			<-listToolsBlocker
+			return map[string]any{"tools": []any{}}
+		},
+	})
+	defer srv.Close()
+
+	cfg := &ServerConfig{Name: "fake", Transport: "http", URL: srv.URL, Timeout: 5 * time.Second}
+	m := NewManager([]*ServerConfig{cfg})
+	m.mu.Lock()
+	m.health["fake"] = &ServerHealth{Healthy: false}
+	m.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		m.tryReconnectUnhealthy(t.Context())
+		close(done)
+	}()
+
+	// Give tryReconnectUnhealthy time to reach the blocked ListTools call
+	// (Phase 2, unlocked network I/O).
+	time.Sleep(150 * time.Millisecond)
+
+	if err := m.RemoveServer("fake"); err != nil {
+		t.Fatalf("RemoveServer: %v", err)
+	}
+
+	close(listToolsBlocker)
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("tryReconnectUnhealthy never returned")
+	}
+
+	if _, ok := m.GetClient("fake"); ok {
+		t.Error("removed server's client was resurrected by the racing reconnect")
+	}
+	if got := m.GetTools(); len(got) != 0 {
+		t.Errorf("removed server's tools leaked into the manager: %v", toolNames(got))
 	}
 }
 

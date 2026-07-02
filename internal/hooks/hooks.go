@@ -148,47 +148,65 @@ func (c *Context) GetCapturedOutput() string {
 //   - ${ERROR} - error message (on_error only)
 //   - Any environment variable
 func (c *Context) ExpandCommand(command string) string {
-	result := command
-
-	// Built-in variables (shell-escaped to prevent injection)
-	result = strings.ReplaceAll(result, "${TOOL_NAME}", shellEscape(c.ToolName))
-	result = strings.ReplaceAll(result, "${WORK_DIR}", shellEscape(c.WorkDir))
-	result = strings.ReplaceAll(result, "${RESULT}", shellEscape(c.ToolResult))
-	result = strings.ReplaceAll(result, "${ERROR}", shellEscape(c.ToolError))
-
-	// Tool arguments
-	if filePath, ok := c.ToolArgs["file_path"].(string); ok {
-		result = strings.ReplaceAll(result, "${FILE_PATH}", shellEscape(filePath))
-	}
-	if cmd, ok := c.ToolArgs["command"].(string); ok {
-		result = strings.ReplaceAll(result, "${COMMAND}", shellEscape(cmd))
-	}
-	if pattern, ok := c.ToolArgs["pattern"].(string); ok {
-		result = strings.ReplaceAll(result, "${PATTERN}", shellEscape(pattern))
-	}
-	if content, ok := c.ToolArgs["content"].(string); ok {
-		// Truncate content if too long
-		if runes := []rune(content); len(runes) > 100 {
-			content = string(runes[:100]) + "..."
+	// A SINGLE os.Expand pass over the PRISTINE command template — never
+	// re-scan already-substituted output. The old code ran a sequence of
+	// strings.ReplaceAll calls, each rescanning the CUMULATIVE result of all
+	// prior substitutions: if a resolved value (tool name, file path, tool
+	// output, an env var...) happened to literally contain text like
+	// "${WORK_DIR}" or "$PATH", a LATER pass would match and substitute
+	// INSIDE the shellEscape()'d quotes an earlier pass had already emitted,
+	// splicing unescaped/differently-escaped content into the command —
+	// shell command injection via attacker/tool-controlled values. os.Expand
+	// only scans its INPUT string for "$name"/"${name}" tokens; the mapping
+	// function's return value is inserted verbatim into the output and is
+	// never rescanned, which is exactly the single-pass guarantee this
+	// needs. Resolution order (first match wins): built-ins, tool args,
+	// Extra map, then the environment variable fallback.
+	return os.Expand(command, func(key string) string {
+		switch key {
+		case "TOOL_NAME":
+			return shellEscape(c.ToolName)
+		case "WORK_DIR":
+			return shellEscape(c.WorkDir)
+		case "RESULT":
+			return shellEscape(c.ToolResult)
+		case "ERROR":
+			return shellEscape(c.ToolError)
+		case "FILE_PATH":
+			if v, ok := c.ToolArgs["file_path"].(string); ok {
+				return shellEscape(v)
+			}
+			return ""
+		case "COMMAND":
+			if v, ok := c.ToolArgs["command"].(string); ok {
+				return shellEscape(v)
+			}
+			return ""
+		case "PATTERN":
+			if v, ok := c.ToolArgs["pattern"].(string); ok {
+				return shellEscape(v)
+			}
+			return ""
+		case "CONTENT":
+			if v, ok := c.ToolArgs["content"].(string); ok {
+				// Truncate content if too long
+				if runes := []rune(v); len(runes) > 100 {
+					v = string(runes[:100]) + "..."
+				}
+				return shellEscape(v)
+			}
+			return ""
 		}
-		result = strings.ReplaceAll(result, "${CONTENT}", shellEscape(content))
-	}
-
-	// Extra variables
-	for key, val := range c.Extra {
-		result = strings.ReplaceAll(result, "${"+key+"}", shellEscape(val))
-	}
-
-	// Environment variables (fallback). Values are shell-escaped to prevent
-	// injection: a malicious env var like "; rm -rf /" must not be executed.
-	result = os.Expand(result, func(key string) string {
-		if val, ok := os.LookupEnv(key); ok {
-			return shellEscape(val)
+		if v, ok := c.Extra[key]; ok {
+			return shellEscape(v)
+		}
+		// Environment variable fallback. Values are shell-escaped to prevent
+		// injection: a malicious env var like "; rm -rf /" must not be executed.
+		if v, ok := os.LookupEnv(key); ok {
+			return shellEscape(v)
 		}
 		return ""
 	})
-
-	return result
 }
 
 // shellEscape wraps a string in single quotes for safe shell interpolation.

@@ -98,6 +98,25 @@ func TestManager_AddRejectsZeroInterval(t *testing.T) {
 	}
 }
 
+// TestManager_AddRejectsSubPollPeriodInterval: the scheduler can't check
+// more often than DefaultPollPeriod regardless of what IntervalSeconds
+// says, so a value below it is rejected at creation time with an
+// actionable message rather than silently firing on a different cadence
+// than the user typed.
+func TestManager_AddRejectsSubPollPeriodInterval(t *testing.T) {
+	m := NewManager(newMemStorage())
+	if _, err := m.Add("task", ModeInterval, int64(DefaultPollPeriod/time.Second)-1); err == nil {
+		t.Error("Add accepted an interval below DefaultPollPeriod")
+	}
+	// The floor itself and anything above it must still be accepted.
+	if _, err := m.Add("task", ModeInterval, int64(DefaultPollPeriod/time.Second)); err != nil {
+		t.Errorf("Add rejected the floor interval itself: %v", err)
+	}
+	if _, err := m.Add("task2", ModeInterval, 3600); err != nil {
+		t.Errorf("Add rejected a normal 1h interval: %v", err)
+	}
+}
+
 func TestManager_GetReturnsClone(t *testing.T) {
 	m := NewManager(newMemStorage())
 	l, _ := m.Add("task", ModeInterval, 600)

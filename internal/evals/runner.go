@@ -236,12 +236,43 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 	result.Metrics = scoreScenario(scenario, result)
 	result.Score = summarizeScore(result.Metrics)
 
-	if result.Agent.Success && allCommandsSuccessful(result.Verification) {
+	if scenarioPassed(result) {
 		result.Status = "passed"
 	} else {
 		result.Status = "failed"
 	}
 	return result
+}
+
+// scenarioPassed is the full pass/fail decision, extracted as a pure
+// function of the already-computed Result so it's unit-testable without a
+// real workspace/shell (runScenario is the only caller that has to shell
+// out; the decision itself doesn't).
+func scenarioPassed(result Result) bool {
+	return result.Agent.Success && allCommandsSuccessful(result.Verification) && behavioralAssertionsSatisfied(result.Metrics)
+}
+
+// behavioralAssertionsSatisfied reports whether every DECLARED behavioral
+// assertion metric (answer_contains_required / required_files_changed /
+// protected_files_unchanged — present in `metrics` only when the scenario
+// declares the corresponding assertion, see scoreScenario) is true. A
+// scenario with no declared assertions vacuously satisfies this.
+//
+// Without this, Status was computed ONLY from Agent.Success + verification
+// exit codes, never from Metrics/Score — so a genuine no-op on a
+// delivered_state=green trap scenario (verification passes BY
+// CONSTRUCTION on those) still got Status="passed", which flows straight
+// into report.Passed / RequireAllPassed / `eval run`'s exit code,
+// defeating the entire point of the v0.92.0 behavioral-assertions feature
+// for the default pass/fail gate (invisible unless the caller separately
+// adds --fail-metric for that specific metric name).
+func behavioralAssertionsSatisfied(metrics map[string]bool) bool {
+	for _, key := range []string{"answer_contains_required", "required_files_changed", "protected_files_unchanged"} {
+		if v, ok := metrics[key]; ok && !v {
+			return false
+		}
+	}
+	return true
 }
 
 func selectScenarios(all []Scenario, ids []string) ([]Scenario, error) {

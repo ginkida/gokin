@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -149,6 +150,56 @@ func TestContextExpandCommand(t *testing.T) {
 	}
 }
 
+// TestContextExpandCommand_NoDoubleExpansion pins the shell-injection fix:
+// a resolved value that happens to literally contain "${OTHER_VAR}" text
+// must NOT be re-scanned and substituted a second time. The old
+// multi-pass strings.ReplaceAll implementation rescanned the cumulative
+// result after every substitution, so a value like this — plausible from a
+// tool result, a file path, or an attacker-influenced argument — would
+// splice a second shellEscape()'d segment INSIDE the quotes the first
+// substitution already emitted, breaking out of safe quoting.
+func TestContextExpandCommand_NoDoubleExpansion(t *testing.T) {
+	ctx := NewContext("bash", map[string]any{
+		"command": "echo hi",
+	}, "/workspace")
+	// A tool result that literally contains another variable's marker text —
+	// exactly the shape a malicious/adversarial tool output could take.
+	ctx.SetResult("output contains ${WORK_DIR} literally")
+
+	got := ctx.ExpandCommand("echo ${RESULT}")
+	want := "echo " + shellEscape("output contains ${WORK_DIR} literally")
+	if got != want {
+		t.Errorf("ExpandCommand double-expanded a nested marker:\ngot:  %q\nwant: %q", got, want)
+	}
+	// The work dir's real value must NOT appear anywhere in the output —
+	// if it does, the ${WORK_DIR} text embedded in RESULT got re-expanded.
+	if strings.Contains(got, "/workspace") && !strings.Contains(want, "/workspace") {
+		t.Errorf("work dir value leaked via re-expansion of a nested marker: %q", got)
+	}
+}
+
+// TestContextExpandCommand_EnvVarCannotBreakOutOfQuoting: an env var value
+// containing shell metacharacters must stay safely single-quoted, and a
+// value containing a literal "${...}" marker must not trigger re-expansion
+// via the env-var fallback pass either.
+func TestContextExpandCommand_EnvVarCannotBreakOutOfQuoting(t *testing.T) {
+	t.Setenv("GOKIN_TEST_HOOK_VAR", "'; rm -rf / #")
+	ctx := NewContext("bash", map[string]any{}, "/workspace")
+
+	got := ctx.ExpandCommand("echo ${GOKIN_TEST_HOOK_VAR}")
+	want := "echo " + shellEscape("'; rm -rf / #")
+	if got != want {
+		t.Errorf("env var not safely escaped:\ngot:  %q\nwant: %q", got, want)
+	}
+
+	t.Setenv("GOKIN_TEST_HOOK_VAR2", "text with ${ERROR} inside it")
+	ctx.SetError("REAL ERROR VALUE")
+	got = ctx.ExpandCommand("echo ${GOKIN_TEST_HOOK_VAR2}")
+	if strings.Contains(got, "REAL ERROR VALUE") {
+		t.Errorf("an env var's literal ${ERROR} text was re-expanded into the real error value: %q", got)
+	}
+}
+
 func TestManagerBasics(t *testing.T) {
 	m := NewManager(true, "/tmp")
 
@@ -234,6 +285,37 @@ func TestManagerRunSimpleHook(t *testing.T) {
 	}
 	if results[0].Output == "" {
 		t.Error("output should not be empty")
+	}
+}
+
+// TestManagerRunKillsBackgroundedChildOnTimeout pins the process-group kill
+// fix: a hook command that backgrounds a detached child (`sleep 30 &`) and
+// exits immediately itself must NOT hang the hook call for the child's
+// full lifetime. cmd.Wait() only returns once EVERY holder of the
+// stdout/stderr pipe's write end closes it — a backgrounded child inherits
+// that write end and keeps it open long after the immediate shell exits.
+// Before the fix, killHookProcess only signaled the (already-exited) shell
+// process, never the background child, so the hook call hung until the
+// real sleep finished.
+func TestManagerRunKillsBackgroundedChildOnTimeout(t *testing.T) {
+	m := NewManager(true, "/tmp")
+	m.SetTimeout(300 * time.Millisecond)
+	m.AddHook(&Hook{
+		Name:    "backgrounder",
+		Type:    PreTool,
+		Enabled: true,
+		Command: "sleep 30 & exit 0",
+	})
+
+	start := time.Now()
+	results := m.RunPreTool(context.Background(), "bash", nil)
+	elapsed := time.Since(start)
+
+	if len(results) != 1 {
+		t.Fatalf("results count = %d, want 1", len(results))
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("hook took %v to return — the backgrounded child's process group was not killed on timeout", elapsed)
 	}
 }
 

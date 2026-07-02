@@ -155,6 +155,58 @@ func TestRunner_OnePerTick(t *testing.T) {
 	}
 }
 
+// TestRunner_TickRotatesAmongDueLoops pins the fairness fix: a loop that
+// stays perpetually due (e.g. a sub-poll-period loop, or simply one that
+// becomes due again immediately after each fire) must NOT permanently
+// starve a loop created after it. Active() always returns loops in fixed
+// CreatedAt order; before the scanRotation fix, tick() fired only the
+// FIRST due loop it found every single time — loop B here would never
+// fire across any number of ticks.
+func TestRunner_TickRotatesAmongDueLoops(t *testing.T) {
+	mgr := NewManager(newMemStorage())
+	a, err := mgr.Add("loop A — created first, always due", ModeSelfPaced, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := mgr.Add("loop B — created after A", ModeSelfPaced, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spawner := &fakeSpawner{output: "did it", ok: true}
+	idle := &fakeIdle{}
+	idle.set(true)
+
+	r := NewRunner(mgr, spawner.spawn, idle.check)
+
+	forceDue := func(l *Loop) { l.NextRunAt = time.Now().Add(-time.Hour) }
+
+	firedFor := func(id string) bool {
+		got, ok := mgr.Get(id)
+		return ok && got.IterationCount > 0
+	}
+
+	waitForTickToSettle := func() {
+		deadline := time.Now().Add(time.Second)
+		for r.iterationRunning.Load() && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Drive several manual ticks, re-forcing BOTH loops due each time
+	// (simulating a chronically-due loop A) until B gets a turn.
+	for i := 0; i < 8 && !firedFor(b.ID); i++ {
+		forceDue(a)
+		forceDue(b)
+		r.tick(context.Background())
+		waitForTickToSettle()
+	}
+
+	if !firedFor(b.ID) {
+		t.Fatal("loop B never fired across 8 ticks with loop A chronically due — round-robin rotation is not reaching loops created after a chronically-due one")
+	}
+}
+
 func TestRunner_ReChecksIdleBeforeFire(t *testing.T) {
 	// Race scenario: runner sees idle=true at start of tick, but a
 	// user message arrives before the spawn call. Re-check should

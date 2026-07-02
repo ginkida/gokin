@@ -189,15 +189,19 @@ func (m *Manager) RunOnExit(ctx context.Context) []Result {
 
 // killHookProcess attempts graceful shutdown with SIGTERM, then SIGKILL after grace period.
 // The done channel should signal when the process has exited (from the caller's cmd.Wait goroutine).
+// Signals target the WHOLE process group (see setProcAttrForGroup/killProcessGroup), not just
+// the immediate `sh -c` process — a hook command that backgrounds a child (`sleep 9999 &`)
+// would otherwise keep the stdout/stderr pipe open forever, hanging cmd.Wait() (and the whole
+// synchronous PreToolUse/turn) well past this timeout.
 func killHookProcess(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan struct{}) {
 	if cmd.Process == nil {
 		return
 	}
 
 	// Try SIGTERM first for graceful shutdown
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
 		// SIGTERM failed, try SIGKILL immediately
-		cmd.Process.Kill()
+		killProcessGroup(cmd, syscall.SIGKILL)
 		return
 	}
 
@@ -208,7 +212,7 @@ func killHookProcess(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan struc
 		graceTimer.Stop()
 		return // Exited gracefully
 	case <-graceTimer.C:
-		cmd.Process.Kill()
+		killProcessGroup(cmd, syscall.SIGKILL)
 	}
 }
 
@@ -226,6 +230,9 @@ func (m *Manager) executeHook(ctx context.Context, hook *Hook, hctx *Context, ti
 	// Execute command
 	cmd := exec.CommandContext(execCtx, "sh", "-c", command)
 	cmd.Dir = hctx.WorkDir
+	// Own process group so killHookProcess can terminate any backgrounded/
+	// detached children the hook spawns, not just this immediate shell.
+	setProcAttrForGroup(cmd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

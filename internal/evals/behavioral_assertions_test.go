@@ -18,6 +18,68 @@ func passingResult(output string, changed []string) Result {
 	}
 }
 
+// TestBehavioralAssertionsSatisfied pins the fix: Status must fail a
+// scenario when a DECLARED behavioral assertion metric is false, not just
+// when Agent.Success/verification exit codes say otherwise. Before this,
+// runScenario computed Status purely from Agent.Success + verification exit
+// codes, so a genuine no-op on a delivered_state=green trap scenario (whose
+// verification passes BY CONSTRUCTION) still got Status="passed" — the
+// exact no-op-reward hole the v0.92.0 behavioral-assertions feature was
+// built to close, just not wired into the default pass/fail gate.
+func TestBehavioralAssertionsSatisfied(t *testing.T) {
+	tests := []struct {
+		name    string
+		metrics map[string]bool
+		want    bool
+	}{
+		{"no assertions declared", map[string]bool{"task_completed": true}, true},
+		{"answer_contains_required true", map[string]bool{"answer_contains_required": true}, true},
+		{"answer_contains_required false", map[string]bool{"answer_contains_required": false}, false},
+		{"required_files_changed false (the no-op trap)", map[string]bool{"required_files_changed": false}, false},
+		{"protected_files_unchanged false (trap violation)", map[string]bool{"protected_files_unchanged": false}, false},
+		{"all three true", map[string]bool{"answer_contains_required": true, "required_files_changed": true, "protected_files_unchanged": true}, true},
+		{"one of three false", map[string]bool{"answer_contains_required": true, "required_files_changed": false, "protected_files_unchanged": true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := behavioralAssertionsSatisfied(tt.metrics); got != tt.want {
+				t.Errorf("behavioralAssertionsSatisfied(%v) = %v, want %v", tt.metrics, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScenarioPassed_RequiresBehavioralAssertions is the end-to-end version
+// of the fix: a Result that satisfies Agent.Success + verification (as a
+// no-op on a green trap fixture always does, by construction) must NOT
+// count as passed if a declared behavioral assertion metric is false.
+func TestScenarioPassed_RequiresBehavioralAssertions(t *testing.T) {
+	base := passingResult("no changes needed", nil) // Agent.Success=true, verification green
+
+	// No assertions declared at all — passes on the pre-existing conditions.
+	if !scenarioPassed(base) {
+		t.Error("a scenario with no declared assertions should pass on Agent.Success + verification alone")
+	}
+
+	// A no-op on a scenario that DECLARES file_must_change — the exact
+	// no-op-reward hole. verification_passed/task_completed are irrelevant;
+	// this must fail.
+	noopWithAssertion := base
+	noopWithAssertion.Metrics = map[string]bool{"required_files_changed": false}
+	if scenarioPassed(noopWithAssertion) {
+		t.Fatal("a no-op that fails its declared file_must_change assertion must NOT pass, even though Agent.Success and verification are both green")
+	}
+
+	// Pre-existing behavior unaffected: Agent failure still fails regardless
+	// of assertions.
+	failedAgent := base
+	failedAgent.Agent.Success = false
+	failedAgent.Metrics = map[string]bool{"required_files_changed": true}
+	if scenarioPassed(failedAgent) {
+		t.Fatal("Agent.Success=false must still fail the scenario")
+	}
+}
+
 func TestScoreScenario_AssertionsAbsentWhenNotDeclared(t *testing.T) {
 	scenario := Scenario{MaxToolCalls: 10}
 	m := scoreScenario(scenario, passingResult("done", []string{"main.go"}))

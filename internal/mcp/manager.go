@@ -244,43 +244,34 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	return nil
 }
 
-// connectServer connects to a single server and registers its tools.
-// Must be called with m.mu held. Notification-handler wiring happens after
-// the caller releases the lock (see Connect).
-func (m *Manager) connectServer(ctx context.Context, cfg *ServerConfig) error {
-	// Create client
+// dialServer performs the network handshake (NewClient + Initialize +
+// ListTools) for a single server WITHOUT touching manager state or holding
+// m.mu — callers commit the result themselves under the lock, same pattern
+// as RefreshTools/ConnectAll/tryReconnectUnhealthy. Splitting this out is
+// what lets Connect release the lock for the whole handshake instead of
+// holding it (previously up to the client's full request timeout, ~30s+
+// per RPC) across NewClient+Initialize+ListTools — during which every
+// other manager operation (GetServerStatus, GetTools, the periodic
+// health-check loop's CheckHealth/tryReconnectUnhealthy, Disconnect,
+// AddServer, RemoveServer, a concurrent Connect) blocked on m.mu.
+func (m *Manager) dialServer(ctx context.Context, cfg *ServerConfig) (*Client, []*ToolInfo, error) {
 	client, err := NewClient(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("failed to create client: %w", err)
+		return nil, nil, fmt.Errorf("failed to create client: %w", err)
 	}
 
-	// Initialize connection
 	if err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
-		return fmt.Errorf("initialization failed: %w", err)
+		return nil, nil, fmt.Errorf("initialization failed: %w", err)
 	}
 
-	// List tools
 	mcpTools, err := client.ListTools(ctx)
 	if err != nil {
 		_ = client.Close()
-		return fmt.Errorf("failed to list tools: %w", err)
+		return nil, nil, fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	// Store client
-	m.clients[cfg.Name] = client
-
-	// Create tool wrappers
-	for _, t := range mcpTools {
-		tool := NewMCPTool(client, cfg.Name, cfg.ToolPrefix, t)
-		m.tools = append(m.tools, tool)
-	}
-
-	logging.Info("MCP server connected",
-		"name", cfg.Name,
-		"tools", len(mcpTools))
-
-	return nil
+	return client, mcpTools, nil
 }
 
 // Connect connects to a specific server by name.
@@ -297,13 +288,40 @@ func (m *Manager) Connect(ctx context.Context, name string) error {
 		m.mu.Unlock()
 		return nil
 	}
+	m.mu.Unlock()
 
-	if err := m.connectServer(ctx, cfg); err != nil {
-		m.mu.Unlock()
+	// Network handshake WITHOUT the lock held.
+	client, mcpTools, err := m.dialServer(ctx, cfg)
+	if err != nil {
 		return err
 	}
-	client := m.clients[name]
+
+	// Commit under lock. Between the Unlock above and this Lock, the server
+	// could have been connected by a concurrent Connect() call, removed via
+	// RemoveServer, or Disconnect()'d — re-verify before committing so we
+	// never clobber a racing connect's client (leaking ours unclosed) or
+	// resurrect a server the user removed while we were dialing.
+	m.mu.Lock()
+	if _, stillConfigured := m.servers[name]; !stillConfigured {
+		m.mu.Unlock()
+		_ = client.Close()
+		return fmt.Errorf("server %s was removed while connecting", name)
+	}
+	if _, alreadyConnected := m.clients[name]; alreadyConnected {
+		m.mu.Unlock()
+		_ = client.Close()
+		return nil
+	}
+	m.clients[name] = client
+	for _, t := range mcpTools {
+		tool := NewMCPTool(client, cfg.Name, cfg.ToolPrefix, t)
+		m.tools = append(m.tools, tool)
+	}
 	m.mu.Unlock()
+
+	logging.Info("MCP server connected",
+		"name", name,
+		"tools", len(mcpTools))
 
 	// Install notification handler outside the lock.
 	m.wireClientNotifications(name, client)
@@ -992,8 +1010,20 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 			continue
 		}
 
-		// Phase 3: commit results under lock.
+		// Phase 3: commit results under lock. Re-verify the server config
+		// still exists — a concurrent /mcp remove (Disconnect+RemoveServer)
+		// racing this Phase 2 network I/O would otherwise leave an orphaned
+		// client in m.clients/m.tools with no matching m.servers entry: the
+		// "removed" server's tools would be silently callable again, and a
+		// later /mcp add <same name> would reuse the stale entry instead of
+		// creating a fresh connection.
 		m.mu.Lock()
+		if _, stillConfigured := m.servers[c.name]; !stillConfigured {
+			m.mu.Unlock()
+			_ = client.Close()
+			logging.Info("MCP auto-reconnect: server removed during reconnect, discarding", "name", c.name)
+			continue
+		}
 		m.clients[c.name] = client
 		for _, t := range mcpTools {
 			tool := NewMCPTool(client, c.cfg.Name, c.cfg.ToolPrefix, t)

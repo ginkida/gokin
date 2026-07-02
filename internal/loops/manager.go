@@ -132,6 +132,23 @@ func NewManager(storage Storage) *Manager {
 // Returns an error only on validation failure or storage failure —
 // never silently mutates partial state on disk.
 func (m *Manager) Add(task string, mode Mode, intervalSeconds int64, opts ...AddOption) (*Loop, error) {
+	// The scheduler can't check more often than DefaultPollPeriod regardless
+	// of what a loop's own IntervalSeconds says, so a sub-poll-period value
+	// is misleading (implies faster firing than physically possible) and
+	// was how one empirically-reproduced starvation scenario got triggered
+	// (a loop due on EVERY tick). tick()'s round-robin scan now prevents the
+	// actual starvation either way, but reject this at creation time so the
+	// user isn't left with a loop that silently fires on a different
+	// cadence than they typed. Checked ONLY here (loop creation), NOT in
+	// Loop.Validate() (also called on storage load) — a value below this
+	// floor already persisted from before this check existed must keep
+	// loading, not vanish on the user's next restart.
+	if mode == ModeInterval && intervalSeconds < int64(DefaultPollPeriod/time.Second) {
+		floor := int64(DefaultPollPeriod / time.Second)
+		return nil, fmt.Errorf("loop: interval (%ds) is below the scheduler's poll period (%ds) — the runner can't check more often than that; use %ds or higher",
+			intervalSeconds, floor, floor)
+	}
+
 	now := time.Now()
 	l := &Loop{
 		ID:              NewID(),

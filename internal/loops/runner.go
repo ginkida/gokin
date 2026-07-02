@@ -79,6 +79,14 @@ type Runner struct {
 	stopOnce         sync.Once
 	iterationRunning atomic.Bool // true while fireOne is executing
 
+	// scanRotation is tick()-only state (single scheduler goroutine, see
+	// run()) — the round-robin start index into the NEXT tick's Active()
+	// scan. Without it, a loop that's due on EVERY tick (e.g. a
+	// sub-poll-interval self-paced loop) permanently starves every loop
+	// created after it: Active() always returns loops in fixed CreatedAt
+	// order and tick() fires only the first due one it finds.
+	scanRotation int
+
 	// Hooks for tests / observability — fired on lifecycle events.
 	// Production wiring leaves them nil; nil-checked at call site.
 	onIterationStart func(loopID string)
@@ -239,20 +247,35 @@ func (r *Runner) run(ctx context.Context, period time.Duration) {
 // so multiple due loops naturally interleave with foreground work
 // instead of all firing at once and stomping on each other.
 //
+// The scan starts from scanRotation (round-robin, advanced past whichever
+// loop fires) rather than always from index 0 — Active() returns loops in
+// fixed CreatedAt order, so a fixed start-at-0 scan lets a loop that's due
+// on EVERY tick (e.g. a sub-poll-interval self-paced loop) permanently
+// starve every loop created after it, since it's always found first.
+//
 // Skips entirely if the IdleChecker says the app is busy.
 func (r *Runner) tick(ctx context.Context) {
 	if r.iterationRunning.Load() || !r.isIdle() {
 		return
 	}
 
+	active := r.mgr.Active()
+	if len(active) == 0 {
+		return
+	}
+
 	now := time.Now()
-	for _, l := range r.mgr.Active() {
+	start := r.scanRotation % len(active)
+	for i := range active {
+		idx := (start + i) % len(active)
+		l := active[idx]
 		if !l.IsDue(now) {
 			continue
 		}
 		if !r.isIdle() {
 			return
 		}
+		r.scanRotation = idx + 1
 		r.iterationRunning.Store(true)
 		go func() {
 			defer func() {
