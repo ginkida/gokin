@@ -207,6 +207,12 @@ func formatPermissionOperation(toolName string, args map[string]any) string {
 			return fmt.Sprintf("task → Spawn %s agent", t)
 		}
 		return "task → Spawn sub-agent"
+	case "mcp_admin":
+		action, _ := args["action"].(string)
+		if action == "" {
+			action = "list"
+		}
+		return fmt.Sprintf("mcp_admin → %s", action)
 	default:
 		return toolName
 	}

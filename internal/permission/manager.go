@@ -71,8 +71,44 @@ func (m *Manager) cacheKey(toolName string, args map[string]any) string {
 		if path, ok := args["file_path"].(string); ok {
 			return fmt.Sprintf("%s:%s", toolName, path)
 		}
+	case "mcp_admin":
+		// Include the action so approving a harmless "list"/"status" call
+		// doesn't cache-hit for a later "add"/"remove" call — mcp_admin's
+		// risk varies wildly by action (list is a read; add spawns an
+		// arbitrary local subprocess for stdio transport). Without this the
+		// tool-name-only key would let one innocuous approval silently
+		// pre-authorize a dangerous action under the SAME session-trust entry.
+		action := "list"
+		if a, ok := args["action"].(string); ok && a != "" {
+			action = a
+		}
+		if action == "add" || action == "remove" {
+			// Also hash the server config itself. Differentiating by action
+			// alone isn't enough: a "DecisionAllowSession" ("Always allow")
+			// on ONE add call would otherwise cache-hit for EVERY future add
+			// call regardless of what's being spawned — the user consciously
+			// approved one specific server, not "any add, forever". Hashing
+			// the spawn-defining fields (same discipline bash uses for its
+			// command hash) makes the per-key trust match only an IDENTICAL
+			// future call for that exact server; a different server still
+			// misses the cache and falls through to mustConfirmDespiteTrust.
+			payload := fmt.Sprintf("%s|%s|%s|%s|%v",
+				stringArg(args, "server"), stringArg(args, "transport"),
+				stringArg(args, "command"), stringArg(args, "url"), args["args"])
+			hash := sha256.Sum256([]byte(payload))
+			return fmt.Sprintf("%s:%s:%x", toolName, action, hash[:8])
+		}
+		return fmt.Sprintf("%s:%s", toolName, action)
 	}
 	return toolName
+}
+
+// stringArg reads a string-typed arg, returning "" for any missing/wrong-typed
+// key. Local helper (not tools.GetStringDefault) — the tools package imports
+// permission, so a reverse import would cycle.
+func stringArg(args map[string]any, key string) string {
+	s, _ := args[key].(string)
+	return s
 }
 
 // Check checks if a tool is allowed to execute.
@@ -181,12 +217,33 @@ func isElevatedBash(toolName string, args map[string]any) bool {
 // tool is trusted for the session. ssh is always outward-facing/irreversible to
 // ANY host, so it never gets blanket session-trust (per-command "Always allow"
 // via the cache is still honored — that's a conscious per-command choice). bash
-// is gated only when the command itself is elevated.
+// is gated only when the command itself is elevated. mcp_admin's spawn-capable
+// actions are gated the same way bash's elevated commands are — see
+// isMCPAdminSpawnAction.
 func mustConfirmDespiteTrust(toolName string, args map[string]any) bool {
 	if toolName == "ssh" {
 		return true
 	}
+	if toolName == "mcp_admin" {
+		return isMCPAdminSpawnAction(args)
+	}
 	return isElevatedBash(toolName, args)
+}
+
+// isMCPAdminSpawnAction reports whether an mcp_admin call registers/spawns a
+// server (action "add") or removes one (action "remove") — as opposed to a
+// harmless read-only action ("list"/"status"/"resources"/"prompts"). Without
+// this floor, cacheKey's per-action differentiation (see cacheKey) is not
+// enough on its own to stop an escalation: approving "add" once for a
+// TRUSTED, previously-vetted server would otherwise blanket-trust EVERY
+// future "add" call, including one with attacker-controlled command/args
+// (e.g. a stdio transport spawning an arbitrary local subprocess) that the
+// user never saw. So "add"/"remove" always re-confirm, exactly like ssh —
+// there is no "Always allow" fast path for spawning a NEW server, only for
+// re-approving calls with the identical action+cache key (list/status).
+func isMCPAdminSpawnAction(args map[string]any) bool {
+	action, _ := args["action"].(string)
+	return action == "add" || action == "remove"
 }
 
 // askUser prompts the user for permission.

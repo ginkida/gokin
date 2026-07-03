@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"gokin/internal/client"
+	"gokin/internal/testkit"
 	"gokin/internal/tools"
 
 	"google.golang.org/genai"
@@ -370,8 +372,19 @@ func TestReadOnlyAgentsUseIsolatedWorkspace(t *testing.T) {
 	if got := result.Metadata["isolated_workspace_dir"]; got != agent.workDir {
 		t.Fatalf("isolated_workspace_dir = %v, want %q", got, agent.workDir)
 	}
-	if _, err := os.Stat(agent.workDir); err != nil {
-		t.Fatalf("expected isolated workspace to exist after failed run: %v", err)
+	// Round 4 fix: a run that never succeeded (here, ctx was cancelled before
+	// Spawn even started) must have its isolated workspace cleaned up, not
+	// leaked. This assertion used to check the OPPOSITE (dir still exists) —
+	// that was pinning the leak itself, not a deliberate design: a read-only
+	// "copy" strategy workspace carries no uncommitted changes to apply back
+	// or review (unlike the git_worktree apply-back-rejected/conflict cases,
+	// which deliberately keep the workspace for inspection), so there is no
+	// reason to keep it around once the run has failed.
+	if result.Metadata["isolated_workspace_cleaned"] != true {
+		t.Fatalf("isolated_workspace_cleaned = %v, want true", result.Metadata["isolated_workspace_cleaned"])
+	}
+	if _, err := os.Stat(agent.workDir); !os.IsNotExist(err) {
+		t.Fatalf("expected isolated workspace to be removed after a failed run, stat err = %v", err)
 	}
 }
 
@@ -788,6 +801,194 @@ func TestMutatingGitAgentsKeepWorkspaceOnApplyBackConflict(t *testing.T) {
 	}
 	if _, statErr := os.Stat(agent.workDir); statErr != nil {
 		t.Fatalf("expected isolated workspace to remain for inspection: %v", statErr)
+	}
+}
+
+// TestFinalizeAgentWorkspace_CleansUpOnGenuineFailure (round 4) pins the fix
+// for a real leak: a run that NEVER SUCCEEDED (max-turn exhaustion, API
+// failure, ctx timeout/cancel — Status is already Failed BEFORE
+// finalizeAgentWorkspace runs, unlike the review-rejected/apply-back-conflict
+// tests above where Status flips to Failed INSIDE the success branch) must
+// still have its isolated worktree cleaned up. Before the fix, the tail path
+// only stamped isolated_workspace_dir and returned — the worktree (and its
+// `git worktree` registration) leaked forever, since finalizeAgentWorkspace is
+// the ONLY place that ever calls isolatedWorkspace.Cleanup() and
+// Runner.Cleanup(maxAge) never references it.
+func TestFinalizeAgentWorkspace_CleansUpOnGenuineFailure(t *testing.T) {
+	workDir := initGitRepo(t, map[string]string{
+		"tracked.txt": "original\n",
+	})
+	registry := tools.NewRegistry()
+	registry.MustRegister(tools.NewReadTool(workDir))
+	registry.MustRegister(tools.NewWriteTool(workDir))
+
+	runner := NewRunner(context.Background(), nil, registry, workDir)
+	runner.SetWorkspaceIsolationEnabled(true)
+
+	typeRegistry := NewAgentTypeRegistry()
+	if err := typeRegistry.RegisterDynamic("writer", "Writes files", []string{"read", "write"}, "dynamic writer prompt"); err != nil {
+		t.Fatalf("RegisterDynamic: %v", err)
+	}
+	runner.SetTypeRegistry(typeRegistry)
+
+	agent := runner.newConfiguredAgent(context.Background(), runner.snapshotAgentDeps(), "writer", 3, "", nil)
+	if agent.isolatedWorkspace == nil {
+		t.Fatal("expected isolated workspace to be attached")
+	}
+	isolatedDir := agent.workDir
+
+	// Simulate a genuine task failure (e.g. v0.100.48's "reached maximum turn
+	// limit" error) — Status is ALREADY Failed, not flipped by an internal
+	// review/apply-back branch.
+	result := &AgentResult{
+		AgentID:   agent.ID,
+		Type:      agent.Type,
+		Status:    AgentStatusFailed,
+		Error:     "reached maximum turn limit (25 turns)",
+		Completed: true,
+	}
+	if err := runner.finalizeAgentWorkspace(agent, result); err != nil {
+		t.Fatalf("finalizeAgentWorkspace: %v", err)
+	}
+
+	if got := result.Metadata["isolated_workspace_dir"]; got != isolatedDir {
+		t.Fatalf("isolated_workspace_dir = %v, want %q", got, isolatedDir)
+	}
+	if result.Metadata["isolated_workspace_cleaned"] != true {
+		t.Fatalf("isolated_workspace_cleaned = %v, want true", result.Metadata["isolated_workspace_cleaned"])
+	}
+	if _, statErr := os.Stat(isolatedDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the leaked worktree to be removed on genuine failure, stat err = %v", statErr)
+	}
+}
+
+// TestFinalizeAgentWorkspace_IdempotentOnReentry pins a review-confirmed
+// follow-up: the panic-recovery defer in SpawnAsync/SpawnAsyncWithStreaming
+// calls finalizeAgentWorkspace, but that defer wraps the ENTIRE goroutine —
+// if something AFTER a successful normal-flow finalize (saveAgentState,
+// recordAgentExecutionLearning, the onComplete callback) panics, the SAME
+// defer fires and would call finalizeAgentWorkspace a SECOND time on an
+// already-cleaned-up workspace. Without an idempotency guard, the second
+// call's Cleanup() re-runs `git worktree remove` on a directory that no
+// longer exists — it fails, setting a misleading
+// isolated_workspace_cleanup_error alongside the already-true
+// isolated_workspace_cleaned, and wastes a subprocess invocation.
+func TestFinalizeAgentWorkspace_IdempotentOnReentry(t *testing.T) {
+	workDir := initGitRepo(t, map[string]string{
+		"tracked.txt": "original\n",
+	})
+	registry := tools.NewRegistry()
+	registry.MustRegister(tools.NewReadTool(workDir))
+	registry.MustRegister(tools.NewWriteTool(workDir))
+
+	runner := NewRunner(context.Background(), nil, registry, workDir)
+	runner.SetWorkspaceIsolationEnabled(true)
+
+	typeRegistry := NewAgentTypeRegistry()
+	if err := typeRegistry.RegisterDynamic("writer", "Writes files", []string{"read", "write"}, "dynamic writer prompt"); err != nil {
+		t.Fatalf("RegisterDynamic: %v", err)
+	}
+	runner.SetTypeRegistry(typeRegistry)
+
+	agent := runner.newConfiguredAgent(context.Background(), runner.snapshotAgentDeps(), "writer", 3, "", nil)
+	if agent.isolatedWorkspace == nil {
+		t.Fatal("expected isolated workspace to be attached")
+	}
+
+	result := &AgentResult{
+		AgentID:   agent.ID,
+		Type:      agent.Type,
+		Status:    AgentStatusFailed,
+		Error:     "reached maximum turn limit (25 turns)",
+		Completed: true,
+	}
+
+	// First call: genuine finalize, cleans up the worktree.
+	if err := runner.finalizeAgentWorkspace(agent, result); err != nil {
+		t.Fatalf("first finalizeAgentWorkspace: %v", err)
+	}
+	if result.Metadata["isolated_workspace_cleaned"] != true {
+		t.Fatal("expected the first call to clean up the workspace")
+	}
+
+	// Second call (simulating a later panic re-entering the same defer):
+	// must be a clean no-op — no cleanup_error, no re-attempted git command.
+	if err := runner.finalizeAgentWorkspace(agent, result); err != nil {
+		t.Fatalf("second (re-entrant) finalizeAgentWorkspace returned an error: %v", err)
+	}
+	if result.Metadata["isolated_workspace_cleanup_error"] != nil {
+		t.Fatalf("re-entrant call must not attempt cleanup again: isolated_workspace_cleanup_error = %v", result.Metadata["isolated_workspace_cleanup_error"])
+	}
+}
+
+// panickingClient's SendMessageWithHistory/SendFunctionResponse panic
+// immediately — used to reproduce agent.Run panicking mid-execution.
+type panickingClient struct {
+	*testkit.MockClient
+}
+
+func (c *panickingClient) SendMessageWithHistory(ctx context.Context, history []*genai.Content, message string) (*client.StreamingResponse, error) {
+	panic("simulated tool/model panic")
+}
+
+// WithModel must be overridden too: MockClient.WithModel returns a bare
+// *MockClient clone (not wrapped), and every agent gets an isolated client
+// clone via WithModel at construction (per the codebase's adaptive-thinking
+// client-cloning invariant) — without this override the agent would run
+// against a plain, non-panicking MockClient clone and the panic would never
+// fire.
+func (c *panickingClient) WithModel(modelName string) client.Client {
+	return &panickingClient{MockClient: c.MockClient.WithModel(modelName).(*testkit.MockClient)}
+}
+
+// TestSpawnAsync_PanicRecoveryCleansUpIsolatedWorkspace (round 4) pins the
+// second, independent worktree-leak fix: a panic inside agent.Run() must
+// still tear down the isolated git worktree via the panic-recovery defer in
+// SpawnAsync, not just the normal (non-panicking) return path. Before the
+// fix, the defer only marked the result Failed — finalizeAgentWorkspace
+// (the ONLY caller of isolatedWorkspace.Cleanup()) was never invoked on
+// this path, so a panicking isolated agent guaranteed-leaked its worktree
+// regardless of the finding #6 fix (which only covers the normal-flow tail).
+func TestSpawnAsync_PanicRecoveryCleansUpIsolatedWorkspace(t *testing.T) {
+	workDir := initGitRepo(t, map[string]string{
+		"tracked.txt": "original\n",
+	})
+	registry := tools.NewRegistry()
+	registry.MustRegister(tools.NewReadTool(workDir))
+	registry.MustRegister(tools.NewWriteTool(workDir))
+
+	mc := testkit.NewMockClient()
+	runner := NewRunner(context.Background(), &panickingClient{MockClient: mc}, registry, workDir)
+	runner.SetWorkspaceIsolationEnabled(true)
+
+	typeRegistry := NewAgentTypeRegistry()
+	if err := typeRegistry.RegisterDynamic("writer", "Writes files", []string{"read", "write"}, "dynamic writer prompt"); err != nil {
+		t.Fatalf("RegisterDynamic: %v", err)
+	}
+	runner.SetTypeRegistry(typeRegistry)
+
+	agentID := runner.SpawnAsync(context.Background(), "writer", "do something", 3, "")
+
+	result, err := runner.WaitWithTimeout(agentID, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WaitWithTimeout: %v", err)
+	}
+	if result.Status != AgentStatusFailed {
+		t.Fatalf("status = %s, want %s (panic should mark the agent failed)", result.Status, AgentStatusFailed)
+	}
+	if !strings.Contains(result.Error, "panic") {
+		t.Fatalf("result error = %q, want it to mention the panic", result.Error)
+	}
+
+	isolatedDir, _ := result.Metadata["isolated_workspace_dir"].(string)
+	if isolatedDir == "" {
+		t.Fatal("expected isolated_workspace_dir metadata to be set by the panic-recovery defer")
+	}
+	if result.Metadata["isolated_workspace_cleaned"] != true {
+		t.Fatalf("isolated_workspace_cleaned = %v, want true — the panic-recovery defer must call finalizeAgentWorkspace", result.Metadata["isolated_workspace_cleaned"])
+	}
+	if _, statErr := os.Stat(isolatedDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the isolated worktree to be removed after a panic, stat err = %v", statErr)
 	}
 }
 

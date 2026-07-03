@@ -358,12 +358,23 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 					"panic", p,
 					"stack", logging.PanicStack())
 				r.mu.Lock()
-				if result, ok := r.results[agentID]; ok {
+				result, ok := r.results[agentID]
+				if ok {
 					result.Error = fmt.Sprintf("agent panic: %v", p)
 					result.Status = AgentStatusFailed
 					result.Completed = true
 				}
 				r.mu.Unlock()
+				// finalizeAgentWorkspace does git/file I/O — call it lock-free,
+				// mirroring the normal (non-panicking) return path. Without
+				// this a panic mid-run guaranteed-leaked the isolated
+				// worktree: finalizeAgentWorkspace is the ONLY place that
+				// ever calls isolatedWorkspace.Cleanup(), and the normal-flow
+				// call sites are unreachable once the goroutine has panicked
+				// past them.
+				if ok {
+					r.finalizeAgentWorkspace(agent, result)
+				}
 				r.notifyResultReady()
 			}
 		}()
@@ -573,12 +584,23 @@ func (r *Runner) SpawnAsyncWithStreaming(
 					"panic", p,
 					"stack", logging.PanicStack())
 				r.mu.Lock()
-				if result, ok := r.results[agentID]; ok {
+				result, ok := r.results[agentID]
+				if ok {
 					result.Error = fmt.Sprintf("agent panic: %v", p)
 					result.Status = AgentStatusFailed
 					result.Completed = true
 				}
 				r.mu.Unlock()
+				// finalizeAgentWorkspace does git/file I/O — call it lock-free,
+				// mirroring the normal (non-panicking) return path. Without
+				// this a panic mid-run guaranteed-leaked the isolated
+				// worktree: finalizeAgentWorkspace is the ONLY place that
+				// ever calls isolatedWorkspace.Cleanup(), and the normal-flow
+				// call sites are unreachable once the goroutine has panicked
+				// past them.
+				if ok {
+					r.finalizeAgentWorkspace(agent, result)
+				}
 				r.notifyResultReady()
 			}
 		}()

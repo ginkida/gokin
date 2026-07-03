@@ -462,6 +462,21 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 			sessionID, state.WorkDir, currentDir, sessionID), nil
 	}
 
+	// Cross-provider guard, mirroring the automatic startup auto-resume path
+	// (app.go Run()): a session tagged with a different provider than the
+	// current active one will silently drop assistant turns on the next
+	// request (unsigned thinking-signature replay across providers — see
+	// CLAUDE.md's Cross-provider history rules), or worse, 400. The auto-
+	// resume path refuses this; /resume itself never checked it — this
+	// closes that gap. Empty state.Provider = legacy session predating the
+	// provider tag; treat as compatible. --force also bypasses this (same
+	// escape hatch as the workdir-mismatch check above).
+	currentProvider := runtimeProviderForConfig(app.GetConfig())
+	if !force && state.Provider != "" && currentProvider != "" && state.Provider != currentProvider {
+		return fmt.Sprintf("Session '%s' was created on provider %s (current: %s) — history formats are incompatible and would silently drop turns.\nUse /provider %s first, or /resume %s --force to load anyway.",
+			sessionID, state.Provider, currentProvider, state.Provider, sessionID), nil
+	}
+
 	session := app.GetSession()
 	if session == nil {
 		return "No active session to restore into.", nil
@@ -1425,4 +1440,29 @@ func formatTimeAgo(t time.Time) string {
 		}
 		return fmt.Sprintf("%dd ago", days)
 	}
+}
+
+// runtimeProviderForConfig mirrors internal/app's function of the same name
+// (app/provider_resolution.go) — duplicated rather than imported because
+// internal/app already imports internal/commands, so the reverse import
+// would cycle. Keep this in sync with the app package's version: both must
+// agree on "what is the current provider" for the cross-provider resume
+// guards (auto-resume in app.go, /resume here) to behave consistently.
+func runtimeProviderForConfig(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if provider := normalizeProviderName(cfg.Model.Provider); provider != "" && provider != "auto" {
+		return provider
+	}
+	if model := strings.TrimSpace(cfg.Model.Name); model != "" {
+		if detected := normalizeProviderName(config.DetectKnownProviderFromModel(model)); detected != "" {
+			return detected
+		}
+	}
+	return normalizeProviderName(cfg.API.GetActiveProvider())
+}
+
+func normalizeProviderName(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
 }

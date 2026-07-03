@@ -1704,6 +1704,23 @@ func (a *App) ResumeLastSession() error {
 		return fmt.Errorf("no previous session found")
 	}
 
+	// Cross-provider guard — mirrors the automatic startup auto-resume check
+	// in Run() (below). ResumeLastSession backs the --resume CLI flag
+	// (interactive AND headless), and setting a.sessionPreloaded = true
+	// below makes Run()'s OWN guard a no-op (`if a.sessionPreloaded {
+	// sessionRestored = true }`), so this is the ONLY place that can catch
+	// a cross-provider restore on this path. Without it, `gokin --provider
+	// deepseek --resume` against a session authored under a different
+	// provider (e.g. kimi/glm) silently drops assistant turns on the next
+	// request (unsigned thinking-signature replay across providers). Empty
+	// state.Provider = legacy session predating the provider tag; treat as
+	// compatible.
+	currentProvider := runtimeProviderForConfig(a.config)
+	if state.Provider != "" && currentProvider != "" && state.Provider != currentProvider {
+		return fmt.Errorf("previous session was on provider %s but you're now on %s — history formats are incompatible; run without --resume, or switch back with --provider %s",
+			state.Provider, currentProvider, state.Provider)
+	}
+
 	if err := a.sessionManager.RestoreFromState(state); err != nil {
 		return fmt.Errorf("failed to restore session: %w", err)
 	}
@@ -2652,7 +2669,14 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	if a.executor != nil {
 		a.executor.SetClient(newClient)
 		if a.registry != nil {
-			newClient.SetTools(a.toolsForCurrentMode())
+			// a.mu is held for the whole critical section (see NOTE at the top),
+			// so this MUST use the lock-free planModeToolsLocked, never
+			// toolsForCurrentMode() — that calls IsPlanningModeEnabled(), which
+			// re-locks a.mu and self-deadlocks on Go's non-reentrant
+			// sync.Mutex. Every post-boot ApplyConfig caller (/login,
+			// /provider, /model, /set, /settings, Ctrl+K, /permissions,
+			// /sandbox) reaches this line, so the deadlock is unconditional.
+			newClient.SetTools(a.planModeToolsLocked(a.planningModeEnabled))
 		}
 	}
 

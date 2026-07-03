@@ -3,6 +3,8 @@ package tools
 import (
 	"sync"
 	"testing"
+
+	"gokin/internal/undo"
 )
 
 // TestCloneToolForWorkDir_MemoryToolIsIsolated pins that each agent gets its OWN
@@ -150,5 +152,60 @@ func TestCloneToolForWorkDir_ReviewChangesIsolated(t *testing.T) {
 	}
 	if cloned.workDir != "/worktree" {
 		t.Fatalf("clone workDir = %q, want /worktree", cloned.workDir)
+	}
+}
+
+// TestCloneToolForWorkDir_UndoManagerPropagated (round 4) pins that write/edit/
+// copy/move/delete/mkdir clones carry the foreground undoManager forward.
+// Without this, every sub-agent (task tool, /loop, coordinate, router
+// sub-agent strategies — CloneToolForWorkDir runs for EVERY spawn, not only
+// workspace-isolated ones) got a FRESH tool instance with a nil undoManager;
+// each tool's Execute guards its undo.Manager.Record() call with
+// `if t.undoManager != nil`, so the mutation succeeded on disk but was never
+// recorded — silently invisible to /undo. *BatchTool and *RefactorTool already
+// copy undoManager correctly; this test covers the six that didn't.
+func TestCloneToolForWorkDir_UndoManagerPropagated(t *testing.T) {
+	um := undo.NewManager()
+
+	writeOrig := NewWriteTool("/foreground")
+	writeOrig.SetUndoManager(um)
+	writeClone, ok := CloneToolForWorkDir(writeOrig, "").(*WriteTool)
+	if !ok || writeClone.undoManager != um {
+		t.Errorf("WriteTool clone lost undoManager: ok=%v got=%p want=%p", ok, writeClone.undoManager, um)
+	}
+
+	editOrig := NewEditTool("/foreground")
+	editOrig.SetUndoManager(um)
+	editClone, ok := CloneToolForWorkDir(editOrig, "").(*EditTool)
+	if !ok || editClone.undoManager != um {
+		t.Errorf("EditTool clone lost undoManager: ok=%v got=%p want=%p", ok, editClone.undoManager, um)
+	}
+
+	copyOrig := NewCopyTool("/foreground")
+	copyOrig.SetUndoManager(um)
+	copyClone, ok := CloneToolForWorkDir(copyOrig, "").(*CopyTool)
+	if !ok || copyClone.undoManager != um {
+		t.Errorf("CopyTool clone lost undoManager: ok=%v got=%p want=%p", ok, copyClone.undoManager, um)
+	}
+
+	moveOrig := NewMoveTool("/foreground")
+	moveOrig.SetUndoManager(um)
+	moveClone, ok := CloneToolForWorkDir(moveOrig, "").(*MoveTool)
+	if !ok || moveClone.undoManager != um {
+		t.Errorf("MoveTool clone lost undoManager: ok=%v got=%p want=%p", ok, moveClone.undoManager, um)
+	}
+
+	deleteOrig := NewDeleteTool("/foreground")
+	deleteOrig.SetUndoManager(um)
+	deleteClone, ok := CloneToolForWorkDir(deleteOrig, "").(*DeleteTool)
+	if !ok || deleteClone.undoManager != um {
+		t.Errorf("DeleteTool clone lost undoManager: ok=%v got=%p want=%p", ok, deleteClone.undoManager, um)
+	}
+
+	mkdirOrig := NewMkdirTool("/foreground")
+	mkdirOrig.SetUndoManager(um)
+	mkdirClone, ok := CloneToolForWorkDir(mkdirOrig, "").(*MkdirTool)
+	if !ok || mkdirClone.undoManager != um {
+		t.Errorf("MkdirTool clone lost undoManager: ok=%v got=%p want=%p", ok, mkdirClone.undoManager, um)
 	}
 }

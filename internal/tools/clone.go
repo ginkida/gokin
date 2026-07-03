@@ -32,9 +32,13 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		cloned.predictor = t.predictor
 		return cloned
 	case *WriteTool:
-		return NewWriteTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewWriteTool(pickWorkDir(workDir, t.workDir))
+		cloned.undoManager = t.undoManager
+		return cloned
 	case *EditTool:
-		return NewEditTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewEditTool(pickWorkDir(workDir, t.workDir))
+		cloned.undoManager = t.undoManager
+		return cloned
 	case *BashTool:
 		dir := pickWorkDir(workDir, t.workDir)
 		cloned := NewBashTool(dir)
@@ -71,13 +75,21 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		cloned.diffEnabled = t.diffEnabled
 		return cloned
 	case *CopyTool:
-		return NewCopyTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewCopyTool(pickWorkDir(workDir, t.workDir))
+		cloned.undoManager = t.undoManager
+		return cloned
 	case *MoveTool:
-		return NewMoveTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewMoveTool(pickWorkDir(workDir, t.workDir))
+		cloned.undoManager = t.undoManager
+		return cloned
 	case *DeleteTool:
-		return NewDeleteTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewDeleteTool(pickWorkDir(workDir, t.workDir))
+		cloned.undoManager = t.undoManager
+		return cloned
 	case *MkdirTool:
-		return NewMkdirTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewMkdirTool(pickWorkDir(workDir, t.workDir))
+		cloned.undoManager = t.undoManager
+		return cloned
 	case *GitLogTool:
 		return NewGitLogTool(pickWorkDir(workDir, t.workDir))
 	case *GitBlameTool:

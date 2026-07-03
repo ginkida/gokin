@@ -985,6 +985,25 @@ func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error
 	if result.Metadata == nil {
 		result.Metadata = make(map[string]any)
 	}
+
+	// Idempotency guard: this must run AT MOST ONCE per agent/result. The
+	// normal (non-panicking) flow always reaches it exactly once, but the
+	// panic-recovery defer in SpawnAsync/SpawnAsyncWithStreaming ALSO calls
+	// it — and that defer wraps the ENTIRE goroutine, not just agent.Run().
+	// If anything AFTER a successful normal-flow finalize (saveAgentState,
+	// recordAgentExecutionLearning, or the onComplete callback) panics, the
+	// same outer defer fires and would call this a SECOND time on an
+	// already-cleaned-up workspace: isolatedWorkspace.Cleanup() re-runs
+	// `git worktree remove` on a directory that no longer exists (fails,
+	// setting a misleading isolated_workspace_cleanup_error alongside the
+	// already-true isolated_workspace_cleaned), or worse, re-applies an
+	// already-applied ApplyBack diff. Mark the guard FIRST, before any
+	// side-effecting work, so a re-entrant call is a clean no-op.
+	if result.Metadata["isolated_workspace_finalized"] == true {
+		return nil
+	}
+	result.Metadata["isolated_workspace_finalized"] = true
+
 	result.Metadata["isolated_workspace"] = true
 	result.Metadata["isolated_workspace_strategy"] = agent.isolatedWorkspace.Strategy
 	if agent.isolatedWorkspace.ApplyBackOnSuccess {
@@ -1059,7 +1078,24 @@ func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error
 		return nil
 	}
 
+	// The run never succeeded (max-turn exhaustion, API failure, ctx timeout/
+	// cancel) — its file changes were never applied back (ApplyBackOnSuccess
+	// only fires above, gated on IsSuccess()), so nothing here is surfaced to
+	// the user or the real repo. Clean up unconditionally so the worktree
+	// (and its `git worktree` registration) don't leak — without this, EVERY
+	// failed isolated run across a long-running /loop or repeated task-tool
+	// spawns accumulated a `gokin-agent-worktree-*` temp dir forever, since
+	// Runner.Cleanup(maxAge) only ever removes OutputFile and never touches
+	// isolatedWorkspace. This is distinct from the deliberate "keep for
+	// inspection" branches ABOVE (review-rejected / apply-back-conflict),
+	// which stay untouched — those are informed, actionable failures within
+	// an otherwise-successful run, not a run that never succeeded at all.
 	result.Metadata["isolated_workspace_dir"] = agent.workDir
+	if err := agent.isolatedWorkspace.Cleanup(); err != nil {
+		result.Metadata["isolated_workspace_cleanup_error"] = err.Error()
+	} else {
+		result.Metadata["isolated_workspace_cleaned"] = true
+	}
 	return nil
 }
 

@@ -197,6 +197,41 @@ func (c *SSHClient) buildHostKeyCallback() (ssh.HostKeyCallback, error) {
 	return ssh.InsecureIgnoreHostKey(), nil
 }
 
+// maxCapturedOutputBytes bounds how much of a remote command's stdout/stderr
+// is buffered in-process. A remote command — attacker-influenced, misconfigured,
+// or simply noisier than expected (a big log tail, a runaway process, a
+// hostile/compromised SSH server deliberately streaming gigabytes) — could
+// otherwise grow the capture buffer without bound: tools/ssh.go's 30000-rune
+// display truncation only runs AFTER Execute returns the fully-materialized
+// string, so it never bounded the in-flight buffering. Set well above that
+// 30000-char display cap so ordinary command output is never affected.
+const maxCapturedOutputBytes = 8 << 20 // 8MB
+
+// cappedWriter caps the total bytes accumulated into buf. Writes past the
+// limit are silently discarded — reporting the FULL length as written (never
+// an error) so a capped stdout/stderr can't make the SSH session treat the
+// write as failed and abort the remote command early; only the local capture
+// stops growing.
+type cappedWriter struct {
+	buf   strings.Builder
+	limit int
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	remaining := w.limit - w.buf.Len()
+	if remaining <= 0 {
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		w.buf.WriteString(string(p[:remaining]))
+		return len(p), nil
+	}
+	return w.buf.Write(p)
+}
+
+func (w *cappedWriter) String() string { return w.buf.String() }
+func (w *cappedWriter) Len() int       { return w.buf.Len() }
+
 // Execute runs a command on the remote host.
 func (c *SSHClient) Execute(ctx context.Context, command string) (string, int, error) {
 	if err := c.Connect(ctx); err != nil {
@@ -213,10 +248,12 @@ func (c *SSHClient) Execute(ctx context.Context, command string) (string, int, e
 	}
 	defer session.Close()
 
-	// Set up output capture
-	var stdout, stderr strings.Builder
-	session.Stdout = &stdout
-	session.Stderr = &stderr
+	// Set up output capture, bounded so a remote command that streams far
+	// more output than expected can't grow this process's memory unbounded.
+	stdout := &cappedWriter{limit: maxCapturedOutputBytes}
+	stderr := &cappedWriter{limit: maxCapturedOutputBytes}
+	session.Stdout = stdout
+	session.Stderr = stderr
 
 	// Run command with context cancellation support
 	done := make(chan error, 1)

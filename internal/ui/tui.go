@@ -2148,26 +2148,51 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case DiffPreviewRequestMsg:
-		// Emit a compact inline diff card into the chat stream as a
-		// persistent record of what's being proposed, then open the
-		// full-screen modal. The card stays in history after accept /
-		// reject; the modal is the actual decision surface.
-		if card := renderInlineDiffCard(m.width, msg); card != "" {
-			for line := range strings.SplitSeq(card, "\n") {
-				m.output.AppendLine("  " + line)
+		// Guard: don't overwrite an active modal (prevents lost responses —
+		// same class as PermissionRequestMsg above). This message arrives
+		// async via safeSendToProgram from a goroutine independent of
+		// whatever else may have just opened a modal (e.g. a background
+		// /loop iteration's diff prompt racing a foreground Ctrl+S). Without
+		// this, opening it would silently clobber an in-flight
+		// Permission/Question/PlanApproval/Diff prompt, orphaning its blocked
+		// decision channel until DiffDecisionTimeout/ctx cancellation.
+		// Auto-reject THIS incoming request so its caller doesn't hang.
+		if m.isModalState() {
+			if m.onDiffDecision != nil {
+				m.onDiffDecision(DiffReject)
 			}
-			m.output.AppendLine("")
+		} else {
+			// Emit a compact inline diff card into the chat stream as a
+			// persistent record of what's being proposed, then open the
+			// full-screen modal. The card stays in history after accept /
+			// reject; the modal is the actual decision surface.
+			if card := renderInlineDiffCard(m.width, msg); card != "" {
+				for line := range strings.SplitSeq(card, "\n") {
+					m.output.AppendLine("  " + line)
+				}
+				m.output.AppendLine("")
+			}
+			m.diffRequest = &msg
+			m.diffPreview.SetSize(m.width, m.height)
+			m.diffPreview.SetContent(msg.FilePath, msg.OldContent, msg.NewContent, msg.ToolName, msg.IsNewFile)
+			m.state = StateDiffPreview
 		}
-		m.diffRequest = &msg
-		m.diffPreview.SetSize(m.width, m.height)
-		m.diffPreview.SetContent(msg.FilePath, msg.OldContent, msg.NewContent, msg.ToolName, msg.IsNewFile)
-		m.state = StateDiffPreview
 
 	case MultiDiffPreviewRequestMsg:
-		m.multiDiffRequest = &msg
-		m.multiDiffPreview.SetSize(m.width, m.height)
-		m.multiDiffPreview.SetFiles(msg.Files)
-		m.state = StateMultiDiffPreview
+		if m.isModalState() {
+			if m.onMultiDiffDecision != nil {
+				rejected := make(map[string]DiffDecision, len(msg.Files))
+				for _, f := range msg.Files {
+					rejected[f.FilePath] = DiffReject
+				}
+				m.onMultiDiffDecision(rejected)
+			}
+		} else {
+			m.multiDiffRequest = &msg
+			m.multiDiffPreview.SetSize(m.width, m.height)
+			m.multiDiffPreview.SetFiles(msg.Files)
+			m.state = StateMultiDiffPreview
+		}
 
 	case DiffPreviewResponseMsg:
 		m.diffRequest = nil
@@ -2208,10 +2233,19 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case SearchResultsRequestMsg:
-		m.searchRequest = &msg
-		m.searchResults.SetSize(m.width, m.height)
-		m.searchResults.SetResults(msg.Query, msg.Tool, msg.Results)
-		m.state = StateSearchResults
+		// Guard: don't clobber an active modal — this isn't a blocking call
+		// (no decision channel to auto-resolve), so just drop it with a toast
+		// rather than silently discarding whatever's currently showing.
+		if m.isModalState() {
+			if m.toastManager != nil {
+				m.toastManager.ShowWarning("Search results ready but another prompt is active")
+			}
+		} else {
+			m.searchRequest = &msg
+			m.searchResults.SetSize(m.width, m.height)
+			m.searchResults.SetResults(msg.Query, msg.Tool, msg.Results)
+			m.state = StateSearchResults
+		}
 
 	case SearchResultsActionMsg:
 		m.searchRequest = nil
@@ -2228,10 +2262,16 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case GitStatusRequestMsg:
-		m.gitStatusRequest = &msg
-		m.gitStatusModel.SetSize(m.width, m.height)
-		m.gitStatusModel.SetStatus(msg.Entries, msg.Branch, msg.Upstream, msg.AheadBehind)
-		m.state = StateGitStatus
+		if m.isModalState() {
+			if m.toastManager != nil {
+				m.toastManager.ShowWarning("Git status ready but another prompt is active")
+			}
+		} else {
+			m.gitStatusRequest = &msg
+			m.gitStatusModel.SetSize(m.width, m.height)
+			m.gitStatusModel.SetStatus(msg.Entries, msg.Branch, msg.Upstream, msg.AheadBehind)
+			m.state = StateGitStatus
+		}
 
 	case GitStatusActionMsg:
 		// Always reset state and request for any action
@@ -2245,13 +2285,19 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case FileBrowserRequestMsg:
-		m.fileBrowser.SetSize(m.width, m.height)
-		if err := m.fileBrowser.SetPath(msg.StartPath); err == nil {
-			m.fileBrowserActive = true
-			m.state = StateFileBrowser
+		if m.isModalState() {
+			if m.toastManager != nil {
+				m.toastManager.ShowWarning("File browser requested but another prompt is active")
+			}
 		} else {
-			m.output.AppendLine(m.styles.FormatError(fmt.Sprintf("Could not open file browser: %s", err)))
-			m.output.AppendLine("")
+			m.fileBrowser.SetSize(m.width, m.height)
+			if err := m.fileBrowser.SetPath(msg.StartPath); err == nil {
+				m.fileBrowserActive = true
+				m.state = StateFileBrowser
+			} else {
+				m.output.AppendLine(m.styles.FormatError(fmt.Sprintf("Could not open file browser: %s", err)))
+				m.output.AppendLine("")
+			}
 		}
 
 	case FileBrowserActionMsg:
@@ -2299,11 +2345,29 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	// Open the interactive settings modal (/settings)
 	case OpenSettingsMsg:
-		m.openSettings(msg)
+		// Guard: Ctrl+S/the /settings command dispatches this async from a
+		// different goroutine than whatever else may be mid-modal (e.g. a
+		// background /loop iteration's permission prompt). Opening
+		// unconditionally would silently clobber an active
+		// Permission/Question/PlanApproval/Diff prompt, orphaning its blocked
+		// decision channel until timeout/ctx cancellation.
+		if m.isModalState() {
+			if m.toastManager != nil {
+				m.toastManager.ShowWarning("Resolve the active prompt before opening Settings")
+			}
+		} else {
+			m.openSettings(msg)
+		}
 
 	// Open the masked API-key entry modal (/login <provider> with no key)
 	case OpenKeyEntryMsg:
-		cmds = append(cmds, m.openKeyEntry(msg))
+		if m.isModalState() {
+			if m.toastManager != nil {
+				m.toastManager.ShowWarning("Resolve the active prompt before entering an API key")
+			}
+		} else {
+			cmds = append(cmds, m.openKeyEntry(msg))
+		}
 
 	// Planning mode toggle result (async)
 	case PlanningModeToggledMsg:

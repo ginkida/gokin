@@ -30,11 +30,17 @@ func (r *Runner) notifyResultReady() {
 
 // WaitWithContext waits for an agent to complete, respecting context cancellation.
 func (r *Runner) WaitWithContext(ctx context.Context, agentID string) (*AgentResult, error) {
-	// Fast path: check immediately
-	r.mu.RLock()
-	result, ok := r.results[agentID]
-	r.mu.RUnlock()
-	if ok && result.Completed {
+	// Fast path: check immediately. The `.Completed` read MUST happen while
+	// still holding r.mu (not after RUnlock): some writers (the panic-
+	// recovery defer in SpawnAsync/SpawnAsyncWithStreaming, and Cancel())
+	// mutate the SAME *AgentResult pointer's fields IN PLACE under
+	// r.mu.Lock(), rather than publishing a fresh pointer via
+	// r.results[agentID]=result. Reading .Completed after releasing the lock
+	// races against that in-place mutation (caught by -race: a panicking
+	// spawned agent's defer writing .Completed concurrently with a poller
+	// reading it unguarded). Checking under the SAME RLock establishes the
+	// happens-before edge the flag-read idiom requires.
+	if result, ok := r.completedResultLocked(agentID); ok {
 		return result, nil
 	}
 
@@ -43,14 +49,29 @@ func (r *Runner) WaitWithContext(ctx context.Context, agentID string) (*AgentRes
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-r.resultReady:
-			r.mu.RLock()
-			result, ok := r.results[agentID]
-			r.mu.RUnlock()
-			if ok && result.Completed {
+			if result, ok := r.completedResultLocked(agentID); ok {
 				return result, nil
 			}
 		}
 	}
+}
+
+// completedResultLocked returns (result, true) iff agentID has a completed
+// result, checking .Completed under r.mu so the read can't race an in-place
+// mutator holding the write lock (see WaitWithContext). Also used by
+// Coordinator (same package) instead of GetResult()+a raw .Completed check —
+// GetResult releases r.mu before returning the pointer, so a bare field read
+// afterward would race the SAME writers (SpawnAsync's panic-recovery defer,
+// Runner.Cancel — reachable independently of Coordinator's own c.mu via
+// task_stop/shutdown) this helper exists to guard against.
+func (r *Runner) completedResultLocked(agentID string) (*AgentResult, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result, ok := r.results[agentID]
+	if ok && result.Completed {
+		return result, true
+	}
+	return nil, false
 }
 
 // WaitWithTimeout waits for an agent to complete with a specific timeout.

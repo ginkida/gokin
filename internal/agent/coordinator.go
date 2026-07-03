@@ -317,8 +317,15 @@ func (c *Coordinator) checkCompletedAgents() {
 	var completed []completedAgent
 
 	for agentID, taskID := range c.running {
-		result, ok := c.runner.GetResult(agentID)
-		if !ok || !result.Completed {
+		// completedResultLocked (not GetResult + a raw .Completed read) —
+		// GetResult releases r.mu before returning the pointer, so a bare
+		// `result.Completed` check afterward races against writers
+		// (SpawnAsync's panic-recovery defer, Runner.Cancel — both mutate
+		// this same *AgentResult in place under r.mu.Lock(), reachable
+		// independently of c.mu via task_stop/shutdown) — the identical
+		// unsynchronized-flag-read bug WaitWithContext had.
+		result, ok := c.runner.completedResultLocked(agentID)
+		if !ok {
 			continue
 		}
 		completed = append(completed, completedAgent{agentID, taskID, result})
@@ -446,8 +453,10 @@ func (c *Coordinator) handleAgentCompletion(agentID string) {
 		return
 	}
 
-	result, ok := c.runner.GetResult(agentID)
-	if !ok || !result.Completed {
+	// See the matching comment in checkCompletedAgents — completedResultLocked
+	// avoids the unsynchronized .Completed read GetResult's callers used to do.
+	result, ok := c.runner.completedResultLocked(agentID)
+	if !ok {
 		c.mu.Unlock()
 		return
 	}

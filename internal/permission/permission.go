@@ -210,7 +210,42 @@ func buildReason(toolName string, args map[string]any) string {
 		}
 		return "Search file contents"
 
+	case "mcp_admin":
+		return buildMCPAdminReason(args)
+
 	default:
 		return fmt.Sprintf("Execute tool: %s", toolName)
+	}
+}
+
+// buildMCPAdminReason surfaces the action (and, for a server-spawning add,
+// the transport + endpoint) so the deciding permission prompt is honest about
+// what's about to happen — a diagnostic "list"/"status" call must not render
+// identically to an "add" that registers and launches a persistent local
+// subprocess (stdio) or connects to a remote endpoint (http).
+func buildMCPAdminReason(args map[string]any) string {
+	action := "list"
+	if a, ok := args["action"].(string); ok && a != "" {
+		action = a
+	}
+	switch action {
+	case "add":
+		server, _ := args["server"].(string)
+		transport, _ := args["transport"].(string)
+		switch transport {
+		case "stdio":
+			cmd, _ := args["command"].(string)
+			return fmt.Sprintf("Add MCP server %q — spawns local subprocess: %s", server, cmd)
+		case "http":
+			url, _ := args["url"].(string)
+			return fmt.Sprintf("Add MCP server %q — connects to: %s", server, url)
+		default:
+			return fmt.Sprintf("Add MCP server %q", server)
+		}
+	case "remove":
+		server, _ := args["server"].(string)
+		return fmt.Sprintf("Remove MCP server %q", server)
+	default:
+		return fmt.Sprintf("MCP admin: %s", action)
 	}
 }

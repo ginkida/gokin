@@ -225,7 +225,12 @@ func (t *WebSearchTool) searchSerpAPI(ctx context.Context, query string, numResu
 		Error string `json:"error"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	// Cap the success-path body like every other read in this file (the
+	// error-body reads above, and the DuckDuckGo success path's 2MB cap) —
+	// json.Decoder buffers the value being decoded with no bound of its own,
+	// so a misconfigured/compromised SerpAPI-compatible endpoint returning a
+	// very large 200 body would otherwise cause unbounded memory growth.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&data); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
@@ -296,7 +301,8 @@ func (t *WebSearchTool) searchGoogle(ctx context.Context, query string, numResul
 		} `json:"error"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	// Cap the success-path body — see the matching comment in searchSerpAPI.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&data); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
