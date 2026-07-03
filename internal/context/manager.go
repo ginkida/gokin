@@ -501,7 +501,7 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 	strategy := m.summaryStrategy
 	m.mu.RUnlock()
 
-	history := m.session.GetHistory()
+	history, historyVersion := m.session.GetHistoryWithVersion()
 	if len(history) <= strategy.MinMessagesForSummary {
 		// Not enough messages to summarize. Surface this so /compact can
 		// tell the user "you only have N messages, threshold is M" instead
@@ -557,9 +557,19 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 		fromCache = false
 	}
 
-	// Apply the summary plan
+	// Apply the summary plan. Commit with optimistic concurrency: this runs in a
+	// BACKGROUND goroutine (backgroundOptimize) from the history snapshot captured
+	// above, while the foreground turn may append its response + tool results and
+	// commit them via SetHistory. An unconditional SetHistory here could land
+	// AFTER the turn's write and silently overwrite the just-finished turn with a
+	// pre-turn compacted snapshot (a lost update — both hold s.mu, so -race won't
+	// catch it). Skip on version mismatch; the next turn re-triggers compaction
+	// against the fresh history.
 	newHistory := ApplySummaryPlan(plan, summary)
-	m.session.SetHistory(newHistory)
+	if !m.session.SetHistoryIfVersion(newHistory, historyVersion) {
+		logging.Debug("context: skipped compaction commit — history changed during summarization (retries next turn)")
+		return nil
+	}
 
 	// Recount tokens
 	tokens, err := m.tokenCounter.CountContents(ctx, newHistory)
@@ -802,7 +812,7 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	strategy := m.summaryStrategy
 	m.mu.RUnlock()
 
-	history := m.session.GetHistory()
+	history, historyVersion := m.session.GetHistoryWithVersion()
 
 	// Preserve last 50 messages in full fidelity
 	preserveCount := min(50, len(history))
@@ -832,7 +842,14 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	newHistory = append(newHistory, summary)
 	newHistory = append(newHistory, recentMessages...)
 
-	m.session.SetHistory(newHistory)
+	// Optimistic-concurrency commit (see OptimizeContext): this runs in a
+	// background goroutine (async token-count → tryAutoCompact) built from the
+	// snapshot above, concurrent with the foreground turn's own SetHistory. Skip
+	// on version mismatch so a stale compaction can't wipe the just-finished turn.
+	if !m.session.SetHistoryIfVersion(newHistory, historyVersion) {
+		logging.Debug("context: skipped incremental compaction commit — history changed during summarization (retries next turn)")
+		return nil
+	}
 
 	// Update token count
 	tokens, err := m.tokenCounter.CountContents(ctx, newHistory)

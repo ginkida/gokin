@@ -14,6 +14,7 @@ type fakeCoordinator struct {
 	nextID      int
 	waitResults map[string]any
 	waitErr     error
+	stopped     int
 }
 
 func (f *fakeCoordinator) AddTask(prompt string, agentType any, priority any, deps []string) string {
@@ -25,6 +26,21 @@ func (f *fakeCoordinator) WaitWithTimeout(timeout time.Duration) (map[string]any
 	return f.waitResults, f.waitErr
 }
 func (f *fakeCoordinator) GetStatus() any { return nil }
+func (f *fakeCoordinator) Stop()          { f.stopped++ }
+
+// Execute must always Stop() the coordinator it created (defer), so a per-call
+// coordinator built from the app-lifetime context doesn't leak a context node.
+func TestCoordinateTool_ExecuteStopsCoordinator(t *testing.T) {
+	fc := &fakeCoordinator{waitResults: map[string]any{"internal-1": map[string]any{"status": "completed", "output": "ok"}}}
+	tool := NewCoordinateTool()
+	tool.SetCoordinatorFactory(func() any { return fc })
+	if _, err := tool.Execute(context.Background(), map[string]any{"tasks": tasksArg("a")}); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if fc.stopped != 1 {
+		t.Fatalf("Execute must Stop() the coordinator exactly once; got %d", fc.stopped)
+	}
+}
 
 func tasksArg(ids ...string) []any {
 	out := make([]any, 0, len(ids))

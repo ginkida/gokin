@@ -1232,6 +1232,15 @@ func (m *Model) handleModelSelectorKeys(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// keyConsumed is a non-nil no-op tea.Cmd returned by shortcut handlers that
+// CONSUME a bare-printable key (e/E/[/]) in StateInput without producing a real
+// command. handleKeyMsg's caller (Update) treats a non-nil return as "handled,
+// stop" and returns early — so the consumed key is NOT also forwarded to the
+// textarea via the type-ahead input.Update path (which would fire the shortcut
+// AND type the char). Returning plain nil is ambiguous ("no cmd" vs "not
+// handled") and falls through to typing; hence this explicit sentinel.
+func keyConsumed() tea.Msg { return nil }
+
 // handleGlobalKeys handles global keyboard shortcuts.
 func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// Ctrl+K opens the model selector. The welcome panel and model selector
@@ -1391,8 +1400,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			} else {
 				m.toastManager.ShowInfo("All tool outputs collapsed")
 			}
+			// Consumed as a shortcut — must NOT also be typed into the textarea
+			// (StateInput is type-ahead-active, so a nil return would leak 'E').
+			return keyConsumed
 		}
-		return nil
+		// No tool output to toggle — fall through so 'E' types normally.
 	}
 
 	// Handle Ctrl+E / plain 'e' for tool output expand/collapse. Ctrl+E
@@ -1414,9 +1426,16 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 					m.toastManager.ShowInfo("Tool output expanded")
 					m.output.AppendLine(m.styles.ToolResult.Render("   " + strings.ReplaceAll(entry.FullContent, "\n", "\n    ")))
 				}
+				// Consumed the toggle — don't also type 'e' into the textarea.
+				return keyConsumed
 			}
 		}
-		return nil
+		// Nothing to toggle: fall through, do NOT consume. Plain 'e' then types
+		// normally; Ctrl+E reaches the bubbles textarea's own binding (ctrl+e =
+		// jump to line end, the emacs sibling of the still-working Ctrl+A =
+		// line start). Returning keyConsumed here would swallow that LineEnd
+		// binding — a real regression, since Ctrl+E is a live forwarded textarea
+		// key, not an inert control combo.
 	}
 
 	// Option+C: copy last AI response to clipboard
@@ -1437,17 +1456,19 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		if codeBlocks != nil && codeBlocks.Count() > 0 {
 			switch msg.String() {
 			case "]":
-				// Navigate to next code block
+				// Navigate to next code block. Consumed — in this context (empty
+				// input + code blocks on screen) ']' is a nav key, not a char to
+				// type; a nil return would leak ']' into the textarea.
 				if codeBlocks.SelectNext() {
 					m.toastManager.ShowInfo(codeBlocks.RenderSelectionIndicator())
 				}
-				return nil
+				return keyConsumed
 			case "[":
-				// Navigate to previous code block
+				// Navigate to previous code block (see ']').
 				if codeBlocks.SelectPrev() {
 					m.toastManager.ShowInfo(codeBlocks.RenderSelectionIndicator())
 				}
-				return nil
+				return keyConsumed
 			}
 		}
 

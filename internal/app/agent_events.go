@@ -493,6 +493,18 @@ func (a *App) runStopHooks(ctx context.Context, response string) {
 		return
 	}
 
+	// End-of-turn gate: on cancellation (user Esc / deadline) skip the hooks
+	// entirely. Running them with a dead ctx makes every hook subprocess fail
+	// immediately with "context canceled"; a FailOnError stop hook would then
+	// spuriously enqueue a continuation turn for work the user just interrupted
+	// (and journal a meaningless error). The stopHookActive flag is reset by
+	// CancelProcessing on the cancel path, so returning here can't strand it.
+	// Same "skip, preserve work on ctx.Err()" discipline as enforceDoneGate and
+	// runCompletionReviewIfNeeded (v0.100.47).
+	if ctx.Err() != nil {
+		return
+	}
+
 	a.mu.Lock()
 	wasContinuation := a.stopHookActive
 	a.stopHookActive = false

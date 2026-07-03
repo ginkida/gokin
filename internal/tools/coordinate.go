@@ -208,6 +208,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 		Start()
 		WaitWithTimeout(timeout time.Duration) (map[string]any, error)
 		GetStatus() any
+		Stop()
 	}
 
 	coord, ok := coordAny.(coordinatorInterface)
@@ -215,6 +216,13 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 		// Fall back to simplified execution
 		return t.executeSimple(ctx, tasksAny)
 	}
+	// The coordinator holds a context.WithCancel(app-lifetime ctx) child plus a
+	// processLoop goroutine. Without Stop(), every coordinate call would leak a
+	// context node on the app context (and overhang processLoop). WaitWithTimeout
+	// snapshots partial results before returning, so tearing the coordinator down
+	// here only reaps the ephemeral machinery — a straggler's result is already
+	// discarded by then.
+	defer coord.Stop()
 
 	// Build task ID mapping (user IDs -> internal IDs)
 	taskIDMap := make(map[string]string)

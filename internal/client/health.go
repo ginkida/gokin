@@ -84,7 +84,13 @@ func healthFilePath() (string, error) {
 	return filepath.Join(configBase, "gokin", "provider_health.json"), nil
 }
 
-func getProviderHealth(provider string) *providerHealth {
+// getProviderHealth returns a SNAPSHOT (value copy) of the provider's health,
+// taken under healthMu. It previously returned the shared *providerHealth
+// pointer, which let callers (AdaptiveRetryConfig / AdaptiveStreamRetryPolicy)
+// read Score/FailureStreak lock-free while recordProviderSuccess/Failure mutated
+// those same fields under healthMu — a data race. A value copy is race-free and
+// every caller only reads.
+func getProviderHealth(provider string) providerHealth {
 	healthMu.Lock()
 	defer healthMu.Unlock()
 	ensureHealthLoadedLocked()
@@ -93,7 +99,7 @@ func getProviderHealth(provider string) *providerHealth {
 		stats = &providerHealth{}
 		providerStats[provider] = stats
 	}
-	return stats
+	return *stats
 }
 
 func recordProviderSuccess(provider string) {

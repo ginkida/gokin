@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gokin/internal/fileutil"
 )
@@ -30,6 +31,16 @@ import (
 //     for how long without parsing.
 type MemoryWriter struct {
 	workDir string
+
+	// mu serializes WriteLoop against DeleteLoop and guards `deleted`. WriteLoop
+	// (loop-runner goroutine, ~once per iteration) and DeleteLoop (command
+	// goroutine, on /loop remove) race otherwise: a finishing iteration's write
+	// could land AFTER the remove deleted the file, resurrecting an orphaned
+	// markdown for a loop the user removed. Holding mu across the file I/O in
+	// both, plus the `deleted` tombstone set, makes every interleaving end with
+	// the file gone. Contention is negligible (writes are seconds apart).
+	mu      sync.Mutex
+	deleted map[string]bool
 }
 
 // NewMemoryWriter creates a writer rooted at <workDir>/.gokin/loops/.
@@ -39,7 +50,7 @@ func NewMemoryWriter(workDir string) *MemoryWriter {
 	if strings.TrimSpace(workDir) == "" {
 		return nil
 	}
-	return &MemoryWriter{workDir: workDir}
+	return &MemoryWriter{workDir: workDir, deleted: make(map[string]bool)}
 }
 
 // WriteLoop renders the loop's full state as markdown and atomically
@@ -60,6 +71,12 @@ func (w *MemoryWriter) WriteLoop(l *Loop) error {
 	if w == nil || l == nil {
 		return nil
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.deleted[l.ID] {
+		// The loop was removed concurrently — don't resurrect its markdown.
+		return nil
+	}
 	dir := filepath.Join(w.workDir, ".gokin", "loops")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("loops memory: create dir: %w", err)
@@ -76,6 +93,14 @@ func (w *MemoryWriter) DeleteLoop(loopID string) error {
 	if w == nil || loopID == "" {
 		return nil
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.deleted == nil {
+		w.deleted = make(map[string]bool)
+	}
+	// Tombstone the id so a WriteLoop that raced this remove (a still-in-flight
+	// iteration finishing) can't recreate the file after we delete it.
+	w.deleted[loopID] = true
 	path := filepath.Join(w.workDir, ".gokin", "loops", loopID+".md")
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {

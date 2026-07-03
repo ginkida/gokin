@@ -85,8 +85,10 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 
 	// Carry over system instruction, turn context (working memory), and
 	// thinking budget to the new client
-	if a.session != nil && a.session.SystemInstruction != "" {
-		newClient.SetSystemInstruction(a.session.SystemInstruction)
+	if a.session != nil {
+		if si := a.session.GetSystemInstruction(); si != "" {
+			newClient.SetSystemInstruction(si)
+		}
 	}
 	if tc := a.turnContextContent(); tc != "" {
 		newClient.SetTurnContext(tc)

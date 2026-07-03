@@ -608,6 +608,11 @@ type journalEvent struct {
 	Details map[string]any `json:"details"`
 }
 
+// maxJournalLineBytes bounds the size of a single journal line we will parse.
+// gokin caps journaled tool content, so real lines stay well under this; a line
+// above it is skipped (recorded as a parse error) instead of unmarshaled.
+const maxJournalLineBytes = 8 << 20 // 8 MiB
+
 func summarizeExecutionJournal(workspace, output string, changed []string) *JournalSummary {
 	journalPath := filepath.Join(workspace, ".gokin", "execution_journal.jsonl")
 	f, err := os.Open(journalPath)
@@ -632,24 +637,42 @@ func summarizeExecutionJournal(workspace, output string, changed []string) *Jour
 	summary := &JournalSummary{
 		Path: ".gokin/execution_journal.jsonl",
 	}
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	// Read line-by-line with a bufio.Reader (not a Scanner): a single
+	// legitimately-large journal line — e.g. a `write` whose content arg is a
+	// few hundred KB — used to exceed the Scanner's 2MB token cap, which makes
+	// scanner.Scan() return false and silently DROP every remaining line, so
+	// scoring saw a truncated view of the run. ReadString handles arbitrarily
+	// long lines and never aborts the rest of the file; a line above
+	// maxJournalLineBytes is skipped (recorded as a parse error) rather than
+	// unmarshaled, bounding pathological memory use.
+	reader := bufio.NewReader(f)
 	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	for {
+		raw, readErr := reader.ReadString('\n')
+		if len(raw) > 0 {
+			lineNo++
+			line := strings.TrimSpace(raw)
+			switch {
+			case line == "":
+				// blank line — skip
+			case len(line) > maxJournalLineBytes:
+				summary.ParseErrors = append(summary.ParseErrors,
+					fmt.Sprintf("line %d: skipped oversized journal line (%d bytes)", lineNo, len(line)))
+			default:
+				var event journalEvent
+				if err := json.Unmarshal([]byte(line), &event); err != nil {
+					summary.ParseErrors = append(summary.ParseErrors, fmt.Sprintf("line %d: %v", lineNo, err))
+				} else {
+					recordJournalEvent(summary, workspace, event)
+				}
+			}
 		}
-		var event journalEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			summary.ParseErrors = append(summary.ParseErrors, fmt.Sprintf("line %d: %v", lineNo, err))
-			continue
+		if readErr != nil {
+			if readErr != io.EOF {
+				summary.ParseErrors = append(summary.ParseErrors, readErr.Error())
+			}
+			break
 		}
-		recordJournalEvent(summary, workspace, event)
-	}
-	if err := scanner.Err(); err != nil {
-		summary.ParseErrors = append(summary.ParseErrors, err.Error())
 	}
 
 	sort.Strings(summary.Tools)
@@ -705,27 +728,24 @@ func recordJournalToolStart(summary *JournalSummary, workspace string, details m
 	}
 }
 
+// appendBatchEditedPaths extracts edited paths from a `batch` tool call's args.
+// The real batch tool (internal/tools/batch.go) takes a single `operation`
+// (replace/rename/delete) applied to an explicit `files` list and/or a glob
+// `pattern` — NOT a nested tools/calls array (the shape the old code parsed,
+// which the tool never emits, so batch-driven edits were never counted). The
+// journal carries only the args, so the explicit `files` list is the reliable
+// source of changed paths; a pattern-only batch can't be resolved to concrete
+// files here and is left unrecorded.
 func appendBatchEditedPaths(paths *[]string, workspace string, args map[string]any) {
 	if args == nil {
 		return
 	}
-	tools, ok := args["tools"].([]any)
+	files, ok := args["files"].([]any)
 	if !ok {
-		tools, _ = args["calls"].([]any)
+		return
 	}
-	for _, item := range tools {
-		call, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		name := strings.ToLower(detailString(call, "tool", "name", "tool_name"))
-		callArgs, _ := call["args"].(map[string]any)
-		switch name {
-		case "write", "edit", "delete", "mkdir", "refactor":
-			appendArgPaths(paths, workspace, callArgs, "file_path", "path")
-		case "move", "copy":
-			appendArgPaths(paths, workspace, callArgs, "source", "destination", "new_path")
-		}
+	for _, f := range files {
+		appendPathValue(paths, workspace, f)
 	}
 }
 

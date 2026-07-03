@@ -123,7 +123,7 @@ func (a *App) prepareHeadlessRuntime() {
 	systemPrompt += a.buildModelEnhancement()
 	if strings.TrimSpace(systemPrompt) != "" && a.client != nil {
 		a.client.SetSystemInstruction(systemPrompt)
-		a.session.SystemInstruction = systemPrompt
+		a.session.SetSystemInstruction(systemPrompt)
 	}
 	a.pushTurnContext()
 	a.session.SetProvider(runtimeProviderForConfig(a.config))

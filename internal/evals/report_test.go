@@ -136,6 +136,55 @@ func TestEvaluateGate_FailsScoreMetricsAndRegressions(t *testing.T) {
 	}
 }
 
+// A require-all-passed gate over zero scenarios must FAIL, not pass vacuously —
+// zero scenarios almost always means a misconfigured filter and a green CI on no
+// work is a false signal.
+func TestEvaluateGate_RequireAllPassedFailsOnZeroScenarios(t *testing.T) {
+	report := BuildReport("empty.jsonl", nil)
+	gate := EvaluateGate(report, nil, GateOptions{RequireAllPassed: true})
+	if gate.Passed {
+		t.Fatal("gate passed on zero scenarios, want failure")
+	}
+	if !gateFailureContains(gate, "no scenarios") {
+		t.Fatalf("gate failures = %v, want a 'no scenarios' failure", gate.Failures)
+	}
+}
+
+// A metric present in only one report (e.g. a --scenario-scoped subset run vs a
+// full baseline) must NOT be emitted as a comparison delta — otherwise the
+// absent side defaults to 0 and it looks like a spurious ±100% regression.
+func TestCompareReports_OneSidedMetricNotComparable(t *testing.T) {
+	baseline := BuildReport("baseline.jsonl", []Result{{
+		ScenarioID: "a", Status: "passed",
+		Metrics: map[string]bool{"verification_passed": true, "only_in_baseline": true},
+		Score:   ScoreSummary{Passed: 2, Total: 2, Ratio: 1},
+	}})
+	current := BuildReport("current.jsonl", []Result{{
+		ScenarioID: "a", Status: "passed",
+		Metrics: map[string]bool{"verification_passed": true},
+		Score:   ScoreSummary{Passed: 1, Total: 1, Ratio: 1},
+	}})
+
+	cmp := CompareReports(baseline, current)
+	for _, d := range cmp.Metrics {
+		if d.Name == "only_in_baseline" {
+			t.Fatalf("one-sided metric %q must be excluded from the comparison (got delta %+v)", d.Name, d)
+		}
+	}
+	// The shared metric is still compared.
+	if metricDeltaByName(cmp.Metrics, "verification_passed").Name == "" {
+		t.Fatal("shared metric should still be compared")
+	}
+
+	// And it must not surface as a regression in diagnose.
+	diagnosis := DiagnoseReport(current, &cmp)
+	for _, r := range diagnosis.Regressions {
+		if r.Name == "only_in_baseline" {
+			t.Fatalf("one-sided metric must not be flagged as a regression: %+v", r)
+		}
+	}
+}
+
 func TestParseMetricThresholds_AcceptsRatiosAndPercents(t *testing.T) {
 	got, err := ParseMetricThresholds([]string{"verification_passed=90%", "task_completed=0.8"})
 	if err != nil {

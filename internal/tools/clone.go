@@ -100,6 +100,20 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		return NewVerifyCodeTool(pickWorkDir(workDir, t.workDir))
 	case *CheckImpactTool:
 		return NewCheckImpactTool(pickWorkDir(workDir, t.workDir))
+	case *GoToDefinitionTool:
+		// Carries workDir + a per-agent SetAllowedDirs mutator (rebuilds its
+		// PathValidator). Without a clone case every sub-agent shared the
+		// foreground instance, so a worktree-isolated agent's SetGrantedDirs
+		// clobbered the shared pathValidator (and multiple isolated agents raced
+		// it). Fresh per-agent instance; the runner re-applies grants after clone.
+		return NewGoToDefinitionTool(pickWorkDir(workDir, t.workDir))
+	case *FindReferencesTool:
+		return NewFindReferencesTool(pickWorkDir(workDir, t.workDir))
+	case *ReviewChangesTool:
+		// Carries workDir (git commands run with cmd.Dir = workDir). Without a
+		// clone case a worktree-isolated agent's self-review ran `git diff`
+		// against the FOREGROUND repo, not its own worktree.
+		return NewReviewChangesTool(pickWorkDir(workDir, t.workDir))
 	case *RequestToolTool:
 		return NewRequestToolTool()
 	case *AskAgentTool:

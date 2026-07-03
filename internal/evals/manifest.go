@@ -60,9 +60,18 @@ type Scenario struct {
 }
 
 // HasBehavioralAssertion reports whether the scenario declares at least one
-// machine-checked behavioral assertion.
+// machine-checked behavioral assertion (positive OR negative).
 func (s Scenario) HasBehavioralAssertion() bool {
 	return len(s.AnswerMustContain) > 0 || len(s.FileMustChange) > 0 || len(s.FileMustNotChange) > 0
+}
+
+// HasPositiveBehavioralAssertion reports whether the scenario declares an
+// assertion that a no-op CANNOT satisfy — the answer must contain something, or
+// a file must change. FileMustNotChange (negative) is trivially satisfied by
+// doing nothing, so it does NOT count here. Green (trap) scenarios need a
+// positive assertion or they silently reward a no-op.
+func (s Scenario) HasPositiveBehavioralAssertion() bool {
+	return len(s.AnswerMustContain) > 0 || len(s.FileMustChange) > 0
 }
 
 // LoadManifest reads and validates a coding eval manifest.
@@ -137,9 +146,10 @@ func (m *Manifest) Validate() error {
 		// that the agent actually did the right thing, or it silently rewards
 		// doing nothing. Red scenarios are gated by verification flipping
 		// red->green, so the assertion is optional for them.
-		if scenario.EffectiveDeliveredState() == "green" && !scenario.HasBehavioralAssertion() {
-			return fmt.Errorf("scenario %q is delivered_state=green but declares no behavioral assertion "+
-				"(answer_must_contain / file_must_change / file_must_not_change) — a no-op would score as success", scenario.ID)
+		if scenario.EffectiveDeliveredState() == "green" && !scenario.HasPositiveBehavioralAssertion() {
+			return fmt.Errorf("scenario %q is delivered_state=green but declares no POSITIVE behavioral assertion "+
+				"(answer_must_contain / file_must_change) — file_must_not_change alone is trivially satisfied by a no-op, "+
+				"which would score as success", scenario.ID)
 		}
 	}
 	return nil

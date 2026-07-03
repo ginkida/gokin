@@ -44,13 +44,18 @@ type Session struct {
 	// formats don't round-trip across providers. Empty for legacy
 	// sessions saved before v0.71.4; those are treated as compatible
 	// on first load (one-time migration) and tagged on first save.
-	Provider          string
-	Branches          map[string]*Session // named branches (forks)
-	Checkpoints       map[string]int      // named checkpoints (name -> history index)
-	SystemInstruction string              // System prompt, passed via API parameter (not in history)
-	tokenCounts       []int               // tokens per message
-	totalTokens       int                 // cached total
-	version           int64               // version for optimistic concurrency control
+	Provider    string
+	Branches    map[string]*Session // named branches (forks)
+	Checkpoints map[string]int      // named checkpoints (name -> history index)
+	// systemInstruction is the system prompt (passed via API parameter, never
+	// in history). UNEXPORTED on purpose: it is read by GetState() on the async
+	// save goroutine while the app goroutine updates it, so all access MUST go
+	// through the locked accessors (GetSystemInstruction / SetSystemInstruction)
+	// — a direct field write from another package would race the save.
+	systemInstruction string
+	tokenCounts       []int // tokens per message
+	totalTokens       int   // cached total
+	version           int64 // version for optimistic concurrency control
 	onChange          ChangeHandler
 	scratchpad        string
 	toolCheckpoints   []SerializedToolCheckpoint // persisted tool checkpoint journal
@@ -407,6 +412,22 @@ func (s *Session) GetProvider() string {
 	return s.Provider
 }
 
+// GetSystemInstruction returns the session's system instruction under lock.
+func (s *Session) GetSystemInstruction() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.systemInstruction
+}
+
+// SetSystemInstruction updates the session's system instruction under lock.
+// GetState() reads this field on the async save goroutine, so every external
+// mutation must go through here rather than a direct field write.
+func (s *Session) SetSystemInstruction(instruction string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.systemInstruction = instruction
+}
+
 // GetState returns the current state of the session for serialization.
 func (s *Session) GetState() *SessionState {
 	s.mu.RLock()
@@ -428,7 +449,7 @@ func (s *Session) GetState() *SessionState {
 		TotalTokens:       s.totalTokens,
 		Version:           s.version,
 		Scratchpad:        s.scratchpad,
-		SystemInstruction: s.SystemInstruction,
+		SystemInstruction: s.systemInstruction,
 	}
 	copy(state.TokenCounts, s.tokenCounts)
 
@@ -494,7 +515,7 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.totalTokens = state.TotalTokens
 	s.version = state.Version
 	s.scratchpad = state.Scratchpad
-	s.SystemInstruction = state.SystemInstruction
+	s.systemInstruction = state.SystemInstruction
 
 	// Restore checkpoints
 	if len(state.Checkpoints) > 0 {
@@ -583,7 +604,7 @@ func (s *Session) Fork(name string) *Session {
 		tokenCounts:       tokenCountsCopy,
 		totalTokens:       s.totalTokens,
 		scratchpad:        s.scratchpad,
-		SystemInstruction: s.SystemInstruction,
+		systemInstruction: s.systemInstruction,
 	}
 
 	s.Branches[name] = branch

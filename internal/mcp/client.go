@@ -691,8 +691,15 @@ func (c *Client) Close() error {
 			"server", c.serverName)
 	}
 
-	// Close transport
-	if err := c.transport.Close(); err != nil {
+	// Close transport. Read the pointer under c.mu: normally receiveLoop has
+	// already exited (we waited on c.done above), but on the 5s-timeout path it
+	// may still be running inside reconnect(), which swaps c.transport under
+	// c.mu — an unlocked read here would race that write. Mirrors the locked
+	// read in request()/notify().
+	c.mu.RLock()
+	transport := c.transport
+	c.mu.RUnlock()
+	if err := transport.Close(); err != nil {
 		return fmt.Errorf("failed to close transport: %w", err)
 	}
 

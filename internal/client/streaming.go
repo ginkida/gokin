@@ -107,6 +107,12 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 			if chunk.CacheReadInputTokens > 0 {
 				resp.CacheReadInputTokens = chunk.CacheReadInputTokens
 			}
+			if chunk.CacheCreationInputTokens > 0 {
+				// Mirror the sibling StreamingResponse.Collect() (client.go): without
+				// this, cache-creation token accounting on the executor + agent
+				// stream paths stays permanently 0.
+				resp.CacheCreationInputTokens = chunk.CacheCreationInputTokens
+			}
 			if chunk.RateLimit != nil {
 				resp.RateLimit = chunk.RateLimit
 				if handler.OnRateLimit != nil {

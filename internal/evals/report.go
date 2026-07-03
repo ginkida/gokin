@@ -161,8 +161,17 @@ func CompareReports(baseline, current Report) Comparison {
 		names[metric.Name] = true
 	}
 	for name := range names {
-		base := baseMetrics[name]
-		cur := currentMetrics[name]
+		base, inBase := baseMetrics[name]
+		cur, inCur := currentMetrics[name]
+		if !inBase || !inCur {
+			// Metric present in only ONE report (e.g. a --scenario-scoped subset
+			// run compared against a full baseline). The absent side would default
+			// to Ratio=0, producing a spurious full-magnitude ±100% delta that
+			// DiagnoseReport flags as a "regression" and tells the user to revert a
+			// change for a metric that was simply never measured. Not comparable —
+			// skip it.
+			continue
+		}
 		cmp.Metrics = append(cmp.Metrics, MetricDelta{
 			Name:          name,
 			BaselineRatio: base.Ratio,
@@ -223,8 +232,16 @@ func EvaluateGate(report Report, comparison *Comparison, opts GateOptions) GateR
 		gate.Failures = append(gate.Failures, fmt.Sprintf(format, args...))
 	}
 
-	if opts.RequireAllPassed && report.Failed > 0 {
-		fail("%d scenario(s) failed", report.Failed)
+	if opts.RequireAllPassed {
+		// A "require all passed" gate over ZERO scenarios must FAIL, not pass
+		// vacuously: it almost always means a misconfigured scenario filter /
+		// glob that matched nothing, and a green CI on zero work is a false
+		// signal.
+		if report.Count == 0 {
+			fail("no scenarios ran — require-pass expects at least one (check the scenario filter/path)")
+		} else if report.Failed > 0 {
+			fail("%d scenario(s) failed", report.Failed)
+		}
 	}
 	if opts.MinScoreRatio > 0 && report.Score.Ratio < opts.MinScoreRatio {
 		fail("score %.1f%% is below required %.1f%%", report.Score.Ratio*100, opts.MinScoreRatio*100)

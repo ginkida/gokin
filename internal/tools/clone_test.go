@@ -93,3 +93,62 @@ func TestCloneToolForWorkDir_TodoToolIsIsolated(t *testing.T) {
 		t.Errorf("clone mutation clobbered the original list: %+v", items)
 	}
 }
+
+// TestCloneToolForWorkDir_SemanticToolsIsolated pins that go_to_definition /
+// find_references get their OWN per-agent instance scoped to the agent's workDir.
+// Without a clone case the shared foreground instance was returned, so a
+// worktree-isolated agent's SetAllowedDirs clobbered the shared pathValidator
+// (and parallel isolated agents raced it).
+func TestCloneToolForWorkDir_SemanticToolsIsolated(t *testing.T) {
+	origDef := NewGoToDefinitionTool("/foreground")
+	clonedDef, ok := CloneToolForWorkDir(origDef, "/worktree").(*GoToDefinitionTool)
+	if !ok {
+		t.Fatalf("go_to_definition clone wrong type: %T", CloneToolForWorkDir(origDef, "/worktree"))
+	}
+	if clonedDef == origDef {
+		t.Fatal("go_to_definition clone must be a distinct instance")
+	}
+	if clonedDef.workDir != "/worktree" {
+		t.Fatalf("clone workDir = %q, want /worktree", clonedDef.workDir)
+	}
+
+	origRef := NewFindReferencesTool("/foreground")
+	clonedRef, ok := CloneToolForWorkDir(origRef, "/worktree").(*FindReferencesTool)
+	if !ok || clonedRef == origRef || clonedRef.workDir != "/worktree" {
+		t.Fatal("find_references clone not isolated/scoped to the worktree")
+	}
+
+	// Empty override → inherit the source tool's own workDir (pickWorkDir).
+	inherited := CloneToolForWorkDir(NewGoToDefinitionTool("/foreground"), "").(*GoToDefinitionTool)
+	if inherited.workDir != "/foreground" {
+		t.Fatalf("empty override should inherit source workDir, got %q", inherited.workDir)
+	}
+
+	// Concurrent SetAllowedDirs on independent clones must be race-free (-race).
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			CloneToolForWorkDir(origDef, "/wt").(*GoToDefinitionTool).SetAllowedDirs([]string{"/grant"})
+		}()
+	}
+	wg.Wait()
+}
+
+// TestCloneToolForWorkDir_ReviewChangesIsolated pins that review_changes follows
+// the agent's workDir — without a clone case an isolated agent's self-review ran
+// git against the foreground repo, not its own worktree.
+func TestCloneToolForWorkDir_ReviewChangesIsolated(t *testing.T) {
+	orig := NewReviewChangesTool("/foreground")
+	cloned, ok := CloneToolForWorkDir(orig, "/worktree").(*ReviewChangesTool)
+	if !ok {
+		t.Fatalf("review_changes clone wrong type: %T", CloneToolForWorkDir(orig, "/worktree"))
+	}
+	if cloned == orig {
+		t.Fatal("review_changes clone must be a distinct instance")
+	}
+	if cloned.workDir != "/worktree" {
+		t.Fatalf("clone workDir = %q, want /worktree", cloned.workDir)
+	}
+}

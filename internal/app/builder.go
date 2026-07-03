@@ -2485,6 +2485,13 @@ func (a *coordinatorToolAdapter) Start() {
 	a.coord.Start()
 }
 
+// Stop tears down the coordinator (cancels its context, ending processLoop).
+// CoordinateTool.Execute defers this so a per-call coordinator built from the
+// app-lifetime context doesn't leak a context node on every coordinate call.
+func (a *coordinatorToolAdapter) Stop() {
+	a.coord.Stop()
+}
+
 func (a *coordinatorToolAdapter) WaitWithTimeout(timeout time.Duration) (map[string]any, error) {
 	// Coordinator.WaitWithTimeout returns a partial results snapshot ALONGSIDE
 	// a timeout/cancellation error now — whatever sub-tasks finished before

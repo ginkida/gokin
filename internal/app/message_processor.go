@@ -147,7 +147,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 		// Track prompt cache state for cache break detection
 		if ct := a.executor.GetCacheTracker(); ct != nil {
-			ct.RecordState(a.session.SystemInstruction, "")
+			ct.RecordState(a.session.GetSystemInstruction(), "")
 		}
 	}
 

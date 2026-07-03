@@ -534,7 +534,7 @@ func (a *App) Run() error {
 		systemPrompt := a.promptBuilder.Build()
 		systemPrompt += modelEnhancement
 		a.client.SetSystemInstruction(systemPrompt)
-		a.session.SystemInstruction = systemPrompt
+		a.session.SetSystemInstruction(systemPrompt)
 	} else {
 		// Restored session: clean up legacy system prompt messages from history
 		a.stripLegacySystemMessages()
@@ -548,17 +548,17 @@ func (a *App) Run() error {
 			systemPrompt := a.promptBuilder.Build()
 			systemPrompt += modelEnhancement
 			a.client.SetSystemInstruction(systemPrompt)
-			a.session.SystemInstruction = systemPrompt
-		} else if a.session.SystemInstruction != "" {
+			a.session.SetSystemInstruction(systemPrompt)
+		} else if saved := a.session.GetSystemInstruction(); saved != "" {
 			// Use saved system instruction — same prompt as when the
 			// session was saved, so tool expectations stay consistent.
-			a.client.SetSystemInstruction(a.session.SystemInstruction)
+			a.client.SetSystemInstruction(saved)
 		} else {
 			// Legacy session without SystemInstruction — rebuild
 			systemPrompt := a.promptBuilder.Build()
 			systemPrompt += modelEnhancement
 			a.client.SetSystemInstruction(systemPrompt)
-			a.session.SystemInstruction = systemPrompt
+			a.session.SetSystemInstruction(systemPrompt)
 		}
 	}
 
@@ -1939,7 +1939,7 @@ func (a *App) ClearConversation() {
 	// Re-set system instruction via API parameter
 	systemPrompt := a.promptBuilder.Build()
 	a.client.SetSystemInstruction(systemPrompt)
-	a.session.SystemInstruction = systemPrompt
+	a.session.SetSystemInstruction(systemPrompt)
 
 	// Clear per-session telemetry so /stats and /cost after /clear reflect the
 	// new conversation instead of accumulating across unrelated tasks. Also
@@ -1971,8 +1971,21 @@ func (a *App) ClearConversation() {
 	// totalOutputTokens accumulates via +=; totalInputTokens is periodically
 	// re-assigned but its last pre-clear value would persist until the next
 	// exchange. Both must be zeroed so /cost shows only the fresh session.
+	//
+	// These fields (and lastError/lastErrorTime/stopHookActive below) are
+	// a.mu-guarded on the message-processing path, and rateLimitRetryCount is
+	// rateLimitRetryMu-guarded (rate_limit_retry.go). ClearConversation is
+	// normally safe lock-free because every regular caller runs under
+	// executeCommandCtx with a.processing=true (mutually exclusive with message
+	// processing) — but the masked key-entry login worker (handleKeyEntrySubmit)
+	// calls commandHandler.Execute("login") directly, OFF the processing gate, so
+	// a concurrent user submit can race these writes. Lock each field write under
+	// its own guard. pushTurnContext MUST stay OUTSIDE a.mu (it is non-reentrant
+	// w.r.t. a.mu — self-deadlock, per the v0.100.42 invariant).
+	a.mu.Lock()
 	a.totalInputTokens = 0
 	a.totalOutputTokens = 0
+	a.mu.Unlock()
 
 	// Clear working memory so stale file/command context from the old
 	// conversation doesn't leak into the new one — and push the now-empty
@@ -1983,21 +1996,22 @@ func (a *App) ClearConversation() {
 	a.pushTurnContext()
 
 	// Drain stale rate-limit retry counters so exhausted keys from the
-	// old conversation don't accumulate indefinitely.
+	// old conversation don't accumulate indefinitely (rateLimitRetryMu-guarded).
+	a.rateLimitRetryMu.Lock()
 	a.rateLimitRetryCount = make(map[string]int)
+	a.rateLimitRetryMu.Unlock()
 
-	// Clear the carried-over error note. message_processor prepends "[Note:
-	// previous attempt failed with: <lastError>. The context from that attempt is
-	// preserved in history.]" when lastError is < 2 min old — but /clear just wiped
-	// the history, so that note would be false AND belong to an unrelated prior
-	// conversation. headless.go zeros it for a fresh run for the same reason.
+	// Clear the carried-over error note + stop-hook marker under a.mu (their
+	// guard). message_processor prepends "[Note: previous attempt failed with:
+	// <lastError>...]" when lastError is < 2 min old — but /clear just wiped the
+	// history, so that note would be false AND belong to an unrelated prior
+	// conversation. A dropped Stop-hook continuation must not leave the next user
+	// turn marked as a continuation (which would skip that turn's Stop hooks).
+	a.mu.Lock()
 	a.lastError = ""
 	a.lastErrorTime = time.Time{}
-
-	// A dropped Stop-hook continuation must not leave the next user turn marked as
-	// a continuation (which would skip that turn's Stop hooks). /clear is a hard
-	// boundary — reset the marker.
 	a.stopHookActive = false
+	a.mu.Unlock()
 }
 
 // CompactContextWithPlan clears the conversation and injects the plan summary.
@@ -2022,7 +2036,7 @@ func (a *App) CompactContextWithPlan(planSummary string) {
 	// Re-set system instruction via API parameter
 	systemPrompt := a.promptBuilder.Build()
 	a.client.SetSystemInstruction(systemPrompt)
-	a.session.SystemInstruction = systemPrompt
+	a.session.SetSystemInstruction(systemPrompt)
 
 	// Inject the plan summary as a user message for execution context
 	if planSummary != "" {
@@ -2192,7 +2206,7 @@ func (a *App) TogglePlanningMode() bool {
 			a.client.SetSystemInstruction(systemPrompt)
 		}
 		if a.session != nil {
-			a.session.SystemInstruction = systemPrompt
+			a.session.SetSystemInstruction(systemPrompt)
 		}
 	}
 
@@ -2276,7 +2290,7 @@ func (a *App) disablePlanModeAfterApproval() {
 			client.SetSystemInstruction(systemPrompt)
 		}
 		if a.session != nil {
-			a.session.SystemInstruction = systemPrompt
+			a.session.SetSystemInstruction(systemPrompt)
 		}
 	}
 
@@ -2974,7 +2988,7 @@ func (a *App) refreshSystemInstruction() {
 		return
 	}
 	a.client.SetSystemInstruction(systemPrompt)
-	a.session.SystemInstruction = systemPrompt
+	a.session.SetSystemInstruction(systemPrompt)
 }
 
 // getActiveToolDeclarations returns declarations for the tools actually available

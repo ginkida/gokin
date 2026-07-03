@@ -430,6 +430,18 @@ func shortenPath(path string, maxLen int) string {
 		return path
 	}
 
+	// Guard tiny widths: the "..."+tail truncations below compute
+	// runes[len(runes)-maxLen+3:], whose start index exceeds len(runes) when
+	// maxLen < 3 → a slice-bounds panic that crashes the whole TUI (Bubble Tea's
+	// render loop has no recover). Narrow terminals + file autocomplete pass
+	// maxLen 1–2 (input.go). Return a bounded tail instead of "...".
+	if maxLen < 3 {
+		if maxLen <= 0 {
+			return ""
+		}
+		return string(runes[len(runes)-maxLen:])
+	}
+
 	// Smart truncation: preserve filename and show as much context as possible
 	lastSlash := strings.LastIndex(path, "/")
 	if lastSlash == -1 {

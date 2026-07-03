@@ -137,7 +137,7 @@ func TestActivateEmergencyFailover_SwapsClientAndReturnsSummary(t *testing.T) {
 func TestActivateEmergencyFailover_PropagatesSystemInstructionAndThinking(t *testing.T) {
 	newMock := testkit.NewMockClient()
 	session := chat.NewSession()
-	session.SystemInstruction = "be concise"
+	session.SetSystemInstruction("be concise")
 
 	app := &App{
 		ctx:     context.Background(),

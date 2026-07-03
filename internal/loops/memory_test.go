@@ -90,6 +90,56 @@ func TestMemoryWriter_WriteAndDelete(t *testing.T) {
 	}
 }
 
+// After a loop is removed, a WriteLoop that raced the remove (a still-in-flight
+// iteration finishing) must NOT resurrect the markdown file. DeleteLoop
+// tombstones the id; a later WriteLoop for that id is a no-op.
+func TestMemoryWriter_WriteAfterDeleteDoesNotResurrect(t *testing.T) {
+	dir := t.TempDir()
+	w := NewMemoryWriter(dir)
+	l := &Loop{ID: "loop-race", Task: "t", Mode: ModeInterval, IntervalSeconds: 600, Status: StatusRunning}
+	path := filepath.Join(dir, ".gokin", "loops", "loop-race.md")
+
+	if err := w.WriteLoop(l); err != nil {
+		t.Fatalf("WriteLoop: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("markdown should exist after first write: %v", err)
+	}
+	if err := w.DeleteLoop("loop-race"); err != nil {
+		t.Fatalf("DeleteLoop: %v", err)
+	}
+	// The racing write lands AFTER the remove — must be a no-op.
+	if err := w.WriteLoop(l); err != nil {
+		t.Fatalf("post-delete WriteLoop: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("markdown was resurrected after DeleteLoop; file exists")
+	}
+}
+
+// Concurrent WriteLoop/DeleteLoop must be race-free (run under -race) and always
+// leave the file gone once DeleteLoop has been called.
+func TestMemoryWriter_ConcurrentWriteDeleteNoRace(t *testing.T) {
+	dir := t.TempDir()
+	w := NewMemoryWriter(dir)
+	l := &Loop{ID: "loop-conc", Task: "t", Mode: ModeInterval, IntervalSeconds: 600, Status: StatusRunning}
+	path := filepath.Join(dir, ".gokin", "loops", "loop-conc.md")
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			_ = w.WriteLoop(l)
+		}
+		close(done)
+	}()
+	_ = w.DeleteLoop("loop-conc")
+	<-done
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("file exists after DeleteLoop despite concurrent writes")
+	}
+}
+
 // TestMemoryWriter_PermissionsOwnerOnly: the markdown can contain
 // agent outputs, task descriptions, and fragments of files the agent
 // read — same sensitivity as the JSON storage which uses 0600 file /

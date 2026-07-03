@@ -208,6 +208,22 @@ func TestValidate_GreenScenarioRequiresAssertion(t *testing.T) {
 		t.Fatalf("green scenario with an assertion should validate: %v", err)
 	}
 
+	// Green with ONLY a negative assertion (file_must_not_change) → rejected: a
+	// no-op trivially satisfies "don't touch X", so it still rewards doing
+	// nothing. A green scenario needs a POSITIVE assertion.
+	greenNeg := validScenario()
+	greenNeg.DeliveredState = "green"
+	greenNeg.FileMustNotChange = []string{"internal/legacy/helper.go"}
+	if err := manifest(greenNeg).Validate(); err == nil {
+		t.Fatal("green scenario with only a negative assertion must fail validation (no-op still passes)")
+	}
+
+	// Green with a negative AND a positive assertion → accepted.
+	greenNeg.FileMustChange = []string{"internal/x/y.go"}
+	if err := manifest(greenNeg).Validate(); err != nil {
+		t.Fatalf("green scenario with a positive assertion should validate: %v", err)
+	}
+
 	// Red without an assertion → fine (gated by verification flipping red→green).
 	red := validScenario()
 	red.DeliveredState = "red"

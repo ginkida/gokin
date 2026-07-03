@@ -187,6 +187,37 @@ func TestRunStopHooks_BlockedEnqueuesOneBoundedContinuation(t *testing.T) {
 	}
 }
 
+// A cancelled context (user Esc / deadline) must make runStopHooks skip the
+// hooks entirely: running them with a dead ctx would fail every subprocess and
+// a FailOnError hook would spuriously enqueue a continuation for work the user
+// just interrupted. Same "skip on ctx.Err()" discipline as the other
+// end-of-turn gates (v0.100.47).
+func TestRunStopHooks_CancelledContextSkipsHooks(t *testing.T) {
+	cp := &capturePresenter{}
+	mgr := hooks.NewManager(true, t.TempDir())
+	mgr.AddHook(&hooks.Hook{
+		Name: "gate", Type: hooks.Stop, Command: "exit 1", Enabled: true, FailOnError: true,
+	})
+
+	a := &App{hooksManager: mgr}
+	a.setPresenter(cp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.runStopHooks(ctx, "final answer")
+
+	if _, _, ok := a.dequeuePending(); ok {
+		t.Fatal("cancelled ctx must not run stop hooks or enqueue a continuation")
+	}
+
+	// A fresh live-ctx turn afterwards still fires normally (the skip didn't
+	// strand any state).
+	a.runStopHooks(context.Background(), "next answer")
+	if _, _, ok := a.dequeuePending(); !ok {
+		t.Fatal("a subsequent live-ctx turn must still fire stop hooks")
+	}
+}
+
 func TestRunStopHooks_PassingHookDoesNothing(t *testing.T) {
 	cp := &capturePresenter{}
 	mgr := hooks.NewManager(true, t.TempDir())
