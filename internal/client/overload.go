@@ -2,9 +2,40 @@ package client
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 )
+
+// TerminalProviderError marks a HARD provider failure that retrying cannot fix:
+// a quota/balance cap, an exhausted usage window, or an auth failure. Unlike an
+// overload (see IsOverloadError), waiting does NOT help — the only recovery is
+// user action (top up, switch provider with /provider, fix the key). The retry
+// deciders (IsOverloadError, IsRetryableError, and the AnthropicClient's own
+// isRetryableError) short-circuit on it so it surfaces IMMEDIATELY with its
+// actionable Message instead of being parked on the patient overload budget or
+// the generic retry budget.
+//
+// This closes the "app looks frozen" report: GLM's 5-hour usage cap (code 1308)
+// is delivered as HTTP 429 with error type "rate_limit_error", so its raw body
+// matched IsOverloadError's "rate_limit" keyword and got the full 10-minute
+// patient retry — when it should have surfaced at once. The SSE-event path
+// already classified GLM codes (v0.100.60); the HTTP-status path did not, so
+// terminal codes arriving as a real 4xx/5xx status leaked through as retryable.
+type TerminalProviderError struct {
+	Code    string // provider error code, e.g. GLM "1308"
+	Status  int    // original HTTP status (telemetry/logging)
+	Message string // actionable, user-facing text
+}
+
+func (e *TerminalProviderError) Error() string { return e.Message }
+
+// IsTerminalProviderError reports whether err (or anything it wraps) is a hard,
+// non-retryable provider failure the user must act on.
+func IsTerminalProviderError(err error) bool {
+	var t *TerminalProviderError
+	return errors.As(err, &t)
+}
 
 // IsOverloadError reports whether err is a transient, self-resolving provider
 // capacity signal — as opposed to a hard failure (auth, quota, bad request,
@@ -25,6 +56,13 @@ import (
 // from timing/token strings like "529ms" or "1305 tokens".
 func IsOverloadError(err error) bool {
 	if err == nil {
+		return false
+	}
+	// A hard terminal failure (quota/auth) is NEVER an overload, even if its
+	// text happens to contain a keyword like "rate limit" — waiting cannot fix
+	// it. Guard first so a terminal error can never be parked on the patient
+	// overload budget regardless of message wording.
+	if IsTerminalProviderError(err) {
 		return false
 	}
 	s := strings.ToLower(err.Error())

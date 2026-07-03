@@ -736,6 +736,14 @@ func (acc *toolCallAccumulator) appendToolInput(input any) {
 
 // isRetryableError returns true if the error should trigger a retry.
 func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
+	// A hard terminal provider failure (quota/balance/auth) is never retryable,
+	// even when it arrives with a normally-retryable HTTP status (GLM's 1308
+	// quota cap comes as 429). Check BEFORE the status-code fast-path so the
+	// status can't override the terminal classification.
+	if IsTerminalProviderError(err) {
+		return false
+	}
+
 	// HTTP status codes that are retryable (5xx server errors and 429 rate limit)
 	if isRetryableHTTPStatusCode(statusCode) {
 		return true
@@ -816,6 +824,58 @@ func classifyGLMErrorCode(code, message string) (retryable bool, keyword, descri
 		return false, "", message
 	}
 	return false, "", "GLM error " + code
+}
+
+// glmTerminalCodes are Z.AI/GLM error codes where retrying cannot help — a hard
+// account/quota/auth failure. Kept as an EXPLICIT set (rather than "any code
+// classifyGLMErrorCode marks non-retryable") so an UNKNOWN code — which classify
+// also reports non-retryable — is left on the normal retry path instead of being
+// given up on. Only these become a TerminalProviderError.
+var glmTerminalCodes = map[string]bool{
+	"1211": true, // insufficient balance
+	"1212": true, // quota exceeded
+	"1213": true, // insufficient balance
+	"1214": true, // auth failure
+	"1215": true, // auth failure
+	"1308": true, // 5-hour usage cap / balance exhausted
+}
+
+func isGLMTerminalCode(code string) bool { return glmTerminalCodes[code] }
+
+// parseProviderErrorBody pulls the {"error":{"code","message"}} shape (GLM/Z.AI)
+// out of a non-200 response body. Returns ("","") for a non-JSON body or the
+// standard Anthropic shape (which carries "type", not a numeric "code") — the
+// same gating the SSE-event path uses, so non-GLM providers are unaffected.
+func parseProviderErrorBody(body []byte) (code, message string) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", ""
+	}
+	errObj, ok := payload["error"].(map[string]any)
+	if !ok {
+		return "", ""
+	}
+	return stringFromMap(errObj, "code"), stringFromMap(errObj, "message")
+}
+
+// terminalProviderMessage builds the user-facing text for a terminal provider
+// error: the actionable description, plus the provider's own reset-time detail
+// when present (GLM's 1308 says "Your limit will reset at <timestamp>"), so the
+// user knows both what to do and when the cap lifts.
+func terminalProviderMessage(description, providerMsg string) string {
+	msg := description
+	if providerMsg != "" {
+		if i := strings.Index(providerMsg, "reset at"); i >= 0 {
+			reset := providerMsg[i:]
+			if j := strings.IndexByte(reset, ']'); j >= 0 {
+				reset = reset[:j]
+			}
+			if reset = strings.TrimSpace(reset); reset != "" {
+				msg += " (" + reset + ")"
+			}
+		}
+	}
+	return msg
 }
 
 // isEOFError returns true if the error is an EOF (connection closed by server).
@@ -1043,6 +1103,25 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		}
 		_ = resp.Body.Close()
 		logging.Warn("anthropic API error", "status", resp.StatusCode, "body", string(body))
+		// If the provider returned a GLM/Z.AI error carrying a numeric "code",
+		// classify it. A KNOWN-terminal code (quota/balance/auth) must surface
+		// IMMEDIATELY as a TerminalProviderError — never retried. GLM's 5-hour
+		// usage cap (1308) arrives as HTTP 429 with type "rate_limit_error", so
+		// without this its raw body matches IsOverloadError's "rate_limit"
+		// keyword and gets the 10-minute patient retry — the "app froze" report.
+		// Only the HTTP-status path needed this; the SSE-event path already
+		// classifies (v0.100.60). Non-GLM bodies (no "code") and retryable GLM
+		// codes fall through to the unchanged HTTPError, so deepseek/kimi/minimax
+		// rate-limit + overload handling is untouched.
+		if code, providerMsg := parseProviderErrorBody(body); isGLMTerminalCode(code) {
+			_, _, description := classifyGLMErrorCode(code, providerMsg)
+			logging.Warn("provider terminal error — not retrying", "code", code, "status", resp.StatusCode)
+			return nil, &TerminalProviderError{
+				Code:    code,
+				Status:  resp.StatusCode,
+				Message: terminalProviderMessage(description, providerMsg),
+			}
+		}
 		return nil, &HTTPError{
 			StatusCode: resp.StatusCode,
 			RetryAfter: retryAfter,

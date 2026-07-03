@@ -311,6 +311,13 @@ func IsRetryableError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
+	// A hard terminal provider failure (quota/balance/auth) must never be
+	// retried — retrying can't fix it and only delays the actionable error.
+	// This is what makes GLM's 5-hour cap (1308) surface at once instead of
+	// looping the small generic budget after IsOverloadError stops matching it.
+	if IsTerminalProviderError(err) {
+		return false
+	}
 	if errors.Is(err, ErrModelRoundTimeout) {
 		return false
 	}
