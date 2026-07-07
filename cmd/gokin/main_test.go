@@ -135,3 +135,30 @@ func TestApplyAddDirFlags(t *testing.T) {
 		t.Errorf("empty entries should be skipped: %v", err)
 	}
 }
+
+// TestRunApp_HeadlessSetupRefusesInsteadOfBlockingOrCrashing (round 7) pins
+// the fix: `--setup` had no headless guard, unlike the auto-invoked wizard
+// path 20 lines below (triggered by ErrMissingAuth), which has always
+// refused to run interactively in headless mode. `gokin --headless --setup`
+// either blocked forever waiting on stdin (a live TTY) or died with a
+// confusing "EOF" (redirected/closed stdin, e.g. from a script/cron job)
+// instead of headless mode's documented "never block, fail clearly"
+// contract. The fix's early return happens BEFORE config.Load() or any
+// other init runs, so this stays a fast, deterministic unit test — it must
+// return an actionable error immediately, not attempt setup.
+func TestRunApp_HeadlessSetupRefusesInsteadOfBlockingOrCrashing(t *testing.T) {
+	origHeadless, origRunSetup, origPrompt := headless, runSetup, prompt
+	t.Cleanup(func() { headless, runSetup, prompt = origHeadless, origRunSetup, origPrompt })
+
+	headless = true
+	runSetup = true
+	prompt = "anything" // satisfy the earlier --prompt-required-in-headless check
+
+	err := runApp(nil, nil)
+	if err == nil {
+		t.Fatal("runApp(--headless --setup) returned nil error, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "--setup") || !strings.Contains(err.Error(), "headless") {
+		t.Fatalf("error = %q, want it to mention both --setup and headless", err.Error())
+	}
+}

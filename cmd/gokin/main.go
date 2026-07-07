@@ -21,7 +21,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version  = "0.100.66"
+	version  = "0.100.67"
 	cfgFile  string
 	model    string
 	provider string
@@ -80,6 +80,16 @@ func runApp(cmd *cobra.Command, args []string) error {
 
 	// Run setup wizard if requested
 	if runSetup {
+		if headless {
+			// The auto-invoked path below (triggered by ErrMissingAuth) has
+			// always refused to run the wizard in headless mode; the
+			// explicit --setup flag lacked the same guard, so
+			// `--headless --setup` either blocked forever on stdin (a live
+			// TTY) or died with a confusing "EOF" (redirected/closed stdin)
+			// instead of headless mode's documented "never block, fail
+			// clearly" contract.
+			return fmt.Errorf("--setup requires an interactive terminal; it cannot run with --headless")
+		}
 		if err := setup.RunSetupWizard(); err != nil {
 			return err
 		}

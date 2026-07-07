@@ -17,6 +17,7 @@ import (
 	"gokin/internal/security"
 
 	"github.com/ollama/ollama/api"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -247,6 +248,62 @@ func RunSetupWizard() error {
 	}
 }
 
+// isStdinTerminal reports whether stdin is an interactive terminal. A
+// package var (not a direct term.IsTerminal(os.Stdin.Fd()) call at each use
+// site) so tests can force it — a raw check would reflect the TEST
+// PROCESS's real stdin, not whatever fake reader a test injects into
+// readSecretLine's `reader` parameter, so a test run from an interactive
+// terminal would block on real stdin instead of using its injected input.
+var isStdinTerminal = func() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// readSecretLine reads one line of sensitive input (an API key) without
+// echoing it to the terminal, matching the masked-entry discipline the
+// in-app /login flow already uses (StateAPIKeyEntry). Setup is the FIRST
+// place most users type a real API key, and until this fix every character
+// was echoed in cleartext — landing in scrollback, tmux/screen
+// capture-pane, script(1) session logs, or a screen share.
+//
+// term.ReadPassword reads directly from the raw fd, bypassing reader's
+// internal buffer — if reader had ALREADY buffered bytes from stdin (e.g. a
+// multi-line paste ahead of a prompt), switching straight to ReadPassword
+// would silently lose them. Drain whatever's already buffered first (it was
+// echoed to the terminal already, in cooked mode, before this call — there
+// is nothing left to protect there), then read the rest masked.
+//
+// Falls back to a plain read when stdin isn't a terminal (piped input in
+// tests, or a non-interactive invocation) — ReadPassword requires a real
+// TTY and would fail otherwise.
+func readSecretLine(reader *bufio.Reader) (string, error) {
+	if !isStdinTerminal() {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("failed to read input: %w", err)
+		}
+		return strings.TrimSpace(line), nil
+	}
+
+	var prefix []byte
+	for reader.Buffered() > 0 {
+		b, err := reader.ReadByte()
+		if err != nil {
+			break
+		}
+		if b == '\n' {
+			return strings.TrimSpace(string(prefix)), nil
+		}
+		prefix = append(prefix, b)
+	}
+
+	keyBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println() // ReadPassword doesn't echo the newline the user pressed
+	if err != nil {
+		return "", fmt.Errorf("failed to read input: %w", err)
+	}
+	return strings.TrimSpace(string(prefix) + string(keyBytes)), nil
+}
+
 func setupAPIKey(reader *bufio.Reader, backend string) error {
 	p := config.GetProvider(backend)
 	if p == nil {
@@ -260,12 +317,10 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 	fmt.Printf("  %s%s%s\n\n", colorBold, keyURL, colorReset)
 	fmt.Printf("%sEnter API key:%s ", colorGreen, colorReset)
 
-	apiKey, err := reader.ReadString('\n')
+	apiKey, err := readSecretLine(reader)
 	if err != nil {
-		return fmt.Errorf("failed to read input: %w", err)
+		return err
 	}
-
-	apiKey = strings.TrimSpace(apiKey)
 
 	if len(apiKey) < 10 {
 		return fmt.Errorf("invalid API key format (too short)")
@@ -590,12 +645,11 @@ func setupOllamaCloud(reader *bufio.Reader) error {
 
 	fmt.Printf("%sEnter Ollama API key:%s ", colorGreen, colorReset)
 
-	apiKey, err := reader.ReadString('\n')
+	apiKey, err := readSecretLine(reader)
 	if err != nil {
-		return fmt.Errorf("failed to read input: %w", err)
+		return err
 	}
 
-	apiKey = strings.TrimSpace(apiKey)
 	if len(apiKey) < 10 {
 		return fmt.Errorf("invalid API key format (too short)")
 	}
@@ -826,7 +880,15 @@ func validateWithProviderConfig(ctx context.Context, p *config.ProviderDef, apiK
 	reqURL := v.URL
 
 	if v.AuthMode == "query" && v.QueryParam != "" {
-		reqURL += "?" + v.QueryParam + "=" + apiKey
+		// url.QueryEscape, not raw concatenation: a connection failure below
+		// wraps the underlying *url.Error (which embeds the full request
+		// URL) into a message that gets printed to the terminal — an
+		// unescaped key would leak in cleartext there, and any key
+		// containing "&"/"#"/"%" would already mangle the request itself.
+		// Currently unreachable in production (all 5 shipped providers use
+		// AuthMode "bearer"), but a real latent defect for the next
+		// query-auth provider registered.
+		reqURL += "?" + v.QueryParam + "=" + url.QueryEscape(apiKey)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)

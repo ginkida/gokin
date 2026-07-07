@@ -1710,6 +1710,20 @@ func (m *Model) markResponseStarted() {
 	if !m.responseHeaderShown {
 		m.responseHeaderShown = true
 		m.output.SetFrozen(false)
+		// Round 7: retryAttempt/retryMax were previously cleared ONLY by
+		// StatusStreamResume — a narrower signal than "a retry succeeded"
+		// (it fires only if THIS stream itself went idle-then-resumed, plus
+		// 2 unrelated reuses of the same message type for MCP
+		// reconnect/tools-changed notifications). A retried request whose
+		// new stream starts and completes cleanly, with no idle gap, never
+		// triggered it — leaving a stale "retry N/M" badge (ColorWarning,
+		// second-highest render priority in the engine-status badge) shown
+		// for every subsequent turn until an unrelated event happened to
+		// clear it. The first real content of ANY new response — succeeded
+		// on the first attempt or the Nth — is the correct "no longer
+		// retrying" signal.
+		m.retryAttempt = 0
+		m.retryMax = 0
 	}
 }
 
@@ -2521,6 +2535,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.processingLabel = ""
 			m.currentTool = ""
 			m.currentToolInfo = ""
+			// Round 7: agentRecentTools/agentToolCount were previously reset
+			// ONLY on the next SubAgentActivityMsg{"start"} — a finished
+			// sub-agent's tool trail lingered (readable at the fallback
+			// processing-indicator block below) until then, which could be
+			// much later or in an entirely UNRELATED turn that spawns no
+			// sub-agent at all. Clear here too, symmetric with "start".
+			m.agentToolCount = 0
+			m.agentRecentTools = nil
 			var elapsed time.Duration
 			if m.activityFeed != nil {
 				if state := m.activityFeed.GetSubAgentState(msg.AgentID); state != nil {
@@ -2532,6 +2554,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.processingLabel = ""
 			m.currentTool = ""
 			m.currentToolInfo = ""
+			m.agentToolCount = 0
+			m.agentRecentTools = nil
 			var elapsed time.Duration
 			if m.activityFeed != nil {
 				if state := m.activityFeed.GetSubAgentState(msg.AgentID); state != nil {
