@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"gokin/internal/fileutil"
 )
 
 // AgentStore provides persistent storage for agent states.
@@ -53,7 +55,14 @@ func (s *AgentStore) saveState(state *AgentState) error {
 	}
 
 	filePath := filepath.Join(s.dir, state.ID+".json")
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	// Atomic (temp+fsync+rename) — this is the SOLE persisted copy of the
+	// agent's state, overwritten in place across its lifetime. A raw
+	// os.WriteFile left it truncated/corrupt if the process died mid-write
+	// (OOM/SIGKILL/panic), permanently losing the only thing crash-recovery
+	// exists to protect. Matches the idiom 3 sibling files in this same
+	// package already use (delegation_metrics.go, prompt_optimizer.go,
+	// strategy_optimizer.go) and internal/loops/storage.go.
+	if err := fileutil.AtomicWrite(filePath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write agent state: %w", err)
 	}
 
@@ -180,7 +189,12 @@ func (s *AgentStore) SaveCheckpoint(cp *AgentCheckpoint) error {
 	}
 
 	filePath := filepath.Join(checkpointsDir, cp.CheckpointID+".json")
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	// Atomic — same rationale as saveState. Each checkpoint has a unique
+	// filename (agentID-unixnano), but a torn write still corrupts THAT
+	// checkpoint; ListErrorCheckpoints silently `continue`s past any
+	// checkpoint that fails to unmarshal, so a corrupt file just sits
+	// unrecovered until the 24h age-based reaper deletes it.
+	if err := fileutil.AtomicWrite(filePath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
 	}
 

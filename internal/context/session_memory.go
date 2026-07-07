@@ -62,6 +62,15 @@ type SessionMemoryManager struct {
 	// Extracted content
 	content string
 
+	// llmExtractionInFlight guards against overlapping extractWithLLM calls
+	// (each up to a 30s API call). Extract() launches one detached per
+	// qualifying event with no tracking of whether a prior one is still
+	// running; a burst of qualifying extractions within that window could
+	// launch two concurrently, and network latency — not recency — would
+	// decide which commits s.content last, silently regressing injected
+	// session-memory content with an extra unbudgeted LLM call besides.
+	llmExtractionInFlight bool
+
 	mu sync.RWMutex
 }
 
@@ -232,7 +241,16 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 	s.lastExtractionTokens = currentTokens
 	s.toolCallsSinceUpdate = 0
 	s.initialized = true
-	useLLM := s.summarizer != nil && s.extractionCount%3 == 0 && len(history) >= 10
+	// Skip the LLM path if one is already in flight (up to 30s), even if
+	// this would otherwise be a qualifying 3rd extraction — a burst of
+	// qualifying extractions (token/tool-call thresholds, plus sub-agent
+	// tool activity counting too) within that window would otherwise launch
+	// TWO concurrent extractWithLLM calls racing to set s.content, letting
+	// network latency (not recency) decide which summary sticks.
+	useLLM := s.summarizer != nil && s.extractionCount%3 == 0 && len(history) >= 10 && !s.llmExtractionInFlight
+	if useLLM {
+		s.llmExtractionInFlight = true
+	}
 	onUpdate := s.onUpdate
 	projectLearning := s.projectLearning
 
@@ -279,6 +297,13 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 func (s *SessionMemoryManager) extractWithLLM(history []*genai.Content, fallback string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// Clear the in-flight guard on every exit path (success, LLM failure, or
+	// a future early return) so the next qualifying Extract() can proceed.
+	defer func() {
+		s.mu.Lock()
+		s.llmExtractionInFlight = false
+		s.mu.Unlock()
+	}()
 
 	prompt := `Summarize this coding session into a structured markdown format:
 
@@ -387,6 +412,15 @@ func (s *SessionMemoryManager) filePath() string {
 }
 
 func (s *SessionMemoryManager) writeToDisk() {
+	// Snapshot content under the lock — every caller invokes writeToDisk()
+	// AFTER releasing s.mu (by design: file I/O never under lock), so a bare
+	// `s.content` read here races a concurrent Extract()/extractWithLLM()
+	// writing it under their OWN lock hold. Caught by -race under concurrent
+	// Extract() calls (round 5's LLM in-flight-guard test).
+	s.mu.RLock()
+	content := s.content
+	s.mu.RUnlock()
+
 	dir := filepath.Join(s.workDir, ".gokin")
 	// Owner-only (0700/0600): session memory captures recent files,
 	// errors, and decisions during the active session — same
@@ -397,7 +431,7 @@ func (s *SessionMemoryManager) writeToDisk() {
 		logging.Debug("failed to create .gokin dir for session memory", "error", err)
 		return
 	}
-	if err := fileutil.AtomicWrite(s.filePath(), []byte(s.content), 0600); err != nil {
+	if err := fileutil.AtomicWrite(s.filePath(), []byte(content), 0600); err != nil {
 		logging.Debug("failed to write session memory", "error", err)
 	}
 }

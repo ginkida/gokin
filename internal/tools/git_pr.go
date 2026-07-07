@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -204,12 +205,40 @@ func (t *GitPRTool) checksPR(ctx context.Context, args map[string]any) (ToolResu
 	prNum, _ := GetString(args, "pr_number")
 	cmd := exec.CommandContext(ctx, "gh", "pr", "checks", prNum)
 	cmd.Dir = t.workDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Checks command may exit non-zero if checks are failing
-		return NewSuccessResult(fmt.Sprintf("PR #%s checks:\n%s", prNum, strings.TrimSpace(string(output)))), nil
+	// Separate stdout/stderr (not CombinedOutput) so a genuine gh failure
+	// (auth expired, network error, unknown/stale pr_number) can be told
+	// apart from "gh successfully queried and is reporting failing checks" —
+	// `gh pr checks` legitimately exits non-zero for the latter. Mirrors
+	// bash.go's benignNonZeroExit signal: empty stderr + real stdout means
+	// the query itself succeeded, only the thing it reports on didn't.
+	var stdout, stderrBuf strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		// Not even a normal exit (couldn't start gh, etc.) — always an error.
+		return NewErrorResult(fmt.Sprintf("failed to run gh pr checks: %s", err)), nil
 	}
-	return NewSuccessResult(fmt.Sprintf("PR #%s checks:\n%s", prNum, strings.TrimSpace(string(output)))), nil
+	output := strings.TrimSpace(stdout.String())
+	if err != nil {
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr != "" || output == "" {
+			return NewErrorResult(fmt.Sprintf("gh pr checks failed: %s%s", err, formatDetail(stderr))), nil
+		}
+		// Benign: gh ran successfully and produced a checks report; the
+		// non-zero exit just reflects failing/pending checks.
+	}
+	return NewSuccessResult(fmt.Sprintf("PR #%s checks:\n%s", prNum, output)), nil
+}
+
+// formatDetail prefixes non-empty detail text with a newline for appending
+// to a one-line error message; returns "" unchanged.
+func formatDetail(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	return "\n" + detail
 }
 
 func (t *GitPRTool) mergePR(ctx context.Context, args map[string]any) (ToolResult, error) {

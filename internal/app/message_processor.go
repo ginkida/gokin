@@ -376,7 +376,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		if overload {
 			overloadRetryCount++
 			overloadElapsed += decision.Delay
-			retryMessage = originalMessage
 			// An overload isn't the hard repeated failure the request circuit
 			// breaker exists to catch — keep it from tripping on transient
 			// capacity errors so the next attempt actually runs. The capped
@@ -387,8 +386,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			}
 		} else if decision.Partial {
 			partialIdleRetryCount++
-			// Partial stream retries should continue from the last complete sentence.
-			retryMessage = buildContinuationRetryMessage(originalMessage, newHistory)
 		} else {
 			requestRetryCount++
 		}
@@ -434,6 +431,18 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			if a.sessionManager != nil {
 				_ = a.sessionManager.SaveAfterMessage()
 			}
+			// Anchor the next attempt to what THIS attempt actually produced,
+			// not to which retry-decision branch fired. Previously each
+			// branch set retryMessage independently — overload always reset
+			// it to the bare originalMessage (discarding a still-valid
+			// continuation anchor from a prior partial-stall retry), and a
+			// plain failure left it untouched (keeping a stale anchor from
+			// several iterations back after a partial->plain transition). A
+			// branch transition mid-retry-loop could desync the anchor from
+			// history.
+			retryMessage = nextRetryMessageAfterProgress(originalMessage, history, cleaned)
+		} else {
+			retryMessage = originalMessage
 		}
 
 		// Warn user about retry
@@ -2213,6 +2222,28 @@ func isAlnum(b byte) bool {
 
 func (a *App) shouldUseSafeMode() bool {
 	return a.reliability != nil && a.reliability.IsDegraded()
+}
+
+// nextRetryMessageAfterProgress anchors the next retry attempt to what THIS
+// attempt actually produced, not to which retry-decision branch fired
+// (round-5 fix — see CLAUDE.md). Executor.Execute always appends the user's
+// message to history before making any Send* call and returns that appended
+// history on every error path, so len(cleaned) > len(preAttempt) alone is
+// true on nearly every retry — including a bare immediate failure with zero
+// model content. Scoping to cleaned[len(preAttempt):] (the portion THIS
+// attempt actually added) avoids two problems: misattributing an OLDER,
+// unrelated session turn's content as "the interrupted response" when this
+// attempt produced nothing new, and needlessly wrapping a genuinely
+// zero-progress retry in interruption boilerplate.
+func nextRetryMessageAfterProgress(originalMessage string, preAttempt, cleaned []*genai.Content) string {
+	newPortion := cleaned
+	if len(cleaned) > len(preAttempt) {
+		newPortion = cleaned[len(preAttempt):]
+	}
+	if lastModelText(newPortion) == "" && lastModelToolContext(newPortion) == "" {
+		return originalMessage
+	}
+	return buildContinuationRetryMessage(originalMessage, newPortion)
 }
 
 func buildContinuationRetryMessage(baseMessage string, history []*genai.Content) string {

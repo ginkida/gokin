@@ -234,9 +234,14 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		}
 	}
 
-	// 6b. Stop search cache cleanup goroutine
-	if a.searchCache != nil {
-		a.searchCache.StopCleanup()
+	// 6b. Stop search cache cleanup goroutine. Snapshot under a.mu — same
+	// field ApplyConfig writes under the lock (see the OnFileChange
+	// callback in app.go for the matching read-side fix).
+	a.mu.Lock()
+	sc := a.searchCache
+	a.mu.Unlock()
+	if sc != nil {
+		sc.StopCleanup()
 	}
 
 	// 7b. Save active plan for later resume
@@ -299,6 +304,20 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 			// successful examples; chronic flush failure silently
 			// regresses agent quality.
 			logging.Warn("failed to flush example store during shutdown — learning from this session may be lost",
+				"error", err)
+		}
+	}
+	if a.memoryStore != nil {
+		// The `memory` tool's kv store (remember/recall/forget) — was
+		// missing from this block entirely (only errorStore/exampleStore
+		// were flushed, despite Store.Flush() existing and being the exact
+		// same class of debounced-save-on-shutdown concern). Store.Add
+		// (the "remember" action) only schedules a 2s debounced save; a
+		// user's last instruction being "remember X" followed by quitting
+		// within that window silently lost the fact — the tool reported
+		// success, but the process exited before the debounce timer fired.
+		if err := a.memoryStore.Flush(); err != nil {
+			logging.Warn("failed to flush memory store during shutdown — recently remembered facts may be lost",
 				"error", err)
 		}
 	}

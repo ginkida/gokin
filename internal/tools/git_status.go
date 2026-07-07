@@ -5,20 +5,25 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"gokin/internal/security"
 
 	"google.golang.org/genai"
 )
 
 // GitStatusTool shows git repository status.
 type GitStatusTool struct {
-	workDir string
+	workDir       string
+	pathValidator *security.PathValidator
 }
 
 // NewGitStatusTool creates a new GitStatusTool instance.
 func NewGitStatusTool(workDir string) *GitStatusTool {
 	return &GitStatusTool{
-		workDir: workDir,
+		workDir:       workDir,
+		pathValidator: security.NewPathValidator([]string{workDir}, false),
 	}
 }
 
@@ -59,13 +64,34 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	path := GetStringDefault(args, "path", t.workDir)
 	short := GetBoolDefault(args, "short", false)
 
+	// Validate the model-supplied directory override — unlike every other
+	// tool that takes a path, git_status assigned it straight to cmd.Dir
+	// with no containment check at all, letting "path": "../../.." (a
+	// relative override, which the executor's out-of-workspace gate only
+	// checks for ABSOLUTE paths) run `git status` against an arbitrary
+	// directory outside the granted workspace. Resolve relative overrides
+	// against workDir first (matches list_dir.go's pattern) so a relative
+	// escape can't be mistaken for "still inside" by filepath.Abs resolving
+	// against the process's CWD instead.
+	absPath := path
+	if !filepath.IsAbs(path) {
+		absPath = filepath.Join(t.workDir, path)
+	}
+	if t.pathValidator != nil {
+		validPath, err := t.pathValidator.ValidateDir(absPath)
+		if err != nil {
+			return NewErrorResult(fmt.Sprintf("path validation failed: %s", err)), nil
+		}
+		absPath = validPath
+	}
+
 	// ONE porcelain invocation with branch info covers everything: the
 	// structured summary below names every file, so the old second
 	// `git status` subprocess (full human output appended after the
 	// summary) only duplicated content and doubled the cost per call.
 	cmdArgs := []string{"status", "--porcelain", "-b"}
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
-	cmd.Dir = path
+	cmd.Dir = absPath
 
 	output, err := cmd.Output()
 	if err != nil {

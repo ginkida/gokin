@@ -102,6 +102,33 @@ func (fw *FileWatcher) checkChanges() {
 	}
 }
 
+// UpdatePath rebinds the watcher to a new target (e.g. once a fallback
+// directory-watch discovers the concrete instruction file it was waiting
+// for). Resets the baseline mtime to the new path's current state so the
+// rebind itself doesn't spuriously fire the callback — only a REAL
+// subsequent change does. Without a way to rebind, a watcher that started
+// watching a directory (no instruction file existed yet) stays bound to the
+// directory forever: a directory's mtime only changes on child add/remove/
+// rename, never on content edits to an already-existing child, so every
+// edit after the file's first creation is silently invisible.
+func (fw *FileWatcher) UpdatePath(path string) {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	fw.path = path
+	if info, err := os.Stat(path); err == nil {
+		fw.lastMod = info.ModTime()
+	} else {
+		fw.lastMod = time.Time{}
+	}
+}
+
+// Path returns the watcher's current target (for tests / diagnostics).
+func (fw *FileWatcher) Path() string {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	return fw.path
+}
+
 // Close stops the file watcher and waits for the goroutine to finish.
 func (fw *FileWatcher) Close() {
 	if fw.cancel != nil {

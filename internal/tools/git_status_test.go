@@ -233,3 +233,46 @@ func TestGitStatusTool_Execute_StagedChanges(t *testing.T) {
 		t.Errorf("Result should contain 'staged.txt', got: %s", result.Content)
 	}
 }
+
+// TestGitStatusTool_Execute_RejectsPathOutsideWorkDir (round 5) pins the fix:
+// GitStatusTool used to assign the model-supplied "path" straight to cmd.Dir
+// with NO containment check — unlike every other path-accepting tool
+// (read.go, list_dir.go, etc.). A RELATIVE traversal escapes the executor's
+// out-of-workspace gate too (that gate only inspects ABSOLUTE paths, by
+// design, since every other tool resolves relatives against workDir first).
+func TestGitStatusTool_Execute_RejectsPathOutsideWorkDir(t *testing.T) {
+	parent := resolvedTempDir(t)
+	workDir := filepath.Join(parent, "workspace")
+	if err := os.Mkdir(workDir, 0755); err != nil {
+		t.Fatalf("Mkdir(workspace): %v", err)
+	}
+	outside := filepath.Join(parent, "outside-repo")
+	if err := os.Mkdir(outside, 0755); err != nil {
+		t.Fatalf("Mkdir(outside-repo): %v", err)
+	}
+	initGitRepo(t, outside)
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0644); err != nil {
+		t.Fatalf("WriteFile(secret.txt): %v", err)
+	}
+
+	tool := NewGitStatusTool(workDir)
+	ctx := context.Background()
+
+	// Relative traversal out of workDir must be rejected.
+	result, err := tool.Execute(ctx, map[string]any{"path": "../outside-repo"})
+	if err != nil {
+		t.Fatalf("Execute() unexpected Go error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected a relative traversal path to be rejected, got success: %+v", result)
+	}
+
+	// Absolute path outside workDir must also be rejected.
+	result, err = tool.Execute(ctx, map[string]any{"path": outside})
+	if err != nil {
+		t.Fatalf("Execute() unexpected Go error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected an absolute out-of-workspace path to be rejected, got success: %+v", result)
+	}
+}

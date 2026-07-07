@@ -139,13 +139,30 @@ func (r *Runner) WaitAll(agentIDs []string) ([]*AgentResult, error) {
 	return results, firstErr
 }
 
-// GetResult returns the result for an agent.
+// GetResult returns a SNAPSHOT (copy) of an agent's result, not the shared
+// pointer. External consumers (task.go/task_output.go's agentRunnerAdapter,
+// router.go, messenger.go) read Status/Completed/Error/Output off whatever
+// this returns with no lock of their own — round 4's completedResultLocked
+// fix covers in-package callers that gate on .Completed first, but GetResult
+// is the general-purpose accessor used to poll a STILL-RUNNING agent too, so
+// there's no flag to gate on. Returning the raw pointer let a concurrent
+// Runner.Cancel (task_stop / meta-agent stuck-check / shutdown) mutate the
+// SAME struct's fields under r.mu.Lock() while the caller read them
+// unguarded — a genuine data race on a currently wired, model-triggerable
+// path (task(run_in_background) + task_output(get) + task_stop). AgentResult
+// has no lock fields, so a value copy is race-free for the scalar fields;
+// Metadata (a map) is intentionally NOT deep-copied here — a residual, lower-
+// priority gap, not the race this fix closes.
 func (r *Runner) GetResult(agentID string) (*AgentResult, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	result, ok := r.results[agentID]
-	return result, ok
+	if !ok {
+		return nil, false
+	}
+	cp := *result
+	return &cp, true
 }
 
 // GetAgent returns an agent by ID.

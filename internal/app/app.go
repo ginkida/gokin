@@ -791,9 +791,16 @@ func (a *App) Run() error {
 	// Start file watcher if enabled
 	if a.fileWatcher != nil {
 		a.fileWatcher.SetOnFileChange(func(path string, op watcher.Operation) {
-			// Invalidate cache on file changes
-			if a.searchCache != nil {
-				a.searchCache.InvalidateByPath(path)
+			// Invalidate cache on file changes. a.searchCache is written
+			// under a.mu by ApplyConfig (/set searchcache on, /model,
+			// /provider, ...) — this callback runs on the watcher's own
+			// background goroutine, so it must snapshot under the same lock
+			// rather than reading the field bare.
+			a.mu.Lock()
+			sc := a.searchCache
+			a.mu.Unlock()
+			if sc != nil {
+				sc.InvalidateByPath(path)
 			}
 		})
 		if err := a.fileWatcher.Start(); err != nil {
@@ -3114,6 +3121,23 @@ func (a *agentRunnerAdapter) GetResult(agentID string) (tools.AgentResult, bool)
 		Completed:  result.Completed,
 		OutputFile: result.OutputFile,
 	}, true
+}
+
+// Cancel and ListAgents implement tools.AgentCanceller/tools.AgentLister.
+// Without these, task_stop.go's stopAgent and task_output.go's cancelTask/
+// listTasks type-assert `t.runner.(AgentCanceller)`/`.(AgentLister)` against
+// this SAME adapter instance (wired once in builder.go, shared by task/
+// task_output/task_stop) and ALWAYS fail — task_stop silently returned
+// "agent cancellation not supported" (the agent kept running/burning turns
+// indefinitely) and task_output's "Agent Tasks:" section was permanently
+// empty to the model. *agent.Runner itself fully supports both; the adapter
+// just never forwarded them.
+func (a *agentRunnerAdapter) Cancel(agentID string) error {
+	return a.runner.Cancel(agentID)
+}
+
+func (a *agentRunnerAdapter) ListAgents() []string {
+	return a.runner.ListAgents()
 }
 
 // diffHandlerAdapter is in app_handlers.go

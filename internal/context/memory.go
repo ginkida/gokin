@@ -285,27 +285,7 @@ func (m *ProjectMemory) StartWatching(ctx context.Context, debounceMs int) error
 		return nil // Already watching
 	}
 
-	// Find the instruction file that exists
-	var watchPath string
-	for _, filename := range instructionFiles {
-		path := filepath.Join(m.workDir, filename)
-		if _, err := os.Stat(path); err == nil {
-			watchPath = path
-			break
-		}
-	}
-	if watchPath == "" {
-		projectMemoryPath := filepath.Join(m.workDir, ".gokin", "project-memory.md")
-		if _, err := os.Stat(projectMemoryPath); err == nil {
-			watchPath = projectMemoryPath
-		}
-	}
-
-	if watchPath == "" {
-		// No file found yet, watch project root so newly created GOKIN.md/CLAUDE.md
-		// and .gokin/* files are detected without restart.
-		watchPath = m.workDir
-	}
+	watchPath, watchingDir := m.resolveInstructionWatchPath()
 
 	watcherCtx, cancel := context.WithCancel(ctx)
 	m.watcherCancel = cancel
@@ -321,6 +301,24 @@ func (m *ProjectMemory) StartWatching(ctx context.Context, debounceMs int) error
 				m.onReload()
 			}
 		}
+
+		// If we're still bound to the directory (no instruction file
+		// existed when watching started), re-resolve now that a change
+		// fired the callback — a directory's mtime only changes on child
+		// add/remove/rename, so if a concrete file exists now, rebind the
+		// watcher to it. Without this, every EDIT after the file's first
+		// creation stays invisible: the directory's mtime doesn't move on
+		// a content-only write to an already-existing child, so the live-
+		// reload feature would silently stop working after the first pickup.
+		m.mu.Lock()
+		stillDirWatch := m.watcher != nil && m.watcher.Path() == m.workDir
+		m.mu.Unlock()
+		if stillDirWatch {
+			if newPath, isDir := m.resolveInstructionWatchPath(); !isDir {
+				m.watcher.UpdatePath(newPath)
+				logging.Debug("file watcher rebound to concrete instruction file", "path", newPath)
+			}
+		}
 	})
 
 	if err != nil {
@@ -328,8 +326,30 @@ func (m *ProjectMemory) StartWatching(ctx context.Context, debounceMs int) error
 		return err
 	}
 
-	logging.Info("started watching instruction files", "path", watchPath)
+	logging.Info("started watching instruction files", "path", watchPath, "directory_fallback", watchingDir)
 	return nil
+}
+
+// resolveInstructionWatchPath finds the concrete instruction file to watch,
+// falling back to the project directory itself when none exists yet (so a
+// file created later is still detected). Returns (path, true) for the
+// directory-fallback case, (path, false) once a real file is found — callers
+// use the bool to know whether the watcher should later be rebound via
+// FileWatcher.UpdatePath once a concrete file appears.
+func (m *ProjectMemory) resolveInstructionWatchPath() (string, bool) {
+	for _, filename := range instructionFiles {
+		path := filepath.Join(m.workDir, filename)
+		if _, err := os.Stat(path); err == nil {
+			return path, false
+		}
+	}
+	projectMemoryPath := filepath.Join(m.workDir, ".gokin", "project-memory.md")
+	if _, err := os.Stat(projectMemoryPath); err == nil {
+		return projectMemoryPath, false
+	}
+	// No file found yet, watch project root so newly created GOKIN.md/CLAUDE.md
+	// and .gokin/* files are detected without restart.
+	return m.workDir, true
 }
 
 // StopWatching disables automatic reloading.

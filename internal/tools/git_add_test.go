@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -236,4 +237,61 @@ func TestGitAddTool_Execute_NonexistentFile(t *testing.T) {
 	}
 	// Should handle gracefully
 	_ = result.Success
+}
+
+// TestGitAddTool_Execute_RejectsFlagInjection (round 5) pins the fix: every
+// element of the model-supplied "paths" array used to be appended straight
+// into git-add argv with no rejection of leading-dash tokens and no "--"
+// pathspec terminator — unlike git_diff.go/git_branch.go, which both guard
+// exactly this class of exec-argument injection via isValidGitRef. A call
+// like paths:["--force",".env"] would stage a gitignore-excluded secret file
+// despite .gitignore; paths:["-A"] would escalate to whole-tree staging.
+func TestGitAddTool_Execute_RejectsFlagInjection(t *testing.T) {
+	tmpDir := resolvedTempDir(t)
+	initGitRepo(t, tmpDir)
+
+	// A gitignored secret file that must NOT be stageable via a flag-
+	// injected "git add --force .env".
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".env\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(.gitignore): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env"), []byte("SECRET=1"), 0644); err != nil {
+		t.Fatalf("WriteFile(.env): %v", err)
+	}
+
+	tool := NewGitAddTool(tmpDir)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"paths": []any{"--force", ".env"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() unexpected Go error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected a dash-prefixed path element to be rejected, got success: %+v", result)
+	}
+
+	// The gitignored file must genuinely remain unstaged.
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = tmpDir
+	out, err := statusCmd.Output()
+	if err != nil {
+		t.Fatalf("git status: %v", err)
+	}
+	if strings.Contains(string(out), ".env") {
+		t.Fatalf("git status shows .env staged/tracked, want it to remain ignored: %s", out)
+	}
+
+	// A single leading-dash element among otherwise-valid paths must also
+	// reject the WHOLE call (fail-closed, not silently skip just that one).
+	result, err = tool.Execute(ctx, map[string]any{
+		"paths": []any{"-A"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() unexpected Go error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected paths:[\"-A\"] to be rejected as flag injection, got success: %+v", result)
+	}
 }

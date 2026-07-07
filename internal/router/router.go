@@ -316,14 +316,22 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 		message = "Before acting, analyze the problem step by step and consider edge cases.\n\n" + message
 	}
 
+	// Direct/Executor call Execute with the AUGMENTED message below — capture
+	// where the injected user turn will land so it can be restored to
+	// originalMessage before the result is persisted (see
+	// restoreOriginalUserMessage).
+	priorLen := len(history)
+
 	switch decision.Handler {
 	case HandlerDirect:
 		// Direct AI response without tools
-		return r.executeDirect(ctx, history, message)
+		newHistory, resp, err := r.executeDirect(ctx, history, message)
+		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage), resp, err
 
 	case HandlerExecutor:
 		// Standard function calling loop
-		return r.executor.Execute(ctx, history, message)
+		newHistory, resp, err := r.executor.Execute(ctx, history, message)
+		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage), resp, err
 
 	case HandlerSubAgent:
 		// Spawn a sub-agent. The sub-agent path returns a MINIMAL history (just
@@ -338,8 +346,42 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 		return extendConversation(history, originalMessage, h, resp, err)
 
 	default:
-		return r.executor.Execute(ctx, history, message)
+		newHistory, resp, err := r.executor.Execute(ctx, history, message)
+		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage), resp, err
 	}
+}
+
+// restoreOriginalUserMessage undoes the routing-scaffolding augmentation
+// (tool-usage/thinking hints prepended to `message` in Execute before it was
+// sent to the model) in the history that gets PERSISTED. Executor.Execute
+// always appends exactly one genai.NewContentFromText(message, RoleUser)
+// turn at index priorLen before doing anything else, on every return path —
+// success or failure — so newHistory[priorLen] is reliably that injected
+// turn. Without this, HandlerDirect/HandlerExecutor (unlike
+// HandlerSubAgent/HandlerCoordinated, which already use originalMessage via
+// extendConversation) permanently baked the hint text into the user's
+// persisted turn: session resume/reload showed the scaffolding instead of
+// what the user actually typed, and session_memory.go's extractCurrentTask
+// (which parses recent user messages) picked up hint noise instead of the
+// real task.
+//
+// Defensive: if newHistory[priorLen] doesn't match the exact shape
+// Executor.Execute produces (a single plain-text user Part), the history is
+// returned unchanged rather than risk corrupting an unrelated turn.
+func restoreOriginalUserMessage(newHistory []*genai.Content, priorLen int, originalMessage string) []*genai.Content {
+	if priorLen < 0 || priorLen >= len(newHistory) {
+		return newHistory
+	}
+	injected := newHistory[priorLen]
+	if injected == nil || injected.Role != genai.RoleUser || len(injected.Parts) != 1 {
+		return newHistory
+	}
+	part := injected.Parts[0]
+	if part == nil || part.FunctionCall != nil || part.FunctionResponse != nil || part.Text == "" {
+		return newHistory
+	}
+	newHistory[priorLen] = genai.NewContentFromText(originalMessage, genai.RoleUser)
+	return newHistory
 }
 
 // extendConversation makes a minimal-history handler result (sub-agent /

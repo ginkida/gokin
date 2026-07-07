@@ -61,13 +61,26 @@ type ReflectorSnapshot struct {
 
 // SaveCheckpoint creates and persists a checkpoint.
 func (a *Agent) SaveCheckpoint(reason string) (*AgentCheckpoint, error) {
+	// a.Scratchpad is written only under a.stateMu (the update_scratchpad
+	// tool's updater closure) and read under it everywhere else (e.g.
+	// buildSystemPrompt) — snapshot it the same way here. A straight
+	// `a.Scratchpad` read raced that writer: executeToolsParallel's
+	// documented abandoned-straggler path (v0.100.60) can leave an
+	// update_scratchpad call still executing (and locking-writing) past its
+	// caller's deadline, concurrent with SaveCheckpoint (called from
+	// maybeAutoCheckpoint mid-turn, or the error-path checkpoint in
+	// runner_spawn.go right after Run() returns).
+	a.stateMu.RLock()
+	scratchpad := a.Scratchpad
+	a.stateMu.RUnlock()
+
 	cp := &AgentCheckpoint{
 		AgentState:        a.GetState(),
 		Timestamp:         time.Now(),
 		CheckpointID:      fmt.Sprintf("%s-%d", a.ID, time.Now().UnixNano()),
 		TriggerReason:     reason,
 		TurnNumber:        a.GetTurnCount(),
-		ScratchpadContent: a.Scratchpad,
+		ScratchpadContent: scratchpad,
 	}
 
 	// Capture shared memory if available

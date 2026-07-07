@@ -87,11 +87,31 @@ func (t *GitAddTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 			return NewErrorResult("no paths specified"), nil
 		}
 
+		var paths []string
 		for _, p := range pathsRaw {
-			if path, ok := p.(string); ok && path != "" {
-				cmdArgs = append(cmdArgs, path)
+			path, ok := p.(string)
+			if !ok || path == "" {
+				continue
 			}
+			// Reject any element that would be interpreted as a git flag
+			// (e.g. "--force"/"-A") — unlike git_diff.go/git_branch.go, this
+			// path never guarded against option injection via a model-
+			// supplied paths array, letting paths:["--force",".env"] stage a
+			// gitignore-excluded file, or paths:["-A"] escalate to
+			// whole-tree staging.
+			if !isValidGitRef(path) {
+				return NewErrorResult(fmt.Sprintf("invalid path %q: must not start with '-'", path)), nil
+			}
+			paths = append(paths, path)
 		}
+		if len(paths) == 0 {
+			return NewErrorResult("no valid paths specified"), nil
+		}
+		// Belt-and-suspenders: a literal "--" pathspec terminator (matching
+		// git_diff.go's pattern) so even a future path-validation gap can't
+		// resurrect flag injection.
+		cmdArgs = append(cmdArgs, "--")
+		cmdArgs = append(cmdArgs, paths...)
 	}
 
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)

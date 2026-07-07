@@ -37,6 +37,17 @@ type Store struct {
 	saveTimer *time.Timer // Timer for debounced save
 	saveMu    sync.Mutex  // Protects saveTimer
 
+	// ioMu serializes the actual disk-write phase of a debounced save against
+	// Flush(). Timer.Stop() cannot cancel a callback that has already started
+	// running — the debounce callback clears `dirty` BEFORE doing its disk
+	// I/O (see scheduleSave), so without this, Flush() can acquire s.mu right
+	// after the callback releases it, observe dirty==false, and return "nothing
+	// to do" while the callback's AtomicWrite calls are still in flight. A
+	// caller treating a nil-error Flush() as "safe to exit" (e.g. graceful
+	// shutdown) could then terminate before that write completes — silent
+	// data loss in exactly the window Flush() exists to close.
+	ioMu sync.Mutex
+
 	// GetForContext cache: invalidated on any mutation
 	contextCache map[string]string // keyed by "project"/"all"
 	cacheVersion uint64            // incremented on every mutation
@@ -1218,8 +1229,20 @@ func hashPath(path string) string {
 	return hex.EncodeToString(hash[:8])
 }
 
+// saveDebounceInterval is the debounce window before scheduleSave's timer
+// fires. A package var (not a const) so tests can shorten it to drive the
+// debounced-save path deterministically instead of waiting out the real
+// 2s window.
+var saveDebounceInterval = 2 * time.Second
+
+// saveIOHookForTest, when non-nil, is invoked at the start of the debounced
+// save's disk-write phase — after ioMu is acquired, before any file write.
+// Test-only seam for deterministically widening the write-phase race window
+// (see store_flush_race_test.go).
+var saveIOHookForTest func()
+
 // scheduleSave schedules a debounced save operation.
-// Multiple calls within 2 seconds will be coalesced into a single save.
+// Multiple calls within saveDebounceInterval will be coalesced into a single save.
 func (s *Store) scheduleSave() {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
@@ -1229,10 +1252,10 @@ func (s *Store) scheduleSave() {
 		s.saveTimer.Stop()
 	}
 
-	// Schedule new save after 2 seconds. Defer-recover guards against a
-	// panic in JSON marshal / file write — the timer fires on its own
-	// goroutine, so an unrecovered panic would crash the whole process.
-	s.saveTimer = time.AfterFunc(2*time.Second, func() {
+	// Schedule new save after the debounce window. Defer-recover guards
+	// against a panic in JSON marshal / file write — the timer fires on its
+	// own goroutine, so an unrecovered panic would crash the whole process.
+	s.saveTimer = time.AfterFunc(saveDebounceInterval, func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logging.Error("memory store save timer panicked", "panic", r)
@@ -1271,6 +1294,17 @@ func (s *Store) scheduleSave() {
 		s.dirty = false
 		s.mu.Unlock()
 
+		// Serialize the disk-write phase against Flush() — see the ioMu field
+		// doc. Held across the writes AND the error-handling re-dirty below,
+		// so Flush() (which also acquires ioMu before checking s.dirty) can
+		// never observe a transient dirty==false while these writes are
+		// still in flight or about to be retried.
+		s.ioMu.Lock()
+		defer s.ioMu.Unlock()
+		if saveIOHookForTest != nil {
+			saveIOHookForTest()
+		}
+
 		// Save outside lock — disk I/O no longer blocks readers/writers.
 		projectErr := s.saveFile(s.storagePath(), projectEntries)
 		globalErr := s.saveFile(s.globalStoragePath(), globalEntries)
@@ -1298,6 +1332,16 @@ func (s *Store) Flush() error {
 		s.saveTimer = nil
 	}
 	s.saveMu.Unlock()
+
+	// Wait for any in-flight debounced save's disk-write phase to finish
+	// before checking dirty. Timer.Stop() above cannot cancel a callback
+	// that has already started running, and that callback clears `dirty`
+	// BEFORE it finishes writing to disk (see scheduleSave) — without this,
+	// Flush() could acquire s.mu right after the callback releases it,
+	// observe dirty==false, and return "nothing to do" while the callback's
+	// AtomicWrite calls are still in flight.
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
