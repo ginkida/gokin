@@ -82,6 +82,16 @@ func (t *CacheTracker) RecordUsage(creationTokens, readTokens int) {
 func (t *CacheTracker) CacheEfficiency() float64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	return t.cacheEfficiencyLocked()
+}
+
+// cacheEfficiencyLocked is the lock-free core, callable from other methods
+// that already hold t.mu (RLock or Lock). sync.RWMutex.RLock is NOT
+// reentrant: a writer queued between two RLock calls on the same goroutine
+// deadlocks both (the writer waits for the first RLock to release; the
+// second RLock waits for the writer). GetStats used to call the public
+// CacheEfficiency() while already holding RLock — this is that bug's fix.
+func (t *CacheTracker) cacheEfficiencyLocked() float64 {
 	total := t.TotalCreationTokens + t.TotalReadTokens
 	if total == 0 {
 		return 0
@@ -99,7 +109,7 @@ func (t *CacheTracker) GetStats() CacheStats {
 		CacheBreaks:         t.CacheBreaks,
 		LastBreakReason:     t.LastBreakReason,
 		LastBreakTime:       t.LastBreakTime,
-		Efficiency:          t.CacheEfficiency(),
+		Efficiency:          t.cacheEfficiencyLocked(),
 	}
 }
 

@@ -326,19 +326,21 @@ func ParseRetryAfter(resp *http.Response) time.Duration {
 }
 
 // ParseHeaderInt64 parses an integer value from the specified header.
-// Returns 0 if the header is absent or unparseable.
+// Returns -1 if the header is absent or unparseable — distinct from a
+// legitimately-parsed 0, which providers send to mean "quota exhausted for
+// this window" (see UpdateLimits, which must react to that, not ignore it).
 func ParseHeaderInt64(resp *http.Response, headerName string) int64 {
 	if resp == nil {
-		return 0
+		return -1
 	}
 	val := resp.Header.Get(headerName)
 	if val == "" {
-		return 0
+		return -1
 	}
 	if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 		return i
 	}
-	return 0
+	return -1
 }
 
 // ParseHeaderDuration parses a duration from the specified header.
@@ -390,8 +392,8 @@ func extractAnthropicRateLimits(resp *http.Response) *RateLimitMetadata {
 		TokensReset:       ParseHeaderDuration(resp, "anthropic-ratelimit-tokens-reset"),
 	}
 
-	// If no headers were found (all 0), return nil
-	if metadata.RequestsLimit == 0 && metadata.TokensLimit == 0 {
+	// If no headers were found at all, return nil.
+	if metadata.RequestsLimit < 0 && metadata.TokensLimit < 0 {
 		return nil
 	}
 
@@ -413,8 +415,8 @@ func extractOpenAIRateLimits(resp *http.Response) *RateLimitMetadata {
 		TokensReset:       ParseHeaderDuration(resp, "x-ratelimit-reset-tokens"),
 	}
 
-	// If no headers were found (all 0), return nil
-	if metadata.RequestsLimit == 0 && metadata.TokensLimit == 0 {
+	// If no headers were found at all, return nil.
+	if metadata.RequestsLimit < 0 && metadata.TokensLimit < 0 {
 		return nil
 	}
 

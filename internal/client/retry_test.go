@@ -205,17 +205,29 @@ func TestParseHeaderInt64(t *testing.T) {
 		Header: make(http.Header),
 	}
 	resp.Header.Set("x-limit", "100")
+	resp.Header.Set("x-zero", "0")
 	resp.Header.Set("x-empty", "")
 	resp.Header.Set("x-not-num", "abc")
 
 	if val := ParseHeaderInt64(resp, "x-limit"); val != 100 {
 		t.Errorf("ParseHeaderInt64: got %d, want 100", val)
 	}
-	if val := ParseHeaderInt64(resp, "x-empty"); val != 0 {
-		t.Errorf("ParseHeaderInt64 (empty): got %d, want 0", val)
+	// A legitimately-parsed 0 (round 6) must round-trip as 0, not be
+	// conflated with "absent" — providers send this to mean "quota
+	// exhausted for this window," which UpdateLimits must react to.
+	if val := ParseHeaderInt64(resp, "x-zero"); val != 0 {
+		t.Errorf("ParseHeaderInt64 (zero): got %d, want 0", val)
 	}
-	if val := ParseHeaderInt64(resp, "x-not-num"); val != 0 {
-		t.Errorf("ParseHeaderInt64 (invalid): got %d, want 0", val)
+	// Absent/unparseable headers return -1 (round 6) — distinct from a
+	// legitimate 0.
+	if val := ParseHeaderInt64(resp, "x-empty"); val != -1 {
+		t.Errorf("ParseHeaderInt64 (missing header): got %d, want -1", val)
+	}
+	if val := ParseHeaderInt64(resp, "x-not-num"); val != -1 {
+		t.Errorf("ParseHeaderInt64 (invalid): got %d, want -1", val)
+	}
+	if val := ParseHeaderInt64(nil, "x-limit"); val != -1 {
+		t.Errorf("ParseHeaderInt64 (nil resp): got %d, want -1", val)
 	}
 }
 

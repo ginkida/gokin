@@ -160,7 +160,7 @@ func truncateDiffOutput(s string) string {
 	if len(s) <= diffMaxOutputBytes {
 		return s
 	}
-	cut := s[:diffMaxOutputBytes]
+	cut := s[:utf8SafeByteCut(s, diffMaxOutputBytes)]
 	// Cut at the last newline to avoid mid-line slice.
 	if idx := strings.LastIndexByte(cut, '\n'); idx > 0 {
 		cut = cut[:idx]

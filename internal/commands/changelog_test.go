@@ -168,3 +168,18 @@ func TestTruncateChangelogTitle(t *testing.T) {
 		}
 	}
 }
+
+// TestChangelog_MetadataIsLongRunning (round 6) pins the fix: /changelog
+// makes the same network call to api.github.com as /update (which already
+// sets LongRunning), but was missing the metadata — a slow network left the
+// user staring at an unexplained frozen spinner with no status hint.
+func TestChangelog_MetadataIsLongRunning(t *testing.T) {
+	c := &ChangelogCommand{}
+	meta := c.GetMetadata()
+	if !meta.LongRunning {
+		t.Fatal("ChangelogCommand.GetMetadata().LongRunning = false, want true (it fetches from api.github.com)")
+	}
+	if meta.LongRunningLabel == "" {
+		t.Fatal("ChangelogCommand.GetMetadata().LongRunningLabel is empty")
+	}
+}

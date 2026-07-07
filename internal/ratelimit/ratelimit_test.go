@@ -340,3 +340,47 @@ func TestEstimateTokensFromContents(t *testing.T) {
 		t.Errorf("3*100 = %d, want 75", got)
 	}
 }
+
+// TestUpdateLimits_ZeroRemainingActuallySyncs (round 6) pins the fix: a
+// provider reporting "0 remaining" (quota genuinely exhausted for this
+// window) was silently ignored because UpdateLimits gated the sync on
+// `remaining > 0` — the same guard used to skip an ABSENT header (which,
+// pre-fix, ALSO parsed as 0 via client.ParseHeaderInt64). The two states —
+// "header absent" and "header says 0" — are now distinguished by callers
+// passing -1 for absent, and UpdateLimits syncs on `>= 0`.
+func TestUpdateLimits_ZeroRemainingActuallySyncs(t *testing.T) {
+	l := NewLimiter(Config{
+		Enabled:           true,
+		RequestsPerMinute: 60,
+		TokensPerMinute:   1000000,
+		BurstSize:         5,
+	})
+
+	// Provider says: limit=10 (irrelevant to this bug), remaining=0 (quota
+	// exhausted). reqLimit=0/tokLimit=0 below means "no limit header" for
+	// this call — isolates the assertion to the remaining-sync bug alone.
+	l.UpdateLimits(0, 0, time.Minute, 0, 0, time.Minute)
+
+	if l.TryAcquire(0) {
+		t.Fatal("TryAcquire succeeded immediately after UpdateLimits synced remaining=0 — the zero-remaining signal was dropped")
+	}
+}
+
+// TestUpdateLimits_AbsentRemainingDoesNotResetBucket confirms the sibling
+// case still behaves as before: a genuinely ABSENT remaining value (-1, the
+// sentinel callers pass when the provider sent no such header) must NOT
+// reset an otherwise-healthy local bucket to empty.
+func TestUpdateLimits_AbsentRemainingDoesNotResetBucket(t *testing.T) {
+	l := NewLimiter(Config{
+		Enabled:           true,
+		RequestsPerMinute: 60,
+		TokensPerMinute:   1000000,
+		BurstSize:         5,
+	})
+
+	l.UpdateLimits(-1, -1, time.Minute, -1, -1, time.Minute)
+
+	if !l.TryAcquire(0) {
+		t.Fatal("TryAcquire failed after UpdateLimits with all-absent (-1) fields — the bucket should be untouched, not drained")
+	}
+}

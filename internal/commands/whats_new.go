@@ -33,11 +33,13 @@ func (c *WhatsNewCommand) Usage() string {
 
 func (c *WhatsNewCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthSetup,
-		Icon:     "info",
-		Priority: 7, // groups with /update + /restart
-		HasArgs:  true,
-		ArgHint:  "[tag]",
+		Category:         CategoryAuthSetup,
+		Icon:             "info",
+		Priority:         7, // groups with /update + /restart
+		HasArgs:          true,
+		ArgHint:          "[tag]",
+		LongRunning:      true,
+		LongRunningLabel: "Fetching release notes from GitHub...",
 	}
 }
 

@@ -354,7 +354,11 @@ func (c *SaveCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		}
 	}
 
-	originalID := session.ID
+	// SetID/GetID (not a direct field write) — GetState() reads session.ID
+	// on the async autosave goroutine; a plain "session.ID = x" here would
+	// race it (concretely reachable: a message queues an autosave, then
+	// /save runs immediately after).
+	originalID := session.GetID()
 	if customName != "" {
 		// Check if a session with that name already exists
 		if !force {
@@ -363,17 +367,17 @@ func (c *SaveCommand) Execute(ctx context.Context, args []string, app AppInterfa
 					customName, customName), nil
 			}
 		}
-		session.ID = customName
+		session.SetID(customName)
 	}
 
 	err = hm.SaveFull(session)
 	if err != nil {
-		session.ID = originalID // Restore original ID
+		session.SetID(originalID) // Restore original ID
 		return fmt.Sprintf("Failed to save session: %v", err), nil
 	}
 
-	savedID := session.ID
-	session.ID = originalID // Restore original ID
+	savedID := session.GetID()
+	session.SetID(originalID) // Restore original ID
 
 	msgCount := len(session.GetHistory())
 	return fmt.Sprintf("Session saved as: %s (%d messages)\nTo restore: /resume %s", savedID, msgCount, savedID), nil

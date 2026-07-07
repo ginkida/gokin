@@ -163,7 +163,14 @@ func formatMCPStatsSection(mgr *mcp.Manager) string {
 	return sb.String()
 }
 func formatNumber(n int64) string {
+	// Strip the sign before digit-grouping, or the '-' gets counted as a
+	// digit and a comma can land right after it (e.g. -123456 -> "-,123,456"
+	// instead of "-123,456") whenever the digit count is a multiple of 3.
+	neg := n < 0
 	in := fmt.Sprintf("%d", n)
+	if neg {
+		in = in[1:]
+	}
 	out := make([]byte, 0, len(in)+(len(in)/3))
 
 	i := len(in)
@@ -178,5 +185,8 @@ func formatNumber(n int64) string {
 		j++
 	}
 
+	if neg {
+		return "-" + string(out)
+	}
 	return string(out)
 }

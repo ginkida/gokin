@@ -30,11 +30,13 @@ func (c *ChangelogCommand) Usage() string {
 
 func (c *ChangelogCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
-		Category: CategoryAuthSetup,
-		Icon:     "list",
-		Priority: 7, // sits with /whats-new + /update + /restart
-		HasArgs:  true,
-		ArgHint:  "[count]",
+		Category:         CategoryAuthSetup,
+		Icon:             "list",
+		Priority:         7, // sits with /whats-new + /update + /restart
+		HasArgs:          true,
+		ArgHint:          "[count]",
+		LongRunning:      true,
+		LongRunningLabel: "Fetching recent releases from GitHub...",
 	}
 }
 

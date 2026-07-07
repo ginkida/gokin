@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"gokin/internal/fileutil"
 )
 
 // PlanStore provides persistent storage for plan states.
@@ -64,7 +66,7 @@ func (s *PlanStore) Save(plan *Plan) error {
 	defer s.mu.Unlock()
 
 	filePath := filepath.Join(s.dir, planID+".json")
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := fileutil.AtomicWrite(filePath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write plan: %w", err)
 	}
 

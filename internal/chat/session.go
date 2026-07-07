@@ -412,6 +412,28 @@ func (s *Session) GetProvider() string {
 	return s.Provider
 }
 
+// GetID returns the session's ID under lock.
+func (s *Session) GetID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ID
+}
+
+// SetID updates the session's ID under lock and returns the PREVIOUS value.
+// GetState() reads s.ID on the async save goroutine while the app goroutine
+// may swap it (e.g. SaveCommand's temporary rename-for-export), so every
+// external mutation must go through here rather than a direct field write —
+// round 6: SaveCommand.Execute wrote session.ID directly at 3 sites, racing
+// the autosave goroutine's locked read (concretely reachable: a queued
+// autosave from a just-sent message racing an immediately-following /save).
+func (s *Session) SetID(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := s.ID
+	s.ID = id
+	return prev
+}
+
 // GetSystemInstruction returns the session's system instruction under lock.
 func (s *Session) GetSystemInstruction() string {
 	s.mu.RLock()

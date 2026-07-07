@@ -175,7 +175,7 @@ func truncateGrepOutput(s string) string {
 	if len(s) <= grepMaxOutputBytes {
 		return s
 	}
-	cut := s[:grepMaxOutputBytes]
+	cut := s[:utf8SafeByteCut(s, grepMaxOutputBytes)]
 	if idx := strings.LastIndexByte(cut, '\n'); idx > 0 {
 		cut = cut[:idx]
 	}

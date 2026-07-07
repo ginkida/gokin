@@ -439,18 +439,51 @@ func subAgentCompletionSummary(output, errMsg string, failed bool, maxRunes int)
 func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string) {
 	switch status {
 	case "tool_start":
+		// Round 6: delegated plan steps (Plan.DelegateSteps, the DEFAULT)
+		// run their step's actual work through a spawned sub-agent, so ITS
+		// tool activity — not the foreground executor's — is the only
+		// signal that the step is making progress. Before this, ONLY the
+		// foreground executor's OnToolStart (buildExecutionHandler) touched
+		// the heartbeat, so any delegated step whose sub-agent worked for
+		// longer than stepStuckTimeout (3min, well under the 5min default
+		// step timeout) was falsely flagged "stuck" by the plan watchdog,
+		// which pauses the WHOLE plan and cancels the step's context
+		// mid-work.
+		a.touchStepHeartbeat()
+		// Record side effects for the active plan step (idempotency guard
+		// + rollback snapshot) — but ONLY when exactly one delegated step
+		// is in flight. Delegated steps can run in PARALLEL (2+ ready
+		// steps, message_processor.go's non-safe-mode branch), in which
+		// case planManager.GetCurrentStepID() is ambiguous — it reflects
+		// whichever step goroutine most recently called SetCurrentStepID,
+		// not necessarily the step this sub-agent's activity belongs to.
+		// Attributing to the wrong step would corrupt RunLedger/rollback
+		// data, which is worse than the current no-op — so this degrades
+		// gracefully (same as today) under parallel execution instead.
+		if a.planManager != nil && a.planManager.IsExecuting() && a.inFlightDelegatedSteps.Load() == 1 {
+			if p := a.planManager.GetCurrentPlan(); p != nil {
+				stepID := a.planManager.GetCurrentStepID()
+				if stepID > 0 {
+					a.captureStepRollbackFromToolArgs(p, stepID, toolName, args)
+					p.RecordStepEffect(stepID, toolName, args)
+					_ = a.planManager.SaveCurrentPlan()
+				}
+			}
+		}
 		a.journalEvent("tool_start", map[string]any{
 			"tool":     toolName,
 			"args":     args,
 			"agent_id": agentID,
 		})
 	case "tool_end":
+		a.touchStepHeartbeat()
 		a.journalEvent("tool_end", map[string]any{
 			"tool":     toolName,
 			"agent_id": agentID,
 			"success":  success,
 		})
 	case "start":
+		a.touchStepHeartbeat()
 		a.journalEvent("agent_start", map[string]any{
 			"agent_id":   agentID,
 			"agent_type": agentType,

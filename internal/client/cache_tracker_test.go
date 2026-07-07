@@ -3,6 +3,7 @@ package client
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestCacheTracker_FirstCallNeverBreaks(t *testing.T) {
@@ -113,4 +114,43 @@ func TestCacheTracker_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 	_ = ct.GetStats()
+}
+
+// TestCacheTracker_GetStatsConcurrentWithWriter (round 6) pins the fix for a
+// recursive-RLock self-deadlock: GetStats used to call the public
+// CacheEfficiency() while ALREADY holding t.mu.RLock() — sync.RWMutex.RLock
+// is not reentrant once a writer is queued (Go blocks new readers behind a
+// pending writer to prevent starvation), so a RecordUsage (writer) call
+// arriving between GetStats's outer and inner RLock could deadlock BOTH
+// goroutines forever. Unlike TestCacheTracker_Concurrent (which only calls
+// GetStats once, AFTER all writers finish), this calls GetStats and
+// RecordUsage CONCURRENTLY in a tight loop to give the pathological
+// interleaving a real chance to occur, wrapped in an explicit timeout so a
+// reintroduced deadlock fails the test instead of hanging the suite.
+func TestCacheTracker_GetStatsConcurrentWithWriter(t *testing.T) {
+	ct := NewCacheTracker()
+	done := make(chan struct{})
+
+	go func() {
+		var wg sync.WaitGroup
+		for i := 0; i < 500; i++ {
+			wg.Add(2)
+			go func(n int) {
+				defer wg.Done()
+				ct.RecordUsage(n, n*2)
+			}(i)
+			go func() {
+				defer wg.Done()
+				_ = ct.GetStats()
+			}()
+		}
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("GetStats()/RecordUsage() concurrent load deadlocked — recursive RLock reintroduced?")
+	}
 }

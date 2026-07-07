@@ -337,6 +337,20 @@ type App struct {
 	stepHeartbeatMu   sync.RWMutex
 	lastStepHeartbeat time.Time
 
+	// inFlightDelegatedSteps counts currently-running executeDelegatedStep
+	// calls (round 6). Delegated plan steps can run IN PARALLEL when 2+ are
+	// simultaneously ready (message_processor.go's non-safe-mode branch), in
+	// which case planManager.GetCurrentStepID() — a single shared field — is
+	// ambiguous: it reflects whichever step goroutine most recently called
+	// SetCurrentStepID, not necessarily the step whose sub-agent activity is
+	// being reported right now. handleSubAgentActivity uses this counter to
+	// gate step-effect recording (RunLedger/rollback) to ONLY the safe case
+	// — exactly one delegated step in flight — rather than risk attributing
+	// a tool call to the wrong step under parallel execution. The heartbeat
+	// touch itself doesn't need this gating (it's a coarse liveness signal
+	// the watchdog only consults when a plan is executing at all).
+	inFlightDelegatedSteps atomic.Int32
+
 	// Step rollback snapshots (rollback-first guardrail)
 	stepRollbackMu        sync.Mutex
 	stepRollbackSnapshots map[string]*stepRollbackSnapshot

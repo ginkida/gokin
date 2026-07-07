@@ -147,3 +147,18 @@ func TestWhatsNew_NoRepoConfigured(t *testing.T) {
 		t.Errorf("expected helpful message, got: %s", out)
 	}
 }
+
+// TestWhatsNew_MetadataIsLongRunning (round 6) pins the fix: /whats-new
+// makes the same network call to api.github.com as /update (which already
+// sets LongRunning), but was missing the metadata — a slow network left the
+// user staring at an unexplained frozen spinner with no status hint.
+func TestWhatsNew_MetadataIsLongRunning(t *testing.T) {
+	c := &WhatsNewCommand{}
+	meta := c.GetMetadata()
+	if !meta.LongRunning {
+		t.Fatal("WhatsNewCommand.GetMetadata().LongRunning = false, want true (it fetches from api.github.com)")
+	}
+	if meta.LongRunningLabel == "" {
+		t.Fatal("WhatsNewCommand.GetMetadata().LongRunningLabel is empty")
+	}
+}

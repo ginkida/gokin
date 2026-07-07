@@ -1858,6 +1858,13 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	// Mark step as started and track current step ID
 	a.planManager.StartStep(step.ID)
 	a.planManager.SetCurrentStepID(step.ID)
+	// See the field doc on inFlightDelegatedSteps: gates whether
+	// handleSubAgentActivity can safely attribute this sub-agent's tool
+	// calls to THIS step (only when exactly one delegated step is in
+	// flight — parallel-ready-steps execution makes GetCurrentStepID()
+	// ambiguous).
+	a.inFlightDelegatedSteps.Add(1)
+	defer a.inFlightDelegatedSteps.Add(-1)
 	a.refreshSystemInstruction()
 	a.touchStepHeartbeat()
 	a.journalEvent("plan_step_started", map[string]any{

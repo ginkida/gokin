@@ -242,7 +242,12 @@ func (l *Limiter) UpdateLimits(reqLimit, reqRemaining int64, reqReset time.Durat
 		refillRate := float64(reqLimit) / resetSec
 		l.requestBucket.UpdateParameters(float64(reqLimit), refillRate)
 	}
-	if reqRemaining > 0 {
+	// >= 0, not > 0: callers pass -1 (see client.ParseHeaderInt64) when the
+	// header was absent, distinct from a legitimate 0 — a provider sending
+	// "0 remaining" means the quota is genuinely exhausted for this window,
+	// which is exactly the state a self-throttling local bucket must sync
+	// to, not skip.
+	if reqRemaining >= 0 {
 		l.requestBucket.Sync(float64(reqRemaining))
 	}
 
@@ -255,7 +260,7 @@ func (l *Limiter) UpdateLimits(reqLimit, reqRemaining int64, reqReset time.Durat
 		refillRate := float64(tokLimit) / resetSec
 		l.tokenBucket.UpdateParameters(float64(tokLimit), refillRate)
 	}
-	if tokRemaining > 0 {
+	if tokRemaining >= 0 {
 		l.tokenBucket.Sync(float64(tokRemaining))
 	}
 }

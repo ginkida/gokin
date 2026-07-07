@@ -112,7 +112,7 @@ func truncateShowOutput(s string) string {
 	if len(s) <= showMaxOutputBytes {
 		return s
 	}
-	cut := s[:showMaxOutputBytes]
+	cut := s[:utf8SafeByteCut(s, showMaxOutputBytes)]
 	if idx := strings.LastIndexByte(cut, '\n'); idx > 0 {
 		cut = cut[:idx]
 	}
