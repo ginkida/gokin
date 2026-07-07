@@ -135,3 +135,41 @@ func TestNextRetryMessageAfterProgress_TextProgressAnchorsLastSentence(t *testin
 		t.Fatalf("expected the anchor to reference the last complete sentence, got: %q", got)
 	}
 }
+
+// TestNextRetryMessageAfterProgress_CleanedNotLongerThanPreAttempt guards an
+// edge case flagged by the round-5 adversarial diff review: if
+// stripOrphanFunctionCalls ever shrinks `cleaned` to AT OR BELOW
+// preAttempt's length (e.g. it stripped an orphan from the already-
+// persisted prefix, not just this attempt's tail — a violation of the
+// pre-existing "persisted history is orphan-free" invariant, not something
+// this attempt itself causes), the function must NOT fall back to scanning
+// the whole (now equal-or-shorter) cleaned slice — that could resurrect an
+// OLDER, unrelated turn's content as if it were this attempt's progress.
+func TestNextRetryMessageAfterProgress_CleanedNotLongerThanPreAttempt(t *testing.T) {
+	original := "now do something else"
+	preAttempt := []*genai.Content{
+		userContent("earlier, unrelated task"),
+		modelTextContent("I finished the earlier, unrelated task successfully."),
+	}
+
+	t.Run("equal length", func(t *testing.T) {
+		cleaned := append([]*genai.Content{}, preAttempt...)
+		got := nextRetryMessageAfterProgress(original, preAttempt, cleaned)
+		if got != original {
+			t.Fatalf("expected verbatim original, got: %q", got)
+		}
+	})
+
+	t.Run("shorter than preAttempt", func(t *testing.T) {
+		// Simulates stripOrphanFunctionCalls removing an entry from the
+		// already-persisted prefix itself.
+		cleaned := preAttempt[:1]
+		got := nextRetryMessageAfterProgress(original, preAttempt, cleaned)
+		if got != original {
+			t.Fatalf("expected verbatim original, got: %q", got)
+		}
+		if strings.Contains(got, "unrelated task") {
+			t.Fatalf("anchor leaked an older, unrelated turn's content: %q", got)
+		}
+	})
+}

@@ -2236,7 +2236,17 @@ func (a *App) shouldUseSafeMode() bool {
 // attempt produced nothing new, and needlessly wrapping a genuinely
 // zero-progress retry in interruption boilerplate.
 func nextRetryMessageAfterProgress(originalMessage string, preAttempt, cleaned []*genai.Content) string {
-	newPortion := cleaned
+	// newPortion stays nil (not "the whole cleaned slice") unless cleaned is
+	// STRICTLY longer than preAttempt. If stripOrphanFunctionCalls ever
+	// shrinks cleaned to at-or-below preAttempt's length (e.g. it stripped
+	// an orphan from the already-persisted prefix, not just this attempt's
+	// tail — a violation of the pre-existing "persisted history is orphan-
+	// free" invariant, not something this attempt itself would cause), a
+	// naive fallback to the whole cleaned slice would re-scan OLDER,
+	// unrelated turns for "the interrupted response" — the exact
+	// misattribution this function exists to avoid. nil safely falls
+	// through to the originalMessage branch below instead.
+	var newPortion []*genai.Content
 	if len(cleaned) > len(preAttempt) {
 		newPortion = cleaned[len(preAttempt):]
 	}
