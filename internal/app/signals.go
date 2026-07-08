@@ -321,6 +321,12 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 				"error", err)
 		}
 	}
+	if a.sessionMemory != nil {
+		if err := a.sessionMemory.Close(ctx); err != nil {
+			logging.Warn("failed to finish session memory extraction during shutdown — latest session summary may be stale",
+				"error", err)
+		}
+	}
 
 	// 13. Flush audit logger to ensure all entries are persisted.
 	// Save errors used to be silently dropped — for an audit log used

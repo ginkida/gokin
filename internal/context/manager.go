@@ -533,6 +533,8 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 		summary = cachedSummary.Summary
 		fromCache = true
 		logging.Debug("using cached summary", "tokens", cachedSummary.TokenCount)
+		originalTokens := EstimateContentsTokens(plan.ToSummarize)
+		m.metrics.RecordSummary(0, cachedSummary.TokenCount, originalTokens, true)
 	} else {
 		// Generate new summary
 		startSummary := time.Now()

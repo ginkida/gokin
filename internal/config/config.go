@@ -290,6 +290,15 @@ type PermissionConfig struct {
 	// indefinitely with periodic reminders, until you answer or press Esc) —
 	// handy for "give a direction and walk away" without the request expiring.
 	PromptTimeoutSeconds int `yaml:"prompt_timeout_seconds"`
+	// QuestionTimeoutSeconds bounds how long an ask_user question waits for a
+	// response. Same semantics as PromptTimeoutSeconds: >0 = that many seconds;
+	// 0 = default (600 = 10m, also the value old configs without this field get);
+	// <0 = NO timeout (wait indefinitely with periodic reminders, until you
+	// answer or press Esc). The default is longer than the permission timeout
+	// because a clarifying question often needs thought/research before you can
+	// answer — the old hardcoded 5m cut that short and the agent continued
+	// without the answer.
+	QuestionTimeoutSeconds int `yaml:"question_timeout_seconds"`
 }
 
 // PlanConfig holds plan mode settings.
@@ -564,9 +573,10 @@ func DefaultConfig() *Config {
 			EnableAutoSummary:  true,  // Enable auto-summarization
 		},
 		Permission: PermissionConfig{
-			Enabled:              true, // Enable permission system by default
-			DefaultPolicy:        "ask",
-			PromptTimeoutSeconds: 300, // 5m; set <0 to wait indefinitely
+			Enabled:                true, // Enable permission system by default
+			DefaultPolicy:          "ask",
+			PromptTimeoutSeconds:   300, // 5m; set <0 to wait indefinitely
+			QuestionTimeoutSeconds: 600, // 10m; set <0 to wait indefinitely
 			Rules: map[string]string{
 				"read":                 "allow",
 				"glob":                 "allow",

@@ -124,15 +124,13 @@ func TestProcessIncludes_AbsolutePath(t *testing.T) {
 }
 
 func TestProcessIncludes_HomePath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home dir")
-	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
-	// Create a temp file under the real home directory
 	tmpFile := filepath.Join(home, ".gokin_test_include_tmp.md")
-	os.WriteFile(tmpFile, []byte("home content"), 0644)
-	defer os.Remove(tmpFile)
+	if err := os.WriteFile(tmpFile, []byte("home content"), 0644); err != nil {
+		t.Fatalf("write home include fixture: %v", err)
+	}
 
 	input := "@~/.gokin_test_include_tmp.md"
 	got := processIncludes(input, "/irrelevant")
@@ -147,13 +145,13 @@ func TestProcessIncludes_HomePath(t *testing.T) {
 // guard). Only "@~" and "@~/..." are home-rooted; "@~foo" falls through to the
 // guarded relative branch.
 func TestProcessIncludes_TildeNoSlashStaysGuarded(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home dir")
-	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	tmpFile := filepath.Join(home, "gokin_test_noslash_tmp.md")
-	os.WriteFile(tmpFile, []byte("SHOULD-NOT-LEAK home content"), 0644)
-	defer os.Remove(tmpFile)
+	if err := os.WriteFile(tmpFile, []byte("SHOULD-NOT-LEAK home content"), 0644); err != nil {
+		t.Fatalf("write home include fixture: %v", err)
+	}
 
 	input := "@~gokin_test_noslash_tmp.md"
 	got := processIncludes(input, t.TempDir())

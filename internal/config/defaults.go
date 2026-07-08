@@ -31,13 +31,23 @@ const (
 	DefaultHTTPTimeout = 120 * time.Second
 
 	// Timeout settings
-	DefaultToolTimeout         = 30 * time.Second
-	DefaultBashTimeout         = 30 * time.Second
-	DefaultModelRoundTimeout   = 5 * time.Minute
-	DefaultGracefulShutdown    = 10 * time.Second
-	DefaultForcedShutdown      = 15 * time.Second
-	DefaultPermissionTimeout   = 2 * time.Minute
-	DefaultQuestionTimeout     = 5 * time.Minute
+	DefaultToolTimeout = 30 * time.Second
+	DefaultBashTimeout = 30 * time.Second
+	// DefaultModelRoundTimeout must match client.DefaultModelRoundTimeout
+	// (the single source of truth for the HARD cap on one model round).
+	// Kept here only so config.DefaultConfig() seeds Tools.ModelRoundTimeout
+	// with the same value the agent loop uses; the executor receives it via
+	// builder.go SetModelRoundTimeout. If you change one, change both.
+	DefaultModelRoundTimeout = 14 * time.Minute
+	DefaultGracefulShutdown  = 10 * time.Second
+	DefaultForcedShutdown    = 15 * time.Second
+	DefaultPermissionTimeout = 2 * time.Minute
+	// DefaultQuestionTimeout is the fallback wait for an ask_user question
+	// response when config.Permission.QuestionTimeoutSeconds is unset (0).
+	// Resolved per-question by questionPromptTimeout (configurable;
+	// <0 = no timeout, wait indefinitely with reminders). Longer than the
+	// permission timeout because a clarifying question often needs thought.
+	DefaultQuestionTimeout     = 10 * time.Minute
 	DefaultPlanApprovalTimeout = 10 * time.Minute
 	DefaultDiffDecisionTimeout = 5 * time.Minute
 

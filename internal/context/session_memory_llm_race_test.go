@@ -35,6 +35,18 @@ func (c *countingSummarizer) Summarize(ctx context.Context, history []*genai.Con
 	return "LLM summary", nil
 }
 
+type cancelAwareSummarizer struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (c *cancelAwareSummarizer) Summarize(ctx context.Context, history []*genai.Content, prompt string) (string, error) {
+	close(c.started)
+	<-ctx.Done()
+	close(c.canceled)
+	return "", ctx.Err()
+}
+
 func longHistory() []*genai.Content {
 	h := minHistory()
 	for i := 0; i < 8; i++ {
@@ -77,13 +89,7 @@ func TestSessionMemoryManager_ExtractWithLLM_NoOverlap(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-
-	// Give any launched extractWithLLM goroutines time to finish (each holds
-	// its "in flight" window for 80ms via the fake summarizer).
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && atomic.LoadInt32(&summarizer.current) > 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
+	mgr.Wait()
 
 	if calls := atomic.LoadInt32(&summarizer.calls); calls == 0 {
 		t.Fatal("test setup invalid: no qualifying (every-3rd) extraction ever fired an LLM call")
@@ -94,5 +100,37 @@ func TestSessionMemoryManager_ExtractWithLLM_NoOverlap(t *testing.T) {
 	summarizer.mu.Unlock()
 	if maxConcur > 1 {
 		t.Fatalf("max concurrent Summarize() calls = %d, want <= 1 — overlapping LLM extractions raced to set s.content", maxConcur)
+	}
+}
+
+func TestSessionMemoryManager_CloseCancelsInFlightLLMExtraction(t *testing.T) {
+	mgr := NewSessionMemoryManager(t.TempDir(), DefaultSessionMemoryConfig())
+	summarizer := &cancelAwareSummarizer{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	mgr.SetSummarizer(summarizer)
+
+	history := longHistory()
+	mgr.Extract(history, 20000)
+	mgr.Extract(history, 20001)
+	mgr.Extract(history, 20002)
+
+	select {
+	case <-summarizer.started:
+	case <-time.After(time.Second):
+		t.Fatal("LLM extraction did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := mgr.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case <-summarizer.canceled:
+	default:
+		t.Fatal("Close returned before canceling the in-flight summarizer")
 	}
 }

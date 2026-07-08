@@ -168,8 +168,32 @@ func (a *App) handlePermissionDecision(reqID string, decision ui.PermissionDecis
 	}
 }
 
-// QuestionTimeout is the maximum time to wait for a question response.
-const QuestionTimeout = 5 * time.Minute
+// QuestionTimeout is the fallback wait for an ask_user question response when
+// config.Permission.QuestionTimeoutSeconds is unset (0). The effective timeout
+// is resolved per-question by questionPromptTimeout (configurable;
+// <0 = no timeout).
+const QuestionTimeout = 10 * time.Minute
+
+// questionPromptTimeout resolves the ask_user question wait from config, with
+// the SAME semantics as permPromptTimeout: >0 → that many seconds; 0 →
+// QuestionTimeout (covers old configs); <0 → 0 meaning "no timeout" (wait
+// indefinitely with periodic reminders). Snapshotted under a.mu.
+func (a *App) questionPromptTimeout() time.Duration {
+	secs := 0
+	a.mu.Lock()
+	if a.config != nil {
+		secs = a.config.Permission.QuestionTimeoutSeconds
+	}
+	a.mu.Unlock()
+	switch {
+	case secs < 0:
+		return 0 // indefinite
+	case secs == 0:
+		return QuestionTimeout
+	default:
+		return time.Duration(secs) * time.Second
+	}
+}
 
 // promptQuestion is called by the AskUserTool to ask the user a question.
 func (a *App) promptQuestion(ctx context.Context, question string, options []string, defaultOpt string) (string, error) {
@@ -184,18 +208,41 @@ func (a *App) promptQuestion(ctx context.Context, question string, options []str
 		Default:  defaultOpt,
 	})
 
-	// Wait for response from TUI with timeout to prevent deadlock
-	questionTimer := time.NewTimer(QuestionTimeout)
-	defer questionTimer.Stop()
+	// Reminder timer — nudge the user after 60s, then every 60s, so a question
+	// doesn't sit silently (the agent appears hung). Matches the permission
+	// prompt's reminder cadence.
+	const warningDelay = 60 * time.Second
+	const repeatDelay = 60 * time.Second
+	warningTimer := time.NewTimer(warningDelay)
+	defer warningTimer.Stop()
 
-	select {
-	case answer := <-a.questionResponseChan:
-		return answer, nil
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-questionTimer.C:
-		logging.Warn("question prompt timed out")
-		return "", fmt.Errorf("question prompt timed out after %v", QuestionTimeout)
+	// Resolve the configurable timeout. A zero duration means "no timeout" —
+	// leave questionTimerC nil so the select branch never fires and we wait
+	// indefinitely (the reminders keep nudging; Esc/ctx-cancel still aborts).
+	timeout := a.questionPromptTimeout()
+	var questionTimerC <-chan time.Time
+	if timeout > 0 {
+		questionTimer := time.NewTimer(timeout)
+		defer questionTimer.Stop()
+		questionTimerC = questionTimer.C
+	}
+
+	for {
+		select {
+		case answer := <-a.questionResponseChan:
+			return answer, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-warningTimer.C:
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusStreamIdle,
+				Message: "Waiting for your answer to the question above...",
+			})
+			warningTimer.Reset(repeatDelay)
+		case <-questionTimerC:
+			logging.Warn("question prompt timed out", "after", timeout)
+			return "", fmt.Errorf("no answer to the question within %v — you may have stepped away. I did not continue; re-send the task or answer when you're back (or set permission.question_timeout_seconds: -1 to wait indefinitely)", timeout)
+		}
 	}
 }
 

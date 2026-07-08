@@ -1,7 +1,12 @@
 package context
 
 import (
+	"context"
 	"testing"
+
+	"gokin/internal/config"
+
+	"google.golang.org/genai"
 )
 
 func TestGetModelLimits_ExactMatch(t *testing.T) {
@@ -187,5 +192,393 @@ func TestGetPricingFunction(t *testing.T) {
 					tc.wantInput, tc.wantOutput)
 			}
 		})
+	}
+}
+
+// --- FormatCost ---
+
+func TestFormatCost_Zero(t *testing.T) {
+	if got := FormatCost(0); got != "$0.00" {
+		t.Errorf("FormatCost(0) = %q, want '$0.00'", got)
+	}
+}
+
+func TestFormatCost_TinyCost(t *testing.T) {
+	if got := FormatCost(0.00001); got != "< $0.0001" {
+		t.Errorf("FormatCost(0.00001) = %q, want '< $0.0001'", got)
+	}
+}
+
+func TestFormatCost_SmallCost(t *testing.T) {
+	got := FormatCost(0.005)
+	// Should be formatted as $0.0050
+	if got != "$0.0050" {
+		t.Errorf("FormatCost(0.005) = %q, want '$0.0050'", got)
+	}
+}
+
+func TestFormatCost_LargeCost(t *testing.T) {
+	got := FormatCost(1.5)
+	if got != "$1.5000" {
+		t.Errorf("FormatCost(1.5) = %q, want '$1.5000'", got)
+	}
+}
+
+// --- EstimateTokens ---
+
+func TestEstimateTokens_Empty(t *testing.T) {
+	if got := EstimateTokens(""); got != 0 {
+		t.Errorf("EstimateTokens('') = %d, want 0", got)
+	}
+}
+
+func TestEstimateTokens_Prose(t *testing.T) {
+	got := EstimateTokens("hello world this is a test")
+	if got <= 0 {
+		t.Errorf("EstimateTokens(prose) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateTokens_Code(t *testing.T) {
+	code := `func main() { x := 10; fmt.Println(x) }`
+	got := EstimateTokens(code)
+	if got <= 0 {
+		t.Errorf("EstimateTokens(code) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateTokens_JSON(t *testing.T) {
+	json := `{"key": "value", "num": 42}`
+	got := EstimateTokens(json)
+	if got <= 0 {
+		t.Errorf("EstimateTokens(json) = %d, want > 0", got)
+	}
+}
+
+// --- EstimateTokensWithType ---
+
+func TestEstimateTokensWithType_Empty(t *testing.T) {
+	if got := EstimateTokensWithType("", ContentTypeProse); got != 0 {
+		t.Errorf("EstimateTokensWithType('') = %d, want 0", got)
+	}
+}
+
+func TestEstimateTokensWithType_Prose(t *testing.T) {
+	got := EstimateTokensWithType("hello world", ContentTypeProse)
+	if got <= 0 {
+		t.Errorf("EstimateTokensWithType(prose) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateTokensWithType_Code(t *testing.T) {
+	got := EstimateTokensWithType("func main() {}", ContentTypeCode)
+	if got <= 0 {
+		t.Errorf("EstimateTokensWithType(code) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateTokensWithType_JSON(t *testing.T) {
+	got := EstimateTokensWithType(`{"a": 1}`, ContentTypeJSON)
+	if got <= 0 {
+		t.Errorf("EstimateTokensWithType(json) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateTokensWithType_Mixed(t *testing.T) {
+	got := EstimateTokensWithType("hello world func main", ContentTypeMixed)
+	if got <= 0 {
+		t.Errorf("EstimateTokensWithType(mixed) = %d, want > 0", got)
+	}
+}
+
+// --- EstimateContentsTokens ---
+
+func TestEstimateContentsTokens_Text(t *testing.T) {
+	contents := []*genai.Content{
+		{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hello world"}}},
+	}
+	got := EstimateContentsTokens(contents)
+	if got <= 0 {
+		t.Errorf("EstimateContentsTokens = %d, want > 0", got)
+	}
+}
+
+func TestEstimateContentsTokens_FunctionCall(t *testing.T) {
+	contents := []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "read", Args: map[string]any{"file_path": "/x.go"}}},
+		}},
+	}
+	got := EstimateContentsTokens(contents)
+	if got <= 0 {
+		t.Errorf("EstimateContentsTokens(FunctionCall) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateContentsTokens_FunctionResponse(t *testing.T) {
+	contents := []*genai.Content{
+		{Role: genai.RoleUser, Parts: []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{Name: "read", Response: map[string]any{"content": "file data"}}},
+		}},
+	}
+	got := EstimateContentsTokens(contents)
+	if got <= 0 {
+		t.Errorf("EstimateContentsTokens(FunctionResponse) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateContentsTokens_NonStringArg(t *testing.T) {
+	contents := []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "bash", Args: map[string]any{"timeout": 30}}},
+		}},
+	}
+	got := EstimateContentsTokens(contents)
+	if got <= 0 {
+		t.Errorf("EstimateContentsTokens(non-string arg) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateContentsTokens_NonStringResponse(t *testing.T) {
+	contents := []*genai.Content{
+		{Role: genai.RoleUser, Parts: []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{Name: "bash", Response: map[string]any{"exit_code": 0}}},
+		}},
+	}
+	got := EstimateContentsTokens(contents)
+	if got <= 0 {
+		t.Errorf("EstimateContentsTokens(non-string resp) = %d, want > 0", got)
+	}
+}
+
+// --- TokenCounter (NewTokenCounter, GetLimits, GetUsage, CalculateCost, cache) ---
+
+func TestNewTokenCounter_Defaults(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	if tc == nil {
+		t.Fatal("NewTokenCounter returned nil")
+	}
+	lim := tc.GetLimits()
+	if lim.MaxInputTokens != 200000 {
+		t.Errorf("MaxInputTokens = %d, want 200000", lim.MaxInputTokens)
+	}
+	if lim.WarningThreshold != 0.8 {
+		t.Errorf("WarningThreshold = %v, want 0.8", lim.WarningThreshold)
+	}
+}
+
+func TestNewTokenCounter_ConfigOverrides(t *testing.T) {
+	cfg := &config.ContextConfig{
+		MaxInputTokens:   50000,
+		WarningThreshold: 0.9,
+	}
+	tc := NewTokenCounter(nil, "glm-5", cfg)
+	lim := tc.GetLimits()
+	if lim.MaxInputTokens != 50000 {
+		t.Errorf("MaxInputTokens = %d, want 50000 (config override)", lim.MaxInputTokens)
+	}
+	if lim.WarningThreshold != 0.9 {
+		t.Errorf("WarningThreshold = %v, want 0.9 (config override)", lim.WarningThreshold)
+	}
+}
+
+func TestNewTokenCounter_UnknownModel(t *testing.T) {
+	tc := NewTokenCounter(nil, "unknown-model", nil)
+	lim := tc.GetLimits()
+	if lim.MaxInputTokens != 128000 {
+		t.Errorf("MaxInputTokens = %d, want 128000 (default)", lim.MaxInputTokens)
+	}
+}
+
+func TestGetUsage_Normal(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	usage := tc.GetUsage(50000) // 25% of 200000
+	if usage.InputTokens != 50000 {
+		t.Errorf("InputTokens = %d, want 50000", usage.InputTokens)
+	}
+	if usage.MaxTokens != 200000 {
+		t.Errorf("MaxTokens = %d, want 200000", usage.MaxTokens)
+	}
+	if usage.PercentUsed != 0.25 {
+		t.Errorf("PercentUsed = %v, want 0.25", usage.PercentUsed)
+	}
+	if usage.NearLimit {
+		t.Error("NearLimit should be false at 25%")
+	}
+	if usage.ExceedsLimit {
+		t.Error("ExceedsLimit should be false at 25%")
+	}
+}
+
+func TestGetUsage_NearLimit(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	usage := tc.GetUsage(170000) // 85% of 200000, > 80% threshold
+	if !usage.NearLimit {
+		t.Error("NearLimit should be true at 85%")
+	}
+}
+
+func TestGetUsage_ExceedsLimit(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	usage := tc.GetUsage(200000) // 100%
+	if !usage.ExceedsLimit {
+		t.Error("ExceedsLimit should be true at 100%")
+	}
+}
+
+func TestGetUsage_ZeroMaxInputTokens(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	// Manually zero out to test the guard
+	tc.limits.MaxInputTokens = 0
+	usage := tc.GetUsage(100)
+	if usage.MaxTokens != 0 {
+		t.Errorf("MaxTokens = %d, want 0", usage.MaxTokens)
+	}
+	if usage.PercentUsed != 0 {
+		t.Errorf("PercentUsed = %v, want 0 (guarded)", usage.PercentUsed)
+	}
+}
+
+func TestCalculateCost(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	cost := tc.CalculateCost(1000000, 0) // 1M input tokens
+	// glm-5 pricing: $1.00/1M input
+	if cost != 1.00 {
+		t.Errorf("CalculateCost = %v, want 1.00", cost)
+	}
+}
+
+func TestCalculateCost_WithOutput(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	cost := tc.CalculateCost(1000000, 1000000)
+	// glm-5: $1.00/1M input + $4.00/1M output = $5.00
+	if cost != 5.00 {
+		t.Errorf("CalculateCost = %v, want 5.00", cost)
+	}
+}
+
+func TestTokenCounter_InvalidateCache(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	// Add something to cache manually
+	tc.addToCache("hash1", 100)
+	if _, ok := tc.getFromCache("hash1"); !ok {
+		t.Fatal("cache should have entry before invalidate")
+	}
+	tc.InvalidateCache()
+	if _, ok := tc.getFromCache("hash1"); ok {
+		t.Error("cache should be empty after InvalidateCache")
+	}
+}
+
+func TestTokenCounter_AddToCacheExistingKey(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	tc.addToCache("hash1", 100)
+	tc.addToCache("hash1", 200) // update existing
+	count, ok := tc.getFromCache("hash1")
+	if !ok {
+		t.Fatal("expected cache hit")
+	}
+	if count != 200 {
+		t.Errorf("count = %d, want 200 (updated)", count)
+	}
+}
+
+func TestTokenCounter_CacheLRUEviction(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	tc.maxCache = 2
+	tc.addToCache("h1", 10)
+	tc.addToCache("h2", 20)
+	// Access h1 to make it more recent
+	_, _ = tc.getFromCache("h1")
+	// Add h3 → should evict h2 (LRU)
+	tc.addToCache("h3", 30)
+	if _, ok := tc.getFromCache("h2"); ok {
+		t.Error("h2 should have been evicted")
+	}
+	if _, ok := tc.getFromCache("h1"); !ok {
+		t.Error("h1 should still be present")
+	}
+}
+
+func TestTokenCounter_CountContents_CacheHit(t *testing.T) {
+	// With nil client, CountContents would panic on API call,
+	// but a cache hit should return before reaching the client.
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	contents := []*genai.Content{
+		{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hello"}}},
+	}
+	hash := tc.hashContents(contents)
+	tc.addToCache(hash, 42)
+
+	count, err := tc.CountContents(context.Background(), contents)
+	if err != nil {
+		t.Fatalf("CountContents cache hit error: %v", err)
+	}
+	if count != 42 {
+		t.Errorf("CountContents = %d, want 42 (cached)", count)
+	}
+}
+
+func TestTokenCounter_hashContents_Stable(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	contents := []*genai.Content{
+		{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hello"}}},
+	}
+	h1 := tc.hashContents(contents)
+	h2 := tc.hashContents(contents)
+	if h1 != h2 {
+		t.Errorf("hashContents not stable: %q vs %q", h1, h2)
+	}
+}
+
+func TestTokenCounter_hashContents_DifferentContent(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	a := []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "a"}}}}
+	b := []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "b"}}}}
+	if tc.hashContents(a) == tc.hashContents(b) {
+		t.Error("different content should produce different hashes")
+	}
+}
+
+// --- detectContentType ---
+
+func TestDetectContentType_Prose(t *testing.T) {
+	if got := detectContentType("hello world this is prose text"); got != ContentTypeProse {
+		t.Errorf("detectContentType(prose) = %v, want ContentTypeProse", got)
+	}
+}
+
+func TestDetectContentType_Code(t *testing.T) {
+	code := "func main() { x := 10; if x > 0 { fmt.Println(x) } }"
+	if got := detectContentType(code); got != ContentTypeCode {
+		t.Errorf("detectContentType(code) = %v, want ContentTypeCode", got)
+	}
+}
+
+func TestDetectContentType_JSON(t *testing.T) {
+	jsonText := `{"key": "value", "nested": {"a": 1}}`
+	if got := detectContentType(jsonText); got != ContentTypeJSON {
+		t.Errorf("detectContentType(json) = %v, want ContentTypeJSON", got)
+	}
+}
+
+// --- containsCamelCase ---
+
+func TestContainsCamelCase(t *testing.T) {
+	if !containsCamelCase("helloWorld") {
+		t.Error("containsCamelCase('helloWorld') should be true")
+	}
+}
+
+func TestContainsCamelCase_NoCamel(t *testing.T) {
+	if containsCamelCase("hello") {
+		t.Error("containsCamelCase('hello') should be false")
+	}
+}
+
+func TestContainsCamelCase_AllUpper(t *testing.T) {
+	// All upper, no lower→upper transition
+	if containsCamelCase("HELLO") {
+		t.Error("containsCamelCase('HELLO') should be false")
 	}
 }

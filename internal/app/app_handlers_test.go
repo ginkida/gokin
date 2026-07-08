@@ -29,6 +29,27 @@ func TestPermPromptTimeout(t *testing.T) {
 	}
 }
 
+// TestQuestionPromptTimeout pins the config → wait-duration mapping for
+// ask_user questions: >0 → seconds, 0 → default (covers old configs),
+// <0 → 0 meaning "no timeout" (indefinite). Mirrors TestPermPromptTimeout.
+func TestQuestionPromptTimeout(t *testing.T) {
+	withSecs := func(secs int) *App {
+		return &App{config: &config.Config{Permission: config.PermissionConfig{QuestionTimeoutSeconds: secs}}}
+	}
+	if got := withSecs(0).questionPromptTimeout(); got != QuestionTimeout {
+		t.Errorf("0 → %v, want default %v", got, QuestionTimeout)
+	}
+	if got := withSecs(900).questionPromptTimeout(); got != 900*time.Second {
+		t.Errorf("900 → %v, want 15m", got)
+	}
+	if got := withSecs(-1).questionPromptTimeout(); got != 0 {
+		t.Errorf("-1 → %v, want 0 (indefinite)", got)
+	}
+	if got := (&App{}).questionPromptTimeout(); got != QuestionTimeout {
+		t.Errorf("nil config → %v, want default %v", got, QuestionTimeout)
+	}
+}
+
 func TestPromptDiffDecisionSerializesRequests(t *testing.T) {
 	app := &App{
 		diffResponseChan: make(chan ui.DiffDecision, 1),

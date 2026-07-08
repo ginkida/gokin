@@ -3,11 +3,11 @@ package tools
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"sync"
 	"time"
 
 	"gokin/internal/logging"
+	"gokin/internal/stable"
 )
 
 // CacheEntry represents a cached tool result with metadata.
@@ -150,7 +150,7 @@ func (c *ToolResultCache) Put(toolName string, args map[string]any, result ToolR
 		entry.Result = result
 		entry.Timestamp = time.Now()
 		entry.ToolName = toolName
-		entry.Args = args
+		entry.Args = stable.CloneMap(args)
 		c.updateLRU(key)
 		return
 	}
@@ -165,7 +165,7 @@ func (c *ToolResultCache) Put(toolName string, args map[string]any, result ToolR
 		Timestamp: time.Now(),
 		HitCount:  0,
 		ToolName:  toolName,
-		Args:      args,
+		Args:      stable.CloneMap(args),
 	}
 
 	c.entries[key] = entry
@@ -328,16 +328,7 @@ func truncKey(key string) string {
 
 // makeKey creates a cache key from tool name and arguments.
 func (c *ToolResultCache) makeKey(toolName string, args map[string]any) string {
-	// Create a deterministic hash of the arguments
-	keyData := fmt.Sprintf("%s:%v", toolName, args)
-
-	// For grep/glob, include pattern + path for a correct key
-	if toolName == "grep" || toolName == "glob" {
-		pattern, _ := args["pattern"].(string)
-		path, _ := args["path"].(string)
-		keyData = fmt.Sprintf("%s:%s:%s:%v", toolName, pattern, path, args)
-	}
-
+	keyData := toolName + "\x00" + stable.EncodeMap(args)
 	hash := sha256.Sum256([]byte(keyData))
 	return toolName + ":" + hex.EncodeToString(hash[:])[:16]
 }

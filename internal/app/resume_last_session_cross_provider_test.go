@@ -11,9 +11,8 @@ import (
 )
 
 // saveFixtureSessionForResume persists a session with the given provider tag
-// under workDir via a real *chat.HistoryManager (backed by the XDG_CONFIG_HOME
-// this package's TestMain redirects to a temp dir — never touches the real
-// user's session store).
+// under workDir via a real *chat.HistoryManager (backed by the test's
+// XDG_DATA_HOME temp dir — never touches the real user's session store).
 func saveFixtureSessionForResume(t *testing.T, provider, workDir string) {
 	t.Helper()
 	hm, err := chat.NewHistoryManager()
@@ -40,6 +39,7 @@ func saveFixtureSessionForResume(t *testing.T, provider, workDir string) {
 // (`if a.sessionPreloaded { sessionRestored = true }`). So this path was the
 // ONLY one that could ever catch a cross-provider `--resume`.
 func TestResumeLastSession_RefusesCrossProviderRestore(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	workDir := t.TempDir()
 	saveFixtureSessionForResume(t, "kimi", workDir)
 
@@ -74,6 +74,7 @@ func TestResumeLastSession_RefusesCrossProviderRestore(t *testing.T) {
 // TestResumeLastSession_SameProviderRestoresNormally is the happy-path
 // regression check — the new guard must not block a same-provider --resume.
 func TestResumeLastSession_SameProviderRestoresNormally(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	workDir := t.TempDir()
 	saveFixtureSessionForResume(t, "deepseek", workDir)
 

@@ -43,6 +43,9 @@ type SessionMemoryManager struct {
 	workDir string
 	config  SessionMemoryConfig
 
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// Tracking thresholds
 	lastExtractionTokens int
 	toolCallsSinceUpdate int
@@ -71,7 +74,8 @@ type SessionMemoryManager struct {
 	// session-memory content with an extra unbudgeted LLM call besides.
 	llmExtractionInFlight bool
 
-	mu sync.RWMutex
+	asyncWG sync.WaitGroup
+	mu      sync.RWMutex
 }
 
 // SetOnUpdate sets a callback invoked after each successful session memory extraction.
@@ -122,9 +126,12 @@ func (s *SessionMemoryManager) SetConfig(config SessionMemoryConfig) {
 
 // NewSessionMemoryManager creates a new session memory manager.
 func NewSessionMemoryManager(workDir string, config SessionMemoryConfig) *SessionMemoryManager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &SessionMemoryManager{
 		workDir: workDir,
 		config:  config,
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 }
 
@@ -166,7 +173,34 @@ func (s *SessionMemoryManager) RecordToolCall() {
 func (s *SessionMemoryManager) ExtractAsync(history []*genai.Content, currentTokens int) {
 	snapshot := make([]*genai.Content, len(history))
 	copy(snapshot, history)
-	go s.Extract(snapshot, currentTokens)
+	s.asyncWG.Add(1)
+	go func() {
+		defer s.asyncWG.Done()
+		s.Extract(snapshot, currentTokens)
+	}()
+}
+
+// Wait blocks until extraction work launched by this manager has finished.
+func (s *SessionMemoryManager) Wait() {
+	s.asyncWG.Wait()
+}
+
+// Close cancels any in-flight LLM extraction and waits for background writes.
+func (s *SessionMemoryManager) Close(ctx context.Context) error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Extract extracts session memory from conversation history using heuristic analysis.
@@ -260,7 +294,11 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 		if projectLearning != nil {
 			s.flushPromotedSessionLearnings(projectLearning, durableLearnings)
 		}
-		go s.extractWithLLM(history, heuristicContent)
+		s.asyncWG.Add(1)
+		go func() {
+			defer s.asyncWG.Done()
+			s.extractWithLLM(history, heuristicContent)
+		}()
 		logging.Debug("session memory extracted",
 			"files", len(files),
 			"tools", len(toolCounts),
@@ -295,7 +333,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 // extractWithLLM uses the Summarizer to create a higher-quality session summary.
 // Runs in a goroutine; falls back to heuristic content on failure.
 func (s *SessionMemoryManager) extractWithLLM(history []*genai.Content, fallback string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
 	// Clear the in-flight guard on every exit path (success, LLM failure, or
 	// a future early return) so the next qualifying Extract() can proceed.

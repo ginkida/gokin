@@ -19,6 +19,16 @@ var (
 	projectLearningCache = make(map[string]*ProjectLearning)
 )
 
+// projectLearningSaveDebounceInterval is a variable so tests can drive the
+// debounced-save path deterministically without waiting for the production
+// two-second window.
+var projectLearningSaveDebounceInterval = 2 * time.Second
+
+// projectLearningSaveIOHookForTest is invoked after the debounced save enters
+// its write phase, before the first AtomicWrite. Tests use it to widen the
+// Timer.Stop/in-flight-write race window.
+var projectLearningSaveIOHookForTest func()
+
 // ProjectLearning manages project-specific learned patterns and preferences.
 // Data is stored in .gokin/learning.yaml within the project directory.
 type ProjectLearning struct {
@@ -28,6 +38,9 @@ type ProjectLearning struct {
 	mu           sync.RWMutex
 	dirty        bool
 	saveFunc     func()
+
+	// ioMu serializes the disk-write phase of the debounced save against Flush.
+	ioMu sync.Mutex
 
 	// Timer mutex for debounced save
 	timerMu sync.Mutex
@@ -105,7 +118,7 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 		if pl.timer != nil {
 			pl.timer.Stop()
 		}
-		pl.timer = time.AfterFunc(2*time.Second, func() {
+		pl.timer = time.AfterFunc(projectLearningSaveDebounceInterval, func() {
 			defer func() {
 				if r := recover(); r != nil {
 					logging.Error("project learning save timer panicked", "panic", r)
@@ -125,6 +138,11 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 			pl.mu.Unlock()
 
 			// Write outside lock — disk I/O no longer blocks readers/writers.
+			pl.ioMu.Lock()
+			defer pl.ioMu.Unlock()
+			if projectLearningSaveIOHookForTest != nil {
+				projectLearningSaveIOHookForTest()
+			}
 			if err := fileutil.AtomicWrite(pl.path, data, 0644); err != nil {
 				logging.Warn("failed to save project learning", "path", pl.path, "error", err)
 				pl.mu.Lock()
@@ -652,6 +670,9 @@ func (pl *ProjectLearning) FlushChanged() (changed bool, err error) {
 		pl.timer = nil
 	}
 	pl.timerMu.Unlock()
+
+	pl.ioMu.Lock()
+	defer pl.ioMu.Unlock()
 
 	pl.mu.Lock()
 	defer pl.mu.Unlock()

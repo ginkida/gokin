@@ -484,7 +484,12 @@ func (d *DelegationStrategy) ExecuteDelegation(ctx context.Context, decision *De
 		return "", err
 	}
 
-	// Wait for response with timeout, respecting parent deadline
+	// Wait for response with timeout, respecting parent deadline.
+	// The 3-minute cap is a wall-clock BUDGET on the delegation round-trip:
+	// it prevents a stuck/looping sub-agent from blocking the caller
+	// indefinitely. The sub-agent's own per-agent timeout
+	// (config.DefaultAgentTimeout, 10m) still applies inside; this is the
+	// outer guard for the messenger round-trip itself.
 	timeout := 3 * time.Minute
 	if deadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining < timeout {

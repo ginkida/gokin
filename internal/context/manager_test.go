@@ -2,11 +2,13 @@ package context
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"gokin/internal/chat"
 	"gokin/internal/config"
+	"gokin/internal/testkit"
 
 	"google.golang.org/genai"
 )
@@ -215,6 +217,60 @@ func TestContextManager_GetCacheStats(t *testing.T) {
 	_ = stats // just verify it doesn't panic
 }
 
+func TestContextManager_OptimizeContextRecordsSummaryCacheHit(t *testing.T) {
+	sess := chat.NewSession()
+	var history []*genai.Content
+	for i := 0; i < 10; i++ {
+		role := genai.Role(genai.RoleUser)
+		if i%2 == 1 {
+			role = genai.RoleModel
+		}
+		history = append(history, genai.NewContentFromText(fmt.Sprintf("message %02d with enough content for token estimates", i), role))
+	}
+	sess.SetHistory(history)
+
+	mc := testkit.NewMockClient()
+	mc.EnqueueText("Detailed stable summary of the middle conversation messages for cache reuse.")
+	cfg := &config.ContextConfig{EnableAutoSummary: true, MaxInputTokens: 100000}
+
+	m := &ContextManager{
+		session:         sess,
+		tokenCounter:    NewTokenCounter(mc, mc.GetModel(), cfg),
+		summarizer:      NewSummarizer(mc),
+		config:          cfg,
+		metrics:         NewContextMetrics(),
+		summaryCache:    NewSummaryCache(10, time.Hour),
+		messageScorer:   NewMessageScorer(),
+		summaryStrategy: SummaryStrategy{InitialMessageCount: 2, RecentMessageCount: 2, MinMessagesForSummary: 3, MaxHistorySize: 50, TargetRatio: 0.5},
+		keyFiles:        map[string]bool{},
+	}
+
+	if err := m.OptimizeContext(context.Background()); err != nil {
+		t.Fatalf("first OptimizeContext returned error: %v", err)
+	}
+	if got := len(mc.Calls()); got != 1 {
+		t.Fatalf("first OptimizeContext LLM calls = %d, want 1", got)
+	}
+
+	sess.SetHistory(history)
+	if err := m.OptimizeContext(context.Background()); err != nil {
+		t.Fatalf("second OptimizeContext returned error: %v", err)
+	}
+	if got := len(mc.Calls()); got != 1 {
+		t.Fatalf("second OptimizeContext should use cached summary; LLM calls = %d, want 1", got)
+	}
+
+	hits, misses, hitRate := m.metrics.GetCacheStats()
+	if hits != 1 || misses != 1 || hitRate != 0.5 {
+		t.Fatalf("manager cache metrics = hits:%d misses:%d rate:%v, want 1/1/0.5", hits, misses, hitRate)
+	}
+
+	stats := m.GetCacheStats()
+	if stats.Hits != 1 || stats.Misses != 1 || stats.HitRate != 0.5 {
+		t.Fatalf("summary cache stats = hits:%d misses:%d rate:%v, want 1/1/0.5", stats.Hits, stats.Misses, stats.HitRate)
+	}
+}
+
 // ========== SetSummaryStrategy / GetSummaryStrategy ==========
 
 func TestContextManager_SetGetSummaryStrategy(t *testing.T) {
@@ -253,18 +309,26 @@ func TestContextManager_SetPlanManager(t *testing.T) {
 // ========== SetClient ==========
 
 func TestContextManager_SetClient(t *testing.T) {
+	mc := testkit.NewMockClient()
+	tc := NewTokenCounter(mc, mc.GetModel(), nil)
 	m := &ContextManager{
+		ctx:           context.Background(),
 		session:       chat.NewSession(),
-		tokenCounter:  &TokenCounter{},
+		tokenCounter:  tc,
+		client:        mc,
 		keyFiles:      map[string]bool{},
 		messageScorer: NewMessageScorer(),
 	}
-	// SetClient with nil-safe client — tokenCounter.SetClient would panic on nil,
-	// so we just verify the method path works with a minimal stub.
-	// We can't easily test SetClient without a real client.Client, but we can
-	// verify it doesn't panic when messageScorer is set.
-	// Skipped: requires a full client.Client mock.
-	_ = m
+	// SetClient with a real mock — exercises tokenCounter.SetClient + messageScorer.SetSemanticClient
+	mc2 := testkit.NewMockClient()
+	m.SetClient(mc2)
+	// Verify it didn't panic and client was updated
+	m.mu.RLock()
+	got := m.client
+	m.mu.RUnlock()
+	if got != mc2 {
+		t.Error("SetClient should update the client")
+	}
 }
 
 // ========== SetConfig ==========
@@ -502,5 +566,178 @@ func TestContextManager_IncrementalCompact_ShortHistory(t *testing.T) {
 	err := m.IncrementalCompact(context.Background())
 	if err != nil {
 		t.Errorf("IncrementalCompact on short history should not error: %v", err)
+	}
+}
+
+// ========== NewContextManager ==========
+
+func TestNewContextManager_NilConfig(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	m := NewContextManager(context.Background(), sess, mc, nil)
+	if m == nil {
+		t.Fatal("NewContextManager returned nil")
+	}
+	if m.session != sess {
+		t.Error("session not set")
+	}
+	if m.tokenCounter == nil {
+		t.Error("tokenCounter not set")
+	}
+	if m.metrics == nil {
+		t.Error("metrics not set")
+	}
+	if m.summaryCache == nil {
+		t.Error("summaryCache not set")
+	}
+	if m.messageScorer == nil {
+		t.Error("messageScorer not set")
+	}
+	if m.responseCompressor == nil {
+		t.Error("responseCompressor not set")
+	}
+	if m.summarizer != nil {
+		t.Error("summarizer should be nil when EnableAutoSummary is false/nil config")
+	}
+}
+
+func TestNewContextManager_WithAutoSummary(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	cfg := &config.ContextConfig{EnableAutoSummary: true}
+	m := NewContextManager(context.Background(), sess, mc, cfg)
+	if m.summarizer == nil {
+		t.Error("summarizer should be set when EnableAutoSummary is true")
+	}
+}
+
+func TestNewContextManager_WithToolResultMaxChars(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	cfg := &config.ContextConfig{ToolResultMaxChars: 5000}
+	m := NewContextManager(context.Background(), sess, mc, cfg)
+	rc := m.responseCompressor
+	if rc.maxChars != 5000 {
+		t.Errorf("maxChars = %d, want 5000", rc.maxChars)
+	}
+}
+
+// ========== PrepareForRequest ==========
+
+func TestPrepareForRequest_EmptyHistory(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	m := NewContextManager(context.Background(), sess, mc, nil)
+	err := m.PrepareForRequest(context.Background())
+	if err != nil {
+		t.Fatalf("PrepareForRequest on empty history: %v", err)
+	}
+	// Should set currentTokens to 0 for empty history
+	if got := m.GetCurrentTokens(); got != 0 {
+		t.Errorf("currentTokens = %d, want 0 for empty history", got)
+	}
+}
+
+func TestPrepareForRequest_WithHistory(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	sess.SetHistory([]*genai.Content{
+		genai.NewContentFromText("hello world this is a test message", genai.RoleUser),
+	})
+	m := NewContextManager(context.Background(), sess, mc, nil)
+	err := m.PrepareForRequest(context.Background())
+	if err != nil {
+		t.Fatalf("PrepareForRequest: %v", err)
+	}
+	// Should have some token estimate
+	if got := m.GetCurrentTokens(); got <= 0 {
+		t.Errorf("currentTokens = %d, want > 0 for non-empty history", got)
+	}
+}
+
+func TestPrepareForRequest_SetsUsage(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	sess.SetHistory([]*genai.Content{
+		genai.NewContentFromText("test message", genai.RoleUser),
+	})
+	m := NewContextManager(context.Background(), sess, mc, nil)
+	if err := m.PrepareForRequest(context.Background()); err != nil {
+		t.Fatalf("PrepareForRequest: %v", err)
+	}
+	usage := m.GetTokenUsage()
+	if usage == nil {
+		t.Fatal("usage should not be nil after PrepareForRequest")
+	}
+	if !usage.IsEstimate {
+		t.Error("usage should be an estimate after PrepareForRequest")
+	}
+}
+
+// ========== UpdateTokenCount ==========
+
+func TestUpdateTokenCount_EmptyHistory(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	m := NewContextManager(context.Background(), sess, mc, nil)
+	err := m.UpdateTokenCount(context.Background())
+	if err != nil {
+		t.Fatalf("UpdateTokenCount: %v", err)
+	}
+	if got := m.GetCurrentTokens(); got != 0 {
+		t.Errorf("currentTokens = %d, want 0 for empty history", got)
+	}
+}
+
+func TestUpdateTokenCount_WithHistory(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	sess.SetHistory([]*genai.Content{
+		genai.NewContentFromText("hello world this is a test", genai.RoleUser),
+	})
+	m := NewContextManager(context.Background(), sess, mc, nil)
+	err := m.UpdateTokenCount(context.Background())
+	if err != nil {
+		t.Fatalf("UpdateTokenCount: %v", err)
+	}
+	// Should have some token count (estimated since mock client won't have CountTokens)
+	if got := m.GetCurrentTokens(); got <= 0 {
+		t.Errorf("currentTokens = %d, want > 0", got)
+	}
+}
+
+// ========== Close ==========
+
+func TestClose_DoesNotPanic(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	m := NewContextManager(context.Background(), sess, mc, nil)
+	// Close should cancel the internal context without panicking
+	m.Close()
+}
+
+// ========== GetKeyFiles ==========
+
+func TestGetKeyFiles_Empty(t *testing.T) {
+	m := &ContextManager{
+		session:      chat.NewSession(),
+		tokenCounter: &TokenCounter{},
+		keyFiles:     map[string]bool{},
+	}
+	files := m.GetKeyFiles()
+	if len(files) != 0 {
+		t.Errorf("GetKeyFiles = %v, want empty", files)
+	}
+}
+
+func TestGetKeyFiles_WithFiles(t *testing.T) {
+	m := &ContextManager{
+		session:      chat.NewSession(),
+		tokenCounter: &TokenCounter{},
+		keyFiles:     map[string]bool{"main.go": true, "test.go": true},
+	}
+	files := m.GetKeyFiles()
+	if len(files) != 2 {
+		t.Errorf("GetKeyFiles len = %d, want 2", len(files))
 	}
 }

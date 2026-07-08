@@ -45,7 +45,13 @@ type ExampleStore struct {
 	examples  map[string]*TaskExample
 	byType    map[string][]string // TaskType -> list of example IDs
 	mu        sync.RWMutex
+
+	writeMu      sync.Mutex
+	asyncDrainMu sync.Mutex
+	asyncWG      sync.WaitGroup
 }
+
+var exampleStoreSaveIOHookForTest func()
 
 // NewExampleStore creates a new example store.
 func NewExampleStore(configDir string) (*ExampleStore, error) {
@@ -95,25 +101,64 @@ func (es *ExampleStore) load() error {
 }
 
 // save persists examples to disk.
-func (es *ExampleStore) save() error {
-	dir := filepath.Dir(es.storagePath())
+func (es *ExampleStore) saveSnapshot(path string, data []byte) error {
+	es.writeMu.Lock()
+	defer es.writeMu.Unlock()
+	if exampleStoreSaveIOHookForTest != nil {
+		exampleStoreSaveIOHookForTest()
+	}
+
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
+	return fileutil.AtomicWrite(path, data, 0644)
+}
+
+func (es *ExampleStore) snapshotLocked() ([]byte, error) {
 	data, err := json.MarshalIndent(es.examples, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// save persists examples to disk. Caller must hold es.mu.
+func (es *ExampleStore) save() error {
+	data, err := es.snapshotLocked()
 	if err != nil {
 		return err
 	}
+	return es.saveSnapshot(es.storagePath(), data)
+}
 
-	return fileutil.AtomicWrite(es.storagePath(), data, 0644)
+func (es *ExampleStore) saveSnapshotAsync(path string, data []byte) {
+	es.asyncDrainMu.Lock()
+	es.asyncWG.Add(1)
+	es.asyncDrainMu.Unlock()
+
+	go func() {
+		defer es.asyncWG.Done()
+		if err := es.saveSnapshot(path, data); err != nil {
+			logging.Debug("failed to save example store", "error", err)
+		}
+	}()
 }
 
 // Flush forces an immediate save to disk. Call on graceful shutdown.
 func (es *ExampleStore) Flush() error {
+	es.asyncDrainMu.Lock()
+	defer es.asyncDrainMu.Unlock()
+	es.asyncWG.Wait()
+
 	es.mu.RLock()
-	defer es.mu.RUnlock()
-	return es.save()
+	data, err := es.snapshotLocked()
+	es.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	return es.saveSnapshot(es.storagePath(), data)
 }
 
 // generateExampleID creates a unique ID for an example.
@@ -138,7 +183,6 @@ func (es *ExampleStore) LearnFromSuccess(taskType, prompt, agentType, output str
 // LearnFromSuccessWithTools records a successful task with tool sequence.
 func (es *ExampleStore) LearnFromSuccessWithTools(taskType, prompt, agentType, output string, toolSeq []ToolCallExample, duration time.Duration, tokens int) error {
 	es.mu.Lock()
-	defer es.mu.Unlock()
 
 	// Generate tags from prompt
 	tags := extractTags(prompt)
@@ -190,23 +234,16 @@ func (es *ExampleStore) LearnFromSuccessWithTools(taskType, prompt, agentType, o
 	}
 
 	// Snapshot data under lock for async save (map is not safe for concurrent read/write)
-	data, err := json.MarshalIndent(es.examples, "", "  ")
+	data, err := es.snapshotLocked()
 	if err != nil {
+		es.mu.Unlock()
 		return nil
 	}
 	path := es.storagePath()
+	es.mu.Unlock()
 
 	// Save asynchronously — write pre-marshalled data outside lock
-	go func() {
-		dir := filepath.Dir(path)
-		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
-			logging.Debug("failed to create example store dir", "error", mkErr)
-			return
-		}
-		if wErr := fileutil.AtomicWrite(path, data, 0644); wErr != nil {
-			logging.Debug("failed to save example store", "error", wErr)
-		}
-	}()
+	es.saveSnapshotAsync(path, data)
 
 	return nil
 }
@@ -462,10 +499,10 @@ func truncateString(s string, maxLen int) string {
 // RecordFeedback updates the success score based on user feedback.
 func (es *ExampleStore) RecordFeedback(exampleID string, positive bool) {
 	es.mu.Lock()
-	defer es.mu.Unlock()
 
 	ex, ok := es.examples[exampleID]
 	if !ok {
+		es.mu.Unlock()
 		return
 	}
 
@@ -478,22 +515,16 @@ func (es *ExampleStore) RecordFeedback(exampleID string, positive bool) {
 	}
 
 	// Snapshot data under lock for async save
-	data, err := json.MarshalIndent(es.examples, "", "  ")
+	data, err := es.snapshotLocked()
 	if err != nil {
+		es.mu.Unlock()
 		return
 	}
 	path := es.storagePath()
+	es.mu.Unlock()
 
 	// Save asynchronously — write pre-marshalled data outside lock
-	go func() {
-		dir := filepath.Dir(path)
-		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
-			return
-		}
-		if wErr := fileutil.AtomicWrite(path, data, 0644); wErr != nil {
-			logging.Debug("failed to save example store", "error", wErr)
-		}
-	}()
+	es.saveSnapshotAsync(path, data)
 }
 
 // GetStats returns statistics about the example store.
@@ -528,6 +559,10 @@ type ExampleStoreStats struct {
 
 // Clear removes all examples.
 func (es *ExampleStore) Clear() error {
+	es.asyncDrainMu.Lock()
+	defer es.asyncDrainMu.Unlock()
+	es.asyncWG.Wait()
+
 	es.mu.Lock()
 	defer es.mu.Unlock()
 

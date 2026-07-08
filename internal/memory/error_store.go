@@ -36,9 +36,14 @@ type ErrorStore struct {
 
 	// Debounced write support
 	dirty     bool
+	ioMu      sync.Mutex
 	saveMu    sync.Mutex
 	saveTimer *time.Timer
 }
+
+var errorStoreSaveDebounceInterval = 2 * time.Second
+
+var errorStoreSaveIOHookForTest func()
 
 // NewErrorStore creates a new error store.
 func NewErrorStore(configDir string) (*ErrorStore, error) {
@@ -117,7 +122,7 @@ func (es *ErrorStore) scheduleSave() {
 		es.saveTimer.Stop()
 	}
 
-	es.saveTimer = time.AfterFunc(2*time.Second, func() {
+	es.saveTimer = time.AfterFunc(errorStoreSaveDebounceInterval, func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logging.Error("error store save timer panicked", "panic", r)
@@ -141,6 +146,11 @@ func (es *ErrorStore) scheduleSave() {
 		if err != nil {
 			return
 		}
+		es.ioMu.Lock()
+		defer es.ioMu.Unlock()
+		if errorStoreSaveIOHookForTest != nil {
+			errorStoreSaveIOHookForTest()
+		}
 		if err := fileutil.AtomicWrite(es.storagePath(), data, 0644); err != nil {
 			logging.Warn("failed to save error store", "path", es.storagePath(), "error", err)
 			es.mu.Lock()
@@ -158,6 +168,9 @@ func (es *ErrorStore) Flush() error {
 		es.saveTimer = nil
 	}
 	es.saveMu.Unlock()
+
+	es.ioMu.Lock()
+	defer es.ioMu.Unlock()
 
 	es.mu.Lock()
 	defer es.mu.Unlock()
