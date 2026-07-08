@@ -23,9 +23,12 @@ func TestCtrlKOpensModelSelector(t *testing.T) {
 		t.Fatalf("plain k must not open model selector, state=%v", m.state)
 	}
 
+	// round 8: ctrl+k now returns keyConsumed (a non-nil no-op tea.Cmd) so
+	// Update() doesn't ALSO forward the keystroke to the compose textarea's
+	// own ctrl+k binding (DeleteAfterCursor) — see the handler's comment.
 	cmd = m.handleGlobalKeys(tea.KeyMsg{Type: tea.KeyCtrlK})
-	if cmd != nil {
-		t.Fatalf("ctrl+k handler should not return a command")
+	if cmd == nil {
+		t.Fatalf("ctrl+k handler should return keyConsumed to suppress textarea forwarding")
 	}
 	if m.state != StateModelSelector {
 		t.Fatalf("ctrl+k state=%v, want StateModelSelector", m.state)

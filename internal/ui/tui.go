@@ -1246,9 +1246,16 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// Ctrl+K opens the model selector. The welcome panel and model selector
 	// both advertise this binding, so keep the handler global for the input
 	// state instead of hiding model choice behind slash commands only.
+	// keyConsumed (round 8), not nil: returning nil here falls through to
+	// bubbles/textarea's OWN ctrl+k binding (DeleteAfterCursor) whenever
+	// m.state is STILL StateInput when handleKeyMsg's caller checks
+	// typeAheadActive() — normally openModelSelector() changes m.state away
+	// from StateInput, making this moot, but its own early-return when
+	// availableModels is empty leaves state unchanged, so ctrl+k with no
+	// models loaded wiped everything after the cursor in the compose buffer.
 	if msg.String() == "ctrl+k" && m.state == StateInput {
 		m.openModelSelector()
-		return nil
+		return keyConsumed
 	}
 
 	// Handle Ctrl+P for command palette (only when in input state)
@@ -1277,16 +1284,27 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Handle Ctrl+A for agent tree panel toggle
+	// Handle Ctrl+A for agent tree panel toggle. keyConsumed (round 8), not
+	// nil: m.state stays StateInput here, so a bare `nil` return let
+	// bubbles/textarea's OWN ctrl+a binding (LineStart) ALSO fire on the
+	// same keystroke — jumping the compose cursor to column 0 every time
+	// the user toggled the panel.
 	if msg.Type == tea.KeyCtrlA && m.state == StateInput {
 		if m.agentTreePanel != nil {
 			m.agentTreePanel.Toggle()
 			m.toastManager.ShowInfo(toggleStateLabel("Agent tree", m.agentTreePanel.IsVisible()))
 		}
-		return nil
+		return keyConsumed
 	}
 
-	// Handle Ctrl+H for context observatory dashboard
+	// Handle Ctrl+H for context observatory dashboard. keyConsumed (round 8),
+	// not nil: toggling the panel OFF leaves m.state at StateInput, and a
+	// bare `nil` return let bubbles/textarea's OWN ctrl+h binding
+	// (DeleteCharacterBackward) ALSO fire — deleting a character from the
+	// compose buffer every time the user closed the panel. (Opening it DOES
+	// change state, making keyConsumed a no-op difference there — this
+	// covers the close case, found alongside the round-8 UI audit's other
+	// global-shortcut/textarea collisions.)
 	if msg.Type == tea.KeyCtrlH && m.state == StateInput {
 		if m.observatoryPanel != nil {
 			m.observatoryPanel.Toggle()
@@ -1294,7 +1312,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.state = StateContextObservatory
 			}
 		}
-		return nil
+		return keyConsumed
 	}
 
 	// Handle Ctrl+X for plan panel expand/collapse. Unlike the other panel
@@ -1309,7 +1327,13 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Handle Ctrl+T for todos toggle
+	// Handle Ctrl+T for todos toggle. keyConsumed (round 8), not nil: this
+	// binding is even ADVERTISED in the status bar ("Ctrl+T tasks N")
+	// whenever todos are pending and hidden — a common state — and a bare
+	// `nil` return let bubbles/textarea's OWN ctrl+t binding
+	// (TransposeCharacterBackward) ALSO fire on the same keystroke, swapping
+	// the two characters left of the cursor in the compose buffer (e.g.
+	// "hello" -> "helol") every time the user opened/closed the panel.
 	if msg.Type == tea.KeyCtrlT && m.state == StateInput {
 		m.todosVisible = !m.todosVisible
 		// When opening the panel, sweep completed tasks older than 5s
@@ -1317,17 +1341,25 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			m.cleanupStaleCoordinatedTasks()
 		}
 		m.toastManager.ShowInfo(toggleStateLabel("Todos", m.todosVisible))
-		return nil
+		return keyConsumed
 	}
 
-	// Scroll shortcuts (work in input and streaming states)
+	// Scroll shortcuts (work in input and streaming states). ctrl+b/ctrl+f
+	// return keyConsumed (round 8), not nil: these are pure OUTPUT-scroll
+	// commands with no reason to ALSO touch the compose buffer, but a bare
+	// `nil` return let bubbles/textarea's OWN ctrl+b/ctrl+f bindings
+	// (CharacterBackward/CharacterForward) fire too — moving the compose
+	// cursor sideways on every scroll keystroke. This is active during
+	// Processing/Streaming (type-ahead composing while the agent works) as
+	// well as StateInput, contrary to what the comment above previously
+	// implied was already safe.
 	if m.state == StateInput || m.state == StateStreaming || m.state == StateProcessing {
 		switch msg.String() {
 		case "ctrl+b": // Scroll up
 			newOffset := max(m.output.viewport.YOffset-3, 0)
 			m.output.viewport.SetYOffset(newOffset)
 			m.output.SetFrozen(true)
-			return nil
+			return keyConsumed
 		case "ctrl+f": // Scroll down
 			maxOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
 			newOffset := min(m.output.viewport.YOffset+3, maxOffset)
@@ -1340,7 +1372,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			// user input, reproducing the exact snap-back bug that fix
 			// removed from output.go, just via ctrl+f instead of the wheel.
 			m.output.SetFrozen(!m.output.IsAtBottom())
-			return nil
+			return keyConsumed
 		case "ctrl+g": // Toggle freeze scroll (for text selection)
 			frozen := !m.output.IsFrozen()
 			m.output.SetFrozen(frozen)
@@ -1361,20 +1393,30 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Ctrl+U: context-aware — clear input when has text, scroll half-page up when empty
+	// Ctrl+U: context-aware — clear input when has text, scroll half-page up
+	// when empty. The empty branch returns keyConsumed (round 8) for the same
+	// reason as Ctrl+D below (gated to an empty textarea, so the collision
+	// with textarea's ctrl+u DeleteBeforeCursor was already harmless — kept
+	// consistent rather than left as an exception). The NON-empty fall-through
+	// is deliberate: textarea's own DeleteBeforeCursor IS the "clear input"
+	// behavior — don't consume it.
 	if msg.Type == tea.KeyCtrlU && m.state == StateInput {
 		if m.input.textarea.Value() == "" {
 			newOffset := max(m.output.viewport.YOffset-m.output.viewport.Height/2, 0)
 			m.output.viewport.SetYOffset(newOffset)
 			m.output.SetFrozen(true)
-			return nil
+			return keyConsumed
 		}
 		// Fall through to default handler (clears input)
 	}
 
 	// Ctrl+D mirrors Ctrl+U: scroll half-page down when the input is empty.
 	// The shortcuts overlay has advertised this binding for a while; wiring
-	// it here keeps navigation discoverable and predictable.
+	// it here keeps navigation discoverable and predictable. keyConsumed
+	// (round 8): gated to an EMPTY textarea, so bubbles/textarea's own
+	// ctrl+d (DeleteCharacterForward) firing too was already harmless
+	// (nothing to delete) — kept consistent with the other collision fixes
+	// in this function rather than left as the one exception.
 	if msg.Type == tea.KeyCtrlD && m.state == StateInput && m.input.textarea.Value() == "" {
 		maxOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
 		newOffset := min(m.output.viewport.YOffset+m.output.viewport.Height/2, maxOffset)
@@ -1382,7 +1424,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		total := m.output.viewport.TotalLineCount()
 		bottom := m.output.viewport.YOffset + m.output.viewport.Height
 		m.output.SetFrozen(total-bottom > 2)
-		return nil
+		return keyConsumed
 	}
 
 	// Handle Ctrl+Shift+C for compact mode toggle (only when in input state)
@@ -1438,7 +1480,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		// key, not an inert control combo.
 	}
 
-	// Option+C: copy last AI response to clipboard
+	// Option+C: copy last AI response to clipboard. keyConsumed (round 8),
+	// not nil: m.state stays StateInput here, so a bare `nil` return let
+	// bubbles/textarea's OWN alt+c binding (CapitalizeWordForward) ALSO
+	// fire — capitalizing a word in the compose buffer every time the user
+	// copied the last response.
 	if msg.String() == "alt+c" && m.state == StateInput {
 		if m.lastResponseText != "" {
 			copyViaOSC52(m.lastResponseText)
@@ -1447,7 +1493,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.toastManager.ShowInfo("Copied last response")
 			}
 		}
-		return nil
+		return keyConsumed
 	}
 
 	// Code block navigation and actions (only when input is empty)
@@ -1569,7 +1615,25 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case tea.KeyEnter:
-		// Alt+Enter: insert newline for multi-line input
+		// KeyEnter is a round-8 collision-class member too: bubbles/textarea
+		// binds "enter" to InsertNewline (never disabled in NewInputModel), so
+		// any branch below that returns bare nil while the model stays in a
+		// typeAheadActive state lets the SAME Enter ALSO insert a newline into
+		// the compose textarea. The submit paths leaked an invisible "\n" into
+		// the just-Reset input — Value()'s TrimSpace hid it, but the slash-
+		// suggestion refresh checks HasPrefix on the RAW value, so autocomplete
+		// silently died for the rest of the session after the first submit;
+		// a debounce-swallowed Enter inserted an INTERIOR newline at a
+		// mid-string cursor, corrupting the eventually-submitted message.
+		// Every consuming branch below must return keyConsumed. The ONE
+		// deliberate forward is suggestions-showing (the outer guards skip all
+		// branches) — InputModel's own KeyEnter case accepts the highlighted
+		// suggestion via the forwarded key.
+		//
+		// Alt+Enter: insert newline for multi-line input. Returning nil here
+		// is safe (textarea's InsertNewline binding matches "enter"/"ctrl+m",
+		// not "alt+enter") and deliberate: the forwarded key lets InputModel
+		// run its normal post-key refresh.
 		if m.state == StateInput && msg.Alt {
 			m.input.InsertNewline()
 			return nil
@@ -1578,9 +1642,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		if m.state == StateInput && !m.input.ShowingSuggestions() {
 			value := m.input.Value()
 			if value != "" {
-				// Rate limiting: prevent rapid message spam
+				// Rate limiting: prevent rapid message spam. keyConsumed, not
+				// nil — a swallowed Enter must not fall through to the
+				// textarea and insert a newline at the cursor.
 				if time.Since(m.lastSubmitTime) < m.minSubmitDelay {
-					return nil // Ignore too-fast submissions
+					return keyConsumed
 				}
 				m.lastSubmitTime = time.Now()
 
@@ -1606,7 +1672,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				if m.onSubmit != nil {
 					m.onSubmit(expanded)
 				}
-				return nil
+				// keyConsumed, not nil: m.state is now StateProcessing (which
+				// IS typeAheadActive), so a bare nil forwarded this Enter to
+				// the textarea — leaving an invisible "\n" in the just-Reset
+				// compose buffer (the autocomplete-death leak).
+				return keyConsumed
 			}
 		}
 		// Type-ahead Enter: queue the composed message behind the in-flight
@@ -1618,7 +1688,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			value := m.input.Value()
 			if value != "" {
 				if time.Since(m.lastSubmitTime) < m.minSubmitDelay {
-					return nil
+					return keyConsumed // swallowed Enter must not reach the textarea
 				}
 				m.lastSubmitTime = time.Now()
 
@@ -1633,8 +1703,19 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				if m.onSubmit != nil {
 					m.onSubmit(expanded)
 				}
-				return nil
+				return keyConsumed // same leak as the main submit path above
 			}
+		}
+		// Bare Enter with nothing to submit (empty input, no suggestions
+		// showing): consume it. Falling through to the function tail's
+		// `return nil` forwarded it to the textarea, piling up an invisible
+		// "\n" per press — which broke the raw-value checks downstream
+		// (slash-suggestion HasPrefix, Ctrl+U's empty-input gate). Gated to
+		// the typeAhead states so Enter in other states is untouched, and to
+		// !ShowingSuggestions so the dropdown-accept forward stays intact.
+		if (m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) &&
+			!m.isModalState() && !m.input.ShowingSuggestions() {
+			return keyConsumed
 		}
 
 	case tea.KeyCtrlL:
@@ -1734,6 +1815,23 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case QueuedCountMsg:
 		m.queuedPending = int(msg)
+		return nil
+
+	case DebugStateRequestMsg:
+		// Computed on THIS goroutine (the Update loop, which owns every
+		// mutation to Model's fields, incl. backgroundTasks) — see the type
+		// doc for why a cross-goroutine direct DebugState() call is unsafe.
+		// Non-blocking send: the contract says Resp is buffered (cap 1), so
+		// this always succeeds for a compliant caller even after its timeout
+		// fired — but if a future caller ever violates the contract with an
+		// unbuffered channel and isn't parked on the receive, dropping the
+		// response (it times out) beats blocking the whole Update loop forever.
+		if msg.Resp != nil {
+			select {
+			case msg.Resp <- m.DebugState():
+			default:
+			}
+		}
 		return nil
 
 	case ContextHealthMsg:
@@ -3841,6 +3939,20 @@ func (m *Model) EndPlanExecution() {
 }
 
 // UIDebugState is a serializable snapshot of key TUI fields for debugging.
+// DebugStateRequestMsg asks the Update loop to compute DebugState() on its
+// own goroutine — the SAME one that owns every mutation to Model's fields
+// (incl. backgroundTasks, mutated both via map insert/delete in
+// handleBackgroundTask and via in-place field writes for progress updates)
+// — and deliver the result via Resp. Round 8: App.GetUIDebugState used to
+// call m.tui.DebugState() directly from the command-execution goroutine,
+// racing those mutations — a fatal, unrecoverable "concurrent map read and
+// map write" crash risk (reachable via /debug-dump), not just a -race
+// finding. Resp is buffered (size 1) so a slow/timed-out caller can never
+// block the Update loop's send.
+type DebugStateRequestMsg struct {
+	Resp chan UIDebugState
+}
+
 type UIDebugState struct {
 	Timestamp         time.Time                       `json:"timestamp"`
 	State             string                          `json:"state"`
@@ -3909,6 +4021,28 @@ func (m *Model) DebugState() UIDebugState {
 		stateName = "batch_progress"
 	}
 
+	// Round 8: deep-copy backgroundTasks rather than returning the live map.
+	// The PRIMARY concurrency fix is DebugStateRequestMsg (see its type doc):
+	// DebugState() now normally runs ON the Update-loop goroutine, so the
+	// copy loop itself no longer races handleBackgroundTask's map mutations.
+	// The deep copy protects the RETURNED snapshot: the caller (/debug-dump,
+	// on the command-execution goroutine) iterates and JSON-marshals it
+	// AFTER this returns, while the Update loop keeps inserting/deleting
+	// entries AND mutating *BackgroundTaskState fields in place (progress
+	// updates). A shallow map copy alone wouldn't be enough — the pointed-to
+	// structs (and their ToolsUsed slice) are still mutated after insertion,
+	// so this copies the struct VALUES too. Also covers the headless
+	// direct-call fallback in GetUIDebugState (no Update loop running there).
+	backgroundTasksCopy := make(map[string]*BackgroundTaskState, len(m.backgroundTasks))
+	for id, task := range m.backgroundTasks {
+		if task == nil {
+			continue
+		}
+		cp := *task
+		cp.ToolsUsed = append([]string(nil), task.ToolsUsed...)
+		backgroundTasksCopy[id] = &cp
+	}
+
 	return UIDebugState{
 		Timestamp:         time.Now(),
 		State:             stateName,
@@ -3919,7 +4053,7 @@ func (m *Model) DebugState() UIDebugState {
 		CurrentTool:       m.currentTool,
 		CurrentToolInfo:   m.currentToolInfo,
 		ActiveToolCalls:   len(m.activeToolCalls),
-		BackgroundTasks:   m.backgroundTasks,
+		BackgroundTasks:   backgroundTasksCopy,
 		PlanningMode:      m.planningModeEnabled,
 		PermissionsActive: m.permissionsEnabled,
 		SandboxEnabled:    m.sandboxEnabled,

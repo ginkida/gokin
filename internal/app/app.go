@@ -3157,11 +3157,41 @@ func (a *agentRunnerAdapter) ListAgents() []string {
 // diffHandlerAdapter is in app_handlers.go
 
 // GetUIDebugState returns a serializable snapshot of the TUI state.
+//
+// Round 8: this used to call a.tui.DebugState() directly — a.tui is shared
+// with the Bubble Tea Update loop (a DIFFERENT goroutine, which owns every
+// mutation to Model's fields, incl. backgroundTasks: both map insert/delete
+// in handleBackgroundTask AND in-place field writes for progress updates).
+// Calling DebugState() from this (command-execution) goroutine while a
+// background task started/completed raced those mutations — a fatal,
+// unrecoverable "concurrent map read and map write" crash, reachable via
+// /debug-dump. Routed through a request/response message instead, so the
+// snapshot is computed on the SAME goroutine as the mutations.
 func (a *App) GetUIDebugState() (any, error) {
 	if a.tui == nil {
 		return nil, fmt.Errorf("TUI not initialized")
 	}
-	return a.tui.DebugState(), nil
+
+	a.programMu.RLock()
+	program := a.program
+	a.programMu.RUnlock()
+
+	if program == nil {
+		// No running Bubble Tea loop (e.g. headless, or before Run() starts
+		// the program) — nothing else can be concurrently mutating a.tui,
+		// so a direct read is safe.
+		return a.tui.DebugState(), nil
+	}
+
+	respCh := make(chan ui.UIDebugState, 1)
+	a.safeSendToProgram(ui.DebugStateRequestMsg{Resp: respCh})
+
+	select {
+	case state := <-respCh:
+		return state, nil
+	case <-time.After(2 * time.Second):
+		return nil, fmt.Errorf("timed out waiting for TUI debug state")
+	}
 }
 
 // GetVersion returns the current application version.
