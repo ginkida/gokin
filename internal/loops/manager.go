@@ -112,9 +112,36 @@ func NewManager(storage Storage) *Manager {
 	}
 
 	loaded, errs := storage.Load()
+
+	// Stagger restart: when gokin restarts, every persisted Running loop has
+	// a NextRunAt in the past (it was due "next" relative to the prior process).
+	// Without this, the first scheduler tick after startup fires ALL of them
+	// back-to-back — a thundering herd of LLM calls hitting the provider at
+	// once. Spread them across one poll period so they fire one per tick,
+	// matching the at-most-one-per-tick cadence the scheduler enforces at
+	// steady state. Only applies to loops that are ACTUALLY overdue (NextRunAt
+	// is in the past); future-due loops are left alone.
+	now := time.Now()
+	staggerStep := DefaultPollPeriod / staggerDivisor // spread N across one period
+	if staggerStep < minStaggerStep {
+		staggerStep = minStaggerStep
+	}
+	overdueCount := 0
 	for _, l := range loaded {
+		if l.Status == StatusRunning && !l.NextRunAt.IsZero() && now.After(l.NextRunAt) {
+			// Start at step 1 (not 0) so even the first overdue loop is pushed
+			// slightly into the future — without this, overdueCount==0 produces
+			// NextRunAt==now which is immediately due on the very first tick.
+			l.NextRunAt = now.Add(time.Duration(overdueCount+1) * staggerStep)
+			overdueCount++
+		}
 		m.loops[l.ID] = l
 	}
+	if overdueCount > 0 {
+		logging.Info("loops: staggered overdue loops on restart",
+			"count", overdueCount, "step", staggerStep)
+	}
+
 	for _, err := range errs {
 		logging.Warn("loops: skipped corrupt state file", "error", err)
 	}

@@ -104,6 +104,16 @@ type Runner struct {
 // against overhead (acquires no expensive resources per tick).
 const DefaultPollPeriod = 30 * time.Second
 
+// staggerDivisor spreads overdue-on-restart loops across one poll period.
+// With period=30s and divisor=3, each overdue loop fires ~10s apart —
+// matching the at-most-one-per-tick steady-state cadence so a restart
+// doesn't thundering-herd the provider.
+const staggerDivisor = 3
+
+// minStaggerStep is the floor for the stagger interval when the poll period
+// is very small (tests). Keeps the step meaningful even with a 1s period.
+const minStaggerStep = 5 * time.Second
+
 // DefaultIterationTimeout caps how long a single iteration can run
 // before being considered stuck. Loops are typically short tasks
 // (read a file, run a check), but we don't want a hung iteration to
@@ -255,12 +265,23 @@ func (r *Runner) run(ctx context.Context, period time.Duration) {
 //
 // Skips entirely if the IdleChecker says the app is busy.
 func (r *Runner) tick(ctx context.Context) {
+	// Check ctx BEFORE anything else: if the app is shutting down, don't
+	// even scan — a fireOne launched here would find ctx.Err() != nil at
+	// its own entry and return immediately, wasting a goroutine spawn +
+	// startHook + SetFiring/ClearFiring cycle.
+	if ctx.Err() != nil {
+		return
+	}
 	if r.iterationRunning.Load() || !r.isIdle() {
 		return
 	}
 
 	active := r.mgr.Active()
 	if len(active) == 0 {
+		// Reset rotation so a stale value from a prior (now-empty) loop set
+		// doesn't make a newly-created loop's first tick start at a non-zero
+		// index — which could skip it if it's the only loop and start > 0.
+		r.scanRotation = 0
 		return
 	}
 
@@ -303,6 +324,19 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	// Parent context already canceled (app shutting down — the runner's ctx is
 	// the app root ctx) before we even start: don't fire a doomed iteration.
 	if ctx.Err() != nil {
+		return
+	}
+
+	// The loop may have been paused/stopped between tick()'s snapshot and this
+	// goroutine starting (e.g. user typed /loop pause during the isIdle wait).
+	// Re-check status from the authoritative manager state — the `l` pointer is
+	// a snapshot from Active() and may be stale. Firing a paused loop wastes a
+	// spawn cycle and produces a phantom iteration that RecordIteration will
+	// silently discard (ErrLoopNotRunning).
+	current, ok := r.mgr.Get(l.ID)
+	if !ok || current.Status != StatusRunning {
+		logging.Info("loops: loop no longer running before fireOne, skipping",
+			"loop_id", l.ID, "status", current.Status)
 		return
 	}
 
