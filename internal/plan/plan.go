@@ -952,6 +952,35 @@ func (p *Plan) GetStatus() Status {
 	return p.Status
 }
 
+// SetStepUsage persists a step's token usage by ID under p.mu. Plan steps are
+// executed against DEEP COPIES from NextReadySteps, so writing step.TokensUsed
+// on the copy never reaches the real step — CompleteStep only persists
+// Output/Status. Callers must use this to record token usage or the plan
+// execution summary always reports 0 tokens.
+func (p *Plan) SetStepUsage(stepID, tokens int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, step := range p.Steps {
+		if step.ID == stepID {
+			step.TokensUsed = tokens
+			return
+		}
+	}
+}
+
+// SetStepAgentMetrics persists a step's sub-agent tree metrics by ID under
+// p.mu (same deep-copy reason as SetStepUsage).
+func (p *Plan) SetStepAgentMetrics(stepID int, metrics *StepAgentMetrics) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, step := range p.Steps {
+		if step.ID == stepID {
+			step.AgentMetrics = metrics
+			return
+		}
+	}
+}
+
 // HasPausedSteps returns true if any step has StatusPaused.
 func (p *Plan) HasPausedSteps() bool {
 	p.mu.RLock()

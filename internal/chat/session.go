@@ -539,31 +539,29 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.scratchpad = state.Scratchpad
 	s.systemInstruction = state.SystemInstruction
 
-	// Restore checkpoints
-	if len(state.Checkpoints) > 0 {
-		s.Checkpoints = make(map[string]int, len(state.Checkpoints))
-		for k, v := range state.Checkpoints {
-			s.Checkpoints[k] = v
-		}
+	// Restore checkpoints — ALWAYS replace (including clearing when the restored
+	// state has none), so a prior session's checkpoints don't survive across
+	// `/resume <id>` into a different session. A stale checkpoint maps a name to
+	// a history index that no longer exists in the newly-restored history, so a
+	// later `/restore <name>` would jump to a wrong/invalid position.
+	s.Checkpoints = make(map[string]int, len(state.Checkpoints))
+	for k, v := range state.Checkpoints {
+		s.Checkpoints[k] = v
 	}
 
-	// Restore branches (recursive)
-	if len(state.Branches) > 0 {
-		s.Branches = make(map[string]*Session, len(state.Branches))
-		for name, branchState := range state.Branches {
-			branch := NewSession()
-			if err := branch.RestoreFromState(branchState); err != nil {
-				return fmt.Errorf("failed to restore branch %q: %w", name, err)
-			}
-			s.Branches[name] = branch
+	// Restore branches (recursive) — always replace for the same reason.
+	s.Branches = make(map[string]*Session, len(state.Branches))
+	for name, branchState := range state.Branches {
+		branch := NewSession()
+		if err := branch.RestoreFromState(branchState); err != nil {
+			return fmt.Errorf("failed to restore branch %q: %w", name, err)
 		}
+		s.Branches[name] = branch
 	}
 
-	// Restore tool checkpoints
-	if len(state.ToolCheckpoints) > 0 {
-		s.toolCheckpoints = make([]SerializedToolCheckpoint, len(state.ToolCheckpoints))
-		copy(s.toolCheckpoints, state.ToolCheckpoints)
-	}
+	// Restore tool checkpoints — always replace.
+	s.toolCheckpoints = make([]SerializedToolCheckpoint, len(state.ToolCheckpoints))
+	copy(s.toolCheckpoints, state.ToolCheckpoints)
 
 	return nil
 }

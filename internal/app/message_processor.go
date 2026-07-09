@@ -1453,9 +1453,12 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		output = string(runes[:planStepOutputMaxChars]) + "..."
 	}
 
-	// Record token usage for this step
+	// Record token usage for this step. `step` is a deep copy from
+	// NextReadySteps, so persist to the real plan step by ID (SetStepUsage) —
+	// otherwise the plan execution summary always reports 0 tokens.
 	apiInput, apiOutput := a.executor.GetLastTokenUsage()
 	step.TokensUsed = apiInput + apiOutput
+	approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
 
 	verificationSummary, verificationOutput, verificationOK, verificationReason := a.runStepVerificationCommands(ctx, approvedPlan, step)
 	if !verificationOK {
@@ -2158,8 +2161,10 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		output = string(runes[:planStepOutputMaxChars]) + "..."
 	}
 
-	// Record token usage for this step (estimate from output length for delegated steps)
+	// Record token usage for this step (estimate from output length for delegated
+	// steps). `step` is a deep copy, so persist to the real plan step by ID.
 	step.TokensUsed = len(output) / 4
+	approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
 
 	verificationSummary, verificationOutput, verificationOK, verificationReason := a.runStepVerificationCommands(ctx, approvedPlan, step)
 	if !verificationOK {
@@ -2223,6 +2228,8 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		}
 		if metrics.TotalNodes > 0 {
 			step.AgentMetrics = metrics
+			// `step` is a deep copy — persist to the real plan step by ID.
+			approvedPlan.SetStepAgentMetrics(step.ID, metrics)
 		}
 	}
 
