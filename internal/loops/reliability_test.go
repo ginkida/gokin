@@ -189,3 +189,32 @@ func TestNewManager_DoesNotStaggerFutureDueLoops(t *testing.T) {
 		t.Errorf("future-due loop was staggered: NextRunAt %v, original %v", got.NextRunAt, future)
 	}
 }
+
+// TestFireOne_SkipsRemovedLoop pins the nil-deref fix in fireOne's status
+// re-check: Manager.Get returns (nil, false) for a REMOVED loop, and the first
+// cut of the guard (`if !ok || current.Status != ...`) evaluated current.Status
+// in the log arguments even when !ok — a nil-pointer panic (recovered by the
+// tick goroutine's recover, but a lost iteration + error log). The removed case
+// must skip cleanly, without panicking and without spawning.
+func TestFireOne_SkipsRemovedLoop(t *testing.T) {
+	mgr := NewManager(newMemStorage())
+	l, err := mgr.Add("test task", ModeSelfPaced, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spawner := &fakeSpawner{output: "ran", ok: true}
+	r := NewRunner(mgr, spawner.spawn, (&fakeIdle{}).check)
+
+	if err := mgr.Remove(l.ID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// Must not panic (the pre-fix guard nil-derefed current.Status here) and
+	// must not spawn.
+	r.fireOne(context.Background(), l)
+
+	if spawner.callCount() != 0 {
+		t.Errorf("spawn called %d times on removed loop; want 0", spawner.callCount())
+	}
+}
