@@ -99,7 +99,12 @@ func TestGetUIDebugState_ConcurrentWithBackgroundTasksNoCrash(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
+	// A genuine deadlock hangs forever, so a GENEROUS guard still catches it while
+	// leaving ample headroom for 3000 iterations under `-race` on a slow/loaded CI
+	// runner (locally ~6s under -race; the old 15s guard false-positived on shared
+	// GitHub Actions 2-core runners). The `go test -timeout` default (10m) is the
+	// ultimate backstop for a real hang.
+	case <-time.After(120 * time.Second):
 		t.Fatal("concurrent GetUIDebugState/BackgroundTaskMsg load deadlocked or hung")
 	}
 	close(errCh)
