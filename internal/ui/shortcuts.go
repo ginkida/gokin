@@ -64,7 +64,7 @@ func DefaultShortcuts() []ShortcutCategory {
 				{Keys: []string{"E"}, Description: "Expand / collapse all tool outputs"},
 				{Keys: []string{"Ctrl", "H"}, Description: "Context Observatory (Technical Health)"},
 				{Keys: []string{"Ctrl", "G"}, Description: "Toggle select mode (freeze + native selection)"},
-				{Keys: []string{"Ctrl", "O"}, Description: "Toggle activity feed panel"},
+				{Keys: []string{"Ctrl", "O"}, Description: "Live activity detail on/off (works while streaming)"},
 				{Keys: []string{"Ctrl", "A"}, Description: "Toggle agent tree panel"},
 				{Keys: []string{"Ctrl", "T"}, Description: "Toggle todo list panel"},
 				{Keys: []string{"Ctrl", "X"}, Description: "Expand / collapse plan progress panel"},

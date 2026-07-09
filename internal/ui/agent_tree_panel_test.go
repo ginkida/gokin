@@ -105,6 +105,7 @@ func TestView_FeedSuppressedWhileTreeRenders(t *testing.T) {
 	m.width = 110
 	m.height = 40
 	m.state = StateInput
+	m.liveDetailExpanded = true // the feed renders only in detailed mode (Ctrl+O)
 
 	// Tree with live tasks → renders.
 	m.agentTreePanel.UpdateTree(treeNodes("running", "pending"))

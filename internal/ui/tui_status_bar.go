@@ -879,11 +879,16 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 		return []shortcutHint{{"↑↓", "Navigate"}, {"Enter", "Confirm"}, {"esc", "Cancel"}}
 	case StateModelSelector:
 		return []shortcutHint{{"↑↓", "Navigate"}, {"Enter", "Select"}, {"esc", "Cancel"}}
+	case StateProcessing, StateStreaming:
+		// Esc-interrupt is NOT here — it's a required, always-visible segment
+		// (see interruptHint), because cancellation must never vanish under
+		// width pressure. This droppable hint surfaces the live-activity
+		// detail toggle (Ctrl+O), discoverable exactly when it's useful.
+		if m.liveDetailExpanded {
+			return []shortcutHint{{"ctrl+o", "minimal"}}
+		}
+		return []shortcutHint{{"ctrl+o", "detail"}}
 	default:
-		// Esc-interrupt during Processing/Streaming is NOT a droppable hint here —
-		// it's a required, always-visible segment (see interruptHint), because
-		// cancellation is the one action the user must never lose under width
-		// pressure.
 		return nil
 	}
 }

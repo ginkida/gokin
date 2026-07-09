@@ -241,6 +241,14 @@ type Model struct {
 	filePeek        *FilePeekPanel
 	activeToolCalls []activeToolCall // Stack of active parallel tool calls
 
+	// liveDetailExpanded is the Claude-Code-style live-activity verbosity
+	// switch (Ctrl+O, works DURING Processing/Streaming too): false (default)
+	// renders the live card as ONE dim unobtrusive line and suppresses the
+	// activity feed panel; true renders the full multi-line card (todo
+	// position, plan/parallel-work lines) and lets the feed panel show.
+	// Session-scoped — persists across turns, resets on app restart.
+	liveDetailExpanded bool
+
 	// Compact mode
 	CompactMode bool
 
@@ -1078,6 +1086,15 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 		if m.toastManager != nil {
 			m.toastManager.ShowInfo(toggleStateLabel("Todos", m.todosVisible))
 		}
+	case paletteActionLiveDetail:
+		m.liveDetailExpanded = !m.liveDetailExpanded
+		if m.toastManager != nil {
+			if m.liveDetailExpanded {
+				m.toastManager.ShowInfo("Live activity: detailed")
+			} else {
+				m.toastManager.ShowInfo("Live activity: minimal")
+			}
+		}
 	case paletteActionActivityFeed:
 		if m.activityFeed != nil {
 			m.activityFeed.Toggle()
@@ -1275,13 +1292,26 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Handle Ctrl+O for activity feed toggle
-	if msg.Type == tea.KeyCtrlO && m.state == StateInput {
-		if m.activityFeed != nil {
-			m.activityFeed.Toggle()
-			m.toastManager.ShowInfo(toggleStateLabel("Activity feed", m.activityFeed.IsVisible()))
+	// Ctrl+O — Claude-Code-style live-activity detail toggle. Deliberately
+	// available DURING Processing/Streaming (the whole point is expanding the
+	// detail while the agent works), not just StateInput. Flips the ONE
+	// verbosity flag: minimal (one dim line, feed suppressed) ⇄ detailed
+	// (full card + activity feed panel). The feed panel's own visibility
+	// machinery (auto-show on sub-agents, userHidden latch) still governs
+	// whether the feed has anything to show WITHIN detailed mode; the
+	// fine-grained feed-only toggle remains on the palette. keyConsumed so
+	// the keystroke never also reaches the compose textarea (round-8 rule).
+	if msg.Type == tea.KeyCtrlO &&
+		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
+		m.liveDetailExpanded = !m.liveDetailExpanded
+		if m.toastManager != nil {
+			if m.liveDetailExpanded {
+				m.toastManager.ShowInfo("Live activity: detailed")
+			} else {
+				m.toastManager.ShowInfo("Live activity: minimal")
+			}
 		}
-		return nil
+		return keyConsumed
 	}
 
 	// Handle Ctrl+A for agent tree panel toggle. keyConsumed (round 8), not
@@ -3215,7 +3245,10 @@ func (m Model) View() string {
 	if m.agentTreePanel != nil {
 		agentTreeView = m.agentTreePanel.View(m.width)
 	}
-	feedRendered := m.activityFeed != nil && m.activityFeed.IsVisible() &&
+	// liveDetailExpanded gates the feed: in minimal mode (default) the whole
+	// live-activity surface is one dim line — the feed only renders once the
+	// user expands with Ctrl+O.
+	feedRendered := m.liveDetailExpanded && m.activityFeed != nil && m.activityFeed.IsVisible() &&
 		m.activityFeed.HasActiveEntries() && agentTreeView == ""
 
 	// Live "Now" card — compact summary of what the agent is doing right now.

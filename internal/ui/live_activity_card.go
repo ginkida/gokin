@@ -105,6 +105,16 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 		firstGlyph = spinnerFramesCard[frameIdx]
 	}
 
+	// MINIMAL mode (default, Claude-Code style): ONE dim unobtrusive line —
+	// spinner + current action + elapsed — nothing else. Ctrl+O (works during
+	// Processing/Streaming too) expands to the full card below. The dim style
+	// keeps the line readable but visually quiet next to streamed output.
+	if !m.liveDetailExpanded {
+		minimalStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		return barStyle.Render(firstGlyph) + " " +
+			minimalStyle.Render(truncateRunes(current, max(width-2, 1)))
+	}
+
 	// Prefix every line with a coloured leading glyph. First line uses the
 	// animated spinner (when active); subsequent lines keep the static bar
 	// so the animation doesn't become visually noisy.

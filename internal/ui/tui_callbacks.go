@@ -15,6 +15,7 @@ const (
 	paletteActionShortcuts     = "shortcuts"
 	paletteActionTodos         = "todos"
 	paletteActionActivityFeed  = "activity_feed"
+	paletteActionLiveDetail    = "live_detail"
 	paletteActionAgentTree     = "agent_tree"
 	paletteActionObservatory   = "observatory"
 	paletteActionPlanPanel     = "plan_panel"
@@ -266,9 +267,18 @@ func (m *Model) RegisterPaletteActions() {
 			ActionID:    paletteActionTodos,
 		},
 		{
-			Name:        "Toggle Activity Feed",
-			Description: "Show or hide the activity feed panel",
+			Name:        "Live Activity Detail",
+			Description: "Expand or minimize the live activity view (works while streaming)",
 			Shortcut:    "Ctrl+O",
+			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
+			Enabled:     true,
+			Priority:    150,
+			Type:        CommandTypeAction,
+			ActionID:    paletteActionLiveDetail,
+		},
+		{
+			Name:        "Toggle Activity Feed",
+			Description: "Show or hide the sub-agent feed panel (within detailed view)",
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
 			Enabled:     true,
 			Priority:    151,

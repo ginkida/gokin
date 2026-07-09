@@ -250,6 +250,7 @@ func TestRenderLiveActivityCard_ShowsActiveTodoStep(t *testing.T) {
 	m := NewModel()
 	m.width = 120
 	m.state = StateStreaming
+	m.liveDetailExpanded = true // todo line is part of the DETAILED view (Ctrl+O)
 	m.currentResponseBuf.WriteString("working on something")
 	m.todoItems = []string{
 		"[x] Check existing code",
@@ -277,6 +278,7 @@ func TestRenderLiveActivityCard_TodoFallsBackToNextPending(t *testing.T) {
 	m := NewModel()
 	m.width = 120
 	m.state = StateStreaming
+	m.liveDetailExpanded = true // todo line is part of the DETAILED view (Ctrl+O)
 	m.currentResponseBuf.WriteString("thinking")
 	m.todoItems = []string{
 		"[x] Done one",
