@@ -733,24 +733,7 @@ func (a *App) Run() error {
 		}
 		a.loopRunner.Start(a.ctx)
 
-		// Surface restored active loops at startup. Without this hint,
-		// a user who set up a loop in a prior session, closed gokin,
-		// and reopened it has no idea that loops are about to start
-		// firing in the background — they could be surprised when an
-		// iteration triggers and the model "spontaneously" does work.
-		// Counts paused/auto-paused too so the user sees the full
-		// loop fleet they have on disk.
-		if active := a.loopManager.Active(); len(active) > 0 {
-			a.safeSendToProgram(ui.StatusUpdateMsg{
-				Type:    ui.StatusInfo,
-				Message: fmt.Sprintf("Resumed %d active loop(s) — /loop to view, /loop pause <id> to halt.", len(active)),
-			})
-		} else if all := a.loopManager.List(); len(all) > 0 {
-			// All loops are non-running (paused/stopped/completed).
-			// Less urgent — debug log only, the user can /loop list to
-			// see them whenever.
-			logging.Debug("loops: restored from disk but none active", "total", len(all))
-		}
+		a.announceRestoredLoops()
 	}
 
 	// Set app reference in TUI for data providers
@@ -1864,6 +1847,42 @@ func (a *App) GetHistoryManager() (*chat.HistoryManager, error) {
 // GetContextManager returns the context manager.
 func (a *App) GetContextManager() *appcontext.ContextManager {
 	return a.contextManager
+}
+
+// announceRestoredLoops surfaces any loops restored from disk at startup so a
+// user who set up a loop in a prior session, closed gokin, and reopened it
+// knows loops are about to start firing in the background (otherwise an
+// iteration triggering looks like the model "spontaneously" doing work).
+//
+// It MUST NOT block the caller: it runs during App.Run() BEFORE a.program.Run()
+// starts draining Bubble Tea's unbuffered msgs channel, so a synchronous
+// safeSendToProgram here would deadlock the entire startup forever (the screen
+// stuck on "Starting Gokin..."). The active-loop toast is therefore replayed
+// from a goroutine after a short delay, exactly like the MCP initial summary —
+// both are latent landmines that only fire once a user has restored state at
+// boot. Returning promptly is the invariant pinned by the regression test.
+func (a *App) announceRestoredLoops() {
+	if a.loopManager == nil {
+		return
+	}
+	if active := a.loopManager.Active(); len(active) > 0 {
+		count := len(active)
+		a.safeGo("loops-restore-hint", func() {
+			select {
+			case <-time.After(800 * time.Millisecond):
+			case <-a.ctx.Done():
+				return
+			}
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusInfo,
+				Message: fmt.Sprintf("Resumed %d active loop(s) — /loop to view, /loop pause <id> to halt.", count),
+			})
+		})
+	} else if all := a.loopManager.List(); len(all) > 0 {
+		// All loops are non-running (paused/stopped/completed). Less urgent —
+		// debug log only; the user can /loop list to see them whenever.
+		logging.Debug("loops: restored from disk but none active", "total", len(all))
+	}
 }
 
 // safeGo runs fn in a new goroutine with panic recovery. A panic in a
