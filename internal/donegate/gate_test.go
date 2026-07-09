@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"gokin/internal/testkit"
 	"gokin/internal/tools"
 
 	"google.golang.org/genai"
@@ -323,4 +324,131 @@ func TestCountDoneGateResults(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNewBashCheckWithDir_DoesNotMoveSessionCwd pins the v0.100.73 #3 fix: a
+// done-gate check anchored to a subdirectory runs through the model's LIVE
+// shared BashTool, whose pwd probe commits the final cwd as the persistent
+// session cwd. A bare `cd subdir && cmd` permanently moved the model's cwd into
+// the checked subpackage — even when the check FAILED — so the model's next-turn
+// relative commands silently ran in the wrong directory. The subshell wrap makes
+// the cd invisible to the top-level pwd probe.
+func TestNewBashCheckWithDir_DoesNotMoveSessionCwd(t *testing.T) {
+	work := testkit.ResolvedTempDir(t)
+	sub := filepath.Join(work, "internal", "foo")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	bash := tools.NewBashTool(work)
+
+	// A SUCCEEDING check in the subdirectory: this is the path that reliably
+	// commits cwd — the bash tool appends a pwd probe after the command, so a
+	// bare `cd subdir && ok` reports the subdir as the new session cwd. (A
+	// FAILING check exits the script before the probe, so success is the
+	// guaranteed-reproduction case.)
+	check := newBashCheckWithDir(bash, "subcheck", sub, "echo checked")
+	if _, err := check.Run(context.Background()); err != nil {
+		t.Fatalf("check run error: %v", err)
+	}
+
+	// The model's session cwd must still be the workspace root — probe it the
+	// same way the bug does (a subsequent `pwd` through the same tool).
+	pwdRes, err := bash.Execute(context.Background(), map[string]any{
+		"command":     "pwd",
+		"description": "probe cwd",
+	})
+	if err != nil {
+		t.Fatalf("pwd probe error: %v", err)
+	}
+	got := strings.TrimSpace(pwdRes.Content)
+	// Resolve symlinks on both sides (macOS /var -> /private/var).
+	if resolved, rerr := filepath.EvalSymlinks(got); rerr == nil {
+		got = resolved
+	}
+	wantRoot := work
+	if resolved, rerr := filepath.EvalSymlinks(work); rerr == nil {
+		wantRoot = resolved
+	}
+	if got != wantRoot {
+		t.Fatalf("session cwd moved to %q after a subdir check; want workspace root %q", got, wantRoot)
+	}
+}
+
+// TestDetectProfile_BareBuildFileNotBazel pins the v0.100.73 #4 marker
+// hardening: a plain-text file literally named BUILD (or WORKSPACE) with no
+// workspace-level bazel marker at the root must NOT register a BazelRoot —
+// otherwise a stray text file forces a permanently-failing `bazel build` that
+// blocks every mutating turn (default enabled+strict+fail-closed policy).
+func TestDetectProfile_BareBuildFileNotBazel(t *testing.T) {
+	dir := t.TempDir()
+	// A README-style BUILD file, no WORKSPACE/MODULE.bazel at the root.
+	if err := os.WriteFile(filepath.Join(dir, "BUILD"), []byte("build instructions\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile := DetectProfile(dir)
+	if len(profile.BazelRoots) != 0 {
+		t.Fatalf("a bare BUILD file with no workspace marker registered BazelRoots=%v", profile.BazelRoots)
+	}
+
+	// With a real workspace marker at the root, the same BUILD file DOES count.
+	if err := os.WriteFile(filepath.Join(dir, "MODULE.bazel"), []byte("module(name='x')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile = DetectProfile(dir)
+	if len(profile.BazelRoots) == 0 {
+		t.Fatal("with a MODULE.bazel at root, the BUILD file should register a BazelRoot")
+	}
+}
+
+// TestBuildChecks_BazelSkipsWhenToolAbsent: even when a bazel root is genuinely
+// registered, the check must be a no-op skip (exit 0, actionable message) when
+// bazel isn't installed — never a hard failure that blocks the gate.
+func TestBuildChecks_BazelSkipsWhenToolAbsent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "MODULE.bazel"), []byte("module(name='x')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "BUILD"), []byte("# bazel build file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.c"), []byte("int main(){return 0;}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := DetectProfileWithTouchedPaths(dir, []string{filepath.Join(dir, "main.c")})
+	if len(profile.BazelRoots) == 0 {
+		t.Skip("bazel root not detected in this environment; skip probe assertion")
+	}
+
+	registry := tools.NewRegistry()
+	registry.MustRegister(tools.NewBashTool(dir))
+	checks := BuildChecks(registry, dir, "edit build", []string{"edit"}, profile, Policy{
+		Enabled: true, Mode: "strict",
+	})
+	var bazelCheck *Check
+	for i := range checks {
+		if strings.HasPrefix(checks[i].Name, "bazel_nobuild") {
+			bazelCheck = &checks[i]
+			break
+		}
+	}
+	if bazelCheck == nil {
+		t.Fatal("expected a bazel_nobuild check for the touched bazel root")
+	}
+	// Run it: with bazel absent (the common host state) the existence probe
+	// must skip cleanly (exit 0), NOT hard-fail. If bazel happens to be
+	// installed here, running the real command against a stub workspace is not
+	// a deterministic assertion — skip in that case.
+	res, err := bazelCheck.Run(context.Background())
+	if err != nil {
+		t.Fatalf("bazel check run error: %v", err)
+	}
+	if strings.Contains(res.Content, "bazel not found — skipping") {
+		if !res.Success {
+			t.Fatalf("absent-bazel skip must report Success, got failure: %q", res.Content)
+		}
+		return
+	}
+	t.Skip("bazel appears installed in this environment; skip the absent-tool assertion")
 }

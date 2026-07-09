@@ -249,9 +249,15 @@ func (t *BatchTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 
 // BatchResult holds the results of a batch operation.
 type BatchResult struct {
-	Succeeded   []string
-	Failed      map[string]string // path -> error
-	Skipped     []string
+	Succeeded []string
+	Failed    map[string]string // path -> error
+	Skipped   []string
+	// RawPaths are the actual filesystem paths that CHANGED (for rename,
+	// both old and new). Succeeded holds display strings ("old -> new" for
+	// rename), which aren't real paths — RawPaths feeds written_paths so the
+	// done-gate and read-dedup see the true set. Populated on real writes
+	// only (never dry-run).
+	RawPaths    []string
 	TotalFiles  int
 	Description string
 }
@@ -296,6 +302,12 @@ func (t *BatchTool) executeReplace(ctx context.Context, files []string, search, 
 			return t.replaceInFile(path, search, replacement, dryRun)
 		})
 		result.Description = fmt.Sprintf("replace '%s' with '%s'", search, replacement)
+		// executeParallel only fills Succeeded; mirror the sequential branch so
+		// written_paths is populated on the parallel path too (Succeeded holds
+		// real file paths for replace).
+		if !dryRun {
+			result.RawPaths = append(result.RawPaths, result.Succeeded...)
+		}
 	} else {
 		for _, path := range files {
 			select {
@@ -314,6 +326,9 @@ func (t *BatchTool) executeReplace(ctx context.Context, files []string, search, 
 				}
 			} else {
 				result.Succeeded = append(result.Succeeded, path)
+				if !dryRun {
+					result.RawPaths = append(result.RawPaths, path)
+				}
 			}
 		}
 	}
@@ -426,6 +441,7 @@ func (t *BatchTool) executeRename(ctx context.Context, files []string, from, to 
 			result.Failed[path] = err.Error()
 		} else {
 			result.Succeeded = append(result.Succeeded, fmt.Sprintf("%s -> %s", path, newPath))
+			result.RawPaths = append(result.RawPaths, path, newPath)
 
 			// Record for undo. Tag as "move" so undo/redo use revertMove/applyMove
 			// (os.Rename back), NOT the generic AtomicWrite path — which would write
@@ -491,6 +507,7 @@ func (t *BatchTool) executeDelete(ctx context.Context, files []string, dryRun, p
 			result.Failed[path] = err.Error()
 		} else {
 			result.Succeeded = append(result.Succeeded, path)
+			result.RawPaths = append(result.RawPaths, path)
 
 			// Record for undo (nil means pre-read failed; []byte{} is a valid empty file).
 			if t.undoManager != nil && oldContent != nil {
@@ -662,13 +679,39 @@ func (t *BatchTool) formatResult(op string, result BatchResult, dryRun bool) Too
 			// actually changed something.
 			return NewErrorResult(sb.String())
 		}
-		return NewSuccessResultWithData(sb.String(), map[string]any{
+		data := map[string]any{
 			"succeeded": len(result.Succeeded),
 			"failed":    len(result.Failed),
 			"skipped":   len(result.Skipped),
 			"total":     result.TotalFiles,
-		})
+		}
+		// Declare the ACTUALLY-changed files so the done-gate records them as
+		// touched (batch's targets are a "files" list, not a scalar arg) and
+		// the executor invalidates read-dedup/caches. See "Adding a New Tool"
+		// step 14. Dry runs change nothing, so RawPaths is empty then.
+		if len(result.RawPaths) > 0 {
+			data["written_paths"] = uniqueStrings(result.RawPaths)
+		}
+		return NewSuccessResultWithData(sb.String(), data)
 	}
 
+	if len(result.RawPaths) > 0 {
+		return NewSuccessResultWithData(sb.String(), map[string]any{
+			"written_paths": uniqueStrings(result.RawPaths),
+		})
+	}
 	return NewSuccessResult(sb.String())
+}
+
+// uniqueStrings returns the input with duplicates removed, order preserved.
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }

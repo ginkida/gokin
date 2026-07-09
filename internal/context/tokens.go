@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"gokin/internal/client"
 	"gokin/internal/config"
@@ -386,27 +387,38 @@ func (t *TokenCounter) addToCacheWithAccuracy(key string, tokens int, isEstimate
 
 // GetUsage returns current token usage statistics.
 func (t *TokenCounter) GetUsage(tokenCount int) TokenUsage {
+	// Snapshot limits under the lock: SetClient/SetConfig rewrite t.limits under
+	// t.mu (a provider switch on a background worker), and this reader runs from
+	// the onSessionChange auto-compaction path holding neither m.mu nor t.mu — a
+	// genuine cross-goroutine race on a multi-word struct without the snapshot.
+	t.mu.RLock()
+	limits := t.limits
+	t.mu.RUnlock()
+
 	// Guard against a zero/unset limit: float division by zero yields +Inf,
 	// which would make PercentUsed/NearLimit report "near limit" for any
 	// token count. getModelLimits always returns a non-zero default, but a
 	// zero-value TokenCounter or a bad config must not corrupt the readout.
-	if t.limits.MaxInputTokens <= 0 {
+	if limits.MaxInputTokens <= 0 {
 		return TokenUsage{InputTokens: tokenCount, MaxTokens: 0}
 	}
-	percentUsed := float64(tokenCount) / float64(t.limits.MaxInputTokens)
+	percentUsed := float64(tokenCount) / float64(limits.MaxInputTokens)
 
 	return TokenUsage{
 		InputTokens:  tokenCount,
-		MaxTokens:    t.limits.MaxInputTokens,
+		MaxTokens:    limits.MaxInputTokens,
 		PercentUsed:  percentUsed,
-		NearLimit:    percentUsed >= t.limits.WarningThreshold,
-		ExceedsLimit: tokenCount >= t.limits.MaxInputTokens,
+		NearLimit:    percentUsed >= limits.WarningThreshold,
+		ExceedsLimit: tokenCount >= limits.MaxInputTokens,
 	}
 }
 
 // CalculateCost estimates the USD cost for the given token usage.
 func (t *TokenCounter) CalculateCost(inputTokens, outputTokens int) float64 {
-	pricing := getPricing(t.model)
+	t.mu.RLock()
+	model := t.model
+	t.mu.RUnlock()
+	pricing := getPricing(model)
 	inputCost := (float64(inputTokens) / 1000000.0) * pricing.InputCostPer1M
 	outputCost := (float64(outputTokens) / 1000000.0) * pricing.OutputCostPer1M
 	return inputCost + outputCost
@@ -462,8 +474,11 @@ func FormatCost(cost float64) string {
 	return fmt.Sprintf("$%.4f", cost)
 }
 
-// GetLimits returns the current token limits.
+// GetLimits returns the current token limits (a value copy taken under the lock;
+// SetClient/SetConfig can rewrite t.limits from another goroutine).
 func (t *TokenCounter) GetLimits() TokenLimits {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	return t.limits
 }
 
@@ -539,7 +554,12 @@ func EstimateTokens(text string) int {
 
 // estimateTokensForType estimates tokens based on detected content type.
 func estimateTokensForType(text string, contentType ContentType) int {
-	chars := len(text)
+	// Count RUNES, not bytes: byte length over-inflates Cyrillic ~2× / CJK ~3×,
+	// which crosses ExceedsLimit at ~60-65% real usage and fires premature
+	// EmergencyTruncate. Mirrors the v0.85 rune-safety fix in
+	// client/anthropic.go estimateTokens (this parallel copy was missed). ASCII
+	// is byte-identical, so existing calibration is unaffected.
+	chars := utf8.RuneCountInString(text)
 
 	switch contentType {
 	case ContentTypeCode:

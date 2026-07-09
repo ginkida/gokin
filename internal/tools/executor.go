@@ -3056,6 +3056,14 @@ func writtenPathsFromResult(result ToolResult) []string {
 	return out
 }
 
+// WrittenPathsFromResult is the exported form of writtenPathsFromResult, for the
+// done-gate to merge a tool's self-declared written paths (batch/refactor pattern
+// mode carry no path args) into the touched-path set. Same defensive contract:
+// any non-conforming Data shape yields nil.
+func WrittenPathsFromResult(result ToolResult) []string {
+	return writtenPathsFromResult(result)
+}
+
 // isWriteOperation returns true if the tool modifies files/state.
 func isWriteOperation(toolName string) bool {
 	return writeTools[toolName]

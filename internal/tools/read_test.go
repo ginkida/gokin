@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -582,5 +583,82 @@ func TestReadTool_Execute_NoPathValidator(t *testing.T) {
 	}
 	if result.Error == "" {
 		t.Error("Error field should be set for security error")
+	}
+}
+
+// --- Round 10 fixes ---
+
+// TestReadTool_ZeroLimitReturnsContent pins the lower clamp: an explicit
+// limit:0 (or negative) used to satisfy `linesRead >= limit` on the very
+// first line — Success=true with ZERO content and a pagination hint pointing
+// at itself.
+func TestReadTool_ZeroLimitReturnsContent(t *testing.T) {
+	dir := resolvedTempDir(t)
+	path := filepath.Join(dir, "z.txt")
+	os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0644)
+	tool := NewReadTool(dir)
+
+	for _, lim := range []any{float64(0), float64(-5)} {
+		res, err := tool.Execute(context.Background(), map[string]any{"file_path": path, "limit": lim})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.Success {
+			t.Fatalf("limit=%v: expected success, got error: %s", lim, res.Error)
+		}
+		if !strings.Contains(res.Content, "alpha") {
+			t.Fatalf("limit=%v: content missing (empty-success bug): %q", lim, res.Content)
+		}
+	}
+}
+
+// TestReadTool_SVGReadAsText pins the .svg routing fix: SVG is XML text; the
+// binary image reader left the model blind to the source (and serialized it
+// as an unsupported image/svg+xml block).
+func TestReadTool_SVGReadAsText(t *testing.T) {
+	dir := resolvedTempDir(t)
+	path := filepath.Join(dir, "icon.svg")
+	os.WriteFile(path, []byte("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>\n"), 0644)
+	tool := NewReadTool(dir)
+
+	res, err := tool.Execute(context.Background(), map[string]any{"file_path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success, got: %s", res.Error)
+	}
+	if !strings.Contains(res.Content, "<svg") {
+		t.Fatalf("SVG source not readable as text: %q", res.Content)
+	}
+	if len(res.MultimodalParts) != 0 {
+		t.Fatal("SVG must not be attached as an image block")
+	}
+}
+
+// TestReadTool_OversizedSpecialFilesRejected pins the size gate: .pdf/.ipynb/
+// image files routed BEFORE the >10MB isLarge gate and were read whole with
+// no bound.
+func TestReadTool_OversizedSpecialFilesRejected(t *testing.T) {
+	dir := resolvedTempDir(t)
+	tool := NewReadTool(dir)
+
+	big := make([]byte, LargeFileSizeMB*1024*1024+1)
+	for _, name := range []string{"huge.pdf", "huge.png", "huge.ipynb"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, big, 0644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := tool.Execute(context.Background(), map[string]any{"file_path": path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Success {
+			t.Fatalf("%s: oversized special file must be rejected, got success", name)
+		}
+		if !strings.Contains(res.Error, "too large") {
+			t.Fatalf("%s: error should say too large, got: %s", name, res.Error)
+		}
+		os.Remove(path)
 	}
 }

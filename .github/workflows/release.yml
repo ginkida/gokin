@@ -41,6 +41,21 @@ jobs:
           tar -czvf gokin-darwin-arm64.tar.gz gokin-darwin-arm64
           zip gokin-windows-amd64.zip gokin-windows-amd64.exe
 
+      # Publish a checksum manifest so the self-updater (which defaults to
+      # verify_checksum: true) can verify downloads. Without this asset the
+      # updater's fail-closed branch refused EVERY default-config install.
+      # sha256sum's "<hash>  <filename>" format is what DownloadChecksum parses,
+      # and FindChecksumAsset already matches the name "checksums.txt".
+      - name: Create checksums
+        run: |
+          sha256sum \
+            gokin-linux-amd64.tar.gz \
+            gokin-linux-arm64.tar.gz \
+            gokin-darwin-amd64.tar.gz \
+            gokin-darwin-arm64.tar.gz \
+            gokin-windows-amd64.zip > checksums.txt
+          cat checksums.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0 (Node 24)
         with:
@@ -51,3 +66,4 @@ jobs:
             gokin-darwin-amd64.tar.gz
             gokin-darwin-arm64.tar.gz
             gokin-windows-amd64.zip
+            checksums.txt

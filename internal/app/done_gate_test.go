@@ -42,6 +42,42 @@ func TestAppRecordResponseTouchedPaths_TracksSuccessfulMutationsOnly(t *testing.
 	}
 }
 
+// TestAppRecordResponseTouchedPaths_MergesWrittenPaths pins the v0.100.73 #2
+// fix: a batch/refactor pattern-mode edit carries its targets as a "files" LIST
+// or no path args at all, so its writes are self-declared via written_paths. The
+// done-gate must merge those with the arg-side paths — otherwise a batch that
+// broke a module records only an unrelated README write, the git ground-truth
+// fallback is suppressed, and the broken module's checks are skipped (false PASS).
+func TestAppRecordResponseTouchedPaths_MergesWrittenPaths(t *testing.T) {
+	dir := t.TempDir()
+	app := &App{workDir: dir}
+
+	// A batch edit that broke packages/b (declared via written_paths — no scalar
+	// path arg), plus an unrelated README write in the same turn.
+	app.recordResponseTouchedPaths("batch", map[string]any{
+		"operation": "replace",
+	}, tools.NewSuccessResultWithData("done", map[string]any{
+		"written_paths": []string{
+			filepath.Join(dir, "packages", "b", "index.ts"),
+			filepath.Join(dir, "packages", "b", "util.ts"),
+		},
+	}))
+	app.recordResponseTouchedPaths("write", map[string]any{
+		"file_path": filepath.Join(dir, "README.md"),
+	}, tools.ToolResult{Success: true})
+
+	got := app.snapshotResponseTouchedPaths()
+	want := []string{"README.md", "packages/b/index.ts", "packages/b/util.ts"}
+	if len(got) != len(want) {
+		t.Fatalf("touched paths = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("touched paths[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestRunDoneGateChecks_RecordsSuccessfulVerificationEvidence(t *testing.T) {
 	app := &App{}
 

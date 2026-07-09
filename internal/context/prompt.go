@@ -343,6 +343,13 @@ type PromptBuilder struct {
 	// Prompt caching: avoids rebuilding when inputs haven't changed
 	cachedPrompt string
 	promptDirty  bool
+	// lastContractCtx is the active-contract text embedded at the last Build().
+	// Plan-step transitions mutate the contract WITHOUT dirtying the builder
+	// (the step-start refreshSystemInstruction is a no-op on prompt content), so
+	// Build() would otherwise serve a stale "ACTIVE CONTRACT" for every step
+	// after the first. Build() self-heals by re-checking the contract even when
+	// promptDirty is false — this is the compare-and-rebuild seam.
+	lastContractCtx string
 }
 
 // NewPromptBuilder creates a new prompt builder.
@@ -518,8 +525,24 @@ func (b *PromptBuilder) SetPlanMode(enabled bool) {
 
 // Build constructs the full system prompt. Returns cached version if inputs
 // haven't changed since the last call.
+// currentContractCtx returns the active-contract text (empty when no plan
+// manager or no active contract).
+func (b *PromptBuilder) currentContractCtx() string {
+	if b.planManager == nil {
+		return ""
+	}
+	return b.planManager.GetActiveContractContext()
+}
+
+// contractUnchanged reports whether the active contract still matches what the
+// cached prompt embedded. A step transition / plan completion changes the
+// contract without dirtying the builder, so the cache must re-check it.
+func (b *PromptBuilder) contractUnchanged() bool {
+	return b.currentContractCtx() == b.lastContractCtx
+}
+
 func (b *PromptBuilder) Build() string {
-	if !b.promptDirty && b.cachedPrompt != "" {
+	if !b.promptDirty && b.cachedPrompt != "" && b.contractUnchanged() {
 		return b.cachedPrompt
 	}
 
@@ -615,14 +638,15 @@ func (b *PromptBuilder) Build() string {
 		builder.WriteString(legacyPlanInstructions)
 	}
 
-	// Inject active contract context from plan manager
-	if b.planManager != nil {
-		if ctx := b.planManager.GetActiveContractContext(); ctx != "" {
-			builder.WriteString("\n\n=== ACTIVE CONTRACT ===\n")
-			builder.WriteString(ctx)
-			builder.WriteString("\n=== END CONTRACT ===\n")
-			builder.WriteString("\nOperate strictly within this contract's boundaries.\n")
-		}
+	// Inject active contract context from plan manager. Record the exact
+	// contract text so the cache short-circuit can detect a step transition
+	// (which changes the contract but does NOT dirty the builder).
+	b.lastContractCtx = b.currentContractCtx()
+	if b.lastContractCtx != "" {
+		builder.WriteString("\n\n=== ACTIVE CONTRACT ===\n")
+		builder.WriteString(b.lastContractCtx)
+		builder.WriteString("\n=== END CONTRACT ===\n")
+		builder.WriteString("\nOperate strictly within this contract's boundaries.\n")
 	}
 
 	// Tool chain patterns removed from system prompt to avoid
@@ -1248,7 +1272,7 @@ func truncateHeadingSection(prompt, heading string, maxSectionChars int) string 
 		return prompt
 	}
 
-	truncated := strings.TrimSpace(section[:maxSectionChars]) + "\n[section compacted]"
+	truncated := strings.TrimSpace(truncateUTF8Safe(section, maxSectionChars)) + "\n[section compacted]"
 	return strings.TrimSpace(prompt[:start] + truncated + prompt[sectionEnd:])
 }
 
@@ -1273,7 +1297,7 @@ func truncatePlanningProtocolSection(prompt string, maxSectionChars int) string 
 	if len(section) <= maxSectionChars {
 		return prompt
 	}
-	truncated := strings.TrimSpace(section[:maxSectionChars]) + "\n[planning protocol compacted]"
+	truncated := strings.TrimSpace(truncateUTF8Safe(section, maxSectionChars)) + "\n[planning protocol compacted]"
 	return strings.TrimSpace(prompt[:sectionStart] + "\n" + truncated + prompt[sectionEnd:])
 }
 

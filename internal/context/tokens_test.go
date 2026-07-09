@@ -631,3 +631,54 @@ func TestContainsCamelCase_AllUpper(t *testing.T) {
 		t.Error("containsCamelCase('HELLO') should be false")
 	}
 }
+
+// TestTokenCounter_ReadersRaceWithSetClient pins the v0.100.73 #9 fix: GetUsage,
+// GetLimits, and CalculateCost read t.limits/t.model with no lock while
+// SetClient/SetConfig rewrite them under t.mu (a provider switch on a background
+// worker races the onSessionChange auto-compaction path). Run under -race.
+func TestTokenCounter_ReadersRaceWithSetClient(t *testing.T) {
+	c := testkit.NewMockClient()
+	c.SetModel("glm-5.2")
+	tc := NewTokenCounter(c, c.GetModel(), nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			_ = tc.GetUsage(12345)
+			_ = tc.GetLimits()
+			_ = tc.CalculateCost(1000, 500)
+		}
+	}()
+
+	models := []string{"glm-5.2", "deepseek-v4-pro", "kimi-k2.6", "MiniMax-M2.7"}
+	for i := 0; i < 2000; i++ {
+		swap := testkit.NewMockClient()
+		swap.SetModel(models[i%len(models)])
+		tc.SetClient(swap)
+		tc.SetConfig(&config.ContextConfig{MaxInputTokens: 40_000 + i, WarningThreshold: 0.75})
+	}
+	<-done
+}
+
+// TestEstimateTokens_CyrillicNotByteInflated pins the v0.100.73 #13 fix:
+// estimateTokensForType counted BYTES, inflating Cyrillic ~2× relative to the
+// rune-based reference — which crosses ExceedsLimit at ~60-65% real usage and
+// fires premature EmergencyTruncate. ASCII and equal-rune-count Cyrillic code
+// must now estimate within ~15% of each other.
+func TestEstimateTokens_CyrillicNotByteInflated(t *testing.T) {
+	// Same shape, same rune count — only the comment charset differs.
+	ascii := "func handleRequest() {\n\t// process the incoming request now\n\treturn nil\n}\n"
+	cyril := "func handleRequest() {\n\t// обработать входящий запрос сейчас пожалуй\n\treturn nil\n}\n"
+
+	a := EstimateTokens(ascii)
+	c := EstimateTokens(cyril)
+	if a == 0 || c == 0 {
+		t.Fatalf("estimates should be > 0: ascii=%d cyril=%d", a, c)
+	}
+	// Pre-fix the Cyrillic estimate was ~2× the ASCII one (byte inflation).
+	ratio := float64(c) / float64(a)
+	if ratio > 1.35 {
+		t.Fatalf("Cyrillic estimate %d is %.2f× the ASCII estimate %d — byte inflation not fixed", c, ratio, a)
+	}
+}

@@ -3,6 +3,7 @@ package context
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // --- truncateUTF8Safe ---
@@ -619,3 +620,68 @@ func TestIsQuestionOnly_Neither(t *testing.T) {
 
 // --- ProviderSupportsPrefixCaching ---
 // (already tested in cache_stability_test.go — TestProviderSupportsPrefixCaching)
+
+// TestTruncateHeadingSection_MultibyteNoInvalidUTF8 pins the v0.100.73 #12 fix:
+// the section was byte-sliced with a raw section[:maxSectionChars], which splits
+// a multi-byte rune and injects invalid UTF-8 into the system prompt for
+// Cyrillic/CJK instruction files.
+func TestTruncateHeadingSection_MultibyteNoInvalidUTF8(t *testing.T) {
+	// 2-byte Cyrillic runes: a byte cut at an odd offset lands mid-rune.
+	body := strings.Repeat("тест ", 600) // ~3000 runes, ~5400 bytes
+	prompt := "## Project Instructions\n" + body + "\n## Next\ntail"
+	got := truncateHeadingSection(prompt, "## Project Instructions", 2201)
+	if !utf8.ValidString(got) {
+		t.Fatal("truncated section contains invalid UTF-8 (byte-sliced mid-rune)")
+	}
+}
+
+// TestTruncatePlanningProtocolSection_MultibyteNoInvalidUTF8: same for the
+// planning-protocol section truncator.
+func TestTruncatePlanningProtocolSection_MultibyteNoInvalidUTF8(t *testing.T) {
+	body := strings.Repeat("шаг ", 800)
+	prompt := "## Planning Protocol\n" + body + "\n## Next\ntail"
+	got := truncatePlanningProtocolSection(prompt, 2201)
+	if !utf8.ValidString(got) {
+		t.Fatal("truncated planning-protocol section contains invalid UTF-8")
+	}
+}
+
+// mutablePlanManager returns a contract that the test can change to simulate a
+// step transition.
+type mutablePlanManager struct{ contract string }
+
+func (m *mutablePlanManager) GetActiveContractContext() string { return m.contract }
+
+// TestBuild_SelfHealsOnContractChange pins the v0.100.73 #10 fix: plan-step
+// transitions change the active contract but do NOT dirty the PromptBuilder, so
+// Build() served a stale "ACTIVE CONTRACT" for every step after the first. The
+// cache now re-checks the contract and rebuilds when it changes — no explicit
+// Invalidate() call needed.
+func TestBuild_SelfHealsOnContractChange(t *testing.T) {
+	b := NewPromptBuilder(t.TempDir(), nil)
+	pm := &mutablePlanManager{contract: "Current Step Contract:\n- Step 1: Do the first thing\n"}
+	b.SetPlanManager(pm)
+
+	first := b.Build()
+	if !strings.Contains(first, "Step 1: Do the first thing") {
+		t.Fatalf("build 1 missing step-1 contract:\n%s", first)
+	}
+
+	// Step transition: the contract changes, but nothing dirties the builder.
+	pm.contract = "Current Step Contract:\n- Step 2: Do the second thing\n"
+
+	second := b.Build()
+	if strings.Contains(second, "Step 1: Do the first thing") {
+		t.Fatalf("build 2 served the STALE step-1 contract:\n%s", second)
+	}
+	if !strings.Contains(second, "Step 2: Do the second thing") {
+		t.Fatalf("build 2 missing the new step-2 contract:\n%s", second)
+	}
+
+	// Plan completion: contract reverts to empty — the block must disappear.
+	pm.contract = ""
+	third := b.Build()
+	if strings.Contains(third, "ACTIVE CONTRACT") {
+		t.Fatalf("build 3 still carries the ACTIVE CONTRACT block after plan completion:\n%s", third)
+	}
+}

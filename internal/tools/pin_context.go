@@ -130,7 +130,10 @@ func (t *PinContextTool) persistPin(content string) {
 		logging.Warn("failed to create pinned context directory", "path", dir, "error", err)
 		return
 	}
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	// AtomicWrite (temp+rename): a crash/kill/disk-full mid-write must not leave
+	// a truncated pinned_context.md that LoadPersistedPin silently injects into
+	// the system prompt next boot.
+	if err := AtomicWriteString(path, content, 0644); err != nil {
 		logging.Warn("failed to persist pinned context", "path", path, "error", err)
 	}
 }

@@ -128,7 +128,13 @@ func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, r
 		return
 	}
 
-	paths := donegate.NormalizeTouchedPaths(a.workDir, donegate.ExtractTouchedPaths(args))
+	// Merge the tool's arg-side paths with any it self-declares via
+	// written_paths (batch/refactor pattern-mode edits carry no path args — the
+	// v0.100.45 seam is the accurate primary route for them, and without it a
+	// batch that breaks a module records zero touched paths and the module's
+	// checks are skipped → done-gate false PASS).
+	raw := append(donegate.ExtractTouchedPaths(args), tools.WrittenPathsFromResult(result)...)
+	paths := donegate.NormalizeTouchedPaths(a.workDir, raw)
 	if len(paths) == 0 {
 		return
 	}

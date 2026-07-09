@@ -30,8 +30,18 @@ const (
 	doneGateMonorepoModuleLimit  = 4
 	doneGateMaxRunTestTargets    = 2
 	doneGateGitProbeTimeout      = 2 * time.Second
-	doneGateCommandProbeTimeout  = 2 * time.Second // Quick check if a command exists
 )
+
+// requireCmd prefixes a toolchain check with a shell existence probe: if the
+// binary is absent, the check prints an explanatory line and exits 0 (a skip),
+// so a repo whose toolchain isn't installed on this host never gets a
+// permanently-failing check that blocks every mutating turn after the auto-fix
+// budget. Matches the composer-probe idiom already used inline below; inside a
+// subshell wrap (newBashCheckWithDir) the exit 0 exits the subshell → the whole
+// check succeeds.
+func requireCmd(bin, command string) string {
+	return "command -v " + bin + " >/dev/null 2>&1 || { echo '" + bin + " not found — skipping'; exit 0; }; " + command
+}
 
 type Check struct {
 	Name     string
@@ -168,11 +178,13 @@ func BuildChecks(reg ToolGetter, workDir string, userMessage string, toolsUsed [
 			command := ""
 			switch project.Runner {
 			case "maven":
-				command = "mvn -q -DskipTests verify"
+				command = requireCmd("mvn", "mvn -q -DskipTests verify")
 			case "gradle_wrapper":
+				// The marker WAS the ./gradlew wrapper, so it exists by
+				// construction — no toolchain probe needed.
 				command = "./gradlew -q build -x test"
 			default:
-				command = "gradle -q build -x test"
+				command = requireCmd("gradle", "gradle -q build -x test")
 			}
 			checks = appendUniqueDoneGateCheck(checks, seen, newBashCheckWithDir(
 				bashTool,
@@ -183,11 +195,12 @@ func BuildChecks(reg ToolGetter, workDir string, userMessage string, toolsUsed [
 		}
 		for _, moduleDir := range profile.CMakeProjects {
 			name := "cmake_configure@" + relPathOrDot(workDir, moduleDir)
-			command := "cmake -S . -B .gokin-donegate-build"
+			inner := "cmake -S . -B .gokin-donegate-build"
 			if policy.Mode == "strict" {
-				command += " && cmake --build .gokin-donegate-build"
+				inner += " && cmake --build .gokin-donegate-build"
 			}
-			command += "; ret=$?; rm -rf .gokin-donegate-build; exit $ret"
+			inner += "; ret=$?; rm -rf .gokin-donegate-build; exit $ret"
+			command := requireCmd("cmake", inner)
 			checks = appendUniqueDoneGateCheck(checks, seen, newBashCheckWithDir(
 				bashTool,
 				name,
@@ -196,8 +209,14 @@ func BuildChecks(reg ToolGetter, workDir string, userMessage string, toolsUsed [
 			))
 		}
 		for _, moduleDir := range profile.BazelRoots {
+			// Skip bazel roots untouched this turn (mirrors the Rust/PHP
+			// per-module narrowing) so a stray marker in an unedited part of
+			// the tree can't force a build.
+			if !moduleHasTouchedFile(moduleDir, workDir, profile.TouchedPaths) {
+				continue
+			}
 			name := "bazel_nobuild@" + relPathOrDot(workDir, moduleDir)
-			command := "bazel build --nobuild //..."
+			command := requireCmd("bazel", "bazel build --nobuild //...")
 			checks = appendUniqueDoneGateCheck(checks, seen, newBashCheckWithDir(
 				bashTool,
 				name,
@@ -207,7 +226,7 @@ func BuildChecks(reg ToolGetter, workDir string, userMessage string, toolsUsed [
 		}
 		for _, moduleDir := range profile.MakeProjects {
 			name := "make_dry_run@" + relPathOrDot(workDir, moduleDir)
-			command := "make -n"
+			command := requireCmd("make", "make -n")
 			checks = appendUniqueDoneGateCheck(checks, seen, newBashCheckWithDir(
 				bashTool,
 				name,
@@ -328,16 +347,20 @@ func BuildChecks(reg ToolGetter, workDir string, userMessage string, toolsUsed [
 			))
 		}
 
-		// Generic repository health checks (stack-agnostic).
-		checks = appendUniqueDoneGateCheck(checks, seen, newBashCheck(
+		// Generic repository health checks (stack-agnostic). Anchored to the
+		// repo being VERIFIED (workDir) — un-anchored they ran in whatever
+		// cwd the model or a previous check left behind.
+		checks = appendUniqueDoneGateCheck(checks, seen, newBashCheckWithDir(
 			bashTool,
 			"git_diff_check",
+			workDir,
 			"if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git diff --check; else true; fi",
 		))
 		if policy.Mode == "strict" {
-			checks = appendUniqueDoneGateCheck(checks, seen, newBashCheck(
+			checks = appendUniqueDoneGateCheck(checks, seen, newBashCheckWithDir(
 				bashTool,
 				"git_unmerged_paths",
+				workDir,
 				"if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then if [ -n \"$(git ls-files -u)\" ]; then echo 'unmerged paths detected'; git ls-files -u; exit 1; fi; fi",
 			))
 		}
@@ -394,8 +417,19 @@ func newBashCheckWithDir(bashTool tools.Tool, name, dir, command string) Check {
 		return newBashCheck(bashTool, name, command)
 	}
 
-	wrapped := "cd " + shellQuote(dir) + " && " + command
+	wrapped := subshellCd(dir, command)
 	return newBashCheck(bashTool, name, wrapped)
+}
+
+// subshellCd wraps a check command so its cd is confined to a subshell — gate
+// checks run through the model's LIVE shared BashTool, whose pwd probe commits
+// the final cwd as the persistent session cwd, so a bare `cd subdir && check`
+// permanently moved the model's cwd into the checked subpackage (even on
+// failure). `cd dir || exit 1` (NOT `cd dir && cmd`) so a cd FAILURE fails the
+// check loudly instead of falling through into a requireCmd `|| { exit 0; }`
+// skip branch (which would silently PASS a check whose dir vanished).
+func subshellCd(dir, command string) string {
+	return "( cd " + shellQuote(dir) + " || exit 1; " + command + " )"
 }
 
 // newBashCheckWithTimeout creates a done-gate check with a custom timeout.
@@ -406,7 +440,9 @@ func newBashCheckWithTimeout(bashTool tools.Tool, name, dir, command string, tim
 	}
 	wrapped := command
 	if dir != "" {
-		wrapped = "cd " + shellQuote(dir) + " && " + command
+		// Subshell for the same reason as newBashCheckWithDir: never move
+		// the shared bash session's persistent cwd.
+		wrapped = subshellCd(dir, command)
 	}
 	return Check{
 		Name:     name,
@@ -609,6 +645,25 @@ func ExtractTouchedPaths(args map[string]any) []string {
 			paths = append(paths, p)
 		}
 	}
+	// The batch tool carries its targets as a "files" LIST — reading only the
+	// scalar keys above recorded ZERO touched paths for batch edits, and any
+	// single other recorded path (a README write) then suppressed the git
+	// ground-truth fallback, so the batch-edited module's checks were skipped
+	// entirely. JSON-sourced args give []any; accept []string defensively.
+	switch files := args["files"].(type) {
+	case []any:
+		for _, f := range files {
+			if p, ok := f.(string); ok && strings.TrimSpace(p) != "" {
+				paths = append(paths, p)
+			}
+		}
+	case []string:
+		for _, p := range files {
+			if strings.TrimSpace(p) != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
 	return paths
 }
 
@@ -786,8 +841,18 @@ func discoverDoneGateMarkers(workDir string) doneGateMarkers {
 			markers.JavaProjects[dir] = struct{}{}
 		case "CMakeLists.txt":
 			markers.CMakeProjects[dir] = struct{}{}
-		case "BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel":
+		case "BUILD.bazel", "WORKSPACE.bazel", "MODULE.bazel":
+			// Unambiguous bazel names — always register.
 			markers.BazelRoots[dir] = struct{}{}
+		case "BUILD", "WORKSPACE":
+			// Bare BUILD/WORKSPACE are common plain-text filenames (build
+			// instructions, a workspace description). Only treat them as bazel
+			// markers when the repo is actually a bazel workspace — i.e. a
+			// workspace-level marker exists at the root. Otherwise a stray text
+			// file forced a permanently-failing `bazel build` on every turn.
+			if bazelWorkspaceAtRoot(workDir) {
+				markers.BazelRoots[dir] = struct{}{}
+			}
 		case "Makefile", "makefile", "GNUmakefile":
 			markers.MakeProjects[dir] = struct{}{}
 		case "composer.json":
@@ -900,6 +965,19 @@ func prioritizeDirsByTouched(workDir string, dirs []string, touched []string, li
 		ordered = ordered[:limit]
 	}
 	return ordered
+}
+
+// bazelWorkspaceAtRoot reports whether workDir looks like a genuine bazel
+// workspace (a workspace-level marker at the root), used to decide whether a
+// bare BUILD/WORKSPACE file elsewhere in the tree is a real bazel marker or just
+// a plain-text file that happens to share the name.
+func bazelWorkspaceAtRoot(workDir string) bool {
+	for _, marker := range []string{"WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"} {
+		if fileExists(filepath.Join(workDir, marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 func isMonorepoWorkspace(workDir string, stacks ...[]string) bool {

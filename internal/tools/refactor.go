@@ -188,6 +188,7 @@ func (t *RefactorTool) executeRename(ctx context.Context, args map[string]any) (
 	// conclude the symbol is absent / the work is done when nothing was written).
 	var results []string
 	var errored []string
+	var changed []string // raw paths that were actually rewritten (for written_paths)
 	var changedFiles int
 	var totalChanges int
 
@@ -199,6 +200,7 @@ func (t *RefactorTool) executeRename(ctx context.Context, args map[string]any) (
 		}
 		if changes > 0 {
 			results = append(results, fmt.Sprintf("%s: %d changes", file, changes))
+			changed = append(changed, file)
 			changedFiles++
 			totalChanges += changes
 		}
@@ -220,7 +222,10 @@ func (t *RefactorTool) executeRename(ctx context.Context, args map[string]any) (
 	if len(errored) > 0 {
 		msg += fmt.Sprintf("\n\n⚠ %d file(s) failed:\n%s", len(errored), strings.Join(errored, "\n"))
 	}
-	return NewSuccessResult(msg), nil
+	// Declare the actually-rewritten files (pattern mode has no path args) so
+	// the done-gate records them as touched and the executor invalidates
+	// read-dedup/caches. See "Adding a New Tool" step 14.
+	return NewSuccessResultWithData(msg, map[string]any{"written_paths": changed}), nil
 }
 
 // renameInFile performs AST-based renaming in a single file.

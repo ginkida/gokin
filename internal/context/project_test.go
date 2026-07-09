@@ -337,6 +337,20 @@ func TestExtractDockerBaseImage(t *testing.T) {
 	}
 }
 
+// TestExtractDockerBaseImage_PlatformFlag pins the v0.100.73 #14 fix: the common
+// multi-arch form `FROM --platform=$BUILDPLATFORM golang:1.25 AS build` must
+// yield the image, not the flag token.
+func TestExtractDockerBaseImage_PlatformFlag(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(p, []byte("FROM --platform=$BUILDPLATFORM golang:1.25 AS build\nRUN go build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if img := extractDockerBaseImage(p); img != "golang:1.25" {
+		t.Errorf("extractDockerBaseImage = %q, want golang:1.25 (flag token skipped)", img)
+	}
+}
+
 func TestExtractDockerBaseImage_NoFrom(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "Dockerfile")

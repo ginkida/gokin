@@ -236,11 +236,6 @@ func (g *GitIgnore) InvalidateCache() {
 
 // matchPattern checks if a path matches a gitignore pattern.
 func (g *GitIgnore) matchPattern(p pattern, relPath string, isDir bool) bool {
-	// Directory-only patterns don't match files
-	if p.dirOnly && !isDir {
-		return false
-	}
-
 	// Make pattern relative to its base directory
 	patternPath := p.pattern
 	if p.baseDir != g.workDir {
@@ -248,6 +243,33 @@ func (g *GitIgnore) matchPattern(p pattern, relPath string, isDir bool) bool {
 		if err == nil {
 			patternPath = filepath.ToSlash(filepath.Join(baseDirRel, p.pattern))
 		}
+	}
+
+	// A directory-only pattern ("build/", "node_modules/", the always-added
+	// ".git") never matches a FILE itself — but it DOES ignore everything
+	// UNDER a matching directory (git doesn't even descend into it). The old
+	// early return `dirOnly && !isDir → false` fired before the containment
+	// forms below could apply, so every file inside an ignored directory came
+	// back NOT ignored and vendored trees leaked into grep/glob/check_impact
+	// results. For files, apply ONLY the containment forms.
+	if p.dirOnly && !isDir {
+		// A NEGATED dir pattern ("!build/") never re-includes a FILE path (git
+		// cannot re-include content under an ignored directory), so it must not
+		// match a file — otherwise it would flip an already-ignored file back to
+		// visible via the last-match-wins loop.
+		if p.negation {
+			return false
+		}
+		// doublestar treats a trailing "/**" as "zero or more segments", so
+		// Match("**/build/**", "build") is TRUE — which would wrongly ignore a
+		// plain FILE literally named "build"/"dist"/"bin". Require the path to be
+		// strictly UNDER the directory: it matches the containment form AND is
+		// not the bare directory name itself (`**/build` / `build` matches the
+		// file-named-build case, so negate it).
+		if p.anchored {
+			return g.globMatch(patternPath+"/**", relPath) && !g.globMatch(patternPath, relPath)
+		}
+		return g.globMatch("**/"+patternPath+"/**", relPath) && !g.globMatch("**/"+patternPath, relPath)
 	}
 
 	// For anchored patterns, match from the start

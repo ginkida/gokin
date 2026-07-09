@@ -133,3 +133,71 @@ func TestBatchTool_Execute_PartialFailureStillSuccess(t *testing.T) {
 		t.Errorf("Execute() with a partial success reported Success:false; want true. Error=%q", result.Error)
 	}
 }
+
+// TestBatchTool_Execute_ReplaceDeclaresWrittenPaths pins the v0.100.73 done-gate
+// fix (#2): batch's targets are a "files" LIST, not a scalar path arg, so before
+// this the executor's read-dedup + the done-gate's touched-path set recorded
+// ZERO paths for a batch edit — a batch that broke a module let it PASS the
+// strict gate because the module's checks were skipped. batch must now declare
+// the actually-changed files via written_paths.
+func TestBatchTool_Execute_ReplaceDeclaresWrittenPaths(t *testing.T) {
+	work := batchResolvedTemp(t)
+	bt := NewBatchTool(work)
+
+	a := filepath.Join(work, "a.go")
+	b := filepath.Join(work, "b.go")
+	if err := os.WriteFile(a, []byte("var oldName = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("var oldName = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := bt.Execute(context.Background(), map[string]any{
+		"operation":   "replace",
+		"files":       []any{a, b},
+		"search":      "oldName",
+		"replacement": "newName",
+	})
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() reported Success:false: %q", result.Error)
+	}
+	written := WrittenPathsFromResult(result)
+	if len(written) != 2 {
+		t.Fatalf("written_paths = %v, want the 2 changed files", written)
+	}
+	got := map[string]bool{written[0]: true, written[1]: true}
+	if !got[a] || !got[b] {
+		t.Fatalf("written_paths %v missing a=%s or b=%s", written, a, b)
+	}
+}
+
+// TestBatchTool_Execute_DryRunDeclaresNoWrittenPaths: a dry run changes nothing,
+// so it must not declare any written paths (else the done-gate would treat
+// preview-only files as touched).
+func TestBatchTool_Execute_DryRunDeclaresNoWrittenPaths(t *testing.T) {
+	work := batchResolvedTemp(t)
+	bt := NewBatchTool(work)
+
+	a := filepath.Join(work, "a.go")
+	if err := os.WriteFile(a, []byte("var oldName = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := bt.Execute(context.Background(), map[string]any{
+		"operation":   "replace",
+		"files":       []any{a},
+		"search":      "oldName",
+		"replacement": "newName",
+		"dry_run":     true,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if len(WrittenPathsFromResult(result)) != 0 {
+		t.Fatalf("dry run declared written_paths: %v", WrittenPathsFromResult(result))
+	}
+}

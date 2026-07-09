@@ -284,8 +284,14 @@ func extractDockerBaseImage(dockerfilePath string) string {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(strings.ToUpper(line), "FROM ") {
 			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				return parts[1]
+			// Skip flag tokens (the common multi-arch form
+			// `FROM --platform=$BUILDPLATFORM golang:1.25 AS build`) so the
+			// image, not the flag, is stored as the base image.
+			for _, tok := range parts[1:] {
+				if strings.HasPrefix(tok, "--") {
+					continue
+				}
+				return tok
 			}
 		}
 	}

@@ -179,8 +179,14 @@ func (m *ContextManager) syncTaskContext() {
 		return
 	}
 
-	// Parse the contract text into structured TaskContext
+	// Parse the contract text into structured TaskContext. The real generator
+	// (plan/executor.go GetActiveContractContext) emits "Current Step Contract:"
+	// followed by "- Step N: Title" and "- Success criteria: a; b" — NOT the
+	// "Current step:" shape the old cases looked for, so CurrentStep/
+	// SuccessCriteria were always empty (dead branches). Track the contract
+	// section and parse the emitted lines.
 	tc := &TaskContext{}
+	inContract := false
 	for line := range strings.SplitSeq(contract, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
@@ -192,12 +198,21 @@ func (m *ContextManager) syncTaskContext() {
 			tc.Description = strings.TrimSpace(strings.TrimPrefix(line, "**Goal:**"))
 		case strings.HasPrefix(line, "Goal:"):
 			tc.Description = strings.TrimSpace(strings.TrimPrefix(line, "Goal:"))
+		case strings.HasPrefix(line, "Current Step Contract:"):
+			inContract = true
+		case inContract && strings.HasPrefix(line, "- Step "):
+			tc.CurrentStep = strings.TrimPrefix(line, "- ")
+		case inContract && strings.HasPrefix(line, "- Success criteria: "):
+			for _, c := range strings.Split(strings.TrimPrefix(line, "- Success criteria: "), "; ") {
+				if c = strings.TrimSpace(c); c != "" {
+					tc.SuccessCriteria = append(tc.SuccessCriteria, c)
+				}
+			}
+		// Legacy shapes kept as harmless compat.
 		case strings.HasPrefix(line, "**Current step:**"):
 			tc.CurrentStep = strings.TrimSpace(strings.TrimPrefix(line, "**Current step:**"))
 		case strings.HasPrefix(line, "Current step:"):
 			tc.CurrentStep = strings.TrimSpace(strings.TrimPrefix(line, "Current step:"))
-		case strings.HasPrefix(line, "- ") && tc.CurrentStep != "":
-			tc.SuccessCriteria = append(tc.SuccessCriteria, strings.TrimPrefix(line, "- "))
 		}
 	}
 
@@ -341,7 +356,7 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 	// Emergency: if estimated tokens EXCEED limit, truncate synchronously (no LLM needed)
 	if usage.ExceedsLimit {
 		logging.Warn("context exceeds token limit, performing emergency truncation",
-			"tokens", tokens, "limit", m.tokenCounter.limits.MaxInputTokens)
+			"tokens", tokens, "limit", usage.MaxTokens)
 		m.EmergencyTruncate()
 		// Re-estimate after truncation
 		history = m.session.GetHistory()
@@ -927,7 +942,7 @@ func (m *ContextManager) EmergencyTruncate() int {
 		return 0
 	}
 
-	targetTokens := int(float64(m.tokenCounter.limits.MaxInputTokens) * 0.7)
+	targetTokens := int(float64(m.tokenCounter.GetLimits().MaxInputTokens) * 0.7)
 
 	// Nothing to do if the whole conversation already fits the budget. (Counts
 	// preserved too, since those messages are also kept against the budget.)

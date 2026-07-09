@@ -763,3 +763,43 @@ func TestGetKeyFiles_WithFiles(t *testing.T) {
 		t.Errorf("GetKeyFiles len = %d, want 2", len(files))
 	}
 }
+
+// fakePlanManagerForTaskContext returns a fixed contract string.
+type fakePlanManagerForTaskContext struct{ contract string }
+
+func (f fakePlanManagerForTaskContext) GetActiveContractContext() string { return f.contract }
+
+// TestSyncTaskContext_ParsesRealContractFormat pins the v0.100.73 #11 fix:
+// syncTaskContext parsed a "Current step:" shape the real generator
+// (plan/executor.go GetActiveContractContext) never emits, so CurrentStep and
+// SuccessCriteria were always empty (dead branches) and task-aware summarization
+// silently dropped the in-flight step's constraints. Feed the REAL emitted shape.
+func TestSyncTaskContext_ParsesRealContractFormat(t *testing.T) {
+	// Exactly the shape plan/executor.go GetActiveContractContext emits.
+	contract := "Plan: Ship feature X\n" +
+		"Goal: make the widget configurable\n\n" +
+		"Current Step Contract:\n" +
+		"- Step 3: Wire the config flag\n" +
+		"- Success criteria: flag parsed; default preserved; tests pass\n" +
+		"- Completion proof required: changed files and/or commands/output evidence\n"
+
+	m := &ContextManager{
+		summarizer:  NewSummarizer(testkit.NewMockClient()),
+		planManager: fakePlanManagerForTaskContext{contract: contract},
+	}
+	m.syncTaskContext()
+
+	tc := m.summarizer.taskContext
+	if tc == nil {
+		t.Fatal("task context should be populated")
+	}
+	if tc.Title != "Ship feature X" {
+		t.Fatalf("Title = %q", tc.Title)
+	}
+	if tc.CurrentStep != "Step 3: Wire the config flag" {
+		t.Fatalf("CurrentStep = %q, want the real '- Step N: ...' line", tc.CurrentStep)
+	}
+	if len(tc.SuccessCriteria) != 3 {
+		t.Fatalf("SuccessCriteria = %v, want 3 items split on '; '", tc.SuccessCriteria)
+	}
+}

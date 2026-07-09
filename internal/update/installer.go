@@ -270,10 +270,20 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, srcFile)
-	return err
+	// Do NOT swallow the destination flush/close error via a bare defer: a
+	// close-deferred flush failure (ENOSPC, NFS/CIFS writeback) silently yields
+	// a truncated backup/binary that CreateBackup then checksums AS-IS and a
+	// later rollback faithfully installs. Sync then check Close explicitly.
+	if _, err = io.Copy(dstFile, srcFile); err != nil {
+		_ = dstFile.Close()
+		return err
+	}
+	if err = dstFile.Sync(); err != nil {
+		_ = dstFile.Close()
+		return fmt.Errorf("failed to sync %s: %w", dst, err)
+	}
+	return dstFile.Close()
 }
 
 func copyFileWithContext(ctx context.Context, src, dst string) error {
@@ -292,23 +302,32 @@ func copyFileWithContext(ctx context.Context, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
 
 	buf := make([]byte, 128*1024)
 	for {
 		if err := ctx.Err(); err != nil {
+			_ = dstFile.Close()
 			return err
 		}
 		n, readErr := srcFile.Read(buf)
 		if n > 0 {
 			if _, err := dstFile.Write(buf[:n]); err != nil {
+				_ = dstFile.Close()
 				return err
 			}
 		}
 		if readErr == io.EOF {
-			return nil
+			// On Windows this writes the REAL install path (replaceWindows);
+			// a swallowed flush failure would truncate the live binary and
+			// then delete the .old fallback. Sync + checked Close.
+			if err := dstFile.Sync(); err != nil {
+				_ = dstFile.Close()
+				return fmt.Errorf("failed to sync %s: %w", dst, err)
+			}
+			return dstFile.Close()
 		}
 		if readErr != nil {
+			_ = dstFile.Close()
 			return readErr
 		}
 	}

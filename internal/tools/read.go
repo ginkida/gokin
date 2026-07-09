@@ -373,12 +373,31 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	// Route based on file extension
 	ext := strings.ToLower(filepath.Ext(filePath))
+	// The special readers (.pdf/.ipynb/images) do a whole-file os.ReadFile —
+	// they used to be routed BEFORE the >10MB isLarge gate, so an oversized
+	// asset flowed unbounded into memory (and, for images, into the model
+	// request as base64). Gate them on the same threshold the text path uses.
+	specialReaderMax := int64(LargeFileSizeMB * 1024 * 1024)
 	switch ext {
 	case ".pdf":
+		if info.Size() > specialReaderMax {
+			return NewErrorResult(fmt.Sprintf("PDF too large to read whole: %s (%d bytes, cap %dMB). Extract the pages you need with an external tool first.", filePath, info.Size(), LargeFileSizeMB)), nil
+		}
 		return t.readPDF(filePath)
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tiff", ".tif":
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".tif":
+		// .svg deliberately NOT here: SVG is XML text — routing it to the
+		// binary image reader left the model blind to the source AND
+		// serialized the bytes as an image block with media type
+		// "image/svg+xml", which providers reject. It falls through to the
+		// normal text path below.
+		if info.Size() > specialReaderMax {
+			return NewErrorResult(fmt.Sprintf("Image too large to attach: %s (%d bytes, cap %dMB). Downscale or convert it first.", filePath, info.Size(), LargeFileSizeMB)), nil
+		}
 		return t.readImage(filePath)
 	case ".ipynb":
+		if info.Size() > specialReaderMax {
+			return NewErrorResult(fmt.Sprintf("Notebook too large to read whole: %s (%d bytes, cap %dMB). Convert it to a script (jupyter nbconvert --to script) and read that.", filePath, info.Size(), LargeFileSizeMB)), nil
+		}
 		return t.readNotebook(filePath)
 	default:
 		// Detect binary files by extension or null bytes in first 512
@@ -543,6 +562,12 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 	// Ensure offset is at least 1
 	if offset < 1 {
 		offset = 1
+	}
+	// Both-sided clamp (the grep context_lines rule): an explicit limit:0 or
+	// negative used to make `linesRead >= limit` true on the FIRST line —
+	// Success=true with ZERO content and a self-referential pagination hint.
+	if limit <= 0 {
+		limit = DefaultReadLimit
 	}
 
 	// Open file

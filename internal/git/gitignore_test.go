@@ -222,3 +222,81 @@ func TestGitIgnoreNestedGitignore(t *testing.T) {
 		t.Error("sub.go should not be ignored")
 	}
 }
+
+// TestGitIgnore_DirOnlyPatternIgnoresFilesUnderneath pins the round-10 fix:
+// dirOnly patterns ("build/", "node_modules/", the always-added ".git") used
+// to early-return false for FILES before the containment forms could apply —
+// so every file INSIDE an ignored directory came back not-ignored and
+// vendored trees leaked into grep/glob/check_impact results.
+func TestGitIgnore_DirOnlyPatternIgnoresFilesUnderneath(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("node_modules/\nbuild/\n"), 0644)
+	os.MkdirAll(filepath.Join(dir, "node_modules", "pkg"), 0755)
+	os.MkdirAll(filepath.Join(dir, "build"), 0755)
+	os.MkdirAll(filepath.Join(dir, "src"), 0755)
+	os.WriteFile(filepath.Join(dir, "node_modules", "pkg", "index.js"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(dir, "build", "out.bin"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(dir, "src", "main.go"), []byte("x"), 0644)
+
+	g := NewGitIgnore(dir)
+	if err := g.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	for _, p := range []string{
+		filepath.Join(dir, "node_modules", "pkg", "index.js"),
+		filepath.Join(dir, "build", "out.bin"),
+	} {
+		if !g.IsIgnored(p) {
+			t.Errorf("file under a dirOnly-ignored directory must be ignored: %s", p)
+		}
+	}
+	// Directories themselves still match.
+	if !g.IsIgnored(filepath.Join(dir, "node_modules")) {
+		t.Error("the ignored directory itself must match")
+	}
+	// Ordinary source files stay visible.
+	if g.IsIgnored(filepath.Join(dir, "src", "main.go")) {
+		t.Error("src/main.go must NOT be ignored")
+	}
+	// A plain FILE literally named "build" must NOT be ignored by the dirOnly
+	// "build/" pattern — git only ignores the DIRECTORY and what's under it.
+	// (doublestar's trailing "/**" matches zero segments, so this was the
+	// over-match regression the round-10 fix had to guard against.)
+	os.WriteFile(filepath.Join(dir, "build_file_not_dir"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(dir, "src", "build"), []byte("x"), 0644)
+	if err := g.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if g.IsIgnored(filepath.Join(dir, "src", "build")) {
+		t.Error("a plain file named 'build' must NOT be ignored by the dirOnly 'build/' pattern")
+	}
+	// Files under .git (always-added dirOnly pattern) are ignored too.
+	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+	os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("x"), 0644)
+	if err := g.Load(); err != nil { // reload so the always-added .git pattern set is fresh
+		t.Fatalf("reload: %v", err)
+	}
+	if !g.IsIgnored(filepath.Join(dir, ".git", "config")) {
+		t.Error(".git/config must be ignored via the always-added .git pattern")
+	}
+}
+
+// TestGitIgnore_NegatedDirOnlyDoesNotReincludeFiles pins the round-10 review
+// finding: a negated dirOnly pattern ("!logs/") must NOT re-include a file that
+// an earlier pattern ("*.log") ignored — git cannot re-include content under a
+// directory, and the containment change must not flip an ignored file visible.
+func TestGitIgnore_NegatedDirOnlyDoesNotReincludeFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n!logs/\n"), 0644)
+	os.MkdirAll(filepath.Join(dir, "logs"), 0755)
+	os.WriteFile(filepath.Join(dir, "logs", "app.log"), []byte("x"), 0644)
+
+	g := NewGitIgnore(dir)
+	if err := g.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !g.IsIgnored(filepath.Join(dir, "logs", "app.log")) {
+		t.Error("logs/app.log matched *.log and a negated dir pattern must not re-include it")
+	}
+}

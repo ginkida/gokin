@@ -212,7 +212,17 @@ func (u *Updater) Download(ctx context.Context, info *UpdateInfo, progress Progr
 			}
 		}
 
-		if ok {
+		if !ok {
+			// The checksum file was fetched but has no entry for this asset (a
+			// misnamed/partial checksums.txt, a CDN error page, an unexpected
+			// single-hash format). Fail CLOSED under VerifyChecksum — do not
+			// install an unverified binary just because the lookup missed.
+			if u.config.VerifyChecksum {
+				os.Remove(downloadedPath)
+				return "", fmt.Errorf("checksum file has no entry for asset %q (%d entries parsed) — refusing to install unverified binary", info.AssetName, len(checksums))
+			}
+			logging.Warn("checksum file has no entry for asset, skipping verification", "asset", info.AssetName)
+		} else {
 			if err := u.downloader.VerifyChecksum(downloadedPath, expectedChecksum); err != nil {
 				os.Remove(downloadedPath)
 				return "", err
@@ -316,7 +326,14 @@ func (u *Updater) downloadWithChecksum(ctx context.Context, info *UpdateInfo, pr
 				}
 			}
 		}
-		if ok {
+		if !ok {
+			// Fail CLOSED on a missing entry (see the sibling Download path).
+			if u.config.VerifyChecksum {
+				os.Remove(downloadedPath)
+				return "", fmt.Errorf("checksum file has no entry for asset %q (%d entries parsed) — refusing to install unverified binary", info.AssetName, len(checksums))
+			}
+			logging.Warn("checksum file has no entry for asset, skipping verification", "asset", info.AssetName)
+		} else {
 			if err := u.downloader.VerifyChecksum(downloadedPath, expectedChecksum); err != nil {
 				os.Remove(downloadedPath)
 				return "", err
