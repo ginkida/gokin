@@ -278,9 +278,11 @@ func (r *Runner) tick(ctx context.Context) {
 
 	active := r.mgr.Active()
 	if len(active) == 0 {
-		// Reset rotation so a stale value from a prior (now-empty) loop set
-		// doesn't make a newly-created loop's first tick start at a non-zero
-		// index — which could skip it if it's the only loop and start > 0.
+		// Hygiene: reset rotation when the loop set empties so the next set
+		// starts scanning from index 0. NOT load-bearing — the scan below
+		// applies `scanRotation % len(active)` and iterates the WHOLE slice,
+		// so a stale rotation can only change scan ORDER, never skip a loop
+		// (any value mod 1 == 0 for a solo loop).
 		r.scanRotation = 0
 		return
 	}
@@ -334,7 +336,11 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	// spawn cycle and produces a phantom iteration that RecordIteration will
 	// silently discard (ErrLoopNotRunning).
 	current, ok := r.mgr.Get(l.ID)
-	if !ok || current.Status != StatusRunning {
+	if !ok {
+		logging.Info("loops: loop removed before fireOne, skipping", "loop_id", l.ID)
+		return
+	}
+	if current.Status != StatusRunning {
 		logging.Info("loops: loop no longer running before fireOne, skipping",
 			"loop_id", l.ID, "status", current.Status)
 		return
