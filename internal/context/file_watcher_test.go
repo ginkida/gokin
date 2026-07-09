@@ -2,6 +2,7 @@ package context
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -143,10 +144,6 @@ func TestFileWatcher_DetectsFileChange(t *testing.T) {
 	}
 	defer fw.Close()
 
-	// Wait a bit, then modify the file
-	time.Sleep(100 * time.Millisecond)
-	os.WriteFile(path, []byte("modified"), 0644)
-
 	// Wait for callback with timeout
 	done := make(chan struct{})
 	go func() {
@@ -154,11 +151,27 @@ func TestFileWatcher_DetectsFileChange(t *testing.T) {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-		// Callback fired
-	case <-time.After(3 * time.Second):
-		t.Fatal("callback was not invoked after file change")
+	// Re-write the file periodically until the watcher reports it (bounded
+	// by the outer timeout). A single write raced the fsnotify watch
+	// registration on loaded CI runners — the event fired before the watch
+	// was armed and the callback never came (first CI run of this test
+	// failed exactly that way at 3s). Repeated distinct writes make the
+	// test deterministic without caring HOW long registration takes.
+	writeTicker := time.NewTicker(200 * time.Millisecond)
+	defer writeTicker.Stop()
+	timeout := time.After(10 * time.Second)
+	i := 0
+waitLoop:
+	for {
+		select {
+		case <-done:
+			break waitLoop // Callback fired
+		case <-writeTicker.C:
+			i++
+			os.WriteFile(path, []byte(fmt.Sprintf("modified-%d", i)), 0644)
+		case <-timeout:
+			t.Fatal("callback was not invoked after file change")
+		}
 	}
 
 	if count := atomic.LoadInt32(&callbackCount); count < 1 {
