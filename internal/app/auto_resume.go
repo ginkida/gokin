@@ -103,6 +103,17 @@ func isAutoResumableError(err error) bool {
 	return false
 }
 
+// isContextSizeError returns true for model round timeout — an error whose
+// likelihood depends on the context size (large context → more reasoning →
+// longer streaming → 14m cap). When EmergencyTruncate already removed nothing
+// (context is minimal or fits budget), the timeout is NOT context-driven, so a
+// retry with an unchanged context would hit the same 14m cap deterministically.
+// The caller uses this to skip such a retry, refunding the budget and surfacing
+// the error immediately instead of wasting ~14m15s per guaranteed-failing attempt.
+func isContextSizeError(err error) bool {
+	return errors.Is(err, client.ErrModelRoundTimeout)
+}
+
 // autoResumeReason returns a human-readable label for why the auto-resume was
 // triggered, shown in the UI toast.
 func autoResumeReason(err error) string {
@@ -169,5 +180,23 @@ func (a *App) clearAutoResume(message string) {
 	key := rateLimitRetryKey(message)
 	a.autoResumeMu.Lock()
 	delete(a.autoResumeCount, key)
+	a.autoResumeMu.Unlock()
+}
+
+// refundAutoResume reverses one increment of the resume counter, returning it to
+// its value before the last scheduleAutoResume call. It is used when a scheduled
+// resume is skipped (e.g. compaction removed nothing for a context-size error,
+// making the retry a guaranteed re-failure) so the budget isn't consumed by an
+// attempt that never ran.
+func (a *App) refundAutoResume(message string) {
+	key := rateLimitRetryKey(message)
+	a.autoResumeMu.Lock()
+	if v, ok := a.autoResumeCount[key]; ok && v > 0 {
+		if v == 1 {
+			delete(a.autoResumeCount, key)
+		} else {
+			a.autoResumeCount[key] = v - 1
+		}
+	}
 	a.autoResumeMu.Unlock()
 }

@@ -198,3 +198,71 @@ func TestAutoResumeReason(t *testing.T) {
 		t.Errorf("reason for unknown = %q, want 'other'", got)
 	}
 }
+
+// TestIsContextSizeError pins the classification used to skip a retry whose
+// compaction removed nothing. Model round timeout IS context-size-driven (a
+// large context forces longer reasoning → 14m cap); other resumable errors are
+// not, so they still retry even with an unchanged context.
+func TestIsContextSizeError(t *testing.T) {
+	timeoutErr := client.NewModelRoundTimeoutError(client.DefaultModelRoundTimeout)
+	if !isContextSizeError(timeoutErr) {
+		t.Error("model round timeout should be a context-size error")
+	}
+
+	// Empty model response is resumable but NOT classified as context-size — it's
+	// cheap to retry and may be transient, so the no-compaction skip doesn't apply.
+	if isContextSizeError(client.ErrEmptyModelResponse) {
+		t.Error("empty model response should NOT be a context-size error")
+	}
+
+	// A transient network error is not context-size-driven.
+	if isContextSizeError(errors.New("connection reset")) {
+		t.Error("generic network error should NOT be a context-size error")
+	}
+
+	if isContextSizeError(nil) {
+		t.Error("nil error should not be a context-size error")
+	}
+}
+
+// TestRefundAutoResume verifies that refundAutoResume reverses exactly one
+// increment, deleting the key when it reaches zero. This is the safety net for
+// the skip path: an attempt that was scheduled but never run must not consume
+// the budget.
+func TestRefundAutoResume(t *testing.T) {
+	a := &App{
+		autoResumeCount: make(map[string]int),
+	}
+	timeoutErr := client.NewModelRoundTimeoutError(client.DefaultModelRoundTimeout)
+	msg := "the task"
+
+	// No-op when nothing was scheduled (defensive — shouldn't panic or go negative).
+	a.refundAutoResume(msg)
+	if len(a.autoResumeCount) != 0 {
+		t.Errorf("refund with no prior schedule should be a no-op, got %v", a.autoResumeCount)
+	}
+
+	// Schedule two attempts, then refund one → back to count 1.
+	_, _, _ = a.scheduleAutoResume(msg, timeoutErr)
+	_, _, _ = a.scheduleAutoResume(msg, timeoutErr)
+	a.refundAutoResume(msg)
+	if a.autoResumeCount[rateLimitRetryKey(msg)] != 1 {
+		t.Errorf("after refund of 2, count should be 1, got %v", a.autoResumeCount)
+	}
+
+	// Refund back to zero → key deleted (clean map, no phantom zero entries).
+	a.refundAutoResume(msg)
+	if _, ok := a.autoResumeCount[rateLimitRetryKey(msg)]; ok {
+		t.Errorf("after refund to zero, key should be deleted, got %v", a.autoResumeCount)
+	}
+
+	// Budget is truly restored: can schedule 2 full attempts again.
+	attempt, _, ok := a.scheduleAutoResume(msg, timeoutErr)
+	if !ok || attempt != 1 {
+		t.Fatalf("after full refund, should get fresh attempt 1, got ok=%v attempt=%d", ok, attempt)
+	}
+	attempt2, _, ok2 := a.scheduleAutoResume(msg, timeoutErr)
+	if !ok2 || attempt2 != 2 {
+		t.Fatalf("second attempt after refund should succeed, got ok=%v attempt=%d", ok2, attempt2)
+	}
+}

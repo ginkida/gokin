@@ -625,6 +625,21 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			// context would hit the same timeout.
 			removed := a.performAutoResumeCompaction()
 
+			// If compaction removed nothing AND the error is context-size-
+			// driven (model round timeout), the retry would hit the same 14m
+			// cap with an unchanged context — a guaranteed re-failure. Refund
+			// the budget and surface the error instead of wasting ~14m15s per
+			// attempt. Transient errors (HTTP/stream-idle/network) still retry
+			// since the provider may have recovered on its own.
+			if removed == 0 && isContextSizeError(err) {
+				logging.Info("auto-resume skipped: compaction removed nothing for a context-size error",
+					"reason", reason, "error", err.Error())
+				a.refundAutoResume(originalMessage)
+				a.safeSendToProgram(ui.ResponseDoneMsg{})
+				a.safeSendToProgram(ui.ErrorMsg(err))
+				return
+			}
+
 			provider := a.shortActiveProviderName()
 			compactNote := ""
 			if removed > 0 {
