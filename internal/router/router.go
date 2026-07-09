@@ -49,7 +49,12 @@ type Router struct {
 	// intent; selectThinkingBudget honors it. Guarded by clientMu — same
 	// write-on-ApplyConfig / read-on-request shape as client.
 	thinkingMode string
-	workDir      string
+	// planMode mirrors the app's planning-mode toggle. When true, Execute must
+	// NOT re-add mutating tools via per-request FilteredGeminiTools — plan mode's
+	// hard schema defense (write/edit/bash removed) would otherwise be defeated.
+	// Guarded by clientMu, same write-on-toggle / read-on-request shape.
+	planMode bool
+	workDir  string
 
 	// Tool filtering
 	registry  *tools.Registry // Tool registry for per-request filtering
@@ -288,6 +293,22 @@ func (r *Router) getThinkingMode() string {
 	return config.ResolveThinkingMode(r.thinkingMode)
 }
 
+// SetPlanMode mirrors the app's planning-mode toggle into the router so
+// Execute keeps mutating tools out of the API schema while plan mode is active.
+// Wired from the builder, ApplyConfig, and the plan-mode toggle.
+func (r *Router) SetPlanMode(enabled bool) {
+	r.clientMu.Lock()
+	r.planMode = enabled
+	r.clientMu.Unlock()
+}
+
+// isPlanMode reports whether planning mode is active.
+func (r *Router) isPlanMode() bool {
+	r.clientMu.RLock()
+	defer r.clientMu.RUnlock()
+	return r.planMode
+}
+
 // Execute routes the task to the appropriate handler and returns the result
 func (r *Router) Execute(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
 	// Preserve the user's original message for the history record — the routing
@@ -301,9 +322,18 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 	// Apply thinking budget for this request
 	cl.SetThinkingBudget(decision.ThinkingBudget)
 
-	// Apply per-request tool filtering
-	if r.registry != nil && len(decision.SuggestedToolSets) > 0 {
-		cl.SetTools(r.registry.FilteredGeminiTools(decision.SuggestedToolSets...))
+	// Apply per-request tool filtering. In plan mode ALWAYS apply the plan-mode
+	// (read-only) set instead — per-request FilteredGeminiTools filters by
+	// ToolSet with no plan-mode awareness, so it would re-add write/edit/bash to
+	// the schema and defeat plan mode's hard schema defense. Setting the plan set
+	// unconditionally (even with no SuggestedToolSets) keeps the schema safe
+	// regardless of what tools a prior request left on the shared client.
+	if r.registry != nil {
+		if r.isPlanMode() {
+			cl.SetTools(r.registry.PlanModeGeminiTools())
+		} else if len(decision.SuggestedToolSets) > 0 {
+			cl.SetTools(r.registry.FilteredGeminiTools(decision.SuggestedToolSets...))
+		}
 	}
 
 	// Add tool usage hint based on task type

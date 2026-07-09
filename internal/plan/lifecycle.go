@@ -33,6 +33,11 @@ var allowedLifecycleTransitions = map[Lifecycle]map[Lifecycle]bool{
 		LifecycleCancelled: true,
 	},
 	LifecycleExecuting: {
+		// A plan that died mid-step (Esc / timeout / crash / done-gate block) is
+		// persisted with Lifecycle "executing". Resuming it must be able to return
+		// it to Approved — without this edge /resume-plan permanently errors with
+		// "invalid plan lifecycle transition: executing -> approved".
+		LifecycleApproved:  true,
 		LifecyclePaused:    true,
 		LifecycleCompleted: true,
 		LifecycleFailed:    true,

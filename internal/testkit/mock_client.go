@@ -255,6 +255,13 @@ func (m *MockClient) SetTools(tools []*genai.Tool) {
 	m.tools = tools
 }
 
+// GetTools returns the tools currently set on the mock (test introspection).
+func (m *MockClient) GetTools() []*genai.Tool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.tools
+}
+
 // SetRateLimiter implements client.Client.
 func (m *MockClient) SetRateLimiter(limiter any) {
 	m.mu.Lock()

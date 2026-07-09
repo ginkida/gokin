@@ -831,6 +831,7 @@ func (b *Builder) initManagers() error {
 	}
 	b.taskRouter = router.NewRouter(routerCfg, b.executor, b.agentRunner, b.mainClient, b.registry, b.isInGitRepo(), b.workDir)
 	b.taskRouter.SetThinkingMode(b.cfg.Model.ThinkingMode) // adaptive per-request thinking
+	b.taskRouter.SetPlanMode(b.cfg.Plan.Enabled)           // keep per-request tool filtering plan-mode aware
 
 	// Wire plan manager to router for plan-aware routing
 	// When a plan is active, router avoids nested decomposition

@@ -194,7 +194,12 @@ func (m *HistoryManager) SaveFull(session *Session) error {
 	// Pre-fix this used WriteFile + Rename without Sync, so a power loss
 	// between WriteFile and Rename could leave the rename pointing at an
 	// unflushed empty file.
-	filename := filepath.Join(sessionsDir, session.ID+".json")
+	//
+	// Use the ID from the locked GetState() snapshot, NOT a lock-free
+	// session.ID re-read: the field is mutated concurrently (SetID via /save),
+	// so re-reading it here both races that write and can diverge from the ID
+	// serialized inside `state` — persisting the state under the wrong filename.
+	filename := filepath.Join(sessionsDir, state.ID+".json")
 	return fileutil.AtomicWrite(filename, data, 0600)
 }
 

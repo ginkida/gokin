@@ -918,6 +918,40 @@ func containsEvidenceToken(evidence []string, token string) bool {
 	return false
 }
 
+// PlanHeader is a point-in-time snapshot of a plan's top-level metadata,
+// read atomically under p.mu so callers don't race concurrent status writes
+// (e.g. PausePlan / parallel delegated-step completion).
+type PlanHeader struct {
+	Title       string
+	Description string
+	Request     string
+	Status      Status
+}
+
+// HeaderSnapshot returns the plan's top-level metadata under p.mu. Callers that
+// need Title/Description/Request/Status together for prompt injection must use
+// this instead of reading the fields directly off the shared *Plan, which races
+// the locked Status writes in PausePlan and step-completion.
+func (p *Plan) HeaderSnapshot() PlanHeader {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return PlanHeader{
+		Title:       p.Title,
+		Description: p.Description,
+		Request:     p.Request,
+		Status:      p.Status,
+	}
+}
+
+// GetStatus returns the plan's status under p.mu — Status is written
+// concurrently by PausePlan and step-completion, so callers must not read the
+// field directly off the shared *Plan.
+func (p *Plan) GetStatus() Status {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.Status
+}
+
 // HasPausedSteps returns true if any step has StatusPaused.
 func (p *Plan) HasPausedSteps() bool {
 	p.mu.RLock()
@@ -947,6 +981,16 @@ func (p *Plan) ResumePausedSteps() int {
 			step.Error = ""
 			step.StartTime = time.Time{}
 			step.EndTime = time.Time{}
+			// Clear the partial-effects flag so re-execution is not immediately
+			// re-paused by the idempotency guard (HasPartialEffects). Without this
+			// auto-resume is structurally dead: ResumePausedSteps resets the status
+			// but the flag survives, so the next attempt hits the guard and pauses
+			// again. Mirrors ResumePlan's clearing in executor.go.
+			if p.RunLedger != nil {
+				if entry, ok := p.RunLedger[step.ID]; ok && entry != nil {
+					entry.PartialEffects = false
+				}
+			}
 			count++
 		}
 	}

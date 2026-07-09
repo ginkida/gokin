@@ -108,6 +108,12 @@ func NewCommandValidator() *CommandValidator {
 		// Recursive deletion with variable expansion
 		regexp.MustCompile(`rm\s+(-[rRf]+\s+)+/`),  // rm -rf / variants
 		regexp.MustCompile(`rm\s+(-[rRf]+\s+)+\$`), // rm -rf $VAR
+		// rm with any short/long flags interspersed before the root target —
+		// catches `rm -rf --no-preserve-root /` (in any order), which the
+		// -[rRf]+-only patterns above miss because --no-preserve-root sits
+		// between the flag group and the "/".
+		regexp.MustCompile(`rm\s+(-{1,2}[\w-]+\s+)+/`),
+		regexp.MustCompile(`rm\s+(-{1,2}[\w-]+\s+)+\$`),
 
 		// dd to block devices
 		regexp.MustCompile(`dd\s+.*of=/dev/[snhv]d`), // dd of=/dev/sd*

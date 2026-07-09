@@ -2319,6 +2319,13 @@ func (a *App) TogglePlanningMode() bool {
 		a.agentRunner.SetPlanningModeEnabled(newEnabled)
 	}
 
+	// Keep the router in sync so its per-request tool filtering doesn't re-add
+	// mutating tools to the schema while plan mode is active. Router's SetPlanMode
+	// takes its own lock (not a.mu) so calling it here is deadlock-safe.
+	if a.taskRouter != nil {
+		a.taskRouter.SetPlanMode(newEnabled)
+	}
+
 	// Update TUI display (direct setter for immediate effect)
 	if a.tui != nil {
 		a.tui.SetPlanningModeEnabled(newEnabled)
@@ -2391,6 +2398,9 @@ func (a *App) disablePlanModeAfterApproval() {
 	}
 	if a.agentRunner != nil {
 		a.agentRunner.SetPlanningModeEnabled(false)
+	}
+	if a.taskRouter != nil {
+		a.taskRouter.SetPlanMode(false)
 	}
 	if a.tui != nil {
 		a.tui.SetPlanningModeEnabled(false)

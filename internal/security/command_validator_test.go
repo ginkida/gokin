@@ -69,6 +69,43 @@ func TestValidateCommand_Safe(t *testing.T) {
 	}
 }
 
+// TestValidateCommand_NoPreserveRoot pins the round-11 fix: the -[rRf]+-only rm
+// patterns miss `rm -rf --no-preserve-root /` because --no-preserve-root sits
+// between the flag group and the "/". The generalized short/long-flag pattern
+// must catch it in any order — while NOT over-blocking ordinary flagged rm on a
+// relative path.
+func TestValidateCommand_NoPreserveRoot(t *testing.T) {
+	cv := NewCommandValidator()
+
+	blocked := []string{
+		"rm -rf --no-preserve-root /",
+		"rm --no-preserve-root -rf /",
+		"rm --no-preserve-root /",
+		"sudo rm -rf --no-preserve-root /",
+	}
+	for _, cmd := range blocked {
+		t.Run("blocked:"+cmd, func(t *testing.T) {
+			if cv.Validate(cmd).Valid {
+				t.Errorf("command %q must be blocked", cmd)
+			}
+		})
+	}
+
+	// The generalized pattern must not over-block a flagged rm on a relative path.
+	safe := []string{
+		"rm -rf ./build",
+		"rm -rf node_modules",
+		"rm -f ./tmp.txt",
+	}
+	for _, cmd := range safe {
+		t.Run("safe:"+cmd, func(t *testing.T) {
+			if !cv.Validate(cmd).Valid {
+				t.Errorf("command %q must NOT be blocked", cmd)
+			}
+		})
+	}
+}
+
 func TestValidateCommand_Empty(t *testing.T) {
 	cv := NewCommandValidator()
 	result := cv.Validate("")

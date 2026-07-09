@@ -239,16 +239,21 @@ func (m *Manager) GetActiveContractContext() string {
 		return ""
 	}
 
+	// Snapshot the plan header under p.mu — Status is written concurrently by
+	// PausePlan and step-completion, so reading these fields directly off the
+	// shared *Plan would race.
+	header := currentPlan.HeaderSnapshot()
+
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Plan: %s\n", strings.TrimSpace(currentPlan.Title))
-	if desc := strings.TrimSpace(currentPlan.Description); desc != "" {
+	fmt.Fprintf(&sb, "Plan: %s\n", strings.TrimSpace(header.Title))
+	if desc := strings.TrimSpace(header.Description); desc != "" {
 		fmt.Fprintf(&sb, "Goal: %s\n", desc)
 	}
-	if req := strings.TrimSpace(currentPlan.Request); req != "" {
+	if req := strings.TrimSpace(header.Request); req != "" {
 		req = compactContractText(req, 240)
 		fmt.Fprintf(&sb, "Request: %s\n", req)
 	}
-	fmt.Fprintf(&sb, "Status: %s", currentPlan.Status.String())
+	fmt.Fprintf(&sb, "Status: %s", header.Status.String())
 	if executing {
 		sb.WriteString(" (executing)")
 	}
@@ -1002,7 +1007,7 @@ func (m *Manager) HasPausedPlan() bool {
 	m.mu.RUnlock()
 
 	// Check current plan in memory
-	if plan != nil && plan.Status == StatusPaused {
+	if plan != nil && plan.GetStatus() == StatusPaused {
 		return true
 	}
 
@@ -1068,10 +1073,8 @@ func (m *Manager) ResumePlan() (*Plan, error) {
 
 	plan := m.currentPlan
 
-	// Single lock acquisition: check + modify atomically
+	// Check if there are any resumable steps.
 	plan.mu.Lock()
-
-	// Check if there are any resumable steps
 	hasPending := false
 	for _, step := range plan.Steps {
 		if step.Status == StatusPending || step.Status == StatusPaused || step.Status == StatusFailed {
@@ -1079,13 +1082,24 @@ func (m *Manager) ResumePlan() (*Plan, error) {
 			break
 		}
 	}
+	plan.mu.Unlock()
 
 	if !hasPending {
-		plan.mu.Unlock()
 		return nil, fmt.Errorf("plan already completed, no steps to resume")
 	}
 
-	// Reset paused and failed steps to pending for retry
+	// Transition the lifecycle back to Approved BEFORE mutating step/plan status,
+	// so a rejected transition leaves the plan untouched rather than half-reset.
+	// This runs while the persisted status is still the pre-resume value, so an
+	// empty-lifecycle plan (legacy) infers correctly from its persisted status;
+	// a plan persisted as "executing" (died mid-step) uses the Executing->Approved
+	// edge. TransitionLifecycle takes plan.mu itself, so it is called unlocked.
+	if err := plan.TransitionLifecycle(LifecycleApproved); err != nil {
+		return nil, err
+	}
+
+	plan.mu.Lock()
+	// Reset paused and failed steps to pending for retry.
 	for _, step := range plan.Steps {
 		if step.Status == StatusPaused || step.Status == StatusFailed {
 			if strings.Contains(strings.ToLower(step.Error), "checkpoint required") {
@@ -1100,15 +1114,10 @@ func (m *Manager) ResumePlan() (*Plan, error) {
 			}
 		}
 	}
-
-	// Reset plan status to in_progress
+	// Reset plan status to in_progress.
 	plan.Status = StatusInProgress
 	plan.UpdatedAt = time.Now()
 	plan.mu.Unlock()
-
-	if err := plan.TransitionLifecycle(LifecycleApproved); err != nil {
-		return nil, err
-	}
 
 	return plan, nil
 }
@@ -1116,12 +1125,13 @@ func (m *Manager) ResumePlan() (*Plan, error) {
 // IsPlanPaused returns true if the current plan is paused.
 func (m *Manager) IsPlanPaused() bool {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	plan := m.currentPlan
+	m.mu.RUnlock()
 
-	if m.currentPlan == nil {
+	if plan == nil {
 		return false
 	}
-	return m.currentPlan.Status == StatusPaused
+	return plan.GetStatus() == StatusPaused
 }
 
 // PausePlan explicitly sets the current plan's status to StatusPaused.
