@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"gokin/internal/client"
 	"gokin/internal/config"
+	"gokin/internal/testkit"
 
 	"google.golang.org/genai"
 )
@@ -467,6 +469,53 @@ func TestTokenCounter_InvalidateCache(t *testing.T) {
 	tc.InvalidateCache()
 	if _, ok := tc.getFromCache("hash1"); ok {
 		t.Error("cache should be empty after InvalidateCache")
+	}
+}
+
+func TestTokenCounter_PreservesAccuracyOnCacheHit(t *testing.T) {
+	c, err := client.NewAnthropicClient(client.AnthropicConfig{
+		Model:   "glm-5.2",
+		BaseURL: "https://api.z.ai",
+		APIKey:  "test-key",
+	})
+	if err != nil {
+		t.Fatalf("NewAnthropicClient: %v", err)
+	}
+	tc := NewTokenCounter(c, c.GetModel(), nil)
+	contents := []*genai.Content{
+		genai.NewContentFromText("hello", genai.RoleUser),
+	}
+
+	_, firstEstimated, err := tc.CountContentsWithAccuracy(context.Background(), contents)
+	if err != nil {
+		t.Fatalf("first count: %v", err)
+	}
+	_, cachedEstimated, err := tc.CountContentsWithAccuracy(context.Background(), contents)
+	if err != nil {
+		t.Fatalf("cached count: %v", err)
+	}
+	if !firstEstimated || !cachedEstimated {
+		t.Fatalf("estimate flag lost across cache: first=%v cached=%v", firstEstimated, cachedEstimated)
+	}
+}
+
+func TestTokenCounter_SetClientPreservesConfiguredLimit(t *testing.T) {
+	first := testkit.NewMockClient()
+	first.SetModel("glm-5.2")
+	tc := NewTokenCounter(first, first.GetModel(), &config.ContextConfig{
+		MaxInputTokens:   50_000,
+		WarningThreshold: 0.7,
+	})
+
+	second := testkit.NewMockClient()
+	second.SetModel("kimi-k2.6")
+	tc.SetClient(second)
+	limits := tc.GetLimits()
+	if limits.MaxInputTokens != 50_000 {
+		t.Fatalf("MaxInputTokens = %d after client swap, want configured 50000", limits.MaxInputTokens)
+	}
+	if limits.WarningThreshold != 0.7 {
+		t.Fatalf("WarningThreshold = %v after client swap, want 0.7", limits.WarningThreshold)
 	}
 }
 

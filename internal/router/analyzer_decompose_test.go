@@ -276,3 +276,76 @@ func TestDecomposeWithContext_NoLLM_FallsBackToRegex(t *testing.T) {
 		t.Errorf("regex fallback should have split 'and' into ≥2 subtasks, got %d", len(result.Subtasks))
 	}
 }
+
+// TestDecompose_PastedDocumentIsNeverShredded reproduces the field failure
+// that motivated decomposableAsInstruction: a large pasted reference document
+// (an error-code table full of prose "and"s) with a short trailing
+// instruction was and-split into 8 meaningless fragments, each becoming a
+// coordinated sub-agent's ENTIRE prompt — no fragment carried the goal or the
+// rest of the material, and 7 of 8 sub-agents died re-exploring the same
+// files. Instruction + pasted material must produce ZERO subtasks so the
+// router keeps the message whole for a single agent.
+func TestDecompose_PastedDocumentIsNeverShredded(t *testing.T) {
+	ta := NewTaskAnalyzer(4, 7) // no LLM client → regex path, the one that shredded
+
+	pastedDoc := strings.Join([]string{
+		"Improve GLM error handling using this documentation:",
+		"",
+		"| Code | Meaning |",
+		"| 1210 | too many requests and concurrency exceeded |",
+		"| 1211 | insufficient balance and account frozen |",
+		"| 1309 | renew the subscription and resume using it |",
+		"| 1310 | weekly limit exhausted and resets at next_flush_time |",
+		"| 1313 | usage pattern does not comply and account is blocked |",
+		"",
+		"1001 is the business error code and 200 is the HTTP status.",
+		"Make sure every code above is classified and covered by tests.",
+	}, "\n")
+
+	result := ta.Decompose(pastedDoc)
+	if len(result.Subtasks) != 0 {
+		parts := make([]string, 0, len(result.Subtasks))
+		for _, st := range result.Subtasks {
+			parts = append(parts, st.Prompt)
+		}
+		t.Fatalf("pasted document was shredded into %d subtasks:\n%s",
+			len(result.Subtasks), strings.Join(parts, "\n---\n"))
+	}
+}
+
+// TestDecompose_LongSingleLineKeptWhole: even without newlines, a message past
+// maxDecomposableRunes is instruction+material (a pasted log line, a minified
+// blob), not a conjunction of tasks.
+func TestDecompose_LongSingleLineKeptWhole(t *testing.T) {
+	ta := NewTaskAnalyzer(4, 7)
+
+	long := "analyze this trace and fix the bug: " + strings.Repeat("frame_a and frame_b ", 40)
+	result := ta.Decompose(long)
+	if len(result.Subtasks) != 0 {
+		t.Fatalf("long single-line message was split into %d subtasks", len(result.Subtasks))
+	}
+}
+
+// TestDecompose_ShortImperativeStillSplits pins the legit path the gate must
+// NOT break: a short single-line "X and Y" imperative still decomposes.
+func TestDecompose_ShortImperativeStillSplits(t *testing.T) {
+	ta := NewTaskAnalyzer(4, 7)
+
+	result := ta.Decompose("fix the failing tests and update the readme")
+	if len(result.Subtasks) != 2 {
+		t.Fatalf("short imperative should split into 2 subtasks, got %d", len(result.Subtasks))
+	}
+	if !result.CanParallel {
+		t.Error("and-split subtasks should be parallel-capable")
+	}
+}
+
+// TestSplitByAndPattern_ProseManyConjunctsRejected: a short sentence with
+// more than maxAndSplitParts conjuncts is prose describing something, not a
+// task list — the splitter must refuse rather than fan out 6 sub-agents.
+func TestSplitByAndPattern_ProseManyConjunctsRejected(t *testing.T) {
+	prose := "the parser and the lexer and the emitter and the linker and the loader and the runtime"
+	if got := splitByAndPattern(prose); got != nil {
+		t.Fatalf("prose with %d conjuncts must not split, got %v", len(got), got)
+	}
+}

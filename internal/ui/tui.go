@@ -2213,6 +2213,15 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				if stepID > 0 {
 					m.planProgressPanel.CompleteStep(stepID, "", msg.Reason)
 				}
+				// WHOLE plan done (the per-step "completed" carries the
+				// running totals; the final step's message is the terminal
+				// signal — same discriminator planProgressMode uses above).
+				// Start the linger → auto-hide window. Failed/paused plans
+				// deliberately stay pinned: those states are actionable and
+				// the user must see why execution stopped.
+				if msg.TotalSteps > 0 && msg.Completed >= msg.TotalSteps {
+					m.planProgressPanel.EndPlan()
+				}
 
 			case "failed":
 				// Step failed - show toast only for failures
@@ -3167,6 +3176,7 @@ func (m *Model) findActiveToolCall(name string, args map[string]any) int {
 // View renders the TUI.
 func (m Model) View() string {
 	var builder strings.Builder
+	const outputMarker = "\x00gokin-main-output\x00"
 
 	// Toast notifications (top of screen) - single line, minimal
 	if m.toastManager != nil && m.toastManager.Count() > 0 {
@@ -3177,13 +3187,11 @@ func (m Model) View() string {
 		}
 	}
 
-	// Output viewport (dimmed when modal is active)
-	outputView := m.output.View()
+	// The output viewport height is resolved after all dynamic footer panels
+	// have rendered. A marker lets the final compositor measure those panels
+	// first, then replace this slot with a viewport sized to the remaining rows.
 	isModal := m.isModalState()
-	if isModal {
-		outputView = lipgloss.NewStyle().Faint(true).Render(outputView)
-	}
-	builder.WriteString(outputView)
+	builder.WriteString(outputMarker)
 	builder.WriteString("\n")
 
 	// Welcome panel (mockup scene A) when output is empty and user is at
@@ -3294,7 +3302,10 @@ func (m Model) View() string {
 
 		// Braille spinner
 		spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		elapsed := time.Since(m.streamStartTime)
+		elapsed := time.Duration(0)
+		if !m.streamStartTime.IsZero() {
+			elapsed = time.Since(m.streamStartTime)
+		}
 		frameIdx := int(elapsed.Milliseconds()/80) % len(spinnerFrames)
 
 		if m.currentTool != "" {
@@ -3538,10 +3549,6 @@ func (m Model) View() string {
 
 	}
 
-	// Enhanced status bar
-	builder.WriteString("\n")
-	builder.WriteString(m.renderStatusBar())
-
 	// Overlay Context Observatory panel if visible
 	if m.observatoryPanel != nil && m.observatoryPanel.IsVisible() {
 		observatoryView := m.observatoryPanel.View(m.width)
@@ -3552,7 +3559,74 @@ func (m Model) View() string {
 		}
 	}
 
-	return m.styles.App.Render(builder.String())
+	preStatus := builder.String()
+	withoutOutput := strings.Replace(preStatus, outputMarker, "", 1)
+	statusBar := m.renderStatusBar()
+
+	// Reserve one separator row and the final status row. Dynamic panels,
+	// multi-line input and toasts consume space from the viewport instead of
+	// growing the whole frame past the terminal height.
+	outputBudget := m.height - lipgloss.Height(withoutOutput) - lipgloss.Height(statusBar) - 1
+	outputView := m.output.ViewWithHeight(max(outputBudget, 0))
+	if isModal && outputView != "" {
+		outputView = lipgloss.NewStyle().Faint(true).Render(outputView)
+	}
+	// Viewport styling can add vertical margin. Fit against the measured budget
+	// rather than assuming viewport.Height equals rendered height.
+	for outputBudget > 0 && lipgloss.Height(outputView) > outputBudget {
+		outputBudget -= lipgloss.Height(outputView) - outputBudget
+		outputView = m.output.ViewWithHeight(max(outputBudget, 0))
+		if isModal && outputView != "" {
+			outputView = lipgloss.NewStyle().Faint(true).Render(outputView)
+		}
+	}
+
+	body := strings.Replace(preStatus, outputMarker, outputView, 1)
+	body = fitVisualWidth(body, m.width)
+	maxBodyHeight := max(m.height-lipgloss.Height(statusBar)-1, 0)
+	body = tailVisualRows(body, maxBodyHeight)
+	gap := m.height - lipgloss.Height(body) - lipgloss.Height(statusBar)
+	if gap < 1 {
+		gap = 1
+	}
+	frame := body + strings.Repeat("\n", gap) + statusBar
+	if missing := m.height - lipgloss.Height(frame); missing > 0 {
+		frame = body + strings.Repeat("\n", gap+missing) + statusBar
+	}
+	return m.styles.App.Render(frame)
+}
+
+// tailVisualRows keeps the bottom-most rendered rows of s. The dynamic footer
+// (input, prompts, activity) is more important than old output when an unusually
+// short terminal cannot fit both. ANSI styling emitted by lipgloss is line
+// scoped in these views, so newline slicing preserves valid rendered rows.
+func tailVisualRows(s string, maxRows int) string {
+	if maxRows <= 0 {
+		return ""
+	}
+	for lipgloss.Height(s) > maxRows {
+		newline := strings.IndexByte(s, '\n')
+		if newline < 0 {
+			return ""
+		}
+		s = s[newline+1:]
+	}
+	return s
+}
+
+// fitVisualWidth is the last-resort horizontal safety rail for dynamic and
+// third-party views. Individual components still adapt their own layout, but a
+// long runtime label or modal row must never wrap the terminal and destabilize
+// the frame geometry.
+func fitVisualWidth(s string, width int) string {
+	if width <= 0 || s == "" {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = fitStatusText(line, width)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) shouldRenderInputArea() bool {

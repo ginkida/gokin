@@ -187,6 +187,24 @@ func TestRunStopHooks_BlockedEnqueuesOneBoundedContinuation(t *testing.T) {
 	}
 }
 
+func TestLateSteersEnterPendingFIFOWithoutDedup(t *testing.T) {
+	a := &App{}
+	handler := a.buildExecutionHandler(nil)
+	if handler.OnSteerLeftover == nil {
+		t.Fatal("OnSteerLeftover handler is nil")
+	}
+
+	handler.OnSteerLeftover([]string{"repeat me", "repeat me"})
+	first, _, ok := a.dequeuePending()
+	if !ok || first != "repeat me" {
+		t.Fatalf("first pending message = %q, ok=%v", first, ok)
+	}
+	second, _, ok := a.dequeuePending()
+	if !ok || second != "repeat me" {
+		t.Fatalf("second pending message = %q, ok=%v", second, ok)
+	}
+}
+
 // A cancelled context (user Esc / deadline) must make runStopHooks skip the
 // hooks entirely: running them with a dead ctx would fail every subprocess and
 // a FailOnError hook would spuriously enqueue a continuation for work the user

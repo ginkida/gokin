@@ -59,9 +59,16 @@ type PlanProgressPanel struct {
 	steps         []PlanStepState
 	currentStepID int
 	startedAt     time.Time
-	styles        *Styles
-	collapsed     bool // Compact mode
-	frame         int  // For animations
+	// finishedAt is stamped by EndPlan when the WHOLE plan reaches a terminal
+	// state. The panel lingers planPanelLingerAfterDone so the user sees the
+	// final state, then View/ViewCompact self-empty — same auto-hide idiom as
+	// the agent tree's allDoneAt (v0.91.0). Before this the panel had NO live
+	// hide path at all (Hide/EndPlanExecution/PlanCompleteMsg were dead code)
+	// and stayed pinned, elapsed ticking, for the rest of the session.
+	finishedAt time.Time
+	styles     *Styles
+	collapsed  bool // Compact mode
+	frame      int  // For animations
 
 	// Live activity feed
 	activities    []ActivityEntry
@@ -92,6 +99,13 @@ func NewPlanProgressPanel(styles *Styles) *PlanProgressPanel {
 // complaint. Ctrl+X expands on demand.
 const planAutoCollapseSteps = 4
 
+// planPanelLingerAfterDone is how long the panel stays visible after the
+// whole plan reaches a terminal state — long enough to read the final ✓/✗
+// summary, short enough that a finished plan doesn't shadow the next
+// conversation (mirrors agentTreeLingerAfterDone, just longer because a plan
+// summary carries more to read than a task tree).
+const planPanelLingerAfterDone = 10 * time.Second
+
 // StartPlan initializes a new plan execution.
 func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps []PlanStepInfo) {
 	p.visible = true
@@ -99,6 +113,7 @@ func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps [
 	p.planTitle = title
 	p.planDesc = description
 	p.startedAt = time.Now()
+	p.finishedAt = time.Time{}
 	p.currentStepID = 0
 	p.collapsed = len(steps) > planAutoCollapseSteps
 	p.timeline = p.timeline[:0]
@@ -127,6 +142,9 @@ func (p *PlanProgressPanel) StartStep(stepID int) {
 			break
 		}
 	}
+	// A step starting means the plan is alive again (resume/replan after a
+	// premature terminal signal) — cancel any pending auto-hide.
+	p.finishedAt = time.Time{}
 }
 
 // CompleteStep marks a step as completed.
@@ -208,10 +226,14 @@ func (p *PlanProgressPanel) appendTransition(stepID int, from, to PlanStepStatus
 	}
 }
 
-// EndPlan marks the plan as finished.
+// EndPlan marks the WHOLE plan as finished: the panel lingers
+// planPanelLingerAfterDone (elapsed frozen), then self-hides via
+// lingerExpired. Idempotent — a repeated terminal message must not extend
+// the linger window.
 func (p *PlanProgressPanel) EndPlan() {
-	// Don't hide immediately - let user see final state
-	// Panel will be hidden when a new response starts
+	if p.finishedAt.IsZero() {
+		p.finishedAt = time.Now()
+	}
 }
 
 // Hide hides the panel.
@@ -224,9 +246,17 @@ func (p *PlanProgressPanel) IsVisible() bool {
 	return p.visible
 }
 
-// Toggle toggles collapsed mode.
+// lingerExpired reports whether the post-completion display window is over.
+func (p *PlanProgressPanel) lingerExpired() bool {
+	return !p.finishedAt.IsZero() && time.Since(p.finishedAt) > planPanelLingerAfterDone
+}
+
+// Toggle toggles collapsed mode. An explicit Ctrl+X also re-pins a finished
+// panel (clears the linger stamp) — user intent overrides auto-hide, the same
+// idiom as the agent tree's Toggle-on clearing allDoneAt (v0.91.0).
 func (p *PlanProgressPanel) Toggle() {
 	p.collapsed = !p.collapsed
+	p.finishedAt = time.Time{}
 }
 
 // Tick updates the animation frame.
@@ -321,7 +351,7 @@ func (p *PlanProgressPanel) CompletedCount() int {
 
 // View renders the plan progress panel.
 func (p *PlanProgressPanel) View(width int) string {
-	if !p.visible || len(p.steps) == 0 {
+	if !p.visible || len(p.steps) == 0 || p.lingerExpired() {
 		return ""
 	}
 
@@ -345,6 +375,11 @@ func (p *PlanProgressPanel) View(width int) string {
 	// Header with progress bar
 	progress := p.Progress()
 	elapsed := time.Since(p.startedAt)
+	if !p.finishedAt.IsZero() {
+		// Terminal state: freeze the clock at the real duration instead of
+		// counting up on a finished plan.
+		elapsed = p.finishedAt.Sub(p.startedAt)
+	}
 
 	// Progress bar
 	barWidth := 20
@@ -649,7 +684,7 @@ func formatElapsed(d time.Duration) string {
 
 // ViewCompact renders a compact single-line version for status bar.
 func (p *PlanProgressPanel) ViewCompact() string {
-	if !p.visible || len(p.steps) == 0 {
+	if !p.visible || len(p.steps) == 0 || p.lingerExpired() {
 		return ""
 	}
 

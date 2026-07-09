@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"gokin/internal/client"
 	"gokin/internal/logging"
@@ -491,6 +492,39 @@ func (ta *TaskAnalyzer) Decompose(message string) *DecompositionResult {
 	return ta.DecomposeWithContext(context.Background(), message)
 }
 
+// Decomposition-input limits. Decomposition (regex AND LLM) understands
+// exactly one shape: a SHORT, SINGLE-LINE imperative ("fix the tests and
+// update the readme"). Anything longer or multi-line is almost always an
+// instruction plus PASTED REFERENCE MATERIAL (a doc, an error table, logs,
+// code) — and splitting a document at its own "and"/"then" connectives shreds
+// it into meaningless fragments that each become a sub-agent's ENTIRE prompt:
+// executeSubtask passes ONLY st.Prompt to the spawned agent, so a fragment
+// carries no goal and no sight of the rest of the material. Field failure
+// that motivated the gate: a pasted Z.AI error-code table with "improve GLM
+// error handling" was and-split into 8 fragments; all 8 sub-agents
+// re-explored the same files with no goal and 7 of 8 died on context limits.
+// The right route for instruction+material is a SINGLE agent that sees the
+// FULL message — returning zero subtasks makes Router.Route fall through to
+// exactly that.
+const (
+	// maxDecomposableRunes is the longest single-line message the splitters
+	// may cut. A genuine conjunction of tasks fits well inside it; pasted
+	// material does not.
+	maxDecomposableRunes = 400
+	// maxAndSplitParts caps the "and"-conjunction split: a real task list has
+	// 2–4 conjuncts; more means the "and"s are prose connectives.
+	maxAndSplitParts = 4
+)
+
+// decomposableAsInstruction reports whether decomposition may touch this
+// message at all (see the limits' doc above).
+func decomposableAsInstruction(message string) bool {
+	if strings.ContainsRune(message, '\n') {
+		return false
+	}
+	return utf8.RuneCountInString(message) <= maxDecomposableRunes
+}
+
 // DecomposeWithContext breaks a complex task into subtasks with context support.
 func (ta *TaskAnalyzer) DecomposeWithContext(ctx context.Context, message string) *DecompositionResult {
 	result := &DecompositionResult{
@@ -501,6 +535,16 @@ func (ta *TaskAnalyzer) DecomposeWithContext(ctx context.Context, message string
 
 	message = strings.TrimSpace(message)
 	if message == "" {
+		return result
+	}
+
+	// Instruction + pasted material must stay WHOLE — no subtasks, so the
+	// router falls through to a single agent/executor that can actually read
+	// the pasted content. This also skips the LLM decomposer: its subtask
+	// prompts are the only context a coordinated sub-agent receives, so they
+	// can never carry a large document either.
+	if !decomposableAsInstruction(message) {
+		result.Reasoning = "message carries multi-line/pasted content — kept whole for a single agent"
 		return result
 	}
 
@@ -806,6 +850,11 @@ func splitByAndPattern(message string) []string {
 				if len(trimmed) > 5 { // Minimum meaningful length
 					validParts = append(validParts, trimmed)
 				}
+			}
+			if len(validParts) > maxAndSplitParts {
+				// Prose, not a task list — a sentence with this many "and"s
+				// is describing something, not enumerating subtasks.
+				return nil
 			}
 			if len(validParts) > 1 {
 				return validParts

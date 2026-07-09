@@ -205,6 +205,9 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			if inputTokens <= 0 {
 				return
 			}
+			if a.contextManager != nil {
+				a.contextManager.ObserveAPIUsage(inputTokens)
+			}
 			maxTokens := 0
 			if a.contextManager != nil {
 				if usage := a.contextManager.GetTokenUsage(); usage != nil {
@@ -237,6 +240,28 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 				msg += ": " + summary
 			}
 			present().MemoryNotify(msg)
+		},
+		OnSteerLeftover: func(messages []string) {
+			// The current turn still owns processing=true here. Put late steers
+			// directly into the normal pending FIFO; the message-processor defer
+			// dispatches them after it clears processing. Calling handleSubmit
+			// here would try to steer them back into the loop that just closed.
+			for _, message := range messages {
+				pos, ok := a.enqueuePending(message)
+				if !ok {
+					a.safeSendToProgram(ui.StatusUpdateMsg{
+						Type:    ui.StatusRetry,
+						Message: fmt.Sprintf("Queue full (%d waiting) — late follow-up not queued", pos),
+					})
+					continue
+				}
+				a.journalEvent("request_queued", map[string]any{
+					"message_preview": previewForJournal(message),
+					"queue_position":  pos,
+					"source":          "late_steer",
+				})
+				a.safeSendToProgram(ui.QueuedCountMsg(pos))
+			}
 		},
 	}
 }

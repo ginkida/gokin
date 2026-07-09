@@ -55,6 +55,28 @@ func TestContextManager_GetTokenUsage_Set(t *testing.T) {
 	}
 }
 
+func TestContextManager_ObserveAPIUsageIsAuthoritative(t *testing.T) {
+	m := &ContextManager{
+		session: chat.NewSession(),
+		tokenCounter: &TokenCounter{
+			limits: TokenLimits{MaxInputTokens: 1_000_000},
+		},
+		lastUsage: &TokenUsage{InputTokens: 100, MaxTokens: 1_000_000, IsEstimate: true},
+	}
+
+	m.ObserveAPIUsage(144_400)
+	usage := m.GetTokenUsage()
+	if usage.InputTokens != 144_400 {
+		t.Fatalf("InputTokens = %d, want API value 144400", usage.InputTokens)
+	}
+	if usage.IsEstimate {
+		t.Fatal("provider-reported usage must be authoritative")
+	}
+	if usage.PercentUsed != 0.1444 {
+		t.Fatalf("PercentUsed = %v, want 0.1444", usage.PercentUsed)
+	}
+}
+
 // ========== GetCurrentTokens ==========
 
 func TestContextManager_GetCurrentTokens(t *testing.T) {

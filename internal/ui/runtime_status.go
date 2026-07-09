@@ -28,5 +28,7 @@ func (m *Model) runtimeStatusCmd() tea.Cmd {
 // handleRuntimeStatusMsg applies a background-fetched runtime status snapshot.
 func (m *Model) handleRuntimeStatusMsg(msg RuntimeStatusMsg) {
 	m.runtimeStatus = msg.Status
+	m.mcpHealthy = msg.Status.MCPHealthy
+	m.mcpTotal = msg.Status.MCPTotal
 	m.lastRuntimeRefresh = time.Now()
 }

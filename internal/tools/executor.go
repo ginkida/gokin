@@ -325,6 +325,21 @@ type Executor struct {
 	pendingNotifications []string
 	pendingNotifMu       sync.Mutex
 
+	// User steering messages: mid-turn follow-ups the user typed while this
+	// turn was running. Drained at the top of each loop iteration and appended
+	// to history as user turns (mirrors agent.drainSteers) so the model can
+	// adjust course mid-task — Claude-Code-style "message during work".
+	// userSteerSuppress > 0 closes the acceptance window for INTERNAL Execute
+	// calls that reuse this executor (completion review, done-gate auto-fix):
+	// a user message typed during those must become the NEXT turn via the
+	// pending queue, not get spliced into an internal exchange whose history
+	// may be discarded (the review's error path drops newHistory — an accepted
+	// steer there would vanish silently).
+	userSteers        []string
+	userSteerActive   bool
+	userSteerSuppress int
+	userSteerMu       sync.Mutex
+
 	// Checkpoint journal for tool execution recovery on API failure.
 	checkpoint *CheckpointJournal
 
@@ -358,6 +373,10 @@ type Executor struct {
 	// history. nil = no-op.
 	responseCompressor ResponseCompressor
 }
+
+// Keep mid-turn steering bounded. Additional input falls back to the app's
+// bounded pending FIFO via TryQueueUserSteer's false return.
+const maxQueuedUserSteers = 5
 
 // ExecutionInfo holds information about an active tool execution
 type ExecutionInfo struct {
@@ -421,6 +440,12 @@ type ExecutionHandler struct {
 
 	// OnMemoryNotify is called when a memory operation completes (save, recall, forget).
 	OnMemoryNotify func(action, summary string)
+
+	// OnSteerLeftover is called when user steering messages arrived AFTER the
+	// last loop iteration's drain (the model finished, but the user typed
+	// something in that final window). The app re-dispatches them as a new
+	// turn so the follow-up isn't silently lost. Nil = leftovers are dropped.
+	OnSteerLeftover func(messages []string)
 }
 
 // NewExecutor creates a new tool executor.
@@ -486,6 +511,68 @@ func (e *Executor) drainPendingNotifications() []string {
 	n := e.pendingNotifications
 	e.pendingNotifications = nil
 	return n
+}
+
+// TryQueueUserSteer queues a message only while executeLoop is accepting
+// steering. The active check and append share one lock with loop shutdown:
+// either the loop owns the message, or the caller gets false and can enqueue it
+// as a fresh top-level request. There is no "accepted after final drain" gap.
+func (e *Executor) TryQueueUserSteer(msg string) bool {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return false
+	}
+	e.userSteerMu.Lock()
+	defer e.userSteerMu.Unlock()
+	if !e.userSteerActive || e.userSteerSuppress > 0 {
+		return false
+	}
+	if len(e.userSteers) >= maxQueuedUserSteers {
+		return false
+	}
+	e.userSteers = append(e.userSteers, msg)
+	return true
+}
+
+// SuspendUserSteering closes the steer-acceptance window for the duration of
+// an INTERNAL Execute on this executor (completion review, done-gate auto-fix)
+// and returns the function that reopens it. While suspended, a live user
+// message falls through to the app's pending queue and becomes the next turn
+// instead of being injected into the internal exchange. Counter-based so
+// nested/overlapping internal calls compose.
+func (e *Executor) SuspendUserSteering() (resume func()) {
+	e.userSteerMu.Lock()
+	e.userSteerSuppress++
+	e.userSteerMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			e.userSteerMu.Lock()
+			e.userSteerSuppress--
+			e.userSteerMu.Unlock()
+		})
+	}
+}
+
+// drainUserSteers returns and clears all queued user steering messages.
+// Called only from the executor's own loop goroutine.
+func (e *Executor) drainUserSteers() []string {
+	e.userSteerMu.Lock()
+	defer e.userSteerMu.Unlock()
+	if len(e.userSteers) == 0 {
+		return nil
+	}
+	s := e.userSteers
+	e.userSteers = nil
+	return s
+}
+
+// HasUserSteers reports whether any steering messages are queued.
+func (e *Executor) HasUserSteers() bool {
+	e.userSteerMu.Lock()
+	defer e.userSteerMu.Unlock()
+	return len(e.userSteers) > 0
 }
 
 // SetClient updates the underlying client.
@@ -833,6 +920,10 @@ func (e *Executor) Execute(ctx context.Context, history []*genai.Content, messag
 func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([]*genai.Content, string, error) {
 	// Snapshot client once per executeLoop to avoid racing with SetClient.
 	cl := e.getClient()
+	e.userSteerMu.Lock()
+	e.userSteerActive = true
+	e.userSteerMu.Unlock()
+	defer e.finishUserSteering()
 
 	// Reset token counters for this execution cycle.
 	// OutputTokens accumulates across rounds (each round generates new output).
@@ -936,6 +1027,20 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		case <-ctx.Done():
 			return history, finalText, client.ContextErr(ctx)
 		default:
+		}
+
+		// Drain any user steering messages (mid-turn follow-ups the user typed
+		// while this turn was running) into history as user turns. The model
+		// sees them on THIS iteration and can adjust course — Claude-Code-style
+		// "message during work". Mirrors agent.drainSteers. The UI echo + toast
+		// already fired in handleSubmit when the steer was queued, so we only
+		// log here — no second warning toast (would duplicate the feedback).
+		if steers := e.drainUserSteers(); len(steers) > 0 {
+			for _, s := range steers {
+				history = append(history, genai.NewContentFromText(
+					"[user follow-up] "+s, genai.RoleUser))
+				logging.Info("injected user steer into turn", "msg", s)
+			}
 		}
 
 		// Notify about loop iteration progress (from 2nd iteration onwards)
@@ -1554,6 +1659,21 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	}
 
 	return history, finalText, nil
+}
+
+// finishUserSteering atomically closes the acceptance window and takes any
+// messages that arrived after the loop's final in-iteration drain. The callback
+// runs outside the mutex because the app may immediately enqueue them.
+func (e *Executor) finishUserSteering() {
+	e.userSteerMu.Lock()
+	e.userSteerActive = false
+	leftover := e.userSteers
+	e.userSteers = nil
+	e.userSteerMu.Unlock()
+
+	if len(leftover) > 0 && e.handler != nil && e.handler.OnSteerLeftover != nil {
+		e.handler.OnSteerLeftover(leftover)
+	}
 }
 
 // calculateMaxIterations determines the optimal iteration limit based on context complexity.

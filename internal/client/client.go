@@ -263,6 +263,27 @@ type Client interface {
 	Close() error
 }
 
+// TokenCountAccuracy is an optional capability for clients whose CountTokens
+// implementation is an estimate rather than a provider-side tokenizer call.
+// A nil error alone does not imply an exact count.
+type TokenCountAccuracy interface {
+	TokenCountIsEstimate() bool
+}
+
+// TokenCountWithAccuracy is an optional per-call variant used when accuracy
+// can change at runtime (for example, native Anthropic falling back to a local
+// estimate after its count endpoint fails).
+type TokenCountWithAccuracy interface {
+	CountTokensWithAccuracy(ctx context.Context, contents []*genai.Content) (*genai.CountTokensResponse, bool, error)
+}
+
+// TokenCountCacheKey is an optional capability that contributes client-side
+// request state to token-count cache keys. System instructions and tool schemas
+// consume context even though they are not present in contents.
+type TokenCountCacheKey interface {
+	TokenCountCacheKey() string
+}
+
 // RateLimiter interface for rate limiting API calls (optional).
 type RateLimiter interface {
 	AcquireWithContext(ctx context.Context, tokens int64) error

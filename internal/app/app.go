@@ -378,6 +378,14 @@ type App struct {
 	// Automatic retry tracking for rate-limit failures.
 	rateLimitRetryMu    sync.Mutex
 	rateLimitRetryCount map[string]int
+
+	// Auto-resume tracking for timeout/retry-exhausted errors.
+	// When the agent hits a model round timeout or exhausts its in-loop retry
+	// budget, it compacts the context and retries — up to maxAutoResumeAttempts
+	// times. This prevents the "agent stopped at 14m with GLM" and "same error
+	// repeated (4x)" failures on long-running tasks.
+	autoResumeMu    sync.Mutex
+	autoResumeCount map[string]int
 }
 
 // toolPattern, detectPatterns, getToolHints, recordToolUsage are in pattern_detector.go
@@ -843,14 +851,50 @@ func (a *App) Run() error {
 	return runErr
 }
 
+// prepareSteerMessage decides whether a message typed while a request is in
+// flight may be STEERED into the current turn, and returns the steer-ready
+// text. Two rules:
+//   - Slash commands are NEVER steered: they must EXECUTE, not become
+//     model-visible text ("[user follow-up] /tasks"). Queued instead — the
+//     dequeue path re-enters handleSubmit with processing=false, which parses
+//     and runs them as commands (the pre-steering behavior).
+//   - @file references are expanded HERE, mirroring the normal-path
+//     expandAtReferences call — the steer path returns early and would
+//     otherwise hand the model a bare unresolved @token.
+func (a *App) prepareSteerMessage(message string) (string, bool) {
+	if a.commandHandler != nil {
+		if _, _, isCmd := a.commandHandler.Parse(message); isCmd {
+			return "", false
+		}
+	}
+	return a.expandAtReferences(message), true
+}
+
 // handleSubmit handles user message submission.
 func (a *App) handleSubmit(message string) {
 	a.mu.Lock()
 	if a.processing {
+		// Claude-Code-style "message during work": a follow-up typed while a
+		// request is in flight is injected into the CURRENT turn via the
+		// executor's steer channel, not queued for a later turn. The executor
+		// drains it into history at the top of the next loop iteration so the
+		// model can adjust course mid-task. The user sees their message echoed
+		// immediately and a "steered" toast.
 		a.mu.Unlock()
 
-		// Type-ahead: queue FIFO behind the in-flight request. Overflow rejects
-		// the NEW message with explicit feedback — never silently drop input.
+		if steerMsg, steerable := a.prepareSteerMessage(message); steerable &&
+			a.executor != nil && a.executor.TryQueueUserSteer(steerMsg) {
+			a.journalEvent("request_steered", map[string]any{
+				"message_preview": previewForJournal(message),
+			})
+			a.safeSendToProgram(ui.StreamTextMsg(
+				"💬 Steered into current turn — the agent will see this on its next step\n"))
+			return
+		}
+
+		// The executor may be absent or already outside its steer-acceptance
+		// window (post-processing, completion review, final shutdown). Queue the
+		// message as a fresh request instead of handing it to a finished loop.
 		pos, ok := a.enqueuePending(message)
 		if !ok {
 			logging.Debug("pending queue full — message rejected", "len", len(message))
@@ -940,6 +984,41 @@ func (a *App) handleSubmit(message string) {
 		}()
 		a.processMessageWithContext(ctx, agentMessage)
 	})
+}
+
+// handleResubmit dispatches a PROGRAMMATIC re-entry (rate-limit retry,
+// auto-resume, pending-queue dispatch, file-command prompt expansion). Unlike
+// a live user follow-up, a programmatic message must NEVER be steered into
+// whatever turn happens to be running when its timer fires — if the user
+// started a NEW task in the meantime, injecting the OLD failed message
+// mid-turn would derail the new task. Busy → pending FIFO (the pre-steering
+// behavior); idle → the normal submit path. The processing check races a
+// concurrent submit by design: the loser lands in handleSubmit's processing
+// branch, where prepareSteerMessage still applies the command guard, so the
+// worst case is a plain-text retry steered into a just-started turn — the
+// exact pre-check behavior, never a swallowed command.
+func (a *App) handleResubmit(message string) {
+	a.mu.Lock()
+	busy := a.processing
+	a.mu.Unlock()
+
+	if busy {
+		pos, ok := a.enqueuePending(message)
+		if !ok {
+			logging.Debug("pending queue full — programmatic resubmit dropped", "len", len(message))
+			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry,
+				Message: fmt.Sprintf("Queue full (%d waiting) — retry not queued", pos)})
+			return
+		}
+		a.journalEvent("request_queued", map[string]any{
+			"message_preview": previewForJournal(message),
+			"queue_position":  pos,
+			"source":          "programmatic_resubmit",
+		})
+		a.safeSendToProgram(ui.QueuedCountMsg(pos))
+		return
+	}
+	a.handleSubmit(message)
 }
 
 // detectUnslashedCommand returns a user-facing hint when the input looks
@@ -1084,7 +1163,10 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 			// File-based command: the expansion is a MODEL PROMPT, not
 			// display text. Re-enter through handleSubmit (it decides
 			// queue-vs-process) once this command's processing flag clears.
-			a.safeGo("file-command-dispatch", func() { a.handleSubmit(prompt) })
+			// handleResubmit: the expanded prompt is a fresh top-level task —
+			// if another request started meanwhile, queue it, never steer it
+			// into that unrelated turn.
+			a.safeGo("file-command-dispatch", func() { a.handleResubmit(prompt) })
 		} else {
 			// Display command result as assistant message
 			a.safeSendToProgram(ui.StreamTextMsg(result))
@@ -1372,6 +1454,18 @@ func (a *App) GetUIRuntimeStatus() ui.RuntimeStatusSnapshot {
 	if age > 0 {
 		out.HasHeartbeat = true
 		out.HeartbeatAge = age
+	}
+
+	// MCP health for the status-bar badge. mcpManager is boot-set (builder,
+	// never reassigned); GetServerStatus locks internally and is cheap
+	// (in-memory snapshot, no network).
+	if a.mcpManager != nil {
+		for _, s := range a.mcpManager.GetServerStatus() {
+			out.MCPTotal++
+			if s.Connected && s.Healthy {
+				out.MCPHealthy++
+			}
+		}
 	}
 
 	return out
@@ -2038,6 +2132,11 @@ func (a *App) ClearConversation() {
 	a.rateLimitRetryMu.Lock()
 	a.rateLimitRetryCount = make(map[string]int)
 	a.rateLimitRetryMu.Unlock()
+
+	// Same for auto-resume counters (autoResumeMu-guarded).
+	a.autoResumeMu.Lock()
+	a.autoResumeCount = make(map[string]int)
+	a.autoResumeMu.Unlock()
 
 	// Clear the carried-over error note + stop-hook marker under a.mu (their
 	// guard). message_processor prepends "[Note: previous attempt failed with:
@@ -3208,11 +3307,22 @@ func (a *App) AddSystemMessage(msg string) {
 
 // sendAgentTreeUpdate snapshots the coordinator task tree and sends it to TUI.
 func (a *App) sendAgentTreeUpdate() {
-	if a.program == nil || a.coordinator == nil {
+	a.sendAgentTreeUpdateFrom(a.coordinator)
+}
+
+// sendAgentTreeUpdateFrom snapshots the given coordinator's tasks into the
+// Agent Tree panel. Parametrized (round 9): the coordinate tool builds a
+// FRESH coordinator per call (builder.go factory) — those are the only
+// coordinators that ever hold tasks, while a.coordinator (the boot instance)
+// never receives any. Feeding the tree only from the boot instance left the
+// panel 100% dead UI: auto-show, Ctrl+A, and two rounds of polish
+// (v0.91.0 linger, v0.100.52 running-node fields) were unreachable.
+func (a *App) sendAgentTreeUpdateFrom(coord *agent.Coordinator) {
+	if a.program == nil || coord == nil {
 		return
 	}
 
-	tasks := a.coordinator.GetAllTasks()
+	tasks := coord.GetAllTasks()
 	if len(tasks) == 0 {
 		return
 	}
@@ -3275,7 +3385,7 @@ func (a *App) sendAgentTreeUpdate() {
 		// tool count (which drives the progress bar). Progress is set to -1
 		// (indeterminate) so the bar animates instead of sitting empty.
 		if t.Status == "running" && a.agentRunner != nil {
-			agentID := a.coordinator.GetTaskAgentID(t.ID)
+			agentID := coord.GetTaskAgentID(t.ID)
 			if agentID != "" {
 				node.Thought = a.agentRunner.GetThought(agentID)
 				if ag := a.agentRunner.GetActiveAgent(agentID); ag != nil {

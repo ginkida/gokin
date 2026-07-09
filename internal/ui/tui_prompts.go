@@ -15,11 +15,11 @@ import (
 // the layout horizontally, which is worse than a borderless prompt.
 func promptPaletteWidth(termWidth int) (width int, bordered bool) {
 	if termWidth < minBorderedPromptWidth {
-		// Fall back: no border, use whatever width we have (minimum 30 so
-		// truncation budgets stay sane).
+		// Fall back: no border, use the actual available width. A historical
+		// 30-column floor made 20-column tmux/SSH panes overflow by design.
 		w := termWidth - 4 // 2-space left padding + 2-space right margin
-		if w < 30 {
-			w = 30
+		if w < 1 {
+			w = 1
 		}
 		return w, false
 	}

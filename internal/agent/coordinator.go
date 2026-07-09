@@ -243,14 +243,34 @@ func (c *Coordinator) processLoop() {
 	}
 }
 
-// processReadyTasks starts ready tasks up to maxParallel.
+// processReadyTasks starts ready tasks up to maxParallel, then fires
+// onTaskStart for each OUTSIDE the lock — the same discipline
+// handleAgentCompletion already follows for onTaskComplete. onTaskStart used
+// to fire inside startTask while c.mu was held: a callback that re-enters
+// the coordinator (the agent-tree snapshot calls GetAllTasks → c.mu.RLock)
+// would self-deadlock the scheduling goroutine. The latent bug never
+// detonated only because the sole wired coordinator (the boot one) never
+// received tasks.
 func (c *Coordinator) processReadyTasks() {
+	started, onStart := c.startReadyTasksLocked()
+	if onStart != nil {
+		for _, task := range started {
+			onStart(task)
+		}
+	}
+}
+
+// startReadyTasksLocked pops and starts ready tasks under c.mu (deferred
+// unlock — a panic inside a spawn must not leave the coordinator locked) and
+// returns the started tasks plus the callback snapshot for unlocked firing.
+func (c *Coordinator) startReadyTasksLocked() ([]*CoordinatedTask, func(*CoordinatedTask)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	runningCount := len(c.running)
 	availableSlots := c.maxParallel - runningCount
 
+	var started []*CoordinatedTask
 	for availableSlots > 0 {
 		task := c.queue.PopTask()
 		if task == nil {
@@ -264,8 +284,10 @@ func (c *Coordinator) processReadyTasks() {
 		// Start the task
 		task.Status = TaskStatusRunning
 		c.startTask(task)
+		started = append(started, task)
 		availableSlots--
 	}
+	return started, c.onTaskStart
 }
 
 // startTask spawns an agent for a task.
@@ -275,9 +297,8 @@ func (c *Coordinator) startTask(task *CoordinatedTask) {
 		"agent_type", task.AgentType,
 		"prompt", truncate(task.Prompt, 100))
 
-	if c.onTaskStart != nil {
-		c.onTaskStart(task)
-	}
+	// NOTE: onTaskStart is fired by processReadyTasks AFTER c.mu is released
+	// — never here (this function runs under the lock; see processReadyTasks).
 
 	// Spawn async agent
 	agentID := c.runner.SpawnAsync(c.ctx, string(task.AgentType), task.Prompt, 30, "")

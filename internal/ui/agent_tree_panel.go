@@ -34,10 +34,13 @@ type AgentTreePanel struct {
 	// allDoneAt is when every node reached a terminal state; zero while any
 	// task is still live. Drives the linger-then-hide in View.
 	allDoneAt time.Time
-	nodes     []AgentTreeNode
-	frame     int // spinner animation frame
-	styles    *Styles
-	mu        sync.RWMutex
+	// userHidden latches an EXPLICIT hide (toggle while visible): auto-show
+	// in UpdateTree stands down until the user shows the panel again.
+	userHidden bool
+	nodes      []AgentTreeNode
+	frame      int // spinner animation frame
+	styles     *Styles
+	mu         sync.RWMutex
 }
 
 // NewAgentTreePanel creates a new agent tree panel.
@@ -67,8 +70,10 @@ func (p *AgentTreePanel) UpdateTree(nodes []AgentTreeNode) {
 	defer p.mu.Unlock()
 	p.nodes = nodes
 
-	// Auto-show when there are ≥2 tasks
-	if len(nodes) >= 2 {
+	// Auto-show when there are ≥2 tasks — but never against an explicit
+	// user hide (userHidden): without the latch, a user closing the tree
+	// mid-multi-agent-work had it snap back open on the next tree update.
+	if len(nodes) >= 2 && !p.userHidden {
 		p.visible = true
 	}
 
@@ -94,6 +99,9 @@ func (p *AgentTreePanel) UpdateTree(nodes []AgentTreeNode) {
 func (p *AgentTreePanel) Toggle() {
 	p.mu.Lock()
 	p.visible = !p.visible
+	// Latch explicit intent symmetrically: hidden by the user → auto-show
+	// stands down until the user shows it again (mirrors the activity feed).
+	p.userHidden = !p.visible
 	if p.visible {
 		// Explicit user intent overrides the auto-hide: keep a finished tree
 		// on screen until the user toggles it off or a new tree arrives.

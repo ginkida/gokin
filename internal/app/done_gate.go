@@ -262,7 +262,12 @@ func (a *App) runDoneGateAutoFix(ctx context.Context, userMessage string, result
 	fixPrompt := donegate.BuildFixPrompt(userMessage, failed, attempt, max)
 	history := a.session.GetHistory()
 
+	// Internal exchange — same steering suppression as the completion review:
+	// a user message typed during the auto-fix belongs to the NEXT turn, not
+	// inside this fix loop.
+	resumeSteering := a.executor.SuspendUserSteering()
 	newHistory, _, err := a.executor.Execute(ctx, history, fixPrompt)
+	resumeSteering()
 	if err != nil {
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("   Auto-fix attempt %d failed: %s\n", attempt, err.Error())))

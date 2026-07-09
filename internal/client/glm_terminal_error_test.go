@@ -101,7 +101,7 @@ func TestIsGLMTerminalCode_AndTheOverloadTrap(t *testing.T) {
 		t.Fatal("precondition: the raw 1308 body DOES match IsOverloadError via rate_limit — that is the trap the fix avoids by classifying at the source")
 	}
 
-	terminal := []string{"1211", "1212", "1213", "1214", "1215", "1308"}
+	terminal := []string{"1211", "1212", "1213", "1214", "1215", "1308", "1309", "1310", "1311", "1313"}
 	for _, code := range terminal {
 		if !isGLMTerminalCode(code) {
 			t.Errorf("isGLMTerminalCode(%q) = false, want true", code)

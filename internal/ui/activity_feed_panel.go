@@ -69,6 +69,13 @@ type ActivityFeedPanel struct {
 
 	// Sub-agent tracking
 	subAgentActivities map[string]*SubAgentState
+
+	// userHidden latches an EXPLICIT hide (Ctrl+O while visible): while set,
+	// the auto-show sites (AddEntry, StartSubAgent) stay quiet — without it,
+	// a user hiding the feed mid-multi-agent-work had it snap back open on
+	// the very next activity event, making the hide unusable. Cleared by an
+	// explicit show (Ctrl+O again). Guarded by p.mu like its siblings.
+	userHidden bool
 }
 
 // NewActivityFeedPanel creates a new activity feed panel.
@@ -98,7 +105,8 @@ func (p *ActivityFeedPanel) AddEntry(entry ActivityFeedEntry) {
 
 	// Auto-surface the panel only when activity becomes genuinely interesting:
 	// parallel tools or agent orchestration. Single short tool calls stay quiet.
-	if p.countRunningEntriesLocked() >= 2 || len(p.subAgentActivities) > 0 {
+	// Never against an explicit user hide (userHidden) — user intent wins.
+	if !p.userHidden && (p.countRunningEntriesLocked() >= 2 || len(p.subAgentActivities) > 0) {
 		p.visible = true
 	}
 }
@@ -154,7 +162,9 @@ func (p *ActivityFeedPanel) StartSubAgent(agentID, agentType, description string
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.visible = true
+	if !p.userHidden {
+		p.visible = true
+	}
 	now := time.Now()
 	p.subAgentActivities[agentID] = &SubAgentState{
 		AgentID:      agentID,
@@ -288,6 +298,9 @@ func (p *ActivityFeedPanel) Tick() {
 func (p *ActivityFeedPanel) Toggle() {
 	p.mu.Lock()
 	p.visible = !p.visible
+	// Latch explicit intent: hidden by the user → auto-show stands down;
+	// shown by the user → auto-show may manage it again.
+	p.userHidden = !p.visible
 	p.mu.Unlock()
 }
 

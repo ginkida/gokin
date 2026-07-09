@@ -121,7 +121,11 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			// shutdown race) crashed the whole CLI silently. Per CLAUDE.md
 			// reliability invariants, every long-lived background goroutine
 			// must use safeGo.
-			a.safeGo("pending-message-dispatch", func() { a.handleSubmit(pending) })
+			// handleResubmit, not handleSubmit: if the user submitted a NEW
+			// message in the tiny gap after processing cleared, the queued
+			// message must RE-QUEUE behind it — not get steered into the
+			// just-started turn as a mid-task follow-up.
+			a.safeGo("pending-message-dispatch", func() { a.handleResubmit(pending) })
 		}
 		a.saveRecoverySnapshot()
 	}()
@@ -581,7 +585,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 					defer timer.Stop()
 					select {
 					case <-timer.C:
-						a.handleSubmit(retryMsg)
+						// handleResubmit: never steer a programmatic retry
+						// into a turn the user started while we waited.
+						a.handleResubmit(retryMsg)
 					case <-a.ctx.Done():
 						return
 					}
@@ -592,11 +598,74 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 		a.clearRateLimitRetry(message)
 
+		// Auto-resume: if the error is a model round timeout, HTTP timeout,
+		// stream-idle, or retry-exhausted transient error, compact the context
+		// and retry — up to maxAutoResumeAttempts times. This prevents the
+		// "agent stopped at 14m" and "same error repeated (4x)" failures on
+		// long-running tasks. The compaction is the key recovery: a smaller
+		// context → less reasoning → the model finishes within the timeout.
+		// Mirrors the rate-limit auto-retry pattern (safeGo + timer).
+		if resumeAttempt, resumeDelay, ok := a.scheduleAutoResume(originalMessage, err); ok {
+			reason := autoResumeReason(err)
+			a.journalEvent("auto_resume_scheduled", map[string]any{
+				"attempt":  resumeAttempt,
+				"delay":    resumeDelay.String(),
+				"reason":   reason,
+				"error":    err.Error(),
+				"provider": ft.Provider,
+			})
+			logging.Info("auto-resume scheduled after terminal error",
+				"reason", reason,
+				"attempt", resumeAttempt,
+				"max_attempts", maxAutoResumeAttempts,
+				"delay", resumeDelay)
+
+			// Compact the context BEFORE the retry — this is the actual
+			// recovery mechanism. Without it, retrying with the same large
+			// context would hit the same timeout.
+			removed := a.performAutoResumeCompaction()
+
+			provider := a.shortActiveProviderName()
+			compactNote := ""
+			if removed > 0 {
+				compactNote = fmt.Sprintf(", compacted %d messages", removed)
+			}
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRetry,
+				Message: fmt.Sprintf("%s — auto-resume %d/%d in %v%s", reason, resumeAttempt, maxAutoResumeAttempts, resumeDelay.Round(time.Second), compactNote),
+				Details: map[string]any{
+					"attempt":     resumeAttempt,
+					"maxAttempts": maxAutoResumeAttempts,
+					"reason":      reason,
+					"provider":    provider,
+				},
+			})
+			a.safeSendToProgram(ui.ResponseDoneMsg{})
+
+			resumeMsg, resumeWait := originalMessage, resumeDelay
+			a.safeGo("auto-resume-retry", func() {
+				timer := time.NewTimer(resumeWait)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+					// handleResubmit: never steer a programmatic retry into
+					// a turn the user started while we waited.
+					a.handleResubmit(resumeMsg)
+				case <-a.ctx.Done():
+					return
+				}
+			})
+			return
+		}
+
+		a.clearAutoResume(originalMessage)
+
 		a.safeSendToProgram(ui.ErrorMsg(err))
 		return
 	}
 
 	a.clearRateLimitRetry(message)
+	a.clearAutoResume(originalMessage)
 
 	if a.reliability != nil {
 		a.reliability.RecordSuccess()

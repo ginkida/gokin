@@ -18,6 +18,12 @@ func TestClassifyGLMErrorCode_QuotaAndBalance(t *testing.T) {
 		{"1212", false, []string{"quota"}},
 		{"1211", false, []string{"balance"}},
 		{"1305", true, []string{"overload"}}, // overload stays retryable
+		// The 429 subscription/quota/plan/FUP codes are all hard failures — the
+		// only recovery is user action, so each must carry a switch-provider hint.
+		{"1309", false, []string{"subscription", "/provider"}},
+		{"1310", false, []string{"limit", "/provider"}},
+		{"1311", false, []string{"plan", "/provider"}},
+		{"1313", false, []string{"fair usage", "/provider"}},
 	}
 	for _, tc := range cases {
 		retryable, _, desc := classifyGLMErrorCode(tc.code, "raw provider message")
@@ -29,8 +35,9 @@ func TestClassifyGLMErrorCode_QuotaAndBalance(t *testing.T) {
 				t.Errorf("code %s description %q missing %q", tc.code, desc, sub)
 			}
 		}
-		if tc.code == "1308" && desc == "raw provider message" {
-			t.Errorf("1308 should be classified, not pass through the raw message")
+		// Classified codes must NEVER pass the raw provider message through.
+		if desc == "raw provider message" {
+			t.Errorf("code %s should be classified, not pass through the raw message", tc.code)
 		}
 	}
 }

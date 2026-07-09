@@ -21,6 +21,33 @@ func TestRenderContextBarAbsoluteTokens(t *testing.T) {
 	}
 }
 
+func TestRenderContextBarFractionalAndEstimated(t *testing.T) {
+	out := stripAnsi(renderContextBar(0.1444, 16, 144400, 1000000, 0, true))
+	if !strings.HasPrefix(out, "██▎") {
+		t.Errorf("14.44%% should use a fractional third cell, got: %q", out)
+	}
+	if !strings.Contains(out, "≈144.4K/1.0M") {
+		t.Errorf("estimated count should be visibly marked, got: %q", out)
+	}
+	if got := strings.Count(out, "█") + strings.Count(out, "▎") + strings.Count(out, "░"); got != 16 {
+		t.Errorf("bar occupies %d cells, want 16: %q", got, out)
+	}
+}
+
+func TestContextPercentPrefersConsistentAbsoluteCounts(t *testing.T) {
+	m := Model{
+		showTokens: true,
+		tokenUsage: &TokenUsageMsg{
+			Tokens:      250,
+			MaxTokens:   1000,
+			PercentUsed: 0.90, // stale/inconsistent transport value
+		},
+	}
+	if got := m.getContextPercent(); got != 0.25 {
+		t.Errorf("getContextPercent() = %v, want 0.25 from absolute counts", got)
+	}
+}
+
 func TestRenderContextBarPercentFallback(t *testing.T) {
 	// Without token counts, should fall back to percentage (pct * 100).
 	result := renderContextBar(0.75, 8, 0, 0, 0)

@@ -131,6 +131,34 @@ func (m OutputModel) View() string {
 	return m.styles.Viewport.Render(m.viewport.View())
 }
 
+// ViewWithHeight renders a copy of the viewport at the requested height
+// without mutating the live model. The top-level compositor uses this to leave
+// room for dynamic panels/input while keeping the status bar on the terminal's
+// final row.
+func (m OutputModel) ViewWithHeight(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	m.state.mu.Lock()
+	ready := m.state.ready
+	frozen := m.state.frozen
+	m.state.mu.Unlock()
+	if !ready {
+		return "Loading..."
+	}
+
+	m.viewport.Height = height
+	if !frozen {
+		m.viewport.GotoBottom()
+	} else {
+		maxOffset := max(m.viewport.TotalLineCount()-height, 0)
+		if m.viewport.YOffset > maxOffset {
+			m.viewport.YOffset = maxOffset
+		}
+	}
+	return m.styles.Viewport.Render(m.viewport.View())
+}
+
 // AppendText appends text to the output.
 func (m *OutputModel) AppendText(text string) {
 	m.state.mu.Lock()

@@ -219,6 +219,35 @@ func (fc *FallbackClient) CountTokens(ctx context.Context, contents []*genai.Con
 	return fc.clients[idx].CountTokens(ctx, contents)
 }
 
+// CountTokensWithAccuracy forwards per-call accuracy when supported.
+func (fc *FallbackClient) CountTokensWithAccuracy(ctx context.Context, contents []*genai.Content) (*genai.CountTokensResponse, bool, error) {
+	idx := fc.getCurrent()
+	active := fc.clients[idx]
+	if detailed, ok := active.(TokenCountWithAccuracy); ok {
+		return detailed.CountTokensWithAccuracy(ctx, contents)
+	}
+	resp, err := active.CountTokens(ctx, contents)
+	accuracy, ok := active.(TokenCountAccuracy)
+	return resp, ok && accuracy.TokenCountIsEstimate(), err
+}
+
+// TokenCountIsEstimate forwards the optional accuracy capability to the active
+// client in the fallback chain.
+func (fc *FallbackClient) TokenCountIsEstimate() bool {
+	idx := fc.getCurrent()
+	accuracy, ok := fc.clients[idx].(TokenCountAccuracy)
+	return ok && accuracy.TokenCountIsEstimate()
+}
+
+// TokenCountCacheKey forwards request-prefix cache state from the active client.
+func (fc *FallbackClient) TokenCountCacheKey() string {
+	idx := fc.getCurrent()
+	if keyer, ok := fc.clients[idx].(TokenCountCacheKey); ok {
+		return keyer.TokenCountCacheKey()
+	}
+	return fc.clients[idx].GetModel()
+}
+
 // GetModel returns the current active client's model name.
 func (fc *FallbackClient) GetModel() string {
 	idx := fc.getCurrent()

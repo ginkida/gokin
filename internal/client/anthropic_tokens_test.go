@@ -3,8 +3,10 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"google.golang.org/genai"
@@ -29,6 +31,88 @@ func TestAnthropicEstimateTokens(t *testing.T) {
 	if resp.TotalTokens <= 0 {
 		t.Error("estimated tokens should be > 0")
 	}
+}
+
+func TestAnthropicEstimateIncludesSystemAndTools(t *testing.T) {
+	c := &AnthropicClient{
+		config: AnthropicConfig{
+			Model:   "glm-5.2",
+			BaseURL: "https://api.z.ai",
+		},
+	}
+	contents := []*genai.Content{
+		genai.NewContentFromText("Hello", genai.RoleUser),
+	}
+
+	base, err := c.CountTokens(context.Background(), contents)
+	if err != nil {
+		t.Fatalf("base CountTokens error: %v", err)
+	}
+	c.SetSystemInstruction(strings.Repeat("system instruction ", 100))
+	c.SetTools([]*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{{
+			Name:        "read",
+			Description: strings.Repeat("tool description ", 100),
+		}},
+	}})
+	withPrefix, err := c.CountTokens(context.Background(), contents)
+	if err != nil {
+		t.Fatalf("prefixed CountTokens error: %v", err)
+	}
+	if withPrefix.TotalTokens <= base.TotalTokens {
+		t.Fatalf("system/tools did not increase estimate: base=%d prefixed=%d", base.TotalTokens, withPrefix.TotalTokens)
+	}
+	if !c.TokenCountIsEstimate() {
+		t.Fatal("compatible-provider CountTokens must be marked as estimated")
+	}
+}
+
+func TestAnthropicTokenCountCacheKeyTracksPrefix(t *testing.T) {
+	c := &AnthropicClient{
+		config: AnthropicConfig{Model: "glm-5.2", BaseURL: "https://api.z.ai"},
+	}
+	before := c.TokenCountCacheKey()
+	c.SetSystemInstruction("new system prompt")
+	after := c.TokenCountCacheKey()
+	if before == after {
+		t.Fatal("cache key did not change with system instruction")
+	}
+
+	c.SetTurnContext("ephemeral working state")
+	withTurnContext := c.TokenCountCacheKey()
+	if after == withTurnContext {
+		t.Fatal("cache key did not change with turn context")
+	}
+}
+
+func TestAnthropicNativeCountFallbackReportsEstimate(t *testing.T) {
+	c := &AnthropicClient{
+		config: AnthropicConfig{
+			Model:  "claude-sonnet-4-5-20250929",
+			APIKey: "test-key",
+		},
+		httpClient: &http.Client{Transport: failingRoundTripper{}},
+	}
+	contents := []*genai.Content{
+		genai.NewContentFromText("hello", genai.RoleUser),
+	}
+
+	resp, estimated, err := c.CountTokensWithAccuracy(context.Background(), contents)
+	if err != nil {
+		t.Fatalf("CountTokensWithAccuracy fallback error: %v", err)
+	}
+	if !estimated {
+		t.Fatal("native count endpoint failure was incorrectly labelled exact")
+	}
+	if resp == nil || resp.TotalTokens <= 0 {
+		t.Fatalf("fallback estimate = %+v, want positive count", resp)
+	}
+}
+
+type failingRoundTripper struct{}
+
+func (failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("count endpoint unavailable")
 }
 
 func TestAnthropicEstimateTokensGLM(t *testing.T) {

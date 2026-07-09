@@ -144,24 +144,27 @@ type TokenUsage struct {
 	PercentUsed  float64
 	NearLimit    bool
 	ExceedsLimit bool
-	IsEstimate   bool // True when token count is an estimate (API call failed)
+	IsEstimate   bool // True when the provider or fallback used local estimation
 }
 
 // cacheEntry holds a cached token count with its key.
 type cacheEntry struct {
-	key    string
-	tokens int
+	key        string
+	tokens     int
+	isEstimate bool
 }
 
 // TokenCounter handles token counting for context management.
 type TokenCounter struct {
-	client   client.Client
-	model    string
-	limits   TokenLimits
-	mu       sync.RWMutex
-	cache    map[string]*list.Element // content hash -> list element
-	lruList  *list.List               // LRU list (front = most recent)
-	maxCache int
+	client                   client.Client
+	model                    string
+	limits                   TokenLimits
+	maxInputTokensOverride   int
+	warningThresholdOverride float64
+	mu                       sync.RWMutex
+	cache                    map[string]*list.Element // content hash -> list element
+	lruList                  *list.List               // LRU list (front = most recent)
+	maxCache                 int
 }
 
 // NewTokenCounter creates a new token counter.
@@ -183,7 +186,7 @@ func NewTokenCounter(c client.Client, model string, cfg *config.ContextConfig) *
 		limits.WarningThreshold = 0.8
 	}
 
-	return &TokenCounter{
+	counter := &TokenCounter{
 		client:   c,
 		model:    model,
 		limits:   limits,
@@ -191,6 +194,11 @@ func NewTokenCounter(c client.Client, model string, cfg *config.ContextConfig) *
 		lruList:  list.New(),
 		maxCache: 1000,
 	}
+	if cfg != nil {
+		counter.maxInputTokensOverride = cfg.MaxInputTokens
+		counter.warningThresholdOverride = cfg.WarningThreshold
+	}
+	return counter
 }
 
 // SetClient updates the underlying client.
@@ -201,6 +209,35 @@ func (t *TokenCounter) SetClient(c client.Client) {
 	// Also update model limits as model might have changed
 	t.model = c.GetModel()
 	t.limits = getModelLimits(t.model)
+	t.applyOverridesLocked()
+	t.cache = make(map[string]*list.Element)
+	t.lruList.Init()
+}
+
+// SetConfig updates token-limit overrides without rebuilding the manager.
+func (t *TokenCounter) SetConfig(cfg *config.ContextConfig) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.maxInputTokensOverride = 0
+	t.warningThresholdOverride = 0
+	if cfg != nil {
+		t.maxInputTokensOverride = cfg.MaxInputTokens
+		t.warningThresholdOverride = cfg.WarningThreshold
+	}
+	t.limits = getModelLimits(t.model)
+	t.applyOverridesLocked()
+}
+
+func (t *TokenCounter) applyOverridesLocked() {
+	if t.maxInputTokensOverride > 0 {
+		t.limits.MaxInputTokens = t.maxInputTokensOverride
+	}
+	if t.warningThresholdOverride > 0 {
+		t.limits.WarningThreshold = t.warningThresholdOverride
+	}
+	if t.limits.WarningThreshold == 0 {
+		t.limits.WarningThreshold = 0.8
+	}
 }
 
 // GetModelLimits returns limits for a model, with fallback defaults.
@@ -247,41 +284,80 @@ func getModelLimits(model string) TokenLimits {
 
 // CountContents counts tokens for a list of contents using the API.
 func (t *TokenCounter) CountContents(ctx context.Context, contents []*genai.Content) (int, error) {
+	count, _, err := t.CountContentsWithAccuracy(ctx, contents)
+	return count, err
+}
+
+// CountContentsWithAccuracy returns the token count and whether it is an
+// estimate. Accuracy is cached with the count so a native-count fallback is
+// never later relabelled as exact on a cache hit.
+func (t *TokenCounter) CountContentsWithAccuracy(ctx context.Context, contents []*genai.Content) (int, bool, error) {
 	// Try cache first
 	hash := t.hashContents(contents)
-	if count, ok := t.getFromCache(hash); ok {
-		return count, nil
+	if entry, ok := t.getEntryFromCache(hash); ok {
+		return entry.tokens, entry.isEstimate, nil
 	}
 
 	// Count via API
-	resp, err := t.client.CountTokens(ctx, contents)
+	t.mu.RLock()
+	c := t.client
+	t.mu.RUnlock()
+	if c == nil {
+		return 0, true, fmt.Errorf("token counter client is nil")
+	}
+	var resp *genai.CountTokensResponse
+	var isEstimate bool
+	var err error
+	if detailed, ok := c.(client.TokenCountWithAccuracy); ok {
+		resp, isEstimate, err = detailed.CountTokensWithAccuracy(ctx, contents)
+	} else {
+		resp, err = c.CountTokens(ctx, contents)
+		if accuracy, ok := c.(client.TokenCountAccuracy); ok {
+			isEstimate = accuracy.TokenCountIsEstimate()
+		}
+	}
 	if err != nil {
-		return 0, err
+		return 0, true, err
+	}
+	if resp == nil {
+		return 0, true, fmt.Errorf("token counter client returned nil response")
 	}
 
 	count := int(resp.TotalTokens)
 
 	// Cache the result
-	t.addToCache(hash, count)
+	t.addToCacheWithAccuracy(hash, count, isEstimate)
 
-	return count, nil
+	return count, isEstimate, nil
 }
 
 // getFromCache retrieves a value from cache and moves it to front (LRU).
 func (t *TokenCounter) getFromCache(key string) (int, bool) {
+	entry, ok := t.getEntryFromCache(key)
+	if !ok {
+		return 0, false
+	}
+	return entry.tokens, true
+}
+
+func (t *TokenCounter) getEntryFromCache(key string) (cacheEntry, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if elem, ok := t.cache[key]; ok {
 		// Move to front (most recently used)
 		t.lruList.MoveToFront(elem)
-		return elem.Value.(*cacheEntry).tokens, true
+		return *elem.Value.(*cacheEntry), true
 	}
-	return 0, false
+	return cacheEntry{}, false
 }
 
 // addToCache adds a value to cache with LRU eviction.
 func (t *TokenCounter) addToCache(key string, tokens int) {
+	t.addToCacheWithAccuracy(key, tokens, false)
+}
+
+func (t *TokenCounter) addToCacheWithAccuracy(key string, tokens int, isEstimate bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -289,6 +365,7 @@ func (t *TokenCounter) addToCache(key string, tokens int) {
 	if elem, ok := t.cache[key]; ok {
 		t.lruList.MoveToFront(elem)
 		elem.Value.(*cacheEntry).tokens = tokens
+		elem.Value.(*cacheEntry).isEstimate = isEstimate
 		return
 	}
 
@@ -302,7 +379,7 @@ func (t *TokenCounter) addToCache(key string, tokens int) {
 	}
 
 	// Add new entry
-	entry := &cacheEntry{key: key, tokens: tokens}
+	entry := &cacheEntry{key: key, tokens: tokens, isEstimate: isEstimate}
 	elem := t.lruList.PushFront(entry)
 	t.cache[key] = elem
 }
@@ -404,6 +481,16 @@ func (t *TokenCounter) InvalidateCache() {
 // hashContents creates a hash of contents for caching.
 func (t *TokenCounter) hashContents(contents []*genai.Content) string {
 	h := sha256.New()
+	t.mu.RLock()
+	c := t.client
+	t.mu.RUnlock()
+	if keyer, ok := c.(client.TokenCountCacheKey); ok {
+		h.Write([]byte(keyer.TokenCountCacheKey()))
+		h.Write([]byte{0})
+	} else if c != nil {
+		h.Write([]byte(c.GetModel()))
+		h.Write([]byte{0})
+	}
 	for _, content := range contents {
 		h.Write([]byte(content.Role))
 		for _, part := range content.Parts {

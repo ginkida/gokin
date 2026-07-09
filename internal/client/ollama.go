@@ -481,6 +481,18 @@ func (c *OllamaClient) CountTokens(ctx context.Context, contents []*genai.Conten
 	}, nil
 }
 
+// TokenCountIsEstimate reports that Ollama pre-counting is character based.
+func (c *OllamaClient) TokenCountIsEstimate() bool {
+	return true
+}
+
+// TokenCountCacheKey includes model identity in the count cache.
+func (c *OllamaClient) TokenCountCacheKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.config.Model
+}
+
 // GetModel returns the model name.
 func (c *OllamaClient) GetModel() string {
 	c.mu.RLock()

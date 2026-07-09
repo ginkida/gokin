@@ -62,8 +62,8 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	}
 
 	width := m.width - 2
-	if width < 40 {
-		width = 40
+	if width < 1 {
+		width = 1
 	}
 
 	accent := m.liveActivityAccentColor()
@@ -97,7 +97,10 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	// line below the card. Same colour scheme (state accent) either way.
 	firstGlyph := "▎"
 	if m.state == StateProcessing || m.state == StateStreaming {
-		elapsed := time.Since(m.streamStartTime)
+		elapsed := time.Duration(0)
+		if !m.streamStartTime.IsZero() {
+			elapsed = time.Since(m.streamStartTime)
+		}
 		frameIdx := int(elapsed.Milliseconds()/80) % len(spinnerFramesCard)
 		firstGlyph = spinnerFramesCard[frameIdx]
 	}
@@ -107,7 +110,7 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	// so the animation doesn't become visually noisy.
 	var out strings.Builder
 	out.WriteString(barStyle.Render(firstGlyph) + " ")
-	out.WriteString(valueStyle.Render(truncateRunes(current, width-2)))
+	out.WriteString(valueStyle.Render(truncateRunes(current, max(width-2, 1))))
 
 	// Todo progress: when the agent is working through a plan (todo list),
 	// surface the currently-active step (or next pending) so users see
@@ -117,7 +120,7 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	if todo := m.liveActivityTodoLine(); todo != "" {
 		out.WriteByte('\n')
 		out.WriteString(barStyle.Render("▎") + " " +
-			valueStyle.Render(truncateRunes(todo, width-2)))
+			valueStyle.Render(truncateRunes(todo, max(width-2, 1))))
 	}
 
 	if !feedOpen {
@@ -130,7 +133,7 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 			out.WriteByte('\n')
 			out.WriteString(barStyle.Render("▎") + " " +
 				dimStyle.Render("→ ") +
-				valueStyle.Render(truncateRunes(next, width-4)))
+				valueStyle.Render(truncateRunes(next, max(width-4, 1))))
 		}
 	}
 
@@ -158,6 +161,9 @@ func (m Model) liveActivityAccentColor() lipgloss.Color {
 // threshold, so the working line answers "is it hung, or working?" the way CC's
 // `(12s)` does. Below 3s it returns s unchanged (no jittery early clock).
 func (m Model) withElapsed(s string) string {
+	if m.streamStartTime.IsZero() {
+		return s
+	}
 	if elapsed := time.Since(m.streamStartTime); elapsed >= 3*time.Second {
 		return s + " · " + format.Duration(elapsed)
 	}

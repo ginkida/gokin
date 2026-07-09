@@ -231,6 +231,7 @@ func (m *ContextManager) SetConfig(cfg *config.ContextConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config = cfg
+	m.tokenCounter.SetConfig(cfg)
 	if m.summarizer != nil {
 		m.summarizer.SetConfig(cfg)
 	}
@@ -251,6 +252,13 @@ func (m *ContextManager) onSessionChange(event chat.ChangeEvent) {
 		m.trackKeyFiles(event)
 	}
 
+	// Reserve a unique version before launching the worker. Multiple session
+	// changes can otherwise observe the same version and complete out of order.
+	m.mu.Lock()
+	m.updateVersion++
+	versionBefore := m.updateVersion
+	m.mu.Unlock()
+
 	// Update token count asynchronously
 	go func() {
 		defer func() {
@@ -259,16 +267,11 @@ func (m *ContextManager) onSessionChange(event chat.ChangeEvent) {
 			}
 		}()
 
-		m.mu.RLock()
-		versionBefore := m.updateVersion
-		m.mu.RUnlock()
-
 		tctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 		defer cancel()
 
 		history := m.session.GetHistory()
-		tokens, err := m.tokenCounter.CountContents(tctx, history)
-		isEstimate := false
+		tokens, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(tctx, history)
 		if err != nil {
 			tokens = EstimateContentsTokens(history)
 			isEstimate = true
@@ -322,6 +325,7 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 
 	m.mu.Lock()
 	m.updateVersion++
+	countVersion := m.updateVersion
 	m.currentTokens = tokens
 	m.lastEstimatedTokens = tokens
 	m.lastHistoryLen = len(history)
@@ -347,6 +351,7 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 		m.lastEstimatedTokens = tokens
 		m.lastHistoryLen = len(history)
 		usage = m.tokenCounter.GetUsage(tokens)
+		usage.IsEstimate = true
 		m.lastUsage = &usage
 		m.mu.Unlock()
 	}
@@ -365,18 +370,20 @@ func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
 			asyncCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 			defer cancel()
 
-			precise, err := m.tokenCounter.CountContents(asyncCtx, history)
+			precise, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(asyncCtx, history)
 			if err != nil {
 				return // Keep using estimate
 			}
 			m.metrics.RecordAPICount()
 
 			m.mu.Lock()
-			m.lastEstimatedTokens = precise
-			m.currentTokens = precise
-			u := m.tokenCounter.GetUsage(precise)
-			u.IsEstimate = false
-			m.lastUsage = &u
+			if m.updateVersion == countVersion {
+				m.lastEstimatedTokens = precise
+				m.currentTokens = precise
+				u := m.tokenCounter.GetUsage(precise)
+				u.IsEstimate = isEstimate
+				m.lastUsage = &u
+			}
 			m.mu.Unlock()
 		}()
 	default:
@@ -574,14 +581,17 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 	}
 
 	// Recount tokens
-	tokens, err := m.tokenCounter.CountContents(ctx, newHistory)
+	tokens, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(ctx, newHistory)
 	if err != nil {
 		tokens = EstimateContentsTokens(newHistory)
+		isEstimate = true
 	}
 
 	m.mu.Lock()
+	m.updateVersion++
 	m.currentTokens = tokens
 	usage := m.tokenCounter.GetUsage(tokens)
+	usage.IsEstimate = isEstimate
 	m.lastUsage = &usage
 	m.mu.Unlock()
 
@@ -643,8 +653,7 @@ func (m *ContextManager) GetCurrentTokens() int {
 func (m *ContextManager) UpdateTokenCount(ctx context.Context) error {
 	history := m.session.GetHistory()
 
-	tokens, err := m.tokenCounter.CountContents(ctx, history)
-	isEstimate := false
+	tokens, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(ctx, history)
 	if err != nil {
 		tokens = EstimateContentsTokens(history)
 		isEstimate = true
@@ -659,6 +668,23 @@ func (m *ContextManager) UpdateTokenCount(ctx context.Context) error {
 	m.mu.Unlock()
 
 	return nil
+}
+
+// ObserveAPIUsage records prompt usage reported by the provider for an actual
+// request. It is the highest-quality measurement available and supersedes any
+// in-flight local count for an older snapshot.
+func (m *ContextManager) ObserveAPIUsage(inputTokens int) {
+	if inputTokens <= 0 {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateVersion++
+	m.currentTokens = inputTokens
+	usage := m.tokenCounter.GetUsage(inputTokens)
+	usage.IsEstimate = false
+	m.lastUsage = &usage
 }
 
 // NeedsSummarization checks if the context needs summarization.
@@ -854,14 +880,17 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	}
 
 	// Update token count
-	tokens, err := m.tokenCounter.CountContents(ctx, newHistory)
+	tokens, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(ctx, newHistory)
 	if err != nil {
 		tokens = EstimateContentsTokens(newHistory)
+		isEstimate = true
 	}
 
 	m.mu.Lock()
+	m.updateVersion++
 	m.currentTokens = tokens
 	usage := m.tokenCounter.GetUsage(tokens)
+	usage.IsEstimate = isEstimate
 	m.lastUsage = &usage
 	m.mu.Unlock()
 

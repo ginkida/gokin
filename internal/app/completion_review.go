@@ -108,7 +108,13 @@ func (a *App) runCompletionReviewIfNeeded(
 	ledgerSummary := a.snapshotResponseEvidence().FormatForCompletionReview()
 	reviewPrompt := donegate.BuildCompletionReviewPrompt(userMessage, *response, touchedPaths, commands, gitChangedPaths, falselyClaimed, ledgerSummary)
 	history := a.session.GetHistory()
+	// This Execute is an INTERNAL exchange — a user message typed during the
+	// review must become the NEXT turn (pending queue), not get steered into
+	// the review conversation: on this function's error path newHistory is
+	// discarded, which would silently LOSE an accepted steer.
+	resumeSteering := a.executor.SuspendUserSteering()
 	newHistory, reviewResponse, err := a.executor.Execute(ctx, history, reviewPrompt)
+	resumeSteering()
 	in, out := a.executor.GetLastTokenUsage()
 	_, cacheRead := a.executor.GetLastCacheMetrics()
 	if apiInputAccum != nil {

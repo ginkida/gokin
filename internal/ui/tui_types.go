@@ -154,7 +154,7 @@ type (
 		MaxTokens    int
 		PercentUsed  float64
 		NearLimit    bool
-		IsEstimate   bool // True when token count is an estimate (API call failed)
+		IsEstimate   bool // True when the provider or fallback used local estimation
 	}
 	ProjectInfoMsg struct {
 		ProjectType string
@@ -416,6 +416,13 @@ type RuntimeStatusSnapshot struct {
 	HasHeartbeat       bool
 	DegradedRemaining  time.Duration
 	ConsecutiveFailure int
+	// MCP server health for the status-bar "MCP N/M" badge. Fed by the same
+	// ~1/sec polled snapshot as everything else here — the badge fields had
+	// ZERO writers since v0.69.3 removed their only setter, so the "server
+	// died mid-session" state was invisible in the chrome (round 9,
+	// dead-mcp-health-badge).
+	MCPHealthy int
+	MCPTotal   int
 }
 
 // RuntimeStatusMsg delivers a runtime status snapshot fetched in the background.

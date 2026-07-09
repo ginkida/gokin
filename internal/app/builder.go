@@ -1347,18 +1347,9 @@ func (b *Builder) initIntegrations() error {
 		}
 	}
 
-	// Wire up coordinate tool with coordinator factory
-	if coordTool, ok := b.registry.Get("coordinate"); ok {
-		if ct, ok := coordTool.(*tools.CoordinateTool); ok {
-			runner := b.agentRunner
-			ct.SetCoordinatorFactory(func() any {
-				coordConfig := &agent.CoordinatorConfig{MaxParallel: 3}
-				coord := agent.NewCoordinator(b.ctx, runner, coordConfig)
-				return &coordinatorToolAdapter{coord: coord}
-			})
-			logging.Debug("coordinate tool wired")
-		}
-	}
+	// The coordinate tool's coordinator factory is wired in wireDependencies
+	// (PHASE 5), where the App exists — each per-call coordinator's
+	// task-start/complete callbacks must feed app.sendAgentTreeUpdateFrom.
 
 	if err := b.initMCP(); err != nil {
 		return err
@@ -2045,6 +2036,30 @@ func (b *Builder) wireDependencies() error {
 		logging.Debug("coordinator UI broadcaster wired")
 	}
 
+	// Wire the coordinate tool's coordinator factory HERE (not in
+	// initIntegrations) so each per-call coordinator's callbacks can reach the
+	// App. These fresh coordinators are the ONLY ones that ever hold tasks —
+	// without this wiring the Agent Tree panel never received a single update
+	// in production (round 9, agent-tree-dead-coordinator). Keep exactly ONE
+	// SetCoordinatorFactory call site so the wiring can't drift.
+	if coordTool, ok := b.registry.Get("coordinate"); ok {
+		if ct, ok := coordTool.(*tools.CoordinateTool); ok {
+			runner := b.agentRunner
+			appCtx := b.ctx
+			ct.SetCoordinatorFactory(func() any {
+				coordConfig := &agent.CoordinatorConfig{MaxParallel: 3}
+				coord := agent.NewCoordinator(appCtx, runner, coordConfig)
+				coord.SetCallbacks(
+					func(*agent.CoordinatedTask) { app.sendAgentTreeUpdateFrom(coord) },
+					func(*agent.CoordinatedTask, *agent.AgentResult) { app.sendAgentTreeUpdateFrom(coord) },
+					nil,
+				)
+				return &coordinatorToolAdapter{coord: coord}
+			})
+			logging.Debug("coordinate tool wired (agent-tree callbacks attached)")
+		}
+	}
+
 	// Wire MetaAgent intervention callback to TUI toast
 	if b.metaAgent != nil {
 		b.metaAgent.SetInterventionCallback(func(agentID, reason, action, message string) {
@@ -2167,6 +2182,7 @@ func (b *Builder) assembleApp() *App {
 		exampleStore: b.exampleStore,
 		// Auto retry tracking
 		rateLimitRetryCount: make(map[string]int),
+		autoResumeCount:     make(map[string]int),
 		// Step rollback snapshots
 		stepRollbackSnapshots: make(map[string]*stepRollbackSnapshot),
 	}

@@ -470,31 +470,43 @@ func (c *AnthropicClient) SetStatusCallback(cb StatusCallback) {
 // For native Anthropic, uses the /v1/messages/count_tokens API endpoint.
 // For compatible providers (GLM, DeepSeek, MiniMax, Kimi), falls back to estimation.
 func (c *AnthropicClient) CountTokens(ctx context.Context, contents []*genai.Content) (*genai.CountTokensResponse, error) {
+	resp, _, err := c.CountTokensWithAccuracy(ctx, contents)
+	return resp, err
+}
+
+// CountTokensWithAccuracy returns the count plus whether it came from local
+// estimation. Native Anthropic can change accuracy per call when its count
+// endpoint fails, so a static provider capability is insufficient.
+func (c *AnthropicClient) CountTokensWithAccuracy(ctx context.Context, contents []*genai.Content) (*genai.CountTokensResponse, bool, error) {
 	// Only native Anthropic has the count_tokens endpoint
 	c.mu.RLock()
 	baseURL := c.config.BaseURL
 	model := c.config.Model
 	apiKey := c.config.APIKey
 	sysInstruction := c.systemInstruction
+	turnContext := c.turnContext
 	tools := c.tools
 	c.mu.RUnlock()
 
 	if baseURL == DefaultAnthropicBaseURL || baseURL == "" {
-		resp, err := c.countTokensNative(ctx, contents, model, apiKey, sysInstruction, tools)
+		resp, err := c.countTokensNative(ctx, contents, model, apiKey, sysInstruction, turnContext, tools)
 		if err != nil {
 			// Fall back to estimation if native counting fails
 			logging.Debug("native token counting failed, using estimation", "error", err)
-			return c.estimateTokens(contents, model)
+			estimated, estimateErr := c.estimateTokens(contents, model, sysInstruction, turnContext, tools)
+			return estimated, true, estimateErr
 		}
-		return resp, nil
+		return resp, false, nil
 	}
 
-	return c.estimateTokens(contents, model)
+	estimated, err := c.estimateTokens(contents, model, sysInstruction, turnContext, tools)
+	return estimated, true, err
 }
 
 // countTokensNative uses Anthropic's /v1/messages/count_tokens endpoint.
-func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*genai.Content, model, apiKey, sysInstruction string, tools []*genai.Tool) (*genai.CountTokensResponse, error) {
+func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*genai.Content, model, apiKey, sysInstruction, turnContext string, tools []*genai.Tool) (*genai.CountTokensResponse, error) {
 	messages := c.convertHistoryToMessages(contents, "")
+	messages = appendTurnContextBlock(messages, turnContext)
 
 	// Remove empty trailing message if convertHistoryToMessages appended one
 	if len(messages) > 0 {
@@ -584,8 +596,19 @@ func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*gen
 
 // estimateTokens provides a character-based token estimation for non-Anthropic providers.
 // Uses rune count (not byte count) so non-ASCII text is measured correctly.
-func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model string) (*genai.CountTokensResponse, error) {
+func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model, sysInstruction, turnContext string, tools []*genai.Tool) (*genai.CountTokensResponse, error) {
 	totalChars := 0
+	if sysInstruction != "" {
+		totalChars += utf8.RuneCountInString(sysInstruction)
+	}
+	if turnContext != "" {
+		totalChars += utf8.RuneCountInString(turnContext)
+	}
+	if len(tools) > 0 {
+		if toolsJSON, err := json.Marshal(c.convertToolsToAnthropicFrom(tools)); err == nil {
+			totalChars += utf8.RuneCount(toolsJSON)
+		}
+	}
 	for _, content := range contents {
 		for _, part := range content.Parts {
 			if part.Text != "" {
@@ -615,6 +638,24 @@ func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model string
 	return &genai.CountTokensResponse{
 		TotalTokens: estimatedTokens,
 	}, nil
+}
+
+// TokenCountIsEstimate reports whether CountTokens uses the provider's native
+// tokenizer. Anthropic-compatible gateways currently use local estimation.
+func (c *AnthropicClient) TokenCountIsEstimate() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.config.BaseURL != "" && c.config.BaseURL != DefaultAnthropicBaseURL
+}
+
+// TokenCountCacheKey includes request prefix state omitted from contents.
+func (c *AnthropicClient) TokenCountCacheKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	toolsJSON, _ := json.Marshal(c.convertToolsToAnthropicFrom(c.tools))
+	return c.config.BaseURL + "\x00" + c.config.Model + "\x00" +
+		c.systemInstruction + "\x00" + c.turnContext + "\x00" + string(toolsJSON)
 }
 
 // GetModel returns the model name.
@@ -791,7 +832,11 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 //   - 1210: too-many-requests            → retryable
 //   - 1211/1213: insufficient balance    → non-retryable (user must top up)
 //   - 1212: quota exceeded               → non-retryable
-//   - 1308: quota / balance exhausted    → non-retryable (actionable hint)
+//   - 1308: quota / balance exhausted (5-hour cap) → non-retryable
+//   - 1309: subscription temporarily unavailable → non-retryable (renew on z.ai/subscribe)
+//   - 1310: weekly/monthly limit exhausted → non-retryable (reset at next_flush_time)
+//   - 1311: plan does not include model  → non-retryable (upgrade plan)
+//   - 1313: Fair Usage Policy block      → non-retryable (account action)
 //   - 1214/1215: auth failure            → non-retryable
 //   - 1301: concurrency limit            → retryable
 //   - 1302/1303: throughput limit        → retryable
@@ -816,6 +861,24 @@ func classifyGLMErrorCode(code, message string) (retryable bool, keyword, descri
 		// its cap). Non-retryable; the only recovery is topping up or switching
 		// provider, so say that instead of leaking a raw code.
 		return false, "", "GLM quota/balance exhausted — top up your GLM plan or switch provider with /provider"
+	case "1309":
+		// "Service is temporarily unavailable. You can resume using it after
+		// renewing the subscription on the official website." A hard subscription
+		// state — retrying within the session cannot renew it.
+		return false, "", "GLM subscription needs renewal — renew on z.ai/subscribe or switch provider with /provider"
+	case "1310":
+		// "Weekly/Monthly Limit Exhausted. Your limit will reset at
+		// {next_flush_time}." Like 1308 but on the weekly/monthly window; the
+		// reset time is extracted by terminalProviderMessage.
+		return false, "", "GLM weekly/monthly limit exhausted — wait for the reset or switch provider with /provider"
+	case "1311":
+		// "Your current subscription plan does not yet include access to
+		// {model_name}." A plan-tier gate; retrying the same model can't unlock it.
+		return false, "", "GLM plan does not include this model — upgrade your plan or switch provider with /provider"
+	case "1313":
+		// "Your account's current usage pattern does not comply with the Fair
+		// Usage Policy." A hard account block; only user action resolves it.
+		return false, "", "GLM Fair Usage Policy block — check your account or switch provider with /provider"
 	case "1214", "1215":
 		return false, "", "GLM authentication failed — check API key"
 	}
@@ -838,6 +901,10 @@ var glmTerminalCodes = map[string]bool{
 	"1214": true, // auth failure
 	"1215": true, // auth failure
 	"1308": true, // 5-hour usage cap / balance exhausted
+	"1309": true, // subscription temporarily unavailable — renew on z.ai/subscribe
+	"1310": true, // weekly/monthly limit exhausted (reset at next_flush_time)
+	"1311": true, // plan does not include the requested model
+	"1313": true, // Fair Usage Policy block
 }
 
 func isGLMTerminalCode(code string) bool { return glmTerminalCodes[code] }
