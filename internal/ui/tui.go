@@ -3567,18 +3567,14 @@ func (m Model) View() string {
 	// multi-line input and toasts consume space from the viewport instead of
 	// growing the whole frame past the terminal height.
 	outputBudget := m.height - lipgloss.Height(withoutOutput) - lipgloss.Height(statusBar) - 1
+	// ViewWithHeight GUARANTEES exactly outputBudget rows (see its contract) —
+	// no post-hoc correction here. The old shrink loop that "fit" an
+	// overshooting render walked the budget down to ZERO on short content
+	// (styled viewport padding used to add one extra row), blanking the output
+	// and floating the input box to the top of the screen.
 	outputView := m.output.ViewWithHeight(max(outputBudget, 0))
 	if isModal && outputView != "" {
 		outputView = lipgloss.NewStyle().Faint(true).Render(outputView)
-	}
-	// Viewport styling can add vertical margin. Fit against the measured budget
-	// rather than assuming viewport.Height equals rendered height.
-	for outputBudget > 0 && lipgloss.Height(outputView) > outputBudget {
-		outputBudget -= lipgloss.Height(outputView) - outputBudget
-		outputView = m.output.ViewWithHeight(max(outputBudget, 0))
-		if isModal && outputView != "" {
-			outputView = lipgloss.NewStyle().Faint(true).Render(outputView)
-		}
 	}
 
 	body := strings.Replace(preStatus, outputMarker, outputView, 1)

@@ -135,6 +135,15 @@ func (m OutputModel) View() string {
 // without mutating the live model. The top-level compositor uses this to leave
 // room for dynamic panels/input while keeping the status bar on the terminal's
 // final row.
+//
+// CONTRACT: the result is EXACTLY `height` rows. The compositor's frame math
+// (View's outputBudget) depends on it: with SHORT content the styled viewport
+// used to render height+1 rows, View's shrink loop "corrected" by walking the
+// budget down one row per pass all the way to zero, the output vanished
+// entirely, and the whole footer (input box) floated to the TOP of the screen
+// with the slack inserted before the status bar — the "input at the top" field
+// regression. exactRows pads/trims at the source so no caller ever sees a
+// row-count surprise.
 func (m OutputModel) ViewWithHeight(height int) string {
 	if height <= 0 {
 		return ""
@@ -144,7 +153,7 @@ func (m OutputModel) ViewWithHeight(height int) string {
 	frozen := m.state.frozen
 	m.state.mu.Unlock()
 	if !ready {
-		return "Loading..."
+		return exactRows("Loading...", height)
 	}
 
 	m.viewport.Height = height
@@ -156,7 +165,25 @@ func (m OutputModel) ViewWithHeight(height int) string {
 			m.viewport.YOffset = maxOffset
 		}
 	}
-	return m.styles.Viewport.Render(m.viewport.View())
+	return exactRows(m.styles.Viewport.Render(m.viewport.View()), height)
+}
+
+// exactRows normalizes s to exactly the requested number of rows: extra
+// TRAILING rows (style padding overshoot) are dropped, missing rows are added
+// as trailing blanks. Content rows are never touched from the top, so the
+// scroll position the viewport computed stays intact.
+func exactRows(s string, rows int) string {
+	if rows <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > rows {
+		lines = lines[:rows]
+	}
+	for len(lines) < rows {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // AppendText appends text to the output.

@@ -62,3 +62,64 @@ func TestFrameGeometryAcrossStatesAndTerminalSizes(t *testing.T) {
 		}
 	}
 }
+
+// TestFrameGeometry_ShortContentKeepsInputAtBottom pins the v0.100.70 field
+// regression: with SHORT output content (a fresh conversation) the styled
+// viewport rendered one row MORE than requested, View's old shrink loop
+// "corrected" by walking the output budget down to ZERO, the output vanished,
+// and the input box floated to the TOP of the screen with all the slack
+// inserted before the status bar. The original geometry matrix always filled
+// the viewport with 40 lines, so the short-content shape was never covered.
+// ViewWithHeight now guarantees exactly the requested rows (exactRows) and
+// the shrink loop is gone.
+func TestFrameGeometry_ShortContentKeepsInputAtBottom(t *testing.T) {
+	for _, fill := range []struct {
+		name  string
+		lines int
+	}{
+		{"short_3_lines", 3},
+		{"medium_10_lines", 10},
+		{"long_40_lines", 40},
+	} {
+		t.Run(fill.name, func(t *testing.T) {
+			m := NewModel()
+			m.workDir = "/home/test/github/gokin"
+			m.currentModel = "glm-5.2"
+			m.state = StateInput
+			m.applyResize(&tea.WindowSizeMsg{Width: 100, Height: 30})
+			for i := 0; i < fill.lines; i++ {
+				m.output.AppendText(fmt.Sprintf("output line %d\n", i))
+			}
+
+			view := stripAnsi(m.View())
+			lines := strings.Split(view, "\n")
+
+			if got := lipgloss.Height(view); got != 30 {
+				t.Fatalf("frame height = %d, want 30", got)
+			}
+
+			// The output content must be VISIBLE (the shrink-loop bug blanked
+			// it entirely).
+			lastContent := fmt.Sprintf("output line %d", fill.lines-1)
+			if !strings.Contains(view, lastContent) {
+				t.Fatalf("output content %q missing from the frame:\n%s", lastContent, view)
+			}
+
+			// The input prompt must sit in the BOTTOM quarter of the frame,
+			// right above the status bar — never float to the top.
+			inputRow := -1
+			for i, line := range lines {
+				if strings.Contains(line, "›") {
+					inputRow = i
+				}
+			}
+			if inputRow == -1 {
+				t.Fatalf("input prompt not found in frame:\n%s", view)
+			}
+			if inputRow < len(lines)*3/4 {
+				t.Fatalf("input prompt floated up: row %d of %d (must be in the bottom quarter)\n%s",
+					inputRow, len(lines), view)
+			}
+		})
+	}
+}
