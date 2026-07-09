@@ -3566,7 +3566,14 @@ func (m Model) View() string {
 	// Reserve one separator row and the final status row. Dynamic panels,
 	// multi-line input and toasts consume space from the viewport instead of
 	// growing the whole frame past the terminal height.
-	outputBudget := m.height - lipgloss.Height(withoutOutput) - lipgloss.Height(statusBar) - 1
+	// Budget identity: the marker sits on its OWN row of preStatus, and the
+	// substitution REPLACES that row with the output view — so
+	// bodyRows = Height(withoutOutput) - 1 + outputBudget, and the frame is
+	// body + "\n" + statusBar (the status bar directly below the last body
+	// row, NO separator: the old "-1 reservation + gap" math wedged 2-3 blank
+	// rows between the input box and the status bar). Solving
+	// bodyRows + Height(statusBar) = m.height gives the +1.
+	outputBudget := m.height - lipgloss.Height(withoutOutput) - lipgloss.Height(statusBar) + 1
 	// ViewWithHeight GUARANTEES exactly outputBudget rows (see its contract) —
 	// no post-hoc correction here. The old shrink loop that "fit" an
 	// overshooting render walked the budget down to ZERO on short content
@@ -3579,15 +3586,14 @@ func (m Model) View() string {
 
 	body := strings.Replace(preStatus, outputMarker, outputView, 1)
 	body = fitVisualWidth(body, m.width)
-	maxBodyHeight := max(m.height-lipgloss.Height(statusBar)-1, 0)
+	maxBodyHeight := max(m.height-lipgloss.Height(statusBar), 0)
 	body = tailVisualRows(body, maxBodyHeight)
-	gap := m.height - lipgloss.Height(body) - lipgloss.Height(statusBar)
-	if gap < 1 {
-		gap = 1
-	}
-	frame := body + strings.Repeat("\n", gap) + statusBar
+	// Status bar directly below the body — no separator rows. Degenerate
+	// shapes (tiny terminals clamping the budget to 0) can leave the frame
+	// short; pad ABOVE the status bar so it stays on the terminal's final row.
+	frame := body + "\n" + statusBar
 	if missing := m.height - lipgloss.Height(frame); missing > 0 {
-		frame = body + strings.Repeat("\n", gap+missing) + statusBar
+		frame = body + strings.Repeat("\n", 1+missing) + statusBar
 	}
 	return m.styles.App.Render(frame)
 }

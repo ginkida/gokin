@@ -123,3 +123,60 @@ func TestFrameGeometry_ShortContentKeepsInputAtBottom(t *testing.T) {
 		})
 	}
 }
+
+// TestFrameGeometry_NoGapBetweenInputAndStatusBar pins the follow-up to the
+// v0.100.71 hotfix: the input box was back at the bottom, but the compositor
+// still reserved a separator row AND double-counted the marker row, leaving
+// 2-3 blank rows wedged between the input's bottom border and the status bar.
+// The slack belongs ABOVE the input (inside the output region), with the
+// footer hugging the terminal's last rows — the pre-v0.100.70 look.
+func TestFrameGeometry_NoGapBetweenInputAndStatusBar(t *testing.T) {
+	for _, fill := range []struct {
+		name  string
+		lines int
+	}{
+		{"short_3_lines", 3},
+		{"long_40_lines", 40},
+	} {
+		t.Run(fill.name, func(t *testing.T) {
+			m := NewModel()
+			m.workDir = "/home/test/github/gokin"
+			m.currentModel = "glm-5.2"
+			m.state = StateInput
+			m.applyResize(&tea.WindowSizeMsg{Width: 100, Height: 30})
+			for i := 0; i < fill.lines; i++ {
+				m.output.AppendText(fmt.Sprintf("output line %d\n", i))
+			}
+
+			view := stripAnsi(m.View())
+			lines := strings.Split(view, "\n")
+			if got := len(lines); got != 30 {
+				t.Fatalf("frame rows = %d, want 30", got)
+			}
+
+			// Find the input box's bottom border (the ╰ row).
+			bottomBorderRow := -1
+			for i, line := range lines {
+				if strings.Contains(line, "╰") {
+					bottomBorderRow = i
+				}
+			}
+			if bottomBorderRow == -1 {
+				t.Fatalf("input bottom border not found:\n%s", view)
+			}
+
+			// Count fully blank rows between the border and the status bar
+			// (the last row). At most ONE is tolerable; 2+ is the wedge.
+			blank := 0
+			for i := bottomBorderRow + 1; i < len(lines)-1; i++ {
+				if strings.TrimSpace(lines[i]) == "" {
+					blank++
+				}
+			}
+			if blank > 1 {
+				t.Fatalf("%d blank rows wedged between the input and the status bar (want <= 1):\n%s",
+					blank, view)
+			}
+		})
+	}
+}
