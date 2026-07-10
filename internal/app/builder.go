@@ -1489,6 +1489,7 @@ func (b *Builder) initMCP() error {
 	// scope. The tool is registered with nil callbacks at registry build, so
 	// no NPE if MCP is disabled — it falls back to the disabled-hint.
 	b.wireMCPAdminTool()
+	b.wireLoopControlTool()
 
 	logging.Debug("MCP initialized",
 		"servers", len(b.cfg.MCP.Servers),
@@ -1507,6 +1508,42 @@ func (b *Builder) initMCP() error {
 // is disabled (callbacks reference b.mcpManager which is nil — the tool's
 // `enabled` predicate gates read paths; write paths short-circuit via the
 // MCPAddCore/MCPRemoveCore `mgr == nil` guard).
+// wireLoopControlTool injects the loops-manager operations into the
+// loop_control tool (mcp_admin pattern) so the MODEL can list/pause/resume/
+// stop the user's background loops from chat. Safe when the tool isn't
+// registered or loops are disabled (nil manager -> callbacks left nil -> the
+// tool returns its "not wired" hint).
+func (b *Builder) wireLoopControlTool() {
+	if b.registry == nil || b.loopManager == nil {
+		return
+	}
+	tool, ok := b.registry.Get("loop_control")
+	if !ok {
+		return
+	}
+	lc, ok := tool.(*tools.LoopControlTool)
+	if !ok {
+		return
+	}
+	mgr := b.loopManager
+	lc.SetCallbacks(
+		func() []tools.LoopControlInfo {
+			var out []tools.LoopControlInfo
+			for _, l := range mgr.List() {
+				out = append(out, tools.LoopControlInfo{
+					ID:     l.ID,
+					Task:   l.Task,
+					Status: string(l.Status),
+				})
+			}
+			return out
+		},
+		mgr.Pause,
+		mgr.Resume,
+		mgr.Stop,
+	)
+}
+
 func (b *Builder) wireMCPAdminTool() {
 	if b.registry == nil {
 		return

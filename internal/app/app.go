@@ -1439,6 +1439,17 @@ func (a *App) GetUIRuntimeStatus() ui.RuntimeStatusSnapshot {
 		out.HeartbeatAge = age
 	}
 
+	// Active loops for the status-bar badge. loopManager is boot-set (builder,
+	// never reassigned); Active()/FiringState() lock internally and are cheap
+	// (in-memory). Loops persist across restarts, so this is the persistent
+	// "a loop is alive in the background" chrome signal.
+	if a.loopManager != nil {
+		out.ActiveLoops = len(a.loopManager.Active())
+		if _, _, firing := a.loopManager.FiringState(); firing {
+			out.LoopFiring = true
+		}
+	}
+
 	// MCP health for the status-bar badge. mcpManager is boot-set (builder,
 	// never reassigned); GetServerStatus locks internally and is cheap
 	// (in-memory snapshot, no network).

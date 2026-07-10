@@ -200,7 +200,7 @@ var toolSetDefinitions = map[ToolSet][]string{
 	ToolSetPlanning: {
 		"enter_plan_mode", "update_plan_progress", "get_plan_status",
 		"exit_plan_mode", "undo_plan", "redo_plan",
-		"task", "task_output", "task_stop",
+		"task", "task_output", "task_stop", "loop_control",
 	},
 	ToolSetAgent: {
 		"ask_agent", "coordinate", "shared_memory", "update_scratchpad",
@@ -355,6 +355,7 @@ func DefaultRegistry(workDir string) *Registry {
 
 	// MCP admin tool: callbacks wired later by builder.go after MCP init.
 	r.MustRegister(NewMCPAdminTool())
+	r.MustRegister(NewLoopControlTool())
 
 	return r
 }
@@ -636,6 +637,7 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 
 	// MCP admin — read-only inspection of the MCP control plane.
 	r.RegisterFactory("mcp_admin", func() Tool { return NewMCPAdminTool() }, declarations["mcp_admin"])
+	r.RegisterFactory("loop_control", func() Tool { return NewLoopControlTool() }, declarations["loop_control"])
 
 	return r
 }

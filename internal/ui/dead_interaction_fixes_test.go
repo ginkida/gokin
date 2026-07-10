@@ -234,3 +234,32 @@ func TestStreamWatchdogCancelsBackend(t *testing.T) {
 		t.Fatal("watchdog must cancel the BACKEND request via onCancel — not only reset the UI")
 	}
 }
+
+// TestStatusBarShowsActiveLoops: loops persist across restarts, so the chrome
+// must carry a persistent "a loop is alive" signal (the startup toast is
+// transient). Fed by the same ~1/sec RuntimeStatusSnapshot poll as the MCP
+// badge; absent when no loops (calm UI).
+func TestStatusBarShowsActiveLoops(t *testing.T) {
+	m := *NewModel()
+	m.width = 120
+	m.height = 40
+	m.state = StateInput
+
+	view := renderToPlain(m.View())
+	if strings.Contains(view, "loop") && strings.Contains(view, "⟳") {
+		t.Fatalf("no-loops chrome must not show a loop badge:\n%.300s", view)
+	}
+
+	m.runtimeStatus.ActiveLoops = 1
+	view = renderToPlain(m.View())
+	if !strings.Contains(view, "⟳ 1 loop") {
+		t.Fatalf("active loop must show the persistent badge, got:\n%.600s", view)
+	}
+
+	m.runtimeStatus.ActiveLoops = 2
+	m.runtimeStatus.LoopFiring = true
+	view = renderToPlain(m.View())
+	if !strings.Contains(view, "⟳ 2 loops · running") {
+		t.Fatalf("firing loops must show the highlighted running badge, got:\n%.600s", view)
+	}
+}

@@ -260,3 +260,41 @@ func TestLoopCommand_FallsThroughToSelfPacedForRealTasks(t *testing.T) {
 		t.Errorf("task = %q, want %q", mgr.addedTask, "check the deploy")
 	}
 }
+
+// TestLoopPauseStopResumeWithoutID pins the id-less fast path: with exactly
+// one eligible loop, /loop pause|stop|resume needs no id (the common "я
+// запустил loop, как его отменить?" case); with several, the command lists
+// candidates instead of guessing.
+func TestLoopPauseStopResumeWithoutID(t *testing.T) {
+	mgr := &fakeLoopMgr{loops: []*loops.Loop{
+		{ID: "loop-solo", Task: "improve the app", Status: loops.StatusRunning},
+		{ID: "loop-done", Task: "finished thing", Status: loops.StatusStopped},
+	}}
+	cmd := &LoopCommand{}
+
+	out, err := cmd.executeWithMgr(context.Background(), mgr, []string{"pause"})
+	if err != nil || !strings.Contains(out, "Paused loop loop-solo") {
+		t.Fatalf("id-less pause must target the sole running loop: %q / %v", out, err)
+	}
+
+	// Sole paused loop -> id-less resume resolves it.
+	mgr.loops[0].Status = loops.StatusPaused
+	out, _ = cmd.executeWithMgr(context.Background(), mgr, []string{"resume"})
+	if !strings.Contains(out, "Resumed loop loop-solo") {
+		t.Fatalf("id-less resume must target the sole paused loop: %q", out)
+	}
+
+	// Two running loops -> ambiguity lists candidates, never guesses.
+	mgr.loops[0].Status = loops.StatusRunning
+	mgr.loops = append(mgr.loops, &loops.Loop{ID: "loop-two", Task: "second", Status: loops.StatusRunning})
+	out, _ = cmd.executeWithMgr(context.Background(), mgr, []string{"stop"})
+	if !strings.Contains(out, "loop-solo") || !strings.Contains(out, "loop-two") {
+		t.Fatalf("ambiguous id-less stop must list both candidates: %q", out)
+	}
+
+	// Nothing eligible -> honest message.
+	out, _ = cmd.executeWithMgr(context.Background(), mgr, []string{"resume"})
+	if !strings.Contains(out, "No loop to resume") {
+		t.Fatalf("no-candidates resume must say so: %q", out)
+	}
+}

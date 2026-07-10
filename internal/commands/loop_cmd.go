@@ -54,9 +54,9 @@ func (c *LoopCommand) Usage() string {
 /loop [...] --max-tokens <N>  Cap lifetime spend (e.g. 200k, 2m); auto-pauses on reaching it
 /loop status <id>           Show loop summary + last 5 iterations
 /loop output <id>           Show full iteration log (markdown render)
-/loop stop <id>             Stop a loop (preserves history)
-/loop pause <id>            Pause (until /loop resume)
-/loop resume <id>           Re-arm paused loop
+/loop stop [id]             Stop a loop (id optional with one loop; preserves history)
+/loop pause [id]            Pause (id optional with one loop; until /loop resume)
+/loop resume [id]           Re-arm paused loop (id optional with one paused loop)
 /loop now <id>              Fire immediately on next tick
 /loop remove <id>           Delete loop state file`
 }
@@ -117,33 +117,36 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 		}
 		return formatOutput(mgr, args[1])
 	case "stop":
-		if len(args) < 2 {
-			return "Usage: /loop stop <id>", nil
+		id, errMsg := resolveSoleLoopID(mgr, args, "stop", loopIsStoppable)
+		if errMsg != "" {
+			return errMsg, nil
 		}
-		if err := mgr.Stop(args[1]); err != nil {
-			return fmt.Sprintf("Failed to stop %s: %v", args[1], err), nil
+		if err := mgr.Stop(id); err != nil {
+			return fmt.Sprintf("Failed to stop %s: %v", id, err), nil
 		}
 		// Honest about the in-flight iteration: stop only prevents
 		// future iterations from being scheduled. A running iteration
 		// completes naturally so it doesn't leave half-edited files
 		// or partial commits behind.
-		return fmt.Sprintf("Stopped loop %s. (Any in-flight iteration finishes before the loop pauses.)", args[1]), nil
+		return fmt.Sprintf("Stopped loop %s. (Any in-flight iteration finishes before the loop pauses.)", id), nil
 	case "pause":
-		if len(args) < 2 {
-			return "Usage: /loop pause <id>", nil
+		id, errMsg := resolveSoleLoopID(mgr, args, "pause", loopIsPausable)
+		if errMsg != "" {
+			return errMsg, nil
 		}
-		if err := mgr.Pause(args[1]); err != nil {
-			return fmt.Sprintf("Failed to pause %s: %v", args[1], err), nil
+		if err := mgr.Pause(id); err != nil {
+			return fmt.Sprintf("Failed to pause %s: %v", id, err), nil
 		}
-		return fmt.Sprintf("Paused loop %s. (Any in-flight iteration finishes before the pause takes effect.) Resume with /loop resume %s.", args[1], args[1]), nil
+		return fmt.Sprintf("Paused loop %s. (Any in-flight iteration finishes before the pause takes effect.) Resume with /loop resume %s.", id, id), nil
 	case "resume":
-		if len(args) < 2 {
-			return "Usage: /loop resume <id>", nil
+		id, errMsg := resolveSoleLoopID(mgr, args, "resume", loopIsResumable)
+		if errMsg != "" {
+			return errMsg, nil
 		}
-		if err := mgr.Resume(args[1]); err != nil {
-			return fmt.Sprintf("Failed to resume %s: %v", args[1], err), nil
+		if err := mgr.Resume(id); err != nil {
+			return fmt.Sprintf("Failed to resume %s: %v", id, err), nil
 		}
-		return fmt.Sprintf("Resumed loop %s.", args[1]), nil
+		return fmt.Sprintf("Resumed loop %s.", id), nil
 	case "now":
 		if len(args) < 2 {
 			return "Usage: /loop now <id>", nil
@@ -589,4 +592,42 @@ func formatDurationShort(d time.Duration) string {
 		return fmt.Sprintf("%dd", days)
 	}
 	return fmt.Sprintf("%dd%dh", days, hours)
+}
+
+// loopIsPausable/loopIsStoppable/loopIsResumable classify which loops each
+// id-less action can sensibly target.
+func loopIsPausable(l *loops.Loop) bool { return l.Status == loops.StatusRunning }
+func loopIsStoppable(l *loops.Loop) bool {
+	return l.Status == loops.StatusRunning || l.Status == loops.StatusPaused
+}
+func loopIsResumable(l *loops.Loop) bool { return l.Status == loops.StatusPaused }
+
+// resolveSoleLoopID lets pause/stop/resume run WITHOUT an id when exactly one
+// loop is eligible — the overwhelmingly common single-loop case ("я запустил
+// loop, как его отменить?" must not require finding and typing an id). With an
+// explicit id it resolves that; with several candidates it lists them so the
+// user can pick. Returns (id, "") on success or ("", message) to display.
+func resolveSoleLoopID(mgr LoopManager, args []string, action string, eligible func(*loops.Loop) bool) (string, string) {
+	if len(args) >= 2 {
+		return args[1], ""
+	}
+	var candidates []*loops.Loop
+	for _, l := range mgr.List() {
+		if eligible(l) {
+			candidates = append(candidates, l)
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Sprintf("No loop to %s. /loop list shows all loops.", action)
+	case 1:
+		return candidates[0].ID, ""
+	default:
+		var b strings.Builder
+		fmt.Fprintf(&b, "Several loops match — pick one:\n")
+		for _, l := range candidates {
+			fmt.Fprintf(&b, "  /loop %s %s — %s\n", action, l.ID, previewTaskShort(l.Task))
+		}
+		return "", strings.TrimRight(b.String(), "\n")
+	}
 }

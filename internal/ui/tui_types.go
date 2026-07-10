@@ -423,6 +423,13 @@ type RuntimeStatusSnapshot struct {
 	// dead-mcp-health-badge).
 	MCPHealthy int
 	MCPTotal   int
+	// Active background loops (running/auto-firing) for the status-bar
+	// "N loop(s)" badge — loops persist across restarts, so without a
+	// persistent chrome indicator a user who restarted gokin had no ambient
+	// signal that a prior session's loop is still firing in the background
+	// (only a one-shot startup toast).
+	ActiveLoops int
+	LoopFiring  bool
 }
 
 // RuntimeStatusMsg delivers a runtime status snapshot fetched in the background.

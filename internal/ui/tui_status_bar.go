@@ -400,6 +400,21 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		parts = append(parts, dimStyle.Render(m.formatBackgroundTaskStatus(bgCount)))
 	}
 
+	// Active background loops — persistent awareness that a (possibly
+	// restart-restored) loop keeps firing. Highlighted while an iteration is
+	// actually running; dim otherwise. Calm UI: absent when no active loops.
+	if n := m.runtimeStatus.ActiveLoops; n > 0 {
+		label := fmt.Sprintf("⟳ %d loop", n)
+		if n > 1 {
+			label += "s"
+		}
+		if m.runtimeStatus.LoopFiring {
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorInfo).Render(label+" · running"))
+		} else {
+			parts = append(parts, dimStyle.Render(label))
+		}
+	}
+
 	// Heartbeat is suppressed during recovery: the engine badge already proves
 	// the session is alive, so a "heartbeat:0s" cell next to "↻ retry 3/3" is
 	// pure noise. It still shows for a healthy-but-slow long operation.
