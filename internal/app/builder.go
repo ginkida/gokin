@@ -2560,14 +2560,20 @@ func (a *coordinatorToolAdapter) Stop() {
 	a.coord.Stop()
 }
 
-func (a *coordinatorToolAdapter) WaitWithTimeout(timeout time.Duration) (map[string]any, error) {
+// CancelRunning forwards to Coordinator.CancelRunning — the coordinate tool
+// calls it on teardown so Esc/timeout actually stops the spawned agents.
+func (a *coordinatorToolAdapter) CancelRunning() int {
+	return a.coord.CancelRunning()
+}
+
+func (a *coordinatorToolAdapter) WaitWithTimeout(ctx context.Context, timeout time.Duration) (map[string]any, error) {
 	// Coordinator.WaitWithTimeout returns a partial results snapshot ALONGSIDE
 	// a timeout/cancellation error now — whatever sub-tasks finished before
 	// the deadline. Convert and pass it through instead of discarding it on
 	// any non-nil err; CoordinateTool.Execute renders it with a note about
 	// which tasks didn't finish rather than losing completed work to a bare
 	// error.
-	results, err := a.coord.WaitWithTimeout(timeout)
+	results, err := a.coord.WaitWithTimeoutCtx(ctx, timeout)
 	out := make(map[string]any, len(results))
 	for k, v := range results {
 		out[k] = v

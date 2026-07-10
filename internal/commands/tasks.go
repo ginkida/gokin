@@ -16,6 +16,12 @@ import (
 type AgentTaskRunner interface {
 	ListTaskSummaries() []agent.TaskSummary
 	GetResult(agentID string) (*agent.AgentResult, bool)
+	// Cancel stops a running background agent (its run context is killed;
+	// partial work is preserved by the agent layer). /tasks stop <id> is the
+	// USER-facing stop — previously only the MODEL could stop an agent
+	// (task_stop tool), so a user watching a runaway background task had no
+	// way to kill it short of quitting gokin.
+	Cancel(agentID string) error
 }
 
 // TasksCommand lists background agent tasks and shows their results —
@@ -25,7 +31,7 @@ type TasksCommand struct{}
 
 func (c *TasksCommand) Name() string        { return "tasks" }
 func (c *TasksCommand) Description() string { return "List background agent tasks and their results" }
-func (c *TasksCommand) Usage() string       { return "/tasks [id]" }
+func (c *TasksCommand) Usage() string       { return "/tasks [id] | /tasks stop <id>" }
 func (c *TasksCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategorySession,
@@ -51,10 +57,29 @@ func (c *TasksCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return "Background agents are unavailable in this build.", nil
 	}
 
+	if len(args) > 0 && strings.TrimSpace(args[0]) == "stop" {
+		if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+			return "Usage: /tasks stop <id>  (ids from /tasks)", nil
+		}
+		return c.stopTask(runner, strings.TrimSpace(args[1]))
+	}
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		return c.renderDetail(runner, strings.TrimSpace(args[0]))
 	}
 	return c.renderList(runner), nil
+}
+
+// stopTask cancels a background agent by id (exact or unique prefix — same
+// resolution as the detail view).
+func (c *TasksCommand) stopTask(runner AgentTaskRunner, rawID string) (string, error) {
+	match, err := resolveTaskID(runner.ListTaskSummaries(), rawID)
+	if err != nil {
+		return err.Error(), nil
+	}
+	if err := runner.Cancel(match.ID); err != nil {
+		return fmt.Sprintf("Failed to stop %s: %v", match.ID, err), nil
+	}
+	return fmt.Sprintf("Stopped background task %s. Partial output stays available via /tasks %s.", match.ID, match.ID), nil
 }
 
 func (c *TasksCommand) renderList(runner AgentTaskRunner) string {

@@ -66,19 +66,29 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	// Report activity to coordinator
 	r.reportActivity()
 
+	// Run context + cancel registration BEFORE the start event: without the
+	// SetCancelFunc, Runner.Cancel/task_stop flipped the agent's STATUS to
+	// cancelled and reported "stopped" while the run itself kept executing to
+	// completion — the only Spawn variant missing the registration
+	// (SpawnWithContext and both async paths already do it). Registering
+	// before the start notification means a Cancel racing the very first
+	// activity event already has a live cancel func to kill.
+	var runCtx context.Context
+	var runCancel context.CancelFunc
+	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
+		runCtx, runCancel = context.WithTimeout(ctx, agentTimeout)
+	} else {
+		runCtx, runCancel = context.WithCancel(ctx)
+	}
+	defer runCancel()
+	agent.SetCancelFunc(runCancel)
+
 	// Notify UI about agent start — pass the prompt so the feed can surface
 	// what this agent is actually working on (instead of "Sub-agent: general").
 	if onSubAgentActivity != nil {
 		onSubAgentActivity(agent.ID, string(agent.Type), prompt, "", nil, "start", false, "")
 	}
 
-	// Run agent synchronously with per-agent timeout
-	runCtx := ctx
-	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, agentTimeout)
-		defer cancel()
-	}
 	startTime := time.Now()
 	result, err := agent.Run(runCtx, r.withFewShot(deps, agentType, prompt))
 	duration := time.Since(startTime)

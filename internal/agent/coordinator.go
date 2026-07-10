@@ -606,6 +606,15 @@ func (c *Coordinator) partialResults() map[string]*AgentResult {
 
 // WaitWithTimeout waits for completion with a timeout.
 func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentResult, error) {
+	return c.WaitWithTimeoutCtx(context.Background(), timeout)
+}
+
+// WaitWithTimeoutCtx is WaitWithTimeout that ALSO unblocks when the CALLER's
+// context cancels (the coordinate tool passes the turn ctx, so Esc actually
+// interrupts the wait — previously the wait selected only on completion, the
+// timer, and the coordinator's own app-lifetime ctx, making a coordinate turn
+// un-interruptible by any user action; the /loop CancelInFlight bug class).
+func (c *Coordinator) WaitWithTimeoutCtx(ctx context.Context, timeout time.Duration) (map[string]*AgentResult, error) {
 	resultChan := make(chan map[string]*AgentResult, 1)
 	var once sync.Once
 
@@ -640,7 +649,34 @@ func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentR
 		// Clean up: ensure callback won't block if called later
 		once.Do(func() {})
 		return c.partialResults(), c.ctx.Err()
+	case <-ctx.Done():
+		once.Do(func() {})
+		return c.partialResults(), fmt.Errorf("coordination cancelled: %w", ctx.Err())
 	}
+}
+
+// CancelRunning cancels every task whose agent is still executing, via the
+// runner's per-agent cancel (SpawnAsync registers SetCancelFunc, so the
+// agents' contexts really die). No-op when nothing is running — the
+// coordinate tool calls this unconditionally on teardown so that an Esc'd or
+// timed-out coordination stops burning provider quota in the background
+// (previously the spawned agents were unreachable by ANY user action: they
+// run on WithoutCancel and the only cancel bridge, CancelTask, had zero
+// callers). Returns how many agents were cancelled.
+func (c *Coordinator) CancelRunning() int {
+	c.mu.RLock()
+	ids := make([]string, 0, len(c.running))
+	for agentID := range c.running {
+		ids = append(ids, agentID)
+	}
+	c.mu.RUnlock()
+	n := 0
+	for _, id := range ids {
+		if err := c.runner.Cancel(id); err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // GetTask returns a task by ID.

@@ -22,7 +22,7 @@ func (f *fakeCoordinator) AddTask(prompt string, agentType any, priority any, de
 	return fmt.Sprintf("internal-%d", f.nextID)
 }
 func (f *fakeCoordinator) Start() {}
-func (f *fakeCoordinator) WaitWithTimeout(timeout time.Duration) (map[string]any, error) {
+func (f *fakeCoordinator) WaitWithTimeout(ctx context.Context, timeout time.Duration) (map[string]any, error) {
 	return f.waitResults, f.waitErr
 }
 func (f *fakeCoordinator) GetStatus() any { return nil }
@@ -140,3 +140,5 @@ func TestCoordinateTool_NormalCompletionUnaffected(t *testing.T) {
 		t.Errorf("normal completion must not mention incomplete tasks:\n%s", result.Content)
 	}
 }
+
+func (f *fakeCoordinator) CancelRunning() int { return 0 }

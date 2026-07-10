@@ -206,7 +206,8 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	type coordinatorInterface interface {
 		AddTask(prompt string, agentType any, priority any, deps []string) string
 		Start()
-		WaitWithTimeout(timeout time.Duration) (map[string]any, error)
+		WaitWithTimeout(ctx context.Context, timeout time.Duration) (map[string]any, error)
+		CancelRunning() int
 		GetStatus() any
 		Stop()
 	}
@@ -222,7 +223,16 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	// snapshots partial results before returning, so tearing the coordinator down
 	// here only reaps the ephemeral machinery — a straggler's result is already
 	// discarded by then.
-	defer coord.Stop()
+	// Teardown ALSO cancels any still-running spawned agents (no-op when all
+	// finished): an Esc'd or timed-out coordination must stop burning provider
+	// quota — previously the agents ran on WithoutCancel and were unreachable
+	// by ANY user action (the /loop CancelInFlight bug class, one layer up).
+	defer func() {
+		if n := coord.CancelRunning(); n > 0 {
+			logging.Info("coordinate: cancelled straggler agents on teardown", "count", n)
+		}
+		coord.Stop()
+	}()
 
 	// Build task ID mapping (user IDs -> internal IDs)
 	taskIDMap := make(map[string]string)
@@ -259,7 +269,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 
 	// Wait for completion
 	timeout := time.Duration(timeoutMinutes) * time.Minute
-	results, waitErr := coord.WaitWithTimeout(timeout)
+	results, waitErr := coord.WaitWithTimeout(ctx, timeout)
 	if waitErr != nil && len(results) == 0 {
 		// Nothing finished before the deadline/cancellation — there's
 		// nothing to show, the bare error is the only useful information.

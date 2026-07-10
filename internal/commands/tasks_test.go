@@ -12,6 +12,7 @@ import (
 type fakeTaskRunner struct {
 	summaries []agent.TaskSummary
 	results   map[string]*agent.AgentResult
+	cancelled []string
 }
 
 func (f *fakeTaskRunner) ListTaskSummaries() []agent.TaskSummary { return f.summaries }
@@ -19,6 +20,10 @@ func (f *fakeTaskRunner) ListTaskSummaries() []agent.TaskSummary { return f.summ
 func (f *fakeTaskRunner) GetResult(agentID string) (*agent.AgentResult, bool) {
 	res, ok := f.results[agentID]
 	return res, ok
+}
+func (f *fakeTaskRunner) Cancel(agentID string) error {
+	f.cancelled = append(f.cancelled, agentID)
+	return nil
 }
 
 type fakeAppForTasks struct {
@@ -142,5 +147,26 @@ func TestTasks_DetailAmbiguousAndMissingPrefix(t *testing.T) {
 	}
 	if _, err := cmd.Execute(context.Background(), []string{"nope"}, newTasksApp(runner)); err == nil || !strings.Contains(err.Error(), "no background task") {
 		t.Fatalf("missing id error = %v, want no-match", err)
+	}
+}
+
+// TestTasksStopCancelsAgent pins the user-facing background-agent stop:
+// previously only the MODEL could stop an agent (task_stop tool) — /tasks was
+// deliberately list-only, so a user watching a runaway background task had no
+// kill switch short of quitting gokin.
+func TestTasksStopCancelsAgent(t *testing.T) {
+	runner := &fakeTaskRunner{summaries: []agent.TaskSummary{
+		{ID: "agent-12345678", Type: "general", Status: "running", Task: "long work"},
+	}}
+	cmd := &TasksCommand{}
+	out, err := cmd.Execute(context.Background(), []string{"stop", "agent-123"}, newTasksApp(runner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.cancelled) != 1 || runner.cancelled[0] != "agent-12345678" {
+		t.Fatalf("stop must Cancel the prefix-resolved agent, got %v", runner.cancelled)
+	}
+	if !strings.Contains(out, "Stopped background task agent-12345678") {
+		t.Fatalf("unexpected output: %q", out)
 	}
 }
