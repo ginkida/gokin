@@ -29,12 +29,12 @@ func NewSecretRedactor() *SecretRedactor {
 			// ============================================================
 			// API Keys and Tokens (with context)
 			// ============================================================
-			regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*[:=]\s*["']?([^\s"',;]{8,})["']?`),
+			regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*[:=]\s*["']?([^\s"',;)\]}]{8,})["']?`),
 
 			// ============================================================
 			// Bearer Tokens (limited to 256 chars, stops at delimiter)
 			// ============================================================
-			regexp.MustCompile(`(?i)Bearer\s+([a-zA-Z0-9_\-\.]{10,256})(?:\s|\"|\'|\r|\n|$)`),
+			regexp.MustCompile(`(?i)Bearer\s+([a-zA-Z0-9_\-\.]{10,256})(?:[\s"',;)\]}]|\r|\n|$)`),
 
 			// ============================================================
 			// AWS Keys
@@ -46,6 +46,13 @@ func NewSecretRedactor() *SecretRedactor {
 			// GitHub Tokens
 			// ============================================================
 			regexp.MustCompile(`gh[pous]_[a-zA-Z0-9]{36}`),
+			regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,}`),
+
+			// ============================================================
+			// Provider and SCM access tokens
+			// ============================================================
+			regexp.MustCompile(`sk-[A-Za-z0-9][A-Za-z0-9_-]{20,}`),
+			regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`),
 
 			// ============================================================
 			// Stripe Keys
@@ -226,20 +233,13 @@ func (r *SecretRedactor) redactSubmatches(text string, pattern *regexp.Regexp) s
 				result = prefix + "[REDACTED]" + suffix
 			}
 		} else if numGroups == 1 {
-			// Single capture group - check if it looks like a key or a value
-			// by looking for assignment operators before it
+			// Single capture group: replace the captured secret while preserving
+			// any surrounding context or delimiter included in the match.
 			idx := strings.Index(result, secret)
 			if idx >= 0 {
 				prefix := result[:idx]
-				// If there's an assignment operator before the secret, it's a value
-				if strings.ContainsAny(prefix, ":=") {
-					suffix := result[idx+len(secret):]
-					result = prefix + "[REDACTED]" + suffix
-				} else {
-					// No assignment operator - this might be a standalone secret
-					// Replace the entire match
-					result = "[REDACTED]"
-				}
+				suffix := result[idx+len(secret):]
+				result = prefix + "[REDACTED]" + suffix
 			}
 		} else {
 			// Multiple groups but secret is not in the last one
