@@ -327,6 +327,14 @@ func formatPaletteArgEntryValue(cmd EnhancedPaletteCommand, value string) string
 	}
 	if strings.HasPrefix(hint, "<file> ") || strings.HasPrefix(hint, "<path> ") {
 		if filePart, suffix, ok := splitPalettePathAndSuffix(value); ok {
+			// Don't re-quote a filePart the user already quoted ("my file.txt" 10)
+			// — wrapping it again produced a filename with LITERAL quote chars
+			// after splitCommandFields decoded the outer layer. Quoting is also
+			// the user's escape hatch for filenames that legitimately end in a
+			// bare number (a file named "Chapter 12"), so it must round-trip.
+			if paletteArgAlreadyQuoted(filePart) {
+				return filePart + " " + suffix
+			}
 			return quotePaletteArg(filePart) + " " + suffix
 		}
 		return quotePaletteArg(value)

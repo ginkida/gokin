@@ -81,6 +81,11 @@ func (s *FileStorage) Load() ([]*Loop, []error) {
 		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
+		fileID := strings.TrimSuffix(name, ".json")
+		if !isSafeLoopID(fileID) {
+			errs = append(errs, fmt.Errorf("loops: skip %s: unsafe loop filename (allowed: A-Za-z0-9_-)", name))
+			continue
+		}
 		fullPath := filepath.Join(s.dir, name)
 		data, readErr := os.ReadFile(fullPath)
 		if readErr != nil {
@@ -90,6 +95,10 @@ func (s *FileStorage) Load() ([]*Loop, []error) {
 		l, parseErr := Unmarshal(data)
 		if parseErr != nil {
 			errs = append(errs, fmt.Errorf("loops: parse %s: %w", name, parseErr))
+			continue
+		}
+		if fileID != l.ID {
+			errs = append(errs, fmt.Errorf("loops: skip %s: filename id %q does not match loop id %q", name, fileID, l.ID))
 			continue
 		}
 		loops = append(loops, l)

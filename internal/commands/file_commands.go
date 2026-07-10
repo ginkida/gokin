@@ -107,7 +107,13 @@ func parseFileCommand(path, source string) (*FileCommand, error) {
 	if err != nil {
 		return nil, err
 	}
-	name := strings.TrimSuffix(filepath.Base(path), ".md")
+	// Lowercase at the REGISTRATION boundary: Parse lowercases the typed
+	// command name before lookup (slash commands are case-insensitive), so a
+	// file named Deploy.md must register as "deploy" or it becomes
+	// unreachable — /Deploy AND /deploy would both miss the "Deploy" map key
+	// and the whole line would silently go to the model as chat. Alias
+	// targets are lowercased on load for the same reason (aliases.go).
+	name := strings.ToLower(strings.TrimSuffix(filepath.Base(path), ".md"))
 	if name == "" {
 		return nil, fmt.Errorf("empty command name")
 	}

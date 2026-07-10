@@ -127,8 +127,13 @@ func trailingInputToken(value string) (inputToken, bool) {
 			token.start = i
 		}
 
-		if r == '"' || r == '\'' {
-			if b.Len() == 0 && token.quote == 0 {
+		if (r == '"' || r == '\'') && (b.Len() == 0 || b.String() == "@") {
+			// Quote mode opens only at token start, with one exception: @file
+			// references may start as @"path with spaces". A mid-word apostrophe
+			// stays literal. Without this, typing "don't forget @mai" merged the
+			// whole rest of the line into one quoted token, so autocomplete died
+			// for the remainder of the message after any English contraction.
+			if token.quote == 0 {
 				token.quote = r
 			}
 			quote = r

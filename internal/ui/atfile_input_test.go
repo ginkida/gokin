@@ -41,6 +41,7 @@ func TestTrailingInputToken_QuotesAndEscapes(t *testing.T) {
 	}{
 		{`/open src/ma`, `src/ma`, 0, true},
 		{`/open "src/ma`, `src/ma`, '"', true},
+		{`look at @"space file`, `@space file`, '"', true},
 		{`/help "say \"hello\""`, `say "hello"`, '"', true},
 		{`/open "C:\Program Files\Gokin`, `C:\Program Files\Gokin`, '"', true},
 		{`/open done `, "", 0, false},
