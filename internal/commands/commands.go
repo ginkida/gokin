@@ -89,6 +89,10 @@ type AppInterface interface {
 	// /loop subcommands check for nil and return a clear "unavailable"
 	// message rather than crashing.
 	GetLoopManager() LoopManager
+	// CancelInFlightLoopIteration kills the currently-executing iteration of
+	// the given loop ("" = any). /loop stop uses it so stopping a loop also
+	// stops the work on screen. Returns whether an iteration was cancelled.
+	CancelInFlightLoopIteration(loopID string) bool
 
 	// Agent task runner — used by /tasks to list background agents and
 	// inspect their results. May be nil when the agent subsystem isn't

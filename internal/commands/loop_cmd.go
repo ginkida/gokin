@@ -76,7 +76,7 @@ func (c *LoopCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	if mgr == nil {
 		return "Loop system unavailable in this build.", nil
 	}
-	return c.executeWithMgr(ctx, mgr, args)
+	return c.executeWithMgrCancel(ctx, mgr, app.CancelInFlightLoopIteration, args)
 }
 
 // executeWithMgr is the testable inner loop. Split out from Execute so
@@ -88,7 +88,15 @@ func (c *LoopCommand) Execute(ctx context.Context, args []string, app AppInterfa
 // reads many state files); none of today's subcommands actually block
 // on it, but keeping the signature ready means the inner code path
 // stays test-stable when we add cancellable subcommands later.
-func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []string) (string, error) {
+func (c *LoopCommand) executeWithMgr(ctx context.Context, mgr LoopManager, args []string) (string, error) {
+	return c.executeWithMgrCancel(ctx, mgr, nil, args)
+}
+
+// executeWithMgrCancel additionally takes the in-flight iteration canceller
+// (nil in tests): /loop stop is terminal, so it also kills the loop's
+// currently-executing iteration — the user stopping a loop expects the work
+// on screen to stop NOW. Pause stays graceful (iteration finishes) by design.
+func (c *LoopCommand) executeWithMgrCancel(_ context.Context, mgr LoopManager, cancelInFlight func(string) bool, args []string) (string, error) {
 	// No args → list. Most common quick-check use case.
 	if len(args) == 0 {
 		fid, fsince, _ := mgr.FiringState()
@@ -123,6 +131,9 @@ func (c *LoopCommand) executeWithMgr(_ context.Context, mgr LoopManager, args []
 		}
 		if err := mgr.Stop(id); err != nil {
 			return fmt.Sprintf("Failed to stop %s: %v", id, err), nil
+		}
+		if cancelInFlight != nil && cancelInFlight(id) {
+			return fmt.Sprintf("Stopped loop %s and cancelled its in-flight iteration.", id), nil
 		}
 		// Honest about the in-flight iteration: stop only prevents
 		// future iterations from being scheduled. A running iteration

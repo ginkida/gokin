@@ -3219,11 +3219,29 @@ func (a *App) getActiveToolDeclarations() []*genai.FunctionDeclaration {
 // Called when user presses ESC during processing.
 func (a *App) CancelProcessing() {
 	a.processingMu.Lock()
+	foregroundCancelled := a.processingCancel != nil
 	if a.processingCancel != nil {
 		a.processingCancel()
 		a.processingCancel = nil
 	}
 	a.processingMu.Unlock()
+
+	// Esc must stop what the user SEES happening. When the foreground is idle
+	// but a background /loop iteration is streaming its activity into the UI,
+	// the foreground cancel above is a no-op — the iteration runs on the loop
+	// runner's own context, which nothing user-facing could previously reach
+	// (only the 15m timeout or app shutdown killed it; the field report:
+	// "я застопил loop, но стриминг не прекратился даже после Esc"). Kill the
+	// in-flight iteration ONLY when there was no foreground work to cancel —
+	// if both run, the first Esc stops the foreground, a second stops the loop.
+	if !foregroundCancelled && a.loopRunner != nil {
+		if a.loopRunner.CancelInFlight("") {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusInfo,
+				Message: "Loop iteration cancelled — the loop stays on its schedule (/loop pause to halt it).",
+			})
+		}
+	}
 
 	// Drain the type-ahead queue: the cancelled request's dispatch defer would
 	// otherwise pop a queued message and start a NEW request right after the user

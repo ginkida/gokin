@@ -1702,6 +1702,21 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			return m.input.Focus()
 		}
 
+		// Esc at an IDLE prompt while a background /loop iteration is firing:
+		// the streaming the user sees is the loop's sub-agent — the foreground
+		// cancel has nothing to cancel, so route to onCancel anyway; the app
+		// side kills the in-flight loop iteration when no foreground request
+		// exists (the "застопил loop, но стриминг не прекратился даже после
+		// Esc" report). Gated to an empty, suggestion-free input so Esc keeps
+		// its editing meanings while composing.
+		if m.state == StateInput && m.runtimeStatus.LoopFiring &&
+			m.input.Value() == "" && !m.input.ShowingSuggestions() {
+			if m.onCancel != nil {
+				m.onCancel()
+			}
+			return keyConsumed
+		}
+
 	case tea.KeyEnter:
 		// KeyEnter is a round-8 collision-class member too: bubbles/textarea
 		// binds "enter" to InsertNewline (never disabled in NewInputModel), so

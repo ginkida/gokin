@@ -79,6 +79,19 @@ type Runner struct {
 	stopOnce         sync.Once
 	iterationRunning atomic.Bool // true while fireOne is executing
 
+	// In-flight iteration cancellation. inFlightCancel is non-nil exactly
+	// while fireOne executes a spawn; CancelInFlight kills the iteration's
+	// context so the sub-agent stops NOW (its partial work is preserved by
+	// the agent layer). userCancelled marks that the cancellation was a
+	// deliberate user action — fireOne then SKIPS recording the iteration
+	// (same discipline as the shutdown skip: a user kill is not a task
+	// failure and must not poison the auto-pause streak). Guarded by
+	// inFlightMu (leaf lock, never nested with mu).
+	inFlightMu     sync.Mutex
+	inFlightCancel context.CancelFunc
+	inFlightLoopID string
+	userCancelled  bool
+
 	// scanRotation is tick()-only state (single scheduler goroutine, see
 	// run()) — the round-robin start index into the NEXT tick's Active()
 	// scan. Without it, a loop that's due on EVERY tick (e.g. a
@@ -354,6 +367,17 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 
 	iterationCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	r.inFlightMu.Lock()
+	r.inFlightCancel = cancel
+	r.inFlightLoopID = l.ID
+	r.userCancelled = false
+	r.inFlightMu.Unlock()
+	defer func() {
+		r.inFlightMu.Lock()
+		r.inFlightCancel = nil
+		r.inFlightLoopID = ""
+		r.inFlightMu.Unlock()
+	}()
 
 	started := time.Now()
 	// Mark this loop as firing-now so /loop status/list can show "running"
@@ -375,6 +399,14 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 	// SHOULD still record as a normal (failed) iteration.
 	if ctx.Err() != nil {
 		logging.Info("loops: iteration interrupted by shutdown, skipping record",
+			"loop_id", l.ID, "iteration", l.IterationCount+1)
+		return
+	}
+	r.inFlightMu.Lock()
+	cancelledByUser := r.userCancelled
+	r.inFlightMu.Unlock()
+	if cancelledByUser {
+		logging.Info("loops: iteration cancelled by user, skipping record",
 			"loop_id", l.ID, "iteration", l.IterationCount+1)
 		return
 	}
@@ -707,4 +739,23 @@ func parseDoneSignal(output string) bool {
 		return false
 	}
 	return false
+}
+
+// CancelInFlight cancels the currently-executing iteration of loopID ("" =
+// whichever iteration is running). The spawned agent's context is killed, so
+// it stops within its next cancellation check; partial work is preserved by
+// the agent layer. The interrupted iteration is NOT recorded (a user kill is
+// not a task failure). Returns whether an iteration was actually cancelled.
+func (r *Runner) CancelInFlight(loopID string) bool {
+	r.inFlightMu.Lock()
+	defer r.inFlightMu.Unlock()
+	if r.inFlightCancel == nil {
+		return false
+	}
+	if loopID != "" && loopID != r.inFlightLoopID {
+		return false
+	}
+	r.userCancelled = true
+	r.inFlightCancel()
+	return true
 }

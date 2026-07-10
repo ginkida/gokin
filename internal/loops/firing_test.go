@@ -92,3 +92,49 @@ func TestTransientWarnThreshold_BelowBackstopAndStillRunning(t *testing.T) {
 		t.Errorf("streak = %d, want %d (the warning fires when == this)", l.ConsecutiveTransientFailures, TransientFailureWarnThreshold)
 	}
 }
+
+// TestRunner_CancelInFlightKillsIterationAndSkipsRecord pins the "застопил
+// loop, но стриминг не прекратился" fix: CancelInFlight must cancel the
+// spawned iteration's context NOW, and the user-cancelled iteration must NOT
+// be recorded (a deliberate kill is not a task failure — it must not feed the
+// auto-pause streak).
+func TestRunner_CancelInFlightKillsIterationAndSkipsRecord(t *testing.T) {
+	mgr := NewManager(newMemStorage())
+	l, err := mgr.Add("long task", ModeInterval, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	iterationStarted := make(chan struct{})
+	spawn := func(ctx context.Context, prompt string) (SpawnResult, error) {
+		close(iterationStarted)
+		<-ctx.Done() // simulate a long-running agent that honors cancellation
+		return SpawnResult{Output: "partial", OK: false}, nil
+	}
+	r := NewRunner(mgr, spawn, func() bool { return true })
+
+	done := make(chan struct{})
+	go func() {
+		r.fireOne(context.Background(), l)
+		close(done)
+	}()
+
+	<-iterationStarted
+	if !r.CancelInFlight(l.ID) {
+		t.Fatal("CancelInFlight must report an iteration was cancelled")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("iteration did not stop after CancelInFlight")
+	}
+
+	got, _ := mgr.Get(l.ID)
+	if got.IterationCount != 0 || len(got.Iterations) != 0 {
+		t.Fatalf("user-cancelled iteration must NOT be recorded, got count=%d", got.IterationCount)
+	}
+	// Wrong-id filter: nothing in flight now.
+	if r.CancelInFlight("") {
+		t.Fatal("no iteration in flight — CancelInFlight must return false")
+	}
+}

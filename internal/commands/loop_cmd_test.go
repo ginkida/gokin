@@ -298,3 +298,26 @@ func TestLoopPauseStopResumeWithoutID(t *testing.T) {
 		t.Fatalf("no-candidates resume must say so: %q", out)
 	}
 }
+
+// TestLoopStopCancelsInFlightIteration: /loop stop is terminal — it must also
+// kill the loop's currently-executing iteration (the user stopping a loop
+// expects the on-screen work to stop NOW; pause stays graceful by design).
+func TestLoopStopCancelsInFlightIteration(t *testing.T) {
+	mgr := &fakeLoopMgr{loops: []*loops.Loop{
+		{ID: "loop-live", Task: "long work", Status: loops.StatusRunning},
+	}}
+	var cancelled []string
+	cancel := func(id string) bool { cancelled = append(cancelled, id); return true }
+
+	cmd := &LoopCommand{}
+	out, err := cmd.executeWithMgrCancel(context.Background(), mgr, cancel, []string{"stop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cancelled) != 1 || cancelled[0] != "loop-live" {
+		t.Fatalf("stop must cancel the stopped loop's in-flight iteration, got %v", cancelled)
+	}
+	if !strings.Contains(out, "cancelled its in-flight iteration") {
+		t.Fatalf("stop message must say the iteration was cancelled: %q", out)
+	}
+}

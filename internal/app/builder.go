@@ -1489,7 +1489,6 @@ func (b *Builder) initMCP() error {
 	// scope. The tool is registered with nil callbacks at registry build, so
 	// no NPE if MCP is disabled — it falls back to the disabled-hint.
 	b.wireMCPAdminTool()
-	b.wireLoopControlTool()
 
 	logging.Debug("MCP initialized",
 		"servers", len(b.cfg.MCP.Servers),
@@ -1513,7 +1512,7 @@ func (b *Builder) initMCP() error {
 // stop the user's background loops from chat. Safe when the tool isn't
 // registered or loops are disabled (nil manager -> callbacks left nil -> the
 // tool returns its "not wired" hint).
-func (b *Builder) wireLoopControlTool() {
+func (b *Builder) wireLoopControlTool(app *App) {
 	if b.registry == nil || b.loopManager == nil {
 		return
 	}
@@ -1540,7 +1539,17 @@ func (b *Builder) wireLoopControlTool() {
 		},
 		mgr.Pause,
 		mgr.Resume,
-		mgr.Stop,
+		func(id string) error {
+			if err := mgr.Stop(id); err != nil {
+				return err
+			}
+			// Stop is terminal — also kill the in-flight iteration so "останови
+			// loop" stops the work the user is watching NOW (pause stays
+			// graceful by design). Nil-checked inside: the loop runner is
+			// created later, in App.Run.
+			app.CancelInFlightLoopIteration(id)
+			return nil
+		},
 	)
 }
 
@@ -1664,6 +1673,11 @@ func (b *Builder) initUI() error {
 // wireDependencies sets up callbacks and inter-component connections.
 func (b *Builder) wireDependencies() error {
 	app := b.assembleApp()
+
+	// loop_control's stop must ALSO cancel an in-flight iteration, which needs
+	// the App (the loop runner is created later, in App.Run) — so the wiring
+	// lives here, not in initMCP where the sibling mcp_admin wiring runs.
+	b.wireLoopControlTool(app)
 
 	// Seed the directory-access snapshot (config-persisted + any --add-dir dirs)
 	// before the boot turn-context push below, so the model's first turn already

@@ -73,6 +73,7 @@ func (f *fakeAppForMCP) GetSessionGovernanceReport() string             { return
 func (f *fakeAppForMCP) GetMemoryReport() string                        { return "" }
 func (f *fakeAppForMCP) GetPerformanceStats() string                    { return "" }
 func (f *fakeAppForMCP) GetLoopManager() LoopManager                    { return nil }
+func (f *fakeAppForMCP) CancelInFlightLoopIteration(string) bool        { return false }
 func (f *fakeAppForMCP) GetAgentTaskRunner() AgentTaskRunner            { return nil }
 func (f *fakeAppForMCP) GetHooksManager() *hooks.Manager                { return nil }
 func (f *fakeAppForMCP) RefreshTokenCount()                             {}

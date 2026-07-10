@@ -442,3 +442,14 @@ func (a *App) onLoopIterationDone(loopID string, it loops.Iteration) {
 		}
 	}
 }
+
+// CancelInFlightLoopIteration kills the currently-executing iteration of the
+// given loop ("" = any). Used by /loop stop and the loop_control tool so that
+// STOPPING a loop also stops the work the user is watching right now —
+// pause stays graceful (in-flight iteration finishes) by design.
+func (a *App) CancelInFlightLoopIteration(loopID string) bool {
+	if a.loopRunner == nil {
+		return false
+	}
+	return a.loopRunner.CancelInFlight(loopID)
+}

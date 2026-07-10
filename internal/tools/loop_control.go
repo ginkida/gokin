@@ -140,9 +140,16 @@ func (t *LoopControlTool) Execute(ctx context.Context, args map[string]any) (Too
 	if err := op(id); err != nil {
 		return NewErrorResult(fmt.Sprintf("failed to %s loop %s: %v", action, id, err)), nil
 	}
-	msg := fmt.Sprintf("%s loop %s. Any in-flight iteration finishes before this takes effect.", verb, id)
-	if action == "pause" {
-		msg += " It can be resumed later (action=resume)."
+	var msg string
+	if action == "stop" {
+		// The builder-wired stop callback also cancels the loop's in-flight
+		// iteration — stop is terminal, the on-screen work halts NOW.
+		msg = fmt.Sprintf("Stopped loop %s. Its in-flight iteration (if any) was cancelled.", id)
+	} else {
+		msg = fmt.Sprintf("%s loop %s. Any in-flight iteration finishes before this takes effect.", verb, id)
+		if action == "pause" {
+			msg += " It can be resumed later (action=resume)."
+		}
 	}
 	return NewSuccessResult(msg), nil
 }
