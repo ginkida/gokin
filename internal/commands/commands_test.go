@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -21,6 +22,17 @@ func TestHandlerParse(t *testing.T) {
 		{"/doctor", "doctor", true, nil},
 		{"/help some-topic", "help", true, []string{"some-topic"}},
 		{"/model gemini-flash", "model", true, []string{"gemini-flash"}},
+		{
+			`/register-agent-type reviewer "code reviewer" --tools "read, grep" --prompt 'be careful'`,
+			"register-agent-type",
+			true,
+			[]string{"reviewer", "code reviewer", "--tools", "read, grep", "--prompt", "be careful"},
+		},
+		{`/login kimi "sk-kimi-with spaces"`, "login", true, []string{"kimi", "sk-kimi-with spaces"}},
+		{`/help "unterminated topic`, "help", true, []string{"unterminated topic"}},
+		{`/help ""`, "help", true, []string{""}},
+		{`/help "say \"hello\""`, "help", true, []string{`say "hello"`}},
+		{`/open "C:\Program Files\Gokin"`, "open", true, []string{`C:\Program Files\Gokin`}},
 
 		// Unknown commands (paths, typos)
 		{"/home/user/file.go", "", false, nil},
@@ -43,7 +55,7 @@ func TestHandlerParse(t *testing.T) {
 			if name != tt.wantName {
 				t.Errorf("Parse(%q) name = %q, want %q", tt.input, name, tt.wantName)
 			}
-			if tt.wantArgs != nil && len(args) != len(tt.wantArgs) {
+			if tt.wantArgs != nil && !reflect.DeepEqual(args, tt.wantArgs) {
 				t.Errorf("Parse(%q) args = %v, want %v", tt.input, args, tt.wantArgs)
 			}
 		})

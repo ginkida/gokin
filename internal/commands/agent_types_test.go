@@ -88,6 +88,34 @@ func TestRegisterAgentType_CleansToolList(t *testing.T) {
 	}
 }
 
+func TestRegisterAgentType_ParsedQuotedArgs(t *testing.T) {
+	app := newAgentTypesApp()
+	h := NewHandlerWithCommands(&RegisterAgentTypeCommand{})
+
+	name, args, ok := h.Parse(`/register-agent-type reviewer "code reviewer" --tools "read, grep" --prompt 'be careful'`)
+	if !ok {
+		t.Fatal("Parse did not recognize register-agent-type")
+	}
+
+	if _, err := h.Execute(context.Background(), name, args, app); err != nil {
+		t.Fatalf("execute parsed command: %v", err)
+	}
+
+	got, ok := app.registry.GetDynamic("reviewer")
+	if !ok {
+		t.Fatal("dynamic type not registered")
+	}
+	if got.Description != "code reviewer" {
+		t.Fatalf("Description = %q, want %q", got.Description, "code reviewer")
+	}
+	if strings.Join(got.AllowedTools, ",") != "read,grep" {
+		t.Fatalf("AllowedTools = %v, want [read grep]", got.AllowedTools)
+	}
+	if got.SystemPrompt != "be careful" {
+		t.Fatalf("SystemPrompt = %q, want %q", got.SystemPrompt, "be careful")
+	}
+}
+
 func TestRegisterAgentType_MalformedFlags(t *testing.T) {
 	cases := [][]string{
 		{"reviewer", "code reviewer", "--tools"},

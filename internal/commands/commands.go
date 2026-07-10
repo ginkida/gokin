@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"gokin/internal/agent"
 	"gokin/internal/chat"
@@ -301,8 +302,7 @@ func (h *Handler) Parse(input string) (string, []string, bool) {
 		return "", nil, false
 	}
 
-	// Split into parts
-	parts := strings.Fields(input)
+	parts := splitCommandFields(input)
 	if len(parts) == 0 {
 		return "", nil, false
 	}
@@ -332,6 +332,65 @@ func (h *Handler) Parse(input string) (string, []string, bool) {
 	}
 
 	return name, args, true
+}
+
+func splitCommandFields(input string) []string {
+	var fields []string
+	var b strings.Builder
+	var quote rune
+	tokenStarted := false
+	escaped := false
+
+	for _, r := range input {
+		if escaped {
+			if r == quote || r == '\\' {
+				b.WriteRune(r)
+			} else {
+				b.WriteRune('\\')
+				b.WriteRune(r)
+			}
+			tokenStarted = true
+			escaped = false
+			continue
+		}
+
+		if quote != 0 {
+			switch r {
+			case '\\':
+				escaped = true
+			case quote:
+				quote = 0
+				tokenStarted = true
+			default:
+				b.WriteRune(r)
+				tokenStarted = true
+			}
+			continue
+		}
+
+		switch {
+		case r == '"' || r == '\'':
+			quote = r
+			tokenStarted = true
+		case unicode.IsSpace(r):
+			if tokenStarted {
+				fields = append(fields, b.String())
+				b.Reset()
+				tokenStarted = false
+			}
+		default:
+			b.WriteRune(r)
+			tokenStarted = true
+		}
+	}
+
+	if escaped {
+		b.WriteRune('\\')
+	}
+	if tokenStarted {
+		fields = append(fields, b.String())
+	}
+	return fields
 }
 
 // Execute runs a command by name.
