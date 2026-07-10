@@ -304,6 +304,20 @@ func (p *ActivityFeedPanel) Toggle() {
 	p.mu.Unlock()
 }
 
+// ShowExplicit makes the panel visible as a direct result of an explicit user
+// action (the Ctrl+O detail expand). It clears the userHidden latch — the
+// NEWEST explicit intent wins, mirroring Toggle's latch semantics: a user who
+// hid the feed earlier and now asks for the detailed view wants the panel
+// back. Without this, Ctrl+O only flipped the Model-level verbosity flag and
+// the panel's own default-hidden visibility silently kept the feed off screen
+// (the "Ctrl+O does nothing during streaming" report).
+func (p *ActivityFeedPanel) ShowExplicit() {
+	p.mu.Lock()
+	p.visible = true
+	p.userHidden = false
+	p.mu.Unlock()
+}
+
 // IsVisible returns whether the panel is visible.
 func (p *ActivityFeedPanel) IsVisible() bool {
 	p.mu.RLock()
