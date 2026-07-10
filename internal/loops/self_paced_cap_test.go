@@ -26,6 +26,18 @@ func TestLoop_SelfPacedDelay_CapsAbsurdHint(t *testing.T) {
 	}
 }
 
+func TestLoop_SelfPacedDelay_CapsHugeHumanHint(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	l := newSelfPacedLoop(start, DefaultMinDelaySeconds)
+	l.AppendIteration(Iteration{N: 1, StartedAt: start, Duration: time.Second, OK: true, NextHint: "999999999999999 days"})
+
+	lastRun := start.Add(time.Second)
+	wantCap := lastRun.Add(MaxSelfPacedDelaySeconds * time.Second)
+	if !l.NextRunAt.Equal(wantCap) {
+		t.Errorf("huge human hint must be capped to %v, got %v", wantCap, l.NextRunAt)
+	}
+}
+
 func TestLoop_SelfPacedDelay_HonorsNormalHint(t *testing.T) {
 	start := time.Unix(1_700_000_000, 0)
 	l := newSelfPacedLoop(start, DefaultMinDelaySeconds)

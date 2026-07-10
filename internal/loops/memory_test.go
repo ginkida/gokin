@@ -117,6 +117,33 @@ func TestMemoryWriter_WriteAfterDeleteDoesNotResurrect(t *testing.T) {
 	}
 }
 
+func TestMemoryWriter_RejectsUnsafeID(t *testing.T) {
+	dir := t.TempDir()
+	w := NewMemoryWriter(filepath.Join(dir, "work"))
+	l := &Loop{ID: "../escape", Task: "t", Mode: ModeInterval, IntervalSeconds: 600, Status: StatusRunning}
+
+	if err := w.WriteLoop(l); err == nil {
+		t.Fatal("WriteLoop accepted unsafe loop ID")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "work", ".gokin", "escape.md")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe WriteLoop touched path outside loops dir: %v", err)
+	}
+
+	escapePath := filepath.Join(dir, "work", ".gokin", "escape.md")
+	if err := os.MkdirAll(filepath.Dir(escapePath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(escapePath, []byte("keep me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.DeleteLoop("../escape"); err == nil {
+		t.Fatal("DeleteLoop accepted unsafe loop ID")
+	}
+	if _, err := os.Stat(escapePath); err != nil {
+		t.Fatalf("unsafe DeleteLoop removed or damaged outside file: %v", err)
+	}
+}
+
 // Concurrent WriteLoop/DeleteLoop must be race-free (run under -race) and always
 // leave the file gone once DeleteLoop has been called.
 func TestMemoryWriter_ConcurrentWriteDeleteNoRace(t *testing.T) {

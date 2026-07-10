@@ -131,6 +131,7 @@ func TestFileStorage_RefuseInvalid(t *testing.T) {
 func TestUnmarshal_RejectsInvalid(t *testing.T) {
 	cases := map[string]string{
 		"empty task":     `{"id":"loop-x","task":"","mode":"interval","interval_seconds":60,"status":"running"}`,
+		"unsafe id":      `{"id":"../escape","task":"t","mode":"interval","interval_seconds":60,"status":"running"}`,
 		"unknown mode":   `{"id":"loop-x","task":"t","mode":"weird","status":"running"}`,
 		"unknown status": `{"id":"loop-x","task":"t","mode":"interval","interval_seconds":60,"status":"weird"}`,
 	}
@@ -140,6 +141,38 @@ func TestUnmarshal_RejectsInvalid(t *testing.T) {
 				t.Errorf("expected parse error for %s", name)
 			}
 		})
+	}
+}
+
+func TestFileStorage_RejectsUnsafeIDOnSave(t *testing.T) {
+	parent := t.TempDir()
+	s := NewFileStorage(filepath.Join(parent, "loops"))
+	bad := &Loop{
+		ID: "../escape", Task: "t", Mode: ModeInterval,
+		IntervalSeconds: 60, Status: StatusRunning, CreatedAt: time.Now(),
+	}
+
+	if err := s.Save(bad); err == nil {
+		t.Fatal("Save accepted unsafe loop ID")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "escape.json")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe Save touched path outside storage dir: %v", err)
+	}
+}
+
+func TestFileStorage_RejectsUnsafeIDOnDelete(t *testing.T) {
+	parent := t.TempDir()
+	escapePath := filepath.Join(parent, "escape.json")
+	if err := os.WriteFile(escapePath, []byte("keep me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewFileStorage(filepath.Join(parent, "loops"))
+
+	if err := s.Delete("../escape"); err == nil {
+		t.Fatal("Delete accepted unsafe loop ID")
+	}
+	if _, err := os.Stat(escapePath); err != nil {
+		t.Fatalf("unsafe Delete removed or damaged outside file: %v", err)
 	}
 }
 
@@ -318,7 +351,12 @@ func TestParseNextHintSeconds(t *testing.T) {
 		{"after 5m", 300},
 		{"next 2h", 7200},
 		{"every 10m", 600},
+		{"30 minutes", 1800},
+		{"wait 1 hour", 3600},
+		{"about 2 hours", 7200},
+		{"roughly 3 days", 259200},
 		{"garbage", 0},
+		{"30 minutes from now", 0},
 		{"-5m", 0}, // negative ignored
 	}
 	for _, tc := range cases {

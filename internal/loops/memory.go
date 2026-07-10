@@ -71,6 +71,9 @@ func (w *MemoryWriter) WriteLoop(l *Loop) error {
 	if w == nil || l == nil {
 		return nil
 	}
+	if !isSafeLoopID(l.ID) {
+		return fmt.Errorf("loops memory: refuse to write unsafe loop id %q", l.ID)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.deleted[l.ID] {
@@ -92,6 +95,9 @@ func (w *MemoryWriter) WriteLoop(l *Loop) error {
 func (w *MemoryWriter) DeleteLoop(loopID string) error {
 	if w == nil || loopID == "" {
 		return nil
+	}
+	if !isSafeLoopID(loopID) {
+		return fmt.Errorf("loops memory: refuse to delete unsafe loop id %q", loopID)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()

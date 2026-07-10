@@ -126,6 +126,9 @@ func (s *FileStorage) Save(l *Loop) error {
 // Delete removes a loop's state file. Missing file is not an error —
 // idempotent so the manager can call it without first checking existence.
 func (s *FileStorage) Delete(id string) error {
+	if !isSafeLoopID(id) {
+		return fmt.Errorf("loops: refuse to delete unsafe loop id %q", id)
+	}
 	err := os.Remove(s.path(id))
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("loops: delete %s: %w", id, err)

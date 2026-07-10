@@ -33,6 +33,8 @@ package loops
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -520,6 +522,9 @@ func (l *Loop) Validate() error {
 	if strings.TrimSpace(l.ID) == "" {
 		return fmt.Errorf("loop: id is empty")
 	}
+	if !isSafeLoopID(l.ID) {
+		return fmt.Errorf("loop %q: id contains unsafe characters", l.ID)
+	}
 	if strings.TrimSpace(l.Task) == "" {
 		return fmt.Errorf("loop %s: task is empty", l.ID)
 	}
@@ -543,6 +548,23 @@ func (l *Loop) Validate() error {
 	return nil
 }
 
+func isSafeLoopID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // parseNextHintSeconds parses common "next check" hints from the iteration
 // summary. Recognizes formats like "wait 30m", "next 1h", "in 5m". Returns
 // 0 when the hint is absent or unparseable — caller treats 0 as "use the
@@ -559,12 +581,56 @@ func parseNextHintSeconds(hint string) int64 {
 	hint = strings.TrimSpace(hint)
 	d, err := time.ParseDuration(hint)
 	if err != nil {
-		return 0
+		return parseHumanDurationSeconds(hint)
 	}
 	if d < 0 {
 		return 0
 	}
 	return int64(d / time.Second)
+}
+
+// parseHumanDurationSeconds accepts the phrasing LLMs naturally produce in
+// self-paced hints ("30 minutes", "1 hour", "2 days"). Keep it deliberately
+// narrow so ordinary prose doesn't become a schedule by accident.
+func parseHumanDurationSeconds(hint string) int64 {
+	fields := strings.Fields(strings.Trim(hint, " ."))
+	for len(fields) > 0 && isApproxWord(fields[0]) {
+		fields = fields[1:]
+	}
+
+	if len(fields) != 2 {
+		return 0
+	}
+	n, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	var seconds int64
+	switch strings.TrimSuffix(fields[1], "s") {
+	case "sec", "second":
+		seconds = 1
+	case "min", "minute":
+		seconds = 60
+	case "hr", "hour":
+		seconds = 60 * 60
+	case "day":
+		seconds = 24 * 60 * 60
+	default:
+		return 0
+	}
+	if n > math.MaxInt64/seconds {
+		return math.MaxInt64
+	}
+	return n * seconds
+}
+
+func isApproxWord(s string) bool {
+	switch s {
+	case "about", "around", "approximately", "approx", "roughly":
+		return true
+	default:
+		return false
+	}
 }
 
 // Marshal returns the canonical JSON encoding for this loop. Used by

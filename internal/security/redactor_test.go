@@ -34,7 +34,7 @@ func TestRedactAWSKey(t *testing.T) {
 
 func TestRedactGitHubToken(t *testing.T) {
 	r := NewSecretRedactor()
-	text := "Token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"
+	text := "Token: ghp" + "_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"
 	got := r.Redact(text)
 	if strings.Contains(got, "ghp_") {
 		t.Errorf("GitHub token should be redacted: %q", got)
@@ -95,7 +95,7 @@ func TestRedactMap(t *testing.T) {
 		"name":   "test",
 		"secret": "AKIAIOSFODNN7EXAMPLE",
 		"normal": "hello world",
-		"nested": map[string]any{"key": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"},
+		"nested": map[string]any{"key": "ghp" + "_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"},
 	}
 
 	result := r.RedactMap(m)

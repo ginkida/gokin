@@ -10,10 +10,11 @@ import (
 // memStorage is an in-memory Storage for tests — no disk IO, no
 // race-detector noise from filesystem timing.
 type memStorage struct {
-	loops    map[string]*Loop
-	saves    int
-	loadErr  []error
-	failSave error // when non-nil, Save returns this without persisting
+	loops      map[string]*Loop
+	saves      int
+	loadErr    []error
+	failSave   error // when non-nil, Save returns this without persisting
+	failDelete error // when non-nil, Delete returns this
 }
 
 func newMemStorage() *memStorage { return &memStorage{loops: make(map[string]*Loop)} }
@@ -38,6 +39,9 @@ func (m *memStorage) Save(l *Loop) error {
 }
 
 func (m *memStorage) Delete(id string) error {
+	if m.failDelete != nil {
+		return m.failDelete
+	}
 	delete(m.loops, id)
 	return nil
 }

@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -264,10 +265,14 @@ func parseTokenBudget(s string) (int64, bool) {
 		mult, s = 1_000_000, s[:len(s)-1]
 	}
 	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || f <= 0 {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 {
 		return 0, false
 	}
-	n := int64(f * float64(mult))
+	amount := f * float64(mult)
+	if math.IsInf(amount, 0) || amount < 1 || amount >= float64(math.MaxInt64) {
+		return 0, false
+	}
+	n := int64(amount)
 	if n <= 0 {
 		return 0, false
 	}
@@ -403,6 +408,8 @@ func formatStatus(mgr LoopManager, id string) (string, error) {
 			statusLabel = "auto-paused (provider unavailable)"
 		case loops.AutoPauseConsecutiveFailures:
 			statusLabel = "auto-paused (consecutive failures)"
+		case loops.AutoPauseNoProgress:
+			statusLabel = "auto-paused (no progress)"
 		default:
 			statusLabel = "auto-paused"
 		}

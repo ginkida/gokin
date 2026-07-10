@@ -82,6 +82,28 @@ func TestFormatLoopLine_RunningNow(t *testing.T) {
 	}
 }
 
+func TestFormatStatus_NoProgressAutoPauseReason(t *testing.T) {
+	mgr := &fakeLoopMgr{
+		getReturns: &loops.Loop{
+			ID:                    "loop-1",
+			Task:                  "fix parser",
+			Mode:                  loops.ModeSelfPaced,
+			Status:                loops.StatusPaused,
+			AutoPaused:            true,
+			AutoPauseReason:       loops.AutoPauseNoProgress,
+			ConsecutiveNoProgress: loops.NoProgressLimit,
+		},
+	}
+
+	out, err := formatStatus(mgr, "loop-1")
+	if err != nil {
+		t.Fatalf("formatStatus: %v", err)
+	}
+	if !strings.Contains(out, "auto-paused (no progress)") {
+		t.Errorf("status should explain no-progress auto-pause:\n%s", out)
+	}
+}
+
 // TestParseLoopInterval covers the accept and reject paths of the
 // shorthand parser. Pinned in tests so future "be more lenient"
 // changes can't silently re-introduce the multi-unit silent
