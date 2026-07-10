@@ -1088,6 +1088,11 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 		}
 	case paletteActionLiveDetail:
 		m.liveDetailExpanded = !m.liveDetailExpanded
+		// Mirror the Ctrl+O handler: expanding explicitly opens the feed panel
+		// too, so the palette action and the key can't behave differently.
+		if m.liveDetailExpanded && m.activityFeed != nil {
+			m.activityFeed.ShowExplicit()
+		}
 		if m.toastManager != nil {
 			if m.liveDetailExpanded {
 				m.toastManager.ShowInfo("Live activity: detailed")
@@ -1294,16 +1299,24 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 
 	// Ctrl+O — Claude-Code-style live-activity detail toggle. Deliberately
 	// available DURING Processing/Streaming (the whole point is expanding the
-	// detail while the agent works), not just StateInput. Flips the ONE
+	// detail while the agent works), not just StateInput. Toggles the ONE
 	// verbosity flag: minimal (one dim line, feed suppressed) ⇄ detailed
-	// (full card + activity feed panel). The feed panel's own visibility
-	// machinery (auto-show on sub-agents, userHidden latch) still governs
-	// whether the feed has anything to show WITHIN detailed mode; the
-	// fine-grained feed-only toggle remains on the palette. keyConsumed so
-	// the keystroke never also reaches the compose textarea (round-8 rule).
+	// (full card + activity feed panel). Expanding ALSO explicitly shows the
+	// feed panel (ShowExplicit): the panel is hidden by default and its
+	// auto-show only fires on parallel/sub-agent activity, so without this
+	// the toggle flipped a flag but nothing visibly opened during ordinary
+	// streaming — the panel must open deterministically on the keypress, even
+	// empty ("No activity yet"). Collapsing needs no panel call — the render
+	// gate (feedRendered) is off in minimal mode. The fine-grained feed-only
+	// toggle remains on the palette for hiding the feed WITHIN detailed mode.
+	// keyConsumed so the keystroke never also reaches the compose textarea
+	// (round-8 rule).
 	if msg.Type == tea.KeyCtrlO &&
 		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
 		m.liveDetailExpanded = !m.liveDetailExpanded
+		if m.liveDetailExpanded && m.activityFeed != nil {
+			m.activityFeed.ShowExplicit()
+		}
 		if m.toastManager != nil {
 			if m.liveDetailExpanded {
 				m.toastManager.ShowInfo("Live activity: detailed")
@@ -3247,9 +3260,15 @@ func (m Model) View() string {
 	}
 	// liveDetailExpanded gates the feed: in minimal mode (default) the whole
 	// live-activity surface is one dim line — the feed only renders once the
-	// user expands with Ctrl+O.
+	// user expands with Ctrl+O. Deliberately NOT gated on HasActiveEntries:
+	// the expand must open the panel deterministically (Claude-Code style),
+	// and the panel itself renders recent completed activity or an honest
+	// "No activity yet" placeholder when nothing is running — a toggle that
+	// only works while entries happen to be active reads as broken. IsVisible
+	// stays in the gate so the palette's feed-only toggle can still hide the
+	// feed WITHIN detailed mode.
 	feedRendered := m.liveDetailExpanded && m.activityFeed != nil && m.activityFeed.IsVisible() &&
-		m.activityFeed.HasActiveEntries() && agentTreeView == ""
+		agentTreeView == ""
 
 	// Live "Now" card — compact summary of what the agent is doing right now.
 	// The card's content overlaps with the processing/tool spinner-status

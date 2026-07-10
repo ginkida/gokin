@@ -214,6 +214,24 @@ func TestActivityFeedPanel_TickAndToggle(t *testing.T) {
 	// No assertion beyond "does not panic"
 }
 
+func TestActivityFeedPanel_ShowExplicitClearsUserHidden(t *testing.T) {
+	p := NewActivityFeedPanel(DefaultStyles())
+
+	p.Toggle() // visible
+	p.Toggle() // hidden by explicit user action, latches userHidden
+	if p.IsVisible() || !p.userHidden {
+		t.Fatalf("precondition: hidden explicit state not set; visible=%v userHidden=%v", p.IsVisible(), p.userHidden)
+	}
+
+	p.ShowExplicit()
+	if !p.IsVisible() {
+		t.Fatal("ShowExplicit should make the panel visible")
+	}
+	if p.userHidden {
+		t.Fatal("ShowExplicit should clear the explicit-hide latch")
+	}
+}
+
 func TestActivityFeedPanel_UpdateSubAgentProgress(t *testing.T) {
 	p := NewActivityFeedPanel(DefaultStyles())
 	p.StartSubAgent("a1", "explore", "Search codebase")
