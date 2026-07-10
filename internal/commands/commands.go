@@ -370,7 +370,14 @@ func splitCommandFields(input string) []string {
 		}
 
 		switch {
-		case r == '"' || r == '\'':
+		case (r == '"' || r == '\'') && b.Len() == 0:
+			// A quote opens quote mode ONLY at token start. A mid-word quote
+			// is literal: without this, `/grep don't` silently searched for
+			// "dont" and `/loop fix Bob's PR --max-tokens 200k` merged
+			// everything after the apostrophe into one arg — swallowing the
+			// --max-tokens flag entirely (the budget silently not applied).
+			// Prose arguments with contractions/apostrophes are far more
+			// common in a chat CLI than mid-word quoting.
 			quote = r
 			tokenStarted = true
 		case unicode.IsSpace(r):
