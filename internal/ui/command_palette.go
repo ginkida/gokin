@@ -2,7 +2,9 @@ package ui
 
 import (
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
@@ -87,6 +89,7 @@ type CommandPalette struct {
 	previewCmd      *EnhancedPaletteCommand
 	paletteProvider PaletteProvider
 	actionCommands  []EnhancedPaletteCommand
+	commandAliases  map[string]string
 
 	// Inline argument entry: when the user picks a slash command that needs an
 	// argument (ArgHint contains "<"), the palette switches into a one-line arg
@@ -121,6 +124,18 @@ func (p *CommandPalette) SetPaletteProvider(provider PaletteProvider) {
 // SetActionCommands sets direct action commands (keyboard shortcuts) for the palette.
 func (p *CommandPalette) SetActionCommands(actions []EnhancedPaletteCommand) {
 	p.actionCommands = actions
+}
+
+func (p *CommandPalette) SetCommandAliases(aliases map[string]string) {
+	if aliases == nil {
+		p.commandAliases = nil
+		return
+	}
+	out := make(map[string]string, len(aliases))
+	for k, v := range aliases {
+		out[strings.ToLower(k)] = strings.ToLower(v)
+	}
+	p.commandAliases = out
 }
 
 // RefreshCommands refreshes the command list from the provider.
@@ -269,7 +284,158 @@ func (p *CommandPalette) SubmitArgEntry() string {
 	if value == "" {
 		return cmd.Shortcut
 	}
-	return cmd.Shortcut + " " + value
+	return cmd.Shortcut + " " + formatPaletteArgEntryValue(cmd, value)
+}
+
+func (p *CommandPalette) DirectSlashLineWithArgs() (string, bool) {
+	line := strings.TrimSpace(p.query)
+	if !strings.HasPrefix(line, "/") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(line, "/")
+	nameEnd := strings.IndexFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' })
+	if nameEnd <= 0 {
+		return "", false
+	}
+	name := rest[:nameEnd]
+	if strings.TrimSpace(rest[nameEnd:]) == "" {
+		return "", false
+	}
+	canonicalName := strings.ToLower(name)
+	if target, ok := p.commandAliases[canonicalName]; ok {
+		canonicalName = target
+	}
+	for i := range p.commands {
+		cmd := p.commands[i]
+		if cmd.Type == CommandTypeSlash && cmd.Enabled && strings.EqualFold(cmd.Name, canonicalName) {
+			p.history.RecordUsage(cmd.Name)
+			p.Hide()
+			return line, true
+		}
+	}
+	return "", false
+}
+
+func formatPaletteArgEntryValue(cmd EnhancedPaletteCommand, value string) string {
+	if !strings.ContainsAny(value, " \t\r\n") || paletteArgAlreadyQuoted(value) {
+		return value
+	}
+	hint := strings.TrimSpace(cmd.ArgHint)
+	switch hint {
+	case "<file>", "<path>":
+		return quotePaletteArg(value)
+	}
+	if strings.HasPrefix(hint, "<file> ") || strings.HasPrefix(hint, "<path> ") {
+		if filePart, suffix, ok := splitPalettePathAndSuffix(value); ok {
+			return quotePaletteArg(filePart) + " " + suffix
+		}
+		return quotePaletteArg(value)
+	}
+	return value
+}
+
+func paletteArgAlreadyQuoted(value string) bool {
+	if len(value) < 2 {
+		return false
+	}
+	first := value[0]
+	last := value[len(value)-1]
+	return (first == '"' && last == '"') || (first == '\'' && last == '\'')
+}
+
+func quotePaletteArg(value string) string {
+	return `"` + escapePaletteQuotedArg(value) + `"`
+}
+
+type paletteArgField struct {
+	start int
+	end   int
+	text  string
+}
+
+func splitPalettePathAndSuffix(value string) (filePart, suffix string, ok bool) {
+	fields := paletteArgFields(value)
+	if len(fields) < 2 {
+		return "", "", false
+	}
+	if len(fields) >= 3 {
+		last := fields[len(fields)-1]
+		prev := fields[len(fields)-2]
+		if isPositivePaletteInt(prev.text) && isPositivePaletteInt(last.text) {
+			prefix := strings.TrimSpace(value[:prev.start])
+			if prefix != "" {
+				return prefix, prev.text + " " + last.text, true
+			}
+		}
+	}
+	last := fields[len(fields)-1]
+	if isPaletteLineRange(last.text) {
+		prefix := strings.TrimSpace(value[:last.start])
+		if prefix != "" {
+			return prefix, last.text, true
+		}
+	}
+	return "", "", false
+}
+
+func paletteArgFields(value string) []paletteArgField {
+	var fields []paletteArgField
+	start := -1
+	end := 0
+	for i, r := range value {
+		if unicode.IsSpace(r) {
+			if start >= 0 {
+				fields = append(fields, paletteArgField{start: start, end: i, text: value[start:i]})
+				start = -1
+			}
+			continue
+		}
+		if start < 0 {
+			start = i
+		}
+		end = i + utf8.RuneLen(r)
+	}
+	if start >= 0 {
+		fields = append(fields, paletteArgField{start: start, end: end, text: value[start:end]})
+	}
+	return fields
+}
+
+func isPaletteLineRange(value string) bool {
+	if isPositivePaletteInt(value) {
+		return true
+	}
+	parts := strings.SplitN(value, "-", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	start, ok := parsePositivePaletteInt(parts[0])
+	if !ok {
+		return false
+	}
+	end, ok := parsePositivePaletteInt(parts[1])
+	return ok && end >= start
+}
+
+func isPositivePaletteInt(value string) bool {
+	_, ok := parsePositivePaletteInt(value)
+	return ok
+}
+
+func parsePositivePaletteInt(value string) (int, bool) {
+	n, err := strconv.Atoi(value)
+	return n, err == nil && n > 0
+}
+
+func escapePaletteQuotedArg(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r == '"' || r == '\\' {
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // Toggle toggles the visibility.

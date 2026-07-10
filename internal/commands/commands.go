@@ -307,8 +307,9 @@ func (h *Handler) Parse(input string) (string, []string, bool) {
 		return "", nil, false
 	}
 
-	// Extract command name (without /)
-	name := strings.TrimPrefix(parts[0], "/")
+	// Extract command name (without /). Slash commands are case-insensitive;
+	// command names are registered in lowercase.
+	name := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 
 	// Alias resolution: if `name` isn't a direct command but matches a
 	// known alias, swap to the canonical name before the existence check.

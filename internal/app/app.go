@@ -2084,6 +2084,30 @@ func (a *App) GetWorkDir() string {
 }
 
 // ClearConversation clears the session history.
+// clearTodosForNewConversation empties the foreground TodoTool and pushes the
+// now-empty list to the UI. The todo list is conversation-scoped: without
+// this, the Ctrl+T panel and the always-on "Ctrl+T tasks N" status-bar hint
+// keep showing the PREVIOUS conversation's tasks after /clear — a violation of
+// the "/clear = clean slate" invariant (same class as the permission-session
+// and granted-dirs resets nearby).
+func (a *App) clearTodosForNewConversation() {
+	if a.registry == nil {
+		return
+	}
+	todoTool, ok := a.registry.Get("todo")
+	if !ok {
+		return
+	}
+	tt, ok := todoTool.(*tools.TodoTool)
+	if !ok {
+		return
+	}
+	tt.ClearItems()
+	// emitTodoUpdate renders the (now empty) list and sends TodoUpdateMsg +
+	// clears the activity label — the UI drops both todo surfaces.
+	a.emitTodoUpdate()
+}
+
 func (a *App) ClearConversation() {
 	a.session.Clear()
 
@@ -2108,6 +2132,7 @@ func (a *App) ClearConversation() {
 	if a.executor != nil {
 		a.executor.ResetSession()
 	}
+	a.clearTodosForNewConversation()
 	// Session directory grants are conversation-scoped — /clear revokes them and
 	// re-propagates (persisted config dirs are untouched).
 	a.resetGrantedDirs()

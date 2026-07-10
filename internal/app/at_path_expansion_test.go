@@ -39,6 +39,21 @@ func TestExpandAtReferences_InWorkspaceFile(t *testing.T) {
 	}
 }
 
+func TestExpandAtReferences_QuotedPathWithSpaces(t *testing.T) {
+	a, work := newAtRefTestApp(t)
+	if err := os.WriteFile(filepath.Join(work, "space file.go"), []byte("package spaced\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := a.expandAtReferences(`look at @"space file.go" please`)
+	if !strings.Contains(out, `look at @"space file.go" please`) {
+		t.Errorf("original quoted message must be preserved verbatim:\n%s", out)
+	}
+	if !strings.Contains(out, "[file: space file.go]") || !strings.Contains(out, "package spaced") {
+		t.Errorf("quoted @ref with spaces should inline file content:\n%s", out)
+	}
+}
+
 func TestExpandAtReferences_NoRefsUnchanged(t *testing.T) {
 	a, _ := newAtRefTestApp(t)
 	for _, msg := range []string{
@@ -51,6 +66,25 @@ func TestExpandAtReferences_NoRefsUnchanged(t *testing.T) {
 		if got := a.expandAtReferences(msg); got != msg {
 			t.Errorf("message with no resolvable @ref must be unchanged.\n in:  %q\n out: %q", msg, got)
 		}
+	}
+}
+
+func TestExpandAtReferences_QuotedPathLineRange(t *testing.T) {
+	a, work := newAtRefTestApp(t)
+	content := "line1\nline2\nline3\nline4\n"
+	if err := os.WriteFile(filepath.Join(work, "space file.txt"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := a.expandAtReferences(`see @"space file.txt":2-3`)
+	if !strings.Contains(out, "[file: space file.txt:2-3]") {
+		t.Errorf("expected quoted range label:\n%s", out)
+	}
+	if !strings.Contains(out, "line2") || !strings.Contains(out, "line3") {
+		t.Errorf("quoted range should include requested lines:\n%s", out)
+	}
+	if strings.Contains(out, "line1") || strings.Contains(out, "line4") {
+		t.Errorf("quoted range must exclude lines outside 2-3:\n%s", out)
 	}
 }
 

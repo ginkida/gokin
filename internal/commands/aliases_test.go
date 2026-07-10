@@ -63,7 +63,7 @@ func TestLoadAliasesFromFile_OverridesDefault(t *testing.T) {
 func TestLoadAliasesFromFile_StripsLeadingSlashFromTarget(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "aliases.yaml")
-	if err := os.WriteFile(path, []byte("p: /plan\n"), 0644); err != nil {
+	if err := os.WriteFile(path, []byte("P: /Plan\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,12 +72,12 @@ func TestLoadAliasesFromFile_StripsLeadingSlashFromTarget(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	// ResolveAlias should return "plan" (without slash).
-	if got := h.ResolveAlias("p"); got != "plan" {
+	if got := h.ResolveAlias("P"); got != "plan" {
 		t.Errorf("p → %q, want plan (leading / must be stripped)", got)
 	}
 	// Parse should also resolve correctly.
-	if name, _, ok := h.Parse("/p"); !ok || name != "plan" {
-		t.Errorf("Parse(/p) = %q, %v; want plan, true", name, ok)
+	if name, _, ok := h.Parse("/P"); !ok || name != "plan" {
+		t.Errorf("Parse(/P) = %q, %v; want plan, true", name, ok)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"gokin/internal/config"
@@ -64,18 +65,87 @@ const (
 // still being typed). ok=false otherwise. Lets "look at @main" autocomplete the
 // @main token mid-sentence, not just a whole-value "@main".
 func atFileWord(value string) (string, bool) {
-	if value == "" || strings.HasSuffix(value, " ") {
+	token, ok := trailingInputToken(value)
+	if !ok {
 		return "", false
 	}
-	fields := strings.Fields(value)
-	if len(fields) == 0 {
-		return "", false
-	}
-	last := fields[len(fields)-1]
-	if strings.HasPrefix(last, "@") && strings.Count(last, "@") == 1 {
-		return last, true
+	if strings.HasPrefix(token.text, "@") && strings.Count(token.text, "@") == 1 {
+		return token.text, true
 	}
 	return "", false
+}
+
+type inputToken struct {
+	start int
+	text  string
+	quote rune
+}
+
+func trailingInputToken(value string) (inputToken, bool) {
+	var token inputToken
+	var b strings.Builder
+	var quote rune
+	tokenStarted := false
+	escaped := false
+
+	for i, r := range value {
+		if escaped {
+			if r == quote || r == '\\' {
+				b.WriteRune(r)
+			} else {
+				b.WriteRune('\\')
+				b.WriteRune(r)
+			}
+			tokenStarted = true
+			escaped = false
+			continue
+		}
+
+		if quote != 0 {
+			switch r {
+			case '\\':
+				escaped = true
+			case quote:
+				quote = 0
+				tokenStarted = true
+			default:
+				b.WriteRune(r)
+				tokenStarted = true
+			}
+			continue
+		}
+
+		if unicode.IsSpace(r) {
+			b.Reset()
+			token = inputToken{}
+			tokenStarted = false
+			continue
+		}
+
+		if !tokenStarted {
+			tokenStarted = true
+			token.start = i
+		}
+
+		if r == '"' || r == '\'' {
+			if b.Len() == 0 && token.quote == 0 {
+				token.quote = r
+			}
+			quote = r
+			continue
+		}
+
+		b.WriteRune(r)
+	}
+
+	if escaped {
+		b.WriteRune('\\')
+	}
+	if !tokenStarted {
+		return inputToken{}, false
+	}
+	token.text = b.String()
+	return token, true
 }
 
 // InputModel represents the input component.
@@ -803,9 +873,9 @@ func (m *InputModel) updateGhostText(prefix string) {
 		top := m.fileSuggestions[0]
 		rel, err := filepath.Rel(m.workDir, top)
 		if err == nil {
-			words := strings.Fields(prefix)
-			if len(words) > 0 {
-				lastWord := words[len(words)-1]
+			token, ok := trailingInputToken(prefix)
+			if ok {
+				lastWord := token.text
 				if strings.HasPrefix(rel, lastWord) && len(rel) > len(lastWord) {
 					m.ghostText = rel[len(lastWord):]
 				} else {
@@ -830,12 +900,12 @@ func (m InputModel) shouldSuggestFiles(input string) bool {
 		return true
 	}
 
-	// Suggest if current word looks like a path (contains /, ., or is part of a known path)
-	words := strings.Fields(input)
-	if len(words) == 0 {
+	// Suggest if current word looks like a path (contains /, ., or is part of a known path).
+	token, ok := trailingInputToken(input)
+	if !ok {
 		return false
 	}
-	lastWord := words[len(words)-1]
+	lastWord := token.text
 	return len(lastWord) >= 2 && (strings.Contains(lastWord, "/") || strings.Contains(lastWord, "."))
 }
 
@@ -877,12 +947,12 @@ func (m *InputModel) updateFileSuggestions(input string) {
 		return
 	}
 
-	words := strings.Fields(input)
-	if len(words) == 0 {
+	token, ok := trailingInputToken(input)
+	if !ok {
 		m.showSuggestions = false
 		return
 	}
-	lastWord := words[len(words)-1]
+	lastWord := token.text
 
 	// Simple glob matching for now
 	pattern := filepath.Join(m.workDir, lastWord+"*")
@@ -1491,22 +1561,42 @@ func (m *InputModel) ShowingSuggestions() bool {
 // acceptFileSuggestion replaces the last word with the selected file path.
 func (m *InputModel) acceptFileSuggestion(path string) {
 	value := m.textarea.Value()
-	words := strings.Fields(value)
-	if len(words) == 0 {
+	token, ok := trailingInputToken(value)
+	if !ok {
 		return
 	}
 
-	// Replace last word. Preserve the leading @ for an @-reference (so the buffer
-	// holds "@relpath", which the app expands to file content on submit); a plain
-	// file suggestion (/open, /ql, …) keeps the bare path.
-	if strings.HasPrefix(words[len(words)-1], "@") {
-		words[len(words)-1] = "@" + path
-	} else {
-		words[len(words)-1] = path
-	}
-	m.textarea.SetValue(strings.Join(words, " ") + " ")
+	replacement := formatAcceptedFilePath(path, token)
+	m.textarea.SetValue(value[:token.start] + replacement + " ")
 	m.textarea.CursorEnd()
 	m.showSuggestions = false
 	m.fileSuggestions = nil
 	m.ghostText = ""
+}
+
+func formatAcceptedFilePath(path string, token inputToken) string {
+	prefix := ""
+	if strings.HasPrefix(token.text, "@") {
+		prefix = "@"
+		path = strings.TrimPrefix(path, "@")
+	}
+
+	if token.quote != 0 {
+		return prefix + string(token.quote) + escapeQuotedInputPath(path, token.quote) + string(token.quote)
+	}
+	if strings.ContainsAny(path, " \t\r\n") {
+		return prefix + `"` + escapeQuotedInputPath(path, '"') + `"`
+	}
+	return prefix + path
+}
+
+func escapeQuotedInputPath(path string, quote rune) string {
+	var b strings.Builder
+	for _, r := range path {
+		if r == quote || r == '\\' {
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

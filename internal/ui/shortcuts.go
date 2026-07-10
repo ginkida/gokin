@@ -68,7 +68,6 @@ func DefaultShortcuts() []ShortcutCategory {
 				{Keys: []string{"Ctrl", "A"}, Description: "Toggle agent tree panel"},
 				{Keys: []string{"Ctrl", "T"}, Description: "Toggle todo list panel"},
 				{Keys: []string{"Ctrl", "X"}, Description: "Expand / collapse plan progress panel"},
-				{Keys: []string{"Ctrl", "Shift", "C"}, Description: "Toggle compact (small viewport) mode"},
 				{Keys: []string{"Ctrl", "L"}, Description: "Clear the output screen"},
 				{Keys: []string{"Option", "C"}, Description: "Copy last AI response"},
 			},
@@ -341,9 +340,9 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 	// Footer
 	content.WriteString("\n")
 	if m.searchQuery != "" {
-		content.WriteString(footerStyle.Render("Esc clear filter • q close • ↑/↓ scroll"))
+		content.WriteString(footerStyle.Render("Esc clear filter • ↑/↓ scroll"))
 	} else {
-		content.WriteString(footerStyle.Render("Type to filter • Esc/q close • ↑/↓ scroll"))
+		content.WriteString(footerStyle.Render("Type to filter • Esc close • ↑/↓ scroll"))
 	}
 
 	// Wrap in container

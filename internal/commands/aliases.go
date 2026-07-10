@@ -49,8 +49,8 @@ func (h *Handler) LoadAliasesFromFile(path string) error {
 		h.aliases = cloneAliases(defaultAliases)
 	}
 	for alias, target := range raw {
-		alias = strings.TrimSpace(alias)
-		target = strings.TrimSpace(strings.TrimPrefix(target, "/"))
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		target = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(target, "/")))
 		if alias == "" || target == "" {
 			continue
 		}
@@ -69,7 +69,7 @@ func (h *Handler) ResolveAlias(name string) string {
 	if h == nil || h.aliases == nil {
 		return name
 	}
-	if target, ok := h.aliases[name]; ok {
+	if target, ok := h.aliases[strings.ToLower(name)]; ok {
 		return target
 	}
 	return name

@@ -211,10 +211,15 @@ func (ch *CommandHistory) save() error {
 		return nil
 	}
 
-	// Snapshot entries under lock
-	entries := make([]*HistoryEntry, 0, len(ch.entries))
+	// Snapshot entry VALUES under lock — copying the pointers is not enough:
+	// json.Marshal reads every pointee's fields OUTSIDE the lock, racing a
+	// concurrent RecordUsage mutating the same *HistoryEntry (Count++,
+	// Timestamp) under the write lock. -race caught this via the async
+	// `go ch.save()` overlapping the next RecordUsage (the round-5
+	// "snapshot the pointers, race on the pointees" class).
+	entries := make([]HistoryEntry, 0, len(ch.entries))
 	for _, e := range ch.entries {
-		entries = append(entries, e)
+		entries = append(entries, *e)
 	}
 	ch.mu.RUnlock()
 

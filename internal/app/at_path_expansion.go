@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gokin/internal/logging"
 )
@@ -82,7 +83,7 @@ func (a *App) expandAtReferences(message string) string {
 	total := 0
 	limitHit := false
 
-	for _, token := range strings.Fields(message) {
+	for _, token := range atReferenceTokens(message) {
 		if len(refs) >= atRefMaxFiles {
 			limitHit = true
 			break
@@ -197,4 +198,80 @@ func (a *App) expandAtReferences(message string) string {
 		b.WriteString("\n[… reference expansion limit reached; remaining @files omitted]\n")
 	}
 	return b.String()
+}
+
+func atReferenceTokens(message string) []string {
+	var tokens []string
+	runes := []rune(message)
+
+	for i := 0; i < len(runes); {
+		if runes[i] != '@' || (i > 0 && !unicode.IsSpace(runes[i-1])) {
+			i++
+			continue
+		}
+
+		i++
+		if i >= len(runes) {
+			continue
+		}
+
+		var b strings.Builder
+		b.WriteRune('@')
+
+		if runes[i] == '"' || runes[i] == '\'' {
+			quote := runes[i]
+			i++
+			bodyLen := 0
+			escaped := false
+			for i < len(runes) {
+				r := runes[i]
+				i++
+				if escaped {
+					if r == quote || r == '\\' {
+						b.WriteRune(r)
+					} else {
+						b.WriteRune('\\')
+						b.WriteRune(r)
+					}
+					bodyLen++
+					escaped = false
+					continue
+				}
+				switch r {
+				case '\\':
+					escaped = true
+				case quote:
+					goto quotedDone
+				default:
+					b.WriteRune(r)
+					bodyLen++
+				}
+			}
+			if escaped {
+				b.WriteRune('\\')
+				bodyLen++
+			}
+
+		quotedDone:
+			if bodyLen == 0 {
+				continue
+			}
+			for i < len(runes) && !unicode.IsSpace(runes[i]) {
+				b.WriteRune(runes[i])
+				i++
+			}
+			tokens = append(tokens, b.String())
+			continue
+		}
+
+		for i < len(runes) && !unicode.IsSpace(runes[i]) {
+			b.WriteRune(runes[i])
+			i++
+		}
+		if b.Len() > len("@") {
+			tokens = append(tokens, b.String())
+		}
+	}
+
+	return tokens
 }

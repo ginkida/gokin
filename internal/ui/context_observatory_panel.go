@@ -188,7 +188,11 @@ func (p *ContextObservatoryPanel) View(width int) string {
 
 	// Footer with instructions
 	content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤") + "\n")
-	p.writeBoxLine(&content, borderStyle, " [Esc/Ctrl+O] Close Observatory", mutedStyle, panelWidth)
+	// Advertise only keys that actually close it: Esc (the global modal
+	// close) and Ctrl+H (the same key that opened it — toggle symmetry).
+	// Ctrl+O used to be listed here but has been the live-activity toggle
+	// since v0.100.x — it does nothing in this state.
+	p.writeBoxLine(&content, borderStyle, " [Esc/Ctrl+H] Close Observatory", mutedStyle, panelWidth)
 
 	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", panelWidth-1) + "╯"))
 

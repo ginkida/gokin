@@ -159,6 +159,9 @@ func (m *Model) SetWorkDir(dir string) {
 // ranker so typing /p resolves to plan as a top suggestion.
 func (m *Model) SetCommandAliases(aliases map[string]string) {
 	m.input.SetCommandAliases(aliases)
+	if m.commandPalette != nil {
+		m.commandPalette.SetCommandAliases(aliases)
+	}
 }
 
 // AddCommands appends commands to the input autocomplete list — used for

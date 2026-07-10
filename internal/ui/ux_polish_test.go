@@ -25,9 +25,18 @@ func TestDefaultShortcuts_DocumentRealPanelToggles(t *testing.T) {
 			all += strings.Join(s.Keys, "+") + "\n"
 		}
 	}
-	for _, want := range []string{"Ctrl+O", "Ctrl+A", "Ctrl+T", "Ctrl+L", "Ctrl+J", "Ctrl+Shift+C"} {
+	for _, want := range []string{"Ctrl+O", "Ctrl+A", "Ctrl+T", "Ctrl+L", "Ctrl+J"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("shortcuts overlay missing %q — it's a real binding and should be documented", want)
 		}
+	}
+	// The INVERSE pin: Ctrl+Shift+C must NOT be advertised. bubbletea v1 has
+	// no "ctrl+shift+c" key name (only home/end/arrows get ctrl+shift), and a
+	// real terminal encodes the chord as byte 0x03 — identical to Ctrl+C, the
+	// CANCEL key. The overlay listing it steered users into cancelling their
+	// own in-flight request. (This test previously asserted the binding was
+	// real — a stale pin on a physically unreachable handler.)
+	if strings.Contains(all, "Ctrl+Shift+C") {
+		t.Error("shortcuts overlay must not advertise Ctrl+Shift+C — the chord is indistinguishable from Ctrl+C (cancel) in a terminal")
 	}
 }

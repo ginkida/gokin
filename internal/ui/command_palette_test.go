@@ -85,3 +85,38 @@ func TestCommandPaletteNoMatchesGivesRecoveryHint(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandPaletteDirectSlashLineWithArgs(t *testing.T) {
+	p := NewCommandPalette(DefaultStyles())
+	p.commands = []EnhancedPaletteCommand{
+		{Name: "open", Shortcut: "/open", Type: CommandTypeSlash, Enabled: true},
+		{Name: "plan", Shortcut: "/plan", Type: CommandTypeSlash, Enabled: true},
+		{Name: "disabled", Shortcut: "/disabled", Type: CommandTypeSlash, Enabled: false},
+	}
+	p.SetCommandAliases(map[string]string{"P": "Plan"})
+
+	p.SetQuery(`/open "space file.go"`)
+	got, ok := p.DirectSlashLineWithArgs()
+	if !ok || got != `/open "space file.go"` {
+		t.Fatalf("DirectSlashLineWithArgs = (%q,%v), want full /open line", got, ok)
+	}
+	if p.IsVisible() || p.InArgEntry() {
+		t.Fatal("direct slash execution should hide and clear palette state")
+	}
+
+	p.SetQuery("/open")
+	if got, ok := p.DirectSlashLineWithArgs(); ok || got != "" {
+		t.Fatalf("exact /open should not bypass arg-entry, got (%q,%v)", got, ok)
+	}
+
+	p.SetQuery("/p status")
+	got, ok = p.DirectSlashLineWithArgs()
+	if !ok || got != "/p status" {
+		t.Fatalf("alias slash line = (%q,%v), want /p status direct submit", got, ok)
+	}
+
+	p.SetQuery("/disabled arg")
+	if got, ok := p.DirectSlashLineWithArgs(); ok || got != "" {
+		t.Fatalf("disabled command should not direct-execute, got (%q,%v)", got, ok)
+	}
+}

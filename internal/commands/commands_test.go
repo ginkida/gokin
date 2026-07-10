@@ -20,6 +20,8 @@ func TestHandlerParse(t *testing.T) {
 		{"/help", "help", true, nil},
 		{"/clear", "clear", true, nil},
 		{"/doctor", "doctor", true, nil},
+		{"/HELP", "help", true, nil},
+		{"/P status", "plan", true, []string{"status"}},
 		{"/help some-topic", "help", true, []string{"some-topic"}},
 		{"/model gemini-flash", "model", true, []string{"gemini-flash"}},
 		{

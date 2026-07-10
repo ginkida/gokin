@@ -481,6 +481,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.output.AppendLine("")
 			m.output.AppendLine(m.styles.FormatError(fmt.Sprintf("request timed out after %v", m.streamTimeout)))
 			m.output.AppendLine("")
+			// Cancel the BACKEND request too — onCancel is the wired callback
+			// (app.CancelProcessing), the same one the Esc path uses. This
+			// used to call only onInterrupt, which has no production wiring
+			// (SetInterruptCallback has zero callers), so the watchdog reset
+			// the UI to input while the request kept running behind it.
+			if m.onCancel != nil {
+				m.onCancel()
+			}
 			if m.onInterrupt != nil {
 				m.onInterrupt()
 			}
@@ -947,6 +955,20 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 		return m.input.Focus()
 
 	case tea.KeyEnter:
+		if full, ok := m.commandPalette.DirectSlashLineWithArgs(); ok {
+			m.state = StateProcessing
+			m.streamStartTime = time.Now()
+			m.responseToolDuration = 0
+			m.responseToolCount = 0
+			m.responseToolFailures = 0
+			m.output.AppendLine(m.styles.FormatUserMessage(full))
+			m.output.AppendLine("")
+			if m.onSubmit != nil {
+				m.onSubmit(full)
+			}
+			return nil
+		}
+
 		// A slash command that needs a required argument drops into the inline
 		// arg-entry step instead of running bare (which would only print Usage).
 		if sel := m.commandPalette.GetSelected(); sel != nil && PaletteNeedsArg(*sel) {
@@ -1079,13 +1101,7 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 			m.state = StateShortcutsOverlay
 		}
 	case paletteActionTodos:
-		m.todosVisible = !m.todosVisible
-		if m.todosVisible {
-			m.cleanupStaleCoordinatedTasks()
-		}
-		if m.toastManager != nil {
-			m.toastManager.ShowInfo(toggleStateLabel("Todos", m.todosVisible))
-		}
+		m.toggleTodosPanel()
 	case paletteActionLiveDetail:
 		m.liveDetailExpanded = !m.liveDetailExpanded
 		// Mirror the Ctrl+O handler: expanding explicitly opens the feed panel
@@ -1115,12 +1131,7 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 			}
 		}
 	case paletteActionAgentTree:
-		if m.agentTreePanel != nil {
-			m.agentTreePanel.Toggle()
-			if m.toastManager != nil {
-				m.toastManager.ShowInfo(toggleStateLabel("Agent tree", m.agentTreePanel.IsVisible()))
-			}
-		}
+		m.toggleAgentTreePanel()
 	case paletteActionObservatory:
 		if m.observatoryPanel != nil {
 			m.observatoryPanel.Toggle()
@@ -1131,6 +1142,10 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 	case paletteActionPlanPanel:
 		if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
 			m.planProgressPanel.Toggle()
+		} else if m.toastManager != nil {
+			// Honest feedback instead of a total silent no-op: the plan panel
+			// only exists while a plan executes — say so.
+			m.toastManager.ShowInfo("No plan panel — appears while a plan is executing")
 		}
 	case paletteActionPlanningMode:
 		if m.onPlanningModeToggle != nil {
@@ -1195,19 +1210,14 @@ func (m *Model) handleShortcutsOverlayKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	default:
-		switch msg.String() {
-		case "k":
-			m.shortcutsOverlay.ScrollUp()
-		case "j":
-			m.shortcutsOverlay.ScrollDown()
-		case "q":
-			m.shortcutsOverlay.Hide()
-			m.state = StateInput
-			return m.input.Focus()
-		default:
-			if msg.Type == tea.KeyRunes {
-				m.shortcutsOverlay.SetSearch(m.shortcutsOverlay.GetSearch() + string(msg.Runes))
-			}
+		// FILTER-FIRST: every typed rune belongs to the search query. The old
+		// single-letter interceptors (k/j scroll, q quit) ran BEFORE the
+		// filter append, so the advertised "Type to filter" could not contain
+		// those letters at all — typing "quit" dismissed the overlay on its
+		// first keystroke. Navigation is ↑/↓ (what the footer advertises) and
+		// close is Esc; there is deliberately no letter-key nav here.
+		if msg.Type == tea.KeyRunes {
+			m.shortcutsOverlay.SetSearch(m.shortcutsOverlay.GetSearch() + string(msg.Runes))
 		}
 		return nil
 	}
@@ -1334,16 +1344,17 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return keyConsumed
 	}
 
-	// Handle Ctrl+A for agent tree panel toggle. keyConsumed (round 8), not
-	// nil: m.state stays StateInput here, so a bare `nil` return let
-	// bubbles/textarea's OWN ctrl+a binding (LineStart) ALSO fire on the
-	// same keystroke — jumping the compose cursor to column 0 every time
-	// the user toggled the panel.
-	if msg.Type == tea.KeyCtrlA && m.state == StateInput {
-		if m.agentTreePanel != nil {
-			m.agentTreePanel.Toggle()
-			m.toastManager.ShowInfo(toggleStateLabel("Agent tree", m.agentTreePanel.IsVisible()))
-		}
+	// Handle Ctrl+A for agent tree panel toggle. Works DURING
+	// Processing/Streaming too (the Ctrl+O/Ctrl+X pattern): the tree shows
+	// running sub-agents, which is exactly a during-work surface — gating it
+	// to StateInput meant the user could not open it while agents actually
+	// ran. Ctrl-key, so it can't fight the type-ahead input. keyConsumed
+	// (round 8), not nil: a bare `nil` return let bubbles/textarea's OWN
+	// ctrl+a binding (LineStart) ALSO fire on the same keystroke — jumping
+	// the compose cursor to column 0 every time the user toggled the panel.
+	if msg.Type == tea.KeyCtrlA &&
+		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
+		m.toggleAgentTreePanel()
 		return keyConsumed
 	}
 
@@ -1355,11 +1366,17 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// change state, making keyConsumed a no-op difference there — this
 	// covers the close case, found alongside the round-8 UI audit's other
 	// global-shortcut/textarea collisions.)
-	if msg.Type == tea.KeyCtrlH && m.state == StateInput {
+	// Also matches StateContextObservatory so the key that OPENED the panel
+	// can close it again (toggle symmetry) — previously only Esc closed it,
+	// while the panel's own footer advertised keys that didn't work.
+	if msg.Type == tea.KeyCtrlH && (m.state == StateInput || m.state == StateContextObservatory) {
 		if m.observatoryPanel != nil {
 			m.observatoryPanel.Toggle()
 			if m.observatoryPanel.IsVisible() {
 				m.state = StateContextObservatory
+			} else if m.state == StateContextObservatory {
+				m.state = StateInput
+				return m.input.Focus()
 			}
 		}
 		return keyConsumed
@@ -1377,20 +1394,18 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Handle Ctrl+T for todos toggle. keyConsumed (round 8), not nil: this
-	// binding is even ADVERTISED in the status bar ("Ctrl+T tasks N")
-	// whenever todos are pending and hidden — a common state — and a bare
-	// `nil` return let bubbles/textarea's OWN ctrl+t binding
-	// (TransposeCharacterBackward) ALSO fire on the same keystroke, swapping
-	// the two characters left of the cursor in the compose buffer (e.g.
-	// "hello" -> "helol") every time the user opened/closed the panel.
-	if msg.Type == tea.KeyCtrlT && m.state == StateInput {
-		m.todosVisible = !m.todosVisible
-		// When opening the panel, sweep completed tasks older than 5s
-		if m.todosVisible {
-			m.cleanupStaleCoordinatedTasks()
-		}
-		m.toastManager.ShowInfo(toggleStateLabel("Todos", m.todosVisible))
+	// Handle Ctrl+T for todos toggle. Works DURING Processing/Streaming too
+	// (the Ctrl+O/Ctrl+X pattern): the todo list tracks the agent's plan
+	// WHILE it works — gating to StateInput meant the advertised "Ctrl+T
+	// tasks N" hint didn't work exactly when the tasks were being executed.
+	// Ctrl-key, so it can't fight the type-ahead input. keyConsumed (round
+	// 8), not nil: a bare `nil` return let bubbles/textarea's OWN ctrl+t
+	// binding (TransposeCharacterBackward) ALSO fire on the same keystroke,
+	// swapping the two characters left of the cursor in the compose buffer
+	// (e.g. "hello" -> "helol") every time the user opened/closed the panel.
+	if msg.Type == tea.KeyCtrlT &&
+		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
+		m.toggleTodosPanel()
 		return keyConsumed
 	}
 
@@ -1438,7 +1453,12 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	}
 
 	// Ctrl+J: insert newline (standard terminal newline, works in all terminals)
-	if msg.Type == tea.KeyCtrlJ && m.state == StateInput {
+	// Ctrl+J inserts a newline — including DURING Processing/Streaming, where
+	// the type-ahead compose box is live: gating to StateInput made multi-line
+	// composing impossible exactly while the agent works (the textarea itself
+	// does not bind ctrl+j, so the fall-through was a silent no-op).
+	if msg.Type == tea.KeyCtrlJ &&
+		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
 		m.input.InsertNewline()
 		return nil
 	}
@@ -1450,7 +1470,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// consistent rather than left as an exception). The NON-empty fall-through
 	// is deliberate: textarea's own DeleteBeforeCursor IS the "clear input"
 	// behavior — don't consume it.
-	if msg.Type == tea.KeyCtrlU && m.state == StateInput {
+	// Works during Processing/Streaming too — the 3-line scrolls Ctrl+B/Ctrl+F
+	// were already extended there, so the half-page siblings staying
+	// StateInput-only made the scroll set inconsistent mid-stream.
+	if msg.Type == tea.KeyCtrlU &&
+		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
 		if m.input.textarea.Value() == "" {
 			newOffset := max(m.output.viewport.YOffset-m.output.viewport.Height/2, 0)
 			m.output.viewport.SetYOffset(newOffset)
@@ -1467,7 +1491,9 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// ctrl+d (DeleteCharacterForward) firing too was already harmless
 	// (nothing to delete) — kept consistent with the other collision fixes
 	// in this function rather than left as the one exception.
-	if msg.Type == tea.KeyCtrlD && m.state == StateInput && m.input.textarea.Value() == "" {
+	if msg.Type == tea.KeyCtrlD &&
+		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) &&
+		m.input.textarea.Value() == "" {
 		maxOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
 		newOffset := min(m.output.viewport.YOffset+m.output.viewport.Height/2, maxOffset)
 		m.output.viewport.SetYOffset(newOffset)
@@ -1477,20 +1503,27 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		return keyConsumed
 	}
 
-	// Handle Ctrl+Shift+C for compact mode toggle (only when in input state)
-	if msg.String() == "ctrl+shift+c" && m.state == StateInput {
-		m.toggleCompactMode()
-		return nil
-	}
+	// NOTE: there is deliberately NO "ctrl+shift+c" binding. bubbletea v1 has
+	// no such key name (ctrl+shift exists only for home/end/arrows), and a
+	// real terminal encodes Ctrl+Shift+C as byte 0x03 — identical to Ctrl+C,
+	// the CANCEL key. The old branch here could never match, and the shortcuts
+	// overlay advertising it steered users into cancelling their own request.
+	// Compact mode remains reachable via the palette ("Toggle Compact Mode").
 
 	// Handle 'E' (shift+e) for toggle all tool outputs (only when input is empty)
 	if msg.String() == "E" && m.state == StateInput && m.input.Value() == "" {
 		if m.toolOutput != nil && m.toolOutput.EntryCount() > 0 {
 			m.toolOutput.ToggleAll()
+			// Honest toast: scrollback is append-only, so flipping AllExpanded
+			// cannot re-render cards already on screen — it sets the default
+			// for entries emitted from now on (AddEntry inherits AllExpanded).
+			// The old "All tool outputs expanded" claimed an on-screen change
+			// that never happened; Ctrl+E (single, re-emits content) is the
+			// key that actually expands an existing card.
 			if m.toolOutput.AllExpanded {
-				m.toastManager.ShowInfo("All tool outputs expanded")
+				m.toastManager.ShowInfo("New tool outputs will render expanded (Ctrl+E expands the last one)")
 			} else {
-				m.toastManager.ShowInfo("All tool outputs collapsed")
+				m.toastManager.ShowInfo("New tool outputs will render collapsed")
 			}
 			// Consumed as a shortcut — must NOT also be typed into the textarea
 			// (StateInput is type-ahead-active, so a nil return would leak 'E').
@@ -1535,7 +1568,12 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// bubbles/textarea's OWN alt+c binding (CapitalizeWordForward) ALSO
 	// fire — capitalizing a word in the compose buffer every time the user
 	// copied the last response.
-	if msg.String() == "alt+c" && m.state == StateInput {
+	// Works during Processing/Streaming too: m.lastResponseText still holds
+	// the PRIOR completed response while a new turn streams — copying it is
+	// exactly the "grab that answer while the next one runs" move. Alt-key,
+	// so it can't fight type-ahead typing.
+	if msg.String() == "alt+c" &&
+		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
 		if m.lastResponseText != "" {
 			copyViaOSC52(m.lastResponseText)
 			_ = clipboard.WriteAll(m.lastResponseText) // best-effort; OSC52 is primary
@@ -1680,11 +1718,13 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		// branches) — InputModel's own KeyEnter case accepts the highlighted
 		// suggestion via the forwarded key.
 		//
-		// Alt+Enter: insert newline for multi-line input. Returning nil here
-		// is safe (textarea's InsertNewline binding matches "enter"/"ctrl+m",
-		// not "alt+enter") and deliberate: the forwarded key lets InputModel
-		// run its normal post-key refresh.
-		if m.state == StateInput && msg.Alt {
+		// Alt+Enter: insert newline for multi-line input, including type-ahead
+		// while a request is Processing/Streaming. Returning nil here is safe
+		// (textarea's InsertNewline binding matches "enter"/"ctrl+m", not
+		// "alt+enter") and deliberate: the forwarded key lets InputModel run
+		// its normal post-key refresh.
+		if (m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) &&
+			!m.isModalState() && msg.Alt {
 			m.input.InsertNewline()
 			return nil
 		}
@@ -2987,6 +3027,49 @@ func toggleStateLabel(name string, on bool) string {
 		return name + " shown"
 	}
 	return name + " hidden"
+}
+
+// toggleTodosPanel flips the todo panel and emits the HONEST toast — shared by
+// the Ctrl+T key handler and the palette "Toggle Task List" action so the two
+// entry points can't drift (the exact drift the round-of-Ctrl+O hunt caught:
+// the key got the empty-state label, the palette kept claiming "shown" while
+// nothing rendered).
+func (m *Model) toggleTodosPanel() {
+	m.todosVisible = !m.todosVisible
+	// When opening the panel, sweep completed tasks older than 5s.
+	if m.todosVisible {
+		m.cleanupStaleCoordinatedTasks()
+	}
+	label := toggleStateLabel("Todos", m.todosVisible)
+	if m.todosVisible && len(m.todoItems) == 0 {
+		// The todos block renders only when items exist — don't claim "shown"
+		// for an empty list. The toggle still arms the panel: it appears with
+		// the agent's first todo update.
+		label = "Todos shown — appears when the agent creates tasks"
+	}
+	if m.toastManager != nil {
+		m.toastManager.ShowInfo(label)
+	}
+}
+
+// toggleAgentTreePanel flips the agent tree panel with the honest toast —
+// shared by the Ctrl+A key handler and the palette "Toggle Agent Tree" action
+// (same anti-drift rule as toggleTodosPanel).
+func (m *Model) toggleAgentTreePanel() {
+	if m.agentTreePanel == nil {
+		return
+	}
+	m.agentTreePanel.Toggle()
+	label := toggleStateLabel("Agent tree", m.agentTreePanel.IsVisible())
+	if m.agentTreePanel.IsVisible() && m.agentTreePanel.NodeCount() == 0 {
+		// With zero nodes the panel View renders "" even when visible — say
+		// so instead of claiming it's on screen. The toggle still arms the
+		// panel: it appears the moment sub-agents start reporting.
+		label = "Agent tree shown — appears when sub-agents run"
+	}
+	if m.toastManager != nil {
+		m.toastManager.ShowInfo(label)
+	}
 }
 
 func collapsedByDefault(toolName string) bool {

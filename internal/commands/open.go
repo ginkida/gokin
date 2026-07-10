@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 )
@@ -147,8 +146,9 @@ func (c *OpenCommand) Execute(ctx context.Context, args []string, app AppInterfa
 
 // parseEditorCommand splits a user-supplied $EDITOR value into (executable,
 // extra-args) suitable for exec.Command — no shell is involved. Users
-// legitimately set values like "code --wait" or "open -t"; those split on
-// whitespace into positional tokens that exec.Command handles directly.
+// legitimately set values like "code --wait" or "open -t"; those split into
+// positional tokens that exec.Command handles directly. Quoted tokens are
+// supported for editor paths or arguments that contain spaces.
 //
 // Critically, tokens are treated as literal argv entries: `;`, `|`,
 // backticks, and `$()` have no special meaning. The old code ran
@@ -160,7 +160,7 @@ func (c *OpenCommand) Execute(ctx context.Context, args []string, app AppInterfa
 // callers should surface that to the user rather than exec'ing an empty
 // command.
 func parseEditorCommand(editor string) (string, []string, bool) {
-	parts := strings.Fields(editor)
+	parts := splitCommandFields(editor)
 	if len(parts) == 0 {
 		return "", nil, false
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -185,12 +186,24 @@ func (c *QuickLookCommand) Execute(ctx context.Context, args []string, app AppIn
 	}
 
 	filePath := args[0]
-	cmd := exec.Command("qlmanage", "-p", filePath)
+	absPath := resolveQuickLookPath(filePath, app.GetWorkDir())
+	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		return fmt.Sprintf("Error: File not found: %s", absPath), nil
+	}
+
+	cmd := exec.Command("qlmanage", "-p", absPath)
 	if err := cmd.Start(); err != nil {
 		return fmt.Sprintf("Failed to start Quick Look: %v", err), nil
 	}
 
 	return fmt.Sprintf("Opening Quick Look preview for %s", filePath), nil
+}
+
+func resolveQuickLookPath(filePath, workDir string) string {
+	if filepath.IsAbs(filePath) {
+		return filePath
+	}
+	return filepath.Join(workDir, filePath)
 }
 
 // Clipboard helper functions

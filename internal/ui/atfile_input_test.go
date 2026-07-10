@@ -21,6 +21,7 @@ func TestAtFileWord(t *testing.T) {
 		{"email user@host", "", false}, // @ not at token start
 		{"@@x", "", false},             // double @
 		{"@", "@", true},               // bare @ (shows top files)
+		{`look at @"space`, "@space", true},
 		{"", "", false},
 	}
 	for _, c := range cases {
@@ -31,9 +32,39 @@ func TestAtFileWord(t *testing.T) {
 	}
 }
 
+func TestTrailingInputToken_QuotesAndEscapes(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantText  string
+		wantQuote rune
+		wantOK    bool
+	}{
+		{`/open src/ma`, `src/ma`, 0, true},
+		{`/open "src/ma`, `src/ma`, '"', true},
+		{`/help "say \"hello\""`, `say "hello"`, '"', true},
+		{`/open "C:\Program Files\Gokin`, `C:\Program Files\Gokin`, '"', true},
+		{`/open done `, "", 0, false},
+		{"", "", 0, false},
+	}
+
+	for _, c := range cases {
+		got, ok := trailingInputToken(c.in)
+		if ok != c.wantOK {
+			t.Fatalf("trailingInputToken(%q) ok = %v, want %v", c.in, ok, c.wantOK)
+		}
+		if !ok {
+			continue
+		}
+		if got.text != c.wantText || got.quote != c.wantQuote {
+			t.Fatalf("trailingInputToken(%q) = text %q quote %q, want text %q quote %q",
+				c.in, got.text, got.quote, c.wantText, c.wantQuote)
+		}
+	}
+}
+
 func TestUpdateAtFileSuggestions(t *testing.T) {
 	work := t.TempDir()
-	for _, f := range []string{"main.go", "main_test.go", "other.go"} {
+	for _, f := range []string{"main.go", "main_test.go", "other.go", "space file.go"} {
 		if err := os.WriteFile(filepath.Join(work, f), []byte("x"), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -49,6 +80,12 @@ func TestUpdateAtFileSuggestions(t *testing.T) {
 	if m.suggestionType != SuggestionAtFile {
 		// updateAtFileSuggestions doesn't set the type itself (the dispatch does);
 		// but confirm it populated suggestions for the @ prefix.
+	}
+
+	m2 := NewInputModel(nil, work)
+	m2.updateAtFileSuggestions("@space")
+	if !m2.showSuggestions || len(m2.fileSuggestions) != 1 || filepath.Base(m2.fileSuggestions[0]) != "space file.go" {
+		t.Fatalf("quoted @ prefix should match space file.go, got %v", m2.fileSuggestions)
 	}
 }
 
@@ -69,6 +106,36 @@ func TestAcceptFileSuggestion_AtMode(t *testing.T) {
 	m2.acceptFileSuggestion("main.go")
 	if got := m2.textarea.Value(); got != "open main.go " {
 		t.Errorf("plain accept should produce bare path, got %q", got)
+	}
+
+	m3 := NewInputModel(nil, work)
+	m3.textarea.SetValue(`look at @"space`)
+	m3.acceptFileSuggestion("space file.go")
+	if got := m3.textarea.Value(); got != `look at @"space file.go" ` {
+		t.Errorf("quoted @ accept should preserve @ and quote spaces, got %q", got)
+	}
+}
+
+func TestAcceptFileSuggestion_QuotedPlainPath(t *testing.T) {
+	work := t.TempDir()
+	m := NewInputModel(nil, work)
+
+	m.textarea.SetValue(`/open "src/ma`)
+	m.acceptFileSuggestion("src/main file.go")
+	if got := m.textarea.Value(); got != `/open "src/main file.go" ` {
+		t.Fatalf("quoted accept should close and preserve quoted path, got %q", got)
+	}
+
+	m.textarea.SetValue(`/open src/ma`)
+	m.acceptFileSuggestion("src/main file.go")
+	if got := m.textarea.Value(); got != `/open "src/main file.go" ` {
+		t.Fatalf("space-containing path should be auto-quoted, got %q", got)
+	}
+
+	m.textarea.SetValue(`/open src/ma`)
+	m.acceptFileSuggestion("src/main.go")
+	if got := m.textarea.Value(); got != `/open src/main.go ` {
+		t.Fatalf("simple path should stay unquoted, got %q", got)
 	}
 }
 

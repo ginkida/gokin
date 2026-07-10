@@ -77,6 +77,103 @@ func TestPaletteArgEntryFlow(t *testing.T) {
 	}
 }
 
+func TestPaletteArgEntryQuotesSingleFileArg(t *testing.T) {
+	m := NewModel()
+	var submitted string
+	m.SetCallbacks(func(s string) { submitted = s }, func() {})
+
+	m.commandPalette.BeginArgEntry(EnhancedPaletteCommand{Name: "open", Shortcut: "/open", ArgHint: "<file>", Type: CommandTypeSlash, Enabled: true})
+	m.state = StateCommandPalette
+	m.commandPalette.visible = true
+
+	for _, r := range "space file.go" {
+		_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if submitted != `/open "space file.go"` {
+		t.Fatalf("submitted = %q, want quoted single file arg", submitted)
+	}
+}
+
+func TestPaletteDirectSlashLineWithArgsSubmitsWithoutArgEntry(t *testing.T) {
+	m := NewModel()
+	var submitted string
+	m.SetCallbacks(func(s string) { submitted = s }, func() {})
+
+	m.commandPalette.commands = []EnhancedPaletteCommand{
+		{Name: "open", Shortcut: "/open", ArgHint: "<file>", Type: CommandTypeSlash, Enabled: true},
+	}
+	m.commandPalette.visible = true
+	m.commandPalette.SetQuery(`/open "space file.go"`)
+	m.state = StateCommandPalette
+
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if submitted != `/open "space file.go"` {
+		t.Fatalf("submitted = %q, want full slash line", submitted)
+	}
+	if m.commandPalette.InArgEntry() {
+		t.Fatal("full slash line should submit directly, not enter arg-entry")
+	}
+	if m.state != StateProcessing {
+		t.Fatalf("state after direct slash submit = %v, want StateProcessing", m.state)
+	}
+}
+
+func TestPaletteDirectSlashLineHonorsAliases(t *testing.T) {
+	m := NewModel()
+	var submitted string
+	m.SetCallbacks(func(s string) { submitted = s }, func() {})
+	m.SetCommandAliases(map[string]string{"p": "plan"})
+
+	m.commandPalette.commands = []EnhancedPaletteCommand{
+		{Name: "plan", Shortcut: "/plan", Type: CommandTypeSlash, Enabled: true},
+	}
+	m.commandPalette.visible = true
+	m.commandPalette.SetQuery("/P status")
+	m.state = StateCommandPalette
+
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if submitted != "/P status" {
+		t.Fatalf("submitted = %q, want alias slash line preserved", submitted)
+	}
+	if m.state != StateProcessing {
+		t.Fatalf("state after alias slash submit = %v, want StateProcessing", m.state)
+	}
+}
+
+func TestFormatPaletteArgEntryValue(t *testing.T) {
+	open := EnhancedPaletteCommand{Name: "open", Shortcut: "/open", ArgHint: "<file>", Type: CommandTypeSlash, Enabled: true}
+	blame := EnhancedPaletteCommand{Name: "blame", Shortcut: "/blame", ArgHint: "<file> [N|N-M|N M]", Type: CommandTypeSlash, Enabled: true}
+	grep := EnhancedPaletteCommand{Name: "grep", Shortcut: "/grep", ArgHint: "<pattern> [path]", Type: CommandTypeSlash, Enabled: true}
+
+	cases := []struct {
+		name string
+		cmd  EnhancedPaletteCommand
+		in   string
+		want string
+	}{
+		{"plain file", open, "main.go", "main.go"},
+		{"space file", open, "space file.go", `"space file.go"`},
+		{"apostrophe file", open, "John's file.go", `"John's file.go"`},
+		{"double quote file", open, `draft "v2".go`, `"draft \"v2\".go"`},
+		{"already double quoted", open, `"space file.go"`, `"space file.go"`},
+		{"already single quoted", open, `'space file.go'`, `'space file.go'`},
+		{"file plus single line", blame, "space file.go 12", `"space file.go" 12`},
+		{"file plus dashed range", blame, "space file.go 12-20", `"space file.go" 12-20`},
+		{"file plus spaced range", blame, "space file.go 12 20", `"space file.go" 12 20`},
+		{"file only for optional range command", blame, "space file.go", `"space file.go"`},
+		{"preserve repeated spaces in file", blame, "space  file.go 12", `"space  file.go" 12`},
+		{"multi arg command untouched", grep, "foo bar", "foo bar"},
+	}
+
+	for _, tc := range cases {
+		if got := formatPaletteArgEntryValue(tc.cmd, tc.in); got != tc.want {
+			t.Fatalf("%s: formatPaletteArgEntryValue(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestPaletteArgEntryEsc returns to the command list without submitting.
 func TestPaletteArgEntryEsc(t *testing.T) {
 	m := NewModel()

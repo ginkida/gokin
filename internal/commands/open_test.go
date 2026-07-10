@@ -24,6 +24,10 @@ func TestParseEditorCommand(t *testing.T) {
 		{"vscode with wait", "code --wait", "code", []string{"--wait"}, true},
 		{"vscode multi-flag", "code --wait --goto", "code", []string{"--wait", "--goto"}, true},
 		{"emacs terminal mode", "emacs -nw", "emacs", []string{"-nw"}, true},
+		{"quoted editor path", `"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" --wait`, "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code", []string{"--wait"}, true},
+		{"quoted arg with spaces", `code --reuse-window "--profile=Work Project"`, "code", []string{"--reuse-window", "--profile=Work Project"}, true},
+		{"single quoted arg", `code '--user-data-dir=/tmp/gokin profile'`, "code", []string{"--user-data-dir=/tmp/gokin profile"}, true},
+		{"escaped quote in arg", `code "--title=say \"hello\""`, "code", []string{`--title=say "hello"`}, true},
 
 		// Whitespace handling — shouldn't trip us up.
 		{"leading spaces", "   vi", "vi", []string{}, true},
