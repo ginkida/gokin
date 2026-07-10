@@ -2,6 +2,7 @@ package loops
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -474,5 +475,164 @@ func TestFileStorage_LoadSortsOldestFirst(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("pos %d: got %s want %s", i, got[i], want[i])
 		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// storage.go error branches (Save / Delete / NewDefaultFileStorage / isSafeLoopID)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestFileStorage_SaveRefusesInvalid: Save runs Validate at the boundary.
+// A loop with an empty task must be rejected before touching disk.
+func TestFileStorage_SaveRefusesInvalid(t *testing.T) {
+	s := NewFileStorage(t.TempDir())
+	bad := &Loop{ID: "loop-bad", Task: "", Mode: ModeInterval, IntervalSeconds: 60}
+	if err := s.Save(bad); err == nil {
+		t.Error("Save accepted invalid loop (empty task)")
+	}
+}
+
+// TestFileStorage_SaveUnwritableDir: MkdirAll failure (parent is a file)
+// must surface as a wrapped error, not a panic.
+func TestFileStorage_SaveUnwritableDir(t *testing.T) {
+	dir := t.TempDir()
+	// Turn the storage dir itself into a file → MkdirAll fails.
+	blocker := filepath.Join(dir, "block")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	s := NewFileStorage(filepath.Join(blocker, "sub"))
+	l := &Loop{ID: "loop-x", Task: "t", Mode: ModeInterval, IntervalSeconds: 60, Status: StatusRunning}
+	if err := s.Save(l); err == nil {
+		t.Error("Save should fail when MkdirAll fails")
+	}
+}
+
+// TestFileStorage_DeleteUnsafeID: Delete rejects path-traversal / unsafe IDs
+// before touching the filesystem. Without this guard a crafted id like
+// "../etc/passwd" would delete arbitrary files.
+func TestFileStorage_DeleteUnsafeID(t *testing.T) {
+	s := NewFileStorage(t.TempDir())
+	for _, bad := range []string{"", "../escape", "a/b", "shell;rm", "space id"} {
+		if err := s.Delete(bad); err == nil {
+			t.Errorf("Delete(%q) should reject unsafe id", bad)
+		}
+	}
+}
+
+// TestNewDefaultFileStorage_ResolvesHome: the default factory must return a
+// storage rooted at ~/.gokin/loops. We only verify it doesn't error and points
+// at the right suffix — the home dir itself is env-dependent.
+func TestNewDefaultFileStorage_ResolvesHome(t *testing.T) {
+	st, err := NewDefaultFileStorage()
+	if err != nil {
+		t.Fatalf("NewDefaultFileStorage: %v", err)
+	}
+	if !strings.HasSuffix(st.dir, filepath.Join(".gokin", "loops")) {
+		t.Errorf("dir = %s, want suffix .gokin/loops", st.dir)
+	}
+}
+
+// TestIsSafeLoopID: the ID validator is the filesystem-injection guard for
+// Delete. Cover the full accept/reject matrix so a future relaxation (e.g.
+// allowing '/' for "nested" ids) is caught.
+func TestIsSafeLoopID(t *testing.T) {
+	for _, ok := range []string{"loop-abc123", "loop_X1", "A", "0", "a-b_c"} {
+		if !isSafeLoopID(ok) {
+			t.Errorf("isSafeLoopID(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "../x", "a/b", "a b", "a.b", "a;b", "укид"} {
+		if isSafeLoopID(bad) {
+			t.Errorf("isSafeLoopID(%q) = true, want false", bad)
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// types.go parseHumanDurationSeconds — the LLM-hint parser (self-paced mode)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestParseHumanDurationSeconds: the fallback parser for phrases like
+// "30 minutes". Covers every unit branch, the approx-word strip, the overflow
+// guard, and the reject paths (wrong field count, non-numeric, bad unit).
+func TestParseHumanDurationSeconds(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		// Unit coverage.
+		{"30 seconds", 30},
+		{"5 minutes", 300},
+		{"1 hour", 3600},
+		{"2 hours", 7200}, // plural 's' stripped
+		{"1 hr", 3600},    // abbreviation
+		{"3 days", 259200},
+		{"1 day", 86400}, // singular
+		// Approx-word prefix is stripped.
+		{"about 30 minutes", 1800},
+		{"roughly 2 hours", 7200},
+		{"approximately 1 day", 86400},
+		// Reject paths.
+		{"", 0},
+		{"   ", 0},
+		{"only_one_word", 0},       // wrong field count
+		{"too many words here", 0}, // >2 fields
+		{"abc minutes", 0},         // non-numeric count
+		{"30 fortnights", 0},       // unknown unit
+		{"-5 minutes", 0},          // negative count
+		{"30", 0},                  // missing unit
+	}
+	for _, tc := range cases {
+		got := parseHumanDurationSeconds(tc.in)
+		if got != tc.want {
+			t.Errorf("parseHumanDurationSeconds(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestParseHumanDurationSeconds_Overflow: a count so large it would overflow
+// int64 must saturate to MaxInt64, not wrap around.
+func TestParseHumanDurationSeconds_Overflow(t *testing.T) {
+	got := parseHumanDurationSeconds("999999999999999999 days")
+	if got != math.MaxInt64 {
+		t.Errorf("overflow = %d, want MaxInt64 (%d)", got, math.MaxInt64)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// memory.go WriteLoop / DeleteLoop — unsafe-ID guards + nil-loop branch
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestMemoryWriter_WriteLoopNilLoop: a nil loop is a no-op (nil writer is
+// covered by TestMemoryWriter_NilSafe in memory_test.go). Guards the `l == nil`
+// arm of the nil-check.
+func TestMemoryWriter_WriteLoopNilLoop(t *testing.T) {
+	w := NewMemoryWriter(t.TempDir())
+	if err := w.WriteLoop(nil); err != nil {
+		t.Errorf("WriteLoop(nil) should be no-op, got: %v", err)
+	}
+}
+
+// TestMemoryWriter_WriteLoopUnsafeID: the markdown writer must reject a
+// path-traversal id just like FileStorage.Delete — otherwise a crafted loop
+// id could write a .md file outside .gokin/loops/.
+func TestMemoryWriter_WriteLoopUnsafeID(t *testing.T) {
+	w := NewMemoryWriter(t.TempDir())
+	l := &Loop{ID: "../escape", Task: "t", Mode: ModeInterval, IntervalSeconds: 60, Status: StatusRunning}
+	if err := w.WriteLoop(l); err == nil {
+		t.Error("WriteLoop should reject unsafe id")
+	}
+}
+
+// TestMemoryWriter_DeleteLoopEmptyAndUnsafe: empty id is a no-op, unsafe id
+// is rejected. Covers both guard branches in DeleteLoop.
+func TestMemoryWriter_DeleteLoopEmptyAndUnsafe(t *testing.T) {
+	w := NewMemoryWriter(t.TempDir())
+	if err := w.DeleteLoop(""); err != nil {
+		t.Errorf("DeleteLoop(\"\") should be no-op, got: %v", err)
+	}
+	if err := w.DeleteLoop("../escape"); err == nil {
+		t.Error("DeleteLoop should reject unsafe id")
 	}
 }

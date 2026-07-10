@@ -1103,6 +1103,13 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 	case paletteActionActivityFeed:
 		if m.activityFeed != nil {
 			m.activityFeed.Toggle()
+			// The feed only renders inside live-detail mode. If the palette
+			// action explicitly shows the feed while the compact live view is
+			// active, expand detail too so "Activity feed shown" is actually
+			// visible on the next frame. Hiding the feed leaves detail mode as-is.
+			if m.activityFeed.IsVisible() {
+				m.liveDetailExpanded = true
+			}
 			if m.toastManager != nil {
 				m.toastManager.ShowInfo(toggleStateLabel("Activity feed", m.activityFeed.IsVisible()))
 			}

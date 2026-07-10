@@ -55,15 +55,20 @@ func (c *RegisterAgentTypeCommand) Execute(ctx context.Context, args []string, a
 	for i < len(args) {
 		arg := args[i]
 		switch {
-		case arg == "--tools" && i+1 < len(args):
-			i++
-			tools = strings.Split(args[i], ",")
-			for j := range tools {
-				tools[j] = strings.TrimSpace(tools[j])
+		case arg == "--tools":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--tools requires a comma-separated value")
 			}
-		case arg == "--prompt" && i+1 < len(args):
+			i++
+			tools = cleanToolList(args[i])
+		case arg == "--prompt":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--prompt requires a value")
+			}
 			i++
 			prompt = args[i]
+		case strings.HasPrefix(arg, "--"):
+			return "", fmt.Errorf("unknown option: %s", arg)
 		case description == "":
 			// Remove quotes if present
 			description = strings.Trim(arg, `"'`)
@@ -93,6 +98,18 @@ func (c *RegisterAgentTypeCommand) Execute(ctx context.Context, args []string, a
 	}
 
 	return sb.String(), nil
+}
+
+func cleanToolList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	tools := make([]string, 0, len(parts))
+	for _, part := range parts {
+		tool := strings.TrimSpace(part)
+		if tool != "" {
+			tools = append(tools, tool)
+		}
+	}
+	return tools
 }
 
 // ListAgentTypesCommand lists all registered agent types.
@@ -223,8 +240,14 @@ func (c *UnregisterAgentTypeCommand) Execute(ctx context.Context, args []string,
 // truncate truncates a string to maxLen characters with ellipsis.
 func truncate(s string, maxLen int) string {
 	runes := []rune(s)
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(runes) <= maxLen {
 		return s
+	}
+	if maxLen <= 3 {
+		return string(runes[:maxLen])
 	}
 	return string(runes[:maxLen-3]) + "..."
 }

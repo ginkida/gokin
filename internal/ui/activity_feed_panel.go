@@ -394,6 +394,9 @@ func (p *ActivityFeedPanel) View(width int) string {
 	if !p.visible {
 		return ""
 	}
+	if width < 4 {
+		width = 4
+	}
 
 	// Show empty state placeholder when visible but no data
 	if len(p.entries) == 0 && len(p.recentLog) == 0 {

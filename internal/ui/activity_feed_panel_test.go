@@ -232,6 +232,22 @@ func TestActivityFeedPanel_ShowExplicitClearsUserHidden(t *testing.T) {
 	}
 }
 
+func TestActivityFeedPanel_ViewNarrowWidthDoesNotPanic(t *testing.T) {
+	p := NewActivityFeedPanel(DefaultStyles())
+	p.ShowExplicit()
+
+	for _, width := range []int{0, 1, 2, 3, 8} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("View(%d) panicked: %v", width, r)
+				}
+			}()
+			_ = p.View(width)
+		})
+	}
+}
+
 func TestActivityFeedPanel_UpdateSubAgentProgress(t *testing.T) {
 	p := NewActivityFeedPanel(DefaultStyles())
 	p.StartSubAgent("a1", "explore", "Search codebase")

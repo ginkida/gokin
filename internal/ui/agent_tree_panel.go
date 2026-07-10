@@ -151,6 +151,9 @@ func (p *AgentTreePanel) View(width int) string {
 	if !p.allDoneAt.IsZero() && time.Since(p.allDoneAt) > agentTreeLingerAfterDone {
 		return ""
 	}
+	if width < 4 {
+		width = 4
+	}
 
 	var builder strings.Builder
 

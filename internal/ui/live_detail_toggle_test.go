@@ -80,6 +80,129 @@ func TestLiveActivity_CtrlOTogglesDuringStreaming(t *testing.T) {
 	}
 }
 
+func TestLiveActivity_CtrlOShowsFeedAfterExplicitHide(t *testing.T) {
+	m := newStreamingModelWithTodo()
+	m.activityFeed.Toggle() // visible
+	m.activityFeed.Toggle() // hidden with userHidden latch set
+	if m.activityFeed.IsVisible() || !m.activityFeed.userHidden {
+		t.Fatalf("precondition: feed should be explicitly hidden; visible=%v userHidden=%v",
+			m.activityFeed.IsVisible(), m.activityFeed.userHidden)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m2 := updated.(Model)
+	if !m2.liveDetailExpanded {
+		t.Fatal("Ctrl+O should expand live detail")
+	}
+	if !m2.activityFeed.IsVisible() {
+		t.Fatal("Ctrl+O detail expansion should explicitly show the activity feed")
+	}
+	if m2.activityFeed.userHidden {
+		t.Fatal("Ctrl+O detail expansion should clear the feed's explicit-hide latch")
+	}
+}
+
+// TestLiveActivity_CtrlOOpensPanelDuringStreaming pins the fix for the field
+// report "Ctrl+O не открывает панельку при стриминге" at the RENDER level: the
+// toggle used to flip ONLY liveDetailExpanded, while the render gate ALSO
+// required the panel's own visible flag (default FALSE — auto-show fires only
+// on ≥2 parallel tools or sub-agents) AND HasActiveEntries (false during plain
+// text streaming). So in the ordinary streaming case the keypress showed a
+// toast and nothing else. Now the expand explicitly opens the panel
+// (ShowExplicit) and the gate no longer requires active entries — the panel
+// must appear in the FULL View output deterministically, and a second Ctrl+O
+// must remove it.
+func TestLiveActivity_CtrlOOpensPanelDuringStreaming(t *testing.T) {
+	m := *NewModel()
+	m.width = 110
+	m.height = 40
+	m.state = StateStreaming
+	m.currentResponseBuf.WriteString("streaming some answer text")
+	// Deliberately NO feed entries and NO prior visibility — the exact state
+	// during ordinary foreground streaming when the user presses Ctrl+O.
+	if m.activityFeed.IsVisible() {
+		t.Fatal("precondition: feed panel must start hidden")
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m2 := updated.(Model)
+
+	view := renderToPlain(m2.View())
+	if !strings.Contains(view, "Live Activity") && !strings.Contains(view, "No activity yet") {
+		t.Fatalf("Ctrl+O during streaming must OPEN the activity panel (empty state included), got:\n%.800s", view)
+	}
+
+	// Second Ctrl+O — the panel must close again (deterministic round-trip).
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m3 := updated.(Model)
+	view = renderToPlain(m3.View())
+	if strings.Contains(view, "Live Activity") || strings.Contains(view, "No activity yet") {
+		t.Fatalf("second Ctrl+O must CLOSE the activity panel, got:\n%.800s", view)
+	}
+}
+
+// TestLiveActivity_CtrlOOpensPanelWithRecentHistory: during streaming with a
+// COMPLETED (not running) tool in the feed — the common "agent just finished a
+// few tools, now writing text" moment — the expand must still show the panel
+// (recent history is exactly what the user wants to inspect). The old gate
+// required ACTIVE entries, so this state rendered nothing.
+func TestLiveActivity_CtrlOOpensPanelWithRecentHistory(t *testing.T) {
+	m := *NewModel()
+	m.width = 110
+	m.height = 40
+	m.state = StateStreaming
+	m.currentResponseBuf.WriteString("writing the summary")
+	m.activityFeed.AddEntry(feedEntry("tool-done", ActivityRunning))
+	m.activityFeed.CompleteEntry("tool-done", true, "42 lines")
+	if m.activityFeed.HasActiveEntries() {
+		t.Fatal("precondition: no ACTIVE entries — only completed history")
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m2 := updated.(Model)
+	view := renderToPlain(m2.View())
+	if !strings.Contains(view, "Live Activity") {
+		t.Fatalf("expanded view must render the panel with recent history, got:\n%.800s", view)
+	}
+}
+
+// TestLiveActivity_PaletteActionMirrorsCtrlO: the palette "live detail" action
+// must behave identically to the key — including the explicit panel open — so
+// the two entry points can't drift.
+func TestLiveActivity_PaletteActionMirrorsCtrlO(t *testing.T) {
+	m := *NewModel()
+	m.width = 110
+	m.height = 40
+	m.state = StateInput
+	if m.activityFeed.IsVisible() {
+		t.Fatal("precondition: feed panel must start hidden")
+	}
+
+	m.dispatchPaletteAction(paletteActionLiveDetail)
+	if !m.liveDetailExpanded {
+		t.Fatal("palette action must expand live detail")
+	}
+	if !m.activityFeed.IsVisible() {
+		t.Fatal("palette action must explicitly show the feed panel, mirroring Ctrl+O")
+	}
+}
+
+func TestLiveActivity_PaletteActivityFeedExpandsDetail(t *testing.T) {
+	m := newStreamingModelWithTodo()
+	m.liveDetailExpanded = false
+	if m.activityFeed.IsVisible() {
+		t.Fatal("precondition: feed starts hidden")
+	}
+
+	_ = m.dispatchPaletteAction(paletteActionActivityFeed)
+	if !m.activityFeed.IsVisible() {
+		t.Fatal("palette activity-feed action should show the feed")
+	}
+	if !m.liveDetailExpanded {
+		t.Fatal("showing the feed from the palette should expand live detail so it can render")
+	}
+}
+
 // TestLiveActivity_FeedGatedOnDetail: the activity feed panel renders only in
 // detailed mode — in minimal mode the whole live surface is the one-line card.
 func TestLiveActivity_FeedGatedOnDetail(t *testing.T) {
