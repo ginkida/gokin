@@ -29,7 +29,7 @@ func NewSecretRedactor() *SecretRedactor {
 			// ============================================================
 			// API Keys and Tokens (with context)
 			// ============================================================
-			regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)[:=]\s*["']?([a-zA-Z0-9_\-\.]{8,})["']?`),
+			regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*[:=]\s*["']?([^\s"',;]{8,})["']?`),
 
 			// ============================================================
 			// Bearer Tokens (limited to 256 chars, stops at delimiter)
@@ -40,7 +40,7 @@ func NewSecretRedactor() *SecretRedactor {
 			// AWS Keys
 			// ============================================================
 			regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
-			regexp.MustCompile(`(?i)aws[_-]?secret[_-]?key[:=]\s*[a-zA-Z0-9+/]{40}`),
+			regexp.MustCompile(`(?i)(aws[_-]?secret[_-]?key)\s*[:=]\s*([a-zA-Z0-9+/]{40})`),
 
 			// ============================================================
 			// GitHub Tokens
@@ -76,7 +76,7 @@ func NewSecretRedactor() *SecretRedactor {
 			// ============================================================
 			// Base64 strings 16+ chars that look like secrets
 			// Must be preceded by key label or assignment
-			regexp.MustCompile(`(?i)(?:api[_-]?key|secret|token|auth)[:=]\s*["']?[A-Za-z0-9+/]{16,}={0,2}["']?`),
+			regexp.MustCompile(`(?i)(?:api[_-]?key|secret|token|auth)\s*[:=]\s*["']?[A-Za-z0-9+/]{16,}={0,2}["']?`),
 
 			// ============================================================
 			// Database URLs with passwords
@@ -97,7 +97,7 @@ func NewSecretRedactor() *SecretRedactor {
 			// Connection strings with credentials
 			// ============================================================
 			// Server=host;Database=db;User=user;Password=secret;
-			regexp.MustCompile(`(?i)(password|pwd)[:=]\s*[^;\'\"\s]{8,}`),
+			regexp.MustCompile(`(?i)(password|pwd)\s*[:=]\s*([^;'"\s]{8,})`),
 
 			// ============================================================
 			// Slack Webhooks
@@ -109,7 +109,7 @@ func NewSecretRedactor() *SecretRedactor {
 			// Slack Bot Tokens
 			// ============================================================
 			// Format: xoxb-NUMBERS-NUMBERS-ALPHANUMERIC
-			regexp.MustCompile(`xox[baprs]-[0-9]{10,}-[0-9]{10,}-[a-zA-Z0-9]{24}`),
+			regexp.MustCompile(`xox[baprs]-[0-9]{10,}-[0-9]{10,}-[a-zA-Z0-9]{20,}`),
 
 			// ============================================================
 			// Discord Bot Tokens
@@ -130,9 +130,10 @@ func NewSecretRedactor() *SecretRedactor {
 			regexp.MustCompile(`(?i)"private[_-]?key"\s*:\s*"[^"]{100,}"`),
 
 			// ============================================================
-			// Private SSH keys (minimal pattern)
+			// Private key headers (bare, without full PEM block)
+			// Matches any key-type prefix: RSA, DSA, EC, OPENSSH, ENCRYPTED, etc.
 			// ============================================================
-			regexp.MustCompile(`-----BEGIN [DR]SA PRIVATE KEY-----`),
+			regexp.MustCompile(`-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----`),
 
 			// ============================================================
 			// Authorization headers with basic auth
@@ -256,7 +257,7 @@ func (r *SecretRedactor) redactSubmatches(text string, pattern *regexp.Regexp) s
 }
 
 // safeValues is a set of values that should never be redacted.
-// Exact match only — no substring matching to prevent bypass.
+// Exact match only, with no substring matching to prevent bypass.
 var safeValues = map[string]bool{
 	"example": true, "test": true, "demo": true,
 	"sample": true, "mock": true, "localhost": true,
@@ -326,7 +327,7 @@ func (r *SecretRedactor) RedactAny(v any) any {
 		}
 		return out
 	default:
-		// Typed slices ([]SomeStruct), typed maps (map[string]string), structs —
+		// Typed slices ([]SomeStruct), typed maps (map[string]string), structs:
 		// convert via JSON round-trip to generic types, then redact.
 		data, err := json.Marshal(val)
 		if err != nil {
@@ -337,7 +338,7 @@ func (r *SecretRedactor) RedactAny(v any) any {
 			return v
 		}
 		// Only recurse if JSON produced a redactable type (string, map, slice).
-		// Primitives (float64, bool) would loop forever — return as-is.
+		// Primitives (float64, bool) would loop forever, so return as-is.
 		switch generic.(type) {
 		case string, map[string]any, []any:
 			return r.RedactAny(generic)
