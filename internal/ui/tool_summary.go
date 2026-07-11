@@ -37,6 +37,10 @@ func conciseToolTarget(name, info string) string {
 // only affects the label.
 func stripBashPlumbing(cmd string) string {
 	cmd = strings.TrimSpace(cmd)
+	// Some info strings carry a display "$ " prefix (extractToolInfoFromArgs) —
+	// without stripping it the `cd … &&` check below never matches and the
+	// whole plumbing survives ("Bash($ cd /long/path && go test -...)").
+	cmd = strings.TrimSpace(strings.TrimPrefix(cmd, "$"))
 	if strings.HasPrefix(cmd, "cd ") {
 		if i := strings.Index(cmd, "&&"); i >= 0 {
 			cmd = strings.TrimSpace(cmd[i+2:])
@@ -49,6 +53,39 @@ func stripBashPlumbing(cmd string) string {
 		}
 	}
 	return strings.TrimSpace(cmd[:cut])
+}
+
+// stripModelFacingContext removes machine-facing blocks from a tool result
+// before it reaches ANY user-facing surface (result card body, expand view,
+// activity-feed summary). These blocks are load-bearing for the MODEL —
+// `[context:predicted]`/`[context]` enrichment hints (executor step 12.9c)
+// and the edit tool's "no verification read needed" instruction — but read
+// as machine noise in the user's scrollback. The model-facing stream is
+// untouched; this only affects rendering (the same discipline as the
+// dedup-stub marker path in handleToolResultWithStatus).
+func stripModelFacingContext(content string) string {
+	if content == "" || (!strings.Contains(content, "[context") && !strings.Contains(content, "Updated region (")) {
+		return content // fast path — nothing to strip
+	}
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		// Enrichment hints are single logical lines prefixed with [context…].
+		if strings.HasPrefix(t, "[context]") || strings.HasPrefix(t, "[context:") {
+			continue
+		}
+		// The edit-region header carries a model-facing parenthetical
+		// ("already written to disk — no verification read needed") — keep
+		// the useful header, drop the instruction aimed at the model.
+		if strings.HasPrefix(t, "Updated region (") && strings.HasSuffix(t, ":") {
+			out = append(out, "Updated region:")
+			continue
+		}
+		out = append(out, line)
+	}
+	// Collapse the doubled blank line a dropped trailing block leaves behind.
+	return strings.TrimRight(strings.Join(out, "\n"), "\n")
 }
 
 // toolOutcomeSummary returns the COUNT-ONLY outcome for a tool's merged line

@@ -2067,6 +2067,13 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
 
+		// Strip machine-facing context blocks ([context:…] enrichment, the
+		// edit tool's model-facing instruction) ONCE here — msg is a local
+		// copy, so this covers every user-facing consumer below (card body,
+		// expand store, activity-feed summary) without touching the model's
+		// own tool-result stream.
+		msg.Content = stripModelFacingContext(msg.Content)
+
 		matchIdx := m.findActiveToolCall(msg.Name, msg.Args)
 
 		if matchIdx >= 0 {
