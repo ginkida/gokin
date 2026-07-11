@@ -44,4 +44,26 @@ func TestProcessReadyTasks_OnTaskStartFiresOutsideLock(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("onTaskStart never completed — invoked under c.mu (re-entrant GetAllTasks deadlocked)")
 	}
+
+	// Drain: wait for the spawned task to reach a terminal state before the
+	// test returns. The coordinator marks a task Completed/Failed only after
+	// the runner's spawn goroutine recorded the result — i.e. after agent.Run
+	// returned and every write under workDir/.gokin (the agent-output .log,
+	// saved agent state) has happened. Returning earlier races t.TempDir()'s
+	// RemoveAll against the agent's file creation, which flaked as
+	// "TempDir RemoveAll cleanup: … .gokin/agent-output: directory not empty".
+	// GetStatus snapshots all counters under c.mu.RLock, so polling it is
+	// race-detector-safe (unlike reading Status off GetAllTasks' live
+	// pointers).
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st := c.GetStatus()
+		if st.PendingTasks == 0 && st.BlockedTasks == 0 && st.ReadyTasks == 0 && st.RunningTasks == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawned task never reached a terminal state (%+v) — returning would race TempDir cleanup", st)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
