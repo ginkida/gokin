@@ -36,33 +36,14 @@ func (t *MemorizeTool) Name() string {
 }
 
 func (t *MemorizeTool) Description() string {
-	return "Saves a durable project fact, preference, convention, or pattern to the project-learning store (.gokin/project-memory.md + learning.yaml), loaded into context every future session. Use this for knowledge about THIS repository (e.g. the test command, a naming convention). The result reports whether a write actually happened. For ad-hoc keyed notes with tags/TTL/recall, use the `memory` tool instead; both stores are shown by `memory` action=list."
+	return MemorizeToolDeclaration().Description
 }
 
+// Declaration delegates to the shared schema in declarations.go (single
+// source — the two hand-maintained copies had drifted; see the CLAUDE.md
+// new-tool rule).
 func (t *MemorizeTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
-		Name:        t.Name(),
-		Description: t.Description(),
-		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"type": {
-					Type:        genai.TypeString,
-					Description: "Type of information: 'fact', 'preference', 'convention', 'pattern'",
-					Enum:        []string{"fact", "preference", "convention", "pattern"},
-				},
-				"key": {
-					Type:        genai.TypeString,
-					Description: "A short, descriptive key or name for the knowledge (e.g., 'test_command', 'logging_library')",
-				},
-				"content": {
-					Type:        genai.TypeString,
-					Description: "The actual fact or preference to remember",
-				},
-			},
-			Required: []string{"type", "key", "content"},
-		},
-	}
+	return MemorizeToolDeclaration()
 }
 
 func (t *MemorizeTool) Validate(args map[string]any) error {
@@ -76,7 +57,8 @@ func (t *MemorizeTool) Validate(args map[string]any) error {
 	if key == "" {
 		return NewValidationError("key", "is required")
 	}
-	if content == "" {
+	// forget removes an entry by key — no content to store.
+	if content == "" && infoType != "forget" {
 		return NewValidationError("content", "is required")
 	}
 
@@ -92,6 +74,7 @@ func (t *MemorizeTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	key, _ := GetString(args, "key")
 	content, _ := GetString(args, "content")
 
+	forgot := false
 	switch infoType {
 	case "preference":
 		t.learning.SetPreference(key, content)
@@ -100,6 +83,13 @@ func (t *MemorizeTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		t.learning.SetPreference(fmt.Sprintf("%s:%s", infoType, key), content)
 	case "pattern":
 		t.learning.LearnPattern(key, content, nil, nil)
+	case "forget":
+		// The correction half of memory maintenance: remove an entry that
+		// turned out wrong or stale so it stops polluting future sessions.
+		if !t.learning.RemoveEntry(key) {
+			return NewErrorResult(fmt.Sprintf("no memorized entry named %q to forget (check `memory` action=list for exact keys)", key)), nil
+		}
+		forgot = true
 	default:
 		return NewErrorResult(fmt.Sprintf("unknown information type: %s", infoType)), nil
 	}
@@ -112,10 +102,15 @@ func (t *MemorizeTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		return NewErrorResult(fmt.Sprintf("failed to save memory: %s", err)), nil
 	}
 
-	EmitMemoryNotify(ctx, "memorized", fmt.Sprintf("%s: %s", infoType, key))
-
 	markdownPath := t.learning.MarkdownPath()
-	msg := fmt.Sprintf("Memorized %s: %s", infoType, key)
+	var msg string
+	if forgot {
+		EmitMemoryNotify(ctx, "forgot", key)
+		msg = fmt.Sprintf("Forgot memorized entry: %s", key)
+	} else {
+		EmitMemoryNotify(ctx, "memorized", fmt.Sprintf("%s: %s", infoType, key))
+		msg = fmt.Sprintf("Memorized %s: %s", infoType, key)
+	}
 	if changed {
 		if markdownPath != "" {
 			msg += fmt.Sprintf(" (updated %s — also shown in `memory list` and loaded next session)", markdownPath)

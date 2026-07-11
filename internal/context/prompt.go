@@ -134,6 +134,21 @@ For any task with 3+ distinct steps, or anything non-trivial and multi-file, use
 - Skip todos for genuinely single-step tasks — don't add ceremony where none is needed.`
 
 // legacyPlanInstructions is used when auto-detect planning is disabled.
+// memoryMaintenanceSection is the standing write-half of the memory
+// discipline (the Claude-Code behavior: the agent maintains its own durable
+// memory DURING work, not only when explicitly told to). STATIC by design —
+// this text lives in the cached system prefix and must stay byte-identical
+// across turns. The recall half is the Project Learning section injected
+// just above it (when the store has content).
+const memoryMaintenanceSection = `
+
+## Memory Maintenance
+You maintain durable per-project memory with the ` + "`memorize`" + ` tool; the Project Learning section (when present) IS that memory, loaded fresh every session — trust it and do not re-derive what it already states.
+- When you VERIFY a durable fact about this project (build/test/lint command, convention, architectural constraint, recurring gotcha), memorize it in the same turn — do not wait to be asked.
+- When the user corrects you or states a lasting preference, memorize it as type=preference.
+- Re-memorizing an existing key UPDATES it. When a remembered entry turns out wrong or stale, remove it with type=forget — a wrong memory is worse than none.
+- Do NOT memorize one-off details, turn-local state, secrets, or anything the project's own docs already state.`
+
 const legacyPlanInstructions = `
 Plan Mode:
 - When a user provides feedback on a plan (after pressing ESC or requesting changes), you MUST:
@@ -581,6 +596,13 @@ func (b *PromptBuilder) Build() string {
 		builder.WriteString("\n\n")
 		builder.WriteString(strings.TrimSpace(b.projectLearning.FormatForPrompt()))
 	}
+
+	// Standing memory-maintenance discipline (STATIC text — byte-stable for
+	// the cached prefix). The Project Learning section above is the RECALL
+	// half; this is the WRITE half: without it the agent only ever updated
+	// its memory when a /loop iteration prompt told it to — normal
+	// interactive sessions never got smarter (the Claude-Code behavior gap).
+	builder.WriteString(memoryMaintenanceSection)
 
 	// Add persistent memories from memory store
 	if b.memoryStore != nil {

@@ -1146,28 +1146,30 @@ func CheckImpactToolDeclaration() *genai.FunctionDeclaration {
 }
 
 // MemorizeToolDeclaration returns the declaration for the memorize tool.
+// MemorizeTool.Declaration() delegates HERE (the single schema source — two
+// hand-maintained copies had already drifted before v0.100.81 unified them).
 func MemorizeToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "memorize",
-		Description: "Saves a durable project fact, preference, convention, or pattern to the project-learning store (.gokin/project-memory.md + learning.yaml), loaded into context every future session. Use this for knowledge about THIS repository (e.g. the test command, a naming convention). The result reports whether a write actually happened. For ad-hoc keyed notes with tags/TTL/recall, use the `memory` tool instead; both stores are shown by `memory` action=list.",
+		Description: "Saves a durable project fact, preference, convention, or pattern to the project-learning store (.gokin/project-memory.md + learning.yaml), loaded into context every future session. Use this for knowledge about THIS repository (e.g. the test command, a naming convention). Re-using an existing key UPDATES that entry; type='forget' REMOVES an entry that turned out wrong or stale (content not needed). The result reports whether a write actually happened. For ad-hoc keyed notes with tags/TTL/recall, use the `memory` tool instead; both stores are shown by `memory` action=list.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
 				"type": {
 					Type:        genai.TypeString,
-					Description: "Type of information: 'fact', 'preference', 'convention', 'pattern'",
-					Enum:        []string{"fact", "preference", "convention", "pattern"},
+					Description: "Type of information: 'fact', 'preference', 'convention', 'pattern' — or 'forget' to remove a wrong/stale entry by key",
+					Enum:        []string{"fact", "preference", "convention", "pattern", "forget"},
 				},
 				"key": {
 					Type:        genai.TypeString,
-					Description: "Name for the knowledge",
+					Description: "A short, descriptive key or name for the knowledge (e.g., 'test_command', 'logging_library')",
 				},
 				"content": {
 					Type:        genai.TypeString,
-					Description: "Actual fact or preference",
+					Description: "The actual fact or preference to remember (not needed for type='forget')",
 				},
 			},
-			Required: []string{"type", "key", "content"},
+			Required: []string{"type", "key"},
 		},
 	}
 }

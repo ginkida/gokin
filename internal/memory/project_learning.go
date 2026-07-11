@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -387,6 +388,37 @@ func (pl *ProjectLearning) SetPreference(key, value string) {
 	pl.saveFunc()
 }
 
+// RemoveEntry deletes a memorized entry by key — a bare preference, an entry
+// stored under the "fact:"/"convention:" prefix (how memorize namespaces
+// those types), or a learned pattern by name. Returns whether anything was
+// removed. This is the CORRECTION half of the memory discipline: without it
+// a wrong or stale memorized fact pollutes every future session's prompt
+// forever (the store is loaded into context each session).
+func (pl *ProjectLearning) RemoveEntry(key string) bool {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+
+	removed := false
+	for _, k := range []string{key, "fact:" + key, "convention:" + key} {
+		if _, ok := pl.data.Preferences[k]; ok {
+			delete(pl.data.Preferences, k)
+			removed = true
+		}
+	}
+	for i := range pl.data.Patterns {
+		if pl.data.Patterns[i].Name == key {
+			pl.data.Patterns = append(pl.data.Patterns[:i], pl.data.Patterns[i+1:]...)
+			removed = true
+			break
+		}
+	}
+	if removed {
+		pl.dirty = true
+		pl.saveFunc()
+	}
+	return removed
+}
+
 // GetPreference returns a project preference.
 func (pl *ProjectLearning) GetPreference(key string) string {
 	pl.mu.RLock()
@@ -474,6 +506,12 @@ func (pl *ProjectLearning) GetRecentPatterns(limit int) []LearnedPattern {
 }
 
 // FormatForPrompt returns a formatted string for prompt injection.
+// maxPromptEntriesPerSection bounds how many Preferences/Facts/Conventions
+// entries FormatForPrompt renders per section (alphabetical; the overflow is
+// disclosed with a count). Patterns (5) and commands (3) were always capped —
+// these sections weren't, and they sit in EVERY session's system prompt.
+const maxPromptEntriesPerSection = 20
+
 func (pl *ProjectLearning) FormatForPrompt() string {
 	pl.mu.RLock()
 	defer pl.mu.RUnlock()
@@ -483,32 +521,33 @@ func (pl *ProjectLearning) FormatForPrompt() string {
 
 	preferences, facts, conventions := splitProjectPreferences(pl.data.Preferences)
 
-	if len(preferences) > 0 {
-		sb.WriteString("### Preferences\n")
-		for _, k := range sortedPreferenceKeys(preferences) {
-			v := preferences[k]
-			sb.WriteString("- **" + k + "**: " + v + "\n")
+	writeSection := func(title string, entries map[string]string) {
+		if len(entries) == 0 {
+			return
+		}
+		sb.WriteString("### " + title + "\n")
+		keys := sortedPreferenceKeys(entries)
+		shown := keys
+		// Bound the per-session prompt cost: patterns and commands were always
+		// capped, but these sections were UNBOUNDED — with the agent now
+		// coached to memorize proactively, an old project would grow every
+		// future session's prompt without limit. Over-cap entries are
+		// disclosed, never silently hidden.
+		if len(shown) > maxPromptEntriesPerSection {
+			shown = shown[:maxPromptEntriesPerSection]
+		}
+		for _, k := range shown {
+			sb.WriteString("- **" + k + "**: " + entries[k] + "\n")
+		}
+		if hidden := len(keys) - len(shown); hidden > 0 {
+			fmt.Fprintf(&sb, "- … and %d more (see `memory` action=list)\n", hidden)
 		}
 		sb.WriteString("\n")
 	}
 
-	if len(facts) > 0 {
-		sb.WriteString("### Facts\n")
-		for _, k := range sortedPreferenceKeys(facts) {
-			v := facts[k]
-			sb.WriteString("- **" + k + "**: " + v + "\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	if len(conventions) > 0 {
-		sb.WriteString("### Conventions\n")
-		for _, k := range sortedPreferenceKeys(conventions) {
-			v := conventions[k]
-			sb.WriteString("- **" + k + "**: " + v + "\n")
-		}
-		sb.WriteString("\n")
-	}
+	writeSection("Preferences", preferences)
+	writeSection("Facts", facts)
+	writeSection("Conventions", conventions)
 
 	// Top patterns
 	if len(pl.data.Patterns) > 0 {
