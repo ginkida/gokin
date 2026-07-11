@@ -28,6 +28,7 @@ import (
 	"gokin/internal/plan"
 	"gokin/internal/ratelimit"
 	"gokin/internal/router"
+	"gokin/internal/security"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
@@ -387,7 +388,7 @@ func (b *Builder) initTools() error {
 	b.executor = tools.NewExecutor(b.registry, b.mainClient, b.cfg.Tools.Timeout)
 	// Give the executor the model's context window so it can pre-emptively prune
 	// old tool outputs mid-loop instead of overflowing and failing the turn.
-	b.executor.SetMaxInputTokens(appcontext.GetModelLimits(b.cfg.Model.Name).MaxInputTokens)
+	b.executor.SetMaxInputTokens(effectiveMaxInputTokens(b.cfg))
 	b.executor.SetWorkDir(b.workDir)
 	b.executor.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.executor.SetDeltaCheckConfig(
@@ -450,6 +451,19 @@ func (b *Builder) initTools() error {
 	}
 
 	return nil
+}
+
+// effectiveMaxInputTokens resolves the context window used by runtime guards.
+// An explicit context.max_input_tokens override wins over model metadata; this
+// matters for compatible proxies that expose GLM-5.2 with a smaller window.
+func effectiveMaxInputTokens(cfg *config.Config) int {
+	if cfg == nil {
+		return 0
+	}
+	if cfg.Context.MaxInputTokens > 0 {
+		return cfg.Context.MaxInputTokens
+	}
+	return appcontext.GetModelLimits(cfg.Model.Name).MaxInputTokens
 }
 
 // selectToolSets determines which tool sets to include based on the current context.
@@ -1375,6 +1389,25 @@ func glmWebSearchServer(glmKey string) config.MCPServerConfig {
 	}
 }
 
+// resolveGLMKey loads the credential exactly like the GLM model client:
+// environment first, then api.glm_key, then the legacy api.api_key fallback.
+// Keeping MCP search on the same path avoids the surprising state where chat
+// works with GOKIN_GLM_KEY but web.glm_search silently has no credential.
+func resolveGLMKey(cfg *config.Config) *security.LoadedKey {
+	if cfg == nil {
+		return security.GetProviderKey(nil, "", "")
+	}
+	p := config.GetProvider("glm")
+	if p == nil {
+		return security.GetProviderKey(nil, "", "")
+	}
+	legacyKey := ""
+	if p.UsesLegacyKey {
+		legacyKey = cfg.API.APIKey
+	}
+	return security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
+}
+
 // initMCP wires up the Model Context Protocol manager when `mcp.enabled: true`.
 //
 // The manager is created even with an empty `mcp.servers` list — otherwise
@@ -1392,11 +1425,11 @@ func (b *Builder) initMCP() error {
 	// server, wired to the stored GLM key. The flag IS the opt-in, so it works
 	// even when mcp.enabled is false.
 	if b.cfg.Web.GLMSearch {
-		if key := strings.TrimSpace(b.cfg.API.GLMKey); key != "" {
-			servers = append(append([]config.MCPServerConfig(nil), servers...), glmWebSearchServer(key))
+		if loadedKey := resolveGLMKey(b.cfg); loadedKey.IsSet() {
+			servers = append(append([]config.MCPServerConfig(nil), servers...), glmWebSearchServer(loadedKey.Value))
 			glmAdded = true
 		} else {
-			logging.Warn("web.glm_search is enabled but no GLM key is set — skipping the GLM web search MCP server")
+			logging.Warn("web.glm_search is enabled but no GLM key is set — set GOKIN_GLM_KEY, GLM_API_KEY, or api.glm_key")
 		}
 	}
 
@@ -1797,6 +1830,17 @@ func (b *Builder) wireDependencies() error {
 			app.pushTurnContext()
 			app.safeSendToProgram(ui.LearningInsightMsg{Message: "Session memory updated"})
 		})
+		// Surfaces a FAILED LLM-backed extraction — previously Debug-log only,
+		// so a degraded provider on a quota-limited plan (GLM's 5h cap) could
+		// silently spend a real ~30s API call every 3rd qualifying turn with
+		// zero on-screen signal, and /cost never attributed it either.
+		app.sessionMemory.SetOnExtractionFailed(func(extractErr error) {
+			app.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusWarning,
+				Message: "Session-memory summarization failed — using a quicker fallback",
+			})
+			logging.Warn("session memory LLM extraction failed (surfaced to UI)", "error", extractErr)
+		})
 	}
 
 	// Set up TUI callbacks
@@ -1876,6 +1920,21 @@ func (b *Builder) wireDependencies() error {
 				})
 			}
 		}
+		// Surfaces a background compaction attempt's FAILURE — previously
+		// invisible (Warn-log only) on every trigger path. Real-world impact:
+		// on a quota-limited provider (GLM's 5h cap), a degraded endpoint can
+		// make every threshold-crossing turn silently retry a failing
+		// summarization call — burning quota with zero on-screen signal while
+		// context keeps growing toward EmergencyTruncate/overflow.
+		b.contextManager.OnOptimizeFailed = func(reason string, optErr error) {
+			if app.program != nil {
+				app.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusWarning,
+					Message: fmt.Sprintf("Context compaction (%s) failed — context will keep growing until it succeeds", reason),
+				})
+			}
+			logging.Warn("context optimization failed (surfaced to UI)", "reason", reason, "error", optErr)
+		}
 	}
 
 	// Set up background task tracking callbacks for UI
@@ -1946,6 +2005,11 @@ func (b *Builder) wireDependencies() error {
 				app.executor.AddPendingNotification(msg)
 			}
 		}
+	})
+	// Account every invocation, not only background UI tasks. This also covers
+	// synchronous task/coordinate calls, plan sub-agents, batches, and resumes.
+	b.agentRunner.SetOnAgentUsage(func(_ string, result *agent.AgentResult) {
+		app.accumulateAgentResultUsage(result)
 	})
 
 	b.agentRunner.SetOnAgentProgress(func(id string, progress *agent.AgentProgress) {

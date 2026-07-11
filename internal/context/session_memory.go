@@ -58,6 +58,14 @@ type SessionMemoryManager struct {
 	// Callback fired after each successful extraction (for UI notifications)
 	onUpdate func()
 
+	// onExtractionFailed fires ONLY when the LLM-backed extraction (a real
+	// ~30s API call, every 3rd qualifying extraction) fails and falls back to
+	// the free heuristic summary. Previously this was Debug-log only — on a
+	// quota-limited provider (GLM's 5h Coding-Plan cap) a degraded endpoint
+	// silently spent an extra API call against the cap on every qualifying
+	// turn with zero on-screen signal, and /cost never reflected it either.
+	onExtractionFailed func(err error)
+
 	// Durable project learning store (optional). When configured, high-signal
 	// findings from the session are promoted into project memory markdown.
 	projectLearning *memory.ProjectLearning
@@ -82,6 +90,15 @@ type SessionMemoryManager struct {
 func (s *SessionMemoryManager) SetOnUpdate(cb func()) {
 	s.mu.Lock()
 	s.onUpdate = cb
+	s.mu.Unlock()
+}
+
+// SetOnExtractionFailed sets a callback invoked when the LLM-backed
+// extraction fails and falls back to the heuristic summary (see the field's
+// doc comment for why this matters on quota-limited providers).
+func (s *SessionMemoryManager) SetOnExtractionFailed(cb func(err error)) {
+	s.mu.Lock()
+	s.onExtractionFailed = cb
 	s.mu.Unlock()
 }
 
@@ -365,8 +382,18 @@ Be concise. Each section should be 1-5 bullet points maximum.`
 		s.mu.Lock()
 		s.content = fallback
 		onUpdate := s.onUpdate
+		var onFailed func(error)
+		// Only a genuine call failure (err != nil) is worth surfacing — an
+		// empty summary with NO error is a legitimate "nothing to add"
+		// response, not a wasted/failed call.
+		if err != nil {
+			onFailed = s.onExtractionFailed
+		}
 		s.mu.Unlock()
 		s.writeToDisk()
+		if onFailed != nil {
+			onFailed(err)
+		}
 		if onUpdate != nil {
 			onUpdate()
 		}

@@ -71,6 +71,7 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 	r.mu.Unlock()
 	r.notifyResultReady()
 	r.recordAgentExecutionLearning(deps, string(state.Type), prompt, result, duration, "resume")
+	r.reportAgentUsage(agent.ID, result)
 
 	if err == nil && workspaceErr != nil {
 		err = workspaceErr
@@ -215,6 +216,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 		r.mu.Unlock()
 		r.notifyResultReady()
 		r.recordAgentExecutionLearning(deps, string(state.Type), prompt, result, duration, "resume_async")
+		r.reportAgentUsage(agent.ID, result)
 
 		// Notify UI about agent completion
 		if onComplete != nil {
@@ -382,6 +384,7 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 				duration,
 				"resume_error_checkpoint",
 			)
+			r.reportAgentUsage(a.ID, result)
 
 			r.mu.Lock()
 			r.results[a.ID] = result
@@ -517,6 +520,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 			duration,
 			"resume_last_checkpoint",
 		)
+		r.reportAgentUsage(a.ID, result)
 
 		r.mu.Lock()
 		r.results[a.ID] = result

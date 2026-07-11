@@ -281,6 +281,29 @@ func TestResponseMetadataShowsFailedToolCount(t *testing.T) {
 	}
 }
 
+func TestResponseMetadataFormatsSmallCachedTurnCost(t *testing.T) {
+	m := NewModel()
+	tests := []struct {
+		cost float64
+		want string
+	}{
+		{0.00001, "< $0.0001"},
+		{0.00015, "$0.0001"},
+		{0.0099, "$0.0099"},
+		{0.01, "$0.01"},
+		{1.239, "$1.24"},
+	}
+	for _, tt := range tests {
+		footer := stripAnsi(m.renderResponseMetadata(ResponseMetadataMsg{Cost: tt.cost}))
+		if footer != tt.want {
+			t.Errorf("cost %v rendered as %q, want %q", tt.cost, footer, tt.want)
+		}
+	}
+	if got := formatResponseCost(0); got != "" {
+		t.Errorf("zero cost rendered as %q, want empty (unknown/free metadata omitted)", got)
+	}
+}
+
 func TestFormatToolRunSummary(t *testing.T) {
 	cases := []struct {
 		count       int

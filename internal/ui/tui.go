@@ -924,7 +924,19 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		m.planFeedbackInput.SetPlaceholder("Enter your feedback for plan modifications...")
 		return m.planFeedbackInput.Focus()
 	case "esc":
-		// ESC to interrupt plan approval and return to input with context
+		// ESC to interrupt plan approval and return to input with context.
+		// This must ACTUALLY unblock the backend, not just reset the UI: the
+		// foreground turn is synchronously blocked inside promptPlanApproval,
+		// waiting on a.planApprovalChan (which only handlePlanApproval below
+		// ever sends to) or its own 10-minute PlanApprovalTimeout. The old
+		// code called only the never-wired m.onInterrupt and told the user
+		// "you can now provide feedback" — but a.processing stayed true, so
+		// anything the user typed next was silently QUEUED as type-ahead and
+		// did nothing for up to 10 minutes (the plan-approval sibling of the
+		// /loop Esc bug: UI says "go ahead", backend is still waiting).
+		// m.onCancel (app.CancelProcessing) cancels the SAME ctx
+		// promptPlanApproval selects on — its ctx.Done() branch fires
+		// immediately, rejecting the plan and freeing the turn for real.
 		m.planRequest = nil
 		m.planSelectedOption = 0
 		m.planFeedbackMode = false
@@ -933,6 +945,9 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		m.output.AppendLine(m.styles.Warning.Render(" Plan approval interrupted"))
 		m.output.AppendLine(lipgloss.NewStyle().Foreground(ColorInfo).Render(" You can now provide feedback or modification requests"))
 		m.output.AppendLine("")
+		if m.onCancel != nil {
+			m.onCancel()
+		}
 		if m.onInterrupt != nil {
 			m.onInterrupt()
 		}
@@ -1957,7 +1972,20 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamStartTime = time.Now()
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
-		m.state = StateStreaming
+		// Never clobber an ACTIVE modal (permission/question/plan-approval)
+		// raised by a DIFFERENT source — a background /loop iteration's
+		// sub-agent hitting a LevelAsk tool, or a coordinate sub-task. Round-4
+		// guarded modal-OPENING messages against an already-active modal, but
+		// missed the symmetric case: a modal that just opened getting
+		// overwritten by the NEXT chunk of an unrelated, already-in-flight
+		// foreground stream milliseconds later — silently vanishing the
+		// prompt while promptPermission/promptPlanApproval stays blocked
+		// (possibly indefinitely, per the -1 "wait forever" timeout option).
+		// The stream content still gets appended below — nothing is lost,
+		// only the state transition is deferred until the modal resolves.
+		if !m.isModalState() {
+			m.state = StateStreaming
+		}
 
 		m.markResponseStarted()
 
@@ -1968,7 +1996,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Now()
 		m.slowWarningShown = false
 		m.streamIdleMsg = "" // Server responded — clear idle warning
-		m.state = StateStreaming
+		if !m.isModalState() {
+			m.state = StateStreaming
+		}
 		m.processingLabel = "" // Text streaming is the feedback itself
 
 		// Close thinking block when text starts
@@ -2125,7 +2155,18 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case ResponseDoneMsg:
 		m.output.EndThinking()
-		m.state = StateInput
+		// Finalize the turn's bookkeeping unconditionally (the backend really
+		// is done), but don't clobber an ACTIVE modal raised by a DIFFERENT
+		// source (a background /loop iteration's permission prompt, a
+		// coordinate sub-task's question) with StateInput — that would vanish
+		// the prompt while its handler stays blocked waiting on a decision
+		// nothing can now deliver (worse with the -1 "wait forever" permission
+		// timeout). The modal's own close path returns to StateInput/whatever
+		// state it decides once the user resolves it.
+		modalActive := m.isModalState()
+		if !modalActive {
+			m.state = StateInput
+		}
 		m.currentTool = ""
 		m.currentToolInfo = ""
 		m.processingLabel = ""
@@ -2146,7 +2187,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 		m.output.FlushStream() // Flush any remaining streamed content
 		m.output.AppendLine("")
-		cmds = append(cmds, m.input.Focus())
+		if !modalActive {
+			cmds = append(cmds, m.input.Focus())
+		}
 
 	case ResponseMetadataMsg:
 		// Track request latency for status bar
@@ -2166,7 +2209,13 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case ErrorMsg:
 		errStr := msg.Error()
-		m.state = StateInput
+		// Same modal-preservation rule as ResponseDoneMsg above — an error
+		// from an UNRELATED foreground/background source must not silently
+		// dismiss an active permission/question/plan-approval modal.
+		modalActive := m.isModalState()
+		if !modalActive {
+			m.state = StateInput
+		}
 		m.currentTool = ""
 		m.currentToolInfo = ""
 		m.processingLabel = ""
@@ -2196,7 +2245,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.output.AppendLine(FormatErrorWithGuidance(m.styles, errStr))
 			m.output.AppendLine("")
 		}
-		cmds = append(cmds, m.input.Focus())
+		if !modalActive {
+			cmds = append(cmds, m.input.Focus())
+		}
 
 	case TodoUpdateMsg:
 		m.todoItems = msg

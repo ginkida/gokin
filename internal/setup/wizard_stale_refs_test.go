@@ -31,7 +31,7 @@ func TestSetupChoices_NoAnthropicCase(t *testing.T) {
 
 // TestSetupChoices_GLMVersionLabelIsCurrent pins that the GLM choice's
 // description references the current major model line (5.x) rather than
-// the pre-v0.71 "GLM-4/GLM-5" label. The current default is glm-5.1;
+// the pre-v0.71 "GLM-4/GLM-5" label. The current default is glm-5.2;
 // "GLM-4/GLM-5" implied a 50/50 split that hasn't been true since v0.71.
 func TestSetupChoices_GLMVersionLabelIsCurrent(t *testing.T) {
 	choices := buildSetupChoices()

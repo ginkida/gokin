@@ -87,6 +87,16 @@ type ContextManager struct {
 
 	// Notification callback when background optimization starts (for UI feedback)
 	OnOptimizeStart func(reason string)
+
+	// Notification callback when a background compaction attempt FAILS.
+	// Every trigger path (backgroundOptimize's OptimizeContext call AND
+	// tryAutoCompact's IncrementalCompact call) previously only Warn-logged a
+	// failure — invisible to the user. On a quota-limited provider (GLM's 5h
+	// Coding-Plan cap) that means repeated background summarization attempts
+	// can silently keep burning quota while context keeps growing toward
+	// EmergencyTruncate/overflow, with zero on-screen signal that anything is
+	// wrong. Guard fires at most once per attempt (not a retry loop itself).
+	OnOptimizeFailed func(reason string, err error)
 }
 
 // NewContextManager creates a new context manager.
@@ -451,6 +461,13 @@ func (m *ContextManager) notifyOptimizeStart(reason string) {
 	}
 }
 
+// notifyOptimizeFailed fires the OnOptimizeFailed callback if registered.
+func (m *ContextManager) notifyOptimizeFailed(reason string, err error) {
+	if m.OnOptimizeFailed != nil {
+		m.OnOptimizeFailed(reason, err)
+	}
+}
+
 // backgroundOptimize runs context optimization in a background goroutine.
 // Only one optimization runs at a time; concurrent calls are no-ops.
 func (m *ContextManager) backgroundOptimize(_ context.Context) {
@@ -483,6 +500,12 @@ func (m *ContextManager) backgroundOptimize(_ context.Context) {
 		start := time.Now()
 		if err := m.OptimizeContext(sumCtx); err != nil {
 			logging.Warn("background context optimization failed", "error", err)
+			// ErrHistoryTooShort/ErrNothingToSummarize are normal "nothing to
+			// do" outcomes (the same sentinel-error convention /compact uses),
+			// not failures worth alarming the user about.
+			if !errors.Is(err, ErrHistoryTooShort) && !errors.Is(err, ErrNothingToSummarize) {
+				m.notifyOptimizeFailed("context optimization", err)
+			}
 		}
 		m.mu.Lock()
 		m.lastSummaryDur = time.Since(start)
@@ -839,8 +862,17 @@ func (m *ContextManager) tryAutoCompact(ctx context.Context, currentTokens int) 
 		"percentage", usage.PercentUsed,
 		"threshold", threshold)
 
+	// This is the ONE compaction trigger (of four: two PrepareForRequest
+	// paths, message-count, and this one) that never called
+	// notifyOptimizeStart — its start, and any failure, were completely
+	// invisible: no toast, no chrome, Warn-only log. Every LLM-backed
+	// summarization call here still costs real tokens against a
+	// possibly-quota-limited provider even when it fails.
+	m.notifyOptimizeStart("auto-compact — context over threshold")
+
 	if err := m.IncrementalCompact(ctx); err != nil {
 		logging.Warn("auto-compaction failed", "error", err)
+		m.notifyOptimizeFailed("auto-compact", err)
 	}
 }
 

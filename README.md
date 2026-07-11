@@ -47,8 +47,8 @@ Five providers, one interface: **Kimi, GLM, MiniMax, DeepSeek** (via Anthropic-c
 | Stack | Cost | Best For |
 |-------|------|----------|
 | **Gokin + DeepSeek V4** | Pay-per-use | **Recommended** — 1M context, top SWE-bench reasoning, prompt caching (95% savings) |
-| **Gokin + Kimi Coding Plan** | Subscription | Default — 262K context, thinking + tool use, coding-tuned |
-| **Gokin + GLM Coding Plan** | ~$3/month | Budget-friendly daily coding, GLM-5.1 with 200K context |
+| **Gokin + Kimi Coding Plan** | Subscription | 262K context, thinking + tool use, coding-tuned |
+| **Gokin + GLM Coding Plan** | ~$3/month | **Default** — GLM-5.2, 1M context, extended thinking |
 | **Gokin + MiniMax** | Pay-per-use | 200K context, strong on agentic coding |
 | **Gokin + Ollama** | Free | Privacy, offline, no API costs |
 
@@ -91,7 +91,7 @@ export GOKIN_DEEPSEEK_KEY="sk-..."   # DeepSeek V4 (recommended)
 gokin
 
 # Other providers work the same way:
-# export GOKIN_KIMI_KEY="sk-kimi-..."   # Kimi Coding Plan (default)
+# export GOKIN_KIMI_KEY="sk-kimi-..."   # Kimi Coding Plan
 # export GOKIN_GLM_KEY="..."            # GLM Coding Plan
 # export GOKIN_MINIMAX_KEY="..."        # MiniMax
 # Ollama needs no key — just run a local model
@@ -232,17 +232,19 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 |----------|--------|---------|---------------------|
 | **DeepSeek** | `deepseek-v4-pro`, `v4-flash`, `chat`, `reasoner` | 1M input, 384K output | Pro $0.44/$0.87, Flash $0.14/$0.28 |
 | **Kimi** | `kimi-for-coding` | 262K input, 32K output | $0.95/$4.00 |
-| **GLM** | `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.5` | 200K input, 131K output | 5.1: $4/$16, 5: $1/$4 |
+| **GLM** | `glm-5.2`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.5` | 5.2: 1M input, 131K output | 5.2/5.1: $4/$16, 5: $1/$4 |
 | **MiniMax** | `MiniMax-M2.7`, `M2.7-highspeed`, `M2.5`, `M2.5-highspeed` | 200K input, 16K output | M2.7: $0.30/$1.20 |
 | **Ollama** | Any local model | Varies | Free |
 
-All cloud providers use Anthropic-compatible APIs and share the same client — fewer moving parts, consistent behavior. Prompt caching is supported on Kimi, MiniMax, and DeepSeek (live-verified 95% savings on repeat prefixes). Ollama uses its own native client and makes zero network calls.
+All cloud providers use Anthropic-compatible APIs and share the same client — fewer moving parts, consistent behavior. GLM uses server-managed implicit prefix caching; Kimi, MiniMax, and DeepSeek use explicit prompt caching markers. Ollama uses its own native client and makes zero network calls.
+
+GLM Coding Plan users can enable the first-party `web_search_prime` tool with `/set glmsearch on`. It reuses `GOKIN_GLM_KEY`, `GLM_API_KEY`, or `api.glm_key`; no second credential is required. This boot-wired setting takes effect after restart.
 
 Switch anytime:
 ```
 /provider deepseek    →  /model deepseek-v4-pro
 /provider kimi        →  /model kimi-for-coding
-/provider glm         →  /model glm-5.1
+/provider glm         →  /model glm-5.2
 /provider minimax     →  /model MiniMax-M2.7
 /provider ollama      →  /model llama3.2
 ```
@@ -295,13 +297,13 @@ Switch anytime:
 api: { deepseek_key: "sk-...", active_provider: "deepseek" }
 model: { name: "deepseek-v4-pro" }
 
-# Or Kimi (default)
+# Or Kimi
 api: { kimi_key: "sk-kimi-...", active_provider: "kimi" }
 model: { name: "kimi-for-coding" }
 
 # Or GLM / MiniMax
 api: { glm_key: "...", active_provider: "glm" }
-model: { name: "glm-5.1" }
+model: { name: "glm-5.2" }
 ```
 
 ### Full Reference
@@ -313,7 +315,7 @@ api:
   glm_key: ""
   minimax_key: ""
   ollama_key: ""                  # optional, for remote Ollama with auth
-  active_provider: "kimi"         # kimi | deepseek | glm | minimax | ollama
+  active_provider: "glm"          # glm | deepseek | kimi | minimax | ollama
   ollama_base_url: "http://localhost:11434"
   retry:
     max_retries: 10
@@ -321,16 +323,17 @@ api:
     stream_idle_timeout: 30s
 
 model:
-  name: "kimi-for-coding"
+  name: "glm-5.2"
   temperature: 0.6
-  max_output_tokens: 32768
+  max_output_tokens: 65536         # headroom below GLM-5.2's 131K API cap
   custom_base_url: ""             # override endpoint
-  enable_thinking: false          # supported on Kimi, DeepSeek, GLM, MiniMax
-  thinking_budget: 0              # 0 = provider default
+  thinking_mode: "auto"           # auto | on | off; adapts per request
+  enable_thinking: false          # legacy static switch
+  thinking_budget: 0              # 0 = adaptive/provider default
 
 tools:
   timeout: 2m
-  model_round_timeout: 5m
+  model_round_timeout: 14m         # allows long GLM reasoning rounds
   bash: { sandbox: true }
 
 permission:

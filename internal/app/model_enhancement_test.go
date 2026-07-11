@@ -7,6 +7,30 @@ import (
 	"gokin/internal/config"
 )
 
+func TestBuildModelEnhancement_GLM52IncludesExecutionContract(t *testing.T) {
+	app := &App{
+		config: &config.Config{
+			API:   config.APIConfig{Backend: "glm"},
+			Model: config.ModelConfig{Name: "glm-5.2"},
+		},
+	}
+
+	got := app.buildModelEnhancement()
+	for _, needle := range []string{
+		"GLM Execution Policy",
+		"keep the todo list current",
+		"batch independent reads/searches",
+		"do not repeat a read/grep",
+		"never stop immediately after a tool call",
+		"inspect the resulting diff or files",
+		"implemented and verified",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("buildModelEnhancement() missing %q:\n%s", needle, got)
+		}
+	}
+}
+
 func TestBuildModelEnhancement_KimiIncludesExecutionPolicy(t *testing.T) {
 	app := &App{
 		config: &config.Config{

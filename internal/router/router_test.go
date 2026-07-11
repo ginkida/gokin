@@ -80,6 +80,27 @@ func TestInferModelCapability(t *testing.T) {
 	}
 }
 
+func TestSetModelCapability_UpdatesLiveRoutingPolicy(t *testing.T) {
+	r := &Router{
+		thinkingMode:    config.ThinkingModeAuto,
+		modelCapability: InferModelCapability("ollama", "llama3.2"),
+	}
+	hard := &TaskComplexity{Strategy: StrategyExecutor, Score: 5}
+	if got := r.selectThinkingBudget(hard); got != 12288 {
+		t.Fatalf("weak-model thinking budget = %d, want 12288", got)
+	}
+
+	r.SetModelCapability(InferModelCapability("glm", "glm-5.2"))
+	if got := r.selectThinkingBudget(hard); got != 8192 {
+		t.Fatalf("GLM-5.2 thinking budget after live switch = %d, want 8192", got)
+	}
+
+	sets := []tools.ToolSet{tools.ToolSetCore, tools.ToolSetAgent, tools.ToolSetAdvanced}
+	if got := r.filterToolSetsByCapability(sets); len(got) != len(sets) {
+		t.Fatalf("GLM-5.2 should retain strong-tier tool sets, got %v", got)
+	}
+}
+
 func TestCapabilityTierAdjustments(t *testing.T) {
 	weak := InferModelCapability("ollama", "llama3.2")
 	if weak.DecomposeAdjust != -2 {

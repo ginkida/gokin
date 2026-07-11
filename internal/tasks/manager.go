@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -160,41 +161,65 @@ func (m *Manager) Cancel(id string) error {
 // List returns all tasks.
 func (m *Manager) List() []Info {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	result := make([]Info, 0, len(m.tasks))
 	for _, task := range m.tasks {
 		result = append(result, task.GetInfo())
 	}
+	m.mu.RUnlock()
+
+	sortTaskInfos(result, true)
 	return result
 }
 
 // ListRunning returns all running tasks.
 func (m *Manager) ListRunning() []Info {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	var result []Info
 	for _, task := range m.tasks {
 		if task.IsRunning() {
 			result = append(result, task.GetInfo())
 		}
 	}
+	m.mu.RUnlock()
+
+	sortTaskInfos(result, false)
 	return result
 }
 
 // ListCompleted returns all completed tasks.
 func (m *Manager) ListCompleted() []Info {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	var result []Info
 	for _, task := range m.tasks {
 		if task.IsComplete() {
 			result = append(result, task.GetInfo())
 		}
 	}
+	m.mu.RUnlock()
+
+	sortTaskInfos(result, false)
 	return result
+}
+
+// sortTaskInfos gives every task-listing surface a stable, useful order.
+// Map iteration is intentionally random; without sorting, callers that cap
+// their output (notably /tasks) can hide recent work while showing older
+// entries. The mixed list keeps active commands visible, then orders newest
+// first. ID is a deterministic tie-breaker for synthetic/test snapshots.
+func sortTaskInfos(infos []Info, runningFirst bool) {
+	sort.Slice(infos, func(i, j int) bool {
+		if runningFirst {
+			iRunning := infos[i].Status == StatusRunning.String()
+			jRunning := infos[j].Status == StatusRunning.String()
+			if iRunning != jRunning {
+				return iRunning
+			}
+		}
+		if !infos[i].StartTime.Equal(infos[j].StartTime) {
+			return infos[i].StartTime.After(infos[j].StartTime)
+		}
+		return infos[i].ID < infos[j].ID
+	})
 }
 
 // Cleanup removes completed tasks older than the given duration.

@@ -286,6 +286,33 @@ func (r *Router) SetThinkingMode(mode string) {
 	r.clientMu.Unlock()
 }
 
+// SetModelCapability updates the model-dependent routing policy after a live
+// /model or /provider switch. The router outlives its client, so leaving the
+// boot-time capability in place applies the previous model's decomposition,
+// tool filtering, and thinking multiplier to the new one.
+func (r *Router) SetModelCapability(capability *ModelCapability) {
+	r.clientMu.Lock()
+	r.modelCapability = capability
+	r.clientMu.Unlock()
+}
+
+func (r *Router) getModelCapability() *ModelCapability {
+	r.clientMu.RLock()
+	capability := r.modelCapability
+	r.clientMu.RUnlock()
+	return capability
+}
+
+// CurrentModelCapability returns a value snapshot of the routing capability.
+// The boolean is false when no profile has been configured.
+func (r *Router) CurrentModelCapability() (ModelCapability, bool) {
+	capability := r.getModelCapability()
+	if capability == nil {
+		return ModelCapability{}, false
+	}
+	return *capability, true
+}
+
 // getThinkingMode returns the resolved mode (defaults to auto when unset).
 func (r *Router) getThinkingMode() string {
 	r.clientMu.RLock()
@@ -936,8 +963,8 @@ func (r *Router) selectThinkingBudget(analysis *TaskComplexity) int32 {
 		budget = 8192
 	}
 
-	if budget > 0 && r.modelCapability != nil {
-		budget = int32(float64(budget) * r.modelCapability.ThinkingMultiplier)
+	if capability := r.getModelCapability(); budget > 0 && capability != nil {
+		budget = int32(float64(budget) * capability.ThinkingMultiplier)
 	}
 	if budget > 0 {
 		budget = int32(float64(budget) * r.sessionDepthMultiplier())
@@ -1032,17 +1059,18 @@ func (r *Router) selectCostAwareModel(analysis *TaskComplexity) string {
 // applyCapabilityAdjustments modifies task analysis based on model capability.
 // Weaker models get lower decompose thresholds (complex tasks split earlier).
 func (r *Router) applyCapabilityAdjustments(analysis *TaskComplexity) {
-	if r.modelCapability == nil || r.modelCapability.DecomposeAdjust == 0 {
+	capability := r.getModelCapability()
+	if capability == nil || capability.DecomposeAdjust == 0 {
 		return
 	}
 
-	effectiveThreshold := max(r.decomposeThreshold+r.modelCapability.DecomposeAdjust, 2)
+	effectiveThreshold := max(r.decomposeThreshold+capability.DecomposeAdjust, 2)
 
 	// If task exceeds adjusted threshold but not original, force sub-agent strategy
 	if analysis.Score >= effectiveThreshold && analysis.Score < r.decomposeThreshold {
 		analysis.Strategy = StrategySubAgent
 		analysis.Reasoning += fmt.Sprintf(" (model-adjusted: %s tier lowers decompose threshold to %d)",
-			r.modelCapability.Tier, effectiveThreshold)
+			capability.Tier, effectiveThreshold)
 	}
 }
 
@@ -1140,7 +1168,8 @@ func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
 //     do confuse lower tiers. Sub-agents get them via a separate path.
 //   - ToolSetSemantic — removed in v0.65.0 entirely; still safe to omit.
 func (r *Router) filterToolSetsByCapability(sets []tools.ToolSet) []tools.ToolSet {
-	if r.modelCapability == nil || r.modelCapability.Tier >= CapabilityStrong {
+	capability := r.getModelCapability()
+	if capability == nil || capability.Tier >= CapabilityStrong {
 		return sets
 	}
 
@@ -1162,7 +1191,7 @@ func (r *Router) filterToolSetsByCapability(sets []tools.ToolSet) []tools.ToolSe
 			filtered = append(filtered, s)
 			continue
 		}
-		if r.modelCapability.Tier == CapabilityMedium && mediumAllow[s] {
+		if capability.Tier == CapabilityMedium && mediumAllow[s] {
 			filtered = append(filtered, s)
 		}
 	}

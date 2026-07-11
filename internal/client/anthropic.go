@@ -42,10 +42,10 @@ func (e *HTTPError) Unwrap() error {
 	return e.Err
 }
 
-// AnthropicConfig holds configuration for Anthropic-compatible API (GLM-4.7).
+// AnthropicConfig holds configuration for Anthropic-compatible APIs.
 type AnthropicConfig struct {
 	APIKey        string
-	BaseURL       string // Default: "https://api.anthropic.com" for Anthropic, custom for GLM-4.7
+	BaseURL       string // Default: "https://api.anthropic.com"; providers set their compatible endpoint.
 	Provider      string // For telemetry/logging (glm, minimax, kimi)
 	Model         string
 	MaxTokens     int32
@@ -61,7 +61,7 @@ type AnthropicConfig struct {
 	ThinkingBudget int32 // Max tokens for thinking (0 = disabled)
 }
 
-// AnthropicClient implements Client interface for Anthropic-compatible APIs (including GLM-4.7).
+// AnthropicClient implements Client for Anthropic-compatible providers.
 type AnthropicClient struct {
 	config            AnthropicConfig
 	httpClient        *http.Client
@@ -841,6 +841,7 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 //   - 1301: concurrency limit            → retryable
 //   - 1302/1303: throughput limit        → retryable
 //   - 1305: service overloaded           → retryable
+//   - 1312: model high traffic           → retryable
 //   - unknown: treated as non-retryable with raw message
 func classifyGLMErrorCode(code, message string) (retryable bool, keyword, description string) {
 	switch code {
@@ -852,6 +853,8 @@ func classifyGLMErrorCode(code, message string) (retryable bool, keyword, descri
 		return true, "overloaded", "GLM throughput limit — retrying"
 	case "1305":
 		return true, "overloaded", "GLM server overloaded — retrying"
+	case "1312":
+		return true, "overloaded", "GLM model is experiencing high traffic — retrying"
 	case "1211", "1213":
 		return false, "", "GLM account balance insufficient — top up or switch provider"
 	case "1212":

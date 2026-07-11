@@ -47,15 +47,18 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	sb.WriteString("Tokens\n")
 	fmt.Fprintf(&sb, "  Input Tokens:     %s\n", formatNumber(int64(tokenStats.InputTokens)))
 	fmt.Fprintf(&sb, "  Output Tokens:    %s\n", formatNumber(int64(tokenStats.OutputTokens)))
+	if tokenStats.CacheReadInputTokens > 0 {
+		fmt.Fprintf(&sb, "  Cached Input:     %s\n", formatNumber(int64(tokenStats.CacheReadInputTokens)))
+	}
 	fmt.Fprintf(&sb, "  Total Tokens:     %s\n", formatNumber(int64(tokenStats.TotalTokens)))
 
 	// Calculate cost using per-model pricing from TokenCounter
-	var totalCost float64
+	totalCost := tokenStats.EstimatedCost
 	contextManager := app.GetContextManager()
-	if contextManager != nil {
+	if !tokenStats.CostTracked && contextManager != nil {
 		tc := contextManager.GetTokenCounter()
 		if tc != nil {
-			totalCost = tc.CalculateCost(tokenStats.InputTokens, tokenStats.OutputTokens)
+			totalCost = tc.CalculateCostWithCache(tokenStats.InputTokens, tokenStats.OutputTokens, tokenStats.CacheReadInputTokens)
 		}
 	}
 	fmt.Fprintf(&sb, "  Est. Cost:       %s\n\n", appcontext.FormatCost(totalCost))

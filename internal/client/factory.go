@@ -246,7 +246,7 @@ func resolveProviderTimeouts(cfg *config.Config, provider string, defaultStreamI
 	return streamIdleTimeout, httpTimeout
 }
 
-// newGLMClient creates a GLM (GLM-4.7) client using Anthropic-compatible API.
+// newGLMClient creates a GLM client using Z.AI's Anthropic-compatible API.
 func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	// Load API key from environment or config via registry
 	p := config.GetProvider("glm")
@@ -283,7 +283,8 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	// GLM/Z.AI needs longer timeouts — server is slower than Anthropic.
 	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "glm", 180*time.Second, 5*time.Minute)
 
-	// GLM 4.7+ supports extended thinking — enable by default if user hasn't explicitly configured it
+	// GLM 4.7+ supports extended thinking — enable by default if the user
+	// hasn't explicitly configured it. This includes the default GLM-5.2.
 	enableThinking := cfg.Model.EnableThinking
 	thinkingBudget := cfg.Model.ThinkingBudget
 	if !enableThinking && thinkingBudget == 0 && supportsGLMThinking(modelID) {

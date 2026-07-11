@@ -884,8 +884,9 @@ func (e *Executor) GetNotificationManager() *NotificationManager {
 	return e.notificationMgr
 }
 
-// GetLastTokenUsage returns the token usage from the last API response.
-// Returns (inputTokens, outputTokens). Values are 0 if metadata was unavailable.
+// GetLastTokenUsage returns aggregate provider-reported usage for the most
+// recent Execute call. A tool loop can make several separately billed model
+// rounds, so both input and output are summed across those rounds.
 func (e *Executor) GetLastTokenUsage() (int, int) {
 	e.tokenMu.Lock()
 	in, out := e.lastInputTokens, e.lastOutputTokens
@@ -893,8 +894,8 @@ func (e *Executor) GetLastTokenUsage() (int, int) {
 	return in, out
 }
 
-// GetLastCacheMetrics returns the prompt cache metrics from the last API response.
-// Returns (cacheCreationInputTokens, cacheReadInputTokens).
+// GetLastCacheMetrics returns aggregate cache metrics for the most recent
+// Execute call, summed across every model round in its tool loop.
 func (e *Executor) GetLastCacheMetrics() (int, int) {
 	e.tokenMu.Lock()
 	creation, read := e.lastCacheCreationTokens, e.lastCacheReadTokens
@@ -927,7 +928,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 	// Reset token counters for this execution cycle.
 	// OutputTokens accumulates across rounds (each round generates new output).
-	// InputTokens is overwritten (last round has full context).
+	// Usage is scoped to this top-level Execute call. Each model round below is
+	// a separate provider request and contributes to these aggregate counters.
 	e.tokenMu.Lock()
 	e.lastInputTokens = 0
 	e.lastOutputTokens = 0
@@ -996,18 +998,22 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		if resp == nil {
 			return
 		}
-		// Capture token usage metadata from API response.
-		// InputTokens: use latest value (last round includes full history context).
-		// OutputTokens: accumulate across rounds (each round generates new output).
+		// Capture token usage metadata from this API round. Provider usage values
+		// are cumulative within one response, not across requests; a tool loop's
+		// rounds are separately billed and therefore must all be accumulated.
 		e.tokenMu.Lock()
 		if resp.InputTokens > 0 {
-			e.lastInputTokens = resp.InputTokens
+			e.lastInputTokens += resp.InputTokens
 		}
 		if resp.OutputTokens > 0 {
 			e.lastOutputTokens += resp.OutputTokens
 		}
-		e.lastCacheCreationTokens = resp.CacheCreationInputTokens
-		e.lastCacheReadTokens = resp.CacheReadInputTokens
+		if resp.CacheCreationInputTokens > 0 {
+			e.lastCacheCreationTokens += resp.CacheCreationInputTokens
+		}
+		if resp.CacheReadInputTokens > 0 {
+			e.lastCacheReadTokens += resp.CacheReadInputTokens
+		}
 		e.tokenMu.Unlock()
 
 		// Track prompt cache usage for cache break detection.
@@ -1103,6 +1109,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 		streamRetries = 0        // reset on success
 		partialStreamRetries = 0 // reset on success
+		recordResponseAccounting(resp)
 
 		// Text-based tool call fallback for models without native function calling
 		// (shared with the sub-agent loop via client.ApplyTextToolCallFallback).
@@ -1424,6 +1431,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				resp, err = e.collectStreamWithHandler(roundCtx, stream)
 				roundCancel()
 				if err == nil {
+					// Every successful function-response request is separately
+					// billed. Record it before resp is replaced by the next tool
+					// round (and before an empty-response retry).
+					recordResponseAccounting(resp)
 					if resp != nil && resp.Text == "" && len(resp.FunctionCalls) == 0 {
 						logging.Warn("model returned empty response after tool results",
 							"retry_count", streamRetries,
@@ -1525,8 +1536,6 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 		// No more function calls, we have the final response
 		finalText = resp.Text
-
-		recordResponseAccounting(resp)
 
 		// If the model hit max_tokens while emitting text, ask it to continue
 		// instead of surfacing a fake "done" turn. This is common when a model
@@ -1802,6 +1811,15 @@ func (e *Executor) SetMaxInputTokens(n int) {
 	e.tokenMu.Lock()
 	e.maxInputTokens = n
 	e.tokenMu.Unlock()
+}
+
+// MaxInputTokens returns the context window currently used by the executor's
+// in-loop pruning guard. It is primarily useful for runtime diagnostics and
+// for verifying that live model switches propagated their limits.
+func (e *Executor) MaxInputTokens() int {
+	e.tokenMu.Lock()
+	defer e.tokenMu.Unlock()
+	return e.maxInputTokens
 }
 
 // pruneOldToolOutputs shrinks large, older FunctionResponse Content in the

@@ -47,36 +47,37 @@ func (f *fakeAppForMCP) ClearConversation()                               {}
 func (f *fakeAppForMCP) GrantAllowedDir(path string, persist bool) (string, error) {
 	return path, nil
 }
-func (f *fakeAppForMCP) RevokeGrantedDir(path string) (bool, error)     { return true, nil }
-func (f *fakeAppForMCP) ListAllowedDirs() []string                      { return nil }
-func (f *fakeAppForMCP) GetTodoTool() *tools.TodoTool                   { return nil }
-func (f *fakeAppForMCP) GetTokenStats() TokenStats                      { return TokenStats{} }
-func (f *fakeAppForMCP) GetModelSetter() ModelSetter                    { return nil }
-func (f *fakeAppForMCP) GetProjectInfo() *appcontext.ProjectInfo        { return nil }
-func (f *fakeAppForMCP) GetPlanManager() *plan.Manager                  { return nil }
-func (f *fakeAppForMCP) GetTreePlanner() *agent.TreePlanner             { return nil }
-func (f *fakeAppForMCP) IsPlanningModeEnabled() bool                    { return false }
-func (f *fakeAppForMCP) TogglePlanningMode() bool                       { return false }
-func (f *fakeAppForMCP) ApplyConfig(*config.Config) error               { return nil }
-func (f *fakeAppForMCP) GetVersion() string                             { return "test" }
-func (f *fakeAppForMCP) AddSystemMessage(string)                        {}
-func (f *fakeAppForMCP) GetAgentTypeRegistry() *agent.AgentTypeRegistry { return nil }
-func (f *fakeAppForMCP) GetUIDebugState() (any, error)                  { return nil, nil }
-func (f *fakeAppForMCP) GetRuntimeHealthReport() string                 { return "" }
-func (f *fakeAppForMCP) GetPolicyReport() string                        { return "" }
-func (f *fakeAppForMCP) GetLedgerReport() string                        { return "" }
-func (f *fakeAppForMCP) GetPlanProofReport(int) string                  { return "" }
-func (f *fakeAppForMCP) GetJournalReport() string                       { return "" }
-func (f *fakeAppForMCP) GetRecoveryReport() string                      { return "" }
-func (f *fakeAppForMCP) GetObservabilityReport() string                 { return "" }
-func (f *fakeAppForMCP) GetSessionGovernanceReport() string             { return "" }
-func (f *fakeAppForMCP) GetMemoryReport() string                        { return "" }
-func (f *fakeAppForMCP) GetPerformanceStats() string                    { return "" }
-func (f *fakeAppForMCP) GetLoopManager() LoopManager                    { return nil }
-func (f *fakeAppForMCP) CancelInFlightLoopIteration(string) bool        { return false }
-func (f *fakeAppForMCP) GetAgentTaskRunner() AgentTaskRunner            { return nil }
-func (f *fakeAppForMCP) GetHooksManager() *hooks.Manager                { return nil }
-func (f *fakeAppForMCP) RefreshTokenCount()                             {}
+func (f *fakeAppForMCP) RevokeGrantedDir(path string) (bool, error)      { return true, nil }
+func (f *fakeAppForMCP) ListAllowedDirs() []string                       { return nil }
+func (f *fakeAppForMCP) GetTodoTool() *tools.TodoTool                    { return nil }
+func (f *fakeAppForMCP) GetTokenStats() TokenStats                       { return TokenStats{} }
+func (f *fakeAppForMCP) GetModelSetter() ModelSetter                     { return nil }
+func (f *fakeAppForMCP) GetProjectInfo() *appcontext.ProjectInfo         { return nil }
+func (f *fakeAppForMCP) GetPlanManager() *plan.Manager                   { return nil }
+func (f *fakeAppForMCP) GetTreePlanner() *agent.TreePlanner              { return nil }
+func (f *fakeAppForMCP) IsPlanningModeEnabled() bool                     { return false }
+func (f *fakeAppForMCP) TogglePlanningMode() bool                        { return false }
+func (f *fakeAppForMCP) ApplyConfig(*config.Config) error                { return nil }
+func (f *fakeAppForMCP) GetVersion() string                              { return "test" }
+func (f *fakeAppForMCP) AddSystemMessage(string)                         {}
+func (f *fakeAppForMCP) GetAgentTypeRegistry() *agent.AgentTypeRegistry  { return nil }
+func (f *fakeAppForMCP) GetUIDebugState() (any, error)                   { return nil, nil }
+func (f *fakeAppForMCP) GetRuntimeHealthReport() string                  { return "" }
+func (f *fakeAppForMCP) GetPolicyReport() string                         { return "" }
+func (f *fakeAppForMCP) GetLedgerReport() string                         { return "" }
+func (f *fakeAppForMCP) GetPlanProofReport(int) string                   { return "" }
+func (f *fakeAppForMCP) GetJournalReport() string                        { return "" }
+func (f *fakeAppForMCP) GetRecoveryReport() string                       { return "" }
+func (f *fakeAppForMCP) GetObservabilityReport() string                  { return "" }
+func (f *fakeAppForMCP) GetSessionGovernanceReport() string              { return "" }
+func (f *fakeAppForMCP) GetMemoryReport() string                         { return "" }
+func (f *fakeAppForMCP) GetPerformanceStats() string                     { return "" }
+func (f *fakeAppForMCP) GetLoopManager() LoopManager                     { return nil }
+func (f *fakeAppForMCP) CancelInFlightLoopIteration(string) bool         { return false }
+func (f *fakeAppForMCP) GetAgentTaskRunner() AgentTaskRunner             { return nil }
+func (f *fakeAppForMCP) GetBackgroundShellRunner() BackgroundShellRunner { return nil }
+func (f *fakeAppForMCP) GetHooksManager() *hooks.Manager                 { return nil }
+func (f *fakeAppForMCP) RefreshTokenCount()                              {}
 
 func newFakeApp(t *testing.T, servers []*mcp.ServerConfig) *fakeAppForMCP {
 	t.Helper()

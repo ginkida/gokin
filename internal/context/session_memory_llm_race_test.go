@@ -134,3 +134,61 @@ func TestSessionMemoryManager_CloseCancelsInFlightLLMExtraction(t *testing.T) {
 		t.Fatal("Close returned before canceling the in-flight summarizer")
 	}
 }
+
+// errorSummarizer always fails — used to exercise the extraction-failed path.
+type errorSummarizer struct{ err error }
+
+func (e *errorSummarizer) Summarize(ctx context.Context, history []*genai.Content, prompt string) (string, error) {
+	return "", e.err
+}
+
+// TestSessionMemoryManager_ExtractionFailedCallback pins the fix for
+// invisible quota-burning background LLM calls (round-14 #7): a failed
+// LLM-backed extraction (a real ~30s API call on a quota-limited provider)
+// was Debug-log only. SetOnExtractionFailed must fire on a genuine failure.
+func TestSessionMemoryManager_ExtractionFailedCallback(t *testing.T) {
+	mgr := NewSessionMemoryManager(t.TempDir(), DefaultSessionMemoryConfig())
+	mgr.SetSummarizer(&errorSummarizer{err: context.DeadlineExceeded})
+
+	var failedErr error
+	failed := false
+	mgr.SetOnExtractionFailed(func(err error) {
+		failed = true
+		failedErr = err
+	})
+
+	history := longHistory()
+	// extractionCount%3==0 triggers the LLM path — call 3 times to reach it.
+	mgr.Extract(history, 1000)
+	mgr.Extract(history, 1000)
+	mgr.Extract(history, 1000)
+	mgr.Wait()
+
+	if !failed {
+		t.Fatal("a genuine Summarize error must fire SetOnExtractionFailed")
+	}
+	if failedErr == nil {
+		t.Fatal("SetOnExtractionFailed fired with a nil error")
+	}
+}
+
+// TestSessionMemoryManager_ExtractionEmptyNoErrorDoesNotNotify guards against
+// a false alarm: an empty summary with NO error is a legitimate "nothing to
+// add" response, not a wasted/failed call.
+func TestSessionMemoryManager_ExtractionEmptyNoErrorDoesNotNotify(t *testing.T) {
+	mgr := NewSessionMemoryManager(t.TempDir(), DefaultSessionMemoryConfig())
+	mgr.SetSummarizer(&errorSummarizer{err: nil}) // empty string, nil error
+
+	failed := false
+	mgr.SetOnExtractionFailed(func(error) { failed = true })
+
+	history := longHistory()
+	mgr.Extract(history, 1000)
+	mgr.Extract(history, 1000)
+	mgr.Extract(history, 1000)
+	mgr.Wait()
+
+	if failed {
+		t.Fatal("an empty summary with no error must NOT fire SetOnExtractionFailed")
+	}
+}

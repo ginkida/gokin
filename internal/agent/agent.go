@@ -182,13 +182,14 @@ type Agent struct {
 
 	// Per-run token usage, accumulated across model rounds in executeLoop and
 	// surfaced on AgentResult so callers (notably the /loop scheduler) can show
-	// what an unattended run cost. usageInputTokens is BILLED input (the API's
-	// InputTokens minus the cache-read portion, summed per round); usageOutput
-	// is generated tokens summed per round. Mutated only on the run goroutine
+	// what an unattended run consumed. Cached input remains part of total input
+	// because providers still bill and quota it; the cached subset is tracked
+	// separately for discounted cost calculation. Mutated only on the run goroutine
 	// (under stateMu, alongside the history append) and read after executeLoop
 	// returns on the same goroutine — guarded by stateMu for discipline.
-	usageInputTokens  int
-	usageOutputTokens int
+	usageInputTokens     int
+	usageOutputTokens    int
+	usageCacheReadTokens int
 
 	// pendingSteers holds steering messages (e.g. MetaAgent stuck-interventions)
 	// queued from another goroutine, drained into history at the top of each loop
@@ -198,6 +199,16 @@ type Agent struct {
 
 	// Explicit cancellation for background agents (set by Runner)
 	cancelFunc context.CancelFunc
+
+	// runCtx is the LIVE run context for the current/most-recent Run() call —
+	// the one cancelFunc actually kills. AgentMessenger reads this (via
+	// Runner.messengerCtxFor) to derive its helper-agent contexts, instead of
+	// a context captured once at Runner construction (app lifetime). Without
+	// this, Esc/task_stop cancelling THIS agent's run left any ask_agent/
+	// delegate helper it had spawned running for a further 3-5 minutes on a
+	// context nothing could reach (v0.100.79 messenger cancellation fix).
+	// Guarded by stateMu like the other run-lifecycle fields.
+	runCtx context.Context
 
 	// Agent Scratchpad (Phase 7)
 	Scratchpad string
@@ -1287,6 +1298,12 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.stateMu.Lock()
 	a.status = AgentStatusRunning
 	a.startTime = time.Now()
+	a.runCtx = ctx
+	// Agent instances can be resumed and Run again. These counters describe
+	// this invocation, not the lifetime of the reusable Agent object.
+	a.usageInputTokens = 0
+	a.usageOutputTokens = 0
+	a.usageCacheReadTokens = 0
 	hasHistory := len(a.history) > 0
 	if a.originalPrompt == "" {
 		a.originalPrompt = prompt // Preserve for continuation after compaction
@@ -1335,6 +1352,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		startTime := a.startTime
 		result.InputTokens = a.usageInputTokens
 		result.OutputTokens = a.usageOutputTokens
+		result.CacheReadInputTokens = a.usageCacheReadTokens
 		a.stateMu.Unlock()
 		result.MutatingToolCalls = a.MutatingToolCount()
 
@@ -1362,6 +1380,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	startTime := a.startTime
 	result.InputTokens = a.usageInputTokens
 	result.OutputTokens = a.usageOutputTokens
+	result.CacheReadInputTokens = a.usageCacheReadTokens
 	a.stateMu.Unlock()
 	result.MutatingToolCalls = a.MutatingToolCount()
 
@@ -3019,15 +3038,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		}
 		a.stateMu.Lock()
 		a.history = append(a.history, modelContent)
-		// Accumulate this round's token usage for per-run cost reporting. Input
-		// is netted against cache reads so it reflects what was actually billed,
-		// not the full (mostly-cached) prompt re-sent each round.
-		if billedIn := resp.InputTokens - resp.CacheReadInputTokens; billedIn > 0 {
-			a.usageInputTokens += billedIn
-		}
-		if resp.OutputTokens > 0 {
-			a.usageOutputTokens += resp.OutputTokens
-		}
+		a.recordResponseUsageLocked(resp)
 		a.stateMu.Unlock()
 
 		turnMadeProgress := false
@@ -5168,6 +5179,16 @@ func (a *Agent) SetCancelFunc(cancel context.CancelFunc) {
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 	a.cancelFunc = cancel
+}
+
+// RunContext returns the live run context set at the top of the
+// current/most-recent Run() call ("" i.e. nil before the first run — callers
+// must fall back to a safe default). This is the context a.cancelFunc
+// actually kills, unlike a context captured once at construction time.
+func (a *Agent) RunContext() context.Context {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.runCtx
 }
 
 // safeOnText streams text to the UI in a thread-safe manner.

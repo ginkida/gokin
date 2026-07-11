@@ -337,6 +337,52 @@ func TestManagerList(t *testing.T) {
 	}
 }
 
+func TestManagerListsAreDeterministicallyNewestFirst(t *testing.T) {
+	m := NewManager(t.TempDir())
+	base := time.Now().Add(-time.Minute)
+
+	completedOld := NewTask("completed-old", "echo old", m.workDir)
+	completedOld.Status = StatusCompleted
+	completedOld.StartTime = base
+	completedOld.EndTime = base.Add(time.Second)
+
+	completedNew := NewTask("completed-new", "echo new", m.workDir)
+	completedNew.Status = StatusCompleted
+	completedNew.StartTime = base.Add(20 * time.Second)
+	completedNew.EndTime = base.Add(21 * time.Second)
+
+	runningOld := NewTask("running-old", "sleep 10", m.workDir)
+	runningOld.Status = StatusRunning
+	runningOld.StartTime = base.Add(10 * time.Second)
+
+	runningNew := NewTask("running-new", "sleep 10", m.workDir)
+	runningNew.Status = StatusRunning
+	runningNew.StartTime = base.Add(30 * time.Second)
+
+	// Deliberately insert in an order unrelated to the expected result. A Go
+	// map does not retain even this order, which is the regression being pinned.
+	m.tasks[completedNew.ID] = completedNew
+	m.tasks[runningOld.ID] = runningOld
+	m.tasks[completedOld.ID] = completedOld
+	m.tasks[runningNew.ID] = runningNew
+
+	assertIDs := func(label string, infos []Info, want ...string) {
+		t.Helper()
+		if len(infos) != len(want) {
+			t.Fatalf("%s length = %d, want %d", label, len(infos), len(want))
+		}
+		for i := range want {
+			if infos[i].ID != want[i] {
+				t.Fatalf("%s[%d] = %q, want %q (all: %+v)", label, i, infos[i].ID, want[i], infos)
+			}
+		}
+	}
+
+	assertIDs("List", m.List(), "running-new", "running-old", "completed-new", "completed-old")
+	assertIDs("ListRunning", m.ListRunning(), "running-new", "running-old")
+	assertIDs("ListCompleted", m.ListCompleted(), "completed-new", "completed-old")
+}
+
 func TestManagerCount(t *testing.T) {
 	m := NewManager(t.TempDir())
 

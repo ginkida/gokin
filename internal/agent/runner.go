@@ -72,6 +72,9 @@ type Runner struct {
 	// Callbacks for background task tracking (UI updates)
 	onAgentStart    func(id, agentType, description string)
 	onAgentComplete func(id string, result *AgentResult)
+	// Lifecycle-agnostic accounting callback. Unlike onAgentComplete (background
+	// UI), this fires for every completed Run: sync, async, coordinated, resumed.
+	onAgentUsage func(id string, result *AgentResult)
 
 	// Phase 2: Progress tracking callback
 	onAgentProgress func(id string, progress *AgentProgress)
@@ -143,6 +146,16 @@ type Runner struct {
 	doneGatePolicy *donegate.Policy
 
 	mu sync.RWMutex
+}
+
+// agentByExactID looks up an agent by its EXACT id — unlike GetActiveAgent,
+// it never falls back to "the first agent" on an empty/unknown id. Used by
+// AgentMessenger to find the specific parent agent whose live run context it
+// should derive helper-agent contexts from.
+func (r *Runner) agentByExactID(id string) *Agent {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.agents[id]
 }
 
 // GetActiveAgent returns an agent by ID, or the first active agent if ID is empty.
@@ -376,6 +389,26 @@ func (r *Runner) SetOnAgentComplete(callback func(id string, result *AgentResult
 	r.mu.Lock()
 	r.onAgentComplete = callback
 	r.mu.Unlock()
+}
+
+// SetOnAgentUsage sets the per-run accounting callback. The same agent ID may
+// legitimately be reported again after Resume; each invocation is distinct.
+func (r *Runner) SetOnAgentUsage(callback func(id string, result *AgentResult)) {
+	r.mu.Lock()
+	r.onAgentUsage = callback
+	r.mu.Unlock()
+}
+
+func (r *Runner) reportAgentUsage(id string, result *AgentResult) {
+	if result == nil {
+		return
+	}
+	r.mu.RLock()
+	callback := r.onAgentUsage
+	r.mu.RUnlock()
+	if callback != nil {
+		callback(id, result)
+	}
 }
 
 // SetOnAgentProgress sets the callback for agent progress updates.

@@ -41,7 +41,7 @@ const (
 
 // ModelInfo contains information about an available model.
 type ModelInfo struct {
-	ID          string // Model identifier (e.g., "glm-5.1", "deepseek-v4-pro")
+	ID          string // Model identifier (e.g., "glm-5.2", "deepseek-v4-pro")
 	Name        string // Human-readable name
 	Description string // Short description
 	Provider    string // Provider: "glm", "kimi", "minimax", "deepseek", or "ollama"
@@ -59,7 +59,7 @@ var AvailableModels = []ModelInfo{
 	{
 		ID:          "glm-5.2",
 		Name:        "GLM-5.2",
-		Description: "Most capable GLM model — Max tier (Coding Plan)",
+		Description: "Most capable GLM model — 1M context, 131K output (Coding Plan)",
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},

@@ -146,11 +146,13 @@ type AgentResult struct {
 	// When set, full output is read from this file instead of the Output field.
 	OutputFile string `json:"output_file,omitempty"`
 
-	// Per-run token usage (billed input netted against cache reads; generated
-	// output), summed across the agent's model rounds. Surfaced so background
-	// callers (the /loop scheduler) can report what an unattended run cost.
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
+	// Per-run token usage summed across the agent's model rounds. InputTokens
+	// includes cached input (providers still bill and quota cache reads, usually
+	// at a discounted rate); CacheReadInputTokens exposes that subset separately.
+	// Surfaced so background callers such as /loop can enforce honest budgets.
+	InputTokens          int `json:"input_tokens,omitempty"`
+	OutputTokens         int `json:"output_tokens,omitempty"`
+	CacheReadInputTokens int `json:"cache_read_input_tokens,omitempty"`
 
 	// MutatingToolCalls is how many code/repo-MUTATING tools (IsImplementationTool:
 	// write/edit/delete/refactor/git_commit/…) the agent ran this turn. Surfaced so

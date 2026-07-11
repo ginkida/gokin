@@ -36,7 +36,11 @@ type AgentMessenger struct {
 	mu sync.RWMutex
 }
 
-// NewAgentMessenger creates a messenger for an agent.
+// NewAgentMessenger creates a messenger for an agent. ctx is the RUNNER's
+// (app-lifetime) context — kept only as the fallback parentCtx() uses when
+// the owning agent can't be found or hasn't recorded a run context yet
+// (e.g. a messenger constructed for tests, or a race at the very top of
+// Run() before runCtx is stamped).
 func NewAgentMessenger(ctx context.Context, runner *Runner, fromAgentID string) *AgentMessenger {
 	return &AgentMessenger{
 		ctx:         ctx,
@@ -45,6 +49,25 @@ func NewAgentMessenger(ctx context.Context, runner *Runner, fromAgentID string) 
 		inbox:       make(map[string]chan Message),
 		pending:     make(map[string]chan string),
 	}
+}
+
+// parentCtx returns the OWNING agent's live run context (the one Esc/
+// task_stop actually cancels via Agent.Cancel -> a.cancelFunc), falling back
+// to the app-lifetime ctx captured at construction when the owning agent
+// can't be resolved. Without this, every helper agent spawned via
+// ask_agent/delegate ran on the app-lifetime ctx regardless of what happened
+// to the REQUESTING agent — cancelling the parent left the helper running to
+// its own 3-5 minute cap on a context nothing user-facing could reach
+// (v0.100.79).
+func (m *AgentMessenger) parentCtx() context.Context {
+	if m.runner != nil {
+		if parent := m.runner.agentByExactID(m.fromAgentID); parent != nil {
+			if rc := parent.RunContext(); rc != nil {
+				return rc
+			}
+		}
+	}
+	return m.ctx
 }
 
 // SendMessage sends a message to another agent (by role or ID).
@@ -157,7 +180,7 @@ func spawnResponse(runner *Runner, agentID string, spawnErr error, errPrefix, no
 
 // handleHelpRequest spawns a sub-agent to answer a help request.
 func (m *AgentMessenger) handleHelpRequest(msg Message) {
-	ctx, cancel := context.WithTimeout(m.ctx, 3*time.Minute)
+	ctx, cancel := context.WithTimeout(m.parentCtx(), 3*time.Minute)
 	defer cancel()
 
 	// Map role to agent type
@@ -199,7 +222,7 @@ func (m *AgentMessenger) handleHelpRequest(msg Message) {
 
 // handleDelegation spawns a sub-agent to handle a delegated task.
 func (m *AgentMessenger) handleDelegation(msg Message) {
-	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(m.parentCtx(), 5*time.Minute)
 	defer cancel()
 
 	agentType := msg.To

@@ -80,11 +80,74 @@ func TestExecutorExecuteLoop_MaxTokensTextChunksAreCarried(t *testing.T) {
 	}
 
 	input, output := exec.GetLastTokenUsage()
-	if input != 120 {
-		t.Fatalf("input tokens = %d, want latest 120", input)
+	if input != 330 {
+		t.Fatalf("input tokens = %d, want aggregate 330", input)
 	}
 	if output != 33 {
 		t.Fatalf("output tokens = %d, want accumulated 33", output)
+	}
+}
+
+func TestExecutorExecuteLoop_AggregatesCacheUsageAcrossRounds(t *testing.T) {
+	registry := NewRegistry()
+	cl := &scriptedExecutorClient{
+		model: "glm-5.2",
+		responses: []*client.StreamingResponse{
+			buildExecutorTestUsageStream("part one", genai.FinishReasonMaxTokens, 1000, 20, 100, 700),
+			buildExecutorTestUsageStream("part two", genai.FinishReasonStop, 1200, 30, 0, 900),
+		},
+	}
+
+	exec := NewExecutor(registry, cl, time.Second)
+	exec.preFlightChecks = false
+	if _, _, err := exec.Execute(context.Background(), nil, "continue with cached context"); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	input, output := exec.GetLastTokenUsage()
+	if input != 2200 || output != 50 {
+		t.Fatalf("token usage = (%d, %d), want aggregate (2200, 50)", input, output)
+	}
+	creation, read := exec.GetLastCacheMetrics()
+	if creation != 100 || read != 1600 {
+		t.Fatalf("cache usage = (%d, %d), want aggregate (100, 1600)", creation, read)
+	}
+}
+
+func TestExecutorExecuteLoop_AggregatesUsageAcrossToolRounds(t *testing.T) {
+	registry := NewRegistry()
+	readTool := &scriptedReadTool{}
+	if err := registry.Register(readTool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	cl := &scriptedExecutorClient{
+		model: "glm-5.2",
+		responses: []*client.StreamingResponse{
+			buildExecutorTestReadUsageStream("read-1", 1_000, 10, 50, 700),
+			buildExecutorTestReadUsageStream("read-2", 1_200, 20, 0, 900),
+			buildExecutorTestUsageStream("done", genai.FinishReasonStop, 1_400, 30, 25, 1_100),
+		},
+	}
+
+	exec := NewExecutor(registry, cl, time.Second)
+	exec.preFlightChecks = false
+	if _, finalText, err := exec.Execute(context.Background(), nil, "inspect two files"); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	} else if finalText != "done" {
+		t.Fatalf("finalText = %q, want done", finalText)
+	}
+	if readTool.calls != 2 {
+		t.Fatalf("read calls = %d, want 2", readTool.calls)
+	}
+
+	input, output := exec.GetLastTokenUsage()
+	if input != 3_600 || output != 60 {
+		t.Fatalf("tool-round token usage = (%d, %d), want (3600, 60)", input, output)
+	}
+	creation, read := exec.GetLastCacheMetrics()
+	if creation != 75 || read != 2_700 {
+		t.Fatalf("tool-round cache usage = (%d, %d), want (75, 2700)", creation, read)
 	}
 }
 
@@ -168,6 +231,34 @@ func buildExecutorTestTextStreamWithUsage(text string, inputTokens, outputTokens
 		FinishReason: genai.FinishReasonStop,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
+	})
+}
+
+func buildExecutorTestUsageStream(text string, finish genai.FinishReason, input, output, creation, read int) *client.StreamingResponse {
+	return buildExecutorTestStream(client.ResponseChunk{
+		Text:                     text,
+		Done:                     true,
+		FinishReason:             finish,
+		InputTokens:              input,
+		OutputTokens:             output,
+		CacheCreationInputTokens: creation,
+		CacheReadInputTokens:     read,
+	})
+}
+
+func buildExecutorTestReadUsageStream(id string, input, output, creation, read int) *client.StreamingResponse {
+	return buildExecutorTestStream(client.ResponseChunk{
+		FunctionCalls: []*genai.FunctionCall{{
+			ID:   id,
+			Name: "read",
+			Args: map[string]any{"file_path": "test.txt"},
+		}},
+		Done:                     true,
+		FinishReason:             genai.FinishReasonStop,
+		InputTokens:              input,
+		OutputTokens:             output,
+		CacheCreationInputTokens: creation,
+		CacheReadInputTokens:     read,
 	})
 }
 

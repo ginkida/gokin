@@ -20,9 +20,12 @@ import (
 
 // TokenStats holds token usage statistics for the session.
 type TokenStats struct {
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
+	InputTokens          int
+	OutputTokens         int
+	CacheReadInputTokens int
+	TotalTokens          int
+	EstimatedCost        float64
+	CostTracked          bool
 }
 
 // Command represents a slash command.
@@ -98,6 +101,15 @@ type AppInterface interface {
 	// inspect their results. May be nil when the agent subsystem isn't
 	// wired; the command nil-checks.
 	GetAgentTaskRunner() AgentTaskRunner
+
+	// Background shell task runner — used by /tasks to list/stop bash/ssh
+	// run_in_background commands. Before this, only the MODEL could list
+	// (task_output-equivalent doesn't exist for shell) or kill (kill_shell
+	// tool) a background shell command; the user had no surface at all — a
+	// stray `npm run dev &`-style task from a finished turn kept holding a
+	// port with no way to find or stop it short of quitting gokin. May be
+	// nil when the tasks subsystem isn't wired; the command nil-checks.
+	GetBackgroundShellRunner() BackgroundShellRunner
 
 	// Hooks manager — used by /hooks to list configured hooks. May be nil;
 	// the command nil-checks.

@@ -108,7 +108,7 @@ func TestIsGLMTerminalCode_AndTheOverloadTrap(t *testing.T) {
 		}
 	}
 	// Retryable / transient / unknown codes must NOT be terminal.
-	for _, code := range []string{"1210", "1301", "1302", "1303", "1305", "9999", ""} {
+	for _, code := range []string{"1210", "1301", "1302", "1303", "1305", "1312", "9999", ""} {
 		if isGLMTerminalCode(code) {
 			t.Errorf("isGLMTerminalCode(%q) = true, want false (retryable/unknown must stay on the normal retry path)", code)
 		}

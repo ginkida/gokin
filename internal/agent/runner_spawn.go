@@ -125,6 +125,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	}
 	workspaceErr := r.finalizeAgentWorkspace(agent, result)
 	r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, "spawn")
+	r.reportAgentUsage(agent.ID, result)
 
 	r.mu.Lock()
 	r.results[agent.ID] = result
@@ -285,6 +286,7 @@ func (r *Runner) SpawnWithContext(
 	workspaceErr := r.finalizeAgentWorkspace(agent, result)
 	r.saveAgentState(agent)
 	r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, "spawn_with_context")
+	r.reportAgentUsage(agent.ID, result)
 
 	r.mu.Lock()
 	r.results[agent.ID] = result
@@ -495,6 +497,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		r.finalizeAgentWorkspace(agent, result)
 		r.saveAgentState(agent)
 		r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, "spawn_async")
+		r.reportAgentUsage(agentID, result)
 
 		r.mu.Lock()
 		r.results[agentID] = result
@@ -721,6 +724,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		r.finalizeAgentWorkspace(agent, result)
 		r.saveAgentState(agent)
 		r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, "spawn_async_streaming")
+		r.reportAgentUsage(agentID, result)
 
 		r.mu.Lock()
 		r.results[agentID] = result
@@ -825,6 +829,7 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			workspaceErr := r.finalizeAgentWorkspace(agent, result)
 			r.saveAgentState(agent)
 			r.recordAgentExecutionLearning(deps, string(t.Type), t.Prompt, result, duration, "spawn_multiple")
+			r.reportAgentUsage(agent.ID, result)
 			if err == nil && workspaceErr != nil {
 				err = workspaceErr
 			}

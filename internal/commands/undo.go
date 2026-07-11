@@ -174,11 +174,12 @@ func (c *CostCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	stats := app.GetTokenStats()
 
 	var costStr string
-	cm := app.GetContextManager()
-	if cm != nil {
+	if stats.CostTracked {
+		costStr = fmt.Sprintf("\n  Cost:   %s", appcontext.FormatCost(stats.EstimatedCost))
+	} else if cm := app.GetContextManager(); cm != nil {
 		tc := cm.GetTokenCounter()
 		if tc != nil {
-			cost := tc.CalculateCost(stats.InputTokens, stats.OutputTokens)
+			cost := tc.CalculateCostWithCache(stats.InputTokens, stats.OutputTokens, stats.CacheReadInputTokens)
 			costStr = fmt.Sprintf("\n  Cost:   %s", appcontext.FormatCost(cost))
 		}
 	}

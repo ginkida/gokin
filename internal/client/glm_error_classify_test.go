@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,7 @@ func TestClassifyGLMErrorCode_QuotaAndBalance(t *testing.T) {
 		{"1212", false, []string{"quota"}},
 		{"1211", false, []string{"balance"}},
 		{"1305", true, []string{"overload"}}, // overload stays retryable
+		{"1312", true, []string{"high traffic", "retrying"}},
 		// The 429 subscription/quota/plan/FUP codes are all hard failures — the
 		// only recovery is user action, so each must carry a switch-provider hint.
 		{"1309", false, []string{"subscription", "/provider"}},
@@ -39,5 +41,19 @@ func TestClassifyGLMErrorCode_QuotaAndBalance(t *testing.T) {
 		if desc == "raw provider message" {
 			t.Errorf("code %s should be classified, not pass through the raw message", tc.code)
 		}
+	}
+}
+
+func TestClassifyGLMErrorCode_1312EntersOverloadRetryPath(t *testing.T) {
+	retryable, keyword, description := classifyGLMErrorCode("1312", "This model is currently experiencing high traffic")
+	if !retryable || keyword != "overloaded" {
+		t.Fatalf("1312 classification = retryable %v keyword %q", retryable, keyword)
+	}
+	err := fmt.Errorf("%s [%s] (1312)", description, keyword)
+	if !IsOverloadError(err) {
+		t.Fatalf("1312 error %q did not enter patient overload retry path", err)
+	}
+	if IsTerminalProviderError(err) {
+		t.Fatalf("1312 error %q incorrectly classified as terminal", err)
 	}
 }

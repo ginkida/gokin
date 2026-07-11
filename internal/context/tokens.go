@@ -87,8 +87,9 @@ var DefaultModelLimits = map[string]TokenLimits{
 
 // ModelPricing defines the cost per 1M tokens in USD.
 type ModelPricing struct {
-	InputCostPer1M  float64
-	OutputCostPer1M float64
+	InputCostPer1M       float64
+	CachedInputCostPer1M float64 // 0 means cached input is billed at the normal input rate
+	OutputCostPer1M      float64
 }
 
 // DefaultPricing provides cost estimation for known models.
@@ -98,14 +99,16 @@ var DefaultPricing = map[string]ModelPricing{
 	// names don't reach this map for removed providers.
 
 	// GLM (prices in USD equivalent from CNY)
-	"glm-5.2":     {InputCostPer1M: 4.00, OutputCostPer1M: 16.00},
-	"glm-5.1":     {InputCostPer1M: 4.00, OutputCostPer1M: 16.00},
-	"glm-5":       {InputCostPer1M: 1.00, OutputCostPer1M: 4.00},
-	"glm-5-turbo": {InputCostPer1M: 0.70, OutputCostPer1M: 2.80},
-	"glm-4.7":     {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
-	"glm-4.6":     {InputCostPer1M: 0.70, OutputCostPer1M: 0.70},
-	"glm-4.5":     {InputCostPer1M: 0.50, OutputCostPer1M: 0.50},
-	"glm-4.5-air": {InputCostPer1M: 0.14, OutputCostPer1M: 0.14},
+	// Z.AI bills cache hits at roughly one fifth of normal input. Keep the
+	// cached rates explicit so /cost reflects provider-reported cache reads.
+	"glm-5.2":     {InputCostPer1M: 4.00, CachedInputCostPer1M: 0.80, OutputCostPer1M: 16.00},
+	"glm-5.1":     {InputCostPer1M: 4.00, CachedInputCostPer1M: 0.80, OutputCostPer1M: 16.00},
+	"glm-5":       {InputCostPer1M: 1.00, CachedInputCostPer1M: 0.20, OutputCostPer1M: 4.00},
+	"glm-5-turbo": {InputCostPer1M: 0.70, CachedInputCostPer1M: 0.14, OutputCostPer1M: 2.80},
+	"glm-4.7":     {InputCostPer1M: 1.00, CachedInputCostPer1M: 0.20, OutputCostPer1M: 1.00},
+	"glm-4.6":     {InputCostPer1M: 0.70, CachedInputCostPer1M: 0.14, OutputCostPer1M: 0.70},
+	"glm-4.5":     {InputCostPer1M: 0.50, CachedInputCostPer1M: 0.10, OutputCostPer1M: 0.50},
+	"glm-4.5-air": {InputCostPer1M: 0.14, CachedInputCostPer1M: 0.028, OutputCostPer1M: 0.14},
 	"glm-4":       {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
 
 	// MiniMax Pay-as-you-go pricing (USD / 1M tokens).
@@ -415,11 +418,25 @@ func (t *TokenCounter) GetUsage(tokenCount int) TokenUsage {
 
 // CalculateCost estimates the USD cost for the given token usage.
 func (t *TokenCounter) CalculateCost(inputTokens, outputTokens int) float64 {
+	return t.CalculateCostWithCache(inputTokens, outputTokens, 0)
+}
+
+// CalculateCostWithCache estimates cost while pricing the provider-reported
+// cache-read subset separately. inputTokens is the full prompt usage including
+// cache hits; cacheReadTokens is clamped to that total defensively.
+func (t *TokenCounter) CalculateCostWithCache(inputTokens, outputTokens, cacheReadTokens int) float64 {
 	t.mu.RLock()
 	model := t.model
 	t.mu.RUnlock()
 	pricing := getPricing(model)
-	inputCost := (float64(inputTokens) / 1000000.0) * pricing.InputCostPer1M
+	cacheReadTokens = min(max(cacheReadTokens, 0), max(inputTokens, 0))
+	uncachedInputTokens := max(inputTokens-cacheReadTokens, 0)
+	cachedRate := pricing.CachedInputCostPer1M
+	if cachedRate <= 0 {
+		cachedRate = pricing.InputCostPer1M
+	}
+	inputCost := (float64(uncachedInputTokens) / 1000000.0) * pricing.InputCostPer1M
+	inputCost += (float64(cacheReadTokens) / 1000000.0) * cachedRate
 	outputCost := (float64(outputTokens) / 1000000.0) * pricing.OutputCostPer1M
 	return inputCost + outputCost
 }

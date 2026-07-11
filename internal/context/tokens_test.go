@@ -459,6 +459,39 @@ func TestCalculateCost_WithOutput(t *testing.T) {
 	}
 }
 
+func TestCalculateCostWithCache_GLM(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5", nil)
+	tests := []struct {
+		name      string
+		input     int
+		output    int
+		cacheRead int
+		want      float64
+	}{
+		{"all cached", 1_000_000, 0, 1_000_000, 0.20},
+		{"half cached", 1_000_000, 0, 500_000, 0.60},
+		{"cached clamped to input", 1_000_000, 0, 2_000_000, 0.20},
+		{"negative cache ignored", 1_000_000, 0, -1, 1.00},
+		{"output unaffected", 1_000_000, 1_000_000, 1_000_000, 4.20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tc.CalculateCostWithCache(tt.input, tt.output, tt.cacheRead); got != tt.want {
+				t.Fatalf("CalculateCostWithCache() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCalculateCostWithCache_UnknownCachedRateUsesInputRate(t *testing.T) {
+	tc := NewTokenCounter(nil, "kimi-for-coding", nil)
+	withoutCache := tc.CalculateCostWithCache(1_000_000, 0, 0)
+	withCache := tc.CalculateCostWithCache(1_000_000, 0, 1_000_000)
+	if withCache != withoutCache {
+		t.Fatalf("unknown cached rate changed cost: cached=%v normal=%v", withCache, withoutCache)
+	}
+}
+
 func TestTokenCounter_InvalidateCache(t *testing.T) {
 	tc := NewTokenCounter(nil, "glm-5", nil)
 	// Add something to cache manually

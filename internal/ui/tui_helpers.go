@@ -562,11 +562,7 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 
 	// Per-message cost estimate
 	if meta.Cost > 0 {
-		if meta.Cost < 0.01 {
-			parts = append(parts, fmt.Sprintf("$%.4f", meta.Cost))
-		} else {
-			parts = append(parts, fmt.Sprintf("$%.2f", meta.Cost))
-		}
+		parts = append(parts, formatResponseCost(meta.Cost))
 	}
 
 	if len(parts) == 0 {
@@ -578,6 +574,19 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 	// real turn (tokens are always present). The numbers stay (handy for cost),
 	// just without the chrome around them.
 	return dimStyle.Render(strings.Join(parts, "  ·  "))
+}
+
+func formatResponseCost(cost float64) string {
+	if cost <= 0 {
+		return ""
+	}
+	if cost < 0.0001 {
+		return "< $0.0001"
+	}
+	if cost < 0.01 {
+		return fmt.Sprintf("$%.4f", cost)
+	}
+	return fmt.Sprintf("$%.2f", cost)
 }
 
 func formatToolRunSummary(count, failures int, includeUsed bool) string {

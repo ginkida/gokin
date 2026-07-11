@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -261,5 +262,98 @@ func TestStatusBarShowsActiveLoops(t *testing.T) {
 	view = renderToPlain(m.View())
 	if !strings.Contains(view, "⟳ 2 loops · running") {
 		t.Fatalf("firing loops must show the highlighted running badge, got:\n%.600s", view)
+	}
+}
+
+// TestPlanApprovalEsc_CancelsTheBackend pins the honesty fix: Esc on the plan
+// approval modal used to reset the UI and print "you can now provide
+// feedback" while the backend stayed BLOCKED inside promptPlanApproval for
+// up to 10 minutes (only handlePlanApproval ever sends to a.planApprovalChan,
+// and Esc never called it or anything else that could unblock the wait).
+// onCancel (app.CancelProcessing) cancels the SAME ctx promptPlanApproval
+// selects on, so Esc must call it.
+func TestPlanApprovalEsc_CancelsTheBackend(t *testing.T) {
+	m := *NewModel()
+	m.width = 100
+	m.height = 40
+	m.state = StatePlanApproval
+	m.planRequest = &PlanApprovalRequestMsg{
+		Title: "Refactor the auth layer",
+		Steps: []PlanStepInfo{{ID: 1, Title: "Extract store"}},
+	}
+
+	cancelled := false
+	m.SetCancelCallback(func() { cancelled = true })
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m2 := updated.(Model)
+
+	if !cancelled {
+		t.Fatal("Esc on plan approval must call onCancel — otherwise promptPlanApproval stays blocked for up to 10 minutes while the UI claims the turn is over")
+	}
+	if m2.state != StateInput {
+		t.Fatalf("Esc must return to StateInput, got %v", m2.state)
+	}
+	if m2.planRequest != nil {
+		t.Fatal("Esc must clear the plan request")
+	}
+}
+
+// TestTurnLifecycleMsgs_DoNotClobberActiveModal pins the fix for the round-4
+// gap: modal-OPENING messages were guarded against an already-active modal
+// (v0.100.64), but turn-lifecycle messages (streamed text/thinking, response
+// done, error) from an UNRELATED source — a background /loop iteration's
+// sub-agent, a coordinate sub-task — were not guarded against clobbering a
+// modal that just opened. A permission/question modal could vanish mid-flight
+// while its handler stayed blocked waiting for a decision (possibly
+// indefinitely, per the -1 "wait forever" permission-timeout option).
+func TestTurnLifecycleMsgs_DoNotClobberActiveModal(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{"StreamThinkingMsg", StreamThinkingMsg("reasoning...")},
+		{"StreamTextMsg", StreamTextMsg("some text")},
+		{"ResponseDoneMsg", ResponseDoneMsg{}},
+		{"ErrorMsg", ErrorMsg(errors.New("boom"))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := *NewModel()
+			m.width = 100
+			m.height = 40
+			m.state = StatePermissionPrompt
+			m.permRequest = &PermissionRequestMsg{ToolName: "bash", ID: "req-1"}
+
+			updated, _ := m.Update(tc.msg)
+			m2 := updated.(Model)
+
+			if m2.state != StatePermissionPrompt {
+				t.Fatalf("%s must not clobber an active modal, state=%v", tc.name, m2.state)
+			}
+			if m2.permRequest == nil {
+				t.Fatalf("%s must not clear the pending permission request", tc.name)
+			}
+		})
+	}
+}
+
+// TestTurnLifecycleMsgs_StillTransitionWithoutModal guards the non-regression
+// case: with NO modal active, these messages must still set state normally.
+func TestTurnLifecycleMsgs_StillTransitionWithoutModal(t *testing.T) {
+	m := *NewModel()
+	m.width = 100
+	m.state = StateProcessing
+
+	updated, _ := m.Update(StreamTextMsg("hello"))
+	m2 := updated.(Model)
+	if m2.state != StateStreaming {
+		t.Fatalf("StreamTextMsg without a modal must still enter StateStreaming, got %v", m2.state)
+	}
+
+	updated, _ = m2.Update(ResponseDoneMsg{})
+	m3 := updated.(Model)
+	if m3.state != StateInput {
+		t.Fatalf("ResponseDoneMsg without a modal must still return to StateInput, got %v", m3.state)
 	}
 }

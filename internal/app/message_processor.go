@@ -749,7 +749,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 	}
 
-	// Update token count after processing and send to UI
+	// Update context token count after processing and send to UI.
+	estimatedContextInput := 0
 	if a.contextManager != nil {
 		if err := a.contextManager.UpdateTokenCount(ctx); err != nil {
 			logging.Debug("failed to update token count", "error", err)
@@ -758,23 +759,18 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		// Send final token usage to UI
 		a.sendTokenUsageUpdate()
 
-		// Track cumulative token usage for /cost command
-		usage := a.contextManager.GetTokenUsage()
-		a.mu.Lock()
-		// apiInputAccum is a per-call delta — accumulate with +=.
-		// usage.InputTokens is the total context window size — overwrite with =.
-		if apiInputAccum > 0 {
-			a.totalInputTokens += apiInputAccum
-		} else if usage.InputTokens > 0 {
-			a.totalInputTokens = usage.InputTokens
+		if usage := a.contextManager.GetTokenUsage(); usage != nil {
+			estimatedContextInput = usage.InputTokens
 		}
-		if apiOutputAccum > 0 {
-			a.totalOutputTokens += apiOutputAccum
-		} else if response != "" {
-			a.totalOutputTokens += len(response) / 4
-		}
-		a.mu.Unlock()
 	}
+
+	turnInputTokens, turnOutputTokens, turnCacheReadTokens := resolveTurnTokenUsage(
+		apiInputAccum, apiOutputAccum, cacheReadAccum, estimatedContextInput, response)
+
+	// Session totals back /stats and /cost. Provider-reported values are true
+	// per-request deltas and accumulate; the local input estimate is the current
+	// context size, so it replaces rather than adds when API metadata is absent.
+	a.accumulateTurnTokenUsage(apiInputAccum, turnInputTokens, turnOutputTokens, turnCacheReadTokens)
 
 	// Direct-executor turns stream their text live through the presenter
 	// (OnText). Minimal-history router strategies (sub-agent, coordinated)
@@ -794,8 +790,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	duration := time.Since(a.responseStartTime)
 	toolsUsed := make([]string, len(a.responseToolsUsed))
 	copy(toolsUsed, a.responseToolsUsed)
-	inputTokens := a.totalInputTokens
-	outputTokens := a.totalOutputTokens
 	a.mu.Unlock()
 
 	// Feed the router's adaptive thinking-budget logic with this turn's
@@ -817,16 +811,24 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	// Send response metadata with cost estimation
 	var cost float64
+	costTracked := false
 	if a.contextManager != nil {
 		if tc := a.contextManager.GetTokenCounter(); tc != nil {
-			cost = tc.CalculateCost(inputTokens, outputTokens)
+			cost = tc.CalculateCostWithCache(turnInputTokens, turnOutputTokens, turnCacheReadTokens)
+			costTracked = true
 		}
+	}
+	if costTracked {
+		a.mu.Lock()
+		a.totalEstimatedCost += cost
+		a.costTracked = true
+		a.mu.Unlock()
 	}
 	a.safeSendToProgram(ui.ResponseMetadataMsg{
 		Model:                a.config.Model.Name,
-		InputTokens:          inputTokens,
-		OutputTokens:         outputTokens,
-		CacheReadInputTokens: cacheReadAccum,
+		InputTokens:          turnInputTokens,
+		OutputTokens:         turnOutputTokens,
+		CacheReadInputTokens: turnCacheReadTokens,
 		Duration:             duration,
 		ToolsUsed:            toolsUsed,
 		Cost:                 cost,
@@ -841,6 +843,76 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	// Update todos display
 	a.emitTodoUpdate()
+}
+
+// resolveTurnTokenUsage selects the metadata shown for one completed user
+// request. Provider usage wins; local estimates fill only missing fields. This
+// must remain separate from App's cumulative session counters, otherwise each
+// response footer re-bills and re-displays every previous turn.
+func resolveTurnTokenUsage(apiInput, apiOutput, cacheRead, estimatedContextInput int, response string) (input, output, cached int) {
+	input = apiInput
+	if input <= 0 {
+		input = max(estimatedContextInput, 0)
+	}
+	output = max(apiOutput, 0)
+	if output == 0 && response != "" {
+		output = len([]rune(response)) / 4
+	}
+	cached = min(max(cacheRead, 0), input)
+	return input, output, cached
+}
+
+// accumulateTurnTokenUsage updates the session ledger without mixing the two
+// different meanings of input usage. Provider metadata is a billable
+// per-request delta and is accumulated. The local fallback is the current
+// context size, not a delta; it therefore acts only as a lower bound. Using a
+// plain assignment for the fallback made totals go backwards when a provider
+// omitted usage after earlier turns had reported it.
+func (a *App) accumulateTurnTokenUsage(apiInput, turnInput, turnOutput, cacheRead int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if apiInput > 0 {
+		a.totalInputTokens += apiInput
+	} else if turnInput > a.totalInputTokens {
+		a.totalInputTokens = turnInput
+	}
+	a.totalOutputTokens += max(turnOutput, 0)
+	a.totalCacheReadTokens += min(max(cacheRead, 0), max(turnInput, 0))
+	// Cached input is a subset of billable input. Some compatible providers
+	// expose cache metrics even when the ordinary input field is absent; keep
+	// the public session totals internally consistent in that case.
+	if a.totalCacheReadTokens > a.totalInputTokens {
+		a.totalInputTokens = a.totalCacheReadTokens
+	}
+}
+
+// accumulateAgentResultUsage folds one delegated agent invocation into the
+// session ledger. Delegated model calls bypass Executor, so without this hook
+// /stats omitted their usage entirely. Call once for every Spawn attempt,
+// including failed attempts: providers bill those completed model rounds too.
+func (a *App) accumulateAgentResultUsage(result *agent.AgentResult) {
+	if result == nil {
+		return
+	}
+	input := max(result.InputTokens, 0)
+	output := max(result.OutputTokens, 0)
+	cacheRead := min(max(result.CacheReadInputTokens, 0), input)
+	if input == 0 && output == 0 && cacheRead == 0 {
+		return
+	}
+
+	a.accumulateTurnTokenUsage(input, input, output, cacheRead)
+
+	if a.contextManager != nil {
+		if tc := a.contextManager.GetTokenCounter(); tc != nil {
+			cost := tc.CalculateCostWithCache(input, output, cacheRead)
+			a.mu.Lock()
+			a.totalEstimatedCost += cost
+			a.costTracked = true
+			a.mu.Unlock()
+		}
+	}
 }
 
 // emitTodoUpdate renders the current todo list and pushes it to the UI checklist
@@ -1457,6 +1529,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	// NextReadySteps, so persist to the real plan step by ID (SetStepUsage) —
 	// otherwise the plan execution summary always reports 0 tokens.
 	apiInput, apiOutput := a.executor.GetLastTokenUsage()
+	_, cacheRead := a.executor.GetLastCacheMetrics()
 	step.TokensUsed = apiInput + apiOutput
 	approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
 
@@ -1542,6 +1615,15 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	}
 	if apiInput > 0 {
 		a.totalInputTokens += apiInput
+	}
+	if cacheRead > 0 {
+		a.totalCacheReadTokens += min(cacheRead, apiInput)
+	}
+	if a.contextManager != nil {
+		if tc := a.contextManager.GetTokenCounter(); tc != nil {
+			a.totalEstimatedCost += tc.CalculateCostWithCache(apiInput, apiOutput, cacheRead)
+			a.costTracked = true
+		}
 	}
 	a.mu.Unlock()
 
@@ -2022,10 +2104,14 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	var result *agent.AgentResult
 	var err error
 	errCat := plan.ErrorUnknown
+	delegatedTokensUsed := 0
 	const maxRetries = 3
 	backoffDurations := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
 
 	for attempt := range maxRetries {
+		// A policy/circuit breaker may reject this attempt without invoking
+		// execFn. Do not accidentally re-account the previous attempt's result.
+		result = nil
 		execFn := func() error {
 			_, result, err = a.agentRunner.SpawnWithContext(
 				stepCtx, "general", stepPrompt, 30, "", projectCtx, onText, true,
@@ -2048,6 +2134,13 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 			err = a.policy.ExecutePlanStep(stepCtx, execFn)
 		} else {
 			err = execFn()
+		}
+		if result != nil {
+			delegatedTokensUsed += max(result.InputTokens, 0) + max(result.OutputTokens, 0)
+			// Persist eagerly: every failure/paused branch below returns before
+			// the success-path assignment, but those attempts were still billed.
+			step.TokensUsed = delegatedTokensUsed
+			approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
 		}
 
 		if err != nil {
@@ -2161,9 +2254,13 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		output = string(runes[:planStepOutputMaxChars]) + "..."
 	}
 
-	// Record token usage for this step (estimate from output length for delegated
-	// steps). `step` is a deep copy, so persist to the real plan step by ID.
-	step.TokensUsed = len(output) / 4
+	// Record provider-reported usage across every delegated attempt. Fall back
+	// to an output-length estimate only for legacy/custom runners that do not
+	// expose usage. `step` is a deep copy, so persist by ID.
+	step.TokensUsed = delegatedTokensUsed
+	if step.TokensUsed == 0 {
+		step.TokensUsed = len([]rune(output)) / 4
+	}
 	approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
 
 	verificationSummary, verificationOutput, verificationOK, verificationReason := a.runStepVerificationCommands(ctx, approvedPlan, step)

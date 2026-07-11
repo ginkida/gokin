@@ -180,8 +180,11 @@ type App struct {
 	commandHandler *commands.Handler
 
 	// Token tracking
-	totalInputTokens  int
-	totalOutputTokens int
+	totalInputTokens     int
+	totalOutputTokens    int
+	totalCacheReadTokens int
+	totalEstimatedCost   float64
+	costTracked          bool
 
 	// Response metadata tracking
 	responseStartTime    time.Time
@@ -1249,6 +1252,21 @@ func (a *App) GetAgentTaskRunner() commands.AgentTaskRunner {
 	return a.agentRunner
 }
 
+// GetBackgroundShellRunner returns the task manager for the /tasks command's
+// background-shell-task section. Nil when the tasks subsystem isn't wired.
+// Typed-nil guard for the same reason as GetAgentTaskRunner: a nil
+// *tasks.Manager stuffed into the interface would be non-nil to the caller,
+// and its methods dereference the receiver (m.mu) — a real panic risk, not
+// just a lint nicety.
+func (a *App) GetBackgroundShellRunner() commands.BackgroundShellRunner {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.taskManager == nil {
+		return nil
+	}
+	return a.taskManager
+}
+
 // GetHooksManager returns the hooks manager for the /hooks command. Nil
 // when hooks aren't wired.
 func (a *App) GetHooksManager() *hooks.Manager {
@@ -2172,6 +2190,9 @@ func (a *App) ClearConversation() {
 	a.mu.Lock()
 	a.totalInputTokens = 0
 	a.totalOutputTokens = 0
+	a.totalCacheReadTokens = 0
+	a.totalEstimatedCost = 0
+	a.costTracked = false
 	a.mu.Unlock()
 
 	// Clear working memory so stale file/command context from the old
@@ -2286,9 +2307,12 @@ func (a *App) GetTokenStats() commands.TokenStats {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return commands.TokenStats{
-		InputTokens:  a.totalInputTokens,
-		OutputTokens: a.totalOutputTokens,
-		TotalTokens:  a.totalInputTokens + a.totalOutputTokens,
+		InputTokens:          a.totalInputTokens,
+		OutputTokens:         a.totalOutputTokens,
+		CacheReadInputTokens: a.totalCacheReadTokens,
+		TotalTokens:          a.totalInputTokens + a.totalOutputTokens,
+		EstimatedCost:        a.totalEstimatedCost,
+		CostTracked:          a.costTracked,
 	}
 }
 
@@ -2853,6 +2877,13 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// 4. Update executor's client and sync tools
 	if a.executor != nil {
 		a.executor.SetClient(newClient)
+		// The executor caches the active context window for in-loop pruning.
+		// Builder initializes it at boot, but /model and /provider replace the
+		// model without rebuilding the executor. Keep the pruning threshold in
+		// sync or switching to GLM-5.2 can retain a previous model's smaller
+		// window (premature pruning), while switching away can retain 1M and
+		// miss pruning before the new model overflows.
+		a.executor.SetMaxInputTokens(effectiveMaxInputTokens(a.config))
 		if a.registry != nil {
 			// a.mu is held for the whole critical section (see NOTE at the top),
 			// so this MUST use the lock-free planModeToolsLocked, never
@@ -2865,13 +2896,25 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		}
 	}
 
-	// 5. Update agent runner
+	// 5. Recompute model-dependent behavior. These components outlive the
+	// client and must not retain the previous model's capability profile.
+	capability := router.InferModelCapability(runtimeProviderForConfig(a.config), a.config.Model.Name)
+	threshold := a.config.Tools.SmartValidation.SelfReviewThreshold
+	if threshold > 2 && (capability.SelfReviewBoost || a.config.Model.ForceWeakOptimizations) {
+		threshold = 2
+	}
+	if a.executor != nil {
+		a.executor.SetSelfReviewThreshold(threshold)
+	}
+
+	// Update agent runner.
 	if a.agentRunner != nil {
 		a.agentRunner.SetClient(newClient)
 		a.agentRunner.SetContextConfig(&a.config.Context)
 		a.agentRunner.SetWorkspaceIsolationEnabled(a.config.Plan.WorkspaceIsolation)
 		a.agentRunner.SetDoneGateConfig(a.config.DoneGate)
 		a.agentRunner.SetThinkingMode(a.config.Model.ThinkingMode)
+		a.agentRunner.SetWeakModelMode(capability.Tier < router.CapabilityStrong || a.config.Model.ForceWeakOptimizations)
 		if a.config.DiffPreview.Enabled && a.config.Permission.Enabled {
 			a.agentRunner.SetWorkspaceReviewHandler(a.reviewWorkspaceChanges)
 		} else {
@@ -2893,6 +2936,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	if a.taskRouter != nil {
 		a.taskRouter.SetClient(newClient)
 		a.taskRouter.SetThinkingMode(a.config.Model.ThinkingMode)
+		a.taskRouter.SetModelCapability(capability)
 	}
 
 	// 6b. Update session-memory config live. The manager is always instantiated
@@ -3151,7 +3195,7 @@ func (a *App) buildModelEnhancement() string {
 	var enhancement string
 
 	if profile.Family == "glm" {
-		enhancement += "\n\n**GLM Model Note:** After every tool call, you MUST respond with analysis of results. Never call tools and stop silently. Structure: What I Found -> Key Points -> Next Steps."
+		enhancement += "\n\n**GLM Execution Policy:** For multi-step work, state a short plan and keep the todo list current. Use the 1M context deliberately: batch independent reads/searches, retain verified facts, and do not repeat a read/grep without a new question. After tool results, briefly synthesize what changed and choose the single next action; never stop immediately after a tool call. Before claiming completion, inspect the resulting diff or files and run the narrowest relevant verification. A tool succeeding is evidence, not completion: finish only when the user's requested behavior is implemented and verified."
 	}
 
 	if profile.Family == "kimi" {

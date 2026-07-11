@@ -63,7 +63,7 @@ type setupChoice struct {
 func buildSetupChoices() []setupChoice {
 	var choices []setupChoice
 
-	// Present choices in user-facing priority order — Kimi first (v0.69 default),
+	// Present choices in user-facing priority order — GLM first (current default),
 	// then the other cloud providers, then Ollama. Registry order stays untouched
 	// for programmatic callers; the wizard is UI-only.
 	ordered := make([]config.ProviderDef, 0, len(config.Providers))

@@ -16,8 +16,8 @@ func (c *ModelCommand) Name() string        { return "model" }
 func (c *ModelCommand) Description() string { return "Switch AI model" }
 func (c *ModelCommand) Usage() string {
 	return `/model                  - Show current model and available models
-/model kimi-for-coding  - Kimi K2.6 Coding Plan (default, 262K context)
-/model glm-5.2          - GLM-5.2 (newest, 131K output)
+/model glm-5.2          - GLM-5.2 (default, 1M context, 131K output)
+/model kimi-for-coding  - Kimi K2.6 Coding Plan (262K context)
 /model glm-5.1          - GLM-5.1 (previous flagship)
 /model glm-5            - GLM-5 (stable)
 /model glm-4.7          - GLM-4.7 (thinking-enabled)

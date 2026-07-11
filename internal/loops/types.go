@@ -116,7 +116,7 @@ type Loop struct {
 	SuccessCount int `json:"success_count,omitempty"`
 	FailureCount int `json:"failure_count,omitempty"`
 
-	// TotalTokensIn / TotalTokensOut are LIFETIME billed-input / generated-output
+	// TotalTokensIn / TotalTokensOut are LIFETIME provider-input / generated-output
 	// token totals across every iteration (not just the visible, trimmed
 	// Iterations slice). Surfaced by /loop status so a user who walked away from
 	// a background loop can see what it has spent — a runaway unattended loop
