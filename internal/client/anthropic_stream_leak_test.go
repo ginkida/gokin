@@ -53,33 +53,41 @@ func TestStreaming_NoScannerGoroutineLeakPerResponse(t *testing.T) {
 		}
 	}
 
-	// settle waits for the goroutine count to quiesce after draining.
-	settle := func() int {
-		var n int
-		for i := 0; i < 50; i++ {
-			runtime.GC()
-			time.Sleep(10 * time.Millisecond)
-			n = runtime.NumGoroutine()
-			if i > 3 && n == runtime.NumGoroutine() {
-				break
-			}
+	// Warm up (HTTP transport, etc.), then take a baseline as the MINIMUM
+	// observed over a settle window — the true quiesced level. (An inflated
+	// baseline would only weaken the assertion.)
+	runOnce()
+	runOnce()
+	base := runtime.NumGoroutine()
+	for end := time.Now().Add(500 * time.Millisecond); time.Now().Before(end); {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+		if g := runtime.NumGoroutine(); g < base {
+			base = g
 		}
-		return n
 	}
-
-	// Warm up (HTTP transport, etc.), then take a baseline.
-	runOnce()
-	runOnce()
-	base := settle()
 
 	const n = 8
 	for i := 0; i < n; i++ {
 		runOnce()
 	}
-	after := settle()
+
+	// Poll until the count returns to the target or a generous deadline. A
+	// GENUINE per-response leak is permanent (pre-fix, each scanner blocks
+	// forever on its unbuffered send), so waiting cannot mask it — this only
+	// absorbs goroutines still WINDING DOWN, whose exits are asynchronous
+	// with response completion. The old single near-instant measurement
+	// flaked on slower CI runners ("grew by 3") for exactly that reason.
+	target := base + 2
+	after := runtime.NumGoroutine()
+	for end := time.Now().Add(5 * time.Second); after > target && time.Now().Before(end); {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+		after = runtime.NumGoroutine()
+	}
 
 	// Pre-fix: ~n leaked scanner goroutines (after ≈ base+n). Post-fix: stable.
-	if after > base+2 {
+	if after > target {
 		t.Fatalf("scanner goroutine leak: baseline=%d after %d responses=%d (grew by %d, want ~0)",
 			base, n, after, after-base)
 	}
