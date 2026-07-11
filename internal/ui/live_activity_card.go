@@ -196,6 +196,33 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	}
 
 	if m.state == StateStreaming {
+		// What the agent is DOING beats an echo of what it's typing. The
+		// line prefers STABLE, semantic signals and only falls back to the
+		// raw stream snippet (which changes every chunk and often reads as
+		// a mid-list fragment) when nothing better exists:
+		//
+		//  1. reasoning phase — thinking chunks never enter
+		//     currentResponseBuf, so the old code showed "Writing: <stale
+		//     last text line>" (mid-turn) or a bare "Writing response"
+		//     (turn start) while the model reasoned silently for minutes;
+		//  2. the agent's own declared activity (in-progress todo, via
+		//     ActivityLabelMsg) — "Implementing backup/restore";
+		//  3. the section heading the answer is currently under —
+		//     "Writing: Root cause analysis";
+		//  4. the raw snippet (start of the current line, v0.100.57).
+		thinking := m.output.IsThinkingActive()
+		if act := strings.TrimSpace(m.currentActivity); act != "" {
+			if thinking {
+				return m.withElapsed(act + " · thinking")
+			}
+			return m.withElapsed(act)
+		}
+		if thinking {
+			return m.withElapsed("Thinking")
+		}
+		if h := lastStreamHeading(m.currentResponseBuf.String()); h != "" {
+			return m.withElapsed("Writing: " + truncateRunes(h, max(m.width-20, 24)))
+		}
 		// Clean the snippet: strip leading bullets/dashes/stars from the
 		// model's markdown so "Writing: - `tui.go`" doesn't read as a
 		// double-dash. Cleaning may reduce a pure-bullet snippet to "" — in

@@ -756,6 +756,52 @@ func ResponseMetadata(model string, inputTokens, outputTokens int, duration time
 	}
 }
 
+// lastStreamHeading returns the most recent markdown heading (outside code
+// fences) in the streaming buffer — the SECTION the answer is currently
+// writing, which reads as an activity ("Root cause analysis") where the raw
+// current-line snippet reads as a fragment. Fence awareness matters: shell
+// snippets inside ``` blocks are full of `# comment` lines that would
+// otherwise masquerade as headings. Returns "" when no heading has streamed.
+func lastStreamHeading(buf string) string {
+	if buf == "" {
+		return ""
+	}
+	inFence := false
+	last := ""
+	for _, raw := range strings.Split(buf, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		if h := markdownHeadingText(line); h != "" {
+			last = h
+		}
+	}
+	return last
+}
+
+// markdownHeadingText extracts the text of an ATX heading line ("## Title",
+// optionally with closing hashes "## Title ##"). Returns "" for non-headings.
+func markdownHeadingText(line string) string {
+	i := 0
+	for i < len(line) && line[i] == '#' {
+		i++
+	}
+	if i == 0 || i > 6 || i >= len(line) || line[i] != ' ' {
+		return ""
+	}
+	text := strings.TrimSpace(line[i+1:])
+	// Strip an ATX closing sequence (trailing run of #'s preceded by a space).
+	if j := strings.LastIndexByte(text, ' '); j >= 0 && strings.Trim(text[j+1:], "#") == "" {
+		text = strings.TrimSpace(text[:j])
+	}
+	return text
+}
+
 // lastStreamSnippet returns the last non-empty line of the streaming buffer for
 // the live "Writing: …" preview, keeping its START — the action/intent the model
 // is expressing ("Я добавлю несуществующие тесты…"), which is what answers "what

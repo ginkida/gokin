@@ -285,6 +285,18 @@ func (m *OutputModel) AppendThinkingStream(text string) {
 	m.updateViewport()
 }
 
+// IsThinkingActive reports whether a thinking block is currently streaming
+// (opened by AppendThinkingStream, not yet closed by EndThinking). Used by
+// the live activity card to label a reasoning phase honestly — thinking
+// chunks never enter currentResponseBuf, so without this signal the card
+// showed "Writing: <stale last text line>" while the model was actually
+// reasoning silently.
+func (m *OutputModel) IsThinkingActive() bool {
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	return m.state.thinkingActive
+}
+
 // EndThinking closes the thinking block with a blank line separator.
 func (m *OutputModel) EndThinking() {
 	m.state.mu.Lock()
