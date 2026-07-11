@@ -284,6 +284,13 @@ type TokenCountCacheKey interface {
 	TokenCountCacheKey() string
 }
 
+// ProviderIdentity is an optional capability for clients that know which
+// backend served the current response. It is intentionally not part of Client
+// so external/test implementations remain source-compatible.
+type ProviderIdentity interface {
+	GetProvider() string
+}
+
 // RateLimiter interface for rate limiting API calls (optional).
 type RateLimiter interface {
 	AcquireWithContext(ctx context.Context, tokens int64) error

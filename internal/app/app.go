@@ -3376,15 +3376,18 @@ func (a *agentRunnerAdapter) GetResult(agentID string) (tools.AgentResult, bool)
 		return tools.AgentResult{}, false
 	}
 	return tools.AgentResult{
-		AgentID:    result.AgentID,
-		Type:       string(result.Type),
-		Model:      result.Model,
-		Status:     string(result.Status),
-		Output:     result.Output,
-		Error:      result.Error,
-		Duration:   result.Duration,
-		Completed:  result.Completed,
-		OutputFile: result.OutputFile,
+		AgentID:       result.AgentID,
+		Type:          string(result.Type),
+		Model:         result.Model,
+		Provider:      result.Provider,
+		EstimatedCost: result.EstimatedCost,
+		CostTracked:   result.CostTracked,
+		Status:        string(result.Status),
+		Output:        result.Output,
+		Error:         result.Error,
+		Duration:      result.Duration,
+		Completed:     result.Completed,
+		OutputFile:    result.OutputFile,
 	}, true
 }
 

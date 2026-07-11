@@ -11,6 +11,15 @@ import (
 	"google.golang.org/genai"
 )
 
+type providerIdentityStub struct {
+	client.Client
+	model    string
+	provider string
+}
+
+func (s *providerIdentityStub) GetModel() string    { return s.model }
+func (s *providerIdentityStub) GetProvider() string { return s.provider }
+
 func TestGetModelLimits_ExactMatch(t *testing.T) {
 	tests := []struct {
 		model   string
@@ -489,6 +498,16 @@ func TestCalculateCostWithCache_UnknownCachedRateUsesInputRate(t *testing.T) {
 	withCache := tc.CalculateCostWithCache(1_000_000, 0, 1_000_000)
 	if withCache != withoutCache {
 		t.Fatalf("unknown cached rate changed cost: cached=%v normal=%v", withCache, withoutCache)
+	}
+}
+
+func TestCalculateCost_OllamaProviderIsFree(t *testing.T) {
+	// The model name is deliberately unknown and would normally receive the
+	// conservative cloud fallback price. Provider identity must override that.
+	c := &providerIdentityStub{model: "private-qwen-build", provider: " Ollama "}
+	tc := NewTokenCounter(c, c.model, nil)
+	if got := tc.CalculateCostWithCache(1_000_000, 500_000, 0); got != 0 {
+		t.Fatalf("Ollama cost = %v, want 0", got)
 	}
 }
 

@@ -162,6 +162,7 @@ type cacheEntry struct {
 type TokenCounter struct {
 	client                   client.Client
 	model                    string
+	provider                 string
 	limits                   TokenLimits
 	maxInputTokensOverride   int
 	warningThresholdOverride float64
@@ -198,6 +199,9 @@ func NewTokenCounter(c client.Client, model string, cfg *config.ContextConfig) *
 		lruList:  list.New(),
 		maxCache: 1000,
 	}
+	if identified, ok := c.(client.ProviderIdentity); ok {
+		counter.provider = strings.ToLower(strings.TrimSpace(identified.GetProvider()))
+	}
 	if cfg != nil {
 		counter.maxInputTokensOverride = cfg.MaxInputTokens
 		counter.warningThresholdOverride = cfg.WarningThreshold
@@ -210,6 +214,10 @@ func (t *TokenCounter) SetClient(c client.Client) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.client = c
+	t.provider = ""
+	if identified, ok := c.(client.ProviderIdentity); ok {
+		t.provider = strings.ToLower(strings.TrimSpace(identified.GetProvider()))
+	}
 	// Also update model limits as model might have changed
 	t.model = c.GetModel()
 	t.limits = getModelLimits(t.model)
@@ -427,7 +435,11 @@ func (t *TokenCounter) CalculateCost(inputTokens, outputTokens int) float64 {
 func (t *TokenCounter) CalculateCostWithCache(inputTokens, outputTokens, cacheReadTokens int) float64 {
 	t.mu.RLock()
 	model := t.model
+	provider := t.provider
 	t.mu.RUnlock()
+	if provider == "ollama" {
+		return 0
+	}
 	pricing := getPricing(model)
 	cacheReadTokens = min(max(cacheReadTokens, 0), max(inputTokens, 0))
 	uncachedInputTokens := max(inputTokens-cacheReadTokens, 0)

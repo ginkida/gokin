@@ -254,6 +254,10 @@ func newLoopSpawner(a *App) loops.Spawner {
 			// run of OK-but-no-change iterations on an action task is "spinning"
 			// (task done or stuck) — the scheduler warns then auto-pauses.
 			out.MadeChanges = result.MutatingToolCalls > 0
+			// Concrete anchors for the next iteration: which files this one
+			// actually changed (workDir-relative, from the agent's done-gate
+			// touched-paths ledger). Capped at record time by the loops layer.
+			out.FilesTouched = result.TouchedPaths
 		}
 		return out, nil
 	}

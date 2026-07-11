@@ -69,3 +69,36 @@ func TestAccumulateAgentResultUsageUsesAgentModel(t *testing.T) {
 			stats.CostTracked, stats.EstimatedCost)
 	}
 }
+
+func TestAccumulateAgentResultUsageOllamaIsKnownZeroCost(t *testing.T) {
+	a := &App{}
+	a.accumulateAgentResultUsage(&agent.AgentResult{
+		Provider:     "ollama",
+		Model:        "private-local-model",
+		InputTokens:  1_000_000,
+		OutputTokens: 500_000,
+	})
+	stats := a.GetTokenStats()
+	if !stats.CostTracked || stats.EstimatedCost != 0 {
+		t.Fatalf("Ollama ledger = tracked %v cost %v, want known zero",
+			stats.CostTracked, stats.EstimatedCost)
+	}
+}
+
+func TestAccumulateAgentResultUsagePrefersPerRoundLedger(t *testing.T) {
+	a := &App{}
+	a.accumulateAgentResultUsage(&agent.AgentResult{
+		// The final identity is DeepSeek, but the run's earlier rounds used
+		// other providers. The agent's per-round ledger is authoritative.
+		Provider:      "deepseek",
+		Model:         "deepseek-v4",
+		InputTokens:   2_000_000,
+		EstimatedCost: 1.15,
+		CostTracked:   true,
+	})
+	stats := a.GetTokenStats()
+	if !stats.CostTracked || stats.EstimatedCost != 1.15 {
+		t.Fatalf("per-round ledger = tracked %v cost %v, want 1.15",
+			stats.CostTracked, stats.EstimatedCost)
+	}
+}

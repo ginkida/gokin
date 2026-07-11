@@ -386,6 +386,16 @@ func (b *Builder) initTools() error {
 	b.mainClient.SetTools(mainTools)
 
 	b.executor = tools.NewExecutor(b.registry, b.mainClient, b.cfg.Tools.Timeout)
+	b.executor.SetCostCalculator(func(provider, model string, input, output, cacheRead int) (float64, bool) {
+		if strings.EqualFold(strings.TrimSpace(provider), "ollama") {
+			return 0, true
+		}
+		if strings.TrimSpace(model) == "" {
+			return 0, false
+		}
+		tc := appcontext.NewTokenCounter(nil, model, nil)
+		return tc.CalculateCostWithCache(input, output, cacheRead), true
+	})
 	// Give the executor the model's context window so it can pre-emptively prune
 	// old tool outputs mid-loop instead of overflowing and failing the turn.
 	b.executor.SetMaxInputTokens(effectiveMaxInputTokens(b.cfg))

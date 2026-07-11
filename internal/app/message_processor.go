@@ -226,6 +226,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	apiInputAccum := 0
 	apiOutputAccum := 0
 	cacheReadAccum := 0
+	apiCostAccum := 0.0
+	apiCostTracked := false
 
 	a.mu.Lock()
 	headlessDirect := a.headlessDirect
@@ -328,6 +330,20 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			"partial_retries", partialIdleRetryCount,
 			"error", err)
 
+		// Capture this attempt before ANY early exit/continue decision. Executor
+		// may hold billable partial-stream usage even for cancellation, context
+		// overflow, or a terminal error that will not be retried.
+		failInput, failOutput := a.executor.GetLastTokenUsage()
+		_, failCacheRead := a.executor.GetLastCacheMetrics()
+		failCost, failCostTracked := a.executor.GetLastEstimatedCost()
+		apiInputAccum += failInput
+		apiOutputAccum += failOutput
+		cacheReadAccum += failCacheRead
+		if failCostTracked {
+			apiCostAccum += failCost
+			apiCostTracked = true
+		}
+
 		// Don't retry if context cancelled (user abort)
 		if ctx.Err() != nil {
 			err = client.ContextErr(ctx)
@@ -410,16 +426,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			_ = a.policy.RecordOverload()
 		}
 
-		// Accumulate tokens spent on this failed attempt before we move on.
-		// Without this, /cost reports only the final-attempt tokens and
-		// silently undercounts retry churn — for heavy GLM 1305 retries
-		// the undercount can be 3-5×.
-		failInput, failOutput := a.executor.GetLastTokenUsage()
-		_, failCacheRead := a.executor.GetLastCacheMetrics()
-		apiInputAccum += failInput
-		apiOutputAccum += failOutput
-		cacheReadAccum += failCacheRead
-
 		// Save partial history before retry (preserves tool side effects).
 		// Strip orphan tool_calls — if the model emitted FunctionCalls but
 		// the executor never produced matching FunctionResponses (e.g. the
@@ -490,6 +496,10 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	}
 
 	if err != nil {
+		// Terminal failures return before normal turn finalization. Commit every
+		// attempt collected above so failed-request spend remains visible.
+		a.commitSessionUsage(apiInputAccum, apiInputAccum, apiOutputAccum, cacheReadAccum, apiCostAccum, apiCostTracked)
+
 		ft := client.DetectFailureTelemetry(err)
 		a.journalEvent("request_failed", map[string]any{
 			"error":           err.Error(),
@@ -688,9 +698,14 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	apiInput, apiOutput := a.executor.GetLastTokenUsage()
 	_, cacheRead := a.executor.GetLastCacheMetrics()
+	apiCost, currentCostTracked := a.executor.GetLastEstimatedCost()
 	apiInputAccum += apiInput
 	apiOutputAccum += apiOutput
 	cacheReadAccum += cacheRead
+	if currentCostTracked {
+		apiCostAccum += apiCost
+		apiCostTracked = true
+	}
 
 	// Update session history. Defensive shrink-guard: a normal turn result must
 	// EXTEND the conversation. If a handler ever returns a shorter slice than we
@@ -718,7 +733,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 	}
 
-	if !a.runCompletionReviewIfNeeded(ctx, message, &response, &apiInputAccum, &apiOutputAccum, &cacheReadAccum) {
+	if !a.runCompletionReviewIfNeeded(ctx, message, &response, &apiInputAccum, &apiOutputAccum, &cacheReadAccum, &apiCostAccum, &apiCostTracked) {
 		return
 	}
 
@@ -770,7 +785,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// Session totals back /stats and /cost. Provider-reported values are true
 	// per-request deltas and accumulate; the local input estimate is the current
 	// context size, so it replaces rather than adds when API metadata is absent.
-	a.accumulateTurnTokenUsage(apiInputAccum, turnInputTokens, turnOutputTokens, turnCacheReadTokens)
+	cost, _ := a.commitSessionUsage(
+		apiInputAccum, turnInputTokens, turnOutputTokens, turnCacheReadTokens, apiCostAccum, apiCostTracked)
 
 	// Direct-executor turns stream their text live through the presenter
 	// (OnText). Minimal-history router strategies (sub-agent, coordinated)
@@ -809,21 +825,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
 
-	// Send response metadata with cost estimation
-	var cost float64
-	costTracked := false
-	if a.contextManager != nil {
-		if tc := a.contextManager.GetTokenCounter(); tc != nil {
-			cost = tc.CalculateCostWithCache(turnInputTokens, turnOutputTokens, turnCacheReadTokens)
-			costTracked = true
-		}
-	}
-	if costTracked {
-		a.mu.Lock()
-		a.totalEstimatedCost += cost
-		a.costTracked = true
-		a.mu.Unlock()
-	}
+	// Send response metadata with the cost already committed above.
 	a.safeSendToProgram(ui.ResponseMetadataMsg{
 		Model:                a.config.Model.Name,
 		InputTokens:          turnInputTokens,
@@ -887,6 +889,32 @@ func (a *App) accumulateTurnTokenUsage(apiInput, turnInput, turnOutput, cacheRea
 	}
 }
 
+// commitSessionUsage applies one top-level request's aggregate usage and cost
+// exactly once. It is shared by success and terminal-error paths so retries do
+// not disappear merely because the final attempt failed.
+func (a *App) commitSessionUsage(apiInput, turnInput, output, cacheRead int, cost float64, costTracked bool) (float64, bool) {
+	apiInput = max(apiInput, 0)
+	turnInput = max(turnInput, 0)
+	output = max(output, 0)
+	cacheRead = min(max(cacheRead, 0), turnInput)
+	a.accumulateTurnTokenUsage(apiInput, turnInput, output, cacheRead)
+
+	if !costTracked && a.contextManager != nil {
+		if tc := a.contextManager.GetTokenCounter(); tc != nil {
+			cost = tc.CalculateCostWithCache(turnInput, output, cacheRead)
+			costTracked = true
+		}
+	}
+	if costTracked {
+		cost = max(cost, 0)
+		a.mu.Lock()
+		a.totalEstimatedCost += cost
+		a.costTracked = true
+		a.mu.Unlock()
+	}
+	return cost, costTracked
+}
+
 // accumulateAgentResultUsage folds one delegated agent invocation into the
 // session ledger. Delegated model calls bypass Executor, so without this hook
 // /stats omitted their usage entirely. Call once for every Spawn attempt,
@@ -904,8 +932,21 @@ func (a *App) accumulateAgentResultUsage(result *agent.AgentResult) {
 
 	a.accumulateTurnTokenUsage(input, input, output, cacheRead)
 
+	if result.CostTracked {
+		a.mu.Lock()
+		a.totalEstimatedCost += max(result.EstimatedCost, 0)
+		a.costTracked = true
+		a.mu.Unlock()
+		return
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(result.Provider))
 	var tc *appcontext.TokenCounter
-	if strings.TrimSpace(result.Model) != "" {
+	if provider == "ollama" {
+		// Local inference has no provider token charge. Still mark the ledger as
+		// tracked below so /cost can distinguish known-zero from missing pricing.
+		tc = appcontext.NewTokenCounter(nil, result.Model, nil)
+	} else if strings.TrimSpace(result.Model) != "" {
 		// Pricing is tied to the agent's resolved model, not whichever model is
 		// active in the foreground when an async callback happens to arrive.
 		tc = appcontext.NewTokenCounter(nil, result.Model, nil)
@@ -914,6 +955,9 @@ func (a *App) accumulateAgentResultUsage(result *agent.AgentResult) {
 	}
 	if tc != nil {
 		cost := tc.CalculateCostWithCache(input, output, cacheRead)
+		if provider == "ollama" {
+			cost = 0
+		}
 		a.mu.Lock()
 		a.totalEstimatedCost += cost
 		a.costTracked = true

@@ -183,7 +183,20 @@ func RenderLoopMarkdown(l *Loop) string {
 			summary = "_(no summary)_"
 		}
 		sb.WriteString(summary)
-		sb.WriteString("\n\n")
+		sb.WriteString("\n")
+		if len(it.FilesTouched) > 0 {
+			fmt.Fprintf(&sb, "\nFiles: %s\n", strings.Join(it.FilesTouched, ", "))
+		}
+		if it.Handoff != "" {
+			// Blockquote the handoff so the working state reads distinctly from
+			// the summary prose when a human (or the next iteration's agent,
+			// following the prompt's pointer) scans the log.
+			sb.WriteString("\nHandoff:\n")
+			for _, line := range strings.Split(it.Handoff, "\n") {
+				fmt.Fprintf(&sb, "> %s\n", line)
+			}
+		}
+		sb.WriteString("\n")
 	}
 
 	return sb.String()

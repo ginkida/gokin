@@ -665,6 +665,13 @@ func (c *AnthropicClient) GetModel() string {
 	return c.config.Model
 }
 
+// GetProvider returns the configured Anthropic-compatible backend name.
+func (c *AnthropicClient) GetProvider() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.config.Provider
+}
+
 // SetModel changes the model for this client.
 func (c *AnthropicClient) SetModel(modelName string) {
 	c.mu.Lock()

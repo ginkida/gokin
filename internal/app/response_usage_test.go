@@ -94,3 +94,19 @@ func TestAccumulateTurnTokenUsageMixedProviderAndFallback(t *testing.T) {
 		t.Fatalf("cache total = %d, want 20000", stats.CacheReadInputTokens)
 	}
 }
+
+func TestCommitSessionUsagePersistsTerminalAttempt(t *testing.T) {
+	a := &App{}
+	cost, tracked := a.commitSessionUsage(1_000, 1_000, 25, 700, 0.42, true)
+	if !tracked || cost != 0.42 {
+		t.Fatalf("committed cost = tracked %v cost %v", tracked, cost)
+	}
+	stats := a.GetTokenStats()
+	if stats.InputTokens != 1_000 || stats.OutputTokens != 25 || stats.CacheReadInputTokens != 700 {
+		t.Fatalf("terminal-attempt stats = %+v", stats)
+	}
+	if !stats.CostTracked || stats.EstimatedCost != 0.42 {
+		t.Fatalf("terminal-attempt ledger = tracked %v cost %v",
+			stats.CostTracked, stats.EstimatedCost)
+	}
+}

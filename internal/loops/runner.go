@@ -40,6 +40,10 @@ type SpawnResult struct {
 	// warns the agent and eventually auto-pauses. Set by the adapter from
 	// AgentResult.MutatingToolCalls.
 	MadeChanges bool
+	// FilesTouched lists the files the iteration successfully mutated
+	// (workDir-relative). Set by the adapter from AgentResult.TouchedPaths;
+	// capped to MaxFilesTouchedPerIteration when recorded on the Iteration.
+	FilesTouched []string
 }
 
 // Spawner is the function the Runner calls to actually execute one
@@ -427,6 +431,13 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 		MadeChanges: res.MadeChanges,
 		TokensIn:    res.TokensIn,
 		TokensOut:   res.TokensOut,
+		// Concrete anchors for the next iteration + the markdown log. Capped —
+		// the value is in the common few-files case, not exhaustiveness.
+		FilesTouched: capFilesTouched(res.FilesTouched),
+		// The agent's own working state (HANDOFF: block). Parsed from the raw
+		// output REGARDLESS of ok — a failed-in-verification or cut-off
+		// iteration's partial output is exactly when continuity matters most.
+		Handoff: parseHandoff(output),
 	}
 
 	// agentDone signals "the work this loop was for is complete" — the
@@ -561,7 +572,8 @@ func BuildIterationPrompt(l *Loop) string {
 
 	// Recent context (C1): wider window (3→6) + a per-iteration [no changes]
 	// marker so the agent sees the trajectory and whether it's actually moving,
-	// not just the last sentence.
+	// not just the last sentence. Iterations that changed files show them —
+	// concrete anchors so the agent finds its own prior work without grepping.
 	if len(l.Iterations) > 0 {
 		sb.WriteString("\nRecent context (newest first):\n")
 		showCount := 6
@@ -576,12 +588,28 @@ func BuildIterationPrompt(l *Loop) string {
 			}
 			fmt.Fprintf(&sb, "  - #%d (%s)%s: %s\n",
 				it.N, it.StartedAt.Format("2006-01-02 15:04"), marker, it.Summary)
+			if files := renderFilesTouchedInline(it.FilesTouched); files != "" {
+				fmt.Fprintf(&sb, "    files: %s\n", files)
+			}
 		}
 		// Pointer to the full log for the context the inline preview lacks.
 		// UpdateMemory==false loops won't have this file, so only mention it then.
 		if l.UpdateMemory {
 			fmt.Fprintf(&sb, "\nFull iteration log (all %d, with files touched + outcomes): .gokin/loops/%s.md\n", l.IterationCount, l.ID)
 			sb.WriteString("Read it when you need to see what prior iterations actually did, not just their last sentence.\n")
+		}
+	}
+
+	// Cross-iteration working state (the HANDOFF loop): inject the newest
+	// handoff VERBATIM so multi-iteration work continues as ONE project. The
+	// newest non-empty handoff wins — a transient-failed iteration in between
+	// (provider hiccup, no output) must not erase the working state.
+	if handoff, n := latestHandoff(l.Iterations); handoff != "" {
+		fmt.Fprintf(&sb, "\nYour working state from iteration #%d (you wrote this — it is your working memory between iterations):\n%s\n", n, handoff)
+		if last := l.Iterations[len(l.Iterations)-1]; !last.OK && !last.Transient {
+			sb.WriteString("Your previous iteration did NOT finish cleanly (failed or was cut off mid-work). Continue from the working state above — do NOT restart or redo work it lists as done.\n")
+		} else {
+			sb.WriteString("Continue from this state — don't re-derive or redo what it lists as done.\n")
 		}
 	}
 
@@ -598,6 +626,13 @@ func BuildIterationPrompt(l *Loop) string {
 	// Scope discipline (D): keep an unattended loop from drifting into unrequested
 	// large changes on a vague task.
 	sb.WriteString("\n\nStay focused on THIS task. Do NOT expand into unrelated refactors, reorganizations, or 'improvements' the task didn't ask for — if you think a broader change is warranted, note it in your summary instead of doing it unprompted.")
+
+	// Handoff coaching (action tasks): the block above is only as good as what
+	// the agent writes. Monitor loops don't carry plan state — their summaries
+	// suffice — so keep their prompt lean.
+	if !monitor {
+		sb.WriteString("\n\nNear the end of your response — as its own paragraph, BEFORE your final summary sentence — write a `HANDOFF:` block of 2-6 short bullet lines (`- DONE: …`, `- IN PROGRESS: …`, `- NEXT: …`, `- BLOCKER: …`). It is carried verbatim into your next iteration and is your only working memory between iterations; without it the next iteration starts from scratch. Update it every iteration — never repeat a stale one.")
+	}
 
 	sb.WriteString("\n\nProceed with the next step. Keep the response focused — your last sentence will be captured as the iteration summary.")
 
@@ -648,6 +683,12 @@ func summarizeOutput(output, fallback string) string {
 // summarizeOutput will then prefer.
 func looksLikeMetadata(p string) bool {
 	if strings.HasPrefix(p, "```") {
+		return true
+	}
+	// A HANDOFF working-state block is machine-facing (re-injected into the
+	// next iteration's prompt), not a human summary — if the agent puts it
+	// LAST despite the coaching, skip it so the toast stays a real sentence.
+	if strings.HasPrefix(strings.ToUpper(p), "HANDOFF:") {
 		return true
 	}
 	if strings.HasPrefix(p, "---") || strings.HasPrefix(p, "===") {
@@ -723,6 +764,96 @@ func parseNextHint(output string) string {
 // reviewing this section" — the agent must opt in deliberately by
 // ending its response with one of these specific markers, which the
 // iteration prompt teaches.
+// latestHandoff returns the newest non-empty handoff among the loop's
+// iterations and the iteration number it came from. Scanning back past
+// handoff-less iterations matters: a transient provider failure in between
+// produces no output and must not erase the working state.
+func latestHandoff(iterations []Iteration) (string, int) {
+	for i := len(iterations) - 1; i >= 0; i-- {
+		if h := iterations[i].Handoff; h != "" {
+			return h, iterations[i].N
+		}
+	}
+	return "", 0
+}
+
+// renderFilesTouchedInline renders a compact files list for the inline
+// recent-context block: up to 4 paths, then "+N more". Returns "" for none.
+func renderFilesTouchedInline(files []string) string {
+	if len(files) == 0 {
+		return ""
+	}
+	const show = 4
+	if len(files) <= show {
+		return strings.Join(files, ", ")
+	}
+	return fmt.Sprintf("%s +%d more", strings.Join(files[:show], ", "), len(files)-show)
+}
+
+// parseHandoff extracts the agent's trailing "HANDOFF:" working-state block
+// from an iteration's output. The block starts at the LAST line beginning
+// with "HANDOFF:" (case-insensitive) and runs until the first blank line
+// after it (the agent is coached to put its final summary sentence in a
+// separate paragraph AFTER the block) — or until a closing `done.` marker
+// line / end of output. Returns "" when no block is present. Bounded at
+// MaxHandoffRunes: this is model output that re-enters the next prompt (the
+// bounded-model-input class).
+func parseHandoff(output string) string {
+	lines := strings.Split(output, "\n")
+	start := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(lines[i])), "HANDOFF:") {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		return ""
+	}
+
+	var block []string
+	// Keep whatever follows "HANDOFF:" on the same line (a one-line handoff).
+	first := strings.TrimSpace(strings.TrimSpace(lines[start])[len("HANDOFF:"):])
+	if first != "" {
+		block = append(block, first)
+	}
+	for _, raw := range lines[start+1:] {
+		line := strings.TrimRight(raw, " \t")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			break // end of the handoff paragraph
+		}
+		switch strings.ToLower(trimmed) {
+		case "done.", "done", "loop done.", "loop_done", "loop: done":
+			// The self-termination marker is not part of the working state.
+			continue
+		}
+		block = append(block, line)
+	}
+	handoff := strings.TrimSpace(strings.Join(block, "\n"))
+	if handoff == "" {
+		return ""
+	}
+	if runes := []rune(handoff); len(runes) > MaxHandoffRunes {
+		handoff = string(runes[:MaxHandoffRunes]) + "…"
+	}
+	return handoff
+}
+
+// capFilesTouched bounds a SpawnResult's touched-files list to
+// MaxFilesTouchedPerIteration for storage on the Iteration.
+func capFilesTouched(files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	if len(files) > MaxFilesTouchedPerIteration {
+		files = files[:MaxFilesTouchedPerIteration]
+	}
+	out := make([]string, len(files))
+	copy(out, files)
+	return out
+}
+
 func parseDoneSignal(output string) bool {
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {

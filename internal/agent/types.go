@@ -136,6 +136,7 @@ type AgentResult struct {
 	AgentID   string         `json:"agent_id"`
 	Type      AgentType      `json:"type"`
 	Model     string         `json:"model,omitempty"` // Actual provider model used for this invocation.
+	Provider  string         `json:"provider,omitempty"`
 	Status    AgentStatus    `json:"status"`
 	Output    string         `json:"output"`
 	Error     string         `json:"error,omitempty"`
@@ -151,15 +152,24 @@ type AgentResult struct {
 	// includes cached input (providers still bill and quota cache reads, usually
 	// at a discounted rate); CacheReadInputTokens exposes that subset separately.
 	// Surfaced so background callers such as /loop can enforce honest budgets.
-	InputTokens          int `json:"input_tokens,omitempty"`
-	OutputTokens         int `json:"output_tokens,omitempty"`
-	CacheReadInputTokens int `json:"cache_read_input_tokens,omitempty"`
+	InputTokens          int     `json:"input_tokens,omitempty"`
+	OutputTokens         int     `json:"output_tokens,omitempty"`
+	CacheReadInputTokens int     `json:"cache_read_input_tokens,omitempty"`
+	EstimatedCost        float64 `json:"estimated_cost,omitempty"`
+	CostTracked          bool    `json:"cost_tracked,omitempty"`
 
 	// MutatingToolCalls is how many code/repo-MUTATING tools (IsImplementationTool:
 	// write/edit/delete/refactor/git_commit/…) the agent ran this turn. Surfaced so
 	// the /loop scheduler can tell a "made changes" iteration from a no-op one
 	// (churn detection) without re-reading the journal or snapshotting the tree.
 	MutatingToolCalls int `json:"mutating_tool_calls,omitempty"`
+
+	// TouchedPaths lists the files this agent SUCCESSFULLY mutated (workDir-
+	// relative slash paths, deduped, sorted — the done-gate's touchedPaths
+	// ledger via GetTouchedPaths). Surfaced so /loop can record WHICH files
+	// each iteration changed, giving the next iteration concrete anchors
+	// instead of re-grepping for its own prior work.
+	TouchedPaths []string `json:"touched_paths,omitempty"`
 }
 
 // AgentOutputWriter streams agent output to both an in-memory buffer (capped)

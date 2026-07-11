@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -112,10 +113,14 @@ func (e *Entry) RecordOutcome(success bool) {
 	e.LastAccessed = time.Now()
 }
 
-// generateID generates a unique ID for the entry based on content and timestamp.
+// generateID generates a unique ID for the entry based on content and random bytes.
+// crypto/rand eliminates the nanosecond-collision risk that time.Now().String() had
+// when two entries are created in the same nanosecond.
 func generateID(content string) string {
-	data := content + time.Now().String()
-	hash := sha256.Sum256([]byte(data))
+	randBytes := make([]byte, 8)
+	_, _ = rand.Read(randBytes)
+	data := append([]byte(content), randBytes...)
+	hash := sha256.Sum256(data)
 	return "mem_" + hex.EncodeToString(hash[:8])
 }
 

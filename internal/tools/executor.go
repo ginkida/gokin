@@ -67,6 +67,10 @@ type ResponseCompressor interface {
 	CompressContent(part *genai.Part) *genai.Part
 }
 
+// CostCalculator prices one completed provider response. It is injected by
+// the app to keep tools independent from internal/context (which imports tools).
+type CostCalculator func(provider, model string, inputTokens, outputTokens, cacheReadTokens int) (cost float64, tracked bool)
+
 type resultSummaryProvider interface {
 	SummarizeForPrune(toolName, content string) string
 }
@@ -247,6 +251,9 @@ type Executor struct {
 	lastOutputTokens        int
 	lastCacheCreationTokens int
 	lastCacheReadTokens     int
+	lastEstimatedCost       float64
+	lastCostTracked         bool
+	costCalculator          CostCalculator
 	// maxInputTokens is the active model's context window. Used as the in-loop
 	// prune trigger; 0 = unset (no pruning). Protected by tokenMu.
 	maxInputTokens int
@@ -903,6 +910,22 @@ func (e *Executor) GetLastCacheMetrics() (int, int) {
 	return creation, read
 }
 
+// SetCostCalculator wires per-response pricing for mixed-provider tool loops.
+func (e *Executor) SetCostCalculator(calculator CostCalculator) {
+	e.tokenMu.Lock()
+	e.costCalculator = calculator
+	e.tokenMu.Unlock()
+}
+
+// GetLastEstimatedCost returns the authoritative per-round ledger for the
+// latest Execute call. tracked=false means pricing was unavailable.
+func (e *Executor) GetLastEstimatedCost() (cost float64, tracked bool) {
+	e.tokenMu.Lock()
+	cost, tracked = e.lastEstimatedCost, e.lastCostTracked
+	e.tokenMu.Unlock()
+	return cost, tracked
+}
+
 // GetCacheTracker returns the prompt cache break tracker.
 func (e *Executor) GetCacheTracker() *client.CacheTracker {
 	return e.cacheTracker
@@ -935,6 +958,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	e.lastOutputTokens = 0
 	e.lastCacheCreationTokens = 0
 	e.lastCacheReadTokens = 0
+	e.lastEstimatedCost = 0
+	e.lastCostTracked = false
 	e.tokenMu.Unlock()
 
 	// NOTE: checkpoint journal is NOT cleared here — it persists across retries
@@ -1001,6 +1026,19 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// Capture token usage metadata from this API round. Provider usage values
 		// are cumulative within one response, not across requests; a tool loop's
 		// rounds are separately billed and therefore must all be accumulated.
+		provider := ""
+		if identified, ok := cl.(client.ProviderIdentity); ok {
+			provider = identified.GetProvider()
+		}
+		model := cl.GetModel()
+		e.tokenMu.Lock()
+		calculator := e.costCalculator
+		e.tokenMu.Unlock()
+		cost, costTracked := 0.0, false
+		if calculator != nil {
+			cost, costTracked = calculator(provider, model, resp.InputTokens, resp.OutputTokens, resp.CacheReadInputTokens)
+		}
+
 		e.tokenMu.Lock()
 		if resp.InputTokens > 0 {
 			e.lastInputTokens += resp.InputTokens
@@ -1013,6 +1051,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 		if resp.CacheReadInputTokens > 0 {
 			e.lastCacheReadTokens += resp.CacheReadInputTokens
+		}
+		if costTracked {
+			e.lastEstimatedCost += max(cost, 0)
+			e.lastCostTracked = true
 		}
 		e.tokenMu.Unlock()
 
@@ -1057,6 +1099,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// Get response from model
 		resp, err := e.getModelResponse(ctx, cl, history)
 		if err != nil {
+			// ProcessStream returns the accumulated partial Response alongside an
+			// error. Usage metadata received before the failure is still billable.
+			recordResponseAccounting(resp)
 			ft := client.DetectFailureTelemetry(err)
 			logging.Warn("model round failed",
 				"reason", ft.Reason,
@@ -1462,6 +1507,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					partialStreamRetries = 0
 					break
 				}
+				// The failed stream may already have delivered cumulative usage.
+				// Account it once before deciding whether to retry this request.
+				recordResponseAccounting(resp)
 
 				ft := client.DetectFailureTelemetry(err)
 				logging.Warn("function response round failed",

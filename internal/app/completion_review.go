@@ -67,6 +67,8 @@ func (a *App) runCompletionReviewIfNeeded(
 	apiInputAccum *int,
 	apiOutputAccum *int,
 	cacheReadAccum *int,
+	apiCostAccum *float64,
+	apiCostTracked *bool,
 ) bool {
 	if a == nil || a.executor == nil || a.session == nil || response == nil {
 		return true
@@ -117,6 +119,7 @@ func (a *App) runCompletionReviewIfNeeded(
 	resumeSteering()
 	in, out := a.executor.GetLastTokenUsage()
 	_, cacheRead := a.executor.GetLastCacheMetrics()
+	cost, costTracked := a.executor.GetLastEstimatedCost()
 	if apiInputAccum != nil {
 		*apiInputAccum += in
 	}
@@ -125,6 +128,14 @@ func (a *App) runCompletionReviewIfNeeded(
 	}
 	if cacheReadAccum != nil {
 		*cacheReadAccum += cacheRead
+	}
+	if costTracked {
+		if apiCostAccum != nil {
+			*apiCostAccum += cost
+		}
+		if apiCostTracked != nil {
+			*apiCostTracked = true
+		}
 	}
 	if err != nil {
 		// The completion review is a BEST-EFFORT, optional self-improvement step

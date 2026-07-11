@@ -500,6 +500,9 @@ func (c *OllamaClient) GetModel() string {
 	return c.config.Model
 }
 
+// GetProvider identifies the local Ollama backend for zero-cost accounting.
+func (c *OllamaClient) GetProvider() string { return "ollama" }
+
 // SetModel changes the model for this client.
 func (c *OllamaClient) SetModel(modelName string) {
 	c.mu.Lock()

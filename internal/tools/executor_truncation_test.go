@@ -12,6 +12,38 @@ import (
 	"google.golang.org/genai"
 )
 
+type roundIdentityClient struct {
+	*scriptedExecutorClient
+	providers []string
+	models    []string
+}
+
+func (c *roundIdentityClient) identityIndex() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	idx := c.next - 1
+	if idx < 0 {
+		return 0
+	}
+	return idx
+}
+
+func (c *roundIdentityClient) GetProvider() string {
+	idx := c.identityIndex()
+	if idx >= len(c.providers) {
+		return ""
+	}
+	return c.providers[idx]
+}
+
+func (c *roundIdentityClient) GetModel() string {
+	idx := c.identityIndex()
+	if idx >= len(c.models) {
+		return ""
+	}
+	return c.models[idx]
+}
+
 func TestExecutorExecuteLoop_MaxTokensTextAutoContinuesIntoToolCall(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
@@ -148,6 +180,79 @@ func TestExecutorExecuteLoop_AggregatesUsageAcrossToolRounds(t *testing.T) {
 	creation, read := exec.GetLastCacheMetrics()
 	if creation != 75 || read != 2_700 {
 		t.Fatalf("tool-round cache usage = (%d, %d), want (75, 2700)", creation, read)
+	}
+}
+
+func TestExecutorExecuteLoop_PricesEachProviderRound(t *testing.T) {
+	registry := NewRegistry()
+	readTool := &scriptedReadTool{}
+	if err := registry.Register(readTool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	base := &scriptedExecutorClient{responses: []*client.StreamingResponse{
+		buildExecutorTestReadUsageStream("read-1", 100, 10, 0, 0),
+		buildExecutorTestReadUsageStream("read-2", 200, 20, 0, 0),
+		buildExecutorTestUsageStream("done", genai.FinishReasonStop, 300, 30, 0, 0),
+	}}
+	cl := &roundIdentityClient{
+		scriptedExecutorClient: base,
+		providers:              []string{"glm", "kimi", "deepseek"},
+		models:                 []string{"glm-5", "kimi-for-coding", "deepseek-v4"},
+	}
+	exec := NewExecutor(registry, cl, time.Second)
+	exec.preFlightChecks = false
+	var seen []string
+	exec.SetCostCalculator(func(provider, model string, _, _, _ int) (float64, bool) {
+		seen = append(seen, provider+"/"+model)
+		return float64(len(seen)), true
+	})
+
+	if _, _, err := exec.Execute(context.Background(), nil, "inspect two files"); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	cost, tracked := exec.GetLastEstimatedCost()
+	if !tracked || cost != 6 {
+		t.Fatalf("mixed-provider cost = tracked %v cost %v, want 6", tracked, cost)
+	}
+	want := []string{"glm/glm-5", "kimi/kimi-for-coding", "deepseek/deepseek-v4"}
+	if strings.Join(seen, ",") != strings.Join(want, ",") {
+		t.Fatalf("priced identities = %v, want %v", seen, want)
+	}
+}
+
+func TestExecutorExecuteLoop_AccountsUsageBeforeStreamError(t *testing.T) {
+	cl := &scriptedExecutorClient{
+		model: "glm-5",
+		responses: []*client.StreamingResponse{buildExecutorTestStream(
+			client.ResponseChunk{
+				InputTokens:              1_000,
+				OutputTokens:             25,
+				CacheCreationInputTokens: 100,
+				CacheReadInputTokens:     700,
+			},
+			client.ResponseChunk{Error: errors.New("terminal stream failure"), Done: true},
+		)},
+	}
+	exec := NewExecutor(NewRegistry(), cl, time.Second)
+	exec.preFlightChecks = false
+	exec.SetCostCalculator(func(_, _ string, _, _, _ int) (float64, bool) {
+		return 0.42, true
+	})
+
+	if _, _, err := exec.Execute(context.Background(), nil, "fail after usage"); err == nil {
+		t.Fatal("Execute() error = nil, want stream failure")
+	}
+	input, output := exec.GetLastTokenUsage()
+	if input != 1_000 || output != 25 {
+		t.Fatalf("partial-error usage = (%d,%d), want (1000,25)", input, output)
+	}
+	creation, read := exec.GetLastCacheMetrics()
+	if creation != 100 || read != 700 {
+		t.Fatalf("partial-error cache = (%d,%d), want (100,700)", creation, read)
+	}
+	if cost, tracked := exec.GetLastEstimatedCost(); !tracked || cost != 0.42 {
+		t.Fatalf("partial-error cost = tracked %v cost %v, want 0.42", tracked, cost)
 	}
 }
 

@@ -40,7 +40,8 @@ func TestRunCompletionReviewIfNeeded_CanceledContextPreservesWork(t *testing.T) 
 
 	resp := "I implemented the controller."
 	in, out, cache := 0, 0, 0
-	ok := a.runCompletionReviewIfNeeded(ctx, "implement the controller", &resp, &in, &out, &cache)
+	cost, costTracked := 0.0, false
+	ok := a.runCompletionReviewIfNeeded(ctx, "implement the controller", &resp, &in, &out, &cache, &cost, &costTracked)
 
 	if !ok {
 		t.Fatal("canceled context must preserve work (return true), not discard the turn")

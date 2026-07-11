@@ -254,6 +254,13 @@ func (fc *FallbackClient) GetModel() string {
 	return fc.clients[idx].GetModel()
 }
 
+// GetProvider returns the backend that served the current successful request.
+func (fc *FallbackClient) GetProvider() string {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.providerAt(fc.current)
+}
+
 // SetModel changes the model on the current active client.
 func (fc *FallbackClient) SetModel(modelName string) {
 	idx := fc.getCurrent()

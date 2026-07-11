@@ -194,7 +194,33 @@ type Iteration struct {
 	TokensIn    int           `json:"tokens_in,omitempty"`
 	TokensOut   int           `json:"tokens_out,omitempty"`
 	NextHint    string        `json:"next_hint,omitempty"` // e.g. "wait 1h" — self-paced runner respects
+
+	// Handoff is the agent's own working state at the end of this iteration
+	// (the trailing "HANDOFF:" block it was coached to leave): what's done,
+	// what's in progress, the exact next step, blockers. Injected VERBATIM
+	// into the next iteration's prompt so multi-iteration work continues as
+	// ONE project instead of N independent attempts. Bounded at capture time
+	// (MaxHandoffRunes) — it's model output that re-enters a prompt.
+	Handoff string `json:"handoff,omitempty"`
+
+	// FilesTouched lists the files this iteration successfully mutated
+	// (workDir-relative, deduped, sorted; capped at
+	// MaxFilesTouchedPerIteration). Gives the NEXT iteration concrete anchors
+	// ("#3 edited internal/foo/bar.go") instead of re-grepping for its own
+	// prior work, and makes the markdown log's file history real.
+	FilesTouched []string `json:"files_touched,omitempty"`
 }
+
+// MaxHandoffRunes bounds a captured HANDOFF block. It is model output that
+// gets re-injected into the next iteration's prompt — the
+// bounded-model-input class (see CLAUDE.md, v0.85.15): without a cap a
+// runaway block would bloat every future prompt and the state file.
+const MaxHandoffRunes = 1500
+
+// MaxFilesTouchedPerIteration caps the per-iteration touched-files list. An
+// iteration that touched more files than this keeps the first N (sorted) —
+// the anchor value is in the common few-files case, not exhaustiveness.
+const MaxFilesTouchedPerIteration = 12
 
 // MaxHistorySize caps the per-loop iterations slice. Set well above the
 // number a typical user will care to scroll through but small enough that

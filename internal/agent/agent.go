@@ -190,6 +190,8 @@ type Agent struct {
 	usageInputTokens     int
 	usageOutputTokens    int
 	usageCacheReadTokens int
+	usageEstimatedCost   float64
+	usageCostTracked     bool
 
 	// pendingSteers holds steering messages (e.g. MetaAgent stuck-interventions)
 	// queued from another goroutine, drained into history at the top of each loop
@@ -1304,6 +1306,8 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.usageInputTokens = 0
 	a.usageOutputTokens = 0
 	a.usageCacheReadTokens = 0
+	a.usageEstimatedCost = 0
+	a.usageCostTracked = false
 	hasHistory := len(a.history) > 0
 	if a.originalPrompt == "" {
 		a.originalPrompt = prompt // Preserve for continuation after compaction
@@ -1324,12 +1328,6 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		Status:    AgentStatusRunning,
 		Completed: false,
 	}
-	if a.client != nil {
-		// a.Model is the optional user override and is commonly empty. Persist
-		// the clone's resolved model so accounting remains correct even if the
-		// foreground session switches models before this agent completes.
-		result.Model = a.client.GetModel()
-	}
 
 	if !hasHistory {
 		// Build fresh history only for new agents; resumed agents must preserve restored context.
@@ -1347,6 +1345,10 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	// Execute the prompt through the function calling loop
 	var finalOutput strings.Builder
 	_, output, err := a.executeLoop(ctx, prompt, &finalOutput)
+	// Snapshot identity AFTER executeLoop: FallbackClient can switch provider
+	// (and model) while serving the request. Capturing this before the first
+	// request attributes the whole run to the failed primary provider.
+	a.populateResultIdentity(result)
 
 	// Stream output to file-backed writer
 	outputWriter.WriteString(output)
@@ -1360,8 +1362,11 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		result.InputTokens = a.usageInputTokens
 		result.OutputTokens = a.usageOutputTokens
 		result.CacheReadInputTokens = a.usageCacheReadTokens
+		result.EstimatedCost = a.usageEstimatedCost
+		result.CostTracked = a.usageCostTracked
 		a.stateMu.Unlock()
 		result.MutatingToolCalls = a.MutatingToolCount()
+		result.TouchedPaths = a.GetTouchedPaths()
 
 		// Clear callHistory to prevent memory leak
 		a.clearCallHistory()
@@ -1388,8 +1393,11 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	result.InputTokens = a.usageInputTokens
 	result.OutputTokens = a.usageOutputTokens
 	result.CacheReadInputTokens = a.usageCacheReadTokens
+	result.EstimatedCost = a.usageEstimatedCost
+	result.CostTracked = a.usageCostTracked
 	a.stateMu.Unlock()
 	result.MutatingToolCalls = a.MutatingToolCount()
+	result.TouchedPaths = a.GetTouchedPaths()
 
 	// Clear callHistory to prevent memory leak on long-running sessions
 	a.clearCallHistory()
@@ -2924,6 +2932,13 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				overloadElapsed = 0
 				break
 			}
+
+			// Preserve usage metadata delivered before a partial/terminal stream
+			// error. The provider bills that work even though no final answer was
+			// produced; successful responses are accounted later on the normal path.
+			a.stateMu.Lock()
+			a.recordResponseUsageLocked(resp)
+			a.stateMu.Unlock()
 
 			// Context cancelled (Esc pressed) — return immediately
 			if ctx.Err() != nil {
