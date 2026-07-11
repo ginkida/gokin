@@ -593,6 +593,18 @@ func (a *App) Run() error {
 
 	// Start session manager for periodic saves
 	if a.sessionManager != nil {
+		// Surface a background-autosave failure the first time a failing streak
+		// starts — previously Warn-log only, so a full disk / unwritable session
+		// dir silently stopped persisting history and the user only found out
+		// after restart. Fires at most once per streak (SessionManager resets on
+		// the next successful save), so it can't spam a per-message toast.
+		a.sessionManager.SetOnSaveFailed(func(saveErr error) {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusWarning,
+				Message: "Session autosave is failing — history may not persist (check disk space / permissions)",
+			})
+			logging.Warn("session autosave failing (surfaced to UI)", "error", saveErr)
+		})
 		a.sessionManager.Start(a.ctx)
 	}
 

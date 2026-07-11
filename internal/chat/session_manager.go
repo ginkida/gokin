@@ -23,6 +23,27 @@ type SessionManager struct {
 	stopChan       chan struct{}
 	stopOnce       sync.Once
 	asyncSaveCh    chan struct{} // Buffered channel for async save dedup
+
+	// consecutiveSaveFailures tracks the current run of failed Save() calls,
+	// reset to 0 on the first success. onSaveFailed fires ONCE per failing
+	// streak (on the healthy->failing transition) so a persistent disk-full /
+	// permission problem surfaces to the user without spamming a toast on every
+	// message. Both guarded by mu; the callback is invoked OUTSIDE the lock.
+	consecutiveSaveFailures int
+	onSaveFailed            func(err error)
+}
+
+// SetOnSaveFailed registers a callback fired when background session
+// persistence STARTS failing (the healthy->failing transition of a failure
+// streak). Surfacing this matters because autosave failures were previously
+// Warn-log only — a user whose disk filled up or whose session dir became
+// unwritable kept working and only discovered their history hadn't persisted
+// after restart. The callback fires at most once per streak (reset on the
+// next successful save) to avoid per-message toast spam.
+func (sm *SessionManager) SetOnSaveFailed(fn func(err error)) {
+	sm.mu.Lock()
+	sm.onSaveFailed = fn
+	sm.mu.Unlock()
 }
 
 // SessionManagerConfig configures session persistence behavior.
@@ -167,14 +188,31 @@ func (sm *SessionManager) Save() error {
 	}
 
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	err := sm.historyManager.SaveFull(sm.session)
+	// Track the failure streak and decide whether to notify while still holding
+	// the lock; the callback itself fires AFTER Unlock (callbacks-never-under-
+	// lock discipline — the UI toast path can re-enter arbitrary code).
+	var notify func(error)
+	if err != nil {
+		sm.consecutiveSaveFailures++
+		if sm.consecutiveSaveFailures == 1 {
+			notify = sm.onSaveFailed // fire once on the healthy->failing transition
+		}
+	} else {
+		sm.consecutiveSaveFailures = 0
+		sm.lastSaveTime = time.Now()
+	}
+	sessionID := sm.session.ID
+	msgCount := sm.session.MessageCount()
+	sm.mu.Unlock()
 
-	if err := sm.historyManager.SaveFull(sm.session); err != nil {
+	if err != nil {
+		if notify != nil {
+			notify(err)
+		}
 		return fmt.Errorf("failed to save session: %w", err)
 	}
-
-	sm.lastSaveTime = time.Now()
-	logging.Debug("session saved", "session_id", sm.session.ID, "messages", sm.session.MessageCount())
+	logging.Debug("session saved", "session_id", sessionID, "messages", msgCount)
 	return nil
 }
 
