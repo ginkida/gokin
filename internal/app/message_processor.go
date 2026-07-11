@@ -904,14 +904,20 @@ func (a *App) accumulateAgentResultUsage(result *agent.AgentResult) {
 
 	a.accumulateTurnTokenUsage(input, input, output, cacheRead)
 
-	if a.contextManager != nil {
-		if tc := a.contextManager.GetTokenCounter(); tc != nil {
-			cost := tc.CalculateCostWithCache(input, output, cacheRead)
-			a.mu.Lock()
-			a.totalEstimatedCost += cost
-			a.costTracked = true
-			a.mu.Unlock()
-		}
+	var tc *appcontext.TokenCounter
+	if strings.TrimSpace(result.Model) != "" {
+		// Pricing is tied to the agent's resolved model, not whichever model is
+		// active in the foreground when an async callback happens to arrive.
+		tc = appcontext.NewTokenCounter(nil, result.Model, nil)
+	} else if a.contextManager != nil {
+		tc = a.contextManager.GetTokenCounter()
+	}
+	if tc != nil {
+		cost := tc.CalculateCostWithCache(input, output, cacheRead)
+		a.mu.Lock()
+		a.totalEstimatedCost += cost
+		a.costTracked = true
+		a.mu.Unlock()
 	}
 }
 

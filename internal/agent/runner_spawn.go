@@ -794,13 +794,22 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 
 			attachMetaAgentMonitoring(agent, deps.metaAgent)
 
-			// Apply per-agent timeout
-			runCtx := ctx
+			// Apply per-agent timeout. ALWAYS wrap in a cancellable ctx and
+			// register it via SetCancelFunc — the same "task_stop lies" bug
+			// class fixed for the sync Spawn path (v0.100.78): without this,
+			// Runner.Cancel/task_stop on a SpawnMultiple agent (this is the
+			// fan-out primitive /audit's find/verify phases use) flipped the
+			// STATUS to cancelled and reported "stopped" while the run itself
+			// kept executing to its own timeout.
+			var runCtx context.Context
+			var runCancel context.CancelFunc
 			if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-				var cancel context.CancelFunc
-				runCtx, cancel = context.WithTimeout(ctx, agentTimeout)
-				defer cancel()
+				runCtx, runCancel = context.WithTimeout(ctx, agentTimeout)
+			} else {
+				runCtx, runCancel = context.WithCancel(ctx)
 			}
+			defer runCancel()
+			agent.SetCancelFunc(runCancel)
 			startTime := time.Now()
 			result, err := agent.Run(runCtx, r.withFewShot(deps, string(t.Type), t.Prompt))
 			duration := time.Since(startTime)

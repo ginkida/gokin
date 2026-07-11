@@ -83,8 +83,9 @@ func TestLoadFileCommands_ConflictRules(t *testing.T) {
 	// Same name in both — project wins.
 	writeCommandFile(t, project, "deploy.md", "project deploy: $ARGUMENTS")
 	writeCommandFile(t, global, "deploy.md", "global deploy: $ARGUMENTS")
-	// Global-only — loads fine.
-	writeCommandFile(t, global, "audit.md", "global audit body")
+	// Global-only — loads fine. "sweep" (not "greet" — chosen not to collide
+	// with any builtin, unlike "audit" which became a real builtin command).
+	writeCommandFile(t, global, "sweep.md", "global sweep body")
 
 	h := NewHandler()
 	loaded, warnings := h.LoadFileCommands(project, global)
@@ -96,7 +97,7 @@ func TestLoadFileCommands_ConflictRules(t *testing.T) {
 	if names["deploy"] != "project" {
 		t.Fatalf("project must win the deploy conflict: %v", names)
 	}
-	if names["audit"] != "global" {
+	if names["sweep"] != "global" {
 		t.Fatalf("global-only command must load: %v", names)
 	}
 	if _, ok := names["help"]; ok {

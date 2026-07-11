@@ -285,6 +285,8 @@ func DefaultCommands() []CommandInfo {
 		{Name: "stats", Description: "Show session statistics", Category: "Session"},
 		{Name: "tasks", Description: "List background agent tasks and their results", Category: "Session",
 			Args: []ArgInfo{{Name: "id", Required: false, Type: "string"}}, Usage: "/tasks [id]"},
+		{Name: "audit", Description: "Multi-agent find→verify audit of the current changes for real bugs", Category: "Session",
+			Args: []ArgInfo{{Name: "path", Required: false, Type: "string"}}, Usage: "/audit [path or description]"},
 		{Name: "cost", Description: "Show token usage and cost (compact)", Category: "Session"},
 		{Name: "memory", Description: "Show stored memories", Category: "Session"},
 		{Name: "loop", Description: "Run a recurring task in the background", Category: "Session",

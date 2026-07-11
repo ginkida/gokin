@@ -50,20 +50,22 @@ func TestSessionCostLedgerDoesNotRepriceAfterModelSwitch(t *testing.T) {
 	}
 }
 
-func TestAccumulateAgentResultUsageWithoutCostCounter(t *testing.T) {
-	// Usage accounting itself must remain correct even when no context manager
-	// is available (cost stays untracked, token totals do not disappear).
+func TestAccumulateAgentResultUsageUsesAgentModel(t *testing.T) {
+	// No context manager is needed: the completed agent carries the actual
+	// model it used, so an async completion cannot be repriced as foreground.
 	a := &App{}
 	a.accumulateAgentResultUsage(&agent.AgentResult{
-		InputTokens:          10_000,
-		OutputTokens:         500,
-		CacheReadInputTokens: 8_000,
+		Model:                "glm-5",
+		InputTokens:          1_000_000,
+		OutputTokens:         0,
+		CacheReadInputTokens: 1_000_000,
 	})
 	stats := a.GetTokenStats()
-	if stats.InputTokens != 10_000 || stats.OutputTokens != 500 || stats.CacheReadInputTokens != 8_000 {
+	if stats.InputTokens != 1_000_000 || stats.OutputTokens != 0 || stats.CacheReadInputTokens != 1_000_000 {
 		t.Fatalf("delegated stats = %+v", stats)
 	}
-	if stats.CostTracked {
-		t.Fatal("cost must remain untracked without a token counter")
+	if !stats.CostTracked || stats.EstimatedCost != 0.20 {
+		t.Fatalf("agent-model cost = tracked %v cost %v, want GLM cached cost 0.20",
+			stats.CostTracked, stats.EstimatedCost)
 	}
 }

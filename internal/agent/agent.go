@@ -1320,8 +1320,15 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	result := &AgentResult{
 		AgentID:   a.ID,
 		Type:      a.Type,
+		Model:     a.Model,
 		Status:    AgentStatusRunning,
 		Completed: false,
+	}
+	if a.client != nil {
+		// a.Model is the optional user override and is commonly empty. Persist
+		// the clone's resolved model so accounting remains correct even if the
+		// foreground session switches models before this agent completes.
+		result.Model = a.client.GetModel()
 	}
 
 	if !hasHistory {

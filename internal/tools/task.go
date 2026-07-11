@@ -34,6 +34,7 @@ type AgentRunner interface {
 type AgentResult struct {
 	AgentID    string
 	Type       string
+	Model      string
 	Status     string
 	Output     string
 	Error      string

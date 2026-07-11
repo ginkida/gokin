@@ -1267,6 +1267,18 @@ func (a *App) GetBackgroundShellRunner() commands.BackgroundShellRunner {
 	return a.taskManager
 }
 
+// GetAuditRunner returns the agent runner for /audit's find-then-verify
+// recipe. Nil when the agent subsystem isn't wired. Typed-nil guard for the
+// same reason as GetAgentTaskRunner.
+func (a *App) GetAuditRunner() commands.AuditRunner {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.agentRunner == nil {
+		return nil
+	}
+	return a.agentRunner
+}
+
 // GetHooksManager returns the hooks manager for the /hooks command. Nil
 // when hooks aren't wired.
 func (a *App) GetHooksManager() *hooks.Manager {
@@ -3354,6 +3366,7 @@ func (a *agentRunnerAdapter) GetResult(agentID string) (tools.AgentResult, bool)
 	return tools.AgentResult{
 		AgentID:    result.AgentID,
 		Type:       string(result.Type),
+		Model:      result.Model,
 		Status:     string(result.Status),
 		Output:     result.Output,
 		Error:      result.Error,

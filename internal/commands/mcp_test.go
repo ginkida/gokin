@@ -76,6 +76,7 @@ func (f *fakeAppForMCP) GetLoopManager() LoopManager                     { retur
 func (f *fakeAppForMCP) CancelInFlightLoopIteration(string) bool         { return false }
 func (f *fakeAppForMCP) GetAgentTaskRunner() AgentTaskRunner             { return nil }
 func (f *fakeAppForMCP) GetBackgroundShellRunner() BackgroundShellRunner { return nil }
+func (f *fakeAppForMCP) GetAuditRunner() AuditRunner                     { return nil }
 func (f *fakeAppForMCP) GetHooksManager() *hooks.Manager                 { return nil }
 func (f *fakeAppForMCP) RefreshTokenCount()                              {}
 

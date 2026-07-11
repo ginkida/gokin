@@ -111,6 +111,11 @@ type AppInterface interface {
 	// nil when the tasks subsystem isn't wired; the command nil-checks.
 	GetBackgroundShellRunner() BackgroundShellRunner
 
+	// Audit runner — used by /audit for its fixed find-then-verify recipe
+	// (SpawnMultiple fan-out + GetResult). May be nil when the agent
+	// subsystem isn't wired; the command nil-checks.
+	GetAuditRunner() AuditRunner
+
 	// Hooks manager — used by /hooks to list configured hooks. May be nil;
 	// the command nil-checks.
 	GetHooksManager() *hooks.Manager
@@ -215,6 +220,7 @@ func NewHandler() *Handler {
 	// Register stats and memory commands
 	h.Register(&StatsCommand{})
 	h.Register(&TasksCommand{})
+	h.Register(&AuditCommand{})
 	h.Register(&HooksCommand{})
 	h.Register(&AddDirCommand{})
 	h.Register(&RemoveDirCommand{})

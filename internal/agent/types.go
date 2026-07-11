@@ -135,6 +135,7 @@ const (
 type AgentResult struct {
 	AgentID   string         `json:"agent_id"`
 	Type      AgentType      `json:"type"`
+	Model     string         `json:"model,omitempty"` // Actual provider model used for this invocation.
 	Status    AgentStatus    `json:"status"`
 	Output    string         `json:"output"`
 	Error     string         `json:"error,omitempty"`
