@@ -3489,8 +3489,15 @@ func (m Model) View() string {
 		panelBuilder.WriteString("\n")
 	}
 
-	// File peek (one-line status indicator, auto-dismissed after a short TTL)
-	if m.filePeek != nil && m.filePeek.IsVisible() {
+	// File peek (one-line status indicator, auto-dismissed after a short TTL).
+	// SUPPRESSED while the live card renders: the card already carries the
+	// current tool + file (and the finished tool is a scrollback line), so
+	// during work the peek added no information — but its 1.5s TTL made it
+	// pop in/out every couple of seconds, shifting the whole panel stack and
+	// making the card's "Writing:" line JUMP (field report: «строка прыгает
+	// из-за всплывающей второй ниже строки»). One activity surface per frame,
+	// same rule as feed-vs-tree (v0.91.0).
+	if !cardRendered && m.filePeek != nil && m.filePeek.IsVisible() {
 		if line := m.filePeek.View(m.width); line != "" {
 			panelBuilder.WriteString(line)
 			panelBuilder.WriteString("\n")
