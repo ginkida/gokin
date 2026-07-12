@@ -109,8 +109,13 @@ func TestSSHClientSessionKey(t *testing.T) {
 }
 
 func TestSSHClientLastUse(t *testing.T) {
-	client := NewSSHClient(&SSHConfig{})
+	// LastUse is stamped inside NewSSHClient, so `before` must be taken
+	// BEFORE construction. The original ordering (before := after the
+	// constructor) passed on macOS only because its coarser clock made all
+	// three timestamps equal; linux CI's ns resolution exposed LastUse
+	// landing ~0.3µs before `before`.
 	before := time.Now()
+	client := NewSSHClient(&SSHConfig{})
 	lastUse := client.LastUse()
 	after := time.Now()
 	if lastUse.Before(before) || lastUse.After(after) {
