@@ -1947,6 +1947,17 @@ func (b *Builder) wireDependencies() error {
 		}
 	}
 
+	// Hook runtime visibility (deferred round-14 #6): the manager's SetHandler
+	// seam existed since v0.95.0 with ZERO production callers, so a
+	// user-configured post_tool/on_error hook could fail forever (typo'd
+	// command, missing binary) with no signal anywhere — the executor discards
+	// Run's results. onHookResult toasts once per failing streak per hook
+	// (see hooks_visibility.go); the manager's own Warn log is the headless
+	// backstop.
+	if b.hooksManager != nil {
+		b.hooksManager.SetHandler(app.onHookResult)
+	}
+
 	// Set up background task tracking callbacks for UI
 	b.agentRunner.SetOnAgentStart(func(id, agentType, description string) {
 		if app.program != nil {

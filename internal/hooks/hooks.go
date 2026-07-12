@@ -54,6 +54,21 @@ type Hook struct {
 	Source string `yaml:"-"`
 }
 
+// DisplayName identifies the hook in logs and user-facing failure surfaces:
+// the configured Name, or a short command preview when the hook is unnamed
+// (name is optional in the YAML schema).
+func (h *Hook) DisplayName() string {
+	if h.Name != "" {
+		return h.Name
+	}
+	const max = 40
+	cmd := h.Command
+	if runes := []rune(cmd); len(runes) > max {
+		cmd = string(runes[:max-1]) + "…"
+	}
+	return cmd
+}
+
 // ShouldRun checks whether the hook should run given the context and completed hooks.
 // It verifies that:
 //   - The hook is enabled

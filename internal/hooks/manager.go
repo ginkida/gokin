@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // Result represents the result of running a hook.
@@ -133,6 +135,21 @@ func (m *Manager) Run(ctx context.Context, hookType Type, hctx *Context) []Resul
 
 		result := m.executeHook(ctx, hook, hctx, timeout)
 		results = append(results, result)
+
+		// Runtime visibility backstop (deferred round-14 #6): this file used
+		// to have ZERO logging and the executor discards Run's results, so a
+		// user's configured hook could fail forever — typo'd command, missing
+		// binary — with no signal ANYWHERE. Warn on failure (works headless
+		// too); Debug on success for diagnosability. The UI toast layer sits
+		// on top via the handler below.
+		if result.Error != nil {
+			logging.Warn("hook failed",
+				"type", string(hook.Type), "hook", hook.DisplayName(),
+				"error", result.Error, "elapsed", result.Elapsed)
+		} else {
+			logging.Debug("hook executed",
+				"type", string(hook.Type), "hook", hook.DisplayName(), "elapsed", result.Elapsed)
+		}
 
 		// Capture output into context for subsequent hooks
 		hctx.CapturedOutput = result.Output

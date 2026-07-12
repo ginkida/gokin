@@ -138,6 +138,11 @@ type App struct {
 	promptBuilder       *appcontext.PromptBuilder
 	contextAgent        *appcontext.ContextAgent
 
+	// hookFailures tracks per-hook failing streaks so a broken user hook
+	// toasts ONCE per streak, not once per tool call (see hooks_visibility.go).
+	// Self-locking leaf state — never held with a.mu.
+	hookFailures hookFailureTracker
+
 	// Permission management
 	permManager *permission.Manager
 	// permPending correlates each in-flight promptPermission call to its OWN
