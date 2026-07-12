@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // conciseToolTarget returns the short subject for the parenthesized part of a
@@ -53,6 +55,46 @@ func stripBashPlumbing(cmd string) string {
 		}
 	}
 	return strings.TrimSpace(cmd[:cut])
+}
+
+// editDiffDisplay is the edit tool's display-diff payload, stashed on the
+// Model by the ToolResultMsg handler and consumed by
+// handleToolResultWithStatus within the same Update dispatch.
+type editDiffDisplay struct {
+	Text    string
+	Added   int
+	Removed int
+}
+
+// renderEditDiffBody renders the Claude-Code-style edit result body: an
+// "Added N lines, removed M lines" header followed by the numbered ±hunk
+// lines, colored by marker (+ green, - red, context dim).
+func renderEditDiffBody(d *editDiffDisplay) string {
+	header := lipgloss.NewStyle().Foreground(ColorMuted).
+		Render(fmt.Sprintf("Added %s, removed %s",
+			pluralCount(d.Added, "line", "lines"), pluralCount(d.Removed, "line", "lines")))
+
+	addStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+	delStyle := lipgloss.NewStyle().Foreground(ColorError)
+	ctxStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
+	var sb strings.Builder
+	sb.WriteString(header)
+	for line := range strings.SplitSeq(d.Text, "\n") {
+		if line == "" {
+			continue
+		}
+		sb.WriteByte('\n')
+		switch line[0] {
+		case '+':
+			sb.WriteString(addStyle.Render(line))
+		case '-':
+			sb.WriteString(delStyle.Render(line))
+		default:
+			sb.WriteString(ctxStyle.Render(line))
+		}
+	}
+	return sb.String()
 }
 
 // stripModelFacingContext removes machine-facing blocks from a tool result

@@ -417,7 +417,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 						status += editedRegionSnippet(newContent, 1+strings.Count(newContent[:idx], "\n"))
 					}
 				}
-				return NewSuccessResult(status), nil
+				return editSuccess(status, content, newContent), nil
 			}
 
 			// Fuzzy matching failed — build a helpful error message.
@@ -495,7 +495,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// Emit FilePeek
 	EmitFilePeek(ctx, filePath, "Editing", newContent, "edit")
 
-	return NewSuccessResult(status), nil
+	return editSuccess(status, content, newContent), nil
 }
 
 // executeMultiEdit applies multiple edits to a single file sequentially.
@@ -614,7 +614,7 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 	if lastEditLine > 0 {
 		status += editedRegionSnippet(content, lastEditLine)
 	}
-	return NewSuccessResult(status), nil
+	return editSuccess(status, string(oldContent), content), nil
 }
 
 // executeLineEdit replaces a range of lines in a file.
@@ -712,7 +712,7 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 	replacedCount := lineEnd - lineStart + 1
 	status := fmt.Sprintf("Replaced lines %d-%d (%d lines) in %s", lineStart, lineEnd, replacedCount, filePath)
 	status += editedRegionSnippet(newContent, lineStart)
-	return NewSuccessResult(status), nil
+	return editSuccess(status, string(data), newContent), nil
 }
 
 // executeInsertAfterLine inserts new text after the specified line without deleting anything.
@@ -795,7 +795,7 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 
 	status := fmt.Sprintf("Inserted %d lines after line %d in %s", len(newLines), afterLine, filePath)
 	status += editedRegionSnippet(newContent, afterLine+1)
-	return NewSuccessResult(status), nil
+	return editSuccess(status, string(data), newContent), nil
 }
 
 // extractFileContext formats file content with line numbers for error context.

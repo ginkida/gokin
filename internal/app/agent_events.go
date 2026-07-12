@@ -301,13 +301,28 @@ func (p *tuiPresenter) ToolStart(name string, args map[string]any) {
 
 func (p *tuiPresenter) ToolEnd(name string, args map[string]any, result tools.ToolResult) {
 	if p.app.program != nil {
-		p.app.safeSendToProgram(ui.ToolResultMsg{
+		msg := ui.ToolResultMsg{
 			Name:    name,
 			Args:    args,
 			Content: result.Content,
 			Failed:  !result.Success,
 			Error:   result.Error,
-		})
+		}
+		// Display-diff payload from the edit tool (ToolResult.Data): rendered
+		// Claude-Code-style by the UI. Defensive assertions — Data shape is
+		// tool-controlled and absent for every other tool.
+		if d, ok := result.Data.(map[string]any); ok {
+			if s, ok := d["display_diff"].(string); ok {
+				msg.Diff = s
+			}
+			if n, ok := d["diff_added"].(int); ok {
+				msg.DiffAdded = n
+			}
+			if n, ok := d["diff_removed"].(int); ok {
+				msg.DiffRemoved = n
+			}
+		}
+		p.app.safeSendToProgram(msg)
 	}
 }
 

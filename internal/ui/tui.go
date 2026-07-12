@@ -167,6 +167,12 @@ type Model struct {
 	toolOutput          *ToolOutputModel
 	lastToolOutputIndex int // Tool output index
 
+	// pendingEditDiff carries an edit result's display-diff from the
+	// ToolResultMsg handler into handleToolResultWithStatus (same Update
+	// dispatch — stashed so the handler's signature, called directly by many
+	// tests, stays unchanged). Consumed and cleared on use.
+	pendingEditDiff *editDiffDisplay
+
 	// Callbacks
 	onSubmit                   func(message string)
 	onQuit                     func()
@@ -2074,6 +2080,15 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// own tool-result stream.
 		msg.Content = stripModelFacingContext(msg.Content)
 
+		// Stash the edit display-diff for handleToolResultWithStatus (which
+		// keeps its signature — a dozen tests call it directly). Consumed and
+		// cleared synchronously within this same Update dispatch.
+		if msg.Diff != "" && !msg.Failed {
+			m.pendingEditDiff = &editDiffDisplay{Text: msg.Diff, Added: msg.DiffAdded, Removed: msg.DiffRemoved}
+		} else {
+			m.pendingEditDiff = nil
+		}
+
 		matchIdx := m.findActiveToolCall(msg.Name, msg.Args)
 
 		if matchIdx >= 0 {
@@ -3220,6 +3235,16 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 	}
 
 	titleLine := m.styles.FormatToolLine(name, target, outcome, duration)
+
+	// Edit display-diff (Claude-Code style): "Added 9 lines, removed 2
+	// lines" + red/green ±hunks, computed by the edit tool from the real
+	// old/new contents. Replaces the generic body for the USER; the model
+	// still receives the v0.88 "Updated region" snippet via Content.
+	if d := m.pendingEditDiff; d != nil {
+		m.pendingEditDiff = nil
+		m.emitToolResultCard(titleLine, renderEditDiffBody(d))
+		return
+	}
 
 	// Body (expand-state aware) — built once, fed either into a bordered
 	// card or the legacy 4-space-indented flat form depending on width.

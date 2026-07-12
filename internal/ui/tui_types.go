@@ -106,6 +106,14 @@ type (
 		Content string
 		Failed  bool
 		Error   string
+
+		// Display-diff payload for edit results (computed by the edit tool,
+		// carried via ToolResult.Data): a compact numbered ±hunk diff the UI
+		// renders Claude-Code-style ("Added 9 lines, removed 2 lines" +
+		// red/green lines). Empty for non-edit tools / no-op edits.
+		Diff        string
+		DiffAdded   int
+		DiffRemoved int
 	}
 	// ToolProgressMsg is sent periodically during long-running tool execution.
 	ToolProgressMsg struct {
