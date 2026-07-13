@@ -2638,6 +2638,10 @@ func (a *coordinatorToolAdapter) Start() {
 	a.coord.Start()
 }
 
+func (a *coordinatorToolAdapter) SetMaxParallel(maxParallel int) {
+	a.coord.SetMaxParallel(maxParallel)
+}
+
 // Stop tears down the coordinator (cancels its context, ending processLoop).
 // CoordinateTool.Execute defers this so a per-call coordinator built from the
 // app-lifetime context doesn't leak a context node on every coordinate call.

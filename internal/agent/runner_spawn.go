@@ -55,9 +55,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 		deps.metaAgent.RegisterAgent(agent.ID, agent.Type)
 	}
 	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string, success bool, summary string) {
-		if onSubAgentActivity != nil {
-			onSubAgentActivity(id, string(agent.Type), "", toolName, args, "tool_"+status, success, summary)
-		}
+		invokeSubAgentActivity(onSubAgentActivity, id, string(agent.Type), "", toolName, args, "tool_"+status, success, summary)
 		if deps.metaAgent != nil && status == "start" {
 			deps.metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
 		}
@@ -85,22 +83,18 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 
 	// Notify UI about agent start — pass the prompt so the feed can surface
 	// what this agent is actually working on (instead of "Sub-agent: general").
-	if onSubAgentActivity != nil {
-		onSubAgentActivity(agent.ID, string(agent.Type), prompt, "", nil, "start", false, "")
-	}
+	invokeSubAgentActivity(onSubAgentActivity, agent.ID, string(agent.Type), prompt, "", nil, "start", false, "")
 
 	startTime := time.Now()
 	result, err := agent.Run(runCtx, r.withFewShot(deps, agentType, prompt))
 	duration := time.Since(startTime)
 
 	// Notify UI about agent completion
-	if onSubAgentActivity != nil {
-		status := "complete"
-		if err != nil {
-			status = "failed"
-		}
-		onSubAgentActivity(agent.ID, string(agent.Type), "", "", nil, status, false, "")
+	status := "complete"
+	if err != nil {
+		status = "failed"
 	}
+	invokeSubAgentActivity(onSubAgentActivity, agent.ID, string(agent.Type), "", "", nil, status, false, "")
 
 	// Report activity after completion
 	r.reportActivity()
@@ -128,7 +122,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	r.reportAgentUsage(agent.ID, result)
 
 	r.mu.Lock()
-	r.results[agent.ID] = result
+	r.results[agent.ID] = cloneAgentResult(result)
 	r.mu.Unlock()
 	r.notifyResultReady()
 
@@ -198,9 +192,7 @@ func (r *Runner) SpawnWithContext(
 	r.mu.RUnlock()
 	agentID := agent.ID
 	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string, success bool, summary string) {
-		if onSubAgentActivity != nil {
-			onSubAgentActivity(id, string(agent.Type), "", toolName, args, "tool_"+status, success, summary)
-		}
+		invokeSubAgentActivity(onSubAgentActivity, id, string(agent.Type), "", toolName, args, "tool_"+status, success, summary)
 		if deps.metaAgent != nil && status == "start" {
 			deps.metaAgent.UpdateActivity(agentID, toolName, agent.GetTurnCount())
 		}
@@ -219,9 +211,7 @@ func (r *Runner) SpawnWithContext(
 
 	// Notify UI with task description so the activity feed shows what this
 	// agent is actually working on.
-	if onSubAgentActivity != nil {
-		onSubAgentActivity(agent.ID, string(agent.Type), prompt, "", nil, "start", false, "")
-	}
+	invokeSubAgentActivity(onSubAgentActivity, agent.ID, string(agent.Type), prompt, "", nil, "start", false, "")
 
 	// Apply per-agent timeout and store cancel func for explicit Cancel()
 	var runCtx context.Context
@@ -270,13 +260,11 @@ func (r *Runner) SpawnWithContext(
 	// "running" after it finishes. Must match the "start" notification
 	// added earlier — without this, agents pile up as permanent Running
 	// entries in the activity feed.
-	if onSubAgentActivity != nil {
-		completionStatus := "complete"
-		if err != nil || result.Status == AgentStatusFailed {
-			completionStatus = "failed"
-		}
-		onSubAgentActivity(agent.ID, string(agent.Type), "", "", nil, completionStatus, false, "")
+	completionStatus := "complete"
+	if err != nil || result.Status == AgentStatusFailed {
+		completionStatus = "failed"
 	}
+	invokeSubAgentActivity(onSubAgentActivity, agent.ID, string(agent.Type), "", "", nil, completionStatus, false, "")
 
 	// Unregister from meta-agent
 	if deps.metaAgent != nil {
@@ -289,7 +277,7 @@ func (r *Runner) SpawnWithContext(
 	r.reportAgentUsage(agent.ID, result)
 
 	r.mu.Lock()
-	r.results[agent.ID] = result
+	r.results[agent.ID] = cloneAgentResult(result)
 	r.mu.Unlock()
 	r.notifyResultReady()
 
@@ -336,9 +324,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		deps.metaAgent.RegisterAgent(agent.ID, agent.Type)
 	}
 	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string, success bool, summary string) {
-		if onSubAgentActivity != nil {
-			onSubAgentActivity(id, string(agent.Type), "", toolName, args, "tool_"+status, success, summary)
-		}
+		invokeSubAgentActivity(onSubAgentActivity, id, string(agent.Type), "", toolName, args, "tool_"+status, success, summary)
 		if deps.metaAgent != nil && status == "start" {
 			deps.metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
 		}
@@ -348,16 +334,13 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	r.reportActivity()
 
 	// Notify UI about agent start
-	if onStart != nil {
-		onStart(agent.ID, agentType, prompt)
-	}
-	if onSubAgentActivity != nil {
-		onSubAgentActivity(agent.ID, agentType, prompt, "", nil, "start", false, "")
-	}
+	invokeAgentStart(onStart, agent.ID, agentType, prompt)
+	invokeSubAgentActivity(onSubAgentActivity, agent.ID, agentType, prompt, "", nil, "start", false, "")
 
 	// Run agent asynchronously with proper cleanup
 	go func() {
 		agentID := agent.ID
+		var result *AgentResult
 
 		// Ensure cleanup happens even on panic
 		defer func() {
@@ -369,24 +352,25 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 					"agent_id", agentID,
 					"panic", p,
 					"stack", logging.PanicStack())
-				r.mu.Lock()
-				result, ok := r.results[agentID]
-				if ok {
-					result.Error = fmt.Sprintf("agent panic: %v", p)
-					result.Status = AgentStatusFailed
-					result.Completed = true
+				if result == nil {
+					result = &AgentResult{AgentID: agentID, Type: agent.Type}
 				}
-				r.mu.Unlock()
+				result.Error = fmt.Sprintf("agent panic: %v", p)
+				result.Status = AgentStatusFailed
+				result.Completed = false
 				// finalizeAgentWorkspace does git/file I/O — call it lock-free,
-				// mirroring the normal (non-panicking) return path. Without
-				// this a panic mid-run guaranteed-leaked the isolated
-				// worktree: finalizeAgentWorkspace is the ONLY place that
-				// ever calls isolatedWorkspace.Cleanup(), and the normal-flow
-				// call sites are unreachable once the goroutine has panicked
-				// past them.
-				if ok {
-					r.finalizeAgentWorkspace(agent, result)
+				// then publish atomically. Completed used to become visible before
+				// this call mutated Metadata, so waiters could race the cleanup.
+				// Reusing the local result also makes its finalized guard effective
+				// if the panic happened after normal workspace finalization.
+				r.finalizeAgentWorkspace(agent, result)
+				result.Completed = true
+				if deps.metaAgent != nil {
+					deps.metaAgent.UnregisterAgent(agentID)
 				}
+				r.mu.Lock()
+				r.results[agentID] = result
+				r.mu.Unlock()
 				r.notifyResultReady()
 			}
 		}()
@@ -439,9 +423,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 				select {
 				case <-progressTicker.C:
 					progress := agent.GetProgress()
-					if onAgentProgress != nil {
-						onAgentProgress(agentID, &progress)
-					}
+					invokeAgentProgress(onAgentProgress, agentID, &progress)
 				case <-progressCtx.Done():
 					return
 				}
@@ -449,7 +431,8 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		}()
 
 		startTime := time.Now()
-		result, err := agent.Run(agentCtx, r.withFewShot(deps, agentType, prompt))
+		var err error
+		result, err = agent.Run(agentCtx, r.withFewShot(deps, agentType, prompt))
 		duration := time.Since(startTime)
 
 		// Ensure result is never nil
@@ -473,13 +456,11 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		result.Completed = true
 
 		// Notify UI about agent completion (SpawnAsync path)
-		if onSubAgentActivity != nil {
-			completionStatus := "complete"
-			if err != nil || result.Status == AgentStatusFailed {
-				completionStatus = "failed"
-			}
-			onSubAgentActivity(agentID, string(agent.Type), "", "", nil, completionStatus, false, "")
+		completionStatus := "complete"
+		if err != nil || result.Status == AgentStatusFailed {
+			completionStatus = "failed"
 		}
+		invokeSubAgentActivity(onSubAgentActivity, agentID, string(agent.Type), "", "", nil, completionStatus, false, "")
 
 		// Unregister from meta-agent
 		if deps.metaAgent != nil {
@@ -505,9 +486,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		r.notifyResultReady()
 
 		// Notify UI about agent completion
-		if onComplete != nil {
-			onComplete(agentID, result)
-		}
+		invokeAgentComplete(onComplete, agentID, result)
 	}()
 
 	return agent.ID
@@ -546,9 +525,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	onSubAgentActivity := r.onSubAgentActivity
 	r.mu.RUnlock()
 	agent.SetOnToolActivity(func(id, toolName string, args map[string]any, status string, success bool, summary string) {
-		if onSubAgentActivity != nil {
-			onSubAgentActivity(id, string(agent.Type), "", toolName, args, "tool_"+status, success, summary)
-		}
+		invokeSubAgentActivity(onSubAgentActivity, id, string(agent.Type), "", toolName, args, "tool_"+status, success, summary)
 		if deps.metaAgent != nil && status == "start" {
 			deps.metaAgent.UpdateActivity(agent.ID, toolName, agent.GetTurnCount())
 		}
@@ -575,16 +552,13 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	r.reportActivity()
 
 	// Notify UI about agent start
-	if onStart != nil {
-		onStart(agent.ID, agentType, prompt)
-	}
-	if onSubAgentActivity != nil {
-		onSubAgentActivity(agent.ID, agentType, prompt, "", nil, "start", false, "")
-	}
+	invokeAgentStart(onStart, agent.ID, agentType, prompt)
+	invokeSubAgentActivity(onSubAgentActivity, agent.ID, agentType, prompt, "", nil, "start", false, "")
 
 	// Run agent asynchronously with streaming and progress updates
 	go func() {
 		agentID := agent.ID
+		var result *AgentResult
 
 		// Ensure cleanup happens even on panic
 		defer func() {
@@ -596,24 +570,20 @@ func (r *Runner) SpawnAsyncWithStreaming(
 					"agent_id", agentID,
 					"panic", p,
 					"stack", logging.PanicStack())
+				if result == nil {
+					result = &AgentResult{AgentID: agentID, Type: agent.Type}
+				}
+				result.Error = fmt.Sprintf("agent panic: %v", p)
+				result.Status = AgentStatusFailed
+				result.Completed = false
+				r.finalizeAgentWorkspace(agent, result)
+				result.Completed = true
+				if deps.metaAgent != nil {
+					deps.metaAgent.UnregisterAgent(agentID)
+				}
 				r.mu.Lock()
-				result, ok := r.results[agentID]
-				if ok {
-					result.Error = fmt.Sprintf("agent panic: %v", p)
-					result.Status = AgentStatusFailed
-					result.Completed = true
-				}
+				r.results[agentID] = result
 				r.mu.Unlock()
-				// finalizeAgentWorkspace does git/file I/O — call it lock-free,
-				// mirroring the normal (non-panicking) return path. Without
-				// this a panic mid-run guaranteed-leaked the isolated
-				// worktree: finalizeAgentWorkspace is the ONLY place that
-				// ever calls isolatedWorkspace.Cleanup(), and the normal-flow
-				// call sites are unreachable once the goroutine has panicked
-				// past them.
-				if ok {
-					r.finalizeAgentWorkspace(agent, result)
-				}
 				r.notifyResultReady()
 			}
 		}()
@@ -646,12 +616,8 @@ func (r *Runner) SpawnAsyncWithStreaming(
 				select {
 				case <-progressTicker.C:
 					progress := agent.GetProgress()
-					if onProgress != nil {
-						onProgress(agentID, &progress)
-					}
-					if onAgentProgress != nil {
-						onAgentProgress(agentID, &progress)
-					}
+					invokeAgentProgress(onProgress, agentID, &progress)
+					invokeAgentProgress(onAgentProgress, agentID, &progress)
 				case <-progressCtx.Done():
 					return
 				}
@@ -681,7 +647,8 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		}
 
 		startTime := time.Now()
-		result, err := agent.Run(agentCtx, r.withFewShot(deps, agentType, prompt))
+		var err error
+		result, err = agent.Run(agentCtx, r.withFewShot(deps, agentType, prompt))
 		duration := time.Since(startTime)
 
 		// Ensure result is never nil
@@ -707,13 +674,11 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		// Notify UI of completion — matches the "start" notification we
 		// send from this path. Without this the activity feed would keep
 		// showing a long-since-finished agent as Running forever.
-		if onSubAgentActivity != nil {
-			completionStatus := "complete"
-			if err != nil || result.Status == AgentStatusFailed {
-				completionStatus = "failed"
-			}
-			onSubAgentActivity(agentID, string(agent.Type), "", "", nil, completionStatus, false, "")
+		completionStatus := "complete"
+		if err != nil || result.Status == AgentStatusFailed {
+			completionStatus = "failed"
 		}
+		invokeSubAgentActivity(onSubAgentActivity, agentID, string(agent.Type), "", "", nil, completionStatus, false, "")
 
 		// Unregister from meta-agent
 		if deps.metaAgent != nil {
@@ -732,9 +697,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		r.notifyResultReady()
 
 		// Notify UI about agent completion
-		if onComplete != nil {
-			onComplete(agentID, result)
-		}
+		invokeAgentComplete(onComplete, agentID, result)
 	}()
 
 	return agent.ID

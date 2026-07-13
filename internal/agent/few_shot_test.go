@@ -67,7 +67,9 @@ func TestAllSpawnPathsUseFewShot(t *testing.T) {
 	}
 	calls := 0
 	for line := range strings.SplitSeq(string(src), "\n") {
-		if !strings.Contains(line, ".Run(") || !strings.Contains(line, "result, err :=") {
+		// Some goroutines predeclare result so their panic-recovery defer can
+		// publish/finalize that same value; accept both := and = assignments.
+		if !strings.Contains(line, ".Run(") || !strings.Contains(line, "result, err") {
 			continue
 		}
 		calls++

@@ -114,6 +114,7 @@ type TreePlanner struct {
 	onNodeComplete func(tree *PlanTree, node *PlanNode, success bool)
 	onReplan       func(tree *PlanTree, ctx *ReplanContext)
 	onProgress     func(action *PlannedAction)
+	callbackMu     sync.RWMutex
 }
 
 // NewTreePlanner creates a new tree planner.
@@ -138,10 +139,67 @@ func (tp *TreePlanner) SetCallbacks(
 	onReplan func(tree *PlanTree, ctx *ReplanContext),
 	onProgress func(action *PlannedAction),
 ) {
+	tp.callbackMu.Lock()
+	defer tp.callbackMu.Unlock()
 	tp.onNodeStart = onNodeStart
 	tp.onNodeComplete = onNodeComplete
 	tp.onReplan = onReplan
 	tp.onProgress = onProgress
+}
+
+func (tp *TreePlanner) invokeNodeStart(tree *PlanTree, node *PlanNode) {
+	tp.callbackMu.RLock()
+	callback := tp.onNodeStart
+	tp.callbackMu.RUnlock()
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("tree_node_start", nodeID(node))
+	callback(tree, node)
+}
+
+func (tp *TreePlanner) invokeNodeComplete(tree *PlanTree, node *PlanNode, success bool) {
+	tp.callbackMu.RLock()
+	callback := tp.onNodeComplete
+	tp.callbackMu.RUnlock()
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("tree_node_complete", nodeID(node))
+	callback(tree, node, success)
+}
+
+func (tp *TreePlanner) invokeReplan(tree *PlanTree, ctx *ReplanContext) {
+	tp.callbackMu.RLock()
+	callback := tp.onReplan
+	tp.callbackMu.RUnlock()
+	if callback == nil {
+		return
+	}
+	id := ""
+	if ctx != nil {
+		id = nodeID(ctx.FailedNode)
+	}
+	defer recoverAgentLifecycleCallback("tree_replan", id)
+	callback(tree, ctx)
+}
+
+func (tp *TreePlanner) invokeProgress(action *PlannedAction) {
+	tp.callbackMu.RLock()
+	callback := tp.onProgress
+	tp.callbackMu.RUnlock()
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("tree_progress", "")
+	callback(action)
+}
+
+func nodeID(node *PlanNode) string {
+	if node == nil {
+		return ""
+	}
+	return node.ID
 }
 
 // BuildTree constructs a plan tree for the given prompt and goal.
@@ -554,9 +612,7 @@ func (tp *TreePlanner) GetNextAction(tree *PlanTree) (*PlannedAction, error) {
 			node.UpdatedAt = time.Now()
 			tree.CurrentNode = node
 
-			if tp.onNodeStart != nil {
-				tp.onNodeStart(tree, node)
-			}
+			tp.invokeNodeStart(tree, node)
 
 			return node.Action, nil
 		}
@@ -572,9 +628,7 @@ func (tp *TreePlanner) GetNextAction(tree *PlanTree) (*PlannedAction, error) {
 		bestNode.UpdatedAt = time.Now()
 		tree.CurrentNode = bestNode
 
-		if tp.onNodeStart != nil {
-			tp.onNodeStart(tree, bestNode)
-		}
+		tp.invokeNodeStart(tree, bestNode)
 
 		return bestNode.Action, nil
 	}
@@ -702,9 +756,7 @@ func (tp *TreePlanner) GetReadyActions(tree *PlanTree) ([]*PlannedAction, error)
 		// but we update it to the last retrieved node for backward compatibility.
 		tree.CurrentNode = node
 
-		if tp.onNodeStart != nil {
-			tp.onNodeStart(tree, node)
-		}
+		tp.invokeNodeStart(tree, node)
 
 		actions = append(actions, node.Action)
 	}
@@ -761,9 +813,7 @@ func (tp *TreePlanner) RecordResult(tree *PlanTree, nodeID string, result *Agent
 	}
 	tp.backpropagateReward(tree, node, reward)
 
-	if tp.onNodeComplete != nil {
-		tp.onNodeComplete(tree, node, result.IsSuccess())
-	}
+	tp.invokeNodeComplete(tree, node, result.IsSuccess())
 
 	tree.UpdatedAt = time.Now()
 
@@ -970,9 +1020,7 @@ func (tp *TreePlanner) Replan(ctx context.Context, tree *PlanTree, rctx *ReplanC
 	tree.BestPath = tp.SelectBestPath(tree)
 	tree.mu.Unlock()
 
-	if tp.onReplan != nil {
-		tp.onReplan(tree, rctx)
-	}
+	tp.invokeReplan(tree, rctx)
 
 	return nil
 }
@@ -1286,9 +1334,7 @@ streamLoop:
 					}
 					if !isDup {
 						actions = append(actions, action)
-						if tp.onProgress != nil {
-							tp.onProgress(action)
-						}
+						tp.invokeProgress(action)
 					}
 				}
 			}
@@ -1309,9 +1355,7 @@ streamLoop:
 			}
 			if !isDup {
 				actions = append(actions, action)
-				if tp.onProgress != nil {
-					tp.onProgress(action)
-				}
+				tp.invokeProgress(action)
 			}
 		}
 	}

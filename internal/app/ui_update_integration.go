@@ -16,6 +16,7 @@ func (a *App) initializeUIUpdateSystem() {
 
 	// Create UI update manager
 	a.uiUpdateManager = NewUIUpdateManager(a.program, a)
+	a.uiUpdateManager.Start()
 
 	// Set up orchestrator callbacks
 	if a.orchestrator != nil {

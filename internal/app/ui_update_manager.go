@@ -5,7 +5,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"gokin/internal/logging"
 )
 
 // UIUpdateManager coordinates periodic UI updates
@@ -13,26 +12,25 @@ type UIUpdateManager struct {
 	program          *tea.Program
 	eventBroadcaster *UIEventBroadcaster
 
-	// Control
-	stopChan chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
-	mu       sync.RWMutex
-	running  bool
+	lifecycleMu sync.Mutex
+	mu          sync.RWMutex
+	running     bool
+	enabled     bool
 }
 
 // NewUIUpdateManager creates a new UI update manager
-func NewUIUpdateManager(program *tea.Program, app *App) *UIUpdateManager {
+func NewUIUpdateManager(program *tea.Program, _ *App) *UIUpdateManager {
 	return &UIUpdateManager{
 		program:          program,
 		eventBroadcaster: NewUIEventBroadcaster(program),
-		stopChan:         make(chan struct{}),
-		running:          false,
+		enabled:          true,
 	}
 }
 
 // Start begins periodic UI updates
 func (m *UIUpdateManager) Start() {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -40,51 +38,30 @@ func (m *UIUpdateManager) Start() {
 		return
 	}
 
+	if m.eventBroadcaster == nil || m.eventBroadcaster.IsStopped() {
+		m.eventBroadcaster = NewUIEventBroadcaster(m.program)
+		if !m.enabled {
+			m.eventBroadcaster.Disable()
+		}
+	}
 	m.running = true
-	m.stopChan = make(chan struct{})
-	// Create a new stopOnce for this Start/Stop cycle
-	// Note: sync.Once cannot be "reset", so we create a fresh value
-	m.stopOnce = sync.Once{}
 }
 
 // Stop stops periodic UI updates
 func (m *UIUpdateManager) Stop() {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	m.mu.Lock()
 	if !m.running {
 		m.mu.Unlock()
 		return
 	}
 	m.running = false
+	broadcaster := m.eventBroadcaster
 	m.mu.Unlock()
 
-	m.stopOnce.Do(func() {
-		close(m.stopChan)
-	})
-
-	// Stop event broadcaster first to unblock any waiting sends
-	if m.eventBroadcaster != nil {
-		m.eventBroadcaster.Stop()
-	}
-
-	// Wait for goroutines with timeout.
-	// done is buffered so the goroutine can always complete its send even if
-	// we've already timed out — no close() needed, channel is GC'd after use.
-	done := make(chan struct{}, 1)
-	go func() {
-		m.wg.Wait()
-		select {
-		case done <- struct{}{}:
-		default:
-		}
-	}()
-
-	stopTimer := time.NewTimer(5 * time.Second)
-	select {
-	case <-done:
-		stopTimer.Stop()
-		logging.Debug("UI update manager stopped gracefully")
-	case <-stopTimer.C:
-		logging.Warn("UI update manager stop timed out, continuing anyway")
+	if broadcaster != nil {
+		broadcaster.Stop()
 	}
 }
 
@@ -97,25 +74,52 @@ func (m *UIUpdateManager) IsRunning() bool {
 
 // BroadcastTaskStart broadcasts a task start event
 func (m *UIUpdateManager) BroadcastTaskStart(taskID, message, planType string) {
-	m.eventBroadcaster.BroadcastTaskStart(taskID, message, planType)
+	if broadcaster := m.broadcasterForSend(); broadcaster != nil {
+		broadcaster.BroadcastTaskStart(taskID, message, planType)
+	}
 }
 
 // BroadcastTaskComplete broadcasts a task completion event
 func (m *UIUpdateManager) BroadcastTaskComplete(taskID string, success bool, duration time.Duration, err error, planType string) {
-	m.eventBroadcaster.BroadcastTaskComplete(taskID, success, duration, err, planType)
+	if broadcaster := m.broadcasterForSend(); broadcaster != nil {
+		broadcaster.BroadcastTaskComplete(taskID, success, duration, err, planType)
+	}
 }
 
 // BroadcastTaskProgress broadcasts a task progress event
 func (m *UIUpdateManager) BroadcastTaskProgress(taskID string, progress float64, message string) {
-	m.eventBroadcaster.BroadcastTaskProgress(taskID, progress, message)
+	if broadcaster := m.broadcasterForSend(); broadcaster != nil {
+		broadcaster.BroadcastTaskProgress(taskID, progress, message)
+	}
+}
+
+func (m *UIUpdateManager) broadcasterForSend() *UIEventBroadcaster {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.running {
+		return nil
+	}
+	return m.eventBroadcaster
 }
 
 // Enable enables event broadcasting
 func (m *UIUpdateManager) Enable() {
-	m.eventBroadcaster.Enable()
+	m.mu.Lock()
+	m.enabled = true
+	broadcaster := m.eventBroadcaster
+	m.mu.Unlock()
+	if broadcaster != nil {
+		broadcaster.Enable()
+	}
 }
 
 // Disable disables event broadcasting
 func (m *UIUpdateManager) Disable() {
-	m.eventBroadcaster.Disable()
+	m.mu.Lock()
+	m.enabled = false
+	broadcaster := m.eventBroadcaster
+	m.mu.Unlock()
+	if broadcaster != nil {
+		broadcaster.Disable()
+	}
 }

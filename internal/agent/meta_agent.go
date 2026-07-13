@@ -214,7 +214,7 @@ func (ma *MetaAgent) checkAgentHealth() {
 	// Callbacks and side-effects OUTSIDE lock
 	for _, si := range stuckAgents {
 		if onStuck != nil {
-			onStuck(si.agentID, si.inactiveDuration)
+			invokeMetaStuckCallback(onStuck, si.agentID, si.inactiveDuration)
 		}
 		if si.shouldIntervene {
 			ma.handleStuckAgent(si.agentID, si.monitor)
@@ -283,11 +283,27 @@ func (ma *MetaAgent) handleStuckAgent(agentID string, monitor *AgentMonitor) {
 
 	// Notify callback outside lock
 	if callback != nil {
-		callback(agentID, reason, action, interventionMsg)
+		invokeMetaInterventionCallback(callback, agentID, reason, action, interventionMsg)
 	}
 
 	// Log-based intervention for now. If the agent remains stuck past MaxInterventions,
 	// checkAgentHealth will cancel it via runner.Cancel().
+}
+
+func invokeMetaStuckCallback(callback func(string, time.Duration), agentID string, duration time.Duration) {
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("meta_stuck", agentID)
+	callback(agentID, duration)
+}
+
+func invokeMetaInterventionCallback(callback func(string, string, string, string), agentID, reason, action, message string) {
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("meta_intervention", agentID)
+	callback(agentID, reason, action, message)
 }
 
 // runOptimization performs periodic optimization based on metrics.

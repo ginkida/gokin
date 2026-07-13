@@ -107,7 +107,7 @@ func (t *CoordinateTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"max_parallel": {
 					Type:        genai.TypeInteger,
-					Description: "Maximum number of agents to run in parallel. Default: 3",
+					Description: "Maximum number of agents to run in parallel. Clamped to the task count. Default: 3",
 				},
 				"timeout_minutes": {
 					Type:        genai.TypeInteger,
@@ -124,53 +124,153 @@ func (t *CoordinateTool) Validate(args map[string]any) error {
 	if !ok || len(tasks) == 0 {
 		return NewValidationError("tasks", "must be a non-empty array")
 	}
+	_, err := prepareCoordinateTasks(tasks)
+	return err
+}
 
-	// Validate each task
-	ids := make(map[string]bool)
+type coordinateTaskInput struct {
+	id           string
+	prompt       string
+	agentType    string
+	priority     int
+	dependencies []string
+}
+
+// prepareCoordinateTasks parses the whole dependency graph and returns a
+// stable topological order. Execute cannot add tasks in the caller's raw order:
+// Coordinator.AddTask generates the internal ID needed by dependents, so a
+// dependency declared later in the array used to be silently omitted.
+func prepareCoordinateTasks(tasks []any) ([]coordinateTaskInput, error) {
+	inputs := make([]coordinateTaskInput, 0, len(tasks))
+	indexByID := make(map[string]int, len(tasks))
+
 	for i, taskAny := range tasks {
 		task, ok := taskAny.(map[string]any)
 		if !ok {
-			return NewValidationError("tasks", fmt.Sprintf("task %d must be an object", i))
+			return nil, NewValidationError("tasks", fmt.Sprintf("task %d must be an object", i))
 		}
 
 		id, _ := task["id"].(string)
 		if id == "" {
-			return NewValidationError("tasks", fmt.Sprintf("task %d must have an id", i))
+			return nil, NewValidationError("tasks", fmt.Sprintf("task %d must have an id", i))
 		}
-		if ids[id] {
-			return NewValidationError("tasks", fmt.Sprintf("duplicate task id: %s", id))
+		if _, exists := indexByID[id]; exists {
+			return nil, NewValidationError("tasks", fmt.Sprintf("duplicate task id: %s", id))
 		}
-		ids[id] = true
 
 		prompt, _ := task["prompt"].(string)
 		if prompt == "" {
-			return NewValidationError("tasks", fmt.Sprintf("task %s must have a prompt", id))
+			return nil, NewValidationError("tasks", fmt.Sprintf("task %s must have a prompt", id))
 		}
 
 		agentType, _ := task["agent_type"].(string)
 		if agentType == "" {
-			return NewValidationError("tasks", fmt.Sprintf("task %s must have an agent_type", id))
+			return nil, NewValidationError("tasks", fmt.Sprintf("task %s must have an agent_type", id))
+		}
+
+		priority := 5
+		switch value := task["priority"].(type) {
+		case float64:
+			priority = int(value)
+		case int:
+			priority = value
+		}
+
+		dependencies, err := coordinateDependencies(task["depends_on"])
+		if err != nil {
+			return nil, NewValidationError("tasks", fmt.Sprintf("task %s: %v", id, err))
+		}
+		seenDependencies := make(map[string]struct{}, len(dependencies))
+		for _, dependency := range dependencies {
+			if _, duplicate := seenDependencies[dependency]; duplicate {
+				return nil, NewValidationError("tasks", fmt.Sprintf("task %s has duplicate dependency: %s", id, dependency))
+			}
+			seenDependencies[dependency] = struct{}{}
+		}
+
+		indexByID[id] = len(inputs)
+		inputs = append(inputs, coordinateTaskInput{
+			id:           id,
+			prompt:       prompt,
+			agentType:    agentType,
+			priority:     priority,
+			dependencies: dependencies,
+		})
+	}
+
+	indegree := make([]int, len(inputs))
+	dependents := make([][]int, len(inputs))
+	for taskIndex, input := range inputs {
+		for _, dependency := range input.dependencies {
+			dependencyIndex, exists := indexByID[dependency]
+			if !exists {
+				return nil, NewValidationError("tasks", fmt.Sprintf("task %s depends on unknown task: %s", input.id, dependency))
+			}
+			if dependency == input.id {
+				return nil, NewValidationError("tasks", fmt.Sprintf("task %s cannot depend on itself", input.id))
+			}
+			indegree[taskIndex]++
+			dependents[dependencyIndex] = append(dependents[dependencyIndex], taskIndex)
 		}
 	}
 
-	// Validate dependencies exist
-	for _, taskAny := range tasks {
-		task, _ := taskAny.(map[string]any) // already checked in loop above
-		id, _ := task["id"].(string)
-		if deps, ok := task["depends_on"].([]any); ok {
-			for _, depAny := range deps {
-				dep, _ := depAny.(string)
-				if !ids[dep] {
-					return NewValidationError("tasks", fmt.Sprintf("task %s depends on unknown task: %s", id, dep))
-				}
-				if dep == id {
-					return NewValidationError("tasks", fmt.Sprintf("task %s cannot depend on itself", id))
-				}
+	ready := make([]int, 0, len(inputs))
+	for i, count := range indegree {
+		if count == 0 {
+			ready = append(ready, i)
+		}
+	}
+	ordered := make([]coordinateTaskInput, 0, len(inputs))
+	for len(ready) > 0 {
+		index := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, inputs[index])
+		for _, dependent := range dependents[index] {
+			indegree[dependent]--
+			if indegree[dependent] == 0 {
+				ready = append(ready, dependent)
 			}
 		}
 	}
+	if len(ordered) != len(inputs) {
+		var cyclic []string
+		for i, count := range indegree {
+			if count > 0 {
+				cyclic = append(cyclic, inputs[i].id)
+			}
+		}
+		sort.Strings(cyclic)
+		return nil, NewValidationError("tasks", fmt.Sprintf("dependency cycle detected involving: %s", strings.Join(cyclic, ", ")))
+	}
+	return ordered, nil
+}
 
-	return nil
+func coordinateDependencies(value any) ([]string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	var raw []any
+	switch dependencies := value.(type) {
+	case []any:
+		raw = dependencies
+	case []string:
+		raw = make([]any, len(dependencies))
+		for i, dependency := range dependencies {
+			raw[i] = dependency
+		}
+	default:
+		return nil, fmt.Errorf("depends_on must be an array of task IDs")
+	}
+
+	result := make([]string, 0, len(raw))
+	for _, dependencyAny := range raw {
+		dependency, ok := dependencyAny.(string)
+		if !ok || dependency == "" {
+			return nil, fmt.Errorf("depends_on entries must be non-empty task IDs")
+		}
+		result = append(result, dependency)
+	}
+	return result, nil
 }
 
 func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
@@ -180,8 +280,28 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 
 	// Parse arguments
 	tasksAny, ok := args["tasks"].([]any)
-	if !ok {
-		return NewErrorResult("tasks must be an array"), nil
+	if !ok || len(tasksAny) == 0 {
+		return NewErrorResult("tasks must be a non-empty array"), nil
+	}
+	orderedTasks, err := prepareCoordinateTasks(tasksAny)
+	if err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+	maxParallel := 3
+	maxParallelProvided := false
+	switch value := args["max_parallel"].(type) {
+	case float64:
+		maxParallel = int(value)
+		maxParallelProvided = true
+	case int:
+		maxParallel = value
+		maxParallelProvided = true
+	}
+	if maxParallel < 1 {
+		maxParallel = 1
+	}
+	if maxParallel > len(orderedTasks) {
+		maxParallel = len(orderedTasks)
 	}
 	timeoutMinutes := 10
 	if tm, ok := args["timeout_minutes"].(float64); ok {
@@ -217,6 +337,11 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 		// Fall back to simplified execution
 		return t.executeSimple(ctx, tasksAny)
 	}
+	if maxParallelProvided {
+		if configurer, ok := coordAny.(interface{ SetMaxParallel(int) }); ok {
+			configurer.SetMaxParallel(maxParallel)
+		}
+	}
 	// The coordinator holds a context.WithCancel(app-lifetime ctx) child plus a
 	// processLoop goroutine. Without Stop(), every coordinate call would leak a
 	// context node on the app context (and overhang processLoop). WaitWithTimeout
@@ -238,30 +363,15 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	taskIDMap := make(map[string]string)
 
 	// Add tasks to coordinator
-	for _, taskAny := range tasksAny {
-		task, _ := taskAny.(map[string]any)
-		userID, _ := task["id"].(string)
-		prompt, _ := task["prompt"].(string)
-		agentType, _ := task["agent_type"].(string)
-
-		priority := 5
-		if p, ok := task["priority"].(float64); ok {
-			priority = int(p)
-		}
-
+	for _, task := range orderedTasks {
 		// Map dependencies to internal IDs
-		var deps []string
-		if depsAny, ok := task["depends_on"].([]any); ok {
-			for _, depAny := range depsAny {
-				depUserID, _ := depAny.(string)
-				if internalID, exists := taskIDMap[depUserID]; exists {
-					deps = append(deps, internalID)
-				}
-			}
+		deps := make([]string, 0, len(task.dependencies))
+		for _, dependencyID := range task.dependencies {
+			deps = append(deps, taskIDMap[dependencyID])
 		}
 
-		internalID := coord.AddTask(prompt, agentType, priority, deps)
-		taskIDMap[userID] = internalID
+		internalID := coord.AddTask(task.prompt, task.agentType, task.priority, deps)
+		taskIDMap[task.id] = internalID
 	}
 
 	// Start coordination
@@ -325,11 +435,27 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 			logging.Debug("failed to unmarshal task result", "error", err, "taskID", userID)
 		}
 
-		if result.Status == "completed" || result.Error == "" {
+		switch result.Status {
+		case "completed":
 			sb.WriteString("Status: **Completed**\n")
 			succeeded++
-		} else {
-			fmt.Fprintf(&sb, "Status: **Failed** - %s\n", result.Error)
+		case "failed", "cancelled":
+			reason := result.Error
+			if reason == "" {
+				reason = result.Status
+			}
+			fmt.Fprintf(&sb, "Status: **Failed** - %s\n", reason)
+			failed++
+		default:
+			reason := result.Error
+			if reason == "" {
+				if result.Status == "" {
+					reason = "missing result status"
+				} else {
+					reason = "unknown result status: " + result.Status
+				}
+			}
+			fmt.Fprintf(&sb, "Status: **Failed** - %s\n", reason)
 			failed++
 		}
 

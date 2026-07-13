@@ -19,41 +19,53 @@ type UIEventBroadcaster struct {
 	mu      sync.RWMutex
 	wg      sync.WaitGroup // Tracks all pending send goroutines
 	enabled bool
+	stopped bool
 
-	// Rate limiting to prevent excessive broadcasts
-	lastBroadcast time.Time
-	minInterval   time.Duration
+	// Rate-limit noisy progress updates per task. Lifecycle transitions must
+	// never be dropped merely because another task emitted an event recently.
+	lastProgress map[string]time.Time
+	minInterval  time.Duration
 }
 
 // NewUIEventBroadcaster creates a new UI event broadcaster
 func NewUIEventBroadcaster(program *tea.Program) *UIEventBroadcaster {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &UIEventBroadcaster{
-		program:     program,
-		ctx:         ctx,
-		cancel:      cancel,
-		enabled:     true,
-		minInterval: 50 * time.Millisecond,
+		program:      program,
+		ctx:          ctx,
+		cancel:       cancel,
+		enabled:      true,
+		lastProgress: make(map[string]time.Time),
+		minInterval:  50 * time.Millisecond,
 	}
 }
 
 // NewUIEventBroadcasterWithContext creates a new UI event broadcaster with a parent context
 func NewUIEventBroadcasterWithContext(ctx context.Context, program *tea.Program) *UIEventBroadcaster {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	childCtx, cancel := context.WithCancel(ctx)
 	return &UIEventBroadcaster{
-		program:     program,
-		ctx:         childCtx,
-		cancel:      cancel,
-		enabled:     true,
-		minInterval: 50 * time.Millisecond,
+		program:      program,
+		ctx:          childCtx,
+		cancel:       cancel,
+		enabled:      true,
+		lastProgress: make(map[string]time.Time),
+		minInterval:  50 * time.Millisecond,
 	}
 }
 
 // Stop stops the broadcaster, cancels pending sends, and waits for goroutine cleanup.
 func (b *UIEventBroadcaster) Stop() {
-	if b.cancel != nil {
-		b.cancel() // Signals all pending goroutines to exit
+	b.mu.Lock()
+	if !b.stopped {
+		b.stopped = true
+		if b.cancel != nil {
+			b.cancel()
+		}
 	}
+	b.mu.Unlock()
 
 	// Wait for all tracked goroutines with timeout
 	done := make(chan struct{})
@@ -74,35 +86,23 @@ func (b *UIEventBroadcaster) Stop() {
 	}
 }
 
-// sendAsync sends a message to the UI program in a tracked goroutine.
-// program.Send() in Bubble Tea is non-blocking (buffered channel), so a single
-// goroutine with context check is sufficient — no nested goroutine needed.
+// sendAsync sends a message to the UI program in a tracked goroutine. Bubble
+// Tea's Send can block before Program.Run starts, so callers must never perform
+// the send synchronously on an application lifecycle path.
 func (b *UIEventBroadcaster) sendAsync(msg tea.Msg) {
 	b.mu.Lock()
-	if !b.enabled || b.program == nil {
+	if !b.enabled || b.stopped || b.program == nil {
 		b.mu.Unlock()
 		return
 	}
-
-	// Rate limiting: skip if too frequent
-	if time.Since(b.lastBroadcast) < b.minInterval {
-		b.mu.Unlock()
-		return
-	}
-	b.lastBroadcast = time.Now()
 
 	program := b.program
 	ctx := b.ctx
-	b.mu.Unlock()
-
-	// Check if already cancelled before spawning goroutine
-	select {
-	case <-ctx.Done():
-		return
-	default:
-	}
-
+	// Register under the same mutex Stop uses to set stopped. Once Stop owns
+	// the mutex, no positive Add can begin concurrently with its subsequent
+	// Wait, preserving sync.WaitGroup's zero-counter reuse contract.
 	b.wg.Add(1)
+	b.mu.Unlock()
 	go func() {
 		defer b.wg.Done()
 		defer func() {
@@ -145,15 +145,17 @@ func (b *UIEventBroadcaster) Disable() {
 func (b *UIEventBroadcaster) IsEnabled() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.enabled
+	return b.enabled && !b.stopped
+}
+
+func (b *UIEventBroadcaster) IsStopped() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.stopped
 }
 
 // BroadcastTaskStart broadcasts a task start event
 func (b *UIEventBroadcaster) BroadcastTaskStart(taskID, message, planType string) {
-	if !b.IsEnabled() {
-		return
-	}
-
 	b.sendAsync(ui.TaskStartedEvent{
 		TaskID:   taskID,
 		Message:  message,
@@ -163,9 +165,9 @@ func (b *UIEventBroadcaster) BroadcastTaskStart(taskID, message, planType string
 
 // BroadcastTaskComplete broadcasts a task completion event
 func (b *UIEventBroadcaster) BroadcastTaskComplete(taskID string, success bool, duration time.Duration, err error, planType string) {
-	if !b.IsEnabled() {
-		return
-	}
+	b.mu.Lock()
+	delete(b.lastProgress, taskID)
+	b.mu.Unlock()
 
 	b.sendAsync(ui.TaskCompletedEvent{
 		TaskID:   taskID,
@@ -178,9 +180,18 @@ func (b *UIEventBroadcaster) BroadcastTaskComplete(taskID string, success bool, 
 
 // BroadcastTaskProgress broadcasts a task progress event
 func (b *UIEventBroadcaster) BroadcastTaskProgress(taskID string, progress float64, message string) {
-	if !b.IsEnabled() {
+	now := time.Now()
+	b.mu.Lock()
+	if !b.enabled || b.stopped || b.program == nil {
+		b.mu.Unlock()
 		return
 	}
+	if last := b.lastProgress[taskID]; !last.IsZero() && now.Sub(last) < b.minInterval {
+		b.mu.Unlock()
+		return
+	}
+	b.lastProgress[taskID] = now
+	b.mu.Unlock()
 
 	b.sendAsync(ui.TaskProgressEvent{
 		TaskID:   taskID,

@@ -826,8 +826,23 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	a.safeSendToProgram(ui.ResponseDoneMsg{})
 
 	// Send response metadata with the cost already committed above.
+	metadataModel := a.config.Model.Name
+	metadataProvider := ""
+	fallbackUsed := false
+	if apiCostTracked && a.executor != nil {
+		if provider, model := a.executor.GetLastProviderIdentity(); provider != "" {
+			configuredProvider := runtimeProviderForConfig(a.config)
+			if !strings.EqualFold(strings.TrimSpace(provider), strings.TrimSpace(configuredProvider)) {
+				metadataProvider = provider
+				metadataModel = model
+				fallbackUsed = true
+			}
+		}
+	}
 	a.safeSendToProgram(ui.ResponseMetadataMsg{
-		Model:                a.config.Model.Name,
+		Model:                metadataModel,
+		Provider:             metadataProvider,
+		FallbackUsed:         fallbackUsed,
 		InputTokens:          turnInputTokens,
 		OutputTokens:         turnOutputTokens,
 		CacheReadInputTokens: turnCacheReadTokens,

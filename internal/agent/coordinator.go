@@ -11,12 +11,6 @@ import (
 	"gokin/internal/logging"
 )
 
-// Constants for resource management
-const (
-	// MaxCoordinatorTasks is the maximum number of completed tasks to keep
-	MaxCoordinatorTasks = 100
-)
-
 // Coordinator manages multiple agents with dependencies and parallelism.
 type Coordinator struct {
 	runner       *Runner
@@ -35,8 +29,10 @@ type Coordinator struct {
 	onAllComplete  func(results map[string]*AgentResult)
 
 	// Event-driven channels for efficient processing
-	taskReadyCh chan struct{} // Signals when a task becomes ready
-	agentDoneCh chan string   // Signals when an agent completes (carries agentID)
+	taskReadyCh  chan struct{} // Signals when a task becomes ready
+	agentDoneCh  chan string   // Signals when an agent completes (carries agentID)
+	completionCh chan struct{} // Closed once when the whole coordination completes
+	completeOnce sync.Once
 
 	// Reflection for error learning feedback loop
 	reflector *Reflector
@@ -72,7 +68,8 @@ func NewCoordinator(ctx context.Context, runner *Runner, config *CoordinatorConf
 		completed:    make(map[string]bool),
 		taskReadyCh:  make(chan struct{}, 100), // Buffered to avoid blocking
 		agentDoneCh:  make(chan string, 100),   // Buffered for agent completions
-		reflector:    NewReflector(),           // Initialize reflector for feedback loop
+		completionCh: make(chan struct{}),
+		reflector:    NewReflector(), // Initialize reflector for feedback loop
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -83,36 +80,6 @@ func (c *Coordinator) SetReflector(r *Reflector) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.reflector = r
-}
-
-// cleanupCompletedTasks removes old completed tasks to prevent unbounded memory growth.
-func (c *Coordinator) cleanupCompletedTasks() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Count completed tasks
-	completedCount := len(c.completed)
-	if completedCount <= MaxCoordinatorTasks {
-		return
-	}
-
-	// Find and remove oldest completed tasks
-	removeCount := completedCount - MaxCoordinatorTasks/2
-	removed := 0
-	for taskID := range c.completed {
-		if removed >= removeCount {
-			break
-		}
-		// Remove from all maps
-		delete(c.tasks, taskID)
-		delete(c.completed, taskID)
-		delete(c.dependencies, taskID)
-		removed++
-	}
-
-	if removed > 0 {
-		logging.Debug("coordinator cleaned up old tasks", "removed", removed)
-	}
 }
 
 // generateTaskID creates a unique task ID.
@@ -180,6 +147,25 @@ func (c *Coordinator) areDependenciesMet(task *CoordinatedTask) bool {
 // Start begins processing tasks.
 func (c *Coordinator) Start() {
 	go c.processLoop()
+}
+
+// SetMaxParallel updates the concurrency limit. Reducing the limit does not
+// cancel agents that are already running; it only gates subsequent starts.
+// The coordinate tool calls this before Start when the caller supplies its
+// public max_parallel argument.
+func (c *Coordinator) SetMaxParallel(maxParallel int) {
+	if maxParallel <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.maxParallel = maxParallel
+	c.mu.Unlock()
+
+	// Wake a live process loop when the limit is raised dynamically.
+	select {
+	case c.taskReadyCh <- struct{}{}:
+	default:
+	}
 }
 
 // Stop stops the coordinator.
@@ -253,11 +239,78 @@ func (c *Coordinator) processLoop() {
 // received tasks.
 func (c *Coordinator) processReadyTasks() {
 	started, onStart := c.startReadyTasksLocked()
-	if onStart != nil {
-		for _, task := range started {
-			onStart(task)
-		}
+	for _, task := range started {
+		invokeCoordinatorTaskStart(onStart, task)
 	}
+}
+
+// Coordinator callbacks are integration hooks (UI, telemetry, embedding
+// applications), not part of the scheduler's correctness path. Keep each
+// invocation behind its own panic boundary so one faulty observer cannot stop
+// the process loop, strand dependent tasks, or prevent Wait from being
+// notified after the coordinator has already committed task state.
+func recoverCoordinatorCallback(kind, taskID string) {
+	if recovered := recover(); recovered != nil {
+		logging.Error("coordinator callback panicked",
+			"callback", kind,
+			"task_id", taskID,
+			"panic", recovered,
+			"stack", logging.PanicStack())
+	}
+}
+
+func invokeCoordinatorTaskStart(callback func(*CoordinatedTask), task *CoordinatedTask) {
+	if callback == nil {
+		return
+	}
+	taskID := ""
+	if task != nil {
+		taskID = task.ID
+	}
+	defer recoverCoordinatorCallback("task_start", taskID)
+	callback(cloneCoordinatedTask(task))
+}
+
+func invokeCoordinatorTaskComplete(callback func(*CoordinatedTask, *AgentResult), task *CoordinatedTask, result *AgentResult) {
+	if callback == nil {
+		return
+	}
+	taskID := ""
+	if task != nil {
+		taskID = task.ID
+	}
+	defer recoverCoordinatorCallback("task_complete", taskID)
+	callback(cloneCoordinatedTask(task), cloneAgentResult(result))
+}
+
+func invokeCoordinatorAllComplete(callback func(map[string]*AgentResult), results map[string]*AgentResult) {
+	if callback == nil {
+		return
+	}
+	defer recoverCoordinatorCallback("all_complete", "")
+	callback(cloneCoordinatorResults(results))
+}
+
+func cloneCoordinatedTask(task *CoordinatedTask) *CoordinatedTask {
+	if task == nil {
+		return nil
+	}
+	clone := *task
+	clone.Dependencies = append([]string(nil), task.Dependencies...)
+	clone.Result = cloneAgentResult(task.Result)
+	clone.index = -1
+	return &clone
+}
+
+func cloneCoordinatorResults(results map[string]*AgentResult) map[string]*AgentResult {
+	if results == nil {
+		return nil
+	}
+	clone := make(map[string]*AgentResult, len(results))
+	for taskID, result := range results {
+		clone[taskID] = cloneAgentResult(result)
+	}
+	return clone
 }
 
 // startReadyTasksLocked pops and starts ready tasks under c.mu (deferred
@@ -284,7 +337,7 @@ func (c *Coordinator) startReadyTasksLocked() ([]*CoordinatedTask, func(*Coordin
 		// Start the task
 		task.Status = TaskStatusRunning
 		c.startTask(task)
-		started = append(started, task)
+		started = append(started, cloneCoordinatedTask(task))
 		availableSlots--
 	}
 	return started, c.onTaskStart
@@ -386,26 +439,23 @@ func (c *Coordinator) checkCompletedAgents() {
 			"duration", ca.result.Duration)
 
 		if onComplete != nil {
-			callbacks = append(callbacks, callbackInfo{task, ca.result})
+			callbacks = append(callbacks, callbackInfo{
+				task:   cloneCoordinatedTask(task),
+				result: cloneAgentResult(ca.result),
+			})
 		}
 
 		// Unblock dependent tasks (needs lock — accesses c.tasks, c.dependencies, c.queue)
 		c.unblockDependents(ca.taskID)
 	}
 
-	// Check if cleanup is needed (threshold reached)
-	needsCleanup := len(c.completed) > MaxCoordinatorTasks
 	c.mu.Unlock()
 
 	// Callbacks OUTSIDE lock
 	for _, cb := range callbacks {
-		onComplete(cb.task, cb.result)
+		invokeCoordinatorTaskComplete(onComplete, cb.task, cb.result)
 	}
 
-	// Cleanup old completed tasks if needed (after releasing lock)
-	if needsCleanup {
-		c.cleanupCompletedTasks()
-	}
 }
 
 // recordReflectionFeedback records success/failure for learned error solutions.
@@ -508,19 +558,24 @@ func (c *Coordinator) handleAgentCompletion(agentID string) {
 	// Snapshot callback and unblock dependents under lock
 	onComplete := c.onTaskComplete
 	c.unblockDependents(taskID)
+	callbackTask := cloneCoordinatedTask(task)
+	callbackResult := cloneAgentResult(result)
 	c.mu.Unlock()
 
 	// Callback OUTSIDE lock
-	if onComplete != nil {
-		onComplete(task, result)
-	}
+	invokeCoordinatorTaskComplete(onComplete, callbackTask, callbackResult)
 }
 
 // isAllComplete checks if all tasks are done.
 func (c *Coordinator) isAllComplete() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.isAllCompleteLocked()
+}
 
+// isAllCompleteLocked reports completion while the caller holds c.mu for
+// reading or writing.
+func (c *Coordinator) isAllCompleteLocked() bool {
 	if len(c.running) > 0 {
 		return false
 	}
@@ -536,55 +591,53 @@ func (c *Coordinator) isAllComplete() bool {
 
 // notifyAllComplete calls the completion callback.
 func (c *Coordinator) notifyAllComplete() {
-	// c.onAllComplete is written under c.mu by Wait/WaitWithTimeout — reading
-	// it here without the lock (as this used to) is a genuine data race,
-	// caught by -race when the completion callback fires (from the
-	// coordinator's own scheduling flow) concurrently with a caller's
-	// Wait/WaitWithTimeout call installing it. Snapshot under the lock, then
-	// invoke the callback OUTSIDE any lock (same "callbacks never under
-	// lock" discipline as the MCP manager).
+	// Completion is a durable, broadcast event. Closing completionCh wakes any
+	// number of current waiters and remains observable by waiters that arrive
+	// after the process loop exits. Wait used to install its own function into
+	// onAllComplete, which both overwrote the user's callback and allowed two
+	// concurrent waiters to overwrite each other (leaving one blocked forever).
+	// Keep notification independent from the optional observer callback.
 	c.mu.RLock()
 	cb := c.onAllComplete
+	results := make(map[string]*AgentResult, len(c.tasks))
+	for taskID, task := range c.tasks {
+		results[taskID] = cloneAgentResult(task.Result)
+	}
 	c.mu.RUnlock()
-	if cb == nil {
+
+	firstNotification := false
+	c.completeOnce.Do(func() {
+		close(c.completionCh)
+		firstNotification = true
+	})
+	if !firstNotification {
 		return
 	}
-
-	results := make(map[string]*AgentResult)
-	c.mu.RLock()
-	for taskID, task := range c.tasks {
-		results[taskID] = task.Result
-	}
-	c.mu.RUnlock()
-
-	cb(results)
+	invokeCoordinatorAllComplete(cb, results)
 }
 
 // Wait blocks until all tasks are complete.
 func (c *Coordinator) Wait() map[string]*AgentResult {
-	resultChan := make(chan map[string]*AgentResult, 1)
-	var once sync.Once
-
-	c.mu.Lock()
-	c.onAllComplete = func(results map[string]*AgentResult) {
-		// Use sync.Once to ensure we only send once and prevent goroutine leak
-		once.Do(func() {
-			select {
-			case resultChan <- results:
-			default:
-			}
-		})
-	}
-	c.mu.Unlock()
-
 	select {
-	case results := <-resultChan:
-		return results
+	case <-c.completionCh:
+		return c.resultsSnapshot()
 	case <-c.ctx.Done():
-		// Clean up: ensure callback won't block if called later
-		once.Do(func() {})
 		return nil
 	}
+}
+
+// resultsSnapshot returns all task results, including nil for a terminal task
+// that produced no result. It is used only after completionCh closes, matching
+// the historical notifyAllComplete result shape.
+func (c *Coordinator) resultsSnapshot() map[string]*AgentResult {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	results := make(map[string]*AgentResult, len(c.tasks))
+	for taskID, task := range c.tasks {
+		results[taskID] = cloneAgentResult(task.Result)
+	}
+	return results
 }
 
 // partialResults snapshots whatever results are available right now — the
@@ -598,7 +651,7 @@ func (c *Coordinator) partialResults() map[string]*AgentResult {
 	results := make(map[string]*AgentResult, len(c.completed))
 	for taskID, task := range c.tasks {
 		if task.Result != nil {
-			results[taskID] = task.Result
+			results[taskID] = cloneAgentResult(task.Result)
 		}
 	}
 	return results
@@ -615,30 +668,13 @@ func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentR
 // timer, and the coordinator's own app-lifetime ctx, making a coordinate turn
 // un-interruptible by any user action; the /loop CancelInFlight bug class).
 func (c *Coordinator) WaitWithTimeoutCtx(ctx context.Context, timeout time.Duration) (map[string]*AgentResult, error) {
-	resultChan := make(chan map[string]*AgentResult, 1)
-	var once sync.Once
-
-	c.mu.Lock()
-	c.onAllComplete = func(results map[string]*AgentResult) {
-		// Use sync.Once to ensure we only send once and prevent goroutine leak
-		once.Do(func() {
-			select {
-			case resultChan <- results:
-			default:
-			}
-		})
-	}
-	c.mu.Unlock()
-
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	select {
-	case results := <-resultChan:
-		return results, nil
+	case <-c.completionCh:
+		return c.resultsSnapshot(), nil
 	case <-timer.C:
-		// Clean up: ensure callback won't block if called later
-		once.Do(func() {})
 		// Surface whatever tasks DID finish before the deadline instead of
 		// discarding them — checkCompletedAgents populates task.Result as
 		// each agent finishes, independent of whether all tasks are done, so
@@ -646,11 +682,8 @@ func (c *Coordinator) WaitWithTimeoutCtx(ctx context.Context, timeout time.Durat
 		// now, not just an all-or-nothing outcome.
 		return c.partialResults(), fmt.Errorf("coordination timed out after %v", timeout)
 	case <-c.ctx.Done():
-		// Clean up: ensure callback won't block if called later
-		once.Do(func() {})
 		return c.partialResults(), c.ctx.Err()
 	case <-ctx.Done():
-		once.Do(func() {})
 		return c.partialResults(), fmt.Errorf("coordination cancelled: %w", ctx.Err())
 	}
 }
@@ -679,11 +712,11 @@ func (c *Coordinator) CancelRunning() int {
 	return n
 }
 
-// GetTask returns a task by ID.
+// GetTask returns a caller-owned task snapshot by ID.
 func (c *Coordinator) GetTask(taskID string) *CoordinatedTask {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.tasks[taskID]
+	return cloneCoordinatedTask(c.tasks[taskID])
 }
 
 // GetTaskAgentID returns the agent ID assigned to a task, if it's currently running.
@@ -699,14 +732,14 @@ func (c *Coordinator) GetTaskAgentID(taskID string) string {
 	return ""
 }
 
-// GetAllTasks returns all tasks.
+// GetAllTasks returns caller-owned snapshots of all tasks.
 func (c *Coordinator) GetAllTasks() []*CoordinatedTask {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	tasks := make([]*CoordinatedTask, 0, len(c.tasks))
 	for _, task := range c.tasks {
-		tasks = append(tasks, task)
+		tasks = append(tasks, cloneCoordinatedTask(task))
 	}
 	return tasks
 }
@@ -801,19 +834,27 @@ func (c *Coordinator) SetUIBroadcaster(broadcaster UIBroadcaster) {
 // CancelTask cancels a specific task.
 func (c *Coordinator) CancelTask(taskID string) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	task := c.tasks[taskID]
 	if task == nil {
+		c.mu.Unlock()
 		return fmt.Errorf("task not found: %s", taskID)
+	}
+	// Cancellation is idempotent and must not replace a real terminal result.
+	if task.Status == TaskStatusCompleted || task.Status == TaskStatusFailed {
+		c.mu.Unlock()
+		return nil
 	}
 
 	// If running, cancel the agent
+	cancelledAgentID := ""
 	for agentID, tid := range c.running {
 		if tid == taskID {
 			if err := c.runner.Cancel(agentID); err != nil {
+				c.mu.Unlock()
 				return err
 			}
+			cancelledAgentID = agentID
 			delete(c.running, agentID)
 		}
 	}
@@ -822,10 +863,27 @@ func (c *Coordinator) CancelTask(taskID string) error {
 	c.queue.RemoveTask(taskID)
 	task.Status = TaskStatusFailed
 	task.Result = &AgentResult{
-		AgentID: "",
-		Type:    task.AgentType,
-		Status:  AgentStatusCancelled,
-		Error:   "cancelled by coordinator",
+		AgentID:   cancelledAgentID,
+		Type:      task.AgentType,
+		Status:    AgentStatusCancelled,
+		Error:     "cancelled by coordinator",
+		Completed: true,
+	}
+	c.completed[taskID] = true
+
+	// A cancelled prerequisite is terminal, matching the coordinator's existing
+	// failed-agent behavior: dependents become eligible once all prerequisites
+	// have reached a terminal state. unblockDependents also wakes processLoop.
+	c.unblockDependents(taskID)
+	onComplete := c.onTaskComplete
+	allComplete := c.isAllCompleteLocked()
+	callbackTask := cloneCoordinatedTask(task)
+	result := cloneAgentResult(task.Result)
+	c.mu.Unlock()
+
+	invokeCoordinatorTaskComplete(onComplete, callbackTask, result)
+	if allComplete {
+		c.notifyAllComplete()
 	}
 
 	return nil

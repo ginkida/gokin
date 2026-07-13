@@ -219,6 +219,10 @@ func TestExecutorExecuteLoop_PricesEachProviderRound(t *testing.T) {
 	if strings.Join(seen, ",") != strings.Join(want, ",") {
 		t.Fatalf("priced identities = %v, want %v", seen, want)
 	}
+	provider, model := exec.GetLastProviderIdentity()
+	if provider != "deepseek" || model != "deepseek-v4" {
+		t.Fatalf("last identity = %s/%s, want deepseek/deepseek-v4", provider, model)
+	}
 }
 
 func TestExecutorExecuteLoop_AccountsUsageBeforeStreamError(t *testing.T) {

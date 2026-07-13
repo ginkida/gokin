@@ -565,6 +565,17 @@ func (m Model) renderResponseMetadata(meta ResponseMetadataMsg) string {
 		parts = append(parts, formatResponseCost(meta.Cost))
 	}
 
+	// Normally the status bar already shows the selected model, so repeating it
+	// in every footer is noise. Surface identity only when an opt-in fallback
+	// actually served the response — crucial for attribution and billing.
+	if meta.FallbackUsed && meta.Provider != "" {
+		identity := meta.Provider
+		if meta.Model != "" {
+			identity += "/" + meta.Model
+		}
+		parts = append(parts, "via "+identity)
+	}
+
 	if len(parts) == 0 {
 		return ""
 	}

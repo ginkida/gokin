@@ -304,6 +304,23 @@ func TestResponseMetadataFormatsSmallCachedTurnCost(t *testing.T) {
 	}
 }
 
+func TestResponseMetadataShowsFallbackIdentityOnlyWhenUsed(t *testing.T) {
+	m := NewModel()
+	normal := stripAnsi(m.renderResponseMetadata(ResponseMetadataMsg{
+		Model: "glm-5", Provider: "glm", Duration: time.Second,
+	}))
+	if strings.Contains(normal, "via ") {
+		t.Fatalf("normal response footer repeated provider identity: %q", normal)
+	}
+
+	fallback := stripAnsi(m.renderResponseMetadata(ResponseMetadataMsg{
+		Model: "deepseek-v4", Provider: "deepseek", FallbackUsed: true, Duration: time.Second,
+	}))
+	if !strings.Contains(fallback, "via deepseek/deepseek-v4") {
+		t.Fatalf("fallback footer missing actual identity: %q", fallback)
+	}
+}
+
 func TestFormatToolRunSummary(t *testing.T) {
 	cases := []struct {
 		count       int

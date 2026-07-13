@@ -253,6 +253,8 @@ type Executor struct {
 	lastCacheReadTokens     int
 	lastEstimatedCost       float64
 	lastCostTracked         bool
+	lastProvider            string
+	lastModel               string
 	costCalculator          CostCalculator
 	// maxInputTokens is the active model's context window. Used as the in-loop
 	// prune trigger; 0 = unset (no pruning). Protected by tokenMu.
@@ -926,6 +928,15 @@ func (e *Executor) GetLastEstimatedCost() (cost float64, tracked bool) {
 	return cost, tracked
 }
 
+// GetLastProviderIdentity returns the backend that served the latest response
+// round of the most recent Execute call. Empty values mean no response arrived.
+func (e *Executor) GetLastProviderIdentity() (provider, model string) {
+	e.tokenMu.Lock()
+	provider, model = e.lastProvider, e.lastModel
+	e.tokenMu.Unlock()
+	return provider, model
+}
+
 // GetCacheTracker returns the prompt cache break tracker.
 func (e *Executor) GetCacheTracker() *client.CacheTracker {
 	return e.cacheTracker
@@ -960,6 +971,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	e.lastCacheReadTokens = 0
 	e.lastEstimatedCost = 0
 	e.lastCostTracked = false
+	e.lastProvider = ""
+	e.lastModel = ""
 	e.tokenMu.Unlock()
 
 	// NOTE: checkpoint journal is NOT cleared here — it persists across retries
@@ -1040,6 +1053,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 
 		e.tokenMu.Lock()
+		e.lastProvider = provider
+		e.lastModel = model
 		if resp.InputTokens > 0 {
 			e.lastInputTokens += resp.InputTokens
 		}

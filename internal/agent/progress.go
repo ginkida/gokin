@@ -61,7 +61,10 @@ func (a *Agent) updateProgress() {
 	}
 	progress.EstimatedRemaining = progress.EstimateRemaining()
 
-	callback(progress)
+	func() {
+		defer recoverAgentLifecycleCallback("agent_progress", a.ID)
+		callback(progress)
+	}()
 }
 
 // SetProgress sets the current progress state.

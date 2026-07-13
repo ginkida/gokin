@@ -15,13 +15,24 @@ type fakeCoordinator struct {
 	waitResults map[string]any
 	waitErr     error
 	stopped     int
+	addCalls    []fakeCoordinateAddCall
+	maxParallel int
+}
+
+type fakeCoordinateAddCall struct {
+	prompt string
+	deps   []string
 }
 
 func (f *fakeCoordinator) AddTask(prompt string, agentType any, priority any, deps []string) string {
 	f.nextID++
+	f.addCalls = append(f.addCalls, fakeCoordinateAddCall{prompt: prompt, deps: append([]string(nil), deps...)})
 	return fmt.Sprintf("internal-%d", f.nextID)
 }
 func (f *fakeCoordinator) Start() {}
+func (f *fakeCoordinator) SetMaxParallel(maxParallel int) {
+	f.maxParallel = maxParallel
+}
 func (f *fakeCoordinator) WaitWithTimeout(ctx context.Context, timeout time.Duration) (map[string]any, error) {
 	return f.waitResults, f.waitErr
 }

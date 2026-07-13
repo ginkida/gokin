@@ -132,6 +132,8 @@ type (
 	// ResponseMetadataMsg carries metadata about the completed response.
 	ResponseMetadataMsg struct {
 		Model                string
+		Provider             string
+		FallbackUsed         bool
 		InputTokens          int
 		OutputTokens         int
 		CacheReadInputTokens int

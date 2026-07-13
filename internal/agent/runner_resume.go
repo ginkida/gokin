@@ -121,9 +121,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 	attachMetaAgentMonitoring(agent, deps.metaAgent)
 
 	// Notify UI about agent start (resumed)
-	if onStart != nil {
-		onStart(agent.ID, string(state.Type), prompt)
-	}
+	invokeAgentStart(onStart, agent.ID, string(state.Type), prompt)
 
 	// Run agent asynchronously with proper cleanup
 	go func() {
@@ -219,9 +217,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 		r.reportAgentUsage(agent.ID, result)
 
 		// Notify UI about agent completion
-		if onComplete != nil {
-			onComplete(agent.ID, result)
-		}
+		invokeAgentComplete(onComplete, agent.ID, result)
 	}()
 
 	return agent.ID, nil
@@ -391,9 +387,7 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 			r.mu.Unlock()
 			r.notifyResultReady()
 
-			if onComplete != nil {
-				onComplete(a.ID, result)
-			}
+			invokeAgentComplete(onComplete, a.ID, result)
 		}(agent, deps, stateType, resumePrompt)
 
 		resumed++
@@ -462,9 +456,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 
 	attachMetaAgentMonitoring(agent, deps.metaAgent)
 
-	if onStart != nil {
-		onStart(agent.ID, string(state.Type), "Resumed from checkpoint")
-	}
+	invokeAgentStart(onStart, agent.ID, string(state.Type), "Resumed from checkpoint")
 
 	go func(a *Agent, runDeps runnerAgentDeps) {
 		defer func() {
@@ -527,9 +519,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 		r.mu.Unlock()
 		r.notifyResultReady()
 
-		if onComplete != nil {
-			onComplete(a.ID, result)
-		}
+		invokeAgentComplete(onComplete, a.ID, result)
 	}(agent, deps)
 
 	logging.Debug("resumed agent from last checkpoint", "agent_id", agent.ID, "checkpoint_id", latestID)

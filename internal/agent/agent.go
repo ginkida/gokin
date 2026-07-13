@@ -246,6 +246,8 @@ type Agent struct {
 
 // SetOnRateLimit sets the rate limit callback.
 func (a *Agent) SetOnRateLimit(cb func(rl *client.RateLimitMetadata)) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
 	a.onRateLimit = cb
 }
 
@@ -2669,7 +2671,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			// Notify plan approval callback for context compaction
 			if onPlanApproved != nil {
 				planSummary := a.treePlanner.GeneratePlanSummary(tree)
-				onPlanApproved(planSummary)
+				invokeAgentPlanApproved(onPlanApproved, a.ID, planSummary)
 			}
 
 			// Set total steps to best path length using SetProgress for thread safety
@@ -4496,9 +4498,7 @@ func (a *Agent) collectStream(ctx context.Context, stream *client.StreamingRespo
 			a.safeOnThinking(text)
 		},
 		OnRateLimit: func(rl *client.RateLimitMetadata) {
-			if a.onRateLimit != nil {
-				a.onRateLimit(rl)
-			}
+			a.safeOnRateLimit(rl)
 		},
 	})
 }
@@ -4890,10 +4890,8 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 			onToolActivity := a.onToolActivity
 			agentID := a.ID
 			a.stateMu.RUnlock()
-			if onToolActivity != nil {
-				args := map[string]any{"reason": reflection.Category}
-				onToolActivity(agentID, call.Name, args, "tool_recovery", false, "")
-			}
+			args := map[string]any{"reason": reflection.Category}
+			invokeAgentToolActivity(onToolActivity, agentID, call.Name, args, "tool_recovery", false, "")
 
 			fixResult, handled := a.recoveryExecutor.AttemptAutoFix(ctx, a, call, reflection, attempt)
 			if handled {
@@ -5039,18 +5037,14 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	a.stateMu.RUnlock()
 
 	// Report tool start to UI
-	if onToolActivity != nil {
-		onToolActivity(a.ID, call.Name, call.Args, "start", false, "")
-	}
+	invokeAgentToolActivity(onToolActivity, a.ID, call.Name, call.Args, "start", false, "")
 
 	// Guarantee "end" event is sent regardless of outcome (panic, error,
 	// success), carrying the tool's outcome so the UI can show meaningful
 	// sub-agent output (✓/✗ + a short result line) instead of a bare name.
 	defer func() {
-		if onToolActivity != nil {
-			success, summary := subAgentToolOutcome(out)
-			onToolActivity(a.ID, call.Name, call.Args, "end", success, summary)
-		}
+		success, summary := subAgentToolOutcome(out)
+		invokeAgentToolActivity(onToolActivity, a.ID, call.Name, call.Args, "end", success, summary)
 	}()
 
 	// No tool-level retry: API retries are handled by the client layer
@@ -5223,7 +5217,10 @@ func (a *Agent) safeOnText(text string) {
 	}
 	a.onTextMu.Lock()
 	defer a.onTextMu.Unlock()
-	fn(text)
+	func() {
+		defer recoverAgentLifecycleCallback("text", a.ID)
+		fn(text)
+	}()
 }
 
 // safeOnThinking streams thinking content to the UI in a thread-safe manner.
@@ -5241,7 +5238,36 @@ func (a *Agent) safeOnThinking(text string) {
 	}
 	a.onThinkingMu.Lock()
 	defer a.onThinkingMu.Unlock()
-	fn(text)
+	func() {
+		defer recoverAgentLifecycleCallback("thinking", a.ID)
+		fn(text)
+	}()
+}
+
+func (a *Agent) safeOnRateLimit(rl *client.RateLimitMetadata) {
+	a.stateMu.RLock()
+	fn := a.onRateLimit
+	a.stateMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("rate_limit", a.ID)
+	fn(rl)
+}
+
+func invokeAgentToolActivity(
+	callback func(agentID, toolName string, args map[string]any, status string, success bool, summary string),
+	agentID, toolName string,
+	args map[string]any,
+	status string,
+	success bool,
+	summary string,
+) {
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("tool_activity", agentID)
+	callback(agentID, toolName, args, status, success, summary)
 }
 
 // executePlannedAction executes a single planned action and returns the result.
@@ -5573,7 +5599,7 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 		a.safeOnText("Commands: [Enter] approve | e <n> <prompt> | d <n> | a [type] <prompt> | c cancel\n")
 		a.safeOnText("Types: explore, plan, general, bash, decompose (default: general)\n")
 
-		response, err := onInput("Plan approval > ")
+		response, err := invokeAgentInput(onInput, a.ID, "Plan approval > ")
 		if err != nil {
 			return err
 		}
@@ -5669,4 +5695,28 @@ func (a *Agent) requestPlanApproval(ctx context.Context, tree *PlanTree) error {
 			a.safeOnText(fmt.Sprintf("Unknown command: %s\n", cmd))
 		}
 	}
+}
+
+func invokeAgentInput(callback func(string) (string, error), agentID, prompt string) (response string, err error) {
+	if callback == nil {
+		return "", nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Error("agent input callback panicked",
+				"agent_id", agentID,
+				"panic", recovered,
+				"stack", logging.PanicStack())
+			err = fmt.Errorf("agent input callback panicked: %v", recovered)
+		}
+	}()
+	return callback(prompt)
+}
+
+func invokeAgentPlanApproved(callback func(string), agentID, summary string) {
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("plan_approved", agentID)
+	callback(summary)
 }

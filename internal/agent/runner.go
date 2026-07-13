@@ -407,8 +407,70 @@ func (r *Runner) reportAgentUsage(id string, result *AgentResult) {
 	callback := r.onAgentUsage
 	r.mu.RUnlock()
 	if callback != nil {
-		callback(id, result)
+		// Accounting/telemetry is ancillary. A buggy integration callback must
+		// never turn a successfully completed agent into a panic failure or skip
+		// the runner's remaining result/notification cleanup.
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logging.Error("agent usage callback panicked",
+						"agent_id", id,
+						"panic", recovered,
+						"stack", logging.PanicStack())
+				}
+			}()
+			callback(id, cloneAgentResult(result))
+		}()
 	}
+}
+
+func recoverAgentLifecycleCallback(kind, id string) {
+	if recovered := recover(); recovered != nil {
+		logging.Error("agent lifecycle callback panicked",
+			"callback", kind,
+			"agent_id", id,
+			"panic", recovered,
+			"stack", logging.PanicStack())
+	}
+}
+
+func invokeAgentStart(callback func(string, string, string), id, agentType, description string) {
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("start", id)
+	callback(id, agentType, description)
+}
+
+func invokeAgentComplete(callback func(string, *AgentResult), id string, result *AgentResult) {
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("complete", id)
+	callback(id, cloneAgentResult(result))
+}
+
+func invokeAgentProgress(callback func(string, *AgentProgress), id string, progress *AgentProgress) {
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("progress", id)
+	callback(id, progress)
+}
+
+func invokeSubAgentActivity(
+	callback func(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string),
+	agentID, agentType, prompt, toolName string,
+	args map[string]any,
+	status string,
+	success bool,
+	summary string,
+) {
+	if callback == nil {
+		return
+	}
+	defer recoverAgentLifecycleCallback("sub_agent_activity", agentID)
+	callback(agentID, agentType, prompt, toolName, args, status, success, summary)
 }
 
 // SetOnAgentProgress sets the callback for agent progress updates.

@@ -86,9 +86,8 @@ func TestWaitWithTimeout_NormalCompletionUnaffected(t *testing.T) {
 	c.tasks["t1"] = &CoordinatedTask{ID: "t1", Status: TaskStatusCompleted, Result: &AgentResult{Output: "ok"}}
 	c.mu.Unlock()
 
-	// Drive the completion callback the way checkCompletedAgents would once
-	// every task is done, on a short delay so WaitWithTimeout has already
-	// installed c.onAllComplete (it does so synchronously before its select).
+	// Drive the durable completion signal the way processLoop does once every
+	// task is done. WaitWithTimeout may begin before or after this notification.
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		c.notifyAllComplete()

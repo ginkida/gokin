@@ -4,8 +4,11 @@ import (
 	"container/heap"
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
+
+	"gokin/internal/logging"
 )
 
 // Priority represents the priority level of a task.
@@ -43,7 +46,8 @@ type QueueTask struct {
 	// Callback for completion
 	OnComplete func(error)
 	// Index for heap (needed by container/heap)
-	index int
+	index    int
+	sequence int
 }
 
 // priorityQueue implements heap.Interface and holds Tasks.
@@ -57,7 +61,10 @@ func (pq priorityQueue) Less(i, j int) bool {
 		return pq[i].Priority > pq[j].Priority
 	}
 	// If same priority, older tasks come first (FIFO)
-	return pq[i].CreatedAt.Before(pq[j].CreatedAt)
+	if !pq[i].CreatedAt.Equal(pq[j].CreatedAt) {
+		return pq[i].CreatedAt.Before(pq[j].CreatedAt)
+	}
+	return pq[i].sequence < pq[j].sequence
 }
 
 func (pq priorityQueue) Swap(i, j int) {
@@ -93,9 +100,10 @@ type QueueManager struct {
 	mu          sync.RWMutex
 
 	// Processing
-	processing      bool
-	currentTask     *QueueTask
-	processingQueue chan *QueueTask
+	processing     bool
+	currentTask    *QueueTask
+	queueWake      chan struct{}
+	processorToken chan struct{}
 
 	// Configuration
 	maxQueueSize int
@@ -106,6 +114,7 @@ type QueueManager struct {
 	totalProcessed    int
 	totalDropped      int
 	highPriorityCount int
+	totalWaitTime     time.Duration
 
 	// Callbacks
 	onTaskStart    func(task *QueueTask)
@@ -114,15 +123,89 @@ type QueueManager struct {
 
 // NewQueueManager creates a new queue manager.
 func NewQueueManager(maxQueueSize int) *QueueManager {
-	qm := &QueueManager{
-		queue:           make(priorityQueue, 0),
-		tasks:           make(map[string]*QueueTask),
-		processingQueue: make(chan *QueueTask, 1),
-		maxQueueSize:    maxQueueSize,
-		enabled:         true,
+	if maxQueueSize <= 0 {
+		maxQueueSize = 1
 	}
+	qm := &QueueManager{
+		queue:          make(priorityQueue, 0),
+		tasks:          make(map[string]*QueueTask),
+		queueWake:      make(chan struct{}, 1),
+		processorToken: make(chan struct{}, 1),
+		maxQueueSize:   maxQueueSize,
+		enabled:        true,
+	}
+	qm.processorToken <- struct{}{}
 	heap.Init(&qm.queue)
 	return qm
+}
+
+func (qm *QueueManager) notifyWork() {
+	select {
+	case qm.queueWake <- struct{}{}:
+	default:
+	}
+}
+
+func cloneQueueTask(task *QueueTask) *QueueTask {
+	if task == nil {
+		return nil
+	}
+	clone := *task
+	clone.index = -1
+	return &clone
+}
+
+func invokeQueueTaskStart(callback func(*QueueTask), task *QueueTask) {
+	if callback == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Error("queue start callback panicked",
+				"task_id", task.ID, "panic", recovered, "stack", logging.PanicStack())
+		}
+	}()
+	callback(cloneQueueTask(task))
+}
+
+func invokeQueueTaskComplete(callback func(*QueueTask, error), task *QueueTask, err error) {
+	if callback == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Error("queue completion callback panicked",
+				"task_id", task.ID, "panic", recovered, "stack", logging.PanicStack())
+		}
+	}()
+	callback(cloneQueueTask(task), err)
+}
+
+func invokeQueueTaskSpecificComplete(callback func(error), taskID string, err error) {
+	if callback == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Error("queue task completion callback panicked",
+				"task_id", taskID, "panic", recovered, "stack", logging.PanicStack())
+		}
+	}()
+	callback(err)
+}
+
+func executeQueueTask(ctx context.Context, taskID string, execute func(context.Context) error) (err error) {
+	if execute == nil {
+		return fmt.Errorf("queued task %s has no execute callback", taskID)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("queued task %s panicked: %v", taskID, recovered)
+			logging.Error("queued task panicked",
+				"task_id", taskID, "panic", recovered, "stack", logging.PanicStack())
+		}
+	}()
+	return execute(ctx)
 }
 
 // Enabled returns whether the queue is enabled.
@@ -142,45 +225,55 @@ func (qm *QueueManager) SetEnabled(enabled bool) {
 // Enqueue adds a task to the queue with the given priority.
 // Returns the task ID and an error if the queue is full.
 func (qm *QueueManager) Enqueue(ctx context.Context, message string, priority Priority, execute func(context.Context) error, onComplete func(error)) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if execute == nil {
+		return "", fmt.Errorf("execute callback cannot be nil")
+	}
 	if !qm.Enabled() {
-		// Queue disabled - execute immediately using provided context.
-		// Recovery is critical: if execute panics and onComplete is
-		// never called, the caller awaiting completion (e.g. a
-		// /resume-plan flow) hangs forever. Synthesize a panic-as-error
-		// so onComplete always fires.
 		go func(ctx context.Context) {
-			var err error
-			defer func() {
-				if r := recover(); r != nil {
-					err = fmt.Errorf("queued task panicked: %v", r)
-				}
-				if onComplete != nil {
-					onComplete(err)
-				}
-			}()
-			err = execute(ctx)
+			err := executeQueueTask(ctx, "direct", execute)
+			invokeQueueTaskSpecificComplete(onComplete, "direct", err)
 		}(ctx)
 		return "direct", nil
 	}
 
 	qm.mu.Lock()
-	defer qm.mu.Unlock()
+	var evicted *QueueTask
+	var evictionErr error
 
 	// Check queue size
 	if qm.queue.Len() >= qm.maxQueueSize {
-		// Queue is full - need to make room
-		// Don't drop high priority tasks
 		if priority != PriorityHigh {
 			qm.totalDropped++
+			qm.mu.Unlock()
 			return "", fmt.Errorf("queue full (max %d), task dropped", qm.maxQueueSize)
 		}
 
-		// Remove lowest priority task to make room for high priority
-		if qm.queue.Len() > 0 {
-			oldest := qm.queue.Pop().(*QueueTask)
-			delete(qm.tasks, oldest.ID)
-			qm.totalDropped++
+		// High priority may preempt only lower-priority work. Scan the heap
+		// because its last element is not guaranteed to be the worst item.
+		worst := -1
+		for i, queued := range qm.queue {
+			if queued.Priority >= priority {
+				continue
+			}
+			if worst == -1 || queued.Priority < qm.queue[worst].Priority ||
+				(queued.Priority == qm.queue[worst].Priority &&
+					(queued.CreatedAt.After(qm.queue[worst].CreatedAt) ||
+						(queued.CreatedAt.Equal(qm.queue[worst].CreatedAt) && queued.sequence > qm.queue[worst].sequence))) {
+				worst = i
+			}
 		}
+		if worst == -1 {
+			qm.totalDropped++
+			qm.mu.Unlock()
+			return "", fmt.Errorf("queue full (max %d), no lower-priority task can be preempted", qm.maxQueueSize)
+		}
+		evicted = heap.Remove(&qm.queue, worst).(*QueueTask)
+		delete(qm.tasks, evicted.ID)
+		qm.totalDropped++
+		evictionErr = fmt.Errorf("task preempted by high-priority queue item")
 	}
 
 	// Create task
@@ -189,9 +282,13 @@ func (qm *QueueManager) Enqueue(ctx context.Context, message string, priority Pr
 
 	task := &QueueTask{
 		ID:         taskID,
+		Message:    message,
 		Priority:   priority,
+		CreatedAt:  time.Now(),
+		Context:    ctx,
 		Execute:    execute,
 		OnComplete: onComplete,
+		sequence:   qm.taskCounter,
 	}
 
 	qm.tasks[taskID] = task
@@ -200,6 +297,14 @@ func (qm *QueueManager) Enqueue(ctx context.Context, message string, priority Pr
 
 	if priority == PriorityHigh {
 		qm.highPriorityCount++
+	}
+	onTaskComplete := qm.onTaskComplete
+	qm.mu.Unlock()
+	qm.notifyWork()
+
+	if evicted != nil {
+		invokeQueueTaskComplete(onTaskComplete, evicted, evictionErr)
+		invokeQueueTaskSpecificComplete(evicted.OnComplete, evicted.ID, evictionErr)
 	}
 
 	return taskID, nil
@@ -230,7 +335,7 @@ func (qm *QueueManager) Peek() *QueueTask {
 		return nil
 	}
 
-	return qm.queue[0]
+	return cloneQueueTask(qm.queue[0])
 }
 
 // GetTask returns a task by ID.
@@ -239,7 +344,7 @@ func (qm *QueueManager) GetTask(id string) (*QueueTask, bool) {
 	defer qm.mu.RUnlock()
 
 	task, ok := qm.tasks[id]
-	return task, ok
+	return cloneQueueTask(task), ok
 }
 
 // Remove removes a task from the queue by ID.
@@ -291,13 +396,17 @@ func (qm *QueueManager) GetStats() QueueStats {
 	qm.mu.RLock()
 	defer qm.mu.RUnlock()
 
-	return QueueStats{
+	stats := QueueStats{
 		Length:            qm.queue.Len(),
 		TotalQueued:       qm.totalQueued,
 		TotalProcessed:    qm.totalProcessed,
 		TotalDropped:      qm.totalDropped,
 		HighPriorityCount: qm.highPriorityCount,
 	}
+	if qm.totalProcessed > 0 {
+		stats.AverageWaitTime = qm.totalWaitTime / time.Duration(qm.totalProcessed)
+	}
+	return stats
 }
 
 // SetCallbacks sets the callbacks for task lifecycle events.
@@ -312,23 +421,30 @@ func (qm *QueueManager) SetCallbacks(onStart func(*QueueTask), onComplete func(*
 // ProcessQueue processes tasks from the queue in priority order.
 // This should be run as a goroutine.
 func (qm *QueueManager) ProcessQueue(ctx context.Context) {
-	pollTicker := time.NewTicker(100 * time.Millisecond)
-	defer pollTicker.Stop()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// QueueManager exposes one currentTask/processing lifecycle, so only one
+	// processor may own it at a time. A channel token lets replacement workers
+	// wait without losing cancellation while the previous worker winds down.
+	select {
+	case <-ctx.Done():
+		return
+	case <-qm.processorToken:
+	}
+	defer func() { qm.processorToken <- struct{}{} }()
 
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
 
 		task := qm.Dequeue()
 		if task == nil {
-			// No tasks - wait a bit, respecting context cancellation
 			select {
 			case <-ctx.Done():
 				return
-			case <-pollTicker.C:
+			case <-qm.queueWake:
 				continue
 			}
 		}
@@ -346,37 +462,48 @@ func (qm *QueueManager) processTask(ctx context.Context, task *QueueTask) {
 	onStart := qm.onTaskStart
 	onComplete := qm.onTaskComplete
 	qm.mu.Unlock()
+	waitTime := time.Since(task.CreatedAt)
+	defer func() {
+		qm.mu.Lock()
+		qm.processing = false
+		qm.currentTask = nil
+		qm.totalProcessed++
+		qm.totalWaitTime += waitTime
+		qm.mu.Unlock()
+	}()
 
-	// Notify start
-	if onStart != nil {
-		onStart(task)
+	invokeQueueTaskStart(onStart, task)
+
+	taskCtx := task.Context
+	if taskCtx == nil {
+		taskCtx = context.Background()
+	}
+	execCtx, cancel := context.WithCancelCause(taskCtx)
+	stopProcessCancellation := context.AfterFunc(ctx, func() { cancel(ctx.Err()) })
+	if err := ctx.Err(); err != nil {
+		cancel(err)
+	}
+	defer func() {
+		stopProcessCancellation()
+		cancel(nil)
+	}()
+
+	var err error
+	if execCtx.Err() != nil {
+		err = context.Cause(execCtx)
+	} else {
+		err = executeQueueTask(execCtx, task.ID, task.Execute)
 	}
 
-	// Execute the task
-	err := task.Execute(ctx)
-
-	// Notify completion
-	if onComplete != nil {
-		onComplete(task, err)
-	}
-
-	// Call task-specific completion callback
-	if task.OnComplete != nil {
-		task.OnComplete(err)
-	}
-
-	qm.mu.Lock()
-	qm.processing = false
-	qm.currentTask = nil
-	qm.totalProcessed++
-	qm.mu.Unlock()
+	invokeQueueTaskComplete(onComplete, task, err)
+	invokeQueueTaskSpecificComplete(task.OnComplete, task.ID, err)
 }
 
 // GetCurrentTask returns the currently processing task.
 func (qm *QueueManager) GetCurrentTask() *QueueTask {
 	qm.mu.RLock()
 	defer qm.mu.RUnlock()
-	return qm.currentTask
+	return cloneQueueTask(qm.currentTask)
 }
 
 // IsProcessing returns whether a task is currently being processed.
@@ -393,8 +520,17 @@ func (qm *QueueManager) ListTasks() []*QueueTask {
 
 	tasks := make([]*QueueTask, 0, qm.queue.Len())
 	for _, task := range qm.queue {
-		tasks = append(tasks, task)
+		tasks = append(tasks, cloneQueueTask(task))
 	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].Priority != tasks[j].Priority {
+			return tasks[i].Priority > tasks[j].Priority
+		}
+		if !tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
+			return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+		}
+		return tasks[i].sequence < tasks[j].sequence
+	})
 
 	return tasks
 }

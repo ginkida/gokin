@@ -56,22 +56,67 @@ func (r *Runner) WaitWithContext(ctx context.Context, agentID string) (*AgentRes
 	}
 }
 
-// completedResultLocked returns (result, true) iff agentID has a completed
-// result, checking .Completed under r.mu so the read can't race an in-place
-// mutator holding the write lock (see WaitWithContext). Also used by
-// Coordinator (same package) instead of GetResult()+a raw .Completed check —
-// GetResult releases r.mu before returning the pointer, so a bare field read
-// afterward would race the SAME writers (SpawnAsync's panic-recovery defer,
-// Runner.Cancel — reachable independently of Coordinator's own c.mu via
-// task_stop/shutdown) this helper exists to guard against.
+// completedResultLocked returns an owned snapshot iff agentID has completed.
+// Both the flag check and the copy happen under r.mu: returning the shared
+// pointer would merely move the race to the caller's later reads of
+// Status/Error/Metadata while Cancel or panic recovery mutates it in place.
 func (r *Runner) completedResultLocked(agentID string) (*AgentResult, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	result, ok := r.results[agentID]
 	if ok && result.Completed {
-		return result, true
+		return cloneAgentResult(result), true
 	}
 	return nil, false
+}
+
+// cloneAgentResult returns a caller-owned snapshot. AgentResult contains a
+// slice and an extensible metadata graph, so a struct copy alone would still
+// expose runner-owned mutable collections to readers and callbacks.
+func cloneAgentResult(result *AgentResult) *AgentResult {
+	if result == nil {
+		return nil
+	}
+	clone := *result
+	clone.TouchedPaths = append([]string(nil), result.TouchedPaths...)
+	clone.Metadata = cloneAgentMetadata(result.Metadata)
+	return &clone
+}
+
+func cloneAgentMetadata(metadata map[string]any) map[string]any {
+	if metadata == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		clone[key] = cloneAgentMetadataValue(value)
+	}
+	return clone
+}
+
+func cloneAgentMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneAgentMetadata(typed)
+	case map[string]string:
+		clone := make(map[string]string, len(typed))
+		for key, item := range typed {
+			clone[key] = item
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(typed))
+		for i, item := range typed {
+			clone[i] = cloneAgentMetadataValue(item)
+		}
+		return clone
+	case []string:
+		return append([]string(nil), typed...)
+	case []byte:
+		return append([]byte(nil), typed...)
+	default:
+		return value
+	}
 }
 
 // WaitWithTimeout waits for an agent to complete with a specific timeout.
@@ -139,20 +184,9 @@ func (r *Runner) WaitAll(agentIDs []string) ([]*AgentResult, error) {
 	return results, firstErr
 }
 
-// GetResult returns a SNAPSHOT (copy) of an agent's result, not the shared
-// pointer. External consumers (task.go/task_output.go's agentRunnerAdapter,
-// router.go, messenger.go) read Status/Completed/Error/Output off whatever
-// this returns with no lock of their own — round 4's completedResultLocked
-// fix covers in-package callers that gate on .Completed first, but GetResult
-// is the general-purpose accessor used to poll a STILL-RUNNING agent too, so
-// there's no flag to gate on. Returning the raw pointer let a concurrent
-// Runner.Cancel (task_stop / meta-agent stuck-check / shutdown) mutate the
-// SAME struct's fields under r.mu.Lock() while the caller read them
-// unguarded — a genuine data race on a currently wired, model-triggerable
-// path (task(run_in_background) + task_output(get) + task_stop). AgentResult
-// has no lock fields, so a value copy is race-free for the scalar fields;
-// Metadata (a map) is intentionally NOT deep-copied here — a residual, lower-
-// priority gap, not the race this fix closes.
+// GetResult returns a deep-enough caller-owned snapshot of an agent result.
+// External consumers poll it without holding r.mu and may retain or mutate it;
+// none of that should race with or modify the runner's internal ledger.
 func (r *Runner) GetResult(agentID string) (*AgentResult, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -161,8 +195,7 @@ func (r *Runner) GetResult(agentID string) (*AgentResult, bool) {
 	if !ok {
 		return nil, false
 	}
-	cp := *result
-	return &cp, true
+	return cloneAgentResult(result), true
 }
 
 // GetAgent returns an agent by ID.
