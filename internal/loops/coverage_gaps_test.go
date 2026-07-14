@@ -152,10 +152,12 @@ func TestNewDefaultFileStorage_RoundTrip(t *testing.T) {
 // truncateErr / truncateForSummary (runner.go:638,650 — were 66-80%)
 // ──────────────────────────────────────────────────────────────────────────────
 
-// TestTruncateErr table-drives the three branches: short passthrough,
-// boundary (exactly 150), and long-with-ellipsis. Also covers the
-// leading/trailing whitespace TrimSpace path.
+// TestTruncateErr table-drives the branches: short passthrough, boundary
+// (exactly 200), long-with-MIDDLE-elision (the tail carries a provider
+// error's actionable half, so it must survive — v0.100.87), machine-wrapper
+// stripping, and the leading/trailing whitespace TrimSpace path.
 func TestTruncateErr(t *testing.T) {
+	longIn := strings.Repeat("x", 300) + " switch provider with /provider"
 	cases := []struct {
 		name string
 		in   string
@@ -165,9 +167,9 @@ func TestTruncateErr(t *testing.T) {
 		{"whitespace only", "   \n\t  ", ""},
 		{"short", "boom", "boom"},
 		{"trimmed short", "  boom  ", "boom"},
-		{"exactly 150", strings.Repeat("x", 150), strings.Repeat("x", 150)},
-		{"151 truncates", strings.Repeat("x", 151), strings.Repeat("x", 147) + "..."},
-		{"long with leading ws", "   " + strings.Repeat("y", 200), strings.Repeat("y", 147) + "..."},
+		{"exactly 200", strings.Repeat("x", 200), strings.Repeat("x", 200)},
+		{"wrapper stripped", "model response error (other): boom", "boom"},
+		{"nested prefix composed", "Loop context: function response error (stream_idle_timeout): stalled", "Loop context: stalled"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -177,6 +179,22 @@ func TestTruncateErr(t *testing.T) {
 					c.in, got, len(got), c.want, len(c.want))
 			}
 		})
+	}
+
+	// Over-cap: bounded at ~200 runes with the ellipsis in the MIDDLE — head
+	// and the actionable tail both survive.
+	got := truncateErr(longIn)
+	if n := len([]rune(got)); n > 200 {
+		t.Fatalf("over-cap error not bounded: %d runes", n)
+	}
+	if !strings.HasSuffix(got, "switch provider with /provider") {
+		t.Fatalf("actionable tail must survive the cap: %q", got)
+	}
+	if !strings.HasPrefix(got, "xxxx") {
+		t.Fatalf("head must survive too: %q", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Fatalf("elision must be disclosed: %q", got)
 	}
 }
 

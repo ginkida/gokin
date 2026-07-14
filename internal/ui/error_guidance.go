@@ -482,6 +482,20 @@ func FormatErrorWithGuidanceWidth(styles *Styles, errMsg string, termWidth int) 
 // raw error still drives guidance matching and logging.
 var machineErrorPrefixRe = regexp.MustCompile(`^(?i)(model response error|function response error|request failed|agent error)(\s*\([^)]{0,40}\))?:\s*`)
 
+// machineErrorAnywhereRe is the non-anchored sibling of machineErrorPrefixRe
+// for surfaces that COMPOSE their own prefixes around an error ("Loop x #3:
+// Iteration error: model response error (other): …") — the wrapper can sit
+// mid-string there. The phrases are distinctive retry-taxonomy strings, so a
+// global replace is safe for display text.
+var machineErrorAnywhereRe = regexp.MustCompile(`(?i)\b(model response error|function response error)(\s*\([^)]{0,40}\))?:\s*`)
+
+// stripMachineErrorWrappers removes machine wrapper taxonomy from a display
+// string wherever it appears. Display-only — raw errors keep driving
+// guidance matching and logs.
+func stripMachineErrorWrappers(s string) string {
+	return machineErrorAnywhereRe.ReplaceAllString(s, "")
+}
+
 // displayErrorLines prepares an error for the user-facing card: strips
 // machine wrapper prefixes, collapses newlines, and word-wraps to the given
 // width. Always returns at least one line. Capped at 5 lines with the

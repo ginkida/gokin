@@ -89,3 +89,30 @@ func TestGetErrorGuidance_GLMLimitWordings(t *testing.T) {
 		}
 	}
 }
+
+// Toasts are one line by design — but their TAIL is where this app puts the
+// action ("… — check /hooks", "/loop resume <id>", the "→ hint" suffix). The
+// old tail-cut amputated it on narrow terminals; toasts now middle-elide and
+// strip machine wrapper taxonomy.
+func TestRenderToast_KeepsActionableTailAndStripsWrapper(t *testing.T) {
+	tm := NewToastManager(DefaultStyles())
+	tm.ShowError("Loop loop-x #3: Iteration error: model response error (other): GLM weekly limit exhausted — retry later or /loop resume loop-x")
+
+	got := stripAnsi(tm.View(60)) // narrow terminal
+	if strings.Contains(got, "model response error") || strings.Contains(got, "(other)") {
+		t.Fatalf("machine wrapper leaked into the toast: %q", got)
+	}
+	if !strings.Contains(got, "/loop resume loop-x") {
+		t.Fatalf("the actionable tail must survive toast truncation: %q", got)
+	}
+	if !strings.Contains(got, "Loop loop-x #3") {
+		t.Fatalf("the head (what happened) must survive too: %q", got)
+	}
+
+	// Short toasts render whole, untouched.
+	tm2 := NewToastManager(DefaultStyles())
+	tm2.ShowInfo("Saved")
+	if got := stripAnsi(tm2.View(80)); !strings.Contains(got, "Saved") {
+		t.Fatalf("short toast must render verbatim: %q", got)
+	}
+}

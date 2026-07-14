@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -720,11 +721,27 @@ func truncateForSummary(s string) string {
 // truncateErr trims an error string to keep the iteration log readable.
 // Some agent errors include full stack traces that would balloon the
 // summary if pasted verbatim.
+// loopMachineErrWrapperRe strips retry-taxonomy wrappers ("model response
+// error (other): ") from iteration summaries — they mean nothing to the
+// user reading /loop status, the toast, or the markdown log. Mirrors the
+// ui package's display strip (kept local — loops has no ui dependency,
+// same precedent as renderTokenCount).
+var loopMachineErrWrapperRe = regexp.MustCompile(`(?i)\b(model response error|function response error)(\s*\([^)]{0,40}\))?:\s*`)
+
+// truncateErr prepares an error for the iteration summary: machine wrappers
+// stripped, and over-long text elided in the MIDDLE — the tail is where a
+// provider error's actionable half lives ("… switch provider with
+// /provider"), and the old tail-cut at 150 runes amputated exactly that.
 func truncateErr(s string) string {
-	if r := []rune(strings.TrimSpace(s)); len(r) > 150 {
-		return string(r[:147]) + "..."
+	s = strings.TrimSpace(loopMachineErrWrapperRe.ReplaceAllString(s, ""))
+	const maxRunes = 200
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
 	}
-	return strings.TrimSpace(s)
+	head := maxRunes * 2 / 3
+	tail := maxRunes - head - 1
+	return string(r[:head]) + "…" + string(r[len(r)-tail:])
 }
 
 // parseNextHint scans the agent's output for "next:" / "wait N" /

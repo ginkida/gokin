@@ -377,11 +377,22 @@ func (m *ToastManager) renderToast(toast Toast, width int) string {
 		msg = "Notification"
 	}
 
+	// Strip machine wrapper taxonomy ("model response error (other): ") the
+	// same way the error card does — it can sit mid-string here because toast
+	// messages compose prefixes of their own ("Loop x #3: Iteration error: …").
+	msg = stripMachineErrorWrappers(msg)
+
 	iconWidth := lipgloss.Width(icon)
 	if width <= iconWidth {
 		return iconStyle.Render(truncateForWidth(icon, width))
 	}
-	msg = truncateForWidth(msg, width-iconWidth-1)
+	// Middle-elide, never tail-cut: a toast is one line by design, and its
+	// TAIL is where this app puts the action ("… — check /hooks",
+	// "… /loop resume <id>", the "→ <hint>" ShowErrorWithHint appends). The
+	// old tail truncation amputated exactly that on narrow terminals; the
+	// head (what happened) and tail (what to do) now both survive. The full
+	// text stays readable in the notification center.
+	msg = truncateMiddleForWidth(msg, width-iconWidth-1)
 	return iconStyle.Render(icon) + " " + msgStyle.Render(msg)
 }
 
