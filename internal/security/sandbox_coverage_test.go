@@ -162,10 +162,31 @@ func TestSandbox_NewCommand_Disabled(t *testing.T) {
 // SandboxedCommand.Run (0% → full)
 // ===========================================================================
 
-func TestSandbox_Run_Success(t *testing.T) {
+// requireSandboxExec skips when the ENVIRONMENT cannot actually execute a
+// sandboxed command. On linux the sandbox clones mount/UTS namespaces
+// (CLONE_NEWNS|CLONE_NEWUTS, sandbox_linux.go) — forbidden inside
+// unprivileged CI containers, where fork/exec fails with "operation not
+// permitted". These tests verify the BEHAVIOR of a working sandbox, not the
+// host's namespace privileges (the macOS-written-test-breaks-on-linux-CI
+// class, environmental-capability flavor).
+func requireSandboxExec(t *testing.T) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("sandbox uses bash")
 	}
+	dir := t.TempDir()
+	sc, err := NewSandboxedCommand(context.Background(), dir, "true", DefaultSandboxConfig())
+	if err != nil {
+		t.Skipf("sandbox unavailable here: %v", err)
+	}
+	if res := sc.Run(10 * time.Second); res.Error != nil &&
+		strings.Contains(res.Error.Error(), "operation not permitted") {
+		t.Skipf("environment cannot execute sandboxed commands: %v", res.Error)
+	}
+}
+
+func TestSandbox_Run_Success(t *testing.T) {
+	requireSandboxExec(t)
 	dir := t.TempDir()
 	sc, err := NewSandboxedCommand(context.Background(), dir, "echo hello", DefaultSandboxConfig())
 	if err != nil {
@@ -182,9 +203,7 @@ func TestSandbox_Run_Success(t *testing.T) {
 }
 
 func TestSandbox_Run_NonZeroExit(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("sandbox uses bash")
-	}
+	requireSandboxExec(t)
 	dir := t.TempDir()
 	sc, _ := NewSandboxedCommand(context.Background(), dir, "exit 42", DefaultSandboxConfig())
 	result := sc.Run(10 * time.Second)
@@ -194,9 +213,7 @@ func TestSandbox_Run_NonZeroExit(t *testing.T) {
 }
 
 func TestSandbox_Run_Timeout(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("sandbox uses bash")
-	}
+	requireSandboxExec(t)
 	// readWithTimeout leaks its goroutine when the timeout fires (io.Copy is
 	// uncancellable), which trips -race. Skip under -race to keep CI green;
 	// the timeout path is still covered by the non-race run.
@@ -212,9 +229,7 @@ func TestSandbox_Run_Timeout(t *testing.T) {
 }
 
 func TestSandbox_Run_BadCommand(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("sandbox uses bash")
-	}
+	requireSandboxExec(t)
 	dir := t.TempDir()
 	sc, _ := NewSandboxedCommand(context.Background(), dir, "this_command_does_not_exist_xyz", DefaultSandboxConfig())
 	result := sc.Run(10 * time.Second)
