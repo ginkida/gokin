@@ -48,6 +48,7 @@ func TestHandleToolResultWithInfo_ReadCollapsesByDefault(t *testing.T) {
 	}, "\n")
 
 	m.handleToolResultWithInfo(content, "read", "internal/ui/output.go", time.Now().Add(-1500*time.Millisecond))
+	m.flushPendingToolLines() // buffered by aggregation; single entry = legacy line
 
 	rendered := stripAnsi(m.output.state.content.String())
 
@@ -92,6 +93,7 @@ func TestHandleToolResultWithInfo_BashCollapsesByDefault(t *testing.T) {
 	}, "\n")
 
 	m.handleToolResultWithInfo(content, "bash", "go test ./internal/ui", time.Now().Add(-2*time.Second))
+	m.flushPendingToolLines()
 	rendered := stripAnsi(m.output.state.content.String())
 
 	// Body preview is suppressed — no raw lines from stdout.
@@ -136,6 +138,7 @@ func TestHandleToolResultWithInfo_UsesExplicitCompactMode(t *testing.T) {
 	m.toolOutput.ToggleAll()
 	m.toolOutput.ToggleAll()
 	m.handleToolResultWithInfo(content, "bash", "go test ./internal/ui", time.Now().Add(-2*time.Second))
+	m.flushPendingToolLines()
 
 	rendered := stripAnsi(m.output.state.content.String())
 	// Compact mode collapses silently — body is empty, no inline content.

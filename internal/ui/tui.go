@@ -199,6 +199,11 @@ type Model struct {
 	// tests, stays unchanged). Consumed and cleared on use.
 	pendingEditDiff *editDiffDisplay
 
+	// pendingToolLines buffers consecutive title-only read/bash completions
+	// for aggregated emission ("Read 2 files, ran 3 shell commands") —
+	// flushed before anything else lands in scrollback. See tool_aggregation.go.
+	pendingToolLines []aggToolEntry
+
 	// Callbacks
 	onSubmit                   func(message string)
 	onQuit                     func()
@@ -2306,6 +2311,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.responseToolCount = 0
 				m.responseToolFailures = 0
 				m.output.SetFrozen(false) // new turn → follow the response from the bottom (clears any leftover scroll-up freeze)
+				m.flushPendingToolLines()
 				m.output.AppendLine(m.styles.FormatUserMessage(value))
 				m.output.AppendLine("")
 
@@ -2341,6 +2347,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				expanded := m.input.ExpandedValue()
 				m.input.AddToHistory(expanded)
 				m.input.Reset()
+				m.flushPendingToolLines() // queued echo lands mid-turn — keep order
 				m.output.AppendLine(m.styles.FormatUserMessage(value))
 				m.output.AppendLine("")
 
@@ -2543,6 +2550,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 		m.markResponseStarted()
 
+		m.flushPendingToolLines()
 		m.output.AppendThinkingStream(string(msg))
 
 	case StreamTextMsg:
@@ -2563,6 +2571,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// Mark response as started (no header in Claude Code style)
 		m.markResponseStarted()
 
+		m.flushPendingToolLines()
 		m.output.AppendTextStream(string(msg))
 		m.currentResponseBuf.WriteString(string(msg))
 
@@ -2726,6 +2735,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastActivityTime = time.Now()
 
 	case ResponseDoneMsg:
+		m.flushPendingToolLines() // end of turn — emit any buffered tool lines
 		m.output.EndThinking()
 		// Finalize the turn's bookkeeping unconditionally (the backend really
 		// is done), but don't clobber an ACTIVE modal raised by a DIFFERENT
@@ -2784,6 +2794,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.responseToolFailures = 0
 
 	case ErrorMsg:
+		m.flushPendingToolLines() // preserve ordering before the error card
 		errStr := msg.Error()
 		// Same modal-preservation rule as ResponseDoneMsg above — an error
 		// from an UNRELATED foreground/background source must not silently
@@ -3567,6 +3578,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	// Sub-agent activity tracking
 	case SubAgentActivityMsg:
+		// Sub-agent lines land in scrollback — flush buffered foreground tool
+		// lines first so the aggregate stays in chronological position.
+		m.flushPendingToolLines()
 		// Agent activity shown inline with dim prefix showing agent type.
 		// Background agents are async — their events interleave with other output,
 		// so we use a flat prefix format instead of tree connectors.
@@ -4058,6 +4072,7 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 	// marker via the tool-result stream; the user gets a quiet "we already
 	// have this" note instead of a full row.
 	if !failed && toolName == "read" && strings.HasPrefix(strings.TrimSpace(content), "[Unchanged since turn ") {
+		m.flushPendingToolLines()
 		// Show only the concise "[Unchanged …]" marker, not the model-facing
 		// reuse guidance the stub appends after the closing bracket — the user
 		// just needs the quiet "we already have this" note.
@@ -4082,6 +4097,7 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 		// Flat failure line matching the success one-liner — `▪ ✗ Name(target)`
 		// with the error nested under the ⎿ corner — instead of a rounded red
 		// box. Pass and fail now share one calm shape.
+		m.flushPendingToolLines()
 		titleLine := m.styles.FormatToolFailureLine(name, conciseToolTarget(toolName, toolInfo), duration)
 		m.emitToolResultCard(titleLine, failureBody(detail, toolName))
 		return
@@ -4095,13 +4111,25 @@ func (m *Model) handleToolResultWithStatus(content, toolName, toolInfo string, s
 	// still receives the v0.88 "Updated region" snippet via Content.
 	if d := m.pendingEditDiff; d != nil {
 		m.pendingEditDiff = nil
+		m.flushPendingToolLines()
 		m.emitToolResultCard(titleLine, renderEditDiffBody(d))
 		return
 	}
 
 	// Body (expand-state aware) — built once, fed either into a bordered
 	// card or the legacy 4-space-indented flat form depending on width.
+	// buildToolResultBody ALSO stores the full output in the expand store,
+	// so a buffered (aggregated) line's details remain reachable.
 	body := m.buildToolResultBody(toolName, toolInfo, content, contentStyle)
+
+	// Title-only read/bash completions aggregate ("Read 2 files, ran 3 shell
+	// commands") instead of stacking near-identical rows; anything with a
+	// visible body flushes the buffer first so ordering is preserved.
+	if body == "" && aggregatableToolLine(toolName) {
+		m.bufferToolLine(name, target, outcome, duration)
+		return
+	}
+	m.flushPendingToolLines()
 
 	m.emitToolResultCard(titleLine, body)
 }

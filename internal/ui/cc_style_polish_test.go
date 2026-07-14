@@ -214,6 +214,7 @@ func TestToolResultMergedLine_NoDuplication(t *testing.T) {
 	m.width = 100
 	m.handleToolResultWithInfo(strings.Repeat("x\n", 175), "read",
 		"~/projects/glm/internal/shared/credentials.go", time.Now().Add(-50*time.Millisecond))
+	m.flushPendingToolLines() // buffered by aggregation; a single entry flushes as the legacy line
 	rendered := stripAnsi(m.output.state.content.String())
 
 	if !strings.Contains(rendered, "Read(credentials.go)") {
@@ -231,6 +232,7 @@ func TestToolResultMergedLine_NoDuplication(t *testing.T) {
 	m2.width = 100
 	m2.handleToolResultWithInfo("ok\n", "bash",
 		"go build ./... 2>&1 | head -40", time.Now().Add(-1900*time.Millisecond))
+	m2.flushPendingToolLines()
 	r2 := stripAnsi(m2.output.state.content.String())
 	if !strings.Contains(r2, "Bash(go build ./...)") {
 		t.Errorf("bash plumbing should strip to Bash(go build ./...):\n%s", r2)
