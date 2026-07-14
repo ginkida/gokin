@@ -39,8 +39,15 @@ func TestStreaming_NoScannerGoroutineLeakPerResponse(t *testing.T) {
 	defer srv.Close()
 
 	c := &AnthropicClient{
-		config:     AnthropicConfig{Model: "glm-5", BaseURL: srv.URL, APIKey: "test", Provider: "glm"},
-		httpClient: &http.Client{},
+		config: AnthropicConfig{Model: "glm-5", BaseURL: srv.URL, APIKey: "test", Provider: "glm"},
+		// Keep-alives OFF: the default transport pools idle connections whose
+		// readLoop/writeLoop goroutines PERSIST by design (90s idle timeout) —
+		// under CI load an extra mid-test connection produced a permanent
+		// +2/+3 goroutine delta no winddown deadline can absorb. With pooling
+		// disabled every response's transport goroutines exit naturally; the
+		// scanner goroutines this test hunts are ours, not the transport's,
+		// and are unaffected.
+		httpClient: &http.Client{Transport: &http.Transport{DisableKeepAlives: true}},
 	}
 
 	runOnce := func() {
