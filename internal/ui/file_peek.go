@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -68,26 +70,31 @@ func (p *FilePeekPanel) View(width int) string {
 
 	icon := actionIcon(p.peek.Action)
 	verb := actionVerb(p.peek.Action)
-	// Reserve ~20 cols for icon + verb + spacing. On a very narrow terminal
-	// (e.g. split pane in tmux), width-20 can go negative — shortenPath
-	// would panic on out-of-range slicing, so clamp first.
-	pathBudget := width - 20
-	if pathBudget < 10 {
-		pathBudget = 10
+	if width <= 0 {
+		width = 80
 	}
-	path := shortenPath(p.peek.FilePath, pathBudget)
 	meta := formatPeekMeta(p.peek.Content)
 	color := actionColor(p.peek.Action)
 
+	label := fmt.Sprintf("%s %s ", icon, verb)
+	if lipgloss.Width(label) >= width {
+		label = icon + " "
+		if lipgloss.Width(label) >= width {
+			return lipgloss.NewStyle().Foreground(color).Render(truncateForWidth(icon, width))
+		}
+	}
+	pathBudget := max(width-lipgloss.Width(label), 1)
+	path := truncateForWidth(shortenPath(p.peek.FilePath, pathBudget), pathBudget)
+
 	primary := lipgloss.NewStyle().
 		Foreground(color).
-		Render(fmt.Sprintf("%s %s ", icon, verb))
+		Render(label)
 	pathStyled := lipgloss.NewStyle().
 		Foreground(ColorText).
 		Render(path)
 
 	line := primary + pathStyled
-	if meta != "" {
+	if meta != "" && lipgloss.Width(line)+2+lipgloss.Width(meta) <= width {
 		metaStyled := lipgloss.NewStyle().
 			Foreground(ColorDim).
 			Render("  " + meta)
@@ -119,7 +126,8 @@ func actionColor(action string) lipgloss.Color {
 // are a mix of tenses ("read", "reading", "modifying", "created") — normalise
 // to present participles for a consistent status line.
 func actionVerb(action string) string {
-	switch action {
+	normalized := strings.ToLower(strings.TrimSpace(action))
+	switch normalized {
 	case "read", "reading":
 		return "Reading"
 	case "write":
@@ -130,13 +138,14 @@ func actionVerb(action string) string {
 		return "Editing"
 	case "modifying":
 		return "Modifying"
-	case "Inserting", "inserting":
+	case "inserting":
 		return "Inserting"
 	}
-	if action == "" {
+	if normalized == "" {
 		return "Touching"
 	}
-	return strings.ToUpper(action[:1]) + action[1:]
+	first, size := utf8.DecodeRuneInString(normalized)
+	return string(unicode.ToUpper(first)) + normalized[size:]
 }
 
 // formatPeekMeta summarises the snippet payload as "N lines · X.Y KB". Returns

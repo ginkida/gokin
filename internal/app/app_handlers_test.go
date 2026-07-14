@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"gokin/internal/agent"
 	"gokin/internal/config"
 	"gokin/internal/ui"
 )
@@ -26,6 +27,24 @@ func TestPermPromptTimeout(t *testing.T) {
 	}
 	if got := (&App{}).permPromptTimeout(); got != DefaultPermissionTimeout {
 		t.Errorf("nil config → %v, want default %v", got, DefaultPermissionTimeout)
+	}
+}
+
+func TestApprovedWorkspaceFilesPreservesPerFileReview(t *testing.T) {
+	changes := []agent.WorkspaceChangePreview{
+		{FilePath: "a.txt"},
+		{FilePath: "b.txt"},
+		{FilePath: "c.txt"},
+	}
+	approved := approvedWorkspaceFiles(changes, map[string]ui.DiffDecision{
+		"a.txt": ui.DiffApply,
+		"b.txt": ui.DiffReject,
+		"c.txt": ui.DiffApply,
+		// A response cannot smuggle an unreviewed file into apply-back.
+		"outside.txt": ui.DiffApply,
+	})
+	if len(approved) != 2 || approved[0] != "a.txt" || approved[1] != "c.txt" {
+		t.Fatalf("approved files = %v, want [a.txt c.txt]", approved)
 	}
 }
 

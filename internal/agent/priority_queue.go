@@ -16,15 +16,16 @@ const (
 
 // CoordinatedTask represents a task managed by the Coordinator.
 type CoordinatedTask struct {
-	ID           string
-	Prompt       string
-	AgentType    AgentType
-	Priority     TaskPriority
-	Dependencies []string // IDs of tasks that must complete first
-	Status       TaskStatus
-	Result       *AgentResult
-	Thought      string // Accumulated reasoning/thought
-	index        int    // Index in heap
+	ID            string
+	Prompt        string
+	AgentType     AgentType
+	Priority      TaskPriority
+	Dependencies  []string // IDs of tasks that must complete first
+	Status        TaskStatus
+	Result        *AgentResult
+	Thought       string // Accumulated reasoning/thought
+	index         int    // Index in heap
+	queueSequence uint64 // Stable FIFO tie-breaker while queued
 }
 
 // TaskStatus represents the status of a coordinated task.
@@ -41,14 +42,17 @@ const (
 
 // TaskQueue is a priority queue for coordinated tasks.
 type TaskQueue struct {
-	items []*CoordinatedTask
-	mu    sync.RWMutex
+	items        []*CoordinatedTask
+	byID         map[string]*CoordinatedTask
+	nextSequence uint64
+	mu           sync.RWMutex
 }
 
 // NewTaskQueue creates a new priority queue.
 func NewTaskQueue() *TaskQueue {
 	tq := &TaskQueue{
 		items: make([]*CoordinatedTask, 0),
+		byID:  make(map[string]*CoordinatedTask),
 	}
 	heap.Init(tq)
 	return tq
@@ -61,7 +65,10 @@ func (tq *TaskQueue) Len() int {
 
 // Less compares two items by priority (higher priority first).
 func (tq *TaskQueue) Less(i, j int) bool {
-	return tq.items[i].Priority > tq.items[j].Priority
+	if tq.items[i].Priority != tq.items[j].Priority {
+		return tq.items[i].Priority > tq.items[j].Priority
+	}
+	return tq.items[i].queueSequence < tq.items[j].queueSequence
 }
 
 // Swap swaps two items.
@@ -74,8 +81,11 @@ func (tq *TaskQueue) Swap(i, j int) {
 // Push adds an item to the queue.
 func (tq *TaskQueue) Push(x any) {
 	item := x.(*CoordinatedTask)
+	tq.nextSequence++
+	item.queueSequence = tq.nextSequence
 	item.index = len(tq.items)
 	tq.items = append(tq.items, item)
+	tq.byID[item.ID] = item
 }
 
 // Pop removes and returns the highest priority item.
@@ -85,6 +95,7 @@ func (tq *TaskQueue) Pop() any {
 	tq.items[n-1] = nil // Avoid memory leak
 	item.index = -1
 	tq.items = tq.items[:n-1]
+	delete(tq.byID, item.ID)
 	return item
 }
 
@@ -92,6 +103,15 @@ func (tq *TaskQueue) Pop() any {
 func (tq *TaskQueue) PushTask(task *CoordinatedTask) {
 	tq.mu.Lock()
 	defer tq.mu.Unlock()
+	if task == nil || task.ID == "" {
+		return
+	}
+	if task.index >= 0 && task.index < len(tq.items) && tq.items[task.index] == task {
+		return
+	}
+	if _, exists := tq.byID[task.ID]; exists {
+		return
+	}
 	heap.Push(tq, task)
 }
 
@@ -114,7 +134,7 @@ func (tq *TaskQueue) PeekTask() *CoordinatedTask {
 	if tq.Len() == 0 {
 		return nil
 	}
-	return tq.items[0]
+	return cloneCoordinatedTask(tq.items[0])
 }
 
 // UpdatePriority updates the priority of a task.
@@ -159,7 +179,7 @@ func (tq *TaskQueue) GetReadyTasks() []*CoordinatedTask {
 	ready := make([]*CoordinatedTask, 0)
 	for _, task := range tq.items {
 		if task.Status == TaskStatusReady {
-			ready = append(ready, task)
+			ready = append(ready, cloneCoordinatedTask(task))
 		}
 	}
 	return ready

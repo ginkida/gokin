@@ -901,8 +901,11 @@ func (a *App) handleSubmit(message string) {
 		pos, ok := a.enqueuePending(message)
 		if !ok {
 			logging.Debug("pending queue full — message rejected", "len", len(message))
-			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry,
-				Message: fmt.Sprintf("Queue full (%d waiting) — message not queued", pos)})
+			a.safeSendToProgram(ui.QueuedMessageRejectedMsg{
+				Message: message,
+				Reason:  fmt.Sprintf("Queue full (%d waiting)", pos),
+				Waiting: pos,
+			})
 			return
 		}
 		a.journalEvent("request_queued", map[string]any{
@@ -2388,6 +2391,7 @@ func (a *App) TogglePermissions() bool {
 	cfg := a.config
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
 	planningModeEnabled := a.planningModeEnabled
+	reducedMotion := a.config.UI.ReducedMotion
 	modelName := a.config.Model.Name
 	a.mu.Unlock()
 
@@ -2405,6 +2409,7 @@ func (a *App) TogglePermissions() bool {
 		PermissionsEnabled:  newEnabled,
 		SandboxEnabled:      sandboxEnabled,
 		PlanningModeEnabled: planningModeEnabled,
+		ReducedMotion:       reducedMotion,
 		ModelName:           modelName,
 	})
 
@@ -2471,6 +2476,7 @@ func (a *App) TogglePlanningMode() bool {
 	// Copy state for UI message before unlocking
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
+	reducedMotion := a.config.UI.ReducedMotion
 	modelName := a.config.Model.Name
 	a.mu.Unlock()
 
@@ -2478,6 +2484,7 @@ func (a *App) TogglePlanningMode() bool {
 		PermissionsEnabled:  permissionsEnabled,
 		SandboxEnabled:      sandboxEnabled,
 		PlanningModeEnabled: newEnabled,
+		ReducedMotion:       reducedMotion,
 		ModelName:           modelName,
 	})
 
@@ -2517,6 +2524,7 @@ func (a *App) disablePlanModeAfterApproval() {
 	// consistent.
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
+	reducedMotion := a.config.UI.ReducedMotion
 	modelName := a.config.Model.Name
 	client := a.client
 	a.mu.Unlock()
@@ -2553,6 +2561,7 @@ func (a *App) disablePlanModeAfterApproval() {
 		PermissionsEnabled:  permissionsEnabled,
 		SandboxEnabled:      sandboxEnabled,
 		PlanningModeEnabled: false,
+		ReducedMotion:       reducedMotion,
 		ModelName:           modelName,
 	})
 }
@@ -2745,6 +2754,7 @@ func (a *App) ToggleSandbox() bool {
 	cfg := a.config
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	planningModeEnabled := a.planningModeEnabled
+	reducedMotion := a.config.UI.ReducedMotion
 	modelName := a.config.Model.Name
 	a.mu.Unlock()
 
@@ -2757,6 +2767,7 @@ func (a *App) ToggleSandbox() bool {
 		PermissionsEnabled:  permissionsEnabled,
 		SandboxEnabled:      newEnabled,
 		PlanningModeEnabled: planningModeEnabled,
+		ReducedMotion:       reducedMotion,
 		ModelName:           modelName,
 	})
 
@@ -3031,6 +3042,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	if a.tui != nil {
 		a.tui.SetCurrentModel(a.config.Model.Name)
 		a.tui.SetShowTokens(a.config.UI.ShowTokenUsage)
+		a.tui.SetReducedMotion(a.config.UI.ReducedMotion)
 		a.tui.SetPermissionsEnabled(a.config.Permission.Enabled)
 		a.tui.SetSandboxEnabled(a.config.Tools.Bash.Sandbox)
 		a.tui.SetPlanningModeEnabled(a.planningModeEnabled)
@@ -3043,6 +3055,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 		PermissionsEnabled:  a.config.Permission.Enabled,
 		SandboxEnabled:      a.config.Tools.Bash.Sandbox,
 		PlanningModeEnabled: a.planningModeEnabled,
+		ReducedMotion:       a.config.UI.ReducedMotion,
 		ModelName:           a.config.Model.Name,
 	}
 
@@ -3118,15 +3131,52 @@ func (a *App) buildSettingItems() []ui.SettingItem {
 // live, via ApplyConfig. Invoked from the UI (Bubble Tea) goroutine, so the
 // ApplyConfig is run on a worker — it must never jank the render loop.
 func (a *App) handleSettingToggle(key string, on bool) {
-	cfg := a.GetConfig()
-	if cfg == nil || !commands.ApplySettingToggle(cfg, key, on) {
-		return
-	}
 	a.safeGo("settings-toggle-apply", func() {
-		if err := a.ApplyConfig(cfg); err != nil {
-			logging.Warn("failed to apply setting toggle", "key", key, "error", err)
-		}
+		result := a.applySettingToggle(key, on)
+		a.safeSendToProgram(result)
 	})
+}
+
+// applySettingToggle is the transactional worker behind the optimistic
+// Settings UI. ApplyConfig persists before rebuilding the client, so a rebuild
+// failure would otherwise leave the requested value in memory/on disk even
+// though runtime components never received it. Restore the prior boolean and
+// persist the rollback before returning an authoritative result to the modal.
+func (a *App) applySettingToggle(key string, on bool) ui.SettingToggleResultMsg {
+	key = strings.ToLower(strings.TrimSpace(key))
+	result := ui.SettingToggleResultMsg{Key: key, On: on}
+	cfg := a.GetConfig()
+	if cfg == nil {
+		result.Message = "Couldn't apply setting: configuration is unavailable"
+		return result
+	}
+
+	oldOn, found := false, false
+	for _, state := range commands.SettableToggleStates(cfg) {
+		if state.Key == key {
+			oldOn, found = state.On, true
+			break
+		}
+	}
+	if !found || !commands.ApplySettingToggle(cfg, key, on) {
+		result.Message = "Couldn't apply setting: unknown setting"
+		return result
+	}
+
+	if err := a.ApplyConfig(cfg); err != nil {
+		logging.Warn("failed to apply setting toggle; restoring previous value", "key", key, "error", err)
+		commands.ApplySettingToggle(cfg, key, oldOn)
+		result.On = oldOn
+		result.Message = fmt.Sprintf("Couldn't apply %s: %v — previous value restored", key, err)
+		if saveErr := cfg.Save(); saveErr != nil {
+			logging.Warn("failed to persist setting rollback", "key", key, "error", saveErr)
+			result.Message += " (rollback could not be saved)"
+		}
+		return result
+	}
+
+	result.Success = true
+	return result
 }
 
 // handleKeyEntrySubmit applies a key entered in the masked /login modal by
@@ -3138,17 +3188,39 @@ func (a *App) handleKeyEntrySubmit(provider, key string) {
 		ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
 		defer cancel()
 		result, err := a.commandHandler.Execute(ctx, "login", []string{provider, key}, a)
-		if err != nil {
-			a.safeSendToProgram(ui.StatusUpdateMsg{
-				Type:    ui.StatusRecoverableError,
-				Message: fmt.Sprintf("Login failed: %v", err),
-			})
-			return
-		}
+		success, warning, feedback := keyEntryCommandOutcome(result, err)
+		a.safeSendToProgram(ui.KeyEntryResultMsg{
+			Provider: provider,
+			Success:  success,
+			Warning:  warning,
+			Message:  feedback,
+		})
 		if strings.TrimSpace(result) != "" {
 			a.safeSendToProgram(ui.StreamTextMsg(result + "\n"))
 		}
 	})
+}
+
+func keyEntryCommandOutcome(result string, err error) (success, warning bool, message string) {
+	if err != nil {
+		return false, false, fmt.Sprintf("Login failed: %v", err)
+	}
+	trimmed := strings.TrimSpace(result)
+	if trimmed == "" {
+		return false, false, "Login failed without a response"
+	}
+	firstLine := trimmed
+	if index := strings.IndexByte(firstLine, '\n'); index >= 0 {
+		firstLine = firstLine[:index]
+	}
+	switch {
+	case strings.HasPrefix(trimmed, "✓"):
+		return true, false, strings.TrimSpace(strings.TrimPrefix(firstLine, "✓"))
+	case strings.HasPrefix(trimmed, "⚠"):
+		return true, true, strings.TrimSpace(strings.TrimPrefix(firstLine, "⚠"))
+	default:
+		return false, false, firstLine
+	}
 }
 
 // stripLegacySystemMessages removes old-style system prompt messages from session history.

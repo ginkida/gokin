@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // TestFilePeek_HiddenByDefault guards the invariant that a fresh panel
@@ -222,6 +224,35 @@ func TestFilePeek_NarrowTerminalDoesNotPanic(t *testing.T) {
 		if out == "" {
 			t.Errorf("width=%d produced empty output even though panel is visible", width)
 		}
+		if width > 0 && lipgloss.Width(out) > width {
+			t.Errorf("width=%d rendered %d cells: %q", width, lipgloss.Width(out), stripAnsi(out))
+		}
+	}
+}
+
+func TestFilePeekUnknownUnicodeActionIsSafeAndReadable(t *testing.T) {
+	if got := actionVerb("  проверка  "); got != "Проверка" {
+		t.Fatalf("actionVerb unicode fallback=%q, want %q", got, "Проверка")
+	}
+	if got := actionVerb("READING"); got != "Reading" {
+		t.Fatalf("actionVerb should normalize known action case, got %q", got)
+	}
+}
+
+func TestFilePeekDropsMetadataBeforePrimaryContext(t *testing.T) {
+	p := NewFilePeekPanel(nil)
+	p.ShowPeek(FilePeekMsg{
+		FilePath: "/very/long/project/internal/tools/read.go",
+		Action:   "reading",
+		Content:  strings.Repeat("content\n", 100),
+	})
+
+	out := stripAnsi(p.View(24))
+	if lipgloss.Width(out) > 24 {
+		t.Fatalf("file peek width=%d, want <=24: %q", lipgloss.Width(out), out)
+	}
+	if strings.Contains(out, "lines") || strings.Contains(out, "KB") {
+		t.Fatalf("narrow file peek retained metadata instead of primary path context: %q", out)
 	}
 }
 

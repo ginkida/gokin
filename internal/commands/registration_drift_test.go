@@ -152,3 +152,28 @@ func TestNoStaleAutocompleteEntries(t *testing.T) {
 			strings.Join(stale, "\n  "))
 	}
 }
+
+func TestArgumentTakingCommandsExposeAutocompleteSyntax(t *testing.T) {
+	autocomplete := make(map[string]ui.CommandInfo)
+	for _, entry := range ui.DefaultCommands() {
+		autocomplete[entry.Name] = entry
+	}
+
+	var drift []string
+	handler := NewHandler()
+	for _, command := range handler.ListCommands() {
+		entry, ok := autocomplete[command.Name()]
+		if !ok {
+			continue
+		}
+		metadata := handler.getCommandMetadata(command)
+		if metadata.HasArgs && (strings.TrimSpace(entry.Usage) == "" || len(entry.Args) == 0) {
+			drift = append(drift, command.Name()+": executable arg hint "+metadata.ArgHint+
+				", UI usage="+entry.Usage)
+		}
+	}
+	if len(drift) > 0 {
+		sort.Strings(drift)
+		t.Fatalf("argument-taking commands lack autocomplete syntax:\n  %s", strings.Join(drift, "\n  "))
+	}
+}

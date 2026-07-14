@@ -97,12 +97,16 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	// line below the card. Same colour scheme (state accent) either way.
 	firstGlyph := "▎"
 	if m.state == StateProcessing || m.state == StateStreaming {
-		elapsed := time.Duration(0)
-		if !m.streamStartTime.IsZero() {
-			elapsed = time.Since(m.streamStartTime)
+		if m.reducedMotion {
+			firstGlyph = "●"
+		} else {
+			elapsed := time.Duration(0)
+			if !m.streamStartTime.IsZero() {
+				elapsed = time.Since(m.streamStartTime)
+			}
+			frameIdx := int(elapsed.Milliseconds()/80) % len(spinnerFramesCard)
+			firstGlyph = spinnerFramesCard[frameIdx]
 		}
-		frameIdx := int(elapsed.Milliseconds()/80) % len(spinnerFramesCard)
-		firstGlyph = spinnerFramesCard[frameIdx]
 	}
 
 	// MINIMAL mode (default, Claude-Code style): ONE dim unobtrusive line —

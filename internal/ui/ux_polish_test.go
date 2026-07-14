@@ -40,3 +40,27 @@ func TestDefaultShortcuts_DocumentRealPanelToggles(t *testing.T) {
 		t.Error("shortcuts overlay must not advertise Ctrl+Shift+C — the chord is indistinguishable from Ctrl+C (cancel) in a terminal")
 	}
 }
+
+func TestDefaultShortcutsDescribeAppendOnlyToolOutputHonestly(t *testing.T) {
+	var descriptions []string
+	for _, category := range DefaultShortcuts() {
+		if category.Name != "Command Center" {
+			continue
+		}
+		for _, shortcut := range category.Shortcuts {
+			key := strings.Join(shortcut.Keys, "+")
+			if key == "Ctrl+E" || key == "E" {
+				descriptions = append(descriptions, shortcut.Description)
+			}
+		}
+	}
+	joined := strings.Join(descriptions, "\n")
+	for _, want := range []string{"existing scrollback", "new tool outputs"} {
+		if !strings.Contains(strings.ToLower(joined), want) {
+			t.Fatalf("tool-output shortcuts do not explain %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(strings.ToLower(joined), "collapse all") {
+		t.Fatalf("shortcuts still promise an impossible scrollback collapse:\n%s", joined)
+	}
+}

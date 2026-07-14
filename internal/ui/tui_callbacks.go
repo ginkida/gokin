@@ -22,12 +22,16 @@ const (
 	paletteActionPlanningMode  = "planning_mode"
 	paletteActionClearScreen   = "clear_screen"
 	paletteActionCompactMode   = "compact_mode"
+	paletteActionNotifications = "notifications"
 )
 
 // SetCallbacks sets the callback functions.
 func (m *Model) SetCallbacks(onSubmit func(string), onQuit func()) {
 	m.onSubmit = onSubmit
 	m.onQuit = onQuit
+	if m.commandPalette != nil {
+		m.commandPalette.SetSubmissionLinked(onSubmit != nil)
+	}
 }
 
 // SetPermissionCallback sets the permission decision callback. reqID
@@ -98,6 +102,27 @@ func (m *Model) SetPlanningModeEnabled(enabled bool) {
 	m.planningModeEnabled = enabled
 }
 
+// SetReducedMotion replaces animated activity indicators with stable glyphs
+// and makes output auto-follow jump directly. Housekeeping ticks continue so
+// expiry, resize, health refresh, and stale-progress cleanup still work.
+func (m *Model) SetReducedMotion(enabled bool) {
+	m.reducedMotion = enabled
+	m.output.SetReducedMotion(enabled)
+	m.progressModel.SetReducedMotion(enabled)
+	if m.toolProgressBar != nil {
+		m.toolProgressBar.SetReducedMotion(enabled)
+	}
+	if m.planProgressPanel != nil {
+		m.planProgressPanel.SetReducedMotion(enabled)
+	}
+	if m.activityFeed != nil {
+		m.activityFeed.SetReducedMotion(enabled)
+	}
+	if m.agentTreePanel != nil {
+		m.agentTreePanel.SetReducedMotion(enabled)
+	}
+}
+
 // GetPlanningModeEnabled returns the current planning mode enabled state.
 func (m *Model) GetPlanningModeEnabled() bool {
 	return m.planningModeEnabled
@@ -132,14 +157,58 @@ func (m *Model) SetMultiDiffDecisionCallback(onMultiDiffDecision func(map[string
 // SetSearchActionCallback sets the callback for search result actions.
 func (m *Model) SetSearchActionCallback(onSearchAction func(SearchAction)) {
 	m.onSearchAction = onSearchAction
+	m.searchResults.SetActionsLinked(m.onSearchAction != nil || m.onSearchResultAction != nil)
+}
+
+// SetSearchResultActionCallback sets a payload-aware callback for search result
+// actions. When set, it takes precedence over the legacy action-only callback.
+func (m *Model) SetSearchResultActionCallback(onSearchResultAction func(SearchAction, string, int)) {
+	m.onSearchResultAction = onSearchResultAction
+	m.searchResults.SetActionsLinked(m.onSearchAction != nil || m.onSearchResultAction != nil)
 }
 
 // SetGitActionCallback sets the callback for git status actions.
 func (m *Model) SetGitActionCallback(onGitAction func(GitAction)) {
 	m.onGitAction = onGitAction
+	m.gitStatusModel.SetActionsLinked(m.onGitAction != nil || m.onGitStatusAction != nil)
 }
 
-// SetFileSelectCallback sets the callback for file browser selections.
+// SetGitStatusActionCallback sets a payload-aware callback for git status
+// actions. When set, it takes precedence over the legacy action-only callback.
+// Diff handlers should asynchronously send a GitStatusDiffMsg back to the
+// Bubble Tea program; the status overlay remains open while it is loading.
+func (m *Model) SetGitStatusActionCallback(onGitStatusAction func(GitAction, []string, string)) {
+	m.onGitStatusAction = onGitStatusAction
+	m.gitStatusModel.SetActionsLinked(m.onGitAction != nil || m.onGitStatusAction != nil)
+}
+
+func (m *Model) dispatchSearchResultAction(msg SearchResultsActionMsg) bool {
+	if m.onSearchResultAction != nil {
+		m.onSearchResultAction(msg.Action, msg.FilePath, msg.LineNumber)
+		return true
+	}
+	if m.onSearchAction != nil {
+		m.onSearchAction(msg.Action)
+		return true
+	}
+	return false
+}
+
+func (m *Model) dispatchGitStatusAction(msg GitStatusActionMsg) bool {
+	if m.onGitStatusAction != nil {
+		m.onGitStatusAction(msg.Action, append([]string(nil), msg.Files...), msg.Message)
+		return true
+	}
+	if m.onGitAction != nil {
+		m.onGitAction(msg.Action)
+		return true
+	}
+	return false
+}
+
+// SetFileSelectCallback sets an optional observer for file browser selections.
+// The UI always inserts selected paths into the composer itself; this callback
+// lets an embedding application react in addition to that core behavior.
 func (m *Model) SetFileSelectCallback(onFileSelect func(string)) {
 	m.onFileSelect = onFileSelect
 }
@@ -192,12 +261,17 @@ func (m *Model) SetProjectInfo(projectType, projectName string) {
 
 // SetAvailableModels sets the list of available models for the selector.
 func (m *Model) SetAvailableModels(models []ModelInfo) {
-	m.availableModels = models
+	m.availableModels = append([]ModelInfo(nil), models...)
+	for i := range m.availableModels {
+		m.availableModels[i].ID = safeKeyEntryText(m.availableModels[i].ID)
+		m.availableModels[i].Name = safeKeyEntryText(m.availableModels[i].Name)
+		m.availableModels[i].Description = safeKeyEntryText(m.availableModels[i].Description)
+	}
 }
 
 // SetCurrentModel sets the current model name.
 func (m *Model) SetCurrentModel(modelID string) {
-	m.currentModel = modelID
+	m.currentModel = safeKeyEntryText(modelID)
 }
 
 // SetModelSelectCallback sets the callback for model selection.
@@ -260,6 +334,16 @@ func (m *Model) RegisterPaletteActions() {
 			ActionID:    paletteActionShortcuts,
 		},
 		{
+			Name:        "Notification History",
+			Description: "Review active, expired, and hidden notifications",
+			Shortcut:    "Alt+N",
+			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
+			Enabled:     true,
+			Priority:    148,
+			Type:        CommandTypeAction,
+			ActionID:    paletteActionNotifications,
+		},
+		{
 			Name:        "Toggle Task List",
 			Description: "Show or hide the task list panel",
 			Shortcut:    "Ctrl+T",
@@ -319,8 +403,8 @@ func (m *Model) RegisterPaletteActions() {
 			ActionID:    paletteActionPlanPanel,
 		},
 		{
-			Name:        "Toggle Planning Mode",
-			Description: "Enable or disable planning mode",
+			Name:        "Cycle Session Mode",
+			Description: "Cycle Normal, Plan, and YOLO session modes",
 			Shortcut:    "Shift+Tab",
 			Category:    PaletteCategoryInfo{Name: "Planning", Icon: "tree", Priority: 4},
 			Enabled:     true,
@@ -340,8 +424,7 @@ func (m *Model) RegisterPaletteActions() {
 		},
 		{
 			Name:        "Toggle Compact Mode",
-			Description: "Switch between compact and normal display",
-			Shortcut:    "Ctrl+Shift+C",
+			Description: "Switch between compact and normal display (available from the palette)",
 			Category:    PaletteCategoryInfo{Name: "Tools", Icon: "gear", Priority: 5},
 			Enabled:     true,
 			Priority:    551,

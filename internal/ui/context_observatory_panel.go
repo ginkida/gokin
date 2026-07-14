@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -55,9 +56,19 @@ func (p *ContextObservatoryPanel) Tick() {
 }
 
 // View renders the context observatory panel.
-func (p *ContextObservatoryPanel) View(width int) string {
+func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 	if !p.visible {
 		return ""
+	}
+	if width <= 0 {
+		width = 80
+	}
+	if width < 4 {
+		return truncateForWidth("Context Observatory", width)
+	}
+	requestedHeight := 0
+	if len(heights) > 0 {
+		requestedHeight = heights[0]
 	}
 
 	// Styles
@@ -66,144 +77,138 @@ func (p *ContextObservatoryPanel) View(width int) string {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	mutedStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	errorStyle := lipgloss.NewStyle().Foreground(ColorError)
+	accentStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	successStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 
 	var content strings.Builder
-
-	// Panel width
-	panelWidth := width - 10
-	if panelWidth < 60 {
-		panelWidth = 60
+	outerWidth := min(width, 120)
+	innerWidth := outerWidth - 2
+	separator := func(left, fill, right string) {
+		content.WriteString(borderStyle.Render(left + strings.Repeat(fill, innerWidth) + right))
+		content.WriteString("\n")
 	}
-	if panelWidth > 120 {
-		panelWidth = 120
+	separator("╭", "─", "╮")
+	p.writeBoxLine(&content, borderStyle, " "+MessageIcons["info"]+" Context Observatory", titleStyle, innerWidth)
+	separator("├", "─", "┤")
+
+	total := max(p.health.TotalTokens, 0)
+	maximum := max(p.health.MaxTokens, 0)
+	system := max(p.health.SystemTokens, 0)
+	instructions := max(p.health.InstructionTokens, 0)
+	history := max(p.health.HistoryTokens, 0)
+	tools := max(p.health.ToolTokens, 0)
+	hasContext := total > 0 || maximum > 0 || system > 0 || instructions > 0 || history > 0 || tools > 0 || len(p.health.ActiveFiles) > 0 || p.health.PruningAlert != "" || !p.health.LastPruningTime.IsZero()
+	hasRate := p.health.RequestsLimit > 0 || p.health.RequestsRemaining > 0 || p.health.TokensLimit > 0 || p.health.TokensRemaining > 0
+	if !hasContext && !hasRate {
+		p.writeBoxLine(&content, borderStyle, "No context health data yet", mutedStyle.Italic(true), innerWidth)
+		p.writeBoxLine(&content, borderStyle, "Metrics appear after the first request.", dimStyle, innerWidth)
+		separator("├", "─", "┤")
+		p.writeBoxLine(&content, borderStyle, "Esc / Ctrl+H  Close", mutedStyle, innerWidth)
+		content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
+		return content.String()
+	}
+	if requestedHeight > 0 && requestedHeight < 24 {
+		// Short-terminal mode keeps the dashboard actionable instead of letting
+		// the parent compositor crop its footer. Structural rows consume six:
+		// top/title/separator + separator/footer/bottom.
+		targetHeight := max(requestedHeight-1, 7)
+		rowBudget := max(targetHeight-6, 1)
+		var rows []string
+		if hasContext {
+			if maximum > 0 {
+				usage := p.normalizedUsage(total, maximum)
+				rows = append(rows, fmt.Sprintf("Context: %d/%d tokens · %.0f%%", total, maximum, usage*100))
+			} else {
+				rows = append(rows, fmt.Sprintf("Context: %d tokens · limit unavailable", total))
+			}
+		}
+		if hasRate {
+			rows = append(rows, p.compactRateSummary())
+		}
+		if len(p.health.ActiveFiles) > 0 {
+			rows = append(rows, fmt.Sprintf("Active files: %d", len(p.health.ActiveFiles)))
+		}
+		if alert := strings.TrimSpace(p.health.PruningAlert); alert != "" {
+			rows = append(rows, "Status: "+alert)
+		} else if hasContext {
+			rows = append(rows, "Status: Context healthy")
+		}
+		for _, row := range rows[:min(len(rows), rowBudget)] {
+			style := dimStyle
+			if strings.HasPrefix(row, "Status:") && p.health.PruningAlert != "" {
+				style = errorStyle.Bold(true)
+			}
+			p.writeBoxLine(&content, borderStyle, row, style, innerWidth)
+		}
+		separator("├", "─", "┤")
+		p.writeBoxLine(&content, borderStyle, "Esc / Ctrl+H  Close", mutedStyle, innerWidth)
+		content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
+		return content.String()
 	}
 
-	// Header
-	header := " " + MessageIcons["info"] + " Context Observatory "
-	headerLine := titleStyle.Render(header)
+	if hasContext {
+		p.writeBoxLine(&content, borderStyle, "Budget & Usage", accentStyle, innerWidth)
+		if maximum > 0 {
+			usage := p.normalizedUsage(total, maximum)
+			usageLine := fmt.Sprintf("%d / %d tokens (%.1f%%)", total, maximum, usage*100)
+			p.writeBoxLine(&content, borderStyle, usageLine, titleStyle, innerWidth)
+			p.writeBoxLine(&content, borderStyle, p.renderUsageGauge(usage, innerWidth), titleStyle, innerWidth)
+		} else {
+			p.writeBoxLine(&content, borderStyle, fmt.Sprintf("%d tokens · limit unavailable", total), dimStyle, innerWidth)
+		}
+		breakdown := fmt.Sprintf("System %d · Instructions %d · History %d · Tools %d", system, instructions, history, tools)
+		p.writeBoxLine(&content, borderStyle, breakdown, dimStyle, innerWidth)
 
-	content.WriteString(borderStyle.Render("╭") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("╮"))
-	content.WriteString("\n")
-
-	// Title line
-	titleBar := "  " + headerLine
-	content.WriteString(borderStyle.Render("│"))
-	content.WriteString(titleBar)
-	padding := panelWidth - 1 - lipgloss.Width(titleBar)
-	if padding > 0 {
-		content.WriteString(strings.Repeat(" ", padding))
-	}
-	content.WriteString(borderStyle.Render("│"))
-	content.WriteString("\n")
-
-	content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤"))
-	content.WriteString("\n")
-
-	// 1. Token Budget Section
-	p.writeBoxLine(&content, borderStyle, "Budget & Usage", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-
-	usagePercent := p.health.PercentUsed
-	barWidth := panelWidth - 30
-	filled := int(usagePercent * float64(barWidth))
-	if filled > barWidth {
-		filled = barWidth
-	}
-
-	var barColor lipgloss.Color = ColorSuccess
-	if usagePercent > 0.90 {
-		barColor = ColorError
-	} else if usagePercent > 0.70 {
-		barColor = ColorWarning
-	}
-
-	progressBar := lipgloss.NewStyle().Foreground(barColor).Render(strings.Repeat("█", filled)) +
-		dimStyle.Render(strings.Repeat("░", barWidth-filled))
-
-	usageText := fmt.Sprintf("  %d / %d tokens (%.1f%%)", p.health.TotalTokens, p.health.MaxTokens, usagePercent*100)
-	p.writeBoxLine(&content, borderStyle, usageText+"  "+progressBar, titleStyle, panelWidth)
-
-	content.WriteString(borderStyle.Render("│") + strings.Repeat(" ", panelWidth-1) + borderStyle.Render("│") + "\n")
-
-	// 2. Token Breakdown
-	p.writeBoxLine(&content, borderStyle, " Breakdown", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-
-	breakdownWidth := (panelWidth - 8) / 3
-	sysText := fmt.Sprintf("System: %d", p.health.SystemTokens)
-	histText := fmt.Sprintf("History: %d", p.health.HistoryTokens)
-	toolText := fmt.Sprintf("Tools: %d", p.health.ToolTokens)
-
-	breakdownLine := fmt.Sprintf("    %-*s %-*s %-s", breakdownWidth, sysText, breakdownWidth, histText, toolText)
-	p.writeBoxLine(&content, borderStyle, breakdownLine, dimStyle, panelWidth)
-
-	content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤") + "\n")
-
-	// 3. Active Inventory (Files)
-	p.writeBoxLine(&content, borderStyle, " Active File Inventory", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-
-	if len(p.health.ActiveFiles) == 0 {
-		p.writeBoxLine(&content, borderStyle, "    (No files in active context)", mutedStyle, panelWidth)
-	} else {
-		for _, file := range p.health.ActiveFiles {
-			p.writeBoxLine(&content, borderStyle, "    "+MessageIcons["hint"]+" "+file, lipgloss.NewStyle().Foreground(ColorText), panelWidth)
+		separator("├", "─", "┤")
+		p.writeBoxLine(&content, borderStyle, "Active Files", accentStyle, innerWidth)
+		if len(p.health.ActiveFiles) == 0 {
+			p.writeBoxLine(&content, borderStyle, "No files in active context", mutedStyle, innerWidth)
+		} else {
+			const maxVisibleFiles = 5
+			end := min(len(p.health.ActiveFiles), maxVisibleFiles)
+			for _, file := range p.health.ActiveFiles[:end] {
+				p.writeBoxLine(&content, borderStyle, MessageIcons["hint"]+" "+file, lipgloss.NewStyle().Foreground(ColorText), innerWidth)
+			}
+			if hidden := len(p.health.ActiveFiles) - end; hidden > 0 {
+				p.writeBoxLine(&content, borderStyle, fmt.Sprintf("… %d more files", hidden), mutedStyle.Italic(true), innerWidth)
+			}
 		}
 	}
 
-	content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤") + "\n")
+	separator("├", "─", "┤")
+	p.writeBoxLine(&content, borderStyle, "Provider Limits", accentStyle, innerWidth)
+	p.writeRateLimit(&content, borderStyle, "Requests", p.health.RequestsRemaining, p.health.RequestsLimit, innerWidth, dimStyle)
+	p.writeRateLimit(&content, borderStyle, "Tokens", p.health.TokensRemaining, p.health.TokensLimit, innerWidth, dimStyle)
 
-	// 4. Adaptive Rate Limiting Section
-	p.writeBoxLine(&content, borderStyle, " Adaptive Rate Limiting (Live)", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-
-	// Requests gauge
-	reqPerc := 100.0
-	if p.health.RequestsLimit > 0 {
-		reqPerc = (float64(p.health.RequestsRemaining) / float64(p.health.RequestsLimit)) * 100.0
-	}
-	reqBar := p.renderGauge(reqPerc, panelWidth-25)
-	p.writeBoxLine(&content, borderStyle, fmt.Sprintf("    Requests: %-4d  %s", p.health.RequestsRemaining, reqBar), dimStyle, panelWidth)
-
-	// Tokens gauge
-	tokPerc := 100.0
-	if p.health.TokensLimit > 0 {
-		tokPerc = (float64(p.health.TokensRemaining) / float64(p.health.TokensLimit)) * 100.0
-	}
-	tokBar := p.renderGauge(tokPerc, panelWidth-25)
-	p.writeBoxLine(&content, borderStyle, fmt.Sprintf("    Tokens:   %-6d %s", p.health.TokensRemaining, tokBar), dimStyle, panelWidth)
-
-	content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤") + "\n")
-
-	// 4. Maintenance & Health
-	p.writeBoxLine(&content, borderStyle, " Health Events", lipgloss.NewStyle().Bold(true).Foreground(ColorAccent), panelWidth)
-
-	lastPruning := "None"
-	if !p.health.LastPruningTime.IsZero() {
-		lastPruning = fmt.Sprintf("%s ago", time.Since(p.health.LastPruningTime).Round(time.Second))
-	}
-	p.writeBoxLine(&content, borderStyle, "    Last Pruning: "+lastPruning, dimStyle, panelWidth)
-
-	if p.health.PruningAlert != "" {
-		p.writeBoxLine(&content, borderStyle, "    Status: "+p.health.PruningAlert, errorStyle.Bold(true), panelWidth)
-	} else {
-		p.writeBoxLine(&content, borderStyle, "    Status: Context Healthy", lipgloss.NewStyle().Foreground(ColorSuccess), panelWidth)
+	if hasContext {
+		separator("├", "─", "┤")
+		p.writeBoxLine(&content, borderStyle, "Context Health", accentStyle, innerWidth)
+		lastPruning := "Not yet"
+		if !p.health.LastPruningTime.IsZero() {
+			elapsed := max(time.Since(p.health.LastPruningTime), 0)
+			lastPruning = fmt.Sprintf("%s ago", elapsed.Round(time.Second))
+		}
+		p.writeBoxLine(&content, borderStyle, "Last pruning: "+lastPruning, dimStyle, innerWidth)
+		if alert := strings.TrimSpace(p.health.PruningAlert); alert != "" {
+			p.writeBoxLine(&content, borderStyle, "Status: "+alert, errorStyle.Bold(true), innerWidth)
+		} else {
+			p.writeBoxLine(&content, borderStyle, "Status: Context healthy", successStyle, innerWidth)
+		}
 	}
 
-	// Footer with instructions
-	content.WriteString(borderStyle.Render("├") + borderStyle.Render(strings.Repeat("─", panelWidth-1)) + borderStyle.Render("┤") + "\n")
-	// Advertise only keys that actually close it: Esc (the global modal
-	// close) and Ctrl+H (the same key that opened it — toggle symmetry).
-	// Ctrl+O used to be listed here but has been the live-activity toggle
-	// since v0.100.x — it does nothing in this state.
-	p.writeBoxLine(&content, borderStyle, " [Esc/Ctrl+H] Close Observatory", mutedStyle, panelWidth)
-
-	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", panelWidth-1) + "╯"))
+	separator("├", "─", "┤")
+	p.writeBoxLine(&content, borderStyle, "Esc / Ctrl+H  Close", mutedStyle, innerWidth)
+	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
 
 	return content.String()
 }
 
-func (p *ContextObservatoryPanel) writeBoxLine(content *strings.Builder, borderStyle lipgloss.Style, text string, textStyle lipgloss.Style, panelWidth int) {
+func (p *ContextObservatoryPanel) writeBoxLine(content *strings.Builder, borderStyle lipgloss.Style, text string, textStyle lipgloss.Style, innerWidth int) {
 	content.WriteString(borderStyle.Render("│"))
+	text = truncateForWidth(strings.Join(strings.Fields(text), " "), innerWidth)
 	rendered := textStyle.Render(text)
 	content.WriteString(rendered)
-	padding := panelWidth - 1 - lipgloss.Width(rendered)
+	padding := innerWidth - lipgloss.Width(rendered)
 	if padding > 0 {
 		content.WriteString(strings.Repeat(" ", padding))
 	}
@@ -212,6 +217,12 @@ func (p *ContextObservatoryPanel) writeBoxLine(content *strings.Builder, borderS
 }
 
 func (p *ContextObservatoryPanel) renderGauge(percent float64, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if math.IsNaN(percent) || math.IsInf(percent, 0) {
+		percent = 0
+	}
 	if percent > 100 {
 		percent = 100
 	}
@@ -231,4 +242,63 @@ func (p *ContextObservatoryPanel) renderGauge(percent float64, width int) string
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	return lipgloss.NewStyle().Foreground(color).Render(strings.Repeat("█", filled)) +
 		dimStyle.Render(strings.Repeat("░", width-filled))
+}
+
+func (p *ContextObservatoryPanel) normalizedUsage(total, maximum int) float64 {
+	usage := p.health.PercentUsed
+	if math.IsNaN(usage) || math.IsInf(usage, 0) || usage <= 0 {
+		if maximum > 0 {
+			usage = float64(total) / float64(maximum)
+		} else {
+			usage = 0
+		}
+	}
+	return min(max(usage, 0), 1)
+}
+
+func (p *ContextObservatoryPanel) renderUsageGauge(usage float64, width int) string {
+	label := fmt.Sprintf("%.0f%%", usage*100)
+	barWidth := max(width-lipgloss.Width(label)-1, 0)
+	if barWidth == 0 {
+		return label
+	}
+	return p.renderGauge(usage*100, barWidth) + " " + label
+}
+
+func (p *ContextObservatoryPanel) writeRateLimit(content *strings.Builder, borderStyle lipgloss.Style, label string, remaining, limit int64, width int, style lipgloss.Style) {
+	remaining = max(remaining, 0)
+	limit = max(limit, 0)
+	if limit == 0 {
+		value := "unavailable"
+		if remaining > 0 {
+			value = fmt.Sprintf("%d remaining · limit unavailable", remaining)
+		}
+		p.writeBoxLine(content, borderStyle, label+": "+value, style, width)
+		return
+	}
+	remaining = min(remaining, limit)
+	percent := float64(remaining) / float64(limit) * 100
+	value := fmt.Sprintf("%s: %d / %d", label, remaining, limit)
+	gaugeWidth := max(width-lipgloss.Width(value)-1, 0)
+	if gaugeWidth > 0 {
+		value += " " + p.renderGauge(percent, gaugeWidth)
+	}
+	p.writeBoxLine(content, borderStyle, value, style, width)
+}
+
+func (p *ContextObservatoryPanel) compactRateSummary() string {
+	formatValue := func(remaining, limit int64) string {
+		remaining = max(remaining, 0)
+		limit = max(limit, 0)
+		if limit == 0 {
+			if remaining > 0 {
+				return fmt.Sprintf("%d/?", remaining)
+			}
+			return "n/a"
+		}
+		return fmt.Sprintf("%d/%d", min(remaining, limit), limit)
+	}
+	return fmt.Sprintf("Limits: requests %s · tokens %s",
+		formatValue(p.health.RequestsRemaining, p.health.RequestsLimit),
+		formatValue(p.health.TokensRemaining, p.health.TokensLimit))
 }

@@ -62,12 +62,32 @@ func TestStaticShortcutsFallbackMatchesCurrentBindings(t *testing.T) {
 	m.shortcutsOverlay = nil
 
 	got := stripAnsi(m.renderShortcutsOverlay())
-	for _, want := range []string{"Ctrl+K", "Open model selector", "Ctrl+D", "Half page down", "Cancel once"} {
+	for _, want := range []string{"Keyboard Shortcuts", "Type to filter", "Esc close", "Ctrl + d", "half-page down"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("static shortcuts fallback missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "Quit (alternative)") {
-		t.Fatalf("static shortcuts fallback still advertises stale Ctrl+D quit:\n%s", got)
+	for _, stale := range []string{"Quit (alternative)", "Apply code block", "Copy selected block", "Press any key to close"} {
+		if strings.Contains(got, stale) {
+			t.Fatalf("static shortcuts fallback advertises stale action %q:\n%s", stale, got)
+		}
+	}
+}
+
+func TestShortcutsFallbackRemainsInteractiveOnFirstKey(t *testing.T) {
+	m := NewModel()
+	m.shortcutsOverlay = nil
+	m.state = StateShortcutsOverlay
+
+	_ = m.handleShortcutsOverlayKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+
+	if m.shortcutsOverlay == nil || !m.shortcutsOverlay.IsVisible() {
+		t.Fatal("first key should materialize the fallback overlay and keep it visible")
+	}
+	if got := m.shortcutsOverlay.GetSearch(); got != "m" {
+		t.Fatalf("first filter key was discarded: query=%q, want m", got)
+	}
+	if m.state != StateShortcutsOverlay {
+		t.Fatalf("first filter key closed fallback overlay: state=%v", m.state)
 	}
 }

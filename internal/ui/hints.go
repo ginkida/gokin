@@ -39,15 +39,17 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 	var hint string
 	hintID := ""
 
-	// Context-aware hints with benefit-focused wording
+	// Immediate recovery always outranks onboarding. The old ordering showed a
+	// planning tip during a new user's first in-flight response, hiding the one
+	// action that matters when they need to stop it.
 	switch {
+	case state == StateProcessing || state == StateStreaming:
+		hint = "Esc — cancel current response"
+		hintID = "cancel_response"
+
 	case sessionDuration < 2*time.Minute:
 		hint = "Shift+Tab — break complex tasks into reviewable plan steps"
 		hintID = "first_message"
-
-	case state == StateStreaming:
-		hint = "Esc — cancel current response"
-		hintID = "cancel_streaming"
 
 	default:
 		// Rotate through general hints (benefit-focused). Bindings here
@@ -59,7 +61,7 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 			"Shift+Tab — break complex tasks into reviewable plan steps",
 			"Ctrl+P — quickly find any command",
 			"Ctrl+K — open the model selector",
-			"Ctrl+E — expand the last tool output",
+			"Ctrl+E — reveal the last tool output",
 			"Alt+C — copy the last response to clipboard",
 			"Ctrl+T — show or hide the task list",
 			"Ctrl+O — see what agents are doing in real time",
@@ -67,9 +69,20 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 			getTextSelectionHint(),
 		}
 
-		idx := len(h.hintsShown) % len(generalHints)
-		hint = generalHints[idx]
-		hintID = fmt.Sprintf("general_%d", idx)
+		// Pick the first unseen non-empty hint. Using len(hintsShown) as an
+		// index made unrelated contextual IDs skip entries and could strand the
+		// rotation permanently on an already-seen item.
+		for idx, candidate := range generalHints {
+			if candidate == "" || h.hintsShown[fmt.Sprintf("general_%d", idx)] > 0 {
+				continue
+			}
+			hint = candidate
+			hintID = fmt.Sprintf("general_%d", idx)
+			break
+		}
+	}
+	if hint == "" {
+		return ""
 	}
 
 	// Check BEFORE incrementing (fix logic order)
@@ -115,6 +128,8 @@ func (h *HintSystem) MarkHintShown(hintID string) {
 // Reset clears hint history.
 func (h *HintSystem) Reset() {
 	h.hintsShown = make(map[string]int)
+	h.lastHint = ""
+	h.lastHintTime = time.Time{}
 }
 
 // Disable turns off hints.

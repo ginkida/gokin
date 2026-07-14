@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gokin/internal/agent"
@@ -377,25 +378,67 @@ func (a *App) handlePlanProgressUpdate(progress *plan.ProgressUpdate) {
 	})
 }
 
-// handleModelSelect is called by the TUI when the user selects a model.
+// handleModelSelect is called by the TUI when the user selects a model. Client
+// reconstruction may perform network/provider setup, so it must not block the
+// Bubble Tea event loop that owns rendering and keyboard input.
 func (a *App) handleModelSelect(modelID string) {
-	if a.config == nil {
-		return
+	a.safeGo("model-selector-apply", func() {
+		a.safeSendToProgram(a.applyModelSelection(modelID))
+	})
+}
+
+// applyModelSelection transactionally switches models and returns the
+// authoritative active model. The selector stays on the old model until this
+// result arrives, so a failed client rebuild can never be presented as success.
+func (a *App) applyModelSelection(modelID string) ui.ModelSelectResultMsg {
+	modelID = strings.TrimSpace(modelID)
+	result := ui.ModelSelectResultMsg{RequestedID: modelID}
+	if modelID == "" {
+		result.Message = "Couldn't switch model: model ID is empty"
+		return result
 	}
-	a.config.Model.Name = modelID
-	a.config.Model.Provider = config.DetectProvider(modelID)
+
+	// Build a candidate without mutating the live config before ApplyConfig has
+	// acquired its lock. Preserve the slice backing store too so rollback cannot
+	// alias a later model mutation.
+	a.mu.Lock()
+	if a.config == nil {
+		a.mu.Unlock()
+		result.Message = "Couldn't switch model: configuration is unavailable"
+		return result
+	}
+	previous := *a.config
+	previous.Model.FallbackProviders = append([]string(nil), a.config.Model.FallbackProviders...)
+	a.mu.Unlock()
+
+	candidate := previous
+	candidate.Model.FallbackProviders = append([]string(nil), previous.Model.FallbackProviders...)
+	candidate.Model.Name = modelID
+	candidate.Model.Provider = config.DetectProvider(modelID)
 	// Clear any stale model.preset so the explicit selection isn't reverted by
 	// MigrateConfig/NormalizeConfig on the ApplyConfig below.
-	a.config.Model.Preset = ""
+	candidate.Model.Preset = ""
 
 	// Apply MaxOutputTokens from preset for new provider
-	if preset, ok := config.ModelPresets[a.config.Model.Provider]; ok {
-		a.config.Model.MaxOutputTokens = preset.MaxOutputTokens
+	if preset, ok := config.ModelPresets[candidate.Model.Provider]; ok {
+		candidate.Model.MaxOutputTokens = preset.MaxOutputTokens
 	}
 
-	if err := a.ApplyConfig(a.config); err != nil {
+	if err := a.ApplyConfig(&candidate); err != nil {
 		logging.Warn("failed to apply model selection", "error", err)
+		result.ModelID = previous.Model.Name
+		result.Message = fmt.Sprintf("Couldn't switch to %s: %v · previous model restored", modelID, err)
+		if rollbackErr := a.ApplyConfig(&previous); rollbackErr != nil {
+			logging.Error("failed to restore model after selection error", "model", previous.Model.Name, "error", rollbackErr)
+			result.Message += fmt.Sprintf(" (rollback error: %v)", rollbackErr)
+		}
+		return result
 	}
+
+	result.Success = true
+	result.ModelID = modelID
+	result.Message = "Switched to " + modelID
+	return result
 }
 
 // DiffDecisionTimeout is the maximum time to wait for a diff decision response.
@@ -543,9 +586,9 @@ func (a *App) handleMultiDiffDecision(decisions map[string]ui.DiffDecision) {
 	}
 }
 
-func (a *App) reviewWorkspaceChanges(ctx context.Context, changes []agent.WorkspaceChangePreview) (bool, error) {
+func (a *App) reviewWorkspaceChanges(ctx context.Context, changes []agent.WorkspaceChangePreview) ([]string, error) {
 	if len(changes) == 0 {
-		return true, nil
+		return nil, nil
 	}
 
 	if len(changes) > 1 {
@@ -561,14 +604,9 @@ func (a *App) reviewWorkspaceChanges(ctx context.Context, changes []agent.Worksp
 
 		decisions, err := a.promptMultiDiffDecision(ctx, files)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		for _, decision := range decisions {
-			if decision != ui.DiffApply {
-				return false, nil
-			}
-		}
-		return true, nil
+		return approvedWorkspaceFiles(changes, decisions), nil
 	}
 
 	a.mu.Lock()
@@ -591,14 +629,24 @@ func (a *App) reviewWorkspaceChanges(ctx context.Context, changes []agent.Worksp
 			change.IsNewFile,
 		)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		if decision == ui.DiffReject || decision == ui.DiffRejectAll {
-			return false, nil
+			return nil, nil
 		}
 	}
 
-	return true, nil
+	return []string{changes[0].FilePath}, nil
+}
+
+func approvedWorkspaceFiles(changes []agent.WorkspaceChangePreview, decisions map[string]ui.DiffDecision) []string {
+	approved := make([]string, 0, len(changes))
+	for _, change := range changes {
+		if decision := decisions[change.FilePath]; decision == ui.DiffApply || decision == ui.DiffApplyAll {
+			approved = append(approved, change.FilePath)
+		}
+	}
+	return approved
 }
 
 // handleApplyCodeBlock handles applying a code block to a file.

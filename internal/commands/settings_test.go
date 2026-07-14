@@ -74,6 +74,9 @@ func TestSharedToggleTable(t *testing.T) {
 	if ApplySettingToggle(cfg, "nope", true) {
 		t.Error("ApplySettingToggle(unknown) must return false")
 	}
+	if !ApplySettingToggle(cfg, "reducedmotion", true) || !cfg.UI.ReducedMotion {
+		t.Error("reducedmotion should be a live settable accessibility toggle")
+	}
 
 	// thinking is a boolean toggle mapping to the two day-to-day modes:
 	// ON = force (mode "on"); OFF = auto (the router/runner decide by task).

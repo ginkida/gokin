@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -16,7 +17,7 @@ func (m *Model) renderTaskTimelineStart(taskIndex int, planType, message string)
 	bodyStyle := lipgloss.NewStyle().Foreground(ColorText)
 
 	var out strings.Builder
-	out.WriteString(headStyle.Render(fmt.Sprintf("  ◌ Subtask %d", taskIndex)))
+	out.WriteString(headStyle.Render(fmt.Sprintf("  ◌ Subtask %d", max(taskIndex, 1))))
 	if label := timelineLabel(planType); label != "" {
 		out.WriteString(" ")
 		out.WriteString(typeStyle.Render(label))
@@ -38,16 +39,20 @@ func (m *Model) renderTaskTimelineProgress(progress float64, message string) str
 	var out strings.Builder
 	out.WriteString(connectorStyle.Render("    ↳"))
 
-	if progress >= 0 {
+	normalizedProgress, determinate := normalizeTimelineProgress(progress)
+	if determinate {
 		out.WriteString(" ")
-		out.WriteString(progressStyle.Render(renderMiniTimelineBar(progress, 10)))
+		out.WriteString(progressStyle.Render(renderMiniTimelineBar(normalizedProgress, 10)))
 		out.WriteString(" ")
-		out.WriteString(progressStyle.Render(fmt.Sprintf("%d%%", int(progress*100))))
+		out.WriteString(progressStyle.Render(fmt.Sprintf("%d%%", int(math.Round(normalizedProgress*100)))))
 	}
 
 	if summary := normalizeTimelineText(message); summary != "" {
 		out.WriteString(" ")
 		out.WriteString(bodyStyle.Render(summary))
+	} else if !determinate {
+		out.WriteString(" ")
+		out.WriteString(bodyStyle.Render("Working…"))
 	}
 
 	return out.String()
@@ -87,9 +92,12 @@ func (m *Model) renderTaskTimelineDone(success bool, duration time.Duration, err
 		out.WriteString(detailStyle.Render(format.Duration(duration)))
 	}
 
-	if err != nil {
+	if errText := normalizedTimelineError(err); errText != "" {
 		out.WriteString(" ")
-		out.WriteString(detailStyle.Render("· " + normalizeTimelineText(err.Error())))
+		out.WriteString(detailStyle.Render("· " + errText))
+	} else if !success {
+		out.WriteString(" ")
+		out.WriteString(detailStyle.Render("· No error details"))
 	}
 
 	return out.String()
@@ -120,12 +128,7 @@ func renderMiniTimelineBar(progress float64, width int) string {
 	if width < 1 {
 		width = 1
 	}
-	if progress < 0 {
-		progress = 0
-	}
-	if progress > 1 {
-		progress = 1
-	}
+	progress, _ = normalizeTimelineProgress(progress)
 
 	filled := int(progress * float64(width))
 	if filled > width {
@@ -136,13 +139,25 @@ func renderMiniTimelineBar(progress float64, width int) string {
 }
 
 func timelineProgressBucket(progress float64) int {
-	if progress < 0 {
+	progress, determinate := normalizeTimelineProgress(progress)
+	if !determinate {
 		return -1
 	}
-	if progress > 1 {
-		progress = 1
-	}
 	return int(progress * 10)
+}
+
+func normalizeTimelineProgress(progress float64) (float64, bool) {
+	if math.IsNaN(progress) || math.IsInf(progress, 0) || progress < 0 {
+		return 0, false
+	}
+	return min(progress, 1), true
+}
+
+func normalizedTimelineError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return normalizeTimelineText(err.Error())
 }
 
 func timelineLabel(kind string) string {

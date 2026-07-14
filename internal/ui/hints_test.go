@@ -53,3 +53,28 @@ func TestGeneralHintsMatchCurrentBindings(t *testing.T) {
 		}
 	}
 }
+
+func TestContextualHintPrioritizesCancellationDuringNewSession(t *testing.T) {
+	h := NewHintSystem(DefaultStyles())
+	for _, state := range []State{StateProcessing, StateStreaming} {
+		h.Reset()
+		got := h.GetContextualHint(state, "", 10*time.Second)
+		if !strings.Contains(got, "Esc") || !strings.Contains(got, "cancel") {
+			t.Fatalf("state %v hid immediate cancellation behind onboarding: %q", state, got)
+		}
+		if strings.Contains(got, "Shift+Tab") {
+			t.Fatalf("state %v showed planning onboarding instead of recovery: %q", state, got)
+		}
+	}
+}
+
+func TestHintResetAllowsImmediateRediscovery(t *testing.T) {
+	h := NewHintSystem(DefaultStyles())
+	if got := h.GetContextualHint(StateInput, "", time.Minute); got == "" {
+		t.Fatal("initial hint missing")
+	}
+	h.Reset()
+	if got := h.GetContextualHint(StateInput, "", time.Minute); got == "" {
+		t.Fatal("Reset retained the 30-second cooldown")
+	}
+}

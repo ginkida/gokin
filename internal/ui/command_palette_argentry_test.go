@@ -77,6 +77,41 @@ func TestPaletteArgEntryFlow(t *testing.T) {
 	}
 }
 
+func TestPaletteRequiredArgRejectsEmptySubmissionInline(t *testing.T) {
+	m := NewModel()
+	var submitted string
+	m.SetCallbacks(func(s string) { submitted = s }, func() {})
+	m.commandPalette.BeginArgEntry(EnhancedPaletteCommand{
+		Name: "open", Shortcut: "/open", ArgHint: "<file>", Type: CommandTypeSlash, Enabled: true,
+	})
+	m.commandPalette.visible = true
+	m.state = StateCommandPalette
+
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if submitted != "" {
+		t.Fatalf("empty required argument submitted %q", submitted)
+	}
+	if !m.commandPalette.InArgEntry() || m.state != StateCommandPalette {
+		t.Fatalf("empty required argument closed palette: arg=%v state=%v", m.commandPalette.InArgEntry(), m.state)
+	}
+	for _, size := range []struct{ width, height int }{{10, 6}, {60, 18}} {
+		view := m.commandPalette.View(size.width, size.height)
+		assertPaletteGeometry(t, view, size.width, size.height)
+		if plain := stripAnsi(view); !strings.Contains(plain, "Argument required") && size.width >= 20 {
+			t.Fatalf("validation error missing at %dx%d:\n%s", size.width, size.height, plain)
+		}
+	}
+
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("main.go")})
+	if m.commandPalette.argError != "" {
+		t.Fatalf("typing did not clear validation error: %q", m.commandPalette.argError)
+	}
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if submitted != "/open main.go" {
+		t.Fatalf("valid argument submitted %q", submitted)
+	}
+}
+
 func TestPaletteArgEntryQuotesSingleFileArg(t *testing.T) {
 	m := NewModel()
 	var submitted string
@@ -247,7 +282,18 @@ func TestRegisterPaletteActionsUsesIDs(t *testing.T) {
 		paletteActionSettings:      false,
 		paletteActionModelSelector: false,
 		paletteActionShortcuts:     false,
+		paletteActionNotifications: false,
+		paletteActionTodos:         false,
+		paletteActionActivityFeed:  false,
+		paletteActionLiveDetail:    false,
+		paletteActionAgentTree:     false,
+		paletteActionObservatory:   false,
+		paletteActionPlanPanel:     false,
+		paletteActionPlanningMode:  false,
+		paletteActionClearScreen:   false,
+		paletteActionCompactMode:   false,
 	}
+	seenIDs := make(map[string]string, len(wantIDs))
 	for _, c := range m.commandPalette.commands {
 		if c.Type != CommandTypeAction {
 			continue
@@ -255,7 +301,17 @@ func TestRegisterPaletteActionsUsesIDs(t *testing.T) {
 		if c.Action != nil {
 			t.Errorf("built-in action %q still uses a closure; it must use ActionID for live dispatch", c.Name)
 		}
-		if _, ok := wantIDs[c.ActionID]; ok {
+		if c.ActionID == "" {
+			t.Errorf("built-in action %q has no ActionID", c.Name)
+			continue
+		}
+		if previous, duplicate := seenIDs[c.ActionID]; duplicate {
+			t.Errorf("built-in actions %q and %q share ActionID %q", previous, c.Name, c.ActionID)
+		}
+		seenIDs[c.ActionID] = c.Name
+		if _, ok := wantIDs[c.ActionID]; !ok {
+			t.Errorf("unexpected built-in palette ActionID %q for %q", c.ActionID, c.Name)
+		} else {
 			wantIDs[c.ActionID] = true
 		}
 	}

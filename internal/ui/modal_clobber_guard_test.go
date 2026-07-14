@@ -1,6 +1,9 @@
 package ui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Round 4 self-improvement audit: PermissionRequestMsg/QuestionRequestMsg/
 // PlanApprovalRequestMsg already guarded against clobbering an active modal
@@ -150,5 +153,178 @@ func TestOpenSettingsMsg_OpensNormallyWithNoActiveModal(t *testing.T) {
 	m2 := updated.(Model)
 	if m2.state != StateSettings {
 		t.Fatalf("state = %v, want StateSettings (guard should not block the happy path)", m2.state)
+	}
+}
+
+func TestBlockingPromptCollisionsExplainAutomaticOutcome(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   any
+		configure func(*Model)
+		want      string
+	}{
+		{
+			name:      "permission",
+			message:   PermissionRequestMsg{ID: "incoming", ToolName: "write"},
+			configure: func(m *Model) { m.SetPermissionCallback(func(string, PermissionDecision) {}) },
+			want:      "Incoming permission request denied",
+		},
+		{
+			name:      "question",
+			message:   QuestionRequestMsg{Question: "Incoming?"},
+			configure: func(m *Model) { m.SetQuestionCallback(func(string) {}) },
+			want:      "Incoming question cancelled",
+		},
+		{
+			name:      "plan",
+			message:   PlanApprovalRequestMsg{Title: "Incoming plan"},
+			configure: func(m *Model) { m.SetPlanApprovalCallback(func(PlanApprovalDecision) {}) },
+			want:      "Incoming plan rejected",
+		},
+		{
+			name:      "diff",
+			message:   DiffPreviewRequestMsg{FilePath: "incoming.go"},
+			configure: func(m *Model) { m.SetDiffDecisionCallback(func(DiffDecision) {}) },
+			want:      "Incoming diff rejected",
+		},
+		{
+			name:      "multi diff",
+			message:   MultiDiffPreviewRequestMsg{Files: []DiffFile{{FilePath: "incoming.go"}}},
+			configure: func(m *Model) { m.SetMultiDiffDecisionCallback(func(map[string]DiffDecision) {}) },
+			want:      "Incoming multi-file diff rejected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newModalGuardTestModel()
+			tt.configure(&m)
+			updated, _ := m.Update(tt.message)
+			got := updated.(Model)
+			if got.state != StatePermissionPrompt || got.permRequest == nil || got.permRequest.ID != "req-1" {
+				t.Fatalf("incoming request clobbered active prompt: state=%v request=%v", got.state, got.permRequest)
+			}
+			if got.toastManager.Count() != 1 || got.toastManager.toasts[0].Type != ToastWarning || !strings.Contains(got.toastManager.toasts[0].Message, tt.want) {
+				t.Fatalf("collision feedback=%+v, want warning containing %q", got.toastManager.toasts, tt.want)
+			}
+			if rows := got.notificationRows(); len(rows) != 1 || !rows[0].active || !strings.Contains(rows[0].toast.Message, tt.want) {
+				t.Fatalf("collision outcome missing from Notification Center: %+v", rows)
+			}
+		})
+	}
+}
+
+func TestBlockingPromptCollisionDoesNotClaimResolutionWithoutHandler(t *testing.T) {
+	m := newModalGuardTestModel()
+	updated, _ := m.Update(QuestionRequestMsg{Question: "Incoming?"})
+	got := updated.(Model)
+	if got.toastManager.Count() != 1 {
+		t.Fatalf("missing collision feedback: %+v", got.toastManager.toasts)
+	}
+	message := got.toastManager.toasts[0].Message
+	if !strings.Contains(message, "could not be resolved") || !strings.Contains(message, "handler unavailable") || strings.Contains(message, "cancelled") {
+		t.Fatalf("unwired collision feedback is dishonest: %q", message)
+	}
+}
+
+func TestAsyncSurfaceCollisionsNamePreservedContextAndRecovery(t *testing.T) {
+	tests := []struct {
+		name       string
+		state      State
+		message    any
+		want       []string
+		configure  func(*Model)
+		assertKept func(*testing.T, Model)
+	}{
+		{
+			name:    "search while command palette open",
+			state:   StateCommandPalette,
+			message: SearchResultsRequestMsg{Query: "needle", Tool: "grep"},
+			want:    []string{`Search results for "needle" were not opened`, "Command Palette kept open", "run the search again"},
+			configure: func(m *Model) {
+				m.commandPalette.visible = true
+				m.commandPalette.SetQuery("settings")
+			},
+			assertKept: func(t *testing.T, m Model) {
+				if m.commandPalette.GetQuery() != "settings" || m.searchRequest != nil {
+					t.Fatalf("palette/search state was not preserved: query=%q request=%v", m.commandPalette.GetQuery(), m.searchRequest)
+				}
+			},
+		},
+		{
+			name:    "git while notifications open",
+			state:   StateNotificationCenter,
+			message: GitStatusRequestMsg{Branch: "main"},
+			want:    []string{"Git status update was not opened", "Notifications kept open", "reopen Git status"},
+		},
+		{
+			name:    "browser while settings open",
+			state:   StateSettings,
+			message: FileBrowserRequestMsg{StartPath: "."},
+			want:    []string{"File browser did not open", "Settings kept open", "close it and retry"},
+		},
+		{
+			name:    "settings while shortcuts open",
+			state:   StateShortcutsOverlay,
+			message: OpenSettingsMsg{},
+			want:    []string{"Settings did not open", "Keyboard shortcuts kept open", "close it and retry"},
+		},
+		{
+			name:    "key entry while decision open",
+			state:   StatePermissionPrompt,
+			message: OpenKeyEntryMsg{Provider: "openai"},
+			want:    []string{"API key entry did not open", "Permission prompt kept open", "resolve it and retry"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModel()
+			m.width, m.height = 80, 24
+			m.state = tc.state
+			if tc.configure != nil {
+				tc.configure(m)
+			}
+			updated, _ := m.Update(tc.message)
+			got := updated.(Model)
+			if got.state != tc.state {
+				t.Fatalf("active surface was clobbered: state=%v want=%v", got.state, tc.state)
+			}
+			if got.toastManager.Count() != 1 {
+				t.Fatalf("collision should emit one warning: %+v", got.toastManager.toasts)
+			}
+			message := got.toastManager.toasts[0].Message
+			for _, want := range tc.want {
+				if !strings.Contains(message, want) {
+					t.Fatalf("collision message missing %q: %q", want, message)
+				}
+			}
+			if tc.assertKept != nil {
+				tc.assertKept(t, got)
+			}
+		})
+	}
+}
+
+func TestBlockingPromptCollisionNamesNonBlockingSurfaceItPreserved(t *testing.T) {
+	m := NewModel()
+	m.state = StateCommandPalette
+	m.commandPalette.visible = true
+	m.commandPalette.SetQuery("model")
+	m.SetPermissionCallback(func(string, PermissionDecision) {})
+
+	updated, _ := m.Update(PermissionRequestMsg{ID: "incoming", ToolName: "write"})
+	got := updated.(Model)
+	if got.state != StateCommandPalette || got.commandPalette.GetQuery() != "model" {
+		t.Fatalf("incoming prompt discarded palette context: state=%v query=%q", got.state, got.commandPalette.GetQuery())
+	}
+	message := got.toastManager.toasts[0].Message
+	for _, want := range []string{"Incoming permission request denied", "Command Palette kept open"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("prompt collision missing %q: %q", want, message)
+		}
+	}
+	if strings.Contains(message, "finish the active prompt") {
+		t.Fatalf("non-blocking palette was mislabeled as a decision prompt: %q", message)
 	}
 }

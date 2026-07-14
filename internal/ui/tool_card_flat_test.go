@@ -77,6 +77,27 @@ func TestCtrlEExpandsLastToolOutput(t *testing.T) {
 	}
 }
 
+func TestCtrlECollapseFeedbackDoesNotClaimScrollbackChanged(t *testing.T) {
+	m := NewModel()
+	m.width = 80
+	m.handleToolResultWithInfo(
+		strings.Repeat("output line\n", 30),
+		"bash",
+		"ls /tmp",
+		time.Now().Add(-50*time.Millisecond),
+	)
+	_ = m.handleGlobalKeys(tea.KeyMsg{Type: tea.KeyCtrlE})
+	before := m.output.state.content.String()
+	_ = m.handleGlobalKeys(tea.KeyMsg{Type: tea.KeyCtrlE})
+
+	if after := m.output.state.content.String(); after != before {
+		t.Fatal("compact mark unexpectedly rewrote append-only scrollback")
+	}
+	if got := lastToastMessage(*m); !strings.Contains(got, "scrollback is unchanged") {
+		t.Fatalf("compact feedback is not honest about visible output: %q", got)
+	}
+}
+
 // TestPlainEStillTogglesWhenInputEmpty pins backward compat: users
 // with muscle memory for plain `e` still get the toggle when the input
 // is empty. Adding Ctrl+E didn't remove plain `e`.

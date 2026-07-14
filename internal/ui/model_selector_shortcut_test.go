@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -38,12 +39,19 @@ func TestCtrlKOpensModelSelector(t *testing.T) {
 	}
 }
 
-func TestCtrlKWithoutModelsStaysInInput(t *testing.T) {
+func TestCtrlKWithoutModelsOpensRecoverableEmptySelector(t *testing.T) {
 	m := NewModel()
+	m.width = 80
 
 	_ = m.handleGlobalKeys(tea.KeyMsg{Type: tea.KeyCtrlK})
-	if m.state != StateInput {
-		t.Fatalf("ctrl+k without models should stay in input, state=%v", m.state)
+	if m.state != StateModelSelector {
+		t.Fatalf("ctrl+k without models should open the empty selector, state=%v", m.state)
+	}
+	view := stripAnsi(m.renderModelSelector())
+	for _, want := range []string{"No model choices are registered", "/provider", "/doctor", "Esc Close"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("empty selector missing recovery %q:\n%s", want, view)
+		}
 	}
 }
 
@@ -65,10 +73,80 @@ func TestModelSelectorEmptyState(t *testing.T) {
 	m.currentModel = "fast"
 
 	got := stripAnsi(m.renderModelSelector())
-	if !strings.Contains(got, "No model choices are loaded") {
+	if !strings.Contains(got, "No model choices are registered") {
 		t.Fatalf("empty model selector should explain missing choices:\n%s", got)
 	}
-	if !strings.Contains(got, "/model") {
-		t.Fatalf("empty model selector should point to /model:\n%s", got)
+	for _, recovery := range []string{"/provider", "/doctor"} {
+		if !strings.Contains(got, recovery) {
+			t.Fatalf("empty model selector should point to %s:\n%s", recovery, got)
+		}
+	}
+	if strings.Contains(got, "Use /model") {
+		t.Fatalf("empty model selector should not suggest reopening itself:\n%s", got)
+	}
+}
+
+func TestModelSelectorLongListKeepsSelectionVisible(t *testing.T) {
+	m := NewModel()
+	m.width = 80
+	m.height = 17
+	for i := 1; i <= 12; i++ {
+		m.availableModels = append(m.availableModels, ModelInfo{
+			ID:          fmt.Sprintf("model-%d", i),
+			Name:        fmt.Sprintf("Model %d", i),
+			Description: fmt.Sprintf("Description %d", i),
+		})
+	}
+	m.currentModel = "model-1"
+	m.modelSelectedIndex = len(m.availableModels) - 1
+
+	got := stripAnsi(m.renderModelSelector())
+	if !strings.Contains(got, "> 12. Model 12") {
+		t.Fatalf("selected last model was clipped:\n%s", got)
+	}
+	if !strings.Contains(got, "↑") || !strings.Contains(got, "more") {
+		t.Fatalf("clipped list lacks an upper scroll indicator:\n%s", got)
+	}
+	if strings.Contains(got, "2. Model 2") {
+		t.Fatalf("long selector rendered the whole list instead of a window:\n%s", got)
+	}
+}
+
+func TestModelSelectorUsesFriendlyCurrentNameAndContextualFooter(t *testing.T) {
+	m := NewModel()
+	m.width = 80
+	m.availableModels = []ModelInfo{{ID: "provider/model-v2", Name: "Model V2", Description: "Current model"}}
+	m.currentModel = "provider/model-v2"
+	m.modelSelectorReturnState = StateSettings
+
+	got := stripAnsi(m.renderModelSelector())
+	if !strings.Contains(got, "Current: Model V2") {
+		t.Fatalf("selector should prefer friendly current name:\n%s", got)
+	}
+	if !strings.Contains(got, "Esc Back to settings") {
+		t.Fatalf("nested selector footer should explain its return target:\n%s", got)
+	}
+}
+
+func TestModelSelectorPageNavigation(t *testing.T) {
+	m := NewModel()
+	m.height = 17
+	m.state = StateModelSelector
+	for i := range 12 {
+		m.availableModels = append(m.availableModels, ModelInfo{ID: fmt.Sprintf("m%d", i), Name: fmt.Sprintf("M%d", i)})
+	}
+
+	page := modelSelectorVisibleCount(m.height, len(m.availableModels))
+	m.handleModelSelectorKeys(tea.KeyMsg{Type: tea.KeyPgDown})
+	if m.modelSelectedIndex != page {
+		t.Fatalf("PgDn index=%d, want %d", m.modelSelectedIndex, page)
+	}
+	m.handleModelSelectorKeys(tea.KeyMsg{Type: tea.KeyEnd})
+	if m.modelSelectedIndex != len(m.availableModels)-1 {
+		t.Fatalf("End index=%d, want last", m.modelSelectedIndex)
+	}
+	m.handleModelSelectorKeys(tea.KeyMsg{Type: tea.KeyHome})
+	if m.modelSelectedIndex != 0 {
+		t.Fatalf("Home index=%d, want 0", m.modelSelectedIndex)
 	}
 }

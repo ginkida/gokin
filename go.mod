@@ -15,6 +15,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/ollama/ollama v0.20.3
 	github.com/pkg/sftp v1.13.10
+	github.com/rivo/uniseg v0.4.7
 	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.51.0
@@ -57,7 +58,6 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.8.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect

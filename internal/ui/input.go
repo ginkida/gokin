@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // defaultProviderNames returns all provider names from the registry.
@@ -55,6 +56,7 @@ type SuggestionType int
 
 const (
 	SuggestionCommand SuggestionType = iota
+	SuggestionArgument
 	SuggestionFile
 	SuggestionAtFile // @path file reference (the buffer keeps the leading @)
 )
@@ -163,12 +165,15 @@ type InputModel struct {
 	workDir      string   // Working directory for file suggestions
 
 	// Autocomplete
-	commands        []CommandInfo
-	suggestions     []CommandInfo
-	suggestionType  SuggestionType
-	fileSuggestions []string
-	suggestionIndex int
-	showSuggestions bool
+	commands         []CommandInfo
+	suggestions      []CommandInfo
+	suggestionType   SuggestionType
+	argSuggestions   []string
+	suggestionArg    string
+	fileSuggestions  []string
+	suggestionIndex  int
+	showSuggestions  bool
+	suggestionNotice string
 
 	// Alias map: user-typed short name → canonical command. Wired from
 	// commands.Handler at startup so /p resolves to plan in autocomplete
@@ -247,6 +252,7 @@ func NewInputModel(styles *Styles, workDir string) InputModel {
 		commands:           DefaultCommands(),
 		suggestions:        nil,
 		suggestionType:     SuggestionCommand,
+		argSuggestions:     nil,
 		fileSuggestions:    nil,
 		suggestionIndex:    0,
 		showSuggestions:    false,
@@ -300,7 +306,9 @@ func DefaultCommands() []CommandInfo {
 		{Name: "redo", Description: "Re-apply the last undone change", Category: "Session",
 			Args:  []ArgInfo{{Name: "n", Required: false, Type: "number"}},
 			Usage: "/redo [N]"},
-		{Name: "instructions", Description: "Show project instructions", Category: "Session"},
+		{Name: "instructions", Description: "Show project instructions", Category: "Session",
+			Args:  []ArgInfo{{Name: "source", Required: false, Type: "option", Options: []string{"--source"}}},
+			Usage: "/instructions [--source]"},
 
 		// Auth & Setup
 		{Name: "login", Description: "Set API key for a provider", Category: "Auth",
@@ -317,7 +325,9 @@ func DefaultCommands() []CommandInfo {
 		{Name: "config", Description: "Show current configuration", Category: "Auth"},
 		{Name: "set", Description: "View or change a setting (live)", Category: "Auth",
 			Args: []ArgInfo{{Name: "key", Required: false, Type: "option",
-				Options: []string{"permissions", "sandbox", "diff", "tokens", "autocompact", "memory", "plan", "donegate", "thinking"}}}},
+				Options: []string{"permissions", "sandbox", "diff", "tokens", "autocompact", "memory", "plan", "donegate", "thinking"}},
+				{Name: "on|off", Required: false, Type: "option", Options: []string{"on", "off"}}},
+			Usage: "/set [<key> <on|off>]"},
 		{Name: "settings", Description: "Open the interactive settings screen", Category: "Auth"},
 		{Name: "update", Description: "Check/install updates and rollback", Category: "Auth",
 			Args:  []ArgInfo{{Name: "action", Required: false, Type: "option", Options: []string{"install", "backups", "rollback"}}},
@@ -326,14 +336,19 @@ func DefaultCommands() []CommandInfo {
 		// commands.go but missing from autocomplete — surfaced by
 		// TestEveryRegisteredCommandIsInAutocomplete in v0.78.14.
 		{Name: "restart", Description: "Re-exec into the latest installed binary", Category: "Auth"},
-		{Name: "whats-new", Description: "Show release notes for the current version", Category: "Auth"},
-		{Name: "changelog", Description: "Show compact list of recent releases", Category: "Auth"},
+		{Name: "whats-new", Description: "Show release notes for the current version", Category: "Auth",
+			Args: []ArgInfo{{Name: "tag", Required: false, Type: "string"}}, Usage: "/whats-new [tag]"},
+		{Name: "changelog", Description: "Show compact list of recent releases", Category: "Auth",
+			Args: []ArgInfo{{Name: "count", Required: false, Type: "number"}}, Usage: "/changelog [count]"},
 
 		// Git
 		{Name: "init", Description: "Initialize GOKIN.md for this project", Category: "Git"},
 		{Name: "commit", Description: "Create a git commit with AI-generated message", Category: "Git",
 			Args: []ArgInfo{{Name: "message", Required: false, Type: "string"}}, Usage: "/commit [message]"},
-		{Name: "pr", Description: "Create a pull request", Category: "Git"},
+		{Name: "pr", Description: "Create a pull request", Category: "Git",
+			Args: []ArgInfo{{Name: "options", Required: false, Type: "option",
+				Options: []string{"--title", "--draft", "--base"}}},
+			Usage: "/pr [--title title] [--draft] [--base branch]"},
 		// v0.77.x git-inspect family + v0.78.12 /blame. These were registered
 		// in commands.go but missing from autocomplete — added here so the
 		// suggestion list matches the actual available commands.
@@ -360,7 +375,9 @@ func DefaultCommands() []CommandInfo {
 		{Name: "plan", Description: "Toggle planning mode", Category: "Planning",
 			Args:  []ArgInfo{{Name: "action", Required: false, Type: "option", Options: []string{"status"}}},
 			Usage: "/plan [status]"},
-		{Name: "resume-plan", Description: "Resume a saved plan", Category: "Planning"},
+		{Name: "resume-plan", Description: "Resume a saved plan", Category: "Planning",
+			Args:  []ArgInfo{{Name: "list|plan_id", Required: false, Type: "option", Options: []string{"list"}}},
+			Usage: "/resume-plan [list|<plan_id>]"},
 		{Name: "health", Description: "Show runtime health", Category: "Planning"},
 		{Name: "policy", Description: "Show policy engine status", Category: "Planning"},
 		{Name: "ledger", Description: "Show plan run ledger", Category: "Planning"},
@@ -378,16 +395,25 @@ func DefaultCommands() []CommandInfo {
 			Args: []ArgInfo{{Name: "path", Required: false, Type: "path"}}, Usage: "/browse [path]"},
 		{Name: "open", Description: "Open a file in your editor", Category: "Tools",
 			Args: []ArgInfo{{Name: "file", Required: true, Type: "path"}}, Usage: "/open <file>"},
-		{Name: "copy", Description: "Copy code block to clipboard", Category: "Tools",
-			Args:  []ArgInfo{{Name: "n", Required: false, Type: "number"}, {Name: "filename", Required: false, Type: "path"}},
-			Usage: "/copy [n] [filename]"},
+		{Name: "copy", Description: "Copy text, the last response, or the conversation", Category: "Tools",
+			Args: []ArgInfo{
+				{Name: "source", Required: false, Type: "option", Options: []string{"--last", "--all", "--ascii"}},
+				{Name: "text", Required: false, Type: "string"},
+			},
+			Usage: "/copy [--last|--all|--ascii] [<text>]"},
 		{Name: "paste", Description: "Paste from clipboard", Category: "Tools"},
-		{Name: "clear-todos", Description: "Clear all todo items", Category: "Tools"},
+		{Name: "clear-todos", Description: "Clear all todo items", Category: "Tools",
+			Args:  []ArgInfo{{Name: "force", Required: false, Type: "option", Options: []string{"--force"}}},
+			Usage: "/clear-todos [--force]"},
 		{Name: "ql", Description: "Quick look at a file", Category: "Tools",
 			Args: []ArgInfo{{Name: "path", Required: true, Type: "path"}}, Usage: "/ql <path>"},
 		{Name: "hooks", Description: "List configured agent hooks and their sources", Category: "Tools"},
-		{Name: "add-dir", Description: "Grant the agent access to a directory outside the workspace", Category: "Tools"},
-		{Name: "remove-dir", Description: "Revoke a session directory grant added with /add-dir", Category: "Tools"},
+		{Name: "add-dir", Description: "Grant the agent access to a directory outside the workspace", Category: "Tools",
+			Args: []ArgInfo{{Name: "persist", Required: false, Type: "option", Options: []string{"--persist"}},
+				{Name: "path", Required: true, Type: "path"}},
+			Usage: "/add-dir [--persist] <path>"},
+		{Name: "remove-dir", Description: "Revoke a session directory grant added with /add-dir", Category: "Tools",
+			Args: []ArgInfo{{Name: "path", Required: true, Type: "path"}}, Usage: "/remove-dir <path>"},
 		{Name: "permissions", Description: "Toggle permission prompts", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
 			Usage: "/permissions [on|off]"},
@@ -465,12 +491,15 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 					if len(selected.Args) > 0 {
 						m.showArgHints = true
 						m.currentCommand = &selected
+						m.updateArgumentSuggestions(m.textarea.Value())
 					}
+					return m, nil
+				} else if m.suggestionType == SuggestionArgument && len(m.argSuggestions) > 0 {
+					m.acceptArgumentSuggestion(m.argSuggestions[m.suggestionIndex])
 					return m, nil
 				} else if (m.suggestionType == SuggestionFile || m.suggestionType == SuggestionAtFile) && len(m.fileSuggestions) > 0 {
 					selected := m.fileSuggestions[m.suggestionIndex]
-					rel, _ := filepath.Rel(m.workDir, selected)
-					m.acceptFileSuggestion(rel)
+					m.acceptFileSuggestion(selected)
 					return m, nil
 				}
 			}
@@ -494,14 +523,26 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 					if len(selected.Args) > 0 {
 						m.showArgHints = true
 						m.currentCommand = &selected
+						m.updateArgumentSuggestions(m.textarea.Value())
 					}
 				}
+			} else if m.updateArgumentSuggestions(value) {
+				// Argument options are accepted by Tab only. Enter remains submit.
 			} else if m.shouldSuggestFiles(value) {
 				m.updateFileSuggestions(value)
 			}
 			return m, nil
 
 		case tea.KeyEnter:
+			if m.showSuggestions && m.suggestionType == SuggestionArgument {
+				// Model.Update normally consumes submission before forwarding the
+				// key. If InputModel is used directly, still never let Enter insert
+				// an option (especially --force) or a textarea newline implicitly.
+				m.showSuggestions = false
+				m.argSuggestions = nil
+				m.suggestionArg = ""
+				return m, nil
+			}
 			// Handle autocomplete on Enter
 			if m.showSuggestions {
 				if m.suggestionType == SuggestionCommand && len(m.suggestions) > 0 {
@@ -515,12 +556,12 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 					if len(selected.Args) > 0 {
 						m.showArgHints = true
 						m.currentCommand = &selected
+						m.updateArgumentSuggestions(m.textarea.Value())
 					}
 					return m, nil
 				} else if (m.suggestionType == SuggestionFile || m.suggestionType == SuggestionAtFile) && len(m.fileSuggestions) > 0 {
 					selected := m.fileSuggestions[m.suggestionIndex]
-					rel, _ := filepath.Rel(m.workDir, selected)
-					m.acceptFileSuggestion(rel)
+					m.acceptFileSuggestion(selected)
 					return m, nil
 				}
 			}
@@ -531,6 +572,8 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				count := 0
 				if m.suggestionType == SuggestionCommand {
 					count = len(m.suggestions)
+				} else if m.suggestionType == SuggestionArgument {
+					count = len(m.argSuggestions)
 				} else {
 					count = len(m.fileSuggestions)
 				}
@@ -564,6 +607,8 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				count := 0
 				if m.suggestionType == SuggestionCommand {
 					count = len(m.suggestions)
+				} else if m.suggestionType == SuggestionArgument {
+					count = len(m.argSuggestions)
 				} else {
 					count = len(m.fileSuggestions)
 				}
@@ -592,10 +637,14 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 
 		case tea.KeyEscape:
 			// Cancel suggestions and ghost text
-			if m.showSuggestions || m.ghostText != "" || m.showArgHints {
+			if m.showSuggestions || m.ghostText != "" || m.showArgHints || m.suggestionNotice != "" {
 				m.showSuggestions = false
 				m.suggestions = nil
+				m.argSuggestions = nil
+				m.suggestionArg = ""
+				m.fileSuggestions = nil
 				m.ghostText = ""
+				m.suggestionNotice = ""
 				m.showArgHints = false
 				m.currentCommand = nil
 				return m, nil
@@ -624,14 +673,19 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 			// Clear arg hints when typing command
 			m.showArgHints = false
 			m.currentCommand = nil
+		} else if m.updateArgumentSuggestions(value) {
+			// Structured option completion takes precedence over path heuristics.
 		} else if m.shouldSuggestFiles(value) {
 			m.suggestionType = SuggestionFile
 			m.updateFileSuggestions(value)
 		} else {
 			m.showSuggestions = false
 			m.suggestions = nil
+			m.argSuggestions = nil
+			m.suggestionArg = ""
 			m.fileSuggestions = nil
 			m.ghostText = ""
+			m.suggestionNotice = ""
 			// Clear arg hints when not in command context
 			if !strings.HasPrefix(value, "/") {
 				m.showArgHints = false
@@ -659,6 +713,7 @@ func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
 		m.historySearchMode = false
 		m.historySearchQuery = ""
 		m.historySearchResult = ""
+		m.historySearchIndex = -1
 		return m, nil
 
 	case tea.KeyEscape, tea.KeyCtrlC:
@@ -666,13 +721,19 @@ func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
 		m.historySearchMode = false
 		m.historySearchQuery = ""
 		m.historySearchResult = ""
+		m.historySearchIndex = -1
 		return m, nil
 
 	case tea.KeyCtrlR:
 		// Search for next match (older)
 		if m.historySearchIndex > 0 {
-			m.historySearchIndex--
+			previousResult := m.historySearchResult
+			previousIndex := m.historySearchIndex
 			m.searchHistory()
+			if m.historySearchResult == "" && previousResult != "" {
+				m.historySearchResult = previousResult
+				m.historySearchIndex = previousIndex
+			}
 		}
 		return m, nil
 
@@ -689,12 +750,25 @@ func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
 	default:
 		// Add character to search query
 		if msg.Type == tea.KeyRunes {
-			m.historySearchQuery += string(msg.Runes)
+			m.historySearchQuery += sanitizeHistorySearchText(string(msg.Runes))
 			m.historySearchIndex = len(m.history)
 			m.searchHistory()
 		}
 		return m, nil
 	}
+}
+
+func sanitizeHistorySearchText(value string) string {
+	value = ansi.Strip(value)
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			if unicode.IsSpace(r) {
+				return ' '
+			}
+			return -1
+		}
+		return r
+	}, value)
 }
 
 // searchHistory searches history for the current query.
@@ -854,9 +928,177 @@ func (m *InputModel) updateSuggestions(input string) {
 	m.suggestionIndex = 0
 	m.showSuggestions = len(m.suggestions) > 0
 	m.suggestionType = SuggestionCommand
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.fileSuggestions = nil
+	m.suggestionNotice = ""
+	if !m.showSuggestions && prefix != "" {
+		m.suggestionNotice = fmt.Sprintf("No commands match %q", "/"+prefix)
+	}
 
 	// Update ghost text with top suggestion
 	m.updateGhostText(prefix)
+}
+
+// updateArgumentSuggestions opens structured option completion for an exact
+// slash command. It deliberately returns false for free-form arguments: a
+// missing option match is not an error and must never block normal typing.
+func (m *InputModel) updateArgumentSuggestions(value string) bool {
+	command, argIndex, prefix, ok := m.commandArgumentContext(value)
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	if !ok {
+		return false
+	}
+
+	var options []string
+	if argIndex >= 0 && argIndex < len(command.Args) {
+		options = append(options, command.Args[argIndex].Options...)
+		m.suggestionArg = command.Args[argIndex].Name
+	}
+	// Flags may legally appear after positional values for several commands.
+	// When the user starts a flag, offer every declared flag regardless of the
+	// nominal positional index instead of making metadata order a hidden rule.
+	if strings.HasPrefix(prefix, "-") {
+		for _, arg := range command.Args {
+			for _, option := range arg.Options {
+				if strings.HasPrefix(option, "-") {
+					options = append(options, option)
+				}
+			}
+		}
+	}
+
+	seen := make(map[string]bool, len(options))
+	prefixLower := strings.ToLower(prefix)
+	for _, option := range options {
+		if seen[option] || !strings.HasPrefix(strings.ToLower(option), prefixLower) {
+			continue
+		}
+		seen[option] = true
+		m.argSuggestions = append(m.argSuggestions, option)
+	}
+	if len(m.argSuggestions) == 0 {
+		m.suggestionArg = ""
+		return false
+	}
+
+	commandCopy := cloneCommandInfo(command)
+	m.currentCommand = &commandCopy
+	m.showArgHints = true
+	m.suggestions = nil
+	m.fileSuggestions = nil
+	m.suggestionNotice = ""
+	m.ghostText = ""
+	m.suggestionType = SuggestionArgument
+	m.suggestionIndex = 0
+	m.showSuggestions = true
+	return true
+}
+
+func (m InputModel) commandArgumentContext(value string) (CommandInfo, int, string, bool) {
+	if !strings.HasPrefix(value, "/") || strings.IndexFunc(value, unicode.IsSpace) < 0 {
+		return CommandInfo{}, 0, "", false
+	}
+	fields := splitInputFields(value)
+	if len(fields) == 0 {
+		return CommandInfo{}, 0, "", false
+	}
+	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	if target, ok := m.commandAliases[name]; ok {
+		name = strings.ToLower(target)
+	}
+	var command CommandInfo
+	found := false
+	for _, candidate := range m.commands {
+		if strings.EqualFold(candidate.Name, name) {
+			command = candidate
+			found = true
+			break
+		}
+	}
+	if !found || len(command.Args) == 0 {
+		return CommandInfo{}, 0, "", false
+	}
+
+	argIndex := len(fields) - 1
+	prefix := ""
+	if token, hasToken := trailingInputToken(value); hasToken && token.start > len(fields[0]) {
+		argIndex--
+		prefix = token.text
+	}
+	return command, argIndex, prefix, true
+}
+
+// splitInputFields mirrors slash-command token semantics closely enough to
+// determine the current argument index while preserving spaces inside quotes.
+func splitInputFields(value string) []string {
+	var fields []string
+	var b strings.Builder
+	var quote rune
+	tokenStarted := false
+	escaped := false
+	for _, r := range value {
+		if escaped {
+			b.WriteRune(r)
+			tokenStarted = true
+			escaped = false
+			continue
+		}
+		if quote != 0 {
+			switch r {
+			case '\\':
+				escaped = true
+			case quote:
+				quote = 0
+				tokenStarted = true
+			default:
+				b.WriteRune(r)
+				tokenStarted = true
+			}
+			continue
+		}
+		switch {
+		case (r == '"' || r == '\'') && b.Len() == 0:
+			quote = r
+			tokenStarted = true
+		case unicode.IsSpace(r):
+			if tokenStarted {
+				fields = append(fields, b.String())
+				b.Reset()
+				tokenStarted = false
+			}
+		default:
+			b.WriteRune(r)
+			tokenStarted = true
+		}
+	}
+	if escaped {
+		b.WriteRune('\\')
+	}
+	if tokenStarted {
+		fields = append(fields, b.String())
+	}
+	return fields
+}
+
+func (m *InputModel) acceptArgumentSuggestion(option string) {
+	value := m.textarea.Value()
+	if token, ok := trailingInputToken(value); ok && token.start > strings.IndexFunc(value, unicode.IsSpace) {
+		value = value[:token.start] + option + " "
+	} else {
+		value += option + " "
+	}
+	m.textarea.SetValue(value)
+	m.textarea.CursorEnd()
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.showSuggestions = false
+	m.suggestionIndex = 0
+	m.ghostText = ""
+	m.suggestionNotice = ""
+	// Chain completion for commands such as `/set <key> <on|off>`.
+	m.updateArgumentSuggestions(value)
 }
 
 func (m *InputModel) updateGhostText(prefix string) {
@@ -901,10 +1143,17 @@ func (m InputModel) shouldSuggestFiles(input string) bool {
 		return false
 	}
 
-	// Suggest for specific commands
-	if strings.HasPrefix(input, "/open ") || strings.HasPrefix(input, "/browse ") ||
-		strings.HasPrefix(input, "/copy ") || strings.HasPrefix(input, "/ql ") {
-		return true
+	if command, argIndex, prefix, ok := m.commandArgumentContext(input); ok && argIndex >= 0 && argIndex < len(command.Args) {
+		arg := command.Args[argIndex]
+		if arg.Type == "path" {
+			return true
+		}
+		// Optional flags do not consume a positional slot when omitted. If the
+		// typed value is not a flag and the following argument is a path, treat
+		// it as that path (e.g. /add-dir <path> without --persist).
+		if arg.Type == "option" && !strings.HasPrefix(prefix, "-") && argIndex+1 < len(command.Args) && command.Args[argIndex+1].Type == "path" {
+			return true
+		}
 	}
 
 	// Suggest if current word looks like a path (contains /, ., or is part of a known path).
@@ -921,8 +1170,15 @@ func (m InputModel) shouldSuggestFiles(input string) bool {
 // "@src/ma"), mirroring updateFileSuggestions but on the @-stripped prefix. The
 // matches are stored as absolute paths; acceptFileSuggestion re-adds the @.
 func (m *InputModel) updateAtFileSuggestions(word string) {
-	if m.workDir == "" {
+	m.suggestions = nil
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.suggestionType = SuggestionAtFile
+	m.suggestionNotice = ""
+	if !m.fileSuggestionsReady() {
 		m.showSuggestions = false
+		m.fileSuggestions = nil
+		m.ghostText = ""
 		return
 	}
 	prefix := strings.TrimPrefix(word, "@")
@@ -935,6 +1191,9 @@ func (m *InputModel) updateAtFileSuggestions(word string) {
 	m.fileSuggestions = matches
 	m.suggestionIndex = 0
 	m.showSuggestions = len(m.fileSuggestions) > 0
+	if !m.showSuggestions {
+		m.suggestionNotice = fmt.Sprintf("No files match %q", word)
+	}
 
 	if len(m.fileSuggestions) > 0 {
 		rel, err := filepath.Rel(m.workDir, m.fileSuggestions[0])
@@ -949,20 +1208,38 @@ func (m *InputModel) updateAtFileSuggestions(word string) {
 }
 
 func (m *InputModel) updateFileSuggestions(input string) {
-	if m.workDir == "" {
+	m.suggestions = nil
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.suggestionType = SuggestionFile
+	m.suggestionNotice = ""
+	if !m.fileSuggestionsReady() {
 		m.showSuggestions = false
+		m.fileSuggestions = nil
+		m.ghostText = ""
 		return
 	}
 
 	token, ok := trailingInputToken(input)
 	if !ok {
-		m.showSuggestions = false
-		return
+		last, _ := utf8.DecodeLastRuneInString(input)
+		if !unicode.IsSpace(last) {
+			m.showSuggestions = false
+			m.fileSuggestions = nil
+			m.ghostText = ""
+			return
+		}
+		// A just-entered path argument should reveal the top-level choices
+		// immediately instead of requiring an arbitrary first character.
+		token = inputToken{start: len(input)}
 	}
 	lastWord := token.text
 
 	// Simple glob matching for now
-	pattern := filepath.Join(m.workDir, lastWord+"*")
+	pattern := lastWord + "*"
+	if !filepath.IsAbs(lastWord) {
+		pattern = filepath.Join(m.workDir, pattern)
+	}
 	matches, _ := filepath.Glob(pattern)
 
 	// Fallback: search in current dir if not absolute
@@ -973,6 +1250,9 @@ func (m *InputModel) updateFileSuggestions(input string) {
 	m.fileSuggestions = matches
 	m.suggestionIndex = 0
 	m.showSuggestions = len(m.fileSuggestions) > 0
+	if !m.showSuggestions {
+		m.suggestionNotice = fmt.Sprintf("No files match %q", lastWord)
+	}
 
 	// Update ghost text for files
 	if len(m.fileSuggestions) > 0 {
@@ -985,7 +1265,22 @@ func (m *InputModel) updateFileSuggestions(input string) {
 				m.ghostText = ""
 			}
 		}
+	} else {
+		m.ghostText = ""
 	}
+}
+
+func (m *InputModel) fileSuggestionsReady() bool {
+	if strings.TrimSpace(m.workDir) == "" {
+		m.suggestionNotice = "File suggestions unavailable · no working directory"
+		return false
+	}
+	info, err := os.Stat(m.workDir)
+	if err != nil || !info.IsDir() {
+		m.suggestionNotice = "File suggestions unavailable · check working directory"
+		return false
+	}
+	return true
 }
 
 // searchFilesFuzzy performs a shallow search for files matching a query.
@@ -1028,22 +1323,35 @@ func (m InputModel) View() string {
 		resultStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted)
 
-		result.WriteString(searchStyle.Render("search:"))
-		result.WriteString(queryStyle.Render("`" + m.historySearchQuery + "'"))
-		result.WriteString(": ")
-		if m.historySearchResult != "" {
-			result.WriteString(resultStyle.Render(m.historySearchResult))
+		width := max(m.textarea.Width(), 1)
+		query := m.historySearchQuery
+		if query == "" {
+			query = "Type to search previous messages"
 		}
+		result.WriteString(searchStyle.Render(truncateForWidth("History search · "+query, width)))
+		result.WriteString("\n")
+		if m.historySearchResult != "" {
+			match := safeKeyEntryText(m.historySearchResult)
+			result.WriteString(resultStyle.Render(truncateForWidth("Match · "+match, width)))
+		} else if m.historySearchQuery != "" {
+			result.WriteString(resultStyle.Render(truncateForWidth("No matching history", width)))
+		} else {
+			result.WriteString(queryStyle.Render(truncateForWidth("Start typing to filter", width)))
+		}
+		result.WriteString("\n")
+		result.WriteString(resultStyle.Render(truncateForWidth("Ctrl+R older · Enter use · Esc cancel", width)))
 		result.WriteString("\n")
 	}
 
-	// Show autocomplete suggestions. Gate on EITHER slice: m.suggestions holds
-	// command matches, m.fileSuggestions holds file/@file matches — the old
-	// command-only gate left the file + @file dropdowns invisible (renderSuggestions
-	// already renders the file branch).
-	if m.showSuggestions && (len(m.suggestions) > 0 || len(m.fileSuggestions) > 0) {
+	// Show autocomplete suggestions. Each suggestion kind owns a separate slice
+	// so command metadata, argument options, and filesystem paths cannot be
+	// mistaken for one another during rendering or acceptance.
+	if m.showSuggestions && (len(m.suggestions) > 0 || len(m.argSuggestions) > 0 || len(m.fileSuggestions) > 0) {
 		suggestionBox := m.renderSuggestions()
 		result.WriteString(suggestionBox)
+		result.WriteString("\n")
+	} else if m.suggestionNotice != "" {
+		result.WriteString(m.renderSuggestionNotice())
 		result.WriteString("\n")
 	}
 
@@ -1078,9 +1386,16 @@ func (m InputModel) renderArgHints() string {
 	reqStyle := lipgloss.NewStyle().Foreground(ColorWarning) // Amber for required
 	optStyle := lipgloss.NewStyle().Foreground(ColorMuted)   // Gray for optional
 
-	builder.WriteString(hintStyle.Render("  Usage: /"))
-	builder.WriteString(hintStyle.Render(m.currentCommand.Name))
-	builder.WriteString(" ")
+	builder.WriteString(hintStyle.Render("  Usage: "))
+	if usage := strings.TrimSpace(m.currentCommand.Usage); usage != "" {
+		// Usage is the only representation that can faithfully express flags,
+		// alternatives, and mixed optional/required ordering. ArgInfo remains the
+		// structured source for completion, while this is the human-readable hint.
+		builder.WriteString(hintStyle.Render(usage))
+		return ansi.Truncate(builder.String(), max(m.textarea.Width(), 1), "…")
+	}
+
+	builder.WriteString(hintStyle.Render("/" + m.currentCommand.Name + " "))
 
 	for i, arg := range m.currentCommand.Args {
 		if i > 0 {
@@ -1094,7 +1409,23 @@ func (m InputModel) renderArgHints() string {
 		}
 	}
 
-	return builder.String()
+	return ansi.Truncate(builder.String(), max(m.textarea.Width(), 1), "…")
+}
+
+func (m InputModel) renderSuggestionNotice() string {
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorBorder).
+		Padding(0, 1)
+	noticeStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+	footerStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	lineBudget := max(m.textarea.Width()-2, 1)
+	notice := truncateForWidth(safeKeyEntryText(m.suggestionNotice), lineBudget)
+	footer := truncateForWidth("Esc dismiss · Enter send anyway", lineBudget)
+	if isUnavailablePromptNotice(m.suggestionNotice) {
+		footer = truncateForWidth("Esc dismiss · Draft preserved", lineBudget)
+	}
+	return boxStyle.Render(noticeStyle.Render(notice) + "\n" + footerStyle.Render(footer))
 }
 
 // renderSuggestions renders the autocomplete suggestion box.
@@ -1185,6 +1516,39 @@ func (m InputModel) renderSuggestions() string {
 			}
 			lines = append(lines, descStyle.Render(footer))
 		}
+	} else if m.suggestionType == SuggestionArgument {
+		if len(m.argSuggestions) < maxShow {
+			maxShow = len(m.argSuggestions)
+		}
+		start := 0
+		if m.suggestionIndex >= maxShow {
+			start = m.suggestionIndex - maxShow + 1
+		}
+		end := min(start+maxShow, len(m.argSuggestions))
+		for i := start; i < end; i++ {
+			style := normalStyle
+			prefix := "  "
+			if i == m.suggestionIndex {
+				style = selectedStyle
+				prefix = "> "
+			}
+			option := safeKeyEntryText(m.argSuggestions[i])
+			if lineBudget > 0 {
+				option = truncateForWidth(option, max(lineBudget-lipgloss.Width(prefix), 1))
+			}
+			lines = append(lines, prefix+style.Render(option))
+		}
+		if len(m.argSuggestions) > maxShow {
+			lines = append(lines, descStyle.Render(fmt.Sprintf("↑↓ %d", len(m.argSuggestions))))
+		}
+		footer := "Tab complete · Enter run as typed"
+		if m.suggestionArg != "" {
+			footer += " · " + m.suggestionArg
+		}
+		if lineBudget > 0 {
+			footer = truncateForWidth(footer, lineBudget)
+		}
+		lines = append(lines, descStyle.Render(footer))
 	} else {
 		// File suggestions
 		if len(m.fileSuggestions) < maxShow {
@@ -1288,7 +1652,10 @@ func (m InputModel) collapsePaste(text string) InputModel {
 	// when the paste landed stays stale (and the next Enter could accept it
 	// instead of submitting).
 	m.showSuggestions = false
+	m.suggestionNotice = ""
 	m.suggestions = nil
+	m.argSuggestions = nil
+	m.suggestionArg = ""
 	m.fileSuggestions = nil
 	m.ghostText = ""
 	m.showArgHints = false
@@ -1326,6 +1693,20 @@ func (m *InputModel) Reset() {
 	m.savedInput = ""
 	m.pastes = nil // drop collapsed-paste content for the next compose
 	m.pasteSeq = 0
+	m.suggestions = nil
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.fileSuggestions = nil
+	m.suggestionIndex = 0
+	m.showSuggestions = false
+	m.ghostText = ""
+	m.suggestionNotice = ""
+	m.showArgHints = false
+	m.currentCommand = nil
+	m.historySearchMode = false
+	m.historySearchQuery = ""
+	m.historySearchResult = ""
+	m.historySearchIndex = -1
 }
 
 // InsertNewline adds a newline at the cursor position and grows the input height.
@@ -1340,6 +1721,77 @@ func (m *InputModel) InsertNewline() {
 	}
 }
 
+// InsertFileReferences appends file-browser selections to the composer as
+// @references. Existing draft text is preserved, paths inside workDir become
+// concise relative references, and names containing spaces are quoted using
+// the same rules as autocomplete.
+func (m *InputModel) InsertFileReferences(paths []string, workDir string) int {
+	seen := make(map[string]bool, len(paths))
+	references := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" || strings.IndexFunc(path, unicode.IsControl) >= 0 {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if clean == "." || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		if workDir != "" && filepath.IsAbs(clean) {
+			if rel, err := filepath.Rel(workDir, clean); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				clean = rel
+			}
+		}
+		clean = filepath.ToSlash(clean)
+		references = append(references, formatAcceptedFilePath(clean, inputToken{text: "@"}))
+	}
+	if len(references) == 0 {
+		return 0
+	}
+
+	value := m.textarea.Value()
+	if value != "" {
+		last, _ := utf8.DecodeLastRuneInString(value)
+		if !unicode.IsSpace(last) {
+			value += " "
+		}
+	}
+	value += strings.Join(references, " ") + " "
+	m.textarea.SetValue(value)
+	m.textarea.CursorEnd()
+	m.textarea.SetHeight(min(strings.Count(value, "\n")+1, 6))
+	m.showSuggestions = false
+	m.suggestionNotice = ""
+	m.suggestions = nil
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.fileSuggestions = nil
+	m.ghostText = ""
+	m.showArgHints = false
+	m.currentCommand = nil
+	return len(references)
+}
+
+// RestoreDraft returns rejected user input to an empty composer without
+// clobbering anything typed since submission. Large content is collapsed back
+// into a paste chip so a queue overflow cannot suddenly fill the whole screen.
+func (m *InputModel) RestoreDraft(value string) bool {
+	value = sanitizeHistoryEntry(value)
+	if value == "" || m.Value() != "" {
+		return false
+	}
+	m.Reset()
+	if isLargePaste(value) {
+		*m = m.collapsePaste(value)
+	} else {
+		m.textarea.SetValue(value)
+		m.textarea.CursorEnd()
+		const maxInputLines = 6
+		m.textarea.SetHeight(min(strings.Count(value, "\n")+1, maxInputLines))
+	}
+	return true
+}
+
 // Height returns the current input height in lines.
 func (m InputModel) Height() int {
 	return m.textarea.Height()
@@ -1347,7 +1799,7 @@ func (m InputModel) Height() int {
 
 // AddToHistory adds a command to the history.
 func (m *InputModel) AddToHistory(cmd string) {
-	cmd = strings.TrimSpace(cmd)
+	cmd = sanitizeHistoryEntry(cmd)
 	if cmd == "" {
 		return
 	}
@@ -1363,6 +1815,24 @@ func (m *InputModel) AddToHistory(cmd string) {
 	if len(m.history) > maxHistorySize {
 		m.history = m.history[len(m.history)-maxHistorySize:]
 	}
+}
+
+func sanitizeHistoryEntry(entry string) string {
+	entry = ansi.Strip(entry)
+	entry = strings.ReplaceAll(entry, "\r\n", "\n")
+	entry = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n':
+			return r
+		case '\r', '\t':
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, entry)
+	return strings.TrimSpace(entry)
 }
 
 // SetWidth sets the input width.
@@ -1387,15 +1857,22 @@ func (m InputModel) Focused() bool {
 
 // GetHistory returns the current history slice.
 func (m *InputModel) GetHistory() []string {
-	return m.history
+	return append([]string(nil), m.history...)
 }
 
 // SetHistory sets the history from an external source.
 func (m *InputModel) SetHistory(history []string) {
-	m.history = history
-	if len(m.history) > maxHistorySize {
-		m.history = m.history[len(m.history)-maxHistorySize:]
+	m.history = make([]string, 0, min(len(history), maxHistorySize))
+	for _, entry := range history {
+		if entry = sanitizeHistoryEntry(entry); entry != "" {
+			m.history = append(m.history, entry)
+		}
 	}
+	if len(m.history) > maxHistorySize {
+		m.history = append([]string(nil), m.history[len(m.history)-maxHistorySize:]...)
+	}
+	m.historyIndex = -1
+	m.savedInput = ""
 }
 
 // LoadHistory loads command history from file.
@@ -1418,8 +1895,13 @@ func (m *InputModel) LoadHistory() error {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line != "" {
-			history = append(history, line)
+		if encoded, ok := strings.CutPrefix(line, "q:"); ok {
+			if unquoted, unquoteErr := strconv.Unquote(encoded); unquoteErr == nil {
+				line = unquoted
+			}
+		}
+		if entry := sanitizeHistoryEntry(line); entry != "" {
+			history = append(history, entry)
 		}
 	}
 
@@ -1432,7 +1914,7 @@ func (m *InputModel) LoadHistory() error {
 		history = history[len(history)-maxHistorySize:]
 	}
 
-	m.history = history
+	m.SetHistory(history)
 	return nil
 }
 
@@ -1449,14 +1931,17 @@ func (m *InputModel) SaveHistory() error {
 		return err
 	}
 
-	file, err := os.Create(histPath)
+	file, err := os.OpenFile(histPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
 
 	for _, cmd := range m.history {
-		if _, err := file.WriteString(cmd + "\n"); err != nil {
+		if _, err := file.WriteString("q:" + strconv.Quote(sanitizeHistoryEntry(cmd)) + "\n"); err != nil {
 			return err
 		}
 	}
@@ -1540,19 +2025,50 @@ func (m *InputModel) updatePlaceholder() {
 
 // SetCommands sets the available commands for autocomplete.
 func (m *InputModel) SetCommands(commands []CommandInfo) {
-	m.commands = commands
+	m.commands = make([]CommandInfo, len(commands))
+	for i := range commands {
+		m.commands[i] = cloneCommandInfo(commands[i])
+	}
+	m.suggestions = nil
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.showSuggestions = false
+	m.ghostText = ""
+	m.suggestionNotice = ""
+	if value := m.textarea.Value(); strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
+		m.updateSuggestions(value)
+	}
 }
 
 // AddCommand adds a single command to the autocomplete list.
 func (m *InputModel) AddCommand(cmd CommandInfo) {
+	cmd = cloneCommandInfo(cmd)
 	// Check if command already exists
 	for i, existing := range m.commands {
 		if existing.Name == cmd.Name {
 			m.commands[i] = cmd
+			m.refreshCommandSuggestions()
 			return
 		}
 	}
 	m.commands = append(m.commands, cmd)
+	m.refreshCommandSuggestions()
+}
+
+func (m *InputModel) refreshCommandSuggestions() {
+	if value := m.textarea.Value(); strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
+		m.updateSuggestions(value)
+	}
+}
+
+func cloneCommandInfo(cmd CommandInfo) CommandInfo {
+	clone := cmd
+	clone.Args = make([]ArgInfo, len(cmd.Args))
+	for i := range cmd.Args {
+		clone.Args[i] = cmd.Args[i]
+		clone.Args[i].Options = append([]string(nil), cmd.Args[i].Options...)
+	}
+	return clone
 }
 
 // IsHistorySearchMode returns whether history search mode is active.
@@ -1565,12 +2081,34 @@ func (m *InputModel) ShowingSuggestions() bool {
 	return m.showSuggestions
 }
 
+// SuggestionsBlockSubmit reports whether Enter belongs to the dropdown. Command
+// and file completion accept Enter; argument options intentionally require Tab
+// so a highlighted destructive flag such as --force is never inserted by an
+// ordinary submit keystroke.
+func (m *InputModel) SuggestionsBlockSubmit() bool {
+	return m.showSuggestions && m.suggestionType != SuggestionArgument
+}
+
 // acceptFileSuggestion replaces the last word with the selected file path.
 func (m *InputModel) acceptFileSuggestion(path string) {
 	value := m.textarea.Value()
 	token, ok := trailingInputToken(value)
 	if !ok {
-		return
+		last, _ := utf8.DecodeLastRuneInString(value)
+		if !unicode.IsSpace(last) {
+			return
+		}
+		token = inputToken{start: len(value)}
+	}
+
+	// Suggestions are stored as absolute paths. Keep them absolute when the
+	// user started an absolute path (important for /add-dir outside workDir),
+	// otherwise insert the concise workspace-relative form.
+	typedPath := strings.TrimPrefix(token.text, "@")
+	if !filepath.IsAbs(typedPath) && filepath.IsAbs(path) {
+		if rel, err := filepath.Rel(m.workDir, path); err == nil {
+			path = rel
+		}
 	}
 
 	replacement := formatAcceptedFilePath(path, token)
@@ -1579,6 +2117,7 @@ func (m *InputModel) acceptFileSuggestion(path string) {
 	m.showSuggestions = false
 	m.fileSuggestions = nil
 	m.ghostText = ""
+	m.suggestionNotice = ""
 }
 
 func formatAcceptedFilePath(path string, token inputToken) string {

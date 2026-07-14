@@ -74,6 +74,28 @@ func (w *isolatedWorkspace) ApplyBack() (*isolatedWorkspaceApplyBackResult, erro
 	}
 }
 
+// ApplyBackFiles applies only the reviewed subset of an isolated workspace.
+// An empty subset is a valid "apply nothing" decision and never falls back to
+// ApplyBack's all-files behavior.
+func (w *isolatedWorkspace) ApplyBackFiles(files []string) (*isolatedWorkspaceApplyBackResult, error) {
+	if w == nil || !w.ApplyBackOnSuccess {
+		return nil, nil
+	}
+	if strings.TrimSpace(w.BaseRoot) == "" {
+		return nil, fmt.Errorf("isolated workspace is missing base root")
+	}
+	if len(files) == 0 {
+		return &isolatedWorkspaceApplyBackResult{}, nil
+	}
+
+	switch w.Strategy {
+	case "git_worktree":
+		return applySelectedGitWorkspaceChanges(w.BaseRoot, w.Root, files)
+	default:
+		return nil, fmt.Errorf("selective apply-back not supported for %q strategy", w.Strategy)
+	}
+}
+
 func (w *isolatedWorkspace) ChangePreviews() ([]WorkspaceChangePreview, error) {
 	if w == nil {
 		return nil, nil
@@ -190,6 +212,21 @@ func prepareCopiedWorkspace(baseWorkDir string) (*isolatedWorkspace, error) {
 }
 
 func applyGitWorkspaceChanges(baseWorkDir, isolatedWorkDir string) (*isolatedWorkspaceApplyBackResult, error) {
+	return applyGitWorkspaceChangesForPaths(baseWorkDir, isolatedWorkDir, nil)
+}
+
+func applySelectedGitWorkspaceChanges(baseWorkDir, isolatedWorkDir string, files []string) (*isolatedWorkspaceApplyBackResult, error) {
+	paths, err := normalizeWorkspaceApplyPaths(files)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return &isolatedWorkspaceApplyBackResult{}, nil
+	}
+	return applyGitWorkspaceChangesForPaths(baseWorkDir, isolatedWorkDir, paths)
+}
+
+func applyGitWorkspaceChangesForPaths(baseWorkDir, isolatedWorkDir string, paths []string) (*isolatedWorkspaceApplyBackResult, error) {
 	if !git.IsGitRepo(baseWorkDir) {
 		return nil, fmt.Errorf("base workspace is not a git repository")
 	}
@@ -201,7 +238,9 @@ func applyGitWorkspaceChanges(baseWorkDir, isolatedWorkDir string) (*isolatedWor
 		return nil, fmt.Errorf("failed to stage isolated workspace paths: %w", err)
 	}
 
-	changedFilesOut, err := runGitCommand(isolatedWorkDir, "diff", "--name-only", "--no-ext-diff", "--no-renames", "HEAD", "--")
+	nameArgs := []string{"diff", "--name-only", "--no-ext-diff", "--no-renames", "HEAD", "--"}
+	nameArgs = append(nameArgs, paths...)
+	changedFilesOut, err := runGitCommand(isolatedWorkDir, nameArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list isolated workspace changes: %w", err)
 	}
@@ -210,7 +249,9 @@ func applyGitWorkspaceChanges(baseWorkDir, isolatedWorkDir string) (*isolatedWor
 		return &isolatedWorkspaceApplyBackResult{}, nil
 	}
 
-	patch, err := runGitCommand(isolatedWorkDir, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames", "HEAD", "--")
+	patchArgs := []string{"diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames", "HEAD", "--"}
+	patchArgs = append(patchArgs, paths...)
+	patch, err := runGitCommand(isolatedWorkDir, patchArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build isolated workspace patch: %w", err)
 	}
@@ -231,6 +272,25 @@ func applyGitWorkspaceChanges(baseWorkDir, isolatedWorkDir string) (*isolatedWor
 		ChangedFiles: changedFiles,
 		PatchBytes:   len(patch),
 	}, nil
+}
+
+func normalizeWorkspaceApplyPaths(files []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(files))
+	paths := make([]string, 0, len(files))
+	for _, raw := range files {
+		// File names may legally begin or end with spaces. Preserve the exact
+		// reviewed path; Clean is only for traversal/absolute-path validation.
+		path := filepath.ToSlash(filepath.Clean(raw))
+		if path == "" || path == "." || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
+			return nil, fmt.Errorf("invalid reviewed workspace path %q", raw)
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths, nil
 }
 
 func collectGitWorkspaceChangePreviews(baseWorkDir, isolatedWorkDir string) ([]WorkspaceChangePreview, error) {

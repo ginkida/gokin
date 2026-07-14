@@ -544,7 +544,7 @@ func TestMutatingGitAgentsApplyBackFromIsolatedWorkspace(t *testing.T) {
 	runner := NewRunner(context.Background(), nil, registry, workDir)
 	runner.SetWorkspaceIsolationEnabled(true)
 	reviewCalls := 0
-	runner.SetWorkspaceReviewHandler(func(_ context.Context, changes []WorkspaceChangePreview) (bool, error) {
+	runner.SetWorkspaceReviewHandler(func(_ context.Context, changes []WorkspaceChangePreview) ([]string, error) {
 		reviewCalls++
 		if len(changes) != 3 {
 			t.Fatalf("review changes = %d, want 3", len(changes))
@@ -565,7 +565,7 @@ func TestMutatingGitAgentsApplyBackFromIsolatedWorkspace(t *testing.T) {
 		if got := found["delete.txt"].NewContent; got != "" {
 			t.Fatalf("delete new content = %q, want empty", got)
 		}
-		return true, nil
+		return []string{"tracked.txt", "new.txt", "delete.txt"}, nil
 	})
 
 	typeRegistry := NewAgentTypeRegistry()
@@ -680,14 +680,14 @@ func TestMutatingGitAgentsCanRejectApplyBackReview(t *testing.T) {
 
 	runner := NewRunner(context.Background(), nil, registry, workDir)
 	runner.SetWorkspaceIsolationEnabled(true)
-	runner.SetWorkspaceReviewHandler(func(_ context.Context, changes []WorkspaceChangePreview) (bool, error) {
+	runner.SetWorkspaceReviewHandler(func(_ context.Context, changes []WorkspaceChangePreview) ([]string, error) {
 		if len(changes) != 1 {
 			t.Fatalf("review changes = %d, want 1", len(changes))
 		}
 		if changes[0].FilePath != "tracked.txt" {
 			t.Fatalf("review file = %q, want tracked.txt", changes[0].FilePath)
 		}
-		return false, nil
+		return nil, nil
 	})
 
 	typeRegistry := NewAgentTypeRegistry()

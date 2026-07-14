@@ -2,12 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"gokin/internal/format"
 )
@@ -64,6 +65,7 @@ type ActivityFeedPanel struct {
 	recentLog     []string
 	activeEntries map[string]int // ID -> index in entries
 	frame         int            // For spinner animation
+	reducedMotion bool
 	styles        *Styles
 	mu            sync.RWMutex
 
@@ -139,7 +141,9 @@ func (p *ActivityFeedPanel) CompleteEntry(id string, success bool, summary strin
 	}
 
 	entry := &p.entries[idx]
-	entry.Duration = time.Since(entry.StartTime)
+	if !entry.StartTime.IsZero() {
+		entry.Duration = max(time.Since(entry.StartTime), 0)
+	}
 	entry.ResultSummary = summary
 	if success {
 		entry.Status = ActivityCompleted
@@ -232,12 +236,19 @@ func (p *ActivityFeedPanel) UpdateSubAgentProgress(agentID string, progress floa
 		return
 	}
 
-	state.Progress = progress
+	if math.IsNaN(progress) || progress < 0 {
+		state.Progress = -1
+	} else {
+		state.Progress = min(progress, 1)
+	}
 	if currentStep > 0 {
 		state.CurrentStep = currentStep
 	}
 	if totalSteps > 0 {
 		state.TotalSteps = totalSteps
+	}
+	if state.TotalSteps > 0 {
+		state.CurrentStep = min(state.CurrentStep, state.TotalSteps)
 	}
 }
 
@@ -268,10 +279,10 @@ func (p *ActivityFeedPanel) CompleteSubAgent(agentID string, success bool, summa
 
 	state := p.subAgentActivities[agentID]
 	entry := &p.entries[idx]
-	if state != nil {
-		entry.Duration = time.Since(state.StartTime)
-	} else {
-		entry.Duration = time.Since(entry.StartTime)
+	if state != nil && !state.StartTime.IsZero() {
+		entry.Duration = max(time.Since(state.StartTime), 0)
+	} else if !entry.StartTime.IsZero() {
+		entry.Duration = max(time.Since(entry.StartTime), 0)
 	}
 
 	if success {
@@ -290,7 +301,15 @@ func (p *ActivityFeedPanel) CompleteSubAgent(agentID string, success bool, summa
 // Tick advances the spinner animation.
 func (p *ActivityFeedPanel) Tick() {
 	p.mu.Lock()
-	p.frame++
+	if !p.reducedMotion {
+		p.frame++
+	}
+	p.mu.Unlock()
+}
+
+func (p *ActivityFeedPanel) SetReducedMotion(enabled bool) {
+	p.mu.Lock()
+	p.reducedMotion = enabled
 	p.mu.Unlock()
 }
 
@@ -394,9 +413,17 @@ func (p *ActivityFeedPanel) View(width int) string {
 	if !p.visible {
 		return ""
 	}
-	if width < 4 {
-		width = 4
+	if width <= 0 {
+		width = 80
 	}
+	if width < 4 {
+		return truncateForWidth("Activity", width)
+	}
+	horizontalPadding := 1
+	if width < 6 {
+		horizontalPadding = 0
+	}
+	contentWidth := max(width-2-horizontalPadding*2, 1)
 
 	// Show empty state placeholder when visible but no data
 	if len(p.entries) == 0 && len(p.recentLog) == 0 {
@@ -404,8 +431,9 @@ func (p *ActivityFeedPanel) View(width int) string {
 		borderStyle := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorBorder).
-			Padding(0, 1)
-		return borderStyle.Width(width - 2).Render(dimStyle.Render("  No activity yet"))
+			Padding(0, horizontalPadding)
+		empty := dimStyle.Render(truncateForWidth("No activity yet", contentWidth))
+		return borderStyle.Width(width - 2).Render(empty)
 	}
 
 	var builder strings.Builder
@@ -414,7 +442,7 @@ func (p *ActivityFeedPanel) View(width int) string {
 	borderStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorBorder).
-		Padding(0, 1)
+		Padding(0, horizontalPadding)
 
 	headerStyle := lipgloss.NewStyle().
 		Foreground(ColorAccent).
@@ -449,6 +477,12 @@ func (p *ActivityFeedPanel) View(width int) string {
 	// no information. Hard cap stays 5.
 	renderIdx := make([]int, 0, 5)
 	finished := 0
+	totalRunning := 0
+	for _, entry := range p.entries {
+		if entry.Status == ActivityRunning || entry.Status == ActivityPending {
+			totalRunning++
+		}
+	}
 	for i := len(p.entries) - 1; i >= 0 && len(renderIdx) < 5; i-- {
 		switch p.entries[i].Status {
 		case ActivityRunning, ActivityPending:
@@ -460,19 +494,30 @@ func (p *ActivityFeedPanel) View(width int) string {
 			}
 		}
 	}
+	renderedRunning := 0
 
 	for _, i := range renderIdx {
 		entry := p.entries[i]
+		if entry.Status == ActivityRunning || entry.Status == ActivityPending {
+			renderedRunning++
+		}
 		var line strings.Builder
 
 		// Timestamp
-		line.WriteString(timestampStyle.Render(entry.StartTime.Format("15:04:05")))
+		timestamp := "--:--:--"
+		if !entry.StartTime.IsZero() {
+			timestamp = entry.StartTime.Format("15:04:05")
+		}
+		line.WriteString(timestampStyle.Render(timestamp))
 		line.WriteString(" ")
 
 		// Status icon
 		switch entry.Status {
 		case ActivityRunning, ActivityPending:
 			spinner := spinnerFrames[p.frame%len(spinnerFrames)]
+			if p.reducedMotion {
+				spinner = "●"
+			}
 			line.WriteString(toolStyle.Render(spinner))
 		case ActivityCompleted:
 			line.WriteString(successStyle.Render(MessageIcons["success"]))
@@ -482,17 +527,25 @@ func (p *ActivityFeedPanel) View(width int) string {
 		line.WriteString(" ")
 
 		// Name (tool or agent)
+		name := strings.Join(strings.Fields(entry.Name), " ")
+		if name == "" {
+			if entry.Type == ActivityTypeAgent {
+				name = "agent"
+			} else {
+				name = "tool"
+			}
+		}
 		if entry.Type == ActivityTypeAgent {
-			line.WriteString(agentStyle.Render(fmt.Sprintf("[%s]", entry.Name)))
+			line.WriteString(agentStyle.Render(fmt.Sprintf("[%s]", name)))
 		} else {
-			line.WriteString(toolStyle.Render(entry.Name))
+			line.WriteString(toolStyle.Render(name))
 		}
 		line.WriteString(" ")
 
 		// For running agents, show inline progress bar
 		if entry.Type == ActivityTypeAgent && (entry.Status == ActivityRunning || entry.Status == ActivityPending) {
 			if state, ok := p.subAgentActivities[entry.AgentID]; ok && state.CurrentStep > 0 {
-				barWidth := 10
+				barWidth := min(10, max(contentWidth-lipgloss.Width(line.String())-8, 0))
 				var filled int
 				if state.TotalSteps > 0 {
 					filled = state.CurrentStep * barWidth / state.TotalSteps
@@ -501,16 +554,22 @@ func (p *ActivityFeedPanel) View(width int) string {
 					}
 				} else {
 					// Indeterminate: animate bouncing position
-					pos := (p.frame / 2) % (barWidth * 2)
-					if pos >= barWidth {
-						pos = barWidth*2 - pos - 1
+					if p.reducedMotion {
+						filled = min(1, barWidth)
+					} else {
+						pos := (p.frame / 2) % (barWidth * 2)
+						if pos >= barWidth {
+							pos = barWidth*2 - pos - 1
+						}
+						filled = pos + 1
 					}
-					filled = pos + 1
 				}
-				bar := progressStyle.Render(strings.Repeat("━", filled)) +
-					dimStyle.Render(strings.Repeat("─", barWidth-filled))
-				line.WriteString(bar)
-				line.WriteString(" ")
+				if barWidth >= 3 {
+					bar := progressStyle.Render(strings.Repeat("━", filled)) +
+						dimStyle.Render(strings.Repeat("─", barWidth-filled))
+					line.WriteString(bar)
+					line.WriteString(" ")
+				}
 
 				// Step counter
 				if state.TotalSteps > 0 {
@@ -522,51 +581,62 @@ func (p *ActivityFeedPanel) View(width int) string {
 			}
 		}
 
-		// Description (truncated to fit)
-		maxDescLen := width - lipgloss.Width(line.String()) - 14
-		if maxDescLen < 20 {
-			maxDescLen = 20
-		}
-		desc := entry.Description
-		if utf8.RuneCountInString(desc) > maxDescLen {
-			runes := []rune(desc)
-			desc = string(runes[:maxDescLen-3]) + "..."
-		}
-		line.WriteString(dimStyle.Render(desc))
-
 		// Idle marker: if this is a running sub-agent that hasn't made a
 		// tool call in SubAgentIdleThreshold, append "· idle Xm". Users
 		// see a clear "may be stuck" signal before the agent hits its
 		// hard timeout — and can decide to cancel.
+		idleLabel := ""
 		if entry.Type == ActivityTypeAgent &&
 			(entry.Status == ActivityRunning || entry.Status == ActivityPending) {
 			if state, ok := p.subAgentActivities[entry.AgentID]; ok &&
 				!state.LastToolTime.IsZero() {
 				idle := time.Since(state.LastToolTime)
 				if idle >= SubAgentIdleThreshold {
-					warnStyle := lipgloss.NewStyle().Foreground(ColorWarning).Italic(true)
-					line.WriteString(warnStyle.Render(
-						fmt.Sprintf("  · idle %s", format.Duration(idle))))
+					idleLabel = fmt.Sprintf(" · idle %s", format.Duration(idle))
 				}
 			}
 		}
 
 		// Duration (right-aligned)
 		var duration string
-		if entry.Status == ActivityRunning || entry.Status == ActivityPending {
-			duration = format.Duration(time.Since(entry.StartTime))
-		} else {
+		if (entry.Status == ActivityRunning || entry.Status == ActivityPending) && !entry.StartTime.IsZero() {
+			duration = format.Duration(max(time.Since(entry.StartTime), 0))
+		} else if entry.Duration > 0 {
 			duration = format.Duration(entry.Duration)
 		}
+		reserve := lipgloss.Width(idleLabel)
+		if duration != "" {
+			reserve += lipgloss.Width(duration) + 1
+		}
+		desc := strings.Join(strings.Fields(entry.Description), " ")
+		if desc == "" {
+			desc = "Working"
+		}
+		descBudget := max(contentWidth-lipgloss.Width(line.String())-reserve, 0)
+		line.WriteString(dimStyle.Render(truncateForWidth(desc, descBudget)))
+		if idleLabel != "" {
+			warnStyle := lipgloss.NewStyle().Foreground(ColorWarning).Italic(true)
+			line.WriteString(warnStyle.Render(idleLabel))
+		}
 		// Pad to right
-		padding := width - lipgloss.Width(line.String()) - len(duration) - 6
+		padding := contentWidth - lipgloss.Width(line.String()) - lipgloss.Width(duration)
 		if padding > 0 {
 			line.WriteString(strings.Repeat(" ", padding))
 		}
-		line.WriteString(" ")
-		line.WriteString(timeStyle.Render(duration))
+		if duration != "" {
+			line.WriteString(" ")
+			line.WriteString(timeStyle.Render(duration))
+		}
 
 		builder.WriteString(line.String())
+		builder.WriteString("\n")
+	}
+	if hiddenRunning := totalRunning - renderedRunning; hiddenRunning > 0 {
+		label := "activities"
+		if hiddenRunning == 1 {
+			label = "activity"
+		}
+		builder.WriteString(dimStyle.Render(fmt.Sprintf("… %d more running %s", hiddenRunning, label)))
 		builder.WriteString("\n")
 	}
 
@@ -576,7 +646,7 @@ func (p *ActivityFeedPanel) View(width int) string {
 
 	// Separator if we have recent log
 	if len(p.recentLog) > 0 && len(p.entries) > 0 {
-		builder.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-4))))
+		builder.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 		builder.WriteString("\n")
 	}
 
@@ -585,13 +655,27 @@ func (p *ActivityFeedPanel) View(width int) string {
 	// shows a render-capped tail so log history can't dominate the height.
 	logStart := max(0, len(p.recentLog)-maxRecentLogRendered)
 	for _, msg := range p.recentLog[logStart:] {
-		builder.WriteString(dimStyle.Render("  › " + msg))
+		msg = strings.Join(strings.Fields(msg), " ")
+		builder.WriteString(dimStyle.Render(truncateForWidth("› "+msg, contentWidth)))
 		builder.WriteString("\n")
 	}
 
 	// Apply border
-	content := strings.TrimSuffix(builder.String(), "\n")
+	content := fitPanelContent(strings.TrimSuffix(builder.String(), "\n"), contentWidth)
 	return borderStyle.Width(width - 2).Render(content)
+}
+
+func fitPanelContent(content string, width int) string {
+	if width <= 0 || content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if lipgloss.Width(line) > width {
+			lines[i] = ansi.Truncate(line, width, "…")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // formatLogMessage formats an entry for the recent log.
@@ -814,8 +898,8 @@ func (p *ActivityFeedPanel) buildMetricsSummary() string {
 		}
 		if entry.Duration > 0 {
 			totalDuration += entry.Duration
-		} else if entry.Status == ActivityRunning || entry.Status == ActivityPending {
-			totalDuration += time.Since(entry.StartTime)
+		} else if (entry.Status == ActivityRunning || entry.Status == ActivityPending) && !entry.StartTime.IsZero() {
+			totalDuration += max(time.Since(entry.StartTime), 0)
 		}
 	}
 

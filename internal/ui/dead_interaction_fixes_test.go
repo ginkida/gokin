@@ -21,13 +21,12 @@ func lastToastMessage(m Model) string {
 	if m.toastManager == nil || len(m.toastManager.toasts) == 0 {
 		return ""
 	}
-	return m.toastManager.toasts[len(m.toastManager.toasts)-1].Message
+	return m.toastManager.toasts[0].Message
 }
 
 // TestCtrlJInsertsNewlineDuringStreaming: Ctrl+J (the advertised universal
-// newline) was StateInput-only — during type-ahead composing it fell through
-// to the textarea, which does not bind ctrl+j, so multi-line composing was
-// impossible exactly while the agent worked.
+// newline) was StateInput-only. The handler now inserts it explicitly during
+// type-ahead composing and consumes the key to avoid a second textarea pass.
 func TestCtrlJInsertsNewlineDuringStreaming(t *testing.T) {
 	m := *NewModel()
 	m.width = 100
@@ -98,6 +97,28 @@ func TestAltCConsumedDuringStreaming(t *testing.T) {
 	}
 	if got := m2.input.textarea.Value(); got != "compose text" {
 		t.Fatalf("alt+c must not mutate the compose buffer, got %q", got)
+	}
+	if !activeToastContains(&m2, "No completed response to copy") {
+		t.Fatal("empty Alt+C did not explain why nothing was copied")
+	}
+}
+
+func TestCodeBlocksDoNotStealComposerBrackets(t *testing.T) {
+	m := *NewModel()
+	m.state = StateInput
+	blocks := m.output.GetCodeBlocks()
+	blocks.AddBlock("go", "one.go", "package one", 1)
+	blocks.AddBlock("go", "two.go", "package two", 5)
+
+	for _, r := range "[]" {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+	if got := m.input.Value(); got != "[]" {
+		t.Fatalf("hidden code-block navigation stole composer brackets: %q", got)
+	}
+	if blocks.GetSelectedIndex() != 0 {
+		t.Fatalf("ordinary typing changed invisible code-block selection: %d", blocks.GetSelectedIndex())
 	}
 }
 

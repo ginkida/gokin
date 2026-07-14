@@ -3,8 +3,10 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ShortcutsOverlay model for displaying keyboard shortcuts.
@@ -15,6 +17,7 @@ type ShortcutsOverlay struct {
 	scrollIndex int
 	searchQuery string
 	filtered    []ShortcutCategory
+	pageSize    int
 }
 
 // ShortcutCategory represents a category of shortcuts.
@@ -36,6 +39,7 @@ func DefaultShortcuts() []ShortcutCategory {
 			Name: "Navigation",
 			Shortcuts: []Shortcut{
 				{Keys: []string{"↑", "↓"}, Description: "Navigate suggestions or history"},
+				{Keys: []string{"PgUp", "PgDn"}, Description: "Scroll output by page"},
 				{Keys: []string{"Ctrl", "b"}, Description: "Scroll up"},
 				{Keys: []string{"Ctrl", "f"}, Description: "Scroll down"},
 				{Keys: []string{"Ctrl", "u"}, Description: "Clear input, or scroll half-page up when input is empty"},
@@ -46,12 +50,13 @@ func DefaultShortcuts() []ShortcutCategory {
 			Name: "Input",
 			Shortcuts: []Shortcut{
 				{Keys: []string{"Enter"}, Description: "Send message"},
+				{Keys: []string{"?"}, Description: "Open searchable keyboard shortcuts"},
 				{Keys: []string{"Alt", "Enter"}, Description: "Insert newline (multi-line)"},
 				{Keys: []string{"Ctrl", "J"}, Description: "Insert newline (works in every terminal)"},
 				{Keys: []string{"Tab"}, Description: "Accept ghost text / autocomplete / select suggestion"},
 				{Keys: []string{"Ctrl", "R"}, Description: "Search input history"},
 				{Keys: []string{"Esc"}, Description: "Interrupt request / close modal"},
-				{Keys: []string{"Ctrl", "C"}, Description: "Cancel (once), quit (twice)"},
+				{Keys: []string{"Ctrl", "C"}, Description: "Interrupt active request; press twice consecutively to quit when idle"},
 			},
 		},
 		{
@@ -59,9 +64,10 @@ func DefaultShortcuts() []ShortcutCategory {
 			Shortcuts: []Shortcut{
 				{Keys: []string{"Ctrl", "p"}, Description: "Command Palette (All Actions)"},
 				{Keys: []string{"Ctrl", "S"}, Description: "Open settings (toggles)"},
+				{Keys: []string{"Alt", "N"}, Description: "Open notification history"},
 				{Keys: []string{"Ctrl", "K"}, Description: "Open model selector"},
-				{Keys: []string{"Ctrl", "E"}, Description: "Expand / collapse last tool output"},
-				{Keys: []string{"E"}, Description: "Expand / collapse all tool outputs"},
+				{Keys: []string{"Ctrl", "E"}, Description: "Reveal last output; compact mark leaves existing scrollback unchanged"},
+				{Keys: []string{"E"}, Description: "Set expanded/compact default for new tool outputs"},
 				{Keys: []string{"Ctrl", "H"}, Description: "Context Observatory (Technical Health)"},
 				{Keys: []string{"Ctrl", "G"}, Description: "Toggle select mode (freeze + native selection)"},
 				{Keys: []string{"Ctrl", "O"}, Description: "Live activity detail on/off (works while streaming)"},
@@ -92,6 +98,8 @@ func DefaultShortcuts() []ShortcutCategory {
 				{Keys: []string{"A"}, Description: "Apply all remaining diffs"},
 				{Keys: []string{"R"}, Description: "Reject all remaining diffs"},
 				{Keys: []string{"Tab"}, Description: "Switch focus (multi-file only)"},
+				{Keys: []string{"[", "]"}, Description: "Previous/next change (single-file only)"},
+				{Keys: []string{"j", "k"}, Description: "Scroll diff, or move through file list"},
 			},
 		},
 		{
@@ -129,6 +137,8 @@ func NewShortcutsOverlay(styles *Styles) *ShortcutsOverlay {
 func (m *ShortcutsOverlay) Show() {
 	m.visible = true
 	m.scrollIndex = 0
+	m.searchQuery = ""
+	m.pageSize = 0
 }
 
 // Hide hides the shortcuts overlay.
@@ -146,6 +156,8 @@ func (m *ShortcutsOverlay) Toggle() {
 	m.visible = !m.visible
 	if m.visible {
 		m.scrollIndex = 0
+		m.searchQuery = ""
+		m.pageSize = 0
 	}
 }
 
@@ -158,16 +170,48 @@ func (m *ShortcutsOverlay) ScrollUp() {
 
 // ScrollDown scrolls the shortcuts list down.
 func (m *ShortcutsOverlay) ScrollDown() {
-	categories := m.getFilteredCategories()
-	maxScroll := len(categories) - 5 // Show 5 categories at a time
+	maxScroll := len(flattenShortcuts(m.getFilteredCategories())) - 1
 	if m.scrollIndex < maxScroll {
 		m.scrollIndex++
 	}
 }
 
+// PageUp and PageDown move by the number of shortcut rows rendered on the
+// previous frame. A small fallback keeps keyboard navigation useful before
+// the first View call.
+func (m *ShortcutsOverlay) PageUp() {
+	m.scrollBy(-max(m.pageSize, 5))
+}
+
+func (m *ShortcutsOverlay) PageDown() {
+	m.scrollBy(max(m.pageSize, 5))
+}
+
+func (m *ShortcutsOverlay) ScrollToStart() {
+	m.scrollIndex = 0
+}
+
+func (m *ShortcutsOverlay) ScrollToEnd() {
+	m.scrollIndex = max(len(flattenShortcuts(m.getFilteredCategories()))-1, 0)
+}
+
+func (m *ShortcutsOverlay) scrollBy(delta int) {
+	maxScroll := max(len(flattenShortcuts(m.getFilteredCategories()))-1, 0)
+	m.scrollIndex = min(max(m.scrollIndex+delta, 0), maxScroll)
+}
+
 // SetSearch sets the search query for filtering shortcuts.
 func (m *ShortcutsOverlay) SetSearch(query string) {
-	m.searchQuery = query
+	query = ansi.Strip(query)
+	m.searchQuery = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, query)
 	m.scrollIndex = 0 // Reset scroll when searching
 }
 
@@ -228,125 +272,129 @@ func (m *ShortcutsOverlay) getFilteredCategories() []ShortcutCategory {
 	return filtered
 }
 
-// View renders the shortcuts overlay.
+type shortcutEntry struct {
+	category string
+	shortcut Shortcut
+}
+
+func flattenShortcuts(categories []ShortcutCategory) []shortcutEntry {
+	var entries []shortcutEntry
+	for _, category := range categories {
+		for _, shortcut := range category.Shortcuts {
+			entries = append(entries, shortcutEntry{category: category.Name, shortcut: shortcut})
+		}
+	}
+	return entries
+}
+
+// View renders the shortcuts overlay. Dimensions returned by the helpers are
+// outer dimensions: border and padding are subtracted before content sizing so
+// the overlay never relies on the parent compositor to crop it.
 func (m *ShortcutsOverlay) View(width, height int) string {
 	if !m.visible {
 		return ""
 	}
 
-	// Get categories to display (filtered or all)
-	categories := m.getFilteredCategories()
+	outerWidth := shortcutsOverlayWidth(width)
+	outerHeight := shortcutsOverlayHeight(height)
+	horizontalPadding := 2
+	if outerWidth < 12 {
+		horizontalPadding = 0
+	}
+	verticalPadding := 1
+	if outerHeight < 6 {
+		verticalPadding = 0
+	}
+	innerWidth := max(outerWidth-2-horizontalPadding*2, 1)
+	innerHeight := max(outerHeight-2-verticalPadding*2, 1)
 
-	// Overlay dimensions
-	overlayWidth := shortcutsOverlayWidth(width)
-	overlayHeight := shortcutsOverlayHeight(height)
-
-	// Container style
 	containerStyle := lipgloss.NewStyle().
-		Width(overlayWidth).
-		Height(overlayHeight).
+		Width(max(outerWidth-2, 1)).
+		Height(max(outerHeight-2, 1)).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorSecondary).
 		Background(ColorBg).
-		Padding(1, 2)
+		Padding(verticalPadding, horizontalPadding)
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary)
+	searchStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
+	categoryStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	footerStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 
-	// Title style
-	titleStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorSecondary).
-		MarginBottom(1)
-
-	// Search prompt style
-	searchStyle := lipgloss.NewStyle().
-		Foreground(ColorAccent).
-		Italic(true)
-
-	// Category style
-	categoryStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorAccent).
-		MarginTop(1).
-		MarginBottom(1)
-
-	// Key style
-	keyStyle := lipgloss.NewStyle().
-		Foreground(ColorText).
-		Background(ColorDim).
-		Bold(true).
-		Padding(0, 1).
-		MarginRight(1)
-
-	// Description style
-	descStyle := lipgloss.NewStyle().
-		Foreground(ColorMuted)
-
-	// Footer style
-	footerStyle := lipgloss.NewStyle().
-		Foreground(ColorDim).
-		Italic(true).
-		MarginTop(1)
-
-	var content strings.Builder
-
-	// Title
-	content.WriteString(titleStyle.Render("Keyboard Shortcuts"))
-	content.WriteString("\n")
-
-	// Search prompt (if filtering)
+	title := titleStyle.Render(truncateForWidth("Keyboard Shortcuts", innerWidth))
+	searchLabel := "Type to filter shortcuts..."
 	if m.searchQuery != "" {
-		content.WriteString(searchStyle.Render(fmt.Sprintf("%s Filter: %s", MessageIcons["info"], m.searchQuery)))
-		content.WriteString("\n")
-		if len(categories) == 0 {
-			content.WriteString("\nNo matching shortcuts found.")
-			content.WriteString("\n")
-			content.WriteString(footerStyle.Render("Type to filter • Esc to clear"))
-			return containerStyle.Render(content.String())
+		searchLabel = fmt.Sprintf("%s Filter: %s", MessageIcons["info"], m.searchQuery)
+	}
+	search := searchStyle.Render(truncateForWidth(searchLabel, innerWidth))
+
+	entries := flattenShortcuts(m.getFilteredCategories())
+	if len(entries) == 0 {
+		rows := []string{title, search, "", truncateForWidth("No matching shortcuts found.", innerWidth), "", footerStyle.Render(truncateForWidth("Esc clear  ·  Keep typing", innerWidth))}
+		if len(rows) > innerHeight {
+			rows = rows[:innerHeight]
 		}
-	} else {
-		content.WriteString(searchStyle.Render("Type to filter shortcuts..."))
-		content.WriteString("\n")
+		return containerStyle.Render(strings.Join(rows, "\n"))
 	}
 
-	// Determine visible categories
-	visibleCategories := categories
-	if len(categories) > 5 {
-		start := m.scrollIndex
-		end := min(start+5, len(categories))
-		visibleCategories = categories[start:end]
-	}
-
-	// Render categories
-	for _, cat := range visibleCategories {
-		content.WriteString(categoryStyle.Render("● " + cat.Name))
-		content.WriteString("\n")
-
-		for _, shortcut := range cat.Shortcuts {
-			// Render keys
-			var keysPart strings.Builder
-			for i, key := range shortcut.Keys {
-				if i > 0 {
-					keysPart.WriteString(" + ")
-				}
-				keysPart.WriteString(keyStyle.Render(key))
-			}
-
-			// Render full line
-			line := keysPart.String() + " " + descStyle.Render(shortcut.Description)
-			content.WriteString(line)
-			content.WriteString("\n")
+	m.scrollIndex = min(max(m.scrollIndex, 0), len(entries)-1)
+	itemBudget := max(innerHeight-5, 1) // title, search, separator, footer separator, footer
+	rows := []string{title, search, ""}
+	lastCategory := ""
+	end := m.scrollIndex
+	used := 0
+	for end < len(entries) {
+		entry := entries[end]
+		needsHeader := entry.category != lastCategory
+		needed := 1
+		if needsHeader {
+			needed++
 		}
+		if used+needed > itemBudget {
+			break
+		}
+		if needsHeader {
+			rows = append(rows, categoryStyle.Render(truncateForWidth("● "+entry.category, innerWidth)))
+			lastCategory = entry.category
+			used++
+		}
+		rows = append(rows, renderShortcutEntry(entry.shortcut, innerWidth))
+		used++
+		end++
 	}
+	if end == m.scrollIndex && m.scrollIndex < len(entries) {
+		rows = append(rows, renderShortcutEntry(entries[m.scrollIndex].shortcut, innerWidth))
+		end++
+	}
+	m.pageSize = max(end-m.scrollIndex, 1)
 
-	// Footer
-	content.WriteString("\n")
+	closeHint := "Esc close"
+	filterHint := "Type to filter"
 	if m.searchQuery != "" {
-		content.WriteString(footerStyle.Render("Esc clear filter • ↑/↓ scroll"))
-	} else {
-		content.WriteString(footerStyle.Render("Type to filter • Esc close • ↑/↓ scroll"))
+		closeHint = "Esc clear"
+		filterHint = "Keep typing"
 	}
+	footer := filterHint + "  ·  " + closeHint
+	if m.scrollIndex > 0 || end < len(entries) {
+		footer = fmt.Sprintf("%s  ·  ↑/↓ %d–%d/%d  ·  PgUp/PgDn", closeHint, m.scrollIndex+1, end, len(entries))
+	}
+	rows = append(rows, "", footerStyle.Render(truncateForWidth(footer, innerWidth)))
+	if len(rows) > innerHeight {
+		rows = rows[:innerHeight-1]
+		rows = append(rows, footerStyle.Render(truncateForWidth(footer, innerWidth)))
+	}
+	return containerStyle.Render(strings.Join(rows, "\n"))
+}
 
-	// Wrap in container
-	return containerStyle.Render(content.String())
+func renderShortcutEntry(shortcut Shortcut, width int) string {
+	keyStyle := lipgloss.NewStyle().Foreground(ColorText).Background(ColorDim).Bold(true).Padding(0, 1)
+	descStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	keys := strings.Join(shortcut.Keys, " + ")
+	keyPart := keyStyle.Render(keys)
+	remaining := width - lipgloss.Width(keyPart) - 1
+	if remaining <= 0 {
+		return keyStyle.Render(truncateForWidth(keys, max(width-2, 1)))
+	}
+	return keyPart + " " + descStyle.Render(truncateForWidth(shortcut.Description, remaining))
 }
 
 func shortcutsOverlayWidth(width int) int {

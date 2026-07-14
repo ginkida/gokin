@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type ToolProgressBarModel struct {
 	cancellable    bool
 	visible        bool
 	frame          int // for indeterminate animation
+	reducedMotion  bool
 	styles         *Styles
 	lastUpdateTime time.Time // for auto-hide on stale progress
 }
@@ -41,12 +43,21 @@ func NewToolProgressBarModel(styles *Styles) *ToolProgressBarModel {
 
 // Update updates the progress bar from a ToolProgressMsg.
 func (m *ToolProgressBarModel) Update(msg ToolProgressMsg) {
-	m.toolName = msg.Name
-	m.elapsed = msg.Elapsed
-	m.progress = msg.Progress
+	if name := strings.TrimSpace(msg.Name); name != "" {
+		m.toolName = name
+	}
+	m.elapsed = max(msg.Elapsed, 0)
+	if math.IsNaN(msg.Progress) || msg.Progress < 0 {
+		m.progress = -1
+	} else {
+		m.progress = min(max(msg.Progress, 0), 1)
+	}
 	m.currentStep = msg.CurrentStep
-	m.totalBytes = msg.TotalBytes
-	m.processedBytes = msg.ProcessedBytes
+	m.totalBytes = max(msg.TotalBytes, 0)
+	m.processedBytes = max(msg.ProcessedBytes, 0)
+	if m.totalBytes > 0 {
+		m.processedBytes = min(m.processedBytes, m.totalBytes)
+	}
 	m.cancellable = msg.Cancellable
 	m.visible = true
 	m.lastUpdateTime = time.Now()
@@ -59,6 +70,9 @@ func (m *ToolProgressBarModel) Show(toolName string) {
 	m.progress = -1 // start indeterminate
 	m.currentStep = ""
 	m.elapsed = 0
+	m.totalBytes = 0
+	m.processedBytes = 0
+	m.cancellable = false
 	m.frame = 0
 	m.lastUpdateTime = time.Now()
 }
@@ -70,6 +84,11 @@ func (m *ToolProgressBarModel) Hide() {
 	m.currentStep = ""
 	m.toolName = ""
 	m.elapsed = 0
+	m.totalBytes = 0
+	m.processedBytes = 0
+	m.cancellable = false
+	m.frame = 0
+	m.lastUpdateTime = time.Time{}
 }
 
 // IsVisible returns whether the progress bar is visible.
@@ -86,7 +105,9 @@ func (m *ToolProgressBarModel) IsCancellable() bool {
 // Also checks for stale progress and auto-hides if no updates for too long.
 func (m *ToolProgressBarModel) Tick() tea.Cmd {
 	if m.visible {
-		m.frame++
+		if !m.reducedMotion {
+			m.frame++
+		}
 
 		// Auto-hide if no updates for too long (tool might have crashed)
 		if !m.lastUpdateTime.IsZero() && time.Since(m.lastUpdateTime) > progressBarStaleTimeout {
@@ -96,13 +117,22 @@ func (m *ToolProgressBarModel) Tick() tea.Cmd {
 	return nil
 }
 
+// SetReducedMotion keeps progress semantics while replacing the animated
+// spinner with a stable activity marker.
+func (m *ToolProgressBarModel) SetReducedMotion(enabled bool) {
+	m.reducedMotion = enabled
+}
+
 // spinnerFrames contains braille spinner animation frames.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // View renders the progress bar as a compact single line.
 func (m *ToolProgressBarModel) View(width int) string {
-	if !m.visible || m.toolName == "" {
+	if !m.visible {
 		return ""
+	}
+	if width <= 0 {
+		width = 80
 	}
 
 	// Styles
@@ -116,41 +146,71 @@ func (m *ToolProgressBarModel) View(width int) string {
 		Foreground(ColorSuccess)
 
 	// Animated spinner
-	spinnerIdx := m.frame % len(spinnerFrames)
-	spinner := accentStyle.Render(spinnerFrames[spinnerIdx])
+	spinnerGlyph := spinnerFrames[m.frame%len(spinnerFrames)]
+	if m.reducedMotion {
+		spinnerGlyph = "●"
+	}
+	spinner := accentStyle.Render(spinnerGlyph)
 
 	// Tool name
-	toolName := capitalizeToolName(m.toolName)
+	toolName := capitalizeToolName(strings.TrimSpace(m.toolName))
+	if toolName == "" {
+		toolName = "Tool"
+	}
 
 	// Time elapsed
 	elapsedStr := formatElapsed(m.elapsed)
 
-	// Build compact single line
+	// Build the primary line by priority. Cancellation is placed before
+	// secondary details so it cannot disappear behind a long step message.
 	var builder strings.Builder
-	builder.WriteString(spinner)
-	builder.WriteString(" ")
-	builder.WriteString(dimStyle.Render(toolName))
+	appendPart := func(raw string, style lipgloss.Style) {
+		remaining := width - lipgloss.Width(builder.String())
+		if remaining <= 0 || raw == "" {
+			return
+		}
+		builder.WriteString(style.Render(truncateForWidth(raw, remaining)))
+	}
+	if m.cancellable {
+		compactCancel := "Esc cancel"
+		cancelLabel := " · Esc cancel"
+		if width < lipgloss.Width(spinner)+lipgloss.Width(cancelLabel) {
+			return dimStyle.Render(truncateForWidth(compactCancel, width))
+		}
+		appendPart(spinner, lipgloss.NewStyle())
+		nameBudget := max(width-lipgloss.Width(spinner)-lipgloss.Width(cancelLabel), 0)
+		appendPart(truncateForWidth(" "+toolName, nameBudget), dimStyle)
+		appendPart(cancelLabel, dimStyle)
+	} else {
+		appendPart(spinner, lipgloss.NewStyle())
+		appendPart(" "+toolName, dimStyle)
+	}
 
 	// Progress indicator
 	if m.progress >= 0 {
-		// Determinate: show percentage with mini bar
+		// Determinate: show a width-aware mini bar and clamped percentage.
 		percent := int(m.progress * 100)
-		barWidth := 20
+		remaining := width - lipgloss.Width(builder.String())
+		percentLabel := fmt.Sprintf(" %d%%", percent)
+		barWidth := min(20, max(remaining-lipgloss.Width(percentLabel)-2, 0))
 		filled := int(m.progress * float64(barWidth))
-		if filled > barWidth {
-			filled = barWidth
+		if barWidth >= 4 {
+			appendPart(" "+strings.Repeat("━", filled)+strings.Repeat("─", barWidth-filled), progressStyle)
 		}
-		miniBar := strings.Repeat("━", filled) + strings.Repeat("─", barWidth-filled)
-		builder.WriteString(" ")
-		builder.WriteString(progressStyle.Render(miniBar))
-		builder.WriteString(dimStyle.Render(fmt.Sprintf(" %d%%", percent)))
+		appendPart(percentLabel, dimStyle)
 	} else {
 		// Indeterminate: just show running dots
 		dots := strings.Repeat(".", (m.frame/3)%4)
-		builder.WriteString(dimStyle.Render(dots))
-		// Pad to keep width stable
-		builder.WriteString(strings.Repeat(" ", 3-len(dots)))
+		appendPart(dots+strings.Repeat(" ", 3-len(dots)), dimStyle)
 	}
+
+	// Stable facts precede volatile step text, which is truncated last.
+	if m.totalBytes > 0 {
+		appendPart(fmt.Sprintf(" %s/%s", format.Bytes(m.processedBytes), format.Bytes(m.totalBytes)), dimStyle)
+	} else if m.processedBytes > 0 {
+		appendPart(fmt.Sprintf(" %s", format.Bytes(m.processedBytes)), dimStyle)
+	}
+	appendPart(" "+elapsedStr, dimStyle)
 
 	// Current step — single line of output renders inline to keep compact.
 	// Multi-line output (e.g. `npm install` progress) falls through to the
@@ -159,32 +219,7 @@ func (m *ToolProgressBarModel) View(width int) string {
 	recent := lastNNonEmptyLines(m.currentStep, maxProgressHistoryLines)
 	if len(recent) == 1 {
 		step := recent[0]
-		// Rune-aware truncation so multibyte chars (emoji, Cyrillic) don't
-		// get sliced mid-byte and render as replacement chars.
-		const maxRunes = 60
-		runes := []rune(step)
-		if len(runes) > maxRunes {
-			step = string(runes[:maxRunes-1]) + "…"
-		}
-		builder.WriteString(" ")
-		builder.WriteString(dimStyle.Render(step))
-	}
-
-	// Bytes if available
-	if m.totalBytes > 0 {
-		builder.WriteString(dimStyle.Render(fmt.Sprintf(" %s/%s",
-			format.Bytes(m.processedBytes), format.Bytes(m.totalBytes))))
-	} else if m.processedBytes > 0 {
-		builder.WriteString(dimStyle.Render(fmt.Sprintf(" %s", format.Bytes(m.processedBytes))))
-	}
-
-	// Elapsed time (right side)
-	builder.WriteString(" ")
-	builder.WriteString(dimStyle.Render(elapsedStr))
-
-	if m.cancellable {
-		builder.WriteString(" ")
-		builder.WriteString(dimStyle.Render("· Esc cancel"))
+		appendPart(" "+step, dimStyle)
 	}
 
 	// Multi-line progress history — only when there's >1 line of output.
@@ -193,15 +228,11 @@ func (m *ToolProgressBarModel) View(width int) string {
 	// style for simple tools.
 	if len(recent) > 1 {
 		builder.WriteString("\n")
-		builder.WriteString(dimStyle.Render("    Recent output"))
-		const maxRunesPerLine = 70
+		indent := strings.Repeat(" ", min(4, max(width-1, 0)))
+		builder.WriteString(dimStyle.Render(truncateForWidth(indent+"Recent output", width)))
 		for _, line := range recent {
-			runes := []rune(line)
-			if len(runes) > maxRunesPerLine {
-				line = string(runes[:maxRunesPerLine-1]) + "…"
-			}
 			builder.WriteString("\n")
-			builder.WriteString(dimStyle.Render("    " + line))
+			builder.WriteString(dimStyle.Render(indent + truncateForWidth(line, max(width-lipgloss.Width(indent), 0))))
 		}
 	}
 

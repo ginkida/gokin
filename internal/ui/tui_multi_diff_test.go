@@ -43,8 +43,8 @@ func TestMultiDiffPreviewStateAndCallback(t *testing.T) {
 		t.Fatalf("updated model type after response = %T, want ui.Model", updatedAny)
 	}
 
-	if updated.state != StateInput {
-		t.Fatalf("state after mixed decisions = %v, want %v", updated.state, StateInput)
+	if updated.state != StateProcessing {
+		t.Fatalf("state after mixed decisions = %v, want %v", updated.state, StateProcessing)
 	}
 	if updated.multiDiffRequest != nil {
 		t.Fatal("expected multi diff request to be cleared after response")
@@ -54,6 +54,34 @@ func TestMultiDiffPreviewStateAndCallback(t *testing.T) {
 	}
 	if callbackDecisions["b.txt"] != DiffReject {
 		t.Fatalf("callback decision for b.txt = %v, want %v", callbackDecisions["b.txt"], DiffReject)
+	}
+	if !activeToastContains(&updated, "1 file approved · 1 file rejected") {
+		t.Fatal("mixed review did not summarize the per-file outcome")
+	}
+}
+
+func TestEmptyMultiDiffCloseReturnsToInput(t *testing.T) {
+	model := NewModel()
+	model.state = StateMultiDiffPreview
+	model.multiDiffRequest = &MultiDiffPreviewRequestMsg{}
+	callbackCalls := 0
+	model.SetMultiDiffDecisionCallback(func(decisions map[string]DiffDecision) {
+		callbackCalls++
+		if len(decisions) != 0 {
+			t.Fatalf("empty close decisions = %v", decisions)
+		}
+	})
+
+	updatedAny, _ := model.Update(MultiDiffPreviewResponseMsg{Decisions: map[string]DiffDecision{}})
+	updated := updatedAny.(Model)
+	if updated.state != StateInput {
+		t.Fatalf("empty close state = %v, want StateInput", updated.state)
+	}
+	if updated.multiDiffRequest != nil || callbackCalls != 1 {
+		t.Fatalf("empty close did not settle request: request=%v callbacks=%d", updated.multiDiffRequest, callbackCalls)
+	}
+	if !activeToastContains(&updated, "No changes to review") {
+		t.Fatal("empty close did not explain the no-op")
 	}
 }
 
@@ -80,8 +108,8 @@ func TestMultiDiffPreview_LowerYAdvancesInsteadOfFinishing(t *testing.T) {
 	}
 }
 
-func TestMultiDiffPreview_UpperYBulkApplies(t *testing.T) {
-	// Bulk apply still available via Shift+Y (or A).
+func TestMultiDiffPreview_UpperYOnlyAppliesCurrent(t *testing.T) {
+	// Shift must not turn a per-file action into an unadvertised bulk action.
 	model := NewMultiDiffPreviewModel(DefaultStyles())
 	model.SetFiles([]DiffFile{
 		{FilePath: "a.txt", OldContent: "old\n", NewContent: "new\n"},
@@ -89,15 +117,11 @@ func TestMultiDiffPreview_UpperYBulkApplies(t *testing.T) {
 	})
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
-	if cmd == nil {
-		t.Fatal("Y (bulk) must finish immediately")
+	if cmd != nil {
+		t.Fatal("Y on file 1 of 2 must not bulk-finish")
 	}
-	response := cmd().(MultiDiffPreviewResponseMsg)
-	if updated.GetDecisions()["a.txt"] != DiffApply || updated.GetDecisions()["b.txt"] != DiffApply {
-		t.Fatalf("decisions = %+v, want all apply", updated.GetDecisions())
-	}
-	if response.Decisions["a.txt"] != DiffApply || response.Decisions["b.txt"] != DiffApply {
-		t.Fatalf("response = %+v, want all apply", response.Decisions)
+	if updated.GetDecisions()["a.txt"] != DiffApply || updated.GetDecisions()["b.txt"] != DiffPending {
+		t.Fatalf("decisions = %+v, want current apply and next pending", updated.GetDecisions())
 	}
 }
 
@@ -169,10 +193,32 @@ func TestMultiDiffPreview_EnterFinishesWithPendingAsReject(t *testing.T) {
 	// Approve a explicitly.
 	_, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 
-	// Enter with b still pending.
+	// Enter with b still pending first asks for explicit confirmation.
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("Enter should finish")
+	if cmd != nil || !updated.confirmFinish {
+		t.Fatalf("first Enter should arm finish confirmation: cmd=%v confirm=%v", cmd, updated.confirmFinish)
+	}
+	if updated.GetDecisions()["b.txt"] != DiffPending {
+		t.Fatal("arming finish confirmation changed pending decisions")
+	}
+	view := stripAnsi(updated.View())
+	for _, want := range []string{"Reject 1 pending file and finish?", "Enter Confirm", "Esc/q Back to review"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("finish confirmation missing %q:\n%s", want, view)
+		}
+	}
+
+	cancelled, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil || cancelled.confirmFinish || cancelled.GetDecisions()["b.txt"] != DiffPending {
+		t.Fatalf("Esc did not return to review: cmd=%v confirm=%v decisions=%v", cmd, cancelled.confirmFinish, cancelled.GetDecisions())
+	}
+	armed, cmd := cancelled.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || !armed.confirmFinish {
+		t.Fatal("second finish attempt did not arm confirmation")
+	}
+	updated, cmd = armed.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil || updated.confirmFinish {
+		t.Fatal("confirmed Enter should finish")
 	}
 	_ = cmd()
 	if updated.GetDecisions()["a.txt"] != DiffApply {
@@ -180,6 +226,32 @@ func TestMultiDiffPreview_EnterFinishesWithPendingAsReject(t *testing.T) {
 	}
 	if updated.GetDecisions()["b.txt"] != DiffReject {
 		t.Errorf("b.txt should become Reject on Enter (pending→reject safety): %v", updated.GetDecisions()["b.txt"])
+	}
+}
+
+func TestMultiDiffPreview_FinishConfirmationOwnsInputAndRefreshClears(t *testing.T) {
+	model := NewMultiDiffPreviewModel(DefaultStyles())
+	model.SetFiles([]DiffFile{
+		{FilePath: "a.txt", OldContent: "old", NewContent: "new"},
+		{FilePath: "b.txt", OldContent: "old", NewContent: "new"},
+	})
+	armed, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || !armed.confirmFinish {
+		t.Fatal("Enter did not arm finish confirmation")
+	}
+	blocked, cmd := armed.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	if cmd != nil || !blocked.confirmFinish {
+		t.Fatal("bulk action escaped finish confirmation")
+	}
+	for path, decision := range blocked.GetDecisions() {
+		if decision != DiffPending {
+			t.Fatalf("blocked action changed %s to %v", path, decision)
+		}
+	}
+
+	blocked.SetFiles([]DiffFile{{FilePath: "fresh.txt", OldContent: "old", NewContent: "new"}})
+	if blocked.confirmFinish {
+		t.Fatal("new diff request retained stale finish confirmation")
 	}
 }
 

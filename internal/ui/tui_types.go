@@ -27,6 +27,7 @@ const (
 	StateFilePeek
 	StateSettings
 	StateAPIKeyEntry
+	StateNotificationCenter
 )
 
 // typeAheadActive reports whether the main input should receive keystrokes
@@ -47,7 +48,7 @@ func (m *Model) isModalState() bool {
 		StateModelSelector, StateShortcutsOverlay, StateCommandPalette,
 		StateDiffPreview, StateMultiDiffPreview, StateSearchResults, StateGitStatus,
 		StateFileBrowser, StateBatchProgress, StateContextObservatory, StateSettings,
-		StateAPIKeyEntry:
+		StateAPIKeyEntry, StateNotificationCenter:
 		return true
 	}
 	return false
@@ -96,7 +97,15 @@ type (
 	// QueuedCountMsg carries the current type-ahead queue length (sent on
 	// every enqueue/dequeue) for the status-bar badge.
 	QueuedCountMsg int
-	ToolCallMsg    struct {
+	// QueuedMessageRejectedMsg returns ownership of a type-ahead message that
+	// the bounded App queue could not accept. The TUI restores it to the
+	// composer when safe, or leaves the newer draft intact with a history hint.
+	QueuedMessageRejectedMsg struct {
+		Message string
+		Reason  string
+		Waiting int
+	}
+	ToolCallMsg struct {
 		Name string
 		Args map[string]any
 	}
@@ -239,7 +248,16 @@ type (
 		PermissionsEnabled  bool
 		SandboxEnabled      bool
 		PlanningModeEnabled bool
+		ReducedMotion       bool
 		ModelName           string // Current model name (empty = no change)
+	}
+	// ModelSelectResultMsg resolves a model switch requested by the selector.
+	// ModelID is the authoritative active model after success or rollback.
+	ModelSelectResultMsg struct {
+		RequestedID string
+		ModelID     string
+		Success     bool
+		Message     string
 	}
 	// BackgroundTaskMsg signals a background task state change.
 	BackgroundTaskMsg struct {

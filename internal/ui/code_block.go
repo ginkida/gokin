@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -113,12 +112,11 @@ func (r *CodeBlockRegistry) CopySelected() error {
 	if block == nil {
 		return fmt.Errorf("no code block selected")
 	}
-	copyViaOSC52(block.Content)
-	err := clipboard.WriteAll(block.Content)
-	if err == nil {
+	outcome := copyTextToClipboard(block.Content)
+	if outcome.SystemError == nil {
 		r.ShowCopyFeedback()
 	}
-	return err
+	return outcome.SystemError
 }
 
 // ShowCopyFeedback triggers the copy feedback indicator.

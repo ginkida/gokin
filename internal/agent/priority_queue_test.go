@@ -140,15 +140,70 @@ func TestTaskQueueSamePriority(t *testing.T) {
 	q := NewTaskQueue()
 	q.PushTask(&CoordinatedTask{ID: "a", Priority: PriorityNormal})
 	q.PushTask(&CoordinatedTask{ID: "b", Priority: PriorityNormal})
+	q.PushTask(&CoordinatedTask{ID: "c", Priority: PriorityNormal})
 
-	if q.Size() != 2 {
+	if q.Size() != 3 {
 		t.Errorf("size = %d", q.Size())
 	}
 
-	// Both should be poppable
-	q.PopTask()
-	q.PopTask()
+	for _, want := range []string{"a", "b", "c"} {
+		if task := q.PopTask(); task == nil || task.ID != want {
+			t.Fatalf("equal-priority FIFO pop = %+v, want %s", task, want)
+		}
+	}
 	if q.Size() != 0 {
 		t.Error("should be empty after popping all")
+	}
+}
+
+func TestTaskQueueRejectsNilAndDuplicatePushes(t *testing.T) {
+	q := NewTaskQueue()
+	task := &CoordinatedTask{ID: "task", Priority: PriorityNormal}
+	q.PushTask(nil)
+	q.PushTask(&CoordinatedTask{Priority: PriorityHigh})
+	q.PushTask(task)
+	q.PushTask(task)
+	q.PushTask(&CoordinatedTask{ID: "task", Priority: PriorityHigh})
+	if got := q.Size(); got != 1 {
+		t.Fatalf("queue size after invalid/duplicate pushes = %d, want 1", got)
+	}
+	if popped := q.PopTask(); popped != task {
+		t.Fatalf("PopTask ownership = %p, want original %p", popped, task)
+	}
+	// The ID is reusable once the original item leaves the queue.
+	replacement := &CoordinatedTask{ID: "task", Priority: PriorityHigh}
+	q.PushTask(replacement)
+	if popped := q.PopTask(); popped != replacement {
+		t.Fatalf("replacement pop = %p, want %p", popped, replacement)
+	}
+}
+
+func TestTaskQueuePeekAndReadyResultsAreSnapshots(t *testing.T) {
+	q := NewTaskQueue()
+	task := &CoordinatedTask{
+		ID: "task", Prompt: "original", Priority: PriorityHigh,
+		Status: TaskStatusReady, Dependencies: []string{"dependency"},
+		Result: &AgentResult{Output: "original result"},
+	}
+	q.PushTask(task)
+
+	peek := q.PeekTask()
+	peek.Prompt = "caller mutation"
+	peek.Priority = PriorityLow
+	peek.Dependencies[0] = "caller mutation"
+	peek.Result.Output = "caller mutation"
+	ready := q.GetReadyTasks()
+	if len(ready) != 1 {
+		t.Fatalf("ready snapshots = %d, want 1", len(ready))
+	}
+	ready[0].Status = TaskStatusFailed
+
+	fresh := q.PeekTask()
+	if fresh.Prompt != "original" || fresh.Priority != PriorityHigh || fresh.Status != TaskStatusReady ||
+		fresh.Dependencies[0] != "dependency" || fresh.Result.Output != "original result" {
+		t.Fatalf("queue state aliased through observer result: %+v", fresh)
+	}
+	if popped := q.PopTask(); popped != task {
+		t.Fatalf("PopTask must transfer original task ownership, got %p want %p", popped, task)
 	}
 }

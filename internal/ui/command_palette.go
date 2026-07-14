@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // CommandType defines what kind of command this is
@@ -96,9 +98,13 @@ type CommandPalette struct {
 	// field instead of running the verb bare (which would only print a Usage
 	// error). This is what makes the palette no-typing for arg-taking commands
 	// too — you pick from the list, then fill just the value.
-	argEntry bool
-	argCmd   EnhancedPaletteCommand
-	argValue string
+	argEntry     bool
+	argCmd       EnhancedPaletteCommand
+	argValue     string
+	argError     string
+	submitError  string
+	submitLinked bool
+	submitKnown  bool
 }
 
 // NewCommandPalette creates a new command palette.
@@ -121,9 +127,30 @@ func (p *CommandPalette) SetPaletteProvider(provider PaletteProvider) {
 	p.paletteProvider = provider
 }
 
+// SetSubmissionLinked tells the reusable palette whether its parent can send
+// slash commands. Direct UI actions remain runnable without this link.
+func (p *CommandPalette) SetSubmissionLinked(linked bool) {
+	p.submitLinked = linked
+	p.submitKnown = true
+}
+
+func (p *CommandPalette) submissionAvailable() bool {
+	// Preserve standalone rendering semantics until an owning Model explicitly
+	// declares responsibility for slash-command dispatch.
+	return !p.submitKnown || p.submitLinked
+}
+
+func (p *CommandPalette) selectedRunnable() bool {
+	selected := p.GetSelected()
+	if selected == nil || !selected.Enabled {
+		return false
+	}
+	return selected.Type != CommandTypeSlash || p.submissionAvailable()
+}
+
 // SetActionCommands sets direct action commands (keyboard shortcuts) for the palette.
 func (p *CommandPalette) SetActionCommands(actions []EnhancedPaletteCommand) {
-	p.actionCommands = actions
+	p.actionCommands = append([]EnhancedPaletteCommand(nil), actions...)
 }
 
 func (p *CommandPalette) SetCommandAliases(aliases map[string]string) {
@@ -133,7 +160,11 @@ func (p *CommandPalette) SetCommandAliases(aliases map[string]string) {
 	}
 	out := make(map[string]string, len(aliases))
 	for k, v := range aliases {
-		out[strings.ToLower(k)] = strings.ToLower(v)
+		key := safeKeyEntryProvider(k)
+		value := safeKeyEntryProvider(v)
+		if key != "" && value != "" {
+			out[strings.ToLower(key)] = strings.ToLower(value)
+		}
 	}
 	p.commandAliases = out
 }
@@ -157,32 +188,64 @@ func (p *CommandPalette) RefreshCommands() {
 		if !ok {
 			continue
 		}
+		name := safeKeyEntryProvider(pc.GetName())
+		if name == "" {
+			continue
+		}
 		p.commands = append(p.commands, EnhancedPaletteCommand{
-			Name:        pc.GetName(),
-			Description: pc.GetDescription(),
-			Usage:       pc.GetUsage(),
-			Shortcut:    "/" + pc.GetName(),
+			Name:        name,
+			Description: safeKeyEntryText(pc.GetDescription()),
+			Usage:       sanitizePaletteUsage(pc.GetUsage()),
+			Shortcut:    "/" + name,
 			Category: PaletteCategoryInfo{
-				Name:     pc.GetCategoryName(),
-				Icon:     pc.GetCategoryIcon(),
+				Name:     safeKeyEntryText(pc.GetCategoryName()),
+				Icon:     safeKeyEntryText(pc.GetCategoryIcon()),
 				Priority: pc.GetCategoryPriority(),
 			},
-			Icon:     pc.GetIcon(),
-			ArgHint:  pc.GetArgHint(),
+			Icon:     safeKeyEntryText(pc.GetIcon()),
+			ArgHint:  safeKeyEntryText(pc.GetArgHint()),
 			Enabled:  pc.IsEnabled(),
-			Reason:   pc.GetReason(),
+			Reason:   safeKeyEntryText(pc.GetReason()),
 			Priority: pc.GetPriority(),
-			IsRecent: recentSet[pc.GetName()],
+			IsRecent: recentSet[name],
 			Type:     CommandTypeSlash,
 			Advanced: pc.IsAdvanced(),
 		})
 	}
 
 	// Append action commands (keyboard shortcuts)
-	p.commands = append(p.commands, p.actionCommands...)
+	for _, action := range p.actionCommands {
+		action.Name = safeKeyEntryText(action.Name)
+		if action.Name == "" {
+			continue
+		}
+		action.Description = safeKeyEntryText(action.Description)
+		action.Usage = sanitizePaletteUsage(action.Usage)
+		action.Shortcut = safeKeyEntryText(action.Shortcut)
+		action.Category.Name = safeKeyEntryText(action.Category.Name)
+		action.Category.Icon = safeKeyEntryText(action.Category.Icon)
+		action.Icon = safeKeyEntryText(action.Icon)
+		action.ArgHint = safeKeyEntryText(action.ArgHint)
+		action.Reason = safeKeyEntryText(action.Reason)
+		p.commands = append(p.commands, action)
+	}
 
 	p.sortCommands()
 	p.filterCommands(p.query)
+	p.normalizeSelection()
+	p.syncPreview()
+}
+
+func sanitizePaletteUsage(usage string) string {
+	usage = ansi.Strip(usage)
+	lines := strings.Split(usage, "\n")
+	if len(lines) > 8 {
+		lines = append(lines[:7], "…")
+	}
+	for i := range lines {
+		lines[i] = safeKeyEntryText(lines[i])
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // sortCommands sorts commands by: recent first (by real timestamp), then by category priority, then by priority within category.
@@ -216,6 +279,7 @@ func (p *CommandPalette) Show() {
 	p.scroll = 0
 	p.showPreview = false
 	p.previewCmd = nil
+	p.submitError = ""
 	p.RefreshCommands()
 }
 
@@ -229,7 +293,9 @@ func (p *CommandPalette) Hide() {
 	p.previewCmd = nil
 	p.argEntry = false
 	p.argValue = ""
+	p.argError = ""
 	p.argCmd = EnhancedPaletteCommand{}
+	p.submitError = ""
 }
 
 // PaletteNeedsArg reports whether picking this command should drop into the
@@ -249,6 +315,8 @@ func (p *CommandPalette) BeginArgEntry(cmd EnhancedPaletteCommand) {
 	p.argEntry = true
 	p.argCmd = cmd
 	p.argValue = ""
+	p.argError = ""
+	p.submitError = ""
 	p.showPreview = false
 	p.previewCmd = nil
 }
@@ -257,18 +325,40 @@ func (p *CommandPalette) BeginArgEntry(cmd EnhancedPaletteCommand) {
 func (p *CommandPalette) CancelArgEntry() {
 	p.argEntry = false
 	p.argValue = ""
+	p.argError = ""
 	p.argCmd = EnhancedPaletteCommand{}
 }
 
 // AppendArg appends text to the argument being entered.
-func (p *CommandPalette) AppendArg(s string) { p.argValue += s }
+func (p *CommandPalette) AppendArg(s string) {
+	p.argValue += sanitizePaletteInput(s)
+	p.argError = ""
+}
+
+func (p *CommandPalette) SetSubmitError(message string) {
+	p.submitError = safeKeyEntryText(message)
+}
+
+func (p *CommandPalette) SetArgError(message string) {
+	p.argError = safeKeyEntryText(message)
+}
 
 // BackspaceArg removes the last rune from the argument being entered.
 func (p *CommandPalette) BackspaceArg() {
+	p.argError = ""
 	if len(p.argValue) > 0 {
 		_, size := utf8.DecodeLastRuneInString(p.argValue)
 		p.argValue = p.argValue[:len(p.argValue)-size]
 	}
+}
+
+func (p *CommandPalette) ValidateArgEntry() bool {
+	if strings.TrimSpace(p.argValue) != "" {
+		p.argError = ""
+		return true
+	}
+	p.argError = "Argument required"
+	return false
 }
 
 // SubmitArgEntry records usage, hides the palette, and returns the full command
@@ -289,31 +379,42 @@ func (p *CommandPalette) SubmitArgEntry() string {
 
 func (p *CommandPalette) DirectSlashLineWithArgs() (string, bool) {
 	line := strings.TrimSpace(p.query)
-	if !strings.HasPrefix(line, "/") {
+	cmd, ok := p.directSlashCommandWithArgs(line)
+	if !ok {
 		return "", false
+	}
+	p.history.RecordUsage(cmd.Name)
+	p.Hide()
+	return line, true
+}
+
+// directSlashCommandWithArgs recognizes a complete slash command without
+// changing palette state. View uses it to avoid presenting a runnable command
+// as an empty search result; DirectSlashLineWithArgs performs the side effects.
+func (p *CommandPalette) directSlashCommandWithArgs(line string) (*EnhancedPaletteCommand, bool) {
+	if !strings.HasPrefix(line, "/") {
+		return nil, false
 	}
 	rest := strings.TrimPrefix(line, "/")
 	nameEnd := strings.IndexFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' })
 	if nameEnd <= 0 {
-		return "", false
+		return nil, false
 	}
 	name := rest[:nameEnd]
 	if strings.TrimSpace(rest[nameEnd:]) == "" {
-		return "", false
+		return nil, false
 	}
 	canonicalName := strings.ToLower(name)
 	if target, ok := p.commandAliases[canonicalName]; ok {
 		canonicalName = target
 	}
 	for i := range p.commands {
-		cmd := p.commands[i]
+		cmd := &p.commands[i]
 		if cmd.Type == CommandTypeSlash && cmd.Enabled && strings.EqualFold(cmd.Name, canonicalName) {
-			p.history.RecordUsage(cmd.Name)
-			p.Hide()
-			return line, true
+			return cmd, true
 		}
 	}
-	return "", false
+	return nil, false
 }
 
 func formatPaletteArgEntryValue(cmd EnhancedPaletteCommand, value string) string {
@@ -462,10 +563,26 @@ func (p *CommandPalette) IsVisible() bool {
 
 // SetQuery sets the search query and filters commands.
 func (p *CommandPalette) SetQuery(query string) {
-	p.query = query
-	p.filterCommands(query)
+	p.query = sanitizePaletteInput(query)
+	p.submitError = ""
+	p.filterCommands(p.query)
 	p.selected = 0
 	p.scroll = 0
+	p.syncPreview()
+}
+
+func sanitizePaletteInput(value string) string {
+	value = ansi.Strip(value)
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
 }
 
 // AppendQuery appends a character to the query.
@@ -579,26 +696,91 @@ func fuzzyMatch(str, query string) bool {
 
 // SelectNext moves selection to the next item.
 func (p *CommandPalette) SelectNext() {
+	p.submitError = ""
 	if len(p.filtered) > 0 && p.selected < len(p.filtered)-1 {
 		p.selected++
 		p.adjustScroll()
+		p.syncPreview()
 	}
 }
 
 // SelectPrev moves selection to the previous item.
 func (p *CommandPalette) SelectPrev() {
+	p.submitError = ""
 	if p.selected > 0 {
 		p.selected--
 		p.adjustScroll()
+		p.syncPreview()
 	}
+}
+
+// SelectFirst and SelectLast provide predictable boundary navigation for long
+// command catalogs. Page movement uses the current rendered capacity rather
+// than the historical fixed 20-row assumption.
+func (p *CommandPalette) SelectFirst() {
+	p.submitError = ""
+	if len(p.filtered) == 0 {
+		return
+	}
+	p.selected = 0
+	p.adjustScroll()
+	p.syncPreview()
+}
+
+func (p *CommandPalette) SelectLast() {
+	p.submitError = ""
+	if len(p.filtered) == 0 {
+		return
+	}
+	p.selected = len(p.filtered) - 1
+	p.adjustScroll()
+	p.syncPreview()
+}
+
+func (p *CommandPalette) PageUp() {
+	if len(p.filtered) == 0 {
+		return
+	}
+	p.selected = max(0, p.selected-p.listCapacity())
+	p.adjustScroll()
+	p.syncPreview()
+}
+
+func (p *CommandPalette) PageDown() {
+	if len(p.filtered) == 0 {
+		return
+	}
+	p.selected = min(len(p.filtered)-1, p.selected+p.listCapacity())
+	p.adjustScroll()
+	p.syncPreview()
+}
+
+func (p *CommandPalette) normalizeSelection() {
+	if len(p.filtered) == 0 {
+		p.selected = 0
+		p.scroll = 0
+		return
+	}
+	if p.selected < 0 {
+		p.selected = 0
+	}
+	if p.selected >= len(p.filtered) {
+		p.selected = len(p.filtered) - 1
+	}
+	p.adjustScroll()
+}
+
+func (p *CommandPalette) syncPreview() {
+	if !p.showPreview || len(p.filtered) == 0 || p.selected < 0 || p.selected >= len(p.filtered) {
+		p.previewCmd = nil
+		return
+	}
+	p.previewCmd = &p.filtered[p.selected]
 }
 
 // adjustScroll ensures the selected item is visible.
 func (p *CommandPalette) adjustScroll() {
-	visibleItems := p.maxHeight - 8 // Account for header, input, footer, borders
-	if visibleItems < 3 {
-		visibleItems = 3
-	}
+	visibleItems := p.listCapacity()
 
 	if p.selected < p.scroll {
 		p.scroll = p.selected
@@ -607,17 +789,20 @@ func (p *CommandPalette) adjustScroll() {
 	}
 }
 
+func (p *CommandPalette) listCapacity() int {
+	if p.height > 0 && p.height < 14 {
+		return 1
+	}
+	return max(commandPaletteHeight(p.height, p.maxHeight)-8, 1)
+}
+
 // TogglePreview toggles the preview panel.
 func (p *CommandPalette) TogglePreview() {
 	if len(p.filtered) == 0 || p.selected >= len(p.filtered) {
 		return
 	}
 	p.showPreview = !p.showPreview
-	if p.showPreview {
-		p.previewCmd = &p.filtered[p.selected]
-	} else {
-		p.previewCmd = nil
-	}
+	p.syncPreview()
 }
 
 // GetSelected returns the currently selected command, or nil if none.
@@ -694,22 +879,32 @@ func (p *CommandPalette) View(width, height int) string {
 		return ""
 	}
 
-	// Use stored size or passed size
+	// Use stored size or passed size, and remember the effective geometry so
+	// paging and selection visibility use the same capacity as rendering.
 	if width == 0 {
 		width = p.width
 	}
+	if height == 0 {
+		height = p.height
+	}
+	p.width = width
+	p.height = height
 
 	if p.argEntry {
-		return p.renderArgEntry(width)
+		return p.renderArgEntry(width, height)
 	}
 
 	// Palette dimensions
 	paletteWidth := commandPaletteWidth(width)
 	paletteHeight := commandPaletteHeight(height, p.maxHeight)
+	if paletteWidth < 32 || (height > 0 && height < 14) {
+		return p.renderCompact(width, height)
+	}
+	innerWidth := max(paletteWidth-4, 1)
 
 	// Styles
 	containerStyle := lipgloss.NewStyle().
-		Width(paletteWidth).
+		Width(innerWidth).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorSecondary).
 		Padding(0, 1)
@@ -726,7 +921,7 @@ func (p *CommandPalette) View(width, height int) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorAccent).
 		Padding(0, 1).
-		Width(paletteWidth - 4)
+		Width(max(innerWidth-4, 1))
 
 	placeholderStyle := lipgloss.NewStyle().
 		Foreground(ColorMuted).
@@ -750,6 +945,13 @@ func (p *CommandPalette) View(width, height int) string {
 
 	disabledStyle := lipgloss.NewStyle().
 		Foreground(ColorMuted).
+		Width(paletteWidth-6).
+		Padding(0, 1)
+
+	selectedDisabledStyle := lipgloss.NewStyle().
+		Background(ColorBorder).
+		Foreground(ColorMuted).
+		Bold(true).
 		Width(paletteWidth-6).
 		Padding(0, 1)
 
@@ -803,16 +1005,44 @@ func (p *CommandPalette) View(width, height int) string {
 	content.WriteString(inputBoxStyle.Render(inputContent))
 	content.WriteString("\n")
 
-	// Results count
+	directCmd, directReady := p.directSlashCommandWithArgs(strings.TrimSpace(p.query))
+	directRunnable := directReady && p.submissionAvailable()
+
+	// Results count or direct-command readiness.
 	if p.query != "" {
-		content.WriteString(descStyle.Render("  " + itoa(len(p.filtered)) + " results"))
+		resultLabel := "results"
+		if len(p.filtered) == 1 {
+			resultLabel = "result"
+		}
+		if directRunnable && len(p.filtered) == 0 {
+			content.WriteString(descStyle.Render("  Ready to run " + directCmd.Shortcut + " with arguments"))
+		} else if directReady && len(p.filtered) == 0 {
+			content.WriteString(descStyle.Render("  Submission unavailable for " + directCmd.Shortcut))
+		} else {
+			content.WriteString(descStyle.Render("  " + itoa(len(p.filtered)) + " " + resultLabel))
+		}
+		content.WriteString("\n")
+	}
+	if p.submitError != "" {
+		errorStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+		content.WriteString(errorStyle.Render("  " + truncateForWidth(p.submitError, max(innerWidth-2, 1))))
 		content.WriteString("\n")
 	}
 
-	// Commands list
-	if len(p.filtered) == 0 {
+	// Commands list, or an in-place detail view. Replacing the list while
+	// previewing keeps the modal within its height budget; the old append-only
+	// preview pushed the footer below short terminals.
+	if p.showPreview && p.previewCmd != nil {
 		content.WriteString("\n")
-		if strings.TrimSpace(p.query) != "" {
+		content.WriteString(p.renderPreview(innerWidth, max(paletteHeight-9, 3)))
+		content.WriteString("\n")
+	} else if len(p.filtered) == 0 {
+		content.WriteString("\n")
+		if directRunnable {
+			content.WriteString(descStyle.Render("  Press Enter to run this command"))
+		} else if directReady {
+			content.WriteString(descStyle.Render("  Connect command submission or press Backspace to edit"))
+		} else if strings.TrimSpace(p.query) != "" {
 			content.WriteString(descStyle.Render("  No matches for \"" + p.query + "\""))
 			content.WriteString("\n")
 			content.WriteString(descStyle.Render("  Try /help, /status, or Backspace"))
@@ -822,10 +1052,7 @@ func (p *CommandPalette) View(width, height int) string {
 		content.WriteString("\n")
 	} else {
 		// Calculate visible range
-		visibleItems := paletteHeight - 8
-		if visibleItems < 3 {
-			visibleItems = 3
-		}
+		visibleItems := max(paletteHeight-8, 1)
 		startIdx := p.scroll
 		endIdx := min(startIdx+visibleItems, len(p.filtered))
 
@@ -834,6 +1061,10 @@ func (p *CommandPalette) View(width, height int) string {
 			content.WriteString(scrollStyle.Render("    ^ " + itoa(startIdx) + " more"))
 			content.WriteString("\n")
 		}
+
+		// Category chrome is useful only when it fits without stealing command
+		// rows. A worst-case transition costs header+separator+item.
+		showCategoryHeaders := p.query == "" && len(p.filtered) <= (visibleItems+1)/3
 
 		// Track last category for headers
 		var lastCategory string
@@ -847,7 +1078,7 @@ func (p *CommandPalette) View(width, height int) string {
 			}
 		}
 
-		if showingRecent && p.query == "" {
+		if showingRecent && showCategoryHeaders {
 			content.WriteString(categoryStyle.Render("  Recently Used"))
 			content.WriteString("\n")
 		}
@@ -856,7 +1087,7 @@ func (p *CommandPalette) View(width, height int) string {
 			cmd := p.filtered[i]
 
 			// Category header with icon and separator (only when not searching and not in recent section)
-			if p.query == "" && !cmd.IsRecent {
+			if showCategoryHeaders && !cmd.IsRecent {
 				catName := cmd.Category.Name
 				if catName != lastCategory {
 					if lastCategory != "" || showingRecent {
@@ -930,8 +1161,13 @@ func (p *CommandPalette) View(width, height int) string {
 			}
 
 			// Apply selection style
-			lineStr := line.String()
-			if i == p.selected {
+			// Reserve the two-cell selection marker before the row style applies
+			// its own horizontal padding. Without this final cell-aware guard a
+			// one-cell budget error wrapped every result into two visual rows.
+			lineStr := fitStatusText(line.String(), max(paletteWidth-10, 1))
+			if i == p.selected && !cmd.Enabled {
+				content.WriteString(selectedDisabledStyle.Render("\u00d7 " + lineStr))
+			} else if i == p.selected {
 				content.WriteString(selectedBgStyle.Render("> " + lineStr))
 			} else if !cmd.Enabled {
 				content.WriteString(disabledStyle.Render("  " + lineStr))
@@ -948,18 +1184,46 @@ func (p *CommandPalette) View(width, height int) string {
 		}
 	}
 
-	// Preview panel (if active)
-	if p.showPreview && p.previewCmd != nil {
-		content.WriteString("\n")
-		content.WriteString(p.renderPreview(paletteWidth - 4))
-	}
-
 	// Footer
 	content.WriteString("\n")
-	footerText := "^/v Navigate  Enter Select  Tab Preview  Esc Close"
-	content.WriteString(footerStyle.Render(footerText))
+	content.WriteString(footerStyle.Render(truncateForWidth(p.footerText(directReady), max(paletteWidth-4, 1))))
 
 	return containerStyle.Render(content.String())
+}
+
+func (p *CommandPalette) footerText(directReady bool) string {
+	if p.submitError != "" {
+		return "Esc Close  ·  Submission unavailable"
+	}
+	if len(p.filtered) == 0 {
+		if directReady {
+			if !p.submissionAvailable() {
+				return "Esc Close  Backspace Edit  Submission unavailable"
+			}
+			return "Esc Close  Enter Run  Backspace Edit"
+		}
+		if strings.TrimSpace(p.query) != "" {
+			return "Esc Close  Backspace Edit"
+		}
+		return "Esc Close"
+	}
+
+	footer := "Esc Close  ↑/↓ Navigate"
+	if len(p.filtered) == 1 {
+		footer = "Esc Close"
+	}
+	if p.width >= 70 {
+		footer += "  PgUp/PgDn Page"
+	}
+	if p.selectedRunnable() {
+		footer += "  Enter Run"
+	} else if selected := p.GetSelected(); selected != nil && selected.Enabled && selected.Type == CommandTypeSlash {
+		footer += "  Submission unavailable"
+	}
+	if p.showPreview {
+		return footer + "  Tab List"
+	}
+	return footer + "  Tab Details"
 }
 
 func commandPaletteWidth(width int) int {
@@ -982,17 +1246,122 @@ func commandPaletteHeight(height, maxHeight int) int {
 	if height <= 0 {
 		return maxHeight
 	}
-	return min(maxHeight, max(10, height-4))
+	return min(maxHeight, max(4, height-2))
+}
+
+// renderCompact is the palette's constrained-terminal mode. The regular
+// search box alone consumes three rows; this flat layout keeps search, current
+// selection and recovery keys visible in a 10x6 terminal without relying on
+// the frame compositor to crop the header.
+func (p *CommandPalette) renderCompact(width, height int) string {
+	paletteWidth := commandPaletteWidth(width)
+	styleWidth := max(paletteWidth-2, 1)   // border adds the final two cells
+	contentWidth := max(paletteWidth-4, 1) // horizontal padding consumes two
+	contentRows := 6
+	if height > 0 {
+		contentRows = max(height-2, 1)
+	}
+	style := lipgloss.NewStyle().
+		Width(styleWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorSecondary).
+		Padding(0, 1)
+	titleStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(ColorDim)
+	keyStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+
+	lines := []string{titleStyle.Render("Cmds")}
+	query := "Filter…"
+	if p.query != "" {
+		query = p.query + "_"
+	}
+	lines = append(lines, keyStyle.Render("› ")+query)
+
+	directCmd, directReady := p.directSlashCommandWithArgs(strings.TrimSpace(p.query))
+	directRunnable := directReady && p.submissionAvailable()
+	if selected := p.GetSelected(); selected != nil {
+		label := selected.Shortcut
+		if label == "" {
+			label = selected.Name
+		}
+		prefix := "> "
+		if !selected.Enabled {
+			prefix = "× "
+		}
+		position := fmt.Sprintf(" %d/%d", p.selected+1, len(p.filtered))
+		lines = append(lines, prefix+label+position)
+	} else if directRunnable {
+		lines = append(lines, "↵ "+directCmd.Shortcut)
+	} else if directReady {
+		lines = append(lines, "× submission unavailable")
+	} else if strings.TrimSpace(p.query) != "" {
+		lines = append(lines, muted.Render("No matches"))
+	} else {
+		lines = append(lines, muted.Render("No commands"))
+	}
+	if p.submitError != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render(p.submitError))
+	}
+
+	footer := "Esc  ⌫"
+	if p.submitError == "" && (p.selectedRunnable() || directRunnable) {
+		footer = "Esc  ↵  ↑↓"
+	}
+	lines = append(lines, muted.Render(footer))
+	if len(lines) > contentRows {
+		lines = lines[:contentRows]
+	}
+	for i := range lines {
+		lines[i] = fitStatusText(lines[i], contentWidth)
+	}
+	return style.Render(strings.Join(lines, "\n"))
+}
+
+func (p *CommandPalette) renderCompactArgEntry(width int) string {
+	paletteWidth := commandPaletteWidth(width)
+	styleWidth := max(paletteWidth-2, 1)
+	contentWidth := max(paletteWidth-4, 1)
+	style := lipgloss.NewStyle().
+		Width(styleWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorAccent).
+		Padding(0, 1)
+	keyStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(ColorDim)
+	value := p.argValue
+	if value == "" {
+		value = p.argCmd.ArgHint
+	}
+	lines := []string{
+		keyStyle.Render("Run ") + p.argCmd.Shortcut,
+		keyStyle.Render("› ") + sanitizePaletteInput(value),
+	}
+	if p.argError != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render(p.argError))
+	}
+	footer := "Esc  ↵"
+	if !p.submissionAvailable() || isUnavailablePromptNotice(p.argError) {
+		footer = "Esc Back"
+	}
+	lines = append(lines, muted.Render(footer))
+	for i := range lines {
+		lines[i] = fitStatusText(lines[i], contentWidth)
+	}
+	return style.Render(strings.Join(lines, "\n"))
 }
 
 // renderArgEntry draws the inline argument-entry step: the chosen command, its
 // argument hint, and a focused one-line field. Picked from the palette list, so
 // the user fills only the value — no need to type the command name.
-func (p *CommandPalette) renderArgEntry(width int) string {
+func (p *CommandPalette) renderArgEntry(width, height int) string {
 	paletteWidth := commandPaletteWidth(width)
+	if paletteWidth < 32 || (height > 0 && height < 12) {
+		return p.renderCompactArgEntry(width)
+	}
+	innerWidth := max(paletteWidth-4, 1)
 
 	containerStyle := lipgloss.NewStyle().
-		Width(paletteWidth).
+		Width(innerWidth).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorAccent).
 		Padding(0, 1)
@@ -1007,12 +1376,12 @@ func (p *CommandPalette) renderArgEntry(width int) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorAccent).
 		Padding(0, 1).
-		Width(paletteWidth - 4)
+		Width(max(innerWidth-4, 1))
 	footerStyle := lipgloss.NewStyle().
 		Foreground(ColorDim).
 		Italic(true).
 		Align(lipgloss.Center).
-		Width(paletteWidth - 4)
+		Width(innerWidth)
 
 	var content strings.Builder
 
@@ -1020,7 +1389,7 @@ func (p *CommandPalette) renderArgEntry(width int) string {
 	content.WriteString(cmdStyle.Render(p.argCmd.Shortcut))
 	content.WriteString("\n")
 	if p.argCmd.Description != "" {
-		content.WriteString(descStyle.Render(p.argCmd.Description))
+		content.WriteString(fitStatusText(descStyle.Render(safeKeyEntryText(p.argCmd.Description)), max(innerWidth-2, 1)))
 		content.WriteString("\n")
 	}
 	content.WriteString("\n")
@@ -1036,6 +1405,7 @@ func (p *CommandPalette) renderArgEntry(width int) string {
 	} else {
 		inputContent = queryStyle.Render(p.argValue) + placeholderStyle.Render("_")
 	}
+	inputContent = fitStatusText(inputContent, max(innerWidth-6, 1))
 	content.WriteString(inputBoxStyle.Render(inputContent))
 	content.WriteString("\n")
 
@@ -1043,15 +1413,31 @@ func (p *CommandPalette) renderArgEntry(width int) string {
 		content.WriteString(hintStyle.Render("  " + p.argCmd.ArgHint))
 		content.WriteString("\n")
 	}
+	if p.argError != "" {
+		errorStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+		content.WriteString(errorStyle.Render("  " + p.argError))
+		content.WriteString("\n")
+	}
 
 	content.WriteString("\n")
-	content.WriteString(footerStyle.Render("Enter Run  ·  Esc Back to list"))
+	footer := "Esc Back to list  ·  Enter Run"
+	if !p.submissionAvailable() || isUnavailablePromptNotice(p.argError) {
+		footer = "Esc Back to list  ·  Submission unavailable"
+	}
+	if paletteWidth < 45 {
+		if !p.submissionAvailable() || isUnavailablePromptNotice(p.argError) {
+			footer = "Esc Back  Submission unavailable"
+		} else {
+			footer = "Esc Back  Enter Run"
+		}
+	}
+	content.WriteString(footerStyle.Render(truncateForWidth(footer, innerWidth)))
 
 	return containerStyle.Render(content.String())
 }
 
 // renderPreview renders the preview panel for the selected command.
-func (p *CommandPalette) renderPreview(width int) string {
+func (p *CommandPalette) renderPreview(width, maxRows int) string {
 	if p.previewCmd == nil {
 		return ""
 	}
@@ -1062,7 +1448,7 @@ func (p *CommandPalette) renderPreview(width int) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorDim).
 		Padding(0, 1).
-		Width(width)
+		Width(max(width-4, 1))
 
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -1101,7 +1487,14 @@ func (p *CommandPalette) renderPreview(width int) string {
 		content.WriteString("Disabled - " + cmd.Reason)
 	}
 
-	return previewStyle.Render(content.String())
+	contentText := strings.TrimSuffix(content.String(), "\n")
+	contentLines := strings.Split(contentText, "\n")
+	innerRows := max(maxRows-2, 1)
+	if len(contentLines) > innerRows {
+		contentLines = contentLines[:innerRows]
+		contentLines[innerRows-1] = fitStatusText(contentLines[innerRows-1], max(width-4, 1))
+	}
+	return previewStyle.Render(strings.Join(contentLines, "\n"))
 }
 
 // categoryIcon returns a minimal icon for a palette category name.

@@ -33,6 +33,7 @@ type Coordinator struct {
 	agentDoneCh  chan string   // Signals when an agent completes (carries agentID)
 	completionCh chan struct{} // Closed once when the whole coordination completes
 	completeOnce sync.Once
+	startOnce    sync.Once
 
 	// Reflection for error learning feedback loop
 	reflector *Reflector
@@ -56,6 +57,9 @@ func NewCoordinator(ctx context.Context, runner *Runner, config *CoordinatorConf
 		config.MaxParallel = 3
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &Coordinator{
@@ -100,7 +104,7 @@ func (c *Coordinator) AddTask(prompt string, agentType AgentType, priority TaskP
 		Prompt:       prompt,
 		AgentType:    agentType,
 		Priority:     priority,
-		Dependencies: deps,
+		Dependencies: append([]string(nil), deps...),
 		Status:       TaskStatusPending,
 	}
 
@@ -146,7 +150,16 @@ func (c *Coordinator) areDependenciesMet(task *CoordinatedTask) bool {
 
 // Start begins processing tasks.
 func (c *Coordinator) Start() {
-	go c.processLoop()
+	c.startOnce.Do(func() {
+		go c.processLoop()
+		// AddTask normally leaves a buffered readiness signal, but an empty
+		// batch has none and used to wait for the five-second fallback ticker.
+		// An initial wake also makes Start's completion behavior deterministic.
+		select {
+		case c.taskReadyCh <- struct{}{}:
+		default:
+		}
+	})
 }
 
 // SetMaxParallel updates the concurrency limit. Reducing the limit does not
@@ -238,10 +251,18 @@ func (c *Coordinator) processLoop() {
 // detonated only because the sole wired coordinator (the boot one) never
 // received tasks.
 func (c *Coordinator) processReadyTasks() {
-	started, onStart := c.startReadyTasksLocked()
+	started, failed, onStart, onComplete := c.startReadyTasksLocked()
 	for _, task := range started {
 		invokeCoordinatorTaskStart(onStart, task)
 	}
+	for _, notification := range failed {
+		invokeCoordinatorTaskComplete(onComplete, notification.task, notification.result)
+	}
+}
+
+type coordinatorTaskCompletion struct {
+	task   *CoordinatedTask
+	result *AgentResult
 }
 
 // Coordinator callbacks are integration hooks (UI, telemetry, embedding
@@ -316,7 +337,12 @@ func cloneCoordinatorResults(results map[string]*AgentResult) map[string]*AgentR
 // startReadyTasksLocked pops and starts ready tasks under c.mu (deferred
 // unlock — a panic inside a spawn must not leave the coordinator locked) and
 // returns the started tasks plus the callback snapshot for unlocked firing.
-func (c *Coordinator) startReadyTasksLocked() ([]*CoordinatedTask, func(*CoordinatedTask)) {
+func (c *Coordinator) startReadyTasksLocked() (
+	[]*CoordinatedTask,
+	[]coordinatorTaskCompletion,
+	func(*CoordinatedTask),
+	func(*CoordinatedTask, *AgentResult),
+) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -324,6 +350,7 @@ func (c *Coordinator) startReadyTasksLocked() ([]*CoordinatedTask, func(*Coordin
 	availableSlots := c.maxParallel - runningCount
 
 	var started []*CoordinatedTask
+	var failed []coordinatorTaskCompletion
 	for availableSlots > 0 {
 		task := c.queue.PopTask()
 		if task == nil {
@@ -336,15 +363,22 @@ func (c *Coordinator) startReadyTasksLocked() ([]*CoordinatedTask, func(*Coordin
 
 		// Start the task
 		task.Status = TaskStatusRunning
-		c.startTask(task)
+		if failure := c.startTask(task); failure != nil {
+			failed = append(failed, coordinatorTaskCompletion{
+				task: cloneCoordinatedTask(task), result: cloneAgentResult(failure),
+			})
+			continue
+		}
 		started = append(started, cloneCoordinatedTask(task))
 		availableSlots--
 	}
-	return started, c.onTaskStart
+	return started, failed, c.onTaskStart, c.onTaskComplete
 }
 
 // startTask spawns an agent for a task.
-func (c *Coordinator) startTask(task *CoordinatedTask) {
+// The caller holds c.mu. A spawn failure is committed as a terminal task
+// result so the popped queue item cannot remain Running without an agent.
+func (c *Coordinator) startTask(task *CoordinatedTask) (failure *AgentResult) {
 	logging.Info("coordinator: starting task",
 		"task_id", task.ID,
 		"agent_type", task.AgentType,
@@ -353,8 +387,34 @@ func (c *Coordinator) startTask(task *CoordinatedTask) {
 	// NOTE: onTaskStart is fired by processReadyTasks AFTER c.mu is released
 	// — never here (this function runs under the lock; see processReadyTasks).
 
+	fail := func(err error) *AgentResult {
+		result := &AgentResult{
+			Type: task.AgentType, Status: AgentStatusFailed,
+			Error: err.Error(), Completed: true,
+		}
+		task.Status = TaskStatusFailed
+		task.Result = result
+		c.completed[task.ID] = true
+		c.unblockDependents(task.ID)
+		logging.Error("coordinator: failed to start task", "task_id", task.ID, "error", err)
+		return result
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			failure = fail(fmt.Errorf("agent spawn panicked: %v", recovered))
+			logging.Error("coordinator agent spawn panic",
+				"task_id", task.ID, "panic", recovered, "stack", logging.PanicStack())
+		}
+	}()
+	if c.runner == nil {
+		return fail(fmt.Errorf("agent runner is not configured"))
+	}
+
 	// Spawn async agent
 	agentID := c.runner.SpawnAsync(c.ctx, string(task.AgentType), task.Prompt, 30, "")
+	if agentID == "" {
+		return fail(fmt.Errorf("agent runner returned an empty agent ID"))
+	}
 	c.running[agentID] = task.ID
 
 	// Monitor completion and notify coordinator immediately via agentDoneCh
@@ -371,6 +431,7 @@ func (c *Coordinator) startTask(task *CoordinatedTask) {
 			}
 		}
 	}()
+	return nil
 }
 
 // checkCompletedAgents checks for completed agents and updates tasks.
@@ -668,6 +729,9 @@ func (c *Coordinator) WaitWithTimeout(timeout time.Duration) (map[string]*AgentR
 // timer, and the coordinator's own app-lifetime ctx, making a coordinate turn
 // un-interruptible by any user action; the /loop CancelInFlight bug class).
 func (c *Coordinator) WaitWithTimeoutCtx(ctx context.Context, timeout time.Duration) (map[string]*AgentResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 

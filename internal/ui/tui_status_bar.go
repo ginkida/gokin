@@ -18,7 +18,7 @@ import (
 // ~/work/clients/acme/infra/services/api/internal/handlers) gets middle-
 // truncated instead of shoving everything else off the right side.
 func statusBarProjectPath(workDir string) string {
-	pretty := prettyPath(workDir)
+	pretty := safeKeyEntryText(prettyPath(workDir))
 	if pretty == "" || pretty == "." {
 		return ""
 	}
@@ -67,8 +67,19 @@ func (m Model) renderStatusBar() string {
 // renderStatusBarMinimal renders a minimal status bar for very narrow terminals (< 60 chars).
 // Shows compact core reliability fields.
 func (m Model) renderStatusBarMinimal() string {
-	parts := m.minimalStatusSegments()
-	return fitStatusText(strings.Join(parts, " "), m.width)
+	left := strings.Join(m.minimalStatusSegments(), " ")
+	var requiredRight []string
+	// Queue ownership and cancellation are recovery-critical. Keep them on the
+	// non-droppable side of the layout: truncating the old left-to-right string
+	// at 10–59 columns could remove both while leaving lower-value identity or
+	// context cells visible.
+	if m.queuedPending > 0 {
+		requiredRight = append(requiredRight, lipgloss.NewStyle().Foreground(ColorAccent).Render(fmt.Sprintf("📥%d", m.queuedPending)))
+	}
+	if m.state == StateProcessing || m.state == StateStreaming {
+		requiredRight = append(requiredRight, lipgloss.NewStyle().Foreground(ColorDim).Render("esc"))
+	}
+	return renderFittedStatusLine(m.width, left, nil, requiredRight)
 }
 
 // renderStatusBarCompact renders a compact status bar for narrow terminals (60-79 chars).
@@ -97,14 +108,7 @@ func (m Model) compactStatusSegments() []string {
 		parts = append(parts, h)
 	}
 
-	provider := m.runtimeStatus.Provider
-	if provider == "" {
-		provider = "ready"
-	}
-	if runes := []rune(provider); len(runes) > 12 {
-		provider = string(runes[:12])
-	}
-	parts = append(parts, provider)
+	parts = append(parts, m.compactIdentity(12))
 
 	tokens, maxTokens := m.getTokenCounts()
 	if m.showTokens && maxTokens > 0 {
@@ -133,14 +137,7 @@ func (m Model) minimalStatusSegments() []string {
 		parts = append(parts, h)
 	}
 
-	provider := m.runtimeStatus.Provider
-	if provider == "" {
-		provider = "ready"
-	}
-	if runes := []rune(provider); len(runes) > 10 {
-		provider = string(runes[:10])
-	}
-	parts = append(parts, provider)
+	parts = append(parts, m.compactIdentity(10))
 
 	_, maxTokens := m.getTokenCounts()
 	if m.showTokens && maxTokens > 0 {
@@ -151,11 +148,6 @@ func (m Model) minimalStatusSegments() []string {
 			label = "≈" + label
 		}
 		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(label))
-	}
-
-	// Even on the tightest layout, keep a cue that Esc cancels a busy turn.
-	if m.state == StateProcessing || m.state == StateStreaming {
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorDim).Render("esc"))
 	}
 
 	return parts
@@ -370,11 +362,8 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	if m.hasActivePlanStatus() {
 		planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
 		activeStep := fmt.Sprintf("%s %d/%d", MessageIcons["info"], m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
-		if m.planProgress.CurrentTitle != "" {
-			title := m.planProgress.CurrentTitle
-			if runes := []rune(title); len(runes) > 20 {
-				title = string(runes[:17]) + "..."
-			}
+		if title := safeKeyEntryText(m.planProgress.CurrentTitle); title != "" {
+			title = truncateForWidth(title, 20)
 			activeStep += " " + title
 		}
 		parts = append(parts, planStyle.Render(activeStep))
@@ -455,8 +444,8 @@ func (m Model) safetyBadge() string {
 // from the model's family (a failover), rendered "provider→model".
 func (m Model) identitySegment() string {
 	style := lipgloss.NewStyle().Foreground(ColorAccent)
-	model := shortenModelName(strings.TrimSpace(m.currentModel))
-	provider := strings.TrimSpace(m.runtimeStatus.Provider)
+	model := shortenModelName(safeKeyEntryText(m.currentModel))
+	provider := safeKeyEntryText(m.runtimeStatus.Provider)
 	if model == "" {
 		if provider == "" {
 			provider = "unknown"
@@ -467,6 +456,25 @@ func (m Model) identitySegment() string {
 		return style.Render(provider + "→" + model)
 	}
 	return style.Render(model)
+}
+
+// compactIdentity keeps the active model visible on narrow layouts too. The
+// previous compact bar showed only the provider (or "ready"), so resizing from
+// 80 to 79 columns silently removed the most useful session identity.
+func (m Model) compactIdentity(width int) string {
+	model := shortenModelName(safeKeyEntryText(m.currentModel))
+	provider := safeKeyEntryText(m.runtimeStatus.Provider)
+	identity := model
+	if identity == "" {
+		identity = provider
+	}
+	if identity == "" {
+		identity = "ready"
+	}
+	if model != "" && provider != "" && !strings.HasPrefix(strings.ToLower(model), strings.ToLower(provider)) {
+		identity = provider + "→" + model
+	}
+	return truncateForWidth(identity, width)
 }
 
 // compactHealth is the narrow-bar (minimal/compact) equivalent of the engine
@@ -866,8 +874,8 @@ func (m Model) getContextPercent() float64 {
 func (m Model) formatBackgroundTaskStatus(bgCount int) string {
 	var bestAction string
 	for _, t := range m.backgroundTasks {
-		if t.CurrentAction != "" {
-			bestAction = t.CurrentAction
+		if action := safeKeyEntryText(t.CurrentAction); action != "" {
+			bestAction = action
 			break
 		}
 	}
@@ -883,17 +891,234 @@ func (m Model) formatBackgroundTaskStatus(bgCount int) string {
 func (m Model) contextualShortcutHintPairs() []shortcutHint {
 	switch m.state {
 	case StatePermissionPrompt:
-		return []shortcutHint{{"y", "Allow"}, {"a", "Always"}, {"n", "Deny"}, {"esc", "Cancel"}}
+		if isUnavailablePromptNotice(m.permNotice) {
+			return []shortcutHint{{"esc", "Cancel"}, {"?", "Details"}}
+		}
+		if m.permShowDetails {
+			return []shortcutHint{{"↑↓", "Scroll"}, {"?", "Back"}, {"y/a/n", "Decide"}, {"esc", "Cancel"}}
+		}
+		return []shortcutHint{{"y", "Allow"}, {"a", "Always"}, {"n", "Deny"}, {"?", "Details"}, {"esc", "Cancel"}}
 	case StatePlanApproval:
+		if m.planFeedbackMode {
+			if isUnavailablePromptNotice(m.planFeedbackError) {
+				return []shortcutHint{{"esc", "Back"}}
+			}
+			return []shortcutHint{{"Enter", "Submit"}, {"Alt+Enter", "New line"}, {"esc", "Back"}}
+		}
+		if isUnavailablePromptNotice(m.planApprovalNotice) {
+			return []shortcutHint{{"esc", "Cancel"}}
+		}
+		if m.planRequest == nil {
+			return []shortcutHint{{"esc", "Cancel"}}
+		}
+		if len(m.planRequest.Steps) == 0 {
+			return []shortcutHint{{"n", "Reject"}, {"m", "Modify"}, {"↑↓", "Navigate"}, {"esc", "Cancel"}}
+		}
 		return []shortcutHint{{"y", "Approve"}, {"n", "Reject"}, {"m", "Modify"}, {"↑↓", "Navigate"}}
 	case StateDiffPreview:
+		if m.diffPreview.responseUnavailable {
+			return []shortcutHint{{"esc", "Cancel"}}
+		}
 		return []shortcutHint{{"y", "Apply"}, {"n", "Reject"}, {"A", "Apply all"}, {"R", "Reject all"}}
 	case StateMultiDiffPreview:
-		return []shortcutHint{{"y", "Apply all"}, {"n", "Reject all"}, {"Tab", "Switch pane"}, {"↑↓", "Browse"}}
+		if len(m.multiDiffPreview.files) == 0 {
+			return []shortcutHint{{"esc", "Close"}}
+		}
+		if m.multiDiffPreview.responseUnavailable {
+			return []shortcutHint{{"esc", "Cancel"}}
+		}
+		return []shortcutHint{{"y/n", "Decide file"}, {"A/R", "Decide rest"}, {"Tab", "Switch pane"}, {"↑↓", "Browse"}}
 	case StateQuestionPrompt:
-		return []shortcutHint{{"↑↓", "Navigate"}, {"Enter", "Confirm"}, {"esc", "Cancel"}}
+		if m.questionCustomInput {
+			if isUnavailablePromptNotice(m.questionInputError) {
+				return []shortcutHint{{"esc", "Back"}}
+			}
+			return []shortcutHint{{"Enter", "Submit"}, {"Alt+Enter", "New line"}, {"esc", "Back"}}
+		}
+		if m.questionRequest != nil && len(m.questionRequest.Options) == 0 {
+			if isUnavailablePromptNotice(m.questionInputError) {
+				return []shortcutHint{{"esc", "Cancel"}}
+			}
+			return []shortcutHint{{"Enter", "Submit"}, {"Alt+Enter", "New line"}, {"esc", "Cancel"}}
+		}
+		if isUnavailablePromptNotice(m.questionInputError) {
+			return []shortcutHint{{"esc", "Cancel"}, {"↑↓", "Navigate"}}
+		}
+		hints := make([]shortcutHint, 0, 3)
+		if m.questionRequest != nil && len(m.questionRequest.Options) > 1 {
+			hints = append(hints, shortcutHint{"↑↓", "Navigate"})
+		}
+		return append(hints, shortcutHint{"Enter", "Confirm"}, shortcutHint{"esc", "Cancel"})
 	case StateModelSelector:
-		return []shortcutHint{{"↑↓", "Navigate"}, {"Enter", "Select"}, {"esc", "Cancel"}}
+		escapeAction := "Close"
+		if m.modelSelectorReturnState == StateSettings {
+			escapeAction = "Back"
+		}
+		if len(m.availableModels) == 0 {
+			return []shortcutHint{{"esc", escapeAction}}
+		}
+		if m.onModelSelect == nil || m.modelSwitchPending != "" {
+			if len(m.availableModels) > 1 {
+				return []shortcutHint{{"↑↓", "Inspect"}, {"esc", escapeAction}}
+			}
+			return []shortcutHint{{"esc", escapeAction}}
+		}
+		hints := make([]shortcutHint, 0, 3)
+		if len(m.availableModels) > 1 {
+			hints = append(hints, shortcutHint{"↑↓", "Navigate"})
+		}
+		return append(hints, shortcutHint{"Enter", "Select"}, shortcutHint{"esc", escapeAction})
+	case StateSettings:
+		if len(m.settingsItems) == 0 {
+			return []shortcutHint{{"m", "Model"}, {"esc", "Close"}}
+		}
+		hints := make([]shortcutHint, 0, 4)
+		if m.selectedSettingToggleAvailable() {
+			hints = append(hints, shortcutHint{"Space", "Toggle"})
+		}
+		if len(m.settingsItems) > 1 {
+			action := "Navigate"
+			if !m.selectedSettingToggleAvailable() {
+				action = "Inspect"
+			}
+			hints = append(hints, shortcutHint{"↑↓", action})
+		}
+		return append(hints, shortcutHint{"m", "Model"}, shortcutHint{"esc", "Close"})
+	case StateAPIKeyEntry:
+		if m.keyEntryAvailable() {
+			return []shortcutHint{{"Enter", "Save"}, {"esc", "Cancel"}}
+		}
+		return []shortcutHint{{"esc", "Close"}}
+	case StateShortcutsOverlay:
+		escapeAction := "Close"
+		hints := []shortcutHint{{"Type", "Filter"}}
+		if m.shortcutsOverlay == nil {
+			return append(hints, shortcutHint{"↑↓", "Browse"}, shortcutHint{"esc", escapeAction})
+		}
+		if m.shortcutsOverlay.GetSearch() != "" {
+			escapeAction = "Clear filter"
+			hints = append(hints, shortcutHint{"Backspace", "Edit"})
+		}
+		entries := flattenShortcuts(m.shortcutsOverlay.getFilteredCategories())
+		pageSize := m.shortcutsOverlay.pageSize
+		canBrowse := len(entries) > 1 && (pageSize <= 0 || m.shortcutsOverlay.scrollIndex > 0 || m.shortcutsOverlay.scrollIndex+pageSize < len(entries))
+		if canBrowse {
+			hints = append(hints, shortcutHint{"↑↓", "Browse"})
+		}
+		return append(hints, shortcutHint{"esc", escapeAction})
+	case StateNotificationCenter:
+		rows := m.notificationRows()
+		if len(rows) == 0 {
+			return []shortcutHint{{"esc", "Back"}}
+		}
+		if m.notificationDetail {
+			selected := selectedNotificationIndex(rows, m.notificationSelected, m.notificationSelectedID)
+			lines := notificationDetailLines(rows[selected], notificationContentWidth(m.width))
+			if len(lines) > notificationDetailVisibleCount(m.height, len(lines)) {
+				return []shortcutHint{{"↑↓", "Scroll"}, {"PgUp/PgDn", "Page"}, {"esc", "Back to list"}}
+			}
+			return []shortcutHint{{"esc", "Back to list"}}
+		}
+		hints := make([]shortcutHint, 0, 4)
+		if len(rows) > 1 {
+			hints = append(hints, shortcutHint{"↑↓", "Select"})
+		}
+		hints = append(hints, shortcutHint{"Enter", "Details"})
+		if m.toastManager != nil && len(m.toastManager.History()) > 0 {
+			hints = append(hints, shortcutHint{"c", "Clear earlier"})
+		}
+		return append(hints, shortcutHint{"esc", "Back"})
+	case StateBatchProgress:
+		if m.progressModel.isComplete {
+			return []shortcutHint{{"Enter/Esc", "Close"}}
+		}
+		if m.progressModel.isCancelling || m.progressModel.onAction == nil {
+			return nil
+		}
+		pauseAction := "Pause"
+		if m.progressModel.isPaused {
+			pauseAction = "Resume"
+		}
+		return []shortcutHint{{"p", pauseAction}, {"esc", "Cancel"}}
+	case StateSearchResults:
+		if len(m.searchResults.results) == 0 {
+			return []shortcutHint{{"esc/q", "Close"}}
+		}
+		hints := []shortcutHint{{"Space", "Preview"}, {"y", "Copy path"}}
+		if m.searchResults.actionsAvailable() {
+			hints = append(hints, shortcutHint{"Enter", "Open"})
+		}
+		return append(hints, shortcutHint{"esc/q", "Close"})
+	case StateGitStatus:
+		if len(m.gitStatusModel.entries) == 0 {
+			return []shortcutHint{{"esc/q", "Close"}}
+		}
+		if m.gitStatusModel.confirmReset {
+			return []shortcutHint{{"esc/q", "Cancel"}, {"Enter", "Confirm reset"}}
+		}
+		if !m.gitStatusModel.actionsAvailable() {
+			return []shortcutHint{{"↑↓", "Inspect"}, {"esc/q", "Close"}}
+		}
+		diffAction := "Show diff"
+		if m.gitStatusModel.showDiff {
+			diffAction = "Hide diff"
+		}
+		if m.gitStatusModel.showDiff && m.gitStatusModel.diffLoadError {
+			diffAction = "Retry diff"
+		}
+		return []shortcutHint{{"Space", "Stage/unstage"}, {"d", diffAction}, {"esc/q", "Close"}}
+	case StateFileBrowser:
+		if m.fileBrowser.filterActive {
+			return []shortcutHint{{"Type", "Filter"}, {"Backspace", "Delete"}, {"Enter/Esc", "Done"}}
+		}
+		if len(m.fileBrowser.entries) == 0 {
+			hints := []shortcutHint{{"/", "Filter"}, {"r", "Refresh"}}
+			if m.fileBrowser.filter != "" {
+				hints = append(hints, shortcutHint{"c", "Clear"})
+			}
+			return append(hints, shortcutHint{"esc/q", "Close"})
+		}
+		hints := []shortcutHint{{"Enter", "Open/add"}}
+		if len(m.fileBrowser.selectedFiles) > 0 {
+			hints = append(hints, shortcutHint{"y", "Add selection"})
+		}
+		return append(hints, shortcutHint{"esc/q", "Close"})
+	case StateCommandPalette:
+		if m.commandPalette == nil {
+			return []shortcutHint{{"esc", "Close"}}
+		}
+		if m.commandPalette.InArgEntry() {
+			if !m.commandPalette.submissionAvailable() || isUnavailablePromptNotice(m.commandPalette.argError) {
+				return []shortcutHint{{"esc", "Back"}}
+			}
+			return []shortcutHint{{"Enter", "Run"}, {"esc", "Back"}}
+		}
+		if m.commandPalette.submitError != "" {
+			return []shortcutHint{{"esc", "Close"}}
+		}
+		_, directReady := m.commandPalette.directSlashCommandWithArgs(strings.TrimSpace(m.commandPalette.GetQuery()))
+		if len(m.commandPalette.filtered) == 0 {
+			hints := make([]shortcutHint, 0, 3)
+			if directReady && m.commandPalette.submissionAvailable() {
+				hints = append(hints, shortcutHint{"Enter", "Run"})
+			}
+			if strings.TrimSpace(m.commandPalette.GetQuery()) != "" {
+				hints = append(hints, shortcutHint{"Backspace", "Edit"})
+			}
+			return append(hints, shortcutHint{"esc", "Close"})
+		}
+		hints := make([]shortcutHint, 0, 4)
+		if len(m.commandPalette.filtered) > 1 {
+			hints = append(hints, shortcutHint{"↑↓", "Navigate"})
+		}
+		if m.commandPalette.selectedRunnable() {
+			hints = append(hints, shortcutHint{"Enter", "Run"})
+		}
+		previewAction := "Details"
+		if m.commandPalette.showPreview {
+			previewAction = "List"
+		}
+		return append(hints, shortcutHint{"Tab", previewAction}, shortcutHint{"esc", "Close"})
 	case StateProcessing, StateStreaming:
 		// Esc-interrupt is NOT here — it's a required, always-visible segment
 		// (see interruptHint), because cancellation must never vanish under
@@ -908,15 +1133,27 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 	}
 }
 
-// interruptHint returns the always-visible "Esc interrupt" status segment during
-// a busy turn. Interrupt is the single always-available action while the agent
-// works, so it is appended to the REQUIRED (non-droppable) right side rather than
-// riding the optional hints that vanish when the bar is crowded. Empty otherwise.
+// interruptHint returns the always-visible busy-action status segment. Besides
+// cancellation it makes follow-up composition discoverable before the hidden
+// busy composer has any text, then changes to the action Enter will actually
+// perform. It rides the REQUIRED (non-droppable) right side so recovery never
+// disappears under width pressure. Minimal layouts use the shorter `esc` cell.
 func (m Model) interruptHint() string {
-	if m.state == StateProcessing || m.state == StateStreaming {
-		return lipgloss.NewStyle().Foreground(ColorDim).Render("Esc interrupt")
+	if m.state != StateProcessing && m.state != StateStreaming {
+		return ""
 	}
-	return ""
+	action := "Type follow-up"
+	switch {
+	case m.input.historySearchMode:
+		action = "Enter use"
+	case m.input.SuggestionsBlockSubmit():
+		action = "Enter complete"
+	case m.input.Value() != "" && m.onSubmit == nil:
+		action = "Send unavailable"
+	case m.input.Value() != "":
+		action = "Enter send"
+	}
+	return lipgloss.NewStyle().Foreground(ColorDim).Render(action + " · Esc interrupt")
 }
 
 // shortenModelName returns a shortened model name for status-bar display.

@@ -6,10 +6,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"gokin/internal/highlight"
 )
 
@@ -63,9 +65,8 @@ type FileBrowserModel struct {
 	filterInput  string
 	filterActive bool
 
-	// Error message (displayed temporarily)
-	errorMsg     string
-	errorTimeout int // Countdown ticks to clear error
+	// Error message (cleared when the user presses the next key)
+	errorMsg string
 
 	// Preview panel
 	previewEnabled     bool
@@ -75,6 +76,7 @@ type FileBrowserModel struct {
 	previewHighlighter *highlight.Highlighter
 	previewMaxLines    int // Max lines to preview (default: 100)
 	previewLoadError   string
+	previewRecovery    string
 
 	// Split dimensions
 	listWidth    int
@@ -82,6 +84,12 @@ type FileBrowserModel struct {
 
 	// Callback for actions
 	onAction func(action FileBrowserAction, path string, files []string)
+}
+
+const minFileBrowserSplitWidth = 64
+
+func (m FileBrowserModel) previewSupported() bool {
+	return m.width <= 0 || m.width >= minFileBrowserSplitWidth
 }
 
 // NewFileBrowserModel creates a new file browser model.
@@ -106,26 +114,63 @@ func NewFileBrowserModel(styles *Styles) FileBrowserModel {
 
 // SetSize sets the size of the file browser.
 func (m *FileBrowserModel) SetSize(width, height int) {
-	if width < 10 {
-		width = 80
+	m.width = max(width, 1)
+	m.height = max(height, 1)
+	m.updateLayout()
+	m.updateViewport()
+	if m.previewEnabled && len(m.entries) > 0 {
+		m.loadPreview(m.entries[m.selectedIndex])
 	}
-	if height < 10 {
-		height = 24
-	}
-	m.width = width
-	m.height = height
 
-	// Calculate split widths
-	if m.previewEnabled {
-		m.listWidth = width * 40 / 100
-		m.previewWidth = width - m.listWidth - 5
-		m.viewport.Width = m.listWidth - 4
-		m.previewViewport.Width = m.previewWidth - 4
-	} else {
-		m.viewport.Width = width - 4
+	m.ensureSelectionVisible()
+}
+
+// updateLayout keeps the bordered panels inside the real terminal dimensions.
+// Width values stored here are content widths; borders and horizontal padding
+// add four cells per panel.
+func (m *FileBrowserModel) updateLayout() {
+	if m.width <= 0 || m.height <= 0 {
+		return
 	}
-	m.viewport.Height = height - 10
-	m.previewViewport.Height = height - 10
+	extraRows := 0
+	if len(m.selectedFiles) > 0 {
+		extraRows++
+	}
+	if m.filter != "" || m.filterActive {
+		extraRows++
+	}
+	if m.errorMsg != "" {
+		extraRows++
+	}
+	contentHeight := max(m.height-10-extraRows, 1)
+	m.viewport.Height = contentHeight
+
+	if m.previewEnabled && m.width >= minFileBrowserSplitWidth {
+		listOuterWidth := max(m.width*40/100, 28)
+		previewOuterWidth := m.width - listOuterWidth - 1
+		if previewOuterWidth < 28 {
+			previewOuterWidth = 28
+			listOuterWidth = m.width - previewOuterWidth - 1
+		}
+		m.listWidth = max(listOuterWidth-4, 1)
+		m.previewWidth = max(previewOuterWidth-4, 1)
+		m.viewport.Width = m.listWidth
+		m.previewViewport.Width = m.previewWidth
+	} else {
+		m.listWidth = max(m.width-4, 1)
+		m.previewWidth = 0
+		m.viewport.Width = m.listWidth
+		m.previewViewport.Width = m.listWidth
+	}
+	m.previewViewport.Height = max(contentHeight-2, 1)
+	m.ensureSelectionVisible()
+}
+
+func (m FileBrowserModel) renderWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
+	return max(m.viewport.Width+4, minFileBrowserSplitWidth)
 }
 
 // SetPath sets the current directory path.
@@ -144,15 +189,36 @@ func (m *FileBrowserModel) SetPath(path string) error {
 		absPath = filepath.Dir(absPath)
 	}
 
+	oldDir := m.currentDir
+	oldIndex := m.selectedIndex
+	oldSelectedFiles := m.selectedFiles
+	oldFilter := m.filter
+	oldFilterInput := m.filterInput
 	m.currentDir = absPath
 	m.selectedIndex = 0
 	m.selectedFiles = make(map[string]bool)
+	m.filter = ""
+	m.filterInput = ""
 
-	return m.loadEntries()
+	if err := m.loadEntries(); err != nil {
+		m.currentDir = oldDir
+		m.selectedIndex = oldIndex
+		m.selectedFiles = oldSelectedFiles
+		m.filter = oldFilter
+		m.filterInput = oldFilterInput
+		m.updateLayout()
+		m.updateViewport()
+		return err
+	}
+	return nil
 }
 
 // loadEntries loads the directory entries.
 func (m *FileBrowserModel) loadEntries() error {
+	selectedPath := ""
+	if m.selectedIndex >= 0 && m.selectedIndex < len(m.entries) {
+		selectedPath = m.entries[m.selectedIndex].Path
+	}
 	entries, err := os.ReadDir(m.currentDir)
 	if err != nil {
 		return err
@@ -212,9 +278,62 @@ func (m *FileBrowserModel) loadEntries() error {
 		}
 		return strings.ToLower(m.entries[i].Name) < strings.ToLower(m.entries[j].Name)
 	})
+	if selectedPath != "" {
+		for i := range m.entries {
+			if m.entries[i].Path == selectedPath {
+				m.selectedIndex = i
+				break
+			}
+		}
+	}
 
+	m.syncSelection()
+	m.updateLayout()
 	m.updateViewport()
 	return nil
+}
+
+// syncSelection keeps the cursor and preview consistent after filtering,
+// toggling hidden files, or changing directories.
+func (m *FileBrowserModel) syncSelection() {
+	if len(m.entries) == 0 {
+		m.selectedIndex = 0
+		m.previewContent = ""
+		m.previewFilePath = ""
+		m.previewLoadError = ""
+		m.previewRecovery = ""
+		m.previewViewport.SetContent("")
+		return
+	}
+
+	if m.selectedIndex >= len(m.entries) {
+		m.selectedIndex = len(m.entries) - 1
+	}
+	if m.selectedIndex < 0 {
+		m.selectedIndex = 0
+	}
+
+	if m.previewEnabled {
+		m.loadPreview(m.entries[m.selectedIndex])
+	}
+}
+
+// selectEntry is the single cursor transaction for arrows, paging and boundary
+// jumps. Keeping viewport visibility and preview refresh here prevents the
+// faster navigation keys from moving a hidden cursor or leaving stale content.
+func (m *FileBrowserModel) selectEntry(index int) {
+	if len(m.entries) == 0 {
+		m.selectedIndex = 0
+		m.updateViewport()
+		return
+	}
+	index = min(max(index, 0), len(m.entries)-1)
+	changed := index != m.selectedIndex
+	m.selectedIndex = index
+	m.updateViewport()
+	if changed && m.previewEnabled {
+		m.loadPreview(m.entries[m.selectedIndex])
+	}
 }
 
 // SetActionCallback sets the callback for user actions.
@@ -225,6 +344,7 @@ func (m *FileBrowserModel) SetActionCallback(callback func(FileBrowserAction, st
 // loadPreview loads and highlights file content for preview.
 func (m *FileBrowserModel) loadPreview(entry FileEntry) {
 	m.previewLoadError = ""
+	m.previewRecovery = ""
 	m.previewContent = ""
 	m.previewFilePath = ""
 
@@ -232,28 +352,33 @@ func (m *FileBrowserModel) loadPreview(entry FileEntry) {
 		m.previewContent = ""
 		return
 	}
+	m.previewFilePath = entry.Path
 
 	// Size check (max 1MB)
 	const maxPreviewSize = 1024 * 1024
 	if entry.Size > maxPreviewSize {
 		m.previewLoadError = "File too large for preview"
+		m.previewRecovery = "Enter Add to draft"
 		return
 	}
 
 	content, err := os.ReadFile(entry.Path)
 	if err != nil {
-		m.previewLoadError = fmt.Sprintf("Cannot read: %s", err.Error())
+		m.previewLoadError = fmt.Sprintf("Cannot read: %s", safeKeyEntryText(err.Error()))
+		m.previewRecovery = "r Retry preview"
 		return
 	}
 
 	// Binary check
 	if isBinaryContent(content) {
 		m.previewLoadError = "Binary file"
+		m.previewRecovery = "Enter Add to draft"
 		return
 	}
 
 	// Truncate to maxLines
-	lines := strings.Split(string(content), "\n")
+	safeContent := safeTerminalDisplayText(string(content))
+	lines := strings.Split(safeContent, "\n")
 	if len(lines) > m.previewMaxLines {
 		lines = lines[:m.previewMaxLines]
 		lines = append(lines, fmt.Sprintf("... (%d more lines)", len(strings.Split(string(content), "\n"))-m.previewMaxLines))
@@ -264,7 +389,6 @@ func (m *FileBrowserModel) loadPreview(entry FileEntry) {
 	m.previewContent = m.previewHighlighter.HighlightWithLineNumbers(
 		strings.Join(lines, "\n"), lang, 1,
 	)
-	m.previewFilePath = entry.Path
 	m.previewViewport.SetContent(m.previewContent)
 	m.previewViewport.GotoTop()
 }
@@ -293,7 +417,53 @@ func (m *FileBrowserModel) updateViewport() {
 		content.WriteString("\n")
 	}
 
+	if emptyState := m.emptyStateText(); emptyState != "" {
+		if content.Len() > 0 {
+			content.WriteString("\n")
+		}
+		emptyStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+		content.WriteString(emptyStyle.Render(emptyState))
+		content.WriteString("\n")
+	}
+
 	m.viewport.SetContent(content.String())
+	m.ensureSelectionVisible()
+}
+
+// ensureSelectionVisible scrolls the list just enough to keep the cursor on
+// screen. Without this, navigation still changes the selection but it becomes
+// invisible as soon as it moves past the first viewport page.
+func (m *FileBrowserModel) ensureSelectionVisible() {
+	if len(m.entries) == 0 || m.viewport.Height <= 0 {
+		m.viewport.SetYOffset(0)
+		return
+	}
+
+	if m.selectedIndex < m.viewport.YOffset {
+		m.viewport.SetYOffset(m.selectedIndex)
+		return
+	}
+	if m.selectedIndex >= m.viewport.YOffset+m.viewport.Height {
+		m.viewport.SetYOffset(m.selectedIndex - m.viewport.Height + 1)
+	}
+}
+
+// emptyStateText describes why there are no browsable results. The parent
+// directory entry is navigation, not a search result, so it is ignored here.
+func (m *FileBrowserModel) emptyStateText() string {
+	for _, entry := range m.entries {
+		if entry.Name != ".." {
+			return ""
+		}
+	}
+
+	if m.filter != "" {
+		return fmt.Sprintf("No files match %q\nPress c to clear the filter", m.filter)
+	}
+	if !m.showHidden {
+		return "No visible files in this folder\nPress . to show hidden files"
+	}
+	return "This folder is empty"
 }
 
 // formatEntryLine formats a single file entry for display.
@@ -346,26 +516,35 @@ func (m *FileBrowserModel) formatEntryLine(index int, entry FileEntry) string {
 	}
 
 	// Format line
-	name := entry.Name
-	if runes := []rune(name); len(runes) > 30 {
-		name = string(runes[:27]) + "..."
+	name := safeKeyEntryText(entry.Name)
+	if name == "" {
+		name = "(unnamed)"
 	}
 
 	var line string
 	if entry.Name == ".." {
 		line = fmt.Sprintf("%s%s %s", prefix, icon, nameStyle.Render(name))
 	} else if entry.IsDir {
-		line = fmt.Sprintf("%s%s %-32s", prefix, icon, nameStyle.Render(name))
+		name = ansi.Truncate(name, max(m.viewport.Width-lipgloss.Width(prefix+icon+" ")-1, 1), "…")
+		line = fmt.Sprintf("%s%s %s", prefix, icon, nameStyle.Render(name))
 	} else {
 		sizeStr := m.formatSize(entry.Size)
-		line = fmt.Sprintf("%s%s %-32s %8s  %s",
-			prefix,
-			icon,
-			nameStyle.Render(name),
-			sizeStyle.Render(sizeStr),
-			timeStyle.Render(entry.ModTime),
-		)
+		fixed := prefix + icon + " "
+		sizeText := fmt.Sprintf(" %8s", sizeStr)
+		timeText := "  " + safeKeyEntryText(entry.ModTime)
+		available := max(m.viewport.Width-lipgloss.Width(fixed), 1)
+		if available-lipgloss.Width(sizeText+timeText) < 12 {
+			timeText = ""
+		}
+		if available-lipgloss.Width(sizeText) < 4 {
+			sizeText = ""
+		}
+		nameBudget := max(available-lipgloss.Width(sizeText+timeText)-1, 1)
+		name = truncateLeftForWidth(name, nameBudget)
+		line = fixed + nameStyle.Width(nameBudget).Render(name) +
+			sizeStyle.Render(sizeText) + timeStyle.Render(timeText)
 	}
+	line = ansi.Truncate(line, max(m.viewport.Width, 1), "…")
 
 	if isSelected {
 		return selectedStyle.Render(line)
@@ -405,7 +584,7 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 	// Clear error message on any key press (user acknowledgment)
 	if _, ok := msg.(tea.KeyMsg); ok && m.errorMsg != "" {
 		m.errorMsg = ""
-		m.errorTimeout = 0
+		m.updateLayout()
 	}
 
 	switch msg := msg.(type) {
@@ -415,19 +594,24 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 			switch msg.Type {
 			case tea.KeyEnter, tea.KeyEsc:
 				m.filterActive = false
+				m.updateLayout()
+				m.updateViewport()
 				return m, nil
 			case tea.KeyBackspace:
-				if len(m.filterInput) > 0 {
-					m.filterInput = m.filterInput[:len(m.filterInput)-1]
+				if runes := []rune(m.filterInput); len(runes) > 0 {
+					m.filterInput = string(runes[:len(runes)-1])
 					m.filter = m.filterInput
-					m.loadEntries()
+					if err := m.loadEntries(); err != nil {
+						m.setError("Cannot update filter", err)
+					}
 				}
+				return m, nil
+			case tea.KeySpace:
+				m.appendFilterText(" ")
 				return m, nil
 			default:
 				if msg.Type == tea.KeyRunes {
-					m.filterInput += string(msg.Runes)
-					m.filter = m.filterInput
-					m.loadEntries()
+					m.appendFilterText(string(msg.Runes))
 				}
 				return m, nil
 			}
@@ -436,32 +620,26 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 		switch msg.String() {
 		case "j", "down":
 			if m.selectedIndex < len(m.entries)-1 {
-				m.selectedIndex++
-				m.updateViewport()
-				// Update preview if enabled
-				if m.previewEnabled && m.selectedIndex < len(m.entries) {
-					m.loadPreview(m.entries[m.selectedIndex])
-				}
+				m.selectEntry(m.selectedIndex + 1)
 			}
 
 		case "k", "up":
 			if m.selectedIndex > 0 {
-				m.selectedIndex--
-				m.updateViewport()
-				// Update preview if enabled
-				if m.previewEnabled && m.selectedIndex < len(m.entries) {
-					m.loadPreview(m.entries[m.selectedIndex])
-				}
+				m.selectEntry(m.selectedIndex - 1)
 			}
+
+		case "pgup":
+			m.selectEntry(m.selectedIndex - max(m.viewport.Height, 1))
+
+		case "pgdown":
+			m.selectEntry(m.selectedIndex + max(m.viewport.Height, 1))
 
 		case "l", "enter", "right":
 			if len(m.entries) > 0 && m.selectedIndex < len(m.entries) {
 				entry := m.entries[m.selectedIndex]
 				if entry.IsDir {
 					if err := m.SetPath(entry.Path); err != nil {
-						// Show error message instead of silently failing
-						m.errorMsg = fmt.Sprintf("Cannot access: %s", err.Error())
-						m.errorTimeout = 30 // Clear after ~3 seconds (10 ticks/sec)
+						m.setError("Cannot access", err)
 						return m, nil
 					}
 				} else {
@@ -481,8 +659,7 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 			// Go to parent directory - show error if navigation fails
 			if m.currentDir != "/" {
 				if err := m.SetPath(filepath.Dir(m.currentDir)); err != nil {
-					m.errorMsg = fmt.Sprintf("Cannot access parent: %s", err.Error())
-					m.errorTimeout = 30
+					m.setError("Cannot access parent", err)
 					return m, nil
 				}
 			}
@@ -497,23 +674,43 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 					} else {
 						m.selectedFiles[entry.Path] = true
 					}
+					m.updateLayout()
 					m.updateViewport()
 				}
 			}
 
 		case "/":
-			// Start filter
+			// Start filtering, preserving the current query for editing.
 			m.filterActive = true
-			m.filterInput = ""
+			m.filterInput = m.filter
+			m.updateLayout()
+			m.updateViewport()
 
 		case ".":
 			// Toggle hidden files
 			m.showHidden = !m.showHidden
-			m.loadEntries()
+			if err := m.loadEntries(); err != nil {
+				m.showHidden = !m.showHidden
+				m.setError("Cannot refresh folder", err)
+			}
+
+		case "r":
+			// Refresh both directory metadata and the selected preview in place.
+			// loadEntries preserves the selected path and syncSelection reloads
+			// the preview, so a transient read error can recover without closing.
+			if err := m.loadEntries(); err != nil {
+				m.setError("Cannot refresh folder", err)
+			}
 
 		case "p":
 			// Toggle preview panel
+			if !m.previewEnabled && !m.previewSupported() {
+				m.setError(fmt.Sprintf("Preview needs at least %d columns", minFileBrowserSplitWidth), nil)
+				return m, nil
+			}
 			m.previewEnabled = !m.previewEnabled
+			m.updateLayout()
+			m.updateViewport()
 			if m.previewEnabled && len(m.entries) > 0 && m.selectedIndex < len(m.entries) {
 				m.loadPreview(m.entries[m.selectedIndex])
 			}
@@ -530,30 +727,22 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 				m.previewViewport.ScrollUp(3)
 			}
 
-		case "g":
-			m.selectedIndex = 0
-			m.updateViewport()
-			if m.previewEnabled && len(m.entries) > 0 {
-				m.loadPreview(m.entries[0])
-			}
+		case "g", "home":
+			m.selectEntry(0)
 
-		case "G":
-			if len(m.entries) > 0 {
-				m.selectedIndex = len(m.entries) - 1
-				m.updateViewport()
-				if m.previewEnabled {
-					m.loadPreview(m.entries[m.selectedIndex])
-				}
-			}
+		case "G", "end":
+			m.selectEntry(len(m.entries) - 1)
 
 		case "~":
 			// Go to home directory
 			home, err := os.UserHomeDir()
-			if err == nil {
-				if err := m.SetPath(home); err != nil {
-					// Stay in current directory on error
-					return m, nil
-				}
+			if err != nil {
+				m.setError("Cannot find home folder", err)
+				return m, nil
+			}
+			if err := m.SetPath(home); err != nil {
+				m.setError("Cannot access home", err)
+				return m, nil
 			}
 
 		case "y":
@@ -563,6 +752,7 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 				for path := range m.selectedFiles {
 					files = append(files, path)
 				}
+				sort.Strings(files)
 				if m.onAction != nil {
 					m.onAction(FileBrowserActionSelect, "", files)
 				}
@@ -586,7 +776,9 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 			// Clear filter
 			m.filter = ""
 			m.filterInput = ""
-			m.loadEntries()
+			if err := m.loadEntries(); err != nil {
+				m.setError("Cannot clear filter", err)
+			}
 		}
 
 	case tea.MouseMsg:
@@ -598,6 +790,82 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *FileBrowserModel) appendFilterText(value string) {
+	value = sanitizeFileBrowserFilter(value)
+	if value == "" {
+		return
+	}
+	m.filterInput += value
+	m.filter = m.filterInput
+	if err := m.loadEntries(); err != nil {
+		m.setError("Cannot update filter", err)
+	}
+}
+
+func sanitizeFileBrowserFilter(value string) string {
+	value = ansi.Strip(value)
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
+}
+
+func renderFileBrowserFilterLine(filter string, active bool, width int) string {
+	filter = sanitizeFileBrowserFilter(filter)
+	if active {
+		filter += "▊"
+	}
+	prefix := "  Filter: "
+	if width <= lipgloss.Width(prefix) {
+		return truncateTailForWidth(prefix+filter, width)
+	}
+	return prefix + truncateTailForWidth(filter, width-lipgloss.Width(prefix))
+}
+
+func truncateTailForWidth(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(value) <= width {
+		return value
+	}
+	if width == 1 {
+		runes := []rune(value)
+		if len(runes) > 0 && lipgloss.Width(string(runes[len(runes)-1])) == 1 {
+			return string(runes[len(runes)-1])
+		}
+		return "…"
+	}
+
+	runes := []rune(value)
+	budget := width - 1
+	used := 0
+	start := len(runes)
+	for start > 0 {
+		cellWidth := lipgloss.Width(string(runes[start-1]))
+		if used+cellWidth > budget {
+			break
+		}
+		start--
+		used += cellWidth
+	}
+	return "…" + string(runes[start:])
+}
+
+func (m *FileBrowserModel) setError(context string, err error) {
+	m.errorMsg = safeKeyEntryText(context)
+	if err != nil {
+		m.errorMsg += ": " + safeKeyEntryText(err.Error())
+	}
+	m.updateLayout()
 }
 
 // View renders the file browser.
@@ -616,7 +884,9 @@ func (m FileBrowserModel) View() string {
 	// Current path
 	pathStyle := lipgloss.NewStyle().
 		Foreground(ColorAccent)
-	fmt.Fprintf(&builder, "  %s\n", pathStyle.Render(m.currentDir))
+	pathWidth := max(m.renderWidth()-4, 1)
+	displayDir := safeKeyEntryText(m.currentDir)
+	fmt.Fprintf(&builder, "  %s\n", pathStyle.Render(truncateForWidth(displayDir, pathWidth)))
 
 	// Selection count
 	if len(m.selectedFiles) > 0 {
@@ -629,11 +899,9 @@ func (m FileBrowserModel) View() string {
 	if m.filter != "" || m.filterActive {
 		filterStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning)
-		filterText := m.filter
-		if m.filterActive {
-			filterText += "▊"
-		}
-		builder.WriteString(filterStyle.Render(fmt.Sprintf("  Filter: %s\n", filterText)))
+		filterLine := renderFileBrowserFilterLine(m.filter, m.filterActive, m.renderWidth())
+		builder.WriteString(filterStyle.Render(filterLine))
+		builder.WriteString("\n")
 	}
 
 	// Error message (if any)
@@ -641,27 +909,21 @@ func (m FileBrowserModel) View() string {
 		errorStyle := lipgloss.NewStyle().
 			Foreground(ColorError).
 			Bold(true)
-		builder.WriteString(errorStyle.Render(fmt.Sprintf("  ⚠ %s\n", m.errorMsg)))
+		errorText := ansi.Truncate(safeKeyEntryText(m.errorMsg), max(m.renderWidth()-4, 1), "…")
+		builder.WriteString(errorStyle.Render(fmt.Sprintf("  ⚠ %s\n", errorText)))
 	}
 
 	builder.WriteString("\n")
 
-	// Empty state when no files found
-	if len(m.entries) == 0 {
-		emptyStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-		builder.WriteString(emptyStyle.Render("  No files found"))
-		builder.WriteString("\n")
-	}
-
 	// Content area - split view or single view
-	if m.previewEnabled {
+	if m.previewEnabled && (m.width == 0 || m.width >= minFileBrowserSplitWidth) {
 		builder.WriteString(m.renderSplitView())
 	} else {
 		borderStyle := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorBorder).
 			Padding(0, 1)
-		builder.WriteString(borderStyle.Render(m.viewport.View()))
+		builder.WriteString(borderStyle.Width(m.viewport.Width).Render(m.viewport.View()))
 	}
 	builder.WriteString("\n\n")
 
@@ -673,31 +935,23 @@ func (m FileBrowserModel) View() string {
 
 // renderSplitView renders the file browser with a preview panel.
 func (m FileBrowserModel) renderSplitView() string {
-	// Calculate widths: 40% list, 60% preview
-	listWidth := m.width * 40 / 100
-	if listWidth < 30 {
-		listWidth = 30
-	}
-	previewWidth := m.width - listWidth - 5 // Account for separator and borders
-	if previewWidth < 30 {
-		previewWidth = 30
-	}
-
 	borderStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorBorder).
 		Padding(0, 1)
 
 	// Left panel: file list
-	leftPanel := borderStyle.Width(listWidth).Render(m.viewport.View())
+	leftPanel := borderStyle.Width(m.listWidth).Render(m.viewport.View())
 
 	// Right panel: preview
 	var previewContent string
 	if m.previewLoadError != "" {
-		errorStyle := lipgloss.NewStyle().
-			Foreground(ColorDim).
-			Italic(true)
-		previewContent = errorStyle.Render(m.previewLoadError)
+		errorStyle := lipgloss.NewStyle().Foreground(ColorWarning).Italic(true)
+		recoveryStyle := lipgloss.NewStyle().Foreground(ColorAccent)
+		previewContent = errorStyle.Render(safeKeyEntryText(m.previewLoadError))
+		if recovery := safeKeyEntryText(m.previewRecovery); recovery != "" {
+			previewContent += "\n" + recoveryStyle.Render(recovery)
+		}
 	} else if m.previewContent != "" {
 		previewContent = m.previewViewport.View()
 	} else {
@@ -705,6 +959,9 @@ func (m FileBrowserModel) renderSplitView() string {
 			Foreground(ColorDim).
 			Italic(true)
 		previewContent = dimStyle.Render("Select a file to preview")
+		if m.selectedIndex >= 0 && m.selectedIndex < len(m.entries) && m.entries[m.selectedIndex].IsDir {
+			previewContent = dimStyle.Render("Folder selected · Enter to open")
+		}
 	}
 
 	// Preview header
@@ -713,11 +970,11 @@ func (m FileBrowserModel) renderSplitView() string {
 		headerStyle := lipgloss.NewStyle().
 			Foreground(ColorHighlight).
 			Bold(true)
-		fileName := filepath.Base(m.previewFilePath)
-		previewHeader = headerStyle.Render(fileName) + "\n" + strings.Repeat("─", previewWidth-2) + "\n"
+		fileName := filepath.Base(safeKeyEntryText(m.previewFilePath))
+		previewHeader = headerStyle.Render(truncateForWidth(fileName, m.previewWidth)) + "\n" + strings.Repeat("─", m.previewWidth) + "\n"
 	}
 
-	rightPanel := borderStyle.Width(previewWidth).Render(previewHeader + previewContent)
+	rightPanel := borderStyle.Width(m.previewWidth).Render(previewHeader + previewContent)
 
 	// Join horizontally
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel)
@@ -730,22 +987,66 @@ func (m *FileBrowserModel) renderActions(builder *strings.Builder) {
 		Foreground(ColorSecondary).
 		Bold(true)
 
-	hints := []string{
-		keyStyle.Render("Enter") + " Open",
-		keyStyle.Render("Space") + " Select",
-		keyStyle.Render("p") + " Preview",
-		keyStyle.Render("/") + " Filter",
-		keyStyle.Render(".") + " Hidden",
-		keyStyle.Render("q") + " Close",
+	if m.filterActive {
+		hints := []string{
+			keyStyle.Render("Enter/Esc") + " Done",
+			keyStyle.Render("Type") + " Filter",
+			keyStyle.Render("Backspace") + " Delete",
+		}
+		builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(hints, "  │  ")), m.renderWidth(), "…"))
+		return
 	}
 
-	builder.WriteString(hintStyle.Render(strings.Join(hints, "  │  ")))
-	builder.WriteString("\n")
-	if m.previewEnabled {
-		builder.WriteString(hintStyle.Render("h/l: Navigate  │  j/k: Move  │  Ctrl+j/k: Scroll preview  │  y: Confirm"))
-	} else {
-		builder.WriteString(hintStyle.Render("h/l: Navigate  │  j/k: Move  │  ~: Home  │  y: Confirm selection"))
+	// Escape is the guaranteed recovery path from this full-screen overlay.
+	// Keep it first: the line is truncated on narrow terminals, so trailing
+	// actions may disappear but closing the panel must remain discoverable.
+	hints := []string{keyStyle.Render("Esc/q") + " Close"}
+	if m.selectedIndex >= 0 && m.selectedIndex < len(m.entries) {
+		entryAction := "Open folder"
+		if !m.entries[m.selectedIndex].IsDir {
+			entryAction = "Add to draft"
+		}
+		hints = append(hints, keyStyle.Render("Enter")+" "+entryAction)
 	}
+	hints = append(hints, keyStyle.Render("/")+" Filter")
+	if m.previewSupported() || m.previewEnabled {
+		previewAction := "Preview"
+		if m.previewEnabled {
+			previewAction = "Hide preview"
+		}
+		hints = append(hints, keyStyle.Render("p")+" "+previewAction)
+	}
+	if m.selectedIndex >= 0 && m.selectedIndex < len(m.entries) && m.entries[m.selectedIndex].Name != ".." {
+		hints = append(hints, keyStyle.Render("Space")+" Select")
+	}
+	if m.filter != "" {
+		hints = append(hints, keyStyle.Render("c")+" Clear")
+	}
+	hiddenAction := "Show hidden"
+	if m.showHidden {
+		hiddenAction = "Hide hidden"
+	}
+	hints = append(hints,
+		keyStyle.Render(".")+" "+hiddenAction,
+	)
+
+	builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(hints, "  ")), m.renderWidth(), "…"))
+	builder.WriteString("\n")
+	secondaryHints := make([]string, 0, 7)
+	if len(m.selectedFiles) > 0 {
+		secondaryHints = append(secondaryHints, "y: Add selection to draft")
+	}
+	secondaryHints = append(secondaryHints, "r Refresh")
+	if !m.previewSupported() {
+		secondaryHints = append(secondaryHints, fmt.Sprintf("Preview needs %d columns", minFileBrowserSplitWidth))
+	}
+	secondaryHints = append(secondaryHints, "↑/↓ Move", "PgUp/PgDn Page", "Home/End Jump", "h/l Folder")
+	if m.previewEnabled {
+		secondaryHints = append(secondaryHints, "Ctrl+j/k Scroll preview")
+	} else {
+		secondaryHints = append(secondaryHints, "~ Home folder")
+	}
+	builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(secondaryHints, "  │  ")), m.renderWidth(), "…"))
 }
 
 // GetCurrentPath returns the current directory path.
@@ -759,5 +1060,6 @@ func (m FileBrowserModel) GetSelectedFiles() []string {
 	for path := range m.selectedFiles {
 		files = append(files, path)
 	}
+	sort.Strings(files)
 	return files
 }

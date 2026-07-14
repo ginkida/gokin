@@ -25,9 +25,11 @@ func renderInlineDiffCard(width int, msg DiffPreviewRequestMsg) string {
 		return ""
 	}
 
-	adds, dels := countDiffLines(msg.OldContent, msg.NewContent)
+	displayOld := visibleTerminalControlText(msg.OldContent)
+	displayNew := visibleTerminalControlText(msg.NewContent)
+	adds, dels := countDiffLines(displayOld, displayNew)
 
-	toolLabel := strings.TrimSpace(msg.ToolName)
+	toolLabel := safeKeyEntryText(msg.ToolName)
 	if toolLabel == "" {
 		toolLabel = "edit"
 	}
@@ -40,9 +42,10 @@ func renderInlineDiffCard(width int, msg DiffPreviewRequestMsg) string {
 	toolStyle := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
 	pathStyle := lipgloss.NewStyle().Foreground(ColorText)
 
-	prettyPathStr := prettyPath(msg.FilePath)
+	displayPath := safeKeyEntryText(msg.FilePath)
+	prettyPathStr := prettyPath(displayPath)
 	if prettyPathStr == "" {
-		prettyPathStr = msg.FilePath
+		prettyPathStr = displayPath
 	}
 	// Card chrome (rounded border + 1-cell hpadding) takes 4 cols total.
 	innerWidth := width - 4
@@ -61,7 +64,7 @@ func renderInlineDiffCard(width int, msg DiffPreviewRequestMsg) string {
 	// recognise the change without opening the full modal. Truncates per
 	// line; falls back to "no preview" (empty slice) when the diff is
 	// effectively whitespace-only after normalisation.
-	preview := extractDiffPreviewLines(msg.OldContent, msg.NewContent, 3, innerWidth-2)
+	preview := extractDiffPreviewLines(displayOld, displayNew, 3, innerWidth-2)
 
 	// Action hint row: subtle pills for ↵ / d / esc.
 	hint := renderDiffActionHints()

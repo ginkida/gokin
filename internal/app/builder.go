@@ -1676,6 +1676,7 @@ func (b *Builder) wireMCPAdminTool() {
 func (b *Builder) initUI() error {
 	b.tuiModel = ui.NewModel()
 	b.tuiModel.SetShowTokens(b.cfg.UI.ShowTokenUsage)
+	b.tuiModel.SetReducedMotion(b.cfg.UI.ReducedMotion)
 
 	b.tuiModel.SetBellEnabled(b.cfg.UI.Bell)
 

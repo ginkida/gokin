@@ -125,3 +125,25 @@ func TestRenderSuggestionsOmitsCategoryBadge(t *testing.T) {
 		t.Fatalf("category badge should be omitted from slash suggestions: %q", got)
 	}
 }
+
+func TestCopyAutocompleteMatchesExecutableCommand(t *testing.T) {
+	var copyCommand *CommandInfo
+	commands := DefaultCommands()
+	for i := range commands {
+		command := commands[i]
+		if command.Name == "copy" {
+			copyCommand = &command
+			break
+		}
+	}
+	if copyCommand == nil {
+		t.Fatal("/copy is missing from autocomplete")
+	}
+	if copyCommand.Description != "Copy text, the last response, or the conversation" ||
+		copyCommand.Usage != "/copy [--last|--all|--ascii] [<text>]" {
+		t.Fatalf("stale /copy metadata: %+v", *copyCommand)
+	}
+	if len(copyCommand.Args) != 2 || !reflect.DeepEqual(copyCommand.Args[0].Options, []string{"--last", "--all", "--ascii"}) {
+		t.Fatalf("stale /copy argument hints: %+v", copyCommand.Args)
+	}
+}

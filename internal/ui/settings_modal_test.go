@@ -67,6 +67,44 @@ func TestSettingsModal_MOpensModelSelector(t *testing.T) {
 	if m.state != StateModelSelector {
 		t.Errorf("'m' in settings should open the model selector, got %v", m.state)
 	}
+
+	m.handleModelSelectorKeys(tea.KeyMsg{Type: tea.KeyEscape})
+	if m.state != StateSettings {
+		t.Errorf("Esc in nested model selector should return to settings, got %v", m.state)
+	}
+}
+
+func TestSettingsModelSelectionReturnsAndRefreshesHeader(t *testing.T) {
+	m := NewModel()
+	m.SetAvailableModels([]ModelInfo{
+		{ID: "fast", Name: "Fast"},
+		{ID: "reasoning", Name: "Reasoning"},
+	})
+	m.SetCurrentModel("fast")
+	m.SetModelSelectCallback(func(string) {})
+	m.openSettings(OpenSettingsMsg{Items: []SettingItem{{Key: "permissions", On: true}}, Model: "fast", Provider: "glm"})
+
+	m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m.handleModelSelectorKeys(tea.KeyMsg{Type: tea.KeyDown})
+	m.handleModelSelectorKeys(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.state != StateSettings {
+		t.Fatalf("selection should return to settings, got %v", m.state)
+	}
+	if m.currentModel != "fast" || m.settingsModel != "fast" || m.modelSwitchPending != "reasoning" {
+		t.Fatalf("unconfirmed selection changed model: current=%q settings=%q pending=%q", m.currentModel, m.settingsModel, m.modelSwitchPending)
+	}
+	if got := renderToPlain(m.renderSettings()); !strings.Contains(got, "Model: fast") || !strings.Contains(got, "Switching model to Reasoning") {
+		t.Fatalf("settings lacks honest pending state:\n%s", got)
+	}
+
+	_ = m.handleMessageTypes(ModelSelectResultMsg{RequestedID: "reasoning", ModelID: "reasoning", Success: true})
+	if m.currentModel != "reasoning" || m.settingsModel != "reasoning" || m.modelSwitchPending != "" {
+		t.Fatalf("confirmed model snapshots diverged: current=%q settings=%q pending=%q", m.currentModel, m.settingsModel, m.modelSwitchPending)
+	}
+	if got := renderToPlain(m.renderSettings()); !strings.Contains(got, "Model: reasoning") || !strings.Contains(got, "Switched to reasoning") {
+		t.Fatalf("settings header remained stale after confirmation:\n%s", got)
+	}
 }
 
 // sampleSettingItems builds a multi-category list for render tests.

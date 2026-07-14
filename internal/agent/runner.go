@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -137,7 +138,7 @@ type Runner struct {
 
 	// Workspace isolation for supported sub-agents
 	workspaceIsolationEnabled bool
-	workspaceReviewHandler    func(context.Context, []WorkspaceChangePreview) (bool, error)
+	workspaceReviewHandler    func(context.Context, []WorkspaceChangePreview) ([]string, error)
 
 	// Rate limiting callback (adaptive)
 	onRateLimit func(rl *client.RateLimitMetadata)
@@ -634,11 +635,30 @@ func (r *Runner) SetDoneGateConfig(cfg config.DoneGateConfig) {
 }
 
 // SetWorkspaceReviewHandler sets the callback used to review isolated workspace
-// changes before apply-back into the primary workspace.
-func (r *Runner) SetWorkspaceReviewHandler(handler func(context.Context, []WorkspaceChangePreview) (bool, error)) {
+// changes before apply-back into the primary workspace. The returned paths are
+// the reviewed subset to apply; an empty subset rejects the apply-back.
+func (r *Runner) SetWorkspaceReviewHandler(handler func(context.Context, []WorkspaceChangePreview) ([]string, error)) {
 	r.mu.Lock()
 	r.workspaceReviewHandler = handler
 	r.mu.Unlock()
+}
+
+func validateReviewedWorkspaceFiles(previews []WorkspaceChangePreview, selected []string) ([]string, error) {
+	selected, err := normalizeWorkspaceApplyPaths(selected)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]struct{}, len(previews))
+	for _, preview := range previews {
+		path := filepath.ToSlash(filepath.Clean(preview.FilePath))
+		allowed[path] = struct{}{}
+	}
+	for _, path := range selected {
+		if _, ok := allowed[path]; !ok {
+			return nil, fmt.Errorf("file %q was not present in the review", path)
+		}
+	}
+	return selected, nil
 }
 
 // SetOnSubAgentActivity sets the callback for sub-agent activity reporting.
@@ -1107,6 +1127,8 @@ func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error
 
 	if result.IsSuccess() {
 		if agent.isolatedWorkspace.ApplyBackOnSuccess {
+			var reviewedFiles []string
+			restrictToReviewedFiles := false
 			r.mu.RLock()
 			reviewHandler := r.workspaceReviewHandler
 			r.mu.RUnlock()
@@ -1123,7 +1145,7 @@ func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error
 				}
 				if len(previews) > 0 {
 					result.Metadata["isolated_workspace_review_required"] = true
-					approved, err := reviewHandler(context.Background(), previews)
+					approvedFiles, err := reviewHandler(context.Background(), previews)
 					if err != nil {
 						reviewErr := fmt.Errorf("failed to review isolated workspace changes: %w", err)
 						result.Status = AgentStatusFailed
@@ -1132,7 +1154,16 @@ func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error
 						result.Metadata["isolated_workspace_dir"] = agent.workDir
 						return reviewErr
 					}
-					if !approved {
+					reviewedFiles, err = validateReviewedWorkspaceFiles(previews, approvedFiles)
+					if err != nil {
+						reviewErr := fmt.Errorf("invalid isolated workspace review: %w", err)
+						result.Status = AgentStatusFailed
+						result.Error = reviewErr.Error()
+						result.Metadata["isolated_workspace_review_error"] = reviewErr.Error()
+						result.Metadata["isolated_workspace_dir"] = agent.workDir
+						return reviewErr
+					}
+					if len(reviewedFiles) == 0 {
 						reviewErr := fmt.Errorf("isolated workspace changes rejected by user")
 						result.Status = AgentStatusFailed
 						result.Error = reviewErr.Error()
@@ -1140,12 +1171,21 @@ func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error
 						result.Metadata["isolated_workspace_dir"] = agent.workDir
 						return reviewErr
 					}
+					restrictToReviewedFiles = true
 					result.Metadata["isolated_workspace_reviewed"] = true
 					result.Metadata["isolated_workspace_review_files"] = len(previews)
+					result.Metadata["isolated_workspace_review_approved_files"] = len(reviewedFiles)
+					result.Metadata["isolated_workspace_review_rejected_files"] = len(previews) - len(reviewedFiles)
 				}
 			}
 
-			applyResult, err := agent.isolatedWorkspace.ApplyBack()
+			var applyResult *isolatedWorkspaceApplyBackResult
+			var err error
+			if restrictToReviewedFiles {
+				applyResult, err = agent.isolatedWorkspace.ApplyBackFiles(reviewedFiles)
+			} else {
+				applyResult, err = agent.isolatedWorkspace.ApplyBack()
+			}
 			if err != nil {
 				applyErr := fmt.Errorf("failed to apply isolated workspace changes: %w", err)
 				result.Status = AgentStatusFailed

@@ -34,6 +34,7 @@ type outputState struct {
 	ready          bool
 	frozen         bool // When true, viewport won't auto-scroll to bottom
 	thinkingActive bool // True while streaming thinking content
+	reducedMotion  bool // Jump auto-follow directly instead of smooth scrolling
 
 	// pendingCodeStartLine is the content line where the currently-streaming
 	// code block opened — the registry entry is recorded at BlockCodeEnd but
@@ -509,6 +510,7 @@ func (m *OutputModel) doViewportUpdate() {
 	m.viewport.SetContent(wrapped)
 	m.state.mu.Lock()
 	frozen := m.state.frozen
+	reducedMotion := m.state.reducedMotion
 
 	if !frozen {
 		// Set smooth scroll target to bottom instead of jumping instantly.
@@ -519,8 +521,12 @@ func (m *OutputModel) doViewportUpdate() {
 			target = 0
 		}
 		m.state.scrollTarget = target
-		m.state.scrolling = true
+		m.state.scrolling = !reducedMotion
 		m.state.mu.Unlock()
+		if reducedMotion {
+			m.viewport.GotoBottom()
+			return
+		}
 
 		// If the gap is small (≤3 lines), jump directly to avoid visible lag
 		// on character-by-character streaming
@@ -671,6 +677,21 @@ func (m OutputModel) IsEmpty() bool {
 // SetMouseEnabled enables or disables mouse wheel scrolling in the viewport.
 func (m *OutputModel) SetMouseEnabled(enabled bool) {
 	m.viewport.MouseWheelEnabled = enabled
+}
+
+// SetReducedMotion switches auto-follow between eased scrolling and an
+// immediate jump. Enabling it also finishes any animation already in flight.
+func (m *OutputModel) SetReducedMotion(enabled bool) {
+	m.state.mu.Lock()
+	m.state.reducedMotion = enabled
+	frozen := m.state.frozen
+	if enabled {
+		m.state.scrolling = false
+	}
+	m.state.mu.Unlock()
+	if enabled && !frozen {
+		m.viewport.GotoBottom()
+	}
 }
 
 // ScrollPercent returns the scroll position as a percentage (0-100).

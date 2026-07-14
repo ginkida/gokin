@@ -16,7 +16,7 @@ func TestPermissionPromptNumberedOptions(t *testing.T) {
 		permRequest: &PermissionRequestMsg{ToolName: "bash", RiskLevel: "high", Args: map[string]any{"command": "ls"}},
 	}
 	got := stripAnsi(m.renderPermissionPrompt())
-	for _, want := range []string{"> 1. Allow", "2. Always allow", "3. Deny"} {
+	for _, want := range []string{"> 1. Allow once", "2. Allow for session", "3. Deny"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("permission prompt missing %q:\n%s", want, got)
 		}

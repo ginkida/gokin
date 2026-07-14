@@ -57,12 +57,35 @@ type ErrorDisplayModel struct {
 
 // NewErrorDisplayModel creates a new error display model.
 func NewErrorDisplayModel(err *EnhancedError) ErrorDisplayModel {
-	return ErrorDisplayModel{error: err, width: 80}
+	if err == nil {
+		return ErrorDisplayModel{width: 80}
+	}
+	snapshot := *err
+	snapshot.Context = strings.TrimSpace(snapshot.Context)
+	snapshot.Documentation = strings.TrimSpace(snapshot.Documentation)
+	snapshot.Suggestions = compactNonEmptyStrings(snapshot.Suggestions)
+	snapshot.RelatedFiles = compactNonEmptyStrings(snapshot.RelatedFiles)
+	if err.RetryInfo != nil {
+		retry := *err.RetryInfo
+		retry.RetryReason = strings.TrimSpace(retry.RetryReason)
+		snapshot.RetryInfo = &retry
+	}
+	return ErrorDisplayModel{error: &snapshot, width: 80}
+}
+
+func compactNonEmptyStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 // SetWidth sets the display width.
 func (m *ErrorDisplayModel) SetWidth(width int) {
-	m.width = width
+	m.width = max(width, 1)
 }
 
 // SetExpanded sets whether to show full details.
@@ -84,51 +107,47 @@ func (m ErrorDisplayModel) View() string {
 	hintStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	var sb strings.Builder
-
-	// Main error line: ✗ Category: message
-	categoryTitle := m.getCategoryTitle()
-	sb.WriteString(errorStyle.Render(MessageIcons["error"]+" "+categoryTitle+": ") + hintStyle.Render(m.error.OriginalError.Error()))
-	sb.WriteString("\n")
-
-	// First suggestion as indented hint
+	var rows []string
+	width := max(m.width, 1)
+	rows = append(rows, renderErrorRow(MessageIcons["error"]+" "+m.getCategoryTitle()+": ", m.errorMessage(), errorStyle, hintStyle, width))
+	if context := strings.TrimSpace(m.error.Context); context != "" {
+		rows = append(rows, renderErrorRow("  ↳ While: ", context, markerStyle, hintStyle, width))
+	}
 	if len(m.error.Suggestions) > 0 {
-		sb.WriteString(markerStyle.Render("  ↳ ") + hintStyle.Render(m.error.Suggestions[0]))
-		sb.WriteString("\n")
+		rows = append(rows, renderErrorRow("  ↳ ", m.error.Suggestions[0], markerStyle, hintStyle, width))
 	}
-
-	// Retry info (compact, inline)
-	if m.error.RetryInfo != nil && m.error.RetryInfo.CanRetry {
-		ri := m.error.RetryInfo
-		retryStr := fmt.Sprintf("  ↳ Retry %d/%d", ri.AttemptNumber, ri.MaxAttempts)
+	if ri := m.error.RetryInfo; ri != nil && ri.CanRetry {
+		attempt := max(ri.AttemptNumber, 0)
+		maxAttempts := max(ri.MaxAttempts, attempt)
+		retry := "Retry available"
+		if maxAttempts > 0 {
+			retry = fmt.Sprintf("Retry %d/%d", attempt, maxAttempts)
+		}
+		if ri.RetryReason != "" {
+			retry += " · " + ri.RetryReason
+		}
 		if ri.NextRetryIn > 0 {
-			retryStr += fmt.Sprintf(", next in %s", ri.NextRetryIn.Round(time.Second))
-		}
-		sb.WriteString(hintStyle.Render(retryStr))
-		sb.WriteString("\n")
-	}
-
-	// Expanded view: more suggestions, related files, docs
-	if m.expanded {
-		for i := 1; i < len(m.error.Suggestions); i++ {
-			sb.WriteString(markerStyle.Render("  ↳ ") + hintStyle.Render(m.error.Suggestions[i]))
-			sb.WriteString("\n")
-		}
-
-		if len(m.error.RelatedFiles) > 0 {
-			for _, file := range m.error.RelatedFiles {
-				sb.WriteString(hintStyle.Render("    " + file))
-				sb.WriteString("\n")
+			next := ri.NextRetryIn.Round(time.Second)
+			if next == 0 {
+				retry += " · next in <1s"
+			} else {
+				retry += fmt.Sprintf(" · next in %s", next)
 			}
 		}
-
+		rows = append(rows, renderErrorRow("  ↳ ", retry, markerStyle, hintStyle, width))
+	}
+	if m.expanded {
+		for i := 1; i < len(m.error.Suggestions); i++ {
+			rows = append(rows, renderErrorRow("  ↳ ", m.error.Suggestions[i], markerStyle, hintStyle, width))
+		}
+		for _, file := range m.error.RelatedFiles {
+			rows = append(rows, renderErrorRow("    ", file, markerStyle, hintStyle, width))
+		}
 		if m.error.Documentation != "" {
-			sb.WriteString(hintStyle.Render("  See: " + m.error.Documentation))
-			sb.WriteString("\n")
+			rows = append(rows, renderErrorRow("  See: ", m.error.Documentation, markerStyle, hintStyle, width))
 		}
 	}
-
-	return sb.String()
+	return strings.Join(rows, "\n") + "\n"
 }
 
 // ViewCompact renders a compact single-line error display.
@@ -140,22 +159,33 @@ func (m ErrorDisplayModel) ViewCompact() string {
 	errorStyle := lipgloss.NewStyle().Foreground(ColorRose)
 	msgStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	errMsg := m.error.OriginalError.Error()
-	if runes := []rune(errMsg); len(runes) > 60 {
-		errMsg = string(runes[:57]) + "..."
-	}
-
-	result := errorStyle.Render("✗ ") + msgStyle.Render(errMsg)
-
+	message := m.errorMessage()
 	if len(m.error.Suggestions) > 0 {
-		hint := m.error.Suggestions[0]
-		if runes := []rune(hint); len(runes) > 40 {
-			hint = string(runes[:37]) + "..."
-		}
-		result += " " + msgStyle.Render("→ "+hint)
+		message += " → " + strings.TrimSpace(m.error.Suggestions[0])
 	}
+	return renderErrorRow("✗ ", message, errorStyle, msgStyle, max(m.width, 1))
+}
 
-	return result
+func (m ErrorDisplayModel) errorMessage() string {
+	if m.error == nil || m.error.OriginalError == nil {
+		return "Unknown error"
+	}
+	message := strings.TrimSpace(m.error.OriginalError.Error())
+	if message == "" {
+		return "Unknown error"
+	}
+	return strings.Join(strings.Fields(message), " ")
+}
+
+func renderErrorRow(prefix, text string, prefixStyle, textStyle lipgloss.Style, width int) string {
+	width = max(width, 1)
+	prefix = truncateForWidth(prefix, width)
+	prefixWidth := lipgloss.Width(prefix)
+	if prefixWidth >= width {
+		return prefixStyle.Render(prefix)
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	return prefixStyle.Render(prefix) + textStyle.Render(truncateForWidth(text, width-prefixWidth))
 }
 
 func (m ErrorDisplayModel) getCategoryTitle() string {

@@ -167,6 +167,7 @@ func TestCtrlFUnfreezesAtTrueBottom(t *testing.T) {
 // freeze so the new response is followed from the bottom.
 func TestSubmitResetsFrozen(t *testing.T) {
 	m := NewModel()
+	m.SetCallbacks(func(string) {}, nil)
 	m.output.SetSize(80, 10)
 	for i := range 40 {
 		m.output.AppendLine(fmt.Sprintf("line %02d", i))

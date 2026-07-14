@@ -36,6 +36,9 @@ func TestPromptPaletteWidth_NarrowTerminalFallsBackToFlat(t *testing.T) {
 			if gotWidth < tc.wantWidthMin {
 				t.Errorf("width = %d, want at least %d (termWidth=%d)", gotWidth, tc.wantWidthMin, tc.termWidth)
 			}
+			if tc.termWidth == minBorderedPromptWidth && gotWidth != tc.termWidth-6 {
+				t.Errorf("threshold width = %d, want exact inner width %d; border must fit terminal", gotWidth, tc.termWidth-6)
+			}
 		})
 	}
 }

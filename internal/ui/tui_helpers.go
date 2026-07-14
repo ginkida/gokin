@@ -8,10 +8,14 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
 )
 
 // ansiCSIPattern matches Control Sequence Introducer escapes — SGR (colour
@@ -19,6 +23,124 @@ import (
 // to recognise lines that carry only formatting escapes and would render
 // as blank rows in the terminal.
 var ansiCSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// safeTerminalDisplayText removes terminal control sequences from externally
+// supplied multi-line content while preserving ordinary newlines and tabs.
+// Metadata that must stay on one visual row should use safeKeyEntryText.
+func safeTerminalDisplayText(text string) string {
+	text = ansi.Strip(text)
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\t':
+			return r
+		case '\r':
+			return -1
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+// visibleTerminalControlText makes terminal control bytes reviewable without
+// executing them. Unlike safeTerminalDisplayText it deliberately preserves
+// their meaning as Unicode control pictures, which is essential on approval
+// surfaces where silently hiding proposed bytes would be misleading.
+func visibleTerminalControlText(text string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\t':
+			return r
+		case 0x7f:
+			return '␡'
+		}
+		if r >= 0 && r < 0x20 {
+			return rune(0x2400) + r
+		}
+		if unicode.IsControl(r) {
+			return '�'
+		}
+		return r
+	}, text)
+}
+
+// truncateLeftForWidth preserves the identifying tail of paths and other
+// suffix-significant labels while fitting an exact terminal-cell budget.
+func truncateLeftForWidth(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	current := lipgloss.Width(text)
+	if current <= width {
+		return text
+	}
+	if width == 1 {
+		return "…"
+	}
+	// Build the tail using the same width implementation that renders it.
+	// This avoids x/ansi vs Lip Gloss disagreements for mixed emoji/Cyrillic.
+	graphemes := uniseg.NewGraphemes(ansi.Strip(text))
+	var clusters []string
+	for graphemes.Next() {
+		clusters = append(clusters, graphemes.Str())
+	}
+	budget := width - lipgloss.Width("…")
+	used := 0
+	start := len(clusters)
+	for i := len(clusters) - 1; i >= 0; i-- {
+		clusterWidth := lipgloss.Width(clusters[i])
+		if used+clusterWidth > budget {
+			break
+		}
+		used += clusterWidth
+		start = i
+	}
+	return "…" + strings.Join(clusters[start:], "")
+}
+
+// truncateMiddleForWidth keeps both the distinguishing prefix and the
+// extension/suffix of a single label. It measures Unicode grapheme clusters
+// with Lip Gloss so emoji cannot make a supposedly one-row filename wrap.
+func truncateMiddleForWidth(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	text = ansi.Strip(text)
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	if width == 1 {
+		return "…"
+	}
+	graphemes := uniseg.NewGraphemes(text)
+	var clusters []string
+	for graphemes.Next() {
+		clusters = append(clusters, graphemes.Str())
+	}
+	budget := width - lipgloss.Width("…")
+	leftBudget := budget / 2
+	leftEnd, leftUsed := 0, 0
+	for leftEnd < len(clusters) {
+		clusterWidth := lipgloss.Width(clusters[leftEnd])
+		if leftUsed+clusterWidth > leftBudget {
+			break
+		}
+		leftUsed += clusterWidth
+		leftEnd++
+	}
+	rightBudget := budget - leftUsed
+	rightStart, rightUsed := len(clusters), 0
+	for rightStart > leftEnd {
+		clusterWidth := lipgloss.Width(clusters[rightStart-1])
+		if rightUsed+clusterWidth > rightBudget {
+			break
+		}
+		rightUsed += clusterWidth
+		rightStart--
+	}
+	return strings.Join(clusters[:leftEnd], "") + "…" + strings.Join(clusters[rightStart:], "")
+}
 
 // isVisuallyBlank reports whether a line renders as empty after the
 // terminal strips ANSI escapes. Lines like "\x1b[0m" — emitted by syntax
@@ -55,6 +177,48 @@ func getTextSelectionHint() string {
 func copyViaOSC52(text string) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))
 	fmt.Fprintf(os.Stderr, "\033]52;c;%s\a", encoded)
+}
+
+type clipboardCopyOutcome struct {
+	SystemError error
+	OSC52Sent   bool
+}
+
+// copyTextToClipboard uses both supported transports and reports what can
+// actually be confirmed. OSC52 is fire-and-forget (terminals do not ack it),
+// while the system clipboard returns an error. UI feedback must distinguish
+// "copied" from "fallback request sent" instead of claiming success blindly.
+func copyTextToClipboard(text string) clipboardCopyOutcome {
+	return copyTextToClipboardUsing(text, clipboard.WriteAll, copyViaOSC52)
+}
+
+func copyTextToClipboardUsing(text string, writeSystem func(string) error, sendOSC52 func(string)) clipboardCopyOutcome {
+	outcome := clipboardCopyOutcome{}
+	if sendOSC52 != nil {
+		sendOSC52(text)
+		outcome.OSC52Sent = true
+	}
+	if writeSystem != nil {
+		outcome.SystemError = writeSystem(text)
+	} else {
+		outcome.SystemError = fmt.Errorf("system clipboard unavailable")
+	}
+	return outcome
+}
+
+func showClipboardCopyFeedback(manager *ToastManager, successMessage string, outcome clipboardCopyOutcome) {
+	if manager == nil {
+		return
+	}
+	if outcome.SystemError == nil {
+		manager.ShowSuccess(successMessage)
+		return
+	}
+	if outcome.OSC52Sent {
+		manager.ShowWarning("Copy request sent via terminal · system clipboard unavailable")
+		return
+	}
+	manager.ShowError("Could not copy · system clipboard unavailable")
 }
 
 // getMacOSBattery removed as battery monitoring is disabled.
@@ -193,72 +357,173 @@ func (m Model) renderTodos() string {
 	if len(m.todoItems) == 0 {
 		return ""
 	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	if width < 4 {
+		return truncateForWidth("Tasks", width)
+	}
+	horizontalPadding := 1
+	if width < 6 {
+		horizontalPadding = 0
+	}
+	contentWidth := max(width-2-horizontalPadding*2, 1)
 
-	// Style for the todo box - Enhanced
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorGradient2).
-		Padding(0, 1).
-		MarginBottom(1)
+		Padding(0, horizontalPadding)
 
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorAccent)
 
-	itemStyle := lipgloss.NewStyle().
-		Foreground(ColorText).
-		PaddingLeft(1)
-
-	var builder strings.Builder
-	builder.WriteString(titleStyle.Render(" Tasks"))
-	builder.WriteString("\n")
-
-	spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	idx := int(time.Now().UnixNano()/100000000) % len(spinner)
-	spinChar := spinner[idx]
-
-	// Long lists collapse completed items into one summary row: a 15-step
-	// plan otherwise renders a 17-line box where most rows are ✓ history.
-	// Short lists (≤ todosPanelFullRender) keep the full picture.
-	collapseDone := len(m.todoItems) > todosPanelFullRender
-	doneCount := 0
+	itemStyle := lipgloss.NewStyle().Foreground(ColorText)
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	for _, item := range m.todoItems {
-		text := strings.TrimSpace(item)
-		if strings.HasPrefix(text, "- ") {
-			text = strings.TrimSpace(text[2:])
+	var builder strings.Builder
+	items := make([]todoRenderItem, 0, len(m.todoItems))
+	var activeCount, pendingCount, doneCount int
+	for _, raw := range m.todoItems {
+		item := parseTodoRenderItem(raw)
+		items = append(items, item)
+		switch item.status {
+		case todoStatusActive:
+			activeCount++
+		case todoStatusPending:
+			pendingCount++
+		case todoStatusDone:
+			doneCount++
 		}
+	}
 
+	title := fmt.Sprintf("Tasks · %d/%d done", doneCount, len(items))
+	if activeCount > 0 {
+		title += fmt.Sprintf(" · %d active", activeCount)
+	}
+	builder.WriteString(titleStyle.Render(truncateForWidth(title, contentWidth)))
+	builder.WriteString("\n")
+
+	spinChar := "●"
+	if !m.reducedMotion {
+		spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		idx := int(time.Now().UnixNano()/100000000) % len(spinner)
+		spinChar = spinner[idx]
+	}
+
+	rowBudget := todosPanelFullRender
+	if m.height > 0 && m.height < 18 {
+		rowBudget = todosPanelCompactRender
+	}
+	visible := selectTodoRows(items, rowBudget)
+	for index, item := range items {
+		if !visible[index] {
+			continue
+		}
 		var styledItem string
-		if strings.HasPrefix(text, "[ ]") {
-			content := strings.TrimSpace(text[3:])
-			styledItem = m.styles.TodoPending.Render("○ " + content)
-		} else if strings.HasPrefix(text, "[/]") {
-			content := strings.TrimSpace(text[3:])
-			styledItem = m.styles.TodoActive.Render(spinChar + " " + content)
-		} else if strings.HasPrefix(text, "[x]") || strings.HasPrefix(text, "[X]") {
-			if collapseDone {
-				doneCount++
-				continue
-			}
-			content := strings.TrimSpace(text[3:])
-			styledItem = m.styles.TodoDone.Render("✓ " + content)
-		} else {
-			// Fallback if no known prefix
-			styledItem = itemStyle.Render("• " + text)
+		switch item.status {
+		case todoStatusPending:
+			styledItem = m.styles.TodoPending.Render("○ " + item.text)
+		case todoStatusActive:
+			styledItem = m.styles.TodoActive.Render(spinChar + " " + item.text)
+		case todoStatusDone:
+			styledItem = m.styles.TodoDone.Render("✓ " + item.text)
+		default:
+			styledItem = itemStyle.Render("• " + item.text)
 		}
 
-		builder.WriteString(m.styles.TodoItem.Render(styledItem))
+		builder.WriteString(fitPanelContent(styledItem, contentWidth))
 		builder.WriteString("\n")
 	}
 
-	if doneCount > 0 {
-		builder.WriteString(m.styles.TodoItem.Render(dimStyle.Render(fmt.Sprintf("✓ %d completed", doneCount))))
-		builder.WriteString("\n")
+	hiddenDone := 0
+	hiddenLive := 0
+	for i, item := range items {
+		if visible[i] {
+			continue
+		}
+		if item.status == todoStatusDone {
+			hiddenDone++
+		} else {
+			hiddenLive++
+		}
 	}
+	footerParts := make([]string, 0, 3)
+	if hiddenDone > 0 {
+		footerParts = append(footerParts, fmt.Sprintf("✓ %d completed", hiddenDone))
+	}
+	if hiddenLive > 0 {
+		footerParts = append(footerParts, fmt.Sprintf("… %d more", hiddenLive))
+	}
+	if pendingCount == 0 && activeCount == 0 {
+		footerParts = append(footerParts, "All complete")
+	}
+	footerParts = append(footerParts, "Ctrl+T hide")
+	footer := strings.Join(footerParts, " · ")
+	builder.WriteString(dimStyle.Render(truncateForWidth(footer, contentWidth)))
 
-	return boxStyle.Render(strings.TrimSuffix(builder.String(), "\n"))
+	content := fitPanelContent(builder.String(), contentWidth)
+	return boxStyle.Width(width - 2).Render(content)
+}
+
+type todoRenderItem struct {
+	status string
+	text   string
+}
+
+const (
+	todoStatusPending = "pending"
+	todoStatusActive  = "active"
+	todoStatusDone    = "done"
+	todoStatusOther   = "other"
+)
+
+func parseTodoRenderItem(raw string) todoRenderItem {
+	text := normalizeTimelineText(raw)
+	if strings.HasPrefix(text, "- ") {
+		text = strings.TrimSpace(text[2:])
+	}
+	item := todoRenderItem{status: todoStatusOther, text: text}
+	for prefix, status := range map[string]string{
+		"[ ]": todoStatusPending,
+		"[/]": todoStatusActive,
+		"[x]": todoStatusDone,
+		"[X]": todoStatusDone,
+	} {
+		if strings.HasPrefix(text, prefix) {
+			item.status = status
+			item.text = strings.TrimSpace(text[len(prefix):])
+			break
+		}
+	}
+	if item.text == "" {
+		item.text = "Untitled task"
+	}
+	return item
+}
+
+func selectTodoRows(items []todoRenderItem, budget int) map[int]bool {
+	budget = max(budget, 1)
+	selected := make(map[int]bool, min(len(items), budget))
+	if len(items) <= budget {
+		for i := range items {
+			selected[i] = true
+		}
+		return selected
+	}
+	// Operational priority wins, while the final render retains source order.
+	for _, status := range []string{todoStatusActive, todoStatusPending, todoStatusOther} {
+		for i, item := range items {
+			if len(selected) >= budget {
+				return selected
+			}
+			if item.status == status {
+				selected[i] = true
+			}
+		}
+	}
+	return selected
 }
 
 // todosPanelFullRender is the largest todo list that still renders every
@@ -266,19 +531,31 @@ func (m Model) renderTodos() string {
 // "✓ N completed" row — the pending/active rows are the signal.
 const todosPanelFullRender = 8
 
+const todosPanelCompactRender = 4
+
 // renderScratchpad renders the agent scratchpad.
 func (m Model) renderScratchpad() string {
-	if m.scratchpad == "" {
+	text := strings.TrimSpace(m.scratchpad)
+	if text == "" {
 		return ""
 	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	if width < 4 {
+		return truncateForWidth("Notes", width)
+	}
+	horizontalPadding := 1
+	if width < 6 {
+		horizontalPadding = 0
+	}
+	contentWidth := max(width-2-horizontalPadding*2, 1)
 
-	// Style for the scratchpad box - Distinct from tasks
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorAccent).
-		Padding(0, 1).
-		MarginBottom(1).
-		Width(m.width - 4)
+		Padding(0, horizontalPadding)
 
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -288,27 +565,45 @@ func (m Model) renderScratchpad() string {
 		Foreground(ColorText)
 
 	var builder strings.Builder
-	builder.WriteString(titleStyle.Render(" Scratchpad"))
+	builder.WriteString(titleStyle.Render(truncateForWidth("Scratchpad · latest notes", contentWidth)))
 	builder.WriteString("\n")
 
 	// Render only the TAIL of the scratchpad — it's append-style working
 	// notes, so the latest lines carry the signal. Unbounded render let a
 	// chatty agent grow the box to half the screen.
-	lines := strings.Split(strings.TrimRight(m.scratchpad, "\n"), "\n")
-	if hidden := len(lines) - scratchpadMaxRenderLines; hidden > 0 {
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = normalizeTimelineText(lines[i])
+		if lines[i] == "" {
+			lines[i] = "·"
+		}
+	}
+	lineBudget := scratchpadMaxRenderLines
+	if m.height > 0 && m.height < 18 {
+		lineBudget = scratchpadCompactRenderLines
+	}
+	if hidden := len(lines) - lineBudget; hidden > 0 {
 		dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		builder.WriteString(dimStyle.Render(fmt.Sprintf("… %d earlier line(s)", hidden)))
 		builder.WriteString("\n")
 		lines = lines[hidden:]
 	}
-	builder.WriteString(contentStyle.Render(strings.Join(lines, "\n")))
+	for i, line := range lines {
+		if i > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(contentStyle.Render(truncateForWidth(line, contentWidth)))
+	}
 
-	return boxStyle.Render(builder.String())
+	content := fitPanelContent(builder.String(), contentWidth)
+	return boxStyle.Width(width - 2).Render(content)
 }
 
 // scratchpadMaxRenderLines caps the scratchpad box height (content lines,
 // excluding the title and the "… earlier" marker).
 const scratchpadMaxRenderLines = 6
+
+const scratchpadCompactRenderLines = 3
 
 // getCommandHint returns a hint for the current command input.
 func (m Model) getCommandHint(input string) string {

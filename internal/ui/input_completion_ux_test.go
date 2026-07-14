@@ -1,0 +1,254 @@
+package ui
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+func TestUnknownSlashCommandShowsDismissibleNoMatch(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetWidth(44)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/definitely-missing")})
+
+	if m.showSuggestions || m.suggestionNotice == "" {
+		t.Fatalf("unknown command state: suggestions=%v notice=%q", m.showSuggestions, m.suggestionNotice)
+	}
+	view := m.View()
+	plain := stripAnsi(view)
+	for _, want := range []string{"No commands match", "/definitely", "Esc dismiss", "Enter send anyway"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("unknown-command notice missing %q:\n%s", want, plain)
+		}
+	}
+	for row, line := range strings.Split(view, "\n") {
+		if got := lipgloss.Width(line); got > 44 {
+			t.Fatalf("completion row %d width=%d, want <=44: %q", row, got, stripAnsi(line))
+		}
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if m.suggestionNotice != "" || m.textarea.Value() != "/definitely-missing" {
+		t.Fatalf("Esc did not dismiss notice without losing input: notice=%q input=%q", m.suggestionNotice, m.textarea.Value())
+	}
+}
+
+func TestFileSuggestionNoMatchClearsStaleGhostAndResults(t *testing.T) {
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "main.go"), []byte("package main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := NewInputModel(DefaultStyles(), work)
+	m.updateFileSuggestions("/open ma")
+	if len(m.fileSuggestions) == 0 || m.ghostText == "" {
+		t.Fatalf("test setup did not create a file completion: files=%v ghost=%q", m.fileSuggestions, m.ghostText)
+	}
+
+	m.updateFileSuggestions("/open definitely-missing.zzz")
+	if m.showSuggestions || len(m.fileSuggestions) != 0 || m.ghostText != "" {
+		t.Fatalf("no-match retained stale completion: show=%v files=%v ghost=%q", m.showSuggestions, m.fileSuggestions, m.ghostText)
+	}
+	if !strings.Contains(m.suggestionNotice, "No files match") {
+		t.Fatalf("file no-match has no feedback: %q", m.suggestionNotice)
+	}
+}
+
+func TestFileSuggestionUnavailableExplainsWorkingDirectory(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), filepath.Join(t.TempDir(), "missing"))
+	m.SetWidth(80)
+	m.textarea.SetValue("@main")
+	m.updateAtFileSuggestions("@main")
+
+	plain := stripAnsi(m.View())
+	if !strings.Contains(plain, "File suggestions unavailable") || !strings.Contains(plain, "working directory") {
+		t.Fatalf("unavailable file completion lacks recovery context:\n%s", plain)
+	}
+}
+
+func TestArgHintsFitInputWidth(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetWidth(24)
+	m.currentCommand = &CommandInfo{
+		Name: strings.Repeat("длинная-команда", 4),
+		Args: []ArgInfo{{Name: strings.Repeat("аргумент", 5), Required: true}},
+	}
+	if got := lipgloss.Width(m.renderArgHints()); got > m.textarea.Width() {
+		t.Fatalf("argument hint width=%d, want <=%d: %q", got, m.textarea.Width(), stripAnsi(m.renderArgHints()))
+	}
+}
+
+func TestArgHintsPreferCanonicalUsage(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetWidth(80)
+	m.currentCommand = &CommandInfo{
+		Name:  "clear-todos",
+		Args:  []ArgInfo{{Name: "force", Required: false}},
+		Usage: "/clear-todos [--force]",
+	}
+
+	plain := stripAnsi(m.renderArgHints())
+	if !strings.Contains(plain, "Usage: /clear-todos [--force]") {
+		t.Fatalf("argument hint lost canonical flag syntax: %q", plain)
+	}
+	if strings.Contains(plain, "[force]") {
+		t.Fatalf("argument hint rebuilt a lossy field-name synopsis: %q", plain)
+	}
+}
+
+func TestTabCompletedCommandShowsExecutableSyntax(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetWidth(80)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/clear-to")})
+	if !m.showSuggestions {
+		t.Fatal("partial command did not open autocomplete")
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.textarea.Value(); got != "/clear-todos " {
+		t.Fatalf("Tab completion = %q, want /clear-todos with trailing space", got)
+	}
+	if !m.showArgHints || m.currentCommand == nil {
+		t.Fatal("Tab completion did not open argument guidance")
+	}
+	if plain := stripAnsi(m.View()); !strings.Contains(plain, "Usage: /clear-todos [--force]") {
+		t.Fatalf("completed command lacks executable syntax:\n%s", plain)
+	}
+}
+
+func TestArgumentOptionsFilterAndChainWithTab(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetWidth(80)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/set p")})
+
+	if !m.showSuggestions || m.suggestionType != SuggestionArgument {
+		t.Fatalf("option query did not open argument completion: show=%v type=%v", m.showSuggestions, m.suggestionType)
+	}
+	if got, want := m.argSuggestions, []string{"permissions", "plan"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered setting options = %v, want %v", got, want)
+	}
+	plain := stripAnsi(m.View())
+	for _, want := range []string{"permissions", "plan", "Tab complete", "Enter run as typed"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("argument dropdown missing %q:\n%s", want, plain)
+		}
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.textarea.Value(); got != "/set permissions " {
+		t.Fatalf("first argument completion = %q", got)
+	}
+	if got, want := m.argSuggestions, []string{"on", "off"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("chained value options = %v, want %v", got, want)
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.textarea.Value(); got != "/set permissions off " {
+		t.Fatalf("second argument completion = %q", got)
+	}
+	if m.showSuggestions || len(m.argSuggestions) != 0 {
+		t.Fatalf("completed argument chain left a stale dropdown: show=%v args=%v", m.showSuggestions, m.argSuggestions)
+	}
+}
+
+func TestFlagCompletionWorksAfterEarlierFlags(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/pr --draft --b")})
+	if m.suggestionType != SuggestionArgument || !reflect.DeepEqual(m.argSuggestions, []string{"--base"}) {
+		t.Fatalf("repeated flag completion = type %v options %v", m.suggestionType, m.argSuggestions)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.textarea.Value(); got != "/pr --draft --base " {
+		t.Fatalf("flag completion after prior flag = %q", got)
+	}
+}
+
+func TestPathMetadataDrivesImmediateFileCompletion(t *testing.T) {
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "main.go"), []byte("package main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := NewInputModel(DefaultStyles(), work)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/grep needle ")})
+	if !m.showSuggestions || m.suggestionType != SuggestionFile || len(m.fileSuggestions) != 1 {
+		t.Fatalf("declared path argument did not open files: show=%v type=%v files=%v",
+			m.showSuggestions, m.suggestionType, m.fileSuggestions)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.textarea.Value(); got != "/grep needle main.go " {
+		t.Fatalf("path completion inserted %q", got)
+	}
+}
+
+func TestAbsoluteFileCompletionPreservesExternalPath(t *testing.T) {
+	work := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "shared directory")
+	m := NewInputModel(DefaultStyles(), work)
+	m.textarea.SetValue("/add-dir " + filepath.Dir(outside) + string(filepath.Separator) + "sha")
+	m.acceptFileSuggestion(outside)
+	if got := m.textarea.Value(); got != "/add-dir \""+outside+"\" " {
+		t.Fatalf("external path was relativized or left unquoted: %q", got)
+	}
+}
+
+func TestArgumentEnterSubmitsWithoutImplicitForce(t *testing.T) {
+	m := *NewModel()
+	m.width = 80
+	m.state = StateInput
+	var submitted string
+	m.SetCallbacks(func(value string) { submitted = value }, nil)
+	m = typeText(t, m, "/clear-todos ")
+	if !m.input.ShowingSuggestions() || m.input.SuggestionsBlockSubmit() {
+		t.Fatalf("force hint should be visible but non-blocking: show=%v block=%v",
+			m.input.ShowingSuggestions(), m.input.SuggestionsBlockSubmit())
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if submitted != "/clear-todos" {
+		t.Fatalf("Enter submitted %q; highlighted --force must require Tab", submitted)
+	}
+	if strings.Contains(submitted, "--force") {
+		t.Fatal("ordinary Enter implicitly accepted destructive --force option")
+	}
+	if m.input.Value() != "" {
+		t.Fatalf("submitted composer was not reset: %q", m.input.Value())
+	}
+}
+
+func TestEscapeDismissesArgumentOptionsWithoutLosingDraft(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/set p")})
+	if m.suggestionType != SuggestionArgument || !m.showSuggestions {
+		t.Fatal("test setup did not open argument options")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if got := m.textarea.Value(); got != "/set p" {
+		t.Fatalf("Esc changed the draft: %q", got)
+	}
+	if m.showSuggestions || len(m.argSuggestions) != 0 || m.showArgHints || m.currentCommand != nil {
+		t.Fatalf("Esc left argument UI state: show=%v args=%v hints=%v command=%v",
+			m.showSuggestions, m.argSuggestions, m.showArgHints, m.currentCommand)
+	}
+}
+
+func TestInputCommandsUseDeepSnapshotsAndRefreshOpenQuery(t *testing.T) {
+	commands := []CommandInfo{{Name: "model", Args: []ArgInfo{{Name: "id", Options: []string{"one"}}}}}
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.textarea.SetValue("/mod")
+	m.SetCommands(commands)
+	if !m.showSuggestions || len(m.suggestions) != 1 || m.suggestions[0].Name != "model" {
+		t.Fatalf("SetCommands did not refresh the open query: %+v", m.suggestions)
+	}
+
+	commands[0].Name = "mutated"
+	commands[0].Args[0].Options[0] = "mutated"
+	if m.commands[0].Name != "model" || m.commands[0].Args[0].Options[0] != "one" {
+		t.Fatalf("commands changed through caller-owned data: %+v", m.commands[0])
+	}
+}

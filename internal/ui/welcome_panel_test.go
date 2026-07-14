@@ -3,6 +3,9 @@ package ui
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // TestWelcomePanel_ContainsExpectedSections pins the structural contract
@@ -86,5 +89,76 @@ func TestWelcomePanel_VersionPrefixed(t *testing.T) {
 				t.Errorf("version %q produced double-v prefix:\n%s", tc.input, got)
 			}
 		})
+	}
+}
+
+func TestWelcomePanel_AdaptsToTerminalGeometry(t *testing.T) {
+	for _, size := range []struct {
+		width  int
+		height int
+	}{
+		{width: 10, height: 6},
+		{width: 20, height: 8},
+		{width: 40, height: 12},
+		{width: 80, height: 18},
+		{width: 100, height: 24},
+	} {
+		m := Model{
+			width:       size.width,
+			height:      size.height,
+			version:     "\x1b[31m0.99\nFORGED VERSION",
+			workDir:     "/very/long/project/path/with/界面/that/does/not/fit\nFORGED PATH",
+			projectName: "a project name that is deliberately much too long",
+			gitBranch:   "feature/a-very-long-branch\x1b[2J\nFORGED BRANCH",
+		}
+		got := m.renderWelcomePanel()
+		for _, line := range strings.Split(got, "\n") {
+			if lineWidth := lipgloss.Width(line); lineWidth > size.width {
+				t.Fatalf("%dx%d welcome line width=%d, want <=%d: %q", size.width, size.height, lineWidth, size.width, ansi.Strip(line))
+			}
+		}
+		if rows := renderedLineCount(got); rows > max(size.height-4, 2) {
+			t.Fatalf("%dx%d welcome rows=%d, want <=%d\n%s", size.width, size.height, rows, max(size.height-4, 2), ansi.Strip(got))
+		}
+		plain := ansi.Strip(got)
+		for _, essential := range []string{"Ctrl+P", "?"} {
+			if !strings.Contains(plain, essential) {
+				t.Fatalf("%dx%d welcome lost essential %q:\n%s", size.width, size.height, essential, plain)
+			}
+		}
+		if strings.Contains(plain, "\nFORGED") {
+			t.Fatalf("%dx%d runtime metadata injected a visual row:\n%s", size.width, size.height, plain)
+		}
+	}
+}
+
+func TestWelcomePanel_ShowsProjectNameWithoutWorkingDirectory(t *testing.T) {
+	m := Model{width: 80, height: 24, projectName: "payments-api"}
+	plain := ansi.Strip(m.renderWelcomePanel())
+	if !strings.Contains(plain, "payments-api") {
+		t.Fatalf("project-only context disappeared from welcome panel:\n%s", plain)
+	}
+}
+
+func TestPaletteCompactModeIsDiscoverableWithoutUnsafeShortcut(t *testing.T) {
+	m := NewModel()
+	m.RegisterPaletteActions()
+
+	var compact *EnhancedPaletteCommand
+	for i := range m.commandPalette.actionCommands {
+		command := &m.commandPalette.actionCommands[i]
+		if command.ActionID == paletteActionCompactMode {
+			compact = command
+			break
+		}
+	}
+	if compact == nil {
+		t.Fatal("compact mode action is missing from command palette")
+	}
+	if compact.Shortcut != "" {
+		t.Fatalf("compact mode advertises unsafe terminal chord %q", compact.Shortcut)
+	}
+	if !strings.Contains(strings.ToLower(compact.Description), "palette") {
+		t.Fatalf("compact mode does not explain how it is reached: %q", compact.Description)
 	}
 }

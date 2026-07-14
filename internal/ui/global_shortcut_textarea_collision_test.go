@@ -10,8 +10,9 @@ import (
 
 // This file pins round 8's fix for a class of bugs confirmed against the
 // vendored bubbles/textarea@v0.21.0 DefaultKeyMap: several gokin global
-// shortcuts (Ctrl+T, Ctrl+A, Ctrl+H close, Ctrl+B, Ctrl+F, Ctrl+D, Alt+C,
-// Ctrl+K) returned a bare `nil` from handleGlobalKeys while m.state stayed
+// shortcuts (Ctrl+T, Ctrl+A, Ctrl+H close, Ctrl+B, Ctrl+F, Ctrl+G, Ctrl+S,
+// Ctrl+X, Ctrl+L, Ctrl+D, Alt+C, Ctrl+K and Shift+Tab) returned a bare `nil`
+// from handleGlobalKeys while m.state stayed
 // StateInput — Update()'s KeyMsg case only skips forwarding the SAME
 // keystroke to the compose textarea when the returned tea.Cmd is non-nil
 // (case tea.KeyMsg: cmd := m.handleKeyMsg(msg); if cmd != nil { return m,
@@ -170,15 +171,15 @@ func TestUpdate_AltCDoesNotCapitalizeInput(t *testing.T) {
 }
 
 // TestUpdate_CtrlKWithNoModelsDoesNotDeleteAfterCursor pins the narrower,
-// edge-case collision: openModelSelector() early-returns (leaving m.state
-// at StateInput) when availableModels is empty, so Ctrl+K with no models
-// loaded used to fall through to textarea's DeleteAfterCursor and wipe
-// everything after the cursor.
+// edge-case collision: the old openModelSelector() early-return left m.state
+// at StateInput when availableModels was empty, so Ctrl+K fell through to
+// textarea's DeleteAfterCursor. The recoverable empty selector now consumes
+// the chord while preserving the draft.
 func TestUpdate_CtrlKWithNoModelsDoesNotDeleteAfterCursor(t *testing.T) {
 	m := *NewModel()
 	m.width = 80
 	m.state = StateInput
-	m.availableModels = nil // the edge case that keeps openModelSelector from changing state
+	m.availableModels = nil
 	m = typeText(t, m, "hello")
 	// Move left twice so the cursor sits mid-string ("hel|lo") — DeleteAfterCursor
 	// would remove "lo" if the key leaks through.
@@ -190,8 +191,8 @@ func TestUpdate_CtrlKWithNoModelsDoesNotDeleteAfterCursor(t *testing.T) {
 	updated, _ = m3.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
 	m4 := updated.(Model)
 
-	if m4.state != StateInput {
-		t.Fatalf("with no models loaded, state should stay StateInput, got %v", m4.state)
+	if m4.state != StateModelSelector {
+		t.Fatalf("with no models loaded, state should show the empty selector, got %v", m4.state)
 	}
 	if v := m4.input.Value(); v != "hello" {
 		t.Fatalf("Ctrl+K with no models deleted text after the cursor: got %q, want %q", v, "hello")
@@ -228,11 +229,9 @@ func TestUpdate_CtrlUEmptyInputScrollDoesNotTouchInput(t *testing.T) {
 }
 
 // TestUpdate_CtrlJInsertsExactlyOneNewline guards the OTHER direction of the
-// collision class: Ctrl+J's handler calls m.input.InsertNewline() and returns
-// nil ON PURPOSE — the key then falls through to the textarea, whose
-// DefaultKeyMap does NOT bind ctrl+j (InsertNewline binds enter/ctrl+m only),
-// so exactly one newline lands. If a future bubbles upgrade adds a ctrl+j
-// binding, this test catches the resulting double newline.
+// collision class: Ctrl+J's handler inserts the newline explicitly and then
+// consumes the key. A future textarea ctrl+j binding therefore cannot add a
+// second newline through Update's fall-through path.
 func TestUpdate_CtrlJInsertsExactlyOneNewline(t *testing.T) {
 	m := *NewModel()
 	m.width = 80
@@ -245,6 +244,96 @@ func TestUpdate_CtrlJInsertsExactlyOneNewline(t *testing.T) {
 	// would hide both a missing newline and a doubled one at the end.
 	if v := m2.input.textarea.Value(); v != "ab\n" {
 		t.Fatalf("Ctrl+J should insert exactly one newline: got %q, want %q", v, "ab\n")
+	}
+}
+
+// TestUpdate_ConsumedGlobalActionsPreserveDraftCursor pins shortcuts that
+// currently happen not to collide with textarea's DefaultKeyMap. They still
+// perform global actions, so forwarding them is an unstable contract: a
+// dependency upgrade could silently mutate the draft or cursor. Typing after
+// each shortcut proves the compose cursor remains at "hel|lo".
+func TestUpdate_ConsumedGlobalActionsPreserveDraftCursor(t *testing.T) {
+	tests := []struct {
+		name   string
+		key    tea.KeyMsg
+		setup  func(*Model)
+		verify func(*testing.T, *Model)
+	}{
+		{
+			name: "Ctrl+S",
+			key:  tea.KeyMsg{Type: tea.KeyCtrlS},
+			verify: func(t *testing.T, m *Model) {
+				if !activeToastContains(m, "Settings are unavailable") {
+					t.Fatal("Ctrl+S did not execute the settings action")
+				}
+			},
+		},
+		{
+			name: "Ctrl+X",
+			key:  tea.KeyMsg{Type: tea.KeyCtrlX},
+			verify: func(t *testing.T, m *Model) {
+				if !activeToastContains(m, "No plan panel") {
+					t.Fatal("Ctrl+X did not explain why the plan panel is unavailable")
+				}
+			},
+		},
+		{
+			name: "Ctrl+G",
+			key:  tea.KeyMsg{Type: tea.KeyCtrlG},
+			verify: func(t *testing.T, m *Model) {
+				if !m.output.IsFrozen() {
+					t.Fatal("Ctrl+G did not toggle output freeze")
+				}
+			},
+		},
+		{
+			name: "Ctrl+L",
+			key:  tea.KeyMsg{Type: tea.KeyCtrlL},
+			setup: func(m *Model) {
+				m.output.AppendLine("content")
+			},
+			verify: func(t *testing.T, m *Model) {
+				if !activeToastContains(m, "Output cleared") {
+					t.Fatal("Ctrl+L did not execute clear-screen feedback")
+				}
+			},
+		},
+		{
+			name: "Shift+Tab",
+			key:  tea.KeyMsg{Type: tea.KeyShiftTab},
+			verify: func(t *testing.T, m *Model) {
+				if !activeToastContains(m, "Session mode switching is unavailable") {
+					t.Fatal("Shift+Tab did not explain why session modes are unavailable")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := *NewModel()
+			m.width = 80
+			m.state = StateInput
+			if tt.setup != nil {
+				tt.setup(&m)
+			}
+			m = typeText(t, m, "hello")
+			for range 2 {
+				updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+				m = updated.(Model)
+			}
+
+			updated, _ := m.Update(tt.key)
+			m = updated.(Model)
+			if tt.verify != nil {
+				tt.verify(t, &m)
+			}
+
+			m = typeText(t, m, "X")
+			if got := m.input.textarea.Value(); got != "helXlo" {
+				t.Fatalf("shortcut moved or mutated compose draft: got %q, want %q", got, "helXlo")
+			}
+		})
 	}
 }
 
@@ -280,6 +369,7 @@ func TestUpdate_CtrlKWithModelsOpensSelectorAndConsumesKey(t *testing.T) {
 // slash command — the suggestions dropdown must appear.
 func TestUpdate_EnterSubmitDoesNotLeakNewlineIntoInput(t *testing.T) {
 	m := *NewModel()
+	m.SetCallbacks(func(string) {}, nil)
 	m.width = 80
 	m.state = StateInput
 	m = typeText(t, m, "hello")
@@ -352,6 +442,7 @@ func TestUpdate_DebouncedEnterDoesNotInsertInteriorNewline(t *testing.T) {
 // submit path (composing while Processing/Streaming) had the same leak.
 func TestUpdate_TypeAheadEnterDoesNotLeakNewlineIntoInput(t *testing.T) {
 	m := *NewModel()
+	m.SetCallbacks(func(string) {}, nil)
 	m.width = 80
 	m.state = StateProcessing
 	m = typeText(t, m, "queued message")

@@ -63,18 +63,20 @@ type ProgressActionMsg struct {
 
 // ProgressModel is the UI for displaying batch operation progress.
 type ProgressModel struct {
-	title       string
-	current     int
-	total       int
-	currentItem string
-	message     string
-	items       []ProgressItem
-	startTime   time.Time
-	isPaused    bool
-	isComplete  bool
-	styles      *Styles
-	width       int
-	height      int
+	title         string
+	current       int
+	total         int
+	currentItem   string
+	message       string
+	items         []ProgressItem
+	startTime     time.Time
+	isPaused      bool
+	isCancelling  bool
+	isComplete    bool
+	styles        *Styles
+	width         int
+	height        int
+	reducedMotion bool
 
 	// Completion stats
 	successCount int
@@ -94,37 +96,54 @@ func NewProgressModel(styles *Styles) ProgressModel {
 	}
 }
 
+// SetReducedMotion replaces the time-based batch spinner with a stable marker.
+func (m *ProgressModel) SetReducedMotion(enabled bool) { m.reducedMotion = enabled }
+
 // SetSize sets the size of the progress view.
 func (m *ProgressModel) SetSize(width, height int) {
-	m.width = width
-	m.height = height
+	m.width = max(width, 0)
+	m.height = max(height, 0)
 }
 
 // Start starts a new progress operation.
 func (m *ProgressModel) Start(title string, total int) {
-	m.title = title
+	m.title = normalizeTimelineText(title)
+	if m.title == "" {
+		m.title = "Batch operation"
+	}
 	m.current = 0
-	m.total = total
+	m.total = max(total, 0)
 	m.currentItem = ""
 	m.message = ""
 	m.items = nil
 	m.startTime = time.Now()
 	m.isPaused = false
+	m.isCancelling = false
 	m.isComplete = false
 	m.successCount = 0
 	m.failureCount = 0
 	m.skippedCount = 0
+	m.duration = 0
 }
 
 // Update updates the progress state.
 func (m *ProgressModel) UpdateProgress(current int, currentItem, message string) {
-	m.current = current
-	m.currentItem = currentItem
-	m.message = message
+	m.current = max(current, 0)
+	if m.total > 0 {
+		m.current = min(m.current, m.total)
+	}
+	m.currentItem = normalizeTimelineText(currentItem)
+	m.message = normalizeTimelineText(message)
 }
 
 // AddItem adds an item to the progress list.
 func (m *ProgressModel) AddItem(item ProgressItem) {
+	item.Name = normalizeTimelineText(item.Name)
+	if item.Name == "" {
+		item.Name = "Untitled item"
+	}
+	item.Error = normalizeTimelineText(item.Error)
+	item.Message = normalizeTimelineText(item.Message)
 	m.items = append(m.items, item)
 
 	// Update counts
@@ -140,8 +159,18 @@ func (m *ProgressModel) AddItem(item ProgressItem) {
 
 // Complete marks the progress as complete.
 func (m *ProgressModel) Complete() {
+	if m.isComplete {
+		return
+	}
 	m.isComplete = true
-	m.duration = time.Since(m.startTime)
+	m.isPaused = false
+	m.isCancelling = false
+	if m.total > 0 {
+		m.current = m.total
+	}
+	if !m.startTime.IsZero() {
+		m.duration = max(time.Since(m.startTime), 0)
+	}
 }
 
 // SetActionCallback sets the callback for user actions.
@@ -159,18 +188,31 @@ func (m ProgressModel) Update(msg tea.Msg) (ProgressModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "esc", "c", "ctrl+c":
-			if !m.isComplete {
-				if m.onAction != nil {
-					m.onAction(ProgressActionCancel)
+		case "esc":
+			if m.isComplete {
+				return m, func() tea.Msg { return CloseOverlayMsg{} }
+			}
+			if !m.isCancelling && m.onAction != nil {
+				m.isCancelling = true
+				m.isPaused = false
+				m.onAction(ProgressActionCancel)
+				return m, func() tea.Msg {
+					return ProgressActionMsg{Action: ProgressActionCancel}
 				}
+			}
+
+		case "c", "ctrl+c":
+			if !m.isComplete && !m.isCancelling && m.onAction != nil {
+				m.isCancelling = true
+				m.isPaused = false
+				m.onAction(ProgressActionCancel)
 				return m, func() tea.Msg {
 					return ProgressActionMsg{Action: ProgressActionCancel}
 				}
 			}
 
 		case "p":
-			if !m.isComplete {
+			if !m.isComplete && !m.isCancelling && m.onAction != nil {
 				if m.isPaused {
 					m.isPaused = false
 					if m.onAction != nil {
@@ -186,26 +228,33 @@ func (m ProgressModel) Update(msg tea.Msg) (ProgressModel, tea.Cmd) {
 
 		case "q", "enter":
 			if m.isComplete {
-				// Close the progress view
-				return m, nil
+				return m, func() tea.Msg { return CloseOverlayMsg{} }
 			}
 		}
 
 	case ProgressUpdateMsg:
-		m.current = msg.Current
-		m.total = msg.Total
-		m.currentItem = msg.CurrentItem
-		m.message = msg.Message
+		m.total = max(msg.Total, 0)
+		m.UpdateProgress(msg.Current, msg.CurrentItem, msg.Message)
 		if msg.Items != nil {
-			m.items = msg.Items
+			m.items = nil
+			m.successCount = 0
+			m.failureCount = 0
+			m.skippedCount = 0
+			for _, item := range msg.Items {
+				m.AddItem(item)
+			}
 		}
 
 	case ProgressCompleteMsg:
 		m.isComplete = true
-		m.successCount = msg.SuccessCount
-		m.failureCount = msg.FailureCount
-		m.skippedCount = msg.SkippedCount
-		m.duration = msg.Duration
+		m.isPaused = false
+		m.isCancelling = false
+		m.total = max(msg.TotalItems, 0)
+		m.current = m.total
+		m.successCount = max(msg.SuccessCount, 0)
+		m.failureCount = max(msg.FailureCount, 0)
+		m.skippedCount = max(msg.SkippedCount, 0)
+		m.duration = max(msg.Duration, 0)
 
 	case tea.WindowSizeMsg:
 		m.SetSize(msg.Width, msg.Height)
@@ -216,148 +265,134 @@ func (m ProgressModel) Update(msg tea.Msg) (ProgressModel, tea.Cmd) {
 
 // View renders the progress view.
 func (m ProgressModel) View() string {
-	var builder strings.Builder
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	if width < 4 {
+		return truncateForWidth("Progress", width)
+	}
 
-	// Animated spinner
 	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	spinnerIdx := int(time.Now().UnixMilli()/100) % len(spinners)
+	spinnerGlyph := spinners[spinnerIdx]
+	if m.reducedMotion {
+		spinnerGlyph = "●"
+	}
 	spinnerStyle := lipgloss.NewStyle().Foreground(ColorGradient1).Bold(true)
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorHighlight)
+	successStyle := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
+	failStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+	warningStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	mutedStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
-	// Header
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorHighlight)
+	title := normalizeTimelineText(m.title)
+	if title == "" {
+		title = "Batch operation"
+	}
+	var lines []string
+	appendLine := func(line string) {
+		lines = append(lines, fitPanelContent(line, width))
+	}
 
-	if m.isComplete {
-		builder.WriteString(headerStyle.Render("✓ " + m.title + " Complete"))
+	if m.isComplete && m.failureCount > 0 && m.successCount == 0 {
+		appendLine(failStyle.Render("✗ " + title + " failed"))
+	} else if m.isComplete && m.failureCount > 0 {
+		appendLine(warningStyle.Render("⚠ " + title + " completed with issues"))
+	} else if m.isComplete {
+		appendLine(successStyle.Render("✓ " + title + " complete"))
+	} else if m.isCancelling {
+		appendLine(warningStyle.Render("◌ " + title + " · cancelling"))
 	} else if m.isPaused {
-		builder.WriteString(headerStyle.Render("‖ " + m.title + " (Paused)"))
+		appendLine(warningStyle.Render("⏸ " + title + " paused"))
 	} else {
-		builder.WriteString(spinnerStyle.Render(spinners[spinnerIdx]) + " " + headerStyle.Render(m.title))
-	}
-	builder.WriteString("\n")
-
-	// Progress bar
-	barWidth := m.width - 30
-	if barWidth < 20 {
-		barWidth = 20
-	}
-	if barWidth > 80 {
-		barWidth = 80
+		appendLine(spinnerStyle.Render(spinnerGlyph) + " " + headerStyle.Render(title))
 	}
 
-	progress := float64(m.current) / float64(m.total)
-	if m.total == 0 {
-		progress = 0
+	total := max(m.total, 0)
+	current := max(m.current, 0)
+	if total > 0 {
+		current = min(current, total)
+	}
+	elapsed := time.Duration(0)
+	if m.isComplete {
+		elapsed = max(m.duration, 0)
+	} else if !m.startTime.IsZero() {
+		elapsed = max(time.Since(m.startTime), 0)
 	}
 
-	filled := int(progress * float64(barWidth))
-	if filled > barWidth {
-		filled = barWidth
-	}
-
-	// Bar colors
-	var barColor lipgloss.Color
+	barColor := ColorPrimary
 	if m.isComplete {
 		if m.failureCount > 0 {
 			barColor = ColorWarning
 		} else {
 			barColor = ColorSuccess
 		}
-	} else {
-		barColor = ColorPrimary
 	}
-
 	filledStyle := lipgloss.NewStyle().Foreground(barColor)
 	emptyStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-
-	// Use modern bar characters ▓░
-	bar := filledStyle.Render(strings.Repeat("▓", filled))
-	bar += emptyStyle.Render(strings.Repeat("░", barWidth-filled))
-
-	percentStr := fmt.Sprintf("%3.0f%%", progress*100)
-	countStr := fmt.Sprintf("%d/%d", m.current, m.total)
-
-	// Format with separators
-	elapsed := time.Since(m.startTime)
-	if m.isComplete {
-		elapsed = m.duration
-	}
-	elapsedStr := formatProgressDuration(elapsed)
-
-	fmt.Fprintf(&builder, " %s %s %s %s %s %s\n", bar, percentStr, dimStyle.Render("│"), countStr, dimStyle.Render("│"), elapsedStr)
-
-	// Current item with indent
-	if !m.isComplete && m.currentItem != "" {
-		itemStyle := lipgloss.NewStyle().Foreground(ColorAccent)
-		fmt.Fprintf(&builder, " └─ %s\n", itemStyle.Render(shortenPath(m.currentItem, 80)))
-	}
-
-	// Message
-	if m.message != "" {
-		msgStyle := lipgloss.NewStyle().Foreground(ColorWarning) // Change to Warning color for better visibility of what is happening
-		fmt.Fprintf(&builder, "    %s\n", msgStyle.Render(m.message))
-	}
-
-	builder.WriteString("\n")
-
-	// Stats
-	if m.isComplete || m.successCount > 0 || m.failureCount > 0 {
-		statsStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		successStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
-		failStyle := lipgloss.NewStyle().Foreground(ColorError)
-		skipStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-
-		stats := []string{
-			successStyle.Render(fmt.Sprintf("✓ %d success", m.successCount)),
+	if total > 0 {
+		progress := min(max(float64(current)/float64(total), 0), 1)
+		meta := fmt.Sprintf("%d/%d · %.0f%% · %s", current, total, progress*100, formatProgressDuration(elapsed))
+		barWidth := min(40, max(width-lipgloss.Width(meta)-1, 0))
+		if barWidth >= 4 {
+			filled := min(max(int(progress*float64(barWidth)), 0), barWidth)
+			bar := filledStyle.Render(strings.Repeat("▓", filled)) + emptyStyle.Render(strings.Repeat("░", barWidth-filled))
+			appendLine(bar + " " + mutedStyle.Render(meta))
+		} else {
+			appendLine(mutedStyle.Render(meta))
 		}
+	} else {
+		appendLine(mutedStyle.Render("Indeterminate · " + formatProgressDuration(elapsed)))
+	}
+
+	if !m.isComplete && !m.isCancelling && normalizeTimelineText(m.currentItem) != "" {
+		itemStyle := lipgloss.NewStyle().Foreground(ColorAccent)
+		appendLine(dimStyle.Render("Now · ") + itemStyle.Render(normalizeTimelineText(m.currentItem)))
+	}
+	if message := normalizeTimelineText(m.message); !m.isCancelling && message != "" {
+		appendLine(lipgloss.NewStyle().Foreground(ColorText).Render(message))
+	}
+
+	if m.isComplete || m.successCount > 0 || m.failureCount > 0 {
+		skipStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+		stats := []string{successStyle.Render(fmt.Sprintf("✓ %d", max(m.successCount, 0)))}
 		if m.failureCount > 0 {
-			stats = append(stats, failStyle.Render(fmt.Sprintf("✗ %d failed", m.failureCount)))
+			stats = append(stats, failStyle.Render(fmt.Sprintf("✗ %d", m.failureCount)))
 		}
 		if m.skippedCount > 0 {
-			stats = append(stats, skipStyle.Render(fmt.Sprintf("○ %d skipped", m.skippedCount)))
+			stats = append(stats, skipStyle.Render(fmt.Sprintf("⊘ %d", m.skippedCount)))
 		}
-
-		builder.WriteString(statsStyle.Render("  ") + strings.Join(stats, "  │  "))
-		builder.WriteString("\n")
+		appendLine(strings.Join(stats, dimStyle.Render(" · ")))
 	}
 
-	// Recent items (show last few)
-	if len(m.items) > 0 {
-		borderStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorBorder).
-			Padding(0, 1).
-			MaxWidth(m.width - 4).
-			MaxHeight(10)
-
-		var itemsContent strings.Builder
-		start := len(m.items) - 5
-		if start < 0 {
-			start = 0
-		}
-
-		for _, item := range m.items[start:] {
-			line := m.formatItemLine(item)
-			itemsContent.WriteString(line)
-			itemsContent.WriteString("\n")
-		}
-
-		builder.WriteString(borderStyle.Render(itemsContent.String()))
-		builder.WriteString("\n")
+	footer := m.renderActions()
+	itemBudget := 5
+	if m.height > 0 {
+		itemBudget = min(itemBudget, max(m.height-len(lines)-2, 0))
 	}
-
-	builder.WriteString("\n")
-
-	// Footer with actions
-	m.renderActions(&builder)
-
-	return builder.String()
+	selected := selectProgressItems(m.items, itemBudget)
+	if len(selected) > 0 {
+		appendLine(dimStyle.Render(strings.Repeat("─", width)))
+		for i, item := range m.items {
+			if selected[i] {
+				appendLine(m.formatItemLine(item, width))
+			}
+		}
+		if hidden := len(m.items) - len(selected); hidden > 0 {
+			appendLine(dimStyle.Render(fmt.Sprintf("… %d earlier or lower-priority item(s)", hidden)))
+		}
+	}
+	appendLine(footer)
+	if m.height > 0 && len(lines) > m.height {
+		lines = append(lines[:max(m.height-1, 0)], lines[len(lines)-1])
+	}
+	return strings.Join(lines, "\n")
 }
 
 // formatItemLine formats a progress item for display.
-func (m *ProgressModel) formatItemLine(item ProgressItem) string {
+func (m ProgressModel) formatItemLine(item ProgressItem, maxWidth int) string {
 	var icon string
 	var style lipgloss.Style
 
@@ -375,32 +410,42 @@ func (m *ProgressModel) formatItemLine(item ProgressItem) string {
 		icon = "✗"
 		style = lipgloss.NewStyle().Foreground(ColorError)
 	case ProgressStatusSkipped:
-		icon = "○"
+		icon = "⊘"
 		style = lipgloss.NewStyle().Foreground(ColorWarning)
+	default:
+		icon = "•"
+		style = lipgloss.NewStyle().Foreground(ColorMuted)
 	}
 
-	line := fmt.Sprintf("  %s %s", icon, style.Render(item.Name))
-	if item.Error != "" {
+	name := normalizeTimelineText(item.Name)
+	if name == "" {
+		name = "Untitled item"
+	}
+	line := fmt.Sprintf("%s %s", icon, style.Render(name))
+	if errText := normalizeTimelineText(item.Error); errText != "" {
 		errStyle := lipgloss.NewStyle().Foreground(ColorError)
-		line += " - " + errStyle.Render(item.Error)
-	} else if item.Message != "" {
+		line += " · " + errStyle.Render(errText)
+	} else if message := normalizeTimelineText(item.Message); message != "" {
 		msgStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		line += " " + msgStyle.Render(item.Message)
+		line += " · " + msgStyle.Render(message)
 	}
-
-	return line
+	return fitPanelContent(line, maxWidth)
 }
 
 // renderActions renders the available actions.
-func (m *ProgressModel) renderActions(builder *strings.Builder) {
+func (m ProgressModel) renderActions() string {
 	hintStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	keyStyle := lipgloss.NewStyle().
 		Foreground(ColorSecondary).
 		Bold(true)
 
 	if m.isComplete {
-		builder.WriteString(hintStyle.Render("Press ") + keyStyle.Render("Enter") + hintStyle.Render(" to close"))
-	} else {
+		return keyStyle.Render("Enter/Esc") + hintStyle.Render(" Close")
+	}
+	if m.isCancelling {
+		return hintStyle.Render("Cancellation requested · waiting for the operation to stop…")
+	}
+	if m.onAction != nil {
 		hints := []string{
 			keyStyle.Render("Esc") + " Cancel",
 		}
@@ -409,8 +454,30 @@ func (m *ProgressModel) renderActions(builder *strings.Builder) {
 		} else {
 			hints = append(hints, keyStyle.Render("p")+" Pause")
 		}
-		builder.WriteString(hintStyle.Render(strings.Join(hints, "  │  ")))
+		return hintStyle.Render(strings.Join(hints, "  │  "))
 	}
+	return hintStyle.Render("Please wait…")
+}
+
+func selectProgressItems(items []ProgressItem, budget int) map[int]bool {
+	selected := make(map[int]bool, min(max(budget, 0), len(items)))
+	if budget <= 0 {
+		return selected
+	}
+	for _, status := range []ProgressStatus{ProgressStatusInProgress, ProgressStatusFailed} {
+		for i, item := range items {
+			if len(selected) >= budget {
+				return selected
+			}
+			if item.Status == status {
+				selected[i] = true
+			}
+		}
+	}
+	for i := len(items) - 1; i >= 0 && len(selected) < budget; i-- {
+		selected[i] = true
+	}
+	return selected
 }
 
 // IsComplete returns whether the progress is complete.

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -36,11 +37,12 @@ type AgentTreePanel struct {
 	allDoneAt time.Time
 	// userHidden latches an EXPLICIT hide (toggle while visible): auto-show
 	// in UpdateTree stands down until the user shows the panel again.
-	userHidden bool
-	nodes      []AgentTreeNode
-	frame      int // spinner animation frame
-	styles     *Styles
-	mu         sync.RWMutex
+	userHidden    bool
+	nodes         []AgentTreeNode
+	frame         int // spinner animation frame
+	reducedMotion bool
+	styles        *Styles
+	mu            sync.RWMutex
 }
 
 // NewAgentTreePanel creates a new agent tree panel.
@@ -127,7 +129,15 @@ func (p *AgentTreePanel) Hide() {
 // Tick advances the spinner animation.
 func (p *AgentTreePanel) Tick() {
 	p.mu.Lock()
-	p.frame++
+	if !p.reducedMotion {
+		p.frame++
+	}
+	p.mu.Unlock()
+}
+
+func (p *AgentTreePanel) SetReducedMotion(enabled bool) {
+	p.mu.Lock()
+	p.reducedMotion = enabled
 	p.mu.Unlock()
 }
 
@@ -151,9 +161,17 @@ func (p *AgentTreePanel) View(width int) string {
 	if !p.allDoneAt.IsZero() && time.Since(p.allDoneAt) > agentTreeLingerAfterDone {
 		return ""
 	}
-	if width < 4 {
-		width = 4
+	if width <= 0 {
+		width = 80
 	}
+	if width < 4 {
+		return truncateForWidth("Agents", width)
+	}
+	horizontalPadding := 1
+	if width < 6 {
+		horizontalPadding = 0
+	}
+	contentWidth := max(width-2-horizontalPadding*2, 1)
 
 	var builder strings.Builder
 
@@ -161,7 +179,7 @@ func (p *AgentTreePanel) View(width int) string {
 	borderStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorGradient2).
-		Padding(0, 1)
+		Padding(0, horizontalPadding)
 
 	headerStyle := lipgloss.NewStyle().
 		Foreground(ColorSecondary).
@@ -191,37 +209,65 @@ func (p *AgentTreePanel) View(width int) string {
 	compact := len(p.nodes) > agentTreeFullRender
 	doneHidden := 0
 	queuedHidden := 0
-	rendered := 0
+	selectedCompact := make(map[int]bool, agentTreeFullRender)
+	if compact {
+		// Choose a bounded set by operational priority, then render those nodes
+		// in original tree order. This prevents dozens of simultaneous running
+		// rows from pinning the entire terminal while still preferring live and
+		// failed work over queued tasks.
+		for priority := 0; priority < 2 && len(selectedCompact) < agentTreeFullRender; priority++ {
+			for i, node := range p.nodes {
+				if len(selectedCompact) >= agentTreeFullRender {
+					break
+				}
+				if node.Status == "completed" || node.Status == "skipped" {
+					continue
+				}
+				highPriority := node.Status == "running" || node.Status == "failed"
+				if (priority == 0) == highPriority {
+					selectedCompact[i] = true
+				}
+			}
+		}
+	}
 
 	// Render tree nodes
-	for _, node := range p.nodes {
+	for index, node := range p.nodes {
 		if compact {
 			switch node.Status {
 			case "completed", "skipped":
 				doneHidden++
 				continue
-			case "running", "failed":
-				// always rendered
-			default: // pending, ready, blocked
-				if rendered >= agentTreeFullRender {
-					queuedHidden++
-					continue
-				}
+			}
+			if !selectedCompact[index] {
+				queuedHidden++
+				continue
 			}
 		}
-		rendered++
 		var line strings.Builder
 
 		// Indentation with tree connectors
-		if node.Depth > 0 {
-			indent := strings.Repeat("  ", node.Depth-1)
-			line.WriteString(dimStyle.Render(indent + "├─ "))
+		depth := max(node.Depth, 0)
+		if depth > 0 {
+			// Preserve status/type/tool even for pathological dependency depths.
+			// Four visible levels plus an ellipsis communicate nesting without
+			// letting indentation consume the whole row.
+			maxVisibleDepth := min(4, max((contentWidth-16)/2, 0))
+			visibleDepth := min(depth, maxVisibleDepth)
+			prefix := strings.Repeat("  ", max(visibleDepth-1, 0)) + "├─ "
+			if visibleDepth < depth {
+				prefix = "… " + prefix
+			}
+			line.WriteString(dimStyle.Render(prefix))
 		}
 
 		// Status icon
 		switch node.Status {
 		case "running":
 			spinner := spinnerFrames[p.frame%len(spinnerFrames)]
+			if p.reducedMotion {
+				spinner = "●"
+			}
 			line.WriteString(runningStyle.Render(spinner))
 		case "completed":
 			line.WriteString(successStyle.Render("✓"))
@@ -237,15 +283,20 @@ func (p *AgentTreePanel) View(width int) string {
 		line.WriteString(" ")
 
 		// Agent type badge
-		line.WriteString(agentTypeStyle.Render(fmt.Sprintf("[%s]", node.AgentType)))
+		agentType := strings.Join(strings.Fields(node.AgentType), " ")
+		if agentType == "" {
+			agentType = "agent"
+		}
+		line.WriteString(agentTypeStyle.Render(fmt.Sprintf("[%s]", agentType)))
 		line.WriteString(" ")
 
 		// Progress bar for running agents
 		if node.Status == "running" && node.ToolsUsed > 0 {
-			barWidth := 8
+			barWidth := min(8, max(contentWidth-lipgloss.Width(line.String())-5, 0))
 			var filled int
-			if node.Progress >= 0 && node.Progress <= 1 {
-				filled = int(node.Progress * float64(barWidth))
+			if !math.IsNaN(node.Progress) && node.Progress >= 0 {
+				progress := min(node.Progress, 1)
+				filled = int(progress * float64(barWidth))
 			} else {
 				// Indeterminate: bounce
 				pos := (p.frame / 2) % (barWidth * 2)
@@ -257,39 +308,43 @@ func (p *AgentTreePanel) View(width int) string {
 			if filled > barWidth {
 				filled = barWidth
 			}
-			bar := successStyle.Render(strings.Repeat("━", filled)) +
-				dimStyle.Render(strings.Repeat("─", barWidth-filled))
-			line.WriteString(bar)
-			line.WriteString(" ")
+			if barWidth >= 3 {
+				bar := successStyle.Render(strings.Repeat("━", filled)) +
+					dimStyle.Render(strings.Repeat("─", barWidth-filled))
+				line.WriteString(bar)
+				line.WriteString(" ")
+			}
 		}
 
-		// Description (truncated)
-		maxDescLen := width - lipgloss.Width(line.String()) - 20 // reserve space for time
-		if maxDescLen < 15 {
-			maxDescLen = 15
+		// Current tool is operationally more important than the prose
+		// description, so render it first on constrained widths.
+		if node.Status == "running" {
+			if currentTool := strings.Join(strings.Fields(node.CurrentTool), " "); currentTool != "" {
+				toolBudget := max(contentWidth-lipgloss.Width(line.String())-1, 0)
+				line.WriteString(toolStyle.Render(truncateForWidth("→ "+currentTool+" ", toolBudget)))
+			}
 		}
-		desc := node.Description
-		descRunes := []rune(desc)
-		if len(descRunes) > maxDescLen {
-			desc = string(descRunes[:maxDescLen-3]) + "..."
-		}
-		line.WriteString(dimStyle.Render(desc))
 
-		// Current tool for running agents
-		if node.Status == "running" && node.CurrentTool != "" {
-			line.WriteString(" ")
-			line.WriteString(toolStyle.Render("→ " + node.CurrentTool))
+		desc := strings.Join(strings.Fields(node.Description), " ")
+		if desc == "" {
+			desc = "Task"
 		}
 
 		// Duration (right side)
 		var durStr string
-		if node.Status == "running" {
-			durStr = format.Duration(time.Since(node.StartTime))
+		if node.Status == "running" && !node.StartTime.IsZero() {
+			durStr = format.Duration(max(time.Since(node.StartTime), 0))
 		} else if node.Duration > 0 {
 			durStr = format.Duration(node.Duration)
 		}
+		reserve := 0
 		if durStr != "" {
-			padding := width - lipgloss.Width(line.String()) - len(durStr) - 6
+			reserve = lipgloss.Width(durStr) + 1
+		}
+		descBudget := max(contentWidth-lipgloss.Width(line.String())-reserve, 0)
+		line.WriteString(dimStyle.Render(truncateForWidth(desc, descBudget)))
+		if durStr != "" {
+			padding := contentWidth - lipgloss.Width(line.String()) - lipgloss.Width(durStr)
 			if padding > 0 {
 				line.WriteString(strings.Repeat(" ", padding))
 			}
@@ -303,7 +358,7 @@ func (p *AgentTreePanel) View(width int) string {
 		// Thought rendering (if present and agent is active)
 		if node.Thought != "" && (node.Status == "running" || node.Status == "completed") {
 			var thoughtLine strings.Builder
-			indentStr := strings.Repeat("  ", node.Depth)
+			indentStr := strings.Repeat("  ", min(max(node.Depth, 0), max(contentWidth/4, 0)))
 			connector := "   │ "
 			if node.Depth > 0 {
 				connector = "  │ "
@@ -311,14 +366,9 @@ func (p *AgentTreePanel) View(width int) string {
 			thoughtLine.WriteString(dimStyle.Render(indentStr + connector))
 
 			// Truncate thought to fit width
-			maxThoughtLen := width - lipgloss.Width(thoughtLine.String()) - 10
-			if maxThoughtLen < 20 {
-				maxThoughtLen = 20
-			}
-			thought := node.Thought
-			if runes := []rune(thought); len(runes) > maxThoughtLen {
-				thought = string(runes[:maxThoughtLen-3]) + "..."
-			}
+			maxThoughtLen := max(contentWidth-lipgloss.Width(thoughtLine.String())-3, 0)
+			thought := strings.Join(strings.Fields(node.Thought), " ")
+			thought = truncateForWidth(thought, maxThoughtLen)
 
 			thoughtLine.WriteString(thoughtStyle.Render("💭 " + thought))
 			builder.WriteString(thoughtLine.String())
@@ -328,7 +378,7 @@ func (p *AgentTreePanel) View(width int) string {
 		// Reflection rendering (Self-correction)
 		if node.Reflection != "" {
 			var reflLine strings.Builder
-			indentStr := strings.Repeat("  ", node.Depth)
+			indentStr := strings.Repeat("  ", min(max(node.Depth, 0), max(contentWidth/4, 0)))
 			connector := "   │ "
 			if node.Depth > 0 {
 				connector = "  │ "
@@ -340,17 +390,12 @@ func (p *AgentTreePanel) View(width int) string {
 				Padding(0, 1).
 				Bold(true)
 
-			reflection := node.Reflection
-			maxReflLen := width - lipgloss.Width(reflLine.String()) - 20
-			if maxReflLen > 20 {
-				if runes := []rune(reflection); len(runes) > maxReflLen {
-					reflection = string(runes[:maxReflLen-3]) + "..."
-				}
-			}
+			reflection := strings.Join(strings.Fields(node.Reflection), " ")
 
 			reflLine.WriteString(reflBadgeStyle.Render("RECOVERY"))
 			reflLine.WriteString(" ")
-			reflLine.WriteString(lipgloss.NewStyle().Foreground(ColorWarning).Render(reflection))
+			reflectionBudget := max(contentWidth-lipgloss.Width(reflLine.String()), 0)
+			reflLine.WriteString(lipgloss.NewStyle().Foreground(ColorWarning).Render(truncateForWidth(reflection, reflectionBudget)))
 			builder.WriteString(reflLine.String())
 			builder.WriteString("\n")
 		}
@@ -364,13 +409,13 @@ func (p *AgentTreePanel) View(width int) string {
 		summary += fmt.Sprintf(" · %d row(s) folded", hidden)
 	}
 	if summary != "" {
-		builder.WriteString(dimStyle.Render(strings.Repeat("─", max(0, width-4))))
+		builder.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 		builder.WriteString("\n")
 		builder.WriteString(dimStyle.Render("  " + summary))
 		builder.WriteString("\n")
 	}
 
-	content := strings.TrimSuffix(builder.String(), "\n")
+	content := fitPanelContent(strings.TrimSuffix(builder.String(), "\n"), contentWidth)
 	return borderStyle.Width(width - 2).Render(content)
 }
 
@@ -383,7 +428,9 @@ func (p *AgentTreePanel) buildSummary() string {
 		switch node.Status {
 		case "running":
 			running++
-			totalDuration += time.Since(node.StartTime)
+			if !node.StartTime.IsZero() {
+				totalDuration += max(time.Since(node.StartTime), 0)
+			}
 		case "completed":
 			completed++
 			totalDuration += node.Duration

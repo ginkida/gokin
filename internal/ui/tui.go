@@ -8,9 +8,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -96,39 +96,61 @@ type Model struct {
 	// Permission prompt state
 	permRequest        *PermissionRequestMsg
 	permSelectedOption int
+	permShowDetails    bool
+	permDetailScroll   int
+	permNotice         string
 
 	// Question prompt state
 	questionRequest        *QuestionRequestMsg
 	questionSelectedOption int
 	questionCustomInput    bool
 	questionInputModel     InputModel
+	questionInputError     string
 
 	// Plan approval state
 	planRequest        *PlanApprovalRequestMsg
 	planSelectedOption int
+	planStepScroll     int
 	planFeedbackMode   bool       // True when entering feedback for "Request Changes"
 	planFeedbackInput  InputModel // Input model for feedback
+	planFeedbackError  string
+	planApprovalNotice string
 
 	// Model selector state
-	modelSelectedIndex int
-	availableModels    []ModelInfo
-	currentModel       string
-	onModelSelect      func(modelID string)
+	modelSelectedIndex       int
+	availableModels          []ModelInfo
+	currentModel             string
+	onModelSelect            func(modelID string)
+	modelSwitchPending       string
+	modelSelectorReturnState State // Settings when opened as a nested picker; Input otherwise.
+	modelSelectorNotice      string
 
 	// Settings modal state (the /settings interactive screen)
-	settingsItems    []SettingItem
-	settingsCursor   int
-	settingsModel    string
-	settingsProvider string
-	onSettingToggle  func(key string, on bool)
-	onOpenSettings   func() // Opens the /settings modal (Ctrl+S + palette action)
+	settingsItems            []SettingItem
+	settingsCursor           int
+	settingsModel            string
+	settingsProvider         string
+	settingsNotice           string
+	settingsPending          map[string]bool // key -> optimistic value; survives modal close/reopen
+	notificationSelected     int
+	notificationSelectedID   int
+	notificationScroll       int
+	notificationDetail       bool
+	notificationDetailScroll int
+	notificationNotice       string
+	onSettingToggle          func(key string, on bool)
+	onOpenSettings           func() // Opens the /settings modal (Ctrl+S + palette action)
 
 	// Masked API-key entry modal (/login <provider> with no key)
-	keyEntryInput       textinput.Model
-	keyEntryProvider    string
-	keyEntryDisplayName string
-	keyEntrySetupURL    string
-	onKeyEntrySubmit    func(provider, key string)
+	keyEntryInput              textinput.Model
+	keyEntryProvider           string
+	keyEntryDisplayName        string
+	keyEntrySetupURL           string
+	keyEntryError              string
+	keyEntryPendingProvider    string
+	keyEntryPendingDisplayName string
+	keyEntryPendingSetupURL    string
+	onKeyEntrySubmit           func(provider, key string)
 
 	// Diff preview state
 	diffPreview         DiffPreviewModel
@@ -139,26 +161,30 @@ type Model struct {
 	onMultiDiffDecision func(decisions map[string]DiffDecision)
 
 	// Search results state
-	searchResults  SearchResultsModel
-	searchRequest  *SearchResultsRequestMsg
-	onSearchAction func(action SearchAction)
+	searchResults        SearchResultsModel
+	searchRequest        *SearchResultsRequestMsg
+	onSearchAction       func(action SearchAction)
+	onSearchResultAction func(action SearchAction, filePath string, lineNumber int)
 
 	// Git status state
-	gitStatusModel   GitStatusModel
-	gitStatusRequest *GitStatusRequestMsg
-	onGitAction      func(action GitAction)
+	gitStatusModel    GitStatusModel
+	gitStatusRequest  *GitStatusRequestMsg
+	onGitAction       func(action GitAction)
+	onGitStatusAction func(action GitAction, files []string, message string)
 
 	// Scratchpad
 	scratchpad string
 
 	// File browser state
-	fileBrowser       FileBrowserModel
-	fileBrowserActive bool
-	onFileSelect      func(path string)
+	fileBrowser                 FileBrowserModel
+	fileBrowserActive           bool
+	workspaceOverlayReturnState State
+	onFileSelect                func(path string)
 
 	// Progress state
-	progressModel  ProgressModel
-	progressActive bool
+	progressModel       ProgressModel
+	progressActive      bool
+	progressReturnState State
 
 	// Tool progress bar (for long-running tool operations)
 	toolProgressBar *ToolProgressBarModel
@@ -180,8 +206,8 @@ type Model struct {
 	onQuestion                 func(answer string)
 	onPlanApproval             func(decision PlanApprovalDecision)
 	onPlanApprovalWithFeedback func(decision PlanApprovalDecision, feedback string) // Extended callback with feedback
-	onInterrupt                func()                                               // Called when user presses ESC to interrupt
-	onCancel                   func()                                               // Called when user presses ESC to cancel current processing
+	onInterrupt                func()                                               // Called after the UI handles Esc/Ctrl+C interruption
+	onCancel                   func()                                               // Cancels current backend processing
 	onPermissionsToggle        func() bool                                          // Called to toggle permissions
 
 	// Todos visibility state
@@ -216,9 +242,10 @@ type Model struct {
 	app any // Reference to App instance (use any to avoid import cycle)
 
 	// Hints system (welcome removed)
-	hintsEnabled bool // Enable contextual hints
-	hintSystem   *HintSystem
-	hintsShown   map[string]int // Track how many times each hint was shown
+	hintsEnabled  bool // Enable contextual hints
+	reducedMotion bool // Static activity indicators + instant auto-follow
+	hintSystem    *HintSystem
+	hintsShown    map[string]int // Track how many times each hint was shown
 
 	// Coordinated task tracking (Phase 2)
 	coordinatedTasks      map[string]*CoordinatedTaskState // taskID -> state
@@ -283,8 +310,9 @@ type Model struct {
 	rateLimitWaitUntil time.Time
 
 	// Error dedup
-	lastErrorMsg   string // Last error message for dedup
-	lastErrorCount int    // Consecutive repeat count
+	lastErrorMsg          string // Last terminal error message for dedup
+	lastErrorCount        int    // Consecutive terminal-error repeat count
+	lastRecoverableStatus string // Last durable recoverable status in this recovery episode
 
 	// Copy support: track last AI response
 	lastResponseText   string           // Last AI response text (saved on ResponseDoneMsg)
@@ -293,7 +321,9 @@ type Model struct {
 	// Terminal bell on prompts
 	bellEnabled bool
 
-	// Quit confirmation: requires double Ctrl+C within 2 seconds
+	// Quit confirmation: requires two consecutive Ctrl+C presses. Any other
+	// interaction clears the confirmation so a later Ctrl+C cannot quit with a
+	// newly composed draft.
 	quitConfirmTime time.Time // When first Ctrl+C was pressed
 
 	// Resize debounce: buffer rapid WindowSizeMsg to prevent flickering
@@ -350,7 +380,7 @@ func NewModel() *Model {
 	s.Spinner = spinner.Dot
 	s.Style = styles.Spinner
 
-	return &Model{
+	m := &Model{
 		input:                NewInputModel(styles, ""), // Initialized with empty workDir, set later in SetWorkDir
 		output:               NewOutputModel(styles),
 		spinner:              s,
@@ -389,6 +419,13 @@ func NewModel() *Model {
 		bellEnabled:          true, // Terminal bell enabled by default
 		highlighter:          highlight.New("monokai"),
 	}
+	// Workspace panels emit action messages, but this parent owns dispatching
+	// them. Start explicitly unlinked; callback setters promote the panels from
+	// viewer mode when an embedding handler is installed.
+	m.searchResults.SetActionsLinked(false)
+	m.gitStatusModel.SetActionsLinked(false)
+	m.commandPalette.SetSubmissionLinked(false)
+	return m
 }
 
 // Init initializes the TUI.
@@ -597,6 +634,10 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 		return m.handleShortcutsOverlayKeys(msg)
 	}
 
+	if m.state == StateNotificationCenter {
+		return m.handleNotificationCenterKeys(msg)
+	}
+
 	// Handle command palette keys
 	if m.state == StateCommandPalette {
 		return m.handleCommandPaletteKeys(msg)
@@ -654,12 +695,22 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 // flow, and the quick keys can't drift. Deny returns to input + interrupts; allow
 // variants resume processing.
 func (m *Model) decidePermission(decision PermissionDecision) tea.Cmd {
+	if m.onPermission == nil {
+		if decision == PermissionDeny || decision == PermissionDenySession {
+			return m.cancelUnavailablePermission()
+		}
+		m.permNotice = "Unavailable: cannot send permission response · Esc cancels the request"
+		return nil
+	}
 	var reqID string
 	if m.permRequest != nil {
 		reqID = m.permRequest.ID
 	}
 	m.permRequest = nil
 	m.permSelectedOption = 0
+	m.permShowDetails = false
+	m.permDetailScroll = 0
+	m.permNotice = ""
 	if decision == PermissionDeny || decision == PermissionDenySession {
 		m.state = StateInput
 		m.output.AppendLine(m.styles.Warning.Render(" Denied - operation cancelled"))
@@ -667,19 +718,70 @@ func (m *Model) decidePermission(decision PermissionDecision) tea.Cmd {
 		if m.onInterrupt != nil {
 			m.onInterrupt()
 		}
-		if m.onPermission != nil {
-			m.onPermission(reqID, decision)
-		}
+		m.onPermission(reqID, decision)
 		return m.input.Focus()
 	}
 	m.state = StateProcessing
-	if m.onPermission != nil {
-		m.onPermission(reqID, decision)
-	}
+	m.onPermission(reqID, decision)
 	return nil
 }
 
+func (m *Model) cancelUnavailablePermission() tea.Cmd {
+	m.permRequest = nil
+	m.permSelectedOption = 0
+	m.permShowDetails = false
+	m.permDetailScroll = 0
+	m.permNotice = ""
+	m.state = StateInput
+	m.output.AppendLine(m.styles.Warning.Render(" Permission request cancelled · response handler unavailable"))
+	m.output.AppendLine("")
+	if m.onCancel != nil {
+		m.onCancel()
+	}
+	if m.onInterrupt != nil {
+		m.onInterrupt()
+	}
+	return m.input.Focus()
+}
+
 func (m *Model) handlePermissionPromptKeys(msg tea.KeyMsg) tea.Cmd {
+	if m.permRequest == nil {
+		m.state = StateInput
+		return m.input.Focus()
+	}
+	m.permSelectedOption = permissionSelectedIndex(m.permSelectedOption)
+
+	if m.permShowDetails {
+		_, paletteWidth := m.permissionDetailBounds()
+		lines := permissionDetailLines(m.permRequest, paletteWidth)
+		page := permissionDetailVisibleCount(m.height, len(lines))
+		maxScroll := max(0, len(lines)-page)
+		switch msg.String() {
+		case "up", "k":
+			m.permDetailScroll = max(0, m.permDetailScroll-1)
+			return nil
+		case "down", "j":
+			m.permDetailScroll = min(maxScroll, m.permDetailScroll+1)
+			return nil
+		case "pgup":
+			m.permDetailScroll = max(0, m.permDetailScroll-page)
+			return nil
+		case "pgdown":
+			m.permDetailScroll = min(maxScroll, m.permDetailScroll+page)
+			return nil
+		case "home":
+			m.permDetailScroll = 0
+			return nil
+		case "end":
+			m.permDetailScroll = maxScroll
+			return nil
+		case "enter", " ":
+			// The decision rows are hidden in detail mode. Never confirm an
+			// invisible selection; number/y/a/n shortcuts remain explicit.
+			return nil
+		}
+	}
+
 	switch msg.String() {
 	case "up", "k":
 		if m.permSelectedOption > 0 {
@@ -704,18 +806,20 @@ func (m *Model) handlePermissionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 	case "a":
 		return m.decidePermission(PermissionAllowSession)
 	case "?":
-		// Show tool details
-		if m.permRequest != nil {
-			infoStyle := lipgloss.NewStyle().Foreground(ColorInfo)
-			m.output.AppendLine("")
-			m.output.AppendLine(infoStyle.Render("  Tool: " + m.permRequest.ToolName))
-			if m.permRequest.Reason != "" {
-				m.output.AppendLine(m.styles.Dim.Render("  " + m.permRequest.Reason))
-			}
-			m.output.AppendLine("")
-		}
+		m.permShowDetails = !m.permShowDetails
+		m.permDetailScroll = 0
 	}
 	return nil
+}
+
+func (m *Model) permissionDetailBounds() (visible, width int) {
+	paletteWidth, _ := promptPaletteWidth(m.width)
+	width = max(1, paletteWidth-6)
+	if m.permRequest == nil {
+		return 0, width
+	}
+	lines := permissionDetailLines(m.permRequest, width)
+	return permissionDetailVisibleCount(m.height, len(lines)), width
 }
 
 // handleQuestionPromptKeys handles keys in question prompt state.
@@ -724,22 +828,26 @@ func (m *Model) handleQuestionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 	if m.questionCustomInput {
 		switch msg.Type {
 		case tea.KeyEnter:
-			// Submit custom answer
-			answer := m.questionInputModel.Value()
-			m.questionRequest = nil
-			m.questionCustomInput = false
-			m.questionInputModel.Reset()
-			m.state = StateProcessing
-			if m.onQuestion != nil {
-				m.onQuestion(answer)
+			if msg.Alt {
+				m.questionInputError = ""
+				m.questionInputModel.InsertNewline()
+				return nil
 			}
-			return nil
+			// Submit custom answer
+			answer := strings.TrimSpace(m.questionInputModel.Value())
+			if answer == "" {
+				m.questionInputError = "Answer cannot be empty"
+				return m.questionInputModel.Focus()
+			}
+			return m.submitQuestion(answer)
 		case tea.KeyEsc:
 			// Cancel custom input, return to options
 			m.questionCustomInput = false
-			m.questionInputModel.Reset()
+			m.questionInputError = ""
+			resetPromptInput(&m.questionInputModel)
 			return nil
 		default:
+			m.questionInputError = ""
 			var cmd tea.Cmd
 			m.questionInputModel, cmd = m.questionInputModel.Update(msg)
 			return cmd
@@ -753,19 +861,26 @@ func (m *Model) handleQuestionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 	}
 
 	optCount := len(m.questionRequest.Options)
+	m.questionSelectedOption = min(max(m.questionSelectedOption, 0), optCount)
 	if optCount == 0 {
 		// No options - just free text input
 		switch msg.Type {
 		case tea.KeyEnter:
-			answer := m.questionInputModel.Value()
-			m.questionRequest = nil
-			m.questionInputModel.Reset()
-			m.state = StateProcessing
-			if m.onQuestion != nil {
-				m.onQuestion(answer)
+			if msg.Alt {
+				m.questionInputError = ""
+				m.questionInputModel.InsertNewline()
+				return nil
 			}
-			return nil
+			answer := strings.TrimSpace(m.questionInputModel.Value())
+			if answer == "" {
+				m.questionInputError = "Answer cannot be empty"
+				return m.questionInputModel.Focus()
+			}
+			return m.submitQuestion(answer)
+		case tea.KeyEsc:
+			return m.cancelQuestion()
 		default:
+			m.questionInputError = ""
 			var cmd tea.Cmd
 			m.questionInputModel, cmd = m.questionInputModel.Update(msg)
 			return cmd
@@ -774,16 +889,7 @@ func (m *Model) handleQuestionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 
 	switch msg.String() {
 	case "esc":
-		m.questionRequest = nil
-		m.questionSelectedOption = 0
-		m.state = StateInput
-		m.output.AppendLine("")
-		m.output.AppendLine(m.styles.Warning.Render(" Question cancelled"))
-		m.output.AppendLine("")
-		if m.onQuestion != nil {
-			m.onQuestion("")
-		}
-		return m.input.Focus()
+		return m.cancelQuestion()
 	case "up", "k":
 		if m.questionSelectedOption > 0 {
 			m.questionSelectedOption--
@@ -792,21 +898,25 @@ func (m *Model) handleQuestionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 		if m.questionSelectedOption < optCount { // +1 for "Other" option
 			m.questionSelectedOption++
 		}
+	case "home", "g":
+		m.questionSelectedOption = 0
+	case "end", "G":
+		m.questionSelectedOption = optCount
+	case "pgup":
+		m.questionSelectedOption = max(0, m.questionSelectedOption-questionOptionVisibleCount(m.height, optCount+1))
+	case "pgdown":
+		m.questionSelectedOption = min(optCount, m.questionSelectedOption+questionOptionVisibleCount(m.height, optCount+1))
 	case "enter", " ":
 		if m.questionSelectedOption < optCount {
 			// Selected an option
 			answer := m.questionRequest.Options[m.questionSelectedOption]
-			m.questionRequest = nil
-			m.questionSelectedOption = 0
-			m.state = StateProcessing
-			if m.onQuestion != nil {
-				m.onQuestion(answer)
-			}
+			return m.submitQuestion(answer)
 		} else {
 			// Selected "Other" - switch to custom input
 			m.questionCustomInput = true
+			m.questionInputError = ""
 			m.questionInputModel = NewInputModel(m.styles, m.workDir)
-			m.questionInputModel.SetWidth(m.width)
+			m.questionInputModel.SetWidth(promptInputContentWidth(m.width))
 			return m.questionInputModel.Focus()
 		}
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
@@ -814,43 +924,121 @@ func (m *Model) handleQuestionPromptKeys(msg tea.KeyMsg) tea.Cmd {
 		idx := int(msg.String()[0] - '1')
 		if idx < optCount {
 			answer := m.questionRequest.Options[idx]
-			m.questionRequest = nil
-			m.questionSelectedOption = 0
-			m.state = StateProcessing
-			if m.onQuestion != nil {
-				m.onQuestion(answer)
-			}
+			return m.submitQuestion(answer)
 		}
 	}
 	return nil
 }
 
+func (m *Model) submitQuestion(answer string) tea.Cmd {
+	if m.onQuestion == nil {
+		recovery := "Esc cancels the request"
+		if m.questionCustomInput {
+			recovery = "Esc returns to answers"
+		}
+		m.questionInputError = "Unavailable: cannot submit answer · " + recovery
+		if m.questionCustomInput || (m.questionRequest != nil && len(m.questionRequest.Options) == 0) {
+			return m.questionInputModel.Focus()
+		}
+		return nil
+	}
+	m.questionRequest = nil
+	m.questionSelectedOption = 0
+	m.questionCustomInput = false
+	m.questionInputError = ""
+	resetPromptInput(&m.questionInputModel)
+	m.state = StateProcessing
+	m.onQuestion(answer)
+	return nil
+}
+
+// resetPromptInput is safe for option-only prompts, whose text editor is
+// intentionally created lazily. bubbles/textarea.Reset dereferences internal
+// viewport state and panics when called on its zero value.
+func resetPromptInput(input *InputModel) {
+	if input == nil {
+		return
+	}
+	if input.styles == nil {
+		*input = InputModel{}
+		return
+	}
+	input.Reset()
+}
+
+func (m *Model) cancelQuestion() tea.Cmd {
+	callbackAvailable := m.onQuestion != nil
+	m.questionRequest = nil
+	m.questionSelectedOption = 0
+	m.questionCustomInput = false
+	m.questionInputError = ""
+	resetPromptInput(&m.questionInputModel)
+	m.state = StateInput
+	m.output.AppendLine("")
+	m.output.AppendLine(m.styles.Warning.Render(" Question cancelled"))
+	m.output.AppendLine("")
+	if callbackAvailable {
+		m.onQuestion("")
+	} else if m.onCancel != nil {
+		m.onCancel()
+	}
+	return m.input.Focus()
+}
+
 // handlePlanApprovalKeys handles keys in plan approval state.
 func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
+	if m.planRequest == nil {
+		m.state = StateInput
+		return m.input.Focus()
+	}
+	m.planSelectedOption = min(max(m.planSelectedOption, 0), 2)
+	emptyPlan := len(m.planRequest.Steps) == 0
+	if emptyPlan && m.planSelectedOption == int(PlanApproved) {
+		m.planSelectedOption = int(PlanRejected)
+	}
+	visibleSteps := planApprovalStepVisibleCount(m.height, len(m.planRequest.Steps))
+	m.planStepScroll = min(max(m.planStepScroll, 0), max(len(m.planRequest.Steps)-visibleSteps, 0))
+
 	// If in feedback mode, handle input
 	if m.planFeedbackMode {
 		switch msg.Type {
 		case tea.KeyEnter:
+			if msg.Alt {
+				m.planFeedbackError = ""
+				m.planFeedbackInput.InsertNewline()
+				return nil
+			}
 			// Submit feedback
-			feedback := m.planFeedbackInput.Value()
+			feedback := strings.TrimSpace(m.planFeedbackInput.Value())
+			if feedback == "" {
+				m.planFeedbackError = "Describe what should change"
+				return m.planFeedbackInput.Focus()
+			}
+			if m.onPlanApprovalWithFeedback == nil && m.onPlanApproval == nil {
+				m.planFeedbackError = "Unavailable: cannot submit feedback · Esc returns to decisions"
+				return m.planFeedbackInput.Focus()
+			}
 			m.planRequest = nil
 			m.planSelectedOption = 0
 			m.planFeedbackMode = false
-			m.planFeedbackInput.Reset()
-			m.state = StateInput
+			m.planFeedbackError = ""
+			resetPromptInput(&m.planFeedbackInput)
+			m.state = StateProcessing
 			// Send decision with feedback
 			if m.onPlanApprovalWithFeedback != nil {
 				m.onPlanApprovalWithFeedback(PlanModifyRequested, feedback)
 			} else if m.onPlanApproval != nil {
 				m.onPlanApproval(PlanModifyRequested)
 			}
-			return m.input.Focus()
+			return nil
 		case tea.KeyEsc:
 			// Cancel feedback, return to options
 			m.planFeedbackMode = false
-			m.planFeedbackInput.Reset()
+			m.planFeedbackError = ""
+			resetPromptInput(&m.planFeedbackInput)
 			return nil
 		default:
+			m.planFeedbackError = ""
 			var cmd tea.Cmd
 			m.planFeedbackInput, cmd = m.planFeedbackInput.Update(msg)
 			return cmd
@@ -859,22 +1047,51 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 
 	switch msg.String() {
 	case "up", "k":
-		if m.planSelectedOption > 0 {
+		minOption := int(PlanApproved)
+		if emptyPlan {
+			minOption = int(PlanRejected)
+		}
+		if m.planSelectedOption > minOption {
 			m.planSelectedOption--
 		}
+		m.planApprovalNotice = ""
 	case "down", "j":
 		if m.planSelectedOption < 2 {
 			m.planSelectedOption++
 		}
+		m.planApprovalNotice = ""
+	case "home", "g":
+		m.planStepScroll = 0
+	case "end", "G":
+		m.planStepScroll = max(len(m.planRequest.Steps)-planApprovalStepVisibleCount(m.height, len(m.planRequest.Steps)), 0)
+	case "pgup", "[":
+		m.planStepScroll = max(m.planStepScroll-planApprovalStepVisibleCount(m.height, len(m.planRequest.Steps)), 0)
+	case "pgdown", "]":
+		maxStart := max(len(m.planRequest.Steps)-planApprovalStepVisibleCount(m.height, len(m.planRequest.Steps)), 0)
+		m.planStepScroll = min(m.planStepScroll+planApprovalStepVisibleCount(m.height, len(m.planRequest.Steps)), maxStart)
 	case "enter", " ":
 		decision := PlanApprovalDecision(m.planSelectedOption)
+		if emptyPlan && decision == PlanApproved {
+			m.planSelectedOption = int(PlanRejected)
+			m.planApprovalNotice = "Cannot approve an empty plan · request changes or reject"
+			return nil
+		}
 		if decision == PlanModifyRequested {
+			if m.onPlanApprovalWithFeedback == nil && m.onPlanApproval == nil {
+				m.planApprovalNotice = "Unavailable: cannot send plan response · Esc cancels the request"
+				return nil
+			}
 			// Enter feedback mode
 			m.planFeedbackMode = true
+			m.planFeedbackError = ""
 			m.planFeedbackInput = NewInputModel(m.styles, m.workDir)
-			m.planFeedbackInput.SetWidth(m.width - 4)
+			m.planFeedbackInput.SetWidth(promptInputContentWidth(m.width))
 			m.planFeedbackInput.SetPlaceholder("Enter your feedback for plan modifications...")
 			return m.planFeedbackInput.Focus()
+		}
+		if m.onPlanApproval == nil {
+			m.planApprovalNotice = "Unavailable: cannot send plan response · Esc cancels the request"
+			return nil
 		}
 		// Initialize the plan progress panel when the plan is approved via Enter
 		// (the "y" quick-approve path already does this; keep them in sync).
@@ -888,12 +1105,20 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 		m.planRequest = nil
 		m.planSelectedOption = 0
+		m.planFeedbackError = ""
 		m.state = StateProcessing
-		if m.onPlanApproval != nil {
-			m.onPlanApproval(decision)
-		}
+		m.onPlanApproval(decision)
 	case "y", "1":
 		// Quick approve (1 = the numbered "Approve" option)
+		if emptyPlan {
+			m.planSelectedOption = int(PlanRejected)
+			m.planApprovalNotice = "Cannot approve an empty plan · request changes or reject"
+			return nil
+		}
+		if m.onPlanApproval == nil {
+			m.planApprovalNotice = "Unavailable: cannot send plan response · Esc cancels the request"
+			return nil
+		}
 		// Initialize plan progress panel with the approved plan
 		if m.planRequest != nil && m.planProgressPanel != nil {
 			m.planProgressPanel.StartPlan(
@@ -907,26 +1132,35 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		m.planRequest = nil
 		m.planSelectedOption = 0
 		m.planFeedbackMode = false
-		m.planFeedbackInput.Reset()
+		m.planFeedbackError = ""
+		resetPromptInput(&m.planFeedbackInput)
 		m.state = StateProcessing
-		if m.onPlanApproval != nil {
-			m.onPlanApproval(PlanApproved)
-		}
+		m.onPlanApproval(PlanApproved)
 	case "n", "2":
+		if m.onPlanApproval == nil {
+			m.planApprovalNotice = "Unavailable: cannot send plan response · Esc cancels the request"
+			return nil
+		}
 		// Quick reject (2 = the numbered "Reject" option)
 		m.planRequest = nil
 		m.planSelectedOption = 0
 		m.planFeedbackMode = false
-		m.planFeedbackInput.Reset()
+		m.planFeedbackError = ""
+		resetPromptInput(&m.planFeedbackInput)
+		m.planApprovalNotice = ""
 		m.state = StateProcessing
-		if m.onPlanApproval != nil {
-			m.onPlanApproval(PlanRejected)
-		}
+		m.onPlanApproval(PlanRejected)
 	case "m", "3":
 		// Quick modify (3 = the numbered "Request changes" option) — enter feedback mode
+		if m.onPlanApprovalWithFeedback == nil && m.onPlanApproval == nil {
+			m.planApprovalNotice = "Unavailable: cannot send plan response · Esc cancels the request"
+			return nil
+		}
 		m.planFeedbackMode = true
+		m.planFeedbackError = ""
+		m.planApprovalNotice = ""
 		m.planFeedbackInput = NewInputModel(m.styles, m.workDir)
-		m.planFeedbackInput.SetWidth(m.width - 4)
+		m.planFeedbackInput.SetWidth(promptInputContentWidth(m.width))
 		m.planFeedbackInput.SetPlaceholder("Enter your feedback for plan modifications...")
 		return m.planFeedbackInput.Focus()
 	case "esc":
@@ -946,6 +1180,8 @@ func (m *Model) handlePlanApprovalKeys(msg tea.KeyMsg) tea.Cmd {
 		m.planRequest = nil
 		m.planSelectedOption = 0
 		m.planFeedbackMode = false
+		m.planFeedbackError = ""
+		m.planApprovalNotice = ""
 		m.state = StateInput
 		m.output.AppendLine("")
 		m.output.AppendLine(m.styles.Warning.Render(" Plan approval interrupted"))
@@ -976,6 +1212,10 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 		return m.input.Focus()
 
 	case tea.KeyEnter:
+		if _, ready := m.commandPalette.directSlashCommandWithArgs(strings.TrimSpace(m.commandPalette.GetQuery())); ready && m.onSubmit == nil {
+			m.commandPalette.SetSubmitError("Unavailable: command submission is not connected")
+			return nil
+		}
 		if full, ok := m.commandPalette.DirectSlashLineWithArgs(); ok {
 			m.state = StateProcessing
 			m.streamStartTime = time.Now()
@@ -990,10 +1230,21 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 
+		// Empty results and disabled commands are non-actions. Keep the palette
+		// open so Enter cannot strand its visible/state flags or discard a query.
+		selected := m.commandPalette.GetSelected()
+		if selected == nil || !selected.Enabled {
+			return nil
+		}
+		if selected.Type == CommandTypeSlash && m.onSubmit == nil {
+			m.commandPalette.SetSubmitError("Unavailable: command submission is not connected")
+			return nil
+		}
+
 		// A slash command that needs a required argument drops into the inline
 		// arg-entry step instead of running bare (which would only print Usage).
-		if sel := m.commandPalette.GetSelected(); sel != nil && PaletteNeedsArg(*sel) {
-			m.commandPalette.BeginArgEntry(*sel)
+		if PaletteNeedsArg(*selected) {
+			m.commandPalette.BeginArgEntry(*selected)
 			return nil
 		}
 
@@ -1047,6 +1298,22 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 		m.commandPalette.SelectNext()
 		return nil
 
+	case tea.KeyHome:
+		m.commandPalette.SelectFirst()
+		return nil
+
+	case tea.KeyEnd:
+		m.commandPalette.SelectLast()
+		return nil
+
+	case tea.KeyPgUp:
+		m.commandPalette.PageUp()
+		return nil
+
+	case tea.KeyPgDown:
+		m.commandPalette.PageDown()
+		return nil
+
 	case tea.KeyTab:
 		// Toggle preview panel
 		m.commandPalette.TogglePreview()
@@ -1071,6 +1338,13 @@ func (m *Model) handleCommandPaletteKeys(msg tea.KeyMsg) tea.Cmd {
 func (m *Model) handlePaletteArgKeys(msg tea.KeyMsg) tea.Cmd {
 	switch msg.Type {
 	case tea.KeyEnter:
+		if !m.commandPalette.ValidateArgEntry() {
+			return nil
+		}
+		if m.onSubmit == nil {
+			m.commandPalette.SetArgError("Unavailable: command submission is not connected")
+			return nil
+		}
 		full := m.commandPalette.SubmitArgEntry()
 		if strings.TrimSpace(full) == "" {
 			m.state = StateInput
@@ -1113,14 +1387,14 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 	case paletteActionModelSelector:
 		m.openModelSelector()
 	case paletteActionSettings:
-		if m.onOpenSettings != nil {
-			m.onOpenSettings()
-		}
+		m.requestOpenSettings()
 	case paletteActionShortcuts:
 		if m.shortcutsOverlay != nil {
 			m.shortcutsOverlay.Show()
 			m.state = StateShortcutsOverlay
 		}
+	case paletteActionNotifications:
+		m.openNotificationCenter()
 	case paletteActionTodos:
 		m.toggleTodosPanel()
 	case paletteActionLiveDetail:
@@ -1169,13 +1443,15 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 			m.toastManager.ShowInfo("No plan panel — appears while a plan is executing")
 		}
 	case paletteActionPlanningMode:
-		if m.onPlanningModeToggle != nil {
-			m.onPlanningModeToggle()
-		}
+		m.requestSessionModeCycle()
 	case paletteActionClearScreen:
-		m.output.Clear()
+		m.clearOutputWithFeedback()
 	case paletteActionCompactMode:
 		m.toggleCompactMode()
+	default:
+		if m.toastManager != nil {
+			m.toastManager.ShowWarning("This palette action is unavailable")
+		}
 	}
 
 	// If the action transitioned to its own modal/state, keep it; otherwise
@@ -1187,9 +1463,169 @@ func (m *Model) dispatchPaletteAction(id string) tea.Cmd {
 	return nil
 }
 
-// toggleCompactMode flips compact mode and resizes the output viewport. Shared
-// by the Ctrl+Shift+C binding and the palette "Toggle Compact Mode" action so
-// the two can't drift.
+// requestOpenSettings keeps the direct shortcut and palette action honest in
+// stripped-down sessions where the app did not wire a settings provider.
+func (m *Model) requestOpenSettings() {
+	if m.onOpenSettings != nil {
+		m.onOpenSettings()
+		return
+	}
+	if m.toastManager != nil {
+		m.toastManager.ShowWarning("Settings are unavailable in this session")
+	}
+}
+
+// requestSessionModeCycle is the one behavior behind every advertised
+// Shift+Tab entry point. Prefer the canonical Normal → Plan → YOLO cycle and
+// retain the legacy binary planning callback for older integrations.
+func (m *Model) requestSessionModeCycle() {
+	switch {
+	case m.onSessionModeCycle != nil:
+		m.onSessionModeCycle()
+	case m.onPlanningModeToggle != nil:
+		m.onPlanningModeToggle()
+	default:
+		if m.toastManager != nil {
+			m.toastManager.ShowWarning("Session mode switching is unavailable")
+		}
+	}
+}
+
+func (m *Model) clearOutputWithFeedback() {
+	m.output.Clear()
+	if m.toastManager != nil {
+		m.toastManager.ShowInfo("Output cleared")
+	}
+}
+
+func overlayReturnState(state State) State {
+	if state == StateProcessing || state == StateStreaming {
+		return state
+	}
+	return StateInput
+}
+
+func isBlockingDecisionState(state State) bool {
+	switch state {
+	case StatePermissionPrompt, StateQuestionPrompt, StatePlanApproval,
+		StateDiffPreview, StateMultiDiffPreview:
+		return true
+	}
+	return false
+}
+
+func activeSurfaceLabel(state State) string {
+	switch state {
+	case StatePermissionPrompt:
+		return "Permission prompt"
+	case StateQuestionPrompt:
+		return "Question prompt"
+	case StatePlanApproval:
+		return "Plan approval"
+	case StateModelSelector:
+		return "Model selector"
+	case StateShortcutsOverlay:
+		return "Keyboard shortcuts"
+	case StateCommandPalette:
+		return "Command Palette"
+	case StateDiffPreview, StateMultiDiffPreview:
+		return "Diff review"
+	case StateSearchResults:
+		return "Search results"
+	case StateGitStatus:
+		return "Git status"
+	case StateFileBrowser:
+		return "File browser"
+	case StateBatchProgress:
+		return "Batch progress"
+	case StateContextObservatory:
+		return "Context dashboard"
+	case StateSettings:
+		return "Settings"
+	case StateAPIKeyEntry:
+		return "API key entry"
+	case StateNotificationCenter:
+		return "Notifications"
+	default:
+		return "Active screen"
+	}
+}
+
+func (m *Model) showSurfaceCollision(action, retry string) {
+	if m.toastManager == nil {
+		return
+	}
+	label := activeSurfaceLabel(m.state)
+	if retry == "" {
+		if isBlockingDecisionState(m.state) {
+			retry = "resolve it and retry"
+		} else {
+			retry = "close it and retry"
+		}
+	} else if isBlockingDecisionState(m.state) {
+		retry = strings.Replace(retry, "close it", "resolve it", 1)
+	}
+	m.toastManager.ShowWarning(action + " · " + label + " kept open · " + retry)
+}
+
+func (m *Model) showPromptCollision(kind, outcome string, resolved bool) {
+	if m.toastManager == nil {
+		return
+	}
+	label := activeSurfaceLabel(m.state)
+	recovery := label + " kept open"
+	if isBlockingDecisionState(m.state) {
+		recovery = "finish the active prompt first"
+	}
+	message := fmt.Sprintf("Incoming %s %s · %s", kind, outcome, recovery)
+	if !resolved {
+		message = fmt.Sprintf("Incoming %s could not be resolved · response handler unavailable · %s", kind, recovery)
+	}
+	m.toastManager.ShowTagged("prompt-collision", ToastWarning, message, 6*time.Second)
+}
+
+func isWorkspaceOverlayState(state State) bool {
+	return state == StateSearchResults || state == StateGitStatus || state == StateFileBrowser
+}
+
+func (m *Model) restoreWorkspaceOverlay() tea.Cmd {
+	m.state = overlayReturnState(m.workspaceOverlayReturnState)
+	m.workspaceOverlayReturnState = StateInput
+	return m.input.Focus()
+}
+
+// finishFileBrowser turns chosen files into immediately usable composer
+// references. The browser is a picker, not a dead-end viewer: Enter and the
+// multi-select confirmation both preserve any existing draft and return to
+// the state that was underneath it. ResponseDone/Error downgrade that saved
+// state to Input while the browser is open.
+func (m *Model) finishFileBrowser(paths []string) tea.Cmd {
+	m.fileBrowserActive = false
+	added := m.input.InsertFileReferences(paths, m.workDir)
+	if added > 0 && m.toastManager != nil {
+		label := "file reference"
+		if added != 1 {
+			label = "file references"
+		}
+		m.toastManager.ShowSuccess(fmt.Sprintf("Added %d %s to draft", added, label))
+	} else if len(paths) > 0 && m.toastManager != nil {
+		m.toastManager.ShowWarning("Selected path could not be added to the draft")
+	}
+	if m.onFileSelect != nil {
+		seen := make(map[string]bool, len(paths))
+		for _, path := range paths {
+			if path != "" && !seen[path] && strings.IndexFunc(path, unicode.IsControl) < 0 {
+				seen[path] = true
+				m.onFileSelect(path)
+			}
+		}
+	}
+	return m.restoreWorkspaceOverlay()
+}
+
+// toggleCompactMode flips compact mode and resizes the output viewport. It is
+// intentionally palette-only: terminals encode Ctrl+Shift+C exactly like the
+// cancel chord Ctrl+C, so advertising that keyboard binding would be unsafe.
 func (m *Model) toggleCompactMode() {
 	m.CompactMode = !m.CompactMode
 	if m.CompactMode {
@@ -1204,8 +1640,12 @@ func (m *Model) toggleCompactMode() {
 
 func (m *Model) handleShortcutsOverlayKeys(msg tea.KeyMsg) tea.Cmd {
 	if m.shortcutsOverlay == nil {
-		m.state = StateInput
-		return m.input.Focus()
+		// The renderer already supplies a fallback overlay for degraded
+		// construction paths. Persist the same fallback before handling input so
+		// its advertised filtering/navigation actions work instead of the first
+		// key unexpectedly closing the screen.
+		m.shortcutsOverlay = NewShortcutsOverlay(m.styles)
+		m.shortcutsOverlay.Show()
 	}
 
 	switch msg.Type {
@@ -1222,6 +1662,18 @@ func (m *Model) handleShortcutsOverlayKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case tea.KeyDown:
 		m.shortcutsOverlay.ScrollDown()
+		return nil
+	case tea.KeyPgUp:
+		m.shortcutsOverlay.PageUp()
+		return nil
+	case tea.KeyPgDown:
+		m.shortcutsOverlay.PageDown()
+		return nil
+	case tea.KeyHome:
+		m.shortcutsOverlay.ScrollToStart()
+		return nil
+	case tea.KeyEnd:
+		m.shortcutsOverlay.ScrollToEnd()
 		return nil
 	case tea.KeyBackspace:
 		query := m.shortcutsOverlay.GetSearch()
@@ -1246,48 +1698,99 @@ func (m *Model) handleShortcutsOverlayKeys(msg tea.KeyMsg) tea.Cmd {
 
 // handleModelSelectorKeys handles keys in model selector state.
 func (m *Model) handleModelSelectorKeys(msg tea.KeyMsg) tea.Cmd {
+	if len(m.availableModels) > 0 {
+		m.modelSelectedIndex = min(max(m.modelSelectedIndex, 0), len(m.availableModels)-1)
+	} else {
+		m.modelSelectedIndex = 0
+	}
 	switch msg.String() {
 	case "up", "k":
 		if m.modelSelectedIndex > 0 {
 			m.modelSelectedIndex--
+			m.modelSelectorNotice = ""
 		}
 	case "down", "j":
 		if m.modelSelectedIndex < len(m.availableModels)-1 {
 			m.modelSelectedIndex++
+			m.modelSelectorNotice = ""
 		}
+	case "home":
+		if len(m.availableModels) > 0 {
+			m.modelSelectedIndex = 0
+		}
+		m.modelSelectorNotice = ""
+	case "end":
+		if len(m.availableModels) > 0 {
+			m.modelSelectedIndex = len(m.availableModels) - 1
+		}
+		m.modelSelectorNotice = ""
+	case "pgup":
+		m.modelSelectedIndex = max(0, m.modelSelectedIndex-modelSelectorVisibleCount(m.height, len(m.availableModels)))
+		m.modelSelectorNotice = ""
+	case "pgdown":
+		if len(m.availableModels) > 0 {
+			m.modelSelectedIndex = min(len(m.availableModels)-1, m.modelSelectedIndex+modelSelectorVisibleCount(m.height, len(m.availableModels)))
+		}
+		m.modelSelectorNotice = ""
 	case "enter", " ":
-		// Select model
-		if m.modelSelectedIndex >= 0 && m.modelSelectedIndex < len(m.availableModels) {
-			selected := m.availableModels[m.modelSelectedIndex]
-			if selected.ID != m.currentModel {
-				m.currentModel = selected.ID
-				m.output.AppendLine(m.styles.Spinner.Render(fmt.Sprintf("Switched to %s", selected.Name)))
-				if m.onModelSelect != nil {
-					m.onModelSelect(selected.ID)
-				}
-			}
-			m.state = StateInput
-			return m.input.Focus()
-		}
+		return m.selectModelAt(m.modelSelectedIndex)
 	case "esc", "q":
-		// Cancel selection
-		m.state = StateInput
-		return m.input.Focus()
+		return m.closeModelSelector()
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		// Quick select by number
 		idx := int(msg.String()[0] - '1')
-		if idx >= 0 && idx < len(m.availableModels) {
-			selected := m.availableModels[idx]
-			if selected.ID != m.currentModel {
-				m.currentModel = selected.ID
-				m.output.AppendLine(m.styles.Spinner.Render(fmt.Sprintf("Switched to %s", selected.Name)))
-				if m.onModelSelect != nil {
-					m.onModelSelect(selected.ID)
-				}
-			}
-			m.state = StateInput
-			return m.input.Focus()
+		return m.selectModelAt(idx)
+	}
+	return nil
+}
+
+func (m *Model) selectModelAt(index int) tea.Cmd {
+	if index < 0 || index >= len(m.availableModels) {
+		return nil
+	}
+
+	selected := m.availableModels[index]
+	selected.ID = safeKeyEntryText(selected.ID)
+	selected.Name = safeKeyEntryText(selected.Name)
+	if selected.ID == "" {
+		m.modelSelectorNotice = "This model has no selectable ID"
+		return nil
+	}
+	if m.modelSwitchPending != "" {
+		m.modelSelectorNotice = "Wait for the current model switch to finish"
+		return nil
+	}
+	if selected.ID != m.currentModel {
+		if m.onModelSelect == nil {
+			m.modelSelectorNotice = "Model switching is unavailable in this session"
+			return nil
 		}
+		name := selected.Name
+		if name == "" {
+			name = selected.ID
+		}
+		m.modelSwitchPending = selected.ID
+		if m.toastManager != nil {
+			m.toastManager.ShowTagged("model-switch", ToastInfo, fmt.Sprintf("Switching to %s…", name), 15*time.Second)
+		}
+		if m.modelSelectorReturnState == StateSettings {
+			m.settingsNotice = fmt.Sprintf("Switching model to %s…", name)
+		}
+		m.onModelSelect(selected.ID)
+	}
+	return m.closeModelSelector()
+}
+
+func (m *Model) closeModelSelector() tea.Cmd {
+	returnState := m.modelSelectorReturnState
+	if returnState != StateSettings {
+		returnState = StateInput
+	}
+	m.modelSelectorReturnState = StateInput
+	m.modelSelectorNotice = ""
+	m.state = returnState
+	if returnState == StateInput {
+		return m.input.Focus()
 	}
 	return nil
 }
@@ -1301,18 +1804,77 @@ func (m *Model) handleModelSelectorKeys(msg tea.KeyMsg) tea.Cmd {
 // handled") and falls through to typing; hence this explicit sentinel.
 func keyConsumed() tea.Msg { return nil }
 
+func (m *Model) clearQuitConfirmation() {
+	if m.quitConfirmTime.IsZero() {
+		return
+	}
+	m.quitConfirmTime = time.Time{}
+	if m.toastManager != nil {
+		m.toastManager.DismissTag("quit-confirm")
+	}
+}
+
+// interruptActiveRequest is the single cancellation transaction shared by Esc
+// and Ctrl+C. It stops backend work, settles every transient activity surface,
+// preserves the type-ahead draft and records a calm timestamped stop marker.
+func (m *Model) interruptActiveRequest() tea.Cmd {
+	elapsed := time.Duration(0)
+	if !m.streamStartTime.IsZero() {
+		elapsed = time.Since(m.streamStartTime)
+	}
+	if m.onCancel != nil {
+		m.onCancel()
+	}
+	m.clearQuitConfirmation()
+	m.state = StateInput
+	m.currentTool = ""
+	m.currentToolInfo = ""
+	m.processingLabel = ""
+	m.streamIdleMsg = ""
+	m.settleActiveToolCalls(false, "cancelled")
+	m.streamStartTime = time.Time{}
+	m.lastActivityTime = time.Time{}
+	m.slowWarningShown = false
+	m.responseHeaderShown = false
+	m.output.FlushStream()
+	if m.toolProgressBar != nil {
+		m.toolProgressBar.Hide()
+	}
+
+	stopStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+	stopMsg := "⎯ stopped"
+	if elapsed > 0 {
+		stopMsg += " after " + format.Duration(elapsed)
+	}
+	m.output.AppendLine("")
+	m.output.AppendLine(stopStyle.Render(stopMsg))
+	m.output.AppendLine("")
+	if m.onInterrupt != nil {
+		m.onInterrupt()
+	}
+	return m.input.Focus()
+}
+
 // handleGlobalKeys handles global keyboard shortcuts.
 func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
+	// Ctrl+C is local cancellation while reverse-history is open. Let the input
+	// model restore its draft without arming the application quit flow.
+	if msg.Type == tea.KeyCtrlC && m.state == StateInput && m.input.historySearchMode {
+		return nil
+	}
+	// Quit is a deliberate double tap, not merely two Ctrl+C presses somewhere
+	// within a time window. Typing, navigating or submitting in between cancels
+	// the pending confirmation and removes its now-stale toast.
+	if msg.Type != tea.KeyCtrlC {
+		m.clearQuitConfirmation()
+	}
 	// Ctrl+K opens the model selector. The welcome panel and model selector
 	// both advertise this binding, so keep the handler global for the input
 	// state instead of hiding model choice behind slash commands only.
-	// keyConsumed (round 8), not nil: returning nil here falls through to
-	// bubbles/textarea's OWN ctrl+k binding (DeleteAfterCursor) whenever
-	// m.state is STILL StateInput when handleKeyMsg's caller checks
-	// typeAheadActive() — normally openModelSelector() changes m.state away
-	// from StateInput, making this moot, but its own early-return when
-	// availableModels is empty leaves state unchanged, so ctrl+k with no
-	// models loaded wiped everything after the cursor in the compose buffer.
+	// keyConsumed (round 8), not nil: returning nil here can fall through to
+	// bubbles/textarea's OWN ctrl+k binding (DeleteAfterCursor). The selector
+	// opens even when its list is empty, exposing recovery guidance while the
+	// compose draft remains untouched.
 	if msg.String() == "ctrl+k" && m.state == StateInput {
 		m.openModelSelector()
 		return keyConsumed
@@ -1329,10 +1891,16 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// configure surface, so give it a direct key in addition to the palette
 	// "Open Settings" action and the /settings command.
 	if msg.Type == tea.KeyCtrlS && m.state == StateInput {
-		if m.onOpenSettings != nil {
-			m.onOpenSettings()
-		}
-		return nil
+		m.requestOpenSettings()
+		return keyConsumed
+	}
+
+	// Alt+N opens the user-visible notification history. ToastManager already
+	// archives expired/evicted items; this binding makes that recovery path
+	// reachable without colliding with textarea editing commands.
+	if msg.String() == "alt+n" && m.state == StateInput {
+		m.openNotificationCenter()
+		return keyConsumed
 	}
 
 	// Ctrl+O — Claude-Code-style live-activity detail toggle. Deliberately
@@ -1407,12 +1975,15 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// toggles this works during Processing/Streaming too — the plan panel is
 	// on screen exactly while a plan executes, which is when the user wants
 	// to peek at the full step list. Ctrl (not bare printable) so it can't
-	// fight the type-ahead input.
+	// conflict with ordinary typed characters. It is still consumed explicitly:
+	// control-key bindings may be added to the textarea now or in the future.
 	if msg.Type == tea.KeyCtrlX && (m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
 		if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
 			m.planProgressPanel.Toggle()
+		} else if m.toastManager != nil {
+			m.toastManager.ShowInfo("No plan panel — appears while a plan is executing")
 		}
-		return nil
+		return keyConsumed
 	}
 
 	// Handle Ctrl+T for todos toggle. Works DURING Processing/Streaming too
@@ -1469,19 +2040,20 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 					m.toastManager.ShowInfo("Scroll unfrozen")
 				}
 			}
-			return nil
+			return keyConsumed
 		}
 	}
 
 	// Ctrl+J: insert newline (standard terminal newline, works in all terminals)
 	// Ctrl+J inserts a newline — including DURING Processing/Streaming, where
 	// the type-ahead compose box is live: gating to StateInput made multi-line
-	// composing impossible exactly while the agent works (the textarea itself
-	// does not bind ctrl+j, so the fall-through was a silent no-op).
+	// composing impossible exactly while the agent works. Insert explicitly and
+	// consume the key so a future textarea ctrl+j binding cannot add a second
+	// newline through Update's fall-through path.
 	if msg.Type == tea.KeyCtrlJ &&
 		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
 		m.input.InsertNewline()
-		return nil
+		return keyConsumed
 	}
 
 	// Ctrl+U: context-aware — clear input when has text, scroll half-page up
@@ -1567,9 +2139,9 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				wasExpanded := m.toolOutput.IsExpanded(m.lastToolOutputIndex)
 				m.toolOutput.ToggleExpand(m.lastToolOutputIndex)
 				if wasExpanded {
-					m.toastManager.ShowInfo("Tool output collapsed")
+					m.toastManager.ShowInfo("Marked compact; existing scrollback is unchanged")
 				} else {
-					m.toastManager.ShowInfo("Tool output expanded")
+					m.toastManager.ShowInfo("Full tool output appended below")
 					m.output.AppendLine(m.styles.ToolResult.Render("   " + strings.ReplaceAll(entry.FullContent, "\n", "\n    ")))
 				}
 				// Consumed the toggle — don't also type 'e' into the textarea.
@@ -1596,38 +2168,17 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if msg.String() == "alt+c" &&
 		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
 		if m.lastResponseText != "" {
-			copyViaOSC52(m.lastResponseText)
-			_ = clipboard.WriteAll(m.lastResponseText) // best-effort; OSC52 is primary
-			if m.toastManager != nil {
-				m.toastManager.ShowInfo("Copied last response")
-			}
+			showClipboardCopyFeedback(m.toastManager, "Copied last response", copyTextToClipboard(m.lastResponseText))
+		} else if m.toastManager != nil {
+			m.toastManager.ShowWarning("No completed response to copy")
 		}
 		return keyConsumed
 	}
 
-	// Code block navigation and actions (only when input is empty)
+	// '?' opens keyboard shortcuts overlay while the composer is empty.
+	// Code-block [/] selection used to live here, but selection had no visual
+	// representation or follow-up action and only swallowed ordinary brackets.
 	if m.state == StateInput && m.input.Value() == "" {
-		codeBlocks := m.output.GetCodeBlocks()
-		if codeBlocks != nil && codeBlocks.Count() > 0 {
-			switch msg.String() {
-			case "]":
-				// Navigate to next code block. Consumed — in this context (empty
-				// input + code blocks on screen) ']' is a nav key, not a char to
-				// type; a nil return would leak ']' into the textarea.
-				if codeBlocks.SelectNext() {
-					m.toastManager.ShowInfo(codeBlocks.RenderSelectionIndicator())
-				}
-				return keyConsumed
-			case "[":
-				// Navigate to previous code block (see ']').
-				if codeBlocks.SelectPrev() {
-					m.toastManager.ShowInfo(codeBlocks.RenderSelectionIndicator())
-				}
-				return keyConsumed
-			}
-		}
-
-		// '?' opens keyboard shortcuts overlay
 		if msg.String() == "?" {
 			if m.shortcutsOverlay != nil {
 				m.shortcutsOverlay.Show()
@@ -1641,24 +2192,17 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		// If tool progress bar is visible and cancellable, cancel the operation
-		if m.toolProgressBar != nil && m.toolProgressBar.IsVisible() && m.toolProgressBar.IsCancellable() {
-			if m.onCancel != nil {
-				m.onCancel()
-			}
-			m.toolProgressBar.Hide()
-			m.state = StateInput
-			m.currentTool = ""
-			m.currentToolInfo = ""
-			m.settleActiveToolCalls(false, "cancelled")
-			m.output.AppendLine("")
-			m.output.AppendLine(m.styles.Warning.Render(" Operation cancelled"))
-			m.output.AppendLine("")
-			return m.input.Focus()
+		// During an active turn Ctrl+C means interrupt, exactly like Esc. The old
+		// path armed application quit unless a specific progress bar happened to
+		// be visible, contradicting the shortcut help and making a second press
+		// terminate the app while the request was still running.
+		if m.state == StateProcessing || m.state == StateStreaming {
+			return m.interruptActiveRequest()
 		}
-		// Double Ctrl+C confirmation: quit only if pressed twice within 2 seconds
+		// Double Ctrl+C confirmation: quit only on a consecutive second press.
 		now := time.Now()
 		if !m.quitConfirmTime.IsZero() && now.Sub(m.quitConfirmTime) < 3*time.Second {
+			m.clearQuitConfirmation()
 			if m.onQuit != nil {
 				m.onQuit()
 			}
@@ -1666,8 +2210,13 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 		m.quitConfirmTime = now
 		if m.toastManager != nil {
-			m.toastManager.ShowWarning("Press Ctrl+C again to quit")
+			message := "Press Ctrl+C again to quit"
+			if m.input.Value() != "" {
+				message = "Draft preserved — press Ctrl+C again to quit"
+			}
+			m.toastManager.ShowTagged("quit-confirm", ToastWarning, message, 3*time.Second)
 		}
+		return keyConsumed
 
 	case tea.KeyEscape:
 		// Handle Esc for Context Observatory
@@ -1681,46 +2230,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 
 		// ESC interrupts processing/streaming and returns to input
 		if m.state == StateProcessing || m.state == StateStreaming {
-			// Capture elapsed BEFORE the reset clears streamStartTime —
-			// surfacing "stopped after Xs" turns a generic cancel into a
-			// useful signal ("how long was I waiting?").
-			elapsed := time.Duration(0)
-			if !m.streamStartTime.IsZero() {
-				elapsed = time.Since(m.streamStartTime)
-			}
-
-			// Cancel the current processing (API request)
-			if m.onCancel != nil {
-				m.onCancel()
-			}
-			m.state = StateInput
-			m.currentTool = ""
-			m.currentToolInfo = ""
-			m.processingLabel = ""
-			m.streamIdleMsg = "" // Clear any "X is thinking" / "waiting for response" hint
-			m.settleActiveToolCalls(false, "cancelled")
-			m.streamStartTime = time.Time{} // Reset timeout tracking
-			m.slowWarningShown = false
-			// Hide tool progress bar if visible
-			if m.toolProgressBar != nil {
-				m.toolProgressBar.Hide()
-			}
-
-			// Cancellation is a user choice, not a warning — render in
-			// ColorDim italic so the line records what happened without
-			// the visual alarm of ⚠ Warning styling.
-			stopStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
-			stopMsg := "⎯ stopped"
-			if elapsed > 0 {
-				stopMsg += " after " + format.Duration(elapsed)
-			}
-			m.output.AppendLine("")
-			m.output.AppendLine(stopStyle.Render(stopMsg))
-			m.output.AppendLine("")
-			if m.onInterrupt != nil {
-				m.onInterrupt()
-			}
-			return m.input.Focus()
+			return m.interruptActiveRequest()
 		}
 
 		// Esc at an IDLE prompt while a background /loop iteration is firing:
@@ -1765,9 +2275,13 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		// Send message on Enter (when input is not empty and no suggestions are shown)
-		if m.state == StateInput && !m.input.ShowingSuggestions() {
+		if m.state == StateInput && !m.input.SuggestionsBlockSubmit() {
 			value := m.input.Value()
 			if value != "" {
+				if m.onSubmit == nil {
+					m.showSubmitUnavailable()
+					return keyConsumed
+				}
 				// Rate limiting: prevent rapid message spam. keyConsumed, not
 				// nil — a swallowed Enter must not fall through to the
 				// textarea and insert a newline at the cursor.
@@ -1810,9 +2324,13 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		// when the current request completes. The message is rendered to the
 		// scrollback NOW (it won't re-render at dispatch time).
 		if (m.state == StateProcessing || m.state == StateStreaming) &&
-			!m.isModalState() && !m.input.ShowingSuggestions() {
+			!m.isModalState() && !m.input.SuggestionsBlockSubmit() {
 			value := m.input.Value()
 			if value != "" {
+				if m.onSubmit == nil {
+					m.showSubmitUnavailable()
+					return keyConsumed
+				}
 				if time.Since(m.lastSubmitTime) < m.minSubmitDelay {
 					return keyConsumed // swallowed Enter must not reach the textarea
 				}
@@ -1840,23 +2358,22 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		// the typeAhead states so Enter in other states is untouched, and to
 		// !ShowingSuggestions so the dropdown-accept forward stays intact.
 		if (m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) &&
-			!m.isModalState() && !m.input.ShowingSuggestions() {
+			!m.isModalState() && !m.input.SuggestionsBlockSubmit() {
 			return keyConsumed
 		}
 
 	case tea.KeyCtrlL:
 		// Clear output screen
 		if m.state == StateInput {
-			m.output.Clear()
-			m.toastManager.ShowInfo("Output cleared")
-			return nil
+			m.clearOutputWithFeedback()
+			return keyConsumed
 		}
 
 	case tea.KeyCtrlU:
 		// Clear input line
 		if m.state == StateInput {
 			m.input.Reset()
-			return nil
+			return keyConsumed
 		}
 
 	case tea.KeyShiftTab:
@@ -1868,13 +2385,8 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		// Async so the Bubble Tea event loop doesn't block on the
 		// cascaded /plan + /permissions + /sandbox toggles inside.
 		if m.state == StateInput {
-			switch {
-			case m.onSessionModeCycle != nil:
-				m.onSessionModeCycle() // feedback via SessionModeCycledMsg
-			case m.onPlanningModeToggle != nil:
-				m.onPlanningModeToggle() // feedback via PlanningModeToggledMsg
-			}
-			return nil
+			m.requestSessionModeCycle() // feedback via the async result message
+			return keyConsumed
 		}
 
 	case tea.KeyPgUp, tea.KeyPgDown:
@@ -1890,12 +2402,22 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) showSubmitUnavailable() {
+	const notice = "Unavailable: message submission is not connected · draft preserved"
+	m.input.suggestionNotice = notice
+	if m.toastManager != nil {
+		m.toastManager.ShowTagged("submit-unavailable", ToastError, "Message submission is unavailable · draft preserved", 6*time.Second)
+	}
+}
+
 func (m *Model) openModelSelector() {
-	if len(m.availableModels) == 0 {
-		if m.toastManager != nil {
-			m.toastManager.ShowWarning("No model choices loaded")
-		}
-		return
+	m.modelSelectorReturnState = StateInput
+	m.modelSelectorNotice = ""
+	if m.modelSwitchPending != "" {
+		m.modelSelectorNotice = "A model switch is still applying"
+	}
+	if m.state == StateSettings {
+		m.modelSelectorReturnState = StateSettings
 	}
 	m.state = StateModelSelector
 	m.modelSelectedIndex = 0
@@ -1940,7 +2462,31 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	switch msg := msg.(type) {
 	case QueuedCountMsg:
-		m.queuedPending = int(msg)
+		m.queuedPending = max(int(msg), 0)
+		return nil
+
+	case QueuedMessageRejectedMsg:
+		if msg.Waiting > 0 {
+			m.queuedPending = msg.Waiting
+		}
+		restored := m.input.RestoreDraft(msg.Message)
+		reason := safeKeyEntryText(msg.Reason)
+		if reason == "" {
+			reason = "Queue full"
+		}
+		feedback := reason + " — message restored to composer"
+		durable := "↳ not queued — restored to composer"
+		if !restored {
+			feedback = reason + " — current draft kept; rejected message is in history (↑)"
+			durable = "↳ not queued — kept in history; current draft unchanged"
+		}
+		if m.toastManager != nil {
+			m.toastManager.ShowTagged("queue-rejected", ToastWarning, feedback, 6*time.Second)
+		}
+		m.output.AppendLine(lipgloss.NewStyle().Foreground(ColorWarning).Render(durable))
+		if restored && m.state == StateInput {
+			return m.input.Focus()
+		}
 		return nil
 
 	case DebugStateRequestMsg:
@@ -1991,6 +2537,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// only the state transition is deferred until the modal resolves.
 		if !m.isModalState() {
 			m.state = StateStreaming
+		} else if isWorkspaceOverlayState(m.state) {
+			m.workspaceOverlayReturnState = StateStreaming
 		}
 
 		m.markResponseStarted()
@@ -2004,6 +2552,8 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.streamIdleMsg = "" // Server responded — clear idle warning
 		if !m.isModalState() {
 			m.state = StateStreaming
+		} else if isWorkspaceOverlayState(m.state) {
+			m.workspaceOverlayReturnState = StateStreaming
 		}
 		m.processingLabel = "" // Text streaming is the feedback itself
 
@@ -2186,6 +2736,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// timeout). The modal's own close path returns to StateInput/whatever
 		// state it decides once the user resolves it.
 		modalActive := m.isModalState()
+		if isWorkspaceOverlayState(m.state) {
+			m.workspaceOverlayReturnState = StateInput
+		}
 		if !modalActive {
 			m.state = StateInput
 		}
@@ -2203,6 +2756,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.responseHeaderShown = false    // Reset for next response
 		m.lastErrorMsg = ""              // Reset error dedup
 		m.lastErrorCount = 0
+		m.lastRecoverableStatus = ""
 		if m.currentResponseBuf.Len() > 0 {
 			m.lastResponseText = m.currentResponseBuf.String()
 			m.currentResponseBuf.Reset()
@@ -2235,6 +2789,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// from an UNRELATED foreground/background source must not silently
 		// dismiss an active permission/question/plan-approval modal.
 		modalActive := m.isModalState()
+		if isWorkspaceOverlayState(m.state) {
+			m.workspaceOverlayReturnState = StateInput
+		}
 		if !modalActive {
 			m.state = StateInput
 		}
@@ -2253,6 +2810,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.responseToolDuration = 0       // Reset tool timing
 		m.responseToolCount = 0
 		m.responseToolFailures = 0
+		m.lastRecoverableStatus = ""
 		m.currentResponseBuf.Reset() // Discard partial response on error
 		m.output.FlushStream()       // Flush any remaining streamed content
 
@@ -2278,7 +2836,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// Live "doing X" label from the in-progress todo. Unlike phaseLabel this
 		// does NOT force state/timers — only the View label selection reads it,
 		// and only while already processing.
-		m.currentActivity = string(msg)
+		m.currentActivity = safeKeyEntryText(string(msg))
 
 	case LoopIterationMsg:
 		m.loopIteration = msg.Iteration
@@ -2327,43 +2885,60 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// is currently displayed — so the still-showing prompt's own decision
 		// can never be misattributed to this one, or vice versa.
 		if m.isModalState() {
-			if m.onPermission != nil {
+			resolved := m.onPermission != nil
+			if resolved {
 				m.onPermission(msg.ID, PermissionDeny)
 			}
+			m.showPromptCollision("permission request", "denied", resolved)
 		} else {
 			m.permRequest = &msg
 			m.permSelectedOption = 0
+			m.permShowDetails = false
+			m.permDetailScroll = 0
+			m.permNotice = ""
 			m.state = StatePermissionPrompt
 			cmds = append(cmds, m.bellCmd())
 		}
 
 	case QuestionRequestMsg:
 		if m.isModalState() {
-			if m.onQuestion != nil {
+			resolved := m.onQuestion != nil
+			if resolved {
 				m.onQuestion("")
 			}
+			m.showPromptCollision("question", "cancelled", resolved)
 		} else {
 			m.questionRequest = &msg
-			m.questionSelectedOption = 0
+			m.questionSelectedOption = questionDefaultIndex(msg.Options, msg.Default)
 			m.questionCustomInput = false
+			m.questionInputError = ""
 			m.state = StateQuestionPrompt
 			cmds = append(cmds, m.bellCmd())
 			// If no options, initialize input model for free text
 			if len(msg.Options) == 0 {
 				m.questionInputModel = NewInputModel(m.styles, m.workDir)
-				m.questionInputModel.SetWidth(m.width)
+				m.questionInputModel.SetWidth(promptInputContentWidth(m.width))
 				cmds = append(cmds, m.questionInputModel.Focus())
 			}
 		}
 
 	case PlanApprovalRequestMsg:
 		if m.isModalState() {
-			if m.onPlanApproval != nil {
+			resolved := m.onPlanApproval != nil
+			if resolved {
 				m.onPlanApproval(PlanRejected)
 			}
+			m.showPromptCollision("plan", "rejected", resolved)
 		} else {
 			m.planRequest = &msg
-			m.planSelectedOption = 0
+			m.planSelectedOption = int(PlanApproved)
+			if len(msg.Steps) == 0 {
+				m.planSelectedOption = int(PlanRejected)
+			}
+			m.planStepScroll = 0
+			m.planFeedbackMode = false
+			m.planFeedbackError = ""
+			m.planApprovalNotice = ""
 			m.state = StatePlanApproval
 			cmds = append(cmds, m.bellCmd())
 		}
@@ -2428,7 +3003,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if msg.Status == "paused" {
 			copyMsg := msg
 			m.planPauseNotice = &copyMsg
-		} else if msg.Status == "in_progress" || msg.Status == "completed" {
+		} else {
+			// A pause notice describes one specific transition. Any subsequent
+			// state supersedes it; retaining it after failed/skipped rendered a
+			// stale "Continue" action for a step that was no longer paused.
 			m.planPauseNotice = nil
 		}
 
@@ -2457,9 +3035,11 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// decision channel until DiffDecisionTimeout/ctx cancellation.
 		// Auto-reject THIS incoming request so its caller doesn't hang.
 		if m.isModalState() {
-			if m.onDiffDecision != nil {
+			resolved := m.onDiffDecision != nil
+			if resolved {
 				m.onDiffDecision(DiffReject)
 			}
+			m.showPromptCollision("diff", "rejected", resolved)
 		} else {
 			// Emit a compact inline diff card into the chat stream as a
 			// persistent record of what's being proposed, then open the
@@ -2479,13 +3059,15 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case MultiDiffPreviewRequestMsg:
 		if m.isModalState() {
-			if m.onMultiDiffDecision != nil {
+			resolved := m.onMultiDiffDecision != nil
+			if resolved {
 				rejected := make(map[string]DiffDecision, len(msg.Files))
 				for _, f := range msg.Files {
 					rejected[f.FilePath] = DiffReject
 				}
 				m.onMultiDiffDecision(rejected)
 			}
+			m.showPromptCollision("multi-file diff", "rejected", resolved)
 		} else {
 			m.multiDiffRequest = &msg
 			m.multiDiffPreview.SetSize(m.width, m.height)
@@ -2494,41 +3076,75 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case DiffPreviewResponseMsg:
-		m.diffRequest = nil
 		if msg.Decision == DiffApply || msg.Decision == DiffApplyAll {
-			m.state = StateProcessing
-			if m.onDiffDecision != nil {
-				m.onDiffDecision(msg.Decision)
+			if m.onDiffDecision == nil {
+				m.diffPreview.MarkResponseUnavailable()
+				m.state = StateDiffPreview
+				if m.toastManager != nil {
+					m.toastManager.ShowError("Diff decision handler is unavailable · press Esc to cancel")
+				}
+				break
 			}
+			m.diffRequest = nil
+			m.state = StateProcessing
+			m.onDiffDecision(msg.Decision)
 		} else {
+			m.diffRequest = nil
 			m.state = StateInput
 			m.output.AppendLine(m.styles.Warning.Render(" Changes rejected"))
 			m.output.AppendLine("")
 			if m.onDiffDecision != nil {
 				m.onDiffDecision(msg.Decision)
+			} else if m.onCancel != nil {
+				m.onCancel()
 			}
 			cmds = append(cmds, m.input.Focus())
 		}
 
 	case MultiDiffPreviewResponseMsg:
-		m.multiDiffRequest = nil
-		allApplied := true
+		applied, rejected := 0, 0
 		for _, decision := range msg.Decisions {
-			if decision != DiffApply {
-				allApplied = false
-				break
+			if decision == DiffApply || decision == DiffApplyAll {
+				applied++
+			} else {
+				rejected++
 			}
 		}
-		if allApplied {
-			m.state = StateProcessing
-		} else {
+		if applied > 0 && m.onMultiDiffDecision == nil {
+			m.multiDiffPreview.MarkResponseUnavailable()
+			m.state = StateMultiDiffPreview
+			if m.toastManager != nil {
+				m.toastManager.ShowError("Diff decision handler is unavailable · press Esc to cancel")
+			}
+			break
+		}
+		m.multiDiffRequest = nil
+		switch {
+		case len(msg.Decisions) == 0:
+			// Empty review is a close/no-op, not vacuous "all applied". The old
+			// allApplied loop left this true and falsely returned to Processing.
 			m.state = StateInput
-			m.output.AppendLine(m.styles.Warning.Render(" Changes rejected"))
+			if m.toastManager != nil {
+				m.toastManager.ShowInfo("No changes to review")
+			}
+			cmds = append(cmds, m.input.Focus())
+		case applied > 0:
+			// The workspace review contract preserves per-file decisions, so a
+			// mixed result still has approved work to apply in the background.
+			m.state = StateProcessing
+			if rejected > 0 && m.toastManager != nil {
+				m.toastManager.ShowInfo(fmt.Sprintf("%s approved · %s rejected", pluralCount(applied, "file", "files"), pluralCount(rejected, "file", "files")))
+			}
+		default:
+			m.state = StateInput
+			m.output.AppendLine(m.styles.Warning.Render(" All changes rejected"))
 			m.output.AppendLine("")
 			cmds = append(cmds, m.input.Focus())
 		}
 		if m.onMultiDiffDecision != nil {
 			m.onMultiDiffDecision(msg.Decisions)
+		} else if m.onCancel != nil {
+			m.onCancel()
 		}
 
 	case SearchResultsRequestMsg:
@@ -2536,10 +3152,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// (no decision channel to auto-resolve), so just drop it with a toast
 		// rather than silently discarding whatever's currently showing.
 		if m.isModalState() {
-			if m.toastManager != nil {
-				m.toastManager.ShowWarning("Search results ready but another prompt is active")
+			query := safeKeyEntryText(msg.Query)
+			action := "Search results were not opened"
+			if query != "" {
+				action = fmt.Sprintf("Search results for %q were not opened", truncateForWidth(query, 32))
 			}
+			m.showSurfaceCollision(action, "close it and run the search again")
 		} else {
+			m.workspaceOverlayReturnState = overlayReturnState(m.state)
 			m.searchRequest = &msg
 			m.searchResults.SetSize(m.width, m.height)
 			m.searchResults.SetResults(msg.Query, msg.Tool, msg.Results)
@@ -2547,25 +3167,38 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case SearchResultsActionMsg:
-		m.searchRequest = nil
 		if msg.Action == SearchActionClose {
-			m.state = StateInput
-			cmds = append(cmds, m.input.Focus())
-		} else {
-			// Reset state for any other action (Open, Edit, CopyPath)
-			m.state = StateInput
-			cmds = append(cmds, m.input.Focus())
-			if m.onSearchAction != nil {
-				m.onSearchAction(msg.Action)
-			}
+			m.searchRequest = nil
+			cmds = append(cmds, m.restoreWorkspaceOverlay())
+			break
 		}
+
+		if msg.Action == SearchActionCopyPath {
+			if msg.FilePath == "" {
+				if m.toastManager != nil {
+					m.toastManager.ShowWarning("No path is available to copy")
+				}
+				break
+			}
+			showClipboardCopyFeedback(m.toastManager, "Copied result path", copyTextToClipboard(msg.FilePath))
+			m.dispatchSearchResultAction(msg)
+			break
+		}
+
+		if !m.dispatchSearchResultAction(msg) {
+			if m.toastManager != nil {
+				m.toastManager.ShowWarning("Search result actions are unavailable in this session")
+			}
+			break
+		}
+		m.searchRequest = nil
+		cmds = append(cmds, m.restoreWorkspaceOverlay())
 
 	case GitStatusRequestMsg:
 		if m.isModalState() {
-			if m.toastManager != nil {
-				m.toastManager.ShowWarning("Git status ready but another prompt is active")
-			}
+			m.showSurfaceCollision("Git status update was not opened", "close it and reopen Git status")
 		} else {
+			m.workspaceOverlayReturnState = overlayReturnState(m.state)
 			m.gitStatusRequest = &msg
 			m.gitStatusModel.SetSize(m.width, m.height)
 			m.gitStatusModel.SetStatus(msg.Entries, msg.Branch, msg.Upstream, msg.AheadBehind)
@@ -2573,74 +3206,182 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 	case GitStatusActionMsg:
-		// Always reset state and request for any action
-		m.gitStatusRequest = nil
-		m.state = StateInput
-		cmds = append(cmds, m.input.Focus())
-
-		// Call action handler for non-close actions
-		if msg.Action != GitActionClose && m.onGitAction != nil {
-			m.onGitAction(msg.Action)
+		if msg.Action == GitActionClose {
+			m.gitStatusRequest = nil
+			cmds = append(cmds, m.restoreWorkspaceOverlay())
+			break
 		}
+		// Diff is an inline preview request, not a terminal action. Keep Git
+		// Status open while the embedding application loads the selected file.
+		if msg.Action == GitActionDiff {
+			if !m.dispatchGitStatusAction(msg) {
+				m.gitStatusModel.pendingDiffPath = ""
+				m.gitStatusModel.SetDiff("Diff preview unavailable\nNo diff provider is connected")
+				if m.toastManager != nil {
+					m.toastManager.ShowWarning("Diff preview is unavailable in this session")
+				}
+			}
+			break
+		}
+		if !m.dispatchGitStatusAction(msg) {
+			if m.toastManager != nil {
+				m.toastManager.ShowWarning("Git status actions are unavailable in this session")
+			}
+			break
+		}
+		m.gitStatusRequest = nil
+		cmds = append(cmds, m.restoreWorkspaceOverlay())
+
+	case GitStatusDiffMsg:
+		// Selection changes may issue overlapping asynchronous requests. Only
+		// the response for the currently loading path may update the preview.
+		if m.state != StateGitStatus || !m.gitStatusModel.diffVisible() ||
+			msg.FilePath == "" || msg.FilePath != m.gitStatusModel.pendingDiffPath {
+			break
+		}
+		m.gitStatusModel.pendingDiffPath = ""
+		if errText := safeKeyEntryText(msg.Error); errText != "" {
+			m.gitStatusModel.SetDiffError("Unable to load diff · " + errText)
+			if m.toastManager != nil {
+				m.toastManager.ShowError("Unable to load diff: " + errText)
+			}
+			break
+		}
+		m.gitStatusModel.SetDiff(msg.Content)
 
 	case FileBrowserRequestMsg:
 		if m.isModalState() {
-			if m.toastManager != nil {
-				m.toastManager.ShowWarning("File browser requested but another prompt is active")
-			}
+			m.showSurfaceCollision("File browser did not open", "close it and retry")
 		} else {
+			previousReturnState := m.workspaceOverlayReturnState
+			m.workspaceOverlayReturnState = overlayReturnState(m.state)
 			m.fileBrowser.SetSize(m.width, m.height)
 			if err := m.fileBrowser.SetPath(msg.StartPath); err == nil {
 				m.fileBrowserActive = true
 				m.state = StateFileBrowser
 			} else {
-				m.output.AppendLine(m.styles.FormatError(fmt.Sprintf("Could not open file browser: %s", err)))
+				m.workspaceOverlayReturnState = previousReturnState
+				m.fileBrowserActive = false
+				errorText := "Could not open file browser: " + safeKeyEntryText(err.Error())
+				m.output.AppendLine(m.styles.FormatError(errorText))
 				m.output.AppendLine("")
+				if m.toastManager != nil {
+					m.toastManager.ShowError(errorText)
+				}
 			}
 		}
 
 	case FileBrowserActionMsg:
-		if msg.Action == FileBrowserActionClose {
-			m.fileBrowserActive = false
-			m.state = StateInput
-			cmds = append(cmds, m.input.Focus())
-		} else if msg.Action == FileBrowserActionOpen {
-			m.fileBrowserActive = false
-			m.state = StateInput
-			cmds = append(cmds, m.input.Focus())
-			if m.onFileSelect != nil {
-				m.onFileSelect(msg.Path)
-			}
-		} else if msg.Action == FileBrowserActionSelect {
-			m.fileBrowserActive = false
-			m.state = StateInput
-			cmds = append(cmds, m.input.Focus())
+		switch msg.Action {
+		case FileBrowserActionClose:
+			cmds = append(cmds, m.finishFileBrowser(nil))
+		case FileBrowserActionOpen:
+			cmds = append(cmds, m.finishFileBrowser([]string{msg.Path}))
+		case FileBrowserActionSelect:
+			cmds = append(cmds, m.finishFileBrowser(msg.Files))
 		}
 
 	case ProgressUpdateMsg:
-		m.progressModel.UpdateProgress(msg.Current, msg.CurrentItem, msg.Message)
+		if !m.progressActive {
+			m.progressModel.Start(m.progressModel.title, msg.Total)
+			m.progressActive = true
+		}
+		m.progressModel, _ = m.progressModel.Update(msg)
+		if m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming {
+			m.progressReturnState = m.state
+			m.state = StateBatchProgress
+		}
 
 	case ProgressCompleteMsg:
-		m.progressModel.Complete()
-		m.progressActive = false
-		if m.state == StateBatchProgress {
-			m.state = StateInput
-			cmds = append(cmds, m.input.Focus())
+		if !m.progressActive {
+			m.progressModel.Start(m.progressModel.title, msg.TotalItems)
+			m.progressActive = true
+		}
+		m.progressModel, _ = m.progressModel.Update(msg)
+		if m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming {
+			m.progressReturnState = m.state
+			m.state = StateBatchProgress
 		}
 
 	case CloseOverlayMsg:
-		m.state = StateInput
-		cmds = append(cmds, m.input.Focus())
+		if m.state == StateBatchProgress {
+			m.progressActive = false
+			m.state = m.progressReturnState
+			if m.state != StateProcessing && m.state != StateStreaming {
+				m.state = StateInput
+				cmds = append(cmds, m.input.Focus())
+			}
+		} else if m.progressActive {
+			// A higher-priority modal may have kept batch progress in the
+			// background. Reveal it after that overlay closes instead of losing
+			// the only completion/error summary.
+			m.progressReturnState = StateInput
+			m.state = StateBatchProgress
+		} else {
+			m.state = StateInput
+			cmds = append(cmds, m.input.Focus())
+		}
 
 	// Config update message - refresh UI state
 	case ConfigUpdateMsg:
 		m.permissionsEnabled = msg.PermissionsEnabled
 		m.sandboxEnabled = msg.SandboxEnabled
 		m.planningModeEnabled = msg.PlanningModeEnabled
+		m.SetReducedMotion(msg.ReducedMotion)
 		if msg.ModelName != "" {
 			m.currentModel = msg.ModelName
 			setTerminalTitle(fmt.Sprintf("Gokin · %s · %s", m.currentModel, shortenPath(m.workDir, 30)))
 		}
+
+	case ModelSelectResultMsg:
+		requestedID := safeKeyEntryText(msg.RequestedID)
+		// Only the active request owns this transition. A duplicated or late
+		// result must not clear feedback for a newer switch.
+		if requestedID == "" || requestedID != m.modelSwitchPending {
+			break
+		}
+		m.modelSwitchPending = ""
+		modelID := safeKeyEntryText(msg.ModelID)
+		if modelID != "" {
+			m.currentModel = modelID
+			m.settingsModel = modelID
+			setTerminalTitle(fmt.Sprintf("Gokin · %s · %s", modelID, shortenPath(m.workDir, 30)))
+		}
+		detail := safeKeyEntryText(msg.Message)
+		confirmed := msg.Success && modelID != ""
+		if confirmed {
+			if detail == "" {
+				detail = "Switched to " + modelID
+			}
+			if m.state == StateSettings {
+				m.settingsNotice = detail
+			}
+			if m.state == StateModelSelector {
+				m.modelSelectorNotice = detail
+			}
+			if m.toastManager != nil {
+				m.toastManager.ShowTagged("model-switch", ToastSuccess, detail, 3*time.Second)
+			}
+			m.output.AppendLine(m.styles.Spinner.Render(detail))
+			break
+		}
+		if detail == "" {
+			if msg.Success {
+				detail = "Couldn't confirm model switch · previous model remains active"
+			} else {
+				detail = "Couldn't switch model · previous model restored"
+			}
+		}
+		if m.state == StateSettings {
+			m.settingsNotice = detail
+		}
+		if m.state == StateModelSelector {
+			m.modelSelectorNotice = detail
+		}
+		if m.toastManager != nil {
+			m.toastManager.ShowTagged("model-switch", ToastError, detail, 15*time.Second)
+		}
+		m.output.AppendLine(lipgloss.NewStyle().Foreground(ColorWarning).Render("  ⚠ " + detail))
 
 	// Open the interactive settings modal (/settings)
 	case OpenSettingsMsg:
@@ -2651,21 +3392,104 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// Permission/Question/PlanApproval/Diff prompt, orphaning its blocked
 		// decision channel until timeout/ctx cancellation.
 		if m.isModalState() {
-			if m.toastManager != nil {
-				m.toastManager.ShowWarning("Resolve the active prompt before opening Settings")
-			}
+			m.showSurfaceCollision("Settings did not open", "")
 		} else {
 			m.openSettings(msg)
 		}
 
+	case SettingToggleResultMsg:
+		key := strings.ToLower(strings.TrimSpace(msg.Key))
+		delete(m.settingsPending, key)
+		name := key
+		live := true
+		found := false
+		for i := range m.settingsItems {
+			if m.settingsItems[i].Key != key {
+				continue
+			}
+			m.settingsItems[i].On = msg.On
+			m.settingsItems[i].Pending = false
+			name = m.settingsItems[i].Name
+			live = m.settingsItems[i].Live
+			found = true
+			break
+		}
+		if name = safeKeyEntryText(name); name == "" {
+			name = "Setting"
+		}
+		detail := safeKeyEntryText(msg.Message)
+		if msg.Success {
+			feedback := fmt.Sprintf("%s: %s", name, onOffLabel(msg.On))
+			if !live {
+				feedback += " · restart required"
+			}
+			if m.state == StateSettings && found {
+				m.settingsNotice = feedback
+			} else if m.toastManager != nil {
+				m.toastManager.ShowTagged("setting-"+key, ToastSuccess, feedback, 3*time.Second)
+			}
+			break
+		}
+		if detail == "" {
+			detail = "Couldn't apply setting — restored previous value"
+		}
+		feedback := fmt.Sprintf("%s: couldn't apply — restored %s", name, onOffLabel(msg.On))
+		if m.state == StateSettings && found {
+			m.settingsNotice = feedback
+		}
+		if m.toastManager != nil {
+			m.toastManager.ShowTagged("setting-"+key, ToastError, detail, 15*time.Second)
+		}
+		m.output.AppendLine(lipgloss.NewStyle().Foreground(ColorWarning).Render("  ⚠ " + detail))
+
 	// Open the masked API-key entry modal (/login <provider> with no key)
 	case OpenKeyEntryMsg:
 		if m.isModalState() {
-			if m.toastManager != nil {
-				m.toastManager.ShowWarning("Resolve the active prompt before entering an API key")
-			}
+			m.showSurfaceCollision("API key entry did not open", "")
 		} else {
 			cmds = append(cmds, m.openKeyEntry(msg))
+		}
+
+	case KeyEntryResultMsg:
+		provider := safeKeyEntryProvider(msg.Provider)
+		if provider == "" || provider != m.keyEntryPendingProvider {
+			break
+		}
+		displayName := m.keyEntryPendingDisplayName
+		setupURL := m.keyEntryPendingSetupURL
+		m.keyEntryPendingProvider = ""
+		m.keyEntryPendingDisplayName = ""
+		m.keyEntryPendingSetupURL = ""
+		detail := safeKeyEntryText(msg.Message)
+		if msg.Success {
+			if detail == "" {
+				detail = displayName + " API key saved"
+			}
+			if m.toastManager != nil {
+				toastType := ToastSuccess
+				duration := 3 * time.Second
+				if msg.Warning {
+					toastType = ToastWarning
+					duration = 8 * time.Second
+				}
+				m.toastManager.ShowTagged("login-"+provider, toastType, detail, duration)
+			}
+			break
+		}
+		if detail == "" {
+			detail = "Login failed · check the key and try again"
+		}
+		if m.toastManager != nil {
+			m.toastManager.ShowTagged("login-"+provider, ToastError, detail, 15*time.Second)
+		}
+		m.output.AppendLine(lipgloss.NewStyle().Foreground(ColorWarning).Render("  ⚠ " + detail))
+		// Reopen only when it cannot clobber work or another decision modal. The
+		// secret was already destroyed; the retry field is intentionally empty.
+		if m.state == StateInput {
+			cmds = append(cmds, m.openKeyEntry(OpenKeyEntryMsg{
+				Provider: provider, DisplayName: displayName, SetupURL: setupURL,
+			}))
+			m.keyEntryError = detail
 		}
 
 	// Planning mode toggle result (async)
@@ -2886,6 +3710,12 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	// Status updates from client (retry, rate limit, stream idle)
 	case StatusUpdateMsg:
+		// Status payloads can originate in providers, tools, hooks, and remote
+		// servers. Normalize once before any value reaches a persistent live
+		// label: toast rendering already collapsed whitespace, but the raw copy
+		// in streamIdleMsg/processingLabel could inject rows into the activity
+		// card and destabilize the frame after the toast disappeared.
+		statusText := safeKeyEntryText(msg.Message)
 		// Ring the bell for events a stepped-away user should HEAR (e.g. a
 		// background /loop reaching a terminal state). Gated on bellEnabled
 		// inside bellCmd; same audible signal background tasks use.
@@ -2900,36 +3730,56 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			if maxAttempts, ok := msg.Details["maxAttempts"].(int); ok {
 				m.retryMax = maxAttempts
 			}
-			if m.toastManager != nil && msg.Message != "" {
+			if m.toastManager != nil && statusText != "" {
 				// Collapse consecutive retries into a single live toast so rapid
 				// attempts don't stack up and push other toasts off screen.
-				m.toastManager.ShowTagged("retry", ToastWarning, msg.Message, 4*time.Second)
+				m.toastManager.ShowTagged("retry", ToastWarning, statusText, 4*time.Second)
 			}
 		case StatusRateLimit:
+			if statusText == "" {
+				statusText = "Rate limit reached"
+			}
 			if m.toastManager != nil {
-				m.toastManager.ShowWarning(msg.Message)
+				m.toastManager.ShowWarning(statusText)
 			}
 			if wt, ok := msg.Details["waitTime"].(time.Duration); ok {
 				m.rateLimitWaitUntil = time.Now().Add(wt)
 			}
 		case StatusStreamIdle:
 			firstWarning := m.streamIdleMsg == ""
-			if msg.Message != "" {
-				m.streamIdleMsg = msg.Message
+			if statusText != "" {
+				m.streamIdleMsg = statusText
 			}
-			if firstWarning && m.toastManager != nil && msg.Message != "" {
-				m.toastManager.ShowWarning(msg.Message)
+			if firstWarning && m.toastManager != nil && statusText != "" {
+				m.toastManager.ShowWarning(statusText)
 			}
 		case StatusStreamResume:
 			m.streamIdleMsg = ""
 			m.retryAttempt = 0
 			m.retryMax = 0
 			m.rateLimitWaitUntil = time.Time{}
+			m.lastRecoverableStatus = ""
 		case StatusRecoverableError:
+			if statusText == "" {
+				statusText = "Recoverable error"
+			}
 			if m.toastManager != nil {
 				// Use the hint-enhanced variant so the toast tells the user
 				// what to try next, not just what went wrong.
-				m.toastManager.ShowErrorWithHint(msg.Message)
+				m.toastManager.ShowErrorWithHint(statusText)
+			}
+			// Recoverable failures used to exist only in an expiring toast. Toast
+			// history has no user-facing surface, so a stepped-away user could not
+			// recover the reason or suggested action. Preserve one compact line per
+			// distinct recovery episode in scrollback; identical retry callbacks
+			// still refresh the toast without spamming durable output.
+			if statusText != m.lastRecoverableStatus {
+				durable := statusText
+				if hint := GetCompactHint(statusText); hint != "" {
+					durable += " → " + hint
+				}
+				m.output.AppendLine(lipgloss.NewStyle().Foreground(ColorWarning).Render("  ⚠ " + durable))
+				m.lastRecoverableStatus = statusText
 			}
 		case StatusCancelled:
 			// Cancellation: clear any in-flight idle/thinking hints so the user
@@ -2937,21 +3787,24 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.streamIdleMsg = ""
 			m.currentTool = ""
 			m.currentToolInfo = ""
-			m.settleActiveToolCalls(false, msg.Message)
+			if statusText == "" {
+				statusText = "Operation cancelled"
+			}
+			m.settleActiveToolCalls(false, statusText)
 			if m.toastManager != nil {
-				m.toastManager.ShowWarning(msg.Message)
+				m.toastManager.ShowWarning(statusText)
 			}
 		case StatusWarning:
-			if m.toastManager != nil && msg.Message != "" {
+			if m.toastManager != nil && statusText != "" {
 				if tag, _ := msg.Details["tag"].(string); tag != "" {
-					m.toastManager.ShowTagged(tag, ToastWarning, msg.Message, 4*time.Second)
+					m.toastManager.ShowTagged(tag, ToastWarning, statusText, 4*time.Second)
 				} else {
-					m.toastManager.ShowWarning(msg.Message)
+					m.toastManager.ShowWarning(statusText)
 				}
 			}
 		case StatusInfo:
-			if label, _ := msg.Details["phaseLabel"].(string); strings.TrimSpace(label) != "" {
-				m.processingLabel = strings.TrimSpace(label)
+			if label, _ := msg.Details["phaseLabel"].(string); safeKeyEntryText(label) != "" {
+				m.processingLabel = safeKeyEntryText(label)
 				m.state = StateProcessing
 				m.streamStartTime = time.Now()
 				m.lastActivityTime = time.Now()
@@ -2959,17 +3812,17 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				m.streamIdleMsg = ""
 			}
 			silent, _ := msg.Details["silent"].(bool)
-			if !silent && m.toastManager != nil && msg.Message != "" {
-				m.toastManager.Show(ToastInfo, "", msg.Message, 4*time.Second)
+			if !silent && m.toastManager != nil && statusText != "" {
+				m.toastManager.Show(ToastInfo, "", statusText, 4*time.Second)
 			}
 		case StatusThinkingIdle:
 			// Model is deliberately thinking — show distinct from generic "idle"
 			firstWarning := m.streamIdleMsg == ""
-			if msg.Message != "" {
-				m.streamIdleMsg = msg.Message
+			if statusText != "" {
+				m.streamIdleMsg = statusText
 			}
-			if firstWarning && m.toastManager != nil && msg.Message != "" {
-				m.toastManager.Show(ToastInfo, "", msg.Message, 6*time.Second)
+			if firstWarning && m.toastManager != nil && statusText != "" {
+				m.toastManager.Show(ToastInfo, "", statusText, 6*time.Second)
 			}
 		}
 	}
@@ -3409,11 +4262,17 @@ func (m Model) View() string {
 	var builder strings.Builder
 	const outputMarker = "\x00gokin-main-output\x00"
 
-	// Toast notifications (top of screen) - single line, minimal
-	if m.toastManager != nil && m.toastManager.Count() > 0 {
-		toasts := m.toastManager.View(m.width)
-		if toasts != "" {
-			builder.WriteString(toasts)
+	// Toast notifications are top-aligned on normal screens. On short panes the
+	// final compositor keeps the bottom rows, so top-aligned notifications were
+	// precisely what got clipped; defer the severity-limited view near the
+	// status bar there. The active manager still retains every notification.
+	toastView := ""
+	deferToasts := false
+	if m.state != StateNotificationCenter && m.toastManager != nil && m.toastManager.Count() > 0 {
+		toastView = m.toastManager.ViewLimit(m.width, toastVisibleLineLimit(m.height))
+		deferToasts = m.height > 0 && m.height <= 12
+		if toastView != "" && !deferToasts {
+			builder.WriteString(toastView)
 			builder.WriteString("\n")
 		}
 	}
@@ -3428,7 +4287,7 @@ func (m Model) View() string {
 	// Welcome panel (mockup scene A) when output is empty and user is at
 	// input. Replaces the prior single-line dim hint with a structured
 	// idle screen: wordmark, version, tips, project info, mode hint.
-	if m.output.IsEmpty() && m.state == StateInput {
+	if m.output.IsEmpty() && m.state == StateInput && !deferToasts {
 		builder.WriteString(m.renderWelcomePanel())
 		builder.WriteString("\n")
 	}
@@ -3476,13 +4335,19 @@ func (m Model) View() string {
 		panelBuilder.WriteString("\n")
 	}
 
-	// Plan progress panel (when actively executing a plan)
+	// Plan progress panel (when actively executing a plan). Resolve it once so
+	// the pause fallback below can avoid repeating the same step and reason in
+	// a second bordered panel.
+	planProgressView := ""
 	if m.planProgressPanel != nil && m.planProgressPanel.IsVisible() {
-		panelBuilder.WriteString(m.planProgressPanel.View(m.width))
+		planProgressView = m.planProgressPanel.View(m.width, m.height)
+	}
+	if planProgressView != "" {
+		panelBuilder.WriteString(planProgressView)
 		panelBuilder.WriteString("\n")
 	}
 
-	if m.planPauseNotice != nil {
+	if m.planPauseNotice != nil && planProgressView == "" {
 		panelBuilder.WriteString(m.renderPlanPauseBlock(*m.planPauseNotice))
 		panelBuilder.WriteString("\n")
 	}
@@ -3554,12 +4419,16 @@ func (m Model) View() string {
 			elapsed = time.Since(m.streamStartTime)
 		}
 		frameIdx := int(elapsed.Milliseconds()/80) % len(spinnerFrames)
+		activityGlyph := spinnerFrames[frameIdx]
+		if m.reducedMotion {
+			activityGlyph = "●"
+		}
 
 		if m.currentTool != "" {
 			// Tool execution: spinner + name in tool's color + info
 			toolColor := GetToolIconColor(m.currentTool)
 			spinnerStyle := lipgloss.NewStyle().Foreground(toolColor)
-			spinner := spinnerStyle.Render(spinnerFrames[frameIdx])
+			spinner := spinnerStyle.Render(activityGlyph)
 
 			toolNameStyle := lipgloss.NewStyle().Foreground(toolColor).Bold(true)
 			icon := GetToolIcon(m.currentTool)
@@ -3594,7 +4463,7 @@ func (m Model) View() string {
 		} else if m.state == StateProcessing || m.processingLabel != "" {
 			// Thinking/Planning/Analyzing: spinner in primary color, label in muted
 			spinnerStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
-			spinner := spinnerStyle.Render(spinnerFrames[frameIdx])
+			spinner := spinnerStyle.Render(activityGlyph)
 			labelStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 			label := m.processingLabel
@@ -3728,6 +4597,11 @@ func (m Model) View() string {
 		builder.WriteString("\n")
 	}
 
+	if m.state == StateNotificationCenter {
+		builder.WriteString(m.renderNotificationCenter())
+		builder.WriteString("\n")
+	}
+
 	// Command palette
 	if m.state == StateCommandPalette {
 		builder.WriteString(m.commandPalette.View(m.width, m.height))
@@ -3798,12 +4672,16 @@ func (m Model) View() string {
 
 	// Overlay Context Observatory panel if visible
 	if m.observatoryPanel != nil && m.observatoryPanel.IsVisible() {
-		observatoryView := m.observatoryPanel.View(m.width)
+		observatoryView := m.observatoryPanel.View(m.width, m.height)
 		if observatoryView != "" {
 			builder.WriteString("\n")
 			builder.WriteString(observatoryView)
 			builder.WriteString("\n")
 		}
+	}
+	if deferToasts && toastView != "" {
+		builder.WriteString("\n")
+		builder.WriteString(toastView)
 	}
 
 	preStatus := builder.String()
@@ -3843,6 +4721,19 @@ func (m Model) View() string {
 		frame = body + strings.Repeat("\n", 1+missing) + statusBar
 	}
 	return m.styles.App.Render(frame)
+}
+
+func toastVisibleLineLimit(height int) int {
+	switch {
+	case height <= 0 || height > 18:
+		return 5
+	case height <= 8:
+		return 1
+	case height <= 12:
+		return 2
+	default:
+		return 3
+	}
 }
 
 // tailVisualRows keeps the bottom-most rendered rows of s. The dynamic footer
@@ -3896,16 +4787,42 @@ func (m *Model) applyResize(msg *tea.WindowSizeMsg) tea.Cmd {
 	m.width = max(msg.Width, 10)
 	m.height = max(msg.Height, 6)
 	m.input.SetWidth(m.width)
+	m.progressModel.SetSize(m.width, m.height)
+	// Full-screen models own internal viewport geometry. They may stay open
+	// while the terminal is resized, so updating only the outer compositor
+	// leaves stale split panes, footer budgets and selection windows behind.
+	// Route only to the active heavy model: File Browser SetSize may reload a
+	// preview from disk, and inactive request-backed models are sized again when
+	// opened using the already-current m.width/m.height.
+	switch m.state {
+	case StateDiffPreview:
+		m.diffPreview.SetSize(m.width, m.height)
+	case StateMultiDiffPreview:
+		m.multiDiffPreview.SetSize(m.width, m.height)
+	case StateSearchResults:
+		m.searchResults.SetSize(m.width, m.height)
+	case StateGitStatus:
+		m.gitStatusModel.SetSize(m.width, m.height)
+	case StateFileBrowser:
+		m.fileBrowser.SetSize(m.width, m.height)
+	case StateCommandPalette:
+		if m.commandPalette != nil {
+			m.commandPalette.SetSize(m.width, m.height)
+		}
+	}
 	if m.CompactMode {
 		m.output.SetSize(m.width, max(m.height/3, 1))
 	} else {
 		m.output.SetSize(m.width, max(m.height-5, 1))
 	}
 	if m.planFeedbackMode {
-		m.planFeedbackInput.SetWidth(max(m.width-4, 1))
+		m.planFeedbackInput.SetWidth(promptInputContentWidth(m.width))
 	}
 	if m.state == StateQuestionPrompt {
-		m.questionInputModel.SetWidth(max(m.width-4, 1))
+		m.questionInputModel.SetWidth(promptInputContentWidth(m.width))
+	}
+	if m.state == StateAPIKeyEntry {
+		m.keyEntryInput.Width = keyEntryInputWidth(m.width)
 	}
 	var cmd tea.Cmd
 	m.output, cmd = m.output.Update(*msg)
@@ -3968,11 +4885,21 @@ func (m *Model) handleTaskStarted(msg TaskStartedEvent) {
 	}
 
 	m.coordinatedTasks[msg.TaskID] = taskState
-	m.coordinatedTaskOrder = append(m.coordinatedTaskOrder, msg.TaskID)
+	taskIndex := 0
+	for i, id := range m.coordinatedTaskOrder {
+		if id == msg.TaskID {
+			taskIndex = i + 1
+			break
+		}
+	}
+	if taskIndex == 0 {
+		m.coordinatedTaskOrder = append(m.coordinatedTaskOrder, msg.TaskID)
+		taskIndex = len(m.coordinatedTaskOrder)
+	}
 	m.activeCoordinatedTask = msg.TaskID
 
 	m.output.AppendLine("")
-	m.output.AppendLine(m.renderTaskTimelineStart(len(m.coordinatedTaskOrder), msg.PlanType, msg.Message))
+	m.output.AppendLine(m.renderTaskTimelineStart(taskIndex, msg.PlanType, msg.Message))
 }
 
 // cleanupStaleCoordinatedTasks removes completed or failed coordinated tasks
@@ -4006,8 +4933,24 @@ func (m *Model) cleanupStaleCoordinatedTasks() {
 // handleTaskCompleted marks a coordinated task as completed or failed and
 // schedules its auto-removal after a short delay.
 func (m *Model) handleTaskCompleted(msg TaskCompletedEvent) tea.Cmd {
-	if ts, ok := m.coordinatedTasks[msg.TaskID]; ok {
-		ts.Duration = msg.Duration
+	ts, ok := m.coordinatedTasks[msg.TaskID]
+	if !ok {
+		return nil
+	}
+	{
+		// Terminal events are idempotent. A replay must not append another
+		// completion line or move EndTime, which would prolong stale UI state.
+		if ts.Status != "running" {
+			if m.activeCoordinatedTask == msg.TaskID {
+				m.activeCoordinatedTask = m.latestRunningCoordinatedTask()
+			}
+			return nil
+		}
+		duration := max(msg.Duration, 0)
+		if duration == 0 && !ts.StartTime.IsZero() {
+			duration = max(time.Since(ts.StartTime), 0)
+		}
+		ts.Duration = duration
 		ts.Error = msg.Error
 		ts.Progress = 1.0
 		if msg.Success {
@@ -4017,11 +4960,11 @@ func (m *Model) handleTaskCompleted(msg TaskCompletedEvent) tea.Cmd {
 		}
 		ts.EndTime = time.Now()
 
-		m.output.AppendLine(m.renderTaskTimelineDone(msg.Success, msg.Duration.Round(time.Millisecond), msg.Error))
+		m.output.AppendLine(m.renderTaskTimelineDone(msg.Success, duration.Round(time.Millisecond), msg.Error))
 	}
 
 	if m.activeCoordinatedTask == msg.TaskID {
-		m.activeCoordinatedTask = ""
+		m.activeCoordinatedTask = m.latestRunningCoordinatedTask()
 	}
 
 	// Schedule auto-removal after 5 seconds
@@ -4033,17 +4976,36 @@ func (m *Model) handleTaskCompleted(msg TaskCompletedEvent) tea.Cmd {
 // handleTaskProgress handles the TaskProgressEvent message.
 func (m *Model) handleTaskProgress(msg TaskProgressEvent) {
 	if taskState, ok := m.coordinatedTasks[msg.TaskID]; ok {
-		taskState.Progress = msg.Progress
-		taskState.Message = msg.Message
-		progressBucket := timelineProgressBucket(msg.Progress)
+		if taskState.Status != "running" {
+			return
+		}
+		progress, determinate := normalizeTimelineProgress(msg.Progress)
+		if !determinate {
+			progress = -1
+		}
+		taskState.Progress = progress
+		if message := normalizeTimelineText(msg.Message); message != "" {
+			taskState.Message = message
+		}
+		progressBucket := timelineProgressBucket(progress)
 		progressMessage := normalizeTimelineText(msg.Message)
 		if progressBucket == taskState.LastProgressBucket && progressMessage == taskState.LastProgressMessage {
 			return
 		}
 		taskState.LastProgressBucket = progressBucket
 		taskState.LastProgressMessage = progressMessage
-		m.output.AppendLine(m.renderTaskTimelineProgress(msg.Progress, msg.Message))
+		m.output.AppendLine(m.renderTaskTimelineProgress(progress, msg.Message))
 	}
+}
+
+func (m *Model) latestRunningCoordinatedTask() string {
+	for i := len(m.coordinatedTaskOrder) - 1; i >= 0; i-- {
+		id := m.coordinatedTaskOrder[i]
+		if task, ok := m.coordinatedTasks[id]; ok && task.Status == "running" {
+			return id
+		}
+	}
+	return ""
 }
 
 // renderInlineDiff renders an inline diff for small text changes.
@@ -4326,6 +5288,8 @@ func (m *Model) DebugState() UIDebugState {
 		stateName = "settings"
 	case StateAPIKeyEntry:
 		stateName = "api_key_entry"
+	case StateNotificationCenter:
+		stateName = "notification_center"
 	case StateShortcutsOverlay:
 		stateName = "shortcuts_overlay"
 	case StateCommandPalette:

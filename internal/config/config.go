@@ -258,6 +258,7 @@ type UIConfig struct {
 	ShowWelcome         bool   `yaml:"show_welcome"`  // Show welcome message on first launch
 	HintsEnabled        bool   `yaml:"hints_enabled"` // Show contextual hints for features
 	CompactMode         bool   `yaml:"compact_mode"`
+	ReducedMotion       bool   `yaml:"reduced_motion"`       // Use static activity indicators and instant auto-scroll
 	Bell                bool   `yaml:"bell"`                 // Terminal bell on prompts (default: true)
 	NativeNotifications bool   `yaml:"native_notifications"` // macOS Notification Center (default: false)
 

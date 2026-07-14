@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/sergi/go-diff/diffmatchpatch"
 
 	"gokin/internal/highlight"
@@ -33,26 +35,29 @@ const (
 
 // DiffPreviewModel is the UI component for displaying diff previews.
 type DiffPreviewModel struct {
-	viewport   viewport.Model
-	diff       string
-	filePath   string
-	oldContent string
-	newContent string
-	decision   DiffDecision
-	toolName   string
-	isNewFile  bool
-	styles     *Styles
-	width      int
-	height     int
+	viewport          viewport.Model
+	diff              string
+	filePath          string
+	oldContent        string
+	newContent        string
+	displayOldContent string
+	displayNewContent string
+	decision          DiffDecision
+	toolName          string
+	isNewFile         bool
+	styles            *Styles
+	width             int
+	height            int
 
 	// Configurable context lines (default 3)
 	contextLines int
 
 	// Ignore whitespace-only changes
-	ignoreWhitespace bool
-	sideBySide       bool
-	changeOffsets    []int
-	currentChange    int
+	ignoreWhitespace    bool
+	sideBySide          bool
+	changeOffsets       []int
+	currentChange       int
+	responseUnavailable bool
 
 	// Callback when user makes a decision
 	onDecision func(decision DiffDecision)
@@ -93,16 +98,10 @@ func NewDiffPreviewModel(styles *Styles) DiffPreviewModel {
 // flip between split and unified layouts (Sprint UI polish: auto-fallback
 // on narrow terminals relies on this re-render).
 func (m *DiffPreviewModel) SetSize(width, height int) {
-	if width < 10 {
-		width = 80
-	}
-	if height < 10 {
-		height = 24
-	}
-	m.width = width
-	m.height = height
-	m.viewport.Width = width - 4
-	m.viewport.Height = height - 10 // Reserve space for header and footer
+	m.width = max(width, 1)
+	m.height = max(height, 1)
+	m.viewport.Width = max(m.width-4, 1)
+	m.viewport.Height = max(m.height-10, 1) // Reserve space for header and footer
 
 	// Re-render only when content has already been loaded. Before SetContent
 	// there's nothing to lay out, and refreshDiffView would just produce
@@ -112,14 +111,24 @@ func (m *DiffPreviewModel) SetSize(width, height int) {
 	}
 }
 
+func (m DiffPreviewModel) renderWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
+	return max(m.viewport.Width, 1)
+}
+
 // SetContent sets the diff content to display.
 func (m *DiffPreviewModel) SetContent(filePath, oldContent, newContent, toolName string, isNewFile bool) {
 	m.filePath = filePath
 	m.oldContent = oldContent
 	m.newContent = newContent
+	m.displayOldContent = visibleTerminalControlText(oldContent)
+	m.displayNewContent = visibleTerminalControlText(newContent)
 	m.toolName = toolName
 	m.isNewFile = isNewFile
 	m.decision = DiffPending
+	m.responseUnavailable = false
 
 	m.refreshDiffView()
 }
@@ -132,14 +141,22 @@ const minSideBySideWidth = 80
 
 // refreshDiffView regenerates and re-renders the diff with current settings.
 func (m *DiffPreviewModel) refreshDiffView() {
-	m.diff = m.generateDiff(m.oldContent, m.newContent)
+	m.diff = m.generateDiff(m.displayOldContent, m.displayNewContent)
 	var content string
-	if m.sideBySide && m.viewport.Width >= minSideBySideWidth {
+	if m.effectiveSideBySide() {
 		content = m.renderSideBySide()
 		m.changeOffsets = m.detectChangeOffsets(content)
 	} else {
 		content = m.highlightDiff(m.diff)
 		m.changeOffsets = m.detectChangeOffsets(m.diff)
+	}
+	if len(m.changeOffsets) == 0 {
+		emptyStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+		message := "No content changes detected."
+		if m.ignoreWhitespace && m.displayOldContent != m.displayNewContent {
+			message = "All changes are whitespace-only and currently hidden.\nPress I to show them."
+		}
+		content = emptyStyle.Render(message)
 	}
 	m.viewport.SetContent(content)
 	m.currentChange = -1
@@ -151,12 +168,17 @@ func (m *DiffPreviewModel) refreshDiffView() {
 // terminal auto-fallback. Used by the status footer so its "view: split"
 // hint doesn't lie when we've downgraded.
 func (m DiffPreviewModel) effectiveSideBySide() bool {
-	return m.sideBySide && m.viewport.Width >= minSideBySideWidth
+	return m.sideBySide && !m.ignoreWhitespace && m.viewport.Width >= minSideBySideWidth
 }
 
 // SetDecisionCallback sets the callback for when user makes a decision.
 func (m *DiffPreviewModel) SetDecisionCallback(callback func(DiffDecision)) {
 	m.onDecision = callback
+}
+
+func (m *DiffPreviewModel) MarkResponseUnavailable() {
+	m.responseUnavailable = true
+	m.decision = DiffPending
 }
 
 // diffLine represents a single line in the diff with its type.
@@ -172,8 +194,9 @@ func (m *DiffPreviewModel) generateDiff(oldContent, newContent string) string {
 	var result strings.Builder
 
 	// Header
-	fmt.Fprintf(&result, "--- %s\n", m.filePath)
-	fmt.Fprintf(&result, "+++ %s\n", m.filePath)
+	displayPath := safeKeyEntryText(m.filePath)
+	fmt.Fprintf(&result, "--- %s\n", displayPath)
+	fmt.Fprintf(&result, "+++ %s\n", displayPath)
 
 	// Generate line-based diff
 	diffs := dmp.DiffMain(oldContent, newContent, true)
@@ -341,18 +364,25 @@ func findNearestFuncName(lines []diffLine, startIdx int) string {
 
 // isWhitespaceOnlyHunk checks if a hunk contains only whitespace changes.
 func isWhitespaceOnlyHunk(lines []diffLine) bool {
-	hasChange := false
+	var removed, added []string
 	for _, dl := range lines {
-		if dl.Type == diffmatchpatch.DiffEqual {
-			continue
-		}
-		hasChange = true
-		trimmed := strings.TrimSpace(dl.Text)
-		if trimmed != "" {
-			return false
+		normalized := strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return -1
+			}
+			return r
+		}, dl.Text)
+		switch dl.Type {
+		case diffmatchpatch.DiffDelete:
+			removed = append(removed, normalized)
+		case diffmatchpatch.DiffInsert:
+			added = append(added, normalized)
 		}
 	}
-	return hasChange
+	// Ignore every whitespace rune, including line boundaries. This matches
+	// the user-facing "ignore whitespace" contract and handles the diff
+	// library splitting indentation and trailing spaces into separate chunks.
+	return len(removed)+len(added) > 0 && strings.Join(removed, "") == strings.Join(added, "")
 }
 
 // highlightDiff applies syntax highlighting to the diff with inline word-level highlighting.
@@ -525,6 +555,9 @@ func (m DiffPreviewModel) Update(msg tea.Msg) (DiffPreviewModel, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "y", "Y":
+			if m.responseUnavailable {
+				return m, nil
+			}
 			m.decision = DiffApply
 			if m.onDecision != nil {
 				m.onDecision(DiffApply)
@@ -550,6 +583,9 @@ func (m DiffPreviewModel) Update(msg tea.Msg) (DiffPreviewModel, tea.Cmd) {
 				}
 			}
 		case "A":
+			if m.responseUnavailable {
+				return m, nil
+			}
 			m.decision = DiffApplyAll
 			if m.onDecision != nil {
 				m.onDecision(DiffApplyAll)
@@ -654,7 +690,8 @@ func (m DiffPreviewModel) View() string {
 
 	// Header: ● Diff Preview
 	bulletStyle := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
-	builder.WriteString(bulletStyle.Render("● ") + nameStyle.Render("Diff Preview"))
+	titleLine := bulletStyle.Render("● ") + nameStyle.Render("Diff Preview")
+	builder.WriteString(ansi.Truncate(titleLine, m.renderWidth(), "…"))
 	builder.WriteString("\n")
 
 	// File info with ⎿ marker
@@ -664,7 +701,16 @@ func (m DiffPreviewModel) View() string {
 	} else {
 		fileLabel = "Modified: "
 	}
-	builder.WriteString(markerStyle.Render("  ⎿  ") + toolStyle.Render(m.toolName+" → ") + fileStyle.Render(fileLabel+m.filePath))
+	filePath := safeKeyEntryText(m.filePath)
+	if filePath == "" {
+		filePath = "(unknown file)"
+	}
+	toolPrefix := ""
+	if toolName := safeKeyEntryText(m.toolName); toolName != "" {
+		toolPrefix = toolStyle.Render(toolName + " → ")
+	}
+	fileLine := markerStyle.Render("  ⎿  ") + toolPrefix + fileStyle.Render(fileLabel+filePath)
+	builder.WriteString(ansi.Truncate(fileLine, m.renderWidth(), "…"))
 	builder.WriteString("\n")
 
 	// Diff statistics and settings
@@ -683,13 +729,16 @@ func (m DiffPreviewModel) View() string {
 	viewMode := "unified"
 	if m.effectiveSideBySide() {
 		viewMode = "split"
+	} else if m.sideBySide && m.ignoreWhitespace {
+		viewMode = "split→unified (ignore-ws)"
 	} else if m.sideBySide {
 		// User wants split but the viewport is too narrow — make that
 		// visible in the status line so toggling feels deterministic.
 		viewMode = "split→unified (narrow)"
 	}
 	settings += settingsStyle.Render(" | view: " + viewMode)
-	builder.WriteString(markerStyle.Render("     ") + stats + settings)
+	statusLine := markerStyle.Render("     ") + stats + settings
+	builder.WriteString(ansi.Truncate(statusLine, m.renderWidth(), "…"))
 	builder.WriteString("\n\n")
 
 	// Diff viewport without border
@@ -715,6 +764,11 @@ func (m DiffPreviewModel) countChanges() (added, removed int) {
 	return
 }
 
+func (m DiffPreviewModel) hasVisibleChanges() bool {
+	added, removed := m.countChanges()
+	return added+removed > 0
+}
+
 // renderActions renders the action buttons.
 func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 	// Styled buttons
@@ -732,10 +786,43 @@ func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 
 	hintStyle := lipgloss.NewStyle().
 		Foreground(ColorDim)
+	if m.responseUnavailable {
+		warningStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+		builder.WriteString(ansi.Truncate(warningStyle.Render("Unavailable: cannot submit diff decision"), m.renderWidth(), "…"))
+		builder.WriteString("\n")
+		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Cancel · review remains open"), m.renderWidth(), "…"))
+		return
+	}
 
-	builder.WriteString(applyStyle.Render("y Apply"))
+	applyLabel := "y Apply"
+	rejectLabel := "n Reject"
+	if !m.hasVisibleChanges() {
+		applyLabel = "y Continue"
+		rejectLabel = "n Cancel"
+	}
+	if m.renderWidth() < 32 {
+		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+		writeLine := func(line string) {
+			builder.WriteString(ansi.Truncate(hintStyle.Render(line), m.renderWidth(), "…"))
+			builder.WriteString("\n")
+		}
+		if m.renderWidth() < 20 {
+			writeLine(keyStyle.Render("y") + " Yes " + keyStyle.Render("n") + " No")
+			writeLine(keyStyle.Render("A") + " All " + keyStyle.Render("R") + " No")
+			writeLine("j/k Scroll  [ ]")
+			builder.WriteString(ansi.Truncate(hintStyle.Render("s View  I WS"), m.renderWidth(), "…"))
+			return
+		}
+		writeLine(keyStyle.Render(applyLabel[:1]) + applyLabel[1:] + "  ·  " + keyStyle.Render(rejectLabel[:1]) + rejectLabel[1:])
+		writeLine("j/k Scroll  ·  [ ] Changes")
+		writeLine("s View  ·  I Whitespace")
+		builder.WriteString(ansi.Truncate(hintStyle.Render("A Apply all  ·  R Reject all"), m.renderWidth(), "…"))
+		return
+	}
+	builder.WriteString(applyStyle.Render(applyLabel))
 	builder.WriteString("  ")
-	builder.WriteString(rejectStyle.Render("n Reject"))
+	builder.WriteString(rejectStyle.Render(rejectLabel))
 	builder.WriteString("\n\n")
 
 	// Hint separator is `·` (middle dot) with double-space padding so it
@@ -743,17 +830,17 @@ func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 	// shortcuts overlay footer, prompt option lines). Previously these
 	// two lines used `|` with single spaces, which was visually heavier
 	// and inconsistent with everything else.
-	builder.WriteString(hintStyle.Render("j/k Scroll  ·  g/G Top/Bottom  ·  [ ] Prev/Next  ·  Ctrl+D/U Half page  ·  +/- Context  ·  I Ignore whitespace"))
+	builder.WriteString(ansi.Truncate(hintStyle.Render("j/k Scroll  ·  g/G Top/Bottom  ·  [ ] Prev/Next  ·  Ctrl+D/U Half page  ·  +/- Context  ·  I Ignore whitespace"), m.renderWidth(), "…"))
 	builder.WriteString("\n")
-	builder.WriteString(hintStyle.Render("s Toggle split/unified  ·  A Accept all  ·  R Reject all"))
+	builder.WriteString(ansi.Truncate(hintStyle.Render("A Accept all  ·  R Reject all  ·  s Toggle split/unified"), m.renderWidth(), "…"))
 }
 
 func (m DiffPreviewModel) renderSideBySide() string {
 	leftHeader := lipgloss.NewStyle().Foreground(ColorDim).Bold(true).Render("OLD")
 	rightHeader := lipgloss.NewStyle().Foreground(ColorDim).Bold(true).Render("NEW")
 
-	oldLines := strings.Split(m.oldContent, "\n")
-	newLines := strings.Split(m.newContent, "\n")
+	oldLines := strings.Split(m.displayOldContent, "\n")
+	newLines := strings.Split(m.displayNewContent, "\n")
 	maxLines := len(oldLines)
 	if len(newLines) > maxLines {
 		maxLines = len(newLines)
@@ -811,14 +898,28 @@ func (m DiffPreviewModel) renderSideBySide() string {
 }
 
 func truncateForWidth(s string, max int) string {
-	runes := []rune(s)
-	if max <= 0 || len(runes) <= max {
+	if max <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= max {
 		return s
 	}
-	if max <= 3 {
-		return string(runes[:max])
+	if max == 1 {
+		return "…"
 	}
-	return string(runes[:max-3]) + "..."
+
+	var b strings.Builder
+	budget := max - 1 // reserve one terminal cell for the ellipsis
+	used := 0
+	for _, r := range s {
+		cellWidth := lipgloss.Width(string(r))
+		if used+cellWidth > budget {
+			break
+		}
+		b.WriteRune(r)
+		used += cellWidth
+	}
+	return b.String() + "…"
 }
 
 func (m *DiffPreviewModel) detectChangeOffsets(content string) []int {
@@ -885,14 +986,17 @@ type DiffFile struct {
 
 // MultiDiffPreviewModel is the UI component for displaying multi-file diff previews.
 type MultiDiffPreviewModel struct {
-	files        []DiffFile
-	currentIndex int
-	viewport     viewport.Model
-	decisions    map[int]DiffDecision
-	styles       *Styles
-	width        int
-	height       int
-	focusOnList  bool // true if focus is on file list, false if on diff
+	files               []DiffFile
+	currentIndex        int
+	listOffset          int
+	viewport            viewport.Model
+	decisions           map[int]DiffDecision
+	styles              *Styles
+	width               int
+	height              int
+	focusOnList         bool // true if focus is on file list, false if on diff
+	confirmFinish       bool
+	responseUnavailable bool
 
 	// Callback when user makes decisions
 	onComplete func(decisions map[string]DiffDecision)
@@ -923,27 +1027,47 @@ func NewMultiDiffPreviewModel(styles *Styles) MultiDiffPreviewModel {
 
 // SetSize sets the size of the multi-diff preview.
 func (m *MultiDiffPreviewModel) SetSize(width, height int) {
-	if width < 20 {
-		width = 80
+	m.width = max(width, 1)
+	m.height = max(height, 1)
+	if m.useMultiDiffSplitLayout() {
+		listWidth := max(m.width/3, 22)
+		m.viewport.Width = max(m.width-listWidth-5, 1)
+	} else {
+		m.viewport.Width = max(m.width-4, 1)
 	}
-	if height < 15 {
-		height = 24
+	reservedRows := 13
+	if m.width >= 40 && !m.useMultiDiffSplitLayout() {
+		reservedRows = 15
 	}
-	m.width = width
-	m.height = height
-	// Viewport takes 2/3 of width (right side)
-	m.viewport.Width = (width * 2 / 3) - 4
-	m.viewport.Height = height - 10
+	m.viewport.Height = max(m.height-reservedRows, 1)
+	m.ensureCurrentFileVisible()
+}
+
+const minMultiDiffSplitWidth = 72
+
+func (m MultiDiffPreviewModel) useMultiDiffSplitLayout() bool {
+	return m.width >= minMultiDiffSplitWidth
+}
+
+func (m MultiDiffPreviewModel) renderWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
+	return max(m.viewport.Width+4, 1)
 }
 
 // SetFiles sets the files to display.
 func (m *MultiDiffPreviewModel) SetFiles(files []DiffFile) {
-	m.files = files
-	m.currentIndex = 0
+	m.files = append([]DiffFile(nil), files...)
+	m.currentIndex = -1
+	m.listOffset = 0
+	m.focusOnList = true
+	m.confirmFinish = false
+	m.responseUnavailable = false
 	m.decisions = make(map[int]DiffDecision)
 
 	// Initialize all decisions to pending
-	for i := range files {
+	for i := range m.files {
 		m.decisions[i] = DiffPending
 	}
 
@@ -954,13 +1078,42 @@ func (m *MultiDiffPreviewModel) SetFiles(files []DiffFile) {
 
 	// Show first file's diff
 	if len(m.files) > 0 {
+		m.currentIndex = 0
 		m.updateViewport()
+	} else {
+		m.viewport.SetContent("")
+		m.viewport.GotoTop()
 	}
+}
+
+func (m MultiDiffPreviewModel) visibleFileCapacity() int {
+	// The list header and its spacer consume two content rows.
+	return max(m.viewport.Height-2, 1)
+}
+
+func (m *MultiDiffPreviewModel) ensureCurrentFileVisible() {
+	if len(m.files) == 0 || m.currentIndex < 0 {
+		m.listOffset = 0
+		return
+	}
+	capacity := m.visibleFileCapacity()
+	if m.currentIndex < m.listOffset {
+		m.listOffset = m.currentIndex
+	} else if m.currentIndex >= m.listOffset+capacity {
+		m.listOffset = m.currentIndex - capacity + 1
+	}
+	maxOffset := max(len(m.files)-capacity, 0)
+	m.listOffset = min(max(m.listOffset, 0), maxOffset)
 }
 
 // SetCompleteCallback sets the callback for when user completes decisions.
 func (m *MultiDiffPreviewModel) SetCompleteCallback(callback func(map[string]DiffDecision)) {
 	m.onComplete = callback
+}
+
+func (m *MultiDiffPreviewModel) MarkResponseUnavailable() {
+	m.responseUnavailable = true
+	m.confirmFinish = false
 }
 
 // generateDiff creates a diff for the file at the given index.
@@ -970,13 +1123,16 @@ func (m *MultiDiffPreviewModel) generateDiff(index int) string {
 	}
 
 	file := m.files[index]
+	displayPath := safeKeyEntryText(file.FilePath)
+	displayOld := visibleTerminalControlText(file.OldContent)
+	displayNew := visibleTerminalControlText(file.NewContent)
 	dmp := diffmatchpatch.New()
 
 	var result strings.Builder
-	fmt.Fprintf(&result, "--- %s\n", file.FilePath)
-	fmt.Fprintf(&result, "+++ %s\n", file.FilePath)
+	fmt.Fprintf(&result, "--- %s\n", displayPath)
+	fmt.Fprintf(&result, "+++ %s\n", displayPath)
 
-	diffs := dmp.DiffMain(file.OldContent, file.NewContent, true)
+	diffs := dmp.DiffMain(displayOld, displayNew, true)
 	diffs = dmp.DiffCleanupSemantic(diffs)
 
 	for _, d := range diffs {
@@ -1045,7 +1201,11 @@ func (m *MultiDiffPreviewModel) updateViewport() {
 		diff := m.files[m.currentIndex].Diff
 		m.viewport.SetContent(m.highlightMultiDiff(diff))
 		m.viewport.GotoTop()
+		m.ensureCurrentFileVisible()
+		return
 	}
+	m.viewport.SetContent("")
+	m.viewport.GotoTop()
 }
 
 // Init initializes the multi-diff preview model.
@@ -1059,10 +1219,33 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.responseUnavailable {
+			switch msg.String() {
+			case "esc":
+				m.setAllDecisions(DiffReject)
+				return m, m.finish()
+			case "y", "Y", "n", "N", "A", "R", "enter":
+				return m, nil
+			}
+		}
+		if m.confirmFinish {
+			switch msg.String() {
+			case "enter":
+				m.confirmFinish = false
+				m.applyPending(DiffReject)
+				return m, m.finish()
+			case "esc", "q":
+				m.confirmFinish = false
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "tab":
 			// Toggle focus between file list and diff
-			m.focusOnList = !m.focusOnList
+			if len(m.files) > 0 {
+				m.focusOnList = !m.focusOnList
+			}
 			return m, nil
 
 		case "up", "k":
@@ -1071,6 +1254,7 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 				if m.currentIndex > 0 {
 					m.currentIndex--
 					m.updateViewport()
+					m.ensureCurrentFileVisible()
 				}
 			} else {
 				// Scroll diff up
@@ -1084,6 +1268,7 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 				if m.currentIndex < len(m.files)-1 {
 					m.currentIndex++
 					m.updateViewport()
+					m.ensureCurrentFileVisible()
 				}
 			} else {
 				// Scroll diff down
@@ -1095,7 +1280,10 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 		// file and advance; A/R (shift) still bulk-apply/reject all
 		// remaining. Previously every key was an all-or-nothing shortcut
 		// which forced mixed-outcome workflows into multiple review rounds.
-		case "y":
+		case "y", "Y":
+			if len(m.files) == 0 || m.currentIndex < 0 {
+				return m, nil
+			}
 			m.decisions[m.currentIndex] = DiffApply
 			if m.allResolved() {
 				return m, m.finish()
@@ -1103,7 +1291,10 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 			m.moveToNextPending()
 			return m, nil
 
-		case "n":
+		case "n", "N":
+			if len(m.files) == 0 || m.currentIndex < 0 {
+				return m, nil
+			}
 			m.decisions[m.currentIndex] = DiffReject
 			if m.allResolved() {
 				return m, m.finish()
@@ -1111,22 +1302,30 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 			m.moveToNextPending()
 			return m, nil
 
-		case "Y", "A":
+		case "A":
+			if len(m.files) == 0 {
+				return m, nil
+			}
 			// Bulk apply: every file that's still pending becomes Apply.
 			// Already-decided files keep their explicit decision.
 			m.applyPending(DiffApply)
 			return m, m.finish()
 
-		case "N", "R":
+		case "R":
+			if len(m.files) == 0 {
+				return m, nil
+			}
 			m.applyPending(DiffReject)
 			return m, m.finish()
 
 		case "enter":
-			// Finish with current decisions — anything still pending is
-			// treated as Reject (safer default: don't apply changes the
-			// user hasn't explicitly approved).
-			m.applyPending(DiffReject)
-			return m, m.finish()
+			if len(m.files) == 0 {
+				return m, nil
+			}
+			// Finishing early rejects pending files. Make that consequence an
+			// explicit second step instead of hiding it behind a generic label.
+			m.confirmFinish = true
+			return m, nil
 
 		case "esc":
 			m.setAllDecisions(DiffReject)
@@ -1229,14 +1428,22 @@ func (m *MultiDiffPreviewModel) finish() tea.Cmd {
 	}
 
 	if m.onComplete != nil {
-		m.onComplete(decisions)
+		m.onComplete(cloneDiffDecisions(decisions))
 	}
 
 	return func() tea.Msg {
 		return MultiDiffPreviewResponseMsg{
-			Decisions: decisions,
+			Decisions: cloneDiffDecisions(decisions),
 		}
 	}
+}
+
+func cloneDiffDecisions(decisions map[string]DiffDecision) map[string]DiffDecision {
+	result := make(map[string]DiffDecision, len(decisions))
+	for path, decision := range decisions {
+		result[path] = decision
+	}
+	return result
 }
 
 // View renders the multi-file diff preview.
@@ -1249,36 +1456,46 @@ func (m MultiDiffPreviewModel) View() string {
 		Foreground(ColorHighlight).
 		Padding(0, 1)
 
-	builder.WriteString(headerStyle.Render(fmt.Sprintf("Multi-File Diff Preview (%d files)", len(m.files))))
+	title := fmt.Sprintf("Multi-File Diff Preview (%d files)", len(m.files))
+	if m.width > 0 && m.width < 40 {
+		title = fmt.Sprintf("Multi-File Diff · %d files", len(m.files))
+	}
+	builder.WriteString(ansi.Truncate(headerStyle.Render(title), m.renderWidth(), "…"))
 	builder.WriteString("\n\n")
+	if len(m.files) == 0 {
+		emptyStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+		builder.WriteString(emptyStyle.Render(truncateForWidth("No files to review", m.renderWidth())))
+		builder.WriteString("\n")
+		builder.WriteString(emptyStyle.Render(truncateForWidth("The requested diff contains no file changes.", m.renderWidth())))
+		builder.WriteString("\n\n")
+		m.renderMultiActions(&builder)
+		return builder.String()
+	}
 
 	// Calculate widths
-	listWidth := m.width / 3
-	if listWidth < 20 {
-		listWidth = 20
-	}
+	listWidth := max(m.width/3, 22)
 
 	// Render file list
 	listStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorBorder).
-		Width(listWidth - 2)
+		Width(listWidth - 2).
+		Height(m.viewport.Height)
 
 	if m.focusOnList {
 		listStyle = listStyle.BorderForeground(ColorHighlight)
 	}
 
 	var listContent strings.Builder
-	listContent.WriteString(lipgloss.NewStyle().Bold(true).Render("Files"))
+	capacity := m.visibleFileCapacity()
+	start := min(max(m.listOffset, 0), max(len(m.files)-capacity, 0))
+	end := min(start+capacity, len(m.files))
+	listContent.WriteString(lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("Files %d–%d/%d", start+1, end, len(m.files))))
 	listContent.WriteString("\n\n")
 
-	for i, file := range m.files {
-		fileName := filepath.Base(file.FilePath)
-		// Reserve extra chars for the decision marker (✓/✗/·) + selection
-		// caret so long filenames truncate predictably.
-		if fileRunes := []rune(fileName); len(fileRunes) > listWidth-10 {
-			fileName = string(fileRunes[:listWidth-13]) + "..."
-		}
+	for i := start; i < end; i++ {
+		file := m.files[i]
+		fileName := filepath.Base(safeKeyEntryText(file.FilePath))
 
 		// Decision marker — lets users see which files they've already
 		// reviewed without switching off the current file.
@@ -1299,7 +1516,11 @@ func (m MultiDiffPreviewModel) View() string {
 			marker = ">"
 		}
 
-		listContent.WriteString(lineStyle.Render(fmt.Sprintf(" %s %s %s", marker, statusMark, fileName)))
+		linePrefix := fmt.Sprintf(" %s %s ", marker, statusMark)
+		nameBudget := max(listWidth-2-lipgloss.Width(linePrefix)-1, 1)
+		fileName = truncateMiddleForWidth(fileName, nameBudget)
+		line := linePrefix + fileName
+		listContent.WriteString(lineStyle.Render(ansi.Truncate(line, max(listWidth-2, 1), "…")))
 		listContent.WriteString("\n")
 	}
 
@@ -1321,19 +1542,35 @@ func (m MultiDiffPreviewModel) View() string {
 		if file.IsNewFile {
 			label = "New file: "
 		}
+		if m.width < 40 {
+			kind := "~"
+			if file.IsNewFile {
+				kind = "+"
+			}
+			label = fmt.Sprintf("%d/%d %s ", m.currentIndex+1, len(m.files), kind)
+		} else if !m.useMultiDiffSplitLayout() {
+			label = fmt.Sprintf("File %d/%d · %s", m.currentIndex+1, len(m.files), label)
+		}
+		displayPath := safeKeyEntryText(file.FilePath)
+		pathBudget := max(m.width-lipgloss.Width(label)-1, 1)
+		display := label + truncateLeftForWidth(displayPath, pathBudget)
 		fileInfo = lipgloss.NewStyle().
 			Foreground(ColorAccent).
 			Bold(true).
-			Render(label + file.FilePath)
+			Render(display)
 	}
 
 	// Layout: file list on left, diff on right
-	leftPane := listStyle.Render(listContent.String())
 	rightPane := viewportStyle.Render(m.viewport.View())
 
 	builder.WriteString(fileInfo)
 	builder.WriteString("\n\n")
-	builder.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPane, " ", rightPane))
+	if m.useMultiDiffSplitLayout() {
+		leftPane := listStyle.Render(listContent.String())
+		builder.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPane, " ", rightPane))
+	} else {
+		builder.WriteString(rightPane)
+	}
 	builder.WriteString("\n\n")
 
 	// Footer with actions
@@ -1364,6 +1601,11 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 
 	hintStyle := lipgloss.NewStyle().
 		Foreground(ColorDim)
+	if len(m.files) == 0 {
+		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Close"), m.renderWidth(), "…"))
+		return
+	}
 
 	// Count resolved vs pending for the status line.
 	applied, rejected, pending := 0, 0, 0
@@ -1379,27 +1621,103 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 	}
 
 	statusStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	status := fmt.Sprintf(
-		"File %d/%d | %d✓ apply · %d✗ reject · %d· pending",
-		m.currentIndex+1,
-		len(m.files),
-		applied,
-		rejected,
-		pending,
-	)
-	builder.WriteString(statusStyle.Render(status))
+	var status string
+	if m.width < 60 {
+		status = fmt.Sprintf("%d/%d · %d pending · %d✓ %d✗", m.currentIndex+1, len(m.files), pending, applied, rejected)
+	} else {
+		status = fmt.Sprintf(
+			"File %d/%d | %d✓ apply · %d✗ reject · %d· pending",
+			m.currentIndex+1,
+			len(m.files),
+			applied,
+			rejected,
+			pending,
+		)
+	}
+	builder.WriteString(ansi.Truncate(statusStyle.Render(status), m.renderWidth(), "…"))
+	if m.responseUnavailable {
+		warningStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+		builder.WriteString("\n")
+		builder.WriteString(ansi.Truncate(warningStyle.Render("Unavailable: cannot submit diff decisions"), m.renderWidth(), "…"))
+		builder.WriteString("\n")
+		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Cancel · review remains open"), m.renderWidth(), "…"))
+		return
+	}
+	if m.confirmFinish {
+		warningStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+		fileLabel := "files"
+		if pending == 1 {
+			fileLabel = "file"
+		}
+		warning := fmt.Sprintf("Reject %d pending %s and finish?", pending, fileLabel)
+		builder.WriteString("\n")
+		builder.WriteString(ansi.Truncate(warningStyle.Render(warning), m.renderWidth(), "…"))
+		builder.WriteString("\n")
+		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+		// Back is the non-destructive recovery path. Keep it before confirmation
+		// so a narrow footer never shows only the action that rejects pending files.
+		controls := keyStyle.Render("Esc/q") + " Back to review  ·  " + keyStyle.Render("Enter") + " Confirm"
+		builder.WriteString(ansi.Truncate(hintStyle.Render(controls), m.renderWidth(), "…"))
+		return
+	}
+	if m.width < 40 {
+		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+		writeHint := func(line string) {
+			builder.WriteString("\n")
+			builder.WriteString(ansi.Truncate(hintStyle.Render(line), m.renderWidth(), "…"))
+		}
+		if m.renderWidth() < 20 {
+			writeHint(keyStyle.Render("y") + " Yes " + keyStyle.Render("n") + " No")
+			writeHint(keyStyle.Render("A") + " All " + keyStyle.Render("R") + " No")
+			writeHint("Enter Done…")
+			writeHint("Esc Reject")
+			return
+		}
+		writeHint(keyStyle.Render("y") + " Apply  ·  " + keyStyle.Render("n") + " Reject")
+		writeHint(keyStyle.Render("A") + " Apply rest  ·  " + keyStyle.Render("R") + " Reject rest")
+		if m.focusOnList {
+			writeHint("↑/↓ Files  ·  Tab Diff")
+		} else {
+			writeHint("j/k Scroll  ·  Tab Files")
+		}
+		writeHint("Enter Finish…  ·  Esc Reject all")
+		return
+	}
 	builder.WriteString("\n\n")
 
 	builder.WriteString(applyStyle.Render("y Apply file"))
-	builder.WriteString("  ")
+	if m.width < 40 {
+		builder.WriteString("\n")
+	} else {
+		builder.WriteString("  ")
+	}
 	builder.WriteString(rejectStyle.Render("n Reject file"))
-	builder.WriteString("  ")
+	if m.width < 80 || !m.useMultiDiffSplitLayout() {
+		builder.WriteString("\n")
+	} else {
+		builder.WriteString("  ")
+	}
 	builder.WriteString(allStyle.Render("A Apply remaining"))
-	builder.WriteString("  ")
+	if m.width < 40 {
+		builder.WriteString("\n")
+	} else {
+		builder.WriteString("  ")
+	}
 	builder.WriteString(allStyle.Render("R Reject remaining"))
 	builder.WriteString("\n\n")
 
-	builder.WriteString(hintStyle.Render("Tab Switch focus  ·  ↑/↓ Files  ·  j/k Scroll diff  ·  y/n Per-file  ·  A/R Bulk  ·  Enter Finish  ·  Esc Reject all"))
+	if m.useMultiDiffSplitLayout() {
+		builder.WriteString(ansi.Truncate(hintStyle.Render("Tab Switch focus  ·  ↑/↓ Files  ·  j/k Scroll diff  ·  y/n Per-file  ·  A/R Bulk  ·  Enter Finish…  ·  Esc Reject all"), m.renderWidth(), "…"))
+	} else if m.width >= 40 {
+		focusHint := "↑/↓ or j/k Navigate files  ·  Tab Focus diff"
+		if !m.focusOnList {
+			focusHint = "↑/↓ or j/k Scroll diff  ·  Tab Focus files"
+		}
+		builder.WriteString(ansi.Truncate(hintStyle.Render(focusHint+"  ·  Enter Finish…"), m.renderWidth(), "…"))
+		builder.WriteString("\n")
+		builder.WriteString(ansi.Truncate(hintStyle.Render("y/n Per-file  ·  A/R Bulk  ·  Esc Reject all"), m.renderWidth(), "…"))
+	}
 }
 
 // GetDecisions returns the current decisions map.

@@ -5,7 +5,7 @@ import "strings"
 func CommandsContainVerificationSignals(commands []string) bool {
 	keywords := []string{
 		" test", "go test", "pytest", "cargo test", "npm test", "pnpm test", "yarn test", "bun test",
-		"lint", "typecheck", "check", "verify", "validate", "vet", "build", "compile",
+		"lint", "typecheck", " tsc", "check", "verify", "validate", "vet", "build", "compile",
 	}
 	for _, cmd := range commands {
 		lower := " " + strings.ToLower(strings.TrimSpace(cmd))

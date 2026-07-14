@@ -1,9 +1,10 @@
 package ui
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -64,6 +65,22 @@ func NewToastManager(styles *Styles) *ToastManager {
 
 // Show displays a new toast notification.
 func (m *ToastManager) Show(toastType ToastType, title, message string, duration time.Duration) {
+	duration = normalizeToastDuration(toastType, duration)
+	key := toastContentKey(toastType, title, message)
+	for i := range m.toasts {
+		if m.toasts[i].Tag == "" && toastContentKey(m.toasts[i].Type, m.toasts[i].Title, m.toasts[i].Message) == key {
+			toast := m.toasts[i]
+			toast.Type = toastType
+			toast.Title = title
+			toast.Message = message
+			toast.Duration = duration
+			toast.CreatedAt = time.Now()
+			toast.FadeOut = false
+			m.promoteToast(i, toast)
+			return
+		}
+	}
+
 	toast := Toast{
 		ID:        m.nextID,
 		Type:      toastType,
@@ -77,19 +94,7 @@ func (m *ToastManager) Show(toastType ToastType, title, message string, duration
 
 	// Add to the beginning (newest first)
 	m.toasts = append([]Toast{toast}, m.toasts...)
-
-	// Evict non-error toasts first when over limit
-	if len(m.toasts) > m.maxToasts {
-		for i := len(m.toasts) - 1; i >= 0 && len(m.toasts) > m.maxToasts; i-- {
-			if m.toasts[i].Type != ToastError {
-				m.toasts = append(m.toasts[:i], m.toasts[i+1:]...)
-			}
-		}
-		// If still over limit, truncate oldest
-		if len(m.toasts) > m.maxToasts {
-			m.toasts = m.toasts[:m.maxToasts]
-		}
-	}
+	m.enforceLimit()
 }
 
 // ShowSuccess displays a success toast.
@@ -128,13 +133,18 @@ func (m *ToastManager) ShowWarning(message string) {
 // a burst of near-identical messages would otherwise spam the stack — each new
 // message updates the live toast in place.
 func (m *ToastManager) ShowTagged(tag string, toastType ToastType, message string, duration time.Duration) {
+	duration = normalizeToastDuration(toastType, duration)
 	if tag != "" {
 		for i := range m.toasts {
 			if m.toasts[i].Tag == tag {
-				m.toasts[i].Type = toastType
-				m.toasts[i].Message = message
-				m.toasts[i].Duration = duration
-				m.toasts[i].CreatedAt = time.Now()
+				toast := m.toasts[i]
+				toast.Type = toastType
+				toast.Title = ""
+				toast.Message = message
+				toast.Duration = duration
+				toast.CreatedAt = time.Now()
+				toast.FadeOut = false
+				m.promoteToast(i, toast)
 				return
 			}
 		}
@@ -149,15 +159,69 @@ func (m *ToastManager) ShowTagged(tag string, toastType ToastType, message strin
 	}
 	m.nextID++
 	m.toasts = append([]Toast{toast}, m.toasts...)
-	if len(m.toasts) > m.maxToasts {
-		for i := len(m.toasts) - 1; i >= 0 && len(m.toasts) > m.maxToasts; i-- {
-			if m.toasts[i].Type != ToastError {
-				m.toasts = append(m.toasts[:i], m.toasts[i+1:]...)
+	m.enforceLimit()
+}
+
+func normalizeToastDuration(toastType ToastType, duration time.Duration) time.Duration {
+	if duration > 0 {
+		return duration
+	}
+	switch toastType {
+	case ToastError:
+		return 15 * time.Second
+	case ToastWarning:
+		return 4 * time.Second
+	default:
+		return 1500 * time.Millisecond
+	}
+}
+
+func toastContentKey(toastType ToastType, title, message string) string {
+	normalize := func(value string) string { return strings.Join(strings.Fields(value), " ") }
+	return string(rune(toastType)) + "\x00" + normalize(title) + "\x00" + normalize(message)
+}
+
+func (m *ToastManager) promoteToast(index int, toast Toast) {
+	copy(m.toasts[1:index+1], m.toasts[:index])
+	m.toasts[0] = toast
+}
+
+func (m *ToastManager) enforceLimit() {
+	limit := max(m.maxToasts, 0)
+	for len(m.toasts) > limit {
+		// Start with the oldest item, then prefer evicting a lower-severity
+		// notification. Within one severity the oldest still goes first.
+		removeIndex := len(m.toasts) - 1
+		removePriority := toastPriority(m.toasts[removeIndex].Type)
+		for i := len(m.toasts) - 2; i >= 0; i-- {
+			if priority := toastPriority(m.toasts[i].Type); priority < removePriority {
+				removeIndex = i
+				removePriority = priority
 			}
 		}
-		if len(m.toasts) > m.maxToasts {
-			m.toasts = m.toasts[:m.maxToasts]
-		}
+		removed := m.toasts[removeIndex]
+		m.toasts = append(m.toasts[:removeIndex], m.toasts[removeIndex+1:]...)
+		m.archive(removed)
+	}
+}
+
+func toastPriority(toastType ToastType) int {
+	switch toastType {
+	case ToastError:
+		return 3
+	case ToastWarning:
+		return 2
+	case ToastSuccess:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (m *ToastManager) archive(toast Toast) {
+	m.history = append([]Toast{toast}, m.history...)
+	if len(m.history) > maxToastHistory {
+		m.history = m.history[:maxToastHistory]
 	}
 }
 
@@ -166,26 +230,44 @@ func (m *ToastManager) Dismiss(id int) {
 	for i, toast := range m.toasts {
 		if toast.ID == id {
 			m.toasts = append(m.toasts[:i], m.toasts[i+1:]...)
+			m.archive(toast)
 			return
 		}
+	}
+}
+
+// DismissTag removes the active toast for a transient interaction state. It is
+// used when the state is cancelled before the toast expires, so stale guidance
+// (for example "press again to quit") does not remain visible.
+func (m *ToastManager) DismissTag(tag string) {
+	if tag == "" {
+		return
+	}
+	for i := len(m.toasts) - 1; i >= 0; i-- {
+		if m.toasts[i].Tag != tag {
+			continue
+		}
+		toast := m.toasts[i]
+		m.toasts = append(m.toasts[:i], m.toasts[i+1:]...)
+		m.archive(toast)
 	}
 }
 
 // Update removes expired toasts, archiving them to history.
 func (m *ToastManager) Update() {
 	var active []Toast
+	var expired []Toast
 	for _, toast := range m.toasts {
 		if !toast.IsExpired() {
 			active = append(active, toast)
 		} else {
-			// Archive expired toasts (newest first)
-			m.history = append([]Toast{toast}, m.history...)
-			if len(m.history) > maxToastHistory {
-				m.history = m.history[:maxToastHistory]
-			}
+			expired = append(expired, toast)
 		}
 	}
 	m.toasts = active
+	for i := len(expired) - 1; i >= 0; i-- {
+		m.archive(expired[i])
+	}
 }
 
 // History returns a copy of the toast history (newest first).
@@ -195,6 +277,16 @@ func (m *ToastManager) History() []Toast {
 	return result
 }
 
+// Active returns a snapshot of currently visible notifications (newest first).
+func (m *ToastManager) Active() []Toast {
+	result := make([]Toast, len(m.toasts))
+	copy(result, m.toasts)
+	return result
+}
+
+// ClearHistory removes archived notifications without dismissing active ones.
+func (m *ToastManager) ClearHistory() { m.history = nil }
+
 // Count returns the number of active toasts.
 func (m *ToastManager) Count() int {
 	return len(m.toasts)
@@ -202,15 +294,40 @@ func (m *ToastManager) Count() int {
 
 // View renders all active toasts in the right upper corner.
 func (m *ToastManager) View(width int) string {
+	return m.ViewLimit(width, len(m.toasts))
+}
+
+// ViewLimit renders at most maxLines active notifications. When constrained,
+// severity outranks recency so a burst of informational events cannot hide the
+// error/warning that explains what needs attention. Hidden count is folded into
+// the last visible row instead of consuming another scarce terminal line.
+func (m *ToastManager) ViewLimit(width, maxLines int) string {
 	if len(m.toasts) == 0 {
 		return ""
 	}
+	maxLines = min(max(maxLines, 0), len(m.toasts))
+	if maxLines == 0 {
+		return ""
+	}
+
+	visible := append([]Toast(nil), m.toasts...)
+	if maxLines < len(visible) {
+		sort.SliceStable(visible, func(i, j int) bool {
+			return toastPriority(visible[i].Type) > toastPriority(visible[j].Type)
+		})
+		visible = visible[:maxLines]
+	}
 
 	var lines []string
-
-	for _, toast := range m.toasts {
+	for _, toast := range visible {
 		line := m.renderToast(toast, width)
 		lines = append(lines, line)
+	}
+	if hidden := len(m.toasts) - len(visible); hidden > 0 && len(lines) > 0 {
+		suffix := lipgloss.NewStyle().Foreground(ColorDim).Render(" · +" + fmt.Sprintf("%d", hidden) + " more")
+		budget := max(width-lipgloss.Width(suffix), 0)
+		lines[len(lines)-1] = fitStatusText(lines[len(lines)-1], budget) + suffix
+		lines[len(lines)-1] = fitStatusText(lines[len(lines)-1], width)
 	}
 
 	return strings.Join(lines, "\n")
@@ -219,8 +336,17 @@ func (m *ToastManager) View(width int) string {
 // renderToast renders a single toast as compact single line.
 // Format: ✓ Message — fades to dim in last 500ms.
 func (m *ToastManager) renderToast(toast Toast, width int) string {
-	icon := ToastIcons[toast.Type]
-	iconColor := ToastColors[toast.Type]
+	if width <= 0 {
+		width = 80
+	}
+	icon, ok := ToastIcons[toast.Type]
+	if !ok {
+		icon = ToastIcons[ToastInfo]
+	}
+	iconColor, ok := ToastColors[toast.Type]
+	if !ok {
+		iconColor = ToastColors[ToastInfo]
+	}
 
 	// Fade entire toast when nearing expiration
 	elapsed := time.Since(toast.CreatedAt)
@@ -236,17 +362,26 @@ func (m *ToastManager) renderToast(toast Toast, width int) string {
 	iconStyle := lipgloss.NewStyle().Foreground(iconColor)
 	msgStyle := lipgloss.NewStyle().Foreground(msgColor)
 
-	// Truncate message to fit width (head-only, not center-truncation)
-	msg := toast.Message
-	maxLen := width - 5
-	if maxLen < 10 {
-		maxLen = 10
+	// Toasts are deliberately one visual line. Collapse embedded whitespace
+	// from provider errors and include the title when supplied instead of
+	// silently discarding it.
+	title := strings.Join(strings.Fields(toast.Title), " ")
+	message := strings.Join(strings.Fields(toast.Message), " ")
+	msg := message
+	if title != "" && message != "" {
+		msg = title + ": " + message
+	} else if title != "" {
+		msg = title
 	}
-	if utf8.RuneCountInString(msg) > maxLen {
-		runes := []rune(msg)
-		msg = string(runes[:maxLen-1]) + "…"
+	if msg == "" {
+		msg = "Notification"
 	}
 
+	iconWidth := lipgloss.Width(icon)
+	if width <= iconWidth {
+		return iconStyle.Render(truncateForWidth(icon, width))
+	}
+	msg = truncateForWidth(msg, width-iconWidth-1)
 	return iconStyle.Render(icon) + " " + msgStyle.Render(msg)
 }
 

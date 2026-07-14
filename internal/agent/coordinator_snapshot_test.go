@@ -38,6 +38,25 @@ func TestCoordinatorTaskSnapshotsDoNotAliasInternalState(t *testing.T) {
 	}
 }
 
+func TestCoordinatorAddTaskOwnsDependencySlice(t *testing.T) {
+	c := NewCoordinator(context.Background(), nil, &CoordinatorConfig{MaxParallel: 1})
+	rootID := c.AddTask("root", AgentTypeExplore, PriorityNormal, nil)
+	dependencies := []string{rootID}
+	childID := c.AddTask("child", AgentTypeExplore, PriorityNormal, dependencies)
+	dependencies[0] = "caller mutation"
+
+	child := c.GetTask(childID)
+	if child == nil || len(child.Dependencies) != 1 || child.Dependencies[0] != rootID {
+		t.Fatalf("caller mutation changed coordinator dependency graph: %+v", child)
+	}
+	c.mu.RLock()
+	dependents := append([]string(nil), c.dependencies[rootID]...)
+	c.mu.RUnlock()
+	if len(dependents) != 1 || dependents[0] != childID {
+		t.Fatalf("reverse dependency map diverged: %+v", dependents)
+	}
+}
+
 func TestCoordinatorTaskSnapshot_ConcurrentMutationIsRaceFree(t *testing.T) {
 	c := NewCoordinator(context.Background(), nil, &CoordinatorConfig{MaxParallel: 1})
 	internal := &CoordinatedTask{
