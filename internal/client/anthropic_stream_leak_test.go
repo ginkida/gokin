@@ -78,9 +78,14 @@ func TestStreaming_NoScannerGoroutineLeakPerResponse(t *testing.T) {
 	// absorbs goroutines still WINDING DOWN, whose exits are asynchronous
 	// with response completion. The old single near-instant measurement
 	// flaked on slower CI runners ("grew by 3") for exactly that reason.
+	// Deadline is deliberately ~10× beyond anything observed locally (the
+	// "-race stress tests need wall-clock guards ≥10× local time" lesson):
+	// a full-suite -race run on a loaded machine once took >5s to wind
+	// down 3 stragglers. Passing runs exit the moment the target is hit,
+	// so only a genuinely-failing run pays the full wait.
 	target := base + 2
 	after := runtime.NumGoroutine()
-	for end := time.Now().Add(5 * time.Second); after > target && time.Now().Before(end); {
+	for end := time.Now().Add(15 * time.Second); after > target && time.Now().Before(end); {
 		runtime.GC()
 		time.Sleep(10 * time.Millisecond)
 		after = runtime.NumGoroutine()
