@@ -167,10 +167,18 @@ var errorGuidancePatterns = []ErrorGuidance{
 		// some providers return for billing issues. The polished version
 		// previously sat at the bottom of the file as dead code (first-
 		// match wins); merged in here.
-		Pattern:     regexp.MustCompile(`(?i)(quota|limit exceeded|resource exhausted|insufficient.*credit|billing|payment.*required|\b402\b)`),
-		Title:       "Quota or Billing Issue",
-		Suggestions: []string{"Your account has hit a usage cap or billing issue", "Check your provider dashboard for billing status", "Switch to a different provider with /provider or /model"},
-		Command:     "",
+		// "limit (exceeded|exhausted|reached)" + "usage limit" cover the GLM
+		// coding-plan cap wordings ("weekly/monthly limit exhausted", "Usage
+		// limit reached for 5 hour") — a field report showed the GLM weekly
+		// cap rendering as a bare truncated line because none of the old
+		// alternatives matched it.
+		// NOTE: no bare "limit reached" alternative — "max tokens limit
+		// reached" must fall through to the Context Window pattern below
+		// (first-match wins); usage-cap wordings are qualified instead.
+		Pattern:     regexp.MustCompile(`(?i)(quota|limit (exceeded|exhausted)|(usage|weekly|monthly|daily|hourly) limit|resource exhausted|insufficient.*credit|billing|payment.*required|\b402\b)`),
+		Title:       "Provider Limit Reached",
+		Suggestions: []string{"Your account has hit a usage cap or billing issue", "Wait for the limit to reset, or check the provider dashboard", "Switch to a different provider with /provider or /model"},
+		Command:     "/provider",
 	},
 	{
 		Pattern:     regexp.MustCompile(`(?i)\b400\b.*model.*not.*found`),
@@ -404,6 +412,15 @@ func GetErrorGuidance(errMsg string) *ErrorGuidance {
 // from regular streaming output — users kept missing actionable suggestions
 // when errors blended into plain text.
 func FormatErrorWithGuidance(styles *Styles, errMsg string) string {
+	return FormatErrorWithGuidanceWidth(styles, errMsg, 0)
+}
+
+// FormatErrorWithGuidanceWidth is FormatErrorWithGuidance with the terminal
+// width threaded in so the message wraps to the card instead of being
+// amputated. termWidth <= 0 falls back to a sane default.
+func FormatErrorWithGuidanceWidth(styles *Styles, errMsg string, termWidth int) string {
+	// Guidance patterns match the RAW error (they reference provider
+	// wording); only the DISPLAYED text is humanized below.
 	guidance := GetErrorGuidance(errMsg)
 
 	errorStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
@@ -413,10 +430,24 @@ func FormatErrorWithGuidance(styles *Styles, errMsg string) string {
 	cmdStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
+	contentWidth := 76
+	if termWidth > 0 {
+		contentWidth = max(min(termWidth-8, 96), 30)
+	}
+
 	var body strings.Builder
 
-	// Error message (first line inside the box)
-	body.WriteString(errorStyle.Render(MessageIcons["error"]+" Error: ") + msgStyle.Render(truncateError(errMsg, 100)))
+	// Error message: machine wrapper prefixes stripped, WRAPPED to the card
+	// width — never tail-truncated. The tail is where the actionable half of
+	// a provider error lives ("… switch provider with /provider"); the old
+	// 100-rune cut amputated exactly that (field report: the GLM weekly-cap
+	// message ended mid-word at "switch p...").
+	msgLines := displayErrorLines(errMsg, contentWidth-9) // 9 = lipgloss.Width("✗ Error: ")
+	body.WriteString(errorStyle.Render(MessageIcons["error"]+" Error: ") + msgStyle.Render(msgLines[0]))
+	for _, line := range msgLines[1:] {
+		body.WriteString("\n")
+		body.WriteString(msgStyle.Render("         " + line))
+	}
 
 	if guidance != nil {
 		// Title
@@ -444,19 +475,63 @@ func FormatErrorWithGuidance(styles *Styles, errMsg string) string {
 	return styles.ErrorBox.Render(body.String())
 }
 
-// truncateError truncates an error message to a maximum length.
-func truncateError(msg string, maxLen int) string {
-	// Remove newlines for single-line display
-	msg = strings.ReplaceAll(msg, "\n", " ")
-	msg = strings.TrimSpace(msg)
+// machineErrorPrefixRe matches internal wrapper prefixes ("model response
+// error (other): ", "function response error (stream_idle_timeout): ") that
+// classify the error for RETRY LOGIC but mean nothing to a user — "(other)"
+// is literally the taxonomy's miss bucket. Stripped for display only; the
+// raw error still drives guidance matching and logging.
+var machineErrorPrefixRe = regexp.MustCompile(`^(?i)(model response error|function response error|request failed|agent error)(\s*\([^)]{0,40}\))?:\s*`)
 
-	if runes := []rune(msg); maxLen > 0 && len(runes) > maxLen {
-		if maxLen <= 3 {
-			return string(runes[:maxLen]) // no room for ellipsis; avoids maxLen-3 underflow panic
+// displayErrorLines prepares an error for the user-facing card: strips
+// machine wrapper prefixes, collapses newlines, and word-wraps to the given
+// width. Always returns at least one line. Capped at 5 lines with the
+// overflow elided in the MIDDLE — the head carries the cause, the tail the
+// action, and both must survive.
+func displayErrorLines(errMsg string, width int) []string {
+	msg := strings.Join(strings.Fields(strings.ReplaceAll(errMsg, "\n", " ")), " ")
+	for range 3 { // wrappers nest ("model response error: request failed: …")
+		stripped := machineErrorPrefixRe.ReplaceAllString(msg, "")
+		if stripped == msg {
+			break
 		}
-		return string(runes[:maxLen-3]) + "..."
+		msg = stripped
 	}
-	return msg
+	if msg == "" {
+		msg = "unknown error"
+	}
+	if width < 16 {
+		width = 16
+	}
+
+	var lines []string
+	words := strings.Fields(msg)
+	current := ""
+	for _, w := range words {
+		candidate := w
+		if current != "" {
+			candidate = current + " " + w
+		}
+		if len([]rune(candidate)) > width && current != "" {
+			lines = append(lines, current)
+			current = w
+			continue
+		}
+		current = candidate
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	if len(lines) == 0 {
+		lines = []string{msg}
+	}
+
+	const maxLines = 5
+	if len(lines) > maxLines {
+		head := lines[:2]
+		tail := lines[len(lines)-2:]
+		lines = append(append(append([]string{}, head...), "…"), tail...)
+	}
+	return lines
 }
 
 // GetCompactHint returns a short actionable hint for an error.

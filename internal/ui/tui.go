@@ -2833,7 +2833,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.lastErrorMsg = errStr
 			m.lastErrorCount = 0
 			m.output.AppendLine("")
-			m.output.AppendLine(FormatErrorWithGuidance(m.styles, errStr))
+			m.output.AppendLine(FormatErrorWithGuidanceWidth(m.styles, errStr, m.width))
 			m.output.AppendLine("")
 		}
 		if !modalActive {
