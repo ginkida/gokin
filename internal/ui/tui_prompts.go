@@ -581,7 +581,12 @@ func (m Model) renderQuestionPrompt() string {
 		quickLabel = fmt.Sprintf("1-%d Select", quickMax)
 	}
 	navigation := ""
-	if optionCount > 1 {
+	// Gate the hint on REAL answers, not optionCount — the synthetic "Other
+	// (custom answer)" row makes optionCount >= 2 even for a single-answer
+	// question, and ↑/↓ between one answer and Other is not meaningful list
+	// navigation. Same cardinality rule as the model-selector / settings /
+	// notification-center / palette footers; the keys themselves still work.
+	if len(m.questionRequest.Options) > 1 {
 		navigation = "↑/↓ Navigate"
 	}
 	if navigation != "" && visible < optionCount {
