@@ -219,7 +219,10 @@ func (t *TokenCounter) SetClient(c client.Client) {
 		t.provider = strings.ToLower(strings.TrimSpace(identified.GetProvider()))
 	}
 	// Also update model limits as model might have changed
-	t.model = c.GetModel()
+	t.model = ""
+	if c != nil {
+		t.model = c.GetModel()
+	}
 	t.limits = getModelLimits(t.model)
 	t.applyOverridesLocked()
 	t.cache = make(map[string]*list.Element)

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -150,5 +151,81 @@ func TestActivityFeedDisclosesRunningRowsBeyondRenderCap(t *testing.T) {
 	view := stripAnsi(panel.View(80))
 	if !strings.Contains(view, "… 3 more running activities") {
 		t.Fatalf("feed silently hid active rows beyond its cap:\n%s", view)
+	}
+}
+
+func TestActivityFeedCompactHeightPrioritizesLiveThenFailure(t *testing.T) {
+	panel := NewActivityFeedPanel(DefaultStyles())
+	panel.ShowExplicit()
+	panel.entries = []ActivityFeedEntry{
+		{ID: "done", Type: ActivityTypeTool, Name: "completed-tool", Description: "stale success", Status: ActivityCompleted},
+		{ID: "failed", Type: ActivityTypeTool, Name: "failed-tool", Description: "permission denied", Status: ActivityFailed},
+		{ID: "live", Type: ActivityTypeTool, Name: "live-tool", Description: "writing current file", Status: ActivityRunning},
+	}
+
+	view := panel.View(80, 7)
+	plain := stripAnsi(view)
+	if got, limit := lipgloss.Height(view), activityFeedPanelHeightBudget(7); got > limit {
+		t.Fatalf("compact feed height=%d, want <=%d:\n%s", got, limit, plain)
+	}
+	for _, want := range []string{"live-tool", "writing current file", "failed-tool", "permission denied", "Ctrl+O minimal"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("compact feed lost priority signal %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "completed-tool") || strings.Contains(plain, "stale success") {
+		t.Fatalf("stale success displaced an active operation or failure:\n%s", plain)
+	}
+}
+
+func TestActivityFeedCompactHeightFoldsLiveRowsBeforeRecentLog(t *testing.T) {
+	panel := NewActivityFeedPanel(DefaultStyles())
+	panel.ShowExplicit()
+	for i := range 8 {
+		panel.entries = append(panel.entries, ActivityFeedEntry{
+			ID:          fmt.Sprintf("run-%d", i),
+			Type:        ActivityTypeTool,
+			Name:        fmt.Sprintf("live-%d", i),
+			Description: fmt.Sprintf("current operation %d", i),
+			Status:      ActivityRunning,
+		})
+	}
+	for i := range 3 {
+		panel.recentLog = append(panel.recentLog, fmt.Sprintf("old log %d", i))
+	}
+
+	view := panel.View(90, 8)
+	plain := stripAnsi(view)
+	if got, limit := lipgloss.Height(view), activityFeedPanelHeightBudget(8); got > limit {
+		t.Fatalf("compact feed height=%d, want <=%d:\n%s", got, limit, plain)
+	}
+	for _, want := range []string{"live-7", "live-6", "… 6 more running activities"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("compact feed lost newest live signal %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "old log") {
+		t.Fatalf("recent log displaced current running work:\n%s", plain)
+	}
+}
+
+func TestActivityFeedFitsEveryTinyHeight(t *testing.T) {
+	panel := NewActivityFeedPanel(DefaultStyles())
+	panel.ShowExplicit()
+	for i := range 4 {
+		panel.entries = append(panel.entries, ActivityFeedEntry{
+			ID:     fmt.Sprintf("run-%d", i),
+			Type:   ActivityTypeTool,
+			Name:   "tool",
+			Status: ActivityRunning,
+		})
+	}
+	panel.recentLog = []string{"recent result"}
+
+	for height := 1; height <= 8; height++ {
+		view := panel.View(36, height)
+		if got, limit := lipgloss.Height(view), activityFeedPanelHeightBudget(height); got > limit {
+			t.Fatalf("height=%d rendered %d rows, want <=%d:\n%s", height, got, limit, stripAnsi(view))
+		}
 	}
 }

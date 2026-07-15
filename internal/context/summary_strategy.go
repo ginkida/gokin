@@ -161,18 +161,30 @@ func refinePlanWithScoring(
 	// Score the middle section
 	scores := scorer.ScoreMessages(plan.ToSummarize)
 
-	// Identify critical messages in the middle that should be kept
+	// Identify critical messages in the middle that should be kept. Tool
+	// exchanges are an atomic unit: a high-priority call (for example bash/edit)
+	// frequently has an ordinary successful response, while an error response
+	// can be critical even when its call is not. Keeping only the scored half
+	// creates an orphan after ApplySummaryPlan; strict providers reject that
+	// history and last-defense sanitizers have to discard the very operation we
+	// intended to preserve.
+	keep := make([]bool, len(plan.ToSummarize))
+	for i, score := range scores {
+		if score.Priority == PriorityCritical || score.Priority == PriorityHigh {
+			if strategy.KeepToolCalls || len(score.ToolsUsed) == 0 {
+				keep[i] = true
+			}
+		}
+	}
+	expandToolPairRetention(plan.ToSummarize, keep)
+
 	var keepFromMiddle []*genai.Content
 	var newToSummarize []*genai.Content
 
 	for i, msg := range plan.ToSummarize {
-		score := scores[i]
-		// Always keep critical or high priority messages
-		if score.Priority == PriorityCritical || score.Priority == PriorityHigh {
-			if strategy.KeepToolCalls || len(score.ToolsUsed) == 0 {
-				keepFromMiddle = append(keepFromMiddle, msg)
-				continue
-			}
+		if keep[i] {
+			keepFromMiddle = append(keepFromMiddle, msg)
+			continue
 		}
 		// Summarize the rest
 		newToSummarize = append(newToSummarize, msg)
@@ -187,6 +199,66 @@ func refinePlanWithScoring(
 	}
 
 	return refinedPlan
+}
+
+// expandToolPairRetention closes an initial keep-set over tool-call IDs. A
+// message may contain several parallel calls/results, so this deliberately
+// propagates transitively through every ID on a newly retained message.
+func expandToolPairRetention(messages []*genai.Content, keep []bool) {
+	if len(messages) == 0 || len(keep) != len(messages) {
+		return
+	}
+
+	messageIDs := make([][]string, len(messages))
+	byID := make(map[string][]int)
+	for i, msg := range messages {
+		if msg == nil {
+			continue
+		}
+		seen := make(map[string]bool)
+		for _, part := range msg.Parts {
+			if part == nil {
+				continue
+			}
+			id := ""
+			if part.FunctionCall != nil {
+				id = part.FunctionCall.ID
+			} else if part.FunctionResponse != nil {
+				id = part.FunctionResponse.ID
+			}
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			messageIDs[i] = append(messageIDs[i], id)
+			byID[id] = append(byID[id], i)
+		}
+	}
+
+	queue := make([]int, 0, len(messages))
+	queued := make([]bool, len(messages))
+	for i, retained := range keep {
+		if retained {
+			queue = append(queue, i)
+			queued[i] = true
+		}
+	}
+	for len(queue) > 0 {
+		i := queue[0]
+		queue = queue[1:]
+		for _, id := range messageIDs[i] {
+			for _, related := range byID[id] {
+				if keep[related] {
+					continue
+				}
+				keep[related] = true
+				if !queued[related] {
+					queue = append(queue, related)
+					queued[related] = true
+				}
+			}
+		}
+	}
 }
 
 // estimateTokenSavings provides a rough estimate of token savings.

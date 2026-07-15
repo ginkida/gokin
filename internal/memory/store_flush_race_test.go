@@ -22,13 +22,17 @@ import (
 // blocks until that write-phase completes, and that the data is genuinely
 // on disk by the time Flush() returns.
 func TestStoreFlush_WaitsForInFlightDebouncedWrite(t *testing.T) {
+	saveTestSeamMu.Lock()
 	origInterval := saveDebounceInterval
 	origHook := saveIOHookForTest
+	saveDebounceInterval = 10 * time.Millisecond
+	saveTestSeamMu.Unlock()
 	t.Cleanup(func() {
+		saveTestSeamMu.Lock()
 		saveDebounceInterval = origInterval
 		saveIOHookForTest = origHook
+		saveTestSeamMu.Unlock()
 	})
-	saveDebounceInterval = 10 * time.Millisecond
 
 	configDir, err := os.MkdirTemp("", "store-flush-race-config-*")
 	if err != nil {
@@ -48,10 +52,12 @@ func TestStoreFlush_WaitsForInFlightDebouncedWrite(t *testing.T) {
 
 	hookEntered := make(chan struct{})
 	proceedHook := make(chan struct{})
+	saveTestSeamMu.Lock()
 	saveIOHookForTest = func() {
 		close(hookEntered)
 		<-proceedHook
 	}
+	saveTestSeamMu.Unlock()
 
 	entry := NewEntry("the deploy key rotates every 90 days", MemoryProject)
 	if err := store.Add(entry); err != nil {

@@ -4,8 +4,17 @@ import (
 	"time"
 )
 
-// CloseOverlayMsg closes any open overlay
-type CloseOverlayMsg struct{}
+// CloseOverlayMsg completes an asynchronous batch-progress close request.
+// It is intentionally harmless once that progress surface is no longer active.
+// CloseOverlayMsg is asynchronous, so it carries the exact key that owned the
+// transition. The parent can suppress only that physical auto-repeat after the
+// composer or active turn is revealed. The owner generation prevents a delayed
+// close from batch A from dismissing a newer batch B. Empty ownership preserves
+// compatibility for synthetic close messages.
+type CloseOverlayMsg struct {
+	triggerKey      string
+	ownerGeneration uint64
+}
 
 // ========== Task Execution Events ==========
 

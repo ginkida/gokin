@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,39 @@ func TestProgressViewFitsAllWidthsAndShortHeights(t *testing.T) {
 	}
 }
 
+func TestProgressCompactListKeepsPriorityItemsAndHiddenSummary(t *testing.T) {
+	m := NewProgressModel(DefaultStyles())
+	m.SetSize(60, 10)
+	m.Start("Index workspace", 8)
+	m.UpdateProgress(4, "active.go", "Scanning symbols")
+	m.SetActionCallback(func(ProgressAction) {})
+	for i := 0; i < 8; i++ {
+		status := ProgressStatusCompleted
+		if i == 0 {
+			status = ProgressStatusInProgress
+		}
+		if i == 7 {
+			status = ProgressStatusFailed
+		}
+		errorText := ""
+		if i == 7 {
+			errorText = "compile failed"
+		}
+		m.AddItem(ProgressItem{Name: fmt.Sprintf("item-%d.go", i), Status: status, Error: errorText})
+	}
+
+	view := m.View()
+	plain := stripAnsi(view)
+	for _, want := range []string{"item-0.go", "item-7.go", "compile failed", "earlier or lower-priority", "Esc Cancel"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("compact progress lost %q:\n%s", want, plain)
+		}
+	}
+	if got := lipgloss.Height(view); got > 10 {
+		t.Fatalf("compact progress height=%d want <=10:\n%s", got, plain)
+	}
+}
+
 func TestProgressCompletionUsesHonestFailureHeading(t *testing.T) {
 	m := NewProgressModel(DefaultStyles())
 	m.SetSize(80, 24)
@@ -167,11 +201,122 @@ func TestProgressCancellationAcknowledgesOnceAndDisablesStaleActions(t *testing.
 	}
 
 	completed, _ := updatedAgain.Update(ProgressCompleteMsg{TotalItems: 10, SuccessCount: 4})
-	if !completed.isComplete || completed.isCancelling {
-		t.Fatalf("completion did not settle cancelling state: complete=%v cancelling=%v", completed.isComplete, completed.isCancelling)
+	if !completed.isComplete || completed.isCancelling || !completed.wasCancelled || completed.current != 4 {
+		t.Fatalf("completion did not preserve cancelled state: complete=%v cancelling=%v cancelled=%v current=%d", completed.isComplete, completed.isCancelling, completed.wasCancelled, completed.current)
+	}
+	completedView := stripAnsi(completed.View())
+	for _, want := range []string{"Index workspace cancelled", "4/10 · 40%", "Enter/Esc Close"} {
+		if !strings.Contains(completedView, want) {
+			t.Fatalf("cancelled completion missing %q:\n%s", want, completedView)
+		}
+	}
+	for _, falseOutcome := range []string{"Index workspace complete", "10/10 · 100%"} {
+		if strings.Contains(completedView, falseOutcome) {
+			t.Fatalf("cancelled completion reported false outcome %q:\n%s", falseOutcome, completedView)
+		}
 	}
 	if got := stripAnsi(completed.renderActions()); !strings.Contains(got, "Enter/Esc Close") {
 		t.Fatalf("completed footer = %q, want Enter/Esc Close", got)
+	}
+}
+
+func TestCompletedProgressIgnoresLateWorkerUpdates(t *testing.T) {
+	m := NewProgressModel(DefaultStyles())
+	m.Start("Index workspace", 5)
+	m.UpdateProgress(5, "final.go", "Done")
+	completed, _ := m.Update(ProgressCompleteMsg{TotalItems: 5, SuccessCount: 5, Duration: time.Second})
+
+	late, _ := completed.Update(ProgressUpdateMsg{
+		Current:     1,
+		Total:       99,
+		CurrentItem: "stale.go",
+		Message:     "Still running",
+		Items:       []ProgressItem{{Name: "stale.go", Status: ProgressStatusFailed}},
+	})
+	if late.total != 5 || late.current != 5 || late.successCount != 5 || late.failureCount != 0 || late.currentItem != "final.go" || late.message != "Done" {
+		t.Fatalf("late update rewrote terminal result: %+v", late)
+	}
+	view := stripAnsi(late.View())
+	if !strings.Contains(view, "Index workspace complete") || strings.Contains(view, "stale.go") || strings.Contains(view, "Still running") {
+		t.Fatalf("late update leaked into completed view:\n%s", view)
+	}
+}
+
+func TestCompletedProgressIgnoresDuplicateTerminalMessages(t *testing.T) {
+	m := NewProgressModel(DefaultStyles())
+	m.SetSize(80, 24)
+	m.Start("Index workspace", 5)
+	completed, _ := m.Update(ProgressCompleteMsg{
+		TotalItems:   5,
+		SuccessCount: 4,
+		FailureCount: 1,
+		Duration:     2 * time.Second,
+	})
+
+	duplicate, _ := completed.Update(ProgressCompleteMsg{
+		TotalItems:   99,
+		FailureCount: 99,
+		Duration:     9 * time.Second,
+	})
+	if duplicate.total != 5 || duplicate.current != 5 || duplicate.successCount != 4 || duplicate.failureCount != 1 || duplicate.duration != 2*time.Second {
+		t.Fatalf("duplicate completion rewrote terminal result: %+v", duplicate)
+	}
+	view := stripAnsi(duplicate.View())
+	for _, want := range []string{"Index workspace completed with issues", "5/5 · 100%", "✓ 4", "✗ 1"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("preserved completion missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "99/99") || strings.Contains(view, "✗ 99") {
+		t.Fatalf("duplicate completion leaked into terminal view:\n%s", view)
+	}
+}
+
+func TestTerminalProgressHidesStaleRunningMessage(t *testing.T) {
+	tests := []struct {
+		name       string
+		cancel     bool
+		completion ProgressCompleteMsg
+		heading    string
+	}{
+		{name: "success", completion: ProgressCompleteMsg{TotalItems: 3, SuccessCount: 3}, heading: "Publish complete"},
+		{name: "failure", completion: ProgressCompleteMsg{TotalItems: 3, FailureCount: 3}, heading: "Publish failed"},
+		{name: "cancelled", cancel: true, completion: ProgressCompleteMsg{TotalItems: 3, SuccessCount: 1}, heading: "Publish cancelled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewProgressModel(DefaultStyles())
+			m.SetSize(80, 24)
+			m.Start("Publish", 3)
+			m.UpdateProgress(1, "draft.md", "Uploading draft")
+			if tt.cancel {
+				m.isCancelling = true
+			}
+
+			completed, _ := m.Update(tt.completion)
+			view := stripAnsi(completed.View())
+			if !strings.Contains(view, tt.heading) {
+				t.Fatalf("terminal view missing heading %q:\n%s", tt.heading, view)
+			}
+			for _, stale := range []string{"Now · draft.md", "Uploading draft"} {
+				if strings.Contains(view, stale) {
+					t.Fatalf("terminal view retained stale running state %q:\n%s", stale, view)
+				}
+			}
+		})
+	}
+}
+
+func TestProgressCompletionReconcilesImpossibleTotals(t *testing.T) {
+	m := NewProgressModel(DefaultStyles())
+	m.Start("Batch", 2)
+	completed, _ := m.Update(ProgressCompleteMsg{TotalItems: 2, SuccessCount: 2, FailureCount: 1})
+	if completed.total != 3 || completed.current != 3 {
+		t.Fatalf("completion kept impossible totals: current=%d total=%d", completed.current, completed.total)
+	}
+	if view := stripAnsi(completed.View()); !strings.Contains(view, "3/3 · 100%") {
+		t.Fatalf("reconciled completion is not visible:\n%s", view)
 	}
 }
 
@@ -227,6 +372,12 @@ func TestBatchProgressIntegrationKeepsCompletionUntilExplicitClose(t *testing.T)
 	m5 := updated.(Model)
 	if m5.state != StateProcessing || m5.progressActive {
 		t.Fatalf("close did not restore prior state: state=%v active=%v", m5.state, m5.progressActive)
+	}
+
+	updated, _ = m5.Update(ProgressUpdateMsg{Current: 1, Total: 2, CurrentItem: "next-batch.go"})
+	m6 := updated.(Model)
+	if m6.state != StateBatchProgress || !m6.progressActive || m6.progressModel.isComplete || m6.progressModel.current != 1 || m6.progressModel.total != 2 || m6.progressModel.currentItem != "next-batch.go" {
+		t.Fatalf("explicit close did not allow a new batch: state=%v active=%v model=%+v", m6.state, m6.progressActive, m6.progressModel)
 	}
 }
 

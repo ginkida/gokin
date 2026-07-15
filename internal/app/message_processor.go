@@ -40,8 +40,187 @@ const (
 	idleCheckInterval = 30 * time.Second
 )
 
+// startMessageIdleWatchdog cancels a foreground turn after prolonged absence
+// of model/tool activity. The headless outcome is latched before cancellation:
+// cancellation cleanup intentionally clears lastError, so reversing this order
+// would make an internally timed-out automation run report false success.
+func (a *App) startMessageIdleWatchdog(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	headlessTurn *headlessTerminalOutcome,
+) {
+	a.safeGo("idle-timeout-watcher", func() {
+		ticker := time.NewTicker(idleCheckInterval)
+		defer ticker.Stop()
+		a.watchMessageIdle(ctx, cancel, headlessTurn, messageIdleTimeout, ticker.C)
+	})
+}
+
+// watchMessageIdle contains the deterministic watchdog state machine. Keeping
+// the tick source injectable at this internal boundary avoids timing-heavy
+// tests while production still uses a normal time.Ticker.
+func (a *App) watchMessageIdle(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	headlessTurn *headlessTerminalOutcome,
+	timeout time.Duration,
+	ticks <-chan time.Time,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			if age := a.stepHeartbeatAge(); age > timeout {
+				logging.Warn("message processing idle timeout",
+					"idle", age.Round(time.Second).String())
+				a.recordHeadlessTerminalOutcomeForTurn(
+					headlessTurn,
+					"timeout",
+					fmt.Sprintf("message processing idle timeout: no model activity for %v", age.Round(time.Second)),
+				)
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// isHeadlessTimeoutFailure recognizes every terminal timeout category emitted
+// by the model/executor stack. Explicit cancellation is deliberately excluded:
+// an operator abort remains status=cancelled rather than being relabeled.
+func isHeadlessTimeoutFailure(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, client.ErrModelRoundTimeout) ||
+		client.IsStreamIdleTimeout(err) ||
+		client.IsHTTPTimeout(err) {
+		return true
+	}
+
+	switch client.DetectFailureTelemetry(err).Reason {
+	case string(client.FailureReasonStreamIdleTimeout),
+		string(client.FailureReasonModelRoundTimeout),
+		string(client.FailureReasonHTTPTimeout):
+		return true
+	default:
+		return false
+	}
+}
+
+// finishForegroundProcessing is the shared terminal transition for model turns
+// and slash commands. It releases the foreground slot, lets the caller publish
+// its final UI messages, then hands the FIFO head to the normal submit path.
+// Keeping those steps together prevents one operation type from leaving queued
+// user input stranded after success, error, panic, or early validation failure.
+func (a *App) finishForegroundProcessing(beforePending func()) {
+	if beforePending != nil {
+		func() {
+			defer func() {
+				if panicValue := recover(); panicValue != nil {
+					a.mu.Lock()
+					a.processing = false
+					a.mu.Unlock()
+					panic(panicValue)
+				}
+			}()
+			beforePending()
+		}()
+	}
+
+	// A headless invocation owns the foreground until its synchronous session
+	// save and terminal result encoding are complete. The model pipeline ends
+	// before those steps, so keep the slot occupied here and let
+	// releaseHeadlessForeground perform the normal FIFO handoff. Otherwise a
+	// queued interactive turn can start under the headless presenter/token and
+	// contaminate its output, policy outcome, and usage ledger.
+	a.mu.Lock()
+	if a.headlessRunActive {
+		a.processing = true
+		a.mu.Unlock()
+		a.saveRecoverySnapshot()
+		return
+	}
+	a.mu.Unlock()
+
+	// Transfer ownership while holding a.mu. Keeping processing=true when a
+	// pending item exists removes the idle gap in which later input could claim
+	// the foreground and overtake the FIFO head.
+	a.mu.Lock()
+	pending, remaining, ok := a.dequeuePending()
+	var name string
+	var args []string
+	var isCmd bool
+	var nextCtx context.Context
+	if ok {
+		a.processing = true
+		a.dropSteerLeftovers = false
+		// Install the next turn's cancellation owner before publishing any UI
+		// handoff messages. Program.Send may block behind the event loop; Esc in
+		// that interval must cancel this accepted FIFO head, not miss it after it
+		// has already been removed from the queue.
+		nextCtx = a.claimForegroundContextLocked()
+		name, args, isCmd = a.commandHandler.Parse(pending)
+	} else {
+		a.processing = false
+	}
+	a.mu.Unlock()
+
+	if ok {
+		a.safeSendToProgram(ui.QueuedCountMsg(remaining))
+		a.safeSendToProgram(ui.StreamTextMsg("\n📤 Processing queued message...\n"))
+		a.startAcceptedSubmit(nextCtx, pending, name, args, isCmd)
+	}
+	a.saveRecoverySnapshot()
+}
+
+// finishMessageProcessing releases ownership of a foreground turn on every
+// exit path, including validation failures before the model pipeline starts.
+// It is deferred directly so recover can convert a synchronous pipeline panic
+// into visible UI feedback instead of leaving the prompt permanently busy.
+func (a *App) finishMessageProcessing() {
+	panicValue := recover()
+	if panicValue != nil {
+		logging.Error("panic in message processing", "panic", panicValue, "stack", logging.PanicStack())
+		a.recordHeadlessTerminalOutcome("panic", fmt.Sprintf("panic in message processing: %v", panicValue))
+	}
+	// Clear only this completed turn's cancel handle before a FIFO handoff can
+	// install the next one.
+	a.processingMu.Lock()
+	a.processingCancel = nil
+	a.processingMu.Unlock()
+	a.finishForegroundProcessing(func() {
+		if a.executor != nil {
+			a.executor.SetSideEffectDedup(false)
+		}
+		// Busy ownership is already released before UI delivery. Even a broken
+		// or shutting-down presenter cannot leave subsequent submits stuck busy.
+		if panicValue != nil {
+			a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("internal error: %v — your work was saved, please retry", panicValue)))
+		}
+	})
+}
+
 // processMessageWithContext handles user messages with full context management.
 func (a *App) processMessageWithContext(ctx context.Context, message string) {
+	a.processMessageWithMemoryQuery(ctx, message, message)
+}
+
+// processMessageWithMemoryQuery separates the model payload from the text used
+// for durable-memory retrieval. Interactive @path expansion can append a large
+// file to the payload; searching memory with that file would be both expensive
+// and semantically wrong, so the caller supplies the original user request.
+func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memoryQuery string) {
+	defer a.finishMessageProcessing()
+	// A FIFO handoff can be cancelled while its UI status send is waiting for
+	// the event loop. Keep the common finalizer, but do not enter the model
+	// pipeline when that accepted turn was already cancelled before launch.
+	if ctx.Err() != nil {
+		return
+	}
+
 	if a.session == nil {
 		a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("session not initialized — try /clear or restart")))
 		return
@@ -58,6 +237,10 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	// interactive only; headless/eval always acts. pushTurnContext refreshes the
 	// client's ephemeral turn-context (never the cached prefix) with the banner.
 	a.beginTurnIntent(message)
+	// Recall durable facts that are relevant to THIS request. Generic hot memory
+	// remains available in the stable system prefix; query-aware recall belongs
+	// beside the user turn so GLM prefix caching is not invalidated every message.
+	a.updateRelevantMemoryForTurn(memoryQuery)
 	a.pushTurnContext()
 
 	// Group all file changes from this message for atomic undo.
@@ -76,59 +259,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	a.touchStepHeartbeat()
-	a.safeGo("idle-timeout-watcher", func() {
-		ticker := time.NewTicker(idleCheckInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if age := a.stepHeartbeatAge(); age > messageIdleTimeout {
-					logging.Warn("message processing idle timeout",
-						"idle", age.Round(time.Second).String())
-					cancel()
-					return
-				}
-			}
-		}
-	})
-
-	defer func() {
-		// A panic anywhere in the synchronous turn pipeline (agent/executor/
-		// tool/client) would otherwise leave the TUI stuck in StateProcessing
-		// forever — the enclosing safeGo recovers it but sends NO UI signal, and
-		// ErrorMsg/ResponseDoneMsg are the only messages that return the UI to
-		// the input prompt. Recover here and surface an actionable error.
-		if r := recover(); r != nil {
-			logging.Error("panic in message processing", "panic", r, "stack", logging.PanicStack())
-			a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("internal error: %v — your work was saved, please retry", r)))
-		}
-		a.mu.Lock()
-		a.processing = false
-		a.mu.Unlock()
-		if a.executor != nil {
-			a.executor.SetSideEffectDedup(false)
-		}
-
-		// Dispatch the next type-ahead message, if any (FIFO).
-		if pending, remaining, ok := a.dequeuePending(); ok {
-			a.safeSendToProgram(ui.QueuedCountMsg(remaining))
-			a.safeSendToProgram(ui.StreamTextMsg("\n📤 Processing queued message...\n"))
-			// Recursively handle the pending message.
-			// Was raw `go` — a panic inside handleSubmit (e.g. nil-deref
-			// from a torn-down Tool, or a panic in safeSendToProgram during
-			// shutdown race) crashed the whole CLI silently. Per CLAUDE.md
-			// reliability invariants, every long-lived background goroutine
-			// must use safeGo.
-			// handleResubmit, not handleSubmit: if the user submitted a NEW
-			// message in the tiny gap after processing cleared, the queued
-			// message must RE-QUEUE behind it — not get steered into the
-			// just-started turn as a mid-task follow-up.
-			a.safeGo("pending-message-dispatch", func() { a.handleResubmit(pending) })
-		}
-		a.saveRecoverySnapshot()
-	}()
+	headlessTurn := a.activeHeadlessTerminalToken()
+	a.startMessageIdleWatchdog(ctx, cancel, headlessTurn)
 
 	// Track response start time and reset tools used
 	a.mu.Lock()
@@ -223,11 +355,23 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	partialIdleRetryCount := 0
 	overloadRetryCount := 0
 	var overloadElapsed time.Duration
-	apiInputAccum := 0
-	apiOutputAccum := 0
-	cacheReadAccum := 0
-	apiCostAccum := 0.0
-	apiCostTracked := false
+	var turnUsage turnUsageAccumulator
+	usageCommitted := false
+	// Several fail-closed finalization paths (done-gate refusal, recovered
+	// panic, context-clear handoff) return before the normal footer/metadata
+	// block. Provider work has already been performed and billed at that point.
+	// Commit the accumulated ledger exactly once on every exit so headless JSON
+	// cannot report zero usage for a failed-but-executed turn.
+	defer func() {
+		if usageCommitted {
+			return
+		}
+		if turnUsage.empty() {
+			return
+		}
+		turnUsage.commit(a)
+		usageCommitted = true
+	}()
 
 	a.mu.Lock()
 	headlessDirect := a.headlessDirect
@@ -268,7 +412,8 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 				}
 			} else {
 				// Fallback to standard executor
-				newHistory, response, err = a.executor.Execute(ctx, history, currentMessage)
+				newHistory, response, err = a.executeTracked(
+					ctx, history, currentMessage, &turnUsage)
 			}
 			return err
 		}
@@ -329,20 +474,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			"request_retries", requestRetryCount,
 			"partial_retries", partialIdleRetryCount,
 			"error", err)
-
-		// Capture this attempt before ANY early exit/continue decision. Executor
-		// may hold billable partial-stream usage even for cancellation, context
-		// overflow, or a terminal error that will not be retried.
-		failInput, failOutput := a.executor.GetLastTokenUsage()
-		_, failCacheRead := a.executor.GetLastCacheMetrics()
-		failCost, failCostTracked := a.executor.GetLastEstimatedCost()
-		apiInputAccum += failInput
-		apiOutputAccum += failOutput
-		cacheReadAccum += failCacheRead
-		if failCostTracked {
-			apiCostAccum += failCost
-			apiCostTracked = true
-		}
 
 		// Don't retry if context cancelled (user abort)
 		if ctx.Err() != nil {
@@ -498,10 +629,23 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	if err != nil {
 		// Terminal failures return before normal turn finalization. Commit every
 		// attempt collected above so failed-request spend remains visible.
-		a.commitSessionUsage(apiInputAccum, apiInputAccum, apiOutputAccum, cacheReadAccum, apiCostAccum, apiCostTracked)
+		turnUsage.commit(a)
+		usageCommitted = true
+		// Provider/round deadlines remain recoverable in the interactive UI,
+		// but one-shot automation must exit non-zero with a typed timeout. This
+		// runs only after the in-turn retry budget is exhausted, so a transient
+		// timeout that recovered is still a successful turn.
+		if isHeadlessTimeoutFailure(err) {
+			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "timeout", err.Error())
+		}
 
+		cancelled := errors.Is(err, context.Canceled)
 		ft := client.DetectFailureTelemetry(err)
-		a.journalEvent("request_failed", map[string]any{
+		journalEvent := "request_failed"
+		if cancelled {
+			journalEvent = "request_cancelled"
+		}
+		a.journalEvent(journalEvent, map[string]any{
 			"error":           err.Error(),
 			"message_preview": previewForJournal(message),
 			"failure_reason":  ft.Reason,
@@ -510,7 +654,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 			"provider":        ft.Provider,
 		})
 		// Don't count user cancellation (Esc) as a failure — only real API errors
-		if a.reliability != nil && !errors.Is(err, context.Canceled) {
+		if a.reliability != nil && !cancelled {
 			a.reliability.RecordFailure()
 		}
 		if errors.Is(err, ErrRequestCircuitOpen) {
@@ -554,6 +698,21 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 					}
 				}
 			}
+		}
+		if cancelled {
+			// Explicit cancellation is an intentional terminal state, not a
+			// provider failure. Do not surface it as ErrorMsg or carry it into the
+			// next prompt as "previous attempt failed". ResponseDone is still
+			// required for OS-signal cancellation, whose UI path does not perform
+			// the TUI Esc transition itself.
+			a.clearRateLimitRetry(message)
+			a.clearAutoResume(originalMessage)
+			a.mu.Lock()
+			a.lastError = ""
+			a.lastErrorTime = time.Time{}
+			a.mu.Unlock()
+			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			return
 		}
 		// Store error for context injection on retry
 		a.mu.Lock()
@@ -696,17 +855,6 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		a.reliability.RecordSuccess()
 	}
 
-	apiInput, apiOutput := a.executor.GetLastTokenUsage()
-	_, cacheRead := a.executor.GetLastCacheMetrics()
-	apiCost, currentCostTracked := a.executor.GetLastEstimatedCost()
-	apiInputAccum += apiInput
-	apiOutputAccum += apiOutput
-	cacheReadAccum += cacheRead
-	if currentCostTracked {
-		apiCostAccum += apiCost
-		apiCostTracked = true
-	}
-
 	// Update session history. Defensive shrink-guard: a normal turn result must
 	// EXTEND the conversation. If a handler ever returns a shorter slice than we
 	// fed in (e.g. a minimal-history router path that wasn't extended), committing
@@ -733,9 +881,13 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 	}
 
-	if !a.runCompletionReviewIfNeeded(ctx, message, &response, &apiInputAccum, &apiOutputAccum, &cacheReadAccum, &apiCostAccum, &apiCostTracked) {
+	if !a.runCompletionReviewIfNeeded(ctx, message, &response, &turnUsage) {
 		return
 	}
+	// Completion review may replace the draft response. Capture the resulting
+	// terminal answer before the done-gate starts any internal auto-fix model
+	// exchanges; JSON headless output must not concatenate those hidden calls.
+	a.recordHeadlessFinalResult(response)
 
 	// Hard done-gate before response completion.
 	if !a.enforceDoneGate(ctx, message) {
@@ -779,14 +931,19 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		}
 	}
 
-	turnInputTokens, turnOutputTokens, turnCacheReadTokens := resolveTurnTokenUsage(
-		apiInputAccum, apiOutputAccum, cacheReadAccum, estimatedContextInput, response)
+	// Router strategies account delegated usage through their agent callback.
+	// A direct call always has at least one executeTracked sample. Keep a
+	// defensive fallback for focused test seams/custom routers that return a
+	// response without publishing usage.
+	if turnUsage.empty() && (estimatedContextInput > 0 || response != "") {
+		turnUsage.add(0, 0, 0, estimatedContextInput, response, 0, false)
+	}
 
 	// Session totals back /stats and /cost. Provider-reported values are true
 	// per-request deltas and accumulate; the local input estimate is the current
 	// context size, so it replaces rather than adds when API metadata is absent.
-	cost, _ := a.commitSessionUsage(
-		apiInputAccum, turnInputTokens, turnOutputTokens, turnCacheReadTokens, apiCostAccum, apiCostTracked)
+	cost, _ := turnUsage.commit(a)
+	usageCommitted = true
 
 	// Direct-executor turns stream their text live through the presenter
 	// (OnText). Minimal-history router strategies (sub-agent, coordinated)
@@ -829,7 +986,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 	metadataModel := a.config.Model.Name
 	metadataProvider := ""
 	fallbackUsed := false
-	if apiCostTracked && a.executor != nil {
+	if turnUsage.samples > 0 && a.executor != nil {
 		if provider, model := a.executor.GetLastProviderIdentity(); provider != "" {
 			configuredProvider := runtimeProviderForConfig(a.config)
 			if !strings.EqualFold(strings.TrimSpace(provider), strings.TrimSpace(configuredProvider)) {
@@ -843,9 +1000,9 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 		Model:                metadataModel,
 		Provider:             metadataProvider,
 		FallbackUsed:         fallbackUsed,
-		InputTokens:          turnInputTokens,
-		OutputTokens:         turnOutputTokens,
-		CacheReadInputTokens: turnCacheReadTokens,
+		InputTokens:          turnUsage.input,
+		OutputTokens:         turnUsage.output,
+		CacheReadInputTokens: turnUsage.cacheRead,
 		Duration:             duration,
 		ToolsUsed:            toolsUsed,
 		Cost:                 cost,
@@ -879,6 +1036,100 @@ func resolveTurnTokenUsage(apiInput, apiOutput, cacheRead, estimatedContextInput
 	return input, output, cached
 }
 
+// turnUsageAccumulator records every model exchange that belongs to one
+// foreground operation. Raw provider input remains separate because the
+// cumulative session ledger treats it differently from local estimates;
+// resolved input/output are additive and are therefore suitable for a single
+// headless invocation, including retries and internal review calls.
+type turnUsageAccumulator struct {
+	apiInput    int
+	input       int
+	output      int
+	cacheRead   int
+	cost        float64
+	costTracked bool
+	// costIncomplete is true when at least one sample had no provider price.
+	// A mixed priced/unpriced invocation must not advertise a partial sum as a
+	// fully tracked cost.
+	costIncomplete bool
+	samples        int
+}
+
+func (u *turnUsageAccumulator) add(
+	apiInput, apiOutput, cacheRead, estimatedInput int,
+	response string,
+	cost float64,
+	costTracked bool,
+) {
+	if u == nil {
+		return
+	}
+	input, output, cached := resolveTurnTokenUsage(
+		apiInput, apiOutput, cacheRead, estimatedInput, response)
+	u.apiInput += max(apiInput, 0)
+	u.input += input
+	u.output += output
+	u.cacheRead += cached
+	if costTracked {
+		u.cost += max(cost, 0)
+		u.costTracked = true
+	} else {
+		u.costIncomplete = true
+	}
+	u.samples++
+}
+
+func (u *turnUsageAccumulator) empty() bool {
+	return u == nil || u.samples == 0
+}
+
+func (u *turnUsageAccumulator) commit(a *App) (float64, bool) {
+	if u == nil || a == nil || u.samples == 0 {
+		return 0, false
+	}
+	cost, tracked := a.commitSessionUsage(
+		u.apiInput, u.input, u.output, u.cacheRead, u.cost, u.costTracked)
+	if !tracked || (u.costTracked && u.costIncomplete) {
+		a.markHeadlessCostIncomplete()
+		tracked = false
+	}
+	return cost, tracked
+}
+
+// estimateModelRequestInput is a deterministic per-request fallback used only
+// when the provider omits usage metadata. It intentionally counts each retry
+// separately; a session-wide context-size lower bound cannot represent an
+// invocation that made several model calls.
+func estimateModelRequestInput(history []*genai.Content, prompt string) int {
+	estimated := appcontext.EstimateContentsTokens(history)
+	if prompt != "" {
+		estimated += max(len([]rune(prompt))/4, 1)
+	}
+	return max(estimated, 0)
+}
+
+// executeTracked is the single direct-Executor boundary for foreground model
+// calls. Its defer captures the executor's final counters on success, error,
+// retry, empty response, and panic before the outer recovery path runs.
+func (a *App) executeTracked(
+	ctx context.Context,
+	history []*genai.Content,
+	prompt string,
+	usage *turnUsageAccumulator,
+) (newHistory []*genai.Content, response string, err error) {
+	estimatedInput := estimateModelRequestInput(history, prompt)
+	defer func() {
+		if usage == nil || a == nil || a.executor == nil {
+			return
+		}
+		input, output := a.executor.GetLastTokenUsage()
+		_, cacheRead := a.executor.GetLastCacheMetrics()
+		cost, tracked := a.executor.GetLastEstimatedCost()
+		usage.add(input, output, cacheRead, estimatedInput, response, cost, tracked)
+	}()
+	return a.executor.Execute(ctx, history, prompt)
+}
+
 // accumulateTurnTokenUsage updates the session ledger without mixing the two
 // different meanings of input usage. Provider metadata is a billable
 // per-request delta and is accumulated. The local fallback is the current
@@ -889,13 +1140,28 @@ func (a *App) accumulateTurnTokenUsage(apiInput, turnInput, turnOutput, cacheRea
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	turnInput = max(turnInput, 0)
+	turnOutput = max(turnOutput, 0)
+	cacheRead = min(max(cacheRead, 0), turnInput)
+	if a.headlessRunActive {
+		// turnInput is the resolved per-request amount: provider metadata when
+		// available, otherwise that request's local estimate. Using apiInput here
+		// would drop fallback work from a mixed metadata/retry invocation.
+		invocationInput := turnInput
+		a.headlessInvocationUsage.InputTokens += invocationInput
+		a.headlessInvocationUsage.OutputTokens += turnOutput
+		a.headlessInvocationUsage.CacheReadInputTokens += min(cacheRead, invocationInput)
+		a.headlessInvocationUsage.TotalTokens =
+			a.headlessInvocationUsage.InputTokens + a.headlessInvocationUsage.OutputTokens
+	}
+
 	if apiInput > 0 {
 		a.totalInputTokens += apiInput
 	} else if turnInput > a.totalInputTokens {
 		a.totalInputTokens = turnInput
 	}
-	a.totalOutputTokens += max(turnOutput, 0)
-	a.totalCacheReadTokens += min(max(cacheRead, 0), max(turnInput, 0))
+	a.totalOutputTokens += turnOutput
+	a.totalCacheReadTokens += cacheRead
 	// Cached input is a subset of billable input. Some compatible providers
 	// expose cache metrics even when the ordinary input field is absent; keep
 	// the public session totals internally consistent in that case.
@@ -921,13 +1187,34 @@ func (a *App) commitSessionUsage(apiInput, turnInput, output, cacheRead int, cos
 		}
 	}
 	if costTracked {
-		cost = max(cost, 0)
-		a.mu.Lock()
-		a.totalEstimatedCost += cost
-		a.costTracked = true
-		a.mu.Unlock()
+		cost = a.commitTrackedCost(cost)
 	}
 	return cost, costTracked
+}
+
+// commitTrackedCost applies a provider-priced (including known-zero local)
+// cost to both the cumulative session ledger and the active headless
+// invocation. Callers must only use this when pricing is known.
+func (a *App) commitTrackedCost(cost float64) float64 {
+	cost = max(cost, 0)
+	a.mu.Lock()
+	a.totalEstimatedCost += cost
+	a.costTracked = true
+	if a.headlessRunActive {
+		a.headlessInvocationCost.EstimatedUSD += cost
+		a.headlessInvocationCost.Tracked = true
+	}
+	a.mu.Unlock()
+	return cost
+}
+
+func (a *App) markHeadlessCostIncomplete() {
+	a.mu.Lock()
+	if a.headlessRunActive {
+		a.headlessCostIncomplete = true
+		a.headlessInvocationCost.Tracked = false
+	}
+	a.mu.Unlock()
 }
 
 // accumulateAgentResultUsage folds one delegated agent invocation into the
@@ -935,49 +1222,10 @@ func (a *App) commitSessionUsage(apiInput, turnInput, output, cacheRead int, cos
 // /stats omitted their usage entirely. Call once for every Spawn attempt,
 // including failed attempts: providers bill those completed model rounds too.
 func (a *App) accumulateAgentResultUsage(result *agent.AgentResult) {
-	if result == nil {
-		return
-	}
-	input := max(result.InputTokens, 0)
-	output := max(result.OutputTokens, 0)
-	cacheRead := min(max(result.CacheReadInputTokens, 0), input)
-	if input == 0 && output == 0 && cacheRead == 0 {
-		return
-	}
-
-	a.accumulateTurnTokenUsage(input, input, output, cacheRead)
-
-	if result.CostTracked {
-		a.mu.Lock()
-		a.totalEstimatedCost += max(result.EstimatedCost, 0)
-		a.costTracked = true
-		a.mu.Unlock()
-		return
-	}
-
-	provider := strings.ToLower(strings.TrimSpace(result.Provider))
-	var tc *appcontext.TokenCounter
-	if provider == "ollama" {
-		// Local inference has no provider token charge. Still mark the ledger as
-		// tracked below so /cost can distinguish known-zero from missing pricing.
-		tc = appcontext.NewTokenCounter(nil, result.Model, nil)
-	} else if strings.TrimSpace(result.Model) != "" {
-		// Pricing is tied to the agent's resolved model, not whichever model is
-		// active in the foreground when an async callback happens to arrive.
-		tc = appcontext.NewTokenCounter(nil, result.Model, nil)
-	} else if a.contextManager != nil {
-		tc = a.contextManager.GetTokenCounter()
-	}
-	if tc != nil {
-		cost := tc.CalculateCostWithCache(input, output, cacheRead)
-		if provider == "ollama" {
-			cost = 0
-		}
-		a.mu.Lock()
-		a.totalEstimatedCost += cost
-		a.costTracked = true
-		a.mu.Unlock()
-	}
+	// Retained as the internal/test compatibility seam. Unscoped results update
+	// cumulative session totals but can never be attributed to whichever
+	// headless invocation happens to be active when an old async agent finishes.
+	a.accumulateScopedAgentResultUsage(result)
 }
 
 // emitTodoUpdate renders the current todo list and pushes it to the UI checklist
@@ -1460,12 +1708,29 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	var response string
 	var err error
 	errCat := plan.ErrorUnknown
+	var stepUsage turnUsageAccumulator
+	usageCommitted := false
+	commitStepUsage := func() {
+		if usageCommitted || stepUsage.empty() {
+			return
+		}
+		stepUsage.commit(a)
+		step.TokensUsed = stepUsage.input + stepUsage.output
+		approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
+		usageCommitted = true
+	}
+	// executeTracked records usage even when Executor.Execute panics. Commit the
+	// captured sample while unwinding so a recovered plan step never loses work
+	// that reached the model. The explicit commit after the loop keeps normal
+	// failure/verification returns observable before their state transition.
+	defer commitStepUsage()
 
 	for attempt := range maxRetries {
 		history, histVersion := a.session.GetHistoryWithVersion()
 		var newHistory []*genai.Content
 		execFn := func() error {
-			newHistory, response, err = a.executor.Execute(stepCtx, history, stepMsg)
+			newHistory, response, err = a.executeTracked(
+				stepCtx, history, stepMsg, &stepUsage)
 			return err
 		}
 		if a.policy != nil {
@@ -1522,6 +1787,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		}
 		break
 	}
+	commitStepUsage()
 
 	// Handle step failure
 	if err != nil {
@@ -1589,14 +1855,6 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 	if runes := []rune(output); len(runes) > planStepOutputMaxChars {
 		output = string(runes[:planStepOutputMaxChars]) + "..."
 	}
-
-	// Record token usage for this step. `step` is a deep copy from
-	// NextReadySteps, so persist to the real plan step by ID (SetStepUsage) —
-	// otherwise the plan execution summary always reports 0 tokens.
-	apiInput, apiOutput := a.executor.GetLastTokenUsage()
-	_, cacheRead := a.executor.GetLastCacheMetrics()
-	step.TokensUsed = apiInput + apiOutput
-	approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
 
 	verificationSummary, verificationOutput, verificationOK, verificationReason := a.runStepVerificationCommands(ctx, approvedPlan, step)
 	if !verificationOK {
@@ -1670,27 +1928,6 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		}
 		a.sendTokenUsageUpdate()
 	}
-
-	// Accumulate token usage for /cost command
-	a.mu.Lock()
-	if apiOutput > 0 {
-		a.totalOutputTokens += apiOutput
-	} else if response != "" {
-		a.totalOutputTokens += len(response) / 4
-	}
-	if apiInput > 0 {
-		a.totalInputTokens += apiInput
-	}
-	if cacheRead > 0 {
-		a.totalCacheReadTokens += min(cacheRead, apiInput)
-	}
-	if a.contextManager != nil {
-		if tc := a.contextManager.GetTokenCounter(); tc != nil {
-			a.totalEstimatedCost += tc.CalculateCostWithCache(apiInput, apiOutput, cacheRead)
-			a.costTracked = true
-		}
-	}
-	a.mu.Unlock()
 
 	// Save session after each completed step (crash recovery)
 	if a.sessionManager != nil {
@@ -2134,7 +2371,13 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	prevSummary := a.planManager.GetPreviousStepsSummary(step.ID, planSummaryMaxChars)
 	projectCtx := ""
 	if a.promptBuilder != nil {
-		projectCtx = a.promptBuilder.BuildSubAgentPrompt()
+		memoryQuery := strings.Join([]string{
+			approvedPlan.Request,
+			approvedPlan.Title,
+			step.Title,
+			step.Description,
+		}, " ")
+		projectCtx = a.promptBuilder.BuildSubAgentPromptForTask(memoryQuery)
 	}
 
 	// Get SharedMemory context for this sub-agent

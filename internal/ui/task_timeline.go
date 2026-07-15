@@ -169,9 +169,5 @@ func timelineLabel(kind string) string {
 }
 
 func normalizeTimelineText(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	return strings.Join(strings.Fields(text), " ")
+	return safeKeyEntryText(text)
 }

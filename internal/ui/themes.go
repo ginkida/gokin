@@ -51,16 +51,16 @@ func predefinedThemes() map[ThemeType]ThemeColorScheme {
 			Success:    lipgloss.Color("#5AB97B"), // Forest Green
 			Warning:    lipgloss.Color("#D4A24A"), // Deep Amber
 			Error:      lipgloss.Color("#D85A4A"), // Coral
-			Muted:      lipgloss.Color("#807D75"), // Warm Gray
+			Muted:      lipgloss.Color("#9A958C"), // Readable Warm Gray
 			Text:       lipgloss.Color("#E8E4D8"), // Warm Off-White
 			Background: lipgloss.Color("#0E1116"), // Warm Graphite
 			Border:     lipgloss.Color("#2A2C33"), // Subtle Border
 			Highlight:  lipgloss.Color("#C0AEFF"), // Lavender
 			Accent:     lipgloss.Color("#9B7BFF"), // Unified with Primary (single violet)
 			Info:       lipgloss.Color("#6BAEB5"), // Calm Teal
-			Dim:        lipgloss.Color("#5A5852"), // Deeper Warm Gray
+			Dim:        lipgloss.Color("#807D75"), // Accessible Dim Warm Gray
 			Running:    lipgloss.Color("#6B8AD4"), // Info Blue
-			Context:    lipgloss.Color("#807D75"), // = Muted
+			Context:    lipgloss.Color("#9A958C"), // = Muted
 		},
 	}
 }

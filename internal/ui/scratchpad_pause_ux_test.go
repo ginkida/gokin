@@ -53,6 +53,47 @@ func TestScratchpadWhitespaceOnlyDoesNotRender(t *testing.T) {
 	}
 }
 
+func TestScratchpadFitsEveryTinyTerminalHeight(t *testing.T) {
+	for height := 1; height <= 12; height++ {
+		m := panelTestModel()
+		m.width = 46
+		m.height = height
+		for i := 0; i < 10; i++ {
+			m.scratchpad += fmt.Sprintf("note %d\n", i)
+		}
+
+		view := m.renderScratchpad()
+		if got, limit := lipgloss.Height(view), scratchpadPanelHeightBudget(height); got > limit {
+			t.Fatalf("height=%d rendered %d rows, want <=%d:\n%s", height, got, limit, stripAnsi(view))
+		}
+		plain := stripAnsi(view)
+		if height >= 4 && !strings.Contains(plain, "note 9") {
+			t.Fatalf("height=%d lost the newest note:\n%s", height, plain)
+		}
+		if height >= 4 && !strings.Contains(plain, "earlier") {
+			t.Fatalf("height=%d hid old notes without disclosure:\n%s", height, plain)
+		}
+	}
+}
+
+func TestScratchpadSanitizesRuntimeControlSequences(t *testing.T) {
+	m := panelTestModel()
+	m.width = 60
+	m.height = 20
+	m.scratchpad = "safe\x1b[2J\nlatest\x1b]0;forged-title\a"
+
+	view := m.renderScratchpad()
+	plain := stripAnsi(view)
+	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "\x1b]0;") {
+		t.Fatalf("scratchpad emitted runtime control sequence: %q", view)
+	}
+	for _, want := range []string{"safe", "latest"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("sanitization discarded note %q:\n%s", want, plain)
+		}
+	}
+}
+
 func TestPlanPauseFallbackFitsAndNormalizesContent(t *testing.T) {
 	for width := 1; width <= 48; width++ {
 		m := panelTestModel()

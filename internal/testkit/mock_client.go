@@ -281,6 +281,12 @@ func (m *MockClient) CountTokens(ctx context.Context, contents []*genai.Content)
 	return &genai.CountTokensResponse{TotalTokens: total}, nil
 }
 
+// TokenCountIsEstimate reports that CountTokens uses a character-based
+// approximation rather than a provider tokenizer.
+func (m *MockClient) TokenCountIsEstimate() bool {
+	return true
+}
+
 // GetModel implements client.Client.
 func (m *MockClient) GetModel() string {
 	m.mu.Lock()

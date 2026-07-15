@@ -102,6 +102,170 @@ func TestPlanProgressShortTerminalAutoCompactsHonestly(t *testing.T) {
 	}
 }
 
+func TestPlanProgressCompactHeightKeepsCurrentStepWithoutDuplicateTool(t *testing.T) {
+	for _, height := range []int{8, 10, 15} {
+		panel := NewPlanProgressPanel(DefaultStyles())
+		panel.StartPlan("p", "Workspace migration", "", planSteps(6))
+		panel.StartStep(3)
+		panel.SetCurrentTool("grep TODO", strings.Repeat("deep/path/", 12))
+
+		view := panel.View(60, height)
+		plain := stripAnsi(view)
+		for _, want := range []string{"Step 3", "grep TODO", "hidden"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("height=%d compact plan missing %q:\n%s", height, want, plain)
+			}
+		}
+		if count := strings.Count(plain, "grep TODO"); count != 1 {
+			t.Fatalf("height=%d rendered current tool %d times:\n%s", height, count, plain)
+		}
+		if got := lipgloss.Height(view); got > height {
+			t.Fatalf("height=%d compact plan rendered %d rows:\n%s", height, got, plain)
+		}
+	}
+}
+
+func TestPlanProgressSmallestPausedViewPrioritizesResumeAndReason(t *testing.T) {
+	panel := NewPlanProgressPanel(DefaultStyles())
+	panel.StartPlan("p", "Workspace migration", "", planSteps(6))
+	panel.StartStep(3)
+	panel.PauseStep(3, "Credentials need review before continuing")
+
+	view := panel.View(60, 8)
+	plain := stripAnsi(view)
+	for _, want := range []string{"Plan paused", "Step 3", "Credentials need review", "/resume-plan"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("smallest paused plan missing %q:\n%s", want, plain)
+		}
+	}
+	if got := lipgloss.Height(view); got > 8 {
+		t.Fatalf("smallest paused plan rendered %d rows:\n%s", got, plain)
+	}
+	if roomier := stripAnsi(panel.View(60, 10)); !strings.Contains(roomier, "5 hidden") {
+		t.Fatalf("roomier paused plan did not restore folded summary:\n%s", roomier)
+	}
+}
+
+func TestPlanProgressTerminalSummaryDistinguishesDoneSkippedAndUnfinished(t *testing.T) {
+	panel := NewPlanProgressPanel(DefaultStyles())
+	panel.StartPlan("p", "Migration", "", []PlanStepInfo{
+		{ID: 1, Title: "Apply"},
+		{ID: 2, Title: "Optional cleanup"},
+		{ID: 3, Title: "Verify"},
+	})
+	panel.StartStep(1)
+	panel.CompleteStep(1, "done", "")
+	panel.SkipStep(2, "not needed")
+	panel.EndPlan()
+
+	view := stripAnsi(panel.View(80))
+	for _, want := range []string{"Plan incomplete: Migration", "1/3", "1 skipped", "1 unfinished"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("terminal summary missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Plan complete:") {
+		t.Fatalf("unfinished plan claimed completion:\n%s", view)
+	}
+	compact := stripAnsi(panel.ViewCompact())
+	if !strings.Contains(compact, "! Plan 1/3 · 1 skipped") {
+		t.Fatalf("compact summary hid terminal incompleteness: %q", compact)
+	}
+}
+
+func TestPlanProgressAllResolvedCanCompleteWithSeparateSkippedCount(t *testing.T) {
+	panel := NewPlanProgressPanel(DefaultStyles())
+	panel.StartPlan("p", "Cleanup", "", []PlanStepInfo{{ID: 1, Title: "Remove"}, {ID: 2, Title: "Optional"}})
+	panel.CompleteStep(1, "done", "")
+	panel.SkipStep(2, "not applicable")
+	panel.EndPlan()
+
+	view := stripAnsi(panel.View(70))
+	if !strings.Contains(view, "Plan complete: Cleanup") || !strings.Contains(view, "1/2") || !strings.Contains(view, "1 skipped") {
+		t.Fatalf("resolved plan summary is not honest:\n%s", view)
+	}
+	if panel.CompletedCount() != 1 || panel.Progress() != 1 {
+		t.Fatalf("counts disagree: completed=%d progress=%v", panel.CompletedCount(), panel.Progress())
+	}
+}
+
+func TestPlanProgressDuplicateAndUnknownEventsDoNotRewriteLifecycle(t *testing.T) {
+	panel := NewPlanProgressPanel(DefaultStyles())
+	panel.StartPlan("p", "Plan", "", []PlanStepInfo{{ID: 1, Title: "One"}})
+	panel.StartStep(1)
+	started := panel.steps[0].StartedAt
+	timelineLen := len(panel.timeline)
+	panel.StartStep(1)
+	if !panel.steps[0].StartedAt.Equal(started) || len(panel.timeline) != timelineLen {
+		t.Fatalf("duplicate start rewrote lifecycle: step=%+v timeline=%d", panel.steps[0], len(panel.timeline))
+	}
+
+	panel.CompleteStep(1, "first", "")
+	completed := panel.steps[0].CompletedAt
+	timelineLen = len(panel.timeline)
+	panel.CompleteStep(1, "duplicate", "duplicate event")
+	if !panel.steps[0].CompletedAt.Equal(completed) || panel.steps[0].Output != "first" || len(panel.timeline) != timelineLen {
+		t.Fatalf("duplicate completion rewrote lifecycle: step=%+v timeline=%d", panel.steps[0], len(panel.timeline))
+	}
+
+	panel.EndPlan()
+	finished := panel.finishedAt
+	panel.StartStep(404)
+	if !panel.finishedAt.Equal(finished) {
+		t.Fatal("unknown step event reopened a finished plan")
+	}
+
+	running := NewPlanProgressPanel(DefaultStyles())
+	running.StartPlan("running", "Running", "", []PlanStepInfo{{ID: 1, Title: "One"}})
+	running.StartStep(1)
+	runningStarted := running.steps[0].StartedAt
+	running.EndPlan()
+	running.StartStep(1)
+	if !running.finishedAt.IsZero() || !running.steps[0].StartedAt.Equal(runningStarted) {
+		t.Fatal("same-step resume should reopen the plan without rewriting its start time")
+	}
+}
+
+func TestPlanProgressRepeatedTerminalEventsAreIdempotent(t *testing.T) {
+	tests := []struct {
+		name   string
+		status PlanStepStatus
+		apply  func(*PlanProgressPanel)
+	}{
+		{name: "completed", status: PlanStepCompleted, apply: func(p *PlanProgressPanel) { p.CompleteStep(1, "done", "") }},
+		{name: "failed", status: PlanStepFailed, apply: func(p *PlanProgressPanel) { p.FailStep(1, "failed", "") }},
+		{name: "skipped", status: PlanStepSkipped, apply: func(p *PlanProgressPanel) { p.SkipStep(1, "optional") }},
+		{name: "paused", status: PlanStepPaused, apply: func(p *PlanProgressPanel) { p.PauseStep(1, "waiting") }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			panel := NewPlanProgressPanel(DefaultStyles())
+			panel.StartPlan("p", "Plan", "", []PlanStepInfo{{ID: 1, Title: "One"}})
+			panel.StartStep(1)
+			tt.apply(panel)
+			completedAt := panel.steps[0].CompletedAt
+			timelineLen := len(panel.timeline)
+			tt.apply(panel)
+			if panel.steps[0].Status != tt.status || !panel.steps[0].CompletedAt.Equal(completedAt) || len(panel.timeline) != timelineLen {
+				t.Fatalf("duplicate %s rewrote lifecycle: step=%+v timeline=%d", tt.name, panel.steps[0], len(panel.timeline))
+			}
+		})
+	}
+}
+
+func TestPlanProgressUnknownStatusRendersExplicitly(t *testing.T) {
+	panel := NewPlanProgressPanel(DefaultStyles())
+	panel.StartPlan("p", "Plan", "", []PlanStepInfo{{ID: 1, Title: "One"}})
+	panel.steps[0].Status = PlanStepStatus(99)
+	panel.EndPlan()
+
+	view := stripAnsi(panel.View(60))
+	if !strings.Contains(view, "Plan incomplete:") || !strings.Contains(view, "? Step 1") {
+		t.Fatalf("unknown status was rendered as a normal terminal state:\n%s", view)
+	}
+}
+
 func TestPlanProgressElapsedNeverNegativeOrAbsurd(t *testing.T) {
 	panel := NewPlanProgressPanel(DefaultStyles())
 	panel.visible = true

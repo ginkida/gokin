@@ -20,7 +20,7 @@ func (m *Model) openNotificationCenter() {
 	m.notificationDetail = false
 	m.notificationDetailScroll = 0
 	m.notificationNotice = ""
-	m.state = StateNotificationCenter
+	m.enterTransientOverlay(StateNotificationCenter)
 	if rows := m.notificationRows(); len(rows) > 0 {
 		m.notificationSelectedID = rows[0].toast.ID
 	}
@@ -42,14 +42,25 @@ func (m *Model) notificationRows() []notificationCenterRow {
 	return rows
 }
 
-func notificationVisibleCount(height, total int) int {
+func notificationVisibleCount(height, total, noticeRows int) int {
 	if total <= 0 {
 		return 0
 	}
 	if height <= 0 {
 		return min(total, 8)
 	}
-	return min(total, max(height-9, 1))
+	return min(total, max(height-9-max(noticeRows, 0), 1))
+}
+
+// notificationPageSize is shared by rendering and selection paging. A notice
+// is part of the list layout, so reserving its row here prevents the footer or
+// border from being cropped after actions such as clearing notification history.
+func (m Model) notificationPageSize(total int) int {
+	noticeRows := 0
+	if m.notificationNoticeText() != "" {
+		noticeRows = 1
+	}
+	return notificationVisibleCount(m.height, total, noticeRows)
 }
 
 func notificationDetailVisibleCount(height, total int) int {
@@ -67,9 +78,58 @@ func notificationContentWidth(termWidth int) int {
 	return max(paletteWidth-4, 1)
 }
 
+// A selected notification needs enough horizontal room to expose a
+// distinguishable slice of its message, not just severity + an ellipsis.
+// Below this boundary Enter would open details for a target the user cannot
+// identify. Zero remains the pre-WindowSize/headless sentinel.
+const minNotificationTargetWidth = 28
+
+func (m Model) notificationPrimaryActionReadable() bool {
+	if m.width <= 0 || m.height <= 0 {
+		return true
+	}
+	minHeight := 4 // selected row + breathing row + local footer + global status
+	rows := m.notificationRows()
+	if len(rows) > 0 {
+		visible := m.notificationPageSize(len(rows))
+		selected := selectedNotificationIndex(rows, m.notificationSelected, m.notificationSelectedID)
+		maxScroll := max(len(rows)-visible, 0)
+		start := min(max(m.notificationScroll, 0), maxScroll)
+		if selected < start {
+			start = selected
+		}
+		if selected >= start+visible {
+			start = selected - visible + 1
+		}
+		end := min(start+visible, len(rows))
+		// The compositor keeps the bottom tail. Every list/disclosure row after
+		// the selected target must therefore fit too, or the target itself is
+		// what gets cropped while its Enter footer survives.
+		minHeight += max(end-selected-1, 0)
+		if end < len(rows) {
+			minHeight++ // "older" disclosure below the selected page
+		}
+	}
+	if m.notificationNoticeText() != "" {
+		minHeight++
+	}
+	_, bordered := promptPaletteWidth(m.width)
+	if bordered {
+		minHeight++ // bottom border sits between the local footer and status
+	}
+	return m.width >= minNotificationTargetWidth && m.height >= minHeight
+}
+
+func (m Model) notificationListFooter(canNavigate, canClear bool) string {
+	if !m.notificationPrimaryActionReadable() {
+		return notificationResizeRecoveryFooter(notificationContentWidth(m.width))
+	}
+	return notificationCenterListFooter(notificationContentWidth(m.width), canNavigate, canClear)
+}
+
 func (m *Model) handleNotificationCenterKeys(msg tea.KeyMsg) tea.Cmd {
 	rows := m.notificationRows()
-	visible := notificationVisibleCount(m.height, len(rows))
+	visible := m.notificationPageSize(len(rows))
 	m.syncNotificationSelection(rows, visible)
 
 	if m.notificationDetail {
@@ -83,8 +143,7 @@ func (m *Model) handleNotificationCenterKeys(msg tea.KeyMsg) tea.Cmd {
 		m.notificationScroll = 0
 		m.notificationDetailScroll = 0
 		m.notificationNotice = ""
-		m.state = StateInput
-		return m.input.Focus()
+		return m.restoreTransientOverlay()
 	case tea.KeyUp:
 		m.setNotificationSelection(m.notificationSelected-1, rows)
 	case tea.KeyDown:
@@ -98,7 +157,7 @@ func (m *Model) handleNotificationCenterKeys(msg tea.KeyMsg) tea.Cmd {
 	case tea.KeyEnd:
 		m.setNotificationSelection(len(rows)-1, rows)
 	case tea.KeyEnter, tea.KeySpace:
-		if len(rows) > 0 {
+		if len(rows) > 0 && m.notificationPrimaryActionReadable() {
 			m.notificationDetail = true
 			m.notificationDetailScroll = 0
 			m.notificationNotice = ""
@@ -109,6 +168,10 @@ func (m *Model) handleNotificationCenterKeys(msg tea.KeyMsg) tea.Cmd {
 				m.notificationNotice = "No earlier notifications to clear"
 				return nil
 			}
+			if !m.notificationClearActionVisible(len(rows) > 1) {
+				m.notificationNotice = "Resize to clear earlier notifications"
+				return nil
+			}
 			m.toastManager.ClearHistory()
 			m.notificationSelected = 0
 			m.notificationSelectedID = 0
@@ -117,7 +180,7 @@ func (m *Model) handleNotificationCenterKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	rows = m.notificationRows()
-	m.syncNotificationSelection(rows, notificationVisibleCount(m.height, len(rows)))
+	m.syncNotificationSelection(rows, m.notificationPageSize(len(rows)))
 	return nil
 }
 
@@ -248,7 +311,7 @@ func (m Model) renderNotificationCenter() string {
 		b.WriteString(metaStyle.Render("Errors, warnings, and status updates will appear here."))
 		b.WriteString("\n")
 	} else {
-		visible := notificationVisibleCount(m.height, len(rows))
+		visible := m.notificationPageSize(len(rows))
 		selected := selectedNotificationIndex(rows, m.notificationSelected, m.notificationSelectedID)
 		maxScroll := max(len(rows)-visible, 0)
 		start := min(max(m.notificationScroll, 0), maxScroll)
@@ -273,17 +336,52 @@ func (m Model) renderNotificationCenter() string {
 		}
 	}
 
-	if notice := safeKeyEntryText(m.notificationNotice); notice != "" {
+	if notice := m.notificationNoticeText(); notice != "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(ColorInfo).Bold(true).Render(notice))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	footer := notificationCenterListFooter(contentWidth, len(rows) > 1, historyCount > 0)
+	footer := m.notificationListFooter(len(rows) > 1, historyCount > 0)
 	if len(rows) == 0 {
 		footer = "Esc Back"
 	}
 	b.WriteString(footerStyle.Render(footer))
 	return wrapPromptContainer(b.String(), paletteWidth, bordered, ColorPrimary)
+}
+
+// notificationNoticeText suppresses notices whose premise is no longer true.
+// Toasts can expire into history and the terminal can be resized while this
+// overlay is open, so persisting the last key-handler string verbatim can claim
+// that there is nothing to clear—or that resizing is still required—after the
+// state has already changed.
+func (m Model) notificationNoticeText() string {
+	notice := safeKeyEntryText(m.notificationNotice)
+	if notice == "" {
+		return ""
+	}
+	historyCount := 0
+	if m.toastManager != nil {
+		historyCount = len(m.toastManager.History())
+	}
+	switch notice {
+	case "No earlier notifications to clear", "Earlier notifications cleared":
+		if historyCount > 0 {
+			return ""
+		}
+	case "Resize to clear earlier notifications":
+		if historyCount == 0 {
+			return ""
+		}
+		// Probe the current geometry without the obsolete notice consuming a
+		// layout row. This value copy is read-only and avoids a resize handler
+		// dependency in tui.go.
+		probe := m
+		probe.notificationNotice = ""
+		if probe.notificationClearActionVisible(len(probe.notificationRows()) > 1) {
+			return ""
+		}
+	}
+	return notice
 }
 
 func renderNotificationCenterRow(row notificationCenterRow, width int, selected bool) string {
@@ -358,9 +456,17 @@ func (m Model) renderNotificationDetail(rows []notificationCenterRow, paletteWid
 
 func notificationCenterListFooter(width int, canNavigate, canClear bool) string {
 	if !canNavigate {
-		candidates := []string{"Enter Details · Esc Back", "Enter Details · Esc", "Esc Back"}
+		candidates := []string{
+			"Enter Details · Esc Back",
+			"Enter Details · Esc",
+			"Esc · Enter Details",
+			"Esc · Enter",
+		}
 		if canClear {
-			candidates = []string{"Enter Details · c Clear earlier · Esc Back", "Enter Details · c Clear · Esc", "Esc Back"}
+			candidates = append([]string{
+				"Enter Details · c Clear earlier · Esc Back",
+				"Enter Details · c Clear · Esc",
+			}, candidates...)
 		}
 		return firstFooterThatFits(candidates, width)
 	}
@@ -368,17 +474,36 @@ func notificationCenterListFooter(width int, canNavigate, canClear bool) string 
 		"↑/↓ Select · Enter Details · Esc Back",
 		"↑↓ Select · Enter Details · Esc Back",
 		"↑↓ · Enter Details · Esc Back",
-		"Esc · ↑↓",
+		"Esc · Enter Details",
+		"Esc · Enter",
 	}
 	if canClear {
-		candidates = []string{
+		candidates = append([]string{
 			"↑/↓ Select · Enter Details · c Clear earlier · Esc Back",
 			"↑↓ Select · Enter Details · c Clear · Esc Back",
 			"↑↓ · Enter Details · c Clear · Esc Back",
-			"Esc · ↑↓",
-		}
+		}, candidates...)
 	}
 	return firstFooterThatFits(candidates, width)
+}
+
+func (m Model) notificationClearActionVisible(canNavigate bool) bool {
+	// Zero dimensions are the pre-WindowSize sentinel used by headless tests and
+	// embedders. Do not invent a tiny terminal and disable their existing input.
+	if m.width <= 0 || m.height <= 0 {
+		return true
+	}
+	// A one-row frame contains only the global status bar, so no notification
+	// footer action can actually be visible regardless of width.
+	if m.height < 2 {
+		return false
+	}
+	footer := m.notificationListFooter(canNavigate, true)
+	return strings.Contains(footer, "Clear")
+}
+
+func notificationResizeRecoveryFooter(width int) string {
+	return firstFooterThatFits([]string{"Resize · Esc Back", "Resize · Esc", "↔ · Esc", "Esc"}, width)
 }
 
 func notificationDetailFooter(width int, canScroll bool) string {

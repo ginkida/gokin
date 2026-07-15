@@ -24,6 +24,7 @@ func TestHelpCommand_ShortcutsListIsCurrent(t *testing.T) {
 
 	mustContain := []string{
 		"Ctrl+P",    // Command palette
+		"Ctrl+S",    // Settings — taught by the welcome panel
 		"Ctrl+K",    // Model selector — v0.84.0
 		"Ctrl+E",    // Expand tool output — v0.84.3
 		"Ctrl+H",    // Context Observatory
@@ -49,6 +50,19 @@ func TestHelpCommand_ShortcutsListIsCurrent(t *testing.T) {
 	for _, stale := range staleStrings {
 		if strings.Contains(out, stale) {
 			t.Errorf("/help output contains stale text %q", stale)
+		}
+	}
+
+	for _, want := range []string{
+		"/quickstart", "Guided examples and safety modes",
+		"Normal asks before write/edit/bash",
+		"Plan explores read-only",
+		"YOLO disables prompts and sandbox",
+		"active mode remains visible",
+		"empty input",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/help onboarding missing %q", want)
 		}
 	}
 }

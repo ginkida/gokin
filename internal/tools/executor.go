@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gokin/internal/audit"
@@ -24,6 +25,7 @@ import (
 	"gokin/internal/permission"
 	"gokin/internal/robustness"
 	"gokin/internal/security"
+	"gokin/internal/skills"
 
 	"google.golang.org/genai"
 )
@@ -223,7 +225,7 @@ type Executor struct {
 	preFlightChecks  bool                     // Enable pre-flight safety checks
 	notificationMgr  *NotificationManager     // User notifications
 	redactor         *security.SecretRedactor // Redact secrets from output
-	unrestrictedMode bool                     // Full freedom when both sandbox and permissions are off
+	unrestrictedMode atomic.Bool              // Full freedom when both sandbox and permissions are off
 
 	// Out-of-workspace access gate (Claude-Code-style ask-on-access). Both nil
 	// in non-app harnesses -> gate disabled (the tool's own PathValidator still
@@ -348,6 +350,11 @@ type Executor struct {
 	userSteerActive   bool
 	userSteerSuppress int
 	userSteerMu       sync.Mutex
+	// userSteerCallbackMu serializes cancellation with extraction of the final
+	// leftover batch. It is deliberately released before the external callback:
+	// that callback may synchronously send to the UI whose Esc handler is the
+	// caller of CancelUserSteering.
+	userSteerCallbackMu sync.Mutex
 
 	// Checkpoint journal for tool execution recovery on API failure.
 	checkpoint *CheckpointJournal
@@ -365,6 +372,15 @@ type Executor struct {
 
 	// Smart validation: persistent learning from validator warnings.
 	errorLearner ErrorLearner
+
+	// Managed Go diagnostics run after successful Go source mutations. The
+	// provider is intentionally attached only to the foreground workspace; tool
+	// registries cloned for isolated agents do not inherit its process/index.
+	goDiagnosticsMu       sync.RWMutex
+	goDiagnosticsProvider GoDiagnosticsProvider
+	goDiagnosticsGate     chan struct{}
+	goDiagnosticsTimeout  time.Duration
+	goDiagnosticsStalled  atomic.Bool
 
 	// Kimi-specific per-turn tool budget. 0 disables the check; stagnation
 	// detection still runs. Set via SetKimiToolBudget from app/builder.
@@ -428,6 +444,13 @@ type ExecutionHandler struct {
 
 	// OnToolDenied is called when user denies a tool execution.
 	OnToolDenied func(name string, reason string)
+
+	// OnToolPolicyBlocked is called exactly once when a tool invocation is
+	// refused by a permission, safety, hook, or plan boundary. Unlike
+	// OnToolDenied it is machine-typed and also covers non-interactive policy
+	// gates, allowing process runners to return a fail-closed status without
+	// parsing presentation strings.
+	OnToolPolicyBlocked func(name string, block PolicyBlock)
 
 	// OnError is called when an error occurs.
 	OnError func(err error)
@@ -584,6 +607,19 @@ func (e *Executor) HasUserSteers() bool {
 	return len(e.userSteers) > 0
 }
 
+// CancelUserSteering closes the current turn's acceptance window and discards
+// messages not yet injected into model history. It serializes with extraction
+// of the final leftover batch but never waits for an external callback, which
+// may itself be blocked on the UI thread performing this cancellation.
+func (e *Executor) CancelUserSteering() {
+	e.userSteerCallbackMu.Lock()
+	e.userSteerMu.Lock()
+	e.userSteerActive = false
+	e.userSteers = nil
+	e.userSteerMu.Unlock()
+	e.userSteerCallbackMu.Unlock()
+}
+
 // SetClient updates the underlying client.
 // SetPlanModeCheck wires the plan-mode predicate. The callback is consulted
 // on every tool dispatch and must be cheap — typically reads a boolean
@@ -626,6 +662,23 @@ func (e *Executor) SetDeltaCheckConfig(enabled bool, timeout time.Duration, warn
 // SetSemanticValidators configures post-write semantic validators.
 func (e *Executor) SetSemanticValidators(r *SemanticValidatorRegistry) {
 	e.semanticValidators = r
+}
+
+// SetGoDiagnosticsProvider configures managed post-mutation Go diagnostics.
+// Passing nil disables the check. The provider must be scoped to e.workDir;
+// isolated agent executors deliberately receive no provider unless they create
+// one for their own workspace.
+func (e *Executor) SetGoDiagnosticsProvider(provider GoDiagnosticsProvider) {
+	e.goDiagnosticsMu.Lock()
+	e.goDiagnosticsProvider = provider
+	if provider == nil {
+		e.goDiagnosticsGate = nil
+	} else {
+		e.goDiagnosticsGate = make(chan struct{}, 1)
+		e.goDiagnosticsGate <- struct{}{}
+	}
+	e.goDiagnosticsStalled.Store(false)
+	e.goDiagnosticsMu.Unlock()
 }
 
 // SetContextEnricher configures post-write context enrichment.
@@ -730,12 +783,12 @@ func (e *Executor) EnablePreFlightChecks(enabled bool) {
 // When enabled (both sandbox and permissions are off), preflight check errors
 // are converted to warnings and don't block execution.
 func (e *Executor) SetUnrestrictedMode(enabled bool) {
-	e.unrestrictedMode = enabled
+	e.unrestrictedMode.Store(enabled)
 }
 
 // IsUnrestrictedMode returns whether unrestricted mode is enabled.
 func (e *Executor) IsUnrestrictedMode() bool {
-	return e.unrestrictedMode
+	return e.unrestrictedMode.Load()
 }
 
 // SetFallbackConfig sets the fallback configuration for tool responses.
@@ -1737,14 +1790,17 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 // messages that arrived after the loop's final in-iteration drain. The callback
 // runs outside the mutex because the app may immediately enqueue them.
 func (e *Executor) finishUserSteering() {
+	e.userSteerCallbackMu.Lock()
 	e.userSteerMu.Lock()
 	e.userSteerActive = false
 	leftover := e.userSteers
 	e.userSteers = nil
 	e.userSteerMu.Unlock()
+	handler := e.handler
+	e.userSteerCallbackMu.Unlock()
 
-	if len(leftover) > 0 && e.handler != nil && e.handler.OnSteerLeftover != nil {
-		e.handler.OnSteerLeftover(leftover)
+	if len(leftover) > 0 && handler != nil && handler.OnSteerLeftover != nil {
+		handler.OnSteerLeftover(leftover)
 	}
 }
 
@@ -1910,6 +1966,15 @@ func pruneOldToolOutputs(history []*genai.Content, protect, minOutputSize int) i
 			content, ok := part.FunctionResponse.Response["content"].(string)
 			if !ok || len([]rune(content)) <= minOutputSize {
 				continue
+			}
+			// A successful bounded skill response is the rendered instruction
+			// payload, not reconstructible command output. Without consumption state,
+			// globally preserving this bounded payload is the safe P0 behavior; full
+			// post-compaction carry-forward remains separate work.
+			if part.FunctionResponse.Name == "skill" && len(content) <= skills.MaxRenderedSkillBytes {
+				if success, _ := part.FunctionResponse.Response["success"].(bool); success {
+					continue
+				}
 			}
 			stub := fmt.Sprintf("[older %s output pruned to fit context — re-read if needed]", part.FunctionResponse.Name)
 			part.FunctionResponse.Response["content"] = stub
@@ -2092,7 +2157,7 @@ func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) To
 	err := breaker.Execute(ctx, func() error {
 		res := e.doExecuteTool(ctx, call)
 		result = res
-		if !res.Success && isExecutionFailure(res.Error) {
+		if !res.Success && res.PolicyBlock == nil && isExecutionFailure(res.Error) {
 			return fmt.Errorf("tool execution failed: %s", res.Error)
 		}
 		return nil // validation/permission errors don't count as circuit breaker failures
@@ -2110,6 +2175,10 @@ func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) To
 		// If it's not circuit open error, it's the wrapped tool error, which is already in 'result'
 	}
 
+	if result.PolicyBlock != nil && e.handler != nil && e.handler.OnToolPolicyBlocked != nil {
+		e.handler.OnToolPolicyBlocked(call.Name, *result.PolicyBlock)
+	}
+
 	return result
 }
 
@@ -2119,7 +2188,8 @@ func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) To
 func isExecutionFailure(errMsg string) bool {
 	for _, prefix := range []string{
 		"validation error:", "Permission denied:", "permission error:",
-		"Safety check failed:", "unknown tool:",
+		"Permission scope changed before execution:",
+		"Safety check failed:", "Safety check unavailable:", "unknown tool:",
 		// A user-configured hook refusing a call is policy, not a tool
 		// malfunction — must not trip the circuit breaker.
 		"hook blocked:",
@@ -2134,6 +2204,11 @@ func isExecutionFailure(errMsg string) bool {
 // doExecuteTool handles the actual execution logic (previously body of executeTool).
 func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) (result ToolResult) {
 	toolStart := time.Now()
+	// A runtime sandbox/permission toggle may happen from the UI while this call
+	// is validating. Use one coherent mode for the whole authorization preflight;
+	// the BashTool separately binds its own exact runtime policy snapshot.
+	unrestrictedMode := e.IsUnrestrictedMode()
+	unrestrictedBypassUsed := false
 	defer func() {
 		// Fire phase observer even on early returns. Success is determined by
 		// the final ToolResult — unknown-tool / validation errors all count as
@@ -2156,10 +2231,11 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// hallucinated `write` or `bash` call would slip past the schema and
 	// actually execute. With it, the model gets a targeted error and re-plans.
 	if e.planModeCheck != nil && e.planModeCheck() && !IsReadOnlyForPlanMode(call.Name) {
-		return NewErrorResult(fmt.Sprintf(
-			"tool %q is not allowed in plan mode — only read-only tools (read, glob, grep, list_dir, tree, diff, git_status/diff/log/blame/branch, web_fetch, web_search, memory, ask_user, etc.) + enter_plan_mode/exit_plan_mode are available. Call enter_plan_mode with your proposed plan when ready to request user approval.",
+		reason := fmt.Sprintf(
+			"tool %q is not allowed in plan mode — only read-only tools (read, glob, grep, list_dir, tree, diff, git_status/diff/log/blame, history_search, web_fetch, web_search, ask_user, etc.) + enter_plan_mode/exit_plan_mode are available. Call enter_plan_mode with your proposed plan when ready to request user approval.",
 			call.Name,
-		))
+		)
+		return NewPolicyBlockedResult(PolicyBlockPlan, reason)
 	}
 
 	// Guard against nil args — some model responses may omit the args field
@@ -2170,6 +2246,24 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 
 	if err := tool.Validate(call.Args); err != nil {
 		return NewErrorResult(fmt.Sprintf("validation error: %s", err))
+	}
+
+	// Trusted pre-tool policy is evaluated for every valid invocation before
+	// retry/checkpoint/read-cache shortcuts. A cached result must not bypass a
+	// hook that was added or changed since the original execution.
+	if e.hooks != nil {
+		preResults := e.hooks.RunPreTool(ctx, call.Name, call.Args)
+		if blocked, ok := hooks.Blocked(preResults); ok {
+			name := blocked.Hook.DisplayName()
+			reason := strings.TrimSpace(blocked.Output)
+			if reason == "" && blocked.Error != nil {
+				reason = blocked.Error.Error()
+			}
+			logging.Info("tool call blocked by pre-tool hook",
+				"tool", call.Name, "hook", name)
+			return NewPolicyBlockedResult(PolicyBlockHook, fmt.Sprintf(
+				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
+		}
 	}
 
 	// Retry dedup guard: skip duplicate side-effect calls during retry windows.
@@ -2184,18 +2278,20 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		return deduped
 	}
 
-	// Checkpoint recovery: reuse result for write operations that already completed
-	// in a previous iteration (e.g., API failure after tool executed successfully).
-	if e.checkpoint != nil && isWriteOperation(call.Name) {
-		if cached, reason, ok := e.checkpoint.Lookup(call); ok {
-			logging.Info("checkpoint recovery: reusing previous tool result",
-				"tool", call.Name,
-				"reason", reason)
-			if e.handler != nil && e.handler.OnWarning != nil {
-				e.handler.OnWarning(fmt.Sprintf("Recovered result for '%s' from checkpoint (%s).", call.Name, reason))
-			}
-			return cached
+	// Checkpoint recovery is active only inside an explicit retry window. A
+	// checkpoint is not a general cache for mutating tools: during a healthy
+	// turn the model may intentionally repeat an identical command after the
+	// workspace changed (for example, run the same test before and after an
+	// edit). Unconditional signature replay returned the stale first result and
+	// skipped that second verification entirely.
+	if cached, reason, ok := e.lookupCheckpointSideEffect(call); ok {
+		logging.Info("checkpoint recovery: reusing previous tool result",
+			"tool", call.Name,
+			"reason", reason)
+		if e.handler != nil && e.handler.OnWarning != nil {
+			e.handler.OnWarning(fmt.Sprintf("Recovered result for '%s' from checkpoint (%s).", call.Name, reason))
 		}
+		return cached
 	}
 
 	// Pre-mutation barrier: if previous delta-check failed, block further mutating calls.
@@ -2207,7 +2303,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			if e.notificationMgr != nil {
 				e.notificationMgr.NotifyDenied(call.Name, reason)
 			}
-			return NewErrorResult(reason)
+			return NewPolicyBlockedResult(PolicyBlockSafety, reason)
 		}
 	}
 
@@ -2218,6 +2314,20 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		preFlight, err = e.safetyValidator.ValidateSafety(ctx, call.Name, call.Args)
 		if err != nil {
 			logging.Warn("safety check failed", "tool", call.Name, "error", err)
+			if !unrestrictedMode {
+				reason := fmt.Sprintf("Safety check unavailable: %s", err)
+				if e.handler != nil && e.handler.OnToolDenied != nil {
+					e.handler.OnToolDenied(call.Name, reason)
+				}
+				if e.notificationMgr != nil {
+					e.notificationMgr.NotifyDenied(call.Name, reason)
+				}
+				return NewPolicyBlockedResult(PolicyBlockSafety, reason)
+			}
+			if e.handler != nil && e.handler.OnWarning != nil {
+				e.handler.OnWarning(fmt.Sprintf("[%s] Safety validation unavailable and bypassed in unrestricted mode: %s", call.Name, err))
+			}
+			unrestrictedBypassUsed = true
 		}
 
 		// Notify user about validation
@@ -2241,7 +2351,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		if preFlight != nil && !preFlight.IsValid {
 			reasons := strings.Join(preFlight.Errors, "; ")
 
-			if e.unrestrictedMode {
+			if unrestrictedMode {
 				// In unrestricted mode, convert errors to warnings and allow execution
 				preFlight.Warnings = append(preFlight.Warnings, preFlight.Errors...)
 				preFlight.Errors = nil
@@ -2252,6 +2362,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				if e.handler != nil && e.handler.OnWarning != nil {
 					e.handler.OnWarning(fmt.Sprintf("[%s] Bypassed in unrestricted mode: %s", call.Name, reasons))
 				}
+				unrestrictedBypassUsed = true
 			} else {
 				if e.handler != nil && e.handler.OnToolDenied != nil {
 					e.handler.OnToolDenied(call.Name, reasons)
@@ -2259,7 +2370,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				if e.notificationMgr != nil {
 					e.notificationMgr.NotifyDenied(call.Name, reasons)
 				}
-				return NewErrorResult(fmt.Sprintf("Safety check failed: %s", reasons))
+				return NewPolicyBlockedResult(PolicyBlockSafety, fmt.Sprintf("Safety check failed: %s", reasons))
 			}
 		}
 	}
@@ -2271,8 +2382,13 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Step 4: Permission check
+	// Capture hidden runtime state even when interactive permissions are
+	// disabled. This binds Bash execution across hooks/cache/gates and prevents a
+	// concurrent sandbox/workspace toggle from changing the invocation that was
+	// validated above.
+	authorizedPermissionArgs := PermissionArgsForTool(tool, call.Args)
 	if e.permissions != nil {
-		resp, err := e.permissions.Check(ctx, call.Name, call.Args)
+		resp, err := e.permissions.Check(ctx, call.Name, ClonePermissionArgs(authorizedPermissionArgs))
 		if err != nil {
 			if e.handler != nil && e.handler.OnToolDenied != nil {
 				e.handler.OnToolDenied(call.Name, err.Error())
@@ -2280,7 +2396,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			if e.notificationMgr != nil {
 				e.notificationMgr.NotifyDenied(call.Name, err.Error())
 			}
-			return NewErrorResult(fmt.Sprintf("permission error: %s", err))
+			return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("permission error: %s", err))
 		}
 		if !resp.Allowed {
 			reason := resp.Reason
@@ -2293,7 +2409,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			if e.notificationMgr != nil {
 				e.notificationMgr.NotifyDenied(call.Name, reason)
 			}
-			return NewErrorResult(fmt.Sprintf("Permission denied: %s", reason))
+			return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("Permission denied: %s", reason))
 		}
 	}
 
@@ -2312,10 +2428,10 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			}
 			allowed, gErr := e.dirGrantHandler(ctx, call.Name, p)
 			if gErr != nil {
-				return NewErrorResult(fmt.Sprintf("directory access check failed for %s: %s", p, gErr))
+				return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("directory access check failed for %s: %s", p, gErr))
 			}
 			if !allowed {
-				return NewErrorResult(fmt.Sprintf("Access to %s is outside the workspace and is NOT granted. This is a hard permission boundary — retrying or rewriting the path will not help. Ask the user to run: /add-dir %s  (add --persist to keep it across restarts). Until then, work within the workspace.", p, filepath.Dir(p)))
+				return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("Access to %s is outside the workspace and is NOT granted. This is a hard permission boundary — retrying or rewriting the path will not help. Ask the user to run: /add-dir %s  (add --persist to keep it across restarts). Until then, work within the workspace.", p, filepath.Dir(p)))
 			}
 		}
 	}
@@ -2334,10 +2450,10 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 		allowed, cErr := e.actionConfirmHandler(ctx, call.Name, target)
 		if cErr != nil {
-			return NewErrorResult(fmt.Sprintf("action confirmation failed: %s", cErr))
+			return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("action confirmation failed: %s", cErr))
 		}
 		if !allowed {
-			return NewErrorResult("Staying in analysis — I did NOT apply this change. We're discussing/analyzing, not implementing. When you want me to actually make changes, say so explicitly (e.g. \"implement it\" / \"сделай\") and I'll proceed. For now, keep analyzing and proposing.")
+			return NewPolicyBlockedResult(PolicyBlockPermission, "Staying in analysis — I did NOT apply this change. We're discussing/analyzing, not implementing. When you want me to actually make changes, say so explicitly (e.g. \"implement it\" / \"сделай\") and I'll proceed. For now, keep analyzing and proposing.")
 		}
 	}
 
@@ -2392,29 +2508,6 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
-	// Step 6: Run pre-tool hooks. A FailOnError hook that exits non-zero
-	// BLOCKS the call — the tool does not run and the hook's output reaches
-	// the model as the reason (error-context rule). Pre-enforcement the
-	// results were silently discarded, making fail_on_error a documented
-	// no-op.
-	if e.hooks != nil {
-		preResults := e.hooks.RunPreTool(ctx, call.Name, call.Args)
-		if blocked, ok := hooks.Blocked(preResults); ok {
-			name := blocked.Hook.Name
-			if name == "" {
-				name = blocked.Hook.Command
-			}
-			reason := strings.TrimSpace(blocked.Output)
-			if reason == "" && blocked.Error != nil {
-				reason = blocked.Error.Error()
-			}
-			logging.Info("tool call blocked by pre-tool hook",
-				"tool", call.Name, "hook", name)
-			return NewErrorResult(fmt.Sprintf(
-				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
-		}
-	}
-
 	// Step 7: Create execution context
 	execInfo := &ExecutionInfo{}
 	if summary != nil {
@@ -2435,6 +2528,15 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				"%s typically takes ~%v (p95 from session history)",
 				call.Name, p95.Round(time.Second)))
 		}
+	}
+
+	// If safety was bypassed only because this call began in unrestricted mode,
+	// turning restrictions back on while hooks/prompts/gates were in flight must
+	// fail closed immediately before dispatch. Bash additionally checks its exact
+	// captured policy revision inside the serialized execution gate.
+	if unrestrictedBypassUsed && !e.IsUnrestrictedMode() {
+		return NewPolicyBlockedResult(PolicyBlockSafety,
+			"Security mode changed during validation: unrestricted safety bypass is stale; retry under the current sandbox and permission policy")
 	}
 
 	// Step 8: Execute with timeout. If we have enough observations for this
@@ -2526,7 +2628,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}()
 		var r ToolResult
 		var e2 error
-		if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
+		if _, scoped := tool.(permissionScopedExecutor); scoped && authorizedPermissionArgs != nil {
+			r, e2 = ExecuteWithPermissionScope(execCtx, tool, call.Args, authorizedPermissionArgs)
+		} else if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
 			r, e2 = e.executeStreamingTool(execCtx, streamingTool, call.Args)
 		} else {
 			r, e2 = tool.Execute(execCtx, call.Args)
@@ -2569,6 +2673,14 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
+	// A permission-scoped tool can refuse execution after authorization if its
+	// hidden runtime scope changed before the execution lease was acquired.
+	// Preserve that as a policy outcome rather than an ordinary tool failure.
+	if !result.Success && result.PolicyBlock == nil &&
+		strings.HasPrefix(result.Error, "Permission scope changed before execution:") {
+		result = WithPolicyBlock(result, PolicyBlockPermission, result.Error)
+	}
+
 	// Enrich error results with actionable suggestions
 	if !result.Success && result.Error != "" {
 		if suggestion := getErrorSuggestion(result.Error); suggestion != "" {
@@ -2589,22 +2701,6 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 	result.SafetyLevel = execInfo.SafetyLevel
 	result.Duration = format.Duration(duration)
-
-	// Step 9: Log to audit
-	if e.auditLogger != nil {
-		entry := audit.NewEntry(e.sessionID, call.Name, call.Args)
-		entry.Complete(result.Content, result.Success, result.Error, duration)
-
-		// Add safety context to audit log
-		if preFlight != nil {
-			entry.Args["safety_warnings"] = preFlight.Warnings
-			entry.Args["safety_level"] = string(execInfo.SafetyLevel)
-		}
-
-		if err := e.auditLogger.Log(entry); err != nil {
-			logging.Warn("failed to write audit log", "error", err, "tool", call.Name)
-		}
-	}
 
 	// Step 10: Run post-tool or on-error hooks
 	if e.hooks != nil {
@@ -2636,6 +2732,16 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
+	// Preserve tool-declared paths before secret redaction and result
+	// compaction. Both transformations are presentation concerns and may rewrite
+	// arbitrary Data strings; post-mutation bookkeeping must use the exact paths
+	// returned by the tool itself.
+	mutation := snapshotGoMutation(result)
+	declaredWrittenPaths := mutation.Paths
+	if result.Success {
+		declaredWrittenPaths = append([]string(nil), declaredWrittenPaths...)
+	}
+
 	// Step 11: apply redaction
 	if e.redactor != nil {
 		result.Content = e.redactor.Redact(result.Content)
@@ -2647,7 +2753,11 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 
 	// Step 12: Apply compaction if configured
 	if e.compactor != nil && result.Success {
+		policyBlock := result.PolicyBlock
 		result = e.compactor.CompactForType(call.Name, result)
+		// Compactors predate policy metadata and some construct a fresh result.
+		// Never let presentation-size compaction erase a fail-closed outcome.
+		result.PolicyBlock = policyBlock
 	}
 
 	// Step 12.5: Cache result or invalidate cache for write operations
@@ -2738,7 +2848,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// post-compaction hints. Generic + drift-proof (no per-tool name list) and
 	// defensive (a malformed Data value is a silent no-op, never a panic).
 	if result.Success {
-		for _, p := range writtenPathsFromResult(result) {
+		for _, p := range declaredWrittenPaths {
 			if e.readTracker != nil {
 				e.readTracker.InvalidateFile(p)
 			}
@@ -2756,6 +2866,13 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				e.searchCache.InvalidateByPath(p)
 			}
 		}
+	}
+
+	// Step 12.8: Fast, workspace-aware Go diagnostics. This runs before the
+	// broader delta-check so cached gopls type information can give the model a
+	// precise error close to the mutation that caused it.
+	if result.Success && shouldRunDeltaCheckCall(call) {
+		e.runGoDiagnosticsAfterMutation(ctx, call, mutation, &result)
 	}
 
 	// Step 12.9: Post-edit delta-check on changed modules (format/lint/build; no tests).
@@ -2823,6 +2940,37 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		e.mutatedFilesMu.Unlock()
 	}
 
+	// Post-checks may append compiler output, source snippets, or validator
+	// messages after the first redaction pass. Redact once more before audit,
+	// callbacks, notifications, and the model receive the final result.
+	if e.redactor != nil {
+		result.Content = e.redactor.Redact(result.Content)
+		result.Error = e.redactor.Redact(result.Error)
+	}
+
+	// Post-mutation diagnostics and delta-checks are part of the operation the
+	// user waits for. Refresh duration before audit/UI notification so a 20s
+	// diagnostic timeout cannot appear as a 5ms edit in telemetry.
+	duration = time.Since(start)
+	result.Duration = format.Duration(duration)
+
+	// Log the final, redacted/compacted result after post-mutation checks. This
+	// both captures diagnostic failures and prevents the audit sink from seeing
+	// raw secrets that Step 11 has already removed from the model/UI result.
+	if e.auditLogger != nil {
+		entry := audit.NewEntry(e.sessionID, call.Name, call.Args)
+		entry.Complete(result.Content, result.Success, result.Error, duration)
+
+		if preFlight != nil {
+			entry.Args["safety_warnings"] = preFlight.Warnings
+			entry.Args["safety_level"] = string(execInfo.SafetyLevel)
+		}
+
+		if err := e.auditLogger.Log(entry); err != nil {
+			logging.Warn("failed to write audit log", "error", err, "tool", call.Name)
+		}
+	}
+
 	// Step 13: Notify completion and send notifications
 	if e.handler != nil && e.handler.OnToolEnd != nil {
 		e.handler.OnToolEnd(call.Name, call.Args, result)
@@ -2885,6 +3033,23 @@ func (e *Executor) lookupDuplicateSideEffect(call *genai.FunctionCall) (ToolResu
 	}
 
 	return ToolResult{}, "", false
+}
+
+// lookupCheckpointSideEffect consults the durable checkpoint journal only
+// while retry-time side-effect recovery is explicitly enabled. It takes the
+// ledger lock before the journal lock, matching ResetSideEffectLedger, so a
+// concurrent retry-mode transition cannot expose a half-cleared journal.
+func (e *Executor) lookupCheckpointSideEffect(call *genai.FunctionCall) (ToolResult, string, bool) {
+	if call == nil || !isWriteOperation(call.Name) || e.checkpoint == nil {
+		return ToolResult{}, "", false
+	}
+
+	e.sideEffectLedgerMu.Lock()
+	defer e.sideEffectLedgerMu.Unlock()
+	if !e.sideEffectDedupEnabled {
+		return ToolResult{}, "", false
+	}
+	return e.checkpoint.Lookup(call)
 }
 
 func (e *Executor) recordSideEffect(call *genai.FunctionCall, result ToolResult) {

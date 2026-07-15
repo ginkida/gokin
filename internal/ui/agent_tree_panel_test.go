@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func treeNodes(statuses ...string) []AgentTreeNode {
@@ -12,6 +15,137 @@ func treeNodes(statuses ...string) []AgentTreeNode {
 		nodes = append(nodes, AgentTreeNode{ID: string(rune('a' + i)), Description: "task", Status: s})
 	}
 	return nodes
+}
+
+func TestAgentTreeSummaryKeepsBlockedSkippedAndUnknownDistinct(t *testing.T) {
+	p := NewAgentTreePanel(nil)
+	p.UpdateTree(treeNodes("pending", "ready", "blocked", "skipped", "mystery"))
+
+	view := renderToPlain(p.View(100))
+	for _, want := range []string{"2 pending", "1 blocked", "1 skipped", "1 unknown", "?"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("agent summary collapsed distinct status %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "5 pending") {
+		t.Fatalf("agent summary presented non-pending work as pending:\n%s", view)
+	}
+}
+
+func TestAgentTreeCopiesAndSanitizesSnapshot(t *testing.T) {
+	nodes := []AgentTreeNode{{
+		ID:           "agent-1",
+		AgentType:    "review\x1b]0;hijack\aagent",
+		Description:  "inspect\nforged row",
+		Status:       " RUNNING ",
+		Dependencies: []string{"parent"},
+	}}
+	p := NewAgentTreePanel(nil)
+	p.UpdateTree(nodes)
+	p.Toggle()
+	nodes[0].Description = "mutated"
+	nodes[0].Dependencies[0] = "mutated-parent"
+
+	p.mu.RLock()
+	stored := p.nodes[0]
+	p.mu.RUnlock()
+	if stored.Description != "inspect forged row" || stored.Status != "running" || stored.Dependencies[0] != "parent" {
+		t.Fatalf("agent snapshot was aliased or not normalized: %+v", stored)
+	}
+	view := p.View(80)
+	plain := renderToPlain(view)
+	if strings.Contains(view, "\x1b]") || strings.Contains(plain, "hijack") || strings.Contains(plain, "mutated") || strings.Contains(plain, "forged\nrow") {
+		t.Fatalf("agent snapshot rendered unsafe/mutated data:\n%s", plain)
+	}
+}
+
+func TestAgentTreeIndeterminateProgressFitsEveryNarrowWidth(t *testing.T) {
+	p := NewAgentTreePanel(nil)
+	p.UpdateTree([]AgentTreeNode{{
+		AgentType:   strings.Repeat("very-long-agent-type", 4),
+		Description: strings.Repeat("description ", 8),
+		Status:      "running",
+		Progress:    math.NaN(),
+		ToolsUsed:   1,
+		CurrentTool: strings.Repeat("tool", 20),
+	}})
+	p.Toggle()
+
+	for width := 1; width <= 32; width++ {
+		view := p.View(width)
+		for row, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Fatalf("width=%d row=%d overflow=%d: %q", width, row, got, renderToPlain(line))
+			}
+		}
+	}
+}
+
+func TestAgentTreeCompactHeightKeepsActiveTaskAndHonestFold(t *testing.T) {
+	p := NewAgentTreePanel(nil)
+	nodes := []AgentTreeNode{
+		{AgentType: "done", Description: "old one", Status: "completed"},
+		{AgentType: "done", Description: "old two", Status: "completed"},
+		{AgentType: "waiting", Description: "queued one", Status: "pending"},
+		{AgentType: "waiting", Description: "queued two", Status: "pending"},
+		{AgentType: "waiting", Description: "queued three", Status: "blocked"},
+		{AgentType: "waiting", Description: "queued four", Status: "ready"},
+		{AgentType: "unknown", Description: "future state", Status: "future"},
+		{AgentType: "critical", Description: "current work", Status: "running", CurrentTool: "write_file"},
+	}
+	p.UpdateTree(nodes)
+
+	view := p.View(70, 8)
+	plain := renderToPlain(view)
+	if got, limit := lipgloss.Height(view), agentTreePanelHeightBudget(8); got > limit {
+		t.Fatalf("compact tree height=%d, want <=%d:\n%s", got, limit, plain)
+	}
+	for _, want := range []string{"[critical]", "→ write_file", "Ctrl+A hide", "7 row(s) folded"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("compact tree lost priority signal %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "[done]") || strings.Contains(plain, "[waiting]") {
+		t.Fatalf("compact tree rendered lower-priority work ahead of the active task:\n%s", plain)
+	}
+}
+
+func TestAgentTreeIrreducibleHeightKeepsRecoveryBeforeThought(t *testing.T) {
+	p := NewAgentTreePanel(nil)
+	p.UpdateTree([]AgentTreeNode{{
+		AgentType:   "worker",
+		Description: "repairing state",
+		Status:      "running",
+		Thought:     "speculative detail",
+		Reflection:  "retry with safe fallback",
+	}})
+	p.Toggle()
+
+	view := p.View(64, 7)
+	plain := renderToPlain(view)
+	if got, limit := lipgloss.Height(view), agentTreePanelHeightBudget(7); got > limit {
+		t.Fatalf("irreducible tree height=%d, want <=%d:\n%s", got, limit, plain)
+	}
+	for _, want := range []string{"[worker]", "RECOVERY", "retry with safe fallback", "Ctrl+A hide"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("irreducible tree lost recovery signal %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "speculative detail") {
+		t.Fatalf("thought prose displaced higher-priority recovery guidance:\n%s", plain)
+	}
+}
+
+func TestAgentTreeFitsEveryTinyHeight(t *testing.T) {
+	p := NewAgentTreePanel(nil)
+	p.UpdateTree(treeNodes("running", "pending"))
+
+	for height := 1; height <= 8; height++ {
+		view := p.View(30, height)
+		if got, limit := lipgloss.Height(view), agentTreePanelHeightBudget(height); got > limit {
+			t.Fatalf("height=%d rendered %d rows, want <=%d:\n%s", height, got, limit, renderToPlain(view))
+		}
+	}
 }
 
 func TestAgentTree_AutoHidesAfterLinger(t *testing.T) {

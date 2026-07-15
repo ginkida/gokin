@@ -26,6 +26,17 @@ func (a *App) enqueuePending(message string) (pos int, ok bool) {
 	return len(a.pendingQueue), true
 }
 
+// prependPending places an already-accepted foreground continuation ahead of
+// later type-ahead. It intentionally bypasses maxPendingQueue: the continuation
+// belongs to the command that already owns the foreground slot, while the cap
+// applies only to additional user submissions.
+func (a *App) prependPending(message string) int {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	a.pendingQueue = append([]string{message}, a.pendingQueue...)
+	return len(a.pendingQueue)
+}
+
 // dequeuePending pops the oldest queued message. ok=false when empty.
 // remaining is the queue length after the pop (for the UI badge).
 func (a *App) dequeuePending() (message string, remaining int, ok bool) {

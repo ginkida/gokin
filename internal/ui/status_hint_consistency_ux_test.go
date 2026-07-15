@@ -27,7 +27,14 @@ func TestStatusHintsDoNotOfferUnavailablePlanOrDiffActions(t *testing.T) {
 	plan.planRequest = &PlanApprovalRequestMsg{Title: "Empty plan"}
 	assertShortcutHints(t, plan,
 		[]string{"n Reject", "m Modify", "esc Cancel"},
-		[]string{"y Approve"},
+		[]string{"y Approve", "PgUp/PgDn Steps"},
+	)
+
+	nilQuestion := NewModel()
+	nilQuestion.state = StateQuestionPrompt
+	assertShortcutHints(t, nilQuestion,
+		[]string{"esc Cancel"},
+		[]string{"↑↓ Navigate", "PgUp/PgDn Page", "Enter Confirm"},
 	)
 
 	diff := NewModel()

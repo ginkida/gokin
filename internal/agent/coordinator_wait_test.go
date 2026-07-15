@@ -10,6 +10,7 @@ import (
 
 func completedCoordinatorForWaitTests() *Coordinator {
 	c := NewCoordinator(context.Background(), nil, &CoordinatorConfig{MaxParallel: 1})
+	c.sealed = true
 	c.tasks["task-done"] = &CoordinatedTask{
 		ID:     "task-done",
 		Status: TaskStatusCompleted,

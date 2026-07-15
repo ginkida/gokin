@@ -69,6 +69,33 @@ func TestShortcutsOverlayNoMatchesKeepsRecoveryVisible(t *testing.T) {
 	}
 }
 
+func TestShortcutsOverlayCompactHeightsKeepContentAndRecoveryVisible(t *testing.T) {
+	for _, height := range []int{5, 6, 8, 12} {
+		overlay := NewShortcutsOverlay(DefaultStyles())
+		overlay.categories = []ShortcutCategory{{Name: "Compact", Shortcuts: []Shortcut{{Keys: []string{"K0"}, Description: "First action"}, {Keys: []string{"K1"}, Description: "Second action"}}}}
+		overlay.Show()
+
+		view := overlay.View(40, height)
+		plain := stripAnsi(view)
+		if got, want := lipgloss.Height(view), shortcutsOverlayHeight(height); got != want {
+			t.Fatalf("height=%d overlay height=%d want %d:\n%s", height, got, want, plain)
+		}
+		for _, want := range []string{"First action", "Esc close"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("height=%d populated overlay missing %q:\n%s", height, want, plain)
+			}
+		}
+
+		overlay.SetSearch("definitely-no-match")
+		empty := stripAnsi(overlay.View(40, height))
+		for _, want := range []string{"No matching", "Esc clear"} {
+			if !strings.Contains(empty, want) {
+				t.Fatalf("height=%d empty overlay missing %q:\n%s", height, want, empty)
+			}
+		}
+	}
+}
+
 func TestShortcutEntryTruncatesDescriptionToAvailableWidth(t *testing.T) {
 	line := renderShortcutEntry(Shortcut{Keys: []string{"Ctrl", "Shift", "P"}, Description: strings.Repeat("long description ", 8)}, 28)
 	if got := lipgloss.Width(line); got > 28 {

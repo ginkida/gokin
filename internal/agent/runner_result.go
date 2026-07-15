@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -11,6 +12,12 @@ import (
 	"gokin/internal/logging"
 )
 
+// ErrAgentResultUnavailable means the requested result is no longer tracked by
+// the runner (or the ID never belonged to it). Waiting cannot make progress in
+// that state: there is no publisher left that could signal a newly registered
+// waiter. Callers can use errors.Is to distinguish this from cancellation.
+var ErrAgentResultUnavailable = errors.New("agent result unavailable")
+
 // Wait waits for an agent to complete and returns its result.
 // Uses a default 10-minute timeout. For context-aware waiting, use WaitWithContext.
 func (r *Runner) Wait(agentID string) (*AgentResult, error) {
@@ -19,47 +26,165 @@ func (r *Runner) Wait(agentID string) (*AgentResult, error) {
 	return r.WaitWithContext(ctx, agentID)
 }
 
-// notifyResultReady signals that an agent result became complete.
-// Non-blocking: if the channel already has a pending signal, the send is skipped.
-func (r *Runner) notifyResultReady() {
-	select {
-	case r.resultReady <- struct{}{}:
-	default:
+// resultWaitState is shared by every current waiter for one agent. Completion
+// transfers an immutable result snapshot into this state before closing done.
+// That snapshot is the waiters' ownership boundary: cleanup may run as soon as
+// completion is published without making an awakened waiter re-read an evicted
+// map entry. The state remains pinned until every registered waiter consumes or
+// abandons it. All fields are guarded by Runner.mu.
+type resultWaitState struct {
+	done      chan struct{}
+	waiters   int
+	completed bool
+	result    *AgentResult
+}
+
+// notifyResultReady signals that agentID's final result has been published.
+// Closing the per-agent channel is a lossless broadcast: it preserves multiple
+// waiters, while the snapshot carried by the state closes the completion ->
+// cleanup -> waiter-recheck lost-notification window.
+func (r *Runner) notifyResultReady(agentID string) {
+	r.mu.Lock()
+	waiter := r.resultWaiters[agentID]
+	result := r.results[agentID]
+	if waiter != nil && !waiter.completed && result != nil && result.Completed {
+		waiter.result = cloneAgentResult(result)
+		waiter.completed = true
+		close(waiter.done)
+	}
+	needsCleanup := len(r.results) > MaxAgentResults || len(r.agents) > MaxCompletedAgents
+	r.mu.Unlock()
+
+	// A burst can start while every result is still pending, so cleanup only at
+	// spawn time does not enforce the cap once those agents finish. Completed
+	// consumers are pinned above; unowned history can be compacted immediately.
+	if needsCleanup {
+		r.cleanupOldResults()
 	}
 }
 
 // WaitWithContext waits for an agent to complete, respecting context cancellation.
 func (r *Runner) WaitWithContext(ctx context.Context, agentID string) (*AgentResult, error) {
-	// Fast path: check immediately. The `.Completed` read MUST happen while
-	// still holding r.mu (not after RUnlock): some writers (the panic-
-	// recovery defer in SpawnAsync/SpawnAsyncWithStreaming, and Cancel())
-	// mutate the SAME *AgentResult pointer's fields IN PLACE under
-	// r.mu.Lock(), rather than publishing a fresh pointer via
-	// r.results[agentID]=result. Reading .Completed after releasing the lock
-	// races against that in-place mutation (caught by -race: a panicking
-	// spawned agent's defer writing .Completed concurrently with a poller
-	// reading it unguarded). Checking under the SAME RLock establishes the
-	// happens-before edge the flag-read idiom requires.
-	if result, ok := r.completedResultLocked(agentID); ok {
-		return result, nil
+	result, waiter, err := r.completedResultOrRegisterWaiter(agentID)
+	if err != nil || result != nil {
+		return result, err
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-r.resultReady:
-			if result, ok := r.completedResultLocked(agentID); ok {
-				return result, nil
-			}
+	select {
+	case <-ctx.Done():
+		// Prefer a completion that won the Runner.mu race over a simultaneous
+		// context cancellation. It owns a final result and cannot be replayed.
+		if result, ok := r.consumeCompletedResultWaiter(agentID, waiter); ok {
+			return result, nil
+		}
+		r.releaseResultWaiter(agentID, waiter)
+		return nil, ctx.Err()
+	case <-waiter.done:
+		result, ok := r.consumeCompletedResultWaiter(agentID, waiter)
+		if !ok {
+			// done is closed only after completed/result are committed under
+			// the same lock, so reaching this branch signals internal corruption
+			// rather than a condition another notification could repair.
+			return nil, fmt.Errorf("%w for agent %q after completion signal", ErrAgentResultUnavailable, agentID)
+		}
+		return result, nil
+	}
+}
+
+// completedResultOrRegisterWaiter atomically checks completion and registers
+// this call as a waiter. Holding the same lock across both operations closes
+// the classic missed-wakeup window between a fast-path check and subscription.
+func (r *Runner) completedResultOrRegisterWaiter(agentID string) (*AgentResult, *resultWaitState, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if result, ok := r.results[agentID]; ok && result.Completed {
+		return cloneAgentResult(result), nil, nil
+	}
+	if r.resultWaiters == nil {
+		r.resultWaiters = make(map[string]*resultWaitState)
+	}
+	waiter := r.resultWaiters[agentID]
+	// A completed waiter may outlive the shared result entry while its
+	// registered consumers are being scheduled. Joining it is still safe: the
+	// owned snapshot and closed channel provide immediate, lossless delivery.
+	if waiter == nil {
+		_, resultTracked := r.results[agentID]
+		_, agentTracked := r.agents[agentID]
+		if !resultTracked && !agentTracked {
+			return nil, nil, fmt.Errorf("%w: %s", ErrAgentResultUnavailable, agentID)
 		}
 	}
+	if waiter == nil {
+		waiter = &resultWaitState{done: make(chan struct{})}
+		r.resultWaiters[agentID] = waiter
+	}
+	waiter.waiters++
+	return nil, waiter, nil
+}
+
+// consumeCompletedResultWaiter atomically takes one waiter's share of the
+// completion snapshot. The snapshot is cloned once more so multiple callers
+// cannot mutate one another's result/metadata.
+func (r *Runner) consumeCompletedResultWaiter(agentID string, waiter *resultWaitState) (*AgentResult, bool) {
+	if waiter == nil {
+		return nil, false
+	}
+
+	r.mu.Lock()
+	if !waiter.completed || waiter.result == nil {
+		r.mu.Unlock()
+		return nil, false
+	}
+
+	result := cloneAgentResult(waiter.result)
+	needsCleanup := len(r.results) > MaxAgentResults || len(r.agents) > MaxCompletedAgents
+	r.mu.Unlock()
+
+	// Keep this consumer's pin until cleanup finishes. With a >cap completion
+	// burst, each scheduled waiter can evict already-consumed history while its
+	// own result remains protected, bringing memory back under the cap even when
+	// no subsequent agent is spawned.
+	if needsCleanup {
+		r.cleanupOldResults()
+	}
+
+	r.mu.Lock()
+	r.releaseResultWaiterLocked(agentID, waiter)
+	r.mu.Unlock()
+	return result, true
+}
+
+func (r *Runner) releaseResultWaiter(agentID string, waiter *resultWaitState) {
+	if waiter == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.releaseResultWaiterLocked(agentID, waiter)
+}
+
+func (r *Runner) releaseResultWaiterLocked(agentID string, waiter *resultWaitState) {
+	if current := r.resultWaiters[agentID]; current == waiter && waiter.waiters > 0 {
+		waiter.waiters--
+		if waiter.waiters == 0 {
+			delete(r.resultWaiters, agentID)
+		}
+	}
+}
+
+// resultHasConsumersLocked reports whether cleanup must retain an agent/result
+// until WaitWithContext has consumed its completion snapshot. Runner.mu must be
+// held by the caller.
+func (r *Runner) resultHasConsumersLocked(agentID string) bool {
+	waiter := r.resultWaiters[agentID]
+	return waiter != nil && waiter.waiters > 0
 }
 
 // completedResultLocked returns an owned snapshot iff agentID has completed.
 // Both the flag check and the copy happen under r.mu: returning the shared
 // pointer would merely move the race to the caller's later reads of
-// Status/Error/Metadata while Cancel or panic recovery mutates it in place.
+// Status/Error/Metadata while a finalizer or panic recovery mutates it in place.
 func (r *Runner) completedResultLocked(agentID string) (*AgentResult, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -78,6 +203,10 @@ func cloneAgentResult(result *AgentResult) *AgentResult {
 		return nil
 	}
 	clone := *result
+	if result.PolicyBlock != nil {
+		policyBlock := *result.PolicyBlock
+		clone.PolicyBlock = &policyBlock
+	}
 	clone.TouchedPaths = append([]string(nil), result.TouchedPaths...)
 	clone.Metadata = cloneAgentMetadata(result.Metadata)
 	return &clone
@@ -209,29 +338,17 @@ func (r *Runner) GetAgent(agentID string) (*Agent, bool) {
 
 // Cancel cancels an agent's execution.
 func (r *Runner) Cancel(agentID string) error {
-	r.mu.Lock()
-
+	r.mu.RLock()
 	agent, ok := r.agents[agentID]
+	r.mu.RUnlock()
 	if !ok {
-		r.mu.Unlock()
 		return fmt.Errorf("agent not found: %s", agentID)
 	}
 
+	// Cancellation is a request, not completion. The run goroutine owns final
+	// status/result publication and signals waiters only after workspace cleanup,
+	// persistence, learning and usage accounting have finished.
 	agent.Cancel()
-
-	// Update result — must set Completed so WaitWithContext doesn't spin
-	completed := false
-	if result, ok := r.results[agentID]; ok {
-		result.Status = AgentStatusCancelled
-		result.Completed = true
-		completed = true
-	}
-	r.mu.Unlock()
-
-	if completed {
-		r.notifyResultReady()
-	}
-
 	return nil
 }
 
@@ -337,6 +454,9 @@ func (r *Runner) Cleanup(maxAge time.Duration) int {
 	for id, agent := range r.agents {
 		status := agent.GetStatus()
 		if status == AgentStatusCompleted || status == AgentStatusFailed || status == AgentStatusCancelled {
+			if r.resultHasConsumersLocked(id) {
+				continue
+			}
 			endTime := agent.GetEndTime()
 			if !endTime.IsZero() && endTime.Before(cutoff) {
 				// Clean up agent output file if it exists

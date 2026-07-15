@@ -3,6 +3,8 @@ package ui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func toolStringArg(args map[string]any, key string) string {
@@ -10,7 +12,7 @@ func toolStringArg(args map[string]any, key string) string {
 		return ""
 	}
 	value, _ := args[key].(string)
-	return strings.TrimSpace(value)
+	return strings.TrimSpace(safeInlineDisplayText(value))
 }
 
 func toolBoolArg(args map[string]any, key string) bool {
@@ -43,12 +45,22 @@ func toolStringListArg(args map[string]any, key string) []string {
 	}
 	switch values := args[key].(type) {
 	case []string:
-		return values
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			value = strings.TrimSpace(safeInlineDisplayText(value))
+			if value != "" {
+				result = append(result, value)
+			}
+		}
+		return result
 	case []any:
 		result := make([]string, 0, len(values))
 		for _, value := range values {
-			if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
-				result = append(result, strings.TrimSpace(s))
+			if s, ok := value.(string); ok {
+				s = strings.TrimSpace(safeInlineDisplayText(s))
+				if s != "" {
+					result = append(result, s)
+				}
 			}
 		}
 		return result
@@ -58,23 +70,22 @@ func toolStringListArg(args map[string]any, key string) []string {
 }
 
 func compactInline(text string, maxLen int) string {
-	text = strings.Join(strings.Fields(text), " ")
+	text = strings.TrimSpace(safeInlineDisplayText(text))
 	if maxLen <= 0 {
 		return text
 	}
-	runes := []rune(text)
-	if len(runes) <= maxLen {
+	if lipgloss.Width(text) <= maxLen {
 		return text
 	}
 	if maxLen <= 3 {
-		return string(runes[:maxLen]) // no room for ellipsis; avoids maxLen-3 underflow panic
+		return truncateForWidth(text, maxLen) // use the compact single-cell ellipsis
 	}
-	return string(runes[:maxLen-3]) + "..."
+	return displayCellPrefix(text, maxLen-3) + "..."
 }
 
 func formatPathPair(source, destination string, maxLen int) string {
-	source = strings.TrimSpace(source)
-	destination = strings.TrimSpace(destination)
+	source = strings.TrimSpace(safeInlineDisplayText(source))
+	destination = strings.TrimSpace(safeInlineDisplayText(destination))
 	if source == "" && destination == "" {
 		return ""
 	}
@@ -84,11 +95,19 @@ func formatPathPair(source, destination string, maxLen int) string {
 	if destination == "" {
 		return shortenPath(source, maxLen)
 	}
-	half := maxLen / 2
-	if half < 18 {
-		half = 18
+	combined := source + " -> " + destination
+	if maxLen <= 0 || lipgloss.Width(combined) <= maxLen {
+		return combined
 	}
-	return shortenPath(source, half) + " -> " + shortenPath(destination, half)
+	const separator = " -> "
+	separatorWidth := lipgloss.Width(separator)
+	if maxLen <= separatorWidth {
+		return truncateForWidth("→", maxLen)
+	}
+	pathBudget := maxLen - separatorWidth
+	sourceBudget := pathBudget / 2
+	destinationBudget := pathBudget - sourceBudget
+	return shortenPath(source, sourceBudget) + separator + shortenPath(destination, destinationBudget)
 }
 
 func formatRunTestsTarget(args map[string]any, pathLimit int) string {
@@ -152,7 +171,7 @@ func formatGitAddTarget(args map[string]any, maxLen int) string {
 }
 
 func displayToolName(name string) string {
-	name = strings.TrimSpace(strings.ReplaceAll(name, "-", "_"))
+	name = strings.ReplaceAll(strings.TrimSpace(safeInlineDisplayText(name)), "-", "_")
 	if name == "" {
 		return ""
 	}
@@ -167,7 +186,7 @@ func displayToolName(name string) string {
 }
 
 func statusToolLabel(name string) string {
-	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "-", "_"))
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(safeInlineDisplayText(name)), "-", "_"))
 	switch normalized {
 	case "":
 		return ""

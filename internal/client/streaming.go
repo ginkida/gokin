@@ -40,6 +40,13 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 			return nil, ContextErr(ctx)
 		case chunk, ok := <-sr.Chunks:
 			if !ok {
+				// A producer may close its channel while cancellation is racing
+				// with delivery of the terminal error chunk. Cancellation must not
+				// be reclassified as a successful (possibly empty) response merely
+				// because the closed channel won the select.
+				if err := ContextErr(ctx); err != nil {
+					return nil, err
+				}
 				if handler.OnComplete != nil {
 					handler.OnComplete(resp)
 				}

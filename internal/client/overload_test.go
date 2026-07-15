@@ -14,11 +14,9 @@ func TestIsOverloadError(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		// Real GLM 1305 error string as produced by classifyGLMErrorCode wrapping.
+		// Current documented GLM transient codes as produced by the classifier.
 		{"glm 1305 overloaded", errors.New("GLM server overloaded — retrying [overloaded] (1305): [1305][The server is busy]"), true},
-		{"glm 1301 concurrency", errors.New("GLM concurrency limit — retrying [overloaded] (1301): ..."), true},
-		{"glm 1302 throughput", errors.New("GLM throughput limit — retrying [overloaded] (1302): ..."), true},
-		{"glm 1210 rate limit", errors.New("GLM rate limit — retrying [rate limit] (1210): ..."), true},
+		{"glm 1302 rate limit", errors.New("GLM rate limit — retrying [rate limit] (1302): ..."), true},
 		{"anthropic overloaded_error", errors.New("API error 529: overloaded_error"), true},
 		{"anthropic rate_limit_error", errors.New("429 rate_limit_error: too many tokens"), true},
 		{"too many requests", errors.New("HTTP 429: too many requests"), true},
@@ -27,6 +25,8 @@ func TestIsOverloadError(t *testing.T) {
 		// Must NOT be treated as overload — these are terminal or unrelated.
 		{"glm 1308 quota", errors.New("GLM quota/balance exhausted — top up your GLM plan or switch provider with /provider"), false},
 		{"glm 1214 auth", errors.New("GLM authentication failed — check API key"), false},
+		{"glm 1301 sensitive content", errors.New("GLM rejected sensitive or unsafe content (1301)"), false},
+		{"glm 1210 invalid parameter", errors.New("GLM request has an invalid API parameter (1210)"), false},
 		{"context too long", errors.New("400: context length exceeded maximum"), false},
 		{"generic timeout", errors.New("request timeout after 1305ms"), false},
 		{"connection refused", errors.New("dial tcp: connection refused"), false},

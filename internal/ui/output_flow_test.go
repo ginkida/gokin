@@ -23,6 +23,40 @@ func TestAppendThinkingStream_ShowsSingleThinkingHeader(t *testing.T) {
 	}
 }
 
+func TestAssistantTranscriptEntrypointsMakeTerminalControlsInert(t *testing.T) {
+	payload := "before\x1b[2Jafter\x1b]0;owned\a"
+
+	thinking := NewOutputModel(DefaultStyles())
+	thinking.AppendThinkingStream(payload + "\tend")
+	thinking.EndThinking()
+	assertSafeTranscriptPayload(t, thinking.Content(), "thinking")
+	if plain := stripAnsi(thinking.Content()); !strings.Contains(plain, "after") || !strings.Contains(plain, "end") || strings.Contains(plain, "\t") {
+		t.Fatalf("thinking sanitization lost content or stable tabs: %q", plain)
+	}
+
+	markdown := NewOutputModel(DefaultStyles())
+	markdown.AppendMarkdown(payload)
+	assertSafeTranscriptPayload(t, markdown.Content(), "markdown")
+
+	fallback := NewOutputModel(DefaultStyles())
+	fallback.streamParser = nil
+	fallback.AppendTextStream(payload)
+	assertSafeTranscriptPayload(t, fallback.Content(), "stream fallback")
+}
+
+func assertSafeTranscriptPayload(t *testing.T, rendered, name string) {
+	t.Helper()
+	for _, control := range []string{"\x1b[2J", "\x1b]0;", "\a"} {
+		if strings.Contains(rendered, control) {
+			t.Fatalf("%s retained executable control %q: %q", name, control, rendered)
+		}
+	}
+	plain := stripAnsi(rendered)
+	if !strings.Contains(plain, "before") || !strings.Contains(plain, "after") {
+		t.Fatalf("%s sanitization discarded surrounding content: %q", name, plain)
+	}
+}
+
 // TestHandleToolResultWithInfo_ReadCollapsesByDefault pins the Claude-Code-
 // style collapse for Read: the ✓ success line (with path + line count +
 // duration) already carries the signal, so we skip the inline head+tail

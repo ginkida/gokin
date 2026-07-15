@@ -14,21 +14,19 @@ import (
 // checkCompletedAgents/handleAgentCompletion used to call
 // c.runner.GetResult(agentID) — which releases r.mu BEFORE returning the
 // *AgentResult pointer — and then read result.Completed with NO lock at all.
-// Runner.Cancel (reachable independently of Coordinator's c.mu via
-// tools/task_stop.go's task_stop tool and app/signals.go's shutdown path —
-// NOT only via Coordinator.CancelTask, which DOES take c.mu) mutates
-// result.Status/.Completed on the SAME pointer under r.mu.Lock(). This is
+// A cancelled run's finalizer (reached independently of Coordinator's c.mu
+// via task_stop or shutdown) publishes result.Status/.Completed on the SAME
+// pointer under r.mu.Lock(). Runner.Cancel itself only requests cancellation;
+// terminal publication belongs to the run goroutine after cleanup. This is
 // the identical unsynchronized-flag-read bug the round's bonus fix
 // (completedResultLocked) closed for Runner.WaitWithContext — left open one
 // call away in Coordinator. Fixed by routing both Coordinator methods
 // through completedResultLocked instead of GetResult()+a raw field read.
 //
-// This test races Runner.Cancel (simulating the task_stop/shutdown path,
-// which does NOT take c.mu) against a tight loop of
+// This test races cancellation plus run-owned terminal publication against a tight loop of
 // Coordinator.checkCompletedAgents() calls (simulating the periodic ticker)
 // under -race — it must report no data race and must eventually observe the
-// task transition to TaskStatusFailed (Cancel sets AgentStatusCancelled,
-// which checkCompletedAgents maps to TaskStatusFailed).
+// task transition to TaskStatusFailed (a cancelled result maps to Failed).
 func TestCoordinatorAgentResultRace_CancelVsCheckCompletedAgents(t *testing.T) {
 	registry := tools.NewRegistry()
 	runner := NewRunner(context.Background(), nil, registry, t.TempDir())
@@ -42,6 +40,7 @@ func TestCoordinatorAgentResultRace_CancelVsCheckCompletedAgents(t *testing.T) {
 	runner.agents[agentID] = agent
 	runner.results[agentID] = &AgentResult{AgentID: agentID, Status: AgentStatusRunning}
 	runner.mu.Unlock()
+	finalized := installCancelledRunFinalizer(runner, agent, agentID)
 
 	coordinator := NewCoordinator(context.Background(), runner, &CoordinatorConfig{MaxParallel: 3})
 	coordinator.mu.Lock()
@@ -77,7 +76,8 @@ func TestCoordinatorAgentResultRace_CancelVsCheckCompletedAgents(t *testing.T) {
 		}
 	}()
 
-	cancelWG.Wait() // Cancel has run; the poller keeps racing below
+	cancelWG.Wait() // Cancel has requested shutdown; the poller keeps racing below
+	<-finalized
 	// Give checkCompletedAgents a few more ticks to observe the now-completed
 	// result, then stop the poller and wait for it to actually exit.
 	deadline := time.Now().Add(2 * time.Second)
@@ -102,7 +102,7 @@ func TestCoordinatorAgentResultRace_CancelVsCheckCompletedAgents(t *testing.T) {
 		t.Fatal("expected checkCompletedAgents to eventually observe the cancelled agent as completed")
 	}
 	if task.Status != TaskStatusFailed {
-		t.Fatalf("task status = %v, want %v (Cancel sets AgentStatusCancelled, which checkCompletedAgents maps to Failed)", task.Status, TaskStatusFailed)
+		t.Fatalf("task status = %v, want %v (cancelled results map to Failed)", task.Status, TaskStatusFailed)
 	}
 }
 
@@ -123,6 +123,7 @@ func TestCoordinatorAgentResultRace_CancelVsHandleAgentCompletion(t *testing.T) 
 	runner.agents[agentID] = agent
 	runner.results[agentID] = &AgentResult{AgentID: agentID, Status: AgentStatusRunning}
 	runner.mu.Unlock()
+	finalized := installCancelledRunFinalizer(runner, agent, agentID)
 
 	coordinator := NewCoordinator(context.Background(), runner, &CoordinatorConfig{MaxParallel: 3})
 	coordinator.mu.Lock()
@@ -144,6 +145,11 @@ func TestCoordinatorAgentResultRace_CancelVsHandleAgentCompletion(t *testing.T) 
 		}
 	}()
 	wg.Wait()
+	<-finalized
+	// The fixed contract publishes only after cancellation finalization. Ensure
+	// one channel-driven observation occurs after that publication; the loop
+	// above still races preceding reads against the finalizer under -race.
+	coordinator.handleAgentCompletion(agentID)
 
 	coordinator.mu.RLock()
 	task := coordinator.tasks[taskID]
@@ -156,4 +162,24 @@ func TestCoordinatorAgentResultRace_CancelVsHandleAgentCompletion(t *testing.T) 
 	if task.Status != TaskStatusFailed {
 		t.Fatalf("task status = %v, want %v", task.Status, TaskStatusFailed)
 	}
+}
+
+// installCancelledRunFinalizer models the ownership boundary used by the real
+// async spawn paths: Agent.Cancel closes the run context; the run goroutine
+// publishes Completed only after cancellation cleanup/finalization.
+func installCancelledRunFinalizer(runner *Runner, agent *Agent, agentID string) <-chan struct{} {
+	cancelRequested := make(chan struct{})
+	finalized := make(chan struct{})
+	agent.SetCancelFunc(func() { close(cancelRequested) })
+	go func() {
+		<-cancelRequested
+		runner.mu.Lock()
+		result := runner.results[agentID]
+		result.Status = AgentStatusCancelled
+		result.Completed = true
+		runner.mu.Unlock()
+		runner.notifyResultReady(agentID)
+		close(finalized)
+	}()
+	return finalized
 }

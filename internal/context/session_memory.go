@@ -38,7 +38,7 @@ func DefaultSessionMemoryConfig() SessionMemoryConfig {
 
 // SessionMemoryManager maintains a structured summary of the current session.
 // It periodically extracts key information from the conversation history and
-// writes it to .gokin/.session-memory.md for injection into the system prompt.
+// writes it to .gokin/.session-memory.md for injection into per-turn context.
 type SessionMemoryManager struct {
 	workDir string
 	config  SessionMemoryConfig
@@ -72,6 +72,12 @@ type SessionMemoryManager struct {
 
 	// Extracted content
 	content string
+	// contentGeneration advances whenever a synchronous/newer lifecycle event
+	// replaces content. Async LLM writers capture the generation they started
+	// from and may commit only while it is still current; otherwise an older
+	// summary (or its shutdown-cancellation fallback) can overwrite the latest
+	// heuristic extraction on disk.
+	contentGeneration uint64
 
 	// llmExtractionInFlight guards against overlapping extractWithLLM calls
 	// (each up to a 30s API call). Extract() launches one detached per
@@ -83,8 +89,15 @@ type SessionMemoryManager struct {
 	llmExtractionInFlight bool
 
 	asyncWG sync.WaitGroup
+	// writeMu serializes disk commits with Clear. A writer that already snapped
+	// old content must never recreate .session-memory.md after /clear removed it.
+	// Lock order: writeMu -> mu (writeToDisk/Clear); never acquire writeMu while
+	// holding mu.
+	writeMu sync.Mutex
 	mu      sync.RWMutex
 }
+
+var sessionMemoryBeforeDiskWriteForTest func()
 
 // SetOnUpdate sets a callback invoked after each successful session memory extraction.
 func (s *SessionMemoryManager) SetOnUpdate(cb func()) {
@@ -228,9 +241,8 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 	}
 
 	var builder strings.Builder
-	// No wall-clock timestamp: this block is injected into the CACHED system
-	// prefix; a per-minute "Updated: HH:MM" busted prompt caching every minute
-	// for no model benefit (same reason working_memory dropped its timestamp).
+	// No wall-clock timestamp: this block also appears in point-in-time sub-agent
+	// prompts, where a timestamp adds churn without helping the model.
 	builder.WriteString("# Session Memory\n\n")
 
 	// Extract current task from the last few user messages
@@ -304,6 +316,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 	}
 	onUpdate := s.onUpdate
 	projectLearning := s.projectLearning
+	contentGeneration := s.contentGeneration
 
 	// Every 3rd extraction, try LLM-based summarization for higher quality
 	if useLLM {
@@ -314,7 +327,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 		s.asyncWG.Add(1)
 		go func() {
 			defer s.asyncWG.Done()
-			s.extractWithLLM(history, heuristicContent)
+			s.extractWithLLM(history, heuristicContent, contentGeneration)
 		}()
 		logging.Debug("session memory extracted",
 			"files", len(files),
@@ -325,6 +338,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 		return
 	} else {
 		s.content = heuristicContent
+		s.contentGeneration++
 	}
 	s.mu.Unlock()
 
@@ -349,7 +363,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 
 // extractWithLLM uses the Summarizer to create a higher-quality session summary.
 // Runs in a goroutine; falls back to heuristic content on failure.
-func (s *SessionMemoryManager) extractWithLLM(history []*genai.Content, fallback string) {
+func (s *SessionMemoryManager) extractWithLLM(history []*genai.Content, fallback string, baseGeneration uint64) {
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
 	// Clear the in-flight guard on every exit path (success, LLM failure, or
@@ -380,8 +394,13 @@ Be concise. Each section should be 1-5 bullet points maximum.`
 	if err != nil || summary == "" {
 		logging.Debug("LLM session memory extraction failed, using heuristic", "error", err)
 		s.mu.Lock()
-		s.content = fallback
-		onUpdate := s.onUpdate
+		commit := s.contentGeneration == baseGeneration
+		var onUpdate func()
+		if commit {
+			s.content = fallback
+			s.contentGeneration++
+			onUpdate = s.onUpdate
+		}
 		var onFailed func(error)
 		// Only a genuine call failure (err != nil) is worth surfacing — an
 		// empty summary with NO error is a legitimate "nothing to add"
@@ -390,7 +409,11 @@ Be concise. Each section should be 1-5 bullet points maximum.`
 			onFailed = s.onExtractionFailed
 		}
 		s.mu.Unlock()
-		s.writeToDisk()
+		if commit {
+			s.writeToDisk()
+		} else {
+			logging.Debug("discarded stale LLM session memory fallback")
+		}
 		if onFailed != nil {
 			onFailed(err)
 		}
@@ -401,14 +424,17 @@ Be concise. Each section should be 1-5 bullet points maximum.`
 	}
 
 	s.mu.Lock()
+	if s.contentGeneration != baseGeneration {
+		s.mu.Unlock()
+		logging.Debug("discarded stale LLM session memory summary")
+		return
+	}
 	s.content = summary
+	s.contentGeneration++
+	onUpdate := s.onUpdate
 	s.mu.Unlock()
 	s.writeToDisk()
 	logging.Debug("LLM session memory extraction completed", "size", len(summary))
-
-	s.mu.RLock()
-	onUpdate := s.onUpdate
-	s.mu.RUnlock()
 
 	if onUpdate != nil {
 		onUpdate()
@@ -455,6 +481,7 @@ func (s *SessionMemoryManager) LoadFromDisk() {
 	}
 	s.mu.Lock()
 	s.content = string(data)
+	s.contentGeneration++
 	s.initialized = true
 	s.mu.Unlock()
 	logging.Debug("loaded session memory from disk", "path", path)
@@ -462,13 +489,17 @@ func (s *SessionMemoryManager) LoadFromDisk() {
 
 // Clear resets session memory (e.g., on new session).
 func (s *SessionMemoryManager) Clear() {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.content = ""
+	s.contentGeneration++
 	s.initialized = false
 	s.lastExtractionTokens = 0
 	s.toolCallsSinceUpdate = 0
-	os.Remove(s.filePath())
+	s.extractionCount = 0
+	s.mu.Unlock()
+	_ = os.Remove(s.filePath())
 }
 
 func (s *SessionMemoryManager) filePath() string {
@@ -477,6 +508,8 @@ func (s *SessionMemoryManager) filePath() string {
 }
 
 func (s *SessionMemoryManager) writeToDisk() {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	// Snapshot content under the lock — every caller invokes writeToDisk()
 	// AFTER releasing s.mu (by design: file I/O never under lock), so a bare
 	// `s.content` read here races a concurrent Extract()/extractWithLLM()
@@ -485,6 +518,16 @@ func (s *SessionMemoryManager) writeToDisk() {
 	s.mu.RLock()
 	content := s.content
 	s.mu.RUnlock()
+	if sessionMemoryBeforeDiskWriteForTest != nil {
+		sessionMemoryBeforeDiskWriteForTest()
+	}
+	// A delayed writer may acquire writeMu only after Clear has already reset
+	// the in-memory snapshot and removed the file. Treat empty content as the
+	// cleared state instead of recreating an empty .session-memory.md.
+	if strings.TrimSpace(content) == "" {
+		_ = os.Remove(s.filePath())
+		return
+	}
 
 	dir := filepath.Join(s.workDir, ".gokin")
 	// Owner-only (0700/0600): session memory captures recent files,

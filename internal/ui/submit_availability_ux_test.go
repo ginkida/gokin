@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -45,6 +46,38 @@ func TestUnavailableTypeAheadSubmitPreservesFollowUp(t *testing.T) {
 	}
 	if status := stripAnsi(got.interruptHint()); !strings.Contains(status, "Send unavailable") || !strings.Contains(status, "Esc interrupt") {
 		t.Fatalf("busy status advertises a false send action: %q", status)
+	}
+}
+
+func TestSubmitCooldownExplainsDelayAndPreservesDraft(t *testing.T) {
+	for _, state := range []State{StateInput, StateProcessing, StateStreaming} {
+		t.Run(state.String(), func(t *testing.T) {
+			m := NewModel()
+			m.width = 80
+			m.state = state
+			m.lastSubmitTime = time.Now()
+			m.input.textarea.SetValue("send this next")
+			calls := 0
+			m.SetCallbacks(func(string) { calls++ }, nil)
+
+			updatedAny, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			got := updatedAny.(Model)
+			if got.state != state || got.input.Value() != "send this next" || calls != 0 || len(got.input.history) != 0 {
+				t.Fatalf("cooldown changed unsent message: state=%v draft=%q calls=%d history=%v", got.state, got.input.Value(), calls, got.input.history)
+			}
+			view := stripAnsi(got.input.View())
+			for _, want := range []string{"Please wait a moment", "Draft preserved"} {
+				if !strings.Contains(view, want) {
+					t.Fatalf("cooldown feedback missing %q:\n%s", want, view)
+				}
+			}
+			if strings.Contains(view, "Enter send anyway") {
+				t.Fatalf("cooldown advertises a bypass it does not support:\n%s", view)
+			}
+			if got.toastManager.Count() != 1 || got.toastManager.toasts[0].Type != ToastWarning {
+				t.Fatalf("cooldown toast=%+v", got.toastManager.toasts)
+			}
+		})
 	}
 }
 

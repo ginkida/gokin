@@ -99,6 +99,52 @@ func TestPermissionDetailNavigationCannotConfirmHiddenSelection(t *testing.T) {
 	}
 }
 
+func TestPermissionShortDetailsDoNotAdvertiseDeadScrolling(t *testing.T) {
+	m := NewModel()
+	m.width = 80
+	m.height = 30
+	m.state = StatePermissionPrompt
+	m.permShowDetails = true
+	m.permRequest = &PermissionRequestMsg{
+		ToolName: "read",
+		Reason:   "Review the requested file",
+		Args:     map[string]any{"path": "main.go"},
+	}
+
+	view := stripAnsi(m.renderPermissionPrompt())
+	hints := plainShortcutHints(m.contextualShortcutHintPairs())
+	for _, got := range []string{view, hints} {
+		if strings.Contains(got, "Scroll") || strings.Contains(got, "PgUp") {
+			t.Fatalf("short details advertised unavailable scrolling:\n%s", got)
+		}
+	}
+	for _, want := range []string{"? Back", "Decide", "Esc Deny"} {
+		if !strings.Contains(view+"\n"+hints, want) {
+			t.Fatalf("short details lost recovery action %q:\n%s\n%s", want, view, hints)
+		}
+	}
+
+	_ = m.handlePermissionPromptKeys(tea.KeyMsg{Type: tea.KeyDown})
+	_ = m.handlePermissionPromptKeys(tea.KeyMsg{Type: tea.KeyPgDown})
+	if m.permDetailScroll != 0 {
+		t.Fatalf("short details moved to impossible scroll offset %d", m.permDetailScroll)
+	}
+}
+
+func TestPermissionOverflowDetailsAdvertiseLineAndPageScrolling(t *testing.T) {
+	m := permissionDetailsTestModel()
+	m.height = 12
+	m.permShowDetails = true
+
+	view := stripAnsi(m.renderPermissionPrompt())
+	hints := plainShortcutHints(m.contextualShortcutHintPairs())
+	for _, want := range []string{"↑/↓ Scroll", "↑↓ Scroll", "PgUp/PgDn Page", "? Back", "y/a/n Decide"} {
+		if !strings.Contains(view+"\n"+hints, want) {
+			t.Fatalf("overflow details missing %q:\n%s\n%s", want, view, hints)
+		}
+	}
+}
+
 func TestPermissionExplicitNumberStillDecidesFromDetails(t *testing.T) {
 	m := permissionDetailsTestModel()
 	m.permShowDetails = true

@@ -4,6 +4,7 @@ package tools
 
 import (
 	"os/exec"
+	"strconv"
 	"time"
 
 	"gokin/internal/logging"
@@ -14,15 +15,19 @@ func setBashProcAttr(cmd *exec.Cmd) {
 	// No special process attributes needed on Windows
 }
 
-// killBashProcessGroup kills the process on Windows
+// killBashProcessGroup kills the entire process tree on Windows.
 func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan struct{}) {
 	if cmd.Process == nil {
 		return
 	}
 
-	// On Windows, we just kill the process directly
-	// There's no process group concept like Unix
-	if err := cmd.Process.Kill(); err != nil {
-		logging.Warn("failed to kill process", "error", err)
+	// taskkill /T covers descendants; Process.Kill alone terminates only the
+	// shell leader and leaves grandchildren running. /F is required because a
+	// cancelled foreground command cannot be allowed to outlive the tool call.
+	err := exec.Command("taskkill", "/PID", strconv.Itoa(cmd.Process.Pid), "/T", "/F").Run()
+	if err != nil {
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			logging.Warn("failed to kill process tree", "taskkill_error", err, "kill_error", killErr)
+		}
 	}
 }

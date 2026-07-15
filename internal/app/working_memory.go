@@ -31,9 +31,44 @@ func (a *App) updateWorkingMemoryFromTurn(userMessage, response string) {
 	a.pushTurnContext()
 }
 
+// updateRelevantMemoryForTurn retrieves only durable memories related to the
+// current request. The result lives in per-turn context rather than the system
+// prompt so GLM's stable prefix cache remains reusable across queries.
+func (a *App) updateRelevantMemoryForTurn(userMessage string) {
+	if a == nil {
+		return
+	}
+	content := ""
+	if a.memoryAutoInject.Load() && a.memoryStore != nil {
+		// Global recall is a separate explicit opt-in. AutoInject alone must
+		// never pull user-wide notes into an unrelated repository.
+		content = a.memoryStore.GetRelevantForContext(userMessage, !a.memoryAllowGlobal.Load(), 0)
+	}
+	a.setRelevantMemoryContext(content)
+}
+
+func (a *App) setRelevantMemoryContext(content string) {
+	if a == nil {
+		return
+	}
+	a.relevantMemoryMu.Lock()
+	a.relevantMemoryContext = strings.TrimSpace(content)
+	a.relevantMemoryMu.Unlock()
+}
+
+func (a *App) relevantMemorySnapshot() string {
+	if a == nil {
+		return ""
+	}
+	a.relevantMemoryMu.RLock()
+	content := a.relevantMemoryContext
+	a.relevantMemoryMu.RUnlock()
+	return content
+}
+
 // turnContextContent assembles everything that travels as ephemeral per-turn
-// context instead of living in the cached system prefix: session memory
-// (mutates every ~5K tokens) and working memory (mutates every turn).
+// context instead of living in the cached system prefix: query-aware durable
+// recall, session memory, working memory, and live capability state.
 func (a *App) turnContextContent() string {
 	if a == nil {
 		return ""
@@ -51,6 +86,11 @@ func (a *App) turnContextContent() string {
 	// byte-stable cached prefix (v0.88.0 rule).
 	if dirCtx := a.directoryAccessContext(); dirCtx != "" {
 		parts = append(parts, dirCtx)
+	}
+	if a.memoryAutoInject.Load() {
+		if relevant := a.relevantMemorySnapshot(); relevant != "" {
+			parts = append(parts, relevant)
+		}
 	}
 	if a.sessionMemory != nil {
 		if sm := a.sessionMemory.GetContent(); sm != "" {
@@ -90,8 +130,8 @@ func (a *App) directoryAccessContext() string {
 	return b.String()
 }
 
-// pushTurnContext delivers the current session+working memory snapshot to the
-// active client as ephemeral per-turn context. Safe to call with a nil client.
+// pushTurnContext delivers the current ephemeral context snapshot to the active
+// client. Safe to call with a nil client.
 func (a *App) pushTurnContext() {
 	if a == nil {
 		return

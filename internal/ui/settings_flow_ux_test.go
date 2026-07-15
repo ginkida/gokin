@@ -65,6 +65,67 @@ func TestSettingsToggleShowsAppliedAndRestartFeedback(t *testing.T) {
 	}
 }
 
+func TestSettingsExplainsCombinedSafetyStateAndTransitions(t *testing.T) {
+	tests := []struct {
+		name      string
+		perms     bool
+		sandbox   bool
+		want      string
+		notWanted string
+	}{
+		{name: "guarded", perms: true, sandbox: true, want: "Safety: prompts on · bash sandboxed", notWanted: "YOLO"},
+		{name: "prompts off only", perms: false, sandbox: true, want: "Safety: no prompts · bash sandboxed", notWanted: "bash unrestricted"},
+		{name: "sandbox off only", perms: true, sandbox: false, want: "Safety: prompts on · approved bash unrestricted", notWanted: "no prompts"},
+		{name: "full yolo", perms: false, sandbox: false, want: "Safety: full YOLO · no prompts · bash unrestricted", notWanted: "bash sandboxed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModel()
+			m.width, m.height = 90, 24
+			m.openSettings(OpenSettingsMsg{Items: []SettingItem{
+				{Key: "permissions", Name: "Ask before risky actions", On: tt.perms, Live: true},
+				{Key: "sandbox", Name: "Sandbox bash commands", On: tt.sandbox, Live: true},
+			}})
+			view := stripAnsi(m.renderSettings())
+			if !strings.Contains(view, tt.want) {
+				t.Fatalf("combined safety state missing %q:\n%s", tt.want, view)
+			}
+			if strings.Contains(view, tt.notWanted) {
+				t.Fatalf("combined safety state falsely claims %q:\n%s", tt.notWanted, view)
+			}
+		})
+	}
+
+	m := NewModel()
+	m.width, m.height = 90, 24
+	m.SetSettingToggleCallback(func(string, bool) {})
+	m.openSettings(OpenSettingsMsg{Items: []SettingItem{
+		{Key: "permissions", Name: "Ask before risky actions", On: true, Live: true},
+		{Key: "sandbox", Name: "Sandbox bash commands", On: true, Live: true},
+	}})
+
+	_ = m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyDown})
+	_ = m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if view := stripAnsi(m.renderSettings()); !strings.Contains(view, "Safety: prompts on · approved bash unrestricted") {
+		t.Fatalf("optimistic sandbox change did not update safety state:\n%s", view)
+	}
+	_ = m.handleMessageTypes(SettingToggleResultMsg{Key: "sandbox", On: false, Success: true})
+	if !strings.Contains(m.settingsNotice, "prompts on · approved bash unrestricted") {
+		t.Fatalf("confirmed sandbox change lacks impact feedback: %q", m.settingsNotice)
+	}
+
+	_ = m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyUp})
+	_ = m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = m.handleMessageTypes(SettingToggleResultMsg{Key: "permissions", On: false, Success: true})
+	view := stripAnsi(m.renderSettings())
+	for _, want := range []string{"Safety: full YOLO · no prompts · bash unrestricted", "full YOLO · no prompts · bash unrestricted"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("full YOLO transition missing %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestSettingsPendingToggleBlocksConcurrentFlip(t *testing.T) {
 	m := NewModel()
 	calls := 0
@@ -176,12 +237,25 @@ func TestSettingsNavigationPagesAndClampsCursor(t *testing.T) {
 		t.Fatalf("Home cursor=%d", m.settingsCursor)
 	}
 	_ = m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyPgDown})
-	if m.settingsCursor != settingsItemVisibleCount(m.height, len(m.settingsItems)) {
+	if m.settingsCursor != 6 {
 		t.Fatalf("PgDown cursor=%d", m.settingsCursor)
 	}
 	_ = m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyEnd})
 	if m.settingsCursor != len(m.settingsItems)-1 {
 		t.Fatalf("End cursor=%d", m.settingsCursor)
+	}
+}
+
+func TestSettingsPageNavigationCountsVisibleItemsNotCategoryRows(t *testing.T) {
+	m := NewModel()
+	m.width = 80
+	m.height = 12
+	m.openSettings(OpenSettingsMsg{Items: sampleSettingItems(), Model: "glm-5.2", Provider: "glm"})
+	m.settingsCursor = 5 // Plan mode; its compact page also contains Done gate.
+
+	_ = m.handleSettingsKeys(tea.KeyMsg{Type: tea.KeyPgDown})
+	if m.settingsCursor != 7 {
+		t.Fatalf("PgDown cursor=%d, want 7 after the two visible settings", m.settingsCursor)
 	}
 }
 

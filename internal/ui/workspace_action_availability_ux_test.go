@@ -28,7 +28,7 @@ func TestParentManagedSearchViewerHidesAndBlocksUnlinkedActions(t *testing.T) {
 	}
 	assertShortcutHints(t, m,
 		[]string{"Space Preview", "y Copy path", "esc/q Close"},
-		[]string{"Enter Open"},
+		[]string{"Enter Open", "↑↓ Navigate", "PgUp/PgDn Page", "Ctrl+j/k Scroll preview"},
 	)
 
 	m.SetSearchResultActionCallback(func(SearchAction, string, int) {})
@@ -42,6 +42,50 @@ func TestParentManagedSearchViewerHidesAndBlocksUnlinkedActions(t *testing.T) {
 		t.Fatal("linked Enter did not emit an Open action")
 	}
 	assertShortcutHints(t, m, []string{"Enter Open"}, nil)
+}
+
+func TestWorkspaceNavigationHintsFollowCardinalityAndOverflow(t *testing.T) {
+	search := NewModel()
+	search.width, search.height = 90, 24
+	search.state = StateSearchResults
+	search.searchResults.SetSize(search.width, search.height)
+	search.searchResults.SetResults("model", "grep", []SearchResult{{FilePath: "main.go"}, {FilePath: "app.go"}})
+	assertShortcutHints(t, search,
+		[]string{"↑↓ Navigate"},
+		[]string{"PgUp/PgDn Page"},
+	)
+
+	results := make([]SearchResult, 20)
+	for i := range results {
+		results[i] = SearchResult{FilePath: strings.Repeat("nested/", i%3) + "file.go"}
+	}
+	search.height = 14
+	search.searchResults.SetSize(search.width, search.height)
+	search.searchResults.SetResults("model", "grep", results)
+	assertShortcutHints(t, search,
+		[]string{"↑↓ Navigate", "PgUp/PgDn Page"},
+		nil,
+	)
+
+	git := NewModel()
+	git.width, git.height = 90, 14
+	git.state = StateGitStatus
+	git.gitStatusModel.SetSize(git.width, git.height)
+	entries := make([]GitFileEntry, 12)
+	for i := range entries {
+		entries[i] = GitFileEntry{FilePath: strings.Repeat("nested/", i%3) + "file.go", Status: GitFileModified}
+	}
+	git.gitStatusModel.SetStatus(entries, "main", "", "")
+	assertShortcutHints(t, git,
+		[]string{"↑↓ Inspect", "PgUp/PgDn Page", "esc/q Close"},
+		nil,
+	)
+	view := stripAnsi(git.gitStatusModel.View())
+	for _, want := range []string{"↑/↓ Navigate", "PgUp/PgDn Page", "Home/End Jump"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overflowing read-only Git list missing %q:\n%s", want, view)
+		}
+	}
 }
 
 func TestParentManagedGitViewerBlocksUnlinkedMutations(t *testing.T) {
@@ -73,8 +117,8 @@ func TestParentManagedGitViewerBlocksUnlinkedMutations(t *testing.T) {
 		}
 	}
 	assertShortcutHints(t, m,
-		[]string{"↑↓ Inspect", "esc/q Close"},
-		[]string{"Space Stage/unstage", "d Show diff"},
+		[]string{"esc/q Close"},
+		[]string{"↑↓ Inspect", "PgUp/PgDn Page", "Space Stage/unstage", "d Show diff"},
 	)
 
 	m.SetGitStatusActionCallback(func(GitAction, []string, string) {})
@@ -87,7 +131,10 @@ func TestParentManagedGitViewerBlocksUnlinkedMutations(t *testing.T) {
 	if _, cmd := m.gitStatusModel.Update(tea.KeyMsg{Type: tea.KeySpace}); cmd == nil {
 		t.Fatal("linked stage action did not emit a message")
 	}
-	assertShortcutHints(t, m, []string{"Space Stage/unstage", "d Show diff"}, nil)
+	assertShortcutHints(t, m,
+		[]string{"Space Stage/unstage", "d Show diff"},
+		[]string{"↑↓ Navigate", "PgUp/PgDn Page"},
+	)
 }
 
 func TestFileBrowserStatusHintsFollowEditingAndSelectionState(t *testing.T) {
@@ -102,6 +149,7 @@ func TestFileBrowserStatusHintsFollowEditingAndSelectionState(t *testing.T) {
 	assertShortcutHints(t, m, []string{"c Clear"}, nil)
 
 	m.fileBrowser.filterActive = true
+	m.fileBrowser.filterInput = m.fileBrowser.filter
 	assertShortcutHints(t, m,
 		[]string{"Type Filter", "Backspace Delete", "Enter/Esc Done"},
 		[]string{"esc/q Close", "r Refresh"},
@@ -111,7 +159,7 @@ func TestFileBrowserStatusHintsFollowEditingAndSelectionState(t *testing.T) {
 	m.fileBrowser.entries = []FileEntry{{Name: "main.go", Path: "main.go"}}
 	m.fileBrowser.selectedFiles["main.go"] = true
 	assertShortcutHints(t, m,
-		[]string{"Enter Open/add", "y Add selection", "esc/q Close"},
-		[]string{"/ Filter", "r Refresh"},
+		[]string{"Enter Add to draft", "Space Select", "y Add selection", "esc/q Close"},
+		[]string{"↑↓ Move", "PgUp/PgDn Page", "/ Filter", "r Refresh"},
 	)
 }

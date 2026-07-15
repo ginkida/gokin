@@ -249,7 +249,7 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 // real workspace/shell (runScenario is the only caller that has to shell
 // out; the decision itself doesn't).
 func scenarioPassed(result Result) bool {
-	return result.Agent.Success && allCommandsSuccessful(result.Verification) && behavioralAssertionsSatisfied(result.Metrics)
+	return agentDeliveredAnswer(result) && allCommandsSuccessful(result.Verification) && behavioralAssertionsSatisfied(result.Metrics)
 }
 
 // behavioralAssertionsSatisfied reports whether every DECLARED behavioral

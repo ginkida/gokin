@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -14,6 +15,41 @@ import (
 // fewShotExampleLimit caps how many past successful runs are injected as
 // few-shot context into a spawn prompt.
 const fewShotExampleLimit = 2
+
+var approvedPlanStepPermissionOverrides = map[string]permission.Level{
+	"write":       permission.LevelAllow,
+	"atomicwrite": permission.LevelAllow,
+	"edit":        permission.LevelAllow,
+	"copy":        permission.LevelAllow,
+	"move":        permission.LevelAllow,
+	"mkdir":       permission.LevelAllow,
+	"run_tests":   permission.LevelAllow,
+}
+
+func approvedPlanStepPermissions(base *permission.Manager) *permission.Manager {
+	if base == nil {
+		return nil
+	}
+	return base.WithPolicyOverrides(approvedPlanStepPermissionOverrides)
+}
+
+// shouldPersistAgentErrorCheckpoint keeps auto-recovery for genuine execution
+// failures only. Context cancellation and deadline expiry are terminal control
+// flow: silently resuming either on the next app start can repeat tool calls the
+// user stopped or restart work that already exhausted its configured limit.
+func shouldPersistAgentErrorCheckpoint(err error) bool {
+	return err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded)
+}
+
+func applyAgentRunError(result *AgentResult, err error) {
+	result.Error = err.Error()
+	result.Status = AgentStatusFailed
+	if errors.Is(err, context.Canceled) {
+		result.Status = AgentStatusCancelled
+	}
+}
 
 // withFewShot prepends the most relevant past SUCCESSFUL runs (matched by prompt
 // tags, sorted by relevance×success) to a spawn prompt so the agent learns from
@@ -41,6 +77,11 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 
 	deps := r.snapshotAgentDeps()
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
+	runLease, err := r.acquireAgentRunLease(agent.ID)
+	if err != nil {
+		return "", err
+	}
+	defer runLease.Release()
 
 	r.mu.Lock()
 	r.agents[agent.ID] = agent
@@ -124,7 +165,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	r.mu.Lock()
 	r.results[agent.ID] = cloneAgentResult(result)
 	r.mu.Unlock()
-	r.notifyResultReady()
+	r.notifyResultReady(agent.ID)
 
 	if err == nil && workspaceErr != nil {
 		err = workspaceErr
@@ -138,8 +179,10 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 
 // SpawnWithContext creates and runs a sub-agent with project context and streaming.
 // Unlike Spawn, it returns the AgentResult directly for immediate use by the caller.
-// When skipPermissions is true, the sub-agent will not ask for permission before
-// executing tools (used for approved plan execution).
+// When skipPermissions is true, the sub-agent receives a bounded local-work
+// capability for an approved plan step. It does not bypass the permission
+// system: external, destructive, and otherwise-unlisted operations retain the
+// base policy and prompt behavior.
 func (r *Runner) SpawnWithContext(
 	ctx context.Context,
 	agentType string,
@@ -154,12 +197,16 @@ func (r *Runner) SpawnWithContext(
 	r.cleanupOldResults()
 	deps := r.snapshotAgentDeps()
 
-	// Pass nil permissions for approved plan execution to avoid per-tool prompts
-	var perms *permission.Manager
-	if !skipPermissions {
-		perms = deps.permissions
+	perms := deps.permissions
+	if skipPermissions {
+		perms = approvedPlanStepPermissions(deps.permissions)
 	}
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, perms)
+	runLease, err := r.acquireAgentRunLease(agent.ID)
+	if err != nil {
+		return "", nil, err
+	}
+	defer runLease.Release()
 
 	// Inject project context and streaming callbacks
 	agent.SetProjectContext(projectContext)
@@ -240,15 +287,15 @@ func (r *Runner) SpawnWithContext(
 	}
 
 	if err != nil {
-		result.Error = err.Error()
-		result.Status = AgentStatusFailed
+		applyAgentRunError(result, err)
 	}
 
 	// Ensure Completed is always true so WaitWithContext doesn't spin
 	result.Completed = true
 
-	// Save error checkpoint on failure for potential recovery
-	if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
+	// Save genuine failures for recovery. Cancellation/deadline are terminal
+	// control flow and must never be silently replayed on the next app start.
+	if shouldPersistAgentErrorCheckpoint(err) && r.store != nil && agent.GetTurnCount() > 0 {
 		if _, cpErr := agent.SaveCheckpoint("error"); cpErr != nil {
 			logging.Debug("failed to save error checkpoint", "agent_id", agent.ID, "error", cpErr)
 		}
@@ -279,7 +326,7 @@ func (r *Runner) SpawnWithContext(
 	r.mu.Lock()
 	r.results[agent.ID] = cloneAgentResult(result)
 	r.mu.Unlock()
-	r.notifyResultReady()
+	r.notifyResultReady(agent.ID)
 
 	if err == nil && workspaceErr != nil {
 		err = workspaceErr
@@ -294,6 +341,17 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	r.cleanupOldResults()
 	deps := r.snapshotAgentDeps()
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
+	runLease, leaseErr := r.acquireAgentRunLease(agent.ID)
+	if leaseErr != nil {
+		logging.Error("refusing duplicate async agent run", "agent_id", agent.ID, "error", leaseErr)
+		return ""
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred {
+			runLease.Release()
+		}
+	}()
 
 	// Wire checkpoint store and enable auto-checkpoint for long-running agents
 	if r.store != nil {
@@ -338,7 +396,9 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 	invokeSubAgentActivity(onSubAgentActivity, agent.ID, agentType, prompt, "", nil, "start", false, "")
 
 	// Run agent asynchronously with proper cleanup
+	leaseTransferred = true
 	go func() {
+		defer runLease.Release()
 		agentID := agent.ID
 		var result *AgentResult
 
@@ -371,7 +431,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 				r.mu.Lock()
 				r.results[agentID] = result
 				r.mu.Unlock()
-				r.notifyResultReady()
+				r.notifyResultReady(agentID)
 			}
 		}()
 
@@ -406,7 +466,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 			r.mu.Lock()
 			r.results[agentID] = cancelledResult
 			r.mu.Unlock()
-			r.notifyResultReady()
+			r.notifyResultReady(agentID)
 			return
 		default:
 		}
@@ -448,8 +508,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 
 		// Handle error by updating result status
 		if err != nil {
-			result.Error = err.Error()
-			result.Status = AgentStatusFailed
+			applyAgentRunError(result, err)
 		}
 
 		// Ensure Completed is always true so WaitWithContext doesn't spin
@@ -467,8 +526,9 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 			deps.metaAgent.UnregisterAgent(agentID)
 		}
 
-		// Save error checkpoint on failure for potential recovery
-		if err != nil && r.store != nil && agent.GetTurnCount() > 0 {
+		// Save genuine failures for recovery. Cancellation/deadline are terminal
+		// control flow and must never be silently replayed on the next app start.
+		if shouldPersistAgentErrorCheckpoint(err) && r.store != nil && agent.GetTurnCount() > 0 {
 			if _, cpErr := agent.SaveCheckpoint("error"); cpErr != nil {
 				logging.Debug("failed to save error checkpoint", "agent_id", agent.ID, "error", cpErr)
 			}
@@ -483,7 +543,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		r.mu.Lock()
 		r.results[agentID] = result
 		r.mu.Unlock()
-		r.notifyResultReady()
+		r.notifyResultReady(agentID)
 
 		// Notify UI about agent completion
 		invokeAgentComplete(onComplete, agentID, result)
@@ -506,6 +566,30 @@ func (r *Runner) SpawnAsyncWithStreaming(
 ) string {
 	deps := r.snapshotAgentDeps()
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
+	runLease, leaseErr := r.acquireAgentRunLease(agent.ID)
+	if leaseErr != nil {
+		logging.Error("refusing duplicate streaming agent run", "agent_id", agent.ID, "error", leaseErr)
+		return ""
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred {
+			runLease.Release()
+		}
+	}()
+
+	// Streaming is only a presentation variant of SpawnAsync. Keep the same
+	// persistence contract: long-running agents checkpoint as they progress and
+	// genuine terminal failures leave an error checkpoint for startup recovery.
+	// Without this wiring, the common background-task path (selected whenever a
+	// text/progress callback is present) was the one path that could not recover
+	// after a provider failure or process restart.
+	if r.store != nil {
+		agent.SetStore(r.store)
+		if maxTurns > 10 {
+			agent.EnableAutoCheckpoint(0)
+		}
+	}
 
 	// Set up streaming callbacks
 	if onText != nil {
@@ -556,7 +640,9 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	invokeSubAgentActivity(onSubAgentActivity, agent.ID, agentType, prompt, "", nil, "start", false, "")
 
 	// Run agent asynchronously with streaming and progress updates
+	leaseTransferred = true
 	go func() {
+		defer runLease.Release()
 		agentID := agent.ID
 		var result *AgentResult
 
@@ -584,7 +670,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 				r.mu.Lock()
 				r.results[agentID] = result
 				r.mu.Unlock()
-				r.notifyResultReady()
+				r.notifyResultReady(agentID)
 			}
 		}()
 
@@ -641,7 +727,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 			r.mu.Lock()
 			r.results[agentID] = cancelledResult
 			r.mu.Unlock()
-			r.notifyResultReady()
+			r.notifyResultReady(agentID)
 			return
 		default:
 		}
@@ -664,8 +750,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 
 		// Handle error by updating result status
 		if err != nil {
-			result.Error = err.Error()
-			result.Status = AgentStatusFailed
+			applyAgentRunError(result, err)
 		}
 
 		// Ensure Completed is always true so WaitWithContext doesn't spin
@@ -685,6 +770,15 @@ func (r *Runner) SpawnAsyncWithStreaming(
 			deps.metaAgent.UnregisterAgent(agentID)
 		}
 
+		// Match SpawnAsync: cancellation/deadline are intentional terminal
+		// control flow and must not be replayed, while genuine failures remain
+		// resumable after restart.
+		if shouldPersistAgentErrorCheckpoint(err) && r.store != nil && agent.GetTurnCount() > 0 {
+			if _, cpErr := agent.SaveCheckpoint("error"); cpErr != nil {
+				logging.Debug("failed to save error checkpoint", "agent_id", agent.ID, "error", cpErr)
+			}
+		}
+
 		// Save agent state for potential resume
 		r.finalizeAgentWorkspace(agent, result)
 		r.saveAgentState(agent)
@@ -694,7 +788,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		r.mu.Lock()
 		r.results[agentID] = result
 		r.mu.Unlock()
-		r.notifyResultReady()
+		r.notifyResultReady(agentID)
 
 		// Notify UI about agent completion
 		invokeAgentComplete(onComplete, agentID, result)
@@ -716,6 +810,10 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 		wg.Add(1)
 		go func(idx int, t AgentTask) {
 			defer wg.Done()
+			var runLease *agentRunLease
+			// Registered before panic recovery so recovery/final accounting runs
+			// while this worker still owns its logical agent ID.
+			defer func() { runLease.Release() }()
 			defer func() {
 				if p := recover(); p != nil {
 					logging.Error("panic in SpawnMultiple worker",
@@ -738,6 +836,23 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 
 			deps := r.snapshotAgentDeps()
 			agent := r.newConfiguredAgent(ctx, deps, string(t.Type), t.MaxTurns, t.Model, deps.permissions)
+			var leaseErr error
+			runLease, leaseErr = r.acquireAgentRunLease(agent.ID)
+			if leaseErr != nil {
+				mu.Lock()
+				results[idx] = &AgentResult{
+					AgentID:   agent.ID,
+					Type:      agent.Type,
+					Status:    AgentStatusFailed,
+					Error:     leaseErr.Error(),
+					Completed: true,
+				}
+				if firstErr == nil {
+					firstErr = leaseErr
+				}
+				mu.Unlock()
+				return
+			}
 
 			// Apply thoroughness from task or context
 			th := tools.ThoroughnessFromContext(ctx)
@@ -817,7 +932,7 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			r.mu.Lock()
 			r.results[agent.ID] = result
 			r.mu.Unlock()
-			r.notifyResultReady()
+			r.notifyResultReady(agent.ID)
 		}(i, task)
 	}
 

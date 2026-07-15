@@ -29,8 +29,11 @@ type fakeAppForModel struct {
 func (f *fakeAppForModel) GetModelSetter() ModelSetter { return f.setter }
 func (f *fakeAppForModel) ApplyConfig(cfg *config.Config) error {
 	f.applyCalls++
-	copyCfg := *cfg
-	f.applied = &copyCfg
+	f.applied = cfg.Clone()
+	// Real ApplyConfig constructs and installs a replacement client after the
+	// config commit. Mirror that lifecycle instead of relying on ModelCommand to
+	// mutate the pre-commit setter captured at the start of Execute.
+	f.setter = &fakeModelSetter{model: cfg.Model.Name}
 	return nil
 }
 func (f *fakeAppForModel) ClearConversation() { f.clearCalls++ }

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,9 +20,11 @@ import (
 	"gokin/internal/config"
 	ctxmgr "gokin/internal/context"
 	"gokin/internal/donegate"
+	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
+	"gokin/internal/skills"
 	"gokin/internal/tools"
 
 	"google.golang.org/genai"
@@ -52,6 +55,7 @@ type Agent struct {
 	originalPrompt string // Preserved for continuation after compaction
 	messenger      tools.Messenger
 	permissions    *permission.Manager
+	hooks          *hooks.Manager
 	timeout        time.Duration
 	history        []*genai.Content
 	status         AgentStatus
@@ -60,6 +64,10 @@ type Agent struct {
 	maxTurns       int
 	thoroughness   tools.Thoroughness
 	outputStyle    tools.OutputStyle
+	// invocationScope is rebound under stateMu at the start of every Run. A
+	// persisted agent ID can be resumed by a different top-level invocation, so
+	// attribution belongs to the run lease rather than the Agent's lifetime.
+	invocationScope InvocationScope
 
 	// === IMPROVEMENT 4: Progress tracking ===
 	currentStep      int
@@ -151,6 +159,12 @@ type Agent struct {
 	fileTracker     *ctxmgr.FileActivityTracker
 	relevanceScorer *ctxmgr.RelevanceScorer
 
+	// invokedSkills is this agent's session-local, immutable snapshot ledger.
+	// It is deliberately not inherited from the foreground session or shared
+	// with sibling agents: every cloned SkillTool is rebound to this stable
+	// pointer during construction.
+	invokedSkills *skills.InvocationLedger
+
 	// Self-reflection for error recovery
 	reflector         *Reflector
 	recoveryExecutor  *RecoveryExecutor
@@ -200,7 +214,8 @@ type Agent struct {
 	pendingSteers []string
 
 	// Explicit cancellation for background agents (set by Runner)
-	cancelFunc context.CancelFunc
+	cancelFunc      context.CancelFunc
+	cancelRequested bool // latched when Cancel races registration of cancelFunc
 
 	// runCtx is the LIVE run context for the current/most-recent Run() call —
 	// the one cancelFunc actually kills. AgentMessenger reads this (via
@@ -224,6 +239,11 @@ type Agent struct {
 	// are zero-valued for non-"end" events.
 	onToolActivity func(agentID, toolName string, args map[string]any, status string, success bool, summary string)
 
+	// First authorization boundary refused in the current Run invocation. A
+	// model can still finish its conversation after a refusal, so this cannot be
+	// inferred from the terminal AgentStatus.
+	runPolicyBlock *tools.PolicyBlock
+
 	// Checkpoint support
 	store              *AgentStore
 	autoCheckpoint     bool // Enable auto-checkpoint every N turns
@@ -231,8 +251,9 @@ type Agent struct {
 	lastCheckpointTurn int  // Last turn when checkpoint was saved
 
 	// Workspace isolation state
-	isolatedWorkspace     *isolatedWorkspace
-	allowedRequestedTools map[string]struct{}
+	isolatedWorkspace        *isolatedWorkspace
+	requestedToolsRestricted bool
+	allowedRequestedTools    map[string]struct{}
 
 	// Done-gate integration.
 	doneGatePolicy *donegate.Policy
@@ -304,6 +325,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	id := generateAgentID()
 
 	// Create filtered registry based on agent type
+	allowedTools := agentType.AllowedTools()
 	filteredRegistry := createFilteredRegistry(agentType, baseRegistry)
 
 	if maxTurns <= 0 {
@@ -353,7 +375,14 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		recoveryExecutor:   NewRecoveryExecutor(2),
 		autoFixAttempts:    make(map[string]int),
 		fixCache:           NewFixCache(),
+		invokedSkills:      skills.NewInvocationLedger(),
+		// A non-nil AllowedTools list is an explicit capability ceiling. The
+		// model-facing request_tool may resolve a late-bound tool within that
+		// ceiling, but cannot turn a restricted role into a general agent.
+		requestedToolsRestricted: allowedTools != nil,
+		allowedRequestedTools:    requestedToolSet(allowedTools),
 	}
+	agent.bindSkillToolLedger()
 
 	// Apply per-agent-type context budgets before other wiring
 	agent.applyAgentTypeDefaults()
@@ -501,9 +530,16 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		recoveryExecutor:   NewRecoveryExecutor(2),
 		autoFixAttempts:    make(map[string]int),
 		fixCache:           NewFixCache(),
+		invokedSkills:      skills.NewInvocationLedger(),
+		// Dynamic types with a non-empty tool list have the same immutable-by-
+		// default capability ceiling as built-in restricted roles. An empty list
+		// retains the constructor's existing "all tools" semantics.
+		requestedToolsRestricted: len(dynType.AllowedTools) > 0,
+		allowedRequestedTools:    requestedToolSet(dynType.AllowedTools),
 		// Store custom prompt for dynamic type
 		projectContext: dynType.SystemPrompt,
 	}
+	agent.bindSkillToolLedger()
 
 	// Apply per-agent-type context budgets before other wiring
 	agent.applyAgentTypeDefaults()
@@ -608,7 +644,7 @@ func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.To
 		for _, tool := range baseRegistry.List() {
 			_ = filtered.Register(cloneToolForAgent(tool))
 		}
-		return filtered
+		return bindTaskToolCapabilityCeiling(filtered)
 	}
 
 	allowedMap := make(map[string]bool)
@@ -622,7 +658,23 @@ func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.To
 		}
 	}
 
-	return filtered
+	return bindTaskToolCapabilityCeiling(filtered)
+}
+
+// bindTaskToolCapabilityCeiling turns the agent's final, already-intersected
+// registry into the immutable parent authority passed to nested task calls.
+// This must happen after filtering: the foreground runner's base registry is
+// broader and must never be recoverable through delegation.
+func bindTaskToolCapabilityCeiling(registry *tools.Registry) *tools.Registry {
+	if registry == nil {
+		return registry
+	}
+	if tool, ok := registry.Get("task"); ok {
+		if taskTool, ok := tool.(*tools.TaskTool); ok {
+			taskTool.SetToolCapabilityCeiling(registry.Names())
+		}
+	}
+	return registry
 }
 
 // cloneToolForAgent returns an agent-local tool instance for tools that carry
@@ -633,6 +685,38 @@ func cloneToolForAgent(tool tools.Tool) tools.Tool {
 
 func cloneToolForAgentWithWorkDir(tool tools.Tool, workDir string) tools.Tool {
 	return tools.CloneToolForWorkDir(tool, workDir)
+}
+
+// bindSkillToolLedger connects the agent-local SkillTool clone to the stable
+// ledger owned by this Agent. Constructors call it before the agent can run.
+func (a *Agent) bindSkillToolLedger() {
+	if a == nil || a.registry == nil {
+		return
+	}
+	if a.invokedSkills == nil {
+		a.invokedSkills = skills.NewInvocationLedger()
+	}
+	tool, ok := a.registry.Get("skill")
+	if !ok {
+		return
+	}
+	if skillTool, ok := tool.(*tools.SkillTool); ok {
+		skillTool.SetInvocationLedger(a.invokedSkills)
+	}
+}
+
+// invokedSkillSnapshot returns a defensive newest-first snapshot without
+// holding stateMu while taking the ledger's own lock. The ledger pointer is
+// stable for every constructed Agent; the nil case supports focused tests that
+// use an Agent literal.
+func (a *Agent) invokedSkillSnapshot() []skills.Invocation {
+	a.stateMu.RLock()
+	ledger := a.invokedSkills
+	a.stateMu.RUnlock()
+	if ledger == nil {
+		return nil
+	}
+	return ledger.SnapshotNewestFirst()
 }
 
 // applyAgentTypeDefaults sets context budget defaults per agent type.
@@ -1226,7 +1310,7 @@ func createFilteredRegistry(agentType AgentType, baseRegistry tools.ToolRegistry
 		for _, tool := range baseRegistry.List() {
 			_ = filtered.Register(cloneToolForAgent(tool))
 		}
-		return filtered
+		return bindTaskToolCapabilityCeiling(filtered)
 	}
 
 	// Create new registry with filtered tools
@@ -1242,7 +1326,7 @@ func createFilteredRegistry(agentType AgentType, baseRegistry tools.ToolRegistry
 		}
 	}
 
-	return filtered
+	return bindTaskToolCapabilityCeiling(filtered)
 }
 
 // RequestTool dynamically adds a tool from the base registry to the agent's active registry.
@@ -1252,10 +1336,12 @@ func (a *Agent) RequestTool(name string) error {
 		return nil // Already have this tool
 	}
 
-	if len(a.allowedRequestedTools) > 0 {
-		if _, ok := a.allowedRequestedTools[name]; !ok {
-			return fmt.Errorf("tool is not allowed in this agent environment: %s", name)
-		}
+	a.stateMu.RLock()
+	restricted := a.requestedToolsRestricted
+	_, authorized := a.allowedRequestedTools[name]
+	a.stateMu.RUnlock()
+	if restricted && !authorized {
+		return fmt.Errorf("tool %q is outside this agent's authorized capabilities", name)
 	}
 
 	tool, ok := a.baseRegistry.Get(name)
@@ -1263,22 +1349,54 @@ func (a *Agent) RequestTool(name string) error {
 		return fmt.Errorf("tool not found in system: %s", name)
 	}
 
-	return a.registry.Register(cloneToolForAgentWithWorkDir(tool, a.workDir))
+	cloned := cloneToolForAgentWithWorkDir(tool, a.workDir)
+	if taskTool, ok := cloned.(*tools.TaskTool); ok {
+		ceiling := a.registry.Names()
+		ceiling = append(ceiling, taskTool.Name())
+		taskTool.SetToolCapabilityCeiling(ceiling)
+	}
+	if skillTool, ok := cloned.(*tools.SkillTool); ok {
+		a.stateMu.RLock()
+		ledger := a.invokedSkills
+		a.stateMu.RUnlock()
+		if ledger == nil {
+			// Production constructors always initialize the ledger. Keep the
+			// literal/test seam fail-safe without ever borrowing the base tool's
+			// (possibly foreground-owned) ledger.
+			a.stateMu.Lock()
+			if a.invokedSkills == nil {
+				a.invokedSkills = skills.NewInvocationLedger()
+			}
+			ledger = a.invokedSkills
+			a.stateMu.Unlock()
+		}
+		skillTool.SetInvocationLedger(ledger)
+	}
+	return a.registry.Register(cloned)
 }
 
-// SetAllowedRequestedTools restricts which tools may be added via request_tool.
-// A nil or empty list means no additional restriction.
+// SetAllowedRequestedTools supplies explicit policy authority for tools that
+// request_tool may add. It is intentionally fail-closed: a nil or empty list
+// authorizes no additions; it never removes the capability check. This setter
+// is runner-facing trusted configuration and is not exposed as a model tool.
 func (a *Agent) SetAllowedRequestedTools(names []string) {
-	if len(names) == 0 {
-		a.allowedRequestedTools = nil
-		return
-	}
+	a.stateMu.Lock()
+	a.requestedToolsRestricted = true
+	a.allowedRequestedTools = requestedToolSet(names)
+	a.stateMu.Unlock()
+}
 
+func requestedToolSet(names []string) map[string]struct{} {
+	if names == nil {
+		return nil
+	}
 	allowed := make(map[string]struct{}, len(names))
 	for _, name := range names {
-		allowed[name] = struct{}{}
+		if name = strings.TrimSpace(name); name != "" {
+			allowed[name] = struct{}{}
+		}
 	}
-	a.allowedRequestedTools = allowed
+	return allowed
 }
 
 // SendMessage sends a message to another agent via the messenger.
@@ -1299,10 +1417,15 @@ func (a *Agent) ReceiveResponse(ctx context.Context, messageID string) (string, 
 
 // Run executes the agent with the given prompt and returns the result.
 func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
+	invocationScope := InvocationScopeFromContext(ctx)
 	a.stateMu.Lock()
 	a.status = AgentStatusRunning
 	a.startTime = time.Now()
 	a.runCtx = ctx
+	// Scope is per RUN, not per persisted Agent ID. Resume reuses the logical
+	// ID but belongs to the invocation whose context acquired the run lease.
+	// Runner paths enter Run only after that lease is held.
+	a.invocationScope = invocationScope
 	// Agent instances can be resumed and Run again. These counters describe
 	// this invocation, not the lifetime of the reusable Agent object.
 	a.usageInputTokens = 0
@@ -1310,6 +1433,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.usageCacheReadTokens = 0
 	a.usageEstimatedCost = 0
 	a.usageCostTracked = false
+	a.runPolicyBlock = nil
 	hasHistory := len(a.history) > 0
 	if a.originalPrompt == "" {
 		a.originalPrompt = prompt // Preserve for continuation after compaction
@@ -1324,11 +1448,12 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	defer outputWriter.Close()
 
 	result := &AgentResult{
-		AgentID:   a.ID,
-		Type:      a.Type,
-		Model:     a.Model,
-		Status:    AgentStatusRunning,
-		Completed: false,
+		AgentID:         a.ID,
+		Type:            a.Type,
+		Model:           a.Model,
+		Status:          AgentStatusRunning,
+		Completed:       false,
+		InvocationScope: invocationScope,
 	}
 
 	if !hasHistory {
@@ -1347,6 +1472,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	// Execute the prompt through the function calling loop
 	var finalOutput strings.Builder
 	_, output, err := a.executeLoop(ctx, prompt, &finalOutput)
+	result.PolicyBlock = a.policyBlockSnapshot()
 	// Snapshot identity AFTER executeLoop: FallbackClient can switch provider
 	// (and model) while serving the request. Capturing this before the first
 	// request attributes the whole run to the failed primary provider.
@@ -1356,8 +1482,14 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	outputWriter.WriteString(output)
 
 	if err != nil {
+		terminalStatus := AgentStatusFailed
+		progress := "Failed: " + err.Error()
+		if errors.Is(err, context.Canceled) {
+			terminalStatus = AgentStatusCancelled
+			progress = "Cancelled"
+		}
 		a.stateMu.Lock()
-		a.status = AgentStatusFailed
+		a.status = terminalStatus
 		a.endTime = time.Now()
 		endTime := a.endTime
 		startTime := a.startTime
@@ -1373,7 +1505,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		// Clear callHistory to prevent memory leak
 		a.clearCallHistory()
 
-		result.Status = AgentStatusFailed
+		result.Status = terminalStatus
 		result.Error = err.Error()
 		result.Output = outputWriter.String() // Use writer's in-memory portion
 		result.OutputFile = outputWriter.FilePath()
@@ -1381,7 +1513,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		result.Completed = true
 
 		// Update progress with failure
-		a.SetProgress(a.currentStep, a.totalSteps, "Failed: "+err.Error())
+		a.SetProgress(a.currentStep, a.totalSteps, progress)
 
 		a.collectTreeMetrics(result)
 		return result, err
@@ -3980,6 +4112,7 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("summarization failed: %w", err)
 	}
+	invokedSkills := a.invokedSkillSnapshot()
 
 	// 4. Reconstruct under write lock, preserving messages added since snapshot.
 	// We snapshot a copy of the new history while holding the lock so we can
@@ -4013,6 +4146,11 @@ func (a *Agent) checkAndSummarize(ctx context.Context) error {
 		// this; the PRE-EMPTIVE path (the one sub-agents and /loop hit most) was
 		// missing it. Allocation-free when there are no orphans.
 		newHistory = ensureToolPairConsistency(newHistory)
+		// Active skills are standing instructions, not disposable tool output.
+		// Reattach one bounded ordinary-user carry block immediately after the
+		// summary. ReattachInvocations suppresses the block when the latest raw
+		// successful skill response is already among the retained messages.
+		newHistory = skills.ReattachInvocations(newHistory, invokedSkills, preserveStart+1)
 
 		a.history = newHistory
 
@@ -4100,6 +4238,7 @@ func (a *Agent) forceCompactViaSummary(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	invokedSkills := a.invokedSkillSnapshot()
 
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
@@ -4113,6 +4252,7 @@ func (a *Agent) forceCompactViaSummary(ctx context.Context) error {
 	newHistory = append(newHistory, summary)
 	newHistory = append(newHistory, a.history[len(a.history)-preserveEnd:]...)
 	newHistory = ensureToolPairConsistency(newHistory)
+	newHistory = skills.ReattachInvocations(newHistory, invokedSkills, preserveStart+1)
 	a.history = newHistory
 	a.injectContinuationHint()
 
@@ -4124,6 +4264,7 @@ func (a *Agent) forceCompactViaSummary(ctx context.Context) error {
 // forceCompactViaTruncation is the fallback when summarization fails.
 // Uses importance scoring to preserve the most valuable messages from the middle.
 func (a *Agent) forceCompactViaTruncation() error {
+	invokedSkills := a.invokedSkillSnapshot()
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 
@@ -4198,6 +4339,7 @@ func (a *Agent) forceCompactViaTruncation() error {
 
 	newHistory = append(newHistory, a.history[len(a.history)-keepEnd:]...)
 	newHistory = ensureToolPairConsistency(newHistory)
+	newHistory = skills.ReattachInvocations(newHistory, invokedSkills, keepStart+1)
 	a.history = newHistory
 	a.injectContinuationHint()
 
@@ -4368,6 +4510,13 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 			}
 			if len(contentStr) <= a.pruneMinOutputSize {
 				continue // Already small, skip
+			}
+			// Preserve only successful, bounded rendered workflows. Oversized custom
+			// tools named "skill" remain normal prune candidates.
+			if part.FunctionResponse.Name == "skill" && len(contentStr) <= skills.MaxRenderedSkillBytes {
+				if success, _ := part.FunctionResponse.Response["success"].(bool); success {
+					continue
+				}
 			}
 			candidates = append(candidates, truncCandidate{
 				msgIdx:  i,
@@ -4556,15 +4705,37 @@ func (a *Agent) withCompactionTimeout(parent context.Context) (context.Context, 
 
 // getModelResponse gets a response from the model.
 func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) {
-	// Read history under lock for thread safety
-	a.stateMu.RLock()
+	// Refresh active skill carry-forward before an ordinary text round. Insert
+	// before the current user message so the user's instruction remains the
+	// actual message passed to SendMessageWithHistory. Never do this for a
+	// pending FunctionResponse turn: inserting any message between a tool call
+	// and its response can violate strict provider tool-pair protocols.
+	invokedSkills := a.invokedSkillSnapshot()
+	a.stateMu.Lock()
 	historyLen := len(a.history)
 	if historyLen == 0 {
-		a.stateMu.RUnlock()
+		a.stateMu.Unlock()
 		return nil, fmt.Errorf("empty history")
 	}
 	lastContent := a.history[historyLen-1]
-	a.stateMu.RUnlock()
+	if lastContent == nil {
+		a.stateMu.Unlock()
+		return nil, fmt.Errorf("history ends with nil content")
+	}
+	if len(invokedSkills) > 0 && lastContent != nil && lastContent.Role == genai.RoleUser &&
+		!contentHasFunctionResponse(lastContent) {
+		// Refresh only the prefix, then append the saved current user message.
+		// This keeps insertAt relative to exactly the slice from which old carry
+		// messages are removed and guarantees the actual prompt remains last.
+		prefix := skills.ReattachInvocations(a.history[:historyLen-1], invokedSkills, historyLen-1)
+		refreshed := make([]*genai.Content, 0, len(prefix)+1)
+		refreshed = append(refreshed, prefix...)
+		refreshed = append(refreshed, lastContent)
+		a.history = refreshed
+		historyLen = len(a.history)
+		lastContent = a.history[historyLen-1]
+	}
+	a.stateMu.Unlock()
 
 	// Check if the last content contains function responses (tool results).
 	// If so, use SendFunctionResponse instead of SendMessageWithHistory
@@ -4822,6 +4993,9 @@ type toolCallResult struct {
 func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.FunctionCall) toolCallResult {
 	toolStart := time.Now()
 	result := a.executeTool(ctx, call)
+	if result.PolicyBlock != nil {
+		a.recordPolicyBlock(result.PolicyBlock)
+	}
 	elapsed := time.Since(toolStart)
 	a.recordToolExecution(call.Name, call.Args, result)
 
@@ -4838,7 +5012,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	var reflection *Reflection
 
 	// Apply self-reflection on errors to provide recovery suggestions
-	if !result.Success && a.reflector != nil {
+	if !result.Success && result.PolicyBlock == nil && a.reflector != nil {
 		// --- Fix Cache: fast path ---
 		// Try session-local cache before full Reflect pipeline
 		category := a.reflector.QuickCategorize(result.Content)
@@ -4943,7 +5117,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	}
 
 	// Check for autonomous delegation opportunity
-	if !result.Success && a.delegation != nil && a.delegation.HasMessenger() {
+	if !result.Success && result.PolicyBlock == nil && a.delegation != nil && a.delegation.HasMessenger() {
 		delCtx := &DelegationContext{
 			AgentType:       a.Type,
 			CurrentTurn:     a.GetTurnCount(),
@@ -4989,7 +5163,9 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 
 	// Compact result if it's too large before converting to map
 	if a.compactor != nil {
+		policyBlock := result.PolicyBlock
 		result = a.compactor.CompactForType(call.Name, result)
+		result.PolicyBlock = policyBlock
 	}
 
 	return toolCallResult{
@@ -5017,17 +5193,38 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	}
 
 	// Check permissions before executing
+	// Capture hidden runtime state even when this agent has no interactive
+	// permission manager. Hooks and UI policy toggles may run before execution;
+	// Bash must still execute only under the exact scope observed here.
+	authorizedPermissionArgs := tools.PermissionArgsForTool(tool, call.Args)
 	if a.permissions != nil {
-		resp, err := a.permissions.Check(ctx, call.Name, call.Args)
+		resp, err := a.permissions.Check(ctx, call.Name, tools.ClonePermissionArgs(authorizedPermissionArgs))
 		if err != nil {
-			return tools.NewErrorResult(fmt.Sprintf("permission error: %s", err))
+			return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, fmt.Sprintf("permission error: %s", err))
 		}
 		if !resp.Allowed {
 			reason := resp.Reason
 			if reason == "" {
 				reason = "permission denied"
 			}
-			return tools.NewErrorResult(fmt.Sprintf("Permission denied: %s", reason))
+			return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, fmt.Sprintf("Permission denied: %s", reason))
+		}
+	}
+
+	a.stateMu.RLock()
+	hookManager := a.hooks
+	workDir := a.workDir
+	a.stateMu.RUnlock()
+	if hookManager != nil {
+		preResults := hookManager.RunPreToolInDir(ctx, workDir, call.Name, call.Args)
+		if blocked, ok := hooks.Blocked(preResults); ok {
+			name := blocked.Hook.DisplayName()
+			reason := strings.TrimSpace(blocked.Output)
+			if reason == "" && blocked.Error != nil {
+				reason = blocked.Error.Error()
+			}
+			return tools.NewPolicyBlockedResult(tools.PolicyBlockHook, fmt.Sprintf(
+				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
 		}
 	}
 
@@ -5050,13 +5247,53 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	// No tool-level retry: API retries are handled by the client layer
 	// (rate-limit retry, message processor retry, failover). Adding retries
 	// here compounds with those layers and wastes tokens.
-	result, err := tool.Execute(ctx, call.Args)
+	result, err := tools.ExecuteWithPermissionScope(ctx, tool, call.Args, authorizedPermissionArgs)
 	if err != nil {
-		out = tools.NewErrorResult(err.Error())
+		if strings.HasPrefix(err.Error(), "Permission scope changed before execution:") {
+			out = tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, err.Error())
+		} else {
+			out = tools.NewErrorResult(err.Error())
+		}
+		if hookManager != nil {
+			hookManager.RunOnErrorInDir(ctx, workDir, call.Name, call.Args, out.Error)
+		}
 		return
 	}
 	out = result
+	if !out.Success && out.PolicyBlock == nil &&
+		strings.HasPrefix(out.Error, "Permission scope changed before execution:") {
+		out = tools.WithPolicyBlock(out, tools.PolicyBlockPermission, out.Error)
+	}
+	if hookManager != nil {
+		if out.Success {
+			hookManager.RunPostToolInDir(ctx, workDir, call.Name, call.Args, out.Content)
+		} else {
+			hookManager.RunOnErrorInDir(ctx, workDir, call.Name, call.Args, out.Error)
+		}
+	}
 	return
+}
+
+func (a *Agent) recordPolicyBlock(block *tools.PolicyBlock) {
+	if block == nil {
+		return
+	}
+	a.stateMu.Lock()
+	if a.runPolicyBlock == nil {
+		copy := *block
+		a.runPolicyBlock = &copy
+	}
+	a.stateMu.Unlock()
+}
+
+func (a *Agent) policyBlockSnapshot() *tools.PolicyBlock {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	if a.runPolicyBlock == nil {
+		return nil
+	}
+	copy := *a.runPolicyBlock
+	return &copy
 }
 
 // buildResponseParts creates Parts from a response.
@@ -5180,21 +5417,46 @@ func (a *Agent) GetTaskPreview(maxRunes int) string {
 // Cancel cancels the agent's execution.
 func (a *Agent) Cancel() {
 	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
-	if a.status == AgentStatusRunning {
-		a.status = AgentStatusCancelled
-		a.endTime = time.Now()
-		if a.cancelFunc != nil {
-			a.cancelFunc()
-		}
+	if a.status != AgentStatusPending && a.status != AgentStatusRunning {
+		a.stateMu.Unlock()
+		return
+	}
+	cancel := a.cancelFunc
+	if cancel == nil {
+		// Async spawn registers the agent before its goroutine installs the
+		// cancellable run context. Remember a cancellation in that narrow window
+		// so task_stop cannot report success while letting the run start anyway.
+		a.cancelRequested = true
+	}
+	a.stateMu.Unlock()
+
+	// Do not publish a terminal status here. Agent.Run owns status/endTime and
+	// Runner publishes Completed only after all finalization has finished.
+	if cancel != nil {
+		cancel()
 	}
 }
 
 // SetCancelFunc sets the cancel function for explicit agent cancellation.
 func (a *Agent) SetCancelFunc(cancel context.CancelFunc) {
 	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
 	a.cancelFunc = cancel
+	requested := a.cancelRequested
+	a.cancelRequested = false
+	a.stateMu.Unlock()
+
+	if requested && cancel != nil {
+		cancel()
+	}
+}
+
+// SetHooks installs the trusted tool-hook policy for this agent. The manager
+// is shared and concurrency-safe; each invocation supplies the agent's own
+// effective workDir so isolated workspaces do not run hooks in the foreground.
+func (a *Agent) SetHooks(manager *hooks.Manager) {
+	a.stateMu.Lock()
+	a.hooks = manager
+	a.stateMu.Unlock()
 }
 
 // RunContext returns the live run context set at the top of the

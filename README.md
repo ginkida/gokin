@@ -344,6 +344,12 @@ plan:
   enabled: true
   require_approval: true
 
+memory:
+  enabled: true
+  max_entries: 1000
+  auto_inject: true
+  allow_global: false              # opt in to user-wide cross-project memory
+
 mcp:
   enabled: false                  # enable MCP server support
   servers: {}                     # server configs (stdio/http)

@@ -151,7 +151,7 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 	}
 
 	if !t.manager.IsEnabled() {
-		return NewErrorResult("plan mode is disabled in configuration"), nil
+		return NewPolicyBlockedResult(PolicyBlockPlan, "plan mode is disabled in configuration"), nil
 	}
 
 	// Check if we're currently executing an approved plan (nested plans not allowed)
@@ -212,23 +212,21 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 	// Request approval
 	decision, err := t.manager.RequestApproval(ctx)
 	if err != nil {
-		t.manager.ClearPlan()
+		t.manager.ClearPlanIfCurrent(p)
 		msg := err.Error()
 		if strings.Contains(strings.ToLower(msg), "plan lint failed") {
 			return NewErrorResult(fmt.Sprintf("plan validation failed before approval:\n%s", msg)), nil
 		}
-		return NewErrorResult(fmt.Sprintf("approval request failed: %s", err)), nil
+		return NewPolicyBlockedResult(PolicyBlockPlan, fmt.Sprintf("approval request failed: %s", err)), nil
 	}
 
 	// Handle decision
 	switch decision {
 	case plan.ApprovalApproved:
-		if err := t.manager.TransitionCurrentPlanLifecycle(plan.LifecycleApproved); err != nil {
-			t.manager.ClearPlan()
-			return NewErrorResult(fmt.Sprintf("failed to apply plan approval transition: %s", err)), nil
+		if err := t.manager.ApprovePlanAndRequestContextClearIfCurrent(p); err != nil {
+			t.manager.ClearPlanIfCurrent(p)
+			return NewErrorResult(fmt.Sprintf("failed to commit plan approval: %s", err)), nil
 		}
-		// Signal context clear for focused plan execution
-		t.manager.RequestContextClear(p)
 		return NewSuccessResultWithData(
 			fmt.Sprintf("Plan approved: %s\nContext will be cleared for focused execution of %d steps.",
 				p.Title, p.StepCount()),
@@ -242,32 +240,43 @@ func (t *EnterPlanModeTool) Execute(ctx context.Context, args map[string]any) (T
 		), nil
 
 	case plan.ApprovalRejected:
-		_ = t.manager.TransitionCurrentPlanLifecycle(plan.LifecycleCancelled)
-		t.manager.ClearPlan()
-		return NewSuccessResultWithData(
+		if err := t.manager.TransitionPlanLifecycleIfCurrent(p, plan.LifecycleCancelled); err != nil {
+			return NewErrorResult(fmt.Sprintf("stale plan rejection discarded: %s", err)), nil
+		}
+		t.manager.ClearPlanIfCurrent(p)
+		result := NewSuccessResultWithData(
 			"Plan rejected by user. Please ask for clarification or propose a different approach.",
 			map[string]any{
 				"approved": false,
 				"decision": "rejected",
 			},
-		), nil
+		)
+		return WithPolicyBlock(result, PolicyBlockPlan, "plan rejected by user"), nil
 
 	case plan.ApprovalModified:
 		// User requested modifications
-		_ = t.manager.TransitionCurrentPlanLifecycle(plan.LifecycleCancelled)
-		t.manager.ClearPlan()
-		return NewSuccessResultWithData(
-			"User requested modifications to the plan. Please revise and resubmit.",
+		feedback := t.manager.ConsumeApprovalFeedback(p)
+		if err := t.manager.TransitionPlanLifecycleIfCurrent(p, plan.LifecycleCancelled); err != nil {
+			return NewErrorResult(fmt.Sprintf("stale plan modification discarded: %s", err)), nil
+		}
+		t.manager.ClearPlanIfCurrent(p)
+		message := "User requested modifications to the plan. Please revise and resubmit."
+		if feedback != "" {
+			message = fmt.Sprintf("User requested modifications to the plan:\n\n%s\n\nRevise the plan accordingly and resubmit it for approval.", feedback)
+		}
+		result := NewSuccessResultWithData(
+			message,
 			map[string]any{
 				"approved": false,
 				"decision": "modification_requested",
 			},
-		), nil
+		)
+		return WithPolicyBlock(result, PolicyBlockPlan, "user requested modifications to the plan"), nil
 
 	default:
-		_ = t.manager.TransitionCurrentPlanLifecycle(plan.LifecycleCancelled)
-		t.manager.ClearPlan()
-		return NewErrorResult("unknown approval decision"), nil
+		_ = t.manager.TransitionPlanLifecycleIfCurrent(p, plan.LifecycleCancelled)
+		t.manager.ClearPlanIfCurrent(p)
+		return NewPolicyBlockedResult(PolicyBlockPlan, "unknown approval decision"), nil
 	}
 }
 

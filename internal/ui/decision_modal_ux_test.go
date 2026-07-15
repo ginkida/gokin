@@ -50,6 +50,30 @@ func TestQuestionPromptKeepsSelectedAnswerAndFooterVisible(t *testing.T) {
 	}
 }
 
+func TestQuestionPromptMiddlePageFitsTerminalHeightWithoutCropping(t *testing.T) {
+	for _, height := range []int{12, 14, 18, 22} {
+		m := NewModel()
+		m.width = 72
+		m.height = height
+		m.questionSelectedOption = 7
+		m.questionRequest = &QuestionRequestMsg{Question: strings.Repeat("Which deployment strategy should be used? ", 8)}
+		for i := range 14 {
+			m.questionRequest.Options = append(m.questionRequest.Options, fmt.Sprintf("Option %02d", i+1))
+		}
+
+		view := m.renderQuestionPrompt()
+		if got := lipgloss.Height(view); got > height {
+			t.Fatalf("height=%d question modal rendered %d rows:\n%s", height, got, stripAnsi(view))
+		}
+		plain := stripAnsi(view)
+		for _, want := range []string{"> 8. Option 08", "Esc Cancel", "Enter Confirm", "PgUp/PgDn Page"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("height=%d question modal missing %q:\n%s", height, want, plain)
+			}
+		}
+	}
+}
+
 func TestQuestionNavigationSupportsPagingAndBounds(t *testing.T) {
 	m := NewModel()
 	m.height = 13
@@ -60,7 +84,7 @@ func TestQuestionNavigationSupportsPagingAndBounds(t *testing.T) {
 	}
 
 	_ = m.handleQuestionPromptKeys(tea.KeyMsg{Type: tea.KeyPgDown})
-	if m.questionSelectedOption != questionOptionVisibleCount(m.height, 21) {
+	if m.questionSelectedOption != 6 {
 		t.Fatalf("page down selected=%d", m.questionSelectedOption)
 	}
 	_ = m.handleQuestionPromptKeys(tea.KeyMsg{Type: tea.KeyEnd})
@@ -70,6 +94,32 @@ func TestQuestionNavigationSupportsPagingAndBounds(t *testing.T) {
 	_ = m.handleQuestionPromptKeys(tea.KeyMsg{Type: tea.KeyPgDown})
 	if m.questionSelectedOption != 20 {
 		t.Fatalf("selection escaped bounds: %d", m.questionSelectedOption)
+	}
+	assertShortcutHints(t, m,
+		[]string{"↑↓ Navigate", "PgUp/PgDn Page", "Enter Confirm", "esc Cancel"},
+		nil,
+	)
+}
+
+func TestQuestionSingleAnswerKeepsCustomAnswerNavigationDiscoverable(t *testing.T) {
+	m := NewModel()
+	m.width, m.height = 90, 24
+	m.state = StateQuestionPrompt
+	m.questionRequest = &QuestionRequestMsg{Question: "Use the recommended strategy?", Options: []string{"Yes"}}
+
+	view := stripAnsi(m.renderQuestionPrompt())
+	if !strings.Contains(view, "↑/↓ Navigate") || !strings.Contains(view, "Other (custom answer)") {
+		t.Fatalf("single answer hid navigation to custom input:\n%s", view)
+	}
+	assertShortcutHints(t, m,
+		[]string{"↑↓ Navigate", "Enter Confirm", "esc Cancel"},
+		[]string{"PgUp/PgDn Page"},
+	)
+
+	_ = m.handleQuestionPromptKeys(tea.KeyMsg{Type: tea.KeyDown})
+	_ = m.handleQuestionPromptKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.questionCustomInput {
+		t.Fatal("advertised navigation did not reach the custom-answer editor")
 	}
 }
 
@@ -101,16 +151,73 @@ func TestPlanApprovalPagesStepsWithoutMovingDecision(t *testing.T) {
 	}
 
 	first := stripAnsi(m.renderPlanApproval())
-	if !strings.Contains(first, "Step 1: Step title 01") || !strings.Contains(first, "↓ 11 more step(s)") {
+	if !strings.Contains(first, "Step 1: Step title 01") || !strings.Contains(first, "↓") || !strings.Contains(first, "more step(s)") {
 		t.Fatalf("initial plan page is not honest:\n%s", first)
 	}
+	assertShortcutHints(t, m,
+		[]string{"PgUp/PgDn Steps", "↑↓ Navigate"},
+		nil,
+	)
 	_ = m.handlePlanApprovalKeys(tea.KeyMsg{Type: tea.KeyPgDown})
-	if m.planStepScroll != 1 || m.planSelectedOption != int(PlanRejected) {
+	if m.planStepScroll != 3 || m.planSelectedOption != int(PlanRejected) {
 		t.Fatalf("step paging changed decision or wrong scroll: scroll=%d decision=%d", m.planStepScroll, m.planSelectedOption)
 	}
 	second := stripAnsi(m.renderPlanApproval())
-	if !strings.Contains(second, "Step 2: Step title 02") || !strings.Contains(second, "↑ 1 earlier step(s)") {
+	if !strings.Contains(second, "Step 4: Step title 04") || !strings.Contains(second, "↑ 3 earlier step(s)") {
 		t.Fatalf("next plan page missing navigation context:\n%s", second)
+	}
+}
+
+func TestPlanApprovalMiddlePageFitsTerminalHeightWithoutCropping(t *testing.T) {
+	for _, height := range []int{12, 14, 18, 22} {
+		m := NewModel()
+		m.width = 72
+		m.height = height
+		m.planSelectedOption = int(PlanRejected)
+		m.planStepScroll = 5
+		m.planRequest = &PlanApprovalRequestMsg{
+			Title:        "Ship the reliability improvements",
+			Description:  strings.Repeat("Preserve user work while updating every affected flow. ", 6),
+			ContractName: "Safe delivery",
+			Intent:       "No silent data loss",
+			Boundaries:   []string{"no destructive fallback"},
+			Invariants:   []string{"footer remains reachable"},
+			Examples:     []string{"rollback"},
+		}
+		for i := range 14 {
+			m.planRequest.Steps = append(m.planRequest.Steps, PlanStepInfo{ID: i + 1, Title: fmt.Sprintf("Step title %02d", i+1), Description: "Detailed verification work"})
+		}
+
+		view := m.renderPlanApproval()
+		if got := lipgloss.Height(view); got > height {
+			t.Fatalf("height=%d plan modal rendered %d rows:\n%s", height, got, stripAnsi(view))
+		}
+		plain := stripAnsi(view)
+		for _, want := range []string{"Step 6: Step title 06", "Esc Cancel", "Enter Confirm", "PgUp/PgDn Steps"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("height=%d plan modal missing %q:\n%s", height, want, plain)
+			}
+		}
+	}
+}
+
+func TestPlanApprovalResizeReanchorsObsoleteMiddlePage(t *testing.T) {
+	m := NewModel()
+	m.width = 72
+	m.height = 12
+	m.planStepScroll = 5
+	m.planRequest = &PlanApprovalRequestMsg{Title: "Resizable plan"}
+	for i := range 14 {
+		m.planRequest.Steps = append(m.planRequest.Steps, PlanStepInfo{ID: i + 1, Title: fmt.Sprintf("Step title %02d", i+1)})
+	}
+	if compact := stripAnsi(m.renderPlanApproval()); !strings.Contains(compact, "Step 6: Step title 06") {
+		t.Fatalf("compact setup did not render the requested middle page:\n%s", compact)
+	}
+
+	m.height = 40
+	view := stripAnsi(m.renderPlanApproval())
+	if !strings.Contains(view, "Step 1: Step title 01") || !strings.Contains(view, "Step 14: Step title 14") {
+		t.Fatalf("expanded modal retained an obsolete middle-page anchor:\n%s", view)
 	}
 }
 

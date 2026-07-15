@@ -29,20 +29,42 @@ func (c *ThemeCommand) GetMetadata() CommandMetadata {
 }
 
 func (c *ThemeCommand) Execute(_ context.Context, args []string, app AppInterface) (string, error) {
-	themeSetter, ok := app.(ThemeSetter)
-	current := string(ui.ThemeDark)
-	if ok {
-		if t := themeSetter.GetTheme(); t != "" {
-			current = t
-		}
-	}
+	current := activeThemeID(app)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Active theme: %s — %s", current, themeDescription(ui.ThemeType(current)))
+	fmt.Fprintf(&sb, "Active theme: %s — %s", current, themeDescription(current))
+	if configured := configuredThemeValue(app); configured != "" && configured != string(current) {
+		fmt.Fprintf(&sb, "\nConfigured ui.theme: %s (legacy/unsupported; not applied)", configured)
+	}
 	if len(args) > 0 {
-		sb.WriteString("\n\ngokin now ships a single unified theme. Arguments are ignored.")
+		sb.WriteString("\n\nNo setting changed: gokin currently ships one unified theme.")
 	}
 	return sb.String(), nil
+}
+
+func activeThemeID(app AppInterface) ui.ThemeType {
+	if setter, ok := app.(ThemeSetter); ok {
+		requested := ui.ThemeType(strings.ToLower(strings.TrimSpace(setter.GetTheme())))
+		for _, available := range ui.GetAvailableThemes() {
+			if requested == available.ID {
+				return requested
+			}
+		}
+	}
+	return ui.ThemeDark
+}
+
+func configuredThemeValue(app AppInterface) string {
+	if app == nil || app.GetConfig() == nil {
+		return ""
+	}
+	// Config is user-controlled text rendered into the terminal. Collapse
+	// controls/newlines and cap it so a stale value cannot forge output rows.
+	value := strings.Join(strings.Fields(app.GetConfig().UI.Theme), " ")
+	if len([]rune(value)) > 40 {
+		value = string([]rune(value)[:37]) + "..."
+	}
+	return strings.ToLower(value)
 }
 
 // themeDescription returns a short human-readable description for a theme ID.

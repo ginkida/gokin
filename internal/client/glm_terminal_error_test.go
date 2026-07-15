@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,14 +102,19 @@ func TestIsGLMTerminalCode_AndTheOverloadTrap(t *testing.T) {
 		t.Fatal("precondition: the raw 1308 body DOES match IsOverloadError via rate_limit — that is the trap the fix avoids by classifying at the source")
 	}
 
-	terminal := []string{"1211", "1212", "1213", "1214", "1215", "1308", "1309", "1310", "1311", "1313"}
+	terminal := []string{
+		"1000", "1001", "1003", "1005", "1113",
+		"1210", "1211", "1212", "1213", "1214", "1215", "1220", "1221", "1222",
+		"1301", "1308", "1309", "1310", "1311", "1313", "1314", "1315",
+		"1316", "1317", "1318", "1319", "1320", "1321",
+	}
 	for _, code := range terminal {
 		if !isGLMTerminalCode(code) {
 			t.Errorf("isGLMTerminalCode(%q) = false, want true", code)
 		}
 	}
 	// Retryable / transient / unknown codes must NOT be terminal.
-	for _, code := range []string{"1210", "1301", "1302", "1303", "1305", "1312", "9999", ""} {
+	for _, code := range []string{"-500", "1200", "1230", "1234", "1261", "1302", "1305", "1303", "1312", "9999", ""} {
 		if isGLMTerminalCode(code) {
 			t.Errorf("isGLMTerminalCode(%q) = true, want false (retryable/unknown must stay on the normal retry path)", code)
 		}
@@ -123,6 +129,18 @@ func TestParseProviderErrorBody_StandardShapeIsNotTerminal(t *testing.T) {
 	code, msg := parseProviderErrorBody([]byte(`{"error":{"code":"1308","message":"cap"}}`))
 	if code != "1308" || msg != "cap" {
 		t.Fatalf("parseProviderErrorBody(glm) = (%q,%q), want (1308,cap)", code, msg)
+	}
+	// Official docs are inconsistent across endpoints: Error Shapes uses a
+	// string, while the Chat Completion default error schema renders a number.
+	code, msg = parseProviderErrorBody([]byte(`{"error":{"code":1316,"message":"cap"}}`))
+	if code != "1316" || msg != "cap" {
+		t.Fatalf("parseProviderErrorBody(numeric code) = (%q,%q), want (1316,cap)", code, msg)
+	}
+	if code = providerErrorCodeFromMap(map[string]any{"code": json.Number("1234")}); code != "1234" {
+		t.Errorf("providerErrorCodeFromMap(json.Number) = %q, want 1234", code)
+	}
+	if code = providerErrorCodeFromMap(map[string]any{"code": 12.5}); code != "" {
+		t.Errorf("providerErrorCodeFromMap(non-integer) = %q, want empty", code)
 	}
 	// Standard Anthropic shape (deepseek) → no numeric code → not terminal.
 	code, _ = parseProviderErrorBody([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`))
@@ -140,12 +158,12 @@ func TestParseProviderErrorBody_StandardShapeIsNotTerminal(t *testing.T) {
 
 func TestTerminalProviderMessage_IncludesResetTime(t *testing.T) {
 	desc := "GLM quota/balance exhausted — top up your GLM plan or switch provider with /provider"
-	glmMsg := "[1308][Usage limit reached for 5 hour. Your limit will reset at 2026-07-03 19:43:33][20260703]"
+	glmMsg := "[1308][Usage limit reached for 5 hour. Your limit Resets at 2026-07-03 19:43:33][20260703]"
 	got := terminalProviderMessage(desc, glmMsg)
 	if !strings.Contains(got, "/provider") {
 		t.Errorf("message %q should keep the actionable description", got)
 	}
-	if !strings.Contains(got, "reset at 2026-07-03 19:43:33") {
+	if !strings.Contains(got, "Resets at 2026-07-03 19:43:33") {
 		t.Errorf("message %q should append the reset time", got)
 	}
 	// No reset clause → just the description, no trailing parens.

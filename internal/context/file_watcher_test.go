@@ -243,6 +243,70 @@ func TestFileWatcher_CheckChanges_DebounceStopsPreviousTimer(t *testing.T) {
 	// If debounce works, we don't get a panic from double-timer
 }
 
+func TestFileWatcher_DetectsDeletionAndRecreation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "watched.txt")
+	if err := os.WriteFile(path, []byte("v1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := make(chan string, 2)
+	fw, err := NewFileWatcher(context.Background(), path, 10, func(path string) {
+		changed <- path
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close()
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	fw.checkChanges()
+	select {
+	case got := <-changed:
+		if got != path {
+			t.Fatalf("deletion callback path=%q, want %q", got, path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("file deletion did not trigger the watcher")
+	}
+
+	if err := os.WriteFile(path, []byte("v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fw.checkChanges()
+	select {
+	case <-changed:
+	case <-time.After(time.Second):
+		t.Fatal("file recreation did not trigger the watcher")
+	}
+}
+
+func TestFileWatcher_CloseCancelsPendingDebounce(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "watched.txt")
+	if err := os.WriteFile(path, []byte("v1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var callbacks atomic.Int32
+	fw, err := NewFileWatcher(context.Background(), path, 100, func(string) {
+		callbacks.Add(1)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	fw.checkChanges() // schedules, but must not survive Close
+	fw.Close()
+	time.Sleep(150 * time.Millisecond)
+	if got := callbacks.Load(); got != 0 {
+		t.Fatalf("callback count after Close=%d, want 0", got)
+	}
+}
+
 // ========== WatchInstructionFiles ==========
 
 func TestWatchInstructionFiles(t *testing.T) {

@@ -1,7 +1,6 @@
 package security
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -46,6 +45,7 @@ type SandboxResult struct {
 // SandboxedCommand represents a command that will be executed in a sandbox
 type SandboxedCommand struct {
 	cmd    *exec.Cmd
+	ctx    context.Context
 	config SandboxConfig
 }
 
@@ -53,6 +53,10 @@ type SandboxedCommand struct {
 // Note: Full chroot and seccomp require Linux and specific permissions
 // This implementation provides basic isolation with safety checks
 func NewSandboxedCommand(ctx context.Context, workDir string, command string, config SandboxConfig) (*SandboxedCommand, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context cannot be nil")
+	}
+
 	// Validate workDir before doing anything
 	if workDir == "" {
 		return nil, fmt.Errorf("workDir cannot be empty")
@@ -69,8 +73,9 @@ func NewSandboxedCommand(ctx context.Context, workDir string, command string, co
 		return nil, fmt.Errorf("workDir does not exist: %s", absWorkDir)
 	}
 
-	// Create command with context
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	// Cancellation is owned explicitly by Run. exec.CommandContext kills only
+	// the bash leader, allowing descendants to survive after Wait returns.
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = absWorkDir
 
 	// Set safe environment variables (limited set)
@@ -78,8 +83,12 @@ func NewSandboxedCommand(ctx context.Context, workDir string, command string, co
 
 	sandboxed := &SandboxedCommand{
 		cmd:    cmd,
+		ctx:    ctx,
 		config: config,
 	}
+	// A process-tree handle is required even when namespace sandboxing is
+	// disabled (tests, unsupported hosts, or an explicitly disabled config).
+	configureSandboxProcessGroup(cmd)
 
 	// Apply sandboxing if enabled
 	if config.Enabled {
@@ -137,16 +146,10 @@ func safeEnvironment(workDir string) []string {
 
 // Run runs the sandboxed command and returns the result
 func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
-	result := &SandboxResult{}
-
-	// Set up timeout if specified
-	if timeout > 0 {
-		timer := time.AfterFunc(timeout, func() {
-			if sc.cmd.Process != nil {
-				sc.cmd.Process.Kill()
-			}
-		})
-		defer timer.Stop()
+	result := &SandboxResult{ExitCode: -1}
+	if err := sc.ctx.Err(); err != nil {
+		result.Error = err
+		return result
 	}
 
 	// Capture stdout and stderr
@@ -164,12 +167,17 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 
 	// Start the command
 	if err := sc.cmd.Start(); err != nil {
+		if ctxErr := sc.ctx.Err(); ctxErr != nil {
+			result.Error = ctxErr
+			return result
+		}
 		result.Error = fmt.Errorf("failed to start command: %w", err)
 		return result
 	}
 
-	// Read stdout and stderr concurrently to avoid goroutine leaks and
-	// cmd.Wait() hangs when one pipe times out while the other is still open.
+	// Read each pipe in exactly one goroutine. Cancellation is handled by
+	// terminating the process tree below, which closes both pipes; nested
+	// per-pipe timeout goroutines used to outlive Run.
 	type pipeResult struct {
 		data []byte
 		err  error
@@ -178,14 +186,48 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 	stderrCh := make(chan pipeResult, 1)
 
 	go func() {
-		data, err := readWithTimeout(stdout, timeout)
+		data, err := io.ReadAll(stdout)
 		stdoutCh <- pipeResult{data, err}
 	}()
 	go func() {
-		data, err := readWithTimeout(stderr, timeout)
+		data, err := io.ReadAll(stderr)
 		stderrCh <- pipeResult{data, err}
 	}()
 
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- sc.cmd.Wait() }()
+
+	var timeoutTimer *time.Timer
+	var timeoutCh <-chan time.Time
+	if timeout > 0 {
+		timeoutTimer = time.NewTimer(timeout)
+		timeoutCh = timeoutTimer.C
+		defer timeoutTimer.Stop()
+	}
+
+	var waitErr error
+	var lifecycleErr error
+	select {
+	case waitErr = <-waitCh:
+		// If completion raced with cancellation, still clean descendants that
+		// may have outlived the bash leader.
+		if err := sc.ctx.Err(); err != nil {
+			lifecycleErr = err
+			terminateSandboxProcessTree(sc.cmd)
+		}
+	case <-sc.ctx.Done():
+		lifecycleErr = sc.ctx.Err()
+		terminateSandboxProcessTree(sc.cmd)
+		waitErr = <-waitCh // Always reap the shell leader.
+	case <-timeoutCh:
+		lifecycleErr = fmt.Errorf("command timed out after %v", timeout)
+		terminateSandboxProcessTree(sc.cmd)
+		waitErr = <-waitCh // Always reap the shell leader.
+	}
+
+	// Wait for both readers after Wait/reap. On cancellation the process-tree
+	// termination above closes inherited pipes, so neither goroutine survives
+	// the Run call.
 	stdoutRes := <-stdoutCh
 	stderrRes := <-stderrCh
 	result.Stdout = stdoutRes.data
@@ -197,17 +239,21 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 		logging.Debug("failed to read sandbox stderr", "error", stderrRes.err)
 	}
 
-	// Wait for command to finish (safe now — both pipes are drained or timed out)
-	err = sc.cmd.Wait()
+	if lifecycleErr != nil {
+		result.Error = lifecycleErr
+		return result
+	}
 
 	// Get exit code
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+	if waitErr != nil {
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
 			result.Error = nil // Exit code is in result.ExitCode
 		} else {
-			result.Error = err
+			result.Error = waitErr
 		}
+	} else {
+		result.ExitCode = 0
 	}
 
 	return result
@@ -220,6 +266,9 @@ func readWithTimeout(pipe any, timeout time.Duration) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("pipe is not an io.Reader")
 	}
+	if timeout <= 0 {
+		return io.ReadAll(reader)
+	}
 
 	// Create a channel for the read result
 	type readResult struct {
@@ -227,10 +276,6 @@ func readWithTimeout(pipe any, timeout time.Duration) ([]byte, error) {
 		err  error
 	}
 	resultChan := make(chan readResult, 1)
-
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 
 	// Read in a goroutine
 	go func() {
@@ -240,17 +285,22 @@ func readWithTimeout(pipe any, timeout time.Duration) ([]byte, error) {
 				resultChan <- readResult{err: fmt.Errorf("panic in sandbox reader: %v", r)}
 			}
 		}()
-		var buf bytes.Buffer
-		_, err := io.Copy(&buf, reader)
-		resultChan <- readResult{data: buf.Bytes(), err: err}
+		data, err := io.ReadAll(reader)
+		resultChan <- readResult{data: data, err: err}
 	}()
 
 	// Wait for either completion or timeout
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
-	case <-ctx.Done():
-		// Timeout occurred - return what we have (empty)
-		// Note: We can't cancel the io.Copy, but the process will be killed
-		// by the parent, which will close the pipe and unblock the goroutine
+	case <-timer.C:
+		// Pipes are closable: close them so the read goroutine cannot outlive
+		// this helper. Generic non-closable readers retain the legacy timeout
+		// behavior, but SandboxedCommand.Run no longer uses this helper.
+		if closer, ok := reader.(io.Closer); ok {
+			_ = closer.Close()
+			<-resultChan
+		}
 		return nil, fmt.Errorf("read timeout after %v", timeout)
 	case result := <-resultChan:
 		return result.data, result.err

@@ -112,6 +112,71 @@ func mcpStatus(mgr *mcp.Manager, args []string) string {
 // Exposed for tests — stub the config-save path.
 var saveConfig = func(cfg *config.Config) error { return cfg.Save() }
 
+// mcpConfigSnapshotCommitter is implemented by the real App. GetConfig returns
+// an isolated candidate, while MCPAddCore/MCPRemoveCore intentionally avoid a
+// full provider rebuild; commit the candidate after those runtime operations.
+type mcpConfigSnapshotCommitter interface {
+	CommitMCPConfigSnapshot(cfg *config.Config)
+}
+
+// mcpConfigMutationLocker is optional so lightweight command test doubles do
+// not need transaction machinery. The real App implements it, serializing the
+// complete add/remove lifecycle while leaving list/status/refresh unaffected.
+type mcpConfigMutationLocker interface {
+	LockMCPConfigMutation()
+	UnlockMCPConfigMutation()
+}
+
+func lockMCPConfigMutation(app AppInterface) func() {
+	locker, ok := app.(mcpConfigMutationLocker)
+	if !ok {
+		return func() {}
+	}
+	locker.LockMCPConfigMutation()
+	return locker.UnlockMCPConfigMutation
+}
+
+func commitMCPConfigSnapshot(app AppInterface, cfg *config.Config) {
+	if committer, ok := app.(mcpConfigSnapshotCommitter); ok {
+		committer.CommitMCPConfigSnapshot(cfg)
+	}
+}
+
+// MCPAddForApp runs the shared MCP add engine against an isolated App config
+// candidate and commits only the MCP section when runtime state changed.
+func MCPAddForApp(ctx context.Context, mgr *mcp.Manager, app AppInterface, p MCPAddParams) (string, error) {
+	unlock := lockMCPConfigMutation(app)
+	defer unlock()
+
+	cfg := app.GetConfig()
+	beforeServers, beforeEnabled := 0, false
+	if cfg != nil {
+		beforeServers, beforeEnabled = len(cfg.MCP.Servers), cfg.MCP.Enabled
+	}
+	result, err := MCPAddCore(ctx, mgr, cfg, app.GetToolRegistry(), app.GetMainClient(), p)
+	if err == nil && cfg != nil && (len(cfg.MCP.Servers) != beforeServers || cfg.MCP.Enabled != beforeEnabled) {
+		commitMCPConfigSnapshot(app, cfg)
+	}
+	return result, err
+}
+
+// MCPRemoveForApp is the remove counterpart to MCPAddForApp.
+func MCPRemoveForApp(mgr *mcp.Manager, app AppInterface, name string) (string, error) {
+	unlock := lockMCPConfigMutation(app)
+	defer unlock()
+
+	cfg := app.GetConfig()
+	beforeServers := 0
+	if cfg != nil {
+		beforeServers = len(cfg.MCP.Servers)
+	}
+	result, err := MCPRemoveCore(mgr, cfg, app.GetToolRegistry(), app.GetMainClient(), name)
+	if err == nil && cfg != nil && len(cfg.MCP.Servers) != beforeServers {
+		commitMCPConfigSnapshot(app, cfg)
+	}
+	return result, err
+}
+
 // MCPAddParams is the structured input to MCPAddCore — same fields that
 // /mcp add parses from its positional args, in a form callable from the
 // model-facing mcp_admin tool too.
@@ -243,7 +308,7 @@ func mcpAdd(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []stri
 	default:
 		return fmt.Sprintf("Unknown transport %q. Use stdio or http.", args[1]), nil
 	}
-	return MCPAddCore(ctx, mgr, app.GetConfig(), app.GetToolRegistry(), app.GetMainClient(), p)
+	return MCPAddForApp(ctx, mgr, app, p)
 }
 
 // ─── remove ────────────────────────────────────────────────────────────────
@@ -313,7 +378,7 @@ func mcpRemove(mgr *mcp.Manager, app AppInterface, args []string) (string, error
 	if len(args) == 0 {
 		return "Usage: /mcp remove NAME", nil
 	}
-	return MCPRemoveCore(mgr, app.GetConfig(), app.GetToolRegistry(), app.GetMainClient(), args[0])
+	return MCPRemoveForApp(mgr, app, args[0])
 }
 
 // ─── refresh ───────────────────────────────────────────────────────────────

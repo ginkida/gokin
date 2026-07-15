@@ -1,6 +1,7 @@
 package undo
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -174,18 +175,39 @@ func (m *Manager) undoGroupLocked(groupID string) ([]*FileChange, error) {
 		return nil, fmt.Errorf("no changes found for group %s", groupID)
 	}
 
+	// Validate the entire group before the first destructive write. Checking
+	// each change only as it is reverted can leave a group temporarily (or, if
+	// rollback itself fails, permanently) half-undone when a later path was
+	// edited outside gokin. The virtual state also handles multiple changes to
+	// the same path: each successful simulated revert feeds the next older
+	// change without touching disk.
+	if err := preflightUndoChanges(grouped); err != nil {
+		return nil, fmt.Errorf("failed to undo group: %w", err)
+	}
+
 	// Revert all in reverse order (newest first)
 	var reverted []*FileChange
 	for _, change := range grouped {
 		if err := m.revertChange(change); err != nil {
-			// Rollback: re-apply already reverted changes
+			// Rollback is the redo half of the group transaction. Preflight the
+			// whole rollback order before its first write for the same reason the
+			// forward group undo is preflighted above.
 			rollbackFailed := false
+			rollback := make([]*FileChange, 0, len(reverted))
 			for j := len(reverted) - 1; j >= 0; j-- {
-				if rbErr := m.applyChange(reverted[j]); rbErr != nil {
-					logging.Error("undo group rollback failed",
-						"file", reverted[j].FilePath,
-						"error", rbErr)
-					rollbackFailed = true
+				rollback = append(rollback, reverted[j])
+			}
+			if rbErr := preflightRedoChanges(rollback); rbErr != nil {
+				logging.Error("undo group rollback preflight failed", "error", rbErr)
+				rollbackFailed = true
+			} else {
+				for _, rollbackChange := range rollback {
+					if rbErr := m.applyChange(rollbackChange); rbErr != nil {
+						logging.Error("undo group rollback failed",
+							"file", rollbackChange.FilePath,
+							"error", rbErr)
+						rollbackFailed = true
+					}
 				}
 			}
 			if rollbackFailed {
@@ -295,6 +317,15 @@ func (m *Manager) SetRedoStack(stack []FileChange) {
 
 // revertChange reverts a file change to its previous state.
 func (m *Manager) revertChange(change *FileChange) error {
+	if err := preflightUndoChanges([]*FileChange{change}); err != nil {
+		return err
+	}
+	return m.revertChangeUnchecked(change)
+}
+
+// revertChangeUnchecked performs the filesystem mutation after its caller has
+// established that the path still matches the state produced by the tool.
+func (m *Manager) revertChangeUnchecked(change *FileChange) error {
 	// Move is special: undo means rename back to original source path,
 	// not write OldContent (which holds the source path, not file bytes).
 	if change.Tool == "move" {
@@ -331,6 +362,16 @@ func permOrDefault(m os.FileMode) os.FileMode {
 
 // applyChange applies a file change (for redo).
 func (m *Manager) applyChange(change *FileChange) error {
+	if err := preflightRedoChanges([]*FileChange{change}); err != nil {
+		return err
+	}
+	return m.applyChangeUnchecked(change)
+}
+
+// applyChangeUnchecked performs the redo mutation after the expected pre-state
+// has been verified. Keeping validation at the Manager boundary prevents redo
+// from overwriting edits made after an undo.
+func (m *Manager) applyChangeUnchecked(change *FileChange) error {
 	switch change.Tool {
 	case "move":
 		return applyMove(change)
@@ -354,6 +395,232 @@ func (m *Manager) applyChange(change *FileChange) error {
 	}
 
 	return fileutil.AtomicWrite(change.FilePath, change.NewContent, permOrDefault(change.Mode))
+}
+
+type pathStateKind uint8
+
+const (
+	pathStateMissing pathStateKind = iota
+	pathStateFile
+	pathStateDirectory
+	pathStateOther
+)
+
+// pathState deliberately represents a missing path separately from a regular
+// file with zero bytes. bytes.Equal(nil, []byte{}) is true, but those two
+// filesystem states have very different undo semantics.
+type pathState struct {
+	kind    pathStateKind
+	content []byte
+}
+
+func missingPathState() pathState            { return pathState{kind: pathStateMissing} }
+func filePathState(content []byte) pathState { return pathState{kind: pathStateFile, content: content} }
+func directoryPathState() pathState          { return pathState{kind: pathStateDirectory} }
+func otherPathState() pathState              { return pathState{kind: pathStateOther} }
+func (s pathState) exists() bool             { return s.kind != pathStateMissing }
+func (s pathState) matches(other pathState) bool {
+	return s.kind == other.kind && (s.kind != pathStateFile || bytes.Equal(s.content, other.content))
+}
+
+func (s pathState) description() string {
+	switch s.kind {
+	case pathStateMissing:
+		return "missing path"
+	case pathStateFile:
+		return fmt.Sprintf("regular file (%d bytes)", len(s.content))
+	case pathStateDirectory:
+		return "directory"
+	default:
+		return "non-regular filesystem entry"
+	}
+}
+
+type pathStateView struct {
+	states map[string]pathState
+}
+
+func newPathStateView() *pathStateView {
+	return &pathStateView{states: make(map[string]pathState)}
+}
+
+func (v *pathStateView) get(path string) (pathState, error) {
+	if state, ok := v.states[path]; ok {
+		return state, nil
+	}
+	state, err := readPathState(path)
+	if err != nil {
+		return pathState{}, err
+	}
+	v.states[path] = state
+	return state, nil
+}
+
+func (v *pathStateView) set(path string, state pathState) {
+	v.states[path] = state
+}
+
+func readPathState(path string) (pathState, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return missingPathState(), nil
+		}
+		return pathState{}, err
+	}
+
+	switch {
+	case info.Mode().IsRegular():
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return pathState{}, err
+		}
+		return filePathState(content), nil
+	case info.IsDir():
+		return directoryPathState(), nil
+	default:
+		// Never follow or replace symlinks/devices/FIFOs as if they were the
+		// regular file recorded by an edit tool.
+		return otherPathState(), nil
+	}
+}
+
+func preflightUndoChanges(changes []*FileChange) error {
+	view := newPathStateView()
+	for _, change := range changes {
+		if err := simulateUndo(change, view); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func preflightRedoChanges(changes []*FileChange) error {
+	view := newPathStateView()
+	for _, change := range changes {
+		if err := simulateRedo(change, view); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func simulateUndo(change *FileChange, view *pathStateView) error {
+	switch change.Tool {
+	case "move":
+		source := string(change.OldContent)
+		if source == "" {
+			return fmt.Errorf("move undo: missing original source path")
+		}
+		if err := requirePathState(view, source, missingPathState(), "undo"); err != nil {
+			return err
+		}
+		destination, err := requirePresentPath(view, change.FilePath, "undo")
+		if err != nil {
+			return err
+		}
+		view.set(source, destination)
+		view.set(change.FilePath, missingPathState())
+		return nil
+
+	case "delete", "batch_delete":
+		if err := requirePathState(view, change.FilePath, missingPathState(), "undo"); err != nil {
+			return err
+		}
+		view.set(change.FilePath, filePathState(change.OldContent))
+		return nil
+
+	case "mkdir":
+		if err := requirePathState(view, change.FilePath, directoryPathState(), "undo"); err != nil {
+			return err
+		}
+		view.set(change.FilePath, missingPathState())
+		return nil
+
+	default:
+		if err := requirePathState(view, change.FilePath, filePathState(change.NewContent), "undo"); err != nil {
+			return err
+		}
+		if change.WasNew {
+			view.set(change.FilePath, missingPathState())
+		} else {
+			view.set(change.FilePath, filePathState(change.OldContent))
+		}
+		return nil
+	}
+}
+
+func simulateRedo(change *FileChange, view *pathStateView) error {
+	switch change.Tool {
+	case "move":
+		source := string(change.OldContent)
+		if source == "" {
+			return fmt.Errorf("move redo: missing original source path")
+		}
+		sourceState, err := requirePresentPath(view, source, "redo")
+		if err != nil {
+			return err
+		}
+		if err := requirePathState(view, change.FilePath, missingPathState(), "redo"); err != nil {
+			return err
+		}
+		view.set(source, missingPathState())
+		view.set(change.FilePath, sourceState)
+		return nil
+
+	case "delete", "batch_delete":
+		if err := requirePathState(view, change.FilePath, filePathState(change.OldContent), "redo"); err != nil {
+			return err
+		}
+		view.set(change.FilePath, missingPathState())
+		return nil
+
+	case "mkdir":
+		if err := requirePathState(view, change.FilePath, missingPathState(), "redo"); err != nil {
+			return err
+		}
+		view.set(change.FilePath, directoryPathState())
+		return nil
+
+	default:
+		expected := filePathState(change.OldContent)
+		if change.WasNew {
+			expected = missingPathState()
+		}
+		if err := requirePathState(view, change.FilePath, expected, "redo"); err != nil {
+			return err
+		}
+		view.set(change.FilePath, filePathState(change.NewContent))
+		return nil
+	}
+}
+
+func requirePathState(view *pathStateView, path string, expected pathState, operation string) error {
+	actual, err := view.get(path)
+	if err != nil {
+		return fmt.Errorf("%s: inspect %s: %w", operation, path, err)
+	}
+	if !actual.matches(expected) {
+		return fmt.Errorf(
+			"%s conflict for %s: working tree changed (expected %s, found %s)",
+			operation, path, expected.description(), actual.description(),
+		)
+	}
+	return nil
+}
+
+func requirePresentPath(view *pathStateView, path string, operation string) (pathState, error) {
+	actual, err := view.get(path)
+	if err != nil {
+		return pathState{}, fmt.Errorf("%s: inspect %s: %w", operation, path, err)
+	}
+	if !actual.exists() {
+		return pathState{}, fmt.Errorf(
+			"%s conflict for %s: working tree changed (expected existing path, found %s)",
+			operation, path, actual.description(),
+		)
+	}
+	return actual, nil
 }
 
 // revertMove reverses a move by renaming change.FilePath (current dest)

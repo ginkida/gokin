@@ -23,10 +23,12 @@ type OpenKeyEntryMsg struct {
 // secret back through the UI event loop. Warning means the key is active for
 // this session but persistence or another non-fatal step needs attention.
 type KeyEntryResultMsg struct {
-	Provider string
-	Success  bool
-	Warning  bool
-	Message  string
+	RequestID string
+	Provider  string
+	Success   bool
+	Warning   bool
+	Message   string
+	Output    string // Safe command output; appended only after ownership passes.
 }
 
 // SetKeyEntrySubmitCallback wires the app handler invoked when the user submits
@@ -34,6 +36,12 @@ type KeyEntryResultMsg struct {
 // applies it (re-invoking /login) — the key is never echoed to the model.
 func (m *Model) SetKeyEntrySubmitCallback(cb func(provider, key string)) {
 	m.onKeyEntrySubmit = cb
+}
+
+// SetKeyEntrySubmitCallbackWithID correlates a result with one exact masked-key
+// submission. Provider names can repeat after a failed retry and are not IDs.
+func (m *Model) SetKeyEntrySubmitCallbackWithID(cb func(requestID, provider, key string)) {
+	m.onKeyEntrySubmitWithID = cb
 }
 
 // openKeyEntry enters the masked key-entry modal.
@@ -44,6 +52,7 @@ func (m *Model) openKeyEntry(msg OpenKeyEntryMsg) tea.Cmd {
 		}
 		return nil
 	}
+	m.keyEntryReturnState = overlayReturnState(m.state)
 	ti := textinput.New()
 	ti.EchoMode = textinput.EchoPassword // mask the secret as it's typed
 	ti.EchoCharacter = '•'
@@ -76,16 +85,19 @@ func (m *Model) openKeyEntry(msg OpenKeyEntryMsg) tea.Cmd {
 func (m *Model) handleKeyEntryKeys(msg tea.KeyMsg) tea.Cmd {
 	if !m.keyEntryAvailable() {
 		if msg.Type == tea.KeyEsc {
-			m.closeKeyEntry()
+			cmd := m.closeKeyEntry()
 			if m.toastManager != nil {
 				m.toastManager.ShowInfo("Login closed")
 			}
-			return m.input.Focus()
+			return cmd
 		}
 		return nil
 	}
 	switch msg.Type {
 	case tea.KeyEnter:
+		if !m.keyEntryPrimaryActionReadable() {
+			return nil
+		}
 		key := normalizeEnteredAPIKey(m.keyEntryInput.Value())
 		if key == "" {
 			m.keyEntryError = "API key cannot be empty"
@@ -101,21 +113,31 @@ func (m *Model) handleKeyEntryKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 		provider := m.keyEntryProvider
 		displayName := m.keyEntryDisplayName
+		requestID := ""
+		if m.onKeyEntrySubmitWithID != nil {
+			requestID = m.nextUIRequestID("login", &m.keyEntryRequestSeq)
+		}
 		m.keyEntryPendingProvider = provider
+		m.keyEntryPendingID = requestID
 		m.keyEntryPendingDisplayName = displayName
 		m.keyEntryPendingSetupURL = m.keyEntrySetupURL
-		m.closeKeyEntry()
+		cmd := m.closeKeyEntry()
+		m.armModalEnterGuard()
 		if m.toastManager != nil {
 			m.toastManager.ShowTagged("login-"+provider, ToastInfo, "Saving "+displayName+" API key…", 15*time.Second)
 		}
-		m.onKeyEntrySubmit(provider, key)
-		return m.input.Focus()
+		if m.onKeyEntrySubmitWithID != nil {
+			m.onKeyEntrySubmitWithID(requestID, provider, key)
+		} else {
+			m.onKeyEntrySubmit(provider, key)
+		}
+		return cmd
 	case tea.KeyEsc:
-		m.closeKeyEntry()
+		cmd := m.closeKeyEntry()
 		if m.toastManager != nil {
 			m.toastManager.ShowInfo("Login cancelled")
 		}
-		return m.input.Focus()
+		return cmd
 	}
 
 	m.keyEntryError = ""
@@ -125,7 +147,7 @@ func (m *Model) handleKeyEntryKeys(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (m *Model) keyEntryAvailable() bool {
-	return m.keyEntryProvider != "" && m.onKeyEntrySubmit != nil
+	return m.keyEntryProvider != "" && (m.onKeyEntrySubmitWithID != nil || m.onKeyEntrySubmit != nil)
 }
 
 func safeKeyEntryProvider(provider string) string {
@@ -161,7 +183,7 @@ func normalizeEnteredAPIKey(raw string) string {
 	return key
 }
 
-func (m *Model) closeKeyEntry() {
+func (m *Model) closeKeyEntry() tea.Cmd {
 	m.keyEntryInput.Reset()
 	// Drop the entire textinput model so the UI retains no reachable copy of
 	// the submitted/cancelled secret after the modal closes.
@@ -170,13 +192,35 @@ func (m *Model) closeKeyEntry() {
 	m.keyEntryDisplayName = ""
 	m.keyEntrySetupURL = ""
 	m.keyEntryError = ""
-	m.state = StateInput
+	return m.restoreAsyncModal(&m.keyEntryReturnState)
 }
 
 func keyEntryInputWidth(termWidth int) int {
 	paletteWidth, _ := promptPaletteWidth(termWidth)
 	// Two cells of line indent plus textinput's prompt must fit inside the card.
 	return max(1, paletteWidth-6)
+}
+
+func (m Model) keyEntryPrimaryActionReadable() bool {
+	paletteWidth, bordered := promptPaletteWidth(m.width)
+	contentWidth := max(1, paletteWidth-4)
+	explainerRows := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render("The key is masked and never sent to the model."))
+	// The provider title is part of the action target. Saving a visible masked
+	// field after its provider identity was cropped is still an ambiguous secret
+	// submission, so count every row between the title and primary footer.
+	minHeight := 4 + max(explainerRows, 1) // title + input + explainer + footer + global status
+	if setupURL := safeKeyEntryText(m.keyEntrySetupURL); setupURL != "" {
+		setup := promptWrappedText("Get a key at "+setupURL, contentWidth, 1)
+		minHeight += max(lipgloss.Height(setup), 1)
+	}
+	if safeKeyEntryText(m.keyEntryError) != "" {
+		minHeight++
+	}
+	if bordered {
+		// renderKeyEntry ends with a newline inside the bordered card.
+		minHeight += 2
+	}
+	return promptPrimaryActionGeometryReadable(m.width, m.height, minHeight)
 }
 
 // renderKeyEntry draws the masked key-entry modal.
@@ -196,12 +240,15 @@ func (m Model) renderKeyEntry() string {
 		displayName = "provider"
 	}
 	title := "Set " + displayName + " API key"
-	headerWidth := paletteWidth
+	headerWidth := contentWidth
 	if !bordered {
 		headerWidth = max(m.width, 1)
 	}
 	if lipgloss.Width(title) > headerWidth {
-		title = "Set API key"
+		// Never replace the action target with a generic title. A compact,
+		// truncated provider identity is still distinguishable, while retaining
+		// the familiar action label expected on every key-entry surface.
+		title = "Set API key · " + displayName
 	}
 	b.WriteString(titleStyle.Render(truncateForWidth(title, headerWidth)))
 	if compact {
@@ -240,7 +287,13 @@ func (m Model) renderKeyEntry() string {
 		}
 		b.WriteString(mutedStyle.Render("The key is masked and never sent to the model."))
 		b.WriteString("\n")
-		b.WriteString(renderPromptFooterLine(footerStyle, contentWidth, "Esc Cancel  ·  Enter Save"))
+		footer := "Esc Cancel  ·  Enter Save"
+		if !m.keyEntryPrimaryActionReadable() {
+			footer = resizeRecoveryLabel(contentWidth, "Esc Cancel")
+		} else {
+			footer = primaryActionFooterLabel(contentWidth, footer, "Esc Cancel", "Enter")
+		}
+		b.WriteString(renderPromptFooterLine(footerStyle, contentWidth, footer))
 	} else {
 		b.WriteString(mutedStyle.Render("No key was captured or stored."))
 		b.WriteString("\n")

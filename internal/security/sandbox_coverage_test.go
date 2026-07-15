@@ -214,12 +214,6 @@ func TestSandbox_Run_NonZeroExit(t *testing.T) {
 
 func TestSandbox_Run_Timeout(t *testing.T) {
 	requireSandboxExec(t)
-	// readWithTimeout leaks its goroutine when the timeout fires (io.Copy is
-	// uncancellable), which trips -race. Skip under -race to keep CI green;
-	// the timeout path is still covered by the non-race run.
-	if raceDetectorEnabled {
-		t.Skip("readWithTimeout leaks a goroutine on timeout; skip under -race")
-	}
 	dir := t.TempDir()
 	sc, _ := NewSandboxedCommand(context.Background(), dir, "sleep 10", DefaultSandboxConfig())
 	result := sc.Run(100 * time.Millisecond)

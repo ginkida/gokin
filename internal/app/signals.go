@@ -108,18 +108,17 @@ func (a *App) setupSignalHandler() func() {
 					return
 				}
 
-				// First Ctrl+C: cancel current processing if active
-				a.processingMu.Lock()
-				cancelFn := a.processingCancel
-				a.processingMu.Unlock()
-
-				if cancelFn != nil {
+				// First Ctrl+C uses the same complete lifecycle as Esc: cancel the
+				// foreground owner, close steering, clear type-ahead, and reset any
+				// Stop-hook continuation. Calling the raw context cancel here left
+				// queued work able to auto-start and kept the cancel handle non-nil,
+				// so even a second Ctrl+C could fail to exit.
+				if a.cancelProcessing() {
 					logging.Debug("cancelling current operation (first Ctrl+C)")
 					a.safeSendToProgram(ui.StatusUpdateMsg{
 						Type:    ui.StatusCancelled,
 						Message: "Canceling... (Ctrl+C again to exit)",
 					})
-					cancelFn()
 					// Wait for second signal for full shutdown
 					continue
 				}

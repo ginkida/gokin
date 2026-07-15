@@ -155,6 +155,29 @@ func TestPaletteDirectSlashLineWithArgsSubmitsWithoutArgEntry(t *testing.T) {
 	}
 }
 
+func TestPaletteDirectSlashLineAcceptsPhysicalSpaceKey(t *testing.T) {
+	m := NewModel()
+	var submitted string
+	m.SetCallbacks(func(s string) { submitted = s }, func() {})
+	m.commandPalette.commands = []EnhancedPaletteCommand{
+		{Name: "open", Shortcut: "/open", ArgHint: "<file>", Type: CommandTypeSlash, Enabled: true},
+	}
+	m.commandPalette.visible = true
+	m.state = StateCommandPalette
+
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/open")})
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeySpace})
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("main.go")})
+	if got := m.commandPalette.GetQuery(); got != "/open main.go" {
+		t.Fatalf("palette query=%q, want physical space preserved", got)
+	}
+
+	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if submitted != "/open main.go" {
+		t.Fatalf("submitted=%q, want complete slash line", submitted)
+	}
+}
+
 func TestPaletteDirectSlashLineHonorsAliases(t *testing.T) {
 	m := NewModel()
 	var submitted string

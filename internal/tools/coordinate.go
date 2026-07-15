@@ -353,8 +353,18 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	// quota — previously the agents ran on WithoutCancel and were unreachable
 	// by ANY user action (the /loop CancelInFlight bug class, one layer up).
 	defer func() {
-		if n := coord.CancelRunning(); n > 0 {
-			logging.Info("coordinate: cancelled straggler agents on teardown", "count", n)
+		cancelled := 0
+		if waiter, ok := coordAny.(interface {
+			CancelRunningAndWait(context.Context) int
+		}); ok {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cancelled = waiter.CancelRunningAndWait(cleanupCtx)
+			cleanupCancel()
+		} else {
+			cancelled = coord.CancelRunning()
+		}
+		if cancelled > 0 {
+			logging.Info("coordinate: cancelled straggler agents on teardown", "count", cancelled)
 		}
 		coord.Stop()
 	}()
@@ -405,6 +415,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 
 	succeeded := 0
 	failed := 0
+	var policyBlock *PolicyBlock
 
 	for internalID, resultAny := range results {
 		userID := reverseMap[internalID]
@@ -427,12 +438,17 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 			resultJSON = []byte("{}")
 		}
 		var result struct {
-			Status string `json:"status"`
-			Output string `json:"output"`
-			Error  string `json:"error"`
+			Status      string       `json:"status"`
+			Output      string       `json:"output"`
+			Error       string       `json:"error"`
+			PolicyBlock *PolicyBlock `json:"policy_block"`
 		}
 		if err := json.Unmarshal(resultJSON, &result); err != nil {
 			logging.Debug("failed to unmarshal task result", "error", err, "taskID", userID)
+		}
+		if policyBlock == nil && result.PolicyBlock != nil {
+			copy := *result.PolicyBlock
+			policyBlock = &copy
 		}
 
 		switch result.Status {
@@ -488,19 +504,20 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 		}
 		fmt.Fprintf(&sb, "---\n**Summary:** %d succeeded, %d failed, %d did not finish out of %d tasks\n",
 			succeeded, failed, len(incomplete), len(tasksAny))
-		return NewSuccessResultWithData(sb.String(), map[string]any{
+		toolResult := NewSuccessResultWithData(sb.String(), map[string]any{
 			"succeeded":       succeeded,
 			"failed":          failed,
 			"did_not_finish":  len(incomplete),
 			"total":           len(tasksAny),
 			"coordination_ok": false,
-		}), nil
+		})
+		return withAgentPolicyBlock(toolResult, policyBlock), nil
 	}
 
 	fmt.Fprintf(&sb, "---\n**Summary:** %d succeeded, %d failed out of %d tasks\n",
 		succeeded, failed, len(tasksAny))
 
-	return NewSuccessResult(sb.String()), nil
+	return withAgentPolicyBlock(NewSuccessResult(sb.String()), policyBlock), nil
 }
 
 // executeSimple is a fallback when coordinator interface isn't available.

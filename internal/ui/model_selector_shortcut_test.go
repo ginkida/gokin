@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestCtrlKOpensModelSelector(t *testing.T) {
@@ -112,6 +113,41 @@ func TestModelSelectorLongListKeepsSelectionVisible(t *testing.T) {
 	}
 }
 
+func TestModelSelectorFitsHeightWithMiddleSelectionAndNotice(t *testing.T) {
+	for _, height := range []int{8, 10, 12, 18, 24} {
+		m := NewModel()
+		m.width, m.height = 72, height
+		m.state = StateModelSelector
+		m.onModelSelect = func(string) {}
+		for i := 1; i <= 16; i++ {
+			m.availableModels = append(m.availableModels, ModelInfo{
+				ID:          fmt.Sprintf("model-%d", i),
+				Name:        fmt.Sprintf("Model %d", i),
+				Description: strings.Repeat("Long capability description ", 6),
+			})
+		}
+		m.modelSelectedIndex = 6
+		m.modelSelectorNotice = "Wait for the current model switch to finish"
+
+		view := m.renderModelSelector()
+		if got := lipgloss.Height(view); got > height {
+			t.Fatalf("height=%d model selector rendered %d rows:\n%s", height, got, stripAnsi(view))
+		}
+		plain := stripAnsi(view)
+		for _, want := range []string{"Select Model", "> 7. Model 7", "Wait for", "Esc"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("height=%d selector missing %q:\n%s", height, want, plain)
+			}
+		}
+		if height < 12 && strings.Contains(plain, "Long capability description") {
+			t.Fatalf("height=%d ultra-compact selector kept secondary description:\n%s", height, plain)
+		}
+		if height >= 12 && !strings.Contains(plain, "Long capability description") {
+			t.Fatalf("height=%d selector dropped available description:\n%s", height, plain)
+		}
+	}
+}
+
 func TestModelSelectorUsesFriendlyCurrentNameAndContextualFooter(t *testing.T) {
 	m := NewModel()
 	m.width = 80
@@ -136,7 +172,7 @@ func TestModelSelectorPageNavigation(t *testing.T) {
 		m.availableModels = append(m.availableModels, ModelInfo{ID: fmt.Sprintf("m%d", i), Name: fmt.Sprintf("M%d", i)})
 	}
 
-	page := modelSelectorVisibleCount(m.height, len(m.availableModels))
+	page := m.modelSelectorPageSize()
 	m.handleModelSelectorKeys(tea.KeyMsg{Type: tea.KeyPgDown})
 	if m.modelSelectedIndex != page {
 		t.Fatalf("PgDn index=%d, want %d", m.modelSelectedIndex, page)

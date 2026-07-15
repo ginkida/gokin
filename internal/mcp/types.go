@@ -224,9 +224,10 @@ type ServerConfig struct {
 	Transport string `yaml:"transport" json:"transport"` // "stdio" or "http"
 
 	// STDIO transport
-	Command string            `yaml:"command,omitempty" json:"command,omitempty"` // e.g., "npx"
-	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`       // e.g., ["-y", "@mcp/server-github"]
-	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`         // Additional env vars
+	Command string            `yaml:"command,omitempty" json:"command,omitempty"`  // e.g., "npx"
+	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`        // e.g., ["-y", "@mcp/server-github"]
+	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`          // Additional env vars
+	WorkDir string            `yaml:"work_dir,omitempty" json:"workDir,omitempty"` // Absolute working directory for the process
 
 	// HTTP transport
 	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`         // Server URL

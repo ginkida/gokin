@@ -45,14 +45,32 @@ func (m *Model) SetQuestionCallback(onQuestion func(string)) {
 	m.onQuestion = onQuestion
 }
 
+// SetQuestionCallbackWithID correlates an answer with the exact asynchronous
+// question waiter. Prefer it for integrations that can have overlapping or
+// expiring prompts; SetQuestionCallback remains for legacy embedders.
+func (m *Model) SetQuestionCallbackWithID(onQuestion func(reqID, answer string)) {
+	m.onQuestionWithID = onQuestion
+}
+
 // SetPlanApprovalCallback sets the plan approval callback.
 func (m *Model) SetPlanApprovalCallback(onPlanApproval func(PlanApprovalDecision)) {
 	m.onPlanApproval = onPlanApproval
 }
 
+// SetPlanApprovalCallbackWithID correlates a decision with its plan request.
+func (m *Model) SetPlanApprovalCallbackWithID(onPlanApproval func(reqID string, decision PlanApprovalDecision)) {
+	m.onPlanApprovalWithID = onPlanApproval
+}
+
 // SetPlanApprovalWithFeedbackCallback sets the plan approval callback with feedback support.
 func (m *Model) SetPlanApprovalWithFeedbackCallback(onPlanApproval func(PlanApprovalDecision, string)) {
 	m.onPlanApprovalWithFeedback = onPlanApproval
+}
+
+// SetPlanApprovalWithFeedbackCallbackWithID correlates feedback with its plan
+// request so a late editor submission cannot affect a newer approval.
+func (m *Model) SetPlanApprovalWithFeedbackCallbackWithID(onPlanApproval func(reqID string, decision PlanApprovalDecision, feedback string)) {
+	m.onPlanFeedbackWithID = onPlanApproval
 }
 
 // SetInterruptCallback sets the interrupt callback (called when user presses ESC).
@@ -109,6 +127,9 @@ func (m *Model) SetReducedMotion(enabled bool) {
 	m.reducedMotion = enabled
 	m.output.SetReducedMotion(enabled)
 	m.progressModel.SetReducedMotion(enabled)
+	if m.toastManager != nil {
+		m.toastManager.SetReducedMotion(enabled)
+	}
 	if m.toolProgressBar != nil {
 		m.toolProgressBar.SetReducedMotion(enabled)
 	}
@@ -149,9 +170,21 @@ func (m *Model) SetDiffDecisionCallback(onDiffDecision func(DiffDecision)) {
 	m.onDiffDecision = onDiffDecision
 }
 
+// SetDiffDecisionCallbackWithID correlates a decision with the exact diff
+// waiter. Late decisions for expired previews are ignored by the embedding app.
+func (m *Model) SetDiffDecisionCallbackWithID(onDiffDecision func(string, DiffDecision)) {
+	m.onDiffDecisionWithID = onDiffDecision
+}
+
 // SetMultiDiffDecisionCallback sets the callback for multi-file diff preview decisions.
 func (m *Model) SetMultiDiffDecisionCallback(onMultiDiffDecision func(map[string]DiffDecision)) {
 	m.onMultiDiffDecision = onMultiDiffDecision
+}
+
+// SetMultiDiffDecisionCallbackWithID correlates a batch review result with its
+// exact asynchronous waiter.
+func (m *Model) SetMultiDiffDecisionCallbackWithID(onMultiDiffDecision func(string, map[string]DiffDecision)) {
+	m.onMultiDiffDecisionWithID = onMultiDiffDecision
 }
 
 // SetSearchActionCallback sets the callback for search result actions.
@@ -170,7 +203,7 @@ func (m *Model) SetSearchResultActionCallback(onSearchResultAction func(SearchAc
 // SetGitActionCallback sets the callback for git status actions.
 func (m *Model) SetGitActionCallback(onGitAction func(GitAction)) {
 	m.onGitAction = onGitAction
-	m.gitStatusModel.SetActionsLinked(m.onGitAction != nil || m.onGitStatusAction != nil)
+	m.gitStatusModel.SetActionsLinked(m.onGitAction != nil || m.onGitStatusAction != nil || m.onGitStatusActionWithID != nil)
 }
 
 // SetGitStatusActionCallback sets a payload-aware callback for git status
@@ -179,7 +212,15 @@ func (m *Model) SetGitActionCallback(onGitAction func(GitAction)) {
 // Bubble Tea program; the status overlay remains open while it is loading.
 func (m *Model) SetGitStatusActionCallback(onGitStatusAction func(GitAction, []string, string)) {
 	m.onGitStatusAction = onGitStatusAction
-	m.gitStatusModel.SetActionsLinked(m.onGitAction != nil || m.onGitStatusAction != nil)
+	m.gitStatusModel.SetActionsLinked(m.onGitAction != nil || m.onGitStatusAction != nil || m.onGitStatusActionWithID != nil)
+}
+
+// SetGitStatusActionCallbackWithID preserves the operation ID used by inline
+// diff loads. Embedders should echo it in GitStatusDiffMsg so a late response
+// for the same path cannot replace a newer load.
+func (m *Model) SetGitStatusActionCallbackWithID(onGitStatusAction func(GitAction, []string, string, string)) {
+	m.onGitStatusActionWithID = onGitStatusAction
+	m.gitStatusModel.SetActionsLinked(m.onGitAction != nil || m.onGitStatusAction != nil || m.onGitStatusActionWithID != nil)
 }
 
 func (m *Model) dispatchSearchResultAction(msg SearchResultsActionMsg) bool {
@@ -195,6 +236,10 @@ func (m *Model) dispatchSearchResultAction(msg SearchResultsActionMsg) bool {
 }
 
 func (m *Model) dispatchGitStatusAction(msg GitStatusActionMsg) bool {
+	if m.onGitStatusActionWithID != nil {
+		m.onGitStatusActionWithID(msg.Action, append([]string(nil), msg.Files...), msg.Message, msg.RequestID)
+		return true
+	}
 	if m.onGitStatusAction != nil {
 		m.onGitStatusAction(msg.Action, append([]string(nil), msg.Files...), msg.Message)
 		return true
@@ -222,6 +267,16 @@ func (m *Model) SetApplyCodeBlockCallback(onApply func(filename, content string)
 // SetWorkDir sets the working directory for display.
 func (m *Model) SetWorkDir(dir string) {
 	m.workDir = dir
+	m.input.SetWorkDir(dir)
+}
+
+// ShowFirstLaunchWelcome arms the adaptive onboarding surface. The callback
+// runs once, on the first key handled after real terminal geometry arrives;
+// callers can persist the one-time flag without marking an unseen frame read.
+func (m *Model) ShowFirstLaunchWelcome(onSeen func()) {
+	m.firstLaunchWelcomePending = true
+	m.onFirstLaunchWelcomeSeen = onSeen
+	m.refreshTerminalTitle()
 }
 
 // SetCommandAliases forwards the alias table to the input autocomplete
@@ -279,6 +334,13 @@ func (m *Model) SetModelSelectCallback(callback func(modelID string)) {
 	m.onModelSelect = callback
 }
 
+// SetModelSelectCallbackWithID correlates a selection with the exact async
+// rebuild attempt. The same model can be retried, so model ID alone is not an
+// operation identity.
+func (m *Model) SetModelSelectCallbackWithID(callback func(requestID, modelID string)) {
+	m.onModelSelectWithID = callback
+}
+
 // SetGitBranch sets the current git branch for display.
 func (m *Model) SetGitBranch(branch string) {
 	m.gitBranch = branch
@@ -302,13 +364,80 @@ func (m *Model) RegisterPaletteActions() {
 		return
 	}
 
+	compactDescription := "Currently normal — switch to a compact transcript layout (palette-only)"
+	if m.CompactMode {
+		compactDescription = "Currently compact — restore the normal transcript layout (palette-only)"
+	}
+	settingsAvailable := m.onOpenSettings != nil
+	settingsDescription := "Toggle permissions, sandbox, thinking, diff and more"
+	settingsReason := ""
+	if !settingsAvailable {
+		settingsDescription = "Settings are unavailable in this session"
+		settingsReason = "settings provider not connected"
+	}
+	todosDescription := "Currently hidden — show the task list panel"
+	if m.todosVisible {
+		todosDescription = "Currently shown — hide the task list panel"
+	}
+	liveDetailDescription := "Currently minimal — show detailed live activity"
+	if m.liveDetailExpanded {
+		liveDetailDescription = "Currently detailed — return to minimal live activity"
+	}
+	activityAvailable := m.activityFeed != nil
+	activityDescription := "Currently hidden — show the activity feed and detailed view"
+	activityReason := ""
+	if !activityAvailable {
+		activityDescription = "Activity feed is unavailable in this session"
+		activityReason = "activity feed not connected"
+	} else if m.activityFeed.IsVisible() {
+		activityDescription = "Currently shown — hide the activity feed"
+	}
+	agentTreeAvailable := m.agentTreePanel != nil
+	agentTreeDescription := "Currently hidden — show the sub-agent tree"
+	agentTreeReason := ""
+	if !agentTreeAvailable {
+		agentTreeDescription = "Sub-agent tree is unavailable in this session"
+		agentTreeReason = "agent tree not connected"
+	} else if m.agentTreePanel.IsVisible() {
+		agentTreeDescription = "Currently shown — hide the sub-agent tree"
+	}
+	observatoryAvailable := m.observatoryPanel != nil
+	observatoryDescription := "Open the context and usage dashboard"
+	observatoryReason := ""
+	if !observatoryAvailable {
+		observatoryDescription = "Context observatory is unavailable in this session"
+		observatoryReason = "context observatory not connected"
+	}
+	planPanelVisible := m.planProgressPanel != nil && m.planProgressPanel.IsVisible()
+	planPanelAvailable := planPanelVisible && planPanelDensityActionReadable(m.width, m.height)
+	planPanelDescription := "Available while a plan is executing"
+	planPanelReason := "no active plan panel"
+	if planPanelVisible && !planPanelAvailable {
+		planPanelDescription = "Resize the terminal to change plan detail"
+		planPanelReason = "terminal too small for expanded plan progress"
+	} else if planPanelAvailable {
+		planPanelReason = ""
+		if m.planProgressPanel.IsCollapsed() {
+			planPanelDescription = "Currently compact — expand active plan progress"
+		} else {
+			planPanelDescription = "Currently expanded — compact active plan progress"
+		}
+	}
+	sessionModeAvailable := m.onSessionModeCycle != nil || m.onPlanningModeToggle != nil
+	sessionModeDescription := "Cycle Normal, Plan, and YOLO session modes"
+	sessionModeReason := ""
+	if !sessionModeAvailable {
+		sessionModeDescription = "Session mode switching is unavailable"
+		sessionModeReason = "session mode controller not connected"
+	}
 	actions := []EnhancedPaletteCommand{
 		{
 			Name:        "Open Settings",
-			Description: "Toggle permissions, sandbox, thinking, diff and more",
+			Description: settingsDescription,
 			Shortcut:    "Ctrl+S",
 			Category:    PaletteCategoryInfo{Name: "Auth & Setup", Icon: "lock", Priority: 2},
-			Enabled:     true,
+			Enabled:     settingsAvailable,
+			Reason:      settingsReason,
 			Priority:    100,
 			Type:        CommandTypeAction,
 			ActionID:    paletteActionSettings,
@@ -345,7 +474,7 @@ func (m *Model) RegisterPaletteActions() {
 		},
 		{
 			Name:        "Toggle Task List",
-			Description: "Show or hide the task list panel",
+			Description: todosDescription,
 			Shortcut:    "Ctrl+T",
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
 			Enabled:     true,
@@ -355,7 +484,7 @@ func (m *Model) RegisterPaletteActions() {
 		},
 		{
 			Name:        "Live Activity Detail",
-			Description: "Expand or minimize the live activity view (works while streaming)",
+			Description: liveDetailDescription + " (works while streaming)",
 			Shortcut:    "Ctrl+O",
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
 			Enabled:     true,
@@ -365,49 +494,54 @@ func (m *Model) RegisterPaletteActions() {
 		},
 		{
 			Name:        "Toggle Activity Feed",
-			Description: "Show or hide the sub-agent feed panel (within detailed view)",
+			Description: activityDescription,
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
-			Enabled:     true,
+			Enabled:     activityAvailable,
+			Reason:      activityReason,
 			Priority:    151,
 			Type:        CommandTypeAction,
 			ActionID:    paletteActionActivityFeed,
 		},
 		{
 			Name:        "Toggle Agent Tree",
-			Description: "Show or hide the sub-agent tree panel",
+			Description: agentTreeDescription,
 			Shortcut:    "Ctrl+A",
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
-			Enabled:     true,
+			Enabled:     agentTreeAvailable,
+			Reason:      agentTreeReason,
 			Priority:    153,
 			Type:        CommandTypeAction,
 			ActionID:    paletteActionAgentTree,
 		},
 		{
 			Name:        "Context Observatory",
-			Description: "Open the context/usage dashboard",
+			Description: observatoryDescription,
 			Shortcut:    "Ctrl+H",
 			Category:    PaletteCategoryInfo{Name: "Tools", Icon: "gear", Priority: 5},
-			Enabled:     true,
+			Enabled:     observatoryAvailable,
+			Reason:      observatoryReason,
 			Priority:    540,
 			Type:        CommandTypeAction,
 			ActionID:    paletteActionObservatory,
 		},
 		{
 			Name:        "Toggle Plan Panel",
-			Description: "Expand or collapse the plan progress panel",
+			Description: planPanelDescription,
 			Shortcut:    "Ctrl+X",
 			Category:    PaletteCategoryInfo{Name: "Planning", Icon: "tree", Priority: 4},
-			Enabled:     true,
+			Enabled:     planPanelAvailable,
+			Reason:      planPanelReason,
 			Priority:    401,
 			Type:        CommandTypeAction,
 			ActionID:    paletteActionPlanPanel,
 		},
 		{
 			Name:        "Cycle Session Mode",
-			Description: "Cycle Normal, Plan, and YOLO session modes",
+			Description: sessionModeDescription,
 			Shortcut:    "Shift+Tab",
 			Category:    PaletteCategoryInfo{Name: "Planning", Icon: "tree", Priority: 4},
-			Enabled:     true,
+			Enabled:     sessionModeAvailable,
+			Reason:      sessionModeReason,
 			Priority:    400,
 			Type:        CommandTypeAction,
 			ActionID:    paletteActionPlanningMode,
@@ -424,7 +558,7 @@ func (m *Model) RegisterPaletteActions() {
 		},
 		{
 			Name:        "Toggle Compact Mode",
-			Description: "Switch between compact and normal display (available from the palette)",
+			Description: compactDescription,
 			Category:    PaletteCategoryInfo{Name: "Tools", Icon: "gear", Priority: 5},
 			Enabled:     true,
 			Priority:    551,

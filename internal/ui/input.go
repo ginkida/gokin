@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,10 +13,12 @@ import (
 
 	"gokin/internal/config"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
 )
 
 // defaultProviderNames returns all provider names from the registry.
@@ -30,8 +31,9 @@ func defaultKeyProviderNames() []string { return config.KeyProviderNames() }
 func defaultAllProviderNames() []string { return config.AllProviderNames() }
 
 const (
-	maxHistorySize = 100
-	historyFile    = "input_history"
+	maxHistorySize   = 100
+	maxComposerLines = 6
+	historyFile      = "input_history"
 )
 
 // ArgInfo describes a command argument for autocomplete hints.
@@ -39,7 +41,11 @@ type ArgInfo struct {
 	Name     string   // Argument name (e.g., "message", "filename")
 	Required bool     // True if argument is required
 	Type     string   // "string", "path", "option", "number"
-	Options  []string // Available options for "option" type
+	Options  []string // Default options for "option" type
+	// OptionsByPrevious overrides Options when the preceding argument matches
+	// a key. This keeps subcommand-style chains honest (for example `/set
+	// preset <safe|balanced|fast>` instead of suggesting on/off for a preset).
+	OptionsByPrevious map[string][]string
 }
 
 // CommandInfo contains information about a slash command for autocomplete.
@@ -81,6 +87,15 @@ type inputToken struct {
 	start int
 	text  string
 	quote rune
+}
+
+// pasteSpan is the internal identity of one paste chip. The textarea stores
+// only the user-visible label; this out-of-band span is what makes an inserted
+// chip expandable. Literal chip-shaped text therefore remains literal.
+type pasteSpan struct {
+	id    int
+	start int // byte offset in textarea.Value()
+	end   int // byte offset immediately after the visible label
 }
 
 func trailingInputToken(value string) (inputToken, bool) {
@@ -157,12 +172,13 @@ func trailingInputToken(value string) (inputToken, bool) {
 
 // InputModel represents the input component.
 type InputModel struct {
-	textarea     textarea.Model
-	styles       *Styles
-	history      []string // Command history
-	historyIndex int      // Current position in history (-1 = new input)
-	savedInput   string   // Saved current input when browsing history
-	workDir      string   // Working directory for file suggestions
+	textarea       textarea.Model
+	styles         *Styles
+	viewportHeight int      // terminal rows available to the main composer; 0 = unconstrained
+	history        []string // Command history
+	historyIndex   int      // Current position in history (-1 = new input)
+	savedInput     string   // Saved current input when browsing history
+	workDir        string   // Working directory for file suggestions
 
 	// Autocomplete
 	commands         []CommandInfo
@@ -220,8 +236,10 @@ type InputModel struct {
 	// (ExpandedValue). Keeps the input readable instead of dumping hundreds of
 	// lines. Cleared on Reset. The map is reference-shared across the by-value
 	// Model copies (intended — chips accumulate across keystrokes until Reset).
-	pastes   map[int]string
-	pasteSeq int
+	pastes          map[int]string
+	pasteSpans      []pasteSpan
+	savedPasteSpans []pasteSpan
+	pasteSeq        int
 }
 
 // NewInputModel creates a new input model.
@@ -271,7 +289,7 @@ func DefaultCommands() []CommandInfo {
 		// Getting Started
 		{Name: "help", Description: "Show help for commands", Category: "Getting Started",
 			Args: []ArgInfo{{Name: "command", Required: false, Type: "string"}}, Usage: "/help [command]"},
-		{Name: "quickstart", Description: "Interactive onboarding guide", Category: "Getting Started"},
+		{Name: "quickstart", Description: "Quick start guide with examples", Category: "Getting Started"},
 		{Name: "shortcuts", Description: "Show keyboard shortcuts", Category: "Getting Started"},
 
 		// Session
@@ -281,32 +299,43 @@ func DefaultCommands() []CommandInfo {
 			// to providers removed during the v0.65 trim.
 			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
 			Usage: "/model [name]"},
-		{Name: "clear", Description: "Clear conversation history", Category: "Session"},
-		{Name: "compact", Description: "Force context compaction", Category: "Session"},
+		{Name: "clear", Description: "Clear conversation history", Category: "Session",
+			Args: []ArgInfo{{Name: "force", Required: false, Type: "option", Options: []string{"--force"}}}, Usage: "/clear [--force]"},
+		{Name: "compact", Description: "Force context compaction/summarization", Category: "Session"},
 		{Name: "save", Description: "Save current session", Category: "Session",
-			Args: []ArgInfo{{Name: "name", Required: false, Type: "string"}}, Usage: "/save [name]"},
+			Args: []ArgInfo{
+				{Name: "name", Required: false, Type: "string"},
+				{Name: "force", Required: false, Type: "option", Options: []string{"--force"}},
+			}, Usage: "/save [name] [--force]"},
 		{Name: "resume", Description: "Resume a saved session", Category: "Session",
-			Args: []ArgInfo{{Name: "session", Required: true, Type: "string"}}, Usage: "/resume <session>"},
-		{Name: "sessions", Description: "List saved sessions", Category: "Session"},
-		{Name: "stats", Description: "Show session statistics", Category: "Session"},
-		{Name: "tasks", Description: "List background agent tasks and their results", Category: "Session",
+			Args: []ArgInfo{
+				{Name: "session", Required: false, Type: "string"},
+				{Name: "force", Required: false, Type: "option", Options: []string{"--force"}},
+			}, Usage: "/resume [session_id] [--force]"},
+		{Name: "sessions", Description: "List saved sessions", Category: "Session",
+			Args: []ArgInfo{{Name: "scope", Required: false, Type: "option", Options: []string{"--all"}}}, Usage: "/sessions [--all]"},
+		{Name: "stats", Description: "Show detailed session statistics", Category: "Session"},
+		{Name: "tasks", Description: "List background agent + shell tasks, view results, or stop a running one", Category: "Session",
 			Args: []ArgInfo{{Name: "id", Required: false, Type: "string"}}, Usage: "/tasks [id]"},
-		{Name: "audit", Description: "Multi-agent find→verify audit of the current changes for real bugs", Category: "Session",
+		{Name: "audit", Description: "Multi-agent find→verify audit of the current changes (or a given scope) for real bugs", Category: "Session",
 			Args: []ArgInfo{{Name: "path", Required: false, Type: "string"}}, Usage: "/audit [path or description]"},
-		{Name: "cost", Description: "Show token usage and cost (compact)", Category: "Session"},
+		{Name: "cost", Description: "Show token usage and cost", Category: "Session"},
 		{Name: "memory", Description: "Show stored memories", Category: "Session"},
 		{Name: "loop", Description: "Run a recurring task in the background", Category: "Session",
-			Args:  []ArgInfo{{Name: "interval_or_task", Required: false, Type: "string"}},
-			Usage: "/loop [<interval>] <task> | status|output|pause|resume|stop|now|remove <id>"},
+			Args: []ArgInfo{
+				{Name: "action_or_task", Required: false, Type: "option", Options: []string{"list", "status", "output", "pause", "resume", "stop", "now", "remove", "--max-tokens"}},
+				{Name: "task_or_id", Required: false, Type: "string"},
+				{Name: "token_budget", Required: false, Type: "string"},
+			}, Usage: "/loop [<interval>] <task> [--max-tokens <N>] | list|status|output|pause|resume|stop|now|remove [id]"},
 		// /undo and /redo are fundamental enough to be in Session autocomplete.
 		// Were missing pre-v0.78.14 — caught by TestEveryRegisteredCommandIsInAutocomplete.
-		{Name: "undo", Description: "Undo the last file change", Category: "Session",
+		{Name: "undo", Description: "Undo last file change(s)", Category: "Session",
 			Args:  []ArgInfo{{Name: "n_or_list", Required: false, Type: "string"}},
 			Usage: "/undo [N|list]"},
-		{Name: "redo", Description: "Re-apply the last undone change", Category: "Session",
+		{Name: "redo", Description: "Redo last undone change(s)", Category: "Session",
 			Args:  []ArgInfo{{Name: "n", Required: false, Type: "number"}},
 			Usage: "/redo [N]"},
-		{Name: "instructions", Description: "Show project instructions", Category: "Session",
+		{Name: "instructions", Description: "Show loaded project instructions (GOKIN.md/CLAUDE.md)", Category: "Session",
 			Args:  []ArgInfo{{Name: "source", Required: false, Type: "option", Options: []string{"--source"}}},
 			Usage: "/instructions [--source]"},
 
@@ -315,8 +344,10 @@ func DefaultCommands() []CommandInfo {
 			Args: []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: defaultKeyProviderNames()},
 				{Name: "key", Required: false, Type: "string"}}, Usage: "/login [provider] [key]"},
 		{Name: "logout", Description: "Remove API key", Category: "Auth",
-			Args:  []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: defaultAllProviderNames()}},
-			Usage: "/logout [provider|all]"},
+			Args: []ArgInfo{
+				{Name: "provider", Required: false, Type: "option", Options: defaultAllProviderNames()},
+				{Name: "force", Required: false, Type: "option", Options: []string{"--force"}},
+			}, Usage: "/logout [provider|all] [--force]"},
 		{Name: "provider", Description: "Switch AI provider", Category: "Auth",
 			Args:  []ArgInfo{{Name: "provider", Required: false, Type: "option", Options: defaultProviderNames()}},
 			Usage: "/provider [name]"},
@@ -324,27 +355,31 @@ func DefaultCommands() []CommandInfo {
 		{Name: "doctor", Description: "Check environment and configuration", Category: "Auth"},
 		{Name: "config", Description: "Show current configuration", Category: "Auth"},
 		{Name: "set", Description: "View or change a setting (live)", Category: "Auth",
-			Args: []ArgInfo{{Name: "key", Required: false, Type: "option",
-				Options: []string{"permissions", "sandbox", "diff", "tokens", "autocompact", "memory", "plan", "donegate", "thinking"}},
-				{Name: "on|off", Required: false, Type: "option", Options: []string{"on", "off"}}},
-			Usage: "/set [<key> <on|off>]"},
+			Args: []ArgInfo{{Name: "key|preset", Required: false, Type: "option",
+				Options: []string{"permissions", "sandbox", "diff", "autocompact", "memory", "globalmemory", "sessionmemory", "plan", "donegate", "thinking", "session", "watcher", "searchcache", "tokens", "compactui", "reducedmotion", "glmsearch", "preset"}},
+				{Name: "value", Required: false, Type: "option", Options: []string{"on", "off"},
+					OptionsByPrevious: map[string][]string{"preset": {"safe", "balanced", "fast"}}}},
+			Usage: "/set [<key> <on|off> | preset <safe|balanced|fast>]"},
 		{Name: "settings", Description: "Open the interactive settings screen", Category: "Auth"},
-		{Name: "update", Description: "Check/install updates and rollback", Category: "Auth",
+		{Name: "update", Description: "Check for and install application updates", Category: "Auth",
 			Args:  []ArgInfo{{Name: "action", Required: false, Type: "option", Options: []string{"install", "backups", "rollback"}}},
 			Usage: "/update [install|backups|rollback [backup-id]]"},
 		// v0.74–v0.76 release feedback set. These were registered in
 		// commands.go but missing from autocomplete — surfaced by
 		// TestEveryRegisteredCommandIsInAutocomplete in v0.78.14.
-		{Name: "restart", Description: "Re-exec into the latest installed binary", Category: "Auth"},
-		{Name: "whats-new", Description: "Show release notes for the current version", Category: "Auth",
+		{Name: "restart", Description: "Re-exec gokin (apply updates without manual quit)", Category: "Auth"},
+		{Name: "whats-new", Description: "Show release notes for the current (or specified) version", Category: "Auth",
 			Args: []ArgInfo{{Name: "tag", Required: false, Type: "string"}}, Usage: "/whats-new [tag]"},
-		{Name: "changelog", Description: "Show compact list of recent releases", Category: "Auth",
+		{Name: "changelog", Description: "List recent releases (compact)", Category: "Auth",
 			Args: []ArgInfo{{Name: "count", Required: false, Type: "number"}}, Usage: "/changelog [count]"},
 
 		// Git
 		{Name: "init", Description: "Initialize GOKIN.md for this project", Category: "Git"},
-		{Name: "commit", Description: "Create a git commit with AI-generated message", Category: "Git",
-			Args: []ArgInfo{{Name: "message", Required: false, Type: "string"}}, Usage: "/commit [message]"},
+		{Name: "commit", Description: "Create a git commit", Category: "Git",
+			Args: []ArgInfo{
+				{Name: "message", Required: false, Type: "string"},
+				{Name: "mode", Required: false, Type: "option", Options: []string{"-m"}},
+			}, Usage: "/commit [message] | /commit -m <message>"},
 		{Name: "pr", Description: "Create a pull request", Category: "Git",
 			Args: []ArgInfo{{Name: "options", Required: false, Type: "option",
 				Options: []string{"--title", "--draft", "--base"}}},
@@ -352,13 +387,16 @@ func DefaultCommands() []CommandInfo {
 		// v0.77.x git-inspect family + v0.78.12 /blame. These were registered
 		// in commands.go but missing from autocomplete — added here so the
 		// suggestion list matches the actual available commands.
-		{Name: "diff", Description: "Show pending changes (working tree / staged)", Category: "Git",
-			Args:  []ArgInfo{{Name: "scope", Required: false, Type: "string"}},
+		{Name: "diff", Description: "Show pending git changes", Category: "Git",
+			Args: []ArgInfo{
+				{Name: "mode", Required: false, Type: "option", Options: []string{"--stat", "--staged", "--cached"}},
+				{Name: "file", Required: false, Type: "path"},
+			},
 			Usage: "/diff [--staged|--stat|<file>]"},
 		{Name: "log", Description: "Show recent git commits", Category: "Git",
 			Args:  []ArgInfo{{Name: "count_or_file", Required: false, Type: "string"}},
 			Usage: "/log [count] [file]"},
-		{Name: "branches", Description: "List local branches with current marker", Category: "Git",
+		{Name: "branches", Description: "List local branches with last commit", Category: "Git",
 			Args:  []ArgInfo{{Name: "scope", Required: false, Type: "option", Options: []string{"--all"}}},
 			Usage: "/branches [--all]"},
 		{Name: "grep", Description: "Search the working tree for a pattern", Category: "Git",
@@ -372,21 +410,21 @@ func DefaultCommands() []CommandInfo {
 			Usage: "/show [ref] [file]"},
 
 		// Planning
-		{Name: "plan", Description: "Toggle planning mode", Category: "Planning",
+		{Name: "plan", Description: "Toggle planning mode for complex multi-step tasks", Category: "Planning",
 			Args:  []ArgInfo{{Name: "action", Required: false, Type: "option", Options: []string{"status"}}},
 			Usage: "/plan [status]"},
-		{Name: "resume-plan", Description: "Resume a saved plan", Category: "Planning",
+		{Name: "resume-plan", Description: "Resume a paused/failed plan execution", Category: "Planning",
 			Args:  []ArgInfo{{Name: "list|plan_id", Required: false, Type: "option", Options: []string{"list"}}},
 			Usage: "/resume-plan [list|<plan_id>]"},
-		{Name: "health", Description: "Show runtime health", Category: "Planning"},
-		{Name: "policy", Description: "Show policy engine status", Category: "Planning"},
-		{Name: "ledger", Description: "Show plan run ledger", Category: "Planning"},
-		{Name: "plan-proof", Description: "Show contract/evidence proof for a step", Category: "Planning",
+		{Name: "health", Description: "Show runtime health and provider reliability", Category: "Planning"},
+		{Name: "policy", Description: "Show policy engine and circuit breaker state", Category: "Planning"},
+		{Name: "ledger", Description: "Show run ledger for current plan", Category: "Planning"},
+		{Name: "plan-proof", Description: "Show contract/evidence proof for a plan step", Category: "Planning",
 			Args: []ArgInfo{{Name: "step_id", Required: false, Type: "number"}}, Usage: "/plan-proof [step_id]"},
-		{Name: "journal", Description: "Show execution journal", Category: "Planning"},
-		{Name: "recovery", Description: "Show recovery snapshot", Category: "Planning"},
-		{Name: "observability", Description: "Show reliability dashboard", Category: "Planning"},
-		{Name: "memory-governance", Description: "Show session memory governance", Category: "Planning"},
+		{Name: "journal", Description: "Show recent execution journal events", Category: "Planning"},
+		{Name: "recovery", Description: "Show latest recovery snapshot", Category: "Planning"},
+		{Name: "observability", Description: "Show unified observability dashboard", Category: "Planning"},
+		{Name: "memory-governance", Description: "Show session memory governance status", Category: "Planning"},
 		{Name: "tree-stats", Description: "Show tree planner statistics", Category: "Planning"},
 
 		// Tools
@@ -401,11 +439,11 @@ func DefaultCommands() []CommandInfo {
 				{Name: "text", Required: false, Type: "string"},
 			},
 			Usage: "/copy [--last|--all|--ascii] [<text>]"},
-		{Name: "paste", Description: "Paste from clipboard", Category: "Tools"},
+		{Name: "paste", Description: "Get text from clipboard", Category: "Tools"},
 		{Name: "clear-todos", Description: "Clear all todo items", Category: "Tools",
 			Args:  []ArgInfo{{Name: "force", Required: false, Type: "option", Options: []string{"--force"}}},
 			Usage: "/clear-todos [--force]"},
-		{Name: "ql", Description: "Quick look at a file", Category: "Tools",
+		{Name: "ql", Description: "Preview a file using macOS Quick Look", Category: "Tools",
 			Args: []ArgInfo{{Name: "path", Required: true, Type: "path"}}, Usage: "/ql <path>"},
 		{Name: "hooks", Description: "List configured agent hooks and their sources", Category: "Tools"},
 		{Name: "add-dir", Description: "Grant the agent access to a directory outside the workspace", Category: "Tools",
@@ -414,33 +452,232 @@ func DefaultCommands() []CommandInfo {
 			Usage: "/add-dir [--persist] <path>"},
 		{Name: "remove-dir", Description: "Revoke a session directory grant added with /add-dir", Category: "Tools",
 			Args: []ArgInfo{{Name: "path", Required: true, Type: "path"}}, Usage: "/remove-dir <path>"},
-		{Name: "permissions", Description: "Toggle permission prompts", Category: "Tools",
+		{Name: "permissions", Description: "View or configure risky-action permission prompts", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
 			Usage: "/permissions [on|off]"},
-		{Name: "sandbox", Description: "Toggle bash sandbox mode", Category: "Tools",
+		{Name: "sandbox", Description: "View or configure bash sandbox containment", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
 			Usage: "/sandbox [on|off]"},
-		{Name: "thinking", Description: "Reasoning: auto, on, off, or a token budget", Category: "Tools",
+		{Name: "thinking", Description: "Configure adaptive/forced reasoning and its token budget", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"auto", "on", "off"}}},
 			Usage: "/thinking [auto|on|off|<budget>]"},
 		{Name: "theme", Description: "Show the active UI theme", Category: "Tools",
 			Usage: "/theme"},
-		{Name: "register-agent-type", Description: "Register a custom agent type", Category: "Tools",
-			Args:  []ArgInfo{{Name: "name", Required: true, Type: "string"}, {Name: "description", Required: true, Type: "string"}},
-			Usage: `/register-agent-type <name> "<desc>" [--tools ...]`},
-		{Name: "list-agent-types", Description: "List all registered agent types", Category: "Tools"},
+		{Name: "register-agent-type", Description: "Register a custom agent type with specific tools", Category: "Tools",
+			Args: []ArgInfo{
+				{Name: "name", Required: true, Type: "string"},
+				{Name: "description", Required: true, Type: "string"},
+				{Name: "option", Required: false, Type: "option", Options: []string{"--tools", "--prompt"}},
+				{Name: "value", Required: false, Type: "string"},
+			}, Usage: `/register-agent-type <name> "<description>" [--tools t1,t2] [--prompt "text"]`},
+		{Name: "list-agent-types", Description: "List all registered agent types (built-in and custom)", Category: "Tools"},
 		{Name: "unregister-agent-type", Description: "Remove a custom agent type", Category: "Tools",
 			Args: []ArgInfo{{Name: "name", Required: true, Type: "string"}}, Usage: "/unregister-agent-type <name>"},
 		{Name: "mcp", Description: "Manage MCP (Model Context Protocol) servers", Category: "Tools",
 			Args: []ArgInfo{{Name: "subcommand", Required: false, Type: "option",
 				Options: []string{"list", "status", "add", "remove", "refresh", "help"}}},
 			Usage: "/mcp [list|status|add|remove|refresh|help]"},
+		{Name: "skill", Description: "List or run reusable project/user workflows", Category: "Tools",
+			Args: []ArgInfo{
+				{Name: "name", Required: false, Type: "string"},
+				{Name: "arguments", Required: false, Type: "string"},
+			},
+			Usage: "/skill [name] [arguments...]"},
 	}
 }
 
 // Init initializes the input model.
 func (m InputModel) Init() tea.Cmd {
 	return textarea.Blink
+}
+
+func (m InputModel) onFirstComposerVisualLine() bool {
+	return m.textarea.Line() == 0 && m.textarea.LineInfo().RowOffset == 0
+}
+
+func (m InputModel) onLastComposerVisualLine() bool {
+	lineInfo := m.textarea.LineInfo()
+	return m.textarea.Line() == m.textarea.LineCount()-1 && lineInfo.RowOffset+1 >= lineInfo.Height
+}
+
+func clonePasteSpans(spans []pasteSpan) []pasteSpan {
+	return append([]pasteSpan(nil), spans...)
+}
+
+func (m *InputModel) clearCompletionState() {
+	m.showSuggestions = false
+	m.suggestions = nil
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.fileSuggestions = nil
+	m.suggestionIndex = 0
+	m.ghostText = ""
+	m.suggestionNotice = ""
+	m.showArgHints = false
+	m.currentCommand = nil
+}
+
+func textareaCursorByteOffset(model textarea.Model) int {
+	value := model.Value()
+	lines := strings.Split(value, "\n")
+	row := min(max(model.Line(), 0), len(lines)-1)
+	lineInfo := model.LineInfo()
+	column := max(lineInfo.StartColumn+lineInfo.ColumnOffset, 0)
+	lineRunes := []rune(lines[row])
+	column = min(column, len(lineRunes))
+
+	offset := 0
+	for i := 0; i < row; i++ {
+		offset += len(lines[i]) + 1
+	}
+	return offset + len(string(lineRunes[:column]))
+}
+
+func (m *InputModel) reconcilePasteEdit(before, after string, oldStart, oldEnd int) {
+	if len(m.pasteSpans) == 0 || before == after {
+		return
+	}
+	oldStart = min(max(oldStart, 0), len(before))
+	oldEnd = min(max(oldEnd, oldStart), len(before))
+	delta := len(after) - len(before)
+	next := make([]pasteSpan, 0, len(m.pasteSpans))
+	for _, span := range m.pasteSpans {
+		content, exists := m.pastes[span.id]
+		label := pasteDisplayLabel(span.id, content)
+		if !exists || span.start < 0 || span.end > len(before) || span.start >= span.end || before[span.start:span.end] != label {
+			continue
+		}
+		switch {
+		case oldEnd <= span.start:
+			span.start += delta
+			span.end += delta
+			next = append(next, span)
+		case oldStart >= span.end:
+			next = append(next, span)
+		default:
+			// Any edit inside a chip turns the remaining text into ordinary
+			// literal text. It must never expand to hidden content later.
+		}
+	}
+	m.pasteSpans = next
+}
+
+func (m *InputModel) reconcilePasteChange(before, after string, prefixLimit int) {
+	if before == after {
+		return
+	}
+	prefixLimit = min(max(prefixLimit, 0), min(len(before), len(after)))
+	start := 0
+	for start < prefixLimit && before[start] == after[start] {
+		start++
+	}
+	oldEnd, newEnd := len(before), len(after)
+	for oldEnd > start && newEnd > start && before[oldEnd-1] == after[newEnd-1] {
+		oldEnd--
+		newEnd--
+	}
+	m.reconcilePasteEdit(before, after, start, oldEnd)
+}
+
+func (m *InputModel) updateTextarea(msg tea.Msg) tea.Cmd {
+	before := m.textarea.Value()
+	beforeCursor := textareaCursorByteOffset(m.textarea)
+	var cmd tea.Cmd
+	m.textarea, cmd = m.textarea.Update(msg)
+	after := m.textarea.Value()
+	afterCursor := textareaCursorByteOffset(m.textarea)
+	m.reconcilePasteChange(before, after, min(beforeCursor, afterCursor))
+	return cmd
+}
+
+func graphemeRangeAtCursor(value string, cursor int, forward bool) (int, int, bool) {
+	if cursor < 0 || cursor > len(value) {
+		return 0, 0, false
+	}
+	graphemes := uniseg.NewGraphemes(value)
+	for graphemes.Next() {
+		start, end := graphemes.Positions()
+		if (forward && cursor >= start && cursor < end) || (!forward && cursor > start && cursor <= end) {
+			return start, end, true
+		}
+	}
+	return 0, 0, false
+}
+
+func (m *InputModel) deleteComposerGrapheme(forward bool) (tea.Cmd, bool) {
+	before := m.textarea.Value()
+	cursor := textareaCursorByteOffset(m.textarea)
+	clusterStart, clusterEnd, ok := graphemeRangeAtCursor(before, cursor, forward)
+	if !ok {
+		return nil, false
+	}
+
+	forwardCount := utf8.RuneCountInString(before[cursor:clusterEnd])
+	backwardCount := utf8.RuneCountInString(before[clusterStart:cursor])
+	cmds := make([]tea.Cmd, 0, forwardCount+backwardCount)
+	// Delete the part after an inside-cluster caret first, then the part before
+	// it. Running the textarea's native edits preserves its viewport and cursor
+	// blink bookkeeping while still treating the full EGC as one editing unit.
+	for range forwardCount {
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(tea.KeyMsg{Type: tea.KeyDelete})
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	for range backwardCount {
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	after := m.textarea.Value()
+	m.reconcilePasteEdit(before, after, clusterStart, clusterEnd)
+	return tea.Batch(cmds...), true
+}
+
+func (m InputModel) graphemeDeleteDirection(msg tea.KeyMsg) (forward, matched bool) {
+	switch {
+	case key.Matches(msg, m.textarea.KeyMap.DeleteCharacterBackward):
+		return false, true
+	case key.Matches(msg, m.textarea.KeyMap.DeleteCharacterForward):
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func (m *InputModel) refreshCompletionStateForValue() {
+	value := m.textarea.Value()
+	if word, ok := atFileWord(value); ok {
+		m.suggestionType = SuggestionAtFile
+		m.updateAtFileSuggestions(word)
+		m.showArgHints = false
+		m.currentCommand = nil
+	} else if strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
+		m.suggestionType = SuggestionCommand
+		m.updateSuggestions(value)
+		m.showArgHints = false
+		m.currentCommand = nil
+	} else if m.updateArgumentSuggestions(value) {
+		// Structured option completion takes precedence over path heuristics.
+	} else if m.shouldSuggestFiles(value) {
+		m.suggestionType = SuggestionFile
+		m.updateFileSuggestions(value)
+	} else {
+		m.showSuggestions = false
+		m.suggestions = nil
+		m.argSuggestions = nil
+		m.suggestionArg = ""
+		m.fileSuggestions = nil
+		m.ghostText = ""
+		m.suggestionNotice = ""
+		if !strings.HasPrefix(value, "/") {
+			m.showArgHints = false
+			m.currentCommand = nil
+		}
+	}
 }
 
 // Update handles input events.
@@ -459,14 +696,43 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 		if msg.Paste && isLargePaste(string(msg.Runes)) {
 			return m.collapsePaste(string(msg.Runes)), nil
 		}
+		if forward, matched := m.graphemeDeleteDirection(msg); matched {
+			cmd, deleted := m.deleteComposerGrapheme(forward)
+			if deleted {
+				m.syncTextareaHeight()
+				m.refreshCompletionStateForValue()
+				return m, cmd
+			}
+		}
 
 		switch msg.Type {
 		case tea.KeyCtrlR:
 			// Enter history search mode
+			if m.historyIndex == -1 {
+				// Keep the live draft behind accepted history navigation. After
+				// choosing a match, Down can walk forward and return to it.
+				m.savedInput = m.textarea.Value()
+				m.savedPasteSpans = clonePasteSpans(m.pasteSpans)
+			}
 			m.historySearchMode = true
 			m.historySearchQuery = ""
 			m.historySearchResult = ""
 			m.historySearchIndex = len(m.history)
+			m.syncTextareaHeight()
+			if !m.historySearchSurfaceReadable() {
+				m.leaveHistorySearch()
+				m.syncTextareaHeight()
+				return m, nil
+			}
+			m.showSuggestions = false
+			m.suggestions = nil
+			m.argSuggestions = nil
+			m.suggestionArg = ""
+			m.fileSuggestions = nil
+			m.ghostText = ""
+			m.suggestionNotice = ""
+			m.showArgHints = false
+			m.currentCommand = nil
 			return m, nil
 
 		case tea.KeyTab:
@@ -474,16 +740,22 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 			if m.ghostText != "" && !m.showSuggestions {
 				m.textarea.SetValue(m.textarea.Value() + m.ghostText)
 				m.textarea.CursorEnd()
+				m.syncTextareaHeight()
 				m.ghostText = ""
 				return m, nil
 			}
 
 			// Accept suggestion from dropdown
 			if m.showSuggestions {
+				if !m.suggestionActionsReadable() {
+					m.clearCompletionState()
+					return m, nil
+				}
 				if m.suggestionType == SuggestionCommand && len(m.suggestions) > 0 {
 					selected := m.suggestions[m.suggestionIndex]
 					m.textarea.SetValue("/" + selected.Name + " ")
 					m.textarea.CursorEnd()
+					m.syncTextareaHeight()
 					m.showSuggestions = false
 					m.suggestions = nil
 					m.ghostText = ""
@@ -516,6 +788,7 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 					selected := m.suggestions[0]
 					m.textarea.SetValue("/" + selected.Name + " ")
 					m.textarea.CursorEnd()
+					m.syncTextareaHeight()
 					m.showSuggestions = false
 					m.suggestions = nil
 					m.ghostText = ""
@@ -534,6 +807,13 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 			return m, nil
 
 		case tea.KeyEnter:
+			if m.showSuggestions && !m.suggestionActionsReadable() {
+				// A cropped dropdown must not own Enter: the parent model can
+				// submit the draft as typed, while direct InputModel use consumes
+				// the key without inserting a textarea newline.
+				m.clearCompletionState()
+				return m, nil
+			}
 			if m.showSuggestions && m.suggestionType == SuggestionArgument {
 				// Model.Update normally consumes submission before forwarding the
 				// key. If InputModel is used directly, still never let Enter insert
@@ -549,6 +829,7 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 					selected := m.suggestions[m.suggestionIndex]
 					m.textarea.SetValue("/" + selected.Name + " ")
 					m.textarea.CursorEnd()
+					m.syncTextareaHeight()
 					m.showSuggestions = false
 					m.suggestions = nil
 					m.ghostText = ""
@@ -569,6 +850,10 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 		case tea.KeyUp:
 			// Navigate suggestions or history
 			if m.showSuggestions {
+				if !m.suggestionActionsReadable() {
+					m.clearCompletionState()
+					return m, nil
+				}
 				count := 0
 				if m.suggestionType == SuggestionCommand {
 					count = len(m.suggestions)
@@ -582,19 +867,22 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if !m.onFirstComposerVisualLine() {
+				break
+			}
 			// Navigate to older history (rest of logic continues...)
 			// Navigate to older history
 			if len(m.history) > 0 {
 				if m.historyIndex == -1 {
 					m.savedInput = m.textarea.Value()
+					m.savedPasteSpans = clonePasteSpans(m.pasteSpans)
 					m.historyIndex = len(m.history) - 1
 				} else if m.historyIndex > 0 {
 					m.historyIndex--
 				}
 				// Bounds check: historyIndex may exceed len if history was externally trimmed
 				if m.historyIndex >= 0 && m.historyIndex < len(m.history) {
-					m.textarea.SetValue(m.history[m.historyIndex])
-					m.textarea.CursorEnd()
+					m.setRecalledValue(m.history[m.historyIndex])
 				} else {
 					m.historyIndex = -1
 				}
@@ -604,6 +892,10 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 		case tea.KeyDown:
 			// Navigate suggestions or history
 			if m.showSuggestions {
+				if !m.suggestionActionsReadable() {
+					m.clearCompletionState()
+					return m, nil
+				}
 				count := 0
 				if m.suggestionType == SuggestionCommand {
 					count = len(m.suggestions)
@@ -617,21 +909,23 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if !m.onLastComposerVisualLine() {
+				break
+			}
 			// Navigate to newer history
 			if m.historyIndex >= 0 {
 				if m.historyIndex < len(m.history)-1 {
 					m.historyIndex++
 					if m.historyIndex < len(m.history) {
-						m.textarea.SetValue(m.history[m.historyIndex])
+						m.setRecalledValue(m.history[m.historyIndex])
 					} else {
 						m.historyIndex = -1
-						m.textarea.SetValue(m.savedInput)
+						m.restoreSavedInput()
 					}
 				} else {
 					m.historyIndex = -1
-					m.textarea.SetValue(m.savedInput)
+					m.restoreSavedInput()
 				}
-				m.textarea.CursorEnd()
 			}
 			return m, nil
 
@@ -656,64 +950,68 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 			return m, nil
 		}
 
-		// Update textarea and check for suggestion updates
-		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg)
-
-		// Update suggestions based on input
-		value := m.textarea.Value()
-		if word, ok := atFileWord(value); ok {
-			m.suggestionType = SuggestionAtFile
-			m.updateAtFileSuggestions(word)
-			m.showArgHints = false
-			m.currentCommand = nil
-		} else if strings.HasPrefix(value, "/") && !strings.Contains(value, " ") {
-			m.suggestionType = SuggestionCommand
-			m.updateSuggestions(value)
-			// Clear arg hints when typing command
-			m.showArgHints = false
-			m.currentCommand = nil
-		} else if m.updateArgumentSuggestions(value) {
-			// Structured option completion takes precedence over path heuristics.
-		} else if m.shouldSuggestFiles(value) {
-			m.suggestionType = SuggestionFile
-			m.updateFileSuggestions(value)
-		} else {
-			m.showSuggestions = false
-			m.suggestions = nil
-			m.argSuggestions = nil
-			m.suggestionArg = ""
-			m.fileSuggestions = nil
-			m.ghostText = ""
-			m.suggestionNotice = ""
-			// Clear arg hints when not in command context
-			if !strings.HasPrefix(value, "/") {
-				m.showArgHints = false
-				m.currentCommand = nil
-			}
+		// Update textarea and check for suggestion updates.
+		beforeValue := m.textarea.Value()
+		cmd := m.updateTextarea(msg)
+		m.syncTextareaHeight()
+		if m.textarea.Value() != beforeValue {
+			m.refreshCompletionStateForValue()
 		}
 
 		return m, cmd
 	}
 
-	var cmd tea.Cmd
-	m.textarea, cmd = m.textarea.Update(msg)
+	cmd := m.updateTextarea(msg)
+	m.syncTextareaHeight()
+	return m, cmd
+}
+
+// updateDecisionEditor is the plain multiline editor path used by question and
+// plan-feedback modals. Those fields have no command suggestions or history;
+// routing through the main composer would consume Up/Down for an empty history
+// and make earlier lines unreachable. It also keeps pasted answers literal
+// instead of collapsing them into composer-only paste chips.
+func (m InputModel) updateDecisionEditor(msg tea.Msg) (InputModel, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if forward, matched := m.graphemeDeleteDirection(keyMsg); matched {
+			cmd, deleted := m.deleteComposerGrapheme(forward)
+			if deleted {
+				m.syncTextareaHeight()
+				return m, cmd
+			}
+		}
+	}
+	cmd := m.updateTextarea(msg)
+	m.syncTextareaHeight()
 	return m, cmd
 }
 
 // handleHistorySearch handles key events in history search mode.
 func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
+	if key.Matches(msg, m.textarea.KeyMap.DeleteCharacterBackward) {
+		// Remove one user-perceived character. A skin-tone emoji, combining
+		// sequence, or ZWJ family is one editing unit even though it contains
+		// multiple runes. Match the textarea keymap so Backspace and its Ctrl+H
+		// alias retain identical semantics when InputModel is used directly.
+		if len(m.historySearchQuery) > 0 {
+			m.historySearchQuery = removeLastGrapheme(m.historySearchQuery)
+			m.historySearchIndex = len(m.history)
+			m.searchHistory(false)
+		}
+		return m, nil
+	}
 	switch msg.Type {
 	case tea.KeyEnter:
 		// Accept search result
 		if m.historySearchResult != "" {
-			m.textarea.SetValue(m.historySearchResult)
-			m.textarea.CursorEnd()
+			m.setRecalledValue(m.historySearchResult)
+			m.historyIndex = m.historySearchIndex
 		}
 		m.historySearchMode = false
 		m.historySearchQuery = ""
 		m.historySearchResult = ""
 		m.historySearchIndex = -1
+		m.syncTextareaHeight()
 		return m, nil
 
 	case tea.KeyEscape, tea.KeyCtrlC:
@@ -722,6 +1020,7 @@ func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
 		m.historySearchQuery = ""
 		m.historySearchResult = ""
 		m.historySearchIndex = -1
+		m.syncTextareaHeight()
 		return m, nil
 
 	case tea.KeyCtrlR:
@@ -729,7 +1028,7 @@ func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
 		if m.historySearchIndex > 0 {
 			previousResult := m.historySearchResult
 			previousIndex := m.historySearchIndex
-			m.searchHistory()
+			m.searchHistory(true)
 			if m.historySearchResult == "" && previousResult != "" {
 				m.historySearchResult = previousResult
 				m.historySearchIndex = previousIndex
@@ -737,14 +1036,12 @@ func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyBackspace:
-		// Remove last character from query
-		if len(m.historySearchQuery) > 0 {
-			_, size := utf8.DecodeLastRuneInString(m.historySearchQuery)
-			m.historySearchQuery = m.historySearchQuery[:len(m.historySearchQuery)-size]
-			m.historySearchIndex = len(m.history)
-			m.searchHistory()
-		}
+	case tea.KeySpace:
+		// Bubble Tea reports a physical space as KeySpace, not KeyRunes. Keep
+		// multi-word reverse search usable with real terminal key events.
+		m.historySearchQuery += " "
+		m.historySearchIndex = len(m.history)
+		m.searchHistory(false)
 		return m, nil
 
 	default:
@@ -752,10 +1049,17 @@ func (m InputModel) handleHistorySearch(msg tea.KeyMsg) (InputModel, tea.Cmd) {
 		if msg.Type == tea.KeyRunes {
 			m.historySearchQuery += sanitizeHistorySearchText(string(msg.Runes))
 			m.historySearchIndex = len(m.history)
-			m.searchHistory()
+			m.searchHistory(false)
 		}
 		return m, nil
 	}
+}
+
+func (m *InputModel) leaveHistorySearch() {
+	m.historySearchMode = false
+	m.historySearchQuery = ""
+	m.historySearchResult = ""
+	m.historySearchIndex = -1
 }
 
 func sanitizeHistorySearchText(value string) string {
@@ -771,16 +1075,28 @@ func sanitizeHistorySearchText(value string) string {
 	}, value)
 }
 
-// searchHistory searches history for the current query.
-func (m *InputModel) searchHistory() {
-	if m.historySearchQuery == "" {
+func removeLastGrapheme(value string) string {
+	lastStart := 0
+	graphemes := uniseg.NewGraphemes(value)
+	for graphemes.Next() {
+		lastStart, _ = graphemes.Positions()
+	}
+	return value[:lastStart]
+}
+
+// searchHistory searches history for the current query. allowEmpty is used by
+// an explicit repeated Ctrl+R, where an empty query means "older entry" just
+// like conventional reverse-search; editing the query back to empty restores
+// the neutral placeholder instead.
+func (m *InputModel) searchHistory(allowEmpty bool) {
+	if m.historySearchQuery == "" && !allowEmpty {
 		m.historySearchResult = ""
 		return
 	}
 
 	query := strings.ToLower(m.historySearchQuery)
 	for i := m.historySearchIndex - 1; i >= 0; i-- {
-		if strings.Contains(strings.ToLower(m.history[i]), query) {
+		if query == "" || strings.Contains(strings.ToLower(m.history[i]), query) {
 			m.historySearchResult = m.history[i]
 			m.historySearchIndex = i
 			return
@@ -788,6 +1104,48 @@ func (m *InputModel) searchHistory() {
 	}
 	// No match found
 	m.historySearchResult = ""
+}
+
+func (m InputModel) historySearchCanSearchOlder() bool {
+	if m.historySearchIndex <= 0 {
+		return false
+	}
+	query := strings.ToLower(m.historySearchQuery)
+	for i := m.historySearchIndex - 1; i >= 0; i-- {
+		if query == "" || strings.Contains(strings.ToLower(m.history[i]), query) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *InputModel) setRecalledValue(value string) {
+	// History deliberately stores the expanded message so recalling and
+	// resubmitting a paste sends the original content. Re-collapse large
+	// entries for display, though: expanding them into the textarea defeats
+	// the compact-paste UX and can fill the screen. Do not Reset here — the
+	// current draft may itself contain chips whose stored content must survive
+	// until Down returns to it.
+	m.clearCompletionState()
+	m.pasteSpans = nil
+	if isLargePaste(value) {
+		m.textarea.SetValue("")
+		m.textarea.CursorEnd()
+		*m = m.collapsePaste(value)
+		m.textarea.SetHeight(1)
+		return
+	}
+	m.textarea.SetValue(value)
+	m.textarea.CursorEnd()
+	m.syncTextareaHeight()
+}
+
+func (m *InputModel) restoreSavedInput() {
+	m.textarea.SetValue(m.savedInput)
+	m.textarea.CursorEnd()
+	m.pasteSpans = clonePasteSpans(m.savedPasteSpans)
+	m.clearCompletionState()
+	m.syncTextareaHeight()
 }
 
 // fuzzyScore calculates a fuzzy match score for a query against a string.
@@ -953,7 +1311,7 @@ func (m *InputModel) updateArgumentSuggestions(value string) bool {
 
 	var options []string
 	if argIndex >= 0 && argIndex < len(command.Args) {
-		options = append(options, command.Args[argIndex].Options...)
+		options = append(options, argumentOptionsForContext(command.Args[argIndex], argIndex, value)...)
 		m.suggestionArg = command.Args[argIndex].Name
 	}
 	// Flags may legally appear after positional values for several commands.
@@ -994,6 +1352,26 @@ func (m *InputModel) updateArgumentSuggestions(value string) bool {
 	m.suggestionIndex = 0
 	m.showSuggestions = true
 	return true
+}
+
+func argumentOptionsForContext(arg ArgInfo, argIndex int, value string) []string {
+	options := arg.Options
+	if argIndex <= 0 || len(arg.OptionsByPrevious) == 0 {
+		return options
+	}
+	fields := splitInputFields(value)
+	// fields[0] is the slash command; the previous argument for argIndex N is
+	// therefore fields[N] whenever it has already been entered.
+	if argIndex >= len(fields) {
+		return options
+	}
+	previous := strings.ToLower(strings.TrimSpace(fields[argIndex]))
+	for key, contextual := range arg.OptionsByPrevious {
+		if strings.EqualFold(strings.TrimSpace(key), previous) {
+			return contextual
+		}
+	}
+	return options
 }
 
 func (m InputModel) commandArgumentContext(value string) (CommandInfo, int, string, bool) {
@@ -1091,6 +1469,7 @@ func (m *InputModel) acceptArgumentSuggestion(option string) {
 	}
 	m.textarea.SetValue(value)
 	m.textarea.CursorEnd()
+	m.syncTextareaHeight()
 	m.argSuggestions = nil
 	m.suggestionArg = ""
 	m.showSuggestions = false
@@ -1310,49 +1689,30 @@ func (m InputModel) searchFilesFuzzy(query string) []string {
 // View renders the input component.
 func (m InputModel) View() string {
 	var result strings.Builder
+	auxiliaryRows := m.auxiliaryRowBudget()
 
 	// Show history search mode
 	if m.historySearchMode {
-		searchStyle := lipgloss.NewStyle().
-			Foreground(ColorSecondary).
-			Bold(true)
-
-		queryStyle := lipgloss.NewStyle().
-			Foreground(ColorText)
-
-		resultStyle := lipgloss.NewStyle().
-			Foreground(ColorMuted)
-
-		width := max(m.textarea.Width(), 1)
-		query := m.historySearchQuery
-		if query == "" {
-			query = "Type to search previous messages"
+		if search := m.renderHistorySearch(auxiliaryRows); search != "" {
+			result.WriteString(search)
+			result.WriteString("\n")
 		}
-		result.WriteString(searchStyle.Render(truncateForWidth("History search · "+query, width)))
-		result.WriteString("\n")
-		if m.historySearchResult != "" {
-			match := safeKeyEntryText(m.historySearchResult)
-			result.WriteString(resultStyle.Render(truncateForWidth("Match · "+match, width)))
-		} else if m.historySearchQuery != "" {
-			result.WriteString(resultStyle.Render(truncateForWidth("No matching history", width)))
-		} else {
-			result.WriteString(queryStyle.Render(truncateForWidth("Start typing to filter", width)))
-		}
-		result.WriteString("\n")
-		result.WriteString(resultStyle.Render(truncateForWidth("Ctrl+R older · Enter use · Esc cancel", width)))
-		result.WriteString("\n")
 	}
 
 	// Show autocomplete suggestions. Each suggestion kind owns a separate slice
 	// so command metadata, argument options, and filesystem paths cannot be
 	// mistaken for one another during rendering or acceptance.
 	if m.showSuggestions && (len(m.suggestions) > 0 || len(m.argSuggestions) > 0 || len(m.fileSuggestions) > 0) {
-		suggestionBox := m.renderSuggestions()
-		result.WriteString(suggestionBox)
-		result.WriteString("\n")
+		suggestionBox := m.renderSuggestionsWithin(auxiliaryRows)
+		if suggestionBox != "" {
+			result.WriteString(suggestionBox)
+			result.WriteString("\n")
+		}
 	} else if m.suggestionNotice != "" {
-		result.WriteString(m.renderSuggestionNotice())
-		result.WriteString("\n")
+		if notice := m.renderSuggestionNoticeWithin(auxiliaryRows); notice != "" {
+			result.WriteString(notice)
+			result.WriteString("\n")
+		}
 	}
 
 	// Show argument hints after command
@@ -1374,6 +1734,75 @@ func (m InputModel) View() string {
 	return result.String()
 }
 
+func (m InputModel) renderHistorySearch(maxRows int) string {
+	if maxRows == 0 {
+		return ""
+	}
+	searchStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+	queryStyle := lipgloss.NewStyle().Foreground(ColorText)
+	resultStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	width := max(m.textarea.Width(), 1)
+
+	query := m.historySearchQuery
+	if query == "" {
+		query = "Type to search previous messages"
+	}
+	header := searchStyle.Render(truncateForWidth("History search · "+query, width))
+	main := "Start typing to filter"
+	mainStyle := queryStyle
+	if m.historySearchResult != "" {
+		main = "Match · " + safeKeyEntryText(m.historySearchResult)
+		mainStyle = resultStyle
+	} else if m.historySearchQuery != "" {
+		main = "No matching history"
+		mainStyle = resultStyle
+	}
+	main = truncateForWidth(main, width)
+
+	var footerVariants []string
+	switch {
+	case m.historySearchResult != "":
+		footer := "Esc cancel · Enter use"
+		if m.historySearchCanSearchOlder() {
+			footer += " · Ctrl+R older"
+			footerVariants = append(footerVariants, footer, "Esc · Enter · Ctrl+R")
+		} else {
+			footerVariants = append(footerVariants, footer)
+		}
+		footerVariants = append(footerVariants, "Esc · Enter")
+	case m.historySearchQuery != "":
+		footerVariants = []string{"Esc cancel · Keep typing", "Esc · Type"}
+	default:
+		footer := "Esc cancel"
+		if len(m.history) > 0 {
+			footer += " · Ctrl+R newest"
+		}
+		footer += " · Type to filter"
+		footerVariants = []string{footer, "Esc · Type"}
+	}
+	footerVariants = append(footerVariants, "Esc", "⎋")
+	footer := completionFooter(width, footerVariants...)
+
+	if maxRows == 1 {
+		return resultStyle.Render(truncateMiddleForWidth(ansi.Strip(mainStyle.Render(main))+" · "+footer, width))
+	}
+	if maxRows == 2 {
+		return mainStyle.Render(main) + "\n" + resultStyle.Render(footer)
+	}
+	return strings.Join([]string{header, mainStyle.Render(main), resultStyle.Render(footer)}, "\n")
+}
+
+// historySearchSurfaceReadable keeps reverse-search from becoming an invisible
+// keyboard mode in a cropped composer. Two rows keep both the current result
+// and its recovery/actions visible; the compact footer fits from 11 columns.
+func (m InputModel) historySearchSurfaceReadable() bool {
+	rows := m.auxiliaryRowBudget()
+	if rows < 0 {
+		return true
+	}
+	return rows >= 2 && m.textarea.Width() >= lipgloss.Width("Esc · Enter")
+}
+
 // renderArgHints renders argument hints for the current command.
 func (m InputModel) renderArgHints() string {
 	if m.currentCommand == nil || len(m.currentCommand.Args) == 0 {
@@ -1391,8 +1820,10 @@ func (m InputModel) renderArgHints() string {
 		// Usage is the only representation that can faithfully express flags,
 		// alternatives, and mixed optional/required ordering. ArgInfo remains the
 		// structured source for completion, while this is the human-readable hint.
-		builder.WriteString(hintStyle.Render(usage))
-		return ansi.Truncate(builder.String(), max(m.textarea.Width(), 1), "…")
+		// Two compact lines keep safety flags discoverable on narrow terminals;
+		// the former one-line truncate often hid the only destructive/recovery
+		// option at the end of a command's usage.
+		return renderUsageHint(usage, max(m.textarea.Width(), 1), hintStyle)
 	}
 
 	builder.WriteString(hintStyle.Render("/" + m.currentCommand.Name + " "))
@@ -1412,6 +1843,71 @@ func (m InputModel) renderArgHints() string {
 	return ansi.Truncate(builder.String(), max(m.textarea.Width(), 1), "…")
 }
 
+func renderUsageHint(usage string, width int, style lipgloss.Style) string {
+	if width <= 0 {
+		return ""
+	}
+	words := strings.Fields(usage)
+	if len(words) == 0 {
+		return ""
+	}
+
+	firstPrefix := "  Usage: "
+	continuationPrefix := "  ↳ "
+	if width < lipgloss.Width(firstPrefix)+4 {
+		firstPrefix = "U "
+	}
+	if width <= lipgloss.Width(continuationPrefix) {
+		continuationPrefix = " "
+	}
+
+	const maxLines = 2
+	lines := make([]string, 0, maxLines)
+	consumed := 0
+	for lineIndex := 0; lineIndex < maxLines && consumed < len(words); lineIndex++ {
+		prefix := continuationPrefix
+		if lineIndex == 0 {
+			prefix = firstPrefix
+		}
+		budget := max(width-lipgloss.Width(prefix), 1)
+		content, used := takeUsageWords(words[consumed:], budget)
+		if used == 0 {
+			break
+		}
+		consumed += used
+		if lineIndex == maxLines-1 && consumed < len(words) {
+			content = truncateForWidth(strings.TrimSpace(content)+" …", budget)
+		}
+		lines = append(lines, style.Render(prefix+content))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func takeUsageWords(words []string, width int) (string, int) {
+	if len(words) == 0 || width <= 0 {
+		return "", 0
+	}
+	var line strings.Builder
+	used := 0
+	for _, word := range words {
+		separator := ""
+		if used > 0 {
+			separator = " "
+		}
+		candidate := line.String() + separator + word
+		if lipgloss.Width(candidate) > width {
+			if used == 0 {
+				return truncateForWidth(word, width), 1
+			}
+			break
+		}
+		line.WriteString(separator)
+		line.WriteString(word)
+		used++
+	}
+	return line.String(), used
+}
+
 func (m InputModel) renderSuggestionNotice() string {
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1422,14 +1918,68 @@ func (m InputModel) renderSuggestionNotice() string {
 	lineBudget := max(m.textarea.Width()-2, 1)
 	notice := truncateForWidth(safeKeyEntryText(m.suggestionNotice), lineBudget)
 	footer := truncateForWidth("Esc dismiss · Enter send anyway", lineBudget)
-	if isUnavailablePromptNotice(m.suggestionNotice) {
+	if isUnavailablePromptNotice(m.suggestionNotice) || isSubmitCooldownNotice(m.suggestionNotice) {
 		footer = truncateForWidth("Esc dismiss · Draft preserved", lineBudget)
 	}
 	return boxStyle.Render(noticeStyle.Render(notice) + "\n" + footerStyle.Render(footer))
 }
 
+func (m InputModel) renderSuggestionNoticeWithin(maxRows int) string {
+	full := m.renderSuggestionNotice()
+	if maxRows < 0 || lipgloss.Height(full) <= maxRows {
+		return full
+	}
+	if maxRows == 0 {
+		return ""
+	}
+	width := max(m.textarea.Width(), 1)
+	notice := truncateForWidth(safeKeyEntryText(m.suggestionNotice), width)
+	if maxRows == 1 {
+		return lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(notice)
+	}
+	footer := "Esc dismiss · Enter send anyway"
+	if isUnavailablePromptNotice(m.suggestionNotice) || isSubmitCooldownNotice(m.suggestionNotice) {
+		footer = "Esc dismiss · Draft preserved"
+	}
+	return lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(notice) + "\n" +
+		lipgloss.NewStyle().Foreground(ColorDim).Render(truncateForWidth(footer, width))
+}
+
 // renderSuggestions renders the autocomplete suggestion box.
 func (m InputModel) renderSuggestions() string {
+	return m.renderSuggestionsWithin(-1)
+}
+
+func (m InputModel) renderSuggestionsWithin(maxRows int) string {
+	full := m.renderSuggestionBox()
+	var rendered string
+	if maxRows < 0 || lipgloss.Height(full) <= maxRows {
+		rendered = full
+	} else if maxRows == 0 {
+		return ""
+	} else {
+		rendered = m.renderCompactSuggestions(maxRows)
+	}
+	if maxRows >= 0 && !suggestionRenderingHasActions(rendered, m.suggestionType) {
+		return m.renderPausedSuggestions(maxRows)
+	}
+	return rendered
+}
+
+func (m InputModel) renderPausedSuggestions(maxRows int) string {
+	if maxRows <= 0 {
+		return ""
+	}
+	width := max(m.textarea.Width(), 1)
+	style := lipgloss.NewStyle().Foreground(ColorDim)
+	if maxRows == 1 {
+		return style.Render(truncateMiddleForWidth("Suggestions paused · resize · Esc", width))
+	}
+	return style.Render(truncateForWidth("Suggestions paused", width)) + "\n" +
+		style.Render(completionFooter(width, "Resize to complete · Esc close", "Resize · Esc", "Esc"))
+}
+
+func (m InputModel) renderSuggestionBox() string {
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorBorder).
@@ -1465,6 +2015,9 @@ func (m InputModel) renderSuggestions() string {
 			start = m.suggestionIndex - maxShow + 1
 		}
 		end := min(start+maxShow, len(m.suggestions))
+		if indicator := suggestionOverflowIndicator("↑", start, lineBudget); indicator != "" {
+			lines = append(lines, descStyle.Render(indicator))
+		}
 
 		for i := start; i < end; i++ {
 			cmd := m.suggestions[i]
@@ -1497,24 +2050,24 @@ func (m InputModel) renderSuggestions() string {
 			lines = append(lines, line)
 		}
 
-		// Add scroll indicator if needed
-		if len(m.suggestions) > maxShow {
-			indicator := lipgloss.NewStyle().Foreground(ColorDim).Render(
-				fmt.Sprintf("↑↓ %d", len(m.suggestions)),
-			)
-			lines = append(lines, indicator)
+		if indicator := suggestionOverflowIndicator("↓", len(m.suggestions)-end, lineBudget); indicator != "" {
+			lines = append(lines, descStyle.Render(indicator))
 		}
 
 		if m.suggestionIndex >= 0 && m.suggestionIndex < len(m.suggestions) {
 			selected := m.suggestions[m.suggestionIndex]
-			footer := "Tab complete"
-			if selected.Usage != "" {
-				footer += " • " + selected.Usage
-			}
-			if lineBudget > 0 {
-				footer = truncateForWidth(footer, lineBudget)
-			}
+			footer := completionFooter(lineBudget,
+				"Enter/Tab complete · Esc close",
+				"Enter/Tab · Esc",
+			)
 			lines = append(lines, descStyle.Render(footer))
+			if selected.Usage != "" {
+				usage := "Usage: " + strings.Join(strings.Fields(selected.Usage), " ")
+				if lineBudget > 0 {
+					usage = truncateForWidth(usage, lineBudget)
+				}
+				lines = append(lines, descStyle.Render(usage))
+			}
 		}
 	} else if m.suggestionType == SuggestionArgument {
 		if len(m.argSuggestions) < maxShow {
@@ -1525,6 +2078,9 @@ func (m InputModel) renderSuggestions() string {
 			start = m.suggestionIndex - maxShow + 1
 		}
 		end := min(start+maxShow, len(m.argSuggestions))
+		if indicator := suggestionOverflowIndicator("↑", start, lineBudget); indicator != "" {
+			lines = append(lines, descStyle.Render(indicator))
+		}
 		for i := start; i < end; i++ {
 			style := normalStyle
 			prefix := "  "
@@ -1538,16 +2094,14 @@ func (m InputModel) renderSuggestions() string {
 			}
 			lines = append(lines, prefix+style.Render(option))
 		}
-		if len(m.argSuggestions) > maxShow {
-			lines = append(lines, descStyle.Render(fmt.Sprintf("↑↓ %d", len(m.argSuggestions))))
+		if indicator := suggestionOverflowIndicator("↓", len(m.argSuggestions)-end, lineBudget); indicator != "" {
+			lines = append(lines, descStyle.Render(indicator))
 		}
-		footer := "Tab complete · Enter run as typed"
-		if m.suggestionArg != "" {
-			footer += " · " + m.suggestionArg
-		}
-		if lineBudget > 0 {
-			footer = truncateForWidth(footer, lineBudget)
-		}
+		footer := completionFooter(lineBudget,
+			"Tab complete · Enter run as typed · Esc close",
+			"Tab add · Enter run · Esc",
+			"Tab/Enter · Esc",
+		)
 		lines = append(lines, descStyle.Render(footer))
 	} else {
 		// File suggestions
@@ -1560,6 +2114,9 @@ func (m InputModel) renderSuggestions() string {
 			start = m.suggestionIndex - maxShow + 1
 		}
 		end := min(start+maxShow, len(m.fileSuggestions))
+		if indicator := suggestionOverflowIndicator("↑", start, lineBudget); indicator != "" {
+			lines = append(lines, descStyle.Render(indicator))
+		}
 
 		for i := start; i < end; i++ {
 			path := m.fileSuggestions[i]
@@ -1582,16 +2139,158 @@ func (m InputModel) renderSuggestions() string {
 			lines = append(lines, line)
 		}
 
-		if len(m.fileSuggestions) > maxShow {
-			indicator := lipgloss.NewStyle().Foreground(ColorDim).Render(
-				fmt.Sprintf("↑↓ %d", len(m.fileSuggestions)),
-			)
-			lines = append(lines, indicator)
+		if indicator := suggestionOverflowIndicator("↓", len(m.fileSuggestions)-end, lineBudget); indicator != "" {
+			lines = append(lines, descStyle.Render(indicator))
 		}
-		lines = append(lines, descStyle.Render("Tab insert path"))
+		lines = append(lines, descStyle.Render(completionFooter(lineBudget,
+			"Enter/Tab insert path · Esc close",
+			"Enter/Tab add · Esc",
+			"Enter/Tab · Esc",
+		)))
 	}
 
 	return boxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// renderCompactSuggestions keeps the selected completion and its real actions
+// visible when a bordered dropdown would be cropped by a short terminal. The
+// current row is always included; neighboring rows use only leftover space.
+func (m InputModel) renderCompactSuggestions(maxRows int) string {
+	if maxRows <= 0 {
+		return ""
+	}
+	width := max(m.textarea.Width(), 1)
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary)
+	normalStyle := lipgloss.NewStyle().Foreground(ColorText)
+	footerStyle := lipgloss.NewStyle().Foreground(ColorDim)
+
+	var labels []string
+	selected := m.suggestionIndex
+	footer := "Enter/Tab complete · Esc close"
+	switch m.suggestionType {
+	case SuggestionCommand:
+		for _, command := range m.suggestions {
+			labels = append(labels, "/"+safeKeyEntryText(command.Name))
+		}
+	case SuggestionArgument:
+		for _, option := range m.argSuggestions {
+			labels = append(labels, safeKeyEntryText(option))
+		}
+		footer = "Tab complete · Enter run · Esc close"
+	default:
+		for _, path := range m.fileSuggestions {
+			rel, err := filepath.Rel(m.workDir, path)
+			if err != nil {
+				rel = path
+			}
+			labels = append(labels, safeKeyEntryText(rel))
+		}
+		footer = "Enter/Tab insert · Esc close"
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	selected = min(max(selected, 0), len(labels)-1)
+	if maxRows == 1 {
+		// One spare row is still enough for a truthful completion surface when
+		// the selected identity and the real keys fit together. Otherwise show
+		// only recovery guidance; accepting a cropped, unidentified target is
+		// worse than temporarily pausing completion.
+		actions := "Enter/Tab · Esc"
+		if m.suggestionType == SuggestionArgument {
+			actions = "Tab · Enter run · Esc"
+		}
+		prefix := "> "
+		suffix := " · " + actions
+		labelBudget := width - lipgloss.Width(prefix) - lipgloss.Width(suffix)
+		if labelBudget < 4 {
+			return footerStyle.Render(truncateMiddleForWidth("Suggestions paused · resize · Esc", width))
+		}
+		label := truncateMiddleForWidth(labels[selected], labelBudget)
+		return prefix + selectedStyle.Render(label) + footerStyle.Render(suffix)
+	}
+
+	rowCapacity := maxRows
+	rowCapacity-- // keep one row for actions/recovery
+	rowCapacity = min(max(rowCapacity, 1), len(labels))
+	start := min(max(selected-rowCapacity+1, 0), len(labels)-rowCapacity)
+	end := start + rowCapacity
+	lines := make([]string, 0, maxRows)
+	for i := start; i < end; i++ {
+		prefix := "  "
+		style := normalStyle
+		if i == selected {
+			prefix = "> "
+			style = selectedStyle
+		}
+		position := ""
+		if len(labels) > 1 {
+			position = fmt.Sprintf(" %d/%d", i+1, len(labels))
+		}
+		labelBudget := max(width-lipgloss.Width(prefix)-lipgloss.Width(position), 1)
+		label := truncateMiddleForWidth(labels[i], labelBudget)
+		lines = append(lines, prefix+style.Render(label)+footerStyle.Render(position))
+	}
+	if maxRows > 1 {
+		lines = append(lines, footerStyle.Render(truncateForWidth(footer, width)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// suggestionActionsReadable reports whether the constrained composer actually
+// renders both the selected target and the keys that will operate on it. An
+// unconstrained reusable InputModel retains its container-owned behavior.
+func (m InputModel) suggestionActionsReadable() bool {
+	rows := m.auxiliaryRowBudget()
+	if rows < 0 {
+		return true
+	}
+	if rows == 0 {
+		return false
+	}
+	return suggestionRenderingHasActions(m.renderSuggestionsWithin(rows), m.suggestionType)
+}
+
+func suggestionRenderingHasActions(rendered string, suggestionType SuggestionType) bool {
+	plain := ansi.Strip(rendered)
+	selectedVisible := false
+	actionsVisible := false
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "> ") {
+			selectedVisible = true
+		}
+		if strings.Contains(line, "Tab") && strings.Contains(line, "Enter") && strings.Contains(line, "Esc") &&
+			(suggestionType != SuggestionArgument || strings.Contains(line, "run")) {
+			actionsVisible = true
+		}
+	}
+	return selectedVisible && actionsVisible
+}
+
+func completionFooter(width int, variants ...string) string {
+	if len(variants) == 0 {
+		return ""
+	}
+	if width <= 0 {
+		return variants[0]
+	}
+	for _, variant := range variants {
+		if lipgloss.Width(variant) <= width {
+			return variant
+		}
+	}
+	return truncateForWidth(variants[len(variants)-1], width)
+}
+
+func suggestionOverflowIndicator(direction string, hidden, width int) string {
+	if hidden <= 0 {
+		return ""
+	}
+	indicator := fmt.Sprintf("%s %d more", direction, hidden)
+	if width > 0 {
+		indicator = truncateForWidth(indicator, width)
+	}
+	return indicator
 }
 
 // Value returns the current input value.
@@ -1605,9 +2304,6 @@ const (
 	pasteCollapseMinLines = 4   // ≥ this many lines → collapse
 	pasteCollapseMinChars = 400 // …or a single line ≥ this many runes
 )
-
-// pastePlaceholderRe matches the chips collapsePaste produces, for ExpandedValue.
-var pastePlaceholderRe = regexp.MustCompile(`\[Pasted text #(\d+) \+\d+ (?:lines?|chars?)\]`)
 
 // isLargePaste reports whether a bracketed paste is big enough to collapse into
 // a chip rather than insert verbatim.
@@ -1626,9 +2322,10 @@ func pasteUnit(n int, singular string) string {
 	return singular + "s"
 }
 
-// pastePlaceholder is the compact chip shown in the input for a collapsed paste.
-// Round-tripped by pastePlaceholderRe / ExpandedValue.
-func pastePlaceholder(id int, text string) string {
+// pasteDisplayLabel is the compact, entirely user-visible label shown in the
+// textarea. It is deliberately not an expansion token: pasteSpan carries the
+// out-of-band identity, so typing this exact label remains literal text.
+func pasteDisplayLabel(id int, text string) string {
 	if nl := strings.Count(text, "\n"); nl > 0 {
 		lines := nl + 1
 		return fmt.Sprintf("[Pasted text #%d +%d %s]", id, lines, pasteUnit(lines, "line"))
@@ -1645,7 +2342,17 @@ func (m InputModel) collapsePaste(text string) InputModel {
 	m.pasteSeq++
 	id := m.pasteSeq
 	m.pastes[id] = text
-	m.textarea.InsertString(pastePlaceholder(id, text))
+	label := pasteDisplayLabel(id, text)
+	before := m.textarea.Value()
+	cursor := textareaCursorByteOffset(m.textarea)
+	m.textarea.InsertString(label)
+	after := m.textarea.Value()
+	m.reconcilePasteEdit(before, after, cursor, cursor)
+	if cursor+len(label) <= len(after) && after[cursor:cursor+len(label)] == label {
+		m.pasteSpans = append(m.pasteSpans, pasteSpan{id: id, start: cursor, end: cursor + len(label)})
+	} else {
+		delete(m.pastes, id)
+	}
 	// The chip never begins a /command or @file, and we skip the normal
 	// post-insert suggestion refresh by returning early — so clear any open
 	// suggestion/ghost/arg-hint state here, else a dropdown that was showing
@@ -1660,6 +2367,7 @@ func (m InputModel) collapsePaste(text string) InputModel {
 	m.ghostText = ""
 	m.showArgHints = false
 	m.currentCommand = nil
+	m.syncTextareaHeight()
 	return m
 }
 
@@ -1668,30 +2376,43 @@ func (m InputModel) collapsePaste(text string) InputModel {
 // rendering, the scrollback echo, and history). A chip whose id has no stored
 // content (e.g. the user typed a lookalike) is left as-is.
 func (m InputModel) ExpandedValue() string {
-	v := m.Value()
-	if len(m.pastes) == 0 {
-		return v
+	raw := m.textarea.Value()
+	leftTrimmed := strings.TrimLeftFunc(raw, unicode.IsSpace)
+	trimStart := len(raw) - len(leftTrimmed)
+	trimmed := strings.TrimRightFunc(leftTrimmed, unicode.IsSpace)
+	trimEnd := trimStart + len(trimmed)
+	if len(m.pastes) == 0 || len(m.pasteSpans) == 0 || trimStart == trimEnd {
+		return trimmed
 	}
-	return pastePlaceholderRe.ReplaceAllStringFunc(v, func(chip string) string {
-		sm := pastePlaceholderRe.FindStringSubmatch(chip)
-		if sm == nil {
-			return chip
+
+	spans := clonePasteSpans(m.pasteSpans)
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	var expanded strings.Builder
+	cursor := trimStart
+	for _, span := range spans {
+		content, ok := m.pastes[span.id]
+		label := pasteDisplayLabel(span.id, content)
+		if !ok || span.start < cursor || span.start < trimStart || span.end > trimEnd ||
+			span.start >= span.end || raw[span.start:span.end] != label {
+			continue
 		}
-		id, _ := strconv.Atoi(sm[1])
-		if content, ok := m.pastes[id]; ok {
-			return content
-		}
-		return chip
-	})
+		expanded.WriteString(raw[cursor:span.start])
+		expanded.WriteString(content)
+		cursor = span.end
+	}
+	expanded.WriteString(raw[cursor:trimEnd])
+	return expanded.String()
 }
 
 // Reset clears the input and optionally saves to history.
 func (m *InputModel) Reset() {
 	m.textarea.Reset()
-	m.textarea.SetHeight(1) // Shrink back to single line after send
+	m.syncTextareaHeight() // Shrink back to single line after send
 	m.historyIndex = -1
 	m.savedInput = ""
 	m.pastes = nil // drop collapsed-paste content for the next compose
+	m.pasteSpans = nil
+	m.savedPasteSpans = nil
 	m.pasteSeq = 0
 	m.suggestions = nil
 	m.argSuggestions = nil
@@ -1712,13 +2433,24 @@ func (m *InputModel) Reset() {
 // InsertNewline adds a newline at the cursor position and grows the input height.
 // Used for multi-line input with Alt+Enter.
 func (m *InputModel) InsertNewline() {
+	before := m.textarea.Value()
+	cursor := textareaCursorByteOffset(m.textarea)
 	m.textarea.InsertString("\n")
-	// Grow height to fit content, up to maxInputLines
-	const maxInputLines = 6
-	lines := min(strings.Count(m.textarea.Value(), "\n")+1, maxInputLines)
-	if lines > 1 {
-		m.textarea.SetHeight(lines)
-	}
+	m.reconcilePasteEdit(before, m.textarea.Value(), cursor, cursor)
+	m.syncTextareaHeight()
+	// A newline ends the token that produced autocomplete. Keeping the old
+	// dropdown alive lets the same Alt+Enter event accept its highlighted row
+	// after inserting the newline, replacing or extending the user's draft.
+	m.showSuggestions = false
+	m.suggestions = nil
+	m.argSuggestions = nil
+	m.suggestionArg = ""
+	m.fileSuggestions = nil
+	m.suggestionIndex = 0
+	m.ghostText = ""
+	m.suggestionNotice = ""
+	m.showArgHints = false
+	m.currentCommand = nil
 }
 
 // InsertFileReferences appends file-browser selections to the composer as
@@ -1759,7 +2491,7 @@ func (m *InputModel) InsertFileReferences(paths []string, workDir string) int {
 	value += strings.Join(references, " ") + " "
 	m.textarea.SetValue(value)
 	m.textarea.CursorEnd()
-	m.textarea.SetHeight(min(strings.Count(value, "\n")+1, 6))
+	m.syncTextareaHeight()
 	m.showSuggestions = false
 	m.suggestionNotice = ""
 	m.suggestions = nil
@@ -1786,8 +2518,7 @@ func (m *InputModel) RestoreDraft(value string) bool {
 	} else {
 		m.textarea.SetValue(value)
 		m.textarea.CursorEnd()
-		const maxInputLines = 6
-		m.textarea.SetHeight(min(strings.Count(value, "\n")+1, maxInputLines))
+		m.syncTextareaHeight()
 	}
 	return true
 }
@@ -1795,6 +2526,31 @@ func (m *InputModel) RestoreDraft(value string) bool {
 // Height returns the current input height in lines.
 func (m InputModel) Height() int {
 	return m.textarea.Height()
+}
+
+func (m *InputModel) syncTextareaHeight() {
+	desired := min(strings.Count(m.textarea.Value(), "\n")+1, maxComposerLines)
+	if m.historySearchMode {
+		desired = 1
+	}
+	if m.viewportHeight > 0 {
+		// Input border consumes two rows and the status bar owns the final row.
+		// The textarea then scrolls internally, keeping the cursor visible rather
+		// than letting the frame compositor cut off the top of the composer.
+		desired = min(desired, max(m.viewportHeight-3, 1))
+	}
+	desired = max(desired, 1)
+	if m.textarea.Height() != desired {
+		m.textarea.SetHeight(desired)
+	}
+}
+
+func (m InputModel) auxiliaryRowBudget() int {
+	if m.viewportHeight <= 0 {
+		return -1
+	}
+	inputRows := lipgloss.Height(m.styles.Input.Render(m.textarea.View()))
+	return max(m.viewportHeight-inputRows-1, 0)
 }
 
 // AddToHistory adds a command to the history.
@@ -1838,6 +2594,40 @@ func sanitizeHistoryEntry(entry string) string {
 // SetWidth sets the input width.
 func (m *InputModel) SetWidth(width int) {
 	m.textarea.SetWidth(max(width-4, 1)) // Account for border padding, minimum 1
+	if m.historySearchMode && !m.historySearchSurfaceReadable() {
+		m.leaveHistorySearch()
+		m.syncTextareaHeight()
+	}
+}
+
+// SetWorkDir updates the workspace used by @file and path completion. The
+// main TUI is constructed before Builder wires its real working directory, so
+// keeping this only on Model leaves production autocomplete disconnected even
+// though standalone InputModel tests work.
+func (m *InputModel) SetWorkDir(workDir string) {
+	if m.workDir == workDir {
+		return
+	}
+	m.workDir = workDir
+	// Any open filesystem suggestions belong to the previous workspace.
+	if m.suggestionType == SuggestionFile || m.suggestionType == SuggestionAtFile {
+		m.showSuggestions = false
+		m.fileSuggestions = nil
+		m.suggestionIndex = 0
+		m.ghostText = ""
+		m.suggestionNotice = ""
+	}
+}
+
+// SetViewportHeight gives the main composer a vertical budget. Reusable prompt
+// inputs leave it unset and retain their container-owned sizing behavior.
+func (m *InputModel) SetViewportHeight(height int) {
+	m.viewportHeight = max(height, 0)
+	m.syncTextareaHeight()
+	if m.historySearchMode && !m.historySearchSurfaceReadable() {
+		m.leaveHistorySearch()
+		m.syncTextareaHeight()
+	}
 }
 
 // Focus focuses the input.
@@ -1873,6 +2663,7 @@ func (m *InputModel) SetHistory(history []string) {
 	}
 	m.historyIndex = -1
 	m.savedInput = ""
+	m.savedPasteSpans = nil
 }
 
 // LoadHistory loads command history from file.
@@ -2067,6 +2858,12 @@ func cloneCommandInfo(cmd CommandInfo) CommandInfo {
 	for i := range cmd.Args {
 		clone.Args[i] = cmd.Args[i]
 		clone.Args[i].Options = append([]string(nil), cmd.Args[i].Options...)
+		if cmd.Args[i].OptionsByPrevious != nil {
+			clone.Args[i].OptionsByPrevious = make(map[string][]string, len(cmd.Args[i].OptionsByPrevious))
+			for key, options := range cmd.Args[i].OptionsByPrevious {
+				clone.Args[i].OptionsByPrevious[key] = append([]string(nil), options...)
+			}
+		}
 	}
 	return clone
 }
@@ -2086,7 +2883,7 @@ func (m *InputModel) ShowingSuggestions() bool {
 // so a highlighted destructive flag such as --force is never inserted by an
 // ordinary submit keystroke.
 func (m *InputModel) SuggestionsBlockSubmit() bool {
-	return m.showSuggestions && m.suggestionType != SuggestionArgument
+	return m.showSuggestions && m.suggestionType != SuggestionArgument && m.suggestionActionsReadable()
 }
 
 // acceptFileSuggestion replaces the last word with the selected file path.
@@ -2114,6 +2911,7 @@ func (m *InputModel) acceptFileSuggestion(path string) {
 	replacement := formatAcceptedFilePath(path, token)
 	m.textarea.SetValue(value[:token.start] + replacement + " ")
 	m.textarea.CursorEnd()
+	m.syncTextareaHeight()
 	m.showSuggestions = false
 	m.fileSuggestions = nil
 	m.ghostText = ""

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 	"sync"
@@ -94,16 +95,18 @@ func NewActivityFeedPanel(styles *Styles) *ActivityFeedPanel {
 
 // AddEntry adds a new activity entry.
 func (p *ActivityFeedPanel) AddEntry(entry ActivityFeedEntry) {
+	entry = cloneActivityFeedEntry(entry)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Update existing entry if it exists
+	// Update existing entry if it exists. Re-evaluate auto-show after an
+	// upsert too: a reused activity ID can transition from terminal to live,
+	// and that transition may be the second parallel operation.
 	if idx, ok := p.activeEntries[entry.ID]; ok && idx < len(p.entries) {
 		p.entries[idx] = entry
-		return
+	} else {
+		p.appendEntryLocked(entry)
 	}
-
-	p.appendEntryLocked(entry)
 
 	// Auto-surface the panel only when activity becomes genuinely interesting:
 	// parallel tools or agent orchestration. Single short tool calls stay quiet.
@@ -111,6 +114,14 @@ func (p *ActivityFeedPanel) AddEntry(entry ActivityFeedEntry) {
 	if !p.userHidden && (p.countRunningEntriesLocked() >= 2 || len(p.subAgentActivities) > 0) {
 		p.visible = true
 	}
+}
+
+func cloneActivityFeedEntry(entry ActivityFeedEntry) ActivityFeedEntry {
+	entry.Name = safeKeyEntryText(entry.Name)
+	entry.Description = safeKeyEntryText(entry.Description)
+	entry.ResultSummary = safeKeyEntryText(entry.ResultSummary)
+	entry.Details = maps.Clone(entry.Details)
+	return entry
 }
 
 // appendEntryLocked appends entry to p.entries, evicting the oldest entry
@@ -140,16 +151,22 @@ func (p *ActivityFeedPanel) CompleteEntry(id string, success bool, summary strin
 		return
 	}
 
+	summary = safeKeyEntryText(summary)
 	entry := &p.entries[idx]
+	nextStatus := ActivityFailed
+	if success {
+		nextStatus = ActivityCompleted
+	}
+	// Duplicate terminal delivery must not append the same result twice or
+	// grow "description -> summary -> summary" in the visible feed.
+	if entry.Status == nextStatus && entry.ResultSummary == summary {
+		return
+	}
 	if !entry.StartTime.IsZero() {
 		entry.Duration = max(time.Since(entry.StartTime), 0)
 	}
 	entry.ResultSummary = summary
-	if success {
-		entry.Status = ActivityCompleted
-	} else {
-		entry.Status = ActivityFailed
-	}
+	entry.Status = nextStatus
 
 	// Append result summary to description if available
 	if summary != "" {
@@ -165,10 +182,25 @@ func (p *ActivityFeedPanel) CompleteEntry(id string, success bool, summary strin
 func (p *ActivityFeedPanel) StartSubAgent(agentID, agentType, description string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	agentType = safeKeyEntryText(agentType)
+	description = safeKeyEntryText(description)
 
 	if !p.userHidden {
 		p.visible = true
 	}
+	entryID := "agent-" + agentID
+	if state, exists := p.subAgentActivities[agentID]; exists {
+		// Start events can be replayed by an asynchronous transport. Preserve
+		// elapsed/progress ownership and update only the descriptive snapshot.
+		state.AgentType = agentType
+		state.Description = description
+		if idx, ok := p.activeEntries[entryID]; ok && idx < len(p.entries) {
+			p.entries[idx].Name = agentType
+			p.entries[idx].Description = description
+		}
+		return
+	}
+
 	now := time.Now()
 	p.subAgentActivities[agentID] = &SubAgentState{
 		AgentID:      agentID,
@@ -181,7 +213,7 @@ func (p *ActivityFeedPanel) StartSubAgent(agentID, agentType, description string
 
 	// Add as activity entry
 	entry := ActivityFeedEntry{
-		ID:          "agent-" + agentID,
+		ID:          entryID,
 		Type:        ActivityTypeAgent,
 		Name:        agentType,
 		Description: description,
@@ -203,14 +235,14 @@ func (p *ActivityFeedPanel) UpdateSubAgentTool(agentID, toolName string, args ma
 		return
 	}
 
-	state.CurrentTool = toolName
-	state.ToolArgs = args
+	state.CurrentTool = safeKeyEntryText(toolName)
+	state.ToolArgs = maps.Clone(args)
 	// Any tool activity (start OR end) resets the idle clock — the agent is
 	// clearly alive if it's reporting events.
 	state.LastToolTime = time.Now()
 
 	// Increment step counter on each new tool start
-	if toolName != "" {
+	if state.CurrentTool != "" {
 		state.CurrentStep++
 	}
 
@@ -218,8 +250,8 @@ func (p *ActivityFeedPanel) UpdateSubAgentTool(agentID, toolName string, args ma
 	entryID := "agent-" + agentID
 	if idx, ok := p.activeEntries[entryID]; ok && idx < len(p.entries) {
 		desc := state.Description
-		if toolName != "" {
-			toolInfo := formatToolActivity(toolName, args)
+		if state.CurrentTool != "" {
+			toolInfo := safeKeyEntryText(formatToolActivity(state.CurrentTool, state.ToolArgs))
 			desc = fmt.Sprintf("%s -> %s", state.AgentType, toolInfo)
 		}
 		p.entries[idx].Description = desc
@@ -260,6 +292,7 @@ func (p *ActivityFeedPanel) GetSubAgentState(agentID string) *SubAgentState {
 	if state, ok := p.subAgentActivities[agentID]; ok {
 		// Return a copy to avoid data races
 		cp := *state
+		cp.ToolArgs = maps.Clone(state.ToolArgs)
 		return &cp
 	}
 	return nil
@@ -277,20 +310,24 @@ func (p *ActivityFeedPanel) CompleteSubAgent(agentID string, success bool, summa
 		return
 	}
 
+	summary = safeKeyEntryText(summary)
 	state := p.subAgentActivities[agentID]
 	entry := &p.entries[idx]
+	nextStatus := ActivityFailed
+	if success {
+		nextStatus = ActivityCompleted
+	}
+	if state == nil && entry.Status == nextStatus && entry.ResultSummary == summary {
+		return
+	}
 	if state != nil && !state.StartTime.IsZero() {
 		entry.Duration = max(time.Since(state.StartTime), 0)
 	} else if !entry.StartTime.IsZero() {
 		entry.Duration = max(time.Since(entry.StartTime), 0)
 	}
 
-	if success {
-		entry.Status = ActivityCompleted
-	} else {
-		entry.Status = ActivityFailed
-	}
-
+	entry.Status = nextStatus
+	entry.ResultSummary = summary
 	// Add to recent log
 	logMsg := p.formatLogMessage(entry, summary)
 	p.addRecentLog(logMsg)
@@ -391,7 +428,10 @@ func (p *ActivityFeedPanel) Snapshot(maxEntries, maxLog int) ActivityFeedSnapsho
 	}
 	if maxEntries > 0 {
 		start := len(p.entries) - maxEntries
-		snap.Entries = append([]ActivityFeedEntry(nil), p.entries[start:]...)
+		snap.Entries = make([]ActivityFeedEntry, maxEntries)
+		for i, entry := range p.entries[start:] {
+			snap.Entries[i] = cloneActivityFeedEntry(entry)
+		}
 	}
 
 	if maxLog > len(p.recentLog) {
@@ -405,8 +445,9 @@ func (p *ActivityFeedPanel) Snapshot(maxEntries, maxLog int) ActivityFeedSnapsho
 	return snap
 }
 
-// View renders the activity feed panel.
-func (p *ActivityFeedPanel) View(width int) string {
+// View renders the activity feed panel. An optional terminal height lets the
+// panel budget its own rows before the final compositor has to crop them.
+func (p *ActivityFeedPanel) View(width int, heights ...int) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -418,6 +459,14 @@ func (p *ActivityFeedPanel) View(width int) string {
 	}
 	if width < 4 {
 		return truncateForWidth("Activity", width)
+	}
+	height := 0
+	if len(heights) > 0 {
+		height = heights[0]
+	}
+	maxPanelHeight := activityFeedPanelHeightBudget(height)
+	if maxPanelHeight > 0 && maxPanelHeight < 4 {
+		return truncateForWidth("Activity · Ctrl+O minimal", width)
 	}
 	horizontalPadding := 1
 	if width < 6 {
@@ -432,7 +481,7 @@ func (p *ActivityFeedPanel) View(width int) string {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorBorder).
 			Padding(0, horizontalPadding)
-		empty := dimStyle.Render(truncateForWidth("No activity yet", contentWidth))
+		empty := dimStyle.Render(truncateForWidth("No activity yet · Ctrl+O minimal", contentWidth))
 		return borderStyle.Width(width - 2).Render(empty)
 	}
 
@@ -456,7 +505,7 @@ func (p *ActivityFeedPanel) View(width int) string {
 	timeStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	// Header
-	title := "Live Activity"
+	title := "Live Activity · Ctrl+O minimal"
 	if summary := p.buildMetricsSummary(); summary != "" {
 		title += " · " + summary
 	}
@@ -471,24 +520,36 @@ func (p *ActivityFeedPanel) View(width int) string {
 
 	timestampStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	// Pick entries to render, most recent first: every running entry (the
-	// actual signal), plus at most 2 recently-finished for context. The old
-	// blanket "last 5" often rendered 5 stale completed rows — height with
-	// no information. Hard cap stays 5.
-	renderIdx := make([]int, 0, 5)
-	finished := 0
+	// Pick entries by operational priority, newest first: live work, failures,
+	// then at most two ordinary finished rows. A height budget can reduce the
+	// five-row cap and reserves a disclosure row when active work is folded.
+	rowBudget := -1
+	if maxPanelHeight > 0 {
+		rowBudget = max(maxPanelHeight-3, 1) // border + title consume three
+	}
+	entryBudget := 5
+	if rowBudget >= 0 {
+		entryBudget = min(entryBudget, rowBudget)
+	}
+	renderIdx := make([]int, 0, entryBudget)
 	totalRunning := 0
 	for _, entry := range p.entries {
 		if entry.Status == ActivityRunning || entry.Status == ActivityPending {
 			totalRunning++
 		}
 	}
-	for i := len(p.entries) - 1; i >= 0 && len(renderIdx) < 5; i-- {
-		switch p.entries[i].Status {
-		case ActivityRunning, ActivityPending:
+	if rowBudget >= 0 && totalRunning > entryBudget && entryBudget >= 2 {
+		entryBudget--
+	}
+	for i := len(p.entries) - 1; i >= 0 && len(renderIdx) < entryBudget; i-- {
+		if p.entries[i].Status == ActivityRunning || p.entries[i].Status == ActivityPending {
 			renderIdx = append(renderIdx, i)
-		default:
-			if finished < 2 {
+		}
+	}
+	finished := 0
+	for _, status := range []ActivityStatus{ActivityFailed, ActivityCompleted} {
+		for i := len(p.entries) - 1; i >= 0 && len(renderIdx) < entryBudget && finished < 2; i-- {
+			if p.entries[i].Status == status {
 				renderIdx = append(renderIdx, i)
 				finished++
 			}
@@ -546,25 +607,25 @@ func (p *ActivityFeedPanel) View(width int) string {
 		if entry.Type == ActivityTypeAgent && (entry.Status == ActivityRunning || entry.Status == ActivityPending) {
 			if state, ok := p.subAgentActivities[entry.AgentID]; ok && state.CurrentStep > 0 {
 				barWidth := min(10, max(contentWidth-lipgloss.Width(line.String())-8, 0))
-				var filled int
-				if state.TotalSteps > 0 {
-					filled = state.CurrentStep * barWidth / state.TotalSteps
-					if filled > barWidth {
-						filled = barWidth
-					}
-				} else {
-					// Indeterminate: animate bouncing position
-					if p.reducedMotion {
-						filled = min(1, barWidth)
-					} else {
-						pos := (p.frame / 2) % (barWidth * 2)
-						if pos >= barWidth {
-							pos = barWidth*2 - pos - 1
-						}
-						filled = pos + 1
-					}
-				}
 				if barWidth >= 3 {
+					var filled int
+					if state.TotalSteps > 0 {
+						filled = state.CurrentStep * barWidth / state.TotalSteps
+						if filled > barWidth {
+							filled = barWidth
+						}
+					} else {
+						// Indeterminate: animate only when a bar actually fits.
+						if p.reducedMotion {
+							filled = 1
+						} else {
+							pos := (p.frame / 2) % (barWidth * 2)
+							if pos >= barWidth {
+								pos = barWidth*2 - pos - 1
+							}
+							filled = pos + 1
+						}
+					}
 					bar := progressStyle.Render(strings.Repeat("━", filled)) +
 						dimStyle.Render(strings.Repeat("─", barWidth-filled))
 					line.WriteString(bar)
@@ -631,29 +692,42 @@ func (p *ActivityFeedPanel) View(width int) string {
 		builder.WriteString(line.String())
 		builder.WriteString("\n")
 	}
-	if hiddenRunning := totalRunning - renderedRunning; hiddenRunning > 0 {
+	rowsUsed := len(renderIdx)
+	hiddenRunning := totalRunning - renderedRunning
+	if hiddenRunning > 0 && (rowBudget < 0 || rowsUsed < rowBudget) {
 		label := "activities"
 		if hiddenRunning == 1 {
 			label = "activity"
 		}
 		builder.WriteString(dimStyle.Render(fmt.Sprintf("… %d more running %s", hiddenRunning, label)))
 		builder.WriteString("\n")
+		rowsUsed++
 	}
 
 	// NOTE: the metrics summary used to render AGAIN here as a separator +
 	// body line — pure duplication of the header's "Live Activity · summary"
 	// title (2 lines of height for zero new information). Removed.
 
-	// Separator if we have recent log
-	if len(p.recentLog) > 0 && len(p.entries) > 0 {
+	// Recent log: render only the last few messages. The buffer keeps
+	// maxRecentLog entries for the live-activity card's snapshot; the panel
+	// shows a render-capped tail using only rows left after current work. When
+	// one row remains, the newest log is more useful than a bare separator.
+	logBudget := maxRecentLogRendered
+	showLogSeparator := len(p.recentLog) > 0 && len(renderIdx) > 0
+	if rowBudget >= 0 {
+		remaining := max(rowBudget-rowsUsed, 0)
+		if showLogSeparator && remaining >= 2 {
+			logBudget = min(logBudget, remaining-1)
+		} else {
+			showLogSeparator = false
+			logBudget = min(logBudget, remaining)
+		}
+	}
+	if showLogSeparator && logBudget > 0 {
 		builder.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 		builder.WriteString("\n")
 	}
-
-	// Recent log: render only the last few messages. The buffer keeps
-	// maxRecentLog entries for the live-activity card's snapshot; the panel
-	// shows a render-capped tail so log history can't dominate the height.
-	logStart := max(0, len(p.recentLog)-maxRecentLogRendered)
+	logStart := max(0, len(p.recentLog)-logBudget)
 	for _, msg := range p.recentLog[logStart:] {
 		msg = strings.Join(strings.Fields(msg), " ")
 		builder.WriteString(dimStyle.Render(truncateForWidth("› "+msg, contentWidth)))
@@ -663,6 +737,16 @@ func (p *ActivityFeedPanel) View(width int) string {
 	// Apply border
 	content := fitPanelContent(strings.TrimSuffix(builder.String(), "\n"), contentWidth)
 	return borderStyle.Width(width - 2).Render(content)
+}
+
+// activityFeedPanelHeightBudget leaves two rows for surrounding UI and keeps
+// an expanded background feed from taking over a tall terminal. Zero preserves
+// the standalone legacy layout for callers without a terminal height.
+func activityFeedPanelHeightBudget(terminalHeight int) int {
+	if terminalHeight <= 0 {
+		return 0
+	}
+	return min(terminalHeight, min(max(terminalHeight-2, 4), 14))
 }
 
 func fitPanelContent(content string, width int) string {
@@ -705,6 +789,10 @@ func (p *ActivityFeedPanel) formatLogMessage(entry *ActivityFeedEntry, summary s
 
 // addRecentLog adds a message to the recent log.
 func (p *ActivityFeedPanel) addRecentLog(msg string) {
+	msg = safeKeyEntryText(msg)
+	if msg == "" {
+		return
+	}
 	if len(p.recentLog) >= maxRecentLog {
 		p.recentLog = p.recentLog[1:]
 	}

@@ -180,9 +180,19 @@ func (t *CopyTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 
 	if srcInfo.IsDir() {
-		return NewSuccessResult(fmt.Sprintf("Copied directory %s to %s (%d files)", source, dest, len(copiedPaths))), nil
+		return NewSuccessResultWithData(
+			fmt.Sprintf("Copied directory %s to %s (%d files)", source, dest, len(copiedPaths)),
+			map[string]any{
+				"changed":           true,
+				"workspace_changed": true,
+				"written_paths":     []string{dest},
+			},
+		), nil
 	}
-	return NewSuccessResult(fmt.Sprintf("Copied %s to %s", source, dest)), nil
+	return NewSuccessResultWithData(
+		fmt.Sprintf("Copied %s to %s", source, dest),
+		map[string]any{"changed": true, "written_paths": copiedPaths},
+	), nil
 }
 
 // copyFile copies a single file. Rejects symlinks to prevent symlink attacks.

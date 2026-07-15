@@ -222,6 +222,7 @@ func NewHandler() *Handler {
 	h.Register(&TasksCommand{})
 	h.Register(&AuditCommand{})
 	h.Register(&HooksCommand{})
+	h.Register(&SkillCommand{})
 	h.Register(&AddDirCommand{})
 	h.Register(&RemoveDirCommand{})
 	h.Register(&MemoryCommand{})

@@ -276,8 +276,8 @@ func TestCommandPalettePageAndBoundaryNavigationUsesRenderedCapacity(t *testing.
 	p.SetSize(60, 18)
 
 	p.PageDown()
-	if p.selected != 8 {
-		t.Fatalf("PageDown selected=%d, want one rendered page (8)", p.selected)
+	if p.selected != 7 {
+		t.Fatalf("PageDown selected=%d, want one rendered page (7 commands + overflow row)", p.selected)
 	}
 	p.SelectLast()
 	if p.selected != 29 {
@@ -289,6 +289,42 @@ func TestCommandPalettePageAndBoundaryNavigationUsesRenderedCapacity(t *testing.
 	p.SelectFirst()
 	if p.selected != 0 || p.scroll != 0 {
 		t.Fatalf("SelectFirst left selected=%d scroll=%d", p.selected, p.scroll)
+	}
+}
+
+func TestCommandPaletteMiddleScrollKeepsIndicatorsAndFooterInsideHeight(t *testing.T) {
+	p := NewCommandPalette(DefaultStyles())
+	p.commands = paletteGeometryCommands(30)
+	p.visible = true
+	p.filterCommands("")
+	p.SetSize(60, 14)
+	p.selected = 15
+	p.adjustScroll()
+
+	view := p.View(60, 14)
+	plain := ansi.Strip(view)
+	assertPaletteGeometry(t, view, 60, 14)
+	for _, want := range []string{"↑ ", "↓ ", "> /command-16", "Esc Close"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("middle palette page missing %q:\n%s", want, plain)
+		}
+	}
+}
+
+func TestCommandPaletteResizeReanchorsSelectionWithinRenderedWindow(t *testing.T) {
+	p := NewCommandPalette(DefaultStyles())
+	p.commands = paletteGeometryCommands(30)
+	p.visible = true
+	p.filterCommands("")
+	p.SetSize(80, 40)
+	p.selected = 18
+	p.adjustScroll()
+
+	view := p.View(60, 14)
+	plain := ansi.Strip(view)
+	assertPaletteGeometry(t, view, 60, 14)
+	if !strings.Contains(plain, "> /command-19") {
+		t.Fatalf("resize left selected command outside the viewport:\n%s", plain)
 	}
 }
 
@@ -322,5 +358,57 @@ func TestCommandPaletteSanitizesCatalogAndTypedControlSequences(t *testing.T) {
 	p.AppendArg("a  b\n\x1b[2Jc")
 	if p.argValue != "a  b c" {
 		t.Fatalf("argument sanitization=%q, want spaces preserved without controls", p.argValue)
+	}
+}
+
+func TestCommandPaletteLongUnicodeInputKeepsEditingTailVisible(t *testing.T) {
+	p := NewCommandPalette(DefaultStyles())
+	p.commands = []EnhancedPaletteCommand{{Name: "help", Description: "Show help", Shortcut: "/help", Enabled: true}}
+	p.visible = true
+	query := strings.Repeat("界", 40) + "needle"
+	p.SetQuery(query)
+
+	view := p.View(60, 14)
+	plain := stripAnsi(view)
+	assertPaletteGeometry(t, view, 60, 14)
+	if !strings.Contains(plain, "needle_") {
+		t.Fatalf("long query hid its editing tail and cursor:\n%s", plain)
+	}
+}
+
+func TestCommandPaletteLongMetadataOutranksDescription(t *testing.T) {
+	p := NewCommandPalette(DefaultStyles())
+	p.commands = []EnhancedPaletteCommand{
+		{Name: "open", Shortcut: "/open", Description: strings.Repeat("descriptive 界面 ", 10), ArgHint: "<very-long-required-file-path>", Enabled: true},
+		{Name: "locked", Shortcut: "/locked", Description: strings.Repeat("decorative details ", 10), Reason: "configure provider credentials first", Enabled: false},
+	}
+	p.visible = true
+	p.filterCommands("")
+
+	first := stripAnsi(p.View(60, 18))
+	assertPaletteGeometry(t, p.View(60, 18), 60, 18)
+	if !strings.Contains(first, "<very") || !strings.Contains(first, "path>") {
+		t.Fatalf("required argument was displaced by description:\n%s", first)
+	}
+	p.SelectNext()
+	second := stripAnsi(p.View(60, 18))
+	if !strings.Contains(second, "configure") || !strings.Contains(second, "first)") {
+		t.Fatalf("disabled reason was displaced by description:\n%s", second)
+	}
+}
+
+func TestCommandPaletteLongArgEntryKeepsEditingTailVisible(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{20, 8}, {60, 18}} {
+		p := NewCommandPalette(DefaultStyles())
+		p.visible = true
+		p.BeginArgEntry(EnhancedPaletteCommand{Name: "open", Shortcut: "/open", ArgHint: "<file>", Enabled: true})
+		p.AppendArg(strings.Repeat("界", 30) + "main.go")
+
+		view := p.View(size.width, size.height)
+		plain := stripAnsi(view)
+		assertPaletteGeometry(t, view, size.width, size.height)
+		if !strings.Contains(plain, "main.go_") {
+			t.Fatalf("%dx%d long argument hid its editing tail and cursor:\n%s", size.width, size.height, plain)
+		}
 	}
 }

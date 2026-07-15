@@ -58,6 +58,9 @@ type DiffPreviewModel struct {
 	changeOffsets       []int
 	currentChange       int
 	responseUnavailable bool
+	responsePending     bool // a decision command is already on its way to the parent
+	requestID           string
+	terminalSizeKnown   bool
 
 	// Callback when user makes a decision
 	onDecision func(decision DiffDecision)
@@ -65,6 +68,7 @@ type DiffPreviewModel struct {
 
 // DiffPreviewRequestMsg is sent to request a diff preview.
 type DiffPreviewRequestMsg struct {
+	RequestID  string
 	FilePath   string
 	OldContent string
 	NewContent string
@@ -74,9 +78,11 @@ type DiffPreviewRequestMsg struct {
 
 // DiffPreviewResponseMsg is sent when user makes a decision.
 type DiffPreviewResponseMsg struct {
+	RequestID  string
 	Decision   DiffDecision
 	FilePath   string
 	NewContent string
+	triggerKey string
 }
 
 // NewDiffPreviewModel creates a new diff preview model.
@@ -98,6 +104,7 @@ func NewDiffPreviewModel(styles *Styles) DiffPreviewModel {
 // flip between split and unified layouts (Sprint UI polish: auto-fallback
 // on narrow terminals relies on this re-render).
 func (m *DiffPreviewModel) SetSize(width, height int) {
+	m.terminalSizeKnown = width > 0 && height > 0
 	m.width = max(width, 1)
 	m.height = max(height, 1)
 	m.viewport.Width = max(m.width-4, 1)
@@ -129,8 +136,13 @@ func (m *DiffPreviewModel) SetContent(filePath, oldContent, newContent, toolName
 	m.isNewFile = isNewFile
 	m.decision = DiffPending
 	m.responseUnavailable = false
+	m.responsePending = false
 
 	m.refreshDiffView()
+}
+
+func (m *DiffPreviewModel) SetRequestID(requestID string) {
+	m.requestID = requestID
 }
 
 // minSideBySideWidth is the viewport width below which side-by-side mode
@@ -178,6 +190,7 @@ func (m *DiffPreviewModel) SetDecisionCallback(callback func(DiffDecision)) {
 
 func (m *DiffPreviewModel) MarkResponseUnavailable() {
 	m.responseUnavailable = true
+	m.responsePending = false
 	m.decision = DiffPending
 }
 
@@ -553,61 +566,86 @@ func (m DiffPreviewModel) Update(msg tea.Msg) (DiffPreviewModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.responsePending {
+			switch msg.String() {
+			case "y", "Y", "n", "N", "esc", "A", "R":
+				// Bubble Tea commands are asynchronous. Ignore a second decision
+				// until the parent consumes the first one, otherwise a rapid double
+				// press can invoke the backend twice and later clobber a newer modal.
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		case "y", "Y":
-			if m.responseUnavailable {
+			if m.responseUnavailable || m.terminalSizeKnown && tinyReviewNeedsResize(m.width, m.height) {
 				return m, nil
 			}
 			m.decision = DiffApply
+			m.responsePending = true
 			if m.onDecision != nil {
 				m.onDecision(DiffApply)
 			}
+			triggerKey := msg.String()
 			return m, func() tea.Msg {
 				return DiffPreviewResponseMsg{
+					RequestID:  m.requestID,
 					Decision:   DiffApply,
 					FilePath:   m.filePath,
 					NewContent: m.newContent,
+					triggerKey: triggerKey,
 				}
 			}
 
 		case "n", "N", "esc":
 			m.decision = DiffReject
+			m.responsePending = true
 			if m.onDecision != nil {
 				m.onDecision(DiffReject)
 			}
+			triggerKey := msg.String()
 			return m, func() tea.Msg {
 				return DiffPreviewResponseMsg{
+					RequestID:  m.requestID,
 					Decision:   DiffReject,
 					FilePath:   m.filePath,
 					NewContent: m.newContent,
+					triggerKey: triggerKey,
 				}
 			}
 		case "A":
-			if m.responseUnavailable {
+			if m.responseUnavailable || m.terminalSizeKnown && tinyReviewNeedsResize(m.width, m.height) {
 				return m, nil
 			}
 			m.decision = DiffApplyAll
+			m.responsePending = true
 			if m.onDecision != nil {
 				m.onDecision(DiffApplyAll)
 			}
+			triggerKey := msg.String()
 			return m, func() tea.Msg {
 				return DiffPreviewResponseMsg{
+					RequestID:  m.requestID,
 					Decision:   DiffApplyAll,
 					FilePath:   m.filePath,
 					NewContent: m.newContent,
+					triggerKey: triggerKey,
 				}
 			}
 
 		case "R":
 			m.decision = DiffRejectAll
+			m.responsePending = true
 			if m.onDecision != nil {
 				m.onDecision(DiffRejectAll)
 			}
+			triggerKey := msg.String()
 			return m, func() tea.Msg {
 				return DiffPreviewResponseMsg{
+					RequestID:  m.requestID,
 					Decision:   DiffRejectAll,
 					FilePath:   m.filePath,
 					NewContent: m.newContent,
+					triggerKey: triggerKey,
 				}
 			}
 
@@ -681,6 +719,15 @@ func (m DiffPreviewModel) Update(msg tea.Msg) (DiffPreviewModel, tea.Cmd) {
 
 // View renders the diff preview (Claude Code style — no bordered boxes).
 func (m DiffPreviewModel) View() string {
+	// The app frame owns a final status row and the join row below this view.
+	// At tiny heights the ordinary header/viewport/four-line footer is cropped
+	// from the top, leaving Apply/Reject visible without the file they affect.
+	// Render an explicit review summary whose identity and primary decisions fit
+	// inside the remaining rows.
+	if m.height > 0 && m.height <= 8 {
+		return m.renderTinyView()
+	}
+
 	var builder strings.Builder
 
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
@@ -751,6 +798,129 @@ func (m DiffPreviewModel) View() string {
 	return builder.String()
 }
 
+func (m DiffPreviewModel) renderTinyView() string {
+	width := max(m.renderWidth(), 1)
+	identityStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	statusStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	warningStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+	hintStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+
+	prefix := "Diff · "
+	if m.isNewFile {
+		prefix = "New · "
+	}
+	path := safeKeyEntryText(m.filePath)
+	if path == "" {
+		path = "(unknown file)"
+	}
+	identity := prefix + truncateLeftForWidth(path, max(width-lipgloss.Width(prefix), 1))
+	identity = ansi.Truncate(identityStyle.Render(identity), width, "…")
+
+	added, removed := m.countChanges()
+	viewMode := "unified"
+	if m.effectiveSideBySide() {
+		viewMode = "split"
+	}
+	context := fmt.Sprintf("+%d -%d · %s", added, removed, viewMode)
+	if !m.hasVisibleChanges() {
+		context = "No visible changes"
+	}
+	context = ansi.Truncate(statusStyle.Render(context), width, "…")
+
+	rowBudget := max(m.height-2, 1)
+	if m.responseUnavailable {
+		return renderTinyReviewRows(
+			identity,
+			ansi.Truncate(warningStyle.Render("Decision unavailable"), width, "…"),
+			[]string{ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Cancel"), width, "…")},
+			rowBudget,
+		)
+	}
+	if m.responsePending {
+		return renderTinyReviewRows(
+			identity,
+			context,
+			[]string{ansi.Truncate(statusStyle.Render("Submitting decision…"), width, "…")},
+			rowBudget,
+		)
+	}
+	if m.terminalSizeKnown && tinyReviewNeedsResize(m.width, m.height) {
+		resize := warningStyle.Render(tinyReviewResizeLabel(width))
+		reject := keyStyle.Render("n")
+		if width >= 4 {
+			reject += hintStyle.Render(" No")
+		}
+		return renderTinyResizeRows(identity, resize, reject, rowBudget)
+	}
+
+	applyLabel, rejectLabel := "Apply", "Reject"
+	if !m.hasVisibleChanges() {
+		applyLabel, rejectLabel = "Continue", "Cancel"
+	}
+	primary := keyStyle.Render("y") + " " + applyLabel + " · " + keyStyle.Render("n") + " " + rejectLabel
+	if !m.hasVisibleChanges() && width < 24 {
+		primary = keyStyle.Render("y") + " Continue " + keyStyle.Render("n") + " Cancel"
+	}
+	recovery := keyStyle.Render("Esc") + " Reject · " + keyStyle.Render("A/R")
+	return renderTinyReviewRows(
+		identity,
+		context,
+		[]string{
+			ansi.Truncate(hintStyle.Render(primary), width, "…"),
+			ansi.Truncate(hintStyle.Render(recovery), width, "…"),
+		},
+		rowBudget,
+	)
+}
+
+// renderTinyReviewRows keeps identity first and required controls last, adding
+// context only when it does not displace either. This is intentionally not a
+// tail slice: generic tail-cropping caused the context-free approval defect.
+func renderTinyReviewRows(identity, context string, required []string, budget int) string {
+	budget = max(budget, 1)
+	rows := []string{identity}
+	remaining := budget - 1
+	if context != "" && remaining > len(required) {
+		rows = append(rows, context)
+		remaining--
+	}
+	for _, row := range required {
+		if remaining <= 0 {
+			break
+		}
+		rows = append(rows, row)
+		remaining--
+	}
+	return strings.Join(rows, "\n")
+}
+
+// A tiny review must fail closed when neither the target identity nor the
+// apply/confirm affordance can be rendered legibly. Reject/back remain usable;
+// widening the terminal is the only route to an applying decision.
+func tinyReviewNeedsResize(width, height int) bool {
+	return width > 0 && height > 0 && height <= 8 && (width <= 7 || height <= 3)
+}
+
+func tinyReviewResizeLabel(width int) string {
+	if width >= 6 {
+		return "Resize"
+	}
+	return "↔"
+}
+
+func renderTinyResizeRows(identity, resize, safeAction string, budget int) string {
+	budget = max(budget, 1)
+	switch budget {
+	case 1:
+		return safeAction
+	case 2:
+		return resize + "\n" + safeAction
+	default:
+		return identity + "\n" + resize + "\n" + safeAction
+	}
+}
+
 // countChanges counts added and removed lines.
 func (m DiffPreviewModel) countChanges() (added, removed int) {
 	lines := strings.Split(m.diff, "\n")
@@ -767,6 +937,14 @@ func (m DiffPreviewModel) countChanges() (added, removed int) {
 func (m DiffPreviewModel) hasVisibleChanges() bool {
 	added, removed := m.countChanges()
 	return added+removed > 0
+}
+
+func (m DiffPreviewModel) canScrollDiff() bool {
+	return m.viewport.TotalLineCount() > m.viewport.Height
+}
+
+func (m DiffPreviewModel) canJumpChanges() bool {
+	return len(m.changeOffsets) > 0
 }
 
 // renderActions renders the action buttons.
@@ -791,7 +969,17 @@ func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 		builder.WriteString(ansi.Truncate(warningStyle.Render("Unavailable: cannot submit diff decision"), m.renderWidth(), "…"))
 		builder.WriteString("\n")
 		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
-		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Cancel · review remains open"), m.renderWidth(), "…"))
+		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Cancel · view controls remain available"), m.renderWidth(), "…"))
+		var inspection []string
+		if m.canScrollDiff() {
+			inspection = append(inspection, "j/k Scroll", "g/G Top/Bottom", "Ctrl+D/U Half page")
+		}
+		if m.canJumpChanges() {
+			inspection = append(inspection, "[ ] Changes")
+		}
+		inspection = append(inspection, "+/- Context", "I Whitespace", "s View")
+		builder.WriteString("\n")
+		builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(inspection, "  ·  ")), m.renderWidth(), "…"))
 		return
 	}
 
@@ -810,12 +998,30 @@ func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 		if m.renderWidth() < 20 {
 			writeLine(keyStyle.Render("y") + " Yes " + keyStyle.Render("n") + " No")
 			writeLine(keyStyle.Render("A") + " All " + keyStyle.Render("R") + " No")
-			writeLine("j/k Scroll  [ ]")
+			var navigation []string
+			if m.canScrollDiff() {
+				navigation = append(navigation, "j/k Scroll")
+			}
+			if m.canJumpChanges() {
+				navigation = append(navigation, "[ ] Changes")
+			}
+			if len(navigation) > 0 {
+				writeLine(strings.Join(navigation, "  ·  "))
+			}
 			builder.WriteString(ansi.Truncate(hintStyle.Render("s View  I WS"), m.renderWidth(), "…"))
 			return
 		}
 		writeLine(keyStyle.Render(applyLabel[:1]) + applyLabel[1:] + "  ·  " + keyStyle.Render(rejectLabel[:1]) + rejectLabel[1:])
-		writeLine("j/k Scroll  ·  [ ] Changes")
+		var navigation []string
+		if m.canScrollDiff() {
+			navigation = append(navigation, "j/k Scroll")
+		}
+		if m.canJumpChanges() {
+			navigation = append(navigation, "[ ] Changes")
+		}
+		if len(navigation) > 0 {
+			writeLine(strings.Join(navigation, "  ·  "))
+		}
 		writeLine("s View  ·  I Whitespace")
 		builder.WriteString(ansi.Truncate(hintStyle.Render("A Apply all  ·  R Reject all"), m.renderWidth(), "…"))
 		return
@@ -830,7 +1036,15 @@ func (m DiffPreviewModel) renderActions(builder *strings.Builder) {
 	// shortcuts overlay footer, prompt option lines). Previously these
 	// two lines used `|` with single spaces, which was visually heavier
 	// and inconsistent with everything else.
-	builder.WriteString(ansi.Truncate(hintStyle.Render("j/k Scroll  ·  g/G Top/Bottom  ·  [ ] Prev/Next  ·  Ctrl+D/U Half page  ·  +/- Context  ·  I Ignore whitespace"), m.renderWidth(), "…"))
+	var inspection []string
+	if m.canScrollDiff() {
+		inspection = append(inspection, "j/k Scroll", "g/G Top/Bottom", "Ctrl+D/U Half page")
+	}
+	if m.canJumpChanges() {
+		inspection = append(inspection, "[ ] Prev/Next")
+	}
+	inspection = append(inspection, "+/- Context", "I Ignore whitespace")
+	builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(inspection, "  ·  ")), m.renderWidth(), "…"))
 	builder.WriteString("\n")
 	builder.WriteString(ansi.Truncate(hintStyle.Render("A Accept all  ·  R Reject all  ·  s Toggle split/unified"), m.renderWidth(), "…"))
 }
@@ -904,22 +1118,11 @@ func truncateForWidth(s string, max int) string {
 	if lipgloss.Width(s) <= max {
 		return s
 	}
-	if max == 1 {
-		return "…"
-	}
-
-	var b strings.Builder
-	budget := max - 1 // reserve one terminal cell for the ellipsis
-	used := 0
-	for _, r := range s {
-		cellWidth := lipgloss.Width(string(r))
-		if used+cellWidth > budget {
-			break
-		}
-		b.WriteRune(r)
-		used += cellWidth
-	}
-	return b.String() + "…"
+	// x/ansi walks extended grapheme clusters and preserves any SGR reset
+	// sequences after the visible cut. Iterating over runes here used to split
+	// combining text, emoji modifiers and ZWJ emoji, and could cut directly
+	// through a styled escape sequence.
+	return ansi.Truncate(s, max, "…")
 }
 
 func (m *DiffPreviewModel) detectChangeOffsets(content string) []int {
@@ -997,6 +1200,9 @@ type MultiDiffPreviewModel struct {
 	focusOnList         bool // true if focus is on file list, false if on diff
 	confirmFinish       bool
 	responseUnavailable bool
+	responsePending     bool // completion command is already on its way to the parent
+	requestID           string
+	terminalSizeKnown   bool
 
 	// Callback when user makes decisions
 	onComplete func(decisions map[string]DiffDecision)
@@ -1004,12 +1210,15 @@ type MultiDiffPreviewModel struct {
 
 // MultiDiffPreviewRequestMsg is sent to request a multi-file diff preview.
 type MultiDiffPreviewRequestMsg struct {
-	Files []DiffFile
+	RequestID string
+	Files     []DiffFile
 }
 
 // MultiDiffPreviewResponseMsg is sent when user completes multi-file decisions.
 type MultiDiffPreviewResponseMsg struct {
-	Decisions map[string]DiffDecision
+	RequestID  string
+	Decisions  map[string]DiffDecision
+	triggerKey string
 }
 
 // NewMultiDiffPreviewModel creates a new multi-file diff preview model.
@@ -1027,6 +1236,7 @@ func NewMultiDiffPreviewModel(styles *Styles) MultiDiffPreviewModel {
 
 // SetSize sets the size of the multi-diff preview.
 func (m *MultiDiffPreviewModel) SetSize(width, height int) {
+	m.terminalSizeKnown = width > 0 && height > 0
 	m.width = max(width, 1)
 	m.height = max(height, 1)
 	if m.useMultiDiffSplitLayout() {
@@ -1036,7 +1246,9 @@ func (m *MultiDiffPreviewModel) SetSize(width, height int) {
 		m.viewport.Width = max(m.width-4, 1)
 	}
 	reservedRows := 13
-	if m.width >= 40 && !m.useMultiDiffSplitLayout() {
+	if m.height < 16 {
+		reservedRows = 11
+	} else if m.width >= 40 && !m.useMultiDiffSplitLayout() {
 		reservedRows = 15
 	}
 	m.viewport.Height = max(m.height-reservedRows, 1)
@@ -1049,11 +1261,59 @@ func (m MultiDiffPreviewModel) useMultiDiffSplitLayout() bool {
 	return m.width >= minMultiDiffSplitWidth
 }
 
+func (m MultiDiffPreviewModel) compactMultiDiffLayout() bool {
+	return m.width < 40 || (m.height > 0 && m.height < 16)
+}
+
 func (m MultiDiffPreviewModel) renderWidth() int {
 	if m.width > 0 {
 		return m.width
 	}
 	return max(m.viewport.Width+4, 1)
+}
+
+func (m MultiDiffPreviewModel) canNavigateFiles() bool {
+	return len(m.files) > 1
+}
+
+func (m MultiDiffPreviewModel) canScrollDiff() bool {
+	return len(m.files) > 0 && m.viewport.TotalLineCount() > m.viewport.Height
+}
+
+func (m MultiDiffPreviewModel) inspectionHints(compact bool) []string {
+	var hints []string
+	if m.focusOnList {
+		if m.canNavigateFiles() {
+			label := "↑/↓ or j/k Navigate files"
+			if compact {
+				label = "↑/↓ Files"
+			}
+			hints = append(hints, label)
+		}
+		if m.canScrollDiff() {
+			label := "Tab Focus diff"
+			if compact {
+				label = "Tab Diff"
+			}
+			hints = append(hints, label)
+		}
+	} else {
+		if m.canScrollDiff() {
+			label := "↑/↓ or j/k Scroll diff"
+			if compact {
+				label = "j/k Scroll"
+			}
+			hints = append(hints, label)
+		}
+		if m.canNavigateFiles() {
+			label := "Tab Focus files"
+			if compact {
+				label = "Tab Files"
+			}
+			hints = append(hints, label)
+		}
+	}
+	return hints
 }
 
 // SetFiles sets the files to display.
@@ -1064,6 +1324,7 @@ func (m *MultiDiffPreviewModel) SetFiles(files []DiffFile) {
 	m.focusOnList = true
 	m.confirmFinish = false
 	m.responseUnavailable = false
+	m.responsePending = false
 	m.decisions = make(map[int]DiffDecision)
 
 	// Initialize all decisions to pending
@@ -1084,6 +1345,10 @@ func (m *MultiDiffPreviewModel) SetFiles(files []DiffFile) {
 		m.viewport.SetContent("")
 		m.viewport.GotoTop()
 	}
+}
+
+func (m *MultiDiffPreviewModel) SetRequestID(requestID string) {
+	m.requestID = requestID
 }
 
 func (m MultiDiffPreviewModel) visibleFileCapacity() int {
@@ -1113,6 +1378,7 @@ func (m *MultiDiffPreviewModel) SetCompleteCallback(callback func(map[string]Dif
 
 func (m *MultiDiffPreviewModel) MarkResponseUnavailable() {
 	m.responseUnavailable = true
+	m.responsePending = false
 	m.confirmFinish = false
 }
 
@@ -1219,11 +1485,20 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.responsePending {
+			switch msg.String() {
+			case "y", "Y", "n", "N", "A", "R", "enter", "esc":
+				// The completion command owns an immutable snapshot. Navigation and
+				// viewport inspection may continue while the parent consumes it, but
+				// no key may mutate decisions or arm another completion state.
+				return m, nil
+			}
+		}
 		if m.responseUnavailable {
 			switch msg.String() {
 			case "esc":
 				m.setAllDecisions(DiffReject)
-				return m, m.finish()
+				return m, m.finish(msg.String())
 			case "y", "Y", "n", "N", "A", "R", "enter":
 				return m, nil
 			}
@@ -1231,9 +1506,12 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 		if m.confirmFinish {
 			switch msg.String() {
 			case "enter":
+				if m.terminalSizeKnown && tinyReviewNeedsResize(m.width, m.height) {
+					return m, nil
+				}
 				m.confirmFinish = false
 				m.applyPending(DiffReject)
-				return m, m.finish()
+				return m, m.finish(msg.String())
 			case "esc", "q":
 				m.confirmFinish = false
 			}
@@ -1281,12 +1559,12 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 		// remaining. Previously every key was an all-or-nothing shortcut
 		// which forced mixed-outcome workflows into multiple review rounds.
 		case "y", "Y":
-			if len(m.files) == 0 || m.currentIndex < 0 {
+			if len(m.files) == 0 || m.currentIndex < 0 || m.terminalSizeKnown && tinyReviewNeedsResize(m.width, m.height) {
 				return m, nil
 			}
 			m.decisions[m.currentIndex] = DiffApply
 			if m.allResolved() {
-				return m, m.finish()
+				return m, m.finish(msg.String())
 			}
 			m.moveToNextPending()
 			return m, nil
@@ -1297,29 +1575,29 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 			}
 			m.decisions[m.currentIndex] = DiffReject
 			if m.allResolved() {
-				return m, m.finish()
+				return m, m.finish(msg.String())
 			}
 			m.moveToNextPending()
 			return m, nil
 
 		case "A":
-			if len(m.files) == 0 {
+			if len(m.files) == 0 || m.terminalSizeKnown && tinyReviewNeedsResize(m.width, m.height) {
 				return m, nil
 			}
 			// Bulk apply: every file that's still pending becomes Apply.
 			// Already-decided files keep their explicit decision.
 			m.applyPending(DiffApply)
-			return m, m.finish()
+			return m, m.finish(msg.String())
 
 		case "R":
 			if len(m.files) == 0 {
 				return m, nil
 			}
 			m.applyPending(DiffReject)
-			return m, m.finish()
+			return m, m.finish(msg.String())
 
 		case "enter":
-			if len(m.files) == 0 {
+			if len(m.files) == 0 || m.terminalSizeKnown && tinyReviewNeedsResize(m.width, m.height) {
 				return m, nil
 			}
 			// Finishing early rejects pending files. Make that consequence an
@@ -1329,7 +1607,7 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 
 		case "esc":
 			m.setAllDecisions(DiffReject)
-			return m, m.finish()
+			return m, m.finish(msg.String())
 
 		case "g":
 			if !m.focusOnList {
@@ -1357,7 +1635,14 @@ func (m MultiDiffPreviewModel) Update(msg tea.Msg) (MultiDiffPreviewModel, tea.C
 		}
 
 	case tea.MouseMsg:
-		if !m.focusOnList {
+		if m.focusOnList {
+			if direction := verticalMouseWheelDirection(msg); direction != 0 && len(m.files) > 0 {
+				step := max(m.viewport.MouseWheelDelta, 1)
+				m.currentIndex = min(max(m.currentIndex+direction*step, 0), len(m.files)-1)
+				m.updateViewport()
+				m.ensureCurrentFileVisible()
+			}
+		} else {
 			m.viewport, cmd = m.viewport.Update(msg)
 		}
 		return m, cmd
@@ -1421,7 +1706,11 @@ func (m *MultiDiffPreviewModel) moveToNextPending() {
 }
 
 // finish creates the completion message.
-func (m *MultiDiffPreviewModel) finish() tea.Cmd {
+func (m *MultiDiffPreviewModel) finish(triggerKey string) tea.Cmd {
+	if m.responsePending {
+		return nil
+	}
+	m.responsePending = true
 	decisions := make(map[string]DiffDecision)
 	for i, file := range m.files {
 		decisions[file.FilePath] = m.decisions[i]
@@ -1433,7 +1722,9 @@ func (m *MultiDiffPreviewModel) finish() tea.Cmd {
 
 	return func() tea.Msg {
 		return MultiDiffPreviewResponseMsg{
-			Decisions: cloneDiffDecisions(decisions),
+			RequestID:  m.requestID,
+			Decisions:  cloneDiffDecisions(decisions),
+			triggerKey: triggerKey,
 		}
 	}
 }
@@ -1448,6 +1739,10 @@ func cloneDiffDecisions(decisions map[string]DiffDecision) map[string]DiffDecisi
 
 // View renders the multi-file diff preview.
 func (m MultiDiffPreviewModel) View() string {
+	if m.height > 0 && m.height <= 8 {
+		return m.renderTinyView()
+	}
+
 	var builder strings.Builder
 
 	// Header
@@ -1457,11 +1752,16 @@ func (m MultiDiffPreviewModel) View() string {
 		Padding(0, 1)
 
 	title := fmt.Sprintf("Multi-File Diff Preview (%d files)", len(m.files))
-	if m.width > 0 && m.width < 40 {
+	compact := m.compactMultiDiffLayout()
+	if compact {
 		title = fmt.Sprintf("Multi-File Diff · %d files", len(m.files))
 	}
 	builder.WriteString(ansi.Truncate(headerStyle.Render(title), m.renderWidth(), "…"))
-	builder.WriteString("\n\n")
+	if compact {
+		builder.WriteString("\n")
+	} else {
+		builder.WriteString("\n\n")
+	}
 	if len(m.files) == 0 {
 		emptyStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 		builder.WriteString(emptyStyle.Render(truncateForWidth("No files to review", m.renderWidth())))
@@ -1542,7 +1842,7 @@ func (m MultiDiffPreviewModel) View() string {
 		if file.IsNewFile {
 			label = "New file: "
 		}
-		if m.width < 40 {
+		if compact {
 			kind := "~"
 			if file.IsNewFile {
 				kind = "+"
@@ -1566,7 +1866,7 @@ func (m MultiDiffPreviewModel) View() string {
 	builder.WriteString(fileInfo)
 	builder.WriteString("\n\n")
 	if m.useMultiDiffSplitLayout() {
-		leftPane := listStyle.Render(listContent.String())
+		leftPane := listStyle.Render(strings.TrimSuffix(listContent.String(), "\n"))
 		builder.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPane, " ", rightPane))
 	} else {
 		builder.WriteString(rightPane)
@@ -1577,6 +1877,106 @@ func (m MultiDiffPreviewModel) View() string {
 	m.renderMultiActions(&builder)
 
 	return builder.String()
+}
+
+func (m MultiDiffPreviewModel) renderTinyView() string {
+	width := max(m.renderWidth(), 1)
+	identityStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	statusStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	warningStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+	hintStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+	rowBudget := max(m.height-2, 1)
+
+	if len(m.files) == 0 {
+		identity := ansi.Truncate(identityStyle.Render("Multi-diff · no files"), width, "…")
+		closeHint := ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Close"), width, "…")
+		return renderTinyReviewRows(identity, "", []string{closeHint}, rowBudget)
+	}
+
+	index := min(max(m.currentIndex, 0), len(m.files)-1)
+	filePath := safeKeyEntryText(m.files[index].FilePath)
+	if filePath == "" {
+		filePath = "(unknown file)"
+	}
+	prefix := fmt.Sprintf("%d/%d · ", index+1, len(m.files))
+	identity := prefix + truncateLeftForWidth(filePath, max(width-lipgloss.Width(prefix), 1))
+	identity = ansi.Truncate(identityStyle.Render(identity), width, "…")
+
+	applied, rejected, pending := 0, 0, 0
+	for i := range m.files {
+		switch m.decisions[i] {
+		case DiffApply:
+			applied++
+		case DiffReject:
+			rejected++
+		default:
+			pending++
+		}
+	}
+	status := fmt.Sprintf("%d pending · %d✓ %d✗", pending, applied, rejected)
+	if len(m.files) > 1 {
+		status = "↑↓ Files · " + status
+	}
+	status = ansi.Truncate(statusStyle.Render(status), width, "…")
+
+	if m.responseUnavailable {
+		warning := ansi.Truncate(warningStyle.Render("Decisions unavailable"), width, "…")
+		cancel := ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Cancel"), width, "…")
+		return renderTinyReviewRows(identity, warning, []string{cancel}, rowBudget)
+	}
+	if m.responsePending {
+		pendingLine := ansi.Truncate(statusStyle.Render("Submitting decisions…"), width, "…")
+		return renderTinyReviewRows(identity, status, []string{pendingLine}, rowBudget)
+	}
+	if m.terminalSizeKnown && tinyReviewNeedsResize(m.width, m.height) {
+		resize := warningStyle.Render(tinyReviewResizeLabel(width))
+		safeAction := keyStyle.Render("n")
+		if m.confirmFinish {
+			switch {
+			case width >= 5:
+				safeAction = keyStyle.Render("Esc/q")
+			case width >= 3:
+				safeAction = keyStyle.Render("Esc")
+			default:
+				safeAction = keyStyle.Render("q")
+			}
+		} else if width >= 4 {
+			safeAction += hintStyle.Render(" No")
+		}
+		return renderTinyResizeRows(identity, resize, safeAction, rowBudget)
+	}
+	if m.confirmFinish {
+		warning := fmt.Sprintf("Reject %d pending and finish?", pending)
+		controls := keyStyle.Render("Enter") + hintStyle.Render(" Confirm · ") + keyStyle.Render("Esc")
+		controls = ansi.Truncate(controls, width, "…")
+		if rowBudget <= 2 {
+			suffix := " · Reject"
+			subject := warningStyle.Render("Reject")
+			if width > lipgloss.Width(suffix) {
+				subject = identityStyle.Render(truncateLeftForWidth(filePath, width-lipgloss.Width(suffix)) + suffix)
+			}
+			return strings.Join([]string{ansi.Truncate(subject, width, "…"), controls}, "\n")
+		}
+		return renderTinyReviewRows(
+			identity,
+			ansi.Truncate(warningStyle.Render(warning), width, "…"),
+			[]string{controls},
+			rowBudget,
+		)
+	}
+
+	primary := keyStyle.Render("y") + " Apply · " + keyStyle.Render("n") + " Reject"
+	recovery := keyStyle.Render("Esc") + " Reject all"
+	return renderTinyReviewRows(
+		identity,
+		status,
+		[]string{
+			ansi.Truncate(hintStyle.Render(primary), width, "…"),
+			ansi.Truncate(hintStyle.Render(recovery), width, "…"),
+		},
+		rowBudget,
+	)
 }
 
 // renderMultiActions renders the action buttons for multi-file diff.
@@ -1622,7 +2022,7 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 
 	statusStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	var status string
-	if m.width < 60 {
+	if m.width < 60 || m.compactMultiDiffLayout() {
 		status = fmt.Sprintf("%d/%d · %d pending · %d✓ %d✗", m.currentIndex+1, len(m.files), pending, applied, rejected)
 	} else {
 		status = fmt.Sprintf(
@@ -1641,7 +2041,11 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 		builder.WriteString(ansi.Truncate(warningStyle.Render("Unavailable: cannot submit diff decisions"), m.renderWidth(), "…"))
 		builder.WriteString("\n")
 		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
-		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Cancel · review remains open"), m.renderWidth(), "…"))
+		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc")+" Cancel · view controls remain available"), m.renderWidth(), "…"))
+		if inspection := m.inspectionHints(m.compactMultiDiffLayout()); len(inspection) > 0 {
+			builder.WriteString("\n")
+			builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(inspection, "  ·  ")), m.renderWidth(), "…"))
+		}
 		return
 	}
 	if m.confirmFinish {
@@ -1661,7 +2065,7 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 		builder.WriteString(ansi.Truncate(hintStyle.Render(controls), m.renderWidth(), "…"))
 		return
 	}
-	if m.width < 40 {
+	if m.compactMultiDiffLayout() {
 		keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
 		writeHint := func(line string) {
 			builder.WriteString("\n")
@@ -1670,18 +2074,16 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 		if m.renderWidth() < 20 {
 			writeHint(keyStyle.Render("y") + " Yes " + keyStyle.Render("n") + " No")
 			writeHint(keyStyle.Render("A") + " All " + keyStyle.Render("R") + " No")
-			writeHint("Enter Done…")
 			writeHint("Esc Reject")
+			writeHint("Enter Done…")
 			return
 		}
 		writeHint(keyStyle.Render("y") + " Apply  ·  " + keyStyle.Render("n") + " Reject")
 		writeHint(keyStyle.Render("A") + " Apply rest  ·  " + keyStyle.Render("R") + " Reject rest")
-		if m.focusOnList {
-			writeHint("↑/↓ Files  ·  Tab Diff")
-		} else {
-			writeHint("j/k Scroll  ·  Tab Files")
+		if inspection := m.inspectionHints(true); len(inspection) > 0 {
+			writeHint(strings.Join(inspection, "  ·  "))
 		}
-		writeHint("Enter Finish…  ·  Esc Reject all")
+		writeHint("Esc Reject all  ·  Enter Finish…")
 		return
 	}
 	builder.WriteString("\n\n")
@@ -1707,16 +2109,18 @@ func (m MultiDiffPreviewModel) renderMultiActions(builder *strings.Builder) {
 	builder.WriteString(allStyle.Render("R Reject remaining"))
 	builder.WriteString("\n\n")
 
-	if m.useMultiDiffSplitLayout() {
-		builder.WriteString(ansi.Truncate(hintStyle.Render("Tab Switch focus  ·  ↑/↓ Files  ·  j/k Scroll diff  ·  y/n Per-file  ·  A/R Bulk  ·  Enter Finish…  ·  Esc Reject all"), m.renderWidth(), "…"))
-	} else if m.width >= 40 {
-		focusHint := "↑/↓ or j/k Navigate files  ·  Tab Focus diff"
-		if !m.focusOnList {
-			focusHint = "↑/↓ or j/k Scroll diff  ·  Tab Focus files"
+	if m.width >= 40 {
+		inspection := m.inspectionHints(false)
+		if m.useMultiDiffSplitLayout() {
+			actions := []string{"Esc Reject all", "Enter Finish…", "y/n Per-file", "A/R Bulk"}
+			actions = append(actions, inspection...)
+			builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(actions, "  ·  ")), m.renderWidth(), "…"))
+		} else {
+			inspection = append(inspection, "Enter Finish…")
+			builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(inspection, "  ·  ")), m.renderWidth(), "…"))
+			builder.WriteString("\n")
+			builder.WriteString(ansi.Truncate(hintStyle.Render("Esc Reject all  ·  y/n Per-file  ·  A/R Bulk"), m.renderWidth(), "…"))
 		}
-		builder.WriteString(ansi.Truncate(hintStyle.Render(focusHint+"  ·  Enter Finish…"), m.renderWidth(), "…"))
-		builder.WriteString("\n")
-		builder.WriteString(ansi.Truncate(hintStyle.Render("y/n Per-file  ·  A/R Bulk  ·  Esc Reject all"), m.renderWidth(), "…"))
 	}
 }
 

@@ -57,46 +57,63 @@ type GitStatusRequestMsg struct {
 
 // GitStatusActionMsg is sent when user performs an action.
 type GitStatusActionMsg struct {
-	Action  GitAction
-	Files   []string
-	Message string
+	Action          GitAction
+	Files           []string
+	Message         string
+	RequestID       string
+	ownerGeneration uint64
+	triggerKey      string
 }
 
 // GitStatusDiffMsg delivers an asynchronously loaded inline diff. FilePath is
 // required so late responses cannot replace the preview for a newer selection.
 type GitStatusDiffMsg struct {
-	FilePath string
-	Content  string
-	Error    string
+	RequestID string
+	FilePath  string
+	Content   string
+	Error     string
 }
 
 // GitStatusModel is the UI for interactive git status.
 type GitStatusModel struct {
-	entries           []GitFileEntry
-	selectedIndex     int
-	selectedIndices   map[int]bool // For multi-select
-	entryRows         map[int]int  // Entry index to rendered viewport row
-	viewport          viewport.Model
-	diffViewport      viewport.Model
-	showDiff          bool
-	pendingDiffPath   string
-	diffLoadError     bool
-	confirmReset      bool
-	pendingResetFiles []string
-	branch            string
-	upstream          string
-	aheadBehind       string
-	styles            *Styles
-	width             int
-	height            int
-	actionsLinked     bool
-	actionsKnown      bool
+	entries              []GitFileEntry
+	selectedIndex        int
+	selectedIndices      map[int]bool // For multi-select
+	entryRows            map[int]int  // Entry index to rendered viewport row
+	viewport             viewport.Model
+	diffViewport         viewport.Model
+	showDiff             bool
+	pendingDiffPath      string
+	pendingDiffRequestID string
+	diffRequestSeq       uint64
+	diffLoadError        bool
+	confirmReset         bool
+	pendingResetFiles    []string
+	branch               string
+	upstream             string
+	aheadBehind          string
+	styles               *Styles
+	width                int
+	height               int
+	actionsLinked        bool
+	actionsKnown         bool
+	ownerGeneration      uint64
+	actionPending        bool
 
 	// Callback for actions
 	onAction func(action GitAction, files []string, message string)
 }
 
+func (m *GitStatusModel) setOwnerGeneration(generation uint64) {
+	m.ownerGeneration = generation
+}
+
 const minGitStatusSplitWidth = 64
+
+// Cursor, selection marker and status consume six cells before the path. The
+// outer panel consumes four more, so eleven terminal columns are the first
+// geometry capable of showing any target identity at all.
+const minGitTargetWidth = 11
 
 // NewGitStatusModel creates a new git status model.
 func NewGitStatusModel(styles *Styles) GitStatusModel {
@@ -117,9 +134,13 @@ func NewGitStatusModel(styles *Styles) GitStatusModel {
 
 // SetSize sets the size of the git status view.
 func (m *GitStatusModel) SetSize(width, height int) {
-	m.width = max(width, 1)
-	m.height = max(height, 1)
-	contentHeight := max(m.height-11, 1)
+	m.width = max(width, 0)
+	m.height = max(height, 0)
+	chromeRows := 11
+	if m.height < 14 {
+		chromeRows = 10 // compact title spacing keeps both diff context and footer visible
+	}
+	contentHeight := max(m.height-chromeRows, 1)
 
 	if m.diffVisible() && m.width >= minGitStatusSplitWidth {
 		listOuterWidth := (m.width - 1) / 2
@@ -137,9 +158,9 @@ func (m *GitStatusModel) SetSize(width, height int) {
 		// Reserve one row for the selected-file context header. On narrow
 		// terminals the diff replaces the file list entirely, so without this
 		// header ↑/↓ changed files invisibly.
-		// viewport.View retains a trailing content row, so reserve two model rows
-		// to keep header + body within the previous panel height budget.
-		m.diffViewport.Height = max(contentHeight-2, 1)
+		// Keeping the remaining rows in the viewport also makes the split panes
+		// exactly equal in height: header + diff body matches the file-list body.
+		m.diffViewport.Height = max(contentHeight-1, 1)
 	}
 	m.ensureSelectionVisible()
 }
@@ -153,6 +174,7 @@ func (m GitStatusModel) renderWidth() int {
 
 // SetStatus sets the git status to display.
 func (m *GitStatusModel) SetStatus(entries []GitFileEntry, branch, upstream, aheadBehind string) {
+	m.actionPending = false
 	m.entries = append([]GitFileEntry(nil), entries...)
 	m.branch = safeKeyEntryText(branch)
 	m.upstream = safeKeyEntryText(upstream)
@@ -164,6 +186,7 @@ func (m *GitStatusModel) SetStatus(entries []GitFileEntry, branch, upstream, ahe
 	m.selectedIndices = make(map[int]bool)
 	m.showDiff = false
 	m.pendingDiffPath = ""
+	m.pendingDiffRequestID = ""
 	m.diffLoadError = false
 	m.confirmReset = false
 	m.pendingResetFiles = nil
@@ -218,6 +241,29 @@ func (m *GitStatusModel) SetActionsLinked(linked bool) {
 
 func (m GitStatusModel) actionsAvailable() bool {
 	return !m.actionsKnown || m.actionsLinked || m.onAction != nil
+}
+
+func (m GitStatusModel) canNavigateEntries() bool {
+	return len(m.entries) > 1
+}
+
+func (m GitStatusModel) canPageEntries() bool {
+	return m.canNavigateEntries() && m.viewport.TotalLineCount() > m.viewport.Height
+}
+
+func (m GitStatusModel) canScrollDiff() bool {
+	return m.diffVisible() && m.diffViewport.TotalLineCount() > m.diffViewport.Height
+}
+
+func (m GitStatusModel) navigationHints() []string {
+	if !m.canNavigateEntries() {
+		return nil
+	}
+	hints := []string{"↑/↓ Navigate"}
+	if m.canPageEntries() {
+		hints = append(hints, "PgUp/PgDn Page")
+	}
+	return append(hints, "Home/End Jump")
 }
 
 // updateViewport updates the viewport content.
@@ -349,11 +395,17 @@ func (m *GitStatusModel) requestSelectedDiff() tea.Cmd {
 	m.SetDiff("Loading diff…")
 	path := m.entries[m.selectedIndex].FilePath
 	m.pendingDiffPath = path
+	m.diffRequestSeq++
+	if m.diffRequestSeq == 0 {
+		m.diffRequestSeq++
+	}
+	requestID := fmt.Sprintf("git-diff-%d", m.diffRequestSeq)
+	m.pendingDiffRequestID = requestID
 	if m.onAction != nil {
 		m.onAction(GitActionDiff, []string{path}, "")
 	}
 	return func() tea.Msg {
-		return GitStatusActionMsg{Action: GitActionDiff, Files: []string{path}}
+		return GitStatusActionMsg{Action: GitActionDiff, Files: []string{path}, RequestID: requestID, ownerGeneration: m.ownerGeneration}
 	}
 }
 
@@ -497,6 +549,9 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.actionPending && gitTerminalActionKey(msg.String()) {
+			return m, nil
+		}
 		if m.confirmReset {
 			if !m.actionsAvailable() {
 				m.confirmReset = false
@@ -505,17 +560,21 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 			}
 			switch msg.String() {
 			case "enter":
+				if workspaceTargetActionsUnreadable(m.width, m.height, minGitTargetWidth) {
+					return m, nil
+				}
 				files := append([]string(nil), m.pendingResetFiles...)
 				m.confirmReset = false
 				m.pendingResetFiles = nil
 				if len(files) == 0 {
 					return m, nil
 				}
+				m.actionPending = true
 				if m.onAction != nil {
 					m.onAction(GitActionReset, files, "")
 				}
 				return m, func() tea.Msg {
-					return GitStatusActionMsg{Action: GitActionReset, Files: files}
+					return GitStatusActionMsg{Action: GitActionReset, Files: files, ownerGeneration: m.ownerGeneration, triggerKey: msg.String()}
 				}
 			case "esc", "q", "n":
 				m.confirmReset = false
@@ -543,8 +602,21 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 		case "pgdown":
 			return m, m.selectPosition(m.selectedPosition() + max(m.viewport.Height-2, 1))
 
+		case "ctrl+j":
+			if m.diffVisible() {
+				m.diffViewport.ScrollDown(3)
+			}
+
+		case "ctrl+k":
+			if m.diffVisible() {
+				m.diffViewport.ScrollUp(3)
+			}
+
 		case " ":
 			// Stage or unstage the current multi-selection group.
+			if workspaceTargetActionsUnreadable(m.width, m.height, minGitTargetWidth) {
+				return m, nil
+			}
 			if m.actionsAvailable() && len(m.entries) > 0 && m.selectedIndex < len(m.entries) {
 				entry := m.entries[m.selectedIndex]
 				var action GitAction
@@ -557,19 +629,25 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 				if len(files) == 0 {
 					files = []string{entry.FilePath}
 				}
+				m.actionPending = true
 				if m.onAction != nil {
 					m.onAction(action, files, "")
 				}
 				return m, func() tea.Msg {
 					return GitStatusActionMsg{
-						Action: action,
-						Files:  files,
+						Action:          action,
+						Files:           files,
+						ownerGeneration: m.ownerGeneration,
+						triggerKey:      msg.String(),
 					}
 				}
 			}
 
 		case "a":
 			// Stage all
+			if workspaceTargetActionsUnreadable(m.width, m.height, minGitTargetWidth) {
+				return m, nil
+			}
 			if !m.actionsAvailable() {
 				return m, nil
 			}
@@ -580,19 +658,25 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 				}
 			}
 			if len(files) > 0 {
+				m.actionPending = true
 				if m.onAction != nil {
 					m.onAction(GitActionStageAll, files, "")
 				}
 				return m, func() tea.Msg {
 					return GitStatusActionMsg{
-						Action: GitActionStageAll,
-						Files:  files,
+						Action:          GitActionStageAll,
+						Files:           files,
+						ownerGeneration: m.ownerGeneration,
+						triggerKey:      msg.String(),
 					}
 				}
 			}
 
 		case "u":
 			// Unstage all
+			if workspaceTargetActionsUnreadable(m.width, m.height, minGitTargetWidth) {
+				return m, nil
+			}
 			if !m.actionsAvailable() {
 				return m, nil
 			}
@@ -603,19 +687,25 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 				}
 			}
 			if len(files) > 0 {
+				m.actionPending = true
 				if m.onAction != nil {
 					m.onAction(GitActionUnstageAll, files, "")
 				}
 				return m, func() tea.Msg {
 					return GitStatusActionMsg{
-						Action: GitActionUnstageAll,
-						Files:  files,
+						Action:          GitActionUnstageAll,
+						Files:           files,
+						ownerGeneration: m.ownerGeneration,
+						triggerKey:      msg.String(),
 					}
 				}
 			}
 
 		case "d":
 			// Toggle diff view
+			if workspaceTargetActionsUnreadable(m.width, m.height, minGitTargetWidth) {
+				return m, nil
+			}
 			if m.actionsAvailable() && len(m.entries) > 0 {
 				if m.showDiff && m.diffLoadError {
 					return m, m.requestSelectedDiff()
@@ -623,6 +713,7 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 				m.showDiff = !m.showDiff
 				if !m.showDiff {
 					m.pendingDiffPath = ""
+					m.pendingDiffRequestID = ""
 				}
 				m.SetSize(m.width, m.height)
 				if m.showDiff {
@@ -632,6 +723,9 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 
 		case "c":
 			// Commit staged changes
+			if workspaceTargetActionsUnreadable(m.width, m.height, minGitTargetWidth) {
+				return m, nil
+			}
 			if !m.actionsAvailable() {
 				return m, nil
 			}
@@ -642,13 +736,16 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 				}
 			}
 			if len(stagedFiles) > 0 {
+				m.actionPending = true
 				if m.onAction != nil {
 					m.onAction(GitActionCommit, stagedFiles, "")
 				}
 				return m, func() tea.Msg {
 					return GitStatusActionMsg{
-						Action: GitActionCommit,
-						Files:  stagedFiles,
+						Action:          GitActionCommit,
+						Files:           stagedFiles,
+						ownerGeneration: m.ownerGeneration,
+						triggerKey:      msg.String(),
 					}
 				}
 			}
@@ -656,6 +753,9 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 		case "r":
 			// Reset may discard local changes. Snapshot the current selection and
 			// require an explicit second step before emitting the action.
+			if workspaceTargetActionsUnreadable(m.width, m.height, minGitTargetWidth) {
+				return m, nil
+			}
 			if m.actionsAvailable() && len(m.entries) > 0 && m.selectedIndex < len(m.entries) {
 				files := m.GetSelectedFiles()
 				if len(files) > 0 {
@@ -665,11 +765,12 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 			}
 
 		case "q", "esc":
+			m.actionPending = true
 			if m.onAction != nil {
 				m.onAction(GitActionClose, nil, "")
 			}
 			return m, func() tea.Msg {
-				return GitStatusActionMsg{Action: GitActionClose}
+				return GitStatusActionMsg{Action: GitActionClose, ownerGeneration: m.ownerGeneration, triggerKey: msg.String()}
 			}
 
 		case "tab":
@@ -689,7 +790,12 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		if m.diffVisible() {
+		if m.canScrollDiff() {
+			m.diffViewport, cmd = m.diffViewport.Update(msg)
+		} else if direction := verticalMouseWheelDirection(msg); direction != 0 {
+			step := max(m.viewport.MouseWheelDelta, 1)
+			cmd = m.selectPosition(m.selectedPosition() + direction*step)
+		} else if m.diffVisible() {
 			m.diffViewport, cmd = m.diffViewport.Update(msg)
 		} else {
 			m.viewport, cmd = m.viewport.Update(msg)
@@ -703,6 +809,14 @@ func (m GitStatusModel) Update(msg tea.Msg) (GitStatusModel, tea.Cmd) {
 	return m, nil
 }
 
+func gitTerminalActionKey(key string) bool {
+	switch key {
+	case "enter", " ", "a", "u", "c", "q", "esc":
+		return true
+	}
+	return false
+}
+
 // View renders the git status.
 func (m GitStatusModel) View() string {
 	var builder strings.Builder
@@ -714,7 +828,11 @@ func (m GitStatusModel) View() string {
 		Padding(0, 1)
 
 	builder.WriteString(headerStyle.Render(MessageIcons["info"] + " Git Status"))
-	builder.WriteString("\n\n")
+	if m.height > 0 && m.height < 14 {
+		builder.WriteString("\n")
+	} else {
+		builder.WriteString("\n\n")
+	}
 
 	// Branch info
 	branchStyle := lipgloss.NewStyle().
@@ -756,13 +874,15 @@ func (m GitStatusModel) View() string {
 
 	if m.diffVisible() && m.width >= minGitStatusSplitWidth {
 		// Split view
-		filesBox := borderStyle.Width(m.viewport.Width).Render(m.viewport.View())
-		diffBox := borderStyle.Width(m.diffViewport.Width).Render(m.renderDiffPane())
+		filesBox := borderStyle.Width(m.viewport.Width + 2).Render(m.viewport.View())
+		diffView := fitPanelContent(m.renderDiffPane(), m.diffViewport.Width)
+		diffBox := borderStyle.Width(m.diffViewport.Width + 2).Render(diffView)
 		builder.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, filesBox, " ", diffBox))
 	} else if m.diffVisible() {
-		builder.WriteString(borderStyle.Width(m.diffViewport.Width).Render(m.renderDiffPane()))
+		diffView := fitPanelContent(m.renderDiffPane(), m.diffViewport.Width)
+		builder.WriteString(borderStyle.Width(m.diffViewport.Width + 2).Render(diffView))
 	} else {
-		builder.WriteString(borderStyle.Width(m.viewport.Width).Render(m.viewport.View()))
+		builder.WriteString(borderStyle.Width(m.viewport.Width + 2).Render(m.viewport.View()))
 	}
 
 	builder.WriteString("\n\n")
@@ -782,6 +902,14 @@ func (m *GitStatusModel) renderActions(builder *strings.Builder) {
 
 	if len(m.entries) == 0 {
 		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc/q")+" Close"), m.renderWidth(), "…"))
+		return
+	}
+	if workspaceTargetActionsUnreadable(m.width, m.height, minGitTargetWidth) {
+		if navigation := m.navigationHints(); len(navigation) > 0 {
+			builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(navigation, "  │  ")), m.renderWidth(), "…"))
+			builder.WriteString("\n")
+		}
+		builder.WriteString(ansi.Truncate(hintStyle.Render(tinyWorkspaceResizeRecoveryHint(m.renderWidth())), m.renderWidth(), "…"))
 		return
 	}
 	if m.confirmReset {
@@ -807,8 +935,10 @@ func (m *GitStatusModel) renderActions(builder *strings.Builder) {
 	if !m.actionsAvailable() {
 		primary := keyStyle.Render("Esc/q") + " Close  │  " + hintStyle.Render("Read-only · Git actions unavailable")
 		builder.WriteString(ansi.Truncate(hintStyle.Render(primary), m.renderWidth(), "…"))
-		builder.WriteString("\n")
-		builder.WriteString(ansi.Truncate(hintStyle.Render("↑/↓ Navigate  │  PgUp/PgDn Page  │  Home/End Jump"), m.renderWidth(), "…"))
+		if navigation := m.navigationHints(); len(navigation) > 0 {
+			builder.WriteString("\n")
+			builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(navigation, "  │  ")), m.renderWidth(), "…"))
+		}
 		return
 	}
 
@@ -834,12 +964,22 @@ func (m *GitStatusModel) renderActions(builder *strings.Builder) {
 	)
 
 	builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(hints, "  │  ")), m.renderWidth(), "…"))
-	builder.WriteString("\n")
+	secondary := make([]string, 0, 4)
+	if m.canScrollDiff() {
+		secondary = append(secondary, "Ctrl+j/k Scroll diff")
+	}
+	secondary = append(secondary, m.navigationHints()...)
 	selectionHint := "Tab Select"
 	if len(m.selectedIndices) > 0 {
 		selectionHint = fmt.Sprintf("Tab Select (%d marked)", len(m.selectedIndices))
 	}
-	builder.WriteString(ansi.Truncate(hintStyle.Render("↑/↓ Navigate  │  PgUp/PgDn Page  │  Home/End Jump  │  "+selectionHint), m.renderWidth(), "…"))
+	if m.canNavigateEntries() || len(m.selectedIndices) > 0 {
+		secondary = append(secondary, selectionHint)
+	}
+	if len(secondary) > 0 {
+		builder.WriteString("\n")
+		builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(secondary, "  │  ")), m.renderWidth(), "…"))
+	}
 }
 
 // GetSelectedFiles returns the currently selected files.

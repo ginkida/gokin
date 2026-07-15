@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -38,6 +40,12 @@ import (
 	"gokin/internal/undo"
 	"gokin/internal/watcher"
 )
+
+var errConfigConflict = errors.New("configuration changed while this update was being prepared; retry the action")
+
+// ErrSessionProviderMismatch marks an exact/continued session whose persisted
+// provider history cannot be replayed safely by the current provider.
+var ErrSessionProviderMismatch = errors.New("session provider mismatch")
 
 // SystemPrompt is the default system prompt for the assistant.
 const SystemPrompt = `You are Gokin, an AI assistant for software development. You help users work with code by:
@@ -124,6 +132,14 @@ type App struct {
 	// mutex — visible to users as `/provider deepseek` hanging with
 	// "Generating 11.8s" forever.
 	programMu sync.RWMutex
+	// programSendOrderMu orders synchronous worker sends together with the
+	// non-blocking sends reserved by callbacks running inside Bubble Tea's
+	// Update. Program.Send uses an unbuffered channel: a callback must return to
+	// the event loop before that loop can receive its reply. Each reservation
+	// publishes a completion channel as the next sender's predecessor, keeping
+	// message order deterministic without re-entering Update.
+	programSendOrderMu sync.Mutex
+	programSendTail    <-chan struct{}
 
 	// Application context for cancellation
 	ctx    context.Context
@@ -157,17 +173,32 @@ type App struct {
 	permPending   map[string]chan permission.Decision
 	permReqSeq    atomic.Int64
 
-	// Question handling
-	questionResponseChan chan string
+	// Question handling. Each waiter owns a channel keyed by request ID; a late
+	// answer for an expired prompt is dropped instead of leaking into the next
+	// ask_user call.
+	questionPendingMu sync.Mutex
+	questionPending   map[string]chan string
+	questionReqSeq    atomic.Int64
 
 	// Diff preview handling
 	diffResponseChan      chan ui.DiffDecision
 	multiDiffResponseChan chan map[string]ui.DiffDecision
 	diffBatchDecision     ui.DiffDecision
+	diffPendingMu         sync.Mutex
+	diffPending           map[string]chan ui.DiffDecision
+	diffReqSeq            atomic.Int64
+	multiDiffPendingMu    sync.Mutex
+	multiDiffPending      map[string]chan map[string]ui.DiffDecision
+	multiDiffReqSeq       atomic.Int64
 
 	// Plan management
-	planManager      *plan.Manager
-	planApprovalChan chan plan.ApprovalDecision
+	planManager *plan.Manager
+	// Plan approvals use the same per-request ownership as permissions and
+	// questions. The response keeps UI intent/feedback intact; side effects are
+	// applied by the correlated waiter against its own *plan.Plan.
+	planPendingMu sync.Mutex
+	planPending   map[string]chan planApprovalResponse
+	planReqSeq    atomic.Int64
 
 	// Hooks management
 	hooksManager *hooks.Manager
@@ -235,6 +266,11 @@ type App struct {
 	// MCP (Model Context Protocol)
 	mcpManager        *mcp.Manager
 	mcpInitialSummary string // One-shot toast describing initial MCP connect results
+	// mcpMutationMu is an outer transaction lock for runtime add/remove. It
+	// covers manager + registry + client tool declarations + config commit as
+	// one ordered operation; status/list calls never take it. Never acquire it
+	// while holding a.mu because mutation helpers acquire a.mu through App APIs.
+	mcpMutationMu sync.Mutex
 
 	// Loops (autonomous recurring task system, v0.81+).
 	// Initialized in builder.go after configDir is known. The actual
@@ -249,6 +285,27 @@ type App struct {
 	// headless/eval runs (post-unification, routed output and journaling
 	// work too; see headless.go). Guarded by a.mu.
 	headlessDirect bool
+	// Policy callbacks are shared with interactive execution. These fields
+	// latch fail-closed outcomes only while one RunHeadless invocation is active,
+	// preventing a denied tool call, recovered panic, or failed finalization gate
+	// from being masked by later model prose. Guarded by a.mu.
+	headlessRunActive     bool
+	headlessPolicyFailure *headlessPolicyFailure
+	headlessTerminal      *headlessTerminalOutcome
+	headlessFinalResult   string
+	// Invocation-scoped accounting is separate from the session ledger. The
+	// latter intentionally treats metadata-free input estimates as a lower
+	// bound, which is correct for /stats but would make a second headless turn
+	// report zero input. These fields add each completed model exchange while
+	// the active headless token owns the foreground. Guarded by a.mu.
+	headlessInvocationUsage HeadlessUsage
+	headlessInvocationCost  HeadlessCost
+	// headlessAgentUsageScope is the exact token inherited by agents spawned
+	// from the current headless context. owner ties the lazily-created scope to
+	// headlessTerminal's per-run pointer so a later invocation cannot reuse it.
+	headlessAgentUsageScope      agent.InvocationScope
+	headlessAgentUsageScopeOwner *headlessTerminalOutcome
+	headlessCostIncomplete       bool
 
 	// Discuss-mode (discuss_mode.go): flags for the foreground "don't jump to
 	// implementation during analysis" gate. turnDiscuss is set at turn start
@@ -284,9 +341,20 @@ type App struct {
 	workingMemory *appcontext.WorkingMemoryManager
 
 	// Persistent stores (for flush on shutdown)
-	memoryStore  *memory.Store
-	errorStore   *memory.ErrorStore
-	exampleStore *memory.ExampleStore
+	memoryStore      *memory.Store
+	memoryAutoInject atomic.Bool
+	// memoryAllowGlobal is separate from auto-inject: the latter controls
+	// whether memory enters context at all, while this flag is the explicit
+	// cross-project opt-in used by per-turn retrieval.
+	memoryAllowGlobal atomic.Bool
+	// relevantMemoryContext is query-aware durable recall for the current turn.
+	// It has its own leaf lock because session-memory callbacks can rebuild the
+	// client turn context while another goroutine starts or clears a turn; those
+	// paths must never re-enter a.mu (same invariant as clientMu/grantedDirsMu).
+	relevantMemoryMu      sync.RWMutex
+	relevantMemoryContext string
+	errorStore            *memory.ErrorStore
+	exampleStore          *memory.ExampleStore
 
 	// Pattern detection throttling
 	knownPatterns     map[string]bool
@@ -308,6 +376,8 @@ type App struct {
 	lastErrorTime time.Time // When the last error occurred
 
 	// Lock ordering (must be acquired in this order to prevent deadlock):
+	//   0. mcpMutationMu / sessionModeCycleMu (independent outer transactions;
+	//      neither is ever acquired under mu)
 	//   1. mu
 	//   2. processingMu
 	//   3. pendingMu
@@ -319,8 +389,16 @@ type App struct {
 	//   9. grantedDirsMu (independent leaf — never held while acquiring a.mu;
 	//      applyGrantedDirsToTools snapshots under it, releases, THEN reads a.mu)
 	// Never hold a later lock while acquiring an earlier one.
-	mu           sync.Mutex
-	diffPromptMu sync.Mutex
+	// sessionModeCycleMu keeps every accepted Shift+Tab/palette cycle as one
+	// read-current -> apply-next transaction. It is deliberately outside mu:
+	// applySessionMode delegates to toggle methods which acquire mu themselves.
+	sessionModeCycleMu sync.Mutex
+	mu                 sync.Mutex
+	// configRevision is guarded by mu and assigned while the corresponding
+	// config snapshot is committed. It therefore records mutation order, not
+	// the later scheduler-dependent order of Bubble Tea sends.
+	configRevision uint64
+	diffPromptMu   sync.Mutex
 
 	// Session-only directory grants (Claude-Code-style /add-dir + ask-on-access).
 	// NOT persisted unless the user passes --persist (then also in
@@ -336,6 +414,10 @@ type App struct {
 
 	running    bool
 	processing bool // Guards against concurrent message processing
+	// dropSteerLeftovers is set by explicit cancellation and cleared only when
+	// a new foreground operation is accepted. It is guarded by mu and provides
+	// defense in depth for embedders that invoke the execution handler directly.
+	dropSteerLeftovers bool
 
 	// Processing cancellation for ESC interrupt
 	processingCancel context.CancelFunc
@@ -402,6 +484,37 @@ type App struct {
 // New creates a new application instance.
 func New(cfg *config.Config, workDir string) (*App, error) {
 	return NewBuilder(cfg, workDir).Build()
+}
+
+// NewWithOptions creates an application with explicit startup behavior. Use
+// NonInteractive for headless/automation entry points so construction cannot
+// pause for input or start an implicit model download.
+func NewWithOptions(cfg *config.Config, workDir string, options BuildOptions) (*App, error) {
+	return NewBuilderWithOptions(cfg, workDir, options).Build()
+}
+
+// markOnboardingWelcomeSeen persists the first-launch flag only after the TUI
+// has real geometry and the user interacts with the visible welcome surface.
+// A failed save restores the in-memory flag so the introduction is offered on
+// the next launch instead of being lost permanently.
+func (a *App) markOnboardingWelcomeSeen() {
+	a.mu.Lock()
+	if !a.config.UI.ShowWelcome {
+		a.mu.Unlock()
+		return
+	}
+	a.config.UI.ShowWelcome = false
+	err := a.config.Save()
+	if err != nil {
+		a.config.UI.ShowWelcome = true
+	} else {
+		a.nextConfigRevisionLocked()
+	}
+	a.mu.Unlock()
+
+	if err != nil {
+		logging.Warn("failed to persist onboarding welcome state", "error", err)
+	}
 }
 
 // Run starts the application.
@@ -636,12 +749,10 @@ func (a *App) Run() error {
 
 	// Show one-time onboarding welcome on first launch.
 	if a.config.UI.ShowWelcome {
-		a.tui.Welcome()
+		a.tui.ShowFirstLaunchWelcome(func() {
+			a.safeGo("persist-onboarding-welcome", a.markOnboardingWelcomeSeen)
+		})
 		a.tui.AddSystemMessage("Type a message to get started, or try a command:\n• /help — see all available commands\n• /doctor — verify your setup\n• /quickstart — guided examples")
-		a.config.UI.ShowWelcome = false
-		if err := a.config.Save(); err != nil {
-			logging.Warn("failed to persist onboarding welcome state", "error", err)
-		}
 	}
 
 	// Post-upgrade banner: when LastSeenVersion differs from the
@@ -890,7 +1001,7 @@ func (a *App) handleSubmit(message string) {
 			a.journalEvent("request_steered", map[string]any{
 				"message_preview": previewForJournal(message),
 			})
-			a.safeSendToProgram(ui.StreamTextMsg(
+			a.safeSendToProgramAsync(ui.StreamTextMsg(
 				"💬 Steered into current turn — the agent will see this on its next step\n"))
 			return
 		}
@@ -901,7 +1012,7 @@ func (a *App) handleSubmit(message string) {
 		pos, ok := a.enqueuePending(message)
 		if !ok {
 			logging.Debug("pending queue full — message rejected", "len", len(message))
-			a.safeSendToProgram(ui.QueuedMessageRejectedMsg{
+			a.safeSendToProgramAsync(ui.QueuedMessageRejectedMsg{
 				Message: message,
 				Reason:  fmt.Sprintf("Queue full (%d waiting)", pos),
 				Waiting: pos,
@@ -914,21 +1025,48 @@ func (a *App) handleSubmit(message string) {
 		})
 		a.saveRecoverySnapshot()
 
-		a.safeSendToProgram(ui.QueuedCountMsg(pos))
+		feedback := []tea.Msg{ui.QueuedCountMsg(pos)}
 		if pos == 1 {
-			a.safeSendToProgram(ui.StreamTextMsg("📥 Queued — will process after the current request\n"))
+			feedback = append(feedback, ui.StreamTextMsg("📥 Queued — will process after the current request\n"))
 		} else {
-			a.safeSendToProgram(ui.StreamTextMsg(fmt.Sprintf("📥 Queued (#%d in line)\n", pos)))
+			feedback = append(feedback, ui.StreamTextMsg(fmt.Sprintf("📥 Queued (#%d in line)\n", pos)))
 		}
+		a.safeSendToProgramAsync(feedback...)
 		return
 	}
 	a.processing = true
+	a.dropSteerLeftovers = false
+	ctx := a.claimForegroundContextLocked()
 
 	// Parse command BEFORE unlocking to avoid race condition
 	// (parsing is fast and doesn't need to be concurrent)
 	name, args, isCmd := a.commandHandler.Parse(message)
 	a.mu.Unlock()
+	a.startAcceptedSubmit(ctx, message, name, args, isCmd)
+}
 
+// claimForegroundContextLocked installs cancellation ownership for a request
+// while the caller still holds a.mu. CancelProcessing takes a.mu before
+// processingMu, so the processing flag, accepted request, and cancel function
+// become visible as one state transition with no Esc/Ctrl+C handoff gap.
+func (a *App) claimForegroundContextLocked() context.Context {
+	parent := a.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	a.processingMu.Lock()
+	a.processingCancel = cancel
+	a.processingMu.Unlock()
+	return ctx
+}
+
+// startAcceptedSubmit starts a message whose foreground ownership has already
+// been claimed under a.mu and whose cancellation context is already installed.
+// Separating claim from launch lets a completed turn publish its queue handoff
+// without an idle or ownerless interval where input can overtake it or Esc can
+// miss it.
+func (a *App) startAcceptedSubmit(ctx context.Context, message, name string, args []string, isCmd bool) {
 	// Journal and recovery AFTER unlock (saveRecoverySnapshot takes a.mu internally)
 	a.journalEvent("request_accept", map[string]any{
 		"message_preview": previewForJournal(message),
@@ -937,19 +1075,8 @@ func (a *App) handleSubmit(message string) {
 
 	// Now safely start the goroutine
 	if isCmd {
-		a.processingMu.Lock()
-		cmdCtx, cmdCancel := context.WithCancel(a.ctx)
-		a.processingCancel = cmdCancel
-		a.processingMu.Unlock()
-
-		a.safeGo("command-execution", func() {
-			defer func() {
-				a.processingMu.Lock()
-				a.processingCancel = nil
-				a.processingMu.Unlock()
-			}()
-			a.executeCommandCtx(cmdCtx, name, args)
-		})
+		ctx = commands.WithRawInvocation(ctx, message)
+		a.safeGo("command-execution", func() { a.executeCommandCtx(ctx, name, args) })
 		return
 	}
 
@@ -963,17 +1090,11 @@ func (a *App) handleSubmit(message string) {
 	// but we surface a toast so they know which command they meant and
 	// can cancel + retype with the slash.
 	if hint := a.detectUnslashedCommand(message); hint != "" {
-		a.safeSendToProgram(ui.StatusUpdateMsg{
+		a.safeSendToProgramAsync(ui.StatusUpdateMsg{
 			Type:    ui.StatusWarning,
 			Message: hint,
 		})
 	}
-
-	// Create cancelable context for this request
-	a.processingMu.Lock()
-	ctx, cancel := context.WithCancel(a.ctx)
-	a.processingCancel = cancel
-	a.processingMu.Unlock()
 
 	// Expand @path references into inline file content for the AGENT only. The
 	// UI already echoed the raw @path text to scrollback (before onSubmit), so
@@ -983,12 +1104,7 @@ func (a *App) handleSubmit(message string) {
 
 	// Process message normally (coordinator is now integrated in agent system)
 	a.safeGo("message-processing", func() {
-		defer func() {
-			a.processingMu.Lock()
-			a.processingCancel = nil
-			a.processingMu.Unlock()
-		}()
-		a.processMessageWithContext(ctx, agentMessage)
+		a.processMessageWithMemoryQuery(ctx, agentMessage, message)
 	})
 }
 
@@ -1077,29 +1193,37 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		// stay stuck in "Generating" forever. We handle both here: convert
 		// the panic into an ErrorMsg + ResponseDoneMsg so the user sees
 		// what happened and the UI returns to StateInput.
-		if r := recover(); r != nil {
+		panicValue := recover()
+		if panicValue != nil {
 			logging.Error("command execution panicked",
 				"command", name,
-				"panic", r,
+				"panic", panicValue,
 				"stack", logging.PanicStack())
-			a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("internal error in /%s: %v", name, r)))
 		}
-		// GUARANTEE ResponseDoneMsg reaches the UI on every exit path.
-		// Previously this was a bare statement at the end of the function
-		// (line 950), so if commandHandler.Execute panicked OR returned
-		// via an early defer (context cancel mid-command), the UI stayed
-		// in StateProcessing → "Generating" forever — the exact
-		// "/login glm hangs" symptom. Moving it here ensures the UI
-		// always returns to StateInput, matching processMessageWithContext
-		// which already does this in its defer (message_processor.go:656).
-		if !responseDoneSent {
-			a.safeSendToProgram(ui.ResponseDoneMsg{})
-		}
-		a.mu.Lock()
-		a.processing = false
-		a.mu.Unlock()
-		a.saveRecoverySnapshot()
+		// Clear this command's cancel handle before the shared finalizer can
+		// atomically hand ownership to a queued operation and install its handle.
+		a.processingMu.Lock()
+		a.processingCancel = nil
+		a.processingMu.Unlock()
+		a.finishForegroundProcessing(func() {
+			if panicValue != nil {
+				a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("internal error in /%s: %v", name, panicValue)))
+			}
+			// GUARANTEE ResponseDoneMsg reaches the UI before a queued turn is
+			// dispatched. Otherwise a late completion from this command could
+			// reset the new turn back to StateInput.
+			if !responseDoneSent {
+				a.safeSendToProgram(ui.ResponseDoneMsg{})
+			}
+		})
 	}()
+	// The request may have been accepted from the FIFO while Program.Send was
+	// blocked and then cancelled before this goroutine was scheduled. Preserve
+	// the normal terminal UI/finalizer path, but never invoke a context-insensitive
+	// command after cancellation already owns the handoff.
+	if ctx.Err() != nil {
+		return
+	}
 
 	a.mu.Lock()
 	a.diffBatchDecision = ui.DiffPending
@@ -1167,12 +1291,21 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 			a.safeSendToProgram(msg)
 		} else if prompt, ok := strings.CutPrefix(result, commands.PromptMarker); ok {
 			// File-based command: the expansion is a MODEL PROMPT, not
-			// display text. Re-enter through handleSubmit (it decides
-			// queue-vs-process) once this command's processing flag clears.
-			// handleResubmit: the expanded prompt is a fresh top-level task —
-			// if another request started meanwhile, queue it, never steer it
-			// into that unrelated turn.
-			a.safeGo("file-command-dispatch", func() { a.handleResubmit(prompt) })
+			// display text. It is the continuation of the already-accepted slash
+			// command, so stage it ahead of later type-ahead; the shared finalizer
+			// atomically hands it the foreground slot after ResponseDone. A
+			// separate goroutine here made ordering scheduler-dependent and could
+			// run a later queued message before its originating command expanded.
+			// Serialize the cancellation check and prepend with CancelProcessing's
+			// processingMu section. If Esc wins, the continuation is skipped; if
+			// this prepend wins, Esc subsequently drains it. A late result from a
+			// context-insensitive command can therefore never resurrect cancelled
+			// work after the authoritative queue drain.
+			a.processingMu.Lock()
+			if ctx.Err() == nil {
+				a.prependPending(prompt)
+			}
+			a.processingMu.Unlock()
 		} else {
 			// Display command result as assistant message
 			a.safeSendToProgram(ui.StreamTextMsg(result))
@@ -1211,6 +1344,18 @@ func (a *App) GetTreePlanner() *agent.TreePlanner {
 // GetMCPManager returns the MCP manager (may be nil when MCP is disabled).
 func (a *App) GetMCPManager() *mcp.Manager {
 	return a.mcpManager
+}
+
+// LockMCPConfigMutation and UnlockMCPConfigMutation implement the optional
+// commands-side transaction boundary used only by MCP add/remove helpers.
+// Keeping the lock on App lets slash commands and model-facing mcp_admin calls
+// share one sequence without serializing read-only MCP actions.
+func (a *App) LockMCPConfigMutation() {
+	a.mcpMutationMu.Lock()
+}
+
+func (a *App) UnlockMCPConfigMutation() {
+	a.mcpMutationMu.Unlock()
 }
 
 // GetToolRegistry returns the tool registry — exposed so /mcp add/remove
@@ -1855,12 +2000,40 @@ func (a *App) ResumeLastSession() error {
 		return fmt.Errorf("session manager not configured")
 	}
 
-	state, info, err := a.sessionManager.LoadLast()
+	state, info, err := a.sessionManager.LoadLatest()
 	if err != nil {
 		return fmt.Errorf("failed to load last session: %w", err)
 	}
 	if state == nil || len(state.History) == 0 {
 		return fmt.Errorf("no previous session found")
+	}
+	return a.restoreLoadedSession(state, info, "previous session")
+}
+
+// ResumeSession loads one exact session ID for the current workspace. Unlike
+// ResumeLastSession it never falls back to another snapshot: missing, corrupt,
+// foreign-project, and provider-incompatible state all fail before any model
+// or tool call. This is the safe boundary used by headless --resume <id>.
+func (a *App) ResumeSession(sessionID string) error {
+	if a.sessionManager == nil {
+		return fmt.Errorf("session manager not configured")
+	}
+	state, info, err := a.sessionManager.LoadSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to load session %q: %w", sessionID, err)
+	}
+	if state == nil {
+		return fmt.Errorf("session %q was not found", sessionID)
+	}
+	return a.restoreLoadedSession(state, info, fmt.Sprintf("session %q", sessionID))
+}
+
+func (a *App) restoreLoadedSession(state *chat.SessionState, info *chat.SessionInfo, label string) error {
+	if state == nil {
+		return fmt.Errorf("cannot restore an empty session state")
+	}
+	if len(state.History) == 0 {
+		return fmt.Errorf("%s has no conversation history", label)
 	}
 
 	// Cross-provider guard — mirrors the automatic startup auto-resume check
@@ -1876,8 +2049,9 @@ func (a *App) ResumeLastSession() error {
 	// compatible.
 	currentProvider := runtimeProviderForConfig(a.config)
 	if state.Provider != "" && currentProvider != "" && state.Provider != currentProvider {
-		return fmt.Errorf("previous session was on provider %s but you're now on %s — history formats are incompatible; run without --resume, or switch back with --provider %s",
-			state.Provider, currentProvider, state.Provider)
+		return fmt.Errorf("%w: %s was on provider %s but you're now on %s — history formats are incompatible; start a new session, or switch back with --provider %s",
+			ErrSessionProviderMismatch,
+			label, state.Provider, currentProvider, state.Provider)
 	}
 
 	if err := a.sessionManager.RestoreFromState(state); err != nil {
@@ -1896,7 +2070,13 @@ func (a *App) ResumeLastSession() error {
 	// Restore tool checkpoints into the executor's journal
 	a.restoreToolCheckpoints()
 
-	logging.Info("pre-loaded session", "session_id", info.ID, "messages", info.MessageCount)
+	loadedID := state.ID
+	messageCount := len(state.History)
+	if info != nil {
+		loadedID = info.ID
+		messageCount = info.MessageCount
+	}
+	logging.Info("pre-loaded session", "session_id", loadedID, "messages", messageCount)
 	return nil
 }
 
@@ -1988,7 +2168,47 @@ func humanizeAge(age time.Duration) string {
 	}
 }
 
-// safeSendToProgram safely sends a message to the Bubbletea program.
+// reserveProgramSend appends one sender to the global delivery order. The
+// returned predecessor closes when every earlier reservation has finished;
+// the caller must close done on every exit path.
+func (a *App) reserveProgramSend() (predecessor <-chan struct{}, done chan struct{}) {
+	a.programSendOrderMu.Lock()
+	predecessor = a.programSendTail
+	done = make(chan struct{})
+	a.programSendTail = done
+	a.programSendOrderMu.Unlock()
+	return predecessor, done
+}
+
+func waitForProgramSend(predecessor <-chan struct{}) {
+	if predecessor != nil {
+		<-predecessor
+	}
+}
+
+// sendProgramMessage performs one raw Bubble Tea send after ordering has been
+// established by the caller. It must never be called directly from a Model
+// Update callback because Program.Send's message channel is unbuffered.
+func (a *App) sendProgramMessage(msg tea.Msg) {
+	a.programMu.RLock()
+	program := a.program
+	a.programMu.RUnlock()
+	if program == nil {
+		return
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Debug("sendProgramMessage recovered from panic (shutdown race)", "error", r)
+		}
+	}()
+	program.Send(msg)
+}
+
+// safeSendToProgram safely sends a message to the Bubble Tea program from a
+// worker/lifecycle goroutine. Delivery remains synchronous so callers that
+// publish terminal state before starting the next operation retain that
+// ordering contract.
 //
 // Guards the `program` reference with a DEDICATED mutex (`programMu`), not
 // the primary `a.mu`. This distinction is load-bearing: callers such as
@@ -2000,21 +2220,28 @@ func humanizeAge(age time.Duration) string {
 // never resolves. `programMu` is independent, held briefly, and read-locked
 // (RLock) on the hot path so concurrent sends don't serialize.
 func (a *App) safeSendToProgram(msg tea.Msg) {
-	a.programMu.RLock()
-	program := a.program
-	a.programMu.RUnlock()
+	predecessor, done := a.reserveProgramSend()
+	defer close(done)
+	waitForProgramSend(predecessor)
+	a.sendProgramMessage(msg)
+}
 
-	if program == nil {
+// safeSendToProgramAsync reserves the same ordered delivery stream but returns
+// before Program.Send. Use it exactly for callbacks invoked from Bubble Tea's
+// Update (submit/cancel/modal-open): the event loop must regain control before
+// it can receive these messages. A group is delivered contiguously and in order.
+func (a *App) safeSendToProgramAsync(messages ...tea.Msg) {
+	if len(messages) == 0 {
 		return
 	}
-
-	// Recover from panic if program channel is closed during shutdown.
-	defer func() {
-		if r := recover(); r != nil {
-			logging.Debug("safeSendToProgram recovered from panic (shutdown race)", "error", r)
+	predecessor, done := a.reserveProgramSend()
+	a.safeGo("bubbletea-async-send", func() {
+		defer close(done)
+		waitForProgramSend(predecessor)
+		for _, msg := range messages {
+			a.sendProgramMessage(msg)
 		}
-	}()
-	program.Send(msg)
+	})
 }
 
 // sendTokenUsageUpdate sends a token usage update to the UI.
@@ -2022,7 +2249,7 @@ func (a *App) safeSendToProgram(msg tea.Msg) {
 func (a *App) sendTokenUsageUpdate() {
 	// a.config is swapped by ApplyConfig under a.mu; this is reachable
 	// cross-goroutine (a background /loop iteration's token-usage callback runs
-	// exactly when a /settings toggle's ApplyConfig worker can fire), so snapshot
+	// exactly when a runtime /settings toggle's ApplyConfig worker can fire), so snapshot
 	// under the lock. Same ApplyConfig-reader race as GetUIRuntimeStatus.
 	a.mu.Lock()
 	cm := a.contextManager
@@ -2172,6 +2399,21 @@ func (a *App) clearTodosForNewConversation() {
 func (a *App) ClearConversation() {
 	a.session.Clear()
 
+	// /clear is a true conversation boundary. Invalidate both automatic
+	// session-summary memory (including its persisted file and any in-flight
+	// stale writer) and keyed `scope=session` entries BEFORE rebuilding the
+	// prompt; otherwise the new conversation starts with facts from the old one.
+	if a.sessionMemory != nil {
+		a.sessionMemory.Clear()
+	}
+	clearedKeyedSessionMemory := 0
+	if a.memoryStore != nil {
+		clearedKeyedSessionMemory = a.memoryStore.ClearSession()
+	}
+	if clearedKeyedSessionMemory > 0 && a.promptBuilder != nil {
+		a.promptBuilder.Invalidate()
+	}
+
 	// Re-set system instruction via API parameter
 	systemPrompt := a.promptBuilder.Build()
 	a.client.SetSystemInstruction(systemPrompt)
@@ -2233,6 +2475,7 @@ func (a *App) ClearConversation() {
 	if a.workingMemory != nil {
 		a.workingMemory.Clear()
 	}
+	a.setRelevantMemoryContext("")
 	a.pushTurnContext()
 
 	// Drain stale rate-limit retry counters so exhausted keys from the
@@ -2304,9 +2547,233 @@ func (a *App) GetTodoTool() *tools.TodoTool {
 	return nil
 }
 
-// GetConfig returns the current configuration.
+// GetConfig returns an independently owned snapshot. Commands stage edits on
+// this candidate and hand it back to ApplyConfig; exposing the live pointer
+// would let an unrelated config event publish an uncommitted value.
 func (a *App) GetConfig() *config.Config {
-	return a.config
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	snapshot := a.config.Clone()
+	if snapshot != nil {
+		snapshot.SetSnapshotRevision(a.configRevision)
+	}
+	return snapshot
+}
+
+// CommitMCPConfigSnapshot adopts the independently staged MCP configuration
+// after MCPAddCore/MCPRemoveCore have already updated the live manager,
+// registry, and YAML. A full ApplyConfig would unnecessarily rebuild the model
+// client; this lightweight commit only restores App's authoritative snapshot.
+func (a *App) CommitMCPConfigSnapshot(cfg *config.Config) {
+	cfg = cfg.Clone()
+	if cfg == nil {
+		return
+	}
+	a.mu.Lock()
+	merged := a.config.Clone()
+	if merged == nil {
+		merged = config.DefaultConfig()
+	}
+	baseMCP, tracked := cfg.SnapshotMCP()
+	merged.MCP = mergeMCPConfig(merged.MCP, cfg.MCP, baseMCP, tracked)
+	saveErr := merged.Save()
+	if saveErr != nil {
+		logging.Warn("failed to save merged MCP config", "error", saveErr, "path", config.GetConfigPath())
+	}
+	a.config = merged
+	// MCPAddCore/MCPRemoveCore receive a client snapshot before their network
+	// work begins. ApplyConfig may replace that client while the operation is in
+	// flight, so re-publish the authoritative registry to whichever client is
+	// current at commit time. Holding a.mu also orders this against client swaps.
+	if a.client != nil && a.registry != nil {
+		a.client.SetTools(a.planModeToolsLocked(a.planningModeEnabled))
+	}
+	msg := ui.ConfigUpdateMsg{
+		Revision:            a.nextConfigRevisionLocked(),
+		Settings:            a.settingToggleSnapshotLocked(),
+		PermissionsEnabled:  merged.Permission.Enabled,
+		SandboxEnabled:      merged.Tools.Bash.Sandbox,
+		PlanningModeEnabled: a.planningModeEnabled,
+		CompactMode:         merged.UI.CompactMode,
+		ReducedMotion:       merged.UI.ReducedMotion,
+		ShowTokenUsage:      merged.UI.ShowTokenUsage,
+		ModelName:           merged.Model.Name,
+	}
+	a.mu.Unlock()
+	a.safeSendToProgram(msg)
+	if saveErr != nil {
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: fmt.Sprintf("MCP changed for this session but could not be saved to %s", config.GetConfigPath()),
+		})
+	}
+}
+
+// mergeMCPConfig applies only the edits made since the caller's GetConfig
+// snapshot. MCP tools may run concurrently, so replacing the whole server list
+// here would make the last finisher silently erase a sibling add/remove.
+func mergeMCPConfig(current, candidate, base config.MCPConfig, tracked bool) config.MCPConfig {
+	cloneSection := func(section config.MCPConfig) config.MCPConfig {
+		return (&config.Config{MCP: section}).Clone().MCP
+	}
+	if !tracked {
+		return cloneSection(candidate)
+	}
+
+	merged := cloneSection(current)
+	baseByName := make(map[string]config.MCPServerConfig, len(base.Servers))
+	candidateByName := make(map[string]config.MCPServerConfig, len(candidate.Servers))
+	for _, server := range base.Servers {
+		baseByName[server.Name] = server
+	}
+	for _, server := range candidate.Servers {
+		candidateByName[server.Name] = server
+	}
+
+	// An entry present in the base but absent from the candidate was explicitly
+	// removed. Preserve all current entries that were not part of that removal.
+	kept := merged.Servers[:0]
+	for _, server := range merged.Servers {
+		if _, existedAtBase := baseByName[server.Name]; existedAtBase {
+			if _, remains := candidateByName[server.Name]; !remains {
+				continue
+			}
+		}
+		kept = append(kept, server)
+	}
+	merged.Servers = kept
+
+	// Add new entries and replace entries changed relative to the caller's
+	// base. Unchanged base entries intentionally leave newer sibling edits alone.
+	for _, server := range candidate.Servers {
+		baseServer, existedAtBase := baseByName[server.Name]
+		if existedAtBase && reflect.DeepEqual(baseServer, server) {
+			continue
+		}
+		replaced := false
+		for i := range merged.Servers {
+			if merged.Servers[i].Name == server.Name {
+				merged.Servers[i] = cloneSection(config.MCPConfig{Servers: []config.MCPServerConfig{server}}).Servers[0]
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cloned := cloneSection(config.MCPConfig{Servers: []config.MCPServerConfig{server}})
+			merged.Servers = append(merged.Servers, cloned.Servers[0])
+		}
+	}
+
+	if candidate.Enabled != base.Enabled {
+		merged.Enabled = candidate.Enabled
+	}
+	if candidate.HealthCheckInterval != base.HealthCheckInterval {
+		merged.HealthCheckInterval = candidate.HealthCheckInterval
+	}
+	return merged
+}
+
+// CommitCredentialConfigSnapshot commits an intentional logout even when no
+// replacement provider client can be constructed. It merges only credential /
+// model identity state, drops every reference to the credential-bearing client,
+// and preserves unrelated newer config commits.
+func (a *App) CommitCredentialConfigSnapshot(cfg *config.Config) error {
+	originalCandidate := cfg
+	cfg = cfg.Clone()
+	if cfg == nil {
+		return fmt.Errorf("cannot commit nil credential config")
+	}
+
+	a.mu.Lock()
+	if baseRevision, tracked := cfg.SnapshotRevision(); tracked && baseRevision != a.configRevision {
+		a.mu.Unlock()
+		return fmt.Errorf("%w (based on revision %d, current revision %d)", errConfigConflict, baseRevision, a.configRevision)
+	}
+	merged := a.config.Clone()
+	if merged == nil {
+		merged = config.DefaultConfig()
+	}
+	previousAPI := merged.API
+	merged.API = cfg.API
+	merged.Model = cfg.Model
+	saveErr := merged.Save()
+	if saveErr != nil {
+		logging.Warn("failed to save credential removal", "error", saveErr, "path", config.GetConfigPath())
+	}
+	merged.ClearSnapshotRevision()
+	a.config = merged
+
+	// Evict pooled clients for every provider whose credential was removed.
+	pool := client.GetPool(merged)
+	for _, provider := range config.Providers {
+		if provider.GetKey(&previousAPI) != "" && provider.GetKey(&merged.API) == "" {
+			pool.FlushProvider(provider.Name)
+		}
+	}
+
+	oldClient := a.client
+	a.setClientLocked(nil)
+	if a.executor != nil {
+		a.executor.SetClient(nil)
+	}
+	if a.agentRunner != nil {
+		a.agentRunner.SetClient(nil)
+	}
+	if a.contextManager != nil {
+		a.contextManager.SetClient(nil)
+	}
+	if a.taskRouter != nil {
+		a.taskRouter.SetClient(nil)
+	}
+	if a.sessionMemory != nil {
+		a.sessionMemory.SetSummarizer(nil)
+	}
+	if a.session != nil {
+		a.session.SetProvider(runtimeProviderForConfig(merged))
+	}
+	if a.promptBuilder != nil {
+		provider := runtimeProviderForConfig(merged)
+		a.promptBuilder.SetProvider(provider)
+		a.promptBuilder.SetPrefixCachingEnabled(appcontext.ProviderSupportsPrefixCaching(provider))
+	}
+
+	msg := ui.ConfigUpdateMsg{
+		Revision:            a.nextConfigRevisionLocked(),
+		Settings:            a.settingToggleSnapshotLocked(),
+		PermissionsEnabled:  merged.Permission.Enabled,
+		SandboxEnabled:      merged.Tools.Bash.Sandbox,
+		PlanningModeEnabled: a.planningModeEnabled,
+		CompactMode:         merged.UI.CompactMode,
+		ReducedMotion:       merged.UI.ReducedMotion,
+		ShowTokenUsage:      merged.UI.ShowTokenUsage,
+		ModelName:           merged.Model.Name,
+	}
+	originalCandidate.SetSnapshotRevision(msg.Revision)
+	a.mu.Unlock()
+
+	if oldClient != nil {
+		a.safeGo("close-client-after-logout", func() { _ = oldClient.Close() })
+	}
+	a.safeSendToProgram(msg)
+	if saveErr != nil {
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: fmt.Sprintf("Credentials removed for this session but could not be saved to %s", config.GetConfigPath()),
+		})
+	}
+	return saveErr
+}
+
+// PersistCurrentConfig serializes the current authoritative snapshot under the
+// config commit lock. Login uses it for an honest persistence confirmation
+// without re-saving an older caller-owned candidate over newer settings.
+func (a *App) PersistCurrentConfig() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.config == nil {
+		return fmt.Errorf("configuration is unavailable")
+	}
+	return a.config.Clone().Save()
 }
 
 // shortActiveProviderName returns a display-friendly label for the active
@@ -2387,18 +2854,25 @@ func (a *App) TogglePermissions() bool {
 	// Update unrestricted mode based on new state
 	a.updateUnrestrictedModeLocked()
 
+	// Persist and capture the UI snapshot in the same critical-section order as
+	// the revision. Saving after unlock lets an older toggle overwrite a newer
+	// config file and can marshal a concurrently mutated live pointer.
+	saveErr := a.config.Clone().Save()
 	// Copy state for UI message before unlocking
-	cfg := a.config
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
 	planningModeEnabled := a.planningModeEnabled
+	compactMode := a.config.UI.CompactMode
 	reducedMotion := a.config.UI.ReducedMotion
+	showTokenUsage := a.config.UI.ShowTokenUsage
 	modelName := a.config.Model.Name
+	settingsSnapshot := a.settingToggleSnapshotLocked()
+	configRevision := a.nextConfigRevisionLocked()
 	a.mu.Unlock()
 
 	// Persist so the toggle survives restart (matches ToggleSandbox). Surface a
 	// write failure honestly instead of silently losing it.
-	if err := cfg.Save(); err != nil {
-		logging.Warn("failed to save permission setting", "error", err)
+	if saveErr != nil {
+		logging.Warn("failed to save permission setting", "error", saveErr)
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusWarning,
 			Message: fmt.Sprintf("Permissions toggled for this session only — couldn't save to %s", config.GetConfigPath()),
@@ -2406,10 +2880,14 @@ func (a *App) TogglePermissions() bool {
 	}
 
 	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		Revision:            configRevision,
+		Settings:            settingsSnapshot,
 		PermissionsEnabled:  newEnabled,
 		SandboxEnabled:      sandboxEnabled,
 		PlanningModeEnabled: planningModeEnabled,
+		CompactMode:         compactMode,
 		ReducedMotion:       reducedMotion,
+		ShowTokenUsage:      showTokenUsage,
 		ModelName:           modelName,
 	})
 
@@ -2418,10 +2896,21 @@ func (a *App) TogglePermissions() bool {
 
 // TogglePlanningMode toggles the tree planning mode on/off.
 func (a *App) TogglePlanningMode() bool {
+	enabled, _ := a.togglePlanningModeWithRevision()
+	return enabled
+}
+
+// togglePlanningModeWithRevision returns the state and config revision from
+// the same committed mutation. Async UI feedback must carry both so a delayed
+// completion cannot repaint a newer authoritative ConfigUpdateMsg.
+func (a *App) togglePlanningModeWithRevision() (bool, uint64) {
 	a.mu.Lock()
 
 	a.planningModeEnabled = !a.planningModeEnabled
 	newEnabled := a.planningModeEnabled
+	if a.config != nil {
+		a.config.Plan.Enabled = newEnabled
+	}
 
 	if a.planManager != nil {
 		a.planManager.SetEnabled(newEnabled)
@@ -2476,19 +2965,27 @@ func (a *App) TogglePlanningMode() bool {
 	// Copy state for UI message before unlocking
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
+	compactMode := a.config.UI.CompactMode
 	reducedMotion := a.config.UI.ReducedMotion
+	showTokenUsage := a.config.UI.ShowTokenUsage
 	modelName := a.config.Model.Name
+	settingsSnapshot := a.settingToggleSnapshotLocked()
+	configRevision := a.nextConfigRevisionLocked()
 	a.mu.Unlock()
 
 	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		Revision:            configRevision,
+		Settings:            settingsSnapshot,
 		PermissionsEnabled:  permissionsEnabled,
 		SandboxEnabled:      sandboxEnabled,
 		PlanningModeEnabled: newEnabled,
+		CompactMode:         compactMode,
 		ReducedMotion:       reducedMotion,
+		ShowTokenUsage:      showTokenUsage,
 		ModelName:           modelName,
 	})
 
-	return newEnabled
+	return newEnabled, configRevision
 }
 
 // IsPlanningModeEnabled returns whether planning mode is active.
@@ -2508,6 +3005,9 @@ func (a *App) disablePlanModeAfterApproval() {
 	a.mu.Lock()
 	wasEnabled := a.planningModeEnabled
 	a.planningModeEnabled = false
+	if a.config != nil {
+		a.config.Plan.Enabled = false
+	}
 	if a.planManager != nil {
 		a.planManager.SetEnabled(false)
 	}
@@ -2524,9 +3024,16 @@ func (a *App) disablePlanModeAfterApproval() {
 	// consistent.
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	sandboxEnabled := a.config.Tools.Bash.Sandbox
+	compactMode := a.config.UI.CompactMode
 	reducedMotion := a.config.UI.ReducedMotion
+	showTokenUsage := a.config.UI.ShowTokenUsage
 	modelName := a.config.Model.Name
 	client := a.client
+	settingsSnapshot := a.settingToggleSnapshotLocked()
+	configRevision := uint64(0)
+	if wasEnabled {
+		configRevision = a.nextConfigRevisionLocked()
+	}
 	a.mu.Unlock()
 
 	if !wasEnabled {
@@ -2558,10 +3065,14 @@ func (a *App) disablePlanModeAfterApproval() {
 	}
 
 	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		Revision:            configRevision,
+		Settings:            settingsSnapshot,
 		PermissionsEnabled:  permissionsEnabled,
 		SandboxEnabled:      sandboxEnabled,
 		PlanningModeEnabled: false,
+		CompactMode:         compactMode,
 		ReducedMotion:       reducedMotion,
+		ShowTokenUsage:      showTokenUsage,
 		ModelName:           modelName,
 	})
 }
@@ -2634,6 +3145,18 @@ func (a *App) currentSessionMode() SessionMode {
 // CycleSessionModeAsync) need the real state so the toast + status
 // bar don't lie.
 func (a *App) CycleSessionMode() SessionMode {
+	mode, _ := a.cycleSessionModeWithRevision()
+	return mode
+}
+
+// cycleSessionModeWithRevision returns one ownership tuple for the async UI
+// completion. Serializing the whole cycle prevents two accepted keypresses
+// from reading the same starting mode, while taking mode and revision under
+// a.mu together lets the TUI reject a completion superseded by newer config.
+func (a *App) cycleSessionModeWithRevision() (SessionMode, uint64) {
+	a.sessionModeCycleMu.Lock()
+	defer a.sessionModeCycleMu.Unlock()
+
 	a.mu.Lock()
 	current := a.currentSessionMode()
 	a.mu.Unlock()
@@ -2656,8 +3179,9 @@ func (a *App) CycleSessionMode() SessionMode {
 	// what actually happened.
 	a.mu.Lock()
 	actual := a.currentSessionMode()
+	revision := a.configRevision
 	a.mu.Unlock()
-	return actual
+	return actual, revision
 }
 
 // applySessionMode normalizes the three flags (planningModeEnabled,
@@ -2706,8 +3230,11 @@ func (a *App) applySessionMode(mode SessionMode) {
 // bar + toast can update.
 func (a *App) CycleSessionModeAsync() {
 	a.safeGo("cycle-session-mode", func() {
-		newMode := a.CycleSessionMode()
-		a.safeSendToProgram(ui.SessionModeCycledMsg{Mode: newMode.String()})
+		newMode, revision := a.cycleSessionModeWithRevision()
+		a.safeSendToProgram(ui.SessionModeCycledMsg{
+			Mode:     newMode.String(),
+			Revision: revision,
+		})
 	})
 }
 
@@ -2715,8 +3242,11 @@ func (a *App) CycleSessionModeAsync() {
 // This is safe to call from UI callbacks as it doesn't block the Bubble Tea event loop.
 func (a *App) TogglePlanningModeAsync() {
 	a.safeGo("toggle-planning-mode", func() {
-		newEnabled := a.TogglePlanningMode()
-		a.safeSendToProgram(ui.PlanningModeToggledMsg{Enabled: newEnabled})
+		newEnabled, revision := a.togglePlanningModeWithRevision()
+		a.safeSendToProgram(ui.PlanningModeToggledMsg{
+			Enabled:  newEnabled,
+			Revision: revision,
+		})
 	})
 }
 
@@ -2750,24 +3280,32 @@ func (a *App) ToggleSandbox() bool {
 	// Update unrestricted mode based on new state
 	a.updateUnrestrictedModeLocked()
 
+	// Persist in commit/revision order; see TogglePermissions.
+	saveErr := a.config.Clone().Save()
 	// Copy state for UI message before unlocking
-	cfg := a.config
 	permissionsEnabled := a.permManager != nil && a.permManager.IsEnabled()
 	planningModeEnabled := a.planningModeEnabled
+	compactMode := a.config.UI.CompactMode
 	reducedMotion := a.config.UI.ReducedMotion
+	showTokenUsage := a.config.UI.ShowTokenUsage
 	modelName := a.config.Model.Name
+	settingsSnapshot := a.settingToggleSnapshotLocked()
+	configRevision := a.nextConfigRevisionLocked()
 	a.mu.Unlock()
 
-	// Save config outside of mutex to avoid blocking on file I/O
-	if err := cfg.Save(); err != nil {
-		logging.Warn("failed to save sandbox setting", "error", err)
+	if saveErr != nil {
+		logging.Warn("failed to save sandbox setting", "error", saveErr)
 	}
 
 	a.safeSendToProgram(ui.ConfigUpdateMsg{
+		Revision:            configRevision,
+		Settings:            settingsSnapshot,
 		PermissionsEnabled:  permissionsEnabled,
 		SandboxEnabled:      newEnabled,
 		PlanningModeEnabled: planningModeEnabled,
+		CompactMode:         compactMode,
 		ReducedMotion:       reducedMotion,
+		ShowTokenUsage:      showTokenUsage,
 		ModelName:           modelName,
 	})
 
@@ -2844,6 +3382,112 @@ func (a *App) GetProjectInfo() *appcontext.ProjectInfo {
 	return a.projectInfo
 }
 
+// nextConfigRevisionLocked advances the authoritative UI-config snapshot
+// sequence. Callers must hold a.mu so revisions follow commit order even when
+// sends from different goroutines are delivered out of order.
+func (a *App) nextConfigRevisionLocked() uint64 {
+	a.configRevision++
+	if a.configRevision == 0 {
+		a.configRevision++
+	}
+	return a.configRevision
+}
+
+func (a *App) settingToggleSnapshotLocked() map[string]bool {
+	if a.config == nil {
+		return nil
+	}
+	states := commands.SettableToggleStates(a.config)
+	snapshot := make(map[string]bool, len(states))
+	for _, state := range states {
+		snapshot[state.Key] = state.On
+	}
+	// Plan mode is a live session mode as well as a persisted preference. The
+	// UI must reflect the actual runtime after Shift+Tab/approval transitions.
+	snapshot["plan"] = a.planningModeEnabled
+	return snapshot
+}
+
+// ApplyUIConfig persists and publishes presentation-only settings without
+// flushing the provider pool, rebuilding the model client, or refreshing token
+// counts. A theme/layout/accessibility toggle must remain usable even when the
+// configured provider is temporarily unavailable or invalid.
+func (a *App) ApplyUIConfig(cfg *config.Config) error {
+	return a.applyUIConfigForSetting(cfg, "")
+}
+
+// ApplyUIConfigForSetting commits one presentation toggle without letting an
+// older candidate overwrite concurrently committed sibling UI fields.
+func (a *App) ApplyUIConfigForSetting(cfg *config.Config, key string) error {
+	return a.applyUIConfigForSetting(cfg, strings.ToLower(strings.TrimSpace(key)))
+}
+
+func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
+	if cfg == nil {
+		return fmt.Errorf("cannot apply nil UI config")
+	}
+	cfg = cfg.Clone()
+
+	a.mu.Lock()
+	merged := a.config.Clone()
+	if merged == nil {
+		merged = config.DefaultConfig()
+	}
+	// The keyed production path updates one owned field. The unkeyed public
+	// compatibility path still applies all three fast-path presentation fields.
+	switch key {
+	case "tokens":
+		merged.UI.ShowTokenUsage = cfg.UI.ShowTokenUsage
+	case "compactui":
+		merged.UI.CompactMode = cfg.UI.CompactMode
+	case "reducedmotion":
+		merged.UI.ReducedMotion = cfg.UI.ReducedMotion
+	default:
+		merged.UI.ShowTokenUsage = cfg.UI.ShowTokenUsage
+		merged.UI.CompactMode = cfg.UI.CompactMode
+		merged.UI.ReducedMotion = cfg.UI.ReducedMotion
+	}
+	saveErr := merged.Save()
+	if saveErr != nil {
+		logging.Warn("failed to save UI config", "error", saveErr, "path", config.GetConfigPath())
+	}
+	a.config = merged
+	msg := ui.ConfigUpdateMsg{
+		Revision:            a.nextConfigRevisionLocked(),
+		Settings:            a.settingToggleSnapshotLocked(),
+		PermissionsEnabled:  merged.Permission.Enabled,
+		SandboxEnabled:      merged.Tools.Bash.Sandbox,
+		PlanningModeEnabled: a.planningModeEnabled,
+		CompactMode:         merged.UI.CompactMode,
+		ReducedMotion:       merged.UI.ReducedMotion,
+		ShowTokenUsage:      merged.UI.ShowTokenUsage,
+		ModelName:           merged.Model.Name,
+	}
+	tuiModel := a.tui
+	a.mu.Unlock()
+
+	// Before Run installs a Bubble Tea program (primarily builder/tests), apply
+	// the same presentation snapshot directly. Once the program exists, only
+	// its event loop mutates the model.
+	a.programMu.RLock()
+	hasProgram := a.program != nil
+	a.programMu.RUnlock()
+	if !hasProgram && tuiModel != nil {
+		tuiModel.SetCompactMode(msg.CompactMode)
+		tuiModel.SetReducedMotion(msg.ReducedMotion)
+		tuiModel.SetShowTokens(msg.ShowTokenUsage)
+	}
+	a.safeSendToProgram(msg)
+
+	if saveErr != nil {
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: fmt.Sprintf("Setting applied for this session but NOT saved to %s — it will revert next launch", config.GetConfigPath()),
+		})
+	}
+	return nil
+}
+
 // ApplyConfig saves the given configuration and re-initializes affected components.
 //
 // Defensive locking discipline: we release `a.mu` BEFORE the trailing
@@ -2854,37 +3498,31 @@ func (a *App) GetProjectInfo() *appcontext.ProjectInfo {
 // takes a.mu again would otherwise silently reintroduce the hang. A test
 // (TestApplyConfig_NoSelfDeadlock) pins the no-deadlock behavior.
 func (a *App) ApplyConfig(cfg *config.Config) error {
+	_, err := a.applyConfig(cfg)
+	return err
+}
+
+// applyConfig is the revision-returning transactional implementation used by
+// request-correlated app flows such as the model selector.
+func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
+	if cfg == nil {
+		return 0, fmt.Errorf("cannot apply nil config")
+	}
+	originalCandidate := cfg
+	cfg = cfg.Clone()
 	a.mu.Lock()
 	// NOTE: no defer Unlock() — we release before safeSendToProgram. Every
 	// early-return below unlocks explicitly.
-
-	// 1. Save to file if path is available. Capture (don't drop) the error:
-	// we still apply in-memory below so the change takes effect this session,
-	// but an honest warning toast is emitted after the lock is released so the
-	// user knows a config command "succeeded" without persisting (unwritable /
-	// ephemeral dir, XDG drift). Returning the error here would skip callers'
-	// post-apply logic (e.g. /login, /provider ClearConversation), so we don't.
-	saveErr := cfg.Save()
-	if saveErr != nil {
-		logging.Warn("failed to save config to file", "error", saveErr, "path", config.GetConfigPath())
+	if baseRevision, tracked := cfg.SnapshotRevision(); tracked && baseRevision != a.configRevision {
+		a.mu.Unlock()
+		return 0, fmt.Errorf("%w (based on revision %d, current revision %d)", errConfigConflict, baseRevision, a.configRevision)
 	}
 
-	// 2. Update internal config
-	a.config = cfg
+	requestedPlanMode := cfg.Plan.Enabled
 
-	// Re-tag the session with the (possibly changed) active provider so
-	// the next SaveAfterMessage persists the right marker. Callers of
-	// ApplyConfig on provider switches ALSO call ClearConversation, so
-	// by the time a new turn is saved, history matches the tag.
-	if a.session != nil {
-		a.session.SetProvider(runtimeProviderForConfig(a.config))
-	}
-	if a.promptBuilder != nil {
-		switchedProvider := runtimeProviderForConfig(a.config)
-		a.promptBuilder.SetProvider(switchedProvider)
-		a.promptBuilder.SetPrefixCachingEnabled(appcontext.ProviderSupportsPrefixCaching(switchedProvider))
-	}
-
+	// Validate/build the replacement client before committing the candidate to
+	// memory or disk. A failed rebuild must leave the previous authoritative
+	// config intact; callers such as Settings can then report/rollback cleanly.
 	// Force-evict ALL pooled clients for the incoming provider BEFORE
 	// asking the factory for a fresh one. The pool keys on (provider,
 	// model) only, so a changed API key — the whole reason ApplyConfig
@@ -2894,15 +3532,63 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// differ from the old one, and fallback chains create multiple
 	// entries for the same provider. FlushProvider evicts every entry
 	// matching the provider so the next NewClient is guaranteed to
-	// build from a.config.
-	client.GetPool(a.config).FlushProvider(runtimeProviderForConfig(a.config))
+	// build from the candidate.
+	client.GetPool(cfg).FlushProvider(runtimeProviderForConfig(cfg))
 
-	// 3. Re-initialize client
-	newClient, err := client.NewClient(a.ctx, a.config, a.config.Model.Name)
+	newClient, err := client.NewClient(a.ctx, cfg, cfg.Model.Name)
 	if err != nil {
 		a.mu.Unlock()
-		return fmt.Errorf("failed to re-initialize client: %w", err)
+		return 0, fmt.Errorf("failed to re-initialize client: %w", err)
 	}
+
+	// The candidate is now runtime-valid. Persist and publish it in the same
+	// locked commit order as its revision. Persistence failure is non-fatal for
+	// this session but is surfaced after unlock.
+	saveErr := cfg.Save()
+	if saveErr != nil {
+		logging.Warn("failed to save config to file", "error", saveErr, "path", config.GetConfigPath())
+	}
+	cfg.ClearSnapshotRevision()
+	permissionPolicyChanged := a.config == nil ||
+		a.config.Permission.DefaultPolicy != cfg.Permission.DefaultPolicy ||
+		!reflect.DeepEqual(a.config.Permission.Rules, cfg.Permission.Rules)
+	a.config = cfg
+	memoryAutoInject := a.memoryStore != nil && cfg.Memory.Enabled && cfg.Memory.AutoInject
+	memoryAllowGlobal := a.memoryStore != nil && cfg.Memory.Enabled && cfg.Memory.AllowGlobal
+	a.memoryAutoInject.Store(memoryAutoInject)
+	a.memoryAllowGlobal.Store(memoryAllowGlobal)
+	// MemoryTool clones share this live policy pointer, so revocation reaches
+	// already-running agents instead of only future registry clones.
+	if a.registry != nil {
+		if registered, ok := a.registry.Get("memory"); ok {
+			if memoryTool, ok := registered.(*tools.MemoryTool); ok {
+				memoryTool.SetAllowGlobal(memoryAllowGlobal)
+			}
+		}
+	}
+	// A config transition is also a memory-context boundary: never let the
+	// previous turn's retrieved notes reappear after disable/re-enable.
+	a.setRelevantMemoryContext("")
+	a.planningModeEnabled = requestedPlanMode
+	if a.planManager != nil {
+		a.planManager.SetEnabled(requestedPlanMode)
+	}
+	if a.session != nil {
+		a.session.SetProvider(runtimeProviderForConfig(a.config))
+	}
+	if a.promptBuilder != nil {
+		switchedProvider := runtimeProviderForConfig(a.config)
+		a.promptBuilder.SetProvider(switchedProvider)
+		a.promptBuilder.SetPrefixCachingEnabled(appcontext.ProviderSupportsPrefixCaching(switchedProvider))
+		a.promptBuilder.SetPlanMode(requestedPlanMode)
+		a.promptBuilder.SetGlobalMemoryEnabled(memoryAllowGlobal)
+		if memoryAutoInject {
+			a.promptBuilder.SetMemoryStore(a.memoryStore)
+		} else {
+			a.promptBuilder.SetMemoryStore(nil)
+		}
+	}
+
 	attachStatusCallback(newClient, &appStatusCallback{app: a})
 	oldClient := a.client
 	a.setClientLocked(newClient) // a.mu held; also guards clientMu for background readers
@@ -2929,9 +3615,10 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 			// so this MUST use the lock-free planModeToolsLocked, never
 			// toolsForCurrentMode() — that calls IsPlanningModeEnabled(), which
 			// re-locks a.mu and self-deadlocks on Go's non-reentrant
-			// sync.Mutex. Every post-boot ApplyConfig caller (/login,
-			// /provider, /model, /set, /settings, Ctrl+K, /permissions,
-			// /sandbox) reaches this line, so the deadlock is unconditional.
+			// sync.Mutex. Every post-boot full ApplyConfig caller (/login,
+			// /provider, /model, runtime /set or /settings toggles, Ctrl+K,
+			// /permissions, /sandbox) reaches this line, so the deadlock is
+			// unconditional for that path. UI-only toggles use ApplyUIConfig.
 			newClient.SetTools(a.planModeToolsLocked(a.planningModeEnabled))
 		}
 	}
@@ -2950,6 +3637,7 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// Update agent runner.
 	if a.agentRunner != nil {
 		a.agentRunner.SetClient(newClient)
+		a.agentRunner.SetPlanningModeEnabled(requestedPlanMode)
 		a.agentRunner.SetContextConfig(&a.config.Context)
 		a.agentRunner.SetWorkspaceIsolationEnabled(a.config.Plan.WorkspaceIsolation)
 		a.agentRunner.SetDoneGateConfig(a.config.DoneGate)
@@ -2975,8 +3663,20 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// only cleared on restart.
 	if a.taskRouter != nil {
 		a.taskRouter.SetClient(newClient)
+		a.taskRouter.SetPlanMode(requestedPlanMode)
 		a.taskRouter.SetThinkingMode(a.config.Model.ThinkingMode)
 		a.taskRouter.SetModelCapability(capability)
+	}
+
+	// ApplyConfig can change plan mode via /set or /settings without going
+	// through TogglePlanningMode. Keep the rebuilt client/session instruction
+	// aligned with the tool schema and every long-lived runtime consumer.
+	if a.promptBuilder != nil {
+		systemPrompt := a.promptBuilder.Build()
+		newClient.SetSystemInstruction(systemPrompt)
+		if a.session != nil {
+			a.session.SetSystemInstruction(systemPrompt)
+		}
 	}
 
 	// 6b. Update session-memory config live. The manager is always instantiated
@@ -3020,6 +3720,12 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 
 	// 8. Update permission manager (YOLO mode)
 	if a.permManager != nil {
+		if permissionPolicyChanged {
+			a.permManager.SetRules(permission.NewRulesFromConfig(
+				a.config.Permission.DefaultPolicy,
+				a.config.Permission.Rules,
+			))
+		}
 		a.permManager.SetEnabled(a.config.Permission.Enabled)
 	}
 
@@ -3052,10 +3758,14 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	// to release a.mu before calling safeSendToProgram (see function-level
 	// comment on the re-entrancy deadlock).
 	uiMsg := ui.ConfigUpdateMsg{
+		Revision:            a.nextConfigRevisionLocked(),
+		Settings:            a.settingToggleSnapshotLocked(),
 		PermissionsEnabled:  a.config.Permission.Enabled,
 		SandboxEnabled:      a.config.Tools.Bash.Sandbox,
 		PlanningModeEnabled: a.planningModeEnabled,
+		CompactMode:         a.config.UI.CompactMode,
 		ReducedMotion:       a.config.UI.ReducedMotion,
+		ShowTokenUsage:      a.config.UI.ShowTokenUsage,
 		ModelName:           a.config.Model.Name,
 	}
 
@@ -3067,6 +3777,10 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 
 	modelName := a.config.Model.Name
 	a.mu.Unlock()
+	// Apply the live session/working/relevant-memory snapshot to the replacement
+	// client. The next user turn would also refresh it, but doing it here keeps
+	// provider switches and background callbacks immediately consistent.
+	a.pushTurnContext()
 
 	// 8d. Send ConfigUpdateMsg to Bubbletea program OUTSIDE the locked
 	// section — safeSendToProgram re-acquires a.mu internally, so calling
@@ -3095,7 +3809,8 @@ func (a *App) ApplyConfig(cfg *config.Config) error {
 	a.safeGo("apply-config-token-refresh", func() { a.refreshTokenCount() })
 
 	logging.Info("configuration applied successfully", "model", modelName)
-	return nil
+	originalCandidate.SetSnapshotRevision(uiMsg.Revision)
+	return uiMsg.Revision, nil
 }
 
 // openSettingsModal sends OpenSettingsMsg with a fresh toggle snapshot plus the
@@ -3108,7 +3823,12 @@ func (a *App) openSettingsModal() {
 		settingsMsg.Model = cfg.Model.Name
 		settingsMsg.Provider = runtimeProviderForConfig(cfg)
 	}
-	a.safeSendToProgram(settingsMsg)
+	// Ctrl+S and the palette invoke this callback from Bubble Tea's Update.
+	// Reserve ordered delivery but return before Program.Send, otherwise the
+	// event loop waits for itself on the unbuffered message channel. Slash
+	// command ordering is preserved because its following ResponseDone send
+	// waits for this reservation.
+	a.safeSendToProgramAsync(settingsMsg)
 }
 
 // buildSettingItems snapshots the curated settings toggles for the /settings
@@ -3127,24 +3847,25 @@ func (a *App) buildSettingItems() []ui.SettingItem {
 	return items
 }
 
-// handleSettingToggle applies a single toggle flipped in the /settings modal,
-// live, via ApplyConfig. Invoked from the UI (Bubble Tea) goroutine, so the
-// ApplyConfig is run on a worker — it must never jank the render loop.
-func (a *App) handleSettingToggle(key string, on bool) {
+// handleSettingToggle applies a single toggle flipped in the /settings modal.
+// Invoked from the UI (Bubble Tea) goroutine, so persistence/runtime work runs
+// on a worker — it must never jank the render loop. UI-only toggles take the
+// lightweight ApplyUIConfig path; runtime toggles use full ApplyConfig.
+func (a *App) handleSettingToggle(requestID, key string, on bool) {
 	a.safeGo("settings-toggle-apply", func() {
-		result := a.applySettingToggle(key, on)
+		result := a.applySettingToggle(requestID, key, on)
 		a.safeSendToProgram(result)
 	})
 }
 
 // applySettingToggle is the transactional worker behind the optimistic
-// Settings UI. ApplyConfig persists before rebuilding the client, so a rebuild
-// failure would otherwise leave the requested value in memory/on disk even
-// though runtime components never received it. Restore the prior boolean and
-// persist the rollback before returning an authoritative result to the modal.
-func (a *App) applySettingToggle(key string, on bool) ui.SettingToggleResultMsg {
+// Settings UI. A full ApplyConfig persists before rebuilding the client, so a
+// rebuild failure would otherwise leave the requested value in memory/on disk
+// even though runtime components never received it. Restore the prior boolean
+// and persist the rollback before returning an authoritative result.
+func (a *App) applySettingToggle(requestID, key string, on bool) ui.SettingToggleResultMsg {
 	key = strings.ToLower(strings.TrimSpace(key))
-	result := ui.SettingToggleResultMsg{Key: key, On: on}
+	result := ui.SettingToggleResultMsg{RequestID: requestID, Key: key, On: on}
 	cfg := a.GetConfig()
 	if cfg == nil {
 		result.Message = "Couldn't apply setting: configuration is unavailable"
@@ -3163,15 +3884,18 @@ func (a *App) applySettingToggle(key string, on bool) ui.SettingToggleResultMsg 
 		return result
 	}
 
-	if err := a.ApplyConfig(cfg); err != nil {
-		logging.Warn("failed to apply setting toggle; restoring previous value", "key", key, "error", err)
-		commands.ApplySettingToggle(cfg, key, oldOn)
+	if err := commands.ApplyConfigForSetting(a, cfg, key); err != nil {
+		logging.Warn("failed to apply setting toggle; keeping authoritative value", "key", key, "error", err)
 		result.On = oldOn
-		result.Message = fmt.Sprintf("Couldn't apply %s: %v — previous value restored", key, err)
-		if saveErr := cfg.Save(); saveErr != nil {
-			logging.Warn("failed to persist setting rollback", "key", key, "error", saveErr)
-			result.Message += " (rollback could not be saved)"
+		if current := a.GetConfig(); current != nil {
+			for _, state := range commands.SettableToggleStates(current) {
+				if state.Key == key {
+					result.On = state.On
+					break
+				}
+			}
 		}
+		result.Message = fmt.Sprintf("Couldn't apply %s: %v — current value preserved", key, err)
 		return result
 	}
 
@@ -3183,21 +3907,20 @@ func (a *App) applySettingToggle(key string, on bool) ui.SettingToggleResultMsg 
 // re-invoking the login command with the captured key. The key never reaches
 // the model or plaintext scrollback — the command's result masks it. Runs on a
 // worker so the UI goroutine that triggered it isn't blocked by ApplyConfig.
-func (a *App) handleKeyEntrySubmit(provider, key string) {
+func (a *App) handleKeyEntrySubmit(requestID, provider, key string) {
 	a.safeGo("login-key-entry-apply", func() {
 		ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
 		defer cancel()
 		result, err := a.commandHandler.Execute(ctx, "login", []string{provider, key}, a)
 		success, warning, feedback := keyEntryCommandOutcome(result, err)
 		a.safeSendToProgram(ui.KeyEntryResultMsg{
-			Provider: provider,
-			Success:  success,
-			Warning:  warning,
-			Message:  feedback,
+			RequestID: requestID,
+			Provider:  provider,
+			Success:   success,
+			Warning:   warning,
+			Message:   feedback,
+			Output:    result,
 		})
-		if strings.TrimSpace(result) != "" {
-			a.safeSendToProgram(ui.StreamTextMsg(result + "\n"))
-		}
 	})
 }
 
@@ -3291,6 +4014,9 @@ func toolContextSummary(name string, args map[string]any) string {
 
 // buildModelEnhancement returns model-specific prompt enhancements.
 func (a *App) buildModelEnhancement() string {
+	if a == nil || a.config == nil {
+		return ""
+	}
 	modelName := a.config.Model.Name
 	profile := client.GetModelProfile(modelName)
 	var enhancement string
@@ -3363,13 +4089,38 @@ func (a *App) getActiveToolDeclarations() []*genai.FunctionDeclaration {
 // CancelProcessing cancels the current processing request.
 // Called when user presses ESC during processing.
 func (a *App) CancelProcessing() {
+	a.cancelProcessing()
+}
+
+// cancelProcessing performs the shared Esc/Ctrl+C cancellation lifecycle and
+// reports whether it actually cancelled or discarded user-visible work. The
+// return value lets the OS signal handler distinguish a first interrupt from a
+// second/idle interrupt without retaining a stale raw context.CancelFunc.
+func (a *App) cancelProcessing() bool {
+	feedback := make([]tea.Msg, 0, 2)
+	// processing state and its cancel owner are claimed under a.mu ->
+	// processingMu. Taking the same order here makes foreground handoff atomic:
+	// Esc observes either the old completed turn or the fully-owned FIFO head,
+	// never processing=true with an unowned accepted request.
+	a.mu.Lock()
 	a.processingMu.Lock()
 	foregroundCancelled := a.processingCancel != nil
 	if a.processingCancel != nil {
 		a.processingCancel()
 		a.processingCancel = nil
 	}
+	a.dropSteerLeftovers = true
 	a.processingMu.Unlock()
+	a.mu.Unlock()
+	cancelledAny := foregroundCancelled
+
+	// Close the steering window before draining the app FIFO. A callback that
+	// already extracted leftovers serializes its all-or-nothing enqueue with
+	// dropSteerLeftovers under a.mu; callbacks that arrive later see the flag
+	// and discard the cancelled turn's messages.
+	if a.executor != nil {
+		a.executor.CancelUserSteering()
+	}
 
 	// Esc must stop what the user SEES happening. When the foreground is idle
 	// but a background /loop iteration is streaming its activity into the UI,
@@ -3381,7 +4132,8 @@ func (a *App) CancelProcessing() {
 	// if both run, the first Esc stops the foreground, a second stops the loop.
 	if !foregroundCancelled && a.loopRunner != nil {
 		if a.loopRunner.CancelInFlight("") {
-			a.safeSendToProgram(ui.StatusUpdateMsg{
+			cancelledAny = true
+			feedback = append(feedback, ui.StatusUpdateMsg{
 				Type:    ui.StatusInfo,
 				Message: "Loop iteration cancelled — the loop stays on its schedule (/loop pause to halt it).",
 			})
@@ -3393,7 +4145,8 @@ func (a *App) CancelProcessing() {
 	// pressed Esc/Ctrl+C to stop. Done outside processingMu (drainPending takes
 	// pendingMu; safeSendToProgram takes a.mu) to avoid any lock ordering risk.
 	if cleared := a.drainPending(); cleared > 0 {
-		a.safeSendToProgram(ui.QueuedCountMsg(0))
+		cancelledAny = true
+		feedback = append(feedback, ui.QueuedCountMsg(0))
 	}
 
 	// A Stop-hook continuation may have been the thing we just cancelled (its
@@ -3404,6 +4157,11 @@ func (a *App) CancelProcessing() {
 	a.mu.Lock()
 	a.stopHookActive = false
 	a.mu.Unlock()
+	// CancelProcessing is invoked directly from Bubble Tea's Update. Reserve
+	// the whole feedback batch in delivery order, then return so the event loop
+	// can receive it instead of re-entering its own unbuffered Program.Send.
+	a.safeSendToProgramAsync(feedback...)
+	return cancelledAny
 }
 
 // agentRunnerAdapter wraps agent.Runner to implement tools.AgentRunner interface.
@@ -3465,7 +4223,16 @@ func (a *agentRunnerAdapter) GetResult(agentID string) (tools.AgentResult, bool)
 		Duration:      result.Duration,
 		Completed:     result.Completed,
 		OutputFile:    result.OutputFile,
+		PolicyBlock:   cloneToolPolicyBlock(result.PolicyBlock),
 	}, true
+}
+
+func cloneToolPolicyBlock(block *tools.PolicyBlock) *tools.PolicyBlock {
+	if block == nil {
+		return nil
+	}
+	copy := *block
+	return &copy
 }
 
 // Cancel and ListAgents implement tools.AgentCanceller/tools.AgentLister.

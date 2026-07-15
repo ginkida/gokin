@@ -10,7 +10,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
+	"gokin/internal/chat"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
@@ -83,6 +85,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		desc string
 	}{
 		{"help", "Show help (this page) or /help <cmd> for details"},
+		{"quickstart", "Guided examples and safety modes"},
 		{"model", "Switch AI model"},
 		{"clear", "Clear conversation history"},
 		{"save", "Save current session"},
@@ -107,7 +110,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"Auth & Setup", []string{"login", "logout", "keys", "provider", "status", "doctor", "config", "set", "settings", "update", "restart", "whats-new", "changelog"}},
 		{"Git", []string{"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"}},
 		{"Planning", []string{"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"}},
-		{"Tools", []string{"browse", "open", "pwd", "mcp", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
+		{"Tools", []string{"browse", "open", "pwd", "mcp", "skill", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"}},
 	}
 
@@ -161,12 +164,13 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		desc string
 	}{
 		{"Ctrl+P", "Command palette"},
+		{"Ctrl+S", "Open settings"},
 		{"Ctrl+K", "Open model selector"},
-		{"Ctrl+E", "Expand / collapse last tool output"},
+		{"Ctrl+E", "Toggle last output (expand appends; compact keeps existing scrollback)"},
 		{"Shift+Tab", "Cycle mode: Normal → Plan → YOLO → Normal"},
 		{"Ctrl+H", "Context Observatory (technical health)"},
 		{"Ctrl+T", "Toggle task list"},
-		{"Ctrl+O", "Toggle activity feed"},
+		{"Ctrl+O", "Toggle live activity detail"},
 		{"Ctrl+U / Ctrl+D", "Scroll half page up / down (empty input)"},
 		{"Alt+C", "Copy last response"},
 		{"Ctrl+G", "Toggle select mode (freeze + native selection)"},
@@ -174,7 +178,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"Ctrl+R", "Search input history"},
 		{"Ctrl+C", "Cancel once, quit on second press"},
 		{"Esc", "Cancel current operation"},
-		{"?", "Show all keyboard shortcuts (filterable)"},
+		{"?", "Show all keyboard shortcuts (filterable; empty input)"},
 	}
 	for _, s := range shortcuts {
 		fmt.Fprintf(&sb, "  %s%-16s%s %s\n", colorGreen, s.key, colorReset, s.desc)
@@ -182,6 +186,8 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 
 	fmt.Fprintf(&sb, "\nTip: Use %sCtrl+P%s for the full command palette, or %s?%s for the filterable shortcuts overlay.\n",
 		colorGreen, colorReset, colorGreen, colorReset)
+	fmt.Fprintf(&sb, "\n%sSession modes:%s Normal asks before write/edit/bash; Plan explores read-only and proposes a plan; YOLO disables prompts and sandbox. The active mode remains visible in the status bar.\n",
+		colorYellow, colorReset)
 
 	return sb.String(), nil
 }
@@ -191,28 +197,55 @@ type ClearCommand struct{}
 
 func (c *ClearCommand) Name() string        { return "clear" }
 func (c *ClearCommand) Description() string { return "Clear conversation history" }
-func (c *ClearCommand) Usage() string       { return "/clear" }
+func (c *ClearCommand) Usage() string       { return "/clear [--force]" }
 func (c *ClearCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategorySession,
 		Icon:     "clear",
 		Priority: 10,
+		HasArgs:  true,
+		ArgHint:  "[--force]",
 	}
 }
 
 func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	force := false
+	for _, arg := range args {
+		if arg != "--force" {
+			return "Invalid argument. Use /clear or /clear --force.", nil
+		}
+		force = true
+	}
+
 	// Count messages before clearing
 	msgCount := 0
 	if session := app.GetSession(); session != nil {
 		msgCount = len(session.GetHistory())
 	}
+	todoTool := app.GetTodoTool()
+	todoCount := 0
+	if todoTool != nil {
+		todoCount = len(todoTool.GetItems())
+	}
 
 	// Save current plan before clearing (so it can be resumed with /resume-plan)
 	planSaved := false
+	planSaveWarning := ""
 	if pm := app.GetPlanManager(); pm != nil {
 		if currentPlan := pm.GetCurrentPlan(); currentPlan != nil && !currentPlan.IsComplete() {
-			if err := pm.SaveCurrentPlan(); err != nil {
-				logging.Warn("failed to save plan before clear", "error", err)
+			var saveErr error
+			if pm.GetPlanStore() == nil {
+				saveErr = errors.New("plan storage is unavailable")
+			} else {
+				saveErr = pm.SaveCurrentPlan()
+			}
+			if saveErr != nil {
+				logging.Warn("failed to save plan before clear", "error", saveErr)
+				if !force {
+					return fmt.Sprintf("Clear cancelled: active plan could not be saved (%s). No conversation data was cleared. Retry, or use /clear --force to discard recovery.",
+						singleLineDisplayText(saveErr.Error(), 160)), nil
+				}
+				planSaveWarning = fmt.Sprintf(" Active plan was not saved: %s.", singleLineDisplayText(saveErr.Error(), 160))
 			} else {
 				planSaved = true
 			}
@@ -222,14 +255,15 @@ func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterf
 	app.ClearConversation()
 	app.RefreshTokenCount()
 	// Also clear todos
-	if todoTool := app.GetTodoTool(); todoTool != nil {
+	if todoTool != nil {
 		todoTool.ClearItems()
 	}
 
-	msg := fmt.Sprintf("Cleared %d messages and todos.", msgCount)
+	msg := fmt.Sprintf("Started a fresh conversation: removed %d messages and %d todos.", msgCount, todoCount)
 	if planSaved {
 		msg += " Active plan saved for /resume-plan."
 	}
+	msg += planSaveWarning
 	return msg, nil
 }
 
@@ -314,6 +348,110 @@ func formatCompactionResult(err error, tokensBefore, tokensAfter int, pctAfter f
 // SaveCommand saves the current session.
 type SaveCommand struct{}
 
+const maxSessionIDRunes = chat.MaxSessionIDRunes
+
+// validSessionID keeps session names safe to show as copyable command arguments
+// and prevents a custom /save or /resume value from escaping the sessions
+// directory. Generated IDs already satisfy this contract; this primarily
+// protects user-provided checkpoint names and corrupt hand-edited metadata.
+func validSessionID(id string) bool {
+	return chat.ValidateSessionID(id) == nil
+}
+
+func parseOptionalTargetAndFlag(args []string, flag, usage string) (string, bool, string) {
+	target := ""
+	flagSet := false
+	for _, arg := range args {
+		switch {
+		case arg == flag:
+			if flagSet {
+				return "", false, fmt.Sprintf("Duplicate option %s. Usage: %s", flag, usage)
+			}
+			flagSet = true
+		case strings.HasPrefix(arg, "-"):
+			return "", false, fmt.Sprintf("Unknown option %q. Usage: %s", singleLineDisplayText(arg, 80), usage)
+		case target != "":
+			return "", false, fmt.Sprintf("Unexpected argument %q; only one target is accepted. Usage: %s", singleLineDisplayText(arg, 80), usage)
+		default:
+			target = arg
+		}
+	}
+	return target, flagSet, ""
+}
+
+func parseOnlyFlag(args []string, flag, usage string) (bool, string) {
+	flagSet := false
+	for _, arg := range args {
+		if arg != flag {
+			return false, fmt.Sprintf("Unexpected argument %q. Usage: %s", singleLineDisplayText(arg, 80), usage)
+		}
+		if flagSet {
+			return false, fmt.Sprintf("Duplicate option %s. Usage: %s", flag, usage)
+		}
+		flagSet = true
+	}
+	return flagSet, ""
+}
+
+// singleLineDisplayText removes terminal control sequences and folds all
+// whitespace so persisted summaries and paths cannot forge extra output rows.
+func singleLineDisplayText(value string, maxRunes int) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	if maxRunes > 0 {
+		runes := []rune(value)
+		if len(runes) > maxRunes {
+			if maxRunes <= 3 {
+				return string(runes[:maxRunes])
+			}
+			value = string(runes[:maxRunes-3]) + "..."
+		}
+	}
+	return value
+}
+
+func formatRecentSessions(sessions []chat.SessionInfo, workDir string) (string, int) {
+	var sb strings.Builder
+	sb.WriteString("Recent sessions (use /resume <id>):\n\n")
+
+	shown := 0
+	firstShownID := ""
+	for _, info := range sessions {
+		if workDir != "" && info.WorkDir != "" &&
+			filepath.Clean(info.WorkDir) != filepath.Clean(workDir) {
+			continue
+		}
+		if !validSessionID(info.ID) {
+			continue
+		}
+
+		summary := singleLineDisplayText(info.Summary, 60)
+		if summary == "" {
+			summary = "(no summary)"
+		}
+		age := formatTimeAgo(info.LastActive)
+		fmt.Fprintf(&sb, "  %s%s%s  %d msgs, %s — %s\n",
+			colorGreen, info.ID, colorReset, info.MessageCount, age, summary)
+		if firstShownID == "" {
+			firstShownID = info.ID
+		}
+		shown++
+		if shown >= 5 {
+			break
+		}
+	}
+
+	if shown > 0 {
+		fmt.Fprintf(&sb, "\nExample: /resume %s", firstShownID)
+	}
+	return sb.String(), shown
+}
+
 func (c *SaveCommand) Name() string        { return "save" }
 func (c *SaveCommand) Description() string { return "Save current session" }
 func (c *SaveCommand) Usage() string       { return "/save [name] [--force]" }
@@ -328,6 +466,14 @@ func (c *SaveCommand) GetMetadata() CommandMetadata {
 }
 
 func (c *SaveCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	customName, force, argErr := parseOptionalTargetAndFlag(args, "--force", c.Usage())
+	if argErr != "" {
+		return argErr, nil
+	}
+	if force && customName == "" {
+		return "Option --force requires a session name: /save <name> --force. Nothing was saved.", nil
+	}
+
 	hm, err := app.GetHistoryManager()
 	if err != nil {
 		return fmt.Sprintf("Failed to get history manager: %v", err), nil
@@ -344,22 +490,15 @@ func (c *SaveCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	// existing 'mywork' checkpoint — discovered when users came back to
 	// the saved session and found different content. Plain /save with no
 	// custom name is unaffected (uses the unique current session.ID).
-	customName := ""
-	force := false
-	for _, a := range args {
-		if a == "--force" {
-			force = true
-		} else if customName == "" {
-			customName = a
-		}
-	}
-
 	// SetID/GetID (not a direct field write) — GetState() reads session.ID
 	// on the async autosave goroutine; a plain "session.ID = x" here would
 	// race it (concretely reachable: a message queues an autosave, then
 	// /save runs immediately after).
 	originalID := session.GetID()
 	if customName != "" {
+		if !validSessionID(customName) {
+			return "Invalid session name. Use 1–120 characters (max 240 bytes), no whitespace/control or <>:\"/\\|?*; do not start with '-' or use a reserved device name.", nil
+		}
 		// Check if a session with that name already exists
 		if !force {
 			if _, loadErr := hm.LoadFull(customName); loadErr == nil {
@@ -395,11 +534,24 @@ func (c *ResumeCommand) GetMetadata() CommandMetadata {
 		Icon:     "resume",
 		Priority: 40,
 		HasArgs:  true,
-		ArgHint:  "<id>",
+		ArgHint:  "[id] [--force]",
 	}
 }
 
 func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	sessionID := ""
+	force := false
+	if len(args) > 0 {
+		var argErr string
+		sessionID, force, argErr = parseOptionalTargetAndFlag(args, "--force", c.Usage())
+		if argErr != "" {
+			return argErr, nil
+		}
+		if sessionID == "" {
+			return "Missing session ID. Use /resume (no args) to list sessions, or /resume <session_id> [--force].", nil
+		}
+	}
+
 	hm, err := app.GetHistoryManager()
 	if err != nil {
 		return fmt.Sprintf("Failed to get history manager: %v", err), nil
@@ -413,38 +565,16 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 
 		workDir := app.GetWorkDir()
-		var sb strings.Builder
-		sb.WriteString("Recent sessions (use /resume <id>):\n\n")
-		shown := 0
-		for _, info := range sessions {
-			if workDir != "" && info.WorkDir != "" &&
-				filepath.Clean(info.WorkDir) != filepath.Clean(workDir) {
-				continue
-			}
-			summary := info.Summary
-			if runes := []rune(summary); len(runes) > 60 {
-				summary = string(runes[:57]) + "..."
-			}
-			if summary == "" {
-				summary = "(no summary)"
-			}
-			age := formatTimeAgo(info.LastActive)
-			fmt.Fprintf(&sb, "  %s%s%s  %d msgs, %s — %s\n",
-				colorGreen, info.ID, colorReset, info.MessageCount, age, summary)
-			shown++
-			if shown >= 5 {
-				break
-			}
-		}
+		output, shown := formatRecentSessions(sessions, workDir)
 		if shown == 0 {
 			return "No sessions for current project. Use /sessions --all to see all.", nil
 		}
-		fmt.Fprintf(&sb, "\nExample: /resume %s", sessions[0].ID)
-		return sb.String(), nil
+		return output, nil
 	}
 
-	sessionID := args[0]
-	force := len(args) > 1 && args[1] == "--force"
+	if !validSessionID(sessionID) {
+		return "Invalid session ID. Run /resume (no args) and copy an ID from the list.", nil
+	}
 
 	state, err := hm.LoadFull(sessionID)
 	if err != nil {
@@ -463,7 +593,7 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 	if !force && state.WorkDir != "" && currentDir != "" &&
 		filepath.Clean(state.WorkDir) != filepath.Clean(currentDir) {
 		return fmt.Sprintf("Session '%s' was created in %s (current: %s).\nUse /resume %s --force to load anyway.",
-			sessionID, state.WorkDir, currentDir, sessionID), nil
+			sessionID, singleLineDisplayText(state.WorkDir, 120), singleLineDisplayText(currentDir, 120), sessionID), nil
 	}
 
 	// Cross-provider guard, mirroring the automatic startup auto-resume path
@@ -511,11 +641,10 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 		msg = fmt.Sprintf("Session '%s' restored. %d messages loaded.", sessionID, loaded)
 	}
 	if state.Summary != "" {
-		summary := state.Summary
-		if runes := []rune(summary); len(runes) > 100 {
-			summary = string(runes[:97]) + "..."
+		summary := singleLineDisplayText(state.Summary, 100)
+		if summary != "" {
+			msg += fmt.Sprintf("\nLast topic: %s", summary)
 		}
-		msg += fmt.Sprintf("\nLast topic: %s", summary)
 	}
 	return msg, nil
 }
@@ -531,10 +660,17 @@ func (c *SessionsCommand) GetMetadata() CommandMetadata {
 		Category: CategorySession,
 		Icon:     "list",
 		Priority: 50,
+		HasArgs:  true,
+		ArgHint:  "[--all]",
 	}
 }
 
 func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	showAll, argErr := parseOnlyFlag(args, "--all", c.Usage())
+	if argErr != "" {
+		return argErr, nil
+	}
+
 	hm, err := app.GetHistoryManager()
 	if err != nil {
 		return fmt.Sprintf("Failed to get history manager: %v", err), nil
@@ -550,8 +686,6 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 	}
 
 	workDir := app.GetWorkDir()
-	showAll := len(args) > 0 && args[0] == "--all"
-
 	var sb strings.Builder
 	shown := 0
 
@@ -568,18 +702,18 @@ func (c *SessionsCommand) Execute(ctx context.Context, args []string, app AppInt
 				continue
 			}
 		}
-
-		summary := info.Summary
-		if runes := []rune(summary); len(runes) > 80 {
-			summary = string(runes[:77]) + "..."
+		if !validSessionID(info.ID) {
+			continue
 		}
+
+		summary := singleLineDisplayText(info.Summary, 80)
 		if summary == "" {
 			summary = "(no summary)"
 		}
 
 		dirLabel := ""
 		if showAll && info.WorkDir != "" {
-			dirLabel = fmt.Sprintf(" [%s]", filepath.Base(info.WorkDir))
+			dirLabel = fmt.Sprintf(" [%s]", singleLineDisplayText(filepath.Base(info.WorkDir), 60))
 		}
 
 		age := formatTimeAgo(info.LastActive)
@@ -955,9 +1089,10 @@ func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppIn
 		{"Ctrl+J / Alt+Enter", "Insert newline"},
 		{"Tab", "Autocomplete command"},
 		{"Ctrl+P", "Command palette"},
+		{"Ctrl+S", "Open settings"},
 		{"Ctrl+K", "Open model selector"},
-		{"Ctrl+E / e", "Expand or collapse last tool output"},
-		{"E", "Expand or collapse all tool outputs"},
+		{"Ctrl+E / e", "Toggle last output (expand appends; compact keeps existing scrollback)"},
+		{"E", "Set expanded/compact default for new tool outputs"},
 		{"Ctrl+R", "Search input history"},
 		{"Ctrl+C", "Cancel once, quit on second press"},
 		{"Ctrl+L", "Clear screen"},
@@ -966,10 +1101,10 @@ func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppIn
 		{"Ctrl+G", "Toggle select mode (freeze + native selection)"},
 		{"Ctrl+H", "Context Observatory (technical health)"},
 		{"Ctrl+T", "Toggle task list"},
-		{"Ctrl+O", "Toggle activity feed"},
+		{"Ctrl+O", "Toggle live activity detail"},
 		{"Shift+Tab", "Cycle mode: Normal → Plan → YOLO → Normal"},
 		{"Alt+C", "Copy last response"},
-		{"?", "Filterable shortcuts overlay"},
+		{"?", "Filterable shortcuts overlay (empty input)"},
 	}
 
 	for _, s := range shortcuts {
@@ -1038,7 +1173,11 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 
 	// UI
 	fmt.Fprintf(&sb, "\n%s─── UI ───%s\n", colorCyan, colorReset)
-	fmt.Fprintf(&sb, "  Theme:  %s\n", cfg.UI.Theme)
+	activeTheme := activeThemeID(app)
+	fmt.Fprintf(&sb, "  Theme:  %s — %s\n", activeTheme, themeDescription(activeTheme))
+	if configured := configuredThemeValue(app); configured != "" && configured != string(activeTheme) {
+		fmt.Fprintf(&sb, "  Configured ui.theme %q is legacy/unsupported and is not applied\n", configured)
+	}
 	fmt.Fprintf(&sb, "  Tokens: %v  Stream: %v  Bell: %v\n",
 		cfg.UI.ShowTokenUsage, cfg.UI.StreamOutput, cfg.UI.Bell)
 
@@ -1051,6 +1190,13 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 		fmt.Fprintf(&sb, "  Max Input: %d tokens\n", maxInput)
 	}
 	fmt.Fprintf(&sb, "  Auto-Compact: %v\n", cfg.Context.EnableAutoSummary)
+
+	// Memory. Global access is called out separately because it is an explicit
+	// cross-project privacy boundary, disabled by default.
+	fmt.Fprintf(&sb, "\n%s─── Memory ───%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  Enabled: %v  Auto-Inject: %v  Global (cross-project): %v\n",
+		cfg.Memory.Enabled, cfg.Memory.AutoInject, cfg.Memory.AllowGlobal)
+	fmt.Fprintf(&sb, "  Toggle global access: /set globalmemory on|off\n")
 
 	// Plan
 	fmt.Fprintf(&sb, "\n%s─── Plan ───%s\n", colorCyan, colorReset)
@@ -1073,8 +1219,10 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 // PermissionsCommand toggles permission prompts.
 type PermissionsCommand struct{}
 
-func (c *PermissionsCommand) Name() string        { return "permissions" }
-func (c *PermissionsCommand) Description() string { return "Toggle permission prompts" }
+func (c *PermissionsCommand) Name() string { return "permissions" }
+func (c *PermissionsCommand) Description() string {
+	return "View or configure risky-action permission prompts"
+}
 func (c *PermissionsCommand) Usage() string {
 	return `/permissions      - Show status
 /permissions on   - Enable prompts
@@ -1099,9 +1247,9 @@ func (c *PermissionsCommand) Execute(ctx context.Context, args []string, app App
 	// No args - show current status
 	if len(args) == 0 {
 		if cfg.Permission.Enabled {
-			return "permissions: on", nil
+			return "permissions: on — risky actions ask first; sandbox setting is separate", nil
 		}
-		return "permissions: off (YOLO)", nil
+		return "permissions: off (YOLO) — risky actions auto-approve; sandbox setting is unchanged", nil
 	}
 
 	// Toggle based on argument
@@ -1111,14 +1259,14 @@ func (c *PermissionsCommand) Execute(ctx context.Context, args []string, app App
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed: %v", err), nil
 		}
-		return "permissions: on", nil
+		return "permissions: on — risky actions ask first; sandbox setting is unchanged", nil
 
 	case "off", "false", "0", "disable":
 		cfg.Permission.Enabled = false
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed: %v", err), nil
 		}
-		return "permissions: off (YOLO)", nil
+		return "permissions: off (YOLO) — risky actions auto-approve; sandbox setting is unchanged", nil
 
 	default:
 		return "/permissions on | off", nil
@@ -1128,8 +1276,10 @@ func (c *PermissionsCommand) Execute(ctx context.Context, args []string, app App
 // SandboxCommand toggles bash sandbox mode.
 type SandboxCommand struct{}
 
-func (c *SandboxCommand) Name() string        { return "sandbox" }
-func (c *SandboxCommand) Description() string { return "Toggle bash sandbox mode" }
+func (c *SandboxCommand) Name() string { return "sandbox" }
+func (c *SandboxCommand) Description() string {
+	return "View or configure bash sandbox containment"
+}
 func (c *SandboxCommand) Usage() string {
 	return `/sandbox      - Show status
 /sandbox on   - Safe mode
@@ -1155,9 +1305,9 @@ func (c *SandboxCommand) Execute(ctx context.Context, args []string, app AppInte
 	// No args - show current status
 	if len(args) == 0 {
 		if cfg.Tools.Bash.Sandbox {
-			return "sandbox: on", nil
+			return "sandbox: on — bash is contained; permission prompts are separate", nil
 		}
-		return "sandbox: off (!SANDBOX)", nil
+		return "sandbox: off (!SANDBOX) — approved or auto-approved bash is unrestricted; permission prompts are unchanged", nil
 	}
 
 	// Toggle based on argument
@@ -1167,14 +1317,14 @@ func (c *SandboxCommand) Execute(ctx context.Context, args []string, app AppInte
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed: %v", err), nil
 		}
-		return "sandbox: on", nil
+		return "sandbox: on — bash is contained; permission prompts are unchanged", nil
 
 	case "off", "false", "0", "disable":
 		cfg.Tools.Bash.Sandbox = false
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed: %v", err), nil
 		}
-		return "sandbox: off (!SANDBOX)", nil
+		return "sandbox: off (!SANDBOX) — approved or auto-approved bash is unrestricted; permission prompts are unchanged", nil
 
 	default:
 		return "/sandbox on | off", nil
@@ -1318,7 +1468,7 @@ func getCommandExample(name string) string {
 		"resume":   "  /resume abc123       — restore session abc123\n  /resume abc123 --force — restore even from different project",
 		"save":     "  /save                — save current session for later /resume\n  /save mywork         — save with custom name (refuses to overwrite by default)\n  /save mywork --force — overwrite an existing 'mywork' checkpoint",
 		"compact":  "  /compact             — summarize old messages to free context space",
-		"clear":    "  /clear               — start fresh (saves active plan for /resume-plan)",
+		"clear":    "  /clear               — start fresh (saves active plan for /resume-plan)\n  /clear --force       — clear even if active-plan recovery cannot be saved",
 		"theme":    "  /theme               — show the active UI theme (gokin ships one unified Graphite + violet theme)",
 		"doctor":   "  /doctor              — check API key, git, config, and project setup",
 		"login":    "  /login glm <key>          — set Z.AI / GLM key\n  /login deepseek <key>     — set DeepSeek key\n  /login kimi <key>         — set Kimi Coding Plan key\n  /login minimax <key>      — set MiniMax key",
@@ -1348,7 +1498,7 @@ func getCommandExample(name string) string {
 		"memory":      "  /memory               — show all stored memories\n  Project memories live in .gokin/MEMORY.md",
 		"sandbox":     "  /sandbox on           — gate bash on permission prompts\n  /sandbox off          — disable bash safety prompts (yolo)",
 		"permissions": "  /permissions on       — prompt before write/edit/bash\n  /permissions off      — auto-approve (yolo mode)",
-		"thinking":    "  /thinking on          — show provider's reasoning trace inline\n  /thinking off         — hide reasoning",
+		"thinking":    "  /thinking auto        — reason only when the task is hard\n  /thinking on          — force reasoning every turn\n  /thinking off         — never reason\n  /thinking 16384       — force reasoning with a 16K-token budget",
 		"open":        "  /open main.go         — open file in $EDITOR (or vi)\n  /open internal/app/app.go",
 		"resume-plan": "  /resume-plan          — restore the plan saved by the last /clear",
 		"recovery":    "  /recovery             — show the recovery snapshot from the last unclean shutdown",
@@ -1370,7 +1520,7 @@ func getRelatedCommands(name string) string {
 		"sessions":    "/save, /resume",
 		"clear":       "/save, /compact, /resume-plan",
 		"compact":     "/clear, /cost, /stats",
-		"model":       "/provider, /config, /reasoning",
+		"model":       "/provider, /config, /thinking",
 		"plan":        "/resume-plan, /tree-stats",
 		"resume-plan": "/plan",
 		"login":       "/logout, /provider, /doctor",
@@ -1390,7 +1540,6 @@ func getRelatedCommands(name string) string {
 		"permissions": "/sandbox, /config",
 		"sandbox":     "/permissions",
 		"provider":    "/model, /login, /status",
-		"reasoning":   "/model",
 		"checkpoints": "/undo, /plan",
 		"pwd":         "/status, /browse",
 		"browse":      "/pwd, /open",
@@ -1406,9 +1555,9 @@ func getRelatedCommands(name string) string {
 		"changelog": "/whats-new, /update",
 		"restart":   "/update, /whats-new",
 		// v0.78.26 — fill out see-also for the rest of user-facing commands.
-		"mcp":               "/permissions, /tools_list, /stats",
+		"mcp":               "/permissions, /status, /stats",
 		"memory":            "/clear, /compact, /memory-governance",
-		"thinking":          "/model, /reasoning",
+		"thinking":          "/model, /provider",
 		"logout":            "/login, /provider, /status",
 		"open":              "/grep, /blame, /diff, /browse",
 		"recovery":          "/journal, /resume-plan, /clear",

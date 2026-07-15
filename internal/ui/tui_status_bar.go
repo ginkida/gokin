@@ -50,6 +50,22 @@ func safePadding(available, left, right int) int {
 
 // renderStatusBar renders the enhanced status bar with adaptive layout.
 func (m Model) renderStatusBar() string {
+	// Quit confirmation is a destructive, time-limited surface even though it
+	// does not change Model.state. Put it in the guaranteed final row so short
+	// panes cannot crop the toast and leave a hidden second-Ctrl+C action.
+	if m.state == StateInput && m.quitConfirmationActiveAt(time.Now()) {
+		return m.renderQuitConfirmationStatus()
+	}
+	// With only three terminal rows, the compositor can preserve one prompt row
+	// plus the status bar. Keep permission recovery in that final row. Whenever
+	// either dimension is unreadable, explain the fail-closed resize requirement.
+	if m.state == StatePermissionPrompt && ((m.height > 0 && m.height <= permissionReadableDecisionHeight) || !m.permissionAllowChoicesReadable()) {
+		return m.renderTinyPermissionSafetyStatus()
+	}
+	if recovery, hidden := m.hiddenPrimaryActionRecovery(); hidden {
+		label := resizeRecoveryLabel(max(m.width, 1), recovery)
+		return lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render(fitStatusText(label, m.width))
+	}
 	layout := m.getStatusBarLayout()
 
 	switch layout {
@@ -64,6 +80,95 @@ func (m Model) renderStatusBar() string {
 	}
 }
 
+func (m Model) renderQuitConfirmationStatus() string {
+	width := max(m.width, 0)
+	if width == 0 {
+		return ""
+	}
+	label := "Ctrl+C again Quit · any other key Cancel"
+	switch {
+	case !m.quitConfirmationReadable():
+		label = "Resize"
+	case width < lipgloss.Width(label):
+		label = "Ctrl+C Quit"
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render(fitStatusText(label, width))
+}
+
+func (m Model) hiddenPrimaryActionRecovery() (string, bool) {
+	switch m.state {
+	case StateSettings:
+		return "Esc Close", m.selectedSettingToggleAvailable() && !m.settingsPrimaryActionReadable()
+	case StateModelSelector:
+		recovery := "Esc Close"
+		if m.modelSelectorReturnState == StateSettings {
+			recovery = "Esc Back"
+		}
+		return recovery, len(m.availableModels) > 0 && !m.modelSelectorPrimaryActionReadable()
+	case StateAPIKeyEntry:
+		return "Esc Cancel", m.keyEntryAvailable() && !m.keyEntryPrimaryActionReadable()
+	case StateQuestionPrompt:
+		recovery := "Esc Cancel"
+		if m.questionCustomInput {
+			recovery = "Esc Back"
+		}
+		return recovery, m.questionRequest != nil && !m.questionPrimaryActionReadable()
+	case StatePlanApproval:
+		recovery := "Esc Cancel"
+		if m.planFeedbackMode {
+			recovery = "Esc Back"
+		}
+		return recovery, m.planRequest != nil && !m.planPrimaryActionReadable()
+	case StateNotificationCenter:
+		return "Esc Back", !m.notificationDetail && len(m.notificationRows()) > 0 && !m.notificationPrimaryActionReadable()
+	case StateCommandPalette:
+		if m.commandPalette == nil {
+			return "", false
+		}
+		if m.commandPalette.InArgEntry() {
+			return "Esc Back", !m.commandPalette.argTargetVisibleForEnter()
+		}
+		_, directReady := m.commandPalette.directSlashCommandWithArgs(strings.TrimSpace(m.commandPalette.GetQuery()))
+		hasTarget := directReady || m.commandPalette.GetSelected() != nil
+		return "Esc Close", hasTarget && !m.commandPalette.targetVisibleForEnter()
+	default:
+		return "", false
+	}
+}
+
+func (m Model) renderTinyPermissionSafetyStatus() string {
+	width := max(m.width, 0)
+	if width == 0 {
+		return ""
+	}
+
+	unavailable := isUnavailablePromptNotice(m.permNotice)
+	recovery := "Esc Deny"
+	if unavailable {
+		recovery = "Esc Cancel"
+	}
+	label := recovery
+	if !m.permissionAllowChoicesReadable() {
+		label = "Resize · Esc/n Deny"
+		if unavailable {
+			label = "Resize · Esc Cancel"
+		}
+		if lipgloss.Width(label) > width {
+			switch {
+			case width >= lipgloss.Width("Resize"):
+				label = "Resize"
+			case unavailable:
+				label = "Esc"
+			default:
+				label = "n"
+			}
+		}
+	}
+
+	style := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
+	return style.Render(fitStatusText(label, width))
+}
+
 // renderStatusBarMinimal renders a minimal status bar for very narrow terminals (< 60 chars).
 // Shows compact core reliability fields.
 func (m Model) renderStatusBarMinimal() string {
@@ -73,11 +178,27 @@ func (m Model) renderStatusBarMinimal() string {
 	// non-droppable side of the layout: truncating the old left-to-right string
 	// at 10–59 columns could remove both while leaving lower-value identity or
 	// context cells visible.
+	recovery := ""
+	if m.state == StateProcessing || m.state == StateStreaming {
+		recovery = "esc"
+	}
+	// Tiny terminals used to hide the only signal that auto-follow had stopped.
+	// Combine it with Esc in one compact, non-droppable cell so even a 10-column
+	// pane can show both cancellation and transcript ownership.
+	switch {
+	case !m.output.IsAtBottom():
+		recovery = strings.TrimSpace(recovery + fmt.Sprintf(" ↑%d%%", m.output.ScrollPercent()))
+	case m.output.IsFrozen():
+		recovery = strings.TrimSpace(recovery + " PAUSE")
+	}
+	if recovery != "" {
+		requiredRight = append(requiredRight, lipgloss.NewStyle().Foreground(ColorDim).Render(recovery))
+	}
 	if m.queuedPending > 0 {
 		requiredRight = append(requiredRight, lipgloss.NewStyle().Foreground(ColorAccent).Render(fmt.Sprintf("📥%d", m.queuedPending)))
 	}
-	if m.state == StateProcessing || m.state == StateStreaming {
-		requiredRight = append(requiredRight, lipgloss.NewStyle().Foreground(ColorDim).Render("esc"))
+	if pending := m.modelSwitchStatus(true); pending != "" {
+		requiredRight = append(requiredRight, pending)
 	}
 	return renderFittedStatusLine(m.width, left, nil, requiredRight)
 }
@@ -87,12 +208,15 @@ func (m Model) renderStatusBarMinimal() string {
 func (m Model) renderStatusBarCompact() string {
 	left := joinStatusSegments(m.compactStatusSegments())
 	var requiredRight []string
+	if h := m.interruptHint(); h != "" {
+		requiredRight = append(requiredRight, h)
+	}
+	if pending := m.modelSwitchStatus(true); pending != "" {
+		requiredRight = append(requiredRight, pending)
+	}
 	if !m.output.IsAtBottom() {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		requiredRight = append(requiredRight, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
-	}
-	if h := m.interruptHint(); h != "" {
-		requiredRight = append(requiredRight, h)
 	}
 
 	return renderFittedStatusLine(m.width, left, m.statusBarHintSegments(true), requiredRight)
@@ -176,12 +300,15 @@ func (m Model) renderStatusBarMedium() string {
 	// Right side: scroll indicator and urgent runtime health. Session cost is
 	// deliberately kept out of chrome to avoid low-value visual noise.
 	var requiredRight []string
+	if h := m.interruptHint(); h != "" {
+		requiredRight = append(requiredRight, h)
+	}
+	if pending := m.modelSwitchStatus(false); pending != "" {
+		requiredRight = append(requiredRight, pending)
+	}
 	if !m.output.IsAtBottom() {
 		scrollStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		requiredRight = append(requiredRight, scrollStyle.Render(fmt.Sprintf("↑ %d%%", m.output.ScrollPercent())))
-	}
-	if h := m.interruptHint(); h != "" {
-		requiredRight = append(requiredRight, h)
 	}
 
 	return renderFittedStatusLine(m.width, left, m.statusBarHintSegments(false), requiredRight)
@@ -195,6 +322,12 @@ func (m Model) renderStatusBarFull() string {
 	leftParts := m.baseStatusSegments(true)
 
 	var requiredRight []string
+	if h := m.interruptHint(); h != "" {
+		requiredRight = append(requiredRight, h)
+	}
+	if pending := m.modelSwitchStatus(false); pending != "" {
+		requiredRight = append(requiredRight, pending)
+	}
 
 	// Retry / rate-limit are shown by the consolidated engine badge in
 	// baseStatusSegments — NOT duplicated here in requiredRight.
@@ -212,10 +345,6 @@ func (m Model) renderStatusBarFull() string {
 			mcpColor = ColorError
 		}
 		requiredRight = append(requiredRight, lipgloss.NewStyle().Foreground(mcpColor).Render(fmt.Sprintf("MCP %d/%d", m.mcpHealthy, m.mcpTotal)))
-	}
-
-	if h := m.interruptHint(); h != "" {
-		requiredRight = append(requiredRight, h)
 	}
 
 	left := joinStatusSegments(leftParts)
@@ -263,6 +392,9 @@ func renderFittedStatusLine(width int, left string, optionalRight, requiredRight
 			return fitStatusText(left+strings.Repeat(" ", padding)+right, width)
 		}
 		if len(optional) == 0 {
+			// requiredRight is ordered highest priority first. If even the
+			// required set cannot fit, prefix truncation therefore preserves the
+			// recovery action before status/detail cells.
 			right = fitStatusText(right, width)
 			rightWidth := lipgloss.Width(right)
 			if rightWidth >= width {
@@ -341,24 +473,18 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	heartbeatStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	var parts []string
-	// Project path is always useful as the first anchor — you instantly
-	// see which repo this session is bound to without scrolling up to the
-	// welcome banner. Kept dim so it doesn't fight for attention with the
-	// live status cells. Always ~/-collapsed when inside $HOME; shortened
-	// only when long enough to eat the bar (>36 runes ≈ "~/a/very/long/path").
-	if dir := statusBarProjectPath(m.workDir); dir != "" {
-		parts = append(parts, dimStyle.Render(dir))
-	}
+	// Reliability and live-work signals lead whenever present. This lets the
+	// fitted renderer drop project/identity detail without hiding unsafe mode,
+	// queued ownership, or what the engine is doing right now.
 	if safety := m.safetyBadge(); safety != "" {
 		parts = append(parts, safety)
 	}
 	if m.queuedPending > 0 {
 		parts = append(parts, providerStyle.Render(fmt.Sprintf("📥 %d queued", m.queuedPending)))
 	}
-
-	// Degraded-mode label removed: the retry/cooldown it carried is now folded
-	// into the single engine badge (renderEngineStatus) below.
-
+	if engineStatus := m.renderEngineStatus(); engineStatus != "" {
+		parts = append(parts, engineStatus)
+	}
 	if m.hasActivePlanStatus() {
 		planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
 		activeStep := fmt.Sprintf("%s %d/%d", MessageIcons["info"], m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
@@ -368,6 +494,19 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		}
 		parts = append(parts, planStyle.Render(activeStep))
 	}
+
+	// Project path is the first anchor in the ordinary healthy/idle case — you instantly
+	// see which repo this session is bound to without scrolling up to the
+	// welcome banner. Kept dim so it doesn't fight for attention with the
+	// live status cells. Always ~/-collapsed when inside $HOME; shortened
+	// only when long enough to eat the bar (>36 runes ≈ "~/a/very/long/path").
+	if dir := statusBarProjectPath(m.workDir); dir != "" {
+		parts = append(parts, dimStyle.Render(dir))
+	}
+
+	// Degraded-mode label removed: the retry/cooldown it carried is now folded
+	// into the single engine badge (renderEngineStatus) below.
+
 	// Breaker circuit-open / recovering cells removed — folded into the single
 	// engine badge below so the same recovery state isn't shown twice.
 
@@ -413,12 +552,6 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 			hb = "heartbeat:" + m.runtimeStatus.HeartbeatAge.Round(time.Second).String()
 		}
 		parts = append(parts, heartbeatStyle.Render(hb))
-	}
-
-	// Live Engine Status — the SINGLE provider-health + activity badge.
-	engineStatus := m.renderEngineStatus()
-	if engineStatus != "" {
-		parts = append(parts, engineStatus)
 	}
 
 	return parts
@@ -495,9 +628,28 @@ func (m Model) compactHealth() string {
 	}
 }
 
+// modelSwitchStatus keeps an asynchronous selector request visible after the
+// modal closes and after its toast expires. The identity cell intentionally
+// stays on the authoritative old model until ModelSelectResultMsg arrives.
+func (m Model) modelSwitchStatus(compact bool) string {
+	target := shortenModelName(safeKeyEntryText(m.modelSwitchPending))
+	if target == "" {
+		return ""
+	}
+	style := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
+	if compact {
+		return style.Render("↻" + truncateForWidth(target, 12))
+	}
+	return style.Render("switching→" + truncateForWidth(target, 18))
+}
+
 // renderEngineStatus returns a compact status indicator for the AI engine.
 func (m Model) renderEngineStatus() string {
 	engineStyle := lipgloss.NewStyle().Bold(true)
+	// Read-only overlays own Esc and navigation, but they do not stop the turn
+	// underneath. Keep the engine cell tied to that underlying request state so
+	// opening notifications/settings never makes active writing look idle.
+	activeState := m.activeRequestState()
 
 	var status string
 	color := ColorMuted
@@ -549,7 +701,7 @@ func (m Model) renderEngineStatus() string {
 		// spinner for the same state; a second static ●/○ on the next row is pure
 		// duplication.
 		icon = ""
-	case m.state == StateStreaming:
+	case activeState == StateStreaming:
 		status = "WRITING"
 		if m.responseToolCount > 0 {
 			status += statusSeparator() + formatToolRunSummary(m.responseToolCount, m.responseToolFailures, false)
@@ -564,7 +716,7 @@ func (m Model) renderEngineStatus() string {
 	case m.planProgressMode && m.planProgress != nil && m.planProgress.TotalSteps > 0:
 		status = fmt.Sprintf("PLAN %d/%d", m.planProgress.CurrentStepID, m.planProgress.TotalSteps)
 		color = ColorInfo
-	case m.state == StateProcessing:
+	case activeState == StateProcessing:
 		status = processingStatusLabel(m.processingLabel)
 		if status == "" {
 			status = "THINKING"
@@ -880,10 +1032,7 @@ func (m Model) formatBackgroundTaskStatus(bgCount int) string {
 		}
 	}
 	if bestAction != "" {
-		if runes := []rune(bestAction); len(runes) > 25 {
-			bestAction = string(runes[:22]) + "..."
-		}
-		return bestAction
+		return compactInline(bestAction, 25)
 	}
 	return fmt.Sprintf("%d bg", bgCount)
 }
@@ -891,14 +1040,31 @@ func (m Model) formatBackgroundTaskStatus(bgCount int) string {
 func (m Model) contextualShortcutHintPairs() []shortcutHint {
 	switch m.state {
 	case StatePermissionPrompt:
+		if m.permShowDetails {
+			if isUnavailablePromptNotice(m.permNotice) {
+				hints := []shortcutHint{{"?", "Back"}, {"esc", "Cancel"}}
+				if m.permissionDetailsCanScroll() {
+					hints = append([]shortcutHint{{"↑↓", "Scroll"}, {"PgUp/PgDn", "Page"}}, hints...)
+				}
+				return hints
+			}
+			if m.permissionDetailsCanScroll() {
+				return []shortcutHint{{"↑↓", "Scroll"}, {"PgUp/PgDn", "Page"}, {"?", "Back"}, {"y/a/n", "Decide"}, {"esc", "Deny"}}
+			}
+			return []shortcutHint{{"?", "Back"}, {"y/a/n", "Decide"}, {"esc", "Deny"}}
+		}
 		if isUnavailablePromptNotice(m.permNotice) {
 			return []shortcutHint{{"esc", "Cancel"}, {"?", "Details"}}
 		}
-		if m.permShowDetails {
-			return []shortcutHint{{"↑↓", "Scroll"}, {"?", "Back"}, {"y/a/n", "Decide"}, {"esc", "Cancel"}}
-		}
-		return []shortcutHint{{"y", "Allow"}, {"a", "Always"}, {"n", "Deny"}, {"?", "Details"}, {"esc", "Cancel"}}
+		return []shortcutHint{{"y", "Allow"}, {"a", "Always"}, {"n", "Deny"}, {"?", "Details"}, {"esc", "Deny"}}
 	case StatePlanApproval:
+		if m.planRequest != nil && !m.planPrimaryActionReadable() {
+			recovery := "Cancel"
+			if m.planFeedbackMode {
+				recovery = "Back"
+			}
+			return []shortcutHint{{"↔", "Resize"}, {"esc", recovery}}
+		}
 		if m.planFeedbackMode {
 			if isUnavailablePromptNotice(m.planFeedbackError) {
 				return []shortcutHint{{"esc", "Back"}}
@@ -906,7 +1072,11 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 			return []shortcutHint{{"Enter", "Submit"}, {"Alt+Enter", "New line"}, {"esc", "Back"}}
 		}
 		if isUnavailablePromptNotice(m.planApprovalNotice) {
-			return []shortcutHint{{"esc", "Cancel"}}
+			hints := []shortcutHint{{"esc", "Cancel"}}
+			if m.planStepsCanPage() {
+				hints = append(hints, shortcutHint{"PgUp/PgDn", "Steps"})
+			}
+			return hints
 		}
 		if m.planRequest == nil {
 			return []shortcutHint{{"esc", "Cancel"}}
@@ -914,21 +1084,77 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 		if len(m.planRequest.Steps) == 0 {
 			return []shortcutHint{{"n", "Reject"}, {"m", "Modify"}, {"↑↓", "Navigate"}, {"esc", "Cancel"}}
 		}
-		return []shortcutHint{{"y", "Approve"}, {"n", "Reject"}, {"m", "Modify"}, {"↑↓", "Navigate"}}
-	case StateDiffPreview:
-		if m.diffPreview.responseUnavailable {
-			return []shortcutHint{{"esc", "Cancel"}}
+		hints := []shortcutHint{{"y", "Approve"}, {"n", "Reject"}, {"m", "Modify"}, {"↑↓", "Navigate"}}
+		if m.planStepsCanPage() {
+			hints = append(hints, shortcutHint{"PgUp/PgDn", "Steps"})
 		}
-		return []shortcutHint{{"y", "Apply"}, {"n", "Reject"}, {"A", "Apply all"}, {"R", "Reject all"}}
+		return hints
+	case StateDiffPreview:
+		inspection := make([]shortcutHint, 0, 2)
+		if m.diffPreview.canScrollDiff() {
+			inspection = append(inspection, shortcutHint{"j/k", "Scroll"})
+		}
+		if m.diffPreview.canJumpChanges() {
+			inspection = append(inspection, shortcutHint{"[ ]", "Changes"})
+		}
+		if m.diffPreview.responsePending {
+			return inspection
+		}
+		if m.diffPreview.responseUnavailable {
+			return append([]shortcutHint{{"esc", "Cancel"}}, inspection...)
+		}
+		if m.diffPreview.terminalSizeKnown && tinyReviewNeedsResize(m.diffPreview.width, m.diffPreview.height) {
+			return []shortcutHint{{"↔", "Resize"}, {"n/esc", "Reject"}}
+		}
+		hints := make([]shortcutHint, 0, 7)
+		hints = append(hints, shortcutHint{"y", "Apply"}, shortcutHint{"n", "Reject"}, shortcutHint{"A", "Apply all"}, shortcutHint{"R", "Reject all"})
+		return append(hints, inspection...)
 	case StateMultiDiffPreview:
 		if len(m.multiDiffPreview.files) == 0 {
 			return []shortcutHint{{"esc", "Close"}}
 		}
-		if m.multiDiffPreview.responseUnavailable {
-			return []shortcutHint{{"esc", "Cancel"}}
+		inspection := make([]shortcutHint, 0, 2)
+		if m.multiDiffPreview.focusOnList {
+			if m.multiDiffPreview.canNavigateFiles() {
+				inspection = append(inspection, shortcutHint{"↑↓", "Files"})
+			}
+			if m.multiDiffPreview.canScrollDiff() {
+				inspection = append(inspection, shortcutHint{"Tab", "Focus diff"})
+			}
+		} else {
+			if m.multiDiffPreview.canScrollDiff() {
+				inspection = append(inspection, shortcutHint{"j/k", "Scroll diff"})
+			}
+			if m.multiDiffPreview.canNavigateFiles() {
+				inspection = append(inspection, shortcutHint{"Tab", "Focus files"})
+			}
 		}
-		return []shortcutHint{{"y/n", "Decide file"}, {"A/R", "Decide rest"}, {"Tab", "Switch pane"}, {"↑↓", "Browse"}}
+		if m.multiDiffPreview.responsePending {
+			return inspection
+		}
+		if m.multiDiffPreview.responseUnavailable {
+			return append([]shortcutHint{{"esc", "Cancel"}}, inspection...)
+		}
+		if m.multiDiffPreview.terminalSizeKnown && tinyReviewNeedsResize(m.multiDiffPreview.width, m.multiDiffPreview.height) {
+			if m.multiDiffPreview.confirmFinish {
+				return []shortcutHint{{"↔", "Resize"}, {"esc/q", "Back to review"}}
+			}
+			return []shortcutHint{{"↔", "Resize"}, {"n", "Reject file"}, {"esc", "Reject all"}}
+		}
+		if m.multiDiffPreview.confirmFinish {
+			return []shortcutHint{{"esc/q", "Back to review"}, {"Enter", "Confirm"}}
+		}
+		hints := make([]shortcutHint, 0, 7)
+		hints = append(hints, shortcutHint{"y/n", "Decide file"}, shortcutHint{"A/R", "Decide rest"}, shortcutHint{"Enter", "Finish…"})
+		return append(hints, inspection...)
 	case StateQuestionPrompt:
+		if m.questionRequest != nil && !m.questionPrimaryActionReadable() {
+			recovery := "Cancel"
+			if m.questionCustomInput {
+				recovery = "Back"
+			}
+			return []shortcutHint{{"↔", "Resize"}, {"esc", recovery}}
+		}
 		if m.questionCustomInput {
 			if isUnavailablePromptNotice(m.questionInputError) {
 				return []shortcutHint{{"esc", "Back"}}
@@ -941,12 +1167,19 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 			}
 			return []shortcutHint{{"Enter", "Submit"}, {"Alt+Enter", "New line"}, {"esc", "Cancel"}}
 		}
-		if isUnavailablePromptNotice(m.questionInputError) {
-			return []shortcutHint{{"esc", "Cancel"}, {"↑↓", "Navigate"}}
+		if m.questionRequest == nil {
+			return []shortcutHint{{"esc", "Cancel"}}
 		}
-		hints := make([]shortcutHint, 0, 3)
-		if m.questionRequest != nil && len(m.questionRequest.Options) > 1 {
-			hints = append(hints, shortcutHint{"↑↓", "Navigate"})
+		if isUnavailablePromptNotice(m.questionInputError) {
+			hints := []shortcutHint{{"esc", "Cancel"}, {"↑↓", "Navigate"}}
+			if m.questionChoicesCanPage() {
+				hints = append(hints, shortcutHint{"PgUp/PgDn", "Page"})
+			}
+			return hints
+		}
+		hints := []shortcutHint{{"↑↓", "Navigate"}}
+		if m.questionChoicesCanPage() {
+			hints = append(hints, shortcutHint{"PgUp/PgDn", "Page"})
 		}
 		return append(hints, shortcutHint{"Enter", "Confirm"}, shortcutHint{"esc", "Cancel"})
 	case StateModelSelector:
@@ -957,11 +1190,31 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 		if len(m.availableModels) == 0 {
 			return []shortcutHint{{"esc", escapeAction}}
 		}
-		if m.onModelSelect == nil || m.modelSwitchPending != "" {
+		if !m.modelSelectorPrimaryActionReadable() {
+			return []shortcutHint{{"↔", "Resize"}, {"esc", escapeAction}}
+		}
+		selected, _ := m.selectedModelChoice()
+		navigation := func(action string) []shortcutHint {
 			if len(m.availableModels) > 1 {
-				return []shortcutHint{{"↑↓", "Inspect"}, {"esc", escapeAction}}
+				return []shortcutHint{{"↑↓", action}, {"esc", escapeAction}}
 			}
 			return []shortcutHint{{"esc", escapeAction}}
+		}
+		if m.modelSwitchPending != "" {
+			return navigation("Inspect")
+		}
+		if selected.ID == "" {
+			return navigation("Navigate")
+		}
+		if selected.ID == safeKeyEntryText(m.currentModel) {
+			hints := make([]shortcutHint, 0, 3)
+			if len(m.availableModels) > 1 {
+				hints = append(hints, shortcutHint{"↑↓", "Navigate"})
+			}
+			return append(hints, shortcutHint{"Enter", "Keep current"}, shortcutHint{"esc", escapeAction})
+		}
+		if !m.modelSelectAvailable() {
+			return navigation("Inspect")
 		}
 		hints := make([]shortcutHint, 0, 3)
 		if len(m.availableModels) > 1 {
@@ -971,6 +1224,9 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 	case StateSettings:
 		if len(m.settingsItems) == 0 {
 			return []shortcutHint{{"m", "Model"}, {"esc", "Close"}}
+		}
+		if m.selectedSettingToggleAvailable() && !m.settingsPrimaryActionReadable() {
+			return []shortcutHint{{"↔", "Resize"}, {"m", "Model"}, {"esc", "Close"}}
 		}
 		hints := make([]shortcutHint, 0, 4)
 		if m.selectedSettingToggleAvailable() {
@@ -986,6 +1242,9 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 		return append(hints, shortcutHint{"m", "Model"}, shortcutHint{"esc", "Close"})
 	case StateAPIKeyEntry:
 		if m.keyEntryAvailable() {
+			if !m.keyEntryPrimaryActionReadable() {
+				return []shortcutHint{{"↔", "Resize"}, {"esc", "Cancel"}}
+			}
 			return []shortcutHint{{"Enter", "Save"}, {"esc", "Cancel"}}
 		}
 		return []shortcutHint{{"esc", "Close"}}
@@ -1019,21 +1278,33 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 			}
 			return []shortcutHint{{"esc", "Back to list"}}
 		}
+		if !m.notificationPrimaryActionReadable() {
+			return []shortcutHint{{"↔", "Resize"}, {"esc", "Back"}}
+		}
 		hints := make([]shortcutHint, 0, 4)
 		if len(rows) > 1 {
 			hints = append(hints, shortcutHint{"↑↓", "Select"})
 		}
 		hints = append(hints, shortcutHint{"Enter", "Details"})
-		if m.toastManager != nil && len(m.toastManager.History()) > 0 {
+		if m.toastManager != nil && len(m.toastManager.History()) > 0 && m.notificationClearActionVisible(len(rows) > 1) {
 			hints = append(hints, shortcutHint{"c", "Clear earlier"})
 		}
 		return append(hints, shortcutHint{"esc", "Back"})
 	case StateBatchProgress:
 		if m.progressModel.isComplete {
+			if m.progressModel.closePending {
+				return nil
+			}
 			return []shortcutHint{{"Enter/Esc", "Close"}}
 		}
 		if m.progressModel.isCancelling || m.progressModel.onAction == nil {
 			return nil
+		}
+		if !m.progressModel.pauseActionReadable() {
+			if m.progressModel.isPaused {
+				return []shortcutHint{{"↔", "Resize to resume"}, {"esc", "Cancel"}}
+			}
+			return []shortcutHint{{"esc", "Cancel"}}
 		}
 		pauseAction := "Pause"
 		if m.progressModel.isPaused {
@@ -1044,20 +1315,49 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 		if len(m.searchResults.results) == 0 {
 			return []shortcutHint{{"esc/q", "Close"}}
 		}
-		hints := []shortcutHint{{"Space", "Preview"}, {"y", "Copy path"}}
+		if workspaceTargetActionsUnreadable(m.searchResults.width, m.searchResults.height, minSearchTargetWidth) {
+			return []shortcutHint{{"↔", "Resize"}, {"esc/q", "Close"}}
+		}
+		previewAction := "Preview"
+		if m.searchResults.previewVisible() {
+			previewAction = "Hide preview"
+		}
+		hints := []shortcutHint{{"Space", previewAction}, {"y", "Copy path"}}
 		if m.searchResults.actionsAvailable() {
 			hints = append(hints, shortcutHint{"Enter", "Open"})
+		}
+		if m.searchResults.canNavigateResults() {
+			hints = append(hints, shortcutHint{"↑↓", "Navigate"})
+		}
+		if m.searchResults.canPageResults() {
+			hints = append(hints, shortcutHint{"PgUp/PgDn", "Page"})
+		}
+		if m.searchResults.canScrollPreview() {
+			hints = append(hints, shortcutHint{"Ctrl+j/k", "Scroll preview"})
 		}
 		return append(hints, shortcutHint{"esc/q", "Close"})
 	case StateGitStatus:
 		if len(m.gitStatusModel.entries) == 0 {
 			return []shortcutHint{{"esc/q", "Close"}}
 		}
+		if workspaceTargetActionsUnreadable(m.gitStatusModel.width, m.gitStatusModel.height, minGitTargetWidth) {
+			if m.gitStatusModel.confirmReset {
+				return []shortcutHint{{"↔", "Resize"}, {"esc/q", "Cancel"}}
+			}
+			return []shortcutHint{{"↔", "Resize"}, {"esc/q", "Close"}}
+		}
 		if m.gitStatusModel.confirmReset {
 			return []shortcutHint{{"esc/q", "Cancel"}, {"Enter", "Confirm reset"}}
 		}
 		if !m.gitStatusModel.actionsAvailable() {
-			return []shortcutHint{{"↑↓", "Inspect"}, {"esc/q", "Close"}}
+			hints := make([]shortcutHint, 0, 3)
+			if m.gitStatusModel.canNavigateEntries() {
+				hints = append(hints, shortcutHint{"↑↓", "Inspect"})
+			}
+			if m.gitStatusModel.canPageEntries() {
+				hints = append(hints, shortcutHint{"PgUp/PgDn", "Page"})
+			}
+			return append(hints, shortcutHint{"esc/q", "Close"})
 		}
 		diffAction := "Show diff"
 		if m.gitStatusModel.showDiff {
@@ -1066,10 +1366,24 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 		if m.gitStatusModel.showDiff && m.gitStatusModel.diffLoadError {
 			diffAction = "Retry diff"
 		}
-		return []shortcutHint{{"Space", "Stage/unstage"}, {"d", diffAction}, {"esc/q", "Close"}}
+		hints := []shortcutHint{{"Space", "Stage/unstage"}, {"d", diffAction}}
+		if m.gitStatusModel.canNavigateEntries() {
+			hints = append(hints, shortcutHint{"↑↓", "Navigate"})
+		}
+		if m.gitStatusModel.canPageEntries() {
+			hints = append(hints, shortcutHint{"PgUp/PgDn", "Page"})
+		}
+		if m.gitStatusModel.canScrollDiff() {
+			hints = append(hints, shortcutHint{"Ctrl+j/k", "Scroll diff"})
+		}
+		return append(hints, shortcutHint{"esc/q", "Close"})
 	case StateFileBrowser:
 		if m.fileBrowser.filterActive {
-			return []shortcutHint{{"Type", "Filter"}, {"Backspace", "Delete"}, {"Enter/Esc", "Done"}}
+			hints := []shortcutHint{{"Type", "Filter"}}
+			if m.fileBrowser.filterInput != "" {
+				hints = append(hints, shortcutHint{"Backspace", "Delete"})
+			}
+			return append(hints, shortcutHint{"Enter/Esc", "Done"})
 		}
 		if len(m.fileBrowser.entries) == 0 {
 			hints := []shortcutHint{{"/", "Filter"}, {"r", "Refresh"}}
@@ -1078,7 +1392,24 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 			}
 			return append(hints, shortcutHint{"esc/q", "Close"})
 		}
-		hints := []shortcutHint{{"Enter", "Open/add"}}
+		if m.fileBrowser.targetActionsUnreadable() {
+			return []shortcutHint{{"↔", "Resize"}, {"esc/q", "Close"}}
+		}
+		entryAction := "Add to draft"
+		selected := min(max(m.fileBrowser.selectedIndex, 0), len(m.fileBrowser.entries)-1)
+		if m.fileBrowser.entries[selected].IsDir {
+			entryAction = "Open folder"
+		}
+		hints := []shortcutHint{{"Enter", entryAction}}
+		if m.fileBrowser.entries[selected].Name != ".." {
+			hints = append(hints, shortcutHint{"Space", "Select"})
+		}
+		if m.fileBrowser.canNavigateEntries() {
+			hints = append(hints, shortcutHint{"↑↓", "Move"})
+		}
+		if m.fileBrowser.canPageEntries() {
+			hints = append(hints, shortcutHint{"PgUp/PgDn", "Page"})
+		}
 		if len(m.fileBrowser.selectedFiles) > 0 {
 			hints = append(hints, shortcutHint{"y", "Add selection"})
 		}
@@ -1088,15 +1419,22 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 			return []shortcutHint{{"esc", "Close"}}
 		}
 		if m.commandPalette.InArgEntry() {
+			if !m.commandPalette.argTargetVisibleForEnter() {
+				return []shortcutHint{{"↔", "Resize"}, {"esc", "Back"}}
+			}
 			if !m.commandPalette.submissionAvailable() || isUnavailablePromptNotice(m.commandPalette.argError) {
 				return []shortcutHint{{"esc", "Back"}}
 			}
 			return []shortcutHint{{"Enter", "Run"}, {"esc", "Back"}}
 		}
+		_, directReady := m.commandPalette.directSlashCommandWithArgs(strings.TrimSpace(m.commandPalette.GetQuery()))
+		hasTarget := directReady || m.commandPalette.GetSelected() != nil
+		if hasTarget && !m.commandPalette.targetVisibleForEnter() {
+			return []shortcutHint{{"↔", "Resize"}, {"esc", "Close"}}
+		}
 		if m.commandPalette.submitError != "" {
 			return []shortcutHint{{"esc", "Close"}}
 		}
-		_, directReady := m.commandPalette.directSlashCommandWithArgs(strings.TrimSpace(m.commandPalette.GetQuery()))
 		if len(m.commandPalette.filtered) == 0 {
 			hints := make([]shortcutHint, 0, 3)
 			if directReady && m.commandPalette.submissionAvailable() {
@@ -1119,6 +1457,8 @@ func (m Model) contextualShortcutHintPairs() []shortcutHint {
 			previewAction = "List"
 		}
 		return append(hints, shortcutHint{"Tab", previewAction}, shortcutHint{"esc", "Close"})
+	case StateContextObservatory:
+		return []shortcutHint{{"Esc/Ctrl+H", "Close"}}
 	case StateProcessing, StateStreaming:
 		// Esc-interrupt is NOT here — it's a required, always-visible segment
 		// (see interruptHint), because cancellation must never vanish under

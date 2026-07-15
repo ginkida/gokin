@@ -14,7 +14,8 @@ import (
 // path/command is no longer repeated on a separate result row, so one clean
 // subject per line is enough.
 func conciseToolTarget(name, info string) string {
-	info = strings.TrimSpace(info)
+	name = safeKeyEntryText(name)
+	info = strings.TrimSpace(safeInlineDisplayText(info))
 	if info == "" {
 		return ""
 	}
@@ -38,7 +39,7 @@ func conciseToolTarget(name, info string) string {
 // shows on the one-line display. The model still ran the full command — this
 // only affects the label.
 func stripBashPlumbing(cmd string) string {
-	cmd = strings.TrimSpace(cmd)
+	cmd = strings.TrimSpace(safeInlineDisplayText(cmd))
 	// Some info strings carry a display "$ " prefix (extractToolInfoFromArgs) —
 	// without stripping it the `cd … &&` check below never matches and the
 	// whole plumbing survives ("Bash($ cd /long/path && go test -...)").
@@ -70,6 +71,9 @@ type editDiffDisplay struct {
 // "Added N lines, removed M lines" header followed by the numbered ±hunk
 // lines, colored by marker (+ green, - red, context dim).
 func renderEditDiffBody(d *editDiffDisplay) string {
+	if d == nil {
+		return ""
+	}
 	header := lipgloss.NewStyle().Foreground(ColorMuted).
 		Render(fmt.Sprintf("Added %s, removed %s",
 			pluralCount(d.Added, "line", "lines"), pluralCount(d.Removed, "line", "lines")))
@@ -80,7 +84,7 @@ func renderEditDiffBody(d *editDiffDisplay) string {
 
 	var sb strings.Builder
 	sb.WriteString(header)
-	for line := range strings.SplitSeq(d.Text, "\n") {
+	for line := range strings.SplitSeq(visibleTerminalControlText(d.Text), "\n") {
 		if line == "" {
 			continue
 		}
@@ -178,6 +182,8 @@ func toolOutcomeSummary(name, content string) string {
 // that haven't been updated, or agents spawned via legacy paths. Better to
 // show *something* than a blank row.
 func summarizeSubAgentTask(prompt, agentType string) string {
+	prompt = safeTerminalDisplayText(prompt)
+	agentType = safeKeyEntryText(agentType)
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		if agentType == "" {
@@ -205,6 +211,9 @@ func summarizeSubAgentTask(prompt, agentType string) string {
 		// so the row isn't empty.
 		first = strings.TrimSpace(strings.SplitN(prompt, "\n", 2)[0])
 	}
+	// This is a one-row summary: remove terminal controls and fold separators,
+	// while preserving meaningful horizontal spacing in the task text.
+	first = strings.TrimSpace(safeInlineDisplayText(first))
 
 	// Truncate at first sentence-ending punctuation (once we have enough
 	// content to not chop mid-verb).
@@ -214,9 +223,7 @@ func summarizeSubAgentTask(prompt, agentType string) string {
 
 	// Hard cap so the feed row doesn't wrap or blow past terminal width.
 	const maxLen = 70
-	if runes := []rune(first); len(runes) > maxLen {
-		first = string(runes[:maxLen-1]) + "…"
-	}
+	first = truncateForWidth(first, maxLen)
 	if agentType != "" {
 		return agentType + " · " + first
 	}
@@ -225,6 +232,8 @@ func summarizeSubAgentTask(prompt, agentType string) string {
 
 // generateToolResultSummary creates compact summaries based on tool type and content.
 func generateToolResultSummary(toolName, content, detail string) string {
+	toolName = safeKeyEntryText(toolName)
+	detail = strings.TrimSpace(safeInlineDisplayText(detail))
 	normalizedTool := strings.ToLower(strings.ReplaceAll(toolName, "-", "_"))
 	// For tools whose detail is a filesystem path, use the path-aware
 	// shortener (handles ~/, keeps filename visible). For command/pattern
@@ -397,24 +406,22 @@ func displayLineCount(content string) int {
 }
 
 func summarizeToolDetail(detail string, maxLen int) string {
-	detail = strings.TrimSpace(detail)
+	detail = strings.TrimSpace(safeInlineDisplayText(detail))
 	if detail == "" {
 		return ""
 	}
 
-	detail = strings.Join(strings.Fields(detail), " ")
-	if detail == "" {
+	if maxLen <= 0 {
 		return ""
 	}
-	runes := []rune(detail)
-	if len(runes) <= maxLen {
+	if lipgloss.Width(detail) <= maxLen {
 		return detail
 	}
 
-	headLen := (maxLen - 3) / 2
-	tailLen := maxLen - 3 - headLen
-	if headLen < 1 || tailLen < 1 {
-		return string(runes[:maxLen])
+	if maxLen <= 3 {
+		return truncateForWidth(detail, maxLen)
 	}
-	return string(runes[:headLen]) + "..." + string(runes[len(runes)-tailLen:])
+	headWidth := (maxLen - 3) / 2
+	tailWidth := maxLen - 3 - headWidth
+	return displayCellPrefix(detail, headWidth) + "..." + displayCellSuffix(detail, tailWidth)
 }

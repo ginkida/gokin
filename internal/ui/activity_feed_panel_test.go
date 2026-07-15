@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ── GenerateResultSummary ────────────────────────────────────────────────────
@@ -344,6 +346,66 @@ func TestActivityFeedPanel_Snapshot(t *testing.T) {
 	}
 	if snap.RunningTools != 1 {
 		t.Errorf("RunningTools = %d, want 1", snap.RunningTools)
+	}
+}
+
+func TestActivityFeedSnapshotsDoNotAliasCallerOrReaderMaps(t *testing.T) {
+	details := map[string]any{"path": "original.go"}
+	p := NewActivityFeedPanel(DefaultStyles())
+	p.AddEntry(ActivityFeedEntry{
+		ID:          "tool-1",
+		Type:        ActivityTypeTool,
+		Name:        "read\x1b]0;hijack\a",
+		Description: "inspect\nforged row",
+		Status:      ActivityRunning,
+		Details:     details,
+	})
+	details["path"] = "mutated.go"
+
+	first := p.Snapshot(1, 0)
+	if len(first.Entries) != 1 || first.Entries[0].Details["path"] != "original.go" {
+		t.Fatalf("activity entry retained caller-owned details: %+v", first.Entries)
+	}
+	first.Entries[0].Details["path"] = "reader-mutated.go"
+	second := p.Snapshot(1, 0)
+	if second.Entries[0].Details["path"] != "original.go" {
+		t.Fatalf("activity snapshot exposed panel-owned details: %+v", second.Entries[0].Details)
+	}
+
+	p.StartSubAgent("agent-1", "review", "Review files")
+	args := map[string]any{"file_path": "safe.go"}
+	p.UpdateSubAgentTool("agent-1", "read", args)
+	args["file_path"] = "mutated.go"
+	state := p.GetSubAgentState("agent-1")
+	if state.ToolArgs["file_path"] != "safe.go" {
+		t.Fatalf("sub-agent retained caller-owned args: %+v", state.ToolArgs)
+	}
+	state.ToolArgs["file_path"] = "reader-mutated.go"
+	if again := p.GetSubAgentState("agent-1"); again.ToolArgs["file_path"] != "safe.go" {
+		t.Fatalf("sub-agent snapshot exposed panel-owned args: %+v", again.ToolArgs)
+	}
+
+	p.visible = true
+	view := p.View(90)
+	plain := stripAnsi(view)
+	if strings.Contains(view, "\x1b]") || strings.Contains(plain, "hijack") || strings.Contains(plain, "forged\nrow") {
+		t.Fatalf("activity feed rendered unsafe metadata:\n%s", plain)
+	}
+}
+
+func TestActivityFeedIndeterminateProgressFitsEveryNarrowWidth(t *testing.T) {
+	p := NewActivityFeedPanel(DefaultStyles())
+	p.StartSubAgent("agent-1", strings.Repeat("long-agent", 8), strings.Repeat("description ", 10))
+	p.UpdateSubAgentTool("agent-1", "read", map[string]any{"file_path": strings.Repeat("deep/", 20) + "main.go"})
+	p.UpdateSubAgentProgress("agent-1", -1, 1, 0)
+
+	for width := 1; width <= 32; width++ {
+		view := p.View(width)
+		for row, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Fatalf("width=%d row=%d overflow=%d: %q", width, row, got, stripAnsi(line))
+			}
+		}
 	}
 }
 

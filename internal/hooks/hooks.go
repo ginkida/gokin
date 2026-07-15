@@ -135,11 +135,13 @@ func NewContext(toolName string, args map[string]any, workDir string) *Context {
 // SetResult sets the tool result for post-tool hooks.
 func (c *Context) SetResult(result string) {
 	c.ToolResult = result
+	c.previousSuccess = true
 }
 
 // SetError sets the error for on-error hooks.
 func (c *Context) SetError(err string) {
 	c.ToolError = err
+	c.previousSuccess = false
 }
 
 // SetPreviousSuccess sets whether the previous tool call succeeded.

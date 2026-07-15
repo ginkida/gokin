@@ -10,6 +10,8 @@ import (
 	"errors"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"gokin/internal/donegate"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
@@ -64,11 +66,7 @@ func (a *App) runCompletionReviewIfNeeded(
 	ctx context.Context,
 	userMessage string,
 	response *string,
-	apiInputAccum *int,
-	apiOutputAccum *int,
-	cacheReadAccum *int,
-	apiCostAccum *float64,
-	apiCostTracked *bool,
+	usage *turnUsageAccumulator,
 ) bool {
 	if a == nil || a.executor == nil || a.session == nil || response == nil {
 		return true
@@ -115,28 +113,14 @@ func (a *App) runCompletionReviewIfNeeded(
 	// the review conversation: on this function's error path newHistory is
 	// discarded, which would silently LOSE an accepted steer.
 	resumeSteering := a.executor.SuspendUserSteering()
-	newHistory, reviewResponse, err := a.executor.Execute(ctx, history, reviewPrompt)
-	resumeSteering()
-	in, out := a.executor.GetLastTokenUsage()
-	_, cacheRead := a.executor.GetLastCacheMetrics()
-	cost, costTracked := a.executor.GetLastEstimatedCost()
-	if apiInputAccum != nil {
-		*apiInputAccum += in
-	}
-	if apiOutputAccum != nil {
-		*apiOutputAccum += out
-	}
-	if cacheReadAccum != nil {
-		*cacheReadAccum += cacheRead
-	}
-	if costTracked {
-		if apiCostAccum != nil {
-			*apiCostAccum += cost
-		}
-		if apiCostTracked != nil {
-			*apiCostTracked = true
-		}
-	}
+	var newHistory []*genai.Content
+	var reviewResponse string
+	var err error
+	func() {
+		defer resumeSteering()
+		newHistory, reviewResponse, err = a.executeTracked(
+			ctx, history, reviewPrompt, usage)
+	}()
 	if err != nil {
 		// The completion review is a BEST-EFFORT, optional self-improvement step
 		// — the HARD verification gate is enforceDoneGate, which runs next. Its

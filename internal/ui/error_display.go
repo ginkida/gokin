@@ -248,20 +248,20 @@ func ClassifyError(err error, context string) *EnhancedError {
 			"Check if the server is responding slowly",
 		}
 
-	case containsAny(errStr, "no such file", "not found", "does not exist", "enoent"):
+	case containsAny(errStr, "no such file", "no such directory", "file not found", "path not found", "enoent"):
 		enhanced.Category = ErrorCategoryFile
 		enhanced.Suggestions = []string{
 			"Verify the file path is correct (typo?)",
-			"Search for it: use /glob or /grep to locate the file",
+			"Open /browse to locate the file, or use /pwd to verify the current directory",
 			"The file may have been moved or deleted",
 		}
 
-	case containsAny(errStr, "unauthorized", "401", "invalid.*key", "api.*key.*invalid"):
+	case containsAny(errStr, "unauthorized", "invalid api key", "api key is invalid", "api key invalid", "missing api key", "expired api key", "authentication failed", "authentication_error") || containsHTTPStatus(errStr, "401"):
 		enhanced.Category = ErrorCategoryAuth
 		enhanced.Suggestions = getAuthSuggestions()
 		enhanced.Documentation = ""
 
-	case containsAny(errStr, "rate limit", "429", "too many requests", "quota"):
+	case containsAny(errStr, "rate limit", "too many requests", "quota") || containsHTTPStatus(errStr, "429"):
 		enhanced.Category = ErrorCategoryRateLimit
 		enhanced.Suggestions = []string{
 			"Wait a moment before trying again",
@@ -281,7 +281,7 @@ func ClassifyError(err error, context string) *EnhancedError {
 		enhanced.Category = ErrorCategoryConfig
 		enhanced.Suggestions = []string{
 			"Check your config file: ~/.config/gokin/config.yaml",
-			"Run /setup to reconfigure interactively",
+			"Open /settings to reconfigure interactively, or run gokin --setup",
 			"Run /doctor to diagnose setup issues",
 		}
 		enhanced.Documentation = "~/.config/gokin/config.yaml"
@@ -294,7 +294,8 @@ func ClassifyError(err error, context string) *EnhancedError {
 			"Check if git is installed and in PATH",
 		}
 
-	case containsAny(errStr, "api", "500", "502", "503", "server error", "internal error"):
+	case containsASCIIWord(errStr, "api") || containsAny(errStr, "server error", "internal error") ||
+		containsHTTPStatus(errStr, "500") || containsHTTPStatus(errStr, "502") || containsHTTPStatus(errStr, "503"):
 		enhanced.Category = ErrorCategoryAPI
 		enhanced.Suggestions = []string{
 			"The API server may be experiencing issues",
@@ -357,9 +358,43 @@ func containsAny(s string, substrs ...string) bool {
 	return false
 }
 
+// containsHTTPStatus matches a standalone status code without treating common
+// telemetry such as "401ms" or identifiers such as "x429" as provider errors.
+func containsHTTPStatus(s, status string) bool {
+	return containsASCIIWord(s, status)
+}
+
+func containsASCIIWord(s, word string) bool {
+	if word == "" || len(word) > len(s) {
+		return false
+	}
+	for offset := 0; offset <= len(s)-len(word); {
+		index := strings.Index(s[offset:], word)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		end := index + len(word)
+		beforeOK := index == 0 || !isASCIIWordByte(s[index-1])
+		afterOK := end == len(s) || !isASCIIWordByte(s[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		offset = index + 1
+	}
+	return false
+}
+
+func isASCIIWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
 // getAuthSuggestions returns auth error suggestions with env var detection.
 func getAuthSuggestions() []string {
-	suggestions := []string{}
+	// Keep the safe in-app recovery first because compact error surfaces render
+	// only the first suggestion. Supplying the provider without a key opens the
+	// masked prompt; the secret is never placed in command history or scrollback.
+	suggestions := []string{"Run /login <provider> to replace the key in the masked prompt"}
 
 	found := false
 	for _, p := range config.Providers {
@@ -384,7 +419,7 @@ func getAuthSuggestions() []string {
 		if ps := config.Providers; len(ps) > 0 && len(ps[0].EnvVars) > 0 {
 			envHint = ps[0].EnvVars[0]
 		}
-		suggestions = append(suggestions, fmt.Sprintf("No API key env vars detected. Set %s or run gokin --setup", envHint))
+		suggestions = append(suggestions, fmt.Sprintf("No API key env vars detected. Set %s or use /login <provider>", envHint))
 	}
 
 	suggestions = append(suggestions,

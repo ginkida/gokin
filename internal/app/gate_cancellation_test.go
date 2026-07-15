@@ -39,9 +39,8 @@ func TestRunCompletionReviewIfNeeded_CanceledContextPreservesWork(t *testing.T) 
 	cancel() // turn interrupted before the optional review
 
 	resp := "I implemented the controller."
-	in, out, cache := 0, 0, 0
-	cost, costTracked := 0.0, false
-	ok := a.runCompletionReviewIfNeeded(ctx, "implement the controller", &resp, &in, &out, &cache, &cost, &costTracked)
+	var usage turnUsageAccumulator
+	ok := a.runCompletionReviewIfNeeded(ctx, "implement the controller", &resp, &usage)
 
 	if !ok {
 		t.Fatal("canceled context must preserve work (return true), not discard the turn")
@@ -51,6 +50,9 @@ func TestRunCompletionReviewIfNeeded_CanceledContextPreservesWork(t *testing.T) 
 	}
 	if n := len(mock.Calls()); n != 0 {
 		t.Fatalf("no model call should happen on a canceled review, got %d", n)
+	}
+	if !usage.empty() {
+		t.Fatalf("canceled review recorded usage without a model call: %+v", usage)
 	}
 }
 

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -25,6 +26,18 @@ type SettingItem struct {
 	Pending bool
 }
 
+type settingRenderRow struct {
+	header  string
+	itemIdx int // -1 marks a category header
+}
+
+type settingRenderWindow struct {
+	rows                 []settingRenderRow
+	start, end           int
+	selectedItem         int
+	showAbove, showBelow bool
+}
+
 // OpenSettingsMsg opens the interactive settings screen with the given toggles
 // plus the current model/provider for the header.
 type OpenSettingsMsg struct {
@@ -37,10 +50,11 @@ type OpenSettingsMsg struct {
 // carries the authoritative restored value so the modal cannot remain visually
 // ahead of the actual runtime/config state.
 type SettingToggleResultMsg struct {
-	Key     string
-	On      bool
-	Success bool
-	Message string
+	RequestID string
+	Key       string
+	On        bool
+	Success   bool
+	Message   string
 }
 
 // SetSettingToggleCallback wires the app handler invoked when the user flips a
@@ -50,9 +64,121 @@ func (m *Model) SetSettingToggleCallback(cb func(key string, on bool)) {
 	m.onSettingToggle = cb
 }
 
+// SetSettingToggleCallbackWithID wires the request-aware app handler. Each
+// attempt gets a distinct opaque ID so a late result cannot settle a newer
+// toggle of the same setting after the modal has been reopened.
+func (m *Model) SetSettingToggleCallbackWithID(cb func(requestID, key string, on bool)) {
+	m.onSettingToggleWithID = cb
+}
+
+func (m Model) settingToggleAvailable() bool {
+	return m.onSettingToggleWithID != nil || m.onSettingToggle != nil
+}
+
+func (m *Model) dispatchSettingToggle(key string, on bool) {
+	requestID := ""
+	if m.onSettingToggleWithID != nil {
+		requestID = m.nextUIRequestID("setting", &m.settingToggleRequestSeq)
+	}
+	if m.settingsPendingRequestIDs == nil {
+		m.settingsPendingRequestIDs = make(map[string]string)
+	}
+	if m.settingsPendingRevisions == nil {
+		m.settingsPendingRevisions = make(map[string]uint64)
+	}
+	m.settingsPendingRequestIDs[key] = requestID
+	m.settingsPendingRevisions[key] = m.lastConfigRevision
+	if m.onSettingToggleWithID != nil {
+		m.onSettingToggleWithID(requestID, key, on)
+		return
+	}
+	if m.onSettingToggle != nil {
+		m.onSettingToggle(key, on)
+	}
+}
+
+// configUpdateSettingSnapshot returns the settings represented by a config
+// message. Settings carries the complete app snapshot; the explicit fields are
+// also folded in so focused tests and older producers get the same semantics
+// for the long-standing runtime toggles.
+func configUpdateSettingSnapshot(msg ConfigUpdateMsg) map[string]bool {
+	snapshot := make(map[string]bool, len(msg.Settings)+6)
+	for key, on := range msg.Settings {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key != "" {
+			snapshot[key] = on
+		}
+	}
+	legacy := map[string]bool{
+		"permissions":   msg.PermissionsEnabled,
+		"sandbox":       msg.SandboxEnabled,
+		"plan":          msg.PlanningModeEnabled,
+		"compactui":     msg.CompactMode,
+		"reducedmotion": msg.ReducedMotion,
+		"tokens":        msg.ShowTokenUsage,
+	}
+	for key, on := range legacy {
+		if _, present := snapshot[key]; !present {
+			snapshot[key] = on
+		}
+	}
+	return snapshot
+}
+
+// reconcileVersionedSettingSnapshot makes a committed config snapshot
+// authoritative over older optimistic settings state. It also removes request
+// ownership, so the result that eventually returns from that older worker is a
+// harmless no-op instead of repainting stale state or feedback.
+func (m *Model) reconcileVersionedSettingSnapshot(msg ConfigUpdateMsg, previousRevision uint64) {
+	for key, authoritativeOn := range configUpdateSettingSnapshot(msg) {
+		desiredOn, pending := m.settingsPending[key]
+		baseRevision, hasBase := m.settingsPendingRevisions[key]
+		if pending {
+			if !hasBase {
+				baseRevision = previousRevision
+			}
+			if msg.Revision <= baseRevision {
+				continue
+			}
+			delete(m.settingsPending, key)
+			delete(m.settingsPendingRequestIDs, key)
+			delete(m.settingsPendingRevisions, key)
+		}
+
+		name := key
+		found := false
+		for i := range m.settingsItems {
+			if m.settingsItems[i].Key != key {
+				continue
+			}
+			m.settingsItems[i].On = authoritativeOn
+			m.settingsItems[i].Pending = false
+			name = m.settingsItems[i].Name
+			found = true
+			break
+		}
+		if !pending {
+			continue
+		}
+		if name = safeKeyEntryText(name); name == "" {
+			name = "Setting"
+		}
+		feedback := fmt.Sprintf("%s: %s", name, onOffLabel(authoritativeOn))
+		if desiredOn != authoritativeOn {
+			feedback = fmt.Sprintf("%s: changed elsewhere · %s", name, onOffLabel(authoritativeOn))
+		}
+		if m.state == StateSettings && found {
+			m.settingsNotice = feedback
+		} else if m.toastManager != nil {
+			m.toastManager.ShowTagged("setting-"+key, ToastInfo, feedback, 4*time.Second)
+		}
+	}
+}
+
 // openSettings enters the settings modal with a fresh snapshot of toggles + the
 // current model/provider for the header.
 func (m *Model) openSettings(msg OpenSettingsMsg) {
+	m.settingsReturnState = overlayReturnState(m.state)
 	m.settingsItems = append([]SettingItem(nil), msg.Items...)
 	for i := range m.settingsItems {
 		m.settingsItems[i].Key = strings.ToLower(strings.TrimSpace(m.settingsItems[i].Key))
@@ -82,7 +208,7 @@ func (m *Model) handleSettingsKeys(msg tea.KeyMsg) tea.Cmd {
 	} else {
 		m.settingsCursor = min(max(m.settingsCursor, 0), len(m.settingsItems)-1)
 	}
-	page := settingsItemVisibleCount(m.height, len(m.settingsItems))
+	page := m.settingsPageItemCount()
 	switch msg.String() {
 	case "up", "k":
 		if m.settingsCursor > 0 {
@@ -112,12 +238,15 @@ func (m *Model) handleSettingsKeys(msg tea.KeyMsg) tea.Cmd {
 		m.settingsNotice = ""
 	case "enter", " ":
 		if m.settingsCursor >= 0 && m.settingsCursor < len(m.settingsItems) {
+			if !m.settingsPrimaryActionReadable() {
+				return nil
+			}
 			if len(m.settingsPending) > 0 {
 				m.settingsNotice = "Wait for the current setting to finish applying"
 				return nil
 			}
 			item := &m.settingsItems[m.settingsCursor]
-			if m.onSettingToggle == nil {
+			if !m.settingToggleAvailable() {
 				m.settingsNotice = "Changes are unavailable in this session"
 				return nil
 			}
@@ -126,12 +255,17 @@ func (m *Model) handleSettingsKeys(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 			item.On = !item.On // optimistic value, explicitly marked pending below
+			if item.Key == "compactui" {
+				// Layout changes are safe to preview immediately; the result message
+				// restores the authoritative value if persistence/runtime apply fails.
+				m.SetCompactMode(item.On)
+			}
 			item.Pending = true
 			if m.settingsPending == nil {
 				m.settingsPending = make(map[string]bool)
 			}
 			m.settingsPending[item.Key] = item.On
-			m.onSettingToggle(item.Key, item.On)
+			m.dispatchSettingToggle(item.Key, item.On)
 			name := item.Name
 			if name == "" {
 				name = item.Key
@@ -145,23 +279,112 @@ func (m *Model) handleSettingsKeys(msg tea.KeyMsg) tea.Cmd {
 		m.openModelSelector()
 		return nil
 	case "esc", "q":
-		m.state = StateInput
-		return m.input.Focus()
+		return m.closeSettings()
 	}
 	return nil
 }
 
-func settingsItemVisibleCount(height, total int) int {
-	if total <= 0 {
+func (m *Model) closeSettings() tea.Cmd {
+	return m.restoreAsyncModal(&m.settingsReturnState)
+}
+
+func buildSettingRenderRows(items []SettingItem) []settingRenderRow {
+	rows := make([]settingRenderRow, 0, len(items)+6)
+	lastCategory := ""
+	for i, item := range items {
+		category := safeKeyEntryText(item.Category)
+		if category != "" && category != lastCategory {
+			rows = append(rows, settingRenderRow{header: category, itemIdx: -1})
+			lastCategory = category
+		}
+		rows = append(rows, settingRenderRow{itemIdx: i})
+	}
+	return rows
+}
+
+func (m Model) settingsListRowBudget(hasMeta, hasSafety, bordered bool) int {
+	if m.height <= 0 {
+		// The historical no-size rendering showed eight data rows plus up to two
+		// overflow markers. Preserve that useful default until WindowSizeMsg.
+		return 10
+	}
+	compact := m.height < 18
+	fixedRows := 1 // title
+	if !compact {
+		fixedRows++ // breathing row after title
+	}
+	if hasMeta {
+		fixedRows++
+	}
+	if hasSafety {
+		fixedRows++
+	}
+	if (hasMeta || hasSafety) && !compact {
+		fixedRows++
+	}
+	if len(m.settingsItems) > 0 {
+		fixedRows++ // selected item description
+		if !compact {
+			fixedRows++ // breathing row before description
+		}
+	}
+	if m.settingsNotice != "" {
+		fixedRows++
+	}
+	if !compact {
+		fixedRows++ // breathing row before footer
+	}
+	fixedRows++ // footer
+	if !compact {
+		fixedRows += 2 // quick-presets line + trailing breathing row
+	}
+	if bordered {
+		fixedRows += 2
+	}
+	return max(m.height-fixedRows, 1)
+}
+
+func chooseSettingRenderWindow(rows []settingRenderRow, selectedRow, rowBudget int) settingRenderWindow {
+	window := settingRenderWindow{rows: rows}
+	if len(rows) == 0 {
+		return window
+	}
+	viewport := chooseViewportWindow(len(rows), selectedRow, rowBudget)
+	window.start, window.end = viewport.start, viewport.end
+	window.showAbove, window.showBelow = viewport.showAbove, viewport.showBelow
+	return window
+}
+
+func (m Model) settingsRenderWindow(hasMeta, hasSafety, bordered bool) settingRenderWindow {
+	rows := buildSettingRenderRows(m.settingsItems)
+	selectedItem := min(max(m.settingsCursor, 0), len(m.settingsItems)-1)
+	selectedRow := 0
+	for i, row := range rows {
+		if row.itemIdx == selectedItem {
+			selectedRow = i
+			break
+		}
+	}
+	window := chooseSettingRenderWindow(rows, selectedRow, m.settingsListRowBudget(hasMeta, hasSafety, bordered))
+	window.selectedItem = selectedItem
+	return window
+}
+
+func (m Model) settingsPageItemCount() int {
+	if len(m.settingsItems) == 0 {
 		return 0
 	}
-	if height <= 0 {
-		return min(total, 8)
+	_, bordered := promptPaletteWidth(m.width)
+	safetySummary, _ := settingsSafetySummary(m.settingsItems)
+	hasSafety := safetySummary != ""
+	window := m.settingsRenderWindow(m.settingsModel != "" || m.settingsProvider != "", hasSafety, bordered)
+	count := 0
+	for _, row := range window.rows[window.start:window.end] {
+		if row.itemIdx >= 0 {
+			count++
+		}
 	}
-	if height < 18 {
-		return min(total, max(height-9, 1))
-	}
-	return min(total, max(height-12, 1))
+	return max(count, 1)
 }
 
 // selectedSettingToggleAvailable is the shared source of truth for whether the
@@ -169,12 +392,24 @@ func settingsItemVisibleCount(height, total int) int {
 // shortcut hints use it so a malformed/read-only/pending row never advertises
 // Space as a working action.
 func (m Model) selectedSettingToggleAvailable() bool {
-	if m.onSettingToggle == nil || len(m.settingsPending) > 0 || len(m.settingsItems) == 0 {
+	if !m.settingToggleAvailable() || len(m.settingsPending) > 0 || len(m.settingsItems) == 0 {
 		return false
 	}
 	selected := min(max(m.settingsCursor, 0), len(m.settingsItems)-1)
 	item := m.settingsItems[selected]
 	return strings.TrimSpace(item.Key) != "" && !item.Pending
+}
+
+func (m Model) settingsPrimaryActionReadable() bool {
+	minHeight := 4 // selected row + description + footer + global status
+	if safeKeyEntryText(m.settingsNotice) != "" {
+		minHeight++
+	}
+	_, bordered := promptPaletteWidth(m.width)
+	if bordered {
+		minHeight++
+	}
+	return promptPrimaryActionGeometryReadable(m.width, m.height, minHeight)
 }
 
 // renderSettings draws the settings modal.
@@ -196,9 +431,12 @@ func (m Model) renderSettings() string {
 		b.WriteString("\n\n")
 	}
 
-	// Model/provider header — shown here so the modal is the one place that
-	// surfaces the whole picture; model is changed with 'm', provider via /provider.
-	if m.settingsModel != "" || m.settingsProvider != "" {
+	// Model/provider and combined safety state — shown here so the modal is the
+	// one place that surfaces the whole picture. Permissions and sandbox are
+	// independent toggles; their combined effect must not be inferred from two
+	// distant on/off rows.
+	hasMeta := m.settingsModel != "" || m.settingsProvider != ""
+	if hasMeta {
 		hdr := lipgloss.NewStyle().Foreground(ColorMuted)
 		model := safeKeyEntryText(m.settingsModel)
 		if model == "" {
@@ -210,9 +448,21 @@ func (m Model) renderSettings() string {
 		}
 		meta := truncateForWidth(fmt.Sprintf("Model: %s · Provider: %s", model, provider), max(contentWidth-2, 1))
 		fmt.Fprintf(&b, "  %s\n", hdr.Render(meta))
-		if !compact {
-			b.WriteString("\n")
+	}
+	safetySummary, safetyRisk := settingsSafetySummary(m.settingsItems)
+	if safetySummary != "" {
+		color := ColorMuted
+		if safetyRisk == 1 {
+			color = ColorWarning
+		} else if safetyRisk == 2 {
+			color = ColorError
 		}
+		safetyStyle := lipgloss.NewStyle().Foreground(color)
+		line := truncateForWidth("Safety: "+safetySummary, max(contentWidth-2, 1))
+		fmt.Fprintf(&b, "  %s\n", safetyStyle.Render(line))
+	}
+	if (hasMeta || safetySummary != "") && !compact {
+		b.WriteString("\n")
 	}
 	footerStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true).Align(lipgloss.Center).Width(contentWidth)
 
@@ -229,59 +479,17 @@ func (m Model) renderSettings() string {
 		return wrapPromptContainer(b.String(), paletteWidth, bordered, ColorPrimary)
 	}
 
-	// Build the flat row list: a header row when the category changes, then ONE
-	// row per item. Headers are render-only — the cursor indexes items (0..N-1),
-	// so headers can never desync it.
-	type settingRow struct {
-		header  string
-		itemIdx int // -1 marks a header row
-	}
-	rows := make([]settingRow, 0, len(m.settingsItems)+6)
-	lastCat := ""
-	for i, item := range m.settingsItems {
-		category := safeKeyEntryText(item.Category)
-		if category != "" && category != lastCat {
-			rows = append(rows, settingRow{header: category, itemIdx: -1})
-			lastCat = category
-		}
-		rows = append(rows, settingRow{itemIdx: i})
-	}
-
-	// Height-aware window so the modal never clips on a short terminal: show at
-	// most `avail` rows, centered on the selected item. max(6, …) floors it for
-	// the pre-first-WindowSizeMsg case (m.height == 0).
-	avail := min(len(rows), 8)
-	if m.height > 0 {
-		reserved := 9
-		if m.settingsNotice != "" {
-			reserved++
-		}
-		avail = min(len(rows), max(m.height-reserved, 1))
-	}
-	selectedItem := min(max(m.settingsCursor, 0), len(m.settingsItems)-1)
-	selRow := 0
-	for ri, r := range rows {
-		if r.itemIdx == selectedItem {
-			selRow = ri
-			break
-		}
-	}
-	start := 0
-	if len(rows) > avail {
-		start = selRow - avail/2
-		if start < 0 {
-			start = 0
-		}
-		if start > len(rows)-avail {
-			start = len(rows) - avail
-		}
-	}
-	end := min(start+avail, len(rows))
+	// Category headers, data rows and overflow markers share one exact row
+	// budget. The same window drives PgUp/PgDown, so navigation cannot skip an
+	// item the renderer never showed.
+	window := m.settingsRenderWindow(hasMeta, safetySummary != "", bordered)
+	rows, start, end := window.rows, window.start, window.end
+	selectedItem := window.selectedItem
 
 	catStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorMuted)
 	moreStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
 
-	if start > 0 {
+	if window.showAbove {
 		marker := truncateForWidth(fmt.Sprintf("↑ %d more row(s)", start), max(contentWidth-2, 1))
 		fmt.Fprintf(&b, "  %s\n", moreStyle.Render(marker))
 	}
@@ -324,7 +532,7 @@ func (m Model) renderSettings() string {
 		line := prefix + style.Render(label)
 		fmt.Fprintf(&b, "%s\n", line)
 	}
-	if end < len(rows) {
+	if window.showBelow {
 		marker := truncateForWidth(fmt.Sprintf("↓ %d more row(s)", len(rows)-end), max(contentWidth-2, 1))
 		fmt.Fprintf(&b, "  %s\n", moreStyle.Render(marker))
 	}
@@ -362,7 +570,9 @@ func (m Model) renderSettings() string {
 	if len(m.settingsItems) > 1 {
 		footer += " · ↑/↓ Navigate"
 	}
-	if m.onSettingToggle == nil {
+	if m.selectedSettingToggleAvailable() && !m.settingsPrimaryActionReadable() {
+		footer = resizeRecoveryLabel(contentWidth, "Esc Close")
+	} else if !m.settingToggleAvailable() {
 		footer = "Esc Close · m Model · Read-only"
 	} else if len(m.settingsPending) > 0 {
 		footer = "Esc Close · m Model · Applying…"
@@ -374,6 +584,8 @@ func (m Model) renderSettings() string {
 		if len(m.settingsItems) > 1 {
 			footer += " · ↑/↓ Navigate"
 		}
+	} else {
+		footer = primaryActionFooterLabel(contentWidth, footer, "Esc Close", "Space")
 	}
 	b.WriteString(renderPromptFooterLine(footerStyle, contentWidth, footer))
 	// Quick presets are the one-tap "simpler" surface — a calm dim line so modal
@@ -392,4 +604,34 @@ func onOffLabel(on bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// settingsSafetySummary resolves the two independent safety toggles into the
+// behavior the user will actually get. risk is 0 for guarded, 1 for a partial
+// bypass, and 2 for full YOLO. Missing rows return no summary rather than
+// guessing from a partial snapshot.
+func settingsSafetySummary(items []SettingItem) (summary string, risk int) {
+	permissionsOn, permissionsFound := false, false
+	sandboxOn, sandboxFound := false, false
+	for _, item := range items {
+		switch strings.ToLower(strings.TrimSpace(item.Key)) {
+		case "permissions":
+			permissionsOn, permissionsFound = item.On, true
+		case "sandbox":
+			sandboxOn, sandboxFound = item.On, true
+		}
+	}
+	if !permissionsFound || !sandboxFound {
+		return "", 0
+	}
+	switch {
+	case !permissionsOn && !sandboxOn:
+		return "full YOLO · no prompts · bash unrestricted", 2
+	case !permissionsOn:
+		return "no prompts · bash sandboxed", 1
+	case !sandboxOn:
+		return "prompts on · approved bash unrestricted", 1
+	default:
+		return "prompts on · bash sandboxed", 0
+	}
 }

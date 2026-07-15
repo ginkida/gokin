@@ -160,6 +160,12 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			// with no internal recover — a panic on a raw goroutine crashes the CLI.
 			a.safeGo("refresh-token-count", a.refreshTokenCount)
 		},
+		OnToolPolicyBlocked: func(name string, block tools.PolicyBlock) {
+			// Interactive execution keeps its existing recoverable UX. During a
+			// headless invocation, however, a model's later prose must not turn a
+			// refused action into process exit 0.
+			a.recordHeadlessPolicyFailure(name, block)
+		},
 		OnToolProgress: func(name string, elapsed time.Duration) {
 			a.touchStepHeartbeat()
 			a.mu.Lock()
@@ -242,6 +248,24 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			present().MemoryNotify(msg)
 		},
 		OnSteerLeftover: func(messages []string) {
+			type queuedSteer struct {
+				message  string
+				position int
+			}
+			queued := make([]queuedSteer, 0, len(messages))
+			rejected := make([]int, 0)
+
+			// Make delivery all-or-nothing relative to explicit cancellation.
+			// CancelProcessing takes the same a.mu before setting the drop flag,
+			// then drains pending after release. It therefore either suppresses
+			// this entire batch or drains every item in it; no later callback can
+			// append behind the authoritative drain.
+			a.mu.Lock()
+			if a.dropSteerLeftovers {
+				a.mu.Unlock()
+				logging.Debug("discarded steer leftovers owned by cancelled turn", "count", len(messages))
+				return
+			}
 			// The current turn still owns processing=true here. Put late steers
 			// directly into the normal pending FIFO; the message-processor defer
 			// dispatches them after it clears processing. Calling handleSubmit
@@ -249,18 +273,29 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			for _, message := range messages {
 				pos, ok := a.enqueuePending(message)
 				if !ok {
-					a.safeSendToProgram(ui.StatusUpdateMsg{
-						Type:    ui.StatusRetry,
-						Message: fmt.Sprintf("Queue full (%d waiting) — late follow-up not queued", pos),
-					})
+					rejected = append(rejected, pos)
 					continue
 				}
+				queued = append(queued, queuedSteer{message: message, position: pos})
+			}
+			a.mu.Unlock()
+
+			for _, item := range queued {
 				a.journalEvent("request_queued", map[string]any{
-					"message_preview": previewForJournal(message),
-					"queue_position":  pos,
+					"message_preview": previewForJournal(item.message),
+					"queue_position":  item.position,
 					"source":          "late_steer",
 				})
-				a.safeSendToProgram(ui.QueuedCountMsg(pos))
+			}
+			// Accepted leftovers need no intermediate count send: immediately
+			// after this callback, the shared foreground finalizer publishes the
+			// authoritative remaining count while dispatching the FIFO head. Keep
+			// rejection feedback because that input was not retained anywhere.
+			for _, pos := range rejected {
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusRetry,
+					Message: fmt.Sprintf("Queue full (%d waiting) — late follow-up not queued", pos),
+				})
 			}
 		},
 	}
@@ -328,7 +363,7 @@ func (p *tuiPresenter) ToolEnd(name string, args map[string]any, result tools.To
 
 func (p *tuiPresenter) ToolProgress(name string, elapsed time.Duration, currentStep string) {
 	if p.app.program != nil {
-		p.app.safeSendToProgram(ui.ToolProgressMsg{Name: name, Elapsed: elapsed, CurrentStep: currentStep})
+		p.app.safeSendToProgram(ui.ToolProgressMsg{Name: name, Elapsed: elapsed, Progress: -1, CurrentStep: currentStep})
 	}
 }
 

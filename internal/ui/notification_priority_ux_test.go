@@ -45,6 +45,31 @@ func TestToastHeightLimitPrioritizesCriticalAndReportsHiddenCount(t *testing.T) 
 	}
 }
 
+func TestToastNarrowHiddenCountNeverDisplacesCriticalSignal(t *testing.T) {
+	m := NewToastManager(DefaultStyles())
+	m.ShowError("Critical failure")
+	for _, message := range []string{"info one", "info two", "info three", "info four"} {
+		m.Show(ToastInfo, "", message, time.Minute)
+	}
+
+	for _, width := range []int{1, 3, 5, 6, 8, 12, 40} {
+		view := m.ViewLimit(width, 1)
+		plain := stripAnsi(view)
+		if got := lipgloss.Width(view); got > width {
+			t.Fatalf("width=%d rendered %d cells: %q", width, got, plain)
+		}
+		if !strings.Contains(plain, ToastIcons[ToastError]) {
+			t.Fatalf("width=%d hidden count displaced critical signal: %q", width, plain)
+		}
+	}
+	if plain := stripAnsi(m.ViewLimit(8, 1)); !strings.Contains(plain, "+4") {
+		t.Fatalf("compact width lost affordable hidden count: %q", plain)
+	}
+	if plain := stripAnsi(m.ViewLimit(40, 1)); !strings.Contains(plain, "+4 more") {
+		t.Fatalf("roomy width lost full hidden count: %q", plain)
+	}
+}
+
 func TestShortFrameKeepsCriticalToastAndBottomStatus(t *testing.T) {
 	m := NewModel()
 	m.currentModel = "glm-5.2"

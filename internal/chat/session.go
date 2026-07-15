@@ -12,6 +12,7 @@ import (
 
 	"gokin/internal/logging"
 	"gokin/internal/security"
+	"gokin/internal/skills"
 
 	"google.golang.org/genai"
 )
@@ -52,23 +53,49 @@ type Session struct {
 	// save goroutine while the app goroutine updates it, so all access MUST go
 	// through the locked accessors (GetSystemInstruction / SetSystemInstruction)
 	// — a direct field write from another package would race the save.
-	systemInstruction string
-	tokenCounts       []int // tokens per message
-	totalTokens       int   // cached total
-	version           int64 // version for optimistic concurrency control
-	onChange          ChangeHandler
-	scratchpad        string
-	toolCheckpoints   []SerializedToolCheckpoint // persisted tool checkpoint journal
-	mu                sync.RWMutex
+	systemInstruction       string
+	tokenCounts             []int // tokens per message
+	totalTokens             int   // cached total
+	version                 int64 // version for optimistic concurrency control
+	onChange                ChangeHandler
+	scratchpad              string
+	toolCheckpoints         []SerializedToolCheckpoint     // persisted tool checkpoint journal
+	invocationLedger        *skills.InvocationLedger       // exact latest rendered Skills, session-scoped
+	checkpointInvokedSkills map[string][]skills.Invocation // Skill snapshots for named rollback points
+	checkpointRawIndices    map[string]bool                // indices measured without synthetic Skill carry
+	mu                      sync.RWMutex
 }
 
 // NewSession creates a new chat session.
 func NewSession() *Session {
 	return &Session{
-		ID:        generateSessionID(),
-		StartTime: time.Now(),
-		History:   make([]*genai.Content, 0),
+		ID:                      generateSessionID(),
+		StartTime:               time.Now(),
+		History:                 make([]*genai.Content, 0),
+		invocationLedger:        skills.NewInvocationLedger(),
+		checkpointInvokedSkills: make(map[string][]skills.Invocation),
+		checkpointRawIndices:    make(map[string]bool),
 	}
+}
+
+// InvocationLedger returns the session-scoped Skill invocation ledger. The
+// pointer remains stable for the Session lifetime so a bound SkillTool keeps
+// writing into the same owner across resume/restore operations.
+func (s *Session) InvocationLedger() *skills.InvocationLedger {
+	s.mu.RLock()
+	ledger := s.invocationLedger
+	s.mu.RUnlock()
+	if ledger != nil {
+		return ledger
+	}
+
+	// Preserve zero-value Session compatibility for tests and embedders.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.invocationLedger == nil {
+		s.invocationLedger = skills.NewInvocationLedger()
+	}
+	return s.invocationLedger
 }
 
 // SetChangeHandler sets the callback for history changes.
@@ -166,51 +193,51 @@ func (s *Session) AddContent(content *genai.Content) {
 
 // SetHistory replaces the entire history and applies sliding window.
 func (s *Session) SetHistory(history []*genai.Content) {
+	s.SetHistoryWithSkillCarry(history, 0)
+}
+
+// SetHistoryWithSkillCarry replaces history and atomically reattaches any
+// active Skill snapshots missing from the retained raw messages. insertAt is a
+// preferred index in the supplied history (callers that just produced a
+// summary normally pass the slot immediately after it).
+func (s *Session) SetHistoryWithSkillCarry(history []*genai.Content, insertAt int) []*genai.Content {
 	s.mu.Lock()
 
 	oldCount := len(s.History)
-
-	// Apply sliding window if history exceeds max.
-	// System instruction is now passed via API parameter, not stored in history.
-	if len(history) > MaxMessages {
-		boundary := len(history) - MaxMessages
-		boundary = adjustBoundaryForToolPairs(history, boundary)
-		history = history[boundary:]
-	}
-
-	s.History = history
-	s.tokenCounts = make([]int, len(history)) // keep len(tokenCounts)==len(History)
+	committed := s.prepareHistoryWithSkillCarryLocked(history, insertAt)
+	s.History = committed
+	s.tokenCounts = make([]int, len(committed)) // keep len(tokenCounts)==len(History)
 	s.totalTokens = 0
 	s.version++
 	s.notifyChange(oldCount)
+	return cloneHistorySlice(committed)
 }
 
 // SetHistoryIfVersion atomically sets history only if the version matches.
 // Returns true if the update was applied, false if version mismatch.
 func (s *Session) SetHistoryIfVersion(history []*genai.Content, expectedVersion int64) bool {
+	_, committed := s.SetHistoryIfVersionWithSkillCarry(history, expectedVersion, 0)
+	return committed
+}
+
+// SetHistoryIfVersionWithSkillCarry is SetHistoryWithSkillCarry with optimistic
+// concurrency. It returns the exact committed slice for token accounting.
+func (s *Session) SetHistoryIfVersionWithSkillCarry(history []*genai.Content, expectedVersion int64, insertAt int) ([]*genai.Content, bool) {
 	s.mu.Lock()
 
 	if s.version != expectedVersion {
 		s.mu.Unlock()
-		return false
+		return nil, false
 	}
 
 	oldCount := len(s.History)
-
-	// Apply sliding window if history exceeds max.
-	// System instruction is now passed via API parameter, not stored in history.
-	if len(history) > MaxMessages {
-		boundary := len(history) - MaxMessages
-		boundary = adjustBoundaryForToolPairs(history, boundary)
-		history = history[boundary:]
-	}
-
-	s.History = history
-	s.tokenCounts = make([]int, len(history)) // keep len(tokenCounts)==len(History)
+	committed := s.prepareHistoryWithSkillCarryLocked(history, insertAt)
+	s.History = committed
+	s.tokenCounts = make([]int, len(committed)) // keep len(tokenCounts)==len(History)
 	s.totalTokens = 0
 	s.version++
 	s.notifyChange(oldCount)
-	return true
+	return cloneHistorySlice(committed), true
 }
 
 // GetVersion returns the current version of the session history.
@@ -248,9 +275,40 @@ func (s *Session) Clear() {
 	s.History = make([]*genai.Content, 0)
 	s.tokenCounts = make([]int, 0)
 	s.totalTokens = 0
+	if s.invocationLedger != nil {
+		s.invocationLedger.Clear()
+	}
+	// /clear establishes a new conversation root. Retaining an old checkpoint
+	// would let /restore silently resurrect both stale history indices and the
+	// Skills that were deliberately cleared.
+	s.Checkpoints = make(map[string]int)
+	s.checkpointInvokedSkills = make(map[string][]skills.Invocation)
+	s.checkpointRawIndices = make(map[string]bool)
 	s.version++
 
 	s.notifyChange(oldCount) // unlocks mu
+}
+
+func cloneSkillInvocations(invocations []skills.Invocation) []skills.Invocation {
+	if len(invocations) == 0 {
+		return nil
+	}
+	cloned := make([]skills.Invocation, len(invocations))
+	copy(cloned, invocations)
+	return cloned
+}
+
+// restoreSkillInvocations validates untrusted persisted entries through a
+// temporary ledger and then replaces the contents of the stable owner ledger.
+// An over-cap payload leaves the temporary ledger empty, so the destination is
+// still cleared instead of retaining Skills from a previously loaded session.
+func restoreSkillInvocations(destination *skills.InvocationLedger, invocations []skills.Invocation) error {
+	validated := skills.NewInvocationLedger()
+	validationErr := validated.Restore(invocations)
+	// Snapshot entries already passed every bound/hash check. Preserve the
+	// destination pointer held by the foreground SkillTool.
+	_ = destination.Restore(validated.SnapshotNewestFirst())
+	return validationErr
 }
 
 // MessageCount returns the number of messages in the session.
@@ -266,29 +324,191 @@ func (s *Session) MessageCount() int {
 // Simple sliding window: keep the last MaxMessages messages.
 // Caller MUST hold s.mu.Lock() before calling.
 func (s *Session) trimHistoryLocked() {
-	if len(s.History) <= MaxMessages {
-		return
-	}
-
-	boundary := len(s.History) - MaxMessages
-	boundary = adjustBoundaryForToolPairs(s.History, boundary)
-	s.History = s.History[boundary:]
-
-	// Align tokenCounts with trimmed History. Missing original counts
-	// (e.g. if AddContent was used without tokens) become 0 so the two
-	// slices always stay the same length.
-	newCounts := make([]int, len(s.History))
-	for i := range newCounts {
-		origIdx := boundary + i
-		if origIdx < len(s.tokenCounts) {
-			newCounts[i] = s.tokenCounts[origIdx]
-		}
-	}
+	previousHistory := s.History
+	previousCounts := s.tokenCounts
+	s.History = s.prepareHistoryWithSkillCarryLocked(s.History, 0)
+	newCounts := realignTokenCounts(previousHistory, previousCounts, s.History)
 	s.tokenCounts = newCounts
 	s.totalTokens = 0
 	for _, count := range s.tokenCounts {
 		s.totalTokens += count
 	}
+}
+
+// prepareHistoryWithSkillCarryLocked is the single destructive-history gate.
+// It first removes/rebuilds synthetic carry state, enforces the hard message
+// window without splitting retained tool pairs, then reserves at most one slot
+// for a missing active-Skill block. Caller must hold s.mu.
+func (s *Session) prepareHistoryWithSkillCarryLocked(history []*genai.Content, insertAt int) []*genai.Content {
+	invocations := []skills.Invocation(nil)
+	if s.invocationLedger != nil {
+		invocations = s.invocationLedger.SnapshotNewestFirst()
+	}
+
+	// Let the carry helper remove any stale block and interpret insertAt against
+	// the resulting raw history before we do anything else. This preserves exact
+	// placement after a summary even when KeepStart already contained the prior
+	// synthetic block.
+	committed := skills.ReattachInvocations(history, invocations, insertAt)
+	if len(committed) <= MaxMessages {
+		return committed
+	}
+
+	// Strip the just-rebuilt block before applying the hard raw-history window.
+	raw := skills.ReattachInvocations(committed, nil, 0)
+	raw, dropped := trimHistoryToLimit(raw, MaxMessages)
+	adjustedInsert := insertAt - dropped
+	if adjustedInsert < 0 {
+		adjustedInsert = 0
+	}
+	committed = skills.ReattachInvocations(raw, invocations, adjustedInsert)
+	if len(committed) <= MaxMessages {
+		return committed
+	}
+
+	// A carry block is one ordinary user message. Reserve its slot and repeat
+	// the raw-snapshot scan after trimming: the second trim may itself remove a
+	// previously-retained full Skill FunctionResponse.
+	raw, extraDropped := trimHistoryToLimit(raw, MaxMessages-1)
+	adjustedInsert -= extraDropped
+	if adjustedInsert < 0 {
+		adjustedInsert = 0
+	}
+	committed = skills.ReattachInvocations(raw, invocations, adjustedInsert)
+	if len(committed) > MaxMessages {
+		// Defensive only: ReattachInvocations is contractually one message. Keep
+		// the newest hard-bounded window if a future implementation regresses.
+		committed, _ = trimHistoryToLimit(committed, MaxMessages)
+	}
+	return committed
+}
+
+// trimHistoryToLimit returns a suffix no larger than limit and how many leading
+// messages were dropped. When retaining a whole pair would exceed the hard
+// limit, it keeps the requested boundary and removes only orphaned tool parts
+// instead of allowing adjustBoundaryForToolPairs to grow past the cap.
+func trimHistoryToLimit(history []*genai.Content, limit int) ([]*genai.Content, int) {
+	if limit < 0 {
+		limit = 0
+	}
+	if len(history) <= limit {
+		return history, 0
+	}
+	desired := len(history) - limit
+	boundary := adjustBoundaryForToolPairs(history, desired)
+	if boundary < desired {
+		boundary = desired
+	}
+	if boundary > len(history) {
+		boundary = len(history)
+	}
+	trimmed := pruneUnpairedToolParts(history[boundary:])
+	if len(trimmed) > limit {
+		// pruneUnpairedToolParts never grows the slice; retain this hard backstop
+		// for future changes and malformed histories.
+		extra := len(trimmed) - limit
+		boundary += extra
+		trimmed = pruneUnpairedToolParts(trimmed[extra:])
+	}
+	return trimmed, boundary
+}
+
+// pruneUnpairedToolParts balances duplicate IDs by count and drops only the
+// excess FunctionResponse parts. Unmatched FunctionCalls are retained because
+// the newest call may be pending while its executor response is still being
+// produced. Plain text and ID-less legacy parts remain untouched. It allocates
+// only when an orphaned response is present.
+func pruneUnpairedToolParts(history []*genai.Content) []*genai.Content {
+	callCounts := make(map[string]int)
+	responseCounts := make(map[string]int)
+	for _, content := range history {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part == nil {
+				continue
+			}
+			if call := part.FunctionCall; call != nil && call.ID != "" {
+				callCounts[call.ID]++
+			}
+			if response := part.FunctionResponse; response != nil && response.ID != "" {
+				responseCounts[response.ID]++
+			}
+		}
+	}
+	paired := make(map[string]int, len(callCounts)+len(responseCounts))
+	orphans := 0
+	for id, calls := range callCounts {
+		pairs := min(calls, responseCounts[id])
+		paired[id] = pairs
+		// An unmatched call may be the live tail of the current tool turn. It is
+		// safe to retain; deleting it would make the eventual response an orphan.
+	}
+	for id, responses := range responseCounts {
+		orphans += responses - paired[id]
+	}
+	if orphans == 0 {
+		return history
+	}
+
+	seenResponses := make(map[string]int, len(paired))
+	result := make([]*genai.Content, 0, len(history))
+	for _, content := range history {
+		if content == nil {
+			continue
+		}
+		parts := make([]*genai.Part, 0, len(content.Parts))
+		for _, part := range content.Parts {
+			if part == nil {
+				continue
+			}
+			keep := true
+			if response := part.FunctionResponse; response != nil && response.ID != "" {
+				keep = seenResponses[response.ID] < paired[response.ID]
+				seenResponses[response.ID]++
+			}
+			if keep {
+				parts = append(parts, part)
+			}
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		if len(parts) == len(content.Parts) {
+			result = append(result, content)
+		} else {
+			result = append(result, &genai.Content{Role: content.Role, Parts: parts})
+		}
+	}
+	return result
+}
+
+func realignTokenCounts(oldHistory []*genai.Content, oldCounts []int, newHistory []*genai.Content) []int {
+	positions := make(map[*genai.Content][]int, len(oldHistory))
+	for index, content := range oldHistory {
+		count := 0
+		if index < len(oldCounts) {
+			count = oldCounts[index]
+		}
+		positions[content] = append(positions[content], count)
+	}
+	used := make(map[*genai.Content]int, len(positions))
+	result := make([]int, len(newHistory))
+	for index, content := range newHistory {
+		cursor := used[content]
+		if counts := positions[content]; cursor < len(counts) {
+			result[index] = counts[cursor]
+			used[content] = cursor + 1
+		}
+	}
+	return result
+}
+
+func cloneHistorySlice(history []*genai.Content) []*genai.Content {
+	cloned := make([]*genai.Content, len(history))
+	copy(cloned, history)
+	return cloned
 }
 
 // TrimHistory manually triggers history trimming to max messages.
@@ -314,6 +534,7 @@ func (s *Session) AddContentWithTokens(content *genai.Content, tokens int) {
 	s.tokenCounts = append(s.tokenCounts, tokens)
 	s.totalTokens += tokens
 	s.version++
+	s.trimHistoryLocked()
 	s.notifyChange(oldCount) // unlocks s.mu
 }
 
@@ -367,10 +588,14 @@ func (s *Session) ReplaceWithSummary(upToIndex int, summary *genai.Content, summ
 	s.tokenCounts = make([]int, 0, 1+len(remainingTokens))
 	s.tokenCounts = append(s.tokenCounts, summaryTokens)
 	s.tokenCounts = append(s.tokenCounts, remainingTokens...)
+	preCarryHistory := s.History
+	preCarryCounts := s.tokenCounts
+	s.History = s.prepareHistoryWithSkillCarryLocked(s.History, 1)
+	s.tokenCounts = realignTokenCounts(preCarryHistory, preCarryCounts, s.History)
 
 	// Recalculate total
-	s.totalTokens = summaryTokens
-	for _, t := range remainingTokens {
+	s.totalTokens = 0
+	for _, t := range s.tokenCounts {
 		s.totalTokens += t
 	}
 	s.version++
@@ -391,6 +616,15 @@ func (s *Session) SetWorkDir(dir string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.WorkDir = dir
+}
+
+// GetWorkDir returns the session working directory under lock. Persistence and
+// resume code run concurrently with session setup/export paths and must not
+// read the exported field without synchronization.
+func (s *Session) GetWorkDir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.WorkDir
 }
 
 // SetProvider records the provider identifier the session was built
@@ -473,6 +707,15 @@ func (s *Session) GetState() *SessionState {
 		Scratchpad:        s.scratchpad,
 		SystemInstruction: s.systemInstruction,
 	}
+	if s.invocationLedger != nil {
+		state.InvokedSkills = s.invocationLedger.SnapshotNewestFirst()
+	}
+	if len(s.checkpointInvokedSkills) > 0 {
+		state.CheckpointInvokedSkills = make(map[string][]skills.Invocation, len(s.checkpointInvokedSkills))
+		for name, invocations := range s.checkpointInvokedSkills {
+			state.CheckpointInvokedSkills[name] = cloneSkillInvocations(invocations)
+		}
+	}
 	copy(state.TokenCounts, s.tokenCounts)
 
 	// Persist checkpoints
@@ -480,6 +723,14 @@ func (s *Session) GetState() *SessionState {
 		state.Checkpoints = make(map[string]int, len(s.Checkpoints))
 		for k, v := range s.Checkpoints {
 			state.Checkpoints[k] = v
+		}
+	}
+	if len(s.checkpointRawIndices) > 0 {
+		state.CheckpointRawIndices = make(map[string]bool, len(s.checkpointRawIndices))
+		for name, raw := range s.checkpointRawIndices {
+			if raw {
+				state.CheckpointRawIndices[name] = true
+			}
 		}
 	}
 
@@ -505,6 +756,9 @@ func (s *Session) GetState() *SessionState {
 
 // RestoreFromState restores the session from a saved state.
 func (s *Session) RestoreFromState(state *SessionState) error {
+	if state == nil {
+		return fmt.Errorf("cannot restore nil session state")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -538,6 +792,31 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.version = state.Version
 	s.scratchpad = state.Scratchpad
 	s.systemInstruction = state.SystemInstruction
+	if s.invocationLedger == nil {
+		s.invocationLedger = skills.NewInvocationLedger()
+	}
+	if err := restoreSkillInvocations(s.invocationLedger, state.InvokedSkills); err != nil {
+		// Restore publishes every valid bounded entry atomically and reports only
+		// rejected corrupt entries. Do not make an otherwise healthy session
+		// unresumable because one optional Skill snapshot was damaged.
+		logging.Warn("skipped invalid persisted skill invocations", "error", err)
+	}
+	preCarryHistory := s.History
+	preCarryCounts := s.tokenCounts
+	s.History = s.prepareHistoryWithSkillCarryLocked(s.History, 0)
+	s.tokenCounts = realignTokenCounts(preCarryHistory, preCarryCounts, s.History)
+	s.totalTokens = 0
+	for _, count := range s.tokenCounts {
+		s.totalTokens += count
+	}
+	s.checkpointInvokedSkills = make(map[string][]skills.Invocation, len(state.CheckpointInvokedSkills))
+	for name, invocations := range state.CheckpointInvokedSkills {
+		validated := skills.NewInvocationLedger()
+		if err := restoreSkillInvocations(validated, invocations); err != nil {
+			logging.Warn("skipped invalid checkpoint skill invocations", "checkpoint", name, "error", err)
+		}
+		s.checkpointInvokedSkills[name] = validated.SnapshotNewestFirst()
+	}
 
 	// Restore checkpoints — ALWAYS replace (including clearing when the restored
 	// state has none), so a prior session's checkpoints don't survive across
@@ -547,6 +826,12 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.Checkpoints = make(map[string]int, len(state.Checkpoints))
 	for k, v := range state.Checkpoints {
 		s.Checkpoints[k] = v
+	}
+	s.checkpointRawIndices = make(map[string]bool, len(state.CheckpointRawIndices))
+	for name, raw := range state.CheckpointRawIndices {
+		if raw {
+			s.checkpointRawIndices[name] = true
+		}
 	}
 
 	// Restore branches (recursive) — always replace for the same reason.
@@ -617,14 +902,32 @@ func (s *Session) Fork(name string) *Session {
 	copy(tokenCountsCopy, s.tokenCounts)
 
 	branch := &Session{
-		ID:                generateSessionID() + "-" + name,
-		StartTime:         time.Now(),
-		WorkDir:           s.WorkDir,
-		History:           historyCopy,
-		tokenCounts:       tokenCountsCopy,
-		totalTokens:       s.totalTokens,
-		scratchpad:        s.scratchpad,
-		systemInstruction: s.systemInstruction,
+		ID:                      generateSessionID() + "-" + name,
+		StartTime:               time.Now(),
+		WorkDir:                 s.WorkDir,
+		History:                 historyCopy,
+		tokenCounts:             tokenCountsCopy,
+		totalTokens:             s.totalTokens,
+		scratchpad:              s.scratchpad,
+		systemInstruction:       s.systemInstruction,
+		invocationLedger:        skills.NewInvocationLedger(),
+		checkpointInvokedSkills: make(map[string][]skills.Invocation, len(s.checkpointInvokedSkills)),
+		checkpointRawIndices:    make(map[string]bool, len(s.checkpointRawIndices)),
+		Checkpoints:             make(map[string]int, len(s.Checkpoints)),
+	}
+	if s.invocationLedger != nil {
+		_ = branch.invocationLedger.Restore(s.invocationLedger.SnapshotNewestFirst())
+	}
+	for checkpoint, invocations := range s.checkpointInvokedSkills {
+		branch.checkpointInvokedSkills[checkpoint] = cloneSkillInvocations(invocations)
+	}
+	for checkpoint, index := range s.Checkpoints {
+		branch.Checkpoints[checkpoint] = index
+	}
+	for checkpoint, raw := range s.checkpointRawIndices {
+		if raw {
+			branch.checkpointRawIndices[checkpoint] = true
+		}
 	}
 
 	s.Branches[name] = branch
@@ -669,7 +972,23 @@ func (s *Session) SaveCheckpoint(name string) {
 	if s.Checkpoints == nil {
 		s.Checkpoints = make(map[string]int)
 	}
-	s.Checkpoints[name] = len(s.History)
+	// Synthetic active-skill carry can appear or disappear before this boundary
+	// when a Skill is updated. Store the checkpoint against stable raw history so
+	// later carry rebuilds cannot shift which real message the index denotes.
+	rawHistory := skills.ReattachInvocations(s.History, nil, 0)
+	s.Checkpoints[name] = len(rawHistory)
+	if s.checkpointRawIndices == nil {
+		s.checkpointRawIndices = make(map[string]bool)
+	}
+	s.checkpointRawIndices[name] = true
+	if s.checkpointInvokedSkills == nil {
+		s.checkpointInvokedSkills = make(map[string][]skills.Invocation)
+	}
+	if s.invocationLedger != nil {
+		s.checkpointInvokedSkills[name] = s.invocationLedger.SnapshotNewestFirst()
+	} else {
+		s.checkpointInvokedSkills[name] = nil
+	}
 }
 
 // RestoreCheckpoint truncates the history to the saved checkpoint index.
@@ -685,37 +1004,73 @@ func (s *Session) RestoreCheckpoint(name string) bool {
 	if !ok {
 		return false
 	}
-
-	// Truncate history to checkpoint index, then remove any orphaned tool responses
-	if idx < len(s.History) {
-		s.History = s.History[:idx]
-		s.History = removeOrphanedToolParts(s.History)
+	restoreBase := s.History
+	if s.checkpointRawIndices[name] {
+		restoreBase = skills.ReattachInvocations(s.History, nil, 0)
+	}
+	if idx < 0 || idx > len(restoreBase) {
+		// Checkpoint indices come from persisted state and are therefore
+		// untrusted. Reject before touching either history or active Skills.
+		delete(s.Checkpoints, name)
+		delete(s.checkpointInvokedSkills, name)
+		delete(s.checkpointRawIndices, name)
+		return false
+	}
+	if invocations, exists := s.checkpointInvokedSkills[name]; exists {
+		if s.invocationLedger == nil {
+			s.invocationLedger = skills.NewInvocationLedger()
+		}
+		if err := restoreSkillInvocations(s.invocationLedger, invocations); err != nil {
+			logging.Warn("skipped invalid checkpoint skill invocations during restore", "checkpoint", name, "error", err)
+		}
+	} else if s.invocationLedger != nil {
+		// Legacy checkpoints have no Skill snapshot. Keeping today's invocations
+		// would falsely carry workflows loaded after the rollback point; fail
+		// closed to an empty active set.
+		s.invocationLedger.Clear()
 	}
 
-	// Align token counts with history length (pad with 0 if shorter,
-	// truncate if longer) so tokenCounts always matches History.
-	newLen := len(s.History)
-	if newLen < len(s.tokenCounts) {
-		s.tokenCounts = s.tokenCounts[:newLen]
-	} else if newLen > len(s.tokenCounts) {
-		padded := make([]int, newLen)
-		copy(padded, s.tokenCounts)
-		s.tokenCounts = padded
+	// Truncate the checkpoint's index basis, then remove any orphaned responses.
+	// For new checkpoints restoreBase excludes synthetic carry; legacy persisted
+	// checkpoints retain their historical full-history indexing semantics.
+	oldHistory := s.History
+	oldCounts := s.tokenCounts
+	s.History = restoreBase[:idx]
+	s.History = removeOrphanedToolParts(s.History)
+	s.tokenCounts = realignTokenCounts(oldHistory, oldCounts, s.History)
+
+	rawNewLen := len(skills.ReattachInvocations(s.History, nil, 0))
+	legacyNewLen := len(s.History)
+
+	// Keep cached token state aligned before rebuilding carry below.
+	s.totalTokens = 0
+	for _, count := range s.tokenCounts {
+		s.totalTokens += count
 	}
+	preCarryHistory := s.History
+	preCarryCounts := s.tokenCounts
+	s.History = s.prepareHistoryWithSkillCarryLocked(s.History, 0)
+	s.tokenCounts = realignTokenCounts(preCarryHistory, preCarryCounts, s.History)
 	s.totalTokens = 0
 	for _, count := range s.tokenCounts {
 		s.totalTokens += count
 	}
 
 	// Remove any checkpoints that referenced indices beyond the new length.
-	// Compare against newLen (the post-orphan-removal length), NOT the original
-	// checkpoint index idx: removeOrphanedToolParts above can shorten History to
-	// newLen < idx, so a checkpoint in (newLen, idx] — including the restore
+	// Compare against the post-orphan-removal length in each checkpoint's own
+	// index basis, NOT the original index idx. Removal can shorten History below
+	// idx, so a checkpoint in (newLen, idx] — including the restore
 	// target itself — would otherwise survive pointing past len(History), making
 	// a later RestoreCheckpoint to it a silent no-op that still returns true.
 	for cpName, cpIdx := range s.Checkpoints {
-		if cpIdx > newLen {
+		limit := legacyNewLen
+		if s.checkpointRawIndices[cpName] {
+			limit = rawNewLen
+		}
+		if cpIdx > limit {
 			delete(s.Checkpoints, cpName)
+			delete(s.checkpointInvokedSkills, cpName)
+			delete(s.checkpointRawIndices, cpName)
 		}
 	}
 

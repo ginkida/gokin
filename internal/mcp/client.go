@@ -80,7 +80,7 @@ func NewClient(ctx context.Context, cfg *ServerConfig) (*Client, error) {
 
 	switch cfg.Transport {
 	case "stdio":
-		transport, err = NewStdioTransport(cfg.Command, cfg.Args, cfg.Env)
+		transport, err = NewStdioTransportWithWorkDir(cfg.Command, cfg.Args, cfg.Env, cfg.WorkDir)
 	case "http":
 		transport, err = NewHTTPTransport(ctx, cfg.URL, cfg.Headers, cfg.Timeout)
 	default:
@@ -204,7 +204,7 @@ func (c *Client) reconnect() bool {
 
 	switch cfg.Transport {
 	case "stdio":
-		transport, err = NewStdioTransport(cfg.Command, cfg.Args, cfg.Env)
+		transport, err = NewStdioTransportWithWorkDir(cfg.Command, cfg.Args, cfg.Env, cfg.WorkDir)
 	case "http":
 		transport, err = NewHTTPTransport(c.ctx, cfg.URL, cfg.Headers, cfg.Timeout)
 	default:

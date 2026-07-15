@@ -48,6 +48,10 @@ func TestUnavailableQuestionResponsePreservesAnswerUntilCancel(t *testing.T) {
 	if view := stripAnsi(m.renderQuestionPrompt()); !strings.Contains(view, "Unavailable: cannot submit answer") || !strings.Contains(view, "Esc cancels") || strings.Contains(view, "Enter Confirm") {
 		t.Fatalf("question prompt lacks durable unavailable feedback:\n%s", view)
 	}
+	assertShortcutHints(t, m,
+		[]string{"esc Cancel", "↑↓ Navigate"},
+		[]string{"Enter Confirm", "PgUp/PgDn Page"},
+	)
 
 	_ = m.handleQuestionPromptKeys(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.state != StateInput || m.questionRequest != nil || cancelled != 1 {
@@ -91,6 +95,40 @@ func TestUnavailablePlanResponseKeepsDecisionModalUntilCancel(t *testing.T) {
 	_ = m.handlePlanApprovalKeys(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.state != StateInput || m.planRequest != nil || cancelled != 1 {
 		t.Fatalf("Esc did not recover unavailable plan prompt: state=%v request=%v cancelled=%d", m.state, m.planRequest, cancelled)
+	}
+}
+
+func TestUnavailableOverflowDecisionStillAdvertisesInspectionPaging(t *testing.T) {
+	question := NewModel()
+	question.width, question.height = 72, 12
+	question.state = StateQuestionPrompt
+	question.questionRequest = &QuestionRequestMsg{Question: "Choose"}
+	for i := 0; i < 12; i++ {
+		question.questionRequest.Options = append(question.questionRequest.Options, fmt.Sprintf("Option %d", i+1))
+	}
+	_ = question.handleQuestionPromptKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	assertShortcutHints(t, question,
+		[]string{"esc Cancel", "↑↓ Navigate", "PgUp/PgDn Page"},
+		[]string{"Enter Confirm"},
+	)
+	if view := stripAnsi(question.renderQuestionPrompt()); !strings.Contains(view, "PgUp/PgDn Page") {
+		t.Fatalf("unavailable overflowing question hid inspection paging:\n%s", view)
+	}
+
+	plan := NewModel()
+	plan.width, plan.height = 72, 12
+	plan.state = StatePlanApproval
+	plan.planRequest = &PlanApprovalRequestMsg{Title: "Deploy"}
+	for i := 0; i < 12; i++ {
+		plan.planRequest.Steps = append(plan.planRequest.Steps, PlanStepInfo{ID: i + 1, Title: fmt.Sprintf("Step %d", i+1)})
+	}
+	_ = plan.handlePlanApprovalKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	assertShortcutHints(t, plan,
+		[]string{"esc Cancel", "PgUp/PgDn Steps"},
+		[]string{"y Approve", "Enter Confirm"},
+	)
+	if view := stripAnsi(plan.renderPlanApproval()); !strings.Contains(view, "PgUp/PgDn Steps") {
+		t.Fatalf("unavailable overflowing plan hid inspection paging:\n%s", view)
 	}
 }
 

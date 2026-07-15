@@ -96,6 +96,35 @@ func TestPaste_EndToEndViaUpdate(t *testing.T) {
 	}
 }
 
+func TestSmallMultilinePasteGrowsComposerAndDeletionShrinksIt(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), ".")
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune("one\ntwo\nthree")})
+	if got := m.Height(); got != 3 {
+		t.Fatalf("small multiline paste height=%d, want 3", got)
+	}
+
+	m.textarea.SetValue("one\n")
+	m.textarea.CursorEnd()
+	m.textarea.SetHeight(2)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if got := m.Height(); got != 1 {
+		t.Fatalf("deleting the final newline left stale composer height=%d", got)
+	}
+}
+
+func TestComposerHeightAdaptsToShortViewportAndRestores(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), ".")
+	m.textarea.SetValue("one\ntwo\nthree\nfour\nfive\nsix")
+	m.SetViewportHeight(6)
+	if got := m.Height(); got != 3 {
+		t.Fatalf("short viewport composer height=%d, want 3", got)
+	}
+	m.SetViewportHeight(20)
+	if got := m.Height(); got != 6 {
+		t.Fatalf("roomy viewport did not restore content height: got %d, want 6", got)
+	}
+}
+
 // TestPasteReset_ClearsStore: Reset drops the collapsed-paste content so the
 // next compose starts fresh (chips renumber from #1).
 func TestPasteReset_ClearsStore(t *testing.T) {

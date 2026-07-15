@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestLastNNonEmptyLines_EmptyInput(t *testing.T) {
@@ -140,6 +142,79 @@ func TestToolProgressBar_CancellableShowsEscHint(t *testing.T) {
 	out := bar.View(100)
 	if !strings.Contains(out, "Esc cancel") {
 		t.Fatalf("expected cancel hint, got:\n%s", out)
+	}
+}
+
+func TestToolProgressHeartbeatStartsIndeterminate(t *testing.T) {
+	msg, ok := ToolProgress("download", 2*time.Second)().(ToolProgressMsg)
+	if !ok {
+		t.Fatal("ToolProgress command returned the wrong message type")
+	}
+	if msg.Progress != -1 {
+		t.Fatalf("heartbeat progress=%v, want indeterminate -1", msg.Progress)
+	}
+
+	bar := NewToolProgressBarModel(DefaultStyles())
+	bar.Update(msg)
+	if plain := stripAnsi(bar.View(60)); strings.Contains(plain, "0%") {
+		t.Fatalf("indeterminate heartbeat rendered as a stuck 0%% operation: %q", plain)
+	}
+}
+
+func TestToolProgressDetailedUpdatePreservesElapsedHeartbeat(t *testing.T) {
+	bar := NewToolProgressBarModel(DefaultStyles())
+	bar.Update(ToolProgressMsg{Name: "download", Elapsed: 7 * time.Second, Progress: -1})
+	bar.Update(ToolProgressMsg{Name: "download", Progress: .5, CurrentStep: "halfway"})
+	if bar.elapsed != 7*time.Second {
+		t.Fatalf("detail update reset elapsed heartbeat to %v", bar.elapsed)
+	}
+	if plain := stripAnsi(bar.View(80)); !strings.Contains(plain, "7.0s") {
+		t.Fatalf("elapsed timer jumped after detail update: %q", plain)
+	}
+
+	bar.Update(ToolProgressMsg{Name: "upload", Progress: .1})
+	if bar.elapsed != 0 {
+		t.Fatalf("new named operation inherited prior elapsed time: %v", bar.elapsed)
+	}
+}
+
+func TestToolProgressFitsTinyHeightsAndKeepsCancel(t *testing.T) {
+	bar := NewToolProgressBarModel(DefaultStyles())
+	bar.Update(ToolProgressMsg{
+		Name:        "deploy",
+		Progress:    .4,
+		Cancellable: true,
+		CurrentStep: "preparing\nuploading\nverifying\nrestarting\nchecking health",
+	})
+
+	for height := 1; height <= 12; height++ {
+		view := bar.View(52, height)
+		if got, limit := lipgloss.Height(view), toolProgressHeightBudget(height); got > limit {
+			t.Fatalf("height=%d rendered %d rows, want <=%d:\n%s", height, got, limit, stripAnsi(view))
+		}
+		if !strings.Contains(stripAnsi(view), "Esc cancel") {
+			t.Fatalf("height=%d lost cancellation action:\n%s", height, stripAnsi(view))
+		}
+	}
+}
+
+func TestToolProgressSanitizesRuntimeLabelsAndHistory(t *testing.T) {
+	bar := NewToolProgressBarModel(DefaultStyles())
+	bar.Update(ToolProgressMsg{
+		Name:        "bash\nforged\x1b]0;title\a",
+		Progress:    -1,
+		CurrentStep: "safe\x1b[2J\nnext\x1b]0;bad\a",
+	})
+
+	view := bar.View(80)
+	plain := stripAnsi(view)
+	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "\x1b]0;") {
+		t.Fatalf("runtime control sequence reached terminal output: %q", view)
+	}
+	for _, want := range []string{"Bash forged", "safe", "next"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("sanitized progress lost %q:\n%s", want, plain)
+		}
 	}
 }
 

@@ -2,6 +2,9 @@ package context
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -45,6 +48,22 @@ func (c *cancelAwareSummarizer) Summarize(ctx context.Context, history []*genai.
 	<-ctx.Done()
 	close(c.canceled)
 	return "", ctx.Err()
+}
+
+type blockedSummarySummarizer struct {
+	started chan struct{}
+	release chan struct{}
+	summary string
+}
+
+func (b *blockedSummarySummarizer) Summarize(ctx context.Context, history []*genai.Content, prompt string) (string, error) {
+	close(b.started)
+	select {
+	case <-b.release:
+		return b.summary, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 func longHistory() []*genai.Content {
@@ -132,6 +151,105 @@ func TestSessionMemoryManager_CloseCancelsInFlightLLMExtraction(t *testing.T) {
 	case <-summarizer.canceled:
 	default:
 		t.Fatal("Close returned before canceling the in-flight summarizer")
+	}
+}
+
+func TestSessionMemoryManager_StaleLLMSuccessDoesNotOverwriteLatestExtraction(t *testing.T) {
+	workDir := t.TempDir()
+	mgr := NewSessionMemoryManager(workDir, DefaultSessionMemoryConfig())
+	summarizer := &blockedSummarySummarizer{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		summary: "obsolete LLM summary",
+	}
+	mgr.SetSummarizer(summarizer)
+
+	oldHistory := append(longHistory(), userMsg("Investigate the old authentication task only"))
+	mgr.Extract(oldHistory, 20_000)
+	mgr.Extract(oldHistory, 20_001)
+	mgr.Extract(oldHistory, 20_002)
+	select {
+	case <-summarizer.started:
+	case <-time.After(time.Second):
+		t.Fatal("LLM extraction did not start")
+	}
+
+	latestTask := "Preserve this newest heuristic session memory after async completion"
+	var updates int32
+	mgr.SetOnUpdate(func() { atomic.AddInt32(&updates, 1) })
+	mgr.Extract(append(longHistory(), userMsg(latestTask)), 20_003)
+	updatesBeforeLLM := atomic.LoadInt32(&updates)
+	close(summarizer.release)
+	mgr.Wait()
+
+	if got := mgr.GetContent(); !strings.Contains(got, latestTask) || strings.Contains(got, summarizer.summary) {
+		t.Fatalf("stale successful LLM overwrote latest extraction:\n%s", got)
+	}
+	if got := atomic.LoadInt32(&updates); got != updatesBeforeLLM {
+		t.Fatalf("discarded stale LLM success fired onUpdate: before=%d after=%d", updatesBeforeLLM, got)
+	}
+	disk, err := os.ReadFile(filepath.Join(workDir, ".gokin", ".session-memory.md"))
+	if err != nil {
+		t.Fatalf("read persisted session memory: %v", err)
+	}
+	if got := string(disk); !strings.Contains(got, latestTask) || strings.Contains(got, summarizer.summary) {
+		t.Fatalf("stale successful LLM reached disk:\n%s", got)
+	}
+}
+
+func TestSessionMemoryManager_CloseDoesNotLetStaleLLMFallbackOverwriteLatestExtraction(t *testing.T) {
+	workDir := t.TempDir()
+	mgr := NewSessionMemoryManager(workDir, DefaultSessionMemoryConfig())
+	summarizer := &cancelAwareSummarizer{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	mgr.SetSummarizer(summarizer)
+
+	oldTask := "Investigate the legacy authentication path and do not touch the new task"
+	latestTask := "Implement the latest shutdown-safe session memory lifecycle regression"
+	withTask := func(task string) []*genai.Content {
+		history := longHistory()
+		return append(history, userMsg(task), modelMsg("Acknowledged; working on that task now."))
+	}
+
+	oldHistory := withTask(oldTask)
+	mgr.Extract(oldHistory, 20_000)
+	mgr.Extract(oldHistory, 20_001)
+	mgr.Extract(oldHistory, 20_002) // every third extraction starts the blocked LLM call
+
+	select {
+	case <-summarizer.started:
+	case <-time.After(time.Second):
+		t.Fatal("LLM extraction did not start")
+	}
+
+	var updates int32
+	mgr.SetOnUpdate(func() { atomic.AddInt32(&updates, 1) })
+	mgr.Extract(withTask(latestTask), 20_003) // newer heuristic while the old LLM is blocked
+	if got := mgr.GetContent(); !strings.Contains(got, latestTask) {
+		t.Fatalf("newer heuristic extraction did not commit before shutdown:\n%s", got)
+	}
+	updatesBeforeClose := atomic.LoadInt32(&updates)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := mgr.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if got := mgr.GetContent(); !strings.Contains(got, latestTask) || strings.Contains(got, oldTask) {
+		t.Fatalf("stale canceled LLM fallback overwrote the latest extraction:\n%s", got)
+	}
+	if got := atomic.LoadInt32(&updates); got != updatesBeforeClose {
+		t.Fatalf("discarded stale LLM result fired onUpdate: before=%d after=%d", updatesBeforeClose, got)
+	}
+	disk, err := os.ReadFile(filepath.Join(workDir, ".gokin", ".session-memory.md"))
+	if err != nil {
+		t.Fatalf("read persisted session memory: %v", err)
+	}
+	if got := string(disk); !strings.Contains(got, latestTask) || strings.Contains(got, oldTask) {
+		t.Fatalf("shutdown persisted stale session memory:\n%s", got)
 	}
 }
 

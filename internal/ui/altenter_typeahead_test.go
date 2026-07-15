@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -51,5 +52,63 @@ func TestAltEnterInStateInputInsertsNewline(t *testing.T) {
 	}
 	if got, want := m.input.textarea.Value(), "hello\n"; got != want {
 		t.Fatalf("StateInput Alt+Enter raw input = %q, want %q", got, want)
+	}
+}
+
+func TestAltEnterDismissesAutocompleteWithoutAcceptingIt(t *testing.T) {
+	tests := []struct {
+		name       string
+		typeID     SuggestionType
+		configure  func(*InputModel)
+		unexpected string
+	}{
+		{
+			name:   "command",
+			typeID: SuggestionCommand,
+			configure: func(input *InputModel) {
+				input.suggestions = []CommandInfo{{Name: "help"}}
+			},
+			unexpected: "/help ",
+		},
+		{
+			name:   "argument",
+			typeID: SuggestionArgument,
+			configure: func(input *InputModel) {
+				input.argSuggestions = []string{"--force"}
+			},
+			unexpected: "--force",
+		},
+		{
+			name:   "file",
+			typeID: SuggestionFile,
+			configure: func(input *InputModel) {
+				input.fileSuggestions = []string{"/workspace/main.go"}
+			},
+			unexpected: "main.go",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTypeAheadModel(t)
+			m.state = StateInput
+			m.input.textarea.SetValue("draft")
+			m.input.textarea.CursorEnd()
+			m.input.showSuggestions = true
+			m.input.suggestionType = tt.typeID
+			tt.configure(&m.input)
+
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+			got := updated.(Model)
+			if value := got.input.textarea.Value(); value != "draft\n" {
+				t.Fatalf("Alt+Enter changed draft to %q, want one newline", value)
+			}
+			if got.input.showSuggestions || len(got.input.suggestions) != 0 || len(got.input.argSuggestions) != 0 || len(got.input.fileSuggestions) != 0 {
+				t.Fatalf("autocomplete survived newline: %+v", got.input)
+			}
+			if strings.Contains(got.input.textarea.Value(), tt.unexpected) {
+				t.Fatalf("Alt+Enter accepted %q into draft: %q", tt.unexpected, got.input.textarea.Value())
+			}
+		})
 	}
 }

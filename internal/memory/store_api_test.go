@@ -76,8 +76,9 @@ func TestRecordAccess_ProjectEntry(t *testing.T) {
 
 	before := e.AccessCount
 	store.RecordAccess(e.ID)
-	if e.AccessCount != before+1 {
-		t.Errorf("AccessCount = %d, want %d", e.AccessCount, before+1)
+	got, _ := store.GetByID(e.ID)
+	if got.AccessCount != before+1 {
+		t.Errorf("AccessCount = %d, want %d", got.AccessCount, before+1)
 	}
 }
 
@@ -88,8 +89,9 @@ func TestRecordAccess_GlobalEntry(t *testing.T) {
 
 	before := e.AccessCount
 	store.RecordAccess(e.ID)
-	if e.AccessCount != before+1 {
-		t.Errorf("AccessCount = %d, want %d", e.AccessCount, before+1)
+	got, _ := store.GetByID(e.ID)
+	if got.AccessCount != before+1 {
+		t.Errorf("AccessCount = %d, want %d", got.AccessCount, before+1)
 	}
 }
 
@@ -110,8 +112,9 @@ func TestRecordFeedback_Success(t *testing.T) {
 	if !ok {
 		t.Error("RecordFeedback should return true for existing entry")
 	}
-	if e.SuccessCount != 1 {
-		t.Errorf("SuccessCount = %d, want 1", e.SuccessCount)
+	got, _ := store.GetByID(e.ID)
+	if got.SuccessCount != 1 {
+		t.Errorf("SuccessCount = %d, want 1", got.SuccessCount)
 	}
 }
 
@@ -124,8 +127,9 @@ func TestRecordFeedback_Failure(t *testing.T) {
 	if !ok {
 		t.Error("RecordFeedback should return true for existing entry")
 	}
-	if e.FailureCount != 1 {
-		t.Errorf("FailureCount = %d, want 1", e.FailureCount)
+	got, _ := store.GetByID(e.ID)
+	if got.FailureCount != 1 {
+		t.Errorf("FailureCount = %d, want 1", got.FailureCount)
 	}
 }
 

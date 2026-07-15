@@ -140,6 +140,51 @@ func TestWelcomePanel_ShowsProjectNameWithoutWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestWelcomePanelDescribesPartialSafetyModesHonestly(t *testing.T) {
+	tests := []struct {
+		name      string
+		perms     bool
+		sandbox   bool
+		want      []string
+		notWanted string
+	}{
+		{
+			name:      "prompts off only",
+			perms:     false,
+			sandbox:   true,
+			want:      []string{"no prompts", "bash remains sandboxed"},
+			notWanted: "agent runs everything",
+		},
+		{
+			name:      "sandbox off only",
+			perms:     true,
+			sandbox:   false,
+			want:      []string{"sandbox off", "prompts remain", "bash runs unrestricted"},
+			notWanted: "no prompts",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Model{
+				width:              100,
+				height:             24,
+				permissionsEnabled: tt.perms,
+				sandboxEnabled:     tt.sandbox,
+			}
+			plain := ansi.Strip(m.renderWelcomePanel())
+			for _, want := range tt.want {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("partial safety mode missing %q:\n%s", want, plain)
+				}
+			}
+			if strings.Contains(plain, tt.notWanted) {
+				t.Fatalf("partial safety mode falsely claims %q:\n%s", tt.notWanted, plain)
+			}
+		})
+	}
+}
+
 func TestPaletteCompactModeIsDiscoverableWithoutUnsafeShortcut(t *testing.T) {
 	m := NewModel()
 	m.RegisterPaletteActions()

@@ -9,7 +9,7 @@ import (
 	"gokin/internal/config"
 )
 
-func TestApplyModelSelectionRollsBackWhenClientRebuildFails(t *testing.T) {
+func TestApplyModelSelectionPreservesCurrentConfigWhenClientRebuildFails(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg := config.DefaultConfig()
 	oldModel := cfg.Model
@@ -25,8 +25,8 @@ func TestApplyModelSelectionRollsBackWhenClientRebuildFails(t *testing.T) {
 	if app.config.Model.Name != oldModel.Name || strings.Contains(app.config.Model.Provider, "does-not-exist") {
 		t.Fatalf("app config retained failed selection: got=%+v previous=%+v", app.config.Model, oldModel)
 	}
-	if !strings.Contains(result.Message, "previous model restored") {
-		t.Fatalf("rollback result lacks explanation: %q", result.Message)
+	if !strings.Contains(result.Message, "current model kept") {
+		t.Fatalf("failed switch result lacks explanation: %q", result.Message)
 	}
 }
 

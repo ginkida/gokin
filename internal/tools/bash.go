@@ -158,15 +158,32 @@ type BashTool struct {
 	workspaceRoot             string
 	workspaceBoundaryEnabled  bool
 	managedWorkspaceApplyBack bool
+	backgroundAllowed         bool
+
+	// executionGate serializes the persistent shell session while still allowing
+	// a queued invocation to honor context cancellation. Each invocation runs on
+	// an immutable policy/session snapshot, so policy toggles do not have to hold
+	// a write lock against a long-running command (which can deadlock with UI
+	// progress callbacks) and cannot change the mode of an in-flight command.
+	executionOnce sync.Once
+	executionGate chan struct{}
+
+	// policyMu protects the live policy used for future invocations. The
+	// monotonically increasing revision prevents an old execution from committing
+	// its resulting cwd after a concurrent policy/workspace change.
+	policyMu       sync.RWMutex
+	policyRevision uint64
 }
 
 // NewBashTool creates a new BashTool instance.
 func NewBashTool(workDir string) *BashTool {
 	return &BashTool{
-		workDir:        workDir,
-		session:        NewBashSession(workDir),
-		timeout:        DefaultBashTimeout, // Set default timeout
-		sandboxEnabled: false,              // Sandbox disabled by default (requires root)
+		workDir:           workDir,
+		session:           NewBashSession(workDir),
+		timeout:           DefaultBashTimeout, // Set default timeout
+		sandboxEnabled:    false,              // Sandbox disabled by default (requires root)
+		backgroundAllowed: true,
+		policyRevision:    1,
 	}
 }
 
@@ -206,24 +223,56 @@ func buildSafeEnv() []string {
 
 // SetTimeout sets the timeout for bash commands.
 func (t *BashTool) SetTimeout(timeout time.Duration) {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	if t.timeout != timeout {
+		t.policyRevision++
+	}
 	t.timeout = timeout
 }
 
 // SetTaskManager sets the task manager for background execution.
 func (t *BashTool) SetTaskManager(manager *tasks.Manager) {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	if t.taskManager != manager {
+		t.policyRevision++
+	}
 	t.taskManager = manager
+}
+
+// SetBackgroundAllowed controls whether this tool may detach commands from the
+// owning turn. Headless one-shot execution disables it so a successful final
+// result cannot race an unfinished command that is cancelled at process exit.
+func (t *BashTool) SetBackgroundAllowed(allowed bool) {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	if t.backgroundAllowed != allowed {
+		t.policyRevision++
+	}
+	t.backgroundAllowed = allowed
 }
 
 // SetSandboxEnabled enables or disables sandbox mode.
 // When enabled, commands run in a Linux namespace sandbox (requires root).
 // When disabled, commands run directly without isolation.
 func (t *BashTool) SetSandboxEnabled(enabled bool) {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	if t.sandboxEnabled != enabled {
+		t.policyRevision++
+	}
 	t.sandboxEnabled = enabled
 }
 
 // SetUnrestrictedMode enables or disables unrestricted mode.
 // When enabled (both sandbox and permissions are off), command validation is skipped.
 func (t *BashTool) SetUnrestrictedMode(enabled bool) {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	if t.unrestrictedMode != enabled {
+		t.policyRevision++
+	}
 	t.unrestrictedMode = enabled
 }
 
@@ -231,14 +280,27 @@ func (t *BashTool) SetUnrestrictedMode(enabled bool) {
 // the provided workspace. It does not fully sandbox commands, but prevents the
 // session from drifting outside the repo across turns.
 func (t *BashTool) SetWorkspaceBoundary(root string) {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	t.setWorkspaceBoundaryLocked(root)
+}
+
+// setWorkspaceBoundaryLocked updates the boundary while policyMu is held.
+func (t *BashTool) setWorkspaceBoundaryLocked(root string) {
 	root = strings.TrimSpace(root)
 	if root == "" {
+		if t.workspaceRoot != "" || t.workspaceBoundaryEnabled {
+			t.policyRevision++
+		}
 		t.workspaceRoot = ""
 		t.workspaceBoundaryEnabled = false
 		return
 	}
 
 	cleanRoot := filepath.Clean(root)
+	if t.workspaceRoot != cleanRoot || !t.workspaceBoundaryEnabled {
+		t.policyRevision++
+	}
 	t.workspaceRoot = cleanRoot
 	t.workspaceBoundaryEnabled = true
 	if !t.isWithinWorkspace(t.session.WorkDir()) {
@@ -250,13 +312,20 @@ func (t *BashTool) SetWorkspaceBoundary(root string) {
 // isolated apply-back workspaces. Background tasks are disabled and commands
 // that mutate git history are blocked because they cannot be replayed safely.
 func (t *BashTool) EnableManagedWorkspaceApplyBackMode(root string) {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	if !t.managedWorkspaceApplyBack {
+		t.policyRevision++
+	}
 	t.managedWorkspaceApplyBack = true
-	t.SetWorkspaceBoundary(root)
+	t.setWorkspaceBoundaryLocked(root)
 }
 
 // ManagedWorkspaceApplyBackModeEnabled reports whether stricter apply-back
 // containment is enabled.
 func (t *BashTool) ManagedWorkspaceApplyBackModeEnabled() bool {
+	t.policyMu.RLock()
+	defer t.policyMu.RUnlock()
 	return t.managedWorkspaceApplyBack
 }
 
@@ -265,7 +334,10 @@ func (t *BashTool) Name() string {
 }
 
 func (t *BashTool) Description() string {
-	return `Executes a bash command and returns the output. Use for system operations, git commands, running tests, etc.
+	t.policyMu.RLock()
+	backgroundAllowed := t.backgroundAllowed
+	t.policyMu.RUnlock()
+	description := `Executes a bash command and returns the output. Use for system operations, git commands, running tests, etc.
 
 PARAMETERS:
 - command (required): The bash command to execute
@@ -302,38 +374,59 @@ AFTER RUNNING - YOU MUST:
 3. Highlight errors or warnings
 4. Suggest fixes if command failed
 5. Recommend next steps`
+	if !backgroundAllowed {
+		description = strings.Replace(description,
+			"- run_in_background (optional): If true, run in background and return task ID",
+			"- Background execution is disabled; every command must finish within this turn", 1)
+		description = strings.Replace(description,
+			"- Long commands: Use run_in_background=true\n- Check background tasks: Use task_output tool with task_id",
+			"- Long commands must run in the foreground and honor the configured timeout", 1)
+	}
+	return description
 }
 
 func (t *BashTool) Declaration() *genai.FunctionDeclaration {
+	t.policyMu.RLock()
+	backgroundAllowed := t.backgroundAllowed
+	t.policyMu.RUnlock()
+	properties := map[string]*genai.Schema{
+		"command": {
+			Type:        genai.TypeString,
+			Description: "The bash command to execute",
+		},
+		"description": {
+			Type:        genai.TypeString,
+			Description: "A brief description of what the command does",
+		},
+		"stdin": {
+			Type:        genai.TypeString,
+			Description: "Content to pipe as stdin to the command",
+		},
+	}
+	if backgroundAllowed {
+		properties["run_in_background"] = &genai.Schema{
+			Type:        genai.TypeBoolean,
+			Description: "If true, run the command in background and return task ID immediately",
+		}
+	}
 	return &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"command": {
-					Type:        genai.TypeString,
-					Description: "The bash command to execute",
-				},
-				"description": {
-					Type:        genai.TypeString,
-					Description: "A brief description of what the command does",
-				},
-				"stdin": {
-					Type:        genai.TypeString,
-					Description: "Content to pipe as stdin to the command",
-				},
-				"run_in_background": {
-					Type:        genai.TypeBoolean,
-					Description: "If true, run the command in background and return task ID immediately",
-				},
-			},
-			Required: []string{"command"},
+			Type:       genai.TypeObject,
+			Properties: properties,
+			Required:   []string{"command"},
 		},
 	}
 }
 
 func (t *BashTool) Validate(args map[string]any) error {
+	t.policyMu.RLock()
+	defer t.policyMu.RUnlock()
+	return t.validateLocked(args)
+}
+
+func (t *BashTool) validateLocked(args map[string]any) error {
 	command, ok := GetString(args, "command")
 	if !ok || command == "" {
 		return NewValidationError("command", "is required")
@@ -344,6 +437,9 @@ func (t *BashTool) Validate(args map[string]any) error {
 	result := security.ValidateCommand(command)
 	if !result.Valid {
 		return NewValidationError("command", fmt.Sprintf("blocked: %s", result.Reason))
+	}
+	if GetBoolDefault(args, "run_in_background", false) && !t.backgroundAllowed {
+		return NewValidationError("run_in_background", "is disabled for this execution mode; run the command in the foreground")
 	}
 
 	// Skip permission-level validation in unrestricted mode (sandbox=off + permissions=off)
@@ -359,6 +455,23 @@ func (t *BashTool) Validate(args map[string]any) error {
 }
 
 func (t *BashTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
+	if err := t.acquireExecution(ctx); err != nil {
+		return startCommandErrorResult(ctx, err), nil
+	}
+	defer t.releaseExecution()
+
+	t.policyMu.RLock()
+	view, revision := t.executionViewLocked()
+	t.policyMu.RUnlock()
+
+	result, err := view.executeLocked(ctx, args)
+	t.commitExecutionSession(view, revision)
+	return result, err
+}
+
+// executeLocked runs against an invocation-local immutable policy/session view.
+// Permission-bound callers use the same core after verifying their snapshot.
+func (t *BashTool) executeLocked(ctx context.Context, args map[string]any) (ToolResult, error) {
 	command, _ := GetString(args, "command")
 	stdinContent, _ := GetString(args, "stdin")
 
@@ -370,6 +483,10 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	runInBackground, _ := args["run_in_background"].(bool)
 
 	if runInBackground {
+		if !t.backgroundAllowed {
+			return NewPolicyBlockedResult(PolicyBlockSafety,
+				"run_in_background is disabled for deterministic one-shot execution; run the command in the foreground"), nil
+		}
 		if t.managedWorkspaceApplyBack {
 			return NewErrorResult("run_in_background is not supported in isolated apply-back bash mode"), nil
 		}
@@ -595,6 +712,20 @@ func startCommandErrorResult(execCtx context.Context, err error) ToolResult {
 	}
 }
 
+func interruptedCommandResult(execCtx context.Context, configuredTimeout time.Duration) ToolResult {
+	switch {
+	case errors.Is(execCtx.Err(), context.Canceled):
+		return NewErrorResult("command cancelled")
+	case configuredTimeout > 0:
+		return NewErrorResult(fmt.Sprintf(
+			"command timed out after %v. For long-running commands, use run_in_background=true",
+			configuredTimeout,
+		))
+	default:
+		return NewErrorResult("command deadline exceeded")
+	}
+}
+
 // executeForeground runs a command and waits for completion.
 func (t *BashTool) executeForeground(ctx context.Context, command string, stdinContent string) (ToolResult, error) {
 	// Create context with explicit timeout to prevent indefinite hangs
@@ -623,8 +754,14 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 	}
 	wrappedCommand := wrapCommandWithPWD(command)
 
-	// Fall back to standard execution (legacy behavior)
-	cmd := exec.CommandContext(execCtx, "bash", "-c", wrappedCommand)
+	// Own cancellation explicitly below. exec.CommandContext kills only the
+	// shell leader when the context fires; its descendants remain in the
+	// process group and can keep mutating files after Wait returns. A plain Cmd
+	// lets the select below terminate the whole process tree before returning.
+	if err := execCtx.Err(); err != nil {
+		return startCommandErrorResult(execCtx, err), nil
+	}
+	cmd := exec.Command("bash", "-c", wrappedCommand)
 	cmd.Dir = workDir
 
 	// Use sanitized environment with session env vars injected
@@ -772,11 +909,18 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		timedOut := false
 		select {
 		case <-cmdDone:
-			// Command completed
+			// A context can become ready at the same instant as Wait. Treat it as
+			// cancellation and clean any descendants that outlived the shell.
+			if execCtx.Err() != nil {
+				timedOut = true
+				killBashProcessGroup(cmd, 5*time.Second, cmdDone)
+			}
 		case <-execCtx.Done():
 			timedOut = true
 			killBashProcessGroup(cmd, 5*time.Second, cmdDone)
-			<-cmdDone
+		}
+		if timedOut {
+			<-cmdDone // Always reap the shell leader before returning.
 		}
 
 		// Wait for readers to drain
@@ -786,9 +930,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		<-streamDone
 
 		if timedOut {
-			return NewErrorResult(fmt.Sprintf(
-				"command timed out after %v. For long-running commands, use run_in_background=true",
-				t.timeout)), nil
+			return interruptedCommandResult(execCtx, t.timeout), nil
 		}
 
 		// Extract real pwd from output and update session
@@ -851,15 +993,21 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 
 	select {
 	case <-cmdDone:
-		// Command completed normally - get the error result
+		// A context can become ready at the same instant as Wait. Treat it as
+		// cancellation and clean any descendants that outlived the shell.
+		if execCtx.Err() != nil {
+			timedOut = true
+			killBashProcessGroup(cmd, 5*time.Second, cmdDone)
+		}
 	case <-execCtx.Done():
 		// Context was cancelled or timed out
 		timedOut = true
 		// Kill the process group with graceful shutdown (5 second grace period)
 		killBashProcessGroup(cmd, 5*time.Second, cmdDone)
-		// Wait for the Wait() goroutine to complete to avoid goroutine leak
-		wg.Wait()
 	}
+	// Always reap the shell leader. On cancellation this also guarantees the
+	// Wait goroutine cannot leak after the tool returns.
+	wg.Wait()
 
 	// At this point, command has definitely finished (either completed or killed)
 	// Safely read the error
@@ -869,9 +1017,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 
 	// Handle timeout case
 	if timedOut {
-		return NewErrorResult(fmt.Sprintf(
-			"command timed out after %v. For long-running commands, use run_in_background=true",
-			t.timeout)), nil
+		return interruptedCommandResult(execCtx, t.timeout), nil
 	}
 
 	// Extract real pwd from output and update session

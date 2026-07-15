@@ -571,6 +571,20 @@ func TestTokenCounter_SetClientPreservesConfiguredLimit(t *testing.T) {
 	}
 }
 
+func TestTokenCounter_SetClientNilClearsCredentialBearingClient(t *testing.T) {
+	first := testkit.NewMockClient()
+	first.SetModel("glm-5.2")
+	tc := NewTokenCounter(first, first.GetModel(), nil)
+
+	tc.SetClient(nil)
+	if tc.model != "" || tc.client != nil {
+		t.Fatalf("client was not cleared: model=%q client=%v", tc.model, tc.client)
+	}
+	if _, err := tc.CountContents(context.Background(), nil); err == nil {
+		t.Fatal("token counting without a client unexpectedly succeeded")
+	}
+}
+
 func TestTokenCounter_AddToCacheExistingKey(t *testing.T) {
 	tc := NewTokenCounter(nil, "glm-5", nil)
 	tc.addToCache("hash1", 100)

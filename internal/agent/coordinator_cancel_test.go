@@ -49,14 +49,40 @@ func TestCancelRunning_NoRunningIsNoOp(t *testing.T) {
 	}
 }
 
-func TestCancelTask_IsTerminalAndUnblocksDependents(t *testing.T) {
+func TestCancelRunningAndWaitObservesRunOwnedFinalization(t *testing.T) {
+	runner := NewRunner(context.Background(), nil, tools.NewRegistry(), t.TempDir())
+	coordinator := NewCoordinator(context.Background(), runner, &CoordinatorConfig{MaxParallel: 1})
+	const agentID = "teardown-agent"
+	agent := &Agent{ID: agentID, status: AgentStatusRunning}
+	runner.mu.Lock()
+	runner.agents[agentID] = agent
+	runner.results[agentID] = &AgentResult{AgentID: agentID, Status: AgentStatusRunning}
+	runner.mu.Unlock()
+	_ = installCancelledRunFinalizer(runner, agent, agentID)
+	coordinator.mu.Lock()
+	coordinator.running[agentID] = "task-teardown"
+	coordinator.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if got := coordinator.CancelRunningAndWait(ctx); got != 1 {
+		t.Fatalf("cancelled agents = %d, want 1", got)
+	}
+	result, ok := runner.completedResultLocked(agentID)
+	if !ok || result.Status != AgentStatusCancelled {
+		t.Fatalf("terminal cancellation result = %+v, %v", result, ok)
+	}
+}
+
+func TestCancelTask_IsTerminalAndFailsDependents(t *testing.T) {
 	c := NewCoordinator(context.Background(), nil, &CoordinatorConfig{MaxParallel: 1})
 	prerequisiteID := c.AddTask("prerequisite", AgentTypeGeneral, PriorityNormal, nil)
 	dependentID := c.AddTask("dependent", AgentTypeGeneral, PriorityNormal, []string{prerequisiteID})
 
 	var completionCalls atomic.Int32
 	c.SetCallbacks(nil, func(task *CoordinatedTask, result *AgentResult) {
-		if task.ID == prerequisiteID && result.Status == AgentStatusCancelled {
+		if (task.ID == prerequisiteID && result.Status == AgentStatusCancelled) ||
+			(task.ID == dependentID && result.Status == AgentStatusFailed) {
 			completionCalls.Add(1)
 		}
 	}, nil)
@@ -68,21 +94,28 @@ func TestCancelTask_IsTerminalAndUnblocksDependents(t *testing.T) {
 	c.mu.RLock()
 	prerequisite := c.tasks[prerequisiteID]
 	dependent := c.tasks[dependentID]
-	markedComplete := c.completed[prerequisiteID]
+	prerequisiteComplete := c.completed[prerequisiteID]
+	dependentComplete := c.completed[dependentID]
 	c.mu.RUnlock()
 
 	if prerequisite.Status != TaskStatusFailed || prerequisite.Result == nil ||
 		prerequisite.Result.Status != AgentStatusCancelled || !prerequisite.Result.Completed {
 		t.Fatalf("cancelled prerequisite is not a complete terminal failure: %+v", prerequisite)
 	}
-	if !markedComplete {
+	if !prerequisiteComplete {
 		t.Fatal("cancelled task missing from coordinator completed set")
 	}
-	if dependent.Status != TaskStatusReady {
-		t.Fatalf("dependent status = %s, want %s", dependent.Status, TaskStatusReady)
+	if dependent.Status != TaskStatusFailed || dependent.Result == nil ||
+		dependent.Result.Status != AgentStatusFailed || !dependent.Result.Completed ||
+		!strings.Contains(dependent.Result.Error, prerequisiteID) ||
+		!strings.Contains(dependent.Result.Error, "cancelled") {
+		t.Fatalf("dependent did not become an explicit dependency failure: %+v", dependent)
 	}
-	if got := completionCalls.Load(); got != 1 {
-		t.Fatalf("completion callback calls = %d, want 1", got)
+	if !dependentComplete {
+		t.Fatal("dependency-failed task missing from coordinator completed set")
+	}
+	if got := completionCalls.Load(); got != 2 {
+		t.Fatalf("completion callback calls = %d, want 2", got)
 	}
 }
 
@@ -93,6 +126,7 @@ func TestCancelTask_AllCompleteWakesWaiters(t *testing.T) {
 	if err := c.CancelTask(taskID); err != nil {
 		t.Fatalf("CancelTask returned error: %v", err)
 	}
+	c.Start() // seals the graph; an open coordinator may still accept more tasks
 
 	results, err := c.WaitWithTimeout(time.Second)
 	if err != nil {
@@ -129,10 +163,12 @@ func TestCancelTask_RunningAgentCompletesExactlyOnce(t *testing.T) {
 	taskID := c.AddTask("running", AgentTypeGeneral, PriorityNormal, nil)
 	const agentID = "cancel-running-agent"
 
+	runningAgent := &Agent{ID: agentID, status: AgentStatusRunning}
 	runner.mu.Lock()
-	runner.agents[agentID] = &Agent{ID: agentID, status: AgentStatusRunning}
+	runner.agents[agentID] = runningAgent
 	runner.results[agentID] = &AgentResult{AgentID: agentID, Status: AgentStatusRunning}
 	runner.mu.Unlock()
+	finalized := installCancelledRunFinalizer(runner, runningAgent, agentID)
 	c.mu.Lock()
 	c.queue.RemoveTask(taskID)
 	c.tasks[taskID].Status = TaskStatusRunning
@@ -147,8 +183,12 @@ func TestCancelTask_RunningAgentCompletesExactlyOnce(t *testing.T) {
 	if err := c.CancelTask(taskID); err != nil {
 		t.Fatalf("CancelTask returned error: %v", err)
 	}
-	// A delayed monitor notification must be ignored after CancelTask removed
-	// the running mapping, rather than publishing a duplicate completion.
+	if result := c.GetTask(taskID).Result; result != nil {
+		t.Fatalf("running cancellation published before run finalization: %+v", result)
+	}
+	<-finalized
+	c.handleAgentCompletion(agentID)
+	// A duplicate delayed monitor notification must remain idempotent.
 	c.handleAgentCompletion(agentID)
 
 	result := c.GetTask(taskID).Result
@@ -157,5 +197,32 @@ func TestCancelTask_RunningAgentCompletesExactlyOnce(t *testing.T) {
 	}
 	if got := completionCalls.Load(); got != 1 {
 		t.Fatalf("completion callback calls = %d, want exactly 1", got)
+	}
+}
+
+func TestCancelTask_PublishedResultWinsCancellationRace(t *testing.T) {
+	runner := NewRunner(context.Background(), nil, tools.NewRegistry(), t.TempDir())
+	c := NewCoordinator(context.Background(), runner, &CoordinatorConfig{MaxParallel: 1})
+	taskID := c.AddTask("already finalized", AgentTypeGeneral, PriorityNormal, nil)
+	const agentID = "published-before-cancel"
+
+	runner.mu.Lock()
+	runner.agents[agentID] = &Agent{ID: agentID, status: AgentStatusCompleted}
+	runner.results[agentID] = &AgentResult{
+		AgentID: agentID, Status: AgentStatusCompleted, Output: "real result", Completed: true,
+	}
+	runner.mu.Unlock()
+	c.mu.Lock()
+	c.queue.RemoveTask(taskID)
+	c.tasks[taskID].Status = TaskStatusRunning
+	c.running[agentID] = taskID
+	c.mu.Unlock()
+
+	if err := c.CancelTask(taskID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	result := c.GetTask(taskID).Result
+	if result == nil || result.Status != AgentStatusCompleted || result.Output != "real result" {
+		t.Fatalf("cancellation overwrote a run-owned result: %+v", result)
 	}
 }

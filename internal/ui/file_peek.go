@@ -22,6 +22,7 @@ import (
 type FilePeekPanel struct {
 	visible bool
 	peek    FilePeekMsg
+	meta    string
 	styles  *Styles
 	expires time.Time
 }
@@ -39,7 +40,19 @@ func NewFilePeekPanel(styles *Styles) *FilePeekPanel {
 // ShowPeek installs a new peek and resets the TTL. Calling this while an
 // earlier peek is still on screen simply replaces it — no stacking.
 func (p *FilePeekPanel) ShowPeek(msg FilePeekMsg) {
-	p.peek = msg
+	filePath := safeKeyEntryText(msg.FilePath)
+	if filePath == "" {
+		p.Hide()
+		return
+	}
+	// Retain only what the one-line panel renders. The content may contain
+	// secrets or be very large; derive its harmless aggregate once and discard
+	// the payload instead of keeping it alive after the tool event.
+	p.peek = FilePeekMsg{
+		FilePath: filePath,
+		Action:   safeKeyEntryText(msg.Action),
+	}
+	p.meta = formatPeekMeta(msg.Content)
 	p.visible = true
 	p.expires = time.Now().Add(filePeekTTL)
 }
@@ -47,18 +60,21 @@ func (p *FilePeekPanel) ShowPeek(msg FilePeekMsg) {
 // Hide hides the panel.
 func (p *FilePeekPanel) Hide() {
 	p.visible = false
+	p.peek = FilePeekMsg{}
+	p.meta = ""
+	p.expires = time.Time{}
 }
 
 // Tick is called on the UI frame timer to evict expired peeks.
 func (p *FilePeekPanel) Tick() {
-	if p.visible && time.Now().After(p.expires) {
-		p.visible = false
+	if p.visible && !time.Now().Before(p.expires) {
+		p.Hide()
 	}
 }
 
 // IsVisible reports whether the panel should render this frame.
 func (p *FilePeekPanel) IsVisible() bool {
-	return p.visible && p.peek.FilePath != ""
+	return p.visible && p.peek.FilePath != "" && time.Now().Before(p.expires)
 }
 
 // View renders the panel as a single dim status line. Returns "" when the
@@ -73,7 +89,7 @@ func (p *FilePeekPanel) View(width int) string {
 	if width <= 0 {
 		width = 80
 	}
-	meta := formatPeekMeta(p.peek.Content)
+	meta := p.meta
 	color := actionColor(p.peek.Action)
 
 	label := fmt.Sprintf("%s %s ", icon, verb)
@@ -84,7 +100,10 @@ func (p *FilePeekPanel) View(width int) string {
 		}
 	}
 	pathBudget := max(width-lipgloss.Width(label), 1)
-	path := truncateForWidth(shortenPath(p.peek.FilePath, pathBudget), pathBudget)
+	// Paths are suffix-significant. A single grapheme-aware left elision spends
+	// the whole budget on the identifying tail without a second truncation pass
+	// that could discard the basename or extension.
+	path := truncateLeftForWidth(p.peek.FilePath, pathBudget)
 
 	primary := lipgloss.NewStyle().
 		Foreground(color).
@@ -106,7 +125,7 @@ func (p *FilePeekPanel) View(width int) string {
 // actionIcon maps an action verb to an icon using the unified style system.
 // Unknown actions fall back to a generic document icon so we never render a blank.
 func actionIcon(action string) string {
-	normalized := strings.ToLower(action)
+	normalized := strings.ToLower(safeKeyEntryText(action))
 	if icon, ok := FilePeekIcons[normalized]; ok {
 		return icon
 	}
@@ -115,7 +134,7 @@ func actionIcon(action string) string {
 
 // actionColor returns the semantic color for a file peek action.
 func actionColor(action string) lipgloss.Color {
-	normalized := strings.ToLower(action)
+	normalized := strings.ToLower(safeKeyEntryText(action))
 	if color, ok := FilePeekColors[normalized]; ok {
 		return color
 	}
@@ -126,7 +145,7 @@ func actionColor(action string) lipgloss.Color {
 // are a mix of tenses ("read", "reading", "modifying", "created") — normalise
 // to present participles for a consistent status line.
 func actionVerb(action string) string {
-	normalized := strings.ToLower(strings.TrimSpace(action))
+	normalized := strings.ToLower(safeKeyEntryText(action))
 	switch normalized {
 	case "read", "reading":
 		return "Reading"

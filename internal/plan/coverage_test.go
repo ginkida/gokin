@@ -189,6 +189,19 @@ func TestManager_RequestApproval_NoHandlerAutoApprove(t *testing.T) {
 	}
 }
 
+func TestManager_RequestApproval_RequiredWithoutHandlerFailsClosed(t *testing.T) {
+	m := NewManager(true, true)
+	plan := NewPlan("test", "desc")
+	m.SetPlan(plan)
+	decision, err := m.RequestApproval(context.Background())
+	if err == nil {
+		t.Fatal("required approval without a handler must return an error")
+	}
+	if decision != ApprovalRejected {
+		t.Errorf("decision = %v, want ApprovalRejected", decision)
+	}
+}
+
 func TestManager_RequestApproval_LintFails(t *testing.T) {
 	m := NewManager(true, false)
 	m.SetLintHandler(func(ctx context.Context, p *Plan) error {
@@ -215,6 +228,76 @@ func TestManager_RequestApproval_HandlerApproves(t *testing.T) {
 	decision, _ := m.RequestApproval(context.Background())
 	if decision != ApprovalApproved {
 		t.Errorf("decision = %v, want ApprovalApproved", decision)
+	}
+}
+
+func TestManager_RequestApproval_DiscardsDecisionForReplacedPlan(t *testing.T) {
+	m := NewManager(true, true)
+	original := NewPlan("original", "desc")
+	m.SetPlan(original)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	m.SetApprovalHandler(func(context.Context, *Plan) (ApprovalDecision, error) {
+		close(entered)
+		<-release
+		return ApprovalApproved, nil
+	})
+
+	type outcome struct {
+		decision ApprovalDecision
+		err      error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		decision, err := m.RequestApproval(context.Background())
+		done <- outcome{decision: decision, err: err}
+	}()
+	<-entered
+	replacement := NewPlan("replacement", "desc")
+	m.SetPlan(replacement)
+	close(release)
+
+	got := <-done
+	if got.err == nil || got.decision != ApprovalRejected {
+		t.Fatalf("stale approval = decision %v, err %v", got.decision, got.err)
+	}
+	if current := m.GetCurrentPlan(); current != replacement {
+		t.Fatalf("stale approval replaced/cleared the new plan: %+v", current)
+	}
+}
+
+func TestManager_ExactPlanLifecycleAndClearPreserveReplacement(t *testing.T) {
+	m := NewManager(true, true)
+	original := NewPlan("original", "desc")
+	m.SetPlan(original)
+	replacement := NewPlan("replacement", "desc")
+	m.SetPlan(replacement)
+
+	if err := m.TransitionPlanLifecycleIfCurrent(original, LifecycleApproved); err == nil {
+		t.Fatal("stale plan transition should fail")
+	}
+	if m.ClearPlanIfCurrent(original) {
+		t.Fatal("stale plan clear should fail")
+	}
+	if current := m.GetCurrentPlan(); current != replacement {
+		t.Fatalf("newer plan was mutated by stale owner: %+v", current)
+	}
+}
+
+func TestManager_ApprovalCommitRunsOnlyAfterExactTransition(t *testing.T) {
+	m := NewManager(true, true)
+	p := NewPlan("current", "desc")
+	m.SetPlan(p)
+	if err := p.TransitionLifecycle(LifecycleAwaitingApproval); err != nil {
+		t.Fatal(err)
+	}
+	commits := 0
+	m.SetApprovalCommitHandler(func() { commits++ })
+	if err := m.TransitionPlanLifecycleIfCurrent(p, LifecycleApproved); err != nil {
+		t.Fatal(err)
+	}
+	if commits != 1 {
+		t.Fatalf("approval commits = %d, want 1", commits)
 	}
 }
 
@@ -560,12 +643,21 @@ func TestManager_SetCurrentStepID_GetCurrentStepID(t *testing.T) {
 func TestManager_ContextClear(t *testing.T) {
 	m := NewManager(true, true)
 	plan := NewPlan("test", "desc")
+	m.SetPlan(plan)
+	if err := plan.TransitionLifecycle(LifecycleAwaitingApproval); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.TransitionPlanLifecycleIfCurrent(plan, LifecycleApproved); err != nil {
+		t.Fatal(err)
+	}
 
 	if m.IsContextClearRequested() {
 		t.Error("should not be requested initially")
 	}
 
-	m.RequestContextClear(plan)
+	if !m.RequestContextClear(plan) {
+		t.Fatal("current approved plan should own context-clear request")
+	}
 	if !m.IsContextClearRequested() {
 		t.Error("should be requested after RequestContextClear")
 	}

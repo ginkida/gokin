@@ -297,14 +297,15 @@ func (t *TaskOutputTool) readAgentOutputFromFile(result AgentResult, offset int6
 
 	if offset >= stat.Size() {
 		// No new output
-		return NewSuccessResultWithData("No new output since last read.", map[string]any{
+		toolResult := NewSuccessResultWithData("No new output since last read.", map[string]any{
 			"agent_id":    result.AgentID,
 			"status":      result.Status,
 			"completed":   result.Completed,
 			"offset":      offset,
 			"next_offset": offset,
 			"total_bytes": stat.Size(),
-		}), nil
+		})
+		return withAgentPolicyBlock(toolResult, result.PolicyBlock), nil
 	}
 
 	if _, err := f.Seek(offset, 0); err != nil {
@@ -323,7 +324,7 @@ func (t *TaskOutputTool) readAgentOutputFromFile(result AgentResult, offset int6
 	builder.WriteString("\nNew output:\n")
 	builder.WriteString(newOutput)
 
-	return NewSuccessResultWithData(builder.String(), map[string]any{
+	toolResult := NewSuccessResultWithData(builder.String(), map[string]any{
 		"agent_id":    result.AgentID,
 		"status":      result.Status,
 		"completed":   result.Completed,
@@ -331,7 +332,8 @@ func (t *TaskOutputTool) readAgentOutputFromFile(result AgentResult, offset int6
 		"next_offset": nextOffset,
 		"total_bytes": stat.Size(),
 		"output":      newOutput,
-	}), nil
+	})
+	return withAgentPolicyBlock(toolResult, result.PolicyBlock), nil
 }
 
 // formatAgentResult formats an agent result
@@ -371,7 +373,7 @@ func (t *TaskOutputTool) formatAgentResult(result AgentResult) ToolResult {
 		}
 	}
 
-	return NewSuccessResultWithData(builder.String(), data)
+	return withAgentPolicyBlock(NewSuccessResultWithData(builder.String(), data), result.PolicyBlock)
 }
 
 func (t *TaskOutputTool) listTasks() (ToolResult, error) {

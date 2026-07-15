@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -784,7 +785,7 @@ func (acc *toolCallAccumulator) appendToolInput(input any) {
 
 // isRetryableError returns true if the error should trigger a retry.
 func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
-	// A hard terminal provider failure (quota/balance/auth) is never retryable,
+	// A hard terminal provider failure (request/auth/account/plan/content) is never retryable,
 	// even when it arrives with a normally-retryable HTTP status (GLM's 1308
 	// quota cap comes as 429). Check BEFORE the status-code fast-path so the
 	// status can't override the terminal classification.
@@ -835,62 +836,67 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 // error so isRetryableError can pick it up via its substring matching (e.g. "overloaded",
 // "rate limit"). `description` is what the UI shows the user.
 //
-// Codes derived from Z.AI API error reference:
-//   - 1210: too-many-requests            → retryable
-//   - 1211/1213: insufficient balance    → non-retryable (user must top up)
-//   - 1212: quota exceeded               → non-retryable
-//   - 1308: quota / balance exhausted (5-hour cap) → non-retryable
-//   - 1309: subscription temporarily unavailable → non-retryable (renew on z.ai/subscribe)
-//   - 1310: weekly/monthly limit exhausted → non-retryable (reset at next_flush_time)
-//   - 1311: plan does not include model  → non-retryable (upgrade plan)
-//   - 1313: Fair Usage Policy block      → non-retryable (account action)
-//   - 1214/1215: auth failure            → non-retryable
-//   - 1301: concurrency limit            → retryable
-//   - 1302/1303: throughput limit        → retryable
-//   - 1305: service overloaded           → retryable
-//   - 1312: model high traffic           → retryable
-//   - unknown: treated as non-retryable with raw message
+// Codes are kept in sync with the current Z.AI API error reference. In
+// particular, 1210 is an invalid parameter (not a rate limit), while 1301 is a
+// sensitive-content rejection (not an overload). Only documented server,
+// network, rate-limit, and overload codes are retryable. Unknown codes retain
+// the provider message and are not assigned a retry keyword.
 func classifyGLMErrorCode(code, message string) (retryable bool, keyword, description string) {
 	switch code {
-	case "1210":
+	case "-500", "1200":
+		return true, "temporarily", "GLM service error — retrying"
+	case "1230":
+		return true, "temporarily", "GLM request processing error — retrying"
+	case "1234":
+		return true, "temporarily", "GLM network error — retrying"
+	case "1302":
 		return true, "rate limit", "GLM rate limit — retrying"
-	case "1301":
-		return true, "overloaded", "GLM concurrency limit — retrying"
-	case "1302", "1303":
-		return true, "overloaded", "GLM throughput limit — retrying"
 	case "1305":
 		return true, "overloaded", "GLM server overloaded — retrying"
-	case "1312":
-		return true, "overloaded", "GLM model is experiencing high traffic — retrying"
-	case "1211", "1213":
-		return false, "", "GLM account balance insufficient — top up or switch provider"
+	case "1000", "1001", "1003":
+		return false, "", "GLM authentication failed — check API key"
+	case "1005":
+		return false, "", "GLM account requires two-factor authentication"
+	case "1113":
+		return false, "", "GLM balance or resource package is insufficient — top up or switch provider with /provider"
+	case "1210":
+		return false, "", "GLM request has an invalid API parameter"
+	case "1211":
+		return false, "", "GLM model is unknown — choose a supported model"
 	case "1212":
-		return false, "", "GLM quota exceeded — check billing"
+		return false, "", "GLM model does not support this API method"
+	case "1213":
+		return false, "", "GLM request is missing a required parameter"
+	case "1214":
+		return false, "", "GLM request contains an invalid parameter"
+	case "1215":
+		return false, "", "GLM request contains conflicting parameters"
+	case "1220":
+		return false, "", "GLM API access denied — check key permissions"
+	case "1221":
+		return false, "", "GLM API is offline for this account"
+	case "1222":
+		return false, "", "GLM API endpoint does not exist"
+	case "1261":
+		return false, "", "GLM prompt is too long for the model context window"
+	case "1301":
+		return false, "", "GLM rejected sensitive or unsafe content"
 	case "1308":
-		// Quota / insufficient balance (commonly seen when a Coding-Plan key hits
-		// its cap). Non-retryable; the only recovery is topping up or switching
-		// provider, so say that instead of leaking a raw code.
 		return false, "", "GLM quota/balance exhausted — top up your GLM plan or switch provider with /provider"
 	case "1309":
-		// "Service is temporarily unavailable. You can resume using it after
-		// renewing the subscription on the official website." A hard subscription
-		// state — retrying within the session cannot renew it.
 		return false, "", "GLM subscription needs renewal — renew on z.ai/subscribe or switch provider with /provider"
 	case "1310":
-		// "Weekly/Monthly Limit Exhausted. Your limit will reset at
-		// {next_flush_time}." Like 1308 but on the weekly/monthly window; the
-		// reset time is extracted by terminalProviderMessage.
 		return false, "", "GLM weekly/monthly limit exhausted — wait for the reset or switch provider with /provider"
 	case "1311":
-		// "Your current subscription plan does not yet include access to
-		// {model_name}." A plan-tier gate; retrying the same model can't unlock it.
 		return false, "", "GLM plan does not include this model — upgrade your plan or switch provider with /provider"
 	case "1313":
-		// "Your account's current usage pattern does not comply with the Fair
-		// Usage Policy." A hard account block; only user action resolves it.
 		return false, "", "GLM Fair Usage Policy block — check your account or switch provider with /provider"
-	case "1214", "1215":
-		return false, "", "GLM authentication failed — check API key"
+	case "1314":
+		return false, "", "GLM enterprise resource package has expired — renew it or switch provider with /provider"
+	case "1315":
+		return false, "", "GLM API key is not valid for this product — use the matching key or switch provider with /provider"
+	case "1316", "1317", "1318", "1319", "1320", "1321":
+		return false, "", "GLM usage or spending limit reached — top up, raise the limit, wait for reset, or switch provider with /provider"
 	}
 	// Unknown code: keep raw message verbatim.
 	if message != "" {
@@ -900,24 +906,76 @@ func classifyGLMErrorCode(code, message string) (retryable bool, keyword, descri
 }
 
 // glmTerminalCodes are Z.AI/GLM error codes where retrying cannot help — a hard
-// account/quota/auth failure. Kept as an EXPLICIT set (rather than "any code
-// classifyGLMErrorCode marks non-retryable") so an UNKNOWN code — which classify
-// also reports non-retryable — is left on the normal retry path instead of being
-// given up on. Only these become a TerminalProviderError.
+// request/auth/account/plan/content rejection. Kept as an EXPLICIT set (rather
+// than "any code classifyGLMErrorCode marks non-retryable") so an UNKNOWN code
+// — which classify also reports non-retryable — is left on the normal retry path
+// instead of being given up on. Only these become a TerminalProviderError.
 var glmTerminalCodes = map[string]bool{
-	"1211": true, // insufficient balance
-	"1212": true, // quota exceeded
-	"1213": true, // insufficient balance
-	"1214": true, // auth failure
-	"1215": true, // auth failure
-	"1308": true, // 5-hour usage cap / balance exhausted
-	"1309": true, // subscription temporarily unavailable — renew on z.ai/subscribe
-	"1310": true, // weekly/monthly limit exhausted (reset at next_flush_time)
+	"1000": true, // authentication failed
+	"1001": true, // missing authentication header
+	"1003": true, // authentication token expired
+	"1005": true, // two-factor authentication required
+	"1113": true, // insufficient balance/resource package
+	"1210": true, // invalid API parameter
+	"1211": true, // unknown model
+	"1212": true, // model does not support API method
+	"1213": true, // missing parameter
+	"1214": true, // invalid parameter
+	"1215": true, // conflicting parameters
+	"1220": true, // permission denied
+	"1221": true, // API offline
+	"1222": true, // API does not exist
+	"1301": true, // sensitive/unsafe content
+	"1308": true, // usage limit / insufficient balance
+	"1309": true, // Coding Plan expired
+	"1310": true, // weekly/monthly limit exhausted
 	"1311": true, // plan does not include the requested model
-	"1313": true, // Fair Usage Policy block
+	"1313": true, // Fair Usage Policy restriction
+	"1314": true, // enterprise resource package expired
+	"1315": true, // key is not valid for this product
+	"1316": true, // usage/balance limit
+	"1317": true, // usage/balance limit
+	"1318": true, // usage/spending limit
+	"1319": true, // usage/spending limit
+	"1320": true, // usage/spending limit
+	"1321": true, // usage/spending limit
 }
 
 func isGLMTerminalCode(code string) bool { return glmTerminalCodes[code] }
+
+// formatGLMError embeds a stable retry keyword without dropping the provider's
+// diagnostic. Retry deciders consume the keyword, while the raw message remains
+// available for troubleshooting.
+func formatGLMError(description, keyword, code, providerMsg string) string {
+	if keyword == "" {
+		return fmt.Sprintf("%s (%s)", description, code)
+	}
+	if providerMsg == "" {
+		return fmt.Sprintf("%s [%s] (%s)", description, keyword, code)
+	}
+	return fmt.Sprintf("%s [%s] (%s): %s", description, keyword, code, providerMsg)
+}
+
+// newGLMStreamError gives streamed error events the same typed semantics as
+// non-200 responses. Terminal business rejections must stay terminal even when
+// the event text happens to contain a retry keyword; 1261 remains recoverable by
+// context compaction through IsContextTooLongError.
+func newGLMStreamError(code, providerMsg string) (error, bool) {
+	retryable, keyword, description := classifyGLMErrorCode(code, providerMsg)
+	if isGLMTerminalCode(code) {
+		return &TerminalProviderError{
+			Code:    code,
+			Message: terminalProviderMessage(description, providerMsg),
+		}, false
+	}
+	if code == "1261" {
+		return &HTTPError{
+			StatusCode: http.StatusBadRequest,
+			Message:    description,
+		}, false
+	}
+	return errors.New(formatGLMError(description, keyword, code, providerMsg)), retryable
+}
 
 // parseProviderErrorBody pulls the {"error":{"code","message"}} shape (GLM/Z.AI)
 // out of a non-200 response body. Returns ("","") for a non-JSON body or the
@@ -932,7 +990,29 @@ func parseProviderErrorBody(body []byte) (code, message string) {
 	if !ok {
 		return "", ""
 	}
-	return stringFromMap(errObj, "code"), stringFromMap(errObj, "message")
+	return providerErrorCodeFromMap(errObj), stringFromMap(errObj, "message")
+}
+
+// providerErrorCodeFromMap tolerates the two code representations present in
+// Z.AI's official documentation: the nested Error Shapes examples use strings,
+// while Chat Completion's generic top-level preview renders a JSON number. Keep
+// this conversion code-specific so numeric values in ordinary SSE fields are
+// never silently coerced to text by stringFromMap.
+func providerErrorCodeFromMap(m map[string]any) string {
+	switch value := m["code"].(type) {
+	case string:
+		return value
+	case json.Number:
+		if n, err := value.Int64(); err == nil {
+			return strconv.FormatInt(n, 10)
+		}
+	case float64:
+		n := int64(value)
+		if float64(n) == value {
+			return strconv.FormatInt(n, 10)
+		}
+	}
+	return ""
 }
 
 // terminalProviderMessage builds the user-facing text for a terminal provider
@@ -942,7 +1022,12 @@ func parseProviderErrorBody(body []byte) (code, message string) {
 func terminalProviderMessage(description, providerMsg string) string {
 	msg := description
 	if providerMsg != "" {
-		if i := strings.Index(providerMsg, "reset at"); i >= 0 {
+		lowerMsg := strings.ToLower(providerMsg)
+		i := strings.Index(lowerMsg, "reset at")
+		if i < 0 {
+			i = strings.Index(lowerMsg, "resets at")
+		}
+		if i >= 0 {
 			reset := providerMsg[i:]
 			if j := strings.IndexByte(reset, ']'); j >= 0 {
 				reset = reset[:j]
@@ -1180,23 +1265,35 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		}
 		_ = resp.Body.Close()
 		logging.Warn("anthropic API error", "status", resp.StatusCode, "body", string(body))
-		// If the provider returned a GLM/Z.AI error carrying a numeric "code",
-		// classify it. A KNOWN-terminal code (quota/balance/auth) must surface
-		// IMMEDIATELY as a TerminalProviderError — never retried. GLM's 5-hour
-		// usage cap (1308) arrives as HTTP 429 with type "rate_limit_error", so
-		// without this its raw body matches IsOverloadError's "rate_limit"
-		// keyword and gets the 10-minute patient retry — the "app froze" report.
-		// Only the HTTP-status path needed this; the SSE-event path already
-		// classifies (v0.100.60). Non-GLM bodies (no "code") and retryable GLM
-		// codes fall through to the unchanged HTTPError, so deepseek/kimi/minimax
-		// rate-limit + overload handling is untouched.
-		if code, providerMsg := parseProviderErrorBody(body); isGLMTerminalCode(code) {
-			_, _, description := classifyGLMErrorCode(code, providerMsg)
-			logging.Warn("provider terminal error — not retrying", "code", code, "status", resp.StatusCode)
-			return nil, &TerminalProviderError{
-				Code:    code,
-				Status:  resp.StatusCode,
-				Message: terminalProviderMessage(description, providerMsg),
+		// A documented Z.AI business code takes precedence over the outer HTTP
+		// status. This prevents hard parameter/auth/plan/content rejections carried
+		// by 429/5xx gateways from entering a retry budget. Known transient codes
+		// receive stable keywords, and context overflow stays a typed HTTP 400 so
+		// callers can compact history. Bodies without a numeric code keep the
+		// standard Anthropic-compatible behavior for other providers.
+		if code, providerMsg := parseProviderErrorBody(body); code != "" {
+			retryable, keyword, description := classifyGLMErrorCode(code, providerMsg)
+			if isGLMTerminalCode(code) {
+				logging.Warn("provider terminal error — not retrying", "code", code, "status", resp.StatusCode)
+				return nil, &TerminalProviderError{
+					Code:    code,
+					Status:  resp.StatusCode,
+					Message: terminalProviderMessage(description, providerMsg),
+				}
+			}
+			if code == "1261" {
+				return nil, &HTTPError{
+					StatusCode: http.StatusBadRequest,
+					RetryAfter: retryAfter,
+					Message:    description,
+				}
+			}
+			if retryable {
+				return nil, &HTTPError{
+					StatusCode: resp.StatusCode,
+					RetryAfter: retryAfter,
+					Message:    formatGLMError(description, keyword, code, providerMsg),
+				}
 			}
 		}
 		return nil, &HTTPError{
@@ -1412,14 +1509,47 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					warningTimer.Reset(streamIdleWarning)
 
 					if !ok {
-						// Channel closed, scanner finished
-						break scanLoop
+						// The scanner goroutine exited without delivering its final
+						// status (for example after a recovered reader panic). That is
+						// never a valid SSE terminator. Preserve cancellation identity;
+						// otherwise classify it as the same retryable truncation as a
+						// clean-but-premature EOF below.
+						streamErr := ContextErr(ctx)
+						if streamErr == nil {
+							streamErr = fmt.Errorf("SSE scanner stopped before completion: %w", io.ErrUnexpectedEOF)
+						}
+						select {
+						case chunks <- ResponseChunk{Error: streamErr, Done: true}:
+						case <-ctx.Done():
+						}
+						return
 					}
 					if !result.ok {
 						if result.err != nil {
 							logging.Warn("SSE scanner error", "error", result.err)
 							select {
 							case chunks <- ResponseChunk{Error: result.err, Done: true}:
+							case <-ctx.Done():
+								return
+							}
+						} else {
+							// EOF without an explicit SSE terminal event is a truncated
+							// response, not successful completion. Preserve fully closed
+							// tool_use blocks as partial structured output before surfacing
+							// the retryable transport error; callers must never execute them
+							// from this failed attempt, but retaining them makes diagnostics
+							// and history cleanup lossless.
+							if len(accumulator.completedCalls) > 0 && !accumulator.callsEmitted {
+								select {
+								case chunks <- ResponseChunk{FunctionCalls: accumulator.completedCalls}:
+								case <-ctx.Done():
+									return
+								}
+							}
+							streamErr := fmt.Errorf("SSE stream ended before completion: %w", io.ErrUnexpectedEOF)
+							logging.Warn("SSE stream truncated", "events", eventCount, "partial", contentReceived || len(accumulator.completedCalls) > 0)
+							select {
+							case chunks <- ResponseChunk{Error: streamErr, Done: true}:
 							case <-ctx.Done():
 								return
 							}
@@ -1481,14 +1611,29 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 							preview = string(runes[:100]) + "..."
 						}
 						logging.Warn("failed to parse SSE event", "error", err, "data", preview)
-						// Notify UI about recoverable parse error
+						// A malformed event cannot be skipped safely: it may be one
+						// fragment of a tool input, and executing the remaining JSON
+						// would mutate with silently altered arguments. Treat the stream
+						// as truncated so the request-level retry path can replay it.
+						streamErr := fmt.Errorf("malformed SSE event: %v: %w", err, io.ErrUnexpectedEOF)
 						if statusCb != nil {
-							statusCb.OnError(fmt.Errorf("incomplete SSE data: %w", err), true)
+							statusCb.OnError(streamErr, true)
 						}
-						continue waitLoop
+						if len(accumulator.completedCalls) > 0 && !accumulator.callsEmitted {
+							select {
+							case chunks <- ResponseChunk{FunctionCalls: accumulator.completedCalls}:
+							case <-ctx.Done():
+								return
+							}
+						}
+						select {
+						case chunks <- ResponseChunk{Error: streamErr, Done: true}:
+						case <-ctx.Done():
+						}
+						return
 					}
 
-					// Handle Z.AI/GLM error format. GLM's undocumented shape carries
+					// Handle the Z.AI/GLM numeric business-code error shape, which carries
 					// a "code" field (e.g. "1305"); the standard Anthropic-compatible
 					// shape used by deepseek/kimi/minimax instead carries "type"
 					// (e.g. "overloaded_error") under event["type"]=="error", handled
@@ -1501,22 +1646,16 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					// provider, defeating IsOverloadError's keyword match on the
 					// resulting error text for deepseek/kimi/minimax.
 					if errObj, ok := event["error"].(map[string]any); ok {
-						if errCode := stringFromMap(errObj, "code"); errCode != "" {
+						if errCode := providerErrorCodeFromMap(errObj); errCode != "" {
 							errMsg := stringFromMap(errObj, "message")
-							retryable, keyword, description := classifyGLMErrorCode(errCode, errMsg)
+							streamErr, retryable := newGLMStreamError(errCode, errMsg)
 							logging.Error("Z.AI API error", "code", errCode, "message", errMsg, "retryable", retryable)
-							// Embed keyword so isRetryableError picks the error up via substring match.
-							// Example: "GLM server overloaded — retrying (1305): <raw>".
-							errText := fmt.Sprintf("%s (%s)", description, errCode)
-							if keyword != "" {
-								errText = fmt.Sprintf("%s [%s] (%s): %s", description, keyword, errCode, errMsg)
-							}
 							if statusCb != nil {
-								statusCb.OnError(errors.New(description), retryable)
+								statusCb.OnError(streamErr, retryable)
 							}
 							select {
 							case chunks <- ResponseChunk{
-								Error: errors.New(errText),
+								Error: streamErr,
 								Done:  true,
 							}:
 							case <-ctx.Done():

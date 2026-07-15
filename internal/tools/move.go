@@ -149,7 +149,17 @@ func (t *MoveTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 
 	if srcInfo.IsDir() {
-		return NewSuccessResult(fmt.Sprintf("Moved directory %s to %s", source, dest)), nil
+		return NewSuccessResultWithData(
+			fmt.Sprintf("Moved directory %s to %s", source, dest),
+			map[string]any{
+				"changed":           true,
+				"workspace_changed": true,
+				"written_paths":     []string{source, dest},
+			},
+		), nil
 	}
-	return NewSuccessResult(fmt.Sprintf("Moved %s to %s", source, dest)), nil
+	return NewSuccessResultWithData(
+		fmt.Sprintf("Moved %s to %s", source, dest),
+		map[string]any{"changed": true, "written_paths": []string{source, dest}},
+	), nil
 }

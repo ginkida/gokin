@@ -56,3 +56,21 @@ func TestQuickstartCommand_KeyCommandsAreCurrent(t *testing.T) {
 		}
 	}
 }
+
+func TestQuickstartCommandExplainsSafetyModesAndRecovery(t *testing.T) {
+	out, err := (&QuickstartCommand{}).Execute(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Execute returned err: %v", err)
+	}
+	for _, want := range []string{
+		"safety & session modes",
+		"Normal", "asks before write, edit, or bash",
+		"Plan", "read-only", "approval",
+		"YOLO", "permissions and sandbox are off",
+		"Shift+Tab", "bottom status bar", "Esc", "cancels the operation",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/quickstart safety onboarding missing %q", want)
+		}
+	}
+}

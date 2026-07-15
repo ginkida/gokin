@@ -63,20 +63,23 @@ type ProgressActionMsg struct {
 
 // ProgressModel is the UI for displaying batch operation progress.
 type ProgressModel struct {
-	title         string
-	current       int
-	total         int
-	currentItem   string
-	message       string
-	items         []ProgressItem
-	startTime     time.Time
-	isPaused      bool
-	isCancelling  bool
-	isComplete    bool
-	styles        *Styles
-	width         int
-	height        int
-	reducedMotion bool
+	title           string
+	current         int
+	total           int
+	currentItem     string
+	message         string
+	items           []ProgressItem
+	startTime       time.Time
+	isPaused        bool
+	isCancelling    bool
+	isComplete      bool
+	wasCancelled    bool
+	closePending    bool
+	ownerGeneration uint64
+	styles          *Styles
+	width           int
+	height          int
+	reducedMotion   bool
 
 	// Completion stats
 	successCount int
@@ -105,6 +108,12 @@ func (m *ProgressModel) SetSize(width, height int) {
 	m.height = max(height, 0)
 }
 
+// setOwnerGeneration correlates asynchronous close commands with the parent
+// batch surface that produced them.
+func (m *ProgressModel) setOwnerGeneration(owner uint64) {
+	m.ownerGeneration = owner
+}
+
 // Start starts a new progress operation.
 func (m *ProgressModel) Start(title string, total int) {
 	m.title = normalizeTimelineText(title)
@@ -120,6 +129,8 @@ func (m *ProgressModel) Start(title string, total int) {
 	m.isPaused = false
 	m.isCancelling = false
 	m.isComplete = false
+	m.wasCancelled = false
+	m.closePending = false
 	m.successCount = 0
 	m.failureCount = 0
 	m.skippedCount = 0
@@ -162,11 +173,14 @@ func (m *ProgressModel) Complete() {
 	if m.isComplete {
 		return
 	}
+	m.wasCancelled = m.wasCancelled || m.isCancelling
 	m.isComplete = true
 	m.isPaused = false
 	m.isCancelling = false
-	if m.total > 0 {
+	if m.total > 0 && !m.wasCancelled {
 		m.current = m.total
+	} else if m.total > 0 {
+		m.current = min(max(m.current, 0), m.total)
 	}
 	if !m.startTime.IsZero() {
 		m.duration = max(time.Since(m.startTime), 0)
@@ -190,7 +204,7 @@ func (m ProgressModel) Update(msg tea.Msg) (ProgressModel, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			if m.isComplete {
-				return m, func() tea.Msg { return CloseOverlayMsg{} }
+				return m.requestClose(msg.String())
 			}
 			if !m.isCancelling && m.onAction != nil {
 				m.isCancelling = true
@@ -212,7 +226,7 @@ func (m ProgressModel) Update(msg tea.Msg) (ProgressModel, tea.Cmd) {
 			}
 
 		case "p":
-			if !m.isComplete && !m.isCancelling && m.onAction != nil {
+			if !m.isComplete && !m.isCancelling && m.onAction != nil && m.pauseActionReadable() {
 				if m.isPaused {
 					m.isPaused = false
 					if m.onAction != nil {
@@ -228,11 +242,16 @@ func (m ProgressModel) Update(msg tea.Msg) (ProgressModel, tea.Cmd) {
 
 		case "q", "enter":
 			if m.isComplete {
-				return m, func() tea.Msg { return CloseOverlayMsg{} }
+				return m.requestClose(msg.String())
 			}
 		}
 
 	case ProgressUpdateMsg:
+		// Completion is terminal. A queued worker update must not replace the
+		// result the user is already reading or resurrect stale current-item text.
+		if m.isComplete {
+			return m, nil
+		}
 		m.total = max(msg.Total, 0)
 		m.UpdateProgress(msg.Current, msg.CurrentItem, msg.Message)
 		if msg.Items != nil {
@@ -246,14 +265,25 @@ func (m ProgressModel) Update(msg tea.Msg) (ProgressModel, tea.Cmd) {
 		}
 
 	case ProgressCompleteMsg:
+		// Completion is terminal. Workers may race while shutting down and send
+		// more than one completion event; keep the first result the user saw.
+		if m.isComplete {
+			return m, nil
+		}
+		m.wasCancelled = m.wasCancelled || m.isCancelling
 		m.isComplete = true
 		m.isPaused = false
 		m.isCancelling = false
-		m.total = max(msg.TotalItems, 0)
-		m.current = m.total
 		m.successCount = max(msg.SuccessCount, 0)
 		m.failureCount = max(msg.FailureCount, 0)
 		m.skippedCount = max(msg.SkippedCount, 0)
+		settled := m.successCount + m.failureCount + m.skippedCount
+		m.total = max(max(msg.TotalItems, 0), max(m.total, settled))
+		if m.wasCancelled {
+			m.current = min(max(m.current, settled), m.total)
+		} else {
+			m.current = m.total
+		}
 		m.duration = max(msg.Duration, 0)
 
 	case tea.WindowSizeMsg:
@@ -261,6 +291,19 @@ func (m ProgressModel) Update(msg tea.Msg) (ProgressModel, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// requestClose is idempotent while its asynchronous command is in flight.
+// This keeps key auto-repeat from enqueueing multiple closes for one summary.
+func (m ProgressModel) requestClose(triggerKey string) (ProgressModel, tea.Cmd) {
+	if m.closePending {
+		return m, nil
+	}
+	m.closePending = true
+	owner := m.ownerGeneration
+	return m, func() tea.Msg {
+		return CloseOverlayMsg{triggerKey: triggerKey, ownerGeneration: owner}
+	}
 }
 
 // View renders the progress view.
@@ -296,7 +339,9 @@ func (m ProgressModel) View() string {
 		lines = append(lines, fitPanelContent(line, width))
 	}
 
-	if m.isComplete && m.failureCount > 0 && m.successCount == 0 {
+	if m.isComplete && m.wasCancelled {
+		appendLine(warningStyle.Render("◌ " + title + " cancelled"))
+	} else if m.isComplete && m.failureCount > 0 && m.successCount == 0 {
 		appendLine(failStyle.Render("✗ " + title + " failed"))
 	} else if m.isComplete && m.failureCount > 0 {
 		appendLine(warningStyle.Render("⚠ " + title + " completed with issues"))
@@ -324,7 +369,7 @@ func (m ProgressModel) View() string {
 
 	barColor := ColorPrimary
 	if m.isComplete {
-		if m.failureCount > 0 {
+		if m.wasCancelled || m.failureCount > 0 {
 			barColor = ColorWarning
 		} else {
 			barColor = ColorSuccess
@@ -351,11 +396,12 @@ func (m ProgressModel) View() string {
 		itemStyle := lipgloss.NewStyle().Foreground(ColorAccent)
 		appendLine(dimStyle.Render("Now · ") + itemStyle.Render(normalizeTimelineText(m.currentItem)))
 	}
-	if message := normalizeTimelineText(m.message); !m.isCancelling && message != "" {
+	if message := normalizeTimelineText(m.message); !m.isComplete && !m.isCancelling && message != "" {
 		appendLine(lipgloss.NewStyle().Foreground(ColorText).Render(message))
 	}
 
-	if m.isComplete || m.successCount > 0 || m.failureCount > 0 {
+	settled := m.successCount + m.failureCount + m.skippedCount
+	if settled > 0 || (m.isComplete && !m.wasCancelled) {
 		skipStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 		stats := []string{successStyle.Render(fmt.Sprintf("✓ %d", max(m.successCount, 0)))}
 		if m.failureCount > 0 {
@@ -368,21 +414,45 @@ func (m ProgressModel) View() string {
 	}
 
 	footer := m.renderActions()
-	itemBudget := 5
-	if m.height > 0 {
-		itemBudget = min(itemBudget, max(m.height-len(lines)-2, 0))
+	itemBudget := min(5, len(m.items))
+	showDivider := len(m.items) > 0
+	showHiddenSummary := len(m.items) > itemBudget
+	if m.height > 0 && len(m.items) > 0 {
+		available := max(m.height-len(lines)-1, 0) // footer is mandatory
+		maxVisible := min(5, len(m.items))
+		switch {
+		case len(m.items) <= maxVisible && 1+len(m.items) <= available:
+			itemBudget = len(m.items)
+			showDivider = true
+			showHiddenSummary = false
+		case available >= 2:
+			// Divider + hidden summary are real rows. Reserve both before
+			// selecting high-priority items so the summary is never the row
+			// discarded by the final height guard.
+			itemBudget = min(maxVisible, max(available-2, 0))
+			showDivider = true
+			showHiddenSummary = len(m.items) > itemBudget
+		case available == 1:
+			itemBudget = 0
+			showDivider = false
+			showHiddenSummary = true
+		default:
+			itemBudget = 0
+			showDivider = false
+			showHiddenSummary = false
+		}
 	}
 	selected := selectProgressItems(m.items, itemBudget)
-	if len(selected) > 0 {
+	if showDivider {
 		appendLine(dimStyle.Render(strings.Repeat("─", width)))
-		for i, item := range m.items {
-			if selected[i] {
-				appendLine(m.formatItemLine(item, width))
-			}
+	}
+	for i, item := range m.items {
+		if selected[i] {
+			appendLine(m.formatItemLine(item, width))
 		}
-		if hidden := len(m.items) - len(selected); hidden > 0 {
-			appendLine(dimStyle.Render(fmt.Sprintf("… %d earlier or lower-priority item(s)", hidden)))
-		}
+	}
+	if hidden := len(m.items) - len(selected); showHiddenSummary && hidden > 0 {
+		appendLine(dimStyle.Render(fmt.Sprintf("… %d earlier or lower-priority item(s)", hidden)))
 	}
 	appendLine(footer)
 	if m.height > 0 && len(lines) > m.height {
@@ -439,6 +509,9 @@ func (m ProgressModel) renderActions() string {
 		Foreground(ColorSecondary).
 		Bold(true)
 
+	if m.isComplete && m.closePending {
+		return hintStyle.Render("Closing…")
+	}
 	if m.isComplete {
 		return keyStyle.Render("Enter/Esc") + hintStyle.Render(" Close")
 	}
@@ -446,17 +519,48 @@ func (m ProgressModel) renderActions() string {
 		return hintStyle.Render("Cancellation requested · waiting for the operation to stop…")
 	}
 	if m.onAction != nil {
+		if m.isPaused && !m.pauseActionReadable() {
+			// A resize can make Resume unreadable after Pause was chosen. Keep p
+			// fail-closed and replace it with an explicit recovery instruction.
+			switch {
+			case m.width <= 0 || m.width >= lipgloss.Width("↔ Resize  ·  Esc Cancel"):
+				return keyStyle.Render("↔") + hintStyle.Render(" Resize  ·  ") + keyStyle.Render("Esc") + hintStyle.Render(" Cancel")
+			case m.width >= lipgloss.Width("↔ Resize · Esc"):
+				return keyStyle.Render("↔") + hintStyle.Render(" Resize · ") + keyStyle.Render("Esc")
+			case m.width >= lipgloss.Width("↔ Resize"):
+				return keyStyle.Render("↔") + hintStyle.Render(" Resize")
+			default:
+				return keyStyle.Render("↔")
+			}
+		}
 		hints := []string{
 			keyStyle.Render("Esc") + " Cancel",
 		}
-		if m.isPaused {
-			hints = append(hints, keyStyle.Render("p")+" Resume")
-		} else {
-			hints = append(hints, keyStyle.Render("p")+" Pause")
+		if m.pauseActionReadable() {
+			if m.isPaused {
+				hints = append(hints, keyStyle.Render("p")+" Resume")
+			} else {
+				hints = append(hints, keyStyle.Render("p")+" Pause")
+			}
 		}
 		return hintStyle.Render(strings.Join(hints, "  │  "))
 	}
 	return hintStyle.Render("Please wait…")
+}
+
+// pauseActionReadable mirrors the actual footer after width fitting. Unknown
+// geometry remains the standalone/headless sentinel; once a positive width is
+// known, p cannot mutate state unless both sides of the reversible action fit.
+// Using the longer Resume label while still running prevents a narrow pane
+// from offering Pause and then hiding the only way to continue.
+func (m ProgressModel) pauseActionReadable() bool {
+	if m.width <= 0 || m.height <= 0 {
+		return true
+	}
+	if m.height < 2 {
+		return false
+	}
+	return m.width >= lipgloss.Width("Esc Cancel  │  p Resume")
 }
 
 func selectProgressItems(items []ProgressItem, budget int) map[int]bool {

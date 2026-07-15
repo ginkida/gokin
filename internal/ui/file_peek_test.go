@@ -273,3 +273,71 @@ func TestFilePeek_ReshowResetsTTL(t *testing.T) {
 		t.Errorf("peek not updated to latest: got %q", p.peek.FilePath)
 	}
 }
+
+func TestFilePeekDiscardsContentAfterDerivingMetadata(t *testing.T) {
+	p := NewFilePeekPanel(nil)
+	secret := "SECRET_API_TOKEN_xyz42\nsecond line\n"
+	p.ShowPeek(FilePeekMsg{
+		FilePath: ".env",
+		Title:    "sensitive preview title",
+		Action:   "reading",
+		Content:  secret,
+	})
+
+	if p.peek.Content != "" || p.peek.Title != "" {
+		t.Fatalf("file peek retained non-rendered payload: %+v", p.peek)
+	}
+	view := stripAnsi(p.View(120))
+	if strings.Contains(view, "SECRET_API_TOKEN") || !strings.Contains(view, "2 lines") {
+		t.Fatalf("file peek leaked content or lost derived metadata: %q", view)
+	}
+
+	p.Hide()
+	if p.peek != (FilePeekMsg{}) || p.meta != "" || !p.expires.IsZero() {
+		t.Fatalf("Hide retained transient file state: peek=%+v meta=%q expires=%v", p.peek, p.meta, p.expires)
+	}
+}
+
+func TestFilePeekSanitizesRuntimePathAndAction(t *testing.T) {
+	p := NewFilePeekPanel(nil)
+	p.ShowPeek(FilePeekMsg{
+		FilePath: "/tmp/safe\nforged.go\x1b]0;title\a",
+		Action:   "reading\nforged\x1b[2J",
+		Content:  "x",
+	})
+
+	view := p.View(100)
+	plain := stripAnsi(view)
+	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "\x1b]0;") || strings.Contains(plain, "\n") {
+		t.Fatalf("file peek emitted runtime control structure: %q", view)
+	}
+	for _, want := range []string{"/tmp/safe forged.go", "Reading forged"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("sanitized file peek lost %q: %q", want, plain)
+		}
+	}
+}
+
+func TestFilePeekExpirationSuppressesRenderBeforeTick(t *testing.T) {
+	p := NewFilePeekPanel(nil)
+	p.ShowPeek(FilePeekMsg{FilePath: "stale.go", Action: "reading"})
+	p.expires = time.Now().Add(-time.Millisecond)
+
+	if p.IsVisible() || p.View(80) != "" {
+		t.Fatal("expired file peek remained visible while waiting for the next UI tick")
+	}
+	p.Tick()
+	if p.peek != (FilePeekMsg{}) || p.meta != "" {
+		t.Fatalf("expiration tick did not clear transient data: peek=%+v meta=%q", p.peek, p.meta)
+	}
+}
+
+func TestFilePeekBlankPathClearsPriorPeek(t *testing.T) {
+	p := NewFilePeekPanel(nil)
+	p.ShowPeek(FilePeekMsg{FilePath: "first.go", Action: "reading", Content: "secret"})
+	p.ShowPeek(FilePeekMsg{FilePath: " \n\x1b[2J ", Action: "reading"})
+
+	if p.IsVisible() || p.peek != (FilePeekMsg{}) || p.meta != "" {
+		t.Fatalf("blank replacement left stale file context visible: peek=%+v meta=%q", p.peek, p.meta)
+	}
+}

@@ -117,3 +117,42 @@ func TestRenderTodosShortTerminalPrioritizesActiveWork(t *testing.T) {
 		t.Fatalf("short-terminal panel rendered %d rows, want <=8:\n%s", lines, got)
 	}
 }
+
+func TestRenderTodosFitsEveryTinyTerminalHeight(t *testing.T) {
+	for height := 1; height <= 12; height++ {
+		m := panelTestModel()
+		m.width = 48
+		m.height = height
+		for i := 0; i < 9; i++ {
+			m.todoItems = append(m.todoItems, "- [ ] queued task "+string(rune('a'+i)))
+		}
+		m.todoItems = append(m.todoItems, "- [/] current active task")
+
+		view := m.renderTodos()
+		if got, limit := lipgloss.Height(view), todosPanelHeightBudget(height); got > limit {
+			t.Fatalf("height=%d rendered %d rows, want <=%d:\n%s", height, got, limit, stripAnsi(view))
+		}
+		plain := stripAnsi(view)
+		if !strings.Contains(plain, "Ctrl+T hide") {
+			t.Fatalf("height=%d lost inverse action:\n%s", height, plain)
+		}
+		if height >= 4 && !strings.Contains(plain, "current active task") {
+			t.Fatalf("height=%d lost active task:\n%s", height, plain)
+		}
+	}
+}
+
+func TestRenderTodosNarrowFooterKeepsHideBeforeCounts(t *testing.T) {
+	m := panelTestModel()
+	m.width = 22
+	m.height = 12
+	for i := 0; i < 9; i++ {
+		m.todoItems = append(m.todoItems, "- [x] completed task")
+	}
+	m.todoItems = append(m.todoItems, "- [/] current task", "- [ ] next task")
+
+	plain := stripAnsi(m.renderTodos())
+	if !strings.Contains(plain, "Ctrl+T hide") {
+		t.Fatalf("narrow footer truncated its recovery action:\n%s", plain)
+	}
+}

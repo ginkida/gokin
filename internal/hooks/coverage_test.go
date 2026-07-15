@@ -210,6 +210,25 @@ func TestManagerRunStop(t *testing.T) {
 	}
 }
 
+func TestManagerToolOutcomeWrappersDriveHookConditions(t *testing.T) {
+	m := NewManager(true, t.TempDir())
+	m.AddHooks([]*Hook{
+		{Name: "success-only", Type: PostTool, Condition: ConditionIfPreviousSuccess, Enabled: true, Command: "printf success"},
+		{Name: "wrong-post", Type: PostTool, Condition: ConditionIfPreviousFailure, Enabled: true, Command: "printf wrong"},
+		{Name: "failure-only", Type: OnError, Condition: ConditionIfPreviousFailure, Enabled: true, Command: "printf failure"},
+		{Name: "wrong-error", Type: OnError, Condition: ConditionIfPreviousSuccess, Enabled: true, Command: "printf wrong"},
+	})
+
+	post := m.RunPostTool(context.Background(), "read", nil, "ok")
+	if len(post) != 1 || post[0].Hook.Name != "success-only" {
+		t.Fatalf("post-tool conditional hooks = %+v", post)
+	}
+	onError := m.RunOnError(context.Background(), "read", nil, "boom")
+	if len(onError) != 1 || onError[0].Hook.Name != "failure-only" {
+		t.Fatalf("on-error conditional hooks = %+v", onError)
+	}
+}
+
 // --- Blocked ----------------------------------------------------------------
 
 // TestBlocked covers the package-level helper that surfaces the first

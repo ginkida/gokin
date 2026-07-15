@@ -133,8 +133,9 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		}
 	}
 
-	// Update model in config and setter
-	setter.SetModel(matchedModel)
+	// Stage the full model/provider selection first. ApplyConfig constructs and
+	// installs the replacement client only after the snapshot commits, so a
+	// conflict or client-build failure cannot mutate the live session early.
 	cfg.API.ActiveProvider = matchedProvider
 	cfg.Model.Provider = matchedProvider
 	cfg.Model.Name = matchedModel

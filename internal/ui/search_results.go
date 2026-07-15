@@ -43,28 +43,65 @@ type SearchResultsActionMsg struct {
 	Action     SearchAction
 	FilePath   string
 	LineNumber int
+	triggerKey string
+	// ownerGeneration identifies the particular overlay opening that emitted
+	// this asynchronous command. It prevents a delayed action from an already
+	// closed search surface from mutating a later search surface.
+	ownerGeneration uint64
 }
 
 // SearchResultsModel is the UI for interactive search results.
 type SearchResultsModel struct {
-	results       []SearchResult
-	selectedIndex int
-	viewport      viewport.Model
-	previewPane   viewport.Model
-	query         string
-	tool          string
-	styles        *Styles
-	width         int
-	height        int
-	showPreview   bool
-	actionsLinked bool
-	actionsKnown  bool
+	results         []SearchResult
+	selectedIndex   int
+	viewport        viewport.Model
+	previewPane     viewport.Model
+	query           string
+	tool            string
+	styles          *Styles
+	width           int
+	height          int
+	showPreview     bool
+	actionsLinked   bool
+	actionsKnown    bool
+	ownerGeneration uint64
+	actionPending   bool
 
 	// Callback for actions
 	onAction func(action SearchAction, filePath string, lineNum int)
 }
 
+func (m *SearchResultsModel) setOwnerGeneration(generation uint64) {
+	m.ownerGeneration = generation
+}
+
 const minSearchResultsSplitWidth = 64
+
+// Tiny full-screen workspaces keep the status row and tail-crop the body. At
+// these dimensions the action footer may survive while the selected target is
+// gone, so target-dependent actions must fail closed until both axes are
+// readable. A zero dimension means Bubble Tea has not announced geometry yet;
+// preserve the historical headless/standalone behavior in that sentinel state.
+func workspaceTargetActionsUnreadable(width, height, minTargetWidth int) bool {
+	return width > 0 && height > 0 && (width < minTargetWidth || height <= 4)
+}
+
+const minSearchTargetWidth = 7 // two-cell cursor + at least one path cell inside the viewport
+
+func tinyWorkspaceResizeRecoveryHint(width int) string {
+	switch {
+	case width >= 20:
+		return "Esc/q Close · Resize"
+	case width >= 10:
+		return "q · Resize"
+	case width >= 5:
+		return "q · ↔"
+	case width >= 3:
+		return "q ↔"
+	default:
+		return "q"
+	}
+}
 
 // NewSearchResultsModel creates a new search results model.
 func NewSearchResultsModel(styles *Styles) SearchResultsModel {
@@ -84,8 +121,8 @@ func NewSearchResultsModel(styles *Styles) SearchResultsModel {
 
 // SetSize sets the size of the search results view.
 func (m *SearchResultsModel) SetSize(width, height int) {
-	m.width = max(width, 1)
-	m.height = max(height, 1)
+	m.width = max(width, 0)
+	m.height = max(height, 0)
 	contentHeight := max(m.height-9, 1)
 
 	if m.previewVisible() && m.width >= minSearchResultsSplitWidth {
@@ -112,6 +149,7 @@ func (m SearchResultsModel) renderWidth() int {
 
 // SetResults sets the search results to display.
 func (m *SearchResultsModel) SetResults(query, tool string, results []SearchResult) {
+	m.actionPending = false
 	m.query = safeKeyEntryText(query)
 	m.tool = safeKeyEntryText(tool)
 	m.results = make([]SearchResult, len(results))
@@ -145,6 +183,18 @@ func (m SearchResultsModel) actionsAvailable() bool {
 	// need no callback. Only a parent that explicitly owns dispatch can declare
 	// that no downstream handler is linked.
 	return !m.actionsKnown || m.actionsLinked || m.onAction != nil
+}
+
+func (m SearchResultsModel) canNavigateResults() bool {
+	return len(m.results) > 1
+}
+
+func (m SearchResultsModel) canPageResults() bool {
+	return m.canNavigateResults() && len(m.results) > max(m.viewport.Height, 1)
+}
+
+func (m SearchResultsModel) canScrollPreview() bool {
+	return m.previewVisible() && m.previewPane.TotalLineCount() > m.previewPane.Height
 }
 
 // updateViewport updates the viewport content based on current selection.
@@ -366,6 +416,9 @@ func (m SearchResultsModel) Update(msg tea.Msg) (SearchResultsModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.actionPending && searchTerminalActionKey(msg.String()) {
+			return m, nil
+		}
 		switch msg.String() {
 		case "j", "down":
 			if m.selectedIndex < len(m.results)-1 {
@@ -390,31 +443,43 @@ func (m SearchResultsModel) Update(msg tea.Msg) (SearchResultsModel, tea.Cmd) {
 			m.selectIndex(m.selectedIndex + max(m.viewport.Height, 1))
 
 		case "enter":
+			if workspaceTargetActionsUnreadable(m.width, m.height, minSearchTargetWidth) {
+				return m, nil
+			}
 			if m.actionsAvailable() && len(m.results) > 0 && m.selectedIndex < len(m.results) {
 				result := m.results[m.selectedIndex]
+				m.actionPending = true
 				if m.onAction != nil {
 					m.onAction(SearchActionOpen, result.FilePath, result.LineNumber)
 				}
 				return m, func() tea.Msg {
 					return SearchResultsActionMsg{
-						Action:     SearchActionOpen,
-						FilePath:   result.FilePath,
-						LineNumber: result.LineNumber,
+						Action:          SearchActionOpen,
+						FilePath:        result.FilePath,
+						LineNumber:      result.LineNumber,
+						ownerGeneration: m.ownerGeneration,
+						triggerKey:      msg.String(),
 					}
 				}
 			}
 
 		case "e":
+			if workspaceTargetActionsUnreadable(m.width, m.height, minSearchTargetWidth) {
+				return m, nil
+			}
 			if m.actionsAvailable() && len(m.results) > 0 && m.selectedIndex < len(m.results) {
 				result := m.results[m.selectedIndex]
+				m.actionPending = true
 				if m.onAction != nil {
 					m.onAction(SearchActionEdit, result.FilePath, result.LineNumber)
 				}
 				return m, func() tea.Msg {
 					return SearchResultsActionMsg{
-						Action:     SearchActionEdit,
-						FilePath:   result.FilePath,
-						LineNumber: result.LineNumber,
+						Action:          SearchActionEdit,
+						FilePath:        result.FilePath,
+						LineNumber:      result.LineNumber,
+						ownerGeneration: m.ownerGeneration,
+						triggerKey:      msg.String(),
 					}
 				}
 			}
@@ -441,6 +506,9 @@ func (m SearchResultsModel) Update(msg tea.Msg) (SearchResultsModel, tea.Cmd) {
 
 		case "y":
 			// Copy path
+			if workspaceTargetActionsUnreadable(m.width, m.height, minSearchTargetWidth) {
+				return m, nil
+			}
 			if len(m.results) > 0 && m.selectedIndex < len(m.results) {
 				result := m.results[m.selectedIndex]
 				if m.onAction != nil {
@@ -448,18 +516,20 @@ func (m SearchResultsModel) Update(msg tea.Msg) (SearchResultsModel, tea.Cmd) {
 				}
 				return m, func() tea.Msg {
 					return SearchResultsActionMsg{
-						Action:   SearchActionCopyPath,
-						FilePath: result.FilePath,
+						Action:          SearchActionCopyPath,
+						FilePath:        result.FilePath,
+						ownerGeneration: m.ownerGeneration,
 					}
 				}
 			}
 
 		case "q", "esc":
+			m.actionPending = true
 			if m.onAction != nil {
 				m.onAction(SearchActionClose, "", 0)
 			}
 			return m, func() tea.Msg {
-				return SearchResultsActionMsg{Action: SearchActionClose}
+				return SearchResultsActionMsg{Action: SearchActionClose, ownerGeneration: m.ownerGeneration, triggerKey: msg.String()}
 			}
 
 		case "g":
@@ -472,7 +542,15 @@ func (m SearchResultsModel) Update(msg tea.Msg) (SearchResultsModel, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		if m.previewVisible() {
+		if m.canScrollPreview() {
+			m.previewPane, cmd = m.previewPane.Update(msg)
+		} else if direction := verticalMouseWheelDirection(msg); direction != 0 {
+			// A short preview has nothing to scroll, so preserve mouse/keyboard
+			// parity by moving the result selection. Keep the highlighted result
+			// and viewport coupled rather than scrolling the viewport alone.
+			step := max(m.viewport.MouseWheelDelta, 1)
+			m.selectIndex(m.selectedIndex + direction*step)
+		} else if m.previewVisible() {
 			m.previewPane, cmd = m.previewPane.Update(msg)
 		} else {
 			m.viewport, cmd = m.viewport.Update(msg)
@@ -484,6 +562,14 @@ func (m SearchResultsModel) Update(msg tea.Msg) (SearchResultsModel, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func searchTerminalActionKey(key string) bool {
+	switch key {
+	case "enter", "e", "q", "esc":
+		return true
+	}
+	return false
 }
 
 // View renders the search results.
@@ -530,13 +616,15 @@ func (m SearchResultsModel) View() string {
 
 	if m.previewVisible() && m.width >= minSearchResultsSplitWidth {
 		// Split view
-		resultBox := borderStyle.Width(m.viewport.Width).Render(m.viewport.View())
-		previewBox := borderStyle.Width(m.previewPane.Width).Render(m.previewPane.View())
+		resultBox := borderStyle.Width(m.viewport.Width + 2).Render(m.viewport.View())
+		previewView := fitPanelContent(m.previewPane.View(), m.previewPane.Width)
+		previewBox := borderStyle.Width(m.previewPane.Width + 2).Render(previewView)
 		builder.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, resultBox, " ", previewBox))
 	} else if m.previewVisible() {
-		builder.WriteString(borderStyle.Width(m.previewPane.Width).Render(m.previewPane.View()))
+		previewView := fitPanelContent(m.previewPane.View(), m.previewPane.Width)
+		builder.WriteString(borderStyle.Width(m.previewPane.Width + 2).Render(previewView))
 	} else {
-		builder.WriteString(borderStyle.Width(m.viewport.Width).Render(m.viewport.View()))
+		builder.WriteString(borderStyle.Width(m.viewport.Width + 2).Render(m.viewport.View()))
 	}
 
 	builder.WriteString("\n\n")
@@ -558,6 +646,14 @@ func (m *SearchResultsModel) renderActions(builder *strings.Builder) {
 		builder.WriteString(ansi.Truncate(hintStyle.Render(keyStyle.Render("Esc/q")+" Close"), m.renderWidth(), "…"))
 		return
 	}
+	if workspaceTargetActionsUnreadable(m.width, m.height, minSearchTargetWidth) {
+		if m.canNavigateResults() {
+			builder.WriteString(ansi.Truncate(hintStyle.Render("↑/↓ Navigate"), m.renderWidth(), "…"))
+			builder.WriteString("\n")
+		}
+		builder.WriteString(ansi.Truncate(hintStyle.Render(tinyWorkspaceResizeRecoveryHint(m.renderWidth())), m.renderWidth(), "…"))
+		return
+	}
 
 	previewAction := "Show preview"
 	if m.showPreview {
@@ -575,12 +671,29 @@ func (m *SearchResultsModel) renderActions(builder *strings.Builder) {
 	}
 
 	builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(hints, "  │  ")), m.renderWidth(), "…"))
-	builder.WriteString("\n")
-	secondary := "↑/↓ Navigate  │  PgUp/PgDn Page  │  Home/End Jump"
+	var secondary []string
 	if m.previewVisible() {
-		secondary = "Ctrl+j/k Scroll preview  │  ↑/↓ Change result  │  Home/End Jump"
+		if m.canScrollPreview() {
+			secondary = append(secondary, "Ctrl+j/k Scroll preview")
+		}
+		if m.canNavigateResults() {
+			secondary = append(secondary, "↑/↓ Change result")
+			if m.canPageResults() {
+				secondary = append(secondary, "PgUp/PgDn Page results")
+			}
+			secondary = append(secondary, "Home/End Jump")
+		}
+	} else if m.canNavigateResults() {
+		secondary = append(secondary, "↑/↓ Navigate")
+		if m.canPageResults() {
+			secondary = append(secondary, "PgUp/PgDn Page")
+		}
+		secondary = append(secondary, "Home/End Jump")
 	}
-	builder.WriteString(ansi.Truncate(hintStyle.Render(secondary), m.renderWidth(), "…"))
+	if len(secondary) > 0 {
+		builder.WriteString("\n")
+		builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(secondary, "  │  ")), m.renderWidth(), "…"))
+	}
 }
 
 // GetSelectedResult returns the currently selected result.

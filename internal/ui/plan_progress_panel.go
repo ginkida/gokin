@@ -100,6 +100,16 @@ func NewPlanProgressPanel(styles *Styles) *PlanProgressPanel {
 // complaint. Ctrl+X expands on demand.
 const planAutoCollapseSteps = 4
 
+// Below this height the expanded panel cannot fit enough plan context to make
+// a density toggle real. View auto-compacts and advertises resize instead;
+// input must follow the same boundary so Ctrl+X cannot mutate a future layout
+// while having no visible effect now.
+const planPanelExpandedMinHeight = 16
+
+// The bordered panel needs seven inner cells for a complete `Ctrl+X` key plus
+// truncation disclosure, which means nine terminal columns including borders.
+const planPanelDensityMinWidth = 9
+
 // planPanelLingerAfterDone is how long the panel stays visible after the
 // whole plan reaches a terminal state — long enough to read the final ✓/✗
 // summary, short enough that a finished plan doesn't shadow the next
@@ -111,8 +121,8 @@ const planPanelLingerAfterDone = 10 * time.Second
 func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps []PlanStepInfo) {
 	p.visible = true
 	p.planID = planID
-	p.planTitle = title
-	p.planDesc = description
+	p.planTitle = safeKeyEntryText(title)
+	p.planDesc = safeKeyEntryText(description)
 	p.startedAt = time.Now()
 	p.finishedAt = time.Time{}
 	p.currentStepID = 0
@@ -126,8 +136,8 @@ func (p *PlanProgressPanel) StartPlan(planID, title, description string, steps [
 	for i, step := range steps {
 		p.steps[i] = PlanStepState{
 			ID:          step.ID,
-			Title:       step.Title,
-			Description: step.Description,
+			Title:       safeKeyEntryText(step.Title),
+			Description: safeKeyEntryText(step.Description),
 			Status:      PlanStepPending,
 		}
 		p.appendTransition(step.ID, PlanStepPending, PlanStepPending, "queued")
@@ -142,6 +152,13 @@ func (p *PlanProgressPanel) StartStep(stepID int) {
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
 			prev := p.steps[i].Status
+			if prev == PlanStepInProgress {
+				// A terminal signal can race a same-step resume. Re-open the panel,
+				// but preserve the original start timestamp and timeline entry.
+				p.currentStepID = stepID
+				p.finishedAt = time.Time{}
+				return
+			}
 			p.steps[i].Status = PlanStepInProgress
 			p.steps[i].StartedAt = time.Now()
 			p.steps[i].CompletedAt = time.Time{}
@@ -149,19 +166,24 @@ func (p *PlanProgressPanel) StartStep(stepID int) {
 			p.steps[i].Error = ""
 			p.currentStepID = stepID
 			p.appendTransition(stepID, prev, PlanStepInProgress, "")
-			break
+			// A step starting means the plan is alive again (resume/replan after
+			// a terminal signal), so cancel any pending auto-hide.
+			p.finishedAt = time.Time{}
+			return
 		}
 	}
-	// A step starting means the plan is alive again (resume/replan after a
-	// premature terminal signal) — cancel any pending auto-hide.
-	p.finishedAt = time.Time{}
 }
 
 // CompleteStep marks a step as completed.
 func (p *PlanProgressPanel) CompleteStep(stepID int, output string, reason string) {
+	output = safeKeyEntryText(output)
+	reason = safeKeyEntryText(reason)
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
 			prev := p.steps[i].Status
+			if prev == PlanStepCompleted {
+				return
+			}
 			p.steps[i].Status = PlanStepCompleted
 			p.steps[i].CompletedAt = time.Now()
 			p.steps[i].Output = output
@@ -174,9 +196,14 @@ func (p *PlanProgressPanel) CompleteStep(stepID int, output string, reason strin
 
 // FailStep marks a step as failed.
 func (p *PlanProgressPanel) FailStep(stepID int, errorMsg string, reason string) {
+	errorMsg = safeKeyEntryText(errorMsg)
+	reason = safeKeyEntryText(reason)
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
 			prev := p.steps[i].Status
+			if prev == PlanStepFailed {
+				return
+			}
 			p.steps[i].Status = PlanStepFailed
 			p.steps[i].CompletedAt = time.Now()
 			p.steps[i].Error = errorMsg
@@ -189,9 +216,13 @@ func (p *PlanProgressPanel) FailStep(stepID int, errorMsg string, reason string)
 
 // SkipStep marks a step as skipped.
 func (p *PlanProgressPanel) SkipStep(stepID int, reason string) {
+	reason = safeKeyEntryText(reason)
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
 			prev := p.steps[i].Status
+			if prev == PlanStepSkipped {
+				return
+			}
 			p.steps[i].Status = PlanStepSkipped
 			p.steps[i].CompletedAt = time.Now()
 			p.appendTransition(stepID, prev, PlanStepSkipped, reason)
@@ -203,9 +234,13 @@ func (p *PlanProgressPanel) SkipStep(stepID int, reason string) {
 
 // PauseStep marks a step as paused.
 func (p *PlanProgressPanel) PauseStep(stepID int, reason string) {
+	reason = safeKeyEntryText(reason)
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
 			prev := p.steps[i].Status
+			if prev == PlanStepPaused {
+				return
+			}
 			p.steps[i].Status = PlanStepPaused
 			p.steps[i].CompletedAt = time.Now()
 			p.steps[i].Error = reason
@@ -238,7 +273,7 @@ func (p *PlanProgressPanel) appendTransition(stepID int, from, to PlanStepStatus
 		StepID:  stepID,
 		From:    from,
 		To:      to,
-		Reason:  reason,
+		Reason:  safeKeyEntryText(reason),
 		At:      time.Now(),
 		StepRef: stepRef,
 	})
@@ -269,6 +304,11 @@ func (p *PlanProgressPanel) IsVisible() bool {
 	return p.visible
 }
 
+// IsCollapsed reports the user-facing density state for palette/status copy.
+func (p *PlanProgressPanel) IsCollapsed() bool {
+	return p.collapsed
+}
+
 // lingerExpired reports whether the post-completion display window is over.
 func (p *PlanProgressPanel) lingerExpired() bool {
 	return !p.finishedAt.IsZero() && time.Since(p.finishedAt) > planPanelLingerAfterDone
@@ -282,6 +322,23 @@ func (p *PlanProgressPanel) Toggle() {
 	p.finishedAt = time.Time{}
 }
 
+// ToggleAtGeometry applies the density change only when its key and the
+// expanded form can actually be shown. Non-positive dimensions are the
+// legacy/headless sentinel.
+func (p *PlanProgressPanel) ToggleAtGeometry(width, height int) bool {
+	if !planPanelDensityActionReadable(width, height) {
+		return false
+	}
+	p.Toggle()
+	return true
+}
+
+func planPanelDensityActionReadable(width, height int) bool {
+	widthReadable := width <= 0 || width >= planPanelDensityMinWidth
+	heightReadable := height <= 0 || height >= planPanelExpandedMinHeight
+	return widthReadable && heightReadable
+}
+
 // Tick updates the animation frame.
 func (p *PlanProgressPanel) Tick() {
 	if !p.reducedMotion {
@@ -293,8 +350,8 @@ func (p *PlanProgressPanel) SetReducedMotion(enabled bool) { p.reducedMotion = e
 
 // SetCurrentTool updates the currently executing tool.
 func (p *PlanProgressPanel) SetCurrentTool(toolName, toolInfo string) {
-	toolName = strings.Join(strings.Fields(toolName), " ")
-	toolInfo = strings.Join(strings.Fields(toolInfo), " ")
+	toolName = safeKeyEntryText(toolName)
+	toolInfo = safeKeyEntryText(toolInfo)
 	if toolName == "" {
 		p.currentTool = ""
 		p.currentInfo = ""
@@ -318,9 +375,7 @@ func (p *PlanProgressPanel) SetCurrentTool(toolName, toolInfo string) {
 	// Add to activity log
 	msg := toolName
 	if toolInfo != "" {
-		if runes := []rune(toolInfo); len(runes) > 40 {
-			toolInfo = string(runes[:37]) + "..."
-		}
+		toolInfo = truncateForWidth(toolInfo, 40)
 		msg += ": " + toolInfo
 	}
 	p.AddActivity("tool", msg)
@@ -334,8 +389,8 @@ func (p *PlanProgressPanel) ClearCurrentTool() {
 
 // AddActivity adds an entry to the activity log.
 func (p *PlanProgressPanel) AddActivity(actType, message string) {
-	actType = strings.Join(strings.Fields(actType), " ")
-	message = strings.Join(strings.Fields(message), " ")
+	actType = safeKeyEntryText(actType)
+	message = safeKeyEntryText(message)
 	if message == "" {
 		return
 	}
@@ -357,7 +412,7 @@ func (p *PlanProgressPanel) ClearActivities() {
 	p.activities = make([]ActivityEntry, 0)
 }
 
-// Progress returns the completion progress (0.0 to 1.0).
+// Progress returns resolved-step progress (completed + intentionally skipped).
 func (p *PlanProgressPanel) Progress() float64 {
 	if len(p.steps) == 0 {
 		return 0
@@ -376,11 +431,25 @@ func (p *PlanProgressPanel) Progress() float64 {
 func (p *PlanProgressPanel) CompletedCount() int {
 	count := 0
 	for _, step := range p.steps {
-		if step.Status == PlanStepCompleted || step.Status == PlanStepSkipped {
+		if step.Status == PlanStepCompleted {
 			count++
 		}
 	}
 	return count
+}
+
+func (p *PlanProgressPanel) SkippedCount() int {
+	count := 0
+	for _, step := range p.steps {
+		if step.Status == PlanStepSkipped {
+			count++
+		}
+	}
+	return count
+}
+
+func (p *PlanProgressPanel) unresolvedCount() int {
+	return max(len(p.steps)-p.CompletedCount()-p.SkippedCount()-p.FailedCount()-p.PausedCount(), 0)
 }
 
 func (p *PlanProgressPanel) FailedCount() int {
@@ -415,6 +484,13 @@ func (p *PlanProgressPanel) elapsed() time.Duration {
 }
 
 func (p *PlanProgressPanel) focusStepIndex() int {
+	// Parallel plans may have more than one running step. Prefer the most
+	// recently announced one, because currentTool/currentInfo belong to it.
+	for i := range p.steps {
+		if p.steps[i].ID == p.currentStepID && p.steps[i].Status == PlanStepInProgress {
+			return i
+		}
+	}
 	for _, status := range []PlanStepStatus{PlanStepInProgress, PlanStepFailed, PlanStepPaused, PlanStepPending, PlanStepCompleted, PlanStepSkipped} {
 		for i := range p.steps {
 			if p.steps[i].Status == status {
@@ -440,6 +516,9 @@ func (p *PlanProgressPanel) View(width int, heights ...int) string {
 	if len(heights) > 0 {
 		height = heights[0]
 	}
+	if height > 0 && height < 8 {
+		return p.viewTiny(width)
+	}
 
 	borderStyle := lipgloss.NewStyle().Foreground(ColorPlan)
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorPlan)
@@ -463,16 +542,21 @@ func (p *PlanProgressPanel) View(width int, heights ...int) string {
 	}
 	failed := p.FailedCount()
 	paused := p.PausedCount()
+	skipped := p.SkippedCount()
+	unresolved := p.unresolvedCount()
 	titlePrefix := "Plan: "
 	titleLineStyle := titleStyle
 	if !p.finishedAt.IsZero() && failed > 0 {
 		titlePrefix = "Plan failed: "
 		titleLineStyle = errorStyle
-	} else if !p.finishedAt.IsZero() {
-		titlePrefix = "Plan complete: "
 	} else if paused > 0 {
 		titlePrefix = "Plan paused: "
 		titleLineStyle = warningStyle
+	} else if !p.finishedAt.IsZero() && unresolved > 0 {
+		titlePrefix = "Plan incomplete: "
+		titleLineStyle = warningStyle
+	} else if !p.finishedAt.IsZero() {
+		titlePrefix = "Plan complete: "
 	}
 	p.writePlanLine(&content, borderStyle, titleLineStyle.Render(titlePrefix+title), innerWidth)
 
@@ -484,8 +568,14 @@ func (p *PlanProgressPanel) View(width int, heights ...int) string {
 
 	progress := p.Progress()
 	progressInfo := fmt.Sprintf("%d/%d · %s", p.CompletedCount(), len(p.steps), formatElapsed(p.elapsed()))
+	if skipped > 0 {
+		progressInfo += fmt.Sprintf(" · %d skipped", skipped)
+	}
 	if failed > 0 {
 		progressInfo += fmt.Sprintf(" · %d failed", failed)
+	}
+	if !p.finishedAt.IsZero() && unresolved > 0 {
+		progressInfo += fmt.Sprintf(" · %d unfinished", unresolved)
 	}
 	barWidth := min(20, max(innerWidth-lipgloss.Width(progressInfo)-1, 0))
 	progressLine := ""
@@ -497,31 +587,44 @@ func (p *PlanProgressPanel) View(width int, heights ...int) string {
 	p.writePlanLine(&content, borderStyle, progressLine, innerWidth)
 	separator("├", "─", "┤")
 
-	autoCompact := height > 0 && height < 16
+	autoCompact := height > 0 && height < planPanelExpandedMinHeight
 	effectiveCollapsed := p.collapsed || autoCompact
+	toolEmbedded := false
 	if !effectiveCollapsed {
 		for _, step := range p.steps {
 			p.writeAdaptiveStepLines(&content, borderStyle, p.renderStep(step, max(innerWidth-2, 1)), innerWidth)
+			if step.Status == PlanStepInProgress && step.ID == p.currentStepID && p.currentTool != "" {
+				toolEmbedded = true
+			}
 		}
 	} else {
 		shown := 0
 		if index := p.focusStepIndex(); index >= 0 {
-			p.writeAdaptiveStepLines(&content, borderStyle, p.renderStep(p.steps[index], max(innerWidth-2, 1)), innerWidth)
+			step := p.steps[index]
+			p.writeAdaptiveStepLines(&content, borderStyle, p.renderStep(step, max(innerWidth-2, 1)), innerWidth)
+			toolEmbedded = step.Status == PlanStepInProgress && step.ID == p.currentStepID && p.currentTool != ""
 			shown = 1
 		}
 		hidden := len(p.steps) - shown
 		action := "Ctrl+X to expand"
-		if autoCompact && !p.collapsed {
+		if autoCompact {
 			action = "resize to expand"
 		}
 		summary := fmt.Sprintf("… %d hidden · ✓ %d done", hidden, p.CompletedCount())
+		if skipped > 0 {
+			summary += fmt.Sprintf(" · %d skipped", skipped)
+		}
 		if failed > 0 {
 			summary += fmt.Sprintf(" · %d failed", failed)
 		}
-		p.writePlanLine(&content, borderStyle, dimStyle.Render(summary+" · "+action), innerWidth)
+		// At the irreducible paused height, the pause reason and resume command
+		// outrank the folded-count summary. Larger panels keep all three.
+		if !(height > 0 && height <= 8 && paused > 0) {
+			p.writePlanLine(&content, borderStyle, dimStyle.Render(action+" · "+summary), innerWidth)
+		}
 	}
 
-	if p.currentTool != "" {
+	if p.currentTool != "" && !toolEmbedded {
 		separator("├", "─", "┤")
 		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		toolStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
@@ -548,6 +651,44 @@ func (p *PlanProgressPanel) View(width int, heights ...int) string {
 	}
 	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
 	return content.String()
+}
+
+// viewTiny keeps a plan truthful when even the eight-row compact panel cannot
+// fit. It avoids parent tail-cropping, which otherwise left only a bottom
+// border/action and hid the active or terminal state.
+func (p *PlanProgressPanel) viewTiny(width int) string {
+	if len(p.steps) == 0 {
+		return truncateForWidth("Plan · no executable steps", width)
+	}
+	failed := p.FailedCount()
+	paused := p.PausedCount()
+	unresolved := p.unresolvedCount()
+	label := "Plan active · resize for controls"
+	switch {
+	case !p.finishedAt.IsZero() && failed > 0:
+		label = "✗ Plan failed"
+	case paused > 0:
+		label = "⏸ Plan paused · /resume-plan"
+	case !p.finishedAt.IsZero() && unresolved > 0:
+		label = "! Plan incomplete"
+	case !p.finishedAt.IsZero():
+		label = "✓ Plan complete"
+	case p.reducedMotion:
+		label = "● Plan active · resize for controls"
+	}
+	label += fmt.Sprintf(" · %d/%d", p.CompletedCount(), len(p.steps))
+	if skipped := p.SkippedCount(); skipped > 0 {
+		label += fmt.Sprintf(" · %d skipped", skipped)
+	}
+	if index := p.focusStepIndex(); index >= 0 {
+		step := p.steps[index]
+		title := safeKeyEntryText(step.Title)
+		if title == "" {
+			title = "Untitled step"
+		}
+		label += fmt.Sprintf(" · Step %d: %s", step.ID, title)
+	}
+	return truncateForWidth(label, width)
 }
 
 func (p *PlanProgressPanel) writePlanLine(content *strings.Builder, borderStyle lipgloss.Style, rendered string, innerWidth int) {
@@ -592,10 +733,13 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 		iconStyle = lipgloss.NewStyle().Foreground(ColorDim)
 	case PlanStepInProgress:
 		// Animated braille spinner so it's obvious the step is actively running
-		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		icon = spinners[p.frame%len(spinners)]
-		if p.reducedMotion {
+		if !p.finishedAt.IsZero() {
+			icon = "!"
+		} else if p.reducedMotion {
 			icon = "●"
+		} else {
+			spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+			icon = spinners[p.frame%len(spinners)]
 		}
 		iconStyle = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	case PlanStepPaused:
@@ -610,6 +754,9 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	case PlanStepSkipped:
 		icon = "⊘"
 		iconStyle = lipgloss.NewStyle().Foreground(ColorMuted)
+	default:
+		icon = "?"
+		iconStyle = lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
 	}
 
 	titleStyle := lipgloss.NewStyle().Foreground(ColorText)
@@ -639,7 +786,11 @@ func (p *PlanProgressPanel) renderStep(step PlanStepState, maxWidth int) string 
 	case PlanStepInProgress:
 		// Show live elapsed time so users know how long the current step has been running
 		if !step.StartedAt.IsZero() {
-			durationStr = " " + dimStyle.Render("["+formatElapsed(max(time.Since(step.StartedAt), 0))+"]")
+			end := time.Now()
+			if !p.finishedAt.IsZero() {
+				end = p.finishedAt
+			}
+			durationStr = " " + dimStyle.Render("["+formatElapsed(max(end.Sub(step.StartedAt), 0))+"]")
 		}
 	}
 	maxTitleWidth := max(maxWidth-2-lipgloss.Width(durationStr), 0)
@@ -740,6 +891,7 @@ func (p *PlanProgressPanel) ViewCompact() string {
 
 	progress := p.Progress()
 	completed := p.CompletedCount()
+	skipped := p.SkippedCount()
 	total := len(p.steps)
 
 	// Find current step
@@ -757,6 +909,8 @@ func (p *PlanProgressPanel) ViewCompact() string {
 		icon = "✗"
 	} else if p.PausedCount() > 0 {
 		icon = "⏸"
+	} else if !p.finishedAt.IsZero() && p.unresolvedCount() > 0 {
+		icon = "!"
 	} else if progress >= 1.0 {
 		icon = "✓"
 	} else {
@@ -772,6 +926,9 @@ func (p *PlanProgressPanel) ViewCompact() string {
 
 	result := planStyle.Render(icon+" Plan") +
 		mutedStyle.Render(fmt.Sprintf(" %d/%d", completed, total))
+	if skipped > 0 {
+		result += mutedStyle.Render(fmt.Sprintf(" · %d skipped", skipped))
+	}
 
 	if currentTitle != "" {
 		result += lipgloss.NewStyle().Foreground(ColorDim).Render(" • " + currentTitle)
@@ -783,9 +940,11 @@ func (p *PlanProgressPanel) ViewCompact() string {
 // RenderStepNotification renders a notification for step status change.
 func (p *PlanProgressPanel) RenderStepNotification(stepID int, status PlanStepStatus) string {
 	var step *PlanStepState
+	stepPosition := 0
 	for i := range p.steps {
 		if p.steps[i].ID == stepID {
 			step = &p.steps[i]
+			stepPosition = i + 1
 			break
 		}
 	}
@@ -821,9 +980,13 @@ func (p *PlanProgressPanel) RenderStepNotification(stepID int, status PlanStepSt
 	style := lipgloss.NewStyle().Foreground(color)
 	titleStyle := lipgloss.NewStyle().Foreground(ColorText)
 
-	stepNum := fmt.Sprintf("[%d/%d]", stepID, len(p.steps))
+	stepNum := fmt.Sprintf("[%d/%d]", stepPosition, len(p.steps))
+	stepTitle := safeKeyEntryText(step.Title)
+	if stepTitle == "" {
+		stepTitle = "Untitled step"
+	}
 
 	return style.Render(icon+" "+verb) + " " +
 		lipgloss.NewStyle().Foreground(ColorDim).Render(stepNum) + " " +
-		titleStyle.Render(step.Title)
+		titleStyle.Render(stepTitle)
 }

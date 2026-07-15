@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -175,5 +176,99 @@ func TestArgumentTakingCommandsExposeAutocompleteSyntax(t *testing.T) {
 	if len(drift) > 0 {
 		sort.Strings(drift)
 		t.Fatalf("argument-taking commands lack autocomplete syntax:\n  %s", strings.Join(drift, "\n  "))
+	}
+}
+
+// TestAutocompleteCopyMatchesRuntimeCommands prevents a subtler form of
+// discoverability drift: the command still appears, but composer copy no
+// longer describes what Enter actually runs. Usage is intentionally concise in
+// the composer while Command.Usage may be a multi-line examples page; argument
+// shape is guarded separately above. Descriptions, however, must share the
+// command's canonical sentence so help, autocomplete and the palette do not
+// tell three different stories.
+func TestAutocompleteCopyMatchesRuntimeCommands(t *testing.T) {
+	autocomplete := make(map[string]ui.CommandInfo)
+	for _, entry := range ui.DefaultCommands() {
+		autocomplete[entry.Name] = entry
+	}
+
+	var drift []string
+	handler := NewHandler()
+	for _, command := range handler.ListCommands() {
+		entry, ok := autocomplete[command.Name()]
+		if !ok {
+			continue
+		}
+		if got, want := strings.TrimSpace(entry.Description), strings.TrimSpace(command.Description()); got != want {
+			drift = append(drift, command.Name()+": description UI="+got+" runtime="+want)
+		}
+	}
+	if len(drift) > 0 {
+		sort.Strings(drift)
+		t.Fatalf("autocomplete copy drifted from executable commands:\n  %s", strings.Join(drift, "\n  "))
+	}
+}
+
+func TestAutocompleteExposesRuntimeLongFlags(t *testing.T) {
+	longFlag := regexp.MustCompile(`--[a-zA-Z][a-zA-Z0-9-]*`)
+	autocomplete := make(map[string]ui.CommandInfo)
+	for _, entry := range ui.DefaultCommands() {
+		autocomplete[entry.Name] = entry
+	}
+
+	var drift []string
+	handler := NewHandler()
+	for _, command := range handler.ListCommands() {
+		entry, ok := autocomplete[command.Name()]
+		if !ok {
+			continue
+		}
+		options := make(map[string]bool)
+		for _, arg := range entry.Args {
+			for _, option := range arg.Options {
+				options[option] = true
+			}
+		}
+		seen := make(map[string]bool)
+		for _, flag := range longFlag.FindAllString(command.Usage(), -1) {
+			if seen[flag] {
+				continue
+			}
+			seen[flag] = true
+			if !strings.Contains(entry.Usage, flag) {
+				drift = append(drift, command.Name()+": UI usage omits "+flag)
+			}
+			if !options[flag] {
+				drift = append(drift, command.Name()+": option completion omits "+flag)
+			}
+		}
+	}
+	if len(drift) > 0 {
+		sort.Strings(drift)
+		t.Fatalf("runtime flags are undiscoverable in autocomplete:\n  %s", strings.Join(drift, "\n  "))
+	}
+}
+
+func TestRelatedCommandLinksResolve(t *testing.T) {
+	handler := NewHandler()
+	var broken []string
+	for _, command := range handler.ListCommands() {
+		for _, raw := range strings.Split(getRelatedCommands(command.Name()), ",") {
+			name := strings.TrimPrefix(strings.TrimSpace(raw), "/")
+			if name == "" {
+				continue
+			}
+			if _, ok := handler.GetCommand(name); ok {
+				continue
+			}
+			if resolved, _, ok := handler.Parse("/" + name); ok && resolved != "" {
+				continue
+			}
+			broken = append(broken, command.Name()+" → /"+name)
+		}
+	}
+	if len(broken) > 0 {
+		sort.Strings(broken)
+		t.Fatalf("help links point to unavailable commands:\n  %s", strings.Join(broken, "\n  "))
 	}
 }

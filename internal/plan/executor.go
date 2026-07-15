@@ -44,13 +44,20 @@ type Manager struct {
 	currentPlan      *Plan
 	lastRejectedPlan *Plan  // Store the last rejected plan for context
 	lastFeedback     string // Store the last user feedback for plan modifications
-	approvalHandler  ApprovalHandler
-	lintHandler      PlanLintHandler
-	replanHandler    ReplanHandler
-	onStepStart      StepHandler
-	onStepComplete   StepHandler
-	onProgressUpdate func(progress *ProgressUpdate) // Progress update handler
-	undoExtension    *ManagerUndoExtension          // Undo/redo support
+	// approvalFeedback is staged by the UI handler against the exact plan it
+	// rendered. committedFeedback is populated only after RequestApproval has
+	// revalidated current-plan ownership, preventing a stale response for plan A
+	// from poisoning plan B's global feedback/replan flow.
+	approvalFeedback  map[*Plan]string
+	committedFeedback map[*Plan]string
+	approvalHandler   ApprovalHandler
+	onApprovalCommit  func()
+	lintHandler       PlanLintHandler
+	replanHandler     ReplanHandler
+	onStepStart       StepHandler
+	onStepComplete    StepHandler
+	onProgressUpdate  func(progress *ProgressUpdate) // Progress update handler
+	undoExtension     *ManagerUndoExtension          // Undo/redo support
 
 	// Plan persistence
 	planStore *PlanStore
@@ -64,7 +71,18 @@ type Manager struct {
 	executionMode bool // true = executing approved plan, false = creating/designing plan
 	currentStepID int  // ID of the step currently being executed (-1 if none)
 
-	mu sync.RWMutex
+	// planSlotMu gives active-plan replacement and approval-commit callbacks a
+	// single linear order. Approval callbacks deliberately run without mu held
+	// (the app callback re-enters ordinary Manager methods), but a replacement
+	// must not slip between the exact-plan check and that callback. Methods that
+	// replace/clear currentPlan take the write side; exact lifecycle commits take
+	// the read side through callback completion.
+	//
+	// Lock order is planSlotMu -> mu. Approval callbacks may re-enter methods
+	// guarded only by mu (for example SetEnabled/GetCurrentPlan), but must not
+	// replace the active plan themselves.
+	planSlotMu sync.RWMutex
+	mu         sync.RWMutex
 }
 
 // NewManager creates a new plan manager.
@@ -81,6 +99,15 @@ func (m *Manager) SetApprovalHandler(handler ApprovalHandler) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.approvalHandler = handler
+}
+
+// SetApprovalCommitHandler registers the application-side effect that should
+// run only after approval has been atomically committed to the same current
+// plan that was shown to the user.
+func (m *Manager) SetApprovalCommitHandler(handler func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onApprovalCommit = handler
 }
 
 // SetLintHandler sets the pre-approval lint handler for plans.
@@ -332,14 +359,26 @@ func compactContractText(s string, maxLen int) string {
 
 // CreatePlan creates a new plan and sets it as current.
 func (m *Manager) CreatePlan(title, description, request string) *Plan {
+	m.planSlotMu.Lock()
+	defer m.planSlotMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	plan := NewPlan(title, description)
 	plan.Request = request
 	plan.WorkDir = m.workDir
-	m.currentPlan = plan
+	m.setCurrentPlanLocked(plan)
 	return plan
+}
+
+// setCurrentPlanLocked replaces the active plan and invalidates every pending
+// execution handoff owned by the previous plan. Caller must hold m.mu.
+func (m *Manager) setCurrentPlanLocked(plan *Plan) {
+	m.currentPlan = plan
+	m.contextClearRequested = false
+	m.approvedPlanSnapshot = nil
+	m.executionMode = false
+	m.currentStepID = -1
 }
 
 // TransitionCurrentPlanLifecycle applies a validated lifecycle transition
@@ -348,12 +387,68 @@ func (m *Manager) TransitionCurrentPlanLifecycle(next Lifecycle) error {
 	m.mu.RLock()
 	current := m.currentPlan
 	m.mu.RUnlock()
+	return m.TransitionPlanLifecycleIfCurrent(current, next)
+}
 
-	if current == nil {
+// TransitionPlanLifecycleIfCurrent applies a transition only when expected is
+// still the active plan. This prevents a late approval/result for plan A from
+// mutating a concurrently-created plan B.
+func (m *Manager) TransitionPlanLifecycleIfCurrent(expected *Plan, next Lifecycle) error {
+	m.planSlotMu.RLock()
+	defer m.planSlotMu.RUnlock()
+
+	m.mu.Lock()
+	if expected == nil || m.currentPlan == nil {
+		m.mu.Unlock()
 		return fmt.Errorf("no active plan")
 	}
+	if m.currentPlan != expected {
+		m.mu.Unlock()
+		return fmt.Errorf("active plan changed while applying lifecycle transition")
+	}
+	if err := expected.TransitionLifecycle(next); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	commit := m.onApprovalCommit
+	m.mu.Unlock()
 
-	return current.TransitionLifecycle(next)
+	if next == LifecycleApproved && commit != nil {
+		commit()
+	}
+	return nil
+}
+
+// ApprovePlanAndRequestContextClearIfCurrent atomically commits approval and
+// the execution handoff for the exact plan shown to the user. Keeping both
+// mutations under one ownership check closes the A-approved/B-replaced/A-run
+// race that two separate Transition + RequestContextClear calls permit.
+func (m *Manager) ApprovePlanAndRequestContextClearIfCurrent(expected *Plan) error {
+	m.planSlotMu.RLock()
+	defer m.planSlotMu.RUnlock()
+
+	m.mu.Lock()
+	if expected == nil || m.currentPlan == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("no active plan")
+	}
+	if m.currentPlan != expected {
+		m.mu.Unlock()
+		return fmt.Errorf("active plan changed while committing approval")
+	}
+	if err := expected.TransitionLifecycle(LifecycleApproved); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	m.contextClearRequested = true
+	m.approvedPlanSnapshot = expected
+	commit := m.onApprovalCommit
+	m.mu.Unlock()
+
+	if commit != nil {
+		commit()
+	}
+	return nil
 }
 
 // GetCurrentPlanLifecycle returns the lifecycle state for the active plan.
@@ -370,16 +465,20 @@ func (m *Manager) GetCurrentPlanLifecycle() Lifecycle {
 
 // SetPlan sets the current plan.
 func (m *Manager) SetPlan(plan *Plan) {
+	m.planSlotMu.Lock()
+	defer m.planSlotMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if plan != nil {
 		plan.EnsureStepContracts()
 	}
-	m.currentPlan = plan
+	m.setCurrentPlanLocked(plan)
 }
 
 // ClearPlan clears the current plan and returns it if it existed.
 func (m *Manager) ClearPlan() *Plan {
+	m.planSlotMu.Lock()
+	defer m.planSlotMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	plan := m.currentPlan
@@ -389,6 +488,24 @@ func (m *Manager) ClearPlan() *Plan {
 	m.executionMode = false
 	m.currentStepID = -1
 	return plan
+}
+
+// ClearPlanIfCurrent clears expected only if it still owns the active slot.
+// A stale tool/approval path must never erase a newer plan.
+func (m *Manager) ClearPlanIfCurrent(expected *Plan) bool {
+	m.planSlotMu.Lock()
+	defer m.planSlotMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if expected == nil || m.currentPlan != expected {
+		return false
+	}
+	m.currentPlan = nil
+	m.contextClearRequested = false
+	m.approvedPlanSnapshot = nil
+	m.executionMode = false
+	m.currentStepID = -1
+	return true
 }
 
 // GetLastRejectedPlan returns the last rejected plan (if saved).
@@ -410,6 +527,42 @@ func (m *Manager) SetFeedback(feedback string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastFeedback = feedback
+}
+
+// StageApprovalFeedback records UI feedback only against the plan that was
+// rendered. It deliberately does not touch lastFeedback or dispatch work; the
+// RequestApproval owner promotes it only after its final still-current check.
+func (m *Manager) StageApprovalFeedback(plan *Plan, feedback string) bool {
+	feedback = strings.TrimSpace(feedback)
+	if plan == nil || feedback == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.currentPlan != plan {
+		return false
+	}
+	if m.approvalFeedback == nil {
+		m.approvalFeedback = make(map[*Plan]string)
+	}
+	m.approvalFeedback[plan] = feedback
+	return true
+}
+
+// ConsumeApprovalFeedback returns feedback committed for exactly plan. A newer
+// plan's response can neither overwrite nor consume it.
+func (m *Manager) ConsumeApprovalFeedback(plan *Plan) string {
+	if plan == nil {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	feedback := m.committedFeedback[plan]
+	delete(m.committedFeedback, plan)
+	if feedback != "" && m.lastFeedback == feedback {
+		m.lastFeedback = ""
+	}
+	return feedback
 }
 
 // GetFeedback returns the last user feedback and clears it.
@@ -451,15 +604,49 @@ func (m *Manager) RequestApproval(ctx context.Context) (ApprovalDecision, error)
 	}
 
 	if !m.requireApproval {
+		m.mu.RLock()
+		stillCurrent := m.currentPlan == plan
+		m.mu.RUnlock()
+		if !stillCurrent {
+			return ApprovalRejected, fmt.Errorf("active plan changed while approval was being prepared")
+		}
 		return ApprovalApproved, nil
 	}
 
 	if handler == nil {
-		// No handler, auto-approve
-		return ApprovalApproved, nil
+		return ApprovalRejected, fmt.Errorf("plan approval is required, but no approval handler is configured")
 	}
 
-	return handler(ctx, plan)
+	decision, err := handler(ctx, plan)
+	if err != nil {
+		m.mu.Lock()
+		delete(m.approvalFeedback, plan)
+		m.mu.Unlock()
+		return ApprovalRejected, err
+	}
+	m.mu.Lock()
+	if m.currentPlan != plan {
+		delete(m.approvalFeedback, plan)
+		m.mu.Unlock()
+		return ApprovalRejected, fmt.Errorf("active plan changed while approval was pending; the stale decision was discarded")
+	}
+	feedback := m.approvalFeedback[plan]
+	delete(m.approvalFeedback, plan)
+	switch decision {
+	case ApprovalRejected:
+		m.lastRejectedPlan = plan
+	case ApprovalModified:
+		m.lastRejectedPlan = plan
+		m.lastFeedback = feedback
+		if feedback != "" {
+			if m.committedFeedback == nil {
+				m.committedFeedback = make(map[*Plan]string)
+			}
+			m.committedFeedback[plan] = feedback
+		}
+	}
+	m.mu.Unlock()
+	return decision, nil
 }
 
 // StartStep marks a step as started.
@@ -794,13 +981,17 @@ func (m *Manager) GetUndoExtension() *ManagerUndoExtension {
 	return m.undoExtension
 }
 
-// RequestContextClear sets the context-clear flag and snapshots the approved plan.
-// Called from tool execution when a plan is approved with context clearing enabled.
-func (m *Manager) RequestContextClear(plan *Plan) {
+// RequestContextClear sets the context-clear flag only for the exact current,
+// approved plan. It returns false for stale/unapproved callers.
+func (m *Manager) RequestContextClear(plan *Plan) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if plan == nil || m.currentPlan != plan || plan.LifecycleState() != LifecycleApproved {
+		return false
+	}
 	m.contextClearRequested = true
 	m.approvedPlanSnapshot = plan
+	return true
 }
 
 // IsContextClearRequested returns whether a context clear has been requested.
@@ -821,6 +1012,9 @@ func (m *Manager) ConsumeContextClearRequest() *Plan {
 	m.contextClearRequested = false
 	plan := m.approvedPlanSnapshot
 	m.approvedPlanSnapshot = nil
+	if plan == nil || m.currentPlan != plan || plan.LifecycleState() != LifecycleApproved {
+		return nil
+	}
 	return plan
 }
 
@@ -914,8 +1108,10 @@ func (m *Manager) LoadPausedPlan() (*Plan, error) {
 	}
 
 	// Set as current plan
+	m.planSlotMu.Lock()
+	defer m.planSlotMu.Unlock()
 	m.mu.Lock()
-	m.currentPlan = plan
+	m.setCurrentPlanLocked(plan)
 	m.mu.Unlock()
 
 	return plan, nil
@@ -937,8 +1133,10 @@ func (m *Manager) LoadPlanByID(planID string) (*Plan, error) {
 	}
 
 	// Set as current plan
+	m.planSlotMu.Lock()
+	defer m.planSlotMu.Unlock()
 	m.mu.Lock()
-	m.currentPlan = plan
+	m.setCurrentPlanLocked(plan)
 	m.mu.Unlock()
 
 	return plan, nil

@@ -23,6 +23,7 @@ func TestErrorGuidance_NoStaleSlashRefs(t *testing.T) {
 		"/model list", // pre-v0.74 shape; current is just /model
 		"/config show",
 		"/oauth-login", // OAuth flows removed in v0.65
+		"/glob",        // tool name, never a registered slash command
 	}
 	for _, g := range errorGuidancePatterns {
 		hay := g.Title + " · " + strings.Join(g.Suggestions, " · ") + " · " + g.Command

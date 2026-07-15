@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"gokin/internal/logging"
@@ -34,37 +35,64 @@ func (r *Registry) Get(name string) (Tool, bool) {
 // List returns all registered tools (read-optimized).
 func (r *Registry) List() []Tool {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	tools := make([]Tool, 0, len(r.tools))
 	for _, tool := range r.tools {
 		tools = append(tools, tool)
 	}
+	r.mu.RUnlock()
+
+	sortToolsByName(tools)
 	return tools
 }
 
 // Names returns the names of all registered tools (read-optimized).
 func (r *Registry) Names() []string {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
 		names = append(names, name)
 	}
+	r.mu.RUnlock()
+
+	sort.Strings(names)
 	return names
 }
 
 // Declarations returns all tool declarations for Gemini (read-optimized).
 func (r *Registry) Declarations() []*genai.FunctionDeclaration {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	declarations := make([]*genai.FunctionDeclaration, 0, len(r.tools))
-	for _, tool := range r.tools {
+	registered := r.List()
+	declarations := make([]*genai.FunctionDeclaration, 0, len(registered))
+	for _, tool := range registered {
 		declarations = append(declarations, tool.Declaration())
 	}
+	sortDeclarationsByName(declarations)
 	return declarations
+}
+
+func sortDeclarationsByName(declarations []*genai.FunctionDeclaration) {
+	sort.SliceStable(declarations, func(i, j int) bool {
+		left, right := declarations[i], declarations[j]
+		if left == nil {
+			return false
+		}
+		if right == nil {
+			return true
+		}
+		return left.Name < right.Name
+	})
+}
+
+func sortToolsByName(registered []Tool) {
+	sort.SliceStable(registered, func(i, j int) bool {
+		left, right := registered[i], registered[j]
+		if left == nil {
+			return false
+		}
+		if right == nil {
+			return true
+		}
+		return left.Name() < right.Name()
+	})
 }
 
 // Register adds a tool to the registry.
@@ -177,14 +205,14 @@ var toolSetDefinitions = map[ToolSet][]string{
 	ToolSetCore: {
 		"read", "write", "edit", "bash", "glob", "grep",
 		"ask_user", "list_dir", "tree", "diff", "todo",
-		"tools_list",
+		"tools_list", "skill",
 		// mcp_admin is read-only inspection of the MCP control plane.
 		// Keeping it in Core means the model can always answer "is MCP
 		// set up?" / "which servers do I have?" — even in plan mode —
 		// without depending on an extra tool set being active.
 		"mcp_admin",
 		// Semantic discovery tools — fundamental for code understanding.
-		"go_to_definition", "find_references",
+		"go_to_definition", "find_references", "go_search",
 		// request_tool moved to ToolSetAgent — it was shipping in the
 		// Core declaration list for main-agent Kimi requests, but the
 		// requester dependency is only wired in the sub-agent path.
@@ -222,23 +250,20 @@ var toolSetDefinitions = map[ToolSet][]string{
 	},
 	ToolSetOllamaCore: {
 		"read", "write", "edit", "bash", "glob", "grep",
-		"ask_user", "list_dir", "todo",
+		"ask_user", "list_dir", "todo", "skill",
 	},
 }
 
 // FilteredDeclarations returns declarations for only the specified tool sets.
 func (r *Registry) FilteredDeclarations(sets ...ToolSet) []*genai.FunctionDeclaration {
 	allowed := r.toolNamesFromSets(sets...)
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	decls := make([]*genai.FunctionDeclaration, 0, len(allowed))
-	for name, tool := range r.tools {
-		if allowed[name] {
+	for _, tool := range r.List() {
+		if allowed[tool.Name()] {
 			decls = append(decls, tool.Declaration())
 		}
 	}
+	sortDeclarationsByName(decls)
 	return decls
 }
 
@@ -297,6 +322,7 @@ func DefaultRegistry(workDir string) *Registry {
 	r.MustRegister(NewBatchTool(workDir))
 	r.MustRegister(NewRefactorTool())
 	r.MustRegister(NewToolsListTool(r))
+	r.MustRegister(NewSkillTool(workDir))
 	r.MustRegister(NewRequestToolTool())
 	r.MustRegister(NewAskAgentTool())
 
@@ -322,6 +348,7 @@ func DefaultRegistry(workDir string) *Registry {
 	// Semantic discovery tools (gopls-backed)
 	r.MustRegister(NewGoToDefinitionTool(workDir))
 	r.MustRegister(NewFindReferencesTool(workDir))
+	r.MustRegister(NewGoSearchTool(workDir))
 
 	// Review changes tool
 	r.MustRegister(NewReviewChangesTool(workDir))
@@ -372,28 +399,56 @@ type ToolLister interface {
 // LazyRegistry manages tools with lazy loading.
 // Tools are only instantiated when first accessed.
 type LazyRegistry struct {
-	entries      map[string]*ToolEntry
-	declarations map[string]*genai.FunctionDeclaration
-	mu           sync.RWMutex
+	entries              map[string]*ToolEntry
+	declarations         map[string]*genai.FunctionDeclaration
+	declarationProviders map[string]func() *genai.FunctionDeclaration
+	mu                   sync.RWMutex
 }
 
 // NewLazyRegistry creates a new lazy registry.
 func NewLazyRegistry() *LazyRegistry {
 	return &LazyRegistry{
-		entries:      make(map[string]*ToolEntry),
-		declarations: make(map[string]*genai.FunctionDeclaration),
+		entries:              make(map[string]*ToolEntry),
+		declarations:         make(map[string]*genai.FunctionDeclaration),
+		declarationProviders: make(map[string]func() *genai.FunctionDeclaration),
 	}
 }
 
 // RegisterFactory registers a tool factory with its declaration.
 // The tool will not be instantiated until Get() is called.
 func (r *LazyRegistry) RegisterFactory(name string, factory ToolFactory, decl *genai.FunctionDeclaration) {
+	r.registerFactory(name, factory, decl, nil)
+}
+
+// registerFactoryWithDeclarationProvider registers a lazy tool whose
+// declaration can change while the process is running. The provider is called
+// by Declarations without instantiating the tool entry.
+func (r *LazyRegistry) registerFactoryWithDeclarationProvider(
+	name string,
+	factory ToolFactory,
+	decl *genai.FunctionDeclaration,
+	provider func() *genai.FunctionDeclaration,
+) {
+	r.registerFactory(name, factory, decl, provider)
+}
+
+func (r *LazyRegistry) registerFactory(
+	name string,
+	factory ToolFactory,
+	decl *genai.FunctionDeclaration,
+	provider func() *genai.FunctionDeclaration,
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.entries[name] = NewToolEntry(factory)
+	delete(r.declarations, name)
+	delete(r.declarationProviders, name)
 	if decl != nil {
 		r.declarations[name] = decl
+	}
+	if provider != nil {
+		r.declarationProviders[name] = provider
 	}
 }
 
@@ -432,42 +487,78 @@ func ConfigureTyped[T Tool](r *LazyRegistry, name string, cfg func(T)) {
 }
 
 // Declarations returns all tool declarations without instantiating tools.
+// Dynamic providers run outside the registry lock because refreshing a
+// declaration may read the filesystem or acquire tool-local locks.
 func (r *LazyRegistry) Declarations() []*genai.FunctionDeclaration {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	decls := make([]*genai.FunctionDeclaration, 0, len(r.declarations))
-	for _, decl := range r.declarations {
-		decls = append(decls, decl)
+	type declarationSnapshot struct {
+		name        string
+		declaration *genai.FunctionDeclaration
+		provider    func() *genai.FunctionDeclaration
 	}
+	snapshots := make([]declarationSnapshot, 0, len(r.declarations))
+	for name, decl := range r.declarations {
+		snapshots = append(snapshots, declarationSnapshot{
+			name:        name,
+			declaration: decl,
+			provider:    r.declarationProviders[name],
+		})
+	}
+	r.mu.RUnlock()
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].name < snapshots[j].name
+	})
+
+	decls := make([]*genai.FunctionDeclaration, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		decl := snapshot.declaration
+		if snapshot.provider != nil {
+			if current := snapshot.provider(); current != nil {
+				decl = current
+			}
+		}
+		if decl != nil {
+			decls = append(decls, decl)
+		}
+	}
+	sortDeclarationsByName(decls)
 	return decls
 }
 
 // Names returns the names of all registered tools.
 func (r *LazyRegistry) Names() []string {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	names := make([]string, 0, len(r.entries))
 	for name := range r.entries {
 		names = append(names, name)
 	}
+	r.mu.RUnlock()
+
+	sort.Strings(names)
 	return names
 }
 
 // List returns all tools, instantiating them if necessary.
 func (r *LazyRegistry) List() []Tool {
 	r.mu.RLock()
-	entries := make([]*ToolEntry, 0, len(r.entries))
-	for _, entry := range r.entries {
-		entries = append(entries, entry)
+	type entrySnapshot struct {
+		name  string
+		entry *ToolEntry
+	}
+	entries := make([]entrySnapshot, 0, len(r.entries))
+	for name, entry := range r.entries {
+		entries = append(entries, entrySnapshot{name: name, entry: entry})
 	}
 	r.mu.RUnlock()
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].name < entries[j].name
+	})
 
 	tools := make([]Tool, len(entries))
-	for i, entry := range entries {
-		tools[i] = entry.Get()
+	for i, snapshot := range entries {
+		tools[i] = snapshot.entry.Get()
 	}
+	sortToolsByName(tools)
 	return tools
 }
 
@@ -559,7 +650,13 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 
 	// Shell and execution
 	r.RegisterFactory("bash", func() Tool { return NewBashTool(workDir) }, declarations["bash"])
-	r.RegisterFactory("task", func() Tool { return NewTaskTool() }, declarations["task"])
+	taskTool := NewTaskTool()
+	r.registerFactoryWithDeclarationProvider(
+		"task",
+		func() Tool { return taskTool },
+		declarations["task"],
+		taskTool.Declaration,
+	)
 	r.RegisterFactory("task_output", func() Tool { return NewTaskOutputTool() }, declarations["task_output"])
 	r.RegisterFactory("task_stop", func() Tool { return NewTaskStopTool() }, declarations["task_stop"])
 	r.RegisterFactory("kill_shell", func() Tool { return NewKillShellTool() }, declarations["kill_shell"])
@@ -578,6 +675,16 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	r.RegisterFactory("diff", func() Tool { return NewDiffTool() }, declarations["diff"])
 	r.RegisterFactory("env", func() Tool { return NewEnvTool() }, declarations["env"])
 	r.RegisterFactory("todo", func() Tool { return NewTodoTool() }, declarations["todo"])
+	// Skill discovery is lightweight and its declaration includes the compact
+	// project catalog, so instantiate this one tool while keeping its body loads
+	// on demand.
+	skillTool := NewSkillTool(workDir)
+	r.registerFactoryWithDeclarationProvider(
+		"skill",
+		func() Tool { return skillTool },
+		skillTool.Declaration(),
+		skillTool.Declaration,
+	)
 	// User interaction
 	r.RegisterFactory("ask_user", func() Tool { return NewAskUserTool() }, declarations["ask_user"])
 	r.RegisterFactory("ask_agent", func() Tool { return NewAskAgentTool() }, declarations["ask_agent"])
@@ -618,6 +725,7 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	// Semantic discovery tools
 	r.RegisterFactory("go_to_definition", func() Tool { return NewGoToDefinitionTool(workDir) }, declarations["go_to_definition"])
 	r.RegisterFactory("find_references", func() Tool { return NewFindReferencesTool(workDir) }, declarations["find_references"])
+	r.RegisterFactory("go_search", func() Tool { return NewGoSearchTool(workDir) }, declarations["go_search"])
 
 	// Review changes tool
 	r.RegisterFactory("review_changes", func() Tool { return NewReviewChangesTool(workDir) }, declarations["review_changes"])

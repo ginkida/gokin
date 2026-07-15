@@ -12,6 +12,8 @@ import (
 // nests this under the ⎿ corner below the flat failure line — same emitter the
 // success path uses, so pass/fail share one calm shape (no rounded red box).
 func failureBody(detail, toolName string) string {
+	detail = safeTerminalDisplayText(detail)
+	toolName = safeKeyEntryText(toolName)
 	const maxLines = 4
 	errStyle := lipgloss.NewStyle().Foreground(ColorError)
 	moreStyle := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
@@ -26,21 +28,31 @@ func failureBody(detail, toolName string) string {
 	}
 
 	hidden := 0
+	markerIndex := -1
 	if len(lines) > maxLines {
 		hidden = len(lines) - maxLines
-		lines = lines[:maxLines]
+		// Preserve both the cause at the head and recovery context at the tail.
+		// Provider/tool errors commonly put the concrete next step after a stack
+		// trace; keeping only the first four rows silently amputated that action.
+		const headLines = maxLines / 2
+		tailLines := maxLines - headLines
+		visible := make([]string, 0, maxLines)
+		visible = append(visible, lines[:headLines]...)
+		visible = append(visible, lines[len(lines)-tailLines:]...)
+		lines = visible
+		markerIndex = headLines
 	}
 
 	var out []string
-	for _, l := range lines {
-		out = append(out, errStyle.Render(l))
-	}
-	if hidden > 0 {
-		word := "lines"
-		if hidden == 1 {
-			word = "line"
+	for index, l := range lines {
+		if index == markerIndex {
+			word := "lines"
+			if hidden == 1 {
+				word = "line"
+			}
+			out = append(out, moreStyle.Render(fmt.Sprintf("⋯ %d more %s", hidden, word)))
 		}
-		out = append(out, moreStyle.Render(fmt.Sprintf("⋯ %d more %s", hidden, word)))
+		out = append(out, errStyle.Render(l))
 	}
 	if hint := renderErrorActionHints(toolName); hint != "" {
 		out = append(out, hint)

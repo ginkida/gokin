@@ -63,6 +63,38 @@ func TestToastCoalescesDuplicateFeedbackAndRefreshesLifetime(t *testing.T) {
 	}
 }
 
+func TestToastSanitizesActiveAndArchivedContent(t *testing.T) {
+	manager := NewToastManager(DefaultStyles())
+	manager.ShowTagged(" retry\x1b[2J ", ToastError, "request\n\x1b]8;;https://example.invalid\a failed\x00", time.Minute)
+
+	active := manager.Active()
+	if len(active) != 1 || active[0].Tag != "retry" || active[0].Message != "request failed" {
+		t.Fatalf("active toast retained unsafe content: %+v", active)
+	}
+	view := manager.ViewLimit(40, 1)
+	if strings.ContainsAny(view, "\n\x00\x1b\a") || !strings.Contains(stripAnsi(view), "request failed") {
+		t.Fatalf("toast view retained controls or lost content: %q", view)
+	}
+
+	manager.Dismiss(active[0].ID)
+	history := manager.History()
+	if len(history) != 1 || history[0].Tag != "retry" || history[0].Message != "request failed" {
+		t.Fatalf("archived toast retained unsafe content: %+v", history)
+	}
+}
+
+func TestToastDeduplicatesEquivalentSanitizedContent(t *testing.T) {
+	manager := NewToastManager(DefaultStyles())
+	manager.Show(ToastError, "Error\x1b[2J", "request\nfailed", time.Minute)
+	id := manager.Active()[0].ID
+	manager.Show(ToastError, "Error", "request failed", time.Minute)
+
+	active := manager.Active()
+	if len(active) != 1 || active[0].ID != id {
+		t.Fatalf("sanitized duplicate stacked instead of refreshing: %+v", active)
+	}
+}
+
 func TestToastTaggedUpdatePromotesAndRemovalArchives(t *testing.T) {
 	manager := NewToastManager(DefaultStyles())
 	manager.maxToasts = 2

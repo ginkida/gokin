@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -97,7 +98,27 @@ type StdioTransport struct {
 
 // NewStdioTransport creates a new stdio transport by starting the specified command.
 func NewStdioTransport(command string, args []string, env map[string]string) (*StdioTransport, error) {
+	return NewStdioTransportWithWorkDir(command, args, env, "")
+}
+
+// NewStdioTransportWithWorkDir creates a stdio transport whose process starts
+// in workDir. An empty workDir preserves the historical inherited-directory
+// behavior. A non-empty workDir must be an absolute, existing directory so a
+// reconnect cannot silently resolve it relative to a different process cwd.
+//
+// Setting a working directory deliberately does not widen the environment
+// inherited by the MCP server. Both managed and third-party servers continue
+// to receive only buildSafeEnv plus explicitly configured values.
+func NewStdioTransportWithWorkDir(command string, args []string, env map[string]string, workDir string) (*StdioTransport, error) {
+	cleanWorkDir, err := validateStdioWorkDir(workDir)
+	if err != nil {
+		return nil, err
+	}
+
 	cmd := exec.Command(command, args...)
+	if cleanWorkDir != "" {
+		cmd.Dir = cleanWorkDir
+	}
 
 	// Use sanitized environment to prevent leaking sensitive env vars
 	cmd.Env = buildSafeEnv()
@@ -178,9 +199,38 @@ func NewStdioTransport(command string, args []string, env map[string]string) (*S
 	logging.Debug("MCP stdio transport started",
 		"command", command,
 		"args", args,
+		"work_dir", cleanWorkDir,
 		"pid", cmd.Process.Pid)
 
 	return t, nil
+}
+
+func validateStdioWorkDir(workDir string) (string, error) {
+	if workDir == "" {
+		return "", nil
+	}
+
+	// filepath.FromSlash makes caller-provided slash paths obey the current
+	// platform's path rules before the absolute/traversal checks below.
+	workDir = filepath.FromSlash(workDir)
+	if !filepath.IsAbs(workDir) {
+		return "", fmt.Errorf("invalid MCP stdio work directory %q: must be absolute", workDir)
+	}
+	for _, part := range strings.Split(workDir, string(filepath.Separator)) {
+		if part == ".." {
+			return "", fmt.Errorf("invalid MCP stdio work directory %q: parent traversal is not allowed", workDir)
+		}
+	}
+
+	cleanWorkDir := filepath.Clean(workDir)
+	info, err := os.Stat(cleanWorkDir)
+	if err != nil {
+		return "", fmt.Errorf("invalid MCP stdio work directory %q: %w", cleanWorkDir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("invalid MCP stdio work directory %q: not a directory", cleanWorkDir)
+	}
+	return cleanWorkDir, nil
 }
 
 // logStderr reads and logs stderr output from the MCP server.

@@ -37,6 +37,24 @@ func TestQuestionMarkOpensFilterableShortcutsOverlay(t *testing.T) {
 	}
 }
 
+func TestShortcutsOverlayAcceptsPhysicalSpaceForPhraseFilter(t *testing.T) {
+	m := NewModel()
+	m.width, m.height = 100, 30
+	m.shortcutsOverlay.Show()
+	m.state = StateShortcutsOverlay
+
+	_ = m.handleShortcutsOverlayKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("model")})
+	_ = m.handleShortcutsOverlayKeys(tea.KeyMsg{Type: tea.KeySpace})
+	_ = m.handleShortcutsOverlayKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("selector")})
+
+	if got := m.shortcutsOverlay.GetSearch(); got != "model selector" {
+		t.Fatalf("shortcut filter=%q, want physical space preserved", got)
+	}
+	if view := stripAnsi(m.renderShortcutsOverlay()); !strings.Contains(view, "Open model selector") {
+		t.Fatalf("phrase filter lost matching shortcut:\n%s", view)
+	}
+}
+
 func TestShortcutsOverlayEscClearsThenCloses(t *testing.T) {
 	m := NewModel()
 	m.shortcutsOverlay.Show()

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"gokin/internal/skills"
+
 	"google.golang.org/genai"
 )
 
@@ -33,6 +35,16 @@ func (rc *ResponseCompressor) CompressFunctionResponse(part *genai.FunctionRespo
 	if part == nil || part.Response == nil {
 		return part
 	}
+	// Successful, bounded skill content is the rendered workflow the model must
+	// follow. Preserve that one field while still compressing sibling data maps;
+	// a custom/embedded tool named "skill" must not turn this into an unbounded
+	// structured-response bypass.
+	preserveSkillContent := false
+	if part.Name == "skill" {
+		success, _ := part.Response["success"].(bool)
+		content, hasContent := part.Response["content"].(string)
+		preserveSkillContent = success && hasContent && len(content) <= skills.MaxRenderedSkillBytes
+	}
 
 	compressed := &genai.FunctionResponse{
 		ID:       part.ID,
@@ -42,6 +54,10 @@ func (rc *ResponseCompressor) CompressFunctionResponse(part *genai.FunctionRespo
 
 	// Process each field in the response
 	for key, value := range part.Response {
+		if preserveSkillContent && key == "content" {
+			compressed.Response[key] = value
+			continue
+		}
 		compressed.Response[key] = rc.compressValue(key, value)
 	}
 

@@ -3,6 +3,8 @@ package context
 import (
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -316,6 +318,21 @@ type MemoryProvider interface {
 	GetForContext(projectOnly bool) string
 }
 
+// MemorySnapshotProvider is an optional cache-coherence extension. It binds
+// prompt content to the exact Store revision and TTL deadline that produced
+// it, then exposes a cheap state comparison for PromptBuilder's own cache.
+type MemorySnapshotProvider interface {
+	GetForContextSnapshot(projectOnly bool) (content string, revision uint64, validUntil time.Time)
+	MemoryContextState(projectOnly bool) (revision uint64, validUntil time.Time)
+}
+
+// RelevantMemoryProvider is an optional extension implemented by durable
+// stores that can retrieve memories for a concrete task. Keeping it separate
+// preserves compatibility with lightweight/static MemoryProvider fakes.
+type RelevantMemoryProvider interface {
+	GetRelevantForContext(query string, projectOnly bool, limit int) string
+}
+
 // PlanStepInfo holds step information for plan execution prompts.
 type PlanStepInfo struct {
 	ID          int
@@ -336,18 +353,23 @@ type ProjectLearningProvider interface {
 
 // PromptBuilder builds dynamic system prompts.
 type PromptBuilder struct {
+	mu              sync.Mutex
 	workDir         string
 	projectInfo     *ProjectInfo
 	projectMemory   *ProjectMemory
 	projectLearning ProjectLearningProvider
 	memoryStore     MemoryProvider
-	sessionMemory   *SessionMemoryManager
-	workingMemory   WorkingMemoryProvider
-	planAutoDetect  bool
-	planManager     PlanManagerProvider
-	detectedContext string // Auto-detected project context (frameworks, docs, etc.)
-	toolHints       string // Tool usage pattern hints
-	lastMessage     string // Last user message for conditional prompt injection
+	// allowGlobalMemory opts this builder into user-wide memory injection.
+	// False is deliberately safe: prompts stay repository-scoped unless the
+	// user explicitly enables memory.allow_global.
+	allowGlobalMemory bool
+	sessionMemory     *SessionMemoryManager
+	workingMemory     WorkingMemoryProvider
+	planAutoDetect    bool
+	planManager       PlanManagerProvider
+	detectedContext   string // Auto-detected project context (frameworks, docs, etc.)
+	toolHints         string // Tool usage pattern hints
+	lastMessage       string // Last user message for conditional prompt injection
 	// prefixCachingEnabled — the active provider honours prompt caching;
 	// disables question-only trimming so the prefix stays byte-stable.
 	prefixCachingEnabled bool
@@ -365,6 +387,12 @@ type PromptBuilder struct {
 	// after the first. Build() self-heals by re-checking the contract even when
 	// promptDirty is false — this is the compare-and-rebuild seam.
 	lastContractCtx string
+	// The system prompt has a cache above the memory Store's cache. Retain the
+	// state paired atomically with the embedded memory content so a mutation or
+	// TTL expiry invalidates that outer cache as well.
+	lastMemoryRevision   uint64
+	lastMemoryValidUntil time.Time
+	lastMemoryStateKnown bool
 }
 
 // NewPromptBuilder creates a new prompt builder.
@@ -378,41 +406,80 @@ func NewPromptBuilder(workDir string, projectInfo *ProjectInfo) *PromptBuilder {
 
 // Invalidate marks the cached prompt as stale so Build() regenerates it.
 func (b *PromptBuilder) Invalidate() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.promptDirty = true
 }
 
 // SetProjectMemory sets the project memory for custom instructions.
 func (b *PromptBuilder) SetProjectMemory(memory *ProjectMemory) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.projectMemory = memory
 	b.promptDirty = true
 }
 
 // SetProjectLearning sets durable project learning for prompt injection.
 func (b *PromptBuilder) SetProjectLearning(learning ProjectLearningProvider) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.projectLearning = learning
 	b.promptDirty = true
 }
 
 // SetMemoryStore sets the memory store for persistent memory injection.
 func (b *PromptBuilder) SetMemoryStore(store MemoryProvider) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.memoryStore = store
+	b.lastMemoryStateKnown = false
 	b.promptDirty = true
+}
+
+// SetGlobalMemoryEnabled controls whether persistent prompt/retrieval context
+// may include user-wide memories. It does not enable the memory store itself;
+// callers must also SetMemoryStore. The default is project-only.
+func (b *PromptBuilder) SetGlobalMemoryEnabled(enabled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.allowGlobalMemory != enabled {
+		b.allowGlobalMemory = enabled
+		b.promptDirty = true
+	}
+}
+
+func (b *PromptBuilder) relevantMemoryFor(query string) string {
+	query = strings.TrimSpace(query)
+	if query == "" || b.memoryStore == nil {
+		return ""
+	}
+	retriever, ok := b.memoryStore.(RelevantMemoryProvider)
+	if !ok {
+		return ""
+	}
+	return retriever.GetRelevantForContext(query, !b.allowGlobalMemory, 0)
 }
 
 // SetSessionMemory sets the session memory manager for automatic context injection.
 func (b *PromptBuilder) SetSessionMemory(sm *SessionMemoryManager) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.sessionMemory = sm
 	b.promptDirty = true
 }
 
 // SetWorkingMemory sets the compact working memory manager for prompt injection.
 func (b *PromptBuilder) SetWorkingMemory(wm WorkingMemoryProvider) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.workingMemory = wm
 	b.promptDirty = true
 }
 
 // SetPlanAutoDetect enables or disables auto-planning in the system prompt.
 func (b *PromptBuilder) SetPlanAutoDetect(enabled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.planAutoDetect != enabled {
 		b.planAutoDetect = enabled
 		b.promptDirty = true
@@ -421,12 +488,16 @@ func (b *PromptBuilder) SetPlanAutoDetect(enabled bool) {
 
 // SetPlanManager sets the plan manager for contract context injection.
 func (b *PromptBuilder) SetPlanManager(pm PlanManagerProvider) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.planManager = pm
 	b.promptDirty = true
 }
 
 // SetDetectedContext sets the auto-detected project context (frameworks, docs summaries).
 func (b *PromptBuilder) SetDetectedContext(ctx string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.detectedContext != ctx {
 		b.detectedContext = ctx
 		b.promptDirty = true
@@ -435,6 +506,8 @@ func (b *PromptBuilder) SetDetectedContext(ctx string) {
 
 // SetToolHints sets the tool usage pattern hints for periodic injection.
 func (b *PromptBuilder) SetToolHints(hints string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.toolHints != hints {
 		b.toolHints = hints
 		b.promptDirty = true
@@ -448,6 +521,8 @@ func (b *PromptBuilder) SetToolHints(hints string) {
 // never reaches Build output), and not at all when prefix caching is enabled
 // (Build ignores the classification there — see SetPrefixCachingEnabled).
 func (b *PromptBuilder) SetLastMessage(msg string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.lastMessage == msg {
 		return
 	}
@@ -496,6 +571,8 @@ func ProviderSupportsPrefixCaching(provider string) bool {
 // byte-stable prefix wins. Without caching (Ollama), trimming still
 // saves real tokens on every question-only turn.
 func (b *PromptBuilder) SetPrefixCachingEnabled(enabled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.prefixCachingEnabled != enabled {
 		b.prefixCachingEnabled = enabled
 		b.promptDirty = true
@@ -507,6 +584,8 @@ func (b *PromptBuilder) SetPrefixCachingEnabled(enabled bool) {
 // behavioural guidance in Build(). Empty string means no addendum.
 func (b *PromptBuilder) SetProvider(provider string) {
 	provider = strings.TrimSpace(strings.ToLower(provider))
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.provider != provider {
 		b.provider = provider
 		b.promptDirty = true
@@ -519,6 +598,8 @@ func (b *PromptBuilder) SetProvider(provider string) {
 // model. Empty string clears the pin. Setter is idempotent so the pin
 // tool can re-apply on reload without thrashing the prompt cache.
 func (b *PromptBuilder) SetPinnedContent(content string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.pinnedContent != content {
 		b.pinnedContent = content
 		b.promptDirty = true
@@ -532,6 +613,8 @@ func (b *PromptBuilder) SetPinnedContent(content string) {
 // filter applied at the client level so the model both sees only read
 // tools AND understands why.
 func (b *PromptBuilder) SetPlanMode(enabled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.planMode != enabled {
 		b.planMode = enabled
 		b.promptDirty = true
@@ -556,8 +639,30 @@ func (b *PromptBuilder) contractUnchanged() bool {
 	return b.currentContractCtx() == b.lastContractCtx
 }
 
+func (b *PromptBuilder) memoryUnchanged() bool {
+	if b.memoryStore == nil {
+		return true
+	}
+	provider, ok := b.memoryStore.(MemorySnapshotProvider)
+	if !ok {
+		// Lightweight/static providers retain the legacy contract; callers can
+		// explicitly Invalidate when their content changes.
+		return true
+	}
+	if !b.lastMemoryStateKnown {
+		return false
+	}
+	revision, validUntil := provider.MemoryContextState(!b.allowGlobalMemory)
+	if revision != b.lastMemoryRevision || !validUntil.Equal(b.lastMemoryValidUntil) {
+		return false
+	}
+	return b.lastMemoryValidUntil.IsZero() || time.Now().Before(b.lastMemoryValidUntil)
+}
+
 func (b *PromptBuilder) Build() string {
-	if !b.promptDirty && b.cachedPrompt != "" && b.contractUnchanged() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.promptDirty && b.cachedPrompt != "" && b.contractUnchanged() && b.memoryUnchanged() {
 		return b.cachedPrompt
 	}
 
@@ -605,8 +710,15 @@ func (b *PromptBuilder) Build() string {
 	builder.WriteString(memoryMaintenanceSection)
 
 	// Add persistent memories from memory store
+	b.lastMemoryStateKnown = false
 	if b.memoryStore != nil {
-		memoryContent := b.memoryStore.GetForContext(true) // Project-specific memories
+		var memoryContent string
+		if provider, ok := b.memoryStore.(MemorySnapshotProvider); ok {
+			memoryContent, b.lastMemoryRevision, b.lastMemoryValidUntil = provider.GetForContextSnapshot(!b.allowGlobalMemory)
+			b.lastMemoryStateKnown = true
+		} else {
+			memoryContent = b.memoryStore.GetForContext(!b.allowGlobalMemory)
+		}
 		if memoryContent != "" {
 			builder.WriteString("\n\n")
 			builder.WriteString(memoryContent)
@@ -934,6 +1046,8 @@ func (b *PromptBuilder) BuildWithContext(additionalContext string) string {
 
 // GetProjectSummary returns a brief summary of the detected project.
 func (b *PromptBuilder) GetProjectSummary() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.projectInfo == nil || b.projectInfo.Type == ProjectTypeUnknown {
 		return ""
 	}
@@ -954,6 +1068,8 @@ func (b *PromptBuilder) GetProjectSummary() string {
 // BuildPlanExecutionPrompt constructs a minimal focused prompt for executing an approved plan.
 // This prompt is used after context is cleared, providing only what's needed for plan execution.
 func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, steps []PlanStepInfo) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	var builder strings.Builder
 
 	builder.WriteString("You are Gokin, executing an approved plan. Execute precisely.\n\n")
@@ -978,12 +1094,16 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 
 	// Add persistent memories from memory store (critical for context retention)
 	if b.memoryStore != nil {
-		memoryContent := b.memoryStore.GetForContext(true)
+		memoryContent := b.memoryStore.GetForContext(!b.allowGlobalMemory)
 		if memoryContent != "" {
 			builder.WriteString("## Project Knowledge\n")
 			builder.WriteString(memoryContent)
 			builder.WriteString("\n\n")
 		}
+	}
+	if relevant := b.relevantMemoryFor(planExecutionMemoryQuery(title, description, steps)); relevant != "" {
+		builder.WriteString(relevant)
+		builder.WriteString("\n")
 	}
 
 	// Add session memory for plan execution context
@@ -1043,6 +1163,14 @@ func (b *PromptBuilder) BuildPlanExecutionPrompt(title, description string, step
 	return applyPromptBudget(builder.String(), maxPlanExecutionPromptChar)
 }
 
+func planExecutionMemoryQuery(title, description string, steps []PlanStepInfo) string {
+	parts := []string{title, description}
+	for _, step := range steps {
+		parts = append(parts, step.Title, step.Description)
+	}
+	return strings.Join(parts, " ")
+}
+
 // BuildPlanExecutionPromptWithContext is like BuildPlanExecutionPrompt but includes
 // a context snapshot from the planning conversation to preserve important decisions.
 func (b *PromptBuilder) BuildPlanExecutionPromptWithContext(title, description string, steps []PlanStepInfo, contextSnapshot string) string {
@@ -1073,6 +1201,15 @@ func (b *PromptBuilder) BuildPlanExecutionPromptWithContext(title, description s
 // Unlike Build(), this omits examples, response format rules, and planning protocol.
 // It provides project guidelines, project instructions, memory, and working directory.
 func (b *PromptBuilder) BuildSubAgentPrompt() string {
+	return b.BuildSubAgentPromptForTask("")
+}
+
+// BuildSubAgentPromptForTask adds durable memories relevant to the delegated
+// task. A sub-agent has an isolated context and cannot see the foreground
+// turn's ephemeral recall, so task-aware retrieval must be repeated here.
+func (b *PromptBuilder) BuildSubAgentPromptForTask(task string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	var builder strings.Builder
 
 	// Project-specific guidelines (Go, Node, Python, etc.)
@@ -1096,12 +1233,16 @@ func (b *PromptBuilder) BuildSubAgentPrompt() string {
 
 	// Add persistent memories (project knowledge, decisions, etc.)
 	if b.memoryStore != nil {
-		memoryContent := b.memoryStore.GetForContext(true)
+		memoryContent := b.memoryStore.GetForContext(!b.allowGlobalMemory)
 		if memoryContent != "" {
 			builder.WriteString("\n## Project Knowledge\n")
 			builder.WriteString(memoryContent)
 			builder.WriteString("\n")
 		}
+	}
+	if relevant := b.relevantMemoryFor(task); relevant != "" {
+		builder.WriteString("\n")
+		builder.WriteString(relevant)
 	}
 
 	// Add session memory for sub-agent context

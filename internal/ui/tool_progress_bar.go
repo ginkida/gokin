@@ -43,10 +43,21 @@ func NewToolProgressBarModel(styles *Styles) *ToolProgressBarModel {
 
 // Update updates the progress bar from a ToolProgressMsg.
 func (m *ToolProgressBarModel) Update(msg ToolProgressMsg) {
-	if name := strings.TrimSpace(msg.Name); name != "" {
+	name := safeKeyEntryText(msg.Name)
+	nameChanged := name != "" && m.toolName != "" && name != m.toolName
+	if name != "" {
 		m.toolName = name
 	}
-	m.elapsed = max(msg.Elapsed, 0)
+	incomingElapsed := max(msg.Elapsed, 0)
+	// Detailed progress messages do not carry elapsed time. Preserve the last
+	// heartbeat for the same operation instead of making the timer jump to 0s;
+	// a different named operation starts a fresh clock.
+	if nameChanged {
+		m.elapsed = 0
+	}
+	if incomingElapsed > 0 || m.elapsed == 0 {
+		m.elapsed = incomingElapsed
+	}
 	if math.IsNaN(msg.Progress) || msg.Progress < 0 {
 		m.progress = -1
 	} else {
@@ -65,7 +76,7 @@ func (m *ToolProgressBarModel) Update(msg ToolProgressMsg) {
 
 // Show makes the progress bar visible.
 func (m *ToolProgressBarModel) Show(toolName string) {
-	m.toolName = toolName
+	m.toolName = safeKeyEntryText(toolName)
 	m.visible = true
 	m.progress = -1 // start indeterminate
 	m.currentStep = ""
@@ -126,14 +137,21 @@ func (m *ToolProgressBarModel) SetReducedMotion(enabled bool) {
 // spinnerFrames contains braille spinner animation frames.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// View renders the progress bar as a compact single line.
-func (m *ToolProgressBarModel) View(width int) string {
+// View renders the progress bar as a compact line with optional recent output.
+// A supplied terminal height bounds that history before the parent compositor
+// has to crop it.
+func (m *ToolProgressBarModel) View(width int, heights ...int) string {
 	if !m.visible {
 		return ""
 	}
 	if width <= 0 {
 		width = 80
 	}
+	height := 0
+	if len(heights) > 0 {
+		height = heights[0]
+	}
+	maxRows := toolProgressHeightBudget(height)
 
 	// Styles
 	dimStyle := lipgloss.NewStyle().
@@ -169,13 +187,22 @@ func (m *ToolProgressBarModel) View(width int) string {
 		if remaining <= 0 || raw == "" {
 			return
 		}
-		builder.WriteString(style.Render(truncateForWidth(raw, remaining)))
+		fitted := raw
+		if lipgloss.Width(fitted) > remaining {
+			if strings.Contains(fitted, "\x1b") {
+				fitted = fitStatusText(fitted, remaining)
+			} else {
+				// Runtime step text often contains emoji and combining marks. Keep
+				// whole grapheme clusters when the volatile tail is elided.
+				fitted = truncateMiddleForWidth(fitted, remaining)
+			}
+		}
+		builder.WriteString(style.Render(fitted))
 	}
 	if m.cancellable {
-		compactCancel := "Esc cancel"
 		cancelLabel := " · Esc cancel"
 		if width < lipgloss.Width(spinner)+lipgloss.Width(cancelLabel) {
-			return dimStyle.Render(truncateForWidth(compactCancel, width))
+			return dimStyle.Render(compactToolCancelLabel(width))
 		}
 		appendPart(spinner, lipgloss.NewStyle())
 		nameBudget := max(width-lipgloss.Width(spinner)-lipgloss.Width(cancelLabel), 0)
@@ -216,6 +243,10 @@ func (m *ToolProgressBarModel) View(width int) string {
 	// Multi-line output (e.g. `npm install` progress) falls through to the
 	// history block below so the user sees recent activity, not just the
 	// last line, and can tell whether the tool is actually making progress.
+	historyRowsBudget := maxProgressHistoryLines + 1 // heading + body rows
+	if maxRows > 0 {
+		historyRowsBudget = min(historyRowsBudget, max(maxRows-1, 0))
+	}
 	recent := lastNNonEmptyLines(m.currentStep, maxProgressHistoryLines)
 	if len(recent) == 1 {
 		step := recent[0]
@@ -227,22 +258,52 @@ func (m *ToolProgressBarModel) View(width int) string {
 	// user sees recent activity without losing the compact single-line
 	// style for simple tools.
 	if len(recent) > 1 {
-		builder.WriteString("\n")
 		indent := strings.Repeat(" ", min(4, max(width-1, 0)))
-		builder.WriteString(dimStyle.Render(truncateForWidth(indent+"Recent output", width)))
-		for _, line := range recent {
+		if historyRowsBudget == 1 {
+			// At two total rows the newest output is more useful than a heading
+			// with no content beneath it.
 			builder.WriteString("\n")
-			builder.WriteString(dimStyle.Render(indent + truncateForWidth(line, max(width-lipgloss.Width(indent), 0))))
+			builder.WriteString(dimStyle.Render(truncateMiddleForWidth(recent[len(recent)-1], width)))
+		} else if historyRowsBudget >= 2 {
+			builder.WriteString("\n")
+			builder.WriteString(dimStyle.Render(truncateMiddleForWidth(indent+"Recent output", width)))
+			visible := recent[max(len(recent)-(historyRowsBudget-1), 0):]
+			for _, line := range visible {
+				builder.WriteString("\n")
+				builder.WriteString(dimStyle.Render(indent + truncateMiddleForWidth(line, max(width-lipgloss.Width(indent), 0))))
+			}
 		}
 	}
 
 	return builder.String()
 }
 
+// compactToolCancelLabel preserves a recognizable recovery action even when
+// there is not enough room for the full progress row. A lone ellipsis—the old
+// one/two-column rendering—looked like truncated status rather than a key.
+func compactToolCancelLabel(width int) string {
+	for _, label := range []string{"Esc cancel", "Esc", "⎋"} {
+		if lipgloss.Width(label) <= width {
+			return label
+		}
+	}
+	return ""
+}
+
 // maxProgressHistoryLines is how many recent non-empty lines of tool output
 // the progress bar shows as a history block. Small enough to avoid pushing
 // the input off-screen on short terminals; big enough to give context.
 const maxProgressHistoryLines = 3
+
+// toolProgressHeightBudget reserves five terminal rows for the composer and
+// status chrome. The progress surface itself needs one row and may grow to the
+// existing five-row maximum when the terminal has room.
+func toolProgressHeightBudget(terminalHeight int) int {
+	if terminalHeight <= 0 {
+		return 0
+	}
+	return min(terminalHeight, min(max(terminalHeight-5, 1), maxProgressHistoryLines+2))
+}
 
 // lastNNonEmptyLines returns up to n trailing non-empty lines from s,
 // oldest→newest. Empty input yields an empty slice. Used by the tool
@@ -257,7 +318,7 @@ func lastNNonEmptyLines(s string, n int) []string {
 	})
 	out := make([]string, 0, n)
 	for i := len(rawLines) - 1; i >= 0 && len(out) < n; i-- {
-		trimmed := strings.TrimSpace(rawLines[i])
+		trimmed := safeKeyEntryText(rawLines[i])
 		if trimmed != "" {
 			out = append(out, trimmed)
 		}

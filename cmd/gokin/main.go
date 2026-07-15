@@ -1,13 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"gokin/internal/app"
+	"gokin/internal/chat"
 	"gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/security"
@@ -21,15 +24,17 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version  = "0.100.87"
-	cfgFile  string
-	model    string
-	provider string
-	runSetup bool
-	resume   bool
-	headless bool
-	prompt   string
-	addDirs  []string
+	version       = "0.100.87"
+	cfgFile       string
+	model         string
+	provider      string
+	runSetup      bool
+	continueLast  bool
+	resumeSession string
+	headless      bool
+	prompt        string
+	outputFormat  string
+	addDirs       []string
 )
 
 func main() {
@@ -50,9 +55,11 @@ choose.`,
 	rootCmd.PersistentFlags().StringVar(&model, "model", "", "model to use (default depends on provider)")
 	rootCmd.PersistentFlags().StringVar(&provider, "provider", "", "provider to use for this run (glm, minimax, kimi, deepseek, ollama)")
 	rootCmd.PersistentFlags().BoolVar(&runSetup, "setup", false, "run the setup wizard")
-	rootCmd.PersistentFlags().BoolVar(&resume, "resume", false, "resume the last session")
+	rootCmd.PersistentFlags().BoolVarP(&continueLast, "continue", "c", false, "continue the most recent session in this workspace")
+	rootCmd.PersistentFlags().StringVarP(&resumeSession, "resume", "r", "", "resume an exact session ID or saved name")
 	rootCmd.PersistentFlags().BoolVar(&headless, "headless", false, "run one prompt without the interactive TUI")
 	rootCmd.PersistentFlags().StringVar(&prompt, "prompt", "", "prompt to run in headless mode")
+	rootCmd.PersistentFlags().StringVar(&outputFormat, "output-format", "text", "headless output format: text or json")
 	rootCmd.PersistentFlags().StringArrayVar(&addDirs, "add-dir", nil, "grant access to a directory outside the workspace (repeatable; in-memory for this run)")
 
 	// Version command
@@ -73,13 +80,44 @@ choose.`,
 	}
 }
 
-func runApp(cmd *cobra.Command, args []string) error {
+func runApp(cmd *cobra.Command, args []string) (runErr error) {
+	headlessFormat, err := resolveHeadlessOutputFormat(headless, outputFormat)
+	if err != nil {
+		return err
+	}
+
+	// Once JSON headless mode is recognized, every startup/runtime failure must
+	// still produce exactly one result envelope. RunHeadlessWithOptions writes
+	// its own terminal envelope; this defer covers failures before execution
+	// begins (CLI validation, config/auth, app init, and exact resume).
+	jsonEnvelopeWritten := false
+	failureKind := "cli"
+	failureSessionID := strings.TrimSpace(resumeSession)
+	defer func() {
+		if runErr == nil || !headless || headlessFormat != app.HeadlessOutputJSON || jsonEnvelopeWritten {
+			return
+		}
+		if encodeErr := writeHeadlessFailure(os.Stdout, failureSessionID, failureKind, runErr); encodeErr != nil {
+			runErr = errors.Join(runErr, encodeErr)
+		}
+	}()
+
 	if headless && strings.TrimSpace(prompt) == "" {
 		return fmt.Errorf("--prompt is required when --headless is set")
+	}
+	resumeID, err := validateResumeSelection(continueLast, resumeSession)
+	if err != nil {
+		if continueLast && resumeSession != "" {
+			failureKind = "resume_conflict"
+		} else {
+			failureKind = "session_invalid_id"
+		}
+		return err
 	}
 
 	// Run setup wizard if requested
 	if runSetup {
+		failureKind = "setup"
 		if headless {
 			// The auto-invoked path below (triggered by ErrMissingAuth) has
 			// always refused to run the wizard in headless mode; the
@@ -97,6 +135,7 @@ func runApp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load configuration
+	failureKind = "configuration"
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -134,20 +173,14 @@ func runApp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get working directory
+	failureKind = "app_init"
 	workDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	// Headless runs cannot answer Builder.checkAllowedDirs' first-run prompt.
-	// Allow the current workspace in memory so evals and scripts never block
-	// waiting on stdin before the agent starts.
-	if headless && len(cfg.Tools.AllowedDirs) == 0 {
-		cfg.Tools.AllowedDirs = append(cfg.Tools.AllowedDirs, workDir)
-	}
-
 	// --add-dir grants (repeatable): resolve, refuse ungrantable locations, and
-	// append in-memory only (never persisted — like the headless workDir append).
+	// append in-memory only (never persisted).
 	// Works for interactive, headless, and eval launches; the builder propagates
 	// AllowedDirs to every path-scoping tool and seeds the agent runner at boot.
 	if err := applyAddDirFlags(cfg, addDirs); err != nil {
@@ -155,36 +188,51 @@ func runApp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create the application
-	application, err := app.New(cfg, workDir)
+	application, err := app.NewWithOptions(cfg, workDir, app.BuildOptions{
+		NonInteractive: headless,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create application: %w", err)
 	}
 
-	if headless {
-		// Honor --resume in headless too: load the prior session so a
-		// sequence of `gokin --headless --resume` calls continues ONE
-		// conversation (scriptable multi-turn sessions). Without this the
-		// flag was a silent no-op here — the `if headless { return }` short-
-		// circuited before the interactive resume block below. Warning goes to
-		// stderr so stdout stays the model answer.
-		if resume {
-			if err := application.ResumeLastSession(); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to resume session: %v\n", err)
+	failureKind = "resume_failed"
+	sessionLease, selectedSessionID, err := prepareSessionForRun(application, cfg.Session.Enabled, resumeID, continueLast)
+	if selectedSessionID != "" {
+		failureSessionID = selectedSessionID
+	}
+	if err != nil {
+		failureKind = sessionPreparationErrorKind(err, resumeID != "" || continueLast)
+		return err
+	}
+	if sessionLease != nil {
+		defer func() {
+			if releaseErr := sessionLease.Release(); releaseErr != nil {
+				// Descriptor-owned OS locks are released by process exit even if
+				// the explicit unlock reports an error; keep the already-emitted
+				// JSON status aligned with the process exit code.
+				fmt.Fprintf(os.Stderr, "Warning: failed to release session writer lease: %v\n", releaseErr)
 			}
-		}
-		return application.RunHeadless(cmd.Context(), prompt)
+		}()
 	}
 
-	// Attempt to resume session if requested
-	if resume {
-		if err := application.ResumeLastSession(); err != nil {
-			// Don't fail completely, just warn
-			fmt.Printf("Warning: failed to resume session: %v\nStarting new session instead.\n", err)
-			// Small pause to let user read the warning
-			// (not ideal but better than complex UI logic here)
-		} else {
-			fmt.Println("Resumed previous session.")
-		}
+	if headless {
+		failureKind = "execution"
+		jsonEnvelopeWritten = headlessFormat == app.HeadlessOutputJSON
+		_, err := application.RunHeadlessWithOptions(cmd.Context(), prompt, app.HeadlessOptions{
+			OutputFormat: headlessFormat,
+			Stdout:       os.Stdout,
+			Stderr:       os.Stderr,
+		})
+		return err
+	}
+
+	// Interactive resume is also fail-closed (prepared above): an explicitly
+	// requested context must never silently turn into a fresh conversation.
+	switch {
+	case resumeID != "":
+		fmt.Printf("Resumed session %s.\n", resumeID)
+	case continueLast:
+		fmt.Println("Resumed previous session.")
 	}
 
 	// Check for updates on startup (non-blocking notification). Wrapped in
@@ -203,6 +251,126 @@ func runApp(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("\nStarting Gokin...")
 	return application.Run()
+}
+
+func resolveHeadlessOutputFormat(headless bool, raw string) (app.HeadlessOutputFormat, error) {
+	format := app.HeadlessOutputFormat(strings.ToLower(strings.TrimSpace(raw)))
+	if format == "" {
+		format = app.HeadlessOutputText
+	}
+	if format != app.HeadlessOutputText && format != app.HeadlessOutputJSON {
+		return "", fmt.Errorf("invalid --output-format %q (want text or json)", raw)
+	}
+	if !headless && format != app.HeadlessOutputText {
+		return "", fmt.Errorf("--output-format %s requires --headless", format)
+	}
+	return format, nil
+}
+
+func validateResumeSelection(continueLast bool, rawID string) (string, error) {
+	if continueLast && rawID != "" {
+		return "", fmt.Errorf("--continue and --resume are mutually exclusive")
+	}
+	if rawID == "" {
+		return "", nil
+	}
+	if strings.TrimSpace(rawID) != rawID {
+		return "", fmt.Errorf("invalid --resume session ID: leading or trailing whitespace is not allowed")
+	}
+	if err := chat.ValidateSessionID(rawID); err != nil {
+		return "", fmt.Errorf("invalid --resume session ID: %w", err)
+	}
+	return rawID, nil
+}
+
+type resumableApplication interface {
+	GetSession() *chat.Session
+	ResumeLastSession() error
+	ResumeSession(sessionID string) error
+}
+
+func prepareSessionForRun(application resumableApplication, persistenceEnabled bool, exactID string, continueLast bool) (*chat.SessionWriterLease, string, error) {
+	if application == nil || application.GetSession() == nil {
+		return nil, exactID, fmt.Errorf("session runtime is not initialized")
+	}
+	if (exactID != "" || continueLast) && !persistenceEnabled {
+		return nil, exactID, fmt.Errorf("cannot resume: session persistence is disabled")
+	}
+
+	selectedID := exactID
+	if continueLast {
+		// LoadLast selects the newest usable snapshot. No model/tool call can
+		// occur here. After acquiring its exact ID below we reload that snapshot
+		// under the lease, closing the selection/acquisition TOCTOU window.
+		if err := application.ResumeLastSession(); err != nil {
+			return nil, "", fmt.Errorf("continue last session: %w", err)
+		}
+		selectedID = application.GetSession().GetID()
+	}
+	if selectedID == "" {
+		selectedID = application.GetSession().GetID()
+	}
+
+	if !persistenceEnabled {
+		return nil, selectedID, nil
+	}
+	lease, err := chat.AcquireSessionWriterLease(selectedID)
+	if err != nil {
+		return nil, selectedID, fmt.Errorf("acquire writer lease for session %q: %w", selectedID, err)
+	}
+
+	if exactID != "" || continueLast {
+		if err := application.ResumeSession(selectedID); err != nil {
+			_ = lease.Release()
+			return nil, selectedID, fmt.Errorf("resume session %q: %w", selectedID, err)
+		}
+	}
+	return lease, selectedID, nil
+}
+
+func sessionPreparationErrorKind(err error, resuming bool) string {
+	if loadKind, ok := chat.SessionLoadErrorKindOf(err); ok {
+		return "session_" + string(loadKind)
+	}
+	if errors.Is(err, app.ErrSessionProviderMismatch) {
+		return "session_provider_mismatch"
+	}
+	if errors.Is(err, chat.ErrSessionWriterLeaseBusy) {
+		return "session_busy"
+	}
+	if !resuming {
+		return "session_lease"
+	}
+	return "resume_failed"
+}
+
+func writeHeadlessFailure(w io.Writer, sessionID, kind string, failure error) error {
+	if w == nil {
+		return fmt.Errorf("write headless JSON failure: output is nil")
+	}
+	if failure == nil {
+		return fmt.Errorf("write headless JSON failure: failure is nil")
+	}
+	if strings.TrimSpace(kind) == "" {
+		kind = "startup"
+	}
+	result := app.HeadlessResult{
+		SchemaVersion: app.HeadlessSchemaVersion,
+		Type:          "result",
+		Result:        "",
+		SessionID:     sessionID,
+		Status:        "error",
+		Error: &app.HeadlessError{
+			Kind:    kind,
+			Message: failure.Error(),
+		},
+		Usage: app.HeadlessUsage{},
+		Cost:  app.HeadlessCost{},
+	}
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		return fmt.Errorf("write headless JSON failure: %w", err)
+	}
+	return nil
 }
 
 // applyAddDirFlags resolves each --add-dir value, refuses ungrantable locations

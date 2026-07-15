@@ -152,4 +152,30 @@ func TestCoordinateTool_NormalCompletionUnaffected(t *testing.T) {
 	}
 }
 
+func TestCoordinateTool_PropagatesSubagentPolicyBlock(t *testing.T) {
+	fc := &fakeCoordinator{waitResults: map[string]any{
+		"internal-1": map[string]any{
+			"status": "completed",
+			"output": "subagent explained the refusal",
+			"policy_block": map[string]any{
+				"kind":   string(PolicyBlockHook),
+				"reason": "trusted hook denied the write",
+			},
+		},
+	}}
+	tool := NewCoordinateTool()
+	tool.SetCoordinatorFactory(func() any { return fc })
+
+	result, err := tool.Execute(context.Background(), map[string]any{"tasks": tasksArg("a")})
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("coordination protocol should still return its summary: %+v", result)
+	}
+	if result.PolicyBlock == nil || result.PolicyBlock.Kind != PolicyBlockHook {
+		t.Fatalf("subagent policy refusal was lost: %#v", result.PolicyBlock)
+	}
+}
+
 func (f *fakeCoordinator) CancelRunning() int { return 0 }

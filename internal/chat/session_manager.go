@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,6 +89,13 @@ func NewSessionManager(session *Session, config SessionManagerConfig) (*SessionM
 	if sm.config.SaveInterval <= 0 {
 		sm.config.SaveInterval = 2 * time.Minute
 	}
+	defaults := DefaultSessionManagerConfig()
+	if sm.config.MaxSessionAge <= 0 {
+		sm.config.MaxSessionAge = defaults.MaxSessionAge
+	}
+	if sm.config.MaxSessionCount <= 0 {
+		sm.config.MaxSessionCount = defaults.MaxSessionCount
+	}
 
 	return sm, nil
 }
@@ -100,7 +108,8 @@ func (sm *SessionManager) Start(ctx context.Context) {
 
 	sm.mu.Lock()
 	sm.lastSaveTime = time.Now()
-	sm.asyncSaveCh = make(chan struct{}, 1)
+	saveCh := make(chan struct{}, 1)
+	sm.asyncSaveCh = saveCh
 	// Start periodic save timer
 	sm.saveTimer = time.AfterFunc(sm.config.SaveInterval, func() {
 		sm.periodicSave()
@@ -117,7 +126,7 @@ func (sm *SessionManager) Start(ctx context.Context) {
 		}()
 		for {
 			select {
-			case <-sm.asyncSaveCh:
+			case <-saveCh:
 				// Debounce: wait briefly to coalesce rapid saves. Use Timer+select
 				// (not time.Sleep) so a shutdown during the debounce window cancels
 				// immediately instead of waiting out the 100ms then doing one more
@@ -128,10 +137,13 @@ func (sm *SessionManager) Start(ctx context.Context) {
 				case <-ctx.Done():
 					timer.Stop()
 					return
+				case <-sm.stopChan:
+					timer.Stop()
+					return
 				}
 				// Drain any extra signals that arrived during the debounce window.
 				select {
-				case <-sm.asyncSaveCh:
+				case <-saveCh:
 				default:
 				}
 				if err := sm.Save(); err != nil {
@@ -142,6 +154,8 @@ func (sm *SessionManager) Start(ctx context.Context) {
 					logging.Warn("async session save failed", "error", err)
 				}
 			case <-ctx.Done():
+				return
+			case <-sm.stopChan:
 				return
 			}
 		}
@@ -158,9 +172,7 @@ func (sm *SessionManager) Start(ctx context.Context) {
 	}()
 }
 
-// Note: Stop() is responsible for cleaning up the timer.
-// We don't spawn a goroutine to listen for stopChan because it would leak
-// if the manager is garbage collected without calling Stop().
+// Stop() tears down both the periodic timer and the async saver.
 
 // Stop gracefully shuts down the session manager.
 func (sm *SessionManager) Stop() {
@@ -170,6 +182,7 @@ func (sm *SessionManager) Stop() {
 		sm.saveTimer.Stop()
 		sm.saveTimer = nil
 	}
+	sm.asyncSaveCh = nil
 	sm.mu.Unlock()
 
 	// Close stop channel to signal any listeners (Once guards against concurrent Stop calls)
@@ -185,6 +198,9 @@ func (sm *SessionManager) Stop() {
 func (sm *SessionManager) Save() error {
 	if !sm.config.Enabled {
 		return nil
+	}
+	if sm.session == nil {
+		return fmt.Errorf("cannot save without an active session")
 	}
 
 	sm.mu.Lock()
@@ -202,7 +218,7 @@ func (sm *SessionManager) Save() error {
 		sm.consecutiveSaveFailures = 0
 		sm.lastSaveTime = time.Now()
 	}
-	sessionID := sm.session.ID
+	sessionID := sm.session.GetID()
 	msgCount := sm.session.MessageCount()
 	sm.mu.Unlock()
 
@@ -222,6 +238,26 @@ func (sm *SessionManager) LoadLast() (*SessionState, *SessionInfo, error) {
 	if !sm.config.Enabled || !sm.config.AutoLoad {
 		return nil, nil, nil
 	}
+	return sm.loadLatestSession()
+}
+
+// LoadLatest explicitly selects the newest usable session for the active
+// workspace, regardless of the automatic-startup AutoLoad preference. It is
+// the persistence boundary for an explicit CLI --continue request: disabling
+// ambient auto-resume must not make a user-requested continue silently start a
+// fresh conversation.
+func (sm *SessionManager) LoadLatest() (*SessionState, *SessionInfo, error) {
+	if !sm.config.Enabled {
+		return nil, nil, wrapSessionLoadError(SessionLoadKindPersistenceDisabled, "",
+			fmt.Errorf("session persistence is disabled"))
+	}
+	return sm.loadLatestSession()
+}
+
+func (sm *SessionManager) loadLatestSession() (*SessionState, *SessionInfo, error) {
+	if sm.session == nil {
+		return nil, nil, fmt.Errorf("cannot load a session without an active session")
+	}
 
 	sessions, err := sm.historyManager.ListSessions()
 	if err != nil {
@@ -232,10 +268,10 @@ func (sm *SessionManager) LoadLast() (*SessionState, *SessionInfo, error) {
 		return nil, nil, nil // No sessions to load
 	}
 
-	// Find the most recent session for the current WorkDir.
-	// Only exact directory matches — never load sessions from other directories.
-	var latest *SessionInfo
-	targetDir := sm.session.WorkDir
+	// Find candidate sessions for the current WorkDir. Only exact directory
+	// matches — never load sessions from other directories.
+	var candidates []SessionInfo
+	targetDir := sm.session.GetWorkDir()
 	if targetDir != "" {
 		targetDir = filepath.Clean(targetDir)
 	}
@@ -248,31 +284,131 @@ func (sm *SessionManager) LoadLast() (*SessionState, *SessionInfo, error) {
 		if targetDir == "" || sessionDir == "" || sessionDir != targetDir {
 			continue
 		}
-		if latest == nil || sessions[i].LastActive.After(latest.LastActive) {
-			latest = &sessions[i]
-		}
+		candidates = append(candidates, sessions[i])
 	}
 
-	if latest == nil {
+	if len(candidates) == 0 {
 		return nil, nil, nil
 	}
 
-	// Load the session state
-	state, err := sm.historyManager.LoadFull(latest.ID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to load session %s: %w", latest.ID, err)
+	// Metadata listing is intentionally shallow. Try newest to oldest until one
+	// candidate also survives full decoding and identity/project validation, so
+	// one partially-written or schema-damaged newest file cannot block every
+	// older intact snapshot. Preserve the newest failure if none are usable.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].LastActive.Equal(candidates[j].LastActive) {
+			return candidates[i].ID < candidates[j].ID
+		}
+		return candidates[i].LastActive.After(candidates[j].LastActive)
+	})
+	var firstErr error
+	for i := range candidates {
+		candidate := &candidates[i]
+		state, loadErr := sm.historyManager.LoadFull(candidate.ID)
+		if loadErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to load session %s: %w", candidate.ID, loadErr)
+			}
+			logging.Debug("skipping unusable session snapshot", "session_id", candidate.ID, "error", loadErr)
+			continue
+		}
+
+		// Revalidate the fully decoded state at the resume boundary. The metadata
+		// scan must never be the sole authority for identity or project ownership.
+		stateDir := state.WorkDir
+		if stateDir != "" {
+			stateDir = filepath.Clean(stateDir)
+		}
+		if state.ID != candidate.ID {
+			loadErr = fmt.Errorf("refusing mismatched session %s containing id %s", candidate.ID, state.ID)
+		} else if targetDir == "" || stateDir == "" || stateDir != targetDir {
+			loadErr = fmt.Errorf("refusing session %s from a different work directory", candidate.ID)
+		}
+		if loadErr != nil {
+			if firstErr == nil {
+				firstErr = loadErr
+			}
+			logging.Debug("skipping invalid session snapshot", "session_id", candidate.ID, "error", loadErr)
+			continue
+		}
+		currentDir := sm.session.GetWorkDir()
+		if currentDir != "" {
+			currentDir = filepath.Clean(currentDir)
+		}
+		if currentDir == "" || currentDir != targetDir {
+			return nil, nil, fmt.Errorf("working directory changed while loading session %s", candidate.ID)
+		}
+
+		logging.Info("loaded previous session",
+			"session_id", candidate.ID,
+			"messages", candidate.MessageCount,
+			"last_active", candidate.LastActive.Format("2006-01-02 15:04:05"))
+
+		return state, candidate, nil
 	}
 
-	logging.Info("loaded previous session",
-		"session_id", latest.ID,
-		"messages", latest.MessageCount,
-		"last_active", latest.LastActive.Format("2006-01-02 15:04:05"))
+	return nil, nil, firstErr
+}
 
-	return state, latest, nil
+// LoadSession loads one exact persisted identity for the current project
+// without mutating the active Session. Callers can perform provider/policy
+// checks and then explicitly call RestoreFromState. Both working directories
+// must be non-empty and equal; an explicit ID is not permission to cross a
+// project boundary.
+func (sm *SessionManager) LoadSession(sessionID string) (*SessionState, *SessionInfo, error) {
+	if !sm.config.Enabled {
+		return nil, nil, wrapSessionLoadError(SessionLoadKindPersistenceDisabled, sessionID,
+			fmt.Errorf("session persistence is disabled"))
+	}
+	if sm.session == nil {
+		return nil, nil, wrapSessionLoadError(SessionLoadKindStorage, sessionID,
+			fmt.Errorf("cannot load a session without an active session"))
+	}
+	if err := ValidateSessionID(sessionID); err != nil {
+		return nil, nil, wrapSessionLoadError(SessionLoadKindInvalidID, sessionID, err)
+	}
+
+	state, err := sm.historyManager.LoadFull(sessionID)
+	if err != nil {
+		kind := SessionLoadKindStorage
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			kind = SessionLoadKindNotFound
+		case errors.Is(err, errSessionIdentityMismatch):
+			kind = SessionLoadKindIdentityMismatch
+		case errors.Is(err, errSessionStateCorrupt):
+			kind = SessionLoadKindCorrupt
+		}
+		return nil, nil, wrapSessionLoadError(kind, sessionID,
+			fmt.Errorf("failed to load session %s: %w", sessionID, err))
+	}
+	if state.ID != sessionID {
+		return nil, nil, wrapSessionLoadError(SessionLoadKindIdentityMismatch, sessionID,
+			fmt.Errorf("%w: requested %q, file contains %q", errSessionIdentityMismatch, sessionID, state.ID))
+	}
+	targetDir := sm.session.GetWorkDir()
+	stateDir := state.WorkDir
+	if targetDir == "" || stateDir == "" || filepath.Clean(targetDir) != filepath.Clean(stateDir) {
+		return nil, nil, wrapSessionLoadError(SessionLoadKindForeignProject, sessionID,
+			fmt.Errorf("refusing session %s from a different work directory", sessionID))
+	}
+
+	info := &SessionInfo{
+		ID:           state.ID,
+		StartTime:    state.StartTime,
+		LastActive:   state.LastActive,
+		Summary:      state.Summary,
+		MessageCount: len(state.History),
+		WorkDir:      state.WorkDir,
+	}
+	return state, info, nil
 }
 
 // RestoreFromState restores the current session from a saved state.
 func (sm *SessionManager) RestoreFromState(state *SessionState) error {
+	if sm.session == nil {
+		return fmt.Errorf("cannot restore without an active session")
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -293,9 +429,12 @@ func (sm *SessionManager) SaveAfterMessage() error {
 
 	// Non-blocking async save: signals background goroutine.
 	// If a save is already pending, this is a no-op (dedup).
-	if sm.asyncSaveCh != nil {
+	sm.mu.Lock()
+	saveCh := sm.asyncSaveCh
+	sm.mu.Unlock()
+	if saveCh != nil {
 		select {
-		case sm.asyncSaveCh <- struct{}{}:
+		case saveCh <- struct{}{}:
 		default: // save already pending
 		}
 	}
@@ -341,11 +480,14 @@ func (sm *SessionManager) ClearCurrentSession() error {
 	if !sm.config.Enabled {
 		return nil
 	}
+	if sm.session == nil {
+		return fmt.Errorf("cannot clear without an active session")
+	}
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if err := sm.historyManager.DeleteSession(sm.session.ID); err != nil {
+	if err := sm.historyManager.DeleteSession(sm.session.GetID()); err != nil {
 		// Ignore error if file doesn't exist
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("failed to delete session: %w", err)
@@ -361,6 +503,9 @@ func (sm *SessionManager) CleanupOldSessions() error {
 	if sm.historyManager == nil {
 		return nil
 	}
+	if sm.session == nil {
+		return fmt.Errorf("cannot clean sessions without an active session")
+	}
 
 	sessions, err := sm.historyManager.ListSessions()
 	if err != nil {
@@ -374,16 +519,20 @@ func (sm *SessionManager) CleanupOldSessions() error {
 
 	// Sort sessions by LastActive (newest first)
 	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].LastActive.Equal(sessions[j].LastActive) {
+			return sessions[i].ID < sessions[j].ID
+		}
 		return sessions[i].LastActive.After(sessions[j].LastActive)
 	})
 
 	cutoff := time.Now().Add(-sm.config.MaxSessionAge)
 	deletedCount := 0
+	currentSessionID := sm.session.GetID()
 
 	// Delete sessions that are too old
 	for i, sess := range sessions {
 		// Always keep current session
-		if sess.ID == sm.session.ID {
+		if sess.ID == currentSessionID {
 			continue
 		}
 

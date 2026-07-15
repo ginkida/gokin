@@ -137,6 +137,14 @@ func TestGitStatusMultiSelectionDrivesGroupedActions(t *testing.T) {
 		t.Fatalf("grouped stage = action %v files %v", msg.Action, msg.Files)
 	}
 
+	// A terminal action remains pending until the embedding surface closes or a
+	// new authoritative status snapshot arrives. Refresh before exercising a
+	// second independent selection transaction.
+	updated.SetStatus([]GitFileEntry{
+		{FilePath: "staged.go", Status: GitFileStaged, IsStaged: true},
+		{FilePath: "one.go", Status: GitFileModified},
+		{FilePath: "two.go", Status: GitFileModified},
+	}, "main", "", "")
 	updated.selectedIndex = 2
 	updated.selectedIndices = map[int]bool{0: true, 2: true}
 	_, cmd = updated.Update(tea.KeyMsg{Type: tea.KeySpace})
@@ -465,6 +473,40 @@ func TestGitStatusSplitPanelsFitWideTerminal(t *testing.T) {
 	for _, line := range strings.Split(m.View(), "\n") {
 		if got := lipgloss.Width(line); got > 80 {
 			t.Fatalf("split git status line width = %d, want <= 80: %q", got, stripAnsi(line))
+		}
+	}
+}
+
+func TestGitStatusFitsHeightWithLongDiffAndNavigationFooter(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{40, 12}, {72, 12}, {80, 18}} {
+		m := NewGitStatusModel(DefaultStyles())
+		entries := make([]GitFileEntry, 16)
+		for i := range entries {
+			entries[i] = GitFileEntry{
+				FilePath:  fmt.Sprintf("deeply/nested/path/%02d-%s.go", i, strings.Repeat("long-name-", 8)),
+				Status:    GitFileModified,
+				DiffStats: "+120 -45",
+			}
+		}
+		m.SetStatus(entries, "feature/compact-layout", "origin/feature/compact-layout", "2 ahead")
+		m.showDiff = true
+		m.SetDiff(strings.Repeat("+ very long diff content ", 12))
+		m.SetSize(size.width, size.height)
+
+		view := m.View()
+		if got := lipgloss.Height(view); got > size.height {
+			t.Fatalf("%dx%d git status rendered %d rows:\n%s", size.width, size.height, got, stripAnsi(view))
+		}
+		for row, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d row=%d width=%d exceeds terminal: %q", size.width, size.height, row, got, stripAnsi(line))
+			}
+		}
+		plain := stripAnsi(view)
+		for _, want := range []string{"Git Status", "Esc/q", "long diff content"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("%dx%d git status missing %q:\n%s", size.width, size.height, want, plain)
+			}
 		}
 	}
 }

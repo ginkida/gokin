@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,26 @@ func TestFileBrowserFilterModeShowsOnlyEditingActions(t *testing.T) {
 			t.Errorf("filter footer advertises unavailable action %q:\n%s", unavailable, out)
 		}
 	}
+}
+
+func TestFileBrowserEmptyFilterDoesNotAdvertiseDeadDeletion(t *testing.T) {
+	m := NewFileBrowserModel(DefaultStyles())
+	m.currentDir = t.TempDir()
+	m.filterActive = true
+	m.updateViewport()
+
+	view := renderToPlain(m.View())
+	if strings.Contains(view, "Backspace Delete") {
+		t.Fatalf("empty filter advertised dead deletion:\n%s", view)
+	}
+
+	root := NewModel()
+	root.state = StateFileBrowser
+	root.fileBrowser = m
+	assertShortcutHints(t, root,
+		[]string{"Type Filter", "Enter/Esc Done"},
+		[]string{"Backspace Delete"},
+	)
 }
 
 func TestFileBrowserEditingFilterPreservesQueryAndUnicode(t *testing.T) {
@@ -223,6 +244,73 @@ func TestFileBrowserNavigationKeepsSelectionVisible(t *testing.T) {
 	}
 }
 
+func TestFileBrowserNavigationHintsFollowCardinalityAndOverflow(t *testing.T) {
+	m := NewFileBrowserModel(DefaultStyles())
+	m.width, m.height = 90, 24
+	m.currentDir = string(filepath.Separator)
+	m.viewport.Height = 10
+	m.entries = []FileEntry{{Name: "main.go", Path: "/main.go"}}
+	m.updateViewport()
+
+	view := renderToPlain(m.View())
+	for _, dead := range []string{"↑/↓ Move", "PgUp/PgDn Page", "Home/End Jump", "h/← Parent"} {
+		if strings.Contains(view, dead) {
+			t.Fatalf("single root entry advertised dead action %q:\n%s", dead, view)
+		}
+	}
+	host := NewModel()
+	host.state = StateFileBrowser
+	host.fileBrowser = m
+	assertShortcutHints(t, host,
+		[]string{"Enter Add to draft", "Space Select", "esc/q Close"},
+		[]string{"↑↓ Move", "PgUp/PgDn Page"},
+	)
+
+	m.entries = append(m.entries, FileEntry{Name: "src", Path: "/src", IsDir: true})
+	m.updateViewport()
+	host.fileBrowser = m
+	assertShortcutHints(t, host,
+		[]string{"↑↓ Move"},
+		[]string{"PgUp/PgDn Page"},
+	)
+	visible := renderToPlain(m.View())
+	if !strings.Contains(visible, "↑/↓ Move") || strings.Contains(visible, "PgUp/PgDn Page") {
+		t.Fatalf("fully visible entries have dishonest navigation:\n%s", visible)
+	}
+
+	m.viewport.Height = 2
+	for i := 0; i < 4; i++ {
+		m.entries = append(m.entries, FileEntry{Name: fmt.Sprintf("file-%d.go", i), Path: fmt.Sprintf("/file-%d.go", i)})
+	}
+	m.updateViewport()
+	host.fileBrowser = m
+	assertShortcutHints(t, host,
+		[]string{"↑↓ Move", "PgUp/PgDn Page"},
+		nil,
+	)
+	if overflow := renderToPlain(m.View()); !strings.Contains(overflow, "PgUp/PgDn Page") {
+		t.Fatalf("overflowing entries hid paging:\n%s", overflow)
+	}
+}
+
+func TestFileBrowserPreviewScrollHintFollowsContentOverflow(t *testing.T) {
+	m := NewFileBrowserModel(DefaultStyles())
+	m.width, m.height = 100, 20
+	m.currentDir = t.TempDir()
+	m.entries = []FileEntry{{Name: "main.go", Path: "main.go"}}
+	m.previewEnabled = true
+	m.previewViewport.Height = 8
+	m.previewViewport.SetContent("short preview")
+	if view := renderToPlain(m.View()); strings.Contains(view, "Ctrl+j/k Scroll preview") {
+		t.Fatalf("short preview advertised dead scrolling:\n%s", view)
+	}
+
+	m.previewViewport.SetContent(strings.Repeat("line\n", 20))
+	if view := renderToPlain(m.View()); !strings.Contains(view, "Ctrl+j/k Scroll preview") {
+		t.Fatalf("overflowing preview hid scrolling:\n%s", view)
+	}
+}
+
 func TestFileBrowserFastNavigationRefreshesPreviewAndIsDiscoverable(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"} {
@@ -247,7 +335,7 @@ func TestFileBrowserFastNavigationRefreshesPreviewAndIsDiscoverable(t *testing.T
 	}
 
 	view := renderToPlain(m.View())
-	for _, want := range []string{"↑/↓ Move", "PgUp/PgDn Page", "Home/End Jump", "h/l Folder"} {
+	for _, want := range []string{"↑/↓ Move", "PgUp/PgDn Page", "Home/End Jump", "h/← Parent"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("file-browser footer hides navigation %q:\n%s", want, view)
 		}
@@ -283,6 +371,49 @@ func TestFileBrowserPreviewToggleReflowsPanelsWithinTerminal(t *testing.T) {
 	}
 	if !strings.Contains(renderToPlain(m.View()), "p Hide preview") {
 		t.Fatalf("enabled preview footer does not advertise its inverse action:\n%s", renderToPlain(m.View()))
+	}
+}
+
+func TestFileBrowserFitsHeightWithLongPreviewAndNavigationFooter(t *testing.T) {
+	dir := t.TempDir()
+	name := "very-long-preview-file-name.go"
+	content := strings.Repeat("package preview with a very long source line ", 12)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, size := range []struct{ width, height int }{{72, 12}, {80, 18}} {
+		m := NewFileBrowserModel(DefaultStyles())
+		m.SetSize(size.width, size.height)
+		if err := m.SetPath(dir); err != nil {
+			t.Fatal(err)
+		}
+		for i, entry := range m.entries {
+			if entry.Name == name {
+				m.selectEntry(i)
+				break
+			}
+		}
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+		if !m.previewEnabled {
+			t.Fatalf("%dx%d preview did not enable", size.width, size.height)
+		}
+
+		view := m.View()
+		if got := lipgloss.Height(view); got > size.height {
+			t.Fatalf("%dx%d file browser rendered %d rows:\n%s", size.width, size.height, got, renderToPlain(view))
+		}
+		for row, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d row=%d width=%d exceeds terminal: %q", size.width, size.height, row, got, renderToPlain(line))
+			}
+		}
+		plain := renderToPlain(view)
+		for _, want := range []string{"Files", "Esc/q", "package preview"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("%dx%d browser missing %q:\n%s", size.width, size.height, want, plain)
+			}
+		}
 	}
 }
 

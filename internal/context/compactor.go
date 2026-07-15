@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"gokin/internal/skills"
 	"gokin/internal/tools"
 )
 
@@ -259,6 +260,13 @@ func (c *ResultCompactor) smartTruncateContent(content string) string {
 
 // CompactForType compacts content based on the tool type.
 func (c *ResultCompactor) CompactForType(toolName string, result tools.ToolResult) tools.ToolResult {
+	// A loaded skill is executable guidance, not disposable tool output. The
+	// SkillTool already bounds rendered SKILL.md content at its catalog boundary;
+	// generic head/tail compaction here can silently remove workflow steps before
+	// the model has had a chance to consume them.
+	if toolName == "skill" && result.Success && len(result.Content) <= skills.MaxRenderedSkillBytes {
+		return result
+	}
 	if !result.Success || len(result.Content) <= c.maxChars {
 		return result
 	}

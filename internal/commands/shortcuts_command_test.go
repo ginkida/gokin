@@ -26,6 +26,7 @@ func TestShortcutsCommand_ListIsCurrent(t *testing.T) {
 
 	mustContain := []string{
 		"Ctrl+P",     // Command palette
+		"Ctrl+S",     // Settings — taught by the welcome panel
 		"Ctrl+K",     // Model selector — added v0.84.0
 		"Ctrl+E",     // Expand tool output — added v0.84.3
 		"Ctrl+H",     // Context Observatory
@@ -38,6 +39,9 @@ func TestShortcutsCommand_ListIsCurrent(t *testing.T) {
 		"?",          // Filterable overlay
 		"task list",  // Ctrl+T description (no longer "Background tasks")
 		"Cycle mode", // Shift+Tab description (no longer "Toggle plan mode")
+		"live activity detail",
+		"default for new tool outputs",
+		"empty input",
 	}
 	for _, key := range mustContain {
 		if !strings.Contains(out, key) {
@@ -50,6 +54,7 @@ func TestShortcutsCommand_ListIsCurrent(t *testing.T) {
 		"Option+C",         // terminal binding is Alt+C
 		"Background tasks", // Ctrl+T shows the task list, not "background tasks"
 		"Toggle plan mode", // Shift+Tab cycles through 3 modes, not 2
+		"Expand or collapse all tool outputs",
 	}
 	for _, stale := range staleStrings {
 		if strings.Contains(out, stale) {

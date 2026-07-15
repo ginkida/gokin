@@ -11,6 +11,7 @@ func TestReducedMotionPropagatesAndKeepsHousekeepingState(t *testing.T) {
 	m.SetReducedMotion(true)
 
 	if !m.reducedMotion || !m.output.state.reducedMotion || !m.progressModel.reducedMotion ||
+		!m.toastManager.reducedMotion ||
 		!m.toolProgressBar.reducedMotion || !m.planProgressPanel.reducedMotion ||
 		!m.activityFeed.reducedMotion || !m.agentTreePanel.reducedMotion {
 		t.Fatal("reduced-motion setting did not reach every live surface")
@@ -29,6 +30,31 @@ func TestReducedMotionPropagatesAndKeepsHousekeepingState(t *testing.T) {
 	_ = m.toolProgressBar.Tick()
 	if m.toolProgressBar.IsVisible() {
 		t.Fatal("reduced motion disabled stale-progress housekeeping")
+	}
+}
+
+func TestReducedMotionKeepsToastContrastStableUntilExpiry(t *testing.T) {
+	manager := NewToastManager(DefaultStyles())
+	now := time.Now()
+	toast := Toast{
+		ID:        1,
+		Type:      ToastWarning,
+		Message:   "Action needs attention",
+		Duration:  10 * time.Second,
+		CreatedAt: now,
+	}
+	if manager.toastFading(toast, now) {
+		t.Fatal("fresh toast entered fade state")
+	}
+
+	toast.CreatedAt = now.Add(-9750 * time.Millisecond)
+	if !manager.toastFading(toast, now) {
+		t.Fatal("normal-motion toast did not enter its final fade state")
+	}
+
+	manager.SetReducedMotion(true)
+	if manager.toastFading(toast, now) {
+		t.Fatal("reduced-motion toast retained its final fade transition")
 	}
 }
 
@@ -102,9 +128,12 @@ func TestReducedMotionConfigUpdateAppliesLive(t *testing.T) {
 	if before := stripAnsi(m.renderTodos()); !containsAnimatedSpinner(before) {
 		t.Fatalf("setup: normal-motion task is not animated:\n%s", before)
 	}
-	_ = m.handleMessageTypes(ConfigUpdateMsg{ReducedMotion: true})
+	_ = m.handleMessageTypes(ConfigUpdateMsg{ReducedMotion: true, ShowTokenUsage: true})
 	if !m.reducedMotion || !m.output.state.reducedMotion {
 		t.Fatal("ConfigUpdateMsg did not apply reduced motion live")
+	}
+	if !m.showTokens {
+		t.Fatal("ConfigUpdateMsg did not apply token-usage visibility live")
 	}
 	if after := stripAnsi(m.renderTodos()); !strings.Contains(after, "● Live task") || containsAnimatedSpinner(after) {
 		t.Fatalf("live config update did not settle task animation:\n%s", after)

@@ -92,18 +92,18 @@ func TestApp_RevokeGrantedDir(t *testing.T) {
 	}
 }
 
-func TestApp_DirGrantPrompt_HeadlessAutoGrants(t *testing.T) {
+func TestApp_DirGrantPrompt_HeadlessRequiresExplicitGrant(t *testing.T) {
 	a, _, external := newGrantTestApp(t)
-	// a.program == nil -> headless -> auto-grant for the session.
+	// a.program == nil: there is nobody who can approve new filesystem scope.
 	allowed, err := a.dirGrantPrompt(context.Background(), "read", filepath.Join(external, "new.txt"))
-	if err != nil {
-		t.Fatalf("headless dirGrantPrompt: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--add-dir") {
+		t.Fatalf("headless denial should explain explicit grant: %v", err)
 	}
-	if !allowed {
-		t.Fatal("headless must auto-grant (no stdin to block on)")
+	if allowed {
+		t.Fatal("headless must not create ambient filesystem authority")
 	}
-	if !a.isDirAccessAllowed(filepath.Join(external, "new.txt")) {
-		t.Error("the containing dir should be granted after headless auto-grant")
+	if a.isDirAccessAllowed(filepath.Join(external, "new.txt")) {
+		t.Error("denied directory must not appear in the session grants")
 	}
 }
 

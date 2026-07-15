@@ -54,6 +54,17 @@ and helps with coding using natural language.
     "Find duplicate code"
 `
 
+	quickstartSafety = `
+%s─── safety & session modes ───%s
+
+  %sNormal%s  — asks before write, edit, or bash actions
+  %sPlan%s    — explores read-only, then proposes a plan for approval
+  %sYOLO%s    — permissions and sandbox are off; commands run without asking
+
+  %sShift+Tab%s cycles Normal → Plan → YOLO. The active mode stays visible
+  in the bottom status bar. During active work, %sEsc%s cancels the operation.
+`
+
 	quickstartTips = `
 %s─── helpful tips ───%s
 
@@ -108,6 +119,13 @@ func (c *QuickstartCommand) Execute(ctx context.Context, args []string, app AppI
 func (c *QuickstartCommand) getQuickstart() string {
 	header := fmt.Sprintf(quickstartHeader, colorCyan, colorReset, colorYellow, colorReset)
 	examples := fmt.Sprintf(quickstartExamples, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset, colorCyan, colorReset)
+	safety := fmt.Sprintf(quickstartSafety,
+		colorYellow, colorReset,
+		colorGreen, colorReset,
+		colorCyan, colorReset,
+		colorRed, colorReset,
+		colorGreen, colorReset,
+		colorGreen, colorReset)
 	tips := fmt.Sprintf(quickstartTips,
 		colorYellow, colorReset,
 		colorGreen, colorReset,
@@ -125,5 +143,5 @@ func (c *QuickstartCommand) getQuickstart() string {
 		colorGreen, colorReset,
 		colorYellow, colorReset,
 		colorCyan, colorReset)
-	return header + examples + tips
+	return header + examples + safety + tips
 }

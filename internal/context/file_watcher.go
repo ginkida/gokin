@@ -18,6 +18,7 @@ type FileWatcher struct {
 
 	mu      sync.Mutex
 	lastMod time.Time
+	exists  bool
 	timer   *time.Timer
 	closed  bool
 }
@@ -45,6 +46,7 @@ func NewFileWatcher(ctx context.Context, path string, debounceMs int, callback f
 	}
 	if info != nil {
 		fw.lastMod = info.ModTime()
+		fw.exists = true
 	}
 
 	// Start watching goroutine
@@ -74,32 +76,51 @@ func (fw *FileWatcher) watch(ctx context.Context) {
 func (fw *FileWatcher) checkChanges() {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
+	if fw.closed {
+		return
+	}
 
 	info, err := os.Stat(fw.path)
 	if err != nil {
-		// File might not exist yet, that's ok
+		if os.IsNotExist(err) && fw.exists {
+			// Deletion is a real change. Without this transition a watcher bound
+			// to GOKIN.md kept stale instructions forever and could never rebind
+			// to CLAUDE.md or the project directory.
+			fw.exists = false
+			fw.lastMod = time.Time{}
+			fw.scheduleCallbackLocked()
+		}
 		return
 	}
 
 	modTime := info.ModTime()
-	if !modTime.Equal(fw.lastMod) && modTime.Sub(fw.lastMod) > 100*time.Millisecond {
-		// File changed
+	if !fw.exists || !modTime.Equal(fw.lastMod) {
+		// Creation/recreation and every mtime transition are real changes. The
+		// debounce timer already collapses rapid writes; rejecting deltas <=100ms
+		// made legitimate edits permanently invisible on precise filesystems.
+		fw.exists = true
 		fw.lastMod = modTime
-
-		// Debounce
-		if fw.timer != nil {
-			fw.timer.Stop()
-		}
-
-		fw.timer = time.AfterFunc(time.Duration(fw.debounceMs)*time.Millisecond, func() {
-			fw.mu.Lock()
-			closed := fw.closed
-			fw.mu.Unlock()
-			if !closed {
-				fw.callback(fw.path)
-			}
-		})
+		fw.scheduleCallbackLocked()
 	}
+}
+
+// scheduleCallbackLocked debounces one observed filesystem transition.
+// Caller must hold fw.mu.
+func (fw *FileWatcher) scheduleCallbackLocked() {
+	if fw.timer != nil {
+		fw.timer.Stop()
+	}
+	fw.timer = time.AfterFunc(time.Duration(fw.debounceMs)*time.Millisecond, func() {
+		fw.mu.Lock()
+		if fw.closed {
+			fw.mu.Unlock()
+			return
+		}
+		path := fw.path
+		callback := fw.callback
+		fw.mu.Unlock()
+		callback(path)
+	})
 }
 
 // UpdatePath rebinds the watcher to a new target (e.g. once a fallback
@@ -117,8 +138,10 @@ func (fw *FileWatcher) UpdatePath(path string) {
 	fw.path = path
 	if info, err := os.Stat(path); err == nil {
 		fw.lastMod = info.ModTime()
+		fw.exists = true
 	} else {
 		fw.lastMod = time.Time{}
+		fw.exists = false
 	}
 }
 
@@ -131,6 +154,19 @@ func (fw *FileWatcher) Path() string {
 
 // Close stops the file watcher and waits for the goroutine to finish.
 func (fw *FileWatcher) Close() {
+	// Prevent a pending debounce callback from starting after Close returns (or
+	// while it waits for the polling goroutine). Mark closed before cancellation.
+	fw.mu.Lock()
+	if fw.closed {
+		fw.mu.Unlock()
+		return
+	}
+	fw.closed = true
+	if fw.timer != nil {
+		fw.timer.Stop()
+	}
+	fw.mu.Unlock()
+
 	if fw.cancel != nil {
 		fw.cancel()
 	}
@@ -147,12 +183,6 @@ func (fw *FileWatcher) Close() {
 		}
 	}
 
-	fw.mu.Lock()
-	fw.closed = true
-	if fw.timer != nil {
-		fw.timer.Stop()
-	}
-	fw.mu.Unlock()
 }
 
 // WatchInstructionFiles watches all possible instruction file locations.

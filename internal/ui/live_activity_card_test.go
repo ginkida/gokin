@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup pins the
@@ -126,6 +128,90 @@ func TestRenderLiveActivityCard_CollapsesWhenFeedOpen(t *testing.T) {
 	lineCount := strings.Count(view, "\n") + 1
 	if lineCount > 1 {
 		t.Errorf("collapsed card has %d lines, want 1:\n%s", lineCount, view)
+	}
+}
+
+func TestRenderLiveActivityCardFeedOpenAlsoCollapsesTodo(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+	m.height = 20
+	m.state = StateProcessing
+	m.liveDetailExpanded = true
+	m.currentActivity = "Implementing compact layout"
+	m.todoItems = []string{"[/] Current todo", "[ ] Next todo"}
+
+	view := stripAnsi(m.renderLiveActivityCard(true))
+	if strings.Count(view, "\n") != 0 || strings.Contains(view, "Step ") {
+		t.Fatalf("open feed did not collapse card to current action:\n%s", view)
+	}
+	if !strings.Contains(view, "Implementing compact layout") {
+		t.Fatalf("collapsed card lost current action: %q", view)
+	}
+}
+
+func TestLiveActivityGenericPhaseYieldsToSpecificActivity(t *testing.T) {
+	m := NewModel()
+	m.state = StateProcessing
+	m.processingLabel = "Analyzing"
+	m.currentActivity = "Implementing backup recovery"
+
+	if got := m.liveActivityCurrentLine(ActivityFeedSnapshot{}); !strings.Contains(got, "Implementing backup recovery") || strings.Contains(got, "Analyzing") {
+		t.Fatalf("generic phase obscured specific activity: %q", got)
+	}
+	m.processingLabel = "Quality gate 2/3: go test"
+	if got := m.liveActivityCurrentLine(ActivityFeedSnapshot{}); !strings.Contains(got, "Quality gate 2/3") {
+		t.Fatalf("specific phase should outrank an older activity label: %q", got)
+	}
+}
+
+func TestLiveActivityShortHeightKeepsIdleWarningBeforeTodo(t *testing.T) {
+	m := NewModel()
+	m.width = 70
+	m.height = 7
+	m.state = StateProcessing
+	m.liveDetailExpanded = true
+	m.processingLabel = "Analyzing"
+	m.currentActivity = "Implementing compact layout"
+	m.streamIdleMsg = "Provider has not responded for 30s"
+	m.todoItems = []string{"[/] Current todo", "[ ] Next todo"}
+
+	view := m.renderLiveActivityCard(false)
+	plain := stripAnsi(view)
+	if got, limit := lipgloss.Height(view), liveActivityCardRowBudget(m.height); got > limit {
+		t.Fatalf("short card height=%d, want <=%d:\n%s", got, limit, plain)
+	}
+	for _, want := range []string{"Implementing compact layout", "Provider has not responded"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("short card lost priority signal %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "Step ") {
+		t.Fatalf("todo displaced higher-priority idle warning:\n%s", plain)
+	}
+
+	m.height = 8
+	if roomy := stripAnsi(m.renderLiveActivityCard(false)); !strings.Contains(roomy, "Step 1/2") {
+		t.Fatalf("todo did not return when a third row became available:\n%s", roomy)
+	}
+}
+
+func TestLiveActivityCardSanitizesAndFitsWideRuntimeText(t *testing.T) {
+	m := NewModel()
+	m.width = 32
+	m.height = 12
+	m.state = StateProcessing
+	m.currentTool = "read\nforged\x1b]0;title\a"
+	m.currentToolInfo = strings.Repeat("界", 30) + "\nFORGED\x1b[2J"
+
+	view := m.renderLiveActivityCard(false)
+	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "\x1b]0;") {
+		t.Fatalf("runtime terminal control reached live card: %q", view)
+	}
+	if strings.Contains(stripAnsi(view), "\n") {
+		t.Fatalf("runtime metadata injected a structural row: %q", stripAnsi(view))
+	}
+	if got := lipgloss.Width(view); got > m.width {
+		t.Fatalf("wide-cell runtime text rendered %d cells, want <=%d: %q", got, m.width, stripAnsi(view))
 	}
 }
 

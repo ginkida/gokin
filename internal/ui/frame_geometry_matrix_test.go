@@ -48,7 +48,7 @@ func TestFrameGeometryAcrossStatesAndTerminalSizes(t *testing.T) {
 					t.Fatalf("frame height = %d, want %d", got, size.height)
 				}
 				lines := strings.Split(stripAnsi(view), "\n")
-				last := lines[len(lines)-1]
+				last := strings.TrimRight(lines[len(lines)-1], " ")
 				wantStatus := stripAnsi(m.renderStatusBar())
 				if last != wantStatus {
 					t.Fatalf("last row is not status bar:\n got %q\nwant %q", last, wantStatus)

@@ -1,12 +1,25 @@
 package app
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"gokin/internal/permission"
 	"gokin/internal/ui"
 )
+
+func TestPromptPermission_HeadlessFailsClosed(t *testing.T) {
+	a := &App{headlessDirect: true}
+	decision, err := a.promptPermission(context.Background(), permission.NewRequest("bash", map[string]any{"command": "go test ./..."}))
+	if decision != permission.DecisionDeny || err == nil {
+		t.Fatalf("headless ask = decision %v, err %v; want deny with error", decision, err)
+	}
+	if !strings.Contains(err.Error(), "permission.rules.bash: allow") {
+		t.Errorf("headless error is not actionable: %v", err)
+	}
+}
 
 // TestHandlePermissionDecision_RoutesByRequestID pins the fix for the
 // misattribution bug: with a single shared response channel, a decision

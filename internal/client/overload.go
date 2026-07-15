@@ -8,9 +8,9 @@ import (
 )
 
 // TerminalProviderError marks a HARD provider failure that retrying cannot fix:
-// a quota/balance cap, an exhausted usage window, or an auth failure. Unlike an
-// overload (see IsOverloadError), waiting does NOT help — the only recovery is
-// user action (top up, switch provider with /provider, fix the key). The retry
+// an invalid request, auth/permission/content rejection, exhausted usage window,
+// or account/plan failure. Unlike an overload (see IsOverloadError), waiting does
+// NOT help — recovery requires changing the request or user/account action. The retry
 // deciders (IsOverloadError, IsRetryableError, and the AnthropicClient's own
 // isRetryableError) short-circuit on it so it surfaces IMMEDIATELY with its
 // actionable Message instead of being parked on the patient overload budget or
@@ -46,9 +46,8 @@ func IsTerminalProviderError(err error) bool {
 //
 // Detection is keyword-based, which reliably covers every overload source gokin
 // sees because each one embeds a stable keyword in its error string:
-//   - GLM/Z.AI 1301/1302/1303/1305 (concurrency/throughput/overload) → the
-//     wrapped error embeds "overloaded" (see classifyGLMErrorCode),
-//   - GLM 1210 → embeds "rate limit",
+//   - GLM/Z.AI 1305 (overloaded) → embeds "overloaded",
+//   - GLM/Z.AI 1302 (rate limit) → embeds "rate limit",
 //   - Anthropic-style "overloaded_error" / HTTP 529 → "overloaded",
 //   - Anthropic "rate_limit_error" / HTTP 429 → "rate_limit" / "too many requests".
 //
@@ -58,7 +57,7 @@ func IsOverloadError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// A hard terminal failure (quota/auth) is NEVER an overload, even if its
+	// A hard terminal failure is NEVER an overload, even if its
 	// text happens to contain a keyword like "rate limit" — waiting cannot fix
 	// it. Guard first so a terminal error can never be parked on the patient
 	// overload budget regardless of message wording.

@@ -35,9 +35,18 @@ func TestStatusBarHintsFollowPromptSubmode(t *testing.T) {
 			notWant: []string{"↑↓ Navigate"},
 		},
 		{
-			name:    "permission details",
-			model:   Model{state: StatePermissionPrompt, permShowDetails: true},
-			want:    []string{"↑↓ Scroll", "? Back", "y/a/n Decide"},
+			name: "permission details",
+			model: Model{
+				state:           StatePermissionPrompt,
+				permShowDetails: true,
+				width:           72,
+				height:          12,
+				permRequest: &PermissionRequestMsg{
+					Reason: strings.Repeat("review this operation ", 20),
+					Args:   map[string]any{"command": strings.Repeat("go generate ./... ", 20)},
+				},
+			},
+			want:    []string{"↑↓ Scroll", "PgUp/PgDn Page", "? Back", "y/a/n Decide"},
 			notWant: []string{"Enter"},
 		},
 	} {

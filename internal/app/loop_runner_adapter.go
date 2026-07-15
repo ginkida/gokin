@@ -202,7 +202,7 @@ func newLoopSpawner(a *App) loops.Spawner {
 		// applyPromptBudget caps the size.
 		projectCtx := ""
 		if a.promptBuilder != nil {
-			projectCtx = a.promptBuilder.BuildSubAgentPrompt()
+			projectCtx = a.promptBuilder.BuildSubAgentPromptForTask(prompt)
 		}
 
 		// SpawnWithContext runs the agent to completion synchronously and returns

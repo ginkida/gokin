@@ -3,20 +3,12 @@ package tools
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"gokin/internal/testkit"
 )
-
-// checkGopls reports whether gopls is on PATH and returns its version.
-func checkGopls(t *testing.T) (available bool) {
-	t.Helper()
-	_, err := exec.LookPath("gopls")
-	return err == nil
-}
 
 // setupGoModule creates a temp Go module with one source file. The dir is
 // symlink-resolved (macOS /var → /private/var) because the tools' PathValidator
@@ -377,14 +369,6 @@ func TestSemanticTools_RejectOutOfWorkspacePath(t *testing.T) {
 	}
 	if res.Success || !strings.Contains(res.Error, "security error") {
 		t.Fatalf("find_references must reject out-of-workspace paths, got success=%v err=%q", res.Success, res.Error)
-	}
-}
-
-// TestGoplsAvailable exercises the gopls availability check.
-func TestGoplsAvailable(t *testing.T) {
-	avail := goplsAvailable()
-	if checkGopls(t) != avail {
-		t.Logf("goplsAvailable()=%v, checkGopls()=%v (may differ if gopls has no version output)", avail, checkGopls(t))
 	}
 }
 

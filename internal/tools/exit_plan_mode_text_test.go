@@ -31,3 +31,33 @@ func TestExitPlanMode_ResultDirectsModelToImplement(t *testing.T) {
 		}
 	}
 }
+
+func TestEnterPlanMode_ModificationFeedbackReturnsToSameModelLoop(t *testing.T) {
+	mgr := plan.NewManager(true, true)
+	mgr.SetApprovalHandler(func(_ context.Context, shown *plan.Plan) (plan.ApprovalDecision, error) {
+		mgr.StageApprovalFeedback(shown, "keep the public API compatible")
+		return plan.ApprovalModified, nil
+	})
+	tool := NewEnterPlanModeTool()
+	tool.SetManager(mgr)
+
+	res, err := tool.Execute(context.Background(), map[string]any{
+		"title":       "Change storage",
+		"description": "Refactor storage safely",
+		"request":     "Improve storage",
+		"steps": []any{
+			map[string]any{"title": "Refactor", "description": "Update implementation"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("modification response should reach model as a normal tool result: %q", res.Error)
+	}
+	for _, want := range []string{"keep the public API compatible", "Revise", "resubmit"} {
+		if !strings.Contains(res.Content, want) {
+			t.Fatalf("modification result missing %q: %q", want, res.Content)
+		}
+	}
+}

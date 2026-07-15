@@ -27,7 +27,7 @@ func (t *RequestToolTool) Name() string {
 }
 
 func (t *RequestToolTool) Description() string {
-	return "Requests a tool from the system that is not currently in your toolkit. Use 'tools_list' to see what's available."
+	return "Requests a policy-authorized tool that is not currently in your toolkit. This cannot expand the agent's authorized capabilities. Use 'tools_list' to see what's available."
 }
 
 func (t *RequestToolTool) Declaration() *genai.FunctionDeclaration {

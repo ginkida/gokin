@@ -1,60 +1,102 @@
 package fileutil
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
 // AtomicWrite writes data to a file atomically using a tmp file + rename pattern.
-// This prevents data corruption if the process is interrupted during write.
-// The file is written to a temporary file in the same directory, synced to disk,
-// then renamed atomically to the target path.
+// This prevents a partially-written target if the process is interrupted. The
+// file is written to a temporary file in the same directory, its contents and
+// mode are synced, then it atomically replaces the target. On POSIX systems the
+// parent directory is synced after the rename so the new directory entry is
+// durable across a power loss as well.
 func AtomicWrite(path string, data []byte, perm os.FileMode) error {
+	return atomicWrite(path, data, perm, systemAtomicWriteOps())
+}
+
+type atomicWriteOps struct {
+	chmod      func(*os.File, os.FileMode) error
+	syncFile   func(*os.File) error
+	replace    func(string, string) error
+	syncParent func(string) error
+}
+
+func systemAtomicWriteOps() atomicWriteOps {
+	return atomicWriteOps{
+		chmod: func(file *os.File, mode os.FileMode) error {
+			return file.Chmod(mode)
+		},
+		syncFile: func(file *os.File) error {
+			return file.Sync()
+		},
+		replace:    replaceAtomic,
+		syncParent: syncParentDir,
+	}
+}
+
+func atomicWrite(path string, data []byte, perm os.FileMode, ops atomicWriteOps) error {
 	dir := filepath.Dir(path)
 
 	// Create temporary file in the same directory (required for atomic rename)
 	tmp, err := os.CreateTemp(dir, ".gokin-*.tmp")
 	if err != nil {
-		return err
+		return fmt.Errorf("create atomic-write temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 
-	// Track success to determine cleanup behavior
-	success := false
+	// Until the replace succeeds, every failure must remove the private temp
+	// file. Close is intentionally also attempted on write/sync failures.
+	closed := false
+	replaced := false
 	defer func() {
-		if !success {
-			os.Remove(tmpPath)
+		if !closed {
+			_ = tmp.Close()
+		}
+		if !replaced {
+			_ = os.Remove(tmpPath)
 		}
 	}()
 
 	// Write data to temporary file
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
+		return fmt.Errorf("write atomic-write temp file: %w", err)
+	}
+
+	// Apply permissions before Sync so both the contents and mode have reached
+	// stable storage before the file becomes visible at the target path. A
+	// CreateTemp file starts at 0600, so secret callers never expose broader
+	// permissions while their data is being written.
+	if err := ops.chmod(tmp, perm); err != nil {
+		return fmt.Errorf("set atomic-write temp permissions: %w", err)
 	}
 
 	// Sync to disk to ensure data is persisted before rename
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
+	if err := ops.syncFile(tmp); err != nil {
+		return fmt.Errorf("sync atomic-write temp file: %w", err)
 	}
 
 	if err := tmp.Close(); err != nil {
-		return err
+		closed = true
+		return fmt.Errorf("close atomic-write temp file: %w", err)
 	}
-
-	// Set permissions on temporary file
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		return err
-	}
+	closed = true
 
 	// Atomic rename - this is the key operation that makes the write atomic
-	// On POSIX systems, rename is atomic when source and destination are on the same filesystem
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
+	// (or an atomic replace on Windows). The temp file is in the same directory,
+	// so this cannot cross filesystem boundaries.
+	if err := ops.replace(tmpPath, path); err != nil {
+		return fmt.Errorf("replace atomic-write target: %w", err)
 	}
+	replaced = true
 
-	success = true
+	// Syncing the file alone does not make the rename durable on POSIX. Once the
+	// replace succeeds there is no temp path left to clean up; if directory sync
+	// fails, return the error so the caller knows durability is uncertain.
+	if err := ops.syncParent(dir); err != nil {
+		return fmt.Errorf("sync atomic-write parent directory: %w", err)
+	}
 	return nil
 }
 

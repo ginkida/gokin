@@ -100,6 +100,45 @@ func TestArgHintsPreferCanonicalUsage(t *testing.T) {
 	}
 }
 
+func TestArgHintsWrapOnceToKeepTrailingSafetyFlagVisible(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetWidth(38)
+	m.currentCommand = &CommandInfo{
+		Name:  "loop",
+		Args:  []ArgInfo{{Name: "task", Required: true}},
+		Usage: "/loop [<interval>] <task> [--max-tokens <N>] | list|status|output|pause|resume|stop|now|remove [id]",
+	}
+
+	rendered := m.renderArgHints()
+	plain := stripAnsi(rendered)
+	lines := strings.Split(plain, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("long usage rendered %d lines, want compact two-line hint: %q", len(lines), plain)
+	}
+	if !strings.Contains(plain, "--max-tokens") || !strings.Contains(plain, "↳") {
+		t.Fatalf("wrapped hint hides trailing safety flag or continuation cue: %q", plain)
+	}
+	for _, line := range lines {
+		if got := lipgloss.Width(line); got > m.textarea.Width() {
+			t.Fatalf("usage line width=%d, want <=%d: %q", got, m.textarea.Width(), line)
+		}
+	}
+}
+
+func TestArgHintsKeepShortUsageOnOneLine(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetWidth(80)
+	m.currentCommand = &CommandInfo{
+		Name:  "clear",
+		Args:  []ArgInfo{{Name: "force"}},
+		Usage: "/clear [--force]",
+	}
+	plain := stripAnsi(m.renderArgHints())
+	if strings.Contains(plain, "\n") || plain != "  Usage: /clear [--force]" {
+		t.Fatalf("short usage should remain stable on one line: %q", plain)
+	}
+}
+
 func TestTabCompletedCommandShowsExecutableSyntax(t *testing.T) {
 	m := NewInputModel(DefaultStyles(), t.TempDir())
 	m.SetWidth(80)
@@ -120,6 +159,83 @@ func TestTabCompletedCommandShowsExecutableSyntax(t *testing.T) {
 	}
 }
 
+func TestRuntimeCommandFlagsAreCompletableAfterPositionalArguments(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "/save checkpoint --", want: "--force"},
+		{input: "/resume session-id --", want: "--force"},
+		{input: "/sessions --", want: "--all"},
+		{input: "/logout all --", want: "--force"},
+		{input: "/loop review failures --m", want: "--max-tokens"},
+		{input: "/register-agent-type reviewer review --p", want: "--prompt"},
+		{input: "/diff --c", want: "--cached"},
+		{input: "/commit -", want: "-m"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.want+"_in_"+strings.Fields(tc.input)[0], func(t *testing.T) {
+			m := NewInputModel(DefaultStyles(), t.TempDir())
+			m.SetWidth(100)
+			m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.input)})
+			if !m.showSuggestions || m.suggestionType != SuggestionArgument {
+				t.Fatalf("%q did not open flag completion: show=%v type=%v suggestions=%v", tc.input, m.showSuggestions, m.suggestionType, m.argSuggestions)
+			}
+			found := false
+			for _, suggestion := range m.argSuggestions {
+				if suggestion == tc.want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%q suggestions = %v, want %q", tc.input, m.argSuggestions, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnterAndTabBothPerformAdvertisedCommandAndFileCompletion(t *testing.T) {
+	keys := []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{name: "enter", msg: tea.KeyMsg{Type: tea.KeyEnter}},
+		{name: "tab", msg: tea.KeyMsg{Type: tea.KeyTab}},
+	}
+
+	for _, key := range keys {
+		t.Run("command_"+key.name, func(t *testing.T) {
+			m := NewInputModel(DefaultStyles(), t.TempDir())
+			m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/mode")})
+			if !m.showSuggestions || m.suggestionType != SuggestionCommand {
+				t.Fatal("command dropdown did not open")
+			}
+			m, _ = m.Update(key.msg)
+			if got := m.textarea.Value(); got != "/model " {
+				t.Fatalf("%s command completion = %q, want /model", key.name, got)
+			}
+		})
+
+		t.Run("file_"+key.name, func(t *testing.T) {
+			work := t.TempDir()
+			if err := os.WriteFile(filepath.Join(work, "main.go"), []byte("package main"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			m := NewInputModel(DefaultStyles(), work)
+			m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/open ma")})
+			if !m.showSuggestions || m.suggestionType != SuggestionFile {
+				t.Fatal("file dropdown did not open")
+			}
+			m, _ = m.Update(key.msg)
+			if got := m.textarea.Value(); got != "/open main.go " {
+				t.Fatalf("%s file completion = %q, want main.go", key.name, got)
+			}
+		})
+	}
+}
+
 func TestArgumentOptionsFilterAndChainWithTab(t *testing.T) {
 	m := NewInputModel(DefaultStyles(), t.TempDir())
 	m.SetWidth(80)
@@ -128,7 +244,7 @@ func TestArgumentOptionsFilterAndChainWithTab(t *testing.T) {
 	if !m.showSuggestions || m.suggestionType != SuggestionArgument {
 		t.Fatalf("option query did not open argument completion: show=%v type=%v", m.showSuggestions, m.suggestionType)
 	}
-	if got, want := m.argSuggestions, []string{"permissions", "plan"}; !reflect.DeepEqual(got, want) {
+	if got, want := m.argSuggestions, []string{"permissions", "plan", "preset"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("filtered setting options = %v, want %v", got, want)
 	}
 	plain := stripAnsi(m.View())
@@ -154,6 +270,51 @@ func TestArgumentOptionsFilterAndChainWithTab(t *testing.T) {
 	if m.showSuggestions || len(m.argSuggestions) != 0 {
 		t.Fatalf("completed argument chain left a stale dropdown: show=%v args=%v", m.showSuggestions, m.argSuggestions)
 	}
+}
+
+func TestSetPresetCompletionUsesContextualValues(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetWidth(100)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/set pre")})
+	if got, want := m.argSuggestions, []string{"preset"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("preset entry completion = %v, want %v", got, want)
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.textarea.Value(); got != "/set preset " {
+		t.Fatalf("preset entry inserted %q", got)
+	}
+	if got, want := m.argSuggestions, []string{"safe", "balanced", "fast"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("preset values = %v, want %v", got, want)
+	}
+	if slicesOverlap(m.argSuggestions, []string{"on", "off"}) {
+		t.Fatalf("preset value completion leaked toggle values: %v", m.argSuggestions)
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if got, want := m.argSuggestions, []string{"balanced"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered preset values = %v, want %v", got, want)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.textarea.Value(); got != "/set preset balanced " {
+		t.Fatalf("preset completion inserted %q", got)
+	}
+	if m.showSuggestions || len(m.argSuggestions) != 0 {
+		t.Fatalf("completed preset retained stale suggestions: show=%v args=%v", m.showSuggestions, m.argSuggestions)
+	}
+}
+
+func slicesOverlap(left, right []string) bool {
+	seen := make(map[string]bool, len(left))
+	for _, value := range left {
+		seen[value] = true
+	}
+	for _, value := range right {
+		if seen[value] {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFlagCompletionWorksAfterEarlierFlags(t *testing.T) {
@@ -238,7 +399,11 @@ func TestEscapeDismissesArgumentOptionsWithoutLosingDraft(t *testing.T) {
 }
 
 func TestInputCommandsUseDeepSnapshotsAndRefreshOpenQuery(t *testing.T) {
-	commands := []CommandInfo{{Name: "model", Args: []ArgInfo{{Name: "id", Options: []string{"one"}}}}}
+	commands := []CommandInfo{{Name: "model", Args: []ArgInfo{{
+		Name:              "id",
+		Options:           []string{"one"},
+		OptionsByPrevious: map[string][]string{"preset": {"safe"}},
+	}}}}
 	m := NewInputModel(DefaultStyles(), t.TempDir())
 	m.textarea.SetValue("/mod")
 	m.SetCommands(commands)
@@ -248,7 +413,9 @@ func TestInputCommandsUseDeepSnapshotsAndRefreshOpenQuery(t *testing.T) {
 
 	commands[0].Name = "mutated"
 	commands[0].Args[0].Options[0] = "mutated"
-	if m.commands[0].Name != "model" || m.commands[0].Args[0].Options[0] != "one" {
+	commands[0].Args[0].OptionsByPrevious["preset"][0] = "mutated"
+	if m.commands[0].Name != "model" || m.commands[0].Args[0].Options[0] != "one" ||
+		m.commands[0].Args[0].OptionsByPrevious["preset"][0] != "safe" {
 		t.Fatalf("commands changed through caller-owned data: %+v", m.commands[0])
 	}
 }

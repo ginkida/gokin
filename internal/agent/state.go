@@ -2,24 +2,29 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
+
+	"gokin/internal/logging"
+	"gokin/internal/skills"
 
 	"google.golang.org/genai"
 )
 
 // AgentState represents the serializable state of an agent.
 type AgentState struct {
-	ID         string              `json:"id"`
-	Type       AgentType           `json:"type"`
-	Model      string              `json:"model,omitempty"`
-	Status     AgentStatus         `json:"status"`
-	History    []SerializedContent `json:"history"`
-	StartTime  time.Time           `json:"start_time"`
-	EndTime    time.Time           `json:"end_time,omitempty"`
-	MaxTurns   int                 `json:"max_turns"`
-	TurnCount  int                 `json:"turn_count"`
-	LastPrompt string              `json:"last_prompt,omitempty"`
-	ActivePlan *PlanTree           `json:"active_plan,omitempty"`
+	ID            string              `json:"id"`
+	Type          AgentType           `json:"type"`
+	Model         string              `json:"model,omitempty"`
+	Status        AgentStatus         `json:"status"`
+	History       []SerializedContent `json:"history"`
+	StartTime     time.Time           `json:"start_time"`
+	EndTime       time.Time           `json:"end_time,omitempty"`
+	MaxTurns      int                 `json:"max_turns"`
+	TurnCount     int                 `json:"turn_count"`
+	LastPrompt    string              `json:"last_prompt,omitempty"`
+	ActivePlan    *PlanTree           `json:"active_plan,omitempty"`
+	InvokedSkills []skills.Invocation `json:"invoked_skills,omitempty"`
 }
 
 // SerializedContent represents a serializable conversation content.
@@ -53,39 +58,81 @@ func (a *Agent) GetState() *AgentState {
 	for i, content := range a.history {
 		history[i] = serializeContent(content)
 	}
+	var invokedSkills []skills.Invocation
+	if a.invokedSkills != nil {
+		invokedSkills = a.invokedSkills.SnapshotNewestFirst()
+	}
 
 	return &AgentState{
-		ID:         a.ID,
-		Type:       a.Type,
-		Model:      a.Model,
-		Status:     a.status,
-		History:    history,
-		StartTime:  a.startTime,
-		EndTime:    a.endTime,
-		MaxTurns:   a.maxTurns,
-		TurnCount:  len(a.history) / 2, // Approximate turn count
-		ActivePlan: a.activePlan,
+		ID:            a.ID,
+		Type:          a.Type,
+		Model:         a.Model,
+		Status:        a.status,
+		History:       history,
+		StartTime:     a.startTime,
+		EndTime:       a.endTime,
+		MaxTurns:      a.maxTurns,
+		TurnCount:     len(a.history) / 2, // Approximate turn count
+		ActivePlan:    a.activePlan,
+		InvokedSkills: invokedSkills,
 	}
 }
 
 // RestoreHistory restores the conversation history from a saved state.
 func (a *Agent) RestoreHistory(state *AgentState) error {
+	if state == nil {
+		return fmt.Errorf("cannot restore nil agent state")
+	}
+
+	// Validate untrusted persisted skill snapshots in a temporary ledger. The
+	// destination pointer is never replaced: the already-bound SkillTool keeps
+	// observing this Agent's stable ledger across resume/checkpoint restore.
+	validatedSkills := skills.NewInvocationLedger()
+	skillValidationErr := validatedSkills.Restore(state.InvokedSkills)
+	invokedSkills := validatedSkills.SnapshotNewestFirst()
+
 	history := make([]*genai.Content, len(state.History))
+	var historyErr error
 	for i, sc := range state.History {
 		content, err := deserializeContent(sc)
 		if err != nil {
-			return err
+			historyErr = fmt.Errorf("restore history[%d]: %w", i, err)
+			break
 		}
 		history[i] = content
 	}
+	// Active-skill snapshots are optional recovery metadata. Corruption fails
+	// closed for those snapshots but must not abort an otherwise valid resume.
+	if skillValidationErr != nil {
+		logging.Warn("ignored invalid invoked-skill snapshots while restoring agent",
+			"agent_id", a.ID, "error", skillValidationErr)
+	}
+	// Conversely, conversation history is authoritative. Do not partially
+	// apply the optional ledger when the durable history itself cannot be
+	// deserialized; leave the existing agent state and stable ledger untouched.
+	if historyErr != nil {
+		return historyErr
+	}
 
 	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
+	if a.invokedSkills == nil {
+		a.invokedSkills = skills.NewInvocationLedger()
+	}
+	// Even an invalid/over-cap persisted list replaces the old contents with
+	// the validated subset (empty for a fail-closed payload), so stale skills
+	// from a prior run can never bleed into the restored agent.
+	skillReplaceErr := a.invokedSkills.Restore(invokedSkills)
 	a.history = history
 	a.status = state.Status
 	a.startTime = state.StartTime
 	a.endTime = state.EndTime
 	a.activePlan = state.ActivePlan
+	a.stateMu.Unlock()
+
+	if skillReplaceErr != nil {
+		logging.Warn("failed to replace invoked-skill snapshots while restoring agent",
+			"agent_id", a.ID, "error", skillReplaceErr)
+	}
 	return nil
 }
 

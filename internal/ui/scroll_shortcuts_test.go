@@ -43,6 +43,36 @@ func TestCtrlDUnfreezesAtBottom(t *testing.T) {
 	}
 }
 
+func TestCtrlDDoesNotSnapBackNearBottom(t *testing.T) {
+	m := NewModel()
+	m.state = StateStreaming
+	m.output.SetSize(80, 10)
+	for i := range 41 {
+		m.output.AppendLine(fmt.Sprintf("line %02d", i))
+	}
+	maxYOffset := max(m.output.viewport.TotalLineCount()-m.output.viewport.Height, 0)
+	step := m.output.viewport.Height / 2
+	// Land exactly one line short of the true bottom after Ctrl+D. The former
+	// <=2 proximity rule unfroze here even though AtBottom was false.
+	m.output.viewport.SetYOffset(maxYOffset - 1 - step)
+	m.output.SetFrozen(true)
+
+	_ = m.handleGlobalKeys(tea.KeyMsg{Type: tea.KeyCtrlD})
+	wantOffset := maxYOffset - 1
+	if got := m.output.viewport.YOffset; got != wantOffset || m.output.IsAtBottom() {
+		t.Fatalf("Ctrl+D setup/result offset=%d bottom=%v, want offset %d above bottom", got, m.output.IsAtBottom(), wantOffset)
+	}
+	if !m.output.IsFrozen() {
+		t.Fatal("Ctrl+D one line short of bottom must keep stream follow frozen")
+	}
+
+	// Prove the user retains viewport ownership when more output arrives.
+	m.output.AppendLine("new streamed line")
+	if got := m.output.viewport.YOffset; got != wantOffset || !m.output.IsFrozen() {
+		t.Fatalf("next stream line snapped viewport: offset=%d frozen=%v, want %d/true", got, m.output.IsFrozen(), wantOffset)
+	}
+}
+
 // TestPgUpFreezesDuringStreaming: paging up while the agent streams pauses
 // auto-follow so the user can read (instead of being snapped back to the bottom).
 func TestPgUpFreezesDuringStreaming(t *testing.T) {

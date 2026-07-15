@@ -106,6 +106,40 @@ func TestKeyEntryCompactFrameKeepsSafetyAndActionsVisible(t *testing.T) {
 	}
 }
 
+func TestKeyEntryPromptFitsHeightWithoutFrameCropping(t *testing.T) {
+	for _, height := range []int{10, 12, 16, 24} {
+		for _, available := range []bool{false, true} {
+			m := NewModel()
+			m.width = 72
+			m.height = height
+			if available {
+				m.SetKeyEntrySubmitCallback(func(string, string) {})
+			}
+			m.openKeyEntry(OpenKeyEntryMsg{
+				Provider:    "glm",
+				DisplayName: strings.Repeat("Very Long Provider ", 8),
+				SetupURL:    strings.Repeat("https://example.test/account/api-keys/", 8),
+			})
+			m.keyEntryError = "API key contains whitespace — paste only the key"
+			m.keyEntryInput.SetValue("sk-never-render-this-secret")
+
+			view := m.renderKeyEntry()
+			if got := lipgloss.Height(view); got > height {
+				t.Fatalf("height=%d available=%v key entry rendered %d rows:\n%s", height, available, got, stripAnsi(view))
+			}
+			plain := stripAnsi(view)
+			if strings.Contains(plain, "sk-never-render-this-secret") {
+				t.Fatalf("height=%d available=%v leaked raw key", height, available)
+			}
+			for _, want := range []string{"Set API key", "Esc"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("height=%d available=%v missing %q:\n%s", height, available, want, plain)
+				}
+			}
+		}
+	}
+}
+
 func TestKeyEntryFitsNarrowWidthsInAvailableAndDisabledStates(t *testing.T) {
 	for width := 10; width <= 48; width++ {
 		for _, available := range []bool{false, true} {

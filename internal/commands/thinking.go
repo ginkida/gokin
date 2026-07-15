@@ -9,10 +9,9 @@ import (
 	"gokin/internal/config"
 )
 
-// ThinkingCommand toggles extended thinking display and lets users tune the
-// token budget at runtime — eliminates the "edit config.yaml then restart"
-// round-trip every time you want to see, or stop seeing, the model's
-// reasoning stream.
+// ThinkingCommand configures whether extended reasoning is adaptive, forced,
+// or disabled and lets users tune its token budget at runtime — this changes
+// model behavior/cost, not merely whether reasoning text is displayed.
 //
 // Background: Kimi Coding Plan (K2.6) and GLM 4.7+ both emit `thinking_delta`
 // SSE events that the TUI renders as dim italic content. Whether they fire is
@@ -22,8 +21,10 @@ import (
 // gnarly refactor.
 type ThinkingCommand struct{}
 
-func (c *ThinkingCommand) Name() string        { return "thinking" }
-func (c *ThinkingCommand) Description() string { return "Toggle extended thinking display" }
+func (c *ThinkingCommand) Name() string { return "thinking" }
+func (c *ThinkingCommand) Description() string {
+	return "Configure adaptive/forced reasoning and its token budget"
+}
 func (c *ThinkingCommand) Usage() string {
 	return `/thinking           - Show status
 /thinking auto      - Reason when the task is hard, skip when easy (default)

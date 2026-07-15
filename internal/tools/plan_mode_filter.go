@@ -1,6 +1,10 @@
 package tools
 
-import "google.golang.org/genai"
+import (
+	"strings"
+
+	"google.golang.org/genai"
+)
 
 // planModeReadOnlyTools is the allow-list of tool names that remain available
 // when the agent is in Claude Code-style plan mode. Anything not on this list
@@ -29,13 +33,13 @@ var planModeReadOnlyTools = map[string]bool{
 	// Environment / metadata (read-only)
 	"env":        true,
 	"tools_list": true,
+	"skill":      true,
 
 	// Read-only git
 	"git_status":     true,
 	"git_diff":       true,
 	"git_log":        true,
 	"git_blame":      true,
-	"git_branch":     true,
 	"review_changes": true,
 
 	// Semantic discovery (read-only)
@@ -48,10 +52,10 @@ var planModeReadOnlyTools = map[string]bool{
 	"task_output":     true,
 	"get_plan_status": true,
 
-	// Memory reads (writes like `memorize` are intentionally absent)
-	"memory":         true,
+	// Dedicated read-only memory/history surface. Mixed-action tools such as
+	// memory and pin_context are excluded because their write actions cannot be
+	// constrained by a name-only schema filter.
 	"history_search": true,
-	"pin_context":    true,
 
 	// Plan lifecycle itself — how the model exits plan mode
 	"enter_plan_mode":      true,
@@ -67,7 +71,7 @@ var planModeReadOnlyTools = map[string]bool{
 // The name is lowercased before lookup so case differences between registry
 // and caller (e.g., "Read" vs "read") don't accidentally block a safe tool.
 func IsReadOnlyForPlanMode(name string) bool {
-	return planModeReadOnlyTools[name]
+	return planModeReadOnlyTools[strings.ToLower(strings.TrimSpace(name))]
 }
 
 // PlanModeDeclarations returns the subset of the registry's tool
@@ -77,8 +81,6 @@ func IsReadOnlyForPlanMode(name string) bool {
 // because it doesn't know they exist.
 func (r *Registry) PlanModeDeclarations() []*genai.FunctionDeclaration {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	decls := make([]*genai.FunctionDeclaration, 0, len(r.tools))
 	for name, tool := range r.tools {
 		if !IsReadOnlyForPlanMode(name) {
@@ -86,6 +88,9 @@ func (r *Registry) PlanModeDeclarations() []*genai.FunctionDeclaration {
 		}
 		decls = append(decls, tool.Declaration())
 	}
+	r.mu.RUnlock()
+
+	sortDeclarationsByName(decls)
 	return decls
 }
 

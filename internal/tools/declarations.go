@@ -420,28 +420,7 @@ func WebSearchToolDeclaration() *genai.FunctionDeclaration {
 
 // TaskToolDeclaration returns the declaration for the task tool.
 func TaskToolDeclaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
-		Name:        "task",
-		Description: "Spawns a sub-agent to perform a specific task.",
-		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"prompt": {
-					Type:        genai.TypeString,
-					Description: "The task description for the sub-agent",
-				},
-				"subagent_type": {
-					Type:        genai.TypeString,
-					Description: "The type of sub-agent to spawn (explore, bash, general, plan, guide)",
-				},
-				"run_in_background": {
-					Type:        genai.TypeBoolean,
-					Description: "Whether to run the task in background",
-				},
-			},
-			Required: []string{"prompt", "subagent_type"},
-		},
-	}
+	return NewTaskTool().Declaration()
 }
 
 // KillShellToolDeclaration returns the declaration for the kill_shell tool.
@@ -466,7 +445,7 @@ func KillShellToolDeclaration() *genai.FunctionDeclaration {
 func MemoryToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "memory",
-		Description: "Keyed memory store for remembering/recalling/forgetting/listing notes across sessions (supports keys, tags, TTL, and project/session scope). action=list also surfaces durable project knowledge saved via the `memorize` tool (a separate project-learning store), so this is the one place to see everything remembered.",
+		Description: "Keyed memory store for remembering/recalling/forgetting/listing notes across sessions (supports keys, tags, TTL, and session/project scope; global scope requires memory.allow_global opt-in). action=list also surfaces durable project knowledge saved via the `memorize` tool (a separate project-learning store), so this is the one place to see everything remembered.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -494,7 +473,7 @@ func MemoryToolDeclaration() *genai.FunctionDeclaration {
 				},
 				"scope": {
 					Type:        genai.TypeString,
-					Description: "Scope of the memory: 'session' (current session only), 'project' (this repository only), 'global' (all projects). Default: 'project'",
+					Description: "For 'remember': scope of the new memory: 'session' (current session only), 'project' (this repository only), 'global' (all projects; disabled unless memory.allow_global is true). Default: 'project'. For recall/list use project_only",
 					Enum:        []string{"session", "project", "global"},
 				},
 				"id": {
@@ -503,7 +482,7 @@ func MemoryToolDeclaration() *genai.FunctionDeclaration {
 				},
 				"project_only": {
 					Type:        genai.TypeBoolean,
-					Description: "If true, only show/search memories for current project",
+					Description: "If true, only show/search session and current-project memories (default: true). Setting false requires memory.allow_global=true",
 				},
 				"ttl_minutes": {
 					Type:        genai.TypeInteger,
@@ -1226,6 +1205,7 @@ func GetAllDeclarations() map[string]*genai.FunctionDeclaration {
 		"verify_code":          VerifyCodeToolDeclaration(),
 		"pin_context":          PinContextToolDeclaration(),
 		"history_search":       HistorySearchToolDeclaration(),
+		"skill":                SkillToolDeclaration(),
 		"run_tests":            RunTestsToolDeclaration(),
 		"git_branch":           GitBranchToolDeclaration(),
 		"git_pr":               GitPRToolDeclaration(),
@@ -1234,6 +1214,34 @@ func GetAllDeclarations() map[string]*genai.FunctionDeclaration {
 		"review_changes":       ReviewChangesToolDeclaration(),
 		"go_to_definition":     GoToDefinitionToolDeclaration(),
 		"find_references":      FindReferencesToolDeclaration(),
+		"go_search":            GoSearchToolDeclaration(),
+	}
+}
+
+// SkillToolDeclaration returns the static fallback declaration used by the
+// registry audit and embedders. Production registries replace the description
+// with the discovered compact catalog while keeping this schema.
+func SkillToolDeclaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        "skill",
+		Description: "Loads a reusable SKILL.md workflow on demand. Omit name to list available skills.",
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"name": {
+					Type:        genai.TypeString,
+					Description: "Skill name. Omit to list available skills.",
+				},
+				"arguments": {
+					Type:        genai.TypeString,
+					Description: "Optional arguments substituted into $ARGUMENTS and $1..$9 in the workflow.",
+				},
+				"query": {
+					Type:        genai.TypeString,
+					Description: "Optional name/description filter when listing skills without a name.",
+				},
+			},
+		},
 	}
 }
 
@@ -1266,7 +1274,7 @@ func ReviewChangesToolDeclaration() *genai.FunctionDeclaration {
 func GoToDefinitionToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "go_to_definition",
-		Description: "Finds the definition of a symbol (function, type, variable) in the codebase. Returns file:line location. Use this instead of grep+read to quickly jump to where something is defined.",
+		Description: "Finds the definition of a Go symbol through managed semantic intelligence, with an explicitly-labeled package-local AST fallback.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -1280,7 +1288,7 @@ func GoToDefinitionToolDeclaration() *genai.FunctionDeclaration {
 				},
 				"line": {
 					Type:        genai.TypeInteger,
-					Description: "Line number (1-indexed) of the symbol reference. Enables precise gopls resolution; omit to fall back to an AST search by name.",
+					Description: "Optional 1-indexed line of the symbol reference. Must be within the file.",
 				},
 				"column": {
 					Type:        genai.TypeInteger,
@@ -1296,7 +1304,7 @@ func GoToDefinitionToolDeclaration() *genai.FunctionDeclaration {
 func FindReferencesToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "find_references",
-		Description: "Finds all references to a symbol (function, type, variable) across the codebase. Returns file:line locations. Much faster than grep for codebase-wide symbol search.",
+		Description: "Finds Go symbol references through managed semantic intelligence. If unavailable, returns a bounded lexical fallback with machine-readable degraded_reason metadata.",
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -1310,7 +1318,7 @@ func FindReferencesToolDeclaration() *genai.FunctionDeclaration {
 				},
 				"line": {
 					Type:        genai.TypeInteger,
-					Description: "Line number (1-indexed) of the symbol. Enables precise gopls resolution; omit to fall back to a whole-word text search.",
+					Description: "Optional 1-indexed line of the symbol. Must be within the file.",
 				},
 				"column": {
 					Type:        genai.TypeInteger,
@@ -1322,6 +1330,28 @@ func FindReferencesToolDeclaration() *genai.FunctionDeclaration {
 				},
 			},
 			Required: []string{"file", "symbol"},
+		},
+	}
+}
+
+// GoSearchToolDeclaration returns the declaration for the go_search tool.
+func GoSearchToolDeclaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        "go_search",
+		Description: "Fuzzy-searches Go declarations across the workspace using managed semantic intelligence. Prefer this when you know part of a symbol name but not its file.",
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"query": {
+					Type:        genai.TypeString,
+					Description: "Symbol name or fuzzy search expression (for example: Server, server run, Config.Load).",
+				},
+				"limit": {
+					Type:        genai.TypeInteger,
+					Description: "Maximum number of matches to return (1-50). Default: 50.",
+				},
+			},
+			Required: []string{"query"},
 		},
 	}
 }

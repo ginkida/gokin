@@ -115,10 +115,11 @@ func TestClassifyGLMErrorCode(t *testing.T) {
 		keyword  string
 		descPart string
 	}{
-		{"1210", "rate limit", "rate limit"},
-		{"1301", "overloaded", "concurrency"},
-		{"1302", "overloaded", "throughput"},
-		{"1303", "overloaded", "throughput"},
+		{"-500", "temporarily", "service"},
+		{"1200", "temporarily", "service"},
+		{"1230", "temporarily", "processing"},
+		{"1234", "temporarily", "network"},
+		{"1302", "rate limit", "rate limit"},
 		{"1305", "overloaded", "overloaded"},
 	}
 	for _, tc := range retryableCases {
@@ -138,12 +139,28 @@ func TestClassifyGLMErrorCode(t *testing.T) {
 		code     string
 		descPart string
 	}{
-		{"1211", "balance"},
-		{"1213", "balance"},
-		{"1212", "quota"},
+		{"1000", "authentication"},
+		{"1005", "two-factor"},
+		{"1113", "balance"},
+		{"1210", "invalid api parameter"},
+		{"1211", "unknown"},
+		{"1212", "does not support"},
+		{"1213", "missing"},
+		{"1214", "invalid parameter"},
+		{"1215", "conflicting"},
+		{"1220", "access denied"},
+		{"1221", "offline"},
+		{"1222", "does not exist"},
+		{"1261", "context"},
+		{"1301", "sensitive"},
 		{"1308", "quota"},
-		{"1214", "authentication"},
-		{"1215", "authentication"},
+		{"1309", "subscription"},
+		{"1310", "limit"},
+		{"1311", "plan"},
+		{"1313", "fair usage"},
+		{"1314", "enterprise"},
+		{"1315", "api key"},
+		{"1316", "spending limit"},
 	}
 	for _, tc := range nonRetryableCases {
 		retryable, _, desc := classifyGLMErrorCode(tc.code, "")

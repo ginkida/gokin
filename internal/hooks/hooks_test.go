@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -286,6 +287,73 @@ func TestManagerRunSimpleHook(t *testing.T) {
 	if results[0].Output == "" {
 		t.Error("output should not be empty")
 	}
+}
+
+func TestManagerRunCapsCombinedOutput(t *testing.T) {
+	m := NewManager(true, "/tmp")
+	m.SetTimeout(5 * time.Second)
+	m.AddHook(&Hook{
+		Name:    "noisy",
+		Type:    PreTool,
+		Enabled: true,
+		// Exercise both streams. The shared capture budget must stay bounded
+		// even when stdout and stderr are copied concurrently by os/exec.
+		Command: "yes stdout | head -c 49152; yes stderr | head -c 49152 >&2",
+	})
+
+	results := m.RunPreTool(context.Background(), "bash", nil)
+	if len(results) != 1 {
+		t.Fatalf("results count = %d, want 1", len(results))
+	}
+	if results[0].Error != nil {
+		t.Fatalf("noisy hook failed: %v", results[0].Error)
+	}
+	if count := strings.Count(results[0].Output, hookOutputTruncationMarker); count != 1 {
+		t.Fatalf("truncation marker count = %d, want 1; output tail = %q", count, tail(results[0].Output, 100))
+	}
+	maxResultBytes := maxHookOutputBytes + len(hookOutputTruncationMarker) + 2 // stream separator + marker separator
+	if len(results[0].Output) > maxResultBytes {
+		t.Fatalf("captured %d bytes, want at most %d", len(results[0].Output), maxResultBytes)
+	}
+}
+
+func TestManagerRunTimeoutReturnsPromptlyWithBoundedPartialOutput(t *testing.T) {
+	m := NewManager(true, "/tmp")
+	m.SetTimeout(100 * time.Millisecond)
+	m.AddHook(&Hook{
+		Name:    "noisy-timeout",
+		Type:    PreTool,
+		Enabled: true,
+		Command: "trap '' TERM; while :; do printf 0123456789abcdef; done",
+	})
+
+	start := time.Now()
+	results := m.RunPreTool(context.Background(), "bash", nil)
+	elapsed := time.Since(start)
+
+	if len(results) != 1 {
+		t.Fatalf("results count = %d, want 1", len(results))
+	}
+	if !errors.Is(results[0].Error, context.DeadlineExceeded) {
+		t.Fatalf("hook error = %v, want context deadline exceeded", results[0].Error)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("timed-out hook returned after %v, want a bounded teardown", elapsed)
+	}
+	if !strings.Contains(results[0].Output, hookOutputTruncationMarker) {
+		t.Fatalf("partial output did not carry truncation marker; tail = %q", tail(results[0].Output, 100))
+	}
+	maxResultBytes := maxHookOutputBytes + len(hookOutputTruncationMarker) + 2
+	if len(results[0].Output) > maxResultBytes {
+		t.Fatalf("captured %d bytes, want at most %d", len(results[0].Output), maxResultBytes)
+	}
+}
+
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // TestManagerRunKillsBackgroundedChildOnTimeout pins the process-group kill

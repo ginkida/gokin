@@ -8,6 +8,28 @@ import (
 	"gokin/internal/config"
 )
 
+type credentialConfigCommitter interface {
+	CommitCredentialConfigSnapshot(cfg *config.Config) error
+}
+
+type currentConfigPersister interface {
+	PersistCurrentConfig() error
+}
+
+func commitCredentialConfigSnapshot(app AppInterface, cfg *config.Config) error {
+	if committer, ok := app.(credentialConfigCommitter); ok {
+		return committer.CommitCredentialConfigSnapshot(cfg)
+	}
+	return cfg.Save()
+}
+
+func persistCurrentConfig(app AppInterface, fallback *config.Config) error {
+	if persister, ok := app.(currentConfigPersister); ok {
+		return persister.PersistCurrentConfig()
+	}
+	return fallback.Save()
+}
+
 // LoginCommand sets the API key.
 // LoginKeyMarker is returned by /login when a provider is named but no key is
 // given — it tells the app to open the masked key-entry modal (same
@@ -149,7 +171,7 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// report "✓ saved" even when the config dir is unwritable/ephemeral —
 	// exactly the "it doesn't remember my key, I have to re-enter it" symptom.
 	// Re-saving is idempotent; here we surface the error honestly with the path.
-	if err := cfg.Save(); err != nil {
+	if err := persistCurrentConfig(app, cfg); err != nil {
 		return fmt.Sprintf(`⚠ %s key is active for THIS session, but it could NOT be saved to:
   %s
   Error: %v
@@ -256,27 +278,23 @@ func (c *LogoutCommand) GetMetadata() CommandMetadata {
 		Icon:     "logout",
 		Priority: 10,
 		HasArgs:  true,
-		ArgHint:  "[" + strings.Join(config.AllProviderNames(), "|") + "]",
+		ArgHint:  "[" + strings.Join(config.AllProviderNames(), "|") + "] [--force]",
 	}
 }
 
 func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	target, force, argErr := parseOptionalTargetAndFlag(args, "--force", "/logout [provider|all] [--force]")
+	if argErr != "" {
+		return argErr, nil
+	}
+	target = strings.ToLower(target)
+	if force && target != "all" {
+		return "Option --force is only valid with /logout all --force. No credentials were removed.", nil
+	}
+
 	cfg := app.GetConfig()
 	if cfg == nil {
 		return "Failed to get configuration.", nil
-	}
-
-	// Parse args: /logout [target] [--force]
-	target := ""
-	force := false
-	for _, a := range args {
-		if a == "--force" {
-			force = true
-			continue
-		}
-		if target == "" {
-			target = strings.ToLower(a)
-		}
 	}
 
 	if target == "" {
@@ -338,8 +356,9 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 	if err := app.ApplyConfig(cfg); err != nil {
 		applyFailed = true
 		// ApplyConfig may fail if no credentials remain.
-		// Still save to disk so credentials are removed on restart.
-		if saveErr := cfg.Save(); saveErr != nil {
+		// Commit the credential section explicitly so the authoritative App
+		// snapshot and disk cannot resurrect the removed secret later.
+		if saveErr := commitCredentialConfigSnapshot(app, cfg); saveErr != nil {
 			return fmt.Sprintf("Failed to save: %v", saveErr), nil
 		}
 	}
@@ -396,8 +415,9 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 			}
 			if err := app.ApplyConfig(cfg); err != nil {
 				// ApplyConfig may fail if no credentials remain.
-				// Still save to disk so the provider switch persists on restart.
-				if saveErr := cfg.Save(); saveErr != nil {
+				// Persist/commit the scoped credential identity without overwriting
+				// unrelated newer config state.
+				if saveErr := commitCredentialConfigSnapshot(app, cfg); saveErr != nil {
 					return fmt.Sprintf("Failed to save: %v", saveErr), nil
 				}
 			}

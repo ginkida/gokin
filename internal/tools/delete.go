@@ -106,7 +106,10 @@ func (t *DeleteTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	if err != nil {
 		if os.IsNotExist(err) {
 			if force {
-				return NewSuccessResult(fmt.Sprintf("File not found (ignored): %s", path)), nil
+				return NewSuccessResultWithData(
+					fmt.Sprintf("File not found (ignored): %s", path),
+					map[string]any{"changed": false, "written_paths": []string{}},
+				), nil
 			}
 			return NewErrorResult(fmt.Sprintf("file not found: %s", path)), nil
 		}
@@ -157,7 +160,10 @@ func (t *DeleteTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 
 	if err != nil {
 		if force && os.IsNotExist(err) {
-			return NewSuccessResult(fmt.Sprintf("File not found (ignored): %s", path)), nil
+			return NewSuccessResultWithData(
+				fmt.Sprintf("File not found (ignored): %s", path),
+				map[string]any{"changed": false, "written_paths": []string{}},
+			), nil
 		}
 		return NewErrorResult(fmt.Sprintf("delete failed: %s", err)), nil
 	}
@@ -174,7 +180,17 @@ func (t *DeleteTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	if info.IsDir() {
 		// Directory deletes are NOT undoable — contents are not snapshotted. Say so
 		// explicitly so the user doesn't trust /undo to bring the tree back.
-		return NewSuccessResult(fmt.Sprintf("Deleted directory: %s (not undoable — directory contents were not snapshotted)", path)), nil
+		return NewSuccessResultWithData(
+			fmt.Sprintf("Deleted directory: %s (not undoable — directory contents were not snapshotted)", path),
+			map[string]any{
+				"changed":           true,
+				"workspace_changed": true,
+				"written_paths":     []string{path},
+			},
+		), nil
 	}
-	return NewSuccessResult(fmt.Sprintf("Deleted file: %s", path)), nil
+	return NewSuccessResultWithData(
+		fmt.Sprintf("Deleted file: %s", path),
+		map[string]any{"changed": true, "written_paths": []string{path}},
+	), nil
 }

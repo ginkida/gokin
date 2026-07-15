@@ -33,8 +33,8 @@ func TestProcessReadyTasks_OnTaskStartFiresOutsideLock(t *testing.T) {
 		nil, nil,
 	)
 
-	c.Start() // processLoop only runs after an explicit Start (coordinate.go does the same)
 	c.AddTask("say hi", AgentTypeGeneral, 5, nil)
+	c.Start() // Start seals the pre-built graph, then launches processLoop.
 
 	select {
 	case n := <-reentered:

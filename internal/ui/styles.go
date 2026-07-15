@@ -17,20 +17,20 @@ var (
 	ColorSuccess   = lipgloss.Color("#5AB97B") // Forest Green
 	ColorWarning   = lipgloss.Color("#D4A24A") // Deep Amber
 	ColorError     = lipgloss.Color("#D85A4A") // Coral
-	ColorMuted     = lipgloss.Color("#807D75") // Warm Gray
+	ColorMuted     = lipgloss.Color("#9A958C") // Readable Warm Gray
 	ColorText      = lipgloss.Color("#E8E4D8") // Warm Off-White
 	ColorBg        = lipgloss.Color("#0E1116") // Warm Graphite
 
 	// Extended semantic colors
 	ColorBorder    = lipgloss.Color("#2A2C33") // Subtle Border
 	ColorHighlight = lipgloss.Color("#C0AEFF") // Lavender
-	ColorDim       = lipgloss.Color("#5A5852") // Deeper Warm Gray
+	ColorDim       = lipgloss.Color("#807D75") // Accessible Dim Warm Gray
 	ColorAccent    = lipgloss.Color("#9B7BFF") // Unified with Primary (single violet)
 	ColorRunning   = lipgloss.Color("#6B8AD4") // Info Blue
 	ColorInfo      = lipgloss.Color("#6BAEB5") // Calm Teal
 
 	// Modal semantic colors
-	ColorContext  = lipgloss.Color("#807D75") // = Muted (warm gray)
+	ColorContext  = lipgloss.Color("#9A958C") // = Muted (warm gray)
 	ColorQuestion = ColorSecondary            // Cyan
 	ColorPlan     = ColorInfo                 // Teal
 
@@ -297,10 +297,37 @@ type Styles struct {
 	AssistantCard lipgloss.Style
 }
 
+// rootBackgroundStyle keeps the app-owned background active across nested
+// Lip Gloss spans. Nested styles end with a full SGR reset, which would
+// otherwise expose a light terminal background until the next styled span.
+// Deriving the prefix through the active renderer keeps TrueColor, ANSI256,
+// ANSI, and no-color output consistent without hard-coding an escape sequence.
+func rootBackgroundStyle(renderer *lipgloss.Renderer, background lipgloss.Color) lipgloss.Style {
+	base := renderer.NewStyle().Background(background)
+	return base.Transform(func(value string) string {
+		const probe = "x"
+		probeRender := base.Render(probe)
+		probeIndex := strings.Index(probeRender, probe)
+		if probeIndex <= 0 {
+			// ASCII/no-color renderers emit no style prefix.
+			return value
+		}
+
+		prefix := probeRender[:probeIndex]
+		value = strings.ReplaceAll(value, "\x1b[0m", "\x1b[0m"+prefix)
+		return strings.ReplaceAll(value, "\x1b[m", "\x1b[m"+prefix)
+	})
+}
+
 // DefaultStyles returns the default UI styles.
 func DefaultStyles() *Styles {
 	return &Styles{
-		App: lipgloss.NewStyle(),
+		// The shipped palette is explicitly a dark Graphite theme. Owning the
+		// frame background keeps its light foregrounds readable even when the
+		// terminal's configured default background is light. In no-color mode
+		// Lip Gloss omits both foreground and background escapes, so the
+		// terminal's own accessible defaults still win.
+		App: rootBackgroundStyle(lipgloss.DefaultRenderer(), ColorBg),
 
 		Header: lipgloss.NewStyle().
 			Bold(true).
@@ -350,7 +377,7 @@ func DefaultStyles() *Styles {
 			// Quiet neutral frame (not the loud violet brand accent) so the input
 			// box doesn't dominate every idle frame — the model's prose, and the
 			// violet › prompt, are the focus (CC keeps the input border subtle).
-			BorderForeground(ColorBorder).
+			BorderForeground(ColorDim).
 			Padding(0, 1),
 
 		Viewport: lipgloss.NewStyle().
@@ -505,6 +532,7 @@ func DefaultStyles() *Styles {
 }
 
 func (s *Styles) FormatUserMessage(msg string) string {
+	msg = safeTerminalDisplayText(msg)
 	// Violet › prefix matches the input prompt — same glyph signals
 	// "your turn" both in scrollback history and at the active input
 	// row. Body in warm off-white for readable contrast.
@@ -536,11 +564,12 @@ func (s *Styles) FormatAssistantStreaming(msg string) string {
 
 // FormatToolCall formats a tool call notification.
 func (s *Styles) FormatToolCall(name string) string {
-	return s.ToolCall.Render(name)
+	return s.ToolCall.Render(safeKeyEntryText(name))
 }
 
 // FormatToolCallWithArgs formats a tool call with brief argument summary.
 func (s *Styles) FormatToolCallWithArgs(name string, args map[string]any) string {
+	name = safeKeyEntryText(name)
 	summary := formatArgsSummary(args)
 	if summary != "" {
 		return s.ToolCall.Render(name + " " + summary)
@@ -550,6 +579,7 @@ func (s *Styles) FormatToolCallWithArgs(name string, args map[string]any) string
 
 // FormatToolExecuting formats a tool that is currently executing.
 func (s *Styles) FormatToolExecuting(name string, args map[string]any) string {
+	name = safeKeyEntryText(name)
 	summary := formatArgsSummary(args)
 
 	spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -572,6 +602,7 @@ const toolBullet = "▪"
 // FormatToolExecutingBlock formats a tool call as a compact line.
 // Format: ▪ Read(file.go)  (dim marker, per-tool name color)
 func (s *Styles) FormatToolExecutingBlock(name string, args map[string]any) string {
+	name = safeKeyEntryText(name)
 	// One shared dim marker for every tool — quiet and aligned.
 	bulletStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
@@ -596,6 +627,7 @@ func (s *Styles) FormatToolExecutingBlock(name string, args map[string]any) stri
 
 // FormatToolSuccess formats a successful tool result.
 func (s *Styles) FormatToolSuccess(name string, duration time.Duration) string {
+	name = safeKeyEntryText(name)
 	successStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
@@ -649,6 +681,9 @@ func formatToolDurationLabel(duration time.Duration) (string, lipgloss.Color) {
 // and the result outcome share a single row (the older two-line ✓-block repeated
 // the tool name AND the full path/command on the result row).
 func (s *Styles) FormatToolLine(name, target, outcome string, duration time.Duration) string {
+	name = safeKeyEntryText(name)
+	target = strings.TrimSpace(safeInlineDisplayText(target))
+	outcome = strings.TrimSpace(safeInlineDisplayText(outcome))
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	nameStyle := lipgloss.NewStyle().Foreground(GetToolIconColor(name))
 	targetStyle := lipgloss.NewStyle().Foreground(ColorText)
@@ -675,6 +710,8 @@ func (s *Styles) FormatToolLine(name, target, outcome string, duration time.Dura
 // now read as the same calm shape; the error detail nests under ⎿ below (the way
 // Claude Code shows `⎿ Error: …`), instead of the old rounded red alarm box.
 func (s *Styles) FormatToolFailureLine(name, target string, duration time.Duration) string {
+	name = safeKeyEntryText(name)
+	target = strings.TrimSpace(safeInlineDisplayText(target))
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	errStyle := lipgloss.NewStyle().Foreground(ColorError)
 	nameStyle := lipgloss.NewStyle().Foreground(GetToolIconColor(name))
@@ -697,10 +734,15 @@ func (s *Styles) FormatToolFailureLine(name, target string, duration time.Durati
 
 // FormatToolError formats a failed tool result.
 func (s *Styles) FormatToolError(name string, err error) string {
+	name = safeKeyEntryText(name)
 	errorStyle := lipgloss.NewStyle().Foreground(ColorRose)
 	msgStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	return errorStyle.Render("✗ "+name) + "  " + msgStyle.Render(err.Error())
+	errText := "unknown error"
+	if err != nil {
+		errText = safeKeyEntryText(err.Error())
+	}
+	return errorStyle.Render("✗ "+name) + "  " + msgStyle.Render(errText)
 }
 
 // --- Agent Activity Formatting ---
@@ -727,6 +769,10 @@ func (s *Styles) FormatToolError(name string, err error) string {
 // a 7-param callback for a polish label. The agent's TOTAL elapsed still shows
 // on completion (FormatAgentComplete).
 func (s *Styles) FormatAgentToolLine(agentType, name, target, summary string, success bool) string {
+	agentType = safeKeyEntryText(agentType)
+	name = safeKeyEntryText(name)
+	target = strings.TrimSpace(safeInlineDisplayText(target))
+	summary = strings.TrimSpace(safeInlineDisplayText(summary))
 	prefixStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	nameStyle := lipgloss.NewStyle().Foreground(GetToolIconColor(name))
@@ -757,6 +803,7 @@ func (s *Styles) FormatAgentToolLine(agentType, name, target, summary string, su
 
 // FormatAgentComplete renders agent completion.
 func (s *Styles) FormatAgentComplete(agentType string, elapsed time.Duration) string {
+	agentType = safeKeyEntryText(agentType)
 	prefixStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 	durStyle := lipgloss.NewStyle().Foreground(ColorDim)
@@ -767,6 +814,7 @@ func (s *Styles) FormatAgentComplete(agentType string, elapsed time.Duration) st
 
 // FormatAgentFailed renders agent failure.
 func (s *Styles) FormatAgentFailed(agentType string, elapsed time.Duration) string {
+	agentType = safeKeyEntryText(agentType)
 	prefixStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	crossStyle := lipgloss.NewStyle().Foreground(ColorError)
 	durStyle := lipgloss.NewStyle().Foreground(ColorDim)
@@ -811,7 +859,7 @@ func formatArgsSummary(args map[string]any) string {
 		}
 		str := formatArgValue(val)
 		if str != "" {
-			parts = append(parts, key+"="+str)
+			parts = append(parts, safeKeyEntryText(key)+"="+str)
 		}
 	}
 
@@ -831,7 +879,7 @@ func formatArgValue(val any) string {
 	case string:
 		// Don't truncate here - let the caller decide based on context
 		// This allows file paths to be shown in full
-		return "\"" + v + "\""
+		return "\"" + safeInlineDisplayText(v) + "\""
 	case float64:
 		return fmt.Sprintf("%.0f", v)
 	case bool:
@@ -856,6 +904,9 @@ func (s *Styles) FormatError(err string) string {
 
 // FormatErrorWithSuggestion formats an error message with a suggestion - Claude Code style.
 func (s *Styles) FormatErrorWithSuggestion(err, suggestion, code string) string {
+	err = safeKeyEntryText(err)
+	suggestion = safeKeyEntryText(suggestion)
+	code = safeKeyEntryText(code)
 	errorStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
 	msgStyle := lipgloss.NewStyle().Foreground(ColorText)
 	suggestionStyle := lipgloss.NewStyle().Foreground(ColorWarning)
@@ -877,6 +928,7 @@ func (s *Styles) FormatErrorWithSuggestion(err, suggestion, code string) string 
 // capitalizeToolName converts snake_case tool names to PascalCase.
 // e.g., "web_fetch" → "WebFetch", "bash" → "Bash", "read" → "Read"
 func capitalizeToolName(name string) string {
+	name = safeKeyEntryText(name)
 	if name == "" {
 		return ""
 	}
@@ -892,6 +944,7 @@ func capitalizeToolName(name string) string {
 // buildClaudeCodeArgs formats tool arguments for display in Claude Code style.
 // Returns a string like "file_path=/path" or "command" for bash.
 func buildClaudeCodeArgs(name string, args map[string]any) string {
+	name = safeKeyEntryText(name)
 	if len(args) == 0 {
 		return ""
 	}
@@ -998,8 +1051,8 @@ func buildClaudeCodeArgs(name string, args map[string]any) string {
 		} else {
 			result = shortenPath(result, filePathMaxLen)
 		}
-	} else if runes := []rune(result); len(runes) > generalArgMaxLen {
-		result = string(runes[:generalArgMaxLen-3]) + "..."
+	} else {
+		result = compactInline(result, generalArgMaxLen)
 	}
 
 	return result
@@ -1068,6 +1121,7 @@ func (s *Styles) FormatThinkingIndicatorWithTokens(usedTokens, maxTokens int) st
 
 // FormatPlanStepHeader formats a plan step header for delegated execution output.
 func (s *Styles) FormatPlanStepHeader(stepID, totalSteps int, title string) string {
+	title = safeKeyEntryText(title)
 	headerStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorPrimary)
@@ -1085,15 +1139,13 @@ func (s *Styles) FormatPlanStepHeader(stepID, totalSteps int, title string) stri
 
 // FormatPlanStepResult formats a plan step completion result.
 func (s *Styles) FormatPlanStepResult(stepID int, success bool, summary string) string {
+	summary = strings.TrimSpace(safeInlineDisplayText(summary))
+	summary = compactInline(summary, 120)
 	if success {
 		checkStyle := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
 		summaryStyle := lipgloss.NewStyle().Foreground(ColorText)
 		result := checkStyle.Render(fmt.Sprintf("  Step %d done", stepID))
 		if summary != "" {
-			// Truncate summary for display
-			if runes := []rune(summary); len(runes) > 120 {
-				summary = string(runes[:117]) + "..."
-			}
 			result += " " + summaryStyle.Render(summary)
 		}
 		return result
@@ -1110,6 +1162,7 @@ func (s *Styles) FormatPlanStepResult(stepID int, success bool, summary string) 
 
 // FormatPlanBanner formats the plan execution start/end banner.
 func (s *Styles) FormatPlanBanner(text string, isStart bool) string {
+	text = safeKeyEntryText(text)
 	color := ColorSuccess
 	if isStart {
 		color = ColorInfo
@@ -1124,6 +1177,9 @@ func (s *Styles) FormatPlanBanner(text string, isStart bool) string {
 // FormatMessage formats a message with consistent styling based on type.
 // msgType can be: success, error, warning, info, hint, loading
 func (s *Styles) FormatMessage(msgType, title, body string) string {
+	msgType = safeKeyEntryText(msgType)
+	title = safeKeyEntryText(title)
+	body = safeTerminalDisplayText(body)
 	icon := MessageIcons[msgType]
 	if icon == "" {
 		icon = MessageIcons["info"]
@@ -1162,6 +1218,7 @@ func (s *Styles) FormatMessage(msgType, title, body string) string {
 
 // FormatHint formats a contextual hint message.
 func (s *Styles) FormatHint(text string) string {
+	text = safeKeyEntryText(text)
 	hintStyle := lipgloss.NewStyle().
 		Foreground(ColorAccent).
 		Italic(true)

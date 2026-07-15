@@ -215,4 +215,7 @@ func TestMockClient_CountTokensReturnsEstimate(t *testing.T) {
 	if resp.TotalTokens != 4 {
 		t.Errorf("TotalTokens = %d, want 4", resp.TotalTokens)
 	}
+	if !m.TokenCountIsEstimate() {
+		t.Error("TokenCountIsEstimate = false, want true for character-based count")
+	}
 }

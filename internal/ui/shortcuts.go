@@ -66,16 +66,16 @@ func DefaultShortcuts() []ShortcutCategory {
 				{Keys: []string{"Ctrl", "S"}, Description: "Open settings (toggles)"},
 				{Keys: []string{"Alt", "N"}, Description: "Open notification history"},
 				{Keys: []string{"Ctrl", "K"}, Description: "Open model selector"},
-				{Keys: []string{"Ctrl", "E"}, Description: "Reveal last output; compact mark leaves existing scrollback unchanged"},
+				{Keys: []string{"Ctrl", "E"}, Description: "Toggle last output (expand appends; compact keeps existing scrollback)"},
 				{Keys: []string{"E"}, Description: "Set expanded/compact default for new tool outputs"},
 				{Keys: []string{"Ctrl", "H"}, Description: "Context Observatory (Technical Health)"},
 				{Keys: []string{"Ctrl", "G"}, Description: "Toggle select mode (freeze + native selection)"},
 				{Keys: []string{"Ctrl", "O"}, Description: "Live activity detail on/off (works while streaming)"},
 				{Keys: []string{"Ctrl", "A"}, Description: "Toggle agent tree panel"},
-				{Keys: []string{"Ctrl", "T"}, Description: "Toggle todo list panel"},
+				{Keys: []string{"Ctrl", "T"}, Description: "Toggle task list panel"},
 				{Keys: []string{"Ctrl", "X"}, Description: "Expand / collapse plan progress panel"},
 				{Keys: []string{"Ctrl", "L"}, Description: "Clear the output screen"},
-				{Keys: []string{"Option", "C"}, Description: "Copy last AI response"},
+				{Keys: []string{"Alt", "C"}, Description: "Copy last AI response"},
 			},
 		},
 		{
@@ -213,12 +213,21 @@ func (m *ShortcutsOverlay) SetSearch(query string) {
 		return r
 	}, query)
 	m.scrollIndex = 0 // Reset scroll when searching
+	m.pageSize = 0
 }
 
 // ClearSearch clears the search query.
 func (m *ShortcutsOverlay) ClearSearch() {
 	m.searchQuery = ""
 	m.scrollIndex = 0
+	m.pageSize = 0
+}
+
+// BackspaceSearch removes one user-perceived character. Emoji modifiers,
+// combining marks and ZWJ sequences must disappear as a unit instead of
+// leaving a visually different fragment behind.
+func (m *ShortcutsOverlay) BackspaceSearch() {
+	m.SetSearch(removeLastGrapheme(m.searchQuery))
 }
 
 // GetSearch returns the current search query.
@@ -287,6 +296,16 @@ func flattenShortcuts(categories []ShortcutCategory) []shortcutEntry {
 	return entries
 }
 
+func shortcutsFooterLabel(width int, full, escape string) string {
+	width = max(width, 1)
+	for _, candidate := range []string{full, escape, "Esc", "↔"} {
+		if lipgloss.Width(candidate) <= width {
+			return candidate
+		}
+	}
+	return "↔"
+}
+
 // View renders the shortcuts overlay. Dimensions returned by the helpers are
 // outer dimensions: border and padding are subtracted before content sizing so
 // the overlay never relies on the parent compositor to crop it.
@@ -297,24 +316,35 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 
 	outerWidth := shortcutsOverlayWidth(width)
 	outerHeight := shortcutsOverlayHeight(height)
+	// Rounded borders require at least one content cell in both dimensions.
+	// Degenerate panes still need a truthful recovery row, so drop the border
+	// instead of letting its two chrome cells overflow the terminal.
+	bordered := outerWidth >= 3 && outerHeight >= 3
+	borderCells := 0
+	if bordered {
+		borderCells = 2
+	}
 	horizontalPadding := 2
 	if outerWidth < 12 {
 		horizontalPadding = 0
 	}
 	verticalPadding := 1
-	if outerHeight < 6 {
+	if outerHeight < 10 {
 		verticalPadding = 0
 	}
-	innerWidth := max(outerWidth-2-horizontalPadding*2, 1)
-	innerHeight := max(outerHeight-2-verticalPadding*2, 1)
+	innerWidth := max(outerWidth-borderCells-horizontalPadding*2, 1)
+	innerHeight := max(outerHeight-borderCells-verticalPadding*2, 1)
 
 	containerStyle := lipgloss.NewStyle().
-		Width(max(outerWidth-2, 1)).
-		Height(max(outerHeight-2, 1)).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorSecondary).
+		Width(max(outerWidth-borderCells, 1)).
+		Height(max(outerHeight-borderCells, 1)).
 		Background(ColorBg).
 		Padding(verticalPadding, horizontalPadding)
+	if bordered {
+		containerStyle = containerStyle.
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorSecondary)
+	}
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary)
 	searchStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
 	categoryStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
@@ -323,22 +353,56 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 	title := titleStyle.Render(truncateForWidth("Keyboard Shortcuts", innerWidth))
 	searchLabel := "Type to filter shortcuts..."
 	if m.searchQuery != "" {
-		searchLabel = fmt.Sprintf("%s Filter: %s", MessageIcons["info"], m.searchQuery)
+		prefix := fmt.Sprintf("%s Filter: ", MessageIcons["info"])
+		queryWidth := max(innerWidth-lipgloss.Width(prefix), 1)
+		searchLabel = prefix + truncateTailForWidth(m.searchQuery+"_", queryWidth)
 	}
 	search := searchStyle.Render(truncateForWidth(searchLabel, innerWidth))
 
 	entries := flattenShortcuts(m.getFilteredCategories())
 	if len(entries) == 0 {
-		rows := []string{title, search, "", truncateForWidth("No matching shortcuts found.", innerWidth), "", footerStyle.Render(truncateForWidth("Esc clear  ·  Keep typing", innerWidth))}
-		if len(rows) > innerHeight {
-			rows = rows[:innerHeight]
+		m.pageSize = 0
+		status := truncateForWidth("No matching shortcuts found.", innerWidth)
+		footer := footerStyle.Render(shortcutsFooterLabel(innerWidth, "Esc clear  ·  Keep typing", "Esc clear"))
+		var rows []string
+		switch {
+		case innerHeight >= 6:
+			rows = []string{title, search, "", status, "", footer}
+		case innerHeight == 5:
+			rows = []string{title, search, "", status, footer}
+		case innerHeight == 4:
+			rows = []string{title, search, status, footer}
+		case innerHeight == 3:
+			rows = []string{title, status, footer}
+		case innerHeight == 2:
+			rows = []string{status, footer}
+		default:
+			rows = []string{footer}
 		}
 		return containerStyle.Render(strings.Join(rows, "\n"))
 	}
 
 	m.scrollIndex = min(max(m.scrollIndex, 0), len(entries)-1)
-	itemBudget := max(innerHeight-5, 1) // title, search, separator, footer separator, footer
-	rows := []string{title, search, ""}
+	// Footer + at least one shortcut are the non-negotiable compact layout.
+	// Add title/search/separators only when they leave room for actual content.
+	rows := make([]string, 0, innerHeight)
+	itemBudget := max(innerHeight-1, 0) // reserve footer
+	switch {
+	case itemBudget >= 3:
+		rows = append(rows, title, search)
+		itemBudget -= 2
+	case itemBudget >= 2:
+		rows = append(rows, title)
+		itemBudget--
+	}
+	if len(rows) > 0 && itemBudget >= 3 {
+		rows = append(rows, "")
+		itemBudget--
+	}
+	footerSeparator := itemBudget >= 4
+	if footerSeparator {
+		itemBudget--
+	}
 	lastCategory := ""
 	end := m.scrollIndex
 	used := 0
@@ -362,10 +426,13 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 		end++
 	}
 	if end == m.scrollIndex && m.scrollIndex < len(entries) {
-		rows = append(rows, renderShortcutEntry(entries[m.scrollIndex].shortcut, innerWidth))
-		end++
+		if itemBudget > 0 {
+			rows = append(rows, renderShortcutEntry(entries[m.scrollIndex].shortcut, innerWidth))
+			end++
+		}
 	}
-	m.pageSize = max(end-m.scrollIndex, 1)
+	renderedItems := end - m.scrollIndex
+	m.pageSize = renderedItems
 
 	closeHint := "Esc close"
 	filterHint := "Type to filter"
@@ -373,22 +440,28 @@ func (m *ShortcutsOverlay) View(width, height int) string {
 		closeHint = "Esc clear"
 		filterHint = "Keep typing"
 	}
-	footer := filterHint + "  ·  " + closeHint
-	if m.scrollIndex > 0 || end < len(entries) {
+	footer := closeHint + "  ·  " + filterHint
+	if renderedItems == 0 {
+		footer = resizeRecoveryLabel(innerWidth, closeHint)
+	} else if m.scrollIndex > 0 || end < len(entries) {
 		footer = fmt.Sprintf("%s  ·  ↑/↓ %d–%d/%d  ·  PgUp/PgDn", closeHint, m.scrollIndex+1, end, len(entries))
 	}
-	rows = append(rows, "", footerStyle.Render(truncateForWidth(footer, innerWidth)))
-	if len(rows) > innerHeight {
-		rows = rows[:innerHeight-1]
-		rows = append(rows, footerStyle.Render(truncateForWidth(footer, innerWidth)))
+	footer = shortcutsFooterLabel(innerWidth, footer, closeHint)
+	if footerSeparator {
+		rows = append(rows, "")
 	}
+	rows = append(rows, footerStyle.Render(footer))
 	return containerStyle.Render(strings.Join(rows, "\n"))
 }
 
 func renderShortcutEntry(shortcut Shortcut, width int) string {
-	keyStyle := lipgloss.NewStyle().Foreground(ColorText).Background(ColorDim).Bold(true).Padding(0, 1)
+	keyStyle := lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder).Bold(true).Padding(0, 1)
 	descStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	keys := strings.Join(shortcut.Keys, " + ")
+	if width < 3 {
+		// Horizontal keycap padding alone would exceed a one/two-cell pane.
+		return lipgloss.NewStyle().Foreground(ColorText).Bold(true).Render(truncateForWidth(keys, max(width, 1)))
+	}
 	keyPart := keyStyle.Render(keys)
 	remaining := width - lipgloss.Width(keyPart) - 1
 	if remaining <= 0 {
@@ -531,7 +604,7 @@ func (b *QuickActionsBar) View(width int) string {
 
 		keyStyle := lipgloss.NewStyle().
 			Foreground(ColorText).
-			Background(ColorDim).
+			Background(ColorBorder).
 			Bold(true).
 			Padding(0, 1)
 

@@ -17,7 +17,9 @@ type SetCommand struct{}
 
 func (c *SetCommand) Name() string        { return "set" }
 func (c *SetCommand) Description() string { return "View or change a setting (live)" }
-func (c *SetCommand) Usage() string       { return "/set [<key> <on|off>]" }
+func (c *SetCommand) Usage() string {
+	return "/set [<key> <on|off> | preset <safe|balanced|fast>]"
+}
 func (c *SetCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategoryAuthSetup,
@@ -82,10 +84,10 @@ type settingToggle struct {
 // invariant test pins that a category never appears, ends, then reappears.
 var settableToggles = []settingToggle{
 	// Safety
-	{"permissions", "Ask before risky actions", "Ask before risky tool actions", catSafety, true,
+	{"permissions", "Ask before risky actions", "On asks first; off auto-approves risky actions (sandbox is separate)", catSafety, true,
 		func(c *config.Config) bool { return c.Permission.Enabled },
 		func(c *config.Config, v bool) { c.Permission.Enabled = v }},
-	{"sandbox", "Sandbox bash commands", "Run bash commands in a sandbox", catSafety, true,
+	{"sandbox", "Sandbox bash commands", "On contains bash; off runs approved or auto-approved bash unrestricted", catSafety, true,
 		func(c *config.Config) bool { return c.Tools.Bash.Sandbox },
 		func(c *config.Config, v bool) { c.Tools.Bash.Sandbox = v }},
 	{"diff", "Confirm edits with a diff", "Show a diff approval card before edits", catSafety, true,
@@ -99,6 +101,9 @@ var settableToggles = []settingToggle{
 	{"memory", "Memory tool & recall", "Enable the memory tool and recall", catContext, true,
 		func(c *config.Config) bool { return c.Memory.Enabled },
 		func(c *config.Config, v bool) { c.Memory.Enabled = v }},
+	{"globalmemory", "Share memory across projects", "Explicitly allow user-wide memory reads/writes in every repository", catContext, true,
+		func(c *config.Config) bool { return c.Memory.AllowGlobal },
+		func(c *config.Config, v bool) { c.Memory.AllowGlobal = v }},
 	{"sessionmemory", "Remember this session", "Auto-summarize the session into memory", catContext, true,
 		func(c *config.Config) bool { return c.SessionMemory.Enabled },
 		func(c *config.Config, v bool) { c.SessionMemory.Enabled = v }},
@@ -142,6 +147,9 @@ var settableToggles = []settingToggle{
 	{"tokens", "Show token usage", "Show token usage in the status bar", catInterface, true,
 		func(c *config.Config) bool { return c.UI.ShowTokenUsage },
 		func(c *config.Config, v bool) { c.UI.ShowTokenUsage = v }},
+	{"compactui", "Compact transcript layout", "Keep the transcript to the latest third of the screen", catInterface, true,
+		func(c *config.Config) bool { return c.UI.CompactMode },
+		func(c *config.Config, v bool) { c.UI.CompactMode = v }},
 	{"reducedmotion", "Reduce motion", "Use static activity indicators and instant scrolling", catInterface, true,
 		func(c *config.Config) bool { return c.UI.ReducedMotion },
 		func(c *config.Config, v bool) { c.UI.ReducedMotion = v }},
@@ -192,6 +200,37 @@ func ApplySettingToggle(cfg *config.Config, key string, on bool) bool {
 	}
 	t.set(cfg, on)
 	return true
+}
+
+// UIConfigApplier is an optional fast path implemented by the real App. Pure
+// presentation toggles should not flush/rebuild the model client or refresh
+// token counts; lightweight command fakes and older integrations can keep
+// implementing only AppInterface and transparently fall back to ApplyConfig.
+type UIConfigApplier interface {
+	ApplyUIConfig(cfg *config.Config) error
+}
+
+// UISettingConfigApplier lets the real App merge only the presentation field
+// owned by this command, preserving newer sibling UI commits.
+type UISettingConfigApplier interface {
+	ApplyUIConfigForSetting(cfg *config.Config, key string) error
+}
+
+// ApplyConfigForSetting chooses the narrowest honest runtime apply for a
+// setting. It is shared by `/set` and the interactive `/settings` worker so the
+// two surfaces cannot drift into different latency/failure behavior.
+func ApplyConfigForSetting(app AppInterface, cfg *config.Config, key string) error {
+	key = strings.ToLower(strings.TrimSpace(key))
+	switch key {
+	case "tokens", "compactui", "reducedmotion":
+		if applier, ok := app.(UISettingConfigApplier); ok {
+			return applier.ApplyUIConfigForSetting(cfg, key)
+		}
+		if applier, ok := app.(UIConfigApplier); ok {
+			return applier.ApplyUIConfig(cfg)
+		}
+	}
+	return app.ApplyConfig(cfg)
 }
 
 // SettingsMarker is returned by /settings to tell the app to open the
@@ -258,7 +297,7 @@ type settingPreset struct {
 var settingPresets = []settingPreset{
 	{"safe", "Maximum guardrails — ask before risky actions, sandbox bash, confirm edits, verify before done",
 		map[string]bool{"permissions": true, "sandbox": true, "diff": true, "donegate": true}},
-	{"balanced", "Sensible default — ask before risky actions and verify before done, no sandbox/diff friction",
+	{"balanced", "Prompts stay on; approved bash is unrestricted, diff preview off, done-gate on",
 		map[string]bool{"permissions": true, "sandbox": false, "diff": false, "donegate": true}},
 	{"fast", "Fewest interruptions — no prompts, sandbox, diff, or done-gate (use only on trusted work)",
 		map[string]bool{"permissions": false, "sandbox": false, "diff": false, "donegate": false}},
@@ -353,7 +392,7 @@ func (c *SetCommand) Execute(ctx context.Context, args []string, app AppInterfac
 	}
 
 	t.set(cfg, val)
-	if err := app.ApplyConfig(cfg); err != nil {
+	if err := ApplyConfigForSetting(app, cfg, t.key); err != nil {
 		return fmt.Sprintf("Failed to apply: %v", err), nil
 	}
 	if !t.live {

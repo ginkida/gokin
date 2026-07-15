@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"gokin/internal/donegate"
+	"gokin/internal/testkit"
 	"gokin/internal/tools"
 )
 
@@ -156,5 +157,21 @@ func TestFormatDoneGateResultSummary(t *testing.T) {
 			t.Errorf("formatDoneGateResultSummary(%d, %d) = %q, want %q",
 				tc.passed, tc.failed, got, tc.want)
 		}
+	}
+}
+
+func TestRunDoneGateAutoFixAccountsInternalModelUsage(t *testing.T) {
+	mock := testkit.NewMockClient().EnqueueText("fixed the verification failure")
+	application, _ := newHeadlessPolicyTestApp(t, mock, &appHeadlessScriptedTool{name: "unused"})
+
+	err := application.runDoneGateAutoFix(context.Background(), "fix the project", []donegate.Result{
+		{Name: "go_test", DisplayName: "go test", Success: false, Error: "tests failed"},
+	}, 1, 1)
+	if err != nil {
+		t.Fatalf("runDoneGateAutoFix: %v", err)
+	}
+	stats := application.GetTokenStats()
+	if stats.InputTokens != 10 || stats.OutputTokens == 0 {
+		t.Fatalf("auto-fix usage was not accounted: %+v", stats)
 	}
 }

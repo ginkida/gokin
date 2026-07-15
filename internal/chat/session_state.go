@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"gokin/internal/skills"
+
 	"google.golang.org/genai"
 )
 
@@ -22,17 +24,26 @@ type SessionState struct {
 	// compatible on first load and re-tagged on next save. See
 	// Session.Provider docstring for the cross-provider history
 	// incompatibility this guards against.
-	Provider          string                     `json:"provider,omitempty"`
-	History           []SerializedContent        `json:"history"`
-	TokenCounts       []int                      `json:"token_counts,omitempty"`
-	TotalTokens       int                        `json:"total_tokens"`
-	Version           int64                      `json:"version"`
-	Summary           string                     `json:"summary,omitempty"`
-	Scratchpad        string                     `json:"scratchpad,omitempty"`
-	SystemInstruction string                     `json:"system_instruction,omitempty"`
-	Branches          map[string]*SessionState   `json:"branches,omitempty"`
-	Checkpoints       map[string]int             `json:"checkpoints,omitempty"`
-	ToolCheckpoints   []SerializedToolCheckpoint `json:"tool_checkpoints,omitempty"`
+	Provider          string                   `json:"provider,omitempty"`
+	History           []SerializedContent      `json:"history"`
+	TokenCounts       []int                    `json:"token_counts,omitempty"`
+	TotalTokens       int                      `json:"total_tokens"`
+	Version           int64                    `json:"version"`
+	Summary           string                   `json:"summary,omitempty"`
+	Scratchpad        string                   `json:"scratchpad,omitempty"`
+	SystemInstruction string                   `json:"system_instruction,omitempty"`
+	Branches          map[string]*SessionState `json:"branches,omitempty"`
+	Checkpoints       map[string]int           `json:"checkpoints,omitempty"`
+	// CheckpointRawIndices marks checkpoint indices that are measured against
+	// history with Gokin's synthetic active-skill carry messages removed. The
+	// per-entry marker preserves compatibility with legacy persisted indices.
+	CheckpointRawIndices map[string]bool            `json:"checkpoint_raw_indices,omitempty"`
+	ToolCheckpoints      []SerializedToolCheckpoint `json:"tool_checkpoints,omitempty"`
+	InvokedSkills        []skills.Invocation        `json:"invoked_skills,omitempty"`
+	// CheckpointInvokedSkills makes /restore a true state rollback: workflows
+	// activated after a named checkpoint must not remain active after history is
+	// rewound. Missing in legacy states is intentionally treated as unknown.
+	CheckpointInvokedSkills map[string][]skills.Invocation `json:"checkpoint_invoked_skills,omitempty"`
 }
 
 // SerializedToolCheckpoint is the persisted form of a tool checkpoint entry.

@@ -213,7 +213,7 @@ func (a *App) ListAllowedDirs() []string {
 // dirGrantPrompt is the executor's ask-on-access handler: the agent tried to
 // touch an absolute path outside the workspace. It resolves the directory to
 // grant (the path itself if a dir, else its parent), refuses ungrantable
-// locations outright, auto-grants in headless (no stdin to block on), and
+// locations outright, requires an explicit pre-grant in headless mode, and
 // otherwise reuses the permission-prompt modal. Any "allow" decision grants the
 // directory for the session (revocable via /remove-dir or /clear); deny returns
 // false so the executor surfaces an actionable error. Returns (allowed, error).
@@ -234,14 +234,11 @@ func (a *App) dirGrantPrompt(ctx context.Context, toolName, path string) (bool, 
 		return false, nil
 	}
 
-	// Headless / no interactive program: follow policy — auto-grant for the
-	// session, symmetric with promptPermission's auto-allow. (Eval/scripts run
-	// the user's configured policies without blocking on stdin.)
+	// Headless / no interactive program cannot create new ambient filesystem
+	// authority. Unattended callers must opt in explicitly with --add-dir (or a
+	// persisted allowed-dir setting), which is both deterministic and auditable.
 	if a.program == nil {
-		if _, err := a.GrantAllowedDir(dir, false); err != nil {
-			return false, nil
-		}
-		return true, nil
+		return false, fmt.Errorf("access to %s requires approval, but interactive approval is unavailable in headless mode; grant it explicitly with --add-dir", dir)
 	}
 
 	req := &permission.Request{

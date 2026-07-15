@@ -60,6 +60,9 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	if !m.shouldShowLiveActivityCard() {
 		return ""
 	}
+	if m.width <= 0 {
+		return ""
+	}
 
 	width := m.width - 2
 	if width < 1 {
@@ -79,6 +82,7 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	// When the big Live Activity panel is actually on screen, collapse to
 	// just the current-action line — Recent/Next live in the panel below.
 	feedOpen := feedRendered
+	rowBudget := liveActivityCardRowBudget(m.height)
 
 	// Line 1: the current action — no state badge, no meta. State comes
 	// from the accent color on the left bar; state word + provider + model
@@ -108,6 +112,16 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 			firstGlyph = spinnerFramesCard[frameIdx]
 		}
 	}
+	// A glyph plus the normal separating space needs three cells once the
+	// truncation disclosure is included. Keep degenerate terminals bounded
+	// while still exposing that work is active; the status row carries the
+	// textual state at these widths.
+	if m.width == 1 {
+		return barStyle.Render(firstGlyph)
+	}
+	if m.width == 2 {
+		return barStyle.Render(firstGlyph) + dimStyle.Render("…")
+	}
 
 	// MINIMAL mode (default, Claude-Code style): ONE dim unobtrusive line —
 	// spinner + current action + elapsed — nothing else. Ctrl+O (works during
@@ -125,33 +139,61 @@ func (m Model) renderLiveActivityCard(feedRendered bool) string {
 	var out strings.Builder
 	out.WriteString(barStyle.Render(firstGlyph) + " ")
 	out.WriteString(valueStyle.Render(truncateRunes(current, max(width-2, 1))))
+	if feedOpen || rowBudget <= 1 {
+		return out.String()
+	}
+	rowsUsed := 1
+	appendTodo := func(todo string) {
+		out.WriteByte('\n')
+		out.WriteString(barStyle.Render("▎") + " " +
+			valueStyle.Render(truncateRunes(todo, max(width-2, 1))))
+		rowsUsed++
+	}
+	appendNext := func(next string) {
+		out.WriteByte('\n')
+		out.WriteString(barStyle.Render("▎") + " " +
+			dimStyle.Render("→ ") +
+			valueStyle.Render(truncateRunes(next, max(width-4, 1))))
+		rowsUsed++
+	}
+
+	// A stalled/idle warning is more urgent than plan orientation on a short
+	// terminal. Render it immediately after the current action; ordinary next
+	// context remains below the Todo row on roomier screens.
+	next := m.liveActivityNextLine(snapshot)
+	if m.streamIdleMsg != "" && next != "" && rowsUsed < rowBudget {
+		appendNext(next)
+		next = ""
+	}
 
 	// Todo progress: when the agent is working through a plan (todo list),
 	// surface the currently-active step (or next pending) so users see
 	// "we're on step 3 of 7" instead of having to guess from tool calls.
 	// The line lives below the current-action row because it's a durable
 	// orientation signal, not a transient one.
-	if todo := m.liveActivityTodoLine(); todo != "" {
-		out.WriteByte('\n')
-		out.WriteString(barStyle.Render("▎") + " " +
-			valueStyle.Render(truncateRunes(todo, max(width-2, 1))))
+	if todo := m.liveActivityTodoLine(); todo != "" && rowsUsed < rowBudget {
+		appendTodo(todo)
 	}
 
-	if !feedOpen {
+	if rowsUsed < rowBudget {
 		// No "recent completed" echo here — the finished tool is already a row
 		// in scrollback right above the card, so repeating it ("↳ Running: … ->
 		// completed") was pure duplication. Only surface genuinely NEW signal
 		// (retries, rate limits, plan progression, parallel work); generic status
 		// echoes are dropped inside liveActivityNextLine.
-		if next := m.liveActivityNextLine(snapshot); next != "" {
-			out.WriteByte('\n')
-			out.WriteString(barStyle.Render("▎") + " " +
-				dimStyle.Render("→ ") +
-				valueStyle.Render(truncateRunes(next, max(width-4, 1))))
+		if next != "" {
+			appendNext(next)
 		}
 	}
 
 	return out.String()
+}
+
+func liveActivityCardRowBudget(terminalHeight int) int {
+	if terminalHeight <= 0 {
+		return 3
+	}
+	return min(max(terminalHeight-5, 1), 3)
 }
 
 func (m Model) liveActivityAccentColor() lipgloss.Color {
@@ -175,6 +217,7 @@ func (m Model) liveActivityAccentColor() lipgloss.Color {
 // threshold, so the working line answers "is it hung, or working?" the way CC's
 // `(12s)` does. Below 3s it returns s unchanged (no jittery early clock).
 func (m Model) withElapsed(s string) string {
+	s = safeKeyEntryText(s)
 	if m.streamStartTime.IsZero() {
 		return s
 	}
@@ -186,15 +229,18 @@ func (m Model) withElapsed(s string) string {
 
 func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	if m.currentTool != "" {
-		title := displayToolName(m.currentTool)
+		title := displayToolName(safeKeyEntryText(m.currentTool))
+		if title == "" {
+			title = "Tool"
+		}
 		if active := len(m.activeToolCalls); active > 1 {
 			title = fmt.Sprintf("%s · %d in flight", title, active)
 		}
-		if m.currentToolInfo != "" {
-			title += " — " + m.currentToolInfo
+		if info := safeKeyEntryText(m.currentToolInfo); info != "" {
+			title += " — " + info
 		}
 		if !m.toolStartTime.IsZero() {
-			title += " · " + format.Duration(time.Since(m.toolStartTime))
+			title += " · " + format.Duration(max(time.Since(m.toolStartTime), 0))
 		}
 		return title
 	}
@@ -215,7 +261,7 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 		//     "Writing: Root cause analysis";
 		//  4. the raw snippet (start of the current line, v0.100.57).
 		thinking := m.output.IsThinkingActive()
-		if act := strings.TrimSpace(m.currentActivity); act != "" {
+		if act := safeKeyEntryText(m.currentActivity); act != "" {
 			if thinking {
 				return m.withElapsed(act + " · thinking")
 			}
@@ -246,7 +292,12 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 		}
 	}
 
-	if label := strings.TrimSpace(m.processingLabel); label != "" {
+	activity := safeKeyEntryText(m.currentActivity)
+	label := safeKeyEntryText(m.processingLabel)
+	if activity != "" && isGenericLiveProcessingLabel(label) {
+		return m.withElapsed(activity)
+	}
+	if label != "" {
 		// Append elapsed wall-clock once past the "barely started" threshold —
 		// answers "has it really been thinking for a while?" without waiting for
 		// a tool call to land.
@@ -257,8 +308,8 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	// ActivityLabelMsg) — surfaced HERE (the card is the active renderer during
 	// processing) instead of only in the now-suppressed inline spinner block, so
 	// the working line reads the real task rather than a generic "Thinking".
-	if act := strings.TrimSpace(m.currentActivity); act != "" {
-		return m.withElapsed(act)
+	if activity != "" {
+		return m.withElapsed(activity)
 	}
 
 	if len(m.backgroundTasks) > 0 {
@@ -270,6 +321,15 @@ func (m Model) liveActivityCurrentLine(snapshot ActivityFeedSnapshot) string {
 	}
 
 	return ""
+}
+
+func isGenericLiveProcessingLabel(label string) bool {
+	switch strings.ToLower(safeKeyEntryText(label)) {
+	case "", "analyzing", "connecting", "generating", "thinking", "working":
+		return true
+	default:
+		return false
+	}
 }
 
 // liveActivityTodoLine surfaces the agent's current plan position as a
@@ -291,7 +351,7 @@ func (m Model) liveActivityTodoLine() string {
 	}
 
 	parseTodo := func(raw string) (marker, text string) {
-		s := strings.TrimSpace(raw)
+		s := normalizeTimelineText(raw)
 		if strings.HasPrefix(s, "- ") {
 			s = strings.TrimSpace(s[2:])
 		}
@@ -301,29 +361,45 @@ func (m Model) liveActivityTodoLine() string {
 		return "", s
 	}
 
-	total := len(m.todoItems)
+	type parsedTodo struct {
+		marker string
+		text   string
+	}
+	items := make([]parsedTodo, 0, len(m.todoItems))
+	for _, raw := range m.todoItems {
+		marker, text := parseTodo(raw)
+		switch marker {
+		case "x", "X", "/", " ":
+			if text != "" {
+				items = append(items, parsedTodo{marker: marker, text: text})
+			}
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+
+	total := len(items)
 	pickIdx := -1
 	pickMarker := ""
 	pickText := ""
 
 	// First pass: in-progress. Second pass: next pending. Done items
 	// ([x]) and empty lines skipped.
-	for i, raw := range m.todoItems {
-		marker, text := parseTodo(raw)
-		if marker == "/" {
+	for i, item := range items {
+		if item.marker == "/" {
 			pickIdx = i
-			pickMarker = marker
-			pickText = text
+			pickMarker = item.marker
+			pickText = item.text
 			break
 		}
 	}
 	if pickIdx < 0 {
-		for i, raw := range m.todoItems {
-			marker, text := parseTodo(raw)
-			if marker == " " && text != "" {
+		for i, item := range items {
+			if item.marker == " " {
 				pickIdx = i
-				pickMarker = marker
-				pickText = text
+				pickMarker = item.marker
+				pickText = item.text
 				break
 			}
 		}
@@ -350,12 +426,12 @@ func (m Model) liveActivityNextLine(snapshot ActivityFeedSnapshot) string {
 	// Provider recovery / rate-limit lines moved OUT — the status bar's engine
 	// badge ("↻ retry N/M · cooldown" / "RATE LIMIT · resumes in …") is the
 	// single home for provider-health state, so it isn't duplicated on screen.
-	if m.streamIdleMsg != "" {
-		return m.streamIdleMsg
+	if idle := safeKeyEntryText(m.streamIdleMsg); idle != "" {
+		return idle
 	}
 
 	if m.planProgressMode && m.planProgress != nil {
-		title := strings.TrimSpace(m.planProgress.CurrentTitle)
+		title := safeKeyEntryText(m.planProgress.CurrentTitle)
 		if title != "" {
 			return title
 		}
@@ -420,12 +496,5 @@ func truncateRunes(text string, maxRunes int) string {
 	if maxRunes <= 0 {
 		return ""
 	}
-	runes := []rune(strings.TrimSpace(text))
-	if len(runes) <= maxRunes {
-		return string(runes)
-	}
-	if maxRunes == 1 {
-		return "…"
-	}
-	return string(runes[:maxRunes-1]) + "…"
+	return truncateForWidth(safeKeyEntryText(text), maxRunes)
 }

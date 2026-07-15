@@ -46,11 +46,12 @@ const maxToastHistory = 50
 // All methods are only called from the Bubble Tea event loop (single goroutine),
 // so no mutex is needed.
 type ToastManager struct {
-	toasts    []Toast
-	history   []Toast // ring buffer of expired toasts
-	maxToasts int
-	styles    *Styles
-	nextID    int
+	toasts        []Toast
+	history       []Toast // bounded archive, newest first
+	maxToasts     int
+	styles        *Styles
+	nextID        int
+	reducedMotion bool
 }
 
 // NewToastManager creates a new toast manager.
@@ -63,8 +64,24 @@ func NewToastManager(styles *Styles) *ToastManager {
 	}
 }
 
+// SetReducedMotion keeps notifications at a stable contrast until expiry.
+// Their lifetime and archival behavior are unchanged; only the final fade is
+// removed for users who opt out of time-based visual transitions.
+func (m *ToastManager) SetReducedMotion(enabled bool) {
+	m.reducedMotion = enabled
+}
+
+func (m *ToastManager) toastFading(toast Toast, now time.Time) bool {
+	if m.reducedMotion {
+		return false
+	}
+	return toast.Duration-now.Sub(toast.CreatedAt) < 500*time.Millisecond
+}
+
 // Show displays a new toast notification.
 func (m *ToastManager) Show(toastType ToastType, title, message string, duration time.Duration) {
+	title = safeKeyEntryText(title)
+	message = safeKeyEntryText(message)
 	duration = normalizeToastDuration(toastType, duration)
 	key := toastContentKey(toastType, title, message)
 	for i := range m.toasts {
@@ -111,6 +128,7 @@ func (m *ToastManager) ShowError(message string) {
 // ShowErrorWithHint displays an error toast with optional actionable hint.
 // If a matching error pattern is found, appends hint: "Error message → Hint"
 func (m *ToastManager) ShowErrorWithHint(message string) {
+	message = safeKeyEntryText(message)
 	hint := GetCompactHint(message)
 	if hint != "" {
 		message = message + " → " + hint
@@ -133,6 +151,8 @@ func (m *ToastManager) ShowWarning(message string) {
 // a burst of near-identical messages would otherwise spam the stack — each new
 // message updates the live toast in place.
 func (m *ToastManager) ShowTagged(tag string, toastType ToastType, message string, duration time.Duration) {
+	tag = safeKeyEntryText(tag)
+	message = safeKeyEntryText(message)
 	duration = normalizeToastDuration(toastType, duration)
 	if tag != "" {
 		for i := range m.toasts {
@@ -177,8 +197,7 @@ func normalizeToastDuration(toastType ToastType, duration time.Duration) time.Du
 }
 
 func toastContentKey(toastType ToastType, title, message string) string {
-	normalize := func(value string) string { return strings.Join(strings.Fields(value), " ") }
-	return string(rune(toastType)) + "\x00" + normalize(title) + "\x00" + normalize(message)
+	return string(rune(toastType)) + "\x00" + safeKeyEntryText(title) + "\x00" + safeKeyEntryText(message)
 }
 
 func (m *ToastManager) promoteToast(index int, toast Toast) {
@@ -236,10 +255,12 @@ func (m *ToastManager) Dismiss(id int) {
 	}
 }
 
-// DismissTag removes the active toast for a transient interaction state. It is
-// used when the state is cancelled before the toast expires, so stale guidance
-// (for example "press again to quit") does not remain visible.
+// DismissTag discards the active toast for a cancelled transient interaction.
+// Unlike Dismiss, it deliberately does not archive the toast: lifecycle-only
+// guidance such as "press again to quit" is stale once the interaction ends
+// and would be misleading in the notification center.
 func (m *ToastManager) DismissTag(tag string) {
+	tag = safeKeyEntryText(tag)
 	if tag == "" {
 		return
 	}
@@ -247,9 +268,7 @@ func (m *ToastManager) DismissTag(tag string) {
 		if m.toasts[i].Tag != tag {
 			continue
 		}
-		toast := m.toasts[i]
 		m.toasts = append(m.toasts[:i], m.toasts[i+1:]...)
-		m.archive(toast)
 	}
 }
 
@@ -305,6 +324,13 @@ func (m *ToastManager) ViewLimit(width, maxLines int) string {
 	if len(m.toasts) == 0 {
 		return ""
 	}
+	// Keep the sentinel-width contract consistent through every stage. A toast
+	// itself falls back to 80 columns, but fitToastHiddenCount used to receive
+	// the original zero and replace the selected critical row with "" whenever
+	// there were hidden notifications.
+	if width <= 0 {
+		width = 80
+	}
 	maxLines = min(max(maxLines, 0), len(m.toasts))
 	if maxLines == 0 {
 		return ""
@@ -324,13 +350,35 @@ func (m *ToastManager) ViewLimit(width, maxLines int) string {
 		lines = append(lines, line)
 	}
 	if hidden := len(m.toasts) - len(visible); hidden > 0 && len(lines) > 0 {
-		suffix := lipgloss.NewStyle().Foreground(ColorDim).Render(" · +" + fmt.Sprintf("%d", hidden) + " more")
-		budget := max(width-lipgloss.Width(suffix), 0)
-		lines[len(lines)-1] = fitStatusText(lines[len(lines)-1], budget) + suffix
-		lines[len(lines)-1] = fitStatusText(lines[len(lines)-1], width)
+		lines[len(lines)-1] = fitToastHiddenCount(lines[len(lines)-1], width, hidden)
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// fitToastHiddenCount adds stack context only when it leaves enough room for
+// the notification itself. On irreducibly narrow terminals the critical
+// signal wins over metadata about less important hidden rows.
+func fitToastHiddenCount(line string, width, hidden int) string {
+	line = fitStatusText(line, width)
+	if width <= 0 || hidden <= 0 || line == "" {
+		return line
+	}
+
+	style := lipgloss.NewStyle().Foreground(ColorDim)
+	minPrimaryWidth := min(lipgloss.Width(line), 3)
+	for _, label := range []string{
+		fmt.Sprintf(" · +%d more", hidden),
+		fmt.Sprintf(" +%d", hidden),
+	} {
+		suffix := style.Render(label)
+		budget := width - lipgloss.Width(suffix)
+		if budget < minPrimaryWidth {
+			continue
+		}
+		return fitStatusText(fitStatusText(line, budget)+suffix, width)
+	}
+	return line
 }
 
 // renderToast renders a single toast as compact single line.
@@ -349,9 +397,7 @@ func (m *ToastManager) renderToast(toast Toast, width int) string {
 	}
 
 	// Fade entire toast when nearing expiration
-	elapsed := time.Since(toast.CreatedAt)
-	remaining := toast.Duration - elapsed
-	fading := remaining < 500*time.Millisecond
+	fading := m.toastFading(toast, time.Now())
 
 	msgColor := ColorMuted
 	if fading {
@@ -365,8 +411,8 @@ func (m *ToastManager) renderToast(toast Toast, width int) string {
 	// Toasts are deliberately one visual line. Collapse embedded whitespace
 	// from provider errors and include the title when supplied instead of
 	// silently discarding it.
-	title := strings.Join(strings.Fields(toast.Title), " ")
-	message := strings.Join(strings.Fields(toast.Message), " ")
+	title := safeKeyEntryText(toast.Title)
+	message := safeKeyEntryText(toast.Message)
 	msg := message
 	if title != "" && message != "" {
 		msg = title + ": " + message
@@ -396,7 +442,7 @@ func (m *ToastManager) renderToast(toast Toast, width int) string {
 	return iconStyle.Render(icon) + " " + msgStyle.Render(msg)
 }
 
-// Clear removes all toasts.
+// Clear removes active toasts without changing notification history.
 func (m *ToastManager) Clear() {
 	m.toasts = m.toasts[:0]
 }

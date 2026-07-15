@@ -77,6 +77,7 @@ func TestCheckCompletedAgents_CallbackPanicDoesNotSkipRemainingTasks(t *testing.
 
 func TestNotifyAllComplete_CallbackPanicDoesNotEscape(t *testing.T) {
 	c := NewCoordinator(context.Background(), nil, &CoordinatorConfig{MaxParallel: 1})
+	c.sealed = true
 	c.SetCallbacks(nil, nil, func(map[string]*AgentResult) {
 		panic("observer failure")
 	})

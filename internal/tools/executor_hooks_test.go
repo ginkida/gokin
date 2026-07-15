@@ -97,6 +97,41 @@ func TestPreToolHook_MatcherScopesBlocking(t *testing.T) {
 	}
 }
 
+func TestPreToolHook_CannotBeBypassedByReadCacheHit(t *testing.T) {
+	registry := NewRegistry()
+	tool := &scriptedStaticTool{name: "read", content: "cached bytes"}
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	exec := NewExecutor(registry, nil, time.Second)
+	exec.SetToolCache(NewToolResultCache(DefaultCacheConfig()))
+	call := testFunctionCall("r1", "read", map[string]any{"file_path": "cached.txt"})
+
+	first := exec.doExecuteTool(context.Background(), call)
+	if !first.Success || tool.calls != 1 {
+		t.Fatalf("priming read = %#v, calls=%d; want success and one call", first, tool.calls)
+	}
+
+	manager := hooks.NewManager(true, t.TempDir())
+	manager.AddHook(&hooks.Hook{
+		Name:        "cache-policy-changed",
+		Type:        hooks.PreTool,
+		ToolName:    "read",
+		Command:     "echo 'cached reads now denied' >&2; exit 1",
+		Enabled:     true,
+		FailOnError: true,
+	})
+	exec.SetHooks(manager)
+
+	second := exec.doExecuteTool(context.Background(), testFunctionCall("r2", "read", map[string]any{"file_path": "cached.txt"}))
+	if second.Success || !strings.Contains(second.Error, "cache-policy-changed") {
+		t.Fatalf("cache hit bypassed current pre-tool policy: %#v", second)
+	}
+	if tool.calls != 1 {
+		t.Fatalf("underlying tool calls = %d, want cached execution to remain at 1", tool.calls)
+	}
+}
+
 func testFunctionCall(id, name string, args map[string]any) *genai.FunctionCall {
 	return &genai.FunctionCall{ID: id, Name: name, Args: args}
 }

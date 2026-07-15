@@ -47,6 +47,27 @@ type MultimodalPart struct {
 	Data     []byte
 }
 
+// PolicyBlockKind identifies the policy boundary that refused a tool call.
+// It is deliberately separate from Error: callers such as headless runners
+// must be able to distinguish a fail-closed authorization outcome from an
+// ordinary tool failure without parsing human-facing error strings.
+type PolicyBlockKind string
+
+const (
+	PolicyBlockPermission PolicyBlockKind = "permission"
+	PolicyBlockSafety     PolicyBlockKind = "safety"
+	PolicyBlockHook       PolicyBlockKind = "hook"
+	PolicyBlockPlan       PolicyBlockKind = "plan"
+)
+
+// PolicyBlock describes a tool call that did not cross a policy boundary.
+// It is runtime metadata only: ToolResult.ToMap still exposes the actionable
+// Error to the model and does not add protocol fields providers may reject.
+type PolicyBlock struct {
+	Kind   PolicyBlockKind `json:"kind"`
+	Reason string          `json:"reason"`
+}
+
 // ToolResult represents the result of a tool execution.
 type ToolResult struct {
 	// Content is the main result content (usually text).
@@ -69,6 +90,11 @@ type ToolResult struct {
 	// MultimodalParts contains binary data (images) for LLM visual analysis.
 	// These are sent as separate inline data parts, not serialized in ToMap().
 	MultimodalParts []*MultimodalPart
+
+	// PolicyBlock is set when the tool itself was not allowed to execute (or a
+	// plan was not allowed to proceed). It is intentionally not serialized to
+	// the model; execution observers use it for reliable process status.
+	PolicyBlock *PolicyBlock
 }
 
 // NewSuccessResult creates a successful tool result.
@@ -94,6 +120,22 @@ func NewErrorResult(errMsg string) ToolResult {
 		Error:   errMsg,
 		Success: false,
 	}
+}
+
+// NewPolicyBlockedResult creates a failed result carrying machine-readable
+// policy metadata in addition to the human-facing error.
+func NewPolicyBlockedResult(kind PolicyBlockKind, reason string) ToolResult {
+	result := NewErrorResult(reason)
+	return WithPolicyBlock(result, kind, reason)
+}
+
+// WithPolicyBlock annotates an existing result. This also supports policy
+// decisions represented as successful tool protocol exchanges (for example,
+// a user rejecting a proposed plan): the tool ran, but the requested work was
+// intentionally not authorized to continue.
+func WithPolicyBlock(result ToolResult, kind PolicyBlockKind, reason string) ToolResult {
+	result.PolicyBlock = &PolicyBlock{Kind: kind, Reason: reason}
+	return result
 }
 
 // NewErrorResultWithContext creates a failed tool result with file context.

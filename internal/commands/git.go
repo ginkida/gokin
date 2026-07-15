@@ -15,7 +15,7 @@ type CommitCommand struct{}
 
 func (c *CommitCommand) Name() string        { return "commit" }
 func (c *CommitCommand) Description() string { return "Create a git commit" }
-func (c *CommitCommand) Usage() string       { return "/commit [-m message]" }
+func (c *CommitCommand) Usage() string       { return "/commit [message] | /commit -m <message>" }
 func (c *CommitCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category:    CategoryGit,
@@ -23,7 +23,7 @@ func (c *CommitCommand) GetMetadata() CommandMetadata {
 		Priority:    10,
 		RequiresGit: true,
 		HasArgs:     true,
-		ArgHint:     "-m \"msg\"",
+		ArgHint:     "[message] | -m <message>",
 		// /commit runs 5+ sequential git subprocesses (status, diff, add,
 		// commit, diff-stat); on a large/locked repo that's a few seconds.
 		// Mirror /pr so the user sees a command-specific hint, not a bare spinner.
@@ -40,13 +40,9 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 		return "Not a git repository.", nil
 	}
 
-	// Parse arguments
-	var message string
-	for i := 0; i < len(args); i++ {
-		if args[i] == "-m" && i+1 < len(args) {
-			message = args[i+1]
-			i++
-		}
+	message, argErr := parseCommitMessage(args)
+	if argErr != "" {
+		return argErr, nil
 	}
 
 	// Get git status
@@ -149,6 +145,27 @@ func (c *CommitCommand) Execute(ctx context.Context, args []string, app AppInter
 		msg += fmt.Sprintf(" (%d file(s))", fileCount)
 	}
 	return msg, nil
+}
+
+func parseCommitMessage(args []string) (string, string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	if args[0] == "-m" {
+		if len(args) == 1 {
+			return "", "Missing commit message after -m. Usage: /commit -m <message>"
+		}
+		return strings.TrimSpace(strings.Join(args[1:], " ")), ""
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return "", fmt.Sprintf("Unknown commit option %q. Use /commit [message] or /commit -m <message>.", args[0])
+	}
+	for _, arg := range args[1:] {
+		if arg == "-m" || strings.HasPrefix(arg, "--") {
+			return "", "Don't mix a positional commit message with options. Use /commit [message] or /commit -m <message>."
+		}
+	}
+	return strings.TrimSpace(strings.Join(args, " ")), ""
 }
 
 // PRCommand creates a pull request.

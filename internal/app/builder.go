@@ -45,6 +45,7 @@ type Builder struct {
 	workDir string
 	ctx     context.Context
 	cancel  context.CancelFunc
+	options BuildOptions
 
 	// Optional components (nil means not configured)
 	configDir        string
@@ -137,8 +138,22 @@ type Builder struct {
 	mcpPendingToolsChanged []string
 }
 
+// BuildOptions controls behavior that must be selected before any application
+// components are initialized.
+type BuildOptions struct {
+	// NonInteractive guarantees that application construction never prompts on
+	// stdin, writes human-oriented messages to stdout, or starts an implicit
+	// download. It is intended for headless/automation callers.
+	NonInteractive bool
+}
+
 // NewBuilder creates a new Builder with the given config and work directory.
 func NewBuilder(cfg *config.Config, workDir string) *Builder {
+	return NewBuilderWithOptions(cfg, workDir, BuildOptions{})
+}
+
+// NewBuilderWithOptions creates a Builder with explicit startup behavior.
+func NewBuilderWithOptions(cfg *config.Config, workDir string, options BuildOptions) *Builder {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Builder{
@@ -146,6 +161,7 @@ func NewBuilder(cfg *config.Config, workDir string) *Builder {
 		workDir:     workDir,
 		ctx:         ctx,
 		cancel:      cancel,
+		options:     options,
 		buildErrors: make([]error, 0),
 	}
 }
@@ -211,6 +227,12 @@ func (b *Builder) initConfigDir() error {
 func (b *Builder) checkAllowedDirs() error {
 	// Skip if allowed_dirs is already configured
 	if len(b.cfg.Tools.AllowedDirs) > 0 {
+		return nil
+	}
+	// Automation cannot answer the first-run question. The working directory
+	// remains the validator's implicit root; callers may grant more paths via
+	// config/flags without mutating persistent config during construction.
+	if b.options.NonInteractive {
 		return nil
 	}
 
@@ -296,9 +318,11 @@ func (b *Builder) validateOllamaModel() error {
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") {
-			fmt.Fprintf(os.Stderr, "\n⚠ Ollama server is not running.\n\n")
-			fmt.Fprintf(os.Stderr, "  Start it with: ollama serve\n")
-			fmt.Fprintf(os.Stderr, "  Then restart gokin.\n\n")
+			if !b.options.NonInteractive {
+				fmt.Fprintf(os.Stderr, "\n⚠ Ollama server is not running.\n\n")
+				fmt.Fprintf(os.Stderr, "  Start it with: ollama serve\n")
+				fmt.Fprintf(os.Stderr, "  Then restart gokin.\n\n")
+			}
 			baseURL := b.cfg.API.OllamaBaseURL
 			if baseURL == "" {
 				baseURL = config.DefaultOllamaBaseURL
@@ -319,6 +343,10 @@ func (b *Builder) validateOllamaModel() error {
 
 // promptModelPull asks user to download a missing model.
 func (b *Builder) promptModelPull(c *client.OllamaClient, modelName string) error {
+	if b.options.NonInteractive {
+		return fmt.Errorf("ollama model %q is not installed; install it before retrying: ollama pull %s", modelName, modelName)
+	}
+
 	fmt.Printf("\nModel '%s' is not installed.\n\n", modelName)
 	fmt.Printf("Would you like to download it now? [Y/n] ")
 
@@ -525,6 +553,17 @@ func (b *Builder) isInGitRepo() bool {
 func (b *Builder) initSession() error {
 	b.session = chat.NewSession()
 	b.session.SetWorkDir(b.workDir)
+	// The foreground SkillTool and persisted Session must share one stable
+	// invocation ledger. initTools runs before initSession, so bind it here and
+	// keep the pointer stable across resume (RestoreFromState mutates the ledger
+	// contents rather than replacing the object).
+	if b.registry != nil {
+		if registered, ok := b.registry.Get("skill"); ok {
+			if skillTool, ok := registered.(*tools.SkillTool); ok {
+				skillTool.SetInvocationLedger(b.session.InvocationLedger())
+			}
+		}
+	}
 	// Tag the session with the active provider so the auto-resume path
 	// can refuse cross-provider loads. See Session.Provider docstring
 	// for the history-incompatibility problem this guards against.
@@ -543,6 +582,7 @@ func (b *Builder) initSession() error {
 
 	b.promptBuilder = appcontext.NewPromptBuilder(b.workDir, b.projectInfo)
 	b.promptBuilder.SetProjectMemory(b.projectMemory)
+	b.promptBuilder.SetGlobalMemoryEnabled(b.cfg.Memory.AllowGlobal)
 	if b.memStore != nil && b.cfg.Memory.AutoInject {
 		b.promptBuilder.SetMemoryStore(b.memStore)
 	}
@@ -756,15 +796,22 @@ func (b *Builder) initManagers() error {
 			Source:      "config",
 		})
 	}
-	if projectHooks, err := hooks.LoadFile(filepath.Join(b.workDir, ".gokin", "hooks.yaml")); err != nil {
-		// Boot must survive a typo'd project file, but the user has to SEE
-		// the problem — same warn-and-continue convention as aliases.
-		logging.Warn("project hooks not loaded", "error", err)
-	} else {
-		for _, h := range projectHooks {
-			h.Source = "project"
-			b.hooksManager.AddHook(h)
+	projectHooksPath := filepath.Join(b.workDir, ".gokin", "hooks.yaml")
+	if hooks.IsWorkspaceTrusted(b.workDir, b.cfg.Hooks.TrustedWorkspaces) {
+		if projectHooks, err := hooks.LoadFile(projectHooksPath); err != nil {
+			// Boot must survive a typo'd trusted project file, but the user has to
+			// see the problem — same warn-and-continue convention as aliases.
+			logging.Warn("project hooks not loaded", "error", err)
+		} else {
+			for _, h := range projectHooks {
+				h.Source = "project"
+				b.hooksManager.AddHook(h)
+			}
 		}
+	} else if _, err := os.Stat(projectHooksPath); err == nil {
+		logging.Warn("project hooks ignored for untrusted workspace",
+			"workspace", b.workDir,
+			"config_key", "hooks.trusted_workspaces")
 	}
 	b.executor.SetHooks(b.hooksManager)
 
@@ -782,6 +829,7 @@ func (b *Builder) initManagers() error {
 	// Agent runner
 	b.agentRunner = agent.NewRunner(b.ctx, b.mainClient, b.registry, b.workDir)
 	b.agentRunner.SetPermissions(b.permManager)
+	b.agentRunner.SetHooks(b.hooksManager)
 	b.agentRunner.SetThinkingMode(b.cfg.Model.ThinkingMode) // adaptive thinking for sub-agents
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
 	b.agentRunner.SetWorkspaceIsolationEnabled(b.cfg.Plan.WorkspaceIsolation)
@@ -1148,6 +1196,7 @@ func (b *Builder) initIntegrations() error {
 	if taskTool, ok := b.registry.Get("task"); ok {
 		if tt, ok := taskTool.(*tools.TaskTool); ok {
 			tt.SetRunner(runnerAdapter)
+			tt.SetAgentTypeProvider(b.agentTypeRegistry)
 		}
 	}
 
@@ -1199,6 +1248,7 @@ func (b *Builder) initIntegrations() error {
 			if memoryTool, ok := b.registry.Get("memory"); ok {
 				if mt, ok := memoryTool.(*tools.MemoryTool); ok {
 					mt.SetStore(memoryStore)
+					mt.SetAllowGlobal(b.cfg.Memory.AllowGlobal)
 				}
 			}
 			// Store on app for /memory command access
@@ -1621,6 +1671,12 @@ func (b *Builder) wireMCPAdminTool() {
 	)
 	admin.SetMutationCallbacks(
 		func(ctx context.Context, params tools.MCPAddParams) (string, error) {
+			if app := b.cachedApp; app != nil {
+				return commands.MCPAddForApp(ctx, b.mcpManager, app, commands.MCPAddParams{
+					Name: params.Name, Transport: params.Transport, Command: params.Command,
+					Args: append([]string(nil), params.Args...), URL: params.URL,
+				})
+			}
 			return commands.MCPAddCore(ctx, b.mcpManager, b.cfg, b.registry, b.mainClient, commands.MCPAddParams{
 				Name:      params.Name,
 				Transport: params.Transport,
@@ -1630,6 +1686,9 @@ func (b *Builder) wireMCPAdminTool() {
 			})
 		},
 		func(name string) (string, error) {
+			if app := b.cachedApp; app != nil {
+				return commands.MCPRemoveForApp(b.mcpManager, app, name)
+			}
 			return commands.MCPRemoveCore(b.mcpManager, b.cfg, b.registry, b.mainClient, name)
 		},
 	)
@@ -1729,6 +1788,7 @@ func (b *Builder) wireDependencies() error {
 	app.applyGrantedDirsToTools()
 
 	if app.promptBuilder != nil {
+		app.promptBuilder.SetGlobalMemoryEnabled(b.cfg.Memory.AllowGlobal)
 		if b.memStore != nil && b.cfg.Memory.AutoInject {
 			app.promptBuilder.SetMemoryStore(b.memStore)
 		}
@@ -1874,24 +1934,25 @@ func (b *Builder) wireDependencies() error {
 		b.tuiModel.AddCommands(infos)
 	}
 	b.tuiModel.SetPermissionCallback(app.handlePermissionDecision)
-	b.tuiModel.SetQuestionCallback(app.handleQuestionAnswer)
-	b.tuiModel.SetPlanApprovalCallback(app.handlePlanApproval)
-	b.tuiModel.SetModelSelectCallback(app.handleModelSelect)
-	b.tuiModel.SetSettingToggleCallback(app.handleSettingToggle)
+	b.tuiModel.SetQuestionCallbackWithID(app.handleQuestionAnswer)
+	b.tuiModel.SetPlanApprovalCallbackWithID(app.handlePlanApproval)
+	b.tuiModel.SetModelSelectCallbackWithID(app.handleModelSelect)
+	b.tuiModel.SetSettingToggleCallbackWithID(app.handleSettingToggle)
 	b.tuiModel.SetOpenSettingsCallback(app.openSettingsModal)
-	b.tuiModel.SetKeyEntrySubmitCallback(app.handleKeyEntrySubmit)
-	b.tuiModel.SetDiffDecisionCallback(app.handleDiffDecision)
-	b.tuiModel.SetMultiDiffDecisionCallback(app.handleMultiDiffDecision)
+	b.tuiModel.SetKeyEntrySubmitCallbackWithID(app.handleKeyEntrySubmit)
+	b.tuiModel.SetDiffDecisionCallbackWithID(app.handleDiffDecision)
+	b.tuiModel.SetMultiDiffDecisionCallbackWithID(app.handleMultiDiffDecision)
 
 	// Set up cancel callback for ESC interrupt
 	b.tuiModel.SetCancelCallback(app.CancelProcessing)
 
 	// Set up plan approval with feedback callback
-	b.tuiModel.SetPlanApprovalWithFeedbackCallback(app.handlePlanApprovalWithFeedback)
+	b.tuiModel.SetPlanApprovalWithFeedbackCallbackWithID(app.handlePlanApprovalWithFeedback)
 
 	// Set up permissions toggle callback and initial state
 	b.tuiModel.SetPermissionsEnabled(b.cfg.Permission.Enabled)
 	b.tuiModel.SetPermissionsToggleCallback(app.TogglePermissions)
+	b.tuiModel.SetCompactMode(b.cfg.UI.CompactMode)
 
 	// Set up sandbox toggle callback and initial state
 	b.tuiModel.SetSandboxEnabled(b.cfg.Tools.Bash.Sandbox)
@@ -2031,7 +2092,7 @@ func (b *Builder) wireDependencies() error {
 	// Account every invocation, not only background UI tasks. This also covers
 	// synchronous task/coordinate calls, plan sub-agents, batches, and resumes.
 	b.agentRunner.SetOnAgentUsage(func(_ string, result *agent.AgentResult) {
-		app.accumulateAgentResultUsage(result)
+		app.accumulateScopedAgentResultUsage(result)
 	})
 
 	b.agentRunner.SetOnAgentProgress(func(id string, progress *agent.AgentProgress) {
@@ -2128,6 +2189,7 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up plan approval
 	b.planManager.SetApprovalHandler(app.promptPlanApproval)
+	b.planManager.SetApprovalCommitHandler(app.disablePlanModeAfterApproval)
 	b.planManager.SetLintHandler(app.lintPlanBeforeApproval)
 
 	// Set up plan progress updates
@@ -2275,11 +2337,13 @@ func (b *Builder) assembleApp() *App {
 		contextAgent:          b.contextAgent,
 		permManager:           b.permManager,
 		permPending:           make(map[string]chan permission.Decision),
-		questionResponseChan:  make(chan string, 1),
+		questionPending:       make(map[string]chan string),
 		diffResponseChan:      make(chan ui.DiffDecision, 1),
 		multiDiffResponseChan: make(chan map[string]ui.DiffDecision, 1),
+		diffPending:           make(map[string]chan ui.DiffDecision),
+		multiDiffPending:      make(map[string]chan map[string]ui.DiffDecision),
 		planManager:           b.planManager,
-		planApprovalChan:      make(chan plan.ApprovalDecision, 1),
+		planPending:           make(map[string]chan planApprovalResponse),
 		hooksManager:          b.hooksManager,
 		taskManager:           b.taskManager,
 		undoManager:           b.undoManager,
@@ -2324,6 +2388,12 @@ func (b *Builder) assembleApp() *App {
 		// Step rollback snapshots
 		stepRollbackSnapshots: make(map[string]*stepRollbackSnapshot),
 	}
+	b.cachedApp.memoryAutoInject.Store(
+		b.memStore != nil && b.cfg.Memory.Enabled && b.cfg.Memory.AutoInject,
+	)
+	b.cachedApp.memoryAllowGlobal.Store(
+		b.memStore != nil && b.cfg.Memory.Enabled && b.cfg.Memory.AllowGlobal,
+	)
 
 	// Wire rate limit callback from runner to app's limiter
 	if b.agentRunner != nil && b.rateLimiter != nil {
@@ -2654,6 +2724,10 @@ func (a *coordinatorToolAdapter) Stop() {
 // calls it on teardown so Esc/timeout actually stops the spawned agents.
 func (a *coordinatorToolAdapter) CancelRunning() int {
 	return a.coord.CancelRunning()
+}
+
+func (a *coordinatorToolAdapter) CancelRunningAndWait(ctx context.Context) int {
+	return a.coord.CancelRunningAndWait(ctx)
 }
 
 func (a *coordinatorToolAdapter) WaitWithTimeout(ctx context.Context, timeout time.Duration) (map[string]any, error) {

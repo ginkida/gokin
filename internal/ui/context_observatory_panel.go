@@ -27,6 +27,11 @@ func NewContextObservatoryPanel(styles *Styles) *ContextObservatoryPanel {
 
 // UpdateHealth updates the health snapshot displayed in the panel.
 func (p *ContextObservatoryPanel) UpdateHealth(health ContextHealthMsg) {
+	health.ActiveFiles = append([]string(nil), health.ActiveFiles...)
+	for i := range health.ActiveFiles {
+		health.ActiveFiles[i] = safeKeyEntryText(health.ActiveFiles[i])
+	}
+	health.PruningAlert = safeKeyEntryText(health.PruningAlert)
 	p.health = health
 }
 
@@ -76,9 +81,7 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorPlan)
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	mutedStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	errorStyle := lipgloss.NewStyle().Foreground(ColorError)
 	accentStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
-	successStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 
 	var content strings.Builder
 	outerWidth := min(width, 120)
@@ -97,11 +100,31 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 	instructions := max(p.health.InstructionTokens, 0)
 	history := max(p.health.HistoryTokens, 0)
 	tools := max(p.health.ToolTokens, 0)
+	usage := p.normalizedUsage(total, maximum)
+	healthSummary, healthColor := contextHealthSummary(usage, maximum > 0, p.health.PruningAlert)
 	hasContext := total > 0 || maximum > 0 || system > 0 || instructions > 0 || history > 0 || tools > 0 || len(p.health.ActiveFiles) > 0 || p.health.PruningAlert != "" || !p.health.LastPruningTime.IsZero()
 	hasRate := p.health.RequestsLimit > 0 || p.health.RequestsRemaining > 0 || p.health.TokensLimit > 0 || p.health.TokensRemaining > 0
+	if requestedHeight > 0 && requestedHeight < 7 {
+		// A bordered dashboard cannot fit in fewer than seven rows. Return a
+		// truthful one-line recovery summary instead of relying on the parent to
+		// tail-crop seven rows (which hid the title and health state).
+		summary := "Context · Esc/Ctrl+H close"
+		if hasContext {
+			summary += " · " + healthSummary
+		} else if hasRate {
+			summary += " · provider limits available"
+		} else {
+			summary += " · no data yet"
+		}
+		return truncateForWidth(summary, outerWidth)
+	}
 	if !hasContext && !hasRate {
 		p.writeBoxLine(&content, borderStyle, "No context health data yet", mutedStyle.Italic(true), innerWidth)
-		p.writeBoxLine(&content, borderStyle, "Metrics appear after the first request.", dimStyle, innerWidth)
+		// Seven rows are the irreducible bordered empty state. The explanatory
+		// line is useful breathing room, but must yield before recovery/footer.
+		if requestedHeight <= 0 || requestedHeight >= 9 {
+			p.writeBoxLine(&content, borderStyle, "Metrics appear after the first request.", dimStyle, innerWidth)
+		}
 		separator("├", "─", "┤")
 		p.writeBoxLine(&content, borderStyle, "Esc / Ctrl+H  Close", mutedStyle, innerWidth)
 		content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
@@ -115,8 +138,10 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 		rowBudget := max(targetHeight-6, 1)
 		var rows []string
 		if hasContext {
+			// Health is the decision-driving signal. Keep it first so an alert or
+			// unknown limit survives even when only one compact data row fits.
+			rows = append(rows, "Status: "+healthSummary)
 			if maximum > 0 {
-				usage := p.normalizedUsage(total, maximum)
 				rows = append(rows, fmt.Sprintf("Context: %d/%d tokens · %.0f%%", total, maximum, usage*100))
 			} else {
 				rows = append(rows, fmt.Sprintf("Context: %d tokens · limit unavailable", total))
@@ -128,15 +153,10 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 		if len(p.health.ActiveFiles) > 0 {
 			rows = append(rows, fmt.Sprintf("Active files: %d", len(p.health.ActiveFiles)))
 		}
-		if alert := strings.TrimSpace(p.health.PruningAlert); alert != "" {
-			rows = append(rows, "Status: "+alert)
-		} else if hasContext {
-			rows = append(rows, "Status: Context healthy")
-		}
 		for _, row := range rows[:min(len(rows), rowBudget)] {
 			style := dimStyle
-			if strings.HasPrefix(row, "Status:") && p.health.PruningAlert != "" {
-				style = errorStyle.Bold(true)
+			if strings.HasPrefix(row, "Status:") {
+				style = lipgloss.NewStyle().Foreground(healthColor).Bold(healthColor == ColorError)
 			}
 			p.writeBoxLine(&content, borderStyle, row, style, innerWidth)
 		}
@@ -149,7 +169,6 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 	if hasContext {
 		p.writeBoxLine(&content, borderStyle, "Budget & Usage", accentStyle, innerWidth)
 		if maximum > 0 {
-			usage := p.normalizedUsage(total, maximum)
 			usageLine := fmt.Sprintf("%d / %d tokens (%.1f%%)", total, maximum, usage*100)
 			p.writeBoxLine(&content, borderStyle, usageLine, titleStyle, innerWidth)
 			p.writeBoxLine(&content, borderStyle, p.renderUsageGauge(usage, innerWidth), titleStyle, innerWidth)
@@ -167,7 +186,13 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 			const maxVisibleFiles = 5
 			end := min(len(p.health.ActiveFiles), maxVisibleFiles)
 			for _, file := range p.health.ActiveFiles[:end] {
-				p.writeBoxLine(&content, borderStyle, MessageIcons["hint"]+" "+file, lipgloss.NewStyle().Foreground(ColorText), innerWidth)
+				file = safeKeyEntryText(file)
+				if file == "" {
+					file = "(unnamed file)"
+				}
+				prefix := MessageIcons["hint"] + " "
+				file = truncateLeftForWidth(file, max(innerWidth-lipgloss.Width(prefix), 1))
+				p.writeBoxLine(&content, borderStyle, prefix+file, lipgloss.NewStyle().Foreground(ColorText), innerWidth)
 			}
 			if hidden := len(p.health.ActiveFiles) - end; hidden > 0 {
 				p.writeBoxLine(&content, borderStyle, fmt.Sprintf("… %d more files", hidden), mutedStyle.Italic(true), innerWidth)
@@ -189,11 +214,11 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 			lastPruning = fmt.Sprintf("%s ago", elapsed.Round(time.Second))
 		}
 		p.writeBoxLine(&content, borderStyle, "Last pruning: "+lastPruning, dimStyle, innerWidth)
-		if alert := strings.TrimSpace(p.health.PruningAlert); alert != "" {
-			p.writeBoxLine(&content, borderStyle, "Status: "+alert, errorStyle.Bold(true), innerWidth)
-		} else {
-			p.writeBoxLine(&content, borderStyle, "Status: Context healthy", successStyle, innerWidth)
+		statusStyle := lipgloss.NewStyle().Foreground(healthColor)
+		if healthColor == ColorError {
+			statusStyle = statusStyle.Bold(true)
 		}
+		p.writeBoxLine(&content, borderStyle, "Status: "+healthSummary, statusStyle, innerWidth)
 	}
 
 	separator("├", "─", "┤")
@@ -257,12 +282,45 @@ func (p *ContextObservatoryPanel) normalizedUsage(total, maximum int) float64 {
 }
 
 func (p *ContextObservatoryPanel) renderUsageGauge(usage float64, width int) string {
+	usage = min(max(usage, 0), 1)
 	label := fmt.Sprintf("%.0f%%", usage*100)
 	barWidth := max(width-lipgloss.Width(label)-1, 0)
 	if barWidth == 0 {
 		return label
 	}
-	return p.renderGauge(usage*100, barWidth) + " " + label
+	color := contextUsageColor(usage)
+	filled := min(max(int(usage*float64(barWidth)), 0), barWidth)
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	bar := lipgloss.NewStyle().Foreground(color).Render(strings.Repeat("█", filled)) +
+		dimStyle.Render(strings.Repeat("░", barWidth-filled))
+	return bar + " " + label
+}
+
+func contextUsageColor(usage float64) lipgloss.Color {
+	usage = min(max(usage, 0), 1)
+	if usage >= .90 {
+		return ColorError
+	}
+	if usage >= .75 {
+		return ColorWarning
+	}
+	return ColorSuccess
+}
+
+func contextHealthSummary(usage float64, hasLimit bool, alert string) (string, lipgloss.Color) {
+	if alert = safeKeyEntryText(alert); alert != "" {
+		return alert, ColorError
+	}
+	if !hasLimit {
+		return "Context limit unavailable", ColorMuted
+	}
+	if usage >= .90 {
+		return "Context critical · pruning likely soon", contextUsageColor(usage)
+	}
+	if usage >= .75 {
+		return "Context pressure elevated", contextUsageColor(usage)
+	}
+	return "Context healthy", contextUsageColor(usage)
 }
 
 func (p *ContextObservatoryPanel) writeRateLimit(content *strings.Builder, borderStyle lipgloss.Style, label string, remaining, limit int64, width int, style lipgloss.Style) {

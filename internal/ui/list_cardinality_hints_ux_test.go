@@ -32,17 +32,6 @@ func TestSingleItemSelectorsDoNotAdvertiseDeadNavigation(t *testing.T) {
 		t.Fatalf("single-setting footer advertises dead navigation:\n%s", view)
 	}
 
-	question := NewModel()
-	question.state = StateQuestionPrompt
-	question.questionRequest = &QuestionRequestMsg{Question: "Continue?", Options: []string{"Yes"}}
-	assertShortcutHints(t, question,
-		[]string{"Enter Confirm", "esc Cancel"},
-		[]string{"↑↓ Navigate"},
-	)
-	question.width, question.height = 80, 24
-	if view := stripAnsi(question.renderQuestionPrompt()); strings.Contains(view, "↑/↓ Navigate") {
-		t.Fatalf("single-answer footer advertises dead navigation:\n%s", view)
-	}
 }
 
 func TestNotificationAndPaletteHintsFollowListCardinality(t *testing.T) {

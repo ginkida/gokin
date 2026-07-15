@@ -57,8 +57,16 @@ func TestCoordinator_NilRunnerFailsTasksWithoutStrandingDependents(t *testing.T)
 	c.SetCallbacks(
 		func(task *CoordinatedTask) { started <- task.ID },
 		func(task *CoordinatedTask, result *AgentResult) {
-			if result == nil || result.Status != AgentStatusFailed || !result.Completed ||
-				!strings.Contains(result.Error, "runner is not configured") {
+			valid := result != nil && result.Status == AgentStatusFailed && result.Completed
+			switch task.ID {
+			case rootID:
+				valid = valid && strings.Contains(result.Error, "runner is not configured")
+			case dependentID:
+				valid = valid && strings.Contains(result.Error, "dependency") && strings.Contains(result.Error, rootID)
+			default:
+				valid = false
+			}
+			if !valid {
 				t.Errorf("spawn failure result for %s = %+v", task.ID, result)
 			}
 			completed <- task.ID

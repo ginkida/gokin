@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"gokin/internal/donegate"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
@@ -102,6 +104,7 @@ func (a *App) blockDoneGate(reason string) bool {
 		"reason": reason,
 	})
 	err := errors.New(reason)
+	a.recordHeadlessTerminalOutcome("done_gate_failed", err.Error())
 	a.safeSendToProgram(ui.StreamTextMsg("\n" + err.Error() + "\n"))
 	a.safeSendToProgram(ui.ErrorMsg(err))
 	return false
@@ -272,8 +275,15 @@ func (a *App) runDoneGateAutoFix(ctx context.Context, userMessage string, result
 	// a user message typed during the auto-fix belongs to the NEXT turn, not
 	// inside this fix loop.
 	resumeSteering := a.executor.SuspendUserSteering()
-	newHistory, _, err := a.executor.Execute(ctx, history, fixPrompt)
-	resumeSteering()
+	var usage turnUsageAccumulator
+	var newHistory []*genai.Content
+	var err error
+	func() {
+		defer resumeSteering()
+		newHistory, _, err = a.executeTracked(
+			ctx, history, fixPrompt, &usage)
+	}()
+	usage.commit(a)
 	if err != nil {
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("   Auto-fix attempt %d failed: %s\n", attempt, err.Error())))

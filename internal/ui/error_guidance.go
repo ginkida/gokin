@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rivo/uniseg"
 )
 
 // ErrorGuidance provides actionable suggestions for common errors.
@@ -151,7 +152,7 @@ var errorGuidancePatterns = []ErrorGuidance{
 		// with the `\b500\b` rule enforced in the 5xx pattern below.
 		Pattern:     regexp.MustCompile(`(?i)(unauthorized|\b401\b|invalid.*key|api.*key.*invalid|authentication_error)`),
 		Title:       "Authentication Failed",
-		Suggestions: []string{"Your API key is missing, invalid, or expired", "Run `/login <provider> <key>` with a fresh key, or check your config file", "Verify the key at the provider's dashboard"},
+		Suggestions: []string{"Your API key is missing, invalid, or expired", "Run `/login <provider>` to replace it in the masked key-entry prompt", "Verify the key at the provider's dashboard"},
 		Command:     "/login",
 	},
 	{
@@ -204,8 +205,8 @@ var errorGuidancePatterns = []ErrorGuidance{
 	{
 		Pattern:     regexp.MustCompile(`(?i)(file.*not.*found|no such file|ENOENT)`),
 		Title:       "File Not Found",
-		Suggestions: []string{"Check the file path (typo?)", "Use /pwd to verify current directory", "Search with /glob or /grep to locate it"},
-		Command:     "",
+		Suggestions: []string{"Check the file path (typo?)", "Use /pwd to verify current directory", "Open /browse to locate the file"},
+		Command:     "/browse",
 	},
 	{
 		Pattern:     regexp.MustCompile(`(?i)(permission.*denied|EACCES|cannot.*write)`),
@@ -430,9 +431,43 @@ func FormatErrorWithGuidanceWidth(styles *Styles, errMsg string, termWidth int) 
 	cmdStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
+	if termWidth > 0 && termWidth < 12 {
+		// At one-digit widths a bordered guidance card degenerates into hundreds
+		// of mostly-indent rows. Keep the persistent transcript record compact:
+		// identity, cause, and the best recovery action all remain available.
+		var rows []string
+		for _, line := range splitDisplayToken("Error", termWidth) {
+			rows = append(rows, errorStyle.Render(line))
+		}
+		for _, line := range displayErrorLines(errMsg, termWidth) {
+			rows = append(rows, msgStyle.Render(line))
+		}
+		if guidance != nil {
+			recovery := guidance.Command
+			if recovery != "" {
+				recovery = "Try: " + recovery
+			} else if len(guidance.Suggestions) > 0 {
+				recovery = guidance.Suggestions[0]
+			}
+			for _, line := range displayErrorLines(recovery, termWidth) {
+				rows = append(rows, cmdStyle.Render(line))
+			}
+		}
+		return strings.Join(rows, "\n")
+	}
+
 	contentWidth := 76
+	bordered := styles != nil
 	if termWidth > 0 {
-		contentWidth = max(min(termWidth-8, 96), 30)
+		// Border + horizontal padding cost four cells. At very small widths the
+		// chrome would consume most of the row, so keep the error readable and
+		// render it borderless until the terminal grows again.
+		if styles != nil && termWidth >= 16 {
+			contentWidth = max(min(termWidth-8, 96), 1)
+		} else {
+			contentWidth = max(min(termWidth, 96), 1)
+			bordered = false
+		}
 	}
 
 	var body strings.Builder
@@ -442,7 +477,13 @@ func FormatErrorWithGuidanceWidth(styles *Styles, errMsg string, termWidth int) 
 	// a provider error lives ("… switch provider with /provider"); the old
 	// 100-rune cut amputated exactly that (field report: the GLM weekly-cap
 	// message ended mid-word at "switch p...").
-	msgLines := displayErrorLines(errMsg, contentWidth-9) // 9 = lipgloss.Width("✗ Error: ")
+	msgWidth := contentWidth - 9 // 9 = lipgloss.Width("✗ Error: ")
+	if msgWidth < 8 {
+		// The prefix will wrap onto its own row. Give the actual error the full
+		// row instead of reducing it to one-character fragments.
+		msgWidth = contentWidth
+	}
+	msgLines := displayErrorLines(errMsg, msgWidth)
 	body.WriteString(errorStyle.Render(MessageIcons["error"]+" Error: ") + msgStyle.Render(msgLines[0]))
 	for _, line := range msgLines[1:] {
 		body.WriteString("\n")
@@ -467,12 +508,17 @@ func FormatErrorWithGuidanceWidth(styles *Styles, errMsg string, termWidth int) 
 		}
 	}
 
-	// Fall back to plain rendering if styles isn't provided (tests,
-	// telemetry, etc.) so callers without a Styles value still work.
-	if styles == nil {
-		return body.String()
+	// Guidance strings and provider errors are external text. Wrap the whole
+	// styled body as a final safety net so titles, suggestions and commands all
+	// obey the same terminal-cell budget as the error itself.
+	renderedBody := wrapText(body.String(), contentWidth)
+
+	// Fall back to plain/borderless rendering when styles aren't provided or
+	// the terminal is too narrow for useful box chrome.
+	if styles == nil || !bordered {
+		return renderedBody
 	}
-	return styles.ErrorBox.Render(body.String())
+	return styles.ErrorBox.Render(renderedBody)
 }
 
 // machineErrorPrefixRe matches internal wrapper prefixes ("model response
@@ -502,7 +548,7 @@ func stripMachineErrorWrappers(s string) string {
 // overflow elided in the MIDDLE — the head carries the cause, the tail the
 // action, and both must survive.
 func displayErrorLines(errMsg string, width int) []string {
-	msg := strings.Join(strings.Fields(strings.ReplaceAll(errMsg, "\n", " ")), " ")
+	msg := strings.Join(strings.Fields(safeTerminalDisplayText(errMsg)), " ")
 	for range 3 { // wrappers nest ("model response error: request failed: …")
 		stripped := machineErrorPrefixRe.ReplaceAllString(msg, "")
 		if stripped == msg {
@@ -513,24 +559,30 @@ func displayErrorLines(errMsg string, width int) []string {
 	if msg == "" {
 		msg = "unknown error"
 	}
-	if width < 16 {
-		width = 16
-	}
+	width = max(width, 1)
 
 	var lines []string
 	words := strings.Fields(msg)
 	current := ""
 	for _, w := range words {
-		candidate := w
 		if current != "" {
-			candidate = current + " " + w
-		}
-		if len([]rune(candidate)) > width && current != "" {
+			candidate := current + " " + w
+			if lipgloss.Width(candidate) <= width {
+				current = candidate
+				continue
+			}
 			lines = append(lines, current)
-			current = w
+			current = ""
+		}
+
+		chunks := splitDisplayToken(w, width)
+		if len(chunks) == 0 {
 			continue
 		}
-		current = candidate
+		if len(chunks) > 1 {
+			lines = append(lines, chunks[:len(chunks)-1]...)
+		}
+		current = chunks[len(chunks)-1]
 	}
 	if current != "" {
 		lines = append(lines, current)
@@ -548,17 +600,58 @@ func displayErrorLines(errMsg string, width int) []string {
 	return lines
 }
 
+// splitDisplayToken hard-wraps a whitespace-free token by grapheme cluster.
+// This is the fallback for URLs, paths and provider identifiers that have no
+// natural word boundary. Every returned row fits width terminal cells.
+func splitDisplayToken(token string, width int) []string {
+	if token == "" {
+		return nil
+	}
+	width = max(width, 1)
+	graphemes := uniseg.NewGraphemes(token)
+	var chunks []string
+	var current strings.Builder
+	used := 0
+	for graphemes.Next() {
+		cluster := graphemes.Str()
+		clusterWidth := lipgloss.Width(cluster)
+		if used > 0 && used+clusterWidth > width {
+			chunks = append(chunks, current.String())
+			current.Reset()
+			used = 0
+		}
+		if clusterWidth > width {
+			// A two-cell emoji cannot be represented in a one-cell terminal.
+			// Consume the intact cluster but render a bounded omission marker.
+			chunks = append(chunks, truncateForWidth(cluster, width))
+			continue
+		}
+		current.WriteString(cluster)
+		used += clusterWidth
+	}
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+	return chunks
+}
+
 // GetCompactHint returns a short actionable hint for an error.
 // Returns empty string if no matching guidance is found.
 func GetCompactHint(errMsg string) string {
 	guidance := GetErrorGuidance(errMsg)
-	if guidance == nil || len(guidance.Suggestions) == 0 {
+	if guidance == nil {
 		return ""
 	}
-	// Return first suggestion, shortened if needed
-	hint := guidance.Suggestions[0]
-	if runes := []rune(hint); len(runes) > 40 {
-		hint = string(runes[:37]) + "..."
+	// Prefer the explicit recovery command over the first explanatory sentence.
+	// Compact surfaces only have room for one hint, so repeating the diagnosis
+	// ("your key is invalid") while hiding the fix ("/login") is not useful.
+	if guidance.Command != "" {
+		return truncateForWidth("Try: "+guidance.Command, 40)
 	}
-	return hint
+	if len(guidance.Suggestions) == 0 {
+		return ""
+	}
+	// Fall back to the first suggestion, shortened by rendered cells so CJK
+	// and emoji cannot overflow a compact status surface.
+	return truncateForWidth(guidance.Suggestions[0], 40)
 }

@@ -342,6 +342,36 @@ func TestDiffPreviewTinyLayoutFitsAndKeepsDecisionsVisible(t *testing.T) {
 	}
 }
 
+func TestDiffPreviewFitsCompactHeightWithLongChangedLines(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{40, 12}, {80, 12}, {100, 18}} {
+		m := NewDiffPreviewModel(DefaultStyles())
+		m.SetSize(size.width, size.height)
+		oldLines := make([]string, 24)
+		newLines := make([]string, 24)
+		for i := range oldLines {
+			oldLines[i] = fmt.Sprintf("old-%02d %s", i, strings.Repeat("very-long-content ", 12))
+			newLines[i] = fmt.Sprintf("new-%02d %s", i, strings.Repeat("replacement-content ", 12))
+		}
+		m.SetContent("deeply/nested/path/to/a-very-long-file-name.go", strings.Join(oldLines, "\n"), strings.Join(newLines, "\n"), "replace", false)
+
+		view := m.View()
+		if got := lipgloss.Height(view); got > size.height {
+			t.Fatalf("%dx%d diff rendered %d rows:\n%s", size.width, size.height, got, stripAnsi(view))
+		}
+		for row, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d row=%d width=%d exceeds terminal: %q", size.width, size.height, row, got, stripAnsi(line))
+			}
+		}
+		plain := stripAnsi(view)
+		for _, want := range []string{"Diff Preview", "y Apply", "n Reject"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("%dx%d diff missing %q:\n%s", size.width, size.height, want, plain)
+			}
+		}
+	}
+}
+
 func TestMultiDiffPreviewTinyLayoutAndSnapshots(t *testing.T) {
 	files := []DiffFile{{FilePath: "main.go", OldContent: "before", NewContent: "after"}}
 	m := NewMultiDiffPreviewModel(DefaultStyles())
@@ -380,5 +410,37 @@ func TestMultiDiffPreviewTinyLayoutAndSnapshots(t *testing.T) {
 	response := cmd().(MultiDiffPreviewResponseMsg)
 	if response.Decisions["main.go"] != DiffApply || len(response.Decisions) != 1 {
 		t.Fatalf("callback mutation leaked into response: %+v", response.Decisions)
+	}
+}
+
+func TestMultiDiffPreviewFitsCompactHeightWithLongChangedLines(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{40, 12}, {71, 14}, {72, 14}, {100, 18}} {
+		files := make([]DiffFile, 12)
+		for i := range files {
+			files[i] = DiffFile{
+				FilePath:   fmt.Sprintf("deeply/nested/path/%02d-%s.go", i, strings.Repeat("long-file-name-", 6)),
+				OldContent: fmt.Sprintf("old-%02d %s", i, strings.Repeat("very-long-content ", 12)),
+				NewContent: fmt.Sprintf("new-%02d %s", i, strings.Repeat("replacement-content ", 12)),
+			}
+		}
+		m := NewMultiDiffPreviewModel(DefaultStyles())
+		m.SetSize(size.width, size.height)
+		m.SetFiles(files)
+
+		view := m.View()
+		if got := lipgloss.Height(view); got > size.height {
+			t.Fatalf("%dx%d multi-diff rendered %d rows:\n%s", size.width, size.height, got, stripAnsi(view))
+		}
+		for row, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d row=%d width=%d exceeds terminal: %q", size.width, size.height, row, got, stripAnsi(line))
+			}
+		}
+		plain := stripAnsi(view)
+		for _, want := range []string{"Multi-File Diff", "Esc Reject", "y"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("%dx%d multi-diff missing %q:\n%s", size.width, size.height, want, plain)
+			}
+		}
 	}
 }

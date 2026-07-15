@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/genai"
@@ -44,21 +46,72 @@ type AgentResult struct {
 	Duration      time.Duration
 	Completed     bool
 	OutputFile    string // Path to file-backed output stream (for incremental reads)
+	PolicyBlock   *PolicyBlock
+}
+
+// AgentTypeDefinition is the model-facing portion of an agent type. Tool
+// allowlists and prompts intentionally stay inside the runner/agent packages;
+// the task schema only needs a stable name and a concise selection hint.
+type AgentTypeDefinition struct {
+	Name        string
+	Description string
+}
+
+// AgentTypeProvider supplies one coherent catalog snapshot. Implementations
+// may be updated at runtime, so callers must not retain mutable internal data.
+type AgentTypeProvider interface {
+	SnapshotAgentTypes() []AgentTypeDefinition
 }
 
 // TaskTool spawns subagents to handle complex tasks.
 type TaskTool struct {
-	runner AgentRunner
+	mu                       sync.RWMutex
+	runner                   AgentRunner
+	agentTypes               AgentTypeProvider
+	toolCapabilityCeiling    []string
+	toolCapabilityRestricted bool
+	backgroundAllowed        bool
 }
 
 // NewTaskTool creates a new TaskTool instance.
 func NewTaskTool() *TaskTool {
-	return &TaskTool{}
+	return &TaskTool{backgroundAllowed: true}
 }
 
 // SetRunner sets the agent runner for spawning subagents.
 func (t *TaskTool) SetRunner(runner AgentRunner) {
+	t.mu.Lock()
 	t.runner = runner
+	t.mu.Unlock()
+}
+
+// SetAgentTypeProvider exposes built-in and loaded custom agent types to the
+// model. The provider is shared by clones so runtime registrations appear on
+// the next declaration/validation snapshot.
+func (t *TaskTool) SetAgentTypeProvider(provider AgentTypeProvider) {
+	t.mu.Lock()
+	t.agentTypes = provider
+	t.mu.Unlock()
+}
+
+// SetToolCapabilityCeiling binds a cloned task tool to its parent agent's
+// actual toolkit. A child receives the intersection of this ceiling and its
+// own type allowlist; delegation can never recover authority filtered out of
+// the parent. Passing nil is reserved for the unrestricted foreground tool.
+func (t *TaskTool) SetToolCapabilityCeiling(names []string) {
+	t.mu.Lock()
+	t.toolCapabilityRestricted = names != nil
+	t.toolCapabilityCeiling = normalizeToolNames(names)
+	t.mu.Unlock()
+}
+
+// SetBackgroundAllowed controls whether the model may detach sub-agents from
+// the current request. Headless callers disable this to keep terminal outcome
+// and process lifetime deterministic.
+func (t *TaskTool) SetBackgroundAllowed(allowed bool) {
+	t.mu.Lock()
+	t.backgroundAllowed = allowed
+	t.mu.Unlock()
 }
 
 func (t *TaskTool) Name() string {
@@ -66,21 +119,16 @@ func (t *TaskTool) Name() string {
 }
 
 func (t *TaskTool) Description() string {
-	return `Spawns a specialized subagent to handle complex tasks autonomously.
-Agent types:
-- explore: Codebase exploration (read, glob, grep, tree, list_dir)
-- bash: Command execution (bash, read, glob)
-- general: All tools available
-- plan: Implementation planning (read-only exploration + planning tools)
-- claude-code-guide: Answer questions about Claude Code CLI (documentation/search focused)
-
-Use for multi-step tasks, parallel exploration, or isolated command execution.`
+	return taskToolDescription(t.agentTypeSnapshot())
 }
 
 func (t *TaskTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
+	state := t.snapshot()
+	agentTypes := agentTypeSnapshot(state.agentTypes)
+	typeNames := agentTypeNames(agentTypes)
+	declaration := &genai.FunctionDeclaration{
 		Name:        t.Name(),
-		Description: t.Description(),
+		Description: taskToolDescription(agentTypes),
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -90,8 +138,8 @@ func (t *TaskTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"subagent_type": {
 					Type:        genai.TypeString,
-					Description: "Type of agent: 'explore', 'bash', 'general', 'plan', or 'claude-code-guide'",
-					Enum:        []string{"explore", "bash", "general", "plan", "claude-code-guide"},
+					Description: "Registered agent type to spawn. See the task tool description for each type's specialization.",
+					Enum:        typeNames,
 				},
 				"description": {
 					Type:        genai.TypeString,
@@ -128,12 +176,24 @@ func (t *TaskTool) Declaration() *genai.FunctionDeclaration {
 			Required: []string{"prompt"},
 		},
 	}
+	if !state.backgroundAllowed {
+		delete(declaration.Parameters.Properties, "run_in_background")
+	}
+	return declaration
 }
 
 func (t *TaskTool) Validate(args map[string]any) error {
+	state := t.snapshot()
+	return validateTaskArgs(args, agentTypeSnapshot(state.agentTypes), state.backgroundAllowed)
+}
+
+func validateTaskArgs(args map[string]any, agentTypes []AgentTypeDefinition, backgroundAllowed bool) error {
 	prompt, ok := GetString(args, "prompt")
 	if !ok || prompt == "" {
 		return NewValidationError("prompt", "is required")
+	}
+	if runInBackground, _ := GetBool(args, "run_in_background"); runInBackground && !backgroundAllowed {
+		return NewValidationError("run_in_background", "is not available in this execution mode")
 	}
 
 	// If resuming, we don't need subagent_type
@@ -147,19 +207,28 @@ func (t *TaskTool) Validate(args map[string]any) error {
 		return NewValidationError("subagent_type", "is required when not resuming")
 	}
 
-	switch agentType {
-	case "explore", "bash", "general", "plan", "claude-code-guide":
-		// Valid types
-	default:
-		return NewValidationError("subagent_type", "must be 'explore', 'bash', 'general', 'plan', or 'claude-code-guide'")
+	for _, definition := range agentTypes {
+		if agentType == definition.Name {
+			return nil
+		}
 	}
 
-	return nil
+	return NewValidationError("subagent_type", fmt.Sprintf(
+		"unknown agent type %q; available types: %s",
+		agentType, strings.Join(agentTypeNames(agentTypes), ", ")))
 }
 
 func (t *TaskTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
-	if t.runner == nil {
+	state := t.snapshot()
+	agentTypes := agentTypeSnapshot(state.agentTypes)
+	if err := validateTaskArgs(args, agentTypes, state.backgroundAllowed); err != nil {
+		return NewErrorResult("validation error: " + err.Error()), nil
+	}
+	if state.runner == nil {
 		return NewErrorResult("task runner not initialized"), nil
+	}
+	if state.toolCapabilityRestricted {
+		ctx = ContextWithAgentToolCapabilityCeiling(ctx, state.toolCapabilityCeiling)
 	}
 
 	prompt, _ := GetString(args, "prompt")
@@ -185,16 +254,119 @@ func (t *TaskTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// If resuming an existing agent
 	if resume != "" {
 		if runInBackground {
-			return t.executeResumeBackground(ctx, resume, prompt, description)
+			return t.executeResumeBackground(ctx, state.runner, resume, prompt, description)
 		}
-		return t.executeResumeForeground(ctx, resume, prompt, description)
+		return t.executeResumeForeground(ctx, state.runner, resume, prompt, description)
 	}
 
 	if runInBackground {
-		return t.executeBackground(ctx, agentType, prompt, description, maxTurns, model)
+		return t.executeBackground(ctx, state.runner, agentType, prompt, description, maxTurns, model)
 	}
 
-	return t.executeForeground(ctx, agentType, prompt, description, maxTurns, model)
+	return t.executeForeground(ctx, state.runner, agentType, prompt, description, maxTurns, model)
+}
+
+type taskToolState struct {
+	runner                   AgentRunner
+	agentTypes               AgentTypeProvider
+	toolCapabilityCeiling    []string
+	toolCapabilityRestricted bool
+	backgroundAllowed        bool
+}
+
+func (t *TaskTool) snapshot() taskToolState {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return taskToolState{
+		runner:                   t.runner,
+		agentTypes:               t.agentTypes,
+		toolCapabilityCeiling:    cloneTaskToolNames(t.toolCapabilityCeiling),
+		toolCapabilityRestricted: t.toolCapabilityRestricted,
+		backgroundAllowed:        t.backgroundAllowed,
+	}
+}
+
+func cloneTaskToolNames(names []string) []string {
+	if names == nil {
+		return nil
+	}
+	cloned := make([]string, len(names))
+	copy(cloned, names)
+	return cloned
+}
+
+func (t *TaskTool) clone() *TaskTool {
+	state := t.snapshot()
+	clone := NewTaskTool()
+	clone.runner = state.runner
+	clone.agentTypes = state.agentTypes
+	clone.toolCapabilityCeiling = state.toolCapabilityCeiling
+	clone.toolCapabilityRestricted = state.toolCapabilityRestricted
+	clone.backgroundAllowed = state.backgroundAllowed
+	return clone
+}
+
+func (t *TaskTool) agentTypeSnapshot() []AgentTypeDefinition {
+	t.mu.RLock()
+	provider := t.agentTypes
+	t.mu.RUnlock()
+	return agentTypeSnapshot(provider)
+}
+
+func agentTypeSnapshot(provider AgentTypeProvider) []AgentTypeDefinition {
+	byName := make(map[string]AgentTypeDefinition)
+	for _, definition := range builtinAgentTypeDefinitions() {
+		byName[definition.Name] = definition
+	}
+	if provider != nil {
+		for _, definition := range provider.SnapshotAgentTypes() {
+			definition.Name = strings.TrimSpace(definition.Name)
+			definition.Description = strings.Join(strings.Fields(definition.Description), " ")
+			if definition.Name == "" {
+				continue
+			}
+			// A provider cannot redefine the model-facing meaning of a built-in.
+			if _, builtin := byName[definition.Name]; builtin {
+				continue
+			}
+			byName[definition.Name] = definition
+		}
+	}
+
+	types := make([]AgentTypeDefinition, 0, len(byName))
+	for _, definition := range byName {
+		types = append(types, definition)
+	}
+	sort.Slice(types, func(i, j int) bool { return types[i].Name < types[j].Name })
+	return types
+}
+
+func builtinAgentTypeDefinitions() []AgentTypeDefinition {
+	return []AgentTypeDefinition{
+		{Name: "explore", Description: "Explore and analyze codebases with read-only search tools"},
+		{Name: "bash", Description: "Execute focused shell commands"},
+		{Name: "general", Description: "Handle general-purpose multi-step work"},
+		{Name: "plan", Description: "Design implementation strategies with read-only planning tools"},
+		{Name: "claude-code-guide", Description: "Answer CLI documentation and usage questions"},
+	}
+}
+
+func agentTypeNames(agentTypes []AgentTypeDefinition) []string {
+	names := make([]string, len(agentTypes))
+	for i, definition := range agentTypes {
+		names[i] = definition.Name
+	}
+	return names
+}
+
+func taskToolDescription(agentTypes []AgentTypeDefinition) string {
+	var description strings.Builder
+	description.WriteString("Spawns a specialized subagent to handle complex tasks autonomously.\nAgent types:\n")
+	for _, definition := range agentTypes {
+		fmt.Fprintf(&description, "- %s: %s\n", definition.Name, definition.Description)
+	}
+	description.WriteString("\nUse for multi-step tasks, parallel exploration, or isolated command execution.")
+	return description.String()
 }
 
 // maxSubAgentReportChars bounds how much of a sub-agent's transcript is folded
@@ -248,8 +420,8 @@ func failureReason(resultErr string, spawnErr error) string {
 	return ""
 }
 
-func (t *TaskTool) executeForeground(ctx context.Context, agentType, prompt, description string, maxTurns int, model string) (ToolResult, error) {
-	agentID, err := t.runner.Spawn(ctx, agentType, prompt, maxTurns, model)
+func (t *TaskTool) executeForeground(ctx context.Context, runner AgentRunner, agentType, prompt, description string, maxTurns int, model string) (ToolResult, error) {
+	agentID, err := runner.Spawn(ctx, agentType, prompt, maxTurns, model)
 	// Spawn is synchronous and stores the agent's PARTIAL result (output + reason)
 	// before returning a non-nil err — agent.Run sets result.Error only on the
 	// err!=nil path, so the real failure shape is err!=nil. The old early-return
@@ -261,7 +433,7 @@ func (t *TaskTool) executeForeground(ctx context.Context, agentType, prompt, des
 		return NewErrorResult(fmt.Sprintf("Agent failed to start: %s", errOrUnknown(err))), nil
 	}
 
-	result, ok := t.runner.GetResult(agentID)
+	result, ok := runner.GetResult(agentID)
 	if !ok {
 		return NewErrorResult(fmt.Sprintf("Agent failed: %s", errOrUnknown(err))), nil
 	}
@@ -284,15 +456,16 @@ func (t *TaskTool) executeForeground(ctx context.Context, agentType, prompt, des
 
 	writeSubAgentOutput(&output, result.Output, result.OutputFile)
 
-	return NewSuccessResultWithData(output.String(), map[string]any{
+	toolResult := NewSuccessResultWithData(output.String(), map[string]any{
 		"agent_id": result.AgentID,
 		"type":     result.Type,
 		"status":   result.Status,
 		"duration": result.Duration.String(),
-	}), nil
+	})
+	return withAgentPolicyBlock(toolResult, result.PolicyBlock), nil
 }
 
-func (t *TaskTool) executeBackground(ctx context.Context, agentType, prompt, description string, maxTurns int, model string) (ToolResult, error) {
+func (t *TaskTool) executeBackground(ctx context.Context, runner AgentRunner, agentType, prompt, description string, maxTurns int, model string) (ToolResult, error) {
 	// Check for streaming callback in context
 	onText := GetStreamingCallback(ctx)
 	onProgress := GetProgressCallback(ctx)
@@ -309,10 +482,10 @@ func (t *TaskTool) executeBackground(ctx context.Context, agentType, prompt, des
 				}
 			}
 		}
-		agentID = t.runner.SpawnAsyncWithStreaming(ctx, agentType, prompt, maxTurns, model, onText, progressAdapter)
+		agentID = runner.SpawnAsyncWithStreaming(ctx, agentType, prompt, maxTurns, model, onText, progressAdapter)
 	} else {
 		// Use standard async spawn
-		agentID = t.runner.SpawnAsync(ctx, agentType, prompt, maxTurns, model)
+		agentID = runner.SpawnAsync(ctx, agentType, prompt, maxTurns, model)
 	}
 
 	var output strings.Builder
@@ -335,8 +508,8 @@ func (t *TaskTool) executeBackground(ctx context.Context, agentType, prompt, des
 	}), nil
 }
 
-func (t *TaskTool) executeResumeForeground(ctx context.Context, agentID, prompt, description string) (ToolResult, error) {
-	resumedID, err := t.runner.Resume(ctx, agentID, prompt)
+func (t *TaskTool) executeResumeForeground(ctx context.Context, runner AgentRunner, agentID, prompt, description string) (ToolResult, error) {
+	resumedID, err := runner.Resume(ctx, agentID, prompt)
 	// Resume stores the partial result before returning a non-nil err (same shape
 	// as Spawn); only a true load/restore failure returns an empty resumedID. When
 	// the agent actually resumed, surface its partial work instead of dropping it.
@@ -344,7 +517,7 @@ func (t *TaskTool) executeResumeForeground(ctx context.Context, agentID, prompt,
 		return NewErrorResult(fmt.Sprintf("Failed to resume agent: %s", errOrUnknown(err))), nil
 	}
 
-	result, ok := t.runner.GetResult(resumedID)
+	result, ok := runner.GetResult(resumedID)
 	if !ok {
 		return NewErrorResult(fmt.Sprintf("Failed to resume agent: %s", errOrUnknown(err))), nil
 	}
@@ -368,17 +541,25 @@ func (t *TaskTool) executeResumeForeground(ctx context.Context, agentID, prompt,
 
 	writeSubAgentOutput(&output, result.Output, result.OutputFile)
 
-	return NewSuccessResultWithData(output.String(), map[string]any{
+	toolResult := NewSuccessResultWithData(output.String(), map[string]any{
 		"agent_id": result.AgentID,
 		"type":     result.Type,
 		"status":   result.Status,
 		"duration": result.Duration.String(),
 		"resumed":  true,
-	}), nil
+	})
+	return withAgentPolicyBlock(toolResult, result.PolicyBlock), nil
 }
 
-func (t *TaskTool) executeResumeBackground(ctx context.Context, agentID, prompt, description string) (ToolResult, error) {
-	resumedID, err := t.runner.ResumeAsync(ctx, agentID, prompt)
+func withAgentPolicyBlock(result ToolResult, block *PolicyBlock) ToolResult {
+	if block == nil {
+		return result
+	}
+	return WithPolicyBlock(result, block.Kind, block.Reason)
+}
+
+func (t *TaskTool) executeResumeBackground(ctx context.Context, runner AgentRunner, agentID, prompt, description string) (ToolResult, error) {
+	resumedID, err := runner.ResumeAsync(ctx, agentID, prompt)
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("Failed to resume agent: %s", err)), nil
 	}

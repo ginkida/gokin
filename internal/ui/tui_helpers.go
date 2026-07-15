@@ -3,13 +3,13 @@ package ui
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"runtime"
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
@@ -43,6 +43,40 @@ func safeTerminalDisplayText(text string) string {
 	}, text)
 }
 
+// safeInlineDisplayText makes external metadata safe for a single terminal
+// row without rewriting meaningful horizontal spacing inside commands or
+// filenames. Line separators become spaces; ANSI and other controls disappear.
+func safeInlineDisplayText(text string) string {
+	text = ansi.Strip(text)
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t', '\v', '\f', '\u0085', '\u2028', '\u2029':
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+// verticalMouseWheelDirection recognizes the ordinary vertical wheel gesture
+// shared by selectable list overlays. Release events and Shift+wheel are left
+// to viewport.Model so horizontal scrolling keeps its native behavior.
+func verticalMouseWheelDirection(msg tea.MouseMsg) int {
+	if msg.Action != tea.MouseActionPress || msg.Shift {
+		return 0
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		return -1
+	case tea.MouseButtonWheelDown:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // visibleTerminalControlText makes terminal control bytes reviewable without
 // executing them. Unlike safeTerminalDisplayText it deliberately preserves
 // their meaning as Unicode control pictures, which is essential on approval
@@ -63,6 +97,38 @@ func visibleTerminalControlText(text string) string {
 		}
 		return r
 	}, text)
+}
+
+// safeToolOutputDisplayText removes terminal styling/envelopes from ordinary
+// command output, then makes any remaining raw controls reviewable. Unlike diff
+// approval surfaces, routine output should not show harmless SGR bytes as text.
+func safeToolOutputDisplayText(text string) string {
+	return expandDisplayTabs(visibleTerminalControlText(ansi.Strip(text)), 4)
+}
+
+func expandDisplayTabs(text string, tabSize int) string {
+	if tabSize <= 0 || !strings.Contains(text, "\t") {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		graphemes := uniseg.NewGraphemes(line)
+		var b strings.Builder
+		column := 0
+		for graphemes.Next() {
+			cluster := graphemes.Str()
+			if cluster == "\t" {
+				spaces := tabSize - column%tabSize
+				b.WriteString(strings.Repeat(" ", spaces))
+				column += spaces
+				continue
+			}
+			b.WriteString(cluster)
+			column += lipgloss.Width(cluster)
+		}
+		lines[i] = b.String()
+	}
+	return strings.Join(lines, "\n")
 }
 
 // truncateLeftForWidth preserves the identifying tail of paths and other
@@ -246,10 +312,33 @@ func ClearBadgeCmd() tea.Cmd {
 	}
 }
 
+const terminalTitleMaxWidth = 160
+
+// writeTerminalTitle keeps runtime metadata inside one OSC-0 envelope. Model
+// names and working directories may come from config files, providers, or the
+// filesystem, so writing either directly would let BEL/ST terminate the title
+// and turn the rest into a second terminal control sequence.
+func writeTerminalTitle(w io.Writer, title string) {
+	title = truncateForWidth(safeKeyEntryText(title), terminalTitleMaxWidth)
+	if title == "" {
+		title = "Gokin"
+	}
+	fmt.Fprintf(w, "\033]0;%s\a", title)
+}
+
 // setTerminalTitle sets the terminal window title via OSC-0 escape sequence.
 // Visible in terminal tabs, tmux, iTerm2, etc.
 func setTerminalTitle(title string) {
-	fmt.Fprintf(os.Stderr, "\033]0;%s\a", title)
+	writeTerminalTitle(os.Stderr, title)
+}
+
+func (m *Model) refreshTerminalTitle() {
+	modelName := safeKeyEntryText(m.currentModel)
+	if modelName == "" {
+		modelName = "no model"
+	}
+	dir := shortenPath(safeKeyEntryText(prettyPath(m.workDir)), 30)
+	setTerminalTitle(fmt.Sprintf("Gokin · %s · %s", modelName, dir))
 }
 
 // Welcome displays a minimalist welcome message using lipgloss borders.
@@ -262,58 +351,7 @@ func setTerminalTitle(title string) {
 // slash). Quick-start suggestions sit just outside the box so users
 // who already know the app can skim past them.
 func (m *Model) Welcome() {
-	titleStyle := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	infoStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	accentStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
-
-	dir := shortenPath(prettyPath(m.workDir), 30)
-
-	modelName := m.currentModel
-	if modelName == "" {
-		modelName = "no model"
-	}
-
-	setTerminalTitle(fmt.Sprintf("Gokin · %s · %s", modelName, dir))
-
-	// Mode badge — the most important state signal on the welcome
-	// banner. A user dropped into plan mode by default needs to see
-	// "✦ plan mode" prominently or they'll be surprised when their
-	// first request triggers an approval flow. Each mode gets a
-	// distinct color hue (info-blue / warn-amber / dim-default) that
-	// matches the status bar so the two surfaces feel consistent.
-	modeBadge := m.welcomeModeBadge()
-
-	line1 := titleStyle.Render("GOKIN")
-	line2 := infoStyle.Render(dir) + dimStyle.Render(" · ") + accentStyle.Render(modelName)
-	line3 := modeBadge
-	line4 := dimStyle.Render("Ctrl+P") + infoStyle.Render(" commands") +
-		dimStyle.Render("  ·  Shift+Tab") + infoStyle.Render(" cycle mode") +
-		dimStyle.Render("  ·  /") + infoStyle.Render(" explore")
-
-	content := line1 + "\n" + line2 + "\n" + line3 + "\n" + line4
-
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorBorder).
-		Padding(1, 3).
-		Align(lipgloss.Center)
-
-	m.output.AppendLine(boxStyle.Render(content))
-	m.output.AppendLine("")
-
-	// Quick-start hints stay outside the box — visual hierarchy puts
-	// the box first (state), suggestions second (actions). User
-	// instinctively reads top-to-bottom.
-	suggestionStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	promptStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
-	suggestions := suggestionStyle.Render("  Quick start: ") +
-		promptStyle.Render("\"explain this codebase\"") +
-		suggestionStyle.Render("  ·  ") +
-		promptStyle.Render("\"fix the failing test\"") +
-		suggestionStyle.Render("  ·  ") +
-		promptStyle.Render("/help")
-	m.output.AppendLine(suggestions)
+	m.ShowFirstLaunchWelcome(nil)
 }
 
 // welcomeModeBadge renders the current session-mode indicator for the
@@ -332,9 +370,15 @@ func (m *Model) welcomeModeBadge() string {
 	case m.planningModeEnabled:
 		return planStyle.Render("✦ plan mode") + " " +
 			hintStyle.Render("(read-only · proposes plan before acting)")
-	case !m.permissionsEnabled || !m.sandboxEnabled:
+	case !m.permissionsEnabled && !m.sandboxEnabled:
 		return yoloStyle.Render("⚠ YOLO mode") + " " +
 			hintStyle.Render("(no prompts · agent runs everything)")
+	case !m.permissionsEnabled:
+		return yoloStyle.Render("⚠ YOLO mode") + " " +
+			hintStyle.Render("(no prompts · bash remains sandboxed)")
+	case !m.sandboxEnabled:
+		return yoloStyle.Render("⚠ sandbox off") + " " +
+			hintStyle.Render("(prompts remain · approved bash runs unrestricted)")
 	default:
 		return normalStyle.Render("● normal mode") + " " +
 			hintStyle.Render("(asks before write/edit/bash)")
@@ -364,6 +408,10 @@ func (m Model) renderTodos() string {
 	if width < 4 {
 		return truncateForWidth("Tasks", width)
 	}
+	maxPanelHeight := todosPanelHeightBudget(m.height)
+	if maxPanelHeight > 0 && maxPanelHeight < 4 {
+		return truncateForWidth("Tasks · Ctrl+T hide", width)
+	}
 	horizontalPadding := 1
 	if width < 6 {
 		horizontalPadding = 0
@@ -382,7 +430,6 @@ func (m Model) renderTodos() string {
 	itemStyle := lipgloss.NewStyle().Foreground(ColorText)
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	var builder strings.Builder
 	items := make([]todoRenderItem, 0, len(m.todoItems))
 	var activeCount, pendingCount, doneCount int
 	for _, raw := range m.todoItems {
@@ -398,13 +445,6 @@ func (m Model) renderTodos() string {
 		}
 	}
 
-	title := fmt.Sprintf("Tasks · %d/%d done", doneCount, len(items))
-	if activeCount > 0 {
-		title += fmt.Sprintf(" · %d active", activeCount)
-	}
-	builder.WriteString(titleStyle.Render(truncateForWidth(title, contentWidth)))
-	builder.WriteString("\n")
-
 	spinChar := "●"
 	if !m.reducedMotion {
 		spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -412,11 +452,44 @@ func (m Model) renderTodos() string {
 		spinChar = spinner[idx]
 	}
 
+	showFooter := true
 	rowBudget := todosPanelFullRender
-	if m.height > 0 && m.height < 18 {
-		rowBudget = todosPanelCompactRender
+	if maxPanelHeight > 0 {
+		if maxPanelHeight >= 5 {
+			rowBudget = min(rowBudget, max(maxPanelHeight-4, 1))
+		} else {
+			showFooter = false
+			rowBudget = 1
+		}
 	}
 	visible := selectTodoRows(items, rowBudget)
+	hiddenDone := 0
+	hiddenLive := 0
+	for i, item := range items {
+		if visible[i] {
+			continue
+		}
+		if item.status == todoStatusDone {
+			hiddenDone++
+		} else {
+			hiddenLive++
+		}
+	}
+
+	var builder strings.Builder
+	title := fmt.Sprintf("Tasks · %d/%d done", doneCount, len(items))
+	if activeCount > 0 {
+		title += fmt.Sprintf(" · %d active", activeCount)
+	}
+	if !showFooter {
+		title = "Tasks · Ctrl+T hide"
+		if hidden := hiddenDone + hiddenLive; hidden > 0 {
+			title += fmt.Sprintf(" · %d folded", hidden)
+		}
+	}
+	builder.WriteString(titleStyle.Render(truncateForWidth(title, contentWidth)))
+	builder.WriteString("\n")
+
 	for index, item := range items {
 		if !visible[index] {
 			continue
@@ -437,33 +510,23 @@ func (m Model) renderTodos() string {
 		builder.WriteString("\n")
 	}
 
-	hiddenDone := 0
-	hiddenLive := 0
-	for i, item := range items {
-		if visible[i] {
-			continue
+	if showFooter {
+		// Keep the inverse action first so it survives narrow-width truncation.
+		footerParts := []string{"Ctrl+T hide"}
+		if hiddenDone > 0 {
+			footerParts = append(footerParts, fmt.Sprintf("✓ %d completed", hiddenDone))
 		}
-		if item.status == todoStatusDone {
-			hiddenDone++
-		} else {
-			hiddenLive++
+		if hiddenLive > 0 {
+			footerParts = append(footerParts, fmt.Sprintf("… %d more", hiddenLive))
 		}
+		if pendingCount == 0 && activeCount == 0 {
+			footerParts = append(footerParts, "All complete")
+		}
+		footer := strings.Join(footerParts, " · ")
+		builder.WriteString(dimStyle.Render(truncateForWidth(footer, contentWidth)))
 	}
-	footerParts := make([]string, 0, 3)
-	if hiddenDone > 0 {
-		footerParts = append(footerParts, fmt.Sprintf("✓ %d completed", hiddenDone))
-	}
-	if hiddenLive > 0 {
-		footerParts = append(footerParts, fmt.Sprintf("… %d more", hiddenLive))
-	}
-	if pendingCount == 0 && activeCount == 0 {
-		footerParts = append(footerParts, "All complete")
-	}
-	footerParts = append(footerParts, "Ctrl+T hide")
-	footer := strings.Join(footerParts, " · ")
-	builder.WriteString(dimStyle.Render(truncateForWidth(footer, contentWidth)))
 
-	content := fitPanelContent(builder.String(), contentWidth)
+	content := fitPanelContent(strings.TrimSuffix(builder.String(), "\n"), contentWidth)
 	return boxStyle.Width(width - 2).Render(content)
 }
 
@@ -531,7 +594,15 @@ func selectTodoRows(items []todoRenderItem, budget int) map[int]bool {
 // "✓ N completed" row — the pending/active rows are the signal.
 const todosPanelFullRender = 8
 
-const todosPanelCompactRender = 4
+// todosPanelHeightBudget reserves four terminal rows for the surrounding
+// composer/status chrome and caps a task list at twelve rows. A zero height
+// preserves the standalone rendering contract.
+func todosPanelHeightBudget(terminalHeight int) int {
+	if terminalHeight <= 0 {
+		return 0
+	}
+	return min(terminalHeight, min(max(terminalHeight-4, 4), 12))
+}
 
 // renderScratchpad renders the agent scratchpad.
 func (m Model) renderScratchpad() string {
@@ -545,6 +616,10 @@ func (m Model) renderScratchpad() string {
 	}
 	if width < 4 {
 		return truncateForWidth("Notes", width)
+	}
+	maxPanelHeight := scratchpadPanelHeightBudget(m.height)
+	if maxPanelHeight > 0 && maxPanelHeight < 4 {
+		return truncateForWidth("Notes · latest", width)
 	}
 	horizontalPadding := 1
 	if width < 6 {
@@ -564,10 +639,6 @@ func (m Model) renderScratchpad() string {
 	contentStyle := lipgloss.NewStyle().
 		Foreground(ColorText)
 
-	var builder strings.Builder
-	builder.WriteString(titleStyle.Render(truncateForWidth("Scratchpad · latest notes", contentWidth)))
-	builder.WriteString("\n")
-
 	// Render only the TAIL of the scratchpad — it's append-style working
 	// notes, so the latest lines carry the signal. Unbounded render let a
 	// chatty agent grow the box to half the screen.
@@ -579,14 +650,35 @@ func (m Model) renderScratchpad() string {
 		}
 	}
 	lineBudget := scratchpadMaxRenderLines
-	if m.height > 0 && m.height < 18 {
-		lineBudget = scratchpadCompactRenderLines
+	showFoldMarker := true
+	if maxPanelHeight > 0 {
+		availableRows := max(maxPanelHeight-3, 1) // border + title
+		lineBudget = min(lineBudget, availableRows)
+		if len(lines) > lineBudget {
+			if availableRows >= 2 {
+				lineBudget = min(lineBudget, availableRows-1)
+			} else {
+				showFoldMarker = false
+			}
+		}
 	}
-	if hidden := len(lines) - lineBudget; hidden > 0 {
+	hidden := max(len(lines)-lineBudget, 0)
+	if hidden > 0 {
+		lines = lines[hidden:]
+	}
+
+	var builder strings.Builder
+	title := "Scratchpad · latest notes"
+	if hidden > 0 && !showFoldMarker {
+		title = fmt.Sprintf("Notes · %d earlier", hidden)
+	}
+	builder.WriteString(titleStyle.Render(truncateForWidth(title, contentWidth)))
+	builder.WriteString("\n")
+
+	if hidden > 0 && showFoldMarker {
 		dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 		builder.WriteString(dimStyle.Render(fmt.Sprintf("… %d earlier line(s)", hidden)))
 		builder.WriteString("\n")
-		lines = lines[hidden:]
 	}
 	for i, line := range lines {
 		if i > 0 {
@@ -603,82 +695,61 @@ func (m Model) renderScratchpad() string {
 // excluding the title and the "… earlier" marker).
 const scratchpadMaxRenderLines = 6
 
-const scratchpadCompactRenderLines = 3
+// scratchpadPanelHeightBudget reserves five rows for surrounding live/composer
+// chrome and caps the note panel at its existing ten-row maximum.
+func scratchpadPanelHeightBudget(terminalHeight int) int {
+	if terminalHeight <= 0 {
+		return 0
+	}
+	return min(terminalHeight, min(max(terminalHeight-5, 4), scratchpadMaxRenderLines+4))
+}
 
 // getCommandHint returns a hint for the current command input.
 func (m Model) getCommandHint(input string) string {
-	// Extract command name
 	parts := strings.Fields(input)
 	if len(parts) == 0 {
 		return ""
 	}
-
-	cmd := strings.TrimPrefix(parts[0], "/")
-
-	// Command hints map
-	hints := map[string]string{
-		"help":              "Show all available commands and their usage",
-		"quickstart":        "Run interactive onboarding and key workflows",
-		"clear":             "Clear the current conversation history",
-		"compact":           "Summarize old context to free up token window",
-		"save":              "Save the current session to disk",
-		"resume":            "Resume a previously saved session",
-		"sessions":          "List all saved sessions",
-		"stats":             "Show session stats, usage and health snapshot",
-		"instructions":      "Show project-specific instructions (GOKIN/CLAUDE/.gokin)",
-		"commit":            "Create a git commit with AI-generated message",
-		"pr":                "Create a pull request",
-		"checkpoint":        "Save a checkpoint of the current state",
-		"checkpoints":       "List all saved checkpoints",
-		"restore":           "Restore a previously saved checkpoint",
-		"init":              "Initialize project configuration",
-		"doctor":            "Run diagnostics to check for issues",
-		"config":            "Show or edit configuration",
-		"status":            "Show provider/auth/runtime configuration status",
-		"login":             "Set API key for a provider",
-		"logout":            "Remove provider key or logout from all",
-		"provider":          "Switch active AI provider",
-		"update":            "Check/install updates, list backups, rollback",
-		"cost":              "Show token usage and estimated costs",
-		"model":             "Switch AI model",
-		"reasoning":         "Set reasoning effort (none/low/medium/high/xhigh)",
-		"browse":            "Browse project files",
-		"open":              "Open a file in your editor",
-		"ql":                "Quick preview file contents",
-		"git-status":        "Show git repository status",
-		"clear-todos":       "Clear the todo list",
-		"plan":              "Toggle planning mode (or press Shift+Tab)",
-		"resume-plan":       "Resume paused or saved plan execution",
-		"copy":              "Copy text, --last for AI response, --all for full chat",
-		"paste":             "Paste from clipboard",
-		"permissions":       "Toggle or inspect command permission prompts",
-		"sandbox":           "Toggle sandbox mode for shell tool execution",
-		"theme":             "Switch UI theme",
-		"health":            "Show runtime health and provider reliability",
-		"policy":            "Show circuit breaker and policy state",
-		"ledger":            "Inspect side effects ledger of active plan",
-		"plan-proof":        "Inspect contract/evidence proof for a plan step",
-		"journal":           "Show recent execution journal events",
-		"recovery":          "Show latest recovery snapshot",
-		"observability":     "Unified reliability and execution dashboard",
-		"memory-governance": "Show session archive/retention governance stats",
-		"tree-stats":        "Show planner tree depth, branches and limits",
-		"agents":            "Show/hide agent orchestrator tree (Ctrl+A)",
-		"insights":          "Show learning insights: strategy metrics, patterns, delegation stats",
+	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
+	if cmd == "" {
+		return ""
 	}
 
-	if hint, ok := hints[cmd]; ok {
+	// Most copy comes from the same catalog that powers autocomplete. Overrides
+	// are reserved for behavior that genuinely needs more context than the
+	// canonical one-sentence description (especially independent safety axes).
+	overrides := map[string]string{
+		"clear":       "Start fresh; saves an active plan for /resume-plan",
+		"logout":      "Remove one provider key; 'all' previews until --force",
+		"permissions": "View or configure risky-action prompts; sandbox is separate",
+		"sandbox":     "View or configure bash containment; permission prompts are separate",
+		"thinking":    "Configure adaptive, forced, or disabled reasoning and its token budget",
+		"theme":       "Show the active Graphite UI theme",
+	}
+	if hint, ok := overrides[cmd]; ok {
 		return hint
 	}
-
-	// Partial match for autocomplete
-	for fullCmd, hint := range hints {
-		if strings.HasPrefix(fullCmd, cmd) {
-			return hint
+	for _, command := range DefaultCommands() {
+		if command.Name == cmd {
+			return command.Description
 		}
 	}
-
 	return ""
+}
+
+func (m Model) inlineCommandHint() string {
+	if m.state != StateInput || m.input.showSuggestions || m.input.showArgHints {
+		return ""
+	}
+	input := m.input.Value()
+	if !strings.HasPrefix(input, "/") || len(input) <= 1 {
+		return ""
+	}
+	hint := m.getCommandHint(input)
+	if hint == "" {
+		return ""
+	}
+	return truncateForWidth("  "+safeKeyEntryText(hint), max(m.width, 1))
 }
 
 // prettyPath returns path with the user's home directory collapsed to "~".
@@ -706,11 +777,14 @@ func prettyPath(path string) string {
 	return path
 }
 
-// shortenPath shortens a path to fit within maxLen runes while preserving the filename.
-// Uses smart truncation: shows directory prefix + ... + filename.
-// Unicode-safe: uses rune count instead of byte length.
+// shortenPath shortens a path to fit within maxLen terminal cells while
+// preserving the filename. Grapheme clusters stay intact, so a skin-tone
+// modifier or ZWJ sequence can never be detached by truncation.
 func shortenPath(path string, maxLen int) string {
-	if utf8.RuneCountInString(path) <= maxLen {
+	if maxLen <= 0 {
+		return ""
+	}
+	if lipgloss.Width(path) <= maxLen {
 		return path
 	}
 
@@ -720,44 +794,77 @@ func shortenPath(path string, maxLen int) string {
 		path = "~" + path[len(home):]
 	}
 
-	runes := []rune(path)
-	if len(runes) <= maxLen {
+	if lipgloss.Width(path) <= maxLen {
 		return path
 	}
 
-	// Guard tiny widths: the "..."+tail truncations below compute
-	// runes[len(runes)-maxLen+3:], whose start index exceeds len(runes) when
-	// maxLen < 3 → a slice-bounds panic that crashes the whole TUI (Bubble Tea's
-	// render loop has no recover). Narrow terminals + file autocomplete pass
-	// maxLen 1–2 (input.go). Return a bounded tail instead of "...".
-	if maxLen < 3 {
-		if maxLen <= 0 {
-			return ""
-		}
-		return string(runes[len(runes)-maxLen:])
+	// Three dots consume the whole budget at tiny widths and convey less than
+	// the single-cell ellipsis used by the shared tail truncator.
+	if maxLen <= 3 {
+		return truncateLeftForWidth(path, maxLen)
 	}
 
 	// Smart truncation: preserve filename and show as much context as possible
 	lastSlash := strings.LastIndex(path, "/")
 	if lastSlash == -1 {
 		// No slash, truncate from the left
-		return "..." + string(runes[len(runes)-maxLen+3:])
+		return "..." + displayCellSuffix(path, maxLen-3)
 	}
 
 	filename := path[lastSlash:] // includes leading /
-	filenameRunes := []rune(filename)
+	filenameWidth := lipgloss.Width(filename)
 
 	// If filename alone fits, show directory prefix + ... + filename
-	if len(filenameRunes) < maxLen-6 { // 6 = len("...") + some prefix
-		availableForDir := maxLen - len(filenameRunes) - 3
+	if filenameWidth < maxLen-6 { // 6 = width("...") + some prefix
+		availableForDir := maxLen - filenameWidth - 3
 		if availableForDir > 3 {
-			dirRunes := []rune(path)
-			return string(dirRunes[:availableForDir]) + "..." + filename
+			return displayCellPrefix(path, availableForDir) + "..." + filename
 		}
 	}
 
 	// Fallback: truncate from the left to always show filename
-	return "..." + string(runes[len(runes)-maxLen+3:])
+	return "..." + displayCellSuffix(path, maxLen-3)
+}
+
+func displayCellPrefix(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	graphemes := uniseg.NewGraphemes(text)
+	var b strings.Builder
+	used := 0
+	for graphemes.Next() {
+		cluster := graphemes.Str()
+		clusterWidth := lipgloss.Width(cluster)
+		if used+clusterWidth > width {
+			break
+		}
+		b.WriteString(cluster)
+		used += clusterWidth
+	}
+	return b.String()
+}
+
+func displayCellSuffix(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	graphemes := uniseg.NewGraphemes(text)
+	var clusters []string
+	for graphemes.Next() {
+		clusters = append(clusters, graphemes.Str())
+	}
+	used := 0
+	start := len(clusters)
+	for i := len(clusters) - 1; i >= 0; i-- {
+		clusterWidth := lipgloss.Width(clusters[i])
+		if used+clusterWidth > width {
+			break
+		}
+		used += clusterWidth
+		start = i
+	}
+	return strings.Join(clusters[start:], "")
 }
 
 // extractToolInfo extracts displayable info from tool arguments.
@@ -990,7 +1097,7 @@ func ToolResult(name string, result string) tea.Cmd {
 // ToolProgress sends a tool progress message (heartbeat for long operations).
 func ToolProgress(name string, elapsed time.Duration) tea.Cmd {
 	return func() tea.Msg {
-		return ToolProgressMsg{Name: name, Elapsed: elapsed}
+		return ToolProgressMsg{Name: name, Elapsed: elapsed, Progress: -1}
 	}
 }
 
@@ -1084,7 +1191,7 @@ func lastStreamHeading(buf string) string {
 			continue
 		}
 		if h := markdownHeadingText(line); h != "" {
-			last = h
+			last = safeKeyEntryText(h)
 		}
 	}
 	return last
@@ -1122,9 +1229,9 @@ func (m Model) lastStreamSnippet() string {
 		return ""
 	}
 	lines := strings.Split(strings.TrimRight(buf, "\n"), "\n")
-	last := strings.TrimSpace(lines[len(lines)-1])
+	last := safeKeyEntryText(lines[len(lines)-1])
 	if last == "" && len(lines) > 1 {
-		last = strings.TrimSpace(lines[len(lines)-2])
+		last = safeKeyEntryText(lines[len(lines)-2])
 	}
 	if last == "" {
 		return ""

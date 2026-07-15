@@ -41,6 +41,24 @@ func TestContextObservatoryEmptyStateIsHonestAndAdaptive(t *testing.T) {
 	}
 }
 
+func TestContextObservatoryEmptyShortTerminalKeepsRecovery(t *testing.T) {
+	panel := NewContextObservatoryPanel(DefaultStyles())
+	panel.Show()
+
+	for _, height := range []int{7, 8, 10} {
+		view := panel.View(50, height)
+		plain := stripAnsi(view)
+		for _, want := range []string{"No context health data yet", "Close"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("height=%d empty observatory missing %q:\n%s", height, want, plain)
+			}
+		}
+		if got := lipgloss.Height(view); got > max(height-1, 7) {
+			t.Fatalf("height=%d empty observatory rendered %d rows:\n%s", height, got, plain)
+		}
+	}
+}
+
 func TestContextObservatoryNormalizesInvalidMetrics(t *testing.T) {
 	panel := NewContextObservatoryPanel(DefaultStyles())
 	panel.Show()
@@ -121,6 +139,71 @@ func TestContextObservatoryUsageFallsBackToTokenRatio(t *testing.T) {
 	}
 }
 
+func TestContextObservatoryDerivesHonestPressureStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		total     int
+		maximum   int
+		want      string
+		notWant   string
+		wantColor lipgloss.Color
+	}{
+		{name: "healthy", total: 50, maximum: 100, want: "Context healthy", notWant: "pressure", wantColor: ColorSuccess},
+		{name: "elevated", total: 80, maximum: 100, want: "Context pressure elevated", notWant: "Context healthy", wantColor: ColorWarning},
+		{name: "critical", total: 95, maximum: 100, want: "Context critical · pruning likely soon", notWant: "Context healthy", wantColor: ColorError},
+		{name: "partial", total: 50, maximum: 0, want: "Context limit unavailable", notWant: "Context healthy", wantColor: ColorMuted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			panel := NewContextObservatoryPanel(DefaultStyles())
+			panel.Show()
+			panel.UpdateHealth(ContextHealthMsg{TotalTokens: tc.total, MaxTokens: tc.maximum})
+			view := stripAnsi(panel.View(80))
+			if !strings.Contains(view, tc.want) || strings.Contains(view, tc.notWant) {
+				t.Fatalf("derived status is dishonest:\n%s", view)
+			}
+			_, color := contextHealthSummary(panel.normalizedUsage(tc.total, tc.maximum), tc.maximum > 0, "")
+			if color != tc.wantColor {
+				t.Fatalf("status color=%v want %v", color, tc.wantColor)
+			}
+			if tc.maximum > 0 {
+				usageColor := contextUsageColor(panel.normalizedUsage(tc.total, tc.maximum))
+				if usageColor != tc.wantColor {
+					t.Fatalf("usage gauge color=%v want %v", usageColor, tc.wantColor)
+				}
+			}
+		})
+	}
+}
+
+func TestContextObservatoryPreservesSafeFileIdentityAndSnapshot(t *testing.T) {
+	files := []string{"/very/long/project/path/with/shared/prefix/]0;hijack\afile-important.go"}
+	panel := NewContextObservatoryPanel(DefaultStyles())
+	panel.Show()
+	panel.UpdateHealth(ContextHealthMsg{TotalTokens: 50, MaxTokens: 100, ActiveFiles: files})
+	files[0] = "mutated-after-update.go"
+
+	view := panel.View(40)
+	plain := stripAnsi(view)
+	if !strings.Contains(plain, "file-important.go") || strings.Contains(plain, "mutated-after-update") || strings.Contains(plain, "hijack") || strings.Contains(view, "\x1b]") {
+		t.Fatalf("active-file snapshot is unsafe or lost identity:\n%s", plain)
+	}
+	for row, line := range strings.Split(view, "\n") {
+		if got := lipgloss.Width(line); got > 40 {
+			t.Fatalf("row %d width=%d, want <=40:\n%s", row, got, plain)
+		}
+	}
+}
+
+func TestContextObservatoryStatusHintMatchesBothCloseBindings(t *testing.T) {
+	m := NewModel()
+	m.state = StateContextObservatory
+	m.observatoryPanel.Show()
+	assertShortcutHints(t, m,
+		[]string{"Esc/Ctrl+H Close"},
+		nil,
+	)
+}
+
 func TestContextObservatoryShortTerminalKeepsCloseFooter(t *testing.T) {
 	panel := NewContextObservatoryPanel(DefaultStyles())
 	panel.Show()
@@ -141,11 +224,41 @@ func TestContextObservatoryShortTerminalKeepsCloseFooter(t *testing.T) {
 		if got := lipgloss.Height(view); got > max(height-1, 7) {
 			t.Fatalf("height=%d compact panel height=%d:\n%s", height, got, plain)
 		}
-		for _, want := range []string{"Context: 75/100 tokens", "Close"} {
+		for _, want := range []string{"Status: Context pressure is elevated", "Close"} {
 			if !strings.Contains(plain, want) {
 				t.Fatalf("height=%d compact panel missing %q:\n%s", height, want, plain)
 			}
 		}
+		if height >= 10 && !strings.Contains(plain, "Context: 75/100 tokens") {
+			t.Fatalf("height=%d compact panel lost usage after status:\n%s", height, plain)
+		}
+	}
+}
+
+func TestContextObservatoryCriticalStatusWinsSmallestRowBudget(t *testing.T) {
+	panel := NewContextObservatoryPanel(DefaultStyles())
+	panel.Show()
+	panel.UpdateHealth(ContextHealthMsg{
+		TotalTokens:       95,
+		MaxTokens:         100,
+		RequestsRemaining: 80,
+		RequestsLimit:     100,
+		ActiveFiles:       []string{"a.go", "b.go"},
+		PruningAlert:      "Pruning required before the next request",
+	})
+
+	view := panel.View(54, 8)
+	plain := stripAnsi(view)
+	for _, want := range []string{"Status: Pruning required", "Close"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("smallest observatory lost %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "Limits:") || strings.Contains(plain, "Active files:") {
+		t.Fatalf("secondary metrics displaced critical status:\n%s", plain)
+	}
+	if got := lipgloss.Height(view); got > 7 {
+		t.Fatalf("smallest observatory height=%d want <=7:\n%s", got, plain)
 	}
 }
 

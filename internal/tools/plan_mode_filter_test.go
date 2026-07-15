@@ -53,16 +53,19 @@ func TestIsReadOnlyForPlanMode(t *testing.T) {
 	allowed := []string{
 		"read", "glob", "grep", "list_dir", "tree", "diff",
 		"web_fetch", "web_search",
-		"env", "tools_list",
-		"git_status", "git_diff", "git_log", "git_blame", "git_branch",
+		"env", "tools_list", "skill",
+		"git_status", "git_diff", "git_log", "git_blame",
 		"ask_user", "todo", "task_output", "get_plan_status",
-		"memory", "history_search", "pin_context",
+		"history_search",
 		"enter_plan_mode", "exit_plan_mode", "update_plan_progress",
 	}
 	for _, name := range allowed {
 		if !IsReadOnlyForPlanMode(name) {
 			t.Errorf("%q must be allowed in plan mode (read/meta/plan-lifecycle tool)", name)
 		}
+	}
+	if !IsReadOnlyForPlanMode("  READ ") {
+		t.Error("plan-mode lookup must normalize caller casing and whitespace")
 	}
 
 	// Must BLOCK: anything that mutates state (files, git, shell, subagents).
@@ -72,12 +75,12 @@ func TestIsReadOnlyForPlanMode(t *testing.T) {
 		// Shell / execution
 		"bash", "ssh", "kill_shell", "run_tests",
 		// Git writes
-		"git_add", "git_commit", "git_pr",
+		"git_add", "git_commit", "git_pr", "git_branch",
 		// Sub-agents / delegation
 		"ask_agent", "coordinate", "shared_memory", "update_scratchpad",
 		"request_tool", "task", "task_stop",
 		// Memory writes + batched ops
-		"memorize", "batch", "refactor", "verify_code", "check_impact",
+		"memory", "memorize", "pin_context", "batch", "refactor", "verify_code", "check_impact",
 		// Plan state mutation (undo/redo are not part of exploration)
 		"undo_plan", "redo_plan",
 	}
@@ -140,17 +143,25 @@ func TestPlanModeDeclarations_FiltersRegistry(t *testing.T) {
 // schema-push API expects exactly this shape.
 func TestPlanModeGeminiTools_Wraps(t *testing.T) {
 	reg := NewRegistry()
-	reg.MustRegister(stubTool{name: "read"})
+	reg.MustRegister(stubTool{name: "web_search"})
 	reg.MustRegister(stubTool{name: "bash"})
+	reg.MustRegister(stubTool{name: "read"})
+	reg.MustRegister(stubTool{name: "grep"})
 
-	tools := reg.PlanModeGeminiTools()
-	if len(tools) != 1 {
-		t.Fatalf("expected single Tool envelope, got %d", len(tools))
-	}
-	if len(tools[0].FunctionDeclarations) != 1 {
-		t.Errorf("expected 1 filtered declaration (read only), got %d", len(tools[0].FunctionDeclarations))
-	}
-	if tools[0].FunctionDeclarations[0].Name != "read" {
-		t.Errorf("expected `read` in plan-mode envelope, got %q", tools[0].FunctionDeclarations[0].Name)
+	want := []string{"grep", "read", "web_search"}
+	for iteration := 0; iteration < 64; iteration++ {
+		planTools := reg.PlanModeGeminiTools()
+		if len(planTools) != 1 {
+			t.Fatalf("expected single Tool envelope, got %d", len(planTools))
+		}
+		got := namesFromDeclarations(planTools[0].FunctionDeclarations)
+		if len(got) != len(want) {
+			t.Fatalf("expected %d filtered declarations, got %d (%v)", len(want), len(got), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("plan-mode declaration order = %v, want %v", got, want)
+			}
+		}
 	}
 }

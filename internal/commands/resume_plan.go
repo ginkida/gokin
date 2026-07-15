@@ -130,7 +130,9 @@ func (c *ResumePlanCommand) resumePlan(planMgr *plan.Manager, p *plan.Plan) (str
 	}
 
 	// Trigger plan execution via context-clear mechanism
-	planMgr.RequestContextClear(resumedPlan)
+	if !planMgr.RequestContextClear(resumedPlan) {
+		return "", fmt.Errorf("resumed plan lost active-plan ownership before execution handoff")
+	}
 
 	return fmt.Sprintf("Resuming plan: %s\n\n%d steps remaining. Executing...",
 		resumedPlan.Title, pendingCount), nil

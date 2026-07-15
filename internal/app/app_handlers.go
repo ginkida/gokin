@@ -68,7 +68,11 @@ func (a *App) registerPermRequest() (id string, ch chan permission.Decision, cle
 // It sends a request to the TUI and waits for a response with timeout.
 func (a *App) promptPermission(ctx context.Context, req *permission.Request) (permission.Decision, error) {
 	if a.program == nil {
-		return permission.DecisionAllow, nil
+		toolName := "operation"
+		if req != nil && strings.TrimSpace(req.ToolName) != "" {
+			toolName = req.ToolName
+		}
+		return permission.DecisionDeny, fmt.Errorf("permission required for %s, but interactive approval is unavailable in headless mode; configure permission.rules.%s: allow or explicitly disable permissions for intentional unattended execution", toolName, toolName)
 	}
 
 	reqID, respCh, cleanup := a.registerPermRequest()
@@ -106,6 +110,7 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 		case decision := <-respCh:
 			return decision, nil
 		case <-ctx.Done():
+			a.notifyPromptExpired(ui.PromptKindPermission, reqID, "Permission request cancelled — no action was run")
 			return permission.DecisionDeny, ctx.Err()
 		case <-warningTimer.C:
 			// Send warning to UI
@@ -121,6 +126,7 @@ func (a *App) promptPermission(ctx context.Context, req *permission.Request) (pe
 			// it as a hard failure. (Set permission.prompt_timeout_seconds: -1 to
 			// disable the timeout entirely.)
 			logging.Warn("permission prompt timed out", "tool", req.ToolName, "after", timeout)
+			a.notifyPromptExpired(ui.PromptKindPermission, reqID, "Permission request expired — no action was run")
 			return permission.DecisionDeny, fmt.Errorf("no response to the permission request for %s within %v — you may have stepped away. I did not run it; re-send the task or approve when you're back (or set permission.prompt_timeout_seconds: -1 to wait indefinitely)", req.ToolName, timeout)
 		}
 	}
@@ -196,14 +202,55 @@ func (a *App) questionPromptTimeout() time.Duration {
 	}
 }
 
+func (a *App) registerQuestionRequest() (id string, ch chan string, cleanup func()) {
+	id = fmt.Sprintf("question-%d", a.questionReqSeq.Add(1))
+	ch = make(chan string, 1)
+	a.questionPendingMu.Lock()
+	if a.questionPending == nil {
+		a.questionPending = make(map[string]chan string)
+	}
+	a.questionPending[id] = ch
+	a.questionPendingMu.Unlock()
+	cleanup = func() {
+		a.questionPendingMu.Lock()
+		delete(a.questionPending, id)
+		a.questionPendingMu.Unlock()
+	}
+	return id, ch, cleanup
+}
+
+// handleQuestionAnswer routes a UI response only to the waiter that owns its
+// request ID. Unknown IDs are expired/duplicate responses and are harmless.
+func (a *App) handleQuestionAnswer(reqID, answer string) {
+	a.questionPendingMu.Lock()
+	ch, ok := a.questionPending[reqID]
+	a.questionPendingMu.Unlock()
+	if !ok {
+		logging.Warn("question answer for unknown or expired request", "request_id", reqID)
+		return
+	}
+	select {
+	case ch <- answer:
+	default:
+		logging.Warn("duplicate question answer ignored", "request_id", reqID)
+	}
+}
+
+func (a *App) notifyPromptExpired(kind ui.PromptKind, reqID, message string) {
+	a.safeSendToProgram(ui.PromptExpiredMsg{Kind: kind, ID: reqID, Message: message})
+}
+
 // promptQuestion is called by the AskUserTool to ask the user a question.
 func (a *App) promptQuestion(ctx context.Context, question string, options []string, defaultOpt string) (string, error) {
 	if a.program == nil {
 		return "", fmt.Errorf("program not running")
 	}
+	reqID, responseCh, cleanup := a.registerQuestionRequest()
+	defer cleanup()
 
 	// Send question request to TUI
 	a.safeSendToProgram(ui.QuestionRequestMsg{
+		ID:       reqID,
 		Question: question,
 		Options:  options,
 		Default:  defaultOpt,
@@ -230,9 +277,10 @@ func (a *App) promptQuestion(ctx context.Context, question string, options []str
 
 	for {
 		select {
-		case answer := <-a.questionResponseChan:
+		case answer := <-responseCh:
 			return answer, nil
 		case <-ctx.Done():
+			a.notifyPromptExpired(ui.PromptKindQuestion, reqID, "Question cancelled — no answer was sent")
 			return "", ctx.Err()
 		case <-warningTimer.C:
 			a.safeSendToProgram(ui.StatusUpdateMsg{
@@ -242,32 +290,88 @@ func (a *App) promptQuestion(ctx context.Context, question string, options []str
 			warningTimer.Reset(repeatDelay)
 		case <-questionTimerC:
 			logging.Warn("question prompt timed out", "after", timeout)
+			a.notifyPromptExpired(ui.PromptKindQuestion, reqID, "Question expired — no answer was sent")
 			return "", fmt.Errorf("no answer to the question within %v — you may have stepped away. I did not continue; re-send the task or answer when you're back (or set permission.question_timeout_seconds: -1 to wait indefinitely)", timeout)
 		}
-	}
-}
-
-// handleQuestionAnswer is called by the TUI when the user answers a question.
-func (a *App) handleQuestionAnswer(answer string) {
-	// Send answer to the waiting promptQuestion call with timeout
-	timer := time.NewTimer(30 * time.Second)
-	defer timer.Stop()
-
-	select {
-	case a.questionResponseChan <- answer:
-	case <-timer.C:
-		logging.Warn("question response channel timeout - no listener")
 	}
 }
 
 // PlanApprovalTimeout is the maximum time to wait for a plan approval response.
 const PlanApprovalTimeout = 10 * time.Minute
 
+type planApprovalResponse struct {
+	Decision ui.PlanApprovalDecision
+	Feedback string
+}
+
+func (a *App) registerPlanApprovalRequest() (id string, ch chan planApprovalResponse, cleanup func()) {
+	id = fmt.Sprintf("plan-%d", a.planReqSeq.Add(1))
+	ch = make(chan planApprovalResponse, 1)
+	a.planPendingMu.Lock()
+	if a.planPending == nil {
+		a.planPending = make(map[string]chan planApprovalResponse)
+	}
+	a.planPending[id] = ch
+	a.planPendingMu.Unlock()
+	cleanup = func() {
+		a.planPendingMu.Lock()
+		delete(a.planPending, id)
+		a.planPendingMu.Unlock()
+	}
+	return id, ch, cleanup
+}
+
+func (a *App) handlePlanApproval(reqID string, decision ui.PlanApprovalDecision) {
+	a.handlePlanApprovalWithFeedback(reqID, decision, "")
+}
+
+// handlePlanApprovalWithFeedback only routes intent. State-changing effects
+// happen in the correlated waiter against that waiter's original *plan.Plan.
+func (a *App) handlePlanApprovalWithFeedback(reqID string, decision ui.PlanApprovalDecision, feedback string) {
+	a.planPendingMu.Lock()
+	ch, ok := a.planPending[reqID]
+	a.planPendingMu.Unlock()
+	if !ok {
+		logging.Warn("plan response for unknown or expired request", "request_id", reqID)
+		return
+	}
+	select {
+	case ch <- planApprovalResponse{Decision: decision, Feedback: feedback}:
+	default:
+		logging.Warn("duplicate plan response ignored", "request_id", reqID)
+	}
+}
+
+func (a *App) applyPlanApprovalResponse(p *plan.Plan, response planApprovalResponse) plan.ApprovalDecision {
+	switch response.Decision {
+	case ui.PlanApproved:
+		// The manager commits this decision to the exact current plan before its
+		// approval-commit callback lifts plan mode. Keeping this handler pure
+		// prevents a stale response for plan A from changing plan B's app state.
+		return plan.ApprovalApproved
+	case ui.PlanRejected:
+		// RequestApproval promotes rejection state only after revalidating that
+		// p is still current. The UI handler must stay side-effect free.
+		return plan.ApprovalRejected
+	case ui.PlanModifyRequested:
+		if feedback := strings.TrimSpace(response.Feedback); feedback != "" {
+			if a.planManager != nil {
+				a.planManager.StageApprovalFeedback(p, feedback)
+			}
+		}
+		return plan.ApprovalModified
+	default:
+		return plan.ApprovalRejected
+	}
+}
+
 // promptPlanApproval is called by the plan manager to request user approval.
 func (a *App) promptPlanApproval(ctx context.Context, p *plan.Plan) (plan.ApprovalDecision, error) {
 	if a.program == nil {
-		return plan.ApprovalApproved, nil
+		return plan.ApprovalRejected, fmt.Errorf("plan approval is required, but interactive approval is unavailable in headless mode; disable required plan approval explicitly for intentional unattended execution")
 	}
+	reqID, responseCh, cleanup := a.registerPlanApprovalRequest()
+	defer cleanup()
 
 	// Convert plan steps to UI format
 	steps := make([]ui.PlanStepInfo, len(p.Steps))
@@ -281,6 +385,7 @@ func (a *App) promptPlanApproval(ctx context.Context, p *plan.Plan) (plan.Approv
 
 	// Build plan approval request
 	msg := ui.PlanApprovalRequestMsg{
+		ID:          reqID,
 		Title:       p.Title,
 		Description: p.Description,
 		Steps:       steps,
@@ -294,68 +399,15 @@ func (a *App) promptPlanApproval(ctx context.Context, p *plan.Plan) (plan.Approv
 	defer planTimer.Stop()
 
 	select {
-	case decision := <-a.planApprovalChan:
-		return decision, nil
+	case response := <-responseCh:
+		return a.applyPlanApprovalResponse(p, response), nil
 	case <-ctx.Done():
+		a.notifyPromptExpired(ui.PromptKindPlan, reqID, "Plan approval cancelled — no decision was applied")
 		return plan.ApprovalRejected, ctx.Err()
 	case <-planTimer.C:
 		logging.Warn("plan approval prompt timed out")
+		a.notifyPromptExpired(ui.PromptKindPlan, reqID, "Plan approval expired — no decision was applied")
 		return plan.ApprovalRejected, fmt.Errorf("plan approval prompt timed out after %v", PlanApprovalTimeout)
-	}
-}
-
-// handlePlanApproval is called by the TUI when the user makes a plan approval decision.
-func (a *App) handlePlanApproval(decision ui.PlanApprovalDecision) {
-	a.handlePlanApprovalWithFeedback(decision, "")
-}
-
-// handlePlanApprovalWithFeedback is called by the TUI when the user makes a plan approval decision with feedback.
-func (a *App) handlePlanApprovalWithFeedback(decision ui.PlanApprovalDecision, feedback string) {
-	// Convert UI decision to plan.ApprovalDecision
-	var planDecision plan.ApprovalDecision
-	switch decision {
-	case ui.PlanApproved:
-		planDecision = plan.ApprovalApproved
-		// Claude Code semantics: approving a plan hands control back to the
-		// agent for execution — which means lifting the read-only
-		// restriction. If we stayed in plan mode the model would still only
-		// see read tools and couldn't carry out the plan it just proposed.
-		// User can re-enter plan mode via Shift+Tab or /plan for the next
-		// task.
-		a.disablePlanModeAfterApproval()
-	case ui.PlanRejected:
-		planDecision = plan.ApprovalRejected
-		// Save the rejected plan for context
-		if currentPlan := a.planManager.GetCurrentPlan(); currentPlan != nil {
-			a.planManager.SaveRejectedPlan(currentPlan)
-		}
-	case ui.PlanModifyRequested:
-		planDecision = plan.ApprovalModified
-		// Save the rejected plan for context
-		if currentPlan := a.planManager.GetCurrentPlan(); currentPlan != nil {
-			a.planManager.SaveRejectedPlan(currentPlan)
-		}
-		// Handle feedback - send as a new message to the model
-		if feedback != "" {
-			a.planManager.SetFeedback(feedback)
-			feedbackMsg := fmt.Sprintf("Please modify the plan according to this feedback:\n\n%s", feedback)
-			// Process feedback as a new message. safeGo, not raw go: handleSubmit
-			// runs the full request pipeline — a panic there on a raw goroutine
-			// crashes the whole CLI (same class as the pending-queue dispatch fix).
-			a.safeGo("plan-feedback-dispatch", func() { a.handleSubmit(feedbackMsg) })
-		}
-	default:
-		planDecision = plan.ApprovalRejected
-	}
-
-	// Send decision to the waiting promptPlanApproval call with timeout
-	timer := time.NewTimer(30 * time.Second)
-	defer timer.Stop()
-
-	select {
-	case a.planApprovalChan <- planDecision:
-	case <-timer.C:
-		logging.Warn("plan approval response channel timeout - no listener")
 	}
 }
 
@@ -381,9 +433,11 @@ func (a *App) handlePlanProgressUpdate(progress *plan.ProgressUpdate) {
 // handleModelSelect is called by the TUI when the user selects a model. Client
 // reconstruction may perform network/provider setup, so it must not block the
 // Bubble Tea event loop that owns rendering and keyboard input.
-func (a *App) handleModelSelect(modelID string) {
+func (a *App) handleModelSelect(requestID, modelID string) {
 	a.safeGo("model-selector-apply", func() {
-		a.safeSendToProgram(a.applyModelSelection(modelID))
+		result := a.applyModelSelection(modelID)
+		result.RequestID = requestID
+		a.safeSendToProgram(result)
 	})
 }
 
@@ -401,18 +455,13 @@ func (a *App) applyModelSelection(modelID string) ui.ModelSelectResultMsg {
 	// Build a candidate without mutating the live config before ApplyConfig has
 	// acquired its lock. Preserve the slice backing store too so rollback cannot
 	// alias a later model mutation.
-	a.mu.Lock()
-	if a.config == nil {
-		a.mu.Unlock()
+	previous := a.GetConfig()
+	if previous == nil {
 		result.Message = "Couldn't switch model: configuration is unavailable"
 		return result
 	}
-	previous := *a.config
-	previous.Model.FallbackProviders = append([]string(nil), a.config.Model.FallbackProviders...)
-	a.mu.Unlock()
 
-	candidate := previous
-	candidate.Model.FallbackProviders = append([]string(nil), previous.Model.FallbackProviders...)
+	candidate := previous.Clone()
 	candidate.Model.Name = modelID
 	candidate.Model.Provider = config.DetectProvider(modelID)
 	// Clear any stale model.preset so the explicit selection isn't reverted by
@@ -424,17 +473,18 @@ func (a *App) applyModelSelection(modelID string) ui.ModelSelectResultMsg {
 		candidate.Model.MaxOutputTokens = preset.MaxOutputTokens
 	}
 
-	if err := a.ApplyConfig(&candidate); err != nil {
+	revision, err := a.applyConfig(candidate)
+	if err != nil {
 		logging.Warn("failed to apply model selection", "error", err)
 		result.ModelID = previous.Model.Name
-		result.Message = fmt.Sprintf("Couldn't switch to %s: %v · previous model restored", modelID, err)
-		if rollbackErr := a.ApplyConfig(&previous); rollbackErr != nil {
-			logging.Error("failed to restore model after selection error", "model", previous.Model.Name, "error", rollbackErr)
-			result.Message += fmt.Sprintf(" (rollback error: %v)", rollbackErr)
+		if current := a.GetConfig(); current != nil {
+			result.ModelID = current.Model.Name
 		}
+		result.Message = fmt.Sprintf("Couldn't switch to %s: %v · current model kept", modelID, err)
 		return result
 	}
 
+	result.Revision = revision
 	result.Success = true
 	result.ModelID = modelID
 	result.Message = "Switched to " + modelID
@@ -470,6 +520,40 @@ func drainMultiDiffDecisionChan(ch <-chan map[string]ui.DiffDecision) {
 	}
 }
 
+func (a *App) registerDiffRequest() (id string, ch chan ui.DiffDecision, cleanup func()) {
+	id = fmt.Sprintf("diff-%d", a.diffReqSeq.Add(1))
+	ch = make(chan ui.DiffDecision, 1)
+	a.diffPendingMu.Lock()
+	if a.diffPending == nil {
+		a.diffPending = make(map[string]chan ui.DiffDecision)
+	}
+	a.diffPending[id] = ch
+	a.diffPendingMu.Unlock()
+	cleanup = func() {
+		a.diffPendingMu.Lock()
+		delete(a.diffPending, id)
+		a.diffPendingMu.Unlock()
+	}
+	return id, ch, cleanup
+}
+
+func (a *App) registerMultiDiffRequest() (id string, ch chan map[string]ui.DiffDecision, cleanup func()) {
+	id = fmt.Sprintf("multi-diff-%d", a.multiDiffReqSeq.Add(1))
+	ch = make(chan map[string]ui.DiffDecision, 1)
+	a.multiDiffPendingMu.Lock()
+	if a.multiDiffPending == nil {
+		a.multiDiffPending = make(map[string]chan map[string]ui.DiffDecision)
+	}
+	a.multiDiffPending[id] = ch
+	a.multiDiffPendingMu.Unlock()
+	cleanup = func() {
+		a.multiDiffPendingMu.Lock()
+		delete(a.multiDiffPending, id)
+		a.multiDiffPendingMu.Unlock()
+	}
+	return id, ch, cleanup
+}
+
 // promptDiffDecision is called by tools to request user approval for file changes.
 // It sends a request to the TUI and waits for a response with timeout.
 func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newContent, toolName string, isNewFile bool) (ui.DiffDecision, error) {
@@ -490,10 +574,13 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 		return ui.DiffApply, nil
 	}
 
+	reqID, responseCh, cleanup := a.registerDiffRequest()
+	defer cleanup()
 	drainDiffDecisionChan(a.diffResponseChan)
 
 	// Send diff preview request to TUI
 	a.safeSendToProgram(ui.DiffPreviewRequestMsg{
+		RequestID:  reqID,
 		FilePath:   filePath,
 		OldContent: oldContent,
 		NewContent: newContent,
@@ -506,7 +593,7 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 	defer diffTimer.Stop()
 
 	select {
-	case decision := <-a.diffResponseChan:
+	case decision := <-responseCh:
 		if decision == ui.DiffApplyAll {
 			a.mu.Lock()
 			a.diffBatchDecision = ui.DiffApplyAll
@@ -521,23 +608,28 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 		}
 		return decision, nil
 	case <-ctx.Done():
+		a.notifyPromptExpired(ui.PromptKindDiff, reqID, "Diff review cancelled — no changes were applied")
 		return ui.DiffReject, ctx.Err()
 	case <-diffTimer.C:
 		logging.Warn("diff decision prompt timed out", "file", filePath)
+		a.notifyPromptExpired(ui.PromptKindDiff, reqID, "Diff review expired — no changes were applied")
 		return ui.DiffReject, fmt.Errorf("diff decision prompt timed out after %v", DiffDecisionTimeout)
 	}
 }
 
 // handleDiffDecision is called by the TUI when the user makes a diff preview decision.
-func (a *App) handleDiffDecision(decision ui.DiffDecision) {
-	// Send decision to the waiting promptDiffDecision call with timeout
-	timer := time.NewTimer(30 * time.Second)
-	defer timer.Stop()
-
+func (a *App) handleDiffDecision(reqID string, decision ui.DiffDecision) {
+	a.diffPendingMu.Lock()
+	ch, ok := a.diffPending[reqID]
+	a.diffPendingMu.Unlock()
+	if !ok {
+		logging.Warn("diff response for unknown or expired request", "request_id", reqID)
+		return
+	}
 	select {
-	case a.diffResponseChan <- decision:
-	case <-timer.C:
-		logging.Warn("diff response channel timeout - no listener")
+	case ch <- decision:
+	default:
+		logging.Warn("duplicate diff response ignored", "request_id", reqID)
 	}
 }
 
@@ -559,30 +651,42 @@ func (a *App) promptMultiDiffDecision(ctx context.Context, files []ui.DiffFile) 
 		return decisions, nil
 	}
 
-	a.safeSendToProgram(ui.MultiDiffPreviewRequestMsg{Files: files})
+	reqID, responseCh, cleanup := a.registerMultiDiffRequest()
+	defer cleanup()
+	a.safeSendToProgram(ui.MultiDiffPreviewRequestMsg{RequestID: reqID, Files: files})
 
 	diffTimer := time.NewTimer(DiffDecisionTimeout)
 	defer diffTimer.Stop()
 
 	select {
-	case decisions := <-a.multiDiffResponseChan:
+	case decisions := <-responseCh:
 		return decisions, nil
 	case <-ctx.Done():
+		a.notifyPromptExpired(ui.PromptKindMultiDiff, reqID, "Multi-file review cancelled — no changes were applied")
 		return nil, ctx.Err()
 	case <-diffTimer.C:
 		logging.Warn("multi diff decision prompt timed out", "files", len(files))
+		a.notifyPromptExpired(ui.PromptKindMultiDiff, reqID, "Multi-file review expired — no changes were applied")
 		return nil, fmt.Errorf("multi diff decision prompt timed out after %v", DiffDecisionTimeout)
 	}
 }
 
-func (a *App) handleMultiDiffDecision(decisions map[string]ui.DiffDecision) {
-	timer := time.NewTimer(30 * time.Second)
-	defer timer.Stop()
-
+func (a *App) handleMultiDiffDecision(reqID string, decisions map[string]ui.DiffDecision) {
+	a.multiDiffPendingMu.Lock()
+	ch, ok := a.multiDiffPending[reqID]
+	a.multiDiffPendingMu.Unlock()
+	if !ok {
+		logging.Warn("multi-diff response for unknown or expired request", "request_id", reqID)
+		return
+	}
+	response := make(map[string]ui.DiffDecision, len(decisions))
+	for file, decision := range decisions {
+		response[file] = decision
+	}
 	select {
-	case a.multiDiffResponseChan <- decisions:
-	case <-timer.C:
-		logging.Warn("multi diff response channel timeout - no listener")
+	case ch <- response:
+	default:
+		logging.Warn("duplicate multi-diff response ignored", "request_id", reqID)
 	}
 }
 

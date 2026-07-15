@@ -7,11 +7,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"gokin/internal/logging"
 
 	"gopkg.in/yaml.v3"
 )
+
+var configSaveMu sync.Mutex
 
 // Load loads configuration from file and environment variables.
 // It merges global config with per-project config (.gokin/config.yaml) if present.
@@ -78,11 +81,16 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 
 	// Load project-specific config
 	projectConfigPath := filepath.Join(projectDir, ".gokin", "config.yaml")
+	// A repository-controlled config must not opt itself into reading the
+	// user's cross-project memory. Treat the user-level decision loaded by Load
+	// as a capability ceiling: project config may narrow it, never widen it.
+	userAllowsGlobal := cfg.Memory.AllowGlobal
 	if err := loadFromFile(cfg, projectConfigPath); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to load project config: %w", err)
 		}
 	}
+	cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
 
 	return cfg, nil
 }
@@ -100,9 +108,14 @@ func loadProjectConfig(cfg *Config) {
 		projectConfig := filepath.Join(dir, ".gokin", "config.yaml")
 		if _, err := os.Stat(projectConfig); err == nil {
 			// Found project config, merge it
+			userAllowsGlobal := cfg.Memory.AllowGlobal
 			if err := loadFromFile(cfg, projectConfig); err != nil {
 				slog.Warn("failed to load project config", "path", projectConfig, "error", err)
 			}
+			// allow_global is a user trust decision, not a capability a repository
+			// may grant itself. A project may explicitly disable it, but cannot
+			// widen a user-level false into cross-project prompt injection.
+			cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
 			return
 		}
 
@@ -377,6 +390,9 @@ func GetConfigPath() string {
 
 // Save saves the configuration to the config file.
 func (c *Config) Save() error {
+	configSaveMu.Lock()
+	defer configSaveMu.Unlock()
+
 	configPath := getConfigPath()
 	if configPath == "" {
 		return fmt.Errorf("could not determine config path")

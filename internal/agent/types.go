@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gokin/internal/config"
+	"gokin/internal/tools"
 )
 
 // AgentType defines the type of agent and its capabilities.
@@ -73,10 +74,10 @@ func (t AgentType) AllowedTools() []string {
 	case AgentTypeExplore:
 		return []string{
 			"read", "glob", "grep", "tree", "list_dir",
-			"tools_list", "request_tool", "ask_agent",
+			"tools_list", "skill", "request_tool", "ask_agent",
 		}
 	case AgentTypeBash:
-		return []string{"bash", "read", "glob", "tools_list", "request_tool", "ask_agent"}
+		return []string{"bash", "read", "glob", "tools_list", "skill", "request_tool", "ask_agent"}
 	case AgentTypeGeneral:
 		return nil // nil means all tools allowed
 	case AgentTypePlan:
@@ -84,14 +85,14 @@ func (t AgentType) AllowedTools() []string {
 		return []string{
 			"read", "glob", "grep", "tree", "list_dir", "diff",
 			"todo", "web_fetch", "web_search", "ask_user", "env",
-			"tools_list", "request_tool", "ask_agent",
+			"tools_list", "skill", "request_tool", "ask_agent",
 			// Planning tools
 			"enter_plan_mode", "exit_plan_mode",
 			"update_plan_progress", "get_plan_status",
 		}
 	case AgentTypeGuide:
 		// Documentation/search focused
-		return []string{"glob", "grep", "read", "web_fetch", "web_search", "tools_list", "request_tool", "ask_agent"}
+		return []string{"glob", "grep", "read", "web_fetch", "web_search", "tools_list", "skill", "request_tool", "ask_agent"}
 	default:
 		return []string{}
 	}
@@ -144,6 +145,11 @@ type AgentResult struct {
 	Completed bool           `json:"completed"`
 	Metadata  map[string]any `json:"metadata,omitempty"` // Additional context (e.g., learned_entry_id for feedback loop)
 
+	// PolicyBlock carries the first authorization boundary refused during this
+	// run. Status may still be completed when the model produced an explanation,
+	// but synchronous callers must not mistake that prose for authorized work.
+	PolicyBlock *tools.PolicyBlock `json:"policy_block,omitempty"`
+
 	// OutputFile is the path to the file-backed output stream.
 	// When set, full output is read from this file instead of the Output field.
 	OutputFile string `json:"output_file,omitempty"`
@@ -157,6 +163,12 @@ type AgentResult struct {
 	CacheReadInputTokens int     `json:"cache_read_input_tokens,omitempty"`
 	EstimatedCost        float64 `json:"estimated_cost,omitempty"`
 	CostTracked          bool    `json:"cost_tracked,omitempty"`
+
+	// InvocationScope is runtime-only attribution metadata. It is deliberately
+	// excluded from persistence and model/tool output; the App accounting
+	// callback uses exact equality to keep old async completions out of a newer
+	// headless invocation while retaining them in cumulative session totals.
+	InvocationScope InvocationScope `json:"-"`
 
 	// MutatingToolCalls is how many code/repo-MUTATING tools (IsImplementationTool:
 	// write/edit/delete/refactor/git_commit/…) the agent ran this turn. Surfaced so

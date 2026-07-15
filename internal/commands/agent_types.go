@@ -28,7 +28,7 @@ func (c *RegisterAgentTypeCommand) GetMetadata() CommandMetadata {
 		Category: CategoryTools,
 		Icon:     "robot",
 		HasArgs:  true,
-		ArgHint:  `<name> "<desc>" [--tools ...]`,
+		ArgHint:  `<name> "<desc>" [--tools ...] [--prompt ...]`,
 		Priority: 30,
 		Advanced: true,
 	}

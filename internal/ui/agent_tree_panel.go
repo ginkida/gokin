@@ -70,7 +70,22 @@ const agentTreeFullRender = 8
 func (p *AgentTreePanel) UpdateTree(nodes []AgentTreeNode) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.nodes = nodes
+	p.nodes = make([]AgentTreeNode, len(nodes))
+	for i, node := range nodes {
+		node.ID = safeKeyEntryText(node.ID)
+		node.AgentType = safeKeyEntryText(node.AgentType)
+		node.Description = safeKeyEntryText(node.Description)
+		node.Thought = safeKeyEntryText(node.Thought)
+		node.CurrentTool = safeKeyEntryText(node.CurrentTool)
+		node.Reflection = safeKeyEntryText(node.Reflection)
+		node.Status = normalizeAgentTreeStatus(node.Status)
+		node.Dependencies = append([]string(nil), node.Dependencies...)
+		for j := range node.Dependencies {
+			node.Dependencies[j] = safeKeyEntryText(node.Dependencies[j])
+		}
+		p.nodes[i] = node
+	}
+	nodes = p.nodes
 
 	// Auto-show when there are ≥2 tasks — but never against an explicit
 	// user hide (userHidden): without the latch, a user closing the tree
@@ -94,6 +109,16 @@ func (p *AgentTreePanel) UpdateTree(nodes []AgentTreeNode) {
 		}
 	} else {
 		p.allDoneAt = time.Time{}
+	}
+}
+
+func normalizeAgentTreeStatus(status string) string {
+	status = strings.ToLower(safeKeyEntryText(status))
+	switch status {
+	case "pending", "ready", "running", "completed", "failed", "skipped", "blocked":
+		return status
+	default:
+		return "unknown"
 	}
 }
 
@@ -148,8 +173,10 @@ func (p *AgentTreePanel) NodeCount() int {
 	return len(p.nodes)
 }
 
-// View renders the agent tree panel.
-func (p *AgentTreePanel) View(width int) string {
+// View renders the agent tree panel. When a terminal height is supplied, the
+// panel budgets its own rows instead of relying on the final screen compositor
+// to crop the top of an oversized tree.
+func (p *AgentTreePanel) View(width int, heights ...int) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -166,6 +193,14 @@ func (p *AgentTreePanel) View(width int) string {
 	}
 	if width < 4 {
 		return truncateForWidth("Agents", width)
+	}
+	height := 0
+	if len(heights) > 0 {
+		height = heights[0]
+	}
+	maxPanelHeight := agentTreePanelHeightBudget(height)
+	if maxPanelHeight > 0 && maxPanelHeight < 4 {
+		return truncateForWidth(fmt.Sprintf("Agents · Ctrl+A hide · %d tasks", len(p.nodes)), width)
 	}
 	horizontalPadding := 1
 	if width < 6 {
@@ -188,6 +223,7 @@ func (p *AgentTreePanel) View(width int) string {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
 	successStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 	errorStyle := lipgloss.NewStyle().Foreground(ColorError)
+	warningStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 	runningStyle := lipgloss.NewStyle().Foreground(ColorGradient1).Bold(true)
 	pendingStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	agentTypeStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
@@ -197,35 +233,107 @@ func (p *AgentTreePanel) View(width int) string {
 
 	spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-	// Header
-	builder.WriteString(headerStyle.Render("⬡ Agent Orchestrator"))
-	builder.WriteString("\n")
-
-	// Long trees render in compact mode: terminal nodes (✓/⊘) collapse into
+	// Long or height-constrained trees render in compact mode: terminal nodes
+	// (✓/⊘) collapse into
 	// the footer summary and queued nodes render up to a budget — 10
 	// parallel tasks otherwise pin a 12+ line box while they run. Running
 	// and failed nodes ALWAYS render; thought/reflection sublines are
 	// suppressed for non-running nodes in compact mode.
-	compact := len(p.nodes) > agentTreeFullRender
+	baseNodeBudget := agentTreeFullRender
+	showSummary := true
+	if maxPanelHeight > 0 {
+		// Border + title + divider + summary consume five rows. At the
+		// irreducible four/five-row size, keep the title/action and current task
+		// rather than dropping the task itself for aggregate counts.
+		if maxPanelHeight >= 6 {
+			baseNodeBudget = min(baseNodeBudget, max(maxPanelHeight-5, 1))
+		} else {
+			showSummary = false
+			baseNodeBudget = min(baseNodeBudget, max(maxPanelHeight-3, 1))
+		}
+	}
+	compact := len(p.nodes) > agentTreeFullRender || baseNodeBudget < len(p.nodes)
 	doneHidden := 0
 	queuedHidden := 0
-	selectedCompact := make(map[int]bool, agentTreeFullRender)
+	selectedCompact := make(map[int]bool, baseNodeBudget)
 	if compact {
 		// Choose a bounded set by operational priority, then render those nodes
 		// in original tree order. This prevents dozens of simultaneous running
 		// rows from pinning the entire terminal while still preferring live and
 		// failed work over queued tasks.
-		for priority := 0; priority < 2 && len(selectedCompact) < agentTreeFullRender; priority++ {
+		allowTerminalRows := len(p.nodes) <= agentTreeFullRender
+		for priority := 0; priority < 3 && len(selectedCompact) < baseNodeBudget; priority++ {
 			for i, node := range p.nodes {
-				if len(selectedCompact) >= agentTreeFullRender {
+				if len(selectedCompact) >= baseNodeBudget {
 					break
 				}
-				if node.Status == "completed" || node.Status == "skipped" {
-					continue
-				}
-				highPriority := node.Status == "running" || node.Status == "failed"
-				if (priority == 0) == highPriority {
+				isLive := node.Status == "running" || node.Status == "failed"
+				isWaiting := node.Status == "blocked" || node.Status == "ready" || node.Status == "pending" || node.Status == "unknown"
+				if (priority == 0 && isLive) || (priority == 1 && isWaiting) || (priority == 2 && allowTerminalRows && !isLive && !isWaiting) {
 					selectedCompact[i] = true
+				}
+			}
+		}
+	}
+
+	// Header. At the irreducible height the footer yields, so keep the inverse
+	// action and any node compaction discoverable in the title itself.
+	title := "⬡ Agent Orchestrator"
+	if maxPanelHeight > 0 && maxPanelHeight < 6 {
+		title = "⬡ Agents · Ctrl+A hide"
+		visibleNodes := len(p.nodes)
+		if compact {
+			visibleNodes = 0
+			for index, node := range p.nodes {
+				if selectedCompact[index] && node.Status != "completed" && node.Status != "skipped" {
+					visibleNodes++
+				}
+			}
+		}
+		if hidden := len(p.nodes) - visibleNodes; hidden > 0 {
+			title += fmt.Sprintf(" · %d folded", hidden)
+		}
+	}
+	builder.WriteString(headerStyle.Render(title))
+	builder.WriteString("\n")
+
+	// Detail rows use only space left after the selected task rows. Recovery
+	// information outranks thought prose; active thoughts outrank completed
+	// thoughts. This keeps compact output useful without exceeding its budget.
+	detailBudget := 0
+	if maxPanelHeight > 0 {
+		selectedCount := len(p.nodes)
+		if compact {
+			selectedCount = len(selectedCompact)
+		}
+		detailBudget = max(baseNodeBudget-selectedCount, 0)
+	}
+	showReflection := make(map[int]bool)
+	showThought := make(map[int]bool)
+	selected := func(index int) bool { return !compact || selectedCompact[index] }
+	if maxPanelHeight <= 0 {
+		for index, node := range p.nodes {
+			showReflection[index] = node.Reflection != ""
+			showThought[index] = node.Thought != "" && (node.Status == "running" || node.Status == "completed")
+		}
+	} else {
+		for index, node := range p.nodes {
+			if detailBudget == 0 {
+				break
+			}
+			if selected(index) && node.Reflection != "" {
+				showReflection[index] = true
+				detailBudget--
+			}
+		}
+		for _, status := range []string{"running", "completed"} {
+			for index, node := range p.nodes {
+				if detailBudget == 0 {
+					break
+				}
+				if selected(index) && node.Status == status && node.Thought != "" {
+					showThought[index] = true
+					detailBudget--
 				}
 			}
 		}
@@ -277,8 +385,10 @@ func (p *AgentTreePanel) View(width int) string {
 			line.WriteString(dimStyle.Render("⊘"))
 		case "blocked":
 			line.WriteString(pendingStyle.Render("◌"))
-		default: // pending, ready
+		case "pending", "ready":
 			line.WriteString(pendingStyle.Render("○"))
+		default:
+			line.WriteString(warningStyle.Render("?"))
 		}
 		line.WriteString(" ")
 
@@ -287,28 +397,30 @@ func (p *AgentTreePanel) View(width int) string {
 		if agentType == "" {
 			agentType = "agent"
 		}
+		agentType = truncateForWidth(agentType, min(20, max(contentWidth/3, 1)))
 		line.WriteString(agentTypeStyle.Render(fmt.Sprintf("[%s]", agentType)))
 		line.WriteString(" ")
 
 		// Progress bar for running agents
 		if node.Status == "running" && node.ToolsUsed > 0 {
 			barWidth := min(8, max(contentWidth-lipgloss.Width(line.String())-5, 0))
-			var filled int
-			if !math.IsNaN(node.Progress) && node.Progress >= 0 {
-				progress := min(node.Progress, 1)
-				filled = int(progress * float64(barWidth))
-			} else {
-				// Indeterminate: bounce
-				pos := (p.frame / 2) % (barWidth * 2)
-				if pos >= barWidth {
-					pos = barWidth*2 - pos - 1
-				}
-				filled = pos + 1
-			}
-			if filled > barWidth {
-				filled = barWidth
-			}
 			if barWidth >= 3 {
+				var filled int
+				if !math.IsNaN(node.Progress) && node.Progress >= 0 {
+					progress := min(node.Progress, 1)
+					filled = int(progress * float64(barWidth))
+				} else {
+					// Indeterminate: bounce. Keep the modulo inside the visible
+					// bar guard so constrained rows can never divide by zero.
+					pos := (p.frame / 2) % (barWidth * 2)
+					if pos >= barWidth {
+						pos = barWidth*2 - pos - 1
+					}
+					filled = pos + 1
+				}
+				if filled > barWidth {
+					filled = barWidth
+				}
 				bar := successStyle.Render(strings.Repeat("━", filled)) +
 					dimStyle.Render(strings.Repeat("─", barWidth-filled))
 				line.WriteString(bar)
@@ -356,7 +468,7 @@ func (p *AgentTreePanel) View(width int) string {
 		builder.WriteString("\n")
 
 		// Thought rendering (if present and agent is active)
-		if node.Thought != "" && (node.Status == "running" || node.Status == "completed") {
+		if showThought[index] {
 			var thoughtLine strings.Builder
 			indentStr := strings.Repeat("  ", min(max(node.Depth, 0), max(contentWidth/4, 0)))
 			connector := "   │ "
@@ -376,7 +488,7 @@ func (p *AgentTreePanel) View(width int) string {
 		}
 
 		// Reflection rendering (Self-correction)
-		if node.Reflection != "" {
+		if showReflection[index] {
 			var reflLine strings.Builder
 			indentStr := strings.Repeat("  ", min(max(node.Depth, 0), max(contentWidth/4, 0)))
 			connector := "   │ "
@@ -401,14 +513,18 @@ func (p *AgentTreePanel) View(width int) string {
 		}
 	}
 
-	// Summary footer
-	summary := p.buildSummary()
+	// Summary footer. Put the hide action and fold disclosure first so both
+	// survive truncation on narrow terminals; aggregate counts follow.
+	summary := "Ctrl+A hide"
 	if hidden := doneHidden + queuedHidden; hidden > 0 {
 		// Make the compaction visible — without this a user counting rows
 		// would think tasks vanished. Totals live in the summary below.
 		summary += fmt.Sprintf(" · %d row(s) folded", hidden)
 	}
-	if summary != "" {
+	if counts := p.buildSummary(); counts != "" {
+		summary += " · " + counts
+	}
+	if showSummary {
 		builder.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 		builder.WriteString("\n")
 		builder.WriteString(dimStyle.Render("  " + summary))
@@ -419,9 +535,20 @@ func (p *AgentTreePanel) View(width int) string {
 	return borderStyle.Width(width - 2).Render(content)
 }
 
+// agentTreePanelHeightBudget leaves two terminal rows for the surrounding
+// activity/composer chrome and caps this background panel at fourteen rows so
+// it never takes over a tall screen. A zero height preserves the legacy
+// standalone rendering contract used by callers that have no terminal size.
+func agentTreePanelHeightBudget(terminalHeight int) int {
+	if terminalHeight <= 0 {
+		return 0
+	}
+	return min(terminalHeight, min(max(terminalHeight-2, 4), 14))
+}
+
 // buildSummary returns a compact summary line.
 func (p *AgentTreePanel) buildSummary() string {
-	var running, completed, pending, failed int
+	var running, completed, pending, blocked, failed, skipped, unknown int
 	var totalDuration time.Duration
 
 	for _, node := range p.nodes {
@@ -437,8 +564,15 @@ func (p *AgentTreePanel) buildSummary() string {
 		case "failed":
 			failed++
 			totalDuration += node.Duration
-		default:
+		case "skipped":
+			skipped++
+			totalDuration += node.Duration
+		case "blocked":
+			blocked++
+		case "pending", "ready":
 			pending++
+		default:
+			unknown++
 		}
 	}
 
@@ -452,8 +586,17 @@ func (p *AgentTreePanel) buildSummary() string {
 	if pending > 0 {
 		parts = append(parts, fmt.Sprintf("%d pending", pending))
 	}
+	if blocked > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocked", blocked))
+	}
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", failed))
+	}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped", skipped))
+	}
+	if unknown > 0 {
+		parts = append(parts, fmt.Sprintf("%d unknown", unknown))
 	}
 	if totalDuration > 0 {
 		parts = append(parts, format.Duration(totalDuration))

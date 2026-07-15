@@ -17,9 +17,11 @@ import (
 // Works on macOS, Linux (X11/Wayland), Windows, and WSL.
 type CopyCommand struct{}
 
-func (c *CopyCommand) Name() string        { return "copy" }
-func (c *CopyCommand) Description() string { return "Copy text or last response to clipboard" }
-func (c *CopyCommand) Usage() string       { return "/copy [--last|--all|--ascii] [<text>]" }
+func (c *CopyCommand) Name() string { return "copy" }
+func (c *CopyCommand) Description() string {
+	return "Copy text, the last response, or the conversation"
+}
+func (c *CopyCommand) Usage() string { return "/copy [--last|--all|--ascii] [<text>]" }
 func (c *CopyCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategoryTools,

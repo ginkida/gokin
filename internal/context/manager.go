@@ -613,10 +613,14 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 	// catch it). Skip on version mismatch; the next turn re-triggers compaction
 	// against the fresh history.
 	newHistory := ApplySummaryPlan(plan, summary)
-	if !m.session.SetHistoryIfVersion(newHistory, historyVersion) {
+	committedHistory, committed := m.session.SetHistoryIfVersionWithSkillCarry(
+		newHistory, historyVersion, len(plan.KeepStart)+1,
+	)
+	if !committed {
 		logging.Debug("context: skipped compaction commit — history changed during summarization (retries next turn)")
 		return nil
 	}
+	newHistory = committedHistory
 
 	// Recount tokens
 	tokens, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(ctx, newHistory)
@@ -921,10 +925,12 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	// background goroutine (async token-count → tryAutoCompact) built from the
 	// snapshot above, concurrent with the foreground turn's own SetHistory. Skip
 	// on version mismatch so a stale compaction can't wipe the just-finished turn.
-	if !m.session.SetHistoryIfVersion(newHistory, historyVersion) {
+	committedHistory, committed := m.session.SetHistoryIfVersionWithSkillCarry(newHistory, historyVersion, 1)
+	if !committed {
 		logging.Debug("context: skipped incremental compaction commit — history changed during summarization (retries next turn)")
 		return nil
 	}
+	newHistory = committedHistory
 
 	// Update token count
 	tokens, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(ctx, newHistory)
@@ -1035,7 +1041,11 @@ func (m *ContextManager) EmergencyTruncate() int {
 	// strict providers 400 on that. Prune orphaned tool parts as a final pass.
 	newHistory = pruneOrphanedToolParts(newHistory)
 
-	m.session.SetHistory(newHistory)
+	carryAt := len(preserved)
+	if regrounding != nil {
+		carryAt++
+	}
+	newHistory = m.session.SetHistoryWithSkillCarry(newHistory, carryAt)
 
 	// Update cached token count — save old value BEFORE overwriting for the callback
 	tokens := EstimateContentsTokens(newHistory)
@@ -1048,7 +1058,7 @@ func (m *ContextManager) EmergencyTruncate() int {
 	m.lastHistoryLen = len(newHistory)
 	m.mu.Unlock()
 
-	removed := len(history) - len(newHistory)
+	removed := max(0, len(history)-len(newHistory))
 	logging.Warn("emergency truncation performed",
 		"removed", removed,
 		"before", len(history),

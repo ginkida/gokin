@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"errors"
 	"os/exec"
 	"syscall"
 	"time"
@@ -17,9 +18,11 @@ func setBashProcAttr(cmd *exec.Cmd) {
 	}
 }
 
-// killBashProcessGroup attempts graceful shutdown with SIGTERM, then SIGKILL after timeout.
-// done is closed when cmd.Wait() completes, allowing early exit from the grace period.
-func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan struct{}) {
+// killBashProcessGroup attempts graceful shutdown with SIGTERM, then SIGKILL
+// after timeout. cmd.Wait completing only proves the shell leader exited; it
+// must never be used as evidence that descendants in the process group are
+// gone.
+func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration, _ <-chan struct{}) {
 	if cmd.Process == nil {
 		return
 	}
@@ -28,28 +31,42 @@ func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan 
 
 	// First, try graceful shutdown with SIGTERM
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return // The process group is already gone.
+		}
 		// Process group kill failed, try individual process
 		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			logging.Debug("SIGTERM failed, trying SIGKILL", "error", err)
 		}
 	}
 
-	// Wait for process exit or grace period expiry
+	// Wait for the process GROUP to disappear or the grace period to expire.
+	// A TERM-ignoring descendant can remain after the shell's Wait is done.
 	graceTimer := time.NewTimer(gracePeriod)
 	defer graceTimer.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
 
-	select {
-	case <-done:
-		// Process exited after SIGTERM — no need for SIGKILL
-		return
-	case <-graceTimer.C:
-	}
-
-	// Grace period expired - escalate to SIGKILL
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-		// Fallback to killing just the process
-		if err := cmd.Process.Kill(); err != nil {
-			logging.Warn("failed to kill process", "error", err)
+	for bashProcessGroupExists(pid) {
+		select {
+		case <-poll.C:
+		case <-graceTimer.C:
+			if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				// Fallback to killing just the process leader. The caller still
+				// waits/reaps it before returning.
+				if err := cmd.Process.Kill(); err != nil {
+					logging.Warn("failed to kill process group", "error", err)
+				}
+			}
+			return
 		}
 	}
+}
+
+func bashProcessGroupExists(pgid int) bool {
+	err := syscall.Kill(-pgid, 0)
+	if err == nil || errors.Is(err, syscall.EPERM) {
+		return true
+	}
+	return !errors.Is(err, syscall.ESRCH)
 }

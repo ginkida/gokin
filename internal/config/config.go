@@ -1,6 +1,8 @@
 package config
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -32,6 +34,97 @@ type Config struct {
 
 	// Runtime version information
 	Version string `yaml:"-"`
+
+	// snapshotRevision is app-owned optimistic-concurrency metadata. It is
+	// deliberately unexported and never serialized; commands only carry it back
+	// through Clone/GetConfig -> ApplyConfig.
+	snapshotRevision uint64
+	snapshotTracked  bool
+	snapshotMCP      MCPConfig
+	snapshotMCPSet   bool
+}
+
+// SetSnapshotRevision marks which authoritative app revision this candidate
+// was cloned from.
+func (c *Config) SetSnapshotRevision(revision uint64) {
+	if c == nil {
+		return
+	}
+	c.snapshotRevision = revision
+	c.snapshotTracked = true
+	c.snapshotMCP = cloneMCPConfig(c.MCP)
+	c.snapshotMCPSet = true
+}
+
+// SnapshotRevision returns the candidate's optimistic-concurrency base.
+func (c *Config) SnapshotRevision() (uint64, bool) {
+	if c == nil {
+		return 0, false
+	}
+	return c.snapshotRevision, c.snapshotTracked
+}
+
+// SnapshotMCP returns the MCP section present when this candidate was created.
+// Section-scoped commits use it to merge their actual add/remove delta into a
+// newer authoritative config instead of replacing a concurrently edited list.
+func (c *Config) SnapshotMCP() (MCPConfig, bool) {
+	if c == nil || !c.snapshotMCPSet {
+		return MCPConfig{}, false
+	}
+	return cloneMCPConfig(c.snapshotMCP), true
+}
+
+// ClearSnapshotRevision turns a candidate into an internally owned committed
+// config; the next GetConfig call assigns a fresh base.
+func (c *Config) ClearSnapshotRevision() {
+	if c == nil {
+		return
+	}
+	c.snapshotRevision = 0
+	c.snapshotTracked = false
+	c.snapshotMCP = MCPConfig{}
+	c.snapshotMCPSet = false
+}
+
+// Clone returns an independently owned configuration snapshot. Config values
+// cross asynchronous command/app boundaries, so a shallow struct copy is not
+// enough: maps and slices would still let a staged command mutate the live
+// config before ApplyConfig commits it.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	clone := *c
+	clone.API.Retry.Providers = maps.Clone(c.API.Retry.Providers)
+	clone.Model.FallbackProviders = slices.Clone(c.Model.FallbackProviders)
+	clone.Tools.AllowedDirs = slices.Clone(c.Tools.AllowedDirs)
+	clone.Tools.Formatters = maps.Clone(c.Tools.Formatters)
+	clone.Tools.Bash.BlockedCommands = slices.Clone(c.Tools.Bash.BlockedCommands)
+	clone.Permission.Rules = maps.Clone(c.Permission.Rules)
+	clone.Plan.VerifyPolicy.AllowContains = slices.Clone(c.Plan.VerifyPolicy.AllowContains)
+	clone.Plan.VerifyPolicy.DenyContains = slices.Clone(c.Plan.VerifyPolicy.DenyContains)
+	clone.Plan.VerifyPolicy.Profiles = maps.Clone(c.Plan.VerifyPolicy.Profiles)
+	for key, profile := range clone.Plan.VerifyPolicy.Profiles {
+		profile.AllowContains = slices.Clone(profile.AllowContains)
+		profile.DenyContains = slices.Clone(profile.DenyContains)
+		clone.Plan.VerifyPolicy.Profiles[key] = profile
+	}
+	clone.Hooks.Hooks = slices.Clone(c.Hooks.Hooks)
+	clone.Hooks.TrustedWorkspaces = slices.Clone(c.Hooks.TrustedWorkspaces)
+	clone.MCP = cloneMCPConfig(c.MCP)
+	clone.snapshotMCP = cloneMCPConfig(c.snapshotMCP)
+	return &clone
+}
+
+func cloneMCPConfig(source MCPConfig) MCPConfig {
+	clone := source
+	clone.Servers = slices.Clone(source.Servers)
+	for i := range clone.Servers {
+		clone.Servers[i].Args = slices.Clone(clone.Servers[i].Args)
+		clone.Servers[i].Env = maps.Clone(clone.Servers[i].Env)
+		clone.Servers[i].Headers = maps.Clone(clone.Servers[i].Headers)
+	}
+	return clone
 }
 
 // CompletionConfig controls how the final response to the user is
@@ -254,7 +347,7 @@ type UIConfig struct {
 	MarkdownRendering   bool   `yaml:"markdown_rendering"`
 	ShowToolCalls       bool   `yaml:"show_tool_calls"`
 	ShowTokenUsage      bool   `yaml:"show_token_usage"`
-	Theme               string `yaml:"theme"`         // Theme name: dark, light, sepia, cyber, forest, ocean, monokai, dracula, high_contrast
+	Theme               string `yaml:"theme"`         // Legacy-stable field; only "dark" (Graphite + violet) is currently applied
 	ShowWelcome         bool   `yaml:"show_welcome"`  // Show welcome message on first launch
 	HintsEnabled        bool   `yaml:"hints_enabled"` // Show contextual hints for features
 	CompactMode         bool   `yaml:"compact_mode"`
@@ -345,8 +438,9 @@ type DoneGateConfig struct {
 
 // HooksConfig holds hooks system settings.
 type HooksConfig struct {
-	Enabled bool         `yaml:"enabled"` // Enable/disable hooks
-	Hooks   []HookConfig `yaml:"hooks"`   // List of configured hooks
+	Enabled           bool         `yaml:"enabled"`            // Enable/disable hooks
+	TrustedWorkspaces []string     `yaml:"trusted_workspaces"` // Exact workspace roots allowed to load .gokin/hooks.yaml
+	Hooks             []HookConfig `yaml:"hooks"`              // List of trusted user-config hooks
 }
 
 // HookConfig represents a single hook configuration.
@@ -390,9 +484,10 @@ type SessionMemoryConfig struct {
 
 // MemoryConfig holds memory system settings.
 type MemoryConfig struct {
-	Enabled    bool `yaml:"enabled"`     // Enable/disable memory system
-	MaxEntries int  `yaml:"max_entries"` // Maximum number of memory entries
-	AutoInject bool `yaml:"auto_inject"` // Auto-inject memories into system prompt
+	Enabled     bool `yaml:"enabled"`      // Enable/disable memory system
+	MaxEntries  int  `yaml:"max_entries"`  // Maximum number of memory entries
+	AutoInject  bool `yaml:"auto_inject"`  // Auto-inject memories into model context
+	AllowGlobal bool `yaml:"allow_global"` // Explicit opt-in to user-wide, cross-project memory
 }
 
 // LoggingConfig holds logging settings.
@@ -589,7 +684,16 @@ func DefaultConfig() *Config {
 				"env":                  "allow",
 				"list_dir":             "allow",
 				"todo":                 "allow",
+				"git_status":           "allow",
+				"git_log":              "allow",
+				"git_diff":             "allow",
+				"git_blame":            "allow",
+				"review_changes":       "allow",
+				"history_search":       "allow",
+				"tools_list":           "allow",
+				"skill":                "allow",
 				"task_output":          "allow",
+				"task_stop":            "allow",
 				"web_fetch":            "allow",
 				"web_search":           "allow",
 				"ask_user":             "allow",
@@ -651,8 +755,9 @@ func DefaultConfig() *Config {
 			AutoFixAttempts: 2,               // Retry with autonomous fixes up to 2 times
 		},
 		Hooks: HooksConfig{
-			Enabled: false, // Disabled by default
-			Hooks:   []HookConfig{},
+			Enabled:           false, // Disabled by default
+			TrustedWorkspaces: []string{},
+			Hooks:             []HookConfig{},
 		},
 		Web: WebConfig{
 			SearchProvider: "serpapi", // Default to SerpAPI
@@ -663,9 +768,10 @@ func DefaultConfig() *Config {
 			AutoLoad:     true,            // Auto-load last session on startup
 		},
 		Memory: MemoryConfig{
-			Enabled:    true, // Enabled by default
-			MaxEntries: 1000, // Max 1000 entries
-			AutoInject: true, // Auto-inject into system prompt
+			Enabled:     true,  // Enabled by default
+			MaxEntries:  1000,  // Max 1000 entries
+			AutoInject:  true,  // Auto-inject into model context
+			AllowGlobal: false, // Safe default: never share memory across repositories
 		},
 		Logging: LoggingConfig{
 			Level: "warn", // Default to warn level

@@ -41,6 +41,12 @@ func TestSearchResultsNavigationKeepsSelectionVisible(t *testing.T) {
 		results[i] = SearchResult{FilePath: fmt.Sprintf("file-%02d.go", i), LineNumber: i + 1}
 	}
 	m.SetResults("file", "glob", results)
+	view := stripAnsi(m.View())
+	for _, want := range []string{"↑/↓ Navigate", "PgUp/PgDn Page", "Home/End Jump"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overflowing result list missing %q:\n%s", want, view)
+		}
+	}
 
 	for range 12 {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -59,6 +65,43 @@ func TestSearchResultsNavigationKeepsSelectionVisible(t *testing.T) {
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd})
 	if m.selectedIndex != len(results)-1 {
 		t.Fatalf("End index=%d, want %d", m.selectedIndex, len(results)-1)
+	}
+}
+
+func TestSearchResultsFitsHeightWithNavigationAndPreviewFooters(t *testing.T) {
+	for _, height := range []int{12, 14, 18} {
+		for _, preview := range []bool{false, true} {
+			m := NewSearchResultsModel(DefaultStyles())
+			m.SetSize(72, height)
+			results := make([]SearchResult, 20)
+			for i := range results {
+				context := make([]string, 24)
+				for j := range context {
+					context[j] = fmt.Sprintf("context line %d for result %d", j, i)
+				}
+				results[i] = SearchResult{FilePath: fmt.Sprintf("file-%02d.go", i), LineNumber: i + 1, Context: context}
+			}
+			m.SetResults("file", "grep", results)
+			if preview {
+				m, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+			}
+
+			view := m.View()
+			if got := lipgloss.Height(view); got > height {
+				t.Fatalf("height=%d preview=%v search results rendered %d rows:\n%s", height, preview, got, stripAnsi(view))
+			}
+			for row, line := range strings.Split(view, "\n") {
+				if got := lipgloss.Width(line); got > 72 {
+					t.Fatalf("height=%d preview=%v row=%d width=%d exceeds 72: %q", height, preview, row, got, stripAnsi(line))
+				}
+			}
+			plain := stripAnsi(view)
+			for _, want := range []string{"Search Results", "Esc/q", "file-00.go"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("height=%d preview=%v missing %q:\n%s", height, preview, want, plain)
+				}
+			}
+		}
 	}
 }
 
@@ -180,6 +223,11 @@ func TestSearchResultsSingleResultGrammarAndPreviewFallback(t *testing.T) {
 			t.Fatalf("single-result view missing %q:\n%s", want, view)
 		}
 	}
+	for _, dead := range []string{"↑/↓", "PgUp/PgDn", "Home/End", "Ctrl+j/k Scroll preview"} {
+		if strings.Contains(view, dead) {
+			t.Fatalf("single short result advertised dead action %q:\n%s", dead, view)
+		}
+	}
 }
 
 func TestSearchResultsNarrowPreviewUsesOnePanelAndFits(t *testing.T) {
@@ -197,10 +245,13 @@ func TestSearchResultsNarrowPreviewUsesOnePanelAndFits(t *testing.T) {
 	}
 	view := m.View()
 	plain := stripAnsi(view)
-	for _, want := range []string{"Esc/q Close", "Ctrl+j/k Scroll preview", "matched content"} {
+	for _, want := range []string{"Esc/q Close", "matched content"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("narrow preview missing %q:\n%s", want, plain)
 		}
+	}
+	if strings.Contains(plain, "Ctrl+j/k Scroll preview") {
+		t.Fatalf("short preview advertised dead scrolling:\n%s", plain)
 	}
 	for _, line := range strings.Split(view, "\n") {
 		if got := lipgloss.Width(line); got > 40 {
@@ -224,6 +275,9 @@ func TestSearchResultsPreviewKeyboardScroll(t *testing.T) {
 	m.SetSize(80, 16)
 	m.SetResults("context", "grep", []SearchResult{{FilePath: "main.go", LineNumber: 15, Context: contextLines}})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if view := stripAnsi(m.View()); !strings.Contains(view, "Ctrl+j/k Scroll preview") {
+		t.Fatalf("overflowing preview hid keyboard scrolling:\n%s", view)
+	}
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
 	if m.previewPane.YOffset == 0 {
 		t.Fatal("Ctrl+j did not scroll the visible preview")

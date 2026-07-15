@@ -2,10 +2,12 @@ package commands
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	"gokin/internal/config"
+	"gokin/internal/ui"
 )
 
 // fakeSetApp is a minimal AppInterface for /set: holds a config and records
@@ -14,6 +16,17 @@ type fakeSetApp struct {
 	fakeAppForMCP
 	cfg     *config.Config
 	applied bool
+}
+
+type fakeUIFastPathSetApp struct {
+	fakeSetApp
+	uiApplied bool
+}
+
+func (a *fakeUIFastPathSetApp) ApplyUIConfig(cfg *config.Config) error {
+	a.cfg = cfg
+	a.uiApplied = true
+	return nil
 }
 
 func (a *fakeSetApp) GetConfig() *config.Config { return a.cfg }
@@ -54,6 +67,30 @@ func TestSetCommand_Toggle(t *testing.T) {
 	}
 }
 
+func TestSetCommand_UIOnlyToggleUsesFastApplyPath(t *testing.T) {
+	cfg := config.DefaultConfig()
+	app := &fakeUIFastPathSetApp{fakeSetApp: fakeSetApp{cfg: cfg}}
+
+	out, err := (&SetCommand{}).Execute(context.Background(), []string{"compactui", "on"}, app)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !app.uiApplied || app.applied {
+		t.Fatalf("UI apply=%v full apply=%v, want true/false", app.uiApplied, app.applied)
+	}
+	if !cfg.UI.CompactMode || !strings.Contains(out, "compactui: on") {
+		t.Fatalf("UI toggle was not applied: compact=%v output=%q", cfg.UI.CompactMode, out)
+	}
+
+	app.uiApplied = false
+	if _, err := (&SetCommand{}).Execute(context.Background(), []string{"permissions", "off"}, app); err != nil {
+		t.Fatalf("runtime Execute: %v", err)
+	}
+	if app.uiApplied || !app.applied {
+		t.Fatalf("runtime setting used wrong path: UI apply=%v full apply=%v", app.uiApplied, app.applied)
+	}
+}
+
 // TestSharedToggleTable pins that /set and the /settings modal share one source
 // of truth (SettableToggleStates + ApplySettingToggle over settableToggles).
 func TestSharedToggleTable(t *testing.T) {
@@ -76,6 +113,9 @@ func TestSharedToggleTable(t *testing.T) {
 	}
 	if !ApplySettingToggle(cfg, "reducedmotion", true) || !cfg.UI.ReducedMotion {
 		t.Error("reducedmotion should be a live settable accessibility toggle")
+	}
+	if !ApplySettingToggle(cfg, "compactui", true) || !cfg.UI.CompactMode {
+		t.Error("compactui should be a live settable layout toggle")
 	}
 
 	// thinking is a boolean toggle mapping to the two day-to-day modes:
@@ -182,6 +222,65 @@ func TestSetCommand_ListAndErrors(t *testing.T) {
 	}
 	if !strings.Contains(out, "Invalid value") {
 		t.Errorf("invalid-value output = %q", out)
+	}
+}
+
+func TestSafetyDescriptionsExplainIndependentEffects(t *testing.T) {
+	states := SettableToggleStates(config.DefaultConfig())
+	descriptions := make(map[string]string, len(states))
+	for _, state := range states {
+		descriptions[state.Key] = state.Desc
+	}
+	for key, wants := range map[string][]string{
+		"permissions": {"auto-approves", "sandbox is separate"},
+		"sandbox":     {"approved or auto-approved", "unrestricted"},
+	} {
+		for _, want := range wants {
+			if !strings.Contains(descriptions[key], want) {
+				t.Fatalf("%s description %q missing %q", key, descriptions[key], want)
+			}
+		}
+	}
+
+	list := presetList()
+	if !strings.Contains(list, "Prompts stay on; approved bash is unrestricted") {
+		t.Fatalf("balanced preset hides its safety tradeoff:\n%s", list)
+	}
+}
+
+func TestSetAutocompleteMatchesToggleAndPresetTables(t *testing.T) {
+	var setCommand *ui.CommandInfo
+	for i := range ui.DefaultCommands() {
+		command := ui.DefaultCommands()[i]
+		if command.Name == "set" {
+			setCommand = &command
+			break
+		}
+	}
+	if setCommand == nil || len(setCommand.Args) < 2 {
+		t.Fatalf("/set autocomplete metadata missing: %+v", setCommand)
+	}
+
+	wantKeys := make([]string, 0, len(settableToggles)+1)
+	for _, toggle := range settableToggles {
+		wantKeys = append(wantKeys, toggle.key)
+	}
+	wantKeys = append(wantKeys, "preset")
+	if got := setCommand.Args[0].Options; !reflect.DeepEqual(got, wantKeys) {
+		t.Fatalf("/set key completion drifted:\n got %v\nwant %v", got, wantKeys)
+	}
+
+	wantPresets := make([]string, 0, len(settingPresets))
+	for _, preset := range settingPresets {
+		wantPresets = append(wantPresets, preset.name)
+	}
+	if got := setCommand.Args[1].OptionsByPrevious["preset"]; !reflect.DeepEqual(got, wantPresets) {
+		t.Fatalf("/set preset completion drifted: got %v want %v", got, wantPresets)
+	}
+	for _, usage := range []string{setCommand.Usage, (&SetCommand{}).Usage()} {
+		if !strings.Contains(usage, "preset <safe|balanced|fast>") {
+			t.Fatalf("/set usage hides presets: %q", usage)
+		}
 	}
 }
 

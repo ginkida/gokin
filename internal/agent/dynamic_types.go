@@ -2,7 +2,10 @@ package agent
 
 import (
 	"fmt"
+	"sort"
 	"sync"
+
+	"gokin/internal/tools"
 )
 
 // DynamicAgentType represents a user-defined agent type.
@@ -53,7 +56,7 @@ func (r *AgentTypeRegistry) RegisterDynamic(name, description string, tools []st
 	r.dynamic[name] = &DynamicAgentType{
 		Name:         name,
 		Description:  description,
-		AllowedTools: tools,
+		AllowedTools: append([]string(nil), tools...),
 		SystemPrompt: prompt,
 		Source:       "runtime",
 	}
@@ -72,7 +75,7 @@ func (r *AgentTypeRegistry) RegisterDynamicType(dt *DynamicAgentType) error {
 	if r.builtin[AgentType(dt.Name)] {
 		return fmt.Errorf("cannot override built-in agent type: %s", dt.Name)
 	}
-	r.dynamic[dt.Name] = dt
+	r.dynamic[dt.Name] = cloneDynamicAgentType(dt)
 	return nil
 }
 
@@ -95,7 +98,7 @@ func (r *AgentTypeRegistry) GetDynamic(name string) (*DynamicAgentType, bool) {
 	defer r.mu.RUnlock()
 
 	dt, ok := r.dynamic[name]
-	return dt, ok
+	return cloneDynamicAgentType(dt), ok
 }
 
 // IsBuiltin checks if a type is a built-in type.
@@ -127,8 +130,9 @@ func (r *AgentTypeRegistry) ListDynamic() []*DynamicAgentType {
 
 	types := make([]*DynamicAgentType, 0, len(r.dynamic))
 	for _, dt := range r.dynamic {
-		types = append(types, dt)
+		types = append(types, cloneDynamicAgentType(dt))
 	}
+	sort.Slice(types, func(i, j int) bool { return types[i].Name < types[j].Name })
 	return types
 }
 
@@ -146,7 +150,33 @@ func (r *AgentTypeRegistry) ListAll() []string {
 		names = append(names, name)
 	}
 
+	sort.Strings(names)
 	return names
+}
+
+// SnapshotAgentTypes returns one deterministic, immutable-by-copy view of the
+// complete catalog for model-facing tools. Holding one read lock across names
+// and descriptions prevents a concurrent registration from producing a mixed
+// declaration (for example, an enum entry with an empty description).
+func (r *AgentTypeRegistry) SnapshotAgentTypes() []tools.AgentTypeDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	types := make([]tools.AgentTypeDefinition, 0, len(r.builtin)+len(r.dynamic))
+	for agentType := range r.builtin {
+		types = append(types, tools.AgentTypeDefinition{
+			Name:        string(agentType),
+			Description: builtinAgentTypeDescription(agentType),
+		})
+	}
+	for _, dynamicType := range r.dynamic {
+		types = append(types, tools.AgentTypeDefinition{
+			Name:        dynamicType.Name,
+			Description: dynamicType.Description,
+		})
+	}
+	sort.Slice(types, func(i, j int) bool { return types[i].Name < types[j].Name })
+	return types
 }
 
 // GetToolsForType returns the allowed tools for a type.
@@ -174,8 +204,11 @@ func (r *AgentTypeRegistry) GetDescriptionForType(name string) string {
 		return dt.Description
 	}
 
-	// Built-in descriptions
-	switch AgentType(name) {
+	return builtinAgentTypeDescription(AgentType(name))
+}
+
+func builtinAgentTypeDescription(agentType AgentType) string {
+	switch agentType {
 	case AgentTypeExplore:
 		return "Explore and analyze codebases"
 	case AgentTypeBash:
@@ -189,4 +222,13 @@ func (r *AgentTypeRegistry) GetDescriptionForType(name string) string {
 	default:
 		return ""
 	}
+}
+
+func cloneDynamicAgentType(dt *DynamicAgentType) *DynamicAgentType {
+	if dt == nil {
+		return nil
+	}
+	clone := *dt
+	clone.AllowedTools = append([]string(nil), dt.AllowedTools...)
+	return &clone
 }

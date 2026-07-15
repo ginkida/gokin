@@ -97,6 +97,39 @@ func TestPermissionDetailFrameKeepsNavigationVisible(t *testing.T) {
 	}
 }
 
+func TestPermissionPromptFitsHeightWithoutFrameCropping(t *testing.T) {
+	for _, height := range []int{12, 18, 24} {
+		for _, details := range []bool{false, true} {
+			m := NewModel()
+			m.width = 72
+			m.height = height
+			m.permShowDetails = details
+			m.permDetailScroll = 2
+			m.permNotice = "Review the exact operation before deciding"
+			m.permRequest = &PermissionRequestMsg{
+				ToolName:  "bash",
+				RiskLevel: "high",
+				Reason:    strings.Repeat("This command changes generated files. ", 10),
+				Args: map[string]any{
+					"command": strings.Repeat("go generate ./internal/package && ", 10),
+					"path":    strings.Repeat("nested/path/", 16),
+				},
+			}
+
+			view := m.renderPermissionPrompt()
+			if got := lipgloss.Height(view); got > height {
+				t.Fatalf("height=%d details=%v permission modal rendered %d rows:\n%s", height, details, got, stripAnsi(view))
+			}
+			plain := stripAnsi(view)
+			for _, want := range []string{"HIGH RISK", "Esc"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("height=%d details=%v missing %q:\n%s", height, details, want, plain)
+				}
+			}
+		}
+	}
+}
+
 func TestPermissionPromptFitsNarrowWidthsWithUnicode(t *testing.T) {
 	for width := 10; width <= 48; width++ {
 		for _, details := range []bool{false, true} {

@@ -102,6 +102,70 @@ func TestProjectMemory_WatcherRebindsAfterInstructionFileCreated(t *testing.T) {
 	}
 }
 
+func TestProjectMemory_WatcherFallsBackAfterActiveInstructionsDeleted(t *testing.T) {
+	workDir := resolvedTempDirForContext(t)
+	gokinPath := filepath.Join(workDir, "GOKIN.md")
+	claudePath := filepath.Join(workDir, "CLAUDE.md")
+	if err := os.WriteFile(gokinPath, []byte("GOKIN-PRIMARY"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte("CLAUDE-FALLBACK-v1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pm := NewProjectMemory(workDir)
+	if err := pm.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := pm.GetInstructions(); !strings.Contains(got, "GOKIN-PRIMARY") || strings.Contains(got, "CLAUDE-FALLBACK") {
+		t.Fatalf("unexpected initial priority: %q", got)
+	}
+	reloaded := make(chan struct{}, 4)
+	pm.OnReload(func() { reloaded <- struct{}{} })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := pm.StartWatching(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	defer pm.StopWatching()
+
+	pm.mu.RLock()
+	watcher := pm.watcher
+	pm.mu.RUnlock()
+	if watcher == nil || watcher.Path() != gokinPath {
+		t.Fatalf("watcher path=%v, want %q", watcher, gokinPath)
+	}
+	if err := os.Remove(gokinPath); err != nil {
+		t.Fatal(err)
+	}
+	watcher.checkChanges()
+	waitForReload(t, reloaded, "after deleting the active GOKIN.md")
+
+	deadline := time.Now().Add(time.Second)
+	for watcher.Path() != claudePath && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := watcher.Path(); got != claudePath {
+		t.Fatalf("watcher did not rebind to fallback: got %q, want %q", got, claudePath)
+	}
+	if got := pm.GetInstructions(); !strings.Contains(got, "CLAUDE-FALLBACK-v1") || strings.Contains(got, "GOKIN-PRIMARY") {
+		t.Fatalf("deleted primary instructions remained active: %q", got)
+	}
+
+	if err := os.WriteFile(claudePath, []byte("CLAUDE-FALLBACK-v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Second)
+	if err := os.Chtimes(claudePath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	watcher.checkChanges()
+	waitForReload(t, reloaded, "after editing the fallback CLAUDE.md")
+	if got := pm.GetInstructions(); !strings.Contains(got, "CLAUDE-FALLBACK-v2") {
+		t.Fatalf("fallback edit was not reloaded: %q", got)
+	}
+}
+
 func waitForReload(t *testing.T, ch chan struct{}, what string) {
 	t.Helper()
 	select {

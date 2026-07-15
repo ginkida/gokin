@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gokin/internal/memory"
@@ -19,11 +20,15 @@ type MemoryTool struct {
 	// saved knowledge via memorize still sees it here (they used to be blind
 	// to each other — the "memory list is empty after memorize" field report).
 	learning *memory.ProjectLearning
+	// allowGlobal is shared by foreground/sub-agent clones so a live config
+	// revocation takes effect for already-running agents too. Global memory can
+	// cross repository boundaries, therefore its safe zero/default is denied.
+	allowGlobal *atomic.Bool
 }
 
 // NewMemoryTool creates a new memory tool.
 func NewMemoryTool() *MemoryTool {
-	return &MemoryTool{}
+	return &MemoryTool{allowGlobal: &atomic.Bool{}}
 }
 
 // SetStore sets the memory store.
@@ -37,12 +42,28 @@ func (t *MemoryTool) SetLearning(learning *memory.ProjectLearning) {
 	t.learning = learning
 }
 
+// SetAllowGlobal controls access to the user-wide memory namespace. Callers
+// must opt in explicitly through memory.allow_global; denied global requests
+// fail loudly instead of being silently rewritten into project scope.
+func (t *MemoryTool) SetAllowGlobal(allow bool) {
+	if t.allowGlobal == nil {
+		t.allowGlobal = &atomic.Bool{}
+	}
+	t.allowGlobal.Store(allow)
+}
+
+func (t *MemoryTool) globalMemoryAllowed() bool {
+	return t != nil && t.allowGlobal != nil && t.allowGlobal.Load()
+}
+
+const globalMemoryDisabledMessage = "global memory access is disabled to prevent cross-project leakage; set `memory.allow_global: true` in config to opt in"
+
 func (t *MemoryTool) Name() string {
 	return "memory"
 }
 
 func (t *MemoryTool) Description() string {
-	return "Keyed memory store for remembering/recalling/forgetting/listing notes across sessions (supports keys, tags, TTL, and project/session scope). action=list also surfaces durable project knowledge saved via the `memorize` tool (a separate project-learning store), so this is the one place to see everything remembered."
+	return "Keyed memory store for remembering/recalling/forgetting/listing notes across sessions (supports keys, tags, TTL, and session/project scope; global scope requires memory.allow_global opt-in). action=list also surfaces durable project knowledge saved via the `memorize` tool (a separate project-learning store), so this is the one place to see everything remembered."
 }
 
 func (t *MemoryTool) Declaration() *genai.FunctionDeclaration {
@@ -76,7 +97,7 @@ func (t *MemoryTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"scope": {
 					Type:        genai.TypeString,
-					Description: "Scope of the memory: 'session' (current session only), 'project' (this repository only), 'global' (all projects). Default: 'project'",
+					Description: "For 'remember': scope of the new memory: 'session' (current session only), 'project' (this repository only), 'global' (all projects; disabled unless memory.allow_global is true). Default: 'project'. For recall/list use project_only",
 					Enum:        []string{"session", "project", "global"},
 				},
 				"id": {
@@ -85,7 +106,7 @@ func (t *MemoryTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"project_only": {
 					Type:        genai.TypeBoolean,
-					Description: "If true, only show/search memories for current project (default: false for 'recall' and 'list')",
+					Description: "If true, only show/search session and current-project memories (default: true). Setting false requires memory.allow_global=true",
 				},
 				"ttl_minutes": {
 					Type:        genai.TypeInteger,
@@ -116,6 +137,9 @@ func (t *MemoryTool) Validate(args map[string]any) error {
 		if _, ok := GetString(args, "content"); !ok {
 			return NewValidationError("content", "content is required for 'remember' action")
 		}
+		if scope, specified := GetString(args, "scope"); specified && scope != "session" && scope != "project" && scope != "global" {
+			return NewValidationError("scope", "scope must be one of: session, project, global")
+		}
 	case "forget":
 		// Need either id or key
 		_, hasID := GetString(args, "id")
@@ -133,7 +157,8 @@ func (t *MemoryTool) Validate(args map[string]any) error {
 			return NewValidationError("success", "success is required for 'feedback' action")
 		}
 	case "recall", "list":
-		// No required parameters
+		// No required parameters. Authorization belongs to Execute so denied
+		// global access carries a typed PolicyBlock (headless must fail closed).
 	default:
 		return NewValidationError("action", "invalid action: "+action)
 	}
@@ -144,6 +169,18 @@ func (t *MemoryTool) Validate(args map[string]any) error {
 func (t *MemoryTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	action, _ := GetString(args, "action")
 
+	// Scope authorization belongs at execution time (not structural Validate)
+	// so the refusal carries PolicyBlock metadata and headless runs fail closed.
+	// Check it before store availability: an explicit forbidden global request
+	// must not be disguised as an ordinary configuration/storage failure.
+	if err := t.validateGlobalRequest(args); err != nil {
+		return NewPolicyBlockedResult(PolicyBlockPermission, err.Error()), nil
+	}
+	if action != "remember" {
+		if scope, specified := GetString(args, "scope"); specified && scope != "" {
+			return NewErrorResult("scope is only valid for action=remember; for recall/list set project_only=false (requires memory.allow_global)"), nil
+		}
+	}
 	if t.store == nil {
 		// `list` can still surface project-learning (written by `memorize`) even
 		// when the keyed kv-store is disabled — the two are independent.
@@ -181,6 +218,22 @@ func (t *MemoryTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	}
 }
 
+func (t *MemoryTool) validateGlobalRequest(args map[string]any) error {
+	if t.globalMemoryAllowed() {
+		return nil
+	}
+	action, _ := GetString(args, "action")
+	if scope, _ := GetString(args, "scope"); scope == "global" {
+		return fmt.Errorf("%s", globalMemoryDisabledMessage)
+	}
+	if action == "recall" || action == "list" {
+		if projectOnly, explicit := GetBool(args, "project_only"); explicit && !projectOnly {
+			return fmt.Errorf("%s", globalMemoryDisabledMessage)
+		}
+	}
+	return nil
+}
+
 // maxMemoryTTLMinutes caps a memory TTL at ~1 year. Without a bound, a large
 // ttl_minutes (e.g. 999999999) overflows time.Duration(n)*time.Minute past
 // int64, wrapping to a NEGATIVE duration — the entry would expire instantly
@@ -204,16 +257,20 @@ func (t *MemoryTool) remember(args map[string]any) (ToolResult, error) {
 	tagsRaw := args["tags"]
 	ttlMinutes := GetIntDefault(args, "ttl_minutes", 0)
 
-	// Parse scope — all memories are scoped to the current project directory.
-	// Global scope is disabled to prevent cross-project memory leaks.
+	// Parse scope. Global reaches this point only after the explicit opt-in gate
+	// in Execute; never silently downgrade it to project because that lies about
+	// both persistence and visibility to the caller.
 	scopeName, _ := GetString(args, "scope")
 	memType := memory.MemoryProject
 	switch scopeName {
+	case "", "project":
+		// Project is the safe default.
 	case "session":
 		memType = memory.MemorySession
 	case "global":
-		// Redirect global to project — memories should stay within the working directory
-		memType = memory.MemoryProject
+		memType = memory.MemoryGlobal
+	default:
+		return NewErrorResult(fmt.Sprintf("invalid memory scope %q; expected session, project, or global", scopeName)), nil
 	}
 
 	// Create entry
@@ -238,10 +295,14 @@ func (t *MemoryTool) remember(args map[string]any) (ToolResult, error) {
 		}
 	}
 
-	// Save entry
-	if err := t.store.Add(entry); err != nil {
+	// Save entry and use the canonical result. Semantic dedup may reinforce an
+	// older memory instead of storing this newly generated ID; returning the
+	// incoming ID would make follow-up feedback/forget calls target nothing.
+	storedEntry, err := t.store.AddResolved(entry)
+	if err != nil {
 		return NewErrorResult(fmt.Sprintf("failed to save memory: %s", err)), nil
 	}
+	entry = storedEntry
 
 	var msg string
 	if key != "" {
@@ -269,7 +330,7 @@ func (t *MemoryTool) recall(args map[string]any) (ToolResult, error) {
 
 	// If key is specified, try exact match first
 	if key != "" {
-		if entry, ok := t.store.Get(key); ok {
+		if entry, ok := t.getByKey(key, projectOnly); ok {
 			t.store.RecordAccess(entry.ID)
 			return NewSuccessResultWithData(
 				fmt.Sprintf("Found memory with key %q: %s", key, entry.Content),
@@ -277,6 +338,7 @@ func (t *MemoryTool) recall(args map[string]any) (ToolResult, error) {
 					"id":      entry.ID,
 					"key":     entry.Key,
 					"content": entry.Content,
+					"type":    entry.Type,
 					"tags":    entry.Tags,
 					"found":   true,
 				},
@@ -368,20 +430,59 @@ func (t *MemoryTool) recall(args map[string]any) (ToolResult, error) {
 	}), nil
 }
 
+// getByKey resolves a keyed memory within the caller-authorized scope. Store.Get
+// intentionally applies session→project→global shadowing, so it cannot be
+// used when global access is disabled: a global-only key would cross the
+// repository boundary even though project_only defaults to true.
+func (t *MemoryTool) getByKey(key string, projectOnly bool) (*memory.Entry, bool) {
+	if !projectOnly {
+		return t.store.Get(key)
+	}
+	entries := t.store.Search(memory.SearchQuery{
+		Key:         key,
+		ProjectOnly: true,
+	})
+	for _, memType := range []memory.MemoryType{memory.MemorySession, memory.MemoryProject} {
+		for _, entry := range entries {
+			if entry != nil && entry.Type == memType {
+				return entry, true
+			}
+		}
+	}
+	return nil, false
+}
+
 func (t *MemoryTool) forget(args map[string]any) (ToolResult, error) {
 	id, _ := GetString(args, "id")
 	key, _ := GetString(args, "key")
 
-	target := id
-	if target == "" {
-		target = key
+	targetID := id
+	displayTarget := id
+	if targetID != "" {
+		entry, ok := t.store.GetByID(targetID)
+		if !ok {
+			// The id field is strict. Passing an unknown ID through Store.Remove
+			// would reinterpret it as a key and could bypass the global-scope gate.
+			return NewErrorResult(fmt.Sprintf("Memory not found by id: %s", targetID)), nil
+		}
+		if entry.Type == memory.MemoryGlobal && !t.globalMemoryAllowed() {
+			return NewPolicyBlockedResult(PolicyBlockPermission, globalMemoryDisabledMessage), nil
+		}
+		targetID = entry.ID
+	} else {
+		displayTarget = key
+		entry, ok := t.getByKey(key, !t.globalMemoryAllowed())
+		if !ok {
+			return NewErrorResult(fmt.Sprintf("Memory not found in allowed scope: %s", key)), nil
+		}
+		targetID = entry.ID
 	}
 
-	if t.store.Remove(target) {
-		return NewSuccessResult(fmt.Sprintf("Forgot memory: %s", target)), nil
+	if t.store.Remove(targetID) {
+		return NewSuccessResult(fmt.Sprintf("Forgot memory: %s", displayTarget)), nil
 	}
 
-	return NewErrorResult(fmt.Sprintf("Memory not found: %s", target)), nil
+	return NewErrorResult(fmt.Sprintf("Memory not found: %s", displayTarget)), nil
 }
 
 func (t *MemoryTool) list(args map[string]any) (ToolResult, error) {
@@ -487,10 +588,14 @@ func (t *MemoryTool) feedback(args map[string]any) (ToolResult, error) {
 	success, _ := GetBool(args, "success")
 
 	targetID := id
-	if targetID == "" && key != "" {
-		entry, ok := t.store.Get(key)
+	if targetID != "" {
+		if entry, ok := t.store.GetByID(targetID); ok && entry.Type == memory.MemoryGlobal && !t.globalMemoryAllowed() {
+			return NewPolicyBlockedResult(PolicyBlockPermission, globalMemoryDisabledMessage), nil
+		}
+	} else if key != "" {
+		entry, ok := t.getByKey(key, !t.globalMemoryAllowed())
 		if !ok {
-			return NewErrorResult(fmt.Sprintf("Memory not found by key: %s", key)), nil
+			return NewErrorResult(fmt.Sprintf("Memory not found by key in allowed scope: %s", key)), nil
 		}
 		targetID = entry.ID
 	}

@@ -13,12 +13,20 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 	if r.store == nil {
 		return "", fmt.Errorf("agent store not configured")
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	// Load state from store
 	state, err := r.store.Load(agentID)
 	if err != nil {
 		return "", fmt.Errorf("failed to load agent state: %w", err)
 	}
+	runLease, err := r.acquireAgentRunLease(state.ID)
+	if err != nil {
+		return "", err
+	}
+	defer runLease.Release()
 
 	// Create a new agent with the same configuration
 	deps := r.snapshotAgentDeps()
@@ -38,9 +46,21 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 
 	attachMetaAgentMonitoring(agent, deps.metaAgent)
 
-	// Run agent with the new prompt (continuing from previous context)
+	// Run agent with the new prompt (continuing from previous context). Register
+	// a cancellable run context before Run so Runner.Cancel never becomes a
+	// status-only no-op on the synchronous resume path.
+	var runCtx context.Context
+	var runCancel context.CancelFunc
+	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
+		runCtx, runCancel = context.WithTimeout(ctx, agentTimeout)
+	} else {
+		runCtx, runCancel = context.WithCancel(ctx)
+	}
+	defer runCancel()
+	agent.SetCancelFunc(runCancel)
+
 	startTime := time.Now()
-	result, err := agent.Run(ctx, prompt)
+	result, err := agent.Run(runCtx, prompt)
 	duration := time.Since(startTime)
 
 	if result == nil {
@@ -66,12 +86,12 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 		}
 	}
 
+	r.recordAgentExecutionLearning(deps, string(state.Type), prompt, result, duration, "resume")
+	r.reportAgentUsage(agent.ID, result)
 	r.mu.Lock()
 	r.results[agent.ID] = result
 	r.mu.Unlock()
-	r.notifyResultReady()
-	r.recordAgentExecutionLearning(deps, string(state.Type), prompt, result, duration, "resume")
-	r.reportAgentUsage(agent.ID, result)
+	r.notifyResultReady(agent.ID)
 
 	if err == nil && workspaceErr != nil {
 		err = workspaceErr
@@ -88,12 +108,28 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 	if r.store == nil {
 		return "", fmt.Errorf("agent store not configured")
 	}
+	// Once accepted, an asynchronous resume deliberately outlives the caller's
+	// tool/request context. Reject a context which was already cancelled at the
+	// ownership boundary instead of racing goroutine scheduling below.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	// Load state from store
 	state, err := r.store.Load(agentID)
 	if err != nil {
 		return "", fmt.Errorf("failed to load agent state: %w", err)
 	}
+	runLease, err := r.acquireAgentRunLease(state.ID)
+	if err != nil {
+		return "", err
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred {
+			runLease.Release()
+		}
+	}()
 
 	// Create a new agent with the same configuration
 	deps := r.snapshotAgentDeps()
@@ -124,50 +160,31 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 	invokeAgentStart(onStart, agent.ID, string(state.Type), prompt)
 
 	// Run agent asynchronously with proper cleanup
+	leaseTransferred = true
 	go func() {
+		// Keep the lease through final persistence/result publication and panic
+		// recovery, not merely through Agent.Run.
+		defer runLease.Release()
 		// Ensure cleanup happens even on panic
 		defer func() {
 			if p := recover(); p != nil {
-				r.mu.Lock()
-				if result, ok := r.results[agent.ID]; ok {
-					result.Error = fmt.Sprintf("agent panic: %v", p)
-					result.Status = AgentStatusFailed
-					result.Completed = true
-				}
-				r.mu.Unlock()
-				r.notifyResultReady()
+				logging.Warn("resumed agent panicked",
+					"agent_id", agent.ID,
+					"panic", p,
+					"stack", logging.PanicStack())
+				r.publishResumedAgentPanic(
+					agent, deps, onComplete, string(state.Type), prompt,
+					"resume_async", p,
+				)
 			}
 		}()
 
 		// Detach from caller's context so resumed agent survives tool timeout.
-		bgCtx := context.WithoutCancel(ctx)
-		agentCtx, agentCancel := context.WithCancel(bgCtx)
+		agentCtx, agentCancel := detachedResumeRunContext(ctx, agent)
 		defer agentCancel()
 
 		// Store cancel func for explicit Agent.Cancel()
 		agent.SetCancelFunc(agentCancel)
-
-		// Check if original context is already cancelled
-		select {
-		case <-ctx.Done():
-			if deps.metaAgent != nil {
-				deps.metaAgent.UnregisterAgent(agent.ID)
-			}
-			cancelledResult := &AgentResult{
-				AgentID:   agent.ID,
-				Type:      state.Type,
-				Status:    AgentStatusCancelled,
-				Error:     ctx.Err().Error(),
-				Completed: true,
-			}
-			r.finalizeAgentWorkspace(agent, cancelledResult)
-			r.mu.Lock()
-			r.results[agent.ID] = cancelledResult
-			r.mu.Unlock()
-			r.notifyResultReady()
-			return
-		default:
-		}
 
 		result, err := agent.Run(agentCtx, prompt)
 		var duration time.Duration
@@ -188,8 +205,7 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 
 		// Handle error by updating result status
 		if err != nil {
-			result.Error = err.Error()
-			result.Status = AgentStatusFailed
+			applyAgentRunError(result, err)
 		}
 
 		// Ensure Completed is always true so WaitWithContext doesn't spin
@@ -209,12 +225,12 @@ func (r *Runner) ResumeAsync(ctx context.Context, agentID string, prompt string)
 			}
 		}
 
+		r.recordAgentExecutionLearning(deps, string(state.Type), prompt, result, duration, "resume_async")
+		r.reportAgentUsage(agent.ID, result)
 		r.mu.Lock()
 		r.results[agent.ID] = result
 		r.mu.Unlock()
-		r.notifyResultReady()
-		r.recordAgentExecutionLearning(deps, string(state.Type), prompt, result, duration, "resume_async")
-		r.reportAgentUsage(agent.ID, result)
+		r.notifyResultReady(agent.ID)
 
 		// Notify UI about agent completion
 		invokeAgentComplete(onComplete, agent.ID, result)
@@ -253,24 +269,79 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 	if r.store == nil {
 		return 0
 	}
-
-	checkpoints, err := r.store.ListErrorCheckpoints()
-	if err != nil || len(checkpoints) == 0 {
+	if ctx.Err() != nil {
 		return 0
 	}
 
-	resumed := 0
+	checkpoints, err := r.store.ListErrorCheckpoints()
+	if err != nil {
+		logging.Warn("failed to inspect error checkpoints — automatic recovery skipped", "error", err)
+		return 0
+	}
+	if len(checkpoints) == 0 {
+		return 0
+	}
+
+	// Several error checkpoints may belong to the same logical agent (for
+	// example an automatic snapshot followed by a terminal provider error).
+	// Only the newest state is a valid continuation; launching every file would
+	// replay the same task multiple times even though the run lease serializes
+	// them. Keep older files as superseded members of the same claim group.
+	type checkpointGroup struct {
+		latest     *AgentCheckpoint
+		superseded []*AgentCheckpoint
+	}
+	groups := make(map[string]*checkpointGroup)
 	for _, cp := range checkpoints {
+		if cp == nil {
+			continue
+		}
 		if cp.AgentState == nil {
 			_ = r.store.DeleteCheckpoint(cp.CheckpointID)
 			continue
 		}
+		agentID := cp.AgentState.ID
+		group := groups[agentID]
+		if group == nil {
+			groups[agentID] = &checkpointGroup{latest: cp}
+			continue
+		}
+		newer := cp.Timestamp.After(group.latest.Timestamp) ||
+			(cp.Timestamp.Equal(group.latest.Timestamp) && cp.CheckpointID > group.latest.CheckpointID)
+		if newer {
+			group.superseded = append(group.superseded, group.latest)
+			group.latest = cp
+		} else {
+			group.superseded = append(group.superseded, cp)
+		}
+	}
 
-		// Delete BEFORE resume — anti-infinite-retry
-		_ = r.store.DeleteCheckpoint(cp.CheckpointID)
+	resumed := 0
+	for _, group := range groups {
+		// Do not consume durable recovery state once shutdown/cancellation has
+		// started. A run accepted before cancellation is intentionally detached
+		// and is thereafter stopped only by Runner.Cancel or its own timeout.
+		if ctx.Err() != nil {
+			break
+		}
+		cp := group.latest
 
-		// Create agent, restore from checkpoint
 		state := cp.AgentState
+		runLease, leaseErr := r.acquireAgentRunLease(state.ID)
+		if leaseErr != nil {
+			// Another Spawn/Resume path owns this logical agent. Preserve the
+			// checkpoint: the active run may still need it until its terminal
+			// state is durably published.
+			logging.Debug("skipping checkpoint for active agent",
+				"checkpoint_id", cp.CheckpointID,
+				"agent_id", state.ID,
+				"error", leaseErr)
+			continue
+		}
+
+		// Create agent, restore from checkpoint while holding the per-agent
+		// lease. This prevents concurrent monitors from constructing and
+		// launching duplicate copies with the same persisted history.
 		deps := r.snapshotAgentDeps()
 		agent := r.newRestoredAgent(ctx, deps, state, deps.permissions)
 
@@ -280,6 +351,7 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 		}
 
 		if err := agent.RestoreFromCheckpoint(cp); err != nil {
+			runLease.Release()
 			// Bumped Debug→Warn: a checkpoint that fails to restore is
 			// silently skipped (continue), so users with N broken
 			// checkpoints saw nothing resume and had no signal why.
@@ -288,6 +360,45 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 			// truncated file, etc.).
 			logging.Warn("failed to restore from checkpoint — skipping",
 				"checkpoint_id", cp.CheckpointID, "error", err)
+			continue
+		}
+		// Retire older error snapshots before claiming the selected checkpoint.
+		// If cleanup fails, keep the selected file unconsumed and do not execute;
+		// a later recovery can retry without risking a stale replay.
+		supersededRemoved := true
+		for _, old := range group.superseded {
+			if err := r.store.DeleteCheckpoint(old.CheckpointID); err != nil {
+				supersededRemoved = false
+				logging.Warn("failed to retire superseded error checkpoint — not resuming",
+					"checkpoint_id", old.CheckpointID,
+					"selected_checkpoint_id", cp.CheckpointID,
+					"agent_id", state.ID,
+					"error", err)
+				break
+			}
+		}
+		if !supersededRemoved {
+			runLease.Release()
+			continue
+		}
+
+		// Consume only after a successful restore, but always before Run. If
+		// deletion fails, do not execute: otherwise a later monitor/startup can
+		// replay the same side effects from a checkpoint we failed to mark used.
+		consumed, err := r.store.ConsumeCheckpoint(cp.CheckpointID)
+		if err != nil {
+			runLease.Release()
+			logging.Warn("failed to consume error checkpoint — not resuming",
+				"checkpoint_id", cp.CheckpointID,
+				"agent_id", state.ID,
+				"error", err)
+			continue
+		}
+		if !consumed {
+			runLease.Release()
+			logging.Debug("error checkpoint already consumed by another recovery path",
+				"checkpoint_id", cp.CheckpointID,
+				"agent_id", state.ID)
 			continue
 		}
 
@@ -302,7 +413,8 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 		stateType := string(state.Type)
 		resumePrompt := "You were restarted after an error. Continue your previous task or report what went wrong."
 
-		go func(a *Agent, runDeps runnerAgentDeps, restoredType string, continuationPrompt string) {
+		go func(a *Agent, runDeps runnerAgentDeps, restoredType string, continuationPrompt string, lease *agentRunLease) {
+			defer lease.Release()
 			defer func() {
 				if p := recover(); p != nil {
 					// Bumped Debug→Warn + stack capture: an agent panic
@@ -314,43 +426,17 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 						"agent_id", a.ID,
 						"panic", p,
 						"stack", logging.PanicStack())
-					r.mu.Lock()
-					if result, ok := r.results[a.ID]; ok {
-						result.Error = fmt.Sprintf("agent panic on resume: %v", p)
-						result.Status = AgentStatusFailed
-						result.Completed = true
-					}
-					r.mu.Unlock()
-					r.notifyResultReady()
+					r.publishResumedAgentPanic(
+						a, runDeps, onComplete, restoredType, continuationPrompt,
+						"resume_error_checkpoint", p,
+					)
 				}
 			}()
 
 			// Detach from caller's context so resumed agent survives tool timeout.
-			bgCtx := context.WithoutCancel(ctx)
-			agentCtx, agentCancel := context.WithCancel(bgCtx)
+			agentCtx, agentCancel := detachedResumeRunContext(ctx, a)
 			defer agentCancel()
 			a.SetCancelFunc(agentCancel)
-
-			select {
-			case <-ctx.Done():
-				if runDeps.metaAgent != nil {
-					runDeps.metaAgent.UnregisterAgent(a.ID)
-				}
-				cancelledResult := &AgentResult{
-					AgentID:   a.ID,
-					Type:      a.Type,
-					Status:    AgentStatusCancelled,
-					Error:     ctx.Err().Error(),
-					Completed: true,
-				}
-				r.finalizeAgentWorkspace(a, cancelledResult)
-				r.mu.Lock()
-				r.results[a.ID] = cancelledResult
-				r.mu.Unlock()
-				r.notifyResultReady()
-				return
-			default:
-			}
 
 			result, err := a.Run(agentCtx, continuationPrompt)
 			var duration time.Duration
@@ -361,8 +447,7 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 				result = &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: "nil result", Completed: true}
 			}
 			if err != nil {
-				result.Error = err.Error()
-				result.Status = AgentStatusFailed
+				applyAgentRunError(result, err)
 			}
 			result.Completed = true
 
@@ -385,10 +470,10 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 			r.mu.Lock()
 			r.results[a.ID] = result
 			r.mu.Unlock()
-			r.notifyResultReady()
+			r.notifyResultReady(a.ID)
 
 			invokeAgentComplete(onComplete, a.ID, result)
-		}(agent, deps, stateType, resumePrompt)
+		}(agent, deps, stateType, resumePrompt, runLease)
 
 		resumed++
 	}
@@ -406,6 +491,9 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 	if r.store == nil {
 		return "", fmt.Errorf("agent store not configured")
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	// List all checkpoints (empty agentID = no filter)
 	ids, err := r.store.ListCheckpoints("")
@@ -416,27 +504,46 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no checkpoints found")
 	}
 
-	// Checkpoint names include timestamps — pick the lexicographically latest
-	latestID := ids[0]
-	for _, id := range ids[1:] {
-		if id > latestID {
-			latestID = id
+	// IDs are `<agent-id>-<unix-nano>`, so lexicographic ordering is valid only
+	// within one agent. Across agents it primarily sorts by agent ID and can pick
+	// an arbitrarily old checkpoint. Load metadata and compare actual timestamps.
+	var cp *AgentCheckpoint
+	loaded := make([]*AgentCheckpoint, 0, len(ids))
+	for _, id := range ids {
+		candidate, loadErr := r.store.LoadCheckpoint(id)
+		if loadErr != nil {
+			// An unreadable file may be newer than every valid candidate. Falling
+			// back to older state can replay side effects, so manual recovery must
+			// fail closed just like automatic error recovery.
+			return "", fmt.Errorf("failed to load checkpoint %s while finding latest: %w", id, loadErr)
+		}
+		if candidate.AgentState == nil {
+			_ = r.store.DeleteCheckpoint(candidate.CheckpointID)
+			continue
+		}
+		loaded = append(loaded, candidate)
+		if cp == nil || candidate.Timestamp.After(cp.Timestamp) ||
+			(candidate.Timestamp.Equal(cp.Timestamp) && candidate.CheckpointID > cp.CheckpointID) {
+			cp = candidate
 		}
 	}
-
-	cp, err := r.store.LoadCheckpoint(latestID)
-	if err != nil {
-		return "", fmt.Errorf("failed to load checkpoint %s: %w", latestID, err)
+	if cp == nil {
+		return "", fmt.Errorf("no valid checkpoints found")
 	}
-	if cp.AgentState == nil {
-		_ = r.store.DeleteCheckpoint(cp.CheckpointID)
-		return "", fmt.Errorf("checkpoint %s has no agent state", latestID)
-	}
-
-	// Delete before resume to prevent duplicate runs
-	_ = r.store.DeleteCheckpoint(cp.CheckpointID)
+	latestID := cp.CheckpointID
 
 	state := cp.AgentState
+	runLease, err := r.acquireAgentRunLease(state.ID)
+	if err != nil {
+		return "", err
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred {
+			runLease.Release()
+		}
+	}()
+
 	deps := r.snapshotAgentDeps()
 	agent := r.newRestoredAgent(ctx, deps, state, deps.permissions)
 	if r.store != nil {
@@ -445,6 +552,27 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 
 	if err := agent.RestoreFromCheckpoint(cp); err != nil {
 		return "", fmt.Errorf("failed to restore from checkpoint: %w", err)
+	}
+	// Claim the logical agent's newest continuation as a group. Otherwise, once
+	// this file is consumed, another Runner/process can immediately discover an
+	// older checkpoint for the same agent and replay it concurrently.
+	for _, old := range loaded {
+		if old == cp || old.AgentState == nil || old.AgentState.ID != state.ID {
+			continue
+		}
+		if err := r.store.DeleteCheckpoint(old.CheckpointID); err != nil {
+			return "", fmt.Errorf("failed to retire superseded checkpoint %s: %w", old.CheckpointID, err)
+		}
+	}
+	// A checkpoint must be durably consumed before any model/tool execution.
+	// Ignoring deletion failure would allow the same side effects to replay on
+	// the next ResumeLastCheckpoint/startup monitor call.
+	consumed, err := r.store.ConsumeCheckpoint(cp.CheckpointID)
+	if err != nil {
+		return "", fmt.Errorf("failed to consume checkpoint %s: %w", cp.CheckpointID, err)
+	}
+	if !consumed {
+		return "", fmt.Errorf("checkpoint %s was already consumed by another recovery path", cp.CheckpointID)
 	}
 
 	r.mu.Lock()
@@ -458,7 +586,9 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 
 	invokeAgentStart(onStart, agent.ID, string(state.Type), "Resumed from checkpoint")
 
-	go func(a *Agent, runDeps runnerAgentDeps) {
+	leaseTransferred = true
+	go func(a *Agent, runDeps runnerAgentDeps, lease *agentRunLease) {
+		defer lease.Release()
 		defer func() {
 			if p := recover(); p != nil {
 				// Same fix as auto-resume above: Debug→Warn + stack so
@@ -467,20 +597,16 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 					"agent_id", a.ID,
 					"panic", p,
 					"stack", logging.PanicStack())
-				r.mu.Lock()
-				if result, ok := r.results[a.ID]; ok {
-					result.Error = fmt.Sprintf("agent panic on resume: %v", p)
-					result.Status = AgentStatusFailed
-					result.Completed = true
-				}
-				r.mu.Unlock()
-				r.notifyResultReady()
+				r.publishResumedAgentPanic(
+					a, runDeps, onComplete, string(state.Type),
+					"You were resumed from a checkpoint. Continue your previous task.",
+					"resume_last_checkpoint", p,
+				)
 			}
 		}()
 
 		// Detach from caller's context so resumed agent survives tool timeout.
-		bgCtx := context.WithoutCancel(ctx)
-		agentCtx, agentCancel := context.WithCancel(bgCtx)
+		agentCtx, agentCancel := detachedResumeRunContext(ctx, a)
 		defer agentCancel()
 		a.SetCancelFunc(agentCancel)
 
@@ -493,8 +619,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 			result = &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: "nil result", Completed: true}
 		}
 		if err != nil {
-			result.Error = err.Error()
-			result.Status = AgentStatusFailed
+			applyAgentRunError(result, err)
 		}
 		result.Completed = true
 
@@ -517,13 +642,87 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 		r.mu.Lock()
 		r.results[a.ID] = result
 		r.mu.Unlock()
-		r.notifyResultReady()
+		r.notifyResultReady(a.ID)
 
 		invokeAgentComplete(onComplete, a.ID, result)
-	}(agent, deps)
+	}(agent, deps, runLease)
 
 	logging.Debug("resumed agent from last checkpoint", "agent_id", agent.ID, "checkpoint_id", latestID)
 	return agent.ID, nil
+}
+
+// detachedResumeRunContext gives accepted asynchronous resumes the same
+// bounded lifetime as fresh asynchronous spawns while deliberately removing
+// only the caller/tool cancellation edge.
+func detachedResumeRunContext(ctx context.Context, agent *Agent) (context.Context, context.CancelFunc) {
+	base := context.WithoutCancel(ctx)
+	if agent != nil {
+		if timeout := agent.GetTimeout(); timeout > 0 {
+			return context.WithTimeout(base, timeout)
+		}
+	}
+	return context.WithCancel(base)
+}
+
+// publishResumedAgentPanic completes every durable and observable lifecycle
+// edge before releasing the run lease. Previously panic recovery only changed
+// the in-memory result map: Agent status and persisted state remained Running,
+// workspace cleanup/accounting were skipped, and UI completion never fired.
+func (r *Runner) publishResumedAgentPanic(
+	agent *Agent,
+	deps runnerAgentDeps,
+	onComplete func(string, *AgentResult),
+	agentType, prompt, strategy string,
+	panicValue any,
+) {
+	end := time.Now()
+	start := agent.GetStartTime()
+	duration := time.Duration(0)
+	if !start.IsZero() {
+		duration = end.Sub(start)
+	}
+
+	agent.stateMu.Lock()
+	agent.status = AgentStatusFailed
+	agent.endTime = end
+	inputTokens := agent.usageInputTokens
+	outputTokens := agent.usageOutputTokens
+	cacheReadTokens := agent.usageCacheReadTokens
+	estimatedCost := agent.usageEstimatedCost
+	costTracked := agent.usageCostTracked
+	agent.stateMu.Unlock()
+
+	result := &AgentResult{
+		AgentID:              agent.ID,
+		Type:                 agent.Type,
+		Status:               AgentStatusFailed,
+		Error:                fmt.Sprintf("agent panic on resume: %v", panicValue),
+		Completed:            false,
+		Duration:             duration,
+		InputTokens:          inputTokens,
+		OutputTokens:         outputTokens,
+		CacheReadInputTokens: cacheReadTokens,
+		EstimatedCost:        estimatedCost,
+		CostTracked:          costTracked,
+		MutatingToolCalls:    agent.MutatingToolCount(),
+		TouchedPaths:         agent.GetTouchedPaths(),
+	}
+	agent.populateResultIdentity(result)
+	r.finalizeAgentWorkspace(agent, result)
+	result.Completed = true
+
+	if deps.metaAgent != nil {
+		deps.metaAgent.UnregisterAgent(agent.ID)
+	}
+	r.saveAgentState(agent)
+	r.recordAgentExecutionLearning(deps, agentType, prompt, result, duration, strategy)
+	r.reportAgentUsage(agent.ID, result)
+
+	r.mu.Lock()
+	r.results[agent.ID] = result
+	r.mu.Unlock()
+	r.notifyResultReady(agent.ID)
+	invokeAgentComplete(onComplete, agent.ID, result)
 }
 
 // Close flushes all agent data (project learning) to prevent data loss on shutdown.

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rivo/uniseg"
 )
 
 // ToolOutputConfig configures the tool output display behavior.
@@ -63,8 +64,9 @@ func (m *ToolOutputModel) SetConfig(config ToolOutputConfig) {
 
 // AddEntry adds a new tool output entry.
 func (m *ToolOutputModel) AddEntry(toolName, content string) int {
+	content = strings.TrimRight(safeToolOutputDisplayText(content), "\n")
 	entry := ToolOutputEntry{
-		ToolName:    toolName,
+		ToolName:    safeKeyEntryText(toolName),
 		FullContent: content,
 		Expanded:    m.AllExpanded,
 		Index:       len(m.entries),
@@ -147,7 +149,11 @@ func (m *ToolOutputModel) GetSummary(index int) string {
 
 // NeedsTruncation checks if the content needs truncation.
 func (m *ToolOutputModel) NeedsTruncation(content string) bool {
-	if len(content) > m.config.MaxCollapsedChars {
+	content = strings.TrimRight(safeToolOutputDisplayText(content), "\n")
+	if content == "" {
+		return false
+	}
+	if uniseg.GraphemeClusterCount(content) > m.config.MaxCollapsedChars {
 		return true
 	}
 	lines := strings.Split(content, "\n")
@@ -178,6 +184,7 @@ func (m *ToolOutputModel) RenderEntry(index int) string {
 
 // RenderContent renders content directly without storing it.
 func (m *ToolOutputModel) RenderContent(content string, expanded bool) string {
+	content = strings.TrimRight(safeToolOutputDisplayText(content), "\n")
 	if content == "" {
 		return ""
 	}
@@ -191,6 +198,10 @@ func (m *ToolOutputModel) RenderContent(content string, expanded bool) string {
 
 // renderFull renders the full content, optionally with line numbers.
 func (m *ToolOutputModel) renderFull(content string, _ bool) string {
+	content = strings.TrimRight(safeToolOutputDisplayText(content), "\n")
+	if content == "" {
+		return ""
+	}
 	var result strings.Builder
 
 	if m.config.ShowLineNumbers {
@@ -256,34 +267,54 @@ func renderHiddenLinesHint(hidden int) string {
 // is found, we fall back to the original first-N-and-last-M behaviour so
 // the user always sees *something*.
 func (m *ToolOutputModel) renderTruncated(content string) string {
+	content = strings.TrimRight(safeToolOutputDisplayText(content), "\n")
+	maxRows := m.config.MaxCollapsedLines
+	if content == "" || maxRows <= 0 {
+		return ""
+	}
 	lines := strings.Split(content, "\n")
 	totalLines := len(lines)
-
-	// Calculate how many lines from head and tail
-	headCount := int(float64(m.config.MaxCollapsedLines) * m.config.HeadRatio)
-	tailCount := m.config.MaxCollapsedLines - headCount
-
-	if headCount < 1 {
-		headCount = 1
-	}
-	if tailCount < 1 {
-		tailCount = 1
+	fitLine := func(line string) string { return truncateForWidth(line, 100) }
+	if totalLines <= maxRows {
+		fitted := make([]string, len(lines))
+		for i, line := range lines {
+			fitted[i] = fitLine(line)
+		}
+		return strings.Join(fitted, "\n")
 	}
 
 	headStart := firstSignalLine(lines)
+	tailStop := lastSignalLine(lines)
+	if maxRows == 1 {
+		return fitLine(lines[tailStop])
+	}
+	if maxRows == 2 {
+		if headStart == tailStop {
+			return fitLine(lines[headStart])
+		}
+		return fitLine(lines[headStart]) + "\n" + fitLine(lines[tailStop])
+	}
+
+	// Reserve one of the configured rows for the omission disclosure. The old
+	// implementation treated it as extra chrome and could render N+2 rows for
+	// an N-row budget because it also inserted a blank separator.
+	dataRows := maxRows - 1
+	headCount := int(float64(dataRows) * m.config.HeadRatio)
+	headCount = min(max(headCount, 1), dataRows-1)
+	tailCount := dataRows - headCount
+
 	// Don't skip so far that we'd overlap with the tail section — leave
 	// room for at least the configured number of head lines.
 	if headStart > totalLines-headCount {
 		headStart = 0
 	}
 
-	tailStop := lastSignalLine(lines)
 	// Similarly clamp on the tail side.
 	if tailStop < headStart+headCount {
 		tailStop = totalLines - 1
 	}
 
-	var result strings.Builder
+	result := make([]string, 0, maxRows)
 
 	// Head lines
 	headEnd := headStart + headCount
@@ -291,14 +322,7 @@ func (m *ToolOutputModel) renderTruncated(content string) string {
 		headEnd = totalLines
 	}
 	for i := headStart; i < headEnd; i++ {
-		line := lines[i]
-		if runes := []rune(line); len(runes) > 100 {
-			line = string(runes[:97]) + "..."
-		}
-		result.WriteString(line)
-		if i < headEnd-1 || tailCount > 0 {
-			result.WriteString("\n")
-		}
+		result = append(result, fitLine(lines[i]))
 	}
 
 	// Hidden lines indicator — accounts for skipped prefix/suffix plus the
@@ -313,22 +337,15 @@ func (m *ToolOutputModel) renderTruncated(content string) string {
 	}
 	hiddenLines := (startTail - headEnd) + headStart + (totalLines - 1 - tailStop)
 	if hiddenLines > 0 {
-		result.WriteString("\n" + renderHiddenLinesHint(hiddenLines) + "\n")
+		result = append(result, renderHiddenLinesHint(hiddenLines))
 	}
 
 	// Tail lines
 	for i := startTail; i <= tailStop && i < totalLines; i++ {
-		line := lines[i]
-		if runes := []rune(line); len(runes) > 100 {
-			line = string(runes[:97]) + "..."
-		}
-		result.WriteString(line)
-		if i < totalLines-1 && i < tailStop {
-			result.WriteString("\n")
-		}
+		result = append(result, fitLine(lines[i]))
 	}
 
-	return result.String()
+	return strings.Join(result, "\n")
 }
 
 // firstSignalLine returns the index of the first line that carries real
@@ -430,10 +447,12 @@ func (r *ExecutionStatusRenderer) RenderValidation(toolName string, warnings []s
 		Foreground(ColorWarning).
 		Bold(true)
 
+	toolName = safeKeyEntryText(toolName)
 	result.WriteString(headerStyle.Render(fmt.Sprintf("⚠ Safety Warnings for %s:", toolName)))
 	result.WriteString("\n")
 
 	for _, warning := range warnings {
+		warning = safeKeyEntryText(warning)
 		warningStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 		result.WriteString(warningStyle.Render("  • " + warning))
 		result.WriteString("\n")
@@ -444,6 +463,7 @@ func (r *ExecutionStatusRenderer) RenderValidation(toolName string, warnings []s
 
 // RenderStart renders the start of tool execution with user-friendly summary
 func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary any) string {
+	toolName = safeKeyEntryText(toolName)
 	var result strings.Builder
 
 	// Tool name with icon
@@ -501,7 +521,8 @@ func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary any) stri
 	result.WriteString(nameStyle.Render(toolName))
 
 	// Add summary if available
-	if s, ok := summary.(string); ok && s != "" {
+	if s, ok := summary.(string); ok && safeKeyEntryText(s) != "" {
+		s = safeKeyEntryText(s)
 		summaryStyle := lipgloss.NewStyle().Faint(true)
 		result.WriteString(" ")
 		result.WriteString(summaryStyle.Render("─ " + s))
@@ -514,6 +535,7 @@ func (r *ExecutionStatusRenderer) RenderStart(toolName string, summary any) stri
 
 // RenderProgress renders progress update for long-running operations
 func (r *ExecutionStatusRenderer) RenderProgress(toolName string, elapsed time.Duration) string {
+	toolName = safeKeyEntryText(toolName)
 	progressStyle := lipgloss.NewStyle().
 		Foreground(ColorDim).
 		Italic(true)
@@ -523,6 +545,7 @@ func (r *ExecutionStatusRenderer) RenderProgress(toolName string, elapsed time.D
 
 // RenderSuccess renders successful tool execution
 func (r *ExecutionStatusRenderer) RenderSuccess(toolName string, duration time.Duration) string {
+	toolName = safeKeyEntryText(toolName)
 	successStyle := lipgloss.NewStyle().
 		Foreground(ColorSuccess).
 		Bold(true)
@@ -540,6 +563,8 @@ func (r *ExecutionStatusRenderer) RenderSuccess(toolName string, duration time.D
 
 // RenderError renders failed tool execution
 func (r *ExecutionStatusRenderer) RenderError(toolName string, errMsg string, duration ...time.Duration) string {
+	toolName = safeKeyEntryText(toolName)
+	errMsg = safeKeyEntryText(errMsg)
 	errorStyle := lipgloss.NewStyle().
 		Foreground(ColorError).
 		Bold(true)
@@ -561,6 +586,8 @@ func (r *ExecutionStatusRenderer) RenderError(toolName string, errMsg string, du
 
 // RenderDenied renders permission denied status
 func (r *ExecutionStatusRenderer) RenderDenied(toolName, reason string) string {
+	toolName = safeKeyEntryText(toolName)
+	reason = safeKeyEntryText(reason)
 	denyStyle := lipgloss.NewStyle().
 		Foreground(ColorError).
 		Bold(true)
@@ -580,6 +607,7 @@ func (r *ExecutionStatusRenderer) RenderDenied(toolName, reason string) string {
 
 // RenderApproved renders permission approved status
 func (r *ExecutionStatusRenderer) RenderApproved(toolName string, summary any) string {
+	toolName = safeKeyEntryText(toolName)
 	approveStyle := lipgloss.NewStyle().
 		Foreground(ColorSuccess).
 		Bold(true)
@@ -589,7 +617,8 @@ func (r *ExecutionStatusRenderer) RenderApproved(toolName string, summary any) s
 	var result strings.Builder
 	result.WriteString(approveStyle.Render("  ✓ " + toolName + " approved"))
 
-	if s, ok := summary.(string); ok && s != "" {
+	if s, ok := summary.(string); ok && safeKeyEntryText(s) != "" {
+		s = safeKeyEntryText(s)
 		result.WriteString(" ")
 		result.WriteString(dimStyle.Render("─ " + s))
 	}
@@ -611,7 +640,11 @@ func (m *ToolOutputModel) EntryCount() int {
 // FormatToolOutput formats tool output with smart truncation.
 // This is a convenience function that can be used directly without storing entries.
 func FormatToolOutput(content string, maxLines int, expanded bool) string {
+	content = strings.TrimRight(safeToolOutputDisplayText(content), "\n")
 	if content == "" {
+		return ""
+	}
+	if maxLines <= 0 && !expanded {
 		return ""
 	}
 
@@ -621,15 +654,20 @@ func FormatToolOutput(content string, maxLines int, expanded bool) string {
 		return content
 	}
 
-	// Smart truncation: 66% head, 33% tail
-	headCount := int(float64(maxLines) * 0.66)
-	tailCount := maxLines - headCount
-
-	if headCount < 1 {
-		headCount = 1
+	// A one-row surface cannot carry both context and an omission marker. Keep
+	// the newest outcome row; larger surfaces preserve cause + tail and reserve
+	// one row for an honest hidden-count disclosure.
+	if maxLines == 1 {
+		return lines[len(lines)-1]
 	}
-	if tailCount < 1 {
-		tailCount = 1
+	if maxLines == 2 {
+		return lines[0] + "\n" + lines[len(lines)-1]
+	}
+	dataRows := maxLines - 1 // one row belongs to the hidden indicator
+	headCount := max(1, (dataRows*2+2)/3)
+	tailCount := max(dataRows-headCount, 1)
+	if headCount+tailCount > dataRows {
+		headCount = max(dataRows-tailCount, 1)
 	}
 
 	var result strings.Builder
@@ -640,7 +678,8 @@ func FormatToolOutput(content string, maxLines int, expanded bool) string {
 		result.WriteString("\n")
 	}
 
-	// Hidden indicator - clean and subtle
+	// Hidden indicator - clean and subtle. It is part of maxLines, not an extra
+	// row that can push the composer/status area off a short terminal.
 	hiddenLines := len(lines) - headCount - tailCount
 	if hiddenLines > 0 {
 		result.WriteString(renderHiddenLinesHint(hiddenLines))

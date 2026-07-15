@@ -30,6 +30,18 @@ const (
 	StateNotificationCenter
 )
 
+// PromptKind identifies an asynchronous decision surface whose app-side
+// waiter can expire independently of the Bubble Tea event loop.
+type PromptKind string
+
+const (
+	PromptKindPermission PromptKind = "permission"
+	PromptKindQuestion   PromptKind = "question"
+	PromptKindPlan       PromptKind = "plan"
+	PromptKindDiff       PromptKind = "diff"
+	PromptKindMultiDiff  PromptKind = "multi_diff"
+)
+
 // typeAheadActive reports whether the main input should receive keystrokes
 // and be rendered: normal input state, plus processing/streaming for
 // type-ahead composition (Enter then queues). Modals always win.
@@ -199,16 +211,19 @@ type (
 	}
 	// QuestionRequestMsg requests user input for a question.
 	QuestionRequestMsg struct {
+		ID       string
 		Question string
 		Options  []string
 		Default  string
 	}
 	// QuestionResponseMsg carries the user's answer.
 	QuestionResponseMsg struct {
+		ID     string
 		Answer string
 	}
 	// PlanApprovalRequestMsg requests approval for a plan.
 	PlanApprovalRequestMsg struct {
+		ID          string
 		Title       string
 		Description string
 		Steps       []PlanStepInfo
@@ -218,6 +233,14 @@ type (
 		Boundaries   []string // Pre-formatted
 		Invariants   []string
 		Examples     []string
+	}
+	// PromptExpiredMsg closes only the matching decision surface after its
+	// app-side waiter timed out or was cancelled. The ID guard prevents an old
+	// timeout from dismissing a newer prompt of the same kind.
+	PromptExpiredMsg struct {
+		Kind    PromptKind
+		ID      string
+		Message string
 	}
 	// PlanStepInfo contains info about a plan step for display.
 	PlanStepInfo struct {
@@ -245,15 +268,21 @@ type (
 	}
 	// ConfigUpdateMsg signals that config has changed and UI should refresh.
 	ConfigUpdateMsg struct {
+		Revision            uint64
+		Settings            map[string]bool // Complete normalized toggle snapshot when sent by App.
 		PermissionsEnabled  bool
 		SandboxEnabled      bool
 		PlanningModeEnabled bool
+		CompactMode         bool
 		ReducedMotion       bool
+		ShowTokenUsage      bool
 		ModelName           string // Current model name (empty = no change)
 	}
 	// ModelSelectResultMsg resolves a model switch requested by the selector.
 	// ModelID is the authoritative active model after success or rollback.
 	ModelSelectResultMsg struct {
+		RequestID   string
+		Revision    uint64
 		RequestedID string
 		ModelID     string
 		Success     bool
@@ -421,17 +450,21 @@ type StatusUpdateMsg struct {
 	Bell bool
 }
 
-// PlanningModeToggledMsg is sent after async toggle completes.
+// PlanningModeToggledMsg is sent after async toggle completes. Revision owns
+// the config snapshot observed with Enabled; zero is legacy/unversioned.
 type PlanningModeToggledMsg struct {
-	Enabled bool
+	Enabled  bool
+	Revision uint64
 }
 
 // SessionModeCycledMsg is sent after Shift+Tab cycles the canonical
 // session mode (Normal → Plan → YOLO → Normal). Mode is the lowercase
 // name of the NEW state ("normal", "plan", "yolo") so the TUI can emit
-// a toast + update the status bar without knowing the app-level enum.
+// a toast + update the status bar without knowing the app-level enum. Revision
+// owns the config snapshot observed with Mode; zero is legacy/unversioned.
 type SessionModeCycledMsg struct {
-	Mode string
+	Mode     string
+	Revision uint64
 }
 
 // RuntimeStatusSnapshot is a compact runtime health snapshot for Status Bar 2.0.

@@ -63,3 +63,43 @@ func TestMinimalBusyStatusPreservesQueueAndCancelAtEveryWidth(t *testing.T) {
 		})
 	}
 }
+
+func TestMinimalBusyStatusKeepsCancelAheadOfModelSwitch(t *testing.T) {
+	for _, width := range []int{10, 12, 20, 40, 59} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			m := NewModel()
+			m.width = width
+			m.state = StateStreaming
+			m.queuedPending = 7
+			m.modelSwitchPending = "model-with-a-long-pending-name"
+
+			got := stripAnsi(m.renderStatusBar())
+			if !strings.Contains(got, "esc") || !strings.Contains(got, "📥7") {
+				t.Fatalf("model-switch status displaced recovery at width %d: %q", width, got)
+			}
+			if gotWidth := lipgloss.Width(m.renderStatusBar()); gotWidth > width {
+				t.Fatalf("status width=%d exceeds terminal width=%d: %q", gotWidth, width, got)
+			}
+		})
+	}
+}
+
+func TestMediumBusyStatusKeepsSafetyAndLiveStateBeforeProject(t *testing.T) {
+	m := NewModel()
+	m.width = 80
+	m.state = StateStreaming
+	m.permissionsEnabled = false
+	m.sandboxEnabled = false
+	m.workDir = "/Users/example/projects/a/very/long/repository/path/that/would-fill-the-status-bar"
+	m.currentModel = "model-with-a-very-long-identity"
+
+	got := stripAnsi(m.renderStatusBar())
+	for _, want := range []string{"YOLO", "!SANDBOX", "WRITING", "Esc interrupt"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("medium busy status lost priority signal %q: %q", want, got)
+		}
+	}
+	if gotWidth := lipgloss.Width(m.renderStatusBar()); gotWidth > m.width {
+		t.Fatalf("status width=%d exceeds terminal width=%d: %q", gotWidth, m.width, got)
+	}
+}

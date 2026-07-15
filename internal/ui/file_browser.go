@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -43,23 +44,26 @@ type FileBrowserRequestMsg struct {
 
 // FileBrowserActionMsg is sent when user performs an action.
 type FileBrowserActionMsg struct {
-	Action FileBrowserAction
-	Path   string
-	Files  []string // For multi-select
+	Action          FileBrowserAction
+	Path            string
+	Files           []string // For multi-select
+	ownerGeneration uint64
+	triggerKey      string
 }
 
 // FileBrowserModel is the UI for interactive file browsing.
 type FileBrowserModel struct {
-	currentDir    string
-	entries       []FileEntry
-	selectedIndex int
-	selectedFiles map[string]bool // For multi-select
-	filter        string
-	showHidden    bool
-	viewport      viewport.Model
-	styles        *Styles
-	width         int
-	height        int
+	currentDir        string
+	entries           []FileEntry
+	selectedIndex     int
+	selectedFiles     map[string]bool // For multi-select
+	filter            string
+	showHidden        bool
+	viewport          viewport.Model
+	styles            *Styles
+	width             int
+	height            int
+	terminalSizeKnown bool
 
 	// Search/filter state
 	filterInput  string
@@ -77,6 +81,11 @@ type FileBrowserModel struct {
 	previewMaxLines    int // Max lines to preview (default: 100)
 	previewLoadError   string
 	previewRecovery    string
+	ownerGeneration    uint64
+	actionPending      bool
+
+	directoryNavGuardKey   string
+	directoryNavGuardUntil time.Time
 
 	// Split dimensions
 	listWidth    int
@@ -86,10 +95,41 @@ type FileBrowserModel struct {
 	onAction func(action FileBrowserAction, path string, files []string)
 }
 
+func (m *FileBrowserModel) setOwnerGeneration(generation uint64) {
+	m.ownerGeneration = generation
+}
+
 const minFileBrowserSplitWidth = 64
+
+// The tiny summary needs room for its selection marker plus at least one
+// distinguishable target cell. Below this boundary (or before a target row can
+// coexist with recovery) target-dependent actions fail closed.
+const minFileBrowserTargetWidth = 7
+
+const fileBrowserDirectoryRepeatWindow = 500 * time.Millisecond
+
+func (m FileBrowserModel) targetActionsUnreadable() bool {
+	return m.terminalSizeKnown && (m.width < minFileBrowserTargetWidth || m.height <= 4)
+}
 
 func (m FileBrowserModel) previewSupported() bool {
 	return m.width <= 0 || m.width >= minFileBrowserSplitWidth
+}
+
+func (m FileBrowserModel) canNavigateEntries() bool {
+	return len(m.entries) > 1
+}
+
+func (m FileBrowserModel) canPageEntries() bool {
+	return m.canNavigateEntries() && len(m.entries) > max(m.viewport.Height, 1)
+}
+
+func (m FileBrowserModel) canScrollPreview() bool {
+	return m.previewEnabled && m.previewViewport.TotalLineCount() > m.previewViewport.Height
+}
+
+func (m FileBrowserModel) canGoToParent() bool {
+	return m.currentDir != "" && filepath.Dir(m.currentDir) != m.currentDir
 }
 
 // NewFileBrowserModel creates a new file browser model.
@@ -114,6 +154,7 @@ func NewFileBrowserModel(styles *Styles) FileBrowserModel {
 
 // SetSize sets the size of the file browser.
 func (m *FileBrowserModel) SetSize(width, height int) {
+	m.terminalSizeKnown = width > 0 && height > 0
 	m.width = max(width, 1)
 	m.height = max(height, 1)
 	m.updateLayout()
@@ -146,14 +187,7 @@ func (m *FileBrowserModel) updateLayout() {
 	m.viewport.Height = contentHeight
 
 	if m.previewEnabled && m.width >= minFileBrowserSplitWidth {
-		listOuterWidth := max(m.width*40/100, 28)
-		previewOuterWidth := m.width - listOuterWidth - 1
-		if previewOuterWidth < 28 {
-			previewOuterWidth = 28
-			listOuterWidth = m.width - previewOuterWidth - 1
-		}
-		m.listWidth = max(listOuterWidth-4, 1)
-		m.previewWidth = max(previewOuterWidth-4, 1)
+		m.listWidth, m.previewWidth = fileBrowserSplitContentWidths(m.width)
 		m.viewport.Width = m.listWidth
 		m.previewViewport.Width = m.previewWidth
 	} else {
@@ -166,6 +200,16 @@ func (m *FileBrowserModel) updateLayout() {
 	m.ensureSelectionVisible()
 }
 
+func fileBrowserSplitContentWidths(width int) (listWidth, previewWidth int) {
+	listOuterWidth := max(width*40/100, 28)
+	previewOuterWidth := width - listOuterWidth - 1
+	if previewOuterWidth < 28 {
+		previewOuterWidth = 28
+		listOuterWidth = width - previewOuterWidth - 1
+	}
+	return max(listOuterWidth-4, 1), max(previewOuterWidth-4, 1)
+}
+
 func (m FileBrowserModel) renderWidth() int {
 	if m.width > 0 {
 		return m.width
@@ -175,6 +219,19 @@ func (m FileBrowserModel) renderWidth() int {
 
 // SetPath sets the current directory path.
 func (m *FileBrowserModel) SetPath(path string) error {
+	return m.setPath(path, true)
+}
+
+// navigateToPath changes folders without declaring a new browser ownership
+// cycle. A terminal Open/Select/Close command may still be in Bubble Tea's
+// queue; internal navigation must not clear actionPending and let another
+// terminal callback escape before the parent consumes that command. Public
+// SetPath remains the authoritative reset used when a browser is opened anew.
+func (m *FileBrowserModel) navigateToPath(path string) error {
+	return m.setPath(path, false)
+}
+
+func (m *FileBrowserModel) setPath(path string, resetTerminalOwnership bool) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -210,6 +267,11 @@ func (m *FileBrowserModel) SetPath(path string) error {
 		m.updateViewport()
 		return err
 	}
+	if resetTerminalOwnership {
+		m.actionPending = false
+	}
+	m.directoryNavGuardKey = ""
+	m.directoryNavGuardUntil = time.Time{}
 	return nil
 }
 
@@ -589,6 +651,12 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.consumeDirectoryNavigationRepeat(msg) {
+			return m, nil
+		}
+		if m.actionPending && fileBrowserTerminalActionKey(msg.String()) {
+			return m, nil
+		}
 		// If filter is active, handle text input
 		if m.filterActive {
 			switch msg.Type {
@@ -598,8 +666,8 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 				m.updateViewport()
 				return m, nil
 			case tea.KeyBackspace:
-				if runes := []rune(m.filterInput); len(runes) > 0 {
-					m.filterInput = string(runes[:len(runes)-1])
+				if next := removeLastGrapheme(m.filterInput); next != m.filterInput {
+					m.filterInput = next
 					m.filter = m.filterInput
 					if err := m.loadEntries(); err != nil {
 						m.setError("Cannot update filter", err)
@@ -635,21 +703,28 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 			m.selectEntry(m.selectedIndex + max(m.viewport.Height, 1))
 
 		case "l", "enter", "right":
+			if m.targetActionsUnreadable() {
+				return m, nil
+			}
 			if len(m.entries) > 0 && m.selectedIndex < len(m.entries) {
 				entry := m.entries[m.selectedIndex]
 				if entry.IsDir {
-					if err := m.SetPath(entry.Path); err != nil {
+					if err := m.navigateToPath(entry.Path); err != nil {
 						m.setError("Cannot access", err)
 						return m, nil
 					}
+					m.armDirectoryNavigationRepeat(msg.String())
 				} else {
+					m.actionPending = true
 					if m.onAction != nil {
 						m.onAction(FileBrowserActionOpen, entry.Path, nil)
 					}
 					return m, func() tea.Msg {
 						return FileBrowserActionMsg{
-							Action: FileBrowserActionOpen,
-							Path:   entry.Path,
+							Action:          FileBrowserActionOpen,
+							Path:            entry.Path,
+							ownerGeneration: m.ownerGeneration,
+							triggerKey:      msg.String(),
 						}
 					}
 				}
@@ -658,7 +733,7 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 		case "h", "backspace", "left":
 			// Go to parent directory - show error if navigation fails
 			if m.currentDir != "/" {
-				if err := m.SetPath(filepath.Dir(m.currentDir)); err != nil {
+				if err := m.navigateToPath(filepath.Dir(m.currentDir)); err != nil {
 					m.setError("Cannot access parent", err)
 					return m, nil
 				}
@@ -666,6 +741,9 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 
 		case " ":
 			// Toggle selection
+			if m.targetActionsUnreadable() {
+				return m, nil
+			}
 			if len(m.entries) > 0 && m.selectedIndex < len(m.entries) {
 				entry := m.entries[m.selectedIndex]
 				if entry.Name != ".." {
@@ -704,6 +782,9 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 
 		case "p":
 			// Toggle preview panel
+			if m.targetActionsUnreadable() {
+				return m, nil
+			}
 			if !m.previewEnabled && !m.previewSupported() {
 				m.setError(fmt.Sprintf("Preview needs at least %d columns", minFileBrowserSplitWidth), nil)
 				return m, nil
@@ -740,36 +821,43 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 				m.setError("Cannot find home folder", err)
 				return m, nil
 			}
-			if err := m.SetPath(home); err != nil {
+			if err := m.navigateToPath(home); err != nil {
 				m.setError("Cannot access home", err)
 				return m, nil
 			}
 
 		case "y":
 			// Confirm selection
+			if m.targetActionsUnreadable() {
+				return m, nil
+			}
 			if len(m.selectedFiles) > 0 {
 				var files []string
 				for path := range m.selectedFiles {
 					files = append(files, path)
 				}
 				sort.Strings(files)
+				m.actionPending = true
 				if m.onAction != nil {
 					m.onAction(FileBrowserActionSelect, "", files)
 				}
 				return m, func() tea.Msg {
 					return FileBrowserActionMsg{
-						Action: FileBrowserActionSelect,
-						Files:  files,
+						Action:          FileBrowserActionSelect,
+						Files:           files,
+						ownerGeneration: m.ownerGeneration,
+						triggerKey:      msg.String(),
 					}
 				}
 			}
 
 		case "q", "esc":
+			m.actionPending = true
 			if m.onAction != nil {
 				m.onAction(FileBrowserActionClose, "", nil)
 			}
 			return m, func() tea.Msg {
-				return FileBrowserActionMsg{Action: FileBrowserActionClose}
+				return FileBrowserActionMsg{Action: FileBrowserActionClose, ownerGeneration: m.ownerGeneration, triggerKey: msg.String()}
 			}
 
 		case "c":
@@ -782,7 +870,21 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		m.viewport, cmd = m.viewport.Update(msg)
+		// A wheel gesture is a distinct navigation intent, so it releases the
+		// short exact-key repeat guard armed by Enter/l/right directory opens.
+		// It intentionally does not release terminal action ownership.
+		m.clearDirectoryNavigationRepeat()
+		if m.canScrollPreview() {
+			// A long visible preview owns wheel scrolling, matching Search and
+			// Git split panes. Moving the file selection here would replace the
+			// document being read and reset its preview to the first line.
+			m.previewViewport, cmd = m.previewViewport.Update(msg)
+		} else if direction := verticalMouseWheelDirection(msg); direction != 0 {
+			step := max(m.viewport.MouseWheelDelta, 1)
+			m.selectEntry(m.selectedIndex + direction*step)
+		} else {
+			m.viewport, cmd = m.viewport.Update(msg)
+		}
 		return m, cmd
 
 	case tea.WindowSizeMsg:
@@ -790,6 +892,42 @@ func (m FileBrowserModel) Update(msg tea.Msg) (FileBrowserModel, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func fileBrowserTerminalActionKey(key string) bool {
+	switch key {
+	case "l", "enter", "right", "y", "q", "esc":
+		return true
+	}
+	return false
+}
+
+func (m *FileBrowserModel) armDirectoryNavigationRepeat(triggerKey string) {
+	if triggerKey == "" {
+		return
+	}
+	m.directoryNavGuardKey = triggerKey
+	m.directoryNavGuardUntil = time.Now().Add(fileBrowserDirectoryRepeatWindow)
+}
+
+func (m *FileBrowserModel) clearDirectoryNavigationRepeat() {
+	m.directoryNavGuardKey = ""
+	m.directoryNavGuardUntil = time.Time{}
+}
+
+func (m *FileBrowserModel) consumeDirectoryNavigationRepeat(msg tea.KeyMsg) bool {
+	if m.directoryNavGuardUntil.IsZero() {
+		return false
+	}
+	if !time.Now().Before(m.directoryNavGuardUntil) {
+		m.clearDirectoryNavigationRepeat()
+		return false
+	}
+	if msg.String() == m.directoryNavGuardKey {
+		return true
+	}
+	m.clearDirectoryNavigationRepeat()
+	return false
 }
 
 func (m *FileBrowserModel) appendFilterText(value string) {
@@ -837,27 +975,16 @@ func truncateTailForWidth(value string, width int) string {
 	if lipgloss.Width(value) <= width {
 		return value
 	}
-	if width == 1 {
-		runes := []rune(value)
-		if len(runes) > 0 && lipgloss.Width(string(runes[len(runes)-1])) == 1 {
-			return string(runes[len(runes)-1])
-		}
-		return "…"
-	}
 
-	runes := []rune(value)
-	budget := width - 1
-	used := 0
-	start := len(runes)
-	for start > 0 {
-		cellWidth := lipgloss.Width(string(runes[start-1]))
-		if used+cellWidth > budget {
-			break
-		}
-		start--
-		used += cellWidth
+	if suffix := displayCellSuffix(value, width-1); suffix != "" {
+		return "…" + suffix
 	}
-	return "…" + string(runes[start:])
+	// A final wide grapheme may fit by itself even when there is no room for
+	// both it and the ellipsis. Preserve that grapheme rather than splitting it.
+	if suffix := displayCellSuffix(value, width); suffix != "" {
+		return suffix
+	}
+	return "…"
 }
 
 func (m *FileBrowserModel) setError(context string, err error) {
@@ -870,6 +997,16 @@ func (m *FileBrowserModel) setError(context string, err error) {
 
 // View renders the file browser.
 func (m FileBrowserModel) View() string {
+	// The app compositor reserves one row for its status bar and one row for
+	// joining this full-screen surface into the frame. On very short terminals
+	// the regular header + bordered list + two-line footer is therefore cropped
+	// from the top, which can leave only controls and hide the selected file.
+	// Use a purpose-built summary whose final rows always carry selection and
+	// recovery instead of relying on generic tail-cropping.
+	if m.height > 0 && m.height <= 8 {
+		return m.renderTinyView()
+	}
+
 	var builder strings.Builder
 
 	// Header
@@ -923,7 +1060,7 @@ func (m FileBrowserModel) View() string {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorBorder).
 			Padding(0, 1)
-		builder.WriteString(borderStyle.Width(m.viewport.Width).Render(m.viewport.View()))
+		builder.WriteString(borderStyle.Width(m.viewport.Width + 2).Render(m.viewport.View()))
 	}
 	builder.WriteString("\n\n")
 
@@ -933,6 +1070,97 @@ func (m FileBrowserModel) View() string {
 	return builder.String()
 }
 
+// renderTinyView preserves the minimum useful file-browser contract in a
+// terminal too short for the bordered list: the active editor (or current
+// selection) plus an honest recovery action. Optional context is kept ahead of
+// those rows so further height reduction drops decoration before ownership or
+// controls.
+func (m FileBrowserModel) renderTinyView() string {
+	width := max(m.renderWidth(), 1)
+	headerStyle := lipgloss.NewStyle().Foreground(ColorHighlight).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	selectedStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
+	errorStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+	filterStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+	keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+
+	header := "Files"
+	if len(m.selectedFiles) > 0 {
+		header += fmt.Sprintf(" · %d selected", len(m.selectedFiles))
+	} else if dir := safeKeyEntryText(m.currentDir); dir != "" {
+		base := filepath.Base(dir)
+		if base == "." || base == string(filepath.Separator) {
+			base = dir
+		}
+		header += " · " + base
+	}
+	rows := []string{ansi.Truncate(headerStyle.Render(header), width, "…")}
+
+	if m.errorMsg != "" {
+		rows = append(rows, ansi.Truncate(errorStyle.Render("! "+safeKeyEntryText(m.errorMsg)), width, "…"))
+	}
+	filterRow := ""
+	if m.filter != "" || m.filterActive {
+		filter := m.filter
+		if m.filterActive {
+			filter = m.filterInput
+		}
+		filterRow = filterStyle.Render(renderFileBrowserFilterLine(filter, m.filterActive, width))
+	}
+
+	selection := "No files"
+	if m.selectedIndex >= 0 && m.selectedIndex < len(m.entries) {
+		entry := m.entries[m.selectedIndex]
+		name := safeKeyEntryText(entry.Name)
+		if name == "" {
+			name = filepath.Base(safeKeyEntryText(entry.Path))
+		}
+		if name == "" {
+			name = "Unnamed entry"
+		}
+		marker := "> "
+		if m.selectedFiles[entry.Path] {
+			marker = "> ✓ "
+		}
+		if entry.IsDir && name != ".." {
+			name += "/"
+		}
+		selection = marker + truncateMiddleForWidth(name, max(width-lipgloss.Width(marker), 1))
+	} else if empty := safeKeyEntryText(m.emptyStateText()); empty != "" {
+		selection = empty
+	}
+	selectionRow := ansi.Truncate(selectedStyle.Render(selection), width, "…")
+	if !m.filterActive && filterRow != "" {
+		rows = append(rows, filterRow)
+	}
+	rows = append(rows, selectionRow)
+	// While editing, the filter and its completion key own the smallest useful
+	// layout. Keeping the filter immediately before the footer lets tail
+	// cropping discard decoration and the inactive target first.
+	if m.filterActive && filterRow != "" {
+		rows = append(rows, filterRow)
+	}
+
+	footer := keyStyle.Render("Esc/q") + dimStyle.Render(" Close")
+	if m.filterActive {
+		footer = keyStyle.Render("Enter/Esc") + dimStyle.Render(" Done")
+	} else if m.targetActionsUnreadable() {
+		footer = dimStyle.Render(tinyWorkspaceResizeRecoveryHint(width))
+	} else if m.selectedIndex >= 0 && m.selectedIndex < len(m.entries) {
+		footer += dimStyle.Render(" · ") + keyStyle.Render("Enter")
+	}
+	rows = append(rows, ansi.Truncate(footer, width, "…"))
+
+	// View() is followed by a compositor newline and the global status row.
+	// Budget those two rows here so the component never asks tailVisualRows to
+	// choose between the selected entry and the close action.
+	rowBudget := max(m.height-2, 1)
+	if len(rows) > rowBudget {
+		rows = rows[len(rows)-rowBudget:]
+	}
+	return strings.Join(rows, "\n")
+}
+
 // renderSplitView renders the file browser with a preview panel.
 func (m FileBrowserModel) renderSplitView() string {
 	borderStyle := lipgloss.NewStyle().
@@ -940,8 +1168,16 @@ func (m FileBrowserModel) renderSplitView() string {
 		BorderForeground(ColorBorder).
 		Padding(0, 1)
 
+	listWidth, previewWidth := m.listWidth, m.previewWidth
+	if m.width >= minFileBrowserSplitWidth && (listWidth <= 0 || previewWidth <= 0 || listWidth+previewWidth+9 != m.width) {
+		// Async/degraded callers can enable preview between layout passes. Derive
+		// safe split dimensions here too, so recovery content never collapses.
+		listWidth, previewWidth = fileBrowserSplitContentWidths(m.width)
+	}
+
 	// Left panel: file list
-	leftPanel := borderStyle.Width(m.listWidth).Render(m.viewport.View())
+	listView := fitPanelContent(m.viewport.View(), listWidth)
+	leftPanel := borderStyle.Width(listWidth + 2).Render(listView)
 
 	// Right panel: preview
 	var previewContent string
@@ -971,10 +1207,11 @@ func (m FileBrowserModel) renderSplitView() string {
 			Foreground(ColorHighlight).
 			Bold(true)
 		fileName := filepath.Base(safeKeyEntryText(m.previewFilePath))
-		previewHeader = headerStyle.Render(truncateForWidth(fileName, m.previewWidth)) + "\n" + strings.Repeat("─", m.previewWidth) + "\n"
+		previewHeader = headerStyle.Render(truncateForWidth(fileName, previewWidth)) + "\n" + strings.Repeat("─", previewWidth) + "\n"
 	}
 
-	rightPanel := borderStyle.Width(m.previewWidth).Render(previewHeader + previewContent)
+	previewView := fitPanelContent(previewHeader+previewContent, previewWidth)
+	rightPanel := borderStyle.Width(previewWidth + 2).Render(previewView)
 
 	// Join horizontally
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel)
@@ -991,9 +1228,15 @@ func (m *FileBrowserModel) renderActions(builder *strings.Builder) {
 		hints := []string{
 			keyStyle.Render("Enter/Esc") + " Done",
 			keyStyle.Render("Type") + " Filter",
-			keyStyle.Render("Backspace") + " Delete",
+		}
+		if m.filterInput != "" {
+			hints = append(hints, keyStyle.Render("Backspace")+" Delete")
 		}
 		builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(hints, "  │  ")), m.renderWidth(), "…"))
+		return
+	}
+	if m.targetActionsUnreadable() {
+		builder.WriteString(ansi.Truncate(hintStyle.Render(tinyWorkspaceResizeRecoveryHint(m.renderWidth())), m.renderWidth(), "…"))
 		return
 	}
 
@@ -1009,7 +1252,7 @@ func (m *FileBrowserModel) renderActions(builder *strings.Builder) {
 		hints = append(hints, keyStyle.Render("Enter")+" "+entryAction)
 	}
 	hints = append(hints, keyStyle.Render("/")+" Filter")
-	if m.previewSupported() || m.previewEnabled {
+	if (len(m.entries) > 0 && m.previewSupported()) || m.previewEnabled {
 		previewAction := "Preview"
 		if m.previewEnabled {
 			previewAction = "Hide preview"
@@ -1040,13 +1283,25 @@ func (m *FileBrowserModel) renderActions(builder *strings.Builder) {
 	if !m.previewSupported() {
 		secondaryHints = append(secondaryHints, fmt.Sprintf("Preview needs %d columns", minFileBrowserSplitWidth))
 	}
-	secondaryHints = append(secondaryHints, "↑/↓ Move", "PgUp/PgDn Page", "Home/End Jump", "h/l Folder")
-	if m.previewEnabled {
+	if m.canNavigateEntries() {
+		secondaryHints = append(secondaryHints, "↑/↓ Move")
+		if m.canPageEntries() {
+			secondaryHints = append(secondaryHints, "PgUp/PgDn Page")
+		}
+		secondaryHints = append(secondaryHints, "Home/End Jump")
+	}
+	if m.canGoToParent() {
+		secondaryHints = append(secondaryHints, "h/← Parent")
+	}
+	if m.canScrollPreview() {
 		secondaryHints = append(secondaryHints, "Ctrl+j/k Scroll preview")
-	} else {
+	}
+	if !m.previewEnabled {
 		secondaryHints = append(secondaryHints, "~ Home folder")
 	}
-	builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(secondaryHints, "  │  ")), m.renderWidth(), "…"))
+	if len(secondaryHints) > 0 {
+		builder.WriteString(ansi.Truncate(hintStyle.Render(strings.Join(secondaryHints, "  │  ")), m.renderWidth(), "…"))
+	}
 }
 
 // GetCurrentPath returns the current directory path.

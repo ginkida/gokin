@@ -228,6 +228,44 @@ func TestNotificationDetailPagesLongContentAndFitsNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestNotificationCenterFitsHeightWithPagingNoticeAndDetails(t *testing.T) {
+	for _, height := range []int{12, 18, 24} {
+		m := NewModel()
+		m.width, m.height = 72, height
+		m.toastManager.maxToasts = 20
+		for i := 0; i < 16; i++ {
+			m.toastManager.Show(ToastWarning, "Provider warning "+strings.Repeat("!", i), strings.Repeat("Reconnect and retry the request. ", 8), time.Minute)
+		}
+		m.openNotificationCenter()
+		rows := m.notificationRows()
+		m.setNotificationSelection(5, rows)
+		m.notificationScroll = 3
+		m.notificationNotice = "Earlier notifications cleared"
+
+		list := m.renderNotificationCenter()
+		if got := lipgloss.Height(list); got > height {
+			t.Fatalf("height=%d notification list rendered %d rows:\n%s", height, got, stripAnsi(list))
+		}
+		for _, want := range []string{"Notifications", "Earlier notifications cleared", "Esc"} {
+			if !strings.Contains(stripAnsi(list), want) {
+				t.Fatalf("height=%d notification list missing %q:\n%s", height, want, stripAnsi(list))
+			}
+		}
+
+		m.notificationDetail = true
+		m.notificationDetailScroll = 2
+		detail := m.renderNotificationCenter()
+		if got := lipgloss.Height(detail); got > height {
+			t.Fatalf("height=%d notification detail rendered %d rows:\n%s", height, got, stripAnsi(detail))
+		}
+		for _, want := range []string{"Notification details", "Esc"} {
+			if !strings.Contains(stripAnsi(detail), want) {
+				t.Fatalf("height=%d notification detail missing %q:\n%s", height, want, stripAnsi(detail))
+			}
+		}
+	}
+}
+
 func TestNotificationSelectionClampsWhenHistoryIsCleared(t *testing.T) {
 	m := NewModel()
 	m.width, m.height = 70, 14

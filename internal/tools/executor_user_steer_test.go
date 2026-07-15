@@ -94,6 +94,34 @@ func TestTryQueueUserSteerIsBounded(t *testing.T) {
 	}
 }
 
+func TestCancelUserSteeringDiscardsQueuedMessages(t *testing.T) {
+	var got []string
+	e := &Executor{
+		userSteerActive: true,
+		handler: &ExecutionHandler{
+			OnSteerLeftover: func(messages []string) {
+				got = append(got, messages...)
+			},
+		},
+	}
+
+	if !e.TryQueueUserSteer("cancel me") {
+		t.Fatal("active executor rejected steer before cancellation")
+	}
+	e.CancelUserSteering()
+	e.finishUserSteering()
+
+	if len(got) != 0 {
+		t.Fatalf("cancelled steers reached leftover callback: %v", got)
+	}
+	if e.HasUserSteers() {
+		t.Fatal("cancelled steers remained queued")
+	}
+	if e.TryQueueUserSteer("too late") {
+		t.Fatal("cancelled executor accepted a late steer")
+	}
+}
+
 // TestQueueUserSteer_TrimsWhitespace pins that the queue normalizes whitespace
 // so a steer of only spaces never enters the queue (would inject a junk turn).
 func TestQueueUserSteer_TrimsWhitespace(t *testing.T) {

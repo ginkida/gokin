@@ -13,6 +13,7 @@ import (
 	"gokin/internal/client"
 	"gokin/internal/config"
 	"gokin/internal/donegate"
+	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
@@ -42,6 +43,7 @@ type Runner struct {
 	results      map[string]*AgentResult
 	store        *AgentStore
 	permissions  *permission.Manager
+	hooks        *hooks.Manager
 
 	// Activity reporting
 	activityReporter ActivityReporter
@@ -111,8 +113,15 @@ type Runner struct {
 	// UI can render a meaningful one-line result; zero-valued otherwise.
 	onSubAgentActivity func(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string)
 
-	// Event-driven notification for result completion (replaces polling in WaitWithContext)
-	resultReady chan struct{}
+	// Per-agent completion notifications used by WaitWithContext. Every waiter
+	// for the same agent shares one channel, which is closed only when that
+	// agent's final result is published. Guarded by mu.
+	resultWaiters map[string]*resultWaitState
+
+	// activeRuns is the in-process execution lease ledger. A persisted state or
+	// checkpoint may be discovered by several resume paths concurrently; only
+	// one of them may execute a given agent ID at a time. Guarded by mu.
+	activeRuns map[string]*agentRunLease
 
 	// Weak model mode: extra guidance for weaker models
 	weakModelMode bool
@@ -215,6 +224,7 @@ type runnerAgentDeps struct {
 	baseRegistry        tools.ToolRegistry
 	workDir             string
 	permissions         *permission.Manager
+	hooks               *hooks.Manager
 	messengerFactory    func(agentID string) *AgentMessenger
 	strategyOptimizer   *StrategyOptimizer
 	delegationMetrics   *DelegationMetrics
@@ -235,6 +245,22 @@ func (r *Runner) SetPermissions(mgr *permission.Manager) {
 	r.mu.Lock()
 	r.permissions = mgr
 	r.mu.Unlock()
+}
+
+// SetHooks installs the same trusted hook policy on foreground-created and
+// recovered sub-agents. Existing agents are updated outside r.mu so their own
+// state locks cannot invert the Runner lock order.
+func (r *Runner) SetHooks(mgr *hooks.Manager) {
+	r.mu.Lock()
+	r.hooks = mgr
+	agents := make([]*Agent, 0, len(r.agents))
+	for _, agent := range r.agents {
+		agents = append(agents, agent)
+	}
+	r.mu.Unlock()
+	for _, agent := range agents {
+		agent.SetHooks(mgr)
+	}
 }
 
 // SetActivityReporter sets the activity reporter.
@@ -406,6 +432,10 @@ func (r *Runner) reportAgentUsage(id string, result *AgentResult) {
 	}
 	r.mu.RLock()
 	callback := r.onAgentUsage
+	var invocationScope InvocationScope
+	if runningAgent := r.agents[id]; runningAgent != nil {
+		invocationScope = runningAgent.invocationScope
+	}
 	r.mu.RUnlock()
 	if callback != nil {
 		// Accounting/telemetry is ancillary. A buggy integration callback must
@@ -420,7 +450,14 @@ func (r *Runner) reportAgentUsage(id string, result *AgentResult) {
 						"stack", logging.PanicStack())
 				}
 			}()
-			callback(id, cloneAgentResult(result))
+			snapshot := cloneAgentResult(result)
+			// Normal Agent.Run results already carry the scope. Synthetic
+			// terminal results (nil-result/panic recovery) may not, so recover
+			// it from the still-registered agent before invoking accounting.
+			if snapshot.InvocationScope.IsZero() {
+				snapshot.InvocationScope = invocationScope
+			}
+			callback(id, snapshot)
 		}()
 	}
 }
@@ -690,13 +727,14 @@ func (r *Runner) reportActivity() {
 // NewRunner creates a new agent runner.
 func NewRunner(ctx context.Context, c client.Client, registry tools.ToolRegistry, workDir string) *Runner {
 	r := &Runner{
-		ctx:          ctx,
-		client:       c,
-		baseRegistry: registry,
-		workDir:      workDir,
-		agents:       make(map[string]*Agent),
-		results:      make(map[string]*AgentResult),
-		resultReady:  make(chan struct{}, 1),
+		ctx:           ctx,
+		client:        c,
+		baseRegistry:  registry,
+		workDir:       workDir,
+		agents:        make(map[string]*Agent),
+		results:       make(map[string]*AgentResult),
+		resultWaiters: make(map[string]*resultWaitState),
+		activeRuns:    make(map[string]*agentRunLease),
 	}
 	// Set up messenger factory
 	r.messengerFactory = func(agentID string) *AgentMessenger {
@@ -722,6 +760,7 @@ func (r *Runner) snapshotAgentDeps() runnerAgentDeps {
 		baseRegistry:        r.baseRegistry,
 		workDir:             r.workDir,
 		permissions:         r.permissions,
+		hooks:               r.hooks,
 		messengerFactory:    r.messengerFactory,
 		strategyOptimizer:   r.strategyOptimizer,
 		delegationMetrics:   r.delegationMetrics,
@@ -772,6 +811,11 @@ func (r *Runner) newConfiguredAgent(
 	agentBaseRegistry := deps.baseRegistry
 	agentWorkDir := strings.TrimSpace(deps.workDir)
 	var isolated *isolatedWorkspace
+	parentToolCeiling, parentToolsRestricted := tools.AgentToolCapabilityCeilingFromContext(ctx)
+	if parentToolsRestricted {
+		agentBaseRegistry = tools.CloneRegistryForWorkDirWithToolCeiling(
+			deps.baseRegistry, "", parentToolCeiling)
+	}
 
 	isolationMode := resolveWorkspaceIsolationMode(agentType, deps)
 	if isolationMode != workspaceIsolationDisabled {
@@ -780,7 +824,12 @@ func (r *Runner) newConfiguredAgent(
 			logging.Debug("failed to prepare isolated workspace", "agent_type", agentType, "workdir", agentWorkDir, "mode", isolationMode, "error", err)
 		} else {
 			isolated = ws
-			agentBaseRegistry = tools.CloneRegistryForWorkDir(deps.baseRegistry, ws.Root)
+			if parentToolsRestricted {
+				agentBaseRegistry = tools.CloneRegistryForWorkDirWithToolCeiling(
+					deps.baseRegistry, ws.Root, parentToolCeiling)
+			} else {
+				agentBaseRegistry = tools.CloneRegistryForWorkDir(deps.baseRegistry, ws.Root)
+			}
 			// The clone starts workDir-scoped only; re-apply the user's granted
 			// dirs so an isolated agent can still reach approved external dirs
 			// (non-isolated agents inherit them via the shared foreground registry).
@@ -810,7 +859,12 @@ func (r *Runner) newConfiguredAgent(
 	}
 	if agent == nil {
 		agent = NewAgent(
-			ParseAgentType(agentType),
+			// Preserve an unknown name as a zero-tool AgentType instead of
+			// ParseAgentType's historical general-agent fallback. TaskTool
+			// rejects unknown names before this point; this defense in depth
+			// prevents a concurrent registry removal or direct caller typo from
+			// silently widening authority to every tool.
+			AgentType(agentType),
 			deps.client,
 			agentBaseRegistry,
 			agentWorkDir,
@@ -822,6 +876,7 @@ func (r *Runner) newConfiguredAgent(
 	}
 
 	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
+	agent.SetHooks(deps.hooks)
 	agent.SetOutputStyle(tools.OutputStyleFromContext(ctx))
 	agent.LoadPinnedContext()
 
@@ -920,6 +975,9 @@ func (r *Runner) newConfiguredAgent(
 	if deps.doneGatePolicy != nil {
 		agent.SetDoneGatePolicy(*deps.doneGatePolicy)
 	}
+	// Capture before publication/async handoff. Every descendant of the
+	// top-level invocation context carries the same opaque attribution token.
+	agent.invocationScope = InvocationScopeFromContext(ctx)
 
 	return agent
 }
@@ -1004,7 +1062,7 @@ func attachMetaAgentMonitoring(agent *Agent, meta *MetaAgent) {
 var workspaceIsolationReadOnlyTools = toolNameSet(
 	"read", "glob", "grep", "tree", "list_dir", "diff", "todo", "env",
 	"web_fetch", "web_search", "ask_user",
-	"tools_list", "request_tool", "ask_agent",
+	"tools_list", "skill", "request_tool", "ask_agent",
 	"enter_plan_mode", "update_plan_progress", "get_plan_status", "exit_plan_mode",
 	"undo_plan", "redo_plan",
 	"git_status", "git_diff", "git_log", "git_blame", "review_changes",
@@ -1017,7 +1075,7 @@ var workspaceIsolationReadOnlyTools = toolNameSet(
 var workspaceIsolationApplyBackTools = toolNameSet(
 	"read", "glob", "grep", "tree", "list_dir", "diff", "todo", "env",
 	"web_fetch", "web_search", "ask_user",
-	"tools_list", "request_tool", "ask_agent",
+	"tools_list", "skill", "request_tool", "ask_agent",
 	"enter_plan_mode", "update_plan_progress", "get_plan_status", "exit_plan_mode",
 	"undo_plan", "redo_plan",
 	"git_status", "git_diff", "git_log", "git_blame", "review_changes",
@@ -1285,6 +1343,9 @@ func (r *Runner) cleanupOldResults() {
 			if agent.GetStatus() == AgentStatusCompleted ||
 				agent.GetStatus() == AgentStatusFailed ||
 				agent.GetStatus() == AgentStatusCancelled {
+				if r.resultHasConsumersLocked(id) {
+					continue
+				}
 				completed = append(completed, agentEntry{id, agent.GetEndTime()})
 			}
 		}
@@ -1293,7 +1354,10 @@ func (r *Runner) cleanupOldResults() {
 			return completed[i].endTime.Before(completed[j].endTime)
 		})
 		// Remove oldest completed agents (keep MaxCompletedAgents/2)
-		removeCount := len(completed) - MaxCompletedAgents/2
+		removeCount := len(r.agents) - MaxCompletedAgents/2
+		if removeCount > len(completed) {
+			removeCount = len(completed)
+		}
 		if removeCount > 0 {
 			for i := range removeCount {
 				delete(r.agents, completed[i].id)
@@ -1311,6 +1375,13 @@ func (r *Runner) cleanupOldResults() {
 		var completed []resultEntry
 		for id, result := range r.results {
 			if result.Completed {
+				// A registered WaitWithContext owns this completion until it
+				// consumes the snapshot installed by notifyResultReady. In
+				// particular this prevents eviction both between publication and
+				// notification and between notification and waiter scheduling.
+				if r.resultHasConsumersLocked(id) {
+					continue
+				}
 				endTime := time.Time{}
 				if agent, ok := r.agents[id]; ok {
 					endTime = agent.GetEndTime()
@@ -1322,7 +1393,10 @@ func (r *Runner) cleanupOldResults() {
 		sort.Slice(completed, func(i, j int) bool {
 			return completed[i].endTime.Before(completed[j].endTime)
 		})
-		removeCount := len(completed) - MaxAgentResults/2
+		removeCount := len(r.results) - MaxAgentResults/2
+		if removeCount > len(completed) {
+			removeCount = len(completed)
+		}
 		if removeCount > 0 {
 			for i := range removeCount {
 				// Remove the backing output file BEFORE dropping the map entry —

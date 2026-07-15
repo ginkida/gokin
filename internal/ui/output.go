@@ -29,12 +29,27 @@ type outputState struct {
 	codeBlocks     *CodeBlockRegistry
 	cachedWrapped  string
 	lastContentLen int
-	lastWrappedLen int
-	width          int
-	ready          bool
-	frozen         bool // When true, viewport won't auto-scroll to bottom
-	thinkingActive bool // True while streaming thinking content
-	reducedMotion  bool // Jump auto-follow directly instead of smooth scrolling
+	// cachedCompleteWrapped contains only raw content through the last newline.
+	// The unfinished logical line is rewrapped as it grows across stream chunks;
+	// treating each chunk as an independent line can create an over-wide row.
+	cachedCompleteWrapped string
+	completeContentLen    int
+	width                 int
+	ready                 bool
+	frozen                bool // When true, viewport won't auto-scroll to bottom
+	thinkingActive        bool // True while streaming thinking content
+	reducedMotion         bool // Jump auto-follow directly instead of smooth scrolling
+
+	// The compositor can make the transcript substantially shorter than the
+	// resize-time terminalHeight-5 estimate (multi-line composer, toasts and
+	// panels all consume rows). ViewWithHeight renders a viewport copy, so keep
+	// the geometry and position the user actually saw in shared state. The next
+	// wheel/key/tick resumes from these metrics instead of a stale taller view.
+	renderedHeight        int
+	renderedYOffset       int
+	renderedAtBottom      bool
+	renderedScrollPercent int
+	renderedValid         bool
 
 	// pendingCodeStartLine is the content line where the currently-streaming
 	// code block opened — the registry entry is recorded at BlockCodeEnd but
@@ -91,28 +106,17 @@ func (m OutputModel) Update(msg tea.Msg) (OutputModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.state.mu.Lock()
-		ready := m.state.ready
-		m.state.mu.Unlock()
-
-		if !ready {
-			// Calculate viewport height dynamically - use all available space except for input (3 lines) and status bar (2 lines)
-			availableHeight := msg.Height - 5
-			m.viewport = viewport.New(msg.Width, availableHeight)
-			m.viewport.YPosition = 0
-			m.viewport.MouseWheelEnabled = true
-			m.state.mu.Lock()
-			m.state.ready = true
-			m.state.mu.Unlock()
-		} else {
-			// Recalculate on resize
-			availableHeight := msg.Height - 5
-			m.viewport.Width = msg.Width
-			m.viewport.Height = availableHeight
-		}
+		// Keep the standalone tea.Model path equivalent to the top-level
+		// compositor's SetSize path. Previously this only resized the viewport:
+		// state.width remained zero, pending pre-resize content was never wrapped,
+		// and terminals shorter than five rows produced a negative viewport.
+		availableHeight := max(msg.Height-5, 1)
+		m.SetSize(max(msg.Width, 0), availableHeight)
 	case tea.KeyMsg, tea.MouseMsg:
 		// Forward key and mouse events to viewport for scrolling
+		m.syncViewportToRendered()
 		m.viewport, cmd = m.viewport.Update(msg)
+		m.rememberRenderedViewport(m.viewport)
 		return m, cmd
 	}
 
@@ -152,13 +156,25 @@ func (m OutputModel) ViewWithHeight(height int) string {
 	m.state.mu.Lock()
 	ready := m.state.ready
 	frozen := m.state.frozen
+	reducedMotion := m.state.reducedMotion
+	renderedHeight := m.state.renderedHeight
+	renderedYOffset := m.state.renderedYOffset
+	renderedValid := m.state.renderedValid
 	m.state.mu.Unlock()
 	if !ready {
 		return exactRows("Loading...", height)
 	}
 
+	if renderedValid {
+		m.viewport.Height = renderedHeight
+		m.viewport.SetYOffset(renderedYOffset)
+	}
+	heightChanged := !renderedValid || renderedHeight != height
 	m.viewport.Height = height
-	if !frozen {
+	if !frozen && (heightChanged || reducedMotion) {
+		// Following remains bottom-anchored when surrounding chrome changes
+		// height. With stable geometry, normal-motion frames retain the offset
+		// advanced by TickSmoothScroll instead of discarding the animation.
 		m.viewport.GotoBottom()
 	} else {
 		maxOffset := max(m.viewport.TotalLineCount()-height, 0)
@@ -166,7 +182,46 @@ func (m OutputModel) ViewWithHeight(height int) string {
 			m.viewport.YOffset = maxOffset
 		}
 	}
+	m.rememberRenderedViewport(m.viewport)
 	return exactRows(m.styles.Viewport.Render(m.viewport.View()), height)
+}
+
+// syncViewportToRendered makes the last frame's actual transcript geometry
+// authoritative before navigation, content updates, or animation ticks.
+func (m *OutputModel) syncViewportToRendered() {
+	m.state.mu.Lock()
+	height := m.state.renderedHeight
+	yOffset := m.state.renderedYOffset
+	valid := m.state.renderedValid
+	m.state.mu.Unlock()
+	if !valid || height <= 0 {
+		return
+	}
+	// With matching geometry the live model already owns the latest key/tick
+	// offset. This also preserves deliberate direct positioning by callers
+	// (tests and restore flows). The divergence bug is specifically created by
+	// ViewWithHeight rendering a different height than the live viewport.
+	if m.viewport.Height == height {
+		return
+	}
+	m.viewport.Height = height
+	m.viewport.SetYOffset(yOffset)
+}
+
+func (m OutputModel) rememberRenderedViewport(v viewport.Model) {
+	atBottom := true
+	scrollPercent := 100
+	if v.Height > 0 {
+		atBottom = v.AtBottom()
+		scrollPercent = int(v.ScrollPercent() * 100)
+	}
+	m.state.mu.Lock()
+	m.state.renderedHeight = max(v.Height, 0)
+	m.state.renderedYOffset = max(v.YOffset, 0)
+	m.state.renderedAtBottom = atBottom
+	m.state.renderedScrollPercent = scrollPercent
+	m.state.renderedValid = v.Height > 0
+	m.state.mu.Unlock()
 }
 
 // exactRows normalizes s to exactly the requested number of rows: extra
@@ -198,8 +253,9 @@ func (m *OutputModel) AppendText(text string) {
 // AppendTextStream appends streaming text with markdown parsing and syntax highlighting.
 func (m *OutputModel) AppendTextStream(text string) {
 	if m.streamParser == nil {
-		// Fallback to regular append
-		m.AppendText(text)
+		// Preserve the same external-content safety contract even if a caller
+		// constructs an OutputModel without the Markdown parser.
+		m.AppendText(safeTerminalDisplayText(text))
 		return
 	}
 
@@ -254,6 +310,11 @@ var thinkingLabelStyle = lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
 //	reasoning text flows naturally here
 //	continuing the thought...
 func (m *OutputModel) AppendThinkingStream(text string) {
+	// Reasoning tokens are the same untrusted model stream as answer tokens,
+	// just rendered through a different path. Keep controls inert and make tab
+	// stops deterministic before adding our own styling.
+	text = expandDisplayTabs(safeTerminalDisplayText(text), 4)
+
 	m.state.mu.Lock()
 
 	if !m.state.thinkingActive {
@@ -348,6 +409,9 @@ func (m *OutputModel) AppendLine(text string) {
 
 // AppendMarkdown appends and renders markdown.
 func (m *OutputModel) AppendMarkdown(text string) {
+	// Glamour adds trusted styling after this point; discard any styling or
+	// terminal controls supplied by the external Markdown itself first.
+	text = safeTerminalDisplayText(text)
 	if m.renderer != nil {
 		rendered, err := m.renderer.Render(text)
 		if err == nil {
@@ -363,41 +427,90 @@ func (m *OutputModel) AppendMarkdown(text string) {
 
 // Clear clears the output.
 func (m *OutputModel) Clear() {
+	// Clear is a transcript boundary, not just a visual erase. A half-open
+	// markdown fence must not classify the next response as old code.
+	if m.streamParser != nil {
+		m.streamParser.Reset()
+	}
 	m.state.mu.Lock()
 	m.state.content.Reset()
+	if m.state.codeBlocks != nil {
+		m.state.codeBlocks.Clear()
+	}
 	// Reset cache on clear
 	m.state.cachedWrapped = ""
 	m.state.lastContentLen = 0
-	m.state.lastWrappedLen = 0
+	m.state.cachedCompleteWrapped = ""
+	m.state.completeContentLen = 0
 	m.state.frozen = false // Unfreeze on clear to restore normal scroll behavior
+	m.state.thinkingActive = false
+	m.state.pendingCodeStartLine = 0
+	m.state.scrollTarget = 0
+	m.state.scrolling = false
+	m.state.renderedHeight = 0
+	m.state.renderedYOffset = 0
+	m.state.renderedAtBottom = true
+	m.state.renderedScrollPercent = 100
+	m.state.renderedValid = false
 	m.state.mu.Unlock()
 	m.ForceUpdateViewport()
 }
 
 // SetSize sets the viewport size.
 func (m *OutputModel) SetSize(width, height int) {
+	width = max(width, 0)
+	height = max(height, 1)
 	m.viewport.Width = width
 	m.viewport.Height = height
 	// Use more conservative padding to ensure text never hits the right edge
-	newWidth := width - 4
+	newWidth := max(width-4, 1)
+	if width > 0 && width < 5 {
+		// At degenerate widths the four-cell comfort margin would consume the
+		// whole transcript and disable wrapping. Use every physical cell so text
+		// remains vertically navigable and recovers cleanly after a resize.
+		newWidth = width
+	}
+	if m.streamParser != nil {
+		m.streamParser.SetWidth(newWidth)
+	}
 
 	m.state.mu.Lock()
 	// If width changed, invalidate cache for full re-wrap
 	if newWidth != m.state.width {
 		m.state.cachedWrapped = ""
 		m.state.lastContentLen = 0
-		m.state.lastWrappedLen = 0
+		m.state.cachedCompleteWrapped = ""
+		m.state.completeContentLen = 0
 	}
 	m.state.width = newWidth
 	m.state.ready = true
+	// SetSize is an authoritative geometry transition (terminal resize or
+	// compact-mode toggle). Do not let metrics from the preceding layout
+	// overwrite its requested height during the immediate content refresh.
+	m.state.renderedValid = false
 	m.state.mu.Unlock()
 
 	m.ForceUpdateViewport()
+	m.state.mu.Lock()
+	frozen := m.state.frozen
+	if !frozen {
+		m.state.scrolling = false
+	}
+	m.state.mu.Unlock()
+	if !frozen {
+		// A resize/layout toggle changes which rows constitute the visible
+		// bottom. Following users stay anchored there; frozen readers retain
+		// their offset and regain ownership on the next rendered frame.
+		m.viewport.GotoBottom()
+		m.rememberRenderedViewport(m.viewport)
+	}
 }
 
 // ScrollToBottom scrolls to the bottom of the output.
 func (m *OutputModel) ScrollToBottom() {
+	m.syncViewportToRendered()
 	m.viewport.GotoBottom()
+	m.rememberRenderedViewport(m.viewport)
 }
 
 func (m *OutputModel) updateViewport() {
@@ -476,7 +589,8 @@ func (m *OutputModel) doViewportUpdate() {
 	contentLen := len(content)
 	lastContentLen := m.state.lastContentLen
 	cachedWrapped := m.state.cachedWrapped
-	lastWrappedLen := m.state.lastWrappedLen
+	cachedCompleteWrapped := m.state.cachedCompleteWrapped
+	completeContentLen := m.state.completeContentLen
 	width := m.state.width
 	m.state.mu.Unlock()
 
@@ -485,28 +599,32 @@ func (m *OutputModel) doViewportUpdate() {
 		return
 	}
 
-	// Incremental wrapping: only wrap new content if possible
+	// Incremental wrapping is safe only through complete logical lines. Stream
+	// chunks routinely split a word or paragraph; appending wrapText(newChunk)
+	// to the old result leaves that unfinished row unwrapped across the boundary.
+	// Cache the newline-terminated prefix and rewrap only the current tail.
 	var wrapped string
-	if width > 20 {
-		if contentLen > lastContentLen && lastWrappedLen > 0 && cachedWrapped != "" {
-			// Append only new content wrapping
-			newContent := content[lastContentLen:]
-			newWrapped := wrapText(newContent, width)
-			wrapped = cachedWrapped + newWrapped
-		} else {
-			// Full re-wrap (on resize, clear, or first time)
-			wrapped = wrapText(content, width)
-		}
+	completeEnd := strings.LastIndex(content, "\n") + 1
+	canExtendCompletePrefix := contentLen >= lastContentLen &&
+		completeContentLen >= 0 && completeContentLen <= completeEnd &&
+		completeContentLen <= lastContentLen &&
+		(completeContentLen == 0 || cachedCompleteWrapped != "")
+	completeWrapped := ""
+	if canExtendCompletePrefix {
+		completeWrapped = cachedCompleteWrapped + wrapText(content[completeContentLen:completeEnd], width)
 	} else {
-		wrapped = content
+		completeWrapped = wrapText(content[:completeEnd], width)
 	}
+	wrapped = completeWrapped + wrapText(content[completeEnd:], width)
 
 	m.state.mu.Lock()
 	m.state.cachedWrapped = wrapped
 	m.state.lastContentLen = contentLen
-	m.state.lastWrappedLen = len(wrapped)
+	m.state.cachedCompleteWrapped = completeWrapped
+	m.state.completeContentLen = completeEnd
 	m.state.mu.Unlock()
 
+	m.syncViewportToRendered()
 	m.viewport.SetContent(wrapped)
 	m.state.mu.Lock()
 	frozen := m.state.frozen
@@ -525,6 +643,7 @@ func (m *OutputModel) doViewportUpdate() {
 		m.state.mu.Unlock()
 		if reducedMotion {
 			m.viewport.GotoBottom()
+			m.rememberRenderedViewport(m.viewport)
 			return
 		}
 
@@ -537,6 +656,7 @@ func (m *OutputModel) doViewportUpdate() {
 			m.state.scrolling = false
 			m.state.mu.Unlock()
 		}
+		m.rememberRenderedViewport(m.viewport)
 	} else {
 		// Frozen = the user scrolled up to read; leave the viewport exactly where
 		// it is (no auto-scroll) so they can read WHILE the agent streams.
@@ -548,6 +668,7 @@ func (m *OutputModel) doViewportUpdate() {
 		// back down mid-read. Following users never reach this branch; they use
 		// the !frozen path above, so dropping the heuristic doesn't affect them.)
 		m.state.mu.Unlock()
+		m.rememberRenderedViewport(m.viewport)
 	}
 }
 
@@ -555,6 +676,7 @@ func (m *OutputModel) doViewportUpdate() {
 // Call this on every frame tick (e.g., spinner tick at 60Hz).
 // Returns true if the viewport moved (caller should re-render).
 func (m *OutputModel) TickSmoothScroll() bool {
+	m.syncViewportToRendered()
 	m.state.mu.Lock()
 	scrolling := m.state.scrolling
 	target := m.state.scrollTarget
@@ -572,6 +694,7 @@ func (m *OutputModel) TickSmoothScroll() bool {
 		m.state.mu.Lock()
 		m.state.scrolling = false
 		m.state.mu.Unlock()
+		m.rememberRenderedViewport(m.viewport)
 		return false
 	}
 
@@ -594,6 +717,7 @@ func (m *OutputModel) TickSmoothScroll() bool {
 		m.state.scrolling = false
 		m.state.mu.Unlock()
 	}
+	m.rememberRenderedViewport(m.viewport)
 
 	return true
 }
@@ -632,17 +756,9 @@ func wrapText(text string, width int) string {
 			continue
 		}
 
-		// Medium path: check if line has ANSI codes. If not, use simple rune count.
-		if !strings.Contains(line, "\x1b[") {
-			if len([]rune(line)) <= width {
-				result.WriteString(line)
-			} else {
-				result.WriteString(style.Render(line))
-			}
-			continue
-		}
-
-		// Slow path: line has ANSI codes, use full lipgloss width calculation
+		// Byte/rune counts are not terminal-cell widths: CJK and emoji may occupy
+		// two cells, while ANSI controls occupy none. Measure the actual rendered
+		// width whenever the byte-length fast path cannot prove the row fits.
 		if lipgloss.Width(line) > width {
 			result.WriteString(style.Render(line))
 		} else {
@@ -690,17 +806,29 @@ func (m *OutputModel) SetReducedMotion(enabled bool) {
 	}
 	m.state.mu.Unlock()
 	if enabled && !frozen {
+		m.syncViewportToRendered()
 		m.viewport.GotoBottom()
+		m.rememberRenderedViewport(m.viewport)
 	}
 }
 
 // ScrollPercent returns the scroll position as a percentage (0-100).
 func (m OutputModel) ScrollPercent() int {
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if m.state.renderedValid {
+		return m.state.renderedScrollPercent
+	}
 	return int(m.viewport.ScrollPercent() * 100)
 }
 
 // IsAtBottom returns whether the viewport is scrolled to the bottom.
 func (m OutputModel) IsAtBottom() bool {
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if m.state.renderedValid {
+		return m.state.renderedAtBottom
+	}
 	return m.viewport.AtBottom()
 }
 
@@ -723,4 +851,5 @@ func (m *OutputModel) SetFrozen(frozen bool) {
 		m.state.scrolling = false
 	}
 	m.state.mu.Unlock()
+	m.rememberRenderedViewport(m.viewport)
 }

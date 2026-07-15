@@ -33,6 +33,23 @@ func (c *UndoCommand) GetMetadata() CommandMetadata {
 	}
 }
 
+func safeChangeSummary(summary string) string {
+	if clean := singleLineDisplayText(summary, 160); clean != "" {
+		return clean
+	}
+	return "file change"
+}
+
+func safeUndoError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	if clean := singleLineDisplayText(err.Error(), 200); clean != "" {
+		return clean
+	}
+	return "unknown error"
+}
+
 func (c *UndoCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	mgr := app.GetUndoManager()
 	if mgr == nil {
@@ -47,10 +64,10 @@ func (c *UndoCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		}
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "Recent undoable changes (most recent first, total %d):\n", mgr.Count())
-		for i := len(recent) - 1; i >= 0; i-- {
-			fmt.Fprintf(&sb, "  %2d. %s\n", len(recent)-i, recent[i].Summary())
+		for i, change := range recent {
+			fmt.Fprintf(&sb, "  %2d. %s\n", i+1, safeChangeSummary(change.Summary()))
 		}
-		sb.WriteString("\nUse /undo N to revert the last N changes.")
+		sb.WriteString("\n1 is the next change /undo will revert. Use /undo N to revert through item N.")
 		return sb.String(), nil
 	}
 
@@ -71,27 +88,34 @@ func (c *UndoCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	if steps == 1 {
 		change, err := mgr.Undo()
 		if err != nil {
-			return fmt.Sprintf("Undo: %s", err.Error()), nil
+			return fmt.Sprintf("Undo: %s", safeUndoError(err)), nil
 		}
-		return fmt.Sprintf("Undone: %s", change.Summary()), nil
+		return fmt.Sprintf("Undone: %s\nRedo this change: /redo", safeChangeSummary(change.Summary())), nil
 	}
 
 	var reverted []string
+	var stopErr error
 	for range steps {
 		change, err := mgr.Undo()
 		if err != nil {
 			if len(reverted) == 0 {
-				return fmt.Sprintf("Undo: %s", err.Error()), nil
+				return fmt.Sprintf("Undo: %s", safeUndoError(err)), nil
 			}
+			stopErr = err
 			break
 		}
-		reverted = append(reverted, change.Summary())
+		reverted = append(reverted, safeChangeSummary(change.Summary()))
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Undone %d change(s):\n", len(reverted))
+	if stopErr != nil {
+		fmt.Fprintf(&sb, "Undone %d of %d requested change(s); stopped: %s\n", len(reverted), steps, safeUndoError(stopErr))
+	} else {
+		fmt.Fprintf(&sb, "Undone %d change(s):\n", len(reverted))
+	}
 	for i, s := range reverted {
 		fmt.Fprintf(&sb, "  %d. %s\n", i+1, s)
 	}
+	fmt.Fprintf(&sb, "Redo these changes: /redo %d", len(reverted))
 	return sb.String(), nil
 }
 
@@ -132,27 +156,34 @@ func (c *RedoCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	if steps == 1 {
 		change, err := mgr.Redo()
 		if err != nil {
-			return fmt.Sprintf("Redo: %s", err.Error()), nil
+			return fmt.Sprintf("Redo: %s", safeUndoError(err)), nil
 		}
-		return fmt.Sprintf("Redone: %s", change.Summary()), nil
+		return fmt.Sprintf("Redone: %s\nUndo this change again: /undo", safeChangeSummary(change.Summary())), nil
 	}
 
 	var applied []string
+	var stopErr error
 	for range steps {
 		change, err := mgr.Redo()
 		if err != nil {
 			if len(applied) == 0 {
-				return fmt.Sprintf("Redo: %s", err.Error()), nil
+				return fmt.Sprintf("Redo: %s", safeUndoError(err)), nil
 			}
+			stopErr = err
 			break
 		}
-		applied = append(applied, change.Summary())
+		applied = append(applied, safeChangeSummary(change.Summary()))
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Redone %d change(s):\n", len(applied))
+	if stopErr != nil {
+		fmt.Fprintf(&sb, "Redone %d of %d requested change(s); stopped: %s\n", len(applied), steps, safeUndoError(stopErr))
+	} else {
+		fmt.Fprintf(&sb, "Redone %d change(s):\n", len(applied))
+	}
 	for i, s := range applied {
 		fmt.Fprintf(&sb, "  %d. %s\n", i+1, s)
 	}
+	fmt.Fprintf(&sb, "Undo these changes again: /undo %d", len(applied))
 	return sb.String(), nil
 }
 

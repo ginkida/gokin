@@ -39,8 +39,8 @@ func TestDiffPreviewHints_UseConsistentSeparator(t *testing.T) {
 	// Sanity: at least one polished `·`-separated hint line exists. Catches
 	// "someone removed the hint entirely" regressions too.
 	polished := []string{
-		"j/k Scroll  ·  g/G Top/Bottom",
-		"Tab Switch focus  ·  ↑/↓ Files",
+		"g/G Top/Bottom",
+		"↑/↓ or j/k Navigate files",
 	}
 	for _, snippet := range polished {
 		if !strings.Contains(src, snippet) {

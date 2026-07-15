@@ -62,6 +62,7 @@ func (m Model) renderWelcomePanel() string {
 	if height <= 0 {
 		height = 24
 	}
+	lineBudget := welcomeLineBudget(height)
 
 	version := safeKeyEntryText(m.version)
 	if version != "" && !strings.HasPrefix(version, "v") && !strings.HasPrefix(version, "V") {
@@ -69,16 +70,56 @@ func (m Model) renderWelcomePanel() string {
 	}
 
 	// Tiny terminals need recovery/discovery affordances more than a
-	// decorative wordmark. Both essentials fit on a nine-cell line.
+	// decorative wordmark. Label the keys whenever the row budget permits;
+	// bare keycaps alone do not tell a first-time user what they open.
 	if width < 28 || height < 11 {
 		title := logoStyle.Render("Gokin")
 		if version != "" && width >= 14 {
 			title += versionStyle.Render(" " + version)
 		}
-		return joinWelcomeLines(width, max(height-4, 2), []string{
-			title,
-			kbdStyle.Render("Ctrl+P") + tipStyle.Render("  ") + kbdStyle.Render("?"),
-		})
+		mode := m.welcomeCompactModeHint()
+		compactKeys := kbdStyle.Render("Ctrl+P") + tipStyle.Render(" · ") + kbdStyle.Render("?")
+		actions := kbdStyle.Render("Ctrl+P") + tipStyle.Render(" actions")
+		shortcuts := kbdStyle.Render("?") + tipStyle.Render(" shortcuts (empty)")
+
+		var lines []string
+		switch {
+		case lineBudget <= 1:
+			if mode != "" {
+				lines = []string{mode}
+			} else {
+				lines = []string{title}
+			}
+		case lineBudget == 2:
+			if mode != "" {
+				lines = []string{mode, compactKeys}
+			} else {
+				lines = []string{title, compactKeys}
+			}
+		case lineBudget == 3 && mode != "":
+			lines = []string{mode, actions, shortcuts}
+		default:
+			lines = []string{title}
+			if mode != "" {
+				lines = append(lines, mode)
+			}
+			if lineBudget-len(lines) >= 2 {
+				lines = append(lines, actions, shortcuts)
+			} else {
+				lines = append(lines, compactKeys)
+			}
+		}
+		for _, discovery := range []string{
+			kbdStyle.Render("Shift+Tab") + tipStyle.Render(" modes"),
+			kbdStyle.Render("/") + tipStyle.Render(" commands · ") + kbdStyle.Render("@") + tipStyle.Render(" files"),
+			kbdStyle.Render("/quickstart") + tipStyle.Render(" guide"),
+		} {
+			if len(lines) >= lineBudget {
+				break
+			}
+			lines = append(lines, discovery)
+		}
+		return joinWelcomeLines(width, lineBudget, lines)
 	}
 
 	// Medium-width or short terminals use a dense quick-start instead of the
@@ -90,16 +131,17 @@ func (m Model) renderWelcomePanel() string {
 		}
 		lines = append(lines,
 			tipStyle.Render("Type a question or paste an error"),
-			kbdStyle.Render("Ctrl+P")+tipStyle.Render(" actions  ·  ")+kbdStyle.Render("?")+tipStyle.Render(" shortcuts"),
-			kbdStyle.Render("/")+tipStyle.Render(" commands  ·  ")+kbdStyle.Render("@")+tipStyle.Render(" files"),
+			kbdStyle.Render("Ctrl+P")+tipStyle.Render(" actions · ")+kbdStyle.Render("?")+tipStyle.Render(" shortcuts (empty)"),
+			kbdStyle.Render("/")+tipStyle.Render(" commands · ")+kbdStyle.Render("@")+tipStyle.Render(" files · ")+kbdStyle.Render("/quickstart"),
+			kbdStyle.Render("Shift+Tab")+tipStyle.Render(" cycles modes"),
 		)
 		if project := m.welcomeProjectSummary(); project != "" {
 			lines = append(lines, pathStyle.Render(project))
 		}
-		if hint := m.welcomeModeHint(); hint != "" {
+		if hint := m.welcomeCompactModeHint(); hint != "" {
 			lines = append(lines, hint)
 		}
-		return joinWelcomeLines(width, max(height-4, 2), lines)
+		return joinWelcomeLines(width, lineBudget, lines)
 	}
 
 	var lines []string
@@ -118,7 +160,9 @@ func (m Model) renderWelcomePanel() string {
 		headerStyle.Render("  tips"),
 		tipStyle.Render("    type a question, or paste a stack trace"),
 		tipStyle.Render("    ")+kbdStyle.Render("/")+tipStyle.Render(" for slash commands · ")+kbdStyle.Render("@")+tipStyle.Render(" to pin a file"),
-		tipStyle.Render("    ")+kbdStyle.Render("Ctrl+P")+tipStyle.Render(" all actions · ")+kbdStyle.Render("Ctrl+S")+tipStyle.Render(" settings · ")+kbdStyle.Render("Ctrl+K")+tipStyle.Render(" model · ")+kbdStyle.Render("?")+tipStyle.Render(" shortcuts"),
+		tipStyle.Render("    ")+kbdStyle.Render("Ctrl+P")+tipStyle.Render(" all actions · ")+kbdStyle.Render("Ctrl+S")+tipStyle.Render(" settings · ")+kbdStyle.Render("Ctrl+K")+tipStyle.Render(" model"),
+		tipStyle.Render("    ")+kbdStyle.Render("?")+tipStyle.Render(" shortcuts (empty) · ")+kbdStyle.Render("Shift+Tab")+tipStyle.Render(" cycles Normal/Plan/YOLO"),
+		tipStyle.Render("    ")+kbdStyle.Render("/quickstart")+tipStyle.Render(" guided examples"),
 	)
 	if sel := getTextSelectionHint(); sel != "" {
 		lines = append(lines, tipStyle.Render("    "+safeKeyEntryText(sel)))
@@ -135,7 +179,18 @@ func (m Model) renderWelcomePanel() string {
 		lines = append(lines, "", "  "+hint)
 	}
 
-	return joinWelcomeLines(width, max(height-4, 2), lines)
+	return joinWelcomeLines(width, lineBudget, lines)
+}
+
+// welcomeLineBudget reserves the composer/status area while remaining honest
+// for one-to-three-row terminal announcements. The old two-row floor could
+// make the component itself taller than a one-row terminal before the parent
+// compositor cropped it.
+func welcomeLineBudget(height int) int {
+	if height <= 0 {
+		return 20
+	}
+	return max(min(max(height-4, 2), height), 1)
 }
 
 // joinWelcomeLines is the welcome surface's geometry safety rail. Four rows
@@ -152,6 +207,11 @@ func joinWelcomeLines(width, maxLines int, lines []string) string {
 
 func (m Model) welcomeProjectSummary() string {
 	parts := make([]string, 0, 2)
+	// Branch is the most actionable project signal on the compact layout.
+	// Put it before a long path so right-edge truncation cannot hide it.
+	if branch := safeKeyEntryText(m.gitBranch); branch != "" {
+		parts = append(parts, "branch: "+branch)
+	}
 	project := safeKeyEntryText(statusBarProjectPath(m.workDir))
 	name := safeKeyEntryText(m.projectName)
 	if project != "" {
@@ -161,9 +221,6 @@ func (m Model) welcomeProjectSummary() string {
 		parts = append(parts, project)
 	} else if name != "" {
 		parts = append(parts, name)
-	}
-	if branch := safeKeyEntryText(m.gitBranch); branch != "" {
-		parts = append(parts, "branch: "+branch)
 	}
 	return strings.Join(parts, "  ·  ")
 }
@@ -213,7 +270,33 @@ func (m Model) welcomeProjectSection(
 // so the two welcome surfaces can't drift in glyph or prose.
 func (m Model) welcomeModeHint() string {
 	if m.permissionsEnabled && m.sandboxEnabled && !m.planningModeEnabled {
-		return ""
+		if !m.firstLaunchWelcomePending {
+			return ""
+		}
 	}
 	return m.welcomeModeBadge()
+}
+
+// welcomeCompactModeHint keeps the active safety contract legible in the
+// dense/tiny layouts. First launch includes Normal too; recurring idle screens
+// stay quiet in the ordinary protected mode.
+func (m Model) welcomeCompactModeHint() string {
+	planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
+	warningStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+	normalStyle := lipgloss.NewStyle().Foreground(ColorDim).Bold(true)
+
+	switch {
+	case m.planningModeEnabled:
+		return planStyle.Render("✦ PLAN · read-only")
+	case !m.permissionsEnabled && !m.sandboxEnabled:
+		return warningStyle.Render("⚠ YOLO · SB off")
+	case !m.permissionsEnabled:
+		return warningStyle.Render("⚠ YOLO · SB on")
+	case !m.sandboxEnabled:
+		return warningStyle.Render("⚠ !SB · prompts on")
+	case m.firstLaunchWelcomePending:
+		return normalStyle.Render("● NORMAL · asks")
+	default:
+		return ""
+	}
 }

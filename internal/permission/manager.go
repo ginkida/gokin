@@ -3,6 +3,7 @@ package permission
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -16,20 +17,32 @@ type PromptHandler func(ctx context.Context, req *Request) (Decision, error)
 
 // Manager handles permission checks and session caching.
 type Manager struct {
-	rules   *Rules
-	enabled bool
+	rules    *Rules
+	enabled  bool
+	revision uint64
+
+	// parent/overrides turn this manager into a bounded invocation capability
+	// (approved plan step). The parent remains the revocation authority: policy
+	// changes and session-deny decisions are observed dynamically, while parent
+	// session-allow decisions are deliberately not inherited.
+	parent         *Manager
+	overrides      map[string]Level
+	parentRevision uint64
 
 	// Session cache for "allow for session" and "deny for session" decisions
-	sessionCache *cache.LRUCache[string, Decision]
-
-	// Auto-approved tool types: after user approves a caution-level tool once,
-	// subsequent uses of the same tool type are auto-approved for the session
-	autoApprovedTools map[string]bool
+	sessionCache *cache.LRUCache[string, cachedDecision]
 
 	// Prompt handler for asking the user
 	promptHandler PromptHandler
 
 	mu sync.RWMutex
+}
+
+// cachedDecision binds reusable authority to the policy revision under which
+// it was granted. A config change can therefore never revive stale approval.
+type cachedDecision struct {
+	Decision Decision
+	Revision uint64
 }
 
 // NewManager creates a new permission manager.
@@ -39,10 +52,10 @@ func NewManager(rules *Rules, enabled bool) *Manager {
 	}
 
 	return &Manager{
-		rules:             rules,
-		enabled:           enabled,
-		sessionCache:      cache.NewLRUCache[string, Decision](1000, 24*time.Hour),
-		autoApprovedTools: make(map[string]bool),
+		rules:        cloneRules(rules),
+		enabled:      enabled,
+		revision:     1,
+		sessionCache: cache.NewLRUCache[string, cachedDecision](1000, 24*time.Hour),
 	}
 }
 
@@ -53,71 +66,145 @@ func (m *Manager) SetPromptHandler(handler PromptHandler) {
 	m.promptHandler = handler
 }
 
+// WithPolicyOverrides creates an invocation-local permission scope. It keeps
+// the effective enabled state and prompt handler, defensively copies rules,
+// applies only the supplied overrides, and deliberately does not inherit
+// session decisions. Overrides are monotonic: an explicit/effective deny is a
+// hard ceiling and can never be weakened by an invocation-local capability.
+// This is suitable for bounded capabilities such as one approved plan step
+// without turning approval into global session authority.
+func (m *Manager) WithPolicyOverrides(overrides map[string]Level) *Manager {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	rules := cloneRules(m.rules)
+	enabled := m.enabled
+	handler := m.promptHandler
+	parentRevision := m.revision
+	m.mu.RUnlock()
+	if rules == nil {
+		rules = DefaultRules()
+	}
+	for tool, level := range overrides {
+		if rules.GetPolicy(tool) == LevelDeny {
+			continue
+		}
+		rules.SetPolicy(tool, level)
+	}
+	scoped := NewManager(rules, enabled)
+	scoped.parent = m
+	scoped.overrides = clonePolicyOverrides(overrides)
+	scoped.parentRevision = parentRevision
+	scoped.SetPromptHandler(handler)
+	return scoped
+}
+
+func clonePolicyOverrides(overrides map[string]Level) map[string]Level {
+	if len(overrides) == 0 {
+		return nil
+	}
+	clone := make(map[string]Level, len(overrides))
+	for tool, level := range overrides {
+		clone[tool] = level
+	}
+	return clone
+}
+
+// refreshFromParent makes an invocation-local manager follow the live parent
+// policy without inheriting ambient session allows. It returns a hard/session
+// deny when the parent has revoked this exact invocation.
+func (m *Manager) refreshFromParent(toolName string, args map[string]any) *Response {
+	if m == nil || m.parent == nil {
+		return nil
+	}
+	parent := m.parent
+	parent.mu.RLock()
+	rules := cloneRules(parent.rules)
+	enabled := parent.enabled
+	handler := parent.promptHandler
+	parentRevision := parent.revision
+	parent.mu.RUnlock()
+	if rules == nil {
+		rules = DefaultRules()
+	}
+
+	// Synchronize effective rules/handler first. Any local reusable decision is
+	// revision-bound and therefore becomes unusable as soon as parent policy
+	// changes; clearing reclaims it eagerly.
+	m.mu.Lock()
+	changed := m.parentRevision != parentRevision || m.enabled != enabled
+	if changed {
+		effective := cloneRules(rules)
+		for tool, level := range m.overrides {
+			if effective.GetPolicy(tool) != LevelDeny {
+				effective.SetPolicy(tool, level)
+			}
+		}
+		m.rules = effective
+		m.enabled = enabled
+		m.parentRevision = parentRevision
+		m.revision++
+	}
+	m.promptHandler = handler
+	m.mu.Unlock()
+	if changed {
+		m.sessionCache.Clear()
+	}
+
+	if !enabled {
+		return nil
+	}
+	if rules.GetPolicy(toolName) == LevelDeny {
+		return &Response{Allowed: false, Decision: DecisionDeny, Reason: "Tool is not permitted by parent configuration"}
+	}
+
+	// A parent session denial is a revocation floor. Parent session ALLOW is not
+	// consulted: plan-step capabilities and their approvals stay invocation-local.
+	key := parent.cacheKey(toolName, args)
+	if cached, ok := parent.sessionCache.Get(key); ok && cached.Revision == parentRevision && cached.Decision == DecisionDenySession {
+		return &Response{Allowed: false, Decision: DecisionDenySession, Reason: "Denied for parent session"}
+	}
+
+	return nil
+}
+
 // cacheKey generates a cache key for a tool invocation.
 // For sensitive tools, the key includes a hash of relevant arguments.
 func (m *Manager) cacheKey(toolName string, args map[string]any) string {
 	switch toolName {
-	case "bash":
-		// Include command hash to differentiate different bash commands
-		if cmd, ok := args["command"].(string); ok {
-			hash := sha256.Sum256([]byte(cmd))
-			return fmt.Sprintf("%s:%x", toolName, hash[:8])
-		}
 	case "write", "edit":
-		// Include file path to differentiate different file operations
-		if path, ok := args["path"].(string); ok {
-			return fmt.Sprintf("%s:%s", toolName, path)
-		}
+		// These tools execute file_path; ignore unrelated extra fields so they
+		// cannot redirect the cache key away from the path being authorized.
 		if path, ok := args["file_path"].(string); ok {
 			return fmt.Sprintf("%s:%s", toolName, path)
 		}
-	case "mcp_admin":
-		// Include the action so approving a harmless "list"/"status" call
-		// doesn't cache-hit for a later "add"/"remove" call — mcp_admin's
-		// risk varies wildly by action (list is a read; add spawns an
-		// arbitrary local subprocess for stdio transport). Without this the
-		// tool-name-only key would let one innocuous approval silently
-		// pre-authorize a dangerous action under the SAME session-trust entry.
-		action := "list"
-		if a, ok := args["action"].(string); ok && a != "" {
-			action = a
+	}
+	// Bash (including its injected cwd/env execution scope), MCP, unknown and
+	// third-party tools may have argument-dependent effects. Scope reusable
+	// decisions to the complete canonical invocation.
+	if len(args) > 0 {
+		payload, err := json.Marshal(args) // encoding/json sorts string map keys.
+		if err != nil {
+			payload = []byte(fmt.Sprintf("%#v", args))
 		}
-		if action == "add" || action == "remove" {
-			// Also hash the server config itself. Differentiating by action
-			// alone isn't enough: a "DecisionAllowSession" ("Always allow")
-			// on ONE add call would otherwise cache-hit for EVERY future add
-			// call regardless of what's being spawned — the user consciously
-			// approved one specific server, not "any add, forever". Hashing
-			// the spawn-defining fields (same discipline bash uses for its
-			// command hash) makes the per-key trust match only an IDENTICAL
-			// future call for that exact server; a different server still
-			// misses the cache and falls through to mustConfirmDespiteTrust.
-			payload := fmt.Sprintf("%s|%s|%s|%s|%v",
-				stringArg(args, "server"), stringArg(args, "transport"),
-				stringArg(args, "command"), stringArg(args, "url"), args["args"])
-			hash := sha256.Sum256([]byte(payload))
-			return fmt.Sprintf("%s:%s:%x", toolName, action, hash[:8])
-		}
-		return fmt.Sprintf("%s:%s", toolName, action)
+		hash := sha256.Sum256(payload)
+		return fmt.Sprintf("%s:%x", toolName, hash[:8])
 	}
 	return toolName
-}
-
-// stringArg reads a string-typed arg, returning "" for any missing/wrong-typed
-// key. Local helper (not tools.GetStringDefault) — the tools package imports
-// permission, so a reverse import would cycle.
-func stringArg(args map[string]any, key string) string {
-	s, _ := args[key].(string)
-	return s
 }
 
 // Check checks if a tool is allowed to execute.
 // Returns a Response indicating whether execution is allowed.
 func (m *Manager) Check(ctx context.Context, toolName string, args map[string]any) (*Response, error) {
+	if denied := m.refreshFromParent(toolName, args); denied != nil {
+		return denied, nil
+	}
 	// Snapshot config fields under lock to avoid races with SetEnabled/SetRules
 	m.mu.RLock()
 	enabled := m.enabled
 	rules := m.rules
+	revision := m.revision
 	m.mu.RUnlock()
 
 	// If permissions are disabled, allow everything
@@ -125,25 +212,40 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 	}
 
-	// Generate cache key that may include args for sensitive tools
-	key := m.cacheKey(toolName, args)
+	// Get policy from rules
+	policy := rules.GetPolicy(toolName)
+	// Explicit deny is the hard policy boundary and always wins over a cached
+	// decision made under an earlier/more-permissive configuration.
+	if policy == LevelDeny {
+		return &Response{
+			Allowed:  false,
+			Decision: DecisionDeny,
+			Reason:   "Tool is not permitted by configuration",
+		}, nil
+	}
 
-	// Check session cache first
-	if decision, ok := m.sessionCache.Get(key); ok {
-		switch decision {
+	// A normal LevelAllow is authoritative. Elevated bash commands are the one
+	// exception: an identical, explicitly session-approved call may satisfy the
+	// action-semantics confirmation floor below.
+	if policy == LevelAllow && !isElevatedBash(toolName, args) {
+		return &Response{Allowed: true, Decision: DecisionAllow}, nil
+	}
+
+	// Reusable decisions are scoped to both the normalized invocation and the
+	// current policy revision. DecisionAllow never enters this cache.
+	key := m.cacheKey(toolName, args)
+	if cached, ok := m.sessionCache.Get(key); ok && cached.Revision == revision {
+		switch cached.Decision {
 		case DecisionAllowSession:
-			return &Response{Allowed: true, Decision: decision}, nil
+			return &Response{Allowed: true, Decision: cached.Decision}, nil
 		case DecisionDenySession:
 			return &Response{
 				Allowed:  false,
-				Decision: decision,
+				Decision: cached.Decision,
 				Reason:   "Denied for session",
 			}, nil
 		}
 	}
-
-	// Get policy from rules
-	policy := rules.GetPolicy(toolName)
 
 	switch policy {
 	case LevelAllow:
@@ -155,41 +257,16 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		// already short-circuited via the cache above, so this never re-prompts
 		// a command the user just OK'd.
 		if isElevatedBash(toolName, args) {
-			return m.askUser(ctx, toolName, args)
+			return m.askUser(ctx, toolName, args, revision)
 		}
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 
-	case LevelDeny:
-		return &Response{
-			Allowed:  false,
-			Decision: DecisionDeny,
-			Reason:   "Tool is not permitted by configuration",
-		}, nil
-
 	case LevelAsk:
-		// Auto-approve a tool already trusted this session (the user approved it
-		// once → don't re-prompt for every subsequent call). Applies to ALL risk
-		// levels — previously RiskMedium-only, which left bash asking on EVERY
-		// distinct command (the main source of prompt fatigue). Full Lock to
-		// avoid a TOCTOU race where two concurrent calls both see autoApproved
-		// false and both prompt.
-		m.mu.Lock()
-		autoApproved := m.autoApprovedTools[toolName]
-		m.mu.Unlock()
-		if autoApproved {
-			// Session trust never blanket-runs the floor classes: an elevated
-			// bash command (rm -rf / sudo / force-push) or ANY ssh (outward-
-			// facing to any host) still re-confirms even when the tool is trusted.
-			if mustConfirmDespiteTrust(toolName, args) {
-				return m.askUser(ctx, toolName, args)
-			}
-			return &Response{Allowed: true, Decision: DecisionAllowSession}, nil
-		}
-		return m.askUser(ctx, toolName, args)
+		return m.askUser(ctx, toolName, args, revision)
 	}
 
 	// Default to asking
-	return m.askUser(ctx, toolName, args)
+	return m.askUser(ctx, toolName, args, revision)
 }
 
 // isElevatedBash reports whether a call is a bash command that must be
@@ -213,48 +290,15 @@ func isElevatedBash(toolName string, args map[string]any) bool {
 	return danger == BashDangerElevated
 }
 
-// mustConfirmDespiteTrust reports whether a call must STILL prompt even when its
-// tool is trusted for the session. ssh is always outward-facing/irreversible to
-// ANY host, so it never gets blanket session-trust (per-command "Always allow"
-// via the cache is still honored — that's a conscious per-command choice). bash
-// is gated only when the command itself is elevated. mcp_admin's spawn-capable
-// actions are gated the same way bash's elevated commands are — see
-// isMCPAdminSpawnAction.
-func mustConfirmDespiteTrust(toolName string, args map[string]any) bool {
-	if toolName == "ssh" {
-		return true
-	}
-	if toolName == "mcp_admin" {
-		return isMCPAdminSpawnAction(args)
-	}
-	return isElevatedBash(toolName, args)
-}
-
-// isMCPAdminSpawnAction reports whether an mcp_admin call registers/spawns a
-// server (action "add") or removes one (action "remove") — as opposed to a
-// harmless read-only action ("list"/"status"/"resources"/"prompts"). Without
-// this floor, cacheKey's per-action differentiation (see cacheKey) is not
-// enough on its own to stop an escalation: approving "add" once for a
-// TRUSTED, previously-vetted server would otherwise blanket-trust EVERY
-// future "add" call, including one with attacker-controlled command/args
-// (e.g. a stdio transport spawning an arbitrary local subprocess) that the
-// user never saw. So "add"/"remove" always re-confirm, exactly like ssh —
-// there is no "Always allow" fast path for spawning a NEW server, only for
-// re-approving calls with the identical action+cache key (list/status).
-func isMCPAdminSpawnAction(args map[string]any) bool {
-	action, _ := args["action"].(string)
-	return action == "add" || action == "remove"
-}
-
 // askUser prompts the user for permission.
-func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]any) (*Response, error) {
+func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]any, revision uint64) (*Response, error) {
 	m.mu.RLock()
 	handler := m.promptHandler
 	m.mu.RUnlock()
 
 	if handler == nil {
-		// No handler set, default to allow (backwards compatibility)
-		return &Response{Allowed: true, Decision: DecisionAllow}, nil
+		err := fmt.Errorf("permission required for %s, but no interactive approval handler is available; configure an explicit allow rule or disable permissions for intentional unattended execution", toolName)
+		return &Response{Allowed: false, Decision: DecisionDeny, Reason: err.Error()}, err
 	}
 
 	// Create permission request
@@ -270,26 +314,31 @@ func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]
 		}, err
 	}
 
+	// A decision made against stale rules is not authority under the new rules.
+	// In particular, a concurrent ask→deny update must beat a late Allow click.
+	m.mu.RLock()
+	currentRevision := m.revision
+	m.mu.RUnlock()
+	if currentRevision != revision {
+		err := fmt.Errorf("permission policy changed while approval for %s was pending; retry the operation under the current policy", toolName)
+		return &Response{Allowed: false, Decision: DecisionDeny, Reason: err.Error()}, err
+	}
+
 	// Generate cache key for session decisions
 	key := m.cacheKey(toolName, args)
 
 	// Handle the decision
 	switch decision {
 	case DecisionAllow:
-		// Trust this tool for the rest of the session (ALL risk levels — extends
-		// the old RiskMedium-only behavior to bash et al, so one approval stops
-		// the per-command re-prompting). Dangerous bash is still gated in Check
-		// via isElevatedBash, so trust never auto-runs rm -rf / sudo / force-push.
-		m.mu.Lock()
-		m.autoApprovedTools[toolName] = true
-		m.mu.Unlock()
+		// "Allow" is deliberately one-shot. Only DecisionAllowSession creates
+		// reusable authority.
 		return &Response{Allowed: true, Decision: decision}, nil
 
 	case DecisionAllowSession:
-		m.rememberKey(key, decision)
-		m.mu.Lock()
-		m.autoApprovedTools[toolName] = true
-		m.mu.Unlock()
+		if !m.rememberKeyIfCurrent(key, decision, revision) {
+			err := fmt.Errorf("permission policy or session authority changed while approval for %s was being committed; retry the operation under the current policy", toolName)
+			return &Response{Allowed: false, Decision: DecisionDeny, Reason: err.Error()}, err
+		}
 		return &Response{Allowed: true, Decision: decision}, nil
 
 	case DecisionDeny:
@@ -300,7 +349,10 @@ func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]
 		}, nil
 
 	case DecisionDenySession:
-		m.rememberKey(key, decision)
+		if !m.rememberKeyIfCurrent(key, decision, revision) {
+			err := fmt.Errorf("permission policy or session authority changed while denial for %s was being committed; retry the operation under the current policy", toolName)
+			return &Response{Allowed: false, Decision: DecisionDeny, Reason: err.Error()}, err
+		}
 		return &Response{
 			Allowed:  false,
 			Decision: decision,
@@ -316,33 +368,56 @@ func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]
 	}
 }
 
-// rememberKey stores a session-level decision for a cache key.
-func (m *Manager) rememberKey(key string, decision Decision) {
-	m.sessionCache.Set(key, decision)
+// rememberKeyIfCurrent stores reusable authority only while the policy/session
+// generation under which it was approved is still current. The manager lock is
+// intentionally held across the cache write so ClearSession/Forget cannot
+// revoke a key and then lose a race to a late approval re-inserting it.
+func (m *Manager) rememberKeyIfCurrent(key string, decision Decision, revision uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.revision != revision {
+		return false
+	}
+	m.sessionCache.Set(key, cachedDecision{Decision: decision, Revision: revision})
+	return true
 }
 
 // RememberWithArgs stores a session-level decision for a tool with args.
 func (m *Manager) RememberWithArgs(toolName string, args map[string]any, decision Decision) {
 	key := m.cacheKey(toolName, args)
-	m.rememberKey(key, decision)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	revision := m.revision
+	m.sessionCache.Set(key, cachedDecision{Decision: decision, Revision: revision})
 }
 
 // Forget removes a session-level decision for a tool.
 func (m *Manager) Forget(toolName string) {
-	m.sessionCache.Delete(toolName)
+	// Revocation must also beat an approval that is currently waiting on user
+	// input. Bump the generation and clear every reusable grant: retaining
+	// unrelated old-revision entries would be misleading because Check must
+	// reject them after the generation change anyway.
+	m.mu.Lock()
+	m.revision++
+	m.sessionCache.Clear()
+	m.mu.Unlock()
 }
 
 // ForgetWithArgs removes a session-level decision for a tool with args.
 func (m *Manager) ForgetWithArgs(toolName string, args map[string]any) {
-	key := m.cacheKey(toolName, args)
-	m.sessionCache.Delete(key)
+	// See Forget: explicit revocation is a session-authority generation change,
+	// not merely an LRU deletion that a late approval can undo.
+	m.mu.Lock()
+	m.revision++
+	m.sessionCache.Clear()
+	m.mu.Unlock()
 }
 
 // ClearSession clears all session-level decisions.
 func (m *Manager) ClearSession() {
-	m.sessionCache.Clear()
 	m.mu.Lock()
-	m.autoApprovedTools = make(map[string]bool)
+	m.revision++
+	m.sessionCache.Clear()
 	m.mu.Unlock()
 }
 
@@ -356,20 +431,43 @@ func (m *Manager) IsEnabled() bool {
 // SetEnabled enables or disables the permission system.
 func (m *Manager) SetEnabled(enabled bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	changed := m.enabled != enabled
 	m.enabled = enabled
+	if changed {
+		m.revision++
+	}
+	m.mu.Unlock()
+	if changed {
+		m.sessionCache.Clear()
+	}
 }
 
 // GetRules returns the current rules.
 func (m *Manager) GetRules() *Rules {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.rules
+	return cloneRules(m.rules)
 }
 
 // SetRules sets new rules.
 func (m *Manager) SetRules(rules *Rules) {
+	if rules == nil {
+		rules = DefaultRules()
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rules = rules
+	m.rules = cloneRules(rules)
+	m.revision++
+	m.mu.Unlock()
+	m.sessionCache.Clear()
+}
+
+func cloneRules(rules *Rules) *Rules {
+	if rules == nil {
+		return nil
+	}
+	policies := make(map[string]Level, len(rules.ToolPolicies))
+	for tool, policy := range rules.ToolPolicies {
+		policies[tool] = policy
+	}
+	return &Rules{DefaultPolicy: rules.DefaultPolicy, ToolPolicies: policies}
 }

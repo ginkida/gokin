@@ -83,6 +83,7 @@ func TestWaitWithTimeout_NormalCompletionUnaffected(t *testing.T) {
 	c := NewCoordinator(context.Background(), nil, &CoordinatorConfig{MaxParallel: 3})
 
 	c.mu.Lock()
+	c.sealed = true
 	c.tasks["t1"] = &CoordinatedTask{ID: "t1", Status: TaskStatusCompleted, Result: &AgentResult{Output: "ok"}}
 	c.mu.Unlock()
 

@@ -287,6 +287,61 @@ func TestProcessIncludes_MissingFile(t *testing.T) {
 	}
 }
 
+func TestProcessIncludes_BlocksPrefixSiblingTraversal(t *testing.T) {
+	root := testkit.ResolvedTempDir(t)
+	baseDir := filepath.Join(root, "project")
+	outsideDir := filepath.Join(root, "project-secrets")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "OUTSIDE_PREFIX_COLLISION_SECRET"
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.md"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	directive := "@../project-secrets/secret.md"
+	got := processIncludes(directive, baseDir)
+	if strings.Contains(got, secret) {
+		t.Fatalf("relative include escaped through a sibling prefix collision: %q", got)
+	}
+	if !strings.Contains(got, directive) {
+		t.Fatalf("blocked include should remain visible for diagnosis: %q", got)
+	}
+}
+
+func TestProcessIncludes_BlocksSymlinkEscapeToPrefixSibling(t *testing.T) {
+	root := testkit.ResolvedTempDir(t)
+	baseDir := filepath.Join(root, "project")
+	outsideDir := filepath.Join(root, "project-secrets")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "OUTSIDE_SYMLINK_SECRET"
+	secretPath := filepath.Join(outsideDir, "secret.md")
+	if err := os.WriteFile(secretPath, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(baseDir, "linked.md")
+	if err := os.Symlink(secretPath, linkPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	directive := "@./linked.md"
+	got := processIncludes(directive, baseDir)
+	if strings.Contains(got, secret) {
+		t.Fatalf("relative include followed an out-of-scope symlink: %q", got)
+	}
+	if !strings.Contains(got, directive) {
+		t.Fatalf("blocked symlink include should remain visible for diagnosis: %q", got)
+	}
+}
+
 // --- OnReload ---
 
 func TestProjectMemory_OnReload(t *testing.T) {

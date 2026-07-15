@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // TestSettingsModal_NavigateToggleClose exercises the modal: open populates and
@@ -170,6 +171,27 @@ func TestSettingsModal_HeightAwareScrollNoClip(t *testing.T) {
 	lines := strings.Count(out, "\n")
 	if lines > m.height+8 {
 		t.Errorf("modal rendered %d lines for height %d — not height-aware:\n%s", lines, m.height, out)
+	}
+}
+
+func TestSettingsModal_MiddlePageFitsTerminalHeight(t *testing.T) {
+	for _, height := range []int{12, 16, 18, 20, 24} {
+		m := NewModel()
+		m.width = 80
+		m.height = height
+		m.openSettings(OpenSettingsMsg{Items: sampleSettingItems(), Model: "glm-5.2", Provider: "glm"})
+		m.settingsCursor = len(m.settingsItems) / 2
+
+		view := m.renderSettings()
+		if got := lipgloss.Height(view); got > height {
+			t.Fatalf("height=%d settings modal rendered %d rows:\n%s", height, got, renderToPlain(view))
+		}
+		plain := renderToPlain(view)
+		for _, want := range []string{"more row(s)", "Esc Close", "m Model"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("height=%d middle page missing %q:\n%s", height, want, plain)
+			}
+		}
 	}
 }
 

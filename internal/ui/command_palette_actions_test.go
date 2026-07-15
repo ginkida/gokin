@@ -56,8 +56,8 @@ func TestCommandPaletteHandlerWiresPageAndBoundaryKeys(t *testing.T) {
 	m.state = StateCommandPalette
 
 	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyPgDown})
-	if m.commandPalette.selected != 8 {
-		t.Fatalf("PgDown selected=%d, want 8", m.commandPalette.selected)
+	if m.commandPalette.selected != 7 {
+		t.Fatalf("PgDown selected=%d, want 7 visible commands", m.commandPalette.selected)
 	}
 	_ = m.handleCommandPaletteKeys(tea.KeyMsg{Type: tea.KeyEnd})
 	if m.commandPalette.selected != 29 {

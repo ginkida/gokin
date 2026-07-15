@@ -36,20 +36,28 @@ func TestWelcomeModeBadge_PerMode(t *testing.T) {
 			notWantSubstring: "YOLO",
 		},
 		{
-			name:             "yolo_mode_perms_off",
+			name:             "prompts_off_sandbox_on",
 			planEnabled:      false,
 			permsEnabled:     false,
 			sandboxEnabled:   true,
-			wantSubstrings:   []string{"YOLO", "no prompts"},
+			wantSubstrings:   []string{"YOLO", "no prompts", "bash remains sandboxed"},
 			notWantSubstring: "normal mode",
 		},
 		{
-			name:             "yolo_mode_sandbox_off",
+			name:             "prompts_on_sandbox_off",
 			planEnabled:      false,
 			permsEnabled:     true,
 			sandboxEnabled:   false,
-			wantSubstrings:   []string{"YOLO"},
-			notWantSubstring: "normal mode",
+			wantSubstrings:   []string{"sandbox off", "prompts remain", "bash runs unrestricted"},
+			notWantSubstring: "no prompts",
+		},
+		{
+			name:             "full_yolo",
+			planEnabled:      false,
+			permsEnabled:     false,
+			sandboxEnabled:   false,
+			wantSubstrings:   []string{"YOLO", "no prompts", "agent runs everything"},
+			notWantSubstring: "remains sandboxed",
 		},
 		// Plan-mode flag wins even if the user has perms/sandbox toggled
 		// off — matches the priority order in App.currentSessionMode.

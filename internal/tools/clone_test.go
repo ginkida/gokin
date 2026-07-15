@@ -1,11 +1,58 @@
 package tools
 
 import (
+	"context"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"gokin/internal/undo"
 )
+
+// TestCloneToolForWorkDir_SkillToolUsesAgentWorkspace pins the worktree
+// boundary for project-local skills. A cloned registry used to retain the
+// foreground SkillTool (and therefore its foreground catalog), so an isolated
+// sub-agent could neither see the worktree's workflows nor avoid loading a
+// same-named workflow from the wrong checkout.
+func TestCloneToolForWorkDir_SkillToolUsesAgentWorkspace(t *testing.T) {
+	// Keep the global Gokin root deterministic; the unique project skill names
+	// also make any user-level Claude skill directory irrelevant to this test.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	foreground := t.TempDir()
+	worktree := t.TempDir()
+	writeToolSkill(t, filepath.Join(foreground, ".gokin", "skills"), "foreground-clone-proof",
+		"---\nname: foreground-clone-proof\ndescription: Foreground-only workflow\n---\nFOREGROUND_WORKFLOW")
+	writeToolSkill(t, filepath.Join(worktree, ".gokin", "skills"), "worktree-clone-proof",
+		"---\nname: worktree-clone-proof\ndescription: Worktree-only workflow\n---\nWORKTREE_WORKFLOW")
+
+	original := NewSkillTool(foreground)
+	cloned, ok := CloneToolForWorkDir(original, worktree).(*SkillTool)
+	if !ok {
+		t.Fatalf("skill clone has type %T, want *SkillTool", CloneToolForWorkDir(original, worktree))
+	}
+	if cloned == original {
+		t.Fatal("skill clone must be a distinct tool instance")
+	}
+
+	loaded, err := cloned.Execute(context.Background(), map[string]any{"name": "worktree-clone-proof"})
+	if err != nil || !loaded.Success || !strings.Contains(loaded.Content, "WORKTREE_WORKFLOW") {
+		t.Fatalf("worktree skill was not loaded by clone: result=%#v err=%v", loaded, err)
+	}
+	wrongWorkspace, err := cloned.Execute(context.Background(), map[string]any{"name": "foreground-clone-proof"})
+	if err != nil || wrongWorkspace.Success {
+		t.Fatalf("clone leaked foreground project skill: result=%#v err=%v", wrongWorkspace, err)
+	}
+
+	originalResult, err := original.Execute(context.Background(), map[string]any{"name": "foreground-clone-proof"})
+	if err != nil || !originalResult.Success || !strings.Contains(originalResult.Content, "FOREGROUND_WORKFLOW") {
+		t.Fatalf("cloning changed original skill binding: result=%#v err=%v", originalResult, err)
+	}
+	originalLeak, err := original.Execute(context.Background(), map[string]any{"name": "worktree-clone-proof"})
+	if err != nil || originalLeak.Success {
+		t.Fatalf("original leaked worktree project skill: result=%#v err=%v", originalLeak, err)
+	}
+}
 
 // TestCloneToolForWorkDir_MemoryToolIsIsolated pins that each agent gets its OWN
 // MemoryTool instance. Without a clone case the shared foreground instance is
@@ -37,6 +84,25 @@ func TestCloneToolForWorkDir_MemoryToolIsIsolated(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestCloneToolForWorkDir_BashPreservesNarrowBoundaryWithoutOverride(t *testing.T) {
+	constructionDir := t.TempDir()
+	narrowBoundary := filepath.Join(constructionDir, "narrow")
+	original := NewBashTool(constructionDir)
+	original.SetWorkspaceBoundary(narrowBoundary)
+
+	cloned, ok := CloneToolForWorkDir(original, "").(*BashTool)
+	if !ok {
+		t.Fatalf("bash clone has type %T, want *BashTool", CloneToolForWorkDir(original, ""))
+	}
+	cloned.policyMu.RLock()
+	gotEnabled := cloned.workspaceBoundaryEnabled
+	gotRoot := cloned.workspaceRoot
+	cloned.policyMu.RUnlock()
+	if !gotEnabled || gotRoot != narrowBoundary {
+		t.Fatalf("bash clone widened source boundary: enabled=%v root=%q want=%q", gotEnabled, gotRoot, narrowBoundary)
+	}
 }
 
 // TestCloneToolForWorkDir_MemorizeToolIsIsolated pins the same isolation for the

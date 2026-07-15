@@ -21,7 +21,7 @@ type Coordinator struct {
 
 	// Tracking running agents
 	running   map[string]string // agentID -> taskID
-	completed map[string]bool   // completed taskIDs
+	completed map[string]bool   // terminal taskIDs (successful, failed, or skipped)
 
 	// Callbacks
 	onTaskStart    func(task *CoordinatedTask)
@@ -29,11 +29,20 @@ type Coordinator struct {
 	onAllComplete  func(results map[string]*AgentResult)
 
 	// Event-driven channels for efficient processing
-	taskReadyCh  chan struct{} // Signals when a task becomes ready
-	agentDoneCh  chan string   // Signals when an agent completes (carries agentID)
-	completionCh chan struct{} // Closed once when the whole coordination completes
-	completeOnce sync.Once
-	startOnce    sync.Once
+	taskReadyCh chan struct{}             // Signals when a task becomes ready
+	agentDoneCh chan coordinatorAgentDone // Carries the waiter's owned result snapshot
+	// completionCh is the durable task-state completion event used by Wait.
+	// It closes as soon as the sealed graph is terminal, before observer
+	// callbacks necessarily return. onAllComplete has the stronger contract:
+	// it runs only after every registered onTaskComplete callback is delivered.
+	completionCh    chan struct{}
+	completeOnce    sync.Once
+	allCompleteOnce sync.Once
+	startOnce       sync.Once
+	sealed          bool // graph is immutable after Start begins
+	// pendingCallbacks keeps all-complete behind task-complete delivery even
+	// when callbacks re-enter the coordinator and mutate/cancel other tasks.
+	pendingCallbacks int
 
 	// Reflection for error learning feedback loop
 	reflector *Reflector
@@ -46,6 +55,15 @@ type Coordinator struct {
 // CoordinatorConfig holds configuration for the coordinator.
 type CoordinatorConfig struct {
 	MaxParallel int // Maximum concurrent agents (default: 3)
+}
+
+// coordinatorAgentDone transfers Runner.WaitWithContext's immutable completion
+// snapshot directly to the coordinator. Re-reading Runner.results after Wait
+// would reopen an eviction window: cleanup may legitimately remove the shared
+// entry once the waiter has consumed its pinned snapshot.
+type coordinatorAgentDone struct {
+	agentID string
+	result  *AgentResult
 }
 
 // NewCoordinator creates a new coordinator.
@@ -70,8 +88,8 @@ func NewCoordinator(ctx context.Context, runner *Runner, config *CoordinatorConf
 		maxParallel:  config.MaxParallel,
 		running:      make(map[string]string),
 		completed:    make(map[string]bool),
-		taskReadyCh:  make(chan struct{}, 100), // Buffered to avoid blocking
-		agentDoneCh:  make(chan string, 100),   // Buffered for agent completions
+		taskReadyCh:  make(chan struct{}, 100),             // Buffered to avoid blocking
+		agentDoneCh:  make(chan coordinatorAgentDone, 100), // Buffered for agent completions
 		completionCh: make(chan struct{}),
 		reflector:    NewReflector(), // Initialize reflector for feedback loop
 		ctx:          ctx,
@@ -96,7 +114,11 @@ func generateTaskID() string {
 // AddTask adds a new task to the coordinator.
 func (c *Coordinator) AddTask(prompt string, agentType AgentType, priority TaskPriority, deps []string) string {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.sealed {
+		c.mu.Unlock()
+		logging.Warn("coordinator: rejected task added after Start", "agent_type", agentType)
+		return ""
+	}
 
 	taskID := generateTaskID()
 	task := &CoordinatedTask{
@@ -115,8 +137,13 @@ func (c *Coordinator) AddTask(prompt string, agentType AgentType, priority TaskP
 		c.dependencies[depID] = append(c.dependencies[depID], taskID)
 	}
 
-	// Check if task is ready
-	if c.areDependenciesMet(task) {
+	var completion *coordinatorTaskCompletion
+	if failedID, failedTask, failed := c.failedDependencyLocked(task); failed {
+		result := c.failTaskForDependencyLocked(task, failedID, failedTask)
+		completion = &coordinatorTaskCompletion{
+			task: cloneCoordinatedTask(task), result: cloneAgentResult(result),
+		}
+	} else if c.areDependenciesMet(task) {
 		task.Status = TaskStatusReady
 		c.queue.PushTask(task)
 		// Signal that a task is ready (non-blocking)
@@ -134,14 +161,26 @@ func (c *Coordinator) AddTask(prompt string, agentType AgentType, priority TaskP
 		"priority", priority,
 		"dependencies", deps,
 		"status", task.Status)
+	onComplete := c.onTaskComplete
+	if completion != nil {
+		c.pendingCallbacks++
+	}
+	c.mu.Unlock()
+
+	if completion != nil {
+		c.deliverTaskCompletions(onComplete, []coordinatorTaskCompletion{*completion})
+	}
 
 	return taskID
 }
 
-// areDependenciesMet checks if all dependencies are completed.
+// areDependenciesMet checks if all dependencies completed successfully.
+// c.completed tracks terminal tasks for accounting, so it cannot be used as
+// the scheduling predicate: failed and cancelled tasks are terminal too.
 func (c *Coordinator) areDependenciesMet(task *CoordinatedTask) bool {
 	for _, depID := range task.Dependencies {
-		if !c.completed[depID] {
+		dependency := c.tasks[depID]
+		if dependency == nil || dependency.Status != TaskStatusCompleted {
 			return false
 		}
 	}
@@ -151,6 +190,11 @@ func (c *Coordinator) areDependenciesMet(task *CoordinatedTask) bool {
 // Start begins processing tasks.
 func (c *Coordinator) Start() {
 	c.startOnce.Do(func() {
+		// Seal the graph before launching the loop. AddTask and Start serialize on
+		// the same lock, so a task is either fully part of this run or rejected.
+		c.mu.Lock()
+		c.sealed = true
+		c.mu.Unlock()
 		go c.processLoop()
 		// AddTask normally leaves a buffered readiness signal, but an empty
 		// batch has none and used to wait for the five-second fallback ticker.
@@ -218,9 +262,9 @@ func (c *Coordinator) processLoop() {
 				return
 			}
 
-		case agentID := <-c.agentDoneCh:
+		case done := <-c.agentDoneCh:
 			// An agent completed - handle it
-			c.handleAgentCompletion(agentID)
+			c.handleAgentCompletionResult(done.agentID, done.result)
 
 			// Check if all done
 			if c.isAllComplete() {
@@ -255,9 +299,7 @@ func (c *Coordinator) processReadyTasks() {
 	for _, task := range started {
 		invokeCoordinatorTaskStart(onStart, task)
 	}
-	for _, notification := range failed {
-		invokeCoordinatorTaskComplete(onComplete, notification.task, notification.result)
-	}
+	c.deliverTaskCompletions(onComplete, failed)
 }
 
 type coordinatorTaskCompletion struct {
@@ -302,6 +344,42 @@ func invokeCoordinatorTaskComplete(callback func(*CoordinatedTask, *AgentResult)
 	}
 	defer recoverCoordinatorCallback("task_complete", taskID)
 	callback(cloneCoordinatedTask(task), cloneAgentResult(result))
+}
+
+// deliverTaskCompletions drains a batch that was registered in
+// pendingCallbacks while coordinator state was locked. Task-state completion
+// is published before invoking observers: an onTaskComplete callback may call
+// Wait without waiting on its own return. The final decrement is the safe
+// point for onAllComplete: every task callback in this batch (including
+// re-entrant nested batches) has returned.
+func (c *Coordinator) deliverTaskCompletions(callback func(*CoordinatedTask, *AgentResult), completions []coordinatorTaskCompletion) {
+	if len(completions) == 0 {
+		return
+	}
+
+	// Wait observes committed task state, not callback delivery. In particular,
+	// do this before entering user code so a final task callback can safely call
+	// Wait instead of forming a cycle with pendingCallbacks.
+	c.publishCompletionIfReady()
+
+	for _, completion := range completions {
+		invokeCoordinatorTaskComplete(callback, completion.task, completion.result)
+	}
+
+	c.mu.Lock()
+	c.pendingCallbacks -= len(completions)
+	if c.pendingCallbacks < 0 {
+		// Defensive invariant guard: never let accounting corruption publish an
+		// early all-complete event.
+		logging.Error("coordinator: completion callback accounting underflow",
+			"pending", c.pendingCallbacks, "delivered", len(completions))
+		c.pendingCallbacks = 0
+	}
+	ready := c.sealed && c.isAllCompleteLocked()
+	c.mu.Unlock()
+	if ready {
+		c.notifyAllComplete()
+	}
 }
 
 func invokeCoordinatorAllComplete(callback func(map[string]*AgentResult), results map[string]*AgentResult) {
@@ -367,11 +445,13 @@ func (c *Coordinator) startReadyTasksLocked() (
 			failed = append(failed, coordinatorTaskCompletion{
 				task: cloneCoordinatedTask(task), result: cloneAgentResult(failure),
 			})
+			failed = append(failed, c.resolveDependentsLocked(task.ID)...)
 			continue
 		}
 		started = append(started, cloneCoordinatedTask(task))
 		availableSlots--
 	}
+	c.pendingCallbacks += len(failed)
 	return started, failed, c.onTaskStart, c.onTaskComplete
 }
 
@@ -395,7 +475,6 @@ func (c *Coordinator) startTask(task *CoordinatedTask) (failure *AgentResult) {
 		task.Status = TaskStatusFailed
 		task.Result = result
 		c.completed[task.ID] = true
-		c.unblockDependents(task.ID)
 		logging.Error("coordinator: failed to start task", "task_id", task.ID, "error", err)
 		return result
 	}
@@ -424,9 +503,18 @@ func (c *Coordinator) startTask(task *CoordinatedTask) (failure *AgentResult) {
 				logging.Warn("panic in coordinator agent monitor goroutine", "agent", agentID, "panic", r)
 			}
 		}()
-		if _, err := c.runner.WaitWithContext(c.ctx, agentID); err == nil || c.ctx.Err() == nil {
+		result, err := c.runner.WaitWithContext(c.ctx, agentID)
+		if err != nil && c.ctx.Err() == nil {
+			result = &AgentResult{
+				AgentID:   agentID,
+				Status:    AgentStatusFailed,
+				Error:     fmt.Sprintf("agent completion unavailable: %v", err),
+				Completed: true,
+			}
+		}
+		if result != nil {
 			select {
-			case c.agentDoneCh <- agentID:
+			case c.agentDoneCh <- coordinatorAgentDone{agentID: agentID, result: cloneAgentResult(result)}:
 			case <-c.ctx.Done():
 			}
 		}
@@ -436,11 +524,6 @@ func (c *Coordinator) startTask(task *CoordinatedTask) (failure *AgentResult) {
 
 // checkCompletedAgents checks for completed agents and updates tasks.
 func (c *Coordinator) checkCompletedAgents() {
-	type callbackInfo struct {
-		task   *CoordinatedTask
-		result *AgentResult
-	}
-
 	c.mu.Lock()
 
 	// Collect completed agents first to avoid modifying map during iteration
@@ -468,7 +551,7 @@ func (c *Coordinator) checkCompletedAgents() {
 
 	// Snapshot callback for invocation outside lock
 	onComplete := c.onTaskComplete
-	var callbacks []callbackInfo
+	var callbacks []coordinatorTaskCompletion
 
 	// Now process completed agents
 	for _, ca := range completed {
@@ -479,7 +562,7 @@ func (c *Coordinator) checkCompletedAgents() {
 		}
 
 		// Update task status
-		if ca.result.Status == AgentStatusCompleted {
+		if ca.result.IsSuccess() {
 			task.Status = TaskStatusCompleted
 			// Record success for learned solutions (feedback loop)
 			c.recordReflectionFeedback(ca.result, true)
@@ -499,23 +582,21 @@ func (c *Coordinator) checkCompletedAgents() {
 			"status", task.Status,
 			"duration", ca.result.Duration)
 
-		if onComplete != nil {
-			callbacks = append(callbacks, callbackInfo{
-				task:   cloneCoordinatedTask(task),
-				result: cloneAgentResult(ca.result),
-			})
-		}
+		callbacks = append(callbacks, coordinatorTaskCompletion{
+			task:   cloneCoordinatedTask(task),
+			result: cloneAgentResult(ca.result),
+		})
 
-		// Unblock dependent tasks (needs lock — accesses c.tasks, c.dependencies, c.queue)
-		c.unblockDependents(ca.taskID)
+		// Resolve dependent tasks while state is locked. Notifications are
+		// returned and delivered only after the lock is released.
+		callbacks = append(callbacks, c.resolveDependentsLocked(ca.taskID)...)
 	}
+	c.pendingCallbacks += len(callbacks)
 
 	c.mu.Unlock()
 
 	// Callbacks OUTSIDE lock
-	for _, cb := range callbacks {
-		invokeCoordinatorTaskComplete(onComplete, cb.task, cb.result)
-	}
+	c.deliverTaskCompletions(onComplete, callbacks)
 
 }
 
@@ -549,12 +630,87 @@ func (c *Coordinator) recordReflectionFeedback(result *AgentResult, success bool
 	}
 }
 
-// unblockDependents moves blocked tasks to ready if dependencies are met.
-func (c *Coordinator) unblockDependents(completedID string) {
-	dependents := c.dependencies[completedID]
-	for _, depTaskID := range dependents {
+// failedDependencyLocked returns the first prerequisite that cannot satisfy
+// task. The caller holds c.mu.
+func (c *Coordinator) failedDependencyLocked(task *CoordinatedTask) (string, *CoordinatedTask, bool) {
+	for _, dependencyID := range task.Dependencies {
+		dependency := c.tasks[dependencyID]
+		if dependency == nil || dependency.Status == TaskStatusFailed {
+			return dependencyID, dependency, true
+		}
+	}
+	return "", nil, false
+}
+
+// failTaskForDependencyLocked commits a terminal result for work that was
+// never started because one of its prerequisites failed. The caller holds
+// c.mu.
+func (c *Coordinator) failTaskForDependencyLocked(task *CoordinatedTask, dependencyID string, dependency *CoordinatedTask) *AgentResult {
+	dependencyStatus := string(AgentStatusFailed)
+	dependencyError := ""
+	if dependency == nil {
+		dependencyStatus = "missing"
+	} else if dependency.Result != nil {
+		if dependency.Result.Status != "" {
+			dependencyStatus = string(dependency.Result.Status)
+		}
+		dependencyError = dependency.Result.Error
+	}
+
+	reason := fmt.Sprintf("dependency %q failed", dependencyID)
+	if dependency == nil {
+		reason = fmt.Sprintf("dependency %q does not exist", dependencyID)
+	} else if dependencyStatus == string(AgentStatusCancelled) {
+		reason = fmt.Sprintf("dependency %q was cancelled", dependencyID)
+	}
+	if dependencyError != "" {
+		reason += ": " + truncate(dependencyError, 240)
+	}
+
+	result := &AgentResult{
+		Type:      task.AgentType,
+		Status:    AgentStatusFailed,
+		Error:     reason,
+		Completed: true,
+		Metadata: map[string]any{
+			"dependency_id":     dependencyID,
+			"dependency_status": dependencyStatus,
+		},
+	}
+	task.Status = TaskStatusFailed
+	task.Result = result
+	c.completed[task.ID] = true
+	return result
+}
+
+// resolveDependentsLocked advances the graph after a task reaches a terminal
+// state. Successful prerequisites can make blocked work ready. A failed or
+// cancelled prerequisite makes that work impossible, so it is failed without
+// spawning an agent and the failure is propagated iteratively through all
+// descendants. The caller holds c.mu; returned callbacks must be invoked only
+// after releasing it.
+func (c *Coordinator) resolveDependentsLocked(terminalID string) []coordinatorTaskCompletion {
+	pending := append([]string(nil), c.dependencies[terminalID]...)
+	var completions []coordinatorTaskCompletion
+
+	for i := 0; i < len(pending); i++ {
+		depTaskID := pending[i]
 		task := c.tasks[depTaskID]
 		if task == nil || task.Status != TaskStatusBlocked {
+			continue
+		}
+
+		if failedID, failedTask, failed := c.failedDependencyLocked(task); failed {
+			result := c.failTaskForDependencyLocked(task, failedID, failedTask)
+			completions = append(completions, coordinatorTaskCompletion{
+				task: cloneCoordinatedTask(task), result: cloneAgentResult(result),
+			})
+			pending = append(pending, c.dependencies[depTaskID]...)
+
+			logging.Info("coordinator: task skipped after dependency failure",
+				"task_id", depTaskID,
+				"dependency_id", failedID,
+				"error", result.Error)
 			continue
 		}
 
@@ -570,13 +726,29 @@ func (c *Coordinator) unblockDependents(completedID string) {
 
 			logging.Debug("coordinator: task unblocked",
 				"task_id", depTaskID,
-				"unblocked_by", completedID)
+				"unblocked_by", terminalID)
 		}
 	}
+
+	return completions
 }
 
 // handleAgentCompletion handles a single agent completion event.
 func (c *Coordinator) handleAgentCompletion(agentID string) {
+	if c.runner == nil {
+		return
+	}
+	result, ok := c.runner.completedResultLocked(agentID)
+	if !ok {
+		return
+	}
+	c.handleAgentCompletionResult(agentID, result)
+}
+
+// handleAgentCompletionResult commits the exact result snapshot owned by the
+// Runner waiter. It must never re-read Runner.results: that shared history is
+// evictable immediately after WaitWithContext returns.
+func (c *Coordinator) handleAgentCompletionResult(agentID string, result *AgentResult) {
 	c.mu.Lock()
 
 	taskID, ok := c.running[agentID]
@@ -585,10 +757,7 @@ func (c *Coordinator) handleAgentCompletion(agentID string) {
 		return
 	}
 
-	// See the matching comment in checkCompletedAgents — completedResultLocked
-	// avoids the unsynchronized .Completed read GetResult's callers used to do.
-	result, ok := c.runner.completedResultLocked(agentID)
-	if !ok {
+	if result == nil || !result.Completed {
 		c.mu.Unlock()
 		return
 	}
@@ -600,7 +769,7 @@ func (c *Coordinator) handleAgentCompletion(agentID string) {
 	}
 
 	// Update task status
-	if result.Status == AgentStatusCompleted {
+	if result.IsSuccess() {
 		task.Status = TaskStatusCompleted
 	} else {
 		task.Status = TaskStatusFailed
@@ -616,18 +785,21 @@ func (c *Coordinator) handleAgentCompletion(agentID string) {
 		"status", task.Status,
 		"duration", result.Duration)
 
-	// Snapshot callback and unblock dependents under lock
+	// Snapshot callback and resolve dependents under lock.
 	onComplete := c.onTaskComplete
-	c.unblockDependents(taskID)
-	callbackTask := cloneCoordinatedTask(task)
-	callbackResult := cloneAgentResult(result)
+	callbacks := []coordinatorTaskCompletion{{
+		task: cloneCoordinatedTask(task), result: cloneAgentResult(result),
+	}}
+	callbacks = append(callbacks, c.resolveDependentsLocked(taskID)...)
+	c.pendingCallbacks += len(callbacks)
 	c.mu.Unlock()
 
-	// Callback OUTSIDE lock
-	invokeCoordinatorTaskComplete(onComplete, callbackTask, callbackResult)
+	// Callbacks OUTSIDE lock
+	c.deliverTaskCompletions(onComplete, callbacks)
 }
 
-// isAllComplete checks if all tasks are done.
+// isAllComplete reports full coordinator quiescence: all tasks are terminal
+// and all task-complete callbacks have returned.
 func (c *Coordinator) isAllComplete() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -637,6 +809,15 @@ func (c *Coordinator) isAllComplete() bool {
 // isAllCompleteLocked reports completion while the caller holds c.mu for
 // reading or writing.
 func (c *Coordinator) isAllCompleteLocked() bool {
+	if len(c.running) > 0 || c.pendingCallbacks > 0 {
+		return false
+	}
+	return c.allTasksTerminalLocked()
+}
+
+// allTasksTerminalLocked reports the durable coordination state independently
+// of observer delivery. The caller holds c.mu for reading or writing.
+func (c *Coordinator) allTasksTerminalLocked() bool {
 	if len(c.running) > 0 {
 		return false
 	}
@@ -650,7 +831,21 @@ func (c *Coordinator) isAllCompleteLocked() bool {
 	return true
 }
 
-// notifyAllComplete calls the completion callback.
+// publishCompletionIfReady publishes the durable event consumed by Wait. It
+// deliberately ignores pendingCallbacks: callbacks observe already-committed
+// task state and are allowed to call Wait themselves.
+func (c *Coordinator) publishCompletionIfReady() {
+	c.mu.Lock()
+	if c.sealed && c.allTasksTerminalLocked() {
+		c.completeOnce.Do(func() {
+			close(c.completionCh)
+		})
+	}
+	c.mu.Unlock()
+}
+
+// notifyAllComplete publishes task-state completion (if needed) and invokes
+// the all-complete observer once task-complete delivery is fully drained.
 func (c *Coordinator) notifyAllComplete() {
 	// Completion is a durable, broadcast event. Closing completionCh wakes any
 	// number of current waiters and remains observable by waiters that arrive
@@ -658,26 +853,36 @@ func (c *Coordinator) notifyAllComplete() {
 	// onAllComplete, which both overwrote the user's callback and allowed two
 	// concurrent waiters to overwrite each other (leaving one blocked forever).
 	// Keep notification independent from the optional observer callback.
-	c.mu.RLock()
+	c.mu.Lock()
+	// Wait may already have been released by publishCompletionIfReady, but the
+	// all-complete observer is held back until task callbacks have returned.
+	if !c.sealed || !c.allTasksTerminalLocked() || c.pendingCallbacks > 0 {
+		c.mu.Unlock()
+		return
+	}
 	cb := c.onAllComplete
 	results := make(map[string]*AgentResult, len(c.tasks))
 	for taskID, task := range c.tasks {
 		results[taskID] = cloneAgentResult(task.Result)
 	}
-	c.mu.RUnlock()
 
 	firstNotification := false
 	c.completeOnce.Do(func() {
 		close(c.completionCh)
+	})
+	c.allCompleteOnce.Do(func() {
 		firstNotification = true
 	})
+	c.mu.Unlock()
 	if !firstNotification {
 		return
 	}
 	invokeCoordinatorAllComplete(cb, results)
 }
 
-// Wait blocks until all tasks are complete.
+// Wait blocks until the sealed task graph reaches terminal state. Observer
+// callbacks may still be returning; onAllComplete is the notification that
+// task-complete callback delivery has also drained.
 func (c *Coordinator) Wait() map[string]*AgentResult {
 	select {
 	case <-c.completionCh:
@@ -761,6 +966,10 @@ func (c *Coordinator) WaitWithTimeoutCtx(ctx context.Context, timeout time.Durat
 // run on WithoutCancel and the only cancel bridge, CancelTask, had zero
 // callers). Returns how many agents were cancelled.
 func (c *Coordinator) CancelRunning() int {
+	return c.cancelRunningIDs()
+}
+
+func (c *Coordinator) cancelRunningIDs() int {
 	c.mu.RLock()
 	ids := make([]string, 0, len(c.running))
 	for agentID := range c.running {
@@ -774,6 +983,44 @@ func (c *Coordinator) CancelRunning() int {
 		}
 	}
 	return n
+}
+
+// CancelRunningAndWait requests cancellation for every running agent and then
+// waits, under one caller-supplied deadline, until Runner publishes their real
+// terminal results. This is the teardown boundary used by ephemeral coordinate
+// calls: returning immediately after Cancel can overlap the next foreground
+// step with tool/workspace cleanup still executing in orphaned goroutines.
+func (c *Coordinator) CancelRunningAndWait(ctx context.Context) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.mu.RLock()
+	ids := make([]string, 0, len(c.running))
+	for agentID := range c.running {
+		ids = append(ids, agentID)
+	}
+	runner := c.runner
+	c.mu.RUnlock()
+	if runner == nil {
+		return 0
+	}
+
+	cancelled := 0
+	for _, id := range ids {
+		if err := runner.Cancel(id); err == nil {
+			cancelled++
+		}
+	}
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			break
+		}
+		// The coordinator monitor may also be waiting on this ID. Runner waiters
+		// are lossless multi-consumers, and an already-cleaned result reports
+		// ErrAgentResultUnavailable immediately rather than hanging teardown.
+		_, _ = runner.WaitWithContext(ctx, id)
+	}
+	return cancelled
 }
 
 // GetTask returns a caller-owned task snapshot by ID.
@@ -910,24 +1157,52 @@ func (c *Coordinator) CancelTask(taskID string) error {
 		return nil
 	}
 
-	// If running, cancel the agent
-	cancelledAgentID := ""
+	// A running task remains running until the Runner publishes its real final
+	// result after tool/workspace cleanup. Cancellation is only a request. If
+	// the result won the race and is already published, consume it now rather
+	// than overwriting success/failure with a synthetic cancellation.
 	for agentID, tid := range c.running {
-		if tid == taskID {
-			if err := c.runner.Cancel(agentID); err != nil {
-				c.mu.Unlock()
-				return err
-			}
-			cancelledAgentID = agentID
-			delete(c.running, agentID)
+		if tid != taskID {
+			continue
 		}
+		if c.runner == nil {
+			c.mu.Unlock()
+			return fmt.Errorf("agent runner is not configured")
+		}
+		if result, published := c.runner.completedResultLocked(agentID); published {
+			if result.IsSuccess() {
+				task.Status = TaskStatusCompleted
+				c.recordReflectionFeedback(result, true)
+			} else {
+				task.Status = TaskStatusFailed
+				c.recordReflectionFeedback(result, false)
+			}
+			task.Result = result
+			c.completed[taskID] = true
+			delete(c.running, agentID)
+			callbacks := []coordinatorTaskCompletion{{
+				task: cloneCoordinatedTask(task), result: cloneAgentResult(result),
+			}}
+			callbacks = append(callbacks, c.resolveDependentsLocked(taskID)...)
+			c.pendingCallbacks += len(callbacks)
+			onComplete := c.onTaskComplete
+			c.mu.Unlock()
+			c.deliverTaskCompletions(onComplete, callbacks)
+			return nil
+		}
+		if err := c.runner.Cancel(agentID); err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		c.mu.Unlock()
+		return nil
 	}
 
-	// Remove from queue if pending/ready
+	// A task that never started has no cleanup owner, so cancellation can become
+	// terminal immediately.
 	c.queue.RemoveTask(taskID)
 	task.Status = TaskStatusFailed
 	task.Result = &AgentResult{
-		AgentID:   cancelledAgentID,
 		Type:      task.AgentType,
 		Status:    AgentStatusCancelled,
 		Error:     "cancelled by coordinator",
@@ -935,20 +1210,15 @@ func (c *Coordinator) CancelTask(taskID string) error {
 	}
 	c.completed[taskID] = true
 
-	// A cancelled prerequisite is terminal, matching the coordinator's existing
-	// failed-agent behavior: dependents become eligible once all prerequisites
-	// have reached a terminal state. unblockDependents also wakes processLoop.
-	c.unblockDependents(taskID)
+	callbacks := []coordinatorTaskCompletion{{
+		task: cloneCoordinatedTask(task), result: cloneAgentResult(task.Result),
+	}}
+	callbacks = append(callbacks, c.resolveDependentsLocked(taskID)...)
+	c.pendingCallbacks += len(callbacks)
 	onComplete := c.onTaskComplete
-	allComplete := c.isAllCompleteLocked()
-	callbackTask := cloneCoordinatedTask(task)
-	result := cloneAgentResult(task.Result)
 	c.mu.Unlock()
 
-	invokeCoordinatorTaskComplete(onComplete, callbackTask, result)
-	if allComplete {
-		c.notifyAllComplete()
-	}
+	c.deliverTaskCompletions(onComplete, callbacks)
 
 	return nil
 }
