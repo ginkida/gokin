@@ -107,6 +107,17 @@ func (m *ToolProgressBarModel) IsVisible() bool {
 	return m.visible
 }
 
+// HasDistinctSignal reports whether the bar carries information the live
+// activity card's tool line does not already show: a determinate progress
+// fraction, byte counts, or a named step. An INDETERMINATE bar with none of
+// those renders the same spinner + tool name + elapsed the card already
+// shows one row above (field report: «⠋ Bash — $ go test … · 23.5s» over
+// «⠏ Bash 23.5s go test…») — the View suppresses it in that case, same
+// one-activity-surface-per-frame rule as feed-vs-tree and file-peek.
+func (m *ToolProgressBarModel) HasDistinctSignal() bool {
+	return m.progress >= 0 || m.totalBytes > 0 || strings.TrimSpace(m.currentStep) != ""
+}
+
 // IsCancellable returns whether the current operation can be cancelled.
 func (m *ToolProgressBarModel) IsCancellable() bool {
 	return m.cancellable

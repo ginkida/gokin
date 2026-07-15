@@ -5485,7 +5485,12 @@ func (m Model) View() string {
 	}
 
 	// Tool progress bar (for long-running operations)
-	if m.toolProgressBar != nil && m.toolProgressBar.IsVisible() {
+	// Suppressed while the live card renders UNLESS the bar carries a signal
+	// the card lacks (determinate %, bytes, named step) — an indeterminate
+	// bar duplicated the card's spinner+tool+elapsed line one row below
+	// (field report). One activity surface per frame.
+	if m.toolProgressBar != nil && m.toolProgressBar.IsVisible() &&
+		(!cardRendered || m.toolProgressBar.HasDistinctSignal()) {
 		panelBuilder.WriteString(m.toolProgressBar.View(m.width, m.height))
 		panelBuilder.WriteString("\n")
 	}
