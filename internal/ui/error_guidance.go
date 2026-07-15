@@ -99,6 +99,16 @@ var errorGuidancePatterns = []ErrorGuidance{
 	},
 	// ─── Generic patterns ───
 	{
+		// The executor/agent loop guards abort a turn that repeats the same
+		// call without progress. The raw error is machine-shaped ("tool
+		// pattern %q repeated N times") — give the user the human story and
+		// the practical recovery instead of a bare fingerprint dump.
+		Pattern:     regexp.MustCompile(`(?i)(executor stagnation|re-coverage loop|reached maximum turn limit)`),
+		Title:       "Agent Got Stuck in a Loop",
+		Suggestions: []string{"The agent kept repeating the same step without progress and was stopped to save your quota", "Press ↑ to restore your message — rephrasing with narrower, more concrete instructions usually breaks the loop", "For big asks, split the task into smaller sequential requests"},
+		Command:     "",
+	},
+	{
 		Pattern: regexp.MustCompile(`model_round_timeout`),
 		Title:   "Model Round Timeout",
 		Suggestions: []string{

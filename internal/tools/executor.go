@@ -3552,6 +3552,17 @@ func shouldAttemptStagnationRecovery(calls []*genai.FunctionCall, attempts int) 
 			return false
 		}
 		m := maxStagnationRecoveryAttempts(call.Name)
+		if m == 0 && call.Name == "bash" {
+			// A read-only INSPECTION command (`git status && git diff --stat`
+			// re-run while the model narrates) is the same benign loop class
+			// as read/grep — killing the whole turn for it was
+			// disproportionate (field report). Budget 2, slightly tighter
+			// than read's 3 since bash is opaquer; mutating/unknown commands
+			// keep the immediate abort.
+			if cmd, _ := GetString(call.Args, "command"); readOnlyBashCommand(cmd) {
+				m = 2
+			}
+		}
 		if m == 0 {
 			return false
 		}
@@ -3777,6 +3788,11 @@ func buildStagnationRecoveryMessage(toolName string, args map[string]any, repeat
 		}
 		return fmt.Sprintf(
 			"Loop guard: the same %s was attempted %d times and is not making progress. Do not call it again unchanged — re-read the current file to recheck the exact line numbers and content, then retry with corrected coordinates or take a different approach.",
+			target, repeatCount,
+		)
+	case "bash":
+		return fmt.Sprintf(
+			"Loop guard: the identical %s ran %d times in a row. Its output will not change until something else changes. Do not call it again — use the result you already have and take the NEXT step (make the edit, run the fix, or answer the user).",
 			target, repeatCount,
 		)
 	default:

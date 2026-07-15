@@ -116,3 +116,19 @@ func TestRenderToast_KeepsActionableTailAndStripsWrapper(t *testing.T) {
 		t.Fatalf("short toast must render verbatim: %q", got)
 	}
 }
+
+// The loop-guard abort error is machine-shaped ("tool pattern %q repeated N
+// times") — the guidance card must translate it into the human story + the
+// practical recovery.
+func TestGetErrorGuidance_LoopGuardAborts(t *testing.T) {
+	for _, msg := range []string{
+		`executor stagnation: tool pattern "bash:git status --short" repeated 5 times consecutively`,
+		"executor re-coverage loop: read internal/x.go",
+		"agent reached maximum turn limit (25 turns)",
+	} {
+		g := GetErrorGuidance(msg)
+		if g == nil || g.Title != "Agent Got Stuck in a Loop" {
+			t.Errorf("GetErrorGuidance(%q) = %+v, want Agent Got Stuck in a Loop", msg, g)
+		}
+	}
+}
