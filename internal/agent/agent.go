@@ -4826,10 +4826,10 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 		callIndex[call] = i
 	}
 
-	// Classify tools into parallel groups
+	// Classify tools in the model-provided order. Reads separated by a write
+	// are not interchangeable: a later read may intentionally observe that
+	// write, so moving every read to the front produces stale results.
 	classifier := NewToolDependencyClassifier()
-	// Optimize call order for better parallelism (reads before writes)
-	calls = classifier.OptimizeForParallelism(calls)
 	groups := classifier.ClassifyDependencies(calls)
 
 	for _, group := range groups {
@@ -4840,12 +4840,69 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 			// Execute sequentially (write tools or single tool)
 			for _, call := range group.Calls {
 				idx := callIndex[call]
-				results[idx] = a.executeToolWithReflection(ctx, call)
+				results[idx] = a.executeToolCancellable(ctx, call)
 			}
 		}
 	}
 
 	return results
+}
+
+// sequentialToolCleanupGrace gives a context-aware tool a brief opportunity
+// to return its own result after cancellation. A non-cooperative tool is then
+// abandoned so one blocked syscall or MCP implementation cannot hang the
+// entire sub-agent turn.
+var sequentialToolCleanupGrace = 50 * time.Millisecond
+
+func cancelledToolCallResult(call *genai.FunctionCall) toolCallResult {
+	return toolCallResult{
+		Response: &genai.FunctionResponse{
+			ID:       call.ID,
+			Name:     call.Name,
+			Response: tools.NewErrorResult("cancelled").ToMap(),
+		},
+	}
+}
+
+func (a *Agent) executeToolCancellable(ctx context.Context, call *genai.FunctionCall) toolCallResult {
+	if ctx.Err() != nil {
+		return cancelledToolCallResult(call)
+	}
+
+	done := make(chan toolCallResult, 1)
+	go func() {
+		var result toolCallResult
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logging.Error("panic in sequential tool execution",
+					"tool", call.Name,
+					"panic", recovered,
+					"stack", logging.PanicStack())
+				result = toolCallResult{Response: &genai.FunctionResponse{
+					ID:       call.ID,
+					Name:     call.Name,
+					Response: tools.NewErrorResult(tools.FormatToolPanic(call.Name, recovered)).ToMap(),
+				}}
+			}
+			done <- result
+		}()
+		result = a.executeToolWithReflection(ctx, call)
+	}()
+
+	select {
+	case result := <-done:
+		return result
+	case <-ctx.Done():
+		timer := time.NewTimer(sequentialToolCleanupGrace)
+		defer timer.Stop()
+		select {
+		case result := <-done:
+			return result
+		case <-timer.C:
+			logging.Warn("sequential tool did not exit after cancellation", "tool", call.Name)
+			return cancelledToolCallResult(call)
+		}
+	}
 }
 
 // parallelToolCleanupGrace is how long executeToolsParallel waits for
@@ -4870,16 +4927,6 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 	abandoned := false
 	semaphore := make(chan struct{}, 5) // Max 5 concurrent executions
 
-	cancelledResult := func(fc *genai.FunctionCall) toolCallResult {
-		return toolCallResult{
-			Response: &genai.FunctionResponse{
-				ID:       fc.ID,
-				Name:     fc.Name,
-				Response: tools.NewErrorResult("cancelled").ToMap(),
-			},
-		}
-	}
-
 	safeWrite := func(idx int, result toolCallResult) {
 		mu.Lock()
 		if !abandoned {
@@ -4896,13 +4943,13 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 	// nil-pointer panic (this is what made the sibling executeDirectly's
 	// `if r.Response != nil` guard necessary in the first place).
 	for _, call := range calls {
-		results[indexMap[call]] = cancelledResult(call)
+		results[indexMap[call]] = cancelledToolCallResult(call)
 	}
 
 	for _, call := range calls {
 		// Check context before spawning goroutine to avoid unnecessary work
 		if ctx.Err() != nil {
-			safeWrite(indexMap[call], cancelledResult(call))
+			safeWrite(indexMap[call], cancelledToolCallResult(call))
 			continue
 		}
 
@@ -4927,7 +4974,7 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 
 			// Check context again before trying to acquire semaphore
 			if ctx.Err() != nil {
-				safeWrite(indexMap[fc], cancelledResult(fc))
+				safeWrite(indexMap[fc], cancelledToolCallResult(fc))
 				return
 			}
 
@@ -4937,7 +4984,7 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 			case semaphore <- struct{}{}:
 				acquired = true
 			case <-ctx.Done():
-				safeWrite(indexMap[fc], cancelledResult(fc))
+				safeWrite(indexMap[fc], cancelledToolCallResult(fc))
 				return
 			}
 
@@ -5299,15 +5346,7 @@ func (a *Agent) policyBlockSnapshot() *tools.PolicyBlock {
 // buildResponseParts creates Parts from a response.
 // Returns at least one part to avoid empty Parts which causes API errors.
 func (a *Agent) buildResponseParts(resp *client.Response) []*genai.Part {
-	var parts []*genai.Part
-
-	if resp.Text != "" {
-		parts = append(parts, genai.NewPartFromText(resp.Text))
-	}
-
-	for _, fc := range resp.FunctionCalls {
-		parts = append(parts, &genai.Part{FunctionCall: fc})
-	}
+	parts := client.ResponsePartsForHistory(resp)
 
 	// Ensure we never return empty parts - API requires at least one part
 	if len(parts) == 0 {
