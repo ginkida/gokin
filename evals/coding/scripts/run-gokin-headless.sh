@@ -10,6 +10,7 @@ bin="${GOKIN_BIN:-gokin}"
 provider="${GOKIN_EVAL_PROVIDER:-}"
 model="${GOKIN_EVAL_MODEL:-}"
 prompt="${GOKIN_EVAL_PROMPT:-}"
+base_url="${GOKIN_EVAL_BASE_URL:-}"
 
 if [ -z "$prompt" ]; then
   echo "GOKIN_EVAL_PROMPT is required" >&2
@@ -22,6 +23,9 @@ if [ -n "$provider" ]; then
 fi
 if [ -n "$model" ]; then
   set -- "$@" --model "$model"
+fi
+if [ -n "$base_url" ]; then
+  set -- "$@" --base-url "$base_url"
 fi
 
 exec "$@"

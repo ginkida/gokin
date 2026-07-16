@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,7 @@ var (
 	cfgFile       string
 	model         string
 	provider      string
+	baseURL       string
 	runSetup      bool
 	continueLast  bool
 	resumeSession string
@@ -54,6 +56,7 @@ choose.`,
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/gokin/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&model, "model", "", "model to use (default depends on provider)")
 	rootCmd.PersistentFlags().StringVar(&provider, "provider", "", "provider to use for this run (glm, minimax, kimi, deepseek, ollama)")
+	rootCmd.PersistentFlags().StringVar(&baseURL, "base-url", "", "custom provider API base URL for this run (in-memory only)")
 	rootCmd.PersistentFlags().BoolVar(&runSetup, "setup", false, "run the setup wizard")
 	rootCmd.PersistentFlags().BoolVarP(&continueLast, "continue", "c", false, "continue the most recent session in this workspace")
 	rootCmd.PersistentFlags().StringVarP(&resumeSession, "resume", "r", "", "resume an exact session ID or saved name")
@@ -145,6 +148,9 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	cfg.Version = version
 
 	if err := applyRuntimeOverrides(cfg, provider, model); err != nil {
+		return err
+	}
+	if err := applyRuntimeBaseURLOverride(cfg, baseURL); err != nil {
 		return err
 	}
 
@@ -452,5 +458,28 @@ func applyRuntimeOverrides(cfg *config.Config, providerOverride, modelOverride s
 		}
 	}
 
+	return nil
+}
+
+func applyRuntimeBaseURLOverride(cfg *config.Config, raw string) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid --base-url: %w", err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("invalid --base-url %q: must be an absolute http/https URL", raw)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("invalid --base-url %q: credentials, query, and fragment are not allowed", raw)
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	cfg.Model.CustomBaseURL = u.String()
 	return nil
 }

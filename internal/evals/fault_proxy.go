@@ -42,15 +42,15 @@ type faultProfileSpec struct {
 }
 
 var supportedFaultProfiles = map[string]faultProfileSpec{
-	"http-408-once":                 {Name: "http-408-once", Trigger: faultTriggerAnyMessage, Action: faultActionHTTP408},
-	"http-429-once":                 {Name: "http-429-once", Trigger: faultTriggerAnyMessage, Action: faultActionHTTP429},
-	"http-500-once":                 {Name: "http-500-once", Trigger: faultTriggerAnyMessage, Action: faultActionHTTP500},
-	"connection-drop-once":          {Name: "connection-drop-once", Trigger: faultTriggerAnyMessage, Action: faultActionConnectionDrop},
-	"truncated-stream-once":         {Name: "truncated-stream-once", Trigger: faultTriggerAnyMessage, Action: faultActionTruncatedStream},
-	"empty-stream-once":             {Name: "empty-stream-once", Trigger: faultTriggerAnyMessage, Action: faultActionEmptyStream},
-	"after-tool-408-once":            {Name: "after-tool-408-once", Trigger: faultTriggerAfterToolResult, Action: faultActionHTTP408},
-	"after-tool-429-once":            {Name: "after-tool-429-once", Trigger: faultTriggerAfterToolResult, Action: faultActionHTTP429},
-	"after-tool-500-once":            {Name: "after-tool-500-once", Trigger: faultTriggerAfterToolResult, Action: faultActionHTTP500},
+	"http-408-once":                   {Name: "http-408-once", Trigger: faultTriggerAnyMessage, Action: faultActionHTTP408},
+	"http-429-once":                   {Name: "http-429-once", Trigger: faultTriggerAnyMessage, Action: faultActionHTTP429},
+	"http-500-once":                   {Name: "http-500-once", Trigger: faultTriggerAnyMessage, Action: faultActionHTTP500},
+	"connection-drop-once":            {Name: "connection-drop-once", Trigger: faultTriggerAnyMessage, Action: faultActionConnectionDrop},
+	"truncated-stream-once":           {Name: "truncated-stream-once", Trigger: faultTriggerAnyMessage, Action: faultActionTruncatedStream},
+	"empty-stream-once":               {Name: "empty-stream-once", Trigger: faultTriggerAnyMessage, Action: faultActionEmptyStream},
+	"after-tool-408-once":             {Name: "after-tool-408-once", Trigger: faultTriggerAfterToolResult, Action: faultActionHTTP408},
+	"after-tool-429-once":             {Name: "after-tool-429-once", Trigger: faultTriggerAfterToolResult, Action: faultActionHTTP429},
+	"after-tool-500-once":             {Name: "after-tool-500-once", Trigger: faultTriggerAfterToolResult, Action: faultActionHTTP500},
 	"after-tool-connection-drop-once": {Name: "after-tool-connection-drop-once", Trigger: faultTriggerAfterToolResult, Action: faultActionConnectionDrop},
 	"after-tool-truncated-once":       {Name: "after-tool-truncated-once", Trigger: faultTriggerAfterToolResult, Action: faultActionTruncatedStream},
 	"after-tool-empty-once":           {Name: "after-tool-empty-once", Trigger: faultTriggerAfterToolResult, Action: faultActionEmptyStream},
@@ -79,12 +79,13 @@ func parseFaultProfile(raw string) (faultProfileSpec, error) {
 // requested fault actually fired; a benchmark must never score an accidentally
 // bypassed proxy as a successful recovery.
 type FaultInjectionSummary struct {
-	Profile                string `json:"profile"`
-	Requests               int    `json:"requests"`
-	MessageRequests        int    `json:"message_requests"`
-	EligibleRequests       int    `json:"eligible_requests"`
-	Injected               int    `json:"injected"`
-	RequestsAfterInjection int    `json:"requests_after_injection"`
+	Profile                       string `json:"profile"`
+	Requests                      int    `json:"requests"`
+	MessageRequests               int    `json:"message_requests"`
+	EligibleRequests              int    `json:"eligible_requests"`
+	Injected                      int    `json:"injected"`
+	RequestsAfterInjection        int    `json:"requests_after_injection"`
+	MessageRequestsAfterInjection int    `json:"message_requests_after_injection"`
 }
 
 // FaultProxy is a loopback-only reverse proxy which injects one deterministic
@@ -124,7 +125,7 @@ func StartFaultProxy(upstreamRaw, profileRaw string) (*FaultProxy, error) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"type": "error",
+			"type":  "error",
 			"error": map[string]string{"type": "proxy_error", "message": proxyErr.Error()},
 		})
 	}
@@ -135,11 +136,11 @@ func StartFaultProxy(upstreamRaw, profileRaw string) (*FaultProxy, error) {
 		return nil, fmt.Errorf("start fault proxy listener: %w", err)
 	}
 	p := &FaultProxy{
-		listener: listener,
-		reverse: reverse,
+		listener:  listener,
+		reverse:   reverse,
 		transport: transport,
-		spec: spec,
-		summary: FaultInjectionSummary{Profile: spec.Name},
+		spec:      spec,
+		summary:   FaultInjectionSummary{Profile: spec.Name},
 	}
 	p.server = &http.Server{Handler: p, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -243,6 +244,9 @@ func (p *FaultProxy) observeAndShouldInject(message, eligible bool) bool {
 	}
 	if p.summary.Injected > 0 {
 		p.summary.RequestsAfterInjection++
+		if message {
+			p.summary.MessageRequestsAfterInjection++
+		}
 	}
 	if eligible {
 		p.summary.EligibleRequests++
@@ -297,7 +301,7 @@ func writeFaultHTTPError(w http.ResponseWriter, status int, kind, message string
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"type": "error",
+		"type":  "error",
 		"error": map[string]string{"type": kind, "message": message},
 	})
 }

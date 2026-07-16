@@ -74,6 +74,48 @@ go run ./cmd/gokin eval report \
 
 The runner writes JSONL results and scores agent evidence from `.gokin/execution_journal.jsonl`, including tool calls, files read, files edited, verification commands, and false file claims.
 
+## Reliability and fault injection
+
+`eval run` can place a loopback-only reverse proxy between gokin and an
+Anthropic-compatible provider. Each profile injects one deterministic failure
+and then becomes transparent. This exercises the real client retry, app
+recovery, tool checkpoint, and verification paths instead of a mocked agent.
+
+For GLM 5.2, build the exact binary under test and point the proxy at Z.AI's
+Anthropic endpoint:
+
+```sh
+go build -o /tmp/gokin ./cmd/gokin
+
+GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
+  --provider glm --model glm-5.2 \
+  --fault-upstream https://api.z.ai/api/anthropic \
+  --fault-profile after-tool-429-once \
+  --fault-profile after-tool-connection-drop-once \
+  --scenario go_bugfix_targeted_test \
+  --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
+  --output .gokin/evals/glm-reliability.jsonl
+
+go run ./cmd/gokin eval report \
+  --input .gokin/evals/glm-reliability.jsonl \
+  --require-pass \
+  --fail-metric reliability_fault_injected=100% \
+  --fail-metric reliability_retry_observed=100% \
+  --fail-metric reliability_no_duplicate_side_effects=100% \
+  --fail-metric reliability_fault_recovered=100%
+```
+
+Available profiles are shown by shell completion for `--fault-profile` and
+cover HTTP 408/429/500, connection drops, truncated streams, and empty streams.
+The `after-tool-*` forms wait until a request contains a tool result, making
+them the strongest exactly-once check. Such a run deliberately fails closed if
+the model never invokes a tool: the requested fault was not exercised, so there
+is no recovery evidence to score.
+
+Reliability results include non-sensitive proxy counters and journal-derived
+recovery evidence. Request bodies, authorization headers, and API keys are not
+written to the result file.
+
 ## Fixture contracts
 
 Every scenario declares (implicitly or via `delivered_state`) what its

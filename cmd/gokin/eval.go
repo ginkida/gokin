@@ -87,8 +87,9 @@ running an agent command template there, then executing scenario verification co
 
 The agent command receives environment variables like GOKIN_EVAL_PROMPT,
 GOKIN_EVAL_SCENARIO_ID, GOKIN_EVAL_PROVIDER, GOKIN_EVAL_MODEL,
-and GOKIN_EVAL_WORKSPACE. Template placeholders such as {{prompt}},
-{{workspace}}, {{provider}}, {{model}}, and {{scenario_id}} are also supported.`,
+GOKIN_EVAL_WORKSPACE, GOKIN_EVAL_FAULT_PROFILE, and GOKIN_EVAL_BASE_URL.
+Template placeholders such as {{prompt}}, {{workspace}}, {{provider}}, {{model}},
+{{fault_profile}}, {{base_url}}, and {{scenario_id}} are also supported.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Timeout = timeout
 			results, err := evals.Run(cmd.Context(), opts)
@@ -139,6 +140,8 @@ and GOKIN_EVAL_WORKSPACE. Template placeholders such as {{prompt}},
 	cmd.Flags().StringArrayVar(&opts.ScenarioIDs, "scenario", nil, "scenario id to run; repeatable")
 	cmd.Flags().StringArrayVar(&opts.Providers, "provider", nil, "provider to include in the matrix; repeatable")
 	cmd.Flags().StringArrayVar(&opts.Models, "model", nil, "model to include in the matrix; repeatable")
+	cmd.Flags().StringArrayVar(&opts.FaultProfiles, "fault-profile", nil, "deterministic provider fault to inject once; repeatable")
+	cmd.Flags().StringVar(&opts.FaultUpstream, "fault-upstream", "", "real provider base URL behind the loopback fault proxy")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "timeout per agent or verification command")
 	cmd.Flags().BoolVar(&opts.KeepWorkspaces, "keep-workspaces", false, "keep temporary workspaces after the run")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "copy/list scenarios without running the agent command or verification")
@@ -156,6 +159,15 @@ and GOKIN_EVAL_WORKSPACE. Template placeholders such as {{prompt}},
 		}
 		return ids, cobra.ShellCompDirectiveNoFileComp
 	})
+	_ = cmd.RegisterFlagCompletionFunc("fault-profile", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		var profiles []string
+		for _, profile := range evals.FaultProfiles() {
+			if strings.HasPrefix(profile, toComplete) {
+				profiles = append(profiles, profile)
+			}
+		}
+		return profiles, cobra.ShellCompDirectiveNoFileComp
+	})
 
 	cmd.SetContext(context.Background())
 	return cmd
@@ -168,6 +180,9 @@ func evalResultLabel(result evals.Result) string {
 	}
 	if result.Model != "" {
 		parts = append(parts, result.Model)
+	}
+	if result.FaultProfile != "" {
+		parts = append(parts, "fault="+result.FaultProfile)
 	}
 	if len(parts) == 0 {
 		return result.ScenarioID

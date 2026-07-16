@@ -479,16 +479,22 @@ func ParseRatio(value string) (float64, error) {
 }
 
 func resultVariant(result Result) string {
+	base := ""
 	switch {
 	case result.Provider != "" && result.Model != "":
-		return result.Provider + "/" + result.Model
+		base = result.Provider + "/" + result.Model
 	case result.Provider != "":
-		return result.Provider
+		base = result.Provider
 	case result.Model != "":
-		return result.Model
-	default:
-		return ""
+		base = result.Model
 	}
+	if result.FaultProfile != "" {
+		if base != "" {
+			base += "/"
+		}
+		base += "fault=" + result.FaultProfile
+	}
+	return base
 }
 
 func scenarioKey(id, variant string) string {

@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"gokin/internal/tools"
 )
 
 const outputPreviewLimit = 6000
@@ -29,6 +31,8 @@ type RunOptions struct {
 	ScenarioIDs    []string
 	Providers      []string
 	Models         []string
+	FaultProfiles  []string
+	FaultUpstream  string
 	Timeout        time.Duration
 	KeepWorkspaces bool
 	DryRun         bool
@@ -36,25 +40,41 @@ type RunOptions struct {
 
 // Result is one scenario outcome, suitable for JSONL output.
 type Result struct {
-	ScenarioID       string            `json:"scenario_id"`
-	ScenarioSpecHash string            `json:"scenario_spec_hash,omitempty"`
-	Category         string            `json:"category"`
-	Difficulty       string            `json:"difficulty"`
-	Provider         string            `json:"provider,omitempty"`
-	Model            string            `json:"model,omitempty"`
-	Status           string            `json:"status"`
-	Workspace        string            `json:"workspace,omitempty"`
-	StartedAt        time.Time         `json:"started_at"`
-	FinishedAt       time.Time         `json:"finished_at"`
-	DurationMillis   int64             `json:"duration_ms"`
-	Agent            CommandResult     `json:"agent"`
-	Verification     []CommandResult   `json:"verification"`
-	ChangedFiles     []string          `json:"changed_files,omitempty"`
-	Journal          *JournalSummary   `json:"journal,omitempty"`
-	Metrics          map[string]bool   `json:"metrics"`
-	Score            ScoreSummary      `json:"score"`
-	Error            string            `json:"error,omitempty"`
-	Metadata         map[string]string `json:"metadata,omitempty"`
+	ScenarioID       string                 `json:"scenario_id"`
+	ScenarioSpecHash string                 `json:"scenario_spec_hash,omitempty"`
+	Category         string                 `json:"category"`
+	Difficulty       string                 `json:"difficulty"`
+	Provider         string                 `json:"provider,omitempty"`
+	Model            string                 `json:"model,omitempty"`
+	FaultProfile     string                 `json:"fault_profile,omitempty"`
+	Status           string                 `json:"status"`
+	Workspace        string                 `json:"workspace,omitempty"`
+	StartedAt        time.Time              `json:"started_at"`
+	FinishedAt       time.Time              `json:"finished_at"`
+	DurationMillis   int64                  `json:"duration_ms"`
+	Agent            CommandResult          `json:"agent"`
+	Verification     []CommandResult        `json:"verification"`
+	ChangedFiles     []string               `json:"changed_files,omitempty"`
+	Journal          *JournalSummary        `json:"journal,omitempty"`
+	Fault            *FaultInjectionSummary `json:"fault,omitempty"`
+	Reliability      *ReliabilitySummary    `json:"reliability,omitempty"`
+	Metrics          map[string]bool        `json:"metrics"`
+	Score            ScoreSummary           `json:"score"`
+	Error            string                 `json:"error,omitempty"`
+	Metadata         map[string]string      `json:"metadata,omitempty"`
+}
+
+// ReliabilitySummary is the fail-closed contract for a fault-injected run.
+// A result is reliable only when the requested fault really fired, the agent
+// made progress afterward, no stateful tool call was executed twice, and the
+// scenario still satisfied its normal answer and verification contract.
+type ReliabilitySummary struct {
+	Profile                string `json:"profile"`
+	FaultInjected          bool   `json:"fault_injected"`
+	RetryObserved          bool   `json:"retry_observed"`
+	NoDuplicateSideEffects bool   `json:"no_duplicate_side_effects"`
+	Recovered              bool   `json:"recovered"`
+	Passed                 bool   `json:"passed"`
 }
 
 // ScoreSummary is a compact aggregate over the boolean eval metrics.
@@ -66,14 +86,33 @@ type ScoreSummary struct {
 
 // JournalSummary captures eval-relevant evidence from .gokin/execution_journal.jsonl.
 type JournalSummary struct {
-	Path                 string   `json:"path,omitempty"`
-	ToolCalls            int      `json:"tool_calls"`
-	Tools                []string `json:"tools,omitempty"`
-	FilesRead            []string `json:"files_read,omitempty"`
-	FilesEdited          []string `json:"files_edited,omitempty"`
-	VerificationCommands []string `json:"verification_commands,omitempty"`
-	FalseFileClaims      []string `json:"false_file_claims,omitempty"`
-	ParseErrors          []string `json:"parse_errors,omitempty"`
+	Path                          string   `json:"path,omitempty"`
+	ToolCalls                     int      `json:"tool_calls"`
+	Tools                         []string `json:"tools,omitempty"`
+	FilesRead                     []string `json:"files_read,omitempty"`
+	FilesEdited                   []string `json:"files_edited,omitempty"`
+	VerificationCommands          []string `json:"verification_commands,omitempty"`
+	FalseFileClaims               []string `json:"false_file_claims,omitempty"`
+	ParseErrors                   []string `json:"parse_errors,omitempty"`
+	RequestFailures               int      `json:"request_failures,omitempty"`
+	RetriesScheduled              int      `json:"retries_scheduled,omitempty"`
+	RecoveriesPersisted           int      `json:"recoveries_persisted,omitempty"`
+	RecoveriesClaimed             int      `json:"recoveries_claimed,omitempty"`
+	RecoveriesCleared             int      `json:"recoveries_cleared,omitempty"`
+	UnsafeRetryBlocks             int      `json:"unsafe_retry_blocks,omitempty"`
+	DuplicateReuses               int      `json:"duplicate_side_effect_reuses,omitempty"`
+	CheckpointReplays             int      `json:"checkpoint_replays,omitempty"`
+	DivergentBlocks               int      `json:"divergent_side_effect_blocks,omitempty"`
+	DuplicateSideEffectExecutions []string `json:"duplicate_side_effect_executions,omitempty"`
+
+	requestGeneration int
+	statefulOrdinal   int
+	seenSideEffects   map[string]sideEffectSeen
+}
+
+type sideEffectSeen struct {
+	Generation int
+	Ordinal    int
 }
 
 // CommandResult captures one external command execution.
@@ -135,11 +174,19 @@ func Run(ctx context.Context, opts RunOptions) ([]Result, error) {
 		defer out.Close()
 	}
 
-	matrix := buildProviderModelMatrix(opts.Providers, opts.Models)
+	matrix, err := buildRunMatrix(opts.Providers, opts.Models, opts.FaultProfiles)
+	if err != nil {
+		return nil, err
+	}
+	if len(opts.FaultProfiles) > 0 && !opts.DryRun {
+		if _, err := validateFaultUpstream(opts.FaultUpstream); err != nil {
+			return nil, err
+		}
+	}
 	results := make([]Result, 0, len(scenarios)*len(matrix))
 	for _, scenario := range scenarios {
 		for _, variant := range matrix {
-			result := runScenario(ctx, manifest, scenario, opts, workRoot, variant)
+			result := runScenarioVariant(ctx, manifest, scenario, opts, workRoot, variant)
 			results = append(results, result)
 			if out != nil {
 				if err := writeJSONL(out, result); err != nil {
@@ -152,21 +199,58 @@ func Run(ctx context.Context, opts RunOptions) ([]Result, error) {
 }
 
 type matrixEntry struct {
-	Provider string
-	Model    string
+	Provider     string
+	Model        string
+	FaultProfile string
+	BaseURL      string
+}
+
+func runScenarioVariant(ctx context.Context, manifest *Manifest, scenario Scenario, opts RunOptions, workRoot string, variant matrixEntry) Result {
+	if variant.FaultProfile == "" || opts.DryRun {
+		return runScenario(ctx, manifest, scenario, opts, workRoot, variant)
+	}
+
+	proxy, err := StartFaultProxy(opts.FaultUpstream, variant.FaultProfile)
+	if err != nil {
+		return failedFaultSetupResult(manifest, scenario, variant, err)
+	}
+	variant.BaseURL = proxy.URL()
+	result := runScenario(ctx, manifest, scenario, opts, workRoot, variant)
+	summary := proxy.Snapshot()
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	closeErr := proxy.Close(closeCtx)
+	cancel()
+	result.Fault = &summary
+	if closeErr != nil && result.Error == "" {
+		result.Error = "stop fault proxy: " + closeErr.Error()
+	}
+	finalizeReliability(&result)
+	return result
+}
+
+func failedFaultSetupResult(manifest *Manifest, scenario Scenario, variant matrixEntry, err error) Result {
+	now := time.Now()
+	return Result{
+		ScenarioID: scenario.ID, Category: scenario.Category, Difficulty: scenario.Difficulty,
+		Provider: variant.Provider, Model: variant.Model, FaultProfile: variant.FaultProfile,
+		Status: "setup_failed", StartedAt: now, FinishedAt: now,
+		Metrics: map[string]bool{}, Score: ScoreSummary{}, Error: err.Error(),
+		Metadata: map[string]string{"manifest": manifest.Name, "fixture": scenario.Fixture},
+	}
 }
 
 func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opts RunOptions, workRoot string, variant matrixEntry) (result Result) {
 	start := time.Now()
 	result = Result{
-		ScenarioID: scenario.ID,
-		Category:   scenario.Category,
-		Difficulty: scenario.Difficulty,
-		Provider:   variant.Provider,
-		Model:      variant.Model,
-		Status:     "running",
-		StartedAt:  start,
-		Metrics:    make(map[string]bool),
+		ScenarioID:   scenario.ID,
+		Category:     scenario.Category,
+		Difficulty:   scenario.Difficulty,
+		Provider:     variant.Provider,
+		Model:        variant.Model,
+		FaultProfile: variant.FaultProfile,
+		Status:       "running",
+		StartedAt:    start,
+		Metrics:      make(map[string]bool),
 		Metadata: map[string]string{
 			"manifest": manifest.Name,
 			"fixture":  scenario.Fixture,
@@ -177,6 +261,9 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 	}
 	if variant.Model != "" {
 		result.Metadata["model"] = variant.Model
+	}
+	if variant.FaultProfile != "" {
+		result.Metadata["fault_profile"] = variant.FaultProfile
 	}
 	defer func() {
 		result.FinishedAt = time.Now()
@@ -249,7 +336,51 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 // real workspace/shell (runScenario is the only caller that has to shell
 // out; the decision itself doesn't).
 func scenarioPassed(result Result) bool {
-	return agentDeliveredAnswer(result) && allCommandsSuccessful(result.Verification) && behavioralAssertionsSatisfied(result.Metrics)
+	return agentDeliveredAnswer(result) && allCommandsSuccessful(result.Verification) &&
+		behavioralAssertionsSatisfied(result.Metrics) && reliabilityAssertionsSatisfied(result.Metrics)
+}
+
+func reliabilityAssertionsSatisfied(metrics map[string]bool) bool {
+	for _, key := range []string{
+		"reliability_fault_injected",
+		"reliability_retry_observed",
+		"reliability_no_duplicate_side_effects",
+		"reliability_fault_recovered",
+	} {
+		if value, declared := metrics[key]; declared && !value {
+			return false
+		}
+	}
+	return true
+}
+
+func finalizeReliability(result *Result) {
+	if result == nil || result.FaultProfile == "" {
+		return
+	}
+	if result.Metrics == nil {
+		result.Metrics = make(map[string]bool)
+	}
+	faultInjected := result.Fault != nil && result.Fault.Injected == 1
+	retryObserved := result.Fault != nil && result.Fault.MessageRequestsAfterInjection > 0
+	noDuplicates := result.Journal == nil || len(result.Journal.DuplicateSideEffectExecutions) == 0
+	recovered := agentDeliveredAnswer(*result) && allCommandsSuccessful(result.Verification) && behavioralAssertionsSatisfied(result.Metrics)
+	reliability := &ReliabilitySummary{
+		Profile: result.FaultProfile, FaultInjected: faultInjected,
+		RetryObserved: retryObserved, NoDuplicateSideEffects: noDuplicates, Recovered: recovered,
+	}
+	reliability.Passed = faultInjected && retryObserved && noDuplicates && recovered
+	result.Reliability = reliability
+	result.Metrics["reliability_fault_injected"] = faultInjected
+	result.Metrics["reliability_retry_observed"] = retryObserved
+	result.Metrics["reliability_no_duplicate_side_effects"] = noDuplicates
+	result.Metrics["reliability_fault_recovered"] = recovered
+	result.Score = summarizeScore(result.Metrics)
+	if scenarioPassed(*result) {
+		result.Status = "passed"
+	} else {
+		result.Status = "failed"
+	}
 }
 
 // behavioralAssertionsSatisfied reports whether every DECLARED behavioral
@@ -334,6 +465,29 @@ func buildProviderModelMatrix(providers, models []string) []matrixEntry {
 	return entries
 }
 
+func buildRunMatrix(providers, models, faultProfiles []string) ([]matrixEntry, error) {
+	base := buildProviderModelMatrix(providers, models)
+	profiles := compactNonEmptyUnique(faultProfiles)
+	if len(profiles) == 0 {
+		return base, nil
+	}
+	for i, profile := range profiles {
+		spec, err := parseFaultProfile(profile)
+		if err != nil {
+			return nil, err
+		}
+		profiles[i] = spec.Name
+	}
+	entries := make([]matrixEntry, 0, len(base)*len(profiles))
+	for _, entry := range base {
+		for _, profile := range profiles {
+			entry.FaultProfile = profile
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
+}
+
 func compactNonEmptyUnique(items []string) []string {
 	seen := make(map[string]bool, len(items))
 	out := make([]string, 0, len(items))
@@ -349,16 +503,22 @@ func compactNonEmptyUnique(items []string) []string {
 }
 
 func matrixLabel(entry matrixEntry) string {
+	var base string
 	switch {
 	case entry.Provider != "" && entry.Model != "":
-		return entry.Provider + "-" + entry.Model
+		base = entry.Provider + "-" + entry.Model
 	case entry.Provider != "":
-		return entry.Provider
+		base = entry.Provider
 	case entry.Model != "":
-		return entry.Model
-	default:
-		return ""
+		base = entry.Model
 	}
+	if entry.FaultProfile != "" {
+		if base != "" {
+			base += "-"
+		}
+		base += "fault-" + entry.FaultProfile
+	}
+	return base
 }
 
 func sanitizePathPart(value string) string {
@@ -521,21 +681,25 @@ func evalEnv(manifest *Manifest, scenario Scenario, workspace string, variant ma
 		"GOKIN_EVAL_WORKSPACE=" + workspace,
 		"GOKIN_EVAL_PROVIDER=" + variant.Provider,
 		"GOKIN_EVAL_MODEL=" + variant.Model,
+		"GOKIN_EVAL_FAULT_PROFILE=" + variant.FaultProfile,
+		"GOKIN_EVAL_BASE_URL=" + variant.BaseURL,
 		"GOKIN_EVAL_PROMPT=" + scenario.Prompt,
 	}
 }
 
 func expandCommandTemplate(command string, manifest *Manifest, scenario Scenario, workspace string, variant matrixEntry) string {
 	replacements := map[string]string{
-		"{{manifest}}":    shellQuote(manifest.Name),
-		"{{scenario_id}}": shellQuote(scenario.ID),
-		"{{category}}":    shellQuote(scenario.Category),
-		"{{difficulty}}":  shellQuote(scenario.Difficulty),
-		"{{fixture}}":     shellQuote(scenario.Fixture),
-		"{{workspace}}":   shellQuote(workspace),
-		"{{provider}}":    shellQuote(variant.Provider),
-		"{{model}}":       shellQuote(variant.Model),
-		"{{prompt}}":      shellQuote(scenario.Prompt),
+		"{{manifest}}":      shellQuote(manifest.Name),
+		"{{scenario_id}}":   shellQuote(scenario.ID),
+		"{{category}}":      shellQuote(scenario.Category),
+		"{{difficulty}}":    shellQuote(scenario.Difficulty),
+		"{{fixture}}":       shellQuote(scenario.Fixture),
+		"{{workspace}}":     shellQuote(workspace),
+		"{{provider}}":      shellQuote(variant.Provider),
+		"{{model}}":         shellQuote(variant.Model),
+		"{{fault_profile}}": shellQuote(variant.FaultProfile),
+		"{{base_url}}":      shellQuote(variant.BaseURL),
+		"{{prompt}}":        shellQuote(scenario.Prompt),
 	}
 	out := command
 	for key, value := range replacements {
@@ -655,7 +819,8 @@ func summarizeExecutionJournal(workspace, output string, changed []string) *Jour
 	defer f.Close()
 
 	summary := &JournalSummary{
-		Path: ".gokin/execution_journal.jsonl",
+		Path:            ".gokin/execution_journal.jsonl",
+		seenSideEffects: make(map[string]sideEffectSeen),
 	}
 	// Read line-by-line with a bufio.Reader (not a Scanner): a single
 	// legitimately-large journal line — e.g. a `write` whose content arg is a
@@ -699,6 +864,7 @@ func summarizeExecutionJournal(workspace, output string, changed []string) *Jour
 	sort.Strings(summary.FilesRead)
 	sort.Strings(summary.FilesEdited)
 	sort.Strings(summary.VerificationCommands)
+	sort.Strings(summary.DuplicateSideEffectExecutions)
 
 	// Computed AFTER the scan: files the agent actually READ are legitimate
 	// to cite in the final answer, so they need to be known first.
@@ -709,6 +875,29 @@ func summarizeExecutionJournal(workspace, output string, changed []string) *Jour
 
 func recordJournalEvent(summary *JournalSummary, workspace string, event journalEvent) {
 	switch strings.ToLower(strings.TrimSpace(event.Event)) {
+	case "request_started":
+		summary.requestGeneration++
+	case "request_failed":
+		summary.RequestFailures++
+	case "rate_limit_auto_retry_scheduled", "auto_resume_scheduled":
+		summary.RetriesScheduled++
+	case "side_effect_recovery_persisted":
+		summary.RecoveriesPersisted++
+	case "side_effect_recovery_claimed":
+		summary.RecoveriesClaimed++
+	case "side_effect_recovery_cleared":
+		summary.RecoveriesCleared++
+	case "automatic_retry_blocked_unsafe_side_effect":
+		summary.UnsafeRetryBlocks++
+	case "retry_safety":
+		switch detailString(event.Details, "kind") {
+		case string(tools.RetrySafetyDuplicateReused):
+			summary.DuplicateReuses++
+		case string(tools.RetrySafetyCheckpointReplay):
+			summary.CheckpointReplays++
+		case string(tools.RetrySafetyDivergentBlocked):
+			summary.DivergentBlocks++
+		}
 	case "tool_start":
 		recordJournalToolStart(summary, workspace, event.Details)
 	case "plan_step_verification_passed":
@@ -729,6 +918,7 @@ func recordJournalToolStart(summary *JournalSummary, workspace string, details m
 	appendUniqueString(&summary.Tools, tool)
 
 	args, _ := details["args"].(map[string]any)
+	recordStatefulExecution(summary, tool, args)
 	switch strings.ToLower(tool) {
 	case "read":
 		appendArgPaths(&summary.FilesRead, workspace, args, "file_path", "path")
@@ -745,6 +935,36 @@ func recordJournalToolStart(summary *JournalSummary, workspace string, details m
 		}
 	case "run_tests", "verify_code":
 		appendUniqueString(&summary.VerificationCommands, tool)
+	}
+}
+
+func recordStatefulExecution(summary *JournalSummary, tool string, args map[string]any) {
+	if summary == nil || !tools.IsWriteTool(tool) {
+		return
+	}
+	signature := tools.ToolCheckpointSignature(tool, args)
+	if signature == "" {
+		return
+	}
+	summary.statefulOrdinal++
+	if summary.seenSideEffects == nil {
+		summary.seenSideEffects = make(map[string]sideEffectSeen)
+	}
+	if previous, ok := summary.seenSideEffects[signature]; ok {
+		crossedRequestBoundary := previous.Generation != summary.requestGeneration
+		immediateRepeat := previous.Generation == summary.requestGeneration && previous.Ordinal+1 == summary.statefulOrdinal
+		if crossedRequestBoundary || immediateRepeat {
+			shortSignature := signature
+			if len(shortSignature) > 12 {
+				shortSignature = shortSignature[:12]
+			}
+			appendUniqueString(&summary.DuplicateSideEffectExecutions,
+				strings.ToLower(strings.TrimSpace(tool))+":"+shortSignature)
+		}
+	}
+	summary.seenSideEffects[signature] = sideEffectSeen{
+		Generation: summary.requestGeneration,
+		Ordinal:    summary.statefulOrdinal,
 	}
 }
 

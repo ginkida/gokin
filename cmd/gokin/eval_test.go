@@ -44,6 +44,14 @@ func TestEvalResultLabel_ModelOnly(t *testing.T) {
 	}
 }
 
+func TestEvalResultLabel_WithFaultProfile(t *testing.T) {
+	got := evalResultLabel(evals.Result{ScenarioID: "s1", Provider: "glm", Model: "glm-5.2", FaultProfile: "after-tool-429-once"})
+	want := "s1 [glm/glm-5.2/fault=after-tool-429-once]"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // --- evalGateOptions (additional edge cases) ---
 
 func TestEvalGateOptions_DisabledByDefault(t *testing.T) {

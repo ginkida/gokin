@@ -72,6 +72,21 @@ func TestApplyRuntimeOverrides_UnknownProviderErrors(t *testing.T) {
 	}
 }
 
+func TestApplyRuntimeBaseURLOverride(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if err := applyRuntimeBaseURLOverride(cfg, "http://127.0.0.1:12345/api/"); err != nil {
+		t.Fatalf("applyRuntimeBaseURLOverride: %v", err)
+	}
+	if cfg.Model.CustomBaseURL != "http://127.0.0.1:12345/api" {
+		t.Fatalf("custom base URL = %q", cfg.Model.CustomBaseURL)
+	}
+	for _, raw := range []string{"relative/path", "ftp://example.test", "https://user:secret@example.test", "https://example.test?q=x"} {
+		if err := applyRuntimeBaseURLOverride(cfg, raw); err == nil {
+			t.Errorf("unsafe base URL %q was accepted", raw)
+		}
+	}
+}
+
 func TestEvalGateOptions_ParsesThresholds(t *testing.T) {
 	opts, enabled, err := evalGateOptions("90%", "2%", true, []string{"verification_passed=100%"})
 	if err != nil {
