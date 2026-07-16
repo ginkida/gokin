@@ -23,7 +23,7 @@ func writeToolSkill(t *testing.T, root, name, document string) {
 
 func TestSkillToolListsLoadsAndExpandsArguments(t *testing.T) {
 	root := t.TempDir()
-	writeToolSkill(t, root, "deploy", "---\nname: deploy\ndescription: Deploy a release safely\n---\nTarget=$0\nAll=$ARGUMENTS\nSecond=$1\nIndexed=$ARGUMENTS[0]")
+	writeToolSkill(t, root, "deploy", "---\nname: deploy\ndescription: Deploy a release safely\n---\nTarget=$1\nAll=$ARGUMENTS\nSecond=$2\nIndexed=$ARGUMENTS[0]")
 	catalog := skills.NewCatalog([]skills.Root{{Path: root, Source: "project"}})
 	tool := NewSkillToolWithCatalog(catalog)
 
@@ -65,7 +65,7 @@ description: Work on an issue
 arguments: [issue, branch]
 ---
 First=$ARGUMENTS[0]
-Second=$1
+Second=$2
 Named=$issue/$branch
 Raw=$ARGUMENTS`)
 	tool := NewSkillToolWithCatalog(skills.NewCatalog([]skills.Root{{Path: root, Source: "project"}}))
@@ -89,8 +89,33 @@ Raw=$ARGUMENTS`)
 	}
 }
 
+// The audit fix (v0.100.90): bare $N is ONE-based, matching the tool's own
+// declaration ("$1..$9"), file commands, and Claude-compatible skills.
+// Zero-based resolution silently dropped a single argument passed to a body
+// using $1 AND suppressed the ARGUMENTS fallback (the placeholder counted as
+// "used"), so the argument vanished without a trace.
+func TestSkillPositionalArgumentsAreOneBased(t *testing.T) {
+	got, err := expandSkillArguments(skills.Skill{Name: "deploy", Body: "Deploy to $1"}, "staging", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Deploy to staging" {
+		t.Fatalf("expanded = %q, want $1 to resolve the FIRST argument", got)
+	}
+
+	// $0 is not a positional argument: it stays literal and, since no argument
+	// placeholder resolved, the ARGUMENTS fallback keeps the value visible.
+	got0, err := expandSkillArguments(skills.Skill{Name: "deploy", Body: "Deploy to $0"}, "staging", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got0, "Deploy to $0") || !strings.Contains(got0, "ARGUMENTS: staging") {
+		t.Fatalf("expanded = %q, want literal $0 plus the ARGUMENTS fallback", got0)
+	}
+}
+
 func TestSkillArgumentRendererPreservesBoundaryWhitespaceAndShellEscapes(t *testing.T) {
-	skill := skills.Skill{Name: "render", Body: "$0"}
+	skill := skills.Skill{Name: "render", Body: "$1"}
 	got, err := expandSkillArguments(skill, `" padded "`, nil, "")
 	if err != nil {
 		t.Fatal(err)
@@ -128,9 +153,9 @@ func TestSkillToolEscapesPlaceholdersAndAppendsUnusedArguments(t *testing.T) {
 name: escape
 description: Check escaping
 ---
-One=\$0
-Two=\\$0
-Three=$0`)
+One=\$1
+Two=\\$1
+Three=$1`)
 	writeToolSkill(t, root, "fallback", "---\nname: fallback\ndescription: Preserve otherwise unused arguments\n---\nRun the workflow")
 	tool := NewSkillToolWithCatalog(skills.NewCatalog([]skills.Root{{Path: root, Source: "project"}}))
 
@@ -138,7 +163,7 @@ Three=$0`)
 	if err != nil || !escaped.Success {
 		t.Fatalf("escape result = %#v err=%v", escaped, err)
 	}
-	for _, want := range []string{"One=$0", `Two=\\value`, "Three=value"} {
+	for _, want := range []string{"One=$1", `Two=\\value`, "Three=value"} {
 		if !strings.Contains(escaped.Content, want) {
 			t.Fatalf("escaped skill missing %q:\n%s", want, escaped.Content)
 		}

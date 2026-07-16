@@ -503,10 +503,14 @@ func resolveSkillPlaceholder(
 			end++
 		}
 		index, err := strconv.Atoi(body[start+1 : end])
-		if err != nil || index < 0 {
+		if err != nil || index < 1 {
+			// $0 is not a positional argument. The model-facing contract is
+			// $1..$9, ONE-based — matching file commands ($1 = first arg) and
+			// Claude-compatible skills. Zero-based resolution here silently
+			// dropped a single argument passed to a body using $1 (v0.100.90).
 			return "", start, false, false
 		}
-		return skillArgumentAt(values, index), end, true, true
+		return skillArgumentAt(values, index-1), end, true, true
 	}
 	if start+1 < len(body) && isSkillArgumentNameStart(body[start+1]) {
 		end = start + 2
