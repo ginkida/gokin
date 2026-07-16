@@ -24,6 +24,7 @@ func TestFinalizeReliabilityFailsClosedAndPassesWithEvidence(t *testing.T) {
 		Fault:        &FaultInjectionSummary{Injected: 1, MessageRequestsAfterInjection: 1},
 		Agent:        CommandResult{Success: true, OutputPreview: "Fixed and verified."},
 		Verification: []CommandResult{{Success: true}},
+		Journal:      &JournalSummary{Path: ".gokin/execution_journal.jsonl"},
 		Metrics:      map[string]bool{"task_completed": true},
 	}
 	finalizeReliability(&result)

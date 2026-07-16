@@ -145,6 +145,19 @@ func Run(ctx context.Context, opts RunOptions) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	matrix, err := buildRunMatrix(opts.Providers, opts.Models, opts.FaultProfiles)
+	if err != nil {
+		return nil, err
+	}
+	faultEnabled := false
+	for _, variant := range matrix {
+		faultEnabled = faultEnabled || variant.FaultProfile != ""
+	}
+	if faultEnabled && !opts.DryRun {
+		if _, err := validateFaultUpstream(opts.FaultUpstream); err != nil {
+			return nil, err
+		}
+	}
 
 	workRoot := opts.WorkRoot
 	tempRoot := ""
@@ -174,15 +187,6 @@ func Run(ctx context.Context, opts RunOptions) ([]Result, error) {
 		defer out.Close()
 	}
 
-	matrix, err := buildRunMatrix(opts.Providers, opts.Models, opts.FaultProfiles)
-	if err != nil {
-		return nil, err
-	}
-	if len(opts.FaultProfiles) > 0 && !opts.DryRun {
-		if _, err := validateFaultUpstream(opts.FaultUpstream); err != nil {
-			return nil, err
-		}
-	}
 	results := make([]Result, 0, len(scenarios)*len(matrix))
 	for _, scenario := range scenarios {
 		for _, variant := range matrix {
@@ -363,8 +367,9 @@ func finalizeReliability(result *Result) {
 	}
 	faultInjected := result.Fault != nil && result.Fault.Injected == 1
 	retryObserved := result.Fault != nil && result.Fault.MessageRequestsAfterInjection > 0
-	noDuplicates := result.Journal == nil || len(result.Journal.DuplicateSideEffectExecutions) == 0
-	recovered := agentDeliveredAnswer(*result) && allCommandsSuccessful(result.Verification) && behavioralAssertionsSatisfied(result.Metrics)
+	journalPresent := result.Journal != nil && result.Journal.Path != ""
+	noDuplicates := journalPresent && len(result.Journal.DuplicateSideEffectExecutions) == 0
+	recovered := result.Error == "" && agentDeliveredAnswer(*result) && allCommandsSuccessful(result.Verification) && behavioralAssertionsSatisfied(result.Metrics)
 	reliability := &ReliabilitySummary{
 		Profile: result.FaultProfile, FaultInjected: faultInjected,
 		RetryObserved: retryObserved, NoDuplicateSideEffects: noDuplicates, Recovered: recovered,
@@ -467,16 +472,21 @@ func buildProviderModelMatrix(providers, models []string) []matrixEntry {
 
 func buildRunMatrix(providers, models, faultProfiles []string) ([]matrixEntry, error) {
 	base := buildProviderModelMatrix(providers, models)
-	profiles := compactNonEmptyUnique(faultProfiles)
-	if len(profiles) == 0 {
+	rawProfiles := compactNonEmptyUnique(faultProfiles)
+	if len(rawProfiles) == 0 {
 		return base, nil
 	}
-	for i, profile := range profiles {
+	profiles := make([]string, 0, len(rawProfiles))
+	seen := make(map[string]bool, len(rawProfiles))
+	for _, profile := range rawProfiles {
 		spec, err := parseFaultProfile(profile)
 		if err != nil {
 			return nil, err
 		}
-		profiles[i] = spec.Name
+		if !seen[spec.Name] {
+			seen[spec.Name] = true
+			profiles = append(profiles, spec.Name)
+		}
 	}
 	entries := make([]matrixEntry, 0, len(base)*len(profiles))
 	for _, entry := range base {
