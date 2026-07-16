@@ -129,6 +129,13 @@ func StartFaultProxy(upstreamRaw, profileRaw string) (*FaultProxy, error) {
 			"error": map[string]string{"type": "proxy_error", "message": proxyErr.Error()},
 		})
 	}
+	reverse.ModifyResponse = func(response *http.Response) error {
+		if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
+			_ = response.Body.Close()
+			return fmt.Errorf("fault proxy refuses upstream redirect with status %d", response.StatusCode)
+		}
+		return nil
+	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

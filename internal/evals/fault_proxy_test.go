@@ -85,3 +85,34 @@ func TestValidateFaultUpstreamRejectsSensitiveURLParts(t *testing.T) {
 		}
 	}
 }
+
+func TestFaultProxyRejectsUpstreamRedirect(t *testing.T) {
+	destinationHits := 0
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		destinationHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer destination.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer upstream.Close()
+
+	proxy, err := StartFaultProxy(upstream.URL, "after-tool-429-once")
+	if err != nil {
+		t.Fatalf("StartFaultProxy: %v", err)
+	}
+	defer proxy.Close(t.Context())
+	response, err := http.Post(proxy.URL()+"/v1/messages", "application/json",
+		bytes.NewBufferString(`{"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("POST proxy: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("redirect response status = %d, want 502", response.StatusCode)
+	}
+	if destinationHits != 0 {
+		t.Fatalf("redirect destination received %d requests", destinationHits)
+	}
+}
