@@ -148,12 +148,22 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		cfg.Model.MaxOutputTokens = preset.MaxOutputTokens
 	}
 
-	if err := app.ApplyConfig(cfg); err != nil {
-		return fmt.Sprintf("Failed to save: %v", err), nil
+	providerSwitched := matchedProvider != activeProvider
+	if providerSwitched {
+		// Persist the conversation boundary before publishing a client for a
+		// different provider. If the clear cannot be saved, keeping the old
+		// provider/history pair is safe; applying first would leave the new
+		// client paired with rolled-back, provider-incompatible history.
+		if err := clearConversationChecked(app); err != nil {
+			return "", fmt.Errorf("model/provider was not switched because the old conversation could not be cleared safely: %w", err)
+		}
 	}
 
-	if matchedProvider != activeProvider {
-		app.ClearConversation()
+	if err := app.ApplyConfig(cfg); err != nil {
+		if providerSwitched {
+			return fmt.Sprintf("Failed to switch provider after the session was cleared safely: %v", err), nil
+		}
+		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
 	// Find model info for nice output
@@ -165,7 +175,7 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		}
 	}
 
-	if matchedProvider != activeProvider {
+	if providerSwitched {
 		return fmt.Sprintf("Switched to %s (%s) on %s — session cleared", modelName, matchedModel, matchedProvider), nil
 	}
 	return fmt.Sprintf("Switched to %s (%s)", modelName, matchedModel), nil

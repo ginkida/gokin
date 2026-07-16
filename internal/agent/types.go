@@ -176,6 +176,14 @@ type AgentResult struct {
 	// (churn detection) without re-reading the journal or snapshotting the tree.
 	MutatingToolCalls int `json:"mutating_tool_calls,omitempty"`
 
+	// StatefulToolAttempts counts calls that crossed the execution boundary for
+	// tools which may mutate local, remote, session, or control state. Unlike
+	// MutatingToolCalls this uses tools.IsWriteTool's fail-closed classification:
+	// bash and unknown MCP/plugin tools are stateful too. The count is per Run and
+	// deliberately includes failed attempts because a tool can apply a side effect
+	// before returning an error. Callers use it to refuse blind outer retries.
+	StatefulToolAttempts int `json:"stateful_tool_attempts,omitempty"`
+
 	// TouchedPaths lists the files this agent SUCCESSFULLY mutated (workDir-
 	// relative slash paths, deduped, sorted — the done-gate's touchedPaths
 	// ledger via GetTouchedPaths). Surfaced so /loop can record WHICH files

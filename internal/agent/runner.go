@@ -1151,7 +1151,16 @@ func resolveWorkspaceIsolationMode(agentType string, deps runnerAgentDeps) works
 }
 
 func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error {
-	if agent == nil || agent.isolatedWorkspace == nil || result == nil {
+	if agent == nil || result == nil {
+		return nil
+	}
+	// Agent.Run normally publishes this itself. Keep the runner's synthesized
+	// nil-result and panic paths equally fail-closed: they still know whether the
+	// agent crossed a stateful execution boundary before losing its normal result.
+	if attempts := agent.StatefulToolAttemptCount(); attempts > result.StatefulToolAttempts {
+		result.StatefulToolAttempts = attempts
+	}
+	if agent.isolatedWorkspace == nil {
 		return nil
 	}
 

@@ -65,6 +65,15 @@ func NewSearchCache(capacity int, ttl time.Duration) *SearchCache {
 		keyToFiles:  make(map[string]map[string]bool),
 		cleanupDone: make(chan struct{}),
 	}
+	// The reverse index is auxiliary state. Keep it bounded by the same LRU/TTL
+	// lifecycle as the authoritative entries; otherwise natural eviction and
+	// expiry leave fileToKeys/keyToFiles growing for the lifetime of the CLI.
+	sc.grepCache.SetOnRemove(func(key string, _ GrepResult) {
+		sc.removeKeyFromIndex(key)
+	})
+	sc.globCache.SetOnRemove(func(key string, _ GlobResult) {
+		sc.removeKeyFromIndex(key)
+	})
 	sc.enabled.Store(true)
 	// Long-lived cleanup worker — wrapped in defer-recover so a panic
 	// in c.Cleanup (e.g. from a future LRU change) doesn't silently kill

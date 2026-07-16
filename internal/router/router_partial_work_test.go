@@ -7,6 +7,10 @@ import (
 	"testing"
 
 	"gokin/internal/agent"
+	"gokin/internal/testkit"
+	"gokin/internal/tools"
+
+	"google.golang.org/genai"
 )
 
 // stubRunner is a minimal AgentRunner for exercising the sub-agent failure
@@ -137,6 +141,121 @@ func TestExecuteViaSubAgent_TrueSpawnFailureErrors(t *testing.T) {
 	_, _, err := r.executeViaSubAgent(context.Background(), "x", "general", false)
 	if err == nil {
 		t.Fatal("a never-started spawn (empty agentID) must surface as an error")
+	}
+}
+
+func TestExecuteViaSubAgent_StatefulFailureIsRetryUnsafeAndPreservesPartialMetadata(t *testing.T) {
+	wantCause := errors.New("transient stream timeout")
+	runner := &stubRunner{
+		spawnID:  "stateful-agent",
+		spawnErr: wantCause,
+		resultOK: true,
+		result: &agent.AgentResult{
+			AgentID:              "stateful-agent",
+			Output:               "edited config before the stream failed",
+			Error:                wantCause.Error(),
+			StatefulToolAttempts: 1,
+			TouchedPaths:         []string{"config.yaml"},
+		},
+	}
+	r := &Router{agentRunner: runner}
+
+	history, response, err := r.executeViaSubAgent(
+		context.Background(), "edit config", "general", false)
+	if err == nil {
+		t.Fatal("failed stateful run was converted to success")
+	}
+	if !errors.Is(err, wantCause) {
+		t.Fatalf("typed error lost underlying cause: %v", err)
+	}
+	if !IsAutomaticRetryUnsafe(err) {
+		t.Fatalf("stateful failure lacks retry-unsafe marker: %T %v", err, err)
+	}
+	var unsafeErr *AgentSideEffectError
+	if !errors.As(err, &unsafeErr) {
+		t.Fatalf("error type = %T, want *AgentSideEffectError", err)
+	}
+	if unsafeErr.AgentID != "stateful-agent" || unsafeErr.StatefulToolAttempts != 1 {
+		t.Fatalf("unsafe provenance = %#v", unsafeErr)
+	}
+	if unsafeErr.PartialOutput != runner.result.Output || unsafeErr.Result == nil ||
+		len(unsafeErr.Result.TouchedPaths) != 1 {
+		t.Fatalf("partial result metadata was not preserved: %#v", unsafeErr)
+	}
+	if !strings.Contains(response, runner.result.Output) || len(history) != 1 {
+		t.Fatalf("returned partial evidence = history:%d response:%q", len(history), response)
+	}
+}
+
+func TestExecuteViaSubAgent_EmptyStatefulFailureStillBlocksRetry(t *testing.T) {
+	runner := &stubRunner{
+		spawnID:  "stateful-agent",
+		spawnErr: errors.New("rate limited after tool result"),
+		resultOK: true,
+		result: &agent.AgentResult{
+			AgentID:              "stateful-agent",
+			Error:                "rate limited after tool result",
+			StatefulToolAttempts: 1,
+		},
+	}
+	r := &Router{agentRunner: runner}
+
+	_, _, err := r.executeViaSubAgent(context.Background(), "mutate", "general", false)
+	if err == nil || !IsAutomaticRetryUnsafe(err) {
+		t.Fatalf("empty stateful failure = %T %v, want retry-unsafe error", err, err)
+	}
+}
+
+func TestExecuteViaSubAgent_MissingStartedResultFailsClosed(t *testing.T) {
+	runner := &stubRunner{spawnID: "started-agent", resultOK: false}
+	r := &Router{agentRunner: runner}
+
+	_, _, err := r.executeViaSubAgent(context.Background(), "work", "general", false)
+	var unsafeErr *AgentSideEffectError
+	if !errors.As(err, &unsafeErr) || !unsafeErr.SideEffectsUnknown ||
+		!IsAutomaticRetryUnsafe(err) {
+		t.Fatalf("missing started result = %T %#v, want unknown retry-unsafe provenance", err, unsafeErr)
+	}
+}
+
+func TestExecute_StatefulFailureExtendsPartialHistoryWithoutBecomingSuccess(t *testing.T) {
+	cause := errors.New("timeout after edit")
+	runner := &stubRunner{
+		spawnID: "stateful-agent", spawnErr: cause, resultOK: true,
+		result: &agent.AgentResult{
+			AgentID: "stateful-agent", Error: cause.Error(),
+			Output: "partial implementation", StatefulToolAttempts: 1,
+		},
+	}
+	mock := testkit.NewMockClient()
+	r := NewRouter(&RouterConfig{
+		Enabled: true, DecomposeThreshold: 100, ParallelThreshold: 100,
+	}, nil, runner, mock, tools.NewRegistry(), false, t.TempDir())
+	const prompt = "Refactor authentication across packages. Analyze every caller and update interfaces. Add migration tests and optimize error handling for all providers."
+	if decision := r.Route(prompt); decision.Handler != HandlerSubAgent || decision.Background {
+		t.Fatalf("test route = handler:%v background:%v", decision.Handler, decision.Background)
+	}
+	prior := []*genai.Content{
+		genai.NewContentFromText("earlier question", genai.RoleUser),
+		genai.NewContentFromText("earlier answer", genai.RoleModel),
+	}
+
+	history, response, err := r.Execute(context.Background(), prior, prompt)
+	if err == nil || !IsAutomaticRetryUnsafe(err) {
+		t.Fatalf("stateful failure = %T %v, want retry-unsafe error", err, err)
+	}
+	if len(history) != len(prior)+2 {
+		t.Fatalf("extended history len = %d, want %d", len(history), len(prior)+2)
+	}
+	userTurn := history[len(prior)]
+	modelTurn := history[len(prior)+1]
+	if userTurn.Role != genai.RoleUser || len(userTurn.Parts) != 1 || userTurn.Parts[0].Text != prompt {
+		t.Fatalf("partial history lost original user turn: %#v", userTurn)
+	}
+	if modelTurn.Role != genai.RoleModel || len(modelTurn.Parts) != 1 ||
+		!strings.Contains(modelTurn.Parts[0].Text, "partial implementation") ||
+		!strings.Contains(response, "partial implementation") {
+		t.Fatalf("partial model output was not retained: turn=%#v response=%q", modelTurn, response)
 	}
 }
 

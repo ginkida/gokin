@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gokin/internal/client"
@@ -188,8 +188,9 @@ type Agent struct {
 	sharedMemory *SharedMemory
 
 	// Phase 2: Tools used tracking for progress
-	toolsUsed []string
-	toolsMu   sync.Mutex
+	toolsUsed            []string
+	statefulToolAttempts int
+	toolsMu              sync.Mutex
 
 	// State protection for concurrent access to status, history, startTime, endTime
 	stateMu sync.RWMutex
@@ -1230,6 +1231,25 @@ func (a *Agent) MutatingToolCount() int {
 	return n
 }
 
+// StatefulToolAttemptCount returns how many potentially stateful tools crossed
+// the execution boundary in the current Run. It is intentionally broader than
+// MutatingToolCount: tools.IsWriteTool treats bash and unknown MCP/plugin tools
+// as stateful unless they are explicitly allow-listed as side-effect-free.
+func (a *Agent) StatefulToolAttemptCount() int {
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
+	return a.statefulToolAttempts
+}
+
+func (a *Agent) recordStatefulToolAttempt(toolName string) {
+	if !tools.IsWriteTool(toolName) {
+		return
+	}
+	a.toolsMu.Lock()
+	a.statefulToolAttempts++
+	a.toolsMu.Unlock()
+}
+
 // SetPlanGoal sets the goal for the plan.
 func (a *Agent) SetPlanGoal(goal *PlanGoal) {
 	a.stateMu.Lock()
@@ -1439,6 +1459,12 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		a.originalPrompt = prompt // Preserve for continuation after compaction
 	}
 	a.stateMu.Unlock()
+	// Retry provenance belongs to this invocation, not the reusable Agent ID.
+	// Reset it only after the run lease has entered Agent.Run, before any tool can
+	// cross its execution boundary.
+	a.toolsMu.Lock()
+	a.statefulToolAttempts = 0
+	a.toolsMu.Unlock()
 
 	// Initialize progress
 	a.SetProgress(0, a.maxTurns, "Starting agent execution")
@@ -1500,6 +1526,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		result.CostTracked = a.usageCostTracked
 		a.stateMu.Unlock()
 		result.MutatingToolCalls = a.MutatingToolCount()
+		result.StatefulToolAttempts = a.StatefulToolAttemptCount()
 		result.TouchedPaths = a.GetTouchedPaths()
 
 		// Clear callHistory to prevent memory leak
@@ -1531,6 +1558,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	result.CostTracked = a.usageCostTracked
 	a.stateMu.Unlock()
 	result.MutatingToolCalls = a.MutatingToolCount()
+	result.StatefulToolAttempts = a.StatefulToolAttemptCount()
 	result.TouchedPaths = a.GetTouchedPaths()
 
 	// Clear callHistory to prevent memory leak on long-running sessions
@@ -2794,7 +2822,11 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		if err != nil {
 			logging.Warn("failed to build plan tree, falling back to reactive mode", "error", err)
 		} else {
+			// activePlan is observed by progress/UI callers while executeLoop is
+			// running. Publish it under the same lock used by every reader.
+			a.stateMu.Lock()
 			a.activePlan = tree
+			a.stateMu.Unlock()
 			if onText != nil {
 				a.safeOnText(fmt.Sprintf("\n[Plan tree built: %d nodes, best path: %d steps]\n",
 					tree.TotalNodes, len(tree.BestPath)))
@@ -2936,25 +2968,42 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 					wg.Add(1)
 					go func(action *PlannedAction) {
 						defer wg.Done()
+						var result *AgentResult
 						defer func() {
 							if r := recover(); r != nil {
 								logging.Error("panic in parallel plan execution", "action", action.Type, "panic", r)
+								result = &AgentResult{
+									AgentID:   a.ID,
+									Type:      action.AgentType,
+									Status:    AgentStatusFailed,
+									Error:     fmt.Sprintf("planned action panicked: %v", r),
+									Completed: true,
+								}
 							}
+							if result == nil {
+								result = &AgentResult{
+									AgentID:   a.ID,
+									Type:      action.AgentType,
+									Status:    AgentStatusFailed,
+									Error:     "planned action returned no result",
+									Completed: true,
+								}
+							}
+
+							// Always settle the node, including panic paths. Leaving it in
+							// Executing permanently blocks every dependent action.
+							if err := a.treePlanner.RecordResult(planTree, action.NodeID, result); err != nil {
+								logging.Warn("failed to record plan result", "error", err)
+							}
+							resMu.Lock()
+							results = append(results, parallelResult{action, result})
+							resMu.Unlock()
 						}()
 
 						a.safeOnText(fmt.Sprintf("\n[Executing planned step: %s %s]\n",
 							action.Type, action.AgentType))
 
-						result := a.executePlannedAction(ctx, action)
-
-						// Record result in tree (RecordResult is thread-safe)
-						if err := a.treePlanner.RecordResult(planTree, action.NodeID, result); err != nil {
-							logging.Warn("failed to record plan result", "error", err)
-						}
-
-						resMu.Lock()
-						results = append(results, parallelResult{action, result})
-						resMu.Unlock()
+						result = a.executePlannedAction(ctx, action)
 					}(act)
 				}
 				wg.Wait()
@@ -4854,6 +4903,23 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 // entire sub-agent turn.
 var sequentialToolCleanupGrace = 50 * time.Millisecond
 
+type agentToolExecutionLease struct{ active atomic.Bool }
+type agentToolExecutionLeaseKey struct{}
+
+type rawAgentToolOutcome struct {
+	result  tools.ToolResult
+	elapsed time.Duration
+}
+
+func agentToolExecutionActive(ctx context.Context) bool {
+	lease, _ := ctx.Value(agentToolExecutionLeaseKey{}).(*agentToolExecutionLease)
+	return lease == nil || lease.active.Load()
+}
+
+func canAbandonAgentTool(name string) bool {
+	return tools.IsParallelSafeTool(strings.ToLower(strings.TrimSpace(name)))
+}
+
 func cancelledToolCallResult(call *genai.FunctionCall) toolCallResult {
 	return toolCallResult{
 		Response: &genai.FunctionResponse{
@@ -4868,41 +4934,85 @@ func (a *Agent) executeToolCancellable(ctx context.Context, call *genai.Function
 	if ctx.Err() != nil {
 		return cancelledToolCallResult(call)
 	}
+	if !canAbandonAgentTool(call.Name) {
+		return a.executeToolSafely(ctx, call)
+	}
 
-	done := make(chan toolCallResult, 1)
+	lease := &agentToolExecutionLease{}
+	lease.active.Store(true)
+	toolCtx := context.WithValue(ctx, agentToolExecutionLeaseKey{}, lease)
+
+	done := make(chan rawAgentToolOutcome, 1)
 	go func() {
-		var result toolCallResult
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				logging.Error("panic in sequential tool execution",
-					"tool", call.Name,
-					"panic", recovered,
-					"stack", logging.PanicStack())
-				result = toolCallResult{Response: &genai.FunctionResponse{
-					ID:       call.ID,
-					Name:     call.Name,
-					Response: tools.NewErrorResult(tools.FormatToolPanic(call.Name, recovered)).ToMap(),
-				}}
-			}
-			done <- result
-		}()
-		result = a.executeToolWithReflection(ctx, call)
+		started := time.Now()
+		done <- rawAgentToolOutcome{
+			result:  a.executeToolResultSafely(toolCtx, call),
+			elapsed: time.Since(started),
+		}
 	}()
 
 	select {
-	case result := <-done:
-		return result
+	case outcome := <-done:
+		return a.finishToolResultSafely(toolCtx, call, outcome.result, outcome.elapsed)
 	case <-ctx.Done():
 		timer := time.NewTimer(sequentialToolCleanupGrace)
 		defer timer.Stop()
 		select {
-		case result := <-done:
-			return result
+		case outcome := <-done:
+			return a.finishToolResultSafely(toolCtx, call, outcome.result, outcome.elapsed)
 		case <-timer.C:
+			lease.active.Store(false)
 			logging.Warn("sequential tool did not exit after cancellation", "tool", call.Name)
 			return cancelledToolCallResult(call)
 		}
 	}
+}
+
+func (a *Agent) executeToolResultSafely(ctx context.Context, call *genai.FunctionCall) (result tools.ToolResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Error("panic in sequential tool execution",
+				"tool", call.Name,
+				"panic", recovered,
+				"stack", logging.PanicStack())
+			result = tools.NewErrorResult(tools.FormatToolPanic(call.Name, recovered))
+		}
+	}()
+	return a.executeTool(ctx, call)
+}
+
+func (a *Agent) finishToolResultSafely(ctx context.Context, call *genai.FunctionCall, raw tools.ToolResult, elapsed time.Duration) (result toolCallResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Error("panic while finalizing sequential tool execution",
+				"tool", call.Name,
+				"panic", recovered,
+				"stack", logging.PanicStack())
+			result = toolCallResult{Response: &genai.FunctionResponse{
+				ID:       call.ID,
+				Name:     call.Name,
+				Response: tools.NewErrorResult(tools.FormatToolPanic(call.Name, recovered)).ToMap(),
+			}}
+		}
+	}()
+	return a.finishToolWithReflection(ctx, call, raw, elapsed)
+}
+
+func (a *Agent) executeToolSafely(ctx context.Context, call *genai.FunctionCall) (result toolCallResult) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Error("panic in sequential tool execution",
+				"tool", call.Name,
+				"panic", recovered,
+				"stack", logging.PanicStack())
+			result = toolCallResult{Response: &genai.FunctionResponse{
+				ID:       call.ID,
+				Name:     call.Name,
+				Response: tools.NewErrorResult(tools.FormatToolPanic(call.Name, recovered)).ToMap(),
+			}}
+		}
+	}()
+	return a.executeToolWithReflection(ctx, call)
 }
 
 // parallelToolCleanupGrace is how long executeToolsParallel waits for
@@ -4915,66 +5025,58 @@ var parallelToolCleanupGrace = 5 * time.Second
 func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.FunctionCall,
 	results []toolCallResult, indexMap map[*genai.FunctionCall]int) {
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	// abandoned is set once the cleanup grace below expires with goroutines
-	// still running. From that point every write to `results` is a no-op —
-	// the caller (executeLoop) has, by definition, already moved on to read
-	// `results` unsynchronized once this function returns, so a straggler
-	// goroutine writing into it afterward would be a genuine data race. Every
-	// write site below goes through safeWrite so none of them can slip past
-	// this guard once it's set.
-	abandoned := false
-	semaphore := make(chan struct{}, 5) // Max 5 concurrent executions
-
-	safeWrite := func(idx int, result toolCallResult) {
-		mu.Lock()
-		if !abandoned {
-			results[idx] = result
-		}
-		mu.Unlock()
+	leases := make(map[*genai.FunctionCall]*agentToolExecutionLease, len(calls))
+	for _, call := range calls {
+		lease := &agentToolExecutionLease{}
+		lease.active.Store(true)
+		leases[call] = lease
 	}
 
 	// Pre-populate every slot with a placeholder BEFORE spawning goroutines.
-	// If the cleanup grace below expires while a goroutine is still deep
-	// inside a non-ctx-aware tool call, its slot must never be left at the
-	// zero-valued toolCallResult{} (nil Response) — the caller dereferences
-	// result.Response.Name unconditionally, so a zero-valued slot is a
-	// nil-pointer panic (this is what made the sibling executeDirectly's
-	// `if r.Response != nil` guard necessary in the first place).
+	// Raw workers never write this slice. If cleanup expires, the caller can
+	// return these placeholders while stragglers finish into a buffered channel
+	// that no longer has an observer; this avoids both late state mutation and a
+	// race with the caller reading results.
 	for _, call := range calls {
 		results[indexMap[call]] = cancelledToolCallResult(call)
 	}
 
+	type indexedRawOutcome struct {
+		idx      int
+		call     *genai.FunctionCall
+		outcome  rawAgentToolOutcome
+		executed bool
+	}
+
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 5) // Max 5 concurrent executions
+	outcomes := make(chan indexedRawOutcome, len(calls))
+	spawned := 0
+
 	for _, call := range calls {
 		// Check context before spawning goroutine to avoid unnecessary work
 		if ctx.Err() != nil {
-			safeWrite(indexMap[call], cancelledToolCallResult(call))
 			continue
 		}
 
+		idx := indexMap[call]
+		spawned++
 		wg.Add(1)
-		go func(fc *genai.FunctionCall) {
+		go func(i int, fc *genai.FunctionCall) {
+			item := indexedRawOutcome{idx: i, call: fc}
 			defer wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
-					stack := make([]byte, 4096)
-					length := runtime.Stack(stack, false)
 					logging.Error("panic in parallel tool execution",
-						"tool", fc.Name, "panic", r, "stack", string(stack[:length]))
-					safeWrite(indexMap[fc], toolCallResult{
-						Response: &genai.FunctionResponse{
-							ID:       fc.ID,
-							Name:     fc.Name,
-							Response: tools.NewErrorResult(tools.FormatToolPanic(fc.Name, r)).ToMap(),
-						},
-					})
+						"tool", fc.Name, "panic", r, "stack", logging.PanicStack())
+					item.executed = true
+					item.outcome.result = tools.NewErrorResult(tools.FormatToolPanic(fc.Name, r))
 				}
+				outcomes <- item
 			}()
 
 			// Check context again before trying to acquire semaphore
 			if ctx.Err() != nil {
-				safeWrite(indexMap[fc], cancelledToolCallResult(fc))
 				return
 			}
 
@@ -4984,7 +5086,6 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 			case semaphore <- struct{}{}:
 				acquired = true
 			case <-ctx.Done():
-				safeWrite(indexMap[fc], cancelledToolCallResult(fc))
 				return
 			}
 
@@ -4992,10 +5093,14 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 				defer func() { <-semaphore }()
 			}
 
-			result := a.executeToolWithReflection(ctx, fc)
-
-			safeWrite(indexMap[fc], result)
-		}(call)
+			toolCtx := context.WithValue(ctx, agentToolExecutionLeaseKey{}, leases[fc])
+			started := time.Now()
+			item.executed = true
+			item.outcome = rawAgentToolOutcome{
+				result:  a.executeToolResultSafely(toolCtx, fc),
+				elapsed: time.Since(started),
+			}
+		}(idx, call)
 	}
 
 	// Wait with timeout to prevent infinite blocking
@@ -5005,9 +5110,10 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 		close(done)
 	}()
 
+	completed := false
 	select {
 	case <-done:
-		// All goroutines completed normally
+		completed = true
 	case <-ctx.Done():
 		// Context cancelled, but goroutines should exit on their own
 		// Wait a bit more for cleanup
@@ -5015,17 +5121,36 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 		select {
 		case <-done:
 			cleanupTimer.Stop()
+			completed = true
 		case <-cleanupTimer.C:
 			logging.Warn("executeToolsParallel: some goroutines did not exit in time")
-			// Freeze `results` from this point — every pre-populated slot
-			// already holds a valid cancelledResult, and any straggler
-			// goroutine's eventual write is now a safeWrite no-op instead of
-			// an unsynchronized write into a slice the caller has moved on
-			// from.
-			mu.Lock()
-			abandoned = true
-			mu.Unlock()
+			for _, lease := range leases {
+				lease.active.Store(false)
+			}
 		}
+	}
+
+	if !completed {
+		return
+	}
+
+	// Every raw worker has exited, so finalization is owned exclusively by this
+	// caller goroutine. Reflection, learning, done-gate bookkeeping, fix-cache,
+	// and delegation can no longer outlive executeToolsParallel and pollute a
+	// subsequent agent run.
+	completedOutcomes := make(map[int]indexedRawOutcome, spawned)
+	for range spawned {
+		item := <-outcomes
+		completedOutcomes[item.idx] = item
+	}
+	for _, call := range calls {
+		idx := indexMap[call]
+		item, ok := completedOutcomes[idx]
+		if !ok || !item.executed {
+			continue
+		}
+		toolCtx := context.WithValue(ctx, agentToolExecutionLeaseKey{}, leases[item.call])
+		results[idx] = a.finishToolResultSafely(toolCtx, item.call, item.outcome.result, item.outcome.elapsed)
 	}
 }
 
@@ -5040,10 +5165,21 @@ type toolCallResult struct {
 func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.FunctionCall) toolCallResult {
 	toolStart := time.Now()
 	result := a.executeTool(ctx, call)
+	return a.finishToolWithReflection(ctx, call, result, time.Since(toolStart))
+}
+
+func (a *Agent) finishToolWithReflection(ctx context.Context, call *genai.FunctionCall, result tools.ToolResult, elapsed time.Duration) toolCallResult {
+	if !agentToolExecutionActive(ctx) {
+		// The caller already returned a cancellation placeholder. Do not let a
+		// late completion alter done-gate state, learning, reflection, fix cache,
+		// or delegation state for a subsequent run.
+		return toolCallResult{Response: &genai.FunctionResponse{
+			ID: call.ID, Name: call.Name, Response: result.ToMap(),
+		}}
+	}
 	if result.PolicyBlock != nil {
 		a.recordPolicyBlock(result.PolicyBlock)
 	}
-	elapsed := time.Since(toolStart)
 	a.recordToolExecution(call.Name, call.Args, result)
 
 	// Feed durable tool-outcome signals into ProjectLearning. Runs on both
@@ -5059,7 +5195,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	var reflection *Reflection
 
 	// Apply self-reflection on errors to provide recovery suggestions
-	if !result.Success && result.PolicyBlock == nil && a.reflector != nil {
+	if ctx.Err() == nil && !result.Success && result.PolicyBlock == nil && a.reflector != nil {
 		// --- Fix Cache: fast path ---
 		// Try session-local cache before full Reflect pipeline
 		category := a.reflector.QuickCategorize(result.Content)
@@ -5164,7 +5300,7 @@ func (a *Agent) executeToolWithReflection(ctx context.Context, call *genai.Funct
 	}
 
 	// Check for autonomous delegation opportunity
-	if !result.Success && result.PolicyBlock == nil && a.delegation != nil && a.delegation.HasMessenger() {
+	if ctx.Err() == nil && !result.Success && result.PolicyBlock == nil && a.delegation != nil && a.delegation.HasMessenger() {
 		delCtx := &DelegationContext{
 			AgentType:       a.Type,
 			CurrentTurn:     a.GetTurnCount(),
@@ -5274,6 +5410,12 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
 		}
 	}
+	// Permission prompts and pre-hooks may outlive cancellation. Re-check the
+	// execution lease immediately before crossing into the tool so an abandoned
+	// call cannot start late.
+	if ctx.Err() != nil || !agentToolExecutionActive(ctx) {
+		return tools.NewErrorResult("cancelled")
+	}
 
 	// Snapshot callback under stateMu to avoid races with SetOnToolActivity
 	a.stateMu.RLock()
@@ -5281,12 +5423,18 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	a.stateMu.RUnlock()
 
 	// Report tool start to UI
+	if ctx.Err() != nil || !agentToolExecutionActive(ctx) {
+		return tools.NewErrorResult("cancelled")
+	}
 	invokeAgentToolActivity(onToolActivity, a.ID, call.Name, call.Args, "start", false, "")
 
 	// Guarantee "end" event is sent regardless of outcome (panic, error,
 	// success), carrying the tool's outcome so the UI can show meaningful
 	// sub-agent output (✓/✗ + a short result line) instead of a bare name.
 	defer func() {
+		if !agentToolExecutionActive(ctx) {
+			return
+		}
 		success, summary := subAgentToolOutcome(out)
 		invokeAgentToolActivity(onToolActivity, a.ID, call.Name, call.Args, "end", success, summary)
 	}()
@@ -5294,6 +5442,12 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	// No tool-level retry: API retries are handled by the client layer
 	// (rate-limit retry, message processor retry, failover). Adding retries
 	// here compounds with those layers and wastes tokens.
+	//
+	// Record retry provenance immediately before crossing the execution
+	// boundary. Do not wait for a successful result: bash/remote/MCP tools may
+	// commit a side effect and then fail, and cancellation can suppress later
+	// reflection/bookkeeping. IsWriteTool fails closed for unknown tools.
+	a.recordStatefulToolAttempt(call.Name)
 	result, err := tools.ExecuteWithPermissionScope(ctx, tool, call.Args, authorizedPermissionArgs)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "Permission scope changed before execution:") {
@@ -5301,7 +5455,7 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 		} else {
 			out = tools.NewErrorResult(err.Error())
 		}
-		if hookManager != nil {
+		if hookManager != nil && agentToolExecutionActive(ctx) {
 			hookManager.RunOnErrorInDir(ctx, workDir, call.Name, call.Args, out.Error)
 		}
 		return
@@ -5311,7 +5465,7 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 		strings.HasPrefix(out.Error, "Permission scope changed before execution:") {
 		out = tools.WithPolicyBlock(out, tools.PolicyBlockPermission, out.Error)
 	}
-	if hookManager != nil {
+	if hookManager != nil && agentToolExecutionActive(ctx) {
 		if out.Success {
 			hookManager.RunPostToolInDir(ctx, workDir, call.Name, call.Args, out.Content)
 		} else {

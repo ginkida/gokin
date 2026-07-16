@@ -369,7 +369,10 @@ func (t *WebFetchTool) ExecuteStreaming(ctx context.Context, args map[string]any
 		}
 
 		if !toolResult.Success {
-			chunks <- "Error: " + toolResult.Error
+			// Preserve the non-streaming ToolResult failure contract. Encoding an
+			// error as an ordinary text chunk makes the executor report success,
+			// cache the failure, and skip breaker/error-hook accounting.
+			errChan <- fmt.Errorf("%s", toolResult.Error)
 			return
 		}
 
@@ -382,6 +385,10 @@ func (t *WebFetchTool) ExecuteStreaming(ctx context.Context, args map[string]any
 			end := min(i+chunkRunes, len(runes))
 			select {
 			case <-ctx.Done():
+				select {
+				case errChan <- ctx.Err():
+				default:
+				}
 				return
 			case chunks <- string(runes[i:end]):
 			}

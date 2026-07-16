@@ -360,6 +360,12 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	} else {
 		a.saveSessionHistory()
 	}
+	// Signal shutdown exits via os.Exit, so Run/main defers do not execute.
+	// Release only after the final save, preserving the writer-exclusivity
+	// invariant through the last persistence operation.
+	if err := a.ReleaseSessionWriterLease(); err != nil {
+		logging.Warn("failed to release session writer lease during shutdown", "error", err)
+	}
 
 	// 13. Close client
 	if a.client != nil {

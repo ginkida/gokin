@@ -13,7 +13,7 @@ import (
 // setupGitRepo creates a temporary git repo with a committed base file and returns its path.
 func setupGitRepo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	cmds := [][]string{
 		{"git", "init"},
 		{"git", "config", "user.name", "test"},

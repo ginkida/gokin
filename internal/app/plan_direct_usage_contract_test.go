@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +82,46 @@ func TestExecuteDirectStepUsageCommittedOnFailedStep(t *testing.T) {
 		t.Fatalf("step status = %s, want failed (error=%q)", persisted.Status, persisted.Error)
 	}
 	assertDirectPlanUsage(t, a, persisted, 19, 6, 5)
+}
+
+func TestExecuteDirectStepDoesNotRetryAfterToolEffects(t *testing.T) {
+	mock := testkit.NewMockClient().
+		EnqueueToolCall("write", map[string]any{"file_path": "result.txt"}).
+		EnqueueError(errors.New("request timeout after tool result")).
+		EnqueueText("this response must never be consumed by an automatic retry")
+
+	a, approvedPlan, step := newDirectPlanUsageHarness(t, mock, false)
+	mutation := &directPlanMutationTool{}
+	if err := a.registry.Register(mutation); err != nil {
+		t.Fatalf("register mutation tool: %v", err)
+	}
+	// Production plan execution enables both of these before dispatching a
+	// step. The hand-built harness must do the same so OnToolStart records the
+	// attempt in the run ledger.
+	a.planManager.SetExecutionMode(true)
+	a.executor.SetHandler(a.buildExecutionHandler(nil))
+
+	a.executeDirectStep(
+		context.Background(), step, approvedPlan, 1, nil, 2,
+		[]time.Duration{0},
+	)
+
+	if got := len(mock.Calls()); got != 2 {
+		t.Fatalf("model calls = %d, want 2 (tool request + failed follow-up, no whole-step retry)", got)
+	}
+	if mutation.runs != 1 {
+		t.Fatalf("mutation executions = %d, want exactly 1", mutation.runs)
+	}
+	persisted := approvedPlan.GetStep(step.ID)
+	if persisted.Status != plan.StatusPaused {
+		t.Fatalf("step status = %s, want safety pause (error=%q)", persisted.Status, persisted.Error)
+	}
+	if !strings.Contains(persisted.Error, "automatic retry blocked") {
+		t.Fatalf("pause reason = %q, want retry-safety explanation", persisted.Error)
+	}
+	if !approvedPlan.HasPartialEffects(step.ID) {
+		t.Fatal("run ledger lost the partial tool effects that blocked retry")
+	}
 }
 
 func newDirectPlanUsageHarness(
@@ -185,4 +226,19 @@ func (directPlanVerifierTool) Declaration() *genai.FunctionDeclaration {
 func (directPlanVerifierTool) Validate(map[string]any) error { return nil }
 func (directPlanVerifierTool) Execute(context.Context, map[string]any) (tools.ToolResult, error) {
 	return tools.NewSuccessResult("verification passed"), nil
+}
+
+type directPlanMutationTool struct {
+	runs int
+}
+
+func (*directPlanMutationTool) Name() string        { return "write" }
+func (*directPlanMutationTool) Description() string { return "test-only mutation" }
+func (*directPlanMutationTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: "write", Description: "test-only mutation"}
+}
+func (*directPlanMutationTool) Validate(map[string]any) error { return nil }
+func (t *directPlanMutationTool) Execute(context.Context, map[string]any) (tools.ToolResult, error) {
+	t.runs++
+	return tools.NewSuccessResult("mutation applied"), nil
 }

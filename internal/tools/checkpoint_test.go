@@ -64,6 +64,41 @@ func TestCheckpointJournalLookupBySignature(t *testing.T) {
 	}
 }
 
+func TestCheckpointJournalReplayConsumesDuplicateSignaturesInOrder(t *testing.T) {
+	j := NewCheckpointJournal()
+	args := map[string]any{"command": "go test ./..."}
+	j.Record(&genai.FunctionCall{ID: "original-1", Name: "bash", Args: args},
+		NewSuccessResult("result-before-edit"))
+	j.Record(&genai.FunctionCall{ID: "original-2", Name: "bash", Args: args},
+		NewSuccessResult("result-after-edit"))
+	j.BeginReplay()
+
+	for i, want := range []string{"result-before-edit", "result-after-edit"} {
+		got, reason, ok := j.ConsumeReplay(&genai.FunctionCall{
+			ID: "regenerated-" + string(rune('1'+i)), Name: "bash", Args: args,
+		})
+		if !ok || reason != "checkpoint_signature" {
+			t.Fatalf("replay %d = %+v reason=%q ok=%v", i, got, reason, ok)
+		}
+		if got.Content != want {
+			t.Fatalf("replay %d content = %q, want %q", i, got.Content, want)
+		}
+	}
+
+	if got, reason, ok := j.ConsumeReplay(&genai.FunctionCall{
+		ID: "regenerated-3", Name: "bash", Args: args,
+	}); ok {
+		t.Fatalf("duplicate generation replayed a third time: %+v reason=%q", got, reason)
+	}
+	// Consuming by signature must retire the call-ID alias too; otherwise a
+	// provider switching back to its original IDs could reuse an outcome.
+	if got, reason, ok := j.ConsumeReplay(&genai.FunctionCall{
+		ID: "original-1", Name: "bash", Args: args,
+	}); ok {
+		t.Fatalf("consumed checkpoint was reused by call ID: %+v reason=%q", got, reason)
+	}
+}
+
 func TestCheckpointJournalLookupNotFound(t *testing.T) {
 	j := NewCheckpointJournal()
 

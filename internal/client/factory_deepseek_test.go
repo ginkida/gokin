@@ -74,10 +74,12 @@ func TestNewClient_DetectsDeepSeekProviderFromModelName(t *testing.T) {
 		_ = c.Close()
 	})
 
-	if _, ok := pool.Get("deepseek", "deepseek-v4-pro"); !ok {
+	deepSeekFingerprint := clientConfigFingerprint(cfg, "deepseek", "deepseek-v4-pro")
+	if _, ok := pool.Get("deepseek", "deepseek-v4-pro", deepSeekFingerprint); !ok {
 		t.Fatal("NewClient should cache inferred DeepSeek client under provider key deepseek")
 	}
-	if _, ok := pool.Get("glm", "deepseek-v4-pro"); ok {
+	glmFingerprint := clientConfigFingerprint(cfg, "glm", "deepseek-v4-pro")
+	if _, ok := pool.Get("glm", "deepseek-v4-pro", glmFingerprint); ok {
 		t.Fatal("NewClient should not cache DeepSeek model under stale active provider glm")
 	}
 }

@@ -302,7 +302,7 @@ func DefaultRegistry(workDir string) *Registry {
 	r.MustRegister(NewGrepTool(workDir))
 	r.MustRegister(NewTodoTool())
 	r.MustRegister(NewListDirTool(workDir))
-	r.MustRegister(NewDiffTool())
+	r.MustRegister(NewDiffTool(workDir))
 	r.MustRegister(NewTreeTool(workDir))
 	r.MustRegister(NewEnvTool())
 	r.MustRegister(NewAskUserTool())
@@ -672,7 +672,7 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	r.RegisterFactory("mkdir", func() Tool { return NewMkdirTool(workDir) }, declarations["mkdir"])
 
 	// Utility tools
-	r.RegisterFactory("diff", func() Tool { return NewDiffTool() }, declarations["diff"])
+	r.RegisterFactory("diff", func() Tool { return NewDiffTool(workDir) }, declarations["diff"])
 	r.RegisterFactory("env", func() Tool { return NewEnvTool() }, declarations["env"])
 	r.RegisterFactory("todo", func() Tool { return NewTodoTool() }, declarations["todo"])
 	// Skill discovery is lightweight and its declaration includes the compact

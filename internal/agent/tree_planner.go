@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -229,11 +230,15 @@ func (tp *TreePlanner) BuildTree(ctx context.Context, prompt string, goal *PlanG
 		}
 	}
 
-	// Add initial actions as children of root
-	for _, action := range actions {
-		node := tree.AddNode(tree.Root.ID, action)
+	// The root is structural: BuildTree has already decomposed it. Leaving the
+	// synthetic ActionDecompose root pending makes executeLoop decompose the
+	// same goal a second time. Mark it complete and serialize the generated
+	// steps by dependency so explore/plan/implement/verify cannot race.
+	tree.Root.Status = PlanNodeSucceeded
+	tree.Root.UpdatedAt = time.Now()
+	for _, node := range addOrderedPlanActions(tree, tree.Root.ID, actions) {
 		if node != nil {
-			node.SuccessProb = tp.EstimateSuccessProbability(action)
+			node.SuccessProb = tp.EstimateSuccessProbability(node.Action)
 			node.Score = tp.ScoreNode(node)
 		}
 	}
@@ -264,6 +269,29 @@ func (tp *TreePlanner) BuildTree(ctx context.Context, prompt string, goal *PlanG
 	return tree, nil
 }
 
+func addOrderedPlanActions(tree *PlanTree, parentID string, actions []*PlannedAction) []*PlanNode {
+	if tree == nil {
+		return nil
+	}
+	nodes := make([]*PlanNode, 0, len(actions))
+	previousID := ""
+	for _, action := range actions {
+		if action == nil {
+			continue
+		}
+		if previousID != "" && !slices.Contains(action.Prerequisites, previousID) {
+			action.Prerequisites = append(action.Prerequisites, previousID)
+		}
+		node := tree.AddNode(parentID, action)
+		if node == nil {
+			continue
+		}
+		nodes = append(nodes, node)
+		previousID = node.ID
+	}
+	return nodes
+}
+
 // generateActions generates candidate actions for a prompt.
 // Uses pattern matching for common task types, with LLM fallback for complex tasks.
 // Leverages StrategyOptimizer to prefer historically successful strategies.
@@ -274,8 +302,10 @@ func (tp *TreePlanner) generateActions(ctx context.Context, prompt string, goal 
 	if tp.client != nil {
 		llmActions, err := tp.generateActionsWithLLM(ctx, prompt, goal)
 		if err == nil && len(llmActions) > 0 {
-			// Reorder actions based on historical success rates
-			llmActions = tp.reorderByHistoricalSuccess(llmActions)
+			// Preserve the model's semantic sequence. Historical success is useful
+			// for choosing between equivalent alternatives, but sorting an
+			// implement/test/verify chain by global success rate can run verify
+			// before the implementation it depends on.
 			return llmActions, nil
 		}
 		// Fall back to pattern matching on error
@@ -950,9 +980,7 @@ func (tp *TreePlanner) ExpandMilestone(ctx context.Context, tree *PlanTree, node
 
 	tree.mu.Lock()
 	// Add actions as children of the milestone node
-	for _, action := range actions {
-		tree.AddNode(node.ID, action)
-	}
+	addOrderedPlanActions(tree, node.ID, actions)
 
 	// Recalculate best path to include new children
 	tree.BestPath = tp.SelectBestPath(tree)
@@ -963,6 +991,12 @@ func (tp *TreePlanner) ExpandMilestone(ctx context.Context, tree *PlanTree, node
 
 // Replan adjusts the plan after a failure.
 func (tp *TreePlanner) Replan(ctx context.Context, tree *PlanTree, rctx *ReplanContext) error {
+	if tree == nil || tree.Root == nil {
+		return fmt.Errorf("cannot replan an empty tree")
+	}
+	if rctx == nil {
+		return fmt.Errorf("cannot replan without context")
+	}
 	if rctx.AttemptNumber >= tp.config.MaxReplans {
 		return fmt.Errorf("max replans exceeded (%d)", tp.config.MaxReplans)
 	}
@@ -972,53 +1006,92 @@ func (tp *TreePlanner) Replan(ctx context.Context, tree *PlanTree, rctx *ReplanC
 		return fmt.Errorf("cannot replan: FailedNode is nil")
 	}
 
-	tree.mu.Lock()
-	tree.ReplanCount++
-	tree.UpdatedAt = time.Now()
-
-	logging.Info("replanning",
-		"tree_id", tree.ID,
-		"attempt", rctx.AttemptNumber+1,
-		"failed_node", rctx.FailedNode.ID)
-
-	// 1. Prune the failed subtree
-	tree.PruneSubtree(rctx.FailedNode.ID)
-
-	// 2. Update scores based on reflection
-	if rctx.Reflection != nil {
-		tp.updateScoresAfterFailure(tree, rctx.FailedNode, rctx.Reflection)
+	// Generate a replacement FROM the failed action, never from its successful
+	// structural parent. The old parent-expansion path dereferenced root.Result
+	// and produced follow-up (not recovery) actions.
+	var recoveryActions []*PlannedAction
+	if tp.config.UseLLMExpansion && tp.client != nil {
+		recoveryActions = tp.generateRecoveryActionsWithLLM(ctx, rctx.FailedNode, tree.Goal)
+	} else {
+		recoveryActions = tp.generateRecoveryActions(ctx, rctx.FailedNode)
+	}
+	if len(recoveryActions) == 0 {
+		return fmt.Errorf("cannot replan failed node %s: no recovery action generated", rctx.FailedNode.ID)
 	}
 
-	// 3. Expand from parent of failed node
+	// Recovery suggestions are alternatives, not a batch of independent edits.
+	// Select one deterministically so two agents cannot "recover" the same failed
+	// mutation in parallel.
+	bestAction := recoveryActions[0]
+	bestScore := tp.EstimateSuccessProbability(bestAction)
+	for _, candidate := range recoveryActions[1:] {
+		if candidate == nil {
+			continue
+		}
+		if score := tp.EstimateSuccessProbability(candidate); score > bestScore {
+			bestAction, bestScore = candidate, score
+		}
+	}
+	if bestAction == nil {
+		return fmt.Errorf("cannot replan failed node %s: recovery action was nil", rctx.FailedNode.ID)
+	}
+
+	tree.mu.Lock()
 	parent, ok := tree.GetParent(rctx.FailedNode.ID)
 	if !ok {
 		tree.mu.Unlock()
 		return fmt.Errorf("cannot replan from root failure")
 	}
-	tree.mu.Unlock()
-
-	// ExpandNode may call LLM — do it outside the lock
-	newChildren, err := tp.ExpandNode(ctx, tree, parent, tree.Goal)
-	if err != nil {
-		logging.Warn("failed to expand alternatives", "error", err)
+	if rctx.Reflection != nil {
+		tp.updateScoresAfterFailure(tree, rctx.FailedNode, rctx.Reflection)
 	}
 
-	tree.mu.Lock()
-	// 4. Boost alternatives suggested by reflection
-	if rctx.Reflection != nil && rctx.Reflection.Alternative != "" {
-		for _, child := range newChildren {
-			if child.Action != nil && child.Action.ToolName == rctx.Reflection.Alternative {
-				child.Score *= 1.2
+	failedID := rctx.FailedNode.ID
+	bestAction.Prerequisites = append([]string(nil), rctx.FailedNode.Action.Prerequisites...)
+	tree.PruneSubtree(failedID)
+	replacement := tree.AddNode(parent.ID, bestAction)
+	if replacement == nil {
+		tree.mu.Unlock()
+		return fmt.Errorf("cannot attach recovery action for failed node %s", failedID)
+	}
+	replacement.SuccessProb = bestScore
+	replacement.Score = tp.ScoreNode(replacement)
+
+	// Every later ordered step that waited for the failed node must now wait for
+	// its replacement. Otherwise the original chain remains blocked forever.
+	var rewire func(*PlanNode)
+	rewire = func(node *PlanNode) {
+		if node != nil && node.Action != nil && node != replacement {
+			for i, prerequisite := range node.Action.Prerequisites {
+				if prerequisite == failedID {
+					node.Action.Prerequisites[i] = replacement.ID
+				}
 			}
-			if child.Action != nil && string(child.Action.AgentType) == rctx.Reflection.Alternative {
-				child.Score *= 1.2
+		}
+		if node != nil {
+			for _, child := range node.Children {
+				rewire(child)
 			}
 		}
 	}
+	rewire(tree.Root)
 
-	// 5. Recalculate best path
+	if rctx.Reflection != nil && rctx.Reflection.Alternative != "" && replacement.Action != nil &&
+		(replacement.Action.ToolName == rctx.Reflection.Alternative ||
+			string(replacement.Action.AgentType) == rctx.Reflection.Alternative) {
+		replacement.Score *= 1.2
+	}
+	tree.ReplanCount++
+	tree.ExpandedNodes++
+	tree.UpdatedAt = time.Now()
 	tree.BestPath = tp.SelectBestPath(tree)
 	tree.mu.Unlock()
+
+	logging.Info("replanned failed action",
+		"tree_id", tree.ID,
+		"attempt", rctx.AttemptNumber+1,
+		"failed_node", failedID,
+		"replacement_node", replacement.ID)
 
 	tp.invokeReplan(tree, rctx)
 
@@ -1093,47 +1166,6 @@ func (tp *TreePlanner) GetStats() map[string]any {
 		"total_replans": totalReplans,
 		"algorithm":     tp.config.Algorithm,
 	}
-}
-
-// reorderByHistoricalSuccess reorders actions based on historical success rates from StrategyOptimizer.
-func (tp *TreePlanner) reorderByHistoricalSuccess(actions []*PlannedAction) []*PlannedAction {
-	if tp.strategyOpt == nil || len(actions) == 0 {
-		return actions
-	}
-
-	// Create a scored list
-	type scoredAction struct {
-		action *PlannedAction
-		score  float64
-	}
-
-	scored := make([]scoredAction, len(actions))
-	for i, action := range actions {
-		key := buildStrategyKey(action)
-		rate := tp.strategyOpt.GetSuccessRate(key)
-		// Default score of 0.5 for unknown strategies
-		if rate <= 0 {
-			rate = 0.5
-		}
-		scored[i] = scoredAction{action: action, score: rate}
-	}
-
-	// Simple bubble sort by score (descending)
-	for i := 0; i < len(scored)-1; i++ {
-		for j := i + 1; j < len(scored); j++ {
-			if scored[j].score > scored[i].score {
-				scored[i], scored[j] = scored[j], scored[i]
-			}
-		}
-	}
-
-	// Extract reordered actions
-	result := make([]*PlannedAction, len(actions))
-	for i, sa := range scored {
-		result[i] = sa.action
-	}
-
-	return result
 }
 
 // classifyTaskType determines the task type from a prompt for strategy lookup.

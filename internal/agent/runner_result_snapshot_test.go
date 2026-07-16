@@ -12,10 +12,11 @@ import (
 func TestRunnerResultSnapshot_DoesNotAliasMutableFields(t *testing.T) {
 	runner := NewRunner(context.Background(), nil, tools.NewRegistry(), t.TempDir())
 	runner.results["agent"] = &AgentResult{
-		AgentID:      "agent",
-		Status:       AgentStatusCompleted,
-		Completed:    true,
-		TouchedPaths: []string{"original.go"},
+		AgentID:              "agent",
+		Status:               AgentStatusCompleted,
+		Completed:            true,
+		StatefulToolAttempts: 2,
+		TouchedPaths:         []string{"original.go"},
 		Metadata: map[string]any{
 			"nested": map[string]any{"value": "original"},
 			"files":  []string{"original.go"},
@@ -28,13 +29,14 @@ func TestRunnerResultSnapshot_DoesNotAliasMutableFields(t *testing.T) {
 		t.Fatal("GetResult did not find result")
 	}
 	snapshot.Status = AgentStatusFailed
+	snapshot.StatefulToolAttempts = 0
 	snapshot.TouchedPaths[0] = "mutated.go"
 	snapshot.Metadata["nested"].(map[string]any)["value"] = "mutated"
 	snapshot.Metadata["files"].([]string)[0] = "mutated.go"
 	snapshot.Metadata["items"].([]any)[0].(map[string]any)["value"] = "mutated"
 
 	fresh, _ := runner.GetResult("agent")
-	if fresh.Status != AgentStatusCompleted || fresh.TouchedPaths[0] != "original.go" {
+	if fresh.Status != AgentStatusCompleted || fresh.StatefulToolAttempts != 2 || fresh.TouchedPaths[0] != "original.go" {
 		t.Fatalf("snapshot mutation reached stored scalars/slice: %+v", fresh)
 	}
 	if got := fresh.Metadata["nested"].(map[string]any)["value"]; got != "original" {

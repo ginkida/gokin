@@ -36,24 +36,25 @@ type RunOptions struct {
 
 // Result is one scenario outcome, suitable for JSONL output.
 type Result struct {
-	ScenarioID     string            `json:"scenario_id"`
-	Category       string            `json:"category"`
-	Difficulty     string            `json:"difficulty"`
-	Provider       string            `json:"provider,omitempty"`
-	Model          string            `json:"model,omitempty"`
-	Status         string            `json:"status"`
-	Workspace      string            `json:"workspace,omitempty"`
-	StartedAt      time.Time         `json:"started_at"`
-	FinishedAt     time.Time         `json:"finished_at"`
-	DurationMillis int64             `json:"duration_ms"`
-	Agent          CommandResult     `json:"agent"`
-	Verification   []CommandResult   `json:"verification"`
-	ChangedFiles   []string          `json:"changed_files,omitempty"`
-	Journal        *JournalSummary   `json:"journal,omitempty"`
-	Metrics        map[string]bool   `json:"metrics"`
-	Score          ScoreSummary      `json:"score"`
-	Error          string            `json:"error,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+	ScenarioID       string            `json:"scenario_id"`
+	ScenarioSpecHash string            `json:"scenario_spec_hash,omitempty"`
+	Category         string            `json:"category"`
+	Difficulty       string            `json:"difficulty"`
+	Provider         string            `json:"provider,omitempty"`
+	Model            string            `json:"model,omitempty"`
+	Status           string            `json:"status"`
+	Workspace        string            `json:"workspace,omitempty"`
+	StartedAt        time.Time         `json:"started_at"`
+	FinishedAt       time.Time         `json:"finished_at"`
+	DurationMillis   int64             `json:"duration_ms"`
+	Agent            CommandResult     `json:"agent"`
+	Verification     []CommandResult   `json:"verification"`
+	ChangedFiles     []string          `json:"changed_files,omitempty"`
+	Journal          *JournalSummary   `json:"journal,omitempty"`
+	Metrics          map[string]bool   `json:"metrics"`
+	Score            ScoreSummary      `json:"score"`
+	Error            string            `json:"error,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 
 // ScoreSummary is a compact aggregate over the boolean eval metrics.
@@ -206,11 +207,10 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 		result.Error = err.Error()
 		return result
 	}
+	result.ScenarioSpecHash = scenarioSpecHash(scenario, before)
 
 	if opts.DryRun {
 		result.Status = "dry_run"
-		result.Metrics["task_completed"] = true
-		result.Score = summarizeScore(result.Metrics)
 		return result
 	}
 	if strings.TrimSpace(opts.AgentCommand) == "" {
@@ -568,6 +568,26 @@ func snapshotFiles(root string) (map[string]string, error) {
 		return nil
 	})
 	return out, err
+}
+
+// scenarioSpecHash binds a result to both its declarative scenario contract
+// and the delivered fixture state. It is additive/optional in JSON so existing
+// baselines remain readable; comparisons enforce it only when both sides have
+// the field.
+func scenarioSpecHash(scenario Scenario, fixtureSnapshot map[string]string) string {
+	payload := struct {
+		Scenario Scenario          `json:"scenario"`
+		Fixture  map[string]string `json:"fixture"`
+	}{
+		Scenario: scenario,
+		Fixture:  fixtureSnapshot,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func fileHash(path string) (string, error) {

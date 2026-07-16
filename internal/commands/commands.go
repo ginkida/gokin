@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -119,6 +120,36 @@ type AppInterface interface {
 	// Hooks manager — used by /hooks to list configured hooks. May be nil;
 	// the command nil-checks.
 	GetHooksManager() *hooks.Manager
+}
+
+type checkedConversationClearer interface {
+	ClearConversationChecked() error
+}
+
+// ErrConversationClearedUncertainDurability marks a ClearConversationChecked
+// error where the conversation genuinely cleared — every in-memory reset ran
+// to completion — but its on-disk durability confirmation could not be
+// verified (a rename couldn't be fsync-confirmed, not that nothing happened).
+// App wraps its internal uncertain-durability sentinel with this one (see
+// app.go's ClearConversationChecked) so commands can distinguish it WITHOUT
+// importing internal/app (app already imports commands; the reverse would
+// cycle). Callers of clearConversationChecked below must treat this case as
+// SUCCESS — the same distinction app.ClearConversation and
+// reportPendingRecoveryClearFailure already make — never as "nothing
+// happened, abort the dependent operation".
+var ErrConversationClearedUncertainDurability = errors.New("conversation cleared, durability unconfirmed")
+
+func clearConversationChecked(app AppInterface) error {
+	checked, ok := app.(checkedConversationClearer)
+	if !ok {
+		app.ClearConversation()
+		return nil
+	}
+	err := checked.ClearConversationChecked()
+	if err != nil && errors.Is(err, ErrConversationClearedUncertainDurability) {
+		return nil
+	}
+	return err
 }
 
 // Handler manages slash commands.

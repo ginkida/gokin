@@ -31,26 +31,3 @@ func (c *ToolDependencyClassifier) IsWriteTool(name string) bool {
 func (c *ToolDependencyClassifier) ClassifyDependencies(calls []*genai.FunctionCall) []tools.ToolGroup {
 	return tools.ClassifyToolDependencies(calls)
 }
-
-// OptimizeForParallelism reorders calls to maximize parallel execution.
-// Moves all read-only calls to the front, then write calls.
-func (c *ToolDependencyClassifier) OptimizeForParallelism(calls []*genai.FunctionCall) []*genai.FunctionCall {
-	if len(calls) <= 1 {
-		return calls
-	}
-
-	var readCalls, writeCalls []*genai.FunctionCall
-	for _, call := range calls {
-		if c.IsWriteTool(call.Name) {
-			writeCalls = append(writeCalls, call)
-		} else {
-			readCalls = append(readCalls, call)
-		}
-	}
-
-	// Return read calls first (can be parallel), then write calls (sequential)
-	result := make([]*genai.FunctionCall, 0, len(calls))
-	result = append(result, readCalls...)
-	result = append(result, writeCalls...)
-	return result
-}

@@ -570,6 +570,119 @@ func TestOllamaIsRetryableError_StatusError400(t *testing.T) {
 	}
 }
 
+// The Ollama SDK returns api.StatusError as a value in its production request
+// path, although wrapped callers and older tests commonly use a pointer. Keep
+// both forms typed all the way into the shared fallback/health policy: 400/422
+// describe this request and must stop the chain without poisoning provider
+// health, while auth/rate-limit/server failures remain provider-local.
+func TestOllamaStatusErrorFallbackAndHealthTaxonomy(t *testing.T) {
+	c, _ := NewOllamaClient(OllamaConfig{Model: "llama3.2"})
+	tests := []struct {
+		name          string
+		provider      string
+		raw           error
+		wantStatus    int
+		wantRetryable bool
+		wantFallback  bool
+	}{
+		{
+			name:       "value 400 with retry wording",
+			provider:   "test-ollama-status-value-400",
+			raw:        api.StatusError{StatusCode: 400, Status: "400 Bad Request", ErrorMessage: "invalid request: unexpected EOF"},
+			wantStatus: 400,
+		},
+		{
+			name:       "pointer 400 with timeout wording",
+			provider:   "test-ollama-status-pointer-400",
+			raw:        &api.StatusError{StatusCode: 400, Status: "400 Bad Request", ErrorMessage: "invalid request timeout"},
+			wantStatus: 400,
+		},
+		{
+			name:       "value 422 safety rejection",
+			provider:   "test-ollama-status-value-422",
+			raw:        api.StatusError{StatusCode: 422, Status: "422 Unprocessable Entity", ErrorMessage: "safety policy rejected"},
+			wantStatus: 422,
+		},
+		{
+			name:       "pointer 422 invalid schema",
+			provider:   "test-ollama-status-pointer-422",
+			raw:        &api.StatusError{StatusCode: 422, Status: "422 Unprocessable Entity", ErrorMessage: "invalid tool schema"},
+			wantStatus: 422,
+		},
+		{
+			name:         "value 401 is provider local",
+			provider:     "test-ollama-status-value-401",
+			raw:          api.StatusError{StatusCode: 401, Status: "401 Unauthorized", ErrorMessage: "bad provider key"},
+			wantStatus:   401,
+			wantFallback: true,
+		},
+		{
+			name:          "value 429 is transient provider local",
+			provider:      "test-ollama-status-value-429",
+			raw:           api.StatusError{StatusCode: 429, Status: "429 Too Many Requests", ErrorMessage: "rate limited"},
+			wantStatus:    429,
+			wantRetryable: true,
+			wantFallback:  true,
+		},
+		{
+			name:          "pointer 500 is transient provider local",
+			provider:      "test-ollama-status-pointer-500",
+			raw:           &api.StatusError{StatusCode: 500, Status: "500 Internal Server Error", ErrorMessage: "backend unavailable"},
+			wantStatus:    500,
+			wantRetryable: true,
+			wantFallback:  true,
+		},
+		{
+			name:         "value authorization error is provider local",
+			provider:     "test-ollama-auth-value-401",
+			raw:          api.AuthorizationError{StatusCode: 401, Status: "401 Unauthorized"},
+			wantStatus:   401,
+			wantFallback: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := c.isRetryableError(tt.raw); got != tt.wantRetryable {
+				t.Fatalf("isRetryableError(%T) = %v, want %v", tt.raw, got, tt.wantRetryable)
+			}
+
+			normalized := c.wrapOllamaError(tt.raw)
+			var httpErr *HTTPError
+			if !errors.As(normalized, &httpErr) || httpErr == nil {
+				t.Fatalf("wrapOllamaError(%T) = %T, want *HTTPError", tt.raw, normalized)
+			}
+			if httpErr.StatusCode != tt.wantStatus {
+				t.Fatalf("normalized status = %d, want %d", httpErr.StatusCode, tt.wantStatus)
+			}
+			if !errors.Is(normalized, tt.raw) {
+				t.Fatalf("normalized error no longer unwraps to original %T", tt.raw)
+			}
+			if got := shouldFallbackToNextProvider(normalized); got != tt.wantFallback {
+				t.Fatalf("shouldFallbackToNextProvider(%T status %d) = %v, want %v",
+					tt.raw, tt.wantStatus, got, tt.wantFallback)
+			}
+
+			fc, err := NewFallbackClient(
+				[]Client{&fakeFallbackClientStub{id: "ollama"}}, []string{tt.provider})
+			if err != nil {
+				t.Fatalf("NewFallbackClient: %v", err)
+			}
+			before := getProviderHealth(tt.provider)
+			fc.recordFailure("Ollama status taxonomy test", 0, normalized)
+			after := getProviderHealth(tt.provider)
+			changed := after.Score < before.Score && after.FailureStreak == before.FailureStreak+1
+			if changed != tt.wantFallback {
+				t.Fatalf("health change = %v, want %v; before=%+v after=%+v",
+					changed, tt.wantFallback, before, after)
+			}
+			if !tt.wantFallback && (after.Score != before.Score || after.FailureStreak != before.FailureStreak) {
+				t.Fatalf("request-scoped failure changed health: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
 // ========== IsModelNotFoundError ==========
 
 func TestIsModelNotFoundError_Nil(t *testing.T) {

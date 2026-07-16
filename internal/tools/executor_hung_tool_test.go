@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,9 +17,29 @@ type hangingTool struct {
 	release chan struct{}
 }
 
+type lateMutatingTool struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *lateMutatingTool) Name() string                  { return "late_mutator" }
+func (h *lateMutatingTool) Description() string           { return "test-only stateful tool" }
+func (h *lateMutatingTool) Validate(map[string]any) error { return nil }
+func (h *lateMutatingTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: h.Name(), Description: h.Description()}
+}
+func (h *lateMutatingTool) Execute(context.Context, map[string]any) (ToolResult, error) {
+	close(h.started)
+	<-h.release
+	return NewSuccessResult("mutation completed"), nil
+}
+func (h *lateMutatingTool) unblock() { h.once.Do(func() { close(h.release) }) }
+
 func (h *hangingTool) Name() string                  { return "hanging_tool" }
 func (h *hangingTool) Description() string           { return "test-only: ignores ctx and blocks" }
 func (h *hangingTool) Validate(map[string]any) error { return nil }
+func (h *hangingTool) SafeToAbandonOnCancel() bool   { return true }
 func (h *hangingTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: "hanging_tool", Description: "blocks ignoring ctx"}
 }
@@ -62,5 +83,41 @@ func TestExecutorDoExecuteTool_HungToolDoesNotBlockTurn(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("doExecuteTool hung on a ctx-ignoring tool — #7 backstop failed")
+	}
+}
+
+func TestExecutorDoesNotAbandonStatefulToolAfterTimeout(t *testing.T) {
+	registry := NewRegistry()
+	tool := &lateMutatingTool{started: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(tool.unblock)
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	executor := NewExecutor(registry, &scriptedExecutorClient{model: "glm-5.2"}, 60*time.Millisecond)
+	executor.EnablePreFlightChecks(false)
+
+	done := make(chan ToolResult, 1)
+	go func() {
+		done <- executor.doExecuteTool(context.Background(), &genai.FunctionCall{
+			ID: "late-1", Name: tool.Name(), Args: map[string]any{},
+		})
+	}()
+	<-tool.started
+
+	select {
+	case result := <-done:
+		t.Fatalf("executor abandoned a stateful tool before it settled: %+v", result)
+	case <-time.After(150 * time.Millisecond):
+		// Expected: timeout cancellation alone cannot release ownership.
+	}
+
+	tool.unblock()
+	select {
+	case result := <-done:
+		if !result.Success {
+			t.Fatalf("joined stateful result = %+v, want completed result", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("executor did not join stateful tool after it settled")
 	}
 }

@@ -1972,8 +1972,11 @@ func (b *Builder) wireDependencies() error {
 	b.tuiModel.SetPaletteProvider(paletteProvider)
 	b.tuiModel.RegisterPaletteActions()
 
-	// Set up plan approval callback for context compaction
-	b.agentRunner.SetOnPlanApproved(app.CompactContextWithPlan)
+	// AgentRunner owns delegated/router agents, not the foreground conversation.
+	// A global plan-approved callback here used to let any nested agent clear the
+	// App session (and invalidate the outer turn) while building its private tree
+	// plan. Foreground plan-context replacement is handled transactionally by the
+	// App plan pipeline; delegated agents keep their context isolated.
 
 	// Set up context compaction notifications
 	if b.contextManager != nil {

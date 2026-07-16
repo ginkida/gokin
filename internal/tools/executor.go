@@ -331,6 +331,10 @@ type Executor struct {
 	sideEffectLedgerMu     sync.Mutex
 	sideEffectsByCallID    map[string]ToolResult
 	sideEffectsBySignature map[string]ToolResult
+	sideEffectSigByCallID  map[string]string
+	replayByCallID         map[string]ToolResult
+	replayBySignature      map[string]ToolResult
+	replaySigByCallID      map[string]string
 
 	// Pending background task completion notifications
 	pendingNotifications []string
@@ -521,6 +525,7 @@ func newExecutorInternal(registry ToolRegistry, c client.Client, timeout time.Du
 		deltaPendingPaths:      make(map[string]struct{}),
 		sideEffectsByCallID:    make(map[string]ToolResult),
 		sideEffectsBySignature: make(map[string]ToolResult),
+		sideEffectSigByCallID:  make(map[string]string),
 		checkpoint:             NewCheckpointJournal(),
 		cacheTracker:           client.NewCacheTracker(),
 	}
@@ -749,6 +754,49 @@ func (e *Executor) SetSideEffectDedup(enabled bool) {
 	e.sideEffectLedgerMu.Lock()
 	defer e.sideEffectLedgerMu.Unlock()
 	e.sideEffectDedupEnabled = enabled
+	if enabled {
+		// The checkpoint journal is the authoritative replay generation. Unlike
+		// the legacy result maps below, it preserves duplicate signatures as an
+		// ordered multiset and consumes each recorded outcome exactly once.
+		if e.checkpoint != nil {
+			e.replayByCallID = nil
+			e.replayBySignature = nil
+			e.replaySigByCallID = nil
+			e.checkpoint.BeginReplay()
+			return
+		}
+		// Defensive fallback for embedded executors without a journal.
+		e.replayByCallID = cloneToolResultMap(e.sideEffectsByCallID)
+		e.replayBySignature = cloneToolResultMap(e.sideEffectsBySignature)
+		e.replaySigByCallID = cloneStringMap(e.sideEffectSigByCallID)
+		return
+	}
+	e.clearSideEffectReplayLocked()
+}
+
+func cloneToolResultMap(src map[string]ToolResult) map[string]ToolResult {
+	dst := make(map[string]ToolResult, len(src))
+	for key, result := range src {
+		dst[key] = result
+	}
+	return dst
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func (e *Executor) clearSideEffectReplayLocked() {
+	e.replayByCallID = nil
+	e.replayBySignature = nil
+	e.replaySigByCallID = nil
+	if e.checkpoint != nil {
+		e.checkpoint.EndReplay()
+	}
 }
 
 // GetCheckpointJournal returns the checkpoint journal for inspection or persistence.
@@ -759,14 +807,61 @@ func (e *Executor) GetCheckpointJournal() *CheckpointJournal {
 // ResetSideEffectLedger clears deduplication ledger for a new top-level request.
 func (e *Executor) ResetSideEffectLedger() {
 	e.sideEffectLedgerMu.Lock()
-	defer e.sideEffectLedgerMu.Unlock()
 	e.sideEffectsByCallID = make(map[string]ToolResult)
 	e.sideEffectsBySignature = make(map[string]ToolResult)
+	e.sideEffectSigByCallID = make(map[string]string)
+	e.replayByCallID = nil
+	e.replayBySignature = nil
+	e.replaySigByCallID = nil
 
 	// Also clear the checkpoint journal — it belongs to the previous request.
 	if e.checkpoint != nil {
 		e.checkpoint.Clear()
 	}
+	e.sideEffectLedgerMu.Unlock()
+
+	// Self-review bookkeeping has the same lifecycle as the side-effect
+	// ledger: one user request may call Execute repeatedly while retrying a
+	// provider failure. Resetting in executeLoop would forget mutations made by
+	// an earlier attempt whose checkpoint is intentionally retained.
+	e.mutatedFilesMu.Lock()
+	e.mutatedFilesThisTurn = make(map[string]bool)
+	e.mutatedFilesMu.Unlock()
+}
+
+// PrepareSideEffectRecovery starts a new top-level retry from an exact
+// checkpoint generation. It clears unrelated in-memory ledger entries (which
+// may belong to an intervening user request), restores the captured journal,
+// and opens a one-shot replay window without ever exposing a half-restored
+// generation to concurrent tool execution.
+func (e *Executor) PrepareSideEffectRecovery(entries []ToolCheckpoint) {
+	e.sideEffectLedgerMu.Lock()
+	e.sideEffectsByCallID = make(map[string]ToolResult)
+	e.sideEffectsBySignature = make(map[string]ToolResult)
+	e.sideEffectSigByCallID = make(map[string]string)
+	e.replayByCallID = nil
+	e.replayBySignature = nil
+	e.replaySigByCallID = nil
+	e.sideEffectDedupEnabled = true
+	if e.checkpoint != nil {
+		e.checkpoint.Clear()
+		for _, entry := range entries {
+			e.checkpoint.RecordSerializedResult(
+				entry.CallID,
+				entry.ToolName,
+				entry.Args,
+				entry.Result,
+				entry.Signature,
+				entry.Timestamp,
+			)
+		}
+		e.checkpoint.BeginReplay()
+	}
+	e.sideEffectLedgerMu.Unlock()
+
+	e.mutatedFilesMu.Lock()
+	e.mutatedFilesThisTurn = make(map[string]bool)
+	e.mutatedFilesMu.Unlock()
 }
 
 // SetSafetyValidator sets the safety validator.
@@ -1432,8 +1527,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						files = append(files, f)
 					}
 					sort.Strings(files)
+					e.mutatedFilesThisTurn = make(map[string]bool)
 				}
-				e.mutatedFilesThisTurn = make(map[string]bool)
 				e.mutatedFilesMu.Unlock()
 
 				if count >= e.selfReviewThreshold {
@@ -2251,24 +2346,6 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		return NewErrorResult(fmt.Sprintf("validation error: %s", err))
 	}
 
-	// Trusted pre-tool policy is evaluated for every valid invocation before
-	// retry/checkpoint/read-cache shortcuts. A cached result must not bypass a
-	// hook that was added or changed since the original execution.
-	if e.hooks != nil {
-		preResults := e.hooks.RunPreTool(ctx, call.Name, call.Args)
-		if blocked, ok := hooks.Blocked(preResults); ok {
-			name := blocked.Hook.DisplayName()
-			reason := strings.TrimSpace(blocked.Output)
-			if reason == "" && blocked.Error != nil {
-				reason = blocked.Error.Error()
-			}
-			logging.Info("tool call blocked by pre-tool hook",
-				"tool", call.Name, "hook", name)
-			return NewPolicyBlockedResult(PolicyBlockHook, fmt.Sprintf(
-				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
-		}
-	}
-
 	// Retry dedup guard: skip duplicate side-effect calls during retry windows.
 	if deduped, reason, ok := e.lookupDuplicateSideEffect(call); ok {
 		logging.Warn("skipping duplicate side-effect tool call",
@@ -2287,14 +2364,49 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// workspace changed (for example, run the same test before and after an
 	// edit). Unconditional signature replay returned the stale first result and
 	// skipped that second verification entirely.
-	if cached, reason, ok := e.lookupCheckpointSideEffect(call); ok {
+	cached, replayReason, replayState, replayRemaining := e.lookupCheckpointSideEffect(call)
+	if replayState == checkpointReplayMatched {
 		logging.Info("checkpoint recovery: reusing previous tool result",
 			"tool", call.Name,
-			"reason", reason)
+			"reason", replayReason)
 		if e.handler != nil && e.handler.OnWarning != nil {
-			e.handler.OnWarning(fmt.Sprintf("Recovered result for '%s' from checkpoint (%s).", call.Name, reason))
+			e.handler.OnWarning(fmt.Sprintf("Recovered result for '%s' from checkpoint (%s).", call.Name, replayReason))
 		}
 		return cached
+	}
+	if replayState == checkpointReplayMismatch {
+		reason := fmt.Sprintf(
+			"Exactly-once recovery blocked divergent side effect %q: it does not match any of the %d unconsumed checkpoint(s). The tool was NOT executed because new mutations would invalidate the remaining saved outcomes. Replay the original pending mutations first; if they cannot be reconstructed, stop and ask the user to inspect /recovery and restart the task manually.",
+			call.Name, replayRemaining)
+		logging.Warn("checkpoint recovery blocked divergent side effect",
+			"tool", call.Name,
+			"call_id", call.ID,
+			"remaining", replayRemaining)
+		if e.handler != nil && e.handler.OnToolDenied != nil {
+			e.handler.OnToolDenied(call.Name, reason)
+		}
+		if e.notificationMgr != nil {
+			e.notificationMgr.NotifyDenied(call.Name, reason)
+		}
+		return NewPolicyBlockedResult(PolicyBlockSafety, reason)
+	}
+
+	// Hooks are part of actual execution, not replay. Running them before a
+	// recovered result can repeat arbitrary hook-side effects even though the
+	// tool itself is correctly skipped.
+	if e.hooks != nil {
+		preResults := e.hooks.RunPreTool(ctx, call.Name, call.Args)
+		if blocked, ok := hooks.Blocked(preResults); ok {
+			name := blocked.Hook.DisplayName()
+			reason := strings.TrimSpace(blocked.Output)
+			if reason == "" && blocked.Error != nil {
+				reason = blocked.Error.Error()
+			}
+			logging.Info("tool call blocked by pre-tool hook",
+				"tool", call.Name, "hook", name)
+			return NewPolicyBlockedResult(PolicyBlockHook, fmt.Sprintf(
+				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
+		}
 	}
 
 	// Pre-mutation barrier: if previous delta-check failed, block further mutating calls.
@@ -2605,55 +2717,56 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Check if tool supports streaming for large outputs.
-	//
-	// Run the actual execution in a goroutine and select on execCtx so a tool
-	// that IGNORES context cancellation (a blocking syscall, a non-context-aware
-	// network read, a deadlocked mutex, a misbehaving MCP tool) cannot hang the
-	// whole turn forever. The per-tool timeout only frees the loop if the tool
-	// honors ctx; this select frees it regardless. A truly-hung goroutine leaks,
-	// but the user always gets control back — matching the "never hangs" bar.
 	var err error
 	type toolOutcome struct {
 		result ToolResult
 		err    error
 	}
-	toolDone := make(chan toolOutcome, 1) // buffered: a leaked goroutine can still send once, then exit
-	go func() {
+	runTool := func() (outcome toolOutcome) {
 		defer func() {
 			if r := recover(); r != nil {
-				// The enclosing executeTools recover can't catch a panic in THIS
-				// nested goroutine — handle it here and deliver as a result.
 				stack := make([]byte, 4096)
 				n := runtime.Stack(stack, false)
 				logging.Error("tool execution panic", "tool", call.Name, "panic", r, "stack", string(stack[:n]))
-				toolDone <- toolOutcome{result: NewErrorResult(formatToolPanic(call.Name, r))}
+				outcome = toolOutcome{result: NewErrorResult(formatToolPanic(call.Name, r))}
 			}
 		}()
-		var r ToolResult
-		var e2 error
 		if _, scoped := tool.(permissionScopedExecutor); scoped && authorizedPermissionArgs != nil {
-			r, e2 = ExecuteWithPermissionScope(execCtx, tool, call.Args, authorizedPermissionArgs)
+			outcome.result, outcome.err = ExecuteWithPermissionScope(execCtx, tool, call.Args, authorizedPermissionArgs)
 		} else if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
-			r, e2 = e.executeStreamingTool(execCtx, streamingTool, call.Args)
+			outcome.result, outcome.err = e.executeStreamingTool(execCtx, streamingTool, call.Args)
 		} else {
-			r, e2 = tool.Execute(execCtx, call.Args)
+			outcome.result, outcome.err = tool.Execute(execCtx, call.Args)
 		}
-		toolDone <- toolOutcome{result: r, err: e2}
-	}()
-	select {
-	case outcome := <-toolDone:
-		result, err = outcome.result, outcome.err
-	case <-execCtx.Done():
-		// Give a well-behaved tool a brief grace to deliver its own (more
-		// informative) result/error on cancel; otherwise return a timeout and
-		// let the misbehaving goroutine leak. err flows into the timeout/cancel
-		// handling below.
+		return outcome
+	}
+
+	if canAbandonToolOnCancel(tool, call.Name) {
+		// Explicitly side-effect-free tools may run behind a timeout backstop. A
+		// broken implementation can leak a goroutine, but cannot mutate state
+		// after control has returned to the user.
+		toolDone := make(chan toolOutcome, 1)
+		go func() { toolDone <- runTool() }()
 		select {
 		case outcome := <-toolDone:
 			result, err = outcome.result, outcome.err
-		case <-time.After(50 * time.Millisecond):
-			err = execCtx.Err()
+		case <-execCtx.Done():
+			// Give a well-behaved tool a brief grace to deliver its own (more
+			// informative) result/error on cancel.
+			select {
+			case outcome := <-toolDone:
+				result, err = outcome.result, outcome.err
+			case <-time.After(50 * time.Millisecond):
+				err = execCtx.Err()
+			}
 		}
+	} else {
+		// Stateful and unknown tools must be joined. Returning while one keeps
+		// running permits a late write/commit/remote action after the ledger has
+		// recorded failure, so a retry can duplicate it. Built-ins use
+		// context-aware I/O/process APIs and therefore still honor toolTimeout.
+		outcome := runTool()
+		result, err = outcome.result, outcome.err
 	}
 	close(done)
 	duration := time.Since(start)
@@ -2937,7 +3050,10 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Step 12.9d: Track mutated files for self-review injection.
 	if result.Success && isWriteOperation(call.Name) && e.selfReviewThreshold > 0 {
 		e.mutatedFilesMu.Lock()
-		for _, fp := range extractFilePaths(call) {
+		if e.mutatedFilesThisTurn == nil {
+			e.mutatedFilesThisTurn = make(map[string]bool)
+		}
+		for _, fp := range selfReviewMutationPaths(call, mutation) {
 			e.mutatedFilesThisTurn[fp] = true
 		}
 		e.mutatedFilesMu.Unlock()
@@ -3022,15 +3138,23 @@ func (e *Executor) lookupDuplicateSideEffect(call *genai.FunctionCall) (ToolResu
 		return ToolResult{}, "", false
 	}
 
-	if call.ID != "" {
-		if prev, ok := e.sideEffectsByCallID[call.ID]; ok {
+	signature := sideEffectSignature(call.Name, call.Args)
+	if call.ID != "" && signature != "" {
+		if prev, ok := e.replayByCallID[call.ID]; ok && e.replaySigByCallID[call.ID] == signature {
+			e.consumeSideEffectReplayLocked(call.ID, signature)
+			if e.checkpoint != nil {
+				_, _, _ = e.checkpoint.ConsumeReplay(call)
+			}
 			return prev, "tool_call_id", true
 		}
 	}
 
-	signature := sideEffectSignature(call.Name, call.Args)
 	if signature != "" {
-		if prev, ok := e.sideEffectsBySignature[signature]; ok {
+		if prev, ok := e.replayBySignature[signature]; ok {
+			e.consumeSideEffectReplayLocked(call.ID, signature)
+			if e.checkpoint != nil {
+				_, _, _ = e.checkpoint.ConsumeReplay(call)
+			}
 			return prev, "fingerprint", true
 		}
 	}
@@ -3038,21 +3162,42 @@ func (e *Executor) lookupDuplicateSideEffect(call *genai.FunctionCall) (ToolResu
 	return ToolResult{}, "", false
 }
 
+func (e *Executor) consumeSideEffectReplayLocked(callID, signature string) {
+	if callID != "" {
+		delete(e.replayByCallID, callID)
+		if signature == "" {
+			signature = e.replaySigByCallID[callID]
+		}
+		delete(e.replaySigByCallID, callID)
+	}
+	if signature == "" {
+		return
+	}
+	delete(e.replayBySignature, signature)
+	for id, sig := range e.replaySigByCallID {
+		if sig == signature {
+			delete(e.replayByCallID, id)
+			delete(e.replaySigByCallID, id)
+		}
+	}
+}
+
 // lookupCheckpointSideEffect consults the durable checkpoint journal only
 // while retry-time side-effect recovery is explicitly enabled. It takes the
 // ledger lock before the journal lock, matching ResetSideEffectLedger, so a
 // concurrent retry-mode transition cannot expose a half-cleared journal.
-func (e *Executor) lookupCheckpointSideEffect(call *genai.FunctionCall) (ToolResult, string, bool) {
+func (e *Executor) lookupCheckpointSideEffect(call *genai.FunctionCall) (ToolResult, string, checkpointReplayState, int) {
 	if call == nil || !isWriteOperation(call.Name) || e.checkpoint == nil {
-		return ToolResult{}, "", false
+		return ToolResult{}, "", checkpointReplayInactive, 0
 	}
 
 	e.sideEffectLedgerMu.Lock()
 	defer e.sideEffectLedgerMu.Unlock()
 	if !e.sideEffectDedupEnabled {
-		return ToolResult{}, "", false
+		return ToolResult{}, "", checkpointReplayInactive, 0
 	}
-	return e.checkpoint.Lookup(call)
+	result, reason, state := e.checkpoint.consumeReplayState(call)
+	return result, reason, state, e.checkpoint.ReplayRemaining()
 }
 
 func (e *Executor) recordSideEffect(call *genai.FunctionCall, result ToolResult) {
@@ -3069,6 +3214,9 @@ func (e *Executor) recordSideEffect(call *genai.FunctionCall, result ToolResult)
 	}
 	if signature := sideEffectSignature(call.Name, call.Args); signature != "" {
 		e.sideEffectsBySignature[signature] = result
+		if call.ID != "" {
+			e.sideEffectSigByCallID[call.ID] = signature
+		}
 	}
 }
 
@@ -3109,21 +3257,7 @@ func (e *Executor) buildResponseParts(resp *client.Response) []*genai.Part {
 // buildResponsePartsRaw returns Parts from a response without a fallback placeholder.
 // Used for partial response preservation where empty means "nothing to preserve".
 func (e *Executor) buildResponsePartsRaw(resp *client.Response) []*genai.Part {
-	if len(resp.Parts) > 0 {
-		return resp.Parts
-	}
-
-	var parts []*genai.Part
-
-	if resp.Text != "" {
-		parts = append(parts, genai.NewPartFromText(resp.Text))
-	}
-
-	for _, fc := range resp.FunctionCalls {
-		parts = append(parts, &genai.Part{FunctionCall: fc})
-	}
-
-	return parts
+	return client.ResponsePartsForHistory(resp)
 }
 
 // executeStreamingTool executes a streaming tool and collects results.
@@ -3143,7 +3277,16 @@ streamLoop:
 		select {
 		case chunk, ok := <-stream.Chunks:
 			if !ok {
-				// Chunks channel closed
+				// The producer sends its terminal error before closing Chunks.
+				// Check it here as well as in the Done branch: when both closed
+				// channels are selectable, Go may choose Chunks first.
+				select {
+				case streamErr := <-stream.Error:
+					if streamErr != nil {
+						return NewErrorResult(streamErr.Error()), nil
+					}
+				default:
+				}
 				break streamLoop
 			}
 			content.WriteString(chunk)
@@ -3196,6 +3339,12 @@ streamLoop:
 		}
 	}
 
+	// Closed producer channels may win the select race against ctx.Done. Never
+	// convert a cancelled, partially collected stream into a successful result.
+	if err := ctx.Err(); err != nil {
+		return NewErrorResult("streaming cancelled"), client.ContextErr(ctx)
+	}
+
 	result := content.String()
 	if result == "" {
 		return NewSuccessResult("No output."), nil
@@ -3245,22 +3394,6 @@ func (e *Executor) trySelfHeal(ctx context.Context, call *genai.FunctionCall) To
 	return ToolResult{Success: false}
 }
 
-// writeTools is a set of tools that modify files/state, used for deduplication.
-var writeTools = map[string]bool{
-	"write":       true,
-	"edit":        true,
-	"delete":      true,
-	"atomicwrite": true,
-	"copy":        true,
-	"move":        true,
-	"mkdir":       true,
-	"batch":       true,
-	"refactor":    true,
-	"bash":        true, // bash can modify anything
-	"git_add":     true,
-	"git_commit":  true,
-}
-
 // extractFilePaths returns all file paths from a tool call's arguments.
 // Handles file_path, path, source, destination, and new_path argument names.
 func extractFilePaths(call *genai.FunctionCall) []string {
@@ -3271,6 +3404,43 @@ func extractFilePaths(call *genai.FunctionCall) []string {
 		}
 	}
 	return paths
+}
+
+// selfReviewMutationPaths prefers authoritative paths declared by a tool
+// result. Batch/refactor dry-runs and no-ops deliberately declare an empty
+// path set; falling back to their requested arguments would claim files were
+// modified when they were not. Legacy scalar tools still use their call args.
+func selfReviewMutationPaths(call *genai.FunctionCall, mutation goMutationSnapshot) []string {
+	if mutation.ChangedKnown && !mutation.Changed {
+		return nil
+	}
+
+	var paths []string
+	if mutation.PathsDeclared {
+		paths = append(paths, mutation.Paths...)
+	} else if call != nil {
+		// Modern multi-target tools always declare the paths they actually
+		// changed. Missing declarations mean no confirmed mutation, not that
+		// every requested match changed.
+		if call.Name == "batch" || call.Name == "refactor" {
+			return nil
+		}
+		paths = extractFilePaths(call)
+	}
+
+	filtered := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path != "" {
+			path = filepath.Clean(path)
+		}
+		if path != "" && path != "." && !seen[path] {
+			seen[path] = true
+			filtered = append(filtered, path)
+		}
+	}
+	return filtered
 }
 
 // writtenPathsFromResult extracts a tool's self-declared written paths from
@@ -3315,7 +3485,7 @@ func WrittenPathsFromResult(result ToolResult) []string {
 
 // isWriteOperation returns true if the tool modifies files/state.
 func isWriteOperation(toolName string) bool {
-	return writeTools[toolName]
+	return IsWriteTool(toolName)
 }
 
 // fileModifyingTools is the subset of writeTools that produce a specific

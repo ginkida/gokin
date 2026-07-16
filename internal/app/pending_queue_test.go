@@ -3,6 +3,8 @@ package app
 import (
 	"fmt"
 	"testing"
+
+	"gokin/internal/tools"
 )
 
 // TestDrainPendingClearsQueue + TestCancelProcessingDrainsQueue pin that
@@ -21,6 +23,33 @@ func TestDrainPendingClearsQueue(t *testing.T) {
 	}
 	if n := a.drainPending(); n != 0 {
 		t.Errorf("drain on empty returned %d, want 0", n)
+	}
+}
+
+func TestRecoveryQueueKeepsCheckpointLineage(t *testing.T) {
+	a := &App{}
+	checkpoints := []tools.ToolCheckpoint{{
+		CallID: "write-1", ToolName: "write",
+		Result: tools.NewSuccessResult("written"),
+	}}
+	if pos, ok := a.enqueueRecoveryPending("retry", "raw retry", "recovery-1", "session-1", 0, checkpoints); !ok || pos != 1 {
+		t.Fatalf("enqueue recovery: pos=%d ok=%v", pos, ok)
+	}
+	// The queue owns its own slice even if the scheduling closure is reused.
+	checkpoints[0].CallID = "mutated-by-caller"
+
+	request, remaining, ok := a.dequeuePendingRequest()
+	if !ok || remaining != 0 || request.message != "retry" {
+		t.Fatalf("dequeue recovery = %+v remaining=%d ok=%v", request, remaining, ok)
+	}
+	if len(request.recoveryCheckpoints) != 1 || request.recoveryCheckpoints[0].CallID != "write-1" {
+		t.Fatalf("checkpoint lineage lost: %+v", request.recoveryCheckpoints)
+	}
+	if request.recoveryID != "recovery-1" || request.recoverySessionID != "session-1" {
+		t.Fatalf("durable recovery identity lost: %+v", request)
+	}
+	if request.recoveryMemoryQuery != "raw retry" {
+		t.Fatalf("recovery memory query lost: %+v", request)
 	}
 }
 

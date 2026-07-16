@@ -2,6 +2,7 @@ package evals
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ type Report struct {
 	ResultsPath string            `json:"results_path,omitempty"`
 	Count       int               `json:"count"`
 	Passed      int               `json:"passed"`
+	DryRun      int               `json:"dry_run"`
 	Failed      int               `json:"failed"`
 	Score       ScoreSummary      `json:"score"`
 	Metrics     []MetricSummary   `json:"metrics"`
@@ -28,22 +30,53 @@ type MetricSummary struct {
 
 // ScenarioSummary is the per-scenario row used in reports.
 type ScenarioSummary struct {
-	ID       string       `json:"id"`
-	Variant  string       `json:"variant,omitempty"`
-	Status   string       `json:"status"`
-	Score    ScoreSummary `json:"score"`
-	Error    string       `json:"error,omitempty"`
-	Duration int64        `json:"duration_ms"`
+	ID               string       `json:"id"`
+	Variant          string       `json:"variant,omitempty"`
+	ScenarioSpecHash string       `json:"scenario_spec_hash,omitempty"`
+	Status           string       `json:"status"`
+	Score            ScoreSummary `json:"score"`
+	Error            string       `json:"error,omitempty"`
+	Duration         int64        `json:"duration_ms"`
 }
 
 // Comparison summarizes current results against a baseline.
 type Comparison struct {
-	BaselinePath string         `json:"baseline_path,omitempty"`
-	CurrentPath  string         `json:"current_path,omitempty"`
-	ScoreDelta   float64        `json:"score_delta"`
-	PassedDelta  int            `json:"passed_delta"`
-	Metrics      []MetricDelta  `json:"metrics"`
-	Scenarios    []ScenarioDiff `json:"scenarios"`
+	BaselinePath    string                     `json:"baseline_path,omitempty"`
+	CurrentPath     string                     `json:"current_path,omitempty"`
+	ScoreDelta      float64                    `json:"score_delta"`
+	PassedDelta     int                        `json:"passed_delta"`
+	Metrics         []MetricDelta              `json:"metrics"`
+	Scenarios       []ScenarioDiff             `json:"scenarios"`
+	CohortMismatch  *CohortMismatch            `json:"cohort_mismatch,omitempty"`
+	InvalidEvidence *ComparisonInvalidEvidence `json:"invalid_evidence,omitempty"`
+}
+
+// CohortMismatch records scenario/variant identities that prevent a valid
+// aggregate comparison. Aggregate deltas are intentionally left at zero when
+// this field is present; the reports did not measure the same cohort.
+type CohortMismatch struct {
+	BaselineOnly       []ScenarioIdentity `json:"baseline_only,omitempty"`
+	CurrentOnly        []ScenarioIdentity `json:"current_only,omitempty"`
+	BaselineDuplicates []ScenarioIdentity `json:"baseline_duplicates,omitempty"`
+	CurrentDuplicates  []ScenarioIdentity `json:"current_duplicates,omitempty"`
+	SpecMismatches     []ScenarioIdentity `json:"spec_mismatches,omitempty"`
+}
+
+// ComparisonInvalidEvidence identifies result sets that look structurally
+// alike but do not contain executed measurements on both sides.
+type ComparisonInvalidEvidence struct {
+	BaselineEmpty       bool `json:"baseline_empty,omitempty"`
+	CurrentEmpty        bool `json:"current_empty,omitempty"`
+	BaselineDryRun      int  `json:"baseline_dry_run,omitempty"`
+	CurrentDryRun       int  `json:"current_dry_run,omitempty"`
+	BaselineNotExecuted int  `json:"baseline_not_executed,omitempty"`
+	CurrentNotExecuted  int  `json:"current_not_executed,omitempty"`
+}
+
+// ScenarioIdentity identifies one independently comparable eval result.
+type ScenarioIdentity struct {
+	ID      string `json:"id"`
+	Variant string `json:"variant,omitempty"`
 }
 
 // MetricDelta compares one metric pass rate.
@@ -65,11 +98,12 @@ type ScenarioDiff struct {
 
 // GateOptions describes pass/fail thresholds for an eval report.
 type GateOptions struct {
-	MinScoreRatio       float64
-	RequireAllPassed    bool
-	MaxRegression       float64
-	MetricMinRatios     map[string]float64
-	FailOnMissingMetric bool
+	MinScoreRatio             float64
+	RequireAllPassed          bool
+	MaxRegression             float64
+	RequireComparableBaseline bool
+	MetricMinRatios           map[string]float64
+	FailOnMissingMetric       bool
 }
 
 // GateResult is the machine-readable outcome of applying thresholds.
@@ -84,34 +118,54 @@ func BuildReport(path string, results []Result) Report {
 	metricCounts := map[string]*MetricSummary{}
 
 	for _, result := range results {
-		if result.Status == "passed" || result.Status == "dry_run" {
+		scenarioScore := result.Score
+		measured := false
+		switch result.Status {
+		case "passed":
 			report.Passed++
+			measured = true
+		case "dry_run":
+			report.DryRun++
+			scenarioScore = ScoreSummary{}
+		case "failed":
+			report.Failed++
+			measured = true
+		default:
+			report.Failed++
+			scenarioScore = ScoreSummary{}
 		}
-		report.Score.Passed += result.Score.Passed
-		report.Score.Total += result.Score.Total
 
-		for name, ok := range result.Metrics {
-			summary := metricCounts[name]
-			if summary == nil {
-				summary = &MetricSummary{Name: name}
-				metricCounts[name] = summary
-			}
-			summary.Total++
-			if ok {
-				summary.Passed++
+		// Only passed/failed results reached actual agent + verification execution.
+		// Older or malformed JSONL may attach synthetic successes to dry-run,
+		// setup_failed, fixture_missing, or agent_command_missing rows; none is
+		// valid score evidence.
+		if measured {
+			report.Score.Passed += result.Score.Passed
+			report.Score.Total += result.Score.Total
+
+			for name, ok := range result.Metrics {
+				summary := metricCounts[name]
+				if summary == nil {
+					summary = &MetricSummary{Name: name}
+					metricCounts[name] = summary
+				}
+				summary.Total++
+				if ok {
+					summary.Passed++
+				}
 			}
 		}
 
 		report.Scenarios = append(report.Scenarios, ScenarioSummary{
-			ID:       result.ScenarioID,
-			Variant:  resultVariant(result),
-			Status:   result.Status,
-			Score:    result.Score,
-			Error:    result.Error,
-			Duration: result.DurationMillis,
+			ID:               result.ScenarioID,
+			Variant:          resultVariant(result),
+			ScenarioSpecHash: result.ScenarioSpecHash,
+			Status:           result.Status,
+			Score:            scenarioScore,
+			Error:            result.Error,
+			Duration:         result.DurationMillis,
 		})
 	}
-	report.Failed = report.Count - report.Passed
 	if report.Score.Total > 0 {
 		report.Score.Ratio = float64(report.Score.Passed) / float64(report.Score.Total)
 	}
@@ -145,63 +199,137 @@ func CompareReports(baseline, current Report) Comparison {
 	cmp := Comparison{
 		BaselinePath: baseline.ResultsPath,
 		CurrentPath:  current.ResultsPath,
-		ScoreDelta:   current.Score.Ratio - baseline.Score.Ratio,
-		PassedDelta:  current.Passed - baseline.Passed,
 	}
-
-	baseMetrics := make(map[string]MetricSummary, len(baseline.Metrics))
-	currentMetrics := make(map[string]MetricSummary, len(current.Metrics))
-	names := map[string]bool{}
-	for _, metric := range baseline.Metrics {
-		baseMetrics[metric.Name] = metric
-		names[metric.Name] = true
-	}
-	for _, metric := range current.Metrics {
-		currentMetrics[metric.Name] = metric
-		names[metric.Name] = true
-	}
-	for name := range names {
-		base, inBase := baseMetrics[name]
-		cur, inCur := currentMetrics[name]
-		if !inBase || !inCur {
-			// Metric present in only ONE report (e.g. a --scenario-scoped subset
-			// run compared against a full baseline). The absent side would default
-			// to Ratio=0, producing a spurious full-magnitude ±100% delta that
-			// DiagnoseReport flags as a "regression" and tells the user to revert a
-			// change for a metric that was simply never measured. Not comparable —
-			// skip it.
-			continue
-		}
-		cmp.Metrics = append(cmp.Metrics, MetricDelta{
-			Name:          name,
-			BaselineRatio: base.Ratio,
-			CurrentRatio:  cur.Ratio,
-			Delta:         cur.Ratio - base.Ratio,
-		})
-	}
-	sort.Slice(cmp.Metrics, func(i, j int) bool {
-		if cmp.Metrics[i].Delta != cmp.Metrics[j].Delta {
-			return cmp.Metrics[i].Delta < cmp.Metrics[j].Delta
-		}
-		return cmp.Metrics[i].Name < cmp.Metrics[j].Name
-	})
 
 	baseScenarios := make(map[string]ScenarioSummary, len(baseline.Scenarios))
 	currentScenarios := make(map[string]ScenarioSummary, len(current.Scenarios))
-	scenarioKeys := map[string]bool{}
+	baseCounts := make(map[string]int, len(baseline.Scenarios))
+	currentCounts := make(map[string]int, len(current.Scenarios))
 	for _, scenario := range baseline.Scenarios {
 		key := scenarioKey(scenario.ID, scenario.Variant)
 		baseScenarios[key] = scenario
-		scenarioKeys[key] = true
+		baseCounts[key]++
 	}
 	for _, scenario := range current.Scenarios {
 		key := scenarioKey(scenario.ID, scenario.Variant)
 		currentScenarios[key] = scenario
-		scenarioKeys[key] = true
+		currentCounts[key]++
 	}
-	for key := range scenarioKeys {
-		base := baseScenarios[key]
-		cur := currentScenarios[key]
+
+	mismatch := CohortMismatch{}
+	for key := range baseScenarios {
+		if _, ok := currentScenarios[key]; !ok {
+			id, variant := splitScenarioKey(key)
+			mismatch.BaselineOnly = append(mismatch.BaselineOnly, ScenarioIdentity{ID: id, Variant: variant})
+		}
+	}
+	for key := range currentScenarios {
+		if _, ok := baseScenarios[key]; !ok {
+			id, variant := splitScenarioKey(key)
+			mismatch.CurrentOnly = append(mismatch.CurrentOnly, ScenarioIdentity{ID: id, Variant: variant})
+		}
+	}
+	for key, count := range baseCounts {
+		if count > 1 {
+			id, variant := splitScenarioKey(key)
+			mismatch.BaselineDuplicates = append(mismatch.BaselineDuplicates, ScenarioIdentity{ID: id, Variant: variant})
+		}
+	}
+	for key, count := range currentCounts {
+		if count > 1 {
+			id, variant := splitScenarioKey(key)
+			mismatch.CurrentDuplicates = append(mismatch.CurrentDuplicates, ScenarioIdentity{ID: id, Variant: variant})
+		}
+	}
+	for key, base := range baseScenarios {
+		cur, ok := currentScenarios[key]
+		if !ok || baseCounts[key] != 1 || currentCounts[key] != 1 {
+			continue
+		}
+		baseHash := strings.TrimSpace(base.ScenarioSpecHash)
+		currentHash := strings.TrimSpace(cur.ScenarioSpecHash)
+		// The field is additive for compatibility with existing baselines. Once
+		// both sides provide it, a changed prompt/contract/fixture is a different
+		// cohort even when the scenario ID stayed the same.
+		if baseHash != "" && currentHash != "" && baseHash != currentHash {
+			id, variant := splitScenarioKey(key)
+			mismatch.SpecMismatches = append(mismatch.SpecMismatches, ScenarioIdentity{ID: id, Variant: variant})
+		}
+	}
+	sortScenarioIdentities(mismatch.BaselineOnly)
+	sortScenarioIdentities(mismatch.CurrentOnly)
+	sortScenarioIdentities(mismatch.BaselineDuplicates)
+	sortScenarioIdentities(mismatch.CurrentDuplicates)
+	sortScenarioIdentities(mismatch.SpecMismatches)
+	if len(mismatch.BaselineOnly) > 0 || len(mismatch.CurrentOnly) > 0 ||
+		len(mismatch.BaselineDuplicates) > 0 || len(mismatch.CurrentDuplicates) > 0 ||
+		len(mismatch.SpecMismatches) > 0 {
+		cmp.CohortMismatch = &mismatch
+	}
+	invalid := ComparisonInvalidEvidence{
+		BaselineEmpty: len(baseline.Scenarios) == 0,
+		CurrentEmpty:  len(current.Scenarios) == 0,
+	}
+	invalid.BaselineDryRun, invalid.BaselineNotExecuted = invalidScenarioEvidenceCounts(baseline.Scenarios)
+	invalid.CurrentDryRun, invalid.CurrentNotExecuted = invalidScenarioEvidenceCounts(current.Scenarios)
+	if invalid.BaselineEmpty || invalid.CurrentEmpty || invalid.BaselineDryRun > 0 || invalid.CurrentDryRun > 0 ||
+		invalid.BaselineNotExecuted > 0 || invalid.CurrentNotExecuted > 0 {
+		cmp.InvalidEvidence = &invalid
+	}
+	if cmp.CohortMismatch == nil && cmp.InvalidEvidence == nil {
+		cmp.ScoreDelta = current.Score.Ratio - baseline.Score.Ratio
+		cmp.PassedDelta = current.Passed - baseline.Passed
+	}
+
+	if cmp.CohortMismatch == nil && cmp.InvalidEvidence == nil {
+		baseMetrics := make(map[string]MetricSummary, len(baseline.Metrics))
+		currentMetrics := make(map[string]MetricSummary, len(current.Metrics))
+		names := map[string]bool{}
+		for _, metric := range baseline.Metrics {
+			baseMetrics[metric.Name] = metric
+			names[metric.Name] = true
+		}
+		for _, metric := range current.Metrics {
+			currentMetrics[metric.Name] = metric
+			names[metric.Name] = true
+		}
+		for name := range names {
+			base, inBase := baseMetrics[name]
+			cur, inCur := currentMetrics[name]
+			if !inBase || !inCur {
+				// A metric that exists in only one report was not measured on
+				// both sides and cannot produce a meaningful delta.
+				continue
+			}
+			cmp.Metrics = append(cmp.Metrics, MetricDelta{
+				Name:          name,
+				BaselineRatio: base.Ratio,
+				CurrentRatio:  cur.Ratio,
+				Delta:         cur.Ratio - base.Ratio,
+			})
+		}
+		sort.Slice(cmp.Metrics, func(i, j int) bool {
+			if cmp.Metrics[i].Delta != cmp.Metrics[j].Delta {
+				return cmp.Metrics[i].Delta < cmp.Metrics[j].Delta
+			}
+			return cmp.Metrics[i].Name < cmp.Metrics[j].Name
+		})
+	}
+
+	// Per-scenario deltas are meaningful for the intersection even when the
+	// overall cohorts differ. Missing identities are represented above rather
+	// than compared against zero-valued placeholder scenarios.
+	for key, base := range baseScenarios {
+		if cmp.InvalidEvidence != nil {
+			break
+		}
+		cur, ok := currentScenarios[key]
+		if !ok || baseCounts[key] != 1 || currentCounts[key] != 1 {
+			continue
+		}
+		if base.ScenarioSpecHash != "" && cur.ScenarioSpecHash != "" && base.ScenarioSpecHash != cur.ScenarioSpecHash {
+			continue
+		}
 		id, variant := splitScenarioKey(key)
 		cmp.Scenarios = append(cmp.Scenarios, ScenarioDiff{
 			ID:             id,
@@ -239,15 +367,43 @@ func EvaluateGate(report Report, comparison *Comparison, opts GateOptions) GateR
 		// signal.
 		if report.Count == 0 {
 			fail("no scenarios ran — require-pass expects at least one (check the scenario filter/path)")
-		} else if report.Failed > 0 {
-			fail("%d scenario(s) failed", report.Failed)
+		} else {
+			if report.DryRun > 0 {
+				fail("%d scenario(s) were dry-run — require-pass requires actual execution", report.DryRun)
+			}
+			if report.Failed > 0 {
+				fail("%d scenario(s) failed", report.Failed)
+			}
 		}
 	}
 	if opts.MinScoreRatio > 0 && report.Score.Ratio < opts.MinScoreRatio {
 		fail("score %.1f%% is below required %.1f%%", report.Score.Ratio*100, opts.MinScoreRatio*100)
 	}
-	if comparison != nil && opts.MaxRegression > 0 && comparison.ScoreDelta < -opts.MaxRegression {
-		fail("score regressed %.1fpp, exceeding allowed %.1fpp", -comparison.ScoreDelta*100, opts.MaxRegression*100)
+	if opts.RequireComparableBaseline {
+		if comparison == nil {
+			fail("a comparable baseline is required for the regression gate")
+		} else if comparison.InvalidEvidence != nil {
+			fail(
+				"comparison contains invalid evidence: empty baseline=%t/current=%t; dry-run evidence=%d baseline/%d current; not-executed=%d baseline/%d current",
+				comparison.InvalidEvidence.BaselineEmpty,
+				comparison.InvalidEvidence.CurrentEmpty,
+				comparison.InvalidEvidence.BaselineDryRun,
+				comparison.InvalidEvidence.CurrentDryRun,
+				comparison.InvalidEvidence.BaselineNotExecuted,
+				comparison.InvalidEvidence.CurrentNotExecuted,
+			)
+		} else if comparison.CohortMismatch != nil {
+			fail(
+				"comparison cohort mismatch: %d baseline-only, %d current-only, %d duplicate baseline, %d duplicate current, and %d changed-spec scenario variant(s)",
+				len(comparison.CohortMismatch.BaselineOnly),
+				len(comparison.CohortMismatch.CurrentOnly),
+				len(comparison.CohortMismatch.BaselineDuplicates),
+				len(comparison.CohortMismatch.CurrentDuplicates),
+				len(comparison.CohortMismatch.SpecMismatches),
+			)
+		} else if comparison.ScoreDelta < -opts.MaxRegression {
+			fail("score regressed %.1fpp, exceeding allowed %.1fpp", -comparison.ScoreDelta*100, opts.MaxRegression*100)
+		}
 	}
 
 	for name, minRatio := range opts.MetricMinRatios {
@@ -265,6 +421,30 @@ func EvaluateGate(report Report, comparison *Comparison, opts GateOptions) GateR
 
 	sort.Strings(gate.Failures)
 	return gate
+}
+
+func sortScenarioIdentities(identities []ScenarioIdentity) {
+	sort.Slice(identities, func(i, j int) bool {
+		if identities[i].ID != identities[j].ID {
+			return identities[i].ID < identities[j].ID
+		}
+		return identities[i].Variant < identities[j].Variant
+	})
+}
+
+func invalidScenarioEvidenceCounts(scenarios []ScenarioSummary) (dryRun, notExecuted int) {
+	for _, scenario := range scenarios {
+		switch scenario.Status {
+		case "passed", "failed":
+			// These statuses are assigned only after the agent and verification
+			// commands ran, so both are legitimate measurements.
+		case "dry_run":
+			dryRun++
+		default:
+			notExecuted++
+		}
+	}
+	return dryRun, notExecuted
 }
 
 func ParseMetricThresholds(values []string) (map[string]float64, error) {
@@ -343,6 +523,9 @@ func parseRatio(value string) (float64, error) {
 	ratio, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid ratio %q", value)
+	}
+	if math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+		return 0, fmt.Errorf("ratio must be a finite number")
 	}
 	if percent || ratio > 1 {
 		ratio /= 100

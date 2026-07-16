@@ -69,7 +69,11 @@ func TestAllSpawnPathsUseFewShot(t *testing.T) {
 	for line := range strings.SplitSeq(string(src), "\n") {
 		// Some goroutines predeclare result so their panic-recovery defer can
 		// publish/finalize that same value; accept both := and = assignments.
-		if !strings.Contains(line, ".Run(") || !strings.Contains(line, "result, err") {
+		// Synchronous paths intentionally use runAgentWithPanicRecovery so a
+		// panic after a stateful tool still publishes retry provenance.
+		isDirectRun := strings.Contains(line, ".Run(")
+		isContainedSyncRun := strings.Contains(line, "runAgentWithPanicRecovery(")
+		if (!isDirectRun && !isContainedSyncRun) || !strings.Contains(line, "result, err") {
 			continue
 		}
 		calls++

@@ -122,7 +122,7 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			a.saveRecoverySnapshot()
 
 			// Record side effects for active plan step (idempotency guard).
-			if a.planManager != nil && a.planManager.IsExecuting() {
+			if !tools.IsReadOnlyForPlanMode(name) && a.planManager != nil && a.planManager.IsExecuting() {
 				if p := a.planManager.GetCurrentPlan(); p != nil {
 					stepID := a.planManager.GetCurrentStepID()
 					if stepID > 0 {
@@ -535,7 +535,7 @@ func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string
 		// Attributing to the wrong step would corrupt RunLedger/rollback
 		// data, which is worse than the current no-op — so this degrades
 		// gracefully (same as today) under parallel execution instead.
-		if a.planManager != nil && a.planManager.IsExecuting() && a.inFlightDelegatedSteps.Load() == 1 {
+		if !tools.IsReadOnlyForPlanMode(toolName) && a.planManager != nil && a.planManager.IsExecuting() && a.inFlightDelegatedSteps.Load() == 1 {
 			if p := a.planManager.GetCurrentPlan(); p != nil {
 				stepID := a.planManager.GetCurrentStepID()
 				if stepID > 0 {
@@ -638,6 +638,12 @@ func (a *App) runStopHooks(ctx context.Context, response string) {
 	if !ok {
 		return
 	}
+	// RunStop may have been in-flight when Esc cancelled the turn. Recheck after
+	// the subprocess returns: a context-insensitive/FailOnError hook can report a
+	// block on cancellation, but that verdict no longer owns a continuation.
+	if ctx.Err() != nil {
+		return
+	}
 	name := blocked.Hook.Name
 	if name == "" {
 		name = blocked.Hook.Command
@@ -654,17 +660,28 @@ func (a *App) runStopHooks(ctx context.Context, response string) {
 	}
 
 	followUp := fmt.Sprintf("[Stop hook %q asks you to continue] %s", name, reason)
+	// Serialize the post-hook decision with the same authoritative Esc barrier
+	// as FIFO/recovery ownership. Either the continuation is committed first and
+	// a later Esc resets+drains it, or cancellation wins and this code observes
+	// the dead context/closed gate without reviving stopHookActive.
+	a.sessionLeaseMu.Lock()
 	a.mu.Lock()
+	if ctx.Err() != nil || a.dropSteerLeftovers {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		return
+	}
 	a.stopHookActive = true
-	a.mu.Unlock()
 	if _, ok := a.enqueuePending(followUp); !ok {
 		// Queue full — drop the continuation rather than displace user input.
-		a.mu.Lock()
 		a.stopHookActive = false
 		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
 		a.currentPresenter().Warning(fmt.Sprintf("Stop hook %q wanted a continuation but the queue is full", name))
 		return
 	}
+	a.mu.Unlock()
+	a.sessionLeaseMu.Unlock()
 	a.currentPresenter().Warning(fmt.Sprintf("Stop hook %q: continuing — %s", name, truncateRunesApp(reason, 120)))
 }
 

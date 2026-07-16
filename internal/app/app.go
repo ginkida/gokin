@@ -231,6 +231,13 @@ type App struct {
 
 	// Session persistence
 	sessionManager *chat.SessionManager
+	// sessionLeaseMu serializes ownership changes for the active persisted
+	// session. A switch holds both the old and target writer leases until the
+	// old state is synchronously flushed and the target state is restored.
+	// Callers must not enter these methods while holding a.mu; the switch may
+	// briefly take a.mu to publish session-derived scratchpad state.
+	sessionLeaseMu sync.Mutex
+	sessionLease   *chat.SessionWriterLease
 
 	// New feature integrations
 	searchCache *cache.SearchCache
@@ -462,8 +469,21 @@ type App struct {
 
 	// Type-ahead pending queue (FIFO, bounded) — see pending_queue.go for the
 	// accessors; never touch the slice directly.
-	pendingQueue []string
+	pendingQueue []pendingRequest
 	pendingMu    sync.Mutex
+	// recoveryEpoch invalidates a retry persistence operation that began before
+	// /clear established a new conversation root but reached the lease boundary
+	// afterwards.
+	recoveryEpoch atomic.Uint64
+	// recoveryTimerMu owns the one-live-timer-per-durable-generation registry.
+	// It is an independent leaf lock: timer helpers never hold it while acquiring
+	// sessionLeaseMu or any of the application locks listed above.
+	recoveryTimerMu sync.Mutex
+	recoveryTimers  map[recoveryTimerKey]*recoveryTimerRegistration
+	// recoveryAwaitingDispatch contains only claims made by this process which
+	// have not yet started or entered the FIFO. Persisted claimed records absent
+	// from this map remain ambiguous and are never released automatically.
+	recoveryAwaitingDispatch map[recoveryTimerKey]struct{}
 
 	// Automatic retry tracking for rate-limit failures.
 	rateLimitRetryMu    sync.Mutex
@@ -519,6 +539,15 @@ func (a *App) markOnboardingWelcomeSeen() {
 
 // Run starts the application.
 func (a *App) Run() error {
+	// Interactive runs own the active session lease for their full lifetime,
+	// including any runtime /resume switches. Keep this defer at the outermost
+	// boundary so early returns and panics do not strand an in-process lease.
+	defer func() {
+		if releaseErr := a.ReleaseSessionWriterLease(); releaseErr != nil {
+			logging.Warn("failed to release session writer lease on app exit", "error", releaseErr)
+		}
+	}()
+
 	// NOTE: Allowed dirs prompt is now done in Builder.checkAllowedDirs()
 	// before tool creation, so PathValidator gets correct directories.
 
@@ -626,21 +655,16 @@ func (a *App) Run() error {
 				a.tui.AddSystemMessage(fmt.Sprintf(
 					"Skipped auto-resume: previous session was on %s but you're now on %s (history formats are incompatible). Use /resume %s to try anyway, or /clear to stay fresh.",
 					state.Provider, currentProvider, info.ID))
-			} else if restoreErr := a.sessionManager.RestoreFromState(state); restoreErr != nil {
-				logging.Warn("failed to restore session", "error", restoreErr)
-			} else {
-				sessionRestored = true
-				// Sync scratchpad from restored session
-				a.scratchpad = a.session.GetScratchpad()
-				if a.agentRunner != nil {
-					a.agentRunner.SetSharedScratchpad(a.scratchpad)
+			} else if restoredState, restoreErr := a.SwitchSession(a.ctx, state, false); restoreErr != nil {
+				logging.Warn("failed to restore session", "session_id", info.ID, "error", restoreErr)
+				if errors.Is(restoreErr, chat.ErrSessionWriterLeaseBusy) {
+					a.tui.AddSystemMessage(fmt.Sprintf(
+						"Skipped auto-resume: session %s is already open in another Gokin process. Started a fresh protected session instead.",
+						info.ID))
 				}
-				// Notify TUI about restored scratchpad
-				a.safeSendToProgram(ui.ScratchpadMsg(a.scratchpad))
-
-				// Restore tool checkpoints into the executor's journal
-				a.restoreToolCheckpoints()
-
+			} else {
+				state = restoredState
+				sessionRestored = true
 				// Notify user about restored session
 				a.tui.AddSystemMessage(fmt.Sprintf("Restored session from %s (%d messages)",
 					humanizeAge(age), len(state.History)))
@@ -830,6 +854,10 @@ func (a *App) Run() error {
 	a.mu.Lock()
 	a.running = true
 	a.mu.Unlock()
+	// Only now is the restored session fully selected and the UI program
+	// published. Resume durable scheduled retries with their exact checkpoint
+	// lineage; claimed entries remain fail-closed for manual inspection.
+	a.resumePersistedRecoveries(true)
 
 	// === PHASE 4: Initialize UI Auto-Update System ===
 	a.initializeUIUpdateSystem()
@@ -986,7 +1014,61 @@ func (a *App) prepareSteerMessage(message string) (string, bool) {
 
 // handleSubmit handles user message submission.
 func (a *App) handleSubmit(message string) {
+	a.handleSubmitWithIntent(message, true)
+}
+
+// handleSubmitWithIntent distinguishes a live user action from a programmatic
+// retry. While a cancelled foreground is still unwinding, explicit input is
+// queued with provenance instead of reopening the gate; a late timer/resubmit
+// remains blocked by that cancellation boundary.
+func (a *App) handleSubmitWithIntent(message string, explicitUser bool) {
+	a.sessionLeaseMu.Lock()
 	a.mu.Lock()
+	if explicitUser && a.processing && a.dropSteerLeftovers {
+		pos, ok := a.enqueuePostCancelUserPending(message)
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		a.acknowledgeQueuedUserMessage(message, pos, ok)
+		return
+	}
+	if !explicitUser && a.dropSteerLeftovers {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		logging.Debug("programmatic resubmit blocked by active cancellation gate")
+		return
+	}
+	// When no cancelled foreground remains, a live Enter owns the next
+	// foreground directly and may intentionally repeat an exact recovery.
+	if explicitUser && !a.processing {
+		a.dropSteerLeftovers = false
+	}
+	a.mu.Unlock()
+	a.sessionLeaseMu.Unlock()
+	if a.tryResumeScheduledRecovery(message) {
+		return
+	}
+	a.sessionLeaseMu.Lock()
+	acceptedLineage := conversationLineage{epoch: a.recoveryEpoch.Load()}
+	if a.session != nil {
+		acceptedLineage.sessionID = a.session.GetID()
+	}
+	a.mu.Lock()
+	// Esc may have landed after the optimistic check above. Preserve the same
+	// explicit provenance instead of steering into the cancelled executor or
+	// appending an indistinguishable callback-owned FIFO entry.
+	if explicitUser && a.processing && a.dropSteerLeftovers {
+		pos, ok := a.enqueuePostCancelUserPending(message)
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		a.acknowledgeQueuedUserMessage(message, pos, ok)
+		return
+	}
+	if !explicitUser && a.dropSteerLeftovers {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		logging.Debug("programmatic resubmit blocked by concurrent cancellation")
+		return
+	}
 	if a.processing {
 		// Claude-Code-style "message during work": a follow-up typed while a
 		// request is in flight is injected into the CURRENT turn via the
@@ -995,6 +1077,7 @@ func (a *App) handleSubmit(message string) {
 		// model can adjust course mid-task. The user sees their message echoed
 		// immediately and a "steered" toast.
 		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
 
 		if steerMsg, steerable := a.prepareSteerMessage(message); steerable &&
 			a.executor != nil && a.executor.TryQueueUserSteer(steerMsg) {
@@ -1007,42 +1090,88 @@ func (a *App) handleSubmit(message string) {
 		}
 
 		// The executor may be absent or already outside its steer-acceptance
-		// window (post-processing, completion review, final shutdown). Queue the
-		// message as a fresh request instead of handing it to a finished loop.
-		pos, ok := a.enqueuePending(message)
-		if !ok {
-			logging.Debug("pending queue full — message rejected", "len", len(message))
-			a.safeSendToProgramAsync(ui.QueuedMessageRejectedMsg{
-				Message: message,
-				Reason:  fmt.Sprintf("Queue full (%d waiting)", pos),
-				Waiting: pos,
-			})
-			return
-		}
-		a.journalEvent("request_queued", map[string]any{
-			"message_preview": previewForJournal(message),
-			"queue_position":  pos,
-		})
-		a.saveRecoverySnapshot()
-
-		feedback := []tea.Msg{ui.QueuedCountMsg(pos)}
-		if pos == 1 {
-			feedback = append(feedback, ui.StreamTextMsg("📥 Queued — will process after the current request\n"))
-		} else {
-			feedback = append(feedback, ui.StreamTextMsg(fmt.Sprintf("📥 Queued (#%d in line)\n", pos)))
-		}
-		a.safeSendToProgramAsync(feedback...)
+		// window. Re-enter the lease barrier before committing fallback ownership:
+		// Esc or the old finalizer may have changed both gate and processing while
+		// TryQueueUserSteer was deciding.
+		a.commitSubmitAfterSteerMiss(message, explicitUser)
 		return
 	}
 	a.processing = true
 	a.dropSteerLeftovers = false
 	ctx := a.claimForegroundContextLocked()
+	ctx = withConversationLineage(ctx, acceptedLineage.sessionID, acceptedLineage.epoch)
 
 	// Parse command BEFORE unlocking to avoid race condition
 	// (parsing is fast and doesn't need to be concurrent)
 	name, args, isCmd := a.commandHandler.Parse(message)
 	a.mu.Unlock()
+	a.sessionLeaseMu.Unlock()
 	a.startAcceptedSubmit(ctx, message, name, args, isCmd)
+}
+
+// commitSubmitAfterSteerMiss is the ownership commit point after an optimistic
+// steering attempt returned false. It must repeat the full lease->app barrier:
+// cancellation or foreground completion may have occurred while steering made
+// its decision, so a blind FIFO append can be drained, stranded, or overtaken.
+func (a *App) commitSubmitAfterSteerMiss(message string, explicitUser bool) {
+	a.sessionLeaseMu.Lock()
+	commitLineage := conversationLineage{epoch: a.recoveryEpoch.Load()}
+	if a.session != nil {
+		commitLineage.sessionID = a.session.GetID()
+	}
+	a.mu.Lock()
+	if explicitUser && a.processing && a.dropSteerLeftovers {
+		pos, ok := a.enqueuePostCancelUserPending(message)
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		a.acknowledgeQueuedUserMessage(message, pos, ok)
+		return
+	}
+	if !explicitUser && a.dropSteerLeftovers {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		logging.Debug("programmatic resubmit blocked after steer miss cancellation")
+		return
+	}
+	if a.processing {
+		pos, ok := a.enqueuePending(message)
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		a.acknowledgeQueuedUserMessage(message, pos, ok)
+		return
+	}
+	a.processing = true
+	a.dropSteerLeftovers = false
+	ctx := a.claimForegroundContextLocked()
+	ctx = withConversationLineage(ctx, commitLineage.sessionID, commitLineage.epoch)
+	name, args, isCmd := a.commandHandler.Parse(message)
+	a.mu.Unlock()
+	a.sessionLeaseMu.Unlock()
+	a.startAcceptedSubmit(ctx, message, name, args, isCmd)
+}
+
+func (a *App) acknowledgeQueuedUserMessage(message string, pos int, ok bool) {
+	if !ok {
+		logging.Debug("pending queue full — message rejected", "len", len(message))
+		a.safeSendToProgramAsync(ui.QueuedMessageRejectedMsg{
+			Message: message,
+			Reason:  fmt.Sprintf("Queue full (%d waiting)", pos),
+			Waiting: pos,
+		})
+		return
+	}
+	a.journalEvent("request_queued", map[string]any{
+		"message_preview": previewForJournal(message),
+		"queue_position":  pos,
+	})
+	a.saveRecoverySnapshot()
+	feedback := []tea.Msg{ui.QueuedCountMsg(pos)}
+	if pos == 1 {
+		feedback = append(feedback, ui.StreamTextMsg("📥 Queued — will process after the current request\n"))
+	} else {
+		feedback = append(feedback, ui.StreamTextMsg(fmt.Sprintf("📥 Queued (#%d in line)\n", pos)))
+	}
+	a.safeSendToProgramAsync(feedback...)
 }
 
 // claimForegroundContextLocked installs cancellation ownership for a request
@@ -1067,6 +1196,31 @@ func (a *App) claimForegroundContextLocked() context.Context {
 // without an idle or ownerless interval where input can overtake it or Esc can
 // miss it.
 func (a *App) startAcceptedSubmit(ctx context.Context, message, name string, args []string, isCmd bool) {
+	a.startAcceptedSubmitWithRecovery(ctx, message, name, args, isCmd, nil)
+}
+
+func (a *App) startAcceptedSubmitWithRecovery(ctx context.Context, message, name string, args []string, isCmd bool, recovery []tools.ToolCheckpoint) {
+	a.startAcceptedSubmitWithRecoveryIdentity(
+		ctx, message, name, args, isCmd,
+		"", "", "", a.recoveryEpoch.Load(), recovery)
+}
+
+func (a *App) startAcceptedSubmitWithRecoveryIdentity(
+	ctx context.Context,
+	message, name string,
+	args []string,
+	isCmd bool,
+	recoveryID, recoverySessionID, recoveryMemoryQuery string,
+	recoveryEpoch uint64,
+	recovery []tools.ToolCheckpoint,
+) {
+	if recoverySessionID != "" {
+		ctx = withConversationLineage(ctx, recoverySessionID, recoveryEpoch)
+	} else if _, ok := conversationLineageFromContext(ctx); !ok {
+		lineage := a.captureConversationLineage()
+		ctx = withConversationLineage(ctx, lineage.sessionID, lineage.epoch)
+	}
+	ctx = withPersistedSideEffectRecovery(ctx, recoveryID, recoverySessionID, recovery)
 	// Journal and recovery AFTER unlock (saveRecoverySnapshot takes a.mu internally)
 	a.journalEvent("request_accept", map[string]any{
 		"message_preview": previewForJournal(message),
@@ -1100,12 +1254,34 @@ func (a *App) startAcceptedSubmit(ctx context.Context, message, name string, arg
 	// UI already echoed the raw @path text to scrollback (before onSubmit), so
 	// the display stays clean while the agent receives the referenced files.
 	// Best-effort: unchanged when there are no resolvable @refs.
-	agentMessage := a.expandAtReferences(message)
+	isRecovery := recoveryID != "" || recoverySessionID != "" || len(recovery) > 0
+	agentMessage, memoryQuery := a.prepareAgentMessageForSubmit(
+		message, recoveryMemoryQuery, isRecovery)
 
 	// Process message normally (coordinator is now integrated in agent system)
 	a.safeGo("message-processing", func() {
-		a.processMessageWithMemoryQuery(ctx, agentMessage, message)
+		if isRecovery && a.recoveryEpoch.Load() != recoveryEpoch {
+			logging.Info("discarded recovery invalidated before pipeline start",
+				"recovery_id", recoveryID, "session_id", recoverySessionID)
+			a.finishMessageProcessing()
+			return
+		}
+		a.processMessageWithMemoryQuery(ctx, agentMessage, memoryQuery)
 	})
+}
+
+func (a *App) prepareAgentMessageForSubmit(message, recoveryMemoryQuery string, recovery bool) (string, string) {
+	if !recovery {
+		return a.expandAtReferences(message), message
+	}
+	// Durable recovery.Message is already the exact expanded executable payload
+	// from the failed turn. Expanding it again could read a changed @file (or
+	// interpret @tokens inside its contents) under an old checkpoint generation.
+	// Keep it byte-for-byte and retain the original user query for memory lookup.
+	if recoveryMemoryQuery == "" {
+		recoveryMemoryQuery = message
+	}
+	return message, recoveryMemoryQuery
 }
 
 // handleResubmit dispatches a PROGRAMMATIC re-entry (rate-limit retry,
@@ -1120,12 +1296,19 @@ func (a *App) startAcceptedSubmit(ctx context.Context, message, name string, arg
 // worst case is a plain-text retry steered into a just-started turn — the
 // exact pre-check behavior, never a swallowed command.
 func (a *App) handleResubmit(message string) {
+	a.sessionLeaseMu.Lock()
 	a.mu.Lock()
+	if a.dropSteerLeftovers {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		logging.Debug("programmatic resubmit blocked by active cancellation gate")
+		return
+	}
 	busy := a.processing
-	a.mu.Unlock()
-
 	if busy {
 		pos, ok := a.enqueuePending(message)
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
 		if !ok {
 			logging.Debug("pending queue full — programmatic resubmit dropped", "len", len(message))
 			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry,
@@ -1140,7 +1323,122 @@ func (a *App) handleResubmit(message string) {
 		a.safeSendToProgram(ui.QueuedCountMsg(pos))
 		return
 	}
-	a.handleSubmit(message)
+	a.mu.Unlock()
+	a.sessionLeaseMu.Unlock()
+	a.handleSubmitWithIntent(message, false)
+}
+
+// handleRecoveryResubmit is the side-effect-aware variant used only for
+// rate-limit and timeout auto-retries. Its checkpoint snapshot travels with
+// the queued request, so a user turn that runs while the timer is waiting
+// cannot erase or replace the retry's replay generation.
+type recoveryDispatchOutcome uint8
+
+const (
+	recoveryDispatchIgnored recoveryDispatchOutcome = iota
+	recoveryDispatchStarted
+	recoveryDispatchQueued
+	recoveryDispatchReleased
+	recoveryDispatchBlocked
+)
+
+func (a *App) handleRecoveryResubmit(message, memoryQuery, recoveryID, recoverySessionID string, recoveryEpoch uint64, checkpoints []tools.ToolCheckpoint) recoveryDispatchOutcome {
+	// Serialize the lineage check and enqueue/start decision with /clear and
+	// session switching. In particular, a switch cannot slip between a durable
+	// claim and this proven-unstarted dispatch decision.
+	a.sessionLeaseMu.Lock()
+	a.mu.Lock()
+	if a.recoveryEpoch.Load() != recoveryEpoch ||
+		(recoverySessionID != "" && (a.session == nil || a.session.GetID() != recoverySessionID)) {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		logging.Warn("recovery resubmit ignored after session switch",
+			"recovery_id", recoveryID, "session_id", recoverySessionID)
+		return recoveryDispatchIgnored
+	}
+	if a.dropSteerLeftovers {
+		// Esc has closed the foreground handoff gate. A timer that claimed just
+		// after that durable boundary must not install a new owner or enter FIFO.
+		// Return a durable claim to scheduled, but leave it unscheduled in-process:
+		// explicit cancellation pauses automation until restart or /recovery.
+		a.mu.Unlock()
+		if recoveryID == "" {
+			a.sessionLeaseMu.Unlock()
+			logging.Debug("in-process recovery blocked by active cancellation gate")
+			return recoveryDispatchBlocked
+		}
+		key := recoveryTimerKey{sessionID: recoverySessionID, recoveryID: recoveryID}
+		commitUncertain, releaseErr := a.releaseClaimedRecoveriesLocked([]recoveryTimerKey{key})
+		a.sessionLeaseMu.Unlock()
+		if releaseErr == nil || commitUncertain {
+			a.finalizeReleasedRecoveries([]recoveryTimerKey{key}, "cancel_gate_before_dispatch", false)
+			message := "Safe retry was paused by cancellation; use /recovery to resume or inspect it"
+			if commitUncertain {
+				message = "Safe retry was paused, but storage could not confirm directory durability; inspect /recovery before restarting"
+				logging.Warn("cancel-gated recovery release committed with uncertain durability",
+					"recovery_id", recoveryID, "error", releaseErr)
+			}
+			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusWarning, Message: message})
+			return recoveryDispatchReleased
+		}
+		logging.Warn("cancel-gated recovery claim could not be released",
+			"recovery_id", recoveryID, "error", releaseErr)
+		a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusWarning,
+			Message: "Safe retry remains claimed after cancellation; inspect /recovery"})
+		return recoveryDispatchBlocked
+	}
+	busy := a.processing
+	if !busy {
+		a.processing = true
+		a.dropSteerLeftovers = false
+		ctx := a.claimForegroundContextLocked()
+		a.markRecoveryDispatched(recoverySessionID, recoveryID)
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		a.startAcceptedSubmitWithRecoveryIdentity(
+			ctx, message, "", nil, false,
+			recoveryID, recoverySessionID, memoryQuery, recoveryEpoch, checkpoints)
+		return recoveryDispatchStarted
+	}
+	pos, ok := a.enqueueRecoveryPending(message, memoryQuery, recoveryID, recoverySessionID, recoveryEpoch, checkpoints)
+	a.mu.Unlock()
+	if !ok {
+		if recoveryID == "" {
+			a.sessionLeaseMu.Unlock()
+			logging.Debug("pending queue full — in-process recovery resubmit rejected", "len", len(message))
+			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusWarning,
+				Message: fmt.Sprintf("Queue full (%d waiting) — non-durable retry was not queued", pos)})
+			return recoveryDispatchBlocked
+		}
+		key := recoveryTimerKey{sessionID: recoverySessionID, recoveryID: recoveryID}
+		commitUncertain, releaseErr := a.releaseClaimedRecoveriesLocked([]recoveryTimerKey{key})
+		a.sessionLeaseMu.Unlock()
+		if releaseErr == nil || commitUncertain {
+			a.finalizeReleasedRecoveries([]recoveryTimerKey{key}, "queue_full_before_dispatch", true)
+			logging.Debug("pending queue full — recovery returned to durable schedule", "len", len(message))
+			a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry,
+				Message: fmt.Sprintf("Queue full (%d waiting) — safe retry returned to its schedule", pos)})
+			if commitUncertain {
+				logging.Warn("unstarted recovery release committed with uncertain durability",
+					"recovery_id", recoveryID, "error", releaseErr)
+			}
+			return recoveryDispatchReleased
+		}
+		logging.Warn("pending queue full and recovery claim could not be released",
+			"recovery_id", recoveryID, "error", releaseErr)
+		a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusWarning,
+			Message: fmt.Sprintf("Queue full (%d waiting) — safe retry remains claimed; inspect /recovery", pos)})
+		return recoveryDispatchBlocked
+	}
+	a.markRecoveryDispatched(recoverySessionID, recoveryID)
+	a.sessionLeaseMu.Unlock()
+	a.journalEvent("request_queued", map[string]any{
+		"message_preview": previewForJournal(message),
+		"queue_position":  pos,
+		"source":          "side_effect_recovery",
+	})
+	a.safeSendToProgram(ui.QueuedCountMsg(pos))
+	return recoveryDispatchQueued
 }
 
 // detectUnslashedCommand returns a user-facing hint when the input looks
@@ -1914,24 +2212,38 @@ func (a *App) GetJournalReport() string {
 
 // GetRecoveryReport returns the latest persisted recovery snapshot.
 func (a *App) GetRecoveryReport() string {
+	var sb strings.Builder
 	if a.journal == nil {
-		return "Recovery snapshot unavailable: journal not initialized."
+		sb.WriteString("Recovery snapshot unavailable: journal not initialized.")
+	} else if snap, err := a.journal.LoadRecovery(); err != nil {
+		fmt.Fprintf(&sb, "Failed to load recovery snapshot: %v", err)
+	} else if snap == nil {
+		sb.WriteString("No recovery snapshot found.")
+	} else {
+		pendingDesc := fmt.Sprintf("%q", snap.PendingMessage)
+		if n := len(snap.PendingMessages); n > 1 {
+			pendingDesc = fmt.Sprintf("%d queued, next: %q", n, snap.PendingMessages[0])
+		}
+		fmt.Fprintf(&sb,
+			"Recovery snapshot:\n- updated: %s\n- session: %s\n- processing: %v\n- pending: %s\n- history_len: %d\n- plan_id: %s\n- current_step: %d",
+			snap.Timestamp.Format("2006-01-02 15:04:05"), snap.SessionID, snap.Processing, pendingDesc, snap.HistoryLen, snap.PlanID, snap.CurrentStepID,
+		)
 	}
-	snap, err := a.journal.LoadRecovery()
-	if err != nil {
-		return fmt.Sprintf("Failed to load recovery snapshot: %v", err)
+
+	if a.session != nil {
+		recoveries := a.session.GetPendingRecoveries()
+		if len(recoveries) > 0 {
+			sb.WriteString("\n\nDurable side-effect recoveries:")
+			for _, recovery := range recoveries {
+				fmt.Fprintf(&sb,
+					"\n- id: %s | state: %s | kind: %s | attempt: %d | checkpoints: %d | not_before: %s",
+					recovery.ID, recovery.State, recovery.Kind, recovery.Attempt,
+					len(recovery.Checkpoints), recovery.NotBefore.Format("2006-01-02 15:04:05"),
+				)
+			}
+		}
 	}
-	if snap == nil {
-		return "No recovery snapshot found."
-	}
-	pendingDesc := fmt.Sprintf("%q", snap.PendingMessage)
-	if n := len(snap.PendingMessages); n > 1 {
-		pendingDesc = fmt.Sprintf("%d queued, next: %q", n, snap.PendingMessages[0])
-	}
-	return fmt.Sprintf(
-		"Recovery snapshot:\n- updated: %s\n- session: %s\n- processing: %v\n- pending: %s\n- history_len: %d\n- plan_id: %s\n- current_step: %d",
-		snap.Timestamp.Format("2006-01-02 15:04:05"), snap.SessionID, snap.Processing, pendingDesc, snap.HistoryLen, snap.PlanID, snap.CurrentStepID,
-	)
+	return sb.String()
 }
 
 // GetObservabilityReport returns a unified operational report.
@@ -2397,7 +2709,34 @@ func (a *App) clearTodosForNewConversation() {
 }
 
 func (a *App) ClearConversation() {
-	a.session.Clear()
+	if err := a.ClearConversationChecked(); err != nil {
+		logging.Warn("conversation clear did not reach a fully durable boundary", "error", err)
+		message := "Conversation was not cleared because its durable session boundary could not be saved; no conversation state was discarded"
+		if errors.Is(err, errRecoveryCommitUncertain) {
+			message = "Conversation was cleared, but storage could not confirm rename durability — do not restart until session storage is healthy"
+		}
+		a.safeSendToProgramAsync(ui.StatusUpdateMsg{
+			Type: ui.StatusWarning, Message: message,
+		})
+	}
+}
+
+// ClearConversationChecked performs a fail-closed conversation reset and
+// reports whether its persistence boundary was definite. Commands that need
+// an honest success result use this method through an optional interface;
+// ClearConversation remains for compatibility with embedded integrations.
+func (a *App) ClearConversationChecked() error {
+	// Clear the executable retry lineage and persist that boundary synchronously
+	// while holding the same lease mutex as persist/claim/session switch. A
+	// periodic save is too late: a crash immediately after /clear must not
+	// resurrect and auto-run a scheduled mutation from the old conversation.
+	droppedRecoveries, clearPersistErr := a.clearConversationPersistenceBoundary()
+	if clearPersistErr != nil && !errors.Is(clearPersistErr, errRecoveryCommitUncertain) {
+		return fmt.Errorf("persist cleared recovery boundary: %w", clearPersistErr)
+	}
+	if droppedRecoveries > 0 {
+		logging.Info("discarded queued recoveries at conversation clear", "count", droppedRecoveries)
+	}
 
 	// /clear is a true conversation boundary. Invalidate both automatic
 	// session-summary memory (including its persisted file and any in-flight
@@ -2500,36 +2839,49 @@ func (a *App) ClearConversation() {
 	a.lastErrorTime = time.Time{}
 	a.stopHookActive = false
 	a.mu.Unlock()
+	if clearPersistErr != nil {
+		// By construction this is errRecoveryCommitUncertain (the early guard
+		// above already returned on any OTHER error) — the whole clear
+		// sequence ran unconditionally past that guard, so the conversation
+		// genuinely cleared. Wrap it with the exported commands-package
+		// marker (multi-%w — both sentinels stay errors.Is-reachable) so
+		// commands.clearConversationChecked's callers can tell "cleared,
+		// durability unconfirmed" apart from "did not clear" without this
+		// package's unexported sentinel leaking across the boundary.
+		return fmt.Errorf("%w: %w", commands.ErrConversationClearedUncertainDurability, clearPersistErr)
+	}
+	return nil
 }
 
 // CompactContextWithPlan clears the conversation and injects the plan summary.
 // This is called when a plan is approved to free up context space.
 //
-// Locking discipline: safeSendToProgram must never be called while a.mu is
-// held — it re-acquires a.mu internally and Go's Mutex is non-reentrant.
-// Same bug as the one ApplyConfig previously had. We emit the user toast
-// first (no lock needed for the outgoing message), then grab the lock for
-// the state mutation.
+// The root replacement shares /clear's durable recovery boundary so no older
+// timer/checkpoint generation can enter the approved plan context.
 func (a *App) CompactContextWithPlan(planSummary string) {
-	// Notify user about context clear — BEFORE taking the lock.
+	systemPrompt := a.promptBuilder.Build()
+	_, boundaryErr := a.replaceConversationPersistenceBoundary(func() {
+		a.session.SetSystemInstruction(systemPrompt)
+
+		// Inject the plan summary as a user message for execution context.
+		if planSummary != "" {
+			a.session.AddUserMessage("Execute the approved plan. Summary:\n\n" + planSummary)
+		}
+	})
+	if boundaryErr != nil {
+		logging.Warn("failed to persist compacted plan context", "error", boundaryErr)
+		if errors.Is(boundaryErr, errRecoveryCommitUncertain) {
+			a.client.SetSystemInstruction(systemPrompt)
+		}
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: "Plan context replacement could not be confirmed safely; plan execution was not started",
+		})
+		return
+	}
+	a.client.SetSystemInstruction(systemPrompt)
 	a.safeSendToProgram(ui.StreamTextMsg(
 		"\n📋 Context cleared for plan execution. Previous conversation archived.\n"))
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	// Clear the session
-	a.session.Clear()
-
-	// Re-set system instruction via API parameter
-	systemPrompt := a.promptBuilder.Build()
-	a.client.SetSystemInstruction(systemPrompt)
-	a.session.SetSystemInstruction(systemPrompt)
-
-	// Inject the plan summary as a user message for execution context
-	if planSummary != "" {
-		a.session.AddUserMessage("Execute the approved plan. Summary:\n\n" + planSummary)
-	}
 
 	// Log the context compaction
 	logging.Info("context compacted for plan execution",
@@ -3909,18 +4261,49 @@ func (a *App) applySettingToggle(requestID, key string, on bool) ui.SettingToggl
 // worker so the UI goroutine that triggered it isn't blocked by ApplyConfig.
 func (a *App) handleKeyEntrySubmit(requestID, provider, key string) {
 	a.safeGo("login-key-entry-apply", func() {
-		ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
+		// The masked modal used to execute /login outside the foreground gate.
+		// A provider switch could therefore clear the session while a model/tool
+		// turn was still mutating it. Claim the same exclusive slot as every
+		// slash command; if it is busy, keep the secret out of any plaintext FIFO
+		// and ask the user to retry after the active turn settles.
+		a.mu.Lock()
+		if a.processing || a.headlessRunActive {
+			a.mu.Unlock()
+			a.safeSendToProgram(ui.KeyEntryResultMsg{
+				RequestID: requestID,
+				Provider:  provider,
+				Message:   "Login was not applied because another request is still running; wait or cancel it, then enter the key again",
+			})
+			return
+		}
+		a.processing = true
+		a.dropSteerLeftovers = false
+		foregroundCtx := a.claimForegroundContextLocked()
+		a.mu.Unlock()
+
+		var outcome ui.KeyEntryResultMsg
+		outcome.RequestID = requestID
+		outcome.Provider = provider
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				logging.Error("masked login execution panicked",
+					"panic", panicValue, "stack", logging.PanicStack())
+				outcome.Message = fmt.Sprintf("Login failed: internal error: %v", panicValue)
+				outcome.Success = false
+				outcome.Warning = false
+				outcome.Output = ""
+			}
+			a.processingMu.Lock()
+			a.processingCancel = nil
+			a.processingMu.Unlock()
+			a.finishForegroundProcessing(func() { a.safeSendToProgram(outcome) })
+		}()
+
+		ctx, cancel := context.WithTimeout(foregroundCtx, 60*time.Second)
 		defer cancel()
 		result, err := a.commandHandler.Execute(ctx, "login", []string{provider, key}, a)
-		success, warning, feedback := keyEntryCommandOutcome(result, err)
-		a.safeSendToProgram(ui.KeyEntryResultMsg{
-			RequestID: requestID,
-			Provider:  provider,
-			Success:   success,
-			Warning:   warning,
-			Message:   feedback,
-			Output:    result,
-		})
+		outcome.Success, outcome.Warning, outcome.Message = keyEntryCommandOutcome(result, err)
+		outcome.Output = result
 	})
 }
 
@@ -4098,10 +4481,13 @@ func (a *App) CancelProcessing() {
 // second/idle interrupt without retaining a stale raw context.CancelFunc.
 func (a *App) cancelProcessing() bool {
 	feedback := make([]tea.Msg, 0, 2)
-	// processing state and its cancel owner are claimed under a.mu ->
-	// processingMu. Taking the same order here makes foreground handoff atomic:
-	// Esc observes either the old completed turn or the fully-owned FIFO head,
-	// never processing=true with an unowned accepted request.
+	// One lease barrier covers the foreground cancel owner, recovery epoch, FIFO
+	// drain, and durable claimed->scheduled release. A retry dispatcher takes the
+	// same sessionLeaseMu before a.mu, while foreground handoff captures lineage
+	// through that lease and then observes dropSteerLeftovers under a.mu. Esc
+	// therefore sees and cancels either side of the handoff, never a newly-owned
+	// retry that slipped between owner cancellation and the durable boundary.
+	a.sessionLeaseMu.Lock()
 	a.mu.Lock()
 	a.processingMu.Lock()
 	foregroundCancelled := a.processingCancel != nil
@@ -4112,12 +4498,15 @@ func (a *App) cancelProcessing() bool {
 	a.dropSteerLeftovers = true
 	a.processingMu.Unlock()
 	a.mu.Unlock()
+	drained, remaining, released, releasedKeys, releaseErr := a.cancelPendingAtRecoveryBoundaryLocked()
+	a.sessionLeaseMu.Unlock()
+	a.finalizePendingRecoveryCancelBoundary(releasedKeys)
 	cancelledAny := foregroundCancelled
 
-	// Close the steering window before draining the app FIFO. A callback that
-	// already extracted leftovers serializes its all-or-nothing enqueue with
-	// dropSteerLeftovers under a.mu; callbacks that arrive later see the flag
-	// and discard the cancelled turn's messages.
+	// Close the executor's steering window after the authoritative drain. A
+	// callback that already extracted leftovers serializes its all-or-nothing
+	// enqueue with dropSteerLeftovers under a.mu; callbacks that arrive later see
+	// the flag and discard the cancelled turn's messages.
 	if a.executor != nil {
 		a.executor.CancelUserSteering()
 	}
@@ -4140,13 +4529,27 @@ func (a *App) cancelProcessing() bool {
 		}
 	}
 
-	// Drain the type-ahead queue: the cancelled request's dispatch defer would
-	// otherwise pop a queued message and start a NEW request right after the user
-	// pressed Esc/Ctrl+C to stop. Done outside processingMu (drainPending takes
-	// pendingMu; safeSendToProgram takes a.mu) to avoid any lock ordering risk.
-	if cleared := a.drainPending(); cleared > 0 {
+	// Ordinary type-ahead was drained inside the same barrier. A queued durable
+	// recovery was claimed before entering the FIFO, so Esc first persisted the
+	// proven-unstarted claimed->scheduled transition. On a definite save failure
+	// it stays claimed and manual-only; putting it back in the FIFO would let the
+	// cancelled turn's finalizer run it immediately after Esc.
+	if drained > 0 || released > 0 || releaseErr != nil || remaining > 0 {
 		cancelledAny = true
-		feedback = append(feedback, ui.QueuedCountMsg(0))
+		feedback = append(feedback, ui.QueuedCountMsg(remaining))
+		if released > 0 {
+			feedback = append(feedback, ui.StatusUpdateMsg{
+				Type: ui.StatusInfo, Message: fmt.Sprintf(
+					"Returned %d queued safe retry(s) to their durable schedule", released),
+			})
+		}
+		if releaseErr != nil {
+			message := "Some queued safe retries could not be released durably and remain claimed; inspect /recovery"
+			if errors.Is(releaseErr, errRecoveryCommitUncertain) {
+				message = "Queued safe retries were released, but storage could not confirm directory durability"
+			}
+			feedback = append(feedback, ui.StatusUpdateMsg{Type: ui.StatusWarning, Message: message})
+		}
 	}
 
 	// A Stop-hook continuation may have been the thing we just cancelled (its

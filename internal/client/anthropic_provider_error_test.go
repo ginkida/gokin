@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,6 +67,31 @@ func TestDeepSeekStandardErrorEvent_NotHijackedByGLMClassifier(t *testing.T) {
 	}
 }
 
+func TestRequiresThinkingReplayConcurrentWithThinkingBudget(t *testing.T) {
+	c := &AnthropicClient{config: AnthropicConfig{
+		Provider: "deepseek", BaseURL: DefaultDeepSeekBaseURL, EnableThinking: true,
+	}}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5000; i++ {
+			if i%2 == 0 {
+				c.SetThinkingBudget(4096)
+			} else {
+				c.SetThinkingBudget(0)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5000; i++ {
+			_ = c.requiresThinkingReplay()
+		}
+	}()
+	wg.Wait()
+}
+
 // GLM's own error shape (numeric "code", no "type") must still classify
 // exactly as before — this fix must not regress GLM's own error path.
 func TestGLMErrorEvent_StillClassifiedByGLMPath(t *testing.T) {
@@ -98,5 +124,64 @@ func TestGLMErrorEvent_StillClassifiedByGLMPath(t *testing.T) {
 	}
 	if !IsOverloadError(streamErr) {
 		t.Errorf("IsOverloadError(%q) = false, want true", streamErr.Error())
+	}
+}
+
+func TestDeepSeekNumericHTTPError_NotClassifiedAsGLMTerminal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"code":"1308","message":"provider-specific quota"}}`)
+	}))
+	defer srv.Close()
+
+	c := &AnthropicClient{
+		config: AnthropicConfig{
+			Model: "deepseek-v4-pro", BaseURL: srv.URL, APIKey: "test",
+			Provider: "deepseek", StreamIdleTimeout: 5 * time.Second,
+		},
+		httpClient: srv.Client(),
+	}
+	_, err := c.SendMessageWithHistory(context.Background(),
+		[]*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}, "")
+	if err == nil {
+		t.Fatal("expected HTTP error")
+	}
+	if IsTerminalProviderError(err) {
+		t.Fatalf("non-GLM numeric code became a GLM terminal error: %T %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "1308") || !strings.Contains(err.Error(), "provider-specific quota") {
+		t.Fatalf("provider error details were lost: %v", err)
+	}
+}
+
+func TestDeepSeekBareNumericStreamError_NotClassifiedAsGLM(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"error\":{\"code\":\"1308\",\"message\":\"provider-specific quota\"}}\n\n")
+	}))
+	defer srv.Close()
+
+	c := &AnthropicClient{
+		config: AnthropicConfig{
+			Model: "deepseek-v4-pro", BaseURL: srv.URL, APIKey: "test",
+			Provider: "deepseek", StreamIdleTimeout: 5 * time.Second,
+		},
+		httpClient: srv.Client(),
+	}
+	resp, err := c.SendMessageWithHistory(context.Background(),
+		[]*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}, "")
+	if err != nil {
+		t.Fatalf("SendMessageWithHistory: %v", err)
+	}
+	_, streamErr := resp.Collect()
+	if streamErr == nil {
+		t.Fatal("expected streamed provider error")
+	}
+	if IsTerminalProviderError(streamErr) {
+		t.Fatalf("non-GLM stream code became a GLM terminal error: %T %v", streamErr, streamErr)
+	}
+	if !strings.Contains(streamErr.Error(), "deepseek") || !strings.Contains(streamErr.Error(), "1308") {
+		t.Fatalf("provider/code context was lost: %v", streamErr)
 	}
 }

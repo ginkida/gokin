@@ -83,6 +83,16 @@ func TestEvalGateOptions_InvalidMaxRegression(t *testing.T) {
 	}
 }
 
+func TestEvalGateOptions_ZeroMaxRegressionEnablesComparableBaselineGate(t *testing.T) {
+	opts, enabled, err := evalGateOptions("", "0", false, nil)
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if !enabled || !opts.RequireComparableBaseline || opts.MaxRegression != 0 {
+		t.Fatalf("options/enabled = %+v/%v, want zero-tolerance regression gate", opts, enabled)
+	}
+}
+
 func TestEvalGateOptions_FailMetricEnables(t *testing.T) {
 	opts, enabled, err := evalGateOptions("", "", false, []string{"verification_passed=0.8"})
 	if err != nil {
@@ -211,6 +221,36 @@ func TestPrintEvalReport_WithComparison(t *testing.T) {
 	}
 }
 
+func TestPrintEvalReport_CohortMismatchDoesNotPrintZeroDelta(t *testing.T) {
+	report := evals.Report{Count: 1, Passed: 1}
+	cmp := evals.Comparison{
+		BaselinePath: "baseline.jsonl",
+		CohortMismatch: &evals.CohortMismatch{
+			BaselineOnly: []evals.ScenarioIdentity{{ID: "a", Variant: "glm/glm-5.1"}},
+			CurrentOnly:  []evals.ScenarioIdentity{{ID: "a", Variant: "glm/glm-5.2"}},
+		},
+	}
+	out := runWithBuffer(t, func(cmd *cobra.Command) {
+		printEvalReport(cmd, report, &cmp, nil)
+	})
+	if !strings.Contains(out, "Comparison unavailable: cohort mismatch") || !strings.Contains(out, "[glm/glm-5.2]") {
+		t.Fatalf("output missing cohort mismatch details: %q", out)
+	}
+	if strings.Contains(out, "Delta:") {
+		t.Fatalf("invalid aggregate delta rendered for mismatched cohorts: %q", out)
+	}
+}
+
+func TestPrintEvalReport_LabelsDryRunAsUnscored(t *testing.T) {
+	report := evals.Report{Count: 1, DryRun: 1, Scenarios: []evals.ScenarioSummary{{ID: "a", Status: "dry_run"}}}
+	out := runWithBuffer(t, func(cmd *cobra.Command) {
+		printEvalReport(cmd, report, nil, nil)
+	})
+	if !strings.Contains(out, "dry-run: 1") {
+		t.Fatalf("output = %q, want explicit dry-run count", out)
+	}
+}
+
 func TestPrintEvalReport_WithGatePassed(t *testing.T) {
 	report := evals.Report{Count: 1, Passed: 1, Score: evals.ScoreSummary{Passed: 1, Total: 1, Ratio: 1}}
 	gate := &evals.GateResult{Passed: true}
@@ -266,6 +306,22 @@ func TestPrintEvalDiagnosis_WithWeakMetrics(t *testing.T) {
 	})
 	if !strings.Contains(out, "Weak metrics:") {
 		t.Errorf("output missing Weak metrics section: %q", out)
+	}
+}
+
+func TestPrintEvalDiagnosis_IncludesDuplicateAndSpecMismatchCounts(t *testing.T) {
+	diag := evals.Diagnosis{CohortMismatch: &evals.CohortMismatch{
+		BaselineDuplicates: []evals.ScenarioIdentity{{ID: "a"}},
+		CurrentDuplicates:  []evals.ScenarioIdentity{{ID: "b"}},
+		SpecMismatches:     []evals.ScenarioIdentity{{ID: "c"}},
+	}}
+	out := runWithBuffer(t, func(cmd *cobra.Command) {
+		printEvalDiagnosis(cmd, diag)
+	})
+	for _, want := range []string{"1 duplicate baseline", "1 duplicate current", "1 changed spec"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output = %q, want %q", out, want)
+		}
 	}
 }
 

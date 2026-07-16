@@ -101,6 +101,8 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		return NewGrepTool(pickWorkDir(workDir, t.workDir))
 	case *ListDirTool:
 		return NewListDirTool(pickWorkDir(workDir, t.baseDir))
+	case *DiffTool:
+		return NewDiffTool(pickWorkDir(workDir, t.workDir))
 	case *TreeTool:
 		return NewTreeTool(pickWorkDir(workDir, t.workDir))
 	case *BatchTool:

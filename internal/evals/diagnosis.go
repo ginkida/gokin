@@ -9,12 +9,15 @@ import (
 // Diagnosis turns an eval report into prioritized next actions for the
 // prompt/tool improvement loop.
 type Diagnosis struct {
-	ResultsPath     string            `json:"results_path,omitempty"`
-	Score           ScoreSummary      `json:"score"`
-	WeakMetrics     []MetricSummary   `json:"weak_metrics,omitempty"`
-	Regressions     []MetricDelta     `json:"regressions,omitempty"`
-	FailedScenarios []ScenarioSummary `json:"failed_scenarios,omitempty"`
-	Recommendations []Recommendation  `json:"recommendations"`
+	ResultsPath     string                     `json:"results_path,omitempty"`
+	Score           ScoreSummary               `json:"score"`
+	DryRun          int                        `json:"dry_run"`
+	CohortMismatch  *CohortMismatch            `json:"cohort_mismatch,omitempty"`
+	InvalidEvidence *ComparisonInvalidEvidence `json:"invalid_evidence,omitempty"`
+	WeakMetrics     []MetricSummary            `json:"weak_metrics,omitempty"`
+	Regressions     []MetricDelta              `json:"regressions,omitempty"`
+	FailedScenarios []ScenarioSummary          `json:"failed_scenarios,omitempty"`
+	Recommendations []Recommendation           `json:"recommendations"`
 }
 
 // Recommendation is one actionable improvement candidate.
@@ -31,6 +34,11 @@ func DiagnoseReport(report Report, comparison *Comparison) Diagnosis {
 	diagnosis := Diagnosis{
 		ResultsPath: report.ResultsPath,
 		Score:       report.Score,
+		DryRun:      report.DryRun,
+	}
+	if comparison != nil {
+		diagnosis.CohortMismatch = comparison.CohortMismatch
+		diagnosis.InvalidEvidence = comparison.InvalidEvidence
 	}
 
 	for _, metric := range report.Metrics {
@@ -71,6 +79,37 @@ func DiagnoseReport(report Report, comparison *Comparison) Diagnosis {
 			return
 		}
 		recommendations[rec.Area] = rec
+	}
+
+	if report.DryRun > 0 {
+		addRecommendation(Recommendation{
+			Area:     "eval-execution",
+			Priority: 5,
+			Reason:   fmt.Sprintf("%d scenario(s) were only prepared in dry-run mode", report.DryRun),
+			Action:   "Run the same cohort without --dry-run before treating its score or quality gate as evidence.",
+		})
+	}
+	if diagnosis.CohortMismatch != nil {
+		addRecommendation(Recommendation{
+			Area:     "eval-cohort",
+			Priority: 8,
+			Reason: fmt.Sprintf("baseline and current cohorts differ (%d baseline-only, %d current-only, %d duplicate baseline, %d duplicate current, %d changed spec)",
+				len(diagnosis.CohortMismatch.BaselineOnly), len(diagnosis.CohortMismatch.CurrentOnly),
+				len(diagnosis.CohortMismatch.BaselineDuplicates), len(diagnosis.CohortMismatch.CurrentDuplicates),
+				len(diagnosis.CohortMismatch.SpecMismatches)),
+			Action: "Re-run or filter both result sets to the same scenario and provider/model variants before diagnosing regressions.",
+		})
+	}
+	if diagnosis.InvalidEvidence != nil {
+		addRecommendation(Recommendation{
+			Area:     "eval-evidence",
+			Priority: 7,
+			Reason: fmt.Sprintf("comparison lacks executed evidence (empty baseline=%t/current=%t; dry-run=%d baseline/%d current; not-executed=%d baseline/%d current)",
+				diagnosis.InvalidEvidence.BaselineEmpty, diagnosis.InvalidEvidence.CurrentEmpty,
+				diagnosis.InvalidEvidence.BaselineDryRun, diagnosis.InvalidEvidence.CurrentDryRun,
+				diagnosis.InvalidEvidence.BaselineNotExecuted, diagnosis.InvalidEvidence.CurrentNotExecuted),
+			Action: "Execute both baseline and current cohorts fully before diagnosing score regressions.",
+		})
 	}
 
 	if len(diagnosis.FailedScenarios) > 0 {

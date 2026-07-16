@@ -4,21 +4,24 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
+
+	"gokin/internal/security"
 
 	"google.golang.org/genai"
 )
 
 // GitLogTool shows git commit history.
 type GitLogTool struct {
-	workDir string
+	workDir       string
+	pathValidator *security.PathValidator
 }
 
 // NewGitLogTool creates a new GitLogTool instance.
 func NewGitLogTool(workDir string) *GitLogTool {
 	return &GitLogTool{
-		workDir: workDir,
+		workDir:       workDir,
+		pathValidator: newWorkspacePathValidator(workDir, nil),
 	}
 }
 
@@ -87,9 +90,12 @@ func (t *GitLogTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	since := GetStringDefault(args, "since", "")
 	author := GetStringDefault(args, "author", "")
 	grepPattern := GetStringDefault(args, "grep", "")
+	if t.pathValidator == nil {
+		return NewErrorResult("security error: path validator not initialized"), nil
+	}
 
 	// Build git log command
-	cmdArgs := []string{"log", fmt.Sprintf("-n%d", count)}
+	cmdArgs := []string{"--literal-pathspecs", "log", fmt.Sprintf("-n%d", count)}
 
 	if oneline {
 		cmdArgs = append(cmdArgs, "--oneline")
@@ -110,13 +116,16 @@ func (t *GitLogTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	}
 
 	if file != "" {
-		// Make path relative to workDir if absolute
-		if filepath.IsAbs(file) {
-			if rel, err := filepath.Rel(t.workDir, file); err == nil {
-				file = rel
-			}
+		validatedFile, _, err := validateGitPath(t.workDir, file, t.pathValidator)
+		if err != nil {
+			return NewErrorResult(fmt.Sprintf("file path validation failed: %s", err)), nil
 		}
-		cmdArgs = append(cmdArgs, "--follow", "--", file)
+		cmdArgs = append(cmdArgs, "--follow", "--", validatedFile)
+	} else {
+		// Git discovers the containing repository even when workDir is only a
+		// nested workspace. Limit unfiltered history to commits touching that
+		// workspace instead of exposing repository-wide sibling history.
+		cmdArgs = append(cmdArgs, "--", ".")
 	}
 
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)

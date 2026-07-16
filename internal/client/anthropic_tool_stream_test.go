@@ -136,3 +136,98 @@ func TestProcessStreamEvent_MalformedToolInputFailsClosed(t *testing.T) {
 		t.Fatalf("tool accumulator was not reset after malformed input: %#v", acc)
 	}
 }
+
+func TestProcessStreamEvent_NullToolInputFailsClosed(t *testing.T) {
+	c := &AnthropicClient{}
+	acc := &toolCallAccumulator{}
+	c.processStreamEvent(map[string]any{
+		"type": "content_block_start",
+		"content_block": map[string]any{
+			"type": "tool_use", "id": "call_null", "name": "write",
+		},
+	}, acc)
+	c.processStreamEvent(map[string]any{
+		"type":  "content_block_delta",
+		"delta": map[string]any{"type": "input_json_delta", "partial_json": "null"},
+	}, acc)
+	chunk := c.processStreamEvent(map[string]any{"type": "content_block_stop"}, acc)
+
+	if !chunk.Done || !errors.Is(chunk.Error, io.ErrUnexpectedEOF) {
+		t.Fatalf("chunk error/done = %v/%v, want fail-closed malformed input", chunk.Error, chunk.Done)
+	}
+	if len(acc.completedCalls) != 0 {
+		t.Fatalf("null input escaped as executable call: %#v", acc.completedCalls)
+	}
+}
+
+func TestProcessStreamEvent_NonStringPartialJSONFailsClosed(t *testing.T) {
+	c := &AnthropicClient{}
+	acc := &toolCallAccumulator{}
+	c.processStreamEvent(map[string]any{
+		"type": "content_block_start",
+		"content_block": map[string]any{
+			"type": "tool_use", "id": "call_wrong_type", "name": "bash",
+		},
+	}, acc)
+	chunk := c.processStreamEvent(map[string]any{
+		"type":  "content_block_delta",
+		"delta": map[string]any{"type": "input_json_delta", "partial_json": map[string]any{"command": "date"}},
+	}, acc)
+
+	if !chunk.Done || !errors.Is(chunk.Error, io.ErrUnexpectedEOF) {
+		t.Fatalf("chunk error/done = %v/%v, want fail-closed schema error", chunk.Error, chunk.Done)
+	}
+	if len(acc.completedCalls) != 0 {
+		t.Fatalf("wrong-typed input escaped as executable call: %#v", acc.completedCalls)
+	}
+}
+
+func TestProcessStreamEvent_OverlappingBlocksFailClosed(t *testing.T) {
+	c := &AnthropicClient{}
+	acc := &toolCallAccumulator{}
+	c.processStreamEvent(map[string]any{
+		"type": "content_block_start",
+		"content_block": map[string]any{
+			"type": "tool_use", "id": "call_first", "name": "edit",
+		},
+	}, acc)
+	chunk := c.processStreamEvent(map[string]any{
+		"type": "content_block_start",
+		"content_block": map[string]any{
+			"type": "text",
+		},
+	}, acc)
+
+	if !chunk.Done || !errors.Is(chunk.Error, io.ErrUnexpectedEOF) {
+		t.Fatalf("chunk error/done = %v/%v, want fail-closed overlapping blocks", chunk.Error, chunk.Done)
+	}
+	if len(acc.completedCalls) != 0 {
+		t.Fatalf("overlapped tool escaped as executable call: %#v", acc.completedCalls)
+	}
+}
+
+func TestProcessStreamEvent_TerminalDeltaFlushesPartialThinkTag(t *testing.T) {
+	c := &AnthropicClient{}
+	acc := &toolCallAccumulator{}
+	c.processStreamEvent(map[string]any{
+		"type":          "content_block_start",
+		"content_block": map[string]any{"type": "text"},
+	}, acc)
+	first := c.processStreamEvent(map[string]any{
+		"type":  "content_block_delta",
+		"delta": map[string]any{"type": "text_delta", "text": "answer<thi"},
+	}, acc)
+	if first.Text != "answer" {
+		t.Fatalf("initial text = %q, want answer with partial tag buffered", first.Text)
+	}
+	// A well-formed stream normally sends content_block_stop before
+	// message_delta; keep the parser buffer intact while closing the block.
+	c.processStreamEvent(map[string]any{"type": "content_block_stop"}, acc)
+	terminal := c.processStreamEvent(map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": "end_turn"},
+	}, acc)
+	if !terminal.Done || terminal.Text != "<thi" {
+		t.Fatalf("terminal chunk = done:%v text:%q, want buffered partial tag", terminal.Done, terminal.Text)
+	}
+}

@@ -544,6 +544,23 @@ func (c *OllamaClient) WithModel(modelName string) Client {
 	return newClient
 }
 
+// cloneForSession isolates mutable request state while reusing the underlying
+// Ollama API client and its HTTP transport.
+func (c *OllamaClient) cloneForSession() Client {
+	c.mu.RLock()
+	clone := &OllamaClient{
+		client:            c.client,
+		config:            c.config,
+		tools:             append([]*genai.Tool(nil), c.tools...),
+		rateLimiter:       c.rateLimiter,
+		statusCallback:    c.statusCallback,
+		systemInstruction: c.systemInstruction,
+		turnContext:       c.turnContext,
+	}
+	c.mu.RUnlock()
+	return clone
+}
+
 // GetRawClient returns the underlying Ollama client.
 func (c *OllamaClient) GetRawClient() any {
 	return c.client
@@ -926,6 +943,14 @@ func (c *OllamaClient) isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if status, _, ok := ollamaHTTPStatus(err); ok {
+		switch status {
+		case 429, 500, 502, 503, 504:
+			return true
+		default:
+			return false
+		}
+	}
 
 	errStr := err.Error()
 
@@ -938,16 +963,35 @@ func (c *OllamaClient) isRetryableError(err error) bool {
 		return true
 	}
 
-	// Check for HTTP status errors
-	var statusErr *api.StatusError
-	if errors.As(err, &statusErr) {
-		switch statusErr.StatusCode {
-		case 429, 500, 502, 503, 504:
-			return true
-		}
-	}
-
 	return false
+}
+
+// ollamaHTTPStatus extracts both value and pointer forms returned by the
+// Ollama SDK. Its streaming client returns api.StatusError as a VALUE, while
+// tests and wrappers often carry a pointer; checking only *api.StatusError
+// silently lost the real status and made every response look untyped to the
+// cross-provider fallback policy.
+func ollamaHTTPStatus(err error) (status int, message string, ok bool) {
+	if err == nil {
+		return 0, "", false
+	}
+	var statusValue api.StatusError
+	if errors.As(err, &statusValue) {
+		return statusValue.StatusCode, statusValue.Error(), true
+	}
+	var statusPointer *api.StatusError
+	if errors.As(err, &statusPointer) && statusPointer != nil {
+		return statusPointer.StatusCode, statusPointer.Error(), true
+	}
+	var authValue api.AuthorizationError
+	if errors.As(err, &authValue) {
+		return authValue.StatusCode, authValue.Error(), true
+	}
+	var authPointer *api.AuthorizationError
+	if errors.As(err, &authPointer) && authPointer != nil {
+		return authPointer.StatusCode, authPointer.Error(), true
+	}
+	return 0, "", false
 }
 
 // IsModelNotFoundError checks if the error indicates a missing model.
@@ -964,8 +1008,7 @@ func IsModelNotFoundError(err error) bool {
 	}
 
 	// Check status error
-	var statusErr *api.StatusError
-	if errors.As(err, &statusErr) && statusErr.StatusCode == 404 {
+	if status, _, ok := ollamaHTTPStatus(err); ok && status == 404 {
 		return true
 	}
 
@@ -976,6 +1019,17 @@ func IsModelNotFoundError(err error) bool {
 func (c *OllamaClient) wrapOllamaError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if status, message, ok := ollamaHTTPStatus(err); ok {
+		if status == 404 {
+			message = fmt.Sprintf("model %q is not installed\n\nTo fix this:\n  1. Pull the model: ollama pull %s\n  2. Or list available models: ollama list\n\nOriginal error: %s",
+				c.config.Model, c.config.Model, message)
+		}
+		return &HTTPError{
+			StatusCode: status,
+			Message:    message,
+			Err:        err,
+		}
 	}
 
 	errStr := err.Error()
@@ -988,14 +1042,6 @@ func (c *OllamaClient) wrapOllamaError(err error) error {
 	// Timeout
 	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded") {
 		return fmt.Errorf("ollama request timed out\n\nPossible causes:\n  • Model is loading into memory (first request is slow)\n  • Model is too large for available RAM/VRAM\n  • Server is overloaded\n\nTry again or use a smaller model.\n\nOriginal error: %w", err)
-	}
-
-	// Check for model not found via status error
-	var statusErr *api.StatusError
-	if errors.As(err, &statusErr) {
-		if statusErr.StatusCode == 404 {
-			return fmt.Errorf("model %q is not installed\n\nTo fix this:\n  1. Pull the model: ollama pull %s\n  2. Or list available models: ollama list\n\nOriginal error: %w", c.config.Model, c.config.Model, err)
-		}
 	}
 
 	// Generic model not found

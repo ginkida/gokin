@@ -51,6 +51,66 @@ func applyAgentRunError(result *AgentResult, err error) {
 	}
 }
 
+// runAgentWithPanicRecovery confines a panic to the Agent.Run boundary while
+// preserving enough terminal provenance for synchronous callers to make a
+// fail-closed retry decision. In particular, Runner.Spawn must still publish a
+// result before returning its non-empty agent ID: Router inspects that result to
+// distinguish a safe pre-execution failure from a panic after a stateful tool.
+//
+// Keep this recovery scoped to Agent.Run. The normal Spawn lifecycle below
+// remains responsible for workspace finalization, persistence, result delivery,
+// and observer notifications, exactly as it is for an ordinary returned error.
+func runAgentWithPanicRecovery(agent *Agent, ctx context.Context, prompt, spawnSite string) (result *AgentResult, err error) {
+	started := time.Now()
+	defer func() {
+		panicValue := recover()
+		if panicValue == nil {
+			return
+		}
+
+		logging.Warn("synchronous agent run panicked",
+			"agent_id", agent.ID,
+			"spawn_site", spawnSite,
+			"panic", panicValue,
+			"stack", logging.PanicStack())
+
+		ended := time.Now()
+		agent.stateMu.Lock()
+		agent.status = AgentStatusFailed
+		agent.endTime = ended
+		inputTokens := agent.usageInputTokens
+		outputTokens := agent.usageOutputTokens
+		cacheReadTokens := agent.usageCacheReadTokens
+		estimatedCost := agent.usageEstimatedCost
+		costTracked := agent.usageCostTracked
+		invocationScope := agent.invocationScope
+		agent.stateMu.Unlock()
+
+		err = fmt.Errorf("agent panic during %s: %v", spawnSite, panicValue)
+		result = &AgentResult{
+			AgentID:              agent.ID,
+			Type:                 agent.Type,
+			Status:               AgentStatusFailed,
+			Error:                err.Error(),
+			Duration:             ended.Sub(started),
+			Completed:            true,
+			PolicyBlock:          agent.policyBlockSnapshot(),
+			InputTokens:          inputTokens,
+			OutputTokens:         outputTokens,
+			CacheReadInputTokens: cacheReadTokens,
+			EstimatedCost:        estimatedCost,
+			CostTracked:          costTracked,
+			InvocationScope:      invocationScope,
+			MutatingToolCalls:    agent.MutatingToolCount(),
+			StatefulToolAttempts: agent.StatefulToolAttemptCount(),
+			TouchedPaths:         agent.GetTouchedPaths(),
+		}
+		agent.populateResultIdentity(result)
+	}()
+
+	return agent.Run(ctx, prompt)
+}
+
 // withFewShot prepends the most relevant past SUCCESSFUL runs (matched by prompt
 // tags, sorted by relevance×success) to a spawn prompt so the agent learns from
 // what worked before. This closes the ExampleStore loop — it was write-only
@@ -127,7 +187,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	invokeSubAgentActivity(onSubAgentActivity, agent.ID, string(agent.Type), prompt, "", nil, "start", false, "")
 
 	startTime := time.Now()
-	result, err := agent.Run(runCtx, r.withFewShot(deps, agentType, prompt))
+	result, err := runAgentWithPanicRecovery(agent, runCtx, r.withFewShot(deps, agentType, prompt), "spawn")
 	duration := time.Since(startTime)
 
 	// Notify UI about agent completion
@@ -272,7 +332,7 @@ func (r *Runner) SpawnWithContext(
 	agent.SetCancelFunc(runCancel)
 
 	startTime := time.Now()
-	result, err := agent.Run(runCtx, r.withFewShot(deps, agentType, prompt))
+	result, err := runAgentWithPanicRecovery(agent, runCtx, r.withFewShot(deps, agentType, prompt), "spawn_with_context")
 	duration := time.Since(startTime)
 
 	// Ensure result is never nil (matches SpawnAsync pattern)

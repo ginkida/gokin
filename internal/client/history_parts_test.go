@@ -61,3 +61,42 @@ func TestResponsePartsForHistory_Nil(t *testing.T) {
 		t.Fatalf("nil response returned %#v, want nil", parts)
 	}
 }
+
+func TestResponsePartsForHistory_AddsTextMissingFromPartialParts(t *testing.T) {
+	resp := &Response{
+		Text:  "hello world",
+		Parts: []*genai.Part{genai.NewPartFromText("hello ")},
+	}
+	parts := ResponsePartsForHistory(resp)
+	if len(parts) != 2 || parts[0].Text+parts[1].Text != resp.Text {
+		t.Fatalf("parts = %#v, want complete text %q", parts, resp.Text)
+	}
+}
+
+func TestResponsePartsForHistory_AppendsPartialSuffixAfterLastInterleavedText(t *testing.T) {
+	call := &genai.FunctionCall{ID: "tool-1", Name: "read"}
+	resp := &Response{
+		Text: "abc",
+		Parts: []*genai.Part{
+			genai.NewPartFromText("a"),
+			{FunctionCall: call},
+			genai.NewPartFromText("b"),
+		},
+	}
+	parts := ResponsePartsForHistory(resp)
+	if len(parts) != 4 || parts[0].Text != "a" || parts[1].FunctionCall != call ||
+		parts[2].Text != "b" || parts[3].Text != "c" {
+		t.Fatalf("parts reordered while adding suffix: %#v", parts)
+	}
+}
+
+func TestResponsePartsForHistory_ReconcilesDivergentTextWithAggregate(t *testing.T) {
+	resp := &Response{
+		Text:  "canonical complete answer",
+		Parts: []*genai.Part{genai.NewPartFromText("stale partial")},
+	}
+	parts := ResponsePartsForHistory(resp)
+	if len(parts) != 1 || parts[0].Text != resp.Text {
+		t.Fatalf("parts = %#v, want canonical aggregate text", parts)
+	}
+}

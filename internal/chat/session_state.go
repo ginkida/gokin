@@ -1,7 +1,9 @@
 package chat
 
 import (
+	"bytes"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -39,7 +41,13 @@ type SessionState struct {
 	// per-entry marker preserves compatibility with legacy persisted indices.
 	CheckpointRawIndices map[string]bool            `json:"checkpoint_raw_indices,omitempty"`
 	ToolCheckpoints      []SerializedToolCheckpoint `json:"tool_checkpoints,omitempty"`
-	InvokedSkills        []skills.Invocation        `json:"invoked_skills,omitempty"`
+	// PendingRecoveries couples an interrupted automatic retry to the exact
+	// request and checkpoint generation that produced it. Keeping this inside
+	// the session snapshot (rather than the redacted workspace recovery report)
+	// makes restart/session-switch recovery executable without ever applying a
+	// previous turn's side-effect ledger to an unrelated new prompt.
+	PendingRecoveries []SerializedPendingRecovery `json:"pending_recoveries,omitempty"`
+	InvokedSkills     []skills.Invocation         `json:"invoked_skills,omitempty"`
 	// CheckpointInvokedSkills makes /restore a true state rollback: workflows
 	// activated after a named checkpoint must not remain active after history is
 	// rewound. Missing in legacy states is intentionally treated as unknown.
@@ -48,12 +56,98 @@ type SessionState struct {
 
 // SerializedToolCheckpoint is the persisted form of a tool checkpoint entry.
 type SerializedToolCheckpoint struct {
-	CallID    string         `json:"call_id"`
-	ToolName  string         `json:"tool_name"`
-	Args      map[string]any `json:"args,omitempty"`
-	Result    string         `json:"result,omitempty"` // Tool result content for replay
-	Signature string         `json:"signature"`
-	Timestamp time.Time      `json:"timestamp"`
+	CallID    string                `json:"call_id"`
+	ToolName  string                `json:"tool_name"`
+	Args      map[string]any        `json:"args,omitempty"`
+	Result    string                `json:"result,omitempty"` // Legacy content-only replay payload.
+	ResultV2  *SerializedToolResult `json:"result_v2,omitempty"`
+	Signature string                `json:"signature"`
+	// OutcomeSignature binds the exact replay result (including policy metadata)
+	// to this call identity and canonical arguments. Signature alone covers only
+	// ToolName+Args and cannot detect a corrupted ResultV2.
+	OutcomeSignature string    `json:"outcome_signature,omitempty"`
+	Timestamp        time.Time `json:"timestamp"`
+}
+
+// SerializedToolResult preserves the model-visible outcome of a completed
+// side-effecting tool call. The legacy Result string omitted Success/Error and
+// therefore restored successful writes as failures, encouraging duplicates.
+// Data is kept as validated JSON so chat does not depend on the tools package.
+type SerializedToolResult struct {
+	Success     bool                   `json:"success"`
+	Content     string                 `json:"content,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	Data        json.RawMessage        `json:"data,omitempty"`
+	DataPresent bool                   `json:"data_present,omitempty"`
+	PolicyBlock *SerializedPolicyBlock `json:"policy_block,omitempty"`
+}
+
+// SerializedPolicyBlock preserves authorization/safety refusal metadata across
+// a durable tool replay. It intentionally lives in chat so session decoding
+// does not depend on the tools package.
+type SerializedPolicyBlock struct {
+	Kind   string `json:"kind"`
+	Reason string `json:"reason"`
+}
+
+const (
+	PendingRecoveryScheduled = "scheduled"
+	PendingRecoveryClaimed   = "claimed"
+)
+
+// SerializedPendingRecovery is a durable, session-scoped automatic retry.
+// Checkpoints are embedded instead of referenced through ToolCheckpoints: an
+// intervening user turn is allowed to reset the live executor journal while a
+// delayed retry waits, but must not change that retry's replay generation.
+type SerializedPendingRecovery struct {
+	ID                  string                     `json:"id"`
+	SessionID           string                     `json:"session_id"`
+	Message             string                     `json:"message"`
+	UserMessage         string                     `json:"user_message,omitempty"`
+	Checkpoints         []SerializedToolCheckpoint `json:"checkpoints,omitempty"`
+	Kind                string                     `json:"kind"`
+	Attempt             int                        `json:"attempt"`
+	RateLimitAttempts   int                        `json:"rate_limit_attempts,omitempty"`
+	AutoResumeAttempts  int                        `json:"auto_resume_attempts,omitempty"`
+	NotBefore           time.Time                  `json:"not_before"`
+	State               string                     `json:"state"`
+	CreatedAt           time.Time                  `json:"created_at"`
+	GenerationSignature string                     `json:"generation_signature,omitempty"`
+}
+
+// PendingRecoveryGenerationSignature binds the complete ordered replay
+// generation and its request/budget/lifecycle identity. Per-checkpoint outcome
+// signatures cannot detect a deleted checkpoint or changed request envelope.
+func PendingRecoveryGenerationSignature(recovery SerializedPendingRecovery) string {
+	payload := struct {
+		Version            string                     `json:"version"`
+		ID                 string                     `json:"id"`
+		SessionID          string                     `json:"session_id"`
+		Message            string                     `json:"message"`
+		UserMessage        string                     `json:"user_message,omitempty"`
+		Checkpoints        []SerializedToolCheckpoint `json:"checkpoints"`
+		Kind               string                     `json:"kind"`
+		Attempt            int                        `json:"attempt"`
+		RateLimitAttempts  int                        `json:"rate_limit_attempts"`
+		AutoResumeAttempts int                        `json:"auto_resume_attempts"`
+		NotBefore          time.Time                  `json:"not_before"`
+		State              string                     `json:"state"`
+		CreatedAt          time.Time                  `json:"created_at"`
+	}{
+		Version: "gokin-pending-recovery-v1",
+		ID:      recovery.ID, SessionID: recovery.SessionID,
+		Message: recovery.Message, UserMessage: recovery.UserMessage,
+		Checkpoints: recovery.Checkpoints, Kind: recovery.Kind, Attempt: recovery.Attempt,
+		RateLimitAttempts:  recovery.RateLimitAttempts,
+		AutoResumeAttempts: recovery.AutoResumeAttempts,
+		NotBefore:          recovery.NotBefore, State: recovery.State, CreatedAt: recovery.CreatedAt,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
 }
 
 // SerializedContent represents a serializable conversation content.
@@ -220,7 +314,15 @@ func (s *SessionState) UnmarshalJSON(data []byte) error {
 	}{
 		Alias: (*Alias)(s),
 	}
-	return json.Unmarshal(data, aux)
+	// Tool arguments and function responses are map[string]any. The default
+	// json.Unmarshal path converts every number to float64, silently rounding
+	// identifiers above 2^53. Apart from corrupting the model-visible value,
+	// that changes durable recovery signatures after an otherwise clean
+	// restart. Preserve the original decimal token until a consumer explicitly
+	// chooses a numeric representation.
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode(aux)
 }
 
 // fixEmptyToolIDs assigns matching IDs to FunctionCall/FunctionResponse pairs

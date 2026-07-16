@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -35,9 +36,7 @@ func shouldSerializeGroup(calls []*genai.FunctionCall, statsLookup func(string) 
 }
 
 // toolDependencyClassifier determines which tools can run in parallel.
-type toolDependencyClassifier struct {
-	writeTools map[string]bool
-}
+type toolDependencyClassifier struct{}
 
 // ToolGroup is a batch of tool calls to execute together: when Parallel is true
 // the calls have no inter-dependencies and may run concurrently; otherwise they
@@ -52,14 +51,11 @@ type ToolGroup struct {
 	Parallel bool
 }
 
-// ClassifyToolDependencies groups tool calls by read/write dependency. A run of
-// consecutive read-only tools becomes one group (Parallel when it holds more
-// than one call — the mid-run flush before a write marks a single read Parallel
-// too, matching the long-standing contract); every write tool (IsWriteTool) gets
-// its own sequential group, flushing any pending read group first so a write
-// never executes alongside reads. Empty or single input returns one
-// non-parallel group (callers only pass non-empty batches; this preserves the
-// executor's tested empty-input behavior).
+// ClassifyToolDependencies groups tool calls without changing model-provided
+// order. Only an explicit allow-list of side-effect-free tools may share a
+// parallel group. Unknown/MCP/control tools are serialized conservatively: an
+// unknown tool can mutate remote or local state even though it is absent from
+// the built-in write-tool set.
 func ClassifyToolDependencies(calls []*genai.FunctionCall) []ToolGroup {
 	if len(calls) <= 1 {
 		return []ToolGroup{{Calls: calls, Parallel: false}}
@@ -69,9 +65,9 @@ func ClassifyToolDependencies(calls []*genai.FunctionCall) []ToolGroup {
 	var readGroup []*genai.FunctionCall
 
 	for _, call := range calls {
-		if IsWriteTool(call.Name) {
+		if !IsParallelSafeTool(call.Name) {
 			if len(readGroup) > 0 {
-				groups = append(groups, ToolGroup{Calls: readGroup, Parallel: true})
+				groups = append(groups, ToolGroup{Calls: readGroup, Parallel: len(readGroup) > 1})
 				readGroup = nil
 			}
 			groups = append(groups, ToolGroup{Calls: []*genai.FunctionCall{call}, Parallel: false})
@@ -87,33 +83,44 @@ func ClassifyToolDependencies(calls []*genai.FunctionCall) []ToolGroup {
 	return groups
 }
 
-var defaultClassifier = &toolDependencyClassifier{
-	writeTools: map[string]bool{
-		"write":       true,
-		"edit":        true,
-		"bash":        true,
-		"delete":      true,
-		"move":        true,
-		"copy":        true,
-		"mkdir":       true,
-		"git_commit":  true,
-		"git_add":     true,
-		"ssh":         true,
-		"run_tests":   true,
-		"batch":       true,
-		"refactor":    true,
-		"atomicwrite": true,
-	},
+var parallelSafeTools = map[string]bool{
+	"read": true, "glob": true, "grep": true, "list_dir": true, "tree": true, "diff": true,
+	"web_fetch": true, "web_search": true, "env": true, "tools_list": true,
+	"git_status": true, "git_diff": true, "git_log": true, "git_blame": true, "review_changes": true,
+	"go_to_definition": true, "find_references": true, "go_search": true,
+	"history_search": true, "get_plan_status": true,
 }
 
-// IsWriteTool reports whether a tool modifies state and must run SEQUENTIALLY
-// (never in parallel with reads or other writes). This is the SINGLE source of
-// truth for write-vs-read classification: the sub-agent classifier
-// (internal/agent) delegates here so the two can't drift. They DID drift —
-// run_tests/batch/refactor/atomicwrite were missing from the agent copy, which
-// let sub-agents parallelize a refactor/batch against concurrent reads.
+// IsParallelSafeTool reports whether concurrent execution and abandonment are
+// safe for a built-in tool. Unknown third-party tools fail closed to false.
+func IsParallelSafeTool(name string) bool {
+	return parallelSafeTools[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// CancelAbandonmentSafe is an explicit opt-in for a custom tool whose work is
+// side-effect-free even if its Execute method ignores cancellation. Built-in
+// read tools are covered by IsParallelSafeTool; unknown tools otherwise fail
+// closed and are joined before the executor returns.
+type CancelAbandonmentSafe interface {
+	SafeToAbandonOnCancel() bool
+}
+
+func canAbandonToolOnCancel(tool Tool, name string) bool {
+	if IsParallelSafeTool(name) {
+		return true
+	}
+	capability, ok := tool.(CancelAbandonmentSafe)
+	return ok && capability.SafeToAbandonOnCancel()
+}
+
+var defaultClassifier = &toolDependencyClassifier{}
+
+// IsWriteTool reports whether a tool may modify local, remote, session, or
+// control state. Only the explicit side-effect-free allow-list is safe; unknown
+// MCP/plugin tools fail closed as stateful. This one capability boundary drives
+// serialization, checkpoint replay, and cancellation abandonment.
 func IsWriteTool(name string) bool {
-	return defaultClassifier.writeTools[name]
+	return !IsParallelSafeTool(name)
 }
 
 // classifyDependencies delegates to the shared ClassifyToolDependencies so the

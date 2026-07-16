@@ -10,8 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
+
+var ErrSessionPersistenceDisabled = errors.New("session persistence is disabled")
 
 // SessionManager handles automatic session persistence.
 type SessionManager struct {
@@ -229,6 +232,67 @@ func (sm *SessionManager) Save() error {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 	logging.Debug("session saved", "session_id", sessionID, "messages", msgCount)
+	return nil
+}
+
+// ApplyAndSave runs one live-session mutation and its mandatory save while
+// excluding the periodic/async saver. If the disk write fails, rollback runs
+// before the save lock is released, so no background snapshot can observe and
+// persist provisional executable state. The mutation and rollback callbacks
+// must not call SessionManager methods.
+func (sm *SessionManager) ApplyAndSave(mutate func() (rollback func(), err error)) error {
+	if sm == nil || sm.session == nil {
+		return fmt.Errorf("cannot save without an active session")
+	}
+	if mutate == nil {
+		return fmt.Errorf("session mutation is required")
+	}
+
+	sm.mu.Lock()
+	rollback, mutateErr := mutate()
+	if mutateErr != nil {
+		if rollback != nil {
+			rollback()
+		}
+		sm.mu.Unlock()
+		return mutateErr
+	}
+	if !sm.config.Enabled {
+		if rollback != nil {
+			rollback()
+		}
+		sm.mu.Unlock()
+		return ErrSessionPersistenceDisabled
+	}
+
+	saveErr := sm.historyManager.SaveFull(sm.session)
+	var notify func(error)
+	if saveErr != nil {
+		// After AtomicWrite has replaced the target, a parent-directory sync
+		// failure is commit-uncertain: rolling back only memory would diverge from
+		// the already-visible file and could invite an unsafe duplicate fallback.
+		if rollback != nil && !errors.Is(saveErr, fileutil.ErrAtomicWriteCommitUncertain) {
+			rollback()
+		}
+		sm.consecutiveSaveFailures++
+		if sm.consecutiveSaveFailures == 1 {
+			notify = sm.onSaveFailed
+		}
+	} else {
+		sm.consecutiveSaveFailures = 0
+		sm.lastSaveTime = time.Now()
+	}
+	sessionID := sm.session.GetID()
+	msgCount := sm.session.MessageCount()
+	sm.mu.Unlock()
+
+	if saveErr != nil {
+		if notify != nil {
+			notify(saveErr)
+		}
+		return fmt.Errorf("failed to save session: %w", saveErr)
+	}
+	logging.Debug("session transaction saved", "session_id", sessionID, "messages", msgCount)
 	return nil
 }
 

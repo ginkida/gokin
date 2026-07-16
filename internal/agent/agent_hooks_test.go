@@ -86,6 +86,9 @@ func TestAgentPreToolHookBlocksDirectSubagentExecutionInEffectiveWorkDir(t *test
 	if probe.calls != 0 {
 		t.Fatalf("tool executed %d times despite blocking hook, want 0", probe.calls)
 	}
+	if got := agent.StatefulToolAttemptCount(); got != 0 {
+		t.Fatalf("blocked tool crossed stateful execution provenance: got %d attempts, want 0", got)
+	}
 	if !strings.Contains(result.Error, "deny-write") || !strings.Contains(result.Error, "subagent writes denied") {
 		t.Fatalf("hook identity/reason missing from error: %q", result.Error)
 	}

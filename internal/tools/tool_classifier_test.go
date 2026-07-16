@@ -97,16 +97,44 @@ func TestClassifyDependencies_MixedReadWriteRead(t *testing.T) {
 //
 //	The mid-loop flush of a read group always sets Parallel=true (even for a
 //	single read), so this produces:
-//	  sequential(write), parallel(read), sequential(write)
+//	  sequential(write), sequential(read), sequential(write)
 func TestClassifyDependencies_WriteReadWrite(t *testing.T) {
 	calls := []*genai.FunctionCall{fc("write"), fc("read"), fc("write")}
 	groups := defaultClassifier.classifyDependencies(calls)
 
 	assertGroupCount(t, groups, 3)
 	assertGroup(t, groups[0], []string{"write"}, false)
-	// mid-loop flush: Parallel is unconditionally true (line 45 in source).
-	assertGroup(t, groups[1], []string{"read"}, true)
+	assertGroup(t, groups[1], []string{"read"}, false)
 	assertGroup(t, groups[2], []string{"write"}, false)
+}
+
+func TestClassifyDependencies_UnknownToolsAreSequentialBarriers(t *testing.T) {
+	calls := []*genai.FunctionCall{fc("read"), fc("third_party_mcp_mutation"), fc("grep"), fc("grep")}
+	groups := defaultClassifier.classifyDependencies(calls)
+
+	assertGroupCount(t, groups, 3)
+	assertGroup(t, groups[0], []string{"read"}, false)
+	assertGroup(t, groups[1], []string{"third_party_mcp_mutation"}, false)
+	assertGroup(t, groups[2], []string{"grep", "grep"}, true)
+}
+
+func TestClassifyDependencies_TaskOutputIsSequentialBarrier(t *testing.T) {
+	// task_output is not uniformly read-only: action="cancel" stops a shell or
+	// agent task. Name-only classification therefore has to fail closed even
+	// though the common get/list actions merely inspect state.
+	if IsParallelSafeTool("task_output") {
+		t.Fatal("task_output must not be parallel-safe because it supports action=cancel")
+	}
+	calls := []*genai.FunctionCall{fc("read"), {
+		Name: "task_output",
+		Args: map[string]any{"action": "cancel", "task_id": "task-1"},
+	}, fc("grep")}
+	groups := defaultClassifier.classifyDependencies(calls)
+
+	assertGroupCount(t, groups, 3)
+	assertGroup(t, groups[0], []string{"read"}, false)
+	assertGroup(t, groups[1], []string{"task_output"}, false)
+	assertGroup(t, groups[2], []string{"grep"}, false)
 }
 
 // 7. Write at start: [bash, read, read]

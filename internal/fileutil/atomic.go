@@ -1,10 +1,26 @@
 package fileutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// ErrAtomicWriteCommitUncertain means the atomic replace already made the new
+// target visible, but syncing the parent directory failed. Callers must not
+// assume the old contents remain or safely repeat an externally-visible action.
+var ErrAtomicWriteCommitUncertain = errors.New("atomic write commit is visible but durability is uncertain")
+
+type atomicWriteCommitUncertainError struct {
+	err error
+}
+
+func (e *atomicWriteCommitUncertainError) Error() string { return e.err.Error() }
+func (e *atomicWriteCommitUncertainError) Unwrap() error { return e.err }
+func (e *atomicWriteCommitUncertainError) Is(target error) bool {
+	return target == ErrAtomicWriteCommitUncertain
+}
 
 // AtomicWrite writes data to a file atomically using a tmp file + rename pattern.
 // This prevents a partially-written target if the process is interrupted. The
@@ -95,7 +111,9 @@ func atomicWrite(path string, data []byte, perm os.FileMode, ops atomicWriteOps)
 	// replace succeeds there is no temp path left to clean up; if directory sync
 	// fails, return the error so the caller knows durability is uncertain.
 	if err := ops.syncParent(dir); err != nil {
-		return fmt.Errorf("sync atomic-write parent directory: %w", err)
+		return &atomicWriteCommitUncertainError{
+			err: fmt.Errorf("sync atomic-write parent directory: %w", err),
+		}
 	}
 	return nil
 }

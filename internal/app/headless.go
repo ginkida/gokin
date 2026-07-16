@@ -174,6 +174,10 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	if a.executor == nil {
 		return emitEarlyFailure("app_init", fmt.Errorf("executor not initialized"))
 	}
+	pendingRecovery, err := a.pendingRecoveryForHeadlessPrompt(prompt)
+	if err != nil {
+		return emitEarlyFailure("recovery_pending", err)
+	}
 
 	// Claim the same foreground slot used by the interactive submit path before
 	// swapping presenters or execution policy. A busy App must remain entirely
@@ -193,6 +197,38 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		cancel()
 		a.releaseHeadlessForeground(claim, pipelineStarted)
 	}()
+	// Re-evaluate durable recovery state only after the shared foreground slot
+	// is ours. The prior turn may have persisted a retry while this invocation
+	// was waiting to claim the slot; launching an unrelated prompt from the
+	// earlier snapshot would bypass that lineage.
+	var headlessLineage conversationLineage
+	pendingRecovery, headlessLineage, err = a.pendingRecoveryForHeadlessPromptAtLineage(prompt)
+	if err != nil {
+		return emitEarlyFailure("recovery_pending", err)
+	}
+	result.SessionID = headlessLineage.sessionID
+	memoryQuery := prompt
+	if pendingRecovery != nil {
+		claimEpoch := headlessLineage.epoch
+		claimed, checkpoints, claimErr := a.claimPendingRecovery(
+			pendingRecovery.ID, pendingRecovery.SessionID, claimEpoch)
+		if claimErr != nil {
+			return emitEarlyFailure("recovery_claim", claimErr)
+		}
+		// Headless owns the exclusive foreground before claiming. Handing the
+		// generation to its run context is therefore the dispatch boundary.
+		a.markRecoveryDispatched(claimed.SessionID, claimed.ID)
+		prompt = claimed.Message
+		if claimed.UserMessage != "" {
+			memoryQuery = claimed.UserMessage
+		}
+		runCtx = withPersistedSideEffectRecovery(
+			runCtx, claimed.ID, claimed.SessionID, checkpoints)
+		runCtx = withConversationLineage(runCtx, claimed.SessionID, claimEpoch)
+	} else {
+		runCtx = withConversationLineage(
+			runCtx, headlessLineage.sessionID, headlessLineage.epoch)
+	}
 
 	// Swap the presenter: the execution handler (built once by the builder
 	// with ALL the shared bookkeeping — journal, heartbeat, response
@@ -225,7 +261,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// baseline: routed headless printed nothing, journal blind) cannot
 	// recur even with routing enabled.
 	pipelineStarted = true
-	a.processMessageWithContext(runCtx, prompt)
+	a.processMessageWithMemoryQuery(runCtx, prompt, memoryQuery)
 	finishOutput()
 	// The shared finalizer retains foreground ownership while the headless token
 	// is active. Restore presenter/routing immediately; the slot itself remains

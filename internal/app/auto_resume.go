@@ -27,6 +27,26 @@ var autoResumeDelays = []time.Duration{
 	30 * time.Second,
 }
 
+// automaticRetrySafety is implemented by errors whose producer has enough
+// provenance to decide whether replaying the whole request is safe. Keep the
+// contract here structural (rather than importing a concrete router error) so
+// every future delegated/tool execution path can close the same boundary.
+type automaticRetrySafety interface {
+	AutomaticRetrySafe() bool
+}
+
+// isAutomaticRetryUnsafe walks wrapped errors and returns true when any
+// execution layer reports that the request may already have crossed a
+// side-effect boundary without an exact replay ledger. Such failures are
+// terminal until the user explicitly inspects the workspace and continues.
+func isAutomaticRetryUnsafe(err error) bool {
+	if err == nil {
+		return false
+	}
+	var safety automaticRetrySafety
+	return errors.As(err, &safety) && !safety.AutomaticRetrySafe()
+}
+
 // isAutoResumableError returns true for errors where an auto-resume (compact +
 // retry) is likely to help — as opposed to errors that will deterministically
 // fail again (auth, terminal provider errors, user cancellation).
@@ -37,6 +57,15 @@ var autoResumeDelays = []time.Duration{
 // within the timeout. This is especially true for GLM with extended thinking.
 func isAutoResumableError(err error) bool {
 	if err == nil {
+		return false
+	}
+
+	// A delegated execution may have already changed the workspace while its
+	// exact tool checkpoints remain outside the foreground executor ledger.
+	// Compaction cannot make replay safe; fail closed before any retry budget is
+	// consumed. message_processor.go enforces the same contract before the
+	// in-turn retry loop and rate-limit scheduler.
+	if isAutomaticRetryUnsafe(err) {
 		return false
 	}
 

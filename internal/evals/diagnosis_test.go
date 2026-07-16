@@ -1,6 +1,9 @@
 package evals
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDiagnoseReport_RecommendsPromptAndToolActions(t *testing.T) {
 	report := BuildReport("results.jsonl", []Result{
@@ -85,6 +88,38 @@ func TestDiagnoseReport_AllPassingRecommendsBaseline(t *testing.T) {
 	if diagnosis.Recommendations[0].Area != "repeat-loop" {
 		t.Fatalf("recommendation = %+v, want repeat-loop", diagnosis.Recommendations[0])
 	}
+}
+
+func TestDiagnoseReport_DryRunIsNotDiagnosedAsPassingEvidence(t *testing.T) {
+	report := BuildReport("results.jsonl", []Result{{ScenarioID: "a", Status: "dry_run"}})
+	diagnosis := DiagnoseReport(report, nil)
+	if diagnosis.DryRun != 1 || !hasRecommendationArea(diagnosis.Recommendations, "eval-execution") {
+		t.Fatalf("diagnosis = %+v, want explicit dry-run execution recommendation", diagnosis)
+	}
+	if hasRecommendationArea(diagnosis.Recommendations, "repeat-loop") {
+		t.Fatalf("dry-run was incorrectly diagnosed as all passing: %+v", diagnosis.Recommendations)
+	}
+}
+
+func TestDiagnoseReport_CohortRecommendationIncludesDuplicateAndSpecCounts(t *testing.T) {
+	current := BuildReport("current.jsonl", []Result{{ScenarioID: "a", Status: "passed"}})
+	cmp := Comparison{CohortMismatch: &CohortMismatch{
+		BaselineDuplicates: []ScenarioIdentity{{ID: "a"}},
+		CurrentDuplicates:  []ScenarioIdentity{{ID: "b"}},
+		SpecMismatches:     []ScenarioIdentity{{ID: "c"}},
+	}}
+	diagnosis := DiagnoseReport(current, &cmp)
+	for _, rec := range diagnosis.Recommendations {
+		if rec.Area == "eval-cohort" {
+			for _, want := range []string{"1 duplicate baseline", "1 duplicate current", "1 changed spec"} {
+				if !strings.Contains(rec.Reason, want) {
+					t.Fatalf("recommendation reason = %q, want %q", rec.Reason, want)
+				}
+			}
+			return
+		}
+	}
+	t.Fatalf("recommendations = %+v, want eval-cohort", diagnosis.Recommendations)
 }
 
 func hasRecommendationArea(recs []Recommendation, area string) bool {

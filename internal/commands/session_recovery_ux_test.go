@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,95 @@ func TestFormatRecentSessionsExampleUsesFirstVisibleProjectSession(t *testing.T)
 	}
 	if !strings.Contains(got, "Example: /resume current-project") {
 		t.Fatalf("example does not use the first visible session: %q", got)
+	}
+}
+
+func TestNamedSaveSnapshotsWithoutChangingActiveIdentity(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	hm, err := chat.NewHistoryManager()
+	if err != nil {
+		t.Fatalf("NewHistoryManager: %v", err)
+	}
+	session := chat.NewSession()
+	session.SetID("active-session")
+	session.AddUserMessage("unsaved active history")
+	session.AddPendingRecovery(chat.SerializedPendingRecovery{
+		ID:        "active-recovery",
+		SessionID: "active-session",
+		Message:   "resume source mutation",
+		State:     chat.PendingRecoveryScheduled,
+	}, "")
+	app := &resumeFakeApp{
+		fakeAppForMCP: &fakeAppForMCP{workDir: t.TempDir()},
+		session:       session,
+		hm:            hm,
+	}
+
+	message, err := (&SaveCommand{}).Execute(context.Background(), []string{"named-copy"}, app)
+	if err != nil {
+		t.Fatalf("SaveCommand.Execute: %v", err)
+	}
+	if !strings.Contains(message, "named-copy") {
+		t.Fatalf("save message = %q", message)
+	}
+	if got := session.GetID(); got != "active-session" {
+		t.Fatalf("named save changed active identity to %q", got)
+	}
+	state, err := hm.LoadFull("named-copy")
+	if err != nil {
+		t.Fatalf("LoadFull named snapshot: %v", err)
+	}
+	if state.ID != "named-copy" || len(state.History) != 1 {
+		t.Fatalf("named snapshot = %+v", state)
+	}
+	if len(state.PendingRecoveries) != 0 {
+		t.Fatalf("named clone inherited source recovery: %+v", state.PendingRecoveries)
+	}
+	if got := session.GetPendingRecoveries(); len(got) != 1 || got[0].ID != "active-recovery" {
+		t.Fatalf("named save changed source recovery: %+v", got)
+	}
+	lease, err := chat.AcquireSessionWriterLease("named-copy")
+	if err != nil {
+		t.Fatalf("named save leaked target lease: %v", err)
+	}
+	_ = lease.Release()
+}
+
+func TestNamedSaveRefusesBusyTargetEvenWithForce(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	hm, err := chat.NewHistoryManager()
+	if err != nil {
+		t.Fatalf("NewHistoryManager: %v", err)
+	}
+	held, err := chat.AcquireSessionWriterLease("busy-target")
+	if err != nil {
+		t.Fatalf("AcquireSessionWriterLease: %v", err)
+	}
+	defer held.Release()
+
+	session := chat.NewSession()
+	session.SetID("active-session")
+	session.AddUserMessage("must not overwrite another writer")
+	app := &resumeFakeApp{
+		fakeAppForMCP: &fakeAppForMCP{workDir: t.TempDir()},
+		session:       session,
+		hm:            hm,
+	}
+	message, err := (&SaveCommand{}).Execute(context.Background(), []string{"busy-target", "--force"}, app)
+	if err != nil {
+		t.Fatalf("SaveCommand.Execute: %v", err)
+	}
+	if !strings.Contains(message, "open in another") || !strings.Contains(message, "Nothing was overwritten") {
+		t.Fatalf("busy save message = %q", message)
+	}
+	if _, loadErr := hm.LoadFull("busy-target"); !os.IsNotExist(loadErr) {
+		t.Fatalf("busy target was written: %v", loadErr)
+	}
+	if duplicate, leaseErr := chat.AcquireSessionWriterLease("busy-target"); !errors.Is(leaseErr, chat.ErrSessionWriterLeaseBusy) {
+		if leaseErr == nil {
+			_ = duplicate.Release()
+		}
+		t.Fatalf("busy lease changed: %v", leaseErr)
 	}
 }
 

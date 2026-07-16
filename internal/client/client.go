@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"time"
 
 	"google.golang.org/genai"
@@ -261,6 +263,56 @@ type Client interface {
 
 	// Close closes the client connection.
 	Close() error
+}
+
+// isNilClient detects both a nil interface and an interface containing a typed
+// nil pointer. The latter otherwise passes `client != nil` and panics only when
+// a method is invoked later.
+func isNilClient(client Client) bool {
+	if client == nil {
+		return true
+	}
+	value := reflect.ValueOf(client)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func sameClientInstance(left, right Client) bool {
+	if isNilClient(left) || isNilClient(right) {
+		return false
+	}
+	lv, rv := reflect.ValueOf(left), reflect.ValueOf(right)
+	if lv.Type() != rv.Type() || lv.Kind() != reflect.Ptr {
+		return false
+	}
+	return lv.Pointer() == rv.Pointer()
+}
+
+// sessionClientCloner creates an isolated mutable wrapper while retaining the
+// provider transport owned by a pooled prototype. Client runtime state (tools,
+// prompt, thinking budget, callbacks) must never be shared between App/session
+// instances.
+type sessionClientCloner interface {
+	cloneForSession() Client
+}
+
+func cloneClientForSession(prototype Client) (Client, error) {
+	if isNilClient(prototype) {
+		return nil, fmt.Errorf("cannot clone nil client prototype")
+	}
+	cloner, ok := prototype.(sessionClientCloner)
+	if !ok {
+		return nil, fmt.Errorf("client type %T does not support isolated session clones", prototype)
+	}
+	clone := cloner.cloneForSession()
+	if isNilClient(clone) {
+		return nil, fmt.Errorf("client type %T returned a nil session clone", prototype)
+	}
+	return clone, nil
 }
 
 // TokenCountAccuracy is an optional capability for clients whose CountTokens

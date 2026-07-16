@@ -102,6 +102,29 @@ func NormalizeConfig(cfg *Config) error {
 		cfg.API.Retry.Providers = normalized
 	}
 
+	// Fallback health labels and factory routing must refer to real providers.
+	// A typo previously fell into generic model auto-detection and silently
+	// created another GLM client under a bogus provider name.
+	if len(cfg.Model.FallbackProviders) > 0 {
+		normalized := make([]string, 0, len(cfg.Model.FallbackProviders))
+		seen := make(map[string]struct{}, len(cfg.Model.FallbackProviders))
+		for _, provider := range cfg.Model.FallbackProviders {
+			provider = strings.ToLower(strings.TrimSpace(provider))
+			if provider == "" {
+				continue
+			}
+			if GetProvider(provider) == nil {
+				return fmt.Errorf("unknown fallback provider %q", provider)
+			}
+			if _, exists := seen[provider]; exists {
+				continue
+			}
+			seen[provider] = struct{}{}
+			normalized = append(normalized, provider)
+		}
+		cfg.Model.FallbackProviders = normalized
+	}
+
 	return nil
 }
 

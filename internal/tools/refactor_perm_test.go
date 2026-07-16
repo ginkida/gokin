@@ -113,7 +113,7 @@ func TestClampTTLMinutes(t *testing.T) {
 // TestDiffContextLinesBounds ensures extreme context_lines values don't panic
 // or error — negatives are floored to 0, huge values clamped (memory guard).
 func TestDiffContextLinesBounds(t *testing.T) {
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	f1 := filepath.Join(dir, "a.txt")
 	f2 := filepath.Join(dir, "b.txt")
 	if err := os.WriteFile(f1, []byte("line1\nline2\nline3\n"), 0o644); err != nil {
@@ -123,7 +123,7 @@ func TestDiffContextLinesBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := NewDiffTool()
+	tool := NewDiffTool(dir)
 	for _, cl := range []int{-100, 0, 3, 1_000_000} {
 		res, err := tool.Execute(context.Background(), map[string]any{
 			"file1":         f1,

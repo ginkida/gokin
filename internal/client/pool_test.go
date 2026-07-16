@@ -2,7 +2,11 @@ package client
 
 import (
 	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -136,5 +140,186 @@ func TestClientPool_InvalidateIsScoped(t *testing.T) {
 	}
 	if deepseek.closed {
 		t.Error("deepseek client must not be closed by an unrelated Invalidate")
+	}
+}
+
+func TestClientPool_InvalidateRemovesAllConfigFingerprints(t *testing.T) {
+	pool := NewClientPool(5)
+	first := &fakeClient{id: "endpoint-a"}
+	second := &fakeClient{id: "endpoint-b"}
+	pool.Put("kimi", "kimi-for-coding", first, "config-a")
+	pool.Put("kimi", "kimi-for-coding", second, "config-b")
+
+	pool.Invalidate("kimi", "kimi-for-coding")
+	if pool.Size() != 0 {
+		t.Fatalf("pool size = %d, want all config variants removed", pool.Size())
+	}
+	if !first.closed || !second.closed {
+		t.Fatalf("scoped clients were not both closed: first=%v second=%v", first.closed, second.closed)
+	}
+}
+
+func TestClientPool_GetOrCreateConcurrentSingleConstruction(t *testing.T) {
+	pool := NewClientPool(2)
+	const callers = 32
+
+	type result struct {
+		client Client
+		err    error
+	}
+	results := make(chan result, callers)
+	start := make(chan struct{})
+	var creates atomic.Int32
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			client, err := pool.GetOrCreate("glm", "glm-5.2", "same-config", func() (Client, error) {
+				creates.Add(1)
+				return &fakeClient{id: "shared"}, nil
+			})
+			results <- result{client: client, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	if got := creates.Load(); got != 1 {
+		t.Fatalf("factory calls = %d, want exactly 1", got)
+	}
+	var shared Client
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("GetOrCreate: %v", result.err)
+		}
+		if shared == nil {
+			shared = result.client
+		} else if result.client != shared {
+			t.Fatal("concurrent callers received different clients")
+		}
+	}
+	if got := pool.Size(); got != 1 {
+		t.Fatalf("pool size = %d, want 1", got)
+	}
+}
+
+func TestClientPool_PutReplacementAtCapacityKeepsUnrelatedClient(t *testing.T) {
+	pool := NewClientPool(2)
+	unrelated := &fakeClient{id: "unrelated"}
+	old := &fakeClient{id: "old"}
+	replacement := &fakeClient{id: "replacement"}
+	pool.Put("kimi", "kimi-for-coding", unrelated)
+	pool.Put("glm", "glm-5.2", old)
+
+	// Make eviction order deterministic. The old implementation incorrectly
+	// evicted the unrelated entry before replacing an already-present key.
+	pool.mu.Lock()
+	pool.lastUsed[poolKey("kimi", "kimi-for-coding")] = time.Unix(1, 0)
+	pool.lastUsed[poolKey("glm", "glm-5.2")] = time.Unix(2, 0)
+	pool.mu.Unlock()
+
+	pool.Put("glm", "glm-5.2", replacement)
+
+	if got := pool.Size(); got != 2 {
+		t.Fatalf("pool size = %d, want 2", got)
+	}
+	if !old.closed {
+		t.Error("replaced client was not closed")
+	}
+	if unrelated.closed {
+		t.Error("replacement at capacity evicted an unrelated client")
+	}
+	if got, ok := pool.Get("kimi", "kimi-for-coding"); !ok || got != unrelated {
+		t.Fatalf("unrelated client missing after replacement: client=%v ok=%v", got, ok)
+	}
+	if got, ok := pool.Get("glm", "glm-5.2"); !ok || got != replacement {
+		t.Fatalf("replacement was not stored: client=%v ok=%v", got, ok)
+	}
+}
+
+func TestClientPool_PutSameInstanceDoesNotCloseStoredClient(t *testing.T) {
+	pool := NewClientPool(1)
+	client := &fakeClient{id: "same"}
+	pool.Put("glm", "glm-5.2", client)
+	pool.Put("glm", "glm-5.2", client)
+
+	if client.closed {
+		t.Fatal("re-putting the same owned instance closed the live pool entry")
+	}
+	if got, ok := pool.Get("glm", "glm-5.2"); !ok || got != client {
+		t.Fatalf("stored client = %v ok=%v, want original instance", got, ok)
+	}
+}
+
+func TestClientPool_GetOrCreateAtCapacityEvictsOldest(t *testing.T) {
+	pool := NewClientPool(1)
+	old := &fakeClient{id: "old"}
+	pool.Put("kimi", "kimi-for-coding", old)
+
+	created := &fakeClient{id: "new"}
+	got, err := pool.GetOrCreate("glm", "glm-5.2", "config", func() (Client, error) {
+		return created, nil
+	})
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if got != created {
+		t.Fatalf("client = %v, want newly created client", got)
+	}
+	if !old.closed {
+		t.Error("oldest client was not closed on capacity eviction")
+	}
+	if size := pool.Size(); size != 1 {
+		t.Fatalf("pool size = %d, want 1", size)
+	}
+}
+
+func TestClientPool_GetOrCreateCloseDuringCreationClosesResult(t *testing.T) {
+	pool := NewClientPool(1)
+	created := &fakeClient{id: "late"}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	type creationResult struct {
+		client Client
+		err    error
+	}
+	resultCh := make(chan creationResult, 1)
+	go func() {
+		client, err := pool.GetOrCreate("glm", "glm-5.2", "config", func() (Client, error) {
+			close(started)
+			<-release
+			return created, nil
+		})
+		resultCh <- creationResult{client: client, err: err}
+	}()
+
+	<-started
+	pool.Close()
+	close(release)
+	gotResult := <-resultCh
+	if !errors.Is(gotResult.err, ErrClientPoolClosed) {
+		t.Fatalf("error = %v, want ErrClientPoolClosed", gotResult.err)
+	}
+	if gotResult.client != nil {
+		t.Fatalf("client = %v, want nil after shutdown", gotResult.client)
+	}
+	if !created.closed {
+		t.Error("client completed after shutdown was not closed")
+	}
+	if size := pool.Size(); size != 0 {
+		t.Fatalf("pool size = %d after shutdown, want 0", size)
+	}
+}
+
+func TestClientPool_PutAfterCloseClosesRejectedClient(t *testing.T) {
+	pool := NewClientPool(1)
+	pool.Close()
+	client := &fakeClient{id: "late-put"}
+	pool.Put("glm", "glm-5.2", client)
+	if !client.closed {
+		t.Error("Put must close a client it cannot take ownership of")
 	}
 }

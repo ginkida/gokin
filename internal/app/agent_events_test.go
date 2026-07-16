@@ -3,10 +3,12 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gokin/internal/hooks"
 )
@@ -233,6 +235,52 @@ func TestRunStopHooks_CancelledContextSkipsHooks(t *testing.T) {
 	a.runStopHooks(context.Background(), "next answer")
 	if _, _, ok := a.dequeuePending(); !ok {
 		t.Fatal("a subsequent live-ctx turn must still fire stop hooks")
+	}
+}
+
+func TestRunStopHooks_CancelledWhileHookRunsCannotLatchContinuation(t *testing.T) {
+	cp := &capturePresenter{}
+	dir := t.TempDir()
+	started := filepath.Join(dir, "hook-started")
+	mgr := hooks.NewManager(true, dir)
+	mgr.AddHook(&hooks.Hook{
+		Name: "slow-gate", Type: hooks.Stop,
+		Command: fmt.Sprintf("touch %q; sleep 5; exit 1", started),
+		Enabled: true, FailOnError: true,
+	})
+	a := &App{hooksManager: mgr}
+	a.setPresenter(cp)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		a.runStopHooks(ctx, "final answer")
+		close(done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("stop hook did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled stop hook did not return")
+	}
+	if _, _, ok := a.dequeuePending(); ok {
+		t.Fatal("hook cancelled in flight enqueued a continuation")
+	}
+	a.mu.Lock()
+	latched := a.stopHookActive
+	a.mu.Unlock()
+	if latched {
+		t.Fatal("hook cancelled in flight latched stopHookActive")
 	}
 }
 

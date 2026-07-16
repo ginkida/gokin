@@ -705,6 +705,7 @@ func (r *Runner) publishResumedAgentPanic(
 		EstimatedCost:        estimatedCost,
 		CostTracked:          costTracked,
 		MutatingToolCalls:    agent.MutatingToolCount(),
+		StatefulToolAttempts: agent.StatefulToolAttemptCount(),
 		TouchedPaths:         agent.GetTouchedPaths(),
 	}
 	agent.populateResultIdentity(result)

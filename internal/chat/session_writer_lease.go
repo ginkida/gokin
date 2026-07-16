@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 // ErrSessionWriterLeaseBusy is returned when another goroutine or process
@@ -28,8 +29,25 @@ var processSessionWriterLeases = struct {
 type SessionWriterLease struct {
 	file       *os.File
 	registryID string
+	sessionID  string
+	active     atomic.Bool
 	once       sync.Once
 	releaseErr error
+}
+
+// SessionID returns the persisted session identity protected by this lease.
+// It lets higher-level runtimes verify that an acquired lease still matches
+// the in-memory Session before accepting ownership of it.
+func (l *SessionWriterLease) SessionID() string {
+	if l == nil {
+		return ""
+	}
+	return l.sessionID
+}
+
+// IsActive reports whether Release has not begun for this lease.
+func (l *SessionWriterLease) IsActive() bool {
+	return l != nil && l.active.Load()
 }
 
 // AcquireSessionWriterLease acquires exclusive write ownership for sessionID
@@ -104,7 +122,8 @@ func acquireSessionWriterLeaseAt(sessionsDir, sessionID string) (*SessionWriterL
 		return nil, fmt.Errorf("lock writer lease for session %s: %w", sessionID, err)
 	}
 
-	lease := &SessionWriterLease{file: file, registryID: registryID}
+	lease := &SessionWriterLease{file: file, registryID: registryID, sessionID: sessionID}
+	lease.active.Store(true)
 	processSessionWriterLeases.held[registryID] = lease
 	return lease, nil
 }
@@ -131,6 +150,7 @@ func (l *SessionWriterLease) Release() error {
 		return nil
 	}
 	l.once.Do(func() {
+		l.active.Store(false)
 		processSessionWriterLeases.Lock()
 		defer processSessionWriterLeases.Unlock()
 

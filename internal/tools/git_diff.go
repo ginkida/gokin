@@ -4,21 +4,24 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
+
+	"gokin/internal/security"
 
 	"google.golang.org/genai"
 )
 
 // GitDiffTool shows differences between commits, branches, or files.
 type GitDiffTool struct {
-	workDir string
+	workDir       string
+	pathValidator *security.PathValidator
 }
 
 // NewGitDiffTool creates a new GitDiffTool instance.
 func NewGitDiffTool(workDir string) *GitDiffTool {
 	return &GitDiffTool{
-		workDir: workDir,
+		workDir:       workDir,
+		pathValidator: newWorkspacePathValidator(workDir, nil),
 	}
 }
 
@@ -73,9 +76,18 @@ func (t *GitDiffTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 	nameStatus := GetBoolDefault(args, "name_status", false)
 	file := GetStringDefault(args, "file", "")
 	staged := GetBoolDefault(args, "staged", false)
+	if t.pathValidator == nil {
+		return NewErrorResult("security error: path validator not initialized"), nil
+	}
 
 	// Build git diff command
-	cmdArgs := []string{"diff"}
+	cmdArgs := []string{"--literal-pathspecs", "diff"}
+	// With no explicit, validated pathspec, --relative is the security boundary
+	// for a workDir that is a subdirectory of a larger repository: it excludes
+	// sibling/parent changes from the result.
+	if file == "" {
+		cmdArgs = append(cmdArgs, "--relative")
+	}
 
 	if nameStatus {
 		cmdArgs = append(cmdArgs, "--name-status")
@@ -101,13 +113,11 @@ func (t *GitDiffTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 	// else: unstaged changes (no additional args needed)
 
 	if file != "" {
-		// Make path relative to workDir if absolute
-		if filepath.IsAbs(file) {
-			if rel, err := filepath.Rel(t.workDir, file); err == nil {
-				file = rel
-			}
+		validatedFile, _, err := validateGitPath(t.workDir, file, t.pathValidator)
+		if err != nil {
+			return NewErrorResult(fmt.Sprintf("file path validation failed: %s", err)), nil
 		}
-		cmdArgs = append(cmdArgs, "--", file)
+		cmdArgs = append(cmdArgs, "--", validatedFile)
 	}
 
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)

@@ -713,6 +713,23 @@ func (c *AnthropicClient) WithModel(modelName string) Client {
 	return newClient
 }
 
+// cloneForSession returns an independently mutable client wrapper that shares
+// only the immutable HTTP transport/connection pool with its prototype.
+func (c *AnthropicClient) cloneForSession() Client {
+	c.mu.RLock()
+	clone := &AnthropicClient{
+		config:            c.config,
+		httpClient:        c.httpClient,
+		tools:             append([]*genai.Tool(nil), c.tools...),
+		rateLimiter:       c.rateLimiter,
+		statusCallback:    c.statusCallback,
+		systemInstruction: c.systemInstruction,
+		turnContext:       c.turnContext,
+	}
+	c.mu.RUnlock()
+	return clone
+}
+
 // Close closes the client connection and releases resources.
 func (c *AnthropicClient) Close() error {
 	c.mu.Lock()
@@ -780,6 +797,21 @@ func (acc *toolCallAccumulator) appendToolInput(input any) {
 			return
 		}
 		acc.currentToolInput.Write(v)
+	}
+}
+
+func malformedToolStreamChunk(acc *toolCallAccumulator, detail string) ResponseChunk {
+	toolName := strings.TrimSpace(acc.currentToolName)
+	if toolName == "" {
+		toolName = "unknown"
+	}
+	acc.currentToolID = ""
+	acc.currentToolName = ""
+	acc.currentToolInput.Reset()
+	acc.currentBlockType = ""
+	return ResponseChunk{
+		Error: fmt.Errorf("malformed streamed input for tool %q: %s: %w", toolName, detail, io.ErrUnexpectedEOF),
+		Done:  true,
 	}
 }
 
@@ -1219,7 +1251,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
 	}
 
-	logging.Debug("anthropic API request", "url", url, "model", c.config.Model)
+	logging.Debug("anthropic API request", "url", url, "model", c.GetModel())
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
@@ -1271,28 +1303,31 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		// receive stable keywords, and context overflow stays a typed HTTP 400 so
 		// callers can compact history. Bodies without a numeric code keep the
 		// standard Anthropic-compatible behavior for other providers.
-		if code, providerMsg := parseProviderErrorBody(body); code != "" {
-			retryable, keyword, description := classifyGLMErrorCode(code, providerMsg)
-			if isGLMTerminalCode(code) {
-				logging.Warn("provider terminal error — not retrying", "code", code, "status", resp.StatusCode)
-				return nil, &TerminalProviderError{
-					Code:    code,
-					Status:  resp.StatusCode,
-					Message: terminalProviderMessage(description, providerMsg),
+		if strings.EqualFold(strings.TrimSpace(c.config.Provider), "glm") {
+			code, providerMsg := parseProviderErrorBody(body)
+			if code != "" {
+				retryable, keyword, description := classifyGLMErrorCode(code, providerMsg)
+				if isGLMTerminalCode(code) {
+					logging.Warn("provider terminal error — not retrying", "code", code, "status", resp.StatusCode)
+					return nil, &TerminalProviderError{
+						Code:    code,
+						Status:  resp.StatusCode,
+						Message: terminalProviderMessage(description, providerMsg),
+					}
 				}
-			}
-			if code == "1261" {
-				return nil, &HTTPError{
-					StatusCode: http.StatusBadRequest,
-					RetryAfter: retryAfter,
-					Message:    description,
+				if code == "1261" {
+					return nil, &HTTPError{
+						StatusCode: http.StatusBadRequest,
+						RetryAfter: retryAfter,
+						Message:    description,
+					}
 				}
-			}
-			if retryable {
-				return nil, &HTTPError{
-					StatusCode: resp.StatusCode,
-					RetryAfter: retryAfter,
-					Message:    formatGLMError(description, keyword, code, providerMsg),
+				if retryable {
+					return nil, &HTTPError{
+						StatusCode: resp.StatusCode,
+						RetryAfter: retryAfter,
+						Message:    formatGLMError(description, keyword, code, providerMsg),
+					}
 				}
 			}
 		}
@@ -1470,7 +1505,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 							"provider", providerSnap, "original_timeout", streamIdleTimeout)
 						idleTimer.Reset(streamIdleTimeout)
 						if statusCb != nil {
-							statusCb.OnThinkingIdle(streamIdleTimeout, c.config.Provider)
+							statusCb.OnThinkingIdle(streamIdleTimeout, providerSnap)
 						}
 						continue waitLoop
 					}
@@ -1648,19 +1683,35 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					if errObj, ok := event["error"].(map[string]any); ok {
 						if errCode := providerErrorCodeFromMap(errObj); errCode != "" {
 							errMsg := stringFromMap(errObj, "message")
-							streamErr, retryable := newGLMStreamError(errCode, errMsg)
-							logging.Error("Z.AI API error", "code", errCode, "message", errMsg, "retryable", retryable)
-							if statusCb != nil {
-								statusCb.OnError(streamErr, retryable)
+							if strings.EqualFold(strings.TrimSpace(providerSnap), "glm") {
+								streamErr, retryable := newGLMStreamError(errCode, errMsg)
+								logging.Error("Z.AI API error", "code", errCode, "message", errMsg, "retryable", retryable)
+								if statusCb != nil {
+									statusCb.OnError(streamErr, retryable)
+								}
+								select {
+								case chunks <- ResponseChunk{
+									Error: streamErr,
+									Done:  true,
+								}:
+								case <-ctx.Done():
+								}
+								return
 							}
-							select {
-							case chunks <- ResponseChunk{
-								Error: streamErr,
-								Done:  true,
-							}:
-							case <-ctx.Done():
+							// Some Anthropic-compatible providers also attach numeric
+							// codes. Preserve those as provider errors, but never run
+							// them through GLM's terminal/retry taxonomy.
+							if eventType, _ := event["type"].(string); eventType != "error" {
+								streamErr := fmt.Errorf("%s API error (code %s): %s", providerSnap, errCode, errMsg)
+								if statusCb != nil {
+									statusCb.OnError(streamErr, IsRetryableError(streamErr))
+								}
+								select {
+								case chunks <- ResponseChunk{Error: streamErr, Done: true}:
+								case <-ctx.Done():
+								}
+								return
 							}
-							return
 						}
 					}
 
@@ -1719,6 +1770,12 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 
 	switch eventType {
 	case "content_block_start":
+		// Anthropic blocks are strictly sequential. Starting a new block before
+		// the previous one stopped can otherwise pair one tool's ID/name with a
+		// different block's deltas or stop event.
+		if acc.currentBlockType != "" {
+			return malformedToolStreamChunk(acc, "overlapping content blocks")
+		}
 		// Check if this is a tool_use, thinking, or text content block
 		if contentBlock, ok := event["content_block"].(map[string]any); ok {
 			blockType := stringFromMap(contentBlock, "type")
@@ -1801,9 +1858,12 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 
 			// Handle tool input JSON delta
 			if deltaType == "input_json_delta" || (deltaType == "" && acc.currentBlockType == "tool_use") {
-				if partialJSON, ok := delta["partial_json"].(string); ok {
-					acc.currentToolInput.WriteString(partialJSON)
+				partialJSON, exists := delta["partial_json"]
+				partialString, ok := partialJSON.(string)
+				if !exists || !ok {
+					return malformedToolStreamChunk(acc, "input_json_delta.partial_json must be a string")
 				}
+				acc.currentToolInput.WriteString(partialString)
 			}
 
 			// Handle thinking signature — arrives as the last delta in a
@@ -1857,21 +1917,17 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 			var args map[string]any
 			if inputJSON != "" {
 				if err := json.Unmarshal([]byte(inputJSON), &args); err != nil {
-					toolName := acc.currentToolName
 					logging.Error("tool args JSON unmarshal failed",
 						"error", err,
-						"tool", toolName,
+						"tool", acc.currentToolName,
 						"json_length", len(inputJSON))
 					// Never turn a truncated or malformed mutation request into an
 					// executable call with empty arguments. Surface a retryable
 					// stream error so the whole model round is replayed safely.
-					acc.currentToolID = ""
-					acc.currentToolName = ""
-					acc.currentToolInput.Reset()
-					acc.currentBlockType = ""
-					chunk.Error = fmt.Errorf("malformed streamed input for tool %q: %v: %w", toolName, err, io.ErrUnexpectedEOF)
-					chunk.Done = true
-					return chunk
+					return malformedToolStreamChunk(acc, err.Error())
+				}
+				if args == nil {
+					return malformedToolStreamChunk(acc, "tool input must be a JSON object, got null")
 				}
 			} else {
 				logging.Warn("tool call received with empty input JSON",
@@ -1936,6 +1992,14 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 			if v, ok := usage["output_tokens"].(float64); ok && v > 0 {
 				chunk.OutputTokens = int(v)
 			}
+		}
+		// message_delta is terminal in the normal protocol and the outer stream
+		// loop returns immediately when Done is set, so message_stop cannot be
+		// relied on to flush a partial inline <think> tag.
+		if chunk.Done {
+			flushedThinking, flushedRegular := acc.thinkTagParser.Flush()
+			chunk.Thinking += flushedThinking
+			chunk.Text += flushedRegular
 		}
 
 	case "message_stop":
@@ -2365,10 +2429,13 @@ func hasSerializableAssistantParts(parts []*genai.Part) bool {
 // safer than silently stripping thinking and hitting the 400 on
 // every subsequent request.
 func (c *AnthropicClient) requiresThinkingReplay() bool {
-	if !c.config.EnableThinking {
+	c.mu.RLock()
+	enableThinking := c.config.EnableThinking
+	base := c.config.BaseURL
+	c.mu.RUnlock()
+	if !enableThinking {
 		return false
 	}
-	base := c.config.BaseURL
 	if base == DefaultAnthropicBaseURL || base == "" {
 		return true
 	}

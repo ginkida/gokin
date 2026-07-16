@@ -252,7 +252,9 @@ func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterf
 		}
 	}
 
-	app.ClearConversation()
+	if err := clearConversationChecked(app); err != nil {
+		return "", fmt.Errorf("clear conversation safely: %w", err)
+	}
 	app.RefreshTokenCount()
 	// Also clear todos
 	if todoTool != nil {
@@ -484,46 +486,74 @@ func (c *SaveCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		return "No active session.", nil
 	}
 
-	// Parse args: /save [name] [--force]
-	// Force flag protects against accidental overwrite when user provides
-	// an explicit name. Without it, /save mywork silently clobbered an
-	// existing 'mywork' checkpoint — discovered when users came back to
-	// the saved session and found different content. Plain /save with no
-	// custom name is unaffected (uses the unique current session.ID).
-	// SetID/GetID (not a direct field write) — GetState() reads session.ID
-	// on the async autosave goroutine; a plain "session.ID = x" here would
-	// race it (concretely reachable: a message queues an autosave, then
-	// /save runs immediately after).
 	originalID := session.GetID()
-	if customName != "" {
-		if !validSessionID(customName) {
-			return "Invalid session name. Use 1–120 characters (max 240 bytes), no whitespace/control or <>:\"/\\|?*; do not start with '-' or use a reserved device name.", nil
+	if customName == "" || customName == originalID {
+		if err := hm.SaveFull(session); err != nil {
+			return fmt.Sprintf("Failed to save session: %v", err), nil
 		}
-		// Check if a session with that name already exists
-		if !force {
-			if _, loadErr := hm.LoadFull(customName); loadErr == nil {
-				return fmt.Sprintf("Session '%s' already exists.\nUse /save %s --force to overwrite, or pick a different name.",
-					customName, customName), nil
-			}
-		}
-		session.SetID(customName)
+		savedID := originalID
+		return fmt.Sprintf("Session saved as: %s (%d messages)\nTo restore: /resume %s",
+			savedID, len(session.GetHistory()), savedID), nil
 	}
 
-	err = hm.SaveFull(session)
+	if !validSessionID(customName) {
+		return "Invalid session name. Use 1–120 characters (max 240 bytes), no whitespace/control or <>:\"/\\|?*; do not start with '-' or use a reserved device name.", nil
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Sprintf("Save cancelled: %v", err), nil
+	}
+
+	// A named save creates a snapshot under a different persisted identity. It
+	// must own that target's writer lease for the existence check and write;
+	// otherwise /save name --force can overwrite a session currently active in
+	// another process. Never temporarily mutate the live Session ID: autosave
+	// may run concurrently and would write the wrong file.
+	targetLease, err := chat.AcquireSessionWriterLease(customName)
 	if err != nil {
-		session.SetID(originalID) // Restore original ID
+		if errors.Is(err, chat.ErrSessionWriterLeaseBusy) {
+			return fmt.Sprintf("Session '%s' is open in another Gokin process. Nothing was overwritten.", customName), nil
+		}
+		return fmt.Sprintf("Failed to protect target session '%s': %v", customName, err), nil
+	}
+	defer targetLease.Release()
+
+	if !force {
+		if _, loadErr := hm.LoadFull(customName); loadErr == nil {
+			return fmt.Sprintf("Session '%s' already exists.\nUse /save %s --force to overwrite, or pick a different name.",
+				customName, customName), nil
+		} else if !os.IsNotExist(loadErr) {
+			return fmt.Sprintf("Cannot safely inspect existing session '%s': %v. Nothing was overwritten.", customName, loadErr), nil
+		}
+	}
+
+	state := session.GetState()
+	state.ID = customName
+	// A named save is a clone, not a writer-ownership transfer. Copying a
+	// scheduled retry into both identities would let the same interrupted
+	// mutation resume twice; claimed entries would also carry a mismatched
+	// SessionID. Durable recoveries remain exclusively with the active source.
+	state.PendingRecoveries = nil
+	snapshot := chat.NewSession()
+	if err := snapshot.RestoreFromState(state); err != nil {
+		return fmt.Sprintf("Failed to prepare session snapshot: %v", err), nil
+	}
+	if err := hm.SaveFull(snapshot); err != nil {
 		return fmt.Sprintf("Failed to save session: %v", err), nil
 	}
 
-	savedID := session.GetID()
-	session.SetID(originalID) // Restore original ID
-
 	msgCount := len(session.GetHistory())
-	return fmt.Sprintf("Session saved as: %s (%d messages)\nTo restore: /resume %s", savedID, msgCount, savedID), nil
+	return fmt.Sprintf("Session saved as: %s (%d messages)\nTo restore: /resume %s", customName, msgCount, customName), nil
 }
 
 // ResumeCommand resumes a saved session.
 type ResumeCommand struct{}
+
+// sessionSwitcher is intentionally narrower than AppInterface. Runtimes that
+// support /resume must provide an atomic writer-lease handoff; falling back to
+// mutating Session directly would allow two processes to write one identity.
+type sessionSwitcher interface {
+	SwitchSession(context.Context, *chat.SessionState, bool) (*chat.SessionState, error)
+}
 
 func (c *ResumeCommand) Name() string        { return "resume" }
 func (c *ResumeCommand) Description() string { return "Resume a saved session" }
@@ -611,14 +641,24 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 			sessionID, state.Provider, currentProvider, state.Provider, sessionID), nil
 	}
 
-	session := app.GetSession()
-	if session == nil {
-		return "No active session to restore into.", nil
+	switcher, ok := app.(sessionSwitcher)
+	if !ok {
+		return "Session switching is unavailable in this runtime; the current session was left unchanged.", nil
+	}
+	state, err = switcher.SwitchSession(ctx, state, force)
+	if err != nil {
+		if errors.Is(err, chat.ErrSessionWriterLeaseBusy) {
+			return fmt.Sprintf("Session '%s' is already open in another Gokin process. The current session was left unchanged.", sessionID), nil
+		}
+		return fmt.Sprintf("Failed to resume session '%s': %v. The current session was left unchanged.", sessionID, err), nil
+	}
+	if state == nil {
+		return fmt.Sprintf("Failed to resume session '%s': the runtime returned no state. The current session was left unchanged.", sessionID), nil
 	}
 
-	err = session.RestoreFromState(state)
-	if err != nil {
-		return fmt.Sprintf("Failed to restore session: %v", err), nil
+	session := app.GetSession()
+	if session == nil {
+		return "Session switch completed, but no active session is available.", nil
 	}
 
 	// Compare on-disk count vs what actually loaded. RestoreFromState skips

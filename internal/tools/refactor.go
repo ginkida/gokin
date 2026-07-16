@@ -418,8 +418,14 @@ func (t *RefactorTool) executeExtract(_ context.Context, args map[string]any) (T
 		t.undoManager.Record(*change)
 	}
 
-	return NewSuccessResult(fmt.Sprintf("Extracted lines %d-%d into function '%s' in %s",
-		startLine, endLine, extractName, filePath)), nil
+	return NewSuccessResultWithData(
+		fmt.Sprintf("Extracted lines %d-%d into function '%s' in %s",
+			startLine, endLine, extractName, filePath),
+		map[string]any{
+			"changed":       true,
+			"written_paths": []string{filePath},
+		},
+	), nil
 }
 
 // executeFindRefs finds all references to a function/variable.
@@ -588,8 +594,14 @@ func (t *RefactorTool) executeInline(_ context.Context, args map[string]any) (To
 		t.undoManager.Record(*change)
 	}
 
-	return NewSuccessResult(fmt.Sprintf("Inlined '%s' at %d call site(s) in %s. Review the changes for correctness.",
-		targetName, len(callSites), filePath)), nil
+	return NewSuccessResultWithData(
+		fmt.Sprintf("Inlined '%s' at %d call site(s) in %s. Review the changes for correctness.",
+			targetName, len(callSites), filePath),
+		map[string]any{
+			"changed":       true,
+			"written_paths": []string{filePath},
+		},
+	), nil
 }
 
 // findRefsInGoFile uses AST to find references in Go code.

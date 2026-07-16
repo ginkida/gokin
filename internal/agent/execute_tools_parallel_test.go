@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,26 @@ func (f *fastTestTool) Declaration() *genai.FunctionDeclaration {
 func (f *fastTestTool) Validate(args map[string]any) error { return nil }
 func (f *fastTestTool) Execute(ctx context.Context, args map[string]any) (tools.ToolResult, error) {
 	return tools.NewSuccessResult("fast tool done"), nil
+}
+
+type blockingParallelTestTool struct {
+	name     string
+	started  chan struct{}
+	release  chan struct{}
+	returned chan struct{}
+}
+
+func (t *blockingParallelTestTool) Name() string        { return t.name }
+func (t *blockingParallelTestTool) Description() string { return "blocking parallel test tool" }
+func (t *blockingParallelTestTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.name}
+}
+func (t *blockingParallelTestTool) Validate(map[string]any) error { return nil }
+func (t *blockingParallelTestTool) Execute(context.Context, map[string]any) (tools.ToolResult, error) {
+	close(t.started)
+	<-t.release
+	close(t.returned)
+	return tools.NewSuccessResult("late result"), nil
 }
 
 // TestExecuteToolsParallel_StragglerLeavesValidPlaceholder pins the fix for
@@ -141,5 +162,74 @@ func TestExecuteToolsParallel_NormalCompletionUnaffected(t *testing.T) {
 	}
 	if results[0].Response.Response["content"] != "fast tool done" {
 		t.Errorf("got %+v, want the real tool result", results[0].Response.Response)
+	}
+}
+
+func TestExecuteToolsParallel_AbandonmentCannotFinalizeCompletedSiblingLate(t *testing.T) {
+	origGrace := parallelToolCleanupGrace
+	parallelToolCleanupGrace = 20 * time.Millisecond
+	defer func() { parallelToolCleanupGrace = origGrace }()
+
+	reg := tools.NewRegistry()
+	if err := reg.Register(&fastTestTool{name: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	if err := reg.Register(&blockingParallelTestTool{
+		name: "grep", started: started, release: release, returned: returned,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{registry: reg}
+	fastEnded := make(chan struct{})
+	var fastEndOnce sync.Once
+	a.SetOnToolActivity(func(_ string, toolName string, _ map[string]any, status string, _ bool, _ string) {
+		if toolName == "read" && status == "end" {
+			fastEndOnce.Do(func() { close(fastEnded) })
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultsCh := make(chan []toolCallResult, 1)
+	go func() {
+		resultsCh <- a.executeTools(ctx, []*genai.FunctionCall{
+			{ID: "read-1", Name: "read", Args: map[string]any{}},
+			{ID: "grep-1", Name: "grep", Args: map[string]any{}},
+		})
+	}()
+
+	<-started
+	<-fastEnded
+	// The fast raw call has completed, but the sibling still owns the group.
+	// Agent bookkeeping must remain caller-owned until the whole join succeeds.
+	time.Sleep(10 * time.Millisecond)
+	if got := a.GetToolsUsed(); len(got) != 0 {
+		close(release)
+		t.Fatalf("parallel worker finalized Agent state before join: %v", got)
+	}
+
+	cancel()
+	var results []toolCallResult
+	select {
+	case results = <-resultsCh:
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		t.Fatal("parallel cleanup did not return after its grace period")
+	}
+	for i, result := range results {
+		if result.Response == nil || result.Response.Response["error"] != "cancelled" {
+			close(release)
+			t.Fatalf("result[%d] = %#v, want cancellation placeholder", i, result)
+		}
+	}
+
+	close(release)
+	<-returned
+	time.Sleep(25 * time.Millisecond)
+	if got := a.GetToolsUsed(); len(got) != 0 {
+		t.Fatalf("abandoned raw worker polluted Agent state after return: %v", got)
 	}
 }

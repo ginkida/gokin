@@ -18,6 +18,14 @@ type doneGateStubTool struct {
 	lastArgs map[string]any
 }
 
+func doneGateCheckNames(checks []Check) []string {
+	names := make([]string, len(checks))
+	for i, check := range checks {
+		names[i] = check.Name
+	}
+	return names
+}
+
 func (t *doneGateStubTool) Name() string { return t.name }
 
 func (t *doneGateStubTool) Description() string { return "stub tool" }
@@ -255,6 +263,115 @@ func TestBuildDoneGateChecks_SkipsVerifyCodeForUnsupportedProjects(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+func TestBuildDoneGateChecks_VerifyCodeCoversNativeFileInSupportedProject(t *testing.T) {
+	dir := t.TempDir()
+	verify := &doneGateStubTool{name: "verify_code"}
+	registry := tools.NewRegistry()
+	if err := registry.Register(verify); err != nil {
+		t.Fatal(err)
+	}
+	checks := BuildChecks(registry, dir, "update cgo bridge", []string{"edit"}, Profile{
+		WorkDir:      dir,
+		GoModules:    []string{dir},
+		MakeProjects: []string{dir}, // Generic build marker at the same depth.
+		TouchedPaths: []string{"native/bridge.h"},
+	}, Policy{Enabled: true, Mode: "strict"})
+	if len(checks) != 1 || checks[0].Name != "verify_code" {
+		t.Fatalf("checks = %v, want verify_code for native file under Go root", doneGateCheckNames(checks))
+	}
+	if _, err := checks[0].Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if verify.lastArgs["path"] != dir {
+		t.Fatalf("verify path = %v, want %s", verify.lastArgs["path"], dir)
+	}
+}
+
+func TestDetectProfile_PreservesAndPrioritizesNestedGoModule(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "services", "api")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{filepath.Join(root, "go.mod"), filepath.Join(nested, "go.mod")} {
+		if err := os.WriteFile(marker, []byte("module example.com/test\n\ngo 1.24\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	profile := DetectProfileWithTouchedPaths(root, []string{"services/api/main.go"})
+	if len(profile.GoModules) < 2 || profile.GoModules[0] != nested {
+		t.Fatalf("GoModules = %v, want nested module first and root retained", profile.GoModules)
+	}
+	if target, ok := doneGateVerifyCodeTarget(root, profile); !ok || target != nested {
+		t.Fatalf("verify target = %q/%v, want nested module %q", target, ok, nested)
+	}
+}
+
+func TestDetectProfile_PreservesNestedSupportedModuleBoundaries(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "services", "api")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markers := map[string]string{
+		filepath.Join(root, "Cargo.toml"):       "[package]\nname = \"root\"\nversion = \"0.1.0\"\n",
+		filepath.Join(nested, "Cargo.toml"):     "[package]\nname = \"api\"\nversion = \"0.1.0\"\n",
+		filepath.Join(root, "package.json"):     "{}\n",
+		filepath.Join(nested, "package.json"):   "{}\n",
+		filepath.Join(root, "pyproject.toml"):   "[project]\nname = \"root\"\nversion = \"0.1.0\"\n",
+		filepath.Join(nested, "pyproject.toml"): "[project]\nname = \"api\"\nversion = \"0.1.0\"\n",
+	}
+	for path, content := range markers {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	profile := DetectProfileWithTouchedPaths(root, []string{"services/api/main.py"})
+	if len(profile.RustModules) < 2 || profile.RustModules[0] != nested {
+		t.Fatalf("RustModules = %v, want nested module first and root retained", profile.RustModules)
+	}
+	if len(profile.PythonRoots) < 2 || profile.PythonRoots[0] != nested {
+		t.Fatalf("PythonRoots = %v, want nested module first and root retained", profile.PythonRoots)
+	}
+	if len(profile.NodeProjects) < 2 || profile.NodeProjects[0].Dir != nested {
+		t.Fatalf("NodeProjects = %v, want nested module first and root retained", profile.NodeProjects)
+	}
+}
+
+func TestDetectProfile_PrunesNestedHierarchicalBuildMarkers(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "subproject")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		filepath.Join(root, "CMakeLists.txt"), filepath.Join(nested, "CMakeLists.txt"),
+		filepath.Join(root, "WORKSPACE.bazel"), filepath.Join(nested, "BUILD.bazel"),
+		filepath.Join(root, "Makefile"), filepath.Join(nested, "Makefile"),
+		filepath.Join(root, "pom.xml"), filepath.Join(nested, "pom.xml"),
+	} {
+		if err := os.WriteFile(marker, []byte("\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	profile := DetectProfileWithTouchedPaths(root, []string{"subproject/source.cpp"})
+	if len(profile.CMakeProjects) != 1 || profile.CMakeProjects[0] != root {
+		t.Fatalf("CMakeProjects = %v, want only hierarchical root", profile.CMakeProjects)
+	}
+	if len(profile.BazelRoots) != 1 || profile.BazelRoots[0] != root {
+		t.Fatalf("BazelRoots = %v, want only hierarchical root", profile.BazelRoots)
+	}
+	if len(profile.MakeProjects) != 1 || profile.MakeProjects[0] != root {
+		t.Fatalf("MakeProjects = %v, want only hierarchical root", profile.MakeProjects)
+	}
+	if len(profile.JavaProjects) != 1 || profile.JavaProjects[0].Dir != root {
+		t.Fatalf("JavaProjects = %v, want only hierarchical root", profile.JavaProjects)
 	}
 }
 

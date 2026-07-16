@@ -17,7 +17,7 @@ func TestSkillCommandListsAndSubmitsExplicitWorkflow(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("---\nname: release\ndescription: Release safely\ndisable-model-invocation: true\n---\nFirst=$0\nSecond=$1\nAll=$ARGUMENTS"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("---\nname: release\ndescription: Release safely\ndisable-model-invocation: true\n---\nFirst=$1\nSecond=$2\nAll=$ARGUMENTS"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	catalog := skills.NewCatalog([]skills.Root{{Path: root, Source: "project"}})
@@ -62,9 +62,9 @@ name: Raw arguments
 description: Verify lossless command handoff
 ---
 Raw=$ARGUMENTS
-First=$0
-Second=$1
-Third=$2`
+First=$1
+Second=$2
+Third=$3`
 	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
 		t.Fatal(err)
 	}

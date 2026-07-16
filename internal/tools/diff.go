@@ -6,15 +6,29 @@ import (
 	"os"
 	"strings"
 
+	"gokin/internal/security"
+
 	"google.golang.org/genai"
 )
 
 // DiffTool compares two files or a file with provided content.
-type DiffTool struct{}
+type DiffTool struct {
+	workDir       string
+	pathValidator *security.PathValidator
+}
 
 // NewDiffTool creates a new DiffTool instance.
-func NewDiffTool() *DiffTool {
-	return &DiffTool{}
+func NewDiffTool(workDir string) *DiffTool {
+	return &DiffTool{
+		workDir:       workDir,
+		pathValidator: newWorkspacePathValidator(workDir, nil),
+	}
+}
+
+// SetAllowedDirs expands the explicit filesystem grant while retaining the
+// tool's own workDir as its default boundary.
+func (t *DiffTool) SetAllowedDirs(dirs []string) {
+	t.pathValidator = newWorkspacePathValidator(t.workDir, dirs)
 }
 
 func (t *DiffTool) Name() string {
@@ -83,8 +97,22 @@ func (t *DiffTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		contextLines = 100
 	}
 
+	// Validate every model-supplied file path before doing any I/O. Relative
+	// paths are resolved against the tool workspace, never the process CWD.
+	validFile1, err := validateWorkspacePath(t.workDir, file1, t.pathValidator)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("file1 path validation failed: %s", err)), nil
+	}
+	var validFile2 string
+	if hasFile2 && file2 != "" {
+		validFile2, err = validateWorkspacePath(t.workDir, file2, t.pathValidator)
+		if err != nil {
+			return NewErrorResult(fmt.Sprintf("file2 path validation failed: %s", err)), nil
+		}
+	}
+
 	// Read first file
-	content1, err := os.ReadFile(file1)
+	content1, err := os.ReadFile(validFile1)
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("error reading file1: %s", err)), nil
 	}
@@ -93,7 +121,7 @@ func (t *DiffTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	var content2 []byte
 	var label2 string
 	if hasFile2 && file2 != "" {
-		content2, err = os.ReadFile(file2)
+		content2, err = os.ReadFile(validFile2)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("error reading file2: %s", err)), nil
 		}

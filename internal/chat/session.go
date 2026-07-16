@@ -60,6 +60,7 @@ type Session struct {
 	onChange                ChangeHandler
 	scratchpad              string
 	toolCheckpoints         []SerializedToolCheckpoint     // persisted tool checkpoint journal
+	pendingRecoveries       []SerializedPendingRecovery    // durable retry lineage, session-scoped
 	invocationLedger        *skills.InvocationLedger       // exact latest rendered Skills, session-scoped
 	checkpointInvokedSkills map[string][]skills.Invocation // Skill snapshots for named rollback points
 	checkpointRawIndices    map[string]bool                // indices measured without synthetic Skill carry
@@ -284,6 +285,10 @@ func (s *Session) Clear() {
 	s.Checkpoints = make(map[string]int)
 	s.checkpointInvokedSkills = make(map[string][]skills.Invocation)
 	s.checkpointRawIndices = make(map[string]bool)
+	// A cleared conversation must not retain a prior turn's mutation replay or
+	// an automatic retry capable of resurrecting it.
+	s.toolCheckpoints = nil
+	s.pendingRecoveries = nil
 	s.version++
 
 	s.notifyChange(oldCount) // unlocks mu
@@ -744,8 +749,10 @@ func (s *Session) GetState() *SessionState {
 
 	// Persist tool checkpoints
 	if len(s.toolCheckpoints) > 0 {
-		state.ToolCheckpoints = make([]SerializedToolCheckpoint, len(s.toolCheckpoints))
-		copy(state.ToolCheckpoints, s.toolCheckpoints)
+		state.ToolCheckpoints = cloneSerializedToolCheckpoints(s.toolCheckpoints)
+	}
+	if len(s.pendingRecoveries) > 0 {
+		state.PendingRecoveries = cloneSerializedPendingRecoveries(s.pendingRecoveries)
 	}
 
 	// Generate summary
@@ -845,8 +852,8 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	}
 
 	// Restore tool checkpoints — always replace.
-	s.toolCheckpoints = make([]SerializedToolCheckpoint, len(state.ToolCheckpoints))
-	copy(s.toolCheckpoints, state.ToolCheckpoints)
+	s.toolCheckpoints = cloneSerializedToolCheckpoints(state.ToolCheckpoints)
+	s.pendingRecoveries = cloneSerializedPendingRecoveries(state.PendingRecoveries)
 
 	return nil
 }
@@ -869,17 +876,159 @@ func (s *Session) SetScratchpad(content string) {
 func (s *Session) GetToolCheckpoints() []SerializedToolCheckpoint {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]SerializedToolCheckpoint, len(s.toolCheckpoints))
-	copy(out, s.toolCheckpoints)
-	return out
+	return cloneSerializedToolCheckpoints(s.toolCheckpoints)
 }
 
 // SetToolCheckpoints sets the persisted tool checkpoint entries.
 func (s *Session) SetToolCheckpoints(checkpoints []SerializedToolCheckpoint) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.toolCheckpoints = make([]SerializedToolCheckpoint, len(checkpoints))
-	copy(s.toolCheckpoints, checkpoints)
+	s.toolCheckpoints = cloneSerializedToolCheckpoints(checkpoints)
+}
+
+// GetPendingRecoveries returns an ownership-safe snapshot of all durable
+// retries for this session.
+func (s *Session) GetPendingRecoveries() []SerializedPendingRecovery {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneSerializedPendingRecoveries(s.pendingRecoveries)
+}
+
+// AddPendingRecovery appends a new retry, or atomically replaces replaceID
+// when a claimed attempt schedules its next generation. A missing replaceID
+// fails closed so an unrelated durable retry is never silently displaced.
+func (s *Session) AddPendingRecovery(recovery SerializedPendingRecovery, replaceID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if replaceID != "" {
+		for i := range s.pendingRecoveries {
+			if s.pendingRecoveries[i].ID == replaceID {
+				s.pendingRecoveries[i] = cloneSerializedPendingRecovery(recovery)
+				return true
+			}
+		}
+		return false
+	}
+	for i := range s.pendingRecoveries {
+		if s.pendingRecoveries[i].ID == recovery.ID {
+			return false
+		}
+	}
+	s.pendingRecoveries = append(s.pendingRecoveries, cloneSerializedPendingRecovery(recovery))
+	return true
+}
+
+// TransitionPendingRecovery performs a compare-and-swap state transition and
+// returns the transitioned immutable snapshot.
+func (s *Session) TransitionPendingRecovery(id, sessionID, from, to string) (SerializedPendingRecovery, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.pendingRecoveries {
+		recovery := &s.pendingRecoveries[i]
+		if recovery.ID != id || recovery.SessionID != sessionID || recovery.State != from {
+			continue
+		}
+		recovery.State = to
+		recovery.GenerationSignature = PendingRecoveryGenerationSignature(*recovery)
+		return cloneSerializedPendingRecovery(*recovery), true
+	}
+	return SerializedPendingRecovery{}, false
+}
+
+// RemovePendingRecovery removes only the matching generation.
+func (s *Session) RemovePendingRecovery(id string) bool {
+	if id == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.pendingRecoveries {
+		if s.pendingRecoveries[i].ID != id {
+			continue
+		}
+		copy(s.pendingRecoveries[i:], s.pendingRecoveries[i+1:])
+		s.pendingRecoveries[len(s.pendingRecoveries)-1] = SerializedPendingRecovery{}
+		s.pendingRecoveries = s.pendingRecoveries[:len(s.pendingRecoveries)-1]
+		return true
+	}
+	return false
+}
+
+func cloneSerializedPendingRecoveries(src []SerializedPendingRecovery) []SerializedPendingRecovery {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]SerializedPendingRecovery, len(src))
+	for i := range src {
+		out[i] = cloneSerializedPendingRecovery(src[i])
+	}
+	return out
+}
+
+func cloneSerializedPendingRecovery(src SerializedPendingRecovery) SerializedPendingRecovery {
+	out := src
+	out.Checkpoints = cloneSerializedToolCheckpoints(src.Checkpoints)
+	return out
+}
+
+func cloneSerializedToolCheckpoints(src []SerializedToolCheckpoint) []SerializedToolCheckpoint {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]SerializedToolCheckpoint, len(src))
+	for i := range src {
+		out[i] = src[i]
+		if src[i].Args != nil {
+			out[i].Args = make(map[string]any, len(src[i].Args))
+			for key, value := range src[i].Args {
+				out[i].Args[key] = cloneSerializedJSONValue(value)
+			}
+		}
+		if src[i].ResultV2 != nil {
+			result := *src[i].ResultV2
+			result.Data = append(json.RawMessage(nil), src[i].ResultV2.Data...)
+			if src[i].ResultV2.PolicyBlock != nil {
+				block := *src[i].ResultV2.PolicyBlock
+				result.PolicyBlock = &block
+			}
+			out[i].ResultV2 = &result
+		}
+	}
+	return out
+}
+
+func cloneSerializedJSONValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = cloneSerializedJSONValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i := range typed {
+			out[i] = cloneSerializedJSONValue(typed[i])
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, item := range typed {
+			out[key] = item
+		}
+		return out
+	case []string:
+		return append([]string(nil), typed...)
+	case json.RawMessage:
+		return append(json.RawMessage(nil), typed...)
+	case []byte:
+		return append([]byte(nil), typed...)
+	default:
+		// JSON scalars (string, float64, bool, nil) and any immutable custom
+		// scalar are safe to share.
+		return value
+	}
 }
 
 // --- Session Branching (Forking) ---
@@ -1073,6 +1222,12 @@ func (s *Session) RestoreCheckpoint(name string) bool {
 			delete(s.checkpointRawIndices, cpName)
 		}
 	}
+	// Rewinding history invalidates the request context attached to any delayed
+	// retry. Retaining its mutation ledger would resume an old request against a
+	// different conversation root. The rollback itself is the user's explicit
+	// recovery choice, so cancel all automatic side-effect replay generations.
+	s.toolCheckpoints = nil
+	s.pendingRecoveries = nil
 
 	s.version++
 	return true

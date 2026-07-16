@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -96,9 +97,16 @@ and GOKIN_EVAL_WORKSPACE. Template placeholders such as {{prompt}},
 			}
 
 			passed := 0
+			dryRun := 0
+			failed := 0
 			for _, result := range results {
-				if result.Status == "passed" || result.Status == "dry_run" {
+				switch result.Status {
+				case "passed":
 					passed++
+				case "dry_run":
+					dryRun++
+				default:
+					failed++
 				}
 				status := result.Status
 				if result.Error != "" {
@@ -106,14 +114,18 @@ and GOKIN_EVAL_WORKSPACE. Template placeholders such as {{prompt}},
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", evalResultLabel(result), status)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "\n%d/%d scenarios passed", passed, len(results))
+			executed := len(results) - dryRun
+			fmt.Fprintf(cmd.OutOrStdout(), "\n%d/%d executed scenarios passed", passed, executed)
+			if dryRun > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), " · dry-run (not scored): %d", dryRun)
+			}
 			if opts.OutputPath != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), " · results: %s", opts.OutputPath)
 			}
 			fmt.Fprintln(cmd.OutOrStdout())
 
-			if passed != len(results) && !opts.DryRun {
-				return fmt.Errorf("eval run failed: %d/%d scenarios passed", passed, len(results))
+			if failed > 0 {
+				return fmt.Errorf("eval run failed: %d/%d executed scenarios passed", passed, executed)
 			}
 			return nil
 		},
@@ -237,7 +249,7 @@ after changing prompts, tools, routing, or model/provider settings.`,
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON")
 	cmd.Flags().StringVar(&failUnder, "fail-under", "", "fail if aggregate score is below this ratio or percent (example: 0.9 or 90%)")
 	cmd.Flags().StringVar(&maxRegression, "max-regression", "", "fail if score regresses by more than this ratio or percent-point value versus --baseline")
-	cmd.Flags().BoolVar(&requirePass, "require-pass", false, "fail if any scenario status is not passed or dry_run")
+	cmd.Flags().BoolVar(&requirePass, "require-pass", false, "fail unless every scenario was actually executed and passed")
 	cmd.Flags().StringArrayVar(&metricThresholds, "fail-metric", nil, "fail if metric ratio is below threshold, as name=ratio; repeatable")
 	return cmd
 }
@@ -261,6 +273,7 @@ func evalGateOptions(failUnder, maxRegression string, requirePass bool, metricTh
 		if err != nil {
 			return opts, false, fmt.Errorf("--max-regression: %w", err)
 		}
+		opts.RequireComparableBaseline = true
 		enabled = true
 	}
 	opts.MetricMinRatios, err = evals.ParseMetricThresholds(metricThresholds)
@@ -276,8 +289,8 @@ func evalGateOptions(failUnder, maxRegression string, requirePass bool, metricTh
 func printEvalReport(cmd *cobra.Command, report evals.Report, comparison *evals.Comparison, gate *evals.GateResult) {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Results: %s\n", report.ResultsPath)
-	fmt.Fprintf(out, "Scenarios: %d · passed: %d · failed: %d · score: %d/%d (%.1f%%)\n",
-		report.Count, report.Passed, report.Failed, report.Score.Passed, report.Score.Total, report.Score.Ratio*100)
+	fmt.Fprintf(out, "Scenarios: %d · passed: %d · failed: %d · dry-run: %d · score: %d/%d (%.1f%%)\n",
+		report.Count, report.Passed, report.Failed, report.DryRun, report.Score.Passed, report.Score.Total, report.Score.Ratio*100)
 
 	if len(report.Metrics) > 0 {
 		fmt.Fprintln(out, "\nMetrics:")
@@ -309,8 +322,28 @@ func printEvalReport(cmd *cobra.Command, report evals.Report, comparison *evals.
 
 	if comparison != nil {
 		fmt.Fprintf(out, "\nBaseline: %s\n", comparison.BaselinePath)
-		fmt.Fprintf(out, "Delta: passed %+d · score %+0.1fpp\n", comparison.PassedDelta, comparison.ScoreDelta*100)
-		if len(comparison.Metrics) > 0 {
+		comparable := comparison.CohortMismatch == nil && comparison.InvalidEvidence == nil
+		if comparison.InvalidEvidence != nil {
+			fmt.Fprintf(out, "Comparison unavailable: invalid evidence (empty baseline=%t/current=%t; dry-run=%d baseline/%d current; not-executed=%d baseline/%d current)\n",
+				comparison.InvalidEvidence.BaselineEmpty, comparison.InvalidEvidence.CurrentEmpty,
+				comparison.InvalidEvidence.BaselineDryRun, comparison.InvalidEvidence.CurrentDryRun,
+				comparison.InvalidEvidence.BaselineNotExecuted, comparison.InvalidEvidence.CurrentNotExecuted)
+		}
+		if comparison.CohortMismatch != nil {
+			fmt.Fprintf(out, "Comparison unavailable: cohort mismatch (%d baseline-only, %d current-only, %d duplicate baseline, %d duplicate current, %d changed spec)\n",
+				len(comparison.CohortMismatch.BaselineOnly), len(comparison.CohortMismatch.CurrentOnly),
+				len(comparison.CohortMismatch.BaselineDuplicates), len(comparison.CohortMismatch.CurrentDuplicates),
+				len(comparison.CohortMismatch.SpecMismatches))
+			printEvalScenarioIdentities(out, "Baseline only", comparison.CohortMismatch.BaselineOnly)
+			printEvalScenarioIdentities(out, "Current only", comparison.CohortMismatch.CurrentOnly)
+			printEvalScenarioIdentities(out, "Duplicate baseline rows", comparison.CohortMismatch.BaselineDuplicates)
+			printEvalScenarioIdentities(out, "Duplicate current rows", comparison.CohortMismatch.CurrentDuplicates)
+			printEvalScenarioIdentities(out, "Changed scenario specs", comparison.CohortMismatch.SpecMismatches)
+		}
+		if comparable {
+			fmt.Fprintf(out, "Delta: passed %+d · score %+0.1fpp\n", comparison.PassedDelta, comparison.ScoreDelta*100)
+		}
+		if comparable && len(comparison.Metrics) > 0 {
 			fmt.Fprintln(out, "\nMetric deltas:")
 			for _, metric := range comparison.Metrics {
 				if metric.Delta == 0 {
@@ -331,6 +364,20 @@ func printEvalReport(cmd *cobra.Command, report evals.Report, comparison *evals.
 		for _, failure := range gate.Failures {
 			fmt.Fprintf(out, "  - %s\n", failure)
 		}
+	}
+}
+
+func printEvalScenarioIdentities(out io.Writer, heading string, identities []evals.ScenarioIdentity) {
+	if len(identities) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "%s:\n", heading)
+	for _, identity := range identities {
+		label := identity.ID
+		if identity.Variant != "" {
+			label += " [" + identity.Variant + "]"
+		}
+		fmt.Fprintf(out, "  - %s\n", label)
 	}
 }
 
@@ -383,6 +430,21 @@ func printEvalDiagnosis(cmd *cobra.Command, diagnosis evals.Diagnosis) {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Results: %s\n", diagnosis.ResultsPath)
 	fmt.Fprintf(out, "Score: %d/%d (%.1f%%)\n", diagnosis.Score.Passed, diagnosis.Score.Total, diagnosis.Score.Ratio*100)
+	if diagnosis.DryRun > 0 {
+		fmt.Fprintf(out, "Dry-run scenarios (not scored): %d\n", diagnosis.DryRun)
+	}
+	if diagnosis.CohortMismatch != nil {
+		fmt.Fprintf(out, "Comparison cohort mismatch: %d baseline-only, %d current-only, %d duplicate baseline, %d duplicate current, %d changed spec\n",
+			len(diagnosis.CohortMismatch.BaselineOnly), len(diagnosis.CohortMismatch.CurrentOnly),
+			len(diagnosis.CohortMismatch.BaselineDuplicates), len(diagnosis.CohortMismatch.CurrentDuplicates),
+			len(diagnosis.CohortMismatch.SpecMismatches))
+	}
+	if diagnosis.InvalidEvidence != nil {
+		fmt.Fprintf(out, "Comparison invalid evidence: empty baseline=%t/current=%t; dry-run=%d baseline/%d current; not-executed=%d baseline/%d current\n",
+			diagnosis.InvalidEvidence.BaselineEmpty, diagnosis.InvalidEvidence.CurrentEmpty,
+			diagnosis.InvalidEvidence.BaselineDryRun, diagnosis.InvalidEvidence.CurrentDryRun,
+			diagnosis.InvalidEvidence.BaselineNotExecuted, diagnosis.InvalidEvidence.CurrentNotExecuted)
+	}
 
 	if len(diagnosis.WeakMetrics) > 0 {
 		fmt.Fprintln(out, "\nWeak metrics:")

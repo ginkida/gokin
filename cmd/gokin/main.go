@@ -205,8 +205,13 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		return err
 	}
 	if sessionLease != nil {
+		if err := application.AdoptSessionWriterLease(sessionLease); err != nil {
+			_ = sessionLease.Release()
+			failureKind = "session_lease"
+			return fmt.Errorf("adopt session writer lease: %w", err)
+		}
 		defer func() {
-			if releaseErr := sessionLease.Release(); releaseErr != nil {
+			if releaseErr := application.ReleaseSessionWriterLease(); releaseErr != nil {
 				// Descriptor-owned OS locks are released by process exit even if
 				// the explicit unlock reports an error; keep the already-emitted
 				// JSON status aligned with the process exit code.

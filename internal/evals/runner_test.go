@@ -32,6 +32,33 @@ func TestRun_DryRunCopiesFixtureMetadata(t *testing.T) {
 	if results[0].Workspace == "" {
 		t.Fatal("workspace should be populated")
 	}
+	if len(results[0].Metrics) != 0 {
+		t.Fatalf("metrics = %+v, want no synthetic successes for dry-run", results[0].Metrics)
+	}
+	if results[0].Score != (ScoreSummary{}) {
+		t.Fatalf("score = %+v, want zero for dry-run", results[0].Score)
+	}
+	if results[0].ScenarioSpecHash == "" {
+		t.Fatal("scenario spec hash should bind the result to its contract and fixture")
+	}
+}
+
+func TestScenarioSpecHash_IsStableAndCoversContractAndFixture(t *testing.T) {
+	scenario := Scenario{ID: "a", Prompt: "fix it", VerificationCommands: []string{"go test ./..."}}
+	fixture := map[string]string{"main.go": "hash-1"}
+	got := scenarioSpecHash(scenario, fixture)
+	if got == "" || got != scenarioSpecHash(scenario, map[string]string{"main.go": "hash-1"}) {
+		t.Fatalf("scenarioSpecHash() = %q, want stable non-empty hash", got)
+	}
+
+	changedScenario := scenario
+	changedScenario.Prompt = "fix it safely"
+	if changed := scenarioSpecHash(changedScenario, fixture); changed == got {
+		t.Fatal("scenario contract change did not alter fingerprint")
+	}
+	if changed := scenarioSpecHash(scenario, map[string]string{"main.go": "hash-2"}); changed == got {
+		t.Fatal("fixture content change did not alter fingerprint")
+	}
 }
 
 func TestRun_CommandAndVerificationWritesJSONL(t *testing.T) {

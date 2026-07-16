@@ -2,7 +2,10 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 
 	"gokin/internal/config"
@@ -26,12 +29,25 @@ func NewFallbackClient(clients []Client, providers []string) (*FallbackClient, e
 	if len(clients) == 0 {
 		return nil, fmt.Errorf("fallback client requires at least one client")
 	}
+	ownedClients := make([]Client, len(clients))
+	for i, client := range clients {
+		if isNilClient(client) {
+			return nil, fmt.Errorf("fallback client at index %d is nil", i)
+		}
+		ownedClients[i] = client
+	}
+	normalizedProviders := make([]string, len(clients))
 	if len(providers) != len(clients) {
-		providers = make([]string, len(clients))
+		providers = nil
+	}
+	for i := range normalizedProviders {
+		if i < len(providers) {
+			normalizedProviders[i] = strings.ToLower(strings.TrimSpace(providers[i]))
+		}
 	}
 	return &FallbackClient{
-		clients:   clients,
-		providers: providers,
+		clients:   ownedClients,
+		providers: normalizedProviders,
 		current:   0,
 	}, nil
 }
@@ -96,8 +112,9 @@ type fallbackSend func(Client) (*StreamingResponse, error)
 // forwarded; before that point it is safe to transparently switch providers.
 func (fc *FallbackClient) sendWithFallback(ctx context.Context, operation string, send fallbackSend) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
+	order := fallbackClientOrder(startIdx, len(fc.clients))
 	var lastErr error
-	for i := startIdx; i < len(fc.clients); i++ {
+	for position, i := range order {
 		if ctx.Err() != nil {
 			return nil, ContextErr(ctx)
 		}
@@ -107,15 +124,18 @@ func (fc *FallbackClient) sendWithFallback(ctx context.Context, operation string
 		}
 		if err != nil {
 			lastErr = err
-			fc.recordFailure(operation, i, err)
 			if ctx.Err() != nil {
 				return nil, ContextErr(ctx)
+			}
+			fc.recordFailure(operation, i, err)
+			if !shouldFallbackToNextProvider(err) {
+				return nil, err
 			}
 			continue
 		}
 
 		fc.setCurrent(i)
-		return fc.proxyStream(ctx, operation, i, resp, send), nil
+		return fc.proxyStream(ctx, operation, order, position, resp, send), nil
 	}
 	if lastErr != nil {
 		return nil, fmt.Errorf("all fallback clients failed, last error: %w", lastErr)
@@ -123,8 +143,32 @@ func (fc *FallbackClient) sendWithFallback(ctx context.Context, operation string
 	return nil, fmt.Errorf("all fallback clients exhausted")
 }
 
+// fallbackClientOrder returns every client exactly once, starting at the
+// current provider and wrapping around. Without the wrap, selecting a provider
+// at index N permanently discarded the healthy providers before it.
+func fallbackClientOrder(start, count int) []int {
+	if count <= 0 {
+		return nil
+	}
+	if start < 0 || start >= count {
+		start = 0
+	}
+	order := make([]int, count)
+	for offset := range count {
+		order[offset] = (start + offset) % count
+	}
+	return order
+}
+
 func (fc *FallbackClient) recordFailure(operation string, index int, err error) {
-	recordProviderFailure(fc.providerAt(index), IsRetryableError(err))
+	// Request-shape/safety failures describe this payload, not backend health;
+	// cancellation describes caller intent. Penalizing either would persistently
+	// demote a healthy provider for future unrelated sessions. Provider-local
+	// auth/quota/plan failures and transient infrastructure failures remain real
+	// provider failures and are scored normally.
+	if shouldFallbackToNextProvider(err) {
+		recordProviderFailure(fc.providerAt(index), IsRetryableError(err))
+	}
 	logging.Warn("client failed in "+operation,
 		"index", index,
 		"provider", fc.providerAt(index),
@@ -132,10 +176,78 @@ func (fc *FallbackClient) recordFailure(operation string, index int, err error) 
 		"error", err.Error())
 }
 
+// shouldFallbackToNextProvider separates failures that another configured
+// backend can reasonably recover from from failures in the request itself.
+//
+// Provider-local account/auth/quota/model availability errors may be terminal
+// for one backend but are exactly what an opt-in fallback chain is for. In
+// contrast, malformed request parameters and safety/content refusals describe
+// the payload being sent; silently resubmitting that payload to another backend
+// can hide an actionable bug or bypass a provider safety decision.
+func shouldFallbackToNextProvider(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	var terminal *TerminalProviderError
+	if errors.As(err, &terminal) {
+		if terminal == nil {
+			return false
+		}
+		switch strings.TrimSpace(terminal.Code) {
+		case "1210", "1211", "1212", "1213", "1214", "1215", "1301":
+			return false
+		default:
+			// Auth, account, quota, subscription, and plan failures are local
+			// to this provider and remain eligible for an explicit fallback.
+			return true
+		}
+	}
+
+	var httpErr *HTTPError
+	hasHTTPError := errors.As(err, &httpErr)
+	if hasHTTPError && httpErr == nil {
+		return false
+	}
+	var apiErr *APIError
+	hasAPIError := errors.As(err, &apiErr)
+	if hasAPIError && apiErr == nil {
+		return false
+	}
+
+	// Preserve explicitly typed API exceptions before applying the generic 4xx
+	// request-shape rule. MiniMax, for example, can return a temporary
+	// model_not_found as HTTP 400; the API status classifier knows that narrow
+	// exception and a healthy fallback provider may serve it immediately. Do not
+	// use the broader IsRetryableError here: its last-resort string heuristics
+	// (such as "EOF") must not override a typed bad-request status.
+	if IsRetryableAPIError(err) {
+		return true
+	}
+
+	if hasHTTPError && isRequestShapeHTTPStatus(httpErr.StatusCode) {
+		return false
+	}
+	if hasAPIError && isRequestShapeHTTPStatus(apiErr.StatusCode) {
+		return false
+	}
+	return true
+}
+
+func isRequestShapeHTTPStatus(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
 func (fc *FallbackClient) proxyStream(
 	ctx context.Context,
 	operation string,
-	startIndex int,
+	order []int,
+	startPosition int,
 	first *StreamingResponse,
 	send fallbackSend,
 ) *StreamingResponse {
@@ -146,7 +258,8 @@ func (fc *FallbackClient) proxyStream(
 		defer close(chunks)
 		defer close(done)
 
-		index := startIndex
+		position := startPosition
+		index := order[position]
 		stream := first
 		for {
 			committed, err := forwardFallbackCandidate(ctx, stream, chunks)
@@ -156,14 +269,19 @@ func (fc *FallbackClient) proxyStream(
 				return
 			}
 
+			if ctx.Err() != nil {
+				emitFallbackError(ctx, chunks, ContextErr(ctx))
+				return
+			}
 			fc.recordFailure(operation+" stream", index, err)
-			if committed || ctx.Err() != nil {
+			if committed || !shouldFallbackToNextProvider(err) {
 				emitFallbackError(ctx, chunks, err)
 				return
 			}
 
 			var next *StreamingResponse
-			for index++; index < len(fc.clients); index++ {
+			for position++; position < len(order); position++ {
+				index = order[position]
 				if ctx.Err() != nil {
 					emitFallbackError(ctx, chunks, ContextErr(ctx))
 					return
@@ -173,8 +291,16 @@ func (fc *FallbackClient) proxyStream(
 					sendErr = fmt.Errorf("provider returned a nil streaming response")
 				}
 				if sendErr != nil {
+					if ctx.Err() != nil {
+						emitFallbackError(ctx, chunks, ContextErr(ctx))
+						return
+					}
 					fc.recordFailure(operation, index, sendErr)
 					err = sendErr
+					if !shouldFallbackToNextProvider(sendErr) {
+						emitFallbackError(ctx, chunks, sendErr)
+						return
+					}
 					continue
 				}
 				next = candidate
@@ -197,8 +323,11 @@ func (fc *FallbackClient) proxyStream(
 // is held until the first meaningful chunk, so an early SSE error can be
 // discarded cleanly when the next provider is tried.
 func forwardFallbackCandidate(ctx context.Context, stream *StreamingResponse, out chan<- ResponseChunk) (committed bool, err error) {
-	if stream == nil || stream.Chunks == nil {
-		return false, nil
+	if stream == nil {
+		return false, fmt.Errorf("provider returned a nil streaming response")
+	}
+	if stream.Chunks == nil {
+		return false, fmt.Errorf("provider returned a streaming response with nil chunks")
 	}
 
 	pending := make([]ResponseChunk, 0, 2)
@@ -208,10 +337,19 @@ func forwardFallbackCandidate(ctx context.Context, stream *StreamingResponse, ou
 			return committed, ContextErr(ctx)
 		case chunk, ok := <-stream.Chunks:
 			if !ok {
+				if ctxErr := ContextErr(ctx); ctxErr != nil {
+					return committed, ctxErr
+				}
 				if !committed {
-					if err := forwardFallbackChunks(ctx, out, pending); err != nil {
-						return false, err
-					}
+					// Wrap the empty-response sentinel so a candidate that streams
+					// nothing still counts as retryable if the caller falls
+					// through the whole fallback chain (v0.100.90): a plain error
+					// here silently defeated the executor/agent's dedicated
+					// empty-response retry-with-backoff once every provider in
+					// the chain exhausted this way — the failure mode already has
+					// a graceful, well-tested recovery path when NO fallback is
+					// configured; enabling fallback must not regress it.
+					return false, fmt.Errorf("provider stream ended without assistant content: %w", ErrEmptyModelResponse)
 				}
 				return committed, nil
 			}
@@ -221,6 +359,9 @@ func forwardFallbackCandidate(ctx context.Context, stream *StreamingResponse, ou
 
 			meaningful := chunk.Text != "" || chunk.Thinking != "" ||
 				len(chunk.FunctionCalls) > 0 || len(chunk.Parts) > 0
+			if chunk.Done && !committed && !meaningful {
+				return false, fmt.Errorf("provider stream completed without assistant content: %w", ErrEmptyModelResponse)
+			}
 			if !committed && !meaningful && !chunk.Done {
 				pending = append(pending, chunk)
 				continue
@@ -381,9 +522,15 @@ func (fc *FallbackClient) WithModel(modelName string) Client {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 	targetIndex := fc.current
-	if targetProvider := config.DetectKnownProviderFromModel(modelName); targetProvider != "" {
+	// WithModel(GetModel()) is used to clone a client for a new session. An
+	// explicitly configured provider remains authoritative even when its custom
+	// model name happens to look like another provider (for example qwen-* on a
+	// GLM-compatible gateway).
+	currentModel := fc.clients[fc.current].GetModel()
+	if modelName != currentModel {
+		targetProvider := config.DetectKnownProviderFromModel(modelName)
 		for i := range fc.clients {
-			if fc.providerAt(i) == targetProvider {
+			if targetProvider != "" && fc.providerAt(i) == targetProvider {
 				targetIndex = i
 				break
 			}

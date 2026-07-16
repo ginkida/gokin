@@ -4,21 +4,24 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
+
+	"gokin/internal/security"
 
 	"google.golang.org/genai"
 )
 
 // GitBlameTool shows line-by-line authorship of a file.
 type GitBlameTool struct {
-	workDir string
+	workDir       string
+	pathValidator *security.PathValidator
 }
 
 // NewGitBlameTool creates a new GitBlameTool instance.
 func NewGitBlameTool(workDir string) *GitBlameTool {
 	return &GitBlameTool{
-		workDir: workDir,
+		workDir:       workDir,
+		pathValidator: newWorkspacePathValidator(workDir, nil),
 	}
 }
 
@@ -84,15 +87,13 @@ func (t *GitBlameTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	startLine, hasStart := GetInt(args, "start_line")
 	endLine, hasEnd := GetInt(args, "end_line")
 
-	// Make path relative to workDir if absolute
-	if filepath.IsAbs(file) {
-		if rel, err := filepath.Rel(t.workDir, file); err == nil {
-			file = rel
-		}
+	validatedFile, _, err := validateGitPath(t.workDir, file, t.pathValidator)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("file path validation failed: %s", err)), nil
 	}
 
 	// Build git blame command
-	cmdArgs := []string{"blame"}
+	cmdArgs := []string{"--literal-pathspecs", "blame"}
 
 	// Line range: -L start,end
 	if hasStart || hasEnd {
@@ -112,7 +113,7 @@ func (t *GitBlameTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		}
 	}
 
-	cmdArgs = append(cmdArgs, "--", file)
+	cmdArgs = append(cmdArgs, "--", validatedFile)
 
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = t.workDir

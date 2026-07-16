@@ -511,7 +511,13 @@ func doneGateVerifyCodeTarget(workDir string, profile Profile) (string, bool) {
 		if bestSupported != "" && bestSupportedDepth > bestUnsupportedDepth {
 			return bestSupported, true
 		}
-		if hintKnown && supportedHint && bestSupported != "" && bestSupportedDepth == bestUnsupportedDepth {
+		// Native sources and headers are contextual: they may belong to cgo,
+		// Rust FFI, a Node native addon, or a Python extension even though
+		// verify_code cannot detect a standalone C/C++ project. When a supported
+		// project and a generic Make/CMake marker share the same root, prefer the
+		// supported project. A more-specific unsupported root still wins above.
+		if bestSupported != "" && bestSupportedDepth == bestUnsupportedDepth &&
+			((hintKnown && supportedHint) || doneGateTouchedPathIsNative(absTouched)) {
 			return bestSupported, true
 		}
 		if hintKnown && supportedHint && bestSupported == "" && bestUnsupported == "" {
@@ -543,7 +549,7 @@ func doneGateTouchedPathVerifySupport(path string) (supported, known bool) {
 		"pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "requirements.txt", "pyproject.toml", "setup.py":
 		return true, true
 	case "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew",
-		"composer.json", "cmakelists.txt", "makefile", "gnumakefile", "build", "build.bazel", "workspace",
+		"composer.json", "cmakelists.txt", "build", "build.bazel", "workspace",
 		"workspace.bazel", "module.bazel":
 		return false, true
 	}
@@ -551,10 +557,19 @@ func doneGateTouchedPathVerifySupport(path string) (supported, known bool) {
 	switch strings.ToLower(filepath.Ext(base)) {
 	case ".go", ".rs", ".js", ".jsx", ".ts", ".tsx", ".py":
 		return true, true
-	case ".java", ".kt", ".kts", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".bzl":
+	case ".java", ".kt", ".kts", ".php", ".bzl":
 		return false, true
 	default:
 		return false, false
+	}
+}
+
+func doneGateTouchedPathIsNative(path string) bool {
+	switch strings.ToLower(filepath.Ext(filepath.Base(path))) {
+	case ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -908,15 +923,21 @@ func DetectProfileWithTouchedPaths(workDir string, touchedOverride []string) Pro
 		touched = DiscoverTouchedPaths(workDir)
 	}
 
-	goAll := pruneNestedDirs(limitAndSortDirs(markers.GoModules, 0))
-	rustAll := pruneNestedDirs(limitAndSortDirs(markers.RustModules, 0))
-	pythonAll := pruneNestedDirs(limitAndSortDirs(markers.PythonRoots, 0))
-	nodeAll := pruneNestedDirs(limitAndSortDirs(markers.NodeProjects, 0))
+	// Supported language modules are independent build boundaries (Go's ./...
+	// explicitly stops at a nested go.mod). Keep them and prioritize the
+	// most-specific touched root below instead of pruning them behind an
+	// ancestor module. CMakeLists, Bazel BUILD files, Makefiles, and Java build
+	// descriptors are commonly hierarchical pieces of one parent build; treating
+	// each nested marker as a standalone root causes invalid child-only builds.
+	goAll := limitAndSortDirs(markers.GoModules, 0)
+	rustAll := limitAndSortDirs(markers.RustModules, 0)
+	pythonAll := limitAndSortDirs(markers.PythonRoots, 0)
+	nodeAll := limitAndSortDirs(markers.NodeProjects, 0)
 	javaAll := pruneNestedDirs(limitAndSortDirs(markers.JavaProjects, 0))
 	cmakeAll := pruneNestedDirs(limitAndSortDirs(markers.CMakeProjects, 0))
 	bazelAll := pruneNestedDirs(limitAndSortDirs(markers.BazelRoots, 0))
 	makeAll := pruneNestedDirs(limitAndSortDirs(markers.MakeProjects, 0))
-	phpAll := pruneNestedDirs(limitAndSortDirs(markers.PHPProjects, 0))
+	phpAll := limitAndSortDirs(markers.PHPProjects, 0)
 
 	monorepo := isMonorepoWorkspace(workDir, goAll, rustAll, nodeAll, pythonAll, javaAll, cmakeAll, bazelAll, makeAll, phpAll)
 	moduleLimit := doneGateMaxModulesPerStack
@@ -1129,6 +1150,17 @@ func prioritizeDirsByTouched(workDir string, dirs []string, touched []string, li
 			rest = append(rest, dir)
 		}
 	}
+	// An ancestor module also contains every touched path under a nested module.
+	// Put the deepest boundary first so target selection and module caps cannot
+	// silently choose an ancestor whose build excludes the changed child.
+	sort.SliceStable(matched, func(i, j int) bool {
+		leftDepth := doneGatePathSpecificity(matched[i])
+		rightDepth := doneGatePathSpecificity(matched[j])
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return matched[i] < matched[j]
+	})
 
 	ordered := append(matched, rest...)
 	if limit > 0 && len(ordered) > limit {
@@ -1290,9 +1322,8 @@ func loadNodeProjects(workDir string, dirs []string) []NodeProject {
 			Scripts: scripts,
 		})
 	}
-	sort.Slice(projects, func(i, j int) bool {
-		return projects[i].Dir < projects[j].Dir
-	})
+	// dirs already has deterministic touched-first ordering. Preserve it so a
+	// nested package selected ahead of an ancestor is not silently demoted.
 	return projects
 }
 

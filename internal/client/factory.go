@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -131,39 +133,50 @@ func NewClient(ctx context.Context, cfg *config.Config, modelID string) (Client,
 // newFallbackClientFromConfig creates a FallbackClient with the primary provider
 // and each configured fallback provider.
 func newFallbackClientFromConfig(ctx context.Context, cfg *config.Config, primaryProvider, modelID string) (Client, error) {
+	return newFallbackClientFromConfigWithFactory(ctx, cfg, primaryProvider, modelID, createClientForProvider)
+}
+
+type providerClientFactory func(context.Context, *config.Config, string, string) (Client, error)
+
+func newFallbackClientFromConfigWithFactory(
+	ctx context.Context,
+	cfg *config.Config,
+	primaryProvider, modelID string,
+	create providerClientFactory,
+) (Client, error) {
+	if create == nil {
+		return nil, fmt.Errorf("fallback client factory is nil")
+	}
 	var clients []Client
 	var clientProviders []string
 
 	// Build candidate provider list (primary + configured fallbacks), then
 	// reorder by dynamic health score so unhealthy providers are de-prioritized.
-	candidateProviders := []string{}
-	addProvider := func(p string) {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			return
-		}
-		for _, existing := range candidateProviders {
-			if existing == p {
-				return
-			}
-		}
-		candidateProviders = append(candidateProviders, p)
-	}
-	addProvider(primaryProvider)
-	for _, fbProvider := range cfg.Model.FallbackProviders {
-		addProvider(fbProvider)
-	}
+	candidateProviders := fallbackProviderCandidates(primaryProvider, cfg.Model.FallbackProviders)
 
 	orderedProviders := reorderProvidersByHealth(candidateProviders)
 
 	// Create clients in health-prioritized order.
 	for _, provider := range orderedProviders {
 		providerModel := fallbackModelForProvider(primaryProvider, provider, modelID)
-		c, err := getOrCreateClient(ctx, cfg, provider, providerModel)
+		providerCfg := fallbackConfigForProvider(cfg, primaryProvider, provider)
+		// FallbackClient owns and closes every child in its chain. These clients
+		// must therefore be fresh and unpooled: sharing one with another wrapper
+		// or a single-client caller would let either owner close the other's
+		// active transport.
+		c, err := create(ctx, providerCfg, provider, providerModel)
 		if err != nil {
+			if !isNilClient(c) {
+				_ = c.Close()
+			}
 			logging.Warn("failed to create fallback chain client",
 				"provider", provider,
 				"error", err.Error())
+			continue
+		}
+		if isNilClient(c) {
+			logging.Warn("fallback chain factory returned nil client",
+				"provider", provider)
 			continue
 		}
 		clients = append(clients, c)
@@ -174,7 +187,48 @@ func newFallbackClientFromConfig(ctx context.Context, cfg *config.Config, primar
 		return nil, fmt.Errorf("failed to create any client: primary provider %q and all fallback providers failed", primaryProvider)
 	}
 
-	return NewFallbackClient(clients, clientProviders)
+	fallback, err := NewFallbackClient(clients, clientProviders)
+	if err != nil {
+		for _, client := range clients {
+			_ = client.Close()
+		}
+		return nil, err
+	}
+	return fallback, nil
+}
+
+func fallbackProviderCandidates(primary string, fallbacks []string) []string {
+	providers := make([]string, 0, len(fallbacks)+1)
+	seen := make(map[string]struct{}, len(fallbacks)+1)
+	add := func(provider string) {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "" {
+			return
+		}
+		if _, exists := seen[provider]; exists {
+			return
+		}
+		seen[provider] = struct{}{}
+		providers = append(providers, provider)
+	}
+	add(primary)
+	for _, provider := range fallbacks {
+		add(provider)
+	}
+	return providers
+}
+
+// fallbackConfigForProvider prevents the primary model's custom endpoint from
+// leaking into unrelated provider fallbacks. A custom GLM gateway cannot be
+// assumed to serve Kimi/MiniMax model namespaces.
+func fallbackConfigForProvider(cfg *config.Config, primaryProvider, provider string) *config.Config {
+	if cfg == nil || strings.EqualFold(strings.TrimSpace(primaryProvider), strings.TrimSpace(provider)) ||
+		strings.TrimSpace(cfg.Model.CustomBaseURL) == "" {
+		return cfg
+	}
+	clone := cfg.Clone()
+	clone.Model.CustomBaseURL = ""
+	return clone
 }
 
 // fallbackModelForProvider keeps the explicitly requested model on its primary
@@ -194,22 +248,56 @@ func fallbackModelForProvider(primaryProvider, provider, requestedModel string) 
 // getOrCreateClient retrieves a client from the pool or creates a new one.
 func getOrCreateClient(ctx context.Context, cfg *config.Config, provider, modelID string) (Client, error) {
 	pool := GetPool(cfg)
-
-	// Check pool first
-	if c, ok := pool.Get(provider, modelID); ok {
-		return c, nil
-	}
-
-	// Create new client
-	c, err := createClientForProvider(ctx, cfg, provider, modelID)
+	fingerprint := clientConfigFingerprint(cfg, provider, modelID)
+	prototype, err := pool.GetOrCreate(provider, modelID, fingerprint, func() (Client, error) {
+		return createClientForProvider(ctx, cfg, provider, modelID)
+	})
 	if err != nil {
 		return nil, err
 	}
+	return cloneClientForSession(prototype)
+}
 
-	// Store in pool for reuse
-	pool.Put(provider, modelID, c)
+// clientConfigFingerprint identifies every immutable input captured when a
+// provider client is constructed. It deliberately hashes credentials rather
+// than exposing them in the pool key or logs.
+func clientConfigFingerprint(cfg *config.Config, provider, modelID string) string {
+	if cfg == nil {
+		return "nil"
+	}
 
-	return c, nil
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if config.GetProvider(provider) == nil {
+		provider = config.DetectProviderFromModel(modelID)
+	}
+	apiKey := ""
+	if def := config.GetProvider(provider); def != nil {
+		legacyKey := ""
+		if def.UsesLegacyKey {
+			legacyKey = cfg.API.APIKey
+		}
+		apiKey = security.GetProviderKey(def.EnvVars, def.GetKey(&cfg.API), legacyKey).Value
+	}
+	override := cfg.API.Retry.Providers[provider]
+	identity := fmt.Sprintf(
+		"provider=%q\x00model=%q\x00custom_base=%q\x00ollama_base=%q\x00key=%q\x00temp=%g\x00max=%d\x00thinking=%t/%d\x00retry=%d/%d/%d\x00provider_retry=%d/%d",
+		provider,
+		modelID,
+		cfg.Model.CustomBaseURL,
+		cfg.API.OllamaBaseURL,
+		apiKey,
+		cfg.Model.Temperature,
+		cfg.Model.MaxOutputTokens,
+		cfg.Model.EnableThinking,
+		cfg.Model.ThinkingBudget,
+		cfg.API.Retry.RetryDelay,
+		cfg.API.Retry.HTTPTimeout,
+		cfg.API.Retry.StreamIdleTimeout,
+		override.HTTPTimeout,
+		override.StreamIdleTimeout,
+	)
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:12])
 }
 
 // createClientForProvider creates a new client for the given provider.

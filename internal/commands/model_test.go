@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -24,10 +26,13 @@ type fakeAppForModel struct {
 	applied    *config.Config
 	applyCalls int
 	clearCalls int
+	clearErr   error
+	events     []string
 }
 
 func (f *fakeAppForModel) GetModelSetter() ModelSetter { return f.setter }
 func (f *fakeAppForModel) ApplyConfig(cfg *config.Config) error {
+	f.events = append(f.events, "apply")
 	f.applyCalls++
 	f.applied = cfg.Clone()
 	// Real ApplyConfig constructs and installs a replacement client after the
@@ -37,6 +42,11 @@ func (f *fakeAppForModel) ApplyConfig(cfg *config.Config) error {
 	return nil
 }
 func (f *fakeAppForModel) ClearConversation() { f.clearCalls++ }
+func (f *fakeAppForModel) ClearConversationChecked() error {
+	f.events = append(f.events, "clear")
+	f.clearCalls++
+	return f.clearErr
+}
 
 func newModelApp(active string, currentModel string) *fakeAppForModel {
 	return &fakeAppForModel{
@@ -149,6 +159,48 @@ func TestModelCommand_CrossProviderDeepSeekModelSwitch(t *testing.T) {
 	}
 	if app.clearCalls != 1 {
 		t.Fatalf("ClearConversation calls = %d, want 1", app.clearCalls)
+	}
+	if got := strings.Join(app.events, ","); got != "clear,apply" {
+		t.Fatalf("cross-provider switch order = %q, want durable clear before apply", got)
+	}
+}
+
+func TestModelCommand_CrossProviderClearFailurePreventsApply(t *testing.T) {
+	app := newModelApp("glm", "glm-5.1")
+	app.fakeAppForMCP.cfg.API.DeepSeekKey = "sk-deepseek-test-key-for-unit-test-12345"
+	app.clearErr = errors.New("session disk full")
+
+	out, err := (&ModelCommand{}).Execute(context.Background(), []string{"deepseek-v4-pro"}, app)
+	if err == nil || !strings.Contains(err.Error(), "was not switched") {
+		t.Fatalf("clear failure outcome = %q, %v; want fail-closed error", out, err)
+	}
+	if app.applyCalls != 0 {
+		t.Fatalf("ApplyConfig calls = %d after failed clear, want 0", app.applyCalls)
+	}
+}
+
+// The audit fix (v0.100.90): ClearConversationChecked returning the
+// "cleared, durability unconfirmed" case must NOT be treated the same as a
+// genuine clear failure — the conversation DID clear (every in-memory reset
+// ran), only the on-disk durability confirmation is uncertain. Before the
+// fix, clearConversationChecked forwarded this non-nil error verbatim and
+// ModelCommand aborted the whole provider switch with a FALSE "was not
+// switched" message while the old conversation was already gone — a split
+// state where history vanished but the model/provider never changed.
+func TestModelCommand_CrossProviderClearUncertainDurabilityStillSwitches(t *testing.T) {
+	app := newModelApp("glm", "glm-5.1")
+	app.fakeAppForMCP.cfg.API.DeepSeekKey = "sk-deepseek-test-key-for-unit-test-12345"
+	app.clearErr = fmt.Errorf("%w: rename could not be fsync-confirmed", ErrConversationClearedUncertainDurability)
+
+	out, err := (&ModelCommand{}).Execute(context.Background(), []string{"deepseek-v4-pro"}, app)
+	if err != nil {
+		t.Fatalf("uncertain-durability clear must not block the switch, got err = %v (out=%q)", err, out)
+	}
+	if !strings.Contains(out, "deepseek-v4-pro") || !strings.Contains(out, "session cleared") {
+		t.Fatalf("expected the switch to proceed as if cleared cleanly, got:\n%s", out)
+	}
+	if app.applyCalls != 1 {
+		t.Fatalf("ApplyConfig calls = %d, want 1 — the switch must still happen", app.applyCalls)
 	}
 }
 

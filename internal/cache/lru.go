@@ -23,6 +23,7 @@ type LRUCache[K comparable, V any] struct {
 	evictList   *list.List
 	mu          sync.RWMutex
 	lastCleanup time.Time
+	onRemove    func(K, V)
 }
 
 // NewLRUCache creates a new LRU cache with the given capacity and TTL.
@@ -51,12 +52,22 @@ func (c *LRUCache[K, V]) maybeCleanup() {
 		return
 	}
 	c.lastCleanup = now
-	for key, e := range c.entries {
+	for _, e := range c.entries {
 		if now.After(e.expiresAt) {
-			c.evictList.Remove(e.element)
-			delete(c.entries, key)
+			c.removeEntry(e)
 		}
 	}
+}
+
+// SetOnRemove installs a callback invoked whenever an entry leaves the cache
+// through expiry, eviction, explicit deletion, cleanup, or Clear. The callback
+// runs synchronously while the cache lock is held and therefore must not call
+// back into this LRUCache. It is intended for keeping small auxiliary indexes
+// in sync with the authoritative cache contents.
+func (c *LRUCache[K, V]) SetOnRemove(callback func(K, V)) {
+	c.mu.Lock()
+	c.onRemove = callback
+	c.mu.Unlock()
 }
 
 // Get retrieves a value from the cache.
@@ -151,6 +162,11 @@ func (c *LRUCache[K, V]) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.onRemove != nil {
+		for key, e := range c.entries {
+			c.onRemove(key, e.value)
+		}
+	}
 	c.entries = make(map[K]*entry[K, V])
 	c.evictList = list.New()
 }
@@ -176,6 +192,9 @@ func (c *LRUCache[K, V]) evictOldest() {
 func (c *LRUCache[K, V]) removeEntry(e *entry[K, V]) {
 	c.evictList.Remove(e.element)
 	delete(c.entries, e.key)
+	if c.onRemove != nil {
+		c.onRemove(e.key, e.value)
+	}
 }
 
 // Cleanup removes expired entries from the cache.
@@ -187,10 +206,9 @@ func (c *LRUCache[K, V]) Cleanup() int {
 	now := time.Now()
 	removed := 0
 
-	for key, e := range c.entries {
+	for _, e := range c.entries {
 		if now.After(e.expiresAt) {
-			c.evictList.Remove(e.element)
-			delete(c.entries, key)
+			c.removeEntry(e)
 			removed++
 		}
 	}

@@ -271,6 +271,52 @@ func TestSearchCache_CleanupReturnsRemovedCount(t *testing.T) {
 	}
 }
 
+func TestSearchCache_LRUEvictionPrunesReverseIndex(t *testing.T) {
+	c := NewSearchCache(1, time.Hour)
+	defer c.StopCleanup()
+
+	firstKey := GrepKey("first", "/src", "", false, 0)
+	secondKey := GrepKey("second", "/src", "", false, 0)
+	c.SetGrep(firstKey, GrepResult{
+		Matches: []GrepMatch{{FilePath: "/src/first.go"}},
+	})
+	c.SetGrep(secondKey, GrepResult{
+		Matches: []GrepMatch{{FilePath: "/src/second.go"}},
+	})
+
+	c.indexMu.RLock()
+	_, staleKey := c.keyToFiles[firstKey]
+	_, staleFile := c.fileToKeys["/src/first.go"]
+	_, liveKey := c.keyToFiles[secondKey]
+	c.indexMu.RUnlock()
+	if staleKey || staleFile {
+		t.Fatal("LRU eviction left stale reverse-index entries behind")
+	}
+	if !liveKey {
+		t.Fatal("LRU eviction pruned the live entry from the reverse index")
+	}
+}
+
+func TestSearchCache_ExpiryPrunesReverseIndex(t *testing.T) {
+	c := NewSearchCache(2, 20*time.Millisecond)
+	defer c.StopCleanup()
+
+	key := GlobKey("*.go", "/src")
+	c.SetGlob(key, GlobResult{Files: []string{"/src/expired.go"}})
+	time.Sleep(50 * time.Millisecond)
+	if _, ok := c.GetGlob(key); ok {
+		t.Fatal("expired glob entry unexpectedly remained live")
+	}
+
+	c.indexMu.RLock()
+	_, staleKey := c.keyToFiles[key]
+	_, staleFile := c.fileToKeys["/src/expired.go"]
+	c.indexMu.RUnlock()
+	if staleKey || staleFile {
+		t.Fatal("TTL expiry left stale reverse-index entries behind")
+	}
+}
+
 // --- SearchCache: Stats ---
 
 func TestSearchCache_Stats(t *testing.T) {

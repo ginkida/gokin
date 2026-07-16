@@ -161,8 +161,22 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 	cfg.Model.Provider = provider
 	cfg.Model.Name = p.DefaultModel
 
+	switchNote := ""
+	if providerSwitched {
+		// Establish the durable boundary before installing the replacement
+		// provider. On a definite save failure this leaves both client and
+		// history on the old provider instead of publishing a split state.
+		if err := clearConversationChecked(app); err != nil {
+			return "", fmt.Errorf("credentials/provider were not changed because the old conversation could not be cleared safely: %w", err)
+		}
+		switchNote = fmt.Sprintf("\n  Session cleared: switched from %s (history format differs across providers).", prevProvider)
+	}
+
 	// Save config
 	if err := app.ApplyConfig(cfg); err != nil {
+		if providerSwitched {
+			return fmt.Sprintf("Failed to change provider after the session was cleared safely: %v", err), nil
+		}
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
 
@@ -182,12 +196,6 @@ You'll be asked for it again next launch. Likely causes:
   • XDG_CONFIG_HOME set differently between runs
 Fix that path so it's writable and stable, then run /login again.`,
 			p.DisplayName, prettyHomePath(config.GetConfigPath()), err), nil
-	}
-
-	switchNote := ""
-	if providerSwitched {
-		app.ClearConversation()
-		switchNote = fmt.Sprintf("\n  Session cleared: switched from %s (history format differs across providers).", prevProvider)
 	}
 
 	return fmt.Sprintf(`✓ %s API key saved (%s)
@@ -351,15 +359,50 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 	}
 
-	// Apply config to reinitialize the client (drops the old client from memory)
+	// If the active provider was removed and another configured provider is
+	// available, stage the final provider now. This keeps logout + auto-switch
+	// to one config publication; the old two-apply flow briefly exposed a
+	// credential-stripped old provider before publishing the replacement.
+	autoSwitchProvider := ""
+	if (target == currentProvider || target == "all") && len(availableProviders) > 0 {
+		autoSwitchProvider = availableProviders[0]
+		cfg.API.ActiveProvider = autoSwitchProvider
+		cfg.Model.Provider = autoSwitchProvider
+		if np := config.GetProvider(autoSwitchProvider); np != nil {
+			cfg.Model.Name = np.DefaultModel
+		}
+		if err := clearConversationChecked(app); err != nil {
+			return "", fmt.Errorf("credentials/provider were not changed because the old conversation could not be cleared safely: %w", err)
+		}
+	}
+
+	// Apply config to reinitialize the client (drops the old client from memory).
 	applyFailed := false
 	if err := app.ApplyConfig(cfg); err != nil {
+		if autoSwitchProvider != "" {
+			return fmt.Sprintf("Failed to remove credentials and auto-switch after the session was cleared safely: %v", err), nil
+		}
 		applyFailed = true
 		// ApplyConfig may fail if no credentials remain.
 		// Commit the credential section explicitly so the authoritative App
 		// snapshot and disk cannot resurrect the removed secret later.
 		if saveErr := commitCredentialConfigSnapshot(app, cfg); saveErr != nil {
 			return fmt.Sprintf("Failed to save: %v", saveErr), nil
+		}
+	}
+	if !applyFailed {
+		// ApplyConfig intentionally keeps a valid runtime configuration live when
+		// its first disk write fails. That is acceptable for ordinary settings but
+		// not for credential deletion: reporting success while the secret remains
+		// on disk makes it silently return next launch. Re-save the authoritative
+		// App snapshot under its config lock; do not republish the caller-owned cfg.
+		if persistErr := persistCurrentConfig(app, cfg); persistErr != nil {
+			return fmt.Sprintf(`⚠ Credentials were removed for THIS session, but the change could NOT be saved to:
+  %s
+  Error: %v
+
+The removed credential may return next launch. Fix the config path permissions or disk space, then run /logout again.`,
+				prettyHomePath(config.GetConfigPath()), persistErr), nil
 		}
 	}
 
@@ -405,31 +448,10 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 			fmt.Fprintf(&result, "%s/provider %s\n", marker, provider)
 		}
 
-		// Auto-switch to first available
-		if len(availableProviders) > 0 {
-			newProvider := availableProviders[0]
-			cfg.API.ActiveProvider = newProvider
-			cfg.Model.Provider = newProvider
-			if np := config.GetProvider(newProvider); np != nil {
-				cfg.Model.Name = np.DefaultModel
-			}
-			if err := app.ApplyConfig(cfg); err != nil {
-				// ApplyConfig may fail if no credentials remain.
-				// Persist/commit the scoped credential identity without overwriting
-				// unrelated newer config state.
-				if saveErr := commitCredentialConfigSnapshot(app, cfg); saveErr != nil {
-					return fmt.Sprintf("Failed to save: %v", saveErr), nil
-				}
-			}
-
-			// Clear session history — the history was built against the
-			// just-removed provider's wire format (thinking signatures,
-			// tool_use IDs, cache_control shapes), and a different
-			// provider (e.g., DeepSeek strict) will 400 on replay.
-			// Same class of bug as /login and /provider handle.
-			app.ClearConversation()
-
-			fmt.Fprintf(&result, "\n✓ Auto-switched to %s — session cleared (history format differs across providers)\n", newProvider)
+		// The provider was already selected and applied above as part of the
+		// single logout transaction.
+		if autoSwitchProvider != "" {
+			fmt.Fprintf(&result, "\n✓ Auto-switched to %s — session cleared (history format differs across providers)\n", autoSwitchProvider)
 		}
 	}
 
@@ -537,16 +559,16 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 		cfg.Model.MaxOutputTokens = preset.MaxOutputTokens
 	}
 
-	if err := app.ApplyConfig(cfg); err != nil {
-		return fmt.Sprintf("Failed to save: %v", err), nil
+	// Persist the old conversation's terminal boundary before publishing the
+	// new provider. A failed clear therefore leaves a coherent old-provider
+	// state; a failed apply leaves only a harmless, explicitly reported clear.
+	if err := clearConversationChecked(app); err != nil {
+		return "", fmt.Errorf("provider was not switched because the old conversation could not be cleared safely: %w", err)
 	}
 
-	// Clear session history on provider switch — the old provider's
-	// thinking signatures / tool_use ID formats / cache_control shapes
-	// don't round-trip cleanly through a different provider. DeepSeek in
-	// particular 400s on missing thinking blocks from prior Kimi turns.
-	// See LoginCommand.Execute for the same handling on key-set path.
-	app.ClearConversation()
+	if err := app.ApplyConfig(cfg); err != nil {
+		return fmt.Sprintf("Failed to switch provider after the session was cleared safely: %v", err), nil
+	}
 
 	return fmt.Sprintf("✓ Switched to %s (%s) — session cleared", newProvider, cfg.Model.Name), nil
 }

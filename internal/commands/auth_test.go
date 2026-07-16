@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -17,10 +18,26 @@ type fakeAppForAuth struct {
 	applyErr     error
 	applyCalls   int
 	applyLatency time.Duration
+	persistErr   error
+	persistCalls int
 	clearCalls   int
+	clearErr     error
+	events       []string
+}
+
+func (f *fakeAppForAuth) PersistCurrentConfig() error {
+	f.persistCalls++
+	if f.persistErr != nil {
+		return f.persistErr
+	}
+	if f.applied == nil {
+		return errors.New("no authoritative config was applied")
+	}
+	return f.applied.Clone().Save()
 }
 
 func (f *fakeAppForAuth) ApplyConfig(cfg *config.Config) error {
+	f.events = append(f.events, "apply")
 	f.applyCalls++
 	if f.applyLatency > 0 {
 		time.Sleep(f.applyLatency)
@@ -38,6 +55,12 @@ func (f *fakeAppForAuth) ApplyConfig(cfg *config.Config) error {
 // used by provider-switch regression tests to ensure history
 // incompatibility between providers is handled automatically.
 func (f *fakeAppForAuth) ClearConversation() { f.clearCalls++ }
+
+func (f *fakeAppForAuth) ClearConversationChecked() error {
+	f.events = append(f.events, "clear")
+	f.clearCalls++
+	return f.clearErr
+}
 
 func newAuthApp(cfg *config.Config) *fakeAppForAuth {
 	return &fakeAppForAuth{
@@ -392,6 +415,9 @@ func TestLogin_ClearsHistoryOnProviderSwitch(t *testing.T) {
 	if app.clearCalls != 1 {
 		t.Errorf("ClearConversation calls = %d, want 1", app.clearCalls)
 	}
+	if got := strings.Join(app.events, ","); got != "clear,apply" {
+		t.Errorf("provider switch order = %q, want durable clear before apply", got)
+	}
 	if !strings.Contains(out, "Session cleared") {
 		t.Errorf("user-facing message should surface the clear, got: %q", out)
 	}
@@ -453,6 +479,9 @@ func TestProvider_ClearsHistoryOnSwitch(t *testing.T) {
 	if app.clearCalls != 1 {
 		t.Errorf("ClearConversation calls = %d, want 1", app.clearCalls)
 	}
+	if got := strings.Join(app.events, ","); got != "clear,apply" {
+		t.Errorf("provider switch order = %q, want durable clear before apply", got)
+	}
 	if !strings.Contains(out, "session cleared") {
 		t.Errorf("output should surface clear: %q", out)
 	}
@@ -479,6 +508,15 @@ func TestLogout_ActiveProviderAutoSwitch_ClearsHistory(t *testing.T) {
 	if app.clearCalls != 1 {
 		t.Errorf("ClearConversation calls = %d, want 1 (autoswitch must clear cross-provider history)", app.clearCalls)
 	}
+	if got := strings.Join(app.events, ","); got != "clear,apply" {
+		t.Errorf("logout auto-switch order = %q, want one durable clear then one apply", got)
+	}
+	if app.applyCalls != 1 {
+		t.Errorf("logout auto-switch ApplyConfig calls = %d, want one atomic publication", app.applyCalls)
+	}
+	if app.persistCalls != 1 {
+		t.Errorf("logout auto-switch persistence confirmations = %d, want 1", app.persistCalls)
+	}
 	if !strings.Contains(out, "Auto-switched") {
 		t.Errorf("output should mention the autoswitch: %q", out)
 	}
@@ -487,6 +525,70 @@ func TestLogout_ActiveProviderAutoSwitch_ClearsHistory(t *testing.T) {
 	}
 	if app.applied == nil || app.applied.API.ActiveProvider != "deepseek" {
 		t.Errorf("autoswitch target = %q, want deepseek", app.applied.API.ActiveProvider)
+	}
+}
+
+func TestLogout_ActiveProviderAutoSwitch_DurableSaveFailureIsNotSuccess(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-existing-ignore-me"
+	cfg.API.DeepSeekKey = "sk-deepseek-ready-ignore-me"
+	app := newAuthApp(cfg)
+	app.persistErr = errors.New("disk full")
+
+	out, err := (&LogoutCommand{}).Execute(context.Background(), []string{"kimi"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 1 || app.applyCalls != 1 || app.persistCalls != 1 {
+		t.Fatalf("clear/apply/persist calls = %d/%d/%d, want 1/1/1",
+			app.clearCalls, app.applyCalls, app.persistCalls)
+	}
+	if app.applied == nil || app.applied.API.KimiKey != "" || app.applied.API.ActiveProvider != "deepseek" {
+		t.Fatalf("live staged config = %+v, want removed Kimi key and DeepSeek fallback", app.applied)
+	}
+	if strings.Contains(out, "✓") || strings.Contains(out, "Auto-switched") {
+		t.Fatalf("durability failure reported success: %q", out)
+	}
+	if !strings.Contains(out, "could NOT be saved") || !strings.Contains(out, "may return next launch") {
+		t.Fatalf("durability failure guidance missing: %q", out)
+	}
+}
+
+func TestProvider_ClearFailurePreventsClientPublication(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-existing"
+	cfg.API.DeepSeekKey = "sk-deepseek-ready-to-use"
+	app := newAuthApp(cfg)
+	app.clearErr = errors.New("session disk full")
+
+	out, err := (&ProviderCommand{}).Execute(context.Background(), []string{"deepseek"}, app)
+	if err == nil || !strings.Contains(err.Error(), "was not switched") {
+		t.Fatalf("clear failure outcome = %q, %v; want fail-closed error", out, err)
+	}
+	if app.applyCalls != 0 {
+		t.Fatalf("ApplyConfig calls = %d after failed clear, want 0", app.applyCalls)
+	}
+	if got := strings.Join(app.events, ","); got != "clear" {
+		t.Fatalf("events = %q, want only clear", got)
+	}
+}
+
+func TestLogin_ClearFailurePreventsCredentialProviderPublication(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-existing"
+	app := newAuthApp(cfg)
+	app.clearErr = errors.New("session disk full")
+
+	out, err := (&LoginCommand{}).Execute(context.Background(),
+		[]string{"deepseek", "sk-deepseek-test-key-ignore-me-12345"}, app)
+	if err == nil || !strings.Contains(err.Error(), "were not changed") {
+		t.Fatalf("clear failure outcome = %q, %v; want fail-closed error", out, err)
+	}
+	if app.applyCalls != 0 {
+		t.Fatalf("ApplyConfig calls = %d after failed clear, want 0", app.applyCalls)
 	}
 }
 
@@ -513,6 +615,36 @@ func TestLogout_NonActiveProvider_DoesNotClearHistory(t *testing.T) {
 	}
 	if app.applied.API.ActiveProvider != "kimi" {
 		t.Errorf("ActiveProvider should stay kimi, got %q", app.applied.API.ActiveProvider)
+	}
+	if app.persistCalls != 1 {
+		t.Errorf("inactive-provider logout persistence confirmations = %d, want 1", app.persistCalls)
+	}
+}
+
+func TestLogout_NonActiveProvider_DurableSaveFailureIsNotSuccess(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.API.ActiveProvider = "kimi"
+	cfg.API.KimiKey = "sk-kimi-existing"
+	cfg.API.DeepSeekKey = "sk-deepseek-remove-me"
+	app := newAuthApp(cfg)
+	app.persistErr = errors.New("read-only config")
+
+	out, err := (&LogoutCommand{}).Execute(context.Background(), []string{"deepseek"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if app.clearCalls != 0 || app.applyCalls != 1 || app.persistCalls != 1 {
+		t.Fatalf("clear/apply/persist calls = %d/%d/%d, want 0/1/1",
+			app.clearCalls, app.applyCalls, app.persistCalls)
+	}
+	if app.applied == nil || app.applied.API.DeepSeekKey != "" || app.applied.API.ActiveProvider != "kimi" {
+		t.Fatalf("live staged config = %+v, want only inactive DeepSeek key removed", app.applied)
+	}
+	if strings.Contains(out, "✓") || strings.Contains(out, "API key removed") {
+		t.Fatalf("durability failure reported success: %q", out)
+	}
+	if !strings.Contains(out, "could NOT be saved") || !strings.Contains(out, "may return next launch") {
+		t.Fatalf("durability failure guidance missing: %q", out)
 	}
 }
 

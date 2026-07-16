@@ -58,6 +58,23 @@ func TestHandleSubAgentActivity_RecordsStepEffectWhenSingleDelegatedStepInFlight
 	}
 }
 
+func TestHandleSubAgentActivity_ReadOnlyToolIsNotPartialEffect(t *testing.T) {
+	mgr := plan.NewManager(true, false)
+	p := mgr.CreatePlan("Test Plan", "desc", "request")
+	p.Steps = []*plan.Step{{ID: 1, Title: "step 1"}}
+	mgr.SetPlan(p)
+	mgr.SetExecutionMode(true)
+	mgr.SetCurrentStepID(1)
+
+	a := &App{planManager: mgr}
+	a.inFlightDelegatedSteps.Store(1)
+	a.handleSubAgentActivity("agent-1", "explore", "inspect", "read", map[string]any{"file_path": "x.go"}, "tool_start", true, "")
+
+	if p.HasPartialEffects(1) {
+		t.Fatal("read-only inspection was recorded as a retry-unsafe side effect")
+	}
+}
+
 // TestHandleSubAgentActivity_SkipsStepEffectWhenMultipleDelegatedStepsInFlight
 // (round 6) pins the mis-attribution guard: when 2+ delegated steps run in
 // parallel (message_processor.go's non-safe-mode branch for multiple ready

@@ -19,6 +19,12 @@ func TestSessionWriterLeaseRejectsSameProcessDuplicateAndReleases(t *testing.T) 
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
+	if got := first.SessionID(); got != "session-one" {
+		t.Fatalf("SessionID() = %q, want session-one", got)
+	}
+	if !first.IsActive() {
+		t.Fatal("newly acquired lease is not active")
+	}
 
 	if _, err := acquireSessionWriterLeaseAt(dir, "session-one"); !errors.Is(err, ErrSessionWriterLeaseBusy) {
 		t.Fatalf("duplicate acquire error = %v, want ErrSessionWriterLeaseBusy", err)
@@ -34,6 +40,9 @@ func TestSessionWriterLeaseRejectsSameProcessDuplicateAndReleases(t *testing.T) 
 
 	if err := first.Release(); err != nil {
 		t.Fatalf("first release: %v", err)
+	}
+	if first.IsActive() {
+		t.Fatal("released lease still reports active")
 	}
 	if err := first.Release(); err != nil {
 		t.Fatalf("idempotent release: %v", err)

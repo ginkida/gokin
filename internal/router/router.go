@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -93,6 +94,83 @@ type AgentRunner interface {
 	Spawn(ctx context.Context, agentType string, prompt string, maxTurns int, model string) (string, error)
 	SpawnAsync(ctx context.Context, agentType string, prompt string, maxTurns int, model string) string
 	GetResult(agentID string) (*agent.AgentResult, bool)
+}
+
+// AgentSideEffectError means a sub-agent failed after crossing at least one
+// potentially-stateful tool boundary, or its final result became unavailable
+// after the agent had started. Re-running the top-level prompt with a fresh
+// sub-agent could duplicate an edit, bash command, remote mutation, or unknown
+// MCP/plugin action, so automatic retry layers must treat this error as unsafe.
+//
+// Result is the caller-owned snapshot returned by AgentRunner.GetResult and
+// retains partial output, touched paths, and other failure metadata for UI and
+// diagnostics. It is nil only when result provenance itself is unavailable.
+type AgentSideEffectError struct {
+	AgentID              string
+	Cause                error
+	Result               *agent.AgentResult
+	PartialOutput        string
+	StatefulToolAttempts int
+	SideEffectsUnknown   bool
+}
+
+func (e *AgentSideEffectError) Error() string {
+	if e == nil {
+		return "sub-agent side-effect state is unsafe to retry"
+	}
+	reason := "sub-agent stopped before finishing"
+	if e.Cause != nil && strings.TrimSpace(e.Cause.Error()) != "" {
+		reason += ": " + e.Cause.Error()
+	}
+	switch {
+	case e.SideEffectsUnknown:
+		reason += " (the started agent's side-effect provenance is unavailable; automatic retry blocked)"
+	case e.StatefulToolAttempts > 0:
+		reason += fmt.Sprintf(" (after %d stateful tool attempt(s); automatic retry blocked)", e.StatefulToolAttempts)
+	default:
+		reason += " (automatic retry blocked)"
+	}
+	if strings.TrimSpace(e.PartialOutput) != "" {
+		reason += " (partial output preserved in error metadata)"
+	}
+	return reason
+}
+
+func (e *AgentSideEffectError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// AutomaticRetrySafe is a marker consumed by outer request/recovery layers.
+// A false value is intentionally stronger than ordinary retry taxonomy: the
+// underlying cause may be transient while replaying already-started work is not.
+func (*AgentSideEffectError) AutomaticRetrySafe() bool { return false }
+
+// IsAutomaticRetryUnsafe recognizes the marker through wrapped error chains.
+// Keeping the predicate here lets callers block retries without depending on
+// the concrete AgentSideEffectError type.
+func IsAutomaticRetryUnsafe(err error) bool {
+	var safety interface{ AutomaticRetrySafe() bool }
+	return errors.As(err, &safety) && !safety.AutomaticRetrySafe()
+}
+
+func newAgentSideEffectError(agentID string, cause error, result *agent.AgentResult, unknown bool) *AgentSideEffectError {
+	if cause == nil {
+		cause = errors.New("sub-agent result unavailable")
+	}
+	unsafeErr := &AgentSideEffectError{
+		AgentID:            agentID,
+		Cause:              cause,
+		Result:             result,
+		SideEffectsUnknown: unknown,
+	}
+	if result != nil {
+		unsafeErr.PartialOutput = result.Output
+		unsafeErr.StatefulToolAttempts = result.StatefulToolAttempts
+	}
+	return unsafeErr
 }
 
 // RouterConfig holds configuration for the router
@@ -395,6 +473,16 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 		// the synthesized response), so extend the prior conversation rather
 		// than letting the caller replace it.
 		h, resp, err := r.executeViaSubAgent(ctx, message, decision.SubAgentType, decision.Background)
+		var sideEffectErr *AgentSideEffectError
+		if err != nil && len(h) > 0 && errors.As(err, &sideEffectErr) {
+			// A failed stateful run remains an error (outer retries must stop), but
+			// its partial model output is still a valid conversation artifact. Extend
+			// it with the original user turn before returning; handing the App the
+			// raw minimal slice would persist a model-only history on an empty/new
+			// session and lose the continuation anchor on an established one.
+			extended, _, _ := extendConversation(history, originalMessage, h, resp, nil)
+			return extended, resp, err
+		}
 		return extendConversation(history, originalMessage, h, resp, err)
 
 	case HandlerCoordinated:
@@ -520,10 +608,14 @@ func (r *Router) executeViaSubAgent(ctx context.Context, message string, agentTy
 	// Get result (present even on a post-Run failure).
 	result, ok := r.agentRunner.GetResult(agentID)
 	if !ok {
+		// The agent definitely started, but its terminal provenance disappeared.
+		// We cannot prove that it stayed read-only, so a fresh automatic run must
+		// fail closed instead of potentially duplicating an unknown side effect.
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to spawn sub-agent: %w", err)
+			return nil, "", newAgentSideEffectError(agentID, err, nil, true)
 		}
-		return nil, "", fmt.Errorf("sub-agent %s did not return a result", agentID)
+		return nil, "", newAgentSideEffectError(agentID,
+			fmt.Errorf("sub-agent %s did not return a result", agentID), nil, true)
 	}
 
 	// The failure reason comes from the Spawn err OR the stored result.Error.
@@ -533,20 +625,35 @@ func (r *Router) executeViaSubAgent(ctx context.Context, message string, agentTy
 	}
 
 	if failureReason != "" {
+		failureCause := err
+		if failureCause == nil {
+			failureCause = errors.New(failureReason)
+		}
+		var partialHistory []*genai.Content
+		partialResponse := ""
+		if strings.TrimSpace(result.Output) != "" {
+			partialResponse = result.Output +
+				"\n\n⚠ The agent stopped before finishing: " + failureReason +
+				"\nThe work above is partial — review it, then ask me to continue from here."
+			partialHistory = []*genai.Content{
+				genai.NewContentFromText(partialResponse, genai.RoleModel),
+			}
+		}
+		if result.StatefulToolAttempts > 0 {
+			// Partial prose is useful evidence, but it cannot turn a failed mutated
+			// run into success: doing so hides the failure boundary, while returning
+			// the raw transient error invites the App's outer retry to duplicate work.
+			return partialHistory, partialResponse,
+				newAgentSideEffectError(agentID, failureCause, result, false)
+		}
 		// The sub-agent stopped before finishing — but it may have done real work
 		// first (the agent preserves it in result.Output). Surface that partial
 		// work plus an actionable reason and keep the turn alive, instead of
 		// discarding minutes of effort and ending with a bare error. This mirrors
 		// the task-tool and plan-execution paths, which never throw away a failed
 		// agent's output. Only a truly-empty failure propagates as an error.
-		if strings.TrimSpace(result.Output) != "" {
-			response := result.Output +
-				"\n\n⚠ The agent stopped before finishing: " + failureReason +
-				"\nThe work above is partial — review it, then ask me to continue from here."
-			history := []*genai.Content{
-				genai.NewContentFromText(response, genai.RoleModel),
-			}
-			return history, response, nil
+		if partialResponse != "" {
+			return partialHistory, partialResponse, nil
 		}
 		return nil, "", fmt.Errorf("sub-agent stopped before finishing: %s", failureReason)
 	}

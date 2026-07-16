@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"gokin/internal/agent"
@@ -145,11 +144,30 @@ func (a *App) finishForegroundProcessing(beforePending func()) {
 	}
 	a.mu.Unlock()
 
+	dispatchLineage := a.captureConversationLineage()
+
 	// Transfer ownership while holding a.mu. Keeping processing=true when a
 	// pending item exists removes the idle gap in which later input could claim
 	// the foreground and overtake the FIFO head.
 	a.mu.Lock()
-	pending, remaining, ok := a.dequeuePending()
+	var pendingRequest pendingRequest
+	var remaining int
+	var ok bool
+	var staleRecoveries int
+	discardedLate := 0
+	if a.dropSteerLeftovers {
+		// Esc drained all pre-boundary work. The cancelled turn's late finalizer
+		// may reopen the gate only for a request carrying explicit post-Esc user
+		// provenance; unmarked callbacks/hooks/timers are discarded.
+		pendingRequest, remaining, ok, discardedLate = a.dequeuePostCancelUserPending()
+		if ok {
+			a.dropSteerLeftovers = false
+		}
+	} else {
+		pendingRequest, remaining, ok, staleRecoveries = a.dequeuePendingRequestForSession(
+			dispatchLineage.sessionID, dispatchLineage.epoch)
+	}
+	pending := pendingRequest.message
 	var name string
 	var args []string
 	var isCmd bool
@@ -162,16 +180,67 @@ func (a *App) finishForegroundProcessing(beforePending func()) {
 		// that interval must cancel this accepted FIFO head, not miss it after it
 		// has already been removed from the queue.
 		nextCtx = a.claimForegroundContextLocked()
-		name, args, isCmd = a.commandHandler.Parse(pending)
+		nextCtx = withConversationLineage(
+			nextCtx, dispatchLineage.sessionID, dispatchLineage.epoch)
+		if pendingRequest.recoverySessionID == "" {
+			name, args, isCmd = a.commandHandler.Parse(pending)
+		}
 	} else {
 		a.processing = false
 	}
 	a.mu.Unlock()
+	if discardedLate > 0 {
+		logging.Warn("discarded unowned FIFO work behind cancellation gate", "count", discardedLate)
+	}
+	if ok && pendingRequest.recoverySessionID == "" && !isCmd {
+		claimed, checkpoints, matched, claimErr := a.claimQueuedRecoveryForPrompt(
+			pending, dispatchLineage.epoch)
+		if matched && claimErr == nil {
+			pendingRequest.recoveryID = claimed.ID
+			pendingRequest.recoverySessionID = claimed.SessionID
+			pendingRequest.recoveryMemoryQuery = claimed.UserMessage
+			pendingRequest.recoveryEpoch = dispatchLineage.epoch
+			pendingRequest.recoveryCheckpoints = checkpoints
+			pending = claimed.Message
+			nextCtx = withConversationLineage(
+				nextCtx, claimed.SessionID, dispatchLineage.epoch)
+		} else if matched {
+			logging.Warn("queued duplicate recovery prompt was blocked", "error", claimErr)
+			a.safeSendToProgram(ui.QueuedCountMsg(remaining))
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusWarning,
+				Message: "A queued repeat matched safe-retry state that was already claimed or inconsistent; it was not run with a fresh ledger",
+			})
+			a.processingMu.Lock()
+			if a.processingCancel != nil {
+				a.processingCancel()
+				a.processingCancel = nil
+			}
+			a.processingMu.Unlock()
+			a.finishForegroundProcessing(nil)
+			a.saveRecoverySnapshot()
+			return
+		}
+	}
+	if staleRecoveries > 0 {
+		logging.Warn("deferred claimed recovery owned by another conversation", "count", staleRecoveries)
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: "A safe retry belongs to another conversation and remains queued; switch back or inspect /recovery",
+		})
+	}
 
 	if ok {
 		a.safeSendToProgram(ui.QueuedCountMsg(remaining))
 		a.safeSendToProgram(ui.StreamTextMsg("\n📤 Processing queued message...\n"))
-		a.startAcceptedSubmit(nextCtx, pending, name, args, isCmd)
+		a.startAcceptedSubmitWithRecoveryIdentity(
+			nextCtx, pending, name, args, isCmd,
+			pendingRequest.recoveryID,
+			pendingRequest.recoverySessionID,
+			pendingRequest.recoveryMemoryQuery,
+			pendingRequest.recoveryEpoch,
+			pendingRequest.recoveryCheckpoints,
+		)
 	}
 	a.saveRecoverySnapshot()
 }
@@ -225,6 +294,29 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("session not initialized — try /clear or restart")))
 		return
 	}
+	turnLineage, ok := conversationLineageFromContext(ctx)
+	if !ok {
+		turnLineage = a.captureConversationLineage()
+	}
+	abortIfConversationChanged := func() bool {
+		if a.conversationLineageMatches(turnLineage) {
+			return false
+		}
+		err := fmt.Errorf("%w; discarded the stale turn instead of applying it to the new session", errRecoveryConversationChanged)
+		logging.Warn("discarded turn after conversation boundary",
+			"session_id", turnLineage.sessionID, "epoch", turnLineage.epoch)
+		a.recordHeadlessTerminalOutcome("conversation_changed", err.Error())
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: "The conversation changed while this request was running; its stale result and automatic retries were discarded",
+		})
+		a.safeSendToProgram(ui.ResponseDoneMsg{})
+		return true
+	}
+	if abortIfConversationChanged() {
+		return
+	}
+	turnRecovery, recoveryTurn := sideEffectRecoveryContextFromContext(ctx)
 
 	a.journalEvent("request_started", map[string]any{
 		"message_preview": previewForJournal(message),
@@ -276,10 +368,16 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	currentMsgCount := a.messageCount
 	a.mu.Unlock()
 
-	// New top-level request: clear side-effect ledger.
+	// A fresh user turn owns a fresh side-effect ledger. An automatic retry
+	// instead restores the exact checkpoint generation captured when its failed
+	// attempt ended; clearing it here would allow duplicate writes/bash calls.
 	if a.executor != nil {
-		a.executor.ResetSideEffectLedger()
-		a.executor.SetSideEffectDedup(false)
+		if recoveryTurn {
+			a.executor.PrepareSideEffectRecovery(turnRecovery.checkpoints)
+		} else {
+			a.executor.ResetSideEffectLedger()
+			a.executor.SetSideEffectDedup(false)
+		}
 
 		// Track prompt cache state for cache break detection
 		if ct := a.executor.GetCacheTracker(); ct != nil {
@@ -326,7 +424,14 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 	// Inject error context if retrying after a recent failure
 	a.mu.Lock()
-	if a.lastError != "" && time.Since(a.lastErrorTime) < 2*time.Minute {
+	if recoveryTurn {
+		// Durable/in-process recovery.Message is the exact executable payload and
+		// its retry budget is keyed by that stable identity. Prefixing it again
+		// would both violate replay exactness and reset the persisted attempt
+		// budget under a new hash on every failure.
+		a.lastError = ""
+		a.lastErrorTime = time.Time{}
+	} else if a.lastError != "" && time.Since(a.lastErrorTime) < 2*time.Minute {
 		message = fmt.Sprintf("[Note: previous attempt failed with: %s. The context from that attempt is preserved in history.]\n\n%s", a.lastError, message)
 		a.lastError = "" // Clear after use
 	}
@@ -378,6 +483,9 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	a.mu.Unlock()
 
 	for {
+		if abortIfConversationChanged() {
+			return
+		}
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
 		currentMessage := retryMessage
 		execFn := func() error {
@@ -421,6 +529,9 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			err = a.policy.ExecuteRequest(ctx, execFn)
 		} else {
 			err = execFn()
+		}
+		if abortIfConversationChanged() {
+			return
 		}
 
 		if err == nil {
@@ -478,6 +589,18 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		// Don't retry if context cancelled (user abort)
 		if ctx.Err() != nil {
 			err = client.ContextErr(ctx)
+			break
+		}
+
+		// A routed/delegated executor can fail after a stateful tool already
+		// started while its checkpoints live outside the foreground executor's
+		// exact replay ledger. Retrying the whole request here could spawn a new
+		// agent and repeat bash/edit/MCP mutations. Fail closed before context
+		// truncation, generic retry classification, or any backoff scheduling.
+		if isAutomaticRetryUnsafe(err) {
+			logging.Error("automatic request retry blocked after uncertain side effect",
+				"error", err,
+				"message_preview", previewForJournal(message))
 			break
 		}
 
@@ -714,6 +837,35 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			a.safeSendToProgram(ui.ResponseDoneMsg{})
 			return
 		}
+		if isAutomaticRetryUnsafe(err) {
+			// The failed delegated run may already have changed files, but its
+			// tool-attempt ledger cannot yet be replayed exactly by the foreground
+			// executor. Never turn this into a rate-limit timer or auto-resume.
+			// A claimed durable recovery is intentionally left claimed/manual-only;
+			// clearing it here would falsely certify that replay is safe.
+			a.clearRateLimitRetry(message)
+			a.clearAutoResume(originalMessage)
+			a.mu.Lock()
+			a.lastError = ""
+			a.lastErrorTime = time.Time{}
+			a.mu.Unlock()
+			a.journalEvent("automatic_retry_blocked_unsafe_side_effect", map[string]any{
+				"error":           err.Error(),
+				"message_preview": previewForJournal(message),
+			})
+			if headlessTurn != nil {
+				a.recordHeadlessTerminalOutcomeForTurn(
+					headlessTurn, "unsafe_recovery", err.Error())
+			}
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type: ui.StatusWarning,
+				Message: "The delegated run may already have changed the workspace. " +
+					"Automatic retry was blocked; inspect the diff, then explicitly continue.",
+			})
+			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			a.safeSendToProgram(ui.ErrorMsg(err))
+			return
+		}
 		// Store error for context injection on retry
 		a.mu.Lock()
 		a.lastError = err.Error()
@@ -749,18 +901,70 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 				a.safeSendToProgram(ui.ResponseDoneMsg{})
 
 				retryMsg, retryWait := message, delay
-				a.safeGo("rate-limit-auto-retry", func() {
-					timer := time.NewTimer(retryWait)
-					defer timer.Stop()
-					select {
-					case <-timer.C:
-						// handleResubmit: never steer a programmatic retry
-						// into a turn the user started while we waited.
-						a.handleResubmit(retryMsg)
-					case <-a.ctx.Done():
+				retrySessionID := turnLineage.sessionID
+				retryEpoch := turnLineage.epoch
+				recoveryCheckpoints := a.sideEffectRecoverySnapshot()
+				persisted, persistErr := a.persistPendingRecovery(
+					"rate_limit", retryMsg, memoryQuery,
+					recoveryCheckpoints, attempt, retryWait,
+					turnRecovery.recoveryID, retrySessionID, retryEpoch,
+				)
+				if persistErr == nil {
+					if headlessTurn != nil {
+						// One-shot automation must not return and then mutate the
+						// workspace from an App-global background timer. The durable
+						// scheduled record remains available to the next explicit exact
+						// headless invocation.
+						a.recordHeadlessTerminalOutcomeForTurn(
+							headlessTurn, "rate_limit", err.Error())
+						a.safeSendToProgram(ui.ErrorMsg(err))
+					} else {
+						a.schedulePersistedRecovery(persisted, false)
+						// Replacing a claimed generation with this scheduled
+						// attempt re-opens the global claim slot. Restore any
+						// sibling timers paused while the prior attempt ran.
+						a.resumePersistedRecoveries(false)
+					}
+				} else if errors.Is(persistErr, errRecoveryConversationChanged) {
+					logging.Info("rate-limit retry cancelled by conversation clear")
+					if headlessTurn != nil {
+						a.recordHeadlessTerminalOutcomeForTurn(
+							headlessTurn, "conversation_changed", persistErr.Error())
+					}
+				} else if errors.Is(persistErr, errRecoveryPersistenceFailed) {
+					if headlessTurn != nil {
+						a.recordHeadlessTerminalOutcomeForTurn(
+							headlessTurn, "rate_limit", err.Error())
+						a.safeSendToProgram(ui.ErrorMsg(err))
 						return
 					}
-				})
+					logging.Warn("rate-limit retry is in-process only", "error", persistErr)
+					a.safeSendToProgram(ui.StatusUpdateMsg{
+						Type:    ui.StatusWarning,
+						Message: "Retry could not be saved for restart recovery; it will continue only while this process stays open",
+					})
+					a.safeGo("rate-limit-auto-retry", func() {
+						timer := time.NewTimer(retryWait)
+						defer timer.Stop()
+						select {
+						case <-timer.C:
+							a.handleRecoveryResubmit(retryMsg, memoryQuery, turnRecovery.recoveryID, retrySessionID, retryEpoch, recoveryCheckpoints)
+						case <-a.ctx.Done():
+							return
+						}
+					})
+				} else {
+					logging.Warn("rate-limit retry blocked by unsafe or inconsistent recovery state", "error", persistErr)
+					if headlessTurn != nil {
+						a.recordHeadlessTerminalOutcomeForTurn(
+							headlessTurn, "unsafe_recovery", persistErr.Error())
+						a.safeSendToProgram(ui.ErrorMsg(persistErr))
+					}
+					a.safeSendToProgram(ui.StatusUpdateMsg{
+						Type:    ui.StatusWarning,
+						Message: "Automatic retry was blocked because its exact safe-replay state could not be verified; inspect /recovery before retrying",
+					})
+				}
 				return
 			}
 		}
@@ -827,18 +1031,63 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			a.safeSendToProgram(ui.ResponseDoneMsg{})
 
 			resumeMsg, resumeWait := originalMessage, resumeDelay
-			a.safeGo("auto-resume-retry", func() {
-				timer := time.NewTimer(resumeWait)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-					// handleResubmit: never steer a programmatic retry into
-					// a turn the user started while we waited.
-					a.handleResubmit(resumeMsg)
-				case <-a.ctx.Done():
+			resumeSessionID := turnLineage.sessionID
+			resumeEpoch := turnLineage.epoch
+			recoveryCheckpoints := a.sideEffectRecoverySnapshot()
+			persisted, persistErr := a.persistPendingRecovery(
+				"auto_resume", resumeMsg, memoryQuery,
+				recoveryCheckpoints, resumeAttempt, resumeWait,
+				turnRecovery.recoveryID, resumeSessionID, resumeEpoch,
+			)
+			if persistErr == nil {
+				if headlessTurn != nil {
+					a.recordHeadlessTerminalOutcomeForTurn(
+						headlessTurn, "auto_resume", err.Error())
+					a.safeSendToProgram(ui.ErrorMsg(err))
+				} else {
+					a.schedulePersistedRecovery(persisted, false)
+					a.resumePersistedRecoveries(false)
+				}
+			} else if errors.Is(persistErr, errRecoveryConversationChanged) {
+				logging.Info("auto-resume retry cancelled by conversation clear")
+				if headlessTurn != nil {
+					a.recordHeadlessTerminalOutcomeForTurn(
+						headlessTurn, "conversation_changed", persistErr.Error())
+				}
+			} else if errors.Is(persistErr, errRecoveryPersistenceFailed) {
+				if headlessTurn != nil {
+					a.recordHeadlessTerminalOutcomeForTurn(
+						headlessTurn, "auto_resume", err.Error())
+					a.safeSendToProgram(ui.ErrorMsg(err))
 					return
 				}
-			})
+				logging.Warn("auto-resume retry is in-process only", "error", persistErr)
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusWarning,
+					Message: "Auto-resume could not be saved for restart recovery; it will continue only while this process stays open",
+				})
+				a.safeGo("auto-resume-retry", func() {
+					timer := time.NewTimer(resumeWait)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+						a.handleRecoveryResubmit(resumeMsg, memoryQuery, turnRecovery.recoveryID, resumeSessionID, resumeEpoch, recoveryCheckpoints)
+					case <-a.ctx.Done():
+						return
+					}
+				})
+			} else {
+				logging.Warn("auto-resume blocked by unsafe or inconsistent recovery state", "error", persistErr)
+				if headlessTurn != nil {
+					a.recordHeadlessTerminalOutcomeForTurn(
+						headlessTurn, "unsafe_recovery", persistErr.Error())
+					a.safeSendToProgram(ui.ErrorMsg(persistErr))
+				}
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type:    ui.StatusWarning,
+					Message: "Auto-resume was blocked because its exact safe-replay state could not be verified; inspect /recovery before retrying",
+				})
+			}
 			return
 		}
 
@@ -907,6 +1156,13 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	}
 
 	a.updateWorkingMemoryFromTurn(message, response)
+
+	// A successful recovered turn is terminal for its claimed durable record.
+	// Clear it before queuing the normal session save so a second restart cannot
+	// rediscover a completed retry.
+	if clearErr := a.clearPendingRecovery(turnRecovery.recoveryID, turnRecovery.sessionID, "success"); clearErr != nil {
+		a.reportPendingRecoveryClearFailure(headlessTurn, turnRecovery, clearErr)
+	}
 
 	// Sync tool checkpoints and save session after each message
 	a.syncToolCheckpoints()
@@ -1017,6 +1273,28 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 	// Update todos display
 	a.emitTodoUpdate()
+}
+
+func (a *App) reportPendingRecoveryClearFailure(headlessTurn *headlessTerminalOutcome, recovery sideEffectRecoveryContext, clearErr error) {
+	if clearErr == nil {
+		return
+	}
+	a.journalEvent("side_effect_recovery_clear_failed", map[string]any{
+		"recovery_id": recovery.recoveryID,
+		"session_id":  recovery.sessionID,
+		"error":       clearErr.Error(),
+	})
+	logging.Warn("successful recovered turn could not clear its durable claim", "error", clearErr)
+	// A non-interactive caller must never observe exit 0 after a successful
+	// mutation whose durable replay marker is still claimed or commit-uncertain.
+	// RunHeadless turns this latched terminal outcome into its non-zero contract.
+	a.recordHeadlessTerminalOutcomeForTurn(
+		headlessTurn, "recovery_persistence", clearErr.Error())
+	message := "Recovered work completed, but its durable claimed marker could not be cleared; automatic retries remain paused — inspect /recovery"
+	if errors.Is(clearErr, errRecoveryCommitUncertain) {
+		message = "Recovered work completed and its claim was cleared, but storage could not confirm directory durability — avoid restarting until session storage is healthy"
+	}
+	a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusWarning, Message: message})
 }
 
 // resolveTurnTokenUsage selects the metadata shown for one completed user
@@ -1300,6 +1578,23 @@ func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *pla
 		}
 	}
 
+	if err := a.preparePlanExecutionBoundary(approvedPlan); err != nil {
+		logging.Warn("plan execution blocked: context boundary was not durable", "error", err)
+		if a.planManager != nil {
+			a.planManager.PausePlan()
+			a.planManager.SetExecutionMode(false)
+			a.planManager.SetCurrentStepID(-1)
+		}
+		a.recordHeadlessTerminalOutcome("persistence", err.Error())
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: "Plan execution was paused because its fresh context could not be saved safely; fix session storage and resume the plan",
+		})
+		a.safeSendToProgram(ui.ErrorMsg(err))
+		a.safeSendToProgram(ui.ResponseDoneMsg{})
+		return
+	}
+
 	delegated := a.config.Plan.DelegateSteps && a.agentRunner != nil
 	if delegated && a.shouldUseSafeMode() {
 		a.safeSendToProgram(ui.StreamTextMsg(
@@ -1312,6 +1607,41 @@ func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *pla
 	} else {
 		a.executePlanDirectly(execCtx, approvedPlan)
 	}
+}
+
+func (a *App) preparePlanExecutionBoundary(approvedPlan *plan.Plan) error {
+	if approvedPlan == nil {
+		return fmt.Errorf("approved plan is unavailable")
+	}
+	contextSnapshot := a.extractContextSnapshot()
+	if contextSnapshot != "" {
+		approvedPlan.SetContextSnapshot(contextSnapshot)
+		logging.Debug("context snapshot saved",
+			"plan_id", approvedPlan.ID, "snapshot_len", len(contextSnapshot))
+	}
+
+	stepInfos := make([]appcontext.PlanStepInfo, 0, len(approvedPlan.Steps))
+	for _, step := range approvedPlan.Steps {
+		stepInfos = append(stepInfos, appcontext.PlanStepInfo{
+			ID:          step.ID,
+			Title:       step.Title,
+			Description: step.Description,
+		})
+	}
+	planPrompt := a.promptBuilder.BuildPlanExecutionPromptWithContext(
+		approvedPlan.Title, approvedPlan.Description, stepInfos, contextSnapshot)
+	if a.planManager != nil {
+		if err := a.planManager.SaveCurrentPlan(); err != nil {
+			return fmt.Errorf("save approved plan before context replacement: %w", err)
+		}
+	}
+	if _, err := a.replaceConversationPersistenceBoundary(func() {
+		a.session.AddUserMessage(planPrompt)
+		a.session.AddModelMessage("I understand the approved plan. I will execute each step as instructed.")
+	}); err != nil {
+		return fmt.Errorf("persist plan context boundary: %w", err)
+	}
+	return nil
 }
 
 // restoreSharedMemoryFromPlan repopulates SharedMemory with results from completed steps.
@@ -1361,39 +1691,6 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 
 	// Skip diff approval prompts — the plan itself was already approved
 	ctx = tools.ContextWithSkipDiff(ctx)
-
-	// 1. Save context snapshot before clearing (preserves planning decisions)
-	contextSnapshot := a.extractContextSnapshot()
-	if contextSnapshot != "" {
-		approvedPlan.SetContextSnapshot(contextSnapshot)
-		logging.Debug("context snapshot saved", "plan_id", approvedPlan.ID, "snapshot_len", len(contextSnapshot))
-	}
-
-	// 2. Convert plan steps to PlanStepInfo for the base prompt
-	stepInfos := make([]appcontext.PlanStepInfo, 0, len(approvedPlan.Steps))
-	for _, s := range approvedPlan.Steps {
-		stepInfos = append(stepInfos, appcontext.PlanStepInfo{
-			ID:          s.ID,
-			Title:       s.Title,
-			Description: s.Description,
-		})
-	}
-
-	// 3. Build plan execution prompt (includes context snapshot if available)
-	planPrompt := a.promptBuilder.BuildPlanExecutionPromptWithContext(
-		approvedPlan.Title, approvedPlan.Description, stepInfos, contextSnapshot)
-
-	// 3b. Save plan to persistent storage before clearing session
-	if a.planManager != nil {
-		if err := a.planManager.SaveCurrentPlan(); err != nil {
-			logging.Warn("failed to save plan before execution", "error", err)
-		}
-	}
-
-	// 4. Clear session and inject plan context
-	a.session.Clear()
-	a.session.AddUserMessage(planPrompt)
-	a.session.AddModelMessage("I understand the approved plan. I will execute each step as instructed.")
 
 	totalSteps := len(approvedPlan.Steps)
 
@@ -1764,6 +2061,32 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 
 		// Retry only on transient errors
 		if errCat == plan.ErrorTransient && attempt < maxRetries-1 {
+			// executeTracked may have completed one or more tool calls before the
+			// provider failed on a later model turn. Retrying the whole step in
+			// that state can repeat writes, commands, or external actions with a
+			// fresh tool-call ID, bypassing the executor's per-call deduplication.
+			// Stop at the attempt boundary and require an explicit resume instead.
+			if approvedPlan.HasPartialEffects(step.ID) || approvedPlan.HasDuplicateRisk(step.ID) {
+				reason := fmt.Sprintf(
+					"automatic retry blocked after attempt %d: tool effects were recorded before the transient error; review the workspace and resume explicitly",
+					attempt+1,
+				)
+				if approvedPlan.HasDuplicateRisk(step.ID) {
+					reason = fmt.Sprintf(
+						"automatic retry blocked after attempt %d: duplicate tool effects were detected; review the workspace and resume explicitly",
+						attempt+1,
+					)
+				}
+				commitStepUsage()
+				if a.reliability != nil && !errors.Is(err, context.Canceled) {
+					a.reliability.RecordFailure()
+				}
+				a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, reason)
+				logging.Warn("step retry blocked after partial tool effects",
+					"step_id", step.ID, "attempt", attempt+1, "error", err.Error())
+				return
+			}
+
 			backoff := backoffDurations[attempt]
 			logging.Warn("step execution error, retrying",
 				"step_id", step.ID, "attempt", attempt+1, "error", err.Error(),
@@ -2154,45 +2477,22 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			break // All steps done — proceed to summary
 		}
 
-		if len(readySteps) == 1 || a.shouldUseSafeMode() {
-			if len(readySteps) > 1 && a.shouldUseSafeMode() {
-				a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusRetry, Message: "Safe mode: running steps sequentially"})
-			}
-			for _, step := range readySteps {
-				a.executeDelegatedStep(ctx, step, approvedPlan, totalSteps, sharedMem, contextSnapshot)
-			}
-		} else {
-			// Parallel execution of ready steps with context cancellation support
-			done := make(chan struct{})
-			var wg sync.WaitGroup
-			for _, step := range readySteps {
-				wg.Add(1)
-				s := step
-				a.safeGo("plan-delegated-step", func() {
-					defer wg.Done()
-					a.executeDelegatedStep(ctx, s, approvedPlan, totalSteps, sharedMem, contextSnapshot)
-				})
-			}
-			a.safeGo("plan-step-wait-barrier", func() {
-				wg.Wait()
-				close(done)
+		// Delegated steps publish tool activity through one process-wide callback.
+		// Running ready steps concurrently makes the callback's single
+		// CurrentStepID ambiguous, so writes can be attributed to the wrong ledger
+		// (or skipped), defeating rollback and retry idempotency. Keep delegation
+		// sequential until activity events carry an explicit step identity.
+		if len(readySteps) > 1 {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRetry,
+				Message: "Running delegated steps sequentially to preserve rollback and retry safety",
 			})
-			select {
-			case <-done:
-			case <-ctx.Done():
-				// Drain step goroutines after cancel, but cap the wait
-				// at 30s. If a step ignores ctx (stuck syscall, blocked
-				// network call), the previous version of this code waited
-				// forever — TUI froze with no way out except kill -9.
-				// Steps that overrun their stepCtx timeout will exit on
-				// their own; the leak window is bounded.
-				select {
-				case <-done:
-				case <-time.After(30 * time.Second):
-					logging.Warn("plan-step barrier drain timed out — leaking step goroutine, returning control to user",
-						"plan_id", approvedPlan.ID)
-				}
+		}
+		for _, step := range readySteps {
+			if ctx.Err() != nil {
+				return
 			}
+			a.executeDelegatedStep(ctx, step, approvedPlan, totalSteps, sharedMem, contextSnapshot)
 		}
 	}
 
@@ -2457,6 +2757,31 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 				errCat = plan.ErrorTransient
 			}
 			if errCat == plan.ErrorTransient && attempt < maxRetries-1 {
+				// A delegated agent may have completed writes before a later
+				// provider round failed. Its tool_start events are recorded in the
+				// step ledger while delegation is sequential. Never respawn the whole
+				// step automatically once such effects exist: new tool-call IDs would
+				// bypass executor-level replay and repeat the mutation.
+				if approvedPlan.HasPartialEffects(step.ID) || approvedPlan.HasDuplicateRisk(step.ID) {
+					reason := fmt.Sprintf(
+						"automatic retry blocked after attempt %d: delegated tool effects were recorded before the transient error; review the workspace and resume explicitly",
+						attempt+1,
+					)
+					if approvedPlan.HasDuplicateRisk(step.ID) {
+						reason = fmt.Sprintf(
+							"automatic retry blocked after attempt %d: duplicate delegated tool effects were detected; review the workspace and resume explicitly",
+							attempt+1,
+						)
+					}
+					if a.reliability != nil && !errors.Is(err, context.Canceled) {
+						a.reliability.RecordFailure()
+					}
+					a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, reason)
+					logging.Warn("delegated step retry blocked after partial tool effects",
+						"step_id", step.ID, "attempt", attempt+1, "error", err.Error())
+					return
+				}
+
 				backoff := backoffDurations[attempt]
 				logging.Warn("sub-agent error, retrying step",
 					"step_id", step.ID, "attempt", attempt+1, "error", err.Error(),

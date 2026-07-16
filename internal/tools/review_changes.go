@@ -6,8 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
+
+	"gokin/internal/security"
 
 	"google.golang.org/genai"
 )
@@ -15,12 +16,16 @@ import (
 // ReviewChangesTool shows a consolidated diff of all uncommitted changes,
 // optimized for agent self-verification after a batch of edits.
 type ReviewChangesTool struct {
-	workDir string
+	workDir       string
+	pathValidator *security.PathValidator
 }
 
 // NewReviewChangesTool creates a new ReviewChangesTool instance.
 func NewReviewChangesTool(workDir string) *ReviewChangesTool {
-	return &ReviewChangesTool{workDir: workDir}
+	return &ReviewChangesTool{
+		workDir:       workDir,
+		pathValidator: newWorkspacePathValidator(workDir, nil),
+	}
 }
 
 func (t *ReviewChangesTool) Name() string {
@@ -63,7 +68,9 @@ const (
 //     `git diff --name-only` prints repo-root-relative names that would then be
 //     re-resolved cwd-relative (empty diffs for every tracked file).
 func (t *ReviewChangesTool) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
-	full := append([]string{"-c", "core.quotepath=off"}, args...)
+	// --literal-pathspecs prevents values such as :(top)secret from escaping a
+	// nested workspace after their filesystem spelling has passed validation.
+	full := append([]string{"-c", "core.quotepath=off", "--literal-pathspecs"}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = t.workDir
 	return cmd
@@ -73,10 +80,17 @@ func (t *ReviewChangesTool) Execute(ctx context.Context, args map[string]any) (T
 	staged := GetBoolDefault(args, "staged", false)
 	nameOnly := GetBoolDefault(args, "name_only", false)
 	file := GetStringDefault(args, "file", "")
+	if t.pathValidator == nil {
+		return NewErrorResult("security error: path validator not initialized"), nil
+	}
 
 	var relFile string
 	if file != "" {
-		relFile = t.relPath(file)
+		var err error
+		relFile, _, err = validateGitPath(t.workDir, file, t.pathValidator)
+		if err != nil {
+			return NewErrorResult(fmt.Sprintf("file path validation failed: %s", err)), nil
+		}
 	}
 
 	// --stat header (best-effort; its failure only downgrades the header).
@@ -106,8 +120,13 @@ func (t *ReviewChangesTool) Execute(ctx context.Context, args map[string]any) (T
 	}
 
 	var tracked []string
+	validatedPaths := make(map[string]string)
 	if trackedRaw != "" {
-		tracked = strings.Split(trackedRaw, "\n")
+		var scopeErr error
+		tracked, validatedPaths, scopeErr = t.validateReportedPaths(strings.Split(trackedRaw, "\n"))
+		if scopeErr != nil {
+			return NewErrorResult(fmt.Sprintf("review_changes rejected git path: %s", scopeErr)), nil
+		}
 	}
 
 	// Untracked (newly-created) files. `git diff` never shows these, but they
@@ -122,9 +141,17 @@ func (t *ReviewChangesTool) Execute(ctx context.Context, args map[string]any) (T
 		}
 		if othersOut, err := t.gitCmd(ctx, othersArgs...).Output(); err == nil {
 			if raw := strings.TrimSpace(string(othersOut)); raw != "" {
-				untracked = strings.Split(raw, "\n")
+				var untrackedPaths map[string]string
+				var scopeErr error
+				untracked, untrackedPaths, scopeErr = t.validateReportedPaths(strings.Split(raw, "\n"))
+				if scopeErr != nil {
+					return NewErrorResult(fmt.Sprintf("review_changes rejected git path: %s", scopeErr)), nil
+				}
 				for _, f := range untracked {
-					untrackedSet[strings.TrimSpace(f)] = true
+					untrackedSet[f] = true
+				}
+				for rel, abs := range untrackedPaths {
+					validatedPaths[rel] = abs
 				}
 			}
 		}
@@ -181,7 +208,11 @@ func (t *ReviewChangesTool) Execute(ctx context.Context, args map[string]any) (T
 		}
 
 		if untrackedSet[f] {
-			block, n, err := renderUntrackedFile(filepath.Join(t.workDir, f))
+			validPath, ok := validatedPaths[f]
+			if !ok {
+				return NewErrorResult(fmt.Sprintf("review_changes rejected unvalidated path: %s", f)), nil
+			}
+			block, n, err := renderUntrackedFile(validPath)
 			result.WriteString("\n")
 			result.WriteString(strings.Repeat("─", 60))
 			if err != nil {
@@ -309,11 +340,24 @@ func gitErrText(err error) string {
 	return err.Error()
 }
 
-func (t *ReviewChangesTool) relPath(absPath string) string {
-	if filepath.IsAbs(absPath) {
-		if rel, err := filepath.Rel(t.workDir, absPath); err == nil {
-			return rel
+// validateReportedPaths applies the same boundary to paths returned by git
+// before they are fed into another git command or opened for an untracked-file
+// preview. Treating subprocess output as trusted would reintroduce a second,
+// less obvious path traversal channel.
+func (t *ReviewChangesTool) validateReportedPaths(paths []string) ([]string, map[string]string, error) {
+	validated := make([]string, 0, len(paths))
+	absoluteByRelative := make(map[string]string, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
 		}
+		relative, absolute, err := validateGitPath(t.workDir, path, t.pathValidator)
+		if err != nil {
+			return nil, nil, err
+		}
+		validated = append(validated, relative)
+		absoluteByRelative[relative] = absolute
 	}
-	return absPath
+	return validated, absoluteByRelative, nil
 }

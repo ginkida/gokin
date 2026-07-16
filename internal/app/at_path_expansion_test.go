@@ -39,6 +39,28 @@ func TestExpandAtReferences_InWorkspaceFile(t *testing.T) {
 	}
 }
 
+func TestRecoverySubmitDoesNotExpandAtReferenceTwice(t *testing.T) {
+	a, work := newAtRefTestApp(t)
+	if err := os.WriteFile(filepath.Join(work, "snapshot.txt"), []byte("NEW CONTENT\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	persisted := "inspect @snapshot.txt\n\n--- Referenced files ---\n[file: snapshot.txt]\nOLD CONTENT\n[/file]"
+
+	agentMessage, memoryQuery := a.prepareAgentMessageForSubmit(
+		persisted, "inspect @snapshot.txt", true)
+	if agentMessage != persisted || memoryQuery != "inspect @snapshot.txt" {
+		t.Fatalf("recovery payload changed:\nagent=%q\nmemory=%q", agentMessage, memoryQuery)
+	}
+	if strings.Contains(agentMessage, "NEW CONTENT") {
+		t.Fatal("recovery re-read the changed @file")
+	}
+
+	fresh, _ := a.prepareAgentMessageForSubmit("inspect @snapshot.txt", "", false)
+	if !strings.Contains(fresh, "NEW CONTENT") {
+		t.Fatal("fresh submission did not expand @file")
+	}
+}
+
 func TestExpandAtReferences_QuotedPathWithSpaces(t *testing.T) {
 	a, work := newAtRefTestApp(t)
 	if err := os.WriteFile(filepath.Join(work, "space file.go"), []byte("package spaced\n"), 0644); err != nil {
