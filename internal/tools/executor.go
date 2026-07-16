@@ -1310,15 +1310,18 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					if shouldAttemptStagnationRecovery(resp.FunctionCalls, recoveryAttempt) {
 						recoveryAttempt++
 						stagnationRecoveries[pattern] = recoveryAttempt
+						hintBudget, _, _ := stagnationHintBudget(resp.FunctionCalls)
+						finalize := recoveryAttempt > hintBudget
 						logging.Warn("executor stagnation detected: sending recovery hint instead of aborting",
 							"pattern", pattern,
 							"count", stagnationLimit,
 							"model", cl.GetModel(),
-							"recovery_attempt", recoveryAttempt)
+							"recovery_attempt", recoveryAttempt,
+							"finalize", finalize)
 						if e.handler != nil && e.handler.OnWarning != nil {
-							e.handler.OnWarning(buildStagnationWarningMessage(resp.FunctionCalls, stagnationLimit))
+							e.handler.OnWarning(buildStagnationWarningMessage(resp.FunctionCalls, stagnationLimit, finalize))
 						}
-						results = e.buildStagnationRecoveryResults(resp.FunctionCalls, stagnationLimit)
+						results = e.buildStagnationRecoveryResults(resp.FunctionCalls, stagnationLimit, finalize)
 					} else {
 						logging.Warn("executor stagnation detected: same tool pattern repeated",
 							"pattern", pattern,
@@ -3538,18 +3541,31 @@ func maxStagnationRecoveryAttempts(toolName string) int {
 	}
 }
 
-// shouldAttemptStagnationRecovery reports whether the current looping batch
-// should get another recovery hint instead of aborting the turn. The per-batch
-// budget is the most restrictive maxStagnationRecoveryAttempts across all calls,
-// so a mixed batch containing any non-recoverable tool aborts immediately.
-func shouldAttemptStagnationRecovery(calls []*genai.FunctionCall, attempts int) bool {
+// stagnationFinalizeAttempts is the bounded force-finalize phase appended to a
+// READ-ONLY pattern's hint budget: once the hints are spent, the executor stops
+// coaching "take the next step" and instead cuts the repeated call off,
+// demanding the final answer NOW. Only a model that ignores these too hits the
+// hard abort — a pure inspection loop must end in an honest answer, not a dead
+// turn (field report: a narrate-then-recheck `git status && git log` loop that
+// ignored both hints killed the whole turn). Mutating/opaque patterns AND edit
+// keep hint-then-abort unchanged: forcing a "final answer" after a failed
+// mutation invites a dishonest success claim.
+const stagnationFinalizeAttempts = 2
+
+// stagnationHintBudget returns the batch's hint budget (the most restrictive
+// maxStagnationRecoveryAttempts across all calls, with read-only bash earning
+// 2) and whether the WHOLE batch is read-only inspection — the only class
+// eligible for the force-finalize phase. ok=false means no recovery at all
+// (the immediate hard abort, e.g. any mutating/unknown call in the batch).
+func stagnationHintBudget(calls []*genai.FunctionCall) (hints int, readOnly bool, ok bool) {
 	if len(calls) == 0 {
-		return false
+		return 0, false, false
 	}
-	budget := -1
+	readOnly = true
+	hints = -1
 	for _, call := range calls {
 		if call == nil {
-			return false
+			return 0, false, false
 		}
 		m := maxStagnationRecoveryAttempts(call.Name)
 		if m == 0 && call.Name == "bash" {
@@ -3563,14 +3579,33 @@ func shouldAttemptStagnationRecovery(calls []*genai.FunctionCall, attempts int) 
 				m = 2
 			}
 		}
-		if m == 0 {
-			return false
+		if call.Name == "edit" {
+			readOnly = false
 		}
-		if budget < 0 || m < budget {
-			budget = m
+		if m == 0 {
+			return 0, false, false
+		}
+		if hints < 0 || m < hints {
+			hints = m
 		}
 	}
-	return attempts < budget
+	return hints, readOnly, true
+}
+
+// shouldAttemptStagnationRecovery reports whether the current looping batch
+// should get another recovery replacement (hint or force-finalize) instead of
+// aborting the turn. A mixed batch containing any non-recoverable tool aborts
+// immediately; read-only batches get hints + the finalize phase.
+func shouldAttemptStagnationRecovery(calls []*genai.FunctionCall, attempts int) bool {
+	hints, readOnly, ok := stagnationHintBudget(calls)
+	if !ok {
+		return false
+	}
+	total := hints
+	if readOnly {
+		total += stagnationFinalizeAttempts
+	}
+	return attempts < total
 }
 
 // toolBudgetFamilies are the model families subject to the per-turn tool cap.
@@ -3725,7 +3760,7 @@ func shouldInjectTodoNudge(model string, toolsUsed []string) bool {
 	return hasMutation
 }
 
-func (e *Executor) buildStagnationRecoveryResults(calls []*genai.FunctionCall, repeatCount int) []*genai.FunctionResponse {
+func (e *Executor) buildStagnationRecoveryResults(calls []*genai.FunctionCall, repeatCount int, finalize bool) []*genai.FunctionResponse {
 	results := make([]*genai.FunctionResponse, len(calls))
 	for i, call := range calls {
 		toolName := "tool"
@@ -3740,6 +3775,9 @@ func (e *Executor) buildStagnationRecoveryResults(calls []*genai.FunctionCall, r
 		}
 
 		msg := buildStagnationRecoveryMessage(toolName, args, repeatCount)
+		if finalize {
+			msg = buildStagnationFinalizeMessage(toolName, args, repeatCount)
+		}
 		result := NewErrorResult(msg)
 		if cached, ok := e.lookupCachedReadOnlyResult(toolName, args); ok && cached.Content != "" {
 			result = NewErrorResultWithContext(msg, cached.Content)
@@ -3803,7 +3841,30 @@ func buildStagnationRecoveryMessage(toolName string, args map[string]any, repeat
 	}
 }
 
-func buildStagnationWarningMessage(calls []*genai.FunctionCall, repeatCount int) string {
+// buildStagnationFinalizeMessage is the post-hint escalation for read-only
+// inspection loops: the hints were ignored, so stop coaching "take the next
+// step" and demand the final answer. Keeps the literal "Do not call it again"
+// phrase (the loop-break contract shared with the hint path) and is honest
+// about the consequence of persisting.
+func buildStagnationFinalizeMessage(toolName string, args map[string]any, repeatCount int) string {
+	target := describeStagnationTarget(toolName, args)
+	return fmt.Sprintf(
+		"Loop guard FINAL: the identical %s has been blocked — it ran %d+ times and its output will not change. Do not call it again. STOP running tools NOW and write your complete final answer for the user from what you already learned this turn. If this identical call is issued again, the turn will be terminated.",
+		target, repeatCount,
+	)
+}
+
+func buildStagnationWarningMessage(calls []*genai.FunctionCall, repeatCount int, finalize bool) string {
+	if finalize {
+		target := "the repeated tool call"
+		if len(calls) > 0 && calls[0] != nil {
+			target = describeStagnationTarget(calls[0].Name, calls[0].Args)
+		}
+		return fmt.Sprintf(
+			"Loop guard: %s ignored the loop hints — cut it off and asked for the final answer.",
+			target,
+		)
+	}
 	if len(calls) == 0 || calls[0] == nil {
 		return fmt.Sprintf(
 			"Loop guard: repeated the same tool pattern %d times. Sent a recovery hint instead of rerunning it.",

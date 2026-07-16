@@ -252,7 +252,7 @@ func TestExecutorExecuteLoop_NonKimiRepeatedReadRecovers(t *testing.T) {
 }
 
 // The hard abort remains as a bounded backstop: a read loop that ignores every
-// recovery hint still aborts once the read-only recovery budget (3) is spent.
+// recovery hint (budget 3) AND both force-finalize demands still aborts.
 func TestExecutorExecuteLoop_RepeatedReadAbortsAfterRecoveryBudget(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
@@ -260,10 +260,11 @@ func TestExecutorExecuteLoop_RepeatedReadAbortsAfterRecoveryBudget(t *testing.T)
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	// 8 identical reads: 4 execute, the 5th–7th each draw a recovery hint
-	// (budget = 3), and the 8th exhausts the budget and aborts.
-	responses := make([]*client.StreamingResponse, 0, 8)
-	for i := 0; i < 8; i++ {
+	// 10 identical reads: 4 execute, the 5th–7th each draw a recovery hint
+	// (budget = 3), the 8th–9th draw force-finalize demands, and the 10th
+	// exhausts everything and aborts.
+	responses := make([]*client.StreamingResponse, 0, 10)
+	for i := 0; i < 10; i++ {
 		responses = append(responses, buildExecutorTestReadStream(fmt.Sprintf("r%d", i)))
 	}
 	cl := &scriptedExecutorClient{model: "glm-4.7", responses: responses}
@@ -273,7 +274,7 @@ func TestExecutorExecuteLoop_RepeatedReadAbortsAfterRecoveryBudget(t *testing.T)
 
 	_, _, err := exec.Execute(context.Background(), nil, "inspect project.go")
 	if err == nil {
-		t.Fatal("Execute() error = nil, want stagnation abort after recovery budget exhausted")
+		t.Fatal("Execute() error = nil, want stagnation abort after recovery + finalize budgets exhausted")
 	}
 	if !strings.Contains(err.Error(), "executor stagnation") {
 		t.Fatalf("err = %v, want executor stagnation", err)
@@ -284,8 +285,8 @@ func TestExecutorExecuteLoop_RepeatedReadAbortsAfterRecoveryBudget(t *testing.T)
 	if readTool.calls != 4 {
 		t.Fatalf("read tool calls = %d, want 4 (recovery hints never re-execute the tool)", readTool.calls)
 	}
-	if len(cl.functionResults) != 7 {
-		t.Fatalf("SendFunctionResponse calls = %d, want 7 (4 reads + 3 recovery hints) before abort", len(cl.functionResults))
+	if len(cl.functionResults) != 9 {
+		t.Fatalf("SendFunctionResponse calls = %d, want 9 (4 reads + 3 hints + 2 finalize) before abort", len(cl.functionResults))
 	}
 }
 

@@ -42,21 +42,30 @@ func TestReadOnlyBashCommand(t *testing.T) {
 	}
 }
 
-// Read-only bash earns a bounded recovery budget; mutating bash keeps 0.
+// Read-only bash earns a bounded recovery budget (2 hints + 2 finalize);
+// mutating bash keeps 0. Edit keeps its 1-hint budget with NO finalize phase —
+// forcing a "final answer" after a failed mutation invites a dishonest
+// success claim.
 func TestShouldAttemptStagnationRecovery_ReadOnlyBash(t *testing.T) {
 	roCall := []*genai.FunctionCall{{Name: "bash", Args: map[string]any{"command": "git status --short && git diff --stat"}}}
 	mutCall := []*genai.FunctionCall{{Name: "bash", Args: map[string]any{"command": "git push origin main"}}}
+	editCall := []*genai.FunctionCall{{Name: "edit", Args: map[string]any{"file_path": "a.go", "old_string": "x"}}}
 
-	if !shouldAttemptStagnationRecovery(roCall, 0) {
-		t.Fatal("read-only bash loop must earn a recovery hint at attempt 0")
+	for attempt := 0; attempt < 4; attempt++ {
+		if !shouldAttemptStagnationRecovery(roCall, attempt) {
+			t.Fatalf("read-only bash loop must earn recovery at attempt %d (2 hints + 2 finalize)", attempt)
+		}
 	}
-	if !shouldAttemptStagnationRecovery(roCall, 1) {
-		t.Fatal("read-only bash loop must earn a second hint at attempt 1")
-	}
-	if shouldAttemptStagnationRecovery(roCall, 2) {
-		t.Fatal("budget must be bounded — attempt 2 aborts")
+	if shouldAttemptStagnationRecovery(roCall, 4) {
+		t.Fatal("budget must be bounded — attempt 4 aborts")
 	}
 	if shouldAttemptStagnationRecovery(mutCall, 0) {
 		t.Fatal("mutating bash must keep the immediate abort")
+	}
+	if !shouldAttemptStagnationRecovery(editCall, 0) {
+		t.Fatal("edit keeps its single hint")
+	}
+	if shouldAttemptStagnationRecovery(editCall, 1) {
+		t.Fatal("edit must NOT get a finalize phase — attempt 1 aborts")
 	}
 }
