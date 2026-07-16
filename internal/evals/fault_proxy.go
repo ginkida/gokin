@@ -230,9 +230,39 @@ func readFaultRequestBody(body io.ReadCloser) ([]byte, error) {
 }
 
 func requestContainsToolResult(body []byte) bool {
-	compact := bytes.ToLower(body)
-	return bytes.Contains(compact, []byte(`"type":"tool_result"`)) ||
-		bytes.Contains(compact, []byte(`"role":"tool"`))
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	return containsToolResultValue(payload, 0)
+}
+
+func containsToolResultValue(value any, depth int) bool {
+	if depth > 128 {
+		return false
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if text, ok := child.(string); ok {
+				key = strings.ToLower(strings.TrimSpace(key))
+				text = strings.ToLower(strings.TrimSpace(text))
+				if (key == "type" && text == "tool_result") || (key == "role" && text == "tool") {
+					return true
+				}
+			}
+			if containsToolResultValue(child, depth+1) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if containsToolResultValue(child, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *FaultProxy) observeAndShouldInject(message, eligible bool) bool {

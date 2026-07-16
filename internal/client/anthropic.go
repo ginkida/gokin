@@ -367,10 +367,32 @@ func (c *AnthropicClient) supportsPromptCaching() bool {
 	if base == DefaultAnthropicBaseURL || base == "" {
 		return true
 	}
-	return strings.Contains(base, "minimax") ||
-		strings.Contains(base, "moonshot") ||
-		strings.Contains(base, "api.kimi.com") ||
-		strings.Contains(base, "api.deepseek.com")
+	return c.isProvider("minimax") || c.isProvider("kimi") || c.isProvider("deepseek") ||
+		strings.Contains(base, "moonshot")
+}
+
+// isProvider keeps provider semantics stable when a custom endpoint (notably
+// the eval fault proxy on 127.0.0.1) hides the vendor hostname. Older callers
+// may omit AnthropicConfig.Provider, so URL inference remains a compatibility
+// fallback only when no explicit provider identity is available.
+func (c *AnthropicClient) isProvider(want string) bool {
+	provider := strings.ToLower(strings.TrimSpace(c.config.Provider))
+	if provider != "" {
+		return provider == want
+	}
+	base := strings.ToLower(c.config.BaseURL)
+	switch want {
+	case "glm":
+		return strings.Contains(base, "api.z.ai") || strings.Contains(base, "bigmodel.cn")
+	case "minimax":
+		return strings.Contains(base, "minimax")
+	case "kimi":
+		return strings.Contains(base, "api.kimi.com") || strings.Contains(base, "moonshot")
+	case "deepseek":
+		return strings.Contains(base, "api.deepseek.com")
+	default:
+		return false
+	}
 }
 
 // applyCacheControl injects cache_control markers into the request body
@@ -563,11 +585,10 @@ func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*gen
 	// Same gateway-specific auth swap as the main request path — keep in
 	// sync with sendRequest() below. Kimi Coding Plan is Bearer-only,
 	// MiniMax + Z.AI/GLM accept Bearer alongside x-api-key.
-	if strings.Contains(c.config.BaseURL, "api.z.ai") || strings.Contains(c.config.BaseURL, "bigmodel.cn") ||
-		strings.Contains(c.config.BaseURL, "minimax") {
+	if c.isProvider("glm") || c.isProvider("minimax") {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	if strings.Contains(c.config.BaseURL, "api.kimi.com") {
+	if c.isProvider("kimi") {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Del("x-api-key")
 	}
@@ -1264,19 +1285,19 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	req.Header.Set("anthropic-version", "2023-06-01")
 
 	// Z.AI / BigModel accept both x-api-key and Authorization: Bearer
-	if strings.Contains(c.config.BaseURL, "api.z.ai") || strings.Contains(c.config.BaseURL, "bigmodel.cn") {
+	if c.isProvider("glm") {
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 	}
 
 	// MiniMax uses Bearer token authentication
-	if strings.Contains(c.config.BaseURL, "minimax") {
+	if c.isProvider("minimax") {
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 	}
 
 	// Kimi Coding Plan (api.kimi.com) expects Bearer-only. Drop the
 	// x-api-key header to avoid confusing gateways that reject requests
 	// with both header styles.
-	if strings.Contains(c.config.BaseURL, "api.kimi.com") {
+	if c.isProvider("kimi") {
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 		req.Header.Del("x-api-key")
 	}
@@ -2431,15 +2452,14 @@ func hasSerializableAssistantParts(parts []*genai.Part) bool {
 func (c *AnthropicClient) requiresThinkingReplay() bool {
 	c.mu.RLock()
 	enableThinking := c.config.EnableThinking
-	base := c.config.BaseURL
 	c.mu.RUnlock()
 	if !enableThinking {
 		return false
 	}
-	if base == DefaultAnthropicBaseURL || base == "" {
+	if c.config.BaseURL == DefaultAnthropicBaseURL || c.config.BaseURL == "" {
 		return true
 	}
-	return strings.Contains(base, "api.deepseek.com")
+	return c.isProvider("deepseek")
 }
 
 // canSerialiseAssistantForProvider tightens hasSerializableAssistantParts
