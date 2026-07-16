@@ -3393,12 +3393,25 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if m.observatoryPanel != nil {
 			m.observatoryPanel.UpdateHealth(msg)
 		}
-		// Sync the main tokenUsage so the status bar and progress bar show the active context
+		// Sync the main tokenUsage so the status bar and progress bar show the
+		// active context — but PRESERVE the live-streaming fields. This message
+		// arrives right behind every TokenUsageMsg (sendTokenUsageUpdate sends
+		// both), and rebuilding the struct from scratch erased IsEstimate (the
+		// ≈ marker went exact-looking for an estimated number) and OutputTokens
+		// (the projected "+N" band vanished mid-stream on every between-rounds
+		// refresh) — v0.100.90.
+		wasEstimate := m.tokenUsage != nil && m.tokenUsage.IsEstimate
+		outputTokens := 0
+		if m.tokenUsage != nil {
+			outputTokens = m.tokenUsage.OutputTokens
+		}
 		m.tokenUsage = &TokenUsageMsg{
-			Tokens:      msg.TotalTokens,
-			MaxTokens:   msg.MaxTokens,
-			PercentUsed: msg.PercentUsed,
-			NearLimit:   msg.PercentUsed >= 0.80,
+			Tokens:       msg.TotalTokens,
+			MaxTokens:    msg.MaxTokens,
+			PercentUsed:  msg.PercentUsed,
+			NearLimit:    msg.PercentUsed >= 0.80,
+			IsEstimate:   wasEstimate,
+			OutputTokens: outputTokens,
 		}
 		m.baseTokenCount = msg.TotalTokens
 		return nil

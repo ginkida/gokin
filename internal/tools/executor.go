@@ -474,7 +474,10 @@ type ExecutionHandler struct {
 	// OnLoopIteration is called at the start of each executor loop iteration (from 2nd onwards).
 	OnLoopIteration func(iteration int, totalToolsUsed int)
 
-	// OnTokenUpdate is called when the streaming response provides token usage from the API.
+	// OnTokenUpdate is called when the streaming response provides token usage
+	// from the API. inputTokens is the FULL prompt-side context including
+	// cache-read/creation tokens (see client.StreamHandler.OnTokenUpdate) —
+	// suitable for context-usage display, not for billing.
 	OnTokenUpdate func(inputTokens, outputTokens int)
 
 	// OnFilePeek is called to show a transient high-resolution snippet of a file.
@@ -495,7 +498,7 @@ type ExecutionHandler struct {
 type RetrySafetyEventKind string
 
 const (
-	RetrySafetyDuplicateReused RetrySafetyEventKind = "duplicate_side_effect_reused"
+	RetrySafetyDuplicateReused  RetrySafetyEventKind = "duplicate_side_effect_reused"
 	RetrySafetyCheckpointReplay RetrySafetyEventKind = "checkpoint_replayed"
 	RetrySafetyDivergentBlocked RetrySafetyEventKind = "divergent_side_effect_blocked"
 )

@@ -21,6 +21,9 @@ type StreamHandler struct {
 	OnError func(err error)
 
 	// OnTokenUpdate is called when the stream provides token usage metadata.
+	// inputTokens is the FULL prompt-side context (input_tokens +
+	// cache_read_input_tokens + cache_creation_input_tokens) — the number a
+	// context-usage display needs — NOT the cache-exclusive billed input.
 	OnTokenUpdate func(inputTokens, outputTokens int)
 
 	// OnRateLimit is called when the stream provides rate limit metadata.
@@ -101,15 +104,15 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 			}
 
 			// Keep the latest non-zero usage metadata (typically from the final chunk).
-			// All providers report cumulative totals, not per-chunk deltas.
+			// All providers report cumulative totals, not per-chunk deltas. Cache
+			// fields must be captured BEFORE the OnTokenUpdate callback below —
+			// message_start delivers input_tokens and cache_read_input_tokens in
+			// the SAME chunk, and the callback needs both.
 			if chunk.InputTokens > 0 {
 				resp.InputTokens = chunk.InputTokens
 			}
 			if chunk.OutputTokens > 0 {
 				resp.OutputTokens = chunk.OutputTokens
-			}
-			if handler.OnTokenUpdate != nil && (chunk.InputTokens > 0 || chunk.OutputTokens > 0) {
-				handler.OnTokenUpdate(resp.InputTokens, resp.OutputTokens)
 			}
 			if chunk.CacheReadInputTokens > 0 {
 				resp.CacheReadInputTokens = chunk.CacheReadInputTokens
@@ -119,6 +122,21 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 				// this, cache-creation token accounting on the executor + agent
 				// stream paths stays permanently 0.
 				resp.CacheCreationInputTokens = chunk.CacheCreationInputTokens
+			}
+			if handler.OnTokenUpdate != nil && (chunk.InputTokens > 0 || chunk.OutputTokens > 0) {
+				// Report the FULL prompt-side context, not the billed remainder:
+				// caching providers (glm/deepseek/kimi/anthropic) report
+				// input_tokens EXCLUSIVE of cache_read/cache_creation — on a warm
+				// prefix cache input_tokens collapses to the uncached tail (the
+				// documented glm probe: 2848 → 32 with cache_read=2816), so
+				// passing it alone made the live context bar and
+				// ContextManager.ObserveAPIUsage authoritatively adopt a number
+				// ~100× smaller than the real context mid-turn (v0.100.90).
+				// Billing paths deliberately do NOT use this callback — they read
+				// resp.InputTokens/CacheReadInputTokens directly.
+				handler.OnTokenUpdate(
+					resp.InputTokens+resp.CacheReadInputTokens+resp.CacheCreationInputTokens,
+					resp.OutputTokens)
 			}
 			if chunk.RateLimit != nil {
 				resp.RateLimit = chunk.RateLimit
