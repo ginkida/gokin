@@ -84,7 +84,10 @@ func TestDebouncedSaveUsesOwnedImmutableSnapshot(t *testing.T) {
 	wg.Wait()
 
 	var first []*Entry
-	deadline := time.Now().Add(3 * time.Second)
+	// A full ./... race run can leave this disk write competing with dozens of
+	// instrumented packages. Passing runs exit the poll immediately; the long
+	// ceiling only prevents scheduler load from becoming a false negative.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(store.storagePath())
 		if err == nil && json.Unmarshal(data, &first) == nil && len(first) == 1 {

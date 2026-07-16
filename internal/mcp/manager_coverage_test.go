@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -110,9 +111,10 @@ func TestManager_Disconnect(t *testing.T) {
 
 func TestManager_SetHealthChangeCallback(t *testing.T) {
 	mgr := NewManager(nil)
-	var called bool
+	called := make(chan struct{})
+	var once sync.Once
 	mgr.SetHealthChangeCallback(func(name string, healthy bool) {
-		called = true
+		once.Do(func() { close(called) })
 	})
 	if mgr.onHealthChange == nil {
 		t.Fatal("expected callback to be set")
@@ -131,8 +133,9 @@ func TestManager_SetHealthChangeCallback(t *testing.T) {
 	mgr.mu.Unlock()
 
 	mgr.CheckHealth(context.Background())
-	time.Sleep(50 * time.Millisecond) // callback fires in goroutine
-	if !called {
+	select {
+	case <-called:
+	case <-time.After(3 * time.Second):
 		t.Fatal("expected health change callback to fire")
 	}
 }
