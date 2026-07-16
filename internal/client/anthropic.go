@@ -1857,11 +1857,21 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 			var args map[string]any
 			if inputJSON != "" {
 				if err := json.Unmarshal([]byte(inputJSON), &args); err != nil {
+					toolName := acc.currentToolName
 					logging.Error("tool args JSON unmarshal failed",
 						"error", err,
-						"tool", acc.currentToolName,
-						"json", inputJSON)
-					args = make(map[string]any)
+						"tool", toolName,
+						"json_length", len(inputJSON))
+					// Never turn a truncated or malformed mutation request into an
+					// executable call with empty arguments. Surface a retryable
+					// stream error so the whole model round is replayed safely.
+					acc.currentToolID = ""
+					acc.currentToolName = ""
+					acc.currentToolInput.Reset()
+					acc.currentBlockType = ""
+					chunk.Error = fmt.Errorf("malformed streamed input for tool %q: %v: %w", toolName, err, io.ErrUnexpectedEOF)
+					chunk.Done = true
+					return chunk
 				}
 			} else {
 				logging.Warn("tool call received with empty input JSON",

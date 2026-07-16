@@ -23,6 +23,7 @@ type fakeFallbackClientStub struct {
 	tools       []*genai.Tool
 	thinkBudget int32
 	statusCB    StatusCallback
+	sendCalls   int
 }
 
 func (f *fakeFallbackClientStub) Close() error                  { f.closed = true; return nil }
@@ -38,12 +39,15 @@ func (f *fakeFallbackClientStub) WithModel(m string) Client {
 }
 func (f *fakeFallbackClientStub) GetRawClient() any { return nil }
 func (f *fakeFallbackClientStub) SendMessage(_ context.Context, _ string) (*StreamingResponse, error) {
+	f.sendCalls++
 	return f.sendResp, f.sendErr
 }
 func (f *fakeFallbackClientStub) SendMessageWithHistory(_ context.Context, _ []*genai.Content, _ string) (*StreamingResponse, error) {
+	f.sendCalls++
 	return f.sendResp, f.sendErr
 }
 func (f *fakeFallbackClientStub) SendFunctionResponse(_ context.Context, _ []*genai.Content, _ []*genai.FunctionResponse) (*StreamingResponse, error) {
+	f.sendCalls++
 	return f.sendResp, f.sendErr
 }
 func (f *fakeFallbackClientStub) CountTokens(_ context.Context, _ []*genai.Content) (*genai.CountTokensResponse, error) {
@@ -262,6 +266,20 @@ func TestFallbackClient_WithModel(t *testing.T) {
 	}
 }
 
+func TestFallbackClient_WithModel_PreservesFallbackProviderModel(t *testing.T) {
+	c1 := &fakeFallbackClientStub{id: "a", model: "glm-5.2"}
+	c2 := &fakeFallbackClientStub{id: "b", model: "kimi-for-coding"}
+	fc, _ := NewFallbackClient([]Client{c1, c2}, []string{"glm", "kimi"})
+
+	got := fc.WithModel("glm-5.2").(*FallbackClient)
+	if got.clients[0].GetModel() != "glm-5.2" {
+		t.Fatalf("primary model = %q, want glm-5.2", got.clients[0].GetModel())
+	}
+	if got.clients[1].GetModel() != "kimi-for-coding" {
+		t.Fatalf("fallback model = %q, want provider-native model", got.clients[1].GetModel())
+	}
+}
+
 // ========== GetRawClient ==========
 
 func TestFallbackClient_GetRawClient(t *testing.T) {
@@ -357,6 +375,68 @@ func TestFallbackClient_SendMessage_CancelledContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error with cancelled context")
 	}
+}
+
+func TestFallbackClient_SendMessage_FailsOverOnEarlyStreamError(t *testing.T) {
+	primary := &fakeFallbackClientStub{id: "a", model: "glm-5.2", sendResp: fallbackTestStream(
+		ResponseChunk{RateLimit: &RateLimitMetadata{RequestsRemaining: 0}},
+		ResponseChunk{Error: errors.New("GLM 1305 overloaded"), Done: true},
+	)}
+	secondary := &fakeFallbackClientStub{id: "b", model: "kimi-for-coding", sendResp: fallbackTestStream(
+		ResponseChunk{Text: "fallback ok", Done: true, FinishReason: genai.FinishReasonStop},
+	)}
+	fc, _ := NewFallbackClient([]Client{primary, secondary}, []string{"test-fb-stream-0", "test-fb-stream-1"})
+
+	stream, err := fc.SendMessage(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	resp, err := ProcessStream(context.Background(), stream, &StreamHandler{})
+	if err != nil {
+		t.Fatalf("ProcessStream: %v", err)
+	}
+	if resp.Text != "fallback ok" {
+		t.Fatalf("Text = %q, want fallback response", resp.Text)
+	}
+	if secondary.sendCalls != 1 || fc.getCurrent() != 1 {
+		t.Fatalf("secondary calls/current = %d/%d, want 1/1", secondary.sendCalls, fc.getCurrent())
+	}
+}
+
+func TestFallbackClient_SendMessage_DoesNotReplayAfterContentCommitted(t *testing.T) {
+	primaryErr := errors.New("stream broke after content")
+	primary := &fakeFallbackClientStub{id: "a", sendResp: fallbackTestStream(
+		ResponseChunk{Text: "partial"},
+		ResponseChunk{Error: primaryErr, Done: true},
+	)}
+	secondary := &fakeFallbackClientStub{id: "b", sendResp: fallbackTestStream(
+		ResponseChunk{Text: "would duplicate", Done: true},
+	)}
+	fc, _ := NewFallbackClient([]Client{primary, secondary}, []string{"test-fb-commit-0", "test-fb-commit-1"})
+
+	stream, err := fc.SendMessage(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	resp, err := ProcessStream(context.Background(), stream, &StreamHandler{})
+	if !errors.Is(err, primaryErr) {
+		t.Fatalf("ProcessStream error = %v, want %v", err, primaryErr)
+	}
+	if resp == nil || resp.Text != "partial" {
+		t.Fatalf("partial response = %#v", resp)
+	}
+	if secondary.sendCalls != 0 {
+		t.Fatalf("secondary was called %d times after content was committed", secondary.sendCalls)
+	}
+}
+
+func fallbackTestStream(chunks ...ResponseChunk) *StreamingResponse {
+	ch := make(chan ResponseChunk, len(chunks))
+	for _, chunk := range chunks {
+		ch <- chunk
+	}
+	close(ch)
+	return &StreamingResponse{Chunks: ch}
 }
 
 // ========== SendMessageWithHistory failover ==========

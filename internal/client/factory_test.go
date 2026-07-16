@@ -6,6 +6,25 @@ import (
 	"gokin/internal/config"
 )
 
+func TestFallbackModelForProvider_UsesProviderNativeDefaults(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     string
+	}{
+		{provider: "glm", want: "glm-5.2"},
+		{provider: "kimi", want: "kimi-for-coding"},
+		{provider: "minimax", want: "MiniMax-M2.7"},
+		{provider: "deepseek", want: "deepseek-v4-pro"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			if got := fallbackModelForProvider("glm", tt.provider, "glm-5.2"); got != tt.want {
+				t.Fatalf("model = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestSupportsKimiThinking pins the model-prefix match used to auto-enable
 // Extended Thinking for Kimi Coding Plan. Drift here silently turns off
 // thinking for every user, so the cases are explicit.

@@ -1,6 +1,10 @@
 package client
 
-import "testing"
+import (
+	"errors"
+	"io"
+	"testing"
+)
 
 func TestProcessStreamEvent_ToolUseStartCarriesInput(t *testing.T) {
 	c := &AnthropicClient{}
@@ -101,5 +105,34 @@ func TestProcessStreamEvent_ToolUseDeltaWithoutTypeCarriesPartialJSON(t *testing
 	}
 	if call.Args["command"] != "go test ./internal/client" {
 		t.Fatalf("command arg = %#v", call.Args["command"])
+	}
+}
+
+func TestProcessStreamEvent_MalformedToolInputFailsClosed(t *testing.T) {
+	c := &AnthropicClient{}
+	acc := &toolCallAccumulator{}
+
+	c.processStreamEvent(map[string]any{
+		"type": "content_block_start",
+		"content_block": map[string]any{
+			"type": "tool_use",
+			"id":   "call_bad",
+			"name": "edit",
+		},
+	}, acc)
+	c.processStreamEvent(map[string]any{
+		"type":  "content_block_delta",
+		"delta": map[string]any{"type": "input_json_delta", "partial_json": `{"file_path":"main.go"`},
+	}, acc)
+	chunk := c.processStreamEvent(map[string]any{"type": "content_block_stop"}, acc)
+
+	if !chunk.Done || !errors.Is(chunk.Error, io.ErrUnexpectedEOF) {
+		t.Fatalf("chunk error/done = %v/%v, want retryable malformed-stream failure", chunk.Error, chunk.Done)
+	}
+	if len(acc.completedCalls) != 0 || len(chunk.FunctionCalls) != 0 {
+		t.Fatalf("malformed tool input escaped as executable call: acc=%#v chunk=%#v", acc.completedCalls, chunk.FunctionCalls)
+	}
+	if acc.currentToolID != "" || acc.currentToolName != "" || acc.currentToolInput.Len() != 0 {
+		t.Fatalf("tool accumulator was not reset after malformed input: %#v", acc)
 	}
 }

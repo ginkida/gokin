@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"gokin/internal/config"
 	"gokin/internal/logging"
 
 	"google.golang.org/genai"
@@ -51,9 +52,13 @@ func (fc *FallbackClient) getCurrent() int {
 
 // resetCurrent resets back to the first client.
 func (fc *FallbackClient) resetCurrent() {
+	fc.setCurrent(0)
+}
+
+func (fc *FallbackClient) setCurrent(index int) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
-	fc.current = 0
+	fc.current = index
 }
 
 // ResetFallbackPosition resets the fallback chain to start from the first provider.
@@ -64,103 +69,205 @@ func (fc *FallbackClient) ResetFallbackPosition() {
 
 // SendMessage sends a message, trying fallback clients on error.
 func (fc *FallbackClient) SendMessage(ctx context.Context, message string) (*StreamingResponse, error) {
-	startIdx := fc.getCurrent()
-	for i := startIdx; i < len(fc.clients); i++ {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		resp, err := fc.clients[i].SendMessage(ctx, message)
-		if err == nil {
-			fc.mu.Lock()
-			fc.current = i
-			fc.mu.Unlock()
-			recordProviderSuccess(fc.providerAt(i))
-			return resp, nil
-		}
-		recordProviderFailure(fc.providerAt(i), IsRetryableError(err))
-
-		logging.Warn("client failed in SendMessage",
-			"index", i,
-			"model", fc.clients[i].GetModel(),
-			"error", err.Error())
-
-		// If context is cancelled, don't try next client
-		if ctx.Err() != nil {
-			return nil, err
-		}
-
-		// If this is the last client, return the error
-		if i+1 >= len(fc.clients) {
-			return nil, fmt.Errorf("all fallback clients failed, last error: %w", err)
-		}
-	}
-	return nil, fmt.Errorf("all fallback clients exhausted")
+	return fc.sendWithFallback(ctx, "SendMessage", func(c Client) (*StreamingResponse, error) {
+		return c.SendMessage(ctx, message)
+	})
 }
 
 // SendMessageWithHistory sends a message with history, trying fallback clients on error.
 func (fc *FallbackClient) SendMessageWithHistory(ctx context.Context, history []*genai.Content, message string) (*StreamingResponse, error) {
-	startIdx := fc.getCurrent()
-	for i := startIdx; i < len(fc.clients); i++ {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		resp, err := fc.clients[i].SendMessageWithHistory(ctx, history, message)
-		if err == nil {
-			fc.mu.Lock()
-			fc.current = i
-			fc.mu.Unlock()
-			recordProviderSuccess(fc.providerAt(i))
-			return resp, nil
-		}
-		recordProviderFailure(fc.providerAt(i), IsRetryableError(err))
-
-		logging.Warn("client failed in SendMessageWithHistory",
-			"index", i,
-			"model", fc.clients[i].GetModel(),
-			"error", err.Error())
-
-		if ctx.Err() != nil {
-			return nil, err
-		}
-
-		if i+1 >= len(fc.clients) {
-			return nil, fmt.Errorf("all fallback clients failed, last error: %w", err)
-		}
-	}
-	return nil, fmt.Errorf("all fallback clients exhausted")
+	return fc.sendWithFallback(ctx, "SendMessageWithHistory", func(c Client) (*StreamingResponse, error) {
+		return c.SendMessageWithHistory(ctx, history, message)
+	})
 }
 
 // SendFunctionResponse sends function results, trying fallback clients on error.
 func (fc *FallbackClient) SendFunctionResponse(ctx context.Context, history []*genai.Content, results []*genai.FunctionResponse) (*StreamingResponse, error) {
+	return fc.sendWithFallback(ctx, "SendFunctionResponse", func(c Client) (*StreamingResponse, error) {
+		return c.SendFunctionResponse(ctx, history, results)
+	})
+}
+
+type fallbackSend func(Client) (*StreamingResponse, error)
+
+// sendWithFallback handles both request-time failures and errors delivered by
+// a provider after the HTTP request has already upgraded to an SSE stream.
+// A stream is only committed once meaningful assistant content has been
+// forwarded; before that point it is safe to transparently switch providers.
+func (fc *FallbackClient) sendWithFallback(ctx context.Context, operation string, send fallbackSend) (*StreamingResponse, error) {
 	startIdx := fc.getCurrent()
+	var lastErr error
 	for i := startIdx; i < len(fc.clients); i++ {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, ContextErr(ctx)
 		}
-		resp, err := fc.clients[i].SendFunctionResponse(ctx, history, results)
-		if err == nil {
-			fc.mu.Lock()
-			fc.current = i
-			fc.mu.Unlock()
-			recordProviderSuccess(fc.providerAt(i))
-			return resp, nil
+		resp, err := send(fc.clients[i])
+		if err == nil && resp == nil {
+			err = fmt.Errorf("provider returned a nil streaming response")
 		}
-		recordProviderFailure(fc.providerAt(i), IsRetryableError(err))
-
-		logging.Warn("client failed in SendFunctionResponse",
-			"index", i,
-			"model", fc.clients[i].GetModel(),
-			"error", err.Error())
-
-		if ctx.Err() != nil {
-			return nil, err
+		if err != nil {
+			lastErr = err
+			fc.recordFailure(operation, i, err)
+			if ctx.Err() != nil {
+				return nil, ContextErr(ctx)
+			}
+			continue
 		}
 
-		if i+1 >= len(fc.clients) {
-			return nil, fmt.Errorf("all fallback clients failed, last error: %w", err)
-		}
+		fc.setCurrent(i)
+		return fc.proxyStream(ctx, operation, i, resp, send), nil
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("all fallback clients failed, last error: %w", lastErr)
 	}
 	return nil, fmt.Errorf("all fallback clients exhausted")
+}
+
+func (fc *FallbackClient) recordFailure(operation string, index int, err error) {
+	recordProviderFailure(fc.providerAt(index), IsRetryableError(err))
+	logging.Warn("client failed in "+operation,
+		"index", index,
+		"provider", fc.providerAt(index),
+		"model", fc.clients[index].GetModel(),
+		"error", err.Error())
+}
+
+func (fc *FallbackClient) proxyStream(
+	ctx context.Context,
+	operation string,
+	startIndex int,
+	first *StreamingResponse,
+	send fallbackSend,
+) *StreamingResponse {
+	chunks := make(chan ResponseChunk, 16)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(chunks)
+		defer close(done)
+
+		index := startIndex
+		stream := first
+		for {
+			committed, err := forwardFallbackCandidate(ctx, stream, chunks)
+			if err == nil {
+				fc.setCurrent(index)
+				recordProviderSuccess(fc.providerAt(index))
+				return
+			}
+
+			fc.recordFailure(operation+" stream", index, err)
+			if committed || ctx.Err() != nil {
+				emitFallbackError(ctx, chunks, err)
+				return
+			}
+
+			var next *StreamingResponse
+			for index++; index < len(fc.clients); index++ {
+				if ctx.Err() != nil {
+					emitFallbackError(ctx, chunks, ContextErr(ctx))
+					return
+				}
+				candidate, sendErr := send(fc.clients[index])
+				if sendErr == nil && candidate == nil {
+					sendErr = fmt.Errorf("provider returned a nil streaming response")
+				}
+				if sendErr != nil {
+					fc.recordFailure(operation, index, sendErr)
+					err = sendErr
+					continue
+				}
+				next = candidate
+				fc.setCurrent(index)
+				break
+			}
+
+			if next == nil {
+				emitFallbackError(ctx, chunks, fmt.Errorf("all fallback clients failed, last error: %w", err))
+				return
+			}
+			stream = next
+		}
+	}()
+
+	return &StreamingResponse{Chunks: chunks, Done: done}
+}
+
+// forwardFallbackCandidate forwards one provider stream. Non-content metadata
+// is held until the first meaningful chunk, so an early SSE error can be
+// discarded cleanly when the next provider is tried.
+func forwardFallbackCandidate(ctx context.Context, stream *StreamingResponse, out chan<- ResponseChunk) (committed bool, err error) {
+	if stream == nil || stream.Chunks == nil {
+		return false, nil
+	}
+
+	pending := make([]ResponseChunk, 0, 2)
+	for {
+		select {
+		case <-ctx.Done():
+			return committed, ContextErr(ctx)
+		case chunk, ok := <-stream.Chunks:
+			if !ok {
+				if !committed {
+					if err := forwardFallbackChunks(ctx, out, pending); err != nil {
+						return false, err
+					}
+				}
+				return committed, nil
+			}
+			if chunk.Error != nil {
+				return committed, chunk.Error
+			}
+
+			meaningful := chunk.Text != "" || chunk.Thinking != "" ||
+				len(chunk.FunctionCalls) > 0 || len(chunk.Parts) > 0
+			if !committed && !meaningful && !chunk.Done {
+				pending = append(pending, chunk)
+				continue
+			}
+			if !committed {
+				if err := forwardFallbackChunks(ctx, out, pending); err != nil {
+					return false, err
+				}
+				pending = nil
+				committed = meaningful
+			}
+			if err := forwardFallbackChunk(ctx, out, chunk); err != nil {
+				return committed, err
+			}
+			if chunk.Done {
+				return committed, nil
+			}
+		}
+	}
+}
+
+func forwardFallbackChunks(ctx context.Context, out chan<- ResponseChunk, chunks []ResponseChunk) error {
+	for _, chunk := range chunks {
+		if err := forwardFallbackChunk(ctx, out, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func forwardFallbackChunk(ctx context.Context, out chan<- ResponseChunk, chunk ResponseChunk) error {
+	select {
+	case <-ctx.Done():
+		return ContextErr(ctx)
+	case out <- chunk:
+		return nil
+	}
+}
+
+func emitFallbackError(ctx context.Context, out chan<- ResponseChunk, err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case out <- ResponseChunk{Error: err, Done: true}:
+	case <-ctx.Done():
+	}
 }
 
 // SetSystemInstruction sets the system-level instruction on ALL clients in the fallback chain.
@@ -267,14 +374,28 @@ func (fc *FallbackClient) SetModel(modelName string) {
 	fc.clients[idx].SetModel(modelName)
 }
 
-// WithModel returns a new FallbackClient with all clients configured for the specified model.
-// Preserves the fallback chain so failover continues to work.
+// WithModel returns a new FallbackClient with the provider matching the model
+// configured for it. Other providers retain their own model names; sending a
+// GLM model ID to Kimi or MiniMax makes a nominal fallback fail deterministically.
 func (fc *FallbackClient) WithModel(modelName string) Client {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
+	targetIndex := fc.current
+	if targetProvider := config.DetectKnownProviderFromModel(modelName); targetProvider != "" {
+		for i := range fc.clients {
+			if fc.providerAt(i) == targetProvider {
+				targetIndex = i
+				break
+			}
+		}
+	}
 	newClients := make([]Client, len(fc.clients))
 	for i, c := range fc.clients {
-		newClients[i] = c.WithModel(modelName)
+		model := c.GetModel()
+		if i == targetIndex {
+			model = modelName
+		}
+		newClients[i] = c.WithModel(model)
 	}
 	newProviders := make([]string, len(fc.providers))
 	copy(newProviders, fc.providers)
@@ -283,6 +404,7 @@ func (fc *FallbackClient) WithModel(modelName string) Client {
 		logging.Debug("FallbackClient.WithModel: NewFallbackClient failed", "error", err)
 		return fc.clients[fc.current].WithModel(modelName)
 	}
+	fb.setCurrent(targetIndex)
 	return fb
 }
 

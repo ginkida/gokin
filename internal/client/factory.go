@@ -158,7 +158,8 @@ func newFallbackClientFromConfig(ctx context.Context, cfg *config.Config, primar
 
 	// Create clients in health-prioritized order.
 	for _, provider := range orderedProviders {
-		c, err := getOrCreateClient(ctx, cfg, provider, modelID)
+		providerModel := fallbackModelForProvider(primaryProvider, provider, modelID)
+		c, err := getOrCreateClient(ctx, cfg, provider, providerModel)
 		if err != nil {
 			logging.Warn("failed to create fallback chain client",
 				"provider", provider,
@@ -174,6 +175,20 @@ func newFallbackClientFromConfig(ctx context.Context, cfg *config.Config, primar
 	}
 
 	return NewFallbackClient(clients, clientProviders)
+}
+
+// fallbackModelForProvider keeps the explicitly requested model on its primary
+// provider and uses each fallback provider's registered default everywhere
+// else. Provider APIs do not share model namespaces (for example, Kimi cannot
+// serve "glm-5.2").
+func fallbackModelForProvider(primaryProvider, provider, requestedModel string) string {
+	if strings.EqualFold(strings.TrimSpace(primaryProvider), strings.TrimSpace(provider)) {
+		return requestedModel
+	}
+	if def := config.GetProvider(strings.ToLower(strings.TrimSpace(provider))); def != nil && def.DefaultModel != "" {
+		return def.DefaultModel
+	}
+	return requestedModel
 }
 
 // getOrCreateClient retrieves a client from the pool or creates a new one.
