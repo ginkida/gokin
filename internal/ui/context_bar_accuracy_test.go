@@ -13,9 +13,14 @@ import (
 func TestContextHealthMsgPreservesEstimateAndStreamingOutput(t *testing.T) {
 	m := NewModel()
 
-	m.Update(TokenUsageMsg{Tokens: 56000, MaxTokens: 1_000_000, PercentUsed: 0.056, IsEstimate: true})
-	m.Update(StreamTokenUpdateMsg{EstimatedOutputTokens: 800})
-	m.Update(ContextHealthMsg{TotalTokens: 56200, MaxTokens: 1_000_000, PercentUsed: 0.0562})
+	// Model.Update is a value receiver — thread the returned model through.
+	apply := func(msg interface{}) {
+		updated, _ := m.Update(msg)
+		*m = updated.(Model)
+	}
+	apply(TokenUsageMsg{Tokens: 56000, MaxTokens: 1_000_000, PercentUsed: 0.056, IsEstimate: true})
+	apply(StreamTokenUpdateMsg{EstimatedOutputTokens: 800})
+	apply(ContextHealthMsg{TotalTokens: 56200, MaxTokens: 1_000_000, PercentUsed: 0.0562})
 
 	if m.tokenUsage == nil {
 		t.Fatal("tokenUsage dropped entirely")
