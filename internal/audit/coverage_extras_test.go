@@ -296,8 +296,11 @@ func TestSanitizeArgs_Nil(t *testing.T) {
 }
 
 func TestSanitizeArgs_RedactsSecrets(t *testing.T) {
-	// Use a value pattern the redactor is known to match (long hex/token-like)
-	args := map[string]any{"token": "ghp_1234567890abcdef1234567890abcdef", "command": "ls"}
+	// Use a value pattern the redactor is known to match (long hex/token-like).
+	// The literal is split so the fixture never looks like a real credential to
+	// GitHub Push Protection (the v0.100.77 rule: provider-shaped strings in
+	// tests are ALWAYS concatenated).
+	args := map[string]any{"token": "ghp_" + "1234567890abcdef1234567890abcdef", "command": "ls"}
 	sanitized := SanitizeArgs(args)
 	// The redactor masks known secret patterns; verify it returns a map
 	// with the same keys (values may or may not be redacted depending on pattern)
