@@ -54,7 +54,22 @@ func runSignalCancelLifecycleHelper(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("SIGINT did not cancel foreground context")
 	}
-	if got := a.pendingCount(); got != 0 {
-		t.Fatalf("SIGINT left %d queued request(s) to auto-start after explicit cancellation", got)
+	// cancelProcessing() calls a.processingCancel() (closing `cancelled` above)
+	// as the FIRST step of one synchronous, lock-held sequence — draining
+	// pendingQueue happens LATER in that same call, on the signal-handler
+	// goroutine. The moment `cancelled` closes, this goroutine can be
+	// scheduled onto a free core and observe pendingCount() BEFORE the
+	// signal-handler goroutine has continued past the drain step — a bounded
+	// poll (not a single-shot read) is required to avoid racing ahead of a
+	// still-in-flight but correct completion (v0.100.90, found via a CI-only
+	// flake: -race never flagged a data race, only this logic-timing gap).
+	deadline := time.Now().Add(time.Second)
+	for {
+		if got := a.pendingCount(); got == 0 {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("SIGINT left %d queued request(s) to auto-start after explicit cancellation", got)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
