@@ -112,15 +112,18 @@ func BuildChecks(reg ToolGetter, workDir string, userMessage string, toolsUsed [
 	var checks []Check
 	seen := make(map[string]bool)
 
-	if verifyTool, ok := reg.Get("verify_code"); ok {
-		checks = append(checks, Check{
-			Name:     "verify_code",
-			Evidence: doneGateCheckEvidence("verify_code", ""),
-			Run: func(ctx context.Context) (tools.ToolResult, error) {
-				return verifyTool.Execute(ctx, map[string]any{"path": workDir})
-			},
-		})
-		seen["verify_code"] = true
+	if verifyTarget, supported := doneGateVerifyCodeTarget(workDir, profile); supported {
+		verifyTool, ok := reg.Get("verify_code")
+		if ok {
+			checks = append(checks, Check{
+				Name:     "verify_code",
+				Evidence: doneGateCheckEvidence("verify_code", ""),
+				Run: func(ctx context.Context) (tools.ToolResult, error) {
+					return verifyTool.Execute(ctx, map[string]any{"path": verifyTarget})
+				},
+			})
+			seen["verify_code"] = true
+		}
 	}
 
 	// Stack-specific checks.
@@ -386,6 +389,173 @@ func BuildChecks(reg ToolGetter, workDir string, userMessage string, toolsUsed [
 	}
 
 	return checks
+}
+
+type doneGateVerifyTarget struct {
+	dir       string
+	supported bool
+}
+
+// doneGateVerifyCodeTarget returns the project directory that verify_code can
+// actually verify. VerifyCodeTool only supports Go, Rust, Node, and Python; the
+// done-gate also knows about Java, PHP, CMake, Bazel, and Make projects, so
+// invoking verify_code unconditionally made those projects fail with "Could not
+// detect project type".
+//
+// Touched paths narrow the choice in mixed workspaces. Project roots are matched
+// most-specific-first so, for example, a Java service nested under a root Go
+// module does not accidentally trigger a repository-wide Go build when only the
+// Java service changed.
+func doneGateVerifyCodeTarget(workDir string, profile Profile) (string, bool) {
+	root := strings.TrimSpace(workDir)
+	if root == "" {
+		root = strings.TrimSpace(profile.WorkDir)
+	}
+	if root != "" {
+		root = filepath.Clean(root)
+	}
+
+	targets := make([]doneGateVerifyTarget, 0,
+		len(profile.GoModules)+len(profile.RustModules)+len(profile.NodeProjects)+len(profile.PythonRoots)+
+			len(profile.JavaProjects)+len(profile.PHPProjects)+len(profile.CMakeProjects)+len(profile.BazelRoots)+len(profile.MakeProjects))
+	seen := make(map[string]bool)
+	addTarget := func(dir string, supported bool) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		if !filepath.IsAbs(dir) && root != "" {
+			dir = filepath.Join(root, dir)
+		}
+		dir = filepath.Clean(dir)
+		key := fmt.Sprintf("%t|%s", supported, dir)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		targets = append(targets, doneGateVerifyTarget{dir: dir, supported: supported})
+	}
+
+	for _, dir := range profile.GoModules {
+		addTarget(dir, true)
+	}
+	for _, dir := range profile.RustModules {
+		addTarget(dir, true)
+	}
+	for _, project := range profile.NodeProjects {
+		addTarget(project.Dir, true)
+	}
+	for _, dir := range profile.PythonRoots {
+		addTarget(dir, true)
+	}
+	for _, project := range profile.JavaProjects {
+		addTarget(project.Dir, false)
+	}
+	for _, project := range profile.PHPProjects {
+		addTarget(project.Dir, false)
+	}
+	for _, dir := range profile.CMakeProjects {
+		addTarget(dir, false)
+	}
+	for _, dir := range profile.BazelRoots {
+		addTarget(dir, false)
+	}
+	for _, dir := range profile.MakeProjects {
+		addTarget(dir, false)
+	}
+
+	if len(profile.TouchedPaths) == 0 {
+		for _, target := range targets {
+			if target.supported && root != "" && target.dir == root {
+				return target.dir, true
+			}
+		}
+		for _, target := range targets {
+			if target.supported {
+				return target.dir, true
+			}
+		}
+		return "", false
+	}
+
+	for _, touched := range profile.TouchedPaths {
+		absTouched := strings.TrimSpace(touched)
+		if absTouched == "" {
+			continue
+		}
+		if !filepath.IsAbs(absTouched) && root != "" {
+			absTouched = filepath.Join(root, filepath.FromSlash(absTouched))
+		}
+		absTouched = filepath.Clean(absTouched)
+
+		bestSupported, bestUnsupported := "", ""
+		bestSupportedDepth, bestUnsupportedDepth := -1, -1
+		for _, target := range targets {
+			if !pathWithinDir(target.dir, absTouched) {
+				continue
+			}
+			depth := doneGatePathSpecificity(target.dir)
+			if target.supported {
+				if depth > bestSupportedDepth {
+					bestSupported, bestSupportedDepth = target.dir, depth
+				}
+			} else if depth > bestUnsupportedDepth {
+				bestUnsupported, bestUnsupportedDepth = target.dir, depth
+			}
+		}
+
+		supportedHint, hintKnown := doneGateTouchedPathVerifySupport(absTouched)
+		if hintKnown && !supportedHint {
+			continue
+		}
+		if bestSupported != "" && bestSupportedDepth > bestUnsupportedDepth {
+			return bestSupported, true
+		}
+		if hintKnown && supportedHint && bestSupported != "" && bestSupportedDepth == bestUnsupportedDepth {
+			return bestSupported, true
+		}
+		if hintKnown && supportedHint && bestSupported == "" && bestUnsupported == "" {
+			return filepath.Dir(absTouched), true
+		}
+	}
+
+	return "", false
+}
+
+func doneGatePathSpecificity(path string) int {
+	path = filepath.Clean(path)
+	volume := filepath.VolumeName(path)
+	path = strings.TrimPrefix(path, volume)
+	path = strings.Trim(path, string(filepath.Separator))
+	if path == "" {
+		return 0
+	}
+	return strings.Count(path, string(filepath.Separator)) + 1
+}
+
+// doneGateTouchedPathVerifySupport recognizes files that unambiguously belong
+// to a stack VerifyCodeTool either supports or deliberately does not support.
+// Unknown files (README, YAML, etc.) inherit the nearest project root.
+func doneGateTouchedPathVerifySupport(path string) (supported, known bool) {
+	base := strings.ToLower(filepath.Base(path))
+	switch base {
+	case "go.mod", "go.sum", "cargo.toml", "package.json", "package-lock.json", "npm-shrinkwrap.json",
+		"pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "requirements.txt", "pyproject.toml", "setup.py":
+		return true, true
+	case "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew",
+		"composer.json", "cmakelists.txt", "makefile", "gnumakefile", "build", "build.bazel", "workspace",
+		"workspace.bazel", "module.bazel":
+		return false, true
+	}
+
+	switch strings.ToLower(filepath.Ext(base)) {
+	case ".go", ".rs", ".js", ".jsx", ".ts", ".tsx", ".py":
+		return true, true
+	case ".java", ".kt", ".kts", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".bzl":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func appendUniqueDoneGateCheck(checks []Check, seen map[string]bool, check Check) []Check {

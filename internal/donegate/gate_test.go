@@ -14,7 +14,8 @@ import (
 )
 
 type doneGateStubTool struct {
-	name string
+	name     string
+	lastArgs map[string]any
 }
 
 func (t *doneGateStubTool) Name() string { return t.name }
@@ -28,6 +29,7 @@ func (t *doneGateStubTool) Declaration() *genai.FunctionDeclaration {
 func (t *doneGateStubTool) Validate(args map[string]any) error { return nil }
 
 func (t *doneGateStubTool) Execute(ctx context.Context, args map[string]any) (tools.ToolResult, error) {
+	t.lastArgs = args
 	return tools.NewSuccessResult("ok"), nil
 }
 
@@ -170,7 +172,10 @@ func TestBuildDoneGateChecks_VerifyCodeUsesReadableEvidence(t *testing.T) {
 		t.Fatalf("Register(verify_code) error = %v", err)
 	}
 
-	checks := BuildChecks(registry, "", "fix bug", []string{"edit"}, Profile{}, Policy{
+	checks := BuildChecks(registry, "/repo", "fix bug", []string{"edit"}, Profile{
+		WorkDir:   "/repo",
+		GoModules: []string{"/repo"},
+	}, Policy{
 		Enabled: true,
 		Mode:    "strict",
 	})
@@ -186,6 +191,133 @@ func TestBuildDoneGateChecks_VerifyCodeUsesReadableEvidence(t *testing.T) {
 	if got := doneGateCheckDisplayName(checks[0]); got != "verify code" {
 		t.Fatalf("display name = %q, want verify code", got)
 	}
+}
+
+func TestBuildDoneGateChecks_SkipsVerifyCodeForUnsupportedProjects(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name    string
+		profile Profile
+	}{
+		{
+			name: "java",
+			profile: Profile{
+				WorkDir:      dir,
+				JavaProjects: []JavaProject{{Dir: dir, Runner: "maven"}},
+				TouchedPaths: []string{"src/Main.java"},
+			},
+		},
+		{
+			name: "php",
+			profile: Profile{
+				WorkDir:      dir,
+				PHPProjects:  []PHPProject{{Dir: dir}},
+				TouchedPaths: []string{"src/App.php"},
+			},
+		},
+		{
+			name: "cmake",
+			profile: Profile{
+				WorkDir:       dir,
+				CMakeProjects: []string{dir},
+				TouchedPaths:  []string{"src/main.cpp"},
+			},
+		},
+		{
+			name: "bazel",
+			profile: Profile{
+				WorkDir:      dir,
+				BazelRoots:   []string{dir},
+				TouchedPaths: []string{"BUILD.bazel"},
+			},
+		},
+		{
+			name: "make",
+			profile: Profile{
+				WorkDir:      dir,
+				MakeProjects: []string{dir},
+				TouchedPaths: []string{"Makefile"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := tools.NewRegistry()
+			if err := registry.Register(&doneGateStubTool{name: "verify_code"}); err != nil {
+				t.Fatalf("Register(verify_code) error = %v", err)
+			}
+
+			checks := BuildChecks(registry, dir, "fix project", []string{"edit"}, tc.profile, Policy{Enabled: true, Mode: "strict"})
+			for _, check := range checks {
+				if check.Name == "verify_code" {
+					t.Fatalf("unsupported %s profile unexpectedly added verify_code", tc.name)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildDoneGateChecks_MixedMonorepoSkipsUnrelatedSupportedStack(t *testing.T) {
+	dir := t.TempDir()
+	javaDir := filepath.Join(dir, "services", "java-api")
+	registry := tools.NewRegistry()
+	if err := registry.Register(&doneGateStubTool{name: "verify_code"}); err != nil {
+		t.Fatalf("Register(verify_code) error = %v", err)
+	}
+
+	profile := Profile{
+		WorkDir:      dir,
+		GoModules:    []string{dir}, // A root module contains every workspace path.
+		JavaProjects: []JavaProject{{Dir: javaDir, Runner: "maven"}},
+		TouchedPaths: []string{"services/java-api/src/Main.java"},
+		Monorepo:     true,
+	}
+	checks := BuildChecks(registry, dir, "fix java service", []string{"edit"}, profile, Policy{Enabled: true, Mode: "strict"})
+	for _, check := range checks {
+		if check.Name == "verify_code" {
+			t.Fatal("Java-only touch selected the unrelated root Go module for verify_code")
+		}
+	}
+}
+
+func TestBuildDoneGateChecks_MixedMonorepoTargetsTouchedSupportedStack(t *testing.T) {
+	dir := t.TempDir()
+	nodeDir := filepath.Join(dir, "web")
+	verify := &doneGateStubTool{name: "verify_code"}
+	registry := tools.NewRegistry()
+	if err := registry.Register(verify); err != nil {
+		t.Fatalf("Register(verify_code) error = %v", err)
+	}
+
+	profile := Profile{
+		WorkDir:   dir,
+		GoModules: []string{dir},
+		NodeProjects: []NodeProject{{
+			Dir:    nodeDir,
+			Runner: "npm",
+		}},
+		TouchedPaths: []string{"web/src/app.ts"},
+		Monorepo:     true,
+	}
+	checks := BuildChecks(registry, dir, "fix web app", []string{"edit"}, profile, Policy{Enabled: true, Mode: "strict"})
+	if len(checks) != 1 || checks[0].Name != "verify_code" {
+		t.Fatalf("checks = %v, want one verify_code check", checkNames(checks))
+	}
+	if _, err := checks[0].Run(context.Background()); err != nil {
+		t.Fatalf("verify_code check error = %v", err)
+	}
+	if got, _ := verify.lastArgs["path"].(string); got != nodeDir {
+		t.Fatalf("verify_code path = %q, want touched Node project %q", got, nodeDir)
+	}
+}
+
+func checkNames(checks []Check) []string {
+	names := make([]string, 0, len(checks))
+	for _, check := range checks {
+		names = append(names, check.Name)
+	}
+	return names
 }
 
 func TestDoneGateCheckEvidence_FormatsReadableVerificationLabels(t *testing.T) {

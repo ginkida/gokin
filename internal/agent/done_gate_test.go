@@ -40,6 +40,31 @@ func TestRecordToolExecution_PopulatesTrackers(t *testing.T) {
 	}
 }
 
+func TestRecordToolExecution_MergesDeclaredAndBatchPaths(t *testing.T) {
+	a := &Agent{workDir: "/tmp/gokin-test"}
+	abs := func(p string) string { return "/tmp/gokin-test/" + p }
+
+	// Pattern refactors have no concrete path argument; the tool reports the
+	// files it actually changed in written_paths.
+	a.recordToolExecution("refactor", map[string]any{"pattern": "**/*.go"}, tools.NewSuccessResultWithData("ok", map[string]any{
+		"written_paths": []any{abs("a.go"), abs("b.go")},
+	}))
+	// Batch paths may arrive both in the call's list argument and in the result.
+	// A duplicate from either source must still be recorded only once.
+	a.recordToolExecution("batch", map[string]any{
+		"files": []any{abs("c.go"), abs("a.go")},
+	}, tools.NewSuccessResultWithData("ok", map[string]any{
+		"written_paths": []string{abs("d.go"), abs("a.go")},
+	}))
+
+	if got := a.GetTouchedPaths(); !reflect.DeepEqual(got, []string{"a.go", "b.go", "c.go", "d.go"}) {
+		t.Fatalf("touched = %v, want declared and batch paths merged and deduped", got)
+	}
+	if gen := a.mutationGeneration(); gen != 2 {
+		t.Fatalf("mutationGen = %d, want 2 successful mutation calls", gen)
+	}
+}
+
 func TestAgentDoneGateMaxFixes_Caps(t *testing.T) {
 	cases := []struct {
 		attempts int

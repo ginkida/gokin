@@ -89,7 +89,8 @@ func (a *Agent) recordToolExecution(toolName string, args map[string]any, result
 	// gate keys re-runs off this so a build-breaking re-edit after a passing
 	// gate is still caught.
 	a.mutationGen++
-	paths := donegate.NormalizeTouchedPaths(a.workDir, donegate.ExtractTouchedPaths(args))
+	rawPaths := append(donegate.ExtractTouchedPaths(args), tools.WrittenPathsFromResult(result)...)
+	paths := donegate.NormalizeTouchedPaths(a.workDir, rawPaths)
 	if len(paths) == 0 {
 		return
 	}
