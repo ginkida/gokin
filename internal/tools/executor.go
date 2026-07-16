@@ -462,6 +462,12 @@ type ExecutionHandler struct {
 	// OnWarning is called when a warning is issued.
 	OnWarning func(warning string)
 
+	// OnRetrySafetyEvent receives machine-readable exactly-once decisions.
+	// Unlike OnWarning, this contract is stable enough for execution journals,
+	// reliability evals, and recovery telemetry; consumers must not parse the
+	// human-facing warning text to decide whether a tool actually executed.
+	OnRetrySafetyEvent func(event RetrySafetyEvent)
+
 	// OnInlineDiff is called after successful edit to show inline diff.
 	OnInlineDiff func(filePath, oldText, newText string)
 
@@ -482,6 +488,32 @@ type ExecutionHandler struct {
 	// something in that final window). The app re-dispatches them as a new
 	// turn so the follow-up isn't silently lost. Nil = leftovers are dropped.
 	OnSteerLeftover func(messages []string)
+}
+
+// RetrySafetyEventKind identifies an exactly-once decision made before a
+// potentially stateful tool crosses its execution boundary.
+type RetrySafetyEventKind string
+
+const (
+	RetrySafetyDuplicateReused RetrySafetyEventKind = "duplicate_side_effect_reused"
+	RetrySafetyCheckpointReplay RetrySafetyEventKind = "checkpoint_replayed"
+	RetrySafetyDivergentBlocked RetrySafetyEventKind = "divergent_side_effect_blocked"
+)
+
+// RetrySafetyEvent is emitted only for a retry/recovery guard decision. A
+// normal tool execution emits no event and continues through OnToolStart.
+type RetrySafetyEvent struct {
+	Kind      RetrySafetyEventKind `json:"kind"`
+	Tool      string               `json:"tool"`
+	CallID    string               `json:"call_id,omitempty"`
+	Reason    string               `json:"reason,omitempty"`
+	Remaining int                  `json:"remaining_checkpoints,omitempty"`
+}
+
+func (e *Executor) reportRetrySafetyEvent(event RetrySafetyEvent) {
+	if e.handler != nil && e.handler.OnRetrySafetyEvent != nil {
+		e.handler.OnRetrySafetyEvent(event)
+	}
 }
 
 // NewExecutor creates a new tool executor.
@@ -2355,6 +2387,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		if e.handler != nil && e.handler.OnWarning != nil {
 			e.handler.OnWarning(fmt.Sprintf("Skipped duplicate side-effect tool call '%s' (%s). Reusing previous result.", call.Name, reason))
 		}
+		e.reportRetrySafetyEvent(RetrySafetyEvent{
+			Kind: RetrySafetyDuplicateReused, Tool: call.Name, CallID: call.ID, Reason: reason,
+		})
 		return deduped
 	}
 
@@ -2372,6 +2407,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		if e.handler != nil && e.handler.OnWarning != nil {
 			e.handler.OnWarning(fmt.Sprintf("Recovered result for '%s' from checkpoint (%s).", call.Name, replayReason))
 		}
+		e.reportRetrySafetyEvent(RetrySafetyEvent{
+			Kind: RetrySafetyCheckpointReplay, Tool: call.Name, CallID: call.ID, Reason: replayReason,
+		})
 		return cached
 	}
 	if replayState == checkpointReplayMismatch {
@@ -2388,6 +2426,10 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		if e.notificationMgr != nil {
 			e.notificationMgr.NotifyDenied(call.Name, reason)
 		}
+		e.reportRetrySafetyEvent(RetrySafetyEvent{
+			Kind: RetrySafetyDivergentBlocked, Tool: call.Name, CallID: call.ID,
+			Reason: reason, Remaining: replayRemaining,
+		})
 		return NewPolicyBlockedResult(PolicyBlockSafety, reason)
 	}
 

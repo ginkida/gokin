@@ -196,6 +196,15 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			}
 			present().Warning(warning)
 		},
+		OnRetrySafetyEvent: func(event tools.RetrySafetyEvent) {
+			a.journalEvent("retry_safety", map[string]any{
+				"kind":                  string(event.Kind),
+				"tool":                  event.Tool,
+				"call_id":               event.CallID,
+				"reason":                event.Reason,
+				"remaining_checkpoints": event.Remaining,
+			})
+		},
 		OnInlineDiff: func(filePath, oldText, newText string) {
 			present().InlineDiff(filePath, oldText, newText)
 		},
