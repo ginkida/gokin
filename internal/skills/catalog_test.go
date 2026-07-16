@@ -209,6 +209,31 @@ Release the requested target`)
 	}
 }
 
+// Empty or comment-only frontmatter is VALID (v0.100.90): the terminator is
+// present and both name (directory) and description (first body paragraph)
+// have designed fallbacks. Rejecting `---\n---\n` as "unterminated" (the
+// zero-byte fence gap defeated the `\n---\n` search) or comment-only YAML as
+// "frontmatter: EOF" dropped perfectly usable Claude-style skills at boot.
+func TestCatalogAcceptsEmptyAndCommentOnlyFrontmatter(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "bare", "---\n---\nDeploy the release safely.\n\nDetails follow.")
+	writeSkill(t, root, "commented", "---\n# just a comment\n---\nReview the change carefully.")
+
+	catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
+	bare, bareOK := catalog.Get("bare")
+	commented, commentedOK := catalog.Get("commented")
+	if !bareOK || !commentedOK {
+		t.Fatalf("skills missing: bare=%v commented=%v warnings=%q",
+			bareOK, commentedOK, strings.Join(catalog.Warnings(), "\n"))
+	}
+	if bare.Name != "bare" || bare.Description != "Deploy the release safely." {
+		t.Fatalf("bare fallbacks = %#v", bare)
+	}
+	if commented.Description != "Review the change carefully." {
+		t.Fatalf("commented fallbacks = %#v", commented)
+	}
+}
+
 func TestCatalogDirectoryNameIsInvocationKey(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, root, "alpha", "---\nname: beta\ndescription: alpha workflow\n---\nRun alpha")

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,10 +29,51 @@ type Manager struct {
 
 // NewManager creates a new task manager.
 func NewManager(workDir string) *Manager {
+	sweepStaleTaskOutputFiles(workDir)
 	return &Manager{
 		tasks:   make(map[string]*Task),
 		workDir: workDir,
 	}
+}
+
+// staleTaskOutputMaxAge is the mtime threshold for sweeping task-output logs
+// left behind by PREVIOUS gokin runs. Far above the in-process 30-minute
+// reap; a LIVE task owned by a concurrently-running second gokin process
+// writes its log continuously, keeping mtime fresh, so it is never touched.
+const staleTaskOutputMaxAge = 48 * time.Hour
+
+// sweepStaleTaskOutputFiles removes orphaned task-output logs. Cleanup only
+// reaps tasks tracked by the CURRENT process's map, so .gokin/task-output
+// files from crashed or exited runs used to accumulate on disk forever.
+func sweepStaleTaskOutputFiles(workDir string) int {
+	if workDir == "" {
+		return 0
+	}
+	dir := filepath.Join(workDir, ".gokin", "task-output")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	cutoff := time.Now().Add(-staleTaskOutputMaxAge)
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if os.Remove(filepath.Join(dir, entry.Name())) == nil {
+				removed++
+			}
+		}
+	}
+	if removed > 0 {
+		logging.Debug("swept stale task output files", "dir", dir, "count", removed)
+	}
+	return removed
 }
 
 // SetCompletionHandler sets the handler called when tasks complete.

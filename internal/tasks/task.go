@@ -126,6 +126,11 @@ type safeBuffer struct {
 	filePath   string
 	totalBytes int64
 	truncated  bool
+	// fileFailed records a mid-stream write failure: filePath then points at
+	// an INCOMPLETE file and the truncation notice must not advertise it as
+	// the full output. Distinct from file==nil, which also happens on the
+	// normal end-of-task Close.
+	fileFailed bool
 }
 
 const maxMemoryOutputBytes = 10 * 1024 * 1024 // 10 MB cap for in-memory output
@@ -142,6 +147,7 @@ func (b *safeBuffer) Write(p []byte) (int, error) {
 			logging.Warn("task output file write failed; disabling file output", "path", b.filePath, "error", err)
 			b.file.Close()
 			b.file = nil
+			b.fileFailed = true
 		}
 	}
 
@@ -163,8 +169,20 @@ func (b *safeBuffer) String() string {
 	defer b.mu.Unlock()
 	s := b.buf.String()
 	if b.truncated {
-		s += fmt.Sprintf("\n\n[Output truncated in memory: %d bytes total. Full output in: %s]",
-			b.totalBytes, b.filePath)
+		// The notice must be honest about where (or whether) the rest of the
+		// output exists: pointing the user/model at a nonexistent or
+		// incomplete log file sends them chasing output that isn't there.
+		switch {
+		case b.filePath != "" && !b.fileFailed:
+			s += fmt.Sprintf("\n\n[Output truncated in memory: %d bytes total. Full output in: %s]",
+				b.totalBytes, b.filePath)
+		case b.filePath != "":
+			s += fmt.Sprintf("\n\n[Output truncated in memory: %d bytes total. File output failed mid-stream — %s is incomplete.]",
+				b.totalBytes, b.filePath)
+		default:
+			s += fmt.Sprintf("\n\n[Output truncated in memory: %d bytes total; output beyond the cap was not retained.]",
+				b.totalBytes)
+		}
 	}
 	return s
 }

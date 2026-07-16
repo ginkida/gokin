@@ -541,20 +541,34 @@ func parseSkillDocument(document string) (skillFrontmatter, string, error) {
 		return skillFrontmatter{}, "", fmt.Errorf("YAML frontmatter is required")
 	}
 	rest := strings.TrimPrefix(document, "---\n")
-	idx := strings.Index(rest, "\n---\n")
-	if idx < 0 {
-		return skillFrontmatter{}, "", fmt.Errorf("unterminated frontmatter")
+	var fmText, body string
+	if strings.HasPrefix(rest, "---\n") {
+		// Empty frontmatter (`---` immediately followed by `---`) IS
+		// terminated, but the `\n---\n` search below can't see a terminator
+		// with zero bytes between the fences.
+		fmText, body = "", strings.TrimPrefix(rest, "---\n")
+	} else {
+		idx := strings.Index(rest, "\n---\n")
+		if idx < 0 {
+			return skillFrontmatter{}, "", fmt.Errorf("unterminated frontmatter")
+		}
+		fmText, body = rest[:idx], rest[idx+len("\n---\n"):]
 	}
 	var fm skillFrontmatter
-	decoder := yaml.NewDecoder(strings.NewReader(rest[:idx]))
+	decoder := yaml.NewDecoder(strings.NewReader(fmText))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&fm); err != nil {
-		return skillFrontmatter{}, "", fmt.Errorf("frontmatter: %w", err)
+		if err != io.EOF {
+			return skillFrontmatter{}, "", fmt.Errorf("frontmatter: %w", err)
+		}
+		// Empty or comment-only frontmatter decodes to EOF — not an error:
+		// name falls back to the directory name and description to the first
+		// body paragraph, both designed fallbacks.
 	}
 	if field := fm.unsupportedExecutionField(); field != "" {
 		return fm, "", fmt.Errorf("frontmatter field %q is recognized but unsupported by this runtime", field)
 	}
-	return fm, rest[idx+len("\n---\n"):], nil
+	return fm, body, nil
 }
 
 // Get returns a copy of a skill by its normalized name.
