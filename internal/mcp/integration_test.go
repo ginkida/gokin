@@ -103,6 +103,24 @@ func (s *fakeMCPServer) handle(req *JSONRPCMessage) {
 		})
 	case MethodInitialized:
 		// notification — no response
+	case MethodPing:
+		s.transport.feed(&JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      float64ID(req.ID),
+			Result:  json.RawMessage(`{}`),
+		})
+	case MethodResourcesList:
+		s.transport.feed(&JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      float64ID(req.ID),
+			Result:  json.RawMessage(`{"resources":[{"uri":"test://resource","name":"Test Resource"}]}`),
+		})
+	case MethodResourcesRead:
+		s.transport.feed(&JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      float64ID(req.ID),
+			Result:  json.RawMessage(`{"contents":[{"uri":"test://resource","text":"hello"}]}`),
+		})
 	case MethodToolsList:
 		s.listCount.Add(1)
 		s.toolsMu.Lock()
