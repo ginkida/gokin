@@ -251,9 +251,11 @@ func TestExecutorExecuteLoop_NonKimiRepeatedReadRecovers(t *testing.T) {
 	}
 }
 
-// The hard abort remains as a bounded backstop: a read loop that ignores every
-// recovery hint (budget 3) AND both force-finalize demands still aborts.
-func TestExecutorExecuteLoop_RepeatedReadAbortsAfterRecoveryBudget(t *testing.T) {
+// The bounded backstop for a read loop that ignores every recovery hint
+// (budget 3) AND both force-finalize demands is a GRACEFUL turn stop
+// (v0.100.100) — the turn still ends, but with an honest final text instead of
+// the dead "Agent Got Stuck" error card, because the loop was side-effect-free.
+func TestExecutorExecuteLoop_RepeatedReadGracefulStopAfterRecoveryBudget(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
 	if err := registry.Register(readTool); err != nil {
@@ -262,7 +264,7 @@ func TestExecutorExecuteLoop_RepeatedReadAbortsAfterRecoveryBudget(t *testing.T)
 
 	// 10 identical reads: 4 execute, the 5th–7th each draw a recovery hint
 	// (budget = 3), the 8th–9th draw force-finalize demands, and the 10th
-	// exhausts everything and aborts.
+	// exhausts everything and gracefully stops the turn.
 	responses := make([]*client.StreamingResponse, 0, 10)
 	for i := 0; i < 10; i++ {
 		responses = append(responses, buildExecutorTestReadStream(fmt.Sprintf("r%d", i)))
@@ -272,21 +274,18 @@ func TestExecutorExecuteLoop_RepeatedReadAbortsAfterRecoveryBudget(t *testing.T)
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
 
-	_, _, err := exec.Execute(context.Background(), nil, "inspect project.go")
-	if err == nil {
-		t.Fatal("Execute() error = nil, want stagnation abort after recovery + finalize budgets exhausted")
+	_, text, err := exec.Execute(context.Background(), nil, "inspect project.go")
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want graceful stop (nil) after recovery + finalize budgets exhausted", err)
 	}
-	if !strings.Contains(err.Error(), "executor stagnation") {
-		t.Fatalf("err = %v, want executor stagnation", err)
-	}
-	if !strings.Contains(err.Error(), "after recovery hint") {
-		t.Fatalf("err = %v, want it to note the recovery hints were already spent", err)
+	if !strings.Contains(text, "Loop guard stopped this turn") {
+		t.Fatalf("final text = %q, want the honest loop-guard stop note", text)
 	}
 	if readTool.calls != 4 {
 		t.Fatalf("read tool calls = %d, want 4 (recovery hints never re-execute the tool)", readTool.calls)
 	}
 	if len(cl.functionResults) != 9 {
-		t.Fatalf("SendFunctionResponse calls = %d, want 9 (4 reads + 3 hints + 2 finalize) before abort", len(cl.functionResults))
+		t.Fatalf("SendFunctionResponse calls = %d, want 9 (4 reads + 3 hints + 2 finalize) before the stop", len(cl.functionResults))
 	}
 }
 

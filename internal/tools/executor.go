@@ -1407,6 +1407,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			var results []*genai.FunctionResponse
 			budgetStopAfterPair := false
+			stagnationStopAfterPair := false
 
 			// Hosted-provider tool budget: cap total tool calls per turn to
 			// prevent runaway exploration. Unlike stagnation (which catches
@@ -1463,11 +1464,33 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 							"count", stagnationLimit,
 							"model", cl.GetModel(),
 							"recovery_attempts", recoveryAttempt)
-						errMsg := fmt.Sprintf("executor stagnation: tool pattern %q repeated %d times consecutively", pattern, stagnationLimit)
-						if recoveryAttempt > 0 {
-							errMsg += " after recovery hint"
+						if _, recoverySafe, ok := stagnationHintBudget(resp.FunctionCalls); ok && recoverySafe {
+							// Side-effect-free/idempotent loop (the force-finalize
+							// class): every repeat was a no-op, so nothing is
+							// half-applied — end the turn HONESTLY instead of
+							// killing it with an error card (v0.100.100, 5th field
+							// report: a model looped on the identical `memory`
+							// call through ALL hints + finalize demands and the
+							// backstop still discarded the turn as an error).
+							// Mirrors the tool-budget stop: pair the calls with
+							// synthetic results so no orphaned tool_use poisons
+							// history, then break with an honest final text.
+							// The turn still ENDS (quota protected) — only the
+							// form changes from a dead error to a preserved turn.
+							if e.handler != nil && e.handler.OnWarning != nil {
+								e.handler.OnWarning(fmt.Sprintf(
+									"Loop guard: stopping the turn — %s kept repeating with no progress",
+									describeStagnationTarget(resp.FunctionCalls[0].Name, resp.FunctionCalls[0].Args)))
+							}
+							results = e.buildStagnationStopResults(resp.FunctionCalls)
+							stagnationStopAfterPair = true
+						} else {
+							errMsg := fmt.Sprintf("executor stagnation: tool pattern %q repeated %d times consecutively", pattern, stagnationLimit)
+							if recoveryAttempt > 0 {
+								errMsg += " after recovery hint"
+							}
+							return history, "", errors.New(errMsg)
 						}
-						return history, "", errors.New(errMsg)
 					}
 				}
 			}
@@ -1676,6 +1699,17 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				resp.Text = fmt.Sprintf(
 					"Stopped after %d tool calls: the model continued requesting tools after the per-turn budget and finalization reminder. The completed work is preserved; ask me to continue in a new turn if more work is needed.",
 					len(toolsUsed))
+				break
+			}
+			if stagnationStopAfterPair {
+				target := "a tool call"
+				if len(resp.FunctionCalls) > 0 && resp.FunctionCalls[0] != nil {
+					target = describeStagnationTarget(resp.FunctionCalls[0].Name, resp.FunctionCalls[0].Args)
+				}
+				resp.FunctionCalls = nil
+				resp.Text = fmt.Sprintf(
+					"⚠ Loop guard stopped this turn: the identical %s kept repeating with no progress, despite recovery hints. Everything completed before the loop is preserved above. To continue, re-ask with a narrower request (or tell me which single step to do next).",
+					target)
 				break
 			}
 
@@ -3992,6 +4026,29 @@ func (e *Executor) shouldEnforceKimiToolBudget(model string, consumed int) bool 
 // "budget reached — wrap up" hint. The IDs are preserved so the model's
 // next-turn expectation (each function-call must be paired with a response)
 // is satisfied, avoiding a malformed conversation history.
+// buildStagnationStopResults pairs a hopeless recovery-safe loop's final batch
+// with synthetic results so no orphaned tool_use poisons history when the turn
+// is gracefully stopped (v0.100.100). Only ever used for side-effect-free /
+// idempotent batches, so blocking the calls is guaranteed harmless.
+func (e *Executor) buildStagnationStopResults(calls []*genai.FunctionCall) []*genai.FunctionResponse {
+	results := make([]*genai.FunctionResponse, len(calls))
+	const msg = "Loop guard: this identical call was blocked and the turn is ending now. Do not call it again."
+	for i, call := range calls {
+		toolName := "tool"
+		callID := ""
+		if call != nil {
+			toolName = call.Name
+			callID = call.ID
+		}
+		results[i] = &genai.FunctionResponse{
+			ID:       callID,
+			Name:     toolName,
+			Response: NewErrorResult(msg).ToMap(),
+		}
+	}
+	return results
+}
+
 func (e *Executor) buildKimiToolBudgetExhaustedResults(calls []*genai.FunctionCall) []*genai.FunctionResponse {
 	results := make([]*genai.FunctionResponse, len(calls))
 	msg := buildKimiToolBudgetMessage(e.kimiToolBudget)

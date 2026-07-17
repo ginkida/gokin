@@ -84,7 +84,11 @@ func TestExecutorExecuteLoop_ReadOnlyBashLoopFinalizesInsteadOfAbort(t *testing.
 
 // The hard abort survives as the bounded backstop: ignoring the hints AND the
 // finalize demands still terminates the turn (quota protection).
-func TestExecutorExecuteLoop_ReadOnlyBashLoopStillAbortsAfterFinalize(t *testing.T) {
+// v0.100.100: the backstop for a recovery-safe (side-effect-free) loop is a
+// GRACEFUL turn stop — honest final text, calls paired in history, nil error —
+// never the dead "Agent Got Stuck" error card. The turn still ends (quota
+// protected); only the form changed.
+func TestExecutorExecuteLoop_ReadOnlyBashLoopGracefulStopAfterFinalize(t *testing.T) {
 	registry := NewRegistry()
 	bashTool := &scriptedStaticTool{name: "bash", content: "On branch main"}
 	if err := registry.Register(bashTool); err != nil {
@@ -102,21 +106,32 @@ func TestExecutorExecuteLoop_ReadOnlyBashLoopStillAbortsAfterFinalize(t *testing
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
 
-	_, _, err := exec.Execute(context.Background(), nil, "check repo state")
-	if err == nil {
-		t.Fatal("Execute() error = nil, want stagnation abort after hints + finalize both ignored")
+	history, text, err := exec.Execute(context.Background(), nil, "check repo state")
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want graceful stop (nil) for a side-effect-free loop", err)
 	}
-	if !strings.Contains(err.Error(), "executor stagnation") {
-		t.Fatalf("err = %v, want executor stagnation", err)
-	}
-	if !strings.Contains(err.Error(), "after recovery hint") {
-		t.Fatalf("err = %v, want the spent-recovery note", err)
+	if !strings.Contains(text, "Loop guard stopped this turn") {
+		t.Fatalf("final text = %q, want the honest loop-guard stop note", text)
 	}
 	if bashTool.calls != 4 {
 		t.Fatalf("bash executions = %d, want 4", bashTool.calls)
 	}
 	if len(cl.functionResults) != 8 {
-		t.Fatalf("SendFunctionResponse calls = %d, want 8 (4 real + 2 hints + 2 finalize) before abort", len(cl.functionResults))
+		t.Fatalf("SendFunctionResponse calls = %d, want 8 (4 real + 2 hints + 2 finalize) before the stop", len(cl.functionResults))
+	}
+	// The final batch must be PAIRED in history (no orphaned tool_use).
+	if len(history) == 0 {
+		t.Fatal("history is empty")
+	}
+	last := history[len(history)-1]
+	paired := false
+	for _, p := range last.Parts {
+		if p.FunctionResponse != nil {
+			paired = true
+		}
+	}
+	if !paired {
+		t.Fatalf("last history entry must carry the pairing tool results, got role=%v", last.Role)
 	}
 }
 
