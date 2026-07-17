@@ -1667,6 +1667,12 @@ var broadLoopExplorationTools = toolNameSet(
 	"read", "grep", "glob", "list_dir", "tree",
 	"diff", "git_status", "git_diff", "git_log", "git_blame",
 	"check_impact", "history_search",
+	// Semantic + review inspection tools (v0.87.0) — also side-effect-free,
+	// no external cost, and called many times over distinct symbols/files in
+	// one understand/refactor task. Missing here, a reasoning-heavy Kimi K3
+	// sub-agent navigating a codebase hit the low base ceiling (v0.100.95).
+	"go_search", "go_diagnostics", "go_to_definition", "find_references",
+	"review_changes",
 )
 
 // broadLoopThreshold returns the per-tool ceiling for the broad loop detector

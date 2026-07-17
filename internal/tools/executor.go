@@ -3753,6 +3753,40 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			return ""
 		}
 		return path + "|" + filter
+	case "list_dir", "tree", "git_status":
+		// Local inspection over a PATH — listing/statting different
+		// directories is exploration progress, not a loop (v0.100.95, same
+		// class as the todo empty-fingerprint bug: a reasoning-heavy Kimi K3
+		// turn that inspects 5 distinct dirs collapsed to one `list_dir:`
+		// pattern). Distinct paths ⇒ distinct fingerprints.
+		path, _ := args["path"].(string)
+		if path == "" {
+			path, _ = args["directory_path"].(string)
+		}
+		return path
+	case "git_diff", "git_log", "git_blame", "review_changes":
+		// Inspecting different files' diffs/history is progress. Path-less
+		// (whole-repo) calls collapse to one target — a genuine repeat.
+		file, _ := args["file"].(string)
+		return file
+	case "check_impact":
+		// Blast-radius of DIFFERENT symbols is distinct work.
+		if s, ok := args["symbol"].(string); ok {
+			return s
+		}
+	case "go_search":
+		// Different search queries are distinct exploration.
+		if q, ok := args["query"].(string); ok {
+			return q
+		}
+	case "go_to_definition", "find_references":
+		// Navigating to different symbols/files is progress.
+		file, _ := args["file"].(string)
+		symbol, _ := args["symbol"].(string)
+		if file == "" && symbol == "" {
+			return ""
+		}
+		return file + "|" + symbol
 	case "todo":
 		// Updating the task list with DIFFERENT items each time is progress,
 		// not a loop — the model checks off a task and adds the next. Hash the
@@ -3789,6 +3823,16 @@ func maxStagnationRecoveryAttempts(toolName string) int {
 	switch toolName {
 	case "read", "grep", "glob", "list_dir", "tree":
 		return 3
+	case "git_status", "git_diff", "git_log", "git_blame", "diff",
+		"review_changes", "check_impact", "go_search", "go_diagnostics",
+		"go_to_definition", "find_references", "history_search":
+		// Dedicated read-only inspection tools — a truly-identical repeat is a
+		// benign loop (same class as read/grep and read-only bash), so it
+		// earns graceful hints + force-finalize instead of a hard turn-kill
+		// (v0.100.95, Kimi-friendliness sweep). 2 like read-only bash: these
+		// are opaquer than a plain read. Distinct-arg calls already never
+		// collapse (stagnationFingerprint cases above).
+		return 2
 	case "edit":
 		return 1
 	case "todo":
