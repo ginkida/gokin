@@ -530,20 +530,7 @@ func (c *AnthropicClient) CountTokensWithAccuracy(ctx context.Context, contents 
 func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*genai.Content, model, apiKey, sysInstruction, turnContext string, tools []*genai.Tool) (*genai.CountTokensResponse, error) {
 	messages := c.convertHistoryToMessages(contents, "")
 	messages = appendTurnContextBlock(messages, turnContext)
-
-	// Remove empty trailing message if convertHistoryToMessages appended one
-	if len(messages) > 0 {
-		last := messages[len(messages)-1]
-		if content, ok := last["content"].([]map[string]any); ok && len(content) == 1 {
-			if text, ok := content[0]["text"].(string); ok && text == "" {
-				messages = messages[:len(messages)-1]
-			}
-		}
-		// Also handle string content
-		if content, ok := last["content"].(string); ok && content == "" {
-			messages = messages[:len(messages)-1]
-		}
-	}
+	messages = stripEmptyTrailingMessage(messages)
 
 	// Need at least one message for the API
 	if len(messages) == 0 {
@@ -623,31 +610,34 @@ func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model, sysIn
 	if sysInstruction != "" {
 		totalChars += utf8.RuneCountInString(sysInstruction)
 	}
-	if turnContext != "" {
-		totalChars += utf8.RuneCountInString(turnContext)
-	}
 	if len(tools) > 0 {
 		if toolsJSON, err := json.Marshal(c.convertToolsToAnthropicFrom(tools)); err == nil {
 			totalChars += utf8.RuneCount(toolsJSON)
 		}
 	}
-	for _, content := range contents {
-		for _, part := range content.Parts {
-			if part.Text != "" {
-				totalChars += utf8.RuneCountInString(part.Text)
-			}
-			if part.FunctionCall != nil {
-				totalChars += utf8.RuneCountInString(part.FunctionCall.Name) + 40
-				if argsJSON, err := json.Marshal(part.FunctionCall.Args); err == nil {
-					totalChars += utf8.RuneCount(argsJSON)
-				}
-			}
-			if part.FunctionResponse != nil {
-				totalChars += utf8.RuneCountInString(part.FunctionResponse.Name) + 40
-				if respJSON, err := json.Marshal(part.FunctionResponse.Response); err == nil {
-					totalChars += utf8.RuneCount(respJSON)
-				}
-			}
+
+	// Estimate over the ACTUAL serialized request — the same
+	// convertHistoryToMessages + appendTurnContextBlock pipeline a real send
+	// uses — instead of a parallel hand-rolled walk of the raw parts. The old
+	// walk counted every part.Text including UNSIGNED thinking blocks, which
+	// buildAssistantMessage DROPS from every outgoing request: a
+	// thinking-heavy session's context bar was systematically inflated by
+	// thousands of tokens the provider never sees (v0.100.92 field report
+	// «≈56.5K все еще неточно»). Walking the serialized shape also picks up
+	// any future transform for free — the estimate can't drift from the wire
+	// shape again. Only VALUE strings are counted (not JSON keys/escapes), so
+	// the established chars-per-token calibration is preserved; turnContext
+	// travels inside the serialized messages (appendTurnContextBlock) and is
+	// deliberately NOT counted separately.
+	// Empty history estimates to zero — convertHistoryToMessages would insert
+	// its synthetic "Continue." placeholder, which is request plumbing, not
+	// context the user accumulated (pinned by TestAnthropicEstimateTokensEmpty).
+	if len(contents) > 0 || strings.TrimSpace(turnContext) != "" {
+		messages := c.convertHistoryToMessages(contents, "")
+		messages = appendTurnContextBlock(messages, turnContext)
+		messages = stripEmptyTrailingMessage(messages)
+		for _, message := range messages {
+			totalChars += charCountOfJSONValues(message["content"])
 		}
 	}
 
@@ -660,6 +650,60 @@ func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model, sysIn
 	return &genai.CountTokensResponse{
 		TotalTokens: estimatedTokens,
 	}, nil
+}
+
+// stripEmptyTrailingMessage removes the empty trailing user message
+// convertHistoryToMessages appends when called with newMessage == "". Shared
+// by the native count_tokens path and the local estimator so both count the
+// same effective payload.
+func stripEmptyTrailingMessage(messages []map[string]any) []map[string]any {
+	if len(messages) == 0 {
+		return messages
+	}
+	last := messages[len(messages)-1]
+	if content, ok := last["content"].([]map[string]any); ok && len(content) == 1 {
+		if text, ok := content[0]["text"].(string); ok && text == "" {
+			return messages[:len(messages)-1]
+		}
+	}
+	if content, ok := last["content"].(string); ok && content == "" {
+		return messages[:len(messages)-1]
+	}
+	return messages
+}
+
+// charCountOfJSONValues sums the rune counts of every VALUE string inside a
+// serialized message-content tree (JSON keys and structural characters are
+// excluded — they're covered by the per-message token constant, matching the
+// pre-existing calibration). Non-string leaves (numbers/bools) count as a
+// small constant.
+func charCountOfJSONValues(v any) int {
+	switch t := v.(type) {
+	case string:
+		return utf8.RuneCountInString(t)
+	case map[string]any:
+		n := 0
+		for _, vv := range t {
+			n += charCountOfJSONValues(vv)
+		}
+		return n
+	case []map[string]any:
+		n := 0
+		for _, vv := range t {
+			n += charCountOfJSONValues(vv)
+		}
+		return n
+	case []any:
+		n := 0
+		for _, vv := range t {
+			n += charCountOfJSONValues(vv)
+		}
+		return n
+	case nil:
+		return 0
+	default:
+		return 8
+	}
 }
 
 // TokenCountIsEstimate reports whether CountTokens uses the provider's native
@@ -1631,12 +1675,15 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					}
 
 					eventCount++
-					// Log FULL data for error events
-					if strings.Contains(data, "error") {
-						logging.Error("SSE ERROR event received", "full_data", data)
-					} else {
-						logging.Debug("SSE data event", "count", eventCount, "data_preview", truncateString(data, 200))
-					}
+					// Error-event logging happens AFTER the JSON parse below,
+					// keyed on the actual event shape. The old substring match
+					// (`strings.Contains(data, "error")`) fired on ORDINARY
+					// content deltas whose streamed text merely contained the
+					// word "error" — constant while the model works on error
+					// handling — flooding the ERROR log with full payloads
+					// (v0.100.92 field log: dozens of bogus "SSE ERROR event
+					// received" lines per minute).
+					logging.Debug("SSE data event", "count", eventCount, "data_preview", truncateString(data, 200))
 
 					// Skip "[DONE]" marker
 					if data == "[DONE]" {
@@ -1687,6 +1734,13 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 						case <-ctx.Done():
 						}
 						return
+					}
+
+					// Real error events (either shape) get the full-payload ERROR
+					// log the substring heuristic used to provide — now keyed on
+					// the parsed event, so ordinary deltas can't trigger it.
+					if eventType, _ := event["type"].(string); eventType == "error" || event["error"] != nil {
+						logging.Error("SSE ERROR event received", "full_data", data)
 					}
 
 					// Handle the Z.AI/GLM numeric business-code error shape, which carries
@@ -2502,7 +2556,10 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 			continue
 		}
 		if len(part.ThoughtSignature) == 0 {
-			logging.Warn("dropping unsigned thinking part from assistant history",
+			// Designed behavior (unsigned thinking is never replayable), and it
+			// fires per part per serialization — a long session logged 25+ of
+			// these in one burst, so Debug, not Warn.
+			logging.Debug("dropping unsigned thinking part from assistant history",
 				"text_len", len(part.Text))
 			continue
 		}
