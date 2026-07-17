@@ -3837,32 +3837,45 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 //     retrying the same failing edit needs to be told WHY, not killed.
 //   - everything else: 0 — repeating an identical mutating/opaque call is treated
 //     as a genuine fault and aborts as before (conservative for side effects).
+//
+// isStagnationRecoverySafe reports whether a truly-identical repeat loop of
+// this tool earns GRACEFUL recovery (hints + force-finalize) instead of a hard
+// turn-kill. Recovery NEVER re-executes the tool — it only returns a hint — so
+// the sole risk is a dishonest "done" claim after a half-applied MUTATION.
+// Thus every side-effect-free tool (IsParallelSafeTool) plus the idempotent
+// state/query tools (re-running is a no-op) are recovery-safe; genuine
+// mutations (write/edit/delete/move/copy/bash/git_commit/…) keep the immediate
+// hard abort. This is the general form that closes the recovery whack-a-mole
+// (v0.100.99 — field reports hit it as read-only inspection, todo, memorize,
+// then memory; each an idempotent tool a reasoning model loops on).
+func isStagnationRecoverySafe(name string) bool {
+	if IsParallelSafeTool(name) {
+		return true
+	}
+	switch name {
+	case "memory", "memorize", "skill", "todo",
+		"check_impact", "go_diagnostics", "mcp_admin":
+		// Idempotent state/query tools not in parallelSafeTools (they write
+		// idempotently or spawn a read helper), safe to re-hint.
+		return true
+	}
+	return false
+}
+
 func maxStagnationRecoveryAttempts(toolName string) int {
 	switch toolName {
 	case "read", "grep", "glob", "list_dir", "tree":
+		// The most benign reads earn one extra hint before force-finalize.
 		return 3
-	case "git_status", "git_diff", "git_log", "git_blame", "diff",
-		"review_changes", "check_impact", "go_search", "go_diagnostics",
-		"go_to_definition", "find_references", "history_search":
-		// Dedicated read-only inspection tools — a truly-identical repeat is a
-		// benign loop (same class as read/grep and read-only bash), so it
-		// earns graceful hints + force-finalize instead of a hard turn-kill
-		// (v0.100.95, Kimi-friendliness sweep). 2 like read-only bash: these
-		// are opaquer than a plain read. Distinct-arg calls already never
-		// collapse (stagnationFingerprint cases above).
-		return 2
 	case "edit":
+		// The ONE exception: hint-then-abort with NO force-finalize — forcing a
+		// "final answer" after a half-applied edit invites a dishonest success
+		// claim (see stagnationHintBudget's edit-only exclusion).
 		return 1
-	case "todo":
-		// A todo write is idempotent + side-effect-free (it only mutates the
-		// model's OWN checklist), so a truly-identical re-write loop earns a
-		// graceful "stop re-listing, DO the next task" hint instead of a hard
-		// turn-kill. 2 hints like read-only bash; still hint-then-abort (NOT
-		// force-finalize — see stagnationHintBudget), since a todo loop means
-		// the model is stuck planning, and forcing a final answer would reward
-		// not doing the work.
-		return 2
 	default:
+		if isStagnationRecoverySafe(toolName) {
+			return 2
+		}
 		return 0
 	}
 }
