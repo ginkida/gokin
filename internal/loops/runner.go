@@ -41,6 +41,14 @@ type SpawnResult struct {
 	// warns the agent and eventually auto-pauses. Set by the adapter from
 	// AgentResult.MutatingToolCalls.
 	MadeChanges bool
+	// TimedOut is true when a NON-OK result was caused by the iteration's own
+	// time budget (iterationCtx deadline) firing mid-work. It stays Transient
+	// for the breaker (a cadence problem, not a task failure), but the NEXT
+	// iteration's prompt treats it as a CUTOFF: the agent was working and got
+	// clipped, so it must continue from the handoff, not restart (v0.100.102 —
+	// a real loop burned 1.7M input tokens across 3 consecutive timed-out
+	// iterations that each started over).
+	TimedOut bool
 	// FilesTouched lists the files the iteration successfully mutated
 	// (workDir-relative). Set by the adapter from AgentResult.TouchedPaths;
 	// capped to MaxFilesTouchedPerIteration when recorded on the Iteration.
@@ -133,9 +141,17 @@ const staggerDivisor = 3
 const minStaggerStep = 5 * time.Second
 
 // DefaultIterationTimeout caps how long a single iteration can run
-// before being considered stuck. Loops are typically short tasks
-// (read a file, run a check), but we don't want a hung iteration to
-// block all other loops from firing forever.
+// before being considered stuck — a hung iteration must not block all
+// other loops from firing forever.
+//
+// 30m (raised from 15m in v0.100.102): reasoning-heavy models (K3
+// always-on reasoning, GLM 5.2) legitimately spend 10+ minutes of
+// thinking per round on open-ended "improve the app" tasks — real loop
+// data showed 3 CONSECUTIVE iterations dying on the 15m deadline
+// mid-work (1.7M input tokens spent, nothing finished). A timed-out
+// iteration is still recorded (TimedOut, transient for the breaker)
+// and the next iteration continues from its handoff/files — but the
+// budget should let a normal substantive iteration FINISH.
 //
 // Set ABOVE the request-level overload patience (client.DefaultOverloadRetryPolicy
 // MaxTotal, 10m): when a provider is overloaded the agent waits it out WITHIN
@@ -144,7 +160,7 @@ const minStaggerStep = 5 * time.Second
 // BEFORE this ctx deadline fires — a bare ctx timeout is ambiguous and would
 // be miscounted as a task failure. The 5m of headroom covers the failed API
 // round-trips between waits.
-const DefaultIterationTimeout = 15 * time.Minute
+const DefaultIterationTimeout = 30 * time.Minute
 
 // NewRunner constructs a Runner. The Spawner and IdleChecker are
 // required (nil panics at Start time so the wire-up bug is loud); period
@@ -426,6 +442,7 @@ func (r *Runner) fireOne(ctx context.Context, l *Loop) {
 		// transport error (err != nil) is a wiring/construction failure, not a
 		// provider hiccup, so it stays non-transient (counts as a task failure).
 		Transient: res.Transient && !ok && err == nil,
+		TimedOut:  res.TimedOut && !ok && err == nil,
 		// Churn signal — did this iteration actually change code/repo? Only read
 		// by AppendIteration on an OK iteration (action tasks), so it's harmless
 		// to carry on a failed one.
@@ -607,7 +624,7 @@ func BuildIterationPrompt(l *Loop) string {
 	// (provider hiccup, no output) must not erase the working state.
 	if handoff, n := latestHandoff(l.Iterations); handoff != "" {
 		fmt.Fprintf(&sb, "\nYour working state from iteration #%d (you wrote this — it is your working memory between iterations):\n%s\n", n, handoff)
-		if last := l.Iterations[len(l.Iterations)-1]; !last.OK && !last.Transient {
+		if last := l.Iterations[len(l.Iterations)-1]; !last.OK && (!last.Transient || last.TimedOut) {
 			sb.WriteString("Your previous iteration did NOT finish cleanly (failed or was cut off mid-work). Continue from the working state above — do NOT restart or redo work it lists as done.\n")
 		} else {
 			sb.WriteString("Continue from this state — don't re-derive or redo what it lists as done.\n")
@@ -632,7 +649,7 @@ func BuildIterationPrompt(l *Loop) string {
 	// the agent writes. Monitor loops don't carry plan state — their summaries
 	// suffice — so keep their prompt lean.
 	if !monitor {
-		sb.WriteString("\n\nNear the end of your response — as its own paragraph, BEFORE your final summary sentence — write a `HANDOFF:` block of 2-6 short bullet lines (`- DONE: …`, `- IN PROGRESS: …`, `- NEXT: …`, `- BLOCKER: …`). It is carried verbatim into your next iteration and is your only working memory between iterations; without it the next iteration starts from scratch. Update it every iteration — never repeat a stale one.")
+		sb.WriteString("\n\nNear the end of your response — as its own paragraph, BEFORE your final summary sentence — write a `HANDOFF:` block of 2-6 short bullet lines (`- DONE: …`, `- IN PROGRESS: …`, `- NEXT: …`, `- BLOCKER: …`). It is carried verbatim into your next iteration and is your only working memory between iterations; without it the next iteration starts from scratch. Update it every iteration — never repeat a stale one. You also have a HARD per-iteration time budget (~30 minutes): write a first HANDOFF EARLY (after your plan) and refresh it after each milestone — the LAST one you wrote survives even if the budget cuts you off mid-work, so the next iteration continues instead of restarting.")
 	}
 
 	sb.WriteString("\n\nProceed with the next step. Keep the response focused — your last sentence will be captured as the iteration summary.")

@@ -288,3 +288,23 @@ func TestParseNextHint_BulletedHandoffNextIsNotAHint(t *testing.T) {
 		t.Fatalf("parseNextHint = %q, want the real pacing hint 30m", got)
 	}
 }
+
+// v0.100.102: an iteration clipped by its OWN time budget is transient for the
+// breaker but a CUTOFF for the next prompt — the agent was mid-work and must
+// continue, not restart. (Field data: 3 consecutive timed-out iterations each
+// started the open-ended task over, burning 1.7M input tokens.)
+func TestBuildIterationPrompt_TimedOutIterationClaimsCutoff(t *testing.T) {
+	l := loopWithIterations("improve the app",
+		Iteration{N: 1, OK: true, StartedAt: time.Now(), Summary: "good progress",
+			Handoff: "- IN PROGRESS: refactoring loops package\n- NEXT: finish runner.go"},
+		Iteration{N: 2, OK: false, Transient: true, TimedOut: true, StartedAt: time.Now(),
+			Summary: "cut off by the iteration time budget"},
+	)
+	prompt := BuildIterationPrompt(l)
+	if !strings.Contains(prompt, "did NOT finish cleanly") {
+		t.Fatalf("a timed-out iteration must claim the cutoff-continuation note:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "finish runner.go") {
+		t.Fatalf("working state must be injected for the continuation:\n%s", prompt)
+	}
+}

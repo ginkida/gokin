@@ -37,7 +37,7 @@ func loopFailureIsTransient(result *agent.AgentResult, spawnErr, waitErr error) 
 }
 
 // isIterationTimeout reports whether err is the iteration's OWN timeout
-// (iterationCtx deadline, DefaultIterationTimeout=15m) firing — as opposed to a
+// (iterationCtx deadline, DefaultIterationTimeout=30m) firing — as opposed to a
 // genuine task failure. The runner derives iterationCtx via context.WithTimeout,
 // so a DeadlineExceeded here means "this iteration ran too long", a CADENCE
 // problem, NOT a task failure: it must not trip the 5-failure auto-pause breaker.
@@ -234,6 +234,16 @@ func newLoopSpawner(a *App) loops.Spawner {
 				}
 			}
 		}
+		// A reasoning-heavy iteration that spends its whole budget thinking +
+		// running tools can die on the iteration deadline with NO final text at
+		// all — the old summary was a bare "[spawn error: context deadline
+		// exceeded]" that hid the real partial work (v0.100.102 field data: 3
+		// consecutive timed-out iterations, 1.7M input tokens, empty summaries).
+		// Synthesize an honest progress line from the structured result so the
+		// summary/markdown show what actually happened.
+		if output == "" {
+			output = loopPartialWorkSummary(result)
+		}
 		// If Spawn errored but we DID capture partial output, append the
 		// spawn-side error too — it's the proximate cause and the user
 		// will want to see it next to whatever the agent managed to say.
@@ -246,7 +256,12 @@ func newLoopSpawner(a *App) loops.Spawner {
 			}
 		}
 
-		out := loops.SpawnResult{Output: output, OK: ok, Transient: transient}
+		out := loops.SpawnResult{
+			Output: output, OK: ok, Transient: transient,
+			// The iteration's own deadline firing is transient for the breaker
+			// but a CUTOFF for the next prompt — the agent was mid-work.
+			TimedOut: !ok && isIterationTimeout(spawnErr),
+		}
 		if result != nil {
 			out.TokensIn = result.InputTokens
 			out.TokensOut = result.OutputTokens
@@ -456,4 +471,32 @@ func (a *App) CancelInFlightLoopIteration(loopID string) bool {
 		return false
 	}
 	return a.loopRunner.CancelInFlight(loopID)
+}
+
+// loopPartialWorkSummary synthesizes an honest progress line for an iteration
+// that produced NO final text (a reasoning-heavy agent clipped by the
+// iteration deadline mid-work): the old summary was a bare "[spawn error:
+// context deadline exceeded]" that hid the real partial work (v0.100.102
+// field data: 3 consecutive timed-out iterations, 1.7M input tokens, empty
+// summaries). Returns "" when there is nothing to report.
+func loopPartialWorkSummary(result *agent.AgentResult) string {
+	if result == nil ||
+		(result.MutatingToolCalls == 0 && len(result.TouchedPaths) == 0 && result.InputTokens == 0) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Iteration was cut off before a final answer — partial work:")
+	fmt.Fprintf(&b, " %d mutating tool call(s)", result.MutatingToolCalls)
+	if len(result.TouchedPaths) > 0 {
+		files := result.TouchedPaths
+		if len(files) > 6 {
+			files = files[:6]
+		}
+		fmt.Fprintf(&b, ", files touched: %s", strings.Join(files, ", "))
+		if len(result.TouchedPaths) > 6 {
+			fmt.Fprintf(&b, " (+%d more)", len(result.TouchedPaths)-6)
+		}
+	}
+	fmt.Fprintf(&b, " (~%dk tokens in).", result.InputTokens/1000)
+	return b.String()
 }

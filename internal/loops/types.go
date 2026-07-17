@@ -190,6 +190,7 @@ type Iteration struct {
 	Summary     string        `json:"summary"`                // 1-3 sentence summary of what happened
 	OK          bool          `json:"ok"`                     // false = iteration errored or model returned nothing useful
 	Transient   bool          `json:"transient,omitempty"`    // true = failed for a transient infra reason (overload/rate-limit/network), not a task failure
+	TimedOut    bool          `json:"timed_out,omitempty"`    // true = the iteration's own time budget fired mid-work (transient for the breaker, but a CUTOFF for the next prompt)
 	MadeChanges bool          `json:"made_changes,omitempty"` // true = ran ≥1 code/repo-mutating tool this iteration (the churn signal)
 	TokensIn    int           `json:"tokens_in,omitempty"`
 	TokensOut   int           `json:"tokens_out,omitempty"`
