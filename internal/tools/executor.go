@@ -3667,9 +3667,17 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			if _, after, ok := strings.Cut(cmd, " && "); ok && strings.HasPrefix(strings.TrimSpace(cmd), "cd ") {
 				cmd = after
 			}
-			// Use first 60 runes of the actual command
+			// Truncate for display/key size, but keep the key EXACT with a
+			// short hash of the full command (v0.100.91 field report): a bare
+			// 60-rune prefix collapsed DIFFERENT commands sharing a long
+			// prefix (`… && git status --short` vs `… && git status
+			// --porcelain`) into one "identical" pattern, so five distinct
+			// inspection variants tripped the 5-consecutive-repeats abort as
+			// if the model had repeated one call. Distinct args must be
+			// distinct keys — same philosophy as normalizeCallKey.
 			if runes := []rune(cmd); len(runes) > 60 {
-				cmd = string(runes[:60])
+				h := sha256.Sum256([]byte(cmd))
+				cmd = fmt.Sprintf("%s#%x", string(runes[:60]), h[:3])
 			}
 			return cmd
 		}

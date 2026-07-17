@@ -121,8 +121,34 @@ func TestStagnationFingerprint_BashTruncatesLongCommands(t *testing.T) {
 	long := stagnationFingerprint("bash", map[string]any{
 		"command": "echo this command is considerably longer than sixty characters so it should be truncated by the fingerprint helper",
 	})
-	if len(long) > 60 {
-		t.Errorf("bash fingerprint len = %d, want ≤ 60", len(long))
+	// 60-rune display prefix + "#" + 6 hex chars of the full-command hash.
+	if len(long) > 70 {
+		t.Errorf("bash fingerprint len = %d, want ≤ 70", len(long))
+	}
+}
+
+// The v0.100.91 field report: two DIFFERENT commands sharing a >60-rune
+// prefix (`… && git status --short` vs `… && git status --porcelain`)
+// collapsed into one fingerprint, so five distinct inspection variants
+// tripped the "repeated 5 times consecutively" abort as if the model had
+// repeated one identical call. Distinct args must be distinct keys; truly
+// identical commands must still collapse.
+func TestStagnationFingerprint_BashLongCommandsKeyOnFullCommand(t *testing.T) {
+	prefix := `git log --oneline -5 && echo "===STATUS===" && git status --`
+	a := stagnationFingerprint("bash", map[string]any{"command": prefix + "short"})
+	b := stagnationFingerprint("bash", map[string]any{"command": prefix + "porcelain"})
+	if a == b {
+		t.Fatalf("different long commands collapsed into one fingerprint: %q", a)
+	}
+	a2 := stagnationFingerprint("bash", map[string]any{"command": prefix + "short"})
+	if a != a2 {
+		t.Fatalf("identical commands produced different fingerprints: %q vs %q", a, a2)
+	}
+	// cd-prefix stripping still normalizes before hashing, so a cd-wrapped
+	// repeat of the same command keeps the same key.
+	withCd := stagnationFingerprint("bash", map[string]any{"command": "cd /repo && " + prefix + "short"})
+	if withCd != a {
+		t.Fatalf("cd-prefixed variant diverged: %q vs %q", withCd, a)
 	}
 }
 

@@ -24,12 +24,24 @@ func TestReadOnlyBashCommand(t *testing.T) {
 		{"cd /repo && go build ./...", true},
 		{"ps aux | grep gokin | wc -l", true},
 
+		// Harmless stderr/null-device redirects must not disqualify (the
+		// v0.100.91 field report: a `… && git status …` inspection loop
+		// hard-aborted the turn solely because of a /dev/null tail).
+		{`git log --oneline -5 && echo "===STATUS===" && git status --porcelain 2>/dev/null`, true},
+		{"git status --short 2>&1 | head -20", true},
+		{"go build ./... > /dev/null 2>&1", true},
+		{"ls -la &>/dev/null", true},
+		{"gofmt -l .", true},
+
 		// Mutating / unknown / risky — keep the immediate abort.
 		{"git push origin main", false},
 		{"git branch new-branch", false},
 		{"rm -rf ./build", false},
-		{"echo hi > file.txt", false},     // redirection writes
-		{"cat a.txt; make deploy", false}, // one mutating segment poisons all
+		{"echo hi > file.txt", false},           // redirection writes
+		{"echo hi >> log.txt", false},           // append writes too
+		{"git status > status.txt 2>&1", false}, // real file target survives the strip
+		{"gofmt -w .", false},                   // in-place formatting writes files
+		{"cat a.txt; make deploy", false},       // one mutating segment poisons all
 		{"go env -w GOFLAGS=-mod=mod", false},
 		{"echo $(rm -rf /tmp/x)", false}, // command substitution hides programs
 		{"git stash pop", false},

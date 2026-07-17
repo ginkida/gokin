@@ -2,6 +2,7 @@ package tools
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -22,6 +23,12 @@ func readOnlyBashCommand(cmd string) bool {
 	if cmd == "" {
 		return false
 	}
+	// Discard stderr/null-device redirections BEFORE the '>' rejection below:
+	// `2>/dev/null`, `2>&1`, `>/dev/null` never write user files, and models
+	// append them to inspection commands constantly — a field report showed
+	// `… && git status …` loops hard-aborting the turn solely because the
+	// conservative '>' check saw the harmless tail (v0.100.91).
+	cmd = harmlessRedirectRe.ReplaceAllString(cmd, " ")
 	// Output redirection writes files; command substitution / backticks can
 	// hide arbitrary programs. Reject outright — a quoted '>' also rejects,
 	// which only costs a hint, never correctness.
@@ -40,6 +47,11 @@ func readOnlyBashCommand(cmd string) bool {
 	}
 	return true
 }
+
+// harmlessRedirectRe matches redirections that cannot write a user file:
+// any fd redirected to /dev/null (`>/dev/null`, `2>/dev/null`, `&>/dev/null`,
+// `>>/dev/null`) and the stderr-to-stdout merge `2>&1`.
+var harmlessRedirectRe = regexp.MustCompile(`(?:[012]?&?>>?\s*/dev/null|2>&1)`)
 
 // splitShellSegments naively splits on &&, ||, ; and | — quotes are NOT
 // honored, which is fine here: a separator inside quotes produces a garbage
@@ -65,7 +77,7 @@ var readOnlyPrograms = map[string]bool{
 	"whoami": true, "stat": true, "du": true, "df": true, "ps": true,
 	"date": true, "uname": true, "file": true, "diff": true, "cmp": true,
 	"sort": true, "uniq": true, "cut": true, "tr": true, "true": true,
-	"test": true, "[": true, "cd": true, "gofmt": true,
+	"test": true, "[": true, "cd": true,
 }
 
 // readOnlyGitSubcommands are git verbs that never mutate the repository.
@@ -100,6 +112,17 @@ func readOnlyProgram(fields []string) bool {
 			}
 		}
 		return false
+	case "gofmt":
+		// gofmt lists by default (read-only) but -w writes files IN PLACE.
+		// The bare map entry used to classify `gofmt -w .` as read-only —
+		// harmless in effect (recovery never re-executes), but wrong in
+		// principle: a mutating loop must keep the immediate abort.
+		for _, field := range fields[1:] {
+			if field == "-w" {
+				return false
+			}
+		}
+		return true
 	case "go":
 		if len(fields) < 2 {
 			return false
