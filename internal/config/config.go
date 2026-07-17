@@ -296,12 +296,12 @@ type ToolsConfig struct {
 	Formatters        map[string]string      `yaml:"formatters"`        // ext → command, e.g. {".py": "black"}
 	ProactiveContext  ProactiveContextConfig `yaml:"proactive_context"` // Auto-append related files to Read results.
 
-	// KimiToolBudget caps the number of tool calls the model can issue per
+	// KimiToolBudget caps the number of tool calls a hosted model can issue per
 	// user turn before the executor synthesizes "budget reached" responses
 	// and forces the model to finalize. 0 disables the cap; values <10 are
-	// clamped up by the executor. Applies to the budget-capped families —
-	// Kimi AND MiniMax (both share the runaway tool-loop failure mode);
-	// GLM/DeepSeek/Ollama are unaffected. YAML key kept for compat. Default: 40.
+	// clamped up by the executor. The historical field/YAML name is retained
+	// for compatibility, but the guard covers every hosted provider family.
+	// Ollama stays uncapped because it consumes local compute. Default: 40.
 	KimiToolBudget int `yaml:"kimi_tool_budget"`
 
 	// RequireReadBeforeEdit enforces the "model must Read before Edit"

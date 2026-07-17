@@ -38,9 +38,9 @@ func TestExecuteDirectStepUsageAggregatesRetryAndSuccess(t *testing.T) {
 	if persisted.Status != plan.StatusCompleted {
 		t.Fatalf("step status = %s, want completed (error=%q)", persisted.Status, persisted.Error)
 	}
-	assertDirectPlanUsage(t, a, persisted, 18, 7, 7)
-	if diff := math.Abs(a.totalEstimatedCost - 0.025); diff > 1e-12 {
-		t.Fatalf("totalEstimatedCost = %.12f, want 0.025", a.totalEstimatedCost)
+	assertDirectPlanUsage(t, a, persisted, 25, 7, 7)
+	if diff := math.Abs(a.totalEstimatedCost - 0.032); diff > 1e-12 {
+		t.Fatalf("totalEstimatedCost = %.12f, want 0.032", a.totalEstimatedCost)
 	}
 	if !a.costTracked {
 		t.Fatal("costTracked = false, want true for two priced attempts")
@@ -61,7 +61,7 @@ func TestExecuteDirectStepUsageCommittedBeforeVerificationPause(t *testing.T) {
 		t.Fatalf("step status = %s, want paused by unavailable verification (error=%q)",
 			persisted.Status, persisted.Error)
 	}
-	assertDirectPlanUsage(t, a, persisted, 13, 4, 2)
+	assertDirectPlanUsage(t, a, persisted, 15, 4, 2)
 }
 
 func TestExecuteDirectStepUsageCommittedOnFailedStep(t *testing.T) {
@@ -81,7 +81,7 @@ func TestExecuteDirectStepUsageCommittedOnFailedStep(t *testing.T) {
 	if persisted.Status != plan.StatusFailed {
 		t.Fatalf("step status = %s, want failed (error=%q)", persisted.Status, persisted.Error)
 	}
-	assertDirectPlanUsage(t, a, persisted, 19, 6, 5)
+	assertDirectPlanUsage(t, a, persisted, 24, 6, 5)
 }
 
 func TestExecuteDirectStepDoesNotRetryAfterToolEffects(t *testing.T) {

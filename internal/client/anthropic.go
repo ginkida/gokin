@@ -194,10 +194,14 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 
 	// Extended Thinking support
 	if enableThinking && thinkingBudget > 0 {
-		requestBody["thinking"] = map[string]any{
+		thinking := map[string]any{
 			"type":          "enabled",
 			"budget_tokens": clampThinkingBudgetBelowMax(thinkingBudget, maxTokens),
 		}
+		if c.isProvider("glm") {
+			thinking["clear_thinking"] = false
+		}
+		requestBody["thinking"] = thinking
 		// Extended thinking requires temperature=1 (Anthropic requirement)
 		requestBody["temperature"] = 1.0
 	} else if temperature > 0 {
@@ -266,10 +270,14 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 
 	// Extended Thinking support
 	if enableThinking && thinkingBudget > 0 {
-		requestBody["thinking"] = map[string]any{
+		thinking := map[string]any{
 			"type":          "enabled",
 			"budget_tokens": clampThinkingBudgetBelowMax(thinkingBudget, maxTokens),
 		}
+		if c.isProvider("glm") {
+			thinking["clear_thinking"] = false
+		}
+		requestBody["thinking"] = thinking
 		requestBody["temperature"] = 1.0
 	} else if temperature > 0 {
 		requestBody["temperature"] = temperature
@@ -2470,7 +2478,7 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]any {
 	}
 }
 
-func hasSerializableAssistantParts(parts []*genai.Part) bool {
+func (c *AnthropicClient) hasSerializableAssistantParts(parts []*genai.Part) bool {
 	for _, part := range parts {
 		if part == nil {
 			continue
@@ -2484,7 +2492,7 @@ func hasSerializableAssistantParts(parts []*genai.Part) bool {
 		if !part.Thought {
 			return true
 		}
-		if len(part.ThoughtSignature) > 0 {
+		if len(part.ThoughtSignature) > 0 || c.isProvider("glm") {
 			return true
 		}
 	}
@@ -2522,7 +2530,7 @@ func (c *AnthropicClient) requiresThinkingReplay() bool {
 // assistant turn so the sanitiser then cascades the unpaired user
 // tool_result turns.
 func (c *AnthropicClient) canSerialiseAssistantForProvider(parts []*genai.Part) bool {
-	if !hasSerializableAssistantParts(parts) {
+	if !c.hasSerializableAssistantParts(parts) {
 		return false
 	}
 	if !c.requiresThinkingReplay() {
@@ -2556,6 +2564,16 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 			continue
 		}
 		if len(part.ThoughtSignature) == 0 {
+			if c.isProvider("glm") {
+				// Z.AI streams reasoning_content without Anthropic's signature. Its
+				// compatibility gateway accepts the matching unsigned thinking block;
+				// preserving it byte-for-byte keeps reasoning continuity and cache hits.
+				content = append(content, map[string]any{
+					"type":     "thinking",
+					"thinking": part.Text,
+				})
+				continue
+			}
 			// Designed behavior (unsigned thinking is never replayable), and it
 			// fires per part per serialization — a long session logged 25+ of
 			// these in one burst, so Debug, not Warn.

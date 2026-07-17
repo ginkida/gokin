@@ -441,6 +441,19 @@ type Response struct {
 	RateLimit *RateLimitMetadata
 }
 
+// TotalInputTokens returns the complete prompt-side token count for one
+// provider response. Anthropic-compatible caching APIs report uncached input,
+// cache creation, and cache reads as disjoint fields; callers that display,
+// aggregate, rate-limit, or price the prompt must sum all three exactly once.
+func (r *Response) TotalInputTokens() int {
+	if r == nil {
+		return 0
+	}
+	return max(r.InputTokens, 0) +
+		max(r.CacheCreationInputTokens, 0) +
+		max(r.CacheReadInputTokens, 0)
+}
+
 // Collect collects all chunks from a streaming response into a single
 // Response. Parallels ProcessStream's accumulator — including the
 // FunctionCall→Parts back-fill so callers can pass Response.Parts to

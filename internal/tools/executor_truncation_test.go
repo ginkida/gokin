@@ -137,8 +137,8 @@ func TestExecutorExecuteLoop_AggregatesCacheUsageAcrossRounds(t *testing.T) {
 	}
 
 	input, output := exec.GetLastTokenUsage()
-	if input != 2200 || output != 50 {
-		t.Fatalf("token usage = (%d, %d), want aggregate (2200, 50)", input, output)
+	if input != 3900 || output != 50 {
+		t.Fatalf("token usage = (%d, %d), want full prompt aggregate (3900, 50)", input, output)
 	}
 	creation, read := exec.GetLastCacheMetrics()
 	if creation != 100 || read != 1600 {
@@ -174,8 +174,8 @@ func TestExecutorExecuteLoop_AggregatesUsageAcrossToolRounds(t *testing.T) {
 	}
 
 	input, output := exec.GetLastTokenUsage()
-	if input != 3_600 || output != 60 {
-		t.Fatalf("tool-round token usage = (%d, %d), want (3600, 60)", input, output)
+	if input != 6_375 || output != 60 {
+		t.Fatalf("tool-round token usage = (%d, %d), want (6375, 60)", input, output)
 	}
 	creation, read := exec.GetLastCacheMetrics()
 	if creation != 75 || read != 2_700 {
@@ -248,8 +248,8 @@ func TestExecutorExecuteLoop_AccountsUsageBeforeStreamError(t *testing.T) {
 		t.Fatal("Execute() error = nil, want stream failure")
 	}
 	input, output := exec.GetLastTokenUsage()
-	if input != 1_000 || output != 25 {
-		t.Fatalf("partial-error usage = (%d,%d), want (1000,25)", input, output)
+	if input != 1_800 || output != 25 {
+		t.Fatalf("partial-error usage = (%d,%d), want full prompt (1800,25)", input, output)
 	}
 	creation, read := exec.GetLastCacheMetrics()
 	if creation != 100 || read != 700 {

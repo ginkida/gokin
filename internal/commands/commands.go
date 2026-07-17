@@ -21,12 +21,15 @@ import (
 
 // TokenStats holds token usage statistics for the session.
 type TokenStats struct {
-	InputTokens          int
-	OutputTokens         int
-	CacheReadInputTokens int
-	TotalTokens          int
-	EstimatedCost        float64
-	CostTracked          bool
+	InputTokens                int
+	OutputTokens               int
+	CacheCreationInputTokens   int
+	CacheReadInputTokens       int
+	PromptCacheBreaks          int
+	LastPromptCacheBreakReason string
+	TotalTokens                int
+	EstimatedCost              float64
+	CostTracked                bool
 }
 
 // Command represents a slash command.

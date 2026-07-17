@@ -27,20 +27,21 @@ func TestRecordResponseUsageIncludesCachedInput(t *testing.T) {
 		CacheReadInputTokens: 8_000,
 	})
 	a.recordResponseUsageLocked(&client.Response{
-		InputTokens:          12_000,
-		OutputTokens:         600,
-		CacheReadInputTokens: 20_000, // malformed metadata is clamped per round
+		InputTokens:              12_000,
+		OutputTokens:             600,
+		CacheReadInputTokens:     20_000,
+		CacheCreationInputTokens: 1_000,
 	})
 	a.stateMu.Unlock()
 
-	if a.usageInputTokens != 22_000 {
-		t.Fatalf("input usage = %d, want 22000 (cached input must remain included)", a.usageInputTokens)
+	if a.usageInputTokens != 51_000 {
+		t.Fatalf("input usage = %d, want 51000 (raw + cache read + creation)", a.usageInputTokens)
 	}
 	if a.usageOutputTokens != 1_100 {
 		t.Fatalf("output usage = %d, want 1100", a.usageOutputTokens)
 	}
-	if a.usageCacheReadTokens != 20_000 {
-		t.Fatalf("cache-read usage = %d, want 20000", a.usageCacheReadTokens)
+	if a.usageCacheReadTokens != 28_000 {
+		t.Fatalf("cache-read usage = %d, want 28000", a.usageCacheReadTokens)
 	}
 }
 
@@ -69,7 +70,7 @@ func TestRecordResponseUsagePricesEachProviderRound(t *testing.T) {
 
 	a.stateMu.Lock()
 	a.recordResponseUsageLocked(&client.Response{
-		InputTokens:          1_000_000,
+		InputTokens:          0,
 		CacheReadInputTokens: 1_000_000,
 	}) // cached GLM-5 input: $0.20
 	identified.provider = "kimi"
@@ -127,7 +128,7 @@ func TestAgentResultAccountsUsageBeforeStreamError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run() error = nil, want stream failure")
 	}
-	if result.InputTokens != 1_000 || result.OutputTokens != 25 || result.CacheReadInputTokens != 700 {
+	if result.InputTokens != 1_700 || result.OutputTokens != 25 || result.CacheReadInputTokens != 700 {
 		t.Fatalf("partial-error agent result = %+v", result)
 	}
 	if !result.CostTracked || result.EstimatedCost <= 0 {

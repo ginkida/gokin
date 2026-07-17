@@ -216,11 +216,12 @@ type App struct {
 	commandHandler *commands.Handler
 
 	// Token tracking
-	totalInputTokens     int
-	totalOutputTokens    int
-	totalCacheReadTokens int
-	totalEstimatedCost   float64
-	costTracked          bool
+	totalInputTokens         int
+	totalOutputTokens        int
+	totalCacheCreationTokens int
+	totalCacheReadTokens     int
+	totalEstimatedCost       float64
+	costTracked              bool
 
 	// Response metadata tracking
 	responseStartTime    time.Time
@@ -2804,6 +2805,7 @@ func (a *App) ClearConversationChecked() error {
 	a.mu.Lock()
 	a.totalInputTokens = 0
 	a.totalOutputTokens = 0
+	a.totalCacheCreationTokens = 0
 	a.totalCacheReadTokens = 0
 	a.totalEstimatedCost = 0
 	a.costTracked = false
@@ -3156,15 +3158,24 @@ func (a *App) shortActiveProviderName() string {
 
 // GetTokenStats returns token usage statistics for the session.
 func (a *App) GetTokenStats() commands.TokenStats {
+	var promptCache client.CacheStats
+	if a.executor != nil {
+		if tracker := a.executor.GetCacheTracker(); tracker != nil {
+			promptCache = tracker.GetStats()
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return commands.TokenStats{
-		InputTokens:          a.totalInputTokens,
-		OutputTokens:         a.totalOutputTokens,
-		CacheReadInputTokens: a.totalCacheReadTokens,
-		TotalTokens:          a.totalInputTokens + a.totalOutputTokens,
-		EstimatedCost:        a.totalEstimatedCost,
-		CostTracked:          a.costTracked,
+		InputTokens:                a.totalInputTokens,
+		OutputTokens:               a.totalOutputTokens,
+		CacheCreationInputTokens:   a.totalCacheCreationTokens,
+		CacheReadInputTokens:       a.totalCacheReadTokens,
+		PromptCacheBreaks:          promptCache.CacheBreaks,
+		LastPromptCacheBreakReason: promptCache.LastBreakReason,
+		TotalTokens:                a.totalInputTokens + a.totalOutputTokens,
+		EstimatedCost:              a.totalEstimatedCost,
+		CostTracked:                a.costTracked,
 	}
 }
 

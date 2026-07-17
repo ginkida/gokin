@@ -386,14 +386,9 @@ type Executor struct {
 	goDiagnosticsTimeout  time.Duration
 	goDiagnosticsStalled  atomic.Bool
 
-	// Kimi-specific per-turn tool budget. 0 disables the check; stagnation
-	// detection still runs. Set via SetKimiToolBudget from app/builder.
-	// Only enforced when the active model is in the "kimi" family — GLM/
-	// MiniMax/Ollama don't see this limit. Rationale: Kimi's tool-call
-	// enthusiasm routinely balloons to 50+ calls on a single task, and
-	// stagnation detection only catches identical repeats, not diverse
-	// over-exploration. A hard cap forces finalization before the context
-	// budget is eaten alive.
+	// Hosted-provider per-turn tool budget. The field/setter retain their legacy
+	// Kimi names for config compatibility. Stagnation only catches identical
+	// repeats; this cap also catches diverse runaway exploration. 0 disables it.
 	kimiToolBudget int
 
 	// Optional deep-compressor for structured function-response fields.
@@ -750,10 +745,10 @@ func (e *Executor) SetSelfReviewThreshold(n int) {
 	}
 }
 
-// SetKimiToolBudget sets the per-turn tool call cap applied to Kimi-family
-// models. n <= 0 disables the cap entirely. Values below 10 are clamped
-// up because a Kimi turn that can only make 9 tool calls will under-deliver
-// on legitimate multi-step tasks.
+// SetKimiToolBudget sets the per-turn tool call cap applied to hosted models.
+// The legacy name is kept for source/config compatibility. n <= 0 disables
+// the cap entirely. Values below 10 are clamped up so legitimate multi-step
+// tasks retain enough room to finish.
 func (e *Executor) SetKimiToolBudget(n int) {
 	if n <= 0 {
 		e.kimiToolBudget = 0
@@ -1198,6 +1193,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// Claude-Code contract nudge for Kimi/DeepSeek-class models that start
 	// mutating across multiple tool calls without using todo.
 	todoNudgeInjected := false
+	// Once the hosted-provider tool budget is reached, give the model one
+	// separately billed round to synthesize a final answer. If it ignores that
+	// instruction and emits tools again, pair those calls with synthetic errors
+	// locally and stop without paying for an unbounded sequence of reminders.
+	toolBudgetFinalizationRounds := 0
 	amnesiaWarned := map[string]bool{}
 	stagnationRecoveries := map[string]int{}
 	coverage := newExecutorCoverageTracker(e.workDir)
@@ -1231,15 +1231,16 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		calculator := e.costCalculator
 		e.tokenMu.Unlock()
 		cost, costTracked := 0.0, false
+		promptInput := resp.TotalInputTokens()
 		if calculator != nil {
-			cost, costTracked = calculator(provider, model, resp.InputTokens, resp.OutputTokens, resp.CacheReadInputTokens)
+			cost, costTracked = calculator(provider, model, promptInput, resp.OutputTokens, resp.CacheReadInputTokens)
 		}
 
 		e.tokenMu.Lock()
 		e.lastProvider = provider
 		e.lastModel = model
-		if resp.InputTokens > 0 {
-			e.lastInputTokens += resp.InputTokens
+		if promptInput > 0 {
+			e.lastInputTokens += promptInput
 		}
 		if resp.OutputTokens > 0 {
 			e.lastOutputTokens += resp.OutputTokens
@@ -1405,24 +1406,28 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			recentToolPatterns = append(recentToolPatterns, pattern)
 
 			var results []*genai.FunctionResponse
+			budgetStopAfterPair := false
 
-			// Kimi-specific tool budget: cap total tool calls per turn to
+			// Hosted-provider tool budget: cap total tool calls per turn to
 			// prevent runaway exploration. Unlike stagnation (which catches
 			// identical repeats), this catches diverse-but-wasteful fan-out.
 			// We count already-consumed calls in toolsUsed, not toolsUsed +
 			// current batch, so Kimi gets to finish a small final batch if
 			// it's right at the edge — the clamp is on the NEXT batch.
 			if e.shouldEnforceKimiToolBudget(cl.GetModel(), len(toolsUsed)-len(resp.FunctionCalls)) {
-				logging.Warn("kimi tool budget exceeded: forcing finalization",
+				toolBudgetFinalizationRounds++
+				logging.Warn("hosted model tool budget exceeded: forcing finalization",
 					"budget", e.kimiToolBudget,
 					"consumed", len(toolsUsed)-len(resp.FunctionCalls),
-					"model", cl.GetModel())
+					"model", cl.GetModel(),
+					"finalization_round", toolBudgetFinalizationRounds)
 				if e.handler != nil && e.handler.OnWarning != nil {
 					e.handler.OnWarning(fmt.Sprintf(
-						"Kimi tool budget (%d) reached — forcing final answer instead of running %d more tools",
+						"Tool budget (%d) reached — forcing final answer instead of running %d more tools",
 						e.kimiToolBudget, len(resp.FunctionCalls)))
 				}
 				results = e.buildKimiToolBudgetExhaustedResults(resp.FunctionCalls)
+				budgetStopAfterPair = toolBudgetFinalizationRounds > 1
 			}
 
 			// Stagnation detection: if the same tool pattern repeats too many times, abort
@@ -1661,6 +1666,18 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			historyBeforeResults := len(history)
 			history = append(history, funcResultContent)
+
+			// The model ignored the first "finalize now" response. The current
+			// assistant tool_use entries are now paired in history, so it is safe to
+			// end locally. Sending another model request here recreates the runaway
+			// quota burn this guard exists to stop.
+			if budgetStopAfterPair {
+				resp.FunctionCalls = nil
+				resp.Text = fmt.Sprintf(
+					"Stopped after %d tool calls: the model continued requesting tools after the per-turn budget and finalization reminder. The completed work is preserved; ask me to continue in a new turn if more work is needed.",
+					len(toolsUsed))
+				break
+			}
 
 			// Send function responses back to model.
 			// Pass history without the just-appended tool results since
@@ -3832,15 +3849,19 @@ func shouldAttemptStagnationRecovery(calls []*genai.FunctionCall, attempts int) 
 }
 
 // toolBudgetFamilies are the model families subject to the per-turn tool cap.
-// Kimi and MiniMax share the runaway failure mode the budget guards against
-// (the config comment always promised both; the check only matched Kimi —
-// fixed post-v0.87.0). The YAML key stays `kimi_tool_budget` for compat.
-var toolBudgetFamilies = map[string]bool{"kimi": true, "minimax": true}
+// Hosted providers share the quota-burning runaway mode this guard prevents.
+// The YAML key stays `kimi_tool_budget` for backwards compatibility.
+var toolBudgetFamilies = map[string]bool{
+	"anthropic": true,
+	"deepseek":  true,
+	"glm":       true,
+	"kimi":      true,
+	"minimax":   true,
+}
 
 // shouldEnforceKimiToolBudget reports whether the per-turn tool budget cap
-// has been reached for the currently active budget-capped model family
-// (Kimi, MiniMax — see toolBudgetFamilies). Other models and a disabled
-// budget (0) always return false. `consumed` is the count of tool calls
+// has been reached for the currently active hosted model family. Local models
+// and a disabled budget (0) always return false. `consumed` is the count of tool calls
 // already executed in this turn before the current batch — callers pass
 // len(toolsUsed)-len(newCalls) so the cap applies to the NEXT batch rather
 // than trimming an in-flight one.
@@ -3848,7 +3869,11 @@ func (e *Executor) shouldEnforceKimiToolBudget(model string, consumed int) bool 
 	if e == nil || e.kimiToolBudget <= 0 {
 		return false
 	}
-	if !toolBudgetFamilies[client.GetModelProfile(model).Family] {
+	family := client.GetModelProfile(model).Family
+	// Anthropic model IDs are not enumerated in the local model-profile table;
+	// recognize their stable public prefix rather than silently leaving the
+	// native hosted provider uncapped.
+	if !toolBudgetFamilies[family] && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-") {
 		return false
 	}
 	return consumed >= e.kimiToolBudget

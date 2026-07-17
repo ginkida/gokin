@@ -455,7 +455,8 @@ func (b *Builder) initTools() error {
 	if threshold := b.cfg.Tools.SmartValidation.SelfReviewThreshold; threshold > 0 {
 		b.executor.SetSelfReviewThreshold(threshold)
 	}
-	// Per-turn Kimi tool budget — 0 disables, clamp-up happens in the setter.
+	// Per-turn hosted-model tool budget. The config field retains its legacy
+	// Kimi name; 0 disables and clamp-up happens in the setter.
 	b.executor.SetKimiToolBudget(b.cfg.Tools.KimiToolBudget)
 
 	compactor := appcontext.NewResultCompactor(b.cfg.Context.ToolResultMaxChars)

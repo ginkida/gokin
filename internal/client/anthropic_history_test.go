@@ -90,6 +90,42 @@ func TestBuildAssistantMessage_EmitsSignedThinkingBeforeToolUse(t *testing.T) {
 	}
 }
 
+func TestBuildAssistantMessage_GLMReplaysUnsignedThinkingBeforeToolUse(t *testing.T) {
+	c := &AnthropicClient{config: AnthropicConfig{Provider: "glm", BaseURL: DefaultGLMBaseURL}}
+
+	msg := c.buildAssistantMessage([]*genai.Part{
+		{Thought: true, Text: "preserve this reasoning exactly"},
+		{FunctionCall: &genai.FunctionCall{ID: "tool_glm", Name: "read"}},
+	})
+	content := extractContentArray(msg["content"])
+	if len(content) != 2 {
+		t.Fatalf("content len = %d, want thinking + tool_use", len(content))
+	}
+	if got := stringFromMap(content[0], "type"); got != "thinking" {
+		t.Fatalf("content[0].type = %q, want thinking", got)
+	}
+	if got := stringFromMap(content[0], "thinking"); got != "preserve this reasoning exactly" {
+		t.Fatalf("thinking = %q", got)
+	}
+	if _, hasSignature := content[0]["signature"]; hasSignature {
+		t.Fatal("GLM unsigned reasoning unexpectedly gained a signature")
+	}
+}
+
+func TestConvertHistoryToMessages_GLMKeepsUnsignedThinkingOnlyTurn(t *testing.T) {
+	c := &AnthropicClient{config: AnthropicConfig{Provider: "glm", BaseURL: DefaultGLMBaseURL}}
+	history := []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{
+		{Thought: true, Text: "standalone preserved reasoning"},
+	}}}
+	messages := c.convertHistoryToMessages(history, "continue")
+	if len(messages) != 2 {
+		t.Fatalf("messages len = %d, want preserved assistant + user", len(messages))
+	}
+	if got := stringFromMap(messages[0], "role"); got != "assistant" {
+		t.Fatalf("first role = %q, want assistant", got)
+	}
+}
+
 func TestConvertHistoryWithResults_OrdersToolResultBeforeNotificationText(t *testing.T) {
 	c := &AnthropicClient{}
 

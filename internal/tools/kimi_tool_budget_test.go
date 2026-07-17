@@ -26,16 +26,15 @@ func TestShouldEnforceKimiToolBudget_DisabledWhenZero(t *testing.T) {
 
 func TestShouldEnforceKimiToolBudget_BudgetedFamiliesOnly(t *testing.T) {
 	e := &Executor{kimiToolBudget: 10}
-	// glm/deepseek/ollama are not budget-capped families.
-	for _, model := range []string{"glm-5.1", "deepseek-v4-pro", "llama3"} {
-		if e.shouldEnforceKimiToolBudget(model, 100) {
-			t.Errorf("budget applied to non-budgeted model %s", model)
+	// Every hosted family is quota-capped.
+	for _, model := range []string{"claude-sonnet-4", "glm-5.2", "deepseek-v4-pro", "kimi-for-coding", "MiniMax-M2.7"} {
+		if !e.shouldEnforceKimiToolBudget(model, 100) {
+			t.Errorf("budget not applied to hosted model %s", model)
 		}
 	}
-	// MiniMax shares Kimi's runaway failure mode — the config comment always
-	// promised the cap for both; the check used to match only Kimi.
-	if !e.shouldEnforceKimiToolBudget("MiniMax-M2.7", 100) {
-		t.Errorf("budget must apply to MiniMax family")
+	// Local Ollama inference does not consume a hosted quota.
+	if e.shouldEnforceKimiToolBudget("llama3", 100) {
+		t.Errorf("budget must not apply to local Ollama family")
 	}
 	if e.shouldEnforceKimiToolBudget("MiniMax-M2.7", 5) {
 		t.Errorf("MiniMax under budget must not fire")
@@ -224,7 +223,7 @@ func TestExecutorExecuteLoop_KimiToolBudgetZeroKeepsAllCalls(t *testing.T) {
 	}
 }
 
-func TestExecutorExecuteLoop_NonKimiIgnoresBudget(t *testing.T) {
+func TestExecutorExecuteLoop_GLMUsesHostedBudget(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
 	if err := registry.Register(readTool); err != nil {
@@ -244,7 +243,7 @@ func TestExecutorExecuteLoop_NonKimiIgnoresBudget(t *testing.T) {
 
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
-	exec.kimiToolBudget = 3 // tight budget, but model family is GLM
+	exec.kimiToolBudget = 3
 
 	_, finalText, err := exec.Execute(context.Background(), nil, "survey Go files")
 	if err != nil {
@@ -253,8 +252,45 @@ func TestExecutorExecuteLoop_NonKimiIgnoresBudget(t *testing.T) {
 	if finalText != "GLM ran all four." {
 		t.Fatalf("finalText = %q, want %q", finalText, "GLM ran all four.")
 	}
-	if readTool.calls != 4 {
-		t.Errorf("GLM should ignore Kimi budget; expected 4 reads, got %d", readTool.calls)
+	if readTool.calls != 3 {
+		t.Errorf("GLM should stop executing at hosted budget; got %d reads", readTool.calls)
+	}
+}
+
+func TestExecutorExecuteLoop_BudgetStopsLocallyWhenFinalizeIgnored(t *testing.T) {
+	registry := NewRegistry()
+	readTool := &scriptedReadTool{}
+	if err := registry.Register(readTool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	cl := &scriptedExecutorClient{
+		model: "glm-5.2",
+		responses: []*client.StreamingResponse{
+			buildKimiBudgetReadStream("g0", "a.go"),
+			buildKimiBudgetReadStream("g1", "b.go"),
+			buildKimiBudgetReadStream("g2", "c.go"),
+			buildKimiBudgetReadStream("g3", "d.go"), // first synthetic guard response
+			buildKimiBudgetReadStream("g4", "e.go"), // ignores finalize; stop locally
+		},
+	}
+
+	exec := NewExecutor(registry, cl, time.Second)
+	exec.preFlightChecks = false
+	exec.kimiToolBudget = 3
+
+	_, finalText, err := exec.Execute(context.Background(), nil, "survey Go files")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(finalText, "Stopped after") || !strings.Contains(finalText, "ask me to continue") {
+		t.Fatalf("finalText = %q, want honest local budget stop", finalText)
+	}
+	if readTool.calls != 3 {
+		t.Fatalf("read tool calls = %d, want only first 3", readTool.calls)
+	}
+	if len(cl.functionResults) != 4 {
+		t.Fatalf("provider function rounds = %d, want 4 (3 real + 1 finalize)", len(cl.functionResults))
 	}
 }
 

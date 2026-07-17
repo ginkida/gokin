@@ -69,10 +69,10 @@ func TestAccumulateTurnTokenUsageMixedProviderAndFallback(t *testing.T) {
 	a := &App{}
 
 	// A provider-reported turn is a true per-request delta.
-	a.accumulateTurnTokenUsage(10_000, 10_000, 500, 8_000)
+	a.accumulateTurnTokenUsage(10_000, 10_000, 500, 0, 8_000)
 	// The next response omits usage. Its local context estimate is smaller
 	// than the already accumulated billable total and must not erase it.
-	a.accumulateTurnTokenUsage(0, 9_000, 100, 0)
+	a.accumulateTurnTokenUsage(0, 9_000, 100, 0, 0)
 
 	stats := a.GetTokenStats()
 	if stats.InputTokens != 10_000 {
@@ -84,7 +84,7 @@ func TestAccumulateTurnTokenUsageMixedProviderAndFallback(t *testing.T) {
 
 	// A later fallback estimate can raise the lower bound as the context grows,
 	// but it still is not added as though it were a provider delta.
-	a.accumulateTurnTokenUsage(0, 12_000, 50, 20_000)
+	a.accumulateTurnTokenUsage(0, 12_000, 50, 0, 20_000)
 	stats = a.GetTokenStats()
 	if stats.InputTokens != 20_000 || stats.OutputTokens != 650 {
 		t.Fatalf("grown fallback stats = %+v", stats)
@@ -97,13 +97,16 @@ func TestAccumulateTurnTokenUsageMixedProviderAndFallback(t *testing.T) {
 
 func TestCommitSessionUsagePersistsTerminalAttempt(t *testing.T) {
 	a := &App{}
-	cost, tracked := a.commitSessionUsage(1_000, 1_000, 25, 700, 0.42, true)
+	cost, tracked := a.commitSessionUsage(1_000, 1_000, 25, 100, 700, 0.42, true)
 	if !tracked || cost != 0.42 {
 		t.Fatalf("committed cost = tracked %v cost %v", tracked, cost)
 	}
 	stats := a.GetTokenStats()
 	if stats.InputTokens != 1_000 || stats.OutputTokens != 25 || stats.CacheReadInputTokens != 700 {
 		t.Fatalf("terminal-attempt stats = %+v", stats)
+	}
+	if stats.CacheCreationInputTokens != 100 {
+		t.Fatalf("cache creation = %d, want 100", stats.CacheCreationInputTokens)
 	}
 	if !stats.CostTracked || stats.EstimatedCost != 0.42 {
 		t.Fatalf("terminal-attempt ledger = tracked %v cost %v",

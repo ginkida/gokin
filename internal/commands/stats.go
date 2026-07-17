@@ -43,12 +43,29 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 	sb.WriteString(strings.Repeat("─", 50))
 	sb.WriteString("\n\n")
 
-	// Token Usage
+	// Token Usage. InputTokens is the full prompt-side total; the cache fields
+	// are subsets/partitions reported separately for transparency.
 	sb.WriteString("Tokens\n")
-	fmt.Fprintf(&sb, "  Input Tokens:     %s\n", formatNumber(int64(tokenStats.InputTokens)))
+	fmt.Fprintf(&sb, "  Prompt Input:     %s\n", formatNumber(int64(tokenStats.InputTokens)))
 	fmt.Fprintf(&sb, "  Output Tokens:    %s\n", formatNumber(int64(tokenStats.OutputTokens)))
 	if tokenStats.CacheReadInputTokens > 0 {
 		fmt.Fprintf(&sb, "  Cached Input:     %s\n", formatNumber(int64(tokenStats.CacheReadInputTokens)))
+	}
+	if tokenStats.CacheCreationInputTokens > 0 {
+		fmt.Fprintf(&sb, "  Cache Created:    %s\n", formatNumber(int64(tokenStats.CacheCreationInputTokens)))
+	}
+	if tokenStats.InputTokens > 0 {
+		uncached := max(tokenStats.InputTokens-tokenStats.CacheReadInputTokens, 0)
+		fmt.Fprintf(&sb, "  Uncached Input:   %s\n", formatNumber(int64(uncached)))
+		fmt.Fprintf(&sb, "  Prompt Cache Hit: %.1f%%\n",
+			100*float64(tokenStats.CacheReadInputTokens)/float64(tokenStats.InputTokens))
+	}
+	if tokenStats.PromptCacheBreaks > 0 {
+		fmt.Fprintf(&sb, "  Cache Breaks:     %d", tokenStats.PromptCacheBreaks)
+		if tokenStats.LastPromptCacheBreakReason != "" {
+			fmt.Fprintf(&sb, " (%s)", tokenStats.LastPromptCacheBreakReason)
+		}
+		sb.WriteByte('\n')
 	}
 	fmt.Fprintf(&sb, "  Total Tokens:     %s\n", formatNumber(int64(tokenStats.TotalTokens)))
 
@@ -83,7 +100,7 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 		fmt.Fprintf(&sb, "  Summaries:       %d\n", summary.Summaries)
 		fmt.Fprintf(&sb, "  Tokens Processed: %s\n", formatNumber(summary.TokensProcessed))
 		fmt.Fprintf(&sb, "  Tokens Saved:     %s\n", formatNumber(summary.TokensSaved))
-		fmt.Fprintf(&sb, "  Cache Hit Rate:  %.1f%%\n\n", summary.CacheHitRate*100)
+		fmt.Fprintf(&sb, "  Summary Cache Hit: %.1f%%\n\n", summary.CacheHitRate*100)
 	} else {
 		sb.WriteString("  (context manager not available)\n\n")
 	}

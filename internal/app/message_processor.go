@@ -379,10 +379,6 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			a.executor.SetSideEffectDedup(false)
 		}
 
-		// Track prompt cache state for cache break detection
-		if ct := a.executor.GetCacheTracker(); ct != nil {
-			ct.RecordState(a.session.GetSystemInstruction(), "")
-		}
 	}
 
 	// Reset stale in_progress todos from previous turn.
@@ -407,6 +403,19 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 	// Keep dynamic system instruction in sync (contract/memory/hints can change between turns).
 	a.refreshSystemInstruction()
+
+	// Record the exact post-refresh cacheable state. The old call ran before
+	// refresh and passed an empty tools payload, so it detected system changes a
+	// turn late and could never diagnose MCP/tool-schema cache breaks.
+	if a.executor != nil {
+		if ct := a.executor.GetCacheTracker(); ct != nil {
+			toolsJSON, err := json.Marshal(a.getActiveToolDeclarations())
+			if err != nil {
+				logging.Debug("failed to serialize tools for prompt-cache tracking", "error", err)
+			}
+			ct.RecordState(a.session.GetSystemInstruction(), string(toolsJSON))
+		}
+	}
 
 	// Prepare context (check tokens, optimize if needed)
 	if a.contextManager != nil {
@@ -1192,7 +1201,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	// defensive fallback for focused test seams/custom routers that return a
 	// response without publishing usage.
 	if turnUsage.empty() && (estimatedContextInput > 0 || response != "") {
-		turnUsage.add(0, 0, 0, estimatedContextInput, response, 0, false)
+		turnUsage.add(0, 0, 0, 0, estimatedContextInput, response, 0, false)
 	}
 
 	// Session totals back /stats and /cost. Provider-reported values are true
@@ -1320,12 +1329,13 @@ func resolveTurnTokenUsage(apiInput, apiOutput, cacheRead, estimatedContextInput
 // resolved input/output are additive and are therefore suitable for a single
 // headless invocation, including retries and internal review calls.
 type turnUsageAccumulator struct {
-	apiInput    int
-	input       int
-	output      int
-	cacheRead   int
-	cost        float64
-	costTracked bool
+	apiInput      int
+	input         int
+	output        int
+	cacheCreation int
+	cacheRead     int
+	cost          float64
+	costTracked   bool
 	// costIncomplete is true when at least one sample had no provider price.
 	// A mixed priced/unpriced invocation must not advertise a partial sum as a
 	// fully tracked cost.
@@ -1334,7 +1344,7 @@ type turnUsageAccumulator struct {
 }
 
 func (u *turnUsageAccumulator) add(
-	apiInput, apiOutput, cacheRead, estimatedInput int,
+	apiInput, apiOutput, cacheCreation, cacheRead, estimatedInput int,
 	response string,
 	cost float64,
 	costTracked bool,
@@ -1347,6 +1357,7 @@ func (u *turnUsageAccumulator) add(
 	u.apiInput += max(apiInput, 0)
 	u.input += input
 	u.output += output
+	u.cacheCreation += max(cacheCreation, 0)
 	u.cacheRead += cached
 	if costTracked {
 		u.cost += max(cost, 0)
@@ -1366,7 +1377,7 @@ func (u *turnUsageAccumulator) commit(a *App) (float64, bool) {
 		return 0, false
 	}
 	cost, tracked := a.commitSessionUsage(
-		u.apiInput, u.input, u.output, u.cacheRead, u.cost, u.costTracked)
+		u.apiInput, u.input, u.output, u.cacheCreation, u.cacheRead, u.cost, u.costTracked)
 	if !tracked || (u.costTracked && u.costIncomplete) {
 		a.markHeadlessCostIncomplete()
 		tracked = false
@@ -1401,9 +1412,9 @@ func (a *App) executeTracked(
 			return
 		}
 		input, output := a.executor.GetLastTokenUsage()
-		_, cacheRead := a.executor.GetLastCacheMetrics()
+		cacheCreation, cacheRead := a.executor.GetLastCacheMetrics()
 		cost, tracked := a.executor.GetLastEstimatedCost()
-		usage.add(input, output, cacheRead, estimatedInput, response, cost, tracked)
+		usage.add(input, output, cacheCreation, cacheRead, estimatedInput, response, cost, tracked)
 	}()
 	return a.executor.Execute(ctx, history, prompt)
 }
@@ -1414,7 +1425,7 @@ func (a *App) executeTracked(
 // context size, not a delta; it therefore acts only as a lower bound. Using a
 // plain assignment for the fallback made totals go backwards when a provider
 // omitted usage after earlier turns had reported it.
-func (a *App) accumulateTurnTokenUsage(apiInput, turnInput, turnOutput, cacheRead int) {
+func (a *App) accumulateTurnTokenUsage(apiInput, turnInput, turnOutput, cacheCreation, cacheRead int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -1439,6 +1450,7 @@ func (a *App) accumulateTurnTokenUsage(apiInput, turnInput, turnOutput, cacheRea
 		a.totalInputTokens = turnInput
 	}
 	a.totalOutputTokens += turnOutput
+	a.totalCacheCreationTokens += max(cacheCreation, 0)
 	a.totalCacheReadTokens += cacheRead
 	// Cached input is a subset of billable input. Some compatible providers
 	// expose cache metrics even when the ordinary input field is absent; keep
@@ -1451,12 +1463,12 @@ func (a *App) accumulateTurnTokenUsage(apiInput, turnInput, turnOutput, cacheRea
 // commitSessionUsage applies one top-level request's aggregate usage and cost
 // exactly once. It is shared by success and terminal-error paths so retries do
 // not disappear merely because the final attempt failed.
-func (a *App) commitSessionUsage(apiInput, turnInput, output, cacheRead int, cost float64, costTracked bool) (float64, bool) {
+func (a *App) commitSessionUsage(apiInput, turnInput, output, cacheCreation, cacheRead int, cost float64, costTracked bool) (float64, bool) {
 	apiInput = max(apiInput, 0)
 	turnInput = max(turnInput, 0)
 	output = max(output, 0)
 	cacheRead = min(max(cacheRead, 0), turnInput)
-	a.accumulateTurnTokenUsage(apiInput, turnInput, output, cacheRead)
+	a.accumulateTurnTokenUsage(apiInput, turnInput, output, cacheCreation, cacheRead)
 
 	if !costTracked && a.contextManager != nil {
 		if tc := a.contextManager.GetTokenCounter(); tc != nil {

@@ -23,7 +23,7 @@ func (a *Agent) recordResponseUsageLocked(resp *client.Response) {
 	if resp == nil {
 		return
 	}
-	input := max(resp.InputTokens, 0)
+	input := resp.TotalInputTokens()
 	cacheRead := min(max(resp.CacheReadInputTokens, 0), input)
 	a.usageInputTokens += input
 	a.usageOutputTokens += max(resp.OutputTokens, 0)
