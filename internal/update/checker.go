@@ -22,6 +22,11 @@ type Checker struct {
 	repo       string
 	cacheDir   string
 	config     *Config
+	// baseURL is the GitHub API root. It is a field (not a const) so tests
+	// can point the checker at an httptest server and exercise the real
+	// GetLatestRelease/GetReleases/GetReleaseByTag wrappers instead of
+	// reimplementing their logic inline.
+	baseURL string
 }
 
 // NewChecker creates a new version checker.
@@ -48,12 +53,13 @@ func NewChecker(config *Config, cacheDir string) *Checker {
 		repo:       config.GitHubRepo,
 		cacheDir:   cacheDir,
 		config:     config,
+		baseURL:    "https://api.github.com",
 	}
 }
 
 // GetLatestRelease fetches the latest release from GitHub.
 func (c *Checker) GetLatestRelease(ctx context.Context) (*ReleaseInfo, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", c.repo)
+	url := fmt.Sprintf("%s/repos/%s/releases/latest", c.baseURL, c.repo)
 
 	release, err := c.fetchRelease(ctx, url)
 	if err != nil {
@@ -87,7 +93,7 @@ func (c *Checker) getLatestStableRelease(ctx context.Context) (*ReleaseInfo, err
 
 // GetReleases fetches multiple releases from GitHub.
 func (c *Checker) GetReleases(ctx context.Context, limit int) ([]ReleaseInfo, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=%d", c.repo, limit)
+	url := fmt.Sprintf("%s/repos/%s/releases?per_page=%d", c.baseURL, c.repo, limit)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -116,7 +122,7 @@ func (c *Checker) GetReleases(ctx context.Context, limit int) ([]ReleaseInfo, er
 
 // GetReleaseByTag fetches a specific release by tag.
 func (c *Checker) GetReleaseByTag(ctx context.Context, tag string) (*ReleaseInfo, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", c.repo, tag)
+	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", c.baseURL, c.repo, tag)
 	return c.fetchRelease(ctx, url)
 }
 
