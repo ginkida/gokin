@@ -99,12 +99,25 @@ func newKimiProviderError(status int, retryAfter time.Duration, errType, provide
 	}
 }
 
+// kimiQuotaPhrases are the official Kimi Code messages signalling HARD
+// subscription quota exhaustion (5-hour/monthly window) as opposed to
+// transient 429 engine overload. Single edit point: if Kimi rewords these,
+// update ONLY this slice — kimi_error_taxonomy_test.go pins the classifier.
+var kimiQuotaPhrases = []string{
+	"usage limit for this billing cycle",
+	"usage limit for this period",
+	"monthly usage limit",
+	"quota exhausted",
+	"quota has been fully",
+}
+
 func kimiQuotaExhausted(message string) bool {
-	return strings.Contains(message, "usage limit for this billing cycle") ||
-		strings.Contains(message, "usage limit for this period") ||
-		strings.Contains(message, "monthly usage limit") ||
-		strings.Contains(message, "quota exhausted") ||
-		strings.Contains(message, "quota has been fully")
+	for _, phrase := range kimiQuotaPhrases {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func kimiStatusFromErrorType(errType string) int {
