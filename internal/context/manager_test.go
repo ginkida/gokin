@@ -64,7 +64,7 @@ func TestContextManager_ObserveAPIUsageIsAuthoritative(t *testing.T) {
 		lastUsage: &TokenUsage{InputTokens: 100, MaxTokens: 1_000_000, IsEstimate: true},
 	}
 
-	m.ObserveAPIUsage(144_400)
+	m.ObserveAPIUsage(144_400, 1_200)
 	usage := m.GetTokenUsage()
 	if usage.InputTokens != 144_400 {
 		t.Fatalf("InputTokens = %d, want API value 144400", usage.InputTokens)
@@ -72,8 +72,72 @@ func TestContextManager_ObserveAPIUsageIsAuthoritative(t *testing.T) {
 	if usage.IsEstimate {
 		t.Fatal("provider-reported usage must be authoritative")
 	}
+	if usage.OutputTokens != 1_200 {
+		t.Fatalf("OutputTokens = %d, want provider value 1200", usage.OutputTokens)
+	}
 	if usage.PercentUsed != 0.1444 {
 		t.Fatalf("PercentUsed = %v, want 0.1444", usage.PercentUsed)
+	}
+}
+
+func TestUpdateTokenCountPreservesProviderMeasurementForSameHistory(t *testing.T) {
+	mc := testkit.NewMockClient()
+	sess := chat.NewSession()
+	sess.SetHistory([]*genai.Content{
+		genai.NewContentFromText("completed request", genai.RoleUser),
+		genai.NewContentFromText("completed response", genai.RoleModel),
+	})
+	m := NewContextManager(context.Background(), sess, mc, &config.ContextConfig{MaxInputTokens: 1_000_000})
+
+	// GLM's stream reports these exact values. The local mock counter is an
+	// estimate and deliberately returns a very different number.
+	m.ObserveAPIUsage(59_600, 1_250)
+	if err := m.UpdateTokenCount(context.Background()); err != nil {
+		t.Fatalf("UpdateTokenCount: %v", err)
+	}
+	assertExact := func(stage string) {
+		t.Helper()
+		usage := m.GetTokenUsage()
+		if usage.InputTokens != 59_600 || usage.OutputTokens != 1_250 || usage.IsEstimate {
+			t.Fatalf("%s usage = %+v, want exact provider 59600 +1250", stage, usage)
+		}
+	}
+	assertExact("first refresh")
+
+	// A duplicate refresh of identical history used to flicker back to ≈.
+	if err := m.UpdateTokenCount(context.Background()); err != nil {
+		t.Fatalf("second UpdateTokenCount: %v", err)
+	}
+	assertExact("second refresh")
+
+	// Once history genuinely changes without a new provider measurement, the
+	// old exact value is stale; falling back to a marked estimate is honest.
+	sess.SetHistory(append(sess.GetHistory(), genai.NewContentFromText("new draft", genai.RoleUser)))
+	if err := m.UpdateTokenCount(context.Background()); err != nil {
+		t.Fatalf("changed-history UpdateTokenCount: %v", err)
+	}
+	usage := m.GetTokenUsage()
+	if !usage.IsEstimate {
+		t.Fatalf("changed history reused stale provider measurement: %+v", usage)
+	}
+	if usage.OutputTokens != 0 {
+		t.Fatalf("changed history retained stale output tail: %+v", usage)
+	}
+}
+
+func TestProviderOutputEstimateStaysMarkedUntilExactUsageArrives(t *testing.T) {
+	m := &ContextManager{tokenCounter: &TokenCounter{limits: TokenLimits{MaxInputTokens: 1_000_000}}}
+	m.ObserveAPIUsage(59_600)
+	m.ObserveOutputEstimate(1_300)
+	usage := m.GetTokenUsage()
+	if usage.OutputTokens != 1_300 || !usage.IsEstimate {
+		t.Fatalf("live output estimate = %+v, want 1300 with estimate marker", usage)
+	}
+
+	m.ObserveAPIUsage(59_600, 1_250)
+	usage = m.GetTokenUsage()
+	if usage.OutputTokens != 1_250 || usage.IsEstimate {
+		t.Fatalf("provider final output did not replace estimate: %+v", usage)
 	}
 }
 

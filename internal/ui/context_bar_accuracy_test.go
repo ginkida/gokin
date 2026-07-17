@@ -44,3 +44,33 @@ func TestContextBarLabelShowsEstimateAndLiveOutput(t *testing.T) {
 		t.Fatalf("label = %q, want tokens/max plus the +N streaming tail", label)
 	}
 }
+
+func TestProviderMeasuredContextRemainsExactAfterHealthRefresh(t *testing.T) {
+	m := NewModel()
+	apply := func(msg interface{}) {
+		updated, _ := m.Update(msg)
+		*m = updated.(Model)
+	}
+	apply(TokenUsageMsg{
+		Tokens: 59_600, OutputTokens: 1_250, MaxTokens: 1_000_000,
+		PercentUsed: 0.0596, IsEstimate: false,
+	})
+	apply(ContextHealthMsg{TotalTokens: 59_600, MaxTokens: 1_000_000, PercentUsed: 0.0596})
+
+	if m.tokenUsage == nil || m.tokenUsage.IsEstimate {
+		t.Fatalf("provider measurement became estimated: %+v", m.tokenUsage)
+	}
+	if m.tokenUsage.OutputTokens != 1_250 {
+		t.Fatalf("exact completion tail was lost: %+v", m.tokenUsage)
+	}
+	rendered := stripAnsi(renderContextBar(
+		m.getContextPercent(), 16, m.tokenUsage.Tokens, m.tokenUsage.MaxTokens,
+		m.tokenUsage.OutputTokens, m.tokenUsage.IsEstimate,
+	))
+	if strings.Contains(rendered, "≈") {
+		t.Fatalf("exact provider measurement rendered as estimate: %q", rendered)
+	}
+	if !strings.Contains(rendered, "59.6K/1.0M +1.2K") {
+		t.Fatalf("provider prompt/output split missing: %q", rendered)
+	}
+}

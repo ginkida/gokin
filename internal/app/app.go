@@ -2577,11 +2577,12 @@ func (a *App) sendTokenUsageUpdate() {
 	}
 
 	a.safeSendToProgram(ui.TokenUsageMsg{
-		Tokens:      usage.InputTokens,
-		MaxTokens:   usage.MaxTokens,
-		PercentUsed: usage.PercentUsed,
-		NearLimit:   usage.NearLimit,
-		IsEstimate:  usage.IsEstimate,
+		Tokens:       usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		MaxTokens:    usage.MaxTokens,
+		PercentUsed:  usage.PercentUsed,
+		NearLimit:    usage.NearLimit,
+		IsEstimate:   usage.IsEstimate,
 	})
 
 	// Also send full health data for observatory if context tracking is active

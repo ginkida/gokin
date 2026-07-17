@@ -655,6 +655,29 @@ func TestTokenCounter_hashContents_DifferentContent(t *testing.T) {
 	}
 }
 
+func TestTokenCounterHashContentsIncludesProviderRelevantPartMetadata(t *testing.T) {
+	tc := NewTokenCounter(nil, "glm-5.2", nil)
+	base := []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{
+		Thought: true, Text: "reasoning", ThoughtSignature: []byte("sig-a"),
+		FunctionCall: &genai.FunctionCall{ID: "call-a", Name: "read", Args: map[string]any{"path": "a.go"}},
+	}}}}
+	changedID := []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{
+		Thought: true, Text: "reasoning", ThoughtSignature: []byte("sig-a"),
+		FunctionCall: &genai.FunctionCall{ID: "call-b", Name: "read", Args: map[string]any{"path": "a.go"}},
+	}}}}
+	changedSignature := []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{
+		Thought: true, Text: "reasoning", ThoughtSignature: []byte("sig-b"),
+		FunctionCall: &genai.FunctionCall{ID: "call-a", Name: "read", Args: map[string]any{"path": "a.go"}},
+	}}}}
+	baseHash := tc.hashContents(base)
+	if baseHash == tc.hashContents(changedID) {
+		t.Fatal("tool-call ID change aliased in token-count history key")
+	}
+	if baseHash == tc.hashContents(changedSignature) {
+		t.Fatal("thought-signature change aliased in token-count history key")
+	}
+}
+
 // --- detectContentType ---
 
 func TestDetectContentType_Prose(t *testing.T) {

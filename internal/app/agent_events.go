@@ -221,7 +221,7 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 				return
 			}
 			if a.contextManager != nil {
-				a.contextManager.ObserveAPIUsage(inputTokens)
+				a.contextManager.ObserveAPIUsage(inputTokens, outputTokens)
 			}
 			maxTokens := 0
 			if a.contextManager != nil {
@@ -331,6 +331,9 @@ func (p *tuiPresenter) StreamThinking(text string) {
 
 func (p *tuiPresenter) StreamTokenEstimate(estimatedTokens int) {
 	if p.app.program != nil {
+		if p.app.contextManager != nil {
+			p.app.contextManager.ObserveOutputEstimate(estimatedTokens)
+		}
 		p.app.safeSendToProgram(ui.StreamTokenUpdateMsg{
 			EstimatedOutputTokens: estimatedTokens,
 		})
@@ -437,11 +440,21 @@ func (p *tuiPresenter) LoopIteration(iteration, toolsUsed int) {
 
 func (p *tuiPresenter) TokenUsage(inputTokens, maxTokens int, percentUsed float64) {
 	if p.app.program != nil {
+		outputTokens := 0
+		isEstimate := false
+		if p.app.contextManager != nil {
+			if usage := p.app.contextManager.GetTokenUsage(); usage != nil {
+				outputTokens = usage.OutputTokens
+				isEstimate = usage.IsEstimate
+			}
+		}
 		p.app.safeSendToProgram(ui.TokenUsageMsg{
-			Tokens:      inputTokens,
-			MaxTokens:   maxTokens,
-			PercentUsed: percentUsed,
-			NearLimit:   percentUsed > 0.8,
+			Tokens:       inputTokens,
+			OutputTokens: outputTokens,
+			MaxTokens:    maxTokens,
+			PercentUsed:  percentUsed,
+			NearLimit:    percentUsed > 0.8,
+			IsEstimate:   isEstimate,
 		})
 	}
 }

@@ -58,6 +58,17 @@ type ContextManager struct {
 	lastUsage     *TokenUsage
 	updateVersion uint64 // Monotonically increasing version to prevent stale watcher updates
 
+	// Provider usage is the only exact GLM token measurement available on the
+	// Anthropic-compatible endpoint. Keep the newest prompt/completion split and
+	// bind it to the post-turn history snapshot so a subsequent local
+	// CountTokens estimate cannot immediately overwrite an exact measurement.
+	observedAPIGeneration   uint64
+	appliedAPIGeneration    uint64
+	observedAPIInput        int
+	observedAPIOutput       int
+	observedOutputEstimated bool
+	authoritativeHistoryKey string
+
 	// Async token counting
 	lastEstimatedTokens int // Cached estimate for fast path
 	lastHistoryLen      int // History length at last count
@@ -681,7 +692,8 @@ func (m *ContextManager) GetTokenUsage() *TokenUsage {
 	if m.lastUsage == nil {
 		return &TokenUsage{}
 	}
-	return m.lastUsage
+	usage := *m.lastUsage
+	return &usage
 }
 
 // GetCurrentTokens returns the current token count.
@@ -694,6 +706,7 @@ func (m *ContextManager) GetCurrentTokens() int {
 // UpdateTokenCount updates the token count after a request.
 func (m *ContextManager) UpdateTokenCount(ctx context.Context) error {
 	history := m.session.GetHistory()
+	historyKey := m.tokenCounter.hashContents(history)
 
 	tokens, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(ctx, history)
 	if err != nil {
@@ -703,9 +716,24 @@ func (m *ContextManager) UpdateTokenCount(ctx context.Context) error {
 
 	m.mu.Lock()
 	m.updateVersion++ // Invalidate any in-flight watcher updates
-	m.currentTokens = tokens
 	usage := m.tokenCounter.GetUsage(tokens)
 	usage.IsEstimate = isEstimate
+	if isEstimate && m.observedAPIGeneration > m.appliedAPIGeneration {
+		// The provider measured the request that produced the history snapshot
+		// we have just committed. Preserve its exact prompt/completion split.
+		m.appliedAPIGeneration = m.observedAPIGeneration
+		m.authoritativeHistoryKey = historyKey
+		usage = m.tokenCounter.GetUsage(m.observedAPIInput)
+		usage.OutputTokens = m.observedAPIOutput
+		usage.IsEstimate = m.observedOutputEstimated
+	} else if isEstimate && historyKey != "" && historyKey == m.authoritativeHistoryKey {
+		// Repeated UI/config refresh of the same history must stay stable and
+		// exact instead of flickering back to the character heuristic.
+		usage = m.tokenCounter.GetUsage(m.observedAPIInput)
+		usage.OutputTokens = m.observedAPIOutput
+		usage.IsEstimate = m.observedOutputEstimated
+	}
+	m.currentTokens = usage.InputTokens
 	m.lastUsage = &usage
 	m.mu.Unlock()
 
@@ -715,17 +743,47 @@ func (m *ContextManager) UpdateTokenCount(ctx context.Context) error {
 // ObserveAPIUsage records prompt usage reported by the provider for an actual
 // request. It is the highest-quality measurement available and supersedes any
 // in-flight local count for an older snapshot.
-func (m *ContextManager) ObserveAPIUsage(inputTokens int) {
+func (m *ContextManager) ObserveAPIUsage(inputTokens int, outputTokens ...int) {
 	if inputTokens <= 0 {
 		return
+	}
+	output := 0
+	if len(outputTokens) > 0 {
+		output = max(outputTokens[0], 0)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.updateVersion++
+	m.observedAPIGeneration++
+	m.observedAPIInput = inputTokens
+	m.observedAPIOutput = output
+	m.observedOutputEstimated = false
 	m.currentTokens = inputTokens
 	usage := m.tokenCounter.GetUsage(inputTokens)
+	usage.OutputTokens = output
 	usage.IsEstimate = false
+	m.lastUsage = &usage
+}
+
+// ObserveOutputEstimate attaches the live character-based completion estimate
+// to the latest exact provider prompt measurement. Providers normally replace
+// it with final output_tokens; if one omits that terminal field, the UI keeps
+// the useful tail but truthfully retains the ≈ marker.
+func (m *ContextManager) ObserveOutputEstimate(outputTokens int) {
+	if outputTokens <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.observedAPIInput <= 0 {
+		return
+	}
+	m.observedAPIOutput = outputTokens
+	m.observedOutputEstimated = true
+	usage := m.tokenCounter.GetUsage(m.observedAPIInput)
+	usage.OutputTokens = outputTokens
+	usage.IsEstimate = true
 	m.lastUsage = &usage
 }
 

@@ -181,11 +181,11 @@ type (
 
 	TokenUsageMsg struct {
 		Tokens       int
-		OutputTokens int // Tokens generated in the current response (streaming estimate)
+		OutputTokens int // Completion tail: estimated while streaming, provider-measured when available
 		MaxTokens    int
 		PercentUsed  float64
 		NearLimit    bool
-		IsEstimate   bool // True when the provider or fallback used local estimation
+		IsEstimate   bool // True when any displayed usage component is locally estimated
 	}
 	ProjectInfoMsg struct {
 		ProjectType string

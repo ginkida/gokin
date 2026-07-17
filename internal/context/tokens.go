@@ -144,6 +144,7 @@ type TokenLimits struct {
 // TokenUsage represents current token usage statistics.
 type TokenUsage struct {
 	InputTokens  int
+	OutputTokens int // Exact/estimated completion tail projected into the next request
 	MaxTokens    int
 	PercentUsed  float64
 	NearLimit    bool
@@ -540,23 +541,23 @@ func (t *TokenCounter) hashContents(contents []*genai.Content) string {
 	}
 	for _, content := range contents {
 		h.Write([]byte(content.Role))
+		h.Write([]byte{0})
 		for _, part := range content.Parts {
-			if part.Text != "" {
-				h.Write([]byte(part.Text))
+			// Hash the complete serialized part: tool-call IDs, thought
+			// signatures, media and scheduling fields all affect the provider
+			// request and sometimes its token count. The old hand-picked fields
+			// let distinct histories alias in both the count cache and the
+			// provider-measurement provenance key.
+			if encoded, err := json.Marshal(part); err == nil {
+				h.Write(encoded)
+			} else if part != nil {
+				// Unsupported custom values in Args/Response should disable useful
+				// equality, not collapse every such part to the same empty key.
+				h.Write([]byte(fmt.Sprintf("%#v", part)))
 			}
-			if part.FunctionCall != nil {
-				h.Write([]byte(part.FunctionCall.Name))
-				if argsJSON, err := json.Marshal(part.FunctionCall.Args); err == nil {
-					h.Write(argsJSON)
-				}
-			}
-			if part.FunctionResponse != nil {
-				h.Write([]byte(part.FunctionResponse.Name))
-				if respJSON, err := json.Marshal(part.FunctionResponse.Response); err == nil {
-					h.Write(respJSON)
-				}
-			}
+			h.Write([]byte{0})
 		}
+		h.Write([]byte{0xff})
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
