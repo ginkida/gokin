@@ -22,8 +22,8 @@ func TestRequiresThinkingReplay_ProviderMatrix(t *testing.T) {
 		// Anthropic native — strict.
 		{"anthropic native + thinking", DefaultAnthropicBaseURL, true, true},
 		{"empty url (anthropic default) + thinking", "", true, true},
-		// Kimi — tolerates missing thinking blocks.
-		{"kimi + thinking", "https://api.kimi.com/coding", true, false},
+		// Kimi — strict for assistant tool-call turns: reasoning_content is required.
+		{"kimi + thinking", "https://api.kimi.com/coding", true, true},
 		// MiniMax — tolerates.
 		{"minimax + thinking", "https://api.minimax.io/anthropic", true, false},
 		// GLM — tolerates.
@@ -79,9 +79,11 @@ func TestCanSerialiseAssistantForProvider_DropsUnsignedThinkingForStrictProvider
 	}
 }
 
-// Same input on a tolerant provider (Kimi) must still serialise —
-// Kimi accepts messages without thinking-block replay.
-func TestCanSerialiseAssistantForProvider_TolerantProviderAllowsUnsignedThinking(t *testing.T) {
+// Kimi documents `thinking is enabled but reasoning_content is missing` for
+// assistant tool calls. An unsigned thought therefore makes the whole turn
+// unserialisable, just like DeepSeek; keeping the tool_use while dropping the
+// thought would deterministically 400 the next request.
+func TestCanSerialiseAssistantForProvider_KimiDropsUnsignedThinking(t *testing.T) {
 	kimi := &AnthropicClient{
 		config: AnthropicConfig{
 			BaseURL:        "https://api.kimi.com/coding",
@@ -92,8 +94,8 @@ func TestCanSerialiseAssistantForProvider_TolerantProviderAllowsUnsignedThinking
 		{Thought: true, Text: "let me think"}, // no signature
 		{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "read"}},
 	}
-	if !kimi.canSerialiseAssistantForProvider(parts) {
-		t.Error("Kimi should tolerate unsigned thinking (tool_use still serialisable)")
+	if kimi.canSerialiseAssistantForProvider(parts) {
+		t.Error("Kimi must reject an unsigned-thinking assistant tool turn")
 	}
 }
 

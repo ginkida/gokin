@@ -26,4 +26,8 @@ func TestKimiK3LimitsAndPricing(t *testing.T) {
 	if p.CachedInputCostPer1M != 0.30 {
 		t.Fatalf("k3 cache-read pricing = %v, want 0.30", p.CachedInputCostPer1M)
 	}
+	k27 := DefaultPricing["kimi-for-coding"]
+	if k27.CachedInputCostPer1M != 0.19 {
+		t.Fatalf("K2.7 cache-read pricing = %v, want 0.19", k27.CachedInputCostPer1M)
+	}
 }

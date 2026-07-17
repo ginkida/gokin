@@ -515,6 +515,7 @@ func TestMessageIndicatesContextOverflow(t *testing.T) {
 		"token limit exceeded",
 		"maximum tokens reached",
 		"too many tokens",
+		"total message size 5943865 exceeds limit 2097152",
 	}
 	for _, msg := range positive {
 		if !messageIndicatesContextOverflow(msg) {

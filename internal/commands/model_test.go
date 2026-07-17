@@ -133,6 +133,20 @@ func TestModelCommand_ModelMatchingIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestModelCommand_KimiSwitchWarnsAboutModelSpecificCache(t *testing.T) {
+	app := newModelApp("kimi", "kimi-for-coding")
+	out, err := (&ModelCommand{}).Execute(context.Background(), []string{"k3"}, app)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(out, "invalidates the prompt cache") || !strings.Contains(out, "/clear") {
+		t.Fatalf("Kimi switch did not explain the cache boundary:\n%s", out)
+	}
+	if app.clearCalls != 0 {
+		t.Fatalf("same-provider Kimi switch cleared conversation without consent")
+	}
+}
+
 func TestModelCommand_CrossProviderDeepSeekModelSwitch(t *testing.T) {
 	app := newModelApp("glm", "glm-5.1")
 	app.fakeAppForMCP.cfg.API.DeepSeekKey = "sk-deepseek-test-key-for-unit-test-12345"

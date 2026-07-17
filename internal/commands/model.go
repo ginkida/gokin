@@ -181,6 +181,12 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 	if providerSwitched {
 		return fmt.Sprintf("Switched to %s (%s) on %s — session cleared", modelName, matchedModel, matchedProvider), nil
 	}
+	if matchedProvider == "kimi" {
+		// Kimi documents that a model switch invalidates the model-specific
+		// context cache. Keep same-provider history by user choice, but make the
+		// expensive first re-prefill explicit instead of looking like a cache bug.
+		return fmt.Sprintf("Switched to %s (%s) — Kimi model switch invalidates the prompt cache; use /clear for a fresh, lower-cost session", modelName, matchedModel), nil
+	}
 	return fmt.Sprintf("Switched to %s (%s)", modelName, matchedModel), nil
 }
 

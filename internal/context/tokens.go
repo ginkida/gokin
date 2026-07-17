@@ -130,10 +130,11 @@ var DefaultPricing = map[string]ModelPricing{
 	// Kimi public API pricing (USD / 1M tokens). Coding Plan users may be
 	// subscription-billed, but this keeps /cost close for paygo and custom
 	// Moonshot endpoint usage. K3: $3 input / $0.30 cache-read / $15 output.
-	"k3":              {InputCostPer1M: 3.00, CachedInputCostPer1M: 0.30, OutputCostPer1M: 15.00},
-	"kimi-for-coding": {InputCostPer1M: 0.95, OutputCostPer1M: 4.00},
-	"kimi-k2.6":       {InputCostPer1M: 0.95, OutputCostPer1M: 4.00},
-	"kimi":            {InputCostPer1M: 0.95, OutputCostPer1M: 4.00}, // fallback
+	"k3":                        {InputCostPer1M: 3.00, CachedInputCostPer1M: 0.30, OutputCostPer1M: 15.00},
+	"kimi-for-coding-highspeed": {InputCostPer1M: 0.95, CachedInputCostPer1M: 0.19, OutputCostPer1M: 4.00},
+	"kimi-for-coding":           {InputCostPer1M: 0.95, CachedInputCostPer1M: 0.19, OutputCostPer1M: 4.00},
+	"kimi-k2.6":                 {InputCostPer1M: 0.95, CachedInputCostPer1M: 0.19, OutputCostPer1M: 4.00},
+	"kimi":                      {InputCostPer1M: 0.95, CachedInputCostPer1M: 0.19, OutputCostPer1M: 4.00}, // fallback
 
 	// DeepSeek V4 — public pricing as of May 2026 (USD / 1M tokens).
 	// Legacy chat/reasoner retained until 2026-07-24.

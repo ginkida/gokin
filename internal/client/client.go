@@ -21,7 +21,7 @@ const (
 	DefaultGLMBaseURL       = "https://api.z.ai/api/anthropic"
 	DefaultMiniMaxBaseURL   = "https://api.minimax.io/anthropic"
 	// DefaultKimiBaseURL points at Kimi Coding Plan's Anthropic-compatible
-	// endpoint — the subscription tier required for kimi-k2.6 and coding-
+	// endpoint — the subscription tier required for K3/K2.7 coding-
 	// optimized inference. Keys for this endpoint are `sk-kimi-...` (distinct
 	// from the Moonshot Developer Platform keys). Users who explicitly want
 	// the Moonshot Developer API can override via `model.custom_base_url:

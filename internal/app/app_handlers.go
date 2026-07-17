@@ -488,6 +488,9 @@ func (a *App) applyModelSelection(modelID string) ui.ModelSelectResultMsg {
 	result.Success = true
 	result.ModelID = modelID
 	result.Message = "Switched to " + modelID
+	if candidate.Model.Provider == "kimi" && previous.Model.Name != modelID {
+		result.Message += " · Kimi model switch invalidates the prompt cache; use /clear for a fresh, lower-cost session"
+	}
 	return result
 }
 

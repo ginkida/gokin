@@ -204,8 +204,16 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 		requestBody["thinking"] = thinking
 		// Extended thinking requires temperature=1 (Anthropic requirement)
 		requestBody["temperature"] = 1.0
-	} else if temperature > 0 {
-		requestBody["temperature"] = temperature
+	} else {
+		// Kimi models default to reasoning even when the field is omitted.
+		// `/thinking off` and an adaptive easy turn therefore need an explicit
+		// disable marker; omission would make the UI/config lie about behavior.
+		if c.isProvider("kimi") {
+			requestBody["thinking"] = map[string]any{"type": "disabled"}
+		}
+		if temperature > 0 {
+			requestBody["temperature"] = temperature
+		}
 	}
 
 	if len(tools) > 0 {
@@ -279,8 +287,13 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 		}
 		requestBody["thinking"] = thinking
 		requestBody["temperature"] = 1.0
-	} else if temperature > 0 {
-		requestBody["temperature"] = temperature
+	} else {
+		if c.isProvider("kimi") {
+			requestBody["thinking"] = map[string]any{"type": "disabled"}
+		}
+		if temperature > 0 {
+			requestBody["temperature"] = temperature
+		}
 	}
 
 	if len(tools) > 0 {
@@ -1404,6 +1417,9 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 				}
 			}
 		}
+		if c.isProvider("kimi") {
+			return nil, newKimiHTTPError(resp.StatusCode, retryAfter, body)
+		}
 		return nil, &HTTPError{
 			StatusCode: resp.StatusCode,
 			RetryAfter: retryAfter,
@@ -1897,7 +1913,11 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 			errType := stringFromMap(errData, "type")
 			errMsg := stringFromMap(errData, "message")
 			logging.Error("API error event", "type", errType, "message", errMsg)
-			chunk.Error = fmt.Errorf("API error: %s - %s", errType, errMsg)
+			if c.isProvider("kimi") {
+				chunk.Error = newKimiProviderError(0, 0, errType, errMsg)
+			} else {
+				chunk.Error = fmt.Errorf("API error: %s - %s", errType, errMsg)
+			}
 			chunk.Done = true
 		}
 
@@ -2503,8 +2523,9 @@ func (c *AnthropicClient) hasSerializableAssistantParts(parts []*genai.Part) boo
 // requests that omit thinking blocks from prior assistant turns when
 // Extended Thinking is enabled. DeepSeek is strict: "The
 // content[].thinking in the thinking mode must be passed back to the
-// API." Anthropic native treats the same way. Kimi accepts missing
-// thinking blocks silently.
+// API." Anthropic native and Kimi Code treat the same way. Kimi documents
+// `thinking is enabled but reasoning_content is missing` for an assistant
+// tool-call message whose preserved reasoning was not replayed.
 //
 // Used by convertHistoryWithResultsAndSystem / convertHistoryToMessages
 // to refuse to serialise an assistant turn whose thinking parts are
@@ -2521,7 +2542,7 @@ func (c *AnthropicClient) requiresThinkingReplay() bool {
 	if c.config.BaseURL == DefaultAnthropicBaseURL || c.config.BaseURL == "" {
 		return true
 	}
-	return c.isProvider("deepseek")
+	return c.isProvider("deepseek") || c.isProvider("kimi")
 }
 
 // canSerialiseAssistantForProvider tightens hasSerializableAssistantParts

@@ -59,9 +59,9 @@ var knownModelProfiles = map[string]ModelProfile{
 	"glm-4":       {Family: "glm", ContextWindow: 128000, SupportsTools: true},
 	"glm":         {Family: "glm", ContextWindow: 128000, SupportsTools: true},
 
-	// Kimi family — Coding Plan exposes only kimi-for-coding (Kimi K2.6).
-	// Older IDs are retained as profile aliases so legacy configs still
-	// match a sane profile before the config-migration rewrites them.
+	// Kimi family — K3 flagship plus the stable K2.7 Coding Plan IDs.
+	// Older IDs remain aliases so legacy configs still match a sane profile
+	// before config migration rewrites them.
 	"k3":                        {Family: "kimi", ContextWindow: 1048576, SupportsTools: true, IsCoding: true},
 	"kimi-for-coding-highspeed": {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
 	"kimi-for-coding":           {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},

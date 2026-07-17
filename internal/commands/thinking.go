@@ -13,7 +13,7 @@ import (
 // or disabled and lets users tune its token budget at runtime — this changes
 // model behavior/cost, not merely whether reasoning text is displayed.
 //
-// Background: Kimi Coding Plan (K2.6) and GLM 4.7+ both emit `thinking_delta`
+// Background: Kimi Coding Plan (K3/K2.7) and GLM 4.7+ both emit `thinking_delta`
 // SSE events that the TUI renders as dim italic content. Whether they fire is
 // controlled by `cfg.Model.EnableThinking` + `cfg.Model.ThinkingBudget`; the
 // factory auto-enables thinking for supported models, but users may want to

@@ -492,12 +492,12 @@ func TestCalculateCostWithCache_GLM(t *testing.T) {
 	}
 }
 
-func TestCalculateCostWithCache_UnknownCachedRateUsesInputRate(t *testing.T) {
+func TestCalculateCostWithCache_KimiUsesPublishedCacheRate(t *testing.T) {
 	tc := NewTokenCounter(nil, "kimi-for-coding", nil)
 	withoutCache := tc.CalculateCostWithCache(1_000_000, 0, 0)
 	withCache := tc.CalculateCostWithCache(1_000_000, 0, 1_000_000)
-	if withCache != withoutCache {
-		t.Fatalf("unknown cached rate changed cost: cached=%v normal=%v", withCache, withoutCache)
+	if withoutCache != 0.95 || withCache != 0.19 {
+		t.Fatalf("Kimi cost = cached %v / normal %v, want 0.19 / 0.95", withCache, withoutCache)
 	}
 }
 

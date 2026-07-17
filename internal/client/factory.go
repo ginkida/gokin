@@ -26,8 +26,8 @@ var (
 // on moderately complex tasks. Users can override via cfg.Model.ThinkingBudget.
 const defaultGLMThinkingBudget = 8192
 
-// defaultKimiThinkingBudget mirrors the GLM default for Kimi Coding Plan
-// (K2.6). The Coding Plan endpoint implements Anthropic's Extended Thinking
+// defaultKimiThinkingBudget mirrors the GLM default for Kimi Coding Plan.
+// The Coding Plan endpoint implements Anthropic's Extended Thinking
 // protocol, so the TUI gets dim-italic "thinking" content streamed via
 // thinking_delta events. 8192 tokens is enough for multi-step plans without
 // blowing through the subscription budget on short tasks.
@@ -511,7 +511,7 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 	// Kimi may pause longer between chunks on complex tool chains.
 	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "kimi", 120*time.Second, 5*time.Minute)
 
-	// Kimi Coding Plan (K2.6) supports Extended Thinking. Enable by default
+	// Kimi Coding Plan models support Extended Thinking. Enable by default
 	// if the user hasn't explicitly configured it — the dim-italic reasoning
 	// content is exactly the signal users want when they see the model pause
 	// between tool calls. Mirrors the GLM auto-enable path above.
@@ -547,8 +547,8 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 }
 
 // supportsKimiThinking returns true for Kimi models that implement Extended
-// Thinking on the Coding Plan endpoint. K2.6 (kimi-for-coding) does; the
-// prefix match covers any future K2.x variant served at api.kimi.com/coding.
+// Thinking on the Coding Plan endpoint. K3 and the stable K2.7 coding IDs do;
+// the prefix match also covers compatible future variants.
 func supportsKimiThinking(modelID string) bool {
 	m := strings.ToLower(modelID)
 	// K3 always reasons and emits SIGNED thinking on the Anthropic-compat

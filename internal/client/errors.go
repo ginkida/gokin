@@ -430,6 +430,13 @@ func IsContextTooLongError(err error) bool {
 // Real overflows reliably say "context", "too long"/"too large", or pair "token"
 // with a limit/exceed/maximum qualifier; a bare "maximum" or bare "token" does not.
 func messageIndicatesContextOverflow(msg string) bool {
+	// Kimi Code enforces a separate 2 MB serialized-message ceiling and says
+	// `total message size N exceeds limit 2097152`. This is recoverable by the
+	// same history compaction as a token-window overflow.
+	if strings.Contains(msg, "message size") &&
+		(strings.Contains(msg, "exceed") || strings.Contains(msg, "limit")) {
+		return true
+	}
 	if strings.Contains(msg, "context") ||
 		strings.Contains(msg, "too long") ||
 		strings.Contains(msg, "too large") {

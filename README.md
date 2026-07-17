@@ -47,7 +47,7 @@ Five providers, one interface: **Kimi, GLM, MiniMax, DeepSeek** (via Anthropic-c
 | Stack | Cost | Best For |
 |-------|------|----------|
 | **Gokin + DeepSeek V4** | Pay-per-use | **Recommended** — 1M context, top SWE-bench reasoning, prompt caching (95% savings) |
-| **Gokin + Kimi Coding Plan** | Subscription | 262K context, thinking + tool use, coding-tuned |
+| **Gokin + Kimi Coding Plan** | Subscription | K3: up to 1M context; K2.7: 256K, thinking + tool use |
 | **Gokin + GLM Coding Plan** | ~$3/month | **Default** — GLM-5.2, 1M context, extended thinking |
 | **Gokin + MiniMax** | Pay-per-use | 200K context, strong on agentic coding |
 | **Gokin + Ollama** | Free | Privacy, offline, no API costs |
@@ -161,7 +161,7 @@ Physical tool restriction — plan mode limits the model to read-only tools (rea
 - `/cost` and `/stats` commands
 
 ### Prompt Caching
-- `cache_control` breakpoints for Kimi, MiniMax, and DeepSeek — up to 90% input cost savings
+- `cache_control` breakpoints for Kimi, MiniMax, and DeepSeek — Kimi cache hits are priced at 10–20% of ordinary input
 - System prompt, tools, and conversation prefix cached
 
 ### Extended Thinking
@@ -231,7 +231,7 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 | Provider | Models | Context | Cost ($/1M tokens) |
 |----------|--------|---------|---------------------|
 | **DeepSeek** | `deepseek-v4-pro`, `v4-flash`, `chat`, `reasoner` | 1M input, 384K output | Pro $0.44/$0.87, Flash $0.14/$0.28 |
-| **Kimi** | `kimi-for-coding` | 262K input, 32K output | $0.95/$4.00 |
+| **Kimi** | `k3`, `kimi-for-coding`, `kimi-for-coding-highspeed` | K3: up to 1M; K2.7: 256K | K3 $3/$15, K2.7 $0.95/$4 |
 | **GLM** | `glm-5.2`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.5` | 5.2: 1M input, 131K output | 5.2/5.1: $4/$16, 5: $1/$4 |
 | **MiniMax** | `MiniMax-M2.7`, `M2.7-highspeed`, `M2.5`, `M2.5-highspeed` | 200K input, 16K output | M2.7: $0.30/$1.20 |
 | **Ollama** | Any local model | Varies | Free |
@@ -243,11 +243,15 @@ GLM Coding Plan users can enable the first-party `web_search_prime` tool with `/
 Switch anytime:
 ```
 /provider deepseek    →  /model deepseek-v4-pro
-/provider kimi        →  /model kimi-for-coding
+/provider kimi        →  /model k3
 /provider glm         →  /model glm-5.2
 /provider minimax     →  /model MiniMax-M2.7
 /provider ollama      →  /model llama3.2
 ```
+
+Kimi's prompt cache is model-specific. After switching between `k3`, Standard,
+and HighSpeed, start a fresh session with `/clear` to avoid re-prefilling a long
+history under the new model.
 
 ---
 
