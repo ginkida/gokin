@@ -71,7 +71,16 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  204800,
 		MaxOutputTokens: 16384,
 	},
-	// Kimi — Coding Plan, 262K window
+	// Kimi Coding Plan. K3 flagship = 1M window; K2.7 (kimi-for-coding*) =
+	// 256K. Per-model entries win over the "kimi" family fallback.
+	"k3": {
+		MaxInputTokens:  1048576,
+		MaxOutputTokens: 131072,
+	},
+	"kimi-for-coding": {
+		MaxInputTokens:  262144,
+		MaxOutputTokens: 32768,
+	},
 	"kimi": {
 		MaxInputTokens:  262144,
 		MaxOutputTokens: 32768,
@@ -118,9 +127,10 @@ var DefaultPricing = map[string]ModelPricing{
 	"MiniMax-M2.5-highspeed": {InputCostPer1M: 0.60, OutputCostPer1M: 2.40},
 	"minimax":                {InputCostPer1M: 0.30, OutputCostPer1M: 1.20}, // fallback
 
-	// Kimi K2.6 public API pricing (USD / 1M tokens). Coding Plan users
-	// may be subscription-billed, but this keeps /cost close for paygo
-	// and custom Moonshot endpoint usage.
+	// Kimi public API pricing (USD / 1M tokens). Coding Plan users may be
+	// subscription-billed, but this keeps /cost close for paygo and custom
+	// Moonshot endpoint usage. K3: $3 input / $0.30 cache-read / $15 output.
+	"k3":              {InputCostPer1M: 3.00, CachedInputCostPer1M: 0.30, OutputCostPer1M: 15.00},
 	"kimi-for-coding": {InputCostPer1M: 0.95, OutputCostPer1M: 4.00},
 	"kimi-k2.6":       {InputCostPer1M: 0.95, OutputCostPer1M: 4.00},
 	"kimi":            {InputCostPer1M: 0.95, OutputCostPer1M: 4.00}, // fallback

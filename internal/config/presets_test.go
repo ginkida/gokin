@@ -16,7 +16,7 @@ func TestApplyPreset(t *testing.T) {
 		{"balanced", true, "glm-5.2", "glm"},
 		{"creative", true, "MiniMax-M2.7", "minimax"},
 		{"ollama", true, "llama3.2", "ollama"},
-		{"kimi", true, "kimi-for-coding", "kimi"},
+		{"kimi", true, "k3", "kimi"},
 		{"glm", true, "glm-5.2", "glm"},
 		{"minimax", true, "MiniMax-M2.7", "minimax"},
 		{"nonexistent", false, "", ""},
@@ -62,7 +62,7 @@ func TestApplyPresetMaxTokens(t *testing.T) {
 	cases := map[string]int32{
 		"coding": 65536, // glm-5.2 default coding cap (headroom)
 		"fast":   65536,
-		"kimi":   32768,
+		"kimi":   65536,
 		"glm":    131072,
 		"ollama": 4096,
 	}

@@ -17,7 +17,8 @@ func (c *ModelCommand) Description() string { return "Switch AI model" }
 func (c *ModelCommand) Usage() string {
 	return `/model                  - Show current model and available models
 /model glm-5.2          - GLM-5.2 (default, 1M context, 131K output)
-/model kimi-for-coding  - Kimi K2.6 Coding Plan (262K context)
+/model k3               - Kimi K3 (Coding Plan flagship, 1M context)
+/model kimi-for-coding  - Kimi K2.7 Coding Plan (256K context)
 /model glm-5.1          - GLM-5.1 (previous flagship)
 /model glm-5            - GLM-5 (stable)
 /model glm-4.7          - GLM-4.7 (thinking-enabled)
@@ -80,10 +81,12 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		case "minimax":
 			sb.WriteString("\nExamples: /model M2.7  or  /model M2.7-highspeed  or  /model M2.5")
 		case "kimi":
-			// Kimi Coding Plan currently serves only kimi-for-coding (K2.6).
-			// Old k2.5 / k2-thinking-turbo examples pointed at the retired
-			// Moonshot Developer API and caused confusion — removed.
-			sb.WriteString("\nExample: /model kimi-for-coding  (only model on Coding Plan — K2.6, 262K context)")
+			// Kimi Coding Plan serves k3 (flagship, 1M ctx — requires
+			// Moderato+ / Allegretto+ subscription) plus the K2.7 coding
+			// models available on every tier.
+			sb.WriteString("\nExamples: /model k3  (flagship K3, 1M context, always-on reasoning)" +
+				"\n          /model kimi-for-coding  (K2.7, 256K context — all tiers)" +
+				"\n          /model kimi-for-coding-highspeed  (K2.7, faster output)")
 		case "deepseek":
 			sb.WriteString("\nExamples: /model deepseek-v4-pro  (flagship, Strong-tier, 1M ctx)" +
 				"\n          /model deepseek-v4-flash  (fast/cheap V4, 1M ctx)" +

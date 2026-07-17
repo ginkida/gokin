@@ -278,6 +278,9 @@ func TestSelectThinkingBudget_ExecutorLow(t *testing.T) {
 
 func TestIsStrongKimiCodingModel(t *testing.T) {
 	strong := []string{
+		"k3",
+		"k3-1m",
+		"kimi-k3",
 		"kimi-for-coding",
 		"kimi-for-coding-v2",
 		"kimi-k2.6",

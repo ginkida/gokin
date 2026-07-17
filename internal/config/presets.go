@@ -45,9 +45,9 @@ var ModelPresets = map[string]ModelPreset{
 	},
 	"kimi": {
 		Provider:        "kimi",
-		Name:            "kimi-for-coding",
+		Name:            "k3",
 		Temperature:     0.6,
-		MaxOutputTokens: 32768,
+		MaxOutputTokens: 65536,
 	},
 	"minimax": {
 		Provider:        "minimax",
@@ -119,7 +119,7 @@ func looksLikeDefaultModelConfig(m *ModelConfig) bool {
 	if m == nil {
 		return false
 	}
-	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "glm-5.1" || m.Name == "glm-5.2" || m.Name == "kimi-for-coding"
+	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "glm-5.1" || m.Name == "glm-5.2" || m.Name == "kimi-for-coding" || m.Name == "k3"
 	defaultMax := m.MaxOutputTokens == 0 || m.MaxOutputTokens == 131072
 	return defaultName && defaultMax
 }

@@ -551,7 +551,12 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 // prefix match covers any future K2.x variant served at api.kimi.com/coding.
 func supportsKimiThinking(modelID string) bool {
 	m := strings.ToLower(modelID)
-	return strings.HasPrefix(m, "kimi-for-coding") ||
+	// K3 always reasons and emits SIGNED thinking on the Anthropic-compat
+	// endpoint (probed 2026-07: signature_delta present, thinking:{type:
+	// enabled,budget_tokens} accepted). "k3"/"k3-*"/"kimi-k3*" plus the K2.x
+	// coding models all support Extended Thinking.
+	return m == "k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3") ||
+		strings.HasPrefix(m, "kimi-for-coding") ||
 		strings.HasPrefix(m, "kimi-k2")
 }
 

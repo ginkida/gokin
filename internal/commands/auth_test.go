@@ -209,8 +209,8 @@ func TestLogin_ValidKey_SavesAndActivates(t *testing.T) {
 	if app.applied.Model.Provider != "kimi" {
 		t.Errorf("Model.Provider = %q, want kimi", app.applied.Model.Provider)
 	}
-	if app.applied.Model.Name != "kimi-for-coding" {
-		t.Errorf("Model.Name = %q, want kimi-for-coding", app.applied.Model.Name)
+	if app.applied.Model.Name != "k3" {
+		t.Errorf("Model.Name = %q, want k3 (Kimi flagship default)", app.applied.Model.Name)
 	}
 }
 

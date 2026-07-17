@@ -69,7 +69,7 @@ var Providers = []ProviderDef{
 	{
 		Name:         "kimi",
 		DisplayName:  "Kimi Coding Plan",
-		DefaultModel: "kimi-for-coding",
+		DefaultModel: "k3",
 		// MOONSHOT_API_KEY retained as a fallback env var so users upgrading
 		// from pre-v0.69 (Moonshot Developer API era) don't suddenly find
 		// gokin unable to auto-discover their key. They'll still hit the
@@ -79,7 +79,7 @@ var Providers = []ProviderDef{
 		UsesLegacyKey: true,
 		GetKey:        func(api *APIConfig) string { return api.KimiKey },
 		SetKey:        func(api *APIConfig, key string) { api.KimiKey = key },
-		ModelPrefixes: []string{"kimi", "moonshot"},
+		ModelPrefixes: []string{"kimi", "moonshot", "k3"},
 		SetupKeyURL:   "https://kimi.com",
 		KeyValidation: KeyValidationDef{
 			URL:             "https://api.kimi.com/coding/v1/models",

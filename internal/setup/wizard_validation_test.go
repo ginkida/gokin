@@ -268,8 +268,8 @@ mcp:
 	if model["provider"] != "kimi" {
 		t.Errorf("model.provider not updated: got %v", model["provider"])
 	}
-	if model["name"] != "kimi-for-coding" {
-		t.Errorf("model.name not set to default: got %v", model["name"])
+	if model["name"] != "k3" {
+		t.Errorf("model.name not set to kimi default (k3): got %v", model["name"])
 	}
 	if model["temperature"] != 0.42 {
 		t.Errorf("model.temperature was clobbered: got %v", model["temperature"])

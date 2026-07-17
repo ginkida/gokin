@@ -16,7 +16,7 @@ func TestFallbackModelForProvider_UsesProviderNativeDefaults(t *testing.T) {
 		want     string
 	}{
 		{provider: "glm", want: "glm-5.2"},
-		{provider: "kimi", want: "kimi-for-coding"},
+		{provider: "kimi", want: "k3"},
 		{provider: "minimax", want: "MiniMax-M2.7"},
 		{provider: "deepseek", want: "deepseek-v4-pro"},
 	}

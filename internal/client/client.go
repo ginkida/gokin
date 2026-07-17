@@ -129,15 +129,31 @@ var AvailableModels = []ModelInfo{
 		Provider:    "minimax",
 		BaseURL:     DefaultMiniMaxBaseURL,
 	},
-	// Kimi Coding Plan — exposes exactly one model, `kimi-for-coding`
-	// (internal name: Kimi K2.6). 262K context, reasoning+vision+video.
-	// No other model IDs are served by api.kimi.com/coding/v1/models;
-	// previous kimi-k2.5 / kimi-k2-thinking-turbo / kimi-k2-turbo-preview
-	// entries were dead (Moonshot Developer API only) and have been removed.
+	// Kimi Coding Plan (api.kimi.com/coding). Live /v1/models (2026-07):
+	// `k3` (Kimi K3 flagship, 1M context), `kimi-for-coding` (K2.7, 256K)
+	// and `kimi-for-coding-highspeed` (K2.7 faster output). All emit SIGNED
+	// thinking on the Anthropic-compat endpoint (signature_delta), so no
+	// GLM-style unsigned preservation is needed. K3 requires a Moderato+
+	// Kimi subscription (Allegretto+ for the full 1M window); lower tiers
+	// switch to kimi-for-coding with /model.
+	{
+		ID:          "k3",
+		Name:        "Kimi K3 (Coding Plan)",
+		Description: "Flagship — 1M context, always-on reasoning + vision + video, coding-tuned",
+		Provider:    "kimi",
+		BaseURL:     DefaultKimiBaseURL,
+	},
 	{
 		ID:          "kimi-for-coding",
-		Name:        "Kimi K2.6 (Coding Plan)",
-		Description: "Flagship — 262K context, reasoning + vision + video, coding-tuned",
+		Name:        "Kimi K2.7 (Coding Plan)",
+		Description: "256K context, reasoning + vision + video, coding-tuned",
+		Provider:    "kimi",
+		BaseURL:     DefaultKimiBaseURL,
+	},
+	{
+		ID:          "kimi-for-coding-highspeed",
+		Name:        "Kimi K2.7 Highspeed (Coding Plan)",
+		Description: "Same K2.7, faster output — for latency-sensitive coding loops",
 		Provider:    "kimi",
 		BaseURL:     DefaultKimiBaseURL,
 	},

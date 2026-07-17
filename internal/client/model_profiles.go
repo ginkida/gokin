@@ -62,10 +62,12 @@ var knownModelProfiles = map[string]ModelProfile{
 	// Kimi family — Coding Plan exposes only kimi-for-coding (Kimi K2.6).
 	// Older IDs are retained as profile aliases so legacy configs still
 	// match a sane profile before the config-migration rewrites them.
-	"kimi-for-coding": {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
-	"kimi-k2.6":       {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
-	"kimi":            {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
-	"moonshot":        {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
+	"k3":                        {Family: "kimi", ContextWindow: 1048576, SupportsTools: true, IsCoding: true},
+	"kimi-for-coding-highspeed": {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
+	"kimi-for-coding":           {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
+	"kimi-k2.6":                 {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
+	"kimi":                      {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
+	"moonshot":                  {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
 
 	// Gemini family removed in v0.65 (provider gone). Five entries
 	// deleted in v0.78.30 — they were dead since the factory has no

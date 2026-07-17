@@ -222,7 +222,8 @@ func clampThinkingBudget(budget int32) int32 {
 func modelSupportsThinking(modelID string) bool {
 	m := strings.ToLower(modelID)
 	switch {
-	case strings.HasPrefix(m, "kimi-for-coding"),
+	case m == "k3", strings.HasPrefix(m, "k3-"), strings.HasPrefix(m, "kimi-k3"),
+		strings.HasPrefix(m, "kimi-for-coding"),
 		strings.HasPrefix(m, "kimi-k2"):
 		return true
 	case strings.HasPrefix(m, "glm-5"),

@@ -113,6 +113,13 @@ func isStrongDeepSeekModel(modelName string) bool {
 
 func isStrongKimiCodingModel(modelName string) bool {
 	m := strings.ToLower(strings.TrimSpace(modelName))
+	// Kimi K3 flagship (1M context, always-on reasoning, Opus-class
+	// SWE-bench) — the coding endpoint serves it as bare "k3". Match the
+	// exact id and any future "k3-*" variant, but not an unrelated model
+	// that merely contains "k3".
+	if m == "k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3") {
+		return true
+	}
 	if strings.HasPrefix(m, "kimi-for-coding") {
 		return true
 	}

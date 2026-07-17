@@ -41,7 +41,10 @@ func TestInferModelCapability(t *testing.T) {
 	}{
 		// Strong tier
 		{"glm", "glm-5-plus", CapabilityStrong},
-		{"kimi", "kimi-for-coding", CapabilityStrong}, // K2.6, Coding Plan endpoint
+		{"kimi", "k3", CapabilityStrong},              // K3 flagship, Coding Plan endpoint
+		{"kimi", "k3-1m", CapabilityStrong},           // K3 variant
+		{"kimi", "kimi-k3", CapabilityStrong},         // K3, prefixed form
+		{"kimi", "kimi-for-coding", CapabilityStrong}, // K2.7, Coding Plan endpoint
 		{"kimi", "kimi-k2.6", CapabilityStrong},
 		{"kimi", "kimi-k2.7", CapabilityStrong},
 		{"kimi", "kimi-k2.8", CapabilityStrong},
