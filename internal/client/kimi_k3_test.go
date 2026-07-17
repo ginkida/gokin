@@ -49,3 +49,24 @@ func TestKimiK3ClientRegistration(t *testing.T) {
 		t.Fatal("supportsKimiThinking(glm-5.2) = true, want false")
 	}
 }
+
+// kimiAlwaysOnReasoningModel guards the K3 family from the
+// {"type":"disabled"} thinking marker (v0.100.101 field report: the marker
+// put K3 into a degraded no-thinking mode that re-emitted its narration
+// verbatim before every tool call). Pin both directions — a silent false on
+// a K3 spelling re-introduces that loop, a silent true on a non-K3 model
+// would leave its thinking un-disableable.
+func TestKimiAlwaysOnReasoningModel(t *testing.T) {
+	alwaysOn := []string{"k3", "K3", "k3-1m", "kimi-k3", "kimi-k3-0905", " kimi-k3 "}
+	for _, m := range alwaysOn {
+		if !kimiAlwaysOnReasoningModel(m) {
+			t.Errorf("kimiAlwaysOnReasoningModel(%q) = false, want true", m)
+		}
+	}
+	notAlwaysOn := []string{"", "kimi-for-coding", "kimi-for-coding-highspeed", "k2", "k2.7", "k30", "glm-5.2"}
+	for _, m := range notAlwaysOn {
+		if kimiAlwaysOnReasoningModel(m) {
+			t.Errorf("kimiAlwaysOnReasoningModel(%q) = true, want false", m)
+		}
+	}
+}
