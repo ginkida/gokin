@@ -29,9 +29,56 @@ func (m *msgCapturingModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.mu.Lock()
 	m.msgs = append(m.msgs, msg)
 	m.mu.Unlock()
+	if gate, ok := msg.(occupyEventLoopMsg); ok {
+		if gate.entered != nil {
+			close(gate.entered)
+		}
+		if gate.release != nil {
+			<-gate.release
+		}
+	}
 	return m, nil
 }
 func (m *msgCapturingModel) View() string { return "" }
+
+// occupyEventLoopMsg parks the capturing program's single event-loop
+// goroutine INSIDE Update until release is closed. Tests use it to make an
+// "event loop is busy" window deterministic.
+type occupyEventLoopMsg struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+// occupyEventLoop deterministically occupies the program's event loop and
+// returns an idempotent release func (also registered as t.Cleanup so a
+// t.Fatal in the occupied window can't leave the loop parked — cleanups run
+// LIFO, so this fires before newCapturingProgram's Quit).
+//
+// This REPLACES the old idiom `model.mu.Lock(); prog.Send(occupier)`, which
+// deadlocked on CI (v0.100.93): between Lock and Send, any concurrent async
+// app message could win the loop's receive first, park Update on model.mu,
+// and then the test's own synchronous Send blocked forever while holding the
+// very mutex the loop needed — the exact goroutine anatomy of the hung
+// TestFileCommandPromptContinuationPrecedesLaterTypeAhead run (and the most
+// plausible mechanism behind the v0.100.90 pending-recovery flake, where the
+// same race shifted orderings without fully deadlocking). The gate never
+// touches model.mu and confirms occupancy before returning: earlier queued
+// messages simply drain first, then the occupier provably parks the loop.
+func occupyEventLoop(t *testing.T, prog *tea.Program) func() {
+	t.Helper()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	go prog.Send(occupyEventLoopMsg{entered: entered, release: release})
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("event loop never picked up the occupier")
+	}
+	var once sync.Once
+	rel := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(rel)
+	return rel
+}
 
 // newCapturingProgram creates a real tea.Program backed by a capturing model.
 // WithoutRenderer avoids needing a terminal; WithoutSignalHandler prevents

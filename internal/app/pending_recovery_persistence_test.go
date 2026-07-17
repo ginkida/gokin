@@ -15,7 +15,6 @@ import (
 	"gokin/internal/commands"
 	"gokin/internal/config"
 	"gokin/internal/tools"
-	"gokin/internal/ui"
 
 	"google.golang.org/genai"
 )
@@ -916,14 +915,12 @@ func TestExplicitExactPromptReopensCancelGateAndQueuesRecovery(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	model.mu.Lock()
-	modelLocked := true
-	defer func() {
-		if modelLocked {
-			model.mu.Unlock()
-		}
-	}()
-	program.Send(ui.StreamTextMsg("occupy event loop for exact recovery promotion"))
+	// Deterministic gate — see occupyEventLoop for why the old mu+Send idiom
+	// deadlocked on CI, and why it is the most plausible mechanism behind
+	// this very test's unexplained v0.100.90 flake (a concurrent async app
+	// message winning the loop shifted the freeze point, so the promotion/
+	// cancel interleaving this test choreographs was no longer guaranteed).
+	releaseLoop := occupyEventLoop(t, program)
 	finishDone := make(chan struct{})
 	go func() {
 		application.finishForegroundProcessing(nil)
@@ -937,8 +934,6 @@ func TestExplicitExactPromptReopensCancelGateAndQueuesRecovery(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			model.mu.Unlock()
-			modelLocked = false
 			t.Fatalf("exact post-Esc prompt was not promoted: %+v", got)
 		}
 		time.Sleep(time.Millisecond)
@@ -953,8 +948,7 @@ func TestExplicitExactPromptReopensCancelGateAndQueuesRecovery(t *testing.T) {
 	if len(got) != 1 || got[0].State != chat.PendingRecoveryClaimed {
 		t.Fatalf("Esc after promotion released active claim: %+v", got)
 	}
-	model.mu.Unlock()
-	modelLocked = false
+	releaseLoop()
 	select {
 	case <-finishDone:
 	case <-time.After(time.Second):

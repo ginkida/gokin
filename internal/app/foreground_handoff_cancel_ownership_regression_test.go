@@ -7,7 +7,6 @@ import (
 
 	"gokin/internal/commands"
 	"gokin/internal/config"
-	"gokin/internal/ui"
 )
 
 // Once finishForegroundProcessing removes the FIFO head, that request is
@@ -25,7 +24,7 @@ func TestCancelDuringAcceptedFIFOForegroundHandoffDoesNotStartNextRequest(t *tes
 		},
 	}
 
-	prog, model := newCapturingProgram(t)
+	prog, _ := newCapturingProgram(t)
 	a := &App{
 		commandHandler: commands.NewHandlerWithCommands(queued),
 		program:        prog,
@@ -39,15 +38,9 @@ func TestCancelDuringAcceptedFIFOForegroundHandoffDoesNotStartNextRequest(t *tes
 
 	// Hold Update so the finalizer blocks in its first Program.Send after it has
 	// dequeued/accepted /queued but before startAcceptedSubmit installs a new
-	// processingCancel.
-	model.mu.Lock()
-	modelLocked := true
-	defer func() {
-		if modelLocked {
-			model.mu.Unlock()
-		}
-	}()
-	prog.Send(ui.StreamTextMsg("occupy event loop"))
+	// processingCancel. Deterministic gate — see occupyEventLoop for why the
+	// old mu+Send idiom deadlocked on CI.
+	releaseLoop := occupyEventLoop(t, prog)
 
 	finished := make(chan struct{})
 	go func() {
@@ -70,8 +63,7 @@ func TestCancelDuringAcceptedFIFOForegroundHandoffDoesNotStartNextRequest(t *tes
 	}
 
 	a.CancelProcessing()
-	model.mu.Unlock()
-	modelLocked = false
+	releaseLoop()
 
 	select {
 	case <-queuedRan:

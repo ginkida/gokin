@@ -139,15 +139,9 @@ func TestFileCommandPromptResubmitCannotBeStranded(t *testing.T) {
 	// Occupy the Bubble Tea event loop so executeCommandCtx pauses at its
 	// ResponseDoneMsg after spawning file-command-dispatch. That makes the
 	// documented busy re-entry path deterministic without reaching into the
-	// scheduler or production implementation.
-	model.mu.Lock()
-	modelLocked := true
-	defer func() {
-		if modelLocked {
-			model.mu.Unlock()
-		}
-	}()
-	prog.Send(ui.StreamTextMsg("occupy event loop"))
+	// scheduler or production implementation. Deterministic gate — see
+	// occupyEventLoop for why the old mu+Send idiom deadlocked on CI.
+	releaseLoop := occupyEventLoop(t, prog)
 
 	foregroundDone := make(chan struct{})
 	go func() {
@@ -164,8 +158,7 @@ func TestFileCommandPromptResubmitCannotBeStranded(t *testing.T) {
 	}
 	wasQueued := a.pendingCount() > 0
 
-	model.mu.Unlock()
-	modelLocked = false
+	releaseLoop()
 
 	select {
 	case <-foregroundDone:
@@ -247,14 +240,9 @@ func TestFileCommandPromptContinuationPrecedesLaterTypeAhead(t *testing.T) {
 	// busy path. A correct implementation may instead stage the continuation
 	// synchronously or dispatch it after release; both still satisfy the only
 	// externally relevant assertion below: expanded before after.
-	model.mu.Lock()
-	modelLocked := true
-	defer func() {
-		if modelLocked {
-			model.mu.Unlock()
-		}
-	}()
-	prog.Send(ui.StreamTextMsg("occupy event loop for ordering checkpoint"))
+	// Deterministic gate — see occupyEventLoop for why the old mu+Send idiom
+	// deadlocked on CI (this exact test hung 10m on the v0.100.93 run).
+	releaseLoop := occupyEventLoop(t, prog)
 	close(release)
 
 	deadline := time.Now().Add(250 * time.Millisecond)
@@ -262,8 +250,7 @@ func TestFileCommandPromptContinuationPrecedesLaterTypeAhead(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	model.mu.Unlock()
-	modelLocked = false
+	releaseLoop()
 
 	gotOrder := make([]string, 0, 2)
 	for len(gotOrder) < 2 {
