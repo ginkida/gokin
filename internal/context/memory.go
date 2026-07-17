@@ -276,7 +276,7 @@ func (m *ProjectMemory) loadSnapshot() projectMemorySnapshot {
 				containmentRoot = projectRoot
 			}
 
-			content, resolvedPath, err := readInstructionFile(path, containmentRoot)
+			content, resolvedPath, err := readInstructionFile(path, containmentRoot, true)
 			if err != nil {
 				if !errors.Is(err, os.ErrNotExist) {
 					logging.Warn("skipping unsafe or invalid instruction file",
@@ -450,7 +450,7 @@ func (e *instructionIncludeExpander) render(content, baseDir string, depth int) 
 		if instructionCandidateWatchable(candidate, containmentRoot) {
 			addInstructionWatchPath(e.policy.watchPaths, candidate)
 		}
-		included, resolvedPath, err := readInstructionFile(candidate, containmentRoot)
+		included, resolvedPath, err := readInstructionFile(candidate, containmentRoot, false)
 		if err != nil {
 			e.writeBounded(line + "\n")
 			continue
@@ -520,7 +520,7 @@ func resolveInstructionIncludeCandidate(includePath, baseDir string) (string, bo
 	return filepath.Join(baseDir, includePath), true, true
 }
 
-func readInstructionFile(path, containmentRoot string) (string, string, error) {
+func readInstructionFile(path, containmentRoot string, truncateOversized bool) (string, string, error) {
 	resolvedPath, err := canonicalInstructionFile(path)
 	if err != nil {
 		return "", "", err
@@ -545,13 +545,38 @@ func readInstructionFile(path, containmentRoot string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	truncated := false
 	if len(data) > maxInstructionFileBytes {
-		return "", "", errInstructionTooLarge
+		// ROOT instruction files degrade gracefully, not all-or-nothing
+		// (v0.100.101 field report): a CLAUDE.md a few KB over the cap used to
+		// be SKIPPED ENTIRELY, so the agent silently worked with ZERO project
+		// instructions — far worse than working with the head of the file.
+		// @include files keep the strict reject (the security-bounded include
+		// expander leaves the @-line literal, disclosing the skip).
+		if !truncateOversized {
+			return "", "", errInstructionTooLarge
+		}
+		// Keep the first maxInstructionFileBytes on a rune boundary and
+		// disclose the cut; the prompt budget downstream compresses further.
+		cut := maxInstructionFileBytes
+		for cut > 0 && !utf8.RuneStart(data[cut]) {
+			cut--
+		}
+		data = data[:cut]
+		truncated = true
 	}
 	if !utf8.Valid(data) {
 		return "", "", errInstructionNotUTF8
 	}
-	return string(data), resolvedPath, nil
+	content := string(data)
+	if truncated {
+		logging.Warn("instruction file exceeds size limit — using truncated head",
+			"path", resolvedPath, "limit_bytes", maxInstructionFileBytes)
+		content += fmt.Sprintf(
+			"\n\n[NOTE: this instruction file exceeded the %dKB limit and was truncated — the sections above are the head of the file]\n",
+			maxInstructionFileBytes>>10)
+	}
+	return content, resolvedPath, nil
 }
 
 func openInstructionFile(resolvedPath, containmentRoot string) (*os.File, error) {
