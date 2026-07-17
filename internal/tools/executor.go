@@ -3803,7 +3803,25 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 		}
 		return ""
 	}
-	// Default: no distinguishing argument, tool name alone is the pattern
+	// Default: hash the full args so a tool WITHOUT an explicit case above
+	// still keys on its distinguishing arguments — DISTINCT calls of any such
+	// tool are distinct fingerprints, only a truly-identical repeat collapses.
+	// This is the general form of the per-tool cases and permanently closes
+	// the empty-fingerprint false-abort class (v0.100.98: field reports hit it
+	// three times — todo, the inspection tools, then memorize — each a tool a
+	// reasoning-heavy model calls repeatedly with DIFFERENT args as progress,
+	// e.g. saving several distinct memories, invoking several skills). The
+	// explicit cases above still win (incl. run_tests/verify_code's
+	// intentional "" for a no-args whole-suite repeat), so their tuned
+	// semantics are unchanged. Args are JSON-sourced ⇒ json.Marshal is
+	// deterministic (sorted keys); a marshal failure falls back to "".
+	if len(args) == 0 {
+		return ""
+	}
+	if encoded, err := json.Marshal(args); err == nil {
+		h := sha256.Sum256(encoded)
+		return fmt.Sprintf("args@%x", h[:4])
+	}
 	return ""
 }
 

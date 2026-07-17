@@ -245,10 +245,16 @@ func TestStagnationFingerprint_WebSearchUsesQuery(t *testing.T) {
 	}
 }
 
-func TestStagnationFingerprint_UnknownToolReturnsEmpty(t *testing.T) {
-	got := stagnationFingerprint("mystery_tool", map[string]any{"file_path": "/x"})
-	if got != "" {
-		t.Errorf("unknown tool should produce empty fingerprint, got %q", got)
+func TestStagnationFingerprint_UnknownToolKeysOnArgs(t *testing.T) {
+	// v0.100.98: an unknown/case-less tool now keys on its args (general
+	// default) so distinct calls don't collapse. Identical calls still do.
+	a := stagnationFingerprint("mystery_tool", map[string]any{"file_path": "/x"})
+	b := stagnationFingerprint("mystery_tool", map[string]any{"file_path": "/y"})
+	if a == "" || a == b {
+		t.Errorf("distinct unknown-tool calls must be distinct fingerprints, got %q / %q", a, b)
+	}
+	if again := stagnationFingerprint("mystery_tool", map[string]any{"file_path": "/x"}); again != a {
+		t.Errorf("identical unknown-tool calls must collapse, got %q vs %q", a, again)
 	}
 }
 
@@ -300,10 +306,44 @@ func TestStagnationFingerprint_RunTestsIncludesFilter(t *testing.T) {
 	}
 }
 
-func TestStagnationFingerprint_WrongArgTypeReturnsEmpty(t *testing.T) {
-	// file_path is an int instead of a string — type assertion should fall through.
-	got := stagnationFingerprint("write", map[string]any{"file_path": 42})
-	if got != "" {
-		t.Errorf("wrong type for file_path should produce empty fingerprint, got %q", got)
+func TestStagnationFingerprint_WrongArgTypeFallsToArgsHash(t *testing.T) {
+	// file_path is an int instead of a string — the write case's string
+	// assertion fails, so it falls to the general args-hash default (v0.100.98).
+	// The load-bearing property is unchanged: IDENTICAL invalid calls still
+	// collapse to one fingerprint (loop still caught), while DISTINCT ones
+	// don't — the default no longer treats every args-bearing tool without an
+	// explicit string-arg as a bare tool-name collapse.
+	a := stagnationFingerprint("write", map[string]any{"file_path": 42})
+	b := stagnationFingerprint("write", map[string]any{"file_path": 42})
+	if a == "" || a != b {
+		t.Fatalf("identical invalid writes must collapse to one fingerprint, got %q / %q", a, b)
+	}
+	c := stagnationFingerprint("write", map[string]any{"file_path": 43})
+	if a == c {
+		t.Fatalf("distinct invalid writes collapsed: %q", a)
+	}
+}
+
+// The general args-hash default (v0.100.98) closes the empty-fingerprint
+// false-abort class for EVERY tool without an explicit case — the third
+// field report of this class was `memorize` (a model saving several DISTINCT
+// facts collapsed to one `memorize:` pattern and killed the turn).
+func TestStagnationFingerprint_DefaultKeysOnArgs(t *testing.T) {
+	for _, tool := range []string{"memorize", "skill", "mcp_admin"} {
+		a := stagnationFingerprint(tool, map[string]any{"key": "fact-a", "content": "alpha"})
+		b := stagnationFingerprint(tool, map[string]any{"key": "fact-b", "content": "beta"})
+		if a == "" || b == "" {
+			t.Errorf("%s: distinct args produced an empty fingerprint (%q/%q)", tool, a, b)
+		}
+		if a == b {
+			t.Errorf("%s: distinct args collapsed to one fingerprint %q", tool, a)
+		}
+		if again := stagnationFingerprint(tool, map[string]any{"key": "fact-a", "content": "alpha"}); again != a {
+			t.Errorf("%s: identical args produced different fingerprints %q vs %q", tool, a, again)
+		}
+	}
+	// No args ⇒ still a bare tool-name collapse (nothing to distinguish).
+	if fp := stagnationFingerprint("some_tool", map[string]any{}); fp != "" {
+		t.Errorf("no-args call should stay empty, got %q", fp)
 	}
 }
