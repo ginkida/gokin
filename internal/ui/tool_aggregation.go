@@ -31,12 +31,16 @@ type aggToolEntry struct {
 }
 
 // aggregatableToolLine reports whether a SUCCESSFUL, body-less result of this
-// tool may join the aggregation buffer. Deliberately just read+bash: they are
-// the high-frequency collapsed-by-default tools that stack into noise; tools
-// whose body is the signal (grep, edit, write) always render individually.
+// tool may join the aggregation buffer. The caller's `body == ""` gate is the
+// load-bearing half: grep/glob/list_dir results WITH matches render a visible
+// body and therefore always emit individually (the v0.100.86 "nothing
+// renderable is deferred" invariant) — only their quiet results (no matches,
+// empty listings) fold into the burst line, the Claude-Code "searched for 2
+// patterns" shape (v0.100.91). Tools whose body is always the signal (edit,
+// write) stay out entirely.
 func aggregatableToolLine(toolName string) bool {
 	switch toolName {
-	case "read", "bash":
+	case "read", "bash", "grep", "glob", "list_dir":
 		return true
 	}
 	return false
@@ -71,10 +75,10 @@ func (m *Model) flushPendingToolLines() {
 	m.emitToolResultCard(m.styles.FormatToolAggregateLine(header, total), aggregateTargetList(entries))
 }
 
-// aggregateToolHeader builds the "Read 2 files, ran 3 shell commands" header
-// and the summed duration.
+// aggregateToolHeader builds the "Read 2 files, searched 2 patterns, ran 3
+// shell commands" header and the summed duration.
 func aggregateToolHeader(entries []aggToolEntry) (string, time.Duration) {
-	var reads, bashes int
+	var reads, searches, listings, bashes int
 	readTargets := map[string]int{}
 	firstReadTarget := ""
 	var total time.Duration
@@ -87,6 +91,10 @@ func aggregateToolHeader(entries []aggToolEntry) (string, time.Duration) {
 				firstReadTarget = e.target
 			}
 			readTargets[e.target]++
+		case "grep", "glob":
+			searches++
+		case "list_dir":
+			listings++
 		default:
 			bashes++
 		}
@@ -103,12 +111,21 @@ func aggregateToolHeader(entries []aggToolEntry) (string, time.Duration) {
 			parts = append(parts, fmt.Sprintf("Read %d files", len(readTargets)))
 		}
 	}
-	if bashes > 0 {
-		verb := "ran"
+	appendVerb := func(lower, upper, body string) {
 		if len(parts) == 0 {
-			verb = "Ran"
+			parts = append(parts, upper+" "+body)
+			return
 		}
-		parts = append(parts, fmt.Sprintf("%s %s", verb, pluralCount(bashes, "shell command", "shell commands")))
+		parts = append(parts, lower+" "+body)
+	}
+	if searches > 0 {
+		appendVerb("searched", "Searched", pluralCount(searches, "pattern", "patterns"))
+	}
+	if listings > 0 {
+		appendVerb("listed", "Listed", pluralCount(listings, "directory", "directories"))
+	}
+	if bashes > 0 {
+		appendVerb("ran", "Ran", pluralCount(bashes, "shell command", "shell commands"))
 	}
 	return strings.Join(parts, ", "), total
 }

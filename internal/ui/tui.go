@@ -44,6 +44,7 @@ type Model struct {
 	agentToolCount   int      // Tools used by current sub-agent (for progress display)
 	agentRecentTools []string // Last N tool names for inline activity display
 	todoItems        []string
+	lastRecapLine    string // dedup latch for the end-of-turn ※ recap (turn_recap.go)
 	workDir          string
 
 	// Streaming timeout protection
@@ -3677,8 +3678,15 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// Render the response metadata footer. When there's nothing measurable,
 		// emit NO ruler — turns are separated by whitespace + the next user echo
 		// (CC idiom), so a bare "───" between every turn is chrome we don't want.
+		m.flushPendingToolLines() // scrollback-append site: aggregate lands first
 		if footer := m.renderResponseMetadata(msg); footer != "" {
 			m.output.AppendLine(footer)
+		}
+		// End-of-turn recap (must read responseToolCount BEFORE the reset
+		// below) — one dim "※ K/N tasks · next: …" anchor line; see
+		// turn_recap.go for the calm-UI gating.
+		if recap := m.buildTurnRecap(); recap != "" {
+			m.output.AppendLine(recap)
 		}
 		m.output.AppendLine("")
 		m.responseToolDuration = 0
@@ -3736,6 +3744,11 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 
 	case TodoUpdateMsg:
 		m.todoItems = msg
+		if len(msg) == 0 {
+			// List cleared (e.g. /clear) — re-arm the recap dedup latch so the
+			// next conversation's first recap isn't suppressed by stale state.
+			m.lastRecapLine = ""
+		}
 
 	case ActivityLabelMsg:
 		// Live "doing X" label from the in-progress todo. Unlike phaseLabel this
