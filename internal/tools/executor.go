@@ -3753,6 +3753,21 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			return ""
 		}
 		return path + "|" + filter
+	case "todo":
+		// Updating the task list with DIFFERENT items each time is progress,
+		// not a loop — the model checks off a task and adds the next. Hash the
+		// serialized todos so only a truly-identical re-write collapses to one
+		// fingerprint (field report: a Kimi K3 turn that narrates + updates its
+		// checklist frequently tripped the 5-repeat abort with `todo:` — an
+		// empty default fingerprint that treated every distinct update as the
+		// same call). Mirrors edit's edits-array hash.
+		if todos, ok := args["todos"]; ok {
+			if encoded, err := json.Marshal(todos); err == nil {
+				h := sha256.Sum256(encoded)
+				return fmt.Sprintf("todos@%x", h[:4])
+			}
+		}
+		return ""
 	}
 	// Default: no distinguishing argument, tool name alone is the pattern
 	return ""
@@ -3776,6 +3791,15 @@ func maxStagnationRecoveryAttempts(toolName string) int {
 		return 3
 	case "edit":
 		return 1
+	case "todo":
+		// A todo write is idempotent + side-effect-free (it only mutates the
+		// model's OWN checklist), so a truly-identical re-write loop earns a
+		// graceful "stop re-listing, DO the next task" hint instead of a hard
+		// turn-kill. 2 hints like read-only bash; still hint-then-abort (NOT
+		// force-finalize — see stagnationHintBudget), since a todo loop means
+		// the model is stuck planning, and forcing a final answer would reward
+		// not doing the work.
+		return 2
 	default:
 		return 0
 	}
@@ -3819,7 +3843,11 @@ func stagnationHintBudget(calls []*genai.FunctionCall) (hints int, readOnly bool
 				m = 2
 			}
 		}
-		if call.Name == "edit" {
+		if call.Name == "edit" || call.Name == "todo" {
+			// Neither is a read-only INSPECTION loop: forcing a "final answer"
+			// after a failed edit invites a dishonest success claim, and after
+			// a todo-planning loop it rewards not doing the work. Both stay
+			// hint-then-abort (no force-finalize phase).
 			readOnly = false
 		}
 		if m == 0 {
@@ -4080,6 +4108,11 @@ func buildStagnationRecoveryMessage(toolName string, args map[string]any, repeat
 		return fmt.Sprintf(
 			"Loop guard: the identical %s ran %d times in a row. Its output will not change until something else changes. Do not call it again — use the result you already have and take the NEXT step (make the edit, run the fix, or answer the user).",
 			target, repeatCount,
+		)
+	case "todo":
+		return fmt.Sprintf(
+			"Loop guard: the task list was written %d times unchanged. Do not call todo again — the list is already set. STOP re-planning and DO the next task: run the tool (edit/bash/read) that actually advances the in-progress item, then update todo only after real work happens.",
+			repeatCount,
 		)
 	default:
 		return fmt.Sprintf(
