@@ -208,7 +208,15 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 		// Kimi models default to reasoning even when the field is omitted.
 		// `/thinking off` and an adaptive easy turn therefore need an explicit
 		// disable marker; omission would make the UI/config lie about behavior.
-		if c.isProvider("kimi") {
+		// EXCEPTION — K3 (v0.100.101 field report): K3 is an ALWAYS-ON
+		// reasoning flagship (reasoning_effort supports only "max"; reasoning
+		// cannot be disabled server-side). Sending {"type":"disabled"} put it
+		// in a degraded mode with NO thinking blocks where it re-emitted its
+		// full narration VERBATIM before every tool call and looped — while
+		// GLM handled the same adaptive-off turns fine. For K3 the field is
+		// omitted so server-side reasoning stays on regardless of the local
+		// thinking flag.
+		if c.isProvider("kimi") && !kimiAlwaysOnReasoningModel(model) {
 			requestBody["thinking"] = map[string]any{"type": "disabled"}
 		}
 		if temperature > 0 {
@@ -288,7 +296,8 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 		requestBody["thinking"] = thinking
 		requestBody["temperature"] = 1.0
 	} else {
-		if c.isProvider("kimi") {
+		// K3 exception mirrors SendMessageWithHistory — see the comment there.
+		if c.isProvider("kimi") && !kimiAlwaysOnReasoningModel(model) {
 			requestBody["thinking"] = map[string]any{"type": "disabled"}
 		}
 		if temperature > 0 {
@@ -2517,6 +2526,16 @@ func (c *AnthropicClient) hasSerializableAssistantParts(parts []*genai.Part) boo
 		}
 	}
 	return false
+}
+
+// kimiAlwaysOnReasoningModel reports whether the Kimi model's reasoning is
+// ALWAYS-ON server-side and must never receive a {"type":"disabled"} thinking
+// marker (K3 family: reasoning_effort supports only "max"; the disabled marker
+// put K3 into a degraded no-thinking mode that re-emitted its narration
+// verbatim before every tool call — v0.100.101 field report).
+func kimiAlwaysOnReasoningModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	return m == "k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3")
 }
 
 // requiresThinkingReplay reports whether the active provider rejects
