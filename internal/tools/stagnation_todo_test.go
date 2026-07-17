@@ -37,27 +37,40 @@ func TestStagnationFingerprint_TodoKeysOnListContent(t *testing.T) {
 	}
 }
 
-// A genuinely-identical todo loop earns a graceful, actionable hint (budget 2,
-// hint-then-abort like edit — NOT a hard turn-kill, and NOT force-finalize).
-func TestStagnationRecovery_TodoIsHintEligibleNotFinalize(t *testing.T) {
+// A genuinely-identical todo loop earns graceful hints AND a force-finalize
+// phase (v0.100.96 field report round 2 — a model wrote the identical list 5×,
+// ignored both hints, and hit the scary hard-abort error card). todo is a
+// side-effect-free idempotent no-op, so "STOP re-planning, write your answer
+// NOW" salvages the turn into an honest response instead of a dead error.
+func TestStagnationRecovery_TodoIsHintPlusFinalizeEligible(t *testing.T) {
 	if got := maxStagnationRecoveryAttempts("todo"); got != 2 {
 		t.Fatalf("maxStagnationRecoveryAttempts(todo) = %d, want 2", got)
 	}
 	todoCall := []*genai.FunctionCall{{Name: "todo", Args: map[string]any{"todos": []any{}}}}
-	if !shouldAttemptStagnationRecovery(todoCall, 0) || !shouldAttemptStagnationRecovery(todoCall, 1) {
-		t.Fatal("todo must earn its 2 hints")
+	// 2 hints + 2 finalize = recovers through attempt 3, aborts at 4.
+	for attempt := 0; attempt < 4; attempt++ {
+		if !shouldAttemptStagnationRecovery(todoCall, attempt) {
+			t.Fatalf("todo must recover at attempt %d (2 hints + 2 finalize)", attempt)
+		}
 	}
-	if shouldAttemptStagnationRecovery(todoCall, 2) {
-		t.Fatal("todo budget must be bounded — attempt 2 aborts (no force-finalize)")
+	if shouldAttemptStagnationRecovery(todoCall, 4) {
+		t.Fatal("todo budget must be bounded — attempt 4 aborts")
 	}
-	// Must NOT be read-only (no force-finalize phase, same as edit).
+	// Force-finalize eligible (unlike edit): the turn ends in an answer, not
+	// a dead error card.
 	_, readOnly, ok := stagnationHintBudget(todoCall)
-	if !ok || readOnly {
-		t.Fatalf("todo hint budget = readOnly:%v ok:%v, want ok + NOT readOnly", readOnly, ok)
+	if !ok || !readOnly {
+		t.Fatalf("todo hint budget = readOnly:%v ok:%v, want ok + readOnly (force-finalize)", readOnly, ok)
 	}
 
 	msg := buildStagnationRecoveryMessage("todo", todoCall[0].Args, 5)
 	if !strings.Contains(msg, "Do not call todo again") || !strings.Contains(msg, "DO the next task") {
 		t.Fatalf("todo recovery hint should push execution, got: %q", msg)
+	}
+	// edit stays hint-then-abort (no finalize) — the contrast that proves the
+	// exclusion is edit-only.
+	editCall := []*genai.FunctionCall{{Name: "edit", Args: map[string]any{"file_path": "a.go", "old_string": "x"}}}
+	if _, editReadOnly, _ := stagnationHintBudget(editCall); editReadOnly {
+		t.Fatal("edit must stay force-finalize-EXCLUDED (dishonest success claim risk)")
 	}
 }

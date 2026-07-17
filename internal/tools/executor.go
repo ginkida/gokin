@@ -3887,11 +3887,16 @@ func stagnationHintBudget(calls []*genai.FunctionCall) (hints int, readOnly bool
 				m = 2
 			}
 		}
-		if call.Name == "edit" || call.Name == "todo" {
-			// Neither is a read-only INSPECTION loop: forcing a "final answer"
-			// after a failed edit invites a dishonest success claim, and after
-			// a todo-planning loop it rewards not doing the work. Both stay
-			// hint-then-abort (no force-finalize phase).
+		if call.Name == "edit" {
+			// edit is the ONLY recovery-eligible tool excluded from the
+			// force-finalize phase: forcing a "final answer" after a failed
+			// edit invites a dishonest success claim about a half-applied
+			// mutation. todo is force-finalize eligible (v0.100.96 field
+			// report round 2 — a model wrote the IDENTICAL todo list 5×,
+			// ignored both hints, and hit the hard abort's scary error card):
+			// a todo write is an idempotent no-op with no half-done state, so
+			// "STOP re-planning, write your answer NOW" salvages the turn into
+			// an honest response instead of a dead "Agent Got Stuck" error.
 			readOnly = false
 		}
 		if m == 0 {
