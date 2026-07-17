@@ -96,9 +96,22 @@ func TestProjectMemory_WatcherRebindsAfterInstructionFileCreated(t *testing.T) {
 
 	waitForReload(t, reloaded, "after editing GOKIN.md's content")
 
-	got := pm.GetInstructions()
-	if !strings.Contains(got, "EDITED content") {
-		t.Fatalf("GetInstructions() = %q, want it to reflect the content edit (proves the watcher actually re-read the file, not just fired stale)", got)
+	// Bounded poll, not a single-shot read: the reload signal can be a
+	// BUFFERED leftover from the create phase above, arriving before the
+	// edit's re-read has committed to the instructions field — the same
+	// signal-then-single-shot race class as the v0.100.90 OS-interrupt CI
+	// flake (fixed with the same bounded-poll idiom in de80023). The
+	// deadline keeps a genuinely-broken watcher failing loudly.
+	pollDeadline := time.Now().Add(3 * time.Second)
+	for {
+		got := pm.GetInstructions()
+		if strings.Contains(got, "EDITED content") {
+			break
+		}
+		if time.Now().After(pollDeadline) {
+			t.Fatalf("GetInstructions() = %q, want it to reflect the content edit (proves the watcher actually re-read the file, not just fired stale)", got)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
