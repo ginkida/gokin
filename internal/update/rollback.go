@@ -38,10 +38,22 @@ func (rm *RollbackManager) CreateBackup(binaryPath string, version string) (*Bac
 		return nil, fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
-	// Generate backup ID based on timestamp
-	backupID := time.Now().Format("20060102-150405")
-	backupName := fmt.Sprintf("gokin-%s-%s", version, backupID)
-	backupPath := filepath.Join(rm.backupDir, backupName)
+	// Generate backup ID based on timestamp. The ID has second resolution,
+	// so two backups started within the same second would share the ID and
+	// file name — the second copy silently clobbering the first rollback
+	// point. Disambiguate with a numeric suffix when the base name is taken.
+	baseID := time.Now().Format("20060102-150405")
+	backupID := baseID
+	backupPath := filepath.Join(rm.backupDir, fmt.Sprintf("gokin-%s-%s", version, backupID))
+	for i := 2; i <= 100; i++ {
+		if _, err := os.Stat(backupPath); err != nil {
+			// Path is free (not-exist) or unusable for another reason —
+			// either way, attempt the copy and let it surface any real error.
+			break
+		}
+		backupID = fmt.Sprintf("%s-%d", baseID, i)
+		backupPath = filepath.Join(rm.backupDir, fmt.Sprintf("gokin-%s-%s", version, backupID))
+	}
 
 	// Copy current binary to backup
 	if err := copyFile(binaryPath, backupPath); err != nil {
