@@ -131,3 +131,33 @@ func TestKimiK3NeverReceivesDisabledThinkingMarker(t *testing.T) {
 		t.Fatal("K2.x models are NOT always-on — they keep the disabled marker")
 	}
 }
+
+// Fail-loud drift guard: every registered Kimi model must be EXPLICITLY
+// classified — either always-on reasoning (K3 family: the disabled marker is
+// never sent) or a known K2.x id (disable IS supported). A new Kimi model
+// (K4, a renamed flagship, …) added to AvailableModels without updating
+// kimiAlwaysOnReasoningModel would SILENTLY receive the disabled marker on
+// adaptive easy turns — the exact degraded-repetition failure the K3 field
+// report exposed. This test forces that decision to be made consciously.
+func TestEveryKimiModelIsExplicitlyClassifiedForThinkingDisable(t *testing.T) {
+	knownDisableSupported := map[string]bool{
+		"kimi-for-coding":           true, // K2.7
+		"kimi-for-coding-highspeed": true, // K2.7 highspeed
+	}
+	seen := 0
+	for _, m := range AvailableModels {
+		if m.Provider != "kimi" {
+			continue
+		}
+		seen++
+		if kimiAlwaysOnReasoningModel(m.ID) {
+			continue // always-on family — never receives the disabled marker
+		}
+		if !knownDisableSupported[m.ID] {
+			t.Errorf("Kimi model %q is not classified: add it to kimiAlwaysOnReasoningModel (always-on reasoning) or to this test's knownDisableSupported set (disable genuinely supported) — an unclassified model silently gets the disabled marker and can degrade like the K3 field report", m.ID)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no Kimi models found in AvailableModels — registry moved?")
+	}
+}
