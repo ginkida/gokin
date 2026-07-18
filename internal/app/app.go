@@ -325,8 +325,13 @@ type App struct {
 	// pipeline where taking a.mu is unsafe, AND the banner in turnContextContent
 	// can be read off-turn (session-memory callback) — atomics give a race-free,
 	// lock-free, deadlock-free read on every path. See discuss_mode.go.
-	turnDiscuss      atomic.Bool
-	discussConfirmed atomic.Bool
+	turnDiscuss atomic.Bool
+	// turnToolBudgetHit is set by the executor's OnToolBudgetExhausted
+	// callback (executor goroutine) and consumed at end of turn; the
+	// budgetAutoContinues streak is capped per REAL user request.
+	turnToolBudgetHit   atomic.Bool
+	budgetAutoContinues int32
+	discussConfirmed    atomic.Bool
 
 	// presenter is WHERE agent output goes (agent_events.go). The builder
 	// installs the TUI presenter; RunHeadless swaps in the stdout presenter.
@@ -1023,6 +1028,11 @@ func (a *App) handleSubmit(message string) {
 // queued with provenance instead of reopening the gate; a late timer/resubmit
 // remains blocked by that cancellation boundary.
 func (a *App) handleSubmitWithIntent(message string, explicitUser bool) {
+	if explicitUser {
+		// A REAL user message resets the tool-budget auto-continue streak —
+		// the cap is per user request, not per session.
+		a.resetBudgetAutoContinueOnUserInput(message)
+	}
 	a.sessionLeaseMu.Lock()
 	a.mu.Lock()
 	if explicitUser && a.processing && a.dropSteerLeftovers {

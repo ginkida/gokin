@@ -457,6 +457,13 @@ type ExecutionHandler struct {
 	// OnWarning is called when a warning is issued.
 	OnWarning func(warning string)
 
+	// OnToolBudgetExhausted fires ONCE per turn when the hosted-provider
+	// per-turn tool budget forces finalization. The app uses it to offer an
+	// AUTO-CONTINUATION (a fresh turn = a fresh budget) when the model's own
+	// todo list still has unfinished items — instead of making the user type
+	// "continue" by hand (v0.100.104 field report).
+	OnToolBudgetExhausted func()
+
 	// OnRetrySafetyEvent receives machine-readable exactly-once decisions.
 	// Unlike OnWarning, this contract is stable enough for execution journals,
 	// reliability evals, and recovery telemetry; consumers must not parse the
@@ -695,6 +702,12 @@ func (e *Executor) SetDeltaCheckConfig(enabled bool, timeout time.Duration, warn
 }
 
 // SetSemanticValidators configures post-write semantic validators.
+// Registry returns the executor's tool registry (read-only use: e.g. the
+// app's end-of-turn incomplete-todo check for budget auto-continuation).
+func (e *Executor) Registry() ToolRegistry {
+	return e.registry
+}
+
 func (e *Executor) SetSemanticValidators(r *SemanticValidatorRegistry) {
 	e.semanticValidators = r
 }
@@ -1417,6 +1430,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// it's right at the edge — the clamp is on the NEXT batch.
 			if e.shouldEnforceKimiToolBudget(cl.GetModel(), len(toolsUsed)-len(resp.FunctionCalls)) {
 				toolBudgetFinalizationRounds++
+				if toolBudgetFinalizationRounds == 1 && e.handler != nil && e.handler.OnToolBudgetExhausted != nil {
+					e.handler.OnToolBudgetExhausted()
+				}
 				logging.Warn("hosted model tool budget exceeded: forcing finalization",
 					"budget", e.kimiToolBudget,
 					"consumed", len(toolsUsed)-len(resp.FunctionCalls),

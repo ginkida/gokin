@@ -189,6 +189,7 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			})
 			present().ToolError(err)
 		},
+		OnToolBudgetExhausted: a.noteToolBudgetExhausted,
 		OnWarning: func(warning string) {
 			a.touchStepHeartbeat()
 			if warning == "" {

@@ -1223,6 +1223,12 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	// continuation (see runStopHooks).
 	a.runStopHooks(ctx, response)
 
+	// Tool-budget auto-continuation: a turn that exhausted the per-turn tool
+	// budget with UNFINISHED todos queues a synthetic "continue" (fresh turn =
+	// fresh budget) so the user doesn't have to type it — bounded per real
+	// user request (see budget_auto_continue.go).
+	a.maybeAutoContinueAfterBudget()
+
 	// Signal completion - copy metadata under lock
 	a.mu.Lock()
 	duration := time.Since(a.responseStartTime)
