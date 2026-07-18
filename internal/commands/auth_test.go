@@ -376,15 +376,18 @@ func TestProvider_NoArgs_ShowsSummary(t *testing.T) {
 }
 
 func TestProvider_SwitchRequiresKey(t *testing.T) {
-	// Kimi not configured — switching must NOT silently activate a keyless provider.
+	// Kimi not configured — switching must NOT silently activate a keyless
+	// provider. v0.100.105: instead of a dead-end "run /login" hint, the
+	// command returns the masked key-entry marker (ONE flow: the modal's
+	// submit re-invokes /login, which saves the key AND completes the switch).
 	app := newAuthApp(&config.Config{})
 	cmd := &ProviderCommand{}
 	out, err := cmd.Execute(context.Background(), []string{"kimi"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(out), "not configured") {
-		t.Errorf("should tell user kimi isn't configured: %q", out)
+	if out != LoginKeyMarker+"kimi" {
+		t.Errorf("keyless switch should open the masked key entry, got %q", out)
 	}
 	if app.applyCalls != 0 {
 		t.Errorf("switch without key should not apply config")
@@ -709,5 +712,30 @@ func TestLogout_OnlyProvider_NoAutoswitchNoClear(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(out), "no api keys") {
 		t.Errorf("should surface the no-keys onboarding hint: %q", out)
+	}
+}
+
+// v0.100.105 setup friendliness: the /login status screen shows WHERE to get
+// a key for every unconfigured provider, and the bare /provider list explains
+// that switching to an unconfigured provider will ask for the key inline.
+func TestAuthStatus_SetupFriendliness(t *testing.T) {
+	cfg := &config.Config{}
+	login := &LoginCommand{}
+	out := login.showStatus(cfg)
+	if !strings.Contains(out, "get a key: ") {
+		t.Errorf("/login status must show key-source URLs for unconfigured providers:\n%s", out)
+	}
+	if !strings.Contains(out, "platform.deepseek.com") {
+		t.Errorf("deepseek key URL missing:\n%s", out)
+	}
+
+	app := newAuthApp(cfg)
+	prov := &ProviderCommand{}
+	list, err := prov.Execute(context.Background(), nil, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(list, "will ask for the key") {
+		t.Errorf("bare /provider must explain the one-flow key entry:\n%s", list)
 	}
 }

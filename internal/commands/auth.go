@@ -233,6 +233,9 @@ func (c *LoginCommand) showStatus(cfg *config.Config) string {
 			status = "configured " + maskKey(cfg.API.APIKey)
 		}
 		fmt.Fprintf(&sb, "%s%s: %s\n", marker, p.DisplayName, status)
+		if status == "not configured" && p.SetupKeyURL != "" {
+			fmt.Fprintf(&sb, "    get a key: %s\n", p.SetupKeyURL)
+		}
 	}
 
 	fmt.Fprintf(&sb, "\nActive: %s\n", activeProvider)
@@ -500,7 +503,7 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 				marker = "→ "
 			}
 
-			status := "not configured"
+			status := "not configured — `/provider " + p.Name + "` will ask for the key"
 			if p.HasOAuth && cfg.API.HasOAuthToken(p.Name) {
 				status = "OAuth (configured)"
 			} else if key := p.GetKey(&cfg.API); key != "" {
@@ -515,7 +518,8 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 		}
 
 		fmt.Fprintf(&sb, "\nCurrent: %s (%s)\n", currentProvider, cfg.Model.Name)
-		sb.WriteString("\nUsage: /provider <name>")
+		sb.WriteString("\nUsage: /provider <name>  — switches (asks for the key if missing)\n")
+		sb.WriteString("       /model <name>     — switch model (Ctrl+K for the picker)")
 
 		return sb.String(), nil
 	}
@@ -546,7 +550,14 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 		return fmt.Sprintf("%s requires OAuth login.\n\nUse: /oauth-login %s", p.DisplayName, newProvider), nil
 	}
 	if !p.KeyOptional && !cfg.API.HasProvider(newProvider) {
-		return fmt.Sprintf("%s is not configured.\n\nUse: /login %s <api_key>", newProvider, newProvider), nil
+		// One-flow switch (v0.100.105): open the masked key-entry directly
+		// instead of a dead-end "run /login NAME" hint. On submit the modal
+		// re-invokes /login <provider> <key>, which saves the key AND
+		// completes the switch (login sets ActiveProvider + the provider's
+		// default model + clears the cross-provider session) — so typing
+		// /provider kimi with no key configured becomes ONE flow, not two
+		// commands.
+		return LoginKeyMarker + newProvider, nil
 	}
 
 	// Switch provider
