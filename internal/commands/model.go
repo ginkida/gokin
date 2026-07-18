@@ -37,6 +37,10 @@ func (c *ModelCommand) GetMetadata() CommandMetadata {
 	}
 }
 
+// ModelSelectorMarker tells the app to open the interactive model selector
+// (the Ctrl+K picker). Same result-prefix mechanism as SettingsMarker.
+const ModelSelectorMarker = "__modelselect:"
+
 func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	cfg := app.GetConfig()
 	if cfg == nil {
@@ -54,8 +58,13 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// Get models for current provider
 	providerModels := client.GetModelsForProvider(activeProvider)
 
-	// No args - show current model and available models for this provider
+	// No args — open the interactive model selector (the same picker as
+	// Ctrl+K) via the marker mechanism (SettingsMarker precedent). The
+	// textual list stays reachable as `/model list` for scripts/logs.
 	if len(args) == 0 {
+		return ModelSelectorMarker, nil
+	}
+	if strings.EqualFold(args[0], "list") {
 		if len(providerModels) == 0 {
 			return fmt.Sprintf("No models available for provider: %s", activeProvider), nil
 		}

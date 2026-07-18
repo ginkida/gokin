@@ -69,7 +69,12 @@ func newModelApp(active string, currentModel string) *fakeAppForModel {
 func TestModelCommand_KimiExampleIsCurrent(t *testing.T) {
 	app := newModelApp("kimi", "kimi-for-coding")
 	cmd := &ModelCommand{}
-	out, err := cmd.Execute(context.Background(), nil, app)
+	// Bare /model opens the interactive selector (marker); the textual list
+	// this test audits moved to `/model list` (v0.100.106).
+	if marker, err := cmd.Execute(context.Background(), nil, app); err != nil || marker != ModelSelectorMarker {
+		t.Fatalf("bare /model = (%q, %v), want the selector marker", marker, err)
+	}
+	out, err := cmd.Execute(context.Background(), []string{"list"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -300,7 +305,7 @@ func TestModelCommand_AllProviderHintsReferRealModels(t *testing.T) {
 			// command doesn't error early.
 			app.setter.model = regs[0].ID
 			cmd := &ModelCommand{}
-			out, err := cmd.Execute(context.Background(), nil, app)
+			out, err := cmd.Execute(context.Background(), []string{"list"}, app)
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}

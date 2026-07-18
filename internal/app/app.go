@@ -1589,6 +1589,10 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 			// /settings: open the interactive modal (also reachable via Ctrl+S
 			// and the palette "Open Settings" action).
 			a.openSettingsModal()
+		} else if result == commands.ModelSelectorMarker {
+			// /model with no args: open the interactive model selector (the
+			// same picker as Ctrl+K). The Update handler guards modal state.
+			a.safeSendToProgram(ui.OpenModelSelectorMsg{})
 		} else if provider, ok := strings.CutPrefix(result, commands.LoginKeyMarker); ok {
 			// /login <provider> with no key: open the masked key-entry modal so
 			// the key is captured securely instead of being typed as a message.

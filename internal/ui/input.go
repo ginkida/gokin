@@ -303,7 +303,7 @@ func DefaultCommands() []CommandInfo {
 			// Tab-complete options reflect the v0.65+ supported set —
 			// gemini/claude/gpt entries pre-v0.78.30 were stale references
 			// to providers removed during the v0.65 trim.
-			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "k3", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
+			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"list", "glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "k3", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
 			Usage: "/model [name]"},
 		{Name: "clear", Description: "Clear conversation history", Category: "Session",
 			Args: []ArgInfo{{Name: "force", Required: false, Type: "option", Options: []string{"--force"}}}, Usage: "/clear [--force]"},
@@ -480,9 +480,17 @@ func DefaultCommands() []CommandInfo {
 		{Name: "unregister-agent-type", Description: "Remove a custom agent type", Category: "Tools",
 			Args: []ArgInfo{{Name: "name", Required: true, Type: "string"}}, Usage: "/unregister-agent-type <name>"},
 		{Name: "mcp", Description: "Manage MCP (Model Context Protocol) servers", Category: "Tools",
-			Args: []ArgInfo{{Name: "subcommand", Required: false, Type: "option",
-				Options: []string{"list", "status", "add", "remove", "refresh", "help"}}},
-			Usage: "/mcp [list|status|add|remove|refresh|help]"},
+			Args: []ArgInfo{
+				{Name: "subcommand", Required: false, Type: "option",
+					Options: []string{"list", "status", "enable", "disable", "add", "remove", "pause", "resume", "edit", "refresh", "preset", "setup", "help"}},
+				{Name: "preset", Required: false, Type: "option",
+					// Offered only after `preset` (server names for pause/
+					// resume/edit are runtime state — no static options).
+					OptionsByPrevious: map[string][]string{
+						"preset": {"github", "filesystem", "sqlite", "brave-search", "puppeteer", "memory", "fetch", "sequential-thinking", "time", "postgres"},
+					}},
+			},
+			Usage: "/mcp [list|status|enable|disable|add|remove|pause|resume|edit|refresh|preset|setup|help]"},
 		{Name: "skill", Description: "List or run reusable project/user workflows", Category: "Tools",
 			Args: []ArgInfo{
 				{Name: "name", Required: false, Type: "string"},

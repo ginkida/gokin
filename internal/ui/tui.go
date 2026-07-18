@@ -4416,6 +4416,15 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 		m.output.AppendLine(lipgloss.NewStyle().Foreground(ColorWarning).Render("  ⚠ " + detail))
 
+	// Open the interactive model selector (/model with no args)
+	case OpenModelSelectorMsg:
+		// Same modal-collision discipline as OpenSettingsMsg below.
+		if m.isModalState() {
+			m.showSurfaceCollision("Model selector did not open", "")
+		} else {
+			m.openModelSelector()
+		}
+
 	// Open the interactive settings modal (/settings)
 	case OpenSettingsMsg:
 		// Guard: Ctrl+S/the /settings command dispatches this async from a

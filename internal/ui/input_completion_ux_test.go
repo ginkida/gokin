@@ -472,3 +472,27 @@ func TestArgumentSuggestions_EnterSelectsAfterNavigation(t *testing.T) {
 		t.Fatal("regenerating suggestions must reset argNavigated")
 	}
 }
+
+// v0.100.106: the /mcp dropdown covers the full runtime-control surface and
+// offers the preset catalog as second-position options after `preset`.
+func TestMCPSuggestions_RuntimeControlAndPresets(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	if !m.updateArgumentSuggestions("/mcp ") {
+		t.Fatal("argument suggestions must show for /mcp ")
+	}
+	joined := strings.Join(m.argSuggestions, " ")
+	for _, want := range []string{"enable", "disable", "pause", "resume", "edit", "preset", "setup"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("/mcp options missing %q: %v", want, m.argSuggestions)
+		}
+	}
+	if !m.updateArgumentSuggestions("/mcp preset ") {
+		t.Fatal("second-position suggestions must show after `preset`")
+	}
+	joined = strings.Join(m.argSuggestions, " ")
+	for _, want := range []string{"github", "filesystem", "sqlite"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("preset catalog options missing %q: %v", want, m.argSuggestions)
+		}
+	}
+}

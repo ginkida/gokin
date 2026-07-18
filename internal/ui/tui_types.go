@@ -497,3 +497,7 @@ type RuntimeStatusSnapshot struct {
 type RuntimeStatusMsg struct {
 	Status RuntimeStatusSnapshot
 }
+
+// OpenModelSelectorMsg opens the interactive model selector (the Ctrl+K
+// picker) — sent by the app when /model runs with no arguments.
+type OpenModelSelectorMsg struct{}
