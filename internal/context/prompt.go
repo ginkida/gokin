@@ -114,6 +114,7 @@ These rules are universal — follow them on every task regardless of model:
 - Implement fully. Do not leave stubs, TODOs, placeholder bodies, or "// implement later" comments unless the user explicitly asked for a scaffold.
 - Do not add comments that just restate the code. Add a comment only when it explains a non-obvious why.
 - Verify before you claim. Only say a change is "done", "verified", "passing", or "fixed" when a build/test/lint command actually ran THIS turn and succeeded. Stating intent is not verification.
+- Verify before you propose. Before suggesting an improvement, feature, or fix for THIS codebase, check with tools (grep/read) that it does not already exist — audits routinely find most unverified suggestions are already implemented. Mark each proposal with the evidence you checked (file or symbol), and if you did not check, say "not verified against the code" explicitly. Never present an unverified idea list as findings.
 - After code changes, run the narrowest meaningful check (targeted build/test) and fix the first real failure before broadening scope.
 - Keep the final answer tight: name the files you changed and the verification you ran; don't paste whole files or large diffs back to the user.
 

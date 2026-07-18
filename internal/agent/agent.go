@@ -1772,6 +1772,11 @@ func (a *Agent) redundancyBudget(tool string) int {
 }
 
 // buildSystemPrompt creates the system prompt based on agent type.
+// proposalHonestyRule mirrors the foreground base prompt's
+// verify-before-proposing rule for sub-agents (they build их own system
+// prompt and never see the foreground universal rules).
+const proposalHonestyRule = "\nProposal honesty: before suggesting an improvement, feature, or fix for this codebase, verify with tools (grep/read) that it does not already exist — most unverified suggestions turn out to be already implemented. Cite what you checked, or explicitly mark the idea 'not verified against the code'.\n"
+
 func (a *Agent) buildSystemPrompt() string {
 	// Snapshot mutable fields under stateMu to avoid races
 	a.stateMu.RLock()
@@ -1914,6 +1919,13 @@ func (a *Agent) buildSystemPrompt() string {
 	// Include for non-lightweight agents always; also for lightweight when weak model needs guidance.
 	if !lightweight || a.weakModelMode {
 		sb.WriteString(a.buildToolGuidesSection())
+	}
+
+	// Proposal honesty (v0.100.105 field report: a session produced a 7-item
+	// improvement list where 4 items ALREADY existed in the code — the model
+	// never checked its own suggestions). Applies to every substantive agent.
+	if !lightweight {
+		sb.WriteString(proposalHonestyRule)
 	}
 
 	// For weak/medium models, add explicit guidance to prevent common mistakes.
