@@ -419,3 +419,56 @@ func TestInputCommandsUseDeepSnapshotsAndRefreshOpenQuery(t *testing.T) {
 		t.Fatalf("commands changed through caller-owned data: %+v", m.commands[0])
 	}
 }
+
+// v0.100.106 field ask: «когда список появляется, по Enter их выбрать».
+// Enter accepts the highlighted ARGUMENT option — but only after explicit
+// ↑/↓ navigation; a bare Enter after typing stays submit-as-typed so a
+// highlighted destructive flag (--force) is never inserted implicitly.
+func TestArgumentSuggestions_EnterSelectsAfterNavigation(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetCommands([]CommandInfo{{
+		Name: "mcp", Description: "mcp", Args: []ArgInfo{{
+			Name: "action", Options: []string{"list", "status", "enable", "disable"},
+		}},
+	}})
+	m.textarea.SetValue("/mcp ")
+	if !m.updateArgumentSuggestions("/mcp ") {
+		t.Fatal("argument suggestions must show for /mcp ")
+	}
+
+	// Bare Enter (no navigation): dropdown must NOT own Enter, and Enter in
+	// direct use closes the dropdown without inserting an option.
+	if m.SuggestionsBlockSubmit() {
+		t.Fatal("un-navigated argument dropdown must not own Enter (submit-as-typed)")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := m.Value(); got != "/mcp" && got != "/mcp " {
+		t.Fatalf("bare Enter must not insert an option, value=%q", got)
+	}
+
+	// Re-open, navigate ↓ once → Enter accepts the highlighted option.
+	m.textarea.SetValue("/mcp ")
+	if !m.updateArgumentSuggestions("/mcp ") {
+		t.Fatal("argument suggestions must re-show")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if !m.argNavigated {
+		t.Fatal("KeyDown must mark argument navigation")
+	}
+	if !m.SuggestionsBlockSubmit() {
+		t.Fatal("navigated argument dropdown must own Enter")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := m.Value(); got != "/mcp status" {
+		t.Fatalf("Enter after ↓ must insert the highlighted option, value=%q", got)
+	}
+
+	// Typing again regenerates the list → navigation state resets.
+	m.textarea.SetValue("/mcp ")
+	if !m.updateArgumentSuggestions("/mcp ") {
+		t.Fatal("argument suggestions must re-show after typing")
+	}
+	if m.argNavigated {
+		t.Fatal("regenerating suggestions must reset argNavigated")
+	}
+}

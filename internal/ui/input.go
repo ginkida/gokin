@@ -181,13 +181,19 @@ type InputModel struct {
 	workDir        string   // Working directory for file suggestions
 
 	// Autocomplete
-	commands         []CommandInfo
-	suggestions      []CommandInfo
-	suggestionType   SuggestionType
-	argSuggestions   []string
-	suggestionArg    string
-	fileSuggestions  []string
-	suggestionIndex  int
+	commands        []CommandInfo
+	suggestions     []CommandInfo
+	suggestionType  SuggestionType
+	argSuggestions  []string
+	suggestionArg   string
+	fileSuggestions []string
+	suggestionIndex int
+	// argNavigated is true once the user explicitly moved the highlight
+	// (↑/↓) inside an ARGUMENT dropdown. Only then does Enter accept the
+	// highlighted option — a bare Enter after typing must stay "run as
+	// typed" so a highlighted destructive flag (--force) is never inserted
+	// by an ordinary submit keystroke (v0.100.106).
+	argNavigated     bool
 	showSuggestions  bool
 	suggestionNotice string
 
@@ -815,9 +821,15 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				return m, nil
 			}
 			if m.showSuggestions && m.suggestionType == SuggestionArgument {
-				// Model.Update normally consumes submission before forwarding the
-				// key. If InputModel is used directly, still never let Enter insert
-				// an option (especially --force) or a textarea newline implicitly.
+				if m.argNavigated && len(m.argSuggestions) > 0 {
+					// The user explicitly moved the highlight — Enter accepts
+					// the selected option, exactly like Tab (v0.100.106).
+					m.acceptArgumentSuggestion(m.argSuggestions[m.suggestionIndex])
+					return m, nil
+				}
+				// No explicit navigation: never let Enter insert an option
+				// (especially --force) or a textarea newline implicitly —
+				// submit-as-typed stays with the parent model.
 				m.showSuggestions = false
 				m.argSuggestions = nil
 				m.suggestionArg = ""
@@ -865,6 +877,9 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				if count > 0 && m.suggestionIndex > 0 {
 					m.suggestionIndex--
 				}
+				if m.suggestionType == SuggestionArgument {
+					m.argNavigated = true
+				}
 				return m, nil
 			}
 			if !m.onFirstComposerVisualLine() {
@@ -906,6 +921,9 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 				}
 				if count > 0 && m.suggestionIndex < count-1 {
 					m.suggestionIndex++
+				}
+				if m.suggestionType == SuggestionArgument {
+					m.argNavigated = true
 				}
 				return m, nil
 			}
@@ -1350,6 +1368,7 @@ func (m *InputModel) updateArgumentSuggestions(value string) bool {
 	m.ghostText = ""
 	m.suggestionType = SuggestionArgument
 	m.suggestionIndex = 0
+	m.argNavigated = false
 	m.showSuggestions = true
 	return true
 }
@@ -2098,7 +2117,7 @@ func (m InputModel) renderSuggestionBox() string {
 			lines = append(lines, descStyle.Render(indicator))
 		}
 		footer := completionFooter(lineBudget,
-			"Tab complete · Enter run as typed · Esc close",
+			argFooterHint(m.argNavigated),
 			"Tab add · Enter run · Esc",
 			"Tab/Enter · Esc",
 		)
@@ -2883,7 +2902,16 @@ func (m *InputModel) ShowingSuggestions() bool {
 // so a highlighted destructive flag such as --force is never inserted by an
 // ordinary submit keystroke.
 func (m *InputModel) SuggestionsBlockSubmit() bool {
-	return m.showSuggestions && m.suggestionType != SuggestionArgument && m.suggestionActionsReadable()
+	if !m.showSuggestions || !m.suggestionActionsReadable() {
+		return false
+	}
+	if m.suggestionType == SuggestionArgument {
+		// A bare Enter after typing stays submit-as-typed; once the user
+		// navigated the highlight (↑/↓), Enter belongs to the dropdown and
+		// accepts the selected option (v0.100.106).
+		return m.argNavigated
+	}
+	return true
 }
 
 // acceptFileSuggestion replaces the last word with the selected file path.
@@ -2943,4 +2971,13 @@ func escapeQuotedInputPath(path string, quote rune) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// argFooterHint tells the truth about what Enter does in the argument
+// dropdown: selection only after explicit ↑/↓ navigation.
+func argFooterHint(navigated bool) string {
+	if navigated {
+		return "Enter select · Tab complete · Esc close"
+	}
+	return "Tab complete · ↑/↓ then Enter select · Enter run as typed · Esc close"
 }
