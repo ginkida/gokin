@@ -723,21 +723,32 @@ func (m *ContextManager) UpdateTokenCount(ctx context.Context) error {
 		// we have just committed. Preserve its exact prompt/completion split.
 		m.appliedAPIGeneration = m.observedAPIGeneration
 		m.authoritativeHistoryKey = historyKey
-		usage = m.tokenCounter.GetUsage(m.observedAPIInput)
-		usage.OutputTokens = m.observedAPIOutput
-		usage.IsEstimate = m.observedOutputEstimated
+		usage = m.usageWithContext(m.observedAPIInput, m.observedAPIOutput, m.observedOutputEstimated)
 	} else if isEstimate && historyKey != "" && historyKey == m.authoritativeHistoryKey {
 		// Repeated UI/config refresh of the same history must stay stable and
 		// exact instead of flickering back to the character heuristic.
-		usage = m.tokenCounter.GetUsage(m.observedAPIInput)
-		usage.OutputTokens = m.observedAPIOutput
-		usage.IsEstimate = m.observedOutputEstimated
+		usage = m.usageWithContext(m.observedAPIInput, m.observedAPIOutput, m.observedOutputEstimated)
 	}
 	m.currentTokens = usage.InputTokens
 	m.lastUsage = &usage
 	m.mu.Unlock()
 
 	return nil
+}
+
+// usageWithContext builds a TokenUsage whose PercentUsed / NearLimit /
+// ExceedsLimit are computed from the FULL live context — prompt PLUS the
+// completion that follows it (v0.100.108 field report: the bar read the
+// last request's prompt only, so a reasoning-heavy K3 answer of tens of K
+// tokens was invisible until the NEXT request, and the near-limit warning /
+// auto-compaction trigger lagged by exactly that much). InputTokens keeps the
+// raw prompt figure for billing/stats consumers.
+func (m *ContextManager) usageWithContext(in, out int, isEstimate bool) TokenUsage {
+	u := m.tokenCounter.GetUsage(in + out)
+	u.InputTokens = in
+	u.OutputTokens = out
+	u.IsEstimate = isEstimate
+	return u
 }
 
 // ObserveAPIUsage records prompt usage reported by the provider for an actual
@@ -760,9 +771,7 @@ func (m *ContextManager) ObserveAPIUsage(inputTokens int, outputTokens ...int) {
 	m.observedAPIOutput = output
 	m.observedOutputEstimated = false
 	m.currentTokens = inputTokens
-	usage := m.tokenCounter.GetUsage(inputTokens)
-	usage.OutputTokens = output
-	usage.IsEstimate = false
+	usage := m.usageWithContext(inputTokens, output, false)
 	m.lastUsage = &usage
 }
 
@@ -781,9 +790,7 @@ func (m *ContextManager) ObserveOutputEstimate(outputTokens int) {
 	}
 	m.observedAPIOutput = outputTokens
 	m.observedOutputEstimated = true
-	usage := m.tokenCounter.GetUsage(m.observedAPIInput)
-	usage.OutputTokens = outputTokens
-	usage.IsEstimate = true
+	usage := m.usageWithContext(m.observedAPIInput, outputTokens, true)
 	m.lastUsage = &usage
 }
 

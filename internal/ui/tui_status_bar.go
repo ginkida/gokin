@@ -863,15 +863,15 @@ func (m Model) getOutputTokens() int {
 	return 0
 }
 
-// formatAbsoluteTokens returns "45.0K/128.0K" if absolute counts are available,
-// optionally appending "+1.2K" for output tokens.
+// formatAbsoluteTokens returns "45.0K/128.0K": ONE number for the full live
+// context (prompt + the completion that follows it — exactly what the next
+// request will carry). The old "+1.2K" output tail was systematically
+// under-read (users compared the first figure against their expectation, and
+// width pressure could drop the tail entirely) — a reasoning-heavy answer of
+// tens of K tokens was invisible until the next request (v0.100.108).
 func formatAbsoluteTokens(tokens, maxTokens, outputTokens int) string {
 	if tokens >= 0 && maxTokens > 0 {
-		label := fmt.Sprintf("%s/%s", formatTokens(tokens), formatTokens(maxTokens))
-		if outputTokens > 0 {
-			label += fmt.Sprintf(" +%s", formatTokens(outputTokens))
-		}
-		return label
+		return fmt.Sprintf("%s/%s", formatTokens(tokens+max(outputTokens, 0)), formatTokens(maxTokens))
 	}
 	return ""
 }
@@ -1015,7 +1015,10 @@ func renderContextBar(pct float64, barWidth int, tokens int, maxTokens int, outp
 func (m Model) getContextPercent() float64 {
 	if m.showTokens && m.tokenUsage != nil {
 		if m.tokenUsage.MaxTokens > 0 && m.tokenUsage.Tokens >= 0 {
-			return float64(m.tokenUsage.Tokens) / float64(m.tokenUsage.MaxTokens)
+			// Full live context: prompt + streaming/final completion, matching
+			// the label and the manager-side NearLimit math (v0.100.108).
+			total := m.tokenUsage.Tokens + max(m.tokenUsage.OutputTokens, 0)
+			return float64(total) / float64(m.tokenUsage.MaxTokens)
 		}
 		return m.tokenUsage.PercentUsed
 	}

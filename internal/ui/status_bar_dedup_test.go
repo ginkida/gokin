@@ -96,3 +96,15 @@ func TestStatusBar_FailoverShowsBothProviderAndModel(t *testing.T) {
 		t.Fatalf("failover should show provider→model, got %q", out)
 	}
 }
+
+// v0.100.108: the context label is ONE number — the full live context
+// (prompt + completion). The old "+N" output tail was systematically
+// under-read and could be dropped under width pressure.
+func TestFormatAbsoluteTokens_SumsCompletion(t *testing.T) {
+	if got := formatAbsoluteTokens(49_000, 1_000_000, 12_000); got != "61.0K/1.0M" {
+		t.Fatalf("label = %q, want the 61.0K/1.0M sum", got)
+	}
+	if got := formatAbsoluteTokens(49_000, 1_000_000, 0); got != "49.0K/1.0M" {
+		t.Fatalf("no-output label = %q", got)
+	}
+}

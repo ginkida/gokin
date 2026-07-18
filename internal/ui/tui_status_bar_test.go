@@ -102,9 +102,9 @@ func TestRenderContextBarShowsProjectedOutput(t *testing.T) {
 	if !strings.Contains(out, "▓") {
 		t.Errorf("expected projection band for output tokens, got: %q", out)
 	}
-	// Label should also surface the +output count.
-	if !strings.Contains(out, "+50.0K") {
-		t.Errorf("expected +output label, got: %q", out)
+	// Label surfaces the summed full context (25K prompt + 50K streaming).
+	if !strings.Contains(out, "75.0K/100.0K") {
+		t.Errorf("expected summed label, got: %q", out)
 	}
 }
 

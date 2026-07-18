@@ -36,12 +36,13 @@ func TestContextHealthMsgPreservesEstimateAndStreamingOutput(t *testing.T) {
 	}
 }
 
-// The absolute label keeps the streaming "+N" tail so the user sees the
-// context growing during generation, and the ≈ prefix marks estimates.
+// The absolute label is ONE number — the full live context (prompt +
+// streaming/final completion), so the user sees the context growing during
+// generation without mentally summing a "+N" tail (v0.100.108).
 func TestContextBarLabelShowsEstimateAndLiveOutput(t *testing.T) {
 	label := formatAbsoluteTokens(56000, 1_000_000, 800)
-	if !strings.Contains(label, "56.0K/1.0M") || !strings.Contains(label, "+800") {
-		t.Fatalf("label = %q, want tokens/max plus the +N streaming tail", label)
+	if label != "56.8K/1.0M" {
+		t.Fatalf("label = %q, want the summed 56.8K/1.0M", label)
 	}
 }
 
@@ -70,7 +71,7 @@ func TestProviderMeasuredContextRemainsExactAfterHealthRefresh(t *testing.T) {
 	if strings.Contains(rendered, "≈") {
 		t.Fatalf("exact provider measurement rendered as estimate: %q", rendered)
 	}
-	if !strings.Contains(rendered, "59.6K/1.0M +1.2K") {
-		t.Fatalf("provider prompt/output split missing: %q", rendered)
+	if !strings.Contains(rendered, "60.9K/1.0M") {
+		t.Fatalf("summed full-context label missing (59.6K prompt + 1.25K output): %q", rendered)
 	}
 }

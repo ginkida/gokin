@@ -75,8 +75,32 @@ func TestContextManager_ObserveAPIUsageIsAuthoritative(t *testing.T) {
 	if usage.OutputTokens != 1_200 {
 		t.Fatalf("OutputTokens = %d, want provider value 1200", usage.OutputTokens)
 	}
-	if usage.PercentUsed != 0.1444 {
-		t.Fatalf("PercentUsed = %v, want 0.1444", usage.PercentUsed)
+	// v0.100.108: percent reflects the FULL live context (prompt + completion)
+	// — the completion becomes prompt on the very next request, and hiding it
+	// lagged the near-limit warning by the whole answer size.
+	if usage.PercentUsed != 0.1456 {
+		t.Fatalf("PercentUsed = %v, want 0.1456 ((144400+1200)/1M)", usage.PercentUsed)
+	}
+}
+
+// NearLimit must fire from the SUM: a prompt just under the warning threshold
+// plus a large reasoning completion is over it — the old prompt-only math let
+// auto-compaction and the near-limit toast lag by the answer size.
+func TestObserveAPIUsage_NearLimitCountsCompletion(t *testing.T) {
+	m := &ContextManager{
+		session: chat.NewSession(),
+		tokenCounter: &TokenCounter{
+			limits: TokenLimits{MaxInputTokens: 100_000, WarningThreshold: 0.8},
+		},
+	}
+	// 75K prompt (under 80%) + 10K completion (sum 85% — over).
+	m.ObserveAPIUsage(75_000, 10_000)
+	usage := m.GetTokenUsage()
+	if !usage.NearLimit {
+		t.Fatalf("NearLimit = false at (75K+10K)/100K with 0.8 threshold; usage=%+v", usage)
+	}
+	if usage.InputTokens != 75_000 {
+		t.Fatalf("InputTokens must keep the raw prompt figure, got %d", usage.InputTokens)
 	}
 }
 
