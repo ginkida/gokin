@@ -323,12 +323,20 @@ func TestSessionManager_SaveAfterMessage(t *testing.T) {
 		t.Errorf("SaveAfterMessage: %v", err)
 	}
 
-	// Give the async saver time to process.
-	time.Sleep(300 * time.Millisecond)
-
-	// Verify the session was saved.
-	if _, err := sm.historyManager.LoadFull(s.ID); err != nil {
-		t.Errorf("session not saved after SaveAfterMessage: %v", err)
+	// The saver is async (buffered signal + 100ms debounce): poll with a
+	// bounded deadline instead of a single-shot read after a fixed sleep —
+	// the signal-then-single-shot idiom flakes on loaded CI runners
+	// (v0.100.105 CI failure; the same fix class as de80023/ffdc62b).
+	deadline := time.Now().Add(5 * time.Second)
+	var loadErr error
+	for time.Now().Before(deadline) {
+		if _, loadErr = sm.historyManager.LoadFull(s.ID); loadErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if loadErr != nil {
+		t.Errorf("session not saved after SaveAfterMessage: %v", loadErr)
 	}
 }
 
