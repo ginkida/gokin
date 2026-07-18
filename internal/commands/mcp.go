@@ -521,7 +521,7 @@ func mcpResume(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []s
 
 func mcpEdit(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []string) (string, error) {
 	if len(args) < 2 {
-		return "Usage: /mcp edit NAME command=CMD [args=A,B] [url=URL] [transport=stdio|http]", nil
+		return "Usage: /mcp edit NAME command=CMD [args=A,B] [url=URL] [transport=stdio|http] [allowed_tools=a,b]", nil
 	}
 	name := args[0]
 	cfg, exists := mgr.GetServerConfig(name)
@@ -557,8 +557,17 @@ func mcpEdit(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []str
 		case "auto_connect":
 			updated.AutoConnect = val == "true" || val == "1" || val == "yes"
 			changed = true
+		case "allowed_tools":
+			// Whitelist of raw tool names; "allowed_tools=" (empty) clears it
+			// (= expose all tools again).
+			if val == "" {
+				updated.AllowedTools = nil
+			} else {
+				updated.AllowedTools = strings.Split(val, ",")
+			}
+			changed = true
 		default:
-			return fmt.Sprintf("Unknown edit key %q — valid: command, args, url, transport, auto_connect.", key), nil
+			return fmt.Sprintf("Unknown edit key %q — valid: command, args, url, transport, auto_connect, allowed_tools.", key), nil
 		}
 	}
 	if !changed {
@@ -593,6 +602,7 @@ func mcpEdit(ctx context.Context, mgr *mcp.Manager, app AppInterface, args []str
 		s.URL = updated.URL
 		s.Transport = updated.Transport
 		s.AutoConnect = updated.AutoConnect
+		s.AllowedTools = append([]string(nil), updated.AllowedTools...)
 	})
 	toolCount := countToolsForServer(mgr, name)
 	return fmt.Sprintf("Updated MCP server %q (%d tools).", name, toolCount), nil

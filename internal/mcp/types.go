@@ -251,6 +251,13 @@ type ServerConfig struct {
 	// configuration. Set by /mcp pause; cleared by /mcp resume. When true,
 	// ConnectAll skips the server and health checks ignore it.
 	Paused bool `yaml:"paused,omitempty" json:"paused,omitempty"`
+
+	// AllowedTools, when non-empty, is a WHITELIST of tool names the server
+	// may expose to the model (matched against the server's RAW tool names,
+	// before any ToolPrefix). Everything else is hidden at registration time —
+	// for servers with write capabilities (filesystem, git) this narrows the
+	// model's reach to exactly what the user intends. Empty = all tools.
+	AllowedTools []string `yaml:"allowed_tools,omitempty" json:"allowedTools,omitempty"`
 }
 
 // MCP protocol version
@@ -268,3 +275,18 @@ const (
 	MethodPromptsGet    = "prompts/get"
 	MethodPing          = "ping"
 )
+
+// ToolAllowed reports whether a server tool (by its RAW name, before any
+// ToolPrefix) passes the AllowedTools whitelist. An empty whitelist allows
+// everything.
+func (c *ServerConfig) ToolAllowed(rawName string) bool {
+	if c == nil || len(c.AllowedTools) == 0 {
+		return true
+	}
+	for _, allowed := range c.AllowedTools {
+		if allowed == rawName {
+			return true
+		}
+	}
+	return false
+}

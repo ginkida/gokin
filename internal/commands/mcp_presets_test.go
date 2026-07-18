@@ -73,4 +73,10 @@ func TestMCPEditParsing(t *testing.T) {
 	if out, _ := mcpEdit(t.Context(), mgr, app, []string{"srv", "transport=carrier-pigeon"}); !strings.Contains(out, "Invalid transport") {
 		t.Fatalf("bad transport: %q", out)
 	}
+	// allowed_tools is an accepted edit key (unknown-key error must not fire);
+	// the flow proceeds to reconnect, which fails against the fake command —
+	// the parse itself succeeding is the pin.
+	if out, _ := mcpEdit(t.Context(), mgr, app, []string{"srv", "allowed_tools=read_file,list_dir"}); strings.Contains(out, "Unknown edit key") {
+		t.Fatalf("allowed_tools must be a valid edit key: %q", out)
+	}
 }

@@ -565,6 +565,10 @@ type MCPServerConfig struct {
 	// configs while letting users opt into tighter permissions per server.
 	PermissionLevel string `yaml:"permission_level,omitempty"`
 
+	// AllowedTools, when non-empty, whitelists the server tools exposed to
+	// the model (raw names, before ToolPrefix). Everything else is hidden.
+	AllowedTools []string `yaml:"allowed_tools,omitempty"`
+
 	// Paused suppresses auto-connect without removing the server config.
 	// Set by /mcp pause; cleared by /mcp resume.
 	Paused bool `yaml:"paused,omitempty"`

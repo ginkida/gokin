@@ -189,6 +189,10 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 			// Create tool wrappers
 			for _, t := range mcpTools {
+				if !cfg.ToolAllowed(t.Name) {
+					logging.Debug("MCP tool hidden by allowed_tools whitelist", "server", cfg.Name, "tool", t.Name)
+					continue
+				}
 				tool := NewMCPTool(client, cfg.Name, cfg.ToolPrefix, t)
 				res.tools = append(res.tools, tool)
 			}
@@ -318,6 +322,10 @@ func (m *Manager) Connect(ctx context.Context, name string) error {
 	}
 	m.clients[name] = client
 	for _, t := range mcpTools {
+		if !cfg.ToolAllowed(t.Name) {
+			logging.Debug("MCP tool hidden by allowed_tools whitelist", "server", cfg.Name, "tool", t.Name)
+			continue
+		}
 		tool := NewMCPTool(client, cfg.Name, cfg.ToolPrefix, t)
 		m.tools = append(m.tools, tool)
 	}
@@ -852,6 +860,10 @@ func (m *Manager) RefreshTools(ctx context.Context, name string) error {
 		}
 	}
 	for _, t := range mcpTools {
+		if !cfg.ToolAllowed(t.Name) {
+			logging.Debug("MCP tool hidden by allowed_tools whitelist", "server", name, "tool", t.Name)
+			continue
+		}
 		tool := NewMCPTool(client, name, cfg.ToolPrefix, t)
 		newTools = append(newTools, tool)
 	}
@@ -973,6 +985,12 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 		if !exists {
 			continue
 		}
+		if cfg.Paused {
+			// A paused server must NOT be resurrected by the health loop —
+			// the same class as the /mcp remove resurrection guard. /mcp
+			// resume reconnects it explicitly.
+			continue
+		}
 
 		h.ReconnectAttempts++
 		logging.Info("MCP auto-reconnect attempt",
@@ -1059,6 +1077,10 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 		}
 		m.clients[c.name] = client
 		for _, t := range mcpTools {
+			if !c.cfg.ToolAllowed(t.Name) {
+				logging.Debug("MCP tool hidden by allowed_tools whitelist", "server", c.cfg.Name, "tool", t.Name)
+				continue
+			}
 			tool := NewMCPTool(client, c.cfg.Name, c.cfg.ToolPrefix, t)
 			m.tools = append(m.tools, tool)
 		}

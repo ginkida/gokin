@@ -1515,6 +1515,8 @@ func (b *Builder) initMCP() error {
 			RetryDelay:      s.RetryDelay,
 			ToolPrefix:      s.ToolPrefix,
 			PermissionLevel: s.PermissionLevel,
+			AllowedTools:    append([]string(nil), s.AllowedTools...),
+			Paused:          s.Paused,
 		})
 		permLevels[s.Name] = s.PermissionLevel
 	}
