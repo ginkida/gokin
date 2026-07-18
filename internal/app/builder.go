@@ -1693,6 +1693,41 @@ func (b *Builder) wireMCPAdminTool() {
 			return commands.MCPRemoveCore(b.mcpManager, b.cfg, b.registry, b.mainClient, name)
 		},
 	)
+	admin.SetControlCallbacks(
+		func(enable bool) (string, error) {
+			if app := b.cachedApp; app != nil {
+				if enable {
+					return commands.MCPEnableForApp(app)
+				}
+				return commands.MCPDisableForApp(app)
+			}
+			return "", fmt.Errorf("app not initialised")
+		},
+		func(name string, paused bool) (string, error) {
+			if app := b.cachedApp; app != nil {
+				if paused {
+					return commands.MCPPauseForApp(context.Background(), b.mcpManager, app, name)
+				}
+				return commands.MCPResumeForApp(context.Background(), b.mcpManager, app, name)
+			}
+			return "", fmt.Errorf("app not initialised")
+		},
+		func(ctx context.Context, params tools.MCPAddParams) (string, error) {
+			if app := b.cachedApp; app != nil {
+				return commands.MCPEditForApp(ctx, b.mcpManager, app, params.Name, commands.MCPAddParams{
+					Transport: params.Transport, Command: params.Command,
+					Args: append([]string(nil), params.Args...), URL: params.URL,
+				})
+			}
+			return "", fmt.Errorf("app not initialised")
+		},
+		func(presetName string) (string, error) {
+			if app := b.cachedApp; app != nil {
+				return commands.MCPPresetAddForApp(context.Background(), b.mcpManager, app, presetName)
+			}
+			return "", fmt.Errorf("app not initialised")
+		},
+	)
 	admin.SetResourceCallbacks(
 		func() string {
 			return mcp.FormatResources(b.mcpManager)

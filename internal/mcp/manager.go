@@ -132,6 +132,10 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	m.mu.RLock()
 	var toConnect []*ServerConfig
 	for name, cfg := range m.servers {
+		if cfg.Paused {
+			logging.Debug("MCP server skipped (paused)", "name", name)
+			continue
+		}
 		if !cfg.AutoConnect {
 			logging.Debug("MCP server skipped (auto_connect=false)", "name", name)
 			continue
@@ -639,6 +643,35 @@ func (m *Manager) RemoveServer(name string) error {
 
 	// Remove configuration
 	delete(m.servers, name)
+	return nil
+}
+
+// UpdateServer replaces the configuration for an existing server. The caller is
+// responsible for disconnecting/reconnecting if the connection should reflect
+// the new settings immediately. Returns an error if the server doesn't exist.
+func (m *Manager) UpdateServer(cfg *ServerConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.servers[cfg.Name]; !exists {
+		return fmt.Errorf("unknown server: %s", cfg.Name)
+	}
+	m.servers[cfg.Name] = cfg
+	return nil
+}
+
+// SetPaused toggles the Paused flag on a server's configuration. Returns an
+// error if the server doesn't exist. The caller is responsible for
+// disconnecting (pause) or reconnecting (resume) as needed.
+func (m *Manager) SetPaused(name string, paused bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, exists := m.servers[name]
+	if !exists {
+		return fmt.Errorf("unknown server: %s", name)
+	}
+	cfg.Paused = paused
 	return nil
 }
 

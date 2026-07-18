@@ -39,6 +39,14 @@ type MCPAdminTool struct {
 	readResource  func(ctx context.Context, uri string) (string, error)
 	listPrompts   func() string
 	getPrompt     func(ctx context.Context, name string, arguments map[string]any) (string, error)
+
+	// Control-plane callbacks (v0.101+): enable/disable, pause/resume, edit,
+	// preset. Each returns a human-readable result string. When nil, Execute
+	// reports the op as unwired rather than panicking.
+	toggleEnabled func(enable bool) (string, error)
+	setPaused     func(name string, paused bool) (string, error)
+	editServer    func(ctx context.Context, params MCPAddParams) (string, error)
+	addPreset     func(name string) (string, error)
 }
 
 // NewMCPAdminTool constructs the tool with no callbacks attached. The builder
@@ -65,6 +73,22 @@ func (t *MCPAdminTool) SetMutationCallbacks(
 ) {
 	t.add = addFn
 	t.remove = removeFn
+}
+
+// SetControlCallbacks wires the enable/disable, pause/resume, edit, and
+// preset callbacks (v0.101+). Each returns a human-readable result string.
+// Kept separate from SetMutationCallbacks so a build or test that only needs
+// add/remove can leave these nil — Execute then reports the op as unwired.
+func (t *MCPAdminTool) SetControlCallbacks(
+	toggleEnabledFn func(enable bool) (string, error),
+	setPausedFn func(name string, paused bool) (string, error),
+	editServerFn func(ctx context.Context, params MCPAddParams) (string, error),
+	addPresetFn func(name string) (string, error),
+) {
+	t.toggleEnabled = toggleEnabledFn
+	t.setPaused = setPausedFn
+	t.editServer = editServerFn
+	t.addPreset = addPresetFn
 }
 
 // SetResourceCallbacks wires the MCP resources read-path: listResourcesFn
@@ -122,9 +146,13 @@ func MCPAdminToolDeclaration() *genai.FunctionDeclaration {
 						"'help' — usage cheatsheet to share with the user. " +
 						"'add' — register a new MCP server; pass `server`, `transport`, plus `command`+`args` for stdio or `url` for http. " +
 						"'remove' — disconnect + drop a server by `server` name. " +
+						"'enable'/'disable' — turn MCP support on/off at runtime (no restart). " +
+						"'pause'/'resume' — suppress auto-connect for one `server` without removing it. " +
+						"'edit' — update an existing `server`'s command/url/args in place. " +
+						"'preset' — add a popular server from the built-in catalog; pass `server` as the preset name (e.g. github, filesystem). " +
 						"'resources' — list context resources exposed by MCP servers; pass `uri` to read one resource's contents. " +
 						"'prompts' — list prompt templates exposed by MCP servers; pass `name` to fetch one rendered prompt (with optional `prompt_args`).",
-					Enum: []string{"list", "status", "help", "add", "remove", "resources", "prompts"},
+					Enum: []string{"list", "status", "help", "add", "remove", "enable", "disable", "pause", "resume", "edit", "preset", "resources", "prompts"},
 				},
 				"server": {
 					Type:        genai.TypeString,
@@ -195,18 +223,46 @@ func (t *MCPAdminTool) Validate(args map[string]any) error {
 			return fmt.Errorf("action=remove requires `server` (server name)")
 		}
 		return nil
+	case "enable", "disable":
+		return nil // no server arg — toggles global MCP support
+	case "pause", "resume":
+		if GetStringDefault(args, "server", "") == "" {
+			return fmt.Errorf("action=%s requires `server` (server name)", action)
+		}
+		return nil
+	case "edit":
+		if GetStringDefault(args, "server", "") == "" {
+			return fmt.Errorf("action=edit requires `server` (existing server name)")
+		}
+		return nil // command/url/args are optional — only provided fields are updated
+	case "preset":
+		if GetStringDefault(args, "server", "") == "" {
+			return fmt.Errorf("action=preset requires `server` (preset name, e.g. github)")
+		}
+		return nil
 	default:
-		return fmt.Errorf("unknown action %q (use list, status, help, add, remove, resources, or prompts)", action)
+		return fmt.Errorf("unknown action %q (use list, status, help, add, remove, enable, disable, pause, resume, edit, preset, resources, or prompts)", action)
 	}
 }
 
 func (t *MCPAdminTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	action := GetStringDefault(args, "action", "list")
 
-	// help is reachable even when MCP is disabled — the model often asks for
-	// the cheatsheet so it can paste a `/mcp add` snippet to the user.
+	// help and enable are reachable even when MCP is disabled — the model
+	// often asks for the cheatsheet, and enable is the whole point of
+	// bootstrapping MCP from an off state.
 	if action == "help" {
 		return NewSuccessResult(mcpAdminHelpText()), nil
+	}
+	if action == "enable" {
+		if t.toggleEnabled == nil {
+			return NewErrorResult("mcp_admin enable is not wired in this build"), nil
+		}
+		out, err := t.toggleEnabled(true)
+		if err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+		return NewSuccessResult(out), nil
 	}
 
 	if !t.mcpReady() {
@@ -248,6 +304,66 @@ func (t *MCPAdminTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 			return NewErrorResult("mcp_admin remove is not wired in this build"), nil
 		}
 		out, err := t.remove(GetStringDefault(args, "server", ""))
+		if err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+		return NewSuccessResult(out), nil
+	case "disable":
+		if t.toggleEnabled == nil {
+			return NewErrorResult("mcp_admin disable is not wired in this build"), nil
+		}
+		out, err := t.toggleEnabled(false)
+		if err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+		return NewSuccessResult(out), nil
+	case "pause":
+		if t.setPaused == nil {
+			return NewErrorResult("mcp_admin pause is not wired in this build"), nil
+		}
+		out, err := t.setPaused(GetStringDefault(args, "server", ""), true)
+		if err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+		return NewSuccessResult(out), nil
+	case "resume":
+		if t.setPaused == nil {
+			return NewErrorResult("mcp_admin resume is not wired in this build"), nil
+		}
+		out, err := t.setPaused(GetStringDefault(args, "server", ""), false)
+		if err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+		return NewSuccessResult(out), nil
+	case "edit":
+		if t.editServer == nil {
+			return NewErrorResult("mcp_admin edit is not wired in this build"), nil
+		}
+		params := MCPAddParams{
+			Name:      GetStringDefault(args, "server", ""),
+			Transport: GetStringDefault(args, "transport", ""),
+			Command:   GetStringDefault(args, "command", ""),
+			URL:       GetStringDefault(args, "url", ""),
+		}
+		if raw, ok := args["args"].([]any); ok {
+			for _, a := range raw {
+				if s, ok := a.(string); ok {
+					params.Args = append(params.Args, s)
+				}
+			}
+		} else if raw, ok := args["args"].([]string); ok {
+			params.Args = append([]string(nil), raw...)
+		}
+		out, err := t.editServer(ctx, params)
+		if err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+		return NewSuccessResult(out), nil
+	case "preset":
+		if t.addPreset == nil {
+			return NewErrorResult("mcp_admin preset is not wired in this build"), nil
+		}
+		out, err := t.addPreset(GetStringDefault(args, "server", ""))
 		if err != nil {
 			return NewErrorResult(err.Error()), nil
 		}

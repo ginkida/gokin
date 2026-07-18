@@ -36,6 +36,8 @@ func (f *fakeAppForMCP) GetMCPManager() *mcp.Manager      { return f.mgr }
 func (f *fakeAppForMCP) GetToolRegistry() *tools.Registry { return f.registry }
 func (f *fakeAppForMCP) GetMainClient() client.Client     { return f.client }
 func (f *fakeAppForMCP) GetConfig() *config.Config        { return f.cfg }
+func (f *fakeAppForMCP) EnableMCP() error                 { return nil }
+func (f *fakeAppForMCP) DisableMCP() error                { return nil }
 
 // — unused methods below (return zero values) —
 func (f *fakeAppForMCP) GetSession() *chat.Session                        { return nil }

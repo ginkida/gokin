@@ -91,6 +91,12 @@ type AppInterface interface {
 	GetToolRegistry() *tools.Registry
 	GetMainClient() client.Client
 
+	// EnableMCP / DisableMCP toggle MCP support at runtime without requiring
+	// a config edit + restart. EnableMCP creates an empty manager so /mcp add
+	// can bootstrap immediately.
+	EnableMCP() error
+	DisableMCP() error
+
 	// Loop manager (v0.81+) — autonomous recurring task system. May be
 	// nil if loops aren't wired (e.g. in unit tests of other commands).
 	// /loop subcommands check for nil and return a clear "unavailable"

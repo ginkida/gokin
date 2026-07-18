@@ -474,3 +474,74 @@ func TestMCPAdminTool_AddWithoutCallbackErrors(t *testing.T) {
 		t.Fatal("add without wired callback should fail")
 	}
 }
+
+// v0.101 control-plane actions: argument validation + honest unwired hints
+// (a build/test that doesn't wire SetControlCallbacks must degrade to a clear
+// message, never panic).
+func TestMCPAdminControlActions(t *testing.T) {
+	tool := NewMCPAdminTool()
+	// enabled-gate: give it a live-looking status callback so mcpReady()=true.
+	tool.SetCallbacks(func() string { return "srv" }, func(name string) string { return "ok" }, func() bool { return true })
+
+	// Validation table.
+	for _, tc := range []struct {
+		args    map[string]any
+		wantErr bool
+	}{
+		{map[string]any{"action": "enable"}, false},
+		{map[string]any{"action": "disable"}, false},
+		{map[string]any{"action": "pause"}, true},
+		{map[string]any{"action": "pause", "server": "x"}, false},
+		{map[string]any{"action": "resume"}, true},
+		{map[string]any{"action": "edit"}, true},
+		{map[string]any{"action": "edit", "server": "x"}, false},
+		{map[string]any{"action": "preset"}, true},
+		{map[string]any{"action": "preset", "server": "github"}, false},
+	} {
+		err := tool.Validate(tc.args)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("Validate(%v) err=%v, wantErr=%v", tc.args, err, tc.wantErr)
+		}
+	}
+
+	// Unwired execution: every control action reports "not wired", not a panic.
+	for _, args := range []map[string]any{
+		{"action": "enable"},
+		{"action": "disable"},
+		{"action": "pause", "server": "x"},
+		{"action": "resume", "server": "x"},
+		{"action": "edit", "server": "x", "command": "y"},
+		{"action": "preset", "server": "github"},
+	} {
+		res, err := tool.Execute(t.Context(), args)
+		if err != nil {
+			t.Fatalf("Execute(%v) transport err: %v", args, err)
+		}
+		if res.Success {
+			t.Errorf("Execute(%v) unwired must be an error result, got success: %s", args, res.Content)
+		}
+		if !strings.Contains(res.Error+res.Content, "not wired") {
+			t.Errorf("Execute(%v) must carry the unwired hint, got %q / %q", args, res.Error, res.Content)
+		}
+	}
+
+	// Wired paths route to the callbacks.
+	tool.SetControlCallbacks(
+		func(enable bool) (string, error) { return fmt.Sprintf("toggled=%v", enable), nil },
+		func(name string, paused bool) (string, error) { return fmt.Sprintf("%s paused=%v", name, paused), nil },
+		func(ctx context.Context, p MCPAddParams) (string, error) { return "edited " + p.Name, nil },
+		func(name string) (string, error) { return "preset " + name, nil },
+	)
+	res, _ := tool.Execute(t.Context(), map[string]any{"action": "enable"})
+	if !res.Success || !strings.Contains(res.Content, "toggled=true") {
+		t.Fatalf("enable route: %+v", res)
+	}
+	res, _ = tool.Execute(t.Context(), map[string]any{"action": "pause", "server": "srv"})
+	if !res.Success || !strings.Contains(res.Content, "srv paused=true") {
+		t.Fatalf("pause route: %+v", res)
+	}
+	res, _ = tool.Execute(t.Context(), map[string]any{"action": "preset", "server": "github"})
+	if !res.Success || !strings.Contains(res.Content, "preset github") {
+		t.Fatalf("preset route: %+v", res)
+	}
+}

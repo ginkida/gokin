@@ -1667,6 +1667,113 @@ func (a *App) UnlockMCPConfigMutation() {
 	a.mcpMutationMu.Unlock()
 }
 
+// EnableMCP creates a fresh empty MCP manager at runtime and persists
+// mcp.enabled=true to config, so the user can turn MCP on from chat without
+// editing YAML + restarting. Idempotent — returns nil if already enabled.
+func (a *App) EnableMCP() error {
+	a.mu.Lock()
+	if a.mcpManager != nil {
+		a.mu.Unlock()
+		return nil
+	}
+	a.mcpManager = mcp.NewManager(nil)
+	a.mcpManager.SetToolsChangedCallback(func(name string) {
+		a.SyncMCPToolsForServer(name)
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusStreamResume,
+			Message: fmt.Sprintf("MCP %q: tool list updated", name),
+		})
+	})
+	// Boot-parity wiring (review catch): without these a runtime-enabled
+	// manager ran with NO health monitor and NO health toasts until restart.
+	healthToasts := newHealthToastLimiter()
+	a.mcpManager.SetHealthChangeCallback(func(name string, healthy bool) {
+		if !healthToasts.ShouldEmit(name, time.Now()) {
+			return
+		}
+		if healthy {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusStreamResume,
+				Message: fmt.Sprintf("MCP server %q reconnected", name),
+			})
+		} else {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRecoverableError,
+				Message: fmt.Sprintf("MCP server %q disconnected", name),
+			})
+		}
+	})
+	if a.config != nil && a.config.MCP.HealthCheckInterval > 0 {
+		// Safe on an empty manager (no servers = cheap no-op ticks); the boot
+		// path only starts it when connected>0, but a runtime-enabled manager
+		// gains servers AFTER this point and would otherwise never be
+		// monitored until restart.
+		a.mcpManager.StartHealthCheck(a.ctx, a.config.MCP.HealthCheckInterval)
+	}
+	if a.config == nil {
+		a.config = config.DefaultConfig()
+	}
+	a.config.MCP.Enabled = true
+	saveErr := a.config.Save()
+	a.mu.Unlock()
+	if saveErr != nil {
+		return fmt.Errorf("MCP enabled in session but config save failed: %w", saveErr)
+	}
+	a.safeSendToProgram(ui.StatusUpdateMsg{
+		Type:    ui.StatusInfo,
+		Message: "MCP enabled. Use /mcp add or /mcp preset to add servers.",
+	})
+	return nil
+}
+
+// DisableMCP shuts down all MCP server connections, nils the manager, and
+// persists mcp.enabled=false. Idempotent — returns nil if already disabled.
+func (a *App) DisableMCP() error {
+	a.mu.Lock()
+	if a.mcpManager == nil {
+		// Already disabled at runtime — still persist the flag so config and
+		// session state can't stay out of sync (nil-guarded for tests).
+		var saveErr error
+		if a.config != nil && a.config.MCP.Enabled {
+			a.config.MCP.Enabled = false
+			saveErr = a.config.Save()
+		}
+		a.mu.Unlock()
+		return saveErr
+	}
+	mgr := a.mcpManager
+	a.mcpManager = nil
+	if a.config != nil {
+		a.config.MCP.Enabled = false
+	}
+	// Unregister all MCP tools from the registry so the model stops seeing them.
+	if a.registry != nil {
+		for _, t := range a.registry.List() {
+			if mt, ok := t.(*mcp.MCPTool); ok {
+				a.registry.Unregister(mt.Name())
+			}
+		}
+		if a.client != nil {
+			a.client.SetTools(a.registry.GeminiTools())
+		}
+	}
+	saveErr := a.config.Save()
+	a.mu.Unlock()
+
+	// Shutdown outside the lock — Close() can block on network I/O.
+	if mgr != nil {
+		_ = mgr.Shutdown(context.Background())
+	}
+	if saveErr != nil {
+		return fmt.Errorf("MCP disabled in session but config save failed: %w", saveErr)
+	}
+	a.safeSendToProgram(ui.StatusUpdateMsg{
+		Type:    ui.StatusInfo,
+		Message: "MCP disabled. All MCP tools removed.",
+	})
+	return nil
+}
+
 // GetToolRegistry returns the tool registry — exposed so /mcp add/remove
 // can register and unregister MCP-provided tools at runtime.
 func (a *App) GetToolRegistry() *tools.Registry {

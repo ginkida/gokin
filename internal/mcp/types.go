@@ -246,6 +246,11 @@ type ServerConfig struct {
 	// server: "low" / "medium" (default) / "high". Controls when the user is
 	// prompted. Untrusted 3rd-party servers should use "high".
 	PermissionLevel string `yaml:"permission_level,omitempty" json:"permissionLevel,omitempty"`
+
+	// Paused suppresses auto-connect for this server without removing its
+	// configuration. Set by /mcp pause; cleared by /mcp resume. When true,
+	// ConnectAll skips the server and health checks ignore it.
+	Paused bool `yaml:"paused,omitempty" json:"paused,omitempty"`
 }
 
 // MCP protocol version

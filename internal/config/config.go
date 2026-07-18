@@ -564,6 +564,10 @@ type MCPServerConfig struct {
 	// default for unknown tools). This preserves existing behavior for old
 	// configs while letting users opt into tighter permissions per server.
 	PermissionLevel string `yaml:"permission_level,omitempty"`
+
+	// Paused suppresses auto-connect without removing the server config.
+	// Set by /mcp pause; cleared by /mcp resume.
+	Paused bool `yaml:"paused,omitempty"`
 }
 
 // UpdateConfig holds self-update settings.
