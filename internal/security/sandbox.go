@@ -195,7 +195,21 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 	}()
 
 	waitCh := make(chan error, 1)
-	go func() { waitCh <- sc.cmd.Wait() }()
+	go func() {
+		// os/exec documents Wait as RACY with StdoutPipe readers: Wait closes
+		// the pipes the moment the process exits, discarding any not-yet-read
+		// tail (CI-reproduced: ExitCode 0 with EMPTY stdout for a command
+		// that printed right before exiting). Start Wait only after BOTH
+		// readers hit EOF — natural on a clean exit, and forced on the
+		// timeout/cancel paths because terminateSandboxProcessTree kills the
+		// write ends. The results are re-buffered (channels have capacity 1)
+		// for the post-select reads below.
+		stdoutRes := <-stdoutCh
+		stderrRes := <-stderrCh
+		stdoutCh <- stdoutRes
+		stderrCh <- stderrRes
+		waitCh <- sc.cmd.Wait()
+	}()
 
 	var timeoutTimer *time.Timer
 	var timeoutCh <-chan time.Time
