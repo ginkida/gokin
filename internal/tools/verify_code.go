@@ -105,6 +105,10 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 	if cmd == nil {
 		return NewErrorResult(fmt.Sprintf("No verification command found for project type: %s", projectType)), nil
 	}
+	// Timeout must kill the whole group: package-manager runners (npm/pnpm/
+	// yarn/bun) and compilers spawn children that a leader-only SIGKILL
+	// orphans forever (the orphaned-`yes` class).
+	KillProcessGroupOnCancel(cmd)
 
 	cmd.Dir = targetDir
 	output, err := cmd.CombinedOutput()

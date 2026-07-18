@@ -292,6 +292,9 @@ func (e *Executor) runDeltaCheck(ctx context.Context) deltaCheckResult {
 		runCtx, cancel := context.WithTimeout(ctx, timeout)
 		cmd := exec.CommandContext(runCtx, check.Command, check.Args...)
 		cmd.Dir = check.Dir
+		// Arbitrary project build/test commands spawn children — a timeout
+		// must kill the whole group, not orphan them (orphaned-`yes` class).
+		KillProcessGroupOnCancel(cmd)
 		output, err := cmd.CombinedOutput()
 		cancel()
 

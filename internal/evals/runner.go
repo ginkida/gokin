@@ -647,6 +647,10 @@ func runShellCommand(ctx context.Context, dir, command string, timeout time.Dura
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
+	// Timeout must kill the whole group: the agent-command script spawns a
+	// headless gokin whose orphan would keep burning API quota forever
+	// (the orphaned-`yes` class).
+	tools.KillProcessGroupOnCancel(cmd)
 
 	var output []byte
 	var err error

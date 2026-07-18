@@ -116,6 +116,7 @@ func NewStdioTransportWithWorkDir(command string, args []string, env map[string]
 	}
 
 	cmd := exec.Command(command, args...)
+	configureServerProcessGroup(cmd)
 	if cleanWorkDir != "" {
 		cmd.Dir = cleanWorkDir
 	}
@@ -342,9 +343,7 @@ func (t *StdioTransport) Close() error {
 	case <-processTimer.C:
 		// Kill if it doesn't exit in time
 		logging.Warn("MCP server not responding, killing process")
-		if t.cmd.Process != nil {
-			t.cmd.Process.Kill()
-		}
+		killServerProcessTree(t.cmd)
 		<-done
 	}
 

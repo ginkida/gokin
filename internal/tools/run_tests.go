@@ -105,6 +105,9 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 
 	cmd := exec.CommandContext(testCtx, cmdName, cmdArgs...)
 	cmd.Dir = workDir
+	// Timeout must kill the whole group: `npm test`/`go test` spawn children
+	// that a leader-only SIGKILL orphans forever (the orphaned-`yes` class).
+	KillProcessGroupOnCancel(cmd)
 
 	start := time.Now()
 	output, err := cmd.CombinedOutput()
