@@ -1,6 +1,8 @@
 package donegate
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -542,5 +544,87 @@ func TestCompletionResponseMentionsTouchedPaths_ShortBasenameIgnored(t *testing.
 	resp := "Updated a.c"
 	if completionResponseMentionsTouchedPaths(resp, []string{"path/a.c"}) {
 		t.Error("short basename (<=3 chars) should not match")
+	}
+}
+
+// ===========================================================================
+// loadPHPProjects / readComposerScripts (25% → full)
+// ===========================================================================
+
+func TestLoadPHPProjects_Empty(t *testing.T) {
+	if got := loadPHPProjects(nil); got != nil {
+		t.Errorf("loadPHPProjects(nil) = %v, want nil", got)
+	}
+	if got := loadPHPProjects([]string{}); got != nil {
+		t.Errorf("loadPHPProjects(empty) = %v, want nil", got)
+	}
+}
+
+func TestLoadPHPProjects_SortsByDir(t *testing.T) {
+	base := t.TempDir()
+	dirB := filepath.Join(base, "b")
+	dirA := filepath.Join(base, "a")
+	for _, d := range []string{dirB, dirA} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projects := loadPHPProjects([]string{dirB, dirA})
+	if len(projects) != 2 {
+		t.Fatalf("got %d projects, want 2", len(projects))
+	}
+	if projects[0].Dir != dirA || projects[1].Dir != dirB {
+		t.Errorf("projects not sorted by Dir: %q, %q", projects[0].Dir, projects[1].Dir)
+	}
+	// No composer.json → empty script map.
+	if len(projects[0].Scripts) != 0 || len(projects[1].Scripts) != 0 {
+		t.Errorf("expected empty Scripts without composer.json, got %v / %v",
+			projects[0].Scripts, projects[1].Scripts)
+	}
+}
+
+func TestLoadPHPProjects_ReadsComposerScripts(t *testing.T) {
+	dir := t.TempDir()
+	composer := `{
+		"scripts": {
+			"Test": "phpunit",
+			" lint ": "phpcs .",
+			"   ": "ignored-empty-name",
+			"watch": ["ignored", "non-string"]
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "composer.json"), []byte(composer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projects := loadPHPProjects([]string{dir})
+	if len(projects) != 1 {
+		t.Fatalf("got %d projects, want 1", len(projects))
+	}
+	scripts := projects[0].Scripts
+	if len(scripts) != 2 {
+		t.Fatalf("got %d scripts, want 2: %v", len(scripts), scripts)
+	}
+	if scripts["test"] != "phpunit" {
+		t.Errorf("scripts[test] = %q, want %q", scripts["test"], "phpunit")
+	}
+	if scripts["lint"] != "phpcs ." {
+		t.Errorf("scripts[lint] = %q, want %q", scripts["lint"], "phpcs .")
+	}
+	if _, ok := scripts["watch"]; ok {
+		t.Error("non-string script value should be skipped")
+	}
+}
+
+func TestLoadPHPProjects_InvalidComposerJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "composer.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projects := loadPHPProjects([]string{dir})
+	if len(projects) != 1 {
+		t.Fatalf("got %d projects, want 1", len(projects))
+	}
+	if len(projects[0].Scripts) != 0 {
+		t.Errorf("invalid composer.json should yield empty Scripts, got %v", projects[0].Scripts)
 	}
 }
