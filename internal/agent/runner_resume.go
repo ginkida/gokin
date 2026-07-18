@@ -51,11 +51,7 @@ func (r *Runner) Resume(ctx context.Context, agentID string, prompt string) (str
 	// status-only no-op on the synchronous resume path.
 	var runCtx context.Context
 	var runCancel context.CancelFunc
-	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-		runCtx, runCancel = context.WithTimeout(ctx, agentTimeout)
-	} else {
-		runCtx, runCancel = context.WithCancel(ctx)
-	}
+	runCtx, runCancel = agentRunContext(ctx, agent)
 	defer runCancel()
 	agent.SetCancelFunc(runCancel)
 

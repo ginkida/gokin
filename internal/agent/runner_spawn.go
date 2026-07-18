@@ -174,11 +174,7 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 	// activity event already has a live cancel func to kill.
 	var runCtx context.Context
 	var runCancel context.CancelFunc
-	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-		runCtx, runCancel = context.WithTimeout(ctx, agentTimeout)
-	} else {
-		runCtx, runCancel = context.WithCancel(ctx)
-	}
+	runCtx, runCancel = agentRunContext(ctx, agent)
 	defer runCancel()
 	agent.SetCancelFunc(runCancel)
 
@@ -243,6 +239,27 @@ func (r *Runner) Spawn(ctx context.Context, agentType string, prompt string, max
 // capability for an approved plan step. It does not bypass the permission
 // system: external, destructive, and otherwise-unlisted operations retain the
 // base policy and prompt behavior.
+
+// agentRunContext derives the run context for a spawned agent. The agent's
+// own timeout (DefaultAgentTimeout / thoroughness-tuned) is a DEFAULT SAFETY
+// CAP for spawns whose parent context carries NO deadline (a foreground
+// task-tool spawn on the undeadlined processing ctx). When the caller DID
+// budget the run with an explicit deadline — a /loop iterationCtx (30m), an
+// eval run — that outer budget wins: stacking the agent's smaller default
+// under it silently clipped loop iterations at 10m while the loop budget said
+// 30m (v0.100.103 field report: "general ✗ 10.0m" — a productive loop agent
+// was killed by DefaultAgentTimeout mid-write, and the v0.100.102 iteration
+// budget raise was unreachable behind it).
+func agentRunContext(ctx context.Context, agent *Agent) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return context.WithCancel(ctx)
+	}
+	if t := agent.GetTimeout(); t > 0 {
+		return context.WithTimeout(ctx, t)
+	}
+	return context.WithCancel(ctx)
+}
+
 func (r *Runner) SpawnWithContext(
 	ctx context.Context,
 	agentType string,
@@ -323,11 +340,7 @@ func (r *Runner) SpawnWithContext(
 	// Apply per-agent timeout and store cancel func for explicit Cancel()
 	var runCtx context.Context
 	var runCancel context.CancelFunc
-	if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-		runCtx, runCancel = context.WithTimeout(ctx, agentTimeout)
-	} else {
-		runCtx, runCancel = context.WithCancel(ctx)
-	}
+	runCtx, runCancel = agentRunContext(ctx, agent)
 	defer runCancel()
 	agent.SetCancelFunc(runCancel)
 
@@ -499,11 +512,7 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		bgCtx := context.WithoutCancel(ctx)
 		var agentCtx context.Context
 		var agentCancel context.CancelFunc
-		if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-			agentCtx, agentCancel = context.WithTimeout(bgCtx, agentTimeout)
-		} else {
-			agentCtx, agentCancel = context.WithCancel(bgCtx)
-		}
+		agentCtx, agentCancel = agentRunContext(bgCtx, agent)
 		defer agentCancel()
 
 		// Store cancel func for explicit Agent.Cancel()
@@ -738,11 +747,7 @@ func (r *Runner) SpawnAsyncWithStreaming(
 		bgCtx := context.WithoutCancel(ctx)
 		var agentCtx context.Context
 		var agentCancel context.CancelFunc
-		if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-			agentCtx, agentCancel = context.WithTimeout(bgCtx, agentTimeout)
-		} else {
-			agentCtx, agentCancel = context.WithCancel(bgCtx)
-		}
+		agentCtx, agentCancel = agentRunContext(bgCtx, agent)
 		defer agentCancel()
 
 		// Store cancel func for explicit Agent.Cancel()
@@ -941,11 +946,7 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 			// kept executing to its own timeout.
 			var runCtx context.Context
 			var runCancel context.CancelFunc
-			if agentTimeout := agent.GetTimeout(); agentTimeout > 0 {
-				runCtx, runCancel = context.WithTimeout(ctx, agentTimeout)
-			} else {
-				runCtx, runCancel = context.WithCancel(ctx)
-			}
+			runCtx, runCancel = agentRunContext(ctx, agent)
 			defer runCancel()
 			agent.SetCancelFunc(runCancel)
 			startTime := time.Now()
