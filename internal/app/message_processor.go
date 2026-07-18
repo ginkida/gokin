@@ -329,6 +329,10 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	// interactive only; headless/eval always acts. pushTurnContext refreshes the
 	// client's ephemeral turn-context (never the cached prefix) with the banner.
 	a.beginTurnIntent(message)
+	// Clear a leftover tool-budget flag from a PRIOR turn that ended on an
+	// error path (before the end-of-turn auto-continue check consumed it) —
+	// otherwise the NEXT normal turn would false-trigger an auto-continue.
+	a.turnToolBudgetHit.Store(false)
 	// Recall durable facts that are relevant to THIS request. Generic hot memory
 	// remains available in the stable system prefix; query-aware recall belongs
 	// beside the user turn so GLM prefix caching is not invalidated every message.

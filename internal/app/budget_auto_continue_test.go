@@ -94,3 +94,17 @@ func TestMaybeAutoContinueAfterBudget(t *testing.T) {
 		t.Fatalf("synthetic prompt shape changed: %q", budgetAutoContinueMessage)
 	}
 }
+
+// A budget flag left over from a turn that ended on an ERROR path (before the
+// end-of-turn check consumed it) must not leak into the next turn — the
+// turn-start reset in processMessageWithContext clears it. Pinned here at the
+// primitive level: Store(false) + maybeAutoContinueAfterBudget = no-op.
+func TestBudgetFlagClearedAtTurnStart(t *testing.T) {
+	a := newBudgetTestApp(t, true)
+	a.program = &tea.Program{}
+	a.noteToolBudgetExhausted() // prior turn's leftover
+	a.turnToolBudgetHit.Store(false)
+	if a.maybeAutoContinueAfterBudget() {
+		t.Fatal("cleared flag must not auto-continue")
+	}
+}
