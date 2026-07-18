@@ -1253,3 +1253,146 @@ func TestModelPromptEnhancement(t *testing.T) {
 		t.Errorf("mistral enhancement = %q, want empty", got)
 	}
 }
+
+// ===========================================================================
+// OllamaClient token-count metadata (ollama.go) — 0%
+// ===========================================================================
+
+func TestOllamaTokenCountMetadata(t *testing.T) {
+	c, err := NewOllamaClient(OllamaConfig{Model: "llama3.2"})
+	if err != nil {
+		t.Fatalf("NewOllamaClient: %v", err)
+	}
+	// Ollama pre-counting is character-based — always an estimate.
+	if !c.TokenCountIsEstimate() {
+		t.Error("TokenCountIsEstimate() = false, want true")
+	}
+	if got := c.TokenCountCacheKey(); got != "llama3.2" {
+		t.Errorf("TokenCountCacheKey() = %q, want %q", got, "llama3.2")
+	}
+	if got := c.GetProvider(); got != "ollama" {
+		t.Errorf("GetProvider() = %q, want %q", got, "ollama")
+	}
+}
+
+// ===========================================================================
+// FallbackClient token-count delegation (fallback.go) — 0%
+// ===========================================================================
+
+// tcAccuracyStub adds the TokenCountAccuracy capability to the fallback stub.
+type tcAccuracyStub struct {
+	fakeFallbackClientStub
+	isEstimate bool
+}
+
+func (s *tcAccuracyStub) TokenCountIsEstimate() bool { return s.isEstimate }
+
+// tcCacheKeyStub adds the TokenCountCacheKey capability to the fallback stub.
+type tcCacheKeyStub struct {
+	fakeFallbackClientStub
+	key string
+}
+
+func (s *tcCacheKeyStub) TokenCountCacheKey() string { return s.key }
+
+// tcDetailedStub adds the TokenCountWithAccuracy capability to the fallback stub.
+type tcDetailedStub struct {
+	fakeFallbackClientStub
+	called bool
+}
+
+func (s *tcDetailedStub) CountTokensWithAccuracy(_ context.Context, _ []*genai.Content) (*genai.CountTokensResponse, bool, error) {
+	s.called = true
+	return &genai.CountTokensResponse{TotalTokens: 7}, true, nil
+}
+
+func TestFallbackTokenCountIsEstimate_CapabilityForwarding(t *testing.T) {
+	// No capability on the active client → not an estimate.
+	plain := &fakeFallbackClientStub{id: "plain"}
+	fc, err := NewFallbackClient([]Client{plain}, []string{"test-tc-plain"})
+	if err != nil {
+		t.Fatalf("NewFallbackClient: %v", err)
+	}
+	if fc.TokenCountIsEstimate() {
+		t.Error("plain stub: TokenCountIsEstimate() = true, want false (no capability)")
+	}
+
+	// Capability present → forwarded verbatim.
+	aware := &tcAccuracyStub{isEstimate: true}
+	fc2, err := NewFallbackClient([]Client{aware}, []string{"test-tc-aware"})
+	if err != nil {
+		t.Fatalf("NewFallbackClient: %v", err)
+	}
+	if !fc2.TokenCountIsEstimate() {
+		t.Error("accuracy stub: TokenCountIsEstimate() = false, want true")
+	}
+}
+
+func TestFallbackTokenCountCacheKey_FallsBackToModel(t *testing.T) {
+	// Without the capability the active client's GetModel() is the cache key.
+	plain := &fakeFallbackClientStub{id: "plain", model: "m-plain"}
+	fc, err := NewFallbackClient([]Client{plain}, []string{"test-tc-key-plain"})
+	if err != nil {
+		t.Fatalf("NewFallbackClient: %v", err)
+	}
+	if got := fc.TokenCountCacheKey(); got != "m-plain" {
+		t.Errorf("TokenCountCacheKey() = %q, want model fallback %q", got, "m-plain")
+	}
+
+	// With the capability the client-supplied key wins.
+	keyed := &tcCacheKeyStub{key: "sess-prefix"}
+	fc2, err := NewFallbackClient([]Client{keyed}, []string{"test-tc-key-aware"})
+	if err != nil {
+		t.Fatalf("NewFallbackClient: %v", err)
+	}
+	if got := fc2.TokenCountCacheKey(); got != "sess-prefix" {
+		t.Errorf("TokenCountCacheKey() = %q, want %q", got, "sess-prefix")
+	}
+}
+
+func TestFallbackCountTokensWithAccuracy(t *testing.T) {
+	// Capability client: the detailed path is used verbatim.
+	detailed := &tcDetailedStub{}
+	fc, err := NewFallbackClient([]Client{detailed}, []string{"test-tc-detailed"})
+	if err != nil {
+		t.Fatalf("NewFallbackClient: %v", err)
+	}
+	resp, isEst, err := fc.CountTokensWithAccuracy(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("CountTokensWithAccuracy: %v", err)
+	}
+	if !detailed.called {
+		t.Error("detailed path was not used")
+	}
+	if resp.TotalTokens != 7 || !isEst {
+		t.Errorf("CountTokensWithAccuracy = (%d, %v), want (7, true)", resp.TotalTokens, isEst)
+	}
+
+	// Plain stub: falls back to CountTokens + capability probe (absent → false).
+	plain := &fakeFallbackClientStub{id: "plain"}
+	fc2, err := NewFallbackClient([]Client{plain}, []string{"test-tc-cta-plain"})
+	if err != nil {
+		t.Fatalf("NewFallbackClient: %v", err)
+	}
+	resp, isEst, err = fc2.CountTokensWithAccuracy(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("CountTokensWithAccuracy: %v", err)
+	}
+	if resp.TotalTokens != 42 || isEst {
+		t.Errorf("plain CountTokensWithAccuracy = (%d, %v), want (42, false)", resp.TotalTokens, isEst)
+	}
+
+	// Accuracy-aware but not detailed: CountTokens result + forwarded estimate flag.
+	aware := &tcAccuracyStub{isEstimate: true}
+	fc3, err := NewFallbackClient([]Client{aware}, []string{"test-tc-cta-aware"})
+	if err != nil {
+		t.Fatalf("NewFallbackClient: %v", err)
+	}
+	resp, isEst, err = fc3.CountTokensWithAccuracy(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("CountTokensWithAccuracy: %v", err)
+	}
+	if resp.TotalTokens != 42 || !isEst {
+		t.Errorf("aware CountTokensWithAccuracy = (%d, %v), want (42, true)", resp.TotalTokens, isEst)
+	}
+}
