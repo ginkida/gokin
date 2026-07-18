@@ -496,3 +496,36 @@ func TestMCPSuggestions_RuntimeControlAndPresets(t *testing.T) {
 		}
 	}
 }
+
+// v0.100.107 field regression (the Enter-select feature's own bug): on a WIDE
+// terminal the post-navigation footer ("Enter select · …", no literal "run")
+// was branded unreadable by suggestionRenderingHasActions, so the SECOND
+// arrow key closed the provider dropdown mid-selection. Narrow terminals
+// happened to pick a width-fallback footer containing "run" and kept working —
+// which is why the first repro attempt passed.
+func TestArgumentSuggestions_WideTerminalNavigationKeepsDropdown(t *testing.T) {
+	m := NewInputModel(DefaultStyles(), t.TempDir())
+	m.SetCommands(DefaultCommands())
+	m.SetWidth(140)
+	m.viewportHeight = 12 // constrained composer, like the real TUI
+	m.textarea.SetValue("/provider ")
+	if !m.updateArgumentSuggestions("/provider ") {
+		t.Fatal("no argument suggestions for /provider ")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if !m.suggestionActionsReadable() {
+		t.Fatal("navigated footer must stay readable on a wide terminal")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if !m.showSuggestions {
+		t.Fatal("second arrow key closed the dropdown (the field-report regression)")
+	}
+	if m.suggestionIndex != 2 {
+		t.Fatalf("suggestionIndex = %d, want 2 after two downs", m.suggestionIndex)
+	}
+	// And Enter still selects the highlighted provider.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := m.Value(); got != "/provider kimi" {
+		t.Fatalf("Enter after navigation inserted %q, want /provider kimi", got)
+	}
+}

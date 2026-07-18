@@ -2287,7 +2287,14 @@ func suggestionRenderingHasActions(rendered string, suggestionType SuggestionTyp
 			selectedVisible = true
 		}
 		if strings.Contains(line, "Tab") && strings.Contains(line, "Enter") && strings.Contains(line, "Esc") &&
-			(suggestionType != SuggestionArgument || strings.Contains(line, "run")) {
+			(suggestionType != SuggestionArgument ||
+				strings.Contains(line, "run") || strings.Contains(line, "select")) {
+			// The argument footer has TWO honest states (v0.100.107 regression
+			// fix): "Enter run as typed" before navigation and "Enter select"
+			// after ↑/↓. Requiring the literal "run" branded the navigated
+			// footer unreadable, so the NEXT arrow key closed the dropdown on
+			// wide terminals (narrow ones happened to pick a fallback variant
+			// containing "run" and kept working — the field-report shape).
 			actionsVisible = true
 		}
 	}
