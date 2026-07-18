@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -1094,5 +1095,161 @@ func TestNewAnthropicClient_Defaults(t *testing.T) {
 	}
 	if c.config.MaxTokens != 8192 {
 		t.Errorf("default MaxTokens = %d", c.config.MaxTokens)
+	}
+}
+
+// ===========================================================================
+// Provider health (health.go) — OrderProvidersByHealth / GetProviderHealthReport / itoa at 0%
+// ===========================================================================
+
+func TestOrderProvidersByHealth_SortsByScoreDescending(t *testing.T) {
+	// Namespaced names: never touch real-provider entries in the shared
+	// providerStats map (the retry_test.go test-adaptive-* convention).
+	const (
+		good = "test-hr-ord-good"
+		mid  = "test-hr-ord-mid" // never recorded → score 0
+		bad  = "test-hr-ord-bad"
+	)
+	recordProviderSuccess(good)       // score +1
+	recordProviderFailure(bad, false) // score -2
+
+	input := []string{bad, mid, good}
+	got := OrderProvidersByHealth(input)
+
+	want := []string{good, mid, bad}
+	if len(got) != len(want) {
+		t.Fatalf("OrderProvidersByHealth = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("OrderProvidersByHealth = %v, want %v", got, want)
+		}
+	}
+	// The input slice must not be mutated — the function returns a copy.
+	for i, name := range []string{bad, mid, good} {
+		if input[i] != name {
+			t.Fatalf("input slice mutated: %v", input)
+		}
+	}
+}
+
+func TestGetProviderHealthReport_FormatsScoreStreakAndLast(t *testing.T) {
+	const (
+		hi = "test-hr-rep-hi"
+		lo = "test-hr-rep-lo"
+	)
+	recordProviderSuccess(hi)        // score 1
+	recordProviderSuccess(hi)        // score 2, streak 0, LastSuccess set
+	recordProviderFailure(lo, false) // score -2, streak 1, LastFailure set
+
+	rep := GetProviderHealthReport()
+
+	if !strings.HasPrefix(rep, "Provider health:\n") {
+		t.Errorf("report missing header:\n%s", rep)
+	}
+	if want := "- " + hi + ": score=2, streak=0, last=success "; !strings.Contains(rep, want) {
+		t.Errorf("report missing %q line:\n%s", want, rep)
+	}
+	if want := "- " + lo + ": score=-2, streak=1, last=failure "; !strings.Contains(rep, want) {
+		t.Errorf("report missing %q line:\n%s", want, rep)
+	}
+	// Rows are sorted by score descending: hi (2) must precede lo (-2).
+	if strings.Index(rep, hi) > strings.Index(rep, lo) {
+		t.Errorf("rows not sorted by score descending:\n%s", rep)
+	}
+}
+
+func TestGetProviderHealthReport_EmptyAndNoTimestamp(t *testing.T) {
+	// Swap the shared map for a controlled fixture (this package runs no
+	// parallel tests), then restore so sibling tests keep their state.
+	healthMu.Lock()
+	savedStats, savedLoaded := providerStats, healthLoaded
+	providerStats = map[string]*providerHealth{}
+	healthLoaded = true // skip reload from the persisted throwaway file
+	healthMu.Unlock()
+	defer func() {
+		healthMu.Lock()
+		providerStats, healthLoaded = savedStats, savedLoaded
+		healthMu.Unlock()
+	}()
+
+	if got := GetProviderHealthReport(); got != "No provider health data." {
+		t.Errorf("empty report = %q, want %q", got, "No provider health data.")
+	}
+
+	// A provider with neither success nor failure renders "last=-".
+	healthMu.Lock()
+	providerStats = map[string]*providerHealth{"test-hr-zero": {Score: 3}}
+	healthMu.Unlock()
+
+	rep := GetProviderHealthReport()
+	if want := "- test-hr-zero: score=3, streak=0, last=-\n"; !strings.Contains(rep, want) {
+		t.Errorf("report missing %q line:\n%s", want, rep)
+	}
+}
+
+func TestItoa(t *testing.T) {
+	for in, want := range map[int]string{0: "0", 8: "8", -20: "-20"} {
+		if got := itoa(in); got != want {
+			t.Errorf("itoa(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// ===========================================================================
+// Response.TotalInputTokens (client.go) — 0%
+// ===========================================================================
+
+func TestResponseTotalInputTokens(t *testing.T) {
+	var nilResp *Response
+	if got := nilResp.TotalInputTokens(); got != 0 {
+		t.Errorf("nil.TotalInputTokens() = %d, want 0", got)
+	}
+	r := &Response{InputTokens: 10, CacheCreationInputTokens: 5, CacheReadInputTokens: 3}
+	if got := r.TotalInputTokens(); got != 18 {
+		t.Errorf("TotalInputTokens() = %d, want 18 (10+5+3)", got)
+	}
+	// Negative fields clamp to zero — they must never subtract.
+	neg := &Response{InputTokens: -4, CacheCreationInputTokens: -2, CacheReadInputTokens: 7}
+	if got := neg.TotalInputTokens(); got != 7 {
+		t.Errorf("TotalInputTokens() with negatives = %d, want 7", got)
+	}
+}
+
+// ===========================================================================
+// ModelPromptEnhancement (model_profiles.go) — 0%
+// ===========================================================================
+
+func TestModelPromptEnhancement(t *testing.T) {
+	// Small llama: concise-responses note + llama-small tool-narration tweak.
+	small := ModelPromptEnhancement("llama3.2:1b")
+	if !strings.Contains(small, "Keep responses concise") {
+		t.Errorf("small-model enhancement missing concise note: %q", small)
+	}
+	if !strings.Contains(small, "always explain what you're doing") {
+		t.Errorf("small llama enhancement missing tool-narration tweak: %q", small)
+	}
+
+	// Coding model (not small): coding-focus block, no small-model note.
+	coding := ModelPromptEnhancement("qwen2.5-coder")
+	if !strings.Contains(coding, "Coding focus") {
+		t.Errorf("coding-model enhancement missing coding focus: %q", coding)
+	}
+	if strings.Contains(coding, "Keep responses concise") {
+		t.Errorf("non-small model got the small-model note: %q", coding)
+	}
+
+	// Unknown model: GetModelProfile falls back to conservative defaults with
+	// IsSmall=true (unknown models get simpler prompts), so the concise note
+	// applies here too.
+	unknown := ModelPromptEnhancement("totally-unknown-model")
+	if !strings.Contains(unknown, "Keep responses concise") {
+		t.Errorf("unknown-model enhancement missing conservative-small note: %q", unknown)
+	}
+
+	// Known model that is neither small nor coding and has no family tweak
+	// (mistral) → empty enhancement.
+	if got := ModelPromptEnhancement("mistral"); got != "" {
+		t.Errorf("mistral enhancement = %q, want empty", got)
 	}
 }
