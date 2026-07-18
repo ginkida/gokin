@@ -214,6 +214,11 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 		if err := sc.ctx.Err(); err != nil {
 			lifecycleErr = err
 			terminateSandboxProcessTree(sc.cmd)
+		} else {
+			// Normal exit: sweep group survivors a backgrounded child left
+			// behind (the orphaned-`yes` leak) — ESRCH-safe no-op when the
+			// group is already gone.
+			terminateSandboxProcessTree(sc.cmd)
 		}
 	case <-sc.ctx.Done():
 		lifecycleErr = sc.ctx.Err()

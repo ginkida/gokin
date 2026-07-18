@@ -70,3 +70,25 @@ func bashProcessGroupExists(pgid int) bool {
 	}
 	return !errors.Is(err, syscall.ESRCH)
 }
+
+// reapLeftoverBashDescendants sweeps process-group SURVIVORS after the shell
+// leader exited NORMALLY. A foreground bash command that backgrounds a child
+// (`yes >/dev/null &` in a script, a crashed installer leaving `yes | ...`'s
+// writer behind) used to orphan it forever — the kill path only ran on
+// cancel/timeout, so a leaked child could pin a CPU core long after the app
+// exited (v0.100.104 field report: an orphaned `yes`). Foreground bash is not
+// the sanctioned way to start long-lived background work (run_in_background
+// is — the tasks manager owns those groups), so any survivor here is a leak:
+// TERM, short grace, then KILL. Daemons that re-setsid into their own group
+// (git auto-gc) have already left this group and are untouched.
+func reapLeftoverBashDescendants(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if !bashProcessGroupExists(cmd.Process.Pid) {
+		return
+	}
+	logging.Warn("bash command left background descendants after exiting — reaping the process group",
+		"pgid", cmd.Process.Pid)
+	killBashProcessGroup(cmd, 2*time.Second, nil)
+}

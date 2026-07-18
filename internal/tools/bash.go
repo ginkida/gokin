@@ -914,6 +914,10 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 			if execCtx.Err() != nil {
 				timedOut = true
 				killBashProcessGroup(cmd, 5*time.Second, cmdDone)
+			} else {
+				// Normal exit: sweep group survivors a backgrounded child
+				// (`x &`) left behind — they'd be orphaned forever otherwise.
+				reapLeftoverBashDescendants(cmd)
 			}
 		case <-execCtx.Done():
 			timedOut = true
@@ -998,6 +1002,10 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		if execCtx.Err() != nil {
 			timedOut = true
 			killBashProcessGroup(cmd, 5*time.Second, cmdDone)
+		} else {
+			// Normal exit: sweep group survivors a backgrounded child
+			// (`x &`) left behind — they'd be orphaned forever otherwise.
+			reapLeftoverBashDescendants(cmd)
 		}
 	case <-execCtx.Done():
 		// Context was cancelled or timed out

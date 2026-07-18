@@ -31,3 +31,8 @@ func killBashProcessGroup(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan 
 		}
 	}
 }
+
+// reapLeftoverBashDescendants is a no-op on Windows: the taskkill /T kill
+// path covers descendants on cancellation, and Windows has no process-group
+// orphan semantics equivalent to the Unix `yes &` leak this guards against.
+func reapLeftoverBashDescendants(_ *exec.Cmd) {}
