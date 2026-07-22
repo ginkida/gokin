@@ -349,7 +349,14 @@ func (t *SSHTool) executeBackground(ctx context.Context, args map[string]any, co
 		command,
 	}
 
-	taskID, err := t.taskManager.StartWithArgs(ctx, "ssh", sshArgs)
+	// Detach from the caller's context so the task survives the tool call —
+	// the executor cancels the per-tool ctx the moment this result returns,
+	// which killed the just-started ssh seconds after "Started background SSH
+	// task" (the long-deferred ssh-background ctx bug; bash's Start path has
+	// carried the same WithoutCancel detach since it was written).
+	// task_stop / /tasks stop still work: the task owns its own cancelFunc.
+	bgCtx := context.WithoutCancel(ctx)
+	taskID, err := t.taskManager.StartWithArgs(bgCtx, "ssh", sshArgs)
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("failed to start background task: %s", err)), nil
 	}
