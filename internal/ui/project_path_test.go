@@ -56,9 +56,11 @@ func TestStatusBarProjectPath_CollapsesHome(t *testing.T) {
 	if home == "" {
 		t.Skip("no home dir on this platform")
 	}
+	// v0.100.109: the segment shows the BASENAME — "which repo?" answered in
+	// a fraction of the width; the full path lives in the terminal title.
 	got := statusBarProjectPath(filepath.Join(home, "github", "gokin"))
-	if got != "~/github/gokin" {
-		t.Errorf("got %q, want ~/github/gokin", got)
+	if got != "gokin" {
+		t.Errorf("got %q, want the basename gokin", got)
 	}
 }
 
@@ -98,8 +100,8 @@ func TestBaseStatusSegments_IncludesProjectPath(t *testing.T) {
 	}
 	// Strip ANSI from the first segment to compare.
 	first := stripAnsi(parts[0])
-	if first != "~/github/gokin" {
-		t.Errorf("first segment = %q, want ~/github/gokin", first)
+	if first != "gokin" {
+		t.Errorf("first segment = %q, want the basename gokin", first)
 	}
 }
 

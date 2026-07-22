@@ -2,8 +2,11 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"gokin/internal/config"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -21,6 +24,13 @@ func statusBarProjectPath(workDir string) string {
 	pretty := safeKeyEntryText(prettyPath(workDir))
 	if pretty == "" || pretty == "." {
 		return ""
+	}
+	// BASENAME only (v0.100.109): the segment answers "which repo is this
+	// session bound to?", and the directory name answers it in a fraction of
+	// the width — "gokin", not "~/github/gokin". The full path still lives in
+	// the terminal title. Roots/short paths ("~", "/") render as-is.
+	if base := filepath.Base(pretty); base != "" && base != "." && base != string(filepath.Separator) && base != "~" {
+		pretty = base
 	}
 	return shortenPath(pretty, 36)
 }
@@ -480,7 +490,7 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 		parts = append(parts, safety)
 	}
 	if m.queuedPending > 0 {
-		parts = append(parts, providerStyle.Render(fmt.Sprintf("📥 %d queued", m.queuedPending)))
+		parts = append(parts, providerStyle.Render(fmt.Sprintf("📥%d", m.queuedPending)))
 	}
 	if engineStatus := m.renderEngineStatus(); engineStatus != "" {
 		parts = append(parts, engineStatus)
@@ -585,8 +595,23 @@ func (m Model) identitySegment() string {
 		}
 		return style.Render(provider)
 	}
-	if provider != "" && !strings.HasPrefix(strings.ToLower(model), strings.ToLower(provider)) {
-		return style.Render(provider + "→" + model)
+	if provider != "" {
+		// The arrow form is for a REAL provider/model mismatch (failover).
+		// The old prefix heuristic ("model starts with provider") worked for
+		// glm-5.2 but branded kimi's k3 as a permanent mismatch — the bar
+		// showed a redundant "kimi→k3" on every frame (v0.100.109). Resolve
+		// through the registry instead; an unknown model (custom/ollama tag)
+		// falls back to the prefix heuristic conservatively.
+		detected := config.DetectKnownProviderFromModel(model)
+		mismatch := false
+		if detected != "" {
+			mismatch = !strings.EqualFold(detected, provider)
+		} else {
+			mismatch = !strings.HasPrefix(strings.ToLower(model), strings.ToLower(provider))
+		}
+		if mismatch {
+			return style.Render(provider + "→" + model)
+		}
 	}
 	return style.Render(model)
 }
@@ -828,10 +853,11 @@ func (m Model) formatTokenStatus(withContextBar bool) string {
 	}
 	pct := m.getContextPercent()
 	if withContextBar {
+		// 12 cells max (was 16 on ≥120 cols): the eighth-cell partial glyphs
+		// keep quantization error under ~1 point, and the four columns saved
+		// go to breathing room — the bar dominated the wide layout (v0.100.109).
 		barWidth := 8
-		if m.width >= 120 {
-			barWidth = 16
-		} else if m.width >= 80 {
+		if m.width >= 80 {
 			barWidth = 12
 		}
 		return renderContextBar(pct, barWidth, tokens, maxTokens, m.getOutputTokens(), m.tokenUsage.IsEstimate)
