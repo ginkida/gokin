@@ -68,21 +68,37 @@ func TestSetCommand_Toggle(t *testing.T) {
 }
 
 func TestSetCommand_UIOnlyToggleUsesFastApplyPath(t *testing.T) {
+	tests := []struct {
+		key   string
+		value string
+		check func(*config.Config) bool
+	}{
+		{"compactui", "on", func(c *config.Config) bool { return c.UI.CompactMode }},
+		{"hints", "off", func(c *config.Config) bool { return !c.UI.HintsEnabled }},
+		{"toolcalls", "off", func(c *config.Config) bool { return !c.UI.ShowToolCalls }},
+		{"bell", "off", func(c *config.Config) bool { return !c.UI.Bell }},
+		{"nativealerts", "on", func(c *config.Config) bool { return c.UI.NativeNotifications }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			app := &fakeUIFastPathSetApp{fakeSetApp: fakeSetApp{cfg: cfg}}
+
+			out, err := (&SetCommand{}).Execute(context.Background(), []string{tt.key, tt.value}, app)
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if !app.uiApplied || app.applied {
+				t.Fatalf("UI apply=%v full apply=%v, want true/false", app.uiApplied, app.applied)
+			}
+			if !tt.check(cfg) || !strings.Contains(out, tt.key+": "+tt.value) {
+				t.Fatalf("UI toggle was not applied: config=%+v output=%q", cfg.UI, out)
+			}
+		})
+	}
+
 	cfg := config.DefaultConfig()
 	app := &fakeUIFastPathSetApp{fakeSetApp: fakeSetApp{cfg: cfg}}
-
-	out, err := (&SetCommand{}).Execute(context.Background(), []string{"compactui", "on"}, app)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !app.uiApplied || app.applied {
-		t.Fatalf("UI apply=%v full apply=%v, want true/false", app.uiApplied, app.applied)
-	}
-	if !cfg.UI.CompactMode || !strings.Contains(out, "compactui: on") {
-		t.Fatalf("UI toggle was not applied: compact=%v output=%q", cfg.UI.CompactMode, out)
-	}
-
-	app.uiApplied = false
 	if _, err := (&SetCommand{}).Execute(context.Background(), []string{"permissions", "off"}, app); err != nil {
 		t.Fatalf("runtime Execute: %v", err)
 	}
@@ -147,7 +163,7 @@ func TestSettableToggles_NewInAppSettings(t *testing.T) {
 	cfg := config.DefaultConfig()
 
 	// Every new key is now a known, configurable toggle.
-	for _, key := range []string{"session", "searchcache", "sessionmemory", "watcher", "glmsearch"} {
+	for _, key := range []string{"session", "searchcache", "sessionmemory", "watcher", "glmsearch", "hints", "toolcalls", "bell", "nativealerts"} {
 		if _, ok := findToggle(key); !ok {
 			t.Errorf("%q should be a settable toggle (configurable in-app, not just YAML)", key)
 		}
@@ -163,6 +179,10 @@ func TestSettableToggles_NewInAppSettings(t *testing.T) {
 		"searchcache":   false,
 		"watcher":       false,
 		"glmsearch":     false, // boot-wired MCP server
+		"hints":         true,  // applied live via ConfigUpdateMsg
+		"toolcalls":     true,  // applied live via ConfigUpdateMsg
+		"bell":          true,  // applied live via the complete Settings snapshot
+		"nativealerts":  true,  // applied live to NotificationManager
 	}
 	live := map[string]bool{}
 	for _, s := range SettableToggleStates(cfg) {

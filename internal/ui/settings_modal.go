@@ -102,7 +102,7 @@ func (m *Model) dispatchSettingToggle(key string, on bool) {
 // also folded in so focused tests and older producers get the same semantics
 // for the long-standing runtime toggles.
 func configUpdateSettingSnapshot(msg ConfigUpdateMsg) map[string]bool {
-	snapshot := make(map[string]bool, len(msg.Settings)+6)
+	snapshot := make(map[string]bool, len(msg.Settings)+8)
 	for key, on := range msg.Settings {
 		key = strings.ToLower(strings.TrimSpace(key))
 		if key != "" {
@@ -116,6 +116,8 @@ func configUpdateSettingSnapshot(msg ConfigUpdateMsg) map[string]bool {
 		"compactui":     msg.CompactMode,
 		"reducedmotion": msg.ReducedMotion,
 		"tokens":        msg.ShowTokenUsage,
+		"hints":         msg.HintsEnabled,
+		"toolcalls":     msg.ShowToolCalls,
 	}
 	for key, on := range legacy {
 		if _, present := snapshot[key]; !present {

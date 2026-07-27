@@ -3073,6 +3073,8 @@ func (a *App) CommitMCPConfigSnapshot(cfg *config.Config) {
 		CompactMode:         merged.UI.CompactMode,
 		ReducedMotion:       merged.UI.ReducedMotion,
 		ShowTokenUsage:      merged.UI.ShowTokenUsage,
+		HintsEnabled:        merged.UI.HintsEnabled,
+		ShowToolCalls:       merged.UI.ShowToolCalls,
 		ModelName:           merged.Model.Name,
 	}
 	a.mu.Unlock()
@@ -3222,6 +3224,8 @@ func (a *App) CommitCredentialConfigSnapshot(cfg *config.Config) error {
 		CompactMode:         merged.UI.CompactMode,
 		ReducedMotion:       merged.UI.ReducedMotion,
 		ShowTokenUsage:      merged.UI.ShowTokenUsage,
+		HintsEnabled:        merged.UI.HintsEnabled,
+		ShowToolCalls:       merged.UI.ShowToolCalls,
 		ModelName:           merged.Model.Name,
 	}
 	originalCandidate.SetSnapshotRevision(msg.Revision)
@@ -3349,6 +3353,8 @@ func (a *App) TogglePermissions() bool {
 	compactMode := a.config.UI.CompactMode
 	reducedMotion := a.config.UI.ReducedMotion
 	showTokenUsage := a.config.UI.ShowTokenUsage
+	hintsEnabled := a.config.UI.HintsEnabled
+	showToolCalls := a.config.UI.ShowToolCalls
 	modelName := a.config.Model.Name
 	settingsSnapshot := a.settingToggleSnapshotLocked()
 	configRevision := a.nextConfigRevisionLocked()
@@ -3373,6 +3379,8 @@ func (a *App) TogglePermissions() bool {
 		CompactMode:         compactMode,
 		ReducedMotion:       reducedMotion,
 		ShowTokenUsage:      showTokenUsage,
+		HintsEnabled:        hintsEnabled,
+		ShowToolCalls:       showToolCalls,
 		ModelName:           modelName,
 	})
 
@@ -3453,6 +3461,8 @@ func (a *App) togglePlanningModeWithRevision() (bool, uint64) {
 	compactMode := a.config.UI.CompactMode
 	reducedMotion := a.config.UI.ReducedMotion
 	showTokenUsage := a.config.UI.ShowTokenUsage
+	hintsEnabled := a.config.UI.HintsEnabled
+	showToolCalls := a.config.UI.ShowToolCalls
 	modelName := a.config.Model.Name
 	settingsSnapshot := a.settingToggleSnapshotLocked()
 	configRevision := a.nextConfigRevisionLocked()
@@ -3467,6 +3477,8 @@ func (a *App) togglePlanningModeWithRevision() (bool, uint64) {
 		CompactMode:         compactMode,
 		ReducedMotion:       reducedMotion,
 		ShowTokenUsage:      showTokenUsage,
+		HintsEnabled:        hintsEnabled,
+		ShowToolCalls:       showToolCalls,
 		ModelName:           modelName,
 	})
 
@@ -3512,6 +3524,8 @@ func (a *App) disablePlanModeAfterApproval() {
 	compactMode := a.config.UI.CompactMode
 	reducedMotion := a.config.UI.ReducedMotion
 	showTokenUsage := a.config.UI.ShowTokenUsage
+	hintsEnabled := a.config.UI.HintsEnabled
+	showToolCalls := a.config.UI.ShowToolCalls
 	modelName := a.config.Model.Name
 	client := a.client
 	settingsSnapshot := a.settingToggleSnapshotLocked()
@@ -3558,6 +3572,8 @@ func (a *App) disablePlanModeAfterApproval() {
 		CompactMode:         compactMode,
 		ReducedMotion:       reducedMotion,
 		ShowTokenUsage:      showTokenUsage,
+		HintsEnabled:        hintsEnabled,
+		ShowToolCalls:       showToolCalls,
 		ModelName:           modelName,
 	})
 }
@@ -3773,6 +3789,8 @@ func (a *App) ToggleSandbox() bool {
 	compactMode := a.config.UI.CompactMode
 	reducedMotion := a.config.UI.ReducedMotion
 	showTokenUsage := a.config.UI.ShowTokenUsage
+	hintsEnabled := a.config.UI.HintsEnabled
+	showToolCalls := a.config.UI.ShowToolCalls
 	modelName := a.config.Model.Name
 	settingsSnapshot := a.settingToggleSnapshotLocked()
 	configRevision := a.nextConfigRevisionLocked()
@@ -3791,6 +3809,8 @@ func (a *App) ToggleSandbox() bool {
 		CompactMode:         compactMode,
 		ReducedMotion:       reducedMotion,
 		ShowTokenUsage:      showTokenUsage,
+		HintsEnabled:        hintsEnabled,
+		ShowToolCalls:       showToolCalls,
 		ModelName:           modelName,
 	})
 
@@ -3919,18 +3939,30 @@ func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
 		merged = config.DefaultConfig()
 	}
 	// The keyed production path updates one owned field. The unkeyed public
-	// compatibility path still applies all three fast-path presentation fields.
+	// compatibility path still applies all fast-path presentation fields.
 	switch key {
 	case "tokens":
 		merged.UI.ShowTokenUsage = cfg.UI.ShowTokenUsage
 	case "compactui":
 		merged.UI.CompactMode = cfg.UI.CompactMode
+	case "hints":
+		merged.UI.HintsEnabled = cfg.UI.HintsEnabled
+	case "toolcalls":
+		merged.UI.ShowToolCalls = cfg.UI.ShowToolCalls
+	case "bell":
+		merged.UI.Bell = cfg.UI.Bell
+	case "nativealerts":
+		merged.UI.NativeNotifications = cfg.UI.NativeNotifications
 	case "reducedmotion":
 		merged.UI.ReducedMotion = cfg.UI.ReducedMotion
 	default:
 		merged.UI.ShowTokenUsage = cfg.UI.ShowTokenUsage
 		merged.UI.CompactMode = cfg.UI.CompactMode
 		merged.UI.ReducedMotion = cfg.UI.ReducedMotion
+		merged.UI.HintsEnabled = cfg.UI.HintsEnabled
+		merged.UI.ShowToolCalls = cfg.UI.ShowToolCalls
+		merged.UI.Bell = cfg.UI.Bell
+		merged.UI.NativeNotifications = cfg.UI.NativeNotifications
 	}
 	saveErr := merged.Save()
 	if saveErr != nil {
@@ -3946,9 +3978,17 @@ func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
 		CompactMode:         merged.UI.CompactMode,
 		ReducedMotion:       merged.UI.ReducedMotion,
 		ShowTokenUsage:      merged.UI.ShowTokenUsage,
+		HintsEnabled:        merged.UI.HintsEnabled,
+		ShowToolCalls:       merged.UI.ShowToolCalls,
 		ModelName:           merged.Model.Name,
 	}
 	tuiModel := a.tui
+	var notificationManager *tools.NotificationManager
+	if a.executor != nil {
+		notificationManager = a.executor.GetNotificationManager()
+	}
+	bellEnabled := merged.UI.Bell
+	nativeNotifications := merged.UI.NativeNotifications
 	a.mu.Unlock()
 
 	// Before Run installs a Bubble Tea program (primarily builder/tests), apply
@@ -3961,6 +4001,12 @@ func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
 		tuiModel.SetCompactMode(msg.CompactMode)
 		tuiModel.SetReducedMotion(msg.ReducedMotion)
 		tuiModel.SetShowTokens(msg.ShowTokenUsage)
+		tuiModel.SetHintsEnabled(msg.HintsEnabled)
+		tuiModel.SetShowToolCalls(msg.ShowToolCalls)
+		tuiModel.SetBellEnabled(bellEnabled)
+	}
+	if notificationManager != nil {
+		notificationManager.EnableNativeNotifications(nativeNotifications)
 	}
 	a.safeSendToProgram(msg)
 
@@ -4234,9 +4280,17 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		a.tui.SetCurrentModel(a.config.Model.Name)
 		a.tui.SetShowTokens(a.config.UI.ShowTokenUsage)
 		a.tui.SetReducedMotion(a.config.UI.ReducedMotion)
+		a.tui.SetHintsEnabled(a.config.UI.HintsEnabled)
+		a.tui.SetShowToolCalls(a.config.UI.ShowToolCalls)
+		a.tui.SetBellEnabled(a.config.UI.Bell)
 		a.tui.SetPermissionsEnabled(a.config.Permission.Enabled)
 		a.tui.SetSandboxEnabled(a.config.Tools.Bash.Sandbox)
 		a.tui.SetPlanningModeEnabled(a.planningModeEnabled)
+	}
+	if a.executor != nil {
+		if notificationManager := a.executor.GetNotificationManager(); notificationManager != nil {
+			notificationManager.EnableNativeNotifications(a.config.UI.NativeNotifications)
+		}
 	}
 
 	// Snapshot the UI-relevant state while we still hold the lock — we need
@@ -4251,6 +4305,8 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		CompactMode:         a.config.UI.CompactMode,
 		ReducedMotion:       a.config.UI.ReducedMotion,
 		ShowTokenUsage:      a.config.UI.ShowTokenUsage,
+		HintsEnabled:        a.config.UI.HintsEnabled,
+		ShowToolCalls:       a.config.UI.ShowToolCalls,
 		ModelName:           a.config.Model.Name,
 	}
 

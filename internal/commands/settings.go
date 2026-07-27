@@ -153,6 +153,18 @@ var settableToggles = []settingToggle{
 	{"reducedmotion", "Reduce motion", "Use static activity indicators and instant scrolling", catInterface, true,
 		func(c *config.Config) bool { return c.UI.ReducedMotion },
 		func(c *config.Config, v bool) { c.UI.ReducedMotion = v }},
+	{"toolcalls", "Show tool calls", "Render tool call rows in the transcript", catInterface, true,
+		func(c *config.Config) bool { return c.UI.ShowToolCalls },
+		func(c *config.Config, v bool) { c.UI.ShowToolCalls = v }},
+	{"hints", "Contextual hints", "Rotating feature tips in the composer and idle status bar", catInterface, true,
+		func(c *config.Config) bool { return c.UI.HintsEnabled },
+		func(c *config.Config, v bool) { c.UI.HintsEnabled = v }},
+	{"bell", "Terminal bell", "Ring on prompts and completed background work", catInterface, true,
+		func(c *config.Config) bool { return c.UI.Bell },
+		func(c *config.Config, v bool) { c.UI.Bell = v }},
+	{"nativealerts", "macOS notifications", "Send Notification Center alerts for long work and errors", catInterface, true,
+		func(c *config.Config) bool { return c.UI.NativeNotifications },
+		func(c *config.Config, v bool) { c.UI.NativeNotifications = v }},
 	{"glmsearch", "GLM web search", "GLM Coding Plan web search (web_search_prime, uses your GLM key)", catInterface, false,
 		func(c *config.Config) bool { return c.Web.GLMSearch },
 		func(c *config.Config, v bool) { c.Web.GLMSearch = v }},
@@ -222,7 +234,7 @@ type UISettingConfigApplier interface {
 func ApplyConfigForSetting(app AppInterface, cfg *config.Config, key string) error {
 	key = strings.ToLower(strings.TrimSpace(key))
 	switch key {
-	case "tokens", "compactui", "reducedmotion":
+	case "tokens", "compactui", "reducedmotion", "hints", "toolcalls", "bell", "nativealerts":
 		if applier, ok := app.(UISettingConfigApplier); ok {
 			return applier.ApplyUIConfigForSetting(cfg, key)
 		}

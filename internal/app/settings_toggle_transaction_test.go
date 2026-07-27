@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"gokin/internal/config"
+	"gokin/internal/tools"
 )
 
 func TestApplySettingToggleRollsBackWhenRuntimeApplyFails(t *testing.T) {
@@ -33,12 +35,29 @@ func TestApplySettingToggleUIOnlyDoesNotRequireValidProvider(t *testing.T) {
 	cfg.API.ActiveProvider = "provider-that-does-not-exist"
 	cfg.API.Backend = "provider-that-does-not-exist"
 	cfg.UI.ReducedMotion = false
-	app := &App{config: cfg, ctx: context.Background()}
+	executor := tools.NewExecutor(nil, nil, time.Second)
+	app := &App{config: cfg, ctx: context.Background(), executor: executor}
 
-	result := app.applySettingToggle("", "reducedmotion", true)
-	committed := app.GetConfig()
-	if !result.Success || !result.On || committed == nil || !committed.UI.ReducedMotion {
-		t.Fatalf("UI-only setting incorrectly depended on provider rebuild: result=%+v config=%v", result, committed)
+	tests := []struct {
+		key   string
+		on    bool
+		check func(*config.Config) bool
+	}{
+		{"reducedmotion", true, func(c *config.Config) bool { return c.UI.ReducedMotion }},
+		{"hints", false, func(c *config.Config) bool { return !c.UI.HintsEnabled }},
+		{"toolcalls", false, func(c *config.Config) bool { return !c.UI.ShowToolCalls }},
+		{"bell", false, func(c *config.Config) bool { return !c.UI.Bell }},
+		{"nativealerts", true, func(c *config.Config) bool { return c.UI.NativeNotifications }},
+	}
+	for _, tt := range tests {
+		result := app.applySettingToggle("", tt.key, tt.on)
+		committed := app.GetConfig()
+		if !result.Success || result.On != tt.on || committed == nil || !tt.check(committed) {
+			t.Fatalf("%s incorrectly depended on provider rebuild: result=%+v config=%v", tt.key, result, committed)
+		}
+	}
+	if !executor.GetNotificationManager().NativeNotificationsEnabled() {
+		t.Fatal("nativealerts updated config but not the live NotificationManager")
 	}
 }
 

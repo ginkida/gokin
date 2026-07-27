@@ -78,3 +78,23 @@ func TestHintResetAllowsImmediateRediscovery(t *testing.T) {
 		t.Fatal("Reset retained the 30-second cooldown")
 	}
 }
+
+func TestGeneralHintsRepeatAfterACompleteCycle(t *testing.T) {
+	h := NewHintSystem(DefaultStyles())
+	generalHintCount := len(generalHintCorpus())
+
+	var first string
+	for i := range generalHintCount + 1 {
+		h.lastHintTime = time.Now().Add(-time.Minute)
+		got := h.GetContextualHint(StateInput, "", 10*time.Minute)
+		if got == "" {
+			t.Fatalf("rotation stopped at item %d", i)
+		}
+		if i == 0 {
+			first = got
+		}
+		if i == generalHintCount && got != first {
+			t.Fatalf("rotation did not wrap to first hint %q, got %q", first, got)
+		}
+	}
+}

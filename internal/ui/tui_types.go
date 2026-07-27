@@ -276,6 +276,8 @@ type (
 		CompactMode         bool
 		ReducedMotion       bool
 		ShowTokenUsage      bool
+		HintsEnabled        bool
+		ShowToolCalls       bool
 		ModelName           string // Current model name (empty = no change)
 	}
 	// ModelSelectResultMsg resolves a model switch requested by the selector.

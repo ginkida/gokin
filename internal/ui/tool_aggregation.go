@@ -64,6 +64,9 @@ func (m *Model) flushPendingToolLines() {
 		return
 	}
 	m.pendingToolLines = nil
+	if !m.showToolCalls {
+		return
+	}
 
 	if len(entries) == 1 {
 		e := entries[0]

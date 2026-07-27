@@ -235,6 +235,12 @@ type InputModel struct {
 
 	// Placeholder context
 	activeTask string
+	// placeholderTipIndex rotates placeholderTips on each Reset (every send or
+	// Ctrl+U clear) so the empty composer surfaces one discovery tip at a time
+	// instead of a static string. Plain int — copies with the by-value Model
+	// like the rest of InputModel's scalar state.
+	placeholderTipIndex int
+	placeholderTipsOn   bool
 
 	// Paste collapsing (Claude-Code-style): a large bracketed paste is replaced
 	// in the textarea with a compact "[Pasted text #N +M lines]" chip; the real
@@ -248,10 +254,24 @@ type InputModel struct {
 	pasteSeq        int
 }
 
+// placeholderTips rotate through the empty composer's placeholder, advancing
+// one step per Reset. Index 0 must stay the classic "Message or /command" —
+// first-run familiarity keys on it; later entries surface one binding each,
+// worded to match the welcome panel and shortcuts overlay (hints.go keeps the
+// canonical binding list; TestGeneralHintsMatchCurrentBindings guards drift).
+var placeholderTips = []string{
+	"Message or /command",
+	"Message · / commands · @ files",
+	"Message · Ctrl+K model · ? shortcuts",
+	"Message · Shift+Tab cycles modes",
+	"Message · Ctrl+P all actions",
+	"Message · Ctrl+E last tool output",
+}
+
 // NewInputModel creates a new input model.
 func NewInputModel(styles *Styles, workDir string) InputModel {
 	ta := textarea.New()
-	ta.Placeholder = "Message or /command"
+	ta.Placeholder = placeholderTips[0]
 	ta.Focus()
 	ta.CharLimit = 10000
 	ta.ShowLineNumbers = false
@@ -283,6 +303,7 @@ func NewInputModel(styles *Styles, workDir string) InputModel {
 		ghostText:          "",
 		ghostEnabled:       true, // Enable ghost text by default
 		historySearchIndex: -1,
+		placeholderTipsOn:  true,
 	}
 }
 
@@ -362,7 +383,7 @@ func DefaultCommands() []CommandInfo {
 		{Name: "config", Description: "Show current configuration", Category: "Auth"},
 		{Name: "set", Description: "View or change a setting (live)", Category: "Auth",
 			Args: []ArgInfo{{Name: "key|preset", Required: false, Type: "option",
-				Options: []string{"permissions", "sandbox", "diff", "autocompact", "memory", "globalmemory", "sessionmemory", "plan", "donegate", "thinking", "session", "watcher", "searchcache", "tokens", "compactui", "reducedmotion", "glmsearch", "preset"}},
+				Options: []string{"permissions", "sandbox", "diff", "autocompact", "memory", "globalmemory", "sessionmemory", "plan", "donegate", "thinking", "session", "watcher", "searchcache", "tokens", "compactui", "reducedmotion", "toolcalls", "hints", "bell", "nativealerts", "glmsearch", "preset"}},
 				{Name: "value", Required: false, Type: "option", Options: []string{"on", "off"},
 					OptionsByPrevious: map[string][]string{"preset": {"safe", "balanced", "fast"}}}},
 			Usage: "/set [<key> <on|off> | preset <safe|balanced|fast>]"},
@@ -2462,6 +2483,13 @@ func (m *InputModel) Reset() {
 	m.historySearchQuery = ""
 	m.historySearchResult = ""
 	m.historySearchIndex = -1
+
+	// Fresh compose → next discovery tip. Cheap: one modulo + a string-header
+	// copy, and the textarea only renders the placeholder while empty anyway.
+	if m.placeholderTipsOn {
+		m.placeholderTipIndex = (m.placeholderTipIndex + 1) % len(placeholderTips)
+	}
+	m.updatePlaceholder()
 }
 
 // InsertNewline adds a newline at the cursor position and grows the input height.
@@ -2839,12 +2867,21 @@ func (m *InputModel) SetPlaceholder(placeholder string) {
 	m.textarea.Placeholder = placeholder
 }
 
+// SetHintsEnabled controls rotating discovery tips in the empty composer.
+// Active-task context remains visible regardless of this preference.
+func (m *InputModel) SetHintsEnabled(enabled bool) {
+	m.placeholderTipsOn = enabled
+	m.updatePlaceholder()
+}
+
 // updatePlaceholder updates the placeholder text based on context.
 func (m *InputModel) updatePlaceholder() {
 	if m.activeTask != "" {
 		m.textarea.Placeholder = "Continue: " + m.activeTask
+	} else if !m.placeholderTipsOn {
+		m.textarea.Placeholder = placeholderTips[0]
 	} else {
-		m.textarea.Placeholder = "Message or /command"
+		m.textarea.Placeholder = placeholderTips[m.placeholderTipIndex%len(placeholderTips)]
 	}
 }
 

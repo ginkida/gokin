@@ -270,6 +270,8 @@ history under the new model.
 | `/mcp [list\|add\|remove]` | Manage MCP servers |
 | `/stats` / `/cost` | Session statistics, token costs |
 | `/doctor` | Diagnostics check |
+| `/settings` | Open interactive settings |
+| `/set <key> <on\|off>` | Change a setting directly |
 | `/shortcuts` | Keyboard shortcuts reference |
 | `/help` | Show all 65 commands |
 
@@ -281,9 +283,14 @@ history under the new model.
 |-----|--------|
 | `Enter` | Send message |
 | `Ctrl+C` | Interrupt / cancel |
+| `Ctrl+S` | Open settings |
 | `Ctrl+K` | Model selector |
 | `Ctrl+E` | Expand/collapse tool output |
 | `Ctrl+P` | Command palette |
+| `Shift+Tab` | Cycle Normal → Plan → YOLO |
+| `Ctrl+T` / `Ctrl+O` | Task list / live activity |
+| `Alt+C` | Copy last response |
+| `?` | Searchable shortcuts overlay |
 | `Tab` | Autocomplete |
 | `↑/↓` | History |
 | `y/n` | Accept/reject diff |
@@ -335,6 +342,19 @@ model:
   enable_thinking: false          # legacy static switch
   thinking_budget: 0              # 0 = adaptive/provider default
 
+ui:
+  stream_output: true
+  markdown_rendering: true
+  show_tool_calls: true            # /set toolcalls off hides transcript rows
+  show_token_usage: true           # /set tokens off
+  theme: "dark"                    # Graphite + violet (only active theme)
+  show_welcome: true
+  hints_enabled: true              # /set hints off; composer + status-bar tips
+  compact_mode: false              # /set compactui on
+  reduced_motion: false            # /set reducedmotion on
+  bell: true                       # /set bell off
+  native_notifications: false      # /set nativealerts on (macOS)
+
 tools:
   timeout: 2m
   model_round_timeout: 14m         # allows long GLM reasoning rounds
@@ -358,6 +378,11 @@ mcp:
   enabled: false                  # enable MCP server support
   servers: {}                     # server configs (stdio/http)
 ```
+
+Open the interactive settings screen with `Ctrl+S` or `/settings`. Interface
+toggles such as `hints`, `toolcalls`, `tokens`, `compactui`, and
+`reducedmotion`, `bell`, and `nativealerts` apply immediately; `/set` marks
+restart-only settings explicitly.
 
 ---
 

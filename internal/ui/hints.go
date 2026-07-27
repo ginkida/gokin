@@ -16,6 +16,21 @@ type HintSystem struct {
 	lastHintTime time.Time
 }
 
+func generalHintCorpus() []string {
+	return []string{
+		"? — show all keyboard shortcuts",
+		"Shift+Tab — break complex tasks into reviewable plan steps",
+		"Ctrl+P — quickly find any command",
+		"Ctrl+K — open the model selector",
+		"Ctrl+E — reveal the last tool output",
+		"Alt+C — copy the last response to clipboard",
+		"Ctrl+T — show or hide the task list",
+		"Ctrl+O — see what agents are doing in real time",
+		"Type / to explore all available commands",
+		getTextSelectionHint(),
+	}
+}
+
 // NewHintSystem creates a new hint system.
 func NewHintSystem(styles *Styles) *HintSystem {
 	return &HintSystem{
@@ -56,29 +71,31 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 		// must match the actual key handlers — see tests in hints_test.go
 		// and the shortcuts overlay (internal/ui/shortcuts.go) for the
 		// authoritative list.
-		generalHints := []string{
-			"? — show all keyboard shortcuts",
-			"Shift+Tab — break complex tasks into reviewable plan steps",
-			"Ctrl+P — quickly find any command",
-			"Ctrl+K — open the model selector",
-			"Ctrl+E — reveal the last tool output",
-			"Alt+C — copy the last response to clipboard",
-			"Ctrl+T — show or hide the task list",
-			"Ctrl+O — see what agents are doing in real time",
-			"Type / to explore all available commands",
-			getTextSelectionHint(),
+		generalHints := generalHintCorpus()
+
+		pickNext := func() (string, string) {
+			for idx, candidate := range generalHints {
+				id := fmt.Sprintf("general_%d", idx)
+				if candidate == "" || h.hintsShown[id] > 0 {
+					continue
+				}
+				return candidate, id
+			}
+			return "", ""
 		}
 
 		// Pick the first unseen non-empty hint. Using len(hintsShown) as an
 		// index made unrelated contextual IDs skip entries and could strand the
 		// rotation permanently on an already-seen item.
-		for idx, candidate := range generalHints {
-			if candidate == "" || h.hintsShown[fmt.Sprintf("general_%d", idx)] > 0 {
-				continue
+		hint, hintID = pickNext()
+		if hint == "" {
+			// A "rotating" corpus should not freeze forever after one pass.
+			// Reset only general IDs: contextual onboarding/cancel hints retain
+			// their one-shot semantics.
+			for idx := range generalHints {
+				delete(h.hintsShown, fmt.Sprintf("general_%d", idx))
 			}
-			hint = candidate
-			hintID = fmt.Sprintf("general_%d", idx)
-			break
+			hint, hintID = pickNext()
 		}
 	}
 	if hint == "" {

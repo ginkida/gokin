@@ -463,6 +463,13 @@ func (m Model) statusBarHintSegments(compact bool) []string {
 		parts = append(parts, style.Render(key+" "+hint.desc))
 	}
 
+	// Curated discovery hint (hints.go corpus), fed by the idle UI heartbeat.
+	// The most expendable segment: appended last so renderFittedStatusLine
+	// drops it first under width pressure.
+	if m.state == StateInput && m.hintsEnabled && m.idleHint != "" && m.hintSystem != nil {
+		parts = append(parts, m.hintSystem.RenderHint(m.idleHint))
+	}
+
 	return parts
 }
 

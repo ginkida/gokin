@@ -81,12 +81,19 @@ func (nm *NotificationManager) EnableVerboseMode(enabled bool) {
 	nm.verboseMode = enabled
 }
 
-// EnableNativeNotifications enables/disables native macOS Notification Center alerts.
-// Enabled by default; can be toggled off via config.
+// EnableNativeNotifications enables/disables native macOS Notification Center
+// alerts. They are opt-in and disabled by default.
 func (nm *NotificationManager) EnableNativeNotifications(enabled bool) {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 	nm.nativeNotifications = enabled
+}
+
+// NativeNotificationsEnabled reports the current native-alert preference.
+func (nm *NotificationManager) NativeNotificationsEnabled() bool {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+	return nm.nativeNotifications
 }
 
 // SetSilentTool configures a tool to not send notifications
@@ -145,7 +152,7 @@ func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, d
 	// is external code (set by App.SetNotifyCallback) and a panic there
 	// would crash the whole process. Same pattern as Manager.monitorTask
 	// in v0.78.18.
-	if nm.onNotify != nil {
+	if onNotify := nm.onNotify; onNotify != nil {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -154,7 +161,9 @@ func (nm *NotificationManager) Notify(typ NotificationType, toolName, message, d
 						"stack", logging.PanicStack())
 				}
 			}()
-			nm.onNotify(notif)
+			// Use the callback snapshot captured under nm.mu. Reading the
+			// mutable field from this goroutine raced SetOnNotify.
+			onNotify(notif)
 		}()
 	}
 

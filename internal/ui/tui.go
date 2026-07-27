@@ -284,9 +284,14 @@ type Model struct {
 
 	// Hints system (welcome removed)
 	hintsEnabled  bool // Enable contextual hints
+	showToolCalls bool // Render tool rows in the transcript
 	reducedMotion bool // Static activity indicators + instant auto-follow
 	hintSystem    *HintSystem
-	hintsShown    map[string]int // Track how many times each hint was shown
+	// idleHint is the curated hint currently shown in the idle status bar.
+	// advanceIdleHint refills it from the UI heartbeat while StateInput is
+	// visible; the hint system's 30s rate limit paces rotation. String header
+	// copies with the by-value Model like the other scalar chrome state.
+	idleHint string
 
 	// Coordinated task tracking (Phase 2)
 	coordinatedTasks      map[string]*CoordinatedTaskState // taskID -> state
@@ -442,8 +447,8 @@ func NewModel() *Model {
 		permissionsEnabled:   true,  // Default to enabled
 		sandboxEnabled:       true,  // Default to enabled
 		hintsEnabled:         true,  // Enable contextual hints
+		showToolCalls:        true,  // Render tool rows in the transcript
 		hintSystem:           NewHintSystem(styles),
-		hintsShown:           make(map[string]int),
 		coordinatedTasks:     make(map[string]*CoordinatedTaskState),
 		coordinatedTaskOrder: make([]string, 0),
 		commandPalette:       NewCommandPalette(styles),
@@ -510,6 +515,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
+		// The spinner heartbeat also drives low-frequency discovery hints.
+		// advanceIdleHint is cheap and internally rate-limited to 30 seconds,
+		// so hints appear on first launch and rotate even before a submit.
+		m.advanceIdleHint()
 
 		// Flush pending resize (debounced)
 		if m.pendingResize != nil && time.Now().After(m.resizeDeadline) {
@@ -3125,6 +3134,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				expanded := m.input.ExpandedValue()
 				m.input.AddToHistory(expanded)
 				m.input.Reset()
+				m.advanceIdleHint() // queue the next discovery hint for the return to idle
 				m.state = StateProcessing
 				m.streamStartTime = time.Now()  // Start timeout tracking
 				m.lastActivityTime = time.Now() // Start activity tracking
@@ -3534,7 +3544,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		// Stash the edit display-diff for handleToolResultWithStatus (which
 		// keeps its signature — a dozen tests call it directly). Consumed and
 		// cleared synchronously within this same Update dispatch.
-		if msg.Diff != "" && !msg.Failed {
+		if msg.Diff != "" && !msg.Failed && m.showToolCalls {
 			m.pendingEditDiff = &editDiffDisplay{Text: msg.Diff, Added: msg.DiffAdded, Removed: msg.DiffRemoved}
 		} else {
 			m.pendingEditDiff = nil
@@ -3563,8 +3573,18 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 				m.activityFeed.CompleteEntry(matched.activityID, !msg.Failed, summary)
 			}
 
-			// Handle tool result using matched tool's info and timing
-			m.handleToolResultWithStatus(msg.Content, matched.name, matched.info, matched.startTime, msg.Failed, msg.Error)
+			// Handle tool result using matched tool's info and timing.
+			// show_tool_calls hides NOISE, not errors: a failed tool always
+			// renders its failure line, otherwise `/set toolcalls off`
+			// silently swallowed every tool failure (the activity feed is
+			// behind Ctrl+O, so nothing reached the user).
+			if m.showToolCalls || msg.Failed {
+				m.handleToolResultWithStatus(msg.Content, matched.name, matched.info, matched.startTime, msg.Failed, msg.Error)
+			} else {
+				// Hiding transcript rows must not make the result unreachable:
+				// Ctrl+E still reveals the latest tool output on demand.
+				m.rememberToolOutput(matched.name, msg.Content)
+			}
 
 			// Remove matched entry from slice
 			m.activeToolCalls = append(m.activeToolCalls[:matchIdx], m.activeToolCalls[matchIdx+1:]...)
@@ -3584,7 +3604,11 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			}
 		} else {
 			// Fallback: no matching active call (shouldn't happen, but be safe)
-			m.handleToolResultWithStatus(msg.Content, msg.Name, "", time.Time{}, msg.Failed, msg.Error)
+			if m.showToolCalls || msg.Failed {
+				m.handleToolResultWithStatus(msg.Content, msg.Name, "", time.Time{}, msg.Failed, msg.Error)
+			} else {
+				m.rememberToolOutput(msg.Name, msg.Content)
+			}
 			m.currentTool = ""
 			m.currentToolInfo = ""
 			if m.processingLabel == "" {
@@ -4341,6 +4365,11 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.SetCompactMode(msg.CompactMode)
 		m.SetReducedMotion(msg.ReducedMotion)
 		m.SetShowTokens(msg.ShowTokenUsage)
+		m.SetHintsEnabled(msg.HintsEnabled)
+		m.SetShowToolCalls(msg.ShowToolCalls)
+		if bellEnabled, ok := msg.Settings["bell"]; ok {
+			m.SetBellEnabled(bellEnabled)
+		}
 		if modelName := safeKeyEntryText(msg.ModelName); modelName != "" {
 			m.currentModel = modelName
 			m.refreshTerminalTitle()
@@ -5248,7 +5277,7 @@ func (m *Model) buildToolResultBody(
 	needsTruncation := false
 	compactLongOutput := false
 	if m.toolOutput != nil {
-		m.lastToolOutputIndex = m.toolOutput.AddEntry(toolName, content)
+		m.lastToolOutputIndex = m.rememberToolOutput(toolName, content)
 		expanded = m.toolOutput.IsExpanded(m.lastToolOutputIndex)
 		needsTruncation = m.toolOutput.NeedsTruncation(content)
 		// Read results collapse by default — the success line already
@@ -5301,6 +5330,19 @@ func (m *Model) buildToolResultBody(
 		}
 	}
 	return b.String()
+}
+
+// rememberToolOutput keeps a successful result available to Ctrl+E without
+// implying that it should be rendered in the transcript. Empty results match
+// buildToolResultBody's existing behavior and do not replace the last useful
+// entry.
+func (m *Model) rememberToolOutput(toolName, content string) int {
+	content = safeToolOutputDisplayText(content)
+	if content == "" || m.toolOutput == nil {
+		return m.lastToolOutputIndex
+	}
+	m.lastToolOutputIndex = m.toolOutput.AddEntry(toolName, content)
+	return m.lastToolOutputIndex
 }
 
 // emitToolResultCard writes the success line and body to the chat
@@ -6046,24 +6088,40 @@ func (m *Model) bellCmd() tea.Cmd {
 // SetHintsEnabled enables or disables contextual hints.
 func (m *Model) SetHintsEnabled(enabled bool) {
 	m.hintsEnabled = enabled
-}
-
-// ShowHint displays a contextual hint if hints are enabled and the hint hasn't
-// been shown too many times (max 3 times per hint).
-func (m *Model) ShowHint(hintID, text string) {
-	if !m.hintsEnabled {
+	m.input.SetHintsEnabled(enabled)
+	if m.hintSystem == nil {
 		return
 	}
-	if m.hintsShown[hintID] >= 3 {
-		return // Already shown 3 times, auto-dismiss
+	if enabled {
+		m.hintSystem.Enable()
+	} else {
+		m.hintSystem.Disable()
 	}
-	m.hintsShown[hintID]++
-	m.toastManager.ShowInfo(text)
 }
 
-// RemoveHint removes a hint by ID.
-func (m *Model) RemoveHint(hintID string) {
-	// Hints are shown as toasts which auto-dismiss; this is a no-op.
+// SetShowToolCalls toggles tool rows in the transcript (show_tool_calls).
+func (m *Model) SetShowToolCalls(enabled bool) {
+	m.showToolCalls = enabled
+	if !enabled {
+		// Aggregated read/bash rows may be waiting for the next scrollback
+		// append. Once hidden, they must not leak out on a later flush.
+		m.pendingToolLines = nil
+		m.pendingEditDiff = nil
+	}
+}
+
+// advanceIdleHint pulls the next curated hint (hints.go corpus) into the idle
+// status-bar slot. The UI heartbeat calls it continuously and submit calls it
+// once before leaving StateInput; the hint system's own 30s rate limit makes
+// both paths cheap and deterministic. Later states are intentionally ignored:
+// their recovery actions live in the processing chrome instead.
+func (m *Model) advanceIdleHint() {
+	if !m.hintsEnabled || m.hintSystem == nil || m.state != StateInput {
+		return
+	}
+	if hint := m.hintSystem.GetContextualHint(m.state, "", time.Since(m.sessionStart)); hint != "" {
+		m.idleHint = hint
+	}
 }
 
 // handleTaskStarted handles the TaskStartedEvent message.

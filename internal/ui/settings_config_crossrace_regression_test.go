@@ -70,3 +70,24 @@ func TestNewerConfigUpdateSupersedesPendingSettingResult(t *testing.T) {
 		t.Fatalf("late A result leaked stale feedback: notice=%q output=%q", m.settingsNotice, stripAnsi(m.output.Content()))
 	}
 }
+
+func TestConfigUpdateSettingSnapshotIncludesDiscoveryAndToolRows(t *testing.T) {
+	got := configUpdateSettingSnapshot(ConfigUpdateMsg{
+		HintsEnabled:  true,
+		ShowToolCalls: true,
+	})
+	if !got["hints"] || !got["toolcalls"] {
+		t.Fatalf("explicit UI fields missing from setting snapshot: %v", got)
+	}
+
+	// The complete Settings map is authoritative when present; explicit
+	// fields remain a compatibility fallback for focused/older producers.
+	got = configUpdateSettingSnapshot(ConfigUpdateMsg{
+		Settings:      map[string]bool{"hints": false, "toolcalls": false},
+		HintsEnabled:  true,
+		ShowToolCalls: true,
+	})
+	if got["hints"] || got["toolcalls"] {
+		t.Fatalf("complete settings map should override explicit fallbacks: %v", got)
+	}
+}
