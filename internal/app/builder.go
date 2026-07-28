@@ -1078,12 +1078,41 @@ func (b *Builder) initManagers() error {
 	return nil
 }
 
-// initIntegrations initializes optional feature integrations.
-func (b *Builder) initIntegrations() error {
-	// Wire up task manager to bash tool and apply config
+// wireBackgroundTaskTools binds every tool that can start background work to
+// the ONE task manager. Sharing it is what makes a background task visible to
+// /tasks and reachable by task_output / kill_shell — those are unclonable
+// singletons bound to this manager, so a tool holding a private manager makes
+// its tasks write-only (the sub-agent bash-clone split-brain, v0.100.111).
+//
+// The ssh tool documents run_in_background in its schema, its description AND
+// a worked example, but was never wired here — every attempt returned
+// "background tasks not configured" since the feature shipped.
+//
+// A NEW background-capable tool belongs in this function, not scattered in
+// initIntegrations.
+func (b *Builder) wireBackgroundTaskTools() {
+	if b.taskManager == nil || b.registry == nil {
+		return
+	}
 	if bashTool, ok := b.registry.Get("bash"); ok {
 		if bt, ok := bashTool.(*tools.BashTool); ok {
 			bt.SetTaskManager(b.taskManager)
+		}
+	}
+	if sshTool, ok := b.registry.Get("ssh"); ok {
+		if st, ok := sshTool.(*tools.SSHTool); ok {
+			st.SetTaskManager(b.taskManager)
+		}
+	}
+}
+
+// initIntegrations initializes optional feature integrations.
+func (b *Builder) initIntegrations() error {
+	b.wireBackgroundTaskTools()
+
+	// Apply bash policy config (the task manager is bound above).
+	if bashTool, ok := b.registry.Get("bash"); ok {
+		if bt, ok := bashTool.(*tools.BashTool); ok {
 			bt.SetSandboxEnabled(b.cfg.Tools.Bash.Sandbox)
 			// Set unrestricted mode for bash tool (skip command validation)
 			sandboxOff := !b.cfg.Tools.Bash.Sandbox

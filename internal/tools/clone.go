@@ -1,7 +1,5 @@
 package tools
 
-import "gokin/internal/tasks"
-
 // CloneRegistryForWorkDir clones a registry for a different workspace root.
 // Tools with workspace-bound state get fresh instances pointed at workDir.
 func CloneRegistryForWorkDir(baseRegistry ToolRegistry, workDir string) *Registry {
@@ -65,7 +63,7 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		managedApplyBack := t.managedWorkspaceApplyBack
 		workspaceBoundaryEnabled := t.workspaceBoundaryEnabled
 		workspaceRoot := t.workspaceRoot
-		hasTaskManager := t.taskManager != nil
+		taskManager := t.taskManager
 		t.policyMu.RUnlock()
 
 		dir := pickWorkDir(workDir, sourceWorkDir)
@@ -91,8 +89,17 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		} else if workDir != "" && dir != sourceWorkDir {
 			cloned.EnableManagedWorkspaceApplyBackMode(dir)
 		}
-		if hasTaskManager {
-			cloned.SetTaskManager(tasks.NewManager(dir))
+		if taskManager != nil {
+			// SHARE the foreground manager (v0.100.111). A per-clone
+			// tasks.NewManager made a sub-agent's run_in_background task
+			// write-only: invisible to /tasks, unreadable by task_output and
+			// unstoppable by kill_shell (both are unclonable singletons bound
+			// to the foreground manager), never cancelled at shutdown, and
+			// its `task_<unixts>_<n>` ID could collide with another clone's.
+			// The clone's working directory now travels with the task
+			// (BashTool.executeBackground → Manager.StartInDir), so sharing
+			// the manager does not move where the command runs.
+			cloned.SetTaskManager(taskManager)
 		}
 		return cloned
 	case *GlobTool:

@@ -83,13 +83,31 @@ func (m *Manager) SetCompletionHandler(handler CompletionHandler) {
 	m.onComplete = handler
 }
 
-// Start starts a new background task and returns its ID.
+// Start starts a new background task and returns its ID. The task runs in the
+// manager's own working directory; use StartInDir when the caller owns a
+// different one (sub-agent tool clones share ONE manager so every task stays
+// visible to /tasks, task_output and kill_shell).
 func (m *Manager) Start(ctx context.Context, command string) (string, error) {
+	return m.StartInDir(ctx, "", command)
+}
+
+// taskDirLocked resolves a per-task working directory against the manager's
+// default. Caller holds m.mu.
+func (m *Manager) taskDirLocked(dir string) string {
+	if dir != "" {
+		return dir
+	}
+	return m.workDir
+}
+
+// StartInDir starts a background task whose process runs in dir. An empty dir
+// falls back to the manager's own working directory.
+func (m *Manager) StartInDir(ctx context.Context, dir, command string) (string, error) {
 	m.mu.Lock()
 	m.counter++
 	id := fmt.Sprintf("task_%d_%d", time.Now().Unix(), m.counter)
 
-	task := NewTask(id, command, m.workDir)
+	task := NewTask(id, command, m.taskDirLocked(dir))
 	m.tasks[id] = task
 	onComplete := m.onComplete
 	m.mu.Unlock()
@@ -111,11 +129,17 @@ func (m *Manager) Start(ctx context.Context, command string) (string, error) {
 // StartWithArgs starts a new background task using direct exec (no shell interpretation).
 // This prevents command injection attacks when constructing commands from user input.
 func (m *Manager) StartWithArgs(ctx context.Context, program string, args []string) (string, error) {
+	return m.StartWithArgsInDir(ctx, "", program, args)
+}
+
+// StartWithArgsInDir is StartWithArgs with an explicit working directory; an
+// empty dir falls back to the manager's own.
+func (m *Manager) StartWithArgsInDir(ctx context.Context, dir, program string, args []string) (string, error) {
 	m.mu.Lock()
 	m.counter++
 	id := fmt.Sprintf("task_%d_%d", time.Now().Unix(), m.counter)
 
-	task := NewTaskWithArgs(id, program, args, m.workDir)
+	task := NewTaskWithArgs(id, program, args, m.taskDirLocked(dir))
 	m.tasks[id] = task
 	onComplete := m.onComplete
 	m.mu.Unlock()

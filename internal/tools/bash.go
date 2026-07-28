@@ -510,7 +510,13 @@ func (t *BashTool) executeBackground(ctx context.Context, command string) (ToolR
 	// Task.Cancel() via task_stop still works (task has its own cancelFunc).
 	bgCtx := context.WithoutCancel(ctx)
 
-	taskID, err := t.taskManager.Start(bgCtx, command)
+	// The manager is SHARED with the foreground (so /tasks, task_output and
+	// kill_shell all see this task); the working directory travels with the
+	// task instead of coming from the manager.
+	t.policyMu.RLock()
+	taskDir := t.workDir
+	t.policyMu.RUnlock()
+	taskID, err := t.taskManager.StartInDir(bgCtx, taskDir, command)
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("failed to start background task: %s", err)), nil
 	}
