@@ -863,6 +863,14 @@ func (r *Runner) SpawnAsyncWithStreaming(
 }
 
 // SpawnMultiple creates and starts multiple agents in parallel.
+// agentIDOf is nil-safe: a worker can panic before newConfiguredAgent returns.
+func agentIDOf(agent *Agent) string {
+	if agent == nil {
+		return ""
+	}
+	return agent.ID
+}
+
 func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string, error) {
 	r.cleanupOldResults()
 	ids := make([]string, len(tasks))
@@ -876,6 +884,9 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 		go func(idx int, t AgentTask) {
 			defer wg.Done()
 			var runLease *agentRunLease
+			// Declared out here so the panic-recovery defer below can finalize
+			// a workspace this worker may already have created.
+			var agent *Agent
 			// Registered before panic recovery so recovery/final accounting runs
 			// while this worker still owns its logical agent ID.
 			defer func() { runLease.Release() }()
@@ -886,21 +897,53 @@ func (r *Runner) SpawnMultiple(ctx context.Context, tasks []AgentTask) ([]string
 						"type", t.Type,
 						"panic", p,
 						"stack", logging.PanicStack())
+					panicErr := fmt.Errorf("agent panic: %v", p)
 					mu.Lock()
 					if results[idx] == nil {
 						results[idx] = &AgentResult{
+							AgentID:   agentIDOf(agent),
 							Type:      AgentType(t.Type),
 							Status:    AgentStatusFailed,
 							Error:     fmt.Sprintf("internal panic: %v", p),
 							Completed: true,
 						}
 					}
+					panicResult := results[idx]
+					// A panicked worker used to return (empty id, NIL error):
+					// the caller could not tell "never started" from "crashed
+					// after doing work", `GetResult` had nothing to look up,
+					// and the synthesized failure never left this goroutine.
+					// Publish the id and surface the panic as the call's error
+					// so the standing convention holds — an EMPTY agent id is
+					// the only true never-started failure (v0.100.111).
+					if id := agentIDOf(agent); id != "" {
+						ids[idx] = id
+					}
+					if firstErr == nil {
+						firstErr = panicErr
+					}
 					mu.Unlock()
+					// A workspace-isolated agent owns a git worktree; without
+					// this the panic path LEAKED it (directory + the repo's
+					// worktree registration) because only the normal flow at
+					// the end of this worker finalizes. Every other spawn path
+					// already finalizes from its recovery defer — which is why
+					// finalizeAgentWorkspace carries an idempotency guard, so
+					// a panic AFTER a normal finalize is a clean no-op. Runs
+					// after mu.Unlock: it does git/file I/O and must not hold
+					// the results lock (v0.100.111).
+					r.finalizeAgentWorkspace(agent, panicResult)
+					if id := agentIDOf(agent); id != "" {
+						r.mu.Lock()
+						r.results[id] = panicResult
+						r.mu.Unlock()
+						r.notifyResultReady(id)
+					}
 				}
 			}()
 
 			deps := r.snapshotAgentDeps()
-			agent := r.newConfiguredAgent(ctx, deps, string(t.Type), t.MaxTurns, t.Model, deps.permissions)
+			agent = r.newConfiguredAgent(ctx, deps, string(t.Type), t.MaxTurns, t.Model, deps.permissions)
 			var leaseErr error
 			runLease, leaseErr = r.acquireAgentRunLease(agent.ID)
 			if leaseErr != nil {
