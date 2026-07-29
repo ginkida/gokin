@@ -50,6 +50,43 @@ func (l *SessionWriterLease) IsActive() bool {
 	return l != nil && l.active.Load()
 }
 
+// sessionWriterLeaseHeld reports whether a live writer currently holds the
+// session's lease. Session cleanup consults it so one gokin process never
+// deletes the session another process is actively writing (the shared store is
+// global: cleanup's count/age limits reach every session, and only the calling
+// process's OWN session is exempt).
+//
+// The probe deliberately never CREATES a lock file — a session that was never
+// leased has none, and creating one while cleaning up would leave an orphan
+// behind the session just deleted. Anything it cannot prove free counts as
+// held: cleanup is best-effort, losing someone's live history is not.
+//
+// flock/LockFileEx are per open-file-description, so a lease held by THIS
+// process (a different fd) also reports busy — which is what we want.
+func sessionWriterLeaseHeld(sessionsDir, sessionID string) bool {
+	if err := ValidateSessionID(sessionID); err != nil {
+		return true
+	}
+	absSessionsDir, err := filepath.Abs(sessionsDir)
+	if err != nil {
+		return true
+	}
+	lockPath := filepath.Join(filepath.Clean(absSessionsDir), sessionWriterLockDirName, sessionID+".lock")
+	file, err := os.OpenFile(lockPath, os.O_RDWR, 0o600)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false // never leased by anyone
+		}
+		return true
+	}
+	defer file.Close()
+	if err := lockSessionWriterFile(file); err != nil {
+		return true // busy, or an error we must not gamble on
+	}
+	_ = unlockSessionWriterFile(file)
+	return false
+}
+
 // AcquireSessionWriterLease acquires exclusive write ownership for sessionID
 // in Gokin's standard full-session storage directory. Session IDs use the
 // exact same portable validation contract as session persistence.

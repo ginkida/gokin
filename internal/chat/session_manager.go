@@ -592,6 +592,14 @@ func (sm *SessionManager) CleanupOldSessions() error {
 	cutoff := time.Now().Add(-sm.config.MaxSessionAge)
 	deletedCount := 0
 	currentSessionID := sm.session.GetID()
+	sessionsDir, dirErr := getSessionsDir()
+	if dirErr != nil {
+		// Without the lease directory we cannot tell a live session from a
+		// stale one; skip cleanup entirely rather than risk another
+		// process's history.
+		logging.Debug("skipping session cleanup: lease directory unavailable", "error", dirErr)
+		return nil
+	}
 
 	// Delete sessions that are too old
 	for i, sess := range sessions {
@@ -613,6 +621,15 @@ func (sm *SessionManager) CleanupOldSessions() error {
 		}
 
 		if shouldDelete {
+			// Never delete a session another gokin process is actively
+			// writing: its writer lease is exactly how that process claims
+			// ownership. Without this, a second process's live history could
+			// be removed out from under it by the count/age limits (only the
+			// CURRENT process's own session is exempt above).
+			if sessionsDir != "" && sessionWriterLeaseHeld(sessionsDir, sess.ID) {
+				logging.Debug("skipping cleanup of session held by a live writer lease", "session_id", sess.ID)
+				continue
+			}
 			if err := sm.historyManager.DeleteSession(sess.ID); err != nil {
 				logging.Debug("failed to delete old session", "session_id", sess.ID, "error", err)
 			} else {
