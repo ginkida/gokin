@@ -134,9 +134,19 @@ func (c *AuditCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	var raw []auditFinding
 	var lensesRun int
+	var crashedLenses []string
 	for i, id := range findIDs {
 		res, ok := runner.GetResult(id)
 		if !ok || res == nil {
+			crashedLenses = append(crashedLenses, auditLenses[i].name)
+			continue
+		}
+		// A lens that failed without producing output covered NOTHING. Counting
+		// it as "checked" would overstate coverage — and a crashed lens is now
+		// visible here at all only because a panicking worker reports its agent
+		// id instead of an empty one (v0.100.111).
+		if res.Status == agent.AgentStatusFailed && strings.TrimSpace(res.Output) == "" {
+			crashedLenses = append(crashedLenses, auditLenses[i].name)
 			continue
 		}
 		lensesRun++
@@ -145,8 +155,9 @@ func (c *AuditCommand) Execute(ctx context.Context, args []string, app AppInterf
 	}
 
 	if len(raw) == 0 {
-		return fmt.Sprintf("Audit found no candidate issues (%d lens(es) checked: %s).",
-			lensesRun, lensNames()), nil
+		msg := fmt.Sprintf("Audit found no candidate issues (%d lens(es) checked: %s).",
+			lensesRun, lensNames())
+		return msg + crashedLensNote(crashedLenses), nil
 	}
 
 	truncatedCount := 0
@@ -180,7 +191,18 @@ func (c *AuditCommand) Execute(ctx context.Context, args []string, app AppInterf
 		}
 	}
 
-	return renderAuditReport(scopeDesc, len(raw), truncatedCount, confirmed), nil
+	return renderAuditReport(scopeDesc, len(raw), truncatedCount, confirmed) +
+		crashedLensNote(crashedLenses), nil
+}
+
+// crashedLensNote discloses lenses that produced nothing, so a partial audit is
+// never presented as full coverage.
+func crashedLensNote(crashed []string) string {
+	if len(crashed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n\n⚠ %d lens(es) produced no output and were skipped: %s — this audit is partial.",
+		len(crashed), strings.Join(crashed, ", "))
 }
 
 func lensNames() string {

@@ -229,3 +229,19 @@ func TestParseFindings_MultipleLinesAndDelimiters(t *testing.T) {
 		t.Fatalf("second finding parsed wrong: %+v", got[1])
 	}
 }
+
+// A lens whose agent crashed produces no output — counting it as "checked"
+// would overstate coverage. It is visible here at all only because a panicking
+// SpawnMultiple worker now reports its agent id instead of an empty one
+// (v0.100.111); the audit must disclose the gap instead of silently shrinking.
+func TestCrashedLensNoteDisclosesPartialCoverage(t *testing.T) {
+	if got := crashedLensNote(nil); got != "" {
+		t.Fatalf("no crashed lenses must add nothing, got %q", got)
+	}
+	got := crashedLensNote([]string{"correctness", "security"})
+	for _, want := range []string{"2 lens", "correctness", "security", "partial"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("note %q missing %q", got, want)
+		}
+	}
+}
