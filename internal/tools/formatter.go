@@ -62,6 +62,13 @@ func (f *Formatter) Format(ctx context.Context, filePath string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, parts[0], append(parts[1:], filePath)...)
+	// A user-configured formatter is routinely a wrapper (`npx prettier`,
+	// `pnpm exec …`) whose real work happens in a child. CommandContext's
+	// default Cancel SIGKILLs only the leader, so on timeout the child both
+	// survives AND keeps the inherited CombinedOutput pipe open — cmd.Wait
+	// then never returns and this post-write step blocks the executor
+	// indefinitely (the hung-tool backstop wraps tool.Execute, not this).
+	KillProcessGroupOnCancel(cmd)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		logging.Warn("auto-format failed",
 			"file", filePath,

@@ -51,7 +51,7 @@ func (t *TaskOutputTool) Declaration() *genai.FunctionDeclaration {
 			Properties: map[string]*genai.Schema{
 				"task_id": {
 					Type:        genai.TypeString,
-					Description: "ID of the task to get output from. If not provided, lists all tasks. Supports both shell task IDs and agent IDs (prefixed with 'agent_').",
+					Description: "ID of the task to get output from. If not provided, lists all tasks. Supports both shell task IDs and agent IDs (as returned by the task tool).",
 				},
 				"action": {
 					Type:        genai.TypeString,
@@ -114,8 +114,7 @@ func (t *TaskOutputTool) Execute(ctx context.Context, args map[string]any) (Tool
 }
 
 func (t *TaskOutputTool) getTaskOutput(ctx context.Context, taskID string, block bool, timeout time.Duration, offset int64) (ToolResult, error) {
-	// Check if this is an agent task (agent IDs typically contain "agent" prefix or UUID format)
-	if t.runner != nil && isAgentTaskID(taskID) {
+	if runnerOwnsAgent(t.runner, taskID) {
 		return t.getAgentOutput(ctx, taskID, block, timeout, offset)
 	}
 
@@ -137,11 +136,32 @@ func (t *TaskOutputTool) getTaskOutput(ctx context.Context, taskID string, block
 	return t.formatShellTaskResult(info), nil
 }
 
-// isAgentTaskID checks if the task ID is for an agent task
-func isAgentTaskID(taskID string) bool {
-	// Agent IDs are UUIDs like "550e8400-e29b-41d4-a716-446655440000"
-	// Shell task IDs are like "shell_1", "task_1"
-	return strings.Contains(taskID, "-") && len(taskID) > 20
+// runnerOwnsAgent reports whether the agent runner knows this id.
+//
+// This used to GUESS the id's shape: the comment claimed UUIDs and the
+// predicate required a dash plus len>20, but gokin agent ids are 16 hex
+// characters with no dash — so it was unreachable-true and EVERY agent id fell
+// through to the shell task manager ("task not found"), making a background
+// agent's output unreachable and a runaway agent unstoppable through the very
+// commands the task tool tells the model to use. Ask the owner instead.
+//
+// ListAgents covers running agents (they are registered at spawn); GetResult
+// covers a completed agent still in the result ledger. Shell ids are
+// task_<unix>_<n> and cannot collide with either, so an unknown id still falls
+// through to the shell manager.
+func runnerOwnsAgent(runner AgentRunner, taskID string) bool {
+	if runner == nil || taskID == "" {
+		return false
+	}
+	if lister, ok := runner.(AgentLister); ok {
+		for _, known := range lister.ListAgents() {
+			if known == taskID {
+				return true
+			}
+		}
+	}
+	_, ok := runner.GetResult(taskID)
+	return ok
 }
 
 // getAgentOutput retrieves output from an agent task
@@ -459,7 +479,7 @@ func (t *TaskOutputTool) listTasks() (ToolResult, error) {
 
 func (t *TaskOutputTool) cancelTask(ctx context.Context, taskID string) (ToolResult, error) {
 	// Check if this is an agent task
-	if t.runner != nil && isAgentTaskID(taskID) {
+	if runnerOwnsAgent(t.runner, taskID) {
 		if canceller, ok := t.runner.(AgentCanceller); ok {
 			if err := canceller.Cancel(taskID); err != nil {
 				return NewErrorResult(err.Error()), nil

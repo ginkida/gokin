@@ -47,9 +47,15 @@ func (t *UpdateScratchpadTool) Execute(ctx context.Context, args map[string]any)
 		return ToolResult{}, fmt.Errorf("missing or invalid 'content' argument")
 	}
 
-	if t.updater != nil {
-		t.updater(content)
+	if t.updater == nil {
+		// The foreground registry registers this tool with a nil updater; only
+		// per-agent clones get one. Reporting success would tell the model its
+		// working notes are persisted and visible in the system prompt when
+		// nothing stored them — every sibling ToolSetAgent tool fails honestly
+		// on a missing dependency, and this was the outlier.
+		return NewErrorResult("scratchpad is not available in this context — keep the notes in your reply instead"), nil
 	}
+	t.updater(content)
 
 	return ToolResult{
 		Content: "Scratchpad updated successfully.",

@@ -490,6 +490,15 @@ func (t *TaskTool) executeBackground(ctx context.Context, runner AgentRunner, ag
 
 	var output strings.Builder
 	output.WriteString("Agent spawned in background.\n\n")
+	if agentID == "" {
+		// SpawnAsync's only failure signal is an empty id (it logs and returns
+		// when the run lease cannot be acquired). Without this the tool
+		// reported success for an agent that was never created or started, and
+		// the model then polled task_output with an empty id forever. Every
+		// sibling spawn path already carries this guard.
+		return NewErrorResult("agent failed to start in background: the runner could not acquire a run lease (see logs) — retry, or run the task in the foreground"), nil
+	}
+
 	fmt.Fprintf(&output, "Agent ID: %s\n", agentID)
 	fmt.Fprintf(&output, "Type: %s\n", agentType)
 	if description != "" {

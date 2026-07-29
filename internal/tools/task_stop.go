@@ -71,8 +71,9 @@ func (t *TaskStopTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	taskID, _ := GetString(args, "task_id")
 	reason := GetStringDefault(args, "reason", "")
 
-	// Check if this is an agent task
-	if isAgentTaskID(taskID) {
+	// Check if this is an agent task (ownership, not id shape — see
+	// runnerOwnsAgent: the old shape guess never matched a real agent id).
+	if runnerOwnsAgent(t.runner, taskID) {
 		return t.stopAgent(taskID, reason)
 	}
 

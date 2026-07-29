@@ -8,6 +8,8 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+
+	"github.com/bmatcuk/doublestar/v4"
 	"regexp"
 	"strings"
 
@@ -173,9 +175,15 @@ func (t *RefactorTool) executeRename(ctx context.Context, args map[string]any) (
 	var files []string
 	if pattern != "" {
 		// Multi-file rename
-		matches, err := filepath.Glob(filepath.Join(t.workDir, pattern))
+		// doublestar, not filepath.Glob: the latter cannot expand `**`, so the
+		// tool's own default pattern (`**/*.go`) matched NOTHING and a rename
+		// reported "no occurrences found" over a repo full of them.
+		matches, err := doublestar.FilepathGlob(filepath.Join(t.workDir, pattern))
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("invalid pattern: %s", err)), nil
+		}
+		if len(matches) == 0 {
+			return NewErrorResult(fmt.Sprintf("pattern %q matched no files under %s — nothing was renamed", pattern, t.searchRoot())), nil
 		}
 		files = matches
 	} else {
@@ -443,9 +451,15 @@ func (t *RefactorTool) executeFindRefs(_ context.Context, args map[string]any) (
 	}
 
 	// Find matching files
-	matches, err := filepath.Glob(filepath.Join(t.workDir, pattern))
+	matches, err := doublestar.FilepathGlob(filepath.Join(t.workDir, pattern))
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("invalid pattern: %s", err)), nil
+	}
+	if len(matches) == 0 {
+		// A zero-FILE pattern is not the same answer as "zero references in the
+		// files I searched". Reporting the former as a confident "no references
+		// found" is the false-unused hazard check_impact was hardened against.
+		return NewErrorResult(fmt.Sprintf("pattern %q matched no files under %s — no files were searched", pattern, t.searchRoot())), nil
 	}
 
 	// Search for references
@@ -625,3 +639,16 @@ func findRefsInGoFile(filePath string, content []byte, targetName string) []stri
 }
 
 // Helper for regex escaping is now using standard regexp package
+
+// searchRoot is the directory globs resolve against — the tool's workDir when
+// wired, otherwise the process CWD. Surfaced in zero-match errors so an unwired
+// workDir is visible instead of silently searching the wrong tree.
+func (t *RefactorTool) searchRoot() string {
+	if t.workDir != "" {
+		return t.workDir
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return "."
+}

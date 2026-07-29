@@ -1143,6 +1143,14 @@ func (b *Builder) initIntegrations() error {
 			}
 		}
 	}
+	// The refactor tool globs from its workDir; unwired it resolved patterns
+	// against the process CWD, which is only accidentally the workspace.
+	if refactorTool, ok := b.registry.Get("refactor"); ok {
+		if rt, ok := refactorTool.(*tools.RefactorTool); ok {
+			rt.SetWorkDir(b.workDir)
+		}
+	}
+
 	if editTool, ok := b.registry.Get("edit"); ok {
 		if et, ok := editTool.(*tools.EditTool); ok {
 			et.SetWorkDir(b.workDir)
