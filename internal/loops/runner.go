@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -85,6 +86,11 @@ type Runner struct {
 	isIdle  IdleChecker
 	period  time.Duration
 	timeout time.Duration
+	// workDir is the workspace this scheduler may fire loops for. Loops live
+	// in the global config dir but every iteration is spawned against THIS
+	// workspace, so firing another project's loop runs an unattended agent in
+	// the wrong repository (v0.100.111). Empty disables scoping (tests).
+	workDir string
 
 	mu               sync.Mutex
 	started          bool
@@ -165,6 +171,38 @@ const DefaultIterationTimeout = 30 * time.Minute
 // NewRunner constructs a Runner. The Spawner and IdleChecker are
 // required (nil panics at Start time so the wire-up bug is loud); period
 // and timeout default to the constants above when zero.
+// SetWorkDir binds the scheduler to a workspace. Loops owned by a different
+// workspace are then skipped, and legacy loops (written before loops carried
+// an owner) are ADOPTED on first sight — silently never firing a running loop
+// again would be a worse failure than the one being fixed.
+func (r *Runner) SetWorkDir(dir string) {
+	r.mu.Lock()
+	r.workDir = strings.TrimSpace(dir)
+	r.mu.Unlock()
+}
+
+// ownsLoop reports whether this scheduler may fire l, adopting an unowned
+// legacy loop into this workspace (persisted, and logged so the binding is
+// visible). Caller must not hold r.mu.
+func (r *Runner) ownsLoop(l *Loop) bool {
+	r.mu.Lock()
+	workDir := r.workDir
+	r.mu.Unlock()
+	if workDir == "" || l == nil {
+		return true // unscoped scheduler (tests / no workspace)
+	}
+	if l.WorkDir == "" {
+		if err := r.mgr.AdoptWorkspace(l.ID, workDir); err != nil {
+			logging.Debug("loops: could not adopt unowned loop", "loop_id", l.ID, "error", err)
+			return false
+		}
+		logging.Info("loops: adopted a loop that predates workspace binding",
+			"loop_id", l.ID, "work_dir", workDir)
+		return true
+	}
+	return filepath.Clean(l.WorkDir) == filepath.Clean(workDir)
+}
+
 func NewRunner(mgr *Manager, spawn Spawner, isIdle IdleChecker) *Runner {
 	return &Runner{
 		mgr:      mgr,
@@ -328,6 +366,9 @@ func (r *Runner) tick(ctx context.Context) {
 		l := active[idx]
 		if !l.IsDue(now) {
 			continue
+		}
+		if !r.ownsLoop(l) {
+			continue // another project's loop — its own gokin runs it
 		}
 		if !r.isIdle() {
 			return

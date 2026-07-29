@@ -769,6 +769,9 @@ func (b *Builder) initManagers() error {
 		// when App.Run starts the background scheduler.
 		loopStorage := loops.NewFileStorage(filepath.Join(b.configDir, "loops"))
 		b.loopManager = loops.NewManager(loopStorage)
+		// Loops persist globally; stamp the creating workspace so another
+		// project's gokin never schedules them.
+		b.loopManager.SetWorkDir(b.workDir)
 		logging.Debug("loops manager initialized", "dir", filepath.Join(b.configDir, "loops"))
 
 		// Per-loop human-readable markdown lives in the project's

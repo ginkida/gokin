@@ -73,6 +73,15 @@ const (
 
 // Loop is the persisted state for a single recurring task.
 type Loop struct {
+	// WorkDir is the workspace this loop belongs to. Loops are persisted in
+	// the GLOBAL config dir, so without an owner ANY gokin process adopted
+	// every loop on disk and fired it against ITS OWN repository — an
+	// unattended agent editing, building and committing in the wrong project,
+	// on the user's quota (v0.100.111). Empty means a loop written before
+	// this field existed; the scheduler adopts it on first sight rather than
+	// silently killing a running loop.
+	WorkDir string `json:"work_dir,omitempty"`
+
 	// ID is the stable identifier — used in filenames and /loop subcommand
 	// args. Generated as a short hex string when the loop is created.
 	ID string `json:"id"`

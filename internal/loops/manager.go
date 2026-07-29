@@ -41,6 +41,9 @@ type Manager struct {
 
 	mu    sync.RWMutex
 	loops map[string]*Loop
+	// workDir is the workspace this manager belongs to; every loop it creates
+	// is stamped with it (see Loop.WorkDir).
+	workDir string
 
 	// onRemove fires after a successful Remove so external state (e.g.
 	// the markdown memory file) can be cleaned up too. Optional;
@@ -177,6 +180,9 @@ func (m *Manager) Add(task string, mode Mode, intervalSeconds int64, opts ...Add
 	}
 
 	now := time.Now()
+	m.mu.RLock()
+	owner := m.workDir
+	m.mu.RUnlock()
 	l := &Loop{
 		ID:              NewID(),
 		Task:            strings.TrimSpace(task),
@@ -185,6 +191,7 @@ func (m *Manager) Add(task string, mode Mode, intervalSeconds int64, opts ...Add
 		MinDelaySeconds: DefaultMinDelaySeconds,
 		Status:          StatusRunning,
 		CreatedAt:       now,
+		WorkDir:         owner,
 		UpdateMemory:    true, // default per user-confirmed design
 	}
 	for _, opt := range opts {
@@ -219,6 +226,39 @@ type AddOption func(*Loop)
 
 // WithMaxIterations caps the lifetime iteration count. 0 = unlimited
 // (the default).
+// SetWorkDir records the workspace this manager belongs to. Every loop it
+// creates is stamped with it, so no other project's gokin will schedule it.
+// One chokepoint by design: a future creation path inherits the binding
+// instead of having to remember it.
+func (m *Manager) SetWorkDir(dir string) {
+	m.mu.Lock()
+	m.workDir = strings.TrimSpace(dir)
+	m.mu.Unlock()
+}
+
+// AdoptWorkspace binds a loop that has no owner to a workspace. Only ever
+// widens from "unowned" — an already-owned loop is left alone, so this can
+// never steal another project's loop.
+func (m *Manager) AdoptWorkspace(id, workDir string) error {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return fmt.Errorf("cannot adopt loop %s into an empty workspace", id)
+	}
+	return m.transition(id, func(l *Loop) error {
+		if strings.TrimSpace(l.WorkDir) != "" {
+			return nil
+		}
+		l.WorkDir = workDir
+		return nil
+	})
+}
+
+// WithWorkDir binds a new loop to the workspace that created it, so another
+// project's gokin never schedules it (see Loop.WorkDir).
+func WithWorkDir(dir string) AddOption {
+	return func(l *Loop) { l.WorkDir = strings.TrimSpace(dir) }
+}
+
 func WithMaxIterations(n int) AddOption {
 	return func(l *Loop) { l.MaxIterations = n }
 }

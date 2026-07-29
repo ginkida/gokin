@@ -883,6 +883,10 @@ func (a *App) Run() error {
 	if a.loopManager != nil && a.loopRunner == nil && a.agentRunner != nil {
 		spawner := newLoopSpawner(a)
 		a.loopRunner = loops.NewRunner(a.loopManager, spawner, a.isLoopRunnerIdle)
+		// Only this workspace's loops may fire here — every iteration is
+		// spawned against a.workDir, so another project's loop would run an
+		// unattended agent in the wrong repository.
+		a.loopRunner.SetWorkDir(a.workDir)
 		a.loopRunner.SetIterationStartHook(a.onLoopIterationStart)
 		a.loopRunner.SetIterationDoneHook(a.onLoopIterationDone)
 		a.loopRunner.SetIterationPersistFailedHook(a.onLoopIterationPersistFailed)
