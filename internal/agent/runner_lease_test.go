@@ -188,6 +188,7 @@ func TestConcurrentCheckpointMonitorsLaunchAgentExactlyOnce(t *testing.T) {
 			Status:   AgentStatusFailed,
 			MaxTurns: 3,
 		},
+		WorkDir:           runner.workDir,
 		Timestamp:         time.Now(),
 		CheckpointID:      agentID + "-100",
 		TriggerReason:     "error",
@@ -200,6 +201,7 @@ func TestConcurrentCheckpointMonitorsLaunchAgentExactlyOnce(t *testing.T) {
 			Status:   AgentStatusFailed,
 			MaxTurns: 3,
 		},
+		WorkDir:           runner.workDir,
 		Timestamp:         cp.Timestamp.Add(-time.Minute),
 		CheckpointID:      agentID + "-050",
 		TriggerReason:     "error",
@@ -267,7 +269,9 @@ func TestCheckpointClaimIsAtomicAcrossRunnersSharingStore(t *testing.T) {
 	const agentID = "cross-runner-checkpoint-agent"
 	c, started, release := newBlockingRunLeaseClient(1)
 	first, store := newRunLeaseFixture(t, c, agentID)
-	second := NewRunner(context.Background(), c, tools.NewRegistry(), t.TempDir())
+	// Two runners racing for ONE checkpoint is, in production, two processes in
+	// the SAME workspace — checkpoints are owned per workspace (v0.100.111).
+	second := NewRunner(context.Background(), c, tools.NewRegistry(), first.workDir)
 	second.SetStore(store)
 	cp := &AgentCheckpoint{
 		AgentState: &AgentState{
@@ -276,6 +280,7 @@ func TestCheckpointClaimIsAtomicAcrossRunnersSharingStore(t *testing.T) {
 			Status:   AgentStatusFailed,
 			MaxTurns: 3,
 		},
+		WorkDir:       first.workDir,
 		Timestamp:     time.Now(),
 		CheckpointID:  agentID + "-atomic",
 		TriggerReason: "error",

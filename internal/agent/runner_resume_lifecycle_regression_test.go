@@ -156,11 +156,13 @@ func TestResumeLastCheckpointUsesTimestampAcrossAgentIDs(t *testing.T) {
 
 	old := &AgentCheckpoint{
 		AgentState:   &AgentState{ID: "z-agent-old", Type: AgentTypeGeneral, MaxTurns: 3},
+		WorkDir:      runner.workDir,
 		Timestamp:    now.Add(-time.Hour),
 		CheckpointID: "z-agent-old-999999999999",
 	}
 	newest := &AgentCheckpoint{
 		AgentState:   &AgentState{ID: "a-agent-new", Type: AgentTypeGeneral, MaxTurns: 3},
+		WorkDir:      runner.workDir,
 		Timestamp:    now,
 		CheckpointID: "a-agent-new-1",
 	}
@@ -202,20 +204,27 @@ func TestResumeLastCheckpointRetiresSameAgentReplayAcrossStores(t *testing.T) {
 	var releaseOnce sync.Once
 	releaseRun := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseRun)
-	first := NewRunner(context.Background(), client, tools.NewRegistry(), t.TempDir())
+	// Two runners over the same workspace — in production that is two gokin
+	// processes in one project. Checkpoints are owned per workspace
+	// (v0.100.111), so a differing workDir here would make `second` fail on
+	// ownership instead of on the durable claim this test pins.
+	workspace := t.TempDir()
+	first := NewRunner(context.Background(), client, tools.NewRegistry(), workspace)
 	first.SetStore(firstStore)
-	second := NewRunner(context.Background(), client, tools.NewRegistry(), t.TempDir())
+	second := NewRunner(context.Background(), client, tools.NewRegistry(), workspace)
 	second.SetStore(secondStore)
 
 	now := time.Now()
 	for _, cp := range []*AgentCheckpoint{
 		{
 			AgentState:   &AgentState{ID: agentID, Type: AgentTypeGeneral, MaxTurns: 3},
+			WorkDir:      workspace,
 			Timestamp:    now.Add(-time.Minute),
 			CheckpointID: agentID + "-older",
 		},
 		{
 			AgentState:   &AgentState{ID: agentID, Type: AgentTypeGeneral, MaxTurns: 3},
+			WorkDir:      workspace,
 			Timestamp:    now,
 			CheckpointID: agentID + "-newer",
 		},
@@ -320,6 +329,7 @@ func TestCheckpointRecoveryFailsClosedWhenAnyCheckpointIsCorrupt(t *testing.T) {
 			Status:   AgentStatusFailed,
 			MaxTurns: 3,
 		},
+		WorkDir:       runner.workDir,
 		Timestamp:     time.Now().Add(-time.Minute),
 		CheckpointID:  "corrupt-checkpoint-agent-valid",
 		TriggerReason: "error",

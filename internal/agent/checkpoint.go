@@ -17,6 +17,13 @@ type AgentCheckpoint struct {
 	ReflectorState       *ReflectorSnapshot      `json:"reflector,omitempty"`
 	ScratchpadContent    string                  `json:"scratchpad,omitempty"`
 
+	// WorkDir is the workspace the agent was running in. Checkpoints live in
+	// the GLOBAL config dir, so without an owner the boot-time recovery in
+	// another project would restore this agent — replaying its file edits,
+	// bash and git calls against the wrong repository (v0.100.111). Empty
+	// means "written before this field existed": treated as not-ours.
+	WorkDir string `json:"work_dir,omitempty"`
+
 	// Metadata
 	Timestamp     time.Time `json:"timestamp"`
 	CheckpointID  string    `json:"checkpoint_id"`
@@ -76,6 +83,7 @@ func (a *Agent) SaveCheckpoint(reason string) (*AgentCheckpoint, error) {
 
 	cp := &AgentCheckpoint{
 		AgentState:        a.GetState(),
+		WorkDir:           a.workDir,
 		Timestamp:         time.Now(),
 		CheckpointID:      fmt.Sprintf("%s-%d", a.ID, time.Now().UnixNano()),
 		TriggerReason:     reason,

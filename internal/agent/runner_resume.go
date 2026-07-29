@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gokin/internal/logging"
@@ -257,6 +259,22 @@ func (r *Runner) CleanupOldCheckpoints(maxAge time.Duration) {
 	}
 }
 
+// ownsCheckpoint reports whether a persisted checkpoint belongs to THIS
+// workspace. Checkpoints are stored globally, and recovery restores an agent
+// bound to this runner's workDir — so resuming a foreign one replays its file
+// mutations, bash and git calls against the wrong repository. Fails closed: an
+// unknown owner (checkpoints written before the field existed) is not ours.
+// Mirrors the exact-directory rule session auto-resume already applies.
+func (r *Runner) ownsCheckpoint(cp *AgentCheckpoint) bool {
+	if cp == nil {
+		return false
+	}
+	if strings.TrimSpace(r.workDir) == "" || strings.TrimSpace(cp.WorkDir) == "" {
+		return false
+	}
+	return filepath.Clean(cp.WorkDir) == filepath.Clean(r.workDir)
+}
+
 // ResumeErrorCheckpoints finds error checkpoints and silently resumes agents in the background.
 // Each checkpoint is deleted before resume to prevent infinite retry loops.
 // Resumed agents do NOT get auto-checkpoint enabled — if they fail again, no new error checkpoint is created.
@@ -294,6 +312,12 @@ func (r *Runner) ResumeErrorCheckpoints(ctx context.Context) int {
 		}
 		if cp.AgentState == nil {
 			_ = r.store.DeleteCheckpoint(cp.CheckpointID)
+			continue
+		}
+		if !r.ownsCheckpoint(cp) {
+			// Another project's failed agent. Skip WITHOUT consuming it: the
+			// owning workspace must still be able to recover its own work when
+			// it next starts, and the store's age-based cleanup retires strays.
 			continue
 		}
 		agentID := cp.AgentState.ID
@@ -517,6 +541,11 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 			_ = r.store.DeleteCheckpoint(candidate.CheckpointID)
 			continue
 		}
+		if !r.ownsCheckpoint(candidate) {
+			// Another workspace's agent — restoring it here would run its
+			// history against this repository. Left in place for its owner.
+			continue
+		}
 		loaded = append(loaded, candidate)
 		if cp == nil || candidate.Timestamp.After(cp.Timestamp) ||
 			(candidate.Timestamp.Equal(cp.Timestamp) && candidate.CheckpointID > cp.CheckpointID) {
@@ -524,7 +553,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 		}
 	}
 	if cp == nil {
-		return "", fmt.Errorf("no valid checkpoints found")
+		return "", fmt.Errorf("no valid checkpoints found for this workspace")
 	}
 	latestID := cp.CheckpointID
 
