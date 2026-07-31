@@ -56,8 +56,68 @@ func isPathRuleName(name string) bool {
 	return readRuleTools[name] || editRuleTools[name]
 }
 
+// claudeMCPRulePrefix is how Claude Code names MCP tools. Gokin registers them
+// under its own `<server>_<tool>` names, so a rule written in the Claude form
+// used to match nothing at all and was accepted as a silent no-op — the worst
+// possible outcome for a rule whose entire purpose is to take authority away.
+const claudeMCPRulePrefix = "mcp__"
+
+// claudeMCPRuleMatches resolves a Claude-style MCP rule against a Gokin runtime
+// tool name. The second return distinguishes "this is an MCP rule and it did
+// not match" from "this is not an MCP rule" so the caller can fall through to
+// ordinary name matching.
+//
+// Accepted forms:
+//
+//	mcp__*                     every tool registered by any MCP server
+//	mcp__<server>              every tool of that server
+//	mcp__<server>__*           every tool of that server
+//	mcp__<server>__<tool>      that exact tool
+//
+// A server/tool segment is matched against Gokin's `<server>_<tool>` naming,
+// and membership is confirmed against the MCP registration table so a rule can
+// never reach a built-in tool that merely shares a prefix.
+func claudeMCPRuleMatches(ruleName, runtimeName string) (matched, isMCPRule bool) {
+	if !strings.HasPrefix(ruleName, claudeMCPRulePrefix) {
+		return false, false
+	}
+	// A runtime name that is already in the Claude form matches structurally —
+	// that is plain wildcard matching and needs no registration evidence.
+	if strings.HasPrefix(runtimeName, claudeMCPRulePrefix) {
+		return wildcardMatch(ruleName, runtimeName), true
+	}
+	// Otherwise the rule can only be about Gokin's own `<server>_<tool>` names,
+	// and only a tool the MCP registration table knows may be reached — a
+	// built-in that merely shares a server-like prefix must stay out of range.
+	if !IsMCPToolName(runtimeName) {
+		return false, true
+	}
+	specifier := strings.TrimPrefix(ruleName, claudeMCPRulePrefix)
+	if specifier == "" || specifier == "*" {
+		return true, true
+	}
+
+	server, tool, hasTool := strings.Cut(specifier, "__")
+	server = canonicalGrantToolNameWithWildcards(server, true)
+	if server == "" {
+		return false, true
+	}
+	if !hasTool || tool == "" || tool == "*" {
+		// Every tool of that server: Gokin prefixes them with `<server>_`.
+		return wildcardMatch(server+"_*", runtimeName), true
+	}
+	tool = canonicalGrantToolNameWithWildcards(tool, true)
+	if tool == "" {
+		return false, true
+	}
+	return wildcardMatch(server+"_"+tool, runtimeName), true
+}
+
 func toolRuleNameMatches(ruleName, runtimeName string) bool {
 	runtimeName = canonicalGrantToolName(runtimeName)
+	if matched, isMCPRule := claudeMCPRuleMatches(ruleName, runtimeName); isMCPRule {
+		return matched
+	}
 	if strings.ContainsRune(ruleName, '*') {
 		return wildcardMatch(ruleName, runtimeName)
 	}

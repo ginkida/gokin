@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	logger  *slog.Logger
-	logFile *os.File
+	logger *slog.Logger
+	// logSink owns the open descriptor and rotates it while the process runs.
+	logSink *rotatingFileWriter
 	logPath string
 	mu      sync.RWMutex
 )
@@ -94,10 +95,14 @@ func EnablePathLogging(path string, level Level, rawFilter string) error {
 	}
 
 	// Close previous log file if any
-	if logFile != nil {
-		_ = logFile.Close()
+	if logSink != nil {
+		_ = logSink.Close()
 	}
-	logFile = f
+	var existing int64
+	if info, statErr := f.Stat(); statErr == nil {
+		existing = info.Size()
+	}
+	logSink = newRotatingFileWriter(f, absolute, existing, maxLogFileSize)
 	logPath = absolute
 
 	var slogLevel slog.Level
@@ -114,7 +119,7 @@ func EnablePathLogging(path string, level Level, rawFilter string) error {
 		slogLevel = slog.LevelWarn
 	}
 
-	logger = newSafeLogger(f, slogLevel, parsedFilter)
+	logger = newSafeLogger(logSink, slogLevel, parsedFilter)
 
 	return nil
 }
@@ -124,9 +129,9 @@ func DisableLogging() {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if logFile != nil {
-		_ = logFile.Close()
-		logFile = nil
+	if logSink != nil {
+		_ = logSink.Close()
+		logSink = nil
 	}
 	logPath = ""
 
@@ -138,9 +143,9 @@ func Close() {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if logFile != nil {
-		_ = logFile.Close()
-		logFile = nil
+	if logSink != nil {
+		_ = logSink.Close()
+		logSink = nil
 	}
 	logPath = ""
 }

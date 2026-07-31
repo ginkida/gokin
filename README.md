@@ -344,7 +344,16 @@ reflection share one atomic ledger; budgeted provider rounds are serialized so
 parallel agents cannot independently race past the same remaining allowance.
 Hitting an explicit turn cap is a typed `max_turns` failure rather than a
 successful-but-incomplete response. Interactive turns retain Gokin's adaptive
-safety budget.
+safety budget, whose iteration limit ends a turn with an incomplete-work notice
+rather than a typed failure — the hard `max_turns` contract belongs to
+`--max-turns`.
+
+All three limits are **per turn**, not per connection. A single `-p` run has
+exactly one turn, so there the distinction does not arise; but every record of a
+`--input-format stream-json` session and every `gokin send` follow-up on a
+detached job starts a fresh deadline, turn count and cost ledger. Budget a
+long-lived detached session by the work you expect one turn to do, and cap the
+whole session from the outside.
 
 `--tools` is an exact capability allowlist. `--allowedTools` (also
 `--allowed-tools`) pre-approves matching calls but never widens that allowlist.
@@ -359,8 +368,10 @@ symlink and resolved targets. Explicit denies win over pre-approvals and
 `bypassPermissions`, and all rules are inherited by delegated agents. Unknown
 bare names fail startup so a typo cannot silently weaken an unattended run.
 MCP tools are registered under Gokin's own `<server>_<tool>` naming, so a deny
-rule targets them as `github_*` (or the exact tool name) — a Claude-style
-`mcp__*` rule matches nothing here and is accepted as a silent no-op.
+rule can target them directly as `github_*` or by exact name. Claude-style
+`mcp__*`, `mcp__<server>`, `mcp__<server>__*`, and `mcp__<server>__<tool>` rules
+resolve onto that naming as well, and match only tools an MCP server actually
+registered — a built-in that happens to share a prefix is never in range.
 
 A scoped `Bash(...)` pre-approval covers only the command it names: its
 wildcards never expand across `|`, `&`, `;`, a newline, a redirect, or a

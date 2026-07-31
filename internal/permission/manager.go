@@ -114,6 +114,39 @@ func (m *Manager) WithPolicyOverrides(overrides map[string]Level) *Manager {
 	return scoped
 }
 
+// adoptSessionAuthorityFrom makes a scoped manager write and read the parent's
+// reusable session decisions instead of a throwaway cache of its own.
+//
+// Used only by the turn-scoped skill-grant path. A "Deny for session" /
+// "Allow for session" the user picks while a skill grant is active is a
+// decision about that tool invocation, not about the skill — dropping it on the
+// per-call scoped manager meant the choice silently evaporated and the user was
+// asked again on the very next identical call.
+//
+// The parent's revision is adopted with the cache so both managers agree on
+// which generation an entry belongs to; a parent Forget/ClearSession bumps that
+// revision and correctly invalidates anything this short-lived scope wrote.
+//
+// Deliberately NOT folded into WithPolicyOverrides: the plan-step bounded
+// capability uses that constructor and must keep NOT inheriting parent
+// session-allow decisions.
+func (m *Manager) adoptSessionAuthorityFrom(parent *Manager) {
+	if m == nil || parent == nil {
+		return
+	}
+	parent.mu.RLock()
+	cache := parent.sessionCache
+	revision := parent.revision
+	parent.mu.RUnlock()
+	if cache == nil {
+		return
+	}
+	m.mu.Lock()
+	m.sessionCache = cache
+	m.revision = revision
+	m.mu.Unlock()
+}
+
 func clonePolicyOverrides(overrides map[string]Level) map[string]Level {
 	if len(overrides) == 0 {
 		return nil

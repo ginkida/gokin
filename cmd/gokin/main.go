@@ -336,6 +336,14 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		}
 	}
 
+	// Bind the process to an explicit --config BEFORE anything can write a
+	// config file. The wizard below resolves the config location itself, so a
+	// late binding would send the API key to the default location while the run
+	// keeps reading the file the operator named.
+	if strings.TrimSpace(cfgFile) != "" {
+		config.SetExplicitConfigPath(cfgFile)
+	}
+
 	// Run setup wizard if requested
 	if runSetup {
 		failureKind = "setup"
@@ -1233,6 +1241,12 @@ func loadConfiguredConfig(path string) (*config.Config, error) {
 	if strings.TrimSpace(path) == "" {
 		return config.Load()
 	}
+	// Bind the whole process to this file before loading it. The setup wizard
+	// and the "saved to <path>" messages resolve the config location on their
+	// own; without this a first run with --config wrote the API key to the
+	// DEFAULT config and then failed again on the explicit file that still had
+	// no credentials.
+	config.SetExplicitConfigPath(path)
 	return config.LoadFrom(path)
 }
 

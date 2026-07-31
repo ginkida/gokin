@@ -252,6 +252,13 @@ func TestStructuredOutputCorrectionCannotExecuteTools(t *testing.T) {
 	if calls := mutatingTool.CallCount(); calls != 0 {
 		t.Fatalf("format correction executed tool %d times", calls)
 	}
+	// The refusal comes from the empty ceiling the correction installs, not from
+	// the operator's configuration — say so, or the report reads as if the
+	// user's own policy fired.
+	if result.Error == nil ||
+		!strings.Contains(result.Error.Message, "structured-output format correction") {
+		t.Fatalf("policy failure does not name the correction as the cause: %+v", result.Error)
+	}
 }
 
 func TestRunHeadlessStructuredOutputSupportsNullAndStreamTerminal(t *testing.T) {

@@ -109,7 +109,100 @@ func NewStoreAt(root string) (*Store, error) {
 			return nil, fmt.Errorf("prepare background store %q: %w", dir, err)
 		}
 	}
+	// Nothing else ever removed a finished job, so every detached run left a
+	// record, two logs, up to two locks and an inbox directory behind forever —
+	// and past maxJobs entries `gokin agents` failed permanently with no way to
+	// recover. Sweeping here (best effort) keeps the store bounded without
+	// asking the user to clean up a directory they never see.
+	store.Sweep(defaultSweepMaxAge, defaultSweepKeep)
 	return store, nil
+}
+
+const (
+	// A finished job's record is worth keeping long enough to read its logs the
+	// next morning, not forever.
+	defaultSweepMaxAge = 7 * 24 * time.Hour
+	defaultSweepKeep   = 200
+)
+
+// Sweep removes terminal jobs that are older than maxAge, and any terminal job
+// beyond the keep newest. It never touches a job whose worker lease is still
+// held: a live worker's state is not ours to delete, and an unreadable or
+// unprovable lease counts as held. Errors are deliberately swallowed per job —
+// housekeeping must never make the store unusable.
+func (s *Store) Sweep(maxAge time.Duration, keep int) {
+	if s == nil {
+		return
+	}
+	entries, err := os.ReadDir(s.jobsDir())
+	if err != nil {
+		return
+	}
+	type candidate struct {
+		id       string
+		finished time.Time
+	}
+	candidates := make([]candidate, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		job, loadErr := s.Load(id)
+		if loadErr != nil {
+			continue
+		}
+		if !job.Terminal() {
+			continue
+		}
+		finished := job.EndedAt
+		if finished.IsZero() {
+			finished = job.StartedAt
+		}
+		candidates = append(candidates, candidate{id: id, finished: finished})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].finished.After(candidates[j].finished)
+	})
+
+	cutoff := time.Time{}
+	if maxAge > 0 {
+		cutoff = time.Now().Add(-maxAge)
+	}
+	for index, entry := range candidates {
+		tooMany := keep > 0 && index >= keep
+		tooOld := !cutoff.IsZero() && entry.finished.Before(cutoff)
+		if !tooMany && !tooOld {
+			continue
+		}
+		if held, leaseErr := s.WorkerLeaseHeld(entry.id); leaseErr != nil || held {
+			continue
+		}
+		s.removeJobArtifacts(entry.id)
+	}
+}
+
+func (s *Store) removeJobArtifacts(id string) {
+	if path, err := s.jobPath(id); err == nil {
+		_ = os.Remove(path)
+	}
+	if path, err := s.StdoutPath(id); err == nil {
+		_ = os.Remove(path)
+	}
+	if path, err := s.StderrPath(id); err == nil {
+		_ = os.Remove(path)
+	}
+	if path, err := s.controlDir(id); err == nil {
+		_ = os.RemoveAll(path)
+	}
+	// Lock files last: dropping them before the record would let a concurrent
+	// probe recreate an orphan for a job that no longer exists.
+	if path, err := s.lockPath(id); err == nil {
+		_ = os.Remove(path)
+	}
+	if path, err := s.metadataLockPath(id); err == nil {
+		_ = os.Remove(path)
+	}
 }
 
 func dataRoot() (string, error) {

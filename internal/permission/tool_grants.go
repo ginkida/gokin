@@ -249,6 +249,11 @@ func (m *Manager) CheckWithTemporaryToolRules(
 	for _, grant := range grants {
 		if temporaryToolGrantMatches(grant, toolName, args, workDir) {
 			scoped := m.WithPolicyOverrides(map[string]Level{toolName: LevelAllow})
+			// The grant is turn-scoped; a session decision the user makes at the
+			// confirmation floor is not. Share the parent's reusable authority so
+			// "Deny for session" actually sticks instead of being dropped with
+			// this per-call scope.
+			scoped.adoptSessionAuthorityFrom(m)
 			return scoped.Check(ctx, toolName, args)
 		}
 	}

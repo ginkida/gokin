@@ -90,7 +90,21 @@ type Response struct {
 var (
 	riskOverridesMu sync.RWMutex
 	riskOverrides   = make(map[string]RiskLevel)
+	// mcpToolNames is maintained by the same two functions below. See the
+	// comment in SetToolRiskOverride for why the two live together.
+	mcpToolNames = make(map[string]struct{})
 )
+
+// IsMCPToolName reports whether a registered tool came from an MCP server.
+func IsMCPToolName(toolName string) bool {
+	if toolName == "" {
+		return false
+	}
+	riskOverridesMu.RLock()
+	defer riskOverridesMu.RUnlock()
+	_, ok := mcpToolNames[toolName]
+	return ok
+}
 
 // SetToolRiskOverride registers a risk override for a tool name. MCP servers
 // call this when registering their tools so per-server trust levels apply.
@@ -102,6 +116,12 @@ func SetToolRiskOverride(toolName string, level RiskLevel) {
 	riskOverridesMu.Lock()
 	defer riskOverridesMu.Unlock()
 	riskOverrides[toolName] = level
+	// This table IS the MCP registration chokepoint (every caller registers or
+	// removes an MCP server's tools), so it doubles as the set that makes
+	// Claude-style `mcp__*` rules matchable — Gokin registers MCP tools under
+	// its own `<server>_<tool>` names, so nothing else can identify them.
+	// If a non-MCP caller ever needs a risk override, split the two sets.
+	mcpToolNames[toolName] = struct{}{}
 }
 
 // ClearToolRiskOverride removes an override. Called when an MCP server is
@@ -110,6 +130,7 @@ func ClearToolRiskOverride(toolName string) {
 	riskOverridesMu.Lock()
 	defer riskOverridesMu.Unlock()
 	delete(riskOverrides, toolName)
+	delete(mcpToolNames, toolName)
 }
 
 // ParseRiskLevel converts a yaml-friendly string ("low"/"medium"/"high") to a

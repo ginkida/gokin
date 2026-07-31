@@ -364,6 +364,12 @@ type App struct {
 	turnToolBudgetHit   atomic.Bool
 	budgetAutoContinues int32
 	discussConfirmed    atomic.Bool
+	// structuredCorrectionActive marks the tool-free JSON-format correction
+	// turns. Those run under an empty capability ceiling that Gokin itself
+	// installs, so a tool call during them is refused by OUR policy — recording
+	// that as the invocation's policy failure reported `policy_blocked` to the
+	// user and discarded an answer the next correction might well have fixed.
+	structuredCorrectionActive atomic.Bool
 
 	// presenter is WHERE agent output goes (agent_events.go). The builder
 	// installs the TUI presenter; RunHeadless swaps in the stdout presenter.

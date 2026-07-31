@@ -159,8 +159,43 @@ func loadProjectConfig(cfg *Config) {
 	}
 }
 
+// explicitConfigPath pins the process to the file the launcher was given with
+// --config. LoadFrom already routes cfg.Save() back to that file, but the
+// wizard and the user-facing "saved to <path>" messages resolve the path on
+// their own — without this they would name the DEFAULT location, so a run that
+// hit the first-run wizard wrote the API key to a file the run never reads and
+// then failed again with the same missing-credentials error.
+var (
+	explicitConfigPath   string
+	explicitConfigPathMu sync.RWMutex
+)
+
+// SetExplicitConfigPath binds every default-path resolution in this process to
+// an operator-supplied config file. An empty value restores the default lookup.
+func SetExplicitConfigPath(path string) {
+	path = strings.TrimSpace(expandTilde(path))
+	if path != "" {
+		if absolute, err := filepath.Abs(path); err == nil {
+			path = absolute
+		}
+	}
+	explicitConfigPathMu.Lock()
+	explicitConfigPath = path
+	explicitConfigPathMu.Unlock()
+}
+
+func configuredExplicitPath() string {
+	explicitConfigPathMu.RLock()
+	defer explicitConfigPathMu.RUnlock()
+	return explicitConfigPath
+}
+
 // getConfigPath returns the path to the config file.
 func getConfigPath() string {
+	if explicit := configuredExplicitPath(); explicit != "" {
+		return explicit
+	}
+
 	// Check XDG_CONFIG_HOME first
 	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
 		return filepath.Join(xdgConfig, "gokin", "config.yaml")

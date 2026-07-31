@@ -362,11 +362,13 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 			}
 			correctionCtx := tools.ContextWithToolCapabilityCeiling(runCtx, []string{})
 			correctionCtx = withStructuredOutputCorrection(correctionCtx)
+			a.structuredCorrectionActive.Store(true)
 			a.processMessageWithMemoryQuery(
 				correctionCtx,
 				opts.JSONSchema.correctionPrompt(structuredErr),
 				memoryQuery,
 			)
+			a.structuredCorrectionActive.Store(false)
 			result.Result = selectHeadlessResult(
 				sp.Result(), a.headlessFinalResultSnapshot())
 			if !a.headlessPipelineHealthy(runCtx) {
@@ -701,6 +703,15 @@ func (a *App) headlessInvocationMetricsSnapshot() (HeadlessUsage, HeadlessCost) 
 // is a no-op for interactive turns and latches only the first failure in the
 // active headless invocation.
 func (a *App) recordHeadlessPolicyFailure(toolName string, block tools.PolicyBlock) {
+	// Failing closed here is deliberate: a model reaching for a tool during a
+	// "just reformat your answer" step is exactly the moment to stop. But the
+	// refusal came from the empty ceiling THIS file installs for correction
+	// turns, so reporting the raw reason reads as the operator's own policy
+	// firing. Name the real cause instead.
+	if a.structuredCorrectionActive.Load() {
+		block.Reason = "tool use is not available during a structured-output format correction; " +
+			"the model attempted " + toolName + " instead of returning JSON"
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.headlessRunActive || a.headlessPolicyFailure != nil {
