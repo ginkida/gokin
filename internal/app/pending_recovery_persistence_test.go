@@ -1047,10 +1047,25 @@ func TestExplicitExactPromptReopensCancelGateAndQueuesRecovery(t *testing.T) {
 		application.finishForegroundProcessing(nil)
 		close(finishDone)
 	}()
-	deadline = time.Now().Add(time.Second)
+	// Wait for a POSITIVE acceptance signal, not for the absence of one.
+	// `Claimed && pendingCount()==0` is already true in the window between the
+	// durable claim (pending_recovery.go: TransitionPendingRecovery) and
+	// markRecoveryAwaitingDispatch two statements later — so polling it alone
+	// can hand control back before the claim is even releasable, and the
+	// "awaiting is empty" check below would then pass for the wrong reason.
+	// dropSteerLeftovers is cleared in the SAME a.mu critical section that calls
+	// markRecoveryDispatched (app.go, the accepted-dispatch branch), so seeing
+	// the gate reopened means acceptance completed and the awaiting mark is
+	// gone. This is the state the assertions after it are about; a loaded CI
+	// runner otherwise lands mid-promotion and releases a claim this test
+	// requires to stay held.
+	deadline = time.Now().Add(3 * time.Second)
 	for {
 		got = session.GetPendingRecoveries()
-		if len(got) == 1 && got[0].State == chat.PendingRecoveryClaimed &&
+		application.mu.Lock()
+		accepted := !application.dropSteerLeftovers
+		application.mu.Unlock()
+		if accepted && len(got) == 1 && got[0].State == chat.PendingRecoveryClaimed &&
 			application.pendingCount() == 0 {
 			break
 		}
@@ -1067,7 +1082,17 @@ func TestExplicitExactPromptReopensCancelGateAndQueuesRecovery(t *testing.T) {
 	application.CancelProcessing()
 	got = session.GetPendingRecoveries()
 	if len(got) != 1 || got[0].State != chat.PendingRecoveryClaimed {
-		t.Fatalf("Esc after promotion released active claim: %+v", got)
+		// This assertion has now failed twice on CI and never locally. Report
+		// which release source fired so the next occurrence is diagnosable
+		// instead of another unexplained flake: the boundary builds its key set
+		// from the drained FIFO plus the awaiting-dispatch marks.
+		application.mu.Lock()
+		gate := application.dropSteerLeftovers
+		application.mu.Unlock()
+		t.Fatalf("Esc after promotion released active claim: %+v "+
+			"(awaiting=%v pending=%d cancel_gate=%v)",
+			got, application.awaitingRecoveryClaimsForSession(session.GetID()),
+			application.pendingCount(), gate)
 	}
 	releaseLoop()
 	select {
